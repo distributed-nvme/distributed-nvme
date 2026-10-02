@@ -1,6 +1,8 @@
-// cmd_node.go holds the subcommands of the three node-shaped scopes of
-// §10.8 — the cluster (§8.1), the disk node (§8.2) and the controller node
-// (§8.3) — plus the `ping` liveness probe of §10.7 step 8.
+// cmd_node.go holds the subcommands of the three node-shaped scopes of the
+// driver's subcommand table — the cluster, the disk node and the controller
+// node (architecture.md, Clusters, Disk nodes and Controller nodes) — plus the
+// `ping` liveness probe the suite polls each gateway with (gateway.md,
+// Integration test plan, What a pass means).
 //
 // The DN and CN halves are exact mirrors: the two proto message families
 // differ only in the name and in which revision token they carry (DnRev vs
@@ -13,7 +15,8 @@
 //
 // Every revision-token flag here is named exactly "rev": race's stale-token
 // retry rewrites the flag by that name (main.go refreshToken), so any other
-// spelling would silently disable the §10.8 retry protocol. Its default of 0
+// spelling would silently disable that retry protocol (gateway.md,
+// Integration test plan, The driver, `gatewayctl`). Its default of 0
 // is a legal value that deliberately sends a zero token — case B step 4
 // asserts the ABORTED that GW6 answers it with.
 package main
@@ -31,7 +34,7 @@ import (
 
 // clusterNameOf resolves which cluster a cluster-scoped subcommand names: the
 // global --cluster, unless the subcommand's own --name overrides it. The
-// override exists only for the pagination step of case S (§10.11 step 2),
+// override exists only for the pagination step of case S (stage 2, GW10),
 // which creates, lists and deletes pg0..pg4 beside the suite's own cluster;
 // every other stage leaves --name empty and works on --cluster.
 func clusterNameOf(g *globals, name string) string {
@@ -58,10 +61,11 @@ func nodeAddrFlag(fs *flag.FlagSet) *string {
 // CreateControllerNode take, which is the same set for both.
 //
 // --location defaults to the empty string rather than to a rack name: the
-// gateway then defaults it to addr_port itself (§8.2), so a create-dn that
-// only passes --addr still produces a well-formed DnConf. The four transport
-// flags default through trConfFlags to the tcp/ipv4/127.0.0.1/4420 the fake
-// agents of §10.3 listen on, for the same reason.
+// gateway then defaults it to addr_port itself (architecture.md, Disk nodes),
+// so a create-dn that only passes --addr still produces a well-formed DnConf.
+// The four transport flags default through trConfFlags to the
+// tcp/ipv4/127.0.0.1/4420 the fake agents of the suite's topology listen on,
+// for the same reason (gateway.md, Integration test plan, Topology).
 func nodeCreateFlags(fs *flag.FlagSet) (
 	addr *string,
 	location *string,
@@ -78,13 +82,13 @@ func nodeCreateFlags(fs *flag.FlagSet) (
 }
 
 // ---------------------------------------------------------------------------
-// cluster (§8.1)
+// cluster (architecture.md, Clusters)
 // ---------------------------------------------------------------------------
 
 // setupCreateCluster drives CreateCluster. It registers no conf flags at all:
-// every cluster this suite creates takes the gateway's pure defaults (§10.11
-// step 1 asserts those defaults verbatim against etcd), so the only knob is
-// --name, for the pg0..pg4 clusters of the pagination step.
+// every cluster this suite creates takes the gateway's pure defaults (case S
+// stage 1 asserts those defaults verbatim against etcd, GW11), so the only
+// knob is --name, for the pg0..pg4 clusters of the pagination step.
 func setupCreateCluster(fs *flag.FlagSet) job {
 	name := clusterNameFlag(fs)
 	return func(
@@ -125,7 +129,7 @@ func setupGetCluster(fs *flag.FlagSet) job {
 // setupListClusters drives ListClusters. The request is cluster-independent —
 // it is the one RPC of this file with no cluster_name field — so it takes only
 // the page flags; --page-token also carries the deliberately malformed '!!'
-// of §10.11 step 2.
+// of case S stage 2.
 func setupListClusters(fs *flag.FlagSet) job {
 	count := fs.Uint("count", 0, "max entries per page (0 = server default)")
 	pageToken := fs.String("page-token", "",
@@ -141,7 +145,7 @@ func setupListClusters(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// disk node (§8.2)
+// disk node (architecture.md, Disk nodes)
 // ---------------------------------------------------------------------------
 
 // setupCreateDn drives CreateDiskNode, the RPC that also makes the gateway
@@ -212,7 +216,7 @@ func setupListDns(fs *flag.FlagSet) job {
 
 // setupSetDnDisabled drives UpdateDiskNodeDisabled. --disabled is an explicit
 // value rather than a toggle, so that re-sending the state the DN already has
-// exercises the §0 #17 idempotency rule (no write, no revision bump, OK).
+// exercises the idempotency rule of GW6 (no write, no revision bump, OK).
 func setupSetDnDisabled(fs *flag.FlagSet) job {
 	addr := nodeAddrFlag(fs)
 	var rev hexUint
@@ -246,7 +250,8 @@ func setupInspectDn(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// controller node (§8.3) — the six exact mirrors of the DN subcommands
+// controller node (architecture.md, Controller nodes) — the six exact
+// mirrors of the DN subcommands
 // ---------------------------------------------------------------------------
 
 // setupCreateCn drives CreateControllerNode; like its DN mirror it makes the
@@ -354,7 +359,8 @@ func setupInspectCn(fs *flag.FlagSet) job {
 // harness
 // ---------------------------------------------------------------------------
 
-// setupPing is the liveness probe of §10.7 step 8: a ListClusters with
+// setupPing is the liveness probe the suite polls each gateway with
+// (gateway.md, Integration test plan, What a pass means): a ListClusters with
 // count 1, which touches etcd through the gateway and so proves the instance
 // really serves rather than merely holding its port open. It takes no flags —
 // the endpoint is the global --gateway, and the reply is thrown away by the

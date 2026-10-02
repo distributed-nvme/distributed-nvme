@@ -18,8 +18,9 @@ const (
 	resKeyPort = "port"
 )
 
-// tagNoWriteZeroes is the DN5 fail-fast detail of §9.4's standing hardware
-// assumption: a disk whose write_zeroes_max_bytes is 0 would make the kernel
+// tagNoWriteZeroes is the DN5 fail-fast detail of the standing hardware
+// assumption of architecture.md, Side provisioning protocol: a disk whose
+// write_zeroes_max_bytes is 0 would make the kernel
 // fall back to writing zero pages at bulk speed, so a DnZeroBatchExtCnt batch
 // could not finish inside CmdSoftTimeout and side provisioning would crawl in
 // backed-off batches (DN9), if it converged at all. Reporting it on meta_info
@@ -60,8 +61,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 			unreadDn = true
 			continue
 		}
-		// §7: a file an older build persisted with a zero extent size is
-		// LOADED, and refused below by convergeDn, rather than skipped here.
+		// architecture.md, Common validation: a file an older build persisted
+		// with a zero extent size is LOADED, and refused below by convergeDn,
+		// rather than skipped here.
 		// Skipping it would drop the DN record, and with no dn-* file left
 		// unread the side loop further down reads a missing DN as "this side
 		// left its parent's list" and drops the local state of every one of
@@ -204,8 +206,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	for _, key := range s.dnKeys() {
 		st := s.getDn(key)
 		if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) != nil {
-			// §7: a dn whose stored conf is unusable converges nothing and
-			// sweeps nothing. A conf fault must not destroy resources.
+			// architecture.md, Common validation: a dn whose stored conf is
+			// unusable converges nothing and sweeps nothing. A conf fault must
+			// not destroy resources.
 			continue
 		}
 		s.sweepDn(ctx, st, true)
@@ -219,8 +222,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		}
 		extentSize := dn.req.Load().GetExtentSize()
 		if agent.ValidateExtentSize(extentSize) != nil {
-			// §7: the parent's conf is unusable, which is NOT the same thing
-			// as this side having left its parent's list. Every run of this
+			// architecture.md, Common validation: the parent's conf is
+			// unusable, which is NOT the same thing as this side having left
+			// its parent's list. Every run of this
 			// side is carved out of that extent size, so nothing here may be
 			// converged — and nothing may be swept either. convergeDn above
 			// already recorded the refusal for this DN.
@@ -239,8 +243,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		}
 		extentSize := dn.req.Load().GetExtentSize()
 		if agent.ValidateExtentSize(extentSize) != nil {
-			// §7, as in the converge loop above: a chunk's offset is computed
-			// from the extent size, so an unusable one applies nothing.
+			// architecture.md, Common validation, as in the converge loop
+			// above: a chunk's offset is computed from the extent size, so an
+			// unusable one applies nothing.
 			continue
 		}
 		s.applyMigrBitmaps(ctx, st, extentSize)
@@ -263,8 +268,8 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 // owner is gone. "No local state for this side" is NOT such a proof. A node
 // that lost --local-store but kept its disk still has every side in its DN's
 // pointer list, and must rebuild those sides from their records; sweeping
-// them would free the extents and send the next SyncupSide through the §9.4
-// provisioning protocol again, zeroing live data.
+// them would free the extents and send the next SyncupSide through
+// architecture.md, Side provisioning protocol, again, zeroing live data.
 //
 // SyncupDn and the startup Reconcile hold the node write lock, so neither
 // the DN set nor the side set can move under them. The read-only verdict
@@ -352,7 +357,7 @@ func (s *DnAgentServer) sweepOrphanRecords(
 		// sp is one whose state we actually hold — otherwise a side we have
 		// not heard from yet could still own it, and freeing the slot would
 		// strand an in-flight migration whose hydration is supposed to
-		// resume from disk (§11.2).
+		// resume from disk (architecture.md, Migration).
 		if !s.spFullyKnown(rec.GetSpId(), known, haveState) {
 			continue
 		}
@@ -377,7 +382,7 @@ func (s *DnAgentServer) sweepOrphanRecords(
 	}
 }
 
-// stopZeroingOf cancels and joins the §9.4 zeroing goroutine of a side named
+// stopZeroingOf cancels and joins the DN9 zeroing goroutine of a side named
 // only by its ids — the shape the node-level sweep works in, where a side's
 // state has already been dropped. The join must precede the side device's
 // removal: the goroutine's `blkdiscard --zeroout` child holds that device
@@ -504,8 +509,9 @@ func pointerKnown(req *pb.SyncupDnRequest, ptr *pb.SidePointer) bool {
 	return false
 }
 
-// msgInvalidStoredConf is the §7 refusal record: a conf member the control
-// plane cannot have written reached this agent, and the converge it would have
+// msgInvalidStoredConf is the refusal record of architecture.md,
+// Common validation: a conf member the control plane cannot have written
+// reached this agent, and the converge it would have
 // driven did not happen. The string is shared with the cn role and with
 // dnv-worker's own refusal so one grep finds every one of them.
 const msgInvalidStoredConf = "invalid stored conf"
@@ -524,8 +530,9 @@ func (s *DnAgentServer) syncupDn(
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupDnReply{AgentReply: reject, Revision: stored}
 	}
-	// §7: extent_size is what this disk's [D13] header is formatted with and
-	// what every side's run is carved out of, so a zero is refused rather
+	// architecture.md, Common validation: extent_size is what this disk's [D13]
+	// header is formatted with and what every side's run is carved out of, so a
+	// zero is refused rather
 	// than replaced with a constant the rest of the cluster does not share.
 	// This is the last point with literally zero side effects: the request
 	// has not become the desired state, nothing has been converged, no dm
@@ -572,7 +579,8 @@ func (s *DnAgentServer) syncupDn(
 	}
 }
 
-// convergeDn builds the once-per-DN base state of §3.1 probe-first (DN5),
+// convergeDn builds the once-per-DN base state of architecture.md, Disk node,
+// probe-first (DN5),
 // recording each resource's outcome as it goes. A failed resource never
 // aborts the pass (DN19).
 func (s *DnAgentServer) convergeDn(
@@ -583,8 +591,9 @@ func (s *DnAgentServer) convergeDn(
 	t := st.tracker
 	info := &pb.DnInfo{}
 
-	// §7: the entrance that does not come through syncupDn's gate is the
-	// startup Reconcile, which converges from a file an older build may have
+	// architecture.md, Common validation: the entrance that does not come
+	// through syncupDn's gate is the startup Reconcile, which converges from a
+	// file an older build may have
 	// persisted with a zero. extent_size is what this disk's [D13] header is
 	// formatted and verified against, so a zero must not reach EnsureFormatted
 	// at all — it would report an identity mismatch naming the disk rather
@@ -694,7 +703,8 @@ func tableMaps(targets []agent.DmTarget, devNo string) bool {
 	return false
 }
 
-// checkWriteZeroes is §9.4's DN5 fail-fast. It returns
+// checkWriteZeroes is the DN5 fail-fast
+// (architecture.md, Side provisioning protocol). It returns
 // (tagNoWriteZeroes, false) **only** when the sysfs attribute is present and
 // reads 0. An absent or unreadable attribute is not a verdict — an older
 // kernel simply may not publish it, and failing a healthy DN for that would

@@ -12,20 +12,22 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §7 as pure functions (GW4): no I/O, no etcd,
-// no clock. Every handler runs its validation FIRST, before any read, so a
-// malformed request is refused without touching the store. Validation that
-// depends on stored state — a cntlid slot already in use, an ns_idx already
-// taken, a size that must divide the SP's stripe — is not here; it happens
-// inside the RPC's STM. CreateStoragePool also runs validateBdevConf on a conf
-// that depends on stored state, the bdev_conf it merges over the cluster's:
-// once over the conf its plain pre-read returned, before its scans, and once
-// more inside its STM. §7's geometry rules must hold for what the SP stores,
+// This file is architecture.md, Common validation, as pure functions (GW4): no
+// I/O, no etcd, no clock. Every handler runs its validation FIRST, before any
+// read, so a malformed request is refused without touching the store.
+// Validation that depends on stored state — a cntlid slot already in use, an
+// ns_idx already taken, a size that must divide the SP's stripe — is not here;
+// it happens inside the RPC's STM. CreateStoragePool also runs
+// validateBdevConf on a conf that depends on stored state, the bdev_conf it
+// merges over the cluster's: once over the conf its plain pre-read returned,
+// before its scans, and once more inside its STM. The geometry rules of
+// architecture.md, Common validation, must hold for what the SP stores,
 // and only the merge shows what an omitted member becomes.
 //
-// The rule for bounded numerics is §7's: a proto3 zero means "unset" and asks
-// for the default, so zero is always accepted here and only a non-zero value
-// outside [Min, Max] is refused. Nothing in this file rewrites a request — the
+// The rule for bounded numerics is that of architecture.md, Common validation:
+// a proto3 zero means "unset" and asks for the default, so zero is always
+// accepted here and only a non-zero value outside [Min, Max] is refused.
+// Nothing in this file rewrites a request — the
 // handler resolves an accepted request into the concrete message it stores
 // (model.ResolveClusterConf, model.ResolveBdevConf), which is why validation
 // must run FIRST: after resolution every member is non-zero and every bound
@@ -37,7 +39,7 @@ var (
 	validStr = regexp.MustCompile(common.ValidStrPattern)
 	// validNqn is common.ValidNqnPattern. It requires a ':' after the domain
 	// part, so the well-known discovery NQN can never validate — no separate
-	// rejection for it exists anywhere (§7).
+	// rejection for it exists anywhere (architecture.md, Common validation).
 	validNqn = regexp.MustCompile(common.ValidNqnPattern)
 	// validUuid is the canonical RFC 4122 dashed form CreateNamespace
 	// generates and therefore also the only form it accepts.
@@ -48,9 +50,9 @@ var (
 	validNguid = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 )
 
-// validateName checks one required §7 name: non-empty, at most MaxStrSize
-// bytes, drawn from ValidStrPattern. field names the request field so the
-// message points a caller at what to fix.
+// validateName checks one required name of architecture.md, Common validation:
+// non-empty, at most MaxStrSize bytes, drawn from ValidStrPattern. field names
+// the request field so the message points a caller at what to fix.
 func validateName(field string, value string) error {
 	if value == "" {
 		return errInvalid("%s must not be empty", field)
@@ -75,8 +77,9 @@ func validateOptionalName(field string, value string) error {
 	return nil
 }
 
-// validateNqn checks one NQN against §7: at most MaxNqnLength bytes,
-// ValidNqnPattern (which keeps out "/" and whitespace) and no "..".
+// validateNqn checks one NQN against architecture.md, Common validation: at
+// most MaxNqnLength bytes, ValidNqnPattern (which keeps out "/" and
+// whitespace) and no "..".
 func validateNqn(field string, value string) error {
 	if value == "" {
 		return errInvalid("%s must not be empty", field)
@@ -94,7 +97,8 @@ func validateNqn(field string, value string) error {
 	return nil
 }
 
-// validateHostFacingNqn is validateNqn plus §7's dnv-namespace rule, for the
+// validateHostFacingNqn is validateNqn plus the dnv-namespace rule of
+// architecture.md, Common validation, for the
 // two fields that carry it: CreateSubsystem's nqn, where a user picks a
 // subsystem's NQN, and CreateTransfer's ori_nqn, where a transfer is built on
 // one. The agents attribute a subsystem by parsing its NQN (common.ParseNqn,
@@ -117,13 +121,14 @@ func validateHostFacingNqn(field string, value string) error {
 	return nil
 }
 
-// validateExistingNqn is §7's length check alone, for the nqn of the two RPCs
-// that empty and delete a subsystem: DeleteNamespace and DeleteSubsystem. A
-// subsystem stored under an NQN that §7 came to refuse later — the pattern was
-// tightened, and the ".." and dnv-namespace refusals were added — can still
-// be emptied and deleted, and its SP after it. Nothing more is needed here:
-// the nqn only ever names an exact subsystem key, and a string no subsystem is
-// stored under is NOT_FOUND there.
+// validateExistingNqn is the length check of architecture.md, Common
+// validation, alone, for the nqn of the two RPCs that empty and delete a
+// subsystem: DeleteNamespace and DeleteSubsystem. A subsystem stored under an
+// NQN that architecture.md, Common validation, came to refuse later — the
+// pattern was tightened, and the ".." and dnv-namespace refusals were added —
+// can still be emptied and deleted, and its SP after it. Nothing more is
+// needed here: the nqn only ever names an exact subsystem key, and a string no
+// subsystem is stored under is NOT_FOUND there.
 func validateExistingNqn(field string, value string) error {
 	if value == "" {
 		return errInvalid("%s must not be empty", field)
@@ -151,9 +156,10 @@ func validateHosts(field string, hosts []string) error {
 }
 
 // validateBound refuses a non-zero value outside [min, max]. A zero is the
-// proto3 "unset" that asks for the default (§7); the handler substitutes it
-// once, at write time, and the stored value is never zero. model's
-// stored-conf validators deliberately have no such escape hatch.
+// proto3 "unset" that asks for the default (architecture.md, Common
+// validation); the handler substitutes it once, at write time, and the stored
+// value is never zero. model's stored-conf validators deliberately have no
+// such escape hatch.
 func validateBound(field string, value uint64, min uint64, max uint64) error {
 	if value == 0 {
 		return nil
@@ -165,8 +171,9 @@ func validateBound(field string, value uint64, min uint64, max uint64) error {
 }
 
 // validateTrConf checks the four members of an NvmeTrConf against the
-// MaxStrSize / ValidStrPattern rule of §7. An entirely empty message is
-// accepted here; the RPCs that require one say so themselves.
+// MaxStrSize / ValidStrPattern rule of architecture.md, Common validation. An
+// entirely empty message is accepted here; the RPCs that require one say so
+// themselves.
 func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 	if conf == nil {
 		return nil
@@ -191,7 +198,8 @@ func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 }
 
 // trConfEmpty reports whether an NvmeTrConf carries nothing at all, which is
-// what CreateDiskNode / CreateControllerNode refuse (§8.2).
+// what CreateDiskNode / CreateControllerNode refuse (architecture.md, Disk
+// nodes).
 func trConfEmpty(conf *pb.NvmeTrConf) bool {
 	return conf.GetTrType() == "" && conf.GetAdrFam() == "" &&
 		conf.GetTrAddr() == "" && conf.GetTrSvcId() == ""
@@ -214,8 +222,9 @@ func validateTrConfList(field string, list []*pb.NvmeTrConf) error {
 	return nil
 }
 
-// validateDnBinConf checks a DnBinConf against §7: extent_size's bounds, and
-// the §6.2 shift ladder.
+// validateDnBinConf checks a DnBinConf against architecture.md, Common
+// validation: extent_size's bounds, and the shift ladder of architecture.md,
+// DN bins.
 //
 // The four shifts are all-or-nothing. All four zero is the proto3 "unset" that
 // asks for the 0/4/8/12 default, and is accepted. Any other set must already
@@ -285,7 +294,7 @@ func validateHealthCheckConf(conf *pb.HealthCheckConf) error {
 }
 
 // validateDmCloneConf checks a hydration knob pair. Both clone and migration
-// share one bound table (§7).
+// share one bound table (architecture.md, Common validation).
 func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 	if err := validateBound(
 		field+".hydration_threshold", uint64(conf.GetHydrationThreshold()),
@@ -298,7 +307,8 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 		1, common.MaxCloneBatchSize)
 }
 
-// validateBdevConf checks the §7 bounds of a BdevConf, its four geometry
+// validateBdevConf checks the bounds of a BdevConf (architecture.md, Common
+// validation), its four geometry
 // rules, and the two structural rules: bdev_feature_list MUST be empty in this
 // version, and RedundConf accepts only redund_none and redund_md_raid1 (the
 // proto oneof has no third case, so an unset oneof is the only other shape and
@@ -307,7 +317,7 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 // The geometry rules refuse here what would otherwise be refused only once the
 // pool exists — by dm-thin, dm-clone or mdadm as it is built, by CreateClone
 // as it is named a source — and then for ever, because a stored geometry never
-// changes (§8.4):
+// changes (architecture.md, Storage pools):
 //
 //   - data_block_size is a power of two. Its 64 KiB minimum then makes it a
 //     multiple of dm-thin's unit ("Invalid block size" otherwise), and it is
@@ -315,7 +325,8 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 //     of one of its sides, which dm-clone refuses unless it is a power of two
 //     ("Region size is not a power of 2").
 //   - stripe_size is a multiple of 4 KiB and at most 1 MiB by its bound, and
-//     data_block_size is a multiple of it: CreateClone's §11.4 source rules,
+//     data_block_size is a multiple of it: CreateClone's source rules
+//     (architecture.md, raid0 bitmap math),
 //     which every pool created under them meets, so that any such pool can be
 //     a clone source.
 //   - Under md-raid1, the bitmap chunk of bitmap_chunk_block_cnt ×
@@ -351,7 +362,8 @@ func validateBdevConf(conf *pb.BdevConf) error {
 	}
 	if lwm := conf.GetDmPoolConf().GetLowWaterMarkPct(); lwm != 0 && lwm < 1 {
 		// Unreachable for a uint32, kept as the explicit statement of the
-		// §7 row: 0 selects DefaultPoolLowWatermarkPct and values above 100
+		// row of architecture.md, Common validation: 0 selects
+		// DefaultPoolLowWatermarkPct and values above 100
 		// are accepted and switch auto-grow off, so nothing is refused.
 		return errInvalid(
 			"bdev_conf.dm_pool_conf.low_water_mark_pct %d is invalid", lwm)
@@ -363,7 +375,8 @@ func validateBdevConf(conf *pb.BdevConf) error {
 	); err != nil {
 		return err
 	}
-	// The minimum is also the stripe's unit: §11.4's i × 4 KiB.
+	// The minimum is also the stripe's unit: i × 4 KiB (architecture.md, raid0
+	// bitmap math).
 	if stripeSize%common.MinDmRaid0StripeSize != 0 {
 		return errInvalid(
 			"bdev_conf.dm_raid0_conf.stripe_size %d is not a multiple of %d",
@@ -408,15 +421,16 @@ func validateBdevConf(conf *pb.BdevConf) error {
 }
 
 // maxMdBitmapChunk is the largest md bitmap chunk, in bytes, a pool may ask
-// mdadm for (§7). mdadm keeps --bitmap-chunk in a signed int and turns it into
-// bytes in that int, so 1 GiB is the largest chunk it computes without
-// overflowing: a 4 GiB one wraps to zero and is refused, and md stores the
-// chunk as a 32-bit byte count anyway.
+// mdadm for (architecture.md, Common validation). mdadm keeps --bitmap-chunk
+// in a signed int and turns it into bytes in that int, so 1 GiB is the largest
+// chunk it computes without overflowing: a 4 GiB one wraps to zero and is
+// refused, and md stores the chunk as a 32-bit byte count anyway.
 const maxMdBitmapChunk = uint64(1) << 30
 
 // validateEventThreshold checks the four thresholds and their one cross-field
-// rule (§7): leg_unhealthy MUST exceed side_unhealthy AFTER the defaults are
-// resolved, because the §10.4 leg repair fires on the side threshold when the
+// rule (architecture.md, Common validation): leg_unhealthy MUST exceed
+// side_unhealthy AFTER the defaults are resolved, because the leg repair of
+// architecture.md, Automatic reactions, fires on the side threshold when the
 // DN looks dead and on the leg threshold when only the cntlr's path is bad.
 func validateEventThreshold(threshold *pb.EventThreshold) error {
 	resolved := model.ResolveEventThreshold(threshold)
@@ -429,8 +443,8 @@ func validateEventThreshold(threshold *pb.EventThreshold) error {
 }
 
 // validateClusterConfInput checks every ClusterConf member a
-// CreateClusterRequest carries (§8.1: they are write-once, so this is their
-// only validation point).
+// CreateClusterRequest carries (architecture.md, Clusters: they are
+// write-once, so this is their only validation point).
 func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 	if err := validateOptionalName(
 		"cluster_name", req.GetClusterName(),
@@ -461,7 +475,8 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 	return validateHealthCheckConf(req.GetHealthCheckConf())
 }
 
-// validateCntlidSlotList checks a cntlid_slot_list against §8.4/§11.8: every
+// validateCntlidSlotList checks a cntlid_slot_list (architecture.md, Storage
+// pools; architecture.md, cntlid slots): every
 // value below CnCntlidSlotCnt (8) and no duplicates. An empty list is legal
 // here and defaults to [0..7] at CreateStoragePool; UpdateStoragePoolCntlidSlotList
 // refuses one, because an SP with no slots can produce no side.
@@ -513,8 +528,9 @@ func validateNodeSelector(field string, selector *pb.NodeSelector) error {
 	return nil
 }
 
-// validateDevIdentity checks a supplied namespace identity (§8.8): an empty
-// value is generated by the handler, a supplied one must be well-formed.
+// validateDevIdentity checks a supplied namespace identity (architecture.md,
+// Subsystems, namespaces): an empty value is generated by the handler, a
+// supplied one must be well-formed.
 func validateDevIdentity(uuid string, nguid string) error {
 	if uuid != "" && !validUuid.MatchString(uuid) {
 		return errInvalid("dev_uuid %q is not a canonical RFC 4122 uuid", uuid)
@@ -525,7 +541,8 @@ func validateDevIdentity(uuid string, nguid string) error {
 	return nil
 }
 
-// validateCloneGeometry checks the §8.9 / §11.4 source-geometry bounds of a
+// validateCloneGeometry checks the source-geometry bounds (architecture.md,
+// Clones; architecture.md, raid0 bitmap math) of a
 // CreateClone request.
 func validateCloneGeometry(
 	sliceCnt uint32,
@@ -559,7 +576,8 @@ func validateCloneGeometry(
 	return nil
 }
 
-// validateBitmap refuses an empty Append*Bitmap payload (§8.9, §8.11).
+// validateBitmap refuses an empty Append*Bitmap payload (architecture.md,
+// Clones and Migrations).
 func validateBitmap(bitmap []byte) error {
 	if len(bitmap) == 0 {
 		return errInvalid("bitmap must not be empty")
@@ -567,9 +585,10 @@ func validateBitmap(bitmap []byte) error {
 	return nil
 }
 
-// validateGrowExclusivity is the §8.5 rule that decides which of ext_cnt and
-// is_meta a GrowSlice may carry: a data grow states a non-zero ext_cnt, a meta
-// grow states none because meta sizes come from the ladder.
+// validateGrowExclusivity is the rule of architecture.md, GrowSlice, that
+// decides which of ext_cnt and is_meta a GrowSlice may carry: a data grow
+// states a non-zero ext_cnt, a meta grow states none because meta sizes come
+// from the ladder.
 func validateGrowExclusivity(isMeta bool, extCnt uint64) error {
 	if isMeta && extCnt != 0 {
 		return errInvalid(

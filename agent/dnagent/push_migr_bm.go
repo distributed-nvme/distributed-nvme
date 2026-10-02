@@ -36,7 +36,8 @@ func (s *DnAgentServer) pushMigrBitmap(
 		req.GetSidePointer().GetSpId(), req.GetMigrId(), req.GetBmIdx())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		// Not persisted ⇒ not applied: the chunk stays out of the applied
-		// set, so the worker re-pushes it on its next round (§9.6).
+		// set, so the worker re-pushes it on its next round (architecture.md,
+		// Bitmap push protocol).
 		slog.ErrorContext(ctx, "persisting bitmap chunk failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
@@ -55,7 +56,8 @@ func (s *DnAgentServer) pushMigrBitmap(
 // applyMigrBitmaps recomputes the skippable regions from every chunk of the
 // applied set and marks them hydrated on the dm-clone. A chunk whose dm-clone
 // does not exist yet still counts as applied; it is re-applied when the
-// dm-clone is (re)created (§9.6 step 2/4).
+// dm-clone is (re)created
+// (architecture.md, Bitmap push protocol, dnv-agent side steps 2 and 4).
 func (s *DnAgentServer) applyMigrBitmaps(
 	ctx context.Context,
 	st *sideState,
@@ -86,7 +88,8 @@ func (s *DnAgentServer) applyChunks(
 		return
 	}
 	// Chunks concatenate over the leg's *data* region, so the dm-clone
-	// regions they describe start at the leg's meta_blocks (§8.11).
+	// regions they describe start at the leg's meta_blocks (architecture.md,
+	// Migrations).
 	ranges := agent.SkipRanges(
 		st.chunks.ContiguousPrefix(),
 		plan.migrDst.GetMetaBlocks(),

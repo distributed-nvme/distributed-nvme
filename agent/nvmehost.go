@@ -9,7 +9,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// NvmeHost wraps the nvme-cli host patterns of Appendix A. Every dnv-internal
+// NvmeHost wraps the nvme-cli host patterns (SH17, SH20). Every dnv-internal
 // connection is made with --fast_io_fail_tmo DefaultNvmeFastIoFailTmo,
 // --ctrl-loss-tmo -1 (SH20) and the common.NvmeHostId derived from its own
 // hostnqn — never the node-wide /etc/nvme/hostid, which the kernel's 1:1
@@ -64,7 +64,7 @@ func (h *NvmeHost) Disconnect(ctx context.Context, nqn string) error {
 // two sides of a migrating leg share one subsystem NQN ([D1]), so
 // `nvme disconnect --nqn` would kill the live path together with the dead one;
 // the cn agent drops the dead side by its controller device instead
-// (cnagent.md §2.3, CN10).
+// (cnagent.md, `NvmeHost.DisconnectDevice`; CN10).
 func (h *NvmeHost) DisconnectDevice(ctx context.Context, dev string) error {
 	return h.runOk(ctx, "nvme", "disconnect", "--device", dev)
 }
@@ -108,7 +108,8 @@ type PathState struct {
 //   - `nvme list-subsys -o json` lists **no namespaces at all** (nvme-cli
 //     2.16, with or without --verbose): a subsystem entry is just Name, NQN
 //     and Paths. There is therefore no block device to hand dm-clone in it,
-//     and the §11.2 destination could never find its migration source.
+//     and the destination of architecture.md, Migration, could never find its
+//     migration source.
 //   - It emits no `ANAState` either unless given a namespace block device,
 //     and with one it answers an all-inaccessible namespace with an *empty*
 //     list, indistinguishable from "not connected".
@@ -148,7 +149,8 @@ func (h *NvmeHost) listSysfs(
 	return entries, err
 }
 
-// readTrimmed reads one sysfs attribute under the §7 soft timeout (SH15).
+// readTrimmed reads one sysfs attribute under the soft timeout
+// (architecture.md, Common validation; SH15).
 // Unlike most of sysfs, the /sys/class/nvme* tree can stall while a controller
 // is mid-reset or being torn down, which is exactly when this walk runs
 // (SH15 applies to every read of it). Only a genuine ENOENT is "absent": a

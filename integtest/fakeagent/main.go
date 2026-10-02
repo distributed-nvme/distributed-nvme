@@ -1,12 +1,12 @@
 // Command fakeagent is the fake dn/cn agent pair of the dnv-worker
-// integration suite (doc/dnv-worker.md §14.9). One binary with a `dn` and a
-// `cn` subcommand, serving the generated DiskNodeAgent resp.
-// ControllerNodeAgent service on a plaintext listener behind the real server
-// interceptors of doc/grpc.md §4, so `agent.log` carries one `grpc server
-// request`/`reply`/`recv`/`send` record per message with the caller's trace
-// id — the suite's evidence of what the worker sent and which worker sent it
-// (RW10). The JSON log goes to stderr through common's default logger; the
-// script redirects it into `agent.log`.
+// integration suite (doc/dnv-worker.md, Integration test plan, The fake agent).
+// One binary with a `dn` and a `cn` subcommand, serving the generated
+// DiskNodeAgent resp. ControllerNodeAgent service on a plaintext listener
+// behind the real server interceptors (doc/grpc.md, Wiring), so `agent.log`
+// carries one `grpc server request`/`reply`/`recv`/`send` record per message
+// with the caller's trace id — the suite's evidence of what the worker sent and
+// which worker sent it (RW10). The JSON log goes to stderr through common's
+// default logger; the script redirects it into `agent.log`.
 //
 // Two files in --dir drive and record the fake:
 //
@@ -19,13 +19,14 @@
 //	state.json     the last applied request and revision per object plus the
 //	               received bitmap chunks (address + byte length; a migration
 //	               chunk is addressed by its bm_idx alone, a clone chunk by the
-//	               (src_slice_idx, bm_idx) pair it sits at, §9.6).
+//	               (src_slice_idx, bm_idx) pair it sits at: architecture.md,
+//	               Bitmap push protocol).
 //	               Written on every apply (temp file + rename) and loaded at
 //	               start, so a killed and restarted fake replies like a
 //	               restarted real agent — the last revision and the applied
 //	               set derived from the recorded chunks, a bm_idx_list for a
-//	               migration and a chunk_id_list for a clone (§14.11 case B
-//	               step 5). The requests
+//	               migration and a chunk_id_list for a clone (worker_test.sh
+//	               case B step 5). The requests
 //	               are protojson so the file stays human-editable: case A
 //	               step 3 sets a DN's stored revision by hand while the
 //	               process runs, and the fake picks the edit up on the next
@@ -34,8 +35,9 @@
 //
 // Objects are keyed exactly as behavior.json keys them — "dn", "cn",
 // "side <sp_id>:<leg_id>:<side_id>", "cntlr <sp_id>:<cntlr_id>", ids in plain
-// decimal — and every rule of §14.9 (the revision gate, the ordering gate,
-// the *Info shape, the change-only Check streams) is per object.
+// decimal — and every rule the fake follows (the revision gate, the ordering
+// gate, the *Info shape, the change-only Check streams) is per object
+// (dnv-worker.md, Integration test plan, The fake agent).
 //
 //	usage: fakeagent dn|cn --grpc-address <ip:port> --dir <dir> [--size N]
 package main
@@ -71,16 +73,15 @@ import (
 )
 
 const (
-	// The two files of §14.3's per-agent directory, next to agent.log.
+	// The two files of the per-agent directory, next to agent.log.
 	behaviorFileName = "behavior.json"
 	stateFileName    = "state.json"
 
 	// defaultNodeSize is what GetDnSize/GetCnSize reply unless --size or
-	// behavior.json's "size" says otherwise (§14.9: "Get*Size replies a
-	// configured size"; the worker never calls them).
+	// behavior.json's "size" says otherwise (the worker never calls them).
 	defaultNodeSize = 1024 * 1024 * 1024 * 1024
 
-	// The object keys of §14.9. The side and cntlr forms are built by
+	// The behavior.json object keys. The side and cntlr forms are built by
 	// sideObjKey/cntlrObjKey; these are the two singletons.
 	dnObjKey = "dn"
 	cnObjKey = "cn"
@@ -89,14 +90,14 @@ const (
 	cntlrObjPrefix = "cntlr "
 )
 
-// sideObjKey renders the "side <sp_id>:<leg_id>:<side_id>" key of §14.9 —
+// sideObjKey renders the "side <sp_id>:<leg_id>:<side_id>" object key —
 // the same string behavior.json uses ("side 1:3:5").
 func sideObjKey(ptr *pb.SidePointer) string {
 	return fmt.Sprintf("%s%d:%d:%d", sideObjPrefix,
 		ptr.GetSpId(), ptr.GetLegId(), ptr.GetSideId())
 }
 
-// cntlrObjKey renders the "cntlr <sp_id>:<cntlr_id>" key of §14.9
+// cntlrObjKey renders the "cntlr <sp_id>:<cntlr_id>" object key
 // ("cntlr 1:1").
 func cntlrObjKey(ptr *pb.CntlrPointer) string {
 	return fmt.Sprintf("%s%d:%d", cntlrObjPrefix,
@@ -110,15 +111,15 @@ func rowKey(field string, id uint64) string {
 
 // migrChunkKey renders the state.json chunk key of one migration chunk: the
 // bm_idx alone, in plain decimal, because a migration bitmap's chunks are
-// numbered by their append sequence (§9.6).
+// numbered by their append sequence (architecture.md, Bitmap push protocol).
 func migrChunkKey(bmIdx uint32) string {
 	return strconv.FormatUint(uint64(bmIdx), 10)
 }
 
 // cloneChunkKey renders the state.json chunk key of one clone chunk: the
-// (src_slice_idx, bm_idx) pair a clone chunk is addressed by (§9.6), decimal
-// and colon-separated ("2:1"). behavior.json's chunk_id_list override spells a
-// chunk the same way.
+// (src_slice_idx, bm_idx) pair a clone chunk is addressed by
+// (architecture.md, Bitmap push protocol), decimal and colon-separated
+// ("2:1"). behavior.json's chunk_id_list override spells a chunk the same way.
 func cloneChunkKey(srcSliceIdx, bmIdx uint32) string {
 	return fmt.Sprintf("%d:%d", srcSliceIdx, bmIdx)
 }
@@ -143,7 +144,8 @@ func parseCloneChunkKey(key string) (uint32, uint32, bool) {
 }
 
 // sortChunkIdList orders a clone's applied set ascending by (src_slice_idx,
-// bm_idx), the order §9.6 has the worker diff and push in.
+// bm_idx), the order the worker diffs and pushes in (architecture.md, Bitmap
+// push protocol).
 func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
 	slices.SortFunc(chunkIdList, func(a, b *pb.BmChunkId) int {
 		if c := cmp.Compare(
@@ -155,7 +157,7 @@ func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
 }
 
 // ---------------------------------------------------------------------------
-// behavior.json (§14.9)
+// behavior.json (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
 // rowBehavior overrides one row of an object's *Info. Both fields are
@@ -164,9 +166,10 @@ func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
 // WhenPrimary gates the override on the cntlr's role: it applies only while
 // the cntlr's last applied request carries cntlr.primary = true, so a row
 // planted on a standby bites the moment a failover promotes it and not
-// before (§14.9; the settling step of §14.11 case D). The fake reports a
-// standby's pool and md rows too — every row but the primary-only thin rows —
-// where the real cn agent reports those for a primary only, so an ungated
+// before (dnv-worker.md, Integration test plan, The fake agent; the settling
+// step of worker_test.sh case D). The fake reports a standby's pool and md rows
+// too — every row but the primary-only thin rows — where the real cn agent
+// reports those for a primary only, so an ungated
 // ERROR row would make the standby unhealthy — and ineligible — before the
 // failover. Only a cntlr object has a role: validate rejects it anywhere else.
 type rowBehavior struct {
@@ -201,8 +204,8 @@ type objectBehavior struct {
 }
 
 // behaviorFile is the whole file. "size" is this fake's one addition to the
-// §14.9 schema: the GetDnSize/GetCnSize reply, so it too can be changed
-// without a restart.
+// levers of dnv-worker.md, Integration test plan, The fake agent: the
+// GetDnSize/GetCnSize reply, so it too can be changed without a restart.
 type behaviorFile struct {
 	Size    uint64                     `json:"size,omitempty"`
 	Default *objectBehavior            `json:"default,omitempty"`
@@ -218,7 +221,7 @@ var resStatusNames = map[string]pb.ResStatus{
 	"PENDING":      pb.ResStatus_RES_STATUS_PENDING,
 }
 
-// parseResStatus accepts both the short spelling of §14.9 ("OK", "ERROR",
+// parseResStatus accepts both the short spelling ("OK", "ERROR",
 // "MISSING", "PROVISIONING", "PENDING", "UNKNOWN") and the full proto enum
 // name ("RES_STATUS_ERROR"), case-insensitively.
 func parseResStatus(name string) (pb.ResStatus, error) {
@@ -312,12 +315,13 @@ func parseBehavior(data []byte) (*behaviorFile, error) {
 }
 
 // ---------------------------------------------------------------------------
-// state.json (§14.9)
+// state.json (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
 // objectState is one object's last applied request. Chunks maps a
 // migration/clone id to a chunk key (migrChunkKey resp. cloneChunkKey) to the
-// chunk's byte length, which is all the applied-set report of §9.6 needs.
+// chunk's byte length, which is all the applied-set report needs
+// (architecture.md, Bitmap push protocol).
 type objectState struct {
 	Revision uint64                       `json:"revision"`
 	Request  json.RawMessage              `json:"request,omitempty"`
@@ -347,7 +351,7 @@ func newRequestForKey(key string) proto.Message {
 	return nil
 }
 
-// putChunk records one received Push*Bitmap chunk (§14.9: address + byte
+// putChunk records one received Push*Bitmap chunk (its address and byte
 // length). chunkKey is the caller's rendered address — migrChunkKey for a
 // migration chunk, cloneChunkKey for a clone one — so a chunk that arrives
 // again at the same address overwrites its length, which is how a grown chunk
@@ -364,9 +368,9 @@ func (o *objectState) putChunk(resId uint64, chunkKey string, size int) {
 }
 
 // bmIdxList derives the applied index set of one MIGRATION from the recorded
-// chunks (§9.6: the report is derived from the files present, so it survives a
-// restart). A clone's applied set is pair-addressed and derived by
-// chunkIdList.
+// chunks (architecture.md, Bitmap push protocol: the report is derived from
+// the files present, so it survives a restart). A clone's applied set is
+// pair-addressed and derived by chunkIdList.
 func (o *objectState) bmIdxList(resId uint64) []uint32 {
 	if o == nil {
 		return nil
@@ -414,7 +418,8 @@ func (o *objectState) chunkIdList(resId uint64) []*pb.BmChunkId {
 // ---------------------------------------------------------------------------
 
 // epochEntry tracks one row's last reported status so ResInfo.epoch only
-// moves when the status actually changes (architecture.md §9.5).
+// moves when the status actually changes (architecture.md, Live-state
+// reporting).
 type epochEntry struct {
 	status pb.ResStatus
 	epoch  uint64
@@ -459,16 +464,17 @@ func newFakeAgent(ctx context.Context, dir string, size uint64) (*fakeAgent, err
 
 // refreshLocked re-reads both files if they changed. It runs at the top of
 // every request handler: behavior.json so the script can flip behaviour
-// without a restart, state.json so a hand edit of a stored revision (§14.11
-// case A step 3) is seen by the next round.
+// without a restart, state.json so a hand edit of a stored revision
+// (worker_test.sh case A step 3) is seen by the next round.
 func (a *fakeAgent) refreshLocked(ctx context.Context) {
 	a.reloadBehaviorLocked(ctx)
 	a.reloadStateLocked(ctx)
 }
 
-// reloadBehaviorLocked implements the §14.9 "re-read on every request when
-// its mtime changed" rule. A malformed file is logged once per mtime and
-// ignored, keeping the previous behaviour.
+// reloadBehaviorLocked implements the behavior file's re-read on every request
+// when its mtime changed (dnv-worker.md,
+// Integration test plan, The fake agent). A malformed file is logged once per
+// mtime and ignored, keeping the previous behaviour.
 func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
 	path := filepath.Join(a.dir, behaviorFileName)
 	info, err := os.Stat(path)
@@ -511,9 +517,10 @@ func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
 }
 
 // reloadStateLocked re-reads state.json when it is newer than this process's
-// own last write — the hand-edit path of §14.11 case A step 3. Comparing
-// against the fake's own write is what keeps an apply from being mistaken
-// for an operator edit (and the operator's edit from being clobbered).
+// own last write — the hand-edit path of worker_test.sh case A step 3.
+// Comparing against the fake's own write is what keeps an apply from being
+// mistaken for an operator edit (and the operator's edit from being
+// clobbered).
 func (a *fakeAgent) reloadStateLocked(ctx context.Context) {
 	path := filepath.Join(a.dir, stateFileName)
 	info, err := os.Stat(path)
@@ -610,8 +617,9 @@ func (a *fakeAgent) saveStateLocked(ctx context.Context) {
 	}
 }
 
-// applyLocked stores one object's request and revision (§14.9: "revision >=
-// stored => apply (store the request and the revision)").
+// applyLocked stores one object's request and revision (the revision gate of
+// dnv-worker.md, Integration test plan, The fake agent: revision >= stored =>
+// apply, storing the request and the revision).
 func (a *fakeAgent) applyLocked(
 	ctx context.Context, key string, revision uint64, req proto.Message,
 ) {
@@ -634,7 +642,7 @@ func (a *fakeAgent) applyLocked(
 
 // pruneLocked drops the child objects that disappeared from their parent's
 // pointer list, the way the real agent deletes their local files
-// (architecture.md §9.1 "full sync").
+// (the Full sync rule of architecture.md, Common agent rules).
 func (a *fakeAgent) pruneLocked(prefix string, keep map[string]bool) {
 	for key := range a.state {
 		if strings.HasPrefix(key, prefix) && !keep[key] {
@@ -673,7 +681,8 @@ func (a *fakeAgent) sizeLocked() uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// Row resolution (§14.9 "rows", architecture.md §9.5)
+// Row resolution (dnv-worker.md, Integration test plan, The fake agent;
+// architecture.md, Live-state reporting)
 // ---------------------------------------------------------------------------
 
 // resolveRow builds one ResInfo. The status and details come from
@@ -691,7 +700,8 @@ func (a *fakeAgent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
 
 // resolveCntlrRow is resolveRow for a cntlr object: a row override marked
 // when_primary is skipped while primary — the cntlr.primary of the cntlr's
-// last applied request — is false (§14.9).
+// last applied request — is false (dnv-worker.md,
+// Integration test plan, The fake agent).
 func (a *fakeAgent) resolveCntlrRow(
 	objKey string, primary bool, keys ...string,
 ) *pb.ResInfo {
@@ -755,7 +765,8 @@ func (a *fakeAgent) epochLocked(
 }
 
 // ---------------------------------------------------------------------------
-// *Info derivation from the last applied request (§14.9)
+// *Info derivation from the last applied request
+// (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
 // dnInfoLocked reports the three DnInfo rows; nil until a SyncupDn has been
@@ -771,8 +782,8 @@ func (a *fakeAgent) dnInfoLocked() *pb.DnInfo {
 	}
 }
 
-// cnInfoLocked reports the four CnInfo rows (architecture.md §3.2: port,
-// tmpfs, the sparse arena file and its loop device).
+// cnInfoLocked reports the four CnInfo rows — port, tmpfs, the sparse arena
+// file and its loop device (architecture.md, Controller node, common).
 func (a *fakeAgent) cnInfoLocked() *pb.CnInfo {
 	if a.requestLocked(cnObjKey) == nil {
 		return nil
@@ -788,9 +799,9 @@ func (a *fakeAgent) cnInfoLocked() *pb.CnInfo {
 // sideInfoLocked derives SideInfo from the side's last applied request: one
 // row per per-CN export stack (primary_cn_id when non-zero plus every
 // standby_id_list entry), the migration roles only when the request carried
-// their conf, and the §9.4 provisioning counters — total = ext_cnt and
+// their conf, and the provisioning counters — total = ext_cnt and
 // zeroed = total by default (instant provisioning), either overridable per
-// object in behavior.json.
+// object in behavior.json (architecture.md, Side provisioning protocol).
 func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
 	if req == nil {
@@ -843,8 +854,9 @@ func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 }
 
 // sideBmInfoLocked reports the applied migration-bitmap indexes of the side's
-// destination role (§9.6: BitmapInfo.res_id = migr_id, the set derived from
-// the recorded chunks unless behavior.json overrides it).
+// destination role (architecture.md, Bitmap push protocol: BitmapInfo.res_id
+// = migr_id, the set derived from the recorded chunks unless behavior.json
+// overrides it).
 func (a *fakeAgent) sideBmInfoLocked(key string) *pb.BitmapInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
 	if req == nil || req.GetMigrDstConf() == nil {
@@ -906,10 +918,10 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // one row per object it named — per slice, per group (meta and data), per leg
 // AND per spare leg of every group, per td, per subsystem, per namespace, per
 // clone and per xfer. td_id_to_thin_info is filled only when the request's
-// cntlr.primary is true and behavior.json's thin_ok says so (architecture.md
-// §10.3, cnagent CN14 "primary only"), minus any thin_missing_slices — the
-// created-flip negative of §14.11 case S step 6. The same cntlr.primary gates
-// every when_primary row override (resolveCntlrRow).
+// cntlr.primary is true and behavior.json's thin_ok says so (architecture.md,
+// sp role; cnagent CN14 "primary only"), minus any thin_missing_slices — the
+// created-flip negative of worker_test.sh case S step 6 (RW19). The same
+// cntlr.primary gates every when_primary row override (resolveCntlrRow).
 func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {
@@ -1026,9 +1038,10 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 }
 
 // cntlrBmInfoListLocked reports one BitmapInfo per clone of the last request
-// (§9.6: SyncupCntlrReply.bm_info_list, res_id = clone_id). A clone's applied
-// set rides in chunk_id_list, the pair-addressed field; bm_idx_list stays
-// unset, it carries migration chunks only.
+// (architecture.md, Bitmap push protocol: SyncupCntlrReply.bm_info_list,
+// res_id = clone_id). A clone's applied set rides in chunk_id_list, the
+// pair-addressed field; bm_idx_list stays unset, it carries migration chunks
+// only.
 func (a *fakeAgent) cntlrBmInfoListLocked(key string) []*pb.BitmapInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {
@@ -1048,7 +1061,7 @@ func (a *fakeAgent) cntlrBmInfoListLocked(key string) []*pb.BitmapInfo {
 }
 
 // ---------------------------------------------------------------------------
-// The gates (§14.9)
+// The gates (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
 func agentReply(code uint32, details string) *pb.AgentReply {
@@ -1058,8 +1071,8 @@ func agentReply(code uint32, details string) *pb.AgentReply {
 // forcedCodeLocked applies behavior.json's reply_code, which forces
 // agent_reply.code on every reply of an object. A forced non-zero code also
 // suppresses the apply: an agent that answers "rejected" must not have
-// stored the request, or §14.11 case C step 6's "clear ⇒ the push succeeds"
-// would have nothing left to push.
+// stored the request, or worker_test.sh case C step 6's "clear ⇒ the push
+// succeeds" would have nothing left to push.
 func (a *fakeAgent) forcedCodeLocked(key string) uint32 {
 	if ob := a.objBehaviorLocked(key); ob != nil {
 		return ob.ReplyCode
@@ -1067,8 +1080,9 @@ func (a *fakeAgent) forcedCodeLocked(key string) uint32 {
 	return 0
 }
 
-// gateSyncupLocked is the §14.9 revision gate: a Syncup* with a revision
-// lower than the stored one is ReplyCodeStaleRevision, anything else applies.
+// gateSyncupLocked is the revision gate: a Syncup* with a revision lower than
+// the stored one is ReplyCodeStaleRevision, anything else applies
+// (dnv-worker.md, Integration test plan, The fake agent).
 func (a *fakeAgent) gateSyncupLocked(
 	key string, revision uint64,
 ) (uint32, string) {
@@ -1082,9 +1096,10 @@ func (a *fakeAgent) gateSyncupLocked(
 	return 0, ""
 }
 
-// gatePushLocked is the §14.9 gate of the Push* RPCs. A push carries no
-// revision any more: the only rejections left are behavior.json's forced code
-// and an id the object's last request does not name.
+// gatePushLocked is the gate of the Push* RPCs. A push carries no revision
+// any more: the only rejections left are behavior.json's forced code and an
+// id the object's last request does not name (dnv-worker.md,
+// Integration test plan, The fake agent).
 func (a *fakeAgent) gatePushLocked(
 	key string, resId uint64, known bool,
 ) (uint32, string) {
@@ -1098,7 +1113,8 @@ func (a *fakeAgent) gatePushLocked(
 	return 0, ""
 }
 
-// sideKnownLocked implements the ordering rule of §14.9: a side pointer
+// sideKnownLocked implements the fake's ordering rule (dnv-worker.md,
+// Integration test plan, The fake agent): a side pointer
 // absent from the DN's last SyncupDn.side_pointer_list is unknown, so its
 // SyncupSide/CheckSide/PushMigrBitmap is refused with
 // ReplyCodeUnknownObject. The worker's independent dn and sp roles must
@@ -1165,7 +1181,8 @@ func (a *fakeAgent) cloneKnownLocked(key string, cloneId uint64) bool {
 }
 
 // ---------------------------------------------------------------------------
-// The Check* streams (§14.9, architecture.md §9.7)
+// The Check* streams (dnv-worker.md, Integration test plan, The fake agent;
+// architecture.md, Check streams)
 // ---------------------------------------------------------------------------
 
 // checkResult is what one Check* round decides under the lock, before the
@@ -1177,9 +1194,9 @@ type checkResult struct {
 }
 
 // checkGateLocked resolves a Check* round for one object: the gate's code and
-// the agent's last fully applied revision (architecture.md §9.7 — a reply
-// whose revision differs from the request's is what makes the worker re-issue
-// the object's Syncup*).
+// the agent's last fully applied revision (architecture.md, Check streams — a
+// reply whose revision differs from the request's is what makes the worker
+// re-issue the object's Syncup*).
 func (a *fakeAgent) checkGateLocked(key string, known bool) checkResult {
 	if !known {
 		return checkResult{
@@ -1195,7 +1212,8 @@ func (a *fakeAgent) checkGateLocked(key string, known bool) checkResult {
 	return result
 }
 
-// infoTracker implements the change-only delivery of architecture.md §9.7:
+// infoTracker implements the change-only delivery of architecture.md, Check
+// streams:
 // show_info = true always sends the *Info, show_info = false sends it only
 // when it changed since the previous reply ON THIS STREAM, and the first
 // reply on a fresh stream always carries it.
@@ -1221,8 +1239,9 @@ func (t *infoTracker) include(showInfo bool, info proto.Message) bool {
 // hangPollInterval is how often a hanging round re-reads behavior.json.
 const hangPollInterval = 200 * time.Millisecond
 
-// waitForRound applies the two stream levers of §14.9 between a Check*
-// request and its reply, and reports whether the stream must be dropped.
+// waitForRound applies the fake's two stream levers (dnv-worker.md,
+// Integration test plan, The fake agent) between a Check* request and its
+// reply, and reports whether the stream must be dropped.
 //
 // hang holds this object's round — and only this object's, the lock is never
 // held while waiting — for as long as behavior.json says so, so the worker
@@ -1259,8 +1278,8 @@ func (a *fakeAgent) waitForRound(
 // hangUnary applies behavior.json's `hang` lever to a UNARY request, the way
 // waitForRound applies it to a Check* round.
 //
-// It exists for the dnv-gateway integration suite (gateway.md §10.14 case C
-// step 4): the gateway bounds every agent call by
+// It exists for the dnv-gateway integration suite (gateway.md AG2 and AG3):
+// the gateway bounds every agent call by
 // common.DefaultGatewayAgentTimeout, and the only way to prove that bound is a
 // listening agent that never answers — distinct from a closed port, which
 // fails instantly. The dnv-worker suite is unaffected: the worker never calls
@@ -1299,7 +1318,7 @@ func dropStreamError() error {
 // service DiskNodeAgent
 // ---------------------------------------------------------------------------
 
-// GetDnSize replies the configured size (§14.9; the worker never calls it).
+// GetDnSize replies the configured size (the worker never calls it).
 func (a *fakeAgent) GetDnSize(
 	ctx context.Context, req *pb.GetDnSizeRequest,
 ) (*pb.GetDnSizeReply, error) {
@@ -1312,9 +1331,10 @@ func (a *fakeAgent) GetDnSize(
 	return &pb.GetDnSizeReply{Size: a.sizeLocked()}, nil
 }
 
-// SyncupDn implements the §14.9 revision gate for the "dn" object and the
-// §9.1 full-sync rule: side pointers that disappear from the list are
-// dropped, as the real agent deletes their local files.
+// SyncupDn implements the revision gate for the "dn" object (dnv-worker.md,
+// Integration test plan, The fake agent) and the Full sync rule of
+// architecture.md, Common agent rules: side pointers that disappear from the
+// list are dropped, as the real agent deletes their local files.
 func (a *fakeAgent) SyncupDn(
 	ctx context.Context, req *pb.SyncupDnRequest,
 ) (*pb.SyncupDnReply, error) {
@@ -1339,8 +1359,9 @@ func (a *fakeAgent) SyncupDn(
 	}, nil
 }
 
-// SyncupSide implements the §14.9 ordering gate (a side pointer absent from
-// the last SyncupDn is ReplyCodeUnknownObject) followed by the revision gate.
+// SyncupSide implements the ordering gate (a side pointer absent from the
+// last SyncupDn is ReplyCodeUnknownObject) followed by the revision gate
+// (dnv-worker.md, Integration test plan, The fake agent).
 func (a *fakeAgent) SyncupSide(
 	ctx context.Context, req *pb.SyncupSideRequest,
 ) (*pb.SyncupSideReply, error) {
@@ -1368,9 +1389,10 @@ func (a *fakeAgent) SyncupSide(
 	}, nil
 }
 
-// PushMigrBitmap records one migration-bitmap chunk behind the §14.9 push
-// gate; the applied set derived from the recorded chunks is what the next
-// SyncupSide reply reports as bm_info (§9.6).
+// PushMigrBitmap records one migration-bitmap chunk behind the push gate
+// (dnv-worker.md, Integration test plan, The fake agent); the applied set
+// derived from the recorded chunks is what the next SyncupSide reply reports as
+// bm_info (architecture.md, Bitmap push protocol).
 func (a *fakeAgent) PushMigrBitmap(
 	ctx context.Context, req *pb.PushMigrBitmapRequest,
 ) (*pb.PushMigrBitmapReply, error) {
@@ -1392,7 +1414,7 @@ func (a *fakeAgent) PushMigrBitmap(
 	}, nil
 }
 
-// GetDnInfo returns the same DnInfo the CheckDn stream reports (§14.9).
+// GetDnInfo returns the same DnInfo the CheckDn stream reports.
 func (a *fakeAgent) GetDnInfo(
 	ctx context.Context, req *pb.GetDnInfoRequest,
 ) (*pb.GetDnInfoReply, error) {
@@ -1435,8 +1457,8 @@ func (a *fakeAgent) GetSideInfo(
 }
 
 // CheckDn serves the DN health stream: one reply per request, never an
-// unsolicited message, with the *Info delivered per the §9.7 change-only
-// rule.
+// unsolicited message, with the *Info delivered per the change-only rule of
+// architecture.md, Check streams.
 func (a *fakeAgent) CheckDn(
 	stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply],
 ) error {
@@ -1478,7 +1500,7 @@ func (a *fakeAgent) CheckDn(
 
 // CheckSide serves one side's health stream; a side pointer absent from the
 // last SyncupDn is refused with ReplyCodeUnknownObject on every round
-// (§14.9).
+// (dnv-worker.md, Integration test plan, The fake agent).
 func (a *fakeAgent) CheckSide(
 	stream grpc.BidiStreamingServer[pb.CheckSideRequest, pb.CheckSideReply],
 ) error {
@@ -1527,7 +1549,7 @@ func (a *fakeAgent) CheckSide(
 // service ControllerNodeAgent
 // ---------------------------------------------------------------------------
 
-// GetCnSize replies the configured size (§14.9; the worker never calls it).
+// GetCnSize replies the configured size (the worker never calls it).
 func (a *fakeAgent) GetCnSize(
 	ctx context.Context, req *pb.GetCnSizeRequest,
 ) (*pb.GetCnSizeReply, error) {
@@ -1540,8 +1562,10 @@ func (a *fakeAgent) GetCnSize(
 	return &pb.GetCnSizeReply{Size: a.sizeLocked()}, nil
 }
 
-// SyncupCn implements the §14.9 revision gate for the "cn" object and drops
-// the cntlrs that disappeared from the pointer list (§9.1).
+// SyncupCn implements the revision gate for the "cn" object (dnv-worker.md,
+// Integration test plan, The fake agent) and drops the cntlrs that disappeared
+// from the pointer list (the Full sync rule of architecture.md, Common agent
+// rules).
 func (a *fakeAgent) SyncupCn(
 	ctx context.Context, req *pb.SyncupCnRequest,
 ) (*pb.SyncupCnReply, error) {
@@ -1566,8 +1590,9 @@ func (a *fakeAgent) SyncupCn(
 	}, nil
 }
 
-// SyncupCntlr implements the §14.9 ordering gate (a cntlr absent from the
-// last SyncupCn is ReplyCodeUnknownObject) followed by the revision gate.
+// SyncupCntlr implements the ordering gate (a cntlr absent from the last
+// SyncupCn is ReplyCodeUnknownObject) followed by the revision gate
+// (dnv-worker.md, Integration test plan, The fake agent).
 func (a *fakeAgent) SyncupCntlr(
 	ctx context.Context, req *pb.SyncupCntlrRequest,
 ) (*pb.SyncupCntlrReply, error) {
@@ -1595,10 +1620,11 @@ func (a *fakeAgent) SyncupCntlr(
 	}, nil
 }
 
-// PushCloneBitmap records one clone-bitmap chunk behind the §14.9 push gate,
-// at the (src_slice_idx, bm_idx) pair the request addresses it by (§9.6); the
-// applied set is reported as the chunk_id_list of the next SyncupCntlr reply's
-// bm_info_list.
+// PushCloneBitmap records one clone-bitmap chunk behind the push gate
+// (dnv-worker.md, Integration test plan, The fake agent), at the
+// (src_slice_idx, bm_idx) pair the request addresses it by (architecture.md,
+// Bitmap push protocol); the applied set is reported as the chunk_id_list of
+// the next SyncupCntlr reply's bm_info_list.
 func (a *fakeAgent) PushCloneBitmap(
 	ctx context.Context, req *pb.PushCloneBitmapRequest,
 ) (*pb.PushCloneBitmapReply, error) {
@@ -1621,7 +1647,7 @@ func (a *fakeAgent) PushCloneBitmap(
 	}, nil
 }
 
-// GetCnInfo returns the same CnInfo the CheckCn stream reports (§14.9).
+// GetCnInfo returns the same CnInfo the CheckCn stream reports.
 func (a *fakeAgent) GetCnInfo(
 	ctx context.Context, req *pb.GetCnInfoRequest,
 ) (*pb.GetCnInfoReply, error) {
@@ -1665,7 +1691,7 @@ func (a *fakeAgent) GetCntlrInfo(
 	}, nil
 }
 
-// GetThinDeviceBm replies an empty bitmap (§14.9; the worker never calls it).
+// GetThinDeviceBm replies an empty bitmap (the worker never calls it).
 func (a *fakeAgent) GetThinDeviceBm(
 	ctx context.Context, req *pb.GetThinDeviceBmRequest,
 ) (*pb.GetThinDeviceBmReply, error) {
@@ -1675,7 +1701,7 @@ func (a *fakeAgent) GetThinDeviceBm(
 	return &pb.GetThinDeviceBmReply{}, nil
 }
 
-// GetLegBm replies an empty bitmap (§14.9; the worker never calls it).
+// GetLegBm replies an empty bitmap (the worker never calls it).
 func (a *fakeAgent) GetLegBm(
 	ctx context.Context, req *pb.GetLegBmRequest,
 ) (*pb.GetLegBmReply, error) {
@@ -1726,7 +1752,8 @@ func (a *fakeAgent) CheckCn(
 }
 
 // CheckCntlr serves one cntlr's health stream; a cntlr absent from the last
-// SyncupCn is refused with ReplyCodeUnknownObject on every round (§14.9).
+// SyncupCn is refused with ReplyCodeUnknownObject on every round
+// (dnv-worker.md, Integration test plan, The fake agent).
 func (a *fakeAgent) CheckCntlr(
 	stream grpc.BidiStreamingServer[pb.CheckCntlrRequest, pb.CheckCntlrReply],
 ) error {
@@ -1809,7 +1836,8 @@ func main() {
 	}
 	// The server interceptors are not optional: agent.log is the suite's
 	// only record of what the worker sent and which worker sent it
-	// (doc/grpc.md §4, dnv-worker.md §14.9).
+	// (doc/grpc.md, Wiring; dnv-worker.md,
+	// Integration test plan, The fake agent).
 	server := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),

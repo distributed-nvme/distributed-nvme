@@ -40,7 +40,8 @@ const (
 // detailsSpLevel is what a resource suppressed by the sp_level reports (CN19),
 // shared through common with the worker's settle (dnv-worker.md HL2);
 // detailsParked is the expected state of an effectively suspended ns-dev
-// (CN28): **live**, its table a dm-linear over the td's dm-error (§11.6).
+// (CN28): **live**, its table a dm-linear over the td's dm-error
+// (architecture.md, Namespace suspend semantics).
 // detailsSuspended is what the generic single-device probes report for a device
 // they find dm-suspended on the table they want. A converge and a probe of one
 // cntlr take the same lock, so CN14's quiesce bracket is never observable from
@@ -95,8 +96,8 @@ func equalFoldHex(got, want string) bool {
 
 // ---------------------------------------------------------------------------
 // The plan: the desired state of one cntlr, a pure function of its
-// SyncupCntlrRequest. The same plan drives the converge pass (§4.6) and the
-// read-only probe (§4.12), which is what keeps the two from drifting.
+// SyncupCntlrRequest. The same plan drives the converge pass (CN8 to CN20)
+// and the read-only probe (CN28), which is what keeps the two from drifting.
 // ---------------------------------------------------------------------------
 
 type cntlrPlan struct {
@@ -246,7 +247,7 @@ type grpPlan struct {
 	// deferred is the [D15] group gate: some leg of leg_list is provisioning, so
 	// the group builds no md array and no CnGrpName, and is left out of the
 	// pool concats and of the pool sizing. A provisioning *spare* never defers
-	// a group — spares are not members (§8.12).
+	// a group — spares are not members (architecture.md, Spare legs).
 	deferred bool
 
 	// dmName is set for RedundNone only; mdDevName/mdArrayName for
@@ -268,7 +269,8 @@ type grpPlan struct {
 
 // legNames are the dm names of the group's leg_list wrappers — the key
 // Md.Detail finds the group's array by. Spares are left out: a spare is never
-// a member (§8.12), and a leg switched out into the spare list is an extra
+// a member (architecture.md, Spare legs), and a leg switched out into the
+// spare list is an extra
 // that reconcileMembers removes, found through the leg_list member that stays.
 func (gp *grpPlan) legNames() []string {
 	out := make([]string, 0, len(gp.legs))
@@ -279,7 +281,8 @@ func (gp *grpPlan) legNames() []string {
 }
 
 // hasLateMember reports whether a group's leg_list holds a member this pass
-// may not use — not available (§11.1.1: no path both live and optimized, or
+// may not use — not available (architecture.md, "Make sure all groups are
+// available": no path both live and optimized, or
 // its connect, its multipath namespace or its wrapper failed, or a
 // controller's address read did not answer, cnagent.md CN10). In an md group
 // that leaves the group unassembled, assembled degraded without it, with its
@@ -293,8 +296,9 @@ func (gp *grpPlan) legNames() []string {
 // flipped to this CN yet exports dm-error to it (a non-optimized path), so a
 // pool over a late meta leg is built only by a later converge. Only
 // availability decides: a held member md has failed on a leg that is available
-// again is not late (cnagent.md §7, known limits). Spares are not members
-// (§8.12), so a spare is never late. A provisioning leg defers its whole group
+// again is not late (cnagent.md, Known limits). Spares are not members
+// (architecture.md, Spare legs), so a spare is never late. A provisioning leg
+// defers its whole group
 // ([D15]), so the build never asks about one; it is excluded all the same
 // rather than trusting the caller.
 func (gp *grpPlan) hasLateMember(available map[uint64]bool) bool {
@@ -324,7 +328,8 @@ type legPlan struct {
 	name         string
 	path         string
 	// sectors is the whole leg (meta + data regions); healthOffset is the
-	// last 4 KiB of the meta region, the §3.6 health block.
+	// last 4 KiB of the meta region, the health block (architecture.md, Group
+	// on-leg layout: meta region, data region, health block).
 	sectors      uint64
 	healthOffset uint64
 }
@@ -364,7 +369,8 @@ type nsPlan struct {
 	devName string
 	sectors uint64
 
-	// suspended is the §11.6 *effective* suspend (CN16) — which is a **park**,
+	// suspended is the *effective* suspend (architecture.md, Namespace
+	// suspend semantics; CN16) — which is a **park**,
 	// not a dm suspension: it makes backingName the td's dm-error (rule 1) and
 	// anaGrpId inaccessible, and the device stays live ([D12]). backingName is
 	// the dm device the ns-dev's table points at, flakey the [D11] read-only
@@ -605,12 +611,14 @@ func (p *cntlrPlan) buildLegs(
 }
 
 // computeEffective is the [D15] effective-desired-state pass. The raw desired
-// state names resources whose DN sides are still being zeroed (§9.4): such a
+// state names resources whose DN sides are still being zeroed
+// (architecture.md, Side provisioning protocol): such a
 // side exports nothing at all, so anything built on top of it could only fail.
 // The plan therefore carries both shapes — the raw one for the report, the
 // effective one for converging and probing — and every resource the effective
 // shape leaves out reports RES_STATUS_PROVISIONING instead of an error, so a
-// freshly created SP never feeds err_epoch or the §10.4 replacement flows.
+// freshly created SP never feeds err_epoch or the replacement flows of
+// architecture.md, Automatic reactions.
 //
 //   - a leg is provisioning iff **every** side of side_list has
 //     provisioned = false (a provisioned src beside an unprovisioned dst is a
@@ -681,8 +689,9 @@ func legProvisioning(sides []*pb.Side) bool {
 // cleared would move every pool-data block dm-thin had allocated meanwhile —
 // silent corruption reported as OK. Truncating instead is exactly what
 // CN28 ("a not-yet-grown concat/pool is OK, not a mismatch; the
-// grow completes when the group clears") and architecture.md §8.5 ("the concat
-// and the pool keep their old, effective size") describe, and it is what makes
+// grow completes when the group clears") and architecture.md, GrowSlice ("the
+// concat and the pool keep their old, effective size") describe, and it is
+// what makes
 // the surviving groups' concat offsets — and so dataGrpSpanStart's CN27
 // arithmetic — those of the live table.
 //
@@ -863,10 +872,12 @@ func (p *cntlrPlan) buildSubsystems() {
 	}
 }
 
-// effectiveSuspend is the §11.6 rule of CN16: a namespace is suspended iff its
+// effectiveSuspend is CN16's rule (architecture.md, Namespace suspend
+// semantics): a namespace is suspended iff its
 // stored flag says so **or** an auto_suspend transfer names it — unless an
 // auto_resume clone targets its td, which overrides to not-suspended. That
-// override is the §11.3 flow: the destination namespace is *created*
+// override is the flow of architecture.md, Transfer + clone = cross-SP live
+// migration: the destination namespace is *created*
 // suspended and serves anyway while the clone runs.
 //
 // The bit it returns is consumed twice, and neither consumer suspends
@@ -913,7 +924,8 @@ func (p *cntlrPlan) nsBacking(np *nsPlan) (string, bool) {
 	if np.deferred {
 		return np.td.errorName, false
 	}
-	// 1. *parked*: the namespace is effectively suspended (§11.6), so its
+	// 1. *parked*: the namespace is effectively suspended (architecture.md,
+	// Namespace suspend semantics), so its
 	// ns-dev is a live dm-linear over the td's dm-error — never under
 	// dm-flakey, and never dm-suspended ([D12]). np.suspended is assigned
 	// before this runs.
@@ -979,7 +991,8 @@ func (p *cntlrPlan) findNs(nqn string, nsIdx uint32) *nsPlan {
 // Derived values shared by the converge pass and the probe
 // ---------------------------------------------------------------------------
 
-// cntlidRange is the cntlr's §11.8 slot, which every host-facing and every
+// cntlidRange is the cntlr's slot (architecture.md, cntlid slots), which
+// every host-facing and every
 // transfer subsystem of this cntlr carries. nvmet's range includes both
 // ends, so the slot stops one short of the next slot's first id.
 func (p *cntlrPlan) cntlidRange() (uint32, uint32) {
@@ -997,8 +1010,9 @@ func (p *cntlrPlan) hostNqn() string {
 // complementary count of free blocks.
 //
 // pct > 100 means "auto-grow off" and passes 0 — no dm events at all. pct = 0
-// is INVALID and does not reach here: the control plane resolves it to the §7
-// default when it writes the conf, and both paths that reach this arithmetic
+// is INVALID and does not reach here: the control plane resolves it to the
+// default of architecture.md, Common validation, when it writes the conf, and
+// both paths that reach this arithmetic
 // sit behind an agent.ValidateBdevConf gate. poolArgs is this method's only
 // caller, and poolArgs runs only from ensurePool (the converge, gated in
 // syncupCntlr and convergeCntlr) and from probePool (the probe, gated in

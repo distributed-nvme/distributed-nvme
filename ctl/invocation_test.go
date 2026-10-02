@@ -1,12 +1,13 @@
-// The invocation model (dnvctl.md §2): the parts of CT2/CT9 that are neither
-// a request field nor a rendered document — the per-invocation deadline, the
-// one connection and its close, and the viper config file.
+// The invocation model (dnvctl.md, Invocation model): the parts of CT2/CT9
+// that are neither a request field nor a rendered document — the
+// per-invocation deadline, the one connection and its close, and the viper
+// config file.
 //
-// These sit under CT-T2/CT-T5 rather than having a tag of their own, but they
-// are where a defect would be invisible to every other test in the package:
-// a deadline that is never applied, a connection that is never closed and a
-// --config that is silently ignored all leave the request and the rendering
-// exactly as they should be.
+// These sit with the argv → request tests and the trace-id tests (CT2)
+// rather than being a group of their own, but they are where a defect would
+// be invisible to every other test in the package: a deadline that is never
+// applied, a connection that is never closed and a --config that is silently
+// ignored all leave the request and the rendering exactly as they should be.
 package ctl
 
 import (
@@ -20,9 +21,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// TestTimeoutIsApplied is §2.2's "every RPC runs under
-// context.WithTimeout(ctx, timeout seconds)", proved the only way it can be:
-// against a server that never answers. It is §7.13's d2 without the VM.
+// TestTimeoutIsApplied is CT2's "Every RPC runs under a deadline of
+// `--timeout` seconds" (context.WithTimeout), proved the only way it can be:
+// against a server that never answers. It is the transport case's deadline
+// step (dnvctl.md, Integration test plan) without the VM.
 func TestTimeoutIsApplied(t *testing.T) {
 	srv := &traceServer{hang: make(chan struct{})}
 	seam := serveTraceWith(t, srv)
@@ -60,7 +62,7 @@ func TestTimeoutIsApplied(t *testing.T) {
 	close(srv.hang)
 }
 
-// TestConnectionIsClosed is the rest of §2.2: ONE connection per invocation,
+// TestConnectionIsClosed is the rest of CT2: ONE connection per invocation,
 // closed on exit — on the success path and on the failure path alike, since a
 // CLI that leaked its connection on every error would still pass every other
 // test here.
@@ -97,7 +99,7 @@ func TestConnectionIsClosed(t *testing.T) {
 			}
 			if closes != 1 {
 				t.Errorf("%d closes, want exactly 1 — the connection is "+
-					"closed on exit (§2.2)", closes)
+					"closed on exit (CT2)", closes)
 			}
 		})
 	}

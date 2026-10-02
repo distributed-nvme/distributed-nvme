@@ -9,11 +9,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.6 / gateway.md §5.5: the three cntlr
-// mutators and the two Inspect RPCs.
+// This file is architecture.md, Cntlrs / gateway.md, Cntlrs and inspects: the
+// three cntlr mutators and the two Inspect RPCs.
 //
 // A Cntlr is the SP's presence on one controller node: the record that makes
-// a cn agent build the §3.3 stack for the pool and export its namespaces. The
+// a cn agent build the stack of architecture.md, Primary cntlr, for the pool
+// and export its namespaces. The
 // three mutators therefore all maintain the same three things together — the
 // SpConf's `cntlr_id_list`, the CN's budget and pointer list, and the
 // `nvme_tr_conf_list` of every CdcEntry of the SP — because a discovery entry
@@ -22,10 +23,11 @@ import (
 //
 // The two Inspect RPCs are the opposite shape: they write nothing, resolve
 // everything the agent request needs in one Snapshot and make the single
-// agent call strictly outside it (AG1, §5.8).
+// agent call strictly outside it (AG1; architecture.md, STM discipline).
 
 // The op names the bump helpers and the agent-failure messages cite; they are
-// the RPC names so a log line names something greppable (gateway.md §8).
+// the RPC names so a log line names something greppable (gateway.md, Log
+// records).
 const (
 	opCreateCntlr        = "CreateCntlr"
 	opDeleteCntlr        = "DeleteCntlr"
@@ -38,12 +40,13 @@ const (
 // because every caller that finds the record also rewrites or deletes that
 // exact key.
 //
-// The id list is the existence check (§8.6: "NOT_FOUND id not in list") and
-// the key is only then read: the list is what bounds the SP and what
-// Create/DeleteCntlr maintain, so an id that is not in it names nothing even
-// if a stale key were still lying around. The reverse — a listed id whose key
-// is gone — is a lost invariant key and therefore §5.9's ABORTED, not a
-// user-visible NOT_FOUND.
+// The id list is the existence check (architecture.md, Cntlrs: "NOT_FOUND id
+// not in list") and the key is only then read: the list is what bounds the SP
+// and what Create/DeleteCntlr maintain, so an id that is not in it names
+// nothing even if a stale key were still lying around. The reverse — a listed
+// id whose key is gone — is a lost invariant key and therefore an ABORTED
+// (architecture.md, UNEXPECTED_ERROR → `ABORTED`), not a user-visible
+// NOT_FOUND.
 func resolveCntlr(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -63,9 +66,10 @@ func resolveCntlr(
 // cntlrPlan is what CreateCntlr prepares outside its STM (GW8): the cluster
 // the scan runs in, the number of extents one cntlr of this SP reserves on
 // its CN, the CNs that are already excluded from the draw, and their
-// locations, which tier 1 of the draw excludes as well (§6.5). The STM holds
-// the pool's cntlrs as it reads them against SpCnAddrs: one on a CN the plan
-// did not hold sends the round back to be planned again.
+// locations, which tier 1 of the draw excludes as well (architecture.md,
+// Per-operation allocation). The STM holds the pool's cntlrs as it reads them
+// against SpCnAddrs: one on a CN the plan did not hold sends the round back to
+// be planned again.
 type cntlrPlan struct {
 	Cid       uint64
 	Cc        *pb.ClusterConf
@@ -74,15 +78,17 @@ type cntlrPlan struct {
 	SpCnLocs  []string
 }
 
-// planCreateCntlr is CreateCntlr's planning read (gateway.md §5.5): the
-// candidate scan needs a size and an exclusion list, and neither can be
-// computed without reading the SP.
+// planCreateCntlr is CreateCntlr's planning read (gateway.md, Cntlrs and
+// inspects): the candidate scan needs a size and an exclusion list, and
+// neither can be computed without reading the SP.
 //
 // The size is the SP's footprint — Σ ext_cnt over every group of every slice
-// (§8.4) — which is what one cntlr's CN reserves, so the slices must be read
-// to size the scan at all. The exclusion list is the addr_port of every CN
-// that already hosts a cntlr of this SP (§6.4), and the location of each of
-// those CNs is the §6.5 tier-1 exclusion (cnLocations).
+// (architecture.md, Storage pools) — which is what one cntlr's CN reserves, so
+// the slices must be read to size the scan at all. The exclusion list is the
+// addr_port of every CN that already hosts a cntlr of this SP
+// (architecture.md, Finding CN candidates), and the location of each of those
+// CNs is the tier-1 exclusion of architecture.md, Per-operation allocation
+// (cnLocations).
 //
 // The SP is read in one read-only Snapshot opened with openSp, not
 // openSpRead: this is a MUTATOR's planning read, so GW5's deleting gate and
@@ -98,8 +104,9 @@ type cntlrPlan struct {
 // its SpConf lists and the store lacks is a lost invariant key, never a torn
 // read, and loadSlices and loadCntlrs answer it ABORTED. The locations are
 // read after the snapshot, outside it, for the reasons cnLocations gives. The
-// plan only shapes the scan: the STM resolves the SP again (§5.8), recomputes
-// the footprint from the slices it reads and re-checks the plan's cntlrs.
+// plan only shapes the scan: the STM resolves the SP again (architecture.md,
+// STM discipline), recomputes the footprint from the slices it reads and
+// re-checks the plan's cntlrs.
 func planCreateCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -144,11 +151,11 @@ func planCreateCntlr(
 	return plan, nil
 }
 
-// CreateCntlr is architecture.md §8.6's CreateCntlr: it adds one standby
-// controller to an SP on a CN that hosts none of the SP's cntlrs yet. The
-// sp-worker's next SyncupSide round tells every side about the new standby
-// and the sides grow an export for it (§3.1), which is why the whole RPC is
-// one SpRev bump away from being visible.
+// CreateCntlr is the CreateCntlr of architecture.md, Cntlrs: it adds one
+// standby controller to an SP on a CN that hosts none of the SP's cntlrs yet.
+// The sp-worker's next SyncupSide round tells every side about the new standby
+// and the sides grow an export for it (architecture.md, Disk node), which is
+// why the whole RPC is one SpRev bump away from being visible.
 //
 // It allocates, so it is a candidate unit (GW9): the CN scan runs outside the
 // transaction and the transaction re-validates the pick. The scan needs a
@@ -159,21 +166,23 @@ func planCreateCntlr(
 // the footprint from the slices IT reads and hands it to cnLedger.verifyPick,
 // so a pick that no longer covers the current footprint — because the SP
 // grew, or because the CN was charged by someone else — fails the unit as
-// errCandidateChanged and the whole round runs again (§0 #8).
+// errCandidateChanged and the whole round runs again (GW9).
 //
 // The already-used cntlid slots are read from the SP's own cntlrs rather than
 // tracked in a separate list: the Cntlr records are the only place a slot is
-// stored, so they cannot disagree with anything (§11.8).
+// stored, so they cannot disagree with anything (architecture.md, cntlid
+// slots).
 //
 // The CN exclusion and the tier-1 locations the scan was given come from the
 // pool's cntlrs as the plan read them, and a cntlr committed after that read
 // would make both stale. A TOKEN-CARRYING caller never gets that far: whatever
 // committed that cntlr — another CreateCntlr, the worker's AR7 replacement —
 // bumped SpRev, which fails the token at the STM's openSp (GW6). GW6 is
-// presence-based (§0 #7), so a token-LESS CreateCntlr is not serialized by it;
-// the STM therefore compares the cntlrs it reads with the plan and re-plans on
-// one the plan did not see (below), which keeps §6.4 and §6.5's tier 1 whole
-// for every caller.
+// presence-based, so a token-LESS CreateCntlr is not serialized by it; the STM
+// therefore compares the cntlrs it reads with the plan and re-plans on one the
+// plan did not see (below), which keeps architecture.md, Finding CN
+// candidates, and the tier 1 of architecture.md, Per-operation allocation,
+// whole for every caller.
 func (s *Server) CreateCntlr(
 	ctx context.Context,
 	req *pb.CreateCntlrRequest,
@@ -254,15 +263,16 @@ func (s *Server) CreateCntlr(
 				}
 			}
 			// The pick was scanned against the pool's cntlrs as the round's
-			// plan read them: their CNs for §6.4 and their locations for
-			// §6.5's tier 1. A cntlr committed since — by another
-			// CreateCntlr, or the worker's AR7 replacement — is missing from
-			// that plan, so the pick may sit in its failure domain behind a
-			// capacity key verifyPick still finds, or on its very CN, when
-			// the scan ran after that cntlr's charge. Only the cntlrs this
-			// transaction reads can tell, so a cntlr on a CN the plan did
-			// not hold makes the round a changed candidate (GW9) and the
-			// next round plans from the pool as it now stands. Only a gain
+			// plan read them: their CNs for architecture.md, Finding CN
+			// candidates, and their locations for the tier 1 of
+			// architecture.md, Per-operation allocation. A cntlr committed
+			// since — by another CreateCntlr, or the worker's AR7 replacement
+			// — is missing from that plan, so the pick may sit in its failure
+			// domain behind a capacity key verifyPick still finds, or on its
+			// very CN, when the scan ran after that cntlr's charge. Only the
+			// cntlrs this transaction reads can tell, so a cntlr on a CN the
+			// plan did not hold makes the round a changed candidate (GW9) and
+			// the next round plans from the pool as it now stands. Only a gain
 			// is checked: a cntlr that has left since the plan frees room the
 			// round did not count on, which GW9 never re-scans for. Only a
 			// token-less request gets here with a gained cntlr: the gain's
@@ -287,7 +297,8 @@ func (s *Server) CreateCntlr(
 			minter := newSpIdMinter(conf)
 			cntlrId = minter.mint()
 			// primary and disabled are both false: a new cntlr is a standby
-			// that the §10.4 election may later promote, and it is enabled
+			// that the election of architecture.md, Automatic reactions, may
+			// later promote, and it is enabled
 			// from birth, which is what puts its CN into every CdcEntry
 			// below.
 			stm.Put(model.CntlrKey(sc.Cid, sc.SpId(), cntlrId), &pb.Cntlr{
@@ -324,14 +335,15 @@ func (s *Server) CreateCntlr(
 	return &pb.CreateCntlrReply{CntlrId: cntlrId}, nil
 }
 
-// DeleteCntlr is architecture.md §8.6's DeleteCntlr: it removes one cntlr
-// record, after which the sides drop its export and the cn agent tears its
-// stack down.
+// DeleteCntlr is the DeleteCntlr of architecture.md, Cntlrs: it removes one
+// cntlr record, after which the sides drop its export and the cn agent tears
+// its stack down.
 //
 // It refuses a primary and refuses an enabled cntlr (`primary == true` or
 // `disabled == false` ⇒ FAILED_PRECONDITION): disabling is what triggers the
-// §10.4 re-election and takes the controller's namespaces ANA-inaccessible,
-// so requiring the disable first means a failover has already happened by the
+// re-election of architecture.md, Automatic reactions, and takes the
+// controller's namespaces ANA-inaccessible, so requiring the disable first
+// means a failover has already happened by the
 // time the record disappears — hosts have moved before their paths do.
 //
 // Everything CreateCntlr did is undone, item for item, so the two are
@@ -340,8 +352,9 @@ func (s *Server) CreateCntlr(
 // one capacity-key maintenance, one CnRev bump), the transport address leaves
 // every CdcEntry, and SpRev bumps once. The footprint returned is the one
 // recomputed from the SP's slices now, which is exactly what is reserved:
-// GrowSlice charges its delta to every cntlr's CN (§8.5), so the reservation
-// tracks the current geometry rather than the geometry at creation time.
+// GrowSlice charges its delta to every cntlr's CN (architecture.md,
+// GrowSlice), so the reservation tracks the current geometry rather than the
+// geometry at creation time.
 func (s *Server) DeleteCntlr(
 	ctx context.Context,
 	req *pb.DeleteCntlrRequest,
@@ -409,17 +422,18 @@ func (s *Server) DeleteCntlr(
 	return &pb.DeleteCntlrReply{CntlrId: req.GetCntlrId()}, nil
 }
 
-// UpdateCntlrEnabled is architecture.md §8.6's UpdateCntlrEnabled: the flag
-// that takes a controller out of, or back into, service.
+// UpdateCntlrEnabled is the UpdateCntlrEnabled of architecture.md, Cntlrs: the
+// flag that takes a controller out of, or back into, service.
 //
 // Disabling removes the cntlr from primary eligibility and makes its
 // namespaces ANA-inaccessible, so its CN must stop being advertised in the
-// SP's CdcEntries at the same instant (§8.8) — a host that discovers a
-// disabled controller finds only inaccessible paths there. Enabling puts the
+// SP's CdcEntries at the same instant (architecture.md, Subsystems,
+// namespaces) — a host that discovers a disabled controller finds only
+// inaccessible paths there. Enabling puts the
 // address back. Disabling the last enabled cntlr is allowed and stops IO;
 // that is the operator's call to make. dnvctl does NOT warn about it in v1: the
 // warning would need a pre-read, and dnvctl issues no RPC the operator did not
-// type (dnvctl.md §0 #10). It is deferred until this reply carries the hint.
+// type (dnvctl.md CT8). It is deferred until this reply carries the hint.
 //
 // Enabling a cntlr that is still the primary also marks it settling
 // (dnv-worker.md HL2): its cn agent converged the standby shape while it was
@@ -428,7 +442,7 @@ func (s *Server) DeleteCntlr(
 // alone.
 //
 // A request that asks for the state already stored writes NOTHING and bumps
-// NOTHING (§0 #17): a no-op that bumped SpRev would invalidate every client's
+// NOTHING (GW6): a no-op that bumped SpRev would invalidate every client's
 // token and make every agent re-sync for a change that did not happen. A token
 // that was sent is still checked first (GW6), so a stale client hears ABORTED
 // rather than a misleading OK.
@@ -483,21 +497,22 @@ func (s *Server) UpdateCntlrEnabled(
 	}, nil
 }
 
-// InspectCntlr is architecture.md §8.6's InspectCntlr: the live state of one
-// cntlr as its cn agent sees it, which is how an operator watches a clone
-// hydrate before calling DeleteClone (§8.9).
+// InspectCntlr is the InspectCntlr of architecture.md, Cntlrs: the live state
+// of one cntlr as its cn agent sees it, which is how an operator watches a
+// clone hydrate before calling DeleteClone (architecture.md, Clones).
 //
 // Phase 1 is a Snapshot and not a RunSTM because the RPC writes nothing: one
 // store revision makes the Cntlr and the CN it names mutually consistent
-// (§5.8, GW8). The CnConf is read for its `cn_id` alone — the
-// Cntlr stores the addr_port to dial, the agent addresses the node by id —
-// and its absence is §5.9's ABORTED rather than NOT_FOUND, because
-// DeleteControllerNode refuses a CN whose `cntlr_ptr_list` is non-empty, so a
-// live cntlr pointing at a missing CnConf is a lost invariant key.
+// (architecture.md, STM discipline; GW8). The CnConf is read for its `cn_id`
+// alone — the Cntlr stores the addr_port to dial, the agent addresses the node
+// by id — and its absence is an ABORTED (architecture.md, UNEXPECTED_ERROR →
+// `ABORTED`) rather than NOT_FOUND, because DeleteControllerNode refuses a CN
+// whose `cntlr_ptr_list` is non-empty, so a live cntlr pointing at a missing
+// CnConf is a lost invariant key.
 //
 // The reply is the agent's, whole: `applied_revision` (the revision of
 // the last SyncupCntlr the agent applied for this cntlr) and `cntlr_info`
-// both come from the GetCntlrInfo reply (architecture.md §8.6) — diff
+// both come from the GetCntlrInfo reply (architecture.md, Cntlrs) — diff
 // `applied_revision` against the SpRev token
 // GetStoragePool hands out to see how far the agent lags desired state.
 //
@@ -583,15 +598,16 @@ func (s *Server) InspectCntlr(
 	}, nil
 }
 
-// InspectSide is architecture.md §8.6's InspectSide: the live state of one
-// side as its dn agent sees it, which is how an operator watches a migration
-// hydrate before calling FinishMigration (§8.11).
+// InspectSide is the InspectSide of architecture.md, Cntlrs: the live state of
+// one side as its dn agent sees it, which is how an operator watches a
+// migration hydrate before calling FinishMigration (architecture.md,
+// Migrations).
 //
 // It is InspectCntlr's shape with the object named differently. The side is
 // located by the bounded slice scan of findSide — every slice, every meta and
 // data group, active legs and spare legs alike — because a side_id is unique
-// inside the SP but carries no hint of which slice holds it (§8.6); an
-// unknown id is NOT_FOUND.
+// inside the SP but carries no hint of which slice holds it (architecture.md,
+// Cntlrs); an unknown id is NOT_FOUND.
 //
 // The agent request names the side by the full SidePointer, not by side_id
 // alone: the dn agent keys its objects by (sp_id, leg_id, side_id), so the
@@ -601,7 +617,7 @@ func (s *Server) InspectCntlr(
 //
 // The reply is the agent's, whole: `applied_revision` (the revision of
 // the last SyncupSide the agent applied for this side) and `side_info`
-// both come from the GetSideInfo reply (architecture.md §8.6) — diff
+// both come from the GetSideInfo reply (architecture.md, Cntlrs) — diff
 // `applied_revision` against the SpRev token
 // GetStoragePool hands out to see how far the agent lags desired state.
 // The agent's SideInfo is passed through exactly as InspectCntlr passes

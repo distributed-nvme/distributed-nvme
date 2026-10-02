@@ -16,7 +16,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The "record" attribute of the §12 "health changed" record (HL1/HL2).
+// The "record" attribute of the "health changed" record (HL1/HL2;
+// dnv-worker.md, Log records).
 const (
 	healthRecordDn    = "dn"
 	healthRecordCn    = "cn"
@@ -25,7 +26,8 @@ const (
 	healthRecordSide  = "side"
 )
 
-// The "reason" attribute of the §12 "health changed" record.
+// The "reason" attribute of the "health changed" record (dnv-worker.md, Log
+// records).
 const (
 	reasonUnreachable = "unreachable"
 	reasonErrorRow    = "error_row"
@@ -50,9 +52,9 @@ const (
 	// RES_STATUS_PROVISIONING and MISSING rows are deliberately NOT healthNone
 	// for a node, a side or a cntlr: they are simply not ERROR rows, so a
 	// reply carrying them is a clean round (HL1 row 3, "no ERROR row in the
-	// latest known info"). architecture.md §9.5 makes PROVISIONING healthy
-	// ([D15]), and all HL1 row 4 and HL2's trailer forbid is SETTING an
-	// err_epoch — which healthClean never does.
+	// latest known info"). architecture.md, Live-state reporting, makes
+	// PROVISIONING healthy ([D15]), and all HL1 row 4 and HL2's trailer forbid
+	// is SETTING an err_epoch — which healthClean never does.
 	healthNone healthObs = iota
 	// healthUnreachable is a stream that cannot be opened, breaks, or misses
 	// its reply within the round timeout.
@@ -181,12 +183,12 @@ func (w *modelHealthWriter) setSideErrEpoch(
 // by the loads HL3 names (seedRecord, offerRecord, refresh). It issues an etcd
 // write only on an observed transition from that memo — or, for a cntlr, for
 // HL2's settle, once per memo (see observeSettle). Two owners of the same
-// object (the accepted overlap of §0 item 4) that observe the same transition
+// object (the accepted overlap of VW7) that observe the same transition
 // therefore write at most once each, and the model op re-reads the record
-// inside its STM so the second write is a no-op — the §11 threshold clock
-// never restarts. An epoch written by an owner that saw something else, an
-// observer cut off from the agent say, is put right by the owner that
-// remains, at its first verdict after its next load.
+// inside its STM so the second write is a no-op — the threshold clock of the
+// automatic reactions (AR4) never restarts. An epoch written by an owner that
+// saw something else, an observer cut off from the agent say, is put right by
+// the owner that remains, at its first verdict after its next load.
 //
 // A monitor is owned by one object goroutine (RW1) and needs no locking but
 // for the offered record and the count of its own writes, which the sp
@@ -196,8 +198,8 @@ type healthMonitor struct {
 	role   string
 	record string
 	cid    uint64
-	// attrs are the object's ids as the §12 "health changed" record carries
-	// them, between cluster_id and record.
+	// attrs are the object's ids as the "health changed" record (dnv-worker.md,
+	// Log records) carries them, between cluster_id and record.
 	attrs []slog.Attr
 	// write performs the MD6 op for this record kind. settle asks a cntlr's
 	// op to clear the record's settling flag as well (HL2); the other kinds
@@ -425,9 +427,10 @@ func (m *healthMonitor) observeSettle(
 // absent from the RW21 cache. MD4 derives the DnCapacity key's bin index from
 // dn_bin_conf, so a write with no usable conf would have to invent a ladder:
 // the real key would never be deleted and a duplicate would be written at the
-// wrong bin, which §6.3's bin scan would then hand out as an allocation
-// candidate for a DN HL1 has just flagged unhealthy. An UNUSABLE stored conf
-// is refused the same way and for exactly the same reason (§7).
+// wrong bin, which the bin scan of architecture.md, Finding DN candidates,
+// would then hand out as an allocation candidate for a DN HL1 has just flagged
+// unhealthy. An UNUSABLE stored conf is refused the same way and for exactly
+// the same reason (architecture.md, Common validation).
 var errNoClusterConf = errors.New("cluster conf missing")
 
 // newDnMonitor builds the health monitor of one DN (HL1). The cluster conf the
@@ -478,8 +481,9 @@ func newDnMonitor(
 
 // newCnMonitor builds the health monitor of one CN (HL1). Unlike the DN's, it
 // needs no ClusterConf: CN capacity keys carry no bin index, so nothing about
-// them depends on dn_bin_conf (MD4, §6.4). Its refresh reads the CnConf the
-// syncup reads (§8.3).
+// them depends on dn_bin_conf (MD4; architecture.md, Finding CN candidates).
+// Its refresh reads the CnConf the syncup reads (dnv-worker.md, cn role —
+// `worker/cnrole.go`).
 func newCnMonitor(
 	d *deps,
 	cid uint64,
@@ -523,7 +527,8 @@ func accepted(code uint32) bool {
 // dnObservation applies the HL1 table to one CheckDn/SyncupDn reply (HL5:
 // info is the LATEST KNOWN DnInfo, not necessarily this reply's). The ERROR
 // sources are disk_info, meta_info and port_info — including meta_info's
-// "disk lacks Write Zeroes" (§9.4), which is a plain ERROR.
+// "disk lacks Write Zeroes" (architecture.md, Side provisioning protocol),
+// which is a plain ERROR.
 func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""
@@ -556,10 +561,10 @@ func cnObservation(code uint32, info *pb.CnInfo) (healthObs, string) {
 }
 
 // markDnUnknown records RES_STATUS_UNKNOWN on a DN's in-memory info while its
-// stream is dead (HL1, §9.5). It is never written to etcd; it exists so that
-// the ERROR rows of a stale info do not outlive the stream that reported
-// them — the first reply on a fresh stream carries the full info again
-// (§9.7).
+// stream is dead (HL1; architecture.md, Live-state reporting). It is never
+// written to etcd; it exists so that the ERROR rows of a stale info do not
+// outlive the stream that reported them — the first reply on a fresh stream
+// carries the full info again (architecture.md, Check streams).
 func markDnUnknown(info *pb.DnInfo) {
 	if info == nil {
 		return
@@ -567,7 +572,8 @@ func markDnUnknown(info *pb.DnInfo) {
 	markUnknown(info.GetDiskInfo(), info.GetMetaInfo(), info.GetPortInfo())
 }
 
-// markCnUnknown is markDnUnknown for a CN (HL1, §9.5).
+// markCnUnknown is markDnUnknown for a CN (HL1; architecture.md, Live-state
+// reporting).
 func markCnUnknown(info *pb.CnInfo) {
 	if info == nil {
 		return
@@ -581,7 +587,7 @@ func markCnUnknown(info *pb.CnInfo) {
 }
 
 // ---------------------------------------------------------------------------
-// HL2 — the sp-object tables (used by the sp role, §8.4)
+// HL2 — the sp-object tables (used by the sp role, RW14-RW20)
 // ---------------------------------------------------------------------------
 
 // newCntlrMonitor builds the health monitor of one cntlr (HL2).
@@ -609,7 +615,8 @@ func newCntlrMonitor(
 }
 
 // newLegMonitor builds the health monitor of one leg (HL2). A leg's health is
-// reported by the PRIMARY cntlr's §3.6 probe, never by a standby, so the
+// reported by the PRIMARY cntlr's probe (architecture.md, Group on-leg layout:
+// meta region, data region, health block), never by a standby, so the
 // monitor lives on the sp coordinator rather than on a cntlr child.
 func newLegMonitor(
 	d *deps,
@@ -719,11 +726,10 @@ func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 // thinIdMissing is how a created td's thin row names the thin id missing from
 // its slice's pool, the mark of HL2's shared-state rows (sharedStateTds). The
 // cn agent attaches a created td's volume with a bare `dmsetup create` of its
-// thin table and never messages the id back into existence (cnagent.md CN14,
-// ThinDeviceCreated.md U4-S2); dm-thin refuses the table of a dev_id the
-// pool's metadata does not hold with ENODATA, which dmsetup prints as this,
-// and the agent carries the output in the row's details (cnagent.md CN29
-// error capture).
+// thin table and never messages the id back into existence (cnagent.md CN14);
+// dm-thin refuses the table of a dev_id the pool's metadata does not hold with
+// ENODATA, which dmsetup prints as this, and the agent carries the output in
+// the row's details (cnagent.md CN29 error capture).
 // Only a converge's report names it: a Check round's probe finds the volume
 // absent and reads it MISSING.
 const thinIdMissing = "No data available"
@@ -769,8 +775,8 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 // a transfer out of one of them, the three of a clone onto it. The pool lives
 // on the SP's legs, so whichever cntlr holds the primary role reads the same
 // rows, and no failover or replacement brings the td, or anything over it,
-// back: an operator does (architecture.md Appendix D). Every other ERROR row
-// is the cntlr's own.
+// back: an operator does (architecture.md, v1 assumptions and known limits).
+// Every other ERROR row is the cntlr's own.
 // It returns those tds, ascending, when the info carries ERROR rows and every
 // one of them is of the shared-state class, and nil when one is the cntlr's
 // own or there is none. Both classes set Cntlr.err_epoch alike
@@ -872,7 +878,7 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // read PROVISIONING all the same): a clean reply that says nothing about the
 // build still to come, and a settle on it would leave that build to be judged
 // by primary_unhealthy, which at 32 slices failed the building primary over
-// (e2e_integtest.md §8 item 13). MISSING is the other half. A converge that
+// (e2e_integtest.md, Known limits). MISSING is the other half. A converge that
 // finds a member not available (a promotion ahead of the sides' ANA flips, a
 // provisioned flip ahead of the side's export) reports the groups and pools it
 // could not build ERROR and leaves them to the CN10 retry, whose first pass
@@ -962,9 +968,10 @@ func sideObservation(code uint32, info *pb.SideInfo) (healthObs, string) {
 	return healthClean, ""
 }
 
-// legObservation applies the HL2 leg row: the PRIMARY cntlr's §3.6 probe of
-// one leg (spares included). ERROR sets, OK clears, everything else — and a
-// leg the primary did not report at all — neither sets nor clears. A
+// legObservation applies the HL2 leg row: the PRIMARY cntlr's probe
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block) of one leg (spares included). ERROR sets, OK clears, everything else —
+// and a leg the primary did not report at all — neither sets nor clears. A
 // STANDBY's leg row is logged by its caller, never passed in here (HL2).
 func legObservation(
 	code uint32,
@@ -989,7 +996,7 @@ func legObservation(
 }
 
 // markCntlrUnknown records RES_STATUS_UNKNOWN on a cntlr's in-memory info
-// while its stream is dead (§9.5).
+// while its stream is dead (architecture.md, Live-state reporting).
 func markCntlrUnknown(info *pb.CntlrInfo) {
 	if info == nil {
 		return
@@ -1025,7 +1032,7 @@ func markCntlrUnknown(info *pb.CntlrInfo) {
 }
 
 // markSideUnknown records RES_STATUS_UNKNOWN on a side's in-memory info while
-// its stream is dead (§9.5).
+// its stream is dead (architecture.md, Live-state reporting).
 func markSideUnknown(info *pb.SideInfo) {
 	if info == nil {
 		return
@@ -1059,8 +1066,9 @@ type row struct {
 	info  *pb.ResInfo
 }
 
-// resName is the "res_name" attribute of the §12 "health changed" record: the
-// agent's own res_name, or the field label when it is empty.
+// resName is the "res_name" attribute of the "health changed" record
+// (dnv-worker.md, Log records): the agent's own res_name, or the field label
+// when it is empty.
 func resName(label string, info *pb.ResInfo) string {
 	if name := info.GetResName(); name != "" {
 		return name
@@ -1108,7 +1116,8 @@ func sortedKeys[V any](m map[uint64]V) []uint64 {
 	return keys
 }
 
-// markUnknown sets every given row to RES_STATUS_UNKNOWN (§9.5).
+// markUnknown sets every given row to RES_STATUS_UNKNOWN (architecture.md,
+// Live-state reporting).
 func markUnknown(rows ...*pb.ResInfo) {
 	for _, res := range rows {
 		if res == nil {

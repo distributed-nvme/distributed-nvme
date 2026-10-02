@@ -24,9 +24,10 @@ var errRoundTimeout = errors.New("round timeout")
 // unreachable (HL1).
 var errRoundAborted = errors.New("round aborted")
 
-// desiredState is the mutable half of a rev value (architecture.md §5.5,
-// RW2): the revision to reach plus the handle — addr_port for DnRev/CnRev,
-// sp_name for SpRev. A put that changes neither is a no-op (RW3).
+// desiredState is the mutable half of a rev value (architecture.md, Revision
+// keys and the sync fan-out; RW2): the revision to reach plus the handle —
+// addr_port for DnRev/CnRev, sp_name for SpRev. A put that changes neither is a
+// no-op (RW3).
 type desiredState struct {
 	revision uint64
 	handle   string
@@ -49,9 +50,9 @@ type replyState struct {
 }
 
 // checkStream is one object's Check* bidirectional stream (RW4,
-// architecture.md §9.7). recv blocks; the caller bounds it with the round
-// timer and closes the stream when the timer wins (RW4 step 4). send puts the
-// round's trace id into the request (RW10): the stream's metadata carries
+// architecture.md, Check streams). recv blocks; the caller bounds it with the
+// round timer and closes the stream when the timer wins (RW4 step 4). send puts
+// the round's trace id into the request (RW10): the stream's metadata carries
 // only the id of the round that opened it.
 type checkStream interface {
 	send(traceId string, revision uint64, showInfo bool) error
@@ -64,8 +65,9 @@ type checkStream interface {
 // needs no locking; the loop below is the same code for a DN, a CN, an sp
 // side and an sp cntlr.
 type objDriver interface {
-	// logAttrs returns the object's ids as the §12 records that list "ids"
-	// carry them (syncup result, syncup rejected, health changed).
+	// logAttrs returns the object's ids as the records that list "ids" carry
+	// them (syncup result, syncup rejected, health changed; dnv-worker.md, Log
+	// records).
 	logAttrs() []slog.Attr
 	// childAttrs returns the extra attributes an sp child's "revision worker
 	// started"/"stopped" records carry (side_pointer / cntlr_pointer); nil
@@ -95,7 +97,7 @@ type objDriver interface {
 	) (*replyState, error)
 	// observe folds one reply — from a round or from a syncup, which are the
 	// same thing here (HL4) — into health and the kind's own consequences
-	// (the flips of RW18/RW19, the pushes of §10).
+	// (the flips of RW18/RW19, the pushes of BM1-BM6).
 	observe(ctx context.Context, r *replyState)
 	// unreachable folds a stream that cannot be opened, breaks or misses its
 	// reply into health (HL1/HL2).
@@ -159,11 +161,12 @@ func awaitPredecessor(ctx context.Context, after <-chan struct{}) bool {
 	return ctx.Err() == nil
 }
 
-// revWorker is the generic per-object loop of §8.1 (RW1-RW12), shared by the
-// dn, cn, side and cntlr object kinds. One goroutine owns the object's
-// Check* stream, its in-memory state and every RPC about it, which is what
-// makes architecture.md §9.1's "one Syncup* at a time per object" and §9.7's
-// "one stream per object" hold by construction.
+// revWorker is the generic per-object loop (RW1-RW12), shared by the dn, cn,
+// side and cntlr object kinds. One goroutine owns the object's Check* stream,
+// its in-memory state and every RPC about it, which is what makes the "one
+// Syncup* at a time per object" of architecture.md, Common agent rules, and the
+// "one stream per object" of architecture.md, Check streams, hold by
+// construction.
 type revWorker struct {
 	deps   *deps
 	driver objDriver
@@ -297,12 +300,12 @@ func (w *revWorker) run() {
 			continue
 		}
 		if err := model.ValidateClusterConf(cc); err != nil {
-			// §7: the gateway stores concrete values, so a zero or an
-			// out-of-range member here is corruption or foreign data, and
-			// this object's pass is refused rather than computed with a
-			// guessed geometry. The refusal reaches nothing: round() is
-			// skipped, so no stream is opened, no Syncup* is sent and no
-			// err_epoch is written, and wait() is passed a nil cc so a
+			// architecture.md, Common validation: the gateway stores concrete
+			// values, so a zero or an out-of-range member here is corruption or
+			// foreign data, and this object's pass is refused rather than
+			// computed with a guessed geometry. The refusal reaches nothing:
+			// round() is skipped, so no stream is opened, no Syncup* is sent
+			// and no err_epoch is written, and wait() is passed a nil cc so a
 			// revision bump arriving meanwhile is recorded (RW3) without
 			// sending anything either. It retries every round, like the
 			// unknown-cluster arm above, because an operator recreating the
@@ -393,7 +396,8 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 // fail is RW4 step 4: close the stream and report the object unreachable
 // (HL1/HL2). A worker that is stopping reports nothing — a cancelled stop ctx
 // is not a sick agent, and writing "unreachable" on the way out would restart
-// the §11 threshold clock of a perfectly healthy object.
+// the threshold clock of the automatic reactions (AR4) of a perfectly healthy
+// object.
 func (w *revWorker) fail(ctx context.Context) {
 	w.dropStream()
 	if w.ctx.Err() != nil {
@@ -564,7 +568,8 @@ func (w *revWorker) recv(
 			// stream is never reused across an abandoned round holds here
 			// too, so the stream goes with it (applyDesired has already
 			// dropped it when RW13 moved the object). The next round opens a
-			// fresh one, which §9.7 answers with the complete *Info again.
+			// fresh one, which the agent answers with the complete *Info again
+			// (architecture.md, Check streams).
 			w.applyDesired(next, cc)
 			w.dropStream()
 			return nil, errRoundAborted
@@ -606,8 +611,9 @@ func (w *revWorker) dropStream() {
 // cache on first use.
 //
 // A put whose only change is addr_port re-syncs the node at its NEW endpoint
-// (RW13, §10.2): the stream and the connection reference are dropped and the
-// loop continues at the new address. No delete ever reaches the agent.
+// (RW13; architecture.md, dn / cn roles): the stream and the connection
+// reference are dropped and the loop continues at the new address. No delete
+// ever reaches the agent.
 func (w *revWorker) connect() (*grpc.ClientConn, error) {
 	addr := w.driver.addrPort()
 	if addr == "" {
@@ -655,9 +661,10 @@ func (w *revWorker) idle() {
 }
 
 // refuseConf is idle's twin for a cluster whose stored conf cannot be used
-// (§7): the same quiesced state — stream dropped, RW7 connection reference
-// released — but its own record, so the §14 grep for "cluster conf missing"
-// keeps meaning "the cluster is not in the cache" and nothing else.
+// (architecture.md, Common validation): the same quiesced state — stream
+// dropped, RW7 connection reference released — but its own record, so the grep
+// of the worker suite (dnv-worker.md, Integration test plan) for "cluster conf
+// missing" keeps meaning "the cluster is not in the cache" and nothing else.
 func (w *revWorker) refuseConf(err error) {
 	w.quiesce()
 	w.idleLogged = false
@@ -682,8 +689,8 @@ func (w *revWorker) cleanup() {
 	w.releaseConn()
 }
 
-// lifecycleAttrs are the attributes of the §12 "revision worker started" /
-// "revision worker stopped" records.
+// lifecycleAttrs are the attributes of the "revision worker started" /
+// "revision worker stopped" records (dnv-worker.md, Log records).
 func (w *revWorker) lifecycleAttrs() []any {
 	attrs := []any{
 		slog.String("role", w.role),
@@ -697,7 +704,7 @@ func (w *revWorker) lifecycleAttrs() []any {
 	return attrs
 }
 
-// idAttrs are the "ids" of the §12 syncup records.
+// idAttrs are the "ids" of the syncup records (dnv-worker.md, Log records).
 func (w *revWorker) idAttrs() []any {
 	attrs := make([]any, 0, 6)
 	for _, attr := range w.driver.logAttrs() {
@@ -706,8 +713,8 @@ func (w *revWorker) idAttrs() []any {
 	return attrs
 }
 
-// logSyncupResult emits the §12 "syncup result" record, which every Syncup*
-// reply or failure produces (RW5).
+// logSyncupResult emits the "syncup result" record (dnv-worker.md, Log
+// records), which every Syncup* reply or failure produces (RW5).
 func (w *revWorker) logSyncupResult(
 	ctx context.Context,
 	revision uint64,
@@ -724,10 +731,10 @@ func (w *revWorker) logSyncupResult(
 	slog.InfoContext(ctx, msgSyncupResult, attrs...)
 }
 
-// logSyncupRejected emits the §12 "syncup rejected" record (RW5).
-// common.ReplyCodeStaleRevision means the agent holds a revision newer than
-// etcd's, which only an etcd restore can cause, and is logged at Error;
-// everything else — an unknown object above all, which merely means the
+// logSyncupRejected emits the "syncup rejected" record (RW5; dnv-worker.md, Log
+// records). common.ReplyCodeStaleRevision means the agent holds a revision
+// newer than etcd's, which only an etcd restore can cause, and is logged at
+// Error; everything else — an unknown object above all, which merely means the
 // parent syncup has not landed yet — at Info.
 func (w *revWorker) logSyncupRejected(
 	ctx context.Context,
@@ -746,16 +753,16 @@ func (w *revWorker) logSyncupRejected(
 	slog.InfoContext(ctx, msgSyncupRejected, attrs...)
 }
 
-// logSyncupLeftover emits the §12 "syncup leftover" record: the request was
-// accepted and stored, and the agent's details name what the node still holds
-// that the desired state does not want, or what kept the agent from proving
-// the node clean (an enumeration that did not answer, say). It is Info, not
-// Error: a leftover is normal for as long as a dead remote's failfast window
-// lasts, and on the pass of a cn teardown whose sweep disconnects anything —
-// the cn agent's sweep sets each `nvme disconnect` it issues, of a leg or a
-// clone source, going off its pass and names the connection a leftover until
-// a later pass finds it gone (a removing pass once it has no controller, a
-// Check round once its sysfs subsystem directory, which can outlive the last
+// logSyncupLeftover emits the "syncup leftover" record (log.md, Leftovers): the
+// request was accepted and stored, and the agent's details name what the node
+// still holds that the desired state does not want, or what kept the agent from
+// proving the node clean (an enumeration that did not answer, say). It is Info,
+// not Error: a leftover is normal for as long as a dead remote's failfast
+// window lasts, and on the pass of a cn teardown whose sweep disconnects
+// anything — the cn agent's sweep sets each `nvme disconnect` it issues, of a
+// leg or a clone source, going off its pass and names the connection a leftover
+// until a later pass finds it gone (a removing pass once it has no controller,
+// a Check round once its sysfs subsystem directory, which can outlive the last
 // controller, is gone), so that pass's SyncupCntlr/SyncupCn reply carries the
 // code, and the first Check round that no longer finds the connection, with
 // nothing else left, answers code 0 and ends the re-sync.

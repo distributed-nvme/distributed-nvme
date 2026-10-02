@@ -1,18 +1,19 @@
-// The disk node subcommands of dnvctl (dnvctl.md §5.2): the six RPCs that
-// manage a DN inside one cluster. Every one of them takes cluster_name from
-// the global --cluster (§5.0) and names its node with --addr, because a DN's
-// name IS its agent's ip:port — there is no separate id to type.
+// The disk node subcommands of dnvctl (dnvctl.md, `dn` — `ctl/dn.go`): the
+// six RPCs that manage a DN inside one cluster. Every one of them takes
+// cluster_name from the global --cluster (dnvctl.md, Conventions) and names
+// its node with --addr, because a DN's name IS its agent's ip:port — there
+// is no separate id to type.
 //
-// Two of the six are token-carrying mutators (§4): `dn delete` and
+// Two of the six are token-carrying mutators (CT3): `dn delete` and
 // `dn set-disabled` send dn_rev, built by root.go's dnRev from the global
 // --rev. dnvctl sends exactly what was typed and substitutes nothing (CT8):
 // an omitted --rev leaves the field NIL, while `--rev 0` sends a PRESENT
-// message with revision 0. §4 keeps those two distinguishable because the
+// message with revision 0. CT3 keeps those two distinguishable because the
 // gateway's GW6 check keys on presence: a nil token skips the check entirely,
 // while a present token — 0 included — is compared and refused ABORTED
 // "stale revision" on mismatch (stored revisions seed at 1, so 0 is the
 // always-stale probe; a token-less mutator is simply ungated, gateway.md
-// §0 #7). Either way the wire content is the operator's to choose.
+// GW6). Either way the wire content is the operator's to choose.
 //
 // `dn get` is the token source an operator reads before either mutator, and
 // it reads etcd. `dn inspect` is the group's only live read: the gateway
@@ -30,7 +31,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// registerDn adds the §5.2 group to the root command.
+// registerDn adds the `dn` group to the root command.
 func registerDn(root *cobra.Command) {
 	root.AddCommand(group("dn", "disk nodes",
 		dnCreateCmd(),
@@ -44,7 +45,7 @@ func registerDn(root *cobra.Command) {
 
 // dnAddrFlag declares the identity flag of five of the six commands. It is
 // named with this file's group prefix so it cannot collide with the identical
-// helper cn.go needs for its own mirror group (§1.2).
+// helper cn.go needs for its own mirror group (dnvctl.md, Files).
 //
 // There is no default: an omitted --addr sends an empty addr_port on purpose
 // and the gateway answers INVALID_ARGUMENT (CT8 — dnvctl checks nothing).
@@ -53,11 +54,12 @@ func dnAddrFlag(cmd *cobra.Command) {
 }
 
 // dnCreateCmd drives CreateDiskNode. The four transport flags come from the
-// shared trConfFlags in its UNPREFIXED form (§5.0), so they read --tr-type,
-// --adr-fam, --tr-addr and --tr-svc-id and default to the lab-shaped
-// tcp/ipv4/127.0.0.1/4420. Emptying all four sends a nil nvme_tr_conf, which
-// the gateway then refuses ("nvme_tr_conf must not be empty"); dnvctl forwards
-// it anyway, because CT8 leaves that judgement to the gateway.
+// shared trConfFlags in its UNPREFIXED form (dnvctl.md, Conventions), so
+// they read --tr-type, --adr-fam, --tr-addr and --tr-svc-id and default to
+// the lab-shaped tcp/ipv4/127.0.0.1/4420. Emptying all four sends a nil
+// nvme_tr_conf, which the gateway then refuses ("nvme_tr_conf must not be
+// empty"); dnvctl forwards it anyway, because CT8 leaves that judgement to
+// the gateway.
 //
 // --location defaults to empty rather than to a rack name because the gateway
 // then defaults it to addr_port itself, so a create that names only --addr
@@ -115,7 +117,7 @@ func dnDeleteCmd() *cobra.Command {
 
 // dnGetCmd drives GetDiskNode. Its reply carries the DnConf and the current
 // dn_rev, which is where an operator reads the token to feed back into
-// `dn delete` or `dn set-disabled` (§4).
+// `dn delete` or `dn set-disabled` (CT3).
 func dnGetCmd() *cobra.Command {
 	cmd := leaf("get", "read a disk node's conf and dn_rev (GetDiskNode)",
 		func() (job, error) {

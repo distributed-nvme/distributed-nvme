@@ -64,7 +64,8 @@ type DiskMeta struct {
 	diskSize uint64
 }
 
-// Envelope layout (the [D13] blocks of §3.1; all integers little-endian).
+// Envelope layout (the [D13] blocks of architecture.md, Disk node; all integers
+// little-endian).
 const (
 	dnHeaderMagic   = "DNVDISK1"
 	dnTableMagic    = "DNVTABL1"
@@ -89,7 +90,8 @@ func NewDiskMeta(oc common.OsClient, disk string) *DiskMeta {
 	return &DiskMeta{oc: oc, disk: disk, newestSlot: -1}
 }
 
-// readBlock / writeBlock wrap every raw-device call in the §7 soft timeout,
+// readBlock / writeBlock wrap every raw-device call in the soft timeout
+// (architecture.md, Common validation),
 // exactly as the osBase wrappers do for commands (SH15). Without it a stalled
 // device would hold the DiskMeta mutex — and, through it, a converge pass —
 // indefinitely.
@@ -524,7 +526,8 @@ func (d *DiskMeta) writeSlot(
 // Queries
 // ---------------------------------------------------------------------------
 
-// Describe is the meta_info details string (§9.5).
+// Describe is the meta_info details string (architecture.md,
+// Live-state reporting).
 func (d *DiskMeta) Describe() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -542,7 +545,7 @@ func (d *DiskMeta) describeLocked() string {
 		d.freeExtCnt(), d.freeUnitCnt(), d.provisioningSideCntLocked())
 }
 
-// provisioningSideCntLocked counts the sides whose §9.4 zeroing has not
+// provisioningSideCntLocked counts the sides whose DN9 zeroing has not
 // finished — the meta_info half of the per-side "zeroing k/n" detail
 // (DN18). It is appended to Describe rather than folded into
 // sides=%d so an operator can tell "this DN carries 12 sides" from "3 of them
@@ -783,7 +786,8 @@ func runTotal(rec *pb.DnDiskTable_SideRecord) uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// zeroed_bits — the §9.4 side-provisioning bitmap ([D15])
+// zeroed_bits — the side-provisioning bitmap of architecture.md,
+// Side provisioning protocol ([D15])
 //
 // **Logical extent i** is the i-th extent of the concatenation of the record's
 // run_list, i.e. bytes [i, i+1) x extent_size of the side's DnSideName
@@ -817,7 +821,8 @@ func sideZeroedCnt(rec *pb.DnDiskTable_SideRecord) uint64 {
 	return agent.BitmapCountSet(rec.GetZeroedBits(), runTotal(rec))
 }
 
-// sideFullyZeroed is the export gate's local half (§9.4 step 4): the agent
+// sideFullyZeroed is the export gate's local half (architecture.md,
+// Side provisioning protocol, step 4): the agent
 // trusts its own bits over the request's provisioned flag, because the disk is
 // authoritative ([D13]) and the etcd flag is a gate, never evidence.
 func sideFullyZeroed(rec *pb.DnDiskTable_SideRecord) bool {
@@ -888,7 +893,8 @@ func (d *DiskMeta) AllocSide(
 	// zeroed_bits is left empty on purpose (DN9): proto3 does not
 	// serialize an empty bytes field, out-of-range bits read as 0, and
 	// BitmapSetRange grows the slice on the first batch — so an absent field
-	// is exactly the §9.4 protocol's "persist the record with zeroed_bits all 0",
+	// is exactly the protocol's "persist the record with zeroed_bits all 0"
+	// (architecture.md, Side provisioning protocol, step 1),
 	// at no cost in every slot write that follows.
 	//
 	// This literal is also where the [D15] invariant is enforced: **zeroed is a
@@ -914,7 +920,7 @@ func (d *DiskMeta) AllocSide(
 }
 
 // SetSideZeroed marks logical extents [fromExt, toExt) of a side as zeroed —
-// step 3 of the §9.4 provisioning protocol, run once per
+// step 3 of architecture.md, Side provisioning protocol, run once per
 // completed batch. The range is half-open, and persisting it *after* the
 // `blkdiscard --zeroout` returned is what makes an interrupted batch simply
 // re-run: its bits stay 0, so the next pass redoes it rather than leaving a

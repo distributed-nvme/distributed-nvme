@@ -20,14 +20,14 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// A real etcd server for the etcd-backed tests (EU7, §13)
+// A real etcd server for the etcd-backed tests (EU7, MD9)
 // ---------------------------------------------------------------------------
 //
 // The same shape as etcdutil_test.go's and model/etcdenv_test.go's helpers,
 // deliberately duplicated rather than factored into a package of its own: it
 // is a test fixture, and a shared one would put another package between
 // worker and etcdutil for no gain. Everything goes through etcdutil, so
-// worker's tests import no etcd client either (layout.md §3).
+// worker's tests import no etcd client either (layout.md, Dependency rules).
 
 // testEndpoint is the client URL of the etcd started by TestMain, empty when
 // no etcd binary was found.
@@ -90,14 +90,15 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// dnv-worker.md §14.4: dnv requires --max-txn-ops=common.EtcdMaxTxnOps
-		// of every etcd it runs against; the server's own default is 128,
-		// below the transactions that need the flag — among them
-		// CreateStoragePool's 967-compare maximum shape, which is what SIZES
-		// the requirement (gateway.md §2.1), the 486 compares the sp drain's
-		// maximum-shape D2 batch reaches (§11.6, SPD13; SPD14 is the tripwire
-		// pair that keeps it so) and the 514 of one created-flip transaction
-		// (RW19, MaxFlipCreatedPerTxn). DeleteClone's rectangle sweep — then 256
+		// dnv-worker.md, Integration test plan: dnv requires
+		// --max-txn-ops=common.EtcdMaxTxnOps of every etcd it runs against; the
+		// server's own default is 128, below the transactions that need the
+		// flag — among them CreateStoragePool's 967-compare maximum shape,
+		// which is what SIZES the requirement (gateway.md, Additions to
+		// `common/constants.go`), the 486 compares the sp drain's maximum-shape
+		// D2 batch reaches (SPD13; SPD14 is the tripwire pair that keeps it so)
+		// and the 514 of one created-flip transaction (RW19,
+		// MaxFlipCreatedPerTxn). DeleteClone's rectangle sweep — then 256
 		// keys, at the 16-slice ceiling of the time — was this flag's founding
 		// justification and is gone: the clone drain's 68-op batches fit the
 		// default (CLD11).

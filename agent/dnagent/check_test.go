@@ -61,7 +61,7 @@ func TestGetDnSize(t *testing.T) {
 	}
 	// GetDnSize reports the *data area*, not the raw device: the fixed
 	// [D13] prefix is already subtracted, so the CP does no further
-	// subtraction (§6.1).
+	// subtraction (architecture.md, Size → extents).
 	want := node.devSize[testDisk] - common.DnDataOffset
 	if reply.GetSize() != want {
 		t.Errorf("size = %d, want %d", reply.GetSize(), want)

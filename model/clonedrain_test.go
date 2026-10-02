@@ -11,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The clone drain's own suite (dnv-worker.md §11.7, model half).
+// The clone drain's own suite (dnv-worker.md, The clone drain; model half).
 //
 // Both of its guards are mutation-tested in BOTH directions, for the sp
 // sibling's reason: an op that refused everything would pass a test that only

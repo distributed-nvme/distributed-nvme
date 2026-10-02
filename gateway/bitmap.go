@@ -8,13 +8,15 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.13 / gateway.md §5.12: the two bitmap reads
-// a clone or a migration pages through before it copies anything.
+// This file is architecture.md, Bitmap reads / gateway.md, Bitmap reads: the
+// two bitmap reads a clone or a migration pages through before it copies
+// anything.
 //
 // Both are read-only two-phase RPCs (AG1): one `Snapshot` resolves everything
 // the agent request needs at a single store revision, and the one agent call
-// happens strictly outside it (§5.8). Neither writes a key, so neither takes
-// a revision token and neither bumps anything (§5.5) — AG4's "re-run
+// happens strictly outside it (architecture.md, STM discipline). Neither
+// writes a key, so neither takes a revision token and neither bumps anything
+// (architecture.md, Revision keys and the sync fan-out) — AG4's "re-run
 // resolution in the deciding STM" has no second STM to apply to here, because
 // there is nothing to decide: the reply is a measurement of the primary's
 // live dm-thin metadata, not a change to desired state. A concurrent
@@ -23,9 +25,9 @@ import (
 // re-reads for.
 //
 // Both go to the PRIMARY cntlr's CN. The primary is the one cntlr that builds
-// the §3.3 stack — the per-slice thin pools and the leg devices under them —
-// so it is the only node that can walk the pool metadata these two answers
-// are computed from. A secondary holds none of it.
+// the stack of architecture.md, Primary cntlr — the per-slice thin pools and
+// the leg devices under them — so it is the only node that can walk the pool
+// metadata these two answers are computed from. A secondary holds none of it.
 
 // The op names the agent-failure messages cite, so a log line names something
 // greppable back to the RPC the operator called.
@@ -47,16 +49,18 @@ type bitmapTarget struct {
 }
 
 // openBitmapTarget resolves the SP's primary cntlr and the CN it runs on
-// (§8.13, gateway.md §5.12).
+// (architecture.md, Bitmap reads; gateway.md, Bitmap reads).
 //
 // An SP with no primary is FAILED_PRECONDITION rather than NOT_FOUND: the SP
 // and its cntlrs exist, but no node has been promoted yet (the sp-worker
-// elects one, §10.3), so the bitmap is unavailable *for now* — a caller that
-// retries after promotion succeeds, which is what a precondition means.
+// elects one, architecture.md, sp role), so the bitmap is unavailable *for
+// now* — a caller that retries after promotion succeeds, which is what a
+// precondition means.
 //
 // The CnConf is read for its `cn_id` only, exactly as InspectCntlr does
-// (gateway.md §5.5): the Cntlr stores the addr_port, and the agent request
-// addresses the node by id. Its absence is §5.9's ABORTED and not NOT_FOUND —
+// (gateway.md, Cntlrs and inspects): the Cntlr stores the addr_port, and the
+// agent request addresses the node by id. Its absence is an ABORTED
+// (architecture.md, UNEXPECTED_ERROR → `ABORTED`) and not NOT_FOUND —
 // DeleteControllerNode refuses a CN whose `cntlr_ptr_list` is non-empty, so a
 // live cntlr pointing at a missing CnConf is a lost invariant key, not a
 // user-visible "no such node".
@@ -88,13 +92,13 @@ func openBitmapTarget(
 	}, nil
 }
 
-// GetThinDeviceBitmap is architecture.md §8.13's GetThinDeviceBitmap: the
-// mapping bitmap of one thin device's volume in one slice, which a clone
-// pages through and feeds to AppendCloneBitmap on the destination.
+// GetThinDeviceBitmap is the GetThinDeviceBitmap of architecture.md, Bitmap
+// reads: the mapping bitmap of one thin device's volume in one slice, which a
+// clone pages through and feeds to AppendCloneBitmap on the destination.
 //
 // Phase 1 is a Snapshot and not a RunSTM because the RPC writes nothing: one
 // store revision is enough to make the td, the primary and the CN it names
-// mutually consistent (§5.8, GW8).
+// mutually consistent (architecture.md, STM discipline; GW8).
 //
 // `slice_idx` is checked against the SP's own slice count and not against a
 // constant: it is state-dependent, so it belongs inside the transaction and
@@ -108,9 +112,10 @@ func openBitmapTarget(
 // — bit k = 1 iff block start_block+k is unmapped, LSB-first within each byte
 // (bit i at `bitmap[i/8] & (1 << (i%8))`), trailing pad bits 0 — is produced
 // by the agent, which inverts thin-pool metadata's native "mapped = written"
-// once at that boundary (§11.4). The gateway never inspects or rewrites a
-// bit, so it can never disagree with the agent about the convention, and
-// byte-aligned chunks stay concatenable by the caller.
+// once at that boundary (architecture.md, raid0 bitmap math). The gateway
+// never inspects or rewrites a bit, so it can never disagree with the agent
+// about the convention, and byte-aligned chunks stay concatenable by the
+// caller.
 func (s *Server) GetThinDeviceBitmap(
 	ctx context.Context,
 	req *pb.GetThinDeviceBitmapRequest,
@@ -191,17 +196,18 @@ func (s *Server) GetThinDeviceBitmap(
 	return &pb.GetThinDeviceBitmapReply{Bitmap: bitmap}, nil
 }
 
-// GetLegBitmap is architecture.md §8.13's GetLegBitmap: the bitmap of one
-// leg's data region, which a migration pages through and feeds to
-// AppendMigrationBitmap.
+// GetLegBitmap is the GetLegBitmap of architecture.md, Bitmap reads: the
+// bitmap of one leg's data region, which a migration pages through and feeds
+// to AppendMigrationBitmap.
 //
 // It is GetThinDeviceBitmap's shape with the object named differently. The
 // leg is located by the bounded slice scan of findLeg — every slice, every
 // meta and data group, active legs and spare legs alike — because a leg_id is
-// unique inside the SP but carries no hint of which slice holds it (§8.6);
-// an unknown id is NOT_FOUND. No slice_idx is taken: the agent derives the
-// owning slice from the leg itself, then walks that slice's pool metadata
-// down through the group geometry to this leg's data region.
+// unique inside the SP but carries no hint of which slice holds it
+// (architecture.md, Cntlrs: InspectSide); an unknown id is NOT_FOUND. No
+// slice_idx is taken: the agent derives the owning slice from the leg itself,
+// then walks that slice's pool metadata down through the group geometry to
+// this leg's data region.
 //
 // The reply is the agent's bytes VERBATIM (GW14, [D-J]) — same convention as
 // GetThinDeviceBitmap, bit k = 1 iff no pool block maps there, LSB-first with

@@ -1,14 +1,15 @@
-// cntlr.go is the `cntlr` group (dnvctl.md §5.5): the four RPCs that manage
-// the NVMe-oF controllers of one storage pool. Every request here is SP-scoped
-// — `cluster_name` from the global --cluster and `sp_name` from the global
-// --sp (§5.0) — and the three mutators carry the SpRev token, not a CnRev:
-// a cntlr belongs to the pool, so the pool's revision is what guards it (§4).
+// cntlr.go is the `cntlr` group (dnvctl.md, `cntlr` — `ctl/cntlr.go`): the
+// four RPCs that manage the NVMe-oF controllers of one storage pool. Every
+// request here is SP-scoped — `cluster_name` from the global --cluster and
+// `sp_name` from the global --sp (dnvctl.md, Conventions) — and the three
+// mutators carry the SpRev token, not a CnRev: a cntlr belongs to the pool,
+// so the pool's revision is what guards it (CT3).
 //
 // The only package-level name this file adds beyond registerCntlr is
 // cntlrIdFlag, which three of the four leaves need. The group prefix is
 // deliberate: sp.go declares an --id of its own for `sp inspect-side` and
 // cluster.go, td.go and the rest declare their own identity flags, so an
-// unprefixed idFlag would collide across the package (§1.2).
+// unprefixed idFlag would collide across the package (dnvctl.md, Files).
 package ctl
 
 import (
@@ -20,19 +21,22 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// cntlrIdFlag declares the group's identity flag, the cntlr_id (§5.0). It is
-// a string flag read back through hexOf so that Go base-0 parsing applies —
-// 3 and 0x3 name the same controller, ids being printed in hex by the rest of
-// dnv — and so that a malformed value is a usage error (exit 2) before any
-// RPC is issued rather than an INVALID_ARGUMENT from the gateway.
+// cntlrIdFlag declares the group's identity flag, the cntlr_id (dnvctl.md,
+// Conventions). It is a string flag read back through hexOf so that Go
+// base-0 parsing applies — 3 and 0x3 name the same controller, ids being
+// printed in hex by the rest of dnv — and so that a malformed value is a
+// usage error (exit 2) before any RPC is issued rather than an
+// INVALID_ARGUMENT from the gateway.
 //
 // The spelling matches `sp inspect-side --id` on purpose even though that one
-// is a side id: the RPC decides what the id means, as in gatewayctl (§5.0).
+// is a side id: the RPC decides what the id means, as in gatewayctl
+// (dnvctl.md, Conventions).
 func cntlrIdFlag(flags *pflag.FlagSet) {
 	flags.String("id", "", "cntlr_id (base 0; 0x accepted)")
 }
 
-// registerCntlr builds the `cntlr` group and hangs it off the root (§5.5).
+// registerCntlr builds the `cntlr` group and hangs it off the root
+// (dnvctl.md, `cntlr` — `ctl/cntlr.go`).
 func registerCntlr(root *cobra.Command) {
 	// cntlr create — CreateCntlr. --slot is the cntlid_slot the new
 	// controller takes; it is a plain decimal index, not an id, so it is a
@@ -105,7 +109,7 @@ func registerCntlr(root *cobra.Command) {
 	// argument and rejected by cobra.NoArgs.
 	//
 	// Disabling the last enabled controller stops IO for the pool. The
-	// gateway allows it and dnvctl does not pre-warn in v1 (§0 #10): the
+	// gateway allows it and dnvctl does not pre-warn in v1 (CT8): the
 	// warning would need a pre-read of the pool's controllers, which is an
 	// RPC the operator did not type. It waits until the gateway carries the
 	// hint in the reply itself.

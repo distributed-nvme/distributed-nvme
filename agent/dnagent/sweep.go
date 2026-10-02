@@ -12,7 +12,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Teardown by sweep — the dn half (architecture.md §9.8, dnagent.md DN6)
+// Teardown by sweep — the dn half (architecture.md, Teardown by sweep;
+// dnagent.md DN6)
 //
 // Same principle as the cn's: what to remove is derived by subtracting the
 // desired state from what the node actually holds, and nothing about a failed
@@ -211,7 +212,8 @@ func (s *DnAgentServer) collectClaims(
 //	:3: connection        wantMigr (ensureMigrDst)
 //
 // migrSrc here is the EFFECTIVE one: a source conf whose destination has not
-// provisioned is exactly equivalent to no source conf at all (§11.2), so a
+// provisioned is exactly equivalent to no source conf at all (architecture.md,
+// Migration), so a
 // deferred source wants nothing and the side keeps serving unchanged.
 type dnWanted struct {
 	dms      map[string]struct{}
@@ -264,7 +266,7 @@ func sideResKeys(plan *sidePlan) map[string]struct{} {
 	}
 	// The RAW source conf is what registers the migr_src_* rows: a source
 	// role reports from the moment migr_src_conf appears, deferred or not
-	// (§11.2).
+	// (architecture.md, Migration).
 	if plan.migrSrcRaw != nil {
 		keys[resKeyMigrSrcDm] = struct{}{}
 		keys[resKeyMigrSrcNvmeof] = struct{}{}
@@ -396,8 +398,9 @@ func (s *DnAgentServer) runChain(
 	// not — is put on its dm-error and resumed, the fence's phase 2. L1
 	// disables the nvmet namespace above it, and that write first waits for
 	// every request in flight on the namespace; one whose bio a suspended dm
-	// device holds never completes, and holding such bios is what the §11.2
-	// window is for. The cutover fence leaves exactly such devices behind,
+	// device holds never completes, and holding such bios is what the cutover
+	// window (architecture.md, Migration, src step 2) is for. The cutover
+	// fence leaves exactly such devices behind,
 	// and not only under a side torn down inside the grace window: a level
 	// raised to SP_LEVEL_NO_SIDE keeps the linears and takes only the exports
 	// off them ([D12]). A SyncupSide that also ends the source role gets here
@@ -573,7 +576,8 @@ func (s *DnAgentServer) retireSuspended(
 // waits for that IO — the disable of the nvmet namespace above it among
 // them; `dmsetup remove` does not succeed on it either. A bare resume would
 // release it too, but against the table it was suspended with, replaying
-// what the §11.2 window absorbed onto the side's data; against the dm-error
+// what the cutover window (architecture.md, Migration, src step 2) absorbed
+// onto the side's data; against the dm-error
 // the deferred bios fail instead ([D12]).
 //
 // It reports whether the device is now known not to be suspended — absent,
@@ -734,7 +738,8 @@ func (s *DnAgentServer) sweepSide(
 // The slot lives in the [D13] on-disk table, so releasing one early is a
 // table-level mistake, not a local one. Without the second half a side
 // we have not heard from yet could still own the slot, and freeing it would
-// strand an in-flight migration whose hydration resumes from disk (§11.2).
+// strand an in-flight migration whose hydration resumes from disk
+// (architecture.md, Migration).
 func (s *DnAgentServer) cloneMetaGate(identified bool) recordGate {
 	known, haveState, ok := s.knownSides()
 	if !ok || !identified {
@@ -1219,8 +1224,8 @@ func (s *DnAgentServer) sidePreSteps(
 		// timeout ([D12]). The set comes from the enumeration, not from a
 		// remembered cn list. It also resumes a linear that a primary flip's
 		// failed reload left suspended, which releases the old primary's
-		// queued IO onto the side's data: a known limit (unfenceLinears,
-		// dnagent.md §2.8).
+		// queued IO onto the side's data: a known limit (unfenceLinears;
+		// dnagent.md, Known limits).
 		s.unfenceLinears(ctx, plan, actual)
 	} else if !plan.wantExport {
 		// A source whose level has no export layer ENDS its window: nothing
@@ -1240,7 +1245,8 @@ func (s *DnAgentServer) sidePreSteps(
 	// the fence's suspension, deliberate, and ending it is the fence's own
 	// job; on any other side unfenceLinears, just above, has tried to end it
 	// (a failed reload can leave a device suspended: a reload fails closed,
-	// dnagent.md §2.8), and one still suspended — its probe or its resume
+	// dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), and one
+	// still suspended — its probe or its resume
 	// failed — is the build phase's to reload or resume.
 	if !plan.wantDm {
 		return
@@ -1296,7 +1302,8 @@ func (s *DnAgentServer) dmMapsUnwanted(
 // the read lock. A side that IS in the pointer list is never touched here
 // even when its side file is absent: after a lost --local-store the side must
 // be REBUILT from its record, and sweeping it would free the extents and send
-// the next SyncupSide through the §9.4 provisioning protocol again, zeroing
+// the next SyncupSide through architecture.md, Side provisioning protocol,
+// again, zeroing
 // live data. Nor, while that side is not held, is a migration object of its
 // sp (fullyKnown below).
 func (s *DnAgentServer) sweepDn(
@@ -1506,7 +1513,7 @@ func (s *DnAgentServer) sweepDn(
 			slog.Uint64("dn_id", dnId))
 		return res
 	}
-	// A side named only by a record still has its §9.4 zeroing child holding
+	// A side named only by a record still has its DN9 zeroing child holding
 	// the side device open, and `dmsetup remove` on a device with an open fd
 	// fails EBUSY.
 	for _, name := range chain.sideDevs {
@@ -1538,7 +1545,8 @@ func (s *DnAgentServer) sweepDn(
 
 // dnVerdict is the node-level comparison the CheckDn rounds and GetDnInfo
 // take. A DN whose stored extent size is unusable converges nothing and
-// sweeps nothing (§7), so it has no verdict either: naming leftovers for a
+// sweeps nothing (architecture.md, Common validation), so it has no verdict
+// either: naming leftovers for a
 // node this agent deliberately did not touch would report objects it is not
 // allowed to remove.
 func (s *DnAgentServer) dnVerdict(

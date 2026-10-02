@@ -38,8 +38,9 @@ func migrSrcReq(revision uint64) *pb.SyncupSideRequest {
 		DstSideId: testSide2,
 		DstDnId:   testSrcDn,
 		// The steady state: the destination has finished provisioning, so the
-		// source really does take on its role (§11.2). The false case is
-		// exactly equivalent to having no migr_src_conf at all and is covered
+		// source really does take on its role (architecture.md, Migration). The
+		// false case is exactly equivalent to having no migr_src_conf at all
+		// and is covered
 		// by TestMigrationSourceDeferredUntilDestinationProvisions.
 		DstProvisioned: true,
 	}
@@ -57,7 +58,8 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	// A migration destination is a freshly allocated side: its very first
 	// SyncupSide already carries migr_dst_conf. Under [D15] that side provisions
 	// first — linear and zeroing only, no metadata slot, no connect, no
-	// dm-clone — and only then does the worker flip its flag (§11.2).
+	// dm-clone — and only then does the worker flip its flag (architecture.md,
+	// Migration).
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
@@ -105,7 +107,8 @@ func TestMigrationDestinationSequence(t *testing.T) {
 			node.dms[cloneName].table, metaNo, destNo)
 	}
 	// Every dnv dm-clone carries both features (DN13 step 4). The dn
-	// hazard is after the §11.2 cutover: a skip-bitmap chunk `blkdiscard`ing
+	// hazard is after the cutover (architecture.md, Migration, dst step 5): a
+	// skip-bitmap chunk `blkdiscard`ing
 	// a region the host already hydrated must stay metadata-only.
 	create := node.callsMatching("cmd dmsetup create " + cloneName)
 	if len(create) != 1 ||
@@ -137,7 +140,8 @@ func TestMigrationDestinationSequence(t *testing.T) {
 		t.Errorf("dm-linear table %q does not point at the dm-clone (%s)",
 			node.dms[linName].table, want)
 	}
-	// Created with hydration off, then enabled (§11.2 dst step 4/5).
+	// Created with hydration off, then enabled
+	// (architecture.md, Migration, dst steps 4 and 5).
 	if node.dms[cloneName].noHydration {
 		t.Error("hydration was never enabled")
 	}
@@ -152,11 +156,13 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	}
 }
 
-// §11.2 under [D15]: a migration destination provisions before it does anything
+// architecture.md, Migration, under [D15]: a migration destination provisions
+// before it does anything
 // else — the aggregate dm-linear and the zeroing, and nothing above it: no
 // clone-metadata slot, no connect, no dm-clone. Its migr_dst_info rows report
 // PROVISIONING throughout.
-// The §11.2 finish step: the request drops migr_dst_conf and the destination
+// The finish step (architecture.md, Migrations, `FinishMigration`): the
+// request drops migr_dst_conf and the destination
 // becomes a plain side. The dm-clone sits *under* the per-CN dm-linear, so the
 // linear must be reloaded onto the plain side device **before** the clone is
 // removed. Removing it first fails EBUSY and leaks the clone, its metadata
@@ -351,8 +357,8 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 	}
 
 	// The next converge succeeds: it reloads the primary's dm-linear onto
-	// the dm-clone and moves the namespaces off inaccessible (§11.2 dst
-	// step 5) — the transition the retry loop exists to reach.
+	// the dm-clone and moves the namespaces off inaccessible (architecture.md,
+	// Migration, dst step 5) — the transition the retry loop exists to reach.
 	node.Reset()
 	if _, err := srv.SyncupSide(ctx,
 		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
@@ -387,8 +393,9 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 // Migration source (DN12)
 // ---------------------------------------------------------------------------
 
-// §11.2: `migr_src_conf.dst_provisioned = false` makes the source behave
-// **exactly** as if migr_src_conf were absent — it keeps serving, it does not
+// architecture.md, Migration: `migr_src_conf.dst_provisioned = false` makes the
+// source behave **exactly** as if migr_src_conf were absent — it keeps serving,
+// it does not
 // fence, and it exports nothing — differing only in reporting the would-be
 // migr_src_info rows as PROVISIONING. Without the gate the source would fence
 // the primary's path at migration start and the leg would have no serving path
@@ -472,7 +479,8 @@ func TestMigrationSourceDeferredUntilDestinationProvisions(t *testing.T) {
 			got.GetStatus(), got.GetDetails())
 	}
 
-	// Once the destination provisions, the real §11.2 sequence runs.
+	// Once the destination provisions, the real sequence of architecture.md,
+	// Migration, runs.
 	if _, err := srv.SyncupSide(ctx, migrSrcReq(3)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
@@ -578,7 +586,7 @@ func TestMigrationSourceSequence(t *testing.T) {
 	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
 	errName := nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0)
 	// (1) every namespace inaccessible, (2) reload every per-CN dm-linear
-	// onto its dm-error ([D12]; newTestServer runs with the §11.2 grace
+	// onto its dm-error ([D12]; newTestServer runs with the DN12 grace
 	// window off, so phase 2 happens at once — TestMigrationSourceFence
 	// covers the window), (3) build + export.
 	assertOrder(t, node,
@@ -1176,7 +1184,8 @@ func TestPushMigrBitmap(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	// Persist before apply (§9.6 step 2).
+	// Persist before apply
+	// (architecture.md, Bitmap push protocol, dnv-agent side step 2).
 	assertOrder(t, node,
 		"writeproto "+chunkPath,
 		"cmd blkdiscard --offset 3145728 --length 1048576 "+
@@ -1375,7 +1384,8 @@ func TestTeardownRemovesDmCloneBeforeDisconnect(t *testing.T) {
 			t.Error("the migration connection survived")
 		}
 		// The primary's dm-linear is reloaded straight onto the side device
-		// (§8.11), and the metadata wrapper and its slot are gone.
+		// (architecture.md, Migrations), and the metadata wrapper and its slot
+		// are gone.
 		linName := nf.DnLinearName(
 			testCluster, testDn, testSp, testSide, testCn0)
 		sideNo := node.devNo[nf.DmPath(nf.DnSideName(
@@ -1444,7 +1454,8 @@ func TestHydrationKnobFailureKeepsTheClonePath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The §11.2 src-cutover grace window ([D12], common.SuspendSeconds)
+// The src-cutover grace window (architecture.md, Migration, src step 2; [D12];
+// common.SuspendSeconds)
 // ---------------------------------------------------------------------------
 
 // The production default is the contract: a migration source's per-CN
@@ -1661,8 +1672,9 @@ func breakSideDev(node *fakeNode, sideDevName string) {
 // The window has to end even when the converge that ends it cannot get past
 // the side device: [D12] promises no dnv device stays suspended for more than
 // the window plus one converge (DN12 rule 1's known limit aside, and a reload
-// whose load fails, which fails closed: dnagent.md §2.8), and a
-// suspended dm target queues bios with no timeout, so the promise is the
+// whose load fails, which fails closed: dnagent.md,
+// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), and a suspended dm target
+// queues bios with no timeout, so the promise is the
 // safety property — not a best effort that a transient `dmsetup info` failure
 // of the side device may drop.
 func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {

@@ -1,6 +1,6 @@
-// CT-T3 — rendering goldens (dnvctl.md §6, CT4/§3.1).
+// Rendering goldens (dnvctl.md CT4).
 //
-// §3.1 promises ONE canonical JSON document per invocation on stdout: sorted
+// CT4 promises ONE canonical JSON document per invocation on stdout: sorted
 // keys, stable spacing, proto field names, proto3 defaults visible, uint64 as
 // JSON strings. Every clause of that is a property of the four-step pipeline
 // in emit — protojson.Marshal with UseProtoNames+EmitUnpopulated, re-parse
@@ -37,10 +37,11 @@ type renderCase struct {
 
 var renderCases = []renderCase{
 	{
-		// The §7.10 golden for step 03: an EMPTY canned reply, which is what
-		// pins EmitUnpopulated and the key order at once. Every field is at
-		// its proto3 default and every one of them is still visible — the
-		// uint64 as a STRING, the five message fields as null.
+		// The sweep golden for step 03 (integtest/dnvctl_test.sh): an EMPTY
+		// canned reply, which is what pins EmitUnpopulated and the key order at
+		// once. Every field is at its proto3 default and every one of them is
+		// still visible — the uint64 as a STRING, the five message fields as
+		// null.
 		name:  "cluster get, empty reply",
 		rpc:   "GetCluster",
 		argv:  []string{"cluster", "get"},
@@ -49,7 +50,7 @@ var renderCases = []renderCase{
 			`"cn_global":null,"dn_global":null,"sp_global":null}` + "\n",
 	},
 	{
-		// The §7.10 golden for step 19: a revision on the wire is a uint64,
+		// The sweep golden for step 19: a revision on the wire is a uint64,
 		// and protojson renders it as a quoted string so that a value above
 		// 2^53 survives a JavaScript or jq consumer intact. This is the
 		// number an operator copies back into --rev.
@@ -76,11 +77,12 @@ var renderCases = []renderCase{
 		want: `{"page_token":"","sp_name":["sp0","sp1"]}` + "\n",
 	},
 	{
-		// The `created` poll of ThinDeviceCreated.md R13 is the reason
-		// EmitUnpopulated is on: the gateway writes `created` false and only
-		// the sp-worker flips it, so the field has to be visible while it is
-		// still false. The map also pins two more renderings at once —
-		// uint32 stays a NUMBER while uint64 becomes a string.
+		// The `created` poll (architecture.md, Thin devices: the client's wait
+		// primitive) is the reason EmitUnpopulated is on: the gateway writes
+		// `created` false and only the sp-worker flips it, so the field has to
+		// be visible while it is still false. The map also pins two more
+		// renderings at once — uint32 stays a NUMBER while uint64 becomes a
+		// string.
 		name: "td list, created visible while false",
 		rpc:  "ListThinDevices",
 		argv: []string{"td", "list"},
@@ -125,8 +127,8 @@ var renderCases = []renderCase{
 		want:  `{"nqn_to_subsystem":{}}` + "\n",
 	},
 	{
-		// §3.1's one deviation: protojson would render `bitmap` as base64, so
-		// the two bitmap reads print a hex map instead. This is §7.10's
+		// CT4's one deviation: protojson would render `bitmap` as base64, so
+		// the two bitmap reads print a hex map instead. This is the sweep
 		// golden for step 33.
 		name: "td get-bm, the hex map",
 		rpc:  "GetThinDeviceBitmap",
@@ -180,7 +182,7 @@ func TestRenderGoldens(t *testing.T) {
 			if res.stdout != tc.want {
 				t.Errorf("stdout\n got: %q\nwant: %q", res.stdout, tc.want)
 			}
-			// §3.2: a successful invocation says nothing on stderr. Together
+			// CT5: a successful invocation says nothing on stderr. Together
 			// with "exactly one line on stdout" that is the whole of CT7's
 			// stream contract.
 			if res.stderr != "" {

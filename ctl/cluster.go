@@ -1,22 +1,26 @@
-// The cluster subcommands of dnvctl (dnvctl.md §5.1): the four RPCs that
-// address a cluster as a whole. This is the one group whose commands do not
-// simply take the global --cluster: each of `create`, `delete` and `get`
-// declares its own --name, which WINS when non-empty and falls back to the
-// global when empty (§5.0's field→flag rule, gatewayctl's clusterNameOf).
+// The cluster subcommands of dnvctl
+// (dnvctl.md, `cluster` — `ctl/cluster.go`): the four RPCs that address a
+// cluster as a whole. This is the one group whose commands do not simply
+// take the global --cluster: each of `create`, `delete` and `get` declares
+// its own --name, which WINS when non-empty and falls back to the global
+// when empty (the field→flag rule of dnvctl.md, Conventions; gatewayctl's
+// clusterNameOf).
 // root.go's clusterNameOf implements that fallback; the flag itself is
 // declared here because only this group has it.
 //
 // `cluster list` is the single exception in the whole CLI: ListClustersRequest
 // is the only Gateway request with no cluster_name field at all, so the global
-// --cluster is simply ignored there (§5.1) and --name is not declared on it.
+// --cluster is simply ignored there (dnvctl.md, `cluster` — `ctl/cluster.go`)
+// and --name is not declared on it.
 //
-// One conf flag in v1 (§5.1's notes): `create` declares --extent-size, which
-// fills dn_bin_conf.extent_size and nothing else. The ClusterConf's other
-// conf members — qos_ratio, bdev_conf, alloc_conf and health_check_conf —
-// have no flag at all, so a created cluster still takes the gateway's pure
-// defaults for them, and for dn_bin_conf too whenever --extent-size is left
-// at its zero. Cluster-scoped is the whole of that claim: `sp create` does
-// declare flags that fill an SP's OWN bdev_conf (§5.4), which is a different
+// One conf flag in v1 (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
+// declares --extent-size, which fills dn_bin_conf.extent_size and nothing
+// else. The ClusterConf's other conf members — qos_ratio, bdev_conf,
+// alloc_conf and health_check_conf — have no flag at all, so a created
+// cluster still takes the gateway's pure defaults for them, and for
+// dn_bin_conf too whenever --extent-size is left at its zero. Cluster-scoped
+// is the whole of that claim: `sp create` does declare flags that fill an
+// SP's OWN bdev_conf (dnvctl.md, `sp` — `ctl/sp.go`), which is a different
 // message from the cluster-wide one this command leaves untouched.
 
 package ctl
@@ -31,7 +35,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// registerCluster adds the §5.1 group to the root command.
+// registerCluster adds the `cluster` group to the root command.
 func registerCluster(root *cobra.Command) {
 	root.AddCommand(group("cluster", "clusters",
 		clusterCreateCmd(),
@@ -43,7 +47,7 @@ func registerCluster(root *cobra.Command) {
 
 // clusterNameFlag declares the group's own identity flag. It is shared by the
 // three commands that carry cluster_name, and is named with this file's group
-// prefix so it cannot collide with a sibling group file (§1.2).
+// prefix so it cannot collide with a sibling group file (dnvctl.md, Files).
 //
 // The default is empty rather than anything cluster-like precisely so that
 // "not given" is distinguishable and clusterNameOf can fall back to --cluster.
@@ -113,7 +117,7 @@ func clusterCreateCmd() *cobra.Command {
 }
 
 // clusterDeleteCmd drives DeleteCluster. A cluster delete carries no revision
-// token — the §4 trio covers DNs, CNs and SPs only — so a typed --rev is a
+// token — the CT3 trio covers DNs, CNs and SPs only — so a typed --rev is a
 // usage error here.
 func clusterDeleteCmd() *cobra.Command {
 	cmd := leaf("delete", "delete a cluster (DeleteCluster)",

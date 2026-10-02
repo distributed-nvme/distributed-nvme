@@ -17,7 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 // Shared test plumbing: a capturing logger with the production handler chain
 // (TraceIdHandler over a JSONHandler), used by log_test, osclient_test and
-// interceptor_test (log.md §7, osclient.md §8.7, grpc.md §6.4).
+// interceptor_test (log.md R2; osclient.md, Logging; grpc.md L2 to L4).
 // ---------------------------------------------------------------------------
 
 // syncBuffer is a bytes.Buffer safe for the concurrent writes produced by
@@ -115,7 +115,7 @@ func captureLogs(t *testing.T) *logCapture {
 }
 
 // ---------------------------------------------------------------------------
-// Trace id (log.md §7.1, §7.2)
+// Trace id (log.md R5, R12)
 // ---------------------------------------------------------------------------
 
 func TestTraceIdHandlerInjectsTraceId(t *testing.T) {
@@ -194,7 +194,7 @@ func TestNewTraceId(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TruncForLog (log.md §7.3, R11)
+// TruncForLog (log.md R11)
 // ---------------------------------------------------------------------------
 
 func TestTruncForLog(t *testing.T) {
@@ -236,7 +236,7 @@ func TestTruncForLog(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PbToLogValue (log.md §7.4, §7.5, R10)
+// PbToLogValue (log.md R10)
 // ---------------------------------------------------------------------------
 
 func TestPbToLogValueBytesAndNesting(t *testing.T) {
@@ -370,7 +370,7 @@ func TestPbToLogValueNil(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Levels (log.md §7.6, R6)
+// Levels (log.md R6)
 // ---------------------------------------------------------------------------
 
 func TestSetLogLevelSuppressesInfo(t *testing.T) {
@@ -397,7 +397,7 @@ func TestSetLogLevelSuppressesInfo(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The stream init() chose (log.md §7, R2, R3)
+// The stream init() chose (log.md R2, R3)
 // ---------------------------------------------------------------------------
 //
 // Neither a bytes.Buffer nor a swap of the os.Stdout/os.Stderr package

@@ -76,8 +76,8 @@ func checkDnEcho(stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnRe
 	}
 }
 
-// startStub brings up the stub agent behind the §4 server interceptors and
-// returns a client dialed with the §4 client interceptors.
+// startStub brings up the stub agent behind the server interceptors of
+// grpc.md, Wiring, and returns a client dialed with its client interceptors.
 func startStub(t *testing.T, stub *stubDnAgent) pb.DiskNodeAgentClient {
 	t.Helper()
 
@@ -121,7 +121,7 @@ func startStub(t *testing.T, stub *stubDnAgent) pb.DiskNodeAgentClient {
 // which can run after the test that started it has returned and the *next*
 // test has installed its capture buffer. Every gRPC record carries the trace
 // id of the RPC that produced it, so keying on it confines each test to its
-// own calls (log.md §7.1).
+// own calls (log.md R5).
 func (c *logCapture) sideMsgs(
 	t *testing.T, side string, traceId string,
 ) []string {
@@ -150,7 +150,7 @@ func wantMsgs(t *testing.T, got, want []string) {
 }
 
 // ---------------------------------------------------------------------------
-// Trace-id propagation (grpc.md §6.1, §6.2, §6.3)
+// Trace-id propagation (grpc.md T1, T2)
 // ---------------------------------------------------------------------------
 
 func TestUnaryTracePropagation(t *testing.T) {
@@ -216,7 +216,8 @@ func TestNoTraceIdIsMinted(t *testing.T) {
 }
 
 // The wrapped ServerStream must hand the trace-enriched ctx to the handler
-// (T2, the Context() override), exercised over a CheckDn stream (§9.7).
+// (T2, the Context() override), exercised over a CheckDn stream
+// (architecture.md, Check streams).
 func TestStreamTracePropagation(t *testing.T) {
 	got := make(chan string, 1)
 	client := startStub(t, &stubDnAgent{
@@ -260,7 +261,7 @@ func TestStreamTracePropagation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Message logging (grpc.md §6.4, §6.5, L2, L3, L4)
+// Message logging (grpc.md L1, L2, L3, L4)
 // ---------------------------------------------------------------------------
 
 func TestUnaryLogRecords(t *testing.T) {
@@ -307,7 +308,7 @@ func TestUnaryLogRecords(t *testing.T) {
 	}
 }
 
-// Message logging over a two-round CheckDn exchange (grpc.md §6 item 4, L4).
+// Message logging over a two-round CheckDn exchange (grpc.md L2 to L4).
 func TestStreamLogRecords(t *testing.T) {
 	capture := captureLogs(t)
 	client := startStub(t, &stubDnAgent{checkDnFn: checkDnEcho})
@@ -371,7 +372,7 @@ func TestStreamLogRecords(t *testing.T) {
 	}
 }
 
-// Bytes redaction on the unary PushMigrBitmap (grpc.md §6 item 5, L1).
+// Bytes redaction on the unary PushMigrBitmap (grpc.md L1).
 func TestUnaryBytesRedaction(t *testing.T) {
 	capture := captureLogs(t)
 	client := startStub(t, &stubDnAgent{})
@@ -413,7 +414,7 @@ func TestUnaryBytesRedaction(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Error path (grpc.md §6.6, L3)
+// Error path (grpc.md L3)
 // ---------------------------------------------------------------------------
 
 func TestUnaryErrorRecords(t *testing.T) {

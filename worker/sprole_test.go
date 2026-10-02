@@ -21,7 +21,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// The fixture SP (§13: "golden requests from a fixture SpState")
+// The fixture SP (golden requests from a fixture SpState, RW14-RW20)
 // ---------------------------------------------------------------------------
 
 const (
@@ -82,8 +82,8 @@ const (
 // spCloneChunks are the fixture clone's bitmap chunks as MD3 reports them: two
 // chunks of two DIFFERENT source slices, so every test that carries a pair
 // around fails when only the bm_idx survives. The second slice is not slice 1,
-// because the chunks are gap-tolerant (architecture.md §9.6) and nothing
-// derives one index from the other.
+// because the chunks are gap-tolerant (architecture.md, Bitmap push protocol)
+// and nothing derives one index from the other.
 var spCloneChunks = []model.BmChunk{
 	{SliceIdx: 0, Idx: 0, ModRev: 11},
 	{SliceIdx: 2, Idx: 1, ModRev: 12},
@@ -112,8 +112,9 @@ func spFixture() *model.SpState {
 		Conf: &pb.SpConf{
 			SpId:      testSpId,
 			ShardCode: testShard,
-			// The concrete geometry CreateStoragePool stored (§7): every
-			// member the worker forwards is a value the SP was created with.
+			// The concrete geometry CreateStoragePool stored (architecture.md,
+			// Common validation): every member the worker forwards is a value
+			// the SP was created with.
 			BdevConf: testBdevConf(),
 			SpLevel:  pb.SpLevel_SP_LEVEL_READWRITE,
 			CntlrIdList: []uint64{
@@ -289,9 +290,9 @@ func spTestWorker(d *deps) *spWorker {
 // included — with the owning group's ext_cnt, the primary's cn_id, the
 // standby list in cntlr_id_list order WITH the disabled cntlr present, and the
 // migration source / destination confs of the two-sided leg. The destination's
-// block_size is the SP's STORED data_block_size, forwarded (§7); only the
-// dm-clone hydration knobs are still resolved here, because they are a policy
-// timer rather than geometry.
+// block_size is the SP's STORED data_block_size, forwarded (architecture.md,
+// Common validation); only the dm-clone hydration knobs are still resolved
+// here, because they are a policy timer rather than geometry.
 func TestSpSideRequestGolden(t *testing.T) {
 	captureLogs(t)
 	w := spTestWorker(nil)
@@ -383,10 +384,11 @@ func TestSpSideRequestGolden(t *testing.T) {
 			SrcDnId:       spDnIdB,
 			SrcNvmeTrConf: srcTrConf(),
 			// The fixture SP's stored dm_pool_conf.data_block_size, forwarded
-			// (RW15). testBlockSize is deliberately not the §7 default, so a
-			// request that substituted the constant would carry 1 MiB here
-			// and this golden would fail. meta_blocks is the fixture group's
-			// own number for the same reason.
+			// (RW15). testBlockSize is deliberately not the default of
+			// architecture.md, Common validation, so a request that substituted
+			// the constant would carry 1 MiB here and this golden would fail.
+			// meta_blocks is the fixture group's own number for the same
+			// reason.
 			BlockSize:  testBlockSize,
 			MetaBlocks: 5,
 			DmCloneConf: &pb.DmCloneConf{
@@ -614,13 +616,13 @@ func settleWrites(hw *fakeHealthWriter) []healthWrite {
 
 // TestSpCntlrSettle pins the driver's settle gate (HL2): only an accepted,
 // clean reply of an ENABLED PRIMARY at the revision the child drives settles
-// it, and that write is what the §12 `cntlr settled` record reports. The
-// revision half is load-bearing: a clean reply at the previous revision
-// describes the standby shape the promotion's failed SyncupCntlr left behind.
-// So is the disabled half: a disabled primary converges the standby shape
-// (cnagent.md CN9). So is the built half (primaryShapeBuilt): a clean reply
-// whose pools are still PROVISIONING, or probed MISSING after a failed
-// build, describes a build still to come. The
+// it, and that write is what the `cntlr settled` record (dnv-worker.md, Log
+// records) reports. The revision half is load-bearing: a clean reply at the
+// previous revision describes the standby shape the promotion's failed
+// SyncupCntlr left behind. So is the disabled half: a disabled primary
+// converges the standby shape (cnagent.md CN9). So is the built half
+// (primaryShapeBuilt): a clean reply whose pools are still PROVISIONING, or
+// probed MISSING after a failed build, describes a build still to come. The
 // memo follows every plan the child takes, both ways: a plan that says
 // settling re-arms it, one that does not clears it.
 func TestSpCntlrSettle(t *testing.T) {
@@ -1008,8 +1010,8 @@ func TestSpMigrationPeerUnresolvedSkipsSide(t *testing.T) {
 // RW19 candidate selection
 // ---------------------------------------------------------------------------
 
-// TestSpCompletedTds walks architecture.md §10.3's materialization flip: the
-// four conditions of a complete td and every negative it lists.
+// TestSpCompletedTds walks the materialization flip of architecture.md, sp
+// role: the four conditions of a complete td and every negative it lists.
 func TestSpCompletedTds(t *testing.T) {
 	sliceIds := []uint64{spSliceA, spSliceB}
 	thin := func(rows map[uint64]*pb.ResInfo) *pb.CntlrInfo_ThinInfo {
@@ -1198,15 +1200,17 @@ func TestSpFlipBatchesOneStm(t *testing.T) {
 	}
 }
 
-// TestSpFlipRecordsOnlyAppliedRefs pins §12's "flip applied" record against
-// RW18/RW19: one record per side / td the STM ACTUALLY wrote.
+// TestSpFlipRecordsOnlyAppliedRefs pins the "flip applied" record
+// (dnv-worker.md, Log records) against RW18/RW19: one record per side / td the
+// STM ACTUALLY wrote.
 //
 // Both ops skip candidates individually — a side another owner flipped first,
 // a td whose key is gone, whose td_id differs or that is already created — so
 // a record per REPORTED candidate would claim flips this worker never
-// performed and pin them to a revision it did not cause. §14.11 case F step 2
-// counts these records across all worker logs to prove a handoff produces no
-// second flip, which only holds if the count is the count of writes.
+// performed and pin them to a revision it did not cause. The worker suite's
+// handoff case (RW18) counts these records across all worker logs to prove a
+// handoff produces no second flip, which only holds if the count is the count
+// of writes.
 func TestSpFlipRecordsOnlyAppliedRefs(t *testing.T) {
 	h := newSpHarness(t)
 	h.store.seed(t, model.SpRevKey(testShard, testCid, testSpId),
@@ -1479,8 +1483,8 @@ func (s *stubCntlrAgent) pushes() []*pb.PushCloneBitmapRequest {
 	return append([]*pb.PushCloneBitmapRequest(nil), s.pushReqs...)
 }
 
-// fakeSpOps is the §13 stand-in for model: a fixture SpState and a record of
-// every flip the coordinator ran.
+// fakeSpOps is the unit tests' stand-in for model: a fixture SpState and a
+// record of every flip the coordinator ran.
 type fakeSpOps struct {
 	mu    sync.Mutex
 	state *model.SpState
@@ -1613,7 +1617,8 @@ func newSpHarness(t *testing.T) *spHarness {
 		sides:  make(map[string]*stubSideAgent),
 		cntlrs: make(map[string]*stubCntlrAgent),
 	}
-	// As stored: the cache resolves nothing (§7), and neither does this.
+	// As stored: the cache resolves nothing (architecture.md, Common
+	// validation), and neither does this.
 	setCachedConf(d, testCid, testClusterConf())
 	return h
 }
@@ -1710,7 +1715,7 @@ func TestSpFanOutStartsOneChildPerObject(t *testing.T) {
 	if !seen[spSideMeta] || !seen[spSideB] {
 		t.Fatalf("dn0 saw sides %v", seen)
 	}
-	// Every child logs its pointer (§12).
+	// Every child logs its pointer (dnv-worker.md, Log records).
 	started := h.logs.withMsg(msgRevisionWorkerStarted)
 	pointers := 0
 	for _, rec := range started {
@@ -1728,9 +1733,10 @@ func TestSpFanOutStartsOneChildPerObject(t *testing.T) {
 }
 
 // spRefusedFanOut starts a coordinator on an SP whose STORED bdev_conf is one
-// CreateStoragePool could not have written, and returns once the §7 gate in
-// front of RW14 has refused it and the refusal has been shown to reach
-// nothing: no child started, no Syncup* sent to any endpoint.
+// CreateStoragePool could not have written, and returns once the gate in front
+// of RW14 (architecture.md, Common validation) has refused it and the refusal
+// has been shown to reach nothing: no child started, no Syncup* sent to any
+// endpoint.
 //
 // It has to go through the coordinator's real start path — buildPlan alone
 // would happily build requests from the bad conf, because the check sits ahead
@@ -1776,12 +1782,13 @@ func spRefusedFanOut(t *testing.T) (*spHarness, *spWorker) {
 	return h, w
 }
 
-// TestSpFanOutRefusesAnInvalidSpConf checks the §7 gate in front of RW14. The
-// SP's stored bdev_conf is what every side and cntlr request is built from,
-// and two of its members are barely read on this side at all:
-// dm_raid0_conf.stripe_size on no worker path whatsoever, and
-// redund_md_raid1.bitmap_chunk_block_cnt only inside model.GrowSlice's §3.6
-// geometry, which re-reads the SP conf from the store in its own STM.
+// TestSpFanOutRefusesAnInvalidSpConf checks the gate in front of RW14
+// (architecture.md, Common validation). The SP's stored bdev_conf is what every
+// side and cntlr request is built from, and two of its members are barely read
+// on this side at all: dm_raid0_conf.stripe_size on no worker path whatsoever,
+// and redund_md_raid1.bitmap_chunk_block_cnt only inside model.GrowSlice's
+// geometry (architecture.md, Group on-leg layout: meta region, data region,
+// health block), which re-reads the SP conf from the store in its own STM.
 // Otherwise both just travel through the verbatim bdev_conf the cntlr request
 // forwards. So the fan-out is the one place the worker can refuse to hand the
 // cn agent a geometry nobody chose, and it refuses the whole plan rather than
@@ -1809,10 +1816,10 @@ func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
 
 	t.Run("recovers on the ticker", inBubble(func(t *testing.T) {
 		h, _ := spRefusedFanOut(t)
-		// Ticks under the STILL-bad conf. The coordinator's two §7 gates
-		// refuse it once each — the fan-out's and the reaction pass's, which
-		// keep separate halves of one memo — and then stay quiet however many
-		// ticks follow.
+		// Ticks under the STILL-bad conf. The coordinator's two gates
+		// (architecture.md, Common validation) refuse it once each — the
+		// fan-out's and the reaction pass's, which keep separate halves of one
+		// memo — and then stay quiet however many ticks follow.
 		h.advanceUntil("the reaction pass to refuse the same conf",
 			roundInterval, func() bool {
 				return len(h.logs.withMsg(msgInvalidStoredConf)) == 2
@@ -1868,7 +1875,8 @@ func TestSpChildRestartedOnEndpointChange(t *testing.T) {
 		req.GetSidePointer().GetSideId() != spSideSpare {
 		t.Fatalf("moved side request = %v", req)
 	}
-	// The old endpoint was never told to delete anything (§10.2, [D10]).
+	// The old endpoint was never told to delete anything (architecture.md, dn /
+	// cn roles; [D10]).
 	for _, old := range h.sides[spDnD].syncups() {
 		if old.GetRevision() > testSpRev {
 			t.Fatalf("the old endpoint was driven after the move")
@@ -1890,7 +1898,7 @@ func TestSpChildRestartedOnEndpointChange(t *testing.T) {
 }
 
 // sideRecords counts the records with msg that name the side sideId in their
-// side_pointer (§12's sp child lifecycle records).
+// side_pointer (the sp child lifecycle records of dnv-worker.md, Log records).
 func sideRecords(logs *logCapture, msg string, sideId uint64) int {
 	n := 0
 	for _, rec := range logs.withMsg(msg) {
@@ -2748,7 +2756,8 @@ func TestSidesFirstIdleSidesHoldNothing(t *testing.T) {
 // requests, so the pass's snapshot already names the new primary while that
 // cntlr's child still drives the standby plan, and the child's info is a
 // standby's report: its leg rows are transport liveness and ana_state, not
-// the §3.6 block probe AR8 step 1 needs. Inside the hold the pass must read no
+// the block probe (architecture.md, Group on-leg layout: meta region, data
+// region, health block) AR8 step 1 needs. Inside the hold the pass must read no
 // primary info, so AR8 waits for the spare rather than switching it in on the
 // standby's row; once the release has handed the child the primary plan, the
 // pass reads its info again and the spare is switched in.
@@ -2876,11 +2885,12 @@ func TestSpProvisionedFlipReported(t *testing.T) {
 // TestSpCreatedFlipFromACheckRound is RW19 end to end over the Check stream,
 // on the path a deferred slice takes. Every round asks for NO info at all
 // (RW4 step 2 sends show_info = false); it is the agent that attaches the
-// CntlrInfo whenever a resource changed status (§9.7), and a thin row moving
-// PROVISIONING → OK as the last deferred slice clears ([D15]) is such a
-// change. So the flip has to run off exactly this reply: a worker that waited
-// for a show_info round would leave the td uncreated — and every snapshot of
-// it refused — until some unrelated resource happened to move.
+// CntlrInfo whenever a resource changed status (architecture.md, Check
+// streams), and a thin row moving PROVISIONING → OK as the last deferred slice
+// clears ([D15]) is such a change. So the flip has to run off exactly this
+// reply: a worker that waited for a show_info round would leave the td
+// uncreated — and every snapshot of it refused — until some unrelated resource
+// happened to move.
 func TestSpCreatedFlipFromACheckRound(t *testing.T) {
 	synctest.Test(t, testSpCreatedFlipFromACheckRound)
 }
@@ -2960,7 +2970,8 @@ func testSpCreatedFlipFromACheckRound(t *testing.T) {
 // (RW4 step 5) as it would for any mismatch. Thin ids are monotonic facts
 // about the shared pool metadata, so a row that is OK at an older revision
 // stays OK; identity is guarded by the td_id re-read inside the flip's own STM
-// (R3), never by the revision of the reply that reported it.
+// (MD6; architecture.md, Thin devices), never by the revision of the reply that
+// reported it.
 func TestSpCreatedFlipIgnoresTheReplyRevision(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
@@ -3448,7 +3459,7 @@ func epochWrites(
 
 // TestOrphanedEpochIsClearedByTheOwner pins HL3's cache rule end to end, on a
 // live coordinator with the fake clock. During the accepted ownership overlap
-// (§0 item 4) two drivers of one SP can hold different verdicts: here the
+// (VW7) two drivers of one SP can hold different verdicts: here the
 // owner, whose rounds are clean, and another observer whose view differs — a
 // gRPC path broken while its etcd path works, say — which stamps an err_epoch
 // on records the owner sees healthy and then fences: the primary cntlr's, the
@@ -3675,13 +3686,13 @@ const (
 
 // lostThinInfo is what a cn agent reports as the primary of the fixture SP
 // once the pool of spSliceB no longer holds the created td's thin id
-// (cnagent.md CN14, ThinDeviceCreated.md U4-S2): with converge, its
-// converge's report, which the SyncupCntlr reply carries, and otherwise a
-// Check round's probe. The converge's `dmsetup create` of the thin table fails
-// with ENODATA, and the raid0 over the td's volumes cannot be built, nor the
-// ns-dev of its namespace over the raid0. The probe finds the volume absent —
-// MISSING, naming no id — and the raid0 and the ns-dev failing as before. A
-// standby builds none of it (CN9).
+// (cnagent.md CN14): with converge, its converge's report, which the
+// SyncupCntlr reply carries, and otherwise a Check round's probe. The
+// converge's `dmsetup create` of the thin table fails with ENODATA, and the
+// raid0 over the td's volumes cannot be built, nor the ns-dev of its namespace
+// over the raid0. The probe finds the volume absent — MISSING, naming no id —
+// and the raid0 and the ns-dev failing as before. A standby builds none of it
+// (CN9).
 func lostThinInfo(converge bool) *pb.CntlrInfo {
 	thin := &pb.ResInfo{
 		ResName: "thin-b",
@@ -4298,10 +4309,11 @@ func TestSpMissingSubObjectsLogged(t *testing.T) {
 }
 
 // TestSpCloneBitmapWiringCarriesThePair checks the clone half of BM1/BM2 end
-// to end: the chunk value is read at the (src_slice_idx, bm_idx) key of §9.6,
-// the PushCloneBitmap it becomes carries that same pair, and the agent's
-// applied set is its chunk_id_list. bm_idx_list is a migration field — a clone
-// that listed a bm_idx there has acknowledged nothing.
+// to end: the chunk value is read at the (src_slice_idx, bm_idx) key
+// (architecture.md, Bitmap push protocol), the PushCloneBitmap it becomes
+// carries that same pair, and the agent's applied set is its chunk_id_list.
+// bm_idx_list is a migration field — a clone that listed a bm_idx there has
+// acknowledged nothing.
 func TestSpCloneBitmapWiringCarriesThePair(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()

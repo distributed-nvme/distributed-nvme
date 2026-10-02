@@ -103,11 +103,12 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// dnv-worker.md §14.4: dnv requires --max-txn-ops=EtcdMaxTxnOps of
-		// every etcd it runs against; the server's own default is 128, below
-		// CreateStoragePool's 967-compare maximum shape, which is what SIZES
-		// the requirement (gateway.md §2.1), and below the 486 compares the
-		// sp drain's maximum-shape D2 batch reaches (§11.6, SPD13) and the
+		// dnv-worker.md, Integration test plan: dnv requires
+		// --max-txn-ops=EtcdMaxTxnOps of every etcd it runs against; the
+		// server's own default is 128, below CreateStoragePool's 967-compare
+		// maximum shape, which is what SIZES the requirement (gateway.md,
+		// Additions to `common/constants.go`), and below the 486 compares the
+		// sp drain's maximum-shape D2 batch reaches (SPD13) and the
 		// 514 of one created-flip transaction (RW19, MaxFlipCreatedPerTxn).
 		// DeleteClone's rectangle sweep — then 256 keys, at the 16-slice
 		// ceiling of the time — was this flag's founding justification and is
@@ -217,7 +218,7 @@ func newTestClient(t *testing.T) *Client {
 }
 
 // testPrefix is a per-test key prefix, space-terminated like every dnv prefix
-// (architecture.md §5.1).
+// (architecture.md, Key grammar).
 func testPrefix(t *testing.T) string {
 	t.Helper()
 	// A per-INVOCATION counter, not just t.Name(): these tests write keys and
@@ -232,7 +233,7 @@ func testPrefix(t *testing.T) string {
 var testPrefixSeq atomic.Uint64
 
 // ---------------------------------------------------------------------------
-// Captured logs (log.md §7 style, as in common/log_test.go)
+// Captured logs (as in common/log_test.go)
 // ---------------------------------------------------------------------------
 
 type syncBuffer struct {
@@ -618,7 +619,7 @@ func TestRangeDescOrderAndLimit(t *testing.T) {
 	ctx := context.Background()
 	prefix := testPrefix(t)
 	// Capacity keys embed the free extent count, so descending key order is
-	// "largest free first" (§6.3).
+	// "largest free first" (architecture.md, Finding DN candidates).
 	for _, free := range []uint64{1, 5, 9} {
 		key := prefix + fmt.Sprintf(common.FreeSpaceFmt, free)
 		if err := cli.Put(ctx, key, &pb.WorkerReg{Epoch: free}); err != nil {

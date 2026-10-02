@@ -66,7 +66,7 @@ const (
 // capacity key is no longer the one the scan saw, or, for ReplaceCntlr, a
 // pick scanned against a plan the SP has moved past — a surviving cntlr the
 // plan did not hold. The caller rescans and retries the scan + STM as one
-// unit (architecture.md §8.4 step 2).
+// unit (architecture.md, Storage pools, CreateStoragePool step 2).
 //
 // It is exported for the same reason ReasonStaleRevision is: the gateway calls
 // GrowSlice and CreateSpareLeg from inside its own candidate unit (gateway.md
@@ -77,7 +77,8 @@ const ReasonCandidateChanged = "candidate changed"
 // ReasonGrowPending is the Reason a GrowSlice carries when the AR6 pending
 // rule holds inside its STM. It is exported because worker/reaction.go logs
 // the SAME `reaction skipped reason=` string from its own pre-check, and the
-// §14 suite greps for one string, not two.
+// worker suite (dnv-worker.md, Integration test plan) greps for one string,
+// not two.
 const ReasonGrowPending = "grow_pending"
 
 // ReasonSpareUnprovisioned is the Reason a CreateSpareLeg carries when a spare
@@ -96,7 +97,7 @@ const ReasonGrpListFull = "grp_list_full"
 
 // ReasonStaleRevision is the Reason the three ops the gateway shares with the
 // worker carry when their expectRev argument does not match the stored
-// SpRev.revision (gateway.md §2.2 #3). The gateway maps exactly this reason to
+// SpRev.revision (gateway.md GW6). The gateway maps exactly this reason to
 // ABORTED "stale revision" (GW7); every other ErrPrecondition reason is a
 // FAILED_PRECONDITION, so the two must be distinguishable by string.
 const ReasonStaleRevision = "stale revision"
@@ -107,13 +108,13 @@ func fail(op string, reason string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Per-SP id allocation (architecture.md §5.4)
+// Per-SP id allocation (architecture.md, Globals: id allocation + shard buckets)
 // ---------------------------------------------------------------------------
 
 // SpFirstId is the lowest per-SP sub-object id. Every one of them — cntlr_id,
 // slice_id, grp_id, leg_id, side_id, ss_id, ns_id, td_id, clone_id, xfer_id,
 // migr_id — comes from the single SpConf.next_id counter, which
-// architecture.md §5.4 says "starts at 1".
+// architecture.md, Globals: id allocation + shard buckets, says "starts at 1".
 //
 // 0 is therefore not a legal id, and the control plane relies on that: it is
 // the reserved "none" sentinel of every id-valued result. failoverCandidate
@@ -135,7 +136,8 @@ func SpNextId(conf *pb.SpConf) uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// Cluster-scoped shard buckets (GW12, architecture.md §5.4)
+// Cluster-scoped shard buckets (GW12; architecture.md, Globals: id
+// allocation + shard buckets)
 // ---------------------------------------------------------------------------
 
 // ReleaseShard is the deletion half of GW12: the deleted object's shard bucket
@@ -158,18 +160,19 @@ func ReleaseShard(bucket []uint32, shard uint32) []uint32 {
 }
 
 // ---------------------------------------------------------------------------
-// Thresholds (MD6, AR4, architecture.md §7)
+// Thresholds (MD6, AR4; architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
-// ResolveEventThreshold returns a copy of threshold with the §7 defaults
+// ResolveEventThreshold returns a copy of threshold with the defaults of
+// architecture.md, Common validation,
 // applied: every 0-valued field falls back to its constant (AR4). It is
 // exported because the ops resolve the SP's thresholds inside their STM and
 // worker/reaction.go must resolve them exactly the same way when it decides
 // whether to call one; nothing may re-implement the rule.
 //
 // A nil threshold — an SP written without one — resolves to the pure
-// defaults. No upper bound applies: §7 only requires each value to be >= 1,
-// which is what a resolved zero already is.
+// defaults. No upper bound applies: architecture.md, Common validation, only
+// requires each value to be >= 1, which is what a resolved zero already is.
 //
 // event_threshold is deliberately still resolved at read time, and stored as
 // sent. It is a policy timer, not geometry: nothing is formatted or addressed
@@ -221,7 +224,8 @@ func thresholdReached(now uint64, errEpoch uint64, threshold uint64) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Group geometry (architecture.md §3.6)
+// Group geometry (architecture.md, Group on-leg layout: meta region, data
+// region, health block)
 // ---------------------------------------------------------------------------
 
 // ceilDiv is ceil(a / b) on unsigned integers; b is never 0 at any call site.
@@ -230,7 +234,8 @@ func ceilDiv(a uint64, b uint64) uint64 {
 }
 
 // GroupBlocks computes one group's meta_blocks and data_blocks
-// (architecture.md §3.6). Both counts are derived, never configured, and are
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block). Both counts are derived, never configured, and are
 // stored in the Group by whoever creates it — CreateStoragePool and GrowSlice
 // alike, which is why this is exported.
 //
@@ -243,7 +248,8 @@ func ceilDiv(a uint64, b uint64) uint64 {
 //	RedundNone:    meta_blocks = 1                     // health block only
 //	data_blocks        = total_group_blocks − meta_blocks
 //
-// Nothing is resolved here (§7): every input is a stored value, concrete since
+// Nothing is resolved here (architecture.md, Common validation): every input
+// is a stored value, concrete since
 // the create RPC wrote it, so a zero is refused rather than replaced — which
 // is also what keeps the three divisions below safe. A group whose data region
 // would be empty is an error, not a zero-sized group.
@@ -271,7 +277,8 @@ func GroupBlocks(
 	blockSize := bdevConf.GetDmPoolConf().GetDataBlockSize()
 	groupSize := extCnt * extentSize
 	totalBlocks := groupSize / blockSize
-	// The health block of §3.6 is the only meta a RedundNone group needs.
+	// The health block (architecture.md, Group on-leg layout: meta region,
+	// data region, health block) is the only meta a RedundNone group needs.
 	metaBlocks := uint64(1)
 	if raid1 := bdevConf.GetRedundConf().GetRedundMdRaid1(); raid1 != nil {
 		chunkBlockCnt := raid1.GetBitmapChunkBlockCnt()
@@ -289,19 +296,22 @@ func GroupBlocks(
 	return metaBlocks, totalBlocks - metaBlocks, nil
 }
 
-// MetaLadderExtCnt is the §8.5 meta ladder: the ext_cnt of the meta group a
+// MetaLadderExtCnt is the meta ladder of architecture.md, GrowSlice: the
+// ext_cnt of the meta group a
 // meta GrowSlice would append to a slice whose meta groups currently total
 // currentTotal extents. The first meta group (created with the SP) is 1
 // extent, and every further meta grow adds the slice's current meta total, so
 // the totals run 1 → 2 → 4 → 8 → 16 …
 //
 // ok is false once the total has reached the 16 GiB dm-thin metadata ceiling,
-// which is where §8.5 refuses to grow further; the cap is expressed in bytes,
+// which is where architecture.md, GrowSlice, refuses to grow further; the
+// cap is expressed in bytes,
 // so it holds for any extent size (with 1 TiB extents the very first meta
 // group is already past it and no meta grow is ever allowed). A slice with no
 // meta group at all also reports false: the ladder has nothing to double.
 //
-// extentSize is the cluster's STORED value and is not resolved here (§7); a
+// extentSize is the cluster's STORED value and is not resolved here
+// (architecture.md, Common validation); a
 // zero would be a divide by zero, so it reports false as a last-resort guard.
 // Callers validate the ClusterConf first, which is what keeps that arm
 // unreachable and keeps "false" meaning the 16 GiB cap.
@@ -321,7 +331,8 @@ func MetaLadderExtCnt(currentTotal uint64, extentSize uint64) (uint64, bool) {
 	return currentTotal, true
 }
 
-// metaSizeCap is the 16 GiB dm-thin metadata ceiling of §8.5.
+// metaSizeCap is the 16 GiB dm-thin metadata ceiling of architecture.md,
+// GrowSlice.
 const metaSizeCap = uint64(16) * 1024 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
@@ -362,7 +373,8 @@ func loadSpConfForOp(
 }
 
 // checkSpRev is the optimistic-concurrency gate the gateway asks the three
-// shared ops to apply before they touch anything (gateway.md §2.2 #3, §5.5):
+// shared ops to apply before they touch anything (gateway.md GW6;
+// architecture.md, Revision keys and the sync fan-out):
 // the stored SpRev.revision MUST equal expectRev. expectRev 0 skips the check
 // entirely, which is what the worker's own internal calls pass — the worker
 // converges on what etcd holds and carries no client token. The gateway passes
@@ -397,7 +409,8 @@ func checkSpRev(
 }
 
 // BumpSpRev writes the SP's revision key with revision + 1 and the sp_name it
-// already holds (§5.5): the key is id-based and therefore stable, so it is
+// already holds (architecture.md, Revision keys and the sync fan-out): the key
+// is id-based and therefore stable, so it is
 // rewritten in place and never deleted and re-created — a watcher must see one
 // put, not a delete followed by a put.
 func BumpSpRev(
@@ -417,7 +430,8 @@ func BumpSpRev(
 	return nil
 }
 
-// BumpDnRev bumps one DN's revision key in place (§5.5). The key is addressed
+// BumpDnRev bumps one DN's revision key in place (architecture.md, Revision
+// keys and the sync fan-out). The key is addressed
 // by the shard code and dn_id the DnConf carries.
 func BumpDnRev(
 	s etcdutil.STM,
@@ -435,7 +449,8 @@ func BumpDnRev(
 	return nil
 }
 
-// BumpCnRev bumps one CN's revision key in place (§5.5).
+// BumpCnRev bumps one CN's revision key in place (architecture.md, Revision
+// keys and the sync fan-out).
 func BumpCnRev(
 	s etcdutil.STM,
 	op string,
@@ -453,7 +468,7 @@ func BumpCnRev(
 }
 
 // applyErrEpoch is the set/clear rule every Set*ErrEpoch shares (MD6, HL3):
-// a nonzero epoch is written only onto a stored 0 — the threshold clock of §11
+// a nonzero epoch is written only onto a stored 0 — the AR4 threshold clock
 // never restarts — and a zero epoch always clears. It returns the value to
 // store and whether that differs from what is stored, so that a caller writes
 // nothing when nothing changed.
@@ -470,7 +485,7 @@ func applyErrEpoch(stored uint64, epoch uint64) (uint64, bool) {
 // allLegs returns every leg of a slice — both group lists, and both the active
 // and the spare list of every group — in a stable order. The MD6 err_epoch ops
 // look a leg or a side up in all of them: a spare's leg and side are
-// health-checked exactly like an active one (§8.12).
+// health-checked exactly like an active one (architecture.md, Spare legs).
 func allLegs(slice *pb.Slice) []*pb.Leg {
 	grpLists := [][]*pb.Group{
 		slice.GetMetaGrpList(),
@@ -527,7 +542,8 @@ func findSideOfLeg(slice *pb.Slice, legId uint64, sideId uint64) *pb.Side {
 }
 
 // findGroup returns the group with grpId, searching the meta list and then the
-// data list of the slice (§8.12: a spare may be created on either kind).
+// data list of the slice (architecture.md, Spare legs: a spare may be created
+// on either kind).
 func findGroup(slice *pb.Slice, grpId uint64) *pb.Group {
 	grpLists := [][]*pb.Group{
 		slice.GetMetaGrpList(),
@@ -551,7 +567,7 @@ func isMdRaid1(conf *pb.SpConf) bool {
 }
 
 // legCntOf is how many legs one group of the SP has: 2 for RedundMdRaid1, 1
-// for RedundNone (§11.3). The md-raid1 arm cites common.MaxAllocLegPerGrp for
+// for RedundNone (AR6). The md-raid1 arm cites common.MaxAllocLegPerGrp for
 // gateway/alloc.go legCntOf's reason (SPD1).
 func legCntOf(conf *pb.SpConf) int {
 	if isMdRaid1(conf) {
@@ -561,8 +577,9 @@ func legCntOf(conf *pb.SpConf) int {
 }
 
 // firstCntlidSlot is the slot every new SIDE is written with:
-// cntlid_slot_list[0] (§8.4). Sides of different legs may share slots freely
-// (§11.8), so no search for an unused one is needed — but an SpConf with an
+// cntlid_slot_list[0] (architecture.md, Storage pools). Sides of different
+// legs may share slots freely (architecture.md, cntlid slots), so no search
+// for an unused one is needed — but an SpConf with an
 // empty list cannot produce a side at all.
 func firstCntlidSlot(conf *pb.SpConf, op string) (uint32, error) {
 	slots := conf.GetCntlidSlotList()
@@ -603,9 +620,11 @@ func checkDnPick(
 	return dn, nil
 }
 
-// chargeDn is the DN bookkeeping every side allocation performs (§5.6, §8.4):
-// the side pointer goes in, extCnt leaves free_ext_cnt, the capacity key
-// follows the §5.6 presence rule, and the DN's revision is bumped once.
+// chargeDn is the DN bookkeeping every side allocation performs
+// (architecture.md, Capacity index keys; Storage pools): the side pointer goes
+// in, extCnt leaves free_ext_cnt, the capacity key follows the presence rule
+// of architecture.md, Capacity index keys, and the DN's revision is bumped
+// once.
 func chargeDn(
 	s etcdutil.STM,
 	op string,
@@ -625,8 +644,9 @@ func chargeDn(
 }
 
 // spFootprint is the Σ ext_cnt over ALL groups of ALL slices of the SP — meta
-// and data alike — which is what one cntlr's CN reserves for the SP (§8.4,
-// §8.6). Slices are read through the caller's STM; a listed slice that does
+// and data alike — which is what one cntlr's CN reserves for the SP
+// (architecture.md, Storage pools; Cntlrs). Slices are read through the
+// caller's STM; a listed slice that does
 // not exist is a precondition failure, since a footprint computed from a
 // partial slice list would undercharge the CN.
 func spFootprint(
@@ -660,15 +680,17 @@ func spFootprint(
 // ---------------------------------------------------------------------------
 
 // SetDnErrEpoch sets or clears a DN's err_epoch (MD6, HL1). A nonzero epoch is
-// written only when the stored value is 0 — the §11 threshold clock never
+// written only when the stored value is 0 — the AR4 threshold clock never
 // restarts — and epoch 0 always clears; a record that already holds what is
 // wanted is not written at all, so two owners observing the same transition
 // write once (HL3).
 //
-// The capacity key follows in the same transaction (MD4, §5.6): err_epoch is
+// The capacity key follows in the same transaction (MD4; architecture.md,
+// Capacity index keys): err_epoch is
 // an input of the presence rule, and the old record read HERE is what makes
 // the delete of the old key exact. Nothing bumps a revision — err_epoch only
-// gates control-plane scheduling (§5.5).
+// gates control-plane scheduling (architecture.md, Revision keys and the sync
+// fan-out).
 func SetDnErrEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -698,7 +720,8 @@ func SetDnErrEpoch(
 // SetCnErrEpoch sets or clears a CN's err_epoch (MD6, HL1) under the same
 // rule as SetDnErrEpoch, maintaining the CN capacity key in the same STM and
 // bumping no revision. It takes no ClusterConf: CN capacity keys carry no bin
-// index, so nothing about them depends on dn_bin_conf (§6.4).
+// index, so nothing about them depends on dn_bin_conf (architecture.md,
+// Finding CN candidates).
 func SetCnErrEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -764,7 +787,8 @@ func SetCntlrErrEpoch(
 // SetLegErrEpoch sets or clears one leg's err_epoch (MD6, HL2). The leg is
 // looked up in EVERY group of the slice — meta and data — and in both the
 // leg_list and the spare_leg_list, because the primary probes a spare's leg
-// exactly like an active one (§8.12). Legs are embedded in the Slice, so the
+// exactly like an active one (architecture.md, Spare legs). Legs are embedded
+// in the Slice, so the
 // whole Slice is rewritten; nothing bumps a revision.
 func SetLegErrEpoch(
 	ctx context.Context,
@@ -829,7 +853,7 @@ func SetSideErrEpoch(
 }
 
 // ---------------------------------------------------------------------------
-// The two flips (MD6, §10.3)
+// The two flips (MD6; architecture.md, sp role)
 // ---------------------------------------------------------------------------
 
 // SideRef names one side of an SP for FlipProvisioned (MD6): the slice that
@@ -843,19 +867,21 @@ type SideRef struct {
 // TdRef names one thin device for FlipCreated (MD6): the name that keys the
 // record and the td_id RW19 observed complete. Both are needed — the name
 // addresses the key, and the id is what proves the record is still the one
-// that was observed (§10.3).
+// that was observed (architecture.md, sp role).
 type TdRef struct {
 	Name string
 	TdId uint64
 }
 
 // FlipProvisioned sets Side.provisioned on every listed side that is still
-// false and bumps SpRev exactly once if at least one was flipped (MD6, RW18,
-// §10.3). It returns the sides it ACTUALLY wrote, in the order they were
+// false and bumps SpRev exactly once if at least one was flipped (MD6, RW18;
+// architecture.md, sp role). It returns the sides it ACTUALLY wrote, in the
+// order they were
 // listed; the MD6 count is len() of that slice.
 //
-// The refs and not a bare count, because the caller logs one §12
-// "flip applied" record per side and that record names the side (`ids`): a
+// The refs and not a bare count, because the caller logs one "flip applied"
+// record (dnv-worker.md, Log records) per side and that record names the
+// side (`ids`): a
 // candidate this STM skipped was never flipped by this worker, and logging it
 // would attribute a write — and a revision — to an owner that did not cause
 // either.
@@ -931,12 +957,13 @@ func containsId(ids []uint64, id uint64) bool {
 }
 
 // FlipCreated sets ThinDevice.created on every listed candidate that still
-// needs it (MD6, RW19, §10.3 / ThinDeviceCreated.md U3). It returns the
+// needs it (MD6, RW19; architecture.md, sp role). It returns the
 // candidates it ACTUALLY wrote, in the order they were listed; the MD6 count
 // is len() of that slice.
 //
 // The refs and not a bare count, for FlipProvisioned's reason: the caller logs
-// one §12 "flip applied" record per td it wrote, naming it, and a skipped
+// one "flip applied" record (dnv-worker.md, Log records) per td it wrote,
+// naming it, and a skipped
 // candidate was never created by this worker. (The sp worker logs them only
 // for a call that succeeded, RW19.)
 //
@@ -1014,7 +1041,7 @@ func flipCreatedTxn(
 }
 
 // ---------------------------------------------------------------------------
-// Failover (MD6, AR5, §10.4, §11.1)
+// Failover (MD6, AR5; architecture.md, Automatic reactions; Failover)
 // ---------------------------------------------------------------------------
 
 // failoverCandidate is the AR5 election run inside an STM: the cntlr with the
@@ -1047,17 +1074,19 @@ func failoverCandidate(
 	return best
 }
 
-// Failover moves the primary role from oldId to newId (MD6, AR5, §10.4): the
+// Failover moves the primary role from oldId to newId (MD6, AR5;
+// architecture.md, Automatic reactions): the
 // old primary has been unhealthy for primary_unhealthy seconds — for the
 // longer of that and cntlr_unhealthy while it is settling (HL2) — or is
-// `disabled`, which triggers on its own and immediately (§8.6), and the new
+// `disabled`, which triggers on its own and immediately (architecture.md,
+// Cntlrs), and the new
 // one is the healthy, enabled, non-primary cntlr with the smallest cntlr_id.
 // Both primary booleans flip in one STM, the new primary is marked settling,
-// and SpRev is bumped once; the data-plane choreography is §11.1's and
-// belongs to the agents.
+// and SpRev is bumped once; the data-plane choreography is that of
+// architecture.md, Failover, and belongs to the agents.
 //
 // Every precondition is re-validated here, election included: two owners
-// overlapping on one SP (§0 item 4) cannot both apply it, because the second
+// overlapping on one SP (VW7) cannot both apply it, because the second
 // finds the old cntlr no longer primary.
 func Failover(
 	ctx context.Context,
@@ -1088,8 +1117,8 @@ func Failover(
 			return fail(opFailover, "old cntlr is not primary")
 		}
 		// The in-STM re-validation mirrors AR5's two triggers: a `disabled`
-		// primary is a trigger in its own right (§8.6), with no threshold
-		// wait, so only an enabled one is held to primary_unhealthy — or,
+		// primary is a trigger in its own right (architecture.md, Cntlrs), with
+		// no threshold wait, so only an enabled one is held to primary_unhealthy — or,
 		// while it is settling (HL2), to cntlr_unhealthy when that is the
 		// longer, as AR5 is.
 		if !old.GetDisabled() {
@@ -1141,20 +1170,23 @@ func Failover(
 }
 
 // ---------------------------------------------------------------------------
-// GrowSlice (MD6, AR6, §8.5)
+// GrowSlice (MD6, AR6; architecture.md, GrowSlice)
 // ---------------------------------------------------------------------------
 
-// GrowSlice appends one new group to a slice (MD6, §8.5) and returns its
+// GrowSlice appends one new group to a slice (MD6; architecture.md,
+// GrowSlice) and returns its
 // grp_id. legs carries one allocator pick per leg of the new group — 2 for a
 // RedundMdRaid1 SP, 1 for RedundNone — and every one of them is re-validated
 // inside the STM (MD5).
 //
 // The new group's size is not the caller's to choose: for a data grow it is
 // the slice's FIRST data group's ext_cnt (grow by the original allocation
-// unit), for a meta grow the §8.5 ladder value, which doubles the slice's meta
-// total and is refused once that total reaches 16 GiB. meta_blocks and
-// data_blocks follow §3.6 from the SP's own bdev_conf and the cluster's
-// extent_size. A list of either kind that already holds
+// unit), for a meta grow the ladder value of architecture.md, GrowSlice,
+// which doubles the slice's meta total and is refused once that total
+// reaches 16 GiB. meta_blocks and data_blocks follow the group on-leg layout
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block) from the SP's own bdev_conf and the cluster's extent_size. A list of
+// either kind that already holds
 // common.MaxGrpCntPerSlice groups takes no more (GrpListFull).
 //
 // poolTotal is the total the primary reported for the pool of THIS kind —
@@ -1164,13 +1196,13 @@ func Failover(
 // re-runs the same rule against the slice as it is NOW. Without it AR6's
 // second attempt could not fail, contrary to AR2 (whose one exception is a
 // spare create that lands after RW18's flip, CreateSpareLeg): during an
-// accepted shard-handoff overlap (§0 item 4) two owners evaluating the same
+// accepted shard-handoff overlap (VW7) two owners evaluating the same
 // pre-grow snapshot both find the grow not pending, and the second would
 // append a second group for one breach — twice the DN extents and twice the CN
 // footprint, undoable only by an operator. Their allocator picks are drawn at
 // random, so the MD5 capacity guard does not cover this. The gateway passes
 // `math.MaxUint64` — a user-driven grow is not gated on the reported usage
-// (architecture.md §8.5, gateway.md §5.4).
+// (architecture.md, GrowSlice; gateway.md, Storage pools and GrowSlice).
 //
 // Effects, all in the one transaction: the Group with one Leg and one
 // unprovisioned Side per pick ([D15]); each picked DN's side pointer, budget,
@@ -1205,7 +1237,8 @@ func GrowSlice(
 			return err
 		}
 		// Both confs are validated before anything is computed from them
-		// (§7): every number below — the pending rule's block size, the
+		// (architecture.md, Common validation): every number below — the pending
+		// rule's block size, the
 		// ladder's extent size, the group geometry — is a stored value, and
 		// this transaction refuses a zero instead of guessing one. It sits
 		// ahead of the first s.Put by construction, and ErrPrecondition
@@ -1231,7 +1264,8 @@ func GrowSlice(
 		) {
 			return fail(opGrowSlice, ReasonGrowPending)
 		}
-		// §8.5's group ceiling, ahead of the sizing so that it holds for a
+		// The group ceiling of architecture.md, GrowSlice, ahead of the sizing so
+		// that it holds for a
 		// meta grow whatever the ladder would say.
 		if GrpListFull(slice, isMeta) {
 			return fail(opGrowSlice, ReasonGrpListFull)
@@ -1320,7 +1354,8 @@ func GrowSlice(
 	return grpId, nil
 }
 
-// growExtCnt is the size of the group a GrowSlice appends (§8.5): the slice's
+// growExtCnt is the size of the group a GrowSlice appends (architecture.md,
+// GrowSlice): the slice's
 // first data group's ext_cnt for a data grow — the original allocation unit —
 // and the meta ladder value for a meta grow, which is refused at the 16 GiB
 // dm-thin metadata ceiling.
@@ -1357,7 +1392,8 @@ const thinMetaBlockSize = uint64(4096)
 
 // PoolBlockSize is a pool's stored data block size: the unit the thin pool's
 // DATA counts are expressed in, and the one that converts a meta group's data
-// region into dm-thin metadata blocks (AR6, §3.6). It substitutes nothing —
+// region into dm-thin metadata blocks (AR6; architecture.md, Group on-leg
+// layout: meta region, data region, health block). It substitutes nothing —
 // the value is concrete from CreateStoragePool on, and every caller sits
 // behind a ValidateBdevConf gate — but it stays a named function so the
 // worker's AR6 pre-check and the GrowSlice STM cannot drift apart about which
@@ -1374,7 +1410,7 @@ func PoolBlockSize(bdevConf *pb.BdevConf) uint64 {
 //	meta: total_meta ≤ Σ data_blocks × block_size / 4096 over all meta groups
 //	      but the last
 //
-// It is a memo reconstructed from facts (§0 item 14), so a worker restart or a
+// It is a memo reconstructed from facts (AR6), so a worker restart or a
 // shard handoff cannot issue a second grow, and a grow deferred on the CN
 // ([D15]) stays pending the same way because its totals have not moved.
 //
@@ -1414,8 +1450,9 @@ func GrowPending(
 
 // GrpListFull reports whether the slice's group list of that kind already
 // holds common.MaxGrpCntPerSlice groups, so a grow of that kind has nothing it
-// may append (§8.5): a group's md names carry its index in its list as two hex
-// digits (§4.3). The other kind's list is not counted: a full data list
+// may append (architecture.md, GrowSlice): a group's md names carry its index
+// in its list as two hex digits (architecture.md, md names). The other kind's
+// list is not counted: a full data list
 // does not stop a meta grow, nor the other way round.
 //
 // It lives here for the reason GrowPending does: GrowSlice applies it inside
@@ -1447,7 +1484,8 @@ func hasDuplicateAddr(cands []Cand) bool {
 
 // chargeSpCns takes extCnt extents off the CN of every cntlr of the SP, one
 // budget update, one capacity-key maintenance and one CnRev bump per CN
-// (§8.5). A CN hosting two cntlrs of one SP is not supposed to exist (§6.4),
+// (architecture.md, GrowSlice). A CN hosting two cntlrs of one SP is not
+// supposed to exist (architecture.md, Finding CN candidates),
 // but if one did it would reserve the group twice, so the charge is
 // accumulated per CN and applied once.
 func chargeSpCns(
@@ -1494,13 +1532,14 @@ func chargeSpCns(
 }
 
 // ---------------------------------------------------------------------------
-// ReplaceCntlr (MD6, AR7, §8.6 ×2 in one STM)
+// ReplaceCntlr (MD6, AR7; two RPCs of architecture.md, Cntlrs, in one STM)
 // ---------------------------------------------------------------------------
 
 // ReplaceCntlr deletes a cntlr that has been unhealthy for cntlr_unhealthy
 // seconds and creates its replacement on newCn with the SAME cntlid_slot (MD6,
-// AR7, §10.4). It returns the new cntlr_id. This is §8.6's DeleteCntlr and
-// CreateCntlr in one transaction — the SP is never left with fewer cntlrs than
+// AR7; architecture.md, Automatic reactions). It returns the new cntlr_id.
+// This is the DeleteCntlr and CreateCntlr of architecture.md, Cntlrs, in one
+// transaction — the SP is never left with fewer cntlrs than
 // it had.
 //
 // asPrimary carries the sole-primary variant of AR7: the primary of an SP with
@@ -1511,7 +1550,8 @@ func chargeSpCns(
 //
 // spCnAddrs is the plan the pick was scanned against: the CNs of the SP's
 // other cntlrs as the caller's snapshot held them, which it handed the scan as
-// the §6.4 exclusion and whose locations it handed it as §6.5's tier 1. A
+// the exclusion of architecture.md, Finding CN candidates, and whose locations
+// it handed it as tier 1 of architecture.md, Per-operation allocation. A
 // surviving cntlr on a CN outside that list was committed after the snapshot,
 // by the gateway's CreateCntlr, so the pick may sit in its failure domain or
 // on its very CN, and the op fails with ReasonCandidateChanged: the caller's next pass plans from
@@ -1583,7 +1623,8 @@ func ReplaceCntlr(
 		}
 		// Reading every surviving cntlr once answers the "was the pick
 		// planned against this cntlr" check (spCnAddrs above), the "is the
-		// CN already hosting one of this SP's cntlrs" rule (§6.4) and the
+		// CN already hosting one of this SP's cntlrs" rule (architecture.md,
+		// Finding CN candidates) and the
 		// "exactly one primary" invariant. The plan comes first: a cntlr
 		// committed on the pick's own CN since the snapshot is a stale plan,
 		// which the next pass re-plans, not a refusal.
@@ -1676,7 +1717,8 @@ func ReplaceCntlr(
 
 // releaseCn returns one cntlr's reservation to its CN: the pointer comes out
 // of cntlr_ptr_list, the footprint goes back to free_ext_cnt, the capacity key
-// follows §5.6 and CnRev is bumped once (§8.6 DeleteCntlr).
+// follows architecture.md, Capacity index keys, and CnRev is bumped once
+// (architecture.md, Cntlrs, DeleteCntlr).
 //
 // A CN record that does not exist any more is not an error: the cntlr key is
 // deleted either way, and there is nothing left to give the extents back to.
@@ -1732,7 +1774,8 @@ func removeId(ids []uint64, id uint64) []uint64 {
 }
 
 // rewriteCdcEntries swaps one cntlr's transport address for another in every
-// discovery entry of the SP (§8.6): one CdcEntry per Subsystem of nqn_list,
+// discovery entry of the SP (architecture.md, Cntlrs): one CdcEntry per
+// Subsystem of nqn_list,
 // whose key needs the subsystem's ss_id — so each Subsystem is read first.
 //
 // A listed Subsystem that is missing aborts the op: its CdcEntry key cannot be
@@ -1805,11 +1848,12 @@ func appendTrConf(
 }
 
 // ---------------------------------------------------------------------------
-// Spare legs (MD6, AR8, §8.12)
+// Spare legs (MD6, AR8; architecture.md, Spare legs)
 // ---------------------------------------------------------------------------
 
 // CreateSpareLeg appends one spare leg to a group and returns its leg_id (MD6,
-// §8.12, AR8 step 3). The spare is pre-connected standby capacity: every cntlr
+// AR8 step 3; architecture.md, Spare legs). The spare is pre-connected
+// standby capacity: every cntlr
 // connects to and probes its side, but md never sees it until SwitchSpareLeg
 // puts it in the active list.
 //
@@ -1818,12 +1862,15 @@ func appendTrConf(
 // redundancy to repair (AR8). The DN must not already carry a leg or a spare
 // of this group: that in-STM check is ADDRESS-based on purpose (grpHostsAddr
 // below), and it is not the failure-domain rule. A domain is excluded before
-// this op is ever called, by §6.5's tier 1 in the caller's pre-STM scan —
+// this op is ever called, by tier 1 of architecture.md, Per-operation
+// allocation, in the caller's pre-STM scan —
 // which tier 2 relaxes when the cluster has no second domain to offer, so a
 // legitimate spare can land in an occupied domain and this check must still
 // accept it. Re-checking the location here would buy nothing anyway: location
-// is immutable in v1 (architecture.md §8.2), so what the scan read cannot have
-// gone stale. No §3.6 geometry is computed: the spare joins an existing Group
+// is immutable in v1 (architecture.md, Disk nodes), so what the scan read
+// cannot have gone stale. No geometry (architecture.md, Group on-leg layout:
+// meta region, data region, health block) is computed: the spare joins an
+// existing Group
 // and inherits its ext_cnt, meta_blocks and data_blocks unchanged.
 //
 // No spare of the group may still have an unprovisioned side
@@ -1964,8 +2011,9 @@ func grpHostsAddr(grp *pb.Group, addrPort string) bool {
 	return false
 }
 
-// nextLegIdx is 1 + the largest leg_idx over BOTH lists of the group (§8.12:
-// "the next unused idx in the group"), so an active leg and a spare never
+// nextLegIdx is 1 + the largest leg_idx over BOTH lists of the group
+// (architecture.md, Spare legs: "the next unused idx in the group"), so an
+// active leg and a spare never
 // share one — the idx names the md member slot.
 func nextLegIdx(grp *pb.Group) uint32 {
 	legLists := [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()}
@@ -1986,17 +2034,20 @@ func nextLegIdx(grp *pb.Group) uint32 {
 }
 
 // SwitchSpareLeg makes a ready spare active and parks the leg it replaces
-// (MD6, §8.12, AR8 step 1). The spare takes the target's POSITION in leg_list
+// (MD6, AR8 step 1; architecture.md, Spare legs). The spare takes the target's
+// POSITION in leg_list
 // — the md member slot the array is missing — and inherits nothing else: it
 // keeps its own leg_id, leg_idx, side and err_epoch. The target is appended to
 // spare_leg_list keeping its err_epoch, where it stays parked for the operator
-// (§0 item 17): still connected and probed, never repaired again.
+// (AR8 step 4): still connected and probed, never repaired again.
 //
-// The spare's single side must be provisioned (§9.4): switching to a side that
+// The spare's single side must be provisioned (architecture.md, Side
+// provisioning protocol): switching to a side that
 // has not finished zeroing would put an unwritten member into the array.
 //
 // Both legs must own exactly one side. A second one is a migration's
-// destination (§8.11), and the migration holds its leg until Finish or Cancel
+// destination (architecture.md, Migrations), and the migration holds its leg
+// until Finish or Cancel
 // ends it, so a migrating leg is neither promoted nor parked. AR8's pass and
 // the gateway's pre-read turn such a leg away already. This re-check is what
 // catches a migration that started after either of them read the leg; for

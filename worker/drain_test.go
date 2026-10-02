@@ -8,7 +8,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The worker half of the sp drain (dnv-worker.md §11.6, §13).
+// The worker half of the sp drain (dnv-worker.md, The sp drain).
 //
 // Everything here runs through reactHarness, i.e. through the REAL
 // reactionPass: the split AR3 makes (SPD6) is a property of that pass, not of a
@@ -119,11 +119,12 @@ func TestDrainRunsAtEverySpLevel(t *testing.T) {
 	}
 }
 
-// TestDrainFailedStepIsLogged is SPD6 and its §12 record: a failed step commits
-// nothing, logs `sp drain failed` with the phase and the cause, and is simply
-// retried on the next tick. There is no terminal-failure state and no status
-// field on the SpConf (SPD6) — a delete that gave up would just strand
-// garbage. The RECORD does carry `error`, asserted below.
+// TestDrainFailedStepIsLogged is SPD6 and its record (dnv-worker.md, Log
+// records): a failed step commits nothing, logs `sp drain failed` with the
+// phase and the cause, and is simply retried on the next tick. There is no
+// terminal-failure state and no status field on the SpConf (SPD6) — a delete
+// that gave up would just strand garbage. The RECORD does carry `error`,
+// asserted below.
 //
 // The `reason` attribute is asserted separately from `error`, because an
 // SPD2 refusal is a model.ErrPrecondition whose Reason is the whole diagnosis

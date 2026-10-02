@@ -8,7 +8,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The §11.2 src-cutover fence ([D12], architecture.md §11.1/§11.2).
+// The src-cutover fence ([D12];
+// architecture.md, Failover and Migration, src step 2).
 //
 // Handing a leg over to its migration destination happens in one converge
 // pass, but the per-CN dm-linears of the source are retired in two phases:
@@ -28,7 +29,8 @@ import (
 //
 // The window is a floor, not a schedule: phase 2 runs on the first converge
 // at or after the deadline. A timer arms that converge so the RPC never waits
-// (the §7 command timeouts are seconds, not minutes), and every converge is
+// (the command timeouts of architecture.md, Common validation, are seconds,
+// not minutes), and every converge is
 // idempotent, so an early one simply stays in phase 1 — unless it removes an
 // export above a fenced linear: the sweep's P0 runs phase 2 for that linear
 // first, and a level with no export layer ends the window (endFence).
@@ -44,8 +46,8 @@ import (
 // bound does not hold across DN12 rule 1's known limit (beginFence), nor
 // past a command that fails: a phase-2 reload whose load fails leaves the
 // linear suspended rather than resume it onto its pre-fence table and replay
-// the window's IO onto the side's data (a reload fails closed, dnagent.md
-// §2.8).
+// the window's IO onto the side's data (a reload fails closed: dnagent.md,
+// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
 
 // beginFence reports whether this side is still inside the grace window, and
 // starts the clock the first time it is asked. The caller holds the side's
@@ -69,7 +71,8 @@ import (
 // window over linears still suspended
 // (TestFenceRestartThatHoldsNoSideOpensAWholeWindow). A phase-2 reload
 // whose load fails breaks it too: a reload fails closed
-// (dnagent.md §2.8), so the linear stays suspended on its pre-fence table
+// (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), so the linear
+// stays suspended on its pre-fence table
 // until a later converge's reload of it succeeds or the role's end resumes
 // it (unfenceLinears).
 func (s *DnAgentServer) beginFence(st *sideState) bool {

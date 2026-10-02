@@ -1,7 +1,8 @@
-// Command dnv-agent is the node-local agent (architecture.md §13). It has
+// Command dnv-agent is the node-local agent
+// (architecture.md, Components: invocation reference). It has
 // exactly two subcommands: dn serves DiskNodeAgent, cn serves
 // ControllerNodeAgent; both share the bootstrap, --local-store handling and
-// the single OsClient of package agent (dnagent.md §3).
+// the single OsClient of package agent (dnagent.md CM1-CM4).
 package main
 
 import (
@@ -182,7 +183,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 			pb.RegisterDiskNodeAgentServer(grpcServer, srv)
 		},
 		// The dn owns background goroutines with long-running children — the
-		// §9.4 zeroing loop's `blkdiscard --zeroout` — so shutdown joins them
+		// DN9 zeroing loop's `blkdiscard --zeroout` — so shutdown joins them
 		// and no orphan child outlives the agent (dnagent.md SH27).
 		srv.WaitBackground)
 }

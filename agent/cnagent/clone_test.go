@@ -12,7 +12,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The clone fixture mirrors cnagent_integtest.md §13: a 64 MiB destination td
+// The clone fixture mirrors cnagent_integtest.md, Cases (clone_xfer): a 64 MiB
+// destination td
 // whose source wrote only its first 32 MiB, so the pushed chunk
 // `00000000ffffffff` (wire: 1 = never written = skippable) must coalesce into
 // exactly one 32 MiB blkdiscard at offset 32 MiB.
@@ -115,7 +116,8 @@ func hexBytes(t *testing.T, text string) []byte {
 }
 
 // ---------------------------------------------------------------------------
-// §6.9 — clone build, §11.5 recovery and teardown (CN18)
+// Clone build, recovery (architecture.md, Clone crash recovery) and teardown
+// (CN18)
 // ---------------------------------------------------------------------------
 
 func TestCloneBuild(t *testing.T) {
@@ -223,13 +225,15 @@ func TestCloneBuild(t *testing.T) {
 
 func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 	srv, node := newTestServer(t)
-	// The destination namespace is created suspended (§11.3) and serves
-	// anyway while the clone runs.
+	// The destination namespace is created suspended (architecture.md,
+	// Transfer + clone = cross-SP live migration) and serves anyway while the
+	// clone runs.
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, suspended: true,
 		clones: []*pb.Clone{cloneOf()}})
 	// The override has to be pinned on the *backing*, not on the device's
-	// suspend bit: since the park (§11.6) nothing is ever dm-suspended, so a
+	// suspend bit: since the park (architecture.md, Namespace suspend
+	// semantics) nothing is ever dm-suspended, so a
 	// `!suspended` assert would pass whether the override worked or not.
 	cloneNo := node.devNo["/dev/mapper/"+cloneName(srv, testClone)]
 	dev := node.dms[nsDevName(srv, testNs)]
@@ -262,7 +266,8 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 	}
 }
 
-// TestCloneRecovery is the §11.5 rebuild: the volatile metadata wrapper is
+// TestCloneRecovery is the rebuild of architecture.md, Clone crash recovery:
+// the volatile metadata wrapper is
 // gone, so the destination thin bitmaps are read and applied before hydration
 // is ever enabled, with the ns-devs parked on dm-error throughout.
 func TestCloneRecovery(t *testing.T) {
@@ -311,8 +316,9 @@ func TestCloneRecovery(t *testing.T) {
 			" 0 enable_hydration",
 		"cmd dmsetup reload "+nsDevName(srv, testNs),
 	)
-	// Parking comes before the metadata snapshot is even taken (§11.5 step
-	// 1): nothing may serve the td while the bitmaps are being applied.
+	// Parking comes before the metadata snapshot is even taken
+	// (architecture.md, Clone crash recovery, step 1): nothing may serve the
+	// td while the bitmaps are being applied.
 	park := node.indexOfCall("cmd dmsetup reload " + nsDevName(srv, testNs))
 	snap := node.indexOfCall(
 		"cmd dmsetup message " + pool + " 0 reserve_metadata_snap")
@@ -373,7 +379,8 @@ func seedKilledCloneBuild(
 // dm-clone and before step 4 applied the destination bitmaps leaves nothing
 // missing — the wrapper still matches and the dm-clone is up — so the one
 // sign that step 4 never finished is the dm-clone's own `no_hydration`. The
-// next pass must run the §11.5 recovery again before it enables hydration:
+// next pass must run the recovery of architecture.md, Clone crash recovery,
+// again before it enables hydration:
 // enabling it straight away re-fetches every region the destination already
 // owns, stale source bytes over newer local ones. The stale dm-clone may
 // also survive the recovery's removal (a refused `dmsetup remove`); the
@@ -463,7 +470,8 @@ func TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps(t *testing.T) {
 			assertNoCall(t, node,
 				"cmd blkdiscard --offset 0 --length 8388608 "+loop)
 			// The stale dm-clone goes before a fresh one is created over the
-			// same wrapper (§11.5 steps 1-2); one whose removal is refused is
+			// same wrapper (architecture.md, Clone crash recovery, steps
+			// 1-2); one whose removal is refused is
 			// kept, and the bitmaps above landed on it.
 			if tc.survives {
 				if !node.hasCall("cmd dmsetup remove " + clone) {
@@ -481,8 +489,9 @@ func TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps(t *testing.T) {
 	}
 }
 
-// TestCloneRecoveryNeverServesAnUnfinishedDmClone holds §11.5's "fully
-// applied before the dm-clone handles any IO" against a second fault. From
+// TestCloneRecoveryNeverServesAnUnfinishedDmClone holds "fully applied before
+// the dm-clone handles any IO" (architecture.md, Clone crash recovery) against
+// a second fault. From
 // the state the kill leaves, one more failure stops the next pass short of
 // CN18 step 5: the arena listing does not answer, the dm-clone's status read
 // does not answer (once, or every time), the recovery's own `dmsetup create`
@@ -736,7 +745,8 @@ func TestCloneRecoveryNeverServesAnUnfinishedDmClone(t *testing.T) {
 // `dmsetup status` reads that follow a recovery's enable. From the state a
 // killed build leaves, one pass runs the recovery through CN18 step 5 and
 // then reads the dm-clone's status twice more: CN18's own read for the
-// dm-clone row (§9.5), then CN16's, which decides whether the ns-dev may
+// dm-clone row (architecture.md, Live-state reporting), then CN16's, which
+// decides whether the ns-dev may
 // leave the park (rule 5). Either may not answer. Hydration is on by then,
 // so the next pass redoes nothing of the recovery — but the dm-clone row
 // the first read leaves ERROR, and the parked ns-dev the second leaves on
@@ -926,7 +936,7 @@ func TestCloneTeardownOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.9 — the clone-metadata slot allocator (CN18 step 2, [D14])
+// The clone-metadata slot allocator (CN18 step 2, [D14])
 // ---------------------------------------------------------------------------
 
 // twoTds is the fixture for the multi-clone allocator cases: a second
@@ -1101,8 +1111,9 @@ func TestCloneMetaArenaExhaustion(t *testing.T) {
 
 // TestCloneMetaAbsentWrapperWithRoomProbesMissing is the other side of the
 // exhaustion pair, and the bound on it: a wrapper that is merely not built yet
-// — here the §11.5 case, the volatile wrapper and the dm-clone that mapped it
-// both lost — is a truthful RES_STATUS_MISSING while the arena still has room,
+// — here the crash-recovery case (architecture.md, Clone crash recovery), the
+// volatile wrapper and the dm-clone that mapped it both lost — is a truthful
+// RES_STATUS_MISSING while the arena still has room,
 // not the CN18 step 2 refusal. The converge agrees: its next pass allocates the
 // slot and rebuilds (TestCloneRecovery), which is the opposite of reporting
 // that the arena could not supply it.
@@ -1410,7 +1421,8 @@ func TestCloneMetaOrphanWrapperSwept(t *testing.T) {
 // TestCloneMetaWrapperMismatchRebuilds is the tmpfs-remounted-under-a-live-
 // agent case: the wrapper is still there but no longer backed by the currently
 // probed loop device. CN28 reports ERROR and the converge repairs it through
-// the §11.5 rebuild — removing the dm-clone first, so the wrapper's own
+// the rebuild of architecture.md, Clone crash recovery — removing the dm-clone
+// first, so the wrapper's own
 // removal cannot fail EBUSY.
 func TestCloneMetaWrapperMismatchRebuilds(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1482,7 +1494,7 @@ func TestCloneMetaRegistrySurvivesRestart(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.10 — PushCloneBitmap (CN22)
+// PushCloneBitmap (CN22)
 // ---------------------------------------------------------------------------
 
 func TestPushCloneBitmapGates(t *testing.T) {
@@ -1700,8 +1712,8 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 // SP_LEVEL_DISABLE teardown can remove a wrapper between the `ls` and the
 // `dmsetup table` of that name. Failing the whole CN-wide enumeration on it
 // flipped a healthy, serving clone of an unrelated cntlr to RES_STATUS_ERROR,
-// and ERROR — unlike PROVISIONING — feeds err_epoch and the §10.2/§10.4
-// reactions ([D14]).
+// and ERROR — unlike PROVISIONING — feeds err_epoch and the reactions of
+// architecture.md, dn / cn roles and Automatic reactions ([D14]).
 func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{

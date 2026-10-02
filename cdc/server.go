@@ -55,7 +55,7 @@ func newServer(ctx context.Context, d *deps, reg *registry) (*server, error) {
 	}, nil
 }
 
-// addr is the address actually listened on, which the §8 tests need when they
+// addr is the address actually listened on, which the unit tests need when they
 // ask for port 0.
 func (s *server) addr() net.Addr {
 	return s.ln.Addr()
@@ -109,7 +109,8 @@ func (s *server) run(ctx context.Context) {
 	wg.Wait()
 }
 
-// shutdownConns closes every live connection with the §7 shutdown reason.
+// shutdownConns closes every live connection with the shutdown reason of
+// cdc.md, Log records.
 func (s *server) shutdownConns() {
 	s.mu.Lock()
 	live := make([]*conn, 0, len(s.conns))
@@ -129,7 +130,7 @@ func (s *server) forget(c *conn) {
 	s.mu.Unlock()
 }
 
-// connCount is the live connection count, for the §8 tests.
+// connCount is the live connection count, for the unit tests.
 func (s *server) connCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

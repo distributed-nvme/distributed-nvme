@@ -12,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Teardown by sweep (architecture.md §9.8, cnagent.md CN21)
+// Teardown by sweep (architecture.md, Teardown by sweep; cnagent.md CN21)
 //
 // Removal is derived by comparing the DESIRED state with the ACTUAL state of
 // the node, never from a remembered plan and never from a remembered failure.
@@ -64,8 +64,9 @@ type cnActual struct {
 	// it did not, those three maps are empty for want of an answer rather
 	// than because the node holds nothing, and an empty map is the shape of
 	// "there is nothing here" — so no removal may be derived from this
-	// snapshot at all (architecture.md §9.8: "gone" is probe-verified, never
-	// inferred). The pass reports what it can and re-drives.
+	// snapshot at all (architecture.md, Teardown by sweep: "gone" is
+	// probe-verified, never inferred). The pass reports what it can and
+	// re-drives.
 	dmListed bool
 	// arrays is every md array on the node, read from sysfs alone.
 	arrays []MdArray
@@ -171,7 +172,7 @@ func (s *CnAgentServer) enumerateCn(
 // A part that did not is empty for want of an answer, which is the shape of
 // "there is nothing here" to every removal gated on absence — the layer stop
 // rule first of all — so a snapshot with any part missing licenses no removal
-// at all (architecture.md §9.8).
+// at all (architecture.md, Teardown by sweep).
 func (a *cnActual) listed() bool {
 	return a.dmListed && a.mdListed && a.hostListed && a.nvmetListed
 }
@@ -290,8 +291,9 @@ func (s *CnAgentServer) nvmetOwner(
 		}
 		if dn.ClusterId != clusterId || dn.NodeId != cnId {
 			// A namespace backed by ANOTHER cn's ns-dev: foreign, not
-			// unowned (`architecture.md` §9.8, "Several agents share one
-			// kernel"). One cn agent per kernel is the ordinary deployment,
+			// unowned (`architecture.md`, Teardown by sweep, "Several agents
+			// share one kernel"). One cn agent per kernel is the ordinary
+			// deployment,
 			// so this should not arise — but the unowned arm below REMOVES,
 			// and a rule that has to be right only while an assumption holds
 			// is the shape that takes a sibling's subsystem when it stops
@@ -305,7 +307,8 @@ func (s *CnAgentServer) nvmetOwner(
 
 // hostFacingClaim reports whether any cntlr of this cn still names one
 // host-facing NQN in its stored request, and under which sp. It is the
-// request-derived half of §9.8's attribution rule: the NQN is the user's own
+// request-derived half of the attribution rule (architecture.md, Teardown by
+// sweep): the NQN is the user's own
 // string and carries nothing, so "somebody here still wants it" is evidence
 // in its own right — and the only evidence there is for a subsystem that
 // currently has no namespace at all.
@@ -1169,7 +1172,8 @@ func (s *CnAgentServer) disconnectVerified(
 // A clone the role or the sp_level merely SUPPRESSES keeps its chunks
 // applied-by-file (CN19, CN22): deleting them on every standby converge would
 // make the worker re-push them every round, and would leave a promoted
-// standby's §11.5 rebuild nothing to skip with. The test is membership of
+// standby's rebuild (architecture.md, Clone crash recovery) nothing to skip
+// with. The test is membership of
 // clone_list, which is exactly "the clone still exists".
 //
 // st.chunks mirrors the files, so a clone's entry goes only once its files
@@ -1559,7 +1563,8 @@ func (s *CnAgentServer) cntlrIdAttrs(plan *cntlrPlan) []any {
 // on its strength (sweepCntlr).
 func (s *CnAgentServer) cntlrAnaPreStep(ctx context.Context, plan *cntlrPlan) {
 	// P1, ANA: every namespace the desired state wants inaccessible is moved
-	// there before anything under it is touched (§11.1 old_primary step 1).
+	// there before anything under it is touched (architecture.md, Failover,
+	// old_primary step 1).
 	// A provisioning-deferred namespace is already inaccessible by CN16's
 	// fourth conjunct, so this covers a fresh SP's first converge too.
 	for _, np := range plan.namespaces {
@@ -1866,8 +1871,9 @@ func (s *CnAgentServer) sweepCn(
 }
 
 // cntlrVerdict is the read-only cntlr-level comparison the Check rounds and
-// GetCntlrInfo take. A cntlr whose stored conf is unusable is refused by §7
-// before any converge runs, so it has no verdict either: reporting leftovers
+// GetCntlrInfo take. A cntlr whose stored conf is unusable is refused
+// (architecture.md, Common validation) before any converge runs, so it has no
+// verdict either: reporting leftovers
 // for a cntlr this agent deliberately did not build would name objects it is
 // not allowed to remove.
 func (s *CnAgentServer) cntlrVerdict(

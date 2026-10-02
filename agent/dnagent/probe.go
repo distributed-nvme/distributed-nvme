@@ -39,7 +39,8 @@ func (s *DnAgentServer) probeDn(
 	case err != nil:
 		info.MetaInfo = t.Err(resKeyMeta, s.disk, err.Error())
 	default:
-		// §9.4's DN5 fail-fast is re-checked every round, so a disk whose
+		// The DN5 fail-fast (architecture.md, Side provisioning protocol) is
+		// re-checked every round, so a disk whose
 		// queue limits changed under the agent surfaces without a re-sync.
 		if wzDetails, ok := s.checkWriteZeroes(ctx); !ok {
 			info.MetaInfo = t.Err(resKeyMeta, s.disk, wzDetails)
@@ -87,7 +88,8 @@ func (s *DnAgentServer) probeSide(
 	return info
 }
 
-// probeSideDev is the read-only half of the §9.4 converge matrix (DN18): it
+// probeSideDev is the read-only half of the converge matrix of architecture.md,
+// Side provisioning protocol (DN18): it
 // checks the side's allocation record, its zeroing progress and the aggregate
 // dm-linear built from its extent runs, and reports whether the side is
 // exportable.
@@ -122,8 +124,8 @@ func (s *DnAgentServer) probeSideDev(
 	}
 	// The counters are filled on every round, whatever the outcome below is:
 	// they are what the worker's provisioned-flip rule reads
-	// (§10.3). They come from the record, never from the request — the disk is
-	// authoritative ([D13]).
+	// (architecture.md, sp role). They come from the record, never from the
+	// request — the disk is authoritative ([D13]).
 	zeroed, total := sideZeroedCnt(rec), sideExtCnt(rec)
 	info.ZeroedExtCnt, info.TotalExtCnt = zeroed, total
 	if zeroed < total {
@@ -132,8 +134,9 @@ func (s *DnAgentServer) probeSideDev(
 		// `dmsetup table`", and a non-OK device wins. Skipping the check while
 		// the bits are incomplete would let a side whose dm-linear could not be
 		// built report healthy PROVISIONING for ever — and PROVISIONING never
-		// feeds err_epoch (§9.5), so nothing would ever bump a revision and
-		// re-send the SyncupSide that is the only thing able to rebuild it.
+		// feeds err_epoch (architecture.md, Live-state reporting), so nothing
+		// would ever bump a revision and re-send the SyncupSide that is the
+		// only thing able to rebuild it.
 		if status, details := s.probeSideDm(ctx, plan, rec); status !=
 			pb.ResStatus_RES_STATUS_OK {
 			info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
@@ -237,7 +240,8 @@ func (s *DnAgentServer) probeAboveSideDev(
 			resKeyOf(resKeyDmErrorFmt, cnId), errName, status, details)
 
 		linName := plan.linearName(cnId)
-		// Inside the §11.2 grace window the linear is still on its pre-fence
+		// Inside the cutover grace window (architecture.md, Migration,
+		// src step 2) the linear is still on its pre-fence
 		// target and suspended on purpose, so that — not dm-error — is what
 		// the probe must expect; reporting the window as a table mismatch
 		// would make a healthy cutover look broken for a minute. The one
@@ -289,7 +293,7 @@ func (s *DnAgentServer) probeAboveSideDev(
 	if plan.migrSrcDeferred {
 		// The destination has not provisioned: this side is serving exactly as
 		// if it had no migr_src_conf, and only the would-be rows differ
-		// (§11.2).
+		// (architecture.md, Migration).
 		s.reportMigrSrcDeferred(st, plan, info)
 	}
 

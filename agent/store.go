@@ -12,8 +12,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// Local-store file-name kind prefixes (architecture.md §4.6). The dn role
-// owns the first three, the cn role the last three (SH6).
+// Local-store file-name kind prefixes (architecture.md,
+// Agent local-store paths). The dn role owns the first three, the cn role the
+// last three (SH6).
 const (
 	StoreKindDn      = "dn-"
 	StoreKindSide    = "side-"

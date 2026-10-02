@@ -9,15 +9,16 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.10 / gateway.md §5.9: the source half of the
-// §11.3 cross-SP live migration. A Transfer is a pure etcd record — it names
+// This file is architecture.md, Transfers / gateway.md, Transfers: the source
+// half of the cross-SP live migration (architecture.md, Transfer + clone =
+// cross-SP live migration). A Transfer is a pure etcd record — it names
 // an existing namespace of this SP and the hosts allowed to reach it through
 // the xfer subsystem — so all four RPCs are the standard mutator/reader shape
 // with no agent call anywhere (AG1: the cntlrs learn about the record from the
 // SpRev bump and build the stack themselves).
 
 // The op names the bump helper cites in its error messages; they are the RPC
-// names so a log line names something greppable (gateway.md §8).
+// names so a log line names something greppable (gateway.md, Log records).
 const (
 	opCreateTransfer      = "CreateTransfer"
 	opDeleteTransfer      = "DeleteTransfer"
@@ -45,9 +46,10 @@ func resolveTransfer(
 	return key, xfer, nil
 }
 
-// CreateTransfer is architecture.md §8.10's CreateTransfer: it retires an
-// existing namespace of this SP behind an xfer subsystem so a destination SP's
-// clone can read the bytes over NVMe-oF (§11.3).
+// CreateTransfer is the CreateTransfer of architecture.md, Transfers: it
+// retires an existing namespace of this SP behind an xfer subsystem so a
+// destination SP's clone can read the bytes over NVMe-oF (architecture.md,
+// Transfer + clone = cross-SP live migration).
 //
 // The origin is resolved — the Subsystem by ori_nqn and the Namespace by
 // ori_ns_idx inside it — inside the STM and NOT_FOUND when either is absent:
@@ -56,10 +58,11 @@ func resolveTransfer(
 // stack over nothing.
 //
 // allowed_hosts carries the destination cntlrs' CnHostNqns, which is why it is
-// validated with the §7 host-NQN rules and stored verbatim; nothing here
-// touches a CdcEntry, because the xfer subsystem is reached by the destination
-// through the transport addresses its operator already knows and is never
-// advertised as a dnv discovery subsystem (§5.9).
+// validated with the host-NQN rules of architecture.md, Common validation, and
+// stored verbatim; nothing here touches a CdcEntry, because the xfer subsystem
+// is reached by the destination through the transport addresses its operator
+// already knows and is never advertised as a dnv discovery subsystem
+// (gateway.md, Transfers).
 func (s *Server) CreateTransfer(
 	ctx context.Context,
 	req *pb.CreateTransferRequest,
@@ -142,8 +145,8 @@ func (s *Server) CreateTransfer(
 	return &pb.CreateTransferReply{XferId: xferId}, nil
 }
 
-// DeleteTransfer is architecture.md §8.10's DeleteTransfer, whose `force` flag
-// picks between the two ways a hand-over ends.
+// DeleteTransfer is the DeleteTransfer of architecture.md, Transfers, whose
+// `force` flag picks between the two ways a hand-over ends.
 //
 // force == false FINALIZES a completed copy: it additionally sets
 // suspended = true on the origin namespace in the same STM, so the source
@@ -155,7 +158,8 @@ func (s *Server) CreateTransfer(
 //
 // force == true ABORTS: the origin is left untouched with suspended still
 // false, so the next syncup reloads its ns-dev onto the raid0 and moves the ns
-// back to the optimized group (§11.3's abort path).
+// back to the optimized group (the abort path of architecture.md, Transfer +
+// clone = cross-SP live migration).
 //
 // A missing origin subsystem or ns_idx on the finalize path is skipped, not an
 // error [D-G]: the transfer is being deleted either way, and the RPC must not
@@ -219,14 +223,14 @@ func (s *Server) DeleteTransfer(
 	return &pb.DeleteTransferReply{XferId: xferId}, nil
 }
 
-// GetTransfer is architecture.md §8.10's GetTransfer: one consistency read
-// (GW5), so the SP the transfer is scoped to and the record itself come from
-// the same store revision and a reply can never describe a transfer of an SP
-// that was deleted between the two reads.
+// GetTransfer is the GetTransfer of architecture.md, Transfers: one
+// consistency read (GW5), so the SP the transfer is scoped to and the record
+// itself come from the same store revision and a reply can never describe a
+// transfer of an SP that was deleted between the two reads.
 //
-// It is a Snapshot and not a RunSTM because nothing is written: §5.8's
-// one-transaction rule is about the read set being consistent, not about
-// committing.
+// It is a Snapshot and not a RunSTM because nothing is written: the
+// one-transaction rule of architecture.md, STM discipline, is about the read
+// set being consistent, not about committing.
 func (s *Server) GetTransfer(
 	ctx context.Context,
 	req *pb.GetTransferRequest,
@@ -262,20 +266,21 @@ func (s *Server) GetTransfer(
 	return &pb.GetTransferReply{Xfer: xfer}, nil
 }
 
-// UpdateTransferHosts is architecture.md §8.10's UpdateTransferHosts: it
-// replaces the transfer's OWN allowed_hosts, which is what an operator calls
-// after a destination cntlr moved to another CN and therefore presents a
-// different CnHostNqn.
+// UpdateTransferHosts is the UpdateTransferHosts of architecture.md,
+// Transfers: it replaces the transfer's OWN allowed_hosts, which is what an
+// operator calls after a destination cntlr moved to another CN and therefore
+// presents a different CnHostNqn.
 //
-// No CdcEntry is touched — unlike UpdateSubsystemHosts (§8.8), which maintains
-// one — because the xfer subsystem is not a discovery-advertised dnv subsystem
-// (§5.9): it exists only for the destination SP's clone, which is told where
+// No CdcEntry is touched — unlike UpdateSubsystemHosts (architecture.md,
+// Subsystems, namespaces), which maintains one — because the xfer subsystem is
+// not a discovery-advertised dnv subsystem (gateway.md, Transfers): it exists
+// only for the destination SP's clone, which is told where
 // to connect out of band.
 //
-// The list is rewritten and the SP bumped unconditionally: §0 #17's
+// The list is rewritten and the SP bumped unconditionally: GW6's
 // idempotent no-write applies to the three Update*Enabled/Disabled RPCs only,
 // and a caller that resends the same list still wants the cntlrs to re-apply
-// it (§5.5).
+// it (architecture.md, Revision keys and the sync fan-out).
 func (s *Server) UpdateTransferHosts(
 	ctx context.Context,
 	req *pb.UpdateTransferHostsRequest,

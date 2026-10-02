@@ -11,8 +11,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.8 — subsystems, namespaces and the CdcEntry
-// writes that go with them (gateway.md §5.7). All eight RPCs are pure etcd:
+// This file is architecture.md, Subsystems, namespaces — subsystems,
+// namespaces and the CdcEntry writes that go with them (gateway.md, Subsystems
+// and namespaces). All eight RPCs are pure etcd:
 // nothing here reaches an agent, so every mutator is the plain
 // resolve → token → precondition → mutate → bump shape of GW5/GW6 in one STM
 // (GW8), and the one read-only RPC is a single Snapshot.
@@ -21,7 +22,8 @@ import (
 // which is why the three namespace updaters all end by writing the Subsystem
 // key back. None of them touches the CdcEntry — an entry carries only the
 // subsystem's NQN, its allowed hosts and the transports of the enabled cntlrs
-// (§8.8), and no namespace field appears in the discovery log.
+// (architecture.md, Subsystems, namespaces), and no namespace field appears in
+// the discovery log.
 
 // The op names the bump helper records, one per mutator so a log line names
 // something greppable. ListSubsystems has none: it never bumps.
@@ -61,7 +63,8 @@ func subsystemByNqn(
 // namespaceByIdx locates one namespace of one subsystem, the opening the three
 // namespace updaters share. The returned Namespace points into the returned
 // Subsystem's ns_list, so a caller mutates it and then writes the subsystem
-// back — the namespace has no key of its own (§8.8).
+// back — the namespace has no key of its own (architecture.md, Subsystems,
+// namespaces).
 func namespaceByIdx(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -81,16 +84,17 @@ func namespaceByIdx(
 }
 
 // newDevUuid mints the RFC 4122 version 4 uuid an empty dev_uuid defaults to
-// (§8.8 Defaults), in the canonical dashed lower-case form — which is the only
+// (architecture.md, Subsystems, namespaces: CreateNamespace's Defaults), in
+// the canonical dashed lower-case form — which is the only
 // form validateDevIdentity accepts, so a generated identity and a supplied one
 // are indistinguishable once stored.
 //
 // crypto/rand and never math/rand: the uuid ends up in the host-visible
 // namespace identify data, where a value another cluster can reproduce would
 // let two unrelated namespaces claim the same identity. The version nibble and
-// the variant bits are stamped after the draw, as RFC 4122 §4.4 requires; a
-// reader that only pattern-matches would still accept an unstamped value, but
-// a host that parses the version would not.
+// the variant bits are stamped after the draw, as RFC 4122 section 4.4
+// requires; a reader that only pattern-matches would still accept an unstamped
+// value, but a host that parses the version would not.
 func newDevUuid() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -104,7 +108,8 @@ func newDevUuid() (string, error) {
 
 // newDevNguid mints the 16 random bytes an empty dev_nguid defaults to,
 // rendered as the 32 lower-case hex characters validateDevIdentity accepts
-// (§8.8 Defaults). An NGUID has no version or variant structure, so the whole
+// (architecture.md, Subsystems, namespaces: CreateNamespace's Defaults). An
+// NGUID has no version or variant structure, so the whole
 // value is random.
 func newDevNguid() (string, error) {
 	var raw [16]byte
@@ -114,16 +119,19 @@ func newDevNguid() (string, error) {
 	return fmt.Sprintf("%x", raw[:]), nil
 }
 
-// CreateSubsystem is architecture.md §8.8's CreateSubsystem.
+// CreateSubsystem is the CreateSubsystem of architecture.md, Subsystems,
+// namespaces.
 //
 // The NQN needs no discovery-NQN rejection: ValidNqnPattern demands a ':'
 // after the domain part, which the well-known discovery NQN does not have, so
-// §7's pattern already refuses it (validate.go). Unlike a host NQN, it must
-// also lie outside the dnv namespace (validateHostFacingNqn).
+// the pattern of architecture.md, Common validation, already refuses it
+// (validate.go). Unlike a host NQN, it must also lie outside the dnv namespace
+// (validateHostFacingNqn).
 //
 // It writes three keys — the Subsystem, the SpConf whose nqn_list gained the
 // name and the counter advanced, and the CdcEntry dnv-cdc will serve the
-// discovery log from — plus the one SpRev bump they share (§5.5). The CdcEntry
+// discovery log from — plus the one SpRev bump they share (architecture.md,
+// Revision keys and the sync fan-out). The CdcEntry
 // is written here and not left to dnv-cdc because the entry IS the desired
 // state: it lists the transports of every ENABLED cntlr's CN, and a disabled
 // cntlr is deliberately not advertised, its namespaces being ANA inaccessible.
@@ -204,7 +212,8 @@ func (s *Server) CreateSubsystem(
 	return &pb.CreateSubsystemReply{SsId: ssId}, nil
 }
 
-// DeleteSubsystem is architecture.md §8.8's DeleteSubsystem.
+// DeleteSubsystem is the DeleteSubsystem of architecture.md, Subsystems,
+// namespaces.
 //
 // Namespaces block the deletion, allowed hosts never do: a host entry is a
 // permission, and removing the subsystem removes the permission with it, while
@@ -257,13 +266,15 @@ func (s *Server) DeleteSubsystem(
 	return &pb.DeleteSubsystemReply{SsId: ssId}, nil
 }
 
-// ListSubsystems is architecture.md §8.8's ListSubsystems.
+// ListSubsystems is the ListSubsystems of architecture.md, Subsystems,
+// namespaces.
 //
-// It is a Snapshot and not a page range (§5.7, GW5): the reply is a whole map,
-// bounded by MaxSsCntPerSp, and it must agree with the nqn_list it was read
-// from — a client uses it to decide what to delete next. A listed NQN whose
-// key is missing is therefore ABORTED and not a hole in the map: the SP has
-// lost an invariant key, and answering with a partial map would hide it.
+// It is a Snapshot and not a page range (architecture.md, page_token; GW5):
+// the reply is a whole map, bounded by MaxSsCntPerSp, and it must agree with
+// the nqn_list it was read from — a client uses it to decide what to delete
+// next. A listed NQN whose key is missing is therefore ABORTED and not a hole
+// in the map: the SP has lost an invariant key, and answering with a partial
+// map would hide it.
 func (s *Server) ListSubsystems(
 	ctx context.Context,
 	req *pb.ListSubsystemsRequest,
@@ -299,7 +310,8 @@ func (s *Server) ListSubsystems(
 	return &pb.ListSubsystemsReply{NqnToSubsystem: nqnToSubsystem}, nil
 }
 
-// UpdateSubsystemHosts is architecture.md §8.8's UpdateSubsystemHosts.
+// UpdateSubsystemHosts is the UpdateSubsystemHosts of architecture.md,
+// Subsystems, namespaces.
 //
 // The host list is stored twice on purpose and both copies move together: the
 // Subsystem's copy is what every cntlr's nvmet allowed_hosts is built from,
@@ -366,17 +378,19 @@ func (s *Server) UpdateSubsystemHosts(
 	return &pb.UpdateSubsystemHostsReply{SsId: ssId}, nil
 }
 
-// CreateNamespace is architecture.md §8.8's CreateNamespace.
+// CreateNamespace is the CreateNamespace of architecture.md, Subsystems,
+// namespaces.
 //
 // ns_idx is the NVMe NSID the host will see, so it is the user's to choose and
 // only two things can be wrong with it: 0, which NVMe reserves, and a value
 // this subsystem already uses. Both are INVALID_ARGUMENT and not
 // ALREADY_EXISTS — a namespace is not a key, it is a field of the subsystem,
-// and §8.8 spells the code out.
+// and architecture.md, Subsystems, namespaces, spells the code out.
 //
 // The td is resolved to its td_id here and the id is what is stored: renaming
 // or recreating a thin device must never silently repoint a live namespace,
-// and the id is never reused (§5.4).
+// and the id is never reused (architecture.md, Globals: id allocation + shard
+// buckets).
 //
 // Both generated identities are minted INSIDE the closure (GW8): they escape
 // the transaction into stored state, so a retried attempt must produce its own
@@ -468,10 +482,12 @@ func (s *Server) CreateNamespace(
 	return &pb.CreateNamespaceReply{NsId: nsId}, nil
 }
 
-// DeleteNamespace is architecture.md §8.8's DeleteNamespace.
+// DeleteNamespace is the DeleteNamespace of architecture.md, Subsystems,
+// namespaces.
 //
 // Only the Subsystem key changes: the ns_id is not returned to any counter
-// (per-SP ids are never reused, §5.4), so the SpConf is untouched and the SP's
+// (per-SP ids are never reused, architecture.md, Globals: id allocation +
+// shard buckets), so the SpConf is untouched and the SP's
 // single revision bump is the whole fan-out. The removed ns_id is the reply,
 // which is why the namespace is located before it is dropped.
 func (s *Server) DeleteNamespace(
@@ -521,9 +537,9 @@ func (s *Server) DeleteNamespace(
 	return &pb.DeleteNamespaceReply{NsId: nsId}, nil
 }
 
-// UpdateNamespaceDev is architecture.md §8.8's UpdateNamespaceDev: it repoints
-// a namespace at another thin device, which is how a snapshot is exposed in
-// place of its origin.
+// UpdateNamespaceDev is the UpdateNamespaceDev of architecture.md, Subsystems,
+// namespaces: it repoints a namespace at another thin device, which is how a
+// snapshot is exposed in place of its origin.
 //
 // The switch is invisible to the host — every cntlr reloads the namespace's
 // own dm-linear onto the new td's raid0 and the nvmet device_path never
@@ -577,15 +593,16 @@ func (s *Server) UpdateNamespaceDev(
 	return &pb.UpdateNamespaceDevReply{NsId: nsId}, nil
 }
 
-// UpdateNamespaceSuspended is architecture.md §8.8's
-// UpdateNamespaceSuspended: a suspended namespace has its `CnNsDevName`
+// UpdateNamespaceSuspended is the UpdateNamespaceSuspended of architecture.md,
+// Subsystems, namespaces: a suspended namespace has its `CnNsDevName`
 // **parked** on the td's dm-error on every cntlr — live, never dm-suspended
-// (§11.6, `cnagent.md` CN16 rule 1) — and moves to the inaccessible ANA
-// group, which is what retires a namespace during the transfer/clone
-// choreography of §11.3.
+// (architecture.md, Namespace suspend semantics; `cnagent.md` CN16 rule 1) —
+// and moves to the inaccessible ANA group, which is what retires a namespace
+// during the transfer/clone choreography of architecture.md, Transfer + clone
+// = cross-SP live migration.
 //
 // It writes and bumps even when the stored flag already equals the requested
-// one: the §0 #17 idempotent no-write applies to UpdateCntlrEnabled and the
+// one: the GW6 idempotent no-write applies to UpdateCntlrEnabled and the
 // two Update*Disabled RPCs only, and the choreography relies on the bump
 // reaching the cntlrs.
 func (s *Server) UpdateNamespaceSuspended(

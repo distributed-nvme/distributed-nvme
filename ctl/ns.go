@@ -1,7 +1,8 @@
-// ns.go is the `ns` group (dnvctl.md §5.8): the four namespace RPCs of
-// architecture.md §8.8. A namespace is addressed by its subsystem's --nqn plus
-// --idx, the pair every one of the four carries, and all four are SP-scoped
-// mutators, so all four take the §4 sp_rev token.
+// ns.go is the `ns` group (dnvctl.md, `ns` — `ctl/ns.go`): the four
+// namespace RPCs of architecture.md, Subsystems, namespaces. A namespace is
+// addressed by its subsystem's --nqn plus --idx, the pair every one of the
+// four carries, and all four are SP-scoped mutators, so all four take the
+// CT3 sp_rev token.
 package ctl
 
 import (
@@ -12,9 +13,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// registerNs installs `dnvctl ns …`. §5.8 lists exactly four rows and CT1
-// forbids a fifth, so there is no convenience verb here — retiring a namespace
-// and repointing it are two RPCs and stay two commands.
+// registerNs installs `dnvctl ns …`. The group has exactly four leaves, one
+// per namespace RPC, and CT1 forbids a fifth, so there is no convenience verb
+// here — retiring a namespace and repointing it are two RPCs and stay two
+// commands.
 func registerNs(root *cobra.Command) {
 	root.AddCommand(group("ns", "namespaces of a subsystem",
 		nsCreateCmd(),
@@ -32,11 +34,11 @@ func registerNs(root *cobra.Command) {
 // dnvctl forwards rather than pre-empts.
 //
 // --uuid and --nguid are empty by default and an EMPTY value is the documented
-// "mint one for me" request (§5.8; the gateway's newDevUuid/newDevNguid run
-// inside the transaction). dnvctl therefore generates nothing client-side:
-// passing them explicitly is how two SPs' namespaces are deliberately given
-// the SAME identity, and that distinction would be destroyed by a client-side
-// mint.
+// "mint one for me" request (dnvctl.md, `ns` — `ctl/ns.go`; the gateway's
+// newDevUuid/newDevNguid run inside the transaction). dnvctl therefore
+// generates nothing client-side: passing them explicitly is how two SPs'
+// namespaces are deliberately given the SAME identity, and that distinction
+// would be destroyed by a client-side mint.
 //
 // --suspended defaults to FALSE here — a namespace is normally created live —
 // which is the opposite of `ns set-suspended`'s default; the two flags share a
@@ -138,10 +140,11 @@ func nsSetDevCmd() *cobra.Command {
 
 // nsSetSuspendedCmd is UpdateNamespaceSuspended, the retire/resume flip.
 //
-// --suspended defaults to TRUE (§5.8): retiring is the direction an operator
-// reaches for, and resuming is the explicit `--suspended=false`. The `=`
-// spelling is the only one that works — `--suspended false` would leave
-// `false` as a positional argument, which cobra.NoArgs rejects (§5.0).
+// --suspended defaults to TRUE (dnvctl.md, `ns` — `ctl/ns.go`): retiring is
+// the direction an operator reaches for, and resuming is the explicit
+// `--suspended=false`. The `=` spelling is the only one that works —
+// `--suspended false` would leave `false` as a positional argument, which
+// cobra.NoArgs rejects (dnvctl.md, Conventions).
 //
 // The RPC writes and bumps the revision even when the stored flag already
 // matches, so re-sending the same value is a deliberate way to produce a bump

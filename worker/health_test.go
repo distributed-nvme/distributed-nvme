@@ -79,10 +79,11 @@ func TestHealthDnTable(t *testing.T) {
 		{
 			// PROVISIONING and MISSING are not ERROR rows, so the round is
 			// HL1 row 3's clean one: it CLEARS a set err_epoch and never sets
-			// one. That is the reading HL1 row 4 and architecture.md §9.5
-			// require — "never sets err_epoch, never counts as bad for the
-			// §5.6 capacity keys" ([D15]) — and healthNone here would instead
-			// freeze a stale epoch on a healthy node.
+			// one. That is the reading HL1 row 4 and architecture.md,
+			// Live-state reporting, require — "never sets err_epoch, never
+			// counts as bad for the capacity keys" (Capacity index keys, [D15])
+			// — and healthNone here would instead freeze a stale epoch on a
+			// healthy node.
 			name: "provisioning and missing are not ERROR rows: a clean round",
 			info: &pb.DnInfo{
 				DiskInfo: resStatus(
@@ -353,14 +354,14 @@ func healthTestDeps(t *testing.T) (*deps, *fakeHealthWriter) {
 // seedClusterConf installs a usable stored ClusterConf in the RW21 cache.
 // Every DN health write needs one: MD4 derives the DnCapacity key's bin index
 // from dn_bin_conf, so newDnMonitor refuses to write without one it can use
-// (HL1, §7).
+// (HL1; architecture.md, Common validation).
 func seedClusterConf(d *deps, cid uint64) {
 	setCachedConf(d, cid, testClusterConf())
 }
 
 // setCachedConf installs one conf in the RW21 cache exactly as given, the way
-// the cache itself stores it (§7) — the only way to hand a reader a conf the
-// gateway could not have written.
+// the cache itself stores it (architecture.md, Common validation) — the only
+// way to hand a reader a conf the gateway could not have written.
 func setCachedConf(d *deps, cid uint64, cc *pb.ClusterConf) {
 	d.conf.mu.Lock()
 	d.conf.entries[cid] = cc
@@ -977,8 +978,8 @@ func TestOrphanedNodeEpochIsClearedByTheOwner(t *testing.T) {
 	}
 }
 
-// TestHealthErrorRowCarriesResName checks the res_name attribute of the §12
-// record.
+// TestHealthErrorRowCarriesResName checks the res_name attribute of the "health
+// changed" record (dnv-worker.md, Log records).
 func TestHealthErrorRowCarriesResName(t *testing.T) {
 	logs := captureLogs(t)
 	d, _ := healthTestDeps(t)
@@ -1162,9 +1163,10 @@ func TestHealthSettle(t *testing.T) {
 // that key's bin index from the cluster's dn_bin_conf. A cluster deleted from
 // the RW21 cache between the loop's RW9 gate and this write must NOT be
 // papered over with an invented 0/4/8/12 ladder — that leaves the real key
-// undeleted and writes a duplicate at the wrong bin, which §6.3's bin scan
-// then hands out as an allocation candidate for a DN this very write is
-// flagging unhealthy. The write is skipped and retried next round (RW12).
+// undeleted and writes a duplicate at the wrong bin, which the bin scan of
+// architecture.md, Finding DN candidates, then hands out as an allocation
+// candidate for a DN this very write is flagging unhealthy. The write is
+// skipped and retried next round (RW12).
 func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)
@@ -1192,13 +1194,14 @@ func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 	}
 }
 
-// TestHealthDnWriteRefusesAnInvalidConf is the §7 twin of the test above, for
-// the conf that is PRESENT but unusable. The two are the same failure: MD4
-// needs a bin ladder, and a cluster whose stored dn_bin_conf has none leaves
-// the monitor with nothing to compute the DnCapacity key from. Guessing
-// the ladder would write the capacity key at a bin the rest of the cluster
-// does not address — the same duplicate-key damage the test above describes,
-// from a cluster that is not even deleted — so the write fails instead.
+// TestHealthDnWriteRefusesAnInvalidConf is the twin of the test above under
+// architecture.md, Common validation, for the conf that is PRESENT but
+// unusable. The two are the same failure: MD4 needs a bin ladder, and a cluster
+// whose stored dn_bin_conf has none leaves the monitor with nothing to compute
+// the DnCapacity key from. Guessing the ladder would write the capacity key at
+// a bin the rest of the cluster does not address — the same duplicate-key
+// damage the test above describes, from a cluster that is not even deleted — so
+// the write fails instead.
 //
 // This is not the only worker STM write that takes a ClusterConf — the sp
 // role's model.GrowSlice, model.CreateSpareLeg and model.DrainSpSlice take one
@@ -1213,8 +1216,8 @@ func TestHealthDnWriteRefusesAnInvalidConf(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)
 	// Present in the cache, but with the bin ladder CreateCluster always
-	// writes missing: proto3 gives back all-zero shifts, which §6.2 does not
-	// accept as a ladder.
+	// writes missing: proto3 gives back all-zero shifts, which architecture.md,
+	// DN bins, does not accept as a ladder.
 	setCachedConf(d, 7, testClusterConf(func(cc *pb.ClusterConf) {
 		cc.DnBinConf = nil
 	}))
@@ -1249,7 +1252,7 @@ func TestHealthDnWriteRefusesAnInvalidConf(t *testing.T) {
 }
 
 // TestHealthSpMonitorsCarryTheirIds pins the HL2 monitors' log identities,
-// which the sp role (§8.4) reuses.
+// which the sp role (RW14-RW20) reuses.
 func TestHealthSpMonitorsCarryTheirIds(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)
@@ -1287,9 +1290,10 @@ func TestHealthSpMonitorsCarryTheirIds(t *testing.T) {
 	}
 }
 
-// TestHealthMarkUnknownClearsStaleErrors checks §9.5: while a stream is dead
-// the worker records RES_STATUS_UNKNOWN on its own copy of the info, so a
-// stale ERROR row does not outlive the stream that reported it.
+// TestHealthMarkUnknownClearsStaleErrors checks architecture.md, Live-state
+// reporting: while a stream is dead the worker records RES_STATUS_UNKNOWN on
+// its own copy of the info, so a stale ERROR row does not outlive the stream
+// that reported it.
 func TestHealthMarkUnknownClearsStaleErrors(t *testing.T) {
 	dn := &pb.DnInfo{DiskInfo: resErr("disk", "io")}
 	markDnUnknown(dn)
@@ -1327,8 +1331,8 @@ func TestHealthMarkUnknownClearsStaleErrors(t *testing.T) {
 	}
 }
 
-// TestHealthMonitorAttrsAreStable guards the §12 attribute names the
-// integration suite greps.
+// TestHealthMonitorAttrsAreStable guards the attribute names (dnv-worker.md,
+// Log records) the integration suite greps.
 func TestHealthMonitorAttrsAreStable(t *testing.T) {
 	d, _ := healthTestDeps(t)
 	monitor := newDnMonitor(d, 1, 2, func() string { return "dn0:9520" })
@@ -1441,10 +1445,11 @@ func TestHealthCntlrEveryMap(t *testing.T) {
 }
 
 // TestHealthCntlrFirstErrorOrder pins which ERROR row HL2's verdict names
-// when several are, and so the res_name of the §12 "health changed" record:
-// the maps in CntlrInfo's field order, then the per-td thin maps by ascending
-// td id, the lowest key first within a map. Each named row is cleared in turn
-// and the next one read; map order is random, so the walk is repeated.
+// when several are, and so the res_name of the "health changed" record
+// (dnv-worker.md, Log records): the maps in CntlrInfo's field order, then the
+// per-td thin maps by ascending td id, the lowest key first within a map. Each
+// named row is cleared in turn and the next one read; map order is random, so
+// the walk is repeated.
 func TestHealthCntlrFirstErrorOrder(t *testing.T) {
 	for round := 0; round < 3; round++ {
 		info := &pb.CntlrInfo{}
@@ -1493,7 +1498,8 @@ func TestHealthCntlrFirstErrorOrder(t *testing.T) {
 
 // TestHealthMarkCntlrUnknownCoversEveryMap pins markCntlrUnknown's list
 // against CntlrInfo itself: a dead stream leaves no row of any map, leg rows
-// and every td's thin rows included, at its last reported status (§9.5).
+// and every td's thin rows included, at its last reported status
+// (architecture.md, Live-state reporting).
 func TestHealthMarkCntlrUnknownCoversEveryMap(t *testing.T) {
 	for _, f := range cntlrRowFields(t) {
 		info := &pb.CntlrInfo{}

@@ -1,6 +1,6 @@
-// harness_test.go is the shared machinery of the dnvctl.md §6 unit tests
-// (CT-T1…CT-T5): the recording client, the argv driver, and the output
-// capture every one of them needs.
+// harness_test.go is the shared machinery of the dnvctl unit tests, which pin
+// CT1 to CT5, CT8, CT9 and the rules of dnvctl.md, Conventions: the recording
+// client, the argv driver, and the output capture every one of them needs.
 //
 // The one rule that shapes this file is that dnvctl's configuration lives in
 // a GLOBAL: viper is a process-wide singleton, bindViper binds the invoked
@@ -50,7 +50,7 @@ func TestMain(m *testing.M) {
 }
 
 // ---------------------------------------------------------------------------
-// The recording client (CT-T2)
+// The recording client (the argv → request tests, dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
 // recordingClient implements pb.GatewayClient for the tests. It embeds the
@@ -62,8 +62,8 @@ func TestMain(m *testing.M) {
 // `want` is what makes a wrong RPC loud: a command that drives a method other
 // than the one the row names PANICS instead of quietly recording a request
 // nobody asserts on. `calls` counts every method entry, including the
-// mismatched one, so CT-T4 can prove that a usage error issued NO RPC at all
-// rather than merely returning the right exit code.
+// mismatched one, so the CT5 tests can prove that a usage error issued NO RPC
+// at all rather than merely returning the right exit code.
 type recordingClient struct {
 	pb.GatewayClient
 
@@ -75,10 +75,10 @@ type recordingClient struct {
 	req proto.Message
 	// calls counts every RPC entry.
 	calls int
-	// err, when set, is returned instead of a reply (CT-T4).
+	// err, when set, is returned instead of a reply (CT5).
 	err error
 	// reply, when set, is returned instead of the empty canned reply. Its
-	// type must be the driven method's reply type (CT-T3).
+	// type must be the driven method's reply type (CT4).
 	reply proto.Message
 }
 
@@ -114,7 +114,7 @@ func rpcCall[Req proto.Message, Reply proto.Message](
 // ---------------------------------------------------------------------------
 
 // cliResult is one whole invocation: the process exit code Execute would hand
-// os.Exit, plus the two streams §3.2 makes promises about.
+// os.Exit, plus the two streams CT5 makes promises about.
 type cliResult struct {
 	code   int
 	stdout string
@@ -150,8 +150,8 @@ func runCLI(t *testing.T, client pb.GatewayClient, argv ...string) cliResult {
 }
 
 // runCLIWithDial is runCLI with the dial seam itself supplied by the caller:
-// CT-T4 needs a dial that FAILS (the exit-1 connection branch) and CT-T5
-// needs one that reaches a real gRPC server.
+// the CT5 tests need a dial that FAILS (the exit-1 connection branch) and the
+// trace-id tests (CT2) need one that reaches a real gRPC server.
 func runCLIWithDial(t *testing.T, d dialFunc, argv ...string) cliResult {
 	t.Helper()
 	resetViper(t)
@@ -170,17 +170,19 @@ func runCLIWithDial(t *testing.T, d dialFunc, argv ...string) cliResult {
 }
 
 // gatewayAddress is any dialable-looking address: the dialer seam never
-// resolves it, and CT-T5 is the one test that needs a real one.
+// resolves it, and the trace-id test of CT2 is the one test that needs a
+// real one.
 const gatewayAddress = "127.0.0.1:29840"
 
-// The §7.6 identity plan, so the unit tests and the integration suite assert
-// the same requests.
+// The identity plan of the integration suite (integtest/dnvctl_test.sh), so
+// the unit tests and the integration suite assert the same requests.
 const (
 	itCluster = "itctl"
 	itSp      = "sp0"
 )
 
-// globalArgv prepends the §7.6 global prefix that every sweep step uses.
+// globalArgv prepends the global prefix that every sweep step of the
+// integration suite uses.
 func globalArgv(argv ...string) []string {
 	return append([]string{
 		"--gateway-address", gatewayAddress,
@@ -189,18 +191,18 @@ func globalArgv(argv ...string) []string {
 	}, argv...)
 }
 
-// runArgv is CT-T2's driver: it parses argv (after the §7.6 global prefix)
-// through the real cobra tree and returns the request the named RPC received.
-// Anything that is not a clean exit-0 invocation of exactly that RPC fails the
-// test here, so a row's assertions never run against a request that was not
-// actually sent.
+// runArgv is the argv → request tests' driver: it parses argv (after the
+// suite's global prefix) through the real cobra tree and returns the request
+// the named RPC received. Anything that is not a clean exit-0 invocation of
+// exactly that RPC fails the test here, so a row's assertions never run
+// against a request that was not actually sent.
 func runArgv(t *testing.T, rpc string, argv ...string) proto.Message {
 	t.Helper()
 	return runArgvFull(t, rpc, globalArgv(argv...)...)
 }
 
 // runArgvFull is runArgv without the global prefix, for the tests that own
-// the globals themselves — the §2.1 env precedence cases, and the ones that
+// the globals themselves — the CT9 env precedence cases, and the ones that
 // prove a command works with a global left empty.
 func runArgvFull(t *testing.T, rpc string, argv ...string) proto.Message {
 	t.Helper()
@@ -237,9 +239,10 @@ func wantRequest(t *testing.T, got, want proto.Message) {
 }
 
 // TestRecordingClientGuardsTheMethod is the harness's own test. The "anything
-// else panics" rule of CT-T2 is what stops a row from passing while dnvctl
-// drives some OTHER RPC — the wrong request would simply never be compared —
-// so the guard has to be known to fire rather than assumed to.
+// else panics" rule of the argv → request tests is what stops a row from
+// passing while dnvctl drives some OTHER RPC — the wrong request would simply
+// never be compared — so the guard has to be known to fire rather than
+// assumed to.
 func TestRecordingClientGuardsTheMethod(t *testing.T) {
 	client := &recordingClient{want: "ListClusters"}
 	func() {
@@ -252,13 +255,13 @@ func TestRecordingClientGuardsTheMethod(t *testing.T) {
 		_, _ = client.GetCluster(
 			context.Background(), &pb.GetClusterRequest{})
 	}()
-	// The mis-driven call is still counted, so CT-T4's "no RPC was issued"
-	// assertions cannot be fooled by one.
+	// The mis-driven call is still counted, so the CT5 tests' "no RPC was
+	// issued" assertions cannot be fooled by one.
 	if client.calls != 1 {
 		t.Errorf("calls = %d after a mis-driven RPC, want 1", client.calls)
 	}
 
-	// An empty `want` accepts anything, which is what the CT-T4 cases that
+	// An empty `want` accepts anything, which is what the CT5 cases that
 	// only count calls rely on.
 	open := &recordingClient{}
 	if _, err := open.GetCluster(
@@ -277,7 +280,7 @@ func TestRecordingClientGuardsTheMethod(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // captureOutput redirects the process's stdout and stderr around fn. The two
-// streams are the CLI's contract (§3.2), and emit writes to os.Stdout
+// streams are the CLI's contract (CT5), and emit writes to os.Stdout
 // directly, so a pipe over the file descriptors is the only faithful way to
 // read what an operator would see.
 //

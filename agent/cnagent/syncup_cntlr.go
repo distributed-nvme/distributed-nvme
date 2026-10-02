@@ -9,7 +9,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// msgInvalidStoredConf is the §7 refusal record: a conf member the control
+// msgInvalidStoredConf is the refusal record of architecture.md, Common
+// validation: a conf member the control
 // plane cannot have written reached this agent, and the converge it would have
 // driven did not happen. The string is shared with the dn role and with
 // dnv-worker's own refusal so one grep finds every one of them.
@@ -22,7 +23,8 @@ func (s *CnAgentServer) syncupCntlr(
 	key string,
 	req *pb.SyncupCntlrRequest,
 ) *pb.SyncupCntlrReply {
-	// CN8 gating: SyncupCn introduces the pointer first (§9.1).
+	// CN8 gating: SyncupCn introduces the pointer first (architecture.md,
+	// Common agent rules).
 	cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
 	if cn == nil || !pointerKnown(cn.loadReq(), req.GetCntlrPointer()) {
 		return &pb.SyncupCntlrReply{
@@ -39,7 +41,8 @@ func (s *CnAgentServer) syncupCntlr(
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}
 	}
-	// §7: the control plane stores concrete geometry, so a zero member here
+	// architecture.md, Common validation: the control plane stores concrete
+	// geometry, so a zero member here
 	// is a conf this agent must not build against — data_block_size and
 	// stripe_size become the dm thin-pool's and raid0's own arguments, and
 	// bitmap_chunk_block_cnt the md bitmap's. This is the last point with
@@ -96,7 +99,8 @@ func (s *CnAgentServer) syncupCntlr(
 }
 
 // convergeCntlr is the CN9 converge pass: one sweep top-down, then one build
-// phase bottom-up. That phase order is what implements §11.1 without special
+// phase bottom-up. That phase order is what implements architecture.md,
+// Failover, without special
 // cases — a primary→standby flip is nothing but "the desired set shrank to
 // the standby shape", and standby→primary is "it grew".
 //
@@ -115,7 +119,8 @@ func (s *CnAgentServer) convergeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 ) (*pb.CntlrInfo, *agent.SweepResult) {
-	// The same §7 refusal as syncupCntlr's, for the two entrances that do not
+	// The same refusal (architecture.md, Common validation) as syncupCntlr's,
+	// for the two entrances that do not
 	// come through it: the startup Reconcile, which converges from a file an
 	// older build may have persisted with zeros, and the background connect
 	// retry, which re-enters with the request it already holds. Refusing
@@ -131,7 +136,8 @@ func (s *CnAgentServer) convergeCntlr(
 			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
 			slog.String("error", err.Error()))
 		// Nothing was converged and nothing enumerated, so the pass has no
-		// verdict to give: the reply's code is the §7 refusal, not this.
+		// verdict to give: the reply's code is the refusal of
+		// architecture.md, Common validation, not this.
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
@@ -222,7 +228,8 @@ func (s *CnAgentServer) dropTdKeys(
 }
 
 // ---------------------------------------------------------------------------
-// Build phase, bottom-up (CN9) — §11.1 new_primary steps 1-4
+// Build phase, bottom-up (CN9) — architecture.md, Failover, new_primary
+// steps 1-4
 // ---------------------------------------------------------------------------
 
 func (s *CnAgentServer) build(
@@ -245,7 +252,8 @@ func (s *CnAgentServer) build(
 		}
 	}
 
-	// Groups (CN12) — a standby has none (§3.4). One /sys/block walk serves
+	// Groups (CN12) — a standby has none (architecture.md, Standby cntlr).
+	// One /sys/block walk serves
 	// every group of the pass (Md.Walk).
 	late := false
 	if plan.wantGrp {
@@ -347,7 +355,7 @@ func (s *CnAgentServer) build(
 	if plan.wantPool {
 		// plan.wantPool implies plan.primary, so no role test is needed.
 		for _, tp := range plan.tds {
-			// U4-S1: a created snapshot's ids are in every slice pool
+			// CN14, case 1: a created snapshot's ids are in every slice pool
 			// already, so there is nothing to message and nothing to
 			// quiesce for it — the thin loop's `dmsetup create` is the
 			// whole job.
@@ -486,7 +494,8 @@ func (s *CnAgentServer) build(
 			s.ensureSubsystem(ctx, st, plan, ssp, info)
 		}
 
-		// ANA rewrites to optimized last — §11.1 new_primary step 4. A held
+		// ANA rewrites to optimized last — architecture.md, Failover,
+		// new_primary step 4. A held
 		// namespace that serves keeps the group it has and goes on serving
 		// from the table it keeps. A held one that is parked goes
 		// inaccessible rather than optimized over the dm-error: it may have
@@ -543,7 +552,7 @@ func (s *CnAgentServer) build(
 // own nested per-slice origin-thin suspend, which is dm-thin's own documented
 // requirement and a separate thing.
 //
-// It owns *every* message of an uncreated snapshot (U4-S3): ensureThin never
+// It owns *every* message of an uncreated snapshot (CN14): ensureThin never
 // messages a td with ori_id != 0, so a slice this pass declines — or one
 // whose message failed — simply waits for the next converge, which is still
 // driven by the same `created == false`. A failed message is tolerated
@@ -569,9 +578,10 @@ func (s *CnAgentServer) snapshotPrePass(
 		// The same trigger ensureThin uses. An Info error means "skip":
 		// ensureThin fails that slice with the same error anyway.
 		//
-		// U4-S3: there is no second filter on the origin's own thin device.
+		// CN14: there is no second filter on the origin's own thin device.
 		// The gateway refuses a snapshot of an origin that is not materialized
-		// in every slice pool (§8.7), so `create_snap` can no longer be
+		// in every slice pool (architecture.md, Thin devices), so `create_snap`
+		// can no longer be
 		// inverted with the origin's `create_thin` — and whether *this* CN has
 		// built the origin's dm device is irrelevant to a message the pool
 		// metadata answers.
@@ -682,7 +692,8 @@ func (s *CnAgentServer) reportSuppressed(
 // reportSliceDeferred fills the three pool rows of a provisioning-deferred
 // slice, shared by the converge pass and the probe ([D15]). A *serving* slice
 // never comes here: its dm_pool row must keep carrying the raw `dmsetup
-// status` line the §10.4 auto-grow parses.
+// status` line the thin-pool auto-grow (architecture.md, Automatic reactions)
+// parses.
 func (s *CnAgentServer) reportSliceDeferred(
 	st *cntlrState,
 	sp *slicePlan,

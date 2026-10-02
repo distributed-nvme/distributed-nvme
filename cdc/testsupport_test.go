@@ -23,10 +23,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The shared fixtures of the §8 unit tests: a fake clock for every timer, a
-// fake etcd store for the watcher, a log-record capture for the §7
-// assertions, and — the one that matters — an in-process fake NVMe/TCP host
-// that speaks NP2/NP3 over a loopback socket.
+// The shared fixtures of the unit tests: a fake clock for every timer, a
+// fake etcd store for the watcher, a log-record capture for the assertions
+// on cdc.md, Log records, and — the one that matters — an in-process fake
+// NVMe/TCP host that speaks NP2/NP3 over a loopback socket.
 
 func TestMain(m *testing.M) {
 	// Tests that assert on records install their own capture handler; the
@@ -163,7 +163,7 @@ func (w *fakeWatch) fail(err error) {
 	})
 }
 
-// fakeStore is the etcdStore of the §8 watcher tests.
+// fakeStore is the etcdStore of the watcher tests (WV6).
 type fakeStore struct {
 	mu       sync.Mutex
 	kvs      map[string][]byte
@@ -320,11 +320,12 @@ func (s *fakeStore) nextWatch(t *testing.T) *fakeWatch {
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (§7)
+// Log capture (cdc.md, Log records)
 // ---------------------------------------------------------------------------
 
 // logCapture collects the records emitted while it is installed, so the tests
-// can assert on the normative §7 msg strings and attributes.
+// can assert on the normative msg strings and attributes of
+// cdc.md, Log records.
 type logCapture struct {
 	mu      sync.Mutex
 	records []map[string]any
@@ -606,7 +607,7 @@ func startInstance(t *testing.T, store *fakeStore) *testServer {
 }
 
 // ---------------------------------------------------------------------------
-// The in-process fake NVMe/TCP host (§8)
+// The in-process fake NVMe/TCP host (NP2, NP3)
 // ---------------------------------------------------------------------------
 
 // fakeHost is a minimal NVMe/TCP host: it speaks exactly the NP2/NP3 subset

@@ -9,13 +9,15 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// GetThinDeviceBm / GetLegBm serve the §8.13 gateway reads from a dm-thin
+// GetThinDeviceBm / GetLegBm serve the gateway reads of architecture.md,
+// Bitmap reads, from a dm-thin
 // metadata snapshot (CN25-CN27). They carry no AgentReply, so every failure —
 // unknown cntlr, non-primary role, a missing pool, a failing command — ends
-// the RPC with an Internal status naming the step (§9.1). A pool whose
+// the RPC with an Internal status naming the step (architecture.md, Common
+// agent rules). A pool whose
 // metadata outgrows what thin_dump emits inside CmdSoftTimeout fails the RPC
 // and the caller falls back to a full copy: bitmaps are an optimization, never
-// a correctness input (§8.9).
+// a correctness input (architecture.md, Clones).
 
 // primaryPlanFor resolves the request's cntlr and returns its plan. Both RPCs
 // need the same three checks, and both must run under the CN1 locks — the
@@ -166,7 +168,8 @@ func (s *CnAgentServer) GetLegBm(
 	}, nil
 }
 
-// bitmapWindow resolves the paged read of §8.13: block_cnt = 0 means "to the
+// bitmapWindow resolves the paged read of architecture.md, Bitmap reads:
+// block_cnt = 0 means "to the
 // end", and a window past the end is a request error rather than a silently
 // truncated bitmap.
 func bitmapWindow(

@@ -21,9 +21,9 @@ const (
 	resKeyMigrDstClone  = "migr_dst_clone"
 )
 
-// details strings of the §9.4 side-provisioning protocol. The bits themselves
-// live in the side's on-disk allocation record ([D13]); these are only what a
-// side reports about them.
+// details strings of architecture.md, Side provisioning protocol. The bits
+// themselves live in the side's on-disk allocation record ([D13]); these are
+// only what a side reports about them.
 const (
 	// zeroingDetailsFmt is the RES_STATUS_PROVISIONING progress detail: k of
 	// n logical extents zeroed. PROVISIONING means healthy / not ready / no
@@ -44,10 +44,12 @@ const (
 	tagProvisioningWait = "side provisioning"
 )
 
-// nsModel is the attr_model every DN side export presents (§3.1).
+// nsModel is the attr_model every DN side export presents (architecture.md,
+// Disk node).
 const nsModel = "dnv"
 
-// sideNsid is the single namespace id both sides of a leg export (§3.1).
+// sideNsid is the single namespace id both sides of a leg export
+// (architecture.md, Disk node).
 const sideNsid = 1
 
 // sidePlan is the desired state of one side, derived from its
@@ -74,8 +76,9 @@ type sidePlan struct {
 	// migrSrcRaw is migr_src_conf exactly as received, and migrSrcDeferred
 	// says the destination has not provisioned yet. In that case migrSrc above
 	// is nil, because `dst_provisioned = false` is **exactly
-	// equivalent** to "no migr_src_conf at all" (§11.2): fencing at migration
-	// start would leave the leg with no serving path for the whole zeroing
+	// equivalent** to "no migr_src_conf at all" (architecture.md, Migration):
+	// fencing at migration start would leave the leg with no serving path for
+	// the whole zeroing
 	// window. The only visible difference is that the would-be migr_src_info
 	// rows report PROVISIONING.
 	migrSrcRaw      *pb.SyncupSideRequest_MigrSrcConf
@@ -215,12 +218,14 @@ func (p *sidePlan) migrMetaDmPath() string {
 }
 
 // nsIdentity is the deterministic identity both sides of a leg present, so
-// the CN kernel merges them into one multipath namespace (§3.1, [D1]).
+// the CN kernel merges them into one multipath namespace (architecture.md,
+// Disk node; [D1]).
 func (p *sidePlan) nsIdentity() (string, string) {
 	return common.DnNsIdentity(p.clusterId, p.spId, p.legId)
 }
 
-// cntlidRange is the side's §11.8 slot, which every per-CN export of this
+// cntlidRange is the side's slot (architecture.md, cntlid slots), which every
+// per-CN export of this
 // side carries. nvmet's range includes both ends, so the slot stops one short
 // of the next slot's first id.
 func (p *sidePlan) cntlidRange() (uint32, uint32) {
@@ -232,11 +237,12 @@ func (p *sidePlan) cntlidRange() (uint32, uint32) {
 // linearBacking is the table target of one CN's dm-linear: the LV for the
 // primary CN, the dm-error device for standbys — and, on a migration
 // destination, the dm-clone for the primary once it is live and dm-error for
-// everyone until then (§3.1, §11.2).
+// everyone until then (architecture.md, Disk node and Migration).
 //
 // A migration *source* fences every per-CN linear — the primary's included —
-// onto its dm-error ([D12], §11.2 src step 2). Its namespaces are already
-// AnaGrpIdInaccessible by then, so this only affects stragglers, and erroring
+// onto its dm-error ([D12]; architecture.md, Migration, src step 2). Its
+// namespaces are already AnaGrpIdInaccessible by then, so this only affects
+// stragglers, and erroring
 // a straggler write is the safe outcome: a suspended device would defer it
 // and replay it at resume, possibly after hydration copied that region.
 func (p *sidePlan) linearBacking(cnId uint64, cloneLive bool) string {
@@ -255,8 +261,9 @@ func (p *sidePlan) linearBacking(cnId uint64, cloneLive bool) string {
 	return p.sideDevPath
 }
 
-// preFenceBacking is where a per-CN dm-linear sits during the §11.2 src
-// grace window: still exactly where it sat before the migration started,
+// preFenceBacking is where a per-CN dm-linear sits during the src grace window
+// of architecture.md, Migration, src step 2: still exactly where it sat before
+// the migration started,
 // because the fence suspends the device in place and only swaps the table at
 // the end of the window. Computing it as "linearBacking with no migr_src"
 // keeps the two definitions from drifting, and stays correct for a side that
@@ -272,13 +279,14 @@ func (p *sidePlan) preFenceBacking(cnId uint64, cloneLive bool) string {
 // anaGrpId is the fixed ANA group a CN's namespace belongs to ([D4]).
 func (p *sidePlan) anaGrpId(cnId uint64, cloneLive bool) int {
 	if p.migrSrc != nil {
-		// The source side hands IO over to the destination (§11.2 src
-		// step 1).
+		// The source side hands IO over to the destination (architecture.md,
+		// Migration, src step 1).
 		return common.AnaGrpIdInaccessible
 	}
 	if p.migrDst != nil && !cloneLive {
 		// Destination stacks start on dm-error, all inaccessible
-		// (§11.2 dst step 1; also the SP_LEVEL_NO_MIGRATION state).
+		// (architecture.md, Migration, dst step 1; also the
+		// SP_LEVEL_NO_MIGRATION state).
 		return common.AnaGrpIdInaccessible
 	}
 	if cnId == p.primaryCnId {

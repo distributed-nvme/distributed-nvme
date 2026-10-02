@@ -1,17 +1,19 @@
 // Command fakegateway is the fake dnv gateway of the dnvctl integration suite
-// (doc/dnvctl.md §7.5). It serves all 59 methods of the generated `Gateway`
-// service on a plaintext listener behind the real server interceptors of
-// doc/grpc.md §4, so `fakegateway.log` carries one `grpc server
-// request`/`reply` record per call with the caller's trace id — the suite's
-// evidence of what dnvctl put on the wire (§7.7). The JSON log goes to stderr
+// (doc/dnvctl.md, Integration test plan, The fake gateway, `fakegateway`). It
+// serves all 59 methods of the generated `Gateway` service on a plaintext
+// listener behind the real server interceptors of doc/grpc.md, Wiring, so
+// `fakegateway.log` carries one `grpc server request`/`reply` record per call
+// with the caller's trace id — the suite's evidence of what dnvctl put on the
+// wire (Integration test plan, What a pass means). The JSON log goes to stderr
 // through common's default logger; the script redirects it into
 // `fakegateway.log`.
 //
 // It mirrors integtest/fakeagent's behavior/state/log contract, with the one
-// structural difference doc/dnvctl.md §0 #13 calls out: everything is keyed
-// per *method*, not per object, because this fake models no cluster state. It
-// answers every call with an empty reply unless behavior.json says otherwise,
-// and the suite it serves tests dnvctl only (§7.1) — gateway semantics stay
+// structural difference doc/dnvctl.md calls out (Integration test plan, The
+// fake gateway): everything is keyed per *method*, not per object, because
+// this fake models no cluster state. It answers every call with an empty reply
+// unless behavior.json says otherwise, and the suite it serves tests dnvctl
+// only (Integration test plan, What the suite proves) — gateway semantics stay
 // gateway_test.sh's job.
 //
 // Two files in --dir drive and record the fake:
@@ -25,11 +27,12 @@
 //	               the fake.
 //	state.json     the per-method call count and last request, written
 //	               (temp file + rename) on every call BEFORE any behaviour is
-//	               applied, so a refused or hung call is recorded too — §7.5
-//	               "Request recording (always first)". The requests are
-//	               protojson without EmitUnpopulated, which is what makes the
-//	               §4 token assertions possible: an absent `--rev` is an
-//	               absent `*_rev` key, `--rev 0` is `"*_rev": {}`.
+//	               applied, so a refused or hung call is recorded too —
+//	               "Every call is recorded first" (Integration test plan, The
+//	               fake gateway). The requests are protojson without
+//	               EmitUnpopulated, which is what makes the CT3 token
+//	               assertions possible: an absent `--rev` is an absent `*_rev`
+//	               key, `--rev 0` is `"*_rev": {}`.
 //
 // Methods are keyed exactly as behavior.json and state.json key them: the
 // bare RPC name of `service Gateway` ("ListClusters"), the last element of
@@ -67,17 +70,18 @@ import (
 )
 
 const (
-	// The two files of §7.3's $WORK/fgw directory, next to fakegateway.log.
+	// The two files of the $WORK/fgw directory, next to fakegateway.log.
 	behaviorFileName = "behavior.json"
 	stateFileName    = "state.json"
 
-	// hangPollInterval is how often a hanging call re-reads behavior.json
-	// (§7.5: "poll every 200 ms until the lever clears or the ctx dies").
+	// hangPollInterval is how often a hanging call re-reads behavior.json: a
+	// hang is "held until the lever is cleared or the call's deadline ends"
+	// (Integration test plan, The fake gateway).
 	hangPollInterval = 200 * time.Millisecond
 )
 
 // ---------------------------------------------------------------------------
-// The method type registry (§7.5)
+// The method type registry (Integration test plan, The fake gateway)
 // ---------------------------------------------------------------------------
 
 // methodTypes is one method's request and reply message type. behavior.json's
@@ -138,9 +142,9 @@ func newGatewayMethodTypes() map[string]methodTypes {
 }
 
 // newReply returns an empty reply message of one method — the canned default
-// of §7.5 ("absent ⇒ the canned default, an empty reply message"), which
-// dnvctl's EmitUnpopulated rendering then fills out client-side. An unknown
-// method returns nil; serve turns that into an Internal status.
+// of Integration test plan, The fake gateway ("otherwise an empty reply"),
+// which dnvctl's EmitUnpopulated rendering then fills out client-side. An
+// unknown method returns nil; serve turns that into an Internal status.
 func newReply(method string) proto.Message {
 	types, ok := gatewayMethodTypes[method]
 	if !ok {
@@ -159,11 +163,11 @@ func newRequest(method string) proto.Message {
 }
 
 // ---------------------------------------------------------------------------
-// gRPC status codes (§7.5: `code` is UPPER_SNAKE)
+// gRPC status codes (`code` is UPPER_SNAKE, CT5's spelling)
 // ---------------------------------------------------------------------------
 
 // codeNames spells every gRPC status code the way behavior.json's `code`
-// writes it and dnvctl's §3.2 error line renders it: UPPER_SNAKE, the
+// writes it and dnvctl's CT5 error line renders it: UPPER_SNAKE, the
 // canonical proto enum spelling. This is integtest/gatewayctl's table, kept
 // identical on purpose — a test author copying a code out of a dnvctl error
 // line must be able to paste it into behavior.json.
@@ -216,7 +220,7 @@ func codeName(code codes.Code) string {
 	return fmt.Sprintf("CODE_%d", uint32(code))
 }
 
-// parseCode accepts the UPPER_SNAKE spelling of §7.5, case-insensitively and
+// parseCode accepts the UPPER_SNAKE spelling (CT5), case-insensitively and
 // with surrounding space trimmed (the fakeagent parseResStatus recipe). An
 // unknown spelling is an error, which makes the whole file malformed: a
 // silently misspelled code would otherwise fail a test far from its cause.
@@ -230,14 +234,14 @@ func parseCode(name string) (codes.Code, error) {
 }
 
 // ---------------------------------------------------------------------------
-// behavior.json (§7.5)
+// behavior.json (Integration test plan, The fake gateway)
 // ---------------------------------------------------------------------------
 
 // methodBehavior is one entry of behavior.json's "methods" map and also the
 // shape of its "default" entry (which may not carry a `reply`, see validate).
 //
 // Every lever is a pointer so "absent" and "set to the zero value" stay
-// distinguishable: that is what lets the §7.5 merge pick the most specific
+// distinguishable: that is what lets the merge pick the most specific
 // value KEY BY KEY, e.g. `methods.X.hang = false` switching off a
 // `default.hang = true` while `default.code` still applies.
 type methodBehavior struct {
@@ -263,7 +267,8 @@ type behaviorFile struct {
 // which has no reply type of its own.
 //
 // An unparseable code or reply makes the whole file malformed, which the
-// caller logs and ignores, keeping the previous behaviour (§7.5).
+// caller logs and ignores, keeping the previous behaviour (Integration test
+// plan, The fake gateway).
 func (mb *methodBehavior) validate(where string, reply proto.Message) error {
 	if mb == nil {
 		return nil
@@ -285,9 +290,10 @@ func (mb *methodBehavior) validate(where string, reply proto.Message) error {
 		return fmt.Errorf(
 			"%s: \"reply\" belongs under \"methods\", not \"default\"", where)
 	}
-	// Strict on purpose (§7.5 "reply is strict protojson of the method's
-	// reply type"): a reply field that does not exist is a test bug, and a
-	// dropped field would show up as a puzzling assertion failure instead.
+	// Strict on purpose ("an injected reply, strict protojson of the
+	// method's reply type", Integration test plan, The fake gateway): a reply
+	// field that does not exist is a test bug, and a dropped field would show
+	// up as a puzzling assertion failure instead.
 	if err := protojson.Unmarshal(mb.Reply, reply); err != nil {
 		return fmt.Errorf("%s: reply: %w", where, err)
 	}
@@ -329,7 +335,7 @@ func parseBehavior(data []byte) (*behaviorFile, error) {
 	return parsed, nil
 }
 
-// resolvedBehavior is what one method's levers come to after the §7.5 merge.
+// resolvedBehavior is what one method's levers come to after the merge.
 type resolvedBehavior struct {
 	code    codes.Code
 	message string
@@ -340,12 +346,12 @@ type resolvedBehavior struct {
 }
 
 // ---------------------------------------------------------------------------
-// state.json (§7.5)
+// state.json (Integration test plan, The fake gateway)
 // ---------------------------------------------------------------------------
 
 // methodState is one method's record: how many calls arrived and what the
 // last one carried. LastRequest holds protojson so the file stays readable
-// and jq-able — §7.7 reads it as `.methods["<Rpc>"].last_request`.
+// and jq-able — the suite reads it as `.methods["<Rpc>"].last_request`.
 type methodState struct {
 	Count       uint64          `json:"count"`
 	LastRequest json.RawMessage `json:"last_request,omitempty"`
@@ -408,10 +414,11 @@ func (g *fakeGateway) refreshLocked(ctx context.Context) {
 	g.reloadStateLocked(ctx)
 }
 
-// reloadBehaviorLocked implements the §7.5 "reloaded at the top of every
-// request when mtime *or size* changed" rule. Size is part of the guard
-// because a same-second rewrite of a different length must still be noticed.
-// A malformed file is logged once per mtime and ignored, keeping the previous
+// reloadBehaviorLocked implements the "re-read whenever it changes" rule of
+// Integration test plan, The fake gateway: reloaded at the top of every
+// request when mtime *or size* changed. Size is part of the guard because a
+// same-second rewrite of a different length must still be noticed. A
+// malformed file is logged once per mtime and ignored, keeping the previous
 // behaviour.
 func (g *fakeGateway) reloadBehaviorLocked(ctx context.Context) {
 	path := filepath.Join(g.dir, behaviorFileName)
@@ -520,10 +527,11 @@ func (g *fakeGateway) reloadStateLocked(ctx context.Context) {
 }
 
 // saveStateLocked writes state.json through a temp file and a rename, so the
-// script's concurrent reader never sees a partial file (§7.5). The resulting
-// mtime is remembered as "our own last write" for reloadStateLocked. Every
-// failure is logged and swallowed: a fake that cannot write its state still
-// answers, and the missing record fails the assertion that needed it.
+// script's concurrent reader never sees a partial file (Integration test plan,
+// The fake gateway). The resulting mtime is remembered as "our own last write"
+// for reloadStateLocked. Every failure is logged and swallowed: a fake that
+// cannot write its state still answers, and the missing record fails the
+// assertion that needed it.
 func (g *fakeGateway) saveStateLocked(ctx context.Context) {
 	path := filepath.Join(g.dir, stateFileName)
 	data, err := json.MarshalIndent(&stateFile{Methods: g.state}, "", "  ")
@@ -566,14 +574,15 @@ func (g *fakeGateway) saveStateLocked(ctx context.Context) {
 	}
 }
 
-// recordLocked implements §7.5's "Request recording (always first)": the
-// count and the request land before any behaviour is applied, so a call that
-// is then refused or left hanging is still on the record. §7.12's error
-// cases and §7.13's hang both depend on that.
+// recordLocked implements "Every call is recorded first" (Integration test
+// plan, The fake gateway): the count and the request land before any
+// behaviour is applied, so a call that is then refused or left hanging is
+// still on the record. The errors case and the transport case's hang both
+// depend on that (Integration test plan, Cases).
 //
 // The request is protojson with UseProtoNames and WITHOUT EmitUnpopulated:
 // snake_case keys, and an unset message stays an absent key. That is the
-// whole point of the §4 token assertions — no `--rev` means no `sp_rev` key,
+// whole point of the CT3 token assertions — no `--rev` means no `sp_rev` key,
 // `--rev 0` means `"sp_rev": {}`.
 func (g *fakeGateway) recordLocked(
 	ctx context.Context, method string, req proto.Message,
@@ -596,7 +605,7 @@ func (g *fakeGateway) recordLocked(
 }
 
 // resolveLocked merges behavior.json down to one method's levers, most
-// specific wins KEY BY KEY (§7.5): the built-in default, then "default",
+// specific wins KEY BY KEY: the built-in default, then "default",
 // then "methods.<Rpc>". Each key is taken from the most specific entry that
 // set it, so `default` can force a code while one method overrides only the
 // message.
@@ -626,16 +635,17 @@ func (g *fakeGateway) resolveLocked(method string) resolvedBehavior {
 		apply(g.beh.Methods[method])
 	}
 	if !messageSet {
-		// §7.5: message defaults to "behavior.json <code>". Computed even
+		// The message defaults to "behavior.json <code>". Computed even
 		// for OK so the error path has nothing left to decide.
 		resolved.message = "behavior.json " + codeName(resolved.code)
 	}
 	return resolved
 }
 
-// waitForHang applies behavior.json's `hang` lever (§7.5). It is how §7.13
-// case D step 2 manufactures a DEADLINE_EXCEEDED: a listening gateway that
-// never answers, distinct from a closed port, which fails instantly.
+// waitForHang applies behavior.json's `hang` lever (Integration test plan,
+// The fake gateway). It is how the transport case manufactures a
+// DEADLINE_EXCEEDED under CT2's deadline: a listening gateway that never
+// answers, distinct from a closed port, which fails instantly.
 //
 // The lock is never held while waiting, so one hung call cannot wedge the
 // rest of the process, and behavior.json is re-read on every poll, so the
@@ -660,8 +670,8 @@ func (g *fakeGateway) waitForHang(ctx context.Context, method string) error {
 	}
 }
 
-// call is the whole §7.5 per-call pipeline, in the order the section fixes:
-// reload, record, hang, code, reply.
+// call is the whole per-call pipeline of Integration test plan, The fake
+// gateway, in the order it fixes: reload, record, hang, code, reply.
 func (g *fakeGateway) call(
 	ctx context.Context, method string, req proto.Message,
 ) (proto.Message, error) {
@@ -685,8 +695,8 @@ func (g *fakeGateway) call(
 	if resolved.reply != nil {
 		// Cloned, never handed out directly: the parse is cached until the
 		// file changes, so two concurrent calls would otherwise share one
-		// message with whatever the grpc codec and the §4 interceptor do
-		// to it.
+		// message with whatever the grpc codec and the server interceptor
+		// (grpc.md, Wiring) do to it.
 		return proto.Clone(resolved.reply), nil
 	}
 	return newReply(method), nil
@@ -716,11 +726,13 @@ func serve[RepT proto.Message](
 }
 
 // ---------------------------------------------------------------------------
-// The 59 Gateway methods (§7.5), in pb.Gateway_ServiceDesc order
+// The 59 Gateway methods, in pb.Gateway_ServiceDesc order (Integration test
+// plan, The fake gateway)
 // ---------------------------------------------------------------------------
 //
 // Every one of them is the same one-liner: the fake models no cluster state
-// (§0 #13), so the method name is all that separates them.
+// (Integration test plan, The fake gateway), so the method name is all that
+// separates them.
 
 func (g *fakeGateway) CreateCluster(
 	ctx context.Context, req *pb.CreateClusterRequest,
@@ -1096,7 +1108,8 @@ func main() {
 	}
 
 	// One trace id for the process's own records; per-call records carry the
-	// caller's, extracted from the metadata by the §4 interceptor.
+	// caller's, extracted from the metadata by the server interceptor (grpc.md,
+	// Wiring).
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
 	fake, err := newFakeGateway(ctx, *dir)
 	if err != nil {
@@ -1108,11 +1121,12 @@ func main() {
 	}
 	// The server interceptors are not optional: fakegateway.log carries the
 	// method, the caller's trace id and the interceptor's rendering of every
-	// request and reply (doc/grpc.md §4, dnvctl.md §7.5/§7.7). The suite reads
-	// its trace-id evidence there; request EQUALITY it asserts against
+	// request and reply (doc/grpc.md, Wiring; dnvctl.md, Integration test
+	// plan, The fake gateway and What a pass means). The suite reads its
+	// trace-id evidence there; request EQUALITY it asserts against
 	// state.json's last_request. The stream twin is installed even though
-	// every Gateway RPC is unary — the §4 chain is one rule, and a fake that
-	// half-applies it is a fake that stops being evidence.
+	// every Gateway RPC is unary — the Wiring chain is one rule, and a fake
+	// that half-applies it is a fake that stops being evidence.
 	server := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),

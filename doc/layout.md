@@ -1,456 +1,163 @@
-# layout.md — Repository Layout (dnv)
+# layout.md — Repository Layout
 
-Status: **normative**. Companion to `architecture.md` (design), `log.md`,
-`osclient.md`, `grpc.md`, `dnagent.md` (component specs). This document fixes where every
-package and file lives, so that all specs and implementers agree on paths and
-import strings. The project is built from scratch against this layout; the
-design inputs are `architecture.md`, `schema.proto`, `constants.go` and
-`name_fmt.go`.
+This document owns the layout of the repository: the module identity, the
+directory tree with the role of every Go package directory, the dependency
+rules between the packages, protobuf generation, and the rules every
+binary's `main` follows, so that the documents and the imports agree on every
+package path. It leans on `dependencies.md` for the module's direct
+dependencies, on `architecture.md` for the system the packages implement, and
+on the component documents for what each package holds and which of its files
+holds what.
 
-## 1. Module identity
+## Module identity
 
-* Repository: `https://github.com/distributed-nvme/distributed-nvme`
-* Repo root folder: `distributed-nvme/` = Go module root.
-* `go.mod`: `module github.com/distributed-nvme/distributed-nvme`, `go 1.26.5`
-  (feature floors: `log/slog` 1.21, `exec.Cmd.Cancel`/`WaitDelay` 1.20, the
-  `crypto/rand.Read` never-fails guarantee 1.24 — `go.mod` is authoritative).
-* Direct dependencies today (must match `go.mod`): `google.golang.org/grpc`,
-  `google.golang.org/protobuf`, `golang.org/x/sync`,
-  `github.com/spf13/viper` (flags/config/env per `architecture.md` §13) and
-  `github.com/spf13/cobra` (the `dnv-agent` and `dnvctl` subcommand trees,
-  `dnagent.md` §3) — the last two entered `go.mod` with `cmd/dnv-agent` — and
-  `github.com/spf13/pflag`, cobra's flag package, which `ctl/` imports directly
-  for the shared `*pflag.FlagSet` helpers behind its repeated flag groups.
-  `go.etcd.io/etcd/client/v3` (the v3.6 line, incl. `concurrency`) entered
-  `go.mod` with `etcdutil/` (§4, `dnv-worker.md` §3), and brought
-  `go.etcd.io/etcd/api/v3` (`rpctypes`, for EU3's `ErrCompacted` report) and
-  `go.uber.org/zap` (only `zap.NewNop()`, the silenced etcd client logger
-  that `log.md` §7's acceptance grep pins) with it as unavoidable direct
-  imports.
+The repository, https://github.com/distributed-nvme/distributed-nvme, is one
+Go module, and the repository root is the module root. `go.mod` declares the
+module path `github.com/distributed-nvme/distributed-nvme`, the prefix of
+every internal import string. `go.mod` also pins the Go version and is
+authoritative for it: the code relies on standard-library features that
+version provides (`log.md`, Placement; `osclient.md`, Scope and placement).
+The direct dependencies, and why each is allowed, are `dependencies.md`,
+Direct dependencies.
 
-Library packages sit directly under the module root (no `pkg/` or
-`internal/` prefix), so the file paths used by the component specs —
+Library packages sit directly under the module root, with no "pkg/" or
+"internal/" prefix, so the file paths the component documents use —
 `common/log.go`, `common/osclient.go`, `common/interceptor.go` — are literal
-repository paths. Binaries live one-per-directory under `cmd/`.
+repository paths. Binaries live one per directory under `cmd/`.
 
-## 2. Directory tree
+## Directory tree
 
-```
-distributed-nvme/                      # repo root = module root
-├── go.mod                             # module github.com/distributed-nvme/distributed-nvme
-├── go.sum
-├── .clang-format                      # proto style for `make fmt` (4-space indent, no column limit)
-├── Makefile                           # targets: gen, fmt, build, vet, test
-├── README.md
-├── LICENSE
-├── .gitignore                         # ignores bin/
-├── bin/                               # build outputs (never committed):
-│                                      # dnv-gateway, dnv-worker, dnv-agent, dnv-cdc, dnvctl
-├── doc/                               # the documents driving the implementation
-│   ├── architecture.md
-│   ├── layout.md                      # this document
-│   ├── log.md
-│   ├── osclient.md
-│   ├── grpc.md
-│   ├── dnagent.md                     # dnv-agent: agent/ (shared), agent/dnagent/, cmd/dnv-agent
-│   ├── cnagent.md                     # dnv-agent cn: agent/cnagent/ (builds on dnagent.md §2/§3)
-│   ├── dnv-worker.md                  # dnv-worker: worker/, model/, etcdutil/, cmd/dnv-worker + its integration suite
-│   ├── cdc.md                         # dnv-cdc: cdc/, cmd/dnv-cdc + its integration suite
-│   ├── gateway.md                     # Gateway: gateway/, cmd/dnv-gateway + its integration suite
-│   ├── dnvctl.md                      # dnvctl: ctl/, cmd/dnvctl + its integration suite
-│   ├── dnagent_integtest.md           # the on-hardware dn agent suite
-│   ├── cnagent_integtest.md           # the on-hardware cn agent suite
-│   ├── e2e_integtest.md               # the on-hardware end-to-end suite (all five binaries, ten guests)
-│   ├── ThinDeviceCreated.md           # the ThinDevice.created change record (normative)
-│   └── dependencies.md                # direct-dependency ledger (must match go.mod)
-├── pb/                                # protobuf: source + generated code
-│   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
-│   ├── schema.pb.go                   # generated, committed
-│   └── schema_grpc.pb.go              # generated, committed
-├── common/                            # the shared leaf package (package common)
-│   ├── constants.go                   # from the design inputs + LogStrDataLimit, DefaultOsClientLimit
-│   ├── name_fmt.go                    # NameFmt helpers; architecture.md §4 is normative where the input file differs
-│   ├── name_parse.go                  # ParseDmName/ParseNqn, the strict inverses of the dm-name and NQN formats, + the IsDnvNqn namespace test (cnagent.md §2.1)
-│   ├── log.go                         # per log.md
-│   ├── osclient.go                    # per osclient.md (+ the exported raw block helpers of §4.5.1)
-│   ├── osclient_fake.go               # per osclient.md §6
-│   └── interceptor.go                 # per grpc.md
-├── etcdutil/                          # central etcd helpers of log.md §5.3 (dnv-worker.md §3)
-│   └── etcdutil.go                    # typed Get/Put/Delete/Range/RangeKeys/WatchTyped + STM runners, logging inside
-├── model/                             # the §5 etcd data model as Go (dnv-worker.md §4)
-│   ├── keys.go                        # §5.3 key formats, prefixes, parsers; §5.2 cluster_id
-│   ├── stm.go                         # the typed SP snapshot loader
-│   ├── capacity.go                    # §5.6 capacity-key maintenance
-│   ├── alloc.go                       # §6.3/§6.4 candidate scans
-│   ├── ops.go                         # the internal §8/§10.4 mutations shared by gateway and worker
-│   ├── drain.go                       # the three sp-drain ops of dnv-worker.md §11.6 (DrainSpCntlrs, DrainSpSlice, FinishSpDelete)
-│   └── clonedrain.go                  # the two clone-drain ops of dnv-worker.md §11.7 (DrainCloneBm, FinishCloneDelete)
-├── gateway/                           # Gateway service implementation
-│   ├── server.go                      # grpc.Server bootstrap + interceptor wiring (serverOptions)
-│   ├── traceid.go                     # the gateway.md §0 #6 trace-id mint: the ensureTraceId* server interceptors chained ahead of the grpc.md §4 pair
-│   ├── common.go                      # the handler helpers the RPC-group files share, among them: GW7 error mapping, resolve/open + token checks + rev bumps, id minting, pagination, the per-call agent dial (withAgentConn)
-│   ├── cluster.go                     # §8.1   (one file per §8 RPC group:)
-│   ├── disknode.go                    # §8.2
-│   ├── controllernode.go              # §8.3
-│   ├── storagepool.go                 # §8.4, §8.5
-│   ├── cntlr.go                       # §8.6
-│   ├── thindevice.go                  # §8.7
-│   ├── subsystem.go                   # §8.8
-│   ├── clone.go                       # §8.9
-│   ├── transfer.go                    # §8.10
-│   ├── migration.go                   # §8.11
-│   ├── spareleg.go                    # §8.12
-│   ├── bitmap.go                      # §8.13
-│   ├── alloc.go                       # §6 bins / candidate scans
-│   └── validate.go                    # §7 common validation
-├── worker/                            # dnv-worker.md §6-§11
-│   ├── worker.go                      # Run/Config, deps, seed mint, the worker-lifecycle §12 msg constants
-│   ├── vote.go                        # §6 vote worker: registry, heartbeat, grace timers, tickets, shard-worker lifecycle
-│   ├── shard.go                       # §7 shard worker: scan+watch of one rev prefix, revision-worker lifecycle
-│   ├── revision.go                    # §8.1 per-object loop: Check stream, rounds, syncup trigger
-│   ├── conn.go                        # the RW7 refcounted agent-connection cache
-│   ├── dnrole.go                      # §8.2 SyncupDn builder + node health
-│   ├── cnrole.go                      # §8.3 SyncupCn builder + node health
-│   ├── sprole.go                      # §8.4 SP snapshot, fan-out, provisioned/created flips
-│   ├── clusterconf.go                 # §8.5 ClusterConf cache
-│   ├── health.go                      # §9 err_epoch bookkeeping (through model)
-│   ├── bmpush.go                      # §10 Push*Bitmap calls, chunk-address bookkeeping
-│   ├── reaction.go                    # §11 automatic reactions
-│   ├── drain.go                       # §11.6 sp drain: the one drain step a latched SP runs per pass instead of the reactions (SPD1-SPD14)
-│   └── clonedrain.go                  # §11.7 clone drain: one step per latched clone, alongside the reactions (CLD1-CLD12)
-├── agent/                             # shared dn/cn mechanism (dnagent.md §2)
-│   ├── agent.go                       # bootstrap: reconcile-then-serve, grpc server wiring
-│   ├── store.go                       # local store helper (Local*Path files, load-on-start)
-│   ├── revision.go                    # §9.1 revision gate + reply codes
-│   ├── conf.go                        # §7 stored-conf validators, the agent-side copy (dnagent.md §2.1)
-│   ├── locks.go                       # node/object lock hierarchy (dnagent.md §2.6)
-│   ├── resinfo.go                     # ResInfo/status-epoch tracker (§9.5)
-│   ├── bitmap.go                      # §9.6 chunk store + §11.4 math skeleton
-│   ├── sweep.go                       # §9.8 teardown by sweep, the part both roles share: leftover kinds, SweepResult, its record and reply
-│   ├── waitbudget.go                  # WaitBudget, one pass's bounded wait (cnagent.md CN10, dnagent.md DN13)
-│   ├── oswrap.go                      # the shared command/configfs plumbing under the three wrappers below
-│   ├── dm.go                          # dmsetup wrapper + table builders, blkdiscard, lsblk
-│   ├── nvmet.go                       # nvmet configfs wrapper, fixed ANA groups [D4]
-│   ├── nvmehost.go                    # nvme connect/disconnect/list-subsys wrapper
-│   ├── dnagent/                       # DiskNodeAgent policy (§9.2, dnagent.md §4): server.go,
-│   │                                  # diskmeta.go ([D13] on-disk format + allocators),
-│   │                                  # syncup_dn.go, syncup_side.go, plan.go (the per-side
-│   │                                  # plan: resource keys, dm/nvmet names, ANA groups),
-│   │                                  # fence.go (the [D12] bounded src-cutover fence of §11.2),
-│   │                                  # push_migr_bm.go, check.go (§9.7), migr.go, probe.go,
-│   │                                  # zeroing.go (§9.4 background side zeroing),
-│   │                                  # sweep.go (the DN6 teardown sweep of §9.8)
-│   └── cnagent/                       # ControllerNodeAgent policy (§9.3, cnagent.md §4): server.go,
-│                                      # plan.go, syncup_cn.go, syncup_cntlr.go, push_clone_bm.go,
-│                                      # check.go (§9.7), leg.go, healthcheck.go (the CN11 probers
-│                                      # and their direct-syscall IO, osclient.md §4.5.1), md.go,
-│                                      # clonemeta.go (the CN base state plus the clone-metadata
-│                                      # slot allocator over the one loop device — no LVM anywhere),
-│                                      # pool.go, td.go, clone.go, xfer.go,
-│                                      # dmutil.go (the shared dm ensure/probe helpers),
-│                                      # thinbm.go (the thin-metadata reader and the §11.4
-│                                      # bitmap math), bitmapread.go (the GetThinDeviceBm /
-│                                      # GetLegBm RPCs), probe.go,
-│                                      # sweep.go (the CN21 teardown sweep of §9.8)
-├── cdc/                               # §12 discovery controller (cdc.md §1)
-│   ├── cdc.go                         # Run, the dependencies, the process wiring
-│   ├── watch.go                       # the WV etcd watcher: scan + watch of {p} cdc
-│   ├── view.go                        # the DS view registry: per-host records, GENCTR
-│   ├── logpage.go                     # DS3/DS9 record rendering + log-page snapshots
-│   ├── server.go                      # NP1 listener, one goroutine per connection
-│   ├── conn.go                        # NP4-NP12 admin-queue state machine
-│   └── pdu.go                         # NP2/NP3 NVMe/TCP PDU codec
-├── ctl/
-│   ├── root.go                        # dnvctl root: globals, dial, emit (dnvctl.md §2-§3)
-│   └── cluster.go, dn.go, cn.go, sp.go, cntlr.go, td.go, ss.go, ns.go, clone.go, xfer.go, migr.go, spare.go
-│                                      # one noun group each (dnvctl.md §5); the §11.4 copier is future work outside dnvctl
-├── integtest/                         # integration suites, driven over ssh against remote hosts (the agent suites need passwordless sudo for real dm/md/nvmet/nvme-tcp over loop devices, the cdc suite for real nvmet/nvme-tcp over dm-zero, the e2e suite for both — dm/md/nvmet/nvme-tcp over loop devices on its dn and cn guests, `nvme connect` and the autoconnector mask on its two hosts; the worker, gateway and dnvctl suites need no root, and neither does the e2e suite's control-plane guest, which is where its etcd, gateway, worker, cdc and dnvctl all run): dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7, e2e_integtest.md
-│   ├── dnagent_test.sh                # dn agent suite
-│   ├── dnagentctl/main.go             # the dn agent suite's gRPC driver
-│   ├── cnagent_test.sh                # cn agent suite
-│   ├── cnagentctl/main.go             # the cn agent suite's gRPC driver
-│   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
-│   ├── workerctl/main.go              # the etcd driver that plays the gateway (+ the six gateway.md §2.4 stand-ins: the two worker flips and the two worker drains, plus the two gateway delete latches the worker suite uses in place of DeleteStoragePool/DeleteClone)
-│   ├── fakeagent/main.go              # fake dn/cn agents driven by a behavior file
-│   ├── cdc_test.sh                    # cdc suite (four servers, real etcd, real nvmet, real hosts)
-│   ├── cdcctl/main.go                 # the etcd driver that plays gateway + worker for CdcEntry keys
-│   ├── gateway_test.sh                # gateway suite (one server, real etcd, 3 gateways, fake agents)
-│   ├── gatewayctl/                    # the gRPC driver of the gateway suite (one subcommand per RPC + `race`):
-│   │                                  # main.go (globals, `race`, the --expect exit contract, the subcommand registry) + the
-│   │                                  # gateway.md §10.8 subcommands' setup functions split by scope — cmd_node.go (cluster/dn/cn + ping), cmd_sp.go (sp + cntlr),
-│   │                                  # cmd_vol.go (td/ss/ns/xfer), cmd_copy.go (clone/migr/spare + the bitmap reads)
-│   ├── dnvctl_test.sh                 # dnvctl suite (one VM, no sudo: the real CLI against a fake gateway)
-│   ├── fakegateway/main.go            # all 59 Gateway methods behind a behavior file (dnvctl.md §7.5)
-│   ├── e2e_test.sh                    # end-to-end suite (ten guests, no fakes: real etcd + gateway + worker + cdc, many dn agents per VM, one cn agent per VM, two kernel NVMe hosts; drives the shipped dnvctl only, and brings no driver of its own)
-│   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
-└── cmd/
-    ├── dnv-gateway/main.go
-    ├── dnv-worker/main.go
-    ├── dnv-agent/main.go              # dispatches the dn|cn subcommand
-    ├── dnv-cdc/main.go
-    └── dnvctl/main.go                 # first statement: common.SetLogLevel(slog.LevelWarn)
-```
+The table names every Go package directory of the repository by its path,
+with its role, and the other entries that matter. A package directory that
+arrives, leaves or moves changes the table in the same commit.
 
-File lists inside `gateway/`, `worker/`, `agent/*`, `ctl/` are the
-recommended split (they mirror the section structure of `architecture.md`);
-implementers MAY split differently but MUST keep the package boundaries.
+Package boundaries are binding; the split of a package into files is not:
+implementers MAY split a package's files differently but MUST keep the
+package boundaries. Which file holds what is the package's own concern, and a
+component document names its package's files where its reader needs them.
 Unit tests are colocated `_test.go` files inside each package.
 
-Whatever the split, the tree names every non-test `.go` file of the repository
-and no other, so a file that arrives, leaves or moves changes the tree in the
-same commit: §7 item 7's lint fails on a Go file the tree does not name and on
-one it names that does not exist. A directory's Go files are named under it, in
-its comment (`agent/dnagent/`) or through a path (`dnagentctl/main.go`), never
-by the directory alone: a directory entry that names no file claims none.
+| path | role |
+|---|---|
+| `go.mod`, `go.sum` | the module (Module identity) and its requirements (`dependencies.md`, Direct dependencies) |
+| `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), and vet and test over the whole module |
+| `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, and `glossary.md`, the project vocabulary |
+| `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and the built drivers and the etcd download cache in `integtest/bin/` |
+| `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation) |
+| `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |
+| `etcdutil/` | the one door to etcd: typed reads, writes, scans and watches and the STM runners over one client, with the protobuf (un)marshaling and the etcd log records inside (`dnv-worker.md`, EU1 to EU7) |
+| `model/` | the etcd data model as Go, shared by the gateway, the worker and dnv-cdc: key formats and their parsers, the `cluster_id` derivation, the typed SP snapshot loader, capacity-key maintenance, the allocator's candidate scans, the mutations the gateway and the worker share, and the worker's sp-drain and clone-drain steps (`dnv-worker.md`, MD1 to MD9) |
+| `gateway/` | dnv-gateway, the stateless server of the `Gateway` gRPC service: serving and the trace-id mint, the shared handler helpers, the handlers in one file per resource group, allocation and request validation (`gateway.md`) |
+| `worker/` | dnv-worker: the vote worker, the shard workers, the per-object revision workers with their dn, cn and sp roles, the agent-connection cache, the `ClusterConf` cache, health bookkeeping, the bitmap pushes, the automatic reactions and the sp and clone drains (`dnv-worker.md`) |
+| `agent/` | the mechanism both agent roles share: bootstrap, the local store, the revision gate, the stored-conf validators, the lock hierarchy, `ResInfo` tracking, the bitmap-chunk store, the part of teardown by sweep both roles share, the per-pass wait budget, and the dm, nvmet and nvme-host wrappers (`dnagent.md`, SH1 to SH27) |
+| `agent/dnagent/` | the dn role's policy, the `DiskNodeAgent` service: which disk-metadata records, dm tables and nvmet objects a disk node builds, and when (`dnagent.md`) |
+| `agent/cnagent/` | the cn role's policy, the `ControllerNodeAgent` service: which leg connections, md arrays, thin pools, dm and nvmet objects a controller node builds, and when, with the wrappers of the tools only the cn runs (`cnagent.md`) |
+| `cdc/` | dnv-cdc: the etcd watcher of the `CdcEntry` keys, the per-host view registry, the discovery-log rendering and the NVMe/TCP discovery controller (`cdc.md`) |
+| `ctl/` | dnvctl: the cobra command tree, one file per noun group, and in `ctl/root.go` what the groups share — the viper binding, the dial, the result rendering and the exit codes (`dnvctl.md`) |
+| `integtest/` | the integration suites, one shell script per suite, beside their drivers and fakes (below) |
+| `integtest/dnagentctl/` | the gRPC driver of a real dn agent, which both agent suites use |
+| `integtest/cnagentctl/` | the gRPC driver of the cn agent suite |
+| `integtest/fakeagent/` | fake dn and cn agents driven by a behavior file, which the worker and gateway suites run in place of real agents |
+| `integtest/workerctl/` | the etcd driver that plays the gateway in the worker suite, writing through `model` and `etcdutil` as a gateway's STM would; the gateway suite reads etcd back through it and plays the worker through it |
+| `integtest/cdcctl/` | the etcd driver that plays the gateway and the worker for the `CdcEntry` keys in the cdc suite |
+| `integtest/gatewayctl/` | the gRPC driver of the gateway suite, one subcommand per `Gateway` RPC |
+| `integtest/fakegateway/` | every `Gateway` method behind a behavior file, which the dnvctl suite runs in place of a gateway |
+| `cmd/dnv-gateway/` | the `main` of `dnv-gateway`, the control-plane API server |
+| `cmd/dnv-worker/` | the `main` of `dnv-worker`, the control-plane worker |
+| `cmd/dnv-agent/` | the `main` of `dnv-agent`, the node agent in its dn and cn roles |
+| `cmd/dnv-cdc/` | the `main` of `dnv-cdc`, the central discovery controller |
+| `cmd/dnvctl/` | the `main` of `dnvctl`, the operator CLI |
+| `doclint/` | a test-only package: the lint that holds the documents under `doc/` and `README.md` to the documentation rules |
 
-`log.md` §5.3 allows the central etcd helpers to live either in
-`common/etcdutil.go` or in a dedicated kv layer; this layout picks the second
-option as its own package `etcdutil` (import
-`github.com/distributed-nvme/distributed-nvme/etcdutil`) so that the etcd
-client is linked only into the binaries that use it (§3).
+The integration suites are driven over ssh against remote hosts. The two
+agent suites need passwordless sudo, for real dm, md, nvmet and NVMe/TCP over
+loop devices; so does the cdc suite, for real nvmet and NVMe/TCP over
+dm-zero, and the end-to-end suite on every guest but its control-plane one.
+The worker, gateway and dnvctl suites need no root. The drivers and fakes are
+test drivers only, never linked into a `cmd/` binary. The end-to-end suite
+adds no driver of its own and drives the shipped `dnvctl` for every
+control-plane call (`e2e_integtest.md` E2E2), and it never runs beside
+another suite (`e2e_integtest.md` E2E9). What each suite proves is its
+document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
+`e2e_integtest.md`, and the Integration test plan of `dnv-worker.md`,
+`cdc.md`, `gateway.md` and `dnvctl.md`.
 
-## 3. Dependency rules (normative)
+## Dependency rules
 
 "May import" lists internal packages; anything not listed is forbidden.
 
 | package | may import (internal) | external notes |
 |---|---|---|
-| `pb` | — | generated code only; imports grpc/protobuf runtimes |
-| `common` | — | stdlib, `x/sync`, `protobuf`, `grpc`. MUST NOT import `pb`, the etcd client, or viper — it stays the leaf. (`PbToLogValue`, `OsClient`, and the interceptors all operate on the generic `proto.Message`; `_test.go` files in `common` MAY import `pb` for fixtures.) |
-| `etcdutil` | `common` | `go.etcd.io/etcd/client/v3` (incl. `concurrency`). Takes `proto.Message` parameters; MUST NOT import `pb` (`_test.go` files in `etcdutil` MAY import `pb` for fixtures, as in `common`: EU7's tests need some concrete `proto.Message`). |
-| `model` | `common`, `pb`, `etcdutil` | the §5 data model as Go (`dnv-worker.md` §4): key formats, `cluster_id`, capacity keys, the §6 allocator, the internal §8/§10.4 mutations. No gRPC; never dials an agent; MUST NOT import `gateway`, `worker`, `agent`, `cdc`, `ctl`. |
-| `gateway` | `common`, `pb`, `etcdutil`, `model` | grpc server + client (dials agents) |
-| `worker` | `common`, `pb`, `etcdutil`, `model` | grpc client only (dials agents); `dnv-worker.md` |
-| `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb` (the two role packages also `agent`, the shared mechanism they build on) | grpc server only; **no etcd** — agents never talk to etcd (`architecture.md` §1) |
+| `pb` | — | generated code only; imports the gRPC and protobuf runtimes |
+| `common` | — | the standard library, `golang.org/x/sync`, protobuf and gRPC. MUST NOT import `pb`, the etcd client or viper: it stays the leaf. `PbToLogValue`, the `OsClient` and the interceptors all operate on the generic `proto.Message`; `_test.go` files in `common` MAY import `pb` for fixtures. |
+| `etcdutil` | `common` | the etcd client, its `concurrency` package included, and the two modules that arrive with it (`dependencies.md`, Direct dependencies). Takes `proto.Message` parameters and MUST NOT import `pb`; its `_test.go` files MAY import `pb` for fixtures, as in `common`, because the tests of `dnv-worker.md` EU7 need a concrete `proto.Message`. |
+| `model` | `common`, `pb`, `etcdutil` | the etcd data model as Go (`dnv-worker.md`, MD1 to MD9): key formats, `cluster_id`, capacity keys, the allocator, the shared mutations. No gRPC; never dials an agent; MUST NOT import `gateway`, `worker`, `agent`, `cdc` or `ctl`. |
+| `gateway` | `common`, `pb`, `etcdutil`, `model` | gRPC server and client: it dials agents |
+| `worker` | `common`, `pb`, `etcdutil`, `model` | gRPC client only: it dials agents (`dnv-worker.md`) |
+| `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb`; the two role packages also `agent`, the shared mechanism they build on | gRPC server only; no etcd: agents never talk to etcd (`architecture.md`, System overview) |
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
-| `ctl` | `common`, `pb` | grpc client to the Gateway; cobra + pflag + viper (the dnvctl command tree and its CT9 viper binding live here, not in `cmd/dnvctl` — `dnvctl.md` §1.2); **no etcd** |
-| `cmd/*` | the matching top-level package + `common` (`cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes; `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: main builds the two servers and their `NvmeTrConf` and registers each through `agent.Serve`; `cmd/dnvctl` imports only `common` + `ctl`) | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) — except for `dnvctl`, whose tree is `ctl`'s (row above) and whose main imports neither |
-| `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`; `fakeagent`, for `CheckRoundCtx`, `dnagent.md` SH24), `model` + `etcdutil` (`workerctl`, which plays the gateway, and `cdcctl`, which plays gateway + worker for the `CdcEntry` keys) | test drivers only, never linked into a `cmd/` binary |
+| `ctl` | `common`, `pb` | gRPC client of the gateway; cobra, pflag and viper, because the dnvctl command tree and its viper binding (`dnvctl.md` CT9) live here, not in `cmd/dnvctl` (`dnvctl.md`, Files); no etcd |
+| each `cmd/` package | the matching top-level package and `common`. `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes. `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: its main builds the role servers and their `NvmeTrConf` and registers each through `agent.Serve`. `cmd/dnvctl` imports only `common` and `ctl`. | cobra and viper live here, for the flag, config and environment parsing and the subcommand trees (`architecture.md`, Components: invocation reference; `dnagent.md` CM1), except for dnvctl, whose tree is `ctl`'s and whose main imports neither |
+| each `integtest/` driver | `common`, `pb`; `agent` for the two agent drivers (`ParseCloneStatus`) and `fakeagent` (`CheckRoundCtx`, `dnagent.md` SH24); `model` and `etcdutil` for `workerctl`, which plays the gateway, and `cdcctl`, which plays the gateway and the worker for the `CdcEntry` keys | test drivers only, never linked into a `cmd/` binary |
+| `doclint` | — | test-only; reads the documents and the sources as files |
 
-Consequences worth stating: the agent and `dnvctl` binaries do not link the
+Consequences worth stating: the agent and dnvctl binaries do not link the
 etcd client, and there are no import cycles because `common` and `pb` import
-nothing internal.
+nothing internal. The central etcd helpers are a package of their own,
+`etcdutil`, rather than part of `common`, so that the etcd client is linked
+only into the binaries that use it.
 
-## 4. Protobuf generation
+## Protobuf generation
 
-* `pb/schema.proto` is the `schema.proto` from the design inputs plus one
-  added line (after `syntax`) and the schema edits the component specs have
-  recorded since — among them the `WorkerReg` message (`dnv-worker.md` §2.2),
-  the `Inspect*Reply` `revision` → `applied_revision` rename and
-  `AppendCloneBitmapRequest`'s chunk address (`gateway.md` §2.3), the [D14]
-  and [D15] field reservations, and the `Clone.bm_cnt` deletion (`reserved
-  11` / `reserved "bm_cnt"`, 2026-09-16). The added line:
+`pb/schema.proto` is dnv's one protobuf schema; `architecture.md` and the
+component documents specify its messages and its three services, `Gateway`,
+`DiskNodeAgent` and `ControllerNodeAgent`. It sets the `go_package` option to
+the import path of `pb`, `github.com/distributed-nvme/distributed-nvme/pb`.
 
-  ```proto
-  option go_package = "github.com/distributed-nvme/distributed-nvme/pb";
-  ```
+Do not add a proto `package` statement: the fully-qualified gRPC method names
+would change from "/Gateway/…", "/DiskNodeAgent/…" and
+"/ControllerNodeAgent/…" to "/<pkg>.Gateway/…", and the `method` attribute of
+the interceptor records (`grpc.md`, L1), the suites that match it and any
+recorded logs rely on the unqualified names.
 
-* Do **not** add a proto `package` statement: the fully-qualified gRPC method
-  names would change from `/Gateway/...`, `/DiskNodeAgent/...`,
-  `/ControllerNodeAgent/...` to `/<pkg>.Gateway/...`, which the `grpc.md`
-  examples (and any recorded logs) rely on.
-* Makefile `gen` target:
+The `gen` target of the `Makefile` regenerates `pb/schema.pb.go` and
+`pb/schema_grpc.pb.go` with `protoc` and its two Go plugins, `protoc-gen-go`
+and `protoc-gen-go-grpc`, which must be on the PATH. The generated files are
+committed, so go build, go test and CI never require protoc; `gen` is rerun
+only when `schema.proto` changes, and its output is committed with that
+change. The `fmt` target formats the Go sources with gofmt and the schema
+with clang-format, in the style `.clang-format` pins; run it before committing
+a proto change.
 
-  ```make
-  gen:
-  	protoc \
-  		--go_out=. --go_opt=paths=source_relative \
-  		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
-  		pb/schema.proto
-  ```
+## `cmd/` wiring
 
-  (requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc` on PATH).
-* Makefile `fmt` target: `gofmt -w .` plus `clang-format -i
-  pb/schema.proto` (style pinned in `.clang-format`; the binary comes from
-  `pip install clang-format`). Run it before committing proto changes.
-* `schema.pb.go` and `schema_grpc.pb.go` are **committed**, so `go build` /
-  `go test` / CI never require protoc; `make gen` is rerun only when
-  `schema.proto` changes.
+Each `main.go` is thin: it parses flags, config file and environment with
+viper (`architecture.md`, Components: invocation reference), constructs the
+dependencies and hands off to the matching library package. Because every
+main imports `common`, at least transitively, the `init` of `common/log.go`
+installs the default JSON logger on stderr before `main` runs (`log.md` R3).
 
-## 5. `cmd/` wiring
+Each daemon binds every flag to an environment prefix of its own, so a flag
+is also a config-file key and an environment variable; dnvctl binds only its
+env-backed global flags that way, in `ctl/` (`dnvctl.md` CT9). Specifics:
 
-Each `main.go` is thin: parse flags/config/env with viper (`architecture.md`
-§13), construct the dependencies, hand off to the matching library package.
-Because every main imports `common` (at least transitively), the `init()` in
-`common/log.go` installs the default JSON logger (on stderr) before `main`
-runs (`log.md` R3). Specifics:
-
-* `cmd/dnvctl/main.go` — first statement:
-  `common.SetLogLevel(slog.LevelWarn)` (`log.md` R6).
-* `cmd/dnv-agent/main.go` — a cobra root command with `dn`/`cn` subcommands
-  (`dnagent.md` §3) dispatching to `agent/dnagent` or `agent/cnagent`; both
-  share `agent` for the server bootstrap, `--local-store` handling and the
-  single `common.NewLimitedOsClient(...)` instance (the CN11 leg probers
-  deliberately bypass that instance — `osclient.md` §4.5.1).
-* `cmd/dnv-worker/main.go` — a cobra root command without subcommands
-  (`dnv-worker.md` §5): `--etcd-endpoints`, `--roles`, `--vote-interval`,
-  `--vote-grace-time`, `--etcd-dial-timeout`, `--config`; env prefix
-  `DNV_WORKER_`; builds the `etcdutil` client and hands off to `worker.Run`,
-  which owns the vote worker and the `ClusterConf` cache.
-* `cmd/dnv-cdc/main.go` — a cobra root command without subcommands
-  (`cdc.md` §6): `--etcd-endpoints`, `--etcd-dial-timeout`, `--range`,
-  `--tr-type`, `--adr-fam`, `--tr-addr`, `--tr-svc-id`, `--config`; env
-  prefix `DNV_CDC_`; builds the `etcdutil` client and hands off to
-  `cdc.Run`, which owns the watcher, the per-host view registry and the
-  NVMe/TCP listener.
-* Interceptor wiring per binary follows the table in `grpc.md` (gateway:
-  server + client; worker: client; agents: server; dnvctl: client; cdc:
-  none).
-* Makefile `build` compiles all five `cmd/*` into `bin/`.
-
-## 6. Suggested build-out order
-
-Each step compiles and passes its tests before the next begins:
-
-1. `go.mod`, `pb/schema.proto` (+ `go_package`), `make gen` → `pb/` builds.
-2. `common/constants.go`, `common/name_fmt.go` (fix the input file's syntax
-   errors; where it disagrees with `architecture.md` §4, §4 wins) and
-   `common/name_parse.go` (the inverse of its dm-name and NQN formats), then
-   `common/log.go`, `common/osclient.go` + `osclient_fake.go`,
-   `common/interceptor.go` per their specs, with the spec test lists.
-3. `etcdutil/` and `model/` (`dnv-worker.md` §3-§4; their tests run against a real
-   `etcd` binary when one is on `PATH` or named by `ETCD_BIN`, and skip otherwise).
-4. `gateway/` (§§6–8) + `cmd/dnv-gateway`.
-5. `agent/` + `dnagent/` + `cnagent/` (§9, §11) + `cmd/dnv-agent`.
-6. `worker/` (`dnv-worker.md` §6-§11) + `cmd/dnv-worker`, then the `dnv-worker.md`
-   §14 suite against the lab server.
-7. `cdc/` (§12, `cdc.md`) + `cmd/dnv-cdc`, then the `cdc.md` §9 suite against the
-   four lab servers.
-8. `ctl/` + `cmd/dnvctl` (`dnvctl.md`), then the `dnvctl.md` §7 suite against
-   one lab VM (the §11.4 copier is future work outside dnvctl).
-9. Nothing new to build: the `e2e_integtest.md` suite against ten lab guests,
-   last and alone, driving the five binaries of step 1-8 through the shipped
-   `dnvctl`. It occupies the whole lab, so it runs after every other suite has
-   finished, never beside one.
-
-## 7. Acceptance checklist
-
-1. `go build ./...` succeeds from the repo root with the module path above.
-2. `go vet ./...` and `go test ./...` pass.
-3. `grep go_package pb/schema.proto` finds the §4 option; the generated files
-   exist and are committed; the proto has no `package` statement.
-4. Imports obey §3 — in particular
-   `go list -deps ./cmd/dnv-agent ./cmd/dnvctl | grep etcd` finds nothing, and
-   `model` imports none of `gateway`, `worker`, `agent`, `cdc`, `ctl`.
-5. `common/` contains exactly the seven files of §2 (plus tests), package name
-   `common`.
-6. All five binaries build into `bin/` via `make build`, and `bin/` is listed
-   in `.gitignore`.
-7. The §2 tree names every non-test `.go` file of the repository and no
-   other: `TestLayoutTreeMatchesGoFiles` (`ctl/layoutlint_test.go`) diffs the
-   two both ways.
-
-## 8. Amendments applied to this document
-
-Recorded for traceability; the edits are already applied. Unlike the
-"amendments applied to companion documents" sections of `dnagent.md` §5 and
-`cnagent.md` §5, this one records edits made **to this document**. It is
-appended rather than inserted because §2, §3, §4 and §7 are cited by number
-from `cnagent.md`, `dnagent.md` and this file itself.
-
-* [D14] LVM removal (suite amendment U3-T5, `cnagent_integtest.md` §20) — LVM is gone from the CN as well as the DN, so the
-  §2 `agent/cnagent/` list loses `lvm.go` ("the clone VG — the one LVM user
-  left") and gains `clonemeta.go`: the CN base-state wrappers plus the
-  clone-metadata slot allocator over the single loop device, whose kind-`cb`
-  wrapper dm-linears are their own allocation registry (`cnagent.md` §4.1,
-  `architecture.md` [D14]).
-* [D15] side provisioning (suite amendment U4-T6 of both integtest specs, §20) — the §2 `agent/dnagent/` list gains `zeroing.go`,
-  the background side-provisioning goroutine of `architecture.md` §9.4
-  ([D15]). No package boundary changed: it is a new file in an existing
-  package.
-* The probe-IO carve-out (suite amendment U2-T5, `cnagent_integtest.md` §20) — the cn probers'
-  block IO left the
-  `OsClient`. The probe-IO dependency lives in the already-listed
-  `healthcheck.go` (no new file), so the §2 note only names it; `common/`
-  gained the exported raw helpers `WriteBlockAt`/`ReadBlockDirectAt` inside the
-  existing `osclient.go` (`osclient.md` §4.5.1), and §5's `cmd/` wiring records
-  that the probers bypass the process's single `LimitedOsClient`. The `common/`
-  file count of §7 item 5 was therefore unchanged by it (`name_parse.go` later
-  made it seven, below).
-* `cdc.md` §10 — `dnv-cdc` arrived: the §2 `cdc/` entry became that document's
-  §1 file split (`cdc.go`, `watch.go`, `view.go`, `logpage.go`, `server.go`,
-  `conn.go`, `pdu.go`), the §2 `doc/` tree gained `cdc.md`, the §2 `integtest/`
-  tree gained `cdc_test.sh` and `cdcctl/`, the §3 `integtest/*` row lists
-  `cdcctl` beside `workerctl` as a `model` + `etcdutil` importer, §5 gained the
-  `cmd/dnv-cdc` bullet (viper + cobra root, no subcommands, env prefix
-  `DNV_CDC_`) and §6 step 7 cites `cdc.md`. No package boundary changed: `cdc`
-  already imported `common`, `pb`, `etcdutil` and `model` per §3.
-* Earlier amendments, recorded in their originating documents: `dnagent.md` §5
-  (cobra/viper in §1, the `agent/` split, this document listed in the `doc/`
-  tree, `agent/lvm.go` deleted with the dn LVM removal) and `cnagent.md` §5
-  (the `doc/` tree entry, the `agent/cnagent/` split).
-* `dnv-worker.md` — the §1 dependency note names the v3.6 etcd client line; §2 gains
-  `doc/dnv-worker.md`, the new `model/` package, the `worker/` file split of
-  `dnv-worker.md` §1 (`vote.go`, `shard.go`, `revision.go`, `dnrole.go`, `cnrole.go`,
-  `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go` — replacing
-  `membership.go`/`check.go`) and the `integtest/` tree; §3 gains the `model` row (and
-  lets `gateway`, `worker`, `cdc` import it) plus the `integtest/*` row; §5 gains the
-  `cmd/dnv-worker` bullet; §6 steps 3 and 6 and §7 item 4 follow. Package boundaries
-  are otherwise unchanged: `common` and `pb` stay leaves, agents and `dnvctl` still
-  never link the etcd client.
-* Housekeeping (2026-09-09): the §2 `doc/` tree caught up with the files
-  that arrived after the amendments above — `gateway.md` (whose suite the §2
-  `integtest/` tree and the §3 `integtest/*` row already reflected),
-  the two on-hardware suite specs `dnagent_integtest.md` /
-  `cnagent_integtest.md`, `ThinDeviceCreated.md`, `dependencies.md`, and the
-  then-current resolved-issue and applied-amendment records; the minor-debt
-  ledger the same verification produced entered the tree the
-  same day (records and ledger all removed
-  2026-09-10, below). No package boundary or path changed.
-* Second doc-amendment pass (2026-09-10, after the second full doc-vs-code
-  verification): an amendment record deciding five code fixes (removed
-  2026-09-10, below) entered the §2 tree; the §2 `worker/`
-  tree gained `worker.go` and `conn.go` (matching dnv-worker.md §1's
-  amended table — the file list above predates them). The pass also fixed
-  stale or imprecise passages across `architecture.md`, `gateway.md`,
-  `dnv-worker.md`, `cnagent.md`, `dnagent.md`, `ThinDeviceCreated.md`,
-  `cdc.md`, `grpc.md`, `log.md`, `osclient.md`, `dependencies.md` and both
-  integtest specs, plus eight stale code comments; each document's own
-  amendments section is not extended for these (they correct drift, not
-  decisions — the amendment and verification records were the
-  provenance). No package boundary or path changed.
-* Amendment implementation pass (2026-09-10, the same day the five fixes
-  were decided): all five landed with their tests — the disabled-primary
-  failover trigger (`worker/reaction.go`, `model/ops.go`), the
-  adopted-fence gate backstop (`agent/dnagent/fence.go`),
-  failure-domain-aware repair placement (`model/alloc.go`,
-  `gateway/alloc.go` +
-  `migration.go`/`spareleg.go`/`storagepool.go`, `worker/reaction.go`),
-  park-before-remove for removed namespaces
-  (`agent/cnagent/syncup_cntlr.go`) and the allocator-ledger invariant
-  errors (`gateway/alloc.go`). Implementation forced corrections to two
-  companion edits that had landed carrying a superseded tier-2 trigger for
-  the placement rule — `architecture.md` §6.5 and `dnv-worker.md` §4 MD5,
-  both re-amended the
-  same day. No file entered or left the
-  tree, and no package boundary or path changed.
-* Housekeeping (2026-09-10): the four resolved-issue / applied-amendment
-  history records and the fully struck minor-debt ledger left the §2 `doc/`
-  tree — every decision and finding they carried is
-  stated by the normative documents and pinned by the tests those documents
-  name, and the remaining doc and code-comment citations of the records
-  were retargeted to those documents. No package boundary or path changed.
-* The end-to-end suite (2026-09-17) — the §2 `doc/` tree gained
-  `e2e_integtest.md` and the §2 `integtest/` tree gained `e2e_test.sh`; the
-  `integtest/` note names the new suite's root requirement (every guest but the
-  control-plane one needs passwordless sudo) and adds the document to the
-  pointer list; §6 gained a closing step 9, which
-  builds nothing and runs that suite last and alone against ten lab guests.
-  Nothing else moved, and nothing here needed to: the suite adds no Go file and
-  no driver of its own — it drives the shipped `dnvctl` for every
-  control-plane call, and builds the existing `workerctl` and `cnagentctl` on
-  the developer machine for one read-only subcommand each (`constants`, which
-  it runs, and `host-id`, which no step of the suite calls today). So the §3
-  `integtest/*` import row, the §5 `cmd/` wiring and the
-  §7 checklist are unchanged.
-* Housekeeping (2026-09-29, from the 2026-09-28 doc/code review): the §2 tree
-  caught up with the Go files that had arrived without it —
-  `common/name_parse.go`, `agent/sweep.go` and the `sweep.go` of both role
-  packages (teardown by sweep, 2026-09-18), and `agent/waitbudget.go` (the
-  per-pass wait budget, 2026-09-28) — so §6 step 2 builds `name_parse.go`
-  beside `name_fmt.go`, §7 item 5 counts seven `common/`
-  files, and the two agent drivers are written as `dnagentctl/main.go` and
-  `cnagentctl/main.go`. So that the tree cannot go stale unnoticed again, §2
-  now states that it names every non-test Go file of the repository, and §7
-  gained item 7, the lint (`ctl/layoutlint_test.go`) that diffs the tree
-  against the repository both ways. No package boundary or path changed.
+* `cmd/dnvctl/main.go` sets the log level to Warn with `SetLogLevel` as its
+  first statement (`log.md` R6), then hands off to `ctl.Execute`.
+* `cmd/dnv-agent/main.go` is a cobra root command with the `dn` and `cn`
+  subcommands (`dnagent.md` CM1), dispatching to `agent/dnagent` or
+  `agent/cnagent`. Both roles share `agent` for the server bootstrap and the
+  `--local-store` handling, and the process builds a single
+  `LimitedOsClient` (`dnagent.md` CM4), which the CN11 leg probers
+  deliberately bypass (`osclient.md`, Exported raw helpers and the probe-IO
+  carve-out).
+* `cmd/dnv-worker/main.go`, `cmd/dnv-gateway/main.go` and
+  `cmd/dnv-cdc/main.go` each build a cobra root command without subcommands
+  (`dnv-worker.md` CM1, `gateway.md` CM1, `cdc.md` CM1), build the
+  `etcdutil` client and hand off to their package's `Run`: `worker.Run` owns
+  the vote worker and the `ClusterConf` cache, `gateway.Run` serves the
+  `Gateway` service, and `cdc.Run` owns the watcher, the per-host view
+  registry and the NVMe/TCP listener.
+* Interceptor wiring per binary follows `grpc.md`, Wiring.
+* The `build` target of the `Makefile` compiles every `cmd/` directory that
+  holds Go sources into a binary of the same name under `bin/`, which
+  `.gitignore` keeps out of the repository.

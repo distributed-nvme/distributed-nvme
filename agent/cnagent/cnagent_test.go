@@ -14,7 +14,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The fixture mirrors the case-S shape of cnagent_integtest.md §5/§6: one
+// The fixture mirrors the smoke case's shape (cnagent_integtest.md, Cases): one
 // slice, one meta group and one data group, one td, one subsystem with one
 // namespace. Tests that need raid1, snapshots, clones or transfers extend it.
 const (
@@ -175,7 +175,8 @@ func legOf(legId uint64, sides ...*pb.Side) *pb.Leg {
 }
 
 // sideOf builds a side in the steady state every pre-provisioning-gate test means: its
-// §9.4 zeroing finished and the worker flipped the gate, so the DN exports it
+// zeroing (architecture.md, Side provisioning protocol) finished and the
+// worker flipped the gate, so the DN exports it
 // and the CN converges the whole stack over it. Without the explicit flag
 // proto3's default would make every existing fixture provisioning-deferred.
 func sideOf(sideId uint64, addr, svcId string) *pb.Side {
@@ -210,8 +211,9 @@ type reqOpts struct {
 	xfers     []*pb.Transfer
 	// extraSide adds a second side to every leg (a migrating leg, [D1]).
 	extraSide bool
-	// twoLegs gives the data group a second leg, so the §11.1.1 assembly
-	// cases that need a real mirror have one.
+	// twoLegs gives the data group a second leg, so the assembly cases of
+	// architecture.md, "Make sure all groups are available", that need a real
+	// mirror have one.
 	twoLegs bool
 	// unprovisionedDataLeg makes every side of the data group's leg
 	// provisioned = false, which defers the group and — since it is the
@@ -254,7 +256,8 @@ func defaultSubsys(suspended bool) map[string]*pb.Subsystem {
 
 // subsysForTd is defaultSubsys with the namespace pointed at another td, so a
 // fixture whose td_list omits testTd — a snapshot whose origin the gateway
-// has let go (ThinDeviceCreated.md U2-S2) — still describes a coherent cntlr.
+// has let go (architecture.md, Thin devices, DeleteThinDevice) — still
+// describes a coherent cntlr.
 func subsysForTd(tdId uint64) map[string]*pb.Subsystem {
 	subsys := defaultSubsys(false)
 	subsys[testNqn].NsList[0].TdId = tdId
@@ -507,7 +510,8 @@ func assertOk(t *testing.T, info *pb.ResInfo, label string) {
 	}
 }
 
-// assertParked pins the §11.6 park: one ns-dev's table is a plain dm-linear
+// assertParked pins the park of architecture.md, Namespace suspend semantics:
+// one ns-dev's table is a plain dm-linear
 // over its td's `CnErrorName` and the device is **live**. Both halves are
 // load-bearing. An assertion on the words "dmsetup suspend"/"dmsetup resume"
 // would prove nothing either way, because `Dm.Reload` is suspend/load/resume
@@ -542,7 +546,7 @@ func assertParked(
 
 // assertErrorDetails is the row a failed converge leaves: RES_STATUS_ERROR
 // whose details carry the node's own output, so an operator reads what the
-// kernel said and not a paraphrase (§9.5).
+// kernel said and not a paraphrase (architecture.md, Live-state reporting).
 func assertErrorDetails(
 	t *testing.T,
 	info *pb.ResInfo,
@@ -738,7 +742,7 @@ func anaPath(nqn string, nsIdx int) string {
 }
 
 // ---------------------------------------------------------------------------
-// §6.1 — fresh SyncupCn
+// Fresh SyncupCn (CN5, CN7)
 // ---------------------------------------------------------------------------
 
 func TestFreshSyncupCn(t *testing.T) {
@@ -796,7 +800,7 @@ func TestFreshSyncupCn(t *testing.T) {
 	assertOk(t, reply.GetCnInfo().GetPortInfo(), "port")
 }
 
-// TestSyncupCnOnNonDefaultPort pins CM2's --nvmet-port-id (use_32_slices §5):
+// TestSyncupCnOnNonDefaultPort pins dnagent.md CM2's --nvmet-port-id:
 // a cn server built with port id 7 creates ports/7, writes its ANA states
 // there, links the cntlr's host-facing subsystem and a transfer's subsystem
 // into ports/7, reports "7" as port_info's res_name, reads the host-facing
@@ -1700,7 +1704,7 @@ func TestAWrongAnaGroupStateReDrivesTheSyncupCn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.2 — the revision gate
+// The revision gate (CN4, CN8)
 // ---------------------------------------------------------------------------
 
 func TestRevisionGate(t *testing.T) {
@@ -1759,7 +1763,7 @@ func TestSyncupCntlrUnknownPointer(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.3 — probe-first idempotency (SH16)
+// Probe-first idempotency (SH16)
 // ---------------------------------------------------------------------------
 
 func TestIdempotentReapply(t *testing.T) {
@@ -1786,7 +1790,7 @@ func TestIdempotentReapply(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.5 — the primary converge order (CN9)
+// The primary converge order (CN9)
 // ---------------------------------------------------------------------------
 
 func TestPrimaryConvergeOrder(t *testing.T) {
@@ -1843,8 +1847,9 @@ func TestPrimaryConvergeOrder(t *testing.T) {
 	assertOk(t, info.GetNsIdToNamespace()[testNs], "namespace")
 	assertOk(t, info.GetSsIdToSubsystem()[testSs], "subsystem")
 
-	// §9.5/CN28: the pool details are the raw dmsetup status line, which the
-	// §10.4 auto-grow parses two used/total pairs out of.
+	// CN28 (architecture.md, Live-state reporting): the pool details are the
+	// raw dmsetup status line, which the thin-pool auto-grow (architecture.md,
+	// Automatic reactions) parses two used/total pairs out of.
 	details := info.GetSliceIdToDmPool()[testSlice].GetDetails()
 	if !strings.Contains(details, "thin-pool") ||
 		strings.Count(details, "/") < 2 {
@@ -1862,7 +1867,7 @@ func isProbe(call string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// §6.4 — the standby shape (§3.4)
+// The standby shape (architecture.md, Standby cntlr)
 // ---------------------------------------------------------------------------
 
 func TestStandbyConverge(t *testing.T) {
@@ -1902,7 +1907,7 @@ func TestStandbyConverge(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.6 — failover (§11.1)
+// Failover (architecture.md, Failover)
 // ---------------------------------------------------------------------------
 
 func TestFailoverRetireOrder(t *testing.T) {
@@ -1973,7 +1978,8 @@ func TestFailoverBackToPrimaryAssembles(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.7 — §11.1.1 assembly cases and member reconciliation (CN12)
+// The assembly cases of architecture.md, "Make sure all groups are available",
+// and member reconciliation (CN12)
 // ---------------------------------------------------------------------------
 
 func TestGroupCreateAssumeClean(t *testing.T) {
@@ -2027,8 +2033,9 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 	}
 }
 
-// §11.1.1 case 1.2: exactly one member of a two-leg group carries a
-// superblock — assemble with that one, then add the other.
+// Case 1.2 of architecture.md, "Make sure all groups are available": exactly
+// one member of a two-leg group carries a superblock — assemble with that one,
+// then add the other.
 func TestGroupAssembleThenAddMissingMember(t *testing.T) {
 	srv, node := newTestServer(t)
 	node.superblocks[srv.nf.DmPath(legName(srv, testDataLeg))] = true
@@ -2052,8 +2059,9 @@ func TestGroupAssembleThenAddMissingMember(t *testing.T) {
 	assertNoCall(t, node, "cmd mdadm --detail")
 }
 
-// §11.1.1 case 1.3: both members carry a superblock but mdadm leaves one out
-// for stale metadata — the converge re-adds it, never zero-superblocks it.
+// Case 1.3 of architecture.md, "Make sure all groups are available": both
+// members carry a superblock but mdadm leaves one out for stale metadata — the
+// converge re-adds it, never zero-superblocks it.
 func TestGroupReaddsLeftOutMember(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -3179,10 +3187,11 @@ func TestGroupMembersComparedByName(t *testing.T) {
 // optimized again runs no mdadm and only stops the retry. A non-optimized
 // path is the side's dm-error, so the first write through it fails (a
 // target-internal DNR error, not a path error), md fails the failfast
-// member, and it stays failed (cnagent.md §7, "a member md failed stays
-// failed"): neither this converge nor the retry re-adds it, and the attempt
-// after the path is optimized again likewise runs no mdadm and only stops
-// the retry. Until then each attempt is the cost cnagent.md §7 records.
+// member, and it stays failed (cnagent.md, Known limits, "a member md has
+// failed stays failed"): neither this converge nor the retry re-adds it, and
+// the attempt after the path is optimized again likewise runs no mdadm and
+// only stops the retry. Until then each attempt is the cost cnagent.md, Known
+// limits, records.
 func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -3273,8 +3282,9 @@ func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 // comparison: every member sysfs lists counts as held, whatever its
 // dev-*/state. Leg 2's member reads "faulty,failfast" while its leg is
 // available again, and an equal-revision converge runs no --fail, --remove
-// or --add and reads OK — the known limit "a member md failed stays failed"
-// (cnagent.md §7). A held set of in-sync members only would --add a member
+// or --add and reads OK — the known limit "a member md has failed stays
+// failed" (cnagent.md, Known limits). A held set of in-sync members only would
+// --add a member
 // md still holds, which mdadm refuses (it opens the device O_EXCL, and md
 // keeps its claim on a faulty member until the member is removed), and the
 // group row would read ERROR on every converge; the follow-up that re-adds a
@@ -3744,7 +3754,8 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 // two-leg group: md had failed and removed leg 2's member on the old primary
 // before the demote stopped the array, so leg 1's superblock no longer
 // counts it, and case 2's start from leg 1 alone is one mdadm allows
-// (§11.1.1). The promotion starts the array degraded and reports the group
+// (architecture.md, "Make sure all groups are available"). The promotion
+// starts the array degraded and reports the group
 // OK, but leg 2 — late — still has to be added, and that --add is the
 // retry's: an attempt while it is still late adds nothing and keeps the
 // retry, and the attempt after its path reads optimized adds it and stops
@@ -3890,12 +3901,13 @@ func TestLateRedundNoneLegRegistersTheRetry(t *testing.T) {
 // TestLateMemberRetryScope pins what never counts as a late member (CN12):
 // each case holds an unavailable leg that TestLateMembersRegisterTheRetry
 // shows would register the retry as a member of a wanted group. A standby
-// wants no group (§3.4) — its non-optimized paths are its designed steady
+// wants no group (architecture.md, Standby cntlr) — its non-optimized paths
+// are its designed steady
 // state — and nor does a primary whose sp_level suppresses its groups
 // (CN19): at NO_SIDE, where no leg is wanted, every member would otherwise
 // read unavailable. A deferred group builds no array at all ([D15]), even
 // when its leg_list holds a provisioned member that is unavailable, and a
-// spare is never a member (§8.12).
+// spare is never a member (architecture.md, Spare legs).
 func TestLateMemberRetryScope(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -4681,11 +4693,12 @@ func TestAbsentSubsystemClassIsNoSubsystem(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.8 — namespace states (CN16)
+// Namespace states (CN16)
 // ---------------------------------------------------------------------------
 
-// TestNamespaceSuspend is §11.6 as amended 2026-09-16: an effectively
-// suspended namespace is **parked**, never dm-suspended. Both directions pin
+// TestNamespaceSuspend is architecture.md, Namespace suspend semantics: an
+// effectively suspended namespace is **parked**, never dm-suspended. Both
+// directions pin
 // the reload's own `--table` — the device the ns-dev ends up on — and the
 // order against the ANA write, which is what keeps a host from ever reaching
 // a table that has stopped serving.
@@ -4854,8 +4867,8 @@ func TestParkedNamespaceProbe(t *testing.T) {
 	}
 }
 
-// TestSuspendedNsDevFromAnOlderBuildIsResumed is the upgrade path (§1
-// Compatibility): the three shapes in which an agent that never suspends can
+// TestSuspendedNsDevFromAnOlderBuildIsResumed is the upgrade path (CN16): the
+// three shapes in which an agent that never suspends can
 // still meet a suspended ns-dev, and how each converges on the first pass.
 func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
 	// leftover re-creates what a pre-2026-09-16 agent (or an interrupted
@@ -4996,7 +5009,8 @@ func TestTransferAutoSuspendRetiresOrigin(t *testing.T) {
 	// The transfer-driven twin of TestNamespaceSuspend. Both steps are the
 	// sweep's pre-steps (CN9): CN16 rule 1 makes the origin's backing the
 	// td's dm-error, so pre-step 2 parks it — ahead of the build phase, which
-	// is where the xfer device is created. What §11.3 makes
+	// is where the xfer device is created. What architecture.md, Transfer +
+	// clone = cross-SP live migration, makes
 	// load-bearing is the first edge: ANA inaccessible *before* the device is
 	// touched, so no host IO is behind the reload.
 	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
@@ -5082,14 +5096,15 @@ func TestUpdateNamespaceDevIsOneReload(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.8b — cntlid slots (CN16/CN17, §11.8)
+// cntlid slots (CN16/CN17; architecture.md, cntlid slots)
 // ---------------------------------------------------------------------------
 
 // cntlidSpan is the `[attr_cntlid_min, attr_cntlid_max]` one subsystem holds
 // in configfs; nvmet hands out CNTLIDs from it with both ends included.
 type cntlidSpan struct{ first, last uint64 }
 
-// slotSpan is §11.8's range for one slot: `Base + s×Step` to
+// slotSpan is the range of architecture.md, cntlid slots, for one slot:
+// `Base + s×Step` to
 // `Base + s×Step + Step − 1`.
 func slotSpan(slot int) cntlidSpan {
 	first := uint64(common.CnCntlidSlotBase + slot*common.CnCntlidSlotStep)
@@ -5163,7 +5178,7 @@ func TestCntlidSlotsAreDisjoint(t *testing.T) {
 			}
 		}
 	}
-	// §11.8's table: slot 0 = 10000-14999 … slot 7 = 45000-49999.
+	// The slot table: slot 0 = 10000-14999 … slot 7 = 45000-49999.
 	for slot, span := range spans {
 		if want := slotSpan(slot); span != want {
 			t.Errorf("slot %d's cntlids are %d-%d, want %d-%d",
@@ -5176,7 +5191,8 @@ func TestCntlidSlotsAreDisjoint(t *testing.T) {
 // on ONE node and reads the range back after every pass, from the
 // host-facing subsystem and from the transfer's. A live subsystem changes
 // slot when a cntlr adopts one that an earlier cntlr on the same CN left
-// behind: rotating a cntlr to a free slot (§11.3) deletes it and creates
+// behind: rotating a cntlr to a free slot (architecture.md, Transfer + clone
+// = cross-SP live migration) deletes it and creates
 // another, both requests name the same NQNs (the host-facing one is the
 // user's own string), and the new cntlr's request keeps the leftover from
 // the sweep, so its pass converges that subsystem under the new slot. Like
@@ -5254,13 +5270,14 @@ func TestCntlidRangeMovesBetweenSlots(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.26 — park before remove (CN9/CN21)
+// Park before remove (CN9/CN21)
 // ---------------------------------------------------------------------------
 
 // TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN9's retire
 // order for a namespace that *leaves* the desired state. CN21's rationale is
 // that a dm-suspended device blocks both the nvmet disable above it and its
-// own removal. Since 2026-09-16 (§11.6, [D12]) this agent never leaves one
+// own removal. Since 2026-09-16 (architecture.md, Namespace suspend semantics;
+// [D12]) this agent never leaves one
 // suspended, so the only way a teardown still meets one is an **older build's
 // leftover** — which is exactly what the two ordering sub-cases fixture. The
 // park — the reload onto the td's `CnErrorName`, whose internal resume is the
@@ -5405,7 +5422,7 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.11 — the sp_level ladder (CN19)
+// The sp_level ladder (CN19)
 // ---------------------------------------------------------------------------
 
 func TestSpLevelLadder(t *testing.T) {
@@ -5579,7 +5596,7 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.12 — check streams (CN24)
+// Check streams (CN24)
 // ---------------------------------------------------------------------------
 
 type fakeCheckCnStream struct {
@@ -5852,16 +5869,19 @@ func TestGetInfoUnknownObject(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.17 — provisioning deferral ([D15])
+// Provisioning deferral ([D15])
 //
-// A side that has not finished its §9.4 zeroing exports nothing, so every
+// A side that has not finished its zeroing (architecture.md, Side provisioning
+// protocol) exports nothing, so every
 // resource stacked on it is left out of the *effective* desired state: it is
 // not built, and it reports RES_STATUS_PROVISIONING rather than an error, so a
-// freshly created SP never feeds err_epoch or the §10.4 replacement flows.
+// freshly created SP never feeds err_epoch or the replacement flows of
+// architecture.md, Automatic reactions.
 // ---------------------------------------------------------------------------
 
 // grownDataGrp appends a second data group to the fixture's only slice — the
-// §8.5 GrowSlice shape. provisioned says whether the DN has already finished
+// GrowSlice shape (architecture.md, GrowSlice). provisioned says whether the
+// DN has already finished
 // zeroing the new group's side.
 func grownDataGrp(req *pb.SyncupCntlrRequest, provisioned bool) {
 	appendDataGrp(req, testDataGrp2, testDataLeg2, testDataSide2, provisioned)
@@ -5973,7 +5993,8 @@ func TestProvisioningDeferredGroup(t *testing.T) {
 	assertProvisioning(t, probed.GetTdIdToRaid0()[testTd], "probed raid0")
 }
 
-// TestServingPoolStaysOkDuringDeferredGrow is the §10.4 guard: a GrowSlice
+// TestServingPoolStaysOkDuringDeferredGrow is the thin-pool auto-grow guard of
+// architecture.md, Automatic reactions: a GrowSlice
 // whose new group is still provisioning must leave the *serving* pool alone —
 // OK at its effective (old) size, with the raw `dmsetup status` details the
 // auto-grow parses. A PROVISIONING pool row would switch auto-grow off.
@@ -6073,8 +6094,8 @@ func concatDevNos(t *testing.T, node *fakeNode, name string) []string {
 // would physically move the moment the earlier group cleared and the target
 // was re-inserted in the middle: silent corruption, reported OK by design.
 // CN28 ("a not-yet-grown concat/pool is OK, not a mismatch; the
-// grow completes when the group clears") and architecture.md §8.5 ("the concat
-// and the pool keep their old, effective size") both describe a prefix.
+// grow completes when the group clears") and architecture.md, GrowSlice ("the
+// concat and the pool keep their old, effective size") both describe a prefix.
 func TestOutOfOrderGrowDefersEveryLaterGroup(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -6154,12 +6175,14 @@ func TestOutOfOrderGrowDefersEveryLaterGroup(t *testing.T) {
 // TestConcatNeverShrinksWhenALiveGroupDefers is the other direction of the
 // same rule: [D15]'s deferral holds a *new* group out of the concat until it is
 // ready — it may never take a serving one out. A live group whose leg_list
-// gains an all-unprovisioned leg (§8.12's spare switch onto a fresh DN) must
+// gains an all-unprovisioned leg (the spare switch of architecture.md, Spare
+// legs, onto a fresh DN) must
 // not shorten the pool-data concat under a live thin-pool: the concat's target
 // list is the physical home of every block the pool has already allocated, so
 // a shrink either remaps live data or leaves the pool suspended on a refused
-// resume. The concat may only grow; anything else is reported, so §10.4 or an
-// operator repairs the group.
+// resume. The concat may only grow; anything else is reported, so an automatic
+// reaction (architecture.md, Automatic reactions) or an operator repairs the
+// group.
 func TestConcatNeverShrinksWhenALiveGroupDefers(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -6232,7 +6255,7 @@ func TestDeferredTdNamespaceIsInaccessible(t *testing.T) {
 	}
 }
 
-// TestProvisioningCheckRoundIsStable is §6 test 18's check-stream clause: a
+// TestProvisioningCheckRoundIsStable is CN9's check-stream clause: a
 // deferred resource's details string is the fixed "provisioning" and carries no
 // progress counter, so the second identical round of a CN24 stream suppresses
 // the whole CntlrInfo (proto.Equal, SH26) and the round mutates nothing
@@ -6265,7 +6288,7 @@ func TestProvisioningCheckRoundIsStable(t *testing.T) {
 	}
 }
 
-// TestSpLevelBeatsProvisioning is §6 test 18's precedence clause: a resource
+// TestSpLevelBeatsProvisioning is CN9's precedence clause: a resource
 // that is both level-suppressed and provisioning-deferred reports MISSING /
 // "sp_level" and not PROVISIONING — the operator said it must not exist, which
 // outranks "it is coming" (CN19). Both channels say so.
@@ -6293,7 +6316,8 @@ func TestSpLevelBeatsProvisioning(t *testing.T) {
 		probed.GetLegIdToLeg()[testDataLeg], "probed leg data")
 }
 
-// TestUnprovisionedSpareDefersOnlyItself: spares never assemble (§8.12), so an
+// TestUnprovisionedSpareDefersOnlyItself: spares never assemble
+// (architecture.md, Spare legs), so an
 // unprovisioned one holds nothing back.
 func TestUnprovisionedSpareDefersOnlyItself(t *testing.T) {
 	srv, node := newTestServer(t)

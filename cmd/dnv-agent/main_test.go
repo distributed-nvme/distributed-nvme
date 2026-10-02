@@ -11,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The invocation from architecture.md §13.
+// An example dn invocation, with the flags of dnagent.md CM2.
 var exampleDnArgs = []string{
 	"--grpc-network", "tcp",
 	"--grpc-address", "192.168.0.20:29528",
@@ -79,11 +79,11 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// CM2: the §13 example parses and every value arrives through viper.
+// CM2: the example dn invocation parses and every value arrives through viper.
 func TestExampleInvocationParses(t *testing.T) {
 	parse(t, "dn", exampleDnArgs)
 	if err := requireValues(append(requiredCommon, "disk")...); err != nil {
-		t.Fatalf("the §13 example was rejected: %v", err)
+		t.Fatalf("the example dn invocation was rejected: %v", err)
 	}
 	for key, want := range map[string]string{
 		"grpc-network": "tcp",
@@ -280,11 +280,11 @@ func writeFileForTest(path string, data string) error {
 }
 
 // ---------------------------------------------------------------------------
-// The cn role (cnagent.md §6.16, CN-CM1/CN-CM2)
+// The cn role (cnagent.md CN-CM1/CN-CM2, dnagent.md CM3)
 // ---------------------------------------------------------------------------
 
-// The invocation from architecture.md §13, plus the cn-only --capacity of
-// CN-CM1.
+// An example cn invocation: the flags of dnagent.md CM2, plus the cn-only
+// --capacity of CN-CM1.
 var exampleCnArgs = []string{
 	"--grpc-network", "tcp",
 	"--grpc-address", "192.168.0.20:29529",
@@ -299,7 +299,7 @@ var exampleCnArgs = []string{
 func TestCnExampleInvocationParses(t *testing.T) {
 	parse(t, "cn", exampleCnArgs)
 	if err := requireValues(requiredCommon...); err != nil {
-		t.Fatalf("the §13 cn example was rejected: %v", err)
+		t.Fatalf("the example cn invocation was rejected: %v", err)
 	}
 	if got := viper.GetString("grpc-address"); got !=
 		"192.168.0.20:29529" {

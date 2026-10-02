@@ -10,7 +10,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The sp drain's own suite (dnv-worker.md §11.6 and §13, model half).
+// The sp drain's own suite (dnv-worker.md, The sp drain; model half).
 //
 // Two things are deliberately pinned in BOTH directions here, because one
 // direction alone passes a broken implementation:
@@ -55,7 +55,7 @@ func drainGrp(grpId uint64, sideId uint64, addrPort string) *pb.Group {
 // groups and metaCnt meta groups, every side on addrPort, and charges that DN
 // for all of them exactly as a create would have: the pointers in
 // `side_ptr_list`, the extents out of `free_ext_cnt`, the capacity key moved
-// (§5.6).
+// (architecture.md, Capacity index keys).
 //
 // Every side on ONE DN is the point, not a shortcut: it is what makes the
 // per-node accounting of a multi-group batch observable as a single write and a
@@ -93,7 +93,8 @@ func (e *opsEnv) putWideSlice(
 }
 
 // chargeDn rewrites one DN as a create that placed those sides would have left
-// it, moving its capacity key with the free count it embeds (§5.6).
+// it, moving its capacity key with the free count it embeds (architecture.md,
+// Capacity index keys).
 func (e *opsEnv) chargeDn(
 	addrPort string,
 	ptrs []*pb.SidePointer,
@@ -114,8 +115,9 @@ func (e *opsEnv) chargeDn(
 }
 
 // chargeCn charges one CN for one cntlr of the fixture SP: the pointer in
-// `cntlr_ptr_list`, the SP's whole footprint out of `free_ext_cnt` (§6.5), the
-// capacity key moved with the free count it embeds (§5.6).
+// `cntlr_ptr_list`, the SP's whole footprint out of `free_ext_cnt`
+// (architecture.md, Per-operation allocation), the capacity key moved with the
+// free count it embeds (architecture.md, Capacity index keys).
 func (e *opsEnv) chargeCn(addrPort string, cntlrId uint64) {
 	e.t.Helper()
 	cn := e.cn(addrPort)
@@ -211,7 +213,8 @@ func equalIds(got []uint64, want []uint64) bool {
 // SpRev bump for the lot.
 //
 // The footprint is asserted as opsFootprint — the Σ ext_cnt of the fixture's
-// groups — rather than as a per-cntlr share, because §6.5 charges every cntlr
+// groups — rather than as a per-cntlr share, because architecture.md,
+// Per-operation allocation, charges every cntlr
 // the whole SP and a release that returned a share would leave every CN of a
 // multi-cntlr SP permanently short.
 func TestDrainSpCntlrs(t *testing.T) {
@@ -281,7 +284,8 @@ func TestDrainSpCntlrs(t *testing.T) {
 }
 
 // TestDrainSpCntlrsBumpsASharedCnOnce is releaseSpCns's reason for existing:
-// two cntlrs of one SP on one CN — a shape §6.4 forbids but nothing in the
+// two cntlrs of one SP on one CN — a shape architecture.md, Finding CN
+// candidates, forbids but nothing in the
 // store enforces — give the footprint back TWICE and cost one write, one
 // capacity-key maintenance and one CnRev bump.
 func TestDrainSpCntlrsBumpsASharedCnOnce(t *testing.T) {
@@ -455,8 +459,10 @@ func TestDrainSpSliceFinalRemovesKeyAndIdTogether(t *testing.T) {
 	}
 }
 
-// TestDrainSpSliceAccounting is the per-node half of §5.5 and §5.6 inside one
-// batch: the DN carrying every side of the batch is written once, has its
+// TestDrainSpSliceAccounting is the per-node half of the revision-key and
+// capacity-key rules (architecture.md, Revision keys and the sync fan-out;
+// Capacity index keys) inside one batch: the DN carrying every side of the
+// batch is written once, has its
 // capacity key MOVED (old gone, new there) and its revision bumped exactly
 // once, whatever the group count.
 func TestDrainSpSliceAccounting(t *testing.T) {
@@ -520,7 +526,8 @@ func TestDrainSpSliceAccounting(t *testing.T) {
 }
 
 // TestDrainSpSliceReleasesSpareLegs pins that a spare leg's side is released
-// like an active one (§8.12): it occupies a DN exactly the same way, so a walk
+// like an active one (architecture.md, Spare legs): it occupies a DN exactly
+// the same way, so a walk
 // that only visited leg_list would leak an extent per spare for ever.
 func TestDrainSpSliceReleasesSpareLegs(t *testing.T) {
 	env := newOpsEnv(t)
@@ -584,7 +591,8 @@ func TestDrainSpSliceRefusesWhileCntlrsRemain(t *testing.T) {
 	}
 }
 
-// TestDrainSliceRefusesAnInvalidStoredConf is the §7 gate DrainSpSlice needs
+// TestDrainSliceRefusesAnInvalidStoredConf is the gate (architecture.md,
+// Common validation) DrainSpSlice needs
 // for MaintainDnCapacity's sake, and the one the gateway's
 // TestStoredClusterConfZeroIsRefusedByEveryReader used to reach through
 // DeleteStoragePool's newDnLedger.
@@ -592,7 +600,8 @@ func TestDrainSpSliceRefusesWhileCntlrsRemain(t *testing.T) {
 // A capacity key embeds the BIN INDEX the stored ladder yields, so a conf
 // CreateCluster could not have written names a key nothing ever wrote: the
 // release would leave the live key behind — still indexing a free count the DN
-// no longer has, and still offered by the §6.3 scan — and write a new one under
+// no longer has, and still offered by the DN candidate scan (architecture.md,
+// Finding DN candidates) — and write a new one under
 // a bin its free count does not belong to. There is no right index to compute
 // from such a conf, so the batch refuses instead of guessing.
 func TestDrainSliceRefusesAnInvalidStoredConf(t *testing.T) {
@@ -979,8 +988,8 @@ func TestDrainStepsAreIdempotent(t *testing.T) {
 	}
 }
 
-// TestDrainConcurrentDriversConverge is dnv-worker.md §13's "two concurrent
-// drivers converging with exact ledgers", run for real: two goroutines drive
+// TestDrainConcurrentDriversConverge is two concurrent drivers converging with
+// exact ledgers (dnv-worker.md SPD8), run for real: two goroutines drive
 // the same drain to the end at the same time, and the SP must end up gone with
 // neither driver reporting a failure outside the three tolerated reasons.
 //

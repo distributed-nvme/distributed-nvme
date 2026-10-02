@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// The ids used across the tables of architecture.md §4.
+// The ids used across the tables of architecture.md, Naming.
 const (
 	testCluster = uint64(0xebada5168620c5fe)
 	testDn      = uint64(3)
@@ -34,7 +34,7 @@ func checkName(t *testing.T, what, got, want string) {
 	}
 }
 
-// §4.2 dm device names.
+// architecture.md, dm device names.
 func TestDmNames(t *testing.T) {
 	nf := NewNameFmt("")
 	const c = "ebada5168620c5fe"
@@ -85,9 +85,9 @@ func TestDmNames(t *testing.T) {
 	checkName(t, "CnXferFinalName",
 		nf.CnXferFinalName(testCluster, testCn, testSp, testXfer),
 		"dnv-"+c+"-0000000000000005-c8-0000000000000011-0000000000000051")
-	// The three cn kinds added by cnagent.md §2.1: the [D1] leg wrapper,
-	// the RedundNone group device, and the kind-`cb` clone-metadata wrapper
-	// that replaced the clone-VG metadata LV ([D14]).
+	// The three cn kinds added by cnagent.md, Additions to `common`: the [D1]
+	// leg wrapper, the RedundNone group device, and the kind-`cb`
+	// clone-metadata wrapper that replaced the clone-VG metadata LV ([D14]).
 	checkName(t, "CnLegName",
 		nf.CnLegName(testCluster, testCn, testSp, testLeg),
 		"dnv-"+c+"-0000000000000005-c9-0000000000000011-0000000000000015")
@@ -107,7 +107,7 @@ func TestDmNames(t *testing.T) {
 	checkName(t, "MdPath", nf.MdPath("dnv-x"), "/dev/md/dnv-x")
 }
 
-// §4.3 md names.
+// architecture.md, md names.
 func TestMdNames(t *testing.T) {
 	nf := NewNameFmt("")
 
@@ -142,7 +142,8 @@ func TestMdNames(t *testing.T) {
 		nf.CnMdArrayName(testSp, 2, 1, true), "dnv-0000000000000011-82-01")
 }
 
-// TestMdNamesAtTheGroupCeiling is the tripwire of MaxGrpCntPerSlice (§4.3):
+// TestMdNamesAtTheGroupCeiling is the tripwire of MaxGrpCntPerSlice
+// (architecture.md, md names):
 // the last group index a slice's list can hold must still format as the two
 // hex digits both md names reserve for it, so the device name stays 28 hex
 // chars ("md_" + 28 within DISK_NAME_LEN) and the array name 26 chars ending
@@ -169,7 +170,7 @@ func TestMdNamesAtTheGroupCeiling(t *testing.T) {
 	}
 }
 
-// §4.4 NQNs.
+// architecture.md, NQNs.
 func TestNqns(t *testing.T) {
 	nf := NewNameFmt("")
 	const p = "nqn.2024-01.io.dnv"
@@ -180,7 +181,7 @@ func TestNqns(t *testing.T) {
 	checkName(t, "CnHostNqn", nf.CnHostNqn(testCluster, testCn),
 		p+":1:"+c+":0000000000000005")
 	// A side subsystem is keyed by leg_id and carries no dn_id, so the two
-	// sides of a migrating leg export the same NQN (architecture.md §4.4).
+	// sides of a migrating leg export the same NQN (architecture.md, NQNs).
 	checkName(t, "SideToCnNqn",
 		nf.SideToCnNqn(testCluster, testSp, testLeg, testCn),
 		p+":2:"+c+":0000000000000011:0000000000000015:0000000000000005")
@@ -188,13 +189,13 @@ func TestNqns(t *testing.T) {
 		nf.MigrSrcNqn(testCluster, testDn, testSp, testMigr),
 		p+":3:"+c+":0000000000000003:0000000000000011:000000000000001e")
 	// A transfer NQN carries no node id: every enabled cntlr of the SP
-	// exports the identical subsystem (§8.10).
+	// exports the identical subsystem (architecture.md, Transfers).
 	checkName(t, "XferNqn", nf.XferNqn(testCluster, testSp, testXfer),
 		p+":4:"+c+":0000000000000011:0000000000000051")
 
 	// No dn component: the src and dst sides of a migrating leg live on two
 	// DNs and must still produce the identical string, which is what lets the
-	// CN aggregate them into one multipath namespace (§11.2).
+	// CN aggregate them into one multipath namespace (architecture.md, Migration).
 	sideNqn := nf.SideToCnNqn(testCluster, testSp, testLeg, testCn)
 	if n := strings.Count(sideNqn, ":"); n != 5 {
 		t.Errorf("SideToCnNqn %q has %d ':' separators, want 5 "+
@@ -222,7 +223,7 @@ func TestNqns(t *testing.T) {
 	}
 }
 
-// §4.5 tmpfs / file names. LVM is gone from dnv entirely ([D13]/[D14]):
+// architecture.md, tmpfs / file names. LVM is gone from dnv entirely ([D13]/[D14]):
 // the DN carries the [D13] disk format, and the CN's clone-metadata arena is a
 // slot allocator over one loop device whose kind-`cb` wrapper tables are its
 // registry, so the clone-VG and metadata-LV names are gone with it.
@@ -254,7 +255,7 @@ func TestCloneMetaArenaConstants(t *testing.T) {
 	}
 }
 
-// §4.6 agent local-store paths.
+// architecture.md, Agent local-store paths.
 func TestLocalStorePaths(t *testing.T) {
 	nf := NewNameFmt("")
 	const c = "ebada5168620c5fe"
@@ -271,20 +272,22 @@ func TestLocalStorePaths(t *testing.T) {
 		nf.LocalMigrBmPath(testCluster, testDn, testSp, testMigr, 3),
 		"/var/lib/dnv/migr-bm-"+c+"-0000000000000003-0000000000000011-000000000000001e-03")
 	// A clone chunk is addressed by the PAIR (src_slice_idx, bm_idx), so the
-	// name ends in two %02x segments and never one (§9.6).
+	// name ends in two %02x segments and never one (architecture.md, Bitmap
+	// push protocol).
 	checkName(t, "LocalCloneBmPath",
 		nf.LocalCloneBmPath(testCluster, testCn, testSp, testClone, 0x07, 0x0a),
 		"/var/lib/dnv/clone-bm-"+c+"-0000000000000005-0000000000000011-0000000000000041-07-0a")
 
-	// --local-store overrides the prefix (architecture.md §13).
+	// --local-store overrides the prefix (architecture.md, Components:
+	// invocation reference).
 	custom := NewNameFmt("/srv/dnv")
 	if got := custom.LocalDnPath(testCluster, testDn); !strings.HasPrefix(got, "/srv/dnv/dn-") {
 		t.Errorf("custom local store prefix ignored: %q", got)
 	}
 }
 
-// The whole point of folding creation_epoch into cluster_id (§4): a recreated
-// cluster produces a disjoint set of names.
+// The whole point of folding creation_epoch into cluster_id (architecture.md,
+// Naming): a recreated cluster produces a disjoint set of names.
 func TestNamesAreClusterScoped(t *testing.T) {
 	nf := NewNameFmt("")
 	for _, pair := range [][2]string{
@@ -302,7 +305,7 @@ func TestNamesAreClusterScoped(t *testing.T) {
 }
 
 // DnNsIdentity is the deterministic namespace identity both sides of a leg
-// present (architecture.md §3.1, dnagent.md §2.2).
+// present (architecture.md, Disk node; dnagent.md, Additions to `common`).
 func TestDnNsIdentity(t *testing.T) {
 	uuid, nguid := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15)
 	again, againNguid := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15)

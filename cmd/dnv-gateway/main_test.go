@@ -1,7 +1,7 @@
-// Tests for cmd/dnv-gateway's CM1-CM3 surface (gateway.md §7): the flag set,
-// the viper binding that makes a flag, a config file and an environment
-// variable interchangeable, the validation of the two required values, and the
-// two-signal handling. Nothing here touches etcd or opens a listener — the
+// Tests for cmd/dnv-gateway's CM1-CM3 surface (gateway.md, cmd/dnv-gateway):
+// the flag set, the viper binding that makes a flag, a config file and an
+// environment variable interchangeable, the validation of the two required
+// values, and the two-signal handling. Nothing here touches etcd or opens a listener — the
 // options path is deliberately I/O-free so every branch is drivable directly.
 package main
 
@@ -23,8 +23,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The invocation gateway.md §10.3 launches every instance of the integration
-// suite with, plus the flag that suite leaves at its default.
+// The invocation gateway.md, Integration test plan, launches every instance
+// of the integration suite with, plus the flag that suite leaves at its
+// default.
 var exampleArgs = []string{
 	"--grpc-network", "tcp",
 	"--grpc-address", "127.0.0.1:29810",
@@ -32,7 +33,7 @@ var exampleArgs = []string{
 }
 
 // cm2Flags is the CM2 flag set, verbatim. There is deliberately no
-// --etcd-op-timeout (EU5) and no default gRPC port (§0 #10).
+// --etcd-op-timeout (EU5) and no default gRPC port (CM2).
 var cm2Flags = []string{
 	"config",
 	"etcd-dial-timeout",
@@ -85,7 +86,7 @@ func TestRootCommandHasNoSubcommands(t *testing.T) {
 }
 
 // TestFlagSetIsExactlyCM2 fails both ways: a missing flag and an undocumented
-// extra one. It also pins the two deliberate absences of §0 #10 and EU5.
+// extra one. It also pins the two deliberate absences of CM2 and EU5.
 func TestFlagSetIsExactlyCM2(t *testing.T) {
 	root := newRootCmd()
 	got := longFlagNames(root.Flags().FlagUsages())
@@ -96,7 +97,7 @@ func TestFlagSetIsExactlyCM2(t *testing.T) {
 		t.Error("--etcd-op-timeout exists; EU5 says it deliberately does not")
 	}
 	if got := root.Flags().Lookup("grpc-address").DefValue; got != "" {
-		t.Errorf("--grpc-address defaults to %q; §0 #10 says it has no "+
+		t.Errorf("--grpc-address defaults to %q; CM2 says it has no "+
 			"default port", got)
 	}
 }
@@ -139,7 +140,7 @@ func TestHelpListsExactlyTheCM2Flags(t *testing.T) {
 }
 
 // TestDefaults pins the two CM2 defaults and the two values with none: a
-// gateway that is given no address must fail rather than pick a port (§0 #10).
+// gateway that is given no address must fail rather than pick a port (CM2).
 func TestDefaults(t *testing.T) {
 	opts := mustOptions(t, exampleArgs)
 	if opts.grpcNetwork != "tcp" {

@@ -1,10 +1,11 @@
-// Tests for the parsing and rendering surface of cdcctl (cdc.md §9.6). The
-// driver writes straight into the etcd the whole suite reads back, and every
-// field it gets wrong is invisible until a much later assertion fails on a
-// host: a shard code read as decimal serves the entry from the wrong pair of
-// instances, a reordered nvme_tr_conf_list breaks the DS5 index, and an
-// allowed_hosts that vanishes from a `list` row cannot be compared with the
-// §9.5 table. These cover exactly that surface.
+// Tests for the parsing and rendering surface of cdcctl (cdc.md, Integration
+// test plan, The driver, `cdcctl`). The driver writes straight into the etcd
+// the whole suite reads back, and every field it gets wrong is invisible until
+// a much later assertion fails on a host: a shard code read as decimal serves
+// the entry from the wrong pair of instances, a reordered nvme_tr_conf_list
+// breaks the DS5 index, and an allowed_hosts that vanishes from a `list` row
+// cannot be compared with the suite's entry table. These cover exactly that
+// surface.
 package main
 
 import (
@@ -66,9 +67,10 @@ func TestHexUintFlag(t *testing.T) {
 	}
 }
 
-// TestShardFlag pins the §9.5 shard codes. "81" is the one that matters most:
-// read as decimal it would become 0x51, which is in the LOW half and would be
-// served by the wrong two instances of §9.3.
+// TestShardFlag pins the suite's shard codes. "81" is the one that matters
+// most: read as decimal it would become 0x51, which is in the LOW half and
+// would be served by the wrong two instances (cdc.md, Integration test plan,
+// Topology).
 func TestShardFlag(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -108,8 +110,8 @@ func TestShardFlag(t *testing.T) {
 }
 
 // TestShardFlagRemembersUnset is the whole reason this flag is a struct: shard
-// 00 is a code §9.5 uses (ssA), so "not given" has to be distinguishable from
-// "given 00" by something other than the value.
+// 00 is a code the suite uses (ssA), so "not given" has to be distinguishable
+// from "given 00" by something other than the value.
 func TestShardFlagRemembersUnset(t *testing.T) {
 	var shard shardFlag
 	if shard.set {
@@ -168,8 +170,9 @@ func TestParseTrConf(t *testing.T) {
 	}
 }
 
-// TestTrConfListKeepsOrder is the DS5 index rule: §9.11 step 3 asserts ssD's
-// two records by their trsvcids, in the order the case listed them.
+// TestTrConfListKeepsOrder is the DS5 index rule: the matrix case asserts
+// ssD's two records (DS3) by their trsvcids, in the order the case listed
+// them.
 func TestTrConfListKeepsOrder(t *testing.T) {
 	var list trConfList
 	for _, spec := range []string{
@@ -215,8 +218,8 @@ func TestStringListKeepsOrder(t *testing.T) {
 	}
 }
 
-// TestEntryKeyGolden pins the key the whole suite addresses: the §9.5 ssF row
-// (second cluster id, shard 81) in the MD2 spelling.
+// TestEntryKeyGolden pins the key the whole suite addresses: the suite's ssF
+// entry (second cluster id, shard 81) in the MD2 spelling.
 func TestEntryKeyGolden(t *testing.T) {
 	got := model.CdcEntryKey(0x1cdc2, 0x81, 0x4, 0xf)
 	want := "dnv cdc 000000000001cdc2 81 0000000000000004 " +
@@ -230,7 +233,7 @@ func TestEntryKeyGolden(t *testing.T) {
 }
 
 // TestOpenEntryRendersEmptyAllowedHosts is why marshalOpts sets
-// EmitUnpopulated: ssA is the §0 #5 entry visible to everyone, and its
+// EmitUnpopulated: ssA is the DS6 entry visible to everyone, and its
 // allowed_hosts must be readable as an explicit [] in a `list` row rather than
 // be missing from the document.
 func TestOpenEntryRendersEmptyAllowedHosts(t *testing.T) {

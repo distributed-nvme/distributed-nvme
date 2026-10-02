@@ -1,4 +1,5 @@
-# dnv build entry points (layout.md §4, §7).
+# dnv build entry points (layout.md, Protobuf generation; layout.md,
+# `cmd/` wiring).
 GO ?= go
 PROTOC ?= protoc
 

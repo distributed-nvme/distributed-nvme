@@ -21,7 +21,7 @@ import (
 // the handler's ctx: the minted id has to survive the whole path — incoming
 // metadata → common's server interceptor (T2) → the handler ctx → common's
 // client interceptor (T1/T3) → the wire — and only the far end sees all of
-// it. §9.4's fake agent already records exactly that (agentpath_test.go
+// it. The agent-path fake already records exactly that (agentpath_test.go
 // captureInterceptor / seenTraceIds), so the two halves of the trace-id
 // contract are asserted by the same recorder.
 
@@ -39,9 +39,9 @@ type traceIdFixture struct {
 //
 // The DN is written straight to etcd rather than created through
 // CreateDiskNode because that handler makes an agent call of its own
-// (GetDnSize, §6.1): the fake would then hold two trace ids and "exactly one"
-// would stop meaning "the one InspectDiskNode forwarded". The cluster is
-// seeded the same way and for the same reason.
+// (GetDnSize; architecture.md, Size → extents): the fake would then hold two
+// trace ids and "exactly one" would stop meaning "the one InspectDiskNode
+// forwarded". The cluster is seeded the same way and for the same reason.
 //
 // The client carries NO interceptors, which is the experiment: common's
 // client chain is precisely what would supply a trace id (T1), so an id
@@ -89,7 +89,8 @@ func traceIdSetup(t *testing.T) *traceIdFixture {
 
 // inspect makes the one served call that reaches the fake agent:
 // InspectDiskNode is a handler whose whole body is a snapshot read plus one
-// GetDnInfo (disknode.go §8.2), so one client call is one agent call.
+// GetDnInfo (disknode.go; architecture.md, Disk nodes), so one client call is
+// one agent call.
 func (fx *traceIdFixture) inspect(t *testing.T, ctx context.Context) {
 	t.Helper()
 	if _, err := fx.client.InspectDiskNode(
@@ -118,7 +119,7 @@ func traceIdIsMinted(s string) bool {
 	return true
 }
 
-// TestServerMintsTraceIdWhenAbsent pins gateway.md §0 #6: a request that
+// TestServerMintsTraceIdWhenAbsent pins gateway.md GW2: a request that
 // arrives with no trace_id metadata still gets one, and the agent call the
 // handler makes carries it. Without the mint the fake would see no trace-id
 // metadata at all here, because the shared server interceptor only adopts an

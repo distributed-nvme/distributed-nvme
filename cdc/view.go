@@ -10,13 +10,14 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is the §3 discovery service model: the owned CdcEntry map, the
-// per-active-host views rendered out of it, and the DS6 impact pass that
+// This file is cdc.md, The discovery service model: the owned CdcEntry map,
+// the per-active-host views rendered out of it, and the DS6 impact pass that
 // decides which hosts a change is worth an AEN to.
 //
 // One mutex serializes every read and every mutation of served state, which is
-// the §4 serialization invariant — no served state is ever mutated
-// concurrently — expressed the way Go expresses it: the watcher goroutine
+// the serialization invariant of cdc.md, The etcd watcher — no served state
+// is ever mutated concurrently — expressed the way Go expresses it: the
+// watcher goroutine
 // mutates the entries and runs the impact pass, the connection goroutines
 // attach and detach their host state and render the dirty views their
 // snapshots find (DS6), all under the same lock, and no reader ever observes
@@ -62,9 +63,10 @@ type entry struct {
 	allowed map[string]struct{}
 	records []byte
 	numRec  uint64
-	// skips are the distinct §7 reasons DS3 could not render some of this
-	// entry's transport configurations under, in first-seen order. Empty
-	// for the overwhelmingly common case of an entry that rendered whole.
+	// skips are the distinct reasons (cdc.md, Log records) DS3 could not
+	// render some of this entry's transport configurations under, in
+	// first-seen order. Empty for the overwhelmingly common case of an entry
+	// that rendered whole.
 	skips []string
 }
 
@@ -92,7 +94,7 @@ func newEntry(msg *pb.CdcEntry) *entry {
 	return e
 }
 
-// addSkip records one §7 skip reason, once.
+// addSkip records one skip reason (cdc.md, Log records), once.
 func (e *entry) addSkip(reason string) {
 	for _, seen := range e.skips {
 		if seen == reason {
@@ -188,7 +190,7 @@ type registry struct {
 	entries map[entryKey]*entry
 	order   []entryKey
 	hosts   map[string]*hostState
-	// renders counts the views rendered, for the §8 tests: DS6's cost rule
+	// renders counts the views rendered, for the unit tests: DS6's cost rule
 	// is stated in renders.
 	renders int
 }
@@ -398,7 +400,7 @@ func (r *registry) attach(hostNqn string, c *conn) {
 }
 
 // detach unregisters one connection (NP13). The host state dies with its last
-// connection, which is what makes GENCTR restart at the next one (§0 #6).
+// connection, which is what makes GENCTR restart at the next one (DS7).
 func (r *registry) detach(hostNqn string, c *conn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -433,7 +435,7 @@ func (r *registry) snapshot(hostNqn string) (uint64, uint64, []byte) {
 	return h.genCtr, h.numRec, h.body
 }
 
-// hostCount is the number of hostnqns currently tracked, for the §8 tests.
+// hostCount is the number of hostnqns currently tracked, for the unit tests.
 func (r *registry) hostCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -1,6 +1,7 @@
 // This file holds the volume-shaped subcommands of gatewayctl: the thin
-// devices of architecture.md §8.7, the subsystems and namespaces of §8.8 and
-// the transfers of §8.10 (gateway.md §5.6, §5.7, §5.9, driver table §10.8).
+// devices, the subsystems and namespaces, and the transfers
+// (architecture.md, Thin devices; Subsystems, namespaces; Transfers; and
+// gateway.md, Thin devices; Subsystems and namespaces; Transfers).
 //
 // Every RPC in the group is SP-scoped and pure etcd, so each subcommand is the
 // same shape: `--sp` names the storage pool, every mutator carries the `--rev`
@@ -8,7 +9,7 @@
 // carry neither. `--rev` is always explicit and 0 is a legal value the B4
 // stage sends on purpose, so it is never defaulted from a prior read.
 //
-// The names here are the §10.8 spellings, which are shorter than the proto
+// The names here are the driver's spellings, which are shorter than the proto
 // field names they fill: `--name` is td_name / xfer_name, `--idx` is ns_idx and
 // `--td` is td_name, because within a subcommand there is only ever one of
 // each and the script types them constantly.
@@ -22,7 +23,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// td — architecture.md §8.7
+// td — architecture.md, Thin devices
 // ---------------------------------------------------------------------------
 
 // setupCreateTd drives CreateThinDevice.
@@ -77,10 +78,10 @@ func setupDeleteTd(fs *flag.FlagSet) job {
 	}
 }
 
-// setupListTds drives ListThinDevices, the read the §10.11 checks poll for
-// `created`: the gateway always writes it false and only the sp-worker flips
-// it, so this is how the script learns an origin may be snapshotted. It never
-// bumps, hence no --rev.
+// setupListTds drives ListThinDevices, the read the smoke case's checks poll
+// for `created`: the gateway always writes it false and only the sp-worker
+// flips it, so this is how the script learns an origin may be snapshotted. It
+// never bumps, hence no --rev.
 func setupListTds(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name whose thin devices are listed")
 	return func(
@@ -96,7 +97,7 @@ func setupListTds(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// ss / ns — architecture.md §8.8
+// ss / ns — architecture.md, Subsystems, namespaces
 // ---------------------------------------------------------------------------
 
 // setupCreateSs drives CreateSubsystem. --hosts is allowed_hosts, the host
@@ -192,12 +193,14 @@ func setupSetSsHosts(fs *flag.FlagSet) job {
 //
 // --idx is the NVMe NSID the host will see and is the user's to choose, so it
 // has no useful default; 0 is reserved and the gateway refuses it, which is
-// what the §10 invalid-argument stage sends.
+// what the suite's invalid-argument stage sends
+// (gateway.md, Integration test plan).
 //
 // --uuid and --nguid stay empty by default because an empty dev_uuid /
-// dev_nguid is the documented "mint one" request (§8.8 Defaults) and the
-// §10.11 check asserts the generated forms; passing them explicitly is how the
-// cross-SP cases give two SPs' namespaces the SAME identity.
+// dev_nguid is the documented "mint one" request (CreateNamespace's Defaults,
+// architecture.md, Subsystems, namespaces) and the smoke case's check asserts
+// the generated forms; passing them explicitly is how the cross-SP cases give
+// two SPs' namespaces the SAME identity.
 //
 // --suspended creates the namespace already retired. It is a bool, so it must
 // be written --suspended / --suspended=false and never `--suspended false`.
@@ -283,7 +286,8 @@ func setupSetNsDev(fs *flag.FlagSet) job {
 }
 
 // setupSetNsSuspended drives UpdateNamespaceSuspended, the retire/resume flip
-// of the §11.3 choreography.
+// of the cross-SP choreography
+// (architecture.md, Transfer + clone = cross-SP live migration).
 //
 // --suspended defaults to TRUE because retiring is the direction the suite
 // asks for; resuming is the explicit --suspended=false, which is the only
@@ -316,11 +320,11 @@ func setupSetNsSuspended(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// xfer — architecture.md §8.10
+// xfer — architecture.md, Transfers
 // ---------------------------------------------------------------------------
 
-// setupCreateXfer drives CreateTransfer, the source half of the §11.3 cross-SP
-// live migration.
+// setupCreateXfer drives CreateTransfer, the source half of the cross-SP live
+// migration (architecture.md, Transfer + clone = cross-SP live migration).
 //
 // --ori-nqn and --ori-idx point at an existing namespace of THIS SP, the one
 // whose bytes the destination clone will read; both are resolved inside the

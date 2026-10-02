@@ -11,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Teardown by sweep, the dn half (teardown_issue_fix_plan §3.6, DN6).
+// Teardown by sweep, the dn half (architecture.md, Teardown by sweep; DN6).
 //
 // Every test here pins one property of the same principle: what the agent
 // removes is derived by subtracting the desired state from what the node
@@ -77,7 +77,8 @@ func sweepDstReq(
 }
 
 // sweepSrcReq is sweepSideReq playing the source of one migration whose
-// destination has provisioned, so the role is live (§11.2).
+// destination has provisioned, so the role is live (architecture.md,
+// Migration).
 func sweepSrcReq(
 	revision uint64,
 	ptr *pb.SidePointer,
@@ -222,8 +223,9 @@ func (o sideObjects) assertAllGone(t *testing.T, node *fakeNode) {
 // side's resources are removed because their NAMES are on the node and the
 // desired state does not want them, not because the agent remembers the side.
 //
-// It matters because §9.8 deletes that memory FIRST: a side whose pointer has
-// left its DN's list has its state file, its chunks, its memory entry and its
+// It matters because architecture.md, Teardown by sweep, deletes that memory
+// FIRST: a side whose pointer has left its DN's list has its state file, its
+// chunks, its memory entry and its
 // object lock dropped in the same pass, before a single removal is attempted.
 // A removal path that needed any of it would leak every such side for ever —
 // which is exactly the bug this design started from, where the teardown
@@ -481,7 +483,8 @@ func TestFinishedMigrationRepointsThenRemovesClone(t *testing.T) {
 }
 
 // TestMigrationCloneRemovedBeforeItsSourceDisconnect pins DN6's one ordering
-// rule inside a chain layer, and the §9.8 stop rule that protects it: the
+// rule inside a chain layer, and the stop rule of architecture.md,
+// Teardown by sweep, that protects it: the
 // destination's dm-clone goes before the :3: connection it hydrates through,
 // and if the clone will not go, the connection is NOT touched at all.
 //
@@ -794,10 +797,11 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A conf fault must never destroy resources (§7)
+// A conf fault must never destroy resources (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
-// TestDnDeferredParentConfSkipsSweep pins the §7 rule at its sharpest point.
+// TestDnDeferredParentConfSkipsSweep pins the Common validation rule at its
+// sharpest point.
 // A DN whose stored extent_size is unusable converges nothing — every side's
 // run is carved out of that number, so nothing can be computed from it — and
 // it must sweep nothing either, even though the sweep would otherwise be
@@ -825,7 +829,7 @@ func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 		objs.assertAllPresent(t, node)
 		// The CP's drop, persisted but never converged: the dn file names no
 		// side any more, and the side's own file is gone, exactly as a
-		// pointer removal leaves them (§9.8).
+		// pointer removal leaves them (architecture.md, Teardown by sweep).
 		req := dnReq(2)
 		req.ExtentSize = extentSize
 		node.mu.Lock()
@@ -871,7 +875,8 @@ func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The §11.2 fence window and the order the layers run in
+// The cutover fence window (architecture.md, Migration, src step 2) and the
+// order the layers run in
 // ---------------------------------------------------------------------------
 
 // TestSuspendedLinearResumedBeforeNvmetDisable pins the sweep's P0 step for a
@@ -886,7 +891,7 @@ func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 // on the namespace, and one whose bio a suspended dm target holds never
 // completes — such a target queues bios with no timeout and no error path —
 // so the writer sits in uninterruptible D state and the pass never returns.
-// The §11.2 cutover fence leaves exactly such devices behind for
+// The DN12 cutover fence leaves exactly such devices behind for
 // common.SuspendSeconds, holding what the old primary had in flight, and
 // anything the control plane retires inside that window is retired over
 // them. Resuming inside removeDm would be too late: by then the namespace
@@ -958,8 +963,8 @@ func TestSuspendedLinearResumedBeforeNvmetDisable(t *testing.T) {
 // TestCheckSideReportsLeftover pins the side-level verdict: the same
 // enumeration and the same comparison the sweep makes, with nothing touched.
 //
-// It is the whole retry machinery (§9.8's recomputed verdict, `dnv-worker.md`
-// RW4). The agent stores no "pending" flag
+// It is the whole retry machinery (the recomputed verdict of architecture.md,
+// Teardown by sweep; `dnv-worker.md` RW4). The agent stores no "pending" flag
 // — a stored flag is memory of failure, and memory of failure is what let the
 // old teardowns forget an object that would not go — so what drives the
 // worker's next SyncupSide is a code recomputed from the node on every round.
@@ -1123,15 +1128,17 @@ func TestCheckDnReportsLeftover(t *testing.T) {
 // The clone-metadata record and the proof it waits for
 // ---------------------------------------------------------------------------
 
-// TestCloneMetaRecordFreedUnderTheProof pins the second half of §9.8's
-// probe-verified "gone", the one a device probe alone cannot supply: a clone-metadata slot is released
+// TestCloneMetaRecordFreedUnderTheProof pins the second half of the
+// probe-verified "gone" of architecture.md, Teardown by sweep, the one a device
+// probe alone cannot supply: a clone-metadata slot is released
 // only when no held side claims its migration AND every side of that sp
 // this node may host is a side whose local state the agent actually holds.
 //
 // The second condition is the one that looks redundant and is not. A side
 // named by its DN's pointer list but not yet synced (DN8, or a restart that
 // has not received its SyncupSide) may be the destination that owns the slot:
-// its dm-clone hydration resumes from that metadata after a crash (§11.2), so
+// its dm-clone hydration resumes from that metadata after a crash
+// (architecture.md, Migration), so
 // freeing the slot on the strength of "nobody I know of claims it" would hand
 // a live migration's metadata to the next one and strand the transfer. The
 // slot simply waits for a pass that can prove it — which costs nothing,

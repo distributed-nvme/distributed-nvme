@@ -12,14 +12,15 @@ import (
 // The probe map of CN28. Every function here is read-only: Get*Info and the
 // Check* streams must never mutate (CN23, SH25). In particular
 // `reserve_metadata_snap` runs only inside `dumpThinMetadata` — the CN25
-// bitmap reads, the CN14 activation sweep and the §11.5 dst-bitmap read —
-// never from here (CN29).
+// bitmap reads, the CN14 activation sweep and the dst-bitmap read of
+// architecture.md, Clone crash recovery — never from here (CN29).
 
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 ) *pb.CntlrInfo {
-	// §7: the same refusal convergeCntlr makes, because this reads the SAME
+	// architecture.md, Common validation: the same refusal convergeCntlr
+	// makes, because this reads the SAME
 	// stored request and every table it would compare against is built from
 	// it — plan.lowWaterMark, plan.blockSectors and plan.stripeSectors are
 	// the pool's and the raid0's own arguments. Probing with a zero would
@@ -285,8 +286,8 @@ func (s *CnAgentServer) probeCntlr(
 		// SP_LEVEL_DISABLE. The transfer, ns-dev, namespace and subsystem rows
 		// below are all suppressed — and CN19 wants that *said*, through the
 		// very helper the converge uses, so the two channels report the same
-		// CntlrInfo for the same stored request (§9.7: show_info always fills
-		// the complete current info).
+		// CntlrInfo for the same stored request (architecture.md, Check
+		// streams: show_info always fills the complete current info).
 		s.reportSuppressed(st, plan, info)
 		return info
 	}

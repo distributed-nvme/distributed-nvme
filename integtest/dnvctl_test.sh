@@ -1,36 +1,38 @@
 #!/usr/bin/env bash
 #
-# dnvctl_test.sh — the `dnvctl` integration test of doc/dnvctl.md §7. One VM,
-# one `integtest/fakegateway` process standing in for the whole control plane,
-# and the real `bin/dnvctl` driven over ssh. Nothing here tests the gateway:
-# the fake records what dnvctl put on the wire and answers whatever
-# behavior.json tells it to, so every assertion below is about dnvctl's own
-# argv→request marshalling, §3.1 rendering, §3.2 error surface and §2.3 trace
-# ids (§7.1).
+# dnvctl_test.sh — the `dnvctl` integration test of doc/dnvctl.md, Integration
+# test plan. One VM, one `integtest/fakegateway` process standing in for the
+# whole control plane, and the real `bin/dnvctl` driven over ssh. Nothing here
+# tests the gateway: the fake records what dnvctl put on the wire and answers
+# whatever behavior.json tells it to, so every assertion below is about
+# dnvctl's own argv→request marshalling, CT4 rendering, CT5 error surface and
+# CT2 trace ids (Integration test plan, What the suite proves).
 #
 #   bash integtest/dnvctl_test.sh [--only <case>] [--cleanup-only] user@ip
 #
-# Cases (§7.9-§7.13), in order, each against a RESTARTED fake whose
-# behavior.json was reset to `{}` and whose state.json holds only case_reset's
-# own readiness probe (a ListClusters under trace it-<case>-reset), so counters
-# are read only as deltas: smoke, sweep, behavior, errors, transport. Cleanup
-# runs unconditionally at the start and, on success only, at the end: a
-# failing run leaves $WORK, the fake's log and both JSON files in place and
-# dumps the §7.15 diagnostics.
+# Cases (Integration test plan, Cases), in order, each against a RESTARTED
+# fake whose behavior.json was reset to `{}` and whose state.json holds only
+# case_reset's own readiness probe (a ListClusters under trace
+# it-<case>-reset), so counters are read only as deltas: smoke, sweep,
+# behavior, errors, transport. Cleanup runs unconditionally at the start and,
+# on success only, at the end: a failing run leaves $WORK, the fake's log and
+# both JSON files in place and dumps the diagnostics (Integration test plan,
+# Cleanup).
 #
 # NO SUDO anywhere: nothing in this suite needs root, and no Go toolchain is
 # needed on the VM — both binaries are built here and scp'd.
 #
-# What it proves (§7.1): (a) every one of the 59 commands marshals its argv
-# into exactly the intended request proto, asserted FIELD FOR FIELD against
-# the fake's state.json — a whole-object comparison, so an unexpected key
-# fails as loudly as a wrong value, which is what makes "no sp_rev key" and
-# "no dm_raid0_conf key" provable rather than asserted; (b) the §4 token trio
-# — absent / `--rev 0` / `--rev 0x1f` — reaches the wire as absent message /
-# present-and-empty / revision 31; (c) replies render per §3.1, with byte-exact
-# goldens for the four §7.10 representatives; (d) failures render per §3.2 and
-# usage errors issue no RPC at all; (e) trace ids arrive on the wire, minted
-# when not given. Correctness only: the two timing assertions (§7.13) bound a
+# What it proves (Integration test plan, What the suite proves): (a) every one
+# of the 59 commands marshals its argv into exactly the intended request
+# proto, asserted FIELD FOR FIELD against the fake's state.json — a
+# whole-object comparison, so an unexpected key fails as loudly as a wrong
+# value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
+# provable rather than asserted; (b) the CT3 token trio — absent / `--rev 0` /
+# `--rev 0x1f` — reaches the wire as absent message / present-and-empty /
+# revision 31; (c) replies render per CT4, with byte-exact goldens for the
+# sweep case's four representatives; (d) failures render per CT5 and usage
+# errors issue no RPC at all; (e) trace ids arrive on the wire, minted when not
+# given. Correctness only: the transport case's two timing assertions bound a
 # deadline, not a latency.
 #
 # Log reading: fakegateway.log is one JSON object per line, and a log being
@@ -58,7 +60,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (§7.3, §7.6)
+# Constants (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -68,16 +70,16 @@ FAKEGW_BIN="$BIN_DIR/fakegateway"
 
 WORK=/var/tmp/dnv-dnvctl-integtest
 
-# §7.3 ports. 29841 is deliberately never listened on — the transport case
-# dials it expecting a refusal — so preflight must prove BOTH free, and
-# cleanup must leave BOTH free. Both are outside every range the other five
-# suites and production use (15379/15380, 29810-29832, 29527, 2379, 295xx,
-# 296xx, 297xx, 298[1-3]x).
+# The ports (Integration test plan, Topology). 29841 is deliberately never
+# listened on — the transport case dials it expecting a refusal — so preflight
+# must prove BOTH free, and cleanup must leave BOTH free. Both are outside
+# every range the other five suites and production use (15379/15380,
+# 29810-29832, 29527, 2379, 295xx, 296xx, 297xx, 298[1-3]x).
 FGW_PORT=29840
 DEAD_PORT=29841
 ALL_PORTS=(29840 29841)
 
-# §7.6 identity plan. Nothing below is dialled: the DN/CN addresses and every
+# The identity plan. Nothing below is dialled: the DN/CN addresses and every
 # nqn are payload the fake only ever records.
 CLUSTER=itctl
 SP=sp0
@@ -92,19 +94,21 @@ UUID=6f7d0f3e-0dd6-4f22-9a34-5e0f1a2b3c4d
 NGUID=00112233445566778899aabbccddeeff
 TD_SIZE=67108864
 
-# §7.10 goldens. Step 03 pins EmitUnpopulated + canonical key order against the
-# fake's canned EMPTY reply; step 19 pins uint64-as-string with an injected
-# revision above 2^53, which a JSON number could not carry intact; steps 33/34
-# pin the §3.1 hex map, the one place dnvctl does not emit a proto message.
+# The sweep's goldens (Integration test plan, Cases). Step 03 pins
+# EmitUnpopulated + canonical key order against the fake's canned EMPTY reply;
+# step 19 pins uint64-as-string with an injected revision above 2^53, which a
+# JSON number could not carry intact; steps 33/34 pin the CT4 hex map, the one
+# place dnvctl does not emit a proto message.
 GOLD_CLUSTER_GET='{"cluster_conf":null,"cluster_id":"0","cluster_name":"","cn_global":null,"dn_global":null,"sp_global":null}'
 SP_GET_REV=9007199254740993
 GOLD_SP_GET='{"cntlr_list":[],"slice_list":[],"sp_conf":null,"sp_name":"","sp_rev":{"revision":"9007199254740993","sp_name":"sp0"}}'
 GOLD_TD_BM='{"bitmap_hex":"a5","byte_cnt":1}'
 GOLD_LEG_BM='{"bitmap_hex":"a5a5","byte_cnt":2}'
 
-# The §7.5 base64 renderings of the two --bm-hex values. protojson renders a
-# bytes field as standard base64, so this is what `bitmap` looks like in
-# state.json: a5 -> pQ==, a5a5 -> paU=.
+# The base64 renderings of the two --bm-hex values in the fake's records
+# (Integration test plan, The fake gateway). protojson renders a bytes field
+# as standard base64, so this is what `bitmap` looks like in state.json:
+# a5 -> pQ==, a5a5 -> paU=.
 BM_A5_B64=pQ==
 BM_A5A5_B64=paU=
 
@@ -131,10 +135,10 @@ STAGE="(startup)"
 SETUP_DONE=0
 QUIET=0
 
-# The four levers of the §7.6 global argv prefix. ctl_defaults restores them;
+# The four levers of the global argv prefix. ctl_defaults restores them;
 # only the three steps that need a different prefix touch them (smoke s2 drops
-# --trace-id to watch the §2.3 mint, behavior b6 drops --cluster and adds a
-# DNVCTL_* assignment, transport d1 dials the dead port).
+# --trace-id to watch the trace-id mint (CT2), behavior b6 drops --cluster
+# and adds a DNVCTL_* assignment, transport d1 dials the dead port).
 CTL_ADDR="127.0.0.1:$FGW_PORT"
 CTL_TRACE=1
 CTL_CLUSTER=1
@@ -159,14 +163,16 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 	-o ConnectTimeout=15 -o ServerAliveInterval=15)
 
 # ---------------------------------------------------------------------------
-# Logging, assertions, failure handling (§7.2, verbatim from gateway_test.sh)
+# Logging, assertions, failure handling (verbatim from gateway_test.sh; PASS
+# and fail-fast per Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
 log() { echo "$*" >&2; }
 
-# stage names the step for the failure report and mints the §7.6 trace id
-# `it-<case>-<step>`, which every dnvctl call of the step then stamps on the
-# fake's records — the thread that ties a script stage to fakegateway.log.
+# stage names the step for the failure report and mints the step's own trace
+# id `it-<case>-<step>` (Integration test plan, Topology), which every dnvctl
+# call of the step then stamps on the fake's records — the thread that ties a
+# script stage to fakegateway.log.
 stage() {
 	STAGE="$CASE: $2"
 	TRACE="it-$CASE-$1"
@@ -199,15 +205,16 @@ assert_field() { # <json> <filter> <want> <label>
 	assert_eq "$(jq_of "$1" "$2")" "$3" "$4"
 }
 
-# assert_jq is the §7.7 spot-check: a `jq -e` filter that must be truthy.
+# assert_jq is the spot-check: a `jq -e` filter that must be truthy.
 assert_jq() { # <json> <filter> <label>
 	printf '%s' "$1" | "$JQ" -e "$2" >/dev/null ||
 		die "$3 (filter: $2, document: $1)"
 }
 
-# assert_parses is §7.7's "dnvctl stdout must satisfy jq -e ." — run on every
-# ctl_ok, because a command that renders unparseable JSON has failed even when
-# every field it names is right.
+# assert_parses is "Every success parses stdout" (Integration test plan, What
+# a pass means), checked as `jq -e .` — run on every ctl_ok, because a command
+# that renders unparseable JSON has failed even when every field it names is
+# right.
 assert_parses() { # <json> <label>
 	printf '%s' "$1" | "$JQ" -e . >/dev/null ||
 		die "$2: stdout is not one parseable JSON document: '$1'"
@@ -226,7 +233,7 @@ on_exit() {
 		log "PASS"
 	else
 		log ""
-		log "########## diagnostics (§7.15) ##########"
+		log "########## diagnostics (Integration test plan, Cleanup) ##########"
 		diagnostics || true
 		log ""
 		log "debris left in place on $TARGET; failing stage '$STAGE'"
@@ -237,7 +244,7 @@ on_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# Remote execution (§7.3)
+# Remote execution (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 # sshw echoes the command and runs it on the server as the plain user. QUIET is
@@ -250,7 +257,7 @@ sshw() {
 
 sshw_ok() { sshw "$@" || true; }
 
-# rlog is the §7.15 log reader: `ssh … cat <path>`, so every assertion is
+# rlog is the log reader: `ssh … cat <path>`, so every assertion is
 # parsed by the DRIVER's jq and the server needs no jq of its own. A missing
 # file yields empty output rather than a failure, because `set -o pipefail`
 # would otherwise turn "the file does not exist yet" into a script abort inside
@@ -281,9 +288,10 @@ recsr() { # <path> <filter> [jq args…]  — raw output
 count_recs() { recs "$@" | wc -l | tr -d ' \n'; }
 
 # req_recs selects the interceptor's request records of one RPC under one trace
-# id (§7.7). The wire method is `/Gateway/<Rpc>` — schema.proto declares no
-# proto package, so there is no package prefix — and no Gateway RPC name is a
-# suffix of another, which is what makes the spec's `endswith` matcher exact.
+# id (Integration test plan, The fake gateway). The wire method is
+# `/Gateway/<Rpc>` — schema.proto declares no proto package, so there is no
+# package prefix — and no Gateway RPC name is a suffix of another, which is
+# what makes the spec's `endswith` matcher exact.
 # Case S step 1 pins the full method string once, so a future package statement
 # would be caught there rather than silently widening this filter.
 req_recs() { # <Rpc> <trace id>
@@ -295,8 +303,9 @@ req_recs() { # <Rpc> <trace id>
 count_req_recs() { req_recs "$@" | wc -l | tr -d ' \n'; }
 
 # ---------------------------------------------------------------------------
-# Polling (§7.8: only for process readiness — every dnvctl call is synchronous,
-# so no stage ever sleeps waiting for the fake to catch up)
+# Polling (Integration test plan, What a pass means: only for process
+# readiness — every dnvctl call is synchronous, so no stage ever sleeps
+# waiting for the fake to catch up)
 # ---------------------------------------------------------------------------
 
 wait_until() { # <secs> <label> <cmd…>
@@ -318,7 +327,7 @@ wait_until() { # <secs> <label> <cmd…>
 }
 
 # ---------------------------------------------------------------------------
-# The dnvctl driver (§7.6)
+# The dnvctl driver (Integration test plan, Topology and What a pass means)
 # ---------------------------------------------------------------------------
 
 ctl_defaults() {
@@ -328,7 +337,7 @@ ctl_defaults() {
 	CTL_ENV=""
 }
 
-# ctl_prefix is the §7.6 global argv prefix, built from the four levers.
+# ctl_prefix is the global argv prefix, built from the four levers.
 ctl_prefix() {
 	local prefix="$WORK/bin/dnvctl --gateway-address $CTL_ADDR"
 	if [ "$CTL_CLUSTER" -eq 1 ]; then
@@ -371,7 +380,7 @@ ctl_section() { # <framed> <n>
 # catted back afterwards, rather than being interleaved on one stream: that is
 # the only way to keep "stdout is empty" and "stderr is exactly one line"
 # separable, and it leaves the last invocation's raw output on the VM for the
-# §7.15 dump.
+# diagnostics (Integration test plan, Cleanup).
 ctl_exec() { # <args…>
 	local quoted remote framed
 	quoted=$(printf '%q ' "$@")
@@ -392,9 +401,10 @@ ctl_exec() { # <args…>
 	[ -n "$CTL_RC" ] || die "dnvctl $*: the framed reply carried no exit code"
 }
 
-# ctl_ok is the success wrapper (§7.6): exit 0, EMPTY stderr — CT7's Warn
-# silencing and stdout reservation, asserted on every single success — and
-# stdout that parses. The result document stays in $CTL_OUT.
+# ctl_ok is the success wrapper (Integration test plan, What a pass means):
+# exit 0, EMPTY stderr — CT7's Warn silencing and stdout reservation, asserted
+# on every single success — and stdout that parses. The result document stays
+# in $CTL_OUT.
 ctl_ok() { # <args…>
 	ctl_exec "$@"
 	assert_eq "$CTL_RC" "0" "exit code of: dnvctl $*"
@@ -402,7 +412,7 @@ ctl_ok() { # <args…>
 	assert_parses "$CTL_OUT" "dnvctl $*"
 }
 
-# ctl_fail is the §3.2 exit-1 wrapper: empty stdout and ONE stderr line of the
+# ctl_fail is the CT5 exit-1 wrapper: empty stdout and ONE stderr line of the
 # exact shape `dnvctl: <CODE>: <message> (trace_id <id>)`. The message is only
 # shape-checked here; ctl_fail_msg compares the whole line.
 ctl_fail() { # <UPPER_SNAKE code> <args…>
@@ -430,13 +440,13 @@ ctl_fail_msg() { # <UPPER_SNAKE code> <message> <args…>
 	shift 2
 	ctl_fail "$code" "$@"
 	assert_eq "$CTL_ERR" "dnvctl: $code: $message (trace_id $TRACE)" \
-		"the whole §3.2 stderr line"
+		"the whole CT5 stderr line"
 }
 
-# ctl_usage is the §3.2 exit-2 wrapper. The "no RPC was issued" half is what
+# ctl_usage is the CT5 exit-2 wrapper. The "no RPC was issued" half is what
 # matters and it is proved, not asserted: the caller names the RPC the command
 # would have driven and the fake's own counter must not have moved across the
-# call (§7.12 c5-c7).
+# call (CT3, CT5, CT8; the errors case's stages 5-7).
 ctl_usage() { # <Rpc the command would drive> <args…>
 	local rpc=$1
 	shift
@@ -448,7 +458,8 @@ ctl_usage() { # <Rpc the command would drive> <args…>
 }
 
 # ctl_probe is the readiness form: no framing, no files, just the remote exit
-# code, so wait_until can poll it. §7.8 makes dnvctl its own readiness probe.
+# code, so wait_until can poll it. dnvctl is its own readiness probe
+# (Integration test plan, Cases).
 ctl_probe() { # <args…>
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -458,7 +469,7 @@ ctl_probe() { # <args…>
 fgw_ready() { ctl_probe cluster list >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------------------
-# Ground truth: the fake's state.json (§7.7)
+# Ground truth: the fake's state.json (Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
 # state_count reads one method's call counter out of a state.json snapshot. A
@@ -486,7 +497,7 @@ assert_count_delta() { # <Rpc> <delta> <label>
 		"$3: $1 count moved from $before to $after, want +$2"
 }
 
-# assert_req is the sweep's core assertion (§7.10, "field for field"): the
+# assert_req is the sweep's core assertion (Integration test plan, Cases): the
 # recorded request must equal the argv-implied one as a WHOLE object. Equality
 # rather than a field walk is deliberate — it is the only form that also proves
 # the absences the spec names (no ori_name, no sp_rev, no dm_raid0_conf), and
@@ -508,7 +519,8 @@ assert_req() { # <Rpc> <want json>
 }
 
 # ---------------------------------------------------------------------------
-# Driving the fake: behavior.json and state.json (§7.5)
+# Driving the fake: behavior.json and state.json (Integration test plan, The
+# fake gateway)
 # ---------------------------------------------------------------------------
 
 # set_behavior writes behavior.json from a here-doc on stdin. The fake re-reads
@@ -537,8 +549,9 @@ truncate_log() {
 }
 
 # ---------------------------------------------------------------------------
-# Process control (§7.8): launch with >> so an external truncation resets the
-# write offset, record the pid from $!, and signal by that pid.
+# Process control: launch with >> so an external truncation resets the write
+# offset, record the pid from $!, and signal by that pid (Integration test
+# plan, Cleanup).
 # ---------------------------------------------------------------------------
 
 remote_start() { # <dir> <logfile> <command…>
@@ -576,17 +589,17 @@ stop_fgw() {
 	wait_gone fgw 10
 }
 
-# case_reset is §7.7's per-case reset: stop the fake, blank both JSON files,
-# truncate the log, restore the argv levers and start it again. Blanking
-# state.json is what zeroes the counters: a started fake loads both files and
-# keeps counting from them. The restart makes the fresh process load the
-# blanked file at start rather than relying on the fake's mtime guard. The
-# readiness probe below is itself recorded (ListClusters, trace
-# it-<case>-reset), so no case starts from an empty state.json; assert counts
-# only as deltas (assert_count_delta).
+# case_reset is the per-case reset (Integration test plan, Cases): stop the
+# fake, blank both JSON files, truncate the log, restore the argv levers and
+# start it again. Blanking state.json is what zeroes the counters: a started
+# fake loads both files and keeps counting from them. The restart makes the
+# fresh process load the blanked file at start rather than relying on the
+# fake's mtime guard. The readiness probe below is itself recorded
+# (ListClusters, trace it-<case>-reset), so no case starts from an empty
+# state.json; assert counts only as deltas (assert_count_delta).
 case_reset() { # <case name>
 	CASE=$1
-	stage reset "per-case reset before case $1 (§7.7)"
+	stage reset "per-case reset before case $1 (Integration test plan, Cases)"
 	stop_fgw
 	clear_behavior
 	reset_state
@@ -599,7 +612,7 @@ case_reset() { # <case name>
 }
 
 # ---------------------------------------------------------------------------
-# Cleanup (§7.14)
+# Cleanup (Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 cleanup_script() {
@@ -636,9 +649,9 @@ cleanup() {
 	RUNNING=()
 }
 
-# verify_clean is §7.14's closing claim, made provable: after a cleanup both
-# ports are free and $WORK is gone. It runs on the --cleanup-only path, which
-# is the one place nothing else would notice.
+# verify_clean is the closing claim of Integration test plan, Cleanup, made
+# provable: after a cleanup both ports are free and $WORK is gone. It runs on
+# the --cleanup-only path, which is the one place nothing else would notice.
 verify_clean() {
 	local listening port left
 	listening=$(sshw "ss -ltnH | awk '{ print \$4 }' | sed 's/.*://' | sort -u")
@@ -652,7 +665,7 @@ verify_clean() {
 }
 
 # ---------------------------------------------------------------------------
-# Diagnostics (§7.15)
+# Diagnostics (Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 diagnostics() {
@@ -692,7 +705,7 @@ diagnostics() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (§7.4)
+# Preflight (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 need_local() {
@@ -733,7 +746,7 @@ preflight_driver() {
 }
 
 # preflight_server runs AFTER the start-of-run cleanup: the port check is only
-# meaningful once a crashed prior run's processes are gone (§7.4). Both ports
+# meaningful once a crashed prior run's processes are gone. Both ports
 # are checked — 29841 is never listened on by this suite, and the transport
 # case's UNAVAILABLE is only a real measurement if nothing else answers there.
 preflight_server() {
@@ -760,13 +773,13 @@ preflight_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup (§7.8)
+# Setup (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 setup() {
 	CASE=setup
 
-	stage layout "create the §7.3 tree and ship dnvctl + fakegateway"
+	stage layout "create the work directory tree and ship dnvctl + fakegateway"
 	sshw "mkdir -p $WORK/bin $(fgw_dir)"
 	SETUP_DONE=1
 	log "[server] scp dnvctl fakegateway -> $WORK/bin"
@@ -792,7 +805,7 @@ setup() {
 }
 
 # ---------------------------------------------------------------------------
-# Case S — smoke (§7.9)
+# Case S — smoke (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_smoke() {
@@ -814,14 +827,14 @@ case_smoke() {
 		'select(.msg == "grpc server request" and .trace_id == $t) | .method' \
 		--arg t "$TRACE")
 	assert_eq "$method" "/Gateway/ListClusters" "the wire method string"
-	# The canned reply is an EMPTY ListClustersReply, so this is §3.1's
+	# The canned reply is an EMPTY ListClustersReply, so this is CT4's
 	# EmitUnpopulated on a repeated field and on a string: both visible,
 	# neither elided as a proto3 default.
 	assert_jq "$CTL_OUT" '.cluster_name == [] and .page_token == ""' \
-		"the canned ListClusters reply renders its empty fields (§3.1)"
+		"the canned ListClusters reply renders its empty fields (CT4)"
 
 	# -------------------------------------------------------------------
-	stage 2 "the same call WITHOUT --trace-id mints one (§2.3)"
+	stage 2 "the same call WITHOUT --trace-id mints one (CT2)"
 	# -------------------------------------------------------------------
 	CTL_TRACE=0
 	ctl_ok cluster list
@@ -831,7 +844,7 @@ case_smoke() {
 	# Every trace id this script hands out starts with `it-`, so the minted
 	# one is exactly the record that does not. It has to be there, it has to
 	# be alone, and it has to be non-empty: an empty trace_id would mean the
-	# §4 client chain attached nothing at all.
+	# client chain (grpc.md, Wiring) attached nothing at all.
 	minted=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request" and
 			(.method | endswith("ListClusters")) and
@@ -844,21 +857,22 @@ case_smoke() {
 	# -------------------------------------------------------------------
 	stage 3 "both invocations kept stderr empty (CT7)"
 	# -------------------------------------------------------------------
-	# ctl_ok already asserted this for each call; restating it here is §7.9
-	# s3 as its own step, and it is the assertion that would catch a stray
-	# Info record or a print that escaped the §3.1 emit path.
+	# ctl_ok already asserted this for each call; restating it here makes the
+	# smoke case's empty-stderr check (Integration test plan, Cases) its own
+	# step, and it is the assertion that would catch a stray Info record or a
+	# print that escaped the CT4 emit path.
 	assert_eq "$s1_err" "" "stderr of the s1 invocation"
 	assert_eq "$s2_err" "" "stderr of the s2 invocation"
 }
 
 # ---------------------------------------------------------------------------
-# Case A — sweep (§7.10)
+# Case A — sweep (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
-# sweep_step is one row of the §7.10 table: run the command, then make the four
-# uniform assertions — exit 0, stdout parses (both inside ctl_ok), the request
-# equals the argv-implied one field for field, and the fake's counter for that
-# RPC moved by exactly one.
+# sweep_step is one step of the sweep (Integration test plan, Cases): run the
+# command, then make the four uniform assertions — exit 0, stdout parses (both
+# inside ctl_ok), the request equals the argv-implied one field for field, and
+# the fake's counter for that RPC moved by exactly one.
 sweep_step() { # <nn> <Rpc> <want json> <argv…>
 	local nn=$1 rpc=$2 want=$3
 	shift 3
@@ -871,10 +885,10 @@ sweep_step() { # <nn> <Rpc> <want json> <argv…>
 }
 
 case_sweep() {
-	# The three reply injections the §7.10 goldens need. Everything else in
+	# The three reply injections the sweep's goldens need. Everything else in
 	# the sweep answers with the canned EMPTY reply, which is what makes
 	# step 03's golden a statement about dnvctl's rendering alone.
-	stage inject "inject the §7.10 golden replies (sp get, the two bitmaps)"
+	stage inject "inject the sweep's golden replies (sp get, the two bitmaps)"
 	set_behavior <<EOF
 {"methods":{
   "GetStoragePool":{"reply":{"sp_rev":{"sp_name":"$SP","revision":"$SP_GET_REV"}}},
@@ -883,17 +897,18 @@ case_sweep() {
 }}
 EOF
 
-	# --- cluster (§5.1) ------------------------------------------------
-	# --extent-size is the one conf flag of §5.1: it fills
+	# --- `cluster` — `ctl/cluster.go` ----------------------------------
+	# --extent-size is the one conf flag of `cluster create`: it fills
 	# dn_bin_conf.extent_size and nothing else, so the recorded request must
 	# show dn_bin_conf carrying that single member and no NON-ZERO bin shift
 	# beside it. Non-zero is as far as any assertion reaches: bin0..bin3_shift
-	# are plain proto3 scalars with no presence, and §7.5 records with
-	# UseProtoNames and WITHOUT EmitUnpopulated, so a shift dnvctl sent as a
-	# literal 0 leaves no key here — and would be harmless anyway, since the
-	# gateway resolves an all-zero set to the 0/4/8/12 ladder either way
-	# (ctl/request_test.go's TestClusterCreateExtentSize says the same, and
-	# also carries the "no --extent-size sends no dn_bin_conf" half).
+	# are plain proto3 scalars with no presence, and the fake records with
+	# UseProtoNames and WITHOUT EmitUnpopulated (Integration test plan, What a
+	# pass means), so a shift dnvctl sent as a literal 0 leaves no key here —
+	# and would be harmless anyway, since the gateway resolves an all-zero set
+	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
+	# TestClusterCreateExtentSize says the same, and also carries the "no
+	# --extent-size sends no dn_bin_conf" half).
 	# The step keeps its number because the audit below pins 59 steps over
 	# 59 distinct RPCs.
 	sweep_step 01 CreateCluster \
@@ -908,13 +923,13 @@ EOF
 	# Golden 1 of 4: the canned empty reply, rendered. It pins
 	# EmitUnpopulated (every field visible), the uint64-as-string of
 	# cluster_id, null for an absent sub-message, and the sorted key order
-	# json.Marshal gives the re-parsed document (§3.1).
+	# json.Marshal gives the re-parsed document (CT4).
 	assert_eq "$CTL_OUT" "$GOLD_CLUSTER_GET" "golden: cluster get"
 	sweep_step 04 ListClusters \
 		'{"count":2,"page_token":"pt0"}' \
 		cluster list --count 2 --page-token pt0
 
-	# --- dn (§5.2) -----------------------------------------------------
+	# --- `dn` — `ctl/dn.go` --------------------------------------------
 	sweep_step 05 CreateDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\",
 		  \"location\":\"$DN_LOCATION\",
@@ -939,7 +954,7 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\"}" \
 		dn inspect --addr "$DN_ADDR"
 
-	# --- cn (§5.3): the six dn mirrors, at $CN_ADDR / $CN_LOCATION -----
+	# --- `cn` — `ctl/cn.go`: the six dn mirrors, at $CN_ADDR / $CN_LOCATION --
 	sweep_step 11 CreateControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\",
 		  \"location\":\"$CN_LOCATION\",
@@ -964,13 +979,13 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\"}" \
 		cn inspect --addr "$CN_ADDR"
 
-	# --- sp (§5.4) -----------------------------------------------------
-	# CreateStoragePool carries no token, so the §7.10 row types no --rev
+	# --- `sp` — `ctl/sp.go` --------------------------------------------
+	# CreateStoragePool carries no token, so its sweep row types no --rev
 	# (case C stage 7 refuses one); and the always-present redund_md_raid1 is
-	# the one dnvctl-side default (§0 #11), with an EMPTY body because
-	# --bitmap-chunk-blocks was not given. --low-water-mark-pct alone builds
-	# dm_pool_conf with no data_block_size key (--block-size was not given);
-	# the mark is a uint32, so it is recorded as a bare JSON number.
+	# the one dnvctl-side default (Conventions, Defaults), with an EMPTY body
+	# because --bitmap-chunk-blocks was not given. --low-water-mark-pct alone
+	# builds dm_pool_conf with no data_block_size key (--block-size was not
+	# given); the mark is a uint32, so it is recorded as a bare JSON number.
 	sweep_step 17 CreateStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"bdev_conf\":{\"dm_pool_conf\":{\"low_water_mark_pct\":30},
@@ -987,7 +1002,7 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		sp get
 	# Golden 2 of 4: the injected reply carries a revision above 2^53, so
-	# this is the assertion that would fail the day §3.1's re-parse started
+	# this is the assertion that would fail the day CT4's re-parse started
 	# decoding uint64 into a JSON number.
 	assert_eq "$CTL_OUT" "$GOLD_SP_GET" "golden: sp get (uint64 as string)"
 	sweep_step 20 ListStoragePools \
@@ -1013,7 +1028,7 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"side_id\":\"5\"}" \
 		sp inspect-side --id 5
 
-	# --- cntlr (§5.5) --------------------------------------------------
+	# --- `cntlr` — `ctl/cntlr.go` --------------------------------------
 	sweep_step 26 CreateCntlr \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlid_slot\":1}" \
@@ -1022,8 +1037,9 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlr_id\":\"3\"}" \
 		cntlr delete --id 3 --rev 7
-	# --enabled=false, the `=` spelling of §5.0: `--enabled false` would
-	# leave `false` as a positional and cobra.NoArgs would reject it.
+	# --enabled=false, the `=` spelling (Conventions, Value types):
+	# `--enabled false` would leave `false` as a positional and cobra.NoArgs
+	# would reject it.
 	sweep_step 28 UpdateCntlrEnabled \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"cntlr_id\":\"3\"}" \
@@ -1032,7 +1048,7 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"cntlr_id\":\"3\"}" \
 		cntlr inspect --id 3
 
-	# --- td (§5.6) -----------------------------------------------------
+	# --- `td` — `ctl/td.go` --------------------------------------------
 	sweep_step 30 CreateThinDevice \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"td_name\":\"t0\",
@@ -1049,7 +1065,7 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"td_name\":\"t0\",\"block_cnt\":\"64\"}" \
 		td get-bm --name t0 --slice-idx 0 --start 0 --cnt 64
-	# Goldens 3 and 4 of 4: §3.1's one deviation. The fake was told to answer
+	# Goldens 3 and 4 of 4: CT4's one deviation. The fake was told to answer
 	# with the single byte 0xa5 here and 0xa5a5 for the leg below, and dnvctl
 	# must print both as hex, not base64.
 	assert_eq "$CTL_OUT" "$GOLD_TD_BM" "golden: td get-bm hex map"
@@ -1059,7 +1075,7 @@ EOF
 		td get-leg-bm --leg 9 --start 0 --cnt 64
 	assert_eq "$CTL_OUT" "$GOLD_LEG_BM" "golden: td get-leg-bm hex map"
 
-	# --- ss (§5.7) -----------------------------------------------------
+	# --- `ss` — `ctl/ss.go` --------------------------------------------
 	sweep_step 35 CreateSubsystem \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",
@@ -1078,7 +1094,7 @@ EOF
 		  \"allowed_hosts\":[\"a\",\"b\"]}" \
 		ss set-hosts --nqn "$NQN" --hosts a,b --rev 7
 
-	# --- ns (§5.8) -----------------------------------------------------
+	# --- `ns` — `ctl/ns.go` --------------------------------------------
 	sweep_step 39 CreateNamespace \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
@@ -1095,16 +1111,16 @@ EOF
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
 		  \"td_name\":\"t1\"}" \
 		ns set-dev --nqn "$NQN" --idx 1 --td t1 --rev 7
-	# The flag's default is TRUE here (§5.8), so the bare form must send
-	# suspended = true — the one place in the CLI where an unmentioned
-	# boolean is not false.
+	# The flag's default is TRUE here (`ns` — `ctl/ns.go`), so the bare form
+	# must send suspended = true — the one place in the CLI where an
+	# unmentioned boolean is not false.
 	sweep_step 42 UpdateNamespaceSuspended \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
 		  \"suspended\":true}" \
 		ns set-suspended --nqn "$NQN" --idx 1 --rev 7
 
-	# --- clone (§5.9) --------------------------------------------------
+	# --- `clone` — `ctl/clone.go` --------------------------------------
 	sweep_step 43 CreateClone \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
@@ -1132,11 +1148,12 @@ EOF
 		    \"tr_addr\":\"127.0.0.1\",\"tr_svc_id\":\"4420\"}]}" \
 		clone set-tr --name cl0 --src-tr-addr 127.0.0.1 --rev 7
 	# A clone bitmap chunk is addressed by the PAIR (src_slice_idx, bm_idx),
-	# so the two indexes are given DISTINCT NON-ZERO values: §7.5 records
-	# without EmitUnpopulated, which would drop a zero index from the
-	# document entirely, and equal values would let a command that wired
-	# --bm-idx to src_slice_idx (or the reverse) pass. Same argv as CT-T2's
-	# row 47 (`ctl/request_test.go`) — the two suites are one contract.
+	# so the two indexes are given DISTINCT NON-ZERO values: the fake records
+	# without EmitUnpopulated (Integration test plan, What a pass means),
+	# which would drop a zero index from the document entirely, and equal
+	# values would let a command that wired --bm-idx to src_slice_idx (or the
+	# reverse) pass. Same argv as row 47 of the unit tests' sweep table
+	# (`ctl/request_test.go`) — the two suites are one contract.
 	sweep_step 47 AppendCloneBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
@@ -1145,7 +1162,7 @@ EOF
 		clone append-bm --name cl0 --src-slice-idx 1 --bm-idx 2 \
 		--bm-hex a5 --rev 7
 
-	# --- xfer (§5.10) --------------------------------------------------
+	# --- `xfer` — `ctl/xfer.go` ----------------------------------------
 	sweep_step 48 CreateTransfer \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"xfer_name\":\"x0\",
@@ -1167,7 +1184,7 @@ EOF
 		  \"allowed_hosts\":[\"c\"]}" \
 		xfer set-hosts --name x0 --hosts c --rev 7
 
-	# --- migr (§5.11) --------------------------------------------------
+	# --- `migr` — `ctl/migr.go` ----------------------------------------
 	sweep_step 52 CreateMigration \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"migr_name\":\"m0\",
@@ -1194,7 +1211,7 @@ EOF
 		  \"bitmap\":\"$BM_A5A5_B64\"}" \
 		migr append-bm --name m0 --bm-hex a5a5 --rev 7
 
-	# --- spare (§5.12) -------------------------------------------------
+	# --- spare (Conventions, Identity flags; CT3) ----------------------
 	sweep_step 57 CreateSpareLeg \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\"}" \
@@ -1230,14 +1247,14 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case B — behavior (§7.11)
+# Case B — behavior (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_behavior() {
 	# -------------------------------------------------------------------
 	stage 1 "td create with NO --rev: the token message must be ABSENT"
 	# -------------------------------------------------------------------
-	# §4's first presence case. The fake records requests with protojson
+	# CT3's first presence case. The fake records requests with protojson
 	# WITHOUT EmitUnpopulated, so "absent message" and "present but empty"
 	# are genuinely different documents here, which is the whole reason the
 	# assertion is made against state.json rather than against a reply.
@@ -1266,7 +1283,8 @@ case_behavior() {
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"td_name\":\"t0\",
 		  \"sp_rev\":{\"revision\":\"31\"}}"
 	# Spelled out separately because it is the assertion that breaks if the
-	# revision ever stops being a uint64-as-string (§7.7).
+	# revision ever stops being a uint64-as-string (Integration test plan,
+	# What a pass means).
 	assert_field "$(state_req "$CTL_POST" CreateThinDevice)" \
 		'.sp_rev.revision' "31" "0x1f parsed base-0 into revision 31"
 
@@ -1295,9 +1313,10 @@ EOF
 	ctl_ok td list
 	assert_jq "$CTL_OUT" '.name_to_td.t0.created == true' \
 		"the injected created:true td renders true"
-	# The R13 poll's real requirement: a NOT-yet-created td must still show
-	# the key, because proto3 would otherwise elide the false and the poll
-	# could not tell "false" from "an older gateway that has no such field".
+	# The `created` poll's real requirement (architecture.md, Thin devices):
+	# a NOT-yet-created td must still show the key, because proto3 would
+	# otherwise elide the false and the poll could not tell "false" from "an
+	# older gateway that has no such field".
 	assert_jq "$CTL_OUT" '(.name_to_td.t1 | has("created"))' \
 		"a created:false td still renders the key (EmitUnpopulated)"
 	assert_jq "$CTL_OUT" '.name_to_td.t1.created == false' \
@@ -1326,13 +1345,13 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case C — errors (§7.12)
+# Case C — errors (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_errors() {
 	# One behavior file for the whole case: four methods, four codes, and
 	# the one custom message an operator will actually meet.
-	stage inject "inject the four §7.12 refusals"
+	stage inject "inject the errors case's four refusals"
 	set_behavior <<'EOF'
 {"methods":{
   "GetStoragePool":{"code":"NOT_FOUND"},
@@ -1344,11 +1363,12 @@ EOF
 	# -------------------------------------------------------------------
 	stage 1 "sp get -> NOT_FOUND"
 	# -------------------------------------------------------------------
-	# The fake's message default is "behavior.json <CODE>" (§7.5), so the
-	# whole §3.2 line is predictable and compared byte for byte.
+	# The fake's message default is "behavior.json <CODE>", so the whole CT5
+	# line is predictable and compared byte for byte.
 	ctl_fail_msg NOT_FOUND "behavior.json NOT_FOUND" sp get
-	# A refused call is still recorded: §7.5 records BEFORE it applies any
-	# behaviour, which is what lets an error case assert the request too.
+	# A refused call is still recorded: the fake records BEFORE it applies
+	# any behaviour (Integration test plan, The fake gateway), which is what
+	# lets an error case assert the request too.
 	assert_count_delta GetStoragePool 1 "a refusal is still recorded"
 	assert_req GetStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}"
@@ -1356,7 +1376,7 @@ EOF
 	# -------------------------------------------------------------------
 	stage 2 "td delete --rev 7 -> ABORTED 'stale revision'"
 	# -------------------------------------------------------------------
-	# The §4 failure an operator meets when a token goes stale under them.
+	# The CT3 failure an operator meets when a token goes stale under them.
 	ctl_fail_msg ABORTED "stale revision" td delete --name t0 --rev 7
 	assert_count_delta DeleteThinDevice 1 "the refused delete was recorded"
 
@@ -1387,7 +1407,7 @@ EOF
 	# CT8's dividing line: dnvctl rejects only what fails to PARSE (and,
 	# stage 7, a --rev with no token field to fill), and it does so before
 	# the dial, so the gateway never sees it. An EMPTY --bm-hex is a
-	# different thing entirely and IS sent (§5.9).
+	# different thing entirely and IS sent (`clone` — `ctl/clone.go`).
 	ctl_usage AppendCloneBitmap \
 		clone append-bm --name cl0 --bm-hex zz --rev 7
 	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c 'bm-hex' || true)" \
@@ -1396,7 +1416,7 @@ EOF
 	# -------------------------------------------------------------------
 	stage 7 "--rev on a command with no token field is exit 2 and issues NO RPC"
 	# -------------------------------------------------------------------
-	# DeleteClusterRequest has no token field (§4): the --rev could only be
+	# DeleteClusterRequest has no token field (CT3): the --rev could only be
 	# dropped, and a delete that looks gated would go out ungated.
 	ctl_usage DeleteCluster cluster delete --name c1 --rev 7
 	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c -e '--rev' || true)" \
@@ -1404,7 +1424,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case D — transport (§7.13)
+# Case D — transport (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_transport() {
@@ -1414,7 +1434,7 @@ case_transport() {
 	stage 1 "a closed port is UNAVAILABLE, and fails fast"
 	# -------------------------------------------------------------------
 	# $DEAD_PORT is the port preflight proved free and nothing ever binds.
-	# The message is gRPC's own ("connection refused"), so only the §3.2
+	# The message is gRPC's own ("connection refused"), so only the CT5
 	# shape is asserted here — ctl_fail's regexp.
 	CTL_ADDR="127.0.0.1:$DEAD_PORT"
 	started=$SECONDS
@@ -1462,7 +1482,7 @@ usage() {
 usage: bash integtest/dnvctl_test.sh [--only <case>] [--cleanup-only] user@ip
 
   --only <case>   run one of: ${CASES[*]}
-  --cleanup-only  run the §7.14 cleanup on the server and exit
+  --cleanup-only  run the Integration test plan's cleanup on the server and exit
 EOF
 	exit 2
 }

@@ -11,8 +11,8 @@ import (
 
 // Teardown by sweep, the part both roles share.
 //
-// The principle (architecture.md §9.8): an agent decides what to REMOVE by
-// comparing the desired state with the ACTUAL state of the node, and
+// The principle (architecture.md, Teardown by sweep): an agent decides what to
+// REMOVE by comparing the desired state with the ACTUAL state of the node, and
 // remembers nothing about past failures. Each pass enumerates what exists,
 // subtracts what the desired state wants, removes the rest top-down, verifies
 // every removal with a probe that cannot block on a dead remote, and
@@ -35,9 +35,9 @@ const (
 	LeftoverKindRecord  = "record"
 )
 
-// MsgSweepLeftover is the §12 record naming everything one pass found that
-// the desired state does not want. One record per pass, so a lingering
-// leftover shows up in the agent log every round rather than once.
+// MsgSweepLeftover is the record of log.md, Leftovers, naming everything one
+// pass found that the desired state does not want. One record per pass, so a
+// lingering leftover shows up in the agent log every round rather than once.
 const MsgSweepLeftover = "sweep leftover"
 
 // SweepResult is what one pass found: the objects still present that nothing

@@ -1,17 +1,18 @@
 // Command gatewayctl is the gRPC driver of the dnv-gateway integration test
-// (gateway.md §10). The gateway serves plaintext gRPC without server
-// reflection, so grpcurl cannot drive it; this binary speaks the generated
-// pb.GatewayClient instead and prints every reply as protojson (proto field
-// names) on stdout for the test script to parse with jq.
+// (gateway.md, Integration test plan). The gateway serves plaintext gRPC
+// without server reflection, so grpcurl cannot drive it; this binary speaks
+// the generated pb.GatewayClient instead and prints every reply as protojson
+// (proto field names) on stdout for the test script to parse with jq.
 //
 // It runs ON THE TEST SERVER, where etcd, the three gateways and the seven
 // fake agents all listen on the loopback, and is invoked over ssh by
-// integtest/gateway_test.sh (§10.3, §10.8).
+// integtest/gateway_test.sh (gateway.md, Integration test plan, Topology and
+// The driver, `gatewayctl`).
 //
 // Conventions the script relies on:
 //
-//   - Global flags may be given BEFORE the subcommand (the §10.8 `gw` wrapper
-//     does exactly that) or after it; the later occurrence wins.
+//   - Global flags may be given BEFORE the subcommand (the script's `gw`
+//     wrapper does exactly that) or after it; the later occurrence wins.
 //   - stdout carries exactly one JSON document per invocation: the reply for
 //     an expected success, `{"code":…,"message":…}` for an EXPECTED failure,
 //     and for `race` one JSON array ordered by input index.
@@ -58,10 +59,11 @@ import (
 )
 
 const (
-	// defaultGateway is gw0 of §10.3: the three gateway instances listen on
-	// 29810..29812 of the test server's loopback, and gatewayctl runs there.
+	// defaultGateway is gw0 (gateway.md, Integration test plan, Topology):
+	// the three gateway instances listen on 29810..29812 of the test server's
+	// loopback, and gatewayctl runs there.
 	defaultGateway = "127.0.0.1:29810"
-	// defaultCluster is the suite's cluster name (§10.5). Every subcommand
+	// defaultCluster is the suite's cluster name. Every subcommand
 	// puts it into the request's cluster_name, so the script never repeats it.
 	defaultCluster = "itgw"
 )
@@ -83,7 +85,7 @@ func usageDie(format string, args ...any) {
 // marshalOpts renders every reply this driver prints. UseProtoNames keeps the
 // JSON field names identical to the schema.proto spelling the assertions
 // quote; EmitUnpopulated keeps a false/0/[] field visible, which is what the
-// §10.11 checks on `created`, `provisioned` and `primary` need.
+// smoke case's checks on `created`, `provisioned` and `primary` need.
 var marshalOpts = protojson.MarshalOptions{
 	UseProtoNames:   true,
 	EmitUnpopulated: true,
@@ -116,7 +118,7 @@ func emit(value any) {
 }
 
 // ---------------------------------------------------------------------------
-// Flag value types (§10.8: ids accept decimal or 0x hex)
+// Flag value types (ids accept decimal or 0x hex)
 // ---------------------------------------------------------------------------
 
 // hexUint is an id flag parsed with base 0, so 17 and 0x11 are the same value.
@@ -260,7 +262,7 @@ var spLevels = map[string]pb.SpLevel{
 
 // parseSpLevel accepts a level name, a full enum name or a raw number, so the
 // script can also send a level the enum does not declare and watch the
-// gateway refuse it (§10.14 step 1).
+// gateway refuse it (the faults case's validation battery, GW4).
 func parseSpLevel(spec string) (pb.SpLevel, error) {
 	key := strings.ToUpper(strings.TrimSpace(spec))
 	key = strings.TrimPrefix(key, "SP_LEVEL_")
@@ -275,7 +277,7 @@ func parseSpLevel(spec string) (pb.SpLevel, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Globals (§10.8)
+// Globals
 // ---------------------------------------------------------------------------
 
 type globals struct {
@@ -348,8 +350,8 @@ func (g *globals) rpcCtx() (context.Context, context.CancelFunc) {
 		ctx, time.Duration(g.timeout*float64(time.Second)))
 }
 
-// codeNames spells every gRPC status code the way --expect and the §10.13
-// jq counts do: UPPER_SNAKE, the canonical proto enum spelling.
+// codeNames spells every gRPC status code the way --expect and the contention
+// case's jq counts do: UPPER_SNAKE, the canonical proto enum spelling.
 //
 // codes.Code.String() renders CamelCase ("AlreadyExists"), so upper-casing it
 // yields ALREADYEXISTS and no expectation on a multi-word code would ever
@@ -418,9 +420,10 @@ type command struct {
 	setup func(fs *flag.FlagSet) job
 }
 
-// commands is the §10.8 table: one subcommand per RPC, kebab-cased, plus the
-// two harness commands. The order is the order §10.8 lists them, so the usage
-// line reads like the table.
+// commands is the subcommand table: one subcommand per RPC, kebab-cased, plus
+// the two harness commands (gateway.md, Integration test plan,
+// The driver, `gatewayctl`). The order is by resource group, so the usage line
+// reads like the table.
 var commands = []command{
 	// cluster
 	{"create-cluster", setupCreateCluster},
@@ -594,7 +597,7 @@ func runOne(g *globals, cmd command, args []string) {
 }
 
 // ---------------------------------------------------------------------------
-// race — the barrier runner of §10.8
+// race — the barrier runner of the driver (gateway.md, Integration test plan)
 // ---------------------------------------------------------------------------
 
 // raceJob is one line of `race`'s stdin.
@@ -686,7 +689,8 @@ type prepared struct {
 }
 
 // runRace reads jobs as JSON lines on stdin, prepares every one of them, then
-// releases them all at once against a WaitGroup barrier (§10.8).
+// releases them all at once against a WaitGroup barrier (gateway.md,
+// Integration test plan, The driver, `gatewayctl`).
 //
 // --targets round-robins the jobs that carry no explicit gateway across the
 // instances, which is what makes case A's waves cross all three gateways and
@@ -795,7 +799,8 @@ func runRace(g *globals, args []string) {
 }
 
 // execute runs one prepared job, applying the documented client retry protocol
-// when the job asked for it (§10.8 `retry_stale`).
+// when the job asked for it with `retry_stale`
+// (gateway.md, Integration test plan, The driver, `gatewayctl`).
 //
 // A job that fails ABORTED "stale revision" re-fetches its SP's token through
 // GetStoragePool, rewrites its own --rev flag and tries again, at most
@@ -833,7 +838,7 @@ func (p *prepared) execute() raceResult {
 }
 
 // isStaleRevision recognises the one refusal the retry protocol reacts to
-// (GW6, §0 #7): ABORTED with the message "stale revision".
+// (GW6): ABORTED with the message "stale revision".
 func isStaleRevision(st *status.Status) bool {
 	return st.Code() == codes.Aborted &&
 		strings.Contains(st.Message(), "stale revision")

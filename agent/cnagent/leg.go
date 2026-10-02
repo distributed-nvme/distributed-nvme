@@ -21,7 +21,8 @@ import (
 // `nvme list-subsys`, for two measured reasons (CN10, CN12):
 //
 //   - `nvme list-subsys -o json` emits **no** `ANAState` unless it is given a
-//     namespace block device, so the §11.1.1 availability test cannot be
+//     namespace block device, so the availability test of architecture.md,
+//     "Make sure all groups are available", cannot be
 //     evaluated from it; and with a device argument it answers an
 //     all-inaccessible namespace with an *empty* subsystem list, which is
 //     indistinguishable from "not connected".
@@ -107,8 +108,9 @@ func (v *subsysView) unknownCtrl() error {
 	return nil
 }
 
-// available is the path half of CN12's availability (§11.1.1): a path that is
-// both live and optimized. ensureLegs counts a leg available only when its
+// available is the path half of CN12's availability (architecture.md, "Make
+// sure all groups are available"): a path that is both live and optimized.
+// ensureLegs counts a leg available only when its
 // CN10 converge succeeded too. A `non-optimized` path means the side
 // currently exports dm-error and cannot be used; a path that is merely
 // `connecting` keeps its last-known ANA state, which is why the controller
@@ -288,7 +290,8 @@ func (s *CnAgentServer) listDir(
 	return out, nil
 }
 
-// readSysfs reads one sysfs attribute under the §7 soft timeout (SH15). This
+// readSysfs reads one sysfs attribute under the soft timeout of
+// architecture.md, Common validation (SH15). This
 // walk calls the OsClient directly rather than through an `agent` OS wrapper,
 // so the bound every other OS touch gets for free has to be applied here
 // explicitly (SH15): the /sys/class/nvme* tree can stall while a
@@ -308,8 +311,9 @@ func (s *CnAgentServer) readSysfs(
 // ---------------------------------------------------------------------------
 
 // ensureLegs converges every leg of every group of every slice — spare legs
-// included, both roles. It reports which legs are **available** (§11.1.1),
-// which is what CN12 assembly needs, records each leg's ResInfo, and says
+// included, both roles. It reports which legs are **available**
+// (architecture.md, "Make sure all groups are available"), which is what CN12
+// assembly needs, records each leg's ResInfo, and says
 // whether any leg failed to converge — its connect, a controller's address
 // read that did not answer, its multipath namespace or its wrapper — which
 // registers the cntlr for the background retry (build registers it too for a
@@ -436,7 +440,8 @@ func (s *CnAgentServer) ensureLeg(
 	return view, nil
 }
 
-// sideNsid is the single namespace id every side of a leg exports (§3.1).
+// sideNsid is the single namespace id every side of a leg exports
+// (architecture.md, Disk node).
 const sideNsid = 1
 
 // connectWithin is the CN10 connect of one side of a leg, and the CN18
@@ -513,7 +518,8 @@ func (s *CnAgentServer) newPassBudget() *agent.WaitBudget {
 // disconnectDeadPaths retires a controller of the leg NQN whose transport
 // matches no desired side — the src side after FinishMigration, whose
 // controller died with DNR and will never reconnect. It is dropped by
-// **device**, never by NQN: the surviving side shares that NQN ([D1], §2.3).
+// **device**, never by NQN: the surviving side shares that NQN ([D1];
+// cnagent.md, `NvmeHost.DisconnectDevice`).
 // A controller whose address read did not answer is passed over: its empty
 // transport matches no side, but it is unknown, never unwanted (CN10). A gone
 // one is passed over too: its device is already deleted.
@@ -569,8 +575,9 @@ func (s *CnAgentServer) nsDeviceOf(
 // legInfo is the CN28 leg report, shared by the converge pass and the probe:
 // on a primary the wrapper table plus the CN11 block-probe outcome, on a
 // standby the wrapper table plus transport liveness and ana_state per desired
-// side (§3.6 as amended — a standby's path terminates in the side's dm-error,
-// so block IO through it can never succeed).
+// side (architecture.md, Group on-leg layout: meta region, data region,
+// health block — a standby's path terminates in the side's dm-error, so block
+// IO through it can never succeed).
 func (s *CnAgentServer) legInfo(
 	ctx context.Context,
 	st *cntlrState,

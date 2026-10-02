@@ -38,8 +38,9 @@ const (
 // TestCloneDrainBatchBudget is CLD11's arithmetic tripwire, and the tripwire
 // that REPLACED TestDeleteCloneTxnBudget: the rectangle transaction that one
 // guarded — the whole rectangle of chunk keys swept in DeleteClone's deciding
-// STM — does not exist any more. DeleteClone latches (§5.8) and the worker
-// drains the chunk keys in batches of a constant size (dnv-worker.md §11.7).
+// STM — does not exist any more. DeleteClone latches (gateway.md, Clones) and
+// the worker drains the chunk keys in batches of a constant size
+// (dnv-worker.md, The clone drain).
 //
 // The arithmetic is one line, because chunk removal is LEDGER-FREE — no DN or
 // CN accounting, pure point deletes. etcd caps a transaction at
@@ -111,7 +112,8 @@ func TestCloneDrainBatchBudget(t *testing.T) {
 	if budget > etcdDefaultMaxTxnOps {
 		t.Errorf("one clone drain batch is %d compares, over etcd's own default "+
 			"cap of %d: the clone path is no longer free of the deployment "+
-			"flag, and gateway.md §2.1's note must change with it",
+			"flag, and the note in gateway.md, Additions to "+
+			"`common/constants.go`, must change with it",
 			budget, etcdDefaultMaxTxnOps)
 	}
 }
@@ -243,7 +245,7 @@ func TestSpDrainBatchBudget(t *testing.T) {
 // planSpGroups emits spCreateGrpsPerSlice groups per slice, each group takes
 // legCntOf legs — MaxAllocLegPerGrp for md-raid1, the widest SP there is — and
 // the growing dnBlack list puts every leg of the WHOLE SP on a DN of its own
-// (§6.5), so
+// (architecture.md, Per-operation allocation), so
 //
 //	D = spCreateGrpsPerSlice x MaxSliceCntPerSp x MaxAllocLegPerGrp
 //
@@ -279,8 +281,9 @@ func TestSpDrainBatchBudget(t *testing.T) {
 // growing black list is caught elsewhere, never here: the DN list's by
 // TestCreateStoragePoolWriteSet's and TestCreateStoragePoolAtTheCeiling's
 // distinct-node assertions, the CN list's by TestCntlrsSpreadAcrossLocations'
-// tier-2 case and TestCreateStoragePoolRefusals' one-CN case. §6.5's tier-1
-// location exclusion stands in for a lost CN list only while tier 1 still
+// tier-2 case and TestCreateStoragePoolRefusals' one-CN case. The tier-1
+// location exclusion of architecture.md, Per-operation allocation, stands in
+// for a lost CN list only while tier 1 still
 // finds a CN outside the picks' locations: the tier-2 case's CNs share
 // locations, and where every CN is its own location but fewer CNs have room
 // than cntlr_cnt — the one-CN case — a lost list turns the RESOURCE_EXHAUSTED
@@ -459,9 +462,10 @@ const (
 	tdDeleteReadsPerClone = 1 // the Clone
 	tdDeleteReadsPerTd    = 0 // the walk is the plan's, outside the STM
 	// TODAY's two ceilings and the compare count the factors produce at them
-	// — the 75 common/constants.go's EtcdMaxTxnOps comment and gateway.md
-	// §2.1 quote. Separate assertions, for the clone tripwire's reason: a
-	// ceiling change and a retyped factor must not fail alike.
+	// — the 75 common/constants.go's EtcdMaxTxnOps comment and gateway.md,
+	// Additions to `common/constants.go`, quote. Separate assertions, for the
+	// clone tripwire's reason: a ceiling change and a retyped factor must not
+	// fail alike.
 	tdDeleteMaxSsCnt    = 4
 	tdDeleteMaxCloneCnt = 64
 	tdDeleteMaxCompares = 75
@@ -495,7 +499,8 @@ func TestDeleteThinDeviceBudget(t *testing.T) {
 				"MaxCloneCntPerSp %d, want the pinned %d and %d. Re-pin "+
 				"tdDeleteMaxSsCnt, tdDeleteMaxCloneCnt and tdDeleteMaxCompares "+
 				"together, and with them the count common/constants.go's "+
-				"EtcdMaxTxnOps comment and gateway.md §2.1 quote",
+				"EtcdMaxTxnOps comment and gateway.md, Additions to "+
+				"`common/constants.go`, quote",
 			common.MaxSsCntPerSp, common.MaxCloneCntPerSp,
 			tdDeleteMaxSsCnt, tdDeleteMaxCloneCnt)
 	}
@@ -530,8 +535,9 @@ func TestDeleteThinDeviceBudget(t *testing.T) {
 			budget, common.EtcdMaxTxnOps)
 	}
 	// And the create stays the widest transaction, which is what
-	// common/constants.go and gateway.md §2.1 say sizes EtcdMaxTxnOps. The
-	// delete is the one that once made that sentence false.
+	// common/constants.go and gateway.md, Additions to `common/constants.go`, say
+	// sizes EtcdMaxTxnOps. The delete is the one that once made that sentence
+	// false.
 	if budget > create {
 		t.Errorf(
 			"the widest DeleteThinDevice is %d compares, wider than the "+

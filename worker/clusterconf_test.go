@@ -71,19 +71,20 @@ func TestConfCacheKeyToIdDerivation(t *testing.T) {
 }
 
 // TestConfCacheReturnsTheConfAsStored is the mirror image of the resolution
-// the cache used to do: §7 makes the gateway resolve every defaultable member
-// at WRITE time, so RW21 hands a reader the stored bytes and changes nothing.
+// the cache used to do: architecture.md, Common validation, makes the gateway
+// resolve every defaultable member at WRITE time, so RW21 hands a reader the
+// stored bytes and changes nothing.
 //
 // Three of the members below are values the cache's old resolver WOULD have
 // rewritten on the way out — a dn_interval of 100000 (it clamped to 3600),
 // absent side and cntlr intervals (it substituted 5), no dn_bin_conf at all
 // (it substituted the 0/4/8/12 ladder and DefaultDnExtSize). The fourth, a
 // low_water_mark_pct above 100, is the one value NOTHING ever rewrites, on
-// either path: §7 gives it a meaning, "never grow this pool automatically".
-// Every one of them comes back untouched. That is not a detail: it is what
-// makes an INVALID stored conf reach a reader at all, and therefore what makes
-// the refusals in revision.go, reaction.go, sprole.go and health.go
-// expressible.
+// either path: architecture.md, Common validation, gives it a meaning, "never
+// grow this pool automatically". Every one of them comes back untouched. That
+// is not a detail: it is what makes an INVALID stored conf reach a reader at
+// all, and therefore what makes the refusals in revision.go, reaction.go,
+// sprole.go and health.go expressible.
 func TestConfCacheReturnsTheConfAsStored(t *testing.T) {
 	h := newConfHarness(t)
 	const name = "asstored"
@@ -128,7 +129,8 @@ func TestConfCacheReturnsTheConfAsStored(t *testing.T) {
 		t.Fatalf("low_water_mark_pct = %d, want the stored 150", got)
 	}
 	// A conf like this is exactly what model.ValidateClusterConf exists to
-	// refuse: the cache caches it, the readers reject it (§7).
+	// refuse: the cache caches it, the readers reject it (architecture.md,
+	// Common validation).
 	if err := model.ValidateClusterConf(cc); err == nil {
 		t.Fatalf("an unresolved stored conf validated")
 	}
@@ -137,7 +139,8 @@ func TestConfCacheReturnsTheConfAsStored(t *testing.T) {
 // TestConfCacheKeepsAnInvalidConf pins the cache's deliberate non-drop: an
 // unusable conf stays in the cache, because dropping it would make a cluster
 // whose conf went bad look exactly like a deleted one to every reader and send
-// an operator chasing a phantom deletion (clusterconf.go, §7).
+// an operator chasing a phantom deletion (clusterconf.go; architecture.md,
+// Common validation).
 func TestConfCacheKeepsAnInvalidConf(t *testing.T) {
 	h := newConfHarness(t)
 	const name = "corrupt"

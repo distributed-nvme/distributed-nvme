@@ -11,19 +11,21 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is the §6.5 half of the gateway: the per-operation candidate
-// compositions that run OUTSIDE every STM (model.FindDnCandidatesAntiAffine /
-// FindCnCandidatesAntiAffine + PickRandom), the in-STM re-validation of a pick
+// This file is the gateway's half of architecture.md, Per-operation
+// allocation: the per-operation candidate compositions that run OUTSIDE every
+// STM (model.FindDnCandidatesAntiAffine / FindCnCandidatesAntiAffine +
+// PickRandom), the in-STM re-validation of a pick
 // that makes a scan outside a transaction safe (GW9), and the DN/CN
 // bookkeeping ledgers that keep "one write and one revision bump per node per
-// STM" (§5.5) true however many sides or cntlrs one transaction touches.
+// STM" (architecture.md, Revision keys and the sync fan-out) true however many
+// sides or cntlrs one transaction touches.
 
 // ---------------------------------------------------------------------------
-// Candidate scans (§6.5)
+// Candidate scans (architecture.md, Per-operation allocation)
 // ---------------------------------------------------------------------------
 
 // legCntOf is the number of legs one group of this SP has: RedundMdRaid1 two,
-// RedundNone one (§6.5).
+// RedundNone one (architecture.md, Per-operation allocation).
 //
 // The md-raid1 arm is common.MaxAllocLegPerGrp and not a literal 2 (SPD1):
 // this is where the allocator's widest group shape is chosen, and the sp-drain
@@ -43,7 +45,8 @@ func isMdRaid1(bdev *pb.BdevConf) bool {
 
 // dnPickPlan is one group's DN allocation request: how many extents each leg
 // needs, how many legs the group has, and the failure domains tier 1 of the
-// §6.5 scan keeps out. ExcludeLocs is empty for the DN scans §6.5 leaves on
+// scan of architecture.md, Per-operation allocation, keeps out. ExcludeLocs is
+// empty for the DN scans that section leaves on
 // the plain scan (CreateStoragePool's and GrowSlice's).
 type dnPickPlan struct {
 	ExtCnt      uint64
@@ -51,9 +54,9 @@ type dnPickPlan struct {
 	ExcludeLocs []string
 }
 
-// pickDns draws Legs distinct DNs for one group (§6.5): scan
-// dn_batch_size × Legs candidates with at least ExtCnt free extents each, then
-// pick Legs of them at random.
+// pickDns draws Legs distinct DNs for one group (architecture.md,
+// Per-operation allocation): scan dn_batch_size × Legs candidates with at
+// least ExtCnt free extents each, then pick Legs of them at random.
 //
 // black is the growing exclusion list — the request's NodeSelector black list
 // plus every DN already picked in this operation — which is what puts every
@@ -74,15 +77,17 @@ func pickDns(
 	black []string,
 	what string,
 ) ([]model.Cand, error) {
-	// The cluster's stored batch size (§7). A zero would silently make the
-	// scan width zero and turn every allocation into RESOURCE_EXHAUSTED, so
-	// the stored conf is checked rather than defaulted.
+	// The cluster's stored batch size (architecture.md, Common validation). A
+	// zero would silently make the scan width zero and turn every allocation
+	// into RESOURCE_EXHAUSTED, so the stored conf is checked rather than
+	// defaulted.
 	if err := model.ValidateClusterConf(cc); err != nil {
 		return nil, errAborted("%v", err)
 	}
 	batch := int(cc.GetAllocConf().GetDnBatchSize())
 	// The tier bool is deliberately dropped: a tier-2 placement is visible in
-	// the stored topology, and §8's LG table gains no record for it.
+	// the stored topology, and gateway.md, Log records (LG1 to LG3), gains no
+	// record for it.
 	cands, _, err := model.FindDnCandidatesAntiAffine(
 		ctx, cli, cid, cc,
 		plan.ExtCnt,
@@ -104,9 +109,10 @@ func pickDns(
 	return picks, nil
 }
 
-// pickCn draws exactly one CN with extCnt free extents (§6.5). spCnAddrs
-// names the CNs already hosting a cntlr of this SP, which model excludes so
-// that two cntlrs of one SP never share a CN (§6.4). excludeLocs is the
+// pickCn draws exactly one CN with extCnt free extents (architecture.md,
+// Per-operation allocation). spCnAddrs names the CNs already hosting a cntlr
+// of this SP, which model excludes so that two cntlrs of one SP never share a
+// CN (architecture.md, Finding CN candidates). excludeLocs is the
 // two-tier half of the rule: tier 1 keeps the pick out of the locations the
 // SP's other cntlrs occupy, and tier 2 drops that exclusion when tier 1 finds
 // no CN, so too few failure domains alone never make it refuse.
@@ -164,7 +170,8 @@ func candAddrs(cands []model.Cand) []string {
 // dnLedger accumulates one STM's DN bookkeeping so that a DN this transaction
 // touches more than once — a pick verified and then charged, or a side list
 // that names it twice — is read once, written once, has its capacity key
-// maintained once and its revision bumped exactly once (§5.5, §5.6).
+// maintained once and its revision bumped exactly once (architecture.md,
+// Revision keys and the sync fan-out; architecture.md, Capacity index keys).
 //
 // Every record it hands out is the one THIS transaction read, which is what
 // makes model.MaintainDnCapacity's delete target exact: a capacity key embeds
@@ -180,7 +187,7 @@ type dnLedger struct {
 }
 
 // newDnLedger opens a ledger over the cluster's STORED conf, or refuses that
-// conf (§7, GW11).
+// conf (architecture.md, Common validation; GW11).
 //
 // The gate sits in the constructor rather than in each handler because every
 // DN this ledger writes goes through model.MaintainDnCapacity, which shifts
@@ -190,17 +197,18 @@ type dnLedger struct {
 // release means to delete survives — still indexing a free count the node no
 // longer has — and the one it writes lands under a bin its free count does not
 // belong to. There is no right index to compute from such a conf, and guessing
-// one is the resolve-at-read this rule removed (§7), so the ledger refuses
-// with the same errAborted the allocating paths already give (§5.9).
+// one is the resolve-at-read this rule removed (architecture.md, Common
+// validation), so the ledger refuses with the same errAborted the allocating
+// paths already give (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 //
 // Five handlers build a ledger — CreateStoragePool, DeleteSpareLeg, and
 // CreateMigration, FinishMigration and CancelMigration — and each builds it
 // before staging its first write, so a refusal here returns having written
 // nothing rather than relying on the transaction being abandoned (EU4).
 // DeleteStoragePool builds none since it became a latch: the worker's drain
-// returns its extents (dnv-worker.md §11.6). Two of the five reach a conf gate
-// before this one anyway (CreateStoragePool's own, CreateMigration's through
-// pickDns); the other three have none, which is what this covers.
+// returns its extents (dnv-worker.md, The sp drain). Two of the five reach a
+// conf gate before this one anyway (CreateStoragePool's own, CreateMigration's
+// through pickDns); the other three have none, which is what this covers.
 func newDnLedger(
 	s etcdutil.STM,
 	cid uint64,
@@ -244,7 +252,8 @@ func (l *dnLedger) get(addrPort string) (*pb.DnConf, error) {
 	dn, found := l.tryGet(addrPort)
 	if !found {
 		// GW7: NOT_FOUND is for an object the REQUEST named; a DN named only
-		// by a stored Side is a lost invariant key — §5.9's ABORTED.
+		// by a stored Side is a lost invariant key — ABORTED (architecture.md,
+		// UNEXPECTED_ERROR → `ABORTED`).
 		return nil, errAborted("dn_conf for %q is missing", addrPort)
 	}
 	return dn, nil
@@ -281,7 +290,8 @@ func (l *dnLedger) verifyPick(
 	return dn, nil
 }
 
-// charge is the DN bookkeeping of one side allocation (§5.6, §8.4): the side
+// charge is the DN bookkeeping of one side allocation (architecture.md,
+// Capacity index keys; architecture.md, Storage pools): the side
 // pointer goes in and extCnt leaves the budget.
 func (l *dnLedger) charge(
 	addrPort string,
@@ -325,9 +335,10 @@ func (l *dnLedger) release(
 	return nil
 }
 
-// flush writes every touched DN once, maintains its capacity key per §5.6 and
-// bumps its revision once (§5.5). Nodes are flushed in first-touch order so
-// one transaction's writes are deterministic.
+// flush writes every touched DN once, maintains its capacity key per
+// architecture.md, Capacity index keys, and bumps its revision once
+// (architecture.md, Revision keys and the sync fan-out). Nodes are flushed in
+// first-touch order so one transaction's writes are deterministic.
 func (l *dnLedger) flush(op string) error {
 	for _, addrPort := range l.order {
 		cur := l.cur[addrPort]
@@ -346,8 +357,10 @@ func (l *dnLedger) flush(op string) error {
 // ---------------------------------------------------------------------------
 
 // cnLedger is dnLedger's CN twin: one read, one write, one capacity-key
-// maintenance and one CnRev bump per CN per transaction (§5.5, §5.6). It takes
-// no ClusterConf — CN capacity keys carry no bin index (§6.4).
+// maintenance and one CnRev bump per CN per transaction (architecture.md,
+// Revision keys and the sync fan-out; architecture.md, Capacity index keys).
+// It takes no ClusterConf — CN capacity keys carry no bin index
+// (architecture.md, Finding CN candidates).
 type cnLedger struct {
 	s     etcdutil.STM
 	cid   uint64
@@ -385,7 +398,8 @@ func (l *cnLedger) get(addrPort string) (*pb.CnConf, error) {
 	cn, found := l.tryGet(addrPort)
 	if !found {
 		// GW7: a CN named only by a stored Cntlr is not an object the request
-		// named, so its absence is a lost invariant key — §5.9's ABORTED.
+		// named, so its absence is a lost invariant key — ABORTED
+		// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 		return nil, errAborted("cn_conf for %q is missing", addrPort)
 	}
 	return cn, nil
@@ -478,7 +492,8 @@ func (l *cnLedger) flush(op string) error {
 // ---------------------------------------------------------------------------
 
 // loadSlices reads every slice the SpConf lists, in list order, inside the
-// caller's STM. A listed slice that does not exist is §5.9's ABORTED: an SP
+// caller's STM. A listed slice that does not exist is an ABORTED
+// (architecture.md, UNEXPECTED_ERROR → `ABORTED`): an SP
 // whose slice list points at nothing has lost an invariant key, and a
 // footprint computed from a partial list would undercharge a node.
 func loadSlices(
@@ -527,7 +542,7 @@ func allGroups(slice *pb.Slice) []*pb.Group {
 }
 
 // allLegs is every leg of a group, active legs first and spare legs after —
-// both carry sides that occupy a DN (§8.12).
+// both carry sides that occupy a DN (architecture.md, Spare legs).
 func allLegs(grp *pb.Group) []*pb.Leg {
 	legs := make([]*pb.Leg, 0,
 		len(grp.GetLegList())+len(grp.GetSpareLegList()))
@@ -537,7 +552,8 @@ func allLegs(grp *pb.Group) []*pb.Leg {
 }
 
 // spFootprint is Σ ext_cnt over ALL groups of ALL slices — meta and data
-// alike — which is what one cntlr's CN reserves for the SP (§8.4, §8.6).
+// alike — which is what one cntlr's CN reserves for the SP (architecture.md,
+// Storage pools; architecture.md, Cntlrs).
 func spFootprint(slices []*pb.Slice) uint64 {
 	total := uint64(0)
 	for _, slice := range slices {
@@ -549,7 +565,8 @@ func spFootprint(slices []*pb.Slice) uint64 {
 }
 
 // grpDnAddrs is every DN a group already occupies through an active leg or a
-// spare leg: the black-list seed of CreateMigration and CreateSpareLeg (§6.5).
+// spare leg: the black-list seed of CreateMigration and CreateSpareLeg
+// (architecture.md, Per-operation allocation).
 func grpDnAddrs(grp *pb.Group) []string {
 	var addrs []string
 	for _, leg := range allLegs(grp) {
@@ -561,17 +578,19 @@ func grpDnAddrs(grp *pb.Group) []string {
 }
 
 // grpDnLocations is the failure domain of every DN grpDnAddrs names: the tier-1
-// exclusion of CreateMigration and CreateSpareLeg (§6.5), which is about
-// LOCATIONS and not merely about the DNs the black list already holds.
+// exclusion of CreateMigration and CreateSpareLeg (architecture.md,
+// Per-operation allocation), which is about LOCATIONS and not merely about the
+// DNs the black list already holds.
 //
 // One plain DnConf read per DISTINCT addr_port, outside every STM like the
 // capacity scan it feeds. Reading them before the transaction is sound because
 // `location` is immutable in v1 — CreateDiskNode defaults it to addr_port and
-// UpdateDiskNodeDisabled is the only later DN mutator (§8.2) — so a location
-// read here cannot have gone stale by the time the op re-validates the pick,
-// which is also why that re-validation stays address-based. A DN whose conf is
-// gone contributes no location: it is black-listed by address anyway, and
-// inventing one would exclude a domain nothing occupies.
+// UpdateDiskNodeDisabled is the only later DN mutator (architecture.md, Disk
+// nodes) — so a location read here cannot have gone stale by the time the op
+// re-validates the pick, which is also why that re-validation stays
+// address-based. A DN whose conf is gone contributes no location: it is
+// black-listed by address anyway, and inventing one would exclude a domain
+// nothing occupies.
 func grpDnLocations(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -600,18 +619,19 @@ func grpDnLocations(
 }
 
 // cnLocations is the failure domain of every CN addrs names: the tier-1
-// exclusion of CreateCntlr (§6.5), which keeps a new cntlr out of the
-// LOCATIONS the SP's cntlrs occupy and not merely off their CNs.
+// exclusion of CreateCntlr (architecture.md, Per-operation allocation), which
+// keeps a new cntlr out of the LOCATIONS the SP's cntlrs occupy and not merely
+// off their CNs.
 //
 // grpDnLocations' CN twin. Reading it before the transaction is sound for two
 // reasons together. `location` is immutable in v1 — CreateControllerNode
 // defaults it to addr_port and UpdateControllerNodeDisabled is the only later
-// CN mutator (§8.3) — so no location read here goes stale. And CreateCntlr's
-// STM drops the pick when the SP, as it reads it, has a cntlr on a CN outside
-// addrs: a cntlr committed after this read is the only way the set of domains
-// to exclude can grow, and immutability alone says nothing about that. Both
-// checks are therefore address-based. A CN whose conf is gone contributes no
-// location: it is excluded by address anyway.
+// CN mutator (architecture.md, Controller nodes) — so no location read here
+// goes stale. And CreateCntlr's STM drops the pick when the SP, as it reads
+// it, has a cntlr on a CN outside addrs: a cntlr committed after this read is
+// the only way the set of domains to exclude can grow, and immutability alone
+// says nothing about that. Both checks are therefore address-based. A CN whose
+// conf is gone contributes no location: it is excluded by address anyway.
 func cnLocations(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -650,8 +670,8 @@ type sliceLocation struct {
 }
 
 // findSide locates one side by id across every slice, group, leg and spare leg
-// of the SP (§8.6: the scan is bounded by MaxSliceCntPerSp × groups ×
-// MaxLegPerGrp).
+// of the SP (architecture.md, Cntlrs: the scan is bounded by MaxSliceCntPerSp
+// × groups × MaxLegPerGrp).
 func findSide(
 	conf *pb.SpConf,
 	slices []*pb.Slice,

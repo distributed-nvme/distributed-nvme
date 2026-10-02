@@ -7,7 +7,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Conf validation on the agent side (architecture.md §7).
+// Conf validation on the agent side (architecture.md, Common validation).
 //
 // The control plane resolves every defaultable conf member when it WRITES the
 // conf, so a request that reaches an agent carries concrete values. An agent
@@ -15,10 +15,11 @@ import (
 // a geometry the agent invented is one the rest of the cluster does not share,
 // and dm, md and the on-disk headers would be built against it. Refusing
 // leaves the object unconverged and the operator with a named field, which is
-// the loud failure §7 asks for.
+// the loud failure Common validation asks for.
 //
 // These are deliberately a SECOND copy of model.ValidateBdevConf's rules,
-// error strings included: layout.md §3 forbids the agent packages from
+// error strings included: layout.md, Dependency rules, forbids the agent
+// packages from
 // importing model, which links the etcd client. The two must stay identical,
 // which is why agent/conf_test.go and model/capacity_test.go assert the same
 // literals: a change made to one copy and not the other goes red.
@@ -30,12 +31,13 @@ func invalidConf(format string, args ...any) error {
 }
 
 // ValidateBdevConf refuses a BdevConf whose geometry is not concrete: the four
-// defaultable members are checked for presence, and nothing else — the §7
-// ranges belong to the gateway, which sees the request that set them.
+// defaultable members are checked for presence, and nothing else — the ranges
+// of Common validation belong to the gateway, which sees the request that set
+// them.
 //
 // low_water_mark_pct is checked for zero ONLY. A value above 100 is the legal
-// "never grow this pool automatically" setting (§7), and the chunk count only
-// exists when the redund_conf oneof chose md-raid1.
+// "never grow this pool automatically" setting (Common validation), and the
+// chunk count only exists when the redund_conf oneof chose md-raid1.
 func ValidateBdevConf(conf *pb.BdevConf) error {
 	if conf.GetDmPoolConf().GetDataBlockSize() == 0 {
 		return invalidConf("bdev_conf.dm_pool_conf.data_block_size is zero")
@@ -56,8 +58,8 @@ func ValidateBdevConf(conf *pb.BdevConf) error {
 }
 
 // ValidateExtentSize refuses the dn agent's one defaultable member. It is the
-// number every disk header is formatted with (§3.1), so a zero must never
-// reach a format or a verify.
+// number every disk header is formatted with (architecture.md, Disk node), so
+// a zero must never reach a format or a verify.
 func ValidateExtentSize(extentSize uint64) error {
 	if extentSize == 0 {
 		return invalidConf("dn_bin_conf.extent_size is zero")

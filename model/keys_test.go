@@ -7,7 +7,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// goldenCid and goldenSpId are the architecture.md §5.1 example's inputs.
+// goldenCid and goldenSpId are the inputs of the golden key example.
 const (
 	goldenCid  = uint64(0xebada5168620c5fe)
 	goldenSpId = uint64(17)
@@ -18,10 +18,10 @@ const (
 	goldenCnAddr = "192.168.0.18:9000"
 )
 
-// TestSpNameKeyIsTheSpecExample pins the one key architecture.md §5.1 spells
-// out in full (MD2, MD9). If this ever changes, every stored key of every
+// TestSpNameKeyGolden pins one key spelled out in full, the golden key
+// (MD2, MD9). If this ever changes, every stored key of every
 // existing cluster has changed with it.
-func TestSpNameKeyIsTheSpecExample(t *testing.T) {
+func TestSpNameKeyGolden(t *testing.T) {
 	got := SpNameKey(goldenCid, goldenSpId)
 	want := "dnv sp_id_to_name ebada5168620c5fe 0000000000000011"
 	if got != want {
@@ -29,7 +29,8 @@ func TestSpNameKeyIsTheSpecExample(t *testing.T) {
 	}
 }
 
-// TestKeyGoldenStrings pins one golden string per §5.3 key (MD9).
+// TestKeyGoldenStrings pins one golden string per key (MD9; architecture.md,
+// Key table).
 func TestKeyGoldenStrings(t *testing.T) {
 	cases := []struct {
 		name string
@@ -173,9 +174,9 @@ func TestKeyGoldenStrings(t *testing.T) {
 	}
 }
 
-// TestPrefixesEndInOneSpace checks the §5.1 invariant every scan and watch
-// depends on (MD2, MD9): a prefix ends in exactly one space, so that it can
-// never match a longer sibling field.
+// TestPrefixesEndInOneSpace checks the invariant every scan and watch depends
+// on (MD2, MD9; architecture.md, Key grammar): a prefix ends in exactly one
+// space, so that it can never match a longer sibling field.
 func TestPrefixesEndInOneSpace(t *testing.T) {
 	cases := []struct {
 		name string
@@ -295,7 +296,8 @@ func TestPrefixIsPrefixOfKey(t *testing.T) {
 	}
 }
 
-// TestClusterId pins the §5.2 derivation against recorded vectors (MD9).
+// TestClusterId pins the cluster_id derivation against recorded vectors (MD9;
+// architecture.md, cluster_id derivation).
 // Changing any of these orphans every key of every existing cluster.
 func TestClusterId(t *testing.T) {
 	cases := []struct {
@@ -318,7 +320,8 @@ func TestClusterId(t *testing.T) {
 		}
 	}
 	// The epoch is folded in as raw bytes, so the same name with two epochs
-	// is two clusters (§5.2: delete + recreate never inherits a key space).
+	// is two clusters (architecture.md, cluster_id derivation: delete + recreate
+	// never inherits a key space).
 	if ClusterId("c", 1) == ClusterId("c", 2) {
 		t.Error("ClusterId ignores creation_epoch")
 	}
@@ -421,7 +424,8 @@ func TestParseRevKeyRejectsMalformed(t *testing.T) {
 }
 
 // TestParseCdcEntryKeyRoundTrip round-trips the discovery-entry parser over
-// the edges of every field (MD2, cdc.md §2.2). It is the ground truth for the
+// the edges of every field (MD2; cdc.md, Addition to `model/keys.go`). It is
+// the ground truth for the
 // field ORDER: CdcEntryKey writes cluster_id before shard_code, the opposite
 // of the rev keys, and a parser that swapped the two would still round-trip
 // four uint64s while sharding dnv-cdc on nonsense (DS2).
@@ -458,7 +462,7 @@ func TestParseCdcEntryKeyRoundTrip(t *testing.T) {
 			)
 		}
 	}
-	// The golden key of §5.3, parsed the other way round.
+	// The golden cdc key (architecture.md, Key table), parsed the other way round.
 	golden := "dnv cdc ebada5168620c5fe 04 0000000000000011 " +
 		"0000000000000005"
 	cid, shard, spId, ssId, ok := ParseCdcEntryKey(golden)
@@ -659,7 +663,8 @@ func TestParseBmIdx(t *testing.T) {
 }
 
 // TestParseCloneBmKey round-trips the clone-bitmap parser over the whole pair
-// and checks its rejections (MD2, MD3, architecture.md §9.6). The two indexes
+// and checks its rejections (MD2, MD3; architecture.md, Bitmap push protocol).
+// The two indexes
 // are rendered alike and adjacent, so the round trip pins their ORDER too:
 // src_slice_idx first.
 func TestParseCloneBmKey(t *testing.T) {
@@ -713,8 +718,9 @@ func TestParseCloneBmKey(t *testing.T) {
 	}
 }
 
-// TestParseCapacityKeys round-trips the two capacity-key parsers the §6
-// allocator turns a scan back into candidates with (MD2, MD5).
+// TestParseCapacityKeys round-trips the two capacity-key parsers the allocator
+// turns a scan back into candidates with (MD2, MD5; architecture.md,
+// Allocation).
 func TestParseCapacityKeys(t *testing.T) {
 	for binIdx := uint32(0); binIdx <= 3; binIdx++ {
 		for _, freeExt := range []uint64{0, 1, 4096, 0xffffffffffffffff} {
@@ -788,10 +794,10 @@ func TestParseCapacityKeys(t *testing.T) {
 	}
 }
 
-// TestCapacityKeyOrderIsNumeric checks the §5.6 claim the whole allocator
-// rests on: the zero-padded FreeSpaceFmt makes lexical key order equal
-// numeric free-space order, so one descending range returns nodes
-// largest-free first.
+// TestCapacityKeyOrderIsNumeric checks the claim the whole allocator rests
+// on (architecture.md, Capacity index keys): the zero-padded FreeSpaceFmt
+// makes lexical key order equal numeric free-space order, so one descending
+// range returns nodes largest-free first.
 func TestCapacityKeyOrderIsNumeric(t *testing.T) {
 	free := []uint64{0, 1, 9, 10, 15, 16, 255, 256, 4096, 1 << 40}
 	for i := 1; i < len(free); i++ {

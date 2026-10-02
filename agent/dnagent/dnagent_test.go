@@ -28,7 +28,7 @@ const (
 	testDisk       = "/dev/fake-disk"
 	testExtentSize = uint64(1 << 20)
 	// testExtCnt is deliberately larger than common.DnZeroBatchExtCnt (10), so
-	// every side in this package provisions in three §9.4 batches — 10, 10, 5.
+	// every side in this package provisions in three DN9 batches — 10, 10, 5.
 	// A fixture equal to the batch size would zero the whole side in one
 	// command and hide every multi-batch offset bug.
 	testExtCnt    = uint64(25)
@@ -73,7 +73,7 @@ func newTestServerOnPort(
 
 // startTestServer builds a dn server over an existing fake node and reconciles
 // it, the way cmd/dnv-agent does. rootCtx is cancellable and joined at test
-// end, so the §9.4 zeroing goroutines can never outlive their test and mutate
+// end, so the DN9 zeroing goroutines can never outlive their test and mutate
 // the fake under a later assertion — the unit-test shape of agent.Serve's
 // cancel-then-WaitBackground shutdown.
 func startTestServer(t *testing.T, node *fakeNode) *DnAgentServer {
@@ -90,13 +90,14 @@ func startTestServerOnPort(
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srv := NewDnAgentServer(node.osClient(), nf,
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(), portId)
-	// The §11.2 cutover grace window is off unless a test asks for it: no
+	// The cutover grace window (architecture.md, Migration, src step 2) is
+	// off unless a test asks for it: no
 	// unit test can wait common.SuspendSeconds, and with it off a migration
 	// source fences straight onto its dm-errors, which is the end state
 	// every other test cares about. TestMigrationSourceFence covers the
 	// window itself, and TestFenceWindowDefault pins the production value.
 	srv.fenceWait = 0
-	// Likewise for the §9.4 retry pace: DnZeroRetryInterval is 5 s, and
+	// Likewise for the DN9 retry pace: DnZeroRetryInterval is 5 s, and
 	// TestZeroRetryIntervalDefault pins the production value.
 	srv.zeroRetryInterval = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -178,9 +179,9 @@ func dnReq(revision uint64, sideIds ...uint64) *pb.SyncupDnRequest {
 }
 
 // sideReq is a *steady-state* request: side_conf.provisioned is true, which is
-// what the sp-worker sets once the side has finished zeroing (the §10.3
-// flip rule). Almost every test wants that shape, so a side is brought
-// there through syncupSideTwoPhase / syncupBoth rather than by hand.
+// what the sp-worker sets once the side has finished zeroing (the flip rule
+// of architecture.md, sp role). Almost every test wants that shape, so a side
+// is brought there through syncupSideTwoPhase / syncupBoth rather than by hand.
 func sideReq(
 	revision uint64,
 	sideId uint64,
@@ -255,11 +256,12 @@ func syncupSideTwoPhase(
 	return reply
 }
 
-// provisionSide runs the §9.4 phase-1 flow for a side that does not exist yet:
+// provisionSide runs the phase-1 flow of architecture.md,
+// Side provisioning protocol, for a side that does not exist yet:
 // the CP has not flipped its provisioned flag, so the agent allocates the
 // side's extents, builds its aggregate dm-linear and zeroes it — and builds
 // nothing above it. A migration destination provisions exactly this way before
-// its migr_dst_conf takes effect (§11.2).
+// its migr_dst_conf takes effect (architecture.md, Migration).
 func provisionSide(
 	t *testing.T,
 	srv *DnAgentServer,
@@ -417,7 +419,7 @@ func TestFreshSyncupDn(t *testing.T) {
 	}
 }
 
-// TestSyncupOnNonDefaultPort pins CM2's --nvmet-port-id (use_32_slices §5):
+// TestSyncupOnNonDefaultPort pins CM2's --nvmet-port-id:
 // a dn server built with port id 7 creates ports/7, writes its ANA states
 // there, links the side subsystem into ports/7, reports "7" as port_info's
 // res_name on both the syncup and the probe path, and unlinks from ports/7
@@ -689,7 +691,7 @@ func TestSyncupDnTearsDownRemovedSide(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Side provisioning protocol (§9.4, DN9)
+// 5. Side provisioning protocol (architecture.md, Side provisioning protocol; DN9)
 // ---------------------------------------------------------------------------
 
 func TestSideProvisioningProtocol(t *testing.T) {
@@ -799,7 +801,7 @@ func TestSideProvisioningProtocol(t *testing.T) {
 	}
 }
 
-// zerooutBatches is the exact command line of every §9.4 batch a side of
+// zerooutBatches is the exact command line of every DN9 batch a side of
 // extCnt extents produces, in order.
 func zerooutBatches(sideDevPath string, extCnt uint64) []string {
 	var out []string
@@ -815,7 +817,8 @@ func zerooutBatches(sideDevPath string, extCnt uint64) []string {
 	return out
 }
 
-// The §9.4 converge matrix, one sub-test per row.
+// The converge matrix of architecture.md, Side provisioning protocol, one
+// sub-test per row.
 func TestSideProvisioningMatrix(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
@@ -1174,7 +1177,7 @@ func TestZeroingResumesAfterRestart(t *testing.T) {
 // drained by a bare cancel just as fast as by cancel-and-wait, so a test built
 // on those passes with the `<-done` deleted and with the stop moved after the
 // removal. Here the removal must not appear until the child returns
-// (doc/dnagent.md §6 test 19).
+// (doc/dnagent.md DN9).
 func TestZeroingCancelledBeforeDeviceRemoval(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -1295,7 +1298,8 @@ func TestAllocFailureReportsTheRecordsCounters(t *testing.T) {
 	}
 }
 
-// §9.4's DN5 fail-fast: a disk whose write_zeroes_max_bytes reads 0 cannot
+// The DN5 fail-fast (architecture.md, Side provisioning protocol): a disk whose
+// write_zeroes_max_bytes reads 0 cannot
 // meet the fast-Write-Zeroes assumption, so meta_info is an error that feeds
 // err_epoch. An absent attribute is not a verdict.
 func TestWriteZeroesFailFast(t *testing.T) {
@@ -1433,7 +1437,7 @@ func TestZeroingRetryIsPaced(t *testing.T) {
 	waitZeroed(t, srv, testSide)
 }
 
-// zerooutLine is the recorded command of one §9.4 batch: count extents from
+// zerooutLine is the recorded command of one DN9 batch: count extents from
 // logical extent from, through the side's dm-linear.
 func zerooutLine(sideDevPath string, from, count uint64) string {
 	return fmt.Sprintf("cmd blkdiscard --zeroout --offset %d --length %d %s",
@@ -2210,15 +2214,15 @@ func TestNoWriteFileOnConfigfsAndNoAnaStateRewrite(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 6b. cntlid slots (DN10, architecture.md §11.8)
+// 6b. cntlid slots (DN10; architecture.md, cntlid slots)
 // ---------------------------------------------------------------------------
 
 // cntlidSpan is the `[attr_cntlid_min, attr_cntlid_max]` one export holds in
 // configfs; nvmet hands out CNTLIDs from it with both ends included.
 type cntlidSpan struct{ first, last uint64 }
 
-// slotSpan is §11.8's range for one slot: `Base + s×Step` to
-// `Base + s×Step + Step − 1`.
+// slotSpan is the range of architecture.md, cntlid slots, for one slot:
+// `Base + s×Step` to `Base + s×Step + Step − 1`.
 func slotSpan(slot int) cntlidSpan {
 	first := uint64(common.DnCntlidSlotBase + slot*common.DnCntlidSlotStep)
 	return cntlidSpan{first, first + common.DnCntlidSlotStep - 1}
@@ -2299,7 +2303,7 @@ func TestCntlidSlotsAreDisjoint(t *testing.T) {
 			}
 		}
 	}
-	// §11.8's table: slot 0 = 10000-14999 … slot 7 = 45000-49999.
+	// The slot ranges: slot 0 = 10000-14999 … slot 7 = 45000-49999.
 	for slot, span := range spans {
 		if want := slotSpan(slot); span != want {
 			t.Errorf("slot %d's cntlids are %d-%d, want %d-%d",
@@ -2315,8 +2319,8 @@ func TestCntlidSlotsAreDisjoint(t *testing.T) {
 // that another side of it built on this kernel: a new side landing on a DN
 // that still holds an earlier side's export, or the two sides of a
 // migrating leg held by two dn agents on one kernel, which both converge
-// that one subsystem (§3.1). Like nvmet, the fake refuses an
-// attr_cntlid_min above the current attr_cntlid_max and an attr_cntlid_max
+// that one subsystem (architecture.md, Disk node). Like nvmet, the fake refuses
+// an attr_cntlid_min above the current attr_cntlid_max and an attr_cntlid_max
 // below the current attr_cntlid_min, so once no two slots share an id a range
 // that lies wholly above the live one must be written max first: min first,
 // even a move up by one slot fails on every pass. The walk moves up by one,
@@ -2454,7 +2458,7 @@ func TestSpLevels(t *testing.T) {
 }
 
 // A side re-synced at SP_LEVEL_DISABLE while its bits are still incomplete
-// keeps issuing its zeroing batches (DN11, §6 test 21). §9.4 provisioning sits
+// keeps issuing its zeroing batches (DN11). DN9 provisioning sits
 // *below* the level ladder — exactly as the trim it replaced did — which is why
 // convergeSide runs ensureSideDev, and with it startZeroing, before the
 // !plan.wantDm early return: the level takes the layers that serve IO away, not
@@ -2474,7 +2478,8 @@ func TestDisableLevelKeepsZeroing(t *testing.T) {
 	// The side starts in the steady state, so the teardown below has real
 	// exports and dm-linears to remove; then its record is re-allocated behind
 	// the agent's back, which is what leaves the bits incomplete under a
-	// request that still says provisioned = true (row 5 of the §9.4 converge matrix — the
+	// request that still says provisioned = true (row 5 of the converge matrix
+	// of architecture.md, Side provisioning protocol — the
 	// flag is not what keeps the goroutine, the bits are).
 	syncupBoth(t, srv, 1, testSide)
 	clearZeroed(t, srv, node)
@@ -2618,8 +2623,8 @@ func TestReadOnlyLevelIsNoOpOnDn(t *testing.T) {
 // extent placement — a node that loses --local-store but keeps its disk
 // recovers exactly the layout it had. The sweep must therefore never treat
 // "no local state for this side" as proof that the side is gone: doing so
-// frees its extents, and the next SyncupSide re-runs the §9.4 provisioning
-// protocol and zeroes live data.
+// frees its extents, and the next SyncupSide re-runs the provisioning of
+// architecture.md, Side provisioning protocol, and zeroes live data.
 func TestLocalStoreLossKeepsSideAllocation(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -3607,11 +3612,13 @@ func TestABlankHeaderIsNotFormattedUnderAnotherNodesDevice(t *testing.T) {
 	}
 }
 
-// [D12]: outside the bounded §11.2 cutover window, a dnv device found
+// [D12]: outside the bounded cutover window
+// (architecture.md, Migration, src step 2), a dnv device found
 // suspended on the table it wants does not stay so. Whatever left one that
 // way — a crash or a failed command inside a reload's suspend/load/resume (a
-// reload fails closed, dnagent.md §2.8), or an older build — the next
-// converge must resume it, for every dm kind the dn agent owns. (This side
+// reload fails closed, dnagent.md,
+// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), or an older build — the
+// next converge must resume it, for every dm kind the dn agent owns. (This side
 // has no migr_src_conf, so no window applies.)
 func TestConvergeResumesSuspendedDevices(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -3896,7 +3903,8 @@ func startPartialZeroing(
 // even while it is still being zeroed: DN18 judges side_dev_info by "the
 // volume-table record + its zeroed_bits + `dmsetup table`", and a probe that
 // skips the device check reports healthy PROVISIONING for ever. PROVISIONING
-// never feeds err_epoch (§9.5), so nothing would ever re-send the SyncupSide
+// never feeds err_epoch (architecture.md, Live-state reporting), so nothing
+// would ever re-send the SyncupSide
 // that is the only thing able to rebuild the device — the side would be
 // bricked and silent.
 func TestProbeReportsABrokenDeviceWhileZeroing(t *testing.T) {

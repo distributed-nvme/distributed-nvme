@@ -7,20 +7,22 @@
 #   bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
 #       [--wipe] user1@ip1 user2@ip2
 #
-# Cases: smoke, sides, migr_full, migr_bitmap, teardown, restart (§10-§15,
-# and architecture.md §9.8 for `teardown`). Cleanup runs
+# Cases: smoke, sides, migr_full, migr_bitmap, teardown, restart
+# (dnagent_integtest.md, Cases; for `teardown`, also architecture.md,
+# Teardown by sweep). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
 # leaves every dm/nvmet object and both agent logs in place and dumps
-# diagnostics (§17).
+# diagnostics (dnagent_integtest.md, Teardown and cleanup).
 #
-# The uutils dd rule of §4 is absolute: this script never passes iflag= or
+# The uutils dd rule (dnagent_integtest.md, Assumptions and preflight checks,
+# the first lab fact) is absolute: this script never passes iflag= or
 # oflag= to dd. Writes use conv=fsync, reads that must hit the media are
 # preceded by a cache drop. Do not "fix" this back to direct IO.
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (§3, §5, §6)
+# Constants (dnagent_integtest.md, Topology)
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -38,10 +40,11 @@ EXTENT_SIZE=67108864 # 64 MiB — MinDnExtSize; the proto field is raw bytes
 # GetDnSize reports the [D13] *data area*, not the raw device: the fixed
 # DnDataOffset (256 MiB) prefix — header block, the two volume-table slots and
 # the clone-metadata area — is already subtracted, so the CP does no further
-# subtraction (§6.1). 2 GiB backing file: 2147483648 - 268435456 = 1879048192.
+# subtraction (architecture.md, Size → extents). 2 GiB backing file:
+# 2147483648 - 268435456 = 1879048192.
 DATA_SIZE=1879048192 # the exact GetDnSize the setup asserts
 
-# Migration knobs, mirroring the CP defaults (§6).
+# Migration knobs, mirroring the CP defaults.
 BLOCK_SIZE=1048576
 META_BLOCKS=3
 HYDR_THRESHOLD=1
@@ -50,7 +53,8 @@ HYDR_BATCH=1
 # Per-RPC deadline for the converge RPCs (see ctl).
 SYNCUP_TIMEOUT=60
 
-# Polling budget of `dnagentctl wait-zeroed` (the §9.4 protocol). With 64 MiB
+# Polling budget of `dnagentctl wait-zeroed` (architecture.md,
+# Side provisioning protocol). With 64 MiB
 # extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
 # so a 1-2 extent side finishes in well under a second; the budget only has to
 # cover a stalled retry loop (DnZeroRetryInterval = 5 s).
@@ -66,7 +70,8 @@ REV=("" 0 0)
 DNREV=("" 0 0)
 LOOP=("" "" "")
 
-# The two concurrent, opposite-direction migrations of cases B and C (§5).
+# The two concurrent, opposite-direction migrations of cases B and C
+# (dnagent_integtest.md, Cases).
 # Migration m's primary CN is hosted on the VM opposite its source DN.
 MLEG=("" 0x1 0x2)
 MSRCDN=("" 1 2)
@@ -94,9 +99,9 @@ CASES=(smoke sides migr_full migr_bitmap teardown restart)
 
 log() { echo "$*" >&2; }
 
-# stage names the step for the failure report and mints the trace id the §9
-# convention asks for: one id shared by the driver call, both agent handlers
-# and every os command they run.
+# stage names the step for the failure report and mints the stage's trace id
+# (dnagent_integtest.md, The driver: `dnagentctl`): one id shared by the
+# driver call, both agent handlers and every os command they run.
 stage() {
 	STAGE="$CASE: $2"
 	TRACE="it-$CASE-$1"
@@ -130,7 +135,8 @@ assert_not_ok() {
 	[ "$got" != "RES_STATUS_OK" ] || die "$3: status is OK, want not OK"
 }
 
-# assert_gated is assert_not_ok's strict twin (§9's exact-status rule).
+# assert_gated is assert_not_ok's strict twin (dnagent_integtest.md,
+# Conventions, Negatives are exact).
 # RES_STATUS_PROVISIONING is a *healthy* status, so it
 # satisfies a bare assert_not_ok: every "this must not be built" check would
 # silently start accepting a side that never provisioned. Where the expectation
@@ -147,7 +153,8 @@ assert_gated() {
 }
 
 # assert_provisioning_or_ok accepts the two statuses a side may legally hold at
-# provisioned = false (the §9.4 converge matrix rows 2 and 3):
+# provisioned = false (rows 2 and 3 of the converge matrix in architecture.md,
+# Side provisioning protocol):
 # PROVISIONING while the background goroutine still has extents to zero, and OK
 # once every bit is set. Zeroing 64-128 MiB on a loop device is a `fallocate`,
 # so which of the two a phase-1 reply carries is a genuine race — do not pick
@@ -199,7 +206,7 @@ on_exit() {
 		log "PASS"
 	else
 		log ""
-		log "########## diagnostics (§17) ##########"
+		log "########## diagnostics (dnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
@@ -217,7 +224,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 
 # sshv runs one command as root on a VM and returns its stdout. Everything the
 # agents touch (dm, configfs, nvme) needs root, so every remote command
-# goes through sudo (§3).
+# goes through sudo (dnagent_integtest.md, Topology).
 sshv() {
 	local idx=$1
 	shift
@@ -242,13 +249,13 @@ helper_ok() {
 
 # ctl drives one agent. Every call carries the current stage's trace id.
 #
-# The §8 default 10 s deadline suits the read-only RPCs, but one converge pass
-# runs dozens of OS commands, each with its own 3 s soft / 5 s hard budget
-# (§7) — enabling a migration destination alone creates a clone-metadata
-# wrapper, an nvme connection, a dm-clone and reloads the export stack, with
-# the two concurrent migrations converging on both nodes at once. Syncups get
-# a much larger budget; a caller's own --timeout still wins, since it lands
-# later on the command line.
+# The driver's default 10 s deadline suits the read-only RPCs, but one
+# converge pass runs dozens of OS commands, each with its own 3 s soft / 5 s
+# hard budget (architecture.md, Common validation) — enabling a migration
+# destination alone creates a clone-metadata wrapper, an nvme connection, a
+# dm-clone and reloads the export stack, with the two concurrent migrations
+# converging on both nodes at once. Syncups get a much larger budget; a
+# caller's own --timeout still wins, since it lands later on the command line.
 ctl() {
 	local idx=$1
 	shift
@@ -265,7 +272,8 @@ ctl() {
 		--trace-id "$TRACE" "${extra[@]}" "$@"
 }
 
-# bump_rev advances a DN's monotonic revision counter (§9). It must run in
+# bump_rev advances a DN's monotonic revision counter (dnagent_integtest.md,
+# Conventions, Revisions). It must run in
 # the parent shell — never inside a background job or a command substitution,
 # both of which would increment a copy — so the two concurrent migrations of
 # cases B/C never race for a value. bump_dn_rev additionally records the
@@ -277,7 +285,7 @@ bump_dn_rev() {
 }
 
 # ---------------------------------------------------------------------------
-# Derived names (§5) — the bash mirror of common/name_fmt.go
+# Derived names (architecture.md, Naming) — the bash mirror of common/name_fmt.go
 # ---------------------------------------------------------------------------
 
 hex16() { printf '%016x' "$(($1))"; }
@@ -309,13 +317,13 @@ dn_side_name() { # cluster dn sp side
 
 # ns_by_id is the CN-side device node of a leg: the namespace identity is
 # deterministic per leg, so both sides of a migrating leg land on one
-# multipath device (§5).
+# multipath device (dnagent_integtest.md, Topology).
 ns_by_id() { "$CTL" ns-id --cluster "$CLUSTER" --sp "$1" --leg "$2" | "$JQ" -r .by_id; }
 
 # ---------------------------------------------------------------------------
-# CN emulation (§3): this suite exercises the DN contract without a CN, so CN
-# identities are plain `nvme connect --hostnqn <CnHostNqn>` from the VMs,
-# cross-connected.
+# CN emulation (dnagent_integtest.md, Topology): this suite exercises the DN
+# contract without a CN, so CN identities are plain
+# `nvme connect --hostnqn <CnHostNqn>` from the VMs, cross-connected.
 # ---------------------------------------------------------------------------
 
 # host_id mirrors common.NvmeHostId. Every emulated connect must pass it: the
@@ -360,8 +368,8 @@ cn_wait_ana() { # cnvm sp leg cn dn want secs
 }
 
 # ---------------------------------------------------------------------------
-# Data IO on CNs (§9): writes fsync, reads follow a cache drop, never
-# iflag=/oflag= (§4).
+# Data IO on CNs (dnagent_integtest.md, Assumptions and preflight checks, the
+# dd lab fact): writes fsync, reads follow a cache drop, never iflag=/oflag=.
 # ---------------------------------------------------------------------------
 
 drop_caches() { sshv "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"; }
@@ -511,8 +519,8 @@ read_probe() {
 allowed_host_cnt() { ls "$NVMET/subsystems/$1/allowed_hosts" 2>/dev/null | wc -l; }
 
 # subsys_present <nqn> — yes/no, so a "this export must NOT exist" assertion
-# (the dst_provisioned = false equivalence proof, §11.2) does not
-# have to parse `residue`.
+# (the dst_provisioned = false equivalence proof, architecture.md, Migration)
+# does not have to parse `residue`.
 subsys_present() {
 	if [ -d "$NVMET/subsystems/$1" ]; then echo yes; else echo no; fi
 }
@@ -521,8 +529,9 @@ subsys_present() {
 # does this node hold a controller for one subsystem NQN, at any address?
 # subsys_present reads configfs, i.e. what this node exports; this reads the
 # nvme driver's own view, i.e. what this node has connected to. It is how the
-# "no `nvme connect` issued yet" clause of §12 step 6c is proved on DNdst,
-# where the gated reply carries no migr_dst_info at all and so cannot show it.
+# "no connection" clause of the gated declaration (dnagent_integtest.md,
+# Cases, migr_full and migr_bitmap) is proved on DNdst, where the gated reply
+# carries no migr_dst_info at all and so cannot show it.
 host_subsys_present() {
 	local json n
 	json=$(subsys_json) || return 1
@@ -560,7 +569,8 @@ residue() {
 # export_dms <sp16> <side16> — the per-CN *export stack* one side currently
 # has on this node: the dm-error (kind d0, DnErrorName) and the dm-linear
 # (kind d1, DnLinearName), which are the only two dm kinds that exist per CN.
-# It is the kernel-side half of the §9.4 provisioning gate — nothing is exported
+# It is the kernel-side half of the provisioning gate of architecture.md,
+# Side provisioning protocol — nothing is exported
 # before the side is fully zeroed — so it deliberately does NOT match kind d4
 # (DnSideName): the side device is exactly what phase (a) is supposed to
 # build, and `residue` would report it. See common/name_fmt.go for the kind
@@ -580,7 +590,8 @@ export_dms() { # sp16 side16
 }
 
 # fenced_linears <sp16> — the per-CN dm-linears of one storage pool that are
-# currently suspended, i.e. inside the §11.2 cutover grace window. The attr
+# currently suspended, i.e. inside the cutover grace window (architecture.md,
+# Migration, src side step 2). The attr
 # column is four positions (live, inactive, suspended, ro/rw), so a suspended
 # device matches ':.-s' — name, then '.', '-', 's'.
 fenced_linears() {
@@ -606,7 +617,8 @@ clone_table() { dmsetup table "$1" 2>/dev/null || echo MISSING; }
 # C jq and on gojq alike.
 
 # clone_discards <clone dm name> — the blkdiscard records the agent logged
-# against one dm-clone device (§14 layer 4).
+# against one dm-clone device (the log check of migr_bitmap,
+# dnagent_integtest.md, Cases).
 clone_discards() {
 	jq -rn --arg dev "/dev/mapper/$1" '
 	    inputs
@@ -615,7 +627,8 @@ clone_discards() {
 		"$WORK/agent.log" || return 1
 }
 
-# any_clone_discards — every blkdiscard against any dm-clone device (§13).
+# any_clone_discards — every blkdiscard against any dm-clone device (the
+# migr_full check of dnagent_integtest.md, Cases).
 any_clone_discards() {
 	local lines
 	lines=$(jq -rn 'inputs
@@ -625,7 +638,8 @@ any_clone_discards() {
 		grep -E '/dev/mapper/dnv-[0-9a-f]{16}-[0-9a-f]{16}-d3-' || true
 }
 
-# mutations [logfile] — every mutating operation in an agent log (§15 step 5).
+# mutations [logfile] — every mutating operation in an agent log (the restart
+# case's mutation-free re-sends, dnagent_integtest.md, Cases).
 # Probe operations (lsblk, dmsetup info/table/status, ls, and the [D13]
 # "os read block") are expected and deliberately absent from the list, exactly
 # mirroring the unit tests' readOnlyPrefixes.
@@ -666,10 +680,11 @@ mutations() {
 }
 
 # ctrl_of <nqn> <traddr> — the controller device backing one path, so a dead
-# source path can be disconnected by device instead of by NQN (§12 step 17).
+# source path can be disconnected by device instead of by NQN (dnagent.md SH20;
+# dnagent_integtest.md, Cases, migr_full and migr_bitmap).
 ctrl_of() { path_field "$1" "$2" Name; }
 
-# --- device pins (architecture.md §9.8) -------------------------------------
+# --- device pins (architecture.md, Teardown by sweep) -----------------------
 #
 # A pin is an open file descriptor on a dm device, held by a process OUTSIDE
 # the agent. It is the one way this suite can make a `dmsetup remove` fail for
@@ -799,7 +814,8 @@ dm_kind_names() {
 
 # resume_suspended sweeps up suspended dm devices before anything reads them.
 # A migration source holds its per-CN dm-linears suspended for the
-# SuspendSeconds grace window of §11.2, so a run killed mid-cutover leaves
+# SuspendSeconds grace window (architecture.md, Migration, src side step 2),
+# so a run killed mid-cutover leaves
 # them that way — and the agent that would have retired them is gone. It also
 # catches a crash inside a reload's suspend/load/resume. The failure it
 # prevents is severe: anything that reads a suspended device (`dmsetup
@@ -872,7 +888,8 @@ loop_devs() {
 	} | sort -u
 }
 
-# cleanup implements §16. The order is load-bearing; the one refinement over
+# cleanup implements dnagent_integtest.md, Teardown and cleanup. The order is
+# load-bearing; the one refinement over
 # the plain step list is that the migration-source subsystems (:3:) are
 # retired after the dm-clones are gone rather than with the side subsystems,
 # because a dm-clone flushes to its source on remove and the source is that
@@ -934,7 +951,8 @@ cleanup() {
 	# Unformat each loop device: zeroing the 4 KiB header is enough, because
 	# the volume-table slots are inert without it — a slot only counts when
 	# its format_uuid matches the header's ([D13], dnagent.md DN5: magic
-	# absent ⇒ the disk is blank). No oflag=, per the §4 dd rule.
+	# absent ⇒ the disk is blank). No oflag=, per the dd lab fact of
+	# dnagent_integtest.md, Assumptions and preflight checks.
 	local dev
 	for dev in $(loop_devs); do
 		dd if=/dev/zero of="$dev" bs=4096 count=1 conv=fsync >/dev/null 2>&1
@@ -946,8 +964,9 @@ cleanup() {
 	return 0
 }
 
-# lab_wipe — the ONE-TIME lab wipe of the teardown-by-sweep plan §3.2. It is
-# NOT part of a run: only the driver's --wipe reaches it.
+# lab_wipe — the ONE-TIME lab wipe (the wipe paragraph of dnagent_integtest.md,
+# Teardown and cleanup). It is NOT part of a run: only the driver's --wipe
+# reaches it.
 #
 # Why it exists at all: every teardown verb above removes dm devices BY KIND,
 # and the kind literals they pass are the new, role-lettered ones (c0…cb,
@@ -968,7 +987,8 @@ cleanup() {
 # takes every fabrics controller on the node, dnv's or not. Run it once,
 # alone.
 #
-# The order is §16's, generalized away from the kind list: arrays first (an
+# The order is that of dnagent_integtest.md, Teardown and cleanup, generalized
+# away from the kind list: arrays first (an
 # array holds its member wrappers open and is the one holder `dmsetup remove
 # --force` cannot argue with), then the controllers, then the nvmet objects
 # that pin dm devices from above, then the dm devices themselves — enumerated
@@ -1007,7 +1027,7 @@ lab_wipe() {
 
 		# Every md array on this node that is ours, by two independent routes
 		# because each is blind to a case the other sees. THE MEMBER ROUTE reads
-		# the member's dm name straight out of sysfs (plan Appendix C), needs no
+		# the member's dm name straight out of sysfs, needs no
 		# superblock read, and is the only one that works for the `inactive`
 		# one-member assemblies udev leaves on a DN — udev has no MD_NAME for
 		# those. THE NAME ROUTE is the only one left once the members themselves
@@ -1150,7 +1170,8 @@ ship_helper() {
 	rm -f "$tmp"
 }
 
-# wipe_all runs the one-time lab wipe (plan §3.2) on both VMs, concurrently
+# wipe_all runs the one-time lab wipe (dnagent_integtest.md,
+# Teardown and cleanup) on both VMs, concurrently
 # for cleanup_all's reason: a subsystem on one VM backs a connection on the
 # other, so the shorter the window the better. `--wipe` is its only caller and
 # it always runs the ordinary start-of-run cleanup afterwards, which takes
@@ -1196,7 +1217,8 @@ cleanup_all() {
 }
 
 # DIAG_SIDES holds "dnidx sp leg side" for every side a migration case has
-# reached so far, so the §17 dump can end with the last get-side-info of every
+# reached so far, so the failure dump of dnagent_integtest.md,
+# Teardown and cleanup, can end with the last get-side-info of every
 # involved side — the one view of a failure that names the migration's own
 # resources (clone, target, per-CN maps) instead of the node's raw dm/nvmet
 # state. The migration cases fill it as they set each side up (a side that does
@@ -1229,7 +1251,7 @@ diagnostics() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (§4)
+# Preflight (dnagent_integtest.md, Assumptions and preflight checks)
 # ---------------------------------------------------------------------------
 
 need_local() {
@@ -1266,7 +1288,8 @@ preflight_driver() {
 }
 
 # preflight_vms runs after the start-of-run cleanup: the port check can only
-# be meaningful once a crashed prior run's agents are gone (§2, §4).
+# be meaningful once a crashed prior run's agents are gone
+# (dnagent_integtest.md, Assumptions and preflight checks).
 preflight_vms() {
 	STAGE="preflight (vms)"
 	log "=== preflight: vms"
@@ -1297,7 +1320,7 @@ preflight_vms() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup (§7)
+# Setup (dnagent_integtest.md, Cases, the setup paragraph)
 # ---------------------------------------------------------------------------
 
 start_agent() { # <idx>
@@ -1319,9 +1342,11 @@ setup() {
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
-		# The §4 fast-Write-Zeroes preflight item, deferred to here because
+		# The fast-Write-Zeroes preflight item (dnagent_integtest.md,
+		# Assumptions and preflight checks), deferred to here because
 		# the device only exists now (preflight_vms runs before setup). The
-		# §9.4 zeroing assumes fast Write Zeroes; a loop device maps
+		# zeroing assumes fast Write Zeroes (the standing hardware assumption
+		# of architecture.md, Side provisioning protocol); a loop device maps
 		# REQ_OP_WRITE_ZEROES onto fallocate, so a 0 here means the kernel
 		# would write zero pages at bulk speed and the agent's DN5 fail-fast
 		# would refuse the disk outright. Read from /sys/class/block, the same
@@ -1355,8 +1380,9 @@ setup() {
 # Shared case helpers
 # ---------------------------------------------------------------------------
 
-# converge_check runs the §9 check-dn/check-side round pair against a side and
-# asserts that each reply echoes the revision the agent actually stored.
+# converge_check runs the check-dn/check-side round pair (dnagent_integtest.md,
+# Conventions, Check rounds) against a side and asserts that each reply echoes
+# the revision the agent actually stored.
 converge_check() { # dnidx sp leg side siderev
 	local idx=$1 out
 	out=$(ctl "$idx" check-dn --revision "${DNREV[$idx]}" --show-info)
@@ -1383,7 +1409,8 @@ assert_no_residue() { # sp
 # the agent replies 0, and gives up after <secs>.
 #
 # It exists because a teardown that has to remove resources hanging off a dead
-# remote is legitimately not finished in one pass (architecture.md §9.8, DN6).
+# remote is legitimately not finished in one pass (DN6; architecture.md,
+# Teardown by sweep).
 # The sweep removes what the desired state no longer wants, verifies every
 # removal with a probe that cannot block, and replies with the leftover code
 # while anything is still there. The first `dmsetup remove` of a dm-clone
@@ -1433,11 +1460,13 @@ dn_drop_until_clean() { # dnidx secs
 }
 
 # wait_zeroed blocks until a side's background zeroing goroutine has zeroed
-# every logical extent (§9.4). `ctl` adds no --timeout for this subcommand, so
-# the one below is wait-zeroed's own polling budget, not an RPC deadline.
+# every logical extent (architecture.md, Side provisioning protocol). `ctl`
+# adds no --timeout for this subcommand, so the one below is wait-zeroed's own
+# polling budget, not an RPC deadline.
 #
 # The optional fifth argument is the ext_cnt the request asked for, and turns
-# the wait into the exact "⇒ N/N" of §9 phase (b) and §10/§12: the driver's own
+# the wait into the exact zeroed = total = N equality of dnagent_integtest.md,
+# Conventions, The provisioned flip: the driver's own
 # loop exits on `total != 0 && zeroed >= total`, which a side allocated with
 # the wrong number of extents also satisfies. Callers that have no --ext-cnt to
 # compare against omit it and keep the driver's weaker guard.
@@ -1455,10 +1484,10 @@ wait_zeroed() { # dnidx sp leg side [ext_cnt]
 # sync_side_cns lists every CN id one syncup-side request names — the primary
 # and every standby — by scanning the caller's flag list the way Go's flag
 # package does (`--flag value`, plus the `--flag=value` spelling). Phase (a)
-# must be asserted for *all* of them: dnagent_integtest.md §9 and §11 step 1
-# pin "every cn_id_to_* map entry PROVISIONING … for both CN ids", and a case
-# A/D side carries a standby, so looking at one map entry leaves one of the
-# two per-CN stacks unexamined while it is gated.
+# must be asserted for *all* of them: dnagent_integtest.md, Conventions,
+# The provisioned flip, says "Before the flip every per-CN row must read
+# provisioning", and a case A/D side carries a standby, so looking at one map
+# entry leaves one of the two per-CN stacks unexamined while it is gated.
 sync_side_cns() { # syncup-side flags…
 	local arg want=""
 	for arg in "$@"; do
@@ -1476,8 +1505,9 @@ sync_side_cns() { # syncup-side flags…
 
 # sync_side_ext_cnt prints the --ext-cnt one syncup-side request asks for, by
 # the same flag scan as sync_side_cns (both spellings). It is what makes the
-# §9 phase-(b)/(c) equality checkable from the helper: the expected extent
-# count is the caller's own flag, not a constant this file could drift from.
+# exact equality of dnagent_integtest.md, Conventions, The provisioned flip,
+# checkable from the helper: the expected extent count is the caller's own
+# flag, not a constant this file could drift from.
 # Nothing is printed when the request carries no --ext-cnt, and every check
 # built on it degrades to the driver's own guard rather than failing.
 sync_side_ext_cnt() { # syncup-side flags…
@@ -1498,14 +1528,16 @@ sync_side_ext_cnt() { # syncup-side flags…
 }
 
 # sync_side_2phase performs the two-phase side provisioning the sp-worker
-# performs in production (§9.4). Phase 1 syncs the side with
+# performs in production (architecture.md, Side provisioning protocol).
+# Phase 1 syncs the side with
 # --provisioned=false: allocate the extent runs, build DnSideName, start the
 # zeroing goroutine — and export nothing. wait_zeroed then blocks until every
 # extent is zeroed, and phase 2 re-sends the identical request at a fresh
 # revision with --provisioned=true, which is the worker's flip rule played by
 # the script.
 #
-# Both revisions are minted by the caller in the parent shell (§9), so this is
+# Both revisions are minted by the caller in the parent shell
+# (dnagent_integtest.md, Conventions, Revisions), so this is
 # safe inside a background job. The phase-2 reply is left in SYNC_SIDE_REPLY:
 # a bash function cannot both echo the reply and be called outside a command
 # substitution, and the caller must not run bump_rev in one.
@@ -1527,7 +1559,8 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	# not to build), so it is paired below with the kernel-side half, which is
 	# the only thing that can catch a stale subsystem surviving from a prior
 	# incarnation or a fault in the nvmet/OsClient layer the unit tests' fake
-	# node does not model (dnagent_integtest.md §9 phase (a), §10 step 2).
+	# node does not model (the gate proof of dnagent_integtest.md,
+	# Conventions, The provisioned flip).
 	cns=$(sync_side_cns "$@")
 	[ -n "$cns" ] ||
 		die "provisioning $sp/$leg/$side: the request names no CN"
@@ -1545,17 +1578,20 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	left=$(helper "$idx" "export_dms $(hex16 "$sp") $(hex16 "$side")")
 	[ -z "$left" ] ||
 		die "provisioning $sp/$leg/$side: export dm devices exist at provisioned=false: $left"
-	# The exact §9 phase (b)/(c) equality, zeroed == total == ext_cnt, asserted
+	# The exact equality zeroed == total == ext_cnt (dnagent_integtest.md,
+	# Conventions, The provisioned flip), asserted
 	# on both the wait's last sample and the flip's reply: a side allocated
 	# with the wrong number of extents zeroes all of them and would satisfy
 	# every `zeroed >= total` check on the way. Hard, not tolerant.
 	ext=$(sync_side_ext_cnt "$@")
-	# The §9 provisioning-window sample: one get-side-info before the wait, to
+	# The provisioning-window sample (dnagent_integtest.md, Conventions): one
+	# get-side-info before the wait, to
 	# record whether this run ever observed the side mid-zeroing. Purely an
 	# observation and never an assertion — with 64 MiB extents a batch is
 	# 640 MiB and loop maps Write Zeroes onto `fallocate`, so the window is
-	# normally already closed by the time this samples, exactly like the §12
-	# grace-window and read-through probes. A failed call degrades to a miss
+	# normally already closed by the time this samples, exactly like the
+	# migration cases' grace-window and read-through probes (the same
+	# convention). A failed call degrades to a miss
 	# for the same reason: this must not be able to fail the suite (the next
 	# line's wait-zeroed is where a real problem surfaces).
 	sample=$(ctl "$idx" get-side-info --sp "$sp" --leg "$leg" --side "$side" ||
@@ -1580,7 +1616,7 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 }
 
 # ---------------------------------------------------------------------------
-# Case S — smoke (§10)
+# Case S — smoke (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 case_smoke() {
@@ -1642,7 +1678,7 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case A — sides (§11)
+# Case A — sides (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 # The 4 legs of case A: leg, owning DN, side id, primary CN, standby CN.
@@ -1765,7 +1801,7 @@ case_sides() {
 }
 
 # ---------------------------------------------------------------------------
-# Cases B and C — the shared migration choreography (§12)
+# Cases B and C — the shared migration choreography (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 # join_jobs waits for the background jobs of one lockstep stage and fails the
@@ -1777,7 +1813,8 @@ join_jobs() {
 }
 
 # migr_dn_sides fills SIDE_ARGS with the --side flags of one DN. with_src=0
-# drops the DN's migration-source side, which is how §12 step 16 tears it down.
+# drops the DN's migration-source side, which is how the finish tears it down
+# ("then drops the source side", dnagent_integtest.md, Cases).
 SIDE_ARGS=()
 migr_dn_sides() { # sp dnidx with_src
 	local sp=$1 dn=$2 with_src=$3 m
@@ -1829,10 +1866,11 @@ migr_prep_data() { # m
 		"migr $m baseline migr_dst_info"
 }
 
-# migr_declare_dst is §12 step 6/11: the same request twice, first gated with
-# sp_level no_migration (so bitmap chunks land before any region is copied),
-# then at readwrite to build the clone. Passing the level in makes the two
-# calls provably identical apart from it.
+# migr_declare_dst declares the destination and later enables it
+# (dnagent_integtest.md, Cases, migr_full and migr_bitmap): the same request
+# twice, first gated with sp_level no_migration (so bitmap chunks land before
+# any region is copied), then at readwrite to build the clone. Passing the
+# level in makes the two calls provably identical apart from it.
 #
 # The destination has already been provisioned by migr_provision_dst, so every
 # call here carries --provisioned=true: re-sending false
@@ -1856,14 +1894,15 @@ migr_declare_dst() { # m revision sp_level
 	if [ "$level" = no_migration ]; then
 		# DN11 suppression: wantMigr needs `level < SP_LEVEL_NO_MIGRATION`, so
 		# at this level migr_dst_info is not emitted at all. assert_gated, not
-		# assert_not_ok, so a PROVISIONING dst cannot satisfy it (§9's
-		# exact-status rule).
+		# assert_not_ok, so a PROVISIONING dst cannot satisfy it
+		# (dnagent_integtest.md, Conventions, Negatives are exact).
 		assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m gated clone"
-		# §12 step 6c's other half: "no `nvme connect` issued yet". The clone
-		# and the connection to the source's :3: subsystem are built by the
-		# same step 11 converge, so a destination that connected while it was
-		# still gated would be pulling data from a source whose bitmap chunks
+		# The other half of the gated declaration's "no clone and no
+		# connection" (dnagent_integtest.md, Cases, migr_full and migr_bitmap).
+		# The clone and the connection to the source's :3: subsystem are built by
+		# the same enabling converge, so a destination that connected while it
+		# was still gated would be pulling data from a source whose bitmap chunks
 		# may not all have landed — the race the staged flow exists to avoid.
 		# The suppressed migr_dst_info cannot show it, so it is read off the
 		# DNdst *host*: the agent connects as DnHostNqn(cluster, DNdst), so its
@@ -1881,14 +1920,15 @@ migr_declare_dst() { # m revision sp_level
 			"migr $m dst clone"
 		# DN13 step 4: every dnv dm-clone carries no_discard_passdown, without
 		# exception. The dn migration clone is the call site the rule fixed, and
-		# without the feature the §11.4 "mark this region hydrated"
-		# blkdiscard would also reach the destination side device and destroy
-		# an acknowledged write.
+		# without the feature the "mark this region hydrated" blkdiscard of
+		# architecture.md, raid0 bitmap math, would also reach the destination
+		# side device and destroy an acknowledged write.
 		#
 		# The whole feature list is pinned, not just the one word: the exact
 		# `2 no_hydration no_discard_passdown` of agent.CloneTable's derived
-		# feature count (agent/dm.go:405-419), which is the string
-		# dnagent_integtest.md §12 step 11 and §20 name. `dmsetup message …
+		# feature count (agent/dm.go:405-419), which is the exact pair
+		# dnagent_integtest.md, Cases, requires of the clone's table (DN13;
+		# architecture.md, [D7]). `dmsetup message …
 		# enable_hydration` does NOT weaken it — dm-clone's STATUSTYPE_TABLE
 		# reprints the constructor args saved by copy_ctr_args verbatim
 		# (drivers/md/dm-clone-target.c), and only `dmsetup status`
@@ -1896,8 +1936,8 @@ migr_declare_dst() { # m revision sp_level
 		# this migration's clone device by name, so nothing else on the node
 		# can satisfy it. A substring test for no_discard_passdown alone
 		# accepts `1 no_discard_passdown`, i.e. a clone created with hydration
-		# already enabled, which would copy the very regions §11.4 asked to
-		# skip.
+		# already enabled, which would copy the very regions the skip bitmap
+		# (architecture.md, raid0 bitmap math) asked to skip.
 		local ctable
 		ctable=$(helper "${MDSTDN[$m]}" \
 			"clone_table '$(dn_clone_name "$CLUSTER" \
@@ -1908,11 +1948,13 @@ migr_declare_dst() { # m revision sp_level
 	fi
 }
 
-# migr_provision_dst is the dst half of the §11.2 migration provisioning rule: the
-# destination side provisions FIRST, under the ordinary §9.4 protocol — the
-# dm-linear and the zeroing goroutine only, no per-CN stacks, no connect and no
-# dm-clone. The request is byte-for-byte migr_declare_dst's gated one except
-# --provisioned=false, which is what makes the gate provable.
+# migr_provision_dst is the dst half of the migration provisioning rule
+# (architecture.md, Migration, Phase 0): the destination side provisions
+# FIRST, under the ordinary side provisioning (architecture.md,
+# Side provisioning protocol) — the dm-linear and the zeroing goroutine only,
+# no per-CN stacks, no connect and no dm-clone. The request is byte-for-byte
+# migr_declare_dst's gated one except --provisioned=false, which is what makes
+# the gate provable.
 migr_provision_dst() { # m revision
 	local m=$1 rev=$2 out field left nqn
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
@@ -1932,7 +1974,8 @@ migr_provision_dst() { # m revision
 		"migr $m dst clone before provisioning"
 	# The same three-map + kernel-side gate proof sync_side_2phase runs; this
 	# request names one CN (the migration's primary), so the loop over the
-	# request's CN ids collapses to it (dnagent_integtest.md §9 phase (a)).
+	# request's CN ids collapses to it (dnagent_integtest.md, Conventions,
+	# The provisioned flip).
 	for field in cn_id_to_dm_error cn_id_to_dm_linear cn_id_to_nvmeof; do
 		assert_provisioning "$out" \
 			".side_info.$field[\"$((${MCN[$m]}))\"].status" \
@@ -1945,8 +1988,9 @@ migr_provision_dst() { # m revision
 		"export_dms $(hex16 "$SP") $(hex16 "${MDSTSIDE[$m]}")")
 	[ -z "$left" ] ||
 		die "migr $m dst has export dm devices before it is provisioned: $left"
-	# §12 step 6b's "⇒ 2/2": the exact equality against the --ext-cnt 2 this
-	# request asked for, not merely "every extent it happened to allocate".
+	# Zeroed 2/2 (dnagent_integtest.md, Conventions, The provisioned flip):
+	# the exact equality against the --ext-cnt 2 this request asked for, not
+	# merely "every extent it happened to allocate".
 	wait_zeroed "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}" 2
 }
 
@@ -1954,7 +1998,7 @@ migr_connect_dst() { # m
 	local m=$1
 	local vm=${MCNVM[$m]}
 	# Same NQN, the other DN: the CN kernel merges the two connections into
-	# one multipath namespace with two paths (§3).
+	# one multipath namespace with two paths (dnagent_integtest.md, Topology).
 	cn_connect "$vm" "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MCN[$m]}"
 	# Polled, like the other ANA checks that follow a connect: `nvme connect`
 	# returns before the namespace scan it only queued has created the path's
@@ -1965,12 +2009,13 @@ migr_connect_dst() { # m
 		inaccessible 20
 }
 
-# migr_gate_src is the dst_provisioned = false half of the §11.2
-# migration rule, and it runs before the cutover: the request is byte-for-byte
-# migr_cutover_src's except --dst-provisioned=false, which the spec declares
-# **exactly equivalent** to migr_src_conf being absent. The source keeps
-# serving, does not fence its per-CN linears and exports no migr-src subsystem;
-# only the would-be migr_src_info.* rows differ, reporting PROVISIONING.
+# migr_gate_src is the dst_provisioned = false half of the migration rule of
+# architecture.md, Migration, and it runs before the cutover: the request is
+# byte-for-byte migr_cutover_src's except --dst-provisioned=false, which the
+# spec declares **exactly equivalent** to migr_src_conf being absent. The
+# source keeps serving, does not fence its per-CN linears and exports no
+# migr-src subsystem; only the would-be migr_src_info.* rows differ, reporting
+# PROVISIONING.
 #
 # Without that equivalence the source would fence the primary's path the moment
 # the migration was created, leaving the leg with no serving path for the whole
@@ -2004,9 +2049,11 @@ migr_gate_src() { # m revision
 		"migr $m: the gated src keeps serving"
 	# …and serving means data, not just an ANA state: an optimized path over a
 	# per-CN linear that had been reloaded onto its dm-error would still read
-	# optimized here and return EIO. §12 step 8b therefore reads 1 MiB through
+	# optimized here and return EIO. The gate probe (dnagent_integtest.md,
+	# Cases, migr_full and migr_bitmap) therefore reads 1 MiB through
 	# the CN device, the same production path stage 0 wrote through. Preceded
-	# by a cache drop so the read reaches the media (§9, and never iflag=).
+	# by a cache drop so the read reaches the media (the dd lab fact of
+	# dnagent_integtest.md, Assumptions and preflight checks: never iflag=).
 	dev=$(ns_by_id "$SP" "${MLEG[$m]}")
 	drop_caches "${MCNVM[$m]}"
 	assert_eq "$(helper "${MCNVM[$m]}" "read_probe '$dev'")" ok \
@@ -2025,7 +2072,8 @@ migr_cutover_src() { # m revision
 		"migr $m src dm-linear"
 	assert_ok "$out" ".side_info.migr_src_info.nvmeof_info.status" \
 		"migr $m src export"
-	# The per-CN linears enter the §11.2 grace window: suspended in place for
+	# The per-CN linears enter the cutover grace window (architecture.md,
+	# Migration, src side step 2): suspended in place for
 	# SuspendSeconds, then reloaded onto their dm-errors. Observed, not
 	# asserted — a slow step could push this past the window, and the
 	# end state is what the teardown checks prove.
@@ -2042,7 +2090,8 @@ migr_cutover_src() { # m revision
 		"${MSRCDN[$m]}" inaccessible 30
 }
 
-# migr_read_through is §12 step 13: the last must-copy MiB read through the
+# migr_read_through is the read-through probe (dnagent_integtest.md, Cases,
+# migr_full and migr_bitmap): the last must-copy MiB read through the
 # destination. Correct either way — served by read-through from the source
 # when hydration has not reached it — but the window is where the proof is
 # strongest, so the sample is logged.
@@ -2070,13 +2119,14 @@ migr_read_through() { # m lastMiB
 	assert_eq "$got" "$want" "migr $m read-through of MiB $skip"
 }
 
-# migr_first_hydr is §14 layer 3: case C's skip jump, asserted on the first
-# hydration sample there is. The step 11 converge applies the pushed chunks,
-# enables hydration and only then reads the clone's `dmsetup status` into its
-# own reply, which migr_declare_dst filed under $REPLY_DIR — so the sample is
-# read out of that file, not polled for. A poll starts after the step 12 ANA
-# wait and the step 13 read-through, when a loop device has often hydrated
-# all 128 regions already, and a floor checked against 128/128 proves nothing.
+# migr_first_hydr is case C's skip jump (dnagent_integtest.md, Cases,
+# migr_bitmap), asserted on the first hydration sample there is. The enabling
+# converge applies the pushed chunks, enables hydration and only then reads
+# the clone's `dmsetup status` into its own reply, which migr_declare_dst
+# filed under $REPLY_DIR — so the sample is read out of that file, not polled
+# for. A poll starts after the destination's ANA wait and the read-through
+# probe, when a loop device has often hydrated all 128 regions already, and a
+# floor checked against 128/128 proves nothing.
 migr_first_hydr() { # m
 	local m=$1 out raw pair
 	out=$(cat "$REPLY_DIR/dst-$m.json")
@@ -2085,8 +2135,8 @@ migr_first_hydr() { # m
 	# when both counts are numbers.
 	pair=$(printf '%s' "$raw" | awk '{for (i = 1; i <= NF; i++) if ($i == "clone") { if (split($(i + 4), a, "/") == 2 && a[1] ~ /^[0-9]+$/ && a[2] ~ /^[0-9]+$/) print a[1], a[2]; exit }}')
 	[ -n "$pair" ] ||
-		die "migr $m: the step 11 reply carries no hydration count: '$raw'"
-	log "migr $m: first hydration sample ${pair% *}/${pair#* } (the step 11 reply)"
+		die "migr $m: the enabling converge's reply carries no hydration count: '$raw'"
+	log "migr $m: first hydration sample ${pair% *}/${pair#* } (the enabling converge's reply)"
 	[ "${pair% *}" -ge "$MIN_FIRST" ] ||
 		die "migr $m: first hydration sample is ${pair% *}/${pair#* }, want >= $MIN_FIRST hydrated"
 }
@@ -2098,17 +2148,20 @@ migr_finish_dst() { # m revision
 		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite --provisioned=true)
 	# The request drops --migr-dst, so the whole migr_dst_info block goes away
-	# with the clone (§9's exact-status rule: gated, never merely "not OK").
+	# with the clone (dnagent_integtest.md, Conventions, Negatives are exact:
+	# gated, never merely "not OK").
 	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"migr $m clone after finish"
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m finished dst"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m finished dst"
 }
 
-# migr_drop_src is §12 step 16/17: the source side leaves its DN's pointer
-# list, which kills the CN's source controller with DNR. The host will not
-# reconnect on its own, so the dead path is disconnected by device — by NQN
-# would kill the surviving destination path too.
+# migr_drop_src drops the source side and the dead source path
+# (dnagent_integtest.md, Cases, migr_full and migr_bitmap; dnagent.md SH20):
+# the source side leaves its DN's pointer list, which kills the CN's source
+# controller with DNR. The host will not reconnect on its own, so the dead
+# path is disconnected by device — by NQN would kill the surviving
+# destination path too.
 migr_drop_src() { # m revision
 	local m=$1 rev=$2 out nqn ctrl
 	migr_dn_sides "$SP" "${MSRCDN[$m]}" 0
@@ -2140,9 +2193,10 @@ migr_write_probe() { # m
 	sshv_ok "$vm" "rm -f $WORK/probe-$m.bin"
 }
 
-# run_migration_cases is the §12 body shared by cases B and C. $SP, $MID,
-# $BM_CNT and the case name are set by the callers; the per-case differences
-# are the two hooks push_bitmaps and verify_data.
+# run_migration_cases is the migration body shared by cases B and C
+# (dnagent_integtest.md, Cases). $SP, $MID, $BM_CNT and the case name are set
+# by the callers; the per-case differences are the two hooks push_bitmaps and
+# verify_data.
 declare -a PAT_SHA=("" "" "")
 declare -a PAT_SHA_HEAD=("" "" "")
 REPLY_DIR=""
@@ -2150,7 +2204,8 @@ REPLY_DIR=""
 run_migration_cases() {
 	local m out pids rev1 rev2 prov1 prov2 dn
 	REPLY_DIR=$(mktemp -d)
-	# A fresh case starts with no sides for the §17 dump to report; the sides
+	# A fresh case starts with no sides for the failure dump of
+	# dnagent_integtest.md, Teardown and cleanup, to report; the sides
 	# below are registered as each stage creates them.
 	DIAG_SIDES=()
 
@@ -2164,15 +2219,17 @@ run_migration_cases() {
 	done
 
 	stage stage0src "both source sides provision and come up (concurrently)"
-	# The sides exist from here on, so register them for the §17 dump — in the
+	# The sides exist from here on, so register them for the failure dump of
+	# dnagent_integtest.md, Teardown and cleanup — in the
 	# parent shell, like the revisions below, because a DIAG_SIDES entry
 	# appended inside a background job would be appended to a copy.
 	for m in 1 2; do
 		diag_add_side "${MSRCDN[$m]}" "$SP" "${MLEG[$m]}" "${MSRCSIDE[$m]}"
 	done
-	# Two revisions per source: the §9.4 phase-1 sync and the worker's flip.
-	# Both are minted here, in the parent shell, because bump_rev inside a
-	# background job would increment a copy (§9).
+	# Two revisions per source: the phase-1 sync of architecture.md,
+	# Side provisioning protocol, and the worker's flip. Both are minted here,
+	# in the parent shell, because bump_rev inside a background job would
+	# increment a copy (dnagent_integtest.md, Conventions, Revisions).
 	bump_rev "${MSRCDN[1]}"
 	prov1=${REV[${MSRCDN[1]}]}
 	bump_rev "${MSRCDN[1]}"
@@ -2202,7 +2259,7 @@ run_migration_cases() {
 		PAT_SHA_HEAD[m]=$(sha_range "${MCNVM[$m]}" "$WORK/pattern-$m.bin" 64)
 	done
 
-	stage stage1prov "the destinations provision first (§9.4): zero, then gate"
+	stage stage1prov "the destinations provision first (architecture.md, Side provisioning protocol): zero, then gate"
 	for m in 1 2; do
 		diag_add_side "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
 	done
@@ -2275,7 +2332,8 @@ run_migration_cases() {
 	migr_declare_dst 2 "$rev2" readwrite &
 	pids+=($!)
 	join_jobs "${pids[@]}"
-	# §14 layer 3 (case C): the skip jump, read off each step 11 reply.
+	# Case C's skip jump (dnagent_integtest.md, Cases, migr_bitmap), read off
+	# each enabling converge's reply.
 	if [ "$MIN_FIRST" -gt 0 ]; then
 		for m in 1 2; do migr_first_hydr "$m"; done
 	fi
@@ -2359,13 +2417,14 @@ run_migration_cases() {
 	for m in 1 2; do
 		sshv_ok "${MCNVM[$m]}" "rm -f $WORK/pattern-$m.bin"
 	done
-	# The sides are gone, so a later case's §17 dump must not ask for them.
+	# The sides are gone, so a later case's failure dump (dnagent_integtest.md,
+	# Teardown and cleanup) must not ask for them.
 	DIAG_SIDES=()
 	rm -rf "$REPLY_DIR"
 }
 
 # ---------------------------------------------------------------------------
-# Case B — migr_full (§13)
+# Case B — migr_full (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 case_migr_full() {
@@ -2377,8 +2436,9 @@ case_migr_full() {
 	MIN_FIRST=0
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
-		# No chunks at all (§13): the equal-revision re-send of the gated
-		# request only proves the reply's applied set is empty.
+		# No chunks at all (dnagent_integtest.md, Cases): the equal-revision
+		# re-send of the gated request only proves the reply's applied set is
+		# empty.
 		local revs=("" "$1" "$2") m out
 		for m in 1 2; do
 			migr_declare_dst "$m" "${revs[$m]}" no_migration
@@ -2392,8 +2452,9 @@ case_migr_full() {
 		local m=$1 got
 		got=$(sha_range "${MCNVM[$m]}" "$(ns_by_id "$SP" "${MLEG[$m]}")" 128)
 		assert_eq "$got" "${PAT_SHA[$m]}" "migr $m full-copy sha256"
-		# Discard-based skipping must not happen without bitmaps. The §9.4
-		# provisioning `blkdiscard --zeroout` that replaced the old side-create
+		# Discard-based skipping must not happen without bitmaps. The
+		# provisioning `blkdiscard --zeroout` of architecture.md,
+		# Side provisioning protocol, that replaced the old side-create
 		# trim targets the side device (dnv-*-d4-*), never a dm-clone
 		# (dnv-*-d3-*), so it does not match this filter either.
 		local discards
@@ -2406,7 +2467,7 @@ case_migr_full() {
 }
 
 # ---------------------------------------------------------------------------
-# Case C — migr_bitmap (§14)
+# Case C — migr_bitmap (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 #
 # 128 regions of 1 MiB, meta_blocks 3. Bits 0..60 = 0 (must copy) map to
@@ -2457,8 +2518,9 @@ case_migr_bitmap() {
 		assert_eq "$got" "${PAT_SHA_HEAD[$m]}" "migr $m first 64 MiB"
 		# Layer 1b: the skipped half reads zero even though the source holds
 		# random data there — the agent skipped it, it did not copy it.
-		# Those zeros are *guaranteed* by the destination's §9.4
-		# `blkdiscard --zeroout` provisioning rather than hoped for from
+		# Those zeros are *guaranteed* by the destination's
+		# `blkdiscard --zeroout` provisioning (architecture.md,
+		# Side provisioning protocol) rather than hoped for from
 		# discard-reads-zeros, which was never a hardware guarantee ([D15]).
 		sshv "$vm" "dd if=$dev of=$WORK/tail-$m.bin bs=1M skip=64 count=64 status=none"
 		got=$(sshv "$vm" "dd if=/dev/zero bs=1M count=64 status=none > $WORK/zero-$m.bin; cmp -s $WORK/tail-$m.bin $WORK/zero-$m.bin && echo zeros || echo data")
@@ -2480,7 +2542,7 @@ case_migr_bitmap() {
 }
 
 # ---------------------------------------------------------------------------
-# Case E — teardown (architecture.md §9.8, DN6)
+# Case E — teardown (architecture.md, Teardown by sweep; DN6)
 # ---------------------------------------------------------------------------
 #
 # Both stages pin the same claim: removal is derived from what the node
@@ -2570,7 +2632,7 @@ teardown_dead_source() {
 	stage dsdata "128 MiB written through the CN device, as case B does"
 	migr_prep_data "$m"
 
-	stage dsprov "the destination provisions first (§9.4)"
+	stage dsprov "the destination provisions first (architecture.md, Side provisioning protocol)"
 	diag_add_side "$dst" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
 	bump_rev "$dst"
 	migr_provision_dst "$m" "${REV[$dst]}"
@@ -2583,7 +2645,8 @@ teardown_dead_source() {
 	migr_connect_dst "$m"
 
 	stage dscut "source cutover: the source hands the leg over"
-	# §12's dst_provisioned=false gate is case B's proof, not this one's: the
+	# The dst_provisioned=false gate of the migration cases
+	# (dnagent_integtest.md, Cases) is case B's proof, not this one's: the
 	# only thing needed here is the state the cutover leaves behind.
 	bump_rev "$src"
 	migr_cutover_src "$m" "${REV[$src]}"
@@ -2592,7 +2655,8 @@ teardown_dead_source() {
 	bump_rev "$dst"
 	migr_declare_dst "$m" "${REV[$dst]}" readwrite
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" optimized 30
-	# Observed, never asserted, exactly like §12's read-through window: 128
+	# Observed, never asserted (dnagent_integtest.md, Conventions), exactly
+	# like the migration cases' read-through window: 128
 	# regions of 1 MiB over a local TCP link can be through before this
 	# samples. Hydration still in flight is what makes the clone's removal
 	# below block on the dead source; hydration already finished still
@@ -2626,9 +2690,10 @@ teardown_dead_source() {
 	stage dsdrop "and IMMEDIATELY the destination side leaves the pointer list"
 	# Nothing sleeps between the yank and this drop: the dm-clone has to be
 	# removed inside the window where its hydration IO to the dead source is
-	# still queued, which is the window the sweep is written for (§9.8's
-	# failfast bound). The loop is what lets the pass that is killed at the
-	# soft timeout be followed by one that finds the device gone.
+	# still queued, which is the window the sweep is written for (the failfast
+	# bound of architecture.md, Teardown by sweep). The loop is what lets the
+	# pass that is killed at the soft timeout be followed by one that finds the
+	# device gone.
 	bump_dn_rev "$dst"
 	dn_drop_until_clean "$dst" 60
 
@@ -2671,7 +2736,8 @@ teardown_dead_source() {
 	assert_no_residue "$SP"
 	ctl "$src" get-dn-info >/dev/null
 	sshv_ok "$vm" "rm -f $WORK/pattern-$m.bin"
-	# Both sides are gone, so the §17 dump must not ask for them again.
+	# Both sides are gone, so the failure dump of dnagent_integtest.md,
+	# Teardown and cleanup, must not ask for them again.
 	DIAG_SIDES=()
 }
 
@@ -2741,7 +2807,7 @@ teardown_pinned_side() {
 }
 
 # ---------------------------------------------------------------------------
-# Case D — restart (§15)
+# Case D — restart (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 case_restart() {
@@ -2872,8 +2938,9 @@ case_restart() {
 		"restart post-restart bm_idx_list"
 
 	stage idempotent "unchanged re-applies must mutate nothing"
-	# §15 step 5: the syncup-side re-sends are equal-revision, the syncup-dn
-	# ones higher-revision — the counter is two past what the setup stored.
+	# The restart case's mutation-free re-sends (dnagent_integtest.md, Cases):
+	# the syncup-side re-sends are equal-revision, the syncup-dn ones
+	# higher-revision — the counter is two past what the setup stored.
 	DNREV[1]=${REV[1]}
 	out=$(ctl 1 syncup-dn --revision "${REV[1]}" --extent-size "$EXTENT_SIZE" \
 		--side "$sp:$leg:$srcside")
@@ -2898,7 +2965,8 @@ case_restart() {
 		--bm-cnt 1)
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side2"
 	# The post-restart log covers the startup reconcile and these re-applies.
-	# This is also the §9.4 resume-at-k net: `blkdiscard` is in
+	# This is also the resume-at-k net (architecture.md,
+	# Side provisioning protocol): `blkdiscard` is in
 	# mutations()' verb list, so a reconcile that re-zeroes an already-complete
 	# side — the resume logic reading its bits wrong — fails the case here.
 	for idx in 1 2; do

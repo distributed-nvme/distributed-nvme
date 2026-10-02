@@ -9,27 +9,29 @@
 #   bash integtest/cnagent_test.sh [--only <case>] [--cleanup-only] \
 #       [--wipe] user1@ip1 user2@ip2
 #
-# Cases: smoke, redund, teardown, thinbm, clone_xfer, restart — §10-§14, plus
-# `teardown`, which is the teardown-by-sweep plan's §4.2 case and injects the
+# Cases (cnagent_integtest.md, Cases): smoke, redund, teardown, thinbm,
+# clone_xfer, restart; `teardown`, the teardown-by-sweep case, injects the
 # faults (a pinned dm device, an iptables partition of the nvme-tcp port, a
 # background writer); case A's `degrade` stage reuses the partition. Cleanup
 # runs unconditionally at the start and, on success only, at the end: a
 # failing run leaves every dm/md/nvmet object and all four agent logs in place
-# and dumps diagnostics (§17). cleanup_phase1 releases every fault injector
+# and dumps diagnostics (cnagent_integtest.md, Teardown and cleanup).
+# cleanup_phase1 releases every fault injector
 # unconditionally, so a failed run of either case cannot poison the next one.
 #
-# The uutils dd rule of §4 is absolute: this script never passes iflag= or
+# The uutils dd rule (dnagent_integtest.md, Assumptions and preflight checks)
+# is absolute: this script never passes iflag= or
 # oflag= to dd. Writes use conv=fsync, reads that must hit the media are
 # preceded by a cache drop. Do not "fix" this back to direct IO.
 #
 # Both roles run from one binary named `dnv-agent`, so `pkill -x dnv-agent`
-# would kill both (§3, Appendix A). Every kill here is
+# would kill both (cnagent_integtest.md, Topology). Every kill here is
 # `pkill -f 'dnv-agent dn'` / `pkill -f 'dnv-agent cn'`. Do not "simplify" it.
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (§3, §5, §6)
+# Constants
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -38,7 +40,8 @@ CTL_CN="$REPO_ROOT/integtest/bin/cnagentctl"
 AGENT_BIN="$REPO_ROOT/bin/dnv-agent"
 
 # Deliberately not the dn suite's directory, so the two suites never share
-# debris (§3). The driver uses it too, for the §8 request files.
+# debris. The driver uses it too, for the request files (cnagent_integtest.md,
+# The driver: `cnagentctl`).
 WORK=/var/tmp/dnv-cn-integtest
 HELPER=/var/tmp/dnv-cn-integtest-helper.sh
 DN_LOG="$WORK/dn-agent.log"
@@ -50,21 +53,25 @@ CN_GRPC_PORT=29529
 TR_SVC_ID=4200
 CLUSTER=0x1
 EXTENT_SIZE=67108864 # 64 MiB — MinDnExtSize; the proto field is raw bytes
-# GetDnSize reports the [D13] data area, not the raw device (§6): 2 GiB
+# GetDnSize reports the [D13] data area, not the raw device
+# (cnagent_integtest.md, Cases, the setup paragraph): 2 GiB
 # backing file, 2147483648 - 268435456 = 1879048192.
 DATA_SIZE=1879048192
-# --capacity: an arbitrary exact value GetCnSize must echo back (CN-CM1, §6).
+# --capacity: an arbitrary exact value GetCnSize must echo back (CN-CM1;
+# cnagent_integtest.md, Cases, the setup paragraph).
 CN_CAPACITY=1099511627776
 
-# Bdev parameters, everywhere (§6).
+# Bdev parameters, everywhere.
 BLOCK_SIZE=1048576
 STRIPE_SIZE=65536
 BM_CHUNK_BLOCKS=128
 LOW_WATER_PCT=50
 TD_SIZE=67108864 # 64 MiB = 64 thin blocks
 
-# The worked §3.6 arithmetic of §6. The request carries these; the agent
-# consumes them and never recomputes.
+# The arithmetic of architecture.md,
+# Group on-leg layout: meta region, data region, health block, worked for
+# these sizes. The request carries these; the agent consumes them and never
+# recomputes.
 NONE_META_BLOCKS=1
 NONE_EXT1_DATA=63
 NONE_EXT2_DATA=127
@@ -76,7 +83,8 @@ RAID1_EXT2_DATA=125
 DN_SYNCUP_TIMEOUT=60
 CN_SYNCUP_TIMEOUT=180
 
-# Polling budget of `dnagentctl wait-zeroed` (the §9.4 protocol). With 64 MiB
+# Polling budget of `dnagentctl wait-zeroed` (architecture.md,
+# Side provisioning protocol). With 64 MiB
 # extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
 # so a 1-2 extent side finishes in well under a second; the budget only has to
 # cover a stalled retry loop (DnZeroRetryInterval = 5 s).
@@ -87,7 +95,8 @@ NQN_IT_PREFIX=nqn.2024-01.io.dnv-it
 HOST_NQN=nqn.2024-01.io.dnv-it:host:0
 
 # Per-VM state, 1-indexed so "vm1"/"vm2" read directly. Each VM runs both
-# agents (§3): dn 0x1/0x2 on :29528, cn 0x11/0x12 on :29529.
+# agents (cnagent_integtest.md, Topology): dn 0x1/0x2 on :29528, cn 0x11/0x12
+# on :29529.
 VM=("" "" "")
 IP=("" "" "")
 DNID=("" 0x1 0x2)
@@ -97,7 +106,8 @@ CNREV=("" 0 0)
 CNSYNC=("" 0 0)
 LOOP=("" "" "")
 
-# The S-shaped SP of §5: one RedundNone meta group and one RedundNone data
+# The S-shaped SP (cnagent_integtest.md, Cases, smoke): one RedundNone meta
+# group and one RedundNone data
 # group on one DN, one td, one subsystem with one namespace. Cases S, B and
 # both halves of C use these sub-ids verbatim — only the sp, the nodes, the
 # cntlid slot and the namespace identity differ.
@@ -112,7 +122,8 @@ S_TD=0x9
 S_SS=0xa
 S_NS=0xb
 
-# The A-shaped SP of §5: md-raid1 meta and data groups across both DNs, a
+# The A-shaped SP (cnagent_integtest.md, Cases, redund): md-raid1 meta and
+# data groups across both DNs, a
 # primary and a standby cntlr. Cases A and D share the sub-ids; leg 1 of every
 # group lives on DN1, leg 2 on DN2.
 A_SLICE=0x3
@@ -144,8 +155,9 @@ CASES=(smoke redund teardown thinbm clone_xfer restart)
 
 log() { echo "$*" >&2; }
 
-# stage names the step for the failure report and mints the trace id the §9
-# convention asks for: one id shared by the driver call, the agent handler and
+# stage names the step for the failure report and mints the trace id the
+# driver sends (cnagent_integtest.md, The driver: `cnagentctl`): one id shared
+# by the driver call, the agent handler and
 # every os command it runs.
 stage() {
 	STAGE="$CASE: $2"
@@ -163,7 +175,8 @@ die() {
 
 assert_eq() { [ "$1" = "$2" ] || die "$3: got '$1', want '$2'"; }
 
-# assert_parked pins the §11.6 park of one effectively suspended namespace:
+# assert_parked pins the park (architecture.md, Namespace suspend semantics)
+# of one effectively suspended namespace:
 # the ns-dev is **live** and its table is a plain dm-linear over its td's
 # `CnErrorName`, offset 0 (CN16 rule 1). Before 2026-09-16 that namespace was
 # held `dmsetup suspend`ed on its ordinary backing instead; asserting `live`
@@ -203,7 +216,8 @@ assert_opens_ok() { # vm dev label
 	[ "$rc" = 0 ] || die "$3: a serving device did not read back (rc $rc)"
 }
 
-# assert_no_suspended_dm is §11.6's operator-visible promise: on a CN, outside
+# assert_no_suspended_dm is the operator-visible promise of architecture.md,
+# Namespace suspend semantics: on a CN, outside
 # a DN cutover window, `dmsetup info` shows no suspended dnv device at all.
 # Before the park a transfer origin's ns-dev sat here for the whole hydration.
 assert_no_suspended_dm() { # vm label
@@ -237,7 +251,8 @@ assert_not_ok() {
 }
 
 # assert_provisioning_or_ok accepts the two statuses a DN side may legally hold
-# at provisioned = false (the §9.4 converge matrix rows 2 and 3):
+# at provisioned = false (architecture.md, Side provisioning protocol, the
+# Converge matrix rows 2 and 3):
 # PROVISIONING while the background zeroing goroutine still has extents to go,
 # and OK once every bit is set. Zeroing 64-128 MiB on a loop device is a
 # `fallocate`, so which of the two a phase-1 reply carries is a genuine race —
@@ -271,7 +286,8 @@ assert_leg_pending() { # json legid label
 # PROVISIONING with no race: the resources a deferred side or leg deliberately
 # does not create. RES_STATUS_PROVISIONING is a *healthy* status, so it
 # satisfies a bare assert_not_ok and trips every assert_all_ok — naming it
-# explicitly is what keeps both honest (§9's exact-status rule).
+# explicitly is what keeps both honest (cnagent_integtest.md, Conventions,
+# Negatives are exact).
 assert_provisioning() { # json path label
 	local got
 	got=$(jq_of "$1" "$2 // \"ABSENT\"")
@@ -282,7 +298,8 @@ assert_provisioning() { # json path label
 # assert_suppressed reads a resource CN19 gated off: not OK, with "sp_level" as
 # the reason. The details check is what keeps it exact now that
 # RES_STATUS_PROVISIONING also satisfies "not OK" — a deferred resource reports
-# "provisioning", never "sp_level" (CN19; §9's exact-status rule).
+# "provisioning", never "sp_level" (CN19; cnagent_integtest.md, Conventions,
+# Negatives are exact).
 assert_suppressed() { # json path label
 	assert_not_ok "$1" "$2.status" "$3"
 	assert_eq "$(jq_of "$1" "$2.details // \"ABSENT\"")" sp_level "$3 details"
@@ -317,7 +334,8 @@ assert_thin_ok() { # json td slice label
 		"$4 thin[$2][$3]"
 }
 
-# assert_cn_info_ok covers the four §3.2 base-state resources of CnInfo. The
+# assert_cn_info_ok covers the four base-state resources of CnInfo
+# (architecture.md, Controller node, common). The
 # fifth — the old clone-VG row — went away with LVM: the clone-metadata arena
 # is now the loop device itself (loop_dev_info) plus the kind-cb wrapper dm
 # tables, and the proto field is `reserved 5` ([D14]).
@@ -329,7 +347,8 @@ assert_cn_info_ok() { # json label
 }
 
 # assert_all_ok fails on any ResInfo under a reply subtree whose status is not
-# OK — the §9 converge-check rule "every expected status == RES_STATUS_OK".
+# OK — the converge-check rule "every expected status == RES_STATUS_OK"
+# (cnagent_integtest.md, Conventions, Steady state).
 # It also fails on a subtree that holds no status at all: an empty selection
 # has no not-OK member, so without the count a reply with code 0, the right
 # revision and no cntlr_info whatsoever passed every check round (`..` over
@@ -359,7 +378,7 @@ on_exit() {
 		log "PASS"
 	else
 		log ""
-		log "########## diagnostics (§17) ##########"
+		log "########## diagnostics (cnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
@@ -378,7 +397,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 
 # sshv runs one command as root on a VM and returns its stdout. Everything the
 # agents touch (md, dm, configfs, nvme) needs root, so every remote command
-# goes through sudo (§3).
+# goes through sudo (cnagent_integtest.md, Topology).
 sshv() {
 	local idx=$1
 	shift
@@ -404,7 +423,7 @@ helper_ok() {
 # dnctl drives one dn agent, cnctl one cn agent. Every call carries the current
 # stage's trace id.
 #
-# The §8 default 10 s deadline suits the read-only RPCs, but one converge pass
+# The drivers' 10 s default suits the read-only RPCs, but one converge pass
 # runs dozens of OS commands, each with its own soft/hard budget: a cn primary
 # converge connects four legs, creates two md arrays, a pool, thin volumes, a
 # raid0 and the nvmet objects. Syncups therefore get a much larger budget; a
@@ -441,10 +460,12 @@ cnctl() {
 		--trace-id "$TRACE" "${extra[@]}" "$@"
 }
 
-# bump_dn_rev/bump_cn_rev advance a node's monotonic revision counter (§9).
+# bump_dn_rev/bump_cn_rev advance a node's monotonic revision counter
+# (cnagent_integtest.md, Conventions, Revisions).
 # They must run in the parent shell — never inside a command substitution or a
 # background job, both of which would increment a copy. On a CN one counter is
-# shared by SyncupCn and SyncupCntlr (the single CnRev of §5.5), so bump_cn_sync
+# shared by SyncupCn and SyncupCntlr (the single CnRev of architecture.md,
+# Revision keys and the sync fan-out), so bump_cn_sync
 # additionally records the revision SyncupCn stored: that, not the counter, is
 # what CheckCn echoes back.
 bump_dn_rev() { DNREV[$1]=$((DNREV[$1] + 1)); }
@@ -455,17 +476,19 @@ bump_cn_sync() {
 }
 
 # ---------------------------------------------------------------------------
-# Derived names (§5) — the bash mirror of common/name_fmt.go
+# Derived names (architecture.md, Naming) — the bash mirror of
+# common/name_fmt.go
 # ---------------------------------------------------------------------------
 
 hex16() { printf '%016x' "$(($1))"; }
 
 # d16 is hex16's twin for protojson, which renders 64-bit fields as decimal
-# strings (§8).
+# strings (cnagent_integtest.md, The driver: `cnagentctl`).
 d16() { printf '%u' "$(($1))"; }
 
 # cn_dm_name mirrors every cn dm formatter: dnv-{cluster}-{cn}-{kind}-{ids…}
-# with the §4.2 kind fields — every cn kind is the role letter `c` in front of
+# with the kind fields of architecture.md, dm device names — every cn kind is
+# the role letter `c` in front of
 # the old digit: c0 pool-meta, c1 pool-data, c2 pool-final, c3 thin, c4 raid0,
 # c5 error, c6 ns-dev, c7 clone-final, c8 xfer-final, c9 leg, ca group,
 # cb clone-meta.
@@ -499,11 +522,12 @@ clone_meta_dm() { # cnidx sp clone
 }
 
 # host_dev is the host-side multipath node of a namespace. The ns uuids are
-# fixed inputs of §5, so no lookup is needed.
+# fixed inputs, so no lookup is needed.
 host_dev() { printf '/dev/disk/by-id/nvme-uuid.%s' "$1"; }
 
 # ---------------------------------------------------------------------------
-# Host emulation (§3): the host role is plain nvme-tcp with one fixed hostnqn,
+# Host emulation (cnagent_integtest.md, Topology): the host role is plain
+# nvme-tcp with one fixed hostnqn,
 # cross-connected from whichever VM the case names.
 # ---------------------------------------------------------------------------
 
@@ -550,8 +574,10 @@ leg_state() { # cnvm sp leg cn dnidx
 }
 
 # leg_wait_ana waits for one leg's path on one CN to reach an ANA state. In a
-# failover it is the §9 ordering barrier: a promote that converges before its
-# legs have optimized paths finds them unavailable (§11.1.1) and fails the md
+# failover it is the ordering barrier of cnagent_integtest.md, Conventions,
+# Sides first: a promote that converges before its legs have optimized paths
+# finds them unavailable (architecture.md,
+# "Make sure all groups are available") and fails the md
 # assembly of its own converge. Since 2026-09-26 the agent's CN10 retry
 # finishes that assembly once they are optimized (cnagent.md CN12), but case
 # A's promote stage asserts its md rows OK and both --assembles under the
@@ -594,8 +620,8 @@ leg_wait_live() { # cnvm sp leg cn dnidx secs
 }
 
 # ---------------------------------------------------------------------------
-# Data IO on the host VM (§9): writes fsync, reads follow a cache drop, never
-# iflag=/oflag= (§4).
+# Data IO on the host VM: writes fsync, reads follow a cache drop, never
+# iflag=/oflag= (dnagent_integtest.md, Assumptions and preflight checks).
 # ---------------------------------------------------------------------------
 
 drop_caches() { sshv "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"; }
@@ -615,18 +641,20 @@ make_pattern() { # vm path countMiB
 }
 
 # ---------------------------------------------------------------------------
-# The §8 --req request files
+# The --req request files (cnagent_integtest.md, The driver: `cnagentctl`)
 # ---------------------------------------------------------------------------
 #
 # SyncupCntlrRequest is far too deep for flags, so every converge is a
 # protojson file under $WORK **on the driver** (cnagentctl runs here, not on
 # the VMs). A case writes the file once with req_none/req_raid1 and from then
-# on edits only the fields that change (§8) with req_set: revision, sp_level,
+# on edits only the fields that change with req_set (cnagent_integtest.md,
+# The driver: `cnagentctl`): revision, sp_level,
 # cntlr.primary, ns_list[].suspended, and the clone and xfer lists.
 #
 # protojson wants original snake_case names, 64-bit integers as decimal strings
 # and enum value names; the id_to_slice key is sprintf("%016x", slice_id) per
-# §9.3 and the nqn_to_subsystem key is the literal NQN.
+# architecture.md, `service ControllerNodeAgent`, and the nqn_to_subsystem
+# key is the literal NQN.
 
 req_tr() { # traddr
 	printf '{"tr_type": "tcp", "adr_fam": "ipv4", "tr_addr": "%s", "tr_svc_id": "%s"}' \
@@ -639,10 +667,12 @@ req_cntlr() { # cnidx cntlid_slot primary
 }
 
 # req_side renders one Side. provisioned is always true here: dn_side has
-# already run the two-phase §9.4 provisioning before any CN sees the side, so
+# already run the two-phase provisioning of architecture.md,
+# Side provisioning protocol, before any CN sees the side, so
 # the desired state the sp-worker would publish at this point already carries
 # its flip. Without the flag every leg would be provisioning-deferred and the
-# cases would build the error-backed shape of cnagent.md §7 item 8 — each td's
+# cases would build the error-backed shape of cnagent.md CN9, CN16 rule 0 and
+# CN17 — each td's
 # dm-error, the ns-devs on it and any transfer's `CnXferFinalName` as an error
 # table — instead of their real stacks.
 req_side() { # sideid dnidx
@@ -665,7 +695,7 @@ req_grp() { # grpid ext_cnt meta_blocks data_blocks leg_json…
 }
 
 # created defaults to false — the state a td is in between CreateThinDevice
-# and the sp-worker's materialization flip (ThinDeviceCreated.md U3). A
+# and the sp-worker's materialization flip (dnv-worker.md RW19). A
 # request carrying `created: true` is the one a real worker publishes after
 # the flip, and the agent then sends no pool message for that td at all.
 req_td() { # tdid dev_id ori_id [created]
@@ -674,7 +704,7 @@ req_td() { # tdid dev_id ori_id [created]
 }
 
 # req_ns renders one Namespace. nguid is always the uuid with the dashes
-# removed (§5).
+# removed.
 req_ns() { # nsid ns_idx tdid uuid suspended
 	printf '{"ns_id": "%s", "ns_idx": %s, "td_id": "%s", "dev_uuid": "%s", "dev_nguid": "%s", "suspended": %s}' \
 		"$(d16 "$1")" "$2" "$(d16 "$3")" "$4" "${4//-/}" "$5"
@@ -694,7 +724,7 @@ req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
 		"$(d16 "$1")" "$2" "$3" "$4" "$5"
 }
 
-# The Clone record carries no chunk count (architecture.md §8.9): how many
+# The Clone record carries no chunk count (architecture.md, Clones): how many
 # chunks a clone holds is how many CloneBitmap keys it has. cnagentctl parses
 # this request with strict protojson, so a leftover "bm_cnt" key would fail
 # the call outright rather than being ignored.
@@ -709,7 +739,8 @@ join_json() {
 	printf '%s' "$*"
 }
 
-# req_none writes the §8 request verbatim: the S-shaped RedundNone SP, one
+# req_none writes a whole request file (cnagent_integtest.md,
+# The driver: `cnagentctl`): the S-shaped RedundNone SP, one
 # primary cntlr, one td, one subsystem with one namespace.
 req_none() { # file cnidx dnidx sp cntlr slot ss_nqn uuid suspended
 	local file=$1 cn=$2 dn=$3 sp=$4 cntlr=$5 slot=$6 nqn=$7 uuid=$8 susp=$9
@@ -746,7 +777,7 @@ EOF
 
 # req_raid1 writes the A-shaped request: md-raid1 meta and data groups whose
 # legs live one per DN, and one cntlr that is either the primary or a standby.
-# allowed_hosts is the emulated host role's NQN (§5 case A).
+# allowed_hosts is the emulated host role's NQN (cnagent.md CN16).
 req_raid1() { # file cnidx sp cntlr slot primary ss_nqn uuid
 	local file=$1 cn=$2 sp=$3 cntlr=$4 slot=$5 primary=$6 nqn=$7 uuid=$8
 	cat >"$file" <<EOF
@@ -784,7 +815,8 @@ EOF
 }
 
 # req_set edits one request file in place. Only the fields a step changes are
-# ever touched (§8), which is why the edit is a jq assignment and not a
+# ever touched (cnagent_integtest.md, The driver: `cnagentctl`), which is why
+# the edit is a jq assignment and not a
 # regenerated file.
 req_set() { # file jq-filter
 	local tmp="$1.tmp"
@@ -793,7 +825,8 @@ req_set() { # file jq-filter
 }
 
 # cn_syncup_cntlr posts one request file at the CN's current revision. The
-# caller bumps the counter first, in the parent shell (§9), so this is safe
+# caller bumps the counter first, in the parent shell (cnagent_integtest.md,
+# Conventions, Revisions), so this is safe
 # inside a command substitution. Extra arguments go to cnagentctl.
 cn_syncup_cntlr() { # cnidx file [cnagentctl args...]
 	req_set "$2" ".revision = \"${CNREV[$1]}\""
@@ -976,7 +1009,8 @@ read_probe() {
 }
 
 # write_probe <dev> <seekMiB> — prints ok or eio. The [D11] readonly table
-# errors writes; conv=fsync is what turns that into a non-zero dd (§4).
+# errors writes; conv=fsync is what turns that into a non-zero dd
+# (cnagent_integtest.md, Lab facts).
 write_probe() {
 	if dd if=/dev/zero of="$1" bs=1M count=1 seek="$2" conv=fsync \
 		status=none 2>/dev/null; then
@@ -1028,9 +1062,11 @@ dm_backing() { dm_table "$1" | awk '{print $4}'; }
 # after a cache drop so the read has to reach the target. 0 means the device
 # served it, **124 means the read BLOCKED** — the uninterruptible D state a
 # dm-suspended device puts any opener into — and anything else is an IO error.
-# A parked ns-dev (§11.6) must give an IO error, promptly; that difference is
+# A parked ns-dev (architecture.md, Namespace suspend semantics) must give an
+# IO error, promptly; that difference is
 # the whole reason the park replaced the suspension. No iflag=/oflag= here:
-# the VMs' uutils dd mis-handles direct IO (§4).
+# the VMs' uutils dd mis-handles direct IO
+# (dnagent_integtest.md, Assumptions and preflight checks).
 #
 # `timeout 5 dd` is NOT enough and must not be "simplified" back to it
 # (measured on the lab kernel): against a dm-suspended device `timeout` fires,
@@ -1086,7 +1122,8 @@ port_linked() {
 mdstat() { cat /proc/mdstat 2>/dev/null || true; }
 
 # ctrl_of <nqn> <traddr> — the controller device backing one path, so a dead
-# path can be disconnected by device instead of by NQN (Appendix A).
+# path can be disconnected by device instead of by NQN (cnagent_integtest.md,
+# Cases, clone_xfer).
 ctrl_of() { path_field "$1" "$2" Name; }
 
 # --- fault injection (case T; the partition also case A's degrade) -----------
@@ -1197,7 +1234,7 @@ iptables_bin() {
 }
 
 # have_iptables reports the partition stages' one lab prerequisite (case T's
-# S4 on VM2, case A's degrade on VM1). Each stage asks before it partitions
+# S4 on vm2, case A's degrade on vm1). Each stage asks before it partitions
 # anything, so a VM without the binary fails with a sentence instead of with
 # a path that simply never goes down.
 have_iptables() {
@@ -1252,7 +1289,8 @@ partition_rules() {
 }
 
 # writer_loop <dev> — the body start_writer detaches. It writes through the
-# suite's own write_probe, which is where the §4 dd rule lives: no iflag=, no
+# suite's own write_probe, which is where the dd rule (dnagent_integtest.md,
+# Assumptions and preflight checks) lives: no iflag=, no
 # oflag=, and a refused write reported as a word instead of as an exit status.
 # Every write here is EXPECTED to fail, or to hang queued at the host's
 # multipath head, once the teardown starts, so nothing in the loop may read a
@@ -1284,8 +1322,9 @@ writer_loop() {
 # start_writer <dev> — writer_loop, detached, with both descriptors redirected
 # for pin_dev's reason: the caller reads this through `$(…)` over ssh. The loop
 # re-enters this same file by name, which is what keeps the writing itself in
-# write_probe rather than in a second copy of a dd command line that the §4
-# rule would then have to be remembered for twice.
+# write_probe rather than in a second copy of a dd command line that the dd
+# rule (dnagent_integtest.md, Assumptions and preflight checks) would then
+# have to be remembered for twice.
 start_writer() {
 	local i
 	rm -f "$WRITER_PID"
@@ -1542,10 +1581,13 @@ cn_requests_since() {
 	echo $((n))
 }
 
-# mutations [trace] [log] — every mutating operation in a cn agent log (§9,
-# case D step 5). An empty trace means the whole log; naming one scopes the
+# mutations [trace] [log] — every mutating operation in a cn agent log
+# (cnagent_integtest.md, Conventions, Mutation-free, and Cases, restart). An
+# empty trace means the whole log; naming one scopes the
 # answer to a single converge, which is what lets a stage prove that *its own*
-# syncup mutated nothing but dm devices (`ThinDeviceCreated.md` U5-T1). The CN11 leg health probers do not use the OsClient (osclient.md §4.5.1):
+# syncup mutated nothing but dm devices (`cnagent_integtest.md`, Cases,
+# thinbm). The CN11 leg health probers do not use the OsClient (osclient.md,
+# Exported raw helpers and the probe-IO carve-out):
 # they call the raw block-IO syscalls directly and log their own records as
 # `probe write block` / `probe read block direct`, which are not in this grep
 # list by construction. So no path-based exemption is needed any more, and
@@ -1553,7 +1595,8 @@ cn_requests_since() {
 # (common/osclient.go:335) — is a mutation without qualification. There is no
 # read-side msg left to grep for: the probe-IO carve-out deleted `OsClient.ReadBlockDirect` and
 # its log record outright, and the package-level `ReadBlockDirectAt` that
-# replaced it logs nothing at all (osclient.md §4.5.1, §8 acceptance).
+# replaced it logs nothing at all
+# (osclient.md, Exported raw helpers and the probe-IO carve-out).
 # Probe commands (lsblk, dmsetup info|table|status|ls, ls, findmnt, stat,
 # losetup --associated, mdadm --examine, nvme list-subsys) are expected and
 # deliberately not in the list; the cn agent no longer runs `mdadm --detail`
@@ -1624,7 +1667,8 @@ residue() {
 }
 
 # cn_residue <cn16> — every dm device of one CN plus the test's host-facing
-# subsystems (the §5 ss NQNs carry no id, so they are matched by prefix). A
+# subsystems (their NQNs carry no id, so they are matched by prefix;
+# cnagent_integtest.md, Cases, smoke). A
 # `dmsetup ls` or an `ls` of the nvmet subsystems that fails prints one line
 # saying so, for residue's reason.
 # agent_dm_names keeps printing nothing on a failed `dmsetup ls`: cleanup
@@ -1648,7 +1692,8 @@ cn_residue() {
 # --- setup / teardown --------------------------------------------------------
 
 # install_udev_rule masks the stock incremental md assembly for dnv arrays
-# (§7 step 2, Appendix A): the stock rule honors SYSTEMD_READY, so setting it
+# (cnagent_integtest.md, Lab facts): the stock rule honors SYSTEMD_READY, so
+# setting it
 # to 0 leaves the agent as the only assembler. Removed again by cleanup — the
 # VMs are shared lab machines.
 install_udev_rule() {
@@ -1682,7 +1727,8 @@ agent_dm_names() {
 }
 
 # suspended_agent_dms — the agent dm devices currently held suspended. The cn
-# agent leaves none across a converge pass (§11.6: an effectively suspended
+# agent leaves none across a converge pass (architecture.md,
+# Namespace suspend semantics: an effectively suspended
 # namespace is parked, live), so on a CN VM outside a DN cutover window this
 # prints nothing; `resume_suspended` uses the same `attr` column to sweep.
 suspended_agent_dms() {
@@ -1730,7 +1776,8 @@ clone_meta_wrappers() { dm_kind_names cb "${1:-}"; }
 # clone_bm_files <cluster16> <cn16> <sp16> <clone16> — the basenames of one
 # clone's bitmap chunk files in the cn store, sorted. A clone chunk is
 # addressed by the PAIR (src_slice_idx, bm_idx), so LocalCloneBmPath ends in
-# TWO %02x segments (cnagent.md §2.1) where the single-index format had one.
+# TWO %02x segments (cnagent.md, Additions to `common`) where the single-index
+# format had one.
 # The name is only an address — the reconcile decodes the pair from the
 # persisted PushCloneBitmapRequest inside the file — which is exactly why it
 # needs asserting here: a wrong name would still reload correctly, so no reply
@@ -1753,7 +1800,8 @@ clone_bm_files() {
 # SuspendSeconds), and an interrupted reload can leave anything so. On CN VMs
 # it is debris cleanup only since 2026-09-16: the cn agent no longer suspends
 # a transfer origin — an effectively suspended namespace is *parked*, live on
-# the td's dm-error (CN16, §11.6) — so the only suspended CN device a run can
+# the td's dm-error (CN16; architecture.md, Namespace suspend semantics) — so
+# the only suspended CN device a run can
 # meet is one an older build or a killed agent left behind. Anything that
 # reads a suspended device (`dmsetup remove`, disabling the nvmet namespace
 # above it, and above all a block-device scan) blocks in uninterruptible D
@@ -1792,7 +1840,7 @@ dm_remove_kind() { # <kind> [node16]
 
 # disconnect_prefix <nqn prefix> — every connection whose subsystem NQN starts
 # with the prefix. Whole-NQN disconnects are only ever used here, where every
-# path of the NQN is being retired (Appendix A).
+# path of the NQN is being retired (cnagent_integtest.md, Cases, clone_xfer).
 disconnect_prefix() {
 	local nqn
 	for nqn in $(subsys_json | jq -r --arg p "$1" '
@@ -1942,9 +1990,11 @@ loop_devs() {
 	} | sort -u
 }
 
-# wipe_cn simulates the §13 stage 6 CN reboot: every kernel object of one CN
+# wipe_cn simulates the CN reboot of clone_xfer's stage 6 (cnagent_integtest.md,
+# Cases, clone_xfer): every kernel object of one CN
 # goes, including the volatile clone-metadata arena, while the dn objects, the
-# shared port and $WORK/cn-store stay. The order is the §16 order, and the
+# shared port and $WORK/cn-store stay. The order is that of
+# cnagent_integtest.md, Teardown and cleanup, and the
 # dm-clone is removed while its :4: source connection is still up — a clone
 # flushes through its source on removal and blocks without it.
 #
@@ -1970,7 +2020,8 @@ wipe_cn() { # <cn16>
 	echo wiped
 }
 
-# cleanup_phase1 and cleanup_phase2 implement §16. The split is what makes the
+# cleanup_phase1 and cleanup_phase2 implement cnagent_integtest.md,
+# Teardown and cleanup. The split is what makes the
 # cross-VM ordering safe: a case C clone on one VM holds an nvme connection to
 # a transfer on the other, so every clone is removed (phase 1) before any
 # transfer subsystem is (phase 2).
@@ -2026,7 +2077,8 @@ cleanup_phase2() { # <cn16> <dn16>
 	tmpfs_teardown
 	resume_suspended
 
-	# The dn suite's §16 sequence, now that nothing connects to the sides.
+	# The dn suite's sequence (dnagent_integtest.md, Teardown and cleanup), now
+	# that nothing connects to the sides.
 	drop_subsys_glob "$NQN_PREFIX:2:*"
 	dm_remove_kind d1 "$dn16"
 	dm_remove_kind d3 "$dn16"
@@ -2056,7 +2108,7 @@ cleanup_phase2() { # <cn16> <dn16>
 	# Unformat each dn loop device: zeroing the 4 KiB header is enough,
 	# because the volume-table slots are inert without it ([D13],
 	# dnagent.md DN5: magic absent ⇒ the disk is blank). No oflag=, per
-	# the §4 dd rule.
+	# the dd rule (dnagent_integtest.md, Assumptions and preflight checks).
 	local dev
 	for dev in $(loop_devs); do
 		dd if=/dev/zero of="$dev" bs=4096 count=1 conv=fsync >/dev/null 2>&1
@@ -2070,7 +2122,8 @@ cleanup_phase2() { # <cn16> <dn16>
 	return 0
 }
 
-# lab_wipe — the ONE-TIME lab wipe of the teardown-by-sweep plan §3.2. It is
+# lab_wipe — the ONE-TIME lab wipe of cnagent_integtest.md,
+# Teardown and cleanup. It is
 # NOT part of a run: only the driver's --wipe reaches it.
 #
 # Why it exists at all: every teardown verb above removes dm devices BY KIND,
@@ -2085,7 +2138,8 @@ cleanup_phase2() { # <cn16> <dn16>
 # destroy a CONCURRENT run's objects, and `nvme disconnect-all` takes every
 # fabrics controller on the node, dnv's or not. Run it once, alone.
 #
-# The order is §16's, generalized away from the kind list: arrays first (an
+# The order is that of cnagent_integtest.md, Teardown and cleanup, generalized
+# away from the kind list: arrays first (an
 # array holds its member wrappers open and is the one holder `dmsetup remove
 # --force` cannot argue with), then the controllers, then the nvmet objects
 # that pin dm devices from above, then the dm devices themselves — enumerated
@@ -2120,7 +2174,8 @@ lab_wipe() {
 
 		# Every md array on this node that is ours, by two independent routes
 		# because each is blind to a case the other sees. THE MEMBER ROUTE reads
-		# the member's dm name straight out of sysfs (plan Appendix C), needs no
+		# the member's dm name straight out of sysfs (cnagent_integtest.md,
+		# Teardown and cleanup), needs no
 		# superblock read, and is the only one that works for the `inactive`
 		# one-member assemblies udev leaves on a DN — udev has no MD_NAME for
 		# those. THE NAME ROUTE is the only one left once the members themselves
@@ -2289,7 +2344,8 @@ ship_helper() {
 	rm -f "$tmp"
 }
 
-# wipe_all runs the one-time lab wipe (plan §3.2) on both VMs, concurrently
+# wipe_all runs the one-time lab wipe (cnagent_integtest.md,
+# Teardown and cleanup) on both VMs, concurrently
 # for cleanup_all's reason: a subsystem on one VM backs a connection on the
 # other, so the shorter the window the better. `--wipe` is its only caller and
 # it always runs the ordinary start-of-run cleanup afterwards, which takes
@@ -2321,14 +2377,15 @@ wipe_all() {
 			"something outside dnv is holding them"
 }
 
-# cleanup_all runs §16 as two cross-VM phases: within a phase the two VMs run
+# cleanup_all runs cnagent_integtest.md, Teardown and cleanup, as two cross-VM
+# phases: within a phase the two VMs run
 # concurrently, but no VM starts phase 2 until both finished phase 1, because
 # a clone on one VM flushes through a transfer export on the other.
 cleanup_all() {
 	local idx pid pids=()
 	for idx in 1 2; do
 		# The other VM's ip is what a partition rule names (case T's S4 on
-		# VM2, case A's degrade on VM1), and only this VM can remove it, so
+		# vm2, case A's degrade on vm1), and only this VM can remove it, so
 		# each VM is told which address to clear.
 		helper_ok "$idx" \
 			"cleanup_phase1 $(hex16 "${CNID[$idx]}") ${IP[$((3 - idx))]}" &
@@ -2364,13 +2421,14 @@ diagnostics() {
 	fi
 }
 
-# diag_cntlr registers one cntlr for the §17 dump. Cases reset the list.
+# diag_cntlr registers one cntlr for the failure dump (cnagent_integtest.md,
+# Teardown and cleanup). Cases reset the list.
 diag_cntlr() { # cnidx sp cntlr
 	DIAG_CNTLRS+=("$1:$2:$3")
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (§4)
+# Preflight (cnagent_integtest.md, Assumptions and preflight checks)
 # ---------------------------------------------------------------------------
 
 need_local() {
@@ -2410,7 +2468,8 @@ preflight_driver() {
 }
 
 # preflight_vms runs after the start-of-run cleanup: the port check can only
-# be meaningful once a crashed prior run's agents are gone (§4).
+# be meaningful once a crashed prior run's agents are gone
+# (cnagent_integtest.md, Assumptions and preflight checks).
 preflight_vms() {
 	STAGE="preflight (vms)"
 	log "=== preflight: vms"
@@ -2420,7 +2479,8 @@ preflight_vms() {
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
 		# No LVM binaries: [D14] removed LVM from the CN entirely. thin_dump stays
-		# — it is the §12 thin-metadata oracle, not an LVM command.
+		# — it is the thin-metadata oracle of cnagent_integtest.md, Cases, thinbm,
+		# not an LVM command.
 		# udevadm: install_udev_rule's and cleanup_phase2's `udevadm control
 		# --reload`, and md_stop_all's MD_NAME read — the first of its two
 		# name sources, and the only one that answers for an array whose
@@ -2449,8 +2509,9 @@ preflight_vms() {
 		assert_eq "$got" /proc/mdstat "md support on vm$idx"
 		got=$(sshv "$idx" "cat /sys/module/nvme_core/parameters/multipath")
 		assert_eq "$got" "Y" "nvme_core.multipath on vm$idx"
-		# The §7 udev mask works by setting SYSTEMD_READY, which only helps
-		# if the stock incremental-assembly rule honors it (Appendix A).
+		# The udev mask works by setting SYSTEMD_READY, which only helps
+		# if the stock incremental-assembly rule honors it (cnagent_integtest.md,
+		# Lab facts).
 		got=$(sshv "$idx" "for d in /usr/lib/udev/rules.d /lib/udev/rules.d; do f=\$d/64-md-raid-assembly.rules; if [ -r \$f ] && grep -q SYSTEMD_READY \$f; then echo FOUND; break; fi; done; true")
 		assert_eq "$got" FOUND \
 			"vm$idx: 64-md-raid-assembly.rules honoring SYSTEMD_READY"
@@ -2470,7 +2531,7 @@ preflight_vms() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup (§7)
+# Setup (cnagent_integtest.md, Cases, the setup paragraph)
 # ---------------------------------------------------------------------------
 
 start_dn_agent() { # <idx>
@@ -2484,7 +2545,8 @@ start_dn_agent() { # <idx>
 
 # The cn agent takes the same --tr-* flags as the dn one: both converge the
 # same ports/1 with the same attributes, and EnsurePort is probe-first, so
-# whichever runs first creates it and the other issues zero writes (§3).
+# whichever runs first creates it and the other issues zero writes
+# (cnagent_integtest.md, Topology).
 start_cn_agent() { # <idx>
 	local idx=$1
 	sshv "$idx" "setsid nohup $WORK/dnv-agent cn \
@@ -2506,9 +2568,11 @@ setup() {
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
-		# The §4 fast-Write-Zeroes preflight item, deferred to here because
+		# The fast-Write-Zeroes preflight item (cnagent_integtest.md,
+		# Assumptions and preflight checks), deferred to here because
 		# the device only exists now (preflight_vms runs before setup). The
-		# §9.4 zeroing assumes fast Write Zeroes; a loop device maps
+		# zeroing of architecture.md, Side provisioning protocol, assumes fast
+		# Write Zeroes; a loop device maps
 		# REQ_OP_WRITE_ZEROES onto fallocate, so a 0 here means the kernel
 		# would write zero pages at bulk speed and the dn agent's DN5
 		# fail-fast would refuse the disk outright. Read from /sys/class/block,
@@ -2551,7 +2615,7 @@ setup() {
 # Shared case helpers
 # ---------------------------------------------------------------------------
 
-# dn_pointers introduces a DN's full side list (§9 ordering: a side pointer
+# dn_pointers introduces a DN's full side list (dnagent.md DN8: a side pointer
 # exists before its first SyncupSide).
 dn_pointers() { # dnidx sp:leg:side…
 	local idx=$1 spec args=() out field
@@ -2565,12 +2629,14 @@ dn_pointers() { # dnidx sp:leg:side…
 	done
 }
 
-# SIDE_PROVISIONED remembers which sides have already been through the §9.4
-# two-phase provisioning, keyed dnidx:sp:leg:side. The memo is load-bearing,
+# SIDE_PROVISIONED remembers which sides have already been through the
+# two-phase provisioning (architecture.md, Side provisioning protocol), keyed
+# dnidx:sp:leg:side. The memo is load-bearing,
 # not tidiness: cases A and D call dn_side again at the failover flip to move
 # the primary, and re-converging an already-serving side with
 # provisioned = false is a perfectly legal request that the converge matrix
-# answers with "no exports" (§9.4 matrix row 3) — i.e. it would retract the
+# answers with "no exports" (architecture.md, Side provisioning protocol,
+# Converge matrix row 3) — i.e. it would retract the
 # live export stacks in the middle of a failover. Phase 1 therefore runs
 # exactly once per side. Each case resets the map.
 declare -A SIDE_PROVISIONED=()
@@ -2578,7 +2644,8 @@ declare -A SIDE_PROVISIONED=()
 # dn_side converges one side: the DN-side backing every CN leg connects to.
 #
 # The first converge of a side is two-phase, this script playing the sp-worker's
-# flip rule (§10.3): sync it unprovisioned — which allocates the
+# flip rule (architecture.md, sp role, Provisioning gate): sync it
+# unprovisioned — which allocates the
 # extent runs, builds DnSideName and starts the background zeroing goroutine,
 # and exports nothing — wait for every logical extent to be zeroed, then re-sync
 # it provisioned at a fresh revision. Every later converge of the same side goes
@@ -2596,7 +2663,8 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 			"dn$idx sp $2 leg $3 phase 1"
 		# The whole point of the gate: nothing above the side device exists
 		# before the bytes are zeroed — all three per-CN maps, for the primary
-		# *and* the standby (cnagent_integtest.md §9). Cases A and D give the
+		# *and* the standby (cnagent_integtest.md, Conventions, Sides first).
+		# Cases A and D give the
 		# sides of the failover pair a standby, so checking one map of one CN
 		# would leave one of the two per-CN export stacks unexamined exactly
 		# while it is supposed to be gated.
@@ -2607,8 +2675,10 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 					"dn$idx sp $2 leg $3 must not export at provisioned=false: $field[$cn]"
 			done
 		done
-		# The §9 provisioning window, observed and never asserted (the dn
-		# suite's §9 twin): phase 1 only *starts* the background zeroing
+		# The provisioning window, observed and never asserted
+		# (cnagent_integtest.md, Cases, What a pass means; the dn suite's twin is
+		# dnagent_integtest.md, Conventions, "Observed, never asserted"): phase 1
+		# only *starts* the background zeroing
 		# goroutine, so a sample taken here normally still catches the side
 		# mid-flight, which is what makes the gate assertions above a reading
 		# of a genuinely closed gate rather than of an already-finished one.
@@ -2676,7 +2746,8 @@ dn_drop() { # dnidx
 #
 # Unlike dn_drop it does NOT bump the revision. The revision is the desired
 # state's, not the attempt's, and an equal-revision re-send is a legal full
-# re-apply (§9); bumping per attempt would mean the suite could no longer tell
+# re-apply (cnagent_integtest.md, Conventions, Revisions); bumping per attempt
+# would mean the suite could no longer tell
 # a sweep that re-ran from one that only ran because something looked new.
 #
 # Only ReplyCodeLeftover (4) is tolerated in between. Every other non-zero code
@@ -2737,7 +2808,8 @@ cn_drop() { # cnidx
 # drops), that is the revision the shape's own SyncupCn used, so the first call
 # is an equal-revision re-apply whose body happens to have lost the cntlr
 # pointer — legal, and precisely the shape the sp-worker produces when it
-# deletes a cntlr record without waiting for anybody (plan §1.1). Called from
+# deletes a cntlr record without waiting for anybody (cnagent_integtest.md,
+# Cases, teardown). Called from
 # cn_drop, CNSYNC has just been bumped: the first call is the new revision and
 # the rest are the worker's re-sends of it.
 cn_drop_until_clean() { # cnidx secs
@@ -2783,7 +2855,8 @@ wait_legs_probed() { # cnidx sp cntlr secs label
 	done
 }
 
-# converge_check runs the §9 check-cn/check-cntlr round pair and asserts that
+# converge_check runs the check-cn/check-cntlr round pair
+# (cnagent_integtest.md, Conventions, Steady state) and asserts that
 # each reply echoes the revision the agent actually stored. A primary's steady
 # state includes a completed probe round on every leg, so the cntlr round waits
 # out CN11's PENDING window first (wait_legs_probed) — a stage that built or
@@ -2803,7 +2876,8 @@ converge_check() { # cnidx sp cntlr cntlrrev
 }
 
 # bitmap_hex runs one of the bitmap RPCs and returns just the hex line; the
-# second line of the reply is the bit count (§8). Taking it here rather than
+# second line of the reply is the bit count
+# (cnagent_integtest.md, The driver: `cnagentctl`). Taking it here rather than
 # through `| head -1` keeps the ctl from ever writing into a closed pipe.
 bitmap_hex() { # cnidx subcommand args…
 	local out
@@ -2821,7 +2895,8 @@ assert_no_residue() { # sp
 
 # event_line prints the 1-based position of the first event matching a regex,
 # or the empty string. The event stream of one trace id is the ordered record
-# of one converge, which is how the CN9/CN18/§11.5 orderings are asserted.
+# of one converge, which is how the orderings of CN9, CN18 and
+# architecture.md, Clone crash recovery, are asserted.
 event_line() { # stream regex
 	printf '%s\n' "$1" | grep -nE -- "$2" | head -1 | cut -d: -f1 || true
 }
@@ -2849,8 +2924,8 @@ assert_before() { # stream regex_first regex_second label
 
 # assert_absent is assert_before's negative twin: the event must not occur
 # anywhere in the stream. It is how a stage proves an omission — a converge
-# that sends *no* pool message (ThinDeviceCreated.md U5-S3) leaves nothing
-# behind for an ordering assertion to anchor on.
+# that sends *no* pool message (cnagent_integtest.md, Cases, thinbm) leaves
+# nothing behind for an ordering assertion to anchor on.
 assert_absent() { # stream regex label
 	local at
 	at=$(event_line "$1" "$2")
@@ -2858,7 +2933,7 @@ assert_absent() { # stream regex label
 }
 
 # ---------------------------------------------------------------------------
-# Case S — smoke (§10)
+# Case S — smoke (cnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 case_smoke() {
@@ -2931,7 +3006,8 @@ case_smoke() {
 	out=$(cnctl "$cn" get-cntlr-info --sp "$sp" --cntlr "$cntlr")
 	got=$(jq_of "$out" \
 		".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$S_SLICE")\"].details // \"\"")
-	# The §10.4 auto-grow parses metadata and data used/total out of this raw
+	# The thin-pool auto-grow (architecture.md, Automatic reactions) parses
+	# metadata and data used/total out of this raw
 	# `dmsetup status` line.
 	printf '%s\n' "$got" |
 		grep -qE 'thin-pool .*[0-9]+/[0-9]+[[:space:]]+[0-9]+/[0-9]+' ||
@@ -2953,7 +3029,8 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case A — redund (§11): raid1, failover, dead leg, readonly, late flip
+# Case A — redund (cnagent_integtest.md, Cases): raid1, failover, dead leg,
+# readonly, late flip
 # ---------------------------------------------------------------------------
 
 case_redund() {
@@ -3009,7 +3086,8 @@ case_redund() {
 
 	stage assert "primary md state, standby shape, host isolation"
 	# CN12 case 1: neither member carries an md superblock — which after the
-	# §9.4 whole-side zeroing is exactly the freshly-provisioned case
+	# whole-side zeroing (architecture.md, Side provisioning protocol) is
+	# exactly the freshly-provisioned case
 	# ([D15] replaced the old trim) — so the arrays are created,
 	# never assembled.
 	seq=$(helper 1 "cn_events $cntrace")
@@ -3088,7 +3166,8 @@ case_redund() {
 	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[2]}" "${CNID[1]}"
 	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[2]}" "${CNID[1]}"
 	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[2]}" "${CNID[1]}"
-	# The promote may only run once the legs are optimized on CN2 (§9).
+	# The promote may only run once the legs are optimized on CN2
+	# (cnagent_integtest.md, Conventions, Sides first).
 	for i in 1 2; do
 		leg_wait_ana 2 "$sp" "${A_MLEG[$i]}" "${CNID[2]}" "$i" optimized 20
 		leg_wait_ana 2 "$sp" "${A_DLEG[$i]}" "${CNID[2]}" "$i" optimized 20
@@ -3128,8 +3207,8 @@ case_redund() {
 	# path's failfast expires — ~13 s after the side died, past the 3 s soft
 	# timeout. The kill turned the md row ERROR, an md row counts toward
 	# cntlr health, and that failed the primary over: the first failover of
-	# the ping-pong found 2026-09-24. The partition (case T's, on VM1's
-	# INPUT from VM2 to the nvme-tcp port) takes CN2's two legs into DN1
+	# the ping-pong found 2026-09-24. The partition (case T's, on vm1's
+	# INPUT from vm2 to the nvme-tcp port) takes CN2's two legs into DN1
 	# away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
 	# disk 0 of their arrays, the member the old `--detail` loaded its
 	# superblock from. It also cuts the emulated host's path to CN1, the
@@ -3228,7 +3307,7 @@ case_redund() {
 	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
 	# The leg rows clear on their probers' next completed round. The md
 	# member md failed stays failed — CN12 re-adds a leg only when the array
-	# lacks it (cnagent.md §7 known limits) — so the data array stays
+	# lacks it (cnagent.md, Known limits) — so the data array stays
 	# degraded, and OK, on CN2 through the readonly stage; the lateflip
 	# stage assembles the arrays anew on CN1.
 	deadline=$((SECONDS + 60))
@@ -3404,10 +3483,11 @@ case_redund() {
 }
 
 # ---------------------------------------------------------------------------
-# Case T — teardown (teardown-by-sweep plan §4.2)
+# Case T — teardown (cnagent_integtest.md, Cases, teardown)
 # ---------------------------------------------------------------------------
 #
-# The bug this case exists for (plan §1.1): `dnvctl sp delete` drains an sp by
+# The bug this case exists for (cnagent_integtest.md, Cases, teardown):
+# `dnvctl sp delete` drains an sp by
 # deleting the cntlr records and, 12 ms later, the slice records, and by design
 # never waits on an agent. So a CN is told to tear its stack down while the DN
 # sides under it are already vanishing. In that window `mdadm --detail` blocked
@@ -3418,7 +3498,8 @@ case_redund() {
 # discarded, the cntlr's state file and memory entry were deleted anyway and
 # the reply was OK. Nothing ever looked at those two wrappers again.
 #
-# What replaced it (plan §3.4/§3.6): removal is a SWEEP. Whatever the node
+# What replaced it (architecture.md, Teardown by sweep; cnagent.md CN21, CN30):
+# removal is a SWEEP. Whatever the node
 # actually holds, minus what the desired state wants, is removed top-down;
 # every removal is verified by a probe that cannot block on a dead remote; and
 # "something is left" is recomputed from scratch on every Syncup* and every
@@ -3439,7 +3520,8 @@ case_redund() {
 # a pin left behind by an earlier stage's failure could otherwise pass for its
 # own.
 #
-# The bound every stage's patience comes from (plan §3.9): legs are connected
+# The bound every stage's patience comes from (cnagent_integtest.md, Cases,
+# teardown; dnagent.md SH20): legs are connected
 # with fast_io_fail_tmo = 5 and ctrl_loss_tmo = -1, so from 5 s after a path
 # loss every IO queued at that multipath head fails at once, and a controller
 # stuck in `connecting` can always be disconnected. The bound is an absolute
@@ -3468,7 +3550,8 @@ T_UUID=(""
 	77777777-7777-4777-8777-777777777775)
 
 # teardown_shape builds the case's one shape. It is case_redund's `dn` and `cn`
-# stages (§11) with the failover half left off — the same builders in the same
+# stages (cnagent_integtest.md, Cases, redund) with the failover half left off
+# — the same builders in the same
 # order, not a second shape — because what five teardowns have to be compared
 # against is one stack, built identically every time.
 teardown_shape() { # sp nqn uuid req1 req2 hostvm
@@ -3519,12 +3602,13 @@ teardown_shape() { # sp nqn uuid req1 req2 hostvm
 # may be left on either VM in dm, nvmet or md — which covers the DN's side
 # devices and :2: exports as well as the CN's stack — neither CN may hold a dm
 # device or a host-facing subsystem of its own, the clone arena must be empty,
-# and both CNs must still serve their four §3.2 base-state resources. That last
+# and both CNs must still serve their four base-state resources
+# (architecture.md, Controller node, common). That last
 # one is not redundant: a teardown that took the port, the tmpfs or the loop
 # arena with it would satisfy every residue check above and still leave the CN
 # unable to build the next SP.
 #
-# get-cn-info is also the node-level verdict (plan §3.4.6), and cnagentctl
+# get-cn-info is also the node-level verdict (cnagent.md CN30), and cnagentctl
 # defaults to --expect-code 0, so each of these two calls additionally asserts
 # that the CN's own read-only sweep finds nothing — the same property from the
 # other side of the lock.
@@ -3546,8 +3630,9 @@ teardown_assert_clean() { # sp label
 # tear down while they are still vanishing, with nothing in between. The host
 # is disconnected first so that no host IO is in flight — that is what makes
 # the first command to touch a dead leg the array's own member read rather than
-# a flush, and it is why this stage is the plan's one-time mutation check
-# (§4.2): on the pre-fix binary it is expected to fail at its residue
+# a flush, and it is why this stage is the teardown-by-sweep plan's one-time
+# mutation check (cnagent_integtest.md, Cases, teardown): on the pre-fix binary
+# it is expected to fail at its residue
 # assertion, with the two kind-c9 wrappers of a group pinned by an array that
 # was never stopped.
 s1_sides_gone() {
@@ -3621,7 +3706,8 @@ s2_paths_long_dead() {
 	# the host-facing subsystem of the CN on the same VM, so the reconnect to a
 	# removed subsystem is refused with DNR and the kernel deletes the
 	# controller at that first refusal, whatever ctrl_loss_tmo says
-	# (Appendix A). A path still `connecting` would mean a reconnect that was
+	# (cnagent_integtest.md, Lab facts). A path still `connecting` would mean a
+	# reconnect that was
 	# not refused with DNR — a port that stopped listening, say, whose refused
 	# TCP connect retries for ever at -1 — and a sweep that meets a leg
 	# controller still there to disconnect, over a namespace head that still
@@ -3649,7 +3735,8 @@ s2_paths_long_dead() {
 }
 
 # s3_io_in_flight is S1 with host writes running across the whole teardown. It
-# is the stage that exercises the waits of plan §3.9 for real: the park of an
+# is the stage that exercises the waits (cnagent_integtest.md, Cases, teardown;
+# dnagent.md SH20) for real: the park of an
 # ns-dev is a flushing suspend, the nvmet `enable = 0` above it is an
 # uncancellable configfs write, and the thin-pool's postsuspend commit is a
 # metadata write — each of them has in-flight host IO through thin -> md -> leg
@@ -3763,7 +3850,8 @@ s3_io_in_flight() {
 # unreachable. That is a different window from S1's — the sides, their exports
 # and their extents all still exist, and the loss has to be discovered by a
 # keep-alive rather than announced by a subsystem going away — and it is the
-# window plan §3.9 says is the longest, which is why this stage alone gets 90 s
+# window the case header's bound says is the longest, which is why this stage
+# alone gets 90 s
 # of patience. It also pins the other half: once the partition is lifted, the
 # DN sweeps its own side away cleanly with the CN above it already gone.
 s4_partitioned_dn() {
@@ -3785,10 +3873,10 @@ s4_partitioned_dn() {
 	assert_eq "$(helper 2 have_iptables)" yes \
 		"s4: vm2 needs iptables to partition the nvme-tcp port"
 	host_disconnect "$hv" "$nqn"
-	# The rule is VM2's INPUT, from VM1, to the nvme-tcp port: it takes CN1's
+	# The rule is vm2's INPUT, from vm1, to the nvme-tcp port: it takes CN1's
 	# two paths into DN2's sides and nothing else. The emulated host runs on
-	# VM2 and reaches CN1 outbound (the replies carry the port as their SOURCE,
-	# which --dport does not match), and CN2's own legs into DN1 are VM1's
+	# vm2 and reaches CN1 outbound (the replies carry the port as their SOURCE,
+	# which --dport does not match), and CN2's own legs into DN1 are vm1's
 	# INPUT, so neither is touched.
 	assert_eq "$(helper 2 "partition_from ${IP[1]}")" partitioned \
 		"s4: the partition rule was not installed"
@@ -3819,7 +3907,7 @@ s4_partitioned_dn() {
 # be removed. It pins the three properties the reply code exists for — the
 # leftover is NAMED, the verdict is RECOMPUTED by a read-only path that issued
 # no syncup, and the retry is the same request at the same revision — plus the
-# D8 rule that makes the residue readable at all.
+# stop rule of cnagent.md CN21 that makes the residue readable at all.
 #
 # It runs last because it is the only stage that pins a dm device open. A pin
 # left behind by an earlier stage's failure would be released by cleanup before
@@ -3842,7 +3930,8 @@ s5_pinned_wrapper() {
 	pinned=$(cn_dm_name c9 1 "$sp" "${A_DLEG[1]}")
 	assert_eq "$(helper 1 "pin_dev $pinned")" pinned "s5: the pin did not take"
 	# cn_drop's request, sent by hand because this one must NOT reply 0. The
-	# bump is on its own line and in the parent shell for §9's reason: inside
+	# bump is on its own line and in the parent shell for the reason of
+	# cnagent_integtest.md, Conventions, Revisions: inside
 	# the command substitution it would increment a copy.
 	bump_cn_sync 1
 	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --expect-code 4)
@@ -3857,7 +3946,7 @@ s5_pinned_wrapper() {
 	*) die "s5: the reply does not name the pinned wrapper: '$details'" ;;
 	esac
 	assert_cn_info_ok "$out" "s5 cn1 base state while pinned"
-	# Recomputed, never stored (plan D3): a read-only path that issued no
+	# Recomputed, never stored (cnagent.md CN30): a read-only path that issued no
 	# syncup at all reaches the same verdict, because the verdict IS an
 	# enumeration of the node and not a flag the syncup left behind. The reply
 	# still carries CnInfo, because code 4 is not a refusal.
@@ -3865,7 +3954,8 @@ s5_pinned_wrapper() {
 	assert_eq "$(jq_of "$out" '.agent_reply.code // 0')" 4 \
 		"s5: get-cn-info must report the leftover too"
 	assert_cn_info_ok "$out" "s5 cn1 get-cn-info while pinned"
-	# The D8 rule on hardware: a layer that leaves something behind stops the
+	# The stop rule of cnagent.md CN21 on hardware: a layer that leaves
+	# something behind stops the
 	# descent, and the leg wrappers are the LAST layer — so everything above
 	# this wrapper is already gone and the wrapper is all that is left. Its own
 	# leg's disconnect was set going in that same layer: the connection and
@@ -3898,11 +3988,12 @@ case_teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# Case B — thinbm (§12): snapshots and bitmap reads
+# Case B — thinbm (cnagent_integtest.md, Cases): snapshots and bitmap reads
 # ---------------------------------------------------------------------------
 #
 # The td is 64 MiB of 1 MiB blocks, so every bitmap is exactly 64 bits, and the
-# §11.4 wire inversion makes a written block a 0 bit. Blocks {0,5,6,7} written
+# wire inversion of architecture.md, raid0 bitmap math, makes a written block a
+# 0 bit. Blocks {0,5,6,7} written
 # ⇒ byte 0 = 0x1e, bytes 1-7 = 0xff.
 
 B_TD2=0xc
@@ -3949,7 +4040,7 @@ case_thinbm() {
 		write_range "$hv" "$WORK/pattern-b-$blk.bin" "$dev" 1 "$blk"
 	done
 
-	stage tdbm "GetThinDeviceBm: 1 = unmapped, LSB-first (§11.4)"
+	stage tdbm "GetThinDeviceBm: 1 = unmapped, LSB-first (architecture.md, raid0 bitmap math)"
 	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 1effffffffffffff "thinbm td bitmap"
@@ -3974,7 +4065,7 @@ case_thinbm() {
 	stage snapshot "create_snap needs a quiesced origin (CN14)"
 	# The origin is re-sent with created = true: the gateway refuses a
 	# snapshot of a td it has not seen materialized in every slice pool
-	# (ThinDeviceCreated.md U2-S1), so this is the only td_list a real worker
+	# (architecture.md, Thin devices), so this is the only td_list a real worker
 	# could publish here. The snapshot itself is uncreated, which is what
 	# still puts its create_snap inside the origin's quiesce below.
 	req_set "$req" ".td_list = [$(req_td "$S_TD" 1 0 true),
@@ -4000,7 +4091,7 @@ case_thinbm() {
 	# CN14's quiesce: the per-slice suspend above stays, nested inside one
 	# quiesce of the origin td's raid0 that spans every slice's message. This
 	# SP has one slice, so the log is the only on-hardware evidence of the
-	# bracket; the cross-slice property is a unit test (cnagent.md §6 test 19).
+	# bracket; the cross-slice property (cnagent.md CN14) is left to a unit test.
 	oriraid0=$(cn_dm_name c4 "$cn" "$sp" "$S_TD")
 	snapthin=$(cn_dm_name c3 "$cn" "$sp" "$B_TD2" "$S_SLICE")
 	assert_before "$seq" "^dmsetup suspend $oriraid0\$" \
@@ -4041,7 +4132,8 @@ case_thinbm() {
 	assert_eq "$got" 1efdffffffffffff "thinbm origin bitmap gained block 9"
 
 	stage drop "CN21 tears the cntlr down; the pool metadata keeps both ids"
-	# ThinDeviceCreated.md U5-S3 steps 1-3. The teardown removes every dm
+	# The rebuild's first half (cnagent_integtest.md, Cases, thinbm;
+	# cnagent.md CN14, CN21). The teardown removes every dm
 	# device and sends no `delete`, so both thin ids stay in the pool
 	# metadata on DN1's legs, and SH7 deletes the cntlr's local file — the
 	# next SyncupCntlr is a fresh cntlr at a higher revision. Its own stage,
@@ -4056,7 +4148,8 @@ case_thinbm() {
 	assert_cn_info_ok "$out" "thinbm rebuild syncup-cn"
 
 	stage rebuild "a created td is re-attached with no device-set message"
-	# ThinDeviceCreated.md U5-S3 steps 4-5 / R14: the desired state the
+	# The rebuild's second half (cnagent_integtest.md, Cases, thinbm;
+	# cnagent.md CN14, CN21): the desired state the
 	# sp-worker publishes once both tds have flipped. The rebuilt cntlr must
 	# re-attach the existing volumes with a bare `dmsetup create` — no
 	# create_thin, no create_snap, nothing to quiesce — and the mappings must
@@ -4078,7 +4171,8 @@ case_thinbm() {
 		"thinbm rebuild: a created snapshot was re-created by message"
 	assert_absent "$seq" "^dmsetup suspend" \
 		"thinbm rebuild: nothing needed quiescing"
-	# U5-T1 (ThinDeviceCreated.md): the rebuild re-creates the pool
+	# cnagent_integtest.md, Cases, thinbm, and cnagent.md CN14 (the activation
+	# sweep): the rebuild re-creates the pool
 	# device, so the activation sweep runs — its reserve/release pair is
 	# the only `dmsetup message` traffic, and nothing changes the device
 	# set (no create_thin, no create_snap, no delete; the bitmap proof
@@ -4115,7 +4209,9 @@ case_thinbm() {
 }
 
 # ---------------------------------------------------------------------------
-# Case C — clone_xfer (§13): the §11.3 live move and the §11.5 recovery
+# Case C — clone_xfer (cnagent_integtest.md, Cases): the live move
+# (architecture.md, Transfer + clone = cross-SP live migration) and the
+# recovery (architecture.md, Clone crash recovery)
 # ---------------------------------------------------------------------------
 #
 # 32 of the td's 64 MiB are written, so the pushed bitmap is 00000000ffffffff:
@@ -4148,7 +4244,8 @@ case_clone_xfer() {
 	nsdev1=$(cn_dm_name c6 1 "$sp1" "$S_NS")
 	nsdev2=$(cn_dm_name c6 2 "$sp2" "$S_NS")
 	# The two tds' permanent dm-errors (kind c5): what an effectively suspended
-	# namespace's ns-dev is parked on (CN16 rule 1, §11.6).
+	# namespace's ns-dev is parked on (CN16 rule 1; architecture.md,
+	# Namespace suspend semantics).
 	err1=$(cn_dm_name c5 1 "$sp1" "$S_TD")
 	err2=$(cn_dm_name c5 2 "$sp2" "$S_TD")
 	# The two chunk files this case creates, as clone_bm_files sorts them:
@@ -4176,7 +4273,8 @@ case_clone_xfer() {
 	make_pattern "$hv" "$WORK/pattern-c.bin" 32
 	want=$(sha_range "$hv" "$WORK/pattern-c.bin" 32)
 	write_range "$hv" "$WORK/pattern-c.bin" "$dev" 32
-	# The production bitmap source (§8.13): the suite pushes exactly what it
+	# The production bitmap source (architecture.md, Bitmap reads): the suite
+	# pushes exactly what it
 	# read. The second 32 MiB was never written, so the skip range is real.
 	got=$(bitmap_hex 1 get-td-bm --sp "$sp1" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
@@ -4204,7 +4302,8 @@ case_clone_xfer() {
 	assert_opens_ok 1 "$nsdev1" "clone_xfer: the serving origin reads"
 	# `suspended = true` on sp2's namespace means **parked**, not
 	# dm-suspended: the ns-dev is live over the td's dm-error and the host
-	# queues against the ANA state above (§11.6, [D12]).
+	# queues against the ANA state above (architecture.md,
+	# Namespace suspend semantics, [D12]).
 	assert_parked 2 "$nsdev2" "$err2" "clone_xfer sp2 stored-suspended ns-dev"
 	assert_opens_eio 2 "$nsdev2" "clone_xfer sp2 stored-suspended ns-dev"
 
@@ -4222,7 +4321,8 @@ case_clone_xfer() {
 	# opens it gets EIO at once instead of wedging in D state ([D12]).
 	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the transfer origin"
 	assert_opens_eio 1 "$nsdev1" "clone_xfer: the transfer origin"
-	# §11.6's ordering rule, on hardware: the ANA move to `inaccessible` is
+	# The ordering rule of architecture.md, Namespace suspend semantics, on
+	# hardware: the ANA move to `inaccessible` is
 	# written before the ns-dev is touched, which is why the park needs no
 	# grace window — nvmet refuses IO to an inaccessible namespace at the
 	# target, so nothing of the host's is in flight when the reload lands.
@@ -4273,7 +4373,8 @@ case_clone_xfer() {
 		--clone "$C_CLONE" --src-slice-idx 0 --bm-idx 1 \
 		--bitmap-hex ff >/dev/null
 	# An equal-revision re-send is a legal full re-apply; here it is only a
-	# way to read the applied set back out of the reply (§9).
+	# way to read the applied set back out of the reply (cnagent_integtest.md,
+	# Conventions, Revisions).
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_eq "$(jq_of "$out" '(.bm_info_list // []) | length')" 1 \
 		"clone_xfer bm_info_list length"
@@ -4281,7 +4382,8 @@ case_clone_xfer() {
 		"clone_xfer bm_info_list res_id"
 	# A clone reports its applied set as chunk_id_list, ascending by the pair.
 	# protojson omits a field at its zero value, so the entry for (0, 0) is
-	# the empty object {} — hence the // 0 defaults (§8).
+	# the empty object {} — hence the // 0 defaults
+	# (cnagent_integtest.md, The driver: `cnagentctl`).
 	assert_eq "$(jq_of "$out" \
 		'[.bm_info_list[0].chunk_id_list[]?
 		  | "\(.src_slice_idx // 0):\(.bm_idx // 0)"] | join(",")')" \
@@ -4289,7 +4391,9 @@ case_clone_xfer() {
 	# bm_idx_list is the migration applied set; a clone never fills it.
 	assert_eq "$(jq_of "$out" '.bm_info_list[0].bm_idx_list // "unset"')" \
 		unset "clone_xfer bm_info_list bm_idx_list is unset for a clone"
-	# The chunk file names carry the pair as two %02x segments (§5).
+	# The chunk file names carry the pair as two %02x segments
+	# (cnagent_integtest.md, Cases, clone_xfer; architecture.md,
+	# Agent local-store paths).
 	assert_eq "$(helper 2 "clone_bm_files $bmargs")" "$bmfiles" \
 		"clone_xfer: both chunk files are pair-named"
 
@@ -4351,7 +4455,8 @@ case_clone_xfer() {
 	# The whole feature list is pinned, not just the one word: the exact
 	# `2 no_hydration no_discard_passdown` agent.CloneTable emits from its
 	# derived feature count (agent/dm.go:405-419), the same string CN18 step 3
-	# and Appendix A name. The `dmsetup message $clonedm 0 enable_hydration`
+	# and architecture.md, [D7], name. The
+	# `dmsetup message $clonedm 0 enable_hydration`
 	# asserted a few lines above does NOT weaken it — dm-clone's
 	# STATUSTYPE_TABLE reprints the constructor args saved by copy_ctr_args
 	# verbatim (drivers/md/dm-clone-target.c), and only `dmsetup status`
@@ -4359,7 +4464,8 @@ case_clone_xfer() {
 	# clone's device by name, so nothing else on the node can satisfy it. A
 	# substring test for no_discard_passdown alone accepts
 	# `1 no_discard_passdown`, i.e. a clone created with hydration already
-	# enabled, which would copy the very regions the §9.6 chunk asked to skip.
+	# enabled, which would copy the very regions the pushed chunk
+	# (architecture.md, Bitmap push protocol) asked to skip.
 	got=$(helper 2 "dm_table $clonedm")
 	printf '%s\n' "$got" |
 		grep -qE ' 2 no_hydration no_discard_passdown( |$)' ||
@@ -4381,8 +4487,10 @@ case_clone_xfer() {
 	assert_eq "$(sha_range "$hv" "$dev" 1 31)" "$want" \
 		"clone_xfer read-through of MiB 31"
 
-	stage wipe "stage 6: CN2 loses its kernel state and rebuilds (§11.5)"
-	# §13 stage 6 "log which": the §11.5 recovery contract covers both a clone
+	stage wipe "stage 6: CN2 loses its kernel state and rebuilds (architecture.md, Clone crash recovery)"
+	# The wipe-time sample (cnagent_integtest.md, Cases, clone_xfer and
+	# What a pass means): the recovery contract of architecture.md,
+	# Clone crash recovery, covers both a clone
 	# that was still hydrating when its CN lost its kernel state and one that
 	# had already finished, and which of the two this run wiped decides what
 	# the rebuilt clone has left to copy. It is recorded, never asserted — the
@@ -4424,7 +4532,8 @@ case_clone_xfer() {
 	seq=$(helper 2 cn_events)
 	# The destination-bitmap read is anchored on the LAST thin_dump, which must
 	# follow the dm-clone's create: the recovery reads the destination only
-	# once the clone exists (created with hydration off, §11.5), while the
+	# once the clone exists (created with hydration off; architecture.md,
+	# Clone crash recovery), while the
 	# re-created pool's CN14 activation sweep dumps the same metadata through
 	# the same reserve → thin_dump → release helper before any clone does. A
 	# startup reconcile arms that sweep and skips it, so today the fresh log
@@ -4493,7 +4602,8 @@ case_clone_xfer() {
 	assert_eq "$(helper 2 "clone_bm_files $bmargs")" "$bmfiles" \
 		"clone_xfer: both pair-named chunk files survived the wipe"
 	# The wipe killed the host's sp2 controller with DNR; it never reconnects
-	# on its own, and -n would take the live sp1 path with it (Appendix A).
+	# on its own, and -n would take the live sp1 path with it
+	# (cnagent_integtest.md, Cases, clone_xfer).
 	ctrl=$(helper "$hv" "ctrl_of '$nqn' '${IP[2]}'")
 	if [ "$ctrl" = none ]; then
 		log "clone_xfer: the dead sp2 controller is already gone"
@@ -4515,7 +4625,8 @@ case_clone_xfer() {
 	out=$(cn_syncup_cntlr 1 "$req1")
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer source retired"
 	# "Retired" is now a parked device, not a suspended one: the transfer is
-	# gone and the stored `suspended` flag carries the state on (§11.6).
+	# gone and the stored `suspended` flag carries the state on (architecture.md,
+	# Namespace suspend semantics).
 	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the retired source"
 	assert_opens_eio 1 "$nsdev1" "clone_xfer: the retired source"
 	req_set "$req2" ".clone_list = []
@@ -4529,7 +4640,8 @@ case_clone_xfer() {
 	# unlinked the :4: subsystem from a port that keeps listening — it still
 	# carries sp1's subsystem — so cn2's controller lost its connection there,
 	# and its first reconnect, after the kernel's default 10 s reconnect delay,
-	# is refused with DNR and deletes the controller (Appendix A), about 11 s
+	# is refused with DNR and deletes the controller (cnagent_integtest.md,
+	# Lab facts), about 11 s
 	# after that unlink. A pass that lands later finds no controller, issues
 	# no disconnect and replies 0. Both endings are CN21's, and the stage
 	# takes whichever the timing gives it: --expect-code 4 names the usual
@@ -4617,13 +4729,15 @@ case_clone_xfer() {
 	cn_drop 2
 	dn_drop 1
 	dn_drop 2
-	# The §13 stage 10 base-state probe, case S's teardown probe run on both
+	# The closing base-state probe (cnagent_integtest.md, Cases, clone_xfer),
+	# case S's teardown probe run on both
 	# CNs: with its cntlr gone each CN must hold no dm device and no
 	# host-facing subsystem of its own, and the arena must be empty again —
 	# the kind-cb tables *are* the allocation registry (CN18), so
 	# reading them by name is what reports a leaked clone unit as an arena
-	# leak instead of as one more anonymous dm device. The four §3.2 base
-	# resources must still probe OK afterwards, because a teardown that took
+	# leak instead of as one more anonymous dm device. The four base resources
+	# (architecture.md, Controller node, common) must still probe OK afterwards,
+	# because a teardown that took
 	# the port, the tmpfs or the loop arena with it would satisfy every
 	# residue check above and still leave the CN unable to serve the next SP.
 	for idx in 1 2; do
@@ -4641,7 +4755,7 @@ case_clone_xfer() {
 }
 
 # ---------------------------------------------------------------------------
-# Case D — restart (§14)
+# Case D — restart (cnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
 case_restart() {
@@ -4761,7 +4875,8 @@ case_restart() {
 
 	stage idempotent "same-revision re-applies must mutate nothing"
 	# SyncupCn and SyncupCntlr share one counter but store their revisions
-	# separately (§9), so the equal-revision re-send of each is the revision
+	# separately (cnagent_integtest.md, Conventions, Revisions), so the
+	# equal-revision re-send of each is the revision
 	# that call stored: CNSYNC for the node, the case's own rev for the cntlr.
 	out=$(cnctl 1 syncup-cn --revision "${CNSYNC[1]}" --cntlr "$sp:$c1")
 	assert_cn_info_ok "$out" "restart re-apply cn1"

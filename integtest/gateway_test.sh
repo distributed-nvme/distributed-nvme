@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 #
-# gateway_test.sh — the `dnv-gateway` integration test of doc/gateway.md §10.
+# gateway_test.sh — the `dnv-gateway` integration test (doc/gateway.md,
+# Integration test plan).
 # One server, a real single-node etcd, THREE real dnv-gateway instances and the
-# fake dn/cn agents of dnv-worker.md §14.9, driven from this machine over ssh
-# by integtest/gatewayctl (the gRPC driver) with etcd ground truth read back
-# through integtest/workerctl (read-only, plus the four §2.4 worker-role
-# writes: the flips set-created/set-provisioned and the drains drain-sp/
-# drain-clone).
+# fake dn/cn agents of dnv-worker.md
+# (Integration test plan, The fake agent, `fakeagent`), driven from this
+# machine over ssh by integtest/gatewayctl (the gRPC driver) with etcd ground
+# truth read back through integtest/workerctl (read-only, plus the four
+# worker-role writes — the flips set-created/set-provisioned and the drains
+# drain-sp/drain-clone — of gateway.md, Integration test plan,
+# The etcd verification, `workerctl`).
 #
 #   bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
 #
-# Cases (§10.11-§10.15), in order, each against a WIPED store: smoke, parallel,
-# contention, faults, restart. Cleanup runs unconditionally at the start and,
-# on success only, at the end: a failing run leaves etcd's data, every log and
-# every behavior file in place and dumps the §10.17 diagnostics.
+# Cases (Integration test plan, Cases), in order, each against a WIPED store:
+# smoke, parallel, contention, faults, restart. Cleanup runs unconditionally at
+# the start and, on success only, at the end: a failing run leaves etcd's data,
+# every log and every behavior file in place and dumps the diagnostics
+# (Integration test plan, Cleanup).
 #
 # NO SUDO anywhere: nothing in this suite needs root. Everything the script
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
-# What it proves (§10.1): (a) every one of the 59 RPCs maintains exactly the
-# §5 etcd schema, verified against ground truth that never goes through the
+# What it proves (Integration test plan, What the suite proves): (a) every one
+# of the 59 RPCs maintains exactly the etcd schema (architecture.md,
+# etcd data model), verified against ground truth that never goes through the
 # code under test; (b) parallel gRPCs across instances are correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
 # writes; (c) refusals of every class write nothing, provably, via before/after
@@ -39,7 +44,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (§10.3, §10.5, §10.6)
+# Constants
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -57,7 +62,8 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
-# common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob (§10.4).
+# common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob
+# (Integration test plan, Topology).
 # The value is NOT typed here: read_constants() fills it at preflight from
 # `workerctl constants`, which prints the Go constants as JSON, so this suite
 # launches etcd with whatever common/constants.go now says.
@@ -66,7 +72,8 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # that named constants bound. The one that SIZES the requirement is
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
-# (architecture.md §8.4); the sp drain's D2 batch (dnv-worker.md §11.6) and a
+# (architecture.md, Storage pools); the sp drain's D2 batch
+# (dnv-worker.md SPD13) and a
 # created-flip transaction of MaxFlipCreatedPerTxn tds (dnv-worker.md RW19)
 # are two more. Their compare counts, and the factors that multiply into them,
 # are asserted from the named constants in gateway/txnbudget_test.go, not
@@ -81,9 +88,9 @@ ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-gateway-integtest
 
-# §10.3 ports: a fresh block, disjoint from every other suite (worker
-# 12379/29600s/29700s, cdc 13379/18009-12/14420-23, agent suites 29528/29529,
-# production 29527/2379).
+# Ports (Integration test plan, Topology): a fresh block, disjoint from every
+# other suite (worker 12379/29600s/29700s, cdc 13379/18009-12/14420-23, agent
+# suites 29528/29529, production 29527/2379).
 ETCD_CLIENT_PORT=15379
 ETCD_PEER_PORT=15380
 GW_PORT_BASE=29810  # gw0..gw2 -> 29810..29812
@@ -91,25 +98,26 @@ DN_PORT_BASE=29820  # dn0..dn3 -> 29820..29823
 CN_PORT_BASE=29830  # cn0..cn2 -> 29830..29832
 ALL_PORTS=(15379 15380 29810 29811 29812 29820 29821 29822 29823 29830 29831 29832)
 
-# common.DnvPrefix — the first field of every dnv etcd key (§5.1).
+# common.DnvPrefix — the first field of every dnv etcd key (architecture.md,
+# Key grammar).
 DNV_PREFIX=dnv
 
-# common.MaxSliceCntPerSp — CreateClone's `src_slice_cnt` ceiling (§5.8,
-# validateCloneGeometry), and stage 13 creates a clone AT it. Like
+# common.MaxSliceCntPerSp — CreateClone's `src_slice_cnt` ceiling (gateway.md,
+# Clones; validateCloneGeometry), and stage 13 creates a clone AT it. Like
 # ETCD_MAX_TXN_OPS it is NOT typed here: read_constants() fills it at preflight
 # from `workerctl constants`. A typed copy would drift silently one way: a
 # ceiling RAISED above it would leave stage 13 green and testing an interior
 # geometry instead of the boundary it is named for.
 MAX_SLICE_CNT=
 
-# §10.5 identity plan.
+# Identity plan.
 CLUSTER=itgw
 GW_DIRS=(gw0 gw1 gw2)
 DN_DIRS=(dn0 dn1 dn2 dn3)
 CN_DIRS=(cn0 cn1 cn2)
 NQN_PREFIX=nqn.2025-01.io.dnv
 
-# §10.6 test-time constants.
+# Test-time constants.
 DN_SIZE=68719476736 # 64 GiB = 64 extents at the default 1 GiB extent_size
 DN_EXTENTS=64
 CN_EXTENTS=4096 # DefaultCnCap 4 TiB / 1 GiB
@@ -143,9 +151,11 @@ QUIET=0
 # GATEWAY is the instance the plain `gw` wrapper talks to; cases that need a
 # specific instance use gw_at.
 GATEWAY="127.0.0.1:$GW_PORT_BASE"
-# SP_REV caches the current SpRev of the SP the case is working on. §10.10:
-# every sp_rev-consuming stage runs in the PARENT shell, never in a subshell,
-# or the refreshed token is lost with the subshell that fetched it.
+# SP_REV caches the current SpRev of the SP the case is working on, the token
+# the script refreshes after every pool mutation
+# (Integration test plan, What a pass means). Every sp_rev-consuming stage
+# runs in the PARENT shell, never in a subshell, or the refreshed token is
+# lost with the subshell that fetched it.
 SP_REV=0
 
 declare -A PID=()     # dir -> pid recorded from $! at launch
@@ -155,15 +165,15 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 	-o ConnectTimeout=15 -o ServerAliveInterval=15)
 
 # ---------------------------------------------------------------------------
-# Logging, assertions, failure handling (§10.2, verbatim from worker_test.sh)
+# Logging, assertions, failure handling (verbatim from worker_test.sh)
 # ---------------------------------------------------------------------------
 
 log() { echo "$*" >&2; }
 
-# stage names the step for the failure report and mints the §10.10 trace id
-# `it-<case>-<step>`, which every gatewayctl and workerctl call of the step
-# then stamps on its records — the thread that ties a script stage to the
-# gateway's, the agents' and etcd's log lines.
+# stage names the step for the failure report and mints the stage's trace id
+# `it-<case>-<step>` (Integration test plan, Topology), which every gatewayctl
+# and workerctl call of the step then stamps on its records — the thread that
+# ties a script stage to the gateway's, the agents' and etcd's log lines.
 stage() {
 	STAGE="$CASE: $2"
 	TRACE="it-$CASE-$1"
@@ -209,7 +219,7 @@ on_exit() {
 		log "PASS"
 	else
 		log ""
-		log "########## diagnostics (§10.17) ##########"
+		log "########## diagnostics ##########"
 		diagnostics || true
 		log ""
 		log "debris left in place on $TARGET; failing stage '$STAGE'"
@@ -218,7 +228,8 @@ on_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# Remote execution (§10.8, §10.9)
+# Remote execution (Integration test plan, The driver, `gatewayctl`, and
+# The etcd verification, `workerctl`)
 # ---------------------------------------------------------------------------
 
 # sshw echoes the command and runs it on the server as the plain user. QUIET is
@@ -231,11 +242,11 @@ sshw() {
 
 sshw_ok() { sshw "$@" || true; }
 
-# gw is the §10.8 driver wrapper: every call carries the gateway endpoint, the
+# gw is the driver wrapper: every call carries the gateway endpoint, the
 # cluster and the stage's trace id. Each argument is quoted for the REMOTE
 # shell with printf %q before the command string is built — without that an
-# argument containing a space (an etcd key is space-joined, §5.1) is re-split
-# by the remote shell.
+# argument containing a space (an etcd key is space-joined; architecture.md,
+# Key grammar) is re-split by the remote shell.
 gw() { gw_at "$GATEWAY" "$@"; }
 
 # gw_at is gw against one named instance: case A round-robins waves over the
@@ -264,13 +275,15 @@ gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
 	gw_at "$endpoint" --expect "$code" "$@"
 }
 
-# wctl is the ground-truth reader (§10.9): the raw decoded etcd state, read
-# back by a binary that is NOT the code under test. Its only writes in this
-# suite are the worker-role stand-ins of §2.4 — set-created, set-provisioned
-# and, since the two delete RPCs became latches, drain-sp (2026-09-15) and
-# drain-clone (2026-09-16), which finish the teardowns `delete-sp` and
-# `delete-clone` now only start. Every drain step bumps SpRev, so a case that
-# holds a token must `refresh_rev` after one, exactly as after a mutator.
+# wctl is the ground-truth reader
+# (Integration test plan, The etcd verification, `workerctl`): the raw decoded
+# etcd state, read back by a binary that is NOT the code under test. Its only
+# writes in this suite are the worker-role stand-ins named there —
+# set-created, set-provisioned and, since the two delete RPCs became latches,
+# drain-sp (2026-09-15) and drain-clone (2026-09-16), which finish the
+# teardowns `delete-sp` and `delete-clone` now only start. Every drain step
+# bumps SpRev, so a case that holds a token must `refresh_rev` after one,
+# exactly as after a mutator.
 wctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -284,7 +297,8 @@ etcdctl_raw() {
 	sshw "$WORK/bin/etcdctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT $*"
 }
 
-# rlog is the §10.17 log reader: `ssh … cat <path>`, so every assertion is
+# rlog is the log reader of the failure diagnostics (Integration test plan,
+# Cleanup): `ssh … cat <path>`, so every assertion is
 # parsed by the driver's jq and the server needs no jq of its own. A missing
 # file yields empty output rather than a failure, because `set -o pipefail`
 # would otherwise turn "the log does not exist yet" into a script abort inside
@@ -315,8 +329,9 @@ recsr() { # <path> <filter> [jq args…]  — raw output
 count_recs() { recs "$@" | wc -l | tr -d ' \n'; }
 
 # ---------------------------------------------------------------------------
-# Polling (§10.10: only for process readiness — the gateway is synchronous, so
-# no stage ever sleeps waiting for etcd content)
+# Polling (Integration test plan, What a pass means: only for process
+# readiness — the gateway is synchronous, so no stage ever sleeps waiting for
+# etcd content)
 # ---------------------------------------------------------------------------
 
 wait_until() { # <secs> <label> <cmd…>
@@ -338,7 +353,7 @@ wait_until() { # <secs> <label> <cmd…>
 }
 
 # ---------------------------------------------------------------------------
-# Identity helpers (§10.5)
+# Identity helpers
 # ---------------------------------------------------------------------------
 
 dn_dir() { printf 'dn%d' "$1"; }   # 0-based
@@ -349,23 +364,26 @@ cn_addr() { printf '127.0.0.1:%d' $((CN_PORT_BASE + $1)); }
 gw_addr() { printf '127.0.0.1:%d' $((GW_PORT_BASE + $1)); }
 dn_port() { printf '%d' $((DN_PORT_BASE + $1)); }
 cn_port() { printf '%d' $((CN_PORT_BASE + $1)); }
-# Fake transport service ids: tcp/ipv4/127.0.0.1/44<n> (§10.5).
+# Fake transport service ids: tcp/ipv4/127.0.0.1/44<n>.
 dn_svcid() { printf '442%d' "$1"; }
 cn_svcid() { printf '443%d' "$1"; }
 dn_loc() { printf 'rack%d' "$1"; }
-# CN locations are distinct too: the §6.4 CN scan location-dedupes, so three
-# CNs sharing a location would make a two-cntlr SP unallocatable.
+# CN locations are distinct too: the CN scan location-dedupes
+# (architecture.md, Finding CN candidates), so three CNs sharing a location
+# would make a two-cntlr SP unallocatable.
 cn_loc() { printf 'rack%d' "$1"; }
 
 # ---------------------------------------------------------------------------
-# Ground-truth readers (§10.9)
+# Ground-truth readers
+# (Integration test plan, The etcd verification, `workerctl`)
 # ---------------------------------------------------------------------------
 
 # store_rev is the etcd store revision — the exact "was anything written?"
-# probe the §10.10 refusal brackets need. etcd advances it only for a
-# transaction that actually mutates the store, so an RPC that refuses (or an
-# idempotent Update* that writes nothing, §0 #17) leaves it untouched. A read
-# that fails or holds no revision DIES: two such reads would compare equal.
+# probe the refusal brackets need (Integration test plan, What a pass means).
+# etcd advances it only for a transaction that actually mutates the store, so
+# an RPC that refuses (or an idempotent Update* that writes nothing, GW6)
+# leaves it untouched. A read that fails or holds no revision DIES: two such
+# reads would compare equal.
 store_rev() {
 	local saved=$QUIET out rev
 	QUIET=1
@@ -379,7 +397,8 @@ store_rev() {
 
 # assert_no_write brackets a refusal: it captures the store revision, runs the
 # command, and requires the revision to be unchanged. This is what makes
-# "refusals write nothing" provable rather than asserted (§10.10).
+# "refusals write nothing" provable rather than asserted
+# (Integration test plan, What a pass means).
 assert_no_write() { # <label> <cmd…>
 	local label=$1 before after
 	shift
@@ -390,12 +409,13 @@ assert_no_write() { # <label> <cmd…>
 }
 
 # key_count counts the keys under a prefix — the non-SP-scoped form of the
-# refusal bracket, and the §10.11 step 17 "nothing left" audit. A bare §5.3
-# kind is scoped to $CLUSTER by workerctl (all but cluster_conf, worker and
-# the three *_rev kinds, which are never scoped), so a scoped read FAILS once
-# the cluster is gone (`cluster "itgw" does not exist`); "dnv" scans the WHOLE
-# store and is the form to use then. A failed read DIES: `grep -c .` counts
-# a read that did not answer as 0 keys, which passes every "keys gone" audit.
+# refusal bracket, and the "nothing left" audit of case S stage 17. A bare
+# kind of architecture.md, Key table, is scoped to $CLUSTER by workerctl (all
+# but cluster_conf, worker and the three *_rev kinds, which are never scoped),
+# so a scoped read FAILS once the cluster is gone (`cluster "itgw" does not
+# exist`); "dnv" scans the WHOLE store and is the form to use then. A failed
+# read DIES: `grep -c .` counts a read that did not answer as 0 keys, which
+# passes every "keys gone" audit.
 key_count() { # <prefix>
 	local saved=$QUIET out
 	QUIET=1
@@ -418,7 +438,8 @@ dn_id_of() { jq_of "$(dn_json "$1")" '.dn_id'; }
 cn_id_of() { jq_of "$(cn_json "$1")" '.cn_id'; }
 
 # sp_rev_of reads the SP's current revision through the GATEWAY's own read
-# path, which is where §10.10 says the script refreshes its cached token from.
+# path, which is where the script refreshes its cached token from
+# (Integration test plan, What a pass means).
 sp_rev_of() { # <sp name>
 	jq_of "$(gw get-sp --sp "$1")" '.sp_rev.revision'
 }
@@ -430,13 +451,14 @@ dn_rev_of() { jq_of "$(gw get-dn --addr "$1")" '.dn_rev.revision'; }
 cn_rev_of() { jq_of "$(gw get-cn --addr "$1")" '.cn_rev.revision'; }
 
 # raw_key prints one etcd value as protojson, for the assertions that name a
-# key literally (§10.11 step 1).
+# key literally (case S stage 1).
 raw_key() { wctl get --key "$1"; }
 
 cluster_key() { printf '%s cluster_conf %s' "$DNV_PREFIX" "$CLUSTER"; }
 
 # ---------------------------------------------------------------------------
-# Fake-agent behaviour and state (dnv-worker.md §14.9, reused here)
+# Fake-agent behaviour and state, reused from dnv-worker.md
+# (Integration test plan, The fake agent, `fakeagent`)
 # ---------------------------------------------------------------------------
 
 # set_behavior writes one fake's behavior.json from a here-doc on stdin. The
@@ -464,10 +486,10 @@ reset_state() { # <agent>
 # It exists because two gateway RPCs — DeleteClone and FinishMigration with
 # force = false — read an *Info the fake derives from the LAST Syncup* request
 # it applied, and this suite runs no dnv-worker, so no Syncup* ever arrives.
-# Hand-writing the state is the fake's documented operator-edit path (§14.9:
-# state.json is protojson so it stays human-editable), and it is what lets the
-# suite present a cntlr or a side that already knows about a clone or a
-# migration destination.
+# Hand-writing the state is the fake's documented operator-edit path
+# (integtest/fakeagent: state.json is protojson so it stays human-editable),
+# and it is what lets the suite present a cntlr or a side that already knows
+# about a clone or a migration destination.
 set_state() { # <agent>   (JSON on stdin)
 	local agent=$1
 	[ "$QUIET" -eq 1 ] || log "[server] state -> $agent"
@@ -485,7 +507,7 @@ reset_fakes() {
 }
 
 # ---------------------------------------------------------------------------
-# Process control (§10.3): launch with >> so an external truncation resets the
+# Process control: launch with >> so an external truncation resets the
 # write offset, record the pid from $!, and signal by that pid.
 # ---------------------------------------------------------------------------
 
@@ -519,7 +541,7 @@ start_fake() { # <kind dn|cn> <dir> <addr> [extra…]
 		"$WORK/bin/fakeagent $kind --grpc-address $addr --dir $WORK/$dir" "$@"
 }
 
-# gw_ready is the §10.4 readiness probe of one gateway instance: a `ping`,
+# gw_ready is the readiness probe of one gateway instance: a `ping`,
 # which is a ListClusters of count 1 and therefore proves the instance serves
 # without needing any state to exist.
 gw_ready() { # <index>
@@ -556,21 +578,21 @@ truncate_logs() {
 }
 
 # wipe_etcd removes every dnv key while the gateways are stopped, so each case
-# starts against a pristine store (§10.5 per-case reset). It is the only
-# non-workerctl write this suite performs.
+# starts against a pristine store (the per-case reset; Integration test plan,
+# Cases). It is the only non-workerctl write this suite performs.
 wipe_etcd() {
 	etcdctl_raw "del --prefix '$DNV_PREFIX '" >/dev/null
 }
 
-# case_reset is §10.5's per-case reset: stop gw0..2 by their recorded pids,
-# wipe the store, reset every fake, truncate the logs, start gw0..2 again and
-# ping all three.
+# case_reset is the per-case reset of Integration test plan, Cases: stop
+# gw0..2 by their recorded pids, wipe the store, reset every fake, truncate the
+# logs, start gw0..2 again and ping all three.
 #
-# The gateways are stateless (§0 #3), so this is only about isolating the
+# The gateways are stateless (GW1), so this is only about isolating the
 # CASES from each other — there is nothing in a gateway to reset.
 case_reset() { # <case name>
 	CASE=$1
-	stage reset "per-case reset before case $1 (§10.5)"
+	stage reset "per-case reset before case $1"
 	local i
 	for i in 0 1 2; do stop_gw "$i"; done
 	wipe_etcd
@@ -588,8 +610,9 @@ case_reset() { # <case name>
 # Shared case helpers
 # ---------------------------------------------------------------------------
 
-# new_cluster creates the suite's cluster THROUGH THE GATEWAY (§10.5: never
-# through workerctl put-cluster) and caches its cluster_id.
+# new_cluster creates the suite's cluster THROUGH THE GATEWAY, never through
+# workerctl put-cluster (Integration test plan, Cases), and caches its
+# cluster_id.
 new_cluster() {
 	local out
 	out=$(gw create-cluster)
@@ -598,9 +621,9 @@ new_cluster() {
 	log "  cluster $CLUSTER, cluster_id $CID"
 }
 
-# make_nodes creates the four DNs and the three CNs of §10.5 sequentially and
-# asserts nothing beyond the reply; the cases that care assert the write set
-# themselves.
+# make_nodes creates the four DNs and the three CNs (Integration test plan,
+# Topology) sequentially and asserts nothing beyond the reply; the cases that
+# care assert the write set themselves.
 make_nodes() {
 	local i
 	for i in 0 1 2 3; do
@@ -613,7 +636,8 @@ make_nodes() {
 	done
 }
 
-# make_sp creates one SP with the §10.6 shape and refreshes the cached token.
+# make_sp creates one SP with the test-time shape and refreshes the cached
+# token.
 make_sp() { # <sp name>
 	gw create-sp --sp "$1" --cntlr-cnt "$SP_CNTLR_CNT" \
 		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" --raid1
@@ -660,7 +684,7 @@ sp_primary_cntlr() { # <sp>
 }
 
 # sp_side_dn_addrs lists every distinct DN addr_port an SP occupies, one per
-# line — the accounting the §10.11/§10.12 free-count assertions walk.
+# line — the accounting the free-count assertions of cases S and A walk.
 sp_side_dn_addrs() { # <sp>
 	jq_of "$(sp_json "$1")" '
 		[ .slices[]
@@ -669,10 +693,11 @@ sp_side_dn_addrs() { # <sp>
 		  | .side_list[]? | .addr_port ] | unique[]'
 }
 
-# verify_sp is the §5.4 write-set verifier of a freshly created standard SP
-# (§10.6 shape). Case S step 6 asserts it in full, and cases A and D reuse it
-# for every SP they create, which is what makes "either the complete write set
-# or no key at all" (§10.15 step 3) a mechanical check.
+# verify_sp is the write-set verifier (gateway.md, Storage pools and GrowSlice)
+# of a freshly created standard SP (the test-time shape). Case S step 6 asserts
+# it in full, and cases A and D reuse it for every SP they create, which is
+# what makes "either the complete write set or no key at all" (case D stage 3)
+# a mechanical check.
 verify_sp() { # <sp name>
 	local sp=$1 out shard spId
 	out=$(sp_json "$sp")
@@ -727,7 +752,7 @@ verify_sp() { # <sp name>
 }
 
 # ---------------------------------------------------------------------------
-# Cleanup (§10.16)
+# Cleanup (Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 cleanup_script() {
@@ -766,7 +791,7 @@ cleanup() {
 }
 
 # ---------------------------------------------------------------------------
-# Diagnostics (§10.17)
+# Diagnostics (Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 diagnostics() {
@@ -817,7 +842,7 @@ diagnostics() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (§10.4)
+# Preflight (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 need_local() {
@@ -921,7 +946,8 @@ preflight_driver() {
 }
 
 # preflight_server runs AFTER the start-of-run cleanup: the port check is only
-# meaningful once a crashed prior run's processes are gone (§10.4).
+# meaningful once a crashed prior run's processes are gone
+# (Integration test plan, Cleanup).
 preflight_server() {
 	STAGE="preflight (server)"
 	log "=== preflight: server"
@@ -946,7 +972,7 @@ preflight_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup (§10.7)
+# Setup
 # ---------------------------------------------------------------------------
 
 etcd_reachable() {
@@ -965,7 +991,7 @@ ports_up() { # <port…>
 setup() {
 	CASE=setup
 
-	stage layout "create the §10.3 tree and ship the six binaries"
+	stage layout "create the work tree and ship the six binaries"
 	local dirs=("bin" "etcd" "${GW_DIRS[@]}" "${DN_DIRS[@]}" "${CN_DIRS[@]}")
 	sshw "mkdir -p $(printf "$WORK/%s " "${dirs[@]}")"
 	SETUP_DONE=1
@@ -999,10 +1025,10 @@ setup() {
 		d=$(cn_dir "$i")
 		clear_behavior "$d"
 		reset_state "$d"
-		# --size 0 is deliberate (§10.6): GetCnSize then replies 0, which
-		# is what makes the gateway apply §6.1's "0 => DefaultCnCap 4 TiB"
-		# and give every CN 4096 extents. The fakeagent's own default is
-		# 1 TiB, which would silently test a different mapping.
+		# --size 0 is deliberate: GetCnSize then replies 0, which is what
+		# makes the gateway apply "0 => DefaultCnCap 4 TiB" (architecture.md,
+		# Size → extents) and give every CN 4096 extents. The fakeagent's own
+		# default is 1 TiB, which would silently test a different mapping.
 		start_fake cn "$d" "$(cn_addr "$i")" "--size 0"
 	done
 	wait_until "$WAIT_SHORT" "the seven fake-agent ports" ports_up \
@@ -1020,14 +1046,16 @@ setup() {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Case S — smoke (§10.11): the full-lifecycle sweep, sequential, gw0 only
+# Case S — smoke (Integration test plan, Cases): the full-lifecycle sweep,
+# sequential, gw0 only
 # ---------------------------------------------------------------------------
 #
-# One stage per numbered step of §10.11, in order. Every mutating stage does
-# the three things §10.10 asks for: the gatewayctl call with its expected code,
-# `wctl` ground-truth assertions on exact fields, and the gateway's own read
-# RPC as the secondary check. Every refusal is bracketed with assert_no_write,
-# which is what makes "refusals write nothing" provable rather than asserted.
+# One stage per step of the lifecycle, numbered in order. Every mutating stage
+# does the three things Integration test plan, What a pass means, asks for:
+# the gatewayctl call with its expected code, `wctl` ground-truth assertions on
+# exact fields, and the gateway's own read RPC as the secondary check. Every
+# refusal is bracketed with assert_no_write, which is what makes "refusals
+# write nothing" provable rather than asserted.
 #
 # The local helpers below are all `smoke_`-prefixed so they cannot collide with
 # the other four cases spliced into this same script.
@@ -1045,7 +1073,7 @@ smoke_jq() { # <json> <filter> [jq args…]
 # smoke_dn_dir / smoke_cn_dir map an addr_port back to the fake's $WORK
 # directory. The gateway picks which node an SP lands on, so a stage that
 # wants to seed the fake behind a side or a cntlr can only learn the directory
-# from the port (§10.5: dn<i> listens on DN_PORT_BASE + i).
+# from the port (dn<i> listens on DN_PORT_BASE + i).
 smoke_dn_dir() { # <addr_port>
 	printf 'dn%d' $((${1##*:} - DN_PORT_BASE))
 }
@@ -1054,10 +1082,11 @@ smoke_cn_dir() { # <addr_port>
 	printf 'cn%d' $((${1##*:} - CN_PORT_BASE))
 }
 
-# smoke_sp_footprint is Σ ext_cnt over every group of the SP — what §6.5 says
-# ONE cntlr's CN reserves, because every cntlr stacks every group of every
-# slice. It is recomputed from the stored slices rather than tracked in a
-# variable so that it stays right across the two GrowSlices of step 7.
+# smoke_sp_footprint is Σ ext_cnt over every group of the SP — what
+# architecture.md, Per-operation allocation, says ONE cntlr's CN reserves,
+# because every cntlr stacks every group of every slice. It is recomputed from
+# the stored slices rather than tracked in a variable so that it stays right
+# across the two GrowSlices of step 7.
 smoke_sp_footprint() { # <sp>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
@@ -1065,8 +1094,9 @@ smoke_sp_footprint() { # <sp>
 }
 
 # smoke_dn_charge is what one DN owes this SP: the ext_cnt of the GROUP each
-# of its sides belongs to, summed over its sides (§5.6 — a side is charged its
-# group's size, and a spare leg's side is charged exactly like an active one).
+# of its sides belongs to, summed over its sides
+# (architecture.md, Capacity index keys — a side is charged its group's size,
+# and a spare leg's side is charged exactly like an active one).
 smoke_dn_charge() { # <sp> <addr_port>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
@@ -1077,7 +1107,7 @@ smoke_dn_charge() { # <sp> <addr_port>
 
 # smoke_dn_sides counts this SP's sides on one DN — the length DnConf's
 # side_ptr_list must have, since CreateStoragePool charges one pointer per
-# side (§8.2).
+# side (architecture.md, Disk nodes).
 smoke_dn_sides() { # <sp> <addr_port>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
@@ -1086,13 +1116,15 @@ smoke_dn_sides() { # <sp> <addr_port>
 }
 
 # smoke_cn_cntlrs counts this SP's cntlrs on one CN, which is the multiplier on
-# the footprint that CN reserves (§6.5) and the length of its cntlr_ptr_list.
+# the footprint that CN reserves (architecture.md, Per-operation allocation)
+# and the length of its cntlr_ptr_list.
 smoke_cn_cntlrs() { # <sp> <addr_port>
 	smoke_jq "$(sp_json "$1")" \
 		'[ .cntlrs[] | select(.addr_port == $a) ] | length' --arg a "$2"
 }
 
-# smoke_cap_cnt counts a node's capacity keys. §5.6 says a node has EXACTLY
+# smoke_cap_cnt counts a node's capacity keys. The presence rule
+# (architecture.md, Capacity index keys) says a node has EXACTLY
 # one while it is allocatable and none while it is not, so this is both the
 # "the index exists" and the "the index was not duplicated" assertion. A
 # failed read DIES, as key_count's does: awk prints 0 on empty input, so a
@@ -1107,8 +1139,9 @@ smoke_cap_cnt() { # <dn_capacity|cn_capacity> <addr_port>
 		awk -v a="$2" '$NF == a { n++ } END { print n + 0 }'
 }
 
-# smoke_cap_free reads free_ext_cnt out of the capacity KEY (§5.6 embeds it in
-# the key so a descending range returns largest-free first), in decimal, or
+# smoke_cap_free reads free_ext_cnt out of the capacity KEY (the key embeds it
+# so a descending range returns largest-free first;
+# architecture.md, Capacity index keys), in decimal, or
 # "none" when the node has no key. Reading the key rather than the DnConf is
 # the whole point: it proves the allocator's index agrees with the record.
 smoke_cap_free() { # <dn_capacity|cn_capacity> <addr_port>
@@ -1124,7 +1157,8 @@ smoke_cap_free() { # <dn_capacity|cn_capacity> <addr_port>
 	printf '%d' "$((16#$hex))"
 }
 
-# smoke_check_dn is the per-DN half of the §5.4/§5.6 write-set audit, in one
+# smoke_check_dn is the per-DN half of the write-set audit (gateway.md,
+# Storage pools and GrowSlice; architecture.md, Capacity index keys), in one
 # place because steps 6, 7, 14, 15 and 17 all owe exactly these four facts:
 # free = total − what the SP's groups charge, one pointer per side, a capacity
 # key that agrees with the record, and the DnRev the ledger's flush left.
@@ -1146,8 +1180,8 @@ smoke_check_dn() { # <sp> <addr_port> <want dn_rev>
 }
 
 # smoke_check_cn is smoke_check_dn's CN mirror: every cntlr on the node
-# reserves the SP's WHOLE footprint (§6.5), so the charge is footprint × the
-# number of this SP's cntlrs the node carries.
+# reserves the SP's WHOLE footprint (architecture.md, Per-operation allocation),
+# so the charge is footprint × the number of this SP's cntlrs the node carries.
 smoke_check_cn() { # <sp> <addr_port> <want cn_rev>
 	local sp=$1 addr=$2 wantRev=$3 cntlrs footprint free
 	cntlrs=$(smoke_cn_cntlrs "$sp" "$addr")
@@ -1167,7 +1201,8 @@ smoke_check_cn() { # <sp> <addr_port> <want cn_rev>
 
 # smoke_grp_addrs lists the distinct DN addr_ports one group occupies, active
 # and spare legs alike — the set whose DnRev a group-touching op bumps, and
-# the set a placement must stay out of (§6.5's black list).
+# the set a placement must stay out of (the black list of architecture.md,
+# Per-operation allocation).
 #
 # A failed read DIES, as key_count's does: jq on empty input prints nothing
 # and exits 0, so a read that did not answer would otherwise come back as an
@@ -1197,10 +1232,10 @@ smoke_grp_field() { # <sp> <grp_id> <field>
 
 # smoke_side_field reads one field of one side by side_id, wherever in the SP
 # it lives. A side_id is unique inside an SP but carries no hint of its slice
-# or leg (§8.6), so every side assertion goes through this scan. A failed read
-# DIES, for smoke_grp_addrs' reason and with its caveat: an empty field would
-# pass stage 14's "the destination side's cntlid_slot differs from the
-# source's".
+# or leg (architecture.md, Cntlrs), so every side assertion goes through this
+# scan. A failed read DIES, for smoke_grp_addrs' reason and with its caveat:
+# an empty field would pass stage 14's "the destination side's cntlid_slot
+# differs from the source's".
 smoke_side_field() { # <sp> <side_id> <field>
 	local json
 	json=$(sp_json "$1") ||
@@ -1213,8 +1248,9 @@ smoke_side_field() { # <sp> <side_id> <field>
 }
 
 # smoke_leg_side_ids lists one leg's side ids in stored order. A leg carries
-# two of them only while a migration runs on it (§8.11), so this is how steps
-# 14's create/cancel/finish are checked against the leg itself.
+# two of them only while a migration runs on it (architecture.md, Migrations),
+# so this is how steps 14's create/cancel/finish are checked against the leg
+# itself.
 smoke_leg_side_ids() { # <sp> <leg_id>
 	smoke_jq "$(sp_json "$1")" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
@@ -1239,7 +1275,8 @@ smoke_grp_spare_ids() { # <sp> <grp_id>
 }
 
 # smoke_ns prints one stored namespace as JSON. A namespace is a field of its
-# Subsystem value and has no key of its own (§8.8), so every namespace
+# Subsystem value and has no key of its own
+# (architecture.md, Subsystems, namespaces), so every namespace
 # assertion digs it out of the subsystem the ground-truth reader returned.
 #
 # A failed read DIES, as key_count's does: stage 12's "the abort path leaves
@@ -1273,7 +1310,7 @@ smoke_dn_free_sum() {
 
 case_smoke() {
 	local i out addr rev want
-	# The §10.5 identity plan: one subsystem NQN of this SP, four host NQNs
+	# The identity plan: one subsystem NQN of this SP, four host NQNs
 	# and the out-of-cluster NQN a clone names as its source.
 	local nqn="$NQN_PREFIX:$CLUSTER:sp0:ss0"
 	local host0="$NQN_PREFIX:host:h0"
@@ -1290,14 +1327,15 @@ case_smoke() {
 	cidHex=$(printf '%016x' "$CID")
 	local cc
 	cc=$(raw_key "$(cluster_key)")
-	# §5.2: cluster_id is derived from name ‖ creation_epoch, so an epoch of 0
-	# would make every cluster of this name share one key prefix.
+	# cluster_id is derived from name ‖ creation_epoch (architecture.md,
+	# cluster_id derivation), so an epoch of 0 would make every cluster of
+	# this name share one key prefix.
 	assert_ne "$(jq_of "$cc" '.creation_epoch')" "0" "ClusterConf creation_epoch"
-	# "confs resolved" (§10.11 step 1): the request carried none of the five
-	# sub-messages, and GW11 resolves every defaultable member at WRITE time,
-	# so what is in the store is CONCRETE — this is the assertion that would
-	# have caught a storage pool created with a zero geometry. Only qos_ratio,
-	# which is not defaultable, is still absent.
+	# "confs resolved" (gateway.md, Clusters): the request carried none of the
+	# five sub-messages, and GW11 resolves every defaultable member at WRITE
+	# time, so what is in the store is CONCRETE — this is the assertion that
+	# would have caught a storage pool created with a zero geometry. Only
+	# qos_ratio, which is not defaultable, is still absent.
 	assert_eq "$(jq_of "$cc" '.qos_ratio')" "null" \
 		"ClusterConf.qos_ratio is not defaultable and stays absent"
 	local probe field want
@@ -1325,10 +1363,12 @@ case_smoke() {
 	assert_eq "$(jq_of "$cc" '.dn_bin_conf.bin0_shift // 0')" "0" \
 		"ClusterConf.dn_bin_conf.bin0_shift is the ladder's bottom rung"
 	# redund_conf is a CHOICE, not a default: an unset oneof already means
-	# redund_none (§8.4), so resolution must not invent a kind here.
+	# redund_none (architecture.md, Storage pools), so resolution must not
+	# invent a kind here.
 	assert_eq "$(jq_of "$cc" '.bdev_conf.redund_conf')" "null" \
 		"ClusterConf.bdev_conf.redund_conf stays the unset choice"
-	# §5.4: each global starts at next_id 1 with ShardBucketSize zeros, and the
+	# Each global starts at next_id 1 with ShardBucketSize zeros
+	# (architecture.md, Globals: id allocation + shard buckets), and the
 	# three buckets are separate slices — they are independent counters and
 	# must never alias.
 	local kind global
@@ -1351,8 +1391,8 @@ case_smoke() {
 		"get-cluster dn_global bucket all zero"
 	assert_field "$out" '.cluster_conf.creation_epoch' \
 		"$(jq_of "$cc" '.creation_epoch')" "get-cluster echoes the stored epoch"
-	# §8.1: the name is the key, so a second create is ALREADY_EXISTS and must
-	# not stamp a second epoch over the first.
+	# The name is the key (architecture.md, Clusters), so a second create is
+	# ALREADY_EXISTS and must not stamp a second epoch over the first.
 	assert_no_write "duplicate create-cluster" \
 		gwx ALREADY_EXISTS create-cluster
 
@@ -1365,8 +1405,9 @@ case_smoke() {
 		pgCid[i]=$(jq_of "$out" '.cluster_id')
 		assert_ne "${pgCid[i]}" "0" "pg$i cluster_id"
 	done
-	# ClusterConf is the only name-keyed message (§5.1) and RangeKeys sorts
-	# ascending, so the six names page in lexical order: itgw pg0 pg1 … pg4.
+	# ClusterConf is the only name-keyed message (architecture.md, cluster_id derivation)
+	# and RangeKeys sorts ascending, so the six names page in lexical order:
+	# itgw pg0 pg1 … pg4.
 	local page token
 	page=$(gw list-clusters --count 2)
 	assert_eq "$(jq_of "$page" '.cluster_name | @json')" '["itgw","pg0"]' \
@@ -1382,8 +1423,9 @@ case_smoke() {
 	assert_eq "$(jq_of "$page" '.cluster_name | @json')" '["pg3","pg4"]' \
 		"list-clusters page 3"
 	token=$(jq_of "$page" '.page_token')
-	# §5.7: the token is empty exactly when the page was NOT full, and page 3
-	# was full — so the end of the listing costs one more, empty, call.
+	# The token is empty exactly when the page was NOT full (architecture.md,
+	# page_token), and page 3 was full — so the end of the listing costs one
+	# more, empty, call.
 	assert_ne "$token" "" "list-clusters page 3 token (a full page always continues)"
 	page=$(gw list-clusters --count 2 --page-token "$token")
 	assert_eq "$(jq_of "$page" '.cluster_name | length')" "0" \
@@ -1396,8 +1438,9 @@ case_smoke() {
 		gwx INVALID_ARGUMENT list-clusters --page-token '!!'
 	for i in 0 1 2 3 4; do
 		out=$(gw delete-cluster --name "pg$i")
-		# §8.1: cluster_id is derived, not stored, so the delete reply is the
-		# only proof the RPC acted on the cluster the create made.
+		# cluster_id is derived, not stored (architecture.md, Clusters), so the
+		# delete reply is the only proof the RPC acted on the cluster the
+		# create made.
 		assert_field "$out" '.cluster_id' "${pgCid[i]}" \
 			"delete-cluster pg$i echoes its cluster_id"
 	done
@@ -1416,8 +1459,9 @@ case_smoke() {
 		assert_field "$out" '.dn_id' "$((i + 1))" "create-dn $addr dn_id"
 		local dn
 		dn=$(dn_json "$addr")
-		# §6.1: 64 GiB / the default 1 GiB extent_size, rounded down, and a
-		# fresh node is entirely free with no side on it yet.
+		# 64 GiB / the default 1 GiB extent_size, rounded down (architecture.md,
+		# Size → extents), and a fresh node is entirely free with no side on it
+		# yet.
 		assert_field "$dn" '.total_ext_cnt' "$DN_EXTENTS" "$addr total_ext_cnt"
 		assert_field "$dn" '.free_ext_cnt' "$DN_EXTENTS" "$addr free_ext_cnt"
 		assert_field "$dn" '.disabled' "false" "$addr disabled"
@@ -1431,35 +1475,39 @@ case_smoke() {
 		assert_field "$dn" '.nvme_tr_conf.tr_svc_id' "$(dn_svcid "$i")" \
 			"$addr tr_svc_id"
 		# The DnRev key is what makes a dn-worker start syncing the node
-		# (§5.5); it is created at revision 1, never bumped by this RPC.
+		# (architecture.md, Revision keys and the sync fan-out); it is created
+		# at revision 1, never bumped by this RPC.
 		shard=$(jq_of "$dn" '.shard_code')
 		assert_field "$(wctl get-rev dn --id "$((i + 1))" \
 			--shard "$(printf '%02x' "$shard")")" '.addr_port' "$addr" \
 			"$addr dn_rev.addr_port"
 		assert_eq "$(dn_rev_of "$addr")" "1" "$addr dn_rev revision"
-		# §5.6: exactly one capacity key, embedding the free count.
+		# Exactly one capacity key, embedding the free count (architecture.md,
+		# Capacity index keys).
 		assert_eq "$(smoke_cap_cnt dn_capacity "$addr")" 1 \
 			"$addr dn_capacity key count"
 		assert_eq "$(smoke_cap_free dn_capacity "$addr")" "$DN_EXTENTS" \
 			"$addr dn_capacity key free_ext_cnt"
 	done
-	# The T3 chain proof (§10.10): CreateDiskNode leaves etcd to ask the node
-	# its size (AG1), and the trace id this stage minted must appear on the
-	# fake's own record of that call — the thread that ties a script stage to
-	# the gateway's log, the agent's log and etcd's.
+	# The T3 chain proof (Integration test plan, Topology): CreateDiskNode
+	# leaves etcd to ask the node its size (AG1), and the trace id this stage
+	# minted must appear on the fake's own record of that call — the thread
+	# that ties a script stage to the gateway's log, the agent's log and etcd's.
 	assert_ge "$(count_recs "$(apath dn0)" \
 		'select(.msg == "grpc server request"
 			and .trace_id == "'"$TRACE"'"
 			and (.method // "" | endswith("GetDnSize")))')" 1 \
 		"dn0 agent.log: a GetDnSize request carrying trace_id $TRACE"
 	assert_eq "$(key_count dn_capacity)" "4" "one dn_capacity key per DN"
-	# §5.4: next_id counts every id ever drawn, Σbucket the live objects.
+	# next_id counts every id ever drawn, Σbucket the live objects
+	# (architecture.md, Globals: id allocation + shard buckets).
 	global=$(raw_key "$DNV_PREFIX dn_global $cidHex")
 	assert_field "$global" '.next_id' "5" "DnGlobal next_id after four DNs"
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "4" \
 		"DnGlobal Σbucket after four DNs"
 	# The paged list agrees with the four get-dns: 4 names at count 2 is two
-	# FULL pages plus the empty page that ends the listing (§5.7).
+	# FULL pages plus the empty page that ends the listing (architecture.md,
+	# page_token).
 	page=$(gw list-dns --count 2)
 	assert_eq "$(jq_of "$page" '.addr_port | @json')" \
 		"[\"$(dn_addr 0)\",\"$(dn_addr 1)\"]" "list-dns page 1"
@@ -1472,7 +1520,8 @@ case_smoke() {
 	assert_eq "$(jq_of "$page" '.addr_port | length')" "0" "list-dns page 3"
 	assert_eq "$(jq_of "$page" '.page_token')" "" "list-dns page 3 token"
 	# The CNs are the same six RPCs with one difference that matters here:
-	# the fakes run --size 0, so §6.1's "0 ⇒ DefaultCnCap 4 TiB" gives 4096.
+	# the fakes run --size 0, so "0 ⇒ DefaultCnCap 4 TiB" (architecture.md,
+	# Size → extents) gives 4096.
 	for i in 0 1 2; do
 		addr=$(cn_addr "$i")
 		out=$(gw create-cn --addr "$addr" --location "$(cn_loc "$i")" \
@@ -1500,7 +1549,8 @@ case_smoke() {
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "3" \
 		"CnGlobal Σbucket after three CNs"
 	# 3 names at count 2 ends on a SHORT page, so its token is empty and no
-	# fourth call is needed — the other half of the §5.7 rule.
+	# fourth call is needed — the other half of the rule (architecture.md,
+	# page_token).
 	page=$(gw list-cns --count 2)
 	assert_eq "$(jq_of "$page" '.addr_port | @json')" \
 		"[\"$(cn_addr 0)\",\"$(cn_addr 1)\"]" "list-cns page 1"
@@ -1519,7 +1569,8 @@ case_smoke() {
 	# is the truthful live state of the node, not a failure of the call (AG3),
 	# and the reply's applied_revision is the agent's — the revision of the
 	# last applied Syncup*, 0 for a fake that has applied nothing
-	# (architecture.md §8.2/§8.3), never the stored rev key.
+	# (architecture.md, Disk nodes and Controller nodes), never the stored
+	# rev key.
 	out=$(gw inspect-dn --addr "$(dn_addr 0)")
 	assert_field "$out" '.applied_revision' "0" \
 		"inspect-dn applied_revision of an unsynced fake"
@@ -1530,11 +1581,11 @@ case_smoke() {
 		"inspect-cn applied_revision of an unsynced fake"
 	assert_eq "$(jq_of "$out" '.cn_info')" "null" \
 		"inspect-cn cn_info of a fake no worker ever synced"
-	# Seeding state.json is the fake's documented operator-edit path (§14.9),
-	# and it is what lets this stage also prove the PASS-THROUGH half of the
-	# RPC: whatever the agent reports arrives at the caller untouched. The
-	# seeded applied revision is a distinctive 7 — the stored rev key is
-	# still 1, so the two cannot be confused.
+	# Seeding state.json is the fake's documented operator-edit path
+	# (integtest/fakeagent), and it is what lets this stage also prove the
+	# PASS-THROUGH half of the RPC: whatever the agent reports arrives at the
+	# caller untouched. The seeded applied revision is a distinctive 7 — the
+	# stored rev key is still 1, so the two cannot be confused.
 	set_state dn0 <<EOF
 {"objects":{"dn":{"revision":7,"request":{
   "cluster_id":"$CID","dn_id":"1","revision":"7","side_pointer_list":[]}}}}
@@ -1566,15 +1617,16 @@ EOF
 	addr=$(dn_addr 3)
 	out=$(gw set-dn-disabled --addr "$addr" --rev 1 --disabled)
 	assert_field "$out" '.dn_id' "4" "set-dn-disabled reply dn_id"
-	# §8.2: `disabled` gates CP scheduling only — the allocator's index goes
-	# away, the record says so, and NO revision is bumped, because no agent
-	# has to be told and the sides the node hosts keep running.
+	# `disabled` gates CP scheduling only (architecture.md, Disk nodes) — the
+	# allocator's index goes away, the record says so, and NO revision is
+	# bumped, because no agent has to be told and the sides the node hosts
+	# keep running.
 	assert_field "$(dn_json "$addr")" '.disabled' "true" "$addr disabled true"
 	assert_eq "$(smoke_cap_cnt dn_capacity "$addr")" 0 \
 		"$addr dn_capacity key gone while disabled"
 	assert_eq "$(key_count dn_capacity)" "3" "dn_capacity keys while dn3 is disabled"
 	assert_eq "$(dn_rev_of "$addr")" "1" "$addr dn_rev unchanged by the disable"
-	# §0 #17: re-sending the state the node already has writes NOTHING and
+	# GW6: re-sending the state the node already has writes NOTHING and
 	# bumps nothing, but the token is still checked first — hence OK, and
 	# hence a store revision that must not move.
 	assert_no_write "idempotent set-dn-disabled" \
@@ -1610,20 +1662,22 @@ EOF
 	assert_eq "$(cn_rev_of "$addr")" "1" "$addr cn_rev after the whole flip"
 
 	# -------------------------------------------------------------------
-	stage 6 "create-sp sp0: the whole §5.4 write set and its accounting"
+	stage 6 "create-sp sp0: the whole write set and its accounting"
 	# -------------------------------------------------------------------
 	make_sp sp0
 	verify_sp sp0
 	local spOut spId
 	spOut=$(sp_json sp0)
 	spId=$(sp_id_of sp0)
-	# The first SP of a fresh cluster draws id 1 (§5.4: next_id starts at 1).
+	# The first SP of a fresh cluster draws id 1 (next_id starts at 1:
+	# architecture.md, Globals: id allocation + shard buckets).
 	assert_eq "$spId" "1" "sp0 sp_id"
 	assert_eq "$SP_REV" "1" "sp0 SpRev starts at 1: it is created, not bumped"
 	# The SP half of stage 1's conf probe (GW11): make_sp sends `--raid1`
 	# and no number at all, so every member below was resolved at WRITE
 	# time — three of them member-wise from the ClusterConf stage 1
-	# probed, and the chunk count from its §7 constant, since the cluster
+	# probed, and the chunk count from its constant (architecture.md,
+	# Common validation), since the cluster
 	# names no redund_conf to inherit one from. A zero in any of them is
 	# what create-td (stage 9) and grow-slice (stage 7) would refuse as an
 	# invalid stored conf instead of re-defaulting.
@@ -1655,14 +1709,16 @@ EOF
 	assert_eq "$(smoke_jq "$out" '[.slice_list[]] | sort_by(.slice_idx) | @json')" \
 		"$(smoke_jq "$spOut" '[.slices[]] | sort_by(.slice_idx) | @json')" \
 		"get-sp slice_list deep-equals the stored slices"
-	# §6.5: 1 meta extent + 2 data extents = a footprint of 3, mirrored over
-	# two legs each = 6 DN extents on four distinct DNs.
+	# 1 meta extent + 2 data extents = a footprint of 3 (architecture.md,
+	# Per-operation allocation), mirrored over two legs each = 6 DN extents on
+	# four distinct DNs.
 	assert_eq "$(smoke_sp_footprint sp0)" "3" "sp0 footprint"
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - SP_EXT_COST))" \
 		"Σ DN free after create-sp"
 	for i in 0 1 2 3; do
 		# Every DN carries exactly one side of this SP and is charged that
-		# side's group; the ledger bumped each DnRev once, 1 -> 2 (§5.5).
+		# side's group; the ledger bumped each DnRev once, 1 -> 2
+		# (architecture.md, Revision keys and the sync fan-out).
 		addr=$(dn_addr "$i")
 		assert_eq "$(smoke_dn_sides sp0 "$addr")" "1" "$addr hosts one side of sp0"
 		smoke_check_dn sp0 "$addr" 2
@@ -1678,8 +1734,9 @@ EOF
 	done
 	assert_eq "$(smoke_jq "$spOut" '[.cntlrs[] | .addr_port] | unique | length')" \
 		"$SP_CNTLR_CNT" "sp0 cntlrs are on distinct CNs"
-	# §8.4's reverse lookup: an id with no sp_id_to_name key is simply left
-	# out of the map, so absence IS the answer "no such sp_id".
+	# The reverse lookup of architecture.md, Storage pools: an id with no
+	# sp_id_to_name key is simply left out of the map, so absence IS the answer
+	# "no such sp_id".
 	out=$(gw find-sp-names --ids 1,99)
 	assert_eq "$(jq_of "$out" '.sp_id_to_name | length')" "1" \
 		"find-sp-names returns only the live id"
@@ -1702,8 +1759,9 @@ EOF
 	# write; the handler adds none of its own.
 	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
 		"the meta grow bumps SpRev exactly once"
-	# The meta ladder doubles the slice's meta total (§8.5), so from 1 extent
-	# the next rung adds exactly 1 more, as a second meta group.
+	# The meta ladder doubles the slice's meta total (architecture.md,
+	# GrowSlice), so from 1 extent the next rung adds exactly 1 more, as a
+	# second meta group.
 	assert_eq "$(smoke_jq "$(sp_json sp0)" \
 		'[.slices[] | .meta_grp_list[]] | length')" "2" "sp0 meta group count"
 	assert_eq "$(smoke_grp_field sp0 "$grpId" ext_cnt)" "1" \
@@ -1717,7 +1775,8 @@ EOF
 	assert_eq "$(printf '%s\n' "$grpAddrs" | wc -l | tr -d ' ')" "2" \
 		"the new meta group's legs are on two distinct DNs"
 	# D-F: only the DNs the NEW group landed on were charged, so only their
-	# DnRev moved — the ledger bumps once per node it touched (§5.5).
+	# DnRev moved — the ledger bumps once per node it touched (architecture.md,
+	# Revision keys and the sync fan-out).
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
 		want=${beforeRev[i]}
@@ -1729,8 +1788,8 @@ EOF
 	done
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - SP_EXT_COST - 2))" \
 		"Σ DN free after the meta grow"
-	# Every cntlr's CN is charged the delta too (§8.5), so the footprint the
-	# CN reserves tracks the current geometry: 3 -> 4.
+	# Every cntlr's CN is charged the delta too (architecture.md, GrowSlice),
+	# so the footprint the CN reserves tracks the current geometry: 3 -> 4.
 	assert_eq "$(smoke_sp_footprint sp0)" "4" "sp0 footprint after the meta grow"
 	for i in 0 1 2; do
 		addr=$(cn_addr "$i")
@@ -1779,8 +1838,8 @@ EOF
 	assert_field "$out" '.sp_id' "$spId" "set-sp-level reply sp_id"
 	assert_field "$(sp_json sp0)" '.sp_conf.sp_level' "SP_LEVEL_READONLY" \
 		"sp0 sp_level READONLY"
-	# §11.7: the level is not applied here in any sense — the bump IS the
-	# mechanism, so exactly one is owed per call.
+	# The level is not applied here in any sense (architecture.md, SpLevel) —
+	# the bump IS the mechanism, so exactly one is owed per call.
 	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
 		"set-sp-level READONLY bumps SpRev exactly once"
 	out=$(gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE)
@@ -1790,7 +1849,8 @@ EOF
 	assert_eq "$SP_REV" "$((spRevBefore + 2))" \
 		"set-sp-level READWRITE bumps SpRev exactly once"
 	# Slot 2 is added because step 10 creates a third cntlr on it; slots 0 and
-	# 1 stay because a cntlr and every side already name them (§11.8).
+	# 1 stay because a cntlr and every side already name them (architecture.md,
+	# cntlid slots).
 	out=$(gw set-cntlid-slots --sp sp0 --rev "$SP_REV" --slots 0,1,2)
 	refresh_rev sp0
 	assert_field "$out" '.sp_id' "$spId" "set-cntlid-slots reply sp_id"
@@ -1817,15 +1877,17 @@ EOF
 	assert_eq "$(smoke_td_field sp0 t0 dev_id)" "1" "t0 dev_id"
 	assert_eq "$(smoke_td_field sp0 t0 ori_id)" "0" "t0 ori_id (no origin)"
 	assert_eq "$(smoke_td_field sp0 t0 size)" "$TD_SIZE" "t0 size"
-	# §8.7: the gateway always writes created false; only the sp-worker flips
-	# it, once a cntlr has reported the thin volume OK in every slice.
+	# The gateway always writes created false (architecture.md, Thin devices);
+	# only the sp-worker flips it, once a cntlr has reported the thin volume OK
+	# in every slice.
 	assert_eq "$(smoke_td_field sp0 t0 created)" "false" "t0 created"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.td_name_list | @json')" \
 		'["t0"]' "sp0 td_name_list"
 	assert_field "$(sp_json sp0)" '.sp_conf.next_dev_id' "2" "sp0 next_dev_id"
-	# The snapshot gate. §8.7 requires it to write LITERALLY nothing — no key,
-	# no next_id and no next_dev_id consumed, no bump — because ids are never
-	# reused and a consumed one would be visible for ever.
+	# The snapshot gate. architecture.md, Thin devices, requires it to write
+	# LITERALLY nothing — no key, no next_id and no next_dev_id consumed, no
+	# bump — because ids are never reused and a consumed one would be visible
+	# for ever.
 	local beforeNextId beforeDevId
 	beforeNextId=$(smoke_jq "$(sp_json sp0)" '.sp_conf.next_id')
 	beforeDevId=$(smoke_jq "$(sp_json sp0)" '.sp_conf.next_dev_id')
@@ -1840,15 +1902,16 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.tds | keys | @json')" '["t0"]' \
 		"no t1 key after the refused snapshot"
 	# Playing the worker, at exactly the step the precondition demands it
-	# (§10.9, §2.4). The flip goes through model.FlipCreated, so it also bumps
-	# SpRev — which the cached token has to be refreshed from.
+	# (Integration test plan, The etcd verification, `workerctl`). The flip
+	# goes through model.FlipCreated, so it also bumps SpRev — which the
+	# cached token has to be refreshed from.
 	spRevBefore=$SP_REV
 	out=$(wctl set-created --sp sp0 --name t0)
 	assert_field "$out" '.flipped' "true" "set-created flipped t0"
 	refresh_rev sp0
 	assert_eq "$(smoke_td_field sp0 t0 created)" "true" "t0 created after the flip"
 	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
-		"the created flip bumps SpRev exactly once (§2.4)"
+		"the created flip bumps SpRev exactly once"
 	# The flip's own reply carries the new SpRev, so the token the script now
 	# caches and the one the flip left behind must be the same number.
 	assert_field "$out" '.sp_rev' "$SP_REV" \
@@ -1889,8 +1952,9 @@ EOF
 		"subsystem allowed_hosts"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.nqn_list | @json')" \
 		"[\"$nqn\"]" "sp0 nqn_list"
-	# §8.8: the CdcEntry IS desired state — it lists the transports of every
-	# ENABLED cntlr's CN, which dnv-cdc serves the discovery log from.
+	# The CdcEntry IS desired state (architecture.md, Subsystems, namespaces) —
+	# it lists the transports of every ENABLED cntlr's CN, which dnv-cdc serves
+	# the discovery log from.
 	local cdcKey cdc
 	cdcKey="$DNV_PREFIX cdc $cidHex $(printf '%02x' "$(sp_shard sp0)")"
 	cdcKey="$cdcKey $(printf '%016x' "$spId") $(printf '%016x' "$ssId")"
@@ -1918,11 +1982,13 @@ EOF
 		"[\"$host0\",\"$host1\"]" "CdcEntry allowed_hosts after set-ss-hosts"
 	# A third cntlr on the one CN that carries none, in the slot step 8 added.
 	#
-	# Which CN that is cannot be hardcoded: §6.5 picks the SP's two original
-	# cntlrs at RANDOM out of the three, so the free one is whichever the
+	# Which CN that is cannot be hardcoded: the allocator picks the SP's two
+	# original cntlrs at RANDOM out of the three (architecture.md,
+	# Per-operation allocation), so the free one is whichever the
 	# allocator did not take. It is computed here from the SP's own stored
 	# cntlrs — which is also what makes the assertion below meaningful, since
-	# §6.4 is exactly the rule that two cntlrs of one SP never share a CN.
+	# architecture.md, Finding CN candidates, is exactly the rule that two
+	# cntlrs of one SP never share a CN.
 	local freeCn used
 	used=$(smoke_jq "$(sp_json sp0)" '[.cntlrs[].addr_port] | @json')
 	freeCn=""
@@ -1942,18 +2008,19 @@ EOF
 	local newCntlrJson
 	newCntlrJson=$(smoke_jq "$(sp_json sp0)" '.cntlrs[$c] | @json' \
 		--arg c "$(printf '%016x' "$newCntlr")")
-	# §8.6: a new cntlr is a standby, enabled from birth — which is what puts
-	# its CN into the CdcEntry below.
+	# A new cntlr is a standby, enabled from birth (architecture.md, Cntlrs) —
+	# which is what puts its CN into the CdcEntry below.
 	assert_field "$newCntlrJson" '.primary' "false" "the new cntlr is a standby"
 	assert_field "$newCntlrJson" '.disabled' "false" "the new cntlr is enabled"
 	assert_field "$newCntlrJson" '.cntlid_slot' "2" "the new cntlr's cntlid_slot"
 	assert_field "$newCntlrJson" '.addr_port' "$freeCn" \
-		"the new cntlr landed on the CN carrying none (§6.4)"
+		"the new cntlr landed on the CN carrying none"
 	assert_eq "$(jq_of "$(raw_key "$cdcKey")" '.nvme_tr_conf_list | length')" \
 		"3" "CdcEntry gained the new cntlr's transport"
 	smoke_check_cn sp0 "$freeCn" 2
 	# Disabling makes its namespaces ANA-inaccessible, so its CN must stop
-	# being advertised at the same instant (§8.8).
+	# being advertised at the same instant
+	# (architecture.md, Subsystems, namespaces).
 	out=$(gw set-cntlr-enabled --sp sp0 --rev "$SP_REV" --id "$newCntlr" \
 		--enabled=false)
 	refresh_rev sp0
@@ -2002,16 +2069,18 @@ EOF
 	assert_field "$ns" '.ns_idx' "1" "namespace ns_idx"
 	assert_field "$ns" '.td_id' "$t0Id" "namespace td_id is t0's"
 	assert_field "$ns" '.suspended' "false" "namespace suspended"
-	# §8.8 Defaults: an empty dev_uuid/dev_nguid asks the gateway to mint one,
-	# and only the canonical forms validateDevIdentity accepts may be stored —
-	# a generated identity must be indistinguishable from a supplied one.
+	# CreateNamespace's Defaults (architecture.md, Subsystems, namespaces): an
+	# empty dev_uuid/dev_nguid asks the gateway to mint one, and only the
+	# canonical forms validateDevIdentity accepts may be stored — a generated
+	# identity must be indistinguishable from a supplied one.
 	assert_eq "$(smoke_jq "$ns" \
 		'.dev_uuid | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")')" \
 		"true" "the minted dev_uuid is a canonical RFC 4122 v4 uuid"
 	assert_eq "$(smoke_jq "$ns" '.dev_nguid | test("^[0-9a-f]{32}$")')" "true" \
 		"the minted dev_nguid is 32 lower-case hex characters"
-	# §8.8: a namespace is a FIELD of its subsystem, not a key, so a reused
-	# ns_idx is INVALID_ARGUMENT and never ALREADY_EXISTS.
+	# A namespace is a FIELD of its subsystem, not a key (architecture.md,
+	# Subsystems, namespaces), so a reused ns_idx is INVALID_ARGUMENT and never
+	# ALREADY_EXISTS.
 	assert_no_write "create-ns with an ns_idx the subsystem already uses" \
 		gwx INVALID_ARGUMENT create-ns --sp sp0 --rev "$SP_REV" \
 		--nqn "$nqn" --idx 1 --td t0
@@ -2050,8 +2119,8 @@ EOF
 		"transfer allowed_hosts"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.xfer_name_list | @json')" \
 		'["x0"]' "sp0 xfer_name_list"
-	# §5.9: the xfer subsystem is reached out of band, never advertised, so
-	# no CdcEntry appears for it.
+	# The xfer subsystem is reached out of band, never advertised (gateway.md,
+	# Transfers), so no CdcEntry appears for it.
 	assert_eq "$(key_count cdc)" "1" "no CdcEntry is written for a transfer"
 	out=$(gw get-xfer --sp sp0 --name x0)
 	assert_field "$out" '.xfer.xfer_id' "$xferId" "get-xfer xfer_id"
@@ -2064,7 +2133,8 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.xfers.x0.allowed_hosts | @json')" \
 		"[\"$host2\",\"$host3\"]" "transfer allowed_hosts after the update"
 	# The abort path leaves the origin EXACTLY as it is, so the next syncup
-	# resumes it (§11.3): the whole namespace record must be byte-identical.
+	# resumes it (architecture.md, Transfer + clone = cross-SP live migration):
+	# the whole namespace record must be byte-identical.
 	# An empty record would make that comparison vacuous.
 	local nsBefore
 	nsBefore=$(smoke_ns sp0 "$nqn" 1)
@@ -2092,9 +2162,10 @@ EOF
 	out=$(gw delete-xfer --sp sp0 --rev "$SP_REV" --name x0)
 	refresh_rev sp0
 	assert_field "$out" '.xfer_id' "$xferId" "delete-xfer reply xfer_id"
-	# §8.10: the finalize suspends the origin in the SAME transaction that
-	# removes the record, which is what closes the window in which a syncup
-	# would resume a source the destination is already serving.
+	# The finalize suspends the origin in the SAME transaction that removes
+	# the record (architecture.md, Transfers), which is what closes the window
+	# in which a syncup would resume a source the destination is already
+	# serving.
 	assert_field "$(smoke_ns sp0 "$nqn" 1)" '.suspended' "true" \
 		"the finalize path retired the origin namespace"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.xfer_name_list | length')" \
@@ -2125,9 +2196,9 @@ EOF
 	assert_field "$clone" '.src_block_size' "1073741824" "clone src_block_size"
 	assert_eq "$(smoke_jq "$clone" '.src_tr_conf_list | length')" "1" \
 		"clone src_tr_conf_list"
-	# §8.9: a clone starts with no source bitmap at all; the chunks are a pure
-	# optimization that may arrive at any time, and the record carries no
-	# count of them.
+	# A clone starts with no source bitmap at all (architecture.md, Clones);
+	# the chunks are a pure optimization that may arrive at any time, and the
+	# record carries no count of them.
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
 		'[]' "the clone holds no chunk at creation"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.clone_name_list | @json')" \
@@ -2136,8 +2207,8 @@ EOF
 	assert_field "$out" '.clone.clone_id' "$cloneId" "get-clone clone_id"
 	# A chunk is addressed by the PAIR (src_slice_idx, bm_idx): src_slice_idx
 	# picks the source slice, bm_idx fixes the chunk's byte offset WITHIN that
-	# one slice's bitmap and says nothing about any other slice (§10.11 step
-	# 13, §5.8).
+	# one slice's bitmap and says nothing about any other slice (gateway.md,
+	# Clones).
 	#
 	# The three appends below DISCRIMINATE that addressing rather than merely
 	# exercising it. A second chunk of the SAME slice must make a SECOND key
@@ -2182,8 +2253,9 @@ EOF
 		"clone src_tr_conf tr_addr after the update"
 	# --force skips the hydration proof (AG4), which is how a clone whose
 	# source never existed is abandoned. Since 2026-09-16 the deciding STM
-	# LATCHES instead of sweeping (§5.8): it sets `deleting`, RESUMES every
-	# namespace backed by the destination td (§8.9 Action) — here the one step
+	# LATCHES instead of sweeping (gateway.md, Clones): it sets `deleting`,
+	# RESUMES every namespace backed by the destination td (DeleteClone's
+	# Action, architecture.md, Clones) — here the one step
 	# 12's finalize retired — and returns. The resume rides the latch and not
 	# the drain on purpose: deferred, the destination namespace would go dark
 	# for the whole teardown.
@@ -2227,8 +2299,8 @@ EOF
 		--src-stripe 1048576 --src-block 1073741824
 	# The drain is the sp coordinator's, and this suite runs no worker: the
 	# worker-role stand-in finishes it, exactly as `wctl drain-sp` does for the
-	# sp drain. The REAL coordinator draining a real clone is dnv-worker.md
-	# §14's case G.
+	# sp drain. The REAL coordinator draining a real clone is the drain case
+	# (dnv-worker.md, Integration test plan, Cases).
 	out=$(wctl drain-clone --sp sp0 --name cl0)
 	assert_eq "$(jq_of "$out" '.clone_deleted')" "true" \
 		"the drain reached its final STM"
@@ -2257,9 +2329,10 @@ EOF
 	srcAddr=$(sp_side_addr sp0 data 0 0)
 	srcSlot=$(smoke_side_field sp0 "$srcSide" cntlid_slot)
 	grpExt=$(smoke_grp_field sp0 "$dataGrp" ext_cnt)
-	# §6.5 seeds the destination scan's black list with every DN the group
-	# already occupies, which is what keeps the migration out of the failure
-	# domain it is meant to leave.
+	# CreateMigration's placement (architecture.md, Per-operation allocation)
+	# seeds the destination scan's black list with every DN the group already
+	# occupies, which is what keeps the migration out of the failure domain it
+	# is meant to leave.
 	local grpBlack
 	grpBlack=$(smoke_grp_addrs sp0 "$dataGrp")
 	# An empty set would make the black-list negative below vacuous.
@@ -2270,8 +2343,9 @@ EOF
 	local migrId
 	migrId=$(jq_of "$out" '.migr_id')
 	assert_ne "$migrId" "0" "create-migr migr_id"
-	# §8.11: the destination is a SECOND side hung off the source's own leg —
-	# they export one NQN and the CN aggregates them as one namespace's paths.
+	# The destination is a SECOND side hung off the source's own leg
+	# (architecture.md, Migrations) — they export one NQN and the CN aggregates
+	# them as one namespace's paths.
 	assert_eq "$(smoke_leg_side_ids sp0 "$srcLeg" | wc -l | tr -d ' ')" "2" \
 		"the source leg now carries two sides"
 	dstSide=$(smoke_jq "$(sp_json sp0)" '.migrs.m0.dst_side_id')
@@ -2290,9 +2364,9 @@ EOF
 	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$dstAddr")" "0" \
 		"the destination landed on a DN the group did not already occupy"
 	# The destination exports under a DIFFERENT cntlid slot than the source,
-	# because both sides of the leg are exported at once (§11.2). The slot is
-	# captured first so that a read that did not answer stops the run instead
-	# of handing assert_ne an empty string.
+	# because both sides of the leg are exported at once (architecture.md,
+	# Migration). The slot is captured first so that a read that did not
+	# answer stops the run instead of handing assert_ne an empty string.
 	dstSlot=$(smoke_side_field sp0 "$dstSide" cntlid_slot)
 	assert_ne "$dstSlot" "$srcSlot" \
 		"the destination side's cntlid_slot differs from the source's"
@@ -2308,7 +2382,8 @@ EOF
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - 12 - grpExt))" \
 		"Σ DN free after the destination side was charged"
 	# A migration's chunks are an immutable append sequence numbered by
-	# bm_cnt, unlike a clone's slice-addressed ones (§8.11).
+	# bm_cnt, unlike a clone's slice-addressed ones (architecture.md,
+	# Migrations).
 	gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-hex aa
 	refresh_rev sp0
 	gw append-migr-bm --sp sp0 --rev "$SP_REV" --name m0 --bm-hex bb
@@ -2406,7 +2481,8 @@ EOF
 	assert_eq "$(smoke_side_field sp0 "$spareSide" provisioned)" "false" \
 		"the spare's side is unprovisioned"
 	# The spare exists to survive the loss of a DN the group already uses, so
-	# §6.5's scan is black-listed off every one of them.
+	# its scan is black-listed off every one of them (architecture.md,
+	# Per-operation allocation).
 	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$spareAddr")" "0" \
 		"the spare landed on a DN the group did not already occupy"
 	for i in 0 1 2 3; do
@@ -2428,13 +2504,15 @@ EOF
 		--arg g "$dataGrp" --arg l "$targetLeg")
 	targetAddr=$(smoke_side_field sp0 \
 		"$(smoke_leg_side_ids sp0 "$targetLeg")" addr_port)
-	# §9.4: switching to a side that has not finished zeroing would put an
-	# unwritten member into the md array, so the refusal must write nothing.
+	# Switching to a side that has not finished zeroing would put an unwritten
+	# member into the md array (architecture.md, Side provisioning protocol),
+	# so the refusal must write nothing.
 	assert_no_write "switch-spare with an unprovisioned spare" \
 		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --spare "$spareLeg" --target "$targetLeg"
 	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "SpRev after the refused switch"
-	# Playing the worker again (§2.4): FlipProvisioned is the same model op
+	# Playing the worker again (Integration test plan,
+	# The etcd verification, `workerctl`): FlipProvisioned is the same model op
 	# the sp-worker calls once the dn agent reports the side zeroed, and it
 	# bumps SpRev, so the cached token has to be refreshed.
 	out=$(wctl set-provisioned --sp sp0 --slice "$slice" --leg "$spareLeg" \
@@ -2450,8 +2528,9 @@ EOF
 		"switch-spare reply curr_active_leg_id"
 	assert_field "$out" '.curr_spare_leg_id' "$targetLeg" \
 		"switch-spare reply curr_spare_leg_id"
-	# §8.12: the spare takes the target's POSITION in leg_list — the md member
-	# slot the array is missing — and the target is parked, not deleted.
+	# The spare takes the target's POSITION in leg_list (architecture.md,
+	# Spare legs) — the md member slot the array is missing — and the target
+	# is parked, not deleted.
 	assert_eq "$(smoke_grp_leg_ids sp0 "$dataGrp" | sed -n "$((targetPos + 1))p")" \
 		"$spareLeg" "the spare took the target's position in leg_list"
 	assert_eq "$(smoke_grp_spare_ids sp0 "$dataGrp")" "$targetLeg" \
@@ -2493,8 +2572,8 @@ EOF
 	assert_field "$out" '.bitmap_hex' "" "get-leg-bm bitmap_hex"
 	# The two inspects need a fake that already knows the object, and no
 	# worker in this suite ever syncs one up — so the state is hand-written,
-	# which is the fake's documented operator-edit path (§14.9). Without it
-	# both replies would be a truthful but empty null info (AG3).
+	# which is the fake's documented operator-edit path (integtest/fakeagent).
+	# Without it both replies would be a truthful but empty null info (AG3).
 	local primary primaryId primaryAddr primaryCnId primaryDir sideDir sideDnId
 	primary=$(sp_primary_cntlr sp0)
 	primaryId=${primary%% *}
@@ -2526,7 +2605,7 @@ EOF
         "revision":"7",
         "side_conf":{"ext_cnt":"1","primary_cn_id":"$primaryCnId"}}}}}
 EOF
-	# architecture.md §8.6: the reply's applied_revision is the agent's own
+	# architecture.md, Cntlrs: the reply's applied_revision is the agent's own
 	# last applied revision for the object, passed through with the info. The
 	# seeded 7 is distinctive — the stored sp_rev is far past 7 by this
 	# stage, so a handler that regressed to the store cannot pass.
@@ -2562,7 +2641,7 @@ EOF
 	assert_eq "$(key_count subsystem)" "0" "subsystem keys after delete-ss"
 	# The CdcEntry goes in the SAME transaction: leaving it would keep dnv-cdc
 	# advertising a subsystem no cntlr serves, and nvme-stas hosts would keep
-	# reconnecting to it (§8.8).
+	# reconnecting to it (architecture.md, Subsystems, namespaces).
 	assert_eq "$(key_count cdc)" "0" "cdc keys after delete-ss"
 	# The snapshot-child gate, observed: t1 is an uncreated snapshot of t0, so
 	# t0 cannot go first — retire runs before build (CN9), and a delete of the
@@ -2582,9 +2661,10 @@ EOF
 	sliceId=$(sp_first_slice sp0)
 	out=$(gw delete-sp --sp sp0 --rev "$SP_REV")
 	assert_field "$out" '.sp_id' "$spId" "delete-sp reply sp_id"
-	# §5.4 (SPD4): delete-sp LATCHES and returns. The SP is still there,
-	# flagged, with every key it implies intact — that inventory shrinking
-	# is what an operator watches as progress.
+	# gateway.md, Storage pools and GrowSlice (SPD4): delete-sp LATCHES and
+	# returns. The SP is still there, flagged, with every key it implies
+	# intact — that inventory shrinking is what an operator watches as
+	# progress.
 	refresh_rev sp0
 	latchRev=$SP_REV
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.deleting')" "true" \
@@ -2613,7 +2693,7 @@ EOF
 	# dnv-worker: `wctl drain-sp` is the worker-role stand-in, the same kind of
 	# write as `wctl set-provisioned` and `wctl set-created` above. The REAL
 	# coordinator driving a real drain — restart included — is
-	# dnv-worker.md §14's case.
+	# the drain case of dnv-worker.md, Integration test plan, Cases.
 	drainOut=$(wctl drain-sp --sp sp0)
 	assert_field "$drainOut" '.sp_id' "$(printf '%016x' "$spId")" \
 		"drain-sp echoes the sp_id"
@@ -2623,9 +2703,10 @@ EOF
 		"the drain emptied every slice"
 	assert_eq "$(jq_of "$drainOut" '.sp_deleted')" "true" \
 		"the drain reached its final STM"
-	# §5.4 as amended: every key the SP implied is gone, and the whole
-	# footprint returns to the nodes — one write, one capacity key and one
-	# revision bump per node per transaction that touched it.
+	# gateway.md, Storage pools and GrowSlice: every key the SP implied is
+	# gone, and the whole footprint returns to the nodes — one write, one
+	# capacity key and one revision bump per node per transaction that
+	# touched it.
 	assert_eq "$(key_count sp_conf)" "0" "sp_conf keys after the drain"
 	assert_eq "$(key_count sp_rev)" "0" "sp_rev keys after the drain"
 	assert_eq "$(key_count sp_id_to_name)" "0" "sp_id_to_name keys"
@@ -2679,31 +2760,37 @@ EOF
 	global=$(raw_key "$DNV_PREFIX cn_global $cidHex")
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" "CnGlobal Σbucket"
 	assert_field "$global" '.next_id' "4" "CnGlobal next_id never rewinds"
-	# §8.1: the emptiness gate is Σbucket == 0 on all three globals, and the
-	# four keys the cluster is made of go together.
+	# The emptiness gate is Σbucket == 0 on all three globals (architecture.md,
+	# Clusters), and the four keys the cluster is made of go together.
 	out=$(gw delete-cluster)
 	assert_field "$out" '.cluster_id' "$CID" "delete-cluster echoes the cluster_id"
 	assert_eq "$(key_count dnv)" "0" "the whole dnv prefix is empty"
 }
 
 # ---------------------------------------------------------------------------
-# Case A — `parallel` (§10.12): 3 gateways, disjoint resources
+# Case A — `parallel` (Integration test plan, Cases): 3 gateways, disjoint
+# resources
 # ---------------------------------------------------------------------------
 #
 # Every wave below is ONE `race` invocation whose --targets names all three
 # instances, so the jobs round-robin across gw0/gw1/gw2 and are released
-# together against race's barrier (§10.8). That is §10.1(b)'s disjoint half:
+# together against race's barrier (Integration test plan,
+# The driver, `gatewayctl`). That is the disjoint half of claim (b)
+# (Integration test plan, What the suite proves):
 # work that shares no object must ALL succeed, and the state the jobs DO share
 # — the three *Global counters, the per-DN and per-CN ledgers, the capacity
-# index of §5.6 — must land exactly where a sequential run would have left it.
-# The gateways are stateless (§0 #3): correctness here rests entirely on
-# RunSTM's serializable-snapshot isolation plus the §5.5 tokens.
+# index (architecture.md, Capacity index keys) — must land exactly where a
+# sequential run would have left it.
+# The gateways are stateless (GW1): correctness here rests entirely on
+# RunSTM's serializable-snapshot isolation plus the tokens of architecture.md,
+# Revision keys and the sync fan-out.
 #
-# Token discipline (§10.10): every SP-scoped wave fetches one token PER SP
-# through the gateway's own read path, in the PARENT shell, and bakes it into
-# that job's line before the wave is released. The harness's cached $SP_REV is
-# deliberately never used in this case — it holds ONE SP's token and this case
-# drives ten of them at once — so `refresh_rev` has nothing to refresh here.
+# Token discipline (Integration test plan, What a pass means): every SP-scoped
+# wave fetches one token PER SP through the gateway's own read path, in the
+# PARENT shell, and bakes it into that job's line before the wave is released.
+# The harness's cached $SP_REV is deliberately never used in this case — it
+# holds ONE SP's token and this case drives ten of them at once — so
+# `refresh_rev` has nothing to refresh here.
 
 # parallel_race releases one wave. Jobs arrive as JSON lines on stdin and the
 # result array comes back on stdout; ssh forwards our stdin to gatewayctl on
@@ -2713,7 +2800,8 @@ EOF
 # same four DN and three CN keys, and GW9 re-runs a whole candidate unit
 # (scan + STM) after every "candidate changed", so a job's WALL time is a
 # retry queue, not one round trip. The timeout must not be the thing that
-# decides a wave (§0 #13: this suite asserts correctness, never latency).
+# decides a wave (Integration test plan, What the suite proves: this suite
+# asserts correctness, never latency).
 parallel_race() { # jobs on stdin -> the race result array on stdout
 	sshw "$WORK/bin/gatewayctl --cluster $CLUSTER --trace-id $TRACE" \
 		"--timeout 30 race --targets" \
@@ -2731,7 +2819,7 @@ parallel_ok_cnt() { # <race array>
 	jq_of "$1" '[.[] | select(.code == "OK")] | length'
 }
 
-# The §10.5 identity plan for this case: spA0..spA9, one td `t0`, one
+# The identity plan for this case: spA0..spA9, one td `t0`, one
 # subsystem `<prefix>:<cluster>:<sp>:ss0` and one namespace at ns_idx 1 per SP.
 parallel_sp() { printf 'spA%d' "$1"; }
 parallel_nqn() { printf '%s:%s:%s:ss0' "$NQN_PREFIX" "$CLUSTER" "$(parallel_sp "$1")"; }
@@ -2748,7 +2836,8 @@ parallel_bucket_sum() { # <global json>
 	jq_of "$1" '((.shard_bucket // []) | add) // 0'
 }
 
-# parallel_node_rev reads a node's *Rev key — the §5.5 token — straight from
+# parallel_node_rev reads a node's *Rev key — the token (architecture.md,
+# Revision keys and the sync fan-out) — straight from
 # etcd. The key is addressed by id + shard, both of which live in the conf the
 # caller already fetched, so this stays one extra read per node.
 parallel_node_rev() { # <dn|cn> <DnConf|CnConf json>
@@ -2757,7 +2846,8 @@ parallel_node_rev() { # <dn|cn> <DnConf|CnConf json>
 }
 
 # parallel_sp_rev reads an SP's SpRev key as ground truth. (`wctl get-sp`'s
-# `store_rev` is etcd's own revision, NOT the §5.5 token, so it can never
+# `store_rev` is etcd's own revision, NOT the token (architecture.md,
+# Revision keys and the sync fan-out), so it can never
 # stand in for this.)
 parallel_sp_rev() { # <sp name>
 	local conf
@@ -2767,12 +2857,15 @@ parallel_sp_rev() { # <sp name>
 }
 
 # parallel_cap_key_cnt counts the capacity keys that name exactly this node at
-# exactly this free count. §5.6 puts free_ext_cnt INTO the key (as %016x) so
-# the §6.3/§6.4 scans need no point reads, which means a stale key is a silent
+# exactly this free count. The capacity index puts free_ext_cnt INTO the key
+# (as %016x; architecture.md, Capacity index keys) so the DN and CN scans
+# (architecture.md, Finding DN candidates and Finding CN candidates) need no
+# point reads, which means a stale key is a silent
 # allocator bug that no *Conf assertion would ever catch — hence rebuilding the
 # key's tail from the conf and demanding exactly one match. The bin field of a
 # dn_capacity key is not rebuilt: matching the " <free> <addr>" tail pins the
-# whole distinguishing part of the key without duplicating §6.2's binning.
+# whole distinguishing part of the key without duplicating the binning of
+# architecture.md, DN bins.
 parallel_cap_key_cnt() { # <list-keys output> <free_ext_cnt> <addr_port>
 	printf '%s\n' "$1" | grep -c -F -- "$(printf ' %016x %s' "$2" "$3")" || true
 }
@@ -2784,10 +2877,10 @@ case_parallel() {
 	local sp_ids="" td_ids=""
 
 	# -------------------------------------------------------------------
-	stage 1 "create-cluster itgw on gw0 (§10.12 step 1)"
+	stage 1 "create-cluster itgw on gw0"
 	# -------------------------------------------------------------------
 	# The one sequential step: every later wave needs the cluster's four keys
-	# to exist, and §10.11 step 1 already proves the RPC's full write set, so
+	# to exist, and case S stage 1 already proves the RPC's full write set, so
 	# here only the preconditions the waves depend on are re-asserted.
 	new_cluster
 
@@ -2807,7 +2900,7 @@ case_parallel() {
 	assert_field "$out" '.dn_global.next_id' "1" "get-cluster dn_global next_id"
 
 	# -------------------------------------------------------------------
-	stage 2 "one wave: 4 create-dn + 3 create-cn across gw0-2 (§10.12 step 2)"
+	stage 2 "one wave: 4 create-dn + 3 create-cn across gw0-2"
 	# -------------------------------------------------------------------
 	# Seven jobs on seven disjoint addr_ports, but all four DN jobs mint their
 	# dn_id out of the SAME dn_global key and all three CN jobs out of the same
@@ -2839,7 +2932,8 @@ case_parallel() {
 		'[1,2,3]' "node wave: the cn_id set"
 
 	# ② ground truth per node: the conf, the capacity key and the rev key —
-	# the three keys CreateDiskNode/CreateControllerNode write (§5.4).
+	# the three keys CreateDiskNode/CreateControllerNode write
+	# (architecture.md, Disk nodes and Controller nodes).
 	keys=$(wctl list-keys --prefix dn_capacity)
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
@@ -2855,8 +2949,10 @@ case_parallel() {
 			"$addr: side_ptr_list on a fresh DN"
 		assert_eq "$(parallel_cap_key_cnt "$keys" "$DN_EXTENTS" "$addr")" "1" \
 			"$addr: its dn_capacity key at free $DN_EXTENTS"
-		# Every rev starts at 1 (§5.5); it is the token the SP waves will
-		# consume, and a node created twice would show up here as a 2.
+		# Every rev starts at 1
+		# (architecture.md, Revision keys and the sync fan-out); it is the
+		# token the SP waves will consume, and a node created twice would show
+		# up here as a 2.
 		out=$(parallel_node_rev dn "$conf")
 		assert_field "$out" '.revision' "1" "$addr: dn_rev revision"
 		assert_field "$out" '.addr_port' "$addr" "$addr: dn_rev addr_port"
@@ -2871,8 +2967,9 @@ case_parallel() {
 		addr=$(cn_addr "$i")
 		conf=$(cn_json "$addr")
 		assert_ne "$(jq_of "$conf" '.cn_id')" "0" "$addr: cn_id"
-		# §6.1: the fakes answer GetCnSize with 0, which is what makes the
-		# gateway apply DefaultCnCap (4 TiB / 1 GiB = 4096 extents).
+		# The fakes answer GetCnSize with 0, which is what makes the gateway
+		# apply DefaultCnCap (4 TiB / 1 GiB = 4096 extents; architecture.md,
+		# Size → extents).
 		assert_field "$conf" '.total_ext_cnt' "$CN_EXTENTS" "$addr: total_ext_cnt"
 		assert_field "$conf" '.free_ext_cnt' "$CN_EXTENTS" "$addr: free_ext_cnt"
 		assert_field "$conf" '.location' "$(cn_loc "$i")" "$addr: location"
@@ -2914,11 +3011,11 @@ case_parallel() {
 	assert_eq "$base_keys" "25" "keys in the store after the node wave"
 
 	# -------------------------------------------------------------------
-	stage 3 "one wave: 10 create-sp spA0..spA9 (§10.12 step 3)"
+	stage 3 "one wave: 10 create-sp spA0..spA9"
 	# -------------------------------------------------------------------
 	# Ten allocating RPCs against four DNs and three CNs at once. Each one
 	# scans the capacity index outside its STM and commits inside it, so most
-	# of them WILL lose a candidate unit to a neighbour; GW9 (§0 #8) re-runs
+	# of them WILL lose a candidate unit to a neighbour; GW9 re-runs
 	# the unit and never surfaces "candidate changed", so the only correct
 	# outcome is ten OKs and an exact ledger.
 	wave=""
@@ -2941,7 +3038,8 @@ case_parallel() {
 		"sp_global Σ shard_bucket"
 
 	# AGGREGATE accounting. Which DN carries which leg is the allocator's
-	# choice (§6.3 walks the bins, and ten concurrent scans see ten different
+	# choice (the scan of architecture.md, Finding DN candidates, walks the
+	# bins, and ten concurrent scans see ten different
 	# stores), so the per-node numbers are NOT predictable — but the total is:
 	# every SP charges SP_EXT_COST extents (meta 1×2 legs + data 2×2 legs) and
 	# nothing else may have moved.
@@ -2951,9 +3049,10 @@ case_parallel() {
 	done
 	assert_eq "$used" "$((PAR_CLIENTS * SP_EXT_COST))" \
 		"Σ over the DNs of (total − free) after $PAR_CLIENTS SPs"
-	# The CN side of the same identity: §6.5 charges every cntlr the SP's
-	# WHOLE footprint (meta 1 + data 2 = 3), and each SP has SP_CNTLR_CNT of
-	# them, so the CNs carry cntlr_cnt × footprint per SP.
+	# The CN side of the same identity: every cntlr is charged the SP's WHOLE
+	# footprint (meta 1 + data 2 = 3;
+	# architecture.md, Per-operation allocation), and each SP has SP_CNTLR_CNT
+	# of them, so the CNs carry cntlr_cnt × footprint per SP.
 	used=0
 	for i in 0 1 2; do
 		used=$((used + CN_EXTENTS - $(cn_free "$(cn_addr "$i")")))
@@ -2961,8 +3060,9 @@ case_parallel() {
 	assert_eq "$used" "$((PAR_CLIENTS * SP_CNTLR_CNT * 3))" \
 		"Σ over the CNs of (total − free) after $PAR_CLIENTS SPs"
 
-	# §5.6: the capacity key must have been rewritten to the node's new free
-	# count by every single one of the ten commits that touched it.
+	# The capacity key must have been rewritten to the node's new free count
+	# by every single one of the ten commits that touched it (architecture.md,
+	# Capacity index keys).
 	keys=$(wctl list-keys --prefix dn_capacity)
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
@@ -2978,10 +3078,10 @@ case_parallel() {
 	done
 	assert_eq "$(key_count cn_capacity)" "3" "cn_capacity keys after the sp wave"
 
-	# Per SP: the complete §5.4 write set (verify_sp is the mechanical form of
-	# §10.15 step 3's "either the whole write set or no key at all"), plus the
-	# token, which must be 1 — a second bump would mean something wrote this
-	# SP twice.
+	# Per SP: the complete write set (gateway.md, Storage pools and GrowSlice;
+	# verify_sp is the mechanical form of case D stage 3's "either the whole
+	# write set or no key at all"), plus the token, which must be 1 — a second
+	# bump would mean something wrote this SP twice.
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
 		verify_sp "$sp"
@@ -2993,11 +3093,11 @@ case_parallel() {
 		"list-sps after the sp wave"
 
 	# -------------------------------------------------------------------
-	stage 4 "one wave: 10 create-td, one per SP (§10.12 step 4)"
+	stage 4 "one wave: 10 create-td, one per SP"
 	# -------------------------------------------------------------------
 	# The first token-carrying wave. Each job gets ITS OWN SP's token, read
 	# here in the parent shell one `get-sp` at a time and baked into the job
-	# line — §0 #7: a wrong token can never match, so a wave built
+	# line — GW6: a wrong token can never match, so a wave built
 	# from one shared token would be nine ABORTEDs. The tokens are sent as
 	# JSON strings, not numbers: race's params decode through float64 and a
 	# uint64 token has no business going near a float.
@@ -3013,7 +3113,8 @@ case_parallel() {
 
 	assert_eq "$(parallel_ok_cnt "$out")" "$PAR_CLIENTS" \
 		"td wave: OK jobs (codes $(parallel_race_codes "$out"))"
-	# td_id comes from the SP's OWN next_id counter (§5.4), not from a
+	# td_id comes from the SP's OWN next_id counter
+	# (architecture.md, Globals: id allocation + shard buckets), not from a
 	# cluster-wide one, so ten SPs of identical shape mint the SAME td_id —
 	# and that is the assertion: one distinct value, not ten. Only the
 	# cluster-scoped ids of step 2 (dn_id, cn_id, sp_id) are a set.
@@ -3034,13 +3135,15 @@ case_parallel() {
 			"$sp: the stored td set"
 		assert_field "$conf" '.tds.t0.size' "$TD_SIZE" "$sp: t0 size"
 		assert_field "$conf" '.tds.t0.dev_id' "1" "$sp: t0 dev_id"
-		# created is the sp-worker's flip (§2.4) and no worker runs in this
-		# suite, so it must still be false.
+		# created is the sp-worker's flip (Integration test plan,
+		# The etcd verification, `workerctl`) and no worker runs in this suite,
+		# so it must still be false.
 		assert_field "$conf" '.tds.t0.created' "false" "$sp: t0 created"
 		assert_eq "$(jq_of "$conf" '.sp_conf.td_name_list | @json')" '["t0"]' \
 			"$sp: td_name_list"
 		assert_field "$conf" '.sp_conf.next_dev_id' "2" "$sp: next_dev_id"
-		# One mutation, one bump (§5.5): the token must be exactly 2.
+		# One mutation, one bump: the token must be exactly 2
+		# (architecture.md, Revision keys and the sync fan-out).
 		assert_eq "$(sp_rev_of "$sp")" "2" "$sp: sp_rev after create-td"
 		# ③ the gateway's list agrees with the etcd row.
 		assert_field "$(gw list-tds --sp "$sp")" '.name_to_td.t0.td_id' \
@@ -3048,12 +3151,12 @@ case_parallel() {
 	done
 
 	# -------------------------------------------------------------------
-	stage 5 "two waves: 10 create-ss, then 10 create-ns (§10.12 step 5)"
+	stage 5 "two waves: 10 create-ss, then 10 create-ns"
 	# -------------------------------------------------------------------
 	# Two waves, not one: both mutate the same ten SPs, so the second needs
 	# tokens minted by the first. Refetching them between the waves is the
-	# documented client protocol (§10.10) and the reason this stage cannot be
-	# collapsed.
+	# documented client protocol (Integration test plan, What a pass means)
+	# and the reason this stage cannot be collapsed.
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
@@ -3112,7 +3215,7 @@ case_parallel() {
 			"$sp: one namespace"
 		# ns_idx is uint32 => a JSON number; td_id is uint64 => a string. The
 		# namespace stores the td's ID, never its name, so a recreated td can
-		# never silently repoint it (§8.8).
+		# never silently repoint it (architecture.md, Subsystems, namespaces).
 		assert_field "$conf" ".subsystems[\"$nqn\"].ns_list[0].ns_idx" "1" \
 			"$sp: ns_idx"
 		assert_field "$conf" ".subsystems[\"$nqn\"].ns_list[0].td_id" \
@@ -3127,7 +3230,7 @@ case_parallel() {
 	done
 
 	# -------------------------------------------------------------------
-	stage 6 "four reverse waves: delete-ns, -ss, -td, -sp (§10.12 step 6)"
+	stage 6 "four reverse waves: delete-ns, -ss, -td, -sp"
 	# -------------------------------------------------------------------
 	# Teardown in reverse dependency order, each wave with tokens refetched
 	# after the previous one. The order is forced by the RPCs themselves:
@@ -3175,8 +3278,9 @@ case_parallel() {
 	assert_eq "$(parallel_ok_cnt "$out")" "$PAR_CLIENTS" \
 		"delete-td wave: OK jobs (codes $(parallel_race_codes "$out"))"
 	# The reply echoes the td_id that was deleted, which step 4 already
-	# pinned: every SP mints from its own next_id (§5.4), so ten SPs of one
-	# shape produce one value — and it is the one the SPs still hold.
+	# pinned: every SP mints from its own next_id
+	# (architecture.md, Globals: id allocation + shard buckets), so ten SPs of
+	# one shape produce one value — and it is the one the SPs still hold.
 	assert_eq "$(jq_of "$out" '[.[] | .reply.td_id] | unique | length')" "1" \
 		"delete-td wave: one td_id across the ten SPs"
 	assert_eq "$(jq_of "$out" '[.[] | .reply.td_id] | unique | .[0]')" \
@@ -3195,7 +3299,8 @@ case_parallel() {
 		"delete-sp wave: OK jobs (codes $(parallel_race_codes "$out"))"
 	assert_eq "$(jq_of "$out" '[.[] | .reply.sp_id | tonumber] | sort | @json')" \
 		"$sp_ids" "delete-sp wave: the sp_id set matches step 3's"
-	# Every job LATCHED its SP (§5.4); the teardown is the sp coordinator's, and
+	# Every job LATCHED its SP (gateway.md, Storage pools and GrowSlice); the
+	# teardown is the sp coordinator's, and
 	# this suite runs none, so the worker-role stand-in finishes each one. The
 	# ten drains are sequential on purpose: what the wave was racing is the
 	# gateway's ten concurrent latches, and the drains would only add a race
@@ -3279,13 +3384,16 @@ case_parallel() {
 }
 
 # ---------------------------------------------------------------------------
-# Case B — contention (§10.13): three gateways, barrier races
+# Case B — contention (Integration test plan, Cases): three gateways, barrier
+# races
 # ---------------------------------------------------------------------------
 #
-# The (b) half of §10.1: contended work has exactly one winner and no partial
-# writes. Every wave here is ONE `race` invocation whose jobs are round-robined
-# over gw0/gw1/gw2 and released together (§10.8), so the contention is between
-# gateway INSTANCES and not between goroutines of one process.
+# The (b) half of Integration test plan, What the suite proves: contended work
+# has exactly one winner and no partial writes. Every wave here is ONE `race`
+# invocation whose jobs are round-robined over gw0/gw1/gw2 and released
+# together (Integration test plan, The driver, `gatewayctl`), so the
+# contention is between gateway INSTANCES and not between goroutines of one
+# process.
 #
 # Two distinct serializers are under test and the case keeps them apart:
 #
@@ -3299,23 +3407,23 @@ case_parallel() {
 #
 # Steps 3-5 use the token as a FENCE (one winner per token) and step 6 uses it
 # as a LIVENESS LOOP (the documented client retry protocol, driven by
-# gatewayctl's own `retry_stale`), which together are what §10.13 sets out to
-# prove.
+# gatewayctl's own `retry_stale`), which together are what the contention case
+# sets out to prove (Integration test plan, Cases).
 
 # contention_race runs one barrier wave, reading its jobs from stdin.
 #
 # --targets names all three instances, so every job that carries no gateway of
-# its own is round-robined across them (§10.8): without it a wave would run
+# its own is round-robined across them: without it a wave would run
 # eight times against gw0 and prove nothing about instances. --retry-budget is
-# passed explicitly so step 6's "within RETRY_BUDGET" is the constant §10.6
-# declares rather than whatever gatewayctl happens to default to.
+# passed explicitly so step 6's "within RETRY_BUDGET" is the test-time constant
+# this script declares rather than whatever gatewayctl happens to default to.
 contention_race() { # <job lines on stdin> -> the race array on stdout
 	gw race --targets "$(gw_addr 0),$(gw_addr 1),$(gw_addr 2)" \
 		--retry-budget "$RETRY_BUDGET"
 }
 
 # contention_code_cnt counts one gRPC code in a `race` array. The codes are the
-# measurement `race` reports (§10.8: it exits 0 whatever they are); the etcd
+# measurement `race` reports (it exits 0 whatever they are); the etcd
 # outcome is always asserted separately, right below.
 contention_code_cnt() { # <race array> <UPPER_SNAKE code>
 	jq_of "$1" "[ .[] | select(.code == \"$2\") ] | length"
@@ -3323,7 +3431,8 @@ contention_code_cnt() { # <race array> <UPPER_SNAKE code>
 
 # contention_stale_cnt counts the losers the GW6 TOKEN CHECK refused.
 #
-# Counting bare ABORTED would not do: GW7 maps the whole §5.9 family — STM
+# Counting bare ABORTED would not do: GW7 maps the whole family of
+# architecture.md, UNEXPECTED_ERROR → `ABORTED` — STM
 # conflict-budget exhaustion, an etcd error, a failed agent call — onto ABORTED
 # as well, so a wave that lost its races for an entirely different reason would
 # still satisfy a bare count. The message is what pins it to the token.
@@ -3332,8 +3441,9 @@ contention_stale_cnt() { # <race array>
 		| select(.message | contains("stale revision")) ] | length'
 }
 
-# contention_sp_rev_gt reads an SP's SpRev straight out of etcd — the §10.9
-# ground-truth counterpart of the harness's sp_rev_of, which asks the gateway.
+# contention_sp_rev_gt reads an SP's SpRev straight out of etcd — the
+# ground-truth counterpart of the harness's sp_rev_of, which asks the gateway
+# (Integration test plan, The etcd verification, `workerctl`).
 # Every "+1 exactly" count below is made against THIS reader: the token the
 # gateway hands back is part of what is under test, so it cannot also be the
 # evidence that it moved exactly once.
@@ -3381,9 +3491,11 @@ case_contention() {
 	cidhex=$(printf '%016x' "$CID")
 	log "  cluster $CLUSTER, cluster_id $CID"
 
-	# Ground truth (§10.9): one cluster, stamped with a real creation_epoch —
-	# the epoch is half of ClusterId's input (§5.2), so a zero there would mean
-	# the cid the reply carried was never derivable from what etcd holds.
+	# Ground truth (Integration test plan, The etcd verification, `workerctl`):
+	# one cluster, stamped with a real creation_epoch — the epoch is half of
+	# ClusterId's input (architecture.md, cluster_id derivation), so a zero
+	# there would mean the cid the reply carried was never derivable from what
+	# etcd holds.
 	assert_eq "$(key_count cluster_conf)" "1" "step 1: cluster_conf keys"
 	conf=$(raw_key "$(cluster_key)")
 	assert_ne "$(jq_of "$conf" '.creation_epoch')" "0" \
@@ -3462,9 +3574,9 @@ case_contention() {
 	# -----------------------------------------------------------------------
 	stage 3 "eight create-td on ONE token: exactly one winner (GW6)"
 	# -----------------------------------------------------------------------
-	# The §10.6 SP shape needs four DNs (one per leg, all distinct) and three
-	# CNs, and step 2 raced only dn0 into existence, so top the fleet up first.
-	# make_nodes cannot be reused: it would re-create dn0 and be refused.
+	# The test-time SP shape needs four DNs (one per leg, all distinct) and
+	# three CNs, and step 2 raced only dn0 into existence, so top the fleet up
+	# first. make_nodes cannot be reused: it would re-create dn0 and be refused.
 	for i in 1 2 3; do
 		gw create-dn --addr "$(dn_addr "$i")" --location "$(dn_loc "$i")" \
 			--tr-svc-id "$(dn_svcid "$i")" >/dev/null
@@ -3522,9 +3634,9 @@ case_contention() {
 		"step 3: the stored td is the job that replied OK"
 	assert_eq "$(jq_of "$conf" '.sp_conf.td_name_list | @json')" \
 		"[\"$winner\"]" "step 3: td_name_list"
-	# §5.6 mints td_id from SpNextId and dev_id from next_dev_id++ — one of
-	# each, for the one td. A loser that reached the mint before its STM lost
-	# would show up here as a gap.
+	# CreateThinDevice mints td_id from SpNextId and dev_id from next_dev_id++
+	# (gateway.md, Thin devices) — one of each, for the one td. A loser that
+	# reached the mint before its STM lost would show up here as a gap.
 	assert_eq "$(jq_of "$conf" '.sp_conf.next_id')" "$((nextIdBefore + 1))" \
 		"step 3: SpConf.next_id advanced by exactly 1"
 	assert_eq "$(jq_of "$conf" '.sp_conf.next_dev_id')" \
@@ -3564,7 +3676,8 @@ case_contention() {
 		"SP_LEVEL_READONLY" "step 4: get-sp read-back of sp_level"
 	refresh_rev sp0
 	# Put the level back before steps 5-6 create namespaces and thin devices on
-	# this SP. Nothing in §5 gates a gateway mutator on sp_level (READONLY is
+	# this SP. Nothing in gateway.md, Handlers by resource group, gates a
+	# gateway mutator on sp_level (READONLY is
 	# enforced on the CN, [D11]), so this is not needed for the assertions to
 	# pass — it keeps the SP the case goes on to exercise in the state a reader
 	# of the trace would expect it to be in.
@@ -3576,10 +3689,11 @@ case_contention() {
 		"step 4: SpRev after the restore"
 	refresh_rev sp0
 
-	# (c) A duplicate name with a VALID token: §5.6 refuses on the name before
-	# minting anything, so next_dev_id must not move. The store-revision
-	# bracket proves nothing at all was written; next_dev_id is the readable
-	# statement of the same fact, and the one §10.13 asks for by name.
+	# (c) A duplicate name with a VALID token: CreateThinDevice refuses on the
+	# name before minting anything (gateway.md, Thin devices), so next_dev_id
+	# must not move. The store-revision bracket proves nothing at all was
+	# written; next_dev_id is the readable statement of the same fact
+	# (Integration test plan, What a pass means).
 	devIdNow=$(jq_of "$(sp_json sp0)" '.sp_conf.next_dev_id')
 	assert_no_write "step 4: create-td with a duplicate name" \
 		gwx ALREADY_EXISTS create-td --sp sp0 --rev "$SP_REV" \
@@ -3588,11 +3702,12 @@ case_contention() {
 		"step 4: next_dev_id after the duplicate refusal"
 
 	# (d) The zero token. gatewayctl sends --rev 0 as a real zero rather than
-	# as "no token" on purpose (§10.8), and that is what makes this probe a
-	# refusal: GW6 is presence-based (§0 #7), so a PRESENT zero is compared
-	# and can never match a stored revision that starts at 1 — ABORTED, not
-	# INVALID_ARGUMENT — while an ABSENT message would be waved through
-	# unchecked. This driver cannot send an absent one.
+	# as "no token" on purpose (Integration test plan,
+	# The driver, `gatewayctl`), and that is what makes this probe a refusal:
+	# GW6 is presence-based, so a PRESENT zero is compared and can never match
+	# a stored revision that starts at 1 — ABORTED, not INVALID_ARGUMENT —
+	# while an ABSENT message would be waved through unchecked. This driver
+	# cannot send an absent one.
 	assert_no_write "step 4: create-td with the zero token" \
 		gwx ABORTED create-td --sp sp0 --rev 0 --name tnil --size "$TD_SIZE"
 	assert_eq "$(jq_of "$(sp_json sp0)" '.tds | keys | @json')" \
@@ -3682,7 +3797,8 @@ case_contention() {
 	# The same shape as step 3 — eight distinct names, one shared token — with
 	# the documented client protocol switched on: a job refused ABORTED "stale
 	# revision" re-reads the SP's token through GetStoragePool and retries
-	# (§10.8). Every job therefore carries "sp":"sp0" in its params, which is
+	# (Integration test plan, The driver, `gatewayctl`). Every job therefore
+	# carries "sp":"sp0" in its params, which is
 	# the only place gatewayctl's refreshToken can learn WHICH SP to re-read;
 	# without it the retry fails immediately and the wave looks like step 3.
 	conf=$(sp_json sp0)
@@ -3720,7 +3836,7 @@ case_contention() {
 		assert_eq "$(jq_of "$conf" "(.tds | has(\"t$((RACE_N + i))\"))")" \
 			"true" "step 6: t$((RACE_N + i)) stored"
 	done
-	# §10.13 counts the eight this step created; step 3's single winner is
+	# The counts are of the eight this step created; step 3's single winner is
 	# still there too, so every total below is a DELTA against tdsBefore.
 	assert_eq "$(jq_of "$conf" '.tds | length')" "$((tdsBefore + RACE_N))" \
 		"step 6: stored tds"
@@ -3747,24 +3863,26 @@ case_contention() {
 }
 
 # ---------------------------------------------------------------------------
-# Case C — faults (§10.14): gw0 only, refusals and agent failures
+# Case C — faults (Integration test plan, Cases): gw0 only, refusals and agent
+# failures
 # ---------------------------------------------------------------------------
 #
-# This case is the settled (c) of §10.1: "refusals of every class write
-# nothing", made provable rather than asserted. Every battery below runs
-# inside an assert_no_write bracket, because etcd advances its store revision
-# only for a transaction that actually mutates the store (§10.10) — an RPC
-# that returns before its first Put therefore leaves the revision exactly
-# where it was. The batteries additionally compare sp0's whole decoded state
-# before and after, so a refusal that somehow rewrote a field in place —
-# leaving the key count alone — would still be caught.
+# This case is the settled (c) (Integration test plan, What the suite proves):
+# "refusals of every class write nothing", made provable rather than asserted.
+# Every battery below runs inside an assert_no_write bracket, because etcd
+# advances its store revision only for a transaction that actually mutates the
+# store (Integration test plan, What a pass means) — an RPC that returns before
+# its first Put therefore leaves the revision exactly where it was. The
+# batteries additionally compare sp0's whole decoded state before and after, so
+# a refusal that somehow rewrote a field in place — leaving the key count
+# alone — would still be caught.
 #
 # Steps 4 and 5 are the agent half. AG2 bounds every gateway->agent call at
 # common.DefaultGatewayAgentTimeout (10 s), which is what makes a hung agent
 # bound an RPC exactly as a hung etcd does; and both force = false proofs
-# (DeleteClone §8.9, FinishMigration §8.11) treat an unreachable agent as
-# "hydration unproven" rather than as permission to proceed — silence is not
-# proof.
+# (DeleteClone and FinishMigration; architecture.md, Clones and Migrations)
+# treat an unreachable agent as "hydration unproven" rather than as permission
+# to proceed — silence is not proof.
 #
 # Everything runs against gw0 (the default $GATEWAY): nothing here is about
 # concurrency, so a second instance would only add noise.
@@ -3789,7 +3907,7 @@ faults_sp_snapshot() { # <sp name>
 
 # faults_nonprimary_cntlr prints the cntlr_id of one cntlr of the SP that is
 # NOT the primary — the mirror of the harness's sp_primary_cntlr, over the
-# same index-aligned cntlr_id_list / cntlr_list pair (§10.8).
+# same index-aligned cntlr_id_list / cntlr_list pair.
 #
 # The pick is made INSIDE jq rather than with `head -n 1`: `set -o pipefail`
 # plus a reader that closes the pipe early turns a SIGPIPE on jq into a
@@ -3805,7 +3923,8 @@ faults_nonprimary_cntlr() { # <sp name>
 
 # faults_side_addr prints the addr_port of one side of the SP by side_id,
 # searching active and spare legs of both group kinds. CreateMigration
-# appends its destination to the SOURCE side's leg (§8.11), so this is the
+# appends its destination to the SOURCE side's leg (architecture.md,
+# Migrations), so this is the
 # only way to learn which DN the gateway picked for it.
 faults_side_addr() { # <sp name> <side_id, decimal>
 	jq_of "$(sp_json "$1")" "
@@ -3818,8 +3937,8 @@ faults_side_addr() { # <sp name> <side_id, decimal>
 }
 
 # faults_dn_dir / faults_cn_dir map an addr_port back to the fake's directory,
-# which is what set_behavior / set_state / sig_dir address. §10.5 assigns the
-# ports contiguously from the two bases, so the index is pure arithmetic.
+# which is what set_behavior / set_state / sig_dir address. The suite assigns
+# the ports contiguously from the two bases, so the index is pure arithmetic.
 faults_dn_dir() { # <addr_port>
 	dn_dir $((${1##*:} - DN_PORT_BASE))
 }
@@ -3831,15 +3950,16 @@ faults_cn_dir() { # <addr_port>
 # faults_gwx_out is gwx with the reply captured into a global, for the
 # refusals whose MESSAGE is part of the assertion. assert_no_write runs its
 # command in the CURRENT shell, so a global set here survives the bracket —
-# a `$( )` around the bracket would lose it, the same subshell hazard §10.10
-# calls out for the SP token.
+# a `$( )` around the bracket would lose it, the same subshell hazard the
+# SP token's comment (SP_REV) calls out.
 faults_gwx_out() { # <UPPER_SNAKE code> <args…>
 	FAULTS_OUT=$(gwx "$@")
 }
 
 # faults_seed_cn_state writes the CN fake's state.json so GetCntlrInfo has a
 # cntlr to report on at all. Every *Info the fake returns is derived from the
-# last Syncup* request it applied (§14.9) and this suite runs no dnv-worker,
+# last Syncup* request it applied (dnv-worker.md, Integration test plan,
+# The fake agent, `fakeagent`) and this suite runs no dnv-worker,
 # so an unseeded fake answers with a nil CntlrInfo and DeleteClone would
 # refuse for the wrong reason. The object keys use DECIMAL ids.
 faults_seed_cn_state() { # <cn dir> <cn_id> <sp_id> <cntlr_id> <clone_id>
@@ -3857,8 +3977,9 @@ EOF
 
 # faults_seed_dn_state is the same seeding for the migration destination: the
 # side's last request must carry a migr_dst_conf, because the fake only
-# builds SideInfo.migr_dst_info when it does (§14.9), and that is the field
-# FinishMigration reads the dm-clone status out of.
+# builds SideInfo.migr_dst_info when it does
+# (dnv-worker.md, Integration test plan, The fake agent, `fakeagent`), and
+# that is the field FinishMigration reads the dm-clone status out of.
 faults_seed_dn_state() { # <dn dir> <dn_id> <sp_id> <leg> <side> <ext> <cn_id> <migr_id>
 	set_state "$1" <<EOF
 {"objects":{
@@ -3897,13 +4018,14 @@ EOF
 
 # ---------------------------------------------------------------------------
 # The batteries. Each is one function so the whole batch can sit inside a
-# single assert_no_write bracket where §10.14 asks for one.
+# single assert_no_write bracket where the case asks for one.
 # ---------------------------------------------------------------------------
 
-# faults_validation_battery is §10.14 step 1: every §7 rule that is checkable
-# without stored state, plus the two that are not (the td size unit and the
-# cntlid slots) which the handlers evaluate inside their STM and which
-# therefore still return before the first Put.
+# faults_validation_battery is stage 1 of case C (GW4): every rule of
+# architecture.md, Common validation, that is checkable without stored state,
+# plus the two that are not (the td size unit and the cntlid slots) which the
+# handlers evaluate inside their STM and which therefore still return before
+# the first Put.
 faults_validation_battery() {
 	local long65 slice
 	# MaxStrSize is 64 bytes, so 65 'a's is the shortest over-long name.
@@ -3916,26 +4038,28 @@ faults_validation_battery() {
 	gwx INVALID_ARGUMENT create-sp --sp "$long65"
 
 	# ValidNqnPattern demands a ':' after the domain part, which is exactly
-	# why the well-known discovery NQN can never validate — §7 needs no
-	# separate rejection for it, and this asserts that claim rather than
-	# assuming it.
+	# why the well-known discovery NQN can never validate — architecture.md,
+	# Common validation, needs no separate rejection for it, and this asserts
+	# that claim rather than assuming it.
 	gwx INVALID_ARGUMENT create-ss --sp sp0 --rev "$SP_REV" --nqn bad-nqn
 	gwx INVALID_ARGUMENT create-ss --sp sp0 --rev "$SP_REV" \
 		--nqn nqn.2014-08.org.nvmexpress.discovery
 
-	# §8.7: a size must be a positive multiple of slice_cnt x stripe_size —
-	# here 1 x 64 KiB — because dm-striped takes equal, chunk-aligned members.
+	# A size must be a positive multiple of slice_cnt x stripe_size
+	# (architecture.md, Thin devices) — here 1 x 64 KiB — because dm-striped
+	# takes equal, chunk-aligned members.
 	# The check is state-dependent, so it runs inside the transaction; the
 	# refusal still lands before the id minter is ever created.
 	gwx INVALID_ARGUMENT create-td --sp sp0 --rev "$SP_REV" \
 		--name tbad --size 1000
 
-	# §8.5's exclusivity: a meta grow takes its size from the ladder, so
-	# ext_cnt must be 0 when is_meta is true.
+	# The exclusivity of architecture.md, GrowSlice: a meta grow takes its
+	# size from the ladder, so ext_cnt must be 0 when is_meta is true.
 	gwx INVALID_ARGUMENT grow-slice --sp sp0 --rev "$SP_REV" \
 		--slice "$slice" --meta --ext 2
 
-	# §11.8: cntlid slots are distinct and below CnCntlidSlotCnt (8).
+	# Cntlid slots are distinct and below CnCntlidSlotCnt (8; architecture.md,
+	# cntlid slots).
 	gwx INVALID_ARGUMENT set-cntlid-slots --sp sp0 --rev "$SP_REV" \
 		--slots 0,0,1
 	gwx INVALID_ARGUMENT set-cntlid-slots --sp sp0 --rev "$SP_REV" --slots 8
@@ -3946,9 +4070,10 @@ faults_validation_battery() {
 	gwx INVALID_ARGUMENT list-clusters --count 2000
 	gwx INVALID_ARGUMENT list-clusters --page-token '!!'
 
-	# §7's structural bdev rule: bdev_feature_list MUST be empty in v1.
+	# The structural bdev rule of architecture.md, Common validation:
+	# bdev_feature_list MUST be empty in v1.
 	# --feature-junk appends one empty BdevFeature; the rest of the request is
-	# the §10.6 shape, because validateBdevConf runs AFTER the cntlr/slice
+	# the test-time shape, because validateBdevConf runs AFTER the cntlr/slice
 	# /init_ext_cnt bounds and a short request would be refused before it.
 	gwx INVALID_ARGUMENT create-sp --sp spjunk --cntlr-cnt "$SP_CNTLR_CNT" \
 		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" \
@@ -3957,7 +4082,7 @@ faults_validation_battery() {
 	# The other half of the bound: 0 is proto3's "unset" and selects
 	# DefaultListCnt (64), so it is ACCEPTED. With itgw the only cluster of
 	# this case the page cannot be full, which is why the token comes back
-	# empty (§5.7: a non-full page ends the listing).
+	# empty (a non-full page ends the listing: architecture.md, page_token).
 	FAULTS_OUT=$(gw list-clusters --count 0)
 	assert_field "$FAULTS_OUT" '.cluster_name | @json' '["itgw"]' \
 		"count 0 is accepted and lists the one cluster"
@@ -3965,7 +4090,7 @@ faults_validation_battery() {
 		"count 0: a non-full page ends the listing"
 }
 
-# faults_notfound_battery is §10.14 step 2: one probe per missing id —
+# faults_notfound_battery is stage 2 of case C (GW7): one probe per missing id —
 # cluster / sp / dn / cn / td / nqn / ns_idx / clone / xfer / migr / cntlr /
 # side — plus the two spare ids. Every other id a probe names exists, so its
 # NOT_FOUND can only be the missing id's own — the cluster probe never
@@ -3996,24 +4121,25 @@ faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	gwx NOT_FOUND get-migr --sp sp0 --name nosuchmigr
 
 	# A cntlr id the SP does not list, and a side id that is in no leg of the
-	# SP (§5.5's id-addressed reads). Both are refused inside the snapshot,
-	# before any agent is dialed.
+	# SP (the id-addressed reads of gateway.md, Cntlrs and inspects). Both are
+	# refused inside the snapshot, before any agent is dialed.
 	gwx NOT_FOUND inspect-cntlr --sp sp0 --id 0xdead
 	gwx NOT_FOUND inspect-side --sp sp0 --id 0xdead
 
-	# The spare ids, both of them. §8.12 makes SwitchSpareLeg check leg
-	# membership in its own pre-read precisely so an unknown id is NOT_FOUND
-	# here rather than the FAILED_PRECONDITION model.SwitchSpareLeg would
-	# raise for it.
+	# The spare ids, both of them. architecture.md, Spare legs, makes
+	# SwitchSpareLeg check leg membership in its own pre-read precisely so an
+	# unknown id is NOT_FOUND here rather than the FAILED_PRECONDITION
+	# model.SwitchSpareLeg would raise for it.
 	gwx NOT_FOUND delete-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$grp" --leg 0xdead
 	gwx NOT_FOUND switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$grp" --spare 0xdead --target "$leg"
 }
 
-# faults_agent_battery is §10.14 step 4. It is one batch because none of it
-# can write: create-dn calls GetDnSize BEFORE its STM (§8.2), so an agent
-# that never answers means the transaction is never opened at all.
+# faults_agent_battery is stage 4 of case C (AG2, AG3). It is one batch
+# because none of it can write: create-dn calls GetDnSize BEFORE its STM
+# (architecture.md, Disk nodes), so an agent that never answers means the
+# transaction is never opened at all.
 #
 # FAULTS_HUNG_SECS / FAULTS_FAST_SECS carry the two wall-clock measurements
 # out to the stage, which asserts the AG2 bound on them.
@@ -4086,10 +4212,11 @@ case_faults() {
 	# -----------------------------------------------------------------
 	stage 0 "fixture: the cluster, the nodes and a live sp0 with objects"
 	# -----------------------------------------------------------------
-	# §10.14's steps 1-3 all speak about "a live sp0": the td-size rule, the
-	# ns_idx probe and every precondition need stored state to be checked
-	# against, so the whole fixture is arranged first and the five numbered
-	# steps below are then exactly the five batteries the section describes.
+	# The faults case of Integration test plan, Cases, runs its batteries on
+	# "a live pool": the td-size rule, the ns_idx probe and every precondition
+	# need stored state to be checked against, so the whole fixture is arranged
+	# first and the five numbered steps below are then exactly the five
+	# batteries that case describes.
 	new_cluster
 	make_nodes
 	make_sp sp0
@@ -4108,14 +4235,15 @@ case_faults() {
 	gw create-td --sp sp0 --rev "$SP_REV" --name tp --size "$TD_SIZE" \
 		>/dev/null
 	refresh_rev sp0
-	# §2.4's first flip, the one write workerctl is allowed to make here: the
-	# sp-worker's materialization of tp, without which §8.7 refuses to
-	# snapshot it. It goes through model.FlipCreated, so it bumps SpRev
-	# exactly as the worker's would.
+	# The first worker-role flip (Integration test plan,
+	# The etcd verification, `workerctl`), the one write workerctl is allowed
+	# to make here: the sp-worker's materialization of tp, without which
+	# architecture.md, Thin devices, refuses to snapshot it. It goes through
+	# model.FlipCreated, so it bumps SpRev exactly as the worker's would.
 	wctl set-created --sp sp0 --name tp >/dev/null
 	refresh_rev sp0
-	# A snapshot inherits its origin's size, which is the one case §8.7 lets
-	# size be 0 ([D-H]).
+	# A snapshot inherits its origin's size, which is the one case
+	# architecture.md, Thin devices, lets size be 0 ([D-H]).
 	gw create-td --sp sp0 --rev "$SP_REV" --name ts --ori tp >/dev/null
 	refresh_rev sp0
 
@@ -4163,7 +4291,8 @@ case_faults() {
 
 	# One migration on the META group's first leg. Meta is deliberate: it
 	# leaves the data group's DN set free for the spare leg below, and
-	# grpDnAddrs black-lists the whole group either way (§6.5).
+	# grpDnAddrs black-lists the whole group either way (architecture.md,
+	# Per-operation allocation).
 	metaLeg=$(sp_leg_id sp0 meta 0 0)
 	srcSide=$(sp_side_id sp0 meta 0 0)
 	gw create-migr --sp sp0 --rev "$SP_REV" --name m0 \
@@ -4175,7 +4304,7 @@ case_faults() {
 		"2" "m0: the source leg now carries two sides"
 	assert_field "$out" \
 		'[ .slices | to_entries[0].value.meta_grp_list[0].leg_list[0].side_list[].cntlid_slot ] | unique | length' \
-		"2" "m0: the destination takes a different cntlid slot (§11.8)"
+		"2" "m0: the destination takes a different cntlid slot"
 	assert_field "$out" \
 		'.slices | to_entries[0].value.meta_grp_list[0].leg_list[0].side_list[1].provisioned' \
 		"false" "m0: the destination side starts unprovisioned ([D15])"
@@ -4186,9 +4315,10 @@ case_faults() {
 		"get-migr read-back: src_side_id"
 	assert_ne "$dstSide" "$srcSide" "m0: the destination is a new side"
 
-	# One spare leg on the data group — step 3's unprovisioned switch. §8.12
-	# writes it parked and unprovisioned, which is exactly the state
-	# SwitchSpareLeg must refuse to activate (§9.4).
+	# One spare leg on the data group — step 3's unprovisioned switch.
+	# CreateSpareLeg (architecture.md, Spare legs) writes it parked and
+	# unprovisioned, which is exactly the state SwitchSpareLeg must refuse to
+	# activate (architecture.md, Side provisioning protocol).
 	dataGrp=$(sp_grp_id sp0 data 0)
 	dataLeg=$(sp_leg_id sp0 data 0 0)
 	# The reply is captured into a variable of its own rather than read
@@ -4212,9 +4342,9 @@ case_faults() {
 	assert_ne "$slice" "0" "sp0: slice_id"
 
 	# -----------------------------------------------------------------
-	stage 1 "validation battery: every §7 refusal is INVALID_ARGUMENT"
+	stage 1 "validation battery: every validation refusal is INVALID_ARGUMENT"
 	# -----------------------------------------------------------------
-	# §10.14 asks for ONE shared bracket around the whole batch: the claim
+	# ONE shared bracket around the whole batch: the claim
 	# being proved is about the batch ("none of these wrote"), and a
 	# per-call bracket would only re-assert it more slowly.
 	local before after
@@ -4235,35 +4365,38 @@ case_faults() {
 	# -----------------------------------------------------------------
 	stage 3 "precondition battery on the live sp0"
 	# -----------------------------------------------------------------
-	# §10.14 wants each of these bracketed on its own: unlike steps 1 and 2
+	# Each of these is bracketed on its own: unlike steps 1 and 2
 	# every one of them reaches deep into a transaction that WOULD have
 	# written had the guard not fired, so which one of them wrote is the
 	# question worth being able to answer.
 	before=$(faults_sp_snapshot sp0)
 
-	# §8.1: a cluster whose three globals still count objects cannot go.
+	# A cluster whose three globals still count objects cannot go
+	# (architecture.md, Clusters).
 	assert_no_write "delete-cluster while the cluster is not empty" \
 		gwx FAILED_PRECONDITION delete-cluster
 
-	# §8.2: a DN that still hosts sides. The token must be right, or GW6's
-	# ABORTED would fire before the guard is reached.
+	# A DN that still hosts sides (architecture.md, Disk nodes). The token
+	# must be right, or GW6's ABORTED would fire before the guard is reached.
 	dnAddr=$(sp_side_addr sp0 data 0 0)
 	assert_no_write "delete-dn while it still hosts sides" \
 		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
 		--rev "$(dn_rev_of "$dnAddr")"
 
-	# §5.4: an SP that still holds tds, nqns, clones, xfers or migrs.
+	# An SP that still holds tds, nqns, clones, xfers or migrs (gateway.md,
+	# Storage pools and GrowSlice).
 	assert_no_write "delete-sp while it still holds objects" \
 		gwx FAILED_PRECONDITION delete-sp --sp sp0 --rev "$SP_REV"
 
-	# §8.8: a subsystem that still holds namespaces.
+	# A subsystem that still holds namespaces
+	# (architecture.md, Subsystems, namespaces).
 	assert_no_write "delete-ss while it still holds a namespace" \
 		gwx FAILED_PRECONDITION delete-ss --sp sp0 --rev "$SP_REV" \
 		--nqn "$ssNqn"
 
-	# §8.6, both rows: the primary is never deletable, and a non-primary
-	# must be disabled first. Both cntlrs of a fresh SP are enabled, so the
-	# two ids cover the two guards exactly.
+	# architecture.md, Cntlrs, both rows: the primary is never deletable, and
+	# a non-primary must be disabled first. Both cntlrs of a fresh SP are
+	# enabled, so the two ids cover the two guards exactly.
 	primary=$(sp_primary_cntlr sp0)
 	cntlrId=${primary%% *}
 	cnAddr=${primary##* }
@@ -4276,19 +4409,20 @@ case_faults() {
 		gwx FAILED_PRECONDITION delete-cntlr --sp sp0 --rev "$SP_REV" \
 		--id "$nonPrimary"
 
-	# §8.7: create_snap has a kernel-level dependency on the origin's id
-	# already being in every slice pool, so a snapshot of an uncreated
-	# origin is refused — and refused BEFORE the id minter exists, which is
-	# what makes this bracket meaningful (an id consumed here would be
-	# visible for ever, since ids are never reused).
+	# architecture.md, Thin devices: create_snap has a kernel-level
+	# dependency on the origin's id already being in every slice pool, so a
+	# snapshot of an uncreated origin is refused — and refused BEFORE the id
+	# minter exists, which is what makes this bracket meaningful (an id
+	# consumed here would be visible for ever, since ids are never reused).
 	assert_no_write "snapshot of an uncreated origin" \
 		gwx FAILED_PRECONDITION create-td --sp sp0 --rev "$SP_REV" \
 		--name tsnap --ori t0
 
-	# §8.7's three delete guards, one probe each. All three are decided
-	# INSIDE the deleting transaction — the third on the snapshots its plan
-	# found, verified by the pool's identity and revision — which is what
-	# makes them race-proof rather than merely correct.
+	# The three delete guards of architecture.md, Thin devices, one probe
+	# each. All three are decided INSIDE the deleting transaction — the third
+	# on the snapshots its plan found, verified by the pool's identity and
+	# revision — which is what makes them race-proof rather than merely
+	# correct.
 	assert_no_write "delete-td backing a namespace" \
 		gwx FAILED_PRECONDITION delete-td --sp sp0 --rev "$SP_REV" --name t0
 	assert_no_write "delete-td that is a clone destination" \
@@ -4296,24 +4430,25 @@ case_faults() {
 	assert_no_write "delete-td with an uncreated snapshot child" \
 		gwx FAILED_PRECONDITION delete-td --sp sp0 --rev "$SP_REV" --name tp
 
-	# §8.11: a leg already carrying two sides has a migration running on it,
-	# and a second destination would give the CN three paths to aggregate.
+	# A leg already carrying two sides has a migration running on it
+	# (architecture.md, Migrations), and a second destination would give the
+	# CN three paths to aggregate.
 	assert_no_write "create-migr on a leg that already has two sides" \
 		gwx FAILED_PRECONDITION create-migr --sp sp0 --rev "$SP_REV" \
 		--name m1 --src-side "$srcSide"
 
-	# §9.4: switching in a side that has not finished zeroing would put an
-	# unwritten member into the md array.
+	# Switching in a side that has not finished zeroing would put an unwritten
+	# member into the md array (architecture.md, Side provisioning protocol).
 	assert_no_write "switch-spare with an unprovisioned spare" \
 		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"
 
-	# The thirteenth guard of §10.14 step 3 — an SP-level mutator refused
+	# The thirteenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose, but not for
-	# the old reason: since 2026-09-15 `delete-sp` sets the flag (§5.4), and
-	# step 17 of case S drives the gate for real. It cannot be driven here,
-	# because this stage's sp0 must stay live for the rest of the battery and
-	# the latch is one-way.
+	# the old reason: since 2026-09-15 `delete-sp` sets the flag
+	# (gateway.md, Storage pools and GrowSlice), and step 17 of case S drives
+	# the gate for real. It cannot be driven here, because this stage's sp0
+	# must stay live for the rest of the battery and the latch is one-way.
 
 	after=$(faults_sp_snapshot sp0)
 	assert_eq "$after" "$before" "step 3: sp0's content must not change"
@@ -4327,9 +4462,9 @@ case_faults() {
 	stage 4 "agent faults: hung, closed and stopped agents are ABORTED"
 	# -----------------------------------------------------------------
 	# One bracket for the batch: CreateDiskNode calls GetDnSize before it
-	# opens its STM (§8.2), so a hung agent means no transaction is ever
-	# started — and InspectDiskNode/InspectControllerNode are read-only to
-	# begin with.
+	# opens its STM (architecture.md, Disk nodes), so a hung agent means no
+	# transaction is ever started — and InspectDiskNode/InspectControllerNode
+	# are read-only to begin with.
 	before=$(faults_sp_snapshot sp0)
 	FAULTS_HUNG_SECS=0
 	FAULTS_FAST_SECS=0
@@ -4337,7 +4472,7 @@ case_faults() {
 	after=$(faults_sp_snapshot sp0)
 	assert_eq "$after" "$before" "step 4: sp0's content must not change"
 
-	# The AG2 bound: DefaultGatewayAgentTimeout is 10 s and §10.14 asks for a
+	# The AG2 bound: DefaultGatewayAgentTimeout is 10 s and this asserts a
 	# generous upper fence rather than a tight one, because the window also
 	# contains one ssh round trip and the gateway's own dial.
 	assert_between "$FAULTS_HUNG_SECS" 10 15 \
@@ -4350,13 +4485,14 @@ case_faults() {
 	# -----------------------------------------------------------------
 	stage 5 "force = false: hydration must be PROVEN, not assumed"
 	# -----------------------------------------------------------------
-	# §8.9 / §8.11 make both of these a proof obligation. Removing a
-	# dm-clone with regions still unhydrated silently loses every byte that
-	# was never pulled from the source, so an incomplete status line, an
-	# unparseable one and an unreachable agent are all "not proven" — the
-	# same FAILED_PRECONDITION, deliberately. force = true is the other half
-	# of the same rule and is proved here too (§10.14 step 5's last clause):
-	# an operator whose agent is never coming back must still be able to
+	# architecture.md, Clones and Migrations, make both of these a proof
+	# obligation. Removing a dm-clone with regions still unhydrated silently
+	# loses every byte that was never pulled from the source, so an incomplete
+	# status line, an unparseable one and an unreachable agent are all "not
+	# proven" — the same FAILED_PRECONDITION, deliberately. force = true is the
+	# other half of the same rule and is proved here too
+	# (Integration test plan, Cases, the faults case): an operator whose agent
+	# is never coming back must still be able to
 	# delete the clone and finish the migration, so each RPC is driven twice
 	# against a STOPPED agent — refused unforced, committed forced.
 
@@ -4375,8 +4511,8 @@ case_faults() {
 		'.message | test("has not finished hydrating")' "true" \
 		"cl0: the refusal is the hydration one, not some other precondition"
 
-	# The agent gone. §8.9 is explicit that silence is not proof, so this
-	# must be the SAME refusal and never a pass.
+	# The agent gone. architecture.md, Clones, is explicit that silence is
+	# not proof, so this must be the SAME refusal and never a pass.
 	sig_dir "$cnDir" TERM
 	wait_gone "$cnDir" "$WAIT_SHORT"
 	assert_no_write "delete-clone while the primary's CN agent is stopped" \
@@ -4393,8 +4529,9 @@ case_faults() {
 	out=$(gw delete-clone --sp sp0 --rev "$SP_REV" --name cl0)
 	assert_field "$out" '.clone_id' "$cloneId" "delete-clone returns cl0's id"
 	refresh_rev sp0
-	# The proof let the LATCH through, which is all the RPC does now (§5.8);
-	# the drain that finishes it is the coordinator's, stood in for here.
+	# The proof let the LATCH through, which is all the RPC does now
+	# (gateway.md, Clones); the drain that finishes it is the coordinator's,
+	# stood in for here.
 	assert_field "$(sp_json sp0)" '.clones.cl0.deleting' "true" \
 		"cl0: the proven delete latched it"
 	wctl drain-clone --sp sp0 --name cl0 >/dev/null
@@ -4409,10 +4546,10 @@ case_faults() {
 		"0" "get-sp read-back agrees the clone is gone"
 
 	# --- DeleteClone with force = true, against the SAME stopped CN.
-	# The other half of §8.9: force is not a shortcut past a proof that
-	# could be waited for, it is the only exit when the proof can never
-	# arrive — a clone whose primary's CN is gone for good. cl0 was spent on
-	# the refusals above, so the override needs a clone of its own; t1 is a
+	# The other half of architecture.md, Clones: force is not a shortcut past
+	# a proof that could be waited for, it is the only exit when the proof can
+	# never arrive — a clone whose primary's CN is gone for good. cl0 was spent
+	# on the refusals above, so the override needs a clone of its own; t1 is a
 	# free destination again now that cl0 is deleted.
 	out=$(gw create-clone --sp sp0 --rev "$SP_REV" --name cl-force \
 		--dst-td t1 --src-nqn "$NQN_PREFIX:src0" --src-idx 1 \
@@ -4422,8 +4559,8 @@ case_faults() {
 	assert_ne "$forceCloneId" "0" "cl-force: create-clone returned an id"
 	sig_dir "$cnDir" TERM
 	wait_gone "$cnDir" "$WAIT_SHORT"
-	# The pairing is what §10.14 step 5's last clause asks for: in the very
-	# same stopped state, force = false still refuses…
+	# The pairing is what the faults case asks for (Integration test plan,
+	# Cases): in the very same stopped state, force = false still refuses…
 	assert_no_write "delete-clone of cl-force unforced, the CN stopped" \
 		faults_gwx_out FAILED_PRECONDITION delete-clone --sp sp0 \
 		--rev "$SP_REV" --name cl-force
@@ -4441,7 +4578,8 @@ case_faults() {
 	# which links no agent client at all — so what it shows is that the etcd
 	# side finishes with the CN down, NOT that the coordinator would make no
 	# agent call (CLD10). That property is only observable where the real
-	# coordinator runs: dnv-worker.md §14 case G.
+	# coordinator runs: the drain case (dnv-worker.md, Integration test plan,
+	# Cases).
 	# Bracketed, not dotted: jq reads `.clones.cl-force` as a subtraction.
 	assert_field "$(sp_json sp0)" '.clones["cl-force"].deleting' "true" \
 		"cl-force: --force latched it with the CN unreachable"
@@ -4490,7 +4628,7 @@ case_faults() {
 	refresh_rev sp0
 	out=$(sp_json sp0)
 	# The commit: the destination is the leg's only side and the source's
-	# extents went back to its DN (§8.11).
+	# extents went back to its DN (architecture.md, Migrations).
 	assert_field "$out" \
 		'.slices | to_entries[0].value.meta_grp_list[0].leg_list[0].side_list | length' \
 		"1" "m0: the leg is back to one side"
@@ -4504,11 +4642,12 @@ case_faults() {
 		"0" "get-sp read-back agrees the migration is gone"
 
 	# --- FinishMigration with force = true, against the SAME stopped DN.
-	# §8.11's override, for the migration whose destination DN will never
-	# answer again. m0 is spent, so it gets a migration of its own: the leg
-	# m0 just finished on carries exactly one side again — m0's destination —
-	# and §8.11 refuses only a leg that already has two, so that survivor is
-	# a legal source for a second migration.
+	# The override of architecture.md, Migrations, for the migration whose
+	# destination DN will never answer again. m0 is spent, so it gets a
+	# migration of its own: the leg m0 just finished on carries exactly one
+	# side again — m0's destination — and that section refuses only a leg
+	# that already has two, so that survivor is a legal source for a second
+	# migration.
 	out=$(gw create-migr --sp sp0 --rev "$SP_REV" --name m-force \
 		--src-side "$dstSide")
 	refresh_rev sp0
@@ -4517,8 +4656,9 @@ case_faults() {
 		'.migr.dst_side_id')
 	assert_ne "$forceDstSide" "$dstSide" \
 		"m-force: the destination is a new side"
-	# The gateway picks the destination DN itself (§6.5), so which fake to
-	# stop is only knowable from the stored side.
+	# The gateway picks the destination DN itself (architecture.md,
+	# Per-operation allocation), so which fake to stop is only knowable from
+	# the stored side.
 	forceDnAddr=$(faults_side_addr sp0 "$forceDstSide")
 	forceDnDir=$(faults_dn_dir "$forceDnAddr")
 	sig_dir "$forceDnDir" TERM
@@ -4537,7 +4677,8 @@ case_faults() {
 	refresh_rev sp0
 	out=$(sp_json sp0)
 	# Ground truth again: the src side is gone, the destination stands alone
-	# and the record is deleted, exactly as on the proven path (§8.11).
+	# and the record is deleted, exactly as on the proven path (architecture.md,
+	# Migrations).
 	assert_field "$out" \
 		'.slices | to_entries[0].value.meta_grp_list[0].leg_list[0].side_list | length' \
 		"1" "m-force: --force finished with the destination DN unreachable"
@@ -4561,32 +4702,35 @@ case_faults() {
 }
 
 # ---------------------------------------------------------------------------
-# Case D — restart (§10.15): kill -9 one instance under load
+# Case D — restart (Integration test plan, Cases): kill -9 one instance under
+# load
 # ---------------------------------------------------------------------------
 #
-# The case that proves (d) of §10.1. Two claims, and nothing else:
+# The case that proves (d) of Integration test plan, What the suite proves.
+# Two claims, and nothing else:
 #
 #   crash atomicity — a gateway SIGKILLed with no drain in the middle of a
 #   wave of CreateStoragePool calls leaves every SP of that wave either
-#   COMPLETE (the whole §5.4 write set) or ABSENT (not one key of it). §5.4
-#   puts the entire write set — SpConf, SpName, every Cntlr, every Slice, the
-#   per-DN and per-CN bookkeeping and SpRev — into ONE STM, and etcd commits a
-#   transaction or it does not, so a third state cannot exist. If one shows up
-#   here the case must fail loudly: that is the whole point of the case.
+#   COMPLETE (the whole write set) or ABSENT (not one key of it). gateway.md,
+#   Storage pools and GrowSlice, puts the entire write set — SpConf, SpName,
+#   every Cntlr, every Slice, the per-DN and per-CN bookkeeping and SpRev —
+#   into ONE STM, and etcd commits a transaction or it does not, so a third
+#   state cannot exist. If one shows up here the case must fail loudly: that
+#   is the whole point of the case.
 #
 #   statelessness — the killed instance restarts on the identical command
 #   line with no cleanup step of any kind, because a gateway writes nothing to
-#   etcd that describes itself (§0 #3: no leader election, no registration
+#   etcd that describes itself (GW1: no leader election, no registration
 #   key, no lease, no shard split). Step 5 proves that by enumerating the
-#   kinds present in the store and requiring every one of them to be a §5.1
-#   kind owned by the DATA.
+#   kinds present in the store and requiring every one of them to be a kind
+#   (architecture.md, Key table) owned by the DATA.
 #
 # Every helper below carries the `restart_` prefix so it cannot collide with a
 # helper of the four other case files spliced into the same script.
 
 # restart_sp_conf_cnt counts the `sp_conf` keys of one SP NAME inside a full
-# key dump. §5.1 joins key fields with a single space and forbids a space in
-# any field, so awk's fields ARE the key fields — here
+# key dump. architecture.md, Key grammar, joins key fields with a single space
+# and forbids a space in any field, so awk's fields ARE the key fields — here
 # `dnv sp_conf {cluster_id} {sp_name}` — and $4 is an exact name match rather
 # than a substring one (spD1 must never match spD10).
 restart_sp_conf_cnt() { # <key dump> <sp name>
@@ -4608,11 +4752,13 @@ restart_key_field() { # <key dump> <kind> <1-based field index>
 		awk -v kind="$2" -v idx="$3" '$2 == kind { print $idx }' | sort
 }
 
-# restart_bucket_sum is Σ shard_bucket of one cluster-scoped global. §5.4
-# keeps that sum equal to the number of live objects of the role — it is the
-# very quantity DeleteCluster uses as its emptiness test instead of a range
-# read (§5.1) — so it is an independent count of the SPs that exist, taken
-# from a key no SP-scoped STM path touches except through the mint/decrement.
+# restart_bucket_sum is Σ shard_bucket of one cluster-scoped global.
+# architecture.md, Globals: id allocation + shard buckets, keeps that sum
+# equal to the number of live objects of the role — it is the very quantity
+# DeleteCluster uses as its emptiness test instead of a range read
+# (gateway.md, Clusters) — so it is an independent count of the SPs that
+# exist, taken from a key no SP-scoped STM path touches except through the
+# mint/decrement.
 restart_bucket_sum() { # <dn_global|cn_global|sp_global>
 	jq_of "$(raw_key "$DNV_PREFIX $1 $(printf '%016x' "$CID")")" \
 		'[.shard_bucket[]] | add'
@@ -4620,9 +4766,10 @@ restart_bucket_sum() { # <dn_global|cn_global|sp_global>
 
 # restart_sp_dn_use prints "<dn addr_port> <extents>" once per stored Side of
 # one SP. A side occupies its GROUP's ext_cnt on the DN it names — that is the
-# quantity §5.4 debits per leg — so the group has to be carried into the side
-# iteration. Spare legs are walked too even though CreateStoragePool mints
-# none, so the helper stays honest if a later stage ever adds one.
+# quantity gateway.md, Storage pools and GrowSlice, debits per leg — so the
+# group has to be carried into the side iteration. Spare legs are walked too
+# even though CreateStoragePool mints none, so the helper stays honest if a
+# later stage ever adds one.
 restart_sp_dn_use() { # <sp name>
 	jq_of "$(sp_json "$1")" '
 		.slices[]
@@ -4634,10 +4781,10 @@ restart_sp_dn_use() { # <sp name>
 }
 
 # restart_sp_cn_use prints "<cn addr_port> <extents>" once per stored Cntlr of
-# one SP. §5.4's CN candidate unit reserves `CandExtCnt = Σ ext_cnt` over ALL
-# groups on every CN it picks, so the reservation is the same number for every
-# cntlr of the SP; it is derived from the slice records here rather than
-# restated as a literal 3.
+# one SP. The CN candidate unit of gateway.md, Storage pools and GrowSlice,
+# reserves `CandExtCnt = Σ ext_cnt` over ALL groups on every CN it picks, so
+# the reservation is the same number for every cntlr of the SP; it is derived
+# from the slice records here rather than restated as a literal 3.
 restart_sp_cn_use() { # <sp name>
 	jq_of "$(sp_json "$1")" '
 		([ .slices[]
@@ -4654,10 +4801,10 @@ restart_sp_cn_use() { # <sp name>
 # This is a cross-check, not a restatement of what was just read: the extents
 # a side occupies live in the Slice VALUE, while free_ext_cnt, side_ptr_list
 # and the dn_capacity/cn_capacity index KEYS are separate keys that the same
-# §5.4 STM maintains beside it. A partially applied write set shows up here as
-# a node debited for an SP that does not exist, or an SP whose DN was never
-# debited — which is exactly the "no third state" claim of §10.15 step 3, seen
-# from the accounting side.
+# STM (gateway.md, Storage pools and GrowSlice) maintains beside it. A
+# partially applied write set shows up here as a node debited for an SP that
+# does not exist, or an SP whose DN was never debited — which is exactly the
+# "no third state" claim of stage 3, seen from the accounting side.
 #
 # Called with NO arguments it asserts the pristine state: every DN back to
 # DN_EXTENTS free with an empty side_ptr_list, every CN back to CN_EXTENTS.
@@ -4703,10 +4850,10 @@ restart_assert_accounting() { # <sp name…>
 		assert_field "$out" '.free_ext_cnt' "$free" "dn$i: free_ext_cnt"
 		assert_eq "$(jq_of "$out" '.side_ptr_list | length')" \
 			"${dn_sides[$addr]:-0}" "dn$i: side_ptr_list length"
-		# The allocator index key SPELLS the free count (§5.6 zero-pads it so
-		# lexical key order is numeric order), so a stale index is visible as
-		# a dn_capacity key whose {free_ext_cnt} field disagrees with the
-		# DnConf, and a dropped one as no key at all.
+		# The allocator index key SPELLS the free count (zero-padded so lexical
+		# key order is numeric order: architecture.md, Capacity index keys), so
+		# a stale index is visible as a dn_capacity key whose {free_ext_cnt}
+		# field disagrees with the DnConf, and a dropped one as no key at all.
 		assert_eq "$(printf '%s\n' "$dump" |
 			awk -v a="$addr" -v f="$freehex" \
 				'$2 == "dn_capacity" && $5 == f && $6 == a' |
@@ -4738,11 +4885,11 @@ restart_assert_accounting() { # <sp name…>
 	assert_eq "$(printf '%s\n' "$dump" | awk '$2 == "cn_capacity"' |
 		wc -l | tr -d ' \n')" "${#CN_DIRS[@]}" "cn_capacity key count"
 
-	# And the closed form, straight from the §10.6 constants: the standard SP
-	# costs SP_EXT_COST DN extents (meta 1 ext × 2 legs + data init_ext × 2
+	# And the closed form, straight from the test-time constants: the standard
+	# SP costs SP_EXT_COST DN extents (meta 1 ext × 2 legs + data init_ext × 2
 	# legs) and reserves 1 + init_ext on each of cntlr_cnt CNs. Recomputing
 	# the totals from the CONSTANTS as well as from the records is what makes
-	# "the survivor set explains the accounting exactly" (§10.15 step 3) a
+	# "the survivor set explains the accounting exactly" (stage 3) a
 	# closed statement instead of a tautology over the same read.
 	assert_eq "$total_dn" \
 		"$((${#DN_DIRS[@]} * DN_EXTENTS - sp_cnt * SP_EXT_COST))" \
@@ -4809,8 +4956,8 @@ restart_assert_in_window() {
 case_restart() {
 	CASE=restart
 
-	# §10.5 fixes case D's pool names as spD0..spD9, which is PAR_CLIENTS
-	# wide — the same parallel width case A uses.
+	# The identity plan fixes case D's pool names as spD0..spD9, which is
+	# PAR_CLIENTS wide — the same parallel width case A uses.
 	local names=() i
 	for ((i = 0; i < PAR_CLIENTS; i++)); do names+=("spD$i"); done
 	local survivors=() missing=()
@@ -4819,8 +4966,8 @@ case_restart() {
 	# -----------------------------------------------------------------------
 	stage 1 "create the cluster and the seven nodes, sequentially"
 	# -----------------------------------------------------------------------
-	# §10.15 step 1 explicitly allows the sequential path here: the crash is
-	# the subject of the case, the node creation is only its fixture.
+	# The sequential path is allowed here: the crash is the subject of the
+	# case, the node creation is only its fixture.
 	new_cluster
 	make_nodes
 
@@ -4866,8 +5013,8 @@ case_restart() {
 	stage 2 "race ${#names[@]} create-sp over gw0-2 and SIGKILL gw1 mid-flight"
 	# -----------------------------------------------------------------------
 	# ① the calls. `race` reads one JSON object per line on stdin and turns
-	# each params object into the very argv the create-sp flag set parses
-	# (§10.8), so this is the §10.6 SP shape spelled as JSON — and `--raid1`
+	# each params object into the very argv the create-sp flag set parses, so
+	# this is the test-time SP shape spelled as JSON — and `--raid1`
 	# is a bool flag, hence a JSON true rather than a string (paramArgs then
 	# emits `--raid1=true`, the only spelling Go's flag package accepts).
 	local shape jobs=()
@@ -4919,7 +5066,7 @@ case_restart() {
 		die "gw1 still answers a ping after kill -9"
 	fi
 	restart_assert_in_window
-	# ② and ③ for this stage are step 3 below: §10.15 splits the load from its
+	# ② and ③ for this stage are step 3 below: the case splits the load from its
 	# audit, and the audit is the part that has to run against a settled
 	# store, after the last in-flight STM has either committed or died.
 
@@ -4931,7 +5078,7 @@ case_restart() {
 
 	for idx in "${!names[@]}"; do
 		name=${names[$idx]}
-		# race's output array is ordered by INPUT index (§10.8), and the jobs
+		# race's output array is ordered by INPUT index, and the jobs
 		# were emitted in name order, so idx addresses both.
 		code=$(jq_of "$result" "[.[] | select(.idx == $idx)][0].code")
 		if [ "$((idx % 3))" -eq 1 ]; then
@@ -4953,14 +5100,15 @@ case_restart() {
 			esac
 		else
 			# A surviving instance has no excuse: killing a PEER must not
-			# disturb it (§0 #3 — they share nothing but etcd).
+			# disturb it (GW1 — they share nothing but etcd).
 			assert_eq "$code" "OK" \
 				"job $idx ($name) on gw$((idx % 3)), an untouched instance"
 		fi
 
 		if [ "$(restart_sp_conf_cnt "$dump" "$name")" = "1" ]; then
-			# COMPLETE is not "an sp_conf exists": verify_sp is §10.11 step
-			# 6's full §5.4 write-set check — SpConf lists, SpName, SpRev,
+			# COMPLETE is not "an sp_conf exists": verify_sp is case S stage
+			# 6's full write-set check (gateway.md, Storage pools and GrowSlice)
+			# — SpConf lists, SpName, SpRev,
 			# both cntlrs with exactly one primary and distinct slots, the
 			# slice with its meta and data groups on four distinct DNs, and
 			# `missing` empty, which is workerctl reporting that no key the
@@ -4992,9 +5140,9 @@ case_restart() {
 	# check runs over ID SETS instead: every sp_id_to_name, sp_rev, cntlr and
 	# slice key in the store must belong to a SURVIVING SP. A write set
 	# applied halfway would show as an id no SpConf owns; one truncated the
-	# other way as a survivor missing from a set. Field indexes are the §5.1
-	# key layouts: sp_id_to_name {cid} {sp_id}, sp_rev {shard} {cid} {sp_id},
-	# cntlr/slice {cid} {sp_id} {sub id}.
+	# other way as a survivor missing from a set. Field indexes are the key
+	# layouts (architecture.md, Key table): sp_id_to_name {cid} {sp_id},
+	# sp_rev {shard} {cid} {sp_id}, cntlr/slice {cid} {sp_id} {sub id}.
 	local surv_ids
 	surv_ids=$(for sp in "${survivors[@]}"; do
 		printf '%016x\n' "$(sp_id_of "$sp")"
@@ -5046,12 +5194,13 @@ case_restart() {
 	if [ "${#missing[@]}" -gt 0 ]; then
 		for name in "${missing[@]}"; do
 			# make_sp drives gw0 (the harness default GATEWAY) and refreshes
-			# the cached token in the PARENT shell, per §10.10.
+			# the cached token in the PARENT shell, as SP_REV's comment asks.
 			make_sp "$name"
 		done
 	fi
 
-	# ② every one of the ten is now a complete §5.4 write set.
+	# ② every one of the ten is now a complete write set
+	# (gateway.md, Storage pools and GrowSlice).
 	for name in "${names[@]}"; do verify_sp "$name"; done
 	assert_eq "$(key_count sp_conf)" "${#names[@]}" "sp_conf key count"
 	assert_eq "$(key_count sp_id_to_name)" "${#names[@]}" \
@@ -5070,15 +5219,16 @@ case_restart() {
 	# -----------------------------------------------------------------------
 	# start_gw is the same launch line setup() and case_reset() use — there is
 	# no recovery flag, no fencing step and no cleanup between the kill and
-	# this call, which is the operational half of §0 #3.
+	# this call, which is the operational half of GW1.
 	start_gw 1
 	wait_until "$WAIT_SHORT" "gw1 to answer a ping after the restart" \
 		gw_ready 1
 
 	# ① one full create/delete round trip THROUGH the restarted instance. The
 	# token is minted by a read on gw0 and spent on gw1 on purpose: the SpRev
-	# token is state in ETCD, not in the instance that issued it (§5.5), so a
-	# rejoining gateway must honour a peer's token immediately.
+	# token is state in ETCD, not in the instance that issued it
+	# (architecture.md, Revision keys and the sync fan-out), so a rejoining
+	# gateway must honour a peer's token immediately.
 	local gw1_addr
 	gw1_addr=$(gw_addr 1)
 	refresh_rev "${names[0]}"
@@ -5086,7 +5236,8 @@ case_restart() {
 		--name t0 --size "$TD_SIZE")
 	refresh_rev "${names[0]}"
 	# dev_id is a uint32 and therefore a JSON NUMBER; td_id is a uint64 and
-	# therefore a STRING. §5.6 hands out dev_id 1 for the SP's first td.
+	# therefore a STRING. gateway.md, Thin devices, hands out dev_id 1 for the
+	# SP's first td.
 	assert_field "$out" '.dev_id' "1" "create-td through gw1: dev_id"
 	assert_ne "$(jq_of "$out" '.td_id')" "0" "create-td through gw1: td_id"
 	# ② ground truth, ③ read-back through gw1 itself.
@@ -5104,8 +5255,9 @@ case_restart() {
 		'.sp_conf.td_name_list | length')" "0" \
 		"${names[0]}: td_name_list after the round trip"
 
-	# The statelessness assertion (§0 #3, GW1). Every key's SECOND field is
-	# its §5.1 kind, so the set of kinds present IS the set of things the
+	# The statelessness assertion (GW1). Every key's SECOND field is its
+	# kind (architecture.md, Key table), so the set of kinds present IS the
+	# set of things the
 	# store describes. All three instances are serving and one of them has
 	# just (re)started, so a gateway that registered itself, took a lease or
 	# claimed a shard would be visible right now — and `worker`, the one
@@ -5123,7 +5275,7 @@ case_restart() {
 	[ -z "$unexpected" ] || die "key kinds the DATA does not own:" \
 		"$(printf '%s' "$unexpected" | tr '\n' ' ')"
 	assert_eq "$(printf '%s\n' "$observed" | grep -cx worker || true)" "0" \
-		"worker-style registration keys (§5.1 kind \"worker\")"
+		"worker-style registration keys (kind \"worker\")"
 	log "  key kinds in the store: $(printf '%s' "$observed" | tr '\n' ' ')"
 
 	# -----------------------------------------------------------------------
@@ -5182,7 +5334,7 @@ usage() {
 usage: bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
 
   --only <case>   run one of: ${CASES[*]}
-  --cleanup-only  run the §10.16 cleanup on the server and exit
+  --cleanup-only  run the cleanup on the server and exit
 EOF
 	exit 2
 }

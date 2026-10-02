@@ -9,17 +9,17 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.9, the destination side of a copy. A Clone
-// names one thin device of this SP as the destination of a dm-clone whose
-// source is a namespace somewhere else; the primary cntlr does the actual
-// work — connect the source, build the dm-clone, reload the td's namespaces
-// onto it (fig. `090Clone`). The gateway only ever writes desired state and
-// bumps SpRev, and never waits for a cntlr to act on it.
+// This file is architecture.md, Clones, the destination side of a copy. A
+// Clone names one thin device of this SP as the destination of a dm-clone
+// whose source is a namespace somewhere else; the primary cntlr does the
+// actual work — connect the source, build the dm-clone, reload the td's
+// namespaces onto it (fig. `090Clone`). The gateway only ever writes desired
+// state and bumps SpRev, and never waits for a cntlr to act on it.
 //
-// Four of the five RPCs are the plain SP-scoped shapes of gateway.md §4.
-// DeleteClone is the exception: with force = false it must PROVE the copy
-// finished before it may take the dm-clone away, and that proof lives only on
-// the primary's CN — hence the two-phase AG4 shape.
+// Four of the five RPCs are the plain SP-scoped shapes of gateway.md, The
+// handler pattern. DeleteClone is the exception: with force = false it must
+// PROVE the copy finished before it may take the dm-clone away, and that proof
+// lives only on the primary's CN — hence the two-phase AG4 shape.
 
 // The op names the bump helper cites; they are the RPC names so a log line
 // names something greppable.
@@ -46,8 +46,9 @@ func loadClone(
 
 // loadLiveClone is loadClone plus CLD1: a clone whose teardown has begun
 // accepts no further changes. DeleteClone is the only RPC allowed to act on
-// one, and it acts as a no-op (§5.8) — so every other clone MUTATOR opens with
-// this instead, and the two read paths (GetClone, and DeleteClone's own phase
+// one, and it acts as a no-op (gateway.md, Clones) — so every other clone
+// MUTATOR opens with this instead, and the two read paths (GetClone, and
+// DeleteClone's own phase
 // 1) keep using loadClone.
 //
 // The AppendCloneBitmap half is not cosmetic: without it a racing append could
@@ -72,18 +73,20 @@ func loadLiveClone(
 	return clone, nil
 }
 
-// CreateClone is architecture.md §8.9's CreateClone: one Clone record, one
-// name in `clone_name_list`, one SpRev bump. Everything the primary needs to
-// build the dm-clone is in that record, so the RPC is pure etcd.
+// CreateClone is the CreateClone of architecture.md, Clones: one Clone record,
+// one name in `clone_name_list`, one SpRev bump. Everything the primary needs
+// to build the dm-clone is in that record, so the RPC is pure etcd.
 //
 // Two of the section's rules are deliberately NOT enforced here. The
 // destination td MUST be empty — freshly created and never written — because
-// §11.5 crash recovery equates "mapped in the destination thin pool" with
+// clone crash recovery (architecture.md, Clone crash recovery) equates "mapped
+// in the destination thin pool" with
 // "already copied"; the CP cannot see whether a td was written, so that
 // stays a documented-unverifiable contract ([D3]). And the ceiling that
 // actually binds is the primary CN's clone-metadata arena, shared by every
 // clone of every cntlr on that CN, not MaxCloneCntPerSp; v1 does not track
-// it (§0 #16, architecture.md §8.9's admission note), so an over-committed clone is created
+// it (gateway.md, Clones; architecture.md, Clones: CreateClone's Admission
+// paragraph), so an over-committed clone is created
 // normally and reports RES_STATUS_ERROR until arena units free up.
 func (s *Server) CreateClone(
 	ctx context.Context,
@@ -195,7 +198,7 @@ func (s *Server) CreateClone(
 // of it and re-checks the token, so for a token-carrying caller an interleaved
 // mutation turns into ABORTED rather than into a decision taken on stale
 // facts. A token-less caller keeps the re-resolution but not that guarantee
-// (GW6 is presence-based, §0 #7).
+// (GW6 is presence-based).
 type clonePhase1 struct {
 	ClusterId uint64
 	SpId      uint64
@@ -209,8 +212,8 @@ type clonePhase1 struct {
 	Latched bool
 }
 
-// DeleteClone is architecture.md §8.9's DeleteClone, the two-phase RPC of
-// AG4: a read-only Snapshot, then — for force = false — one GetCntlrInfo
+// DeleteClone is the DeleteClone of architecture.md, Clones, the two-phase RPC
+// of AG4: a read-only Snapshot, then — for force = false — one GetCntlrInfo
 // against the primary's CN agent, then the deciding STM.
 //
 // force = false is a proof obligation, not a best effort. Removing the
@@ -218,10 +221,11 @@ type clonePhase1 struct {
 // byte that was never pulled from the source, so the RPC refuses unless the
 // primary's `clone_id_to_dm_clone` row shows the copy complete. An
 // unreachable agent is FAILED_PRECONDITION for exactly the same reason
-// (§8.9): silence is not proof. force = true skips the whole check and is
-// how an operator abandons a clone whose source is gone.
+// (architecture.md, Clones): silence is not proof. force = true skips the
+// whole check and is how an operator abandons a clone whose source is gone.
 //
-// The deciding STM also resumes the destination's namespaces: §11.3 has them
+// The deciding STM also resumes the destination's namespaces: architecture.md,
+// Transfer + clone = cross-SP live migration, has them
 // suspended (created that way, or flipped) before the clone is made, and the
 // clone record is the only thing that remembers why. The resume rides the
 // LATCH (CLD4), not the final STM that removes the clone: clearing `suspended`
@@ -251,10 +255,11 @@ func (s *Server) DeleteClone(
 			return err
 		}
 		// GW6 in PHASE 1, not only in the deciding STM: openSpRead skips the
-		// check, and §5.8's table order puts a stale token ahead of every
-		// other answer this RPC can give — including the `deleting` row, which
-		// decides here. AG4 still re-checks in phase 2; this only makes a
-		// stale client see ABORTED before the agent call rather than after it.
+		// check, and the table order of gateway.md, Clones, puts a stale token
+		// ahead of every other answer this RPC can give — including the
+		// `deleting` row, which decides here. AG4 still re-checks in phase 2;
+		// this only makes a stale client see ABORTED before the agent call
+		// rather than after it.
 		if _, err := checkSpToken(
 			stm, sc.Cid, sc.Conf, req.GetSpRev(),
 		); err != nil {
@@ -298,7 +303,8 @@ func (s *Server) DeleteClone(
 			// GW7: NOT_FOUND is for an object the REQUEST named. This CN
 			// is named by a live cntlr of the SP, and DeleteControllerNode
 			// refuses a CN whose cntlr_ptr_list is non-empty, so its absence
-			// is a lost invariant key — §5.9's ABORTED.
+			// is a lost invariant key — ABORTED (architecture.md,
+			// UNEXPECTED_ERROR → `ABORTED`).
 			return errAborted("cn_conf key %q is missing", cnKey)
 		}
 		phase1 = clonePhase1{
@@ -373,7 +379,8 @@ func (s *Server) DeleteClone(
 //
 // Both failure modes are FAILED_PRECONDITION rather than the usual ABORTED
 // of AG3, because both mean the same thing to the caller: hydration could
-// not be proven complete, so retry later or pass force (§8.9).
+// not be proven complete, so retry later or pass force (architecture.md,
+// Clones).
 func checkCloneHydrated(
 	ctx context.Context,
 	phase1 clonePhase1,
@@ -410,12 +417,14 @@ func checkCloneHydrated(
 }
 
 // resumeCloneDstNs clears `suspended` on every namespace of the SP backed by
-// the clone's destination td (§8.9 Action). Only the subsystems that actually
-// change are written back, so an SP with many subsystems produces the
-// smallest write set that still describes the new desired state.
+// the clone's destination td (architecture.md, Clones: DeleteClone's Action).
+// Only the subsystems that actually change are written back, so an SP with
+// many subsystems produces the smallest write set that still describes the new
+// desired state.
 //
-// A listed nqn whose Subsystem key is gone aborts the RPC (§5.9): the SP has
-// lost an invariant key, and half-resuming the namespaces of an SP is worse
+// A listed nqn whose Subsystem key is gone aborts the RPC (architecture.md,
+// UNEXPECTED_ERROR → `ABORTED`): the SP has lost an invariant key, and
+// half-resuming the namespaces of an SP is worse
 // than refusing — the caller can retry, whereas a namespace left suspended
 // with no clone to explain it never resumes on its own.
 func resumeCloneDstNs(
@@ -444,8 +453,8 @@ func resumeCloneDstNs(
 	return nil
 }
 
-// GetClone is architecture.md §8.9's GetClone: one consistency read at a
-// single store revision, no token and no bump.
+// GetClone is the GetClone of architecture.md, Clones: one consistency read at
+// a single store revision, no token and no bump.
 func (s *Server) GetClone(
 	ctx context.Context,
 	req *pb.GetCloneRequest,
@@ -481,11 +490,11 @@ func (s *Server) GetClone(
 	return &pb.GetCloneReply{Clone: clone}, nil
 }
 
-// UpdateCloneTrConf is architecture.md §8.9's UpdateCloneTrConf: the source
-// SP's cntlrs moved, so the addresses the primary reconnects to are replaced
-// wholesale. The list is a replacement and never a merge — an address that
-// is gone must stop being retried — and the bump is what tells the primary
-// to reconnect.
+// UpdateCloneTrConf is the UpdateCloneTrConf of architecture.md, Clones: the
+// source SP's cntlrs moved, so the addresses the primary reconnects to are
+// replaced wholesale. The list is a replacement and never a merge — an address
+// that is gone must stop being retried — and the bump is what tells the
+// primary to reconnect.
 func (s *Server) UpdateCloneTrConf(
 	ctx context.Context,
 	req *pb.UpdateCloneTrConfRequest,
@@ -530,8 +539,9 @@ func (s *Server) UpdateCloneTrConf(
 	return &pb.UpdateCloneTrConfReply{CloneId: cloneId}, nil
 }
 
-// AppendCloneBitmap is architecture.md §8.9's AppendCloneBitmap: one chunk of
-// the SOURCE bitmap, addressed by the PAIR (`src_slice_idx`, `bm_idx`).
+// AppendCloneBitmap is the AppendCloneBitmap of architecture.md, Clones: one
+// chunk of the SOURCE bitmap, addressed by the PAIR (`src_slice_idx`,
+// `bm_idx`).
 //
 // A chunk is addressed rather than allocated: `src_slice_idx` picks the source
 // slice and `bm_idx` fixes the chunk's byte offset within that slice's bitmap
@@ -540,16 +550,18 @@ func (s *Server) UpdateCloneTrConf(
 // any other chunk's existence or length, so a caller may append to any (s, b)
 // at any time, in any order, and may leave chunks unsent entirely; an absent
 // chunk reads as all-zero (= all-written) and a short chunk's missing tail
-// reads as written, both the safe direction (§9.6). WITHIN one chunk the page
-// lands at the chunk's current length — a page is never a replacement, or
-// paging would keep only the last one (the STM below) — which is why the pages
-// of ONE chunk must arrive in slice-bitmap order.
+// reads as written, both the safe direction (architecture.md, Bitmap push
+// protocol). WITHIN one chunk the page lands at the chunk's current length — a
+// page is never a replacement, or paging would keep only the last one (the STM
+// below) — which is why the pages of ONE chunk must arrive in slice-bitmap
+// order.
 //
 // The Clone record carries no chunk count, and an append does not rewrite it:
 // the set of a clone's chunks IS the set of its `CloneBitmap` keys, which is
-// what §11.7's drain and `PushCloneBitmap` read (gateway.md §5.8). The clone
-// key still enters this transaction's read set through `loadLiveClone` below,
-// so the optimistic-concurrency guard is unchanged.
+// what the drain of dnv-worker.md, The clone drain, and `PushCloneBitmap` read
+// (gateway.md, Clones). The clone key still enters this transaction's read set
+// through `loadLiveClone` below, so the optimistic-concurrency guard is
+// unchanged.
 //
 // The two index bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of
 // GW7's Append*Bitmap row: they judge the indexes of THIS request against a
@@ -559,7 +571,8 @@ func (s *Server) UpdateCloneTrConf(
 // `bm_cnt ≥ MaxMigrBmCnt` — and is the one refusal here that is
 // RESOURCE_EXHAUSTED. The
 // stateless page cap is INVALID_ARGUMENT again, because a page longer than a
-// whole chunk fits nowhere, whatever is already stored (§8.9 Errors).
+// whole chunk fits nowhere, whatever is already stored (architecture.md,
+// Clones: AppendCloneBitmap's Errors).
 //
 // The bytes are stored exactly as sent: bitmaps are opaque to the gateway
 // (GW14, [D-J]) — the 1 = never-written, LSB-first convention is the agents'
@@ -584,7 +597,8 @@ func (s *Server) AppendCloneBitmap(
 	}
 	// Judged on this request alone, so it is here and NOT in validateBitmap:
 	// that helper is shared with AppendMigrationBitmap, whose chunks carry no
-	// byte cap of their own, and C is a clone chunk's capacity (§8.9).
+	// byte cap of their own, and C is a clone chunk's capacity
+	// (architecture.md, Clones).
 	if len(req.GetBitmap()) > common.CloneBmChunkBytes {
 		return nil, errInvalid(
 			"bitmap is %d bytes, over the %d one clone bitmap chunk holds",
@@ -616,12 +630,13 @@ func (s *Server) AppendCloneBitmap(
 			return errInvalid("bm_idx %d is not below %d",
 				bmIdx, common.MaxCloneBmCnt)
 		}
-		// §8.9 Action: "append the bytes to CloneBitmap key
-		// (src_slice_idx, bm_idx) (create if absent)". The chunk grows in
-		// place; it is never replaced. Callers page one source slice's bitmap
-		// through GetThinDeviceBitmap and hand each page here, and the pages
-		// of one chunk concatenate into exactly the bytes [b*C, b*C+len) that
-		// chunk holds of the slice's bitmap (§9.6, [D8]). Overwriting would
+		// architecture.md, Clones, AppendCloneBitmap's Action: "append the
+		// bytes to CloneBitmap key (src_slice_idx, bm_idx) (create if
+		// absent)". The chunk grows in place; it is never replaced. Callers
+		// page one source slice's bitmap through GetThinDeviceBitmap and hand
+		// each page here, and the pages of one chunk concatenate into exactly
+		// the bytes [b*C, b*C+len) that chunk holds of the slice's bitmap
+		// (architecture.md, Bitmap push protocol; [D8]). Overwriting would
 		// keep only the last page and place its bits at the chunk's own
 		// offset, which PushCloneBitmap would then hand the primary as "these
 		// blocks were never written" and the agent would blkdiscard regions

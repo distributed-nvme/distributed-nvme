@@ -17,7 +17,7 @@ import (
 )
 
 // noExpectRev is the expectRev the worker's own calls pass to the three ops
-// the gateway shares with it (gateway.md §2.2 #3): 0 skips the SpRev token
+// the gateway shares with it (gateway.md GW6): 0 skips the SpRev token
 // check, which is what every test below wants unless it is testing the check.
 const noExpectRev = uint64(0)
 
@@ -101,7 +101,8 @@ func opsTrConf(addrPort string) *pb.NvmeTrConf {
 // opsSpConf is the SP the fixture writes; every op reads it back.
 func opsSpConf() *pb.SpConf {
 	// A stored bdev_conf, every member concrete: CreateStoragePool resolved
-	// it once and every op below reads it as written (§7).
+	// it once and every op below reads it as written (architecture.md, Common
+	// validation).
 	bdevConf := testRaid1BdevConf(opsBlockSize, common.DefaultChunkBlockCnt)
 	return &pb.SpConf{
 		SpId:           opsSpId,
@@ -183,7 +184,8 @@ func newOpsEnv(t *testing.T) *opsEnv {
 	t.Helper()
 	cli := newTestClient(t)
 	// A stored ClusterConf: concrete from CreateCluster on, which is what the
-	// GrowSlice gate requires (§7). Its extent size is named here because the
+	// GrowSlice gate requires (architecture.md, Common validation). Its extent
+	// size is named here because the
 	// whole fixture's block arithmetic is written against 1 GiB extents.
 	cc := testClusterConf()
 	cc.DnBinConf.ExtentSize = opsExtSize
@@ -238,8 +240,9 @@ func newOpsEnv(t *testing.T) *opsEnv {
 	return env
 }
 
-// putDn writes one DnConf, its capacity key (when the §5.6 rule says it has
-// one) and its DnRev, all consistently.
+// putDn writes one DnConf, its capacity key (when the presence rule of
+// architecture.md, Capacity index keys, says it has one) and its DnRev, all
+// consistently.
 func (e *opsEnv) putDn(
 	addrPort string,
 	dnId uint64,
@@ -394,7 +397,8 @@ func (e *opsEnv) cnRev(addrPort string) uint64 {
 	return rev.GetRevision()
 }
 
-// dnCand rebuilds the candidate a §6.3 scan would have produced for a DN.
+// dnCand rebuilds the candidate a DN candidate scan (architecture.md, Finding
+// DN candidates) would have produced for a DN.
 func (e *opsEnv) dnCand(addrPort string) Cand {
 	e.t.Helper()
 	dn := e.dn(addrPort)
@@ -410,7 +414,8 @@ func (e *opsEnv) dnCand(addrPort string) Cand {
 	}
 }
 
-// cnCand rebuilds the candidate a §6.4 scan would have produced for a CN.
+// cnCand rebuilds the candidate a CN candidate scan (architecture.md, Finding
+// CN candidates) would have produced for a CN.
 func (e *opsEnv) cnCand(addrPort string) Cand {
 	e.t.Helper()
 	cn := e.cn(addrPort)
@@ -598,7 +603,8 @@ func TestErrPreconditionAbortsWithoutCommit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestResolveEventThreshold pins one of the two conf messages still resolved
-// at READ time, deliberately (§7): event_threshold is a policy timer, not
+// at READ time, deliberately (architecture.md, Common validation):
+// event_threshold is a policy timer, not
 // geometry — nothing is formatted or addressed with it — so CreateStoragePool
 // stores it verbatim and a stored zero here keeps meaning "the default".
 // (The other is the DmCloneConf hydration pair, resolved in worker/sprole.go.)
@@ -608,7 +614,7 @@ func TestResolveEventThreshold(t *testing.T) {
 		resolved.GetCntlrUnhealthy() != common.DefaultCntlrUnhealthy ||
 		resolved.GetSideUnhealthy() != common.DefaultSideUnhealthy ||
 		resolved.GetLegUnhealthy() != common.DefaultLegUnhealthy {
-		t.Errorf("nil must resolve to the §7 defaults: %v", resolved)
+		t.Errorf("nil must resolve to the Common validation defaults: %v", resolved)
 	}
 	stored := &pb.EventThreshold{PrimaryUnhealthy: 11, LegUnhealthy: 22}
 	resolved = ResolveEventThreshold(stored)
@@ -645,8 +651,10 @@ func TestThresholdReached(t *testing.T) {
 	}
 }
 
-// TestGroupBlocks pins the §3.6 worked example: a 1 TiB raid1 group with 1 GiB
-// extents, 1 MiB blocks and 128-block bitmap chunks has meta_blocks = 3.
+// TestGroupBlocks pins a worked example of the group geometry
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block): a 1 TiB raid1 group with 1 GiB extents, 1 MiB blocks and 128-block
+// bitmap chunks has meta_blocks = 3.
 func TestGroupBlocks(t *testing.T) {
 	raid1 := testRaid1BdevConf(opsBlockSize, 128)
 	metaBlocks, dataBlocks, err := GroupBlocks(1024, opsExtSize, raid1)
@@ -682,10 +690,13 @@ func TestGroupBlocks(t *testing.T) {
 }
 
 // TestGroupBlocksRefusesAZero is the mirror image of the case this test made
-// until the defaults moved: the three numbers §3.6's arithmetic needs used to
-// be resolved here, so a caller that passed zeros got exactly the geometry of
+// until the defaults moved: the three numbers the group geometry
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block) needs used to be resolved here, so a caller that passed zeros got
+// exactly the geometry of
 // one that passed the constants. They are stored values now, concrete since
-// the create RPC wrote them (§7), and a zero is corruption or foreign data —
+// the create RPC wrote them (architecture.md, Common validation), and a zero
+// is corruption or foreign data —
 // GroupBlocks refuses it by name instead of guessing a geometry a pool may not
 // have been formatted with.
 func TestGroupBlocksRefusesAZero(t *testing.T) {
@@ -728,7 +739,8 @@ func TestGroupBlocksRefusesAZero(t *testing.T) {
 	}
 }
 
-// TestPoolBlockSize pins the plain accessor it became (§7): it reports the
+// TestPoolBlockSize pins the plain accessor it became (architecture.md, Common
+// validation): it reports the
 // stored value and substitutes nothing, so a conf that somehow carries a zero
 // reports zero and its caller's ValidateBdevConf gate is what refuses it — a
 // silent 1 MiB here would address a pool in a unit it was never formatted
@@ -745,7 +757,8 @@ func TestPoolBlockSize(t *testing.T) {
 	}
 }
 
-// TestMetaLadderExtCnt walks the §8.5 ladder 1 → 2 → 4 → 8 → 16 GiB and
+// TestMetaLadderExtCnt walks the meta ladder of architecture.md, GrowSlice,
+// 1 → 2 → 4 → 8 → 16 GiB and
 // refuses at the cap.
 func TestMetaLadderExtCnt(t *testing.T) {
 	total := uint64(1)
@@ -772,7 +785,8 @@ func TestMetaLadderExtCnt(t *testing.T) {
 	if _, ok := MetaLadderExtCnt(1, common.MaxDnExtSize); ok {
 		t.Errorf("1 TiB extents must cap immediately")
 	}
-	// A zero extent size is no longer defaulted (§7): it is a divide by zero,
+	// A zero extent size is no longer defaulted (architecture.md, Common
+	// validation): it is a divide by zero,
 	// so the last-resort guard reports false rather than panicking. Callers
 	// validate the ClusterConf first, which is what keeps this arm
 	// unreachable in production.
@@ -804,7 +818,7 @@ func TestSetDnErrEpoch(t *testing.T) {
 		t.Errorf("err_epoch: got %d, want 1000", got)
 	}
 	if env.exists(capKey) {
-		t.Errorf("an unhealthy DN must have no capacity key (§5.6)")
+		t.Errorf("an unhealthy DN must have no capacity key (architecture.md, Capacity index keys)")
 	}
 	if got := env.dnRev(opsDnA); got != revBefore {
 		t.Errorf("err_epoch must not bump DnRev: got %d, want %d", got, revBefore)
@@ -1003,7 +1017,8 @@ func TestSetLegErrEpoch(t *testing.T) {
 	if got := findLeg(env.slice(), opsMetaLegB).GetErrEpoch(); got != 1100 {
 		t.Errorf("meta leg err_epoch: got %d, want 1100", got)
 	}
-	// A SPARE leg is found too (§8.12: spares are probed like active legs).
+	// A SPARE leg is found too (architecture.md, Spare legs: spares are probed
+	// like active legs).
 	if err := SetLegErrEpoch(
 		env.ctx, env.cli, env.cid, opsSpId, opsSliceId, opsSpareLeg, 1200,
 	); err != nil {
@@ -1144,7 +1159,8 @@ func TestFlipProvisioned(t *testing.T) {
 		t.Fatalf("FlipProvisioned: %v", err)
 	}
 	// The op reports the sides it WROTE, in the order they were listed: the
-	// caller logs one §12 "flip applied" record per side.
+	// caller logs one "flip applied" record (dnv-worker.md, Log records) per
+	// side.
 	if !equalSideRefs(flipped, sides) {
 		t.Errorf("flipped: got %v, want %v", flipped, sides)
 	}
@@ -1501,7 +1517,8 @@ func TestFailover(t *testing.T) {
 }
 
 // TestFailoverDisabledPrimary pins AR5's second trigger in the STM: a
-// `disabled` primary fails over on its own (§8.6), so a HEALTHY one moves the
+// `disabled` primary fails over on its own (architecture.md, Cntlrs), so a
+// HEALTHY one moves the
 // role with no threshold to wait out.
 func TestFailoverDisabledPrimary(t *testing.T) {
 	env := newOpsEnv(t)
@@ -1916,7 +1933,7 @@ func TestGrowSliceData(t *testing.T) {
 // TestCreateSpareLegRefusesWhileASpareIsPending pins).
 //
 // Both owners evaluate the SAME pre-grow snapshot during an accepted
-// shard-handoff overlap (§0 item 4): both find AR6's pending rule false, both
+// shard-handoff overlap (VW7): both find AR6's pending rule false, both
 // scan candidates and both call GrowSlice. Their picks are drawn at random, so
 // the second owner's DNs need not be the first's and MD5's capacity guard does
 // not fire — the test gives the second call fresh DNs on purpose. Without a
@@ -2027,7 +2044,7 @@ func TestGrowPending(t *testing.T) {
 }
 
 // TestGrowSliceMetaLadder grows the meta list 1 → 2 → 4 → 8 → 16 extents and
-// then hits the §8.5 cap.
+// then hits the cap of architecture.md, GrowSlice.
 func TestGrowSliceMetaLadder(t *testing.T) {
 	env := newOpsEnv(t)
 	// Enough DN pairs for four meta grows.
@@ -2089,8 +2106,9 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 	}
 }
 
-// TestGrowSliceRefusesAFullGroupList pins the §8.5 group ceiling: a group's
-// md names carry its index in its list as two hex digits (§4.3), so GrowSlice
+// TestGrowSliceRefusesAFullGroupList pins the group ceiling of architecture.md,
+// GrowSlice: a group's md names carry its index in its list as two hex digits
+// (architecture.md, md names), so GrowSlice
 // refuses to append to a list that already holds MaxGrpCntPerSlice groups,
 // for either kind, and writes nothing. The ceiling is per list: a grow of the
 // other kind still commits on the same slice. The data list is also walked up
@@ -2306,7 +2324,8 @@ func TestGrowSlicePreconditions(t *testing.T) {
 	})
 }
 
-// TestGrowSliceRefusesAnInvalidStoredConf pins the §7 gate at the top of the
+// TestGrowSliceRefusesAnInvalidStoredConf pins the gate (architecture.md,
+// Common validation) at the top of the
 // GrowSlice STM. Both confs are validated before anything is computed from
 // them — the two zeros below are exactly the two the op used to substitute a
 // constant for — and the refusal is an ErrPrecondition, so the transaction
@@ -2319,8 +2338,9 @@ func TestGrowSliceRefusesAnInvalidStoredConf(t *testing.T) {
 		reason string
 	}{
 		{
-			// The pool block size §3.6's geometry and AR6's pending rule are
-			// both expressed in.
+			// The pool block size the group geometry (architecture.md, Group
+			// on-leg layout: meta region, data region, health block) and AR6's
+			// pending rule are both expressed in.
 			name: "the sp's stored bdev_conf",
 			setup: func(env *opsEnv) {
 				conf := env.spConf()
@@ -2629,7 +2649,8 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 		},
 		{
 			// The same gain on the pick's own CN is a stale plan too, and
-			// the plan check precedes the §6.4 one, so the next pass
+			// the plan check precedes the same-CN one (architecture.md, Finding CN
+			// candidates), so the next pass
 			// re-plans instead of reading a refusal.
 			name: "a cntlr the plan did not hold on the pick's cn",
 			setup: func(env *opsEnv) Cand {
@@ -3081,7 +3102,7 @@ func TestSwitchSpareLeg(t *testing.T) {
 
 func TestSwitchSpareLegPreconditions(t *testing.T) {
 	// addMigrDst gives one leg the second side a CreateMigration hangs off
-	// it (architecture.md §8.11): an unprovisioned destination on dn-d, the
+	// it (architecture.md, Migrations): an unprovisioned destination on dn-d, the
 	// one DN no leg of the fixture uses.
 	addMigrDst := func(env *opsEnv, legId uint64) {
 		slice := env.slice()

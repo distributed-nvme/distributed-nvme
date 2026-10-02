@@ -33,8 +33,8 @@ import (
 // up yet at boot) and a `reconcile` failure both return after the children are
 // already running. Cancelling `runCtx` alone does not kill them: the
 // `exec.CommandContext` watchdog that turns cancellation into SIGTERM/SIGKILL
-// (osclient.md §4.2, SH15) lives in *this* process and dies with it, so the
-// child is reparented to init and keeps `/dev/mapper/{DnSideName}` open —
+// (osclient.md, RunCommand; SH15) lives in *this* process and dies with it, so
+// the child is reparented to init and keeps `/dev/mapper/{DnSideName}` open —
 // EBUSY for the next incarnation's `dmsetup remove`.
 //
 // The fake background goroutine below is the shape that matters: rooted at the
@@ -51,7 +51,7 @@ func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
 		// already started the zeroing goroutines.
 		{"listener failure", "127.0.0.1:999999", nil},
 		// reconcile itself fails after starting some of them — convergeSide
-		// arms the goroutine before the loop's later error (§9.4).
+		// arms the goroutine before the loop's later error (DN9).
 		{"reconcile failure", "127.0.0.1:0", errors.New("reconcile failed")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,7 +245,8 @@ func TestResTrackerEpoch(t *testing.T) {
 	// PROVISIONING is the fourth outcome: healthy, not
 	// ready, no action needed. It is an ordinary status change, so it moves
 	// the epoch exactly like the other three — what makes it special is that
-	// the *worker* never turns it into err_epoch (§9.5).
+	// the *worker* never turns it into err_epoch (architecture.md,
+	// Live-state reporting).
 	now = 500
 	provisioning := tracker.Provisioning("p", "side-dev", "zeroing 3/10")
 	if provisioning.GetStatus() !=
@@ -327,9 +328,10 @@ func TestStoreListUnreadablePrefixIsFatal(t *testing.T) {
 }
 
 // TestStoreCommandsCarryTheSoftTimeout: the store's two commands, SH6's `ls`
-// and SH7's `rm`, reach the OsClient on a ctx carrying the §7 soft timeout
-// (SH15). The caller owns that deadline and the LimitedOsClient adds none
-// (osclient.md §4.2), so without the wrap a wedged `ls` would hold the
+// and SH7's `rm`, reach the OsClient on a ctx carrying the soft timeout
+// (architecture.md, Common validation; SH15). The caller owns that deadline
+// and the LimitedOsClient adds none (osclient.md, RunCommand), so without the
+// wrap a wedged `ls` would hold the
 // startup reconcile, node lock and all, for ever, and a wedged `rm` the pass
 // that drops an object.
 func TestStoreCommandsCarryTheSoftTimeout(t *testing.T) {
@@ -496,7 +498,8 @@ func TestStoreListRetriesAFailedLeftoverRemoval(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bitmap chunk store and skip-range math (SH21-SH23, §11.4)
+// Bitmap chunk store and skip-range math (SH21-SH23; architecture.md,
+// raid0 bitmap math)
 // ---------------------------------------------------------------------------
 
 func TestBitmapBit(t *testing.T) {

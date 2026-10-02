@@ -31,7 +31,8 @@ import (
 // a transaction reaches the client exactly as written and nothing is written
 // to etcd.
 
-// errInvalid is a §7 violation, a malformed page_token or a bad enum/oneof.
+// errInvalid is a violation of architecture.md, Common validation, a malformed
+// page_token or a bad enum/oneof.
 func errInvalid(format string, args ...any) error {
 	return status.Errorf(codes.InvalidArgument, format, args...)
 }
@@ -53,7 +54,8 @@ func errPrecondition(format string, args ...any) error {
 }
 
 // errExhausted is a cardinality ceiling: the Max*CntPerCluster / Max*CntPerSp
-// gates, "too few candidates" (§6.5) and the Append*Bitmap count caps. GW7's
+// gates, "too few candidates" (architecture.md, Per-operation allocation) and
+// the Append*Bitmap count caps. GW7's
 // dividing line: RESOURCE_EXHAUSTED is capacity or quota that could be freed
 // or extended, FAILED_PRECONDITION the object's own state forbidding the
 // operation — which is why the meta ladder cap left this list for
@@ -63,7 +65,8 @@ func errExhausted(format string, args ...any) error {
 	return status.Errorf(codes.ResourceExhausted, format, args...)
 }
 
-// errAborted is the §5.9 catch-all: STM-client, conflict-budget, etcd and
+// errAborted is the catch-all of architecture.md, UNEXPECTED_ERROR →
+// `ABORTED`: STM-client, conflict-budget, etcd and
 // proto errors, a missing invariant key, and the agent gRPC failures the RPC
 // specs map here.
 func errAborted(format string, args ...any) error {
@@ -71,12 +74,12 @@ func errAborted(format string, args ...any) error {
 }
 
 // msgStaleRevision is the one sentence a token mismatch ever produces. The
-// integration suite matches on it, so it is a constant (§0 #7, GW6).
+// integration suite matches on it, so it is a constant (GW6).
 const msgStaleRevision = "stale revision"
 
 // errStale is the ABORTED of GW6: the request carried a token message and its
 // revision does not equal the stored one. A request that carries NO token
-// message never reaches here — the check is skipped entirely (§0 #7).
+// message never reaches here — the check is skipped entirely (GW6).
 func errStale() error {
 	return status.Error(codes.Aborted, msgStaleRevision)
 }
@@ -91,7 +94,7 @@ func isStatusErr(err error) bool {
 // mapStmErr is what every handler wraps its RunSTM / Snapshot call in. A
 // status error the closure raised passes through untouched; everything else —
 // the STM client, the conflict budget, etcd itself, a (de)serialization
-// failure — is §5.9's ABORTED.
+// failure — is an ABORTED (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 func mapStmErr(err error) error {
 	if err == nil {
 		return nil
@@ -144,7 +147,7 @@ func mapModelErr(err error) error {
 // occupies a DN the scan's read of it did not. DeleteThinDevice's deciding
 // STM returns it too, for a stale plan:
 // another SP than the one the plan walked, or, for a token-less request, a
-// moved SpRev. It is never surfaced to a client (§0 #8).
+// moved SpRev. It is never surfaced to a client (GW9).
 var errCandidateChanged = errors.New("gateway: candidate changed")
 
 // isCandidateChanged reports whether err is that sentinel.
@@ -176,7 +179,8 @@ func candidateUnit(ctx context.Context, unit func() error) error {
 // Resolution (GW5)
 // ---------------------------------------------------------------------------
 
-// clusterNameOf applies the §8 preamble default that every RPC carrying a
+// clusterNameOf applies the default of architecture.md, `service Gateway` —
+// RPC specifications, that every RPC carrying a
 // cluster_name shares.
 func clusterNameOf(name string) string {
 	if name == "" {
@@ -186,12 +190,13 @@ func clusterNameOf(name string) string {
 }
 
 // resolveCluster is the first read of every STM but CreateCluster's and
-// ListClusters' (GW5, §5.8), save the later transactions of GrowSlice,
-// CreateSpareLeg and SwitchSpareLeg, which reuse the cid their planning
-// snapshot resolved here. ClusterConf is the only name-keyed message, and
-// cluster_id = fnv64a(name ‖ creation_epoch) is the prefix of every other key
-// the RPC will touch. Reading it INSIDE the transaction is what makes an RPC
-// fail correctly when the cluster is concurrently deleted or recreated.
+// ListClusters' (GW5; architecture.md, STM discipline), save the later
+// transactions of GrowSlice, CreateSpareLeg and SwitchSpareLeg, which reuse
+// the cid their planning snapshot resolved here. ClusterConf is the only
+// name-keyed message, and cluster_id = fnv64a(name ‖ creation_epoch) is the
+// prefix of every other key the RPC will touch. Reading it INSIDE the
+// transaction is what makes an RPC fail correctly when the cluster is
+// concurrently deleted or recreated.
 func resolveCluster(
 	s etcdutil.STM,
 	clusterName string,
@@ -207,9 +212,10 @@ func resolveCluster(
 // resolveSp reads the SP an SP-scoped RPC names (GW5).
 //
 // rejectDeleting is true for every mutator except DeleteStoragePool: an SP
-// whose teardown has begun accepts no further changes (§8 preamble).
-// DeleteStoragePool is what SETS the flag (SPD4), so the branch is live from
-// the moment it commits until the worker's drain removes the key — the whole
+// whose teardown has begun accepts no further changes (architecture.md,
+// `service Gateway` — RPC specifications). DeleteStoragePool is what SETS the
+// flag (SPD4), so the branch is live from the moment it commits until the
+// worker's drain removes the key — the whole
 // duration of a teardown, not a test-only corner.
 func resolveSp(
 	s etcdutil.STM,
@@ -247,7 +253,7 @@ func (sc *spScope) Shard() uint32 { return sc.Conf.GetShardCode() }
 // openSp is the resolve-then-check-the-token opening of every SP-scoped
 // mutator (GW5 + GW6, in that order). tok is req.GetSpRev() — the MESSAGE, not
 // its revision — because GW6 is presence-based: a request that omitted the
-// message passes nil here and its revision check is skipped (§0 #7).
+// message passes nil here and its revision check is skipped (GW6).
 func openSp(
 	s etcdutil.STM,
 	clusterName string,
@@ -300,18 +306,20 @@ func openSpFlags(
 }
 
 // ---------------------------------------------------------------------------
-// Token checks and revision bumps (GW6, §5.5)
+// Token checks and revision bumps (GW6; architecture.md, Revision keys and
+// the sync fan-out)
 // ---------------------------------------------------------------------------
 //
-// The token check is PRESENCE-BASED (§0 #7). A request that carries a token
+// The token check is PRESENCE-BASED (GW6). A request that carries a token
 // message is checked immediately after resolution and before any other state
 // check, so a stale client always sees ABORTED "stale revision" and never a
 // precondition error computed against state it has not read. A request that
 // carries NO token message skips the comparison and proceeds with no
 // optimistic-concurrency gate — the caller has opted out of it.
 //
-// The rev key is read either way: it is a §5.1 invariant key whose absence is
-// §5.9's ABORTED, the bump helpers below rely on it having been read, and
+// The rev key is read either way: it is an invariant key (architecture.md, Key
+// grammar) whose absence is an ABORTED (architecture.md, UNEXPECTED_ERROR →
+// `ABORTED`), the bump helpers below rely on it having been read, and
 // keeping it in the STM's read set makes a skipped check no weaker against a
 // concurrent DELETE of the object than a checked one.
 //
@@ -379,10 +387,11 @@ func checkCnToken(
 	return rev, nil
 }
 
-// bumpSp bumps the SP's revision once (§5.5). The key has already been READ by
-// GW6's token check — which reads it whether or not it compares it — so a
-// failure here can only mean the key vanished inside the same transaction,
-// which is §5.9's ABORTED.
+// bumpSp bumps the SP's revision once (architecture.md, Revision keys and the
+// sync fan-out). The key has already been READ by GW6's token check — which
+// reads it whether or not it compares it — so a failure here can only mean the
+// key vanished inside the same transaction, which is an ABORTED
+// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 func bumpSp(s etcdutil.STM, op string, sc *spScope) error {
 	err := model.BumpSpRev(s, op, sc.Shard(), sc.Cid, sc.SpId())
 	if err != nil {
@@ -391,7 +400,8 @@ func bumpSp(s etcdutil.STM, op string, sc *spScope) error {
 	return nil
 }
 
-// bumpDn bumps one DN's revision once (§5.5).
+// bumpDn bumps one DN's revision once (architecture.md, Revision keys and the
+// sync fan-out).
 func bumpDn(s etcdutil.STM, op string, cid uint64, dn *pb.DnConf) error {
 	if err := model.BumpDnRev(s, op, cid, dn); err != nil {
 		return errAborted("%v", err)
@@ -399,7 +409,8 @@ func bumpDn(s etcdutil.STM, op string, cid uint64, dn *pb.DnConf) error {
 	return nil
 }
 
-// bumpCn bumps one CN's revision once (§5.5).
+// bumpCn bumps one CN's revision once (architecture.md, Revision keys and the
+// sync fan-out).
 func bumpCn(s etcdutil.STM, op string, cid uint64, cn *pb.CnConf) error {
 	if err := model.BumpCnRev(s, op, cid, cn); err != nil {
 		return errAborted("%v", err)
@@ -408,7 +419,8 @@ func bumpCn(s etcdutil.STM, op string, cid uint64, cn *pb.CnConf) error {
 }
 
 // ---------------------------------------------------------------------------
-// Cluster-scoped id minting (GW12, §5.4)
+// Cluster-scoped id minting (GW12; architecture.md, Globals: id allocation +
+// shard buckets)
 // ---------------------------------------------------------------------------
 
 // mint is what one draw from a DnGlobal / CnGlobal / SpGlobal yields. The
@@ -421,7 +433,8 @@ type mint struct {
 	Bucket []uint32
 }
 
-// mintClusterId allocates one id and one shard code (GW12, §5.4): the id is
+// mintClusterId allocates one id and one shard code (GW12; architecture.md,
+// Globals: id allocation + shard buckets): the id is
 // next_id (never reused), the shard code is the index of the smallest bucket
 // value — the first index on ties — and that bucket is incremented.
 //
@@ -453,7 +466,8 @@ func mintClusterId(
 		)
 	}
 	if nextId == 0 {
-		// next_id "starts at 1" (§5.4); a proto3 zero is a global written
+		// next_id "starts at 1" (architecture.md, Globals: id allocation +
+		// shard buckets); a proto3 zero is a global written
 		// without it and must never mint the 0 that every id-valued result
 		// reserves for "none".
 		nextId = 1
@@ -479,7 +493,8 @@ func releaseShard(bucket []uint32, shard uint32) []uint32 {
 	return model.ReleaseShard(bucket, shard)
 }
 
-// bucketSum is the live object count a global's shard_bucket encodes (§5.4).
+// bucketSum is the live object count a global's shard_bucket encodes
+// (architecture.md, Globals: id allocation + shard buckets).
 func bucketSum(bucket []uint32) uint64 {
 	total := uint64(0)
 	for _, value := range bucket {
@@ -489,13 +504,14 @@ func bucketSum(bucket []uint32) uint64 {
 }
 
 // zeroBucket is the shard_bucket a fresh global carries: ShardBucketSize
-// zeros (§5.4).
+// zeros (architecture.md, Globals: id allocation + shard buckets).
 func zeroBucket() []uint32 {
 	return make([]uint32, common.ShardBucketSize)
 }
 
 // ---------------------------------------------------------------------------
-// Per-SP id minting (GW12, §5.4)
+// Per-SP id minting (GW12; architecture.md, Globals: id allocation + shard
+// buckets)
 // ---------------------------------------------------------------------------
 
 // spIdMinter hands out the per-SP sub-object ids of one transaction from the
@@ -528,7 +544,8 @@ func (m *spIdMinter) commit(conf *pb.SpConf) {
 	conf.NextId = m.next
 }
 
-// nextDevId draws one thin-device dev_id from SpConf.next_dev_id (§5.4:
+// nextDevId draws one thin-device dev_id from SpConf.next_dev_id
+// (architecture.md, Globals: id allocation + shard buckets —
 // starts at 1, never reused, 0 is the "no origin" sentinel of ori_id).
 func nextDevId(conf *pb.SpConf) uint32 {
 	devId := conf.GetNextDevId()
@@ -540,11 +557,11 @@ func nextDevId(conf *pb.SpConf) uint32 {
 }
 
 // ---------------------------------------------------------------------------
-// Pagination (GW10, §5.7)
+// Pagination (GW10; architecture.md, page_token)
 // ---------------------------------------------------------------------------
 
-// pageLimit resolves and validates a list `count` (§7): 0 selects
-// DefaultListCnt, anything above MaxListCnt is refused.
+// pageLimit resolves and validates a list `count` (architecture.md, Common
+// validation): 0 selects DefaultListCnt, anything above MaxListCnt is refused.
 func pageLimit(count uint32) (int, error) {
 	if count == 0 {
 		return common.DefaultListCnt, nil
@@ -557,8 +574,8 @@ func pageLimit(count uint32) (int, error) {
 }
 
 // decodePageToken turns a request token into the last key of the previous
-// page (§5.7). An empty token is the start of the prefix; a token that is not
-// valid base64 is INVALID_ARGUMENT.
+// page (architecture.md, page_token). An empty token is the start of the
+// prefix; a token that is not valid base64 is INVALID_ARGUMENT.
 func decodePageToken(token string) (string, error) {
 	if token == "" {
 		return "", nil
@@ -570,7 +587,8 @@ func decodePageToken(token string) (string, error) {
 	return string(raw), nil
 }
 
-// encodePageToken is the token that continues a page after lastKey (§5.7).
+// encodePageToken is the token that continues a page after lastKey
+// (architecture.md, page_token).
 func encodePageToken(lastKey string) string {
 	return base64.StdEncoding.EncodeToString([]byte(lastKey))
 }
@@ -593,12 +611,13 @@ func validatePageArgs(count uint32, token string) error {
 
 // pageNames lists one page of the names under prefix (GW10).
 //
-// The range itself is not an STM read: §5.7 says the list RPCs never use one,
-// and a transaction cannot range at all. It is a keys-only scan of the whole
-// prefix, cut in Go at the token and the limit — every prefix a list RPC pages
-// is bounded by a Max*CntPerCluster (1024 DNs, 1024 CNs, 4096 SPs), so a
-// keys-only scan of one is cheap, and etcdutil deliberately exposes no
-// "range from key, limited" primitive to build a server-side cut from.
+// The range itself is not an STM read: architecture.md, page_token, says the
+// list RPCs never use one, and a transaction cannot range at all. It is a
+// keys-only scan of the whole prefix, cut in Go at the token and the limit —
+// every prefix a list RPC pages is bounded by a Max*CntPerCluster (1024 DNs,
+// 1024 CNs, 4096 SPs), so a keys-only scan of one is cheap, and etcdutil
+// deliberately exposes no "range from key, limited" primitive to build a
+// server-side cut from.
 //
 // The returned names are the key suffixes after the prefix; the next token is
 // empty exactly when the page was not full, which is what tells a client it
@@ -649,13 +668,13 @@ func pageNames(
 // ---------------------------------------------------------------------------
 
 // withAgentConn dials one agent, runs f against it and closes the connection
-// (AG2, §0 #5): dial per call, no cache in v1.
+// (AG2): dial per call, no cache in v1.
 //
-// Both interceptor chains are mandatory on every dnv connection (grpc.md §4);
-// they are what forwards the request's trace id to the agent (T3), which is
-// how the integration suite ties a script stage to an agent log record. The
-// whole dial+call is bounded by common.DefaultGatewayAgentTimeout, so a hung
-// agent bounds an RPC exactly as a hung etcd does.
+// Both interceptor chains are mandatory on every dnv connection (grpc.md,
+// Wiring); they are what forwards the request's trace id to the agent (T3),
+// which is how the integration suite ties a script stage to an agent log
+// record. The whole dial+call is bounded by common.DefaultGatewayAgentTimeout,
+// so a hung agent bounds an RPC exactly as a hung etcd does.
 //
 // grpc.NewClient does not block, so a dead endpoint surfaces as f's error,
 // never here.
@@ -712,7 +731,8 @@ func withCnAgent(
 // ---------------------------------------------------------------------------
 
 // containsName reports whether list already holds name. Every list it guards
-// is bounded by a §2.1 cardinality limit, so a linear scan is the right shape.
+// is bounded by a cardinality limit (architecture.md, Cardinality limits), so
+// a linear scan is the right shape.
 func containsName(list []string, name string) bool {
 	for _, item := range list {
 		if item == name {
@@ -773,8 +793,9 @@ func trConfEqual(a *pb.NvmeTrConf, b *pb.NvmeTrConf) bool {
 // primaryCntlr is the SP's primary cntlr and its id, or ok = false when the
 // SP has none. Every RPC that must reach "the" cntlr of an SP — InspectCntlr's
 // neighbours, DeleteClone's hydration check, both bitmap reads — goes through
-// the primary, because it is the one that builds §3.3 and therefore the one
-// that knows about thin volumes, clones and legs.
+// the primary, because it is the one that builds the stack of architecture.md,
+// Primary cntlr, and therefore the one that knows about thin volumes, clones
+// and legs.
 func primaryCntlr(
 	conf *pb.SpConf,
 	cntlrs []*pb.Cntlr,
@@ -789,8 +810,9 @@ func primaryCntlr(
 
 // enabledCntlrTrConfs is the nvme_tr_conf of every ENABLED cntlr's CN, in
 // cntlr_id_list order: exactly the `nvme_tr_conf_list` a CdcEntry advertises
-// (§8.8). A disabled cntlr is not advertised — its namespaces are ANA
-// inaccessible — which is why UpdateCntlrEnabled maintains the list too.
+// (architecture.md, Subsystems, namespaces). A disabled cntlr is not
+// advertised — its namespaces are ANA inaccessible — which is why
+// UpdateCntlrEnabled maintains the list too.
 func enabledCntlrTrConfs(cntlrs []*pb.Cntlr) []*pb.NvmeTrConf {
 	var list []*pb.NvmeTrConf
 	for _, cntlr := range cntlrs {
@@ -814,7 +836,8 @@ func findNs(subsystem *pb.Subsystem, nsIdx uint32) *pb.Namespace {
 }
 
 // ---------------------------------------------------------------------------
-// CdcEntry maintenance (§8.6, §8.8)
+// CdcEntry maintenance (architecture.md, Cntlrs; architecture.md, Subsystems,
+// namespaces)
 // ---------------------------------------------------------------------------
 //
 // One CdcEntry exists per Subsystem of the SP and advertises the transport
@@ -866,10 +889,11 @@ func eachCdcEntry(
 }
 
 // rebuildCdcEntry is one subsystem's CdcEntry as CreateSubsystem writes it
-// (§8.8), recomputed from what this transaction reads: the NQN the subsystem
-// is listed under, the Subsystem's allowed_hosts and the transport of every
-// ENABLED cntlr's CN in cntlr_id_list order. Every field is derived, none is
-// guessed, which is why UpdateSubsystemHosts and the cntlr mutators put this
+// (architecture.md, Subsystems, namespaces), recomputed from what this
+// transaction reads: the NQN the subsystem is listed under, the Subsystem's
+// allowed_hosts and the transport of every ENABLED cntlr's CN in cntlr_id_list
+// order. Every field is derived, none is guessed, which is why
+// UpdateSubsystemHosts and the cntlr mutators put this
 // back when they find the entry's key missing, rather than skip the entry.
 // The worker's ReplaceCntlr (model rewriteCdcEntries) still skips it.
 func rebuildCdcEntry(
@@ -932,7 +956,8 @@ func dropCdcTrConf(
 
 // spBdevConf is the bdev conf a stored SP is read with: its own, which
 // CreateStoragePool wrote as the member-wise merge of the request over
-// ClusterConf (§8.4 Defaults). It is deliberately NOT re-merged at read time —
+// ClusterConf (architecture.md, Storage pools, CreateStoragePool's Defaults).
+// It is deliberately NOT re-merged at read time —
 // an SP's geometry is fixed when it is created, and a later cluster-level
 // change must never move the stripe a thin device was sized against.
 func spBdevConf(conf *pb.SpConf) *pb.BdevConf {
@@ -940,8 +965,9 @@ func spBdevConf(conf *pb.SpConf) *pb.BdevConf {
 }
 
 // spStripeSize is the SP's dm-raid0 stripe, the unit CreateThinDevice sizes
-// against (§8.7): the SP's stored conf and nothing else. CreateStoragePool
-// resolved it (§7), so there is no constant rung left here — a caller
+// against (architecture.md, Thin devices): the SP's stored conf and nothing
+// else. CreateStoragePool resolved it (architecture.md, Common validation), so
+// there is no constant rung left here — a caller
 // validates the stored bdev_conf instead of sizing a thin device against a
 // stripe nobody chose.
 func spStripeSize(conf *pb.SpConf) uint64 {
@@ -955,11 +981,13 @@ func spSliceCnt(conf *pb.SpConf) int {
 }
 
 // ---------------------------------------------------------------------------
-// dm-clone status (the force = false hydration checks of §8.9 / §8.11)
+// dm-clone status (the force = false hydration checks of architecture.md,
+// Clones and Migrations)
 // ---------------------------------------------------------------------------
 
 // hydrationComplete decides whether a dm-clone has finished copying, from the
-// raw `dmsetup status` line the agent puts in a ResInfo's details (§9.5).
+// raw `dmsetup status` line the agent puts in a ResInfo's details
+// (architecture.md, Live-state reporting).
 //
 // The line is
 //
@@ -969,11 +997,12 @@ func spSliceCnt(conf *pb.SpConf) int {
 // so the fourth argument after the target type carries the progress. Anything
 // that does not parse as a clone status, and a total of zero, is "not
 // complete": DeleteClone and FinishMigration refuse unless they can PROVE the
-// copy is done, and an unreadable status is not proof (§8.9).
+// copy is done, and an unreadable status is not proof (architecture.md,
+// Clones).
 //
 // The gateway parses this itself rather than importing agent.ParseCloneStatus:
-// gateway may import only common, pb, etcdutil and model (layout.md §3), and
-// only the one number is needed here.
+// gateway may import only common, pb, etcdutil and model (layout.md,
+// Dependency rules), and only the one number is needed here.
 func hydrationComplete(details string) bool {
 	for _, line := range strings.Split(details, "\n") {
 		fields := strings.Fields(line)

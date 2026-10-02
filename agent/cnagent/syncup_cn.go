@@ -15,9 +15,10 @@ import (
 // cn-* file does not load, no cntlr or chunk whose CN is not loaded is loaded
 // or deleted, and while a cntlr-* file does not load, neither is a chunk
 // whose cntlr is not loaded but whose loaded CN still names that cntlr —
-// converge every loaded CN's §3.2 base state, tear down cntlrs
+// converge every loaded CN's base state (architecture.md, Controller node,
+// common), tear down cntlrs
 // whose pointer left their CN's list, converge the rest — which, per CN18,
-// runs the §11.5 recovery for
+// runs the recovery of architecture.md, Clone crash recovery, for
 // any clone whose metadata wrapper is gone or mismatched, whose dm-clone has
 // vanished, or whose dm-clone does not show hydration enabled (after a CN
 // reboot the tmpfs arena and the dm state are both empty; after a plain agent
@@ -236,12 +237,14 @@ func (s *CnAgentServer) syncupCn(
 	}
 }
 
-// convergeCn builds the once-per-CN base state of §3.2 probe-first (CN5),
+// convergeCn builds the once-per-CN base state of architecture.md, Controller
+// node, common, probe-first (CN5),
 // recording each resource's outcome as it goes. A failed resource never aborts
 // the pass (CN29).
 //
 // CN6: QoS is accepted and deliberately **not** enforced in this version. The
-// §3.2 step 4 open issue stands — `io.max` written from any agent-created
+// step 4 open issue of architecture.md, Controller node, common, stands —
+// `io.max` written from any agent-created
 // cgroup binds the agent's own tools, not the nvmet kernel threads that carry
 // host IO — so the agent persists `qos_ratio` with the request (SH5 does that
 // for free), applies nothing, and reports no QoS resource in CnInfo.
@@ -470,7 +473,8 @@ var (
 	errAnaStateDiffers = errors.New("differs")
 )
 
-// baseRedrive is one piece of the §3.2 base state that a probe read absent,
+// baseRedrive is one piece of the base state (architecture.md, Controller
+// node, common) that a probe read absent,
 // or an ANA group it read in a state other than its fixed one, in the words
 // the node-level verdict reports it with (sweepCn).
 type baseRedrive struct {
@@ -478,7 +482,8 @@ type baseRedrive struct {
 	err  error
 }
 
-// probeCn reads the §3.2 base state into its rows, and also returns what of
+// probeCn reads the base state (architecture.md, Controller node, common) into
+// its rows, and also returns what of
 // it the probe read wrong in a way a SyncupCn's converge would cure (CN30):
 // an absent tmpfs, which convergeCn mounts; an absent arena file or loop
 // device, which it creates only on a tmpfs it found or mounted, so only

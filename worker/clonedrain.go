@@ -1,4 +1,5 @@
-// The worker half of the clone drain (dnv-worker.md §11.7, rules CLD1-CLD12).
+// The worker half of the clone drain (dnv-worker.md, The clone drain, rules
+// CLD1-CLD12).
 //
 // DeleteClone no longer sweeps a clone's bitmap chunks. It LATCHES the clone —
 // `deleting = true`, the destination namespaces resumed, one SpRev bump — and
@@ -34,9 +35,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The §12-style records of the clone drain, in the same house style as the sp
-// drain's. msgCloneDrainStep is non-normative — it names no decision — but a
-// max-shape drain is four batches and this is the only record that shows them.
+// The records of the clone drain (dnv-worker.md, Log records), in the same
+// house style as the sp drain's. msgCloneDrainStep is non-normative — it names
+// no decision — but a max-shape drain is four batches and this is the only
+// record that shows them.
 const (
 	msgCloneDrainFailed = "clone drain failed"
 	msgCloneDrainStep   = "clone drain step"
@@ -143,7 +145,7 @@ func (w *spWorker) drainCloneStep(
 		slog.String("step", cloneDrainStepBm),
 		// chunk_cnt is the batch's size — how many chunk keys THIS step
 		// removed — and not any count carried by the Clone record, which
-		// carries none (§11.7 CLD8).
+		// carries none (CLD8).
 		slog.Int("chunk_cnt", removed),
 	}
 	slog.InfoContext(ctx, msgCloneDrainStep, attrs...)

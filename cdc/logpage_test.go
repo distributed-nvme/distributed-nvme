@@ -19,8 +19,9 @@ import (
 // pinning proves nothing, because a layout change moves both sides at once.
 
 // The fixture the goldens are taken from. The addresses are the lab's CN
-// endpoints (§9.3) and the NQN is dnv-shaped, so the padded string fields are
-// exercised at realistic lengths.
+// endpoints (the topology of cdc.md, Integration test plan) and the NQN is
+// dnv-shaped, so the padded string fields are exercised at realistic
+// lengths.
 const (
 	lpGoldenNqn   = "nqn.2024-01.io.dnv:cdc-golden-ss"
 	lpGoldenAddr  = "192.168.0.21"
@@ -231,7 +232,7 @@ func TestRenderEntryGolden(t *testing.T) {
 
 // TestRenderEntryForeignTransport proves the DS3 skip half: an element naming
 // a transport or an address family dnv-cdc does not serve renders to nothing
-// and the caller counts it (§0 #2).
+// and the caller counts it (DS3).
 func TestRenderEntryForeignTransport(t *testing.T) {
 	cases := []struct {
 		name     string

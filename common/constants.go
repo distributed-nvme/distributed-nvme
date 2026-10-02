@@ -10,7 +10,7 @@ const (
 	// whitespace, since an NQN names a configfs directory. The gateway
 	// refuses ".." on top of it. The ':' after the domain part is required,
 	// so the well-known discovery NQN "nqn.2014-08.org.nvmexpress.discovery"
-	// can never validate (architecture.md §7).
+	// can never validate (architecture.md, Common validation).
 	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
 	MaxNqnLength    = 223
 
@@ -37,7 +37,8 @@ const (
 	DefaultAllocCnBatchSize = 16
 
 	// MaxDmRaid0StripeSize equals CreateClone's src_stripe_size cap, 256 x 4 KiB
-	// (architecture.md §11.4), so that every legal pool is a legal clone source.
+	// (architecture.md, raid0 bitmap math), so that every legal pool is a legal
+	// clone source.
 	MaxDmPoolDataBlockSize     = 1 * 1024 * 1024 * 1024
 	MinDmPoolDataBlockSize     = 64 * 1024
 	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
@@ -47,9 +48,10 @@ const (
 
 	// MinChunkBlockCnt, MaxChunkBlockCnt and DefaultChunkBlockCnt are the
 	// bounds and the default of redund_md_raid1.bitmap_chunk_block_cnt, the
-	// md bitmap chunk counted in pool data blocks (architecture.md §7). A
-	// dm-clone region has no parameter of its own: it is the data_block_size
-	// of the SP a clone copies into or whose side a migration moves.
+	// md bitmap chunk counted in pool data blocks (architecture.md, Common
+	// validation). A dm-clone region has no parameter of its own: it is the
+	// data_block_size of the SP a clone copies into or whose side a migration
+	// moves.
 	MinChunkBlockCnt     = 1
 	MaxChunkBlockCnt     = 1024
 	DefaultChunkBlockCnt = 128
@@ -67,11 +69,11 @@ const (
 	DefaultCntlrCntPerSp = 2
 	// DefaultSliceCntPerSp is the slice count CreateStoragePool substitutes
 	// for a slice_cnt of 0, exactly as DefaultCntlrCntPerSp above is
-	// substituted for a cntlr_cnt of 0 (architecture.md §8.4's Defaults). The
-	// help of `dnvctl sp create --slice-cnt` — and of gatewayctl's own
-	// --slice-cnt — prints the number an operator gets for that zero, and
-	// both build it from this constant with a %d rather than typing a 2, so
-	// moving the default moves what the two CLIs say.
+	// substituted for a cntlr_cnt of 0 (the Defaults of architecture.md,
+	// Storage pools). The help of `dnvctl sp create --slice-cnt` — and of
+	// gatewayctl's own --slice-cnt — prints the number an operator gets for
+	// that zero, and both build it from this constant with a %d rather than
+	// typing a 2, so moving the default moves what the two CLIs say.
 	DefaultSliceCntPerSp = 2
 	MaxCloneCntPerSp     = 64
 	MaxXferCntPerSp      = 4
@@ -82,7 +84,7 @@ const (
 	MaxSpareLegPerGrp    = 2
 	// MaxGrpCntPerSlice is the most groups EACH of a slice's two group lists
 	// (meta_grp_list, data_grp_list) holds. A group's two md names carry its
-	// index in its list as two hex digits (%02x, architecture.md §4.3), and
+	// index in its list as two hex digits (%02x, architecture.md, md names), and
 	// that fixed width is what keeps "md_" + CnMdDevName within the kernel's
 	// DISK_NAME_LEN; index 256 would widen to three digits. GrowSlice, the
 	// one op that appends a group to an existing slice, refuses at the
@@ -103,7 +105,7 @@ const (
 	// instead of a deployment.
 	MaxAllocLegPerGrp = 2
 	// MaxDelGrpPerTxn is the most groups ONE sp-drain batch removes from one
-	// slice in a single transaction (SPD10, dnv-worker.md §11.6). It bounds
+	// slice in a single transaction (dnv-worker.md SPD10). It bounds
 	// transaction SIZE, not rate — strictly sequential batches are the
 	// pacing — and it is a package constant rather than configuration for
 	// exactly that reason. The SPD13 arithmetic it must satisfy is
@@ -114,7 +116,7 @@ const (
 	// which gateway/txnbudget_test.go asserts from the named constants (SPD14).
 	MaxDelGrpPerTxn = 20
 	// MaxDelBmPerTxn is the most clone-bitmap chunk keys ONE clone-drain batch
-	// deletes in a single transaction (CLD8, dnv-worker.md §11.7). Like
+	// deletes in a single transaction (dnv-worker.md CLD8). Like
 	// MaxDelGrpPerTxn it bounds transaction SIZE, not rate, and is a package
 	// constant rather than configuration for that reason.
 	//
@@ -181,8 +183,8 @@ const (
 	DnDataOffset       = 256 * 1024 * 1024 // extent area start (fixed!)
 
 	// DefaultLocalStorPrefix is the directory an agent keeps its local store
-	// in when --local-store is not given (architecture.md §4.6). It must
-	// exist before the agent starts (dnagent.md SH3). Not /var/tmp, where the
+	// in when --local-store is not given (architecture.md, Agent local-store paths).
+	// It must exist before the agent starts (dnagent.md SH3). Not /var/tmp, where the
 	// stock tmpfiles rule of some distributions deletes files that nothing
 	// has touched for 30 days: a store file is written only when a request for
 	// its object is applied and read only at startup.
@@ -208,9 +210,9 @@ const (
 	DefaultCloneBatchSize = 1
 	// MaxCloneBmCnt is the number of chunks ONE source slice's bitmap may be
 	// split into: a clone bitmap chunk is addressed (src_slice_idx, bm_idx)
-	// and bm_idx < MaxCloneBmCnt (architecture.md §9.6). It is NOT a cap on
-	// the source slice count — that is MaxSliceCntPerSp, enforced by
-	// CreateClone. 16 chunks × CloneBmChunkBytes = 16 MiB per slice.
+	// and bm_idx < MaxCloneBmCnt (architecture.md, Bitmap push protocol).
+	// It is NOT a cap on the source slice count — that is MaxSliceCntPerSp,
+	// enforced by CreateClone. 16 chunks × CloneBmChunkBytes = 16 MiB per slice.
 	MaxCloneBmCnt = 16
 	// CloneBmChunkBytes is the fixed capacity of one clone bitmap chunk and
 	// the quantum that positions it: chunk (s, b) holds bytes
@@ -244,7 +246,8 @@ const (
 	LogStrDataLimit = 128
 
 	// The DEFAULT configfs id of the nvmet port an agent converges
-	// (architecture.md §3.1/§3.2: exactly one port per agent).
+	// (architecture.md, Disk node; Controller node, common: exactly one port
+	// per agent).
 	// `dnv-agent --nvmet-port-id` overrides it, which is what lets several
 	// agents share one node's kernel, each converging its own port.
 	NvmetPortId = 1
@@ -258,7 +261,7 @@ const (
 	AnaGrpIdNonOptimized = 2
 	AnaGrpIdInaccessible = 3
 
-	// AgentReply.code values (dnagent.md §2.5). 0 = OK. Codes 1-3 are
+	// AgentReply.code values (dnagent.md SH8, SH9). 0 = OK. Codes 1-3 are
 	// rejections: the request was not applied, so the worker reads no
 	// verdict from the reply's rows. ReplyCodeLeftover (4) is accepted: the
 	// worker reads the rows exactly as for 0 (worker/health.go accepted).
@@ -270,10 +273,10 @@ const (
 	ReplyCodeStaleRevision = 1
 	ReplyCodeUnknownObject = 2
 	// ReplyCodeInvalidConf refuses a request whose conf carries a value the
-	// control plane cannot have written — a proto3 zero where §7 requires a
-	// concrete geometry. The object is known and the revision is current; it
-	// is the conf that is unusable, which is why it is neither of the two
-	// above.
+	// control plane cannot have written — a proto3 zero where architecture.md,
+	// Common validation, requires a concrete geometry. The object is known and
+	// the revision is current; it is the conf that is unusable, which is why it
+	// is neither of the two above.
 	ReplyCodeInvalidConf = 3
 	// ReplyCodeLeftover reports an ACCEPTED request with residue: the
 	// desired state is stored and every wanted object was converged, but the
@@ -282,8 +285,8 @@ const (
 	// travels in agent_reply rather than in the *Info rows, because a
 	// leftover by definition has no row — nothing wanted names it. An agent
 	// also reports a few conditions this way so that the worker re-sends the
-	// Syncup* whose converge acts on them (architecture.md §9.8): on a dn a
-	// disk identity not yet confirmed or a side with extents to zero and
+	// Syncup* whose converge acts on them (architecture.md, Teardown by sweep):
+	// on a dn a disk identity not yet confirmed or a side with extents to zero and
 	// nothing zeroing it, on a cn a piece of the node's base state that a
 	// CheckCn round's or GetCnInfo's probe read absent, or an ANA group it
 	// read in a state other than its fixed one on a port whose transport
@@ -324,7 +327,7 @@ const (
 	// two above.
 	DnExportOrphanGrace = 30 * time.Second
 
-	// Side provisioning ([D15], architecture.md §9.4,
+	// Side provisioning ([D15], architecture.md, Side provisioning protocol,
 	// dnagent.md DN9): the background zeroing goroutine zeroes at most
 	// DnZeroBatchExtCnt logical extents per `blkdiscard --zeroout`
 	// command, through the side's dm-linear, and persists that batch's
@@ -349,22 +352,25 @@ const (
 	DnZeroConcurrency = 2
 	DnZeroKillBackoff = 2
 
-	// CN base state (architecture.md §3.2): the tmpfs that carries the
-	// clone-metadata arena file, sized 2 × CnCloneMetaAreaSize so that even
-	// a fully materialized arena plus slack never hits ENOSPC on the mount.
+	// CN base state (architecture.md, Controller node, common): the tmpfs that
+	// carries the clone-metadata arena file, sized 2 × CnCloneMetaAreaSize so
+	// that even a fully materialized arena plus slack never hits ENOSPC on the
+	// mount.
 	// The file itself is sparse: pages appear as dm-clone writes metadata
 	// and are released again by the allocator's hole-punch discard
 	// (CN18).
 	DefaultCnTmpfsSize = 2 * 1024 * 1024 * 1024
 
-	// Seconds between two §3.6 leg health-probe rounds on a primary
+	// Seconds between two leg health-probe rounds (architecture.md, Group
+	// on-leg layout: meta region, data region, health block) on a primary
 	// cntlr, and how long one probe IO may stay in flight before the leg
 	// is reported stalled (cnagent.md CN11). Probes are single-flight per
 	// leg and run outside every lock.
 	CnLegProbeInterval     = 5
 	CnLegProbeStallSeconds = 15
 
-	// The §3.6 health block: the last 4 KiB of the leg's meta region.
+	// The leg health block (architecture.md, Group on-leg layout: meta region,
+	// data region, health block): the last 4 KiB of the leg's meta region.
 	// Payload = magic + writer id + timestamp, never interpreted on read
 	// ([D6]).
 	LegHealthBlockSize = 4096
@@ -403,7 +409,8 @@ const (
 	// settle reads it (dnv-worker.md HL2), so the two take it from here.
 	ResDetailsSpLevel = "sp_level"
 
-	// SuspendSeconds is the §11.2 src-cutover grace window: a migration
+	// SuspendSeconds is the src-cutover grace window (architecture.md,
+	// Migration, src step 2): a migration
 	// source's per-CN dm-linears are held suspended for at least this long
 	// before they are reloaded onto their dm-errors, so IO the old primary
 	// still had in flight is absorbed rather than immediately failed. The
@@ -416,12 +423,12 @@ const (
 	// (dnagent.md DN12).
 	SuspendSeconds = 60
 
-	// dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
-	// another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
+	// dnv-worker (dnv-worker.md, Additions to `common/constants.go`), plus one
+	// constant this block holds for another document: EtcdMaxTxnOps is the
+	// addition of gateway.md, Additions to `common/constants.go`, and the
 	// arithmetic tripwired against it is that section's for CreateStoragePool
-	// and DeleteThinDevice, dnv-worker.md §8.4's for the created flip (RW19)
-	// and §11.6's and §11.7's for the two drains — SPD13/SPD14 for the sp
-	// drain, CLD11 for the clone drain.
+	// and DeleteThinDevice, dnv-worker.md's for the created flip (RW19) and for
+	// the two drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -455,7 +462,8 @@ const (
 	//	  + 8 x MaxCntlrCntPerSp                        <= EtcdMaxTxnOps
 	//
 	// 32 slices x 2 groups per slice (planSpGroups) x MaxAllocLegPerGrp = 2
-	// legs is 128 DNs, all distinct (§6.5's growing black list), and
+	// legs is 128 DNs, all distinct (the growing black list of architecture.md,
+	// Per-operation allocation), and
 	// MaxCntlrCntPerSp = 4 cntlrs on 4 distinct CNs, so it is
 	// 7 + 32 + 7x128 + 8x4 = 967, which 1024 clears by 57. init_ext_cnt never
 	// enters that count — it moves ExtCnt VALUES, not key counts — so the
@@ -470,9 +478,9 @@ const (
 	// COMPARES at the maximum shape — SPD13's arithmetic, asserted at the
 	// named constants by gateway/txnbudget_test.go's SPD14 tripwire and
 	// committed against a real etcd by model/drain_test.go's
-	// TestDrainSpSliceAtTheCeiling (dnv-worker.md §11.6). The created flip's
+	// TestDrainSpSliceAtTheCeiling (dnv-worker.md SPD14). The created flip's
 	// transaction is another, 2 x MaxFlipCreatedPerTxn + 2 = 514 COMPARES
-	// (RW19, dnv-worker.md §8.4; TestFlipCreatedTxnBudget,
+	// (dnv-worker.md RW19; TestFlipCreatedTxnBudget,
 	// TestFlipCreatedAtTheTdCeiling; see MaxFlipCreatedPerTxn below).
 	//
 	// DeleteThinDevice stays below all three — the create, D2 and the flip —
@@ -483,7 +491,7 @@ const (
 	// (gateway/txnbudget_test.go's TestDeleteThinDeviceBudget). The
 	// walk over every td for uncreated snapshots is a read-only plan outside
 	// the transaction, verified inside it by the pool's identity and revision
-	// (architecture.md §8.7), and TestDeleteThinDeviceAtTheTdCeiling commits a
+	// (architecture.md, Thin devices), and TestDeleteThinDeviceAtTheTdCeiling commits a
 	// delete in a pool of MaxTdCntPerSp tds. While that walk sat inside the
 	// STM such a delete cost at least MaxTdCntPerSp + 6 = 1030 compares, and
 	// etcd refused it.
@@ -491,15 +499,15 @@ const (
 	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt rectangle sweep — then
 	// 256 keys, at the 16-slice ceiling of the time — was this number's
 	// founding justification and is gone: the clone drain replaced it with
-	// batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the default (CLD11,
-	// dnv-worker.md §11.7).
+	// batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the default
+	// (dnv-worker.md CLD11).
 	//
 	// The Go test etcd launchers pass it from here; the three shell suites
 	// that start an etcd cannot import common, so they read it at preflight
 	// from workerctl's constants subcommand.
 	EtcdMaxTxnOps = 1024
 	// MaxFlipCreatedPerTxn is the most candidates ONE created-flip
-	// transaction carries (RW19, dnv-worker.md §8.4). model.FlipCreated
+	// transaction carries (dnv-worker.md RW19). model.FlipCreated
 	// commits its list this many at a time, in list order, one STM each, and
 	// each STM that wrote bumps SpRev once. The list is bounded only by
 	// MaxTdCntPerSp: the sp worker folds every td one drain of its reports
@@ -530,7 +538,8 @@ const (
 	WorkerRoleCn = "cn"
 	WorkerRoleSp = "sp"
 
-	// dnv-gateway (gateway.md §2.1). That section adds three constants and
+	// dnv-gateway (gateway.md, Additions to `common/constants.go`). That
+	// section adds three constants and
 	// only this one lands here: CloneBmChunkBytes sits beside MaxCloneBmCnt
 	// above, and EtcdMaxTxnOps in the dnv-worker block, whose header says so.
 	//
@@ -542,21 +551,21 @@ const (
 	// hung agent and a hung etcd bound an RPC alike.
 	DefaultGatewayAgentTimeout = 10
 
-	// dnv-cdc (cdc.md §2.1).
+	// dnv-cdc (cdc.md, Additions to `common/constants.go`).
 	//
 	// NvmeDiscoveryNqn is the well-known discovery subsystem NQN every
 	// host connects to (NP5). It deliberately fails ValidNqnPattern above:
 	// no dnv object may ever be named it.
 	NvmeDiscoveryNqn = "nqn.2014-08.org.nvmexpress.discovery"
 	// The listen endpoint defaults of cmd/dnv-cdc (CM1). Only tcp is
-	// accepted (§0 #2); 8009 is the IANA discovery port.
+	// accepted (CM2); 8009 is the IANA discovery port.
 	DefaultCdcTrType  = "tcp"
 	DefaultCdcAdrFam  = "ipv4"
 	DefaultCdcTrSvcId = "8009"
 	// CdcAdrFamIpv6 is the other legal --adr-fam value (CM2).
 	CdcAdrFamIpv6 = "ipv6"
 	// CdcRangeAll is the --range default: all sixteen ranges, so a
-	// single-instance deployment needs no sharding flag (§0 #4). Range
+	// single-instance deployment needs no sharding flag (CM1). Range
 	// digit h owns the sixteen shard codes h0…hf (DS2).
 	CdcRangeAll = "0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f"
 	// CdcMaxAdminSqSize is the admin SQ entry count: CAP.MQES is one less,
@@ -586,7 +595,7 @@ const (
 	// is reaped (NP10), mirroring nvmet's grace.
 	DefaultCdcKeepAliveGraceMs = 10000
 	// DefaultCdcZeroKatoTmoMs is the idle cutoff of a KATO = 0 connection
-	// (§0 #9) — a one-shot `nvme discover` is not immortal. It mirrors
+	// (NP10) — a one-shot `nvme discover` is not immortal. It mirrors
 	// nvmet's NVMET_DISC_KATO_MS.
 	DefaultCdcZeroKatoTmoMs = 120000
 	// DefaultCdcRescanInterval is the seconds between retries of a failed

@@ -1,39 +1,44 @@
 // Command workerctl is the etcd driver of the dnv-worker integration test
-// (dnv-worker.md §14.8): "the etcd driver that plays the gateway". It formats
-// the architecture.md §5.3 keys through model, marshals the pb messages, bumps
-// the revision keys and reads keys back as protojson.
+// (dnv-worker.md, Integration test plan, The driver): "the etcd driver that
+// plays the gateway". It formats the keys of architecture.md, Key table,
+// through model, marshals the pb messages, bumps the revision keys and reads
+// keys back as protojson.
 //
 // Every subcommand that reaches etcd runs ON THE TEST SERVER, where etcd
 // listens on localhost, and is invoked over ssh by two suites:
-// integtest/worker_test.sh, whose fake gateway it is (§14.3, §14.10), and
-// integtest/gateway_test.sh, which reads etcd back through it as ground
-// truth and writes through exactly the four worker-role stand-ins of
-// gateway.md §2.4 — set-created, set-provisioned, drain-sp and drain-clone.
+// integtest/worker_test.sh, whose fake gateway it is (dnv-worker.md,
+// Integration test plan, The driver), and integtest/gateway_test.sh, which
+// reads etcd back through it as ground truth and writes through exactly the
+// four worker-role stand-ins — set-created, set-provisioned, drain-sp and
+// drain-clone — of gateway.md, Integration test plan, The etcd verification.
 // It never dials an agent and never sleeps: it is the gateway's write path
-// with explicit placement (§14.8, §0 item 19). Every mutation is one
-// etcdutil.RunSTM, so the state it leaves behind is exactly the state a real
-// gateway STM would have produced — capacity keys per §5.6, revision keys
-// bumped in place per §5.5, SpConf.next_id past every id the script
-// assigned.
+// with explicit placement (dnv-worker.md, Integration test plan, The driver).
+// Every mutation is one etcdutil.RunSTM, so the state it leaves behind is
+// exactly the state a real gateway STM would have produced — capacity keys per
+// architecture.md, Capacity index keys; revision keys bumped in place per
+// architecture.md, Revision keys and the sync fan-out; SpConf.next_id past
+// every id the script assigned.
 //
 // `constants` and `geometry` are the exceptions: they open no client and read
 // no key, so a suite runs them on the DRIVER, on the binary it has just built
 // and before it ships anything. They are how a shell suite reads a Go constant
-// and the §3.6 geometry formula instead of hand-copying either.
+// and the group geometry formula (architecture.md, Group on-leg layout: meta
+// region, data region, health block) instead of hand-copying either.
 //
 // Conventions the script relies on:
 //
-//   - Global flags may be given BEFORE the subcommand (the §14.10 `ctl`
+//   - Global flags may be given BEFORE the subcommand (worker_test.sh's `ctl`
 //     wrapper does exactly that) or after it; the later occurrence wins.
 //   - stdout carries exactly one JSON document per invocation — protojson for
 //     a read, the ids and revisions it assigned for a mutation — except
 //     list-keys (one key per line) and list-workers (one object per line).
-//   - The log.md §5.3 records etcdutil emits ("etcd get", "etcd put", …) go to
-//     STDERR, where common/log.go's init() handler puts every record, so that
-//     they never interleave with the JSON the script pipes into jq.
+//   - The etcd records etcdutil emits (log.md, etcd: "etcd get", "etcd put",
+//     …) go to STDERR, where common/log.go's init() handler puts every
+//     record, so that they never interleave with the JSON the script pipes
+//     into jq.
 //     They carry --trace-id, so a failing run still correlates every write of
 //     the driver with the test stage that made it.
-//   - protojson is emitted with EmitUnpopulated, so that the fields the §14.11
+//   - protojson is emitted with EmitUnpopulated, so that the fields the suite's
 //     assertions read — err_epoch, provisioned, created, primary — are present
 //     even when they hold their proto3 default. uint64 fields are JSON strings
 //     (the proto3 JSON mapping), so jq compares them as "0", not 0.
@@ -66,12 +71,13 @@ import (
 )
 
 const (
-	// defaultEndpoints is the single-node etcd of §14.3: it listens on the
-	// loopback of the test server, and workerctl runs there.
+	// defaultEndpoints is the suite's single-node etcd (dnv-worker.md,
+	// Integration test plan, Topology): it listens on the loopback of the test
+	// server, and workerctl runs there.
 	defaultEndpoints = "127.0.0.1:12379"
 	// pingKey is the key `ping` reads. It is deliberately a key nothing ever
-	// writes: the probe succeeds on not-found (§14.7 step 3), so what it
-	// proves is that etcd answers, not that anything is stored.
+	// writes: the probe succeeds on not-found, so what it proves is that etcd
+	// answers, not that anything is stored.
 	pingKey = common.DnvPrefix + " ping"
 	// nvmeTrType / nvmeAdrFam are the nvme_tr_conf fields every DnConf/CnConf
 	// this driver writes carries; the fake agents never open an NVMe-oF port,
@@ -79,8 +85,7 @@ const (
 	// the FALLBACK tr_svc_id of an --addr with no port — nvmeTrConfOf stores
 	// the node's own port instead — and 4420 is the IANA nvme-tcp port, which
 	// is all that makes it the plausible fallback: a real agent has no default
-	// here at all, since dnv-agent's --tr-svc-id is required (architecture.md
-	// §13 launches both agents with 4200).
+	// here at all, since dnv-agent's --tr-svc-id is required (dnagent.md CM2).
 	nvmeTrType  = "tcp"
 	nvmeAdrFam  = "ipv4"
 	nvmeTrSvcId = "4420"
@@ -103,7 +108,7 @@ func usageDie(format string, args ...any) {
 // marshalOpts renders every message this driver prints. UseProtoNames keeps
 // the JSON field names identical to the schema.proto spelling the assertions
 // quote; EmitUnpopulated keeps a false/0/[] field visible, which is what the
-// §14.11 checks on provisioned, created and err_epoch need.
+// suite's checks on provisioned, created and err_epoch need.
 var marshalOpts = protojson.MarshalOptions{
 	UseProtoNames:   true,
 	EmitUnpopulated: true,
@@ -138,9 +143,9 @@ func emitPb(msg proto.Message) {
 	emit(pbToAny(msg))
 }
 
-// idHex renders an id the way every key field does (architecture.md §5.1), so
-// that the map members of a composite reply are addressable by the same
-// spelling the keys use.
+// idHex renders an id the way every key field does (architecture.md, Key
+// grammar), so that the map members of a composite reply are addressable by
+// the same spelling the keys use.
 func idHex(id uint64) string {
 	return fmt.Sprintf(common.IdKeyFmt, id)
 }
@@ -149,7 +154,7 @@ func idHex(id uint64) string {
 // Flag value types
 // ---------------------------------------------------------------------------
 
-// hexUint is an id flag: decimal or 0x hex, parsed with base 0 (§14.8).
+// hexUint is an id flag: decimal or 0x hex, parsed with base 0.
 type hexUint uint64
 
 func (h *hexUint) String() string { return fmt.Sprintf("%#x", uint64(*h)) }
@@ -164,10 +169,10 @@ func (h *hexUint) Set(s string) error {
 }
 
 // shardFlag is a --shard flag. A shard code is ALWAYS written in its
-// common.ShardCodeFmt spelling (architecture.md §5.1), and §14.11 case E
-// spreads DNs over "00", "55", "aa" and "ff", so the value is parsed as HEX —
-// with or without a 0x prefix. Reading it as decimal would silently turn the
-// "55" of the test plan into shard 0x37.
+// common.ShardCodeFmt spelling (architecture.md, Key grammar), and
+// worker_test.sh's case E spreads DNs over "00", "55", "aa" and "ff", so the
+// value is parsed as HEX — with or without a 0x prefix. Reading it as decimal
+// would silently turn the "55" of that case into shard 0x37.
 type shardFlag uint32
 
 func (c *shardFlag) String() string {
@@ -204,7 +209,7 @@ func (l *stringList) Set(s string) error {
 
 // triBool is a bool flag that distinguishes "not given" from "given false",
 // which is what `set-cntlr --primary=… --disabled=…` needs: each is settable
-// on its own and neither may disturb the other (§14.8).
+// on its own and neither may disturb the other.
 type triBool struct {
 	set   bool
 	value bool
@@ -231,11 +236,11 @@ func (t *triBool) Set(s string) error {
 func (t *triBool) IsBoolFlag() bool { return true }
 
 // ---------------------------------------------------------------------------
-// Tuple parsers (§14.8). Every one of them rejects a malformed spec loudly, so
+// Tuple parsers. Every one of them rejects a malformed spec loudly, so
 // that a mistyped test invocation fails instead of writing garbage into etcd.
 // ---------------------------------------------------------------------------
 
-// parseId parses one id field: decimal or 0x hex (§14.8).
+// parseId parses one id field: decimal or 0x hex.
 func parseId(s string) (uint64, error) {
 	value, err := strconv.ParseUint(strings.TrimSpace(s), 0, 64)
 	if err != nil {
@@ -291,7 +296,7 @@ func parseBoolField(part string, spec string, form string) (bool, error) {
 
 const sidePtrForm = "sp:leg:side"
 
-// parseSidePointer reads the `--side sp:leg:side` form of put-dn (§14.8): one
+// parseSidePointer reads the `--side sp:leg:side` form of put-dn: one
 // entry of a DnConf.side_ptr_list.
 func parseSidePointer(spec string) (*pb.SidePointer, error) {
 	parts, err := splitSpec(spec, 3, sidePtrForm)
@@ -310,7 +315,7 @@ func parseSidePointer(spec string) (*pb.SidePointer, error) {
 
 const cntlrPtrForm = "sp:cntlr"
 
-// parseCntlrPointer reads the `--cntlr sp:cntlr` form of put-cn (§14.8).
+// parseCntlrPointer reads the `--cntlr sp:cntlr` form of put-cn.
 func parseCntlrPointer(spec string) (*pb.CntlrPointer, error) {
 	parts, err := splitSpec(spec, 2, cntlrPtrForm)
 	if err != nil {
@@ -385,7 +390,8 @@ const groupForm = "slice:grp:meta|data:ext_cnt:none|raid1"
 
 // groupSpec is one `--group slice:grp:meta|data:ext_cnt:none|raid1` of put-sp.
 // The redundancy kind is per group in the flag because that is what decides
-// the group's §3.6 meta_blocks; every group of one SP must name the same kind,
+// the group's meta_blocks (architecture.md, Group on-leg layout: meta region,
+// data region, health block); every group of one SP must name the same kind,
 // since SpConf.bdev_conf holds exactly one redund_conf.
 type groupSpec struct {
 	sliceId uint64
@@ -593,10 +599,10 @@ func parseHexBitmap(spec string) ([]byte, error) {
 	return data, nil
 }
 
-// parseSpLevel reads `--level`: either the number the §14.11 steps use
+// parseSpLevel reads `--level`: either the number the suite's steps use
 // (`set-level sp0 48`) or the enum name. Any other number is refused — an
-// undefined level would be stored and then read back as a level no rule of §7
-// knows.
+// undefined level would be stored and then read back as a level no rule of
+// architecture.md, Common validation, knows.
 func parseSpLevel(spec string) (pb.SpLevel, error) {
 	trimmed := strings.TrimSpace(spec)
 	if trimmed == "" {
@@ -620,28 +626,28 @@ func parseSpLevel(spec string) (pb.SpLevel, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Keys (architecture.md §5.1, §5.3)
+// Keys (architecture.md, Key grammar and Key table)
 // ---------------------------------------------------------------------------
 
-// keyPrefix joins key fields the §5.1 way and ends in the separating space, so
-// that a prefix can never match a longer sibling field. Every full key this
-// driver writes comes from model; model exports no bare scan prefix for the
-// kinds `list-keys` walks, so this mirrors the one grammar rule rather than
-// hand-spelling each prefix.
+// keyPrefix joins key fields per architecture.md, Key grammar, and ends in the
+// separating space, so that a prefix can never match a longer sibling field.
+// Every full key this driver writes comes from model; model exports no bare
+// scan prefix for the kinds `list-keys` walks, so this mirrors the one grammar
+// rule rather than hand-spelling each prefix.
 func keyPrefix(fields ...string) string {
 	return strings.Join(fields, " ") + " "
 }
 
-// kindInfo describes one row of the §5.3 key table: the message a value of
-// that kind decodes into (which is how `get` picks a type from a key's SECOND
-// field) and whether {cluster_id} is the field right after the kind (which is
-// how `list-keys` scopes a prefix to one cluster).
+// kindInfo describes one row of the key table (architecture.md, Key table):
+// the message a value of that kind decodes into (which is how `get` picks a
+// type from a key's SECOND field) and whether {cluster_id} is the field right
+// after the kind (which is how `list-keys` scopes a prefix to one cluster).
 type kindInfo struct {
 	newMsg        func() proto.Message
 	clusterScoped bool
 }
 
-// kinds is the §5.3 key table.
+// kinds is the key table (architecture.md, Key table).
 var kinds = map[string]kindInfo{
 	"cluster_conf": {
 		newMsg:        func() proto.Message { return &pb.ClusterConf{} },
@@ -744,8 +750,8 @@ var kinds = map[string]kindInfo{
 }
 
 // messageForKey picks the message type of a key from its SECOND field, which
-// is what `get --key` needs (§5.3: every stored message has one key schema and
-// the kind field names it).
+// is what `get --key` needs (architecture.md, Key table: every stored message
+// has one key schema and the kind field names it).
 func messageForKey(key string) (proto.Message, error) {
 	fields := strings.Split(key, " ")
 	if len(fields) < 3 || fields[0] != common.DnvPrefix {
@@ -773,11 +779,12 @@ func nvmeTrConfOf(addrPort string) *pb.NvmeTrConf {
 	}
 	// tr_svc_id is the node's own port, not the fixed nvmeTrSvcId: the fake
 	// agents never open an NVMe-oF port, so the value is inert, and every node
-	// of the §14.3 topology shares one host address. A constant here would make
-	// every node's NvmeTrConf byte-identical, and a CdcEntry's
-	// nvme_tr_conf_list would then be unattributable to a particular CN —
-	// which is exactly what §14.11 case D step 3 has to assert ("CdcEntry of
-	// ss0 lists cn 2 and cn 3, not cn 1").
+	// of the suite's topology shares one host address (dnv-worker.md,
+	// Integration test plan, Topology). A constant here would make every node's
+	// NvmeTrConf byte-identical, and a CdcEntry's nvme_tr_conf_list would then
+	// be unattributable to a particular CN — which is exactly what
+	// worker_test.sh case D step 3 has to assert ("CdcEntry of ss0 lists cn 2
+	// and cn 3, not cn 1").
 	return &pb.NvmeTrConf{
 		TrType:  nvmeTrType,
 		AdrFam:  nvmeAdrFam,
@@ -788,9 +795,9 @@ func nvmeTrConfOf(addrPort string) *pb.NvmeTrConf {
 
 // nsIdentity derives a namespace's dev_uuid / dev_nguid from (cluster_id,
 // sp_id, ns_id). The gateway generates a random v4 uuid and 16 random bytes
-// (architecture.md §8.8 CreateNamespace); a test driver must instead be
-// reproducible, so the same namespace of the same cluster always gets the same
-// identity.
+// (architecture.md, Subsystems, namespaces: CreateNamespace); a test driver
+// must instead be reproducible, so the same namespace of the same cluster
+// always gets the same identity.
 func nsIdentity(cid uint64, spId uint64, nsId uint64) (string, string) {
 	var raw [16]byte
 	high := fnv.New64a()
@@ -810,7 +817,7 @@ func nsIdentity(cid uint64, spId uint64, nsId uint64) (string, string) {
 }
 
 // ---------------------------------------------------------------------------
-// Globals (§14.8)
+// Globals
 // ---------------------------------------------------------------------------
 
 type globals struct {
@@ -826,7 +833,7 @@ func newGlobals() globals {
 
 // bind registers the global flags. It is called twice — once on the top-level
 // set, once on the subcommand's — with the current values as defaults, so that
-// `workerctl --cluster c put-dn …` (the §14.10 `ctl` wrapper) and
+// `workerctl --cluster c put-dn …` (worker_test.sh's `ctl` wrapper) and
 // `workerctl put-dn --cluster c …` are both accepted and the later occurrence
 // wins.
 func (g *globals) bind(fs *flag.FlagSet) {
@@ -834,7 +841,7 @@ func (g *globals) bind(fs *flag.FlagSet) {
 		"comma-separated etcd client endpoints")
 	fs.StringVar(&g.cluster, "cluster", g.cluster,
 		"cluster NAME; the cluster_id is derived from it and the stored "+
-			"creation_epoch (architecture.md §5.2)")
+			"creation_epoch (architecture.md, cluster_id derivation)")
 	fs.StringVar(&g.traceId, "trace-id", g.traceId,
 		"trace id stamped on every log record of this invocation")
 	fs.Float64Var(&g.timeout, "timeout", g.timeout,
@@ -863,12 +870,12 @@ func (g *globals) open() (context.Context, func(), *etcdutil.Client) {
 }
 
 // clusterId reads ClusterConf and derives the cluster_id from it, exactly as
-// the gateway must (architecture.md §5.2, §14.8): cluster_id is not computable
-// from a name alone, so a subcommand that BUILDS a cluster-scoped key comes
-// through here first. Six subcommands never do: put-cluster (it writes the
-// very ClusterConf this reads), get (it is handed a whole key and needs no
-// id), list-workers (the worker registry is keyed by role and seed, not by
-// cluster), ping, and the two etcd-free ones, constants and geometry.
+// the gateway must (architecture.md, cluster_id derivation): cluster_id is not
+// computable from a name alone, so a subcommand that BUILDS a cluster-scoped
+// key comes through here first. Six subcommands never do: put-cluster (it
+// writes the very ClusterConf this reads), get (it is handed a whole key and
+// needs no id), list-workers (the worker registry is keyed by role and seed,
+// not by cluster), ping, and the two etcd-free ones, constants and geometry.
 // list-keys is the single CONDITIONAL caller: it reads the ClusterConf when it
 // was given a cluster-scoped kind name and a --cluster, and not when it was
 // given a raw `dnv `-prefixed prefix. Every other subcommand reads it
@@ -896,9 +903,9 @@ func (g *globals) clusterId(
 // ---------------------------------------------------------------------------
 
 // findNodeAddr resolves a dn_id / cn_id to the addr_port its record is keyed
-// by (§14.8's note on id-addressed reads): DnConf and CnConf are keyed by
-// endpoint, several subcommands take an id, so exactly one helper scans the
-// cluster's conf prefix for the record that carries the id.
+// by: DnConf and CnConf are keyed by endpoint, several subcommands take an
+// id, so exactly one helper scans the cluster's conf prefix for the record
+// that carries the id.
 func findNodeAddr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -947,7 +954,7 @@ func findNodeAddr(
 }
 
 // spTarget is an SP resolved from a `--sp` value, which may be either the SP
-// NAME (SpConf is name-keyed) or the sp_id (the §14.11 steps use both, e.g.
+// NAME (SpConf is name-keyed) or the sp_id (the suite's steps use both, e.g.
 // `set-lwm sp0` and `set-cntlr --sp 1`).
 type spTarget struct {
 	name  string
@@ -1016,10 +1023,11 @@ func getSpConf(
 	return conf, nil
 }
 
-// bumpSpRev rewrites the SP's revision key with revision + 1 IN PLACE (§5.5):
-// the key is id-based and therefore stable, so a watcher must see one put, not
-// a delete followed by a put. Every SpConf sub-object mutation calls it
-// exactly once. model has the same body, unexported.
+// bumpSpRev rewrites the SP's revision key with revision + 1 IN PLACE
+// (architecture.md, Revision keys and the sync fan-out): the key is id-based
+// and therefore stable, so a watcher must see one put, not a delete followed
+// by a put. Every SpConf sub-object mutation calls it exactly once. model has
+// the same body, unexported.
 func bumpSpRev(
 	s etcdutil.STM,
 	cid uint64,
@@ -1035,7 +1043,8 @@ func bumpSpRev(
 	return rev.Revision, nil
 }
 
-// bumpDnRev bumps one DN's revision key in place (§5.5).
+// bumpDnRev bumps one DN's revision key in place
+// (architecture.md, Revision keys and the sync fan-out).
 func bumpDnRev(s etcdutil.STM, cid uint64, dn *pb.DnConf) (uint64, error) {
 	key := model.DnRevKey(dn.GetShardCode(), cid, dn.GetDnId())
 	rev := &pb.DnRev{}
@@ -1047,7 +1056,8 @@ func bumpDnRev(s etcdutil.STM, cid uint64, dn *pb.DnConf) (uint64, error) {
 	return rev.Revision, nil
 }
 
-// bumpCnRev bumps one CN's revision key in place (§5.5).
+// bumpCnRev bumps one CN's revision key in place
+// (architecture.md, Revision keys and the sync fan-out).
 func bumpCnRev(s etcdutil.STM, cid uint64, cn *pb.CnConf) (uint64, error) {
 	key := model.CnRevKey(cn.GetShardCode(), cid, cn.GetCnId())
 	rev := &pb.CnRev{}
@@ -1162,7 +1172,7 @@ func newFlagSet(name string, g *globals) *flag.FlagSet {
 
 // splitKind peels the `dn|cn|sp` positional argument of bump-rev / del-rev /
 // get-rev / set-free off the argument list. It is accepted both before the
-// flags (the §14.8 table's spelling) and after them, since Go's flag package
+// flags (worker_test.sh's spelling) and after them, since Go's flag package
 // stops at the first non-flag argument either way.
 func splitKind(args []string) (string, []string) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -1189,8 +1199,8 @@ func kindArg(fs *flag.FlagSet, kind string, want ...string) string {
 // ping
 // ---------------------------------------------------------------------------
 
-// cmdPing is the etcd liveness probe of §14.7 step 3: one Get of a key nothing
-// writes, which succeeds on not-found.
+// cmdPing is the etcd liveness probe the suites' setup waits on: one Get of a
+// key nothing writes, which succeeds on not-found.
 func cmdPing(g *globals, args []string) {
 	fs := newFlagSet("ping", g)
 	fs.Parse(args)
@@ -1216,8 +1226,9 @@ func cmdPing(g *globals, args []string) {
 // cmdConstants prints the common package's transaction-budget constants as one
 // JSON object. It exists because a shell suite cannot import common: worker,
 // gateway and cdc each have to launch etcd with
-// --max-txn-ops=common.EtcdMaxTxnOps (§14.4), and before this subcommand all
-// three carried the number as a hand-copied literal.
+// --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test plan,
+// Topology), and before this subcommand all three carried the number as a
+// hand-copied literal.
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
@@ -1242,7 +1253,8 @@ func cmdConstants(g *globals, args []string) {
 	})
 }
 
-// cmdGeometry prints the §3.6 block geometry of ONE group — the meta_blocks
+// cmdGeometry prints the block geometry of ONE group (architecture.md, Group
+// on-leg layout: meta region, data region, health block) — the meta_blocks
 // and data_blocks a group of --ext-cnt extents gets — by calling
 // model.GroupBlocks, the one implementation of that formula (MD6). The
 // arithmetic is deliberately NOT repeated here: put-sp computes a group's
@@ -1263,10 +1275,10 @@ func cmdGeometry(g *globals, args []string) {
 	extentSize := fs.Uint64("extent-size", common.MinDnExtSize,
 		"dn_bin_conf.extent_size in bytes")
 	blockSize := fs.Uint64("block-size", common.DefaultDmPoolDataBlockSize,
-		"bdev_conf.dm_pool_conf.data_block_size, the §3.6 block_size")
+		"bdev_conf.dm_pool_conf.data_block_size, the geometry's block_size")
 	chunkBlocks := fs.Uint64("chunk-blocks", common.DefaultChunkBlockCnt,
-		"redund_md_raid1.bitmap_chunk_block_cnt, the §3.6 bitmap chunk; "+
-			"ignored without --raid1")
+		"redund_md_raid1.bitmap_chunk_block_cnt, the geometry's bitmap "+
+			"chunk; ignored without --raid1")
 	extCnt := fs.Uint64("ext-cnt", 0, "the group's ext_cnt (required)")
 	raid1 := fs.Bool("raid1", false,
 		"the group is md-raid1 (md superblock + bitmap + health block); "+
@@ -1312,13 +1324,15 @@ func cmdGeometry(g *globals, args []string) {
 // put-cluster
 // ---------------------------------------------------------------------------
 
-// cmdPutCluster implements CreateCluster (architecture.md §8.1, §5.2): it
-// stamps creation_epoch = time.Now().UnixNano() like the gateway, derives the
-// cluster_id from the name and that epoch, and writes the three zeroed globals
-// alongside the ClusterConf (§5.4).
+// cmdPutCluster implements CreateCluster (architecture.md, Clusters and
+// cluster_id derivation): it stamps creation_epoch = time.Now().UnixNano()
+// like the gateway, derives the cluster_id from the name and that epoch, and
+// writes the three zeroed globals alongside the ClusterConf (architecture.md,
+// Globals: id allocation + shard buckets).
 //
 // It refuses to overwrite an existing cluster: creation_epoch is immutable, and
-// rewriting it would orphan every other key of the cluster (§5.2).
+// rewriting it would orphan every other key of the cluster (architecture.md,
+// cluster_id derivation).
 func cmdPutCluster(g *globals, args []string) {
 	fs := newFlagSet("put-cluster", g)
 	name := fs.String("name", "", "cluster name (defaults to --cluster)")
@@ -1333,9 +1347,9 @@ func cmdPutCluster(g *globals, args []string) {
 	lwm := fs.Uint("lwm", common.DefaultPoolLowWatermarkPct,
 		"bdev_conf.dm_pool_conf.low_water_mark_pct")
 	blockSize := fs.Uint64("block-size", common.DefaultDmPoolDataBlockSize,
-		"bdev_conf.dm_pool_conf.data_block_size, the §3.6 block_size")
+		"bdev_conf.dm_pool_conf.data_block_size, the geometry's block_size")
 	chunkBlocks := fs.Uint64("chunk-blocks", common.DefaultChunkBlockCnt,
-		"redund_md_raid1.bitmap_chunk_block_cnt, the §3.6 bitmap chunk")
+		"redund_md_raid1.bitmap_chunk_block_cnt, the geometry's bitmap chunk")
 	dnBatch := fs.Uint("dn-batch", 0, "alloc_conf.dn_batch_size")
 	cnBatch := fs.Uint("cn-batch", 0, "alloc_conf.cn_batch_size")
 	fs.Parse(args)
@@ -1364,7 +1378,9 @@ func cmdPutCluster(g *globals, args []string) {
 			},
 			// put-sp inherits this bdev_conf and replaces the redund kind
 			// with the one its --group flags name; the chunk count rides
-			// along, which is how a case pins the §3.6 geometry.
+			// along, which is how a case pins the group geometry
+			// (architecture.md, Group on-leg layout: meta region, data
+			// region, health block).
 			RedundConf: &pb.RedundConf{
 				RedunKind: &pb.RedundConf_RedundMdRaid1{
 					RedundMdRaid1: &pb.RedundMdRaid1{
@@ -1386,12 +1402,12 @@ func cmdPutCluster(g *globals, args []string) {
 		},
 	}
 	// workerctl plays the gateway for this suite, so it must store what
-	// CreateCluster stores: a FULLY RESOLVED conf (§7). Every member left at
-	// its flag's zero — the batch sizes, the four intervals, the bin shift
-	// ladder, dm_raid0_conf.stripe_size — becomes concrete here, because the
-	// worker now validates the stored conf and refuses to drive an object
-	// whose geometry nobody chose. Writing the raw literal would make every
-	// case in the suite fail at the first round.
+	// CreateCluster stores: a FULLY RESOLVED conf (architecture.md, Common
+	// validation). Every member left at its flag's zero — the batch sizes, the
+	// four intervals, the bin shift ladder, dm_raid0_conf.stripe_size —
+	// becomes concrete here, because the worker now validates the stored conf
+	// and refuses to drive an object whose geometry nobody chose. Writing the
+	// raw literal would make every case in the suite fail at the first round.
 	cc = model.ResolveClusterConf(cc)
 	newGlobal := func() ([]uint32, uint64) {
 		return make([]uint32, common.ShardBucketSize), 1
@@ -1401,7 +1417,7 @@ func cmdPutCluster(g *globals, args []string) {
 		if s.Get(key, &pb.ClusterConf{}) {
 			return fmt.Errorf(
 				"cluster %q already exists; creation_epoch is immutable "+
-					"(architecture.md §5.2)", clusterName,
+					"(architecture.md, cluster_id derivation)", clusterName,
 			)
 		}
 		s.Put(key, cc)
@@ -1439,10 +1455,10 @@ func cmdPutCluster(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdPutDn implements CreateDiskNode with an explicit id, shard and budget
-// (§14.8, architecture.md §8.2): ONE STM writes DnConf, DnRev (revision =
+// (architecture.md, Disk nodes): ONE STM writes DnConf, DnRev (revision =
 // current + 1, or 1 when absent) and the DnCapacity key through
-// model.MaintainDnCapacity, so the §5.6 presence rule holds the moment the
-// transaction commits.
+// model.MaintainDnCapacity, so the presence rule of architecture.md, Capacity
+// index keys, holds the moment the transaction commits.
 func cmdPutDn(g *globals, args []string) {
 	fs := newFlagSet("put-dn", g)
 	var id hexUint
@@ -1509,7 +1525,8 @@ func cmdPutDn(g *globals, args []string) {
 		model.MaintainDnCapacity(s, cid, *addr, cc, oldDn, newDn)
 		s.Put(revKey, &pb.DnRev{AddrPort: *addr, Revision: revision})
 		if created {
-			// §5.4: creating a node consumes an id and one bucket slot, so
+			// Creating a node consumes an id and one bucket slot
+			// (architecture.md, Globals: id allocation + shard buckets), so
 			// a worker reaction that allocates later never reuses this id.
 			globalKey := model.DnGlobalKey(cid)
 			global := &pb.DnGlobal{}
@@ -1538,8 +1555,9 @@ func cmdPutDn(g *globals, args []string) {
 	})
 }
 
-// cmdPutCn is cmdPutDn's mirror for a controller node (§8.3): CnConf, CnRev
-// and the CnCapacity key through model.MaintainCnCapacity.
+// cmdPutCn is cmdPutDn's mirror for a controller node (architecture.md,
+// Controller nodes): CnConf, CnRev and the CnCapacity key through
+// model.MaintainCnCapacity.
 func cmdPutCn(g *globals, args []string) {
 	fs := newFlagSet("put-cn", g)
 	var id hexUint
@@ -1637,9 +1655,10 @@ func cmdPutCn(g *globals, args []string) {
 // bump-rev / move-dn / del-rev
 // ---------------------------------------------------------------------------
 
-// cmdBumpRev raises one revision key IN PLACE (§5.5): the key is id-based and
-// therefore stable, so a watcher sees one put — never a delete followed by a
-// put, which would read as "node removed, then a different node added".
+// cmdBumpRev raises one revision key IN PLACE (architecture.md, Revision keys
+// and the sync fan-out): the key is id-based and therefore stable, so a
+// watcher sees one put — never a delete followed by a put, which would read as
+// "node removed, then a different node added".
 func cmdBumpRev(g *globals, args []string) {
 	fs := newFlagSet("bump-rev", g)
 	kind, rest := splitKind(args)
@@ -1703,16 +1722,16 @@ func cmdBumpRev(g *globals, args []string) {
 	})
 }
 
-// cmdMoveDn is the §5.5 moved-node case: one STM rewrites DnRev.addr_port and
-// bumps its revision, and moves DnConf and the DnCapacity key to the new
-// endpoint. The rev key itself is rewritten, never deleted and re-created, so
-// the watching worker sees a single put that says "the same DN now answers
-// somewhere else".
+// cmdMoveDn is the moved-node case of architecture.md, Revision keys and the
+// sync fan-out: one STM rewrites DnRev.addr_port and bumps its revision, and
+// moves DnConf and the DnCapacity key to the new endpoint. The rev key itself
+// is rewritten, never deleted and re-created, so the watching worker sees a
+// single put that says "the same DN now answers somewhere else".
 //
 // It rewrites nothing else: Sides already placed on the DN keep the old
-// addr_port copy their Slice holds, because §5.5 has no rename path and no
-// v001 RPC changes a node's endpoint. The suite only moves a DN that carries
-// no side (§14.11 A2, before its SP exists).
+// addr_port copy their Slice holds, because the rev keys have no rename path
+// and no v001 RPC changes a node's endpoint. The suite only moves a DN that
+// carries no side (worker_test.sh case A step 2, before its SP exists).
 func cmdMoveDn(g *globals, args []string) {
 	fs := newFlagSet("move-dn", g)
 	var id hexUint
@@ -1785,7 +1804,8 @@ func cmdMoveDn(g *globals, args []string) {
 }
 
 // cmdDelRev deletes one revision key and nothing else — the "the object is
-// gone as far as the watching worker is concerned" case of §14.11 A5.
+// gone as far as the watching worker is concerned" case of SW3, which
+// worker_test.sh case A step 5 stages.
 func cmdDelRev(g *globals, args []string) {
 	fs := newFlagSet("del-rev", g)
 	kind, rest := splitKind(args)
@@ -1868,10 +1888,10 @@ type spPlan struct {
 	grpOfLeg map[uint64]uint64
 	extOfLeg map[uint64]uint64
 	// footprint is Σ ext_cnt over ALL groups — what one cntlr's CN reserves
-	// for the SP (§8.4, §8.6).
+	// for the SP (architecture.md, Storage pools and Cntlrs).
 	footprint uint64
 	// nextId is one past the largest id the plan uses, so that a worker
-	// reaction allocates fresh ids ABOVE the script's (§14.5).
+	// reaction allocates fresh ids ABOVE the script's.
 	nextId uint64
 }
 
@@ -1885,9 +1905,10 @@ func buildSpPlan(
 		extOfLeg: make(map[uint64]uint64),
 	}
 	// Every sub-object id must be distinct WITHIN ITS KIND, and next_id ends
-	// up past all of them (§5.4, §14.5). Uniqueness is not enforced ACROSS
-	// kinds even though a real gateway draws all of them from the one
-	// SpConf.next_id counter: §14.11 labels the objects of one SP per kind
+	// up past all of them (architecture.md, Globals: id allocation + shard
+	// buckets). Uniqueness is not enforced ACROSS kinds even though a real
+	// gateway draws all of them from the one SpConf.next_id counter:
+	// worker_test.sh labels the objects of one SP per kind
 	// (slice `1`, group `G1`, leg `L1`, side `S1`), nothing in model or
 	// worker ever looks an id up without knowing its kind, and refusing the
 	// numbering the cases are written in would buy nothing.
@@ -1933,7 +1954,7 @@ func buildSpPlan(
 		if prev, ok := usedSlots[parsed.slot]; ok {
 			return nil, fmt.Errorf(
 				"--cntlr %q: cntlid slot %d already taken by cntlr %#x "+
-					"(architecture.md §11.8 wants them distinct)",
+					"(architecture.md, cntlid slots, wants them distinct)",
 				spec, parsed.slot, prev,
 			)
 		}
@@ -1941,7 +1962,7 @@ func buildSpPlan(
 		if prev, ok := usedCns[parsed.cnId]; ok {
 			return nil, fmt.Errorf(
 				"--cntlr %q: cn %#x already hosts a cntlr of this sp, "+
-					"%#x (architecture.md §6.4)",
+					"%#x (architecture.md, Finding CN candidates)",
 				spec, parsed.cnId, prev,
 			)
 		}
@@ -2105,16 +2126,18 @@ func buildSpPlan(
 }
 
 // cmdPutSp implements the CreateStoragePool STM with EXPLICIT PLACEMENT
-// (dnv-worker.md §14.8, architecture.md §8.4). Everything §8.4 step 2 does is
-// done here, with the §6.5 allocator replaced by the --cntlr/--side flags:
-// SpConf (next_id past every id used, next_dev_id 1, bdev_conf inherited from
-// ClusterConf, event_threshold, cntlid_slot_list, sp_level, deleting = false,
-// every id list filled), SpName, one Cntlr per --cntlr, one Slice per --slice
-// with its groups → legs → sides (provisioned = false, [D15]), the SpRev key
-// with revision = 1, SpGlobal, and the DN/CN bookkeeping: every DN gains its
-// side pointers, loses the group's ext_cnt, has its capacity key maintained
-// (§5.6) and its DnRev bumped ONCE; every CN gains its cntlr pointer, loses
-// the SP footprint, and likewise.
+// (dnv-worker.md, Integration test plan, The driver; architecture.md,
+// Storage pools). Everything CreateStoragePool's Action step 2 does is done
+// here, with the allocator of architecture.md, Per-operation allocation,
+// replaced by the --cntlr/--side flags: SpConf (next_id past every id used,
+// next_dev_id 1, bdev_conf inherited from ClusterConf, event_threshold,
+// cntlid_slot_list, sp_level, deleting = false, every id list filled),
+// SpName, one Cntlr per --cntlr, one Slice per --slice with its groups → legs
+// → sides (provisioned = false, [D15]), the SpRev key with revision = 1,
+// SpGlobal, and the DN/CN bookkeeping: every DN gains its side pointers, loses
+// the group's ext_cnt, has its capacity key maintained (architecture.md,
+// Capacity index keys) and its DnRev bumped ONCE; every CN gains its cntlr
+// pointer, loses the SP footprint, and likewise.
 func cmdPutSp(g *globals, args []string) {
 	fs := newFlagSet("put-sp", g)
 	name := fs.String("name", "", "sp_name (required)")
@@ -2126,7 +2149,7 @@ func cmdPutSp(g *globals, args []string) {
 		"cntlid_slot_list, comma separated")
 	levelSpec := fs.String("level", "0", "sp_level")
 	thresholdSpec := fs.String("thresholds", "",
-		"event_threshold as primary,cntlr,side,leg (0 = the §7 default)")
+		"event_threshold as primary,cntlr,side,leg (0 = the default)")
 	lwm := fs.Int("lwm", -1,
 		"low_water_mark_pct (default: inherit from the cluster)")
 	var cntlrSpecs, sliceSpecs, groupSpecs, legSpecs, sideSpecs stringList
@@ -2194,8 +2217,9 @@ func cmdPutSp(g *globals, args []string) {
 	cid, cc := g.clusterId(ctx, cli)
 
 	// The SP's bdev_conf is the cluster's, with the redundancy the groups
-	// name and the --lwm override (§8.4 "bdev_conf member-wise from
-	// ClusterConf.bdev_conf then constants").
+	// name and the --lwm override (architecture.md, Storage pools:
+	// CreateStoragePool takes bdev_conf member-wise from
+	// ClusterConf.bdev_conf, then from the constants).
 	bdev := cloneBdevConf(cc.GetBdevConf())
 	if bdev.DmPoolConf == nil {
 		bdev.DmPoolConf = &pb.DmPoolConf{}
@@ -2220,19 +2244,20 @@ func cmdPutSp(g *globals, args []string) {
 			},
 		}
 	}
-	// The gateway's resolve-at-write, mirrored (§7): CreateStoragePool stores
-	// the merge passed through model.ResolveBdevConf, so put-sp does too —
-	// the cluster's bdev_conf is already concrete, but the SP's redund kind
-	// was just rebuilt above and the merge's own constants rung still has to
-	// fire.
+	// The gateway's resolve-at-write, mirrored (architecture.md, Common
+	// validation): CreateStoragePool stores the merge passed through
+	// model.ResolveBdevConf, so put-sp does too — the cluster's bdev_conf is
+	// already concrete, but the SP's redund kind was just rebuilt above and
+	// the merge's own constants rung still has to fire.
 	bdev = model.ResolveBdevConf(bdev)
 	if err := model.ValidateClusterConf(cc); err != nil {
 		die("put-sp: %v", err)
 	}
 	extentSize := cc.GetDnBinConf().GetExtentSize()
 
-	// The §3.6 geometry of every group, computed by model.GroupBlocks — the
-	// one implementation of the formula (MD6).
+	// The geometry of every group (architecture.md, Group on-leg layout:
+	// meta region, data region, health block), computed by model.GroupBlocks
+	// — the one implementation of the formula (MD6).
 	type grpGeometry struct {
 		metaBlocks uint64
 		dataBlocks uint64
@@ -2402,7 +2427,7 @@ func cmdPutSp(g *globals, args []string) {
 				Disabled:   false,
 				ErrEpoch:   0,
 				// As CreateStoragePool: the primary is created settling
-				// (dnv-worker.md HL2, §14.8).
+				// (dnv-worker.md HL2 and Integration test plan, The driver).
 				Settling: spec.primary,
 			})
 			cntlrIds = append(cntlrIds, spec.cntlrId)
@@ -2426,7 +2451,8 @@ func cmdPutSp(g *globals, args []string) {
 			SpName:   *name,
 			Revision: 1,
 		})
-		// --- the DN bookkeeping, once per DN (§8.4, §5.6, §5.5) ---
+		// --- the DN bookkeeping, once per DN (architecture.md, Storage
+		// pools; Capacity index keys; Revision keys and the sync fan-out) ---
 		for _, addr := range dnOrder {
 			dn := dns[addr]
 			charge := dnCharge[addr]
@@ -2447,7 +2473,8 @@ func cmdPutSp(g *globals, args []string) {
 			}
 			dnRevisions[addr] = revision
 		}
-		// --- the CN bookkeeping, once per CN (§8.4, §8.6) ---
+		// --- the CN bookkeeping, once per CN (architecture.md, Storage
+		// pools and Cntlrs) ---
 		for _, addr := range cnOrder {
 			cn := cns[addr]
 			if cn.GetFreeExtCnt() < plan.footprint {
@@ -2468,7 +2495,8 @@ func cmdPutSp(g *globals, args []string) {
 			}
 			cnRevisions[addr] = revision
 		}
-		// --- SpGlobal (§5.4) ---
+		// --- SpGlobal (architecture.md, Globals: id allocation + shard
+		// buckets) ---
 		globalKey := model.SpGlobalKey(cid)
 		global := &pb.SpGlobal{}
 		if s.Get(globalKey, global) {
@@ -2524,7 +2552,8 @@ func cmdPutSp(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // advanceNextId keeps SpConf.next_id past every id the script assigned, so
-// that a worker reaction allocates fresh ids ABOVE them (§14.5, §5.4).
+// that a worker reaction allocates fresh ids ABOVE them (architecture.md,
+// Globals: id allocation + shard buckets).
 func advanceNextId(conf *pb.SpConf, ids ...uint64) {
 	for _, id := range ids {
 		if conf.NextId <= id {
@@ -2544,7 +2573,7 @@ func containsName(list []string, name string) bool {
 }
 
 // cmdPutTd writes one ThinDevice and its SpConf.td_name_list entry
-// (architecture.md §8.7 CreateThinDevice), then bumps SpRev once.
+// (architecture.md, Thin devices: CreateThinDevice), then bumps SpRev once.
 func cmdPutTd(g *globals, args []string) {
 	fs := newFlagSet("put-td", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2615,9 +2644,10 @@ func cmdPutTd(g *globals, args []string) {
 }
 
 // cmdPutSs writes one Subsystem, its SpConf.nqn_list entry and the SP's
-// CdcEntry (architecture.md §8.8 CreateSubsystem, §12): the discovery entry is
-// keyed by the SP's shard code and lists every cntlr's transport, and it is
-// what case D3 reads back after a cntlr replacement.
+// CdcEntry (architecture.md, Subsystems, namespaces: CreateSubsystem; and
+// dnv-cdc): the discovery entry is keyed by the SP's shard code and lists
+// every cntlr's transport, and it is what case D3 reads back after a cntlr
+// replacement.
 func cmdPutSs(g *globals, args []string) {
 	fs := newFlagSet("put-ss", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2691,7 +2721,8 @@ func cmdPutSs(g *globals, args []string) {
 			advanceNextId(conf, spec.nsId)
 		}
 		s.Put(key, subsystem)
-		// The discovery entry advertises every cntlr of the SP (§12).
+		// The discovery entry advertises every cntlr of the SP
+		// (architecture.md, dnv-cdc).
 		trList := make([]*pb.NvmeTrConf, 0, len(conf.GetCntlrIdList()))
 		for _, cntlrId := range conf.GetCntlrIdList() {
 			cntlr := &pb.Cntlr{}
@@ -2729,8 +2760,8 @@ func cmdPutSs(g *globals, args []string) {
 }
 
 // cmdPutClone writes one Clone and its SpConf.clone_name_list entry
-// (architecture.md §8.9), then bumps SpRev once. --dst-td accepts either a td
-// name or a td_id.
+// (architecture.md, Clones), then bumps SpRev once. --dst-td accepts either a
+// td name or a td_id.
 func cmdPutClone(g *globals, args []string) {
 	fs := newFlagSet("put-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2812,7 +2843,7 @@ func cmdPutClone(g *globals, args []string) {
 }
 
 // cmdPutXfer writes one Transfer and its SpConf.xfer_name_list entry
-// (architecture.md §8.10), then bumps SpRev once.
+// (architecture.md, Transfers), then bumps SpRev once.
 func cmdPutXfer(g *globals, args []string) {
 	fs := newFlagSet("put-xfer", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2874,12 +2905,13 @@ func cmdPutXfer(g *globals, args []string) {
 }
 
 // cmdPutMigr writes one Migration and its SpConf.migr_name_list entry
-// (architecture.md §8.11) AND appends the destination Side to the SOURCE
-// side's leg, which is what makes the leg carry two sides — the shape RW15
-// keys migr_src_conf/migr_dst_conf off and the precondition AR8 reads as "a
-// leg with two sides is left alone". The destination DN gets the full §8.4
-// treatment: the side pointer, the group's ext_cnt off its budget, its
-// capacity key maintained and its DnRev bumped once.
+// (architecture.md, Migrations) AND appends the destination Side to the
+// SOURCE side's leg, which is what makes the leg carry two sides — the shape
+// RW15 keys migr_src_conf/migr_dst_conf off and the precondition AR8 reads as
+// "a leg with two sides is left alone". The destination DN gets the full
+// CreateStoragePool treatment (architecture.md, Storage pools): the side
+// pointer, the group's ext_cnt off its budget, its capacity key maintained and
+// its DnRev bumped once.
 func cmdPutMigr(g *globals, args []string) {
 	fs := newFlagSet("put-migr", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2987,7 +3019,8 @@ func cmdPutMigr(g *globals, args []string) {
 		conf.MigrNameList = append(conf.MigrNameList, spec.name)
 		advanceNextId(conf, spec.migrId, spec.dstSide)
 		s.Put(model.SpConfKey(cid, target.name), conf)
-		// The destination DN's bookkeeping (§8.4, §5.6, §5.5).
+		// The destination DN's bookkeeping (architecture.md, Storage pools;
+		// Capacity index keys; Revision keys and the sync fan-out).
 		if dn.GetFreeExtCnt() < extCnt {
 			return fmt.Errorf(
 				"dn %#x at %q has free_ext_cnt %d, needs %d",
@@ -3030,8 +3063,8 @@ func cmdPutMigr(g *globals, args []string) {
 }
 
 // cmdPutBitmap writes one chunk of a clone's or a migration's bitmap
-// (architecture.md §8.9/§8.11, BM3), raises `bm_cnt` on a MIGRATION's parent,
-// and bumps SpRev once.
+// (architecture.md, Clones and Migrations; BM3), raises `bm_cnt` on a
+// MIGRATION's parent, and bumps SpRev once.
 //
 // A clone chunk is addressed by the PAIR --src-slice-idx / --bm-idx and holds
 // the bytes at offset bm_idx*CloneBmChunkBytes of that source slice's bitmap,
@@ -3041,7 +3074,7 @@ func cmdPutMigr(g *globals, args []string) {
 // IS the count.
 //
 // Rewriting an existing chunk raises no count but still bumps SpRev — which is
-// exactly the "grown chunk" trigger of §14.11 C5.
+// exactly the "grown chunk" trigger of BM5.
 func cmdPutBitmap(g *globals, args []string) {
 	fs := newFlagSet("put-bitmap", g)
 	kind := fs.String("kind", "", "clone|migr (required)")
@@ -3088,8 +3121,8 @@ func cmdPutBitmap(g *globals, args []string) {
 	cid, _ := g.clusterId(ctx, cli)
 	target := resolveSp(ctx, cli, cid, *sp)
 
-	// bmCnt is Migration's only: a Clone record carries no chunk count
-	// (§14.8), so the output key is emitted for --kind migr.
+	// bmCnt is Migration's only: a Clone record carries no chunk count, so
+	// the output key is emitted for --kind migr.
 	var bmCnt uint32
 	var migr bool
 	var spRev uint64
@@ -3163,7 +3196,7 @@ func cmdPutBitmap(g *globals, args []string) {
 
 // cmdSetCntlr rewrites one Cntlr's primary / disabled flags and bumps SpRev
 // once. The two flags are independently settable and a tri-state, so that
-// "not given" differs from "false" (§14.8) — case C7 flips the primary role
+// "not given" differs from "false" — case C7 flips the primary role
 // with two calls and case D10 disables a standby without touching its role.
 func cmdSetCntlr(g *globals, args []string) {
 	fs := newFlagSet("set-cntlr", g)
@@ -3222,10 +3255,10 @@ func cmdSetCntlr(g *globals, args []string) {
 	})
 }
 
-// cmdSetLevel writes SpConf.sp_level and bumps SpRev once (architecture.md
-// §8.4 UpdateStoragePoolLevel): the level rides in both Syncup requests, and
-// AR3 makes NO_THINPOOL and above suppress every reaction — which is what case
-// D10 proves.
+// cmdSetLevel writes SpConf.sp_level and bumps SpRev once (architecture.md,
+// Storage pools: UpdateStoragePoolLevel): the level rides in both Syncup
+// requests, and AR3 makes NO_THINPOOL and above suppress every reaction —
+// which is what case D10 proves.
 func cmdSetLevel(g *globals, args []string) {
 	fs := newFlagSet("set-level", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3265,7 +3298,7 @@ func cmdSetLevel(g *globals, args []string) {
 }
 
 // cmdSetLwm writes SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct and bumps
-// SpRev once: the lever case D5/D6 pulls to arm and disarm the §8.5 grow rule
+// SpRev once: the lever case D5/D6 pulls to arm and disarm the AR6 grow rule
 // (a value above 100 means "never grow automatically").
 func cmdSetLwm(g *globals, args []string) {
 	fs := newFlagSet("set-lwm", g)
@@ -3278,10 +3311,10 @@ func cmdSetLwm(g *globals, args []string) {
 	cid, _ := g.clusterId(ctx, cli)
 	target := resolveSp(ctx, cli, cid, *sp)
 
-	// The gateway's rule, mirrored (§7): 0 asks for the default and is
-	// resolved before the write, because the worker refuses a stored 0. A
-	// value above 100 is a MEANING — "never grow automatically" — and is
-	// stored exactly as given.
+	// The gateway's rule, mirrored (architecture.md, Common validation): 0 asks
+	// for the default and is resolved before the write, because the worker
+	// refuses a stored 0. A value above 100 is a MEANING — "never grow
+	// automatically" — and is stored exactly as given.
 	pctValue := uint32(*pct)
 	if pctValue == 0 {
 		pctValue = common.DefaultPoolLowWatermarkPct
@@ -3315,9 +3348,10 @@ func cmdSetLwm(g *globals, args []string) {
 }
 
 // cmdSetFree rewrites a node's free_ext_cnt and maintains its capacity key in
-// the same STM (§5.6) — and bumps NO revision: a budget change is an allocator
-// input, not agent-visible desired state (§5.5). It is the script's lever for
-// deterministic allocation (§14.5).
+// the same STM (architecture.md, Capacity index keys) — and bumps NO revision:
+// a budget change is an allocator input, not agent-visible desired state
+// (architecture.md, Revision keys and the sync fan-out). It is the script's
+// lever for deterministic allocation.
 func cmdSetFree(g *globals, args []string) {
 	fs := newFlagSet("set-free", g)
 	kind, rest := splitKind(args)
@@ -3384,14 +3418,16 @@ func cmdSetFree(g *globals, args []string) {
 }
 
 // ---------------------------------------------------------------------------
-// Playing the worker (gateway.md §2.4)
+// Playing the worker (gateway.md, Integration test plan, The etcd verification)
 // ---------------------------------------------------------------------------
 //
 // These are the ONLY writes the gateway integration suite performs through
-// workerctl (gateway.md §10.9). They exist because two gateway preconditions
-// are gated on a flag only the sp-worker ever sets — CreateThinDevice's
-// snapshot gate on ThinDevice.created (§8.7) and SwitchSpareLeg's gate on
-// Side.provisioned (§9.4) — and that suite deliberately runs no dnv-worker.
+// workerctl (gateway.md, Integration test plan, The etcd verification). They
+// exist because two gateway preconditions are gated on a flag only the
+// sp-worker ever sets — CreateThinDevice's snapshot gate on ThinDevice.created
+// (architecture.md, Thin devices) and SwitchSpareLeg's gate on Side.provisioned
+// (architecture.md, Side provisioning protocol) — and that suite deliberately
+// runs no dnv-worker.
 // Both go through the very model op the worker calls, so the state they leave
 // behind is exactly the state a converging worker would have produced,
 // including the single SpRev bump the flip owes (which the suite's rev
@@ -3399,7 +3435,8 @@ func cmdSetFree(g *globals, args []string) {
 
 // cmdSetCreated flips ThinDevice.created through model.FlipCreated: the
 // materialization the sp-worker performs once a cntlr has reported the td's
-// thin volume RES_STATUS_OK in every slice (§10.3, ThinDeviceCreated.md U3).
+// thin volume RES_STATUS_OK in every slice (architecture.md, sp role;
+// dnv-worker.md RW19).
 //
 // The td_id comes from the stored record rather than from a flag: FlipCreated
 // takes a TdRef of name AND id precisely so a td deleted and re-created under
@@ -3446,9 +3483,10 @@ func cmdSetCreated(g *globals, args []string) {
 }
 
 // cmdSetProvisioned flips one Side.provisioned through model.FlipProvisioned:
-// the §9.4 completion the sp-worker records once the dn agent reports the side
-// fully zeroed. The suite pulls it exactly where a gateway precondition
-// demands it — SwitchSpareLeg refuses an unprovisioned spare (§8.12).
+// the provisioning completion (architecture.md, Side provisioning protocol)
+// the sp-worker records once the dn agent reports the side fully zeroed. The
+// suite pulls it exactly where a gateway precondition demands it —
+// SwitchSpareLeg refuses an unprovisioned spare (architecture.md, Spare legs).
 func cmdSetProvisioned(g *globals, args []string) {
 	fs := newFlagSet("set-provisioned", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3484,14 +3522,15 @@ func cmdSetProvisioned(g *globals, args []string) {
 }
 
 // cmdSetDeleting latches an SP the way DeleteStoragePool does
-// (architecture.md §8.4, gateway.md §5.4): `deleting = true` plus ONE SpRev
-// bump, and nothing else.
+// (architecture.md, Storage pools; gateway.md, Storage pools and GrowSlice):
+// `deleting = true` plus ONE SpRev bump, and nothing else.
 //
 // The worker suite runs no gateway, so this is how a case puts an SP into the
 // state the sp coordinator's drain reacts to. It deliberately does NOT apply
-// the five-empty-lists precondition: that gate is the gateway's, the §14 suite
-// plants whatever shape a case needs, and re-implementing a public precondition
-// in a test driver is how the two drift apart.
+// the five-empty-lists precondition: that gate is the gateway's, the worker
+// suite (dnv-worker.md, Integration test plan, The driver) plants whatever
+// shape a case needs, and re-implementing a public precondition in a test
+// driver is how the two drift apart.
 func cmdSetDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3554,7 +3593,8 @@ func cmdDrainSp(g *globals, args []string) {
 	// needs a PARTIALLY drained SP — to prove a restarted coordinator resumes
 	// one (SPD8) — asks for exactly as many steps as it wants. Running out is
 	// therefore reported in `sp_deleted`, never fatal; 4096 is above any shape
-	// the §2.1 ceilings allow (1 + MaxSliceCntPerSp x batches + 1).
+	// the ceilings of architecture.md, Cardinality limits, allow
+	// (1 + MaxSliceCntPerSp x batches + 1).
 	maxSteps := fs.Int("max-steps", 4096,
 		"run at most this many drain steps")
 	fs.Parse(args)
@@ -3633,13 +3673,14 @@ func cmdDrainSp(g *globals, args []string) {
 }
 
 // cmdSetCloneDeleting latches one clone the way DeleteClone does (CLD4,
-// architecture.md §8.9): `deleting = true` plus one BumpSpRev.
+// architecture.md, Clones): `deleting = true` plus one BumpSpRev.
 //
 // It deliberately does NOT resume the destination namespaces, which the RPC
 // does in the same transaction: that write belongs to the gateway's request
-// validation and subsystem walk, the §14 suite plants whatever shape a case
-// needs, and re-implementing a public action in a test driver is how the two
-// drift apart. A case that cares about the resume drives the real RPC.
+// validation and subsystem walk, the worker suite (dnv-worker.md,
+// Integration test plan, The driver) plants whatever shape a case needs, and
+// re-implementing a public action in a test driver is how the two drift
+// apart. A case that cares about the resume drives the real RPC.
 func cmdSetCloneDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-clone-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3868,7 +3909,8 @@ func readSpRev(
 // ---------------------------------------------------------------------------
 
 // cmdGet reads any key and prints it as protojson, choosing the message type
-// from the key's SECOND field — the §5.3 table's "message kind" column.
+// from the key's SECOND field — the "message kind" column of architecture.md,
+// Key table.
 func cmdGet(g *globals, args []string) {
 	fs := newFlagSet("get", g)
 	key := fs.String("key", "", "the full key (required)")
@@ -4049,7 +4091,7 @@ func cmdGetSp(g *globals, args []string) {
 		migrs[migrName] = pbToAny(migr)
 	}
 	// Each chunk prints as its ADDRESS, in the shape the fake agents write
-	// into state.json (§14.9) so the two sides of an assertion spell a chunk
+	// into state.json so the two sides of an assertion spell a chunk
 	// the same way: a clone chunk is the decimal "{src_slice_idx}:{bm_idx}"
 	// pair it is addressed by, a migration chunk its plain append sequence
 	// number. Both lists keep model.LoadSp's ascending order.
@@ -4203,11 +4245,12 @@ func cmdGetTd(g *globals, args []string) {
 }
 
 // cmdListKeys prints the keys under a prefix, one per line. --prefix takes
-// either a full key prefix ("dnv dn_conf …") or one §5.3 kind, which is then
-// scoped to --cluster when the kind's key carries {cluster_id} right after it.
+// either a full key prefix ("dnv dn_conf …") or one kind of architecture.md,
+// Key table, which is then scoped to --cluster when the kind's key carries
+// {cluster_id} right after it.
 func cmdListKeys(g *globals, args []string) {
 	fs := newFlagSet("list-keys", g)
-	prefix := fs.String("prefix", "", "a full key prefix or a §5.3 key kind")
+	prefix := fs.String("prefix", "", "a full key prefix or a key kind")
 	fs.Parse(args)
 
 	ctx, done, cli := g.open()
@@ -4220,9 +4263,10 @@ func cmdListKeys(g *globals, args []string) {
 		scan = common.DnvPrefix + " "
 	case spec == common.DnvPrefix:
 		// The whole store. TrimSpace above has already eaten the trailing
-		// space of a "dnv " the caller may have quoted, and §14.13's
+		// space of a "dnv " the caller may have quoted, and worker_test.sh's
 		// diagnostics dump asks for exactly `list-keys --prefix dnv`, so a
-		// bare prefix must not be mistaken for a §5.3 kind name.
+		// bare prefix must not be mistaken for a key kind name
+		// (architecture.md, Key table).
 		scan = common.DnvPrefix + " "
 	case strings.HasPrefix(spec, common.DnvPrefix+" "):
 		scan = spec
@@ -4249,8 +4293,8 @@ func cmdListKeys(g *globals, args []string) {
 }
 
 // cmdListWorkers prints one JSON object per worker registration — the seed out
-// of the key and the epoch out of the value (§5.3, VW2). It is how case E
-// checks that a dead worker's key is gone (VW6).
+// of the key and the epoch out of the value (architecture.md, Key table;
+// VW2). It is how case E checks that a dead worker's key is gone (VW6).
 func cmdListWorkers(g *globals, args []string) {
 	fs := newFlagSet("list-workers", g)
 	role := fs.String("role", "", "dn|cn|sp (default: all three)")

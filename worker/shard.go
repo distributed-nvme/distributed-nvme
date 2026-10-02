@@ -16,7 +16,8 @@ import (
 // revKind is the per-role plumbing one shard worker needs (SW1): the rev
 // prefix it watches, the message type that prefix holds, the parser of its
 // keys and the constructor of the revision workers below it. The three kinds
-// differ in nothing else, which is why §7 is one implementation.
+// differ in nothing else, which is why the shard worker (SW1-SW6) is one
+// implementation.
 type revKind struct {
 	role     string
 	prefix   func(shard uint32) string
@@ -26,7 +27,7 @@ type revKind struct {
 	// revision plus the handle (addr_port for DnRev/CnRev, sp_name for
 	// SpRev).
 	desired func(msg proto.Message) (desiredState, bool)
-	// newWorker starts one revision worker (SW2). It is a field so the §13
+	// newWorker starts one revision worker (SW2). It is a field so the
 	// shard tests can substitute a recording fake for the real per-object
 	// loop.
 	newWorker func(p revWorkerParams) revWorkerHandle
@@ -62,7 +63,7 @@ type revObjEntry struct {
 }
 
 // shardWorker watches one owned (role, shard) rev prefix and keeps one
-// revision worker per key under it (§7). It is started and stopped only by
+// revision worker per key under it (SW1-SW6). It is started and stopped only by
 // the vote worker (VW9).
 type shardWorker struct {
 	deps  *deps
@@ -413,7 +414,7 @@ func (s *childStops[K]) join() {
 // ---------------------------------------------------------------------------
 
 // dnKind is the dn role's shard plumbing: {p} dn_rev {s}␠ holding DnRev
-// (§8.2).
+// (RW13).
 func dnKind() revKind {
 	return revKind{
 		role:     common.WorkerRoleDn,
@@ -439,7 +440,7 @@ func dnKind() revKind {
 }
 
 // cnKind is the cn role's shard plumbing: {p} cn_rev {s}␠ holding CnRev
-// (§8.3).
+// (dnv-worker.md, cn role — `worker/cnrole.go`).
 func cnKind() revKind {
 	return revKind{
 		role:     common.WorkerRoleCn,
@@ -465,7 +466,7 @@ func cnKind() revKind {
 }
 
 // spKind is the sp role's shard plumbing: {p} sp_rev {s}␠ holding SpRev,
-// whose handle is the sp_name (§8.4).
+// whose handle is the sp_name (RW14-RW20).
 func spKind() revKind {
 	return revKind{
 		role:     common.WorkerRoleSp,

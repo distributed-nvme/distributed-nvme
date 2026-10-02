@@ -12,9 +12,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The §3 discovery service model tests: DS3 skip-and-serve, DS4 visibility,
-// DS5 ordering, the DS6 impact table, DS7 host state and GENCTR, the WV4
-// rescan path through registry.replace, and the DS9 snapshot promise.
+// The tests of cdc.md, The discovery service model: DS3 skip-and-serve, DS4
+// visibility, DS5 ordering, the DS6 impact table, DS7 host state and GENCTR,
+// the WV4 rescan path through registry.replace, and the DS9 snapshot
+// promise.
 //
 // Everything here drives the registry directly with stub connections: no
 // socket, no clock, no watcher. What an impact "does" is observed exactly the
@@ -37,7 +38,8 @@ const (
 	vwNqnE = "nqn.2024-01.io.dnv:ss-e"
 )
 
-// The CN ports of the fixtures: port1 and port2 of §9.3, on one CN.
+// The CN ports of the fixtures: port1 and port2 of the cdc suite's target
+// (integtest/cdc_test.sh), on one CN.
 const (
 	vwAddr1  = "192.168.0.21"
 	vwAddr2  = "192.168.0.22"
@@ -200,7 +202,7 @@ func TestNewEntrySkipAndServe(t *testing.T) {
 }
 
 // TestNewEntryAllForeign proves that an entry whose every element is foreign
-// still exists and still serves — it simply contributes no records (§0 #2).
+// still exists and still serves — it simply contributes no records (DS3).
 func TestNewEntryAllForeign(t *testing.T) {
 	e := newEntry(cdcEntry(
 		vwNqnA, []string{vwHost1},
@@ -304,7 +306,8 @@ func TestEntryVisibleTo(t *testing.T) {
 }
 
 // TestVisibilityInAView proves DS4 through the served views: three hosts, one
-// open entry and one restricted entry (§9.12's ssA/ssB shape).
+// open entry and one restricted entry (the ssA/ssB shape of the cdc suite's
+// lowlevel case).
 func TestVisibilityInAView(t *testing.T) {
 	f := vwNew(t)
 	f.attach(vwHost1, 1)
@@ -591,7 +594,7 @@ func TestRegistryImpact(t *testing.T) {
 			},
 		},
 		{
-			// The §9.12 step 4 rule: allowed_hosts is not log page content,
+			// The DS6 rule: allowed_hosts is not log page content,
 			// so adding a SECOND host to an entry the first host already
 			// sees must not move the first host's GENCTR at all.
 			name: "membership preserving allowed_hosts edit",
@@ -949,10 +952,10 @@ func BenchmarkViewEventFanout(b *testing.B) {
 // DS7 — host state lifecycle
 // ---------------------------------------------------------------------------
 
-// TestHostStateLifecycle proves DS7 and §0 #6: the state is created at the
-// first connection with GENCTR 1, shared by every later connection, and
-// dropped at the last disconnect — so a new connection of the same hostnqn
-// starts counting again at 1.
+// TestHostStateLifecycle proves DS7: the state is created at the first
+// connection with GENCTR 1, shared by every later connection, and dropped at
+// the last disconnect — so a new connection of the same hostnqn starts
+// counting again at 1.
 func TestHostStateLifecycle(t *testing.T) {
 	f := vwNew(t)
 	confA := tcpConf(vwAddr1, vwSvcId1)
@@ -1024,7 +1027,7 @@ func TestHostStateLifecycle(t *testing.T) {
 	// While the host is gone the served state moves on, unnoticed.
 	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
 
-	// A new connection of the same hostnqn restarts at 1 (§0 #6) and sees
+	// A new connection of the same hostnqn restarts at 1 (DS7) and sees
 	// the current state, not the one it left.
 	f.attach(vwHost1, 1)
 	genCtr, numRec, body := f.view(vwHost1)
@@ -1344,7 +1347,7 @@ func TestSnapshotIsolation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §7 — the `view changed` record
+// cdc.md, Log records — the `view changed` record
 // ---------------------------------------------------------------------------
 
 // TestViewChangedRecords proves the LG contract for DS6: exactly one
@@ -1390,7 +1393,7 @@ func TestViewChangedRecords(t *testing.T) {
 		t.Errorf("an idempotent put logged %d records in total, want 1", got)
 	}
 
-	// The membership-preserving edit of §9.12 step 4: h2 gains the entry and
+	// The membership-preserving edit of DS6: h2 gains the entry and
 	// is logged, h1 keeps exactly its one record.
 	f.put(vwKeyB, cdcEntry(vwNqnB, []string{vwHost1, vwHost2}, confB))
 	recs = logs.find(msgViewChanged)

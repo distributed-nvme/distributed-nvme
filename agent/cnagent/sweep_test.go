@@ -27,7 +27,7 @@ const (
 // ids with no mappings at all: the sweep reads dev_id and nothing else, and
 // zero mapped_blocks is what keeps CN25's mapped-vs-header consistency check
 // (thinbm.go) happy. Scripted through the fake's thinDumps exactly as the
-// §6.14 bitmap tests script theirs.
+// CN25-CN27 bitmap tests script theirs.
 func sweepDump(devIds ...uint32) string {
 	var sb strings.Builder
 	sb.WriteString(`<superblock uuid="" time="0" transaction="0" flags="0" ` +
@@ -64,7 +64,7 @@ func sweepPending(srv *CnAgentServer, sliceId uint64) bool {
 
 // createdTd is one already-materialized td: the sp-worker has seen its volume
 // OK in every slice, so its id is in the pool metadata and a bare `dmsetup
-// create` attaches it (U4-S2).
+// create` attaches it (CN14).
 func createdTd(tdId uint64, devId uint32) *pb.ThinDevice {
 	return &pb.ThinDevice{
 		TdId: tdId, DevId: devId, Size: testTdSize, Created: true}
@@ -319,7 +319,7 @@ func TestSweepSurvivesDeleteFailure(t *testing.T) {
 // converge-then-persist (syncupCntlr saves after convergeCntlr and only logs a
 // failed Save; a crash in the same window has the same effect) lets that copy
 // lag the pool's true contents. A sweep run against it deletes a live created
-// td's thin id, which U4-S2 then reports as a permanent, never-re-messaged
+// td's thin id, which CN14 then reports as a permanent, never-re-messaged
 // RES_STATUS_ERROR — data loss, where the same staleness without a sweep is
 // merely a td left unbuilt until the next sync. So the startup Create arms
 // only; the first revision-gated SyncupCntlr sweeps, with the fresh td_list,

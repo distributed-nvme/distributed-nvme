@@ -1,17 +1,18 @@
 // Package gateway is dnv-gateway's control-plane API server (gateway.md): the
 // 59 RPCs of `service Gateway`, implemented directly on etcd through
-// etcdutil's STM machinery, plus the ten agent calls of §6 that reach a dn or
-// cn agent for a size, an *Info or a bitmap.
+// etcdutil's STM machinery, plus the ten agent calls of gateway.md, Agent
+// calls, that reach a dn or cn agent for a size, an *Info or a bitmap.
 //
-// It is stateless and active-active (§0 #3): no leader election, no
+// It is stateless and active-active (GW1): no leader election, no
 // registration key, no shard split and no instance-count limit. Any instance
 // serves any request; multi-instance correctness rests entirely on
-// etcdutil.RunSTM's serializable-snapshot isolation plus the §5.5 revision
-// tokens. A gateway writes nothing to etcd that describes itself.
+// etcdutil.RunSTM's serializable-snapshot isolation plus the revision tokens
+// of architecture.md, Revision keys and the sync fan-out. A gateway writes
+// nothing to etcd that describes itself.
 //
 // It imports only common, pb, etcdutil, model and the grpc/protobuf runtimes
-// (layout.md §3): it is a gRPC server AND a client, and the cobra/viper flag
-// parsing lives in cmd/dnv-gateway.
+// (layout.md, Dependency rules): it is a gRPC server AND a client, and the
+// cobra/viper flag parsing lives in cmd/dnv-gateway.
 package gateway
 
 import (
@@ -26,8 +27,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The normative msg strings of gateway.md §8 (LG2). The integration suite
-// greps them, so they are constants and never formatted.
+// The normative msg strings of gateway.md, Log records (LG2). The integration
+// suite greps them, so they are constants and never formatted.
 const (
 	msgGatewayStarting = "gateway starting"
 	msgGatewayServing  = "gateway serving"
@@ -38,7 +39,7 @@ const (
 type Config struct {
 	// GrpcNetwork and GrpcAddress are the listener, exactly as in
 	// cmd/dnv-agent: --grpc-network defaults to "tcp", --grpc-address is
-	// required and has no default port (§0 #10).
+	// required and has no default port (CM2).
 	GrpcNetwork string
 	GrpcAddress string
 	// Endpoints are the etcd endpoints the client was built with. The
@@ -64,18 +65,18 @@ type Server struct {
 }
 
 // NewServer builds a Server over an existing etcd client. Run uses it; the
-// unit tests of §9 use it to drive handlers without a listener.
+// unit tests use it to drive handlers without a listener.
 func NewServer(cli *etcdutil.Client) *Server {
 	return &Server{cli: cli}
 }
 
 // serverOptions is the option set Run's grpc.Server is built from, factored
 // out so a test can build a server with exactly the production chain
-// (gateway.md §9.5).
+// (gateway.md GW2, GW3).
 //
 // The trace-id mint is FIRST in both chains, upstream of the shared chain of
-// grpc.md §4, and that order is the whole mechanism: it injects the id into
-// the INCOMING metadata, so common's interceptor adopts it exactly as it
+// grpc.md, Wiring, and that order is the whole mechanism: it injects the id
+// into the INCOMING metadata, so common's interceptor adopts it exactly as it
 // adopts a client-supplied one and its own request/reply records — the first
 // records of the request — already carry it. Minting inside the handlers
 // instead would leave those two records, and everything the shared chain
@@ -92,12 +93,12 @@ func serverOptions() []grpc.ServerOption {
 // Run serves the Gateway service until ctx is canceled (GW2, GW3).
 //
 // It mirrors agent/agent.go Serve: one listener, one grpc.Server carrying
-// serverOptions' two interceptor chains (grpc.md §4, behind the trace-id
+// serverOptions' two interceptor chains (grpc.md, Wiring, behind the trace-id
 // mint), a goroutine that turns ctx cancellation into GracefulStop, and
 // Serve. Shutdown is GracefulStop and nothing else: in-flight handlers
 // finish (each bounded by its client deadline and the 10 s per-STM budget of
 // EU5), new requests are refused, and there is nothing to drain — no
-// registry key to delete, no background loop to stop (§0 #3).
+// registry key to delete, no background loop to stop (GW3).
 //
 // Run closes cli as the last step of its drain, so cmd/dnv-gateway does not
 // (CM3). Startup never fails because etcd is unreachable: etcdutil.New dials

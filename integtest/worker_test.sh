@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# worker_test.sh — the `dnv-worker` integration test of doc/dnv-worker.md §14.
-# One server, a real single-node etcd, a real three-process worker fleet and
-# the fake dn/cn agents of §14.9, driven from this machine over ssh by
-# integtest/workerctl (the gateway's write path) and integtest/fakeagent.
+# worker_test.sh — the `dnv-worker` integration test of doc/dnv-worker.md,
+# Integration test plan. One server, a real single-node etcd, a real
+# three-process worker fleet and the plan's fake dn/cn agents, driven from this
+# machine over ssh by integtest/workerctl (the gateway's write path) and
+# integtest/fakeagent.
 #
 #   bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@ip
 #
-# Cases (§14.11), in order, each in its own cluster `it-<case>` and each after
-# a fleet restart (§14.10): smoke, revision, health, bitmap, reaction, drain,
+# The plan's cases, in order, each in its own cluster `it-<case>` and each
+# after a fleet restart: smoke, revision, health, bitmap, reaction, drain,
 # vote, handoff. Cleanup runs unconditionally at the start and, on success only, at
 # the end: a failing run leaves etcd's data, every log and every behavior file
-# in place and dumps the §14.13 diagnostics.
+# in place and dumps the diagnostics.
 #
 # NO SUDO anywhere: nothing in this suite needs root. Everything the script
 # creates lives under $WORK on the server, and cleanup removes exactly that.
@@ -28,7 +29,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (§14.3, §14.5, §14.6)
+# Constants
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -47,19 +48,20 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
-# §14.4/§14.6: every etcd serving dnv MUST run with --max-txn-ops at least
-# common.EtcdMaxTxnOps. The value is NOT typed here — read_constants() fills it
-# at preflight from `workerctl constants`, which prints the Go constants as
-# JSON — so the suite cannot drift from the deployment requirement it enforces.
+# Every etcd serving dnv MUST run with --max-txn-ops at least
+# common.EtcdMaxTxnOps (dnv-worker.md, Integration test plan, Topology). The
+# value is NOT typed here — read_constants() fills it at preflight from
+# `workerctl constants`, which prints the Go constants as JSON — so the suite
+# cannot drift from the deployment requirement it enforces.
 #
 # Several transactions in dnv are above etcd's default cap of 128 with a size
 # that named constants bound. The one that SIZES the requirement is
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
-# (architecture.md §8.4); the sp drain's D2 batch (§11.6) and a created-flip
-# transaction of MaxFlipCreatedPerTxn tds (RW19) are two more. Their compare
-# counts, and the factors that multiply into them, are asserted from the named
-# constants in gateway/txnbudget_test.go, not restated here.
+# (architecture.md, Storage pools); the sp drain's D2 batch (SPD10) and a
+# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19) are two more.
+# Their compare counts, and the factors that multiply into them, are asserted
+# from the named constants in gateway/txnbudget_test.go, not restated here.
 # This suite runs no gateway — `wctl put-sp` plants its pools directly — so
 # the create never happens here, and case G commits batches of the drain
 # family well below the ceiling — its widest slice is 21 groups over two DNs,
@@ -70,16 +72,17 @@ ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-worker-integtest
 
-# §14.3 ports: nine in total, none shared with the two agent suites.
+# Ports: nine in total, none shared with the two agent suites.
 ETCD_CLIENT_PORT=12379
-# common.DnvPrefix — the first field of every dnv etcd key (architecture.md §5.1).
+# common.DnvPrefix — the first field of every dnv etcd key (architecture.md,
+# Key grammar).
 DNV_PREFIX=dnv
 ETCD_PEER_PORT=12380
 DN_PORT_BASE=29600 # dn0..dn3 -> 29600..29603
 CN_PORT_BASE=29700 # cn0..cn2 -> 29700..29702
 ALL_PORTS=(12379 12380 29600 29601 29602 29603 29700 29701 29702)
 
-# §14.6 test-time constants.
+# Test-time constants (dnv-worker.md, Integration test plan, Topology).
 VOTE_INTERVAL=2
 VOTE_GRACE=6
 HEALTH_INTERVAL=1     # every health_check_conf.*_interval
@@ -96,7 +99,8 @@ WAIT_SHORT=5
 WAIT_MEMBERSHIP=20
 WAIT_SYNCUP=65
 
-# §3.6 geometry, filled by read_geometry() at preflight from `workerctl
+# The group geometry (architecture.md, Group on-leg layout: meta region, data
+# region, health block), filled by read_geometry() at preflight from `workerctl
 # geometry`, which calls model.GroupBlocks — the one implementation of the
 # formula (MD6) — at this suite's EXTENT_SIZE / BLOCK_SIZE / CHUNK_BLOCKS and
 # the ext_cnt of each group kind. Case D is the only case that reads them, and
@@ -127,7 +131,7 @@ DATA_GRP_DATA_BLOCKS=  # ext_cnt 2
 META_GRP_DATA_BLOCKS=  # ext_cnt 1
 META_BLOCKS_PER_GRP=   # META_GRP_DATA_BLOCKS * BLOCK_SIZE / THIN_META_BLOCK_SIZE
 
-# Sub-object ids the script assigns (§14.5). workerctl advances SpConf.next_id
+# Sub-object ids the script assigns. workerctl advances SpConf.next_id
 # past all of them, so a worker reaction allocates ids ABOVE these.
 TD_ID=0x10
 SS_ID=0x20
@@ -177,7 +181,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 
 log() { echo "$*" >&2; }
 
-# stage names the step for the failure report and mints the §14.10 trace id
+# stage names the step for the failure report and mints the trace id
 # `it-<case>-<step>`, which every workerctl call of the step then stamps on its
 # etcd records.
 stage() {
@@ -228,7 +232,7 @@ on_exit() {
 		log "PASS"
 	else
 		log ""
-		log "########## diagnostics (§14.13) ##########"
+		log "########## diagnostics ##########"
 		diagnostics || true
 		log ""
 		log "debris left in place on $TARGET; failing stage '$STAGE'"
@@ -240,7 +244,7 @@ on_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# Remote execution (§14.10)
+# Remote execution
 # ---------------------------------------------------------------------------
 
 # sshw echoes the command and runs it on the server as the plain user. QUIET is
@@ -254,13 +258,13 @@ sshw() {
 
 sshw_ok() { sshw "$@" || true; }
 
-# ctl is the §14.10 driver wrapper: every call carries the endpoints, the
+# ctl is the driver wrapper: every call carries the endpoints, the
 # case's cluster and the stage's trace id.
 #
 # Each argument is quoted for the REMOTE shell with printf %q before the
 # command string is built. Without that, an argument containing a space is
-# re-split by the remote shell: an etcd key is space-joined
-# (architecture.md §5.1), so `ctl get --key "dnv cdc <cid> <shard> <sp> <ss>"`
+# re-split by the remote shell: an etcd key is space-joined (architecture.md,
+# Key grammar), so `ctl get --key "dnv cdc <cid> <shard> <sp> <ss>"`
 # reached workerctl as `--key dnv` plus five stray words and died — which,
 # under `set -e` inside a command substitution, aborted the whole run.
 ctl() {
@@ -270,7 +274,7 @@ ctl() {
 		"--cluster $CLUSTER --trace-id $TRACE $quoted"
 }
 
-# rlog is the §14.10 log reader: `ssh … cat <path>`, so every assertion is
+# rlog is the log reader: `ssh … cat <path>`, so every assertion is
 # parsed by the driver's jq and the server needs no jq of its own. A missing
 # file yields empty output rather than a failure, because `set -o pipefail`
 # would otherwise turn "the log does not exist yet" into a script abort inside
@@ -356,7 +360,7 @@ wcount_ge() { # <n> <filter> [jq args…]
 }
 
 # ---------------------------------------------------------------------------
-# Polling (§14.10)
+# Polling (dnv-worker.md, Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
 # wait_until polls twice a second until the command exits 0, else dies.
@@ -397,7 +401,7 @@ assert_none_for() { # <secs> <label> <cmd…>
 }
 
 # ---------------------------------------------------------------------------
-# Ownership table (§14.10)
+# Ownership table
 # ---------------------------------------------------------------------------
 
 # running_workers lists the workers this script believes are alive, in w1..w4
@@ -442,8 +446,8 @@ owners_from() { # <role> -> "<shard> <worker>" lines, shard-sorted
 	' "$OWN_FILE" | sort
 }
 
-# owners is the §14.10 helper: the shards each LIVE worker currently holds for
-# one role, taken fresh.
+# owners is the ownership helper: the shards each LIVE worker currently holds
+# for one role, taken fresh.
 owners() { # <role>
 	local live=()
 	mapfile -t live < <(running_workers)
@@ -455,9 +459,9 @@ owner_of() { # <role> <shard>
 	owners "$1" | awk -v s="$2" '$1 == s { print $2 }'
 }
 
-# assert_owners is §14.7 step 5: for every role, the 256 shards are covered
-# exactly once, by exactly the expected workers, and no worker holds fewer than
-# <min>.
+# assert_owners checks the ownership table: for every role, the 256 shards are
+# covered exactly once, by exactly the expected workers, and no worker holds
+# fewer than <min>.
 assert_owners() { # <min> <worker…>
 	local min=$1
 	shift
@@ -482,7 +486,8 @@ assert_owners() { # <min> <worker…>
 }
 
 # ---------------------------------------------------------------------------
-# Seeds, requests and other log queries (§14.10)
+# Seeds, requests and other log queries (dnv-worker.md, Integration test plan,
+# What a pass means)
 # ---------------------------------------------------------------------------
 
 # seed_of is the seed of the LATEST `worker registered` record — a fenced
@@ -579,7 +584,7 @@ ts_lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
 ts_ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a >= b) }'; }
 
 # ---------------------------------------------------------------------------
-# Node naming (§14.5)
+# Node naming
 # ---------------------------------------------------------------------------
 
 dn_dir() { printf 'dn%d' $(($1 - 1)); }
@@ -624,7 +629,8 @@ put_cn() { # <id> <free-ext> [extra…]
 }
 
 # ---------------------------------------------------------------------------
-# Behaviour and state files of the fakes (§14.9)
+# The fakes' behaviour and state files (dnv-worker.md, Integration test plan,
+# The fake agent)
 # ---------------------------------------------------------------------------
 
 # set_behavior writes one fake's behavior.json from a here-doc on stdin. The
@@ -641,11 +647,12 @@ set_behavior() { # <agent>   (JSON on stdin)
 
 clear_behavior() { set_behavior "$1" <<<'{}'; }
 
-# reset_state empties one fake's state.json the same way. The revision gate of
-# §14.9 is per object ("dn", "cn", "side …", "cntlr …") and is NOT scoped by
-# cluster, so a fake that ended case S holding dn revision 2 would reject case
-# A's revision-1 syncup as stale. The per-case reset is what keeps every case
-# independent; it runs while the fleet is stopped, so no request is in flight.
+# reset_state empties one fake's state.json the same way. The fakes' revision
+# gate (dnv-worker.md, Integration test plan, The fake agent) is per object
+# ("dn", "cn", "side …", "cntlr …") and is NOT scoped by cluster, so a fake that
+# ended case S holding dn revision 2 would reject case A's revision-1 syncup as
+# stale. The per-case reset is what keeps every case independent; it runs while
+# the fleet is stopped, so no request is in flight.
 reset_state() { # <agent>
 	ssh "${SSH_OPTS[@]}" "$TARGET" \
 		"printf '%s' '{\"objects\":{}}' > $WORK/$1/state.json.tmp &&
@@ -670,7 +677,7 @@ state_revision() { # <agent> <object key>
 }
 
 # ---------------------------------------------------------------------------
-# Process control (§14.3): launch with >> so an external truncation resets the
+# Process control: launch with >> so an external truncation resets the
 # write offset, record the pid from $!, and signal by that pid.
 # ---------------------------------------------------------------------------
 
@@ -751,7 +758,7 @@ worker_stopped_since() { # <w> <records held before the signal>
 
 # stop_worker is the CM5 graceful stop: SIGTERM, then wait for BOTH the
 # `worker stopping` record and the process's exit before anybody restarts it,
-# so the pid/port bookkeeping never drifts (§14.10).
+# so the pid/port bookkeeping never drifts.
 stop_worker() { # <w>
 	[ "${RUNNING[$1]-}" = 1 ] || return 0
 	local stops
@@ -768,7 +775,8 @@ start_fake() { # <kind dn|cn> <dir> <addr>
 }
 
 # ---------------------------------------------------------------------------
-# Per-case reset (§14.10 fleet restart)
+# Per-case reset (the fleet restart of dnv-worker.md, Integration test plan,
+# Cases)
 # ---------------------------------------------------------------------------
 
 truncate_logs() {
@@ -787,8 +795,9 @@ truncate_logs() {
 # step 2 outright — the two `revision worker stopped` records it counted for
 # the dn role belonged to it-smoke's DNs, released when w1 handed shard 00 over
 # during this case's grace window — and every other count-based assertion
-# carried the same trap. §14.11 gives each case its own cluster precisely so
-# nothing leaks between them; deleting the old keys is what makes that true.
+# carried the same trap. The plan gives each case its own cluster precisely so
+# nothing leaks between them (dnv-worker.md, Integration test plan, Cases);
+# deleting the old keys is what makes that true.
 #
 # Safe because the workers are down: their registrations go with the wipe and
 # are re-put on restart.
@@ -805,12 +814,13 @@ reset_fakes() {
 	done
 }
 
-# fleet_restart is §14.10's "before every case": stop every worker, wipe the
-# per-case state the fakes and the logs carry, start w1..w3 again, wait one
-# grace window and re-assert the ownership table.
+# fleet_restart is the fleet restart before every case (dnv-worker.md,
+# Integration test plan, Cases): stop every worker, wipe the per-case state the
+# fakes and the logs carry, start w1..w3 again, wait one grace window and
+# re-assert the ownership table.
 fleet_restart() { # <case name>
 	CASE=$1
-	stage restart "fleet restart before case $1 (§14.10)"
+	stage restart "fleet restart before case $1"
 	local w
 	for w in "${WORKER_DIRS[@]}"; do
 		stop_worker "$w"
@@ -826,7 +836,7 @@ fleet_restart() { # <case name>
 }
 
 # ---------------------------------------------------------------------------
-# Cleanup (§14.12)
+# Cleanup (dnv-worker.md, Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 cleanup_script() {
@@ -870,7 +880,7 @@ cleanup() {
 }
 
 # ---------------------------------------------------------------------------
-# Diagnostics (§14.13)
+# Diagnostics (dnv-worker.md, Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 diagnostics() {
@@ -928,7 +938,7 @@ diagnostics() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (§14.4)
+# Preflight
 # ---------------------------------------------------------------------------
 
 need_local() {
@@ -952,7 +962,7 @@ resolve_jq() {
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
-# fetch_etcd implements the download-and-verify path of §14.2. It is
+# fetch_etcd implements the download-and-verify path. It is
 # idempotent: a cached tarball whose sha256 already matches the pin is never
 # re-downloaded, so the server needs no internet and a repeat run costs
 # nothing, while a fresh checkout still works.
@@ -986,8 +996,8 @@ fetch_etcd() {
 # carry them exits 2 on `unknown subcommand`, which is one thing the dies
 # below report; the other is the driver itself, since the binary they run is
 # cross-built GOOS=linux GOARCH=amd64 like everything else preflight_driver
-# builds and will not exec on a driver that is not the linux/amd64 host §14.3
-# assumes.
+# builds and will not exec on a driver that is not the linux/amd64 host the
+# suite assumes.
 read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
@@ -1016,10 +1026,10 @@ read_geometry() {
 	local data meta value
 	data=$(geometry_json 2) ||
 		die "\`workerctl geometry --ext-cnt 2\` failed: this suite reads the" \
-			"§3.6 geometry from it and must not re-derive it"
+			"group geometry from it and must not re-derive it"
 	meta=$(geometry_json 1) ||
 		die "\`workerctl geometry --ext-cnt 1\` failed: this suite reads the" \
-			"§3.6 geometry from it and must not re-derive it"
+			"group geometry from it and must not re-derive it"
 	# meta_blocks is taken from the DATA group because that is the only group
 	# case D asserts it on.
 	GRP_META_BLOCKS=$(jq_of "$data" .meta_blocks)
@@ -1036,7 +1046,7 @@ read_geometry() {
 	done
 	META_BLOCKS_PER_GRP=$((META_GRP_DATA_BLOCKS * BLOCK_SIZE /
 		THIN_META_BLOCK_SIZE))
-	log "  §3.6 geometry: meta_blocks $GRP_META_BLOCKS," \
+	log "  group geometry: meta_blocks $GRP_META_BLOCKS," \
 		"data_blocks $DATA_GRP_DATA_BLOCKS (data, ext_cnt 2) /" \
 		"$META_GRP_DATA_BLOCKS (meta, ext_cnt 1);" \
 		"meta blocks per meta group $META_BLOCKS_PER_GRP"
@@ -1066,7 +1076,7 @@ preflight_driver() {
 }
 
 # preflight_server runs AFTER the start-of-run cleanup: the port check is only
-# meaningful once a crashed prior run's processes are gone (§14.4).
+# meaningful once a crashed prior run's processes are gone.
 preflight_server() {
 	STAGE="preflight (server)"
 	log "=== preflight: server"
@@ -1091,7 +1101,7 @@ preflight_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup (§14.7)
+# Setup
 # ---------------------------------------------------------------------------
 
 etcd_reachable() {
@@ -1110,7 +1120,7 @@ ports_up() { # <port…>
 setup() {
 	CASE=setup
 
-	stage layout "create the §14.3 tree and ship the five binaries"
+	stage layout "create the work tree and ship the five binaries"
 	local dirs=("bin" "etcd" "${WORKER_DIRS[@]}" "${DN_DIRS[@]}" "${CN_DIRS[@]}")
 	sshw "mkdir -p $(printf "$WORK/%s " "${dirs[@]}")"
 	SETUP_DONE=1
@@ -1204,7 +1214,7 @@ side_epoch() { # <sp> <slice> <side id>
 }
 
 # nonzero_epochs counts the err_epoch fields of a workerctl reply that are NOT
-# 0, at any depth — the "err_epoch 0 everywhere" form of §14.11 B8, which a
+# 0, at any depth — the "err_epoch 0 everywhere" form of case B step 8, which a
 # spot check of three named objects cannot give. protojson renders uint64 as a
 # JSON string, so the compare goes through tostring like every numeric one here.
 nonzero_epochs() { # <json>
@@ -1344,7 +1354,7 @@ thin_pool_line() { # <used_meta> <total_meta> <used_data> <total_data>
 }
 
 # ---------------------------------------------------------------------------
-# Case S — smoke (§14.11 S)
+# Case S — smoke (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 w1_owns_everything() {
@@ -1529,7 +1539,7 @@ sp_rev_changed() { # <sp id> <old revision>
 }
 
 # ---------------------------------------------------------------------------
-# Case A — revision (§14.11 A)
+# Case A — revision (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_revision() {
@@ -1546,7 +1556,7 @@ case_revision() {
 	wait_until "$WAIT_SHORT" "dn0: CheckDn carrying revision 2" \
 		req_ge 1 dn0 CheckDn '(.revision | tostring) == "2"'
 
-	stage 2 "move-dn: a put, never a delete (§5.5)"
+	stage 2 "move-dn: a put, never a delete"
 	local closes_before syncups_dn0
 	closes_before=$(stream_closes dn0 CheckDn)
 	syncups_dn0=$(reqs dn0 SyncupDn)
@@ -1643,7 +1653,7 @@ EOF
 	stage 6 "bump-rev on an SP re-fans every child"
 	# dn 1's rev key is gone and its DnConf still owns dn1's endpoint, so the
 	# SP's side goes on a THIRD node: dn 3 at the fake dn2, which keeps the
-	# §14.5 dn_id <-> fake mapping intact (a DN 2 would have to go either on
+	# suite's dn_id <-> fake mapping intact (a DN 2 would have to go either on
 	# dn2, breaking that mapping, or on dn1, whose endpoint dn 1's DnConf owns).
 	put_dn 3 8
 	ctl put-sp --name sp0 --id 1 --shard 00 --slots 0,1 --level 0 \
@@ -1685,7 +1695,7 @@ reqs_gt() { # <n> <agent> <method> [<filter>] [jq args…]
 }
 
 # ---------------------------------------------------------------------------
-# Case B — health (§14.11 B)
+# Case B — health (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 dn_err_epoch_set() { [ "$(dn_err_epoch "$1")" != 0 ]; }
@@ -1780,7 +1790,7 @@ EOF
 	assert_none_for 3 "err_epoch set by a PROVISIONING row" dn_err_epoch_set 1
 	assert_eq "$(dn_capacity_key)" "$capkey" "the dn_capacity key under PROVISIONING"
 
-	stage 7 "a plain ERROR meta row sets err_epoch (§9.4)"
+	stage 7 "a plain ERROR meta row sets err_epoch"
 	set_behavior dn0 <<'EOF'
 {"objects": {"dn": {"rows": {"meta_info": {"status": "ERROR",
   "details": "disk lacks Write Zeroes"}}}}}
@@ -1790,8 +1800,8 @@ EOF
 	wait_until "$WAIT_SHORT" "dn 1 err_epoch cleared again" dn_err_epoch_clear 1
 
 	stage 8 "the SP object table: cntlr, leg and side err_epochs"
-	# The thresholds are deliberately NOT the §14.6 reaction values here: this
-	# case injects the very ERROR rows §14.11 D uses as reaction triggers, and
+	# The thresholds are deliberately NOT the suite's reaction values here: this
+	# case injects the very ERROR rows case D uses as reaction triggers, and
 	# an AR5 failover or an AR8 spare would bump SpRev — which step 8 asserts
 	# never happens ("health never bumps"). Case D is where the small
 	# thresholds belong.
@@ -1872,7 +1882,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case C — bitmap (§14.11 C)
+# Case C — bitmap (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 # push_time prints the timestamp of the n-th PushMigrBitmap / PushCloneBitmap
@@ -1935,13 +1945,14 @@ case_bitmap() {
 	# legal target of a migration chunk (BM4) and dn0, the source, gets none.
 	ctl put-migr --sp sp0 --migr "m0:3:1:3" --dst-dn 2 --dst-slot 1
 	ctl put-clone --sp sp0 --name c0 --id "$CLONE_ID" --dst-td td0 --src-slice-cnt 2
-	# Hold the clone pushes back while the three chunks are seeded: the
-	# §14.9 chunk_id_list lever forces cn0 to report exactly the pairs about
-	# to be written as already applied, so BM2's diff stays empty. Seeded one
-	# at a time without it, each chunk would be pushed as it appeared and the
-	# observed order would be the WRITE order — which says nothing about
-	# BM3's. Stage 3 clears the lever and the whole clone becomes missing at
-	# once, which is what makes the lexicographic order observable.
+	# Hold the clone pushes back while the three chunks are seeded: the fake's
+	# chunk_id_list lever (dnv-worker.md, Integration test plan, The fake agent)
+	# forces cn0 to report exactly the pairs about to be written as already
+	# applied, so BM2's diff stays empty. Seeded one at a time without it, each
+	# chunk would be pushed as it appeared and the observed order would be the
+	# WRITE order — which says nothing about BM3's. Stage 3 clears the lever and
+	# the whole clone becomes missing at once, which is what makes the
+	# lexicographic order observable.
 	set_behavior cn0 <<'EOF'
 {"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0", "0:1", "1:0"]}}}
 EOF
@@ -1957,7 +1968,7 @@ EOF
 	assert_eq "$(key_cnt clone_bitmap)" 3 \
 		"c0 chunk keys after (0,0), (0,1), (1,0)"
 	# The output key follows the record: a Clone carries no chunk count, so a
-	# clone put emits no bm_cnt at all (§14.8). The migration half is asserted
+	# clone put emits no bm_cnt at all. The migration half is asserted
 	# below, so the two directions of the same branch are both pinned.
 	assert_eq "$("$JQ" -r 'has("bm_cnt")' <<<"$clone_put")" false \
 		"a clone put-bitmap must emit no bm_cnt"
@@ -1969,14 +1980,14 @@ EOF
 		reqs_gt 0 cn0 PushCloneBitmap
 	local migr0_out
 	migr0_out=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 0 --hex aa00ff)
-	# A MIGRATION's parent does carry the counter, and put-bitmap raises it
-	# (§14.8) — the other direction of the clone assert above.
+	# A MIGRATION's parent does carry the counter, and put-bitmap raises it —
+	# the other direction of the clone assert above.
 	assert_eq "$("$JQ" -r '.bm_cnt' <<<"$migr0_out")" 1 \
 		"a migr put-bitmap emits the parent's raised bm_cnt"
 	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 1 --hex bb11ee
 	# --src-slice-idx addresses a CLONE chunk; a migration's chunks name no
 	# source slice, so a non-zero one with --kind migr is a driver usage
-	# error (§14.8) and writes nothing — it is refused on the flags alone,
+	# error and writes nothing — it is refused on the flags alone,
 	# before etcd is opened, so it cannot disturb the pushes step 2 counts.
 	if ctl put-bitmap --sp sp0 --kind migr --name m0 --src-slice-idx 1 \
 		--bm-idx 9 --hex ff >/dev/null 2>&1; then
@@ -2155,7 +2166,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case D — reaction (§14.11 D)
+# Case D — reaction (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 cntlr_is_primary() { [ "$(cntlr_field "$1" "$2" primary)" = true ]; }
@@ -2165,10 +2176,10 @@ cntlr_not_primary() { [ "$(cntlr_field "$1" "$2" primary)" = false ]; }
 # false rather than a missing key.
 cntlr_settled() { [ "$(cntlr_field "$1" "$2" settling)" = false ]; }
 
-# settled_cnt counts the §12 `cntlr settled` records of one cntlr — the
-# worker's own statement that it observed the cntlr clean as primary, its
-# stack built, at the revision it drives (HL2). The sp_id and the pointer's
-# cntlr_id are JSON numbers in the worker log, hence tostring.
+# settled_cnt counts the `cntlr settled` records (dnv-worker.md, Log records)
+# of one cntlr — the worker's own statement that it observed the cntlr clean
+# as primary, its stack built, at the revision it drives (HL2). The sp_id and
+# the pointer's cntlr_id are JSON numbers in the worker log, hence tostring.
 settled_cnt() { # <sp id> <cntlr id>
 	wcount 'select(.msg == "cntlr settled")
 		| select((.sp_id | tostring) == $sp
@@ -2180,10 +2191,10 @@ settled_ge() { # <sp id> <cntlr id> <n>
 	count_ge "$3" settled_cnt "$1" "$2"
 }
 
-# cntlr_gone is §14.11 D3's "C1 gone from cntlr_id_list". It reads the LIST
-# rather than probing the Cntlr key: `! ctl get-cntlr …` cannot tell "the key
-# is not there" from "the read failed", so a dropped ssh would report the
-# cntlr gone and the poll would end on it.
+# cntlr_gone is case D step 3's "C1 gone from cntlr_id_list". It reads the
+# LIST rather than probing the Cntlr key: `! ctl get-cntlr …` cannot tell
+# "the key is not there" from "the read failed", so a dropped ssh would report
+# the cntlr gone and the poll would end on it.
 cntlr_gone() { # <sp> <cntlr id>
 	local ids
 	ids=$(ctl get-sp --sp "$1" | "$JQ" -r '.sp_conf.cntlr_id_list[]?') || return 1
@@ -2399,7 +2410,7 @@ EOF
 	assert_ge "$(cn_rev 3)" $((cn3_rev_before + 1)) "cn 3 CnRev bumped"
 	# The CdcEntry was rewritten in the replacement's own STM. Each node's
 	# NvmeTrConf carries that node's OWN port as tr_svc_id (workerctl), so the
-	# list is attributable per CN and §14.11 D3's "lists cn 2 and cn 3, not
+	# list is attributable per CN and step 3's "lists cn 2 and cn 3, not
 	# cn 1" is checkable as a SET. The expectation is also derived from what
 	# the SP actually holds, because put-ss appends one entry per cntlr with
 	# no dedupe: the two must agree.
@@ -2466,7 +2477,7 @@ EOF
 	prim_dir=$(dir_of_addr "$prim_addr")
 	log "  sp0's primary is cntlr $prim_id on $prim_addr ($prim_dir)"
 	ctl set-lwm --sp sp0 --pct "$LWM"
-	# Exactly two eligible DNs for a two-leg group (§14.5).
+	# Exactly two eligible DNs for a two-leg group.
 	ctl set-free dn --id 3 --free-ext 8
 	ctl set-free dn --id 4 --free-ext 8
 	ctl set-free dn --id 1 --free-ext 0
@@ -2522,7 +2533,9 @@ EOF
 	# PENDING (AR6, stateless). The reported total is still 125 while the
 	# slice's data groups excluding the newest already total 125, so
 	# 125 <= 125 and no second grow may start. (The doc's illustrative
-	# 600/2048 numbers cannot express this at the real §3.6 geometry.)
+	# 600/2048 numbers cannot express this at the real group geometry of
+	# architecture.md, Group on-leg layout: meta region, data region, health
+	# block.)
 	grows=$(reaction_cnt grow_data)
 	local pendings
 	pendings=$(reaction_skip_cnt grow_data grow_pending)
@@ -2615,7 +2628,7 @@ EOF
 	# is identified against this set rather than by reading spare_leg_list[0]:
 	# the fakes provision instantly and the primary reports the spare OK by
 	# default, so AR8 step 1's switch can land before the assertion runs, and
-	# spare_leg_list[0] is then the PARKED OLD LEG (§0 item 17), not the spare.
+	# spare_leg_list[0] is then the PARKED OLD LEG (AR8 step 4), not the spare.
 	legs_before=$(group_legs sp0 1 data 2 | awk '{ print $1 }' | sort -n | tr '\n' ' ')
 	set_behavior "$prim_dir" <<EOF
 {"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {"leg_id_to_leg.3":
@@ -2843,18 +2856,18 @@ EOF
 	# The demoted cntlr is now an unhealthy STANDBY well past the 4 s
 	# cntlr threshold, so AR7 would replace it on the very next pass — the
 	# only reason it does not is that cn 1, the sole candidate (the old CN is
-	# black-listed and the other cntlr's CN is excluded by §6.4), still has a
-	# zero budget from step 4. So the order is load-bearing: disable FIRST,
-	# then hand cn 1 a budget. The assertion that follows then really tests
-	# AR3's "a disabled cntlr is never replaced" and not an empty candidate
-	# set.
+	# black-listed and the other cntlr's CN is excluded by architecture.md,
+	# Finding CN candidates), still has a zero budget from step 4. So the
+	# order is load-bearing: disable FIRST, then hand cn 1 a budget. The
+	# assertion that follows then really tests AR3's "a disabled cntlr is
+	# never replaced" and not an empty candidate set.
 	ctl set-cntlr --sp sp0 --id "$prim_id" --disabled=true
 	ctl set-free cn --id 1 --free-ext 64
 	replaces=$(reaction_cnt replace_cntlr)
 	assert_none_for 6 "a replacement of the disabled standby" \
 		reaction_ge $((replaces + 1)) replace_cntlr
 
-	stage 11 "AR5 disabled primary: the flag alone is the trigger (§8.6)"
+	stage 11 "AR5 disabled primary: the flag alone is the trigger"
 	# Step 10 leaves sp0 with the step-3 replacement as a healthy primary and
 	# ONE other cntlr: the cntlr it demoted, now disabled and still unhealthy.
 	# AR5's candidate rule is unchanged — a disabled or unhealthy cntlr is
@@ -2877,7 +2890,7 @@ EOF
 	log "  sp0's primary is cntlr $dis_id; C$standby_id is the enabled healthy standby"
 	standby_syncups=$(reqs "$standby_dir" SyncupCntlr '.cntlr.primary == true')
 	failovers=$(reaction_cnt failover)
-	# The disable is the §14.8 driver's direct etcd write — what the gateway's
+	# The disable is workerctl's direct etcd write — what the gateway's
 	# UpdateCntlrEnabled does to the store: `disabled` plus one SpRev bump,
 	# which is what wakes the sp-worker. Nothing here is unhealthy, so the
 	# err_epoch trigger cannot fire at ANY threshold and the flag is the only
@@ -2906,11 +2919,12 @@ EOF
 	# C2 on cn 2 (fake cn1) standby, one RedundNone data group on dn 4.
 	#
 	# cn 3 gets a zero budget first, which takes AR7 out of the picture for
-	# sp2: cn 1 and cn 2 already host its cntlrs (§6.4), so cn 3 is its only
-	# replacement candidate. Without that, C2 — an unhealthy STANDBY already
-	# past cntlr_unhealthy the moment the fail-back below demotes it — would
-	# race its own err_epoch clear against the next pass's AR7. sp0's cntlr on
-	# cn 3 is disabled and sp1's is healthy, so neither needs cn 3's budget.
+	# sp2: cn 1 and cn 2 already host its cntlrs (architecture.md, Finding CN
+	# candidates), so cn 3 is its only replacement candidate. Without that, C2
+	# — an unhealthy STANDBY already past cntlr_unhealthy the moment the
+	# fail-back below demotes it — would race its own err_epoch clear against
+	# the next pass's AR7. sp0's cntlr on cn 3 is disabled and sp1's is
+	# healthy, so neither needs cn 3's budget.
 	ctl set-free cn --id 1 --free-ext 64
 	ctl set-free cn --id 2 --free-ext 64
 	ctl set-free cn --id 3 --free-ext 0
@@ -2922,11 +2936,11 @@ EOF
 		--group 1:1:data:1:none \
 		--leg 1:1:0 \
 		--side 1:1:4:0
-	# put-sp writes C1 settling, as CreateStoragePool does (§14.8). The
-	# worker's first round may already have settled it by the time this read
-	# lands, so it is logged, not asserted: the `cntlr settled` record below is
-	# the proof, because the worker writes one only for a record it read as
-	# settling.
+	# put-sp writes C1 settling, as CreateStoragePool does (dnv-worker.md,
+	# Integration test plan, The driver). The worker's first round may already
+	# have settled it by the time this read lands, so it is logged, not
+	# asserted: the `cntlr settled` record below is the proof, because the
+	# worker writes one only for a record it read as settling.
 	log "  sp2 C1 settling right after put-sp: $(cntlr_field sp2 1 settling)"
 	wait_until "$WAIT_SYNCUP" "sp2: the side provisioned" all_provisioned sp2 1
 	wait_until "$WAIT_SYNCUP" "sp2: cntlr settled for C1 (the creation settle)" \
@@ -2937,9 +2951,10 @@ EOF
 		"sp2 C2, a standby, is never settling"
 
 	log "  12.2: a row that bites only as primary, planted on the standby"
-	# §14.9 when_primary: the fake reports a standby's pool rows too, so an
-	# ungated ERROR row would make C2 unhealthy — and no failover candidate —
-	# before the failover this step needs.
+	# The fake's when_primary (dnv-worker.md,
+	# Integration test plan, The fake agent): the fake reports a standby's pool
+	# rows too, so an ungated ERROR row would make C2 unhealthy — and no
+	# failover candidate — before the failover this step needs.
 	set_behavior cn1 <<'EOF'
 {"objects": {"cntlr 3:2": {"rows": {"slice_id_to_dm_pool.1":
   {"status": "ERROR", "details": "settling test", "when_primary": true}}}}}
@@ -3029,8 +3044,8 @@ reaction_skip_ge() { # <n> <kind> <reason>
 }
 
 # g2_repair_progressed reports whether ANY further AR8 step ran on sp0's data
-# group G2 — another switch, another allocation, or another parked leg. §14.11
-# case D step 7's "no further repair of L3" is all three.
+# group G2 — another switch, another allocation, or another parked leg. The
+# "no further repair of L3" of case D step 7 is all three.
 g2_repair_progressed() { # <spare_switch cnt> <spare_create cnt> <spare cnt>
 	if count_gt "$1" reaction_cnt spare_switch; then return 0; fi
 	if count_gt "$2" reaction_cnt spare_create; then return 0; fi
@@ -3053,7 +3068,7 @@ leg_in_list() { # <sp> <slice> <meta|data> <grp id> <leg id>
 }
 
 # ---------------------------------------------------------------------------
-# Case E — vote (§14.11 E)
+# Case E — vote (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 membership_committed() { # <w> <seed> <state> [role]
@@ -3119,8 +3134,8 @@ worker_not_listed() { # <seed>
 }
 
 # ---------------------------------------------------------------------------
-# Case G — drain (§14.11 G, dnv-worker.md §11.6): the sp coordinator tears a
-# LATCHED storage pool down in bounded steps
+# Case G — drain (dnv-worker.md, Integration test plan, Cases; The sp drain):
+# the sp coordinator tears a LATCHED storage pool down in bounded steps
 # ---------------------------------------------------------------------------
 #
 # The gateway suite owns the LATCH — that `delete-sp` writes `deleting = true`,
@@ -3149,9 +3164,10 @@ drain_finished() {
 	[ "$cnt" = 0 ]
 }
 
-# drained_records counts the §7 `sp drained` records across every worker that
-# has run in this case: the drain may finish under a different owner than the
-# one that started it, and either way exactly one final STM commits.
+# drained_records counts the `sp drained` records across every worker that
+# has run in this case (dnv-worker.md, Log records): the drain may finish
+# under a different owner than the one that started it, and either way
+# exactly one final STM commits.
 drained_records() { wcount 'select(.msg == "sp drained")'; }
 drain_step_records() { # <phase>
 	wcount 'select(.msg == "sp drain step") | select(.phase == $p)' --arg p "$1"
@@ -3224,7 +3240,7 @@ case_drain() {
 	for i in 1 2; do put_cn "$i" 64; done
 	drain_put_sp sp0 1
 	# Each DN carries four sides of 1+2+1+2 = 6 extents; each CN reserves the
-	# SP's whole footprint, also 6 (§6.5).
+	# SP's whole footprint, also 6 (architecture.md, Per-operation allocation).
 	assert_eq "$(dn_free 1)" "58" "dn 1 free after the fixture"
 	assert_eq "$(cn_free 1)" "58" "cn 1 free after the fixture"
 	wait_until "$WAIT_SYNCUP" "dn0: SyncupSide for side 1" \
@@ -3327,11 +3343,11 @@ case_drain() {
 	drain_assert_restored 64 64 4
 
 	stage 5 "the CLONE drain: a latched clone leaves the plan and its keys go"
-	# The clone drain (§11.7) alongside the sp drain, in the same case because
-	# they share the coordinator and the fixture machinery. 65 chunks is one
-	# more than MaxDelBmPerTxn, so the drain provably needs TWO batches: the
-	# bound is what makes a batch's size independent of the clone's shape, and
-	# a single-batch fixture could not tell the two apart.
+	# The clone drain (CLD1 to CLD12) alongside the sp drain, in the same case
+	# because they share the coordinator and the fixture machinery. 65 chunks
+	# is one more than MaxDelBmPerTxn, so the drain provably needs TWO batches:
+	# the bound is what makes a batch's size independent of the clone's shape,
+	# and a single-batch fixture could not tell the two apart.
 	drain_put_sp sp3 4
 	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 10737418240 >/dev/null
 	ctl put-clone --sp sp3 --name c0 --id "$CLONE_ID" --dst-td td0 \
@@ -3672,7 +3688,7 @@ case_vote() {
 		1 --arg s "$seed4_now")
 	term_latency=$(ts_delta "$term_commit" "$term_at")
 	log "  SIGTERM -> nonmember commit: ${term_latency}s"
-	# The bounds are DERIVED here, exactly as §14.11 E step 6 states them.
+	# The bounds are DERIVED here, from the rules this step tests (CM5, VW3).
 	#
 	# SIGTERM deletes the registrations at once (CM5), so a peer sees the
 	# disappear immediately and commits one grace window later:
@@ -3683,7 +3699,7 @@ case_vote() {
 	#     2*VOTE_INTERVAL + VOTE_GRACE - (time since the victim's last put)
 	# and the victim heartbeats every VOTE_INTERVAL, so the true window is
 	#     [VOTE_INTERVAL + VOTE_GRACE, 2*VOTE_INTERVAL + VOTE_GRACE]
-	# = [8, 10] s at the §14.6 timers. Where inside that window a run lands
+	# = [8, 10] s at this suite's timers. Where inside that window a run lands
 	# depends on where the kill fell in the victim's heartbeat cycle — one
 	# landing just BEFORE the next heartbeat produced 8.372 s here — so the
 	# floor asserted below is VOTE_INTERVAL + VOTE_GRACE and the ceiling
@@ -3770,12 +3786,13 @@ case_vote() {
 		die "w3 owned a shard under the new seed before releasing the old ones"
 
 	stage 8 "w2 and w4 stay stopped until the next fleet restart"
-	# §14.11 E8 leaves w2 and w4 to "the fleet restart of the next case", and
-	# §14.10's fleet restart starts w1 w2 w3 — the §14.3 baseline. So w2 comes
-	# back and w4 deliberately does NOT: w4 is case E's own extra worker, and
-	# every later case asserts its ownership tables over the three-worker
-	# fleet. fleet_restart's stop loop covers w4 anyway (it is a no-op for a
-	# worker this script already knows is down).
+	# This step leaves w2 and w4 to the fleet restart of the next case (VW7),
+	# and that restart starts w1 w2 w3, the three-worker baseline of
+	# dnv-worker.md, Integration test plan, Topology. So w2 comes back and w4
+	# deliberately does NOT: w4 is case E's own extra worker, and every later
+	# case asserts its ownership tables over the three-worker fleet.
+	# fleet_restart's stop loop covers w4 anyway (it is a no-op for a worker
+	# this script already knows is down).
 	log "  leaving w2 and w4 stopped; the next fleet restart returns to w1 w2 w3"
 }
 
@@ -3838,7 +3855,7 @@ recent_seeds() { # <agent> <method> <cutoff epoch>
 }
 
 # ---------------------------------------------------------------------------
-# Case F — handoff (§14.11 F)
+# Case F — handoff (dnv-worker.md, Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_handoff() {
@@ -3972,8 +3989,9 @@ EOF
 		flip_gt "$flips" provisioned
 
 	stage 3 "both sides released together: one flip per side, one bump per STM"
-	# §14.11 F2 asks for "exactly one flip record and SpRev advanced by
-	# exactly one" when both sides finish together, but RW18 only says several
+	# The handoff case (dnv-worker.md, Integration test plan, Cases) asks for
+	# "exactly one flip record and SpRev advanced by exactly one" when both
+	# sides finish together, but RW18 only says several
 	# sides reported within one round MAY share one STM — and the coordinator
 	# logs one record per side it WROTE, all carrying that STM's revision. So
 	# the batched round is run (step 2 releases one side at a time and never

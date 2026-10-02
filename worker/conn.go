@@ -19,7 +19,7 @@ import (
 type connCache struct {
 	// dial builds one connection. It is a field so the unit tests can dial a
 	// bufconn listener instead of a real endpoint; production uses
-	// dialAgent, which installs the grpc.md §4 chain options.
+	// dialAgent, which installs the chain options of grpc.md, Wiring.
 	dial func(addrPort string) (*grpc.ClientConn, error)
 
 	mu      sync.Mutex
@@ -41,7 +41,7 @@ func newConnCache() *connCache {
 }
 
 // dialAgent opens one agent connection with the chain options every dnv
-// client connection MUST carry (grpc.md §4): insecure transport plus the
+// client connection MUST carry (grpc.md, Wiring): insecure transport plus the
 // unary and stream client interceptors, which propagate the RW10 trace id and
 // log every message.
 //

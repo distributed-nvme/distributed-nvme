@@ -30,7 +30,7 @@ const (
 	// reads are served, writes fail with an IO error.
 	// Enforced on the CN only, by a write-failing table on the
 	// namespace device — never by a bdev read-only flag, and never
-	// on the DN (architecture.md §11.7, [D11]).
+	// on the DN (architecture.md, SpLevel; [D11]).
 	SpLevel_SP_LEVEL_READONLY SpLevel = 16
 	// Do not create all dm-clone for clones
 	// and include all in SP_LEVEL_READONLY
@@ -461,7 +461,7 @@ type DmPoolConf struct {
 	DataBlockSize uint64                 `protobuf:"varint,1,opt,name=data_block_size,json=dataBlockSize,proto3" json:"data_block_size,omitempty"`
 	// Thin pool low water mark.
 	// 0 means "unset" and is resolved once, on the
-	// create request (architecture.md §7): to the
+	// create request (architecture.md, Common validation): to the
 	// cluster's stored value for a storage pool,
 	// else to DefaultPoolLowWatermarkPct. A 0 read
 	// back out of etcd is refused as an invalid conf.
@@ -3294,11 +3294,11 @@ type ThinDevice struct {
 	Size  uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
 	// created is set exactly once by the sp-worker, when a cntlr has
 	// reported this td's thin volume RES_STATUS_OK in every slice of the SP
-	// (§10.3); it is never cleared. It gates snapshot creation and origin
-	// deletion (§8.7) and tells the cn agent that the ids exist in every
-	// slice pool, so no create_thin/create_snap is ever sent for this td
-	// again (CN14; the delete sent when the td leaves td_list stays
-	// ungated).
+	// (architecture.md, sp role); it is never cleared. It gates snapshot
+	// creation and origin deletion (architecture.md, Thin devices) and tells
+	// the cn agent that the ids exist in every slice pool, so no
+	// create_thin/create_snap is ever sent for this td again (CN14; the
+	// delete sent when the td leaves td_list stays ungated).
 	Created       bool `protobuf:"varint,5,opt,name=created,proto3" json:"created,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3459,13 +3459,14 @@ type Clone struct {
 	DstTdId       uint64                 `protobuf:"varint,8,opt,name=dst_td_id,json=dstTdId,proto3" json:"dst_td_id,omitempty"`
 	DmCloneConf   *DmCloneConf           `protobuf:"bytes,9,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
 	AutoResume    bool                   `protobuf:"varint,10,opt,name=auto_resume,json=autoResume,proto3" json:"auto_resume,omitempty"`
-	// architecture.md Appendix C). Reserving the NUMBER is
-	// what keeps a future varint field from decoding an old
-	// record's counter as itself; the name goes with it.
-	// The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
-	// DeleteClone sets it and returns, and the sp coordinator drains the
-	// chunk keys. Appended, never renumbered — a renumbered field decodes
-	// silently into unknown fields rather than failing.
+	// Reserving the NUMBER is what keeps a future varint
+	// field from decoding an old record's counter as
+	// itself; the name goes with it.
+	// The clone-delete latch (architecture.md, Clones, DeleteClone;
+	// dnv-worker.md, The clone drain): DeleteClone sets it and returns, and
+	// the sp coordinator drains the chunk keys. Appended, never renumbered —
+	// a renumbered field decodes silently into unknown fields rather than
+	// failing.
 	Deleting      bool `protobuf:"varint,12,opt,name=deleting,proto3" json:"deleting,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -9,7 +9,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// This file is the gateway's trace-id mint. gateway.md §0 #6 says the
+// This file is the gateway's trace-id mint. gateway.md GW2 says the
 // gateway is one of grpc.md T4's entry points — the one that mints a trace
 // id for a request that arrived without one — while the shared server
 // interceptor only ADOPTS an incoming id: without this mint an id-less
@@ -17,18 +17,17 @@ import (
 // all and forward none to the agents the gateway calls.
 //
 // The mint lives here, gateway-local, and not in common/interceptor.go
-// because that file is a byte-for-byte copy of grpc.md §3's reference
-// listing, pinned by TestRefListingsVerbatim (common/doclisting_test.go).
+// because the shared interceptors never mint (grpc.md T4).
 // Run installs it FIRST in both chains (server.go
 // serverOptions), so it is upstream of the shared chain and the shared
 // chain's own request/reply records carry the id.
 
 // ensureTraceIdCtx returns ctx whose INCOMING metadata carries a trace_id,
-// minting one when absent (gateway.md §0 #6, grpc.md T4's MAY). Injecting
+// minting one when absent (gateway.md GW2, grpc.md T4's MAY). Injecting
 // into the metadata — not the ctx value — upstream of the shared chain is
 // deliberate: common's interceptor then adopts it exactly as "a request that
 // arrived with one", its own request/reply records carry the id, and
-// common/interceptor.go stays the grpc.md §3 reference verbatim.
+// common/interceptor.go stays free of any mint.
 func ensureTraceIdCtx(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
@@ -65,7 +64,7 @@ func ensureTraceIdUnary() grpc.UnaryServerInterceptor {
 // common/interceptor.go).
 //
 // `service Gateway` has no streaming RPC today — schema.proto declares 59
-// unary calls and not one `stream`, as dnvctl.md §2.2 states from the client
+// unary calls and not one `stream`, as dnvctl.md CT2 states from the client
 // side — so this half never runs; it is wired for symmetry with the shared
 // chain, which installs both halves, so that the first streaming RPC added
 // here inherits the mint instead of quietly losing it.

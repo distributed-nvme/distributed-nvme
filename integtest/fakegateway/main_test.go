@@ -23,15 +23,17 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// CT-T6 (dnvctl.md §6): the fakegateway obligations are default success on
-// every RPC, behavior.json code/message injection, `hang` released by ctx
-// cancel and by lever clear, `reply` injection, state.json count/last_request
-// writing and the atomic-rename property, malformed behavior keeping the
-// previous behavior, and unknown behavior keys rejected.
+// The fakegateway obligations (dnvctl.md, Integration test plan, The fake
+// gateway) are default success on every RPC, behavior.json code/message
+// injection, `hang` released by ctx cancel and by lever clear, `reply`
+// injection, state.json count/last_request writing and the atomic-rename
+// property, malformed behavior keeping the previous behavior, and unknown
+// behavior keys rejected.
 
 // ---------------------------------------------------------------------------
-// Harness: one fake gateway behind the real §4 server interceptors on
-// bufconn, exactly as main() wires it (the fakeagent house pattern).
+// Harness: one fake gateway behind the real server interceptors (grpc.md,
+// Wiring) on bufconn, exactly as main() wires it (the fakeagent house
+// pattern).
 // ---------------------------------------------------------------------------
 
 func newTestGateway(t *testing.T) *fakeGateway {
@@ -129,7 +131,8 @@ func readState(t *testing.T, fake *fakeGateway) *stateFile {
 }
 
 // lastRequest returns one method's stored last_request as a generic JSON
-// object, which is how §7.7's assertions look at it.
+// object, which is how the suite's assertions look at it (Integration test
+// plan, What a pass means).
 func lastRequest(t *testing.T, fake *fakeGateway, method string) map[string]any {
 	t.Helper()
 	entry := readState(t, fake).Methods[method]
@@ -163,7 +166,7 @@ func fullMethod(method string) string {
 // ---------------------------------------------------------------------------
 
 // TestMethodTypeRegistryMatchesServiceDesc pins the registry against
-// pb.Gateway_ServiceDesc in both directions, with the 59 of §0 #3 spelled
+// pb.Gateway_ServiceDesc in both directions, with CT1's 59 RPCs spelled
 // out: the registry is what decodes behavior.json's `reply`, so a method it
 // misses would silently answer with the wrong message type.
 func TestMethodTypeRegistryMatchesServiceDesc(t *testing.T) {
@@ -210,7 +213,7 @@ func TestMethodTypeRegistryMatchesServiceDesc(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Default success (CT-T6 "default success on every RPC")
+// Default success (obligation "default success on every RPC")
 // ---------------------------------------------------------------------------
 
 // TestDefaultSuccessOnEveryRpc drives all 59 methods through the wire with no
@@ -230,8 +233,9 @@ func TestDefaultSuccessOnEveryRpc(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		// §7.5: the canned default is an EMPTY reply message; dnvctl's
-		// EmitUnpopulated rendering fills the shape client-side.
+		// The canned default is an EMPTY reply message (Integration test
+		// plan, The fake gateway); dnvctl's EmitUnpopulated rendering fills
+		// the shape client-side.
 		if !proto.Equal(reply, newReply(name)) {
 			t.Errorf("%s replied %v, want the empty message", name, reply)
 		}
@@ -258,14 +262,15 @@ func TestDefaultSuccessOnEveryRpc(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// state.json (CT-T6 "count/last_request writing")
+// state.json (obligation "count/last_request writing")
 // ---------------------------------------------------------------------------
 
 // TestStateCountsAndLastRequest pins the count bump and the protojson
-// rendering of the §4 token trio — the assertion §7.11 b1/b2/b3 is built on.
-// UseProtoNames WITHOUT EmitUnpopulated is what makes an absent token an
-// ABSENT KEY and a present-but-zero token `{}`; emitting unpopulated fields
-// would render both as `{}` and quietly destroy the distinction.
+// rendering of the CT3 token trio — the assertion the behavior case's b1-b3
+// are built on (Integration test plan, Cases). UseProtoNames WITHOUT
+// EmitUnpopulated is what makes an absent token an ABSENT KEY and a
+// present-but-zero token `{}`; emitting unpopulated fields would render both
+// as `{}` and quietly destroy the distinction.
 func TestStateCountsAndLastRequest(t *testing.T) {
 	fake := newTestGateway(t)
 	client, _ := startGateway(t, fake)
@@ -293,7 +298,8 @@ func TestStateCountsAndLastRequest(t *testing.T) {
 	if req["td_name"] != "t0" {
 		t.Errorf("stored td_name = %v, want t0", req["td_name"])
 	}
-	// §7.7: protojson renders uint64 as a string.
+	// protojson renders uint64 as a string (Integration test plan, What a
+	// pass means).
 	if req["size"] != "67108864" {
 		t.Errorf("stored size = %#v, want the string \"67108864\"",
 			req["size"])
@@ -349,10 +355,11 @@ func TestStateCountsAndLastRequest(t *testing.T) {
 	}
 }
 
-// TestRecordingPrecedesBehavior pins §7.5's "Request recording (always
-// first)": a call the behaviour refuses is still counted and still stores its
-// request. §7.12's error steps assert both the stderr line and the counts,
-// and a fake that recorded after the gate would report zero.
+// TestRecordingPrecedesBehavior pins "Every call is recorded first"
+// (Integration test plan, The fake gateway): a call the behaviour refuses is
+// still counted and still stores its request. The errors case's steps assert
+// both the stderr line and the counts (Integration test plan, Cases), and a
+// fake that recorded after the gate would report zero.
 func TestRecordingPrecedesBehavior(t *testing.T) {
 	fake := newTestGateway(t)
 	client, _ := startGateway(t, fake)
@@ -427,7 +434,7 @@ func TestStateHandEditIsPickedUp(t *testing.T) {
 	}
 }
 
-// TestStateWriteIsAtomic is CT-T6's atomic-rename property. Concurrent
+// TestStateWriteIsAtomic is the atomic-rename obligation. Concurrent
 // callers hammer the fake while a reader reads state.json in a tight loop:
 // with the temp-file + rename write every read sees a whole file, and no
 // temp file is left behind. A plain os.WriteFile would fail this within a
@@ -517,8 +524,9 @@ func TestStateWriteIsAtomic(t *testing.T) {
 // behavior.json parsing
 // ---------------------------------------------------------------------------
 
-// TestParseBehaviorEveryLever checks that every §7.5 key lands, including the
-// per-method reply decoded against that method's own reply type.
+// TestParseBehaviorEveryLever checks that every behavior.json key lands,
+// including the per-method reply decoded against that method's own reply
+// type.
 func TestParseBehaviorEveryLever(t *testing.T) {
 	parsed, err := parseBehavior([]byte(`{
 		"default": {"code": "unavailable", "message": "down", "hang": false},
@@ -559,7 +567,7 @@ func TestParseBehaviorEveryLever(t *testing.T) {
 	}
 }
 
-// TestParseBehaviorMalformed is CT-T6's "unknown behavior keys rejected",
+// TestParseBehaviorMalformed is obligation "unknown behavior keys rejected",
 // widened to every way the file can be wrong. Each of these must fail the
 // whole file: a rejection that is logged and ignored keeps the previous
 // behaviour, whereas a silently dropped key would fail a test far from its
@@ -594,9 +602,10 @@ func TestParseBehaviorMalformed(t *testing.T) {
 	}
 }
 
-// TestParseCodeSpellings pins the UPPER_SNAKE vocabulary of §7.5 against the
-// table dnvctl's §3.2 error line renders from: an operator who copies a code
-// out of an error line must be able to paste it into behavior.json.
+// TestParseCodeSpellings pins the UPPER_SNAKE vocabulary of behavior.json's
+// `code` against the table dnvctl's CT5 error line renders from: an operator
+// who copies a code out of an error line must be able to paste it into
+// behavior.json.
 func TestParseCodeSpellings(t *testing.T) {
 	for code, name := range codeNames {
 		got, err := parseCode(name)
@@ -626,7 +635,8 @@ func TestParseCodeSpellings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// behavior.json injection (CT-T6 "code/message injection", "reply injection")
+// behavior.json injection (obligations "code/message injection" and "reply
+// injection")
 // ---------------------------------------------------------------------------
 
 func TestBehaviorCodeAndMessageInjection(t *testing.T) {
@@ -634,8 +644,8 @@ func TestBehaviorCodeAndMessageInjection(t *testing.T) {
 	client, _ := startGateway(t, fake)
 	ctx := context.Background()
 
-	// A code with an explicit message — §7.12 c2, the §4 failure an operator
-	// actually meets.
+	// A code with an explicit message — the errors case's stale-revision
+	// line (CT5), the CT3 failure an operator actually meets.
 	setBehavior(t, fake, `{"methods": {"DeleteThinDevice": {
 		"code": "ABORTED", "message": "stale revision"}}}`)
 	_, err := client.DeleteThinDevice(ctx, &pb.DeleteThinDeviceRequest{
@@ -646,7 +656,7 @@ func TestBehaviorCodeAndMessageInjection(t *testing.T) {
 		t.Errorf("message = %q, want %q", got, "stale revision")
 	}
 
-	// No message: §7.5's default, "behavior.json <code>".
+	// No message: the fake's default, "behavior.json <code>".
 	setBehavior(t, fake,
 		`{"methods": {"CreateCluster": {"code": "ALREADY_EXISTS"}}}`)
 	_, err = client.CreateCluster(ctx, &pb.CreateClusterRequest{
@@ -663,7 +673,7 @@ func TestBehaviorCodeAndMessageInjection(t *testing.T) {
 	}
 }
 
-// TestBehaviorMergeIsKeyByKey pins §7.5's "most specific wins KEY BY KEY":
+// TestBehaviorMergeIsKeyByKey pins "most specific wins KEY BY KEY":
 // a method entry that sets only the message keeps the default's code, and a
 // method entry may switch a default lever back off.
 func TestBehaviorMergeIsKeyByKey(t *testing.T) {
@@ -736,9 +746,9 @@ func TestBehaviorReplyInjection(t *testing.T) {
 	}
 }
 
-// TestBehaviorMalformedKeepsPrevious is CT-T6's "malformed behavior keeps the
-// previous behavior", plus the file-gone reset. The script writes
-// behavior.json atomically for exactly this reason (§7.7); a half-written
+// TestBehaviorMalformedKeepsPrevious is obligation "malformed behavior keeps
+// the previous behavior", plus the file-gone reset. The script writes
+// behavior.json atomically for exactly this reason; a half-written
 // file that was parsed, rejected and ignored would otherwise silently keep
 // the previous case's behaviour.
 func TestBehaviorMalformedKeepsPrevious(t *testing.T) {
@@ -775,7 +785,7 @@ func TestBehaviorMalformedKeepsPrevious(t *testing.T) {
 	}
 }
 
-// TestBehaviorReloadNoticesSizeChange pins the "OR size" half of §7.5's
+// TestBehaviorReloadNoticesSizeChange pins the "OR size" half of the fake's
 // reload guard by holding the mtime still across the rewrite: on a coarse
 // filesystem clock a same-second rewrite of a different length is the real
 // case, and an mtime-only guard would keep serving the previous behaviour.
@@ -799,7 +809,7 @@ func TestBehaviorReloadNoticesSizeChange(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The hang lever (CT-T6 "hang released by ctx cancel and by lever clear")
+// The hang lever (obligation "hang released by ctx cancel and by lever clear")
 // ---------------------------------------------------------------------------
 
 // hangingCall starts one call in a goroutine and proves it has NOT answered
@@ -821,9 +831,10 @@ func hangingCall(
 	return done
 }
 
-// TestHangReleasedByContextCancel is how §7.13 case D step 2 manufactures a
-// DEADLINE_EXCEEDED: dnvctl's --timeout cancels the call's context and the
-// fake must turn that into a proper gRPC code rather than hanging forever.
+// TestHangReleasedByContextCancel is how the transport case manufactures a
+// DEADLINE_EXCEEDED under CT2's deadline: dnvctl's --timeout cancels the
+// call's context and the fake must turn that into a proper gRPC code rather
+// than hanging forever.
 func TestHangReleasedByContextCancel(t *testing.T) {
 	fake := newTestGateway(t)
 	client, _ := startGateway(t, fake)
@@ -865,7 +876,8 @@ func TestHangReleasedByClearingLever(t *testing.T) {
 	if _, err := client.GetCluster(ctx, &pb.GetClusterRequest{}); err != nil {
 		t.Fatalf("GetCluster while ListClusters hangs: %v", err)
 	}
-	// And the hung call was recorded before it hung (§7.5).
+	// And the hung call was recorded before it hung (Integration test plan,
+	// The fake gateway).
 	if entry := readState(t, fake).Methods["ListClusters"]; entry == nil ||
 		entry.Count != 1 {
 		t.Errorf("the hung call recorded %v, want count 1", entry)
@@ -881,7 +893,8 @@ func TestHangReleasedByClearingLever(t *testing.T) {
 		t.Fatalf("clearing the lever did not release the call")
 	}
 
-	// §7.13 d2's recovery step: the method works again afterwards.
+	// The transport case's recovery step (Integration test plan, Cases): the
+	// method works again afterwards.
 	if _, err := client.ListClusters(ctx, &pb.ListClustersRequest{}); err != nil {
 		t.Errorf("ListClusters after the lever cleared: %v", err)
 	}

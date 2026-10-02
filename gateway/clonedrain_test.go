@@ -12,9 +12,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The gateway half of the clone drain (gateway.md §5.8, dnv-worker.md §11.7):
-// DeleteClone latches, and the chunk sweep that used to sit in its deciding STM
-// is the worker's.
+// The gateway half of the clone drain (gateway.md, Clones; dnv-worker.md,
+// The clone drain): DeleteClone latches, and the chunk sweep that used to sit
+// in its deciding STM is the worker's.
 //
 // As for the sp drain, the END-state assertions did not move with it, so the
 // tests that own them run the drain here through volDrainClone, exactly as the
@@ -269,9 +269,9 @@ func TestDeleteCloneRepeatIsANoOp(t *testing.T) {
 			got, latchRev)
 	}
 	env.wantUntouched(before, latchRev)
-	// A stale token still ABORTs on a latched clone: §5.8's table order puts
-	// GW6 ahead of the `deleting` row, and the short-circuit runs the check
-	// itself because phase 1 is where it decides.
+	// A stale token still ABORTs on a latched clone: the order of DeleteClone's
+	// phase 1 (gateway.md, Clones) puts GW6 ahead of the `deleting` row, and the
+	// short-circuit runs the check itself because phase 1 is where it decides.
 	_, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
 		ClusterName: env.cluster,
 		SpName:      volSpName,
@@ -445,9 +445,10 @@ func volLatchClone(env *volEnv, name string) {
 	}
 }
 
-// TestCloneDrainConsequences pins what §5.8 states for the record — the things
-// an operator or a script trips over, ALL of which follow from the Clone key
-// and its `clone_name_list` entry surviving until the final STM:
+// TestCloneDrainConsequences pins what gateway.md, Clones, states for the
+// record — the things an operator or a script trips over, ALL of which follow
+// from the Clone key and its `clone_name_list` entry surviving until the final
+// STM:
 //
 //   - the name is NOT reusable until then;
 //   - `DeleteStoragePool` keeps refusing while any clone drains, with the

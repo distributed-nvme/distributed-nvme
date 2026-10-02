@@ -11,13 +11,15 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The §3.6 / [D6] leg health probe (CN11). Only the **primary** runs it: a
-// standby's path deliberately terminates in the side's dm-error (§3.1), so
-// block IO through it can never succeed, and a standby reports transport
-// liveness instead (leg.go, transportHealth).
+// The leg health probe of architecture.md, Group on-leg layout: meta region,
+// data region, health block, and [D6] (CN11). Only the **primary** runs it: a
+// standby's path deliberately terminates in the side's dm-error
+// (architecture.md, Disk node), so block IO through it can never succeed, and
+// a standby reports transport liveness instead (leg.go, transportHealth).
 //
 // Probers take **no** lock (CN1) and do **not** use the process OsClient: they
-// call the raw block-IO helpers through LegProbeIO (osclient.md §4.5.1), because a
+// call the raw block-IO helpers through LegProbeIO (osclient.md, Exported raw
+// helpers and the probe-IO carve-out), because a
 // blocked probe must not hold one of the OsClient's DefaultOsClientLimit
 // semaphore slots. Their IO can block far past every command timeout — a leg
 // with no serving path queues IO indefinitely — and nothing that holds a lock
@@ -30,7 +32,8 @@ const (
 )
 
 // LegProbeIO is the CN11 probers' block-IO dependency. It deliberately does
-// NOT go through the process's LimitedOsClient (osclient.md §4.5.1): that client
+// NOT go through the process's LimitedOsClient (osclient.md, Exported raw
+// helpers and the probe-IO carve-out): that client
 // is a DefaultOsClientLimit-slot semaphore held across the blocking syscall,
 // and a probe of a pathless leg (ctrl_loss_tmo = -1 ⇒ IO queues forever)
 // would wedge in D state holding a slot. One dead DN can back many legs of one
@@ -50,7 +53,8 @@ type LegProbeIO interface {
 // directLegProbeIO is the real implementation: the raw helpers of
 // common/osclient.go, no semaphore, no lock, no cached fd. It emits one record
 // per half itself, because the OsClient that used to log these calls is no
-// longer in the path (osclient.md §4.5.1 as amended). The ctx carries only the
+// longer in the path (osclient.md, Exported raw helpers and the probe-IO
+// carve-out). The ctx carries only the
 // CN2 per-attempt trace id and the cancellation check below — the helpers take
 // none, because a pread in flight cannot be interrupted by one.
 type directLegProbeIO struct{}
@@ -65,7 +69,7 @@ func (directLegProbeIO) Write(
 ) error {
 	// A cancelled prober starts no new IO — the same fast fail the OsClient's
 	// semaphore acquire used to give, and silent for the same reason: an
-	// operation that never happened is not logged (osclient.md §4.6).
+	// operation that never happened is not logged (osclient.md, Logging).
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -230,7 +234,8 @@ func (s *CnAgentServer) runLegProbe(
 	prober.begin(s.now())
 	payload := healthBlockPayload(cnId, s.now().UnixNano())
 	// The two records of a round are `probe write block` and `probe read block
-	// direct`, emitted by the LegProbeIO itself (osclient.md §4.5.1).
+	// direct`, emitted by the LegProbeIO itself (osclient.md, Exported raw
+	// helpers and the probe-IO carve-out).
 	err := s.probeIO.Write(attemptCtx, prober.path, prober.offset, payload)
 	if err == nil {
 		_, err = s.probeIO.ReadDirect(attemptCtx, prober.path,

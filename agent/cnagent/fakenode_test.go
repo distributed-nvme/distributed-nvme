@@ -25,7 +25,7 @@ import (
 // the sysfs nvme-subsystem tree the leg probe walks, thin-provisioning-tools
 // and the local store. It backs common.FakeOsClient, records every call, and
 // lets tests assert command sequences, probe-first idempotency and teardown
-// order without root or real devices (cnagent.md §6).
+// order without root or real devices.
 type fakeNode struct {
 	mu sync.Mutex
 
@@ -78,11 +78,13 @@ type fakeNode struct {
 	// superblocks is the set of member devices carrying md metadata.
 	superblocks map[string]bool
 	// assembleDrop models mdadm leaving a member out of an assembly for
-	// stale metadata (§11.1.1 case 1.3): the array starts without it and the
+	// stale metadata (architecture.md, "Make sure all groups are available",
+	// case 1.3): the array starts without it and the
 	// agent has to re-add it.
 	assembleDrop map[string]bool
 
-	// the §3.2 base state: the clone-metadata arena is a plain file on a
+	// the base state (architecture.md, Controller node, common): the
+	// clone-metadata arena is a plain file on a
 	// tmpfs mount behind one loop device, carved by kind-`cb` dm wrappers
 	// ([D14]) — no LVM state of any kind.
 	mounts   map[string]string
@@ -379,7 +381,8 @@ func (f *fakeNode) releaseCmd(key string) {
 
 // osClient is the cn role's OsClient double. Its block-write half is left
 // unwired: since the probe-IO carve-out the CN11 probe does not use the
-// OsClient (osclient.md §4.5.1) but the raw WriteBlockAt/ReadBlockDirectAt
+// OsClient (osclient.md, Exported raw helpers and the probe-IO carve-out) but
+// the raw WriteBlockAt/ReadBlockDirectAt
 // helpers, faked through the LegProbeIO double below, and the interface has
 // no ReadBlockDirect to wire at all.
 // ReadBlockFn stays connected so that a buffered read — which the probe must
@@ -718,7 +721,8 @@ func (f *fakeNode) writeProto(
 
 // readBlock / writeBlock / readBlockDirect model the CN11 health probe: the
 // leg wrapper accepts a 4 KiB write at the health offset and reads it back.
-// The last two are reached through fakeProbeIO, not the OsClient (osclient.md §4.5.1).
+// The last two are reached through fakeProbeIO, not the OsClient (osclient.md,
+// Exported raw helpers and the probe-IO carve-out).
 func (f *fakeNode) readBlock(
 	ctx context.Context, path string, offset uint64, length uint64,
 ) ([]byte, error) {
@@ -1392,7 +1396,7 @@ func (f *fakeNode) poolThinIds(name, table string) map[uint32]bool {
 
 // holdThinIds seeds a pool's dm-thin metadata with ids no cntlr of this node
 // created — the state a fresh primary meets when the control plane has
-// already marked the tds `created` (U4-S2).
+// already marked the tds `created` (CN14).
 func (f *fakeNode) holdThinIds(pool string, ids ...uint32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1418,7 +1422,8 @@ func isDmTarget(table, target string) bool {
 
 // checkThinTable rejects a `thin` table whose dev_id the pool's metadata does
 // not hold. The kernel does exactly that, and modelling it is what makes
-// U4-S2 observable: a created td is never re-created by message, so a pool
+// CN14's created-td rule observable: a created td is never re-created by
+// message, so a pool
 // that lost the id has to surface as a failing `dmsetup create` — an
 // RES_STATUS_ERROR the worker records — instead of a fresh empty volume
 // quietly taking the dev_id over.
@@ -1547,7 +1552,8 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 		devId, _ := strconv.ParseUint(fields[1], 10, 32)
 		oriId, _ := strconv.ParseUint(fields[2], 10, 32)
 		// dm-thin rejects a create_snap whose origin the pool does not hold.
-		// That is the U4-S5/R11 failure mode: the gateway's job is to keep
+		// That is the failure mode of CN14's "A violated precondition is left
+		// to dm-thin": the gateway's job is to keep
 		// the origin materialized, and an agent that meets a violated
 		// precondition simply reports the error and retries.
 		if dm.thinIds[uint32(devId)] || !dm.thinIds[uint32(oriId)] {
@@ -1618,7 +1624,8 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		if dm.heldRoot {
 			held = "123"
 		}
-		// The §10.4 auto-grow parses the two used/total pairs out of this.
+		// The thin-pool auto-grow (architecture.md, Automatic reactions)
+		// parses the two used/total pairs out of this.
 		return fmt.Sprintf(
 			"0 %s thin-pool 0 12/1024 5/%s %s rw discard_passdown "+
 				"queue_if_no_space - 1024\n",

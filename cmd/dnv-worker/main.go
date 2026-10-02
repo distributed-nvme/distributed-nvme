@@ -1,13 +1,14 @@
-// Command dnv-worker is the control-plane worker (dnv-worker.md §5): one
-// cobra root command without subcommands that parses the CM1 flags through
-// viper, builds the process's single etcdutil client (EU1) and hands off to
-// worker.Run, which owns the ClusterConf cache (RW21), the vote worker (§6)
-// and everything below it.
+// Command dnv-worker is the control-plane worker (dnv-worker.md,
+// `cmd/dnv-worker`): one cobra root command without subcommands that parses
+// the CM1 flags through viper, builds the process's single etcdutil client
+// (EU1) and hands off to worker.Run, which owns the ClusterConf cache (RW21),
+// the vote worker (VW1 to VW11) and everything below it.
 //
-// main itself is deliberately thin (layout.md §5): it never touches etcd, it
-// logs nothing but the CM3 warning and the two CM5 signal records, and the
-// "worker starting" / "worker stopping" records of §12 are emitted by
-// worker.Run, which is why the endpoints travel to it in worker.Config (CM6).
+// main itself is deliberately thin (layout.md, `cmd/` wiring): it never
+// touches etcd, it logs nothing but the CM3 warning and the two CM5 signal
+// records, and the "worker starting" / "worker stopping" records of
+// dnv-worker.md, Log records, are emitted by worker.Run, which is why the
+// endpoints travel to it in worker.Config (CM6).
 package main
 
 import (
@@ -90,7 +91,7 @@ func addFlags(cmd *cobra.Command) {
 }
 
 // bindViper wires flags, config file and environment together exactly as
-// cmd/dnv-agent does (CM2, dnagent.md §3); every value is read through viper
+// cmd/dnv-agent does (CM2, dnagent.md CM3); every value is read through viper
 // afterwards, so a file or the environment satisfies a required value just as
 // a flag does.
 func bindViper(cmd *cobra.Command) error {
@@ -131,8 +132,8 @@ type options struct {
 }
 
 // optionsFromViper reads and validates the CM1 values after the CM2 binding.
-// It performs no I/O and logs nothing, so the §13-style unit tests can drive
-// every CM3 branch directly.
+// It performs no I/O and logs nothing, so the unit tests can drive every CM3
+// branch directly.
 func optionsFromViper() (*options, error) {
 	endpoints := splitList(viper.GetString("etcd-endpoints"))
 	if len(endpoints) == 0 {

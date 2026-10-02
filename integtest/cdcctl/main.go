@@ -1,34 +1,37 @@
-// Command cdcctl is the etcd driver of the dnv-cdc integration test (cdc.md
-// §9.2, §9.6): "the etcd driver that plays gateway + worker for CdcEntry keys
-// only". It formats the {p} cdc keys through model, marshals pb.CdcEntry and
-// reads the prefix back as protojson.
+// Command cdcctl is the etcd driver of the dnv-cdc integration test (cdc.md,
+// Integration test plan, The driver, `cdcctl`): "the etcd driver that plays
+// the gateway and the worker for `CdcEntry` keys only". It formats the {p} cdc
+// keys through model, marshals pb.CdcEntry and reads the prefix back as
+// protojson.
 //
-// It runs ON SERVER 1, where etcd listens on the loopback (§9.3), and is
-// invoked over ssh by integtest/cdc_test.sh (§9.2). It touches NOTHING but
-// CdcEntry keys: dnv-cdc reads only those and never reads ClusterConf, so this
-// suite fabricates its cluster ids (§0 #13, §9.5) and --cluster takes the id
-// itself, not a name. No ClusterConf, global, revision or capacity key is ever
-// read or written here — that whole pipeline is the worker suite's job
-// (dnv-worker.md §14, whose case D already asserts CdcEntry contents). Apart
-// from that, this driver follows workerctl's conventions exactly.
+// It runs ON SERVER 1, where etcd listens on the loopback, and is invoked over
+// ssh by integtest/cdc_test.sh (Integration test plan, Topology). It touches
+// NOTHING but CdcEntry keys: dnv-cdc reads only those and never reads
+// ClusterConf, so this suite fabricates its cluster ids (Integration test
+// plan, The driver and Cases) and --cluster takes the id itself, not a name.
+// No ClusterConf, global, revision or capacity key is ever read or written
+// here — that whole pipeline is the worker suite's job (dnv-worker.md,
+// Integration test plan, whose reaction case already asserts CdcEntry
+// contents). Apart from that, this driver follows workerctl's conventions
+// exactly.
 //
 // Conventions the script relies on:
 //
 //   - Global flags may be given BEFORE the subcommand (a `ctl` wrapper does
 //     exactly that) or after it; the later occurrence wins.
 //   - stdout carries exactly one JSON document per invocation — except `list`,
-//     which prints one "<key>\t<protojson>" line per entry (§9.6), and an
+//     which prints one "<key>\t<protojson>" line per entry, and an
 //     empty prefix therefore prints nothing at all.
-//   - The log.md §5.3 records etcdutil emits ("etcd get", "etcd put", …) go to
-//     STDERR, where common/log.go's init() handler puts every record, so that
-//     they never interleave with the JSON the script pipes into jq.
+//   - The records etcdutil emits (log.md, etcd: "etcd get", "etcd put", …) go
+//     to STDERR, where common/log.go's init() handler puts every record, so
+//     that they never interleave with the JSON the script pipes into jq.
 //     They carry --trace-id, so a failing run still correlates every write of
 //     the driver with the case that made it.
 //   - protojson is emitted with EmitUnpopulated, so an entry with no
-//     allowed_hosts — the §0 #5 "visible to everyone" entry, which §9.5 uses
-//     for ssA — reads back as an explicit [] instead of vanishing from the
-//     document.
-//   - Ids accept decimal or 0x hex; --shard is always read as HEX (§9.5
+//     allowed_hosts — the DS6 "visible to everyone" entry, which the suite
+//     uses for ssA — reads back as an explicit [] instead of vanishing from
+//     the document.
+//   - Ids accept decimal or 0x hex; --shard is always read as HEX (the suite
 //     spreads the entry set over 00, 07, 3c, 80, ff and 81).
 //
 // Exit codes: 0 on success, 1 on any error (with a message on stderr), 2 on a
@@ -55,10 +58,10 @@ import (
 )
 
 const (
-	// defaultEndpoints is the single-node etcd of §9.3. It is deliberately NOT
-	// workerctl's 12379: §9.3 gives this suite 13379/13380 so that a stray
-	// cdcctl can never write into a worker-suite store, and the two suites can
-	// be installed on the same lab machine.
+	// defaultEndpoints is the suite's single-node etcd (Integration test plan,
+	// Topology). It is deliberately NOT workerctl's 12379: this suite uses
+	// 13379/13380 so that a stray cdcctl can never write into a worker-suite
+	// store, and the two suites can be installed on the same lab machine.
 	defaultEndpoints = "127.0.0.1:13379"
 	// pingKey is the key `ping` reads. It is deliberately a key nothing ever
 	// writes: the probe succeeds on not-found, so what it proves is that etcd
@@ -66,8 +69,8 @@ const (
 	pingKey = common.DnvPrefix + " ping"
 	// trConfForm is the --tr spelling. Its fields are COMMA-separated, unlike
 	// workerctl's ':'-separated tuples, because tr_addr may be an IPv6
-	// literal (adr_fam ipv6, §2.1) whose colons would be indistinguishable
-	// from field separators.
+	// literal (adr_fam ipv6, cdc.md, Additions to `common/constants.go`)
+	// whose colons would be indistinguishable from field separators.
 	trConfForm = "tr_type,adr_fam,tr_addr,tr_svc_id"
 )
 
@@ -88,7 +91,7 @@ func usageDie(format string, args ...any) {
 // marshalOpts renders every message this driver prints. UseProtoNames keeps
 // the JSON field names identical to the schema.proto spelling the assertions
 // quote (nvme_tr_conf_list, allowed_hosts); EmitUnpopulated keeps an empty
-// repeated field visible, which is what an open entry (§0 #5) needs.
+// repeated field visible, which is what an open entry (DS6) needs.
 var marshalOpts = protojson.MarshalOptions{
 	UseProtoNames:   true,
 	EmitUnpopulated: true,
@@ -124,13 +127,14 @@ func emit(value any) {
 	fmt.Println(string(mustJson(value)))
 }
 
-// idHex renders an id the way every key field does (architecture.md §5.1), so
-// that a reply names ids in the spelling the keys use.
+// idHex renders an id the way every key field does (architecture.md, Key
+// grammar), so that a reply names ids in the spelling the keys use.
 func idHex(id uint64) string {
 	return fmt.Sprintf(common.IdKeyFmt, id)
 }
 
-// shardHex renders a shard code the way the key field does (§5.1).
+// shardHex renders a shard code the way the key field does (architecture.md,
+// Key grammar).
 func shardHex(shard uint32) string {
 	return fmt.Sprintf(common.ShardCodeFmt, shard)
 }
@@ -139,8 +143,9 @@ func shardHex(shard uint32) string {
 // Flag value types
 // ---------------------------------------------------------------------------
 
-// parseId parses one id field: decimal or 0x hex, parsed with base 0. §9.5
-// writes the fabricated cluster ids as 0xcdc2 and the sp/ss ids as 0x1/0xa.
+// parseId parses one id field: decimal or 0x hex, parsed with base 0. The
+// suite writes the fabricated cluster ids as 0xcdc2 and the sp/ss ids as
+// 0x1/0xa.
 func parseId(s string) (uint64, error) {
 	value, err := strconv.ParseUint(strings.TrimSpace(s), 0, 64)
 	if err != nil {
@@ -164,13 +169,13 @@ func (h *hexUint) Set(s string) error {
 }
 
 // shardFlag is a --shard flag. A shard code is ALWAYS written in its
-// common.ShardCodeFmt spelling (architecture.md §5.1), so the value is parsed
-// as HEX — with or without a 0x prefix. Reading "81" as decimal would place
-// the §9.5 cross-cluster entry in shard 0x51, i.e. in the low half, where the
-// wrong pair of instances would serve it.
+// common.ShardCodeFmt spelling (architecture.md, Key grammar), so the value is
+// parsed as HEX — with or without a 0x prefix. Reading "81" as decimal would
+// place the suite's cross-cluster entry in shard 0x51, i.e. in the low half,
+// where the wrong pair of instances would serve it.
 //
 // Unlike workerctl's, it remembers whether it was SET: "00" is a shard code
-// the §9.5 table actually uses (ssA), so a missing --shard cannot be told
+// the suite's entries actually use (ssA), so a missing --shard cannot be told
 // from --shard 00 by value alone. A put that silently landed in shard 00 would
 // still serve, and the mistake would surface much later as a `del` that finds
 // nothing.
@@ -224,9 +229,9 @@ func (l *stringList) Set(s string) error {
 
 // trConfList collects the repeatable --tr flag IN ORDER: an element's position
 // in nvme_tr_conf_list is the DS5 tr-conf index that decides which rendered
-// log entry a change impacts, and §9.11 step 3 asserts ssD's two records by
-// their trsvcids. The driver therefore never reorders, deduplicates or sorts
-// them.
+// log entry a change impacts, and the matrix case asserts ssD's two records
+// (DS3) by their trsvcids. The driver therefore never reorders, deduplicates
+// or sorts them.
 type trConfList []*pb.NvmeTrConf
 
 func (l *trConfList) String() string {
@@ -252,7 +257,7 @@ func (l *trConfList) Set(s string) error {
 	return nil
 }
 
-// parseTrConf reads one `--tr tcp,ipv4,<ip2>,14420` (§9.5's port<n>).
+// parseTrConf reads one `--tr tcp,ipv4,<ip2>,14420` (the suite's port<n>).
 //
 // tr_type is NOT checked against common.DefaultCdcTrType: DS3 skips an element
 // whose tr_type is not tcp and keeps serving the rest of the entry, so a case
@@ -281,7 +286,7 @@ func parseTrConf(spec string) (*pb.NvmeTrConf, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Globals (§9.6)
+// Globals
 // ---------------------------------------------------------------------------
 
 type globals struct {
@@ -302,15 +307,15 @@ func newGlobals() globals {
 // wins.
 func (g *globals) bind(fs *flag.FlagSet) {
 	fs.StringVar(&g.endpoints, "etcd", g.endpoints,
-		"comma-separated etcd client endpoints (§9.6)")
+		"comma-separated etcd client endpoints")
 	// workerctl spells the same flag --endpoints. Both suites are driven from
 	// the same script style by the same hands, so the other spelling is
 	// accepted rather than silently ignored as an unknown flag.
 	fs.StringVar(&g.endpoints, "endpoints", g.endpoints,
 		"alias for --etcd (workerctl's spelling)")
 	fs.Var(&g.cluster, "cluster",
-		"cluster id, decimal or 0x hex; it is FABRICATED (§0 #13, §9.5), "+
-			"no ClusterConf is read")
+		"cluster id, decimal or 0x hex; it is FABRICATED (cdc.md, "+
+			"Integration test plan), no ClusterConf is read")
 	fs.StringVar(&g.traceId, "trace-id", g.traceId,
 		"trace id stamped on every log record of this invocation")
 	fs.Float64Var(&g.timeout, "timeout", g.timeout,
@@ -339,12 +344,13 @@ func (g *globals) open() (context.Context, func(), *etcdutil.Client) {
 }
 
 // clusterId returns the cluster id of the invocation. Unlike workerctl's, it
-// reads nothing: the id is fabricated per case (§9.5 — S 0xcdc1 … H 0xcdc5,
-// plus case id + 0x10000 for the cross-cluster entry, the prepended `1`
-// nibble) and no ClusterConf exists
-// to derive it from (§0 #13). Zero stands for "not given": no case uses it,
-// and a missing --cluster would otherwise write into a cluster id of 0, where
-// dnv-cdc would happily serve the entry and only the later `del` would fail.
+// reads nothing: the id is fabricated per case (Integration test plan, Cases)
+// — S 0xcdc1 … H 0xcdc5, plus case id + 0x10000 for the cross-cluster entry,
+// the prepended `1` nibble — and no ClusterConf exists to derive it from
+// (Integration test plan, The driver). Zero stands for "not given": no case
+// uses it, and a missing --cluster would otherwise write into a cluster id of
+// 0, where dnv-cdc would happily serve the entry and only the later `del`
+// would fail.
 func (g *globals) clusterId() uint64 {
 	if uint64(g.cluster) == 0 {
 		die("--cluster is required (a nonzero cluster id, e.g. 0xcdc2)")
@@ -352,10 +358,10 @@ func (g *globals) clusterId() uint64 {
 	return uint64(g.cluster)
 }
 
-// entryKey builds the one key kind this driver knows (MD2, §2.2) out of the
-// four addressing flags, refusing every value that is missing rather than
-// defaulting it — see shardFlag on why a defaulted key field is invisible
-// until a much later assertion fails.
+// entryKey builds the one key kind this driver knows (MD2; cdc.md, Addition
+// to `model/keys.go`) out of the four addressing flags, refusing every value
+// that is missing rather than defaulting it — see shardFlag on why a
+// defaulted key field is invisible until a much later assertion fails.
 func entryKey(g *globals, shard *shardFlag, spId, ssId hexUint) (
 	string, uint64,
 ) {
@@ -439,7 +445,7 @@ func newFlagSet(name string, g *globals) *flag.FlagSet {
 // ping
 // ---------------------------------------------------------------------------
 
-// cmdPing is the etcd liveness probe of the §9.4 preflight: one Get of a key
+// cmdPing is the etcd liveness probe of the suite's preflight: one Get of a key
 // nothing writes, which succeeds on not-found.
 func cmdPing(g *globals, args []string) {
 	fs := newFlagSet("ping", g)
@@ -463,16 +469,18 @@ func cmdPing(g *globals, args []string) {
 // put / del
 // ---------------------------------------------------------------------------
 
-// cmdPut writes one CdcEntry at model.CdcEntryKey (§9.6) — what the gateway
-// does at CreateSubsystem / UpdateSubsystemHosts / CreateCntlr / DeleteCntlr /
-// UpdateCntlrEnabled and the worker at ReplaceCntlr (§1), reduced to the one
-// key dnv-cdc reads.
+// cmdPut writes one CdcEntry at model.CdcEntryKey (Integration test plan, The
+// driver) — what the gateway does at CreateSubsystem / UpdateSubsystemHosts /
+// CreateCntlr / DeleteCntlr / UpdateCntlrEnabled and the worker at
+// ReplaceCntlr (cdc.md, Scope and placement), reduced to the one key dnv-cdc
+// reads.
 //
 // It is ONE plain Put, not a read-modify-write: the stored value is the whole
-// message, and the rewrites of §9.12 steps 4-5 and §9.13 step 4 ("ssE now
-// allows only H2", "port3 → port4") are expressed by re-putting the entry. A
-// driver that merged with what is already stored could not express a REMOVAL
-// at all, and case L's negative — h1 losing ssE — is exactly a removal.
+// message, and the rewrites of the lowlevel case ("ssE now allows only H2",
+// DS6) and of the stas case's re-point ("port3 → port4"; Integration test
+// plan, Cases) are expressed by re-putting the entry. A driver that merged
+// with what is already stored could not express a REMOVAL at all, and case
+// L's negative — h1 losing ssE — is exactly a removal.
 func cmdPut(g *globals, args []string) {
 	fs := newFlagSet("put", g)
 	var shard shardFlag
@@ -524,16 +532,17 @@ func cmdPut(g *globals, args []string) {
 	})
 }
 
-// cmdDel removes one CdcEntry (§9.6) — DeleteSubsystem as dnv-cdc sees it, the
-// step that makes a host lose a device in §9.12 step 6 and §9.13 step 5.
+// cmdDel removes one CdcEntry (Integration test plan, The driver) —
+// DeleteSubsystem as dnv-cdc sees it, the step that makes a host lose a device
+// in the lowlevel and stas cases (DS6; Integration test plan, Cases).
 //
 // It reads the entry first, for two reasons: the reply then reports what was
 // removed, and a key that is not there is refused. A del that names a key no
 // case ever wrote is always a mistyped id here — the per-case reset is `wipe`
-// (§9.9), and every del of §9.12/§9.13 names an entry the case itself put — so
-// failing loudly, with the key in the message, is the only place that typo is
-// ever visible; skipping it silently would surface minutes later as "the host
-// still has the device".
+// (Integration test plan, Cases), and every del of the lowlevel and stas cases
+// names an entry the case itself put — so failing loudly, with the key in the
+// message, is the only place that typo is ever visible; skipping it silently
+// would surface minutes later as "the host still has the device".
 func cmdDel(g *globals, args []string) {
 	fs := newFlagSet("del", g)
 	var shard shardFlag
@@ -575,17 +584,17 @@ func cmdDel(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdWipe deletes every key under model.CdcEntryPrefix() — the per-case reset
-// of §9.9 and the mass-teardown assertion of §9.13 step 6, where both hosts
-// must converge to zero dnv-it subsystems.
+// and the stas case's mass-teardown assertion (Integration test plan, Cases;
+// CM4), where both hosts must converge to zero dnv-it subsystems.
 //
-// etcdutil exposes no range delete and layout.md §3 allows this driver no
-// other etcd path, so the range is walked with RangeKeys (keys only — the
-// values are about to be gone) and each key deleted on its own. The count is
-// reported, so the script can assert what a reset actually removed.
+// etcdutil exposes no range delete and layout.md, Dependency rules, allows
+// this driver no other etcd path, so the range is walked with RangeKeys (keys
+// only — the values are about to be gone) and each key deleted on its own. The
+// count is reported, so the script can assert what a reset actually removed.
 //
 // It deliberately ignores --cluster, even though the flag is global and a
 // `ctl` wrapper may carry one: a reset must leave the prefix EMPTY. Narrowing
-// it to one cluster would silently leave the second-cluster entry of §9.5
+// it to one cluster would silently leave the suite's second-cluster entry
 // (ssF, in case id + 0x10000) behind, and the next case would start with a
 // stray entry that its own discover grid does not expect.
 func cmdWipe(g *globals, args []string) {
@@ -611,11 +620,12 @@ func cmdWipe(g *globals, args []string) {
 	})
 }
 
-// cmdList prints every CdcEntry as "<key>\t<protojson>", one per line (§9.6) —
-// the diagnostics dump of §9.16. Like wipe it walks the whole prefix and
-// ignores --cluster: DS1 serves every cluster, so a dump that hid one would
-// hide exactly the stray key it is there to find. An empty prefix prints
-// nothing, which is what a post-wipe `wc -l` expects.
+// cmdList prints every CdcEntry as "<key>\t<protojson>", one per line — the
+// diagnostics dump of the entries in etcd (Integration test plan, Cleanup).
+// Like wipe it walks the whole prefix and ignores --cluster: DS1 serves every
+// cluster, so a dump that hid one would hide exactly the stray key it is
+// there to find. An empty prefix prints nothing, which is what a post-wipe
+// `wc -l` expects.
 func cmdList(g *globals, args []string) {
 	fs := newFlagSet("list", g)
 	fs.Parse(args)

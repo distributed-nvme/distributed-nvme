@@ -22,7 +22,7 @@ import (
 // the raw disk's [D13] metadata regions, device-mapper, the nvmet configfs
 // tree, the nvme host and the local store. It backs common.FakeOsClient, records every call, and lets tests
 // assert command sequences, probe-first idempotency and teardown order
-// without root or real devices (dnagent.md §6).
+// without root or real devices.
 type fakeNode struct {
 	mu sync.Mutex
 
@@ -53,7 +53,8 @@ type fakeNode struct {
 	// write — issued while the dm device the namespace backs was suspended.
 	// That write first waits for every request in flight on the namespace,
 	// and one whose bio a suspended dm target holds never completes — the
-	// §11.2 window holds exactly those — so the agent would sit in D state
+	// cutover window (architecture.md, Migration, src step 2) holds exactly
+	// those — so the agent would sit in D state
 	// with its locks held. The fake models no in-flight IO and cannot hang a
 	// test, so every such write lands and is named here instead.
 	wedgedDisables []string
@@ -160,7 +161,7 @@ type fakeNode struct {
 	// common/osclient.go: a cancelled RunCommand SIGTERMs the process and only
 	// SIGKILLs it CmdHardTimeout−CmdSoftTimeout later, so `cmd.Run` can return
 	// seconds after the cancel while the child still holds its fds open. That
-	// gap is exactly what makes the §9.4 cancel-**and-wait** different from a
+	// gap is exactly what makes the DN9 cancel-**and-wait** different from a
 	// bare cancel, so a test that pins the wait cannot use the ctx-aware gate.
 	hardGate map[string]chan struct{}
 }
@@ -182,7 +183,7 @@ type fakeDm struct {
 	threshold         uint32
 	batchSize         uint32
 	// discards holds the metadata-only `blkdiscard --offset/--length` hints
-	// (dm-clone hydration marking); zeroouts holds the §9.4
+	// (dm-clone hydration marking); zeroouts holds the DN9
 	// `blkdiscard --zeroout` side-provisioning writes. They are deliberately
 	// separate — see cmdBlkdiscard.
 	discards []string
@@ -1059,7 +1060,8 @@ func (f *fakeNode) cmdLsblk(args []string) (string, int) {
 	}
 	if contains(args, "KNAME") {
 		// The kernel name Dm.WriteZeroesMaxBytes turns into a
-		// /sys/class/block entry (§9.4's DN5 check). The fake's devices are
+		// /sys/class/block entry (the DN5 check of
+		// architecture.md, Side provisioning protocol). The fake's devices are
 		// already plain /dev paths, so the basename is the kernel name.
 		if _, ok := f.devNo[path]; !ok {
 			return "", 32
@@ -1094,7 +1096,7 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	if !ok {
 		return "", 0
 	}
-	// The §9.4 side-provisioning write and the metadata-only "mark this
+	// The DN9 side-provisioning write and the metadata-only "mark this
 	// region hydrated" discard are recorded in separate lists: a
 	// migration-dst side zeroes its own dm-linear while the dm-clone above it
 	// takes hydration discards, and one shared list would make either
@@ -1246,7 +1248,8 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 
 // parseDmCreateArgs accepts both table forms: the single-line --table option
 // and the multi-line stdin form dmsetup reads when --table is absent
-// (architecture.md Appendix A). The stdin table is normalized to one space-
+// (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`). The stdin
+// table is normalized to one space-
 // joined line per target, keeping the parsing below single-line.
 func parseDmCreateArgs(args []string, stdin string) (string, string, bool) {
 	name := args[1]
@@ -1499,8 +1502,8 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 // nvmeDisconnect handles both forms. `--nqn` drops every controller of the
 // subsystem; `--device` drops exactly one, which is the only way to retire
 // the dead side of a migrating leg without killing the live one (SH20,
-// cnagent.md §2.3). Neither is idempotent: nvme-cli exits non-zero when it
-// finds nothing to disconnect.
+// cnagent.md, `NvmeHost.DisconnectDevice`). Neither is idempotent: nvme-cli
+// exits non-zero when it finds nothing to disconnect.
 func (f *fakeNode) nvmeDisconnect(args []string) (string, int) {
 	if nqn := flagValue(args, "--nqn"); nqn != "" {
 		conn, ok := f.conns[nqn]

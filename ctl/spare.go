@@ -1,13 +1,15 @@
-// spare.go is dnvctl.md §5.12: the three RPCs of spare legs
-// (architecture.md §8.12). A spare is an extra leg of a raid1 group that every
-// cntlr connects to and health-checks but that is NOT an md member — parked
-// standby capacity, until a switch trades it for an active leg.
+// spare.go is the `spare` group (dnvctl.md, Conventions): the three RPCs of
+// spare legs (architecture.md, Spare legs). A spare is an extra leg of a
+// raid1 group that every cntlr connects to and health-checks but that is NOT
+// an md member — parked standby capacity, until a switch trades it for an
+// active leg.
 //
-// The identity flags are the group's own (§5.0): `--grp` everywhere, plus
-// `--leg` on delete and the `--spare`/`--target` pair on switch. All four are
-// ids, so they are declared as strings and read through hexOf: Go base-0
-// parsing, `0x` accepted, and a malformed value is a usage error (exit 2) with
-// no RPC issued — all the checking dnvctl does on an id (CT8).
+// The identity flags are the group's own (dnvctl.md, Conventions): `--grp`
+// everywhere, plus `--leg` on delete and the `--spare`/`--target` pair on
+// switch. All four are ids, so they are declared as strings and read through
+// hexOf: Go base-0 parsing, `0x` accepted, and a malformed value is a usage
+// error (exit 2) with no RPC issued — all the checking dnvctl does on an id
+// (CT8).
 package ctl
 
 import (
@@ -19,11 +21,12 @@ import (
 )
 
 // registerSpare adds the `spare` group to the root. All three are SP-scoped
-// mutators, so all three carry an `sp_rev` token when --rev is given (§4).
+// mutators, so all three carry an `sp_rev` token when --rev is given (CT3).
 func registerSpare(root *cobra.Command) {
 	root.AddCommand(group(
 		"spare",
-		"spare legs — parked standby replicas of a raid1 group (§8.12)",
+		"spare legs — parked standby replicas of a raid1 group "+
+			"(architecture.md, Spare legs)",
 		spareCreateCmd(),
 		spareDeleteCmd(),
 		spareSwitchCmd(),

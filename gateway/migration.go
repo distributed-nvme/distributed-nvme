@@ -9,9 +9,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.11 / gateway.md §5.10: the five RPCs that
-// move one leg's side from one disk node to another while the volume keeps
-// serving (§11.2).
+// This file is architecture.md, Migrations / gateway.md, Migrations: the five
+// RPCs that move one leg's side from one disk node to another while the volume
+// keeps serving (architecture.md, Migration).
 //
 // The whole feature rests on one temporary shape: between CreateMigration and
 // Finish/Cancel the leg owns TWO sides, the source and the destination, both
@@ -20,10 +20,11 @@ import (
 // a disk node no leg of the group already uses and, whenever the cluster has
 // one to offer, in a failure domain the group does not already occupy either
 // (a destination in the domain the migration was meant to leave repairs
-// nothing; §6.5's two tiers: the domain exclusion yields rather than refuse
-// the migration altogether), it must take a cntlid slot the source does not
-// hold (otherwise the two controllers a CN aggregates could pick the same
-// CNTLID and the kernel would refuse the second path, §11.8), and exactly one
+// nothing; the two tiers of architecture.md, Per-operation allocation: the
+// domain exclusion yields rather than refuse the migration altogether), it
+// must take a cntlid slot the source does not hold (otherwise the two
+// controllers a CN aggregates could pick the same CNTLID and the kernel would
+// refuse the second path, architecture.md, cntlid slots), and exactly one
 // of the two sides survives: Finish keeps the destination, Cancel keeps the
 // source.
 
@@ -38,10 +39,10 @@ const (
 )
 
 // migrMaxLegSideCnt is how many sides one leg may own: its own, plus the
-// destination of at most ONE migration (§8.11). A leg already at this count is
-// mid-migration, so CreateMigration refuses it — two concurrent migrations of
-// one leg would give the CN three paths to reconcile and leave no unambiguous
-// survivor for FinishMigration to keep.
+// destination of at most ONE migration (architecture.md, Migrations). A leg
+// already at this count is mid-migration, so CreateMigration refuses it — two
+// concurrent migrations of one leg would give the CN three paths to reconcile
+// and leave no unambiguous survivor for FinishMigration to keep.
 const migrMaxLegSideCnt = 2
 
 // migrSideIdx is the position of one side inside a leg's side_list, or -1.
@@ -75,12 +76,12 @@ func migrDropSide(leg *pb.Leg, sideId uint64) {
 // migrDstCntlidSlot is the destination side's cntlid slot [D-I]: the first
 // entry of the SP's cntlid_slot_list that differs from the source side's.
 //
-// §11.8 makes this the one slot constraint a side has. Sides of different legs
-// may share slots freely — their subsystem NQNs differ — but the two sides of
-// ONE leg are aggregated by every CN, so they must occupy different CNTLID
-// ranges. An SP whose list offers no second value cannot migrate this leg at
-// all; that is a standing property of its own configuration, hence
-// FAILED_PRECONDITION rather than a candidate problem.
+// architecture.md, cntlid slots, makes this the one slot constraint a side
+// has. Sides of different legs may share slots freely — their subsystem NQNs
+// differ — but the two sides of ONE leg are aggregated by every CN, so they
+// must occupy different CNTLID ranges. An SP whose list offers no second value
+// cannot migrate this leg at all; that is a standing property of its own
+// configuration, hence FAILED_PRECONDITION rather than a candidate problem.
 func migrDstCntlidSlot(conf *pb.SpConf, srcSlot uint32) (uint32, error) {
 	for _, slot := range conf.GetCntlidSlotList() {
 		if slot != srcSlot {
@@ -101,7 +102,7 @@ func migrDstCntlidSlot(conf *pb.SpConf, srcSlot uint32) (uint32, error) {
 // The chunks are deleted one key at a time from bm_idx 0 to bm_cnt-1: an STM
 // cannot range (EU4), and bm_cnt is exactly the number of chunks
 // AppendMigrationBitmap ever wrote, since every append takes the next index
-// and a written chunk is immutable (§8.11).
+// and a written chunk is immutable (architecture.md, Migrations).
 //
 // The caller still writes the SpConf and bumps SpRev — this helper only
 // mutates the conf in memory, so one transaction keeps one write per key.
@@ -119,13 +120,15 @@ func dropMigration(
 }
 
 // migrSrcLocation locates a CreateMigration source side and asserts its leg
-// can still take a destination (§8.11's two errors).
+// can still take a destination (the two errors of architecture.md,
+// Migrations).
 //
 // The same walk runs twice — once to plan the allocation and once inside the
 // deciding transaction — and shares one implementation so the two can never
 // disagree about what they refuse. findSide covers spare legs as well as
-// active ones, which §8.11's "any leg of the SP" asks for: a spare's side sits
-// on a disk node exactly like an active one and can be moved off it.
+// active ones, which the "any leg of the SP" of architecture.md, Migrations,
+// asks for: a spare's side sits on a disk node exactly like an active one and
+// can be moved off it.
 func migrSrcLocation(
 	conf *pb.SpConf,
 	slices []*pb.Slice,
@@ -144,10 +147,11 @@ func migrSrcLocation(
 }
 
 // errMigrRunning is the FAILED_PRECONDITION for a leg that owns more than its
-// own side: a migration is running on it (§8.11). CreateMigration raises it
-// for a source leg that cannot take a second destination, and DeleteSpareLeg
-// and SwitchSpareLeg for a leg they would release or move under that
-// migration (§8.12), so the three RPCs name the refusal the same way. The one
+// own side: a migration is running on it (architecture.md, Migrations).
+// CreateMigration raises it for a source leg that cannot take a second
+// destination, and DeleteSpareLeg and SwitchSpareLeg for a leg they would
+// release or move under that migration (architecture.md, Spare legs), so the
+// three RPCs name the refusal the same way. The one
 // exception is the re-check inside model.SwitchSpareLeg's STM: it refuses
 // only a token-less switch that raced a CreateMigration, and it keeps model's
 // own reason ("spare leg has no single side" / "target leg has no single
@@ -178,23 +182,24 @@ func getMigration(
 	return migr, nil
 }
 
-// CreateMigration is architecture.md §8.11's CreateMigration: it allocates one
-// destination disk node and hangs a second, unprovisioned Side off the source
-// side's leg.
+// CreateMigration is the CreateMigration of architecture.md, Migrations: it
+// allocates one destination disk node and hangs a second, unprovisioned Side
+// off the source side's leg.
 //
 // The destination is written `provisioned: false` ([D15]) and nothing else
-// happens yet: the dst DN runs only the §9.4 zeroing protocol, and
-// `migr_src_conf.dst_provisioned = false` keeps the source serving untouched
-// meanwhile (§11.2 phase 0). That is why this RPC allocates and writes but
+// happens yet: the dst DN runs only the zeroing protocol (architecture.md,
+// Side provisioning protocol), and `migr_src_conf.dst_provisioned = false`
+// keeps the source serving untouched meanwhile (architecture.md, Migration,
+// Phase 0). That is why this RPC allocates and writes but
 // starts no data movement — the sp-worker's later flip does.
 //
-// Shape (gateway.md §5.10): the GW9 candidate unit, each round of which plans
-// from plain pre-reads, scans and decides. The plan — the group's ext_cnt and
-// the black list — is read through a read-only snapshot so the SpConf and the
-// slices it indexes are coherent; nothing from it is trusted, since the
-// deciding STM re-locates the side and re-verifies both the pick's capacity
-// key and the plan the pick was scanned against: the group, as that STM reads
-// it, must occupy no DN the plan's read of it did not.
+// Shape (gateway.md, Migrations): the GW9 candidate unit, each round of which
+// plans from plain pre-reads, scans and decides. The plan — the group's
+// ext_cnt and the black list — is read through a read-only snapshot so the
+// SpConf and the slices it indexes are coherent; nothing from it is trusted,
+// since the deciding STM re-locates the side and re-verifies both the pick's
+// capacity key and the plan the pick was scanned against: the group, as that
+// STM reads it, must occupy no DN the plan's read of it did not.
 func (s *Server) CreateMigration(
 	ctx context.Context,
 	req *pb.CreateMigrationRequest,
@@ -226,7 +231,8 @@ func (s *Server) CreateMigration(
 		// and which disk nodes — and failure domains — it must avoid.
 		// grpDnAddrs names every DN the group already occupies through an
 		// active or a spare leg and seeds the black list; grpDnLocations
-		// turns the same set into §6.5's tier-1 exclusion, so the
+		// turns the same set into the tier-1 exclusion of architecture.md,
+		// Per-operation allocation, so the
 		// destination leaves the failure domain the migration is meant to
 		// leave, and a cluster with no other domain still places through
 		// tier 2 rather than refusing. It is read afresh every round, never
@@ -272,7 +278,7 @@ func (s *Server) CreateMigration(
 		}
 		planBlack := grpDnAddrs(planGrp)
 		// Outside the snapshot, at no cost in coherence: a location cannot
-		// change (§8.2).
+		// change (architecture.md, Disk nodes).
 		planLocs, err := grpDnLocations(ctx, s.cli, planCid, planGrp)
 		if err != nil {
 			return err
@@ -308,8 +314,9 @@ func (s *Server) CreateMigration(
 			}
 			// The topology is re-verified inside the transaction, not
 			// carried over from the plan: a side that moved between the two
-			// reads is the plain NOT_FOUND / FAILED_PRECONDITION of §8.11
-			// again, never GW9's candidate-changed retry — re-scanning disk
+			// reads is the plain NOT_FOUND / FAILED_PRECONDITION of
+			// architecture.md, Migrations, again, never GW9's
+			// candidate-changed retry — re-scanning disk
 			// nodes would not bring a side back.
 			slices, err := loadSlices(stm, sc.Cid, sc.Conf)
 			if err != nil {
@@ -335,7 +342,8 @@ func (s *Server) CreateMigration(
 			}
 			// The pick was scanned against the group as the round's plan read
 			// it: planBlack for the distinct-DN rule, and those DNs'
-			// locations for tier 1 (§6.5). A side hung off the group since —
+			// locations for tier 1 (architecture.md, Per-operation
+			// allocation). A side hung off the group since —
 			// a migration of its other leg, a spare — is missing from that
 			// plan, so the pick may sit on that side's very DN, behind a
 			// capacity key verifyPick still finds, or in its failure domain,
@@ -410,8 +418,8 @@ func (s *Server) CreateMigration(
 	return &pb.CreateMigrationReply{MigrId: migrId}, nil
 }
 
-// FinishMigration is architecture.md §8.11's FinishMigration: the destination
-// side becomes the leg's only side and the source is released.
+// FinishMigration is the FinishMigration of architecture.md, Migrations: the
+// destination side becomes the leg's only side and the source is released.
 //
 // It is two-phase (AG4) for the same reason DeleteClone is: `force == false`
 // must PROVE the dm-clone has finished hydrating before the source disappears,
@@ -422,12 +430,13 @@ func (s *Server) CreateMigration(
 // from phase 1 is trusted in phase 2: any interleaved mutation bumped SpRev,
 // so a token that was sent subsumes the staleness of everything phase 1 saw.
 // A caller that sent none gets the re-resolution but not that subsumption —
-// GW6 is presence-based (§0 #7), so an interleaved mutation stays invisible
+// GW6 is presence-based, so an interleaved mutation stays invisible
 // to it.
 //
 // An unreachable agent is FAILED_PRECONDITION, not ABORTED (AG3): the caller
-// cannot prove hydration is done, which is exactly the precondition §8.11
-// states. `force == true` skips the whole judgement and finishes regardless.
+// cannot prove hydration is done, which is exactly the precondition
+// architecture.md, Migrations, states. `force == true` skips the whole
+// judgement and finishes regardless.
 func (s *Server) FinishMigration(
 	ctx context.Context,
 	req *pb.FinishMigrationRequest,
@@ -478,7 +487,8 @@ func (s *Server) FinishMigration(
 			// A live Migration always owns both sides: Cancel removes the
 			// destination and the record together, Finish the source and the
 			// record together. A destination that is gone while the record
-			// stands is a lost invariant, which is §5.9's ABORTED.
+			// stands is a lost invariant, which is an ABORTED
+			// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 			return errAborted(
 				"migration %q destination side %d is in no leg",
 				req.GetMigrName(), migr.GetDstSideId())
@@ -489,7 +499,8 @@ func (s *Server) FinishMigration(
 			// GW7: the request named a migration, not this DN — the DN is
 			// named by the destination side, and DeleteDiskNode refuses a DN
 			// whose side_ptr_list is non-empty. Its absence is a lost
-			// invariant key, which is §5.9's ABORTED.
+			// invariant key, which is an ABORTED (architecture.md,
+			// UNEXPECTED_ERROR → `ABORTED`).
 			return errAborted("dn_conf key %q is missing", dnKey)
 		}
 		phaseDnId = dn.GetDnId()
@@ -556,7 +567,8 @@ func (s *Server) FinishMigration(
 		if migrSideIdx(loc.Leg, migr.GetDstSideId()) < 0 {
 			// The two sides must share one leg: they export the same NQN and
 			// the CN aggregates them as the paths of one namespace. If they
-			// do not, the leg is not in the shape §8.11 finishes.
+			// do not, the leg is not in the shape architecture.md, Migrations,
+			// finishes.
 			return errAborted(
 				"migration %q sides %d and %d are not in one leg",
 				req.GetMigrName(), migr.GetSrcSideId(), migr.GetDstSideId())
@@ -564,7 +576,8 @@ func (s *Server) FinishMigration(
 		// The source's extents go back to its DN and its pointer disappears,
 		// which is what makes the src agent tear the side down on its next
 		// syncup. One flush = one DnConf write, one capacity key, one DnRev
-		// bump (§5.5, §5.6).
+		// bump (architecture.md, Revision keys and the sync fan-out;
+		// architecture.md, Capacity index keys).
 		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
 		if err != nil {
 			return err
@@ -590,15 +603,16 @@ func (s *Server) FinishMigration(
 	return &pb.FinishMigrationReply{MigrId: migrId}, nil
 }
 
-// CancelMigration is architecture.md §8.11's CancelMigration: the mirror
-// rollback of CreateMigration, in one STM.
+// CancelMigration is the CancelMigration of architecture.md, Migrations: the
+// mirror rollback of CreateMigration, in one STM.
 //
 // It is a single transaction where FinishMigration needs two because it
 // answers a question no agent has to be consulted about: whatever the
 // destination has copied is thrown away, so there is nothing to prove. The
 // source side is left exactly as it was and returns to normal service on its
 // next SyncupSide; the destination DN sees its pointer disappear and tears the
-// stack down, including the migration's local bitmap files (§9.6).
+// stack down, including the migration's local bitmap files (architecture.md,
+// Bitmap push protocol).
 func (s *Server) CancelMigration(
 	ctx context.Context,
 	req *pb.CancelMigrationRequest,
@@ -639,7 +653,7 @@ func (s *Server) CancelMigration(
 		}
 		// The destination's extents return to its DN and its pointer goes,
 		// which is the whole rollback: the source side was never touched, so
-		// it needs nothing done to it here (§8.11).
+		// it needs nothing done to it here (architecture.md, Migrations).
 		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
 		if err != nil {
 			return err
@@ -665,9 +679,10 @@ func (s *Server) CancelMigration(
 	return &pb.CancelMigrationReply{MigrId: migrId}, nil
 }
 
-// GetMigration is architecture.md §8.11's GetMigration: one read-only
-// transaction (§5.8), so the SpConf that resolves the key and the Migration it
-// addresses are read at one store revision. It carries no token — a read never
+// GetMigration is the GetMigration of architecture.md, Migrations: one
+// read-only transaction (architecture.md, STM discipline), so the SpConf that
+// resolves the key and the Migration it addresses are read at one store
+// revision. It carries no token — a read never
 // needs one — and the Migration is replied verbatim, bm_cnt included, which is
 // what tells a caller how many bitmap chunks it has already appended.
 func (s *Server) GetMigration(
@@ -700,9 +715,10 @@ func (s *Server) GetMigration(
 	return &pb.GetMigrationReply{Migr: migr}, nil
 }
 
-// AppendMigrationBitmap is architecture.md §8.11's AppendMigrationBitmap: it
-// stores one more chunk of the optional "never written, skippable" bitmap the
-// destination uses to avoid copying blocks that hold nothing (§11.4).
+// AppendMigrationBitmap is the AppendMigrationBitmap of architecture.md,
+// Migrations: it stores one more chunk of the optional "never written,
+// skippable" bitmap the destination uses to avoid copying blocks that hold
+// nothing (architecture.md, raid0 bitmap math).
 //
 // The chunk lands at bm_idx = the CURRENT bm_cnt and the count then advances,
 // which is the whole append rule: a written chunk is immutable, so the index

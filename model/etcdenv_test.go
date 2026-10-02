@@ -29,7 +29,7 @@ import (
 // than factored into a package of its own: it is a test fixture, and a shared
 // one would put a third package between model and etcdutil for no gain.
 // Everything here goes through etcdutil, so model's tests import no etcd
-// client either (layout.md §3).
+// client either (layout.md, Dependency rules).
 
 // testEndpoint is the client URL of the etcd started by TestMain, empty when
 // no etcd binary was found.
@@ -101,10 +101,11 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// architecture.md §13: dnv requires --max-txn-ops=common.EtcdMaxTxnOps
-		// of every etcd it runs against; the server's own default is 128,
-		// below CreateStoragePool's 967-compare maximum shape, which is what
-		// SIZES the requirement (gateway.md §2.1), and below the 486 compares
+		// architecture.md, Components: invocation reference: dnv requires
+		// --max-txn-ops=common.EtcdMaxTxnOps of every etcd it runs against;
+		// the server's own default is 128, below CreateStoragePool's
+		// 967-compare maximum shape, which is what SIZES the requirement
+		// (gateway.md, Additions to `common/constants.go`), and below the 486 compares
 		// one maximum-shape sp-drain batch reaches (SPD13) — and THIS package
 		// commits that batch, in TestDrainSpSliceAtTheCeiling (SPD14), as it
 		// commits the created flip's 514-compare transactions (RW19) in
@@ -162,7 +163,7 @@ func waitForEtcd(endpoint string) error {
 
 func TestMain(m *testing.M) {
 	// model logs nothing of its own, but every etcdutil call it makes emits
-	// a log.md §5.3 record. The tests assert behavior, not logs, so the
+	// a record of log.md, etcd. The tests assert behavior, not logs, so the
 	// records go nowhere and keep the test output readable.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if bin := findEtcdBin(); bin != "" {
@@ -212,11 +213,13 @@ func newTestClient(t *testing.T) *etcdutil.Client {
 }
 
 // testCid gives each test its own cluster id, so that the shared etcd needs no
-// cleanup between tests: two clusters never share a key (§5.2).
+// cleanup between tests: two clusters never share a key (architecture.md,
+// cluster_id derivation).
 func testCid(t *testing.T) uint64 {
 	t.Helper()
 	// The creation epoch is a per-invocation counter, not 0: ClusterId folds
-	// it in (§5.2), so every call — including the second and third iteration
+	// it in (architecture.md, cluster_id derivation), so every call —
+	// including the second and third iteration
 	// of the same test under `go test -count=3`, and two tests running in
 	// parallel — gets its own key space. Deriving it from t.Name() alone made
 	// a test that writes keys and does not delete them see its previous

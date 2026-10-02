@@ -25,8 +25,9 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Harness: one fake agent behind the real §4 server interceptors on bufconn,
-// exactly as main() wires it (common/interceptor_test.go's house pattern).
+// Harness: one fake agent behind the real server interceptors (grpc.md,
+// Wiring) on bufconn, exactly as main() wires it (common/interceptor_test.go's
+// house pattern).
 // ---------------------------------------------------------------------------
 
 func newTestAgent(t *testing.T) *fakeAgent {
@@ -131,7 +132,7 @@ func wantKeys[V any](t *testing.T, name string, m map[uint64]V, want ...uint64) 
 }
 
 // ---------------------------------------------------------------------------
-// behavior.json parsing (§14.9)
+// behavior.json parsing (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
 func TestParseBehaviorBothStatusSpellings(t *testing.T) {
@@ -167,7 +168,7 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 		t.Errorf("cn status = %v", cn.status)
 	}
 	// The full RES_STATUS_* spelling must resolve to the same enum as the
-	// short one (§14.9: "Accept BOTH").
+	// short one.
 	if got := cn.Rows["port_info"].status; got !=
 		pb.ResStatus_RES_STATUS_ERROR {
 		t.Errorf("cn port_info status = %v", got)
@@ -199,10 +200,10 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 	}
 }
 
-// TestParseResStatusNames pins the §14.9 status vocabulary: every ResStatus
-// value parses in both spellings, so a behavior file can plant any row a real
-// agent can report — PENDING included, the cn agent's leg row before its
-// prober completes a round (cnagent.md CN11).
+// TestParseResStatusNames pins the behavior file's status vocabulary: every
+// ResStatus value parses in both spellings, so a behavior file can plant any
+// row a real agent can report — PENDING included, the cn agent's leg row
+// before its prober completes a round (cnagent.md CN11).
 func TestParseResStatusNames(t *testing.T) {
 	for value, name := range pb.ResStatus_name {
 		want := pb.ResStatus(value)
@@ -258,9 +259,9 @@ func TestParseBehaviorMalformed(t *testing.T) {
 	}
 }
 
-// TestBehaviorReloadKeepsPreviousOnMalformed is §14.9's "a malformed
-// behavior.json must be logged and IGNORED": the agent must keep answering
-// with the last good behaviour instead of dying.
+// TestBehaviorReloadKeepsPreviousOnMalformed pins that a malformed
+// behavior.json is logged and IGNORED: the agent must keep answering with the
+// last good behaviour instead of dying.
 func TestBehaviorReloadKeepsPreviousOnMalformed(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -317,7 +318,7 @@ func TestBehaviorReloadKeepsPreviousOnMalformed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The revision gate (§14.9)
+// The revision gate (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
 // syncupDn is the fixture every side test needs first: the DN must know the
@@ -369,9 +370,10 @@ func syncupSide(
 	return reply
 }
 
-// TestGateStaleSyncupRevision covers §14.9's first rejection: a Syncup* whose
-// revision is lower than the stored one is ReplyCodeStaleRevision, and the
-// reply still reports the agent's own (higher) revision.
+// TestGateStaleSyncupRevision covers the revision gate (dnv-worker.md,
+// Integration test plan, The fake agent): a Syncup* whose revision is lower
+// than the stored one is ReplyCodeStaleRevision, and the reply still reports
+// the agent's own (higher) revision.
 func TestGateStaleSyncupRevision(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
@@ -388,7 +390,8 @@ func TestGateStaleSyncupRevision(t *testing.T) {
 	if reply.GetRevision() != 2 {
 		t.Errorf("rejected reply revision = %d, want 2", reply.GetRevision())
 	}
-	// Equal revisions re-apply (workers retry), architecture.md §9.1.
+	// Equal revisions re-apply (workers retry): the Revision gate of
+	// architecture.md, Common agent rules.
 	if code := syncupDn(t, dnClient, 2).GetAgentReply().GetCode(); code != 0 {
 		t.Errorf("SyncupDn at the equal revision code = %d, want 0", code)
 	}
@@ -415,12 +418,12 @@ func TestGateStaleSyncupRevision(t *testing.T) {
 	}
 }
 
-// TestPushIsNotGatedOnRevision is what [D13] left of §14.9's old second
-// rejection: a Push* carries no revision at all, so the fake's gatePushLocked
-// has nothing to compare and a chunk planned against a report the desired
-// state has since superseded is still recorded. The descriptor check is the
-// part a future edit cannot quietly undo — a revision field could only come
-// back by being added to the proto again.
+// TestPushIsNotGatedOnRevision is what [D13] left of the fake agent's old
+// second rejection (BM3): a Push* carries no revision at all, so the fake's
+// gatePushLocked has nothing to compare and a chunk planned against a report
+// the desired state has since superseded is still recorded. The descriptor
+// check is the part a future edit cannot quietly undo — a revision field could
+// only come back by being added to the proto again.
 func TestPushIsNotGatedOnRevision(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
@@ -523,9 +526,9 @@ func TestForcedReplyCodeCarriesLeftover(t *testing.T) {
 	}
 }
 
-// TestGateUnknownPushId covers §14.9's third rejection: a Push* naming a
-// migr_id/clone_id absent from the object's last applied request is
-// ReplyCodeUnknownObject.
+// TestGateUnknownPushId covers the fake's push refusal (dnv-worker.md,
+// Integration test plan, The fake agent): a Push* naming a migr_id/clone_id
+// absent from the object's last applied request is ReplyCodeUnknownObject.
 func TestGateUnknownPushId(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
@@ -596,8 +599,9 @@ func TestGateUnknownPushId(t *testing.T) {
 	}
 }
 
-// TestGateOrderingUnknownChild covers §14.9's fourth rejection, the real
-// agents' ordering rule the worker's independent roles must survive: a side
+// TestGateOrderingUnknownChild covers the fake's ordering rejection
+// (dnv-worker.md, Integration test plan, The fake agent), the real agents'
+// ordering rule the worker's independent roles must survive: a side
 // absent from the DN's last SyncupDn — or a cntlr absent from the CN's last
 // SyncupCn — is ReplyCodeUnknownObject on Syncup*, Check* and Get*Info alike.
 func TestGateOrderingUnknownChild(t *testing.T) {
@@ -651,7 +655,8 @@ func TestGateOrderingUnknownChild(t *testing.T) {
 		GetCode(); got != 0 {
 		t.Fatalf("SyncupSide for a listed pointer code = %d, want 0", got)
 	}
-	// ... and dropping it again forgets the side (architecture.md §9.1).
+	// ... and dropping it again forgets the side (the Full sync rule of
+	// architecture.md, Common agent rules).
 	syncupDn(t, dnClient, 3)
 	if got := syncupSide(t, dnClient, ptr, 3, 0).GetAgentReply().
 		GetCode(); got != common.ReplyCodeUnknownObject {
@@ -676,8 +681,9 @@ func TestGateOrderingUnknownChild(t *testing.T) {
 
 // TestForcedReplyCodeRejects covers behavior.json's reply_code lever: it
 // forces agent_reply.code on every reply of the object and, because a
-// rejected request must not have been applied, suppresses the apply — §14.11
-// case C step 6 clears the lever and expects the push to still be missing.
+// rejected request must not have been applied, suppresses the apply —
+// worker_test.sh case C step 6 clears the lever and expects the push to still
+// be missing.
 func TestForcedReplyCodeRejects(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -708,12 +714,13 @@ func TestForcedReplyCodeRejects(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// *Info derivation (§14.9)
+// *Info derivation (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
-// cntlrFixture is the §14.11-shaped SyncupCntlrRequest the derivation tests
-// assert against: two slices, a meta and a data group with a spare leg each,
-// two tds, one subsystem with two namespaces, one clone and one xfer.
+// cntlrFixture is a SyncupCntlrRequest shaped like worker_test.sh's cases,
+// which the derivation tests assert against: two slices, a meta and a data
+// group with a spare leg each, two tds, one subsystem with two namespaces, one
+// clone and one xfer.
 func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
 	return &pb.SyncupCntlrRequest{
 		ClusterId:    1,
@@ -817,8 +824,8 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	wantKeys(t, "slice_id_to_meta", info.GetSliceIdToMeta(), 1, 2)
 	wantKeys(t, "slice_id_to_data", info.GetSliceIdToData(), 1, 2)
 	wantKeys(t, "grp_id_to_md_raid", info.GetGrpIdToMdRaid(), 11, 12, 21)
-	// One row per leg AND per SPARE leg of every group (§14.9): 102 and 202
-	// are the spares, and §14.11 case D step 7 reads exactly them.
+	// One row per leg AND per SPARE leg of every group: 102 and 202 are the
+	// spares, and worker_test.sh case D step 7 reads exactly them.
 	wantKeys(t, "leg_id_to_leg", info.GetLegIdToLeg(),
 		101, 102, 103, 104, 201, 202)
 	wantKeys(t, "td_id_to_raid0", info.GetTdIdToRaid0(), 7, 8)
@@ -855,7 +862,8 @@ func TestCntlrInfoDerivation(t *testing.T) {
 		t.Errorf("leg_id_to_leg.101 status = %v, want the default OK", got)
 	}
 
-	// bm_info_list: one entry per clone, res_id = clone_id (§9.6).
+	// bm_info_list: one entry per clone, res_id = clone_id (architecture.md,
+	// Bitmap push protocol).
 	if len(reply.GetBmInfoList()) != 1 ||
 		reply.GetBmInfoList()[0].GetResId() != 41 {
 		t.Errorf("bm_info_list = %v, want one entry for clone 41",
@@ -863,9 +871,10 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	}
 }
 
-// TestCntlrInfoWhenPrimary is §14.9's when_primary: the row override applies
-// only while the cntlr's last applied request carries cntlr.primary = true,
-// and an ungated override beside it applies either way.
+// TestCntlrInfoWhenPrimary is the fake's when_primary (dnv-worker.md,
+// Integration test plan, The fake agent): the row override applies only while
+// the cntlr's last applied request carries cntlr.primary = true, and an ungated
+// override beside it applies either way.
 func TestCntlrInfoWhenPrimary(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {"rows": {
 	  "slice_id_to_dm_pool.1": {"status": "ERROR", "details": "settling test",
@@ -982,9 +991,10 @@ func TestCntlrInfoThinRows(t *testing.T) {
 	}
 }
 
-// TestSideInfoDerivation asserts the §14.9 SideInfo shape: one row per
+// TestSideInfoDerivation asserts the fake's SideInfo shape: one row per
 // per-CN export stack, the migration roles only when their conf rode along,
-// and the §9.4 counters (total = ext_cnt, zeroed = total by default).
+// and the provisioning counters of architecture.md, Side provisioning protocol
+// (total = ext_cnt, zeroed = total by default).
 func TestSideInfoDerivation(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -1010,8 +1020,8 @@ func TestSideInfoDerivation(t *testing.T) {
 		t.Errorf("side_dev_info res_name = %q", got)
 	}
 
-	// The destination role and a partial-zeroing override (§14.11 case F
-	// step 2 holds a side unprovisioned exactly this way).
+	// The destination role and a partial-zeroing override (worker_test.sh case
+	// F step 2 holds a side unprovisioned exactly this way).
 	writeFile(t, agent, behaviorFileName, `{
 	  "objects": {"side 1:3:5": {"zeroed_ext_cnt": 0,
 	    "rows": {"side_dev_info": {"status": "PROVISIONING"}}}}
@@ -1083,11 +1093,12 @@ func TestDnAndCnInfoRows(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The Check streams (§14.9, architecture.md §9.7)
+// The Check streams (dnv-worker.md, Integration test plan, The fake agent;
+// architecture.md, Check streams)
 // ---------------------------------------------------------------------------
 
-// TestCheckDnChangeOnlyInfo is §14.11 case S step 2's "show_info false after
-// the first": the first reply on a fresh stream always carries the full
+// TestCheckDnChangeOnlyInfo is worker_test.sh case S step 2's "show_info false
+// after the first": the first reply on a fresh stream always carries the full
 // info, show_info = false carries it only when something changed, and
 // show_info = true always carries it.
 func TestCheckDnChangeOnlyInfo(t *testing.T) {
@@ -1165,10 +1176,11 @@ func TestCheckDnChangeOnlyInfo(t *testing.T) {
 	stream2.CloseSend()
 }
 
-// TestCheckCntlrHang is §14.9's hang lever: the round is accepted and not
-// answered while the lever is set, so the worker's round times out (§14.11
-// case B step 4), and the handler ends promptly both when the worker gives up
-// on the stream and when the script clears the lever.
+// TestCheckCntlrHang is the fake's hang lever (dnv-worker.md,
+// Integration test plan, The fake agent): the round is accepted and not
+// answered while the lever is set, so the worker's round times out
+// (worker_test.sh case B step 4), and the handler ends promptly both when the
+// worker gives up on the stream and when the script clears the lever.
 func TestCheckCntlrHang(t *testing.T) {
 	agent := newTestAgent(t)
 	_, cnClient := startAgent(t, agent)
@@ -1245,7 +1257,8 @@ func TestCheckCntlrHang(t *testing.T) {
 	stream2.CloseSend()
 }
 
-// TestCheckSideDropStream is §14.9's drop_stream lever.
+// TestCheckSideDropStream is the fake's drop_stream lever (dnv-worker.md,
+// Integration test plan, The fake agent).
 func TestCheckSideDropStream(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -1270,12 +1283,12 @@ func TestCheckSideDropStream(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// state.json (§14.9)
+// state.json (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
-// TestStateSurvivesRestart is §14.11 case B step 5: a killed and restarted
-// fake reports the stored revision (so the worker does not re-sync) and the
-// bm_idx_list derived from the recorded chunks.
+// TestStateSurvivesRestart is worker_test.sh case B step 5: a killed and
+// restarted fake reports the stored revision (so the worker does not re-sync)
+// and the bm_idx_list derived from the recorded chunks.
 func TestStateSurvivesRestart(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -1375,8 +1388,8 @@ func readStateChunks(
 	return obj.Chunks[strconv.FormatUint(resId, 10)]
 }
 
-// TestCloneChunkKeysAndChunkIdList pins the clone half of the §14.9 state.json
-// contract: a clone chunk is recorded under the decimal
+// TestCloneChunkKeysAndChunkIdList pins the clone half of the fake's
+// state.json contract: a clone chunk is recorded under the decimal
 // "{src_slice_idx}:{bm_idx}" pair that addresses it, two source slices sharing
 // a bm_idx are two distinct chunks, a re-push at the same pair only updates
 // the recorded length (the grown chunk of [D8]/BM5), and the derived set rides
@@ -1413,9 +1426,9 @@ func TestCloneChunkKeysAndChunkIdList(t *testing.T) {
 	}
 }
 
-// TestCloneChunksSurviveRestart is §14.11 case B step 5 for clones: a killed
-// and restarted fake derives the same chunk_id_list from the recorded chunks,
-// pairs and all.
+// TestCloneChunksSurviveRestart is worker_test.sh case B step 5 for clones: a
+// killed and restarted fake derives the same chunk_id_list from the recorded
+// chunks, pairs and all.
 func TestCloneChunksSurviveRestart(t *testing.T) {
 	agent := newTestAgent(t)
 	_, cnClient := startAgent(t, agent)
@@ -1494,8 +1507,9 @@ func TestAppliedSetOverrides(t *testing.T) {
 	}
 }
 
-// TestStateHandEdit is §14.11 case A step 3: the script rewrites a stored
-// revision in state.json while the fake runs, and the next round must see it.
+// TestStateHandEdit is worker_test.sh case A step 3: the script rewrites a
+// stored revision in state.json while the fake runs, and the next round must
+// see it.
 func TestStateHandEdit(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)

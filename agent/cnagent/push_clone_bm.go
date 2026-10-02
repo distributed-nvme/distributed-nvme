@@ -66,7 +66,8 @@ func (s *CnAgentServer) pushCloneBitmap(
 		ptr.GetSpId(), req.GetCloneId(), req.GetSrcSliceIdx(), req.GetBmIdx())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		// Not persisted ⇒ not applied: the chunk stays out of the applied
-		// set, so the worker re-pushes it on its next round (§9.6).
+		// set, so the worker re-pushes it on its next round (architecture.md,
+		// Bitmap push protocol).
 		slog.ErrorContext(ctx, "persisting clone bitmap chunk failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))

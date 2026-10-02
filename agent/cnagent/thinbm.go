@@ -14,9 +14,11 @@ import (
 )
 
 // thinbm.go is the dm-thin metadata reader behind GetThinDeviceBm / GetLegBm
-// (CN25-CN27) and the §11.4 geometry folds used by PushCloneBitmap (CN22) and
-// by the §11.5 clone recovery. thin-provisioning-tools has a single role, so
-// by the dnagent.md §1 split rule this wrapper is role code.
+// (CN25-CN27) and the geometry folds of architecture.md, raid0 bitmap math,
+// used by PushCloneBitmap (CN22) and by the clone recovery of
+// architecture.md, Clone crash recovery. thin-provisioning-tools has a single
+// role, so by the split rule of dnagent.md, Scope and placement, this wrapper
+// is role code.
 
 // ---------------------------------------------------------------------------
 // thin_dump XML
@@ -169,7 +171,8 @@ func (s *CnAgentServer) dumpThinMetadata(
 	}
 	// A dump the soft timeout truncated, or a shared subtree the parser
 	// mishandled, both show up here — and a wrong bitmap is worse than no
-	// bitmap (§8.9: bitmaps are an optimization, never a correctness input).
+	// bitmap (architecture.md, Clones: bitmaps are an optimization, never a
+	// correctness input).
 	defs := sb.defExtents()
 	for i := range sb.Devices {
 		var mapped uint64
@@ -370,8 +373,8 @@ func clipRange(lo, hi, windowLo, windowHi uint64) (uint64, uint64) {
 
 // thinDeviceBitmap is the mapping bitmap of one thin volume over its virtual
 // blocks: bit k = 1 iff block start+k is **unmapped**. Thin metadata answers
-// "mapped = written", and this boundary is where the §11.4 wire convention
-// inverts — exactly once.
+// "mapped = written", and this boundary is where the wire convention of
+// architecture.md, raid0 bitmap math, inverts — exactly once.
 func thinDeviceBitmap(
 	extents []thinExtent,
 	start uint64,
@@ -433,12 +436,14 @@ func legDataBitmap(
 }
 
 // ---------------------------------------------------------------------------
-// The §11.4 raid0 fold (CN22 and the §11.5 recovery)
+// The raid0 fold of architecture.md, raid0 bitmap math (CN22 and the
+// recovery of architecture.md, Clone crash recovery)
 // ---------------------------------------------------------------------------
 
 // sliceBitmap is one underlying device's bitmap in the fold, held as the
 // self-positioned chunks it arrives in: chunk b carries bytes
-// [b*C, b*C+len) of the slice's bitmap, C = common.CloneBmChunkBytes (§9.6).
+// [b*C, b*C+len) of the slice's bitmap, C = common.CloneBmChunkBytes
+// (architecture.md, Bitmap push protocol).
 // The fold consumes them in place — nothing here reassembles a slice bitmap,
 // because chunks may be missing and a concatenation would place every later
 // chunk at the wrong offset. A nil or empty map is simply never skippable.
@@ -467,7 +472,8 @@ func (b sliceBitmap) skippable(idx uint64) bool {
 }
 
 // chunksOf cuts a whole slice bitmap into the C-sized chunks sliceBitmap
-// addresses. The §11.5 recovery builds its per-slice bitmaps locally rather
+// addresses. The recovery of architecture.md, Clone crash recovery, builds its
+// per-slice bitmaps locally rather
 // than receiving them as chunks, so it must split them here: handing the whole
 // bitmap over as chunk 0 would leave every bit past the first C bytes
 // unreachable, and unreachable reads as written — silently stopping the skip
@@ -485,7 +491,8 @@ func chunksOf(bitmap []byte) map[uint32][]byte {
 	return out
 }
 
-// raid0Geometry is one side of the §11.4 address mapping.
+// raid0Geometry is one side of the address mapping of architecture.md, raid0
+// bitmap math.
 type raid0Geometry struct {
 	sliceCnt   uint64
 	stripeSize uint64
@@ -498,7 +505,8 @@ func (g raid0Geometry) valid() bool {
 }
 
 // regionSkippable decides one dm-clone region. Region r covers logical bytes
-// [r*regionSize, (r+1)*regionSize); §11.4 maps a byte offset to stripe chunk
+// [r*regionSize, (r+1)*regionSize); architecture.md, raid0 bitmap math, maps
+// a byte offset to stripe chunk
 // c = off/stripe_size on slice c mod slice_cnt at slice-local offset
 // (c div slice_cnt)*stripe_size, and the source bit is that offset divided by
 // the source block_size. Because block_size is a whole multiple of
@@ -627,13 +635,15 @@ func (s *CnAgentServer) applyCloneChunks(
 	}
 }
 
-// applyDstBitmaps is the §11.5 recovery, B-side of §11.4: read the
+// applyDstBitmaps is the recovery of architecture.md, Clone crash recovery,
+// B-side of architecture.md, raid0 bitmap math: read the
 // destination td's mapping bitmap from every slice pool and blkdiscard every
 // region the destination already owns. "Mapped ⇔ already copied" holds because
 // the dst td started empty ([D3]).
 //
 // It fails closed: every error is returned rather than logged, because a
-// partially applied destination bitmap is exactly the §11.5 staleness hazard
+// partially applied destination bitmap is exactly the staleness hazard of
+// architecture.md, Clone crash recovery
 // — the caller must not let the dm-clone serve or hydrate after one.
 func (s *CnAgentServer) applyDstBitmaps(
 	ctx context.Context,

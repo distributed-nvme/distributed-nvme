@@ -11,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// CN24 instantiates the SH24-SH26 check loop with the §4.12 probes: rounds are
+// CN24 instantiates the SH24-SH26 check loop with the CN28 probes: rounds are
 // worker-initiated, exactly one reply per received request, never an
 // unsolicited send. The info rides along when show_info is set, on the first
 // reply of the stream, and whenever the freshly probed info differs from the

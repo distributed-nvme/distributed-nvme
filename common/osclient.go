@@ -24,11 +24,12 @@ import (
 //
 // All OS command execution and disk file I/O in the codebase goes through an
 // OsClient; os/exec and os.ReadFile/os.WriteFile are never called directly
-// outside this file (osclient.md §1). That is what makes the logging rules of
-// log.md R8.1/R8.2 enforceable, and every consumer unit-testable through
-// FakeOsClient.
+// outside this file (osclient.md, Scope and placement). That is what makes
+// the logging rules of log.md R8.1/R8.2 enforceable, and every consumer
+// unit-testable through FakeOsClient.
 //
-// One carve-out is recorded (osclient.md §4.5.1): the CN11
+// One carve-out is recorded (osclient.md, Exported raw helpers and the
+// probe-IO carve-out): the CN11
 // leg health prober calls the raw helpers WriteBlockAt / ReadBlockDirectAt
 // directly, because its IO may block indefinitely by design — a pathless leg
 // queues IO forever — and must never hold one of the LimitedOsClient's
@@ -72,8 +73,9 @@ type OsClient interface {
 	// a temp file in the same directory is written, fsynced and renamed onto
 	// path, so readers never observe a partial file, and the directory is
 	// fsynced after the rename, so a replacement that returned nil survives a
-	// crash (architecture.md §9.1). A failed directory fsync fails the write,
-	// with the new file already in place at path.
+	// crash (architecture.md, Common agent rules, Local store). A failed
+	// directory fsync fails the write, with the new file already in place at
+	// path.
 	WriteFile(ctx context.Context, path string, data string) (err error)
 
 	// WriteFileDirect writes data straight into the file at path with a
@@ -148,7 +150,7 @@ func (c *LimitedOsClient) RunCommand(
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	// architecture.md §7: SIGTERM at the (caller-set) soft timeout,
+	// architecture.md, Common validation: SIGTERM at the (caller-set) soft timeout,
 	// SIGKILL at the hard timeout.
 	cmd.Cancel = func() error {
 		return cmd.Process.Signal(syscall.SIGTERM)
@@ -258,8 +260,9 @@ func (c *LimitedOsClient) WriteFileDirect(
 // side. No O_DIRECT — of the regions they touch only a clone-metadata slot is
 // ever part of a dm table, and there the agent only ever WRITES, before the
 // slot's wrapper dm-linear exists, so page-cache aliasing cannot occur
-// (osclient.md §4.5) — and never a shell-out to dd, whose uutils build
-// silently mishandles iflag=/oflag=direct (dnagent_integtest.md §4).
+// (osclient.md, ReadBlock / WriteBlock) — and never a shell-out to dd, whose
+// uutils build silently mishandles iflag=/oflag=direct (dnagent_integtest.md,
+// Assumptions and preflight checks).
 func (c *LimitedOsClient) ReadBlock(
 	ctx context.Context,
 	path string,
@@ -349,7 +352,8 @@ func (c *LimitedOsClient) WriteBlock(
 // It is the raw helper behind OsClient.WriteBlock. It takes no context, does
 // no logging and holds no semaphore slot, so a caller that uses it directly
 // MUST emit its own log record. The only sanctioned direct caller is the CN11
-// leg health prober (osclient.md §4.5.1): its IO may block
+// leg health prober (osclient.md, Exported raw helpers and the probe-IO
+// carve-out): its IO may block
 // for as long as the device queues IO, and it must never occupy an OsClient
 // slot — nor run under a lock — while it does (cnagent.md CN1/CN11).
 func WriteBlockAt(path string, offset uint64, data []byte) error {
@@ -374,10 +378,11 @@ func WriteBlockAt(path string, offset uint64, data []byte) error {
 var rawOpen = syscall.Open
 
 // ReadBlockDirectAt reads exactly length bytes at byte offset with O_DIRECT,
-// so the read is served by the device and not by the page cache: the §3.6 leg
-// health probe writes a block through a device and must read it back *from the
-// device*, and a buffered read of a just-written block would be answered from
-// cache and observe no IO at all.
+// so the read is served by the device and not by the page cache: the leg
+// health probe (architecture.md, Group on-leg layout: meta region, data
+// region, health block) writes a block through a device and must read it back
+// *from the device*, and a buffered read of a just-written block would be
+// answered from cache and observe no IO at all.
 //
 // offset and length MUST be multiples of 4096; the check happens before the
 // open, so a misaligned caller never touches the device at all. The pread
@@ -390,8 +395,8 @@ var rawOpen = syscall.Open
 // precisely why it lives outside the OsClient: a wedged probe
 // must not consume one of the DefaultOsClientLimit slots the node's teardown
 // commands need. The only sanctioned direct caller is the CN11 leg health
-// prober, and it must never run under a lock (osclient.md §4.5.1,
-// cnagent.md CN1/CN11).
+// prober, and it must never run under a lock (osclient.md, Exported raw
+// helpers and the probe-IO carve-out; cnagent.md CN1/CN11).
 //
 // The descriptor is opened O_CLOEXEC, as os.OpenFile opens every one;
 // syscall.Open does not add it. The read can block for as long as the device
@@ -518,7 +523,8 @@ var syncDir = func(dir string) error {
 const AtomicWriteTmpInfix = ".tmp-"
 
 // atomicWrite implements the temp-file + fsync + rename + directory-fsync
-// protocol of architecture.md §9.1: readers never observe a partial file, and
+// protocol of architecture.md, Common agent rules, Local store: readers
+// never observe a partial file, and
 // a write that returned nil survives a crash. The rename is a change to the
 // directory, so until the directory itself is fsynced a crash can undo it —
 // bring the old file back or, for a first write, leave none — however durable

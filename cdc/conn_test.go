@@ -14,9 +14,9 @@ import (
 )
 
 // The NP3-NP13 tests: a real listener, the real codec and the in-process fake
-// host of §8 on the other end of a loopback socket. Nothing is mocked between
-// the test's bytes and the connection state machine, so every assertion here
-// is one a Linux host would make.
+// host (NP2, NP3) on the other end of a loopback socket. Nothing is mocked
+// between the test's bytes and the connection state machine, so every
+// assertion here is one a Linux host would make.
 
 // The two hostnqns the connection tests connect as.
 const (
@@ -303,7 +303,7 @@ func TestFirstCapsuleMustBeConnect(t *testing.T) {
 
 // TestConnectHappyPath proves NP5: a CNTLID out of the dynamic range, the
 // connection registered under its hostnqn (DS7) and the `host connected`
-// record of §7.
+// record of cdc.md, Log records.
 func TestConnectHappyPath(t *testing.T) {
 	logs := captureLogs(t)
 	ts := startServer(t)
@@ -892,7 +892,7 @@ func TestTransfersHonorTheSglLength(t *testing.T) {
 }
 
 // TestGetLogPageRaeIsAcceptedAndIgnored proves NP8's RAE rule: event clearing
-// is delivery-based (§0 #7), so the bit changes neither the answer nor the
+// is delivery-based (NP11), so the bit changes neither the answer nor the
 // connection's pending state.
 func TestGetLogPageRaeIsAcceptedAndIgnored(t *testing.T) {
 	ts := startServer(t)
@@ -933,9 +933,9 @@ func TestGetLogPageServesASnapshot(t *testing.T) {
 }
 
 // TestLogPageIsFilteredPerHost proves DS4/DS5 through the socket, which is the
-// reason this controller exists at all (§0 #1): two hosts connected to one
-// instance are served different logs, and an entry with an empty
-// allowed_hosts is served to both.
+// reason this controller exists at all (cdc.md, Scope and placement): two
+// hosts connected to one instance are served different logs, and an entry
+// with an empty allowed_hosts is served to both.
 func TestLogPageIsFilteredPerHost(t *testing.T) {
 	ts := startServer(t)
 	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:shared", "10.0.0.1", "4420"))
@@ -971,9 +971,9 @@ func TestLogPageIsFilteredPerHost(t *testing.T) {
 // Features (NP9)
 // ---------------------------------------------------------------------------
 
-// TestFeaturesAenConfigGatesAens proves NP9 and §0 #8: an impact on a host
-// that has not enabled the discovery-log-change notice delivers nothing, and
-// enabling it afterwards releases the AEN that was already pending.
+// TestFeaturesAenConfigGatesAens proves NP9: an impact on a host that has not
+// enabled the discovery-log-change notice delivers nothing, and enabling it
+// afterwards releases the AEN that was already pending.
 func TestFeaturesAenConfigGatesAens(t *testing.T) {
 	logs := captureLogs(t)
 	ts := startServer(t)
@@ -1098,7 +1098,7 @@ func TestAerImpactedThenArmedCompletesImmediately(t *testing.T) {
 	}
 }
 
-// TestAerImpactsCoalesce proves §0 #7: several impacts before a delivery are
+// TestAerImpactsCoalesce proves NP11: several impacts before a delivery are
 // one pending bit, so the host gets exactly one AEN and re-reads the log once.
 func TestAerImpactsCoalesce(t *testing.T) {
 	ts := startServer(t)
@@ -1204,7 +1204,7 @@ func connConnectWithKato(
 
 // TestKeepAliveExpiresAtKatoPlusGrace proves NP10: a KATO > 0 connection
 // survives to its deadline and is reaped past it, with the `host disconnected`
-// reason of §7.
+// reason of cdc.md, Log records.
 func TestKeepAliveExpiresAtKatoPlusGrace(t *testing.T) {
 	logs := captureLogs(t)
 	ts := startServer(t)
@@ -1288,7 +1288,7 @@ func TestKeepAliveFollowsSetFeatures0Fh(t *testing.T) {
 	connSocketClosed(t, h)
 }
 
-// TestZeroKatoIdleCutoff proves §0 #9: a one-shot `nvme discover` that asks
+// TestZeroKatoIdleCutoff proves NP10: a one-shot `nvme discover` that asks
 // for no keep-alive is not immortal — it is reaped after
 // common.DefaultCdcZeroKatoTmoMs of silence.
 func TestZeroKatoIdleCutoff(t *testing.T) {
@@ -1419,7 +1419,7 @@ func TestHostTerminateRequestEndsTheConnection(t *testing.T) {
 // a command that carries in-capsule data and is not Connect — nvme-stas sends
 // the TP-8010 Discovery Information Management command (opcode 21h) with a
 // 1024 byte payload to every discovery controller — has its data accepted and
-// discarded and the COMMAND refused (NP12, §0 #2), rather than the connection
+// discarded and the COMMAND refused (NP2, NP12), rather than the connection
 // terminated. A C2HTermReq here would put the production host stack in a
 // permanent connect/reset loop.
 func TestInCapsuleDataOnANonConnectCommand(t *testing.T) {

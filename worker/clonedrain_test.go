@@ -9,7 +9,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The worker half of the clone drain (dnv-worker.md §11.7 and §13).
+// The worker half of the clone drain (dnv-worker.md, The clone drain).
 //
 // Everything routed through the REAL reactionPass, as for the sp drain: CLD7's
 // "alongside, not instead of" is a property of that pass, and a test that
@@ -61,9 +61,10 @@ func TestCloneDrainDerivation(t *testing.T) {
 			t.Errorf("batch targeted %q/%d, want c0/700",
 				calls[0].cloneName, calls[0].cloneId)
 		}
-		// The §12 record, whose attribute name is the operator's: nothing else
-		// in the tree pins the worker's own record — the shell suites read
-		// `wctl drain-clone`'s JSON, a different producer.
+		// The "clone drain step" record (dnv-worker.md, Log records), whose
+		// attribute name is the operator's: nothing else in the tree pins the
+		// worker's own record — the shell suites read `wctl drain-clone`'s
+		// JSON, a different producer.
 		recs := h.logs.withMsg(msgCloneDrainStep)
 		if len(recs) != 1 {
 			t.Fatalf("%q records = %d, want 1", msgCloneDrainStep, len(recs))
@@ -73,8 +74,9 @@ func TestCloneDrainDerivation(t *testing.T) {
 		}
 		// An slog attribute name is a string literal, so the compiler guards
 		// nothing here: deleting `Clone.bm_cnt` does not stop anyone adding
-		// `slog.Int("bm_cnt", …)` beside chunk_cnt. §12's row lists chunk_cnt
-		// only, and the one `bm_cnt` left in dnv is Migration's.
+		// `slog.Int("bm_cnt", …)` beside chunk_cnt. The record's entry in
+		// dnv-worker.md, Log records, lists chunk_cnt only, and the one
+		// `bm_cnt` left in dnv is Migration's.
 		if _, ok := recs[0]["bm_cnt"]; ok {
 			t.Errorf("the clone drain record must carry no bm_cnt attribute")
 		}
@@ -183,7 +185,7 @@ func TestCloneDrainRunsAlongsideTheReactions(t *testing.T) {
 func TestCloneDrainIgnoresEveryPassGate(t *testing.T) {
 	// The two CLUSTER-level gates. Both are reachable in production — the RW21
 	// cache is watch-populated, so a cluster can be absent at startup or after
-	// its conf key is deleted, and §13 keeps an invalid conf in the cache
+	// its conf key is deleted, and RW21 keeps an invalid conf in the cache
 	// rather than dropping it — and behind either one EVERY latched clone of
 	// EVERY SP in that cluster would be stranded, the latch being one-way.
 	t.Run("with the cluster missing from the cache", func(t *testing.T) {
@@ -273,7 +275,7 @@ func TestCloneDrainOnePerPassPerClone(t *testing.T) {
 // BOTH steps, because they fail through different call sites and the final one
 // is the step whose silence would be invisible: a swallowed error there logs
 // `clone drained` for a clone that is still in etcd, which is the one record
-// §14's case G reads as "this clone is gone".
+// the worker suite's drain case reads as "this clone is gone" (CLD9).
 func TestCloneDrainFailedStepIsLogged(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

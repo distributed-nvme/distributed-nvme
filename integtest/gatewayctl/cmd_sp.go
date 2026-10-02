@@ -1,6 +1,8 @@
-// The storage pool and controller subcommands of gatewayctl (gateway.md
-// §10.8): the eight SP-scoped RPCs of §5.4 including GrowSlice (§5.4/§8.5),
-// and the five cntlr RPCs of §5.5 including the two inspects.
+// The storage pool and controller subcommands of gatewayctl (gateway.md,
+// Integration test plan, The driver, `gatewayctl`): the eight SP-scoped RPCs
+// of gateway.md, Storage pools and GrowSlice, including GrowSlice
+// (architecture.md, GrowSlice), and the five cntlr RPCs of
+// gateway.md, Cntlrs and inspects, including the two inspects.
 //
 // Every setup here obeys the main.go contract: it registers its own flags on
 // the flag set it is handed and returns the job closure that reads the flag
@@ -12,11 +14,11 @@
 // `SpRev{Revision: n}` with sp_name left empty, because the handler matches
 // on the revision alone. An omitted `--rev` therefore sends a zero token
 // deliberately rather than "no token" — and since GW6 became presence-based
-// (gateway.md §0 #7) that choice is load-bearing, not incidental: a PRESENT
+// that choice is load-bearing, not incidental: a PRESENT
 // zero token is still refused, while an absent message would now be waved
 // through unchecked. This driver never sends an absent one, which is what
-// keeps the §10.13 B4 stage a refusal. dnvctl deliberately does the opposite
-// (dnvctl.md §4) — do not port this pattern there.
+// keeps the contention case's B4 stage a refusal. dnvctl deliberately does
+// the opposite (dnvctl.md CT3) — do not port this pattern there.
 
 package main
 
@@ -50,22 +52,24 @@ func spSelectorFlags(fs *flag.FlagSet, prefix string) func() *pb.NodeSelector {
 	}
 }
 
-// setupCreateSp drives CreateStoragePool (§5.4).
+// setupCreateSp drives CreateStoragePool (gateway.md, Storage pools and
+// GrowSlice).
 //
 // --cntlr-cnt, --slice-cnt, --init-ext-cnt, --slots and --raid1 are the
-// §10.6 fixture knobs that shape the SP. Every numeric defaults to 0 and an
-// empty --slots leaves cntlid_slot_list empty, so the script names only what
-// it cares about: §5.4 substitutes DefaultCntlrCntPerSp for a zero cntlr_cnt,
-// DefaultSliceCntPerSp for a zero slice_cnt and [0..7] for an empty slot list
-// (architecture.md §8.4's `Defaults:` line). A zero init_ext_cnt is the
-// exception — §5.4 answers INVALID_ARGUMENT to it — so a script that wants an
-// SP must pass that one.
+// test-time fixture knobs that shape the SP. Every numeric defaults to 0 and
+// an empty --slots leaves cntlid_slot_list empty, so the script names only
+// what it cares about: gateway.md, Storage pools and GrowSlice, substitutes
+// DefaultCntlrCntPerSp for a zero cntlr_cnt, DefaultSliceCntPerSp for a zero
+// slice_cnt and [0..7] for an empty slot list (the `Defaults:` line of
+// CreateStoragePool in architecture.md, Storage pools). A zero init_ext_cnt
+// is the exception — the same section answers INVALID_ARGUMENT to it — so a
+// script that wants an SP must pass that one.
 //
 // --stripe-size, --block-size and --feature-junk exist for the case C
-// validation battery (§10.14 step 1): the first two push the DmRaid0Conf and
-// DmPoolConf bounds, and --feature-junk appends one empty BdevFeature purely
-// so the "bdev_feature_list must be empty" rule can be watched refusing a
-// request. A BdevConf is built only when --raid1 or one of those three asks
+// validation battery (its stage 1, GW4): the first two push the DmRaid0Conf
+// and DmPoolConf bounds, and --feature-junk appends one empty BdevFeature
+// purely so the "bdev_feature_list must be empty" rule can be watched refusing
+// a request. A BdevConf is built only when --raid1 or one of those three asks
 // for it, so the default request carries no bdev_conf at all.
 //
 // The four --thr-* flags fill EventThreshold, where 0 again means "use the
@@ -152,9 +156,10 @@ func setupCreateSp(fs *flag.FlagSet) job {
 	}
 }
 
-// setupDeleteSp drives DeleteStoragePool (§5.4), the one SP-scoped mutator
-// the `deleting` gate does not apply to. It refuses an SP that still owns a
-// td, nqn, clone, xfer or migr, which is the case C precondition the suite
+// setupDeleteSp drives DeleteStoragePool
+// (gateway.md, Storage pools and GrowSlice), the one SP-scoped mutator the
+// `deleting` gate does not apply to. It refuses an SP that still owns a td,
+// nqn, clone, xfer or migr, which is the case C precondition the suite
 // asserts, so the script always tears those down first.
 func setupDeleteSp(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool to delete")
@@ -173,9 +178,10 @@ func setupDeleteSp(fs *flag.FlagSet) job {
 	}
 }
 
-// setupGetSp drives GetStoragePool (§5.4). Besides being the state assertion
-// of every stage, its reply is the token source: `race`'s stale-revision
-// retry re-reads sp_rev.revision through this very RPC (refreshToken).
+// setupGetSp drives GetStoragePool (gateway.md, Storage pools and GrowSlice).
+// Besides being the state assertion of every stage, its reply is the token
+// source: `race`'s stale-revision retry re-reads sp_rev.revision through this
+// very RPC (refreshToken).
 func setupGetSp(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool to read")
 	return func(
@@ -190,10 +196,11 @@ func setupGetSp(fs *flag.FlagSet) job {
 	}
 }
 
-// setupListSps drives ListStoragePools (§5.4). --count is the page size that
-// the §7 clamp turns into 64 when it is 0 and refuses above 1024, and
-// --page-token continues a previous page — the pair case C probes with a
-// bad token.
+// setupListSps drives ListStoragePools
+// (gateway.md, Storage pools and GrowSlice). --count is the page size that
+// the clamp of architecture.md, Common validation, turns into 64 when it is
+// 0 and refuses above 1024, and --page-token continues a previous page — the
+// pair case C probes with a bad token.
 func setupListSps(fs *flag.FlagSet) job {
 	count := fs.Uint("count", 0, "page size; 0 asks for the default of 64")
 	pageToken := fs.String("page-token", "",
@@ -211,9 +218,10 @@ func setupListSps(fs *flag.FlagSet) job {
 	}
 }
 
-// setupSetCntlidSlots drives UpdateStoragePoolCntlidSlotList (§5.4). Unlike
-// create-sp's --slots, an empty list here is a refusal the gateway owns (an
-// SP with no slot can produce no side), so the flag is sent exactly as given.
+// setupSetCntlidSlots drives UpdateStoragePoolCntlidSlotList (gateway.md,
+// Storage pools and GrowSlice). Unlike create-sp's --slots, an empty list
+// here is a refusal the gateway owns (an SP with no slot can produce no
+// side), so the flag is sent exactly as given.
 func setupSetCntlidSlots(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
@@ -235,10 +243,11 @@ func setupSetCntlidSlots(fs *flag.FlagSet) job {
 	}
 }
 
-// setupSetSpLevel drives UpdateStoragePoolLevel (§5.4). --level goes through
-// main.go's parseSpLevel, which also accepts a raw number so the script can
-// send a level the enum does not declare and watch the gateway refuse it
-// (§10.14 step 1). The parse happens inside the job, not in setup, because
+// setupSetSpLevel drives UpdateStoragePoolLevel
+// (gateway.md, Storage pools and GrowSlice). --level goes through main.go's
+// parseSpLevel, which also accepts a raw number so the script can send a
+// level the enum does not declare and watch the gateway refuse it (case C
+// stage 1, GW4). The parse happens inside the job, not in setup, because
 // setup runs before Parse.
 func setupSetSpLevel(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
@@ -265,10 +274,11 @@ func setupSetSpLevel(fs *flag.FlagSet) job {
 	}
 }
 
-// setupFindSpNames drives FindStoragePoolNames (§5.4), the snapshot read that
-// maps sp_ids back to names. Unknown ids are omitted from the reply map
-// rather than being an error, which is what the suite asserts by asking for a
-// mix of live and dead ids in one --ids list.
+// setupFindSpNames drives FindStoragePoolNames
+// (gateway.md, Storage pools and GrowSlice), the snapshot read that maps
+// sp_ids back to names. Unknown ids are omitted from the reply map rather
+// than being an error, which is what the suite asserts by asking for a mix of
+// live and dead ids in one --ids list.
 func setupFindSpNames(fs *flag.FlagSet) job {
 	var ids idList
 	fs.Var(&ids, "ids", "comma-separated sp_id_list, decimal or 0x hex")
@@ -285,12 +295,14 @@ func setupFindSpNames(fs *flag.FlagSet) job {
 	}
 }
 
-// setupGrowSlice drives GrowSlice (§5.4/§8.5). --ext and --meta are the two
-// exclusive halves of that section: a data grow needs ext_cnt > 0, and a meta
-// grow needs ext_cnt == 0 because the meta ladder picks the size itself.
+// setupGrowSlice drives GrowSlice (gateway.md, Storage pools and GrowSlice;
+// architecture.md, GrowSlice). --ext and --meta are the two exclusive halves
+// of that section: a data grow needs ext_cnt > 0, and a meta grow needs
+// ext_cnt == 0 because the meta ladder picks the size itself.
 // Sending both is the `--meta --ext 2` row of the case C battery, so neither
 // flag constrains the other here — the gateway is the one that refuses.
-// --dn-black seeds the §6.5 black list the placement scan grows.
+// --dn-black seeds the black list the placement scan grows (architecture.md,
+// Per-operation allocation).
 func setupGrowSlice(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
@@ -318,10 +330,11 @@ func setupGrowSlice(fs *flag.FlagSet) job {
 	}
 }
 
-// setupCreateCntlr drives CreateCntlr (§5.5). --slot is the cntlid_slot the
-// new controller takes; it must be in the SP's cntlid_slot_list and unused,
-// which is the state-dependent refusal the suite drives by asking twice for
-// the same slot. --cn-black keeps a race's two jobs off each other's CN.
+// setupCreateCntlr drives CreateCntlr (gateway.md, Cntlrs and inspects).
+// --slot is the cntlid_slot the new controller takes; it must be in the SP's
+// cntlid_slot_list and unused, which is the state-dependent refusal the suite
+// drives by asking twice for the same slot. --cn-black keeps a race's two jobs
+// off each other's CN.
 func setupCreateCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
@@ -343,9 +356,9 @@ func setupCreateCntlr(fs *flag.FlagSet) job {
 	}
 }
 
-// setupDeleteCntlr drives DeleteCntlr (§5.5). --id is the cntlr_id; deleting
-// the primary, or an enabled non-primary, is refused, which is the pair of
-// FAILED_PRECONDITION rows of §10.14 step 3.
+// setupDeleteCntlr drives DeleteCntlr (gateway.md, Cntlrs and inspects). --id
+// is the cntlr_id; deleting the primary, or an enabled non-primary, is
+// refused, which is the pair of FAILED_PRECONDITION rows of case C stage 3.
 func setupDeleteCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
@@ -366,10 +379,11 @@ func setupDeleteCntlr(fs *flag.FlagSet) job {
 	}
 }
 
-// setupSetCntlrEnabled drives UpdateCntlrEnabled (§5.5). --enabled defaults
-// to true because disabling is the deliberate act and re-enabling is the
-// undo; the flag package never consumes the next argument for a bool, so the
-// script must write `--enabled=false`, never `--enabled false`.
+// setupSetCntlrEnabled drives UpdateCntlrEnabled
+// (gateway.md, Cntlrs and inspects). --enabled defaults to true because
+// disabling is the deliberate act and re-enabling is the undo; the flag
+// package never consumes the next argument for a bool, so the script must
+// write `--enabled=false`, never `--enabled false`.
 func setupSetCntlrEnabled(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
@@ -393,9 +407,9 @@ func setupSetCntlrEnabled(fs *flag.FlagSet) job {
 	}
 }
 
-// setupInspectCntlr drives InspectCntlr (§5.5): the gateway asks the CN agent
-// that hosts the controller for its live CntlrInfo. It is a read, so it takes
-// no token — --id is the cntlr_id.
+// setupInspectCntlr drives InspectCntlr (gateway.md, Cntlrs and inspects):
+// the gateway asks the CN agent that hosts the controller for its live
+// CntlrInfo. It is a read, so it takes no token — --id is the cntlr_id.
 func setupInspectCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var id hexUint
@@ -413,10 +427,11 @@ func setupInspectCntlr(fs *flag.FlagSet) job {
 	}
 }
 
-// setupInspectSide drives InspectSide (§5.5): the DN-side mirror of
-// inspect-cntlr, asking the DN agent that hosts the side for its SideInfo.
-// --id is the SIDE_ID here, not a cntlr_id — the two inspects share the flag
-// name so the §10.8 table reads as one row, and the RPC decides what it means.
+// setupInspectSide drives InspectSide (gateway.md, Cntlrs and inspects): the
+// DN-side mirror of inspect-cntlr, asking the DN agent that hosts the side for
+// its SideInfo. --id is the SIDE_ID here, not a cntlr_id — the two inspects
+// share the flag name so the subcommand table reads as one row, and the RPC
+// decides what it means.
 func setupInspectSide(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var id hexUint

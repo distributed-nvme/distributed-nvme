@@ -8,9 +8,9 @@ import (
 )
 
 // ResTracker turns probe outcomes into pb.ResInfo values per
-// architecture.md §9.5 / dnagent.md SH14: epoch is the unix second of the
-// last *status* change — a details-only change does not bump it. The agent
-// emits MISSING/ERROR/OK/PROVISIONING, the cn agent also PENDING on a
+// architecture.md, Live-state reporting / dnagent.md SH14: epoch is the unix
+// second of the last *status* change — a details-only change does not bump it.
+// The agent emits MISSING/ERROR/OK/PROVISIONING, the cn agent also PENDING on a
 // primary's leg rows (cnagent.md CN11), and never UNKNOWN (that one is
 // worker-only).
 //
@@ -78,9 +78,11 @@ func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 }
 
 // Provisioning is the [D15] outcome: the resource is deliberately not created
-// yet, because the sides underneath it are still being zeroed (§9.4). It
+// yet, because the sides underneath it are still being zeroed
+// (architecture.md, Side provisioning protocol). It
 // means healthy / not ready / no action needed, and — unlike ERROR — never
-// feeds err_epoch (architecture.md §9.5, §10.2-§10.4).
+// feeds err_epoch (architecture.md, Live-state reporting, dn / cn roles,
+// sp role and Automatic reactions).
 func (t *ResTracker) Provisioning(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_PROVISIONING, details)
 }

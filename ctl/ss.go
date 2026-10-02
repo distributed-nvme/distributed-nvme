@@ -1,15 +1,17 @@
-// This file is the `ss` group: the NVMe-oF subsystems of architecture.md §8.8
-// (dnvctl.md §5.7, four RPCs).
+// This file is the `ss` group: the NVMe-oF subsystems of architecture.md,
+// Subsystems, namespaces (dnvctl.md, `ss` — `ctl/ss.go`, four RPCs).
 //
-// A subsystem is SP-scoped like everything in §5.6-§5.11, so cluster_name and
-// sp_name come from the §2.1 globals and the only identity flag is --nqn. The
-// three mutators carry `sp_rev` from the global --rev (presence-based, §4);
-// `ss list` carries no token and takes no page flags, because ListSubsystems
-// is unpaginated.
+// A subsystem is SP-scoped like everything in the groups `td` through `migr`,
+// so cluster_name and sp_name come from the globals
+// (dnvctl.md, Global flags, env, config) and the only identity flag is
+// --nqn. The three mutators carry `sp_rev` from the global --rev
+// (presence-based, CT3); `ss list` carries no token and takes no page flags,
+// because ListSubsystems is unpaginated.
 //
 // A namespace is a field of its subsystem rather than a key of its own, so
 // `ss list` is also the only gateway read that shows namespaces at all — the
-// `ns` group (§5.8) can create and update them but never read one back.
+// `ns` group (dnvctl.md, `ns` — `ctl/ns.go`) can create and update them but
+// never read one back.
 package ctl
 
 import (
@@ -21,7 +23,7 @@ import (
 )
 
 // registerSs adds the `ss` group to the root. NewRootCmd calls this by name,
-// so the name and signature are the contract (§1.2).
+// so the name and signature are the contract (dnvctl.md, Files).
 func registerSs(root *cobra.Command) {
 	root.AddCommand(group(
 		"ss", "nvme-of subsystems of a storage pool",
@@ -97,7 +99,7 @@ func ssDeleteCmd() *cobra.Command {
 // ssListCmd is ListSubsystems: the read-back that carries each subsystem's
 // namespaces with it, and the only place a namespace is visible from the
 // gateway. The request is nothing but the two scope globals — no token, and no
-// page flags because the RPC is unpaginated (§5.7 lists none).
+// page flags because the RPC is unpaginated.
 func ssListCmd() *cobra.Command {
 	return leaf(
 		"list", "list the subsystems of a pool (ListSubsystems)",
@@ -116,10 +118,11 @@ func ssListCmd() *cobra.Command {
 }
 
 // ssSetHostsCmd is UpdateSubsystemHosts. --hosts is the FULL replacement list,
-// matching the replace-on-occurrence semantics of every §5.0 string list: an
-// empty --hosts= revokes every host rather than leaving the stored list alone,
-// which is the only way to revoke one and is why the flag has no "add" or
-// "remove" spelling (CT1 — one command per RPC, and the RPC replaces).
+// matching the replace-on-occurrence semantics of every string list of
+// dnvctl.md, Conventions: an empty --hosts= revokes every host rather than
+// leaving the stored list alone, which is the only way to revoke one and is
+// why the flag has no "add" or "remove" spelling (CT1 — one command per RPC,
+// and the RPC replaces).
 func ssSetHostsCmd() *cobra.Command {
 	cmd := leaf(
 		"set-hosts", "replace a subsystem's host list "+

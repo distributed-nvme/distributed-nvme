@@ -11,11 +11,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.7 / gateway.md §5.6: the three thin-device
-// RPCs. All three are pure etcd — a thin device has no allocator footprint and
-// no agent call, because the gateway only ever writes the DESIRED row and the
-// primary cntlr builds the dm-thin volumes on the SpRev fan-out these bumps
-// start (§3.3, §10.3).
+// This file is architecture.md, Thin devices / gateway.md, Thin devices: the
+// three thin-device RPCs. All three are pure etcd — a thin device has no
+// allocator footprint and no agent call, because the gateway only ever writes
+// the DESIRED row and the primary cntlr builds the dm-thin volumes on the
+// SpRev fan-out these bumps start (architecture.md, Primary cntlr;
+// architecture.md, sp role).
 //
 // The one subtlety the whole file is built around is `ThinDevice.created`. The
 // gateway always writes it false and never reads it back except as a gate: it
@@ -36,37 +37,40 @@ const (
 	opDeleteThinDevice = "DeleteThinDevice"
 )
 
-// msgOriginNotCreated is §8.7's normative refusal for a snapshot whose origin
-// has not materialized. It is a format constant rather than an inline string
-// because the integration suite greps the sentence, and because it is the one
-// error in this file that also promises the client a way forward.
+// msgOriginNotCreated is the normative refusal of architecture.md, Thin
+// devices, for a snapshot whose origin has not materialized. It is a format
+// constant rather than an inline string because the integration suite greps
+// the sentence, and because it is the one error in this file that also
+// promises the client a way forward.
 const msgOriginNotCreated = "origin %s is not created yet; " +
 	"wait for ListThinDevices to report created = true"
 
-// msgSnapshotNotCreated is §8.7's normative detail for the delete guard that
-// names the blocking snapshot(s).
+// msgSnapshotNotCreated is the normative detail of architecture.md, Thin
+// devices, for the delete guard that names the blocking snapshot(s).
 const msgSnapshotNotCreated = "snapshot %s of %s is not created yet"
 
-// CreateThinDevice is architecture.md §8.7's CreateThinDevice.
+// CreateThinDevice is the CreateThinDevice of architecture.md, Thin devices.
 //
-// Only two of its §7 checks are pure and therefore run here (GW4): the names,
+// Only two of its checks of architecture.md, Common validation, are pure and
+// therefore run here (GW4): the names,
 // and `size == 0`, which is legal exactly when `ori_name` is set because a
 // snapshot then inherits the origin's size ([D-H]). The rest of the size rule
 // — a positive multiple of `slice_cnt × stripe_size`, which is what lets
 // dm-striped take equal, chunk-aligned members — depends on the SP's stored
 // geometry and on the origin, so it is state-dependent and runs inside the
-// transaction (gateway.md §5.6).
+// transaction (gateway.md, Thin devices).
 //
 // The two snapshot refusals — an origin with `created == false`, and an origin
 // that is the destination of a clone — are the places in this file that must
-// write literally nothing: §8.7 requires no key, no next_id / next_dev_id
-// consumption and no SpRev bump, so both checks sit before the minter is ever
-// created and return straight out of the closure, which leaves the whole
-// transaction uncommitted (EU4). Consuming an id there would be visible
-// forever — ids are never reused — for a request that failed.
+// write literally nothing: architecture.md, Thin devices, requires no key, no
+// next_id / next_dev_id consumption and no SpRev bump, so both checks sit
+// before the minter is ever created and return straight out of the closure,
+// which leaves the whole transaction uncommitted (EU4). Consuming an id there
+// would be visible forever — ids are never reused — for a request that failed.
 //
-// The RPC never blocks on materialization (§5.8 keeps every RPC short); a
-// client that wants to snapshot polls ListThinDevices instead.
+// The RPC never blocks on materialization (architecture.md, STM discipline,
+// keeps every RPC short); a client that wants to snapshot polls
+// ListThinDevices instead.
 func (s *Server) CreateThinDevice(
 	ctx context.Context,
 	req *pb.CreateThinDeviceRequest,
@@ -111,7 +115,8 @@ func (s *Server) CreateThinDevice(
 				common.MaxTdCntPerSp)
 		}
 		tdKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetTdName())
-		// Both halves are checked: the list is what every walk of §8.7 uses
+		// Both halves are checked: the list is what every walk of
+		// architecture.md, Thin devices, uses
 		// and the key is what the row actually lives at, so a store where
 		// they disagree still refuses rather than orphaning one of them.
 		if containsName(sc.Conf.GetTdNameList(), req.GetTdName()) ||
@@ -128,11 +133,11 @@ func (s *Server) CreateThinDevice(
 					"thin device %q not found", req.GetOriName())
 			}
 			if !origin.GetCreated() {
-				// Checked after NOT_FOUND (§8.7) and before anything is
-				// minted, so the request is a no-op the client can retry
-				// unchanged once the origin materializes. A snapshot OF a
-				// snapshot follows the same rule: only the IMMEDIATE origin
-				// is gated.
+				// Checked after NOT_FOUND (architecture.md, Thin devices) and
+				// before anything is minted, so the request is a no-op the
+				// client can retry unchanged once the origin materializes. A
+				// snapshot OF a snapshot follows the same rule: only the
+				// IMMEDIATE origin is gated.
 				return errPrecondition(
 					msgOriginNotCreated, req.GetOriName())
 			}
@@ -140,10 +145,11 @@ func (s *Server) CreateThinDevice(
 			// destination's thin volumes hold only the regions hydrated so
 			// far, dm-clone serving every other read from the source: a
 			// create_snap of them would take a partial copy for a snapshot
-			// (§8.7). Hydration is known only to the primary's CN and this
-			// RPC is pure etcd, so the refusal holds for as long as the Clone
-			// key does — the delete guard's walk, drain included — and, like
-			// the created gate, it returns before anything is minted.
+			// (architecture.md, Thin devices). Hydration is known only to the
+			// primary's CN and this RPC is pure etcd, so the refusal holds for
+			// as long as the Clone key does — the delete guard's walk, drain
+			// included — and, like the created gate, it returns before
+			// anything is minted.
 			cloneName, found, err := tdCloneRef(stm, sc, origin.GetTdId())
 			if err != nil {
 				return err
@@ -161,10 +167,11 @@ func (s *Server) CreateThinDevice(
 		if size == 0 {
 			size = origin.GetSize()
 		}
-		// The stripe is the SP's stored one (§7). Checking the stored
-		// bdev_conf separately keeps the two lost-invariant cases apart: a
-		// zero stripe and an empty slice_id_list would otherwise both arrive
-		// at "has no slice", and only one of them is about slices.
+		// The stripe is the SP's stored one (architecture.md, Common
+		// validation). Checking the stored bdev_conf separately keeps the two
+		// lost-invariant cases apart: a zero stripe and an empty slice_id_list
+		// would otherwise both arrive at "has no slice", and only one of them
+		// is about slices.
 		if err := model.ValidateBdevConf(spBdevConf(sc.Conf)); err != nil {
 			return errAborted("%v", err)
 		}
@@ -173,7 +180,8 @@ func (s *Server) CreateThinDevice(
 		unit := uint64(sliceCnt) * stripe
 		if unit == 0 {
 			// An SP always has at least one slice; a slice_id_list that is
-			// empty is a lost invariant, not a user error (§5.9).
+			// empty is a lost invariant, not a user error (architecture.md,
+			// UNEXPECTED_ERROR → `ABORTED`).
 			return errAborted(
 				"storage pool %q has no slice", req.GetSpName())
 		}
@@ -194,9 +202,10 @@ func (s *Server) CreateThinDevice(
 			DevId: devId,
 			OriId: origin.GetDevId(),
 			Size:  size,
-			// Always false: materialization is the sp-worker's write (§10.3,
-			// ThinDeviceCreated.md U2/U3), and this RPC has no way to know whether every slice
-			// pool already holds the id.
+			// Always false: materialization is the sp-worker's write
+			// (architecture.md, sp role; architecture.md, Thin devices,
+			// Materialization; dnv-worker.md RW19), and this RPC has no way to
+			// know whether every slice pool already holds the id.
 			Created: false,
 		})
 		sc.Conf.TdNameList = append(sc.Conf.GetTdNameList(), req.GetTdName())
@@ -210,8 +219,9 @@ func (s *Server) CreateThinDevice(
 	return &pb.CreateThinDeviceReply{TdId: tdId, DevId: devId}, nil
 }
 
-// DeleteThinDevice is architecture.md §8.7's DeleteThinDevice: a plan, then a
-// deciding STM that verifies it, run in the candidate unit's loop (GW9).
+// DeleteThinDevice is the DeleteThinDevice of architecture.md, Thin devices: a
+// plan, then a deciding STM that verifies it, run in the candidate unit's loop
+// (GW9).
 //
 // Its three FAILED_PRECONDITION guards are decided inside the deleting
 // transaction, which is what makes them race-proof: a CreateNamespace, a
@@ -219,7 +229,8 @@ func (s *Server) CreateThinDevice(
 // concurrently touches a key this transaction read, so the later of the two to
 // commit conflicts and etcdutil re-runs it against the state that actually
 // won; a request that carries a token then fails GW6, ABORTED, and its client
-// retries (§5.8/§5.9).
+// retries (architecture.md, STM discipline; architecture.md, UNEXPECTED_ERROR
+// → `ABORTED`).
 //
 // The third guard's walk is the one read the transaction does not make. Finding
 // the snapshots of this td means reading every td of the SP, and a transaction
@@ -229,7 +240,8 @@ func (s *Server) CreateThinDevice(
 // Snapshot, and the deciding STM re-reads only the snapshots the plan found —
 // after checking that the SP it resolved is the one the plan walked and that
 // SpRev still carries the revision the plan was read at. Every write to a td
-// bumps SpRev (§5.5), so a snapshot created between the plan and the delete's
+// bumps SpRev (architecture.md, Revision keys and the sync fan-out), so a
+// snapshot created between the plan and the delete's
 // commit either moves that revision before the STM reads it, and the round
 // re-plans, or commits after that read and conflicts the transaction on the
 // SpRev key, whose re-run re-plans the same way. That is the token-less path.
@@ -297,7 +309,8 @@ type tdDeletePlan struct {
 }
 
 // planDeleteThinDevice is DeleteThinDevice's plan: one read-only Snapshot
-// (§5.8) that walks td_name_list for the target's uncreated snapshots.
+// (architecture.md, STM discipline) that walks td_name_list for the target's
+// uncreated snapshots.
 //
 // It opens with openSp, so a stale token is ABORTED before any other state
 // check exactly as in the deciding STM (GW6), and it refuses what the revision
@@ -428,12 +441,13 @@ func decideDeleteThinDevice(
 	return tdId, nil
 }
 
-// ListThinDevices is architecture.md §8.7's ListThinDevices: one Snapshot over
-// the SpConf and every td it lists, so the whole map is read at ONE store
-// revision (EU4) and no caller can see a td that was created after another one
-// it also sees.
+// ListThinDevices is the ListThinDevices of architecture.md, Thin devices: one
+// Snapshot over the SpConf and every td it lists, so the whole map is read at
+// ONE store revision (EU4) and no caller can see a td that was created after
+// another one it also sees.
 //
-// This is the documented client wait primitive for `created` (§8.7): a client
+// This is the documented client wait primitive for `created` (architecture.md,
+// Thin devices): a client
 // that wants to snapshot a td polls this RPC until the origin reads
 // `created == true`, then calls CreateThinDevice, which is why the read must
 // be consistent rather than a page of independent Gets. When a clone targets
@@ -446,7 +460,8 @@ func decideDeleteThinDevice(
 // poll, because a token read before the flip — or before a clone's latch and
 // drain, which bump SpRev too — is stale.
 //
-// A listed key that is missing is §5.9's ABORTED and never a short map: the
+// A listed key that is missing is an ABORTED (architecture.md,
+// UNEXPECTED_ERROR → `ABORTED`) and never a short map: the
 // wait primitive that silently omitted a td would read as "not created yet"
 // for ever.
 func (s *Server) ListThinDevices(
@@ -487,15 +502,17 @@ func (s *Server) ListThinDevices(
 	return &pb.ListThinDevicesReply{NameToTd: nameToTd}, nil
 }
 
-// tdNamespaceRef is §8.7's first delete guard: the first namespace of the SP
-// whose td_id is tdId, as its subsystem NQN and ns_idx.
+// tdNamespaceRef is the first delete guard of architecture.md, Thin devices:
+// the first namespace of the SP whose td_id is tdId, as its subsystem NQN and
+// ns_idx.
 //
 // The walk is nqn_list × ns_list, bounded by MaxSsCntPerSp × MaxNsCntPerSs =
-// 16 embedded entries over at most 4 keys, which is why §8.7 calls it cheap
-// enough to run in the transaction. Namespaces live inside their Subsystem
-// value, so there is nothing finer to read.
+// 16 embedded entries over at most 4 keys, which is why architecture.md, Thin
+// devices, calls it cheap enough to run in the transaction. Namespaces live
+// inside their Subsystem value, so there is nothing finer to read.
 //
-// A listed subsystem whose key is gone is §5.9's ABORTED: the guard cannot be
+// A listed subsystem whose key is gone is an ABORTED (architecture.md,
+// UNEXPECTED_ERROR → `ABORTED`): the guard cannot be
 // evaluated, and a delete that cannot PROVE the td is unreferenced must not
 // proceed — a namespace left pointing at a deleted td would park on the td's
 // CnErrorName for ever.
@@ -520,9 +537,9 @@ func tdNamespaceRef(
 	return "", 0, false, nil
 }
 
-// tdCloneRef is §8.7's second delete guard, and the walk behind
-// CreateThinDevice's refusal to snapshot a clone destination: the name of the
-// first clone of the SP whose dst_td_id is tdId.
+// tdCloneRef is the second delete guard of architecture.md, Thin devices, and
+// the walk behind CreateThinDevice's refusal to snapshot a clone destination:
+// the name of the first clone of the SP whose dst_td_id is tdId.
 //
 // A clone hydrates INTO its destination td, so deleting that td would leave a
 // dm-clone copying into a device the pool no longer holds, and a snapshot of
@@ -547,9 +564,9 @@ func tdCloneRef(
 	return "", false, nil
 }
 
-// tdUncreatedSnapshots is §8.7's third delete guard: the names, among names,
-// of the snapshots of devId that have not materialized yet, in the order
-// given.
+// tdUncreatedSnapshots is the third delete guard of architecture.md, Thin
+// devices: the names, among names, of the snapshots of devId that have not
+// materialized yet, in the order given.
 //
 // The match is on dev_id and not on td_id or name, which is what makes a
 // same-name recreate safe: dev_ids are never reused, so a snapshot left over
@@ -560,9 +577,10 @@ func tdCloneRef(
 //
 // Every blocker is reported rather than only the first: the operator's next
 // step is to wait for all of them, and a one-at-a-time refusal would make that
-// a guessing game. Reads are per key because an STM cannot range (§8.7 allows
-// the plan one range instead, but only at the store revision it read SpRev
-// at). The plan passes the whole td_name_list — the ListThinDevices read set,
+// a guessing game. Reads are per key because an STM cannot range
+// (architecture.md, Thin devices, allows the plan one range instead, but only
+// at the store revision it read SpRev at). The plan passes the whole
+// td_name_list — the ListThinDevices read set,
 // bounded by MaxTdCntPerSp, which is why it is read in a Snapshot and never in
 // the deciding transaction — and the deciding STM only the names the plan
 // returned.

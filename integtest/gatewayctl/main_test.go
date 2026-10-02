@@ -1,4 +1,5 @@
-// Tests for the parsing surface of gatewayctl (gateway.md §10.8). The driver
+// Tests for the parsing surface of gatewayctl
+// (gateway.md, Integration test plan, The driver, `gatewayctl`). The driver
 // is what the whole gateway suite asserts through, so a malformed invocation
 // or a mis-built request must fail loudly here rather than turn into a wrong
 // verdict about the gateway: these cover the flag value types, the
@@ -120,7 +121,7 @@ func TestParseSpLevel(t *testing.T) {
 		{"SP_LEVEL_NO_THINPOOL", pb.SpLevel_SP_LEVEL_NO_THINPOOL, true},
 		{"112", pb.SpLevel_SP_LEVEL_DISABLE, true},
 		// A number the enum does not declare is accepted here on purpose, so
-		// the §10.14 validation battery can watch the GATEWAY refuse it.
+		// the faults case's validation battery can watch the GATEWAY refuse it.
 		{"7", pb.SpLevel(7), true},
 		{"nope", 0, false},
 	}
@@ -223,13 +224,13 @@ func TestParamArgsIntegersAreNotScientific(t *testing.T) {
 	}
 }
 
-// TestCommandsCoverEveryRpc is the §10.8 completeness check: every method of
+// TestCommandsCoverEveryRpc is the driver's completeness check: every method of
 // the generated Gateway service descriptor must have a subcommand, so a new
 // RPC cannot be added to the proto without the suite gaining a way to drive
 // it. It also fails on a subcommand whose setup is nil.
 func TestCommandsCoverEveryRpc(t *testing.T) {
 	// The subcommand name of an RPC: CreateStoragePool -> create-storage-pool
-	// is NOT the spelling §10.8 chose (it abbreviates: create-sp), so the
+	// is NOT the spelling the driver chose (it abbreviates: create-sp), so the
 	// mapping is explicit and this table is what pins it.
 	rpcToCmd := map[string]string{
 		"CreateCluster": "create-cluster", "DeleteCluster": "delete-cluster",
@@ -382,10 +383,10 @@ func runArgv(t *testing.T, name string, argv ...string) proto.Message {
 	return client.req
 }
 
-// TestCreateSpRequest pins the §10.6 shape the whole suite creates its SPs
+// TestCreateSpRequest pins the test-time shape the whole suite creates its SPs
 // with, including the --raid1 lever that selects RedundMdRaid1 — a RedundNone
-// SP would have one leg per group and every leg assertion of §10.11 would be
-// wrong.
+// SP would have one leg per group and every leg assertion of the smoke case
+// would be wrong.
 func TestCreateSpRequest(t *testing.T) {
 	req := runArgv(t, "create-sp",
 		"--sp", "sp0", "--cntlr-cnt", "2", "--slice-cnt", "1",
@@ -412,7 +413,7 @@ func TestCreateSpRequest(t *testing.T) {
 	}
 }
 
-// TestSpRevTokenIsAlwaysPresent pins §0 #7 as the driver sees it: an omitted
+// TestSpRevTokenIsAlwaysPresent pins GW6 as the driver sees it: an omitted
 // --rev sends the ZERO token, not an absent message, and a PRESENT zero can
 // never match a stored revision that starts at 1. Since GW6 became
 // presence-based this is what keeps case B step 4 a refusal — an absent

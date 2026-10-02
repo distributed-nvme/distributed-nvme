@@ -23,33 +23,35 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is gateway.md §9.4, §9.5 and §9.6: the three groups of tests that
-// exercise the gateway as a gRPC PEER rather than as a pile of handlers —
-// the ten agent calls of §6 against a real in-process agent, the served
-// surface of §3 over bufconn, and one Server driven by two goroutines at once.
+// This file is the three groups of tests that exercise the gateway as a gRPC
+// PEER rather than as a pile of handlers — the ten agent calls of gateway.md,
+// Agent calls (AG1 to AG4), against a real in-process agent, the served
+// surface of its Serving and lifecycle (GW2, GW3) over bufconn, and one Server
+// driven by two goroutines at once (GW1, GW8).
 //
 // The three belong together because they share one need the handler tests do
-// not have: a second process-like party on the other end of a socket. §9.4's
-// fake is that party for the outbound calls (the gateway is the client),
-// §9.5's bufconn harness is it for the inbound ones (the gateway is the
-// server), and §9.6's two goroutines are the "two instances" of §0 #3 reduced
-// to the one case that can be tested in process — etcd, not the gateway, is
-// what serializes them, so one Server with two callers is the same experiment
-// as two gateways with one caller each.
+// not have: a second process-like party on the other end of a socket. The
+// agent-path fake is that party for the outbound calls (the gateway is the
+// client), the serving tests' bufconn harness is it for the inbound ones (the
+// gateway is the server), and the race test's two goroutines are the "two
+// instances" of GW1 reduced to the one case that can be tested in process —
+// etcd, not the gateway, is what serializes them, so one Server with two
+// callers is the same experiment as two gateways with one caller each.
 //
 // Everything here is prefixed `agentpath` / `serving` / `race` so it cannot
-// collide with the per-resource handler tests of §9.3, which own the
-// unprefixed helper names.
+// collide with the per-resource handler tests, which own the unprefixed helper
+// names.
 
 // ---------------------------------------------------------------------------
-// §9.4 — the in-process agent pair
+// AG1 to AG4 — the in-process agent pair
 // ---------------------------------------------------------------------------
 
 // agentpathSeq numbers the cluster names, addresses and trace ids the helpers
 // below hand out. The package's etcd is shared by every test, so a name that
 // repeats is a test reading another test's keys; deriving names from a
 // process-wide counter keeps them distinct across `-count=N` and across
-// parallel subtests without any cleanup between tests (§5.2).
+// parallel subtests without any cleanup between tests (architecture.md,
+// cluster_id derivation).
 var agentpathSeq atomic.Uint64
 
 // agentpathName mints a store-unique name of the given kind. It stays inside
@@ -60,7 +62,7 @@ func agentpathName(kind string) string {
 }
 
 // agentpathFake is one process serving BOTH generated agent services on one
-// real TCP port (§9.4). One struct for both is not a shortcut: a DN and a CN
+// real TCP port. One struct for both is not a shortcut: a DN and a CN
 // are separate processes in production, but the gateway addresses either by
 // `addr_port` alone and builds its stub from the RPC it is about to make, so
 // a single endpoint answering both proves the stub selection as well as two
@@ -70,7 +72,7 @@ func agentpathName(kind string) string {
 // It is a real listener rather than a bufconn because withAgentConn dials
 // `addr_port` with grpc.NewClient and no dialer override (AG2): a bufconn
 // would require the production code to accept an injected dialer, which is
-// exactly the seam §9.4 refuses to add.
+// exactly the seam these tests refuse to add.
 type agentpathFake struct {
 	pb.UnimplementedDiskNodeAgentServer
 	pb.UnimplementedControllerNodeAgentServer
@@ -83,8 +85,8 @@ type agentpathFake struct {
 	stopOnce sync.Once
 
 	mu sync.Mutex
-	// dnSize and cnSize are what GetDnSize / GetCnSize report; §6.1 turns
-	// them into total_ext_cnt.
+	// dnSize and cnSize are what GetDnSize / GetCnSize report; architecture.md,
+	// Size → extents, turns them into total_ext_cnt.
 	dnSize uint64
 	cnSize uint64
 	// dnInfo and cnInfo are what GetDnInfo / GetCnInfo report.
@@ -92,9 +94,9 @@ type agentpathFake struct {
 	cnInfo *pb.CnInfo
 	// agentRev is the `revision` the agent's own Get*Info reply carries —
 	// the number every Inspect* reply must carry back as its
-	// `applied_revision` (architecture.md §8.2/§8.6). It is deliberately
-	// different from every revision written to etcd, so a handler that
-	// regressed to the stored one fails.
+	// `applied_revision` (architecture.md, Disk nodes and Cntlrs). It is
+	// deliberately different from every revision written to etcd, so a handler
+	// that regressed to the stored one fails.
 	agentRev uint64
 	// cntlrInfo and sideInfo are what GetCntlrInfo / GetSideInfo report.
 	cntlrInfo *pb.CntlrInfo
@@ -114,8 +116,8 @@ type agentpathFake struct {
 }
 
 // agentpathStartAgent starts a fake on 127.0.0.1:0 and stops it at the end of
-// the test. Both interceptor chains of grpc.md §4 are installed because that
-// is what a real agent runs; the extra capture interceptor in front of them
+// the test. Both interceptor chains of grpc.md, Wiring, are installed because
+// that is what a real agent runs; the extra capture interceptor in front of them
 // records the raw incoming metadata, which is what T3 is actually about — the
 // gateway must put common.TraceIdMetadataKey on the wire, not merely carry a
 // trace id in its own ctx.
@@ -175,7 +177,7 @@ func (f *agentpathFake) setSizes(dnSize uint64, cnSize uint64) {
 
 // setInfos fixes what the two node info probes report, together with the
 // revision the agent claims — which every Inspect* reply of the gateway must
-// echo as its `applied_revision` (architecture.md §8.2/§8.6).
+// echo as its `applied_revision` (architecture.md, Disk nodes and Cntlrs).
 func (f *agentpathFake) setInfos(
 	dnInfo *pb.DnInfo,
 	cnInfo *pb.CnInfo,
@@ -333,7 +335,8 @@ func agentpathTraceCtx() (context.Context, string) {
 	return common.WithTraceId(context.Background(), traceId), traceId
 }
 
-// agentpathTrConf is a transport conf for one node; §8.2 refuses an empty one.
+// agentpathTrConf is a transport conf for one node; CreateDiskNode
+// (architecture.md, Disk nodes) refuses an empty one.
 func agentpathTrConf(addrPort string) *pb.NvmeTrConf {
 	return &pb.NvmeTrConf{
 		TrType:  "tcp",
@@ -370,11 +373,12 @@ func agentpathCreateCluster(
 // agentpathSeedCluster writes a ClusterConf directly, for the tests whose
 // subject is a refusal reached before any cluster-level state matters. It
 // stamps its own creation_epoch, so the cluster_id it returns is the one
-// resolveCluster will derive (§5.2).
+// resolveCluster will derive (architecture.md, cluster_id derivation).
 //
 // The conf is testStoredClusterConf's — what CreateCluster would have stored,
-// every member concrete (§7) — with the default geometry, since no test here
-// has an opinion about it. A sparse conf would be refused as an invalid stored
+// every member concrete (architecture.md, Common validation) — with the default
+// geometry, since no test here has an opinion about it. A sparse conf would be
+// refused as an invalid stored
 // conf and each of these tests would then be asserting the wrong refusal.
 func agentpathSeedCluster(
 	t *testing.T,
@@ -440,8 +444,9 @@ func agentpathCode(err error) codes.Code {
 	return status.Code(err)
 }
 
-// agentpathBucketSum is the cluster's live object count of one kind: §5.4
-// makes sum(shard_bucket) exactly that by construction.
+// agentpathBucketSum is the cluster's live object count of one kind:
+// architecture.md, Globals: id allocation + shard buckets, makes
+// sum(shard_bucket) exactly that by construction.
 func agentpathBucketSum(bucket []uint32) uint32 {
 	var total uint32
 	for _, value := range bucket {
@@ -450,7 +455,8 @@ func agentpathBucketSum(bucket []uint32) uint32 {
 	return total
 }
 
-// TestAgentPathCreateDiskNodeConsumesAgentSize pins AG1 and §6.1 for
+// TestAgentPathCreateDiskNodeConsumesAgentSize pins AG1 and architecture.md,
+// Size → extents, for
 // CreateDiskNode: the disk size is the agent's, not the request's, it is
 // consumed by the STM that follows the call, and total_ext_cnt rounds DOWN
 // to whole extents of the cluster's extent_size.
@@ -513,8 +519,9 @@ func TestAgentPathCreateDiskNodeConsumesAgentSize(t *testing.T) {
 					got, err, tt.wantCode)
 			}
 
-			// The probe is made either way: §6.1 cannot judge the size
-			// before it has it, so even the refusal has reached the agent.
+			// The probe is made either way: architecture.md, Size → extents,
+			// cannot judge the size before it has it, so even the refusal has
+			// reached the agent.
 			fake.mu.Lock()
 			sizeReqs := append(
 				[]*pb.GetDnSizeRequest(nil), fake.dnSizeReqs...)
@@ -527,7 +534,8 @@ func TestAgentPathCreateDiskNodeConsumesAgentSize(t *testing.T) {
 					sizeReqs[0].GetClusterId(), cid)
 			}
 			if sizeReqs[0].GetDnId() != 0 {
-				t.Errorf("GetDnSize dn_id = %d, want 0 (§8.2: the node has "+
+				t.Errorf("GetDnSize dn_id = %d, want 0 (architecture.md, "+
+					"Disk nodes: the node has "+
 					"no id yet)", sizeReqs[0].GetDnId())
 			}
 
@@ -571,7 +579,8 @@ func TestAgentPathCreateDiskNodeConsumesAgentSize(t *testing.T) {
 	}
 }
 
-// TestAgentPathCreateControllerNodeCapBudget pins §6.1's CN budget rule, the
+// TestAgentPathCreateControllerNodeCapBudget pins the CN budget rule of
+// architecture.md, Size → extents, the
 // one place the CN flow deliberately differs from its DN twin: GetCnSize is
 // an operator's opinion, so 0 and anything below MinCnCap take DefaultCnCap
 // and anything above MaxCnCap is clamped to it.
@@ -662,8 +671,9 @@ func TestAgentPathCreateControllerNodeCapBudget(t *testing.T) {
 	}
 }
 
-// TestAgentPathInspectRepliesTheAppliedRevision pins architecture.md
-// §8.2/§8.6: an Inspect* reply's `applied_revision` is the one the agent's
+// TestAgentPathInspectRepliesTheAppliedRevision pins architecture.md,
+// Disk nodes and Cntlrs: an Inspect* reply's `applied_revision` is the one
+// the agent's
 // own reply carries — its last applied revision — never the one stored in an
 // etcd rev key. The rev keys are hand-written to a value the agent does not
 // report, so a handler that regressed to the stored revision fails here.
@@ -1105,7 +1115,8 @@ func TestAgentPathHangingAgentAbortsWithinBudget(t *testing.T) {
 // TestAgentPathForceFalseRefusesUnreachableAgent pins AG3's one exception:
 // for DeleteClone and FinishMigration with force == false an unreachable
 // agent is FAILED_PRECONDITION, not the usual ABORTED, because the caller
-// cannot PROVE hydration finished and silence is not proof (§8.9, §8.11).
+// cannot PROVE hydration finished and silence is not proof (architecture.md,
+// Clones and Migrations).
 //
 // Both subtests seed etcd by hand rather than building an SP through the
 // creating handlers: the subject is the between-the-phases call and the code
@@ -1196,8 +1207,8 @@ func TestAgentPathForceFalseRefusesUnreachableAgent(t *testing.T) {
 		agentpathPut(t, cli, model.SpRevKey(shard, cid, spId),
 			&pb.SpRev{SpName: spName, Revision: spRev})
 		// One leg carrying both sides of the migration: that is the shape
-		// §8.11 finishes, and the destination's addr_port is the DN the
-		// hydration question is put to.
+		// architecture.md, Migrations, finishes, and the destination's addr_port is
+		// the DN the hydration question is put to.
 		agentpathPut(t, cli, model.SliceKey(cid, spId, sliceId), &pb.Slice{
 			DataGrpList: []*pb.Group{{
 				GrpId:  grpId,
@@ -1257,7 +1268,7 @@ func TestAgentPathForceFalseRefusesUnreachableAgent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §9.5 — the served surface
+// GW2, GW3 — the served surface
 // ---------------------------------------------------------------------------
 
 // servingCapture records what the innermost server interceptor sees. It is
@@ -1296,15 +1307,16 @@ func (c *servingCapture) seen() ([]string, []string) {
 
 // servingBufconnServe puts srv behind a bufconn listener built from exactly
 // the production option set — serverOptions(), so the trace-id mint and the
-// grpc.md §4 chains under test are the ones Run installs, in the order Run
-// installs them — plus any extra option the caller chains behind them, and
-// returns the dialer that reaches it. bufconn is deliberate: §9.5 is about
-// the interceptors and the status codes, not about sockets, and an in-memory
-// pipe removes every port from the test.
+// chains of grpc.md, Wiring, under test are the ones Run installs, in the order
+// Run installs them — plus any extra option the caller chains behind them, and
+// returns the dialer that reaches it. bufconn is deliberate: the serving tests
+// are about the interceptors and the status codes, not about sockets, and an
+// in-memory pipe removes every port from the test.
 //
 // The dial is the caller's rather than this helper's because the two callers
-// need opposite clients: §9.5's client carries the mandatory client chains,
-// the trace-id mint's test carries none at all (traceid_test.go).
+// need opposite clients: the serving tests' client carries the mandatory
+// client chains, the trace-id mint's test carries none at all
+// (traceid_test.go).
 func servingBufconnServe(
 	t *testing.T,
 	srv *Server,
@@ -1395,7 +1407,7 @@ func TestServingBufconnStatusCodesCrossTheWire(t *testing.T) {
 	// One live cluster, one live DN, for the rows that need something to
 	// collide with, to read back or a token to get wrong. The cluster goes
 	// through the real handler because the OK row reads the three globals
-	// CreateCluster writes alongside the ClusterConf (§8.1).
+	// CreateCluster writes alongside the ClusterConf (architecture.md, Clusters).
 	liveCluster, cid := agentpathCreateCluster(t, srv)
 	const dnAddr = "agentpath-wire-dn:9520"
 	agentpathPut(t, cli, model.DnConfKey(cid, dnAddr), &pb.DnConf{
@@ -1425,7 +1437,7 @@ func TestServingBufconnStatusCodesCrossTheWire(t *testing.T) {
 			want: codes.OK,
 		},
 		{
-			name: "a §7 violation is INVALID_ARGUMENT",
+			name: "a Common validation violation is INVALID_ARGUMENT",
 			call: func() error {
 				_, err := client.CreateCluster(ctx, &pb.CreateClusterRequest{
 					ClusterName: "not a legal name!",
@@ -1501,7 +1513,7 @@ func servingOwnClient(t *testing.T) *etcdutil.Client {
 
 // TestServingGracefulStopOnCtxCancel pins GW2/GW3's whole lifecycle: Run
 // serves until ctx is canceled and then GracefulStop lets Serve return
-// nil — in-flight handlers finish, and there is nothing else to drain (§0 #3).
+// nil — in-flight handlers finish, and there is nothing else to drain (GW3).
 //
 // This one test uses a real listener rather than bufconn, because
 // GracefulStop lives inside Run and Run opens its own listener: testing the
@@ -1561,7 +1573,7 @@ func TestServingGracefulStopOnCtxCancel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §9.6 — one Server, two goroutines
+// GW1, GW8 — one Server, two goroutines
 // ---------------------------------------------------------------------------
 
 // raceOutcome is what one racing goroutine came back with.
@@ -1595,7 +1607,8 @@ func raceBoth(
 }
 
 // raceWinner asserts exactly one of the two calls succeeded and that the
-// other lost with a code §5.9 allows a loser to lose with, then returns the
+// other lost with a code architecture.md, UNEXPECTED_ERROR → `ABORTED`, allows
+// a loser to lose with, then returns the
 // winner. ALREADY_EXISTS is what the loser normally sees — RunSTM re-runs its
 // closure on a write conflict, so the second attempt reads the winner's key —
 // and ABORTED is the legal alternative if the retry budget ran out first.
@@ -1623,7 +1636,7 @@ func raceWinner(t *testing.T, out [2]raceOutcome) raceOutcome {
 	return winner
 }
 
-// TestRaceSameNameCreatesHaveOneWinner pins §0 #3 and GW8 under `-race`: the
+// TestRaceSameNameCreatesHaveOneWinner pins GW1 and GW8 under `-race`: the
 // Server holds no state and takes no lock, so two concurrent same-name
 // creates are ordered by etcd alone. Exactly one must commit, the loser must
 // write nothing, and the store must be left in the state one create leaves —
@@ -1646,7 +1659,8 @@ func TestRaceSameNameCreatesHaveOneWinner(t *testing.T) {
 		winner := raceWinner(t, raceBoth(t, create, create))
 
 		// Each attempt stamps its own creation_epoch, so the stored conf
-		// names the winning cluster_id and nothing else may claim it (§5.2).
+		// names the winning cluster_id and nothing else may claim it
+		// (architecture.md, cluster_id derivation).
 		conf := &pb.ClusterConf{}
 		agentpathMustGet(t, cli, model.ClusterConfKey(name), conf)
 		cid := model.ClusterId(name, conf.GetCreationEpoch())
@@ -1712,7 +1726,8 @@ func TestRaceSameNameCreatesHaveOneWinner(t *testing.T) {
 				dn.GetTotalExtCnt(), dn.GetFreeExtCnt())
 		}
 		// One create, one mint: next_id advanced by exactly one and exactly
-		// one bucket slot carries the node (§5.4, GW12).
+		// one bucket slot carries the node (architecture.md, Globals: id allocation +
+		// shard buckets; GW12).
 		global := &pb.DnGlobal{}
 		agentpathMustGet(t, cli, model.DnGlobalKey(cid), global)
 		if global.GetNextId() != 2 {

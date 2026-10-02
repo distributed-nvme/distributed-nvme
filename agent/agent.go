@@ -1,10 +1,11 @@
 // Package agent holds the mechanism shared by the dn and cn agent roles
-// (dnagent.md §2): bootstrap, the local store, the revision gate, the lock
-// hierarchy, ResInfo tracking, the OS wrappers and the bitmap-chunk store.
+// (dnagent.md, Shared mechanism — package `agent`): bootstrap, the local
+// store, the revision gate, the lock hierarchy, ResInfo tracking, the OS
+// wrappers and the bitmap-chunk store.
 // Policy — which dm tables, md arrays and nvmet objects to build and when —
 // lives in the role packages agent/dnagent and agent/cnagent. No LVs: [D14]
 // removed the clone VG, LVM's last user, so no LVM runs anywhere in dnv
-// (cnagent.md §1).
+// (cnagent.md, Scope and placement).
 package agent
 
 import (
@@ -23,7 +24,7 @@ import (
 //
 // waitBackground (may be nil) is joined after GracefulStop has drained every
 // RPC, so no background goroutine it covers — and, more to the point, no
-// child process one of them owns, such as the §9.4 zeroing `blkdiscard` —
+// child process one of them owns, such as DN9's zeroing `blkdiscard` —
 // outlives the agent (dnagent.md SH27). Only a role whose background work
 // holds a long-running child that must not outlive it passes one: the dn
 // passes its WaitGroup join, the cn passes nil because its CN11 probers are
@@ -38,8 +39,9 @@ import (
 // background goroutines (and forked their children) by the time a reconcile
 // error or a net.Listen error returns, and cancellation alone does not reap a
 // child — the exec.CommandContext watchdog that turns it into SIGTERM and then
-// SIGKILL (SH15, osclient.md §4.2) lives in this process and dies with it, so
-// the child would be reparented to init still holding its dm device open.
+// SIGKILL (SH15, osclient.md, RunCommand) lives in this process and dies with
+// it, so the child would be reparented to init still holding its dm device
+// open.
 func Serve(
 	ctx context.Context,
 	network string,
@@ -88,7 +90,7 @@ func Serve(
 	// GracefulStop has drained every RPC by the time Serve returns; the
 	// deferred cancel-and-join above then stops the background workers and
 	// waits for the ones waitBackground covers, so no orphan child process of
-	// theirs outlives the agent (§9.4).
+	// theirs outlives the agent (SH27).
 	return grpcServer.Serve(lis)
 }
 

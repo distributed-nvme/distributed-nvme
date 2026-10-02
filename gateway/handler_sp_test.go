@@ -20,18 +20,21 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is gateway.md §9.3 for architecture.md §8.4–§8.6: the eight
-// storage-pool RPCs of storagepool.go and the three cntlr mutators of
-// cntlr.go, driven against a real etcd through a Server built directly.
+// This file is the handler tests (gateway.md GW5 to GW12) for architecture.md,
+// Storage pools, GrowSlice and Cntlrs: the eight storage-pool RPCs of
+// storagepool.go and the three cntlr mutators of cntlr.go, driven against a
+// real etcd through a Server built directly.
 //
 // Every assertion is on the STORE, not on the handler's reply alone: the
-// contract of a mutator is the exact set of keys it writes (§5.3), the exact
-// DN/CN budgets it moves (§5.6) and the exactly-once revision bump that makes
-// the change visible to a worker (§5.5). A reply that looks right over a write
-// set that is wrong is the failure mode these tests exist to catch.
+// contract of a mutator is the exact set of keys it writes (architecture.md,
+// Key table), the exact DN/CN budgets it moves
+// (architecture.md, Capacity index keys) and the exactly-once revision bump
+// that makes the change visible to a worker (architecture.md, Revision keys and
+// the sync fan-out). A reply that looks right over a write set that is wrong is
+// the failure mode these tests exist to catch.
 //
 // The two Inspect RPCs of cntlr.go are not here: they end in an agent call and
-// belong to the §9.4 agent-path suite.
+// belong to the agent-path suite (agentpath_test.go).
 
 // ---------------------------------------------------------------------------
 // The fixture: one cluster, twelve disk nodes and five controller nodes
@@ -39,9 +42,11 @@ import (
 
 const (
 	// sptExtSize / sptBlockSize are the cluster geometry every expected
-	// meta_blocks / data_blocks below is computed from (§3.6).
+	// meta_blocks / data_blocks below is computed from (architecture.md, Group
+	// on-leg layout: meta region, data region, health block).
 	//
-	// NEITHER is its §7 default (1 GiB and 1 MiB): every handler here reads
+	// NEITHER is its default under architecture.md, Common validation (1 GiB and
+	// 1 MiB): every handler here reads
 	// both as STORED, and a fixture that stored the constant could not tell a
 	// handler that read the cluster from one that substituted the constant —
 	// the two would agree on every number. Substituting either alone, or both
@@ -52,7 +57,7 @@ const (
 	// sptDnFree / sptCnFree sit in DN bin 1 (levels 1/16/256/4096), so a
 	// charge of a few extents moves the capacity key without moving the bin
 	// — which is what makes "the old key is gone, the new key is there" a
-	// meaningful assertion (§5.6, §6.2).
+	// meaningful assertion (architecture.md, Capacity index keys and DN bins).
 	sptDnFree = uint64(64)
 	sptCnFree = uint64(64)
 	sptDnCnt  = 12
@@ -60,16 +65,19 @@ const (
 
 	// The default SP: two slices, two cntlrs, md-raid1 groups. Two legs per
 	// group over two slices is eight sides on eight DISTINCT disk nodes,
-	// which is the §6.5 property with the most room to go wrong.
+	// which is the property of architecture.md, Per-operation allocation, with the
+	// most room to go wrong.
 	sptSliceCnt = 2
 	sptCntlrCnt = 2
 	sptInitExt  = uint64(4)
 	sptSpName   = "pool0"
 	// sptFootprint is Σ ext_cnt over every group of every slice: what ONE
-	// cntlr's CN reserves for the SP (§8.4, §6.5).
+	// cntlr's CN reserves for the SP (architecture.md, Storage pools and
+	// Per-operation allocation).
 	sptFootprint = uint64(sptSliceCnt) * (1 + sptInitExt)
 
-	// §3.6 for this geometry (2 GiB extents, 4 MiB pool blocks, 128-block
+	// architecture.md, Group on-leg layout: meta region, data region, health
+	// block, for this geometry (2 GiB extents, 4 MiB pool blocks, 128-block
 	// bitmap chunks): the one-extent meta group is 2 GiB / 4 MiB = 512 pool
 	// blocks, of which 3 are meta — the md superblock block, one bitmap block
 	// (256 B of superblock plus ceil(2 GiB / (128 × 4 MiB)) = 4 bits, so one
@@ -83,12 +91,13 @@ const (
 
 // sptEnvSeq numbers the cluster each environment gets, so that two tests — and
 // two iterations of one test under `go test -count=2` — never share a
-// cluster_id: it is fnv64a(name ‖ creation_epoch) and both halves move (§5.2).
+// cluster_id: it is fnv64a(name ‖ creation_epoch) and both halves move
+// (architecture.md, cluster_id derivation).
 var sptEnvSeq atomic.Uint64
 
 // sptEnv is one test's world: a cluster with its three globals, a set of disk
 // and controller nodes with consistent capacity and revision keys, and a
-// Server wired straight to the fixture etcd (no listener — §9.3).
+// Server wired straight to the fixture etcd (no listener).
 type sptEnv struct {
 	t       *testing.T
 	ctx     context.Context
@@ -115,12 +124,14 @@ func sptTrConf(addrPort string) *pb.NvmeTrConf {
 // sptNewEnv writes the whole fixture and returns it.
 //
 // The ClusterConf is testStoredClusterConf's: exactly what CreateCluster would
-// have stored, every defaultable member concrete (§7), because the RPCs below
+// have stored, every defaultable member concrete (architecture.md, Common
+// validation), because the RPCs below
 // read it as stored: each one that computes from it — the allocating ones and
 // the delete paths that maintain DN capacity keys alike — refuses a zero
 // instead of substituting. Its bdev_conf carries the data block size, the low
 // water mark and the stripe size, which is what decision D-C's merge inherits
-// from — but no redund_conf, so §8.4's structural default
+// from — but no redund_conf, so the structural default of architecture.md,
+// Storage pools,
 // applies unless a request asks for md-raid1: an SP created with no bdev_conf
 // at all is redund_none.
 func sptNewEnv(t *testing.T, dnCnt int, cnCnt int, cnFree uint64) *sptEnv {
@@ -162,7 +173,8 @@ func sptNewEnv(t *testing.T, dnCnt int, cnCnt int, cnFree uint64) *sptEnv {
 		ShardBucket: cnBucket,
 	})
 	// A fresh SpGlobal: next_id starts at 1 and shard_bucket is
-	// ShardBucketSize zeros (§5.4), exactly as CreateCluster leaves it.
+	// ShardBucketSize zeros (architecture.md, Globals: id allocation + shard
+	// buckets), exactly as CreateCluster leaves it.
 	mustPut(t, cli, model.SpGlobalKey(env.cid), &pb.SpGlobal{
 		NextId:      1,
 		ShardBucket: zeroBucket(),
@@ -170,8 +182,9 @@ func sptNewEnv(t *testing.T, dnCnt int, cnCnt int, cnFree uint64) *sptEnv {
 	return env
 }
 
-// putDn writes one DnConf, the capacity key the §5.6 presence rule implies for
-// it, and its DnRev at revision 1.
+// putDn writes one DnConf, the capacity key the presence rule of
+// architecture.md, Capacity index keys, implies for it, and its DnRev at
+// revision 1.
 func (e *sptEnv) putDn(
 	addrPort string,
 	dnId uint64,
@@ -224,7 +237,7 @@ func (e *sptEnv) putCn(
 }
 
 // dnCapacityKey is the key a DN with freeExt free extents implies, or "" when
-// it implies none (§5.6).
+// it implies none (architecture.md, Capacity index keys).
 func (e *sptEnv) dnCapacityKey(addrPort string, freeExt uint64) string {
 	binIdx, ok := model.DnBinIdx(freeExt, e.cc.GetDnBinConf())
 	if !ok {
@@ -294,7 +307,7 @@ func (e *sptEnv) cnConf(addrPort string) *pb.CnConf {
 }
 
 // spRev is the SP's stored revision — the token every SP mutator consumes and
-// bumps (§5.5).
+// bumps (architecture.md, Revision keys and the sync fan-out).
 func (e *sptEnv) spRev(shard uint32, spId uint64) uint64 {
 	rev := &pb.SpRev{}
 	e.get(model.SpRevKey(shard, e.cid, spId), rev)
@@ -326,8 +339,8 @@ func (e *sptEnv) cdcEntry(
 }
 
 // dump is every key of THIS cluster with its raw value. Cluster-scoped keys
-// all carry the cluster_id as one field (§5.3), so the id's rendering is an
-// exact filter on a store several tests share.
+// all carry the cluster_id as one field (architecture.md, Key table), so the
+// id's rendering is an exact filter on a store several tests share.
 func (e *sptEnv) dump() map[string][]byte {
 	e.t.Helper()
 	kvs, _, err := e.cli.Range(e.ctx, common.DnvPrefix)
@@ -379,7 +392,8 @@ func sptSmallSpec(name string) sptSpec {
 }
 
 // req builds the CreateStoragePoolRequest a spec describes. The
-// event_threshold is deliberately non-default: §7 stores it verbatim — it is
+// event_threshold is deliberately non-default: architecture.md, Common
+// validation, stores it verbatim — it is
 // still resolved at read time, one of the two conf messages that are — and a
 // zero one could not tell that apart from a dropped field.
 func (spec sptSpec) req(clusterName string) *pb.CreateStoragePoolRequest {
@@ -427,7 +441,7 @@ func sptWantCode(t *testing.T, err error, want codes.Code) {
 }
 
 // sptWantStale asserts GW6's token refusal: ABORTED carrying the one sentence
-// §0 #7 fixes, which the integration suite greps for.
+// GW6 fixes, which the integration suite greps for.
 //
 // It is the assertion for a request that SENT a token and was compared against
 // the stored revision. GW6 is presence-based, so a request that sent no token
@@ -474,16 +488,17 @@ func (e *sptEnv) walkSides(conf *pb.SpConf) []sptSideWalk {
 }
 
 // ---------------------------------------------------------------------------
-// CreateStoragePool (§8.4)
+// CreateStoragePool (architecture.md, Storage pools)
 // ---------------------------------------------------------------------------
 
-// TestCreateStoragePoolWriteSet pins the whole write set of §8.4: the SpConf
-// with decision D-C's merged bdev_conf and the §8.4 default slot list, the
-// sp_id_to_name reverse key, an SpRev CREATED at revision 1 (never bumped),
-// one Cntlr per CN pick with exactly one primary and pairwise distinct cntlid
-// slots (§11.8), one Slice per slice carrying its meta and data group, every
-// side unprovisioned ([D15]) on a DN no other leg of the SP uses (§6.5), and
-// the cluster's SpGlobal advanced by exactly one id and one bucket slot
+// TestCreateStoragePoolWriteSet pins the whole write set of architecture.md,
+// Storage pools: the SpConf with decision D-C's merged bdev_conf and its
+// default slot list, the sp_id_to_name reverse key, an SpRev CREATED at
+// revision 1 (never bumped), one Cntlr per CN pick with exactly one primary and
+// pairwise distinct cntlid slots (architecture.md, cntlid slots), one Slice per
+// slice carrying its meta and data group, every side unprovisioned ([D15]) on a
+// DN no other leg of the SP uses (architecture.md, Per-operation allocation),
+// and the cluster's SpGlobal advanced by exactly one id and one bucket slot
 // (GW12).
 func TestCreateStoragePoolWriteSet(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -492,7 +507,8 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateStoragePool: %v", err)
 	}
-	// The first SP of a fresh cluster: next_id starts at 1 (§5.4).
+	// The first SP of a fresh cluster: next_id starts at 1
+	// (architecture.md, Globals: id allocation + shard buckets).
 	if reply.GetSpId() != 1 {
 		t.Fatalf("sp_id: got %d, want 1", reply.GetSpId())
 	}
@@ -514,7 +530,8 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	if conf.GetDeleting() {
 		t.Errorf("deleting must be false on a fresh SP")
 	}
-	// D-C plus §7: the request's redund_md_raid1 wins the kind, the cluster's
+	// D-C plus architecture.md, Common validation: the request's redund_md_raid1
+	// wins the kind, the cluster's
 	// dm_pool_conf members carry over, and every member still zero after the
 	// merge is settled by model.ResolveBdevConf — so the STORED message is
 	// concrete down to the last field. bitmap_chunk_block_cnt is the one the
@@ -540,7 +557,8 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	if !proto.Equal(conf.GetBdevConf(), wantBdev) {
 		t.Errorf("bdev_conf: got %v, want %v", conf.GetBdevConf(), wantBdev)
 	}
-	// §7: event_threshold is stored VERBATIM and resolved at read time
+	// architecture.md, Common validation: event_threshold is stored VERBATIM and
+	// resolved at read time
 	// (model.ResolveEventThreshold) — it is a policy timer, not geometry.
 	// It and the DmCloneConf hydration pair are the two such exemptions. This assertion is the guard that the write-time
 	// resolution above stopped at bdev_conf: a handler that swept
@@ -550,7 +568,8 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	if !proto.Equal(conf.GetEventThreshold(), wantThreshold) {
 		t.Errorf("event_threshold: got %v", conf.GetEventThreshold())
 	}
-	// §8.4: an empty cntlid_slot_list defaults to every slot a CN has.
+	// architecture.md, Storage pools: an empty cntlid_slot_list defaults to every
+	// slot a CN has.
 	if len(conf.GetCntlidSlotList()) != common.CnCntlidSlotCnt {
 		t.Fatalf("cntlid_slot_list: got %v", conf.GetCntlidSlotList())
 	}
@@ -579,9 +598,9 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	if name.GetSpName() != sptSpName {
 		t.Errorf("sp_id_to_name: got %q", name.GetSpName())
 	}
-	// §5.5: the rev key is CREATED at 1 and carries the sp_name a watching
-	// worker forms the SpConf key from [D10]; CreateStoragePool bumps
-	// nothing.
+	// architecture.md, Revision keys and the sync fan-out: the rev key is CREATED
+	// at 1 and carries the sp_name a watching worker forms the SpConf key from
+	// [D10]; CreateStoragePool bumps nothing.
 	rev := &pb.SpRev{}
 	env.get(model.SpRevKey(0, env.cid, spId), rev)
 	if rev.GetRevision() != 1 || rev.GetSpName() != sptSpName {
@@ -614,7 +633,7 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 		if cntlr.GetErrEpoch() != 0 {
 			t.Errorf("cntlr %d: err_epoch %d", cntlrId, cntlr.GetErrEpoch())
 		}
-		// §11.8: cntlid_slot_list[idx] in pick order.
+		// architecture.md, cntlid slots: cntlid_slot_list[idx] in pick order.
 		if cntlr.GetCntlidSlot() != uint32(idx) {
 			t.Errorf("cntlr %d: cntlid_slot %d, want %d",
 				cntlrId, cntlr.GetCntlidSlot(), idx)
@@ -639,7 +658,8 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	}
 
 	// One Slice per slice, each with one meta group of 1 extent — the first
-	// rung of the §8.5 ladder — and one data group of init_ext_cnt.
+	// rung of the meta ladder of architecture.md, GrowSlice — and one data group
+	// of init_ext_cnt.
 	seenDn := make(map[string]bool)
 	for idx, sliceId := range conf.GetSliceIdList() {
 		slice := env.slice(spId, sliceId)
@@ -675,7 +695,7 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 				t.Errorf("group %d: a new group has no spare leg",
 					grp.GetGrpId())
 			}
-			// md-raid1 is two legs (§6.5).
+			// md-raid1 is two legs (architecture.md, Per-operation allocation).
 			if len(grp.GetLegList()) != 2 {
 				t.Fatalf("group %d: %d legs, want 2",
 					grp.GetGrpId(), len(grp.GetLegList()))
@@ -739,8 +759,9 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 // and then CreateDiskNode/CreateControllerNode against fake agents — rather
 // than through sptNewEnv's hand-written ClusterConf.
 //
-// The bdev_conf tests below need the whole write path, because §7 resolves
-// twice along it: CreateCluster makes the CLUSTER's bdev_conf concrete, and
+// The bdev_conf tests below need the whole write path, because
+// architecture.md, Common validation, resolves twice along it: CreateCluster
+// makes the CLUSTER's bdev_conf concrete, and
 // CreateStoragePool merges the request over that result and resolves whatever
 // neither side named. A fixture that wrote the ClusterConf itself would pin
 // only the second half — it would keep passing with the first one deleted,
@@ -748,7 +769,8 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 //
 // It registers exactly the nodes one sptDefaultSpec SP needs: two slices x
 // (meta + data) x two md-raid1 legs is eight sides on eight distinct DNs
-// (§6.5), each in its own location, plus one CN per cntlr.
+// (architecture.md, Per-operation allocation), each in its own location, plus
+// one CN per cntlr.
 type sptLiveEnv struct {
 	srv  *Server
 	name string
@@ -766,8 +788,9 @@ func sptNewLiveEnv(t *testing.T, clusterBdev *pb.BdevConf) *sptLiveEnv {
 		t.Fatalf("CreateCluster %s: %v", name, err)
 	}
 	// 100 GiB is 100 extents against the default 1 GiB unit, and 1 TiB is the
-	// 1024 a CN budget of that size floors to (§6.1) — both far above this
-	// SP's footprint, so no placement here can fail for capacity.
+	// 1024 a CN budget of that size floors to (architecture.md, Size → extents) —
+	// both far above this SP's footprint, so no placement here can fail for
+	// capacity.
 	for idx := 0; idx < 2*sptSliceCnt*2; idx++ {
 		addr := fakeAddrPort(t, fmt.Sprintf("livedn%d", idx))
 		mustDn(t, srv, name, addr, fmt.Sprintf("dn-rack-%d", idx), 100<<30)
@@ -801,8 +824,8 @@ func (e *sptLiveEnv) createSpBdev(
 }
 
 // TestCreateStoragePoolResolvesTheMergedBdevConf pins the bottom rung of
-// decision D-C: a member no one asked for anywhere is stored as the §7
-// constant, not as a zero.
+// decision D-C: a member no one asked for anywhere is stored as the constant
+// of architecture.md, Common validation, not as a zero.
 //
 // Neither the cluster request nor the SP request names a single number — the
 // SP's whole bdev_conf is the redundancy CHOICE — so all four members below
@@ -810,8 +833,9 @@ func (e *sptLiveEnv) createSpBdev(
 // already made concrete. bitmap_chunk_block_cnt is the one that could have
 // come from nowhere else at all: the cluster has no redund_conf, so it has no
 // chunk count to inherit. Storing these numbers is the point — the group's
-// bitmap and every later capacity sum are computed from them (§3.6), and a
-// zero left here would be re-filled by whatever binary read the SP next.
+// bitmap and every later capacity sum are computed from them (architecture.md,
+// Group on-leg layout: meta region, data region, health block), and a zero left
+// here would be re-filled by whatever binary read the SP next.
 func TestCreateStoragePoolResolvesTheMergedBdevConf(t *testing.T) {
 	env := sptNewLiveEnv(t, nil)
 	got := env.createSpBdev(t, &pb.BdevConf{
@@ -837,7 +861,8 @@ func TestCreateStoragePoolResolvesTheMergedBdevConf(t *testing.T) {
 		t.Errorf("bdev_conf: got %v, want %v", got, wantBdev)
 	}
 	// The stored conf is what every later reader is held to: CreateThinDevice
-	// and GrowSlice refuse it rather than resolving it (§7).
+	// and GrowSlice refuse it rather than resolving it (architecture.md, Common
+	// validation).
 	if err := model.ValidateBdevConf(got); err != nil {
 		t.Errorf("the stored bdev_conf does not validate: %v", err)
 	}
@@ -847,7 +872,8 @@ func TestCreateStoragePoolResolvesTheMergedBdevConf(t *testing.T) {
 // the request wins every member it set, the cluster wins every member the
 // request left unset, and both land in the SAME stored message.
 //
-// Every number is deliberately neither the other rung's nor the §7 constant,
+// Every number is deliberately neither the other rung's nor the constant of
+// architecture.md, Common validation,
 // so a member taken from the wrong rung — or resolved BEFORE the merge instead
 // of after it, which would replace everything the request omitted with
 // constants and destroy inheritance wholesale — reads as a different number
@@ -899,7 +925,8 @@ func TestCreateStoragePoolBdevConfMergeRungs(t *testing.T) {
 	}
 }
 
-// TestCreateStoragePoolJudgesTheMergedGeometry pins §7's geometry rules on
+// TestCreateStoragePoolJudgesTheMergedGeometry pins the geometry rules of
+// architecture.md, Common validation, on
 // the bdev_conf an SP STORES, not merely on the request. D-C's merge fills
 // every member the request omits from the cluster, or from the constants
 // where the cluster has none, so a request legal by itself can combine with
@@ -924,8 +951,9 @@ func TestCreateStoragePoolBdevConfMergeRungs(t *testing.T) {
 // that pool now holds is still INVALID_ARGUMENT, not ALREADY_EXISTS: the
 // geometry is judged before the existence check. Last, with the cluster's
 // stored chunk count zeroed, a request that would inherit it is ABORTED with
-// model's message (§5.9): the stored conf is checked before the merge could
-// resolve that zero into a constant and blame the request for the result.
+// model's message (architecture.md, UNEXPECTED_ERROR → `ABORTED`): the stored
+// conf is checked before the merge could resolve that zero into a constant and
+// blame the request for the result.
 func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 	const kib = uint64(1024)
 	const mib = 1024 * kib
@@ -1044,7 +1072,8 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 		refuse(t, req, "bitmap_chunk_block_cnt")
 	})
 	// A stored conf that fails its own check is ABORTED before anything is
-	// judged against it (§5.9). With the cluster's chunk count zeroed, the
+	// judged against it (architecture.md, UNEXPECTED_ERROR → `ABORTED`). With the
+	// cluster's chunk count zeroed, the
 	// merge would resolve the request's unset count to the 128-block
 	// constant, and the 2 GiB chunk that makes would blame the request.
 	t.Run("a stored conf with its chunk count zeroed", func(t *testing.T) {
@@ -1078,7 +1107,9 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 	})
 }
 
-// TestCreateStoragePoolNodeAccounting pins the §5.6 / §5.5 half of §8.4: every
+// TestCreateStoragePoolNodeAccounting pins the capacity-key and revision half
+// (architecture.md, Capacity index keys; Revision keys and the sync fan-out) of
+// architecture.md, Storage pools: every
 // picked DN loses exactly its group's extents and gains exactly one side
 // pointer, every cntlr's CN loses the SP's whole footprint and gains exactly
 // one cntlr pointer, both capacity keys move to the new free count, and every
@@ -1151,7 +1182,8 @@ func TestCreateStoragePoolNodeAccounting(t *testing.T) {
 	}
 
 	// A node the allocator did not pick must be untouched down to its bytes:
-	// an allocation writes only what it charges (§5.6).
+	// an allocation writes only what it charges
+	// (architecture.md, Capacity index keys).
 	after := env.dump()
 	for _, addrPort := range env.dnAddrs {
 		if touchedDn[addrPort] {
@@ -1187,7 +1219,8 @@ func TestCreateStoragePoolNodeAccounting(t *testing.T) {
 // must reproduce this exact write set, which is only true if the order is
 // fixed.
 //
-// It then grows a slice and adds a cntlr to pin the other half of §5.4: ids
+// It then grows a slice and adds a cntlr to pin the other half of id
+// allocation (architecture.md, Globals: id allocation + shard buckets): ids
 // continue from the counter and are never reused.
 func TestCreateStoragePoolIdSequence(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -1271,12 +1304,14 @@ func TestCreateStoragePoolIdSequence(t *testing.T) {
 	}
 }
 
-// TestCreateStoragePoolRefusals pins the refusals of §8.4 that write nothing:
+// TestCreateStoragePoolRefusals pins the refusals of architecture.md,
+// Storage pools, that write nothing:
 // a name already taken is ALREADY_EXISTS, and each RESOURCE_EXHAUSTED path —
 // too few disk nodes for the leg count, no controller node with room for the
 // SP's footprint, fewer such controller nodes than the SP has cntlrs, and a
 // cluster that has reached MaxSpCntPerCluster — leaves the SpGlobal and every
-// node exactly as it found them (GW7, §6.5).
+// node exactly as it found them (GW7; architecture.md, Per-operation
+// allocation).
 func TestCreateStoragePoolRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1300,7 +1335,8 @@ func TestCreateStoragePoolRefusals(t *testing.T) {
 			msg:    "disk nodes",
 		},
 		{
-			// Every CN reserves the SP's whole footprint (§6.5).
+			// Every CN reserves the SP's whole footprint (architecture.md,
+			// Per-operation allocation).
 			name:   "no controller node with room",
 			dnCnt:  sptDnCnt,
 			cnCnt:  sptCnCnt,
@@ -1313,8 +1349,9 @@ func TestCreateStoragePoolRefusals(t *testing.T) {
 			// The CN is its own location, so the second pick's tier 1 finds
 			// nothing and tier 2 rescans without the location exclusion:
 			// only the CN black list keeps that pick off the first one's CN
-			// (§6.4, §6.5), and a create that lost it would commit both
-			// cntlrs there instead of refusing.
+			// (architecture.md, Finding CN candidates and Per-operation
+			// allocation), and a create that lost it would commit both cntlrs
+			// there instead of refusing.
 			name:   "one controller node for two cntlrs",
 			dnCnt:  sptDnCnt,
 			cnCnt:  1,
@@ -1375,7 +1412,8 @@ func TestCreateStoragePoolRefusals(t *testing.T) {
 	}
 }
 
-// TestCreateStoragePoolValidation pins the §7 / §8.4 checks that run before
+// TestCreateStoragePoolValidation pins the checks of architecture.md, Common
+// validation and Storage pools, that run before
 // any read, so a malformed request never touches the store (GW4).
 func TestCreateStoragePoolValidation(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -1426,14 +1464,16 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 			_, err := env.srv.CreateStoragePool(env.ctx, req)
 			sptWantCode(t, err, codes.InvalidArgument)
 			if env.exists(model.SpConfKey(env.cid, sptSpName)) {
-				t.Errorf("a §7 refusal must not create the SP")
+				t.Errorf("a refusal of architecture.md, Common validation, " +
+					"must not create the SP")
 			}
 		})
 	}
 }
 
-// TestCreateStoragePoolDefaultsSliceCnt pins the other half of §7's
-// "substitute the default" for slice_cnt: a zero is not a refusal — it is a
+// TestCreateStoragePoolDefaultsSliceCnt pins the other half of the
+// "substitute the default" rule of architecture.md, Common validation, for
+// slice_cnt: a zero is not a refusal — it is a
 // request for common.DefaultSliceCntPerSp, the way a zero cntlr_cnt asks for
 // DefaultCntlrCntPerSp — and that substituted count is what the SP is
 // actually built with.
@@ -1461,7 +1501,8 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 // sptSliceCnt happens to equal DefaultSliceCntPerSp today; what makes this
 // test meaningful is the zero in the REQUEST, not the shape of the SP.
 func TestCreateStoragePoolDefaultsSliceCnt(t *testing.T) {
-	// §6.5: every leg of the WHOLE SP lands on a DN of its own, and one
+	// architecture.md, Per-operation allocation: every leg of the WHOLE SP lands on
+	// a DN of its own, and one
 	// cntlr's CN reserves the whole SP's Σ ext_cnt.
 	const envSliceCnt = common.DefaultSliceCntPerSp + 1
 	const envDnCnt = spCreateGrpsPerSlice * envSliceCnt *
@@ -1507,7 +1548,7 @@ func TestCreateStoragePoolDefaultsSliceCnt(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DeleteStoragePool (§8.4)
+// DeleteStoragePool (architecture.md, Storage pools)
 // ---------------------------------------------------------------------------
 
 // TestDeleteStoragePoolFullTeardown is the accounting counterpart of
@@ -1516,9 +1557,11 @@ func TestCreateStoragePoolDefaultsSliceCnt(t *testing.T) {
 // every DN and CN budget, pointer list and capacity key restored, the
 // SpGlobal's bucket slot released — with exactly three deliberate exceptions:
 // next_id never rewinds (GW12: a deleted sp_id must never come back), and each
-// node the two RPCs touched has been bumped exactly twice (§5.5).
+// node the two RPCs touched has been bumped exactly twice (architecture.md,
+// Revision keys and the sync fan-out).
 //
-// The delete now only LATCHES (§8.4), so sptDrain stands in for the sp
+// The delete now only LATCHES (architecture.md, Storage pools), so sptDrain
+// stands in for the sp
 // coordinator. The property under test is unchanged by that split, and
 // deliberately so: SPD13 keeps the one-shot's real guarantee — DN and CN
 // budgets never disagree with the keys that describe them — by having every
@@ -1611,7 +1654,8 @@ func sptUnmarshal(t *testing.T, raw []byte, msg proto.Message) {
 
 // sptIsRevKey reports whether a key is a DnRev or a CnRev key. Both are
 // bumped by an allocation and are therefore the one class of key a full
-// teardown does NOT restore (§5.5: a revision only ever grows).
+// teardown does NOT restore (architecture.md, Revision keys and the sync
+// fan-out: a revision only ever grows).
 func sptIsRevKey(key string) bool {
 	if _, _, _, ok := model.ParseDnRevKey(key); ok {
 		return true
@@ -1643,12 +1687,14 @@ func sptRevisionOf(t *testing.T, raw []byte) uint64 {
 	return rev.GetRevision()
 }
 
-// TestDeleteStoragePoolBumpsASharedNodeOnce pins the ledger property §5.5
+// TestDeleteStoragePoolBumpsASharedNodeOnce pins the ledger property that
+// architecture.md, Revision keys and the sync fan-out,
 // exists for: one DN carrying SEVERAL sides of the SP being torn down is read
 // once, written once, has its capacity key maintained once and its revision
 // bumped ONCE — with the whole of what it carried returned to its budget.
 //
-// CreateStoragePool can never build such an SP (§6.5 puts every leg on a
+// CreateStoragePool can never build such an SP (architecture.md, Per-operation
+// allocation, puts every leg on a
 // distinct DN), so the fixture is written by hand: this is exactly the state a
 // GrowSlice reaching back to an already-used DN produces (decision D-F).
 //
@@ -1813,7 +1859,7 @@ func sptBucketWith(shard uint32) []uint32 {
 
 // reserveDn charges a hand-written SP's footprint onto a DN exactly as the
 // ledger would have: the budget drops, the pointers appear and the capacity
-// key moves with the free count (§5.6).
+// key moves with the free count (architecture.md, Capacity index keys).
 func (e *sptEnv) reserveDn(
 	addrPort string,
 	extCnt uint64,
@@ -1858,13 +1904,14 @@ func (e *sptEnv) reserveCn(
 	)
 }
 
-// TestDeleteStoragePoolRefusals pins §8.4's preconditions: the five name lists
+// TestDeleteStoragePoolRefusals pins the preconditions of architecture.md,
+// Storage pools: the five name lists
 // are the whole gate — a thin device, subsystem, clone, transfer or migration
 // the user made must be removed first — and a token that was SENT and does not
 // match the stored revision is refused before any of them is even looked at
 // (GW6). Every refusal writes nothing.
 //
-// GW6 is presence-based (§0 #7), so "does not match" covers more than an
+// GW6 is presence-based, so "does not match" covers more than an
 // outdated revision. The last two rows are the discriminators that say so: a
 // message that is present but carries revision 0 — what &pb.SpRev{} gives, and
 // what a client that filled in only the echoed sp_name gives — is a real token
@@ -1897,7 +1944,7 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 			c.MigrNameList = []string{"m0"}
 		}, &pb.SpRev{Revision: 1}, codes.FailedPrecondition},
 		{"stale token", nil, &pb.SpRev{Revision: 2}, codes.Aborted},
-		// The two discriminators of the presence rule (§0 #7): both of these
+		// The two discriminators of GW6's presence rule: both of these
 		// requests DO carry a token message, so both are compared, and a
 		// revision of 0 matches no live SP.
 		{"token carrying revision 0", nil, &pb.SpRev{}, codes.Aborted},
@@ -1921,8 +1968,9 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 				})
 			sptWantCode(t, err, tc.want)
 			// Every ABORTED row of this table is GW6's token refusal: the
-			// held-object rows are FAILED_PRECONDITION, and §5.9's other
-			// ABORTED needs a lost invariant key, which this fixture does not
+			// held-object rows are FAILED_PRECONDITION, and the other
+			// ABORTED of architecture.md, UNEXPECTED_ERROR → `ABORTED`,
+			// needs a lost invariant key, which this fixture does not
 			// have (that one is TestReleasePathsAbortOnALostConfKey). So each
 			// token row also pins the exact sentence, which is what tells a
 			// stale client to re-read rather than to give up.
@@ -1944,7 +1992,8 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 }
 
 // TestDeleteStoragePoolWithoutAToken is the positive half of GW6's presence
-// rule (§0 #7) for §8.4: a request that carries NO SpRev message skips the
+// rule for DeleteStoragePool (architecture.md, Storage pools): a request that
+// carries NO SpRev message skips the
 // revision comparison and is then judged by exactly the same preconditions as
 // any other request. Omitting the token opts out of optimistic concurrency; it
 // does not opt out of the five name lists, and it is not itself a refusal.
@@ -1955,9 +2004,10 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 // first. Each subtest builds its own SP, so the teardown that commits cannot
 // reach the fixture the other one reads.
 //
-// The sp_rev key is still READ on the way through — it is a §5.1 invariant key
-// whose absence is ABORTED either way — and since the RPC became a latch
-// (§8.4) a token-less delete bumps it exactly like a token-carrying one; the
+// The sp_rev key is still READ on the way through — it is an invariant key of
+// architecture.md, Key grammar, whose absence is ABORTED either way — and since
+// the RPC became a latch (architecture.md, Storage pools) a token-less delete
+// bumps it exactly like a token-carrying one; the
 // drain then deletes it at D3. What the second subtest therefore pins is the
 // whole effect of the bypass: the latch commits, and the teardown it starts
 // returns every extent. TestGrowSliceWithoutAToken pins the bump on its own.
@@ -2024,7 +2074,7 @@ func TestDeleteStoragePoolWithoutAToken(t *testing.T) {
 			}
 		}
 		// The ledgers ran too, so this was the whole RPC and not some early
-		// exit that happened to report OK (§5.6).
+		// exit that happened to report OK (architecture.md, Capacity index keys).
 		for _, walk := range sides {
 			dn := env.dnConf(walk.AddrPort)
 			if dn.GetFreeExtCnt() != sptDnFree {
@@ -2050,7 +2100,8 @@ func TestDeleteStoragePoolWithoutAToken(t *testing.T) {
 	})
 }
 
-// TestDeleteStoragePoolUnknown pins the NOT_FOUND rows of §8.4: an SP name
+// TestDeleteStoragePoolUnknown pins the NOT_FOUND rows of architecture.md,
+// Storage pools: an SP name
 // nothing wrote, and a cluster name nothing wrote.
 func TestDeleteStoragePoolUnknown(t *testing.T) {
 	env := sptNewEnv(t, 1, 1, sptCnFree)
@@ -2072,15 +2123,17 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 
 // TestReleasePathsAbortOnALostConfKey pins the allocator ledgers' error class.
 // A dn_conf or cn_conf the ledgers reach through a stored Side or Cntlr is
-// named by no request, so GW7 makes its absence a lost invariant key — §5.9's
-// ABORTED — and never the NOT_FOUND of an object the caller asked for. The
+// named by no request, so GW7 makes its absence a lost invariant key — the
+// ABORTED of architecture.md, UNEXPECTED_ERROR → `ABORTED` — and never the
+// NOT_FOUND of an object the caller asked for. The
 // store is untouched either way: each ledger reads before its handler stages
 // its first write and an error out of the closure commits nothing (EU4), so the
 // object whose release aborted is still whole.
 //
 // The two rows used to be DeleteStoragePool's, the widest release path there
 // was. It is no longer a release path at all — the sp drain took its ledgers
-// with it (§8.4) — so each row now drives the widest SURVIVING user of the
+// with it (architecture.md, Storage pools) — so each row now drives the widest
+// SURVIVING user of the
 // ledger it is about: DeleteSpareLeg for the DN half, DeleteCntlr for the CN
 // half. The drain's own answer to the same lost key is deliberately the
 // opposite one, and TestDrainToleratesALostNodeRecord in model/drain_test.go
@@ -2128,7 +2181,8 @@ func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 		conf := env.spConf(sptSpName)
 		standbyId := conf.GetCntlrIdList()[1]
 		addr := env.cntlr(spId, standbyId).GetAddrPort()
-		// §8.6 refuses to delete an enabled cntlr, so the disable comes first
+		// architecture.md, Cntlrs, refuses to delete an enabled cntlr, so the disable
+		// comes first
 		// — while the CnConf is still there, since UpdateCntlrEnabled reads
 		// the CdcEntries and not the node.
 		if _, err := env.srv.UpdateCntlrEnabled(
@@ -2169,7 +2223,8 @@ func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 			}
 		}
 		// The cntlr the release aborted over is still listed and still keyed,
-		// and the token is unconsumed because nothing committed (§5.5).
+		// and the token is unconsumed because nothing committed (architecture.md,
+		// Revision keys and the sync fan-out).
 		env.cntlr(spId, standbyId)
 		if got := env.spRev(conf.GetShardCode(), spId); got != 2 {
 			t.Errorf("sp_rev: got %d, want 2", got)
@@ -2178,7 +2233,8 @@ func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 }
 
 // TestDeletingStoragePoolRefusesOtherMutators pins resolveSp's rejectDeleting
-// gate (§8 preamble): an SP whose teardown has begun accepts no further
+// gate (architecture.md, `service Gateway` — RPC specifications): an SP whose
+// teardown has begun accepts no further
 // changes, and DeleteStoragePool is the ONE mutator that must still proceed —
 // refusing the RPC that starts, and re-confirms, the teardown would strand it.
 //
@@ -2237,10 +2293,11 @@ func TestDeletingStoragePoolRefusesOtherMutators(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The read paths (§8.4)
+// The read paths (architecture.md, Storage pools)
 // ---------------------------------------------------------------------------
 
-// TestGetStoragePool pins §8.4's read: the reply carries the stored SpConf,
+// TestGetStoragePool pins the read of architecture.md, Storage pools: the reply
+// carries the stored SpConf,
 // the SpRev token a caller then spends, and the cntlr and slice lists
 // INDEX-ALIGNED with sp_conf.cntlr_id_list / slice_id_list, all read in one
 // Snapshot so a client can never see a cntlr list from one revision beside a
@@ -2351,7 +2408,8 @@ func TestListStoragePools(t *testing.T) {
 	sptWantCode(t, err, codes.InvalidArgument)
 }
 
-// TestFindStoragePoolNames pins §8.4's reverse lookup: known ids map to their
+// TestFindStoragePoolNames pins the reverse lookup of architecture.md,
+// Storage pools: known ids map to their
 // names and an id nothing wrote is simply OMITTED — absence IS the answer "no
 // such sp_id", and making it an error would force a caller to probe one id at
 // a time.
@@ -2395,15 +2453,17 @@ func TestFindStoragePoolNames(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// UpdateStoragePoolCntlidSlotList (§8.4)
+// UpdateStoragePoolCntlidSlotList (architecture.md, Storage pools)
 // ---------------------------------------------------------------------------
 
-// TestUpdateStoragePoolCntlidSlotList pins §8.4's in-use-slot rule: a slot may
-// only leave the list when nothing names it, and what names one is every
-// cntlr's cntlid_slot AND every side's — a side's slot is what its DN's nvmet
-// subsystem exports it under (§11.8), so dropping one would make the SP
+// TestUpdateStoragePoolCntlidSlotList pins the in-use-slot rule of
+// architecture.md, Storage pools: a slot may only leave the list when nothing
+// names it, and what names one is every cntlr's cntlid_slot AND every side's —
+// a side's slot is what its DN's nvmet subsystem exports it under
+// (architecture.md, cntlid slots), so dropping one would make the SP
 // undeployable. Every refusal writes nothing and bumps nothing; the accepted
-// list is stored and bumps SpRev exactly once (§5.5).
+// list is stored and bumps SpRev exactly once (architecture.md, Revision keys
+// and the sync fan-out).
 func TestUpdateStoragePoolCntlidSlotList(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -2503,15 +2563,17 @@ func TestUpdateStoragePoolCntlidSlotListRefusesASideSlot(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GrowSlice (§8.5)
+// GrowSlice (architecture.md, GrowSlice)
 // ---------------------------------------------------------------------------
 
-// TestGrowSliceData pins §8.5's data grow and decision D-E: the new group's
-// size is the slice's FIRST data group's ext_cnt, NOT the request's ext_cnt —
-// which is only §8.5's exclusivity signal. The group lands on legs on distinct
+// TestGrowSliceData pins the data grow of architecture.md, GrowSlice, and
+// decision D-E: the new group's size is the slice's FIRST data group's ext_cnt,
+// NOT the request's ext_cnt — which is only the exclusivity signal of that
+// section. The group lands on legs on distinct
 // disk nodes (decision D-F), its sides are unprovisioned ([D15]) and carry
 // cntlid_slot_list[0], every leg's DN is charged the new size and every
-// cntlr's CN reserves it too (§6.5), and SpRev, DnRev and CnRev each bump
+// cntlr's CN reserves it too (architecture.md, Per-operation allocation), and
+// SpRev, DnRev and CnRev each bump
 // exactly once — all inside model.GrowSlice's own transaction, so the handler
 // itself bumps nothing.
 func TestGrowSliceData(t *testing.T) {
@@ -2623,13 +2685,13 @@ func TestGrowSliceData(t *testing.T) {
 				addrPort, got, dnRevBefore[addrPort])
 		}
 	}
-	// §5.5: exactly one bump, and it is model.GrowSlice's, not the
-	// handler's.
+	// architecture.md, Revision keys and the sync fan-out: exactly one bump, and
+	// it is model.GrowSlice's, not the handler's.
 	if got := env.spRev(0, spId); got != 2 {
 		t.Errorf("sp_rev: got %d, want exactly one bump to 2", got)
 	}
-	// §8.5 / §6.5: every cntlr stacks the new group, so every one of their
-	// CNs reserves it.
+	// architecture.md, GrowSlice and Per-operation allocation: every cntlr stacks
+	// the new group, so every one of their CNs reserves it.
 	for _, cntlrId := range env.spConf(sptSpName).GetCntlrIdList() {
 		addrPort := env.cntlr(spId, cntlrId).GetAddrPort()
 		cn := env.cnConf(addrPort)
@@ -2645,8 +2707,9 @@ func TestGrowSliceData(t *testing.T) {
 	}
 }
 
-// TestGrowSliceConsecutiveDataGrows pins gateway.md §5.4's poolTotal
-// argument (architecture.md §8.5): the gateway passes math.MaxUint64, so
+// TestGrowSliceConsecutiveDataGrows pins the poolTotal argument of gateway.md,
+// Storage pools and GrowSlice (D-B; architecture.md, GrowSlice): the gateway
+// passes math.MaxUint64, so
 // AR6's pending rule — a WORKER convergence guard judged by the primary's
 // reported usage — never refuses a user-driven grow. The discriminator is
 // the SECOND grow of a kind: per kind the first is never pending
@@ -2695,7 +2758,8 @@ func TestGrowSliceConsecutiveDataGrows(t *testing.T) {
 	}
 }
 
-// TestGrowSliceMeta pins the other half of §8.5: a meta grow states no ext_cnt
+// TestGrowSliceMeta pins the other half of architecture.md, GrowSlice: a meta
+// grow states no ext_cnt
 // and takes its size from the ladder — a slice whose meta groups total one
 // extent grows by one — and the group is appended to meta_grp_list, not to
 // data_grp_list.
@@ -2751,7 +2815,7 @@ func TestGrowSliceMeta(t *testing.T) {
 }
 
 // TestGrowSliceMetaLadderCap pins the meta ladder's ceiling AND its error
-// class (architecture.md §8.5, gateway.md GW7): the 16 GiB cap is the SP's
+// class (architecture.md, GrowSlice; gateway.md GW7): the 16 GiB cap is the SP's
 // own permanent structural ceiling — per-object state, not exhaustible
 // capacity — so it is FAILED_PRECONDITION, never RESOURCE_EXHAUSTED.
 // model.GrowSlice's in-STM re-check of the same cap maps there too, so the
@@ -2769,8 +2833,9 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 	slice := env.slice(spId, sliceId)
 	// The cap is a size, not an ext_cnt: 8 extents of this cluster's stored
 	// 2 GiB is exactly the 16 GiB ceiling, and the ladder is refused once the
-	// total has REACHED it. A handler that read the §7 default extent size
-	// instead would make this 16 GiB look like 8 and grow.
+	// total has REACHED it. A handler that read the default extent size of
+	// architecture.md, Common validation, instead would make this 16 GiB look like
+	// 8 and grow.
 	slice.GetMetaGrpList()[0].ExtCnt = 8
 	mustPut(t, env.cli, model.SliceKey(env.cid, spId, sliceId), slice)
 	before := env.dump()
@@ -2787,8 +2852,9 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 	// re-check says only "meta ladder at the 16 GiB cap". The two map to the
 	// same code on purpose, so the message is the only thing that tells them
 	// apart — and the pre-check can only have fired by measuring 8 extents
-	// against this cluster's STORED 2 GiB, since against the §7 default they
-	// would be 8 GiB and it would have let the grow through to the STM.
+	// against this cluster's STORED 2 GiB, since against the default of
+	// architecture.md, Common validation, they would be 8 GiB and it would have
+	// let the grow through to the STM.
 	wantMsg := fmt.Sprintf(
 		"slice %d has 8 meta extents and cannot grow past the 16 GiB "+
 			"dm-thin metadata cap", sliceId)
@@ -2810,7 +2876,8 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 	}
 }
 
-// TestGrowSliceGroupListFull pins §8.5's group ceiling AND its error class:
+// TestGrowSliceGroupListFull pins the group ceiling of architecture.md,
+// GrowSlice, AND its error class:
 // a slice whose data list already holds MaxGrpCntPerSlice groups is refused
 // with nothing written. It is a count ceiling, but not one anything can free —
 // a slice's groups are only ever appended — so, like the ladder cap above, it
@@ -2871,14 +2938,15 @@ func TestGrowSliceGroupListFull(t *testing.T) {
 	}
 }
 
-// TestGrowSliceRefusals pins §8.5's refusals: the ext_cnt / is_meta
-// exclusivity of §7, a slice_id the SP does not list, and GW6's token check —
+// TestGrowSliceRefusals pins the refusals of architecture.md, GrowSlice: the
+// ext_cnt / is_meta exclusivity of architecture.md, Common validation, a
+// slice_id the SP does not list, and GW6's token check —
 // which openSp runs BEFORE the slice lookup, so a client whose token does not
 // match hears "stale revision" and never a NOT_FOUND computed against a list
 // it has not read.
 //
-// Every row here SENDS a token, because that is the only thing GW6 compares
-// (§0 #7). The last two are its discriminators: a message carrying revision 0,
+// Every row here SENDS a token, because that is the only thing GW6 compares.
+// The last two are its discriminators: a message carrying revision 0,
 // and one carrying only the echoed sp_name, are both present and are both
 // compared, and neither can match an SpRev that was created at 1 and only
 // grows — 0 is a value the check refuses, not a way to switch the check off.
@@ -2937,14 +3005,15 @@ func TestGrowSliceRefusals(t *testing.T) {
 	}
 }
 
-// TestGrowSliceWithoutAToken pins GW6's presence rule (§0 #7) on the one RPC
+// TestGrowSliceWithoutAToken pins GW6's presence rule on the one RPC
 // in this file where it has to hold in TWO places at once. GrowSlice is
 // model-backed: the handler checks the token through openSp, and then
 // model.GrowSlice re-checks it inside its own transaction through
 // model.checkSpRev — which is handed req.GetSpRev().GetRevision(), and that is
 // 0 for a request that sent no message. The two layers agree only because 0 is
 // exactly model.checkSpRev's "skip the check", the mode the worker's own
-// internal calls use (gateway.md §2.2 #3). A token-less grow that got past
+// internal calls use (gateway.md GW6; dnv-worker.md MD6). A token-less grow
+// that got past
 // openSp and was then refused by the model would be an ABORTED no client could
 // act on, so the assertion here is end to end: it must actually commit.
 //
@@ -2997,16 +3066,17 @@ func TestGrowSliceWithoutAToken(t *testing.T) {
 			t.Errorf("grp %d: ext_cnt %d, want the allocation unit %d",
 				grp.GetGrpId(), grp.GetExtCnt(), sptInitExt)
 		}
-		// One bump per grow, the model's own (§5.5): the skipped comparison
-		// leaves the revision sequence untouched.
+		// One bump per grow, the model's own
+		// (architecture.md, Revision keys and the sync fan-out): the skipped
+		// comparison leaves the revision sequence untouched.
 		if got := env.spRev(0, spId); got != uint64(round)+1 {
 			t.Errorf("after grow %d: sp_rev %d, want %d",
 				round, got, round+1)
 		}
 	}
 	// The ledgers ran for both grows, so these were whole transactions and
-	// not an early exit that reported OK (§6.5: every cntlr's CN stacks the
-	// new group).
+	// not an early exit that reported OK (architecture.md, Per-operation
+	// allocation: every cntlr's CN stacks the new group).
 	for addrPort, was := range cnRevBefore {
 		cn := env.cnConf(addrPort)
 		want := sptCnFree - sptFootprint - 2*sptInitExt
@@ -3035,7 +3105,7 @@ func TestGrowSliceWithoutAToken(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Cntlrs (§8.6)
+// Cntlrs (architecture.md, Cntlrs)
 // ---------------------------------------------------------------------------
 
 // sptNqn is the subsystem the CdcEntry tests hang off.
@@ -3045,7 +3115,8 @@ const sptNqn = "nqn.2024-01.io.dnv:spt-pool0"
 const sptSsId = uint64(9001)
 
 // addSubsystem gives the SP one subsystem and the CdcEntry that advertises
-// every ENABLED cntlr's CN (§8.8) — the state CreateSubsystem leaves behind,
+// every ENABLED cntlr's CN (architecture.md, Subsystems, namespaces) — the
+// state CreateSubsystem leaves behind,
 // written directly because this file's subject is the cntlr RPCs that MAINTAIN
 // that entry, not the one that creates it.
 func (e *sptEnv) addSubsystem(spId uint64) {
@@ -3078,11 +3149,12 @@ func sptTrAddrs(list []*pb.NvmeTrConf) []string {
 	return out
 }
 
-// TestCreateCntlr pins §8.6's CreateCntlr: a standby is added on a CN that
-// hosts none of the SP's cntlrs, it reserves the SP's whole footprint there
-// (§6.5), it is enabled from birth so its CN joins every CdcEntry of the SP
-// (§8.8), the id joins cntlr_id_list, and SpRev and the CN's CnRev each bump
-// exactly once.
+// TestCreateCntlr pins CreateCntlr (architecture.md, Cntlrs): a standby is
+// added on a CN that hosts none of the SP's cntlrs, it reserves the SP's whole
+// footprint there (architecture.md, Per-operation allocation), it is enabled
+// from birth so its CN joins every CdcEntry of the SP (architecture.md,
+// Subsystems, namespaces), the id joins cntlr_id_list, and SpRev and the CN's
+// CnRev each bump exactly once.
 func TestCreateCntlr(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -3154,15 +3226,16 @@ func TestCreateCntlr(t *testing.T) {
 	}
 }
 
-// TestCreateCntlrRefusals pins §8.6's refusals, all of which write nothing:
+// TestCreateCntlrRefusals pins the refusals of architecture.md, Cntlrs, all of
+// which write nothing:
 // a cntlid_slot outside [0, 8), one the SP's cntlid_slot_list does not name,
 // one another cntlr of the SP already holds, a token that was sent and does
 // not match, and the MaxCntlrCntPerSp ceiling — which is RESOURCE_EXHAUSTED
 // and is checked before the slot rules, so an SP already at the ceiling
 // reports the ceiling.
 //
-// The three token rows all SEND one, which is the only case GW6 compares (§0
-// #7). Two of them are the discriminators for that: a message carrying
+// The three token rows all SEND one, which is the only case GW6 compares. Two
+// of them are the discriminators for that: a message carrying
 // revision 0, and one carrying only the echoed sp_name, are present and are
 // therefore compared, and they match no SpRev, since those are created at 1
 // and only grow. Sending nothing is the case that is NOT compared, and it is
@@ -3248,8 +3321,9 @@ func TestCreateCntlrRefusals(t *testing.T) {
 	})
 
 	t.Run("every controller node already hosts a cntlr", func(t *testing.T) {
-		// Exactly as many CNs as the SP already uses, so §6.4's "two cntlrs
-		// of one SP never share a CN" leaves the scan nothing to draw.
+		// Exactly as many CNs as the SP already uses, so "two cntlrs of one
+		// SP never share a CN" (architecture.md, Finding CN candidates) leaves
+		// the scan nothing to draw.
 		env := sptNewEnv(t, sptDnCnt, sptCntlrCnt, sptCnFree)
 		spId := env.createSp(sptSpec{
 			name:     sptSpName,
@@ -3273,7 +3347,9 @@ func TestCreateCntlrRefusals(t *testing.T) {
 		func(t *testing.T) {
 			// One CN is left unused by the SP and then charged down below
 			// the SP's footprint, which is the size the scan asks for
-			// (§6.5): the only node §6.4 would allow is not a candidate.
+			// (architecture.md, Per-operation allocation): the only node the
+			// scan of architecture.md, Finding CN candidates, would allow is
+			// not a candidate.
 			env := sptNewEnv(t, sptDnCnt, sptCntlrCnt+1, sptCnFree)
 			spId := env.createSp(sptSpec{
 				name:     sptSpName,
@@ -3307,9 +3383,9 @@ func TestCreateCntlrRefusals(t *testing.T) {
 		})
 }
 
-// TestCreateCntlrWithoutAToken is the positive half of GW6's presence rule (§0
-// #7) for CreateCntlr: a request that carries no SpRev message is not
-// compared against the stored revision and is judged by §8.6's own gates
+// TestCreateCntlrWithoutAToken is the positive half of GW6's presence rule for
+// CreateCntlr: a request that carries no SpRev message is not compared against
+// the stored revision and is judged by its own gates (architecture.md, Cntlrs)
 // instead — openSp runs first, so everything after it is reached exactly as it
 // would be by a request whose token matched.
 //
@@ -3318,7 +3394,8 @@ func TestCreateCntlrRefusals(t *testing.T) {
 // already holds is still INVALID_ARGUMENT, and still writes nothing, so the
 // SP the second request then mutates is the same one the fixture built.
 //
-// The create that follows commits the whole §8.6 write set and bumps SpRev,
+// The create that follows commits the whole write set of architecture.md,
+// Cntlrs, and bumps SpRev,
 // and the last request shows what that bump is worth: a client still holding
 // the pre-bump token is refused, so a token-less mutator does not quietly
 // leave stale clients thinking they are current.
@@ -3382,7 +3459,8 @@ func TestCreateCntlrWithoutAToken(t *testing.T) {
 	if oldAddrs[cntlr.GetAddrPort()] {
 		t.Errorf("two cntlrs of one SP on CN %q", cntlr.GetAddrPort())
 	}
-	// The CN ledger ran, so this was the whole RPC (§6.5).
+	// The CN ledger ran, so this was the whole RPC (architecture.md,
+	// Per-operation allocation).
 	cn := env.cnConf(cntlr.GetAddrPort())
 	if cn.GetFreeExtCnt() != sptCnFree-footprint {
 		t.Errorf("cn %q: free_ext_cnt %d, want %d", cntlr.GetAddrPort(),
@@ -3432,7 +3510,8 @@ func (e *sptEnv) createCntlrScans(req *pb.CreateCntlrRequest) (int64, error) {
 //
 // The other request is the one that leaves the scan nothing: a second
 // client's CreateCntlr takes the one controller node the pool did not use, so
-// every CN now hosts a cntlr of the pool (§6.4), and its bump moves the pool
+// every CN now hosts a cntlr of the pool
+// (architecture.md, Finding CN candidates), and its bump moves the pool
 // past the first client's token. That token is ABORTED "stale revision"
 // without a scan; the fresh one then scans and meets the scan's own refusal,
 // which shows that the stale request was refused ahead of a scan that really
@@ -3519,8 +3598,8 @@ func TestCreateCntlrChecksTheTokenBeforeItsScan(t *testing.T) {
 // that skipped the flag would also let the fresh one and the absent one
 // reach the scan.
 func TestCreateCntlrRefusesADeletingPoolBeforeItsScan(t *testing.T) {
-	// As many controller nodes as the pool has cntlrs: §6.4 leaves the scan
-	// nothing to draw.
+	// As many controller nodes as the pool has cntlrs: architecture.md,
+	// Finding CN candidates, leaves the scan nothing to draw.
 	env := sptNewEnv(t, sptDnCnt, sptCntlrCnt, sptCnFree)
 	spId := env.createSp(sptSpec{
 		name:     sptSpName,
@@ -3631,17 +3710,19 @@ func sptDistinctCnt(strs []string) int {
 	return len(seen)
 }
 
-// TestCntlrsSpreadAcrossLocations pins §6.5's location anti-affinity between
+// TestCntlrsSpreadAcrossLocations pins the location anti-affinity of
+// architecture.md, Per-operation allocation, between
 // the cntlrs of one SP: every cntlr pick after the first excludes, at tier 1,
 // the locations the SP's cntlrs already occupy, so two of them share a
 // failure domain only once no controller node outside those locations has
-// room — and then tier 2 still places, on a CN of its own (§6.4), rather than
-// refusing.
+// room — and then tier 2 still places, on a CN of its own (architecture.md,
+// Finding CN candidates), rather than refusing.
 //
 // The first fixture is two locations of two CNs each. A pick that did not
 // exclude the locations would be a fair draw between the other CN of the
 // first cntlr's location and one CN of the other location — a scan keeps one
-// candidate per location (§6.3) and PickRandom takes either — so every pool
+// candidate per location (architecture.md, Finding DN candidates) and
+// PickRandom takes either — so every pool
 // would share a location with probability one half, and fifty pools that all
 // spread would be a 2^-50 accident. The three-location cases pin that the
 // exclusion is EVERY location the SP's cntlrs hold and not just one of them,
@@ -3886,7 +3967,8 @@ func (e *sptEnv) setCnBatchSize(size uint32) {
 }
 
 // TestCreateCntlrReplansAroundACntlrItDidNotSee pins the deciding STM's own
-// check of the round's plan against the pool's cntlrs (§6.5, GW9). A round
+// check of the round's plan against the pool's cntlrs (architecture.md,
+// Per-operation allocation; GW9). A round
 // takes its CN exclusion and its tier-1 locations from the cntlrs its plan
 // read, outside the transaction, and the transaction re-checks only the pick's
 // capacity key. A cntlr another request commits after that read is missing
@@ -4074,8 +4156,9 @@ func TestCreateCntlrReplansAroundACntlrItDidNotSee(t *testing.T) {
 	}
 }
 
-// TestDeleteCntlr pins §8.6's DeleteCntlr: it refuses the primary and refuses
-// an ENABLED cntlr — requiring the disable first means the §10.4 re-election
+// TestDeleteCntlr pins DeleteCntlr (architecture.md, Cntlrs): it refuses the
+// primary and refuses an ENABLED cntlr — requiring the disable first means the
+// re-election of architecture.md, Automatic reactions,
 // has already happened and hosts have moved before their paths do — and it
 // then undoes everything CreateCntlr did, item for item: the id leaves the
 // list, the key goes, the CN gets its pointer and the SP's footprint back
@@ -4168,8 +4251,9 @@ func TestDeleteCntlr(t *testing.T) {
 	}
 }
 
-// TestUpdateCntlrEnabled pins §8.6's enable flag together with its §8.8 side
-// effect: disabling takes the cntlr's CN out of every CdcEntry of the SP at
+// TestUpdateCntlrEnabled pins the enable flag of architecture.md, Cntlrs,
+// together with its side effect of architecture.md, Subsystems, namespaces:
+// disabling takes the cntlr's CN out of every CdcEntry of the SP at
 // the same instant its namespaces go ANA-inaccessible, enabling puts it back,
 // and each transition bumps SpRev exactly once.
 func TestUpdateCntlrEnabled(t *testing.T) {
@@ -4280,7 +4364,8 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 // do with a listed subsystem whose CdcEntry key is gone: they write it back in
 // the same transaction, rebuilt from the Subsystem record — the NQN it is
 // listed under and its allowed_hosts — and advertising every cntlr that is
-// ENABLED once the mutator's own change is applied (§8.8). Skipping the entry
+// ENABLED once the mutator's own change is applied (architecture.md,
+// Subsystems, namespaces). Skipping the entry
 // instead answered OK while the subsystem stayed out of dnv-cdc's discovery
 // log, and no later RPC would ever have put the key back.
 //
@@ -4382,7 +4467,8 @@ func TestCntlrMutatorsRecreateAMissingCdcEntry(t *testing.T) {
 	}
 }
 
-// TestUpdateCntlrEnabledNoWrite pins §0 #17: a request that asks for the state
+// TestUpdateCntlrEnabledNoWrite pins GW6's idempotent no-write: a request that
+// asks for the state
 // already stored writes NOTHING and bumps NOTHING — a no-op that bumped SpRev
 // would invalidate every client's token and make every agent re-sync for a
 // change that did not happen. It pins it across all three of GW6's cases,
@@ -4393,8 +4479,8 @@ func TestCntlrMutatorsRecreateAMissingCdcEntry(t *testing.T) {
 // client hears ABORTED rather than a misleading OK — and that holds for a
 // message carrying revision 0, or one carrying only the echoed sp_name,
 // exactly as it holds for an outdated one: presence selects the comparison,
-// the value never switches it off (§0 #7). A request carrying no message at
-// all skips the comparison and reaches the flag, where §0 #17 answers it OK —
+// the value never switches it off (GW6). A request carrying no message at all
+// skips the comparison and reaches the flag, where GW6's no-op answers it OK —
 // the bypass lets a mutator through to its own preconditions, it does not make
 // it write.
 //
@@ -4446,7 +4532,7 @@ func TestUpdateCntlrEnabledNoWrite(t *testing.T) {
 		})
 	}
 	// No token at all: nothing is compared, the request reaches the flag, and
-	// §0 #17 answers the no-op exactly as it answered the one that came with
+	// GW6 answers the no-op exactly as it answered the one that came with
 	// a matching token — same OK, same reply, same nothing written.
 	reply, err = env.srv.UpdateCntlrEnabled(
 		env.ctx, &pb.UpdateCntlrEnabledRequest{
@@ -4480,9 +4566,10 @@ func TestUpdateCntlrEnabledNoWrite(t *testing.T) {
 // path: TestUpdateCntlrEnabledNoWrite shows one reaching the flag and finding
 // nothing to do, and this shows one reaching the flag and doing the work. A
 // bypass that only ever produced no-ops would pass that test while writing
-// nothing anywhere, which is not the rule §0 #7 states.
+// nothing anywhere, which is not the rule GW6 states.
 //
-// So the §8.8 side effect is pinned with it: the disable takes the cntlr's CN
+// So the side effect of architecture.md, Subsystems, namespaces, is pinned with
+// it: the disable takes the cntlr's CN
 // out of the SP's CdcEntry at the same instant its namespaces go
 // ANA-inaccessible, and SpRev bumps once — a token-less mutation is a full
 // mutation, visible to every agent and every other client.

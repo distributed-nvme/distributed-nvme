@@ -1,120 +1,78 @@
 # distributed-nvme (dnv)
 
-A distributed NVMe-oF block storage system. `doc/architecture.md` is the
-design; `doc/layout.md` fixes the repository layout; `doc/log.md`,
-`doc/osclient.md` and `doc/grpc.md` are the normative specs of the shared
-components; `doc/dnv-worker.md` is the normative spec of `dnv-worker`, `model/`
-and `etcdutil/`, `doc/cdc.md` of `dnv-cdc` and `doc/gateway.md` of
-`dnv-gateway`; each carries its own integration-test plan.
+dnv is a distributed NVMe-oF block storage system. It aggregates the raw disks
+of disk nodes into storage pools, runs the volume logic (thin provisioning,
+striping, redundancy, snapshots, cloning, live migration) on controller nodes,
+and exports virtual volumes to hosts over NVMe-oF with native NVMe multipath
+and ANA. etcd holds all desired state; the control-plane processes and the
+per-node agents converge the data plane to it. The binaries:
+
+- `dnv-gateway` serves the `Gateway` gRPC API, stateless and active-active.
+- `dnv-worker` turns the desired state into agent calls, runs the automatic
+  reactions and drains deleted pools and clones.
+- `dnv-agent` runs as `dn` on a disk node or `cn` on a controller node; it
+  converges local state to the desired state it is sent, and never talks to etcd.
+- `dnv-cdc` is the central discovery controller: it serves NVMe-oF discovery to hosts.
+- `dnvctl` is the operator CLI, one command per `Gateway` RPC.
 
 Module: `github.com/distributed-nvme/distributed-nvme`.
 
-## Layout
+## Start here
 
-| path | contents |
-|---|---|
-| `pb/` | `schema.proto` plus the committed generated code |
-| `common/` | leaf package: constants, name formats and their parsers, logging, `OsClient`, gRPC interceptors |
-| `etcdutil/` | central etcd helpers (proto (un)marshal + logging) |
-| `model/` | the architecture §5 etcd data model as Go: keys, capacity, candidate scans, the mutations gateway and worker share |
-| `gateway/`, `worker/`, `agent/`, `cdc/`, `ctl/` | the service implementations |
-| `cmd/` | one directory per binary: `dnv-gateway`, `dnv-worker`, `dnv-agent`, `dnv-cdc`, `dnvctl` |
-| `integtest/` | the integration suites (driven over ssh against remote hosts) and their drivers (never linked into a `cmd/` binary) |
+Read [`doc/glossary.md`](doc/glossary.md) first: it defines the project
+vocabulary the documents use. Then read
+[`doc/architecture.md`](doc/architecture.md), the design as a whole: the object
+model, the device stacks, naming, the etcd data model, allocation, common
+validation, the `Gateway` API contract, the agent and worker contracts, the
+procedures that span components and the design decisions. The other documents
+each own a part:
 
-Import rules are in `doc/layout.md` §3. In short: `common` and `pb` import
-nothing internal, agents and `dnvctl` never link the etcd client.
+- [`doc/gateway.md`](doc/gateway.md) — `dnv-gateway`: how it carries out each RPC.
+- [`doc/dnv-worker.md`](doc/dnv-worker.md) — `dnv-worker` and the `etcdutil` and `model` packages.
+- [`doc/dnagent.md`](doc/dnagent.md) — `dnv-agent`: what both roles share, the command, the dn role.
+- [`doc/cnagent.md`](doc/cnagent.md) — the cn role of `dnv-agent`.
+- [`doc/cdc.md`](doc/cdc.md) — `dnv-cdc`: the discovery service and its etcd watcher.
+- [`doc/dnvctl.md`](doc/dnvctl.md) — `dnvctl`: invocation, the command tree, output and errors.
+- [`doc/log.md`](doc/log.md) — the JSON logging and the trace id every binary shares.
+- [`doc/grpc.md`](doc/grpc.md) — the gRPC interceptors every dnv connection and server chains.
+- [`doc/osclient.md`](doc/osclient.md) — the `OsClient`, the one path to the operating system.
+- [`doc/layout.md`](doc/layout.md) — the directory tree, the dependency rules, protobuf generation.
+- [`doc/dependencies.md`](doc/dependencies.md) — the direct module dependencies and why each is allowed.
+
+The integration suites drive real binaries on lab VMs over ssh, one script
+under `integtest/` each; what a suite proves, its topology and its cleanup are
+its document's:
+
+- `integtest/dnagent_test.sh` — [`doc/dnagent_integtest.md`](doc/dnagent_integtest.md)
+- `integtest/cnagent_test.sh` — [`doc/cnagent_integtest.md`](doc/cnagent_integtest.md)
+- `integtest/e2e_test.sh` — [`doc/e2e_integtest.md`](doc/e2e_integtest.md)
+- `integtest/worker_test.sh` — [`doc/dnv-worker.md`, Integration test plan](doc/dnv-worker.md#integration-test-plan)
+- `integtest/gateway_test.sh` — [`doc/gateway.md`, Integration test plan](doc/gateway.md#integration-test-plan)
+- `integtest/cdc_test.sh` — [`doc/cdc.md`, Integration test plan](doc/cdc.md#integration-test-plan)
+- `integtest/dnvctl_test.sh` — [`doc/dnvctl.md`, Integration test plan](doc/dnvctl.md#integration-test-plan)
 
 ## Build
 
-```shell
-make build   # compiles every cmd/* that has sources into bin/
-make vet
-make test
-make fmt     # gofmt + clang-format on pb/schema.proto (pip install clang-format)
-```
+The build entry points are `Makefile` targets, run as "make build" and so on:
 
-`make gen` regenerates `pb/schema.pb.go` and `pb/schema_grpc.pb.go`; it needs
-`protoc`, `protoc-gen-go` and `protoc-gen-go-grpc` on `PATH`. The generated
-files are committed, so an ordinary build or test never requires protoc.
+- `build` compiles every binary under `cmd/` into `bin/` (`layout.md`, `cmd/` wiring).
+- `vet` runs go vet over the whole module.
+- `test` runs go test over the whole module. The etcd-backed tests skip unless an
+  etcd binary is on the PATH or named by `ETCD_BIN` (`dnv-worker.md` EU7).
+- `fmt` formats the Go sources with gofmt and `pb/schema.proto` with
+  clang-format, which must be installed.
+- `gen` regenerates `pb/schema.pb.go` and `pb/schema_grpc.pb.go`; it needs
+  `protoc`, `protoc-gen-go` and `protoc-gen-go-grpc` on the PATH. The generated
+  files are committed, so build and test never need protoc (`layout.md`,
+  Protobuf generation).
 
-## Implemented so far
+## Docs and code
 
-* `pb/` — generated from `pb/schema.proto` (protoc v7.36.0 / libprotoc 36.0,
-  protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2). The proto deliberately has no
-  `package` statement, so method names stay `/Gateway/…`,
-  `/DiskNodeAgent/…`, `/ControllerNodeAgent/…`.
-* `common/` — complete per its specs: `constants.go` and `name_fmt.go` (the
-  architecture §4/§7 constants and the deterministic dm/md/NQN/local-store
-  name formats, `DnNsIdentity`, `NvmeHostId`), `name_parse.go`
-  (`ParseDmName` and `ParseNqn`, the strict inverses of the dm-name and NQN
-  formats, and `IsDnvNqn`, the dnv-namespace test: the agents attribute the
-  names they read back from the kernel with them, and the gateway keeps user
-  NQNs out of dnv's namespace with the last), `log.go` (`log/slog` JSON
-  logging on stderr, trace ids on the context, `PbToLogValue`,
-  `TruncForLog`), `osclient.go`/`osclient_fake.go` (the single path for OS
-  commands and file/proto/block I/O plus the `osclient.md` §4.5.1 raw probe
-  helpers), and
-  `interceptor.go` (the shared gRPC interceptors every dnv connection chains:
-  unary client, stream client, unary server, stream server — `dnv-gateway`
-  chains its own trace-id mint ahead of them, `grpc.md` T4).
-* `etcdutil/` — the one and only door to etcd (`dnv-worker.md` §3, `log.md`
-  §5.3): typed `Get`/`Put`/`Delete`/`Range`/`RangeKeys`/`WatchTyped` and the
-  three STM runners (`RunSTM`, `Snapshot`, `SnapshotRev`), with the protobuf
-  (un)marshaling and the `log.md` records inside.
-* `model/` — the architecture §5 etcd data model as Go (`dnv-worker.md` §4):
-  key formats and parsers, `cluster_id`, the §5.6 capacity keys, the §6
-  candidate scans, the §7 conf resolvers and stored-conf validators, and the
-  internal §8/§10.4 mutations: the worker drives all of them, and the gateway
-  reuses `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` behind its own
-  RPCs rather than duplicating their transactions.
-* `worker/` — `dnv-worker.md` §6-§11: the heartbeat/grace/ticket vote layer and
-  its shard ownership, the per-shard revision watchers, the per-object
-  `Check*` loops with their `Syncup*` and `Push*Bitmap` calls, the `err_epoch`
-  health bookkeeping, the `provisioned`/`created` flips, the §11 automatic
-  reactions (failover, thin-pool auto-grow, cntlr replacement, leg repair —
-  at most one applied per SP per pass), and the §11.6 sp drain and §11.7
-  clone drain that tear down what `DeleteStoragePool`/`DeleteClone` latch.
-* `agent/` — the shared dn/cn agent mechanism of `dnagent.md` §2:
-  reconcile-then-serve bootstrap, local store, revision gate, lock
-  hierarchy, `ResInfo` tracking, dm/nvmet/nvme-host wrappers, bitmap-chunk
-  store.
-* `agent/dnagent/` — the dn role (`dnagent.md` §4): the [D13] on-disk
-  format, [D15] side provisioning (background zeroing), per-CN exports,
-  migration source/destination with the [D12] bounded fence, bitmap pushes,
-  check streams.
-* `agent/cnagent/` — the cn role (`cnagent.md` §4): leg connections and
-  md-raid1 groups, thin pools and volumes, raid0/ns-dev/nvmet stacks,
-  clones and transfers, the CN11 leg health probers, thin-metadata bitmap
-  reads.
-* `cmd/dnv-agent` — the cobra/viper `dn`/`cn` binary (`dnagent.md` §3).
-* `cmd/dnv-worker` — the cobra/viper root command of `dnv-worker.md` §5:
-  `--etcd-endpoints`, `--roles`, the two vote timers and `--etcd-dial-timeout`,
-  env prefix `DNV_WORKER_`; it builds the `etcdutil` client and hands off to
-  `worker.Run`.
-* `cdc/` and `cmd/dnv-cdc` — the discovery controller of `doc/cdc.md`: the
-  etcd watch that holds the `CdcEntry` view, the NVMe/TCP PDU codec and the
-  discovery-log server that answers hosts and fans out AENs.
-* `gateway/` and `cmd/dnv-gateway` — the control-plane API server of
-  `doc/gateway.md`: all 59 RPCs of `service Gateway` over `etcdutil`'s STM
-  machinery, the architecture §6.5 allocation, the architecture §5.5 revision
-  tokens and the ten agent calls (`gateway.md` §6): the eight behind
-  `Get*Size` / `Inspect*` / `Get*Bitmap` plus the `GetCntlrInfo`/`GetSideInfo`
-  hydration checks of `DeleteClone`/`FinishMigration` with `force=false`.
-  `DeleteStoragePool` and `DeleteClone` latch (`deleting = true`) rather than
-  tear down; the worker's drains do the teardown. Stateless and active-active:
-  any instance serves any request.
-* `ctl/` and `cmd/dnvctl` — the operator CLI of `doc/dnvctl.md`: one noun
-  group per §5 table with every one of the 59 RPCs as a leaf command,
-  presence-based `--rev` tokens, protojson results on stdout and logs on
-  stderr at Warn.
-* `integtest/` — the integration suites of `dnagent_integtest.md`,
-  `cnagent_integtest.md`, `dnv-worker.md` §14, `cdc.md` §9, `gateway.md`
-  §10, `dnvctl.md` §7 and `e2e_integtest.md` (`dnagent_test.sh`,
-  `cnagent_test.sh`, `worker_test.sh`, `cdc_test.sh`, `gateway_test.sh`,
-  `dnvctl_test.sh`, `e2e_test.sh` and
-  their drivers `dnagentctl`, `cnagentctl`, `workerctl`, `cdcctl`,
-  `gatewayctl`, plus the `fakeagent` the worker and gateway suites drive and
-  the `fakegateway` the dnvctl suite drives). The end-to-end suite brings no
-  driver of its own: it runs the five binaries with no fakes on lab guests,
-  with two kernel NVMe hosts on its namespaces, and makes every control-plane
-  call through the shipped `dnvctl`.
+The documents under `doc/` are the high-level guide the code must follow: they
+state the current design, its roles, contracts, invariants, orderings and gates,
+and each decision with its reason. The code is the source of truth for every
+detail, so a document never restates a constant's value, a signature or a flag
+table. Each rule has exactly one owner document; anywhere else a rule is cited
+by its id, as in "`gateway.md` GW6", or by its owner's heading text, never by a
+section number, and never restated. `go test ./doclint/`, which `test` also
+runs, checks the documents, this README and the citations in the code.

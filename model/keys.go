@@ -1,12 +1,14 @@
-// Package model is the architecture.md §5 etcd data model expressed as Go
-// (dnv-worker.md §4): key formats and their parsers, the §5.2 cluster_id, the
-// §5.6 capacity keys, the §6 allocator and the internal §8/§10 mutations. It
+// Package model is the etcd data model expressed as Go (dnv-worker.md,
+// Package `model`): key formats and their parsers, the cluster_id, the
+// capacity keys, the allocator and the internal mutations, as architecture.md
+// specifies them in etcd data model, cluster_id derivation, Capacity index
+// keys, Allocation, `service Gateway` — RPC specifications and Workers. It
 // is shared by the worker, the gateway and dnv-cdc, so that one set of key
 // formats and invariants serves every consumer.
 //
-// model imports common, pb and etcdutil only (layout.md §3). It never dials an
-// agent, never sleeps, and logs nothing of its own beyond the etcdutil records
-// its reads and writes produce.
+// model imports common, pb and etcdutil only (layout.md, Dependency rules). It
+// never dials an agent, never sleeps, and logs nothing of its own beyond the
+// etcdutil records its reads and writes produce.
 package model
 
 import (
@@ -19,8 +21,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The second field of every key: the message kind (architecture.md §5.3). They
-// are literals of the on-disk format and never change.
+// The second field of every key: the message kind (architecture.md, Key
+// table). They are literals of the on-disk format and never change.
 const (
 	kindClusterConf = "cluster_conf"
 	kindDnGlobal    = "dn_global"
@@ -48,13 +50,13 @@ const (
 	kindWorkerReg   = "worker"
 )
 
-// keySep is the single space every key field is joined by (architecture.md
-// §5.1). No key field may contain it: names match common.ValidStrPattern and
-// every other field is hex.
+// keySep is the single space every key field is joined by (architecture.md,
+// Key grammar). No key field may contain it: names match
+// common.ValidStrPattern and every other field is hex.
 const keySep = " "
 
 // ---------------------------------------------------------------------------
-// Field formatting (architecture.md §5.1)
+// Field formatting (architecture.md, Key grammar)
 // ---------------------------------------------------------------------------
 
 // joinKey builds a key out of its fields (MD2): one space between two fields,
@@ -71,7 +73,7 @@ func prefixOf(fields ...string) string {
 }
 
 // idField renders any id with common.IdKeyFmt — cluster, dn, cn, sp, cntlr,
-// slice and subsystem ids alike (architecture.md §5.1).
+// slice and subsystem ids alike (architecture.md, Key grammar).
 func idField(id uint64) string {
 	return fmt.Sprintf(common.IdKeyFmt, id)
 }
@@ -81,13 +83,15 @@ func shardField(shard uint32) string {
 	return fmt.Sprintf(common.ShardCodeFmt, shard)
 }
 
-// binField renders a DN bin index with common.BinIdxFmt (§6.2: 0…3).
+// binField renders a DN bin index with common.BinIdxFmt
+// (architecture.md, DN bins: 0…3).
 func binField(binIdx uint32) string {
 	return fmt.Sprintf(common.BinIdxFmt, binIdx)
 }
 
 // freeField renders a free extent count with common.FreeSpaceFmt, whose
-// zero-padding makes lexical key order equal numeric order (§5.6).
+// zero-padding makes lexical key order equal numeric order (architecture.md,
+// Capacity index keys).
 func freeField(freeExt uint64) string {
 	return fmt.Sprintf(common.FreeSpaceFmt, freeExt)
 }
@@ -98,17 +102,17 @@ func bmIdxField(bmIdx uint32) string {
 }
 
 // ---------------------------------------------------------------------------
-// cluster_id (architecture.md §5.2)
+// cluster_id (architecture.md, cluster_id derivation)
 // ---------------------------------------------------------------------------
 
 // ClusterId derives a cluster's id from its name and its immutable
-// ClusterConf.creation_epoch (architecture.md §5.2, MD2): fnv64a over the raw
-// name bytes followed by the epoch as exactly 8 big-endian bytes — no
-// separator, no text formatting.
+// ClusterConf.creation_epoch (architecture.md, cluster_id derivation; MD2):
+// fnv64a over the raw name bytes followed by the epoch as exactly 8
+// big-endian bytes — no separator, no text formatting.
 //
 // It is deliberately not computable from a request alone: every caller beyond
 // CreateCluster/ListClusters first reads {p} cluster_conf {cluster_name} to
-// learn the epoch (§5.8).
+// learn the epoch (architecture.md, STM discipline).
 func ClusterId(clusterName string, creationEpoch uint64) uint64 {
 	h := fnv.New64a()
 	// hash.Hash.Write never returns an error.
@@ -120,7 +124,7 @@ func ClusterId(clusterName string, creationEpoch uint64) uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// Keys (MD2, architecture.md §5.3)
+// Keys (MD2; architecture.md, Key table)
 // ---------------------------------------------------------------------------
 
 // ClusterConfKey is the key of a ClusterConf — the only name-keyed message
@@ -201,7 +205,7 @@ func CnConfKey(cid uint64, addrPort string) string {
 }
 
 // DnConfPrefix is the range prefix of every DN record of one cluster: the
-// ListDiskNodes page range (gateway.md §2.2 #4, GW10). The returned names are
+// ListDiskNodes page range (gateway.md GW10). The returned names are
 // the key suffixes after it.
 func DnConfPrefix(cid uint64) string {
 	return prefixOf(common.DnvPrefix, kindDnConf, idField(cid))
@@ -212,9 +216,10 @@ func CnConfPrefix(cid uint64) string {
 	return prefixOf(common.DnvPrefix, kindCnConf, idField(cid))
 }
 
-// DnCapacityKey is the allocation-index key of one DN (MD2, §5.6). It exists
-// iff the DN is allocatable, and it embeds free_ext_cnt so that a descending
-// range over one bin returns DNs largest-free first (§6.3).
+// DnCapacityKey is the allocation-index key of one DN (MD2; architecture.md,
+// Capacity index keys). It exists iff the DN is allocatable, and it embeds
+// free_ext_cnt so that a descending range over one bin returns DNs
+// largest-free first (architecture.md, Finding DN candidates).
 func DnCapacityKey(
 	cid uint64,
 	binIdx uint32,
@@ -227,16 +232,17 @@ func DnCapacityKey(
 	)
 }
 
-// DnCapacityPrefix is the prefix the §6.3 walk range-scans, one bin at a time
-// (MD2).
+// DnCapacityPrefix is the prefix the DN candidate walk range-scans, one bin
+// at a time (MD2; architecture.md, Finding DN candidates).
 func DnCapacityPrefix(cid uint64, binIdx uint32) string {
 	return prefixOf(
 		common.DnvPrefix, kindDnCapacity, idField(cid), binField(binIdx),
 	)
 }
 
-// CnCapacityKey is the allocation-index key of one CN (MD2, §5.6). CNs have no
-// bins (§6.4).
+// CnCapacityKey is the allocation-index key of one CN (MD2; architecture.md,
+// Capacity index keys). CNs have no bins (architecture.md, Finding CN
+// candidates).
 func CnCapacityKey(cid uint64, freeExt uint64, addrPort string) string {
 	return joinKey(
 		common.DnvPrefix, kindCnCapacity,
@@ -244,13 +250,15 @@ func CnCapacityKey(cid uint64, freeExt uint64, addrPort string) string {
 	)
 }
 
-// CnCapacityPrefix is the single prefix the §6.4 scan walks (MD2).
+// CnCapacityPrefix is the single prefix the CN candidate scan walks (MD2;
+// architecture.md, Finding CN candidates).
 func CnCapacityPrefix(cid uint64) string {
 	return prefixOf(common.DnvPrefix, kindCnCapacity, idField(cid))
 }
 
 // CdcEntryKey is the key of one subsystem's discovery entry (MD2). The shard
-// code is the SP's, so that dnv-cdc can shard by key field (§12).
+// code is the SP's, so that dnv-cdc can shard by key field (architecture.md,
+// dnv-cdc).
 func CdcEntryKey(cid uint64, shard uint32, spId uint64, ssId uint64) string {
 	return joinKey(
 		common.DnvPrefix, kindCdcEntry,
@@ -259,7 +267,7 @@ func CdcEntryKey(cid uint64, shard uint32, spId uint64, ssId uint64) string {
 }
 
 // CdcEntryPrefix is the whole discovery prefix dnv-cdc watches, filtering on
-// the {shard_code} field of each key (MD2, architecture.md §12).
+// the {shard_code} field of each key (MD2; architecture.md, dnv-cdc).
 func CdcEntryPrefix() string {
 	return prefixOf(common.DnvPrefix, kindCdcEntry)
 }
@@ -270,7 +278,7 @@ func SpConfKey(cid uint64, spName string) string {
 }
 
 // SpConfPrefix is the range prefix of every SP record of one cluster: the
-// ListStoragePools page range (gateway.md §2.2 #4, GW10).
+// ListStoragePools page range (gateway.md GW10).
 func SpConfPrefix(cid uint64) string {
 	return prefixOf(common.DnvPrefix, kindSpConf, idField(cid))
 }
@@ -327,7 +335,8 @@ func CloneKey(cid uint64, spId uint64, cloneName string) string {
 // CloneBitmapKey is the key of one chunk of a clone's bitmap (MD2). A chunk is
 // addressed by the PAIR (src_slice_idx, bm_idx), both rendered with
 // bmIdxField: chunk (s, b) holds the bytes [b*common.CloneBmChunkBytes, …+len)
-// of source slice s's bitmap, len <= common.CloneBmChunkBytes (§9.6). Its
+// of source slice s's bitmap, len <= common.CloneBmChunkBytes
+// (architecture.md, Bitmap push protocol). Its
 // position is fixed by b alone, so no chunk's meaning depends on any other
 // chunk's existence or length.
 func CloneBitmapKey(
@@ -410,9 +419,10 @@ func WorkerRegPrefix(role string) string {
 // ---------------------------------------------------------------------------
 //
 // Every parser reports ok = false for a malformed key — wrong field count, an
-// unexpected literal, a field that is not exactly the hex the §5.1 format
-// prescribes — and never panics: a worker decodes keys straight off a watch or
-// a range, and SW2 logs and skips whatever it cannot parse.
+// unexpected literal, a field that is not exactly the hex the format of
+// architecture.md, Key grammar, prescribes — and never panics: a worker
+// decodes keys straight off a watch or a range, and SW2 logs and skips
+// whatever it cannot parse.
 
 // parseFields splits a key and checks its field count and its first two
 // literal fields.
@@ -461,8 +471,8 @@ func parseShard(s string) (uint32, bool) {
 	return uint32(value), true
 }
 
-// parseBin parses one common.BinIdxFmt field; §6.2 has exactly four bins, so
-// the field is always a single hex digit.
+// parseBin parses one common.BinIdxFmt field; there are exactly four bins
+// (architecture.md, DN bins), so the field is always a single hex digit.
 func parseBin(s string) (uint32, bool) {
 	if len(s) != 1 {
 		return 0, false
@@ -516,7 +526,8 @@ func parseRevKey(
 
 // ParseDnRevKey decodes a DnRev key as seen on a watch (MD2). A DnRev event is
 // self-sufficient: the key gives the cluster and the dn_id, the value the
-// revision and the addr_port (§5.5).
+// revision and the addr_port (architecture.md, Revision keys and the sync
+// fan-out).
 func ParseDnRevKey(key string) (uint32, uint64, uint64, bool) {
 	return parseRevKey(key, kindDnRev)
 }
@@ -576,7 +587,8 @@ func ParseBmIdx(key string) (uint32, bool) {
 }
 
 // ParseCloneBmKey decodes the (src_slice_idx, bm_idx) pair that addresses one
-// chunk of a clone's bitmap (MD2, §9.6). MD3's clone scan reads the
+// chunk of a clone's bitmap (MD2; architecture.md, Bitmap push protocol).
+// MD3's clone scan reads the
 // CloneBitmapPrefix keys-only, so a chunk's whole address comes out of its key
 // and never out of a value. Only this 7-field shape parses: a 6-field
 // clone_bitmap key and a migration key of any width are malformed here and
@@ -609,9 +621,10 @@ func ParseCloneBmKey(
 }
 
 // ParseDnCapacityKey turns one scanned dn_capacity key back into the candidate
-// it describes (MD2, MD5): the §6.3 walk reads free_ext_cnt and addr_port out
-// of the key itself and only decodes the value for the location, so a scan
-// needs no extra point reads (§5.6). The cluster id is validated but not
+// it describes (MD2, MD5): the DN candidate walk (architecture.md, Finding DN
+// candidates) reads free_ext_cnt and addr_port out of the key itself and only
+// decodes the value for the location, so a scan needs no extra point reads
+// (architecture.md, Capacity index keys). The cluster id is validated but not
 // returned — the caller built the prefix from it.
 func ParseDnCapacityKey(key string) (uint32, uint64, string, bool) {
 	fields, ok := parseFields(key, kindDnCapacity, 6)
@@ -637,7 +650,8 @@ func ParseDnCapacityKey(key string) (uint32, uint64, string, bool) {
 }
 
 // ParseCnCapacityKey turns one scanned cn_capacity key back into the candidate
-// it describes (MD2, MD5). CNs have no bins (§6.4).
+// it describes (MD2, MD5). CNs have no bins (architecture.md, Finding CN
+// candidates).
 func ParseCnCapacityKey(key string) (uint64, string, bool) {
 	fields, ok := parseFields(key, kindCnCapacity, 5)
 	if !ok {
@@ -658,7 +672,8 @@ func ParseCnCapacityKey(key string) (uint64, string, bool) {
 }
 
 // ParseCdcEntryKey decodes a CdcEntry key as seen on dnv-cdc's prefix watch
-// (MD2, cdc.md §2.2). Its field order is the key's own and is deliberately
+// (MD2; cdc.md, Addition to `model/keys.go`). Its field order is the key's
+// own and is deliberately
 // NOT the rev keys' order: cluster_id comes BEFORE shard_code, so that the
 // single CdcEntryPrefix watch spans every cluster (DS1) and dnv-cdc decides
 // ownership from the shard code it finds inside each key (DS2, WV2). A

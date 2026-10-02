@@ -556,7 +556,7 @@ func (w *fakeHealthWriter) setSideErrEpoch(
 }
 
 // ---------------------------------------------------------------------------
-// Log capture (log.md §7 style)
+// Log capture
 // ---------------------------------------------------------------------------
 
 // syncBuffer is a mutex-guarded buffer, so the capture handler is safe for the
@@ -641,7 +641,7 @@ func (c *logCapture) msgOrder(msgs ...string) []string {
 }
 
 // ---------------------------------------------------------------------------
-// Stored-conf fixtures (architecture.md §7)
+// Stored-conf fixtures (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
 // Defaults are resolved on the WRITE path: CreateCluster stores a ClusterConf
@@ -665,15 +665,17 @@ func (c *logCapture) msgOrder(msgs ...string) []string {
 // testBlockSize is the fixture SP's stored dm_pool_conf.data_block_size, and
 // is deliberately NOT common.DefaultDmPoolDataBlockSize (1 MiB): it is the one
 // bdev_conf member a worker request carries as a NUMBER rather than inside the
-// verbatim bdev_conf, so a request that substituted the §7 default instead of
-// forwarding the stored value has to read as a different number somewhere. It
-// is a legal dm-thin data block size (a multiple of 64 KiB, inside the §7
-// bounds), so model.ValidateBdevConf accepts the fixture.
+// verbatim bdev_conf, so a request that substituted the default of
+// architecture.md, Common validation, instead of forwarding the stored value
+// has to read as a different number somewhere. It is a legal dm-thin data block
+// size (a multiple of 64 KiB, inside the bounds of architecture.md, Common
+// validation), so model.ValidateBdevConf accepts the fixture.
 const testBlockSize = uint64(4) << 20
 
 // testBdevConf is the concrete SP geometry CreateStoragePool stores: every
 // member a value the write path resolved, spelled out. All but the data block
-// size are the §7 defaults written down; that one is testBlockSize (see it).
+// size are the defaults of architecture.md, Common validation, written down;
+// that one is testBlockSize (see it).
 func testBdevConf() *pb.BdevConf {
 	return &pb.BdevConf{
 		DmPoolConf: &pb.DmPoolConf{
@@ -753,7 +755,8 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// testConfig is the §14-style configuration: seconds-scale timers so a
+// testConfig is a configuration in the style of the worker suite
+// (dnv-worker.md, Integration test plan): seconds-scale timers so a
 // membership case runs in a few fake-clock steps.
 func testConfig(roles ...string) Config {
 	return Config{

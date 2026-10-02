@@ -19,7 +19,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// §6.15 — the CN11 leg prober. The loop itself is time-driven; the tests drive
+// The CN11 leg prober. The loop itself is time-driven; the tests drive
 // one round at a time under a fake clock, which is what makes the single-flight
 // and stall rules observable.
 
@@ -48,7 +48,8 @@ func withClock(srv *CnAgentServer) *fakeClock {
 
 // logCapture reads back the records the cn agent emits for itself — the
 // prober is now the only cn code that logs its own block IO, so the msgs and
-// attrs have to be pinned here (log.md §5.1), and the §7 conf refusal is
+// attrs have to be pinned here (log.md, OS commands and file IO), and the conf
+// refusal of architecture.md, Common validation, is
 // pinned the same way in conf_test.go. The buffer is mutex-guarded
 // because slog.Default is process-wide and other goroutines may be logging.
 type logCapture struct {
@@ -147,8 +148,9 @@ func TestLegProberWritesTheHealthBlock(t *testing.T) {
 	if prober == nil {
 		t.Fatalf("the primary started no prober for the data leg")
 	}
-	// §3.6: the health block is the last 4 KiB of the meta region, written
-	// through the leg wrapper.
+	// The health block is the last 4 KiB of the meta region, written through
+	// the leg wrapper (architecture.md, Group on-leg layout: meta region, data
+	// region, health block).
 	wantOffset := 1*testBlockSize - common.LegHealthBlockSize
 	if prober.offset != wantOffset {
 		t.Fatalf("probe offset is %d, want %d", prober.offset, wantOffset)
@@ -164,7 +166,8 @@ func TestLegProberWritesTheHealthBlock(t *testing.T) {
 			srv.nf.DmPath(legName(srv, testDataLeg)), wantOffset,
 			common.LegHealthBlockSize),
 	)
-	// CN11/acceptance 5: the read-back is O_DIRECT, never a buffered read.
+	// CN11 and cnagent.md, Leg-probe IO leaves the `OsClient`: the read-back
+	// is O_DIRECT, never a buffered read.
 	for _, call := range node.Calls() {
 		if strings.HasPrefix(call, "readblock ") {
 			t.Fatalf("the probe used a buffered read: %q", call)
@@ -432,7 +435,8 @@ func TestTransportHealthAnaState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The LegProbeIO dependency (osclient.md §4.5.1)
+// The LegProbeIO dependency (osclient.md, Exported raw helpers and the
+// probe-IO carve-out)
 // ---------------------------------------------------------------------------
 
 // TestFakeProbeIoDefaultsAndOverrides pins the double's FakeOsClient-style
@@ -525,7 +529,8 @@ func TestLegProbeUsesTheProbeIo(t *testing.T) {
 	if !droveWrite || !droveRead {
 		t.Fatalf("the round drove write=%v read=%v", droveWrite, droveRead)
 	}
-	// The OsClient is out of the path entirely (§7 acceptance 3).
+	// The OsClient is out of the path entirely (cnagent.md, Leg-probe IO
+	// leaves the `OsClient`).
 	for _, call := range node.Calls() {
 		if strings.HasPrefix(call, "writeblock ") ||
 			strings.HasPrefix(call, "readblockdirect ") {
@@ -539,12 +544,13 @@ func TestLegProbeUsesTheProbeIo(t *testing.T) {
 	}
 }
 
-// TestWedgedProbeDoesNotBlockAConverge is the central carve-out property (§6 test
-// 15): a probe that never returns must not delay anything else on the node.
+// TestWedgedProbeDoesNotBlockAConverge is the central carve-out property
+// (CN11): a probe that never returns must not delay anything else on the node.
 // A leg with no serving path queues IO forever (ctrl_loss_tmo = -1), so this
 // is the ordinary failure mode, not an exotic one — and the design's answer is
 // that a hung probe is harmless: its IO does not go through the process's
-// DefaultOsClientLimit semaphore (osclient.md §4.5.1), and CN1 forbids holding
+// DefaultOsClientLimit semaphore (osclient.md, Exported raw helpers and the
+// probe-IO carve-out), and CN1 forbids holding
 // any lock across it. This test pins the second half, which is the one a unit
 // test can observe: a full SyncupCntlr — leg wrappers, arrays, pools, nvmet —
 // completes while a probe of the same server's own leg is parked mid-write.
@@ -899,7 +905,8 @@ func TestProbersTrimmedWhenTheDescentStops(t *testing.T) {
 	}
 }
 
-// TestLegUnavailableWhenNotOptimized is the §11.1.1 availability test: a path
+// TestLegUnavailableWhenNotOptimized is the availability test of
+// architecture.md, "Make sure all groups are available": a path
 // that is live but `non-optimized` means the side exports dm-error, so the leg
 // is not available and the array is not built from it.
 func TestLegUnavailableWhenNotOptimized(t *testing.T) {

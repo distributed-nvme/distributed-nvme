@@ -13,8 +13,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Md wraps the mdadm patterns of Appendix A. Only the cn role runs mdadm, so
-// by the dnagent.md §1 split rule this wrapper is role code.
+// Md wraps the mdadm patterns of cnagent.md CN12. Only the cn role runs mdadm,
+// so by the split rule of dnagent.md, Scope and placement, this wrapper is
+// role code.
 //
 // The agent never runs `mdadm --zero-superblock`: a leg only ever leaves an
 // array into the spare list — where a stale superblock makes a later re-add
@@ -46,7 +47,7 @@ func NewMd(oc common.OsClient) *Md {
 //   - for a running array, `md/{degraded,sync_action,sync_completed}` are
 //     what CN28's md row composes its details from; each member's
 //     `dev-*/block/dev` names a foreign member in its error, and its
-//     `dev-*/state` is read but not yet acted on (cnagent.md §7, known
+//     `dev-*/state` is read but not yet acted on (cnagent.md, Known
 //     limits). CN12's member reconciliation compares members by dm name
 //     alone.
 //
@@ -61,9 +62,9 @@ const sysfsBlockDir = "/sys/block"
 
 // mdBlockEntryPattern matches an array's kernel node under /sys/block: mdN
 // by default, or md_<name> — what mdadm makes of /dev/md/<name> when
-// mdadm.conf says `CREATE names=yes` (architecture.md §4.3 sizes CnMdDevName
-// for that node). The /dev/md/<name> entries themselves are udev symlinks
-// and never appear here. "mdN" below stands for either spelling.
+// mdadm.conf says `CREATE names=yes` (architecture.md, md names, sizes
+// CnMdDevName for that node). The /dev/md/<name> entries themselves are udev
+// symlinks and never appear here. "mdN" below stands for either spelling.
 var mdBlockEntryPattern = regexp.MustCompile(`^md([0-9]+|_.+)$`)
 
 // mdRunningStates are the array_state values dnv treats as a running array:
@@ -629,7 +630,8 @@ func mdStateLine(d *MdDetail) string {
 
 // HasSuperblock reports whether a member device carries an md superblock.
 // `mdadm --examine` exits non-zero on a device without one, which is the
-// §11.1.1 "no superblock" case rather than an error.
+// "no superblock" case of architecture.md, "Make sure all groups are
+// available", rather than an error.
 //
 // A run that did not answer is an error and must never read as "no
 // superblock": `--examine` opens and reads the member device, so on a leg
@@ -643,7 +645,7 @@ func mdStateLine(d *MdDetail) string {
 // it answers a member without a superblock ("No md superblock detected", exit
 // status 1), which reads here as false. Only a leg that read available earlier
 // in the pass is probed, so it takes a failfast expiring between that read and
-// this answer (cnagent.md CN12, §7 known limits).
+// this answer (cnagent.md CN12, Known limits).
 func (m *Md) HasSuperblock(ctx context.Context, dev string) (bool, error) {
 	_, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--examine", "--export", dev)
 	if err != nil {
@@ -652,9 +654,11 @@ func (m *Md) HasSuperblock(ctx context.Context, dev string) (bool, error) {
 	return ok, nil
 }
 
-// MdCreateConf carries the §3.3 step 2 options every dnv array is created
-// with: an internal write-intent bitmap, failfast members, and a data offset
-// that clears the leg's meta region (§3.6).
+// MdCreateConf carries the options every dnv array is created with
+// (architecture.md, Primary cntlr, step 2): an internal write-intent bitmap,
+// failfast members, and a data offset that clears the leg's meta region
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block).
 type MdCreateConf struct {
 	DevPath        string
 	ArrayName      string
@@ -700,7 +704,8 @@ func (m *Md) Create(
 
 // Assemble starts an existing array from the members that carry a superblock.
 // It deliberately passes no `--run`: with a single available member mdadm
-// itself decides whether a degraded start is safe (§11.1.1 case 2), and a
+// itself decides whether a degraded start is safe (architecture.md, "Make
+// sure all groups are available", case 2), and a
 // refusal must leave the group in error rather than force a start.
 func (m *Md) Assemble(
 	ctx context.Context,
@@ -735,8 +740,9 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 
 // ensureGroup converges one group device. A RedundNone group is a dm-linear
 // over its single leg's data region; a RedundMdRaid1 group instantiates the
-// §11.1.1 assembly cases over the member leg wrappers. Spare legs are never
-// members (§8.12) — they stay connected, wrapped and probed.
+// assembly cases of architecture.md, "Make sure all groups are available",
+// over the member leg wrappers. Spare legs are never members
+// (architecture.md, Spare legs) — they stay connected, wrapped and probed.
 //
 // A provisioning-deferred group never gets here: the build phase reports it
 // PROVISIONING and skips it ([D15]). The leg-count check below is kept explicit
@@ -793,7 +799,8 @@ func (s *CnAgentServer) ensureGroup(
 	return s.reconcileMembers(ctx, gp, detail, available)
 }
 
-// assembleGroup is §11.1.1 case selection: probe each available member for an
+// assembleGroup is the case selection of architecture.md, "Make sure all
+// groups are available": probe each available member for an
 // md superblock and either create the array or assemble it from the members
 // that have one.
 func (s *CnAgentServer) assembleGroup(
@@ -831,8 +838,9 @@ func (s *CnAgentServer) assembleGroup(
 	}
 	if len(withSuperblock) == 0 {
 		// Case 1: --assume-clean is correct only when **every** member was
-		// probed. A side is never exported before the §9.4 whole-side zeroing
-		// has written zeros over all of it and its `provisioned` gate has
+		// probed. A side is never exported before the whole-side zeroing of
+		// architecture.md, Side provisioning protocol, has written zeros over
+		// all of it and its `provisioned` gate has
 		// opened ([D15]), the effective desired state defers any group whose
 		// legs are still provisioning ([D15]), and ids are never reused — so a
 		// superblock-free leg can only be a freshly zeroed side — short of a
@@ -840,8 +848,9 @@ func (s *CnAgentServer) assembleGroup(
 		// same way (HasSuperblock). But that argument covers the legs
 		// actually examined. An unavailable member may be the one carrying
 		// the group's data (its DN rebooting, its path mid-ANA-move), and
-		// creating over the survivors would resync the data away. §11.1.1
-		// puts "one leg available" in case 2, never in case 1.
+		// creating over the survivors would resync the data away.
+		// architecture.md, "Make sure all groups are available", puts "one
+		// leg available" in case 2, never in case 1.
 		if len(members) != len(gp.legs) {
 			return fmt.Errorf(
 				"only %d of %d legs available and none carries a superblock",
@@ -870,7 +879,8 @@ func (s *CnAgentServer) assembleGroup(
 		return s.md.Create(ctx, conf, members)
 	}
 	// Case 2: assemble from the members that carry metadata; anything left
-	// out is re-added by reconcileMembers (§11.1.1 cases 1.2/1.3/2).
+	// out is re-added by reconcileMembers (architecture.md, "Make sure all
+	// groups are available", cases 1.2/1.3/2).
 	return s.md.Assemble(ctx, gp.devPath, gp.mdArrayName, withSuperblock)
 }
 
@@ -905,7 +915,7 @@ func (s *CnAgentServer) assembleGroup(
 // converge of this cntlr, whatever brings it, removes the member in
 // milliseconds and adds the spare — a spare that is not available yet is
 // added by the first retry attempt that finds it available. Nothing here
-// remembers the failure (cnagent.md §7, known limits).
+// remembers the failure (cnagent.md, Known limits).
 func (s *CnAgentServer) reconcileMembers(
 	ctx context.Context,
 	gp *grpPlan,

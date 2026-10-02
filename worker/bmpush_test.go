@@ -367,7 +367,8 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 	}
 }
 
-// TestBmObjectsPushIndependently checks BM3/§9.6 step 4: different clones push
+// TestBmObjectsPushIndependently checks BM3 and step 4 of the dnv-worker side
+// of architecture.md, Bitmap push protocol: different clones push
 // independently and may be in flight toward one agent at the same time.
 func TestBmObjectsPushIndependently(t *testing.T) {
 	captureLogs(t)
@@ -494,9 +495,10 @@ func TestPushFailureIsLoggedOnly(t *testing.T) {
 			t.Fatalf("%d deliveries attempted, want the plan to end after "+
 				"the refused one", got)
 		}
-		// The §12 "bitmap pushed" record carries the code and the chunk's
-		// whole address (BM3); the failure record next to it carries the
-		// AGENT's own explanation, which is the only thing that says WHY.
+		// The "bitmap pushed" record (dnv-worker.md, Log records) carries the
+		// code and the chunk's whole address (BM3); the failure record next to
+		// it carries the AGENT's own explanation, which is the only thing that
+		// says WHY.
 		pushed := logs.withMsg(msgBitmapPushed)
 		if len(pushed) != 1 {
 			t.Fatalf("%d bitmap pushed records, want one", len(pushed))
@@ -576,11 +578,12 @@ func TestPushFailureIsLoggedOnly(t *testing.T) {
 	}))
 }
 
-// TestBmPushRecordsCarryATraceId checks RW10 for §10: every push runs under
-// common.WithTraceId(ctx, seed[:8] + "-" + NewTraceId()), so the §12
-// "bitmap pushed" record — and the failure record of a push that never
-// reached a chunk — names the worker incarnation that sent it. It is the
-// evidence the §14 suite matches trace_id | split("-")[0] against.
+// TestBmPushRecordsCarryATraceId checks RW10 for the bitmap pushes (BM1-BM6):
+// every push runs under common.WithTraceId(ctx, seed[:8] + "-" + NewTraceId()),
+// so the "bitmap pushed" record (dnv-worker.md, Log records) — and the failure
+// record of a push that never reached a chunk — names the worker incarnation
+// that sent it. It is the evidence the worker suite (dnv-worker.md, Integration
+// test plan) matches trace_id | split("-")[0] against.
 func TestBmPushRecordsCarryATraceId(t *testing.T) {
 	logs := captureLogs(t)
 	rec := newPushRecorder()

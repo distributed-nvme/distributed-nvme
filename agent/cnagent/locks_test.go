@@ -11,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// §6.13 — the CN1 lock mapping: a SyncupCntlr blocked in a slow command
+// The CN1 lock mapping: a SyncupCntlr blocked in a slow command
 // blocks a same-cntlr SyncupCntlr, but neither a CheckCn round (node read
 // lock only) nor another cntlr's converge (a different object lock).
 

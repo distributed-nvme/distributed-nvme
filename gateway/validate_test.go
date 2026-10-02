@@ -12,13 +12,14 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is gateway.md §9.2: every row of architecture.md §7 as a
-// table-driven case against the pure validators of validate.go. It does no
-// I/O at all — no etcd, no clock, no agent — so it runs (and must keep
-// running) even when TestMain found no etcd binary.
+// This file pins gateway.md GW4: every row of architecture.md, Common
+// validation, as a table-driven case against the pure validators of
+// validate.go. It does no I/O at all — no etcd, no clock, no agent — so it runs
+// (and must keep running) even when TestMain found no etcd binary.
 //
-// Every case asserts the gRPC CODE, never merely "an error came back". §7
-// violations are GW7's INVALID_ARGUMENT and nothing else, and a client
+// Every case asserts the gRPC CODE, never merely "an error came back".
+// Violations of Common validation are GW7's INVALID_ARGUMENT and nothing else,
+// and a client
 // branches on the code: a validator that refused with, say, ABORTED would
 // make a malformed request look like a lost race and be retried for ever.
 
@@ -41,9 +42,10 @@ func validateWantCode(
 	}
 }
 
-// validateWantMsg asserts a refusal names what the caller must fix. §7 messages
-// are the only thing a human operator sees, so the field name (and, for the
-// pattern row, the pattern itself) being in the text is part of the contract.
+// validateWantMsg asserts a refusal names what the caller must fix. The
+// messages of architecture.md, Common validation, are the only thing a human
+// operator sees, so the field name (and, for the pattern row, the pattern
+// itself) being in the text is part of the contract.
 func validateWantMsg(t *testing.T, what string, err error, want string) {
 	t.Helper()
 	if err == nil {
@@ -68,10 +70,11 @@ func validateNqnOfLen(t *testing.T, n int) string {
 }
 
 // ---------------------------------------------------------------------------
-// Names: MaxStrSize and ValidStrPattern (§7 row 1)
+// Names: MaxStrSize and ValidStrPattern (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
-// TestValidateName pins the required-name row of §7: non-empty, at most
+// TestValidateName pins the required-name row of architecture.md, Common
+// validation: non-empty, at most
 // MaxStrSize BYTES, and drawn from ValidStrPattern. The size limit is counted
 // in bytes and not in runes, which is why a 33-character two-byte string is
 // refused at 66 bytes.
@@ -146,7 +149,8 @@ func TestValidateOptionalName(t *testing.T) {
 	}
 }
 
-// TestValidateNameMessages pins what a §7 name refusal tells the caller: the
+// TestValidateNameMessages pins what a name refusal of architecture.md, Common
+// validation, tells the caller: the
 // request field it came from, and — for the pattern row — the pattern itself,
 // so the message is actionable without the spec at hand.
 func TestValidateNameMessages(t *testing.T) {
@@ -163,7 +167,7 @@ func TestValidateNameMessages(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// NQNs (§7 row 2)
+// NQNs (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
 // TestValidateNqn pins the NQN row: non-empty, at most MaxNqnLength bytes,
@@ -213,7 +217,8 @@ func TestValidateNqn(t *testing.T) {
 	}
 }
 
-// TestValidateHostFacingNqn pins §7's dnv-namespace row: the refusal is
+// TestValidateHostFacingNqn pins the dnv-namespace row of architecture.md,
+// Common validation: the refusal is
 // IsDnvNqn's prefix, NqnPrefix + ":", and neither "decodes as a dnv kind" —
 // which would pass a prefix-only name the cn agent then never sweeps — nor
 // the bare prefix, which would refuse the suites' own nqn.2024-01.io.dnv-it:
@@ -243,7 +248,8 @@ func TestValidateHostFacingNqn(t *testing.T) {
 	}
 }
 
-// TestValidateExistingNqn pins §7's row for the nqn of DeleteNamespace and
+// TestValidateExistingNqn pins the row of architecture.md, Common validation,
+// for the nqn of DeleteNamespace and
 // DeleteSubsystem: only non-empty and at most MaxNqnLength bytes, so that a
 // subsystem stored under a name the NQN row or the dnv-namespace row came to
 // refuse can still be emptied and deleted.
@@ -289,7 +295,8 @@ func TestValidateNqnLength(t *testing.T) {
 		validateNqn("nqn", overMax), "224")
 }
 
-// TestValidateNqnRejectsDiscoveryNqn pins the §7 sentence that saves every
+// TestValidateNqnRejectsDiscoveryNqn pins the sentence of architecture.md,
+// Common validation, that saves every
 // name-taking RPC a special case: ValidNqnPattern demands a ':' after the
 // domain part, and the well-known discovery NQN has none, so it can never
 // validate. No dnv object can be named it and CreateSubsystem needs no
@@ -350,10 +357,11 @@ func TestValidateHosts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bounded numerics and the "zero means unset" rule (§7 table)
+// Bounded numerics and the "zero means unset" rule (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
-// TestValidateBound pins the rule the whole numeric half of §7 rests on: on
+// TestValidateBound pins the rule the whole numeric half of architecture.md,
+// Common validation, rests on: on
 // the REQUEST side a proto3 zero is "unset" and asks for the Default*, so zero
 // is ALWAYS accepted here even when the minimum is 1, and only a non-zero
 // value outside [min, max] is refused. Nothing in validate.go rewrites the
@@ -384,13 +392,15 @@ func TestValidateBound(t *testing.T) {
 }
 
 // TestValidateDnBinConf pins the dn_bin_conf.extent_size row — [64 MiB, 1 TiB],
-// zero unset — and the §6.2 shift ladder, which is all-or-nothing.
+// zero unset — and the shift ladder of architecture.md, DN bins, which is
+// all-or-nothing.
 //
 // All four shifts zero is the proto3 "unset" that asks for the 0/4/8/12
 // default and is accepted; any other set must already BE a ladder
 // 0 <= bin0 < bin1 < bin2 < bin3 <= 63. The stored ladder is what every
 // capacity key in the cluster is written under for the cluster's whole life
-// (§7: nothing resolves it again on read), so an operator who asks for a
+// (architecture.md, Common validation: nothing resolves it again on read), so
+// an operator who asks for a
 // ladder that is not one has to be told here — quietly substituting the
 // default would hand them a cluster binned differently from the one they
 // asked for, and there is no UpdateCluster RPC to correct it with.
@@ -585,9 +595,9 @@ func TestValidateHealthCheckConf(t *testing.T) {
 	}
 }
 
-// TestValidateDmCloneConf pins the hydration knob pair, which clone (§8.9) and
-// migration (§8.11) share one bound table for: threshold [1, 8], batch size
-// [1, 4], zero unset in both.
+// TestValidateDmCloneConf pins the hydration knob pair, which clone
+// (architecture.md, Clones) and migration (architecture.md, Migrations) share
+// one bound table for: threshold [1, 8], batch size [1, 4], zero unset in both.
 func TestValidateDmCloneConf(t *testing.T) {
 	cases := []struct {
 		name string
@@ -632,12 +642,12 @@ func TestValidateDmCloneConf(t *testing.T) {
 	}
 }
 
-// TestValidateListCountClamp pins the last numeric row of §7 — list `count`,
-// min 1, max MaxListCnt, default DefaultListCnt. The resolver lives in
-// common.go's pageLimit rather than validate.go because it returns the
-// resolved limit as well as the refusal, but it is a §7 row and this is the
-// §9.2 table that owns it: 0 resolves to 64, 1024 is accepted verbatim and
-// 1025 is refused.
+// TestValidateListCountClamp pins the last numeric row of architecture.md,
+// Common validation — list `count`, min 1, max MaxListCnt, default
+// DefaultListCnt. The resolver lives in common.go's pageLimit rather than
+// validate.go because it returns the resolved limit as well as the refusal,
+// but it is a Common validation row and this is the table that owns it: 0
+// resolves to 64, 1024 is accepted verbatim and 1025 is refused.
 func TestValidateListCountClamp(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -669,8 +679,9 @@ func TestValidateListCountClamp(t *testing.T) {
 // Transport configurations
 // ---------------------------------------------------------------------------
 
-// TestValidateTrConf pins that all four NvmeTrConf members obey the §7 name
-// row, and that an entirely empty message is accepted here: the RPCs that
+// TestValidateTrConf pins that all four NvmeTrConf members obey the name row
+// of architecture.md, Common validation, and that an entirely empty message is
+// accepted here: the RPCs that
 // require a non-empty one (CreateDiskNode, CreateControllerNode) say so
 // themselves through trConfEmpty.
 func TestValidateTrConf(t *testing.T) {
@@ -713,8 +724,9 @@ func TestValidateTrConf(t *testing.T) {
 }
 
 // TestValidateTrConfEmpty pins the predicate CreateDiskNode and
-// CreateControllerNode refuse on (§8.2): a message is empty exactly when all
-// four members are, so any single member makes it non-empty.
+// CreateControllerNode refuse on (architecture.md, Disk nodes): a message is
+// empty exactly when all four members are, so any single member makes it
+// non-empty.
 func TestValidateTrConfEmpty(t *testing.T) {
 	cases := []struct {
 		name string
@@ -738,9 +750,10 @@ func TestValidateTrConfEmpty(t *testing.T) {
 }
 
 // TestValidateTrConfList pins the list form CreateClone and UpdateCloneTrConf
-// take: at least one entry, no entry empty, every member a valid §7 name. A
-// clone with no source address could never connect, so an empty list is a §7
-// violation and not a defaulted field.
+// take: at least one entry, no entry empty, every member a valid name
+// (architecture.md, Common validation). A clone with no source address could
+// never connect, so an empty list is a Common validation violation and not a
+// defaulted field.
 func TestValidateTrConfList(t *testing.T) {
 	good := &pb.NvmeTrConf{
 		TrType:  "tcp",
@@ -785,12 +798,14 @@ func TestValidateTrConfList(t *testing.T) {
 // BdevConf: bounds, the four geometry rules and the two structural rules
 // ---------------------------------------------------------------------------
 
-// TestValidateBdevConf pins every bounded member of a BdevConf and the §7
-// structural rule that bdev_feature_list MUST be empty in this version.
+// TestValidateBdevConf pins every bounded member of a BdevConf and the
+// structural rule of architecture.md, Common validation, that
+// bdev_feature_list MUST be empty in this version.
 //
 // low_water_mark_pct is the row with no upper bound: 0 selects
 // DefaultPoolLowWatermarkPct and a value above 100 is ACCEPTED and switches
-// the §10.4 auto-grow off, so neither may be refused here.
+// the auto-grow of architecture.md, Automatic reactions, off, so neither may be
+// refused here.
 func TestValidateBdevConf(t *testing.T) {
 	raid1 := func(cnt uint64) *pb.RedundConf {
 		return &pb.RedundConf{
@@ -936,10 +951,11 @@ func TestValidateBdevConf(t *testing.T) {
 	}
 }
 
-// TestBdevConfGeometryRules pins the four §7 geometry rules a BdevConf obeys
-// beyond its bounds. Each is a refusal dm-thin, dm-clone, mdadm or CreateClone
-// would otherwise deliver only once the pool exists, and then for ever,
-// because a stored geometry never changes (§8.4):
+// TestBdevConfGeometryRules pins the four geometry rules of architecture.md,
+// Common validation, a BdevConf obeys beyond its bounds. Each is a refusal
+// dm-thin, dm-clone, mdadm or CreateClone would otherwise deliver only once the
+// pool exists, and then for ever, because a stored geometry never changes
+// (architecture.md, Storage pools):
 //
 //   - data_block_size is a power of two. Its 64 KiB minimum then makes it a
 //     whole number of dm-thin's units, which dm-thin demands ("Invalid block
@@ -948,8 +964,9 @@ func TestValidateBdevConf(t *testing.T) {
 //     of one of its sides, which dm-clone's parse_region_size refuses unless
 //     it is a power of two ("Region size is not a power of 2");
 //   - stripe_size is a multiple of 4 KiB and at most 1 MiB, and
-//     data_block_size a multiple of stripe_size: CreateClone's §11.4 source
-//     rules, so that every legal pool is a legal clone source;
+//     data_block_size a multiple of stripe_size: CreateClone's source rules
+//     (architecture.md, raid0 bitmap math), so that every legal pool is a legal
+//     clone source;
 //   - under md-raid1, the bitmap chunk of bitmap_chunk_block_cnt x
 //     data_block_size bytes is a power of two, which mdadm demands of any
 //     --bitmap-chunk ("invalid bitmap chunksize"; lab, mdadm 4.5: 1000K
@@ -1161,7 +1178,7 @@ func TestBdevConfGeometryRules(t *testing.T) {
 		}
 	})
 	// Every refusal names the member to fix: the message is all an operator
-	// sees (§7).
+	// sees (architecture.md, Common validation).
 	for _, item := range []struct {
 		conf  *pb.BdevConf
 		field string
@@ -1208,14 +1225,14 @@ func TestBdevConfGeometryRules(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// EventThreshold: its one cross-field rule (§7)
+// EventThreshold: its one cross-field rule (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
 // TestValidateEventThreshold pins the leg_unhealthy > side_unhealthy rule, and
 // pins that it is applied AFTER default resolution — that is the whole point
-// of the row. §10.4's leg repair fires on the side threshold when the DN looks
-// dead and on the leg threshold when only the cntlr's path is bad, so the leg
-// wait is the longer one by construction.
+// of the row. The leg repair of architecture.md, Automatic reactions, fires on
+// the side threshold when the DN looks dead and on the leg threshold when only
+// the cntlr's path is bad, so the leg wait is the longer one by construction.
 //
 // The cases that leave one member unset are the ones that matter: a request
 // naming only side_unhealthy = 1200 is refused because leg_unhealthy resolves
@@ -1307,7 +1324,7 @@ func TestValidateEventThresholdMessageIsResolved(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CreateCluster's write-once conf (§8.1)
+// CreateCluster's write-once conf (architecture.md, Clusters)
 // ---------------------------------------------------------------------------
 
 // TestValidateClusterConfInput pins that CreateCluster's single validation
@@ -1385,12 +1402,13 @@ func TestValidateClusterConfInput(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// cntlid slots (§8.4, §11.8)
+// cntlid slots (architecture.md, Storage pools and cntlid slots)
 // ---------------------------------------------------------------------------
 
 // TestValidateCntlidSlotList pins the slot-list rules: every value below
-// CnCntlidSlotCnt and no duplicates, because §11.8 gives the cntlrs of one SP
-// distinct slots and a repeated entry would silently shrink the usable list.
+// CnCntlidSlotCnt and no duplicates, because architecture.md, cntlid slots,
+// gives the cntlrs of one SP distinct slots and a repeated entry would silently
+// shrink the usable list.
 //
 // allowEmpty is the one difference between the two callers:
 // CreateStoragePool defaults an empty list to [0..7], while
@@ -1450,7 +1468,8 @@ func TestValidateCntlidSlotList(t *testing.T) {
 // TestValidateSpLevel pins that only a declared SpLevel is accepted. The
 // levels are spaced 16 apart on purpose, so an undeclared number between two
 // of them must be refused rather than rounded to a neighbour: a stored
-// SP_LEVEL of 40 would make every §11.7 comparison ambiguous.
+// SP_LEVEL of 40 would make every comparison of architecture.md, SpLevel,
+// ambiguous.
 func TestValidateSpLevel(t *testing.T) {
 	declared := []pb.SpLevel{
 		pb.SpLevel_SP_LEVEL_READWRITE,
@@ -1535,7 +1554,7 @@ func TestValidateNodeSelector(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Namespace identity (§8.8)
+// Namespace identity (architecture.md, Subsystems, namespaces)
 // ---------------------------------------------------------------------------
 
 // TestValidateDevIdentity pins the two identity shapes CreateNamespace accepts
@@ -1615,17 +1634,19 @@ func TestValidateDevIdentity(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Clone source geometry (§8.9, §11.4)
+// Clone source geometry (architecture.md, Clones and raid0 bitmap math)
 // ---------------------------------------------------------------------------
 
 // TestValidateCloneGeometry pins the three source-geometry bounds of
 // CreateClone and the divisibility rule between two of them. The numbers
-// describe the SOURCE SP, which this cluster cannot read, so §7 is the only
-// place they are ever checked: src_slice_cnt ∈ [1, MaxSliceCntPerSp],
+// describe the SOURCE SP, which this cluster cannot read, so architecture.md,
+// Common validation, is the only place they are ever checked: src_slice_cnt ∈
+// [1, MaxSliceCntPerSp],
 // src_stripe_size = i x 4 KiB with i ∈ [1, 256], src_block_size = j x 64 KiB
 // with j ∈ [1, 16384], and src_block_size a multiple of src_stripe_size —
 // without which a clone region would straddle a raid0 stripe boundary and the
-// per-slice bitmaps of §8.13 would address the wrong bytes.
+// per-slice bitmaps of architecture.md, Bitmap reads, would address the wrong
+// bytes.
 //
 // Every case states all three numbers so that a bound and the divisibility
 // rule can never be confused for one another: the only member under test is
@@ -1692,13 +1713,13 @@ func TestValidateCloneGeometry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bitmaps (§8.9, §8.11)
+// Bitmaps (architecture.md, Clones and Migrations)
 // ---------------------------------------------------------------------------
 
 // TestValidateBitmap pins the one thing the gateway ever asserts about a
 // bitmap. GW14 makes the payload opaque — Append*Bitmap stores the bytes
-// verbatim and never inspects a bit — so the only §7 rule left is that an
-// append must actually carry something.
+// verbatim and never inspects a bit — so the only rule of architecture.md,
+// Common validation, left is that an append must actually carry something.
 func TestValidateBitmap(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1719,10 +1740,11 @@ func TestValidateBitmap(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GrowSlice exclusivity (§8.5)
+// GrowSlice exclusivity (architecture.md, GrowSlice)
 // ---------------------------------------------------------------------------
 
-// TestValidateGrowExclusivity pins the §8.5 rule that decides which of the two
+// TestValidateGrowExclusivity pins the rule of architecture.md, GrowSlice, that
+// decides which of the two
 // GrowSlice signals a request may carry. A meta grow takes its size from the
 // meta ladder, so an ext_cnt alongside is_meta would be silently ignored and
 // the caller would believe it had asked for something it did not get; a data

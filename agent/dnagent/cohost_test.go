@@ -12,7 +12,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Several dn agents on one kernel (architecture.md §9.8, "attribution").
+// Several dn agents on one kernel (architecture.md, Teardown by sweep,
+// "attribution").
 //
 // The dm, nvmet and nvme-host namespaces are per KERNEL, not per agent, so a
 // node-level sweep enumerating configfs or /sys/class/nvme-subsystem sees

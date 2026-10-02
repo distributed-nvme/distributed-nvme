@@ -1,9 +1,9 @@
-// Package etcdutil is the one and only door to etcd in dnv (dnv-worker.md §3,
-// log.md §5.3): it wraps a single clientv3 client, does the protobuf
-// (un)marshaling of every value and emits the log records log.md requires, so
-// that no other package ever calls clientv3 (or its STM) directly with ad-hoc
-// marshaling. It takes proto.Message parameters and MUST NOT import pb
-// (layout.md §3).
+// Package etcdutil is the one and only door to etcd in dnv (dnv-worker.md,
+// Package `etcdutil`; log.md, etcd): it wraps a single clientv3 client, does
+// the protobuf (un)marshaling of every value and emits the log records
+// log.md requires, so that no other package ever calls clientv3 (or its STM)
+// directly with ad-hoc marshaling. It takes proto.Message parameters and
+// MUST NOT import pb (layout.md, Dependency rules).
 package etcdutil
 
 import (
@@ -22,8 +22,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The log.md §5.3 record names. They are normative: the integration suite
-// greps for them (dnv-worker.md §12).
+// The record names of log.md, etcd. They are normative: the integration suite
+// greps for them (dnv-worker.md, Log records).
 const (
 	msgGet        = "etcd get"
 	msgPut        = "etcd put"
@@ -42,8 +42,8 @@ type Client struct {
 	cli *clientv3.Client
 }
 
-// New builds the client (EU1). No dnv gRPC interceptor is attached: etcd
-// logging is done by these helpers, not by message interceptors (grpc.md §1).
+// New builds the client (EU1). No dnv gRPC interceptor is attached: etcd logging
+// is done by these helpers, not by message interceptors (grpc.md, Placement).
 // dialTimeout defaults to common.DefaultEtcdDialTimeout seconds when it is not
 // positive (EU5). Not reaching any endpoint here is not by itself fatal to the
 // caller: clientv3 dials lazily and reconnects in the background, and the
@@ -91,8 +91,8 @@ func opCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, common.DefaultEtcdOpTimeout*time.Second)
 }
 
-// appendErr appends the optional "error" attribute of the log.md §5.3 records
-// (the same shape common/osclient.go uses).
+// appendErr appends the optional "error" attribute of the records of log.md,
+// etcd (the same shape common/osclient.go uses).
 func appendErr(attrs []any, err error) []any {
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
@@ -100,7 +100,7 @@ func appendErr(attrs []any, err error) []any {
 	return attrs
 }
 
-// logGet emits an "etcd get" record (log.md §5.3). value is logged decoded,
+// logGet emits an "etcd get" record (log.md, etcd). value is logged decoded,
 // never as raw bytes, and only when the key was found and could be decoded.
 func logGet(
 	ctx context.Context,
@@ -119,7 +119,7 @@ func logGet(
 	slog.InfoContext(ctx, msgGet, appendErr(attrs, err)...)
 }
 
-// logPut emits an "etcd put" record (log.md §5.3).
+// logPut emits an "etcd put" record (log.md, etcd).
 func logPut(ctx context.Context, key string, msg proto.Message, err error) {
 	attrs := []any{
 		slog.String("key", key),
@@ -128,7 +128,7 @@ func logPut(ctx context.Context, key string, msg proto.Message, err error) {
 	slog.InfoContext(ctx, msgPut, appendErr(attrs, err)...)
 }
 
-// logDelete emits an "etcd delete" record (log.md §5.3).
+// logDelete emits an "etcd delete" record (log.md, etcd).
 func logDelete(ctx context.Context, key string, err error) {
 	attrs := []any{slog.String("key", key)}
 	slog.InfoContext(ctx, msgDelete, appendErr(attrs, err)...)
@@ -213,7 +213,7 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 }
 
 // scan runs one prefix range and logs the single "etcd range" record of EU2:
-// prefix and count only — a range never dumps its values (log.md §5.3).
+// prefix and count only — a range never dumps its values (log.md, etcd).
 func (c *Client) scan(
 	ctx context.Context,
 	prefix string,
@@ -267,8 +267,9 @@ func (c *Client) Range(
 }
 
 // RangeDesc scans a prefix in DESCENDING key order, at most limit keys
-// (limit <= 0 means no limit). It exists for the §6.3/§6.4 allocator
-// (model/alloc.go, MD5): the capacity keys embed free_ext_cnt in
+// (limit <= 0 means no limit). It exists for the allocator of architecture.md,
+// Finding DN candidates and Finding CN candidates (model/alloc.go, MD5): the
+// capacity keys embed free_ext_cnt in
 // common.FreeSpaceFmt, so descending key order is "largest free first", and
 // the allocator stops as soon as it has enough candidates — which is what the
 // bounded scan expresses without pulling a whole bin into memory. Same "etcd
@@ -327,7 +328,7 @@ func (c *Client) RangeKeys(
 // Decode unmarshals one scanned value (EU2) and logs it as an "etcd get"
 // record with found = true, so that every value a caller actually reads is
 // logged individually even though the range that produced it logged only a
-// count (log.md §5.3).
+// count (log.md, etcd).
 func (c *Client) Decode(ctx context.Context, kv KV, msg proto.Message) error {
 	if err := proto.Unmarshal(kv.Value, msg); err != nil {
 		logGet(ctx, kv.Key, true, nil, err)
@@ -351,7 +352,7 @@ const (
 	EventDelete
 )
 
-// String renders the type as the log.md §5.3 "type" attribute.
+// String renders the type as the "type" attribute of log.md, etcd.
 func (t EventType) String() string {
 	switch t {
 	case EventPut:
@@ -446,7 +447,7 @@ func (c *Client) WatchTyped(
 }
 
 // decodeEvent turns one clientv3 event into an Event and logs the
-// "etcd watch event" record of log.md §5.3.
+// "etcd watch event" record of log.md, etcd.
 func decodeEvent(
 	ctx context.Context,
 	rawEvent *clientv3.Event,
@@ -487,8 +488,8 @@ func decodeEvent(
 // caller can type-assert it.
 //
 // This is the contract model builds on: model.ErrPrecondition (MD7) is a
-// normal error type whose Unwrap() returns ErrNoCommit, which keeps
-// etcdutil free of any model import (layout.md §3). Note that the abort is
+// normal error type whose Unwrap() returns ErrNoCommit, which keeps etcdutil
+// free of any model import (layout.md, Dependency rules). Note that the abort is
 // not special-cased in the transaction machinery — ANY error returned by the
 // callback ends the attempt before the commit txn is issued; ErrNoCommit only
 // tells etcdutil (and the reader) that the error is a deliberate, non-fatal
@@ -503,7 +504,7 @@ var errSnapshotDone = errors.New("etcdutil: snapshot complete")
 var errReadOnly = errors.New("write inside a read-only Snapshot")
 
 // STM is the typed view of one transaction (EU4). Get/Put/Del each log their
-// log.md §5.3 record; a retried transaction logs its records once per attempt,
+// record (log.md, etcd); a retried transaction logs its records once per attempt,
 // which log.md accepts.
 type STM interface {
 	// Get reads one key into msg and reports whether it exists. msg is left
@@ -617,7 +618,7 @@ func (v *stmView) Del(key string) {
 }
 
 // Rev returns the key's mod_revision, 0 when it does not exist. It emits no
-// log record: it reads no value, and log.md §5.3's "etcd get" record is
+// log record: it reads no value, and the "etcd get" record of log.md, etcd, is
 // defined by the decoded value it carries.
 func (v *stmView) Rev(key string) int64 {
 	return v.stm.Rev(key)

@@ -8,8 +8,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The §9.4 background side-zeroing loop — the dn twin of the DN8 connect-retry
-// registry (migr.go) and of the cn leg probers (cnagent/healthcheck.go).
+// The background side-zeroing loop of
+// architecture.md, Side provisioning protocol — the dn twin of the DN8
+// connect-retry registry (migr.go) and of the cn leg probers
+// (cnagent/healthcheck.go).
 //
 // dnv is multi-tenant: one tenant must never read another's bytes. discard is
 // not a zero guarantee (the kernel dropped discard_zeroes_data in 4.12 and
@@ -58,7 +60,7 @@ type zeroJob struct {
 // startZeroing registers the side's zeroing loop if it is not running already.
 // The caller holds the node read lock and the side's object lock.
 //
-// It refuses once rootCtx is done (SH27): an armed §11.2 fence timer
+// It refuses once rootCtx is done (SH27): an armed DN12 fence timer
 // is not enrolled in the WaitGroup and can still reach a converge after
 // WaitBackground returned, and a bg.Add after bg.Wait panics.
 func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
@@ -230,7 +232,7 @@ func (s *DnAgentServer) zeroLoop(
 			}
 			// The killed command's output is what side_dev_info reports, and
 			// the pace below is what keeps a persistent failure from becoming
-			// a hot loop (§9.4).
+			// a hot loop (DN9).
 			s.setZeroingErr(st, err)
 			if !s.zeroPace(ctx) {
 				return

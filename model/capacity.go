@@ -11,7 +11,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Conf defaults, resolved at WRITE time (architecture.md §7)
+// Conf defaults, resolved at WRITE time (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 //
 // Every Resolve* below turns an accepted request into the CONCRETE message the
@@ -19,8 +19,9 @@ import (
 // ClusterConf, `CreateStoragePool` for an SP's bdev_conf — and never again: a
 // conf read back out of etcd already carries its values, so no reader
 // substitutes a member of one. Readers use the Validate* helpers further down
-// instead, which refuse a zero rather than guessing around it. (§7's two
-// deliberate exemptions are stored as sent and resolved elsewhere:
+// instead, which refuse a zero rather than guessing around it. (The two
+// deliberate exemptions of architecture.md, Common validation, are stored as
+// sent and resolved elsewhere:
 // event_threshold in ops.go, and a migration's DmCloneConf in worker/sprole.go
 // — neither is geometry.)
 //
@@ -44,7 +45,8 @@ func clampU32(value uint32, min uint32, max uint32) uint32 {
 	return value
 }
 
-// binLadderOk is §6.2's rule about the four shifts, in one place so the
+// binLadderOk is the rule of architecture.md, DN bins, about the four shifts,
+// in one place so the
 // resolver and the validator below cannot drift apart:
 // 0 <= bin0 < bin1 < bin2 < bin3 <= 63. The all-zero set a DnBinConf written
 // without shifts carries is NOT a ladder — bin0_shift 0 is legitimate, but
@@ -57,11 +59,13 @@ func binLadderOk(conf *pb.DnBinConf) bool {
 }
 
 // ResolveDnBinConf returns a copy of conf with its defaults applied
-// (architecture.md §6.2). A nil conf resolves to the pure defaults.
+// (architecture.md, DN bins). A nil conf resolves to the pure defaults.
 //
-//   - extent_size: 0 => common.DefaultDnExtSize. The §7 bounds are enforced on
-//     the REQUEST, not here: a stored size is what every DN's disk header was
-//     formatted with (§3.1) and must never be silently changed afterwards.
+//   - extent_size: 0 => common.DefaultDnExtSize. The bounds of
+//     architecture.md, Common validation, are enforced on the REQUEST, not
+//     here: a stored size is what every DN's disk header was formatted with
+//     (architecture.md, Disk node) and must never be silently changed
+//     afterwards.
 //   - the four shifts: a set that is not a ladder — the all-zero one a
 //     ClusterConf written without a dn_bin_conf carries above all — falls back
 //     to the 0/4/8/12 defaults as a whole, never shift by shift, so that the
@@ -89,7 +93,8 @@ func ResolveDnBinConf(conf *pb.DnBinConf) *pb.DnBinConf {
 }
 
 // ResolveAllocConf returns a copy of conf with its defaults applied
-// (architecture.md §6.5, §7): each batch size 0 => 16, clamped to [1, 1024].
+// (architecture.md, Per-operation allocation; Common validation): each batch
+// size 0 => 16, clamped to [1, 1024].
 // The clamp is unreachable for an accepted request — validateAllocConf refuses
 // a non-zero value outside the range first — and is kept as robustness.
 func ResolveAllocConf(conf *pb.AllocConf) *pb.AllocConf {
@@ -116,8 +121,8 @@ func ResolveAllocConf(conf *pb.AllocConf) *pb.AllocConf {
 	return resolved
 }
 
-// resolveInterval applies the §7 rule to one health-check interval: 0 => 5
-// seconds, then clamped to [1, 3600].
+// resolveInterval applies the rule of architecture.md, Common validation, to
+// one health-check interval: 0 => 5 seconds, then clamped to [1, 3600].
 func resolveInterval(interval uint32) uint32 {
 	if interval == 0 {
 		interval = common.DefaultHealthCheckInterval
@@ -130,8 +135,8 @@ func resolveInterval(interval uint32) uint32 {
 }
 
 // ResolveHealthCheckConf returns a copy of conf with the four round intervals
-// resolved (§7): each is the object kind's round timeout (§8.1), so none of
-// them may ever be zero.
+// resolved (architecture.md, Common validation): each is the object kind's
+// round timeout (architecture.md, Clusters), so none of them may ever be zero.
 func ResolveHealthCheckConf(conf *pb.HealthCheckConf) *pb.HealthCheckConf {
 	return &pb.HealthCheckConf{
 		DnInterval:    resolveInterval(conf.GetDnInterval()),
@@ -142,15 +147,17 @@ func ResolveHealthCheckConf(conf *pb.HealthCheckConf) *pb.HealthCheckConf {
 }
 
 // ResolveBdevConf returns a copy of conf with every defaultable member
-// concrete (§7): data_block_size 0 => 1 MiB, low_water_mark_pct 0 => 50,
+// concrete (architecture.md, Common validation): data_block_size 0 => 1 MiB,
+// low_water_mark_pct 0 => 50,
 // stripe_size 0 => 64 KiB, and — only when the redund_conf oneof actually
 // selects md-raid1 — bitmap_chunk_block_cnt 0 => 128. A nil conf resolves to
 // the pure defaults.
 //
 // Two members are deliberately left alone. low_water_mark_pct above 100 is a
-// MEANING, not an error ("never grow this pool automatically", §7), so it is
-// carried through as written and never clamped. And redund_conf is a choice,
-// not a default: an unset oneof already means redund_none (§8.4), so nothing
+// MEANING, not an error ("never grow this pool automatically",
+// architecture.md, Common validation), so it is carried through as written and
+// never clamped. And redund_conf is a choice, not a default: an unset oneof
+// already means redund_none (architecture.md, Storage pools), so nothing
 // here invents a kind — only the chunk count INSIDE an md-raid1 choice is
 // filled in.
 func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
@@ -163,7 +170,8 @@ func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
 			StripeSize: conf.GetDmRaid0Conf().GetStripeSize(),
 		},
 	}
-	// §7 refuses a non-empty bdev_feature_list on both the cluster and the SP,
+	// architecture.md, Common validation, refuses a non-empty bdev_feature_list
+	// on both the cluster and the SP,
 	// so this list is always empty today. It is copied element by element
 	// anyway, for the same reason redund_conf is cloned below: the result ends
 	// up inside a stored message and must not alias a request the caller still
@@ -209,7 +217,8 @@ func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
 // creation_epoch and qos_ratio exactly as given (neither is defaultable). A
 // nil cc resolves to the pure defaults.
 //
-// ClusterConf is write-once (§8.1: no UpdateCluster* RPC exists), so this is
+// ClusterConf is write-once (architecture.md, Clusters: no UpdateCluster* RPC
+// exists), so this is
 // the only chance a cluster's conf ever gets to become concrete — which is why
 // it covers every sub-message rather than staying sparse.
 func ResolveClusterConf(cc *pb.ClusterConf) *pb.ClusterConf {
@@ -224,7 +233,7 @@ func ResolveClusterConf(cc *pb.ClusterConf) *pb.ClusterConf {
 }
 
 // ---------------------------------------------------------------------------
-// Stored-conf validation (architecture.md §7)
+// Stored-conf validation (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 //
 // The mirror image of the Resolve* family above: every conf in etcd is
@@ -259,11 +268,13 @@ func validateStoredRange(
 
 // ValidateBdevConf refuses a stored BdevConf whose geometry is not concrete.
 //
-// Only the four defaultable members are checked, and only for presence: the §7
-// ranges are enforced on the request, and re-enforcing them here would make
+// Only the four defaultable members are checked, and only for presence: the
+// ranges of architecture.md, Common validation, are enforced on the request,
+// and re-enforcing them here would make
 // every RPC on a pool whose stored value is out of range fail rather than the
 // one RPC that set it. low_water_mark_pct is checked for zero ONLY — a value
-// above 100 is the legal "auto-grow off" setting (§7).
+// above 100 is the legal "auto-grow off" setting (architecture.md, Common
+// validation).
 func ValidateBdevConf(conf *pb.BdevConf) error {
 	if conf.GetDmPoolConf().GetDataBlockSize() == 0 {
 		return invalidConf("bdev_conf.dm_pool_conf.data_block_size is zero")
@@ -275,7 +286,8 @@ func ValidateBdevConf(conf *pb.BdevConf) error {
 		return invalidConf("bdev_conf.dm_raid0_conf.stripe_size is zero")
 	}
 	// The chunk count only exists when the oneof chose md-raid1; a
-	// redund_none pool has no bitmap and must not be asked for one (§8.4).
+	// redund_none pool has no bitmap and must not be asked for one
+	// (architecture.md, Storage pools).
 	if raid1 := conf.GetRedundConf().GetRedundMdRaid1(); raid1 != nil &&
 		raid1.GetBitmapChunkBlockCnt() == 0 {
 		return invalidConf(
@@ -289,7 +301,8 @@ func ValidateBdevConf(conf *pb.BdevConf) error {
 // not have written.
 //
 // extent_size is checked for zero only, never against [Min, Max]: it is what
-// every DN's disk header was formatted with (§3.1), so a cluster whose DNs are
+// every DN's disk header was formatted with (architecture.md, Disk node), so a
+// cluster whose DNs are
 // correctly formatted at an unusual size must keep working. The batch sizes
 // and intervals ARE range-checked, because the resolver clamps them into those
 // ranges and anything outside therefore cannot have come from a write.
@@ -346,7 +359,7 @@ func ValidateClusterConf(cc *pb.ClusterConf) error {
 }
 
 // ---------------------------------------------------------------------------
-// Bins (MD4, architecture.md §6.2)
+// Bins (MD4; architecture.md, DN bins)
 // ---------------------------------------------------------------------------
 
 // binLevels returns the four bin levels level_i = 1 << bin_i_shift of a STORED
@@ -369,10 +382,11 @@ func binLevels(conf *pb.DnBinConf) [4]uint64 {
 	}
 }
 
-// DnBinIdx is the bin a DN with freeExt free extents sits in (MD4, §6.2): bin
-// b is where level_b <= f < level_{b+1}, bin 3 is unbounded above, and ok is
-// false below level_0 — a DN with less free space than the smallest bin holds
-// has no bin and therefore no capacity key at all (§5.6).
+// DnBinIdx is the bin a DN with freeExt free extents sits in (MD4;
+// architecture.md, DN bins): bin b is where level_b <= f < level_{b+1}, bin 3
+// is unbounded above, and ok is false below level_0 — a DN with less free
+// space than the smallest bin holds has no bin and therefore no capacity key
+// at all (architecture.md, Capacity index keys).
 func DnBinIdx(freeExt uint64, conf *pb.DnBinConf) (uint32, bool) {
 	levels := binLevels(conf)
 	if freeExt < levels[0] {
@@ -387,12 +401,13 @@ func DnBinIdx(freeExt uint64, conf *pb.DnBinConf) (uint32, bool) {
 }
 
 // ---------------------------------------------------------------------------
-// The §5.6 presence rule (MD4)
+// The presence rule of architecture.md, Capacity index keys (MD4)
 // ---------------------------------------------------------------------------
 
-// DnAllocatable is the §5.6 presence rule for a DN (MD4): its capacity key
-// exists in etcd if and only if this returns true. A nil dn — a record that
-// was just deleted, or one that never existed — is not allocatable.
+// DnAllocatable is the presence rule of architecture.md, Capacity index keys,
+// for a DN (MD4): its capacity key exists in etcd if and only if this returns
+// true. A nil dn — a record that was just deleted, or one that never existed —
+// is not allocatable.
 func DnAllocatable(dn *pb.DnConf, conf *pb.DnBinConf) bool {
 	if dn == nil {
 		return false
@@ -406,14 +421,15 @@ func DnAllocatable(dn *pb.DnConf, conf *pb.DnBinConf) bool {
 	if dn.GetDisabled() {
 		return false
 	}
-	// The free floor is exactly "has a bin" (§6.2): free_ext_cnt < 1 <<
-	// bin0_shift.
+	// The free floor is exactly "has a bin" (architecture.md, DN bins):
+	// free_ext_cnt < 1 << bin0_shift.
 	_, ok := DnBinIdx(dn.GetFreeExtCnt(), conf)
 	return ok
 }
 
-// CnAllocatable is the §5.6 presence rule for a CN (MD4). CNs have no bins, so
-// the free floor is simply a nonzero budget.
+// CnAllocatable is the presence rule of architecture.md, Capacity index keys,
+// for a CN (MD4). CNs have no bins, so the free floor is simply a nonzero
+// budget.
 func CnAllocatable(cn *pb.CnConf) bool {
 	if cn == nil {
 		return false
@@ -435,7 +451,8 @@ func CnAllocatable(cn *pb.CnConf) bool {
 // ---------------------------------------------------------------------------
 
 // dnCapacityKeyOf is the capacity key a DnConf implies, or "" when the record
-// is not allocatable and therefore implies no key at all (§5.6).
+// is not allocatable and therefore implies no key at all (architecture.md,
+// Capacity index keys).
 func dnCapacityKeyOf(
 	cid uint64,
 	addrPort string,
@@ -453,7 +470,7 @@ func dnCapacityKeyOf(
 }
 
 // cnCapacityKeyOf is the capacity key a CnConf implies, or "" when the record
-// is not allocatable (§5.6).
+// is not allocatable (architecture.md, Capacity index keys).
 func cnCapacityKeyOf(cid uint64, addrPort string, cn *pb.CnConf) string {
 	if !CnAllocatable(cn) {
 		return ""
@@ -461,8 +478,9 @@ func cnCapacityKeyOf(cid uint64, addrPort string, cn *pb.CnConf) string {
 	return CnCapacityKey(cid, cn.GetFreeExtCnt(), addrPort)
 }
 
-// MaintainDnCapacity brings a DN's capacity key in line with the §5.6 presence
-// rule inside the caller's STM (MD4): it deletes the key oldDn implied, if
+// MaintainDnCapacity brings a DN's capacity key in line with the presence rule
+// of architecture.md, Capacity index keys, inside the caller's STM (MD4): it
+// deletes the key oldDn implied, if
 // oldDn was allocatable, and writes the key newDn implies, if newDn is. A nil
 // oldDn means "the record did not exist before" (a create), a nil newDn means
 // "it does not exist any more" (a delete).
@@ -470,14 +488,16 @@ func cnCapacityKeyOf(cid uint64, addrPort string, cn *pb.CnConf) string {
 // oldDn MUST be the record as read in this very STM, which is what makes the
 // delete target exact: a capacity key embeds free_ext_cnt, so it can only be
 // removed by the transaction that still knows the count it was written with.
-// The two records share one addrPort — no v001 path renames a node (§5.5) —
+// The two records share one addrPort — no v001 path renames a node
+// (architecture.md, Revision keys and the sync fan-out) —
 // which is why it is a parameter rather than a field: DnConf is keyed by
 // addr_port and does not carry it.
 //
 // The call is idempotent and safe when nothing moved: when both records imply
 // the same key only the put is issued, so an unchanged DN produces no spurious
 // delete record in the log. It is called by every op that changes an input of
-// the rule, in that op's STM, and never bumps a revision (§5.5).
+// the rule, in that op's STM, and never bumps a revision (architecture.md,
+// Revision keys and the sync fan-out).
 func MaintainDnCapacity(
 	s etcdutil.STM,
 	cid uint64,
@@ -487,7 +507,8 @@ func MaintainDnCapacity(
 	newDn *pb.DnConf,
 ) {
 	// The stored ladder, used as stored: CreateCluster resolves dn_bin_conf
-	// before it writes it (§7), so a cluster this control plane created
+	// before it writes it (architecture.md, Common validation), so a cluster
+	// this control plane created
 	// carries a concrete one. Nothing is resolved or guessed here, so an op
 	// that reaches this must have refused an unusable cc before it staged its
 	// first write: a key embeds the bin it was written under, so a different
@@ -513,7 +534,7 @@ func MaintainDnCapacity(
 
 // MaintainCnCapacity is MaintainDnCapacity for a CN (MD4). It takes no
 // ClusterConf: CN capacity keys carry no bin index, so nothing about them
-// depends on dn_bin_conf (§6.4).
+// depends on dn_bin_conf (architecture.md, Finding CN candidates).
 func MaintainCnCapacity(
 	s etcdutil.STM,
 	cid uint64,

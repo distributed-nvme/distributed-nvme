@@ -12,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Teardown by sweep (§4.1)
+// Teardown by sweep (CN21)
 //
 // Every test in this file pins one property of the same rule: what the agent
 // REMOVES is derived by enumerating the node and subtracting the desired
@@ -82,8 +82,8 @@ func cnSweepAssertDetails(
 }
 
 // cnSweepForget drops the cntlr's state file and its memory entry the way a
-// pointer removal does (`architecture.md` §9.8, "State is dropped at pointer
-// removal"), WITHOUT touching the node. What is left is
+// pointer removal does (`architecture.md`, Teardown by sweep, "State is
+// dropped at pointer removal"), WITHOUT touching the node. What is left is
 // the situation the sweep has to cope with: resources on the node and no
 // plan, no request and no state anywhere that names them.
 func cnSweepForget(t *testing.T, srv *CnAgentServer, node *fakeNode) {
@@ -258,7 +258,8 @@ func syncupCntlrSettled(
 //
 // The cntlr's state file and its memory entry are dropped BEFORE the pass, so
 // there is provably no plan, no request and no bookkeeping left that names a
-// single one of its objects — exactly the state §9.8's drop-at-pointer-removal
+// single one of its objects — exactly the state the drop-at-pointer-removal of
+// architecture.md, Teardown by sweep,
 // leaves behind when a pointer disappears, and exactly the state an agent restarted in the middle
 // of a teardown wakes up in. Everything of that sp must still go, by name,
 // and the reply must be a plain OK once the leg disconnects the pass set
@@ -454,7 +455,8 @@ func TestSweepStopsANamedArrayNode(t *testing.T) {
 	}
 }
 
-// TestPersistBeforeSweep pins §9.8's persist-first ordering: the cn request — the pointer
+// TestPersistBeforeSweep pins the persist-first ordering of architecture.md,
+// Teardown by sweep: the cn request — the pointer
 // list the sweep removes against — is on disk before the first removal.
 //
 // The sweep can block for the whole failfast window on a dead leg, so an RPC
@@ -507,8 +509,8 @@ func seedStrayDm(node *fakeNode, name string, devNo string) {
 	node.devNo["/dev/mapper/"+name] = devNo
 }
 
-// TestCheckCnReportsLeftover pins `architecture.md` §9.8's "The verdict is
-// recomputed every time and stored nowhere".
+// TestCheckCnReportsLeftover pins `architecture.md`, Teardown by sweep, "The
+// verdict is recomputed every time and stored nowhere".
 //
 // That is what makes the leftover code a working retry: the worker re-issues
 // SyncupCn while a Check replies non-zero (RW4 step 5), and it stops as soon
@@ -733,7 +735,8 @@ func TestDisableCreatesNoParkTarget(t *testing.T) {
 	)
 }
 
-// TestStandbyKeepsOnlyStandbyObjects pins the failover half of §11.1: the
+// TestStandbyKeepsOnlyStandbyObjects pins the failover half (architecture.md,
+// Failover): the
 // sweep is the whole implementation of "the desired set shrank to the standby
 // shape", with no retire step naming any object by hand.
 //
@@ -798,7 +801,8 @@ func TestStandbyKeepsOnlyStandbyObjects(t *testing.T) {
 	} {
 		assertNoCall(t, node, forbidden)
 	}
-	// §11.6: the ns-dev it keeps is live and serving errors, not suspended
+	// architecture.md, Namespace suspend semantics: the ns-dev it keeps is
+	// live and serving errors, not suspended
 	// and not still mapping the raid0 that has just gone.
 	assertParked(t, srv, node, testNs, testTd, "demoted ns-dev")
 }
@@ -1062,8 +1066,9 @@ func connectedNsDevNo(
 	return devNo
 }
 
-// TestUnownedXferConnectionSwept pins `architecture.md` §9.8's attribution
-// rule for the one object whose name says nothing about who needs it.
+// TestUnownedXferConnectionSwept pins the attribution rule of
+// `architecture.md`, Teardown by sweep, for the one object whose name says
+// nothing about who needs it.
 //
 // A clone-source connection is named for the SOURCE sp, not for the cntlr
 // that dials it, so there is no id in it to sweep by. "Somebody here still
@@ -1123,7 +1128,8 @@ func TestUnownedXferConnectionSwept(t *testing.T) {
 // can attribute it is what its namespaces are backed by.
 //
 // Attribution by the stored plan is what this replaces, and it could not
-// survive §9.8's drop-at-pointer-removal: the file that held the NQN list is
+// survive the drop-at-pointer-removal of architecture.md, Teardown by sweep:
+// the file that held the NQN list is
 // dropped the moment the pointer goes, which is precisely when the subsystem has to be found. A
 // subsystem whose namespace backs onto a removed sp's ns-dev is that sp's and
 // goes with it; one with no attributable namespace at all — what a teardown
@@ -1955,7 +1961,8 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 		from reqOpts
 		to   reqOpts
 		// suspended leaves the ns-dev dm-suspended after the fixture, as
-		// an older build held one for §11.6: kept where it is, it is still
+		// an older build held one for a namespace suspend (architecture.md,
+		// Namespace suspend semantics): kept where it is, it is still
 		// resumed.
 		suspended bool
 		want      []nsWant

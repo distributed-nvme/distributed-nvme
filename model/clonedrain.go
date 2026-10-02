@@ -8,13 +8,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The clone drain of dnv-worker.md §11.7: the two worker-side ops that remove a
-// LATCHED clone's bitmap chunks and then the clone itself.
+// The clone drain (dnv-worker.md, The clone drain): the two worker-side ops
+// that remove a LATCHED clone's bitmap chunks and then the clone itself.
 //
-// It is the sp drain's sibling (§11.6) and reuses its shapes on purpose — the
-// same load-and-refuse guard, the same "derive the position from surviving
-// state, never from a checkpoint", the same one-step-per-pass cadence. Three
-// things differ, and each for a reason:
+// It is the sp drain's sibling (dnv-worker.md, The sp drain) and reuses its
+// shapes on purpose — the same load-and-refuse guard, the same "derive the
+// position from surviving state, never from a checkpoint", the same
+// one-step-per-pass cadence. Three things differ, and each for a reason:
 //
 //   - It is LEDGER-FREE. Clone chunks are not budgeted to any node and the CN
 //     arena units behind the metadata wrapper are agent-local, freed by the

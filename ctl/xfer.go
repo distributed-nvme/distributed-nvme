@@ -1,8 +1,9 @@
-// xfer.go is dnvctl.md §5.10: the four RPCs of a transfer, the SOURCE half of
-// a cross-SP copy (architecture.md §8.10). A transfer re-exports one existing
-// namespace's raid0 under its own `XferNqn` subsystem so a clone in another SP
-// — possibly another cluster — can read the bytes; transfer + clone is the
-// §11.3 cross-SP live migration of a volume.
+// xfer.go is dnvctl.md, `xfer` — `ctl/xfer.go`: the four RPCs of a transfer,
+// the SOURCE half of a cross-SP copy (architecture.md, Transfers). A transfer
+// re-exports one existing namespace's raid0 under its own `XferNqn` subsystem
+// so a clone in another SP — possibly another cluster — can read the bytes;
+// transfer + clone is the cross-SP live migration of a volume
+// (architecture.md, Transfer + clone = cross-SP live migration).
 //
 // Everything here follows root.go's contract: `build` reads its flags and
 // --rev off the parsed command line and --cluster/--sp through viper (CT9),
@@ -19,12 +20,13 @@ import (
 )
 
 // registerXfer adds the `xfer` group to the root. The identity flag is the
-// group-uniform `--name` (§5.0), and `sp_name`/`cluster_name` come from the
-// globals on all four.
+// group-uniform `--name` (dnvctl.md, Conventions), and
+// `sp_name`/`cluster_name` come from the globals on all four.
 func registerXfer(root *cobra.Command) {
 	root.AddCommand(group(
 		"xfer",
-		"transfers — the source side of a cross-SP copy (§8.10)",
+		"transfers — the source side of a cross-SP copy (architecture.md, "+
+			"Transfers)",
 		xferCreateCmd(),
 		xferDeleteCmd(),
 		xferGetCmd(),
@@ -87,7 +89,7 @@ func xferCreateCmd() *cobra.Command {
 // than degrees: without it the STM additionally sets `suspended = true` on the
 // origin namespace, FINALIZING a completed hand-over so the source stays
 // retired; with it the origin is left as it is, ABORTING the transfer so the
-// next syncup restores normal service (§8.10).
+// next syncup restores normal service (architecture.md, Transfers).
 func xferDeleteCmd() *cobra.Command {
 	cmd := leaf(
 		"delete",
@@ -117,7 +119,7 @@ func xferDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// xferGetCmd is GetTransfer, a pure STM read. It bumps nothing, so §4 gives it
+// xferGetCmd is GetTransfer, a pure STM read. It bumps nothing, so CT3 gives it
 // no token, and a typed --rev is a usage error here.
 func xferGetCmd() *cobra.Command {
 	cmd := leaf(

@@ -13,7 +13,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// dnDriver is the dn role's half of the per-object loop (RW13, §8.2). One
+// dnDriver is the dn role's half of the per-object loop (RW13). One
 // per DN: cluster_id and dn_id come from the DnRev key, addr_port and
 // revision from its value.
 type dnDriver struct {
@@ -30,10 +30,11 @@ type dnDriver struct {
 	// A CheckDn reply is decoded by fold on the STREAM'S PUMP goroutine
 	// (dnCheckStream.recv) and a SyncupDn reply by fold on the LOOP's, while
 	// the loop reads the field in observe and rewrites the message's rows in
-	// place in unreachable (§9.5). They overlap on the RW4 step 4 path:
-	// dropStream does not join the pump, so a late reply can still be inside
-	// fold while fail() reports the object unreachable. Unguarded, that loses
-	// the round's ERROR rows and HL1 never sets err_epoch.
+	// place in unreachable (architecture.md, Live-state reporting). They
+	// overlap on the RW4 step 4 path: dropStream does not join the pump, so a
+	// late reply can still be inside fold while fail() reports the object
+	// unreachable. Unguarded, that loses the round's ERROR rows and HL1 never
+	// sets err_epoch.
 	mu       sync.Mutex
 	lastInfo *pb.DnInfo
 
@@ -54,8 +55,9 @@ func (d *dnDriver) info() *pb.DnInfo {
 	return d.lastInfo
 }
 
-// markInfoUnknown is §9.5's "no answer from the node" applied in place to the
-// last known info, under the lock a concurrent fold takes (HL1).
+// markInfoUnknown is the "no answer from the node" of architecture.md,
+// Live-state reporting, applied in place to the last known info, under the lock
+// a concurrent fold takes (HL1).
 func (d *dnDriver) markInfoUnknown() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -64,7 +66,7 @@ func (d *dnDriver) markInfoUnknown() {
 
 // newDnDriver builds the dn driver of one revision worker (RW13). host is the
 // generic loop this driver belongs to; a DN drives no bitmap pushes and no
-// flips, so it never calls back into it (unlike the sp children of §8.4).
+// flips, so it never calls back into it (unlike the sp children, RW14-RW20).
 func newDnDriver(p revWorkerParams, host *revWorker) objDriver {
 	d := &dnDriver{
 		deps:     p.deps,
@@ -77,7 +79,8 @@ func newDnDriver(p revWorkerParams, host *revWorker) objDriver {
 	return d
 }
 
-// logAttrs are the DN's ids as the §12 records carry them.
+// logAttrs are the DN's ids as the records of dnv-worker.md, Log records, carry
+// them.
 func (d *dnDriver) logAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.Uint64("cluster_id", d.cid),
@@ -104,14 +107,14 @@ func (d *dnDriver) interval(cc *pb.ClusterConf) time.Duration {
 // setDesired installs a new revision and endpoint (RW3). A put whose only
 // change is addr_port re-syncs the node at its new endpoint: the loop's
 // connect drops the stream and the connection reference and continues there
-// (RW13, §10.2). No delete ever reaches the agent.
+// (RW13; architecture.md, dn / cn roles). No delete ever reaches the agent.
 func (d *dnDriver) setDesired(next desiredState) {
 	d.revision = next.revision
 	d.addr = next.handle
 }
 
-// openStream opens the DN's CheckDn stream (RW4 step 1, architecture.md
-// §9.7).
+// openStream opens the DN's CheckDn stream (RW4 step 1, architecture.md, Check
+// streams).
 func (d *dnDriver) openStream(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -172,7 +175,8 @@ func (d *dnDriver) observe(ctx context.Context, r *replyState) {
 
 // unreachable folds a broken stream or a missed reply into the DN's health
 // (HL1). The in-memory info is marked RES_STATUS_UNKNOWN — what the worker
-// records itself while the stream is dead (§9.5) — and never written to etcd.
+// records itself while the stream is dead (architecture.md, Live-state
+// reporting) — and never written to etcd.
 func (d *dnDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.health.observe(ctx, healthUnreachable, "")
@@ -228,11 +232,12 @@ func (s *dnCheckStream) closeSend() error {
 }
 
 // dnSyncupRequest builds the SyncupDn request of RW13: the side pointer list
-// is DnConf's, authoritative and complete (§9.1), and extent_size is the
-// STORED dn_bin_conf's, validated by the loop's pass gate before this is ever
-// built (§7). Nothing here substitutes a default, and it matters more here
-// than anywhere: the dn agent formats every disk header with this number
-// (§3.1), so shipping a zero — or a constant this binary happens to carry —
+// is DnConf's, authoritative and complete (architecture.md, Common agent
+// rules), and extent_size is the STORED dn_bin_conf's, validated by the loop's
+// pass gate before this is ever built (architecture.md, Common validation).
+// Nothing here substitutes a default, and it matters more here than anywhere:
+// the dn agent formats every disk header with this number (architecture.md,
+// Disk node), so shipping a zero — or a constant this binary happens to carry —
 // would be a geometry the rest of the cluster does not share.
 func dnSyncupRequest(
 	cid uint64,

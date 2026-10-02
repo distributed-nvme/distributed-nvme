@@ -15,7 +15,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// A recording revision worker, so the shard tests exercise §7 alone
+// A recording revision worker, so the shard tests exercise SW1-SW6 alone
 // ---------------------------------------------------------------------------
 
 // fakeRevWorker records what a shard worker told one revision worker.

@@ -12,9 +12,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// osBase is the shared plumbing of the OS wrappers (dnagent.md §2.8): one
-// process-wide OsClient, and the §7 soft timeout wrapped around every call
-// (SH15; osclient.md §4.2 turns it into SIGTERM, then SIGKILL at the hard
+// osBase is the shared plumbing of the OS wrappers
+// (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`): one
+// process-wide OsClient, and the soft timeout of
+// architecture.md, Common validation, wrapped around every call (SH15;
+// osclient.md, RunCommand, turns it into SIGTERM, then SIGKILL at the hard
 // timeout).
 type osBase struct {
 	oc common.OsClient
@@ -25,7 +27,8 @@ func cmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 		ctx, common.CmdSoftTimeout*time.Second)
 }
 
-// CmdCtx bounds one OS touch by the §7 soft timeout (SH15). The unexported
+// CmdCtx bounds one OS touch by the soft timeout
+// (architecture.md, Common validation; SH15). The unexported
 // cmdCtx stays; this is the same thing for role packages that call the
 // OsClient directly (the cn sysfs walk of leg.go, the thin_dump file read of
 // thinbm.go).
@@ -86,7 +89,7 @@ func (b *osBase) runProbe(
 
 // runStdin executes one command with a stdin payload. dmsetup's --table is
 // single-line only, so a multi-target table is fed through stdin instead
-// (architecture.md Appendix A).
+// (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
 func (b *osBase) runStdin(
 	ctx context.Context,
 	stdin string,
@@ -130,9 +133,10 @@ func (b *osBase) runOk(
 // only *they* run — the cn role's mdadm wrapper (`md.go`), the CN base-state
 // and clone-metadata tooling of `clonemeta.go` (tmpfs, `truncate`, `losetup`,
 // `blkdiscard`) and the thin-provisioning-tools reader (`thinbm.go`), i.e. the
-// `cnagent.md` §4.1 file list. There is no LVM in that list, and none anywhere
-// else in dnv: [D14] removed the clone VG, LVM's last user.
-// By the §1 split rule those wrappers stay role code, but they still owe the
+// file list of `cnagent.md`, Files. There is no LVM in that list, and none
+// anywhere else in dnv: [D14] removed the clone VG, LVM's last user.
+// By the split rule of `cnagent.md`, Scope and placement, those wrappers stay
+// role code, but they still owe the
 // SH15 soft-timeout discipline and the DN19 error capture, which is exactly
 // what this type carries.
 type Cmd struct {

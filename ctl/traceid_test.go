@@ -1,10 +1,11 @@
-// CT-T5 — trace ids (dnvctl.md §6, CT2/§2.3).
+// Trace ids (dnvctl.md, Trace ids, the trace-id half of CT2).
 //
-// §2.3 says dnvctl builds its ctx as common.WithTraceId(…, id) — `--trace-id`
-// when non-empty, else common.NewTraceId() — and that the grpc.md §4 CLIENT
-// chain is what moves that id into the outgoing `trace_id` metadata, because
-// "dnvctl never touches metadata directly" (the AppendToOutgoingContext
-// shortcut is the integtest drivers' carve-out, §6 of grpc.md, and does not
+// dnvctl.md, Trace ids, says dnvctl builds its ctx as
+// common.WithTraceId(…, id) — `--trace-id` when non-empty, else
+// common.NewTraceId() — and that the CLIENT chain of grpc.md, Wiring, is
+// what moves that id into the outgoing `trace_id` metadata, because "dnvctl
+// never touches metadata itself" (the AppendToOutgoingContext shortcut is
+// the integtest drivers' carve-out, grpc.md, Drivers and fakes, and does not
 // apply here).
 //
 // That makes the ctx a useless place to assert: an id in dnvctl's own ctx
@@ -12,7 +13,7 @@
 // END, out of the server's incoming metadata, because only a value that got
 // there travelled the whole path — run's ctx → attachTraceId → the wire →
 // the server chain. So these tests run a real gRPC server over bufconn behind
-// the §4 server chain and read what arrives.
+// the server chain of grpc.md, Wiring, and read what arrives.
 //
 // The dial seam is replaced rather than bypassed, but with the SAME option
 // block ctl/root.go's dial uses, plus bufconn's contextDialer — the
@@ -46,8 +47,9 @@ type traceServer struct {
 	pb.UnimplementedGatewayServer
 
 	// hang, when non-nil, blocks every call until it is closed or the call's
-	// context dies — how §7.13's d2 manufactures a DEADLINE_EXCEEDED. It is
-	// set before the server starts serving, so the handler goroutine never
+	// context dies — how the transport case of
+	// dnvctl.md, Integration test plan, manufactures a DEADLINE_EXCEEDED. It
+	// is set before the server starts serving, so the handler goroutine never
 	// races the test over it.
 	hang chan struct{}
 
@@ -61,7 +63,7 @@ func (s *traceServer) ListClusters(
 	id := ""
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		// Exactly one value: a second would mean the id was attached twice,
-		// once by the §4 chain and once by a metadata shortcut dnvctl is not
+		// once by the client chain and once by a metadata shortcut dnvctl is not
 		// allowed to take.
 		if values := md.Get(common.TraceIdMetadataKey); len(values) == 1 {
 			id = values[0]
@@ -88,9 +90,10 @@ func (s *traceServer) seen() []string {
 	return append([]string(nil), s.ids...)
 }
 
-// serveTrace starts one gateway on bufconn behind the grpc.md §4 SERVER
-// chain — both chains, as §4 requires on every dnv connection — and returns
-// the server plus a dial seam that reaches it through the §4 CLIENT chain.
+// serveTrace starts one gateway on bufconn behind the SERVER chain of
+// grpc.md, Wiring — both chains, as Wiring requires on every dnv connection —
+// and returns the server plus a dial seam that reaches it through the CLIENT
+// chain of the same section.
 func serveTrace(t *testing.T) (*traceServer, dialFunc) {
 	t.Helper()
 	srv := &traceServer{}
@@ -137,9 +140,9 @@ func serveTraceWith(t *testing.T, srv *traceServer) dialFunc {
 
 // quietLogging installs the logger cmd/dnvctl/main.go installs — level Warn,
 // nothing on stdout — over a buffer the test can inspect, and restores the
-// process default afterwards. Every §4 interceptor record is Info, so the
-// buffer staying empty is log.md's "dnvctl's own gRPC logging is silenced by
-// design" (CT7), asserted rather than assumed.
+// process default afterwards. Every client interceptor record is Info
+// (grpc.md L1), so the buffer staying empty is log.md's "dnvctl's own gRPC
+// logging is silenced by design" (CT7), asserted rather than assumed.
 func quietLogging(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -152,9 +155,9 @@ func quietLogging(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestTraceIdReachesTheServer is CT-T5 proper: the explicit id arrives
-// verbatim, an omitted one arrives as a non-empty mint, and two invocations
-// mint two DIFFERENT ids.
+// TestTraceIdReachesTheServer is the trace-id test proper
+// (dnvctl.md, Trace ids): the explicit id arrives verbatim, an omitted one
+// arrives as a non-empty mint, and two invocations mint two DIFFERENT ids.
 func TestTraceIdReachesTheServer(t *testing.T) {
 	t.Run("explicit", func(t *testing.T) {
 		srv, seam := serveTrace(t)
@@ -173,7 +176,7 @@ func TestTraceIdReachesTheServer(t *testing.T) {
 			t.Errorf("the server saw trace_id %q, want it-smoke-1", seen[0])
 		}
 
-		// The whole §3.1 contract still holds over a real connection: one
+		// The whole CT4 contract still holds over a real connection: one
 		// document on stdout, nothing on stderr, and the interceptors'
 		// Info records silenced (CT7).
 		want := `{"cluster_name":[],"page_token":""}` + "\n"
@@ -184,7 +187,7 @@ func TestTraceIdReachesTheServer(t *testing.T) {
 			t.Errorf("stderr = %q, want empty", res.stderr)
 		}
 		if logs.Len() != 0 {
-			t.Errorf("the §4 client chain logged %q at Warn, want silence",
+			t.Errorf("the client chain logged %q at Warn, want silence",
 				logs.String())
 		}
 	})
@@ -207,8 +210,8 @@ func TestTraceIdReachesTheServer(t *testing.T) {
 		}
 		for i, id := range seen {
 			if id == "" {
-				t.Errorf("run %d arrived with no trace_id: §2.3 mints one "+
-					"per invocation", i)
+				t.Errorf("run %d arrived with no trace_id: dnvctl.md, "+
+					"Trace ids, mints one per invocation", i)
 			}
 			if !mintedTraceId.MatchString(id) {
 				t.Errorf("run %d arrived with trace_id %q, which is not "+

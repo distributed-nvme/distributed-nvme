@@ -10,17 +10,17 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The gateway half of the sp drain (gateway.md §5.4, dnv-worker.md §11.6):
-// DeleteStoragePool LATCHES and returns, and everything that used to be its
-// transaction is now the worker's.
+// The gateway half of the sp drain (gateway.md, Storage pools and GrowSlice;
+// dnv-worker.md, The sp drain): DeleteStoragePool LATCHES and returns, and
+// everything that used to be its transaction is now the worker's.
 //
-// The teardown assertions of §8.4 did not move with it — they are still the
-// only proof that a delete returns every extent it charged — so the tests that
-// own them run the drain here, through sptDrain, exactly as the sp coordinator
-// would. That is the same stand-in the §14 suite makes with `wctl
-// set-provisioned` and `wctl set-created`: a worker-role write driven from a
-// gateway test, so that the gateway's end state can be asserted without a
-// worker process.
+// The teardown assertions of architecture.md, Storage pools, did not move with
+// it — they are still the only proof that a delete returns every extent it
+// charged — so the tests that own them run the drain here, through sptDrain,
+// exactly as the sp coordinator would. That is the same stand-in the suite of
+// dnv-worker.md, Integration test plan, makes with `wctl set-provisioned` and
+// `wctl set-created`: a worker-role write driven from a gateway test, so that
+// the gateway's end state can be asserted without a worker process.
 
 // sptDrainSteps bounds sptDrain so a drain that cannot progress fails the test
 // instead of spinning. The largest shape these fixtures build is 2 slices x 2
@@ -120,8 +120,9 @@ func sptChangedKeys(before map[string][]byte, after map[string][]byte) []string 
 	return changed
 }
 
-// TestDeleteStoragePoolLatchesOnly is §8.4's whole write set: SpConf with
-// `deleting = true` and one SpRev bump, and NOTHING else.
+// TestDeleteStoragePoolLatchesOnly is the whole write set of DeleteStoragePool
+// (architecture.md, Storage pools): SpConf with `deleting = true` and one
+// SpRev bump, and NOTHING else.
 //
 // It is asserted as a key-set difference rather than as a list of things that
 // are still there, because the failure this guards against is a leftover half

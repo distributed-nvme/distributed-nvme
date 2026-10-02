@@ -16,7 +16,8 @@ import (
 
 const testCnAddr = "cn0:9620"
 
-// cnTestConf is the CnConf a SyncupCn is built from (§8.3).
+// cnTestConf is the CnConf a SyncupCn is built from (dnv-worker.md, cn role —
+// `worker/cnrole.go`).
 func cnTestConf() *pb.CnConf {
 	return &pb.CnConf{
 		CnId:      testCnId,
@@ -49,10 +50,11 @@ func (h *revHarness) startCn(addrPort string, revision uint64) *revWorker {
 	return w
 }
 
-// TestCnSyncupRequestGolden pins the SyncupCn request of §8.3: the CnConf's
-// cntlr pointer list verbatim and the cluster's qos_ratio. qos_ratio is not
-// defaultable at all — CreateCluster stores whatever it was given, including
-// nothing (§7) — so an absent one stays absent here rather than becoming an
+// TestCnSyncupRequestGolden pins the SyncupCn request (dnv-worker.md, cn role —
+// `worker/cnrole.go`): the CnConf's cntlr pointer list verbatim and the
+// cluster's qos_ratio. qos_ratio is not defaultable at all — CreateCluster
+// stores whatever it was given, including nothing (architecture.md, Common
+// validation) — so an absent one stays absent here rather than becoming an
 // empty message.
 func TestCnSyncupRequestGolden(t *testing.T) {
 	conf := cnTestConf()
@@ -91,7 +93,8 @@ func TestCnCheckRequestGolden(t *testing.T) {
 	}
 }
 
-// TestCnRoleSyncupReadsCnConf checks §8.3 end to end.
+// TestCnRoleSyncupReadsCnConf checks the cn role (dnv-worker.md, cn role —
+// `worker/cnrole.go`) end to end.
 func TestCnRoleSyncupReadsCnConf(t *testing.T) {
 	h := newRevHarness(t)
 	qos := &pb.QosRatio{Strict: true, BytesPerIops: 8192}
@@ -220,7 +223,7 @@ func TestCnRoleHealthFromInfo(t *testing.T) {
 // TestCnDriverInfoIsRaceFree is TestDnDriverInfoIsRaceFree for a CN: fold runs
 // on the stream's pump goroutine while observe and unreachable run on the
 // loop's, and RW4 step 4 lets them overlap because dropStream does not join
-// the pump (HL1, §9.5).
+// the pump (HL1; architecture.md, Live-state reporting).
 func TestCnDriverInfoIsRaceFree(t *testing.T) {
 	h := newRevHarness(t)
 	h.defaultConf()

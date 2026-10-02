@@ -12,10 +12,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is the §4 etcd watcher: the scan-then-watch loop over
-// {p} cdc that keeps the §3 registry current. It is the shard.go skeleton of
-// dnv-worker.md §7 minus the per-key workers — there is one prefix, one
-// goroutine and one map.
+// This file is cdc.md, The etcd watcher: the scan-then-watch loop over
+// {p} cdc that keeps the view registry (DS1 to DS11) current. It is the
+// shard.go skeleton of dnv-worker.md SW2 to SW4 minus the per-key workers —
+// there is one prefix, one goroutine and one map.
 //
 // It NEVER writes etcd (WV6): no put, no delete, no lease, no lock.
 
@@ -198,8 +198,8 @@ func (w *watcher) applyEvent(ctx context.Context, event etcdutil.Event) {
 
 // parseKey turns one key under the discovery prefix into an entryKey (WV2). A
 // key whose shard code this instance does not own is skipped SILENTLY — that
-// is the expected §12 key-field filter, not an anomaly — while a key that does
-// not parse at all is logged and dropped.
+// is the expected key-field filter of architecture.md, dnv-cdc, not an
+// anomaly — while a key that does not parse at all is logged and dropped.
 func (w *watcher) parseKey(ctx context.Context, key string) (entryKey, bool) {
 	cid, shard, spId, ssId, ok := model.ParseCdcEntryKey(key)
 	if !ok {
@@ -217,7 +217,7 @@ func (w *watcher) parseKey(ctx context.Context, key string) (entryKey, bool) {
 
 // render turns one CdcEntry value into its rendered entry (DS3) and logs the
 // transport configurations it had to drop. The rest of the entry still serves
-// (§0 #2).
+// (DS3).
 func (w *watcher) render(
 	ctx context.Context,
 	key string,

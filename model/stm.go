@@ -22,7 +22,8 @@ var ErrNotFound = errors.New("model: not found")
 // single byte of it.
 //
 // For a clone the pair (SliceIdx, Idx) is the chunk's full address: Idx names
-// the chunk's fixed position inside source slice SliceIdx's bitmap (§9.6).
+// the chunk's fixed position inside source slice SliceIdx's bitmap
+// (architecture.md, Bitmap push protocol).
 // SliceIdx is ALWAYS 0 for a migration chunk, whose bm_idx is an append
 // sequence over the leg's one bitmap and names no slice.
 type BmChunk struct {
@@ -123,7 +124,7 @@ func appendAddr(
 // sideAddrs walks the slices of the SP in Conf.slice_id_list order and returns
 // every distinct Side.addr_port — both groups of a slice, and both the active
 // legs and the spare legs of a group, because a spare's side is provisioned
-// and health-checked exactly like an active one (§8.12).
+// and health-checked exactly like an active one (architecture.md, Spare legs).
 func sideAddrs(conf *pb.SpConf, slices map[uint64]*pb.Slice) []string {
 	var addrs []string
 	seen := make(map[string]struct{})
@@ -262,7 +263,7 @@ func loadSpConf(
 	// The node records come last: their addresses are embedded in the
 	// slices and cntlrs read above. They are part of the same snapshot
 	// because a side's syncup carries the DN's nvme_tr_conf and a cntlr's
-	// the CN's (§10.3), and a reaction weighs their free_ext_cnt.
+	// the CN's (architecture.md, sp role), and a reaction weighs their free_ext_cnt.
 	for _, addrPort := range sideAddrs(conf, state.Slices) {
 		key := DnConfKey(cid, addrPort)
 		dn := &pb.DnConf{}
@@ -336,7 +337,7 @@ func loadBmIdx(
 // accepts the split because the pin is what keeps the two reads consistent —
 // neither key set is append-only: the clone drain deletes chunk keys (CLD8)
 // and FinishMigration/CancelMigration delete a migration's whole run
-// (§8.11), so a newer view could disagree with the snapshot.
+// (architecture.md, Migrations), so a newer view could disagree with the snapshot.
 //
 // A missing SpConf returns ErrNotFound (the SP is being deleted; the delete of
 // its rev key follows). Every other listed key that is absent lands in

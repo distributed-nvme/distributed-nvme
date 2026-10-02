@@ -1,11 +1,12 @@
-// migr.go is dnvctl.md §5.11: the five RPCs of a migration, the side → side
-// move of one leg's data inside an SP (architecture.md §8.11, §11.2). The
-// gateway gives the leg a second `Side` on another DN, a dm-clone hydrates it
-// from the first, and the operator ends the migration by committing (finish)
-// or rolling back (cancel).
+// migr.go is dnvctl.md, `migr` — `ctl/migr.go`: the five RPCs of a
+// migration, the side → side move of one leg's data inside an SP
+// (architecture.md, Migrations; architecture.md, Migration). The gateway
+// gives the leg a second `Side` on another DN, a dm-clone hydrates it from
+// the first, and the operator ends the migration by committing (finish) or
+// rolling back (cancel).
 //
-// Two of the RPCs are deliberately NOT symmetric with their siblings, and §5
-// is exhaustive about it (CT1):
+// Two of the RPCs are deliberately NOT symmetric with their siblings, and
+// dnvctl.md, The command tree, is exhaustive about it (CT1):
 //
 //   - `migr cancel` has no --force. Throwing an unfinished copy away needs no
 //     proof about the copy, so CancelMigrationRequest has no such field —
@@ -31,7 +32,8 @@ import (
 func registerMigr(root *cobra.Command) {
 	root.AddCommand(group(
 		"migr",
-		"migrations — move one leg's side to another disk node (§8.11)",
+		"migrations — move one leg's side to another disk node "+
+			"(architecture.md, Migrations)",
 		migrCreateCmd(),
 		migrFinishCmd(),
 		migrCancelCmd(),
@@ -48,8 +50,9 @@ func registerMigr(root *cobra.Command) {
 // knobs are the same pair CreateClone takes, because the destination side is
 // driven by a dm-clone as well, and both zero means "not given": the gateway
 // stores the message as it arrived, and the sp-worker fills a migration's
-// zeros in with the architecture.md §7 constants as it builds the side
-// request (§5.0, GW11, dnv-worker.md RW15).
+// zeros in with the constants of architecture.md, Common validation, as it
+// builds the side request (dnvctl.md, Conventions; GW11;
+// dnv-worker.md RW15).
 func migrCreateCmd() *cobra.Command {
 	cmd := leaf(
 		"create",
@@ -153,7 +156,7 @@ func migrCancelCmd() *cobra.Command {
 }
 
 // migrGetCmd is GetMigration, a pure STM read: no token, so a typed --rev is
-// a usage error here (§4).
+// a usage error here (CT3).
 func migrGetCmd() *cobra.Command {
 	cmd := leaf(
 		"get",
@@ -178,12 +181,14 @@ func migrGetCmd() *cobra.Command {
 // skip bitmap, stored at `bm_idx = bm_cnt`. The chunks concatenate in bm_idx
 // order into one bitmap over the leg's DATA region, 1 = never written ⇒
 // skippable, and the destination DN agent shifts by the leg's `meta_blocks`
-// before blkdiscarding the fully-skippable dm-clone regions (§8.11, §11.4).
+// before blkdiscarding the fully-skippable dm-clone regions (architecture.md,
+// Migrations; architecture.md, raid0 bitmap math).
 //
 // An empty --bm-hex sends an EMPTY bitmap on purpose rather than being
 // rejected here, so the gateway's own refusal is what the operator sees; a
-// malformed non-empty value is the usage error (exit 2, §5.9's rule for the
-// clone twin). hexBytesOf draws exactly that line.
+// malformed non-empty value is the usage error (exit 2, the rule of
+// dnvctl.md, `clone` — `ctl/clone.go`, for the clone twin). hexBytesOf draws
+// exactly that line.
 func migrAppendBmCmd() *cobra.Command {
 	cmd := leaf(
 		"append-bm",

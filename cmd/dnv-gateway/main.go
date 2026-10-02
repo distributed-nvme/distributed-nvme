@@ -1,15 +1,17 @@
-// Command dnv-gateway is the control-plane API server (gateway.md §7): one
-// cobra root command without subcommands that parses the CM2 flags through
-// viper, builds the process's single etcdutil client (EU1) and hands off to
-// gateway.Run, which serves the 59 RPCs of `service Gateway`.
+// Command dnv-gateway is the control-plane API server
+// (gateway.md, cmd/dnv-gateway): one cobra root command without subcommands
+// that parses the CM2 flags through viper, builds the process's single
+// etcdutil client (EU1) and hands off to gateway.Run, which serves the 59
+// RPCs of `service Gateway`.
 //
 // It is the only dnv binary that needs both flag families — the gRPC-server
-// pair of cmd/dnv-agent and the etcd pair of cmd/dnv-worker (§0 #11).
+// pair of cmd/dnv-agent and the etcd pair of cmd/dnv-worker (CM1).
 //
-// main itself is deliberately thin (layout.md §5): it never touches etcd, it
-// logs only the CM3 signal records, and the "gateway starting" / "gateway
-// serving" / "gateway stopping" records of §8 are emitted by gateway.Run,
-// which is why the endpoints travel to it in gateway.Config.
+// main itself is deliberately thin (layout.md, `cmd/` wiring): it never
+// touches etcd, it logs only the CM3 signal records, and the "gateway
+// starting" / "gateway serving" / "gateway stopping" records of LG2 are
+// emitted by gateway.Run, which is why the endpoints travel to it in
+// gateway.Config.
 package main
 
 import (
@@ -72,7 +74,7 @@ func newRootCmd() *cobra.Command {
 // every STM transaction as a whole with its conflict retries, is bounded by
 // common.DefaultEtcdOpTimeout (EU5) — and no default gRPC port:
 // --grpc-address is required exactly as the agent's is, and 29527 stays a
-// documented example rather than a constant (§0 #10).
+// documented example rather than a constant (CM2).
 func addFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 	flags.String("grpc-network", "tcp", "net.Listen network")
@@ -180,7 +182,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// The startup trace id. Every REQUEST gets its own — the server
 	// interceptor adopts the caller's when there is one and gateway.Run's
-	// server chain mints one otherwise (gateway/traceid.go; §0 #6, grpc.md
+	// server chain mints one otherwise (gateway/traceid.go; GW2, grpc.md
 	// T4) — so this id only ever labels the process's own lifecycle records.
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
 

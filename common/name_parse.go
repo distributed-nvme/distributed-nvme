@@ -13,8 +13,9 @@ import (
 // half-decoded one, because the caller's next move is a removal.
 
 // DmName is a dnv dm device name decoded into its fields. Which object each
-// Ids position names depends on the kind (Appendix B of the teardown-by-sweep
-// design); for every kind of both roles Ids[0] is the sp id.
+// Ids position names depends on the kind (architecture.md, dm device names;
+// cnagent.md, Additions to `common`, for c9 to cb); for every kind of both
+// roles Ids[0] is the sp id.
 type DmName struct {
 	ClusterId uint64
 	NodeId    uint64
@@ -97,9 +98,9 @@ func IsDnvNqn(nqn string) bool {
 // the user and carries nothing, so it parses false; that "false" is the
 // signal the sweep attributes such a subsystem by its namespaces' backing
 // device instead. The gateway refuses a NEW host-facing NQN in the dnv
-// namespace (architecture.md §7), but a subsystem stored before that rule may
-// still carry one: if it decodes, it is attributed as the kind it mimics, and
-// if it does not, it is left alone (IsDnvNqn).
+// namespace (architecture.md, Common validation), but a subsystem stored
+// before that rule may still carry one: if it decodes, it is attributed as
+// the kind it mimics, and if it does not, it is left alone (IsDnvNqn).
 func ParseNqn(nqn string) (NqnParts, bool) {
 	rest, found := strings.CutPrefix(nqn, NqnPrefix+":")
 	if !found {

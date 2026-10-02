@@ -29,13 +29,15 @@ func dnTestConf() *pb.DnConf {
 
 // TestDnSyncupRequestGolden pins the SyncupDn request of RW13: the DnConf's
 // side pointer list verbatim and the STORED dn_bin_conf's extent_size. The
-// agent formats every disk header with that number (§3.1), so the request must
-// carry the cluster's own value and never a constant this binary holds.
+// agent formats every disk header with that number (architecture.md, Disk
+// node), so the request must carry the cluster's own value and never a constant
+// this binary holds.
 func TestDnSyncupRequestGolden(t *testing.T) {
 	conf := dnTestConf()
 	// The stored conf of a cluster created without an explicit extent size:
 	// CreateCluster resolved it to common.DefaultDnExtSize when it wrote the
-	// key (§7), and the request forwards what it finds.
+	// key (architecture.md, Common validation), and the request forwards what
+	// it finds.
 	cc := testClusterConf()
 	got := dnSyncupRequest(testCid, testDnId, 42, conf, cc)
 	want := &pb.SyncupDnRequest{
@@ -138,10 +140,10 @@ func testDnRoleMissingDnConfSkipsSyncup(t *testing.T) {
 	})
 }
 
-// TestDnRoleEndpointChangeRestartsAtNewAddress checks RW13/§10.2: a put whose
-// only change is addr_port re-syncs the node at its NEW endpoint — the loop
-// drops the stream and the connection reference and continues there, and no
-// delete ever reaches the agent.
+// TestDnRoleEndpointChangeRestartsAtNewAddress checks RW13 and architecture.md,
+// dn / cn roles: a put whose only change is addr_port re-syncs the node at its
+// NEW endpoint — the loop drops the stream and the connection reference and
+// continues there, and no delete ever reaches the agent.
 func TestDnRoleEndpointChangeRestartsAtNewAddress(t *testing.T) {
 	synctest.Test(t, testDnRoleEndpointChangeRestartsAtNewAddress)
 }
@@ -248,13 +250,14 @@ func testDnRoleHealthFromInfo(t *testing.T) {
 // TestDnDriverInfoIsRaceFree checks HL1/HL5 under -race. A CheckDn reply is
 // decoded by fold on the STREAM'S PUMP goroutine (dnCheckStream.recv) while
 // the loop goroutine reads the same lastInfo in observe and rewrites its rows
-// in place in unreachable (§9.5). The two overlap on RW4 step 4: recv returns
-// errRoundTimeout while a late reply is already inside the pump's recv, and
-// fail() then drops the stream — which does NOT join the pump — and calls
-// unreachable at once. Unguarded, a just-stored fresh DnInfo is overwritten
-// with RES_STATUS_UNKNOWN or the marking lands on a message being discarded;
-// either way the round's ERROR rows are lost, HL1 never sets err_epoch and the
-// node stays in the §5.6 capacity index as an allocation candidate.
+// in place in unreachable (architecture.md, Live-state reporting). The two
+// overlap on RW4 step 4: recv returns errRoundTimeout while a late reply is
+// already inside the pump's recv, and fail() then drops the stream — which does
+// NOT join the pump — and calls unreachable at once. Unguarded, a just-stored
+// fresh DnInfo is overwritten with RES_STATUS_UNKNOWN or the marking lands on a
+// message being discarded; either way the round's ERROR rows are lost, HL1
+// never sets err_epoch and the node stays in the capacity index
+// (architecture.md, Capacity index keys) as an allocation candidate.
 func TestDnDriverInfoIsRaceFree(t *testing.T) {
 	h := newRevHarness(t)
 	h.defaultConf()
@@ -298,7 +301,7 @@ func TestDnDriverInfoIsRaceFree(t *testing.T) {
 // while the round is still waiting for its reply, re-syncs the node at the NEW
 // endpoint at once, hands the old endpoint's connection reference back, and
 // reaches no health verdict — a moved node was never unreachable (HL1). No
-// delete ever reaches either agent (§10.2, [D10]).
+// delete ever reaches either agent (architecture.md, dn / cn roles; [D10]).
 func TestDnRoleEndpointChangeDuringRoundMovesConnection(t *testing.T) {
 	synctest.Test(t, testDnRoleEndpointChangeDuringRoundMovesConnection)
 }

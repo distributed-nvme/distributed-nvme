@@ -41,8 +41,9 @@ func AnaStateOf(grpId int) string {
 	return ""
 }
 
-// Nvmet wraps the nvmet configfs patterns of Appendix A. Attribute writes go
-// through OsClient.WriteFileDirect, directory and link operations through
+// Nvmet wraps the nvmet configfs patterns (SH18, SH19; cnagent.md CN16).
+// Attribute writes go through OsClient.WriteFileDirect, directory and link
+// operations through
 // RunCommand, probing through ReadFile (SH18); WriteFile is never used on a
 // /sys/kernel/config path.
 type Nvmet struct {
@@ -275,8 +276,8 @@ type SubsysConf struct {
 	CntlidMax    uint32
 	AllowedHosts []string
 	// AllowAnyHost is the CN host-facing case of an empty `allowed_hosts`
-	// list (architecture.md §3.3 step 6): the subsystem accepts every
-	// hostnqn. Every dnv-internal subsystem leaves it false and lists its
+	// list (architecture.md, Primary cntlr, step 6): the subsystem accepts
+	// every hostnqn. Every dnv-internal subsystem leaves it false and lists its
 	// one peer instead.
 	AllowAnyHost bool
 }
@@ -337,9 +338,9 @@ func (n *Nvmet) EnsureSubsystem(
 	// `attr_cntlid_min` (-EINVAL either way). attrs() lists min before max,
 	// which moves a range down, or up while the new min still falls inside
 	// the old range; a range that lies wholly above the live one, as when a
-	// subsystem is adopted from a lower cntlid slot (architecture.md §11.8),
-	// has its max written here first, or its min would be refused on every
-	// converge.
+	// subsystem is adopted from a lower cntlid slot (architecture.md,
+	// cntlid slots), has its max written here first, or its min would be
+	// refused on every converge.
 	if err := n.raiseCntlidMax(ctx, subsysPath, conf); err != nil {
 		return err
 	}
@@ -476,7 +477,8 @@ func (n *Nvmet) ProbeSubsystem(
 
 // NsConf is one namespace of a subsystem. Uuid/Nguid are empty for the
 // DN↔DN migration-source export and set for every side export, where both
-// sides of a migrating leg MUST present the same identity (§3.1).
+// sides of a migrating leg MUST present the same identity (architecture.md,
+// Disk node).
 type NsConf struct {
 	Nqn        string
 	Nsid       int

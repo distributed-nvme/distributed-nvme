@@ -1,23 +1,25 @@
-// The storage-pool group of dnvctl (dnvctl.md §5.4). Five commands are the
-// pool object's own RPCs — create, delete, get, list, set-level — and the
-// other four are the RPCs §0 #4 homed here rather than giving each a group of
-// its own: UpdateStoragePoolCntlidSlotList, FindStoragePoolNames, GrowSlice
-// and InspectSide. Everything else under an SP (cntlr, td, ss, ns, clone,
-// xfer, migr, spare) is its own group file.
+// The storage-pool group of dnvctl (dnvctl.md, `sp` — `ctl/sp.go`). Five
+// commands are the pool object's own RPCs — create, delete, get, list,
+// set-level — and the other four are the RPCs that dnvctl.md, Conventions,
+// homes here rather than giving each a group of its own:
+// UpdateStoragePoolCntlidSlotList, FindStoragePoolNames, GrowSlice and
+// InspectSide. Everything else under an SP (cntlr, td, ss, ns, clone, xfer,
+// migr, spare) is its own group file.
 //
 // Three group-wide notes:
 //
-//   - `sp_name` is never a local flag here. It is §5.0's second field→flag
-//     exception: the global --sp fills it on every request that carries it,
-//     `sp create` included. `sp list` and `sp find-names` have no sp_name
-//     field at all, so for those two the global is simply ignored.
+//   - `sp_name` is never a local flag here. It is one of the field→flag
+//     exceptions of dnvctl.md, Conventions: the global --sp fills it on every
+//     request that carries it, `sp create` included. `sp list` and
+//     `sp find-names` have no sp_name field at all, so for those two the
+//     global is simply ignored.
 //   - Four commands carry a token: delete, set-cntlid-slots, set-level and
 //     grow-slice call spRev. The four reads carry none, and neither does
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where
-//     the operator read the number they pass back as --rev (§4).
+//     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
-//     package and the twelve group files must not collide (§1.2 — the
-//     gatewayctl lesson).
+//     package and the twelve group files must not collide (dnvctl.md,
+//     Files — the gatewayctl lesson).
 
 package ctl
 
@@ -49,12 +51,13 @@ var spLevels = map[string]pb.SpLevel{
 	"DISABLE":      pb.SpLevel_SP_LEVEL_DISABLE,
 }
 
-// spParseLevel turns --level into an SpLevel (§5.4). It accepts a short name,
-// the full enum name (both case-insensitive) and a RAW NUMBER — the last of
-// those is not a convenience but CT8: dnvctl must not second-guess an enum, so
-// `--level 17`, a value the enum does not declare, is forwarded as typed and
-// the gateway's validateSpLevel is the one that refuses it. Only a spelling
-// that is neither a known name nor a number fails to parse (exit 2).
+// spParseLevel turns --level into an SpLevel (dnvctl.md, `sp` — `ctl/sp.go`).
+// It accepts a short name, the full enum name (both case-insensitive) and a
+// RAW NUMBER — the last of those is not a convenience but CT8: dnvctl must
+// not second-guess an enum, so `--level 17`, a value the enum does not
+// declare, is forwarded as typed and the gateway's validateSpLevel is the one
+// that refuses it. Only a spelling that is neither a known name nor a number
+// fails to parse (exit 2).
 func spParseLevel(spec string) (pb.SpLevel, error) {
 	name := strings.ToUpper(strings.TrimSpace(spec))
 	if level, ok := spLevels[strings.TrimPrefix(name, "SP_LEVEL_")]; ok {
@@ -68,10 +71,10 @@ func spParseLevel(spec string) (pb.SpLevel, error) {
 }
 
 // spRedundConf builds the redund_conf arm --redund names. This is the one
-// dnvctl-side default the spec keeps (§0 #11, architecture.md §8.4): `sp
-// create` ALWAYS sends a bdev_conf with a redund_conf, and an unmentioned
-// --redund means raid1 rather than "let the gateway decide". A flag default is
-// not a hidden RPC, so CT8 is untouched.
+// dnvctl-side default the spec keeps (dnvctl.md, Conventions;
+// architecture.md, Storage pools): `sp create` ALWAYS sends a bdev_conf with
+// a redund_conf, and an unmentioned --redund means raid1 rather than "let the
+// gateway decide". A flag default is not a hidden RPC, so CT8 is untouched.
 //
 // chunkBlocks is --bitmap-chunk-blocks; 0 leaves the control plane its own
 // chunk size. It belongs to the raid1 arm only and is quietly unused under
@@ -103,7 +106,8 @@ func spRedundConf(spec string, chunkBlocks uint64) (*pb.RedundConf, error) {
 	}
 }
 
-// registerSp adds the `sp` group and its nine leaves (§5.4).
+// registerSp adds the `sp` group and its nine leaves
+// (dnvctl.md, `sp` — `ctl/sp.go`).
 func registerSp(root *cobra.Command) {
 	root.AddCommand(group("sp", "storage pools",
 		spCreateCmd(),
@@ -130,8 +134,9 @@ func registerSp(root *cobra.Command) {
 // long way.
 //
 // What is never sent: bdev_feature_list. v1 exposes no BdevFeature flags at
-// all (§1.1; gatewayctl's --feature-junk was a driver-only poke at the
-// gateway's "must be empty" rule and is deliberately not ported).
+// all (dnvctl.md, In scope / out of scope; gatewayctl's --feature-junk was a
+// driver-only poke at the gateway's "must be empty" rule and is deliberately
+// not ported).
 //
 // CreateStoragePool carries no token — there is no SP yet to have a revision —
 // so a typed --rev is a usage error here.
@@ -197,8 +202,8 @@ func spCreateCmd() *cobra.Command {
 	// out: `--help` is where an operator learns what a zero buys them, so the
 	// number has to be the gateway's own and has to move with it. init_ext_cnt
 	// has no default at all — CreateStoragePool refuses a zero
-	// (gateway/storagepool.go, architecture.md §8.4) — so its help says so
-	// rather than promising one.
+	// (gateway/storagepool.go; architecture.md, Storage pools) — so its help
+	// says so rather than promising one.
 	flags.Uint32("slice-cnt", 0,
 		fmt.Sprintf("slice_cnt — slices the SP has (0 = the gateway "+
 			"default, %d)", common.DefaultSliceCntPerSp))
@@ -216,7 +221,7 @@ func spCreateCmd() *cobra.Command {
 		"bdev_conf.dm_pool_conf.data_block_size in bytes (0 = not sent)")
 	// The default is interpolated for --slice-cnt's reason; a zero takes the
 	// cluster's stored mark first and the constant only when that is zero
-	// too (architecture.md §8.4 Defaults, §7).
+	// too (architecture.md, Storage pools; architecture.md, Common validation).
 	flags.Uint32("low-water-mark-pct", 0,
 		fmt.Sprintf("bdev_conf.dm_pool_conf.low_water_mark_pct (0 = not "+
 			"sent: the cluster's mark, else %d; above 100 turns the "+
@@ -257,7 +262,7 @@ func spDeleteCmd() *cobra.Command {
 		})
 }
 
-// spGetCmd is GetStoragePool — the SpRev token source (§4). Its reply carries
+// spGetCmd is GetStoragePool — the SpRev token source (CT3). Its reply carries
 // sp_rev.revision, which is the number an operator feeds back as --rev on the
 // 30 SP-scoped mutators.
 func spGetCmd() *cobra.Command {
@@ -397,11 +402,12 @@ func spFindNamesCmd() *cobra.Command {
 	return cmd
 }
 
-// spGrowSliceCmd is GrowSlice (§5.4, architecture.md §8.5). A data grow wants
-// --ext > 0 and a meta grow wants --meta with no --ext, because the meta
-// ladder picks its own step — but the two flags do NOT constrain each other
-// here: `--meta --ext 2` is built and sent, and the gateway is the one that
-// refuses it (CT8). --dn-black / --dn-white steer the placement scan.
+// spGrowSliceCmd is GrowSlice (dnvctl.md, `sp` — `ctl/sp.go`;
+// architecture.md, GrowSlice). A data grow wants --ext > 0 and a meta grow
+// wants --meta with no --ext, because the meta ladder picks its own step —
+// but the two flags do NOT constrain each other here: `--meta --ext 2` is
+// built and sent, and the gateway is the one that refuses it (CT8).
+// --dn-black / --dn-white steer the placement scan.
 func spGrowSliceCmd() *cobra.Command {
 	cmd := leaf("grow-slice", "grow one slice (GrowSlice)",
 		func() (job, error) {
@@ -440,8 +446,8 @@ func spGrowSliceCmd() *cobra.Command {
 
 // spInspectSideCmd is InspectSide: the gateway asks the DN agent that hosts
 // the side for its live SideInfo, so this reads past etcd. --id is a SIDE id
-// here, spelled the same as `cntlr … --id` on purpose (§5.0) — the RPC, not
-// the flag name, decides what the id means.
+// here, spelled the same as `cntlr … --id` on purpose (dnvctl.md,
+// Conventions) — the RPC, not the flag name, decides what the id means.
 func spInspectSideCmd() *cobra.Command {
 	cmd := leaf("inspect-side", "read a side from its DN agent (InspectSide)",
 		func() (job, error) {

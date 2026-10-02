@@ -10,7 +10,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// The md half of "did not answer is not absent" (plan §1.2, §3.3.1)
+// The md half of "did not answer is not absent" (CN12; architecture.md,
+// Teardown by sweep)
 // ---------------------------------------------------------------------------
 
 // mdLookup is one Detail the way a lone group takes it: a fresh walk of
@@ -740,7 +741,8 @@ func TestMdStateLine(t *testing.T) {
 // TestMdHasSuperblockKilledIsAnError pins the most destructive reading of a
 // killed probe in the tree. `mdadm --examine` opens and reads the member
 // device, so it blocks on a dead leg until failfast, and its answer selects
-// between the two §11.1.1 assembly cases: create, or assemble. "No
+// between the two assembly cases of architecture.md, "Make sure all groups are
+// available": create, or assemble. "No
 // superblock" on every available member means case 1, and case 1 is `mdadm
 // --create --assume-clean` — over whatever those members already hold. So a
 // kill read as "no superblock" does not leak anything; it destroys the
@@ -757,7 +759,8 @@ func TestMdHasSuperblockKilledIsAnError(t *testing.T) {
 	md := NewMd(node.osClient())
 
 	// The tool ran and answered: this device carries no md metadata. That is
-	// the §11.1.1 case 1 answer, not a failure — a freshly zeroed side.
+	// the case 1 answer of architecture.md, "Make sure all groups are
+	// available", not a failure — a freshly zeroed side.
 	has, err := md.HasSuperblock(ctx, member)
 	if err != nil {
 		t.Fatalf("a device without a superblock errored: %v", err)
@@ -964,9 +967,10 @@ func TestMdListArraysFromSysfsOnly(t *testing.T) {
 // TestMdNamedKernelNode pins that an array whose kernel node is named, not
 // numbered, is found by every reader of /sys/block (CN12, amended
 // 2026-09-26). With mdadm.conf `CREATE names=yes`, mdadm creates
-// /dev/md/<name> on the kernel node md_<name> (architecture.md §4.3 sizes
-// CnMdDevName for it), and /sys/block lists md_<name>. The md rows are read
-// from the walk: a walk listing md[0-9]+ alone would read the group's running
+// /dev/md/<name> on the kernel node md_<name> (architecture.md, md names,
+// sizes CnMdDevName for it), and /sys/block lists md_<name>. The md rows are
+// read from the walk: a walk listing md[0-9]+ alone would read the group's
+// running
 // array as absent on every Check round and send every converge into an
 // assembly of an array already active — ERROR on every md row of the cn —
 // and the sweep would never stop such an array either (the stop itself is

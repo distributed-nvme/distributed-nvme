@@ -18,7 +18,8 @@ func (s *DnAgentServer) syncupSide(
 	key string,
 	req *pb.SyncupSideRequest,
 ) *pb.SyncupSideReply {
-	// DN8 gating: SyncupDn introduces the pointer first (§9.2).
+	// DN8 gating: SyncupDn introduces the pointer first (architecture.md,
+	// `service DiskNodeAgent`).
 	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 	if dn == nil || !pointerKnown(dn.req.Load(), req.GetSidePointer()) {
 		return &pb.SyncupSideReply{
@@ -86,8 +87,9 @@ func (s *DnAgentServer) convergeSide(
 	if !plan.wantDm {
 		// SP_LEVEL_DISABLE: only the side device, its allocation record and —
 		// because zeroing is bottom-layer provisioning, like the trim it
-		// replaced — its zeroing goroutine remain (DN11, §9.4). The sweep
-		// above has already removed everything else, dm-clone included: at
+		// replaced — its zeroing goroutine remain (DN11; architecture.md,
+		// Side provisioning protocol). The sweep above has already removed
+		// everything else, dm-clone included: at
 		// this level nothing is wanted but the side device, so the per-CN
 		// linears went first and stopped holding the clone open.
 		return info, sweep
@@ -98,20 +100,22 @@ func (s *DnAgentServer) convergeSide(
 		// provisioning has nothing above it by design, and a side whose bits
 		// are incomplete must not export a zeroed impostor of the data.
 		//
-		// The §11.2 fence is the one thing the gate may not skip: a window
+		// The DN12 fence is the one thing the gate may not skip: a window
 		// opened by an earlier pass is a suspension already in place, and
 		// [D12] bounds it at the window plus one converge whatever the side
 		// device is doing. That holds for every window this process opened,
 		// adopted or ended, as far as phase 2's reload succeeds (a reload
-		// fails closed, dnagent.md §2.8); DN12 rule 1's known limit is a
-		// suspension it knows nothing of, which settleFence cannot settle.
+		// fails closed, dnagent.md,
+		// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`); DN12 rule 1's
+		// known limit is a suspension it knows nothing of, which settleFence
+		// cannot settle.
 		s.settleFence(ctx, st, plan)
 		s.reportAboveSideDeferred(st, plan, info)
 		return info, sweep
 	}
 
-	// §11.2 src step 1: hand IO over before the dm-linears are reloaded onto
-	// their dm-errors.
+	// architecture.md, Migration, src step 1: hand IO over before the
+	// dm-linears are reloaded onto their dm-errors.
 	if plan.migrSrc != nil && plan.wantExport {
 		s.moveCnAnaGroups(ctx, plan, common.AnaGrpIdInaccessible)
 	}
@@ -125,7 +129,8 @@ func (s *DnAgentServer) convergeSide(
 	case plan.migrSrc != nil:
 		s.ensureMigrSrc(ctx, st, plan, info)
 	case plan.migrSrcDeferred:
-		// Serving is untouched; only the reporting differs (§11.2).
+		// Serving is untouched; only the reporting differs (architecture.md,
+		// Migration).
 		s.reportMigrSrcDeferred(st, plan, info)
 	}
 	if plan.wantExport {
@@ -135,11 +140,12 @@ func (s *DnAgentServer) convergeSide(
 }
 
 // ---------------------------------------------------------------------------
-// Side device — allocation + the §9.4 provisioning protocol (DN9)
+// Side device — allocation + architecture.md, Side provisioning protocol (DN9)
 // ---------------------------------------------------------------------------
 
 // sideDevState is the outcome of one side-device converge — the three things
-// the §9.4 matrix has to distinguish, which a bool cannot.
+// the converge matrix (architecture.md, Side provisioning protocol) has to
+// distinguish, which a bool cannot.
 type sideDevState int
 
 const (
@@ -150,15 +156,15 @@ const (
 	sideDevFailed sideDevState = iota
 	// sideDevProvisioning is healthy but not exportable yet: the side is being
 	// zeroed, or it is zeroed and the CP has not flipped its flag. No
-	// err_epoch (§9.5).
+	// err_epoch (architecture.md, Live-state reporting).
 	sideDevProvisioning
 	// sideDevReady is zeroed *and* released by the CP: the per-CN stacks may
 	// converge.
 	sideDevReady
 )
 
-// ensureSideDev implements the §9.4 side provisioning protocol (DN9): allocate
-// the side's extents in the on-disk volume table, build the aggregate
+// ensureSideDev implements architecture.md, Side provisioning protocol (DN9):
+// allocate the side's extents in the on-disk volume table, build the aggregate
 // dm-linear that concatenates them, and keep the background zeroing goroutine
 // running until every logical extent is zeroed.
 //
@@ -168,7 +174,8 @@ const (
 // in the record because zeroed is a property of the side's *allocation*, not
 // of the disk extent.
 //
-// The six rows of the §9.4 converge matrix (request provisioned × local state):
+// The six rows of the converge matrix of architecture.md,
+// Side provisioning protocol (request provisioned × local state):
 //
 //	false / absent   allocate (bits 0), build the linear, start the goroutine
 //	false / partial  ensure the linear, keep the goroutine
@@ -261,7 +268,7 @@ func (s *DnAgentServer) ensureSideDev(
 
 	// Rows 3 and 4: fully zeroed. Cancel-and-wait rather than a bare cancel —
 	// a straggler batch's child would otherwise still hold the side device
-	// open (§9.4).
+	// open (DN9).
 	s.stopZeroing(st)
 	status, details := s.probeSideDm(ctx, plan, rec)
 	info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
@@ -372,7 +379,8 @@ func (s *DnAgentServer) ensureCnDm(
 	info *pb.SideInfo,
 	cloneLive bool,
 ) {
-	// The §11.2 src cutover fences the per-CN linears in two phases: hold
+	// The src cutover (architecture.md, Migration, src step 2) fences the
+	// per-CN linears in two phases: hold
 	// them suspended for at least common.SuspendSeconds, then reload them
 	// onto their dm-errors ([D12]). fencing is true only during phase 1.
 	fencing := plan.migrSrc != nil && s.beginFence(st)
@@ -394,8 +402,9 @@ func (s *DnAgentServer) ensureCnDm(
 			continue
 		}
 		if fencing {
-			// §11.2 src step 2, phase 1: hold the device suspended where it
-			// is. Its namespace is already AnaGrpIdInaccessible, so this
+			// architecture.md, Migration, src step 2, phase 1: hold the device
+			// suspended where it is. Its namespace is already
+			// AnaGrpIdInaccessible, so this
 			// only absorbs stragglers — and absorbing them is the point of
 			// the window.
 			err = s.ensureDmLinearSuspended(ctx, linName, plan.sectors,
@@ -421,7 +430,7 @@ func (s *DnAgentServer) ensureCnDm(
 // linear that a primary flip's failed reload left suspended on its old
 // table still needs that swap, and resuming it here releases the old
 // primary's queued IO onto the side's data ahead of any retry of the
-// reload: a known limit (a reload fails closed, dnagent.md §2.8).
+// reload: a known limit (a reload fails closed; dnagent.md, Known limits).
 //
 // The set of devices comes from the ENUMERATION, not from a remembered cn
 // list: a linear built for a CN that has since left standby_id_list is
@@ -463,7 +472,8 @@ func fenceDetails(err error) string {
 }
 
 // fenceSuspendedDetails is what a per-CN dm-linear reports while it is inside
-// the §11.2 grace window — an expected, time-bounded state, not a fault.
+// the cutover grace window (architecture.md, Migration, src step 2) — an
+// expected, time-bounded state, not a fault.
 const fenceSuspendedDetails = "suspended (migration cutover grace window)"
 
 // ensureDmLinearSuspended is phase 1 of the fence: the device must exist and
@@ -524,7 +534,8 @@ func (s *DnAgentServer) ensureDmError(
 	}
 	// Suspended on the table it wants — an interrupted reload, or a failed
 	// one whose old table is wanted again, since a reload fails closed
-	// (dnagent.md §2.8) — it is resumed ([D12]).
+	// (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`) — it is
+	// resumed ([D12]).
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}
@@ -570,8 +581,9 @@ func (s *DnAgentServer) ensureDmLinear(
 	}
 	// A device an older (pre-[D12]) build left suspended, one a crash
 	// caught mid-reload, or one a failed reload left suspended on the table
-	// that is wanted again (a reload fails closed, dnagent.md §2.8) must
-	// converge back to resumed.
+	// that is wanted again (a reload fails closed, dnagent.md,
+	// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`) must converge back to
+	// resumed.
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}
@@ -657,7 +669,7 @@ func (s *DnAgentServer) moveCnAnaGroups(
 }
 
 // ---------------------------------------------------------------------------
-// Provisioning-deferred reporting (§9.4)
+// Provisioning-deferred reporting (architecture.md, Side provisioning protocol)
 // ---------------------------------------------------------------------------
 
 // reportAboveSideDeferred fills every row above the side device with
@@ -665,7 +677,8 @@ func (s *DnAgentServer) moveCnAnaGroups(
 // at: those resources are deliberately not created while the side underneath
 // them is not exportable.
 //
-// PROVISIONING never feeds err_epoch (§9.5), which is the point: one cause is
+// PROVISIONING never feeds err_epoch (architecture.md, Live-state reporting),
+// which is the point: one cause is
 // reported once — on side_dev_info, as ERROR when it really is one — instead
 // of multiplying a single fault across every per-CN stack (DN10).
 //
@@ -701,7 +714,7 @@ func (s *DnAgentServer) reportAboveSideDeferred(
 	if plan.wantMigr {
 		// The destination provisions first, under this same protocol: linear
 		// and zeroing only, no metadata slot, no connect, no dm-clone
-		// (§11.2).
+		// (architecture.md, Migration).
 		dstInfo := &pb.SideInfo_MigrDstInfo{}
 		info.MigrDstInfo = dstInfo
 		nqn := plan.srcNqnOfDst()
@@ -716,8 +729,9 @@ func (s *DnAgentServer) reportAboveSideDeferred(
 // once its destination has provisioned.
 //
 // `migr_src_conf.dst_provisioned = false` makes the source behave **exactly**
-// as if migr_src_conf were absent (§11.2): it keeps serving, it does not
-// fence, and it exports nothing to the destination. Without that equivalence
+// as if migr_src_conf were absent (architecture.md, Migration): it keeps
+// serving, it does not fence, and it exports nothing to the destination.
+// Without that equivalence
 // the source would fence the primary's path the moment the migration was
 // created, and the leg would have no serving path for the whole zeroing
 // window. The only visible difference is right here — the would-be rows report
@@ -795,7 +809,7 @@ func (s *DnAgentServer) removeDm(ctx context.Context, name string) bool {
 		return true
 	}
 	// `dmsetup remove` does not succeed on a suspended device. A per-CN
-	// linear the §11.2 fence suspended never gets here that way — the
+	// linear the DN12 fence suspended never gets here that way — the
 	// sweep's pre-step has resumed it (a request that ends the source role)
 	// or its P0 has put it on its dm-error — so what the agent itself leaves
 	// suspended here is a device whose reload was cut off between its

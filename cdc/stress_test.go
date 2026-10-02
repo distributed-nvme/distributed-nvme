@@ -12,10 +12,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The liveness and concurrency properties of §5 that the deterministic §8
-// tests cannot express: "an AEN is never lost" (§0 #7), "a host that has
-// stopped reading cannot stall the watcher" (DS6 -> NP11), and "every
-// goroutine and every host state dies with its connection" (NP13, DS7).
+// The liveness and concurrency properties of
+// cdc.md, The NVMe/TCP discovery service, that the deterministic unit tests
+// cannot express: "an AEN is never lost" (NP11), "a host that has stopped
+// reading cannot stall the watcher" (DS6 -> NP11), and "every goroutine and
+// every host state dies with its connection" (NP13, DS7).
 //
 // These are the one place in the package that uses REAL time on purpose. They
 // are not measuring a timer — they are running the real goroutines against
@@ -165,7 +166,7 @@ func TestStressWatcherPlusServerShutdown(t *testing.T) {
 	}
 }
 
-// §0 #7 "never lost": with exactly one AER armed at all times, every impact
+// NP11 "never lost": with exactly one AER armed at all times, every impact
 // must produce an AEN.
 func TestAenIsNeverLostUnderLoad(t *testing.T) {
 	ts := startServer(t)

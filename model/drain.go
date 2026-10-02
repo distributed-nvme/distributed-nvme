@@ -10,7 +10,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The sp drain of dnv-worker.md §11.6: the three worker-side ops
+// The sp drain (dnv-worker.md, The sp drain): the three worker-side ops
 // that tear a LATCHED storage pool down in bounded steps.
 //
 // DeleteStoragePool no longer tears anything down. It commits `deleting = true`
@@ -96,7 +96,8 @@ func loadSpConfForDrain(
 //
 // Effects: every `cntlr` key deleted; SpConf put with an empty cntlr_id_list;
 // per distinct CN the full ledger release — CnConf put with the pointer gone and
-// the SP footprint back, its capacity key maintained (§5.6) and one CnRev bump;
+// the SP footprint back, its capacity key maintained (architecture.md,
+// Capacity index keys) and one CnRev bump;
 // finally one SpRev bump, whose watch event schedules the next drain step.
 //
 // It deliberately skips DeleteCntlr's disabled-first and non-primary
@@ -141,7 +142,8 @@ func DrainSpCntlrs(
 			return nil
 		}
 		// Every cntlr reserved the SP's WHOLE footprint, so every one of them
-		// returns it (§6.5). It is computed from the slices as they are NOW,
+		// returns it (architecture.md, Per-operation allocation). It is computed
+		// from the slices as they are NOW,
 		// which is what makes a grown SP release exactly what it charged — and
 		// is the second reason D1 runs before any group is popped (SPD9).
 		footprint, err := spFootprint(s, opDrainSpCntlrs, cid, conf)
@@ -180,8 +182,10 @@ func DrainSpCntlrs(
 
 // releaseSpCns is chargeSpCns's inverse: every cntlr of the SP gives the SP's
 // whole footprint back to its CN, with one CnConf write, one capacity-key
-// maintenance and one CnRev bump per DISTINCT CN (§5.5, §5.6). A CN hosting two
-// cntlrs of one SP is not supposed to exist (§6.4), but if one did it would have
+// maintenance and one CnRev bump per DISTINCT CN (architecture.md,
+// Revision keys and the sync fan-out; Capacity index keys). A CN hosting two
+// cntlrs of one SP is not supposed to exist (architecture.md, Finding CN
+// candidates), but if one did it would have
 // reserved the footprint twice, so the credit is accumulated per CN and applied
 // once — which is also what keeps MaintainCnCapacity's delete target exact.
 //
@@ -275,7 +279,8 @@ func DrainSpSlice(
 	done := false
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		removed, done = 0, false
-		// The cluster's stored ladder, used as stored (§7): every DnConf this
+		// The cluster's stored ladder, used as stored (architecture.md, Common
+		// validation): every DnConf this
 		// batch writes goes through MaintainDnCapacity, whose key embeds the bin
 		// index the ladder yields, so a conf CreateCluster could not have
 		// written would leave the live capacity key behind and write a new one
@@ -339,8 +344,9 @@ func DrainSpSlice(
 }
 
 // popGrps removes up to budget groups from the TAIL of grps, releasing every
-// side of every active leg and every spare leg of each one through rel (§8.12: a
-// spare occupies a DN exactly like an active leg). It returns what is left of
+// side of every active leg and every spare leg of each one through rel
+// (architecture.md, Spare legs: a spare occupies a DN exactly like an active
+// leg). It returns what is left of
 // the list, the budget that is left, and how many groups it popped.
 func popGrps(
 	rel *dnReleaser,
@@ -367,7 +373,7 @@ func popGrps(
 }
 
 // legsOf is every leg of ONE group — active legs first, spares after. Both carry
-// sides that occupy a DN (§8.12), so both are released.
+// sides that occupy a DN (architecture.md, Spare legs), so both are released.
 func legsOf(grp *pb.Group) []*pb.Leg {
 	legs := make([]*pb.Leg, 0,
 		len(grp.GetLegList())+len(grp.GetSpareLegList()))
@@ -378,7 +384,8 @@ func legsOf(grp *pb.Group) []*pb.Leg {
 // dnReleaser is the release-only twin of the gateway's dnLedger: it accumulates
 // one STM's DN bookkeeping so that a DN carrying several sides of the batch is
 // read once, written once, has its capacity key maintained once and its revision
-// bumped exactly once (§5.5, §5.6).
+// bumped exactly once (architecture.md, Revision keys and the sync fan-out;
+// Capacity index keys).
 //
 // Every record it hands out is the one THIS transaction read, which is what
 // makes MaintainDnCapacity's delete target exact: a capacity key embeds
@@ -394,7 +401,8 @@ type dnReleaser struct {
 }
 
 // newDnReleaser opens a releaser over the cluster's STORED conf. The caller
-// gates that conf (§7) before the first read; see DrainSpSlice.
+// gates that conf (architecture.md, Common validation) before the first read;
+// see DrainSpSlice.
 func newDnReleaser(
 	s etcdutil.STM,
 	cid uint64,
@@ -437,8 +445,10 @@ func (r *dnReleaser) release(
 	newDn.FreeExtCnt += extCnt
 }
 
-// flush writes every touched DN once, maintains its capacity key per §5.6 and
-// bumps its revision once (§5.5). Nodes are flushed in first-touch order, so one
+// flush writes every touched DN once, maintains its capacity key per
+// architecture.md, Capacity index keys, and bumps its revision once
+// (architecture.md, Revision keys and the sync fan-out). Nodes are flushed in
+// first-touch order, so one
 // transaction's writes are deterministic.
 func (r *dnReleaser) flush(op string) error {
 	for _, addrPort := range r.order {
@@ -487,9 +497,9 @@ func removeSidePtr(
 //
 // It is the one drain STM that does NOT bump SpRev — it DELETES the key, and
 // that delete is already the shard worker's stop signal for the sp coordinator
-// (dnv-worker.md SW3; the prose carrier is architecture.md §8.4). The drain
-// therefore terminates itself in the same transaction that finishes the job.
-// After the commit the name is reusable.
+// (dnv-worker.md SW3; the prose carrier is architecture.md, Storage pools).
+// The drain therefore terminates itself in the same transaction that
+// finishes the job. After the commit the name is reusable.
 func FinishSpDelete(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -526,7 +536,8 @@ func FinishSpDelete(
 		s.Del(SpNameKey(cid, spId))
 		s.Del(revKey)
 		// GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
-		// never come back, so agents may assume it never does (§5.4).
+		// never come back, so agents may assume it never does (architecture.md,
+		// Globals: id allocation + shard buckets).
 		global.ShardBucket = ReleaseShard(global.GetShardBucket(), shard)
 		s.Put(globalKey, global)
 		return nil

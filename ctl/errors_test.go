@@ -1,9 +1,9 @@
-// CT-T4 — the error surface (dnvctl.md §6, CT5/§3.2).
+// The error surface (dnvctl.md CT5).
 //
-// §3.2 is a three-row table and every row is a promise an operator's script
-// depends on:
+// CT5 is three exit codes, and every row below is a promise an operator's
+// script depends on:
 //
-//	0  the §3.1 document on stdout, stderr empty
+//	0  the CT4 document on stdout, stderr empty
 //	1  RPC or connection failure: stdout EMPTY, one line on stderr
 //	2  usage error: stdout empty, and NO RPC WAS ISSUED
 //
@@ -27,12 +27,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// TestAbortedStaleRevision is §3.2's worked example and §7.12's step c2: the
-// failure an operator meets when their --rev is stale. The whole line is
-// asserted, not a substring, because each part of it is load-bearing — the
-// `dnvctl: ` prefix marks the line as the CLI's own, the UPPER_SNAKE code is
-// what a script greps for, the message is the gateway's verbatim, and the
-// trace id is the jq key for the gateway and agent logs.
+// TestAbortedStaleRevision is CT5's worked example and the errors case's
+// stale-revision refusal (dnvctl.md, Integration test plan): the failure an
+// operator meets when their --rev is stale. The whole line is asserted, not
+// a substring, because each part of it is load-bearing — the `dnvctl: `
+// prefix marks the line as the CLI's own, the UPPER_SNAKE code is what a
+// script greps for, the message is the gateway's verbatim, and the trace id
+// is the jq key for the gateway and agent logs.
 func TestAbortedStaleRevision(t *testing.T) {
 	client := &recordingClient{
 		want: "DeleteThinDevice",
@@ -58,8 +59,9 @@ func TestAbortedStaleRevision(t *testing.T) {
 	}
 }
 
-// TestRpcFailureLines walks the codes an operator actually meets (§7.12's
-// four injections plus the two transport ones) through the same line.
+// TestRpcFailureLines walks the codes an operator actually meets (the errors
+// case's four injections plus the two transport ones,
+// dnvctl.md, Integration test plan) through the same line.
 func TestRpcFailureLines(t *testing.T) {
 	cases := []struct {
 		code    codes.Code
@@ -105,9 +107,10 @@ func TestRpcFailureLines(t *testing.T) {
 	}
 }
 
-// TestDialFailureIsExitOne is §7.13's d1 in miniature: a connection that
-// cannot be made is an RPC failure (exit 1), not a usage error, and dnvctl
-// adds no translation layer over the code gRPC reports.
+// TestDialFailureIsExitOne is the transport case's refused dial (dnvctl.md,
+// Integration test plan) in miniature: a connection that cannot be made is
+// an RPC failure (exit 1), not a usage error, and dnvctl adds no translation
+// layer over the code gRPC reports.
 func TestDialFailureIsExitOne(t *testing.T) {
 	t.Run("status error", func(t *testing.T) {
 		res := runCLIWithDial(t, failingDial(
@@ -151,9 +154,10 @@ func failingDial(err error) dialFunc {
 	}
 }
 
-// TestUsageErrorsIssueNoRpc is §3.2's third row and §7.12's c5-c7. Each case
-// asserts the call count, not just the exit code: the count is the only thing
-// that distinguishes "rejected before dialing" from "sent, then rejected".
+// TestUsageErrorsIssueNoRpc is CT5's third row and the errors case's usage
+// errors (CT8, CT3). Each case asserts the call count, not just the exit
+// code: the count is the only thing that distinguishes "rejected before
+// dialing" from "sent, then rejected".
 func TestUsageErrorsIssueNoRpc(t *testing.T) {
 	cases := []struct {
 		name string
@@ -162,14 +166,14 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		{"unknown flag",
 			[]string{"td", "create", "--no-such-flag"}},
 		// An unknown VERB under a known group has its own test below: it is
-		// the same §3.2 row, held by the RunE root.go's group() installs.
+		// the same CT5 row, held by the RunE root.go's group() installs.
 		{"unknown group",
 			[]string{"nosuchgroup", "list"}},
 		{"positional argument",
 			[]string{"td", "list", "stray"}},
-		// The §5.0 booleans: `--enabled false` leaves `false` as a
-		// positional argument, which cobra.NoArgs rejects. That is why the
-		// spec insists on the `=` spelling.
+		// The booleans of dnvctl.md, Conventions: `--enabled false` leaves
+		// `false` as a positional argument, which cobra.NoArgs rejects. That is
+		// why the spec insists on the `=` spelling.
 		{"bool without =",
 			[]string{"cntlr", "set-enabled", "--id", "3", "--enabled",
 				"false"}},
@@ -177,11 +181,11 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 			[]string{"td", "create", "--name", "t0", "--rev", "zz"}},
 		{"negative --rev",
 			[]string{"td", "create", "--name", "t0", "--rev", "-1"}},
-		// Presence is the typed flag (§4), so an empty value is a typed
+		// Presence is the typed flag (CT3), so an empty value is a typed
 		// --rev that does not parse — never a silently absent token.
 		{"empty --rev",
 			[]string{"td", "create", "--name", "t0", "--rev="}},
-		// §4: a --rev on a command whose request has no token field, here
+		// CT3: a --rev on a command whose request has no token field, here
 		// typed ahead of the group, as a global may be.
 		{"--rev with no token field",
 			[]string{"--rev", "7", "cluster", "delete", "--name", "c1"}},
@@ -238,7 +242,7 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 	}
 }
 
-// TestUnknownVerbIsAUsageError pins §3.2's "unknown command" row on the shape
+// TestUnknownVerbIsAUsageError pins CT5's "unknown command" row on the shape
 // an operator actually types it in: a typo'd verb under a real group.
 //
 // What the row rests on is the RunE ctl/root.go's group() gives every group.
@@ -249,8 +253,8 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 // ExecuteC treats flag.ErrHelp as success — "always show help if requested,
 // even if SilenceErrors is in effect", command.go:1152. That shape would
 // answer `dnvctl td lst` with a page of help text on STDOUT and exit 0,
-// breaking §3.2's "unknown command ⇒ exit 2, stdout empty, no RPC issued"
-// (§3.1's stdout promise is scoped to an RPC path, and this argv issues no
+// breaking CT5's "unknown command ⇒ exit 2, stdout empty, no RPC issued"
+// (CT4's stdout promise is scoped to an RPC path, and this argv issues no
 // RPC): a script that mistypes a verb would be told it succeeded. Being
 // Runnable puts ValidateArgs back in the path, where `Args: cobra.NoArgs`
 // produces the `unknown command` error this test pins.
@@ -268,7 +272,7 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 // other message rather than a help screen. That one no spec row demands, so
 // it is described here rather than asserted; the typo'd verb is not arguable.
 // `--help` is unaffected either way: cobra handles the help flag first, so
-// the stock help of §0 #3 still prints to stdout and exits 0.
+// the stock help (dnvctl.md, Conventions) still prints to stdout and exits 0.
 func TestUnknownVerbIsAUsageError(t *testing.T) {
 	for _, argv := range [][]string{
 		{"td", "no-such-verb"},
@@ -354,10 +358,11 @@ func TestCodeNameFallback(t *testing.T) {
 // lowercase hex.
 var mintedTraceId = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
-// TestFailureLineCarriesMintedTraceId closes the §2.3 loop for the failure
-// path: with no --trace-id the line still hands the operator an id, and it is
-// the minted one rather than an empty parenthesis. CT-T5 proves the same id
-// is what the server saw.
+// TestFailureLineCarriesMintedTraceId closes the trace-id loop (dnvctl.md,
+// Trace ids) for the failure path: with no --trace-id the line still hands
+// the operator an id, and it is the minted one rather than an empty
+// parenthesis. The trace-id tests (CT2) prove the same id is what the server
+// saw.
 func TestFailureLineCarriesMintedTraceId(t *testing.T) {
 	line := regexp.MustCompile(
 		`^dnvctl: NOT_FOUND: nope \(trace_id ([^)]*)\)\n$`)
@@ -370,7 +375,7 @@ func TestFailureLineCarriesMintedTraceId(t *testing.T) {
 		res := runCLI(t, client, globalArgv("sp", "get")...)
 		match := line.FindStringSubmatch(res.stderr)
 		if match == nil {
-			t.Fatalf("stderr = %q, want the §3.2 line", res.stderr)
+			t.Fatalf("stderr = %q, want the CT5 line", res.stderr)
 		}
 		if !mintedTraceId.MatchString(match[1]) {
 			t.Errorf("trace id %q is not a minted id", match[1])

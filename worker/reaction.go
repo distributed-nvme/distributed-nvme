@@ -1,5 +1,5 @@
-// The automatic reactions of dnv-worker.md §11 (AR1-AR9), run by the sp
-// coordinator of §8.4 as one PASS per SP per cntlr_interval (AR1).
+// The automatic reactions of dnv-worker.md (AR1-AR9), run by the sp coordinator
+// (RW14) as one PASS per SP per cntlr_interval (AR1).
 //
 // A pass is stateless by construction, but for two records: it starts from a
 // fresh model.LoadSp snapshot plus the in-memory CntlrInfo the PRIMARY cntlr's
@@ -26,22 +26,22 @@
 //     invariant AR2 is protecting is that AT MOST ONE ACTION IS APPLIED PER
 //     SP PER PASS, and "not applicable, keep looking" is not an action, so
 //     the pass CONTINUES past: AR5's no failover candidate (AR7's
-//     sole-primary variant is defined as "AR5 found none", so §0 item 16
-//     would otherwise be unreachable); AR5's shared_state and same_error,
-//     each a primary the pass declines to move, which can last until an
-//     operator acts; AR6's grow_pending, grp_list_full, meta_ladder_cap and
-//     no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and all
-//     four can hold indefinitely — a grow deferred on the CN, a §8.5
-//     ceiling — so ending the pass would disable AR7 and AR8 for as long as
-//     they do); AR7's shared_state and same_error, each a primary it
-//     declines to replace, which can last as long as AR5's and move the scan
-//     to the next cntlr (an unhealthy standby is still replaced, and AR8
-//     still runs); and AR8's leg_has_two_sides, spare_list_full,
-//     spare_unprovisioned and step 2's "wait for the pending spare", which
-//     move the scan to the next candidate leg (a migration lasts hours, only
-//     an operator frees a spare slot, §0 item 17, a spare whose DN failed
-//     while it zeroed stays unprovisioned until that DN finishes zeroing it
-//     or an operator deletes it, and a spare that cannot be connected stays
+//     sole-primary variant is defined as "AR5 found none", so AR7's sole-cntlr
+//     repair would otherwise be unreachable); AR5's shared_state and
+//     same_error, each a primary the pass declines to move, which can last
+//     until an operator acts; AR6's grow_pending, grp_list_full,
+//     meta_ladder_cap and no_data_group (AR6 scopes pending to "no grow OF THAT
+//     KIND", and all four can hold indefinitely — a grow deferred on the CN, a
+//     ceiling of architecture.md, GrowSlice — so ending the pass would disable
+//     AR7 and AR8 for as long as they do); AR7's shared_state and same_error,
+//     each a primary it declines to replace, which can last as long as AR5's
+//     and move the scan to the next cntlr (an unhealthy standby is still
+//     replaced, and AR8 still runs); and AR8's leg_has_two_sides,
+//     spare_list_full, spare_unprovisioned and step 2's "wait for the pending
+//     spare", which move the scan to the next candidate leg (a migration lasts
+//     hours, only an operator frees a spare slot (AR8 step 4), a spare whose DN
+//     failed while it zeroed stays unprovisioned until that DN finishes zeroing
+//     it or an operator deletes it, and a spare that cannot be connected stays
 //     pending for up to leg_unhealthy — one that is never reported at all,
 //     for good).
 //     Everything else ends the pass as AR2 says: every
@@ -66,15 +66,17 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The §12 records of a pass. The strings are normative — the §14 suite greps
+// The records of a pass (dnv-worker.md, Log records). The strings are normative
+// — the worker suite (dnv-worker.md, Integration test plan) greps
 // them — so they are constants and never formatted.
 const (
 	msgReactionApplied = "reaction applied"
 	msgReactionSkipped = "reaction skipped"
 )
 
-// The "kind" attribute of the two §12 records (AR2). Every reaction the
-// worker can run is one of these six; nothing else is ever logged as a kind.
+// The "kind" attribute of the two records (AR2; dnv-worker.md, Log records).
+// Every reaction the worker can run is one of these six; nothing else is ever
+// logged as a kind.
 const (
 	reactionFailover     = "failover"
 	reactionGrowData     = "grow_data"
@@ -116,13 +118,13 @@ const (
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
 	// flight and is left alone".
 	reasonTwoSides = "leg_has_two_sides"
-	// reasonMetaLadderCap is §8.5's 16 GiB dm-thin metadata ceiling, reached
-	// before model.GrowSlice is even called because the allocator has to
-	// search for the ladder's size first.
+	// reasonMetaLadderCap is the 16 GiB dm-thin metadata ceiling of
+	// architecture.md, GrowSlice, reached before model.GrowSlice is even called
+	// because the allocator has to search for the ladder's size first.
 	reasonMetaLadderCap = "meta_ladder_cap"
-	// reasonGrpListFull is §8.5's group ceiling: the slice's list of that
-	// kind already holds common.MaxGrpCntPerSlice groups, which
-	// model.GrowSlice refuses. It is model's string, for the reason
+	// reasonGrpListFull is the group ceiling of architecture.md, GrowSlice: the
+	// slice's list of that kind already holds common.MaxGrpCntPerSlice groups,
+	// which model.GrowSlice refuses. It is model's string, for the reason
 	// reasonGrowPending is.
 	reasonGrpListFull = model.ReasonGrpListFull
 	// reasonNoDataGroup is a slice with no data group to size a data grow by.
@@ -133,8 +135,9 @@ const (
 	reasonOpFailed = "op_failed"
 )
 
-// Non-normative records of the pass. The §12 strings above are the ones the
-// §14 suite greps; these exist so an operator can see why an SP is not being
+// Non-normative records of the pass. The strings above (dnv-worker.md, Log
+// records) are the ones the worker suite (dnv-worker.md, Integration test plan)
+// greps; these exist so an operator can see why an SP is not being
 // reacted on at all.
 const (
 	// msgReactionSuppressed is AR3, logged on the transition only: an SP at
@@ -157,15 +160,15 @@ const thinMetaBlockSize = uint64(4096)
 // ---------------------------------------------------------------------------
 
 // reactionOps is everything a pass allocates and mutates through model. It is
-// an interface for the same reason spOps is: the §13 tests drive a real
+// an interface for the same reason spOps is: the unit tests drive a real
 // coordinator over a fixture SpState without etcd. Production is
 // modelReactionOps, which does nothing but call model.
 type reactionOps interface {
 	// findDnCandidates is MD5 for a side allocation (AR6 step, AR8 step 3).
-	// excludeLocs is §6.5's tier-1 exclusion: the failure domains AR8 keeps
-	// the spare out of, empty for the AR6 grow. requiredCnt is how many DNs
-	// the caller must actually place — the §6.5 tier-2 trigger, and never the
-	// oversampled candCnt.
+	// excludeLocs is the tier-1 exclusion of architecture.md, Per-operation
+	// allocation: the failure domains AR8 keeps the spare out of, empty for the
+	// AR6 grow. requiredCnt is how many DNs the caller must actually place —
+	// that section's tier-2 trigger, and never the oversampled candCnt.
 	findDnCandidates(
 		ctx context.Context,
 		cid uint64,
@@ -177,8 +180,9 @@ type reactionOps interface {
 		excludeLocs []string,
 	) ([]model.Cand, error)
 	// findCnCandidates is MD5 for a cntlr allocation (AR7). excludeLocs is
-	// §6.5's tier-1 exclusion: the failure domains of the SP's other cntlrs,
-	// which model drops again when tier 1 finds no CN.
+	// the tier-1 exclusion of architecture.md, Per-operation allocation: the
+	// failure domains of the SP's other cntlrs, which model drops again when
+	// tier 1 finds no CN.
 	findCnCandidates(
 		ctx context.Context,
 		cid uint64,
@@ -325,8 +329,8 @@ func (o *modelReactionOps) findDnCandidates(
 	excludeLocs []string,
 ) ([]model.Cand, error) {
 	// The tier bool is dropped: a tier-2 placement is visible in the stored
-	// topology and §12's LG table gains no record for it. An empty excludeLocs
-	// — the AR6 grow — makes this the plain scan.
+	// topology and the records of dnv-worker.md, Log records, gain none for it.
+	// An empty excludeLocs — the AR6 grow — makes this the plain scan.
 	cands, _, err := model.FindDnCandidatesAntiAffine(
 		ctx, o.cli, cid, cc, candExt, candCnt, requiredCnt,
 		black, nil, excludeLocs,
@@ -378,7 +382,7 @@ func (o *modelReactionOps) growSlice(
 	legs []model.Cand,
 ) (uint64, error) {
 	// expectRev 0: the worker holds no client token and converges on what
-	// etcd holds (gateway.md §2.2 #3). The gateway passes a real one only
+	// etcd holds (gateway.md GW6, MD6). The gateway passes a real one only
 	// when its caller sent one — GW6 is presence-based — and 0 otherwise.
 	return model.GrowSlice(
 		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, isMeta,
@@ -504,11 +508,11 @@ func (o *modelReactionOps) finishCloneDelete(
 // The reactor: the little state a stateless pass still keeps
 // ---------------------------------------------------------------------------
 
-// reactor is the sp coordinator's §11 half: the model surface, plus the two
-// memos that exist only to keep the log honest and the two records AR5 and AR7
-// decide by. No other decision is ever taken from a memo — AR6's pending rule
-// and AR8's spare rules are reconstructed from etcd and the status line on
-// every pass (§0 item 14).
+// reactor is the sp coordinator's reaction half (AR1-AR9): the model surface,
+// plus the two memos that exist only to keep the log honest and the two records
+// AR5 and AR7 decide by. No other decision is ever taken from a memo — AR6's
+// pending rule and AR8's spare rules are reconstructed from etcd and the status
+// line on every pass (AR6).
 type reactor struct {
 	ops reactionOps
 	// badLine is the last unparsable pool status line per slice_id, so a
@@ -530,7 +534,7 @@ func newReactor(ops reactionOps) *reactor {
 	return &reactor{ops: ops, badLine: make(map[uint64]string)}
 }
 
-// reactor returns the coordinator's §11 state, building the production one
+// reactor returns the coordinator's reaction state, building the production one
 // from its deps on first use. A coordinator assembled by hand — the plan-only
 // test fixture — therefore still runs a well-formed pass.
 func (w *spWorker) reactor() *reactor {
@@ -589,9 +593,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		return
 	}
 	// HL3: the health memos are a cache of the records this load read. A
-	// health write bumps no revision (§5.5), so no fan-out ever reloads for
-	// one; this pass, every cntlr_interval, is the load that sees an epoch
-	// another observer wrote or cleared, whatever the gates below decide.
+	// health write bumps no revision (architecture.md, Revision keys and the
+	// sync fan-out), so no fan-out ever reloads for one; this pass, every
+	// cntlr_interval, is the load that sees an epoch another observer wrote or
+	// cleared, whatever the gates below decide.
 	// The children's write counts were read before the load (healthSeqs).
 	w.reseedHealth(state, seqs)
 	// CLD7: the clone drain runs ALONGSIDE the reactions rather than instead of
@@ -614,10 +619,11 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// children already log `cluster conf missing` for the idle period.
 		return
 	}
-	// §7: the CLUSTER's stored conf is checked before the pass is built, so an
-	// unusable ladder produces no candidate scan and no model op. The drain
-	// needs it too — every D2 batch maintains a DN capacity key, whose bin
-	// index comes from that ladder — so this gate sits ahead of both branches.
+	// architecture.md, Common validation: the CLUSTER's stored conf is checked
+	// before the pass is built, so an unusable ladder produces no candidate
+	// scan and no model op. The drain needs it too — every D2 batch maintains a
+	// DN capacity key, whose bin index comes from that ladder — so this gate
+	// sits ahead of both branches.
 	if err := model.ValidateClusterConf(cc); err != nil {
 		w.refuseReactionConf(ctx, err)
 		return
@@ -723,9 +729,10 @@ func failoverEligible(cntlr *pb.Cntlr) bool {
 // The plan test keeps a held promotion out of the pass. The snapshot the pass
 // loads names the new primary as soon as the failover commits, while that
 // cntlr's child drives its standby plan until RW14's release, and a standby's
-// leg row is transport liveness and ana_state, not the §3.6 block probe AR8
-// step 1 reads as a spare's readiness. The test is on the plan the child
-// drives, not on its info: from the hand-over until the reply to the
+// leg row is transport liveness and ana_state, not the block probe
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block) AR8 step 1 reads as a spare's readiness. The test is on the plan the
+// child drives, not on its info: from the hand-over until the reply to the
 // promotion, the info is still the standby's last report — the promotion's
 // own round trip, as it was before the hold.
 //
@@ -741,7 +748,7 @@ func (w *spWorker) primaryInfo(cntlrId uint64) *pb.CntlrInfo {
 
 // reactionSuppressed is AR3's surviving half: no reaction runs at
 // sp_level >= SP_LEVEL_NO_THINPOOL, where an operator is in charge
-// (architecture.md §11.7). The record is emitted on the transition only.
+// (architecture.md, SpLevel). The record is emitted on the transition only.
 //
 // The `deleting` half of AR3 has moved (SPD6): a latched SP no longer merely
 // suppresses its reactions, it runs the drain of drain.go instead, and
@@ -785,15 +792,15 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		return false
 	}
 	// AR5 has two triggers. A `disabled` primary is one in its own right
-	// (architecture.md §8.6: "disabling the current primary triggers the
-	// §10.4 primary re-election") and fires immediately — disabling is
-	// explicit operator intent, and the disabled primary has normally stopped
-	// serving by then (its disable request is handed over one RW14 sides-first
-	// hold after the bump; a pass inside that hold fails it over before it
-	// has) — so no threshold is waited out. Only an enabled primary has
-	// to have been unhealthy for a threshold: primary_unhealthy, or, while it
-	// is settling, the longer of that and cntlr_unhealthy (below). The
-	// candidate rule is unchanged (failoverEligible): a disabled cntlr is
+	// (architecture.md, Cntlrs: "disabling the current primary triggers the
+	// primary re-election of Automatic reactions") and fires immediately —
+	// disabling is explicit operator intent, and the disabled primary has
+	// normally stopped serving by then (its disable request is handed over one
+	// RW14 sides-first hold after the bump; a pass inside that hold fails it
+	// over before it has) — so no threshold is waited out. Only an enabled
+	// primary has to have been unhealthy for a threshold: primary_unhealthy,
+	// or, while it is settling, the longer of that and cntlr_unhealthy (below).
+	// The candidate rule is unchanged (failoverEligible): a disabled cntlr is
 	// never elected.
 	threshold := p.th.GetPrimaryUnhealthy()
 	if p.primary.GetSettling() && p.th.GetCntlrUnhealthy() > threshold {
@@ -884,7 +891,7 @@ func newErrorMemo(now uint64, info *pb.CntlrInfo) errorMemo {
 // presumed to have followed the reaction the memo records — the err_epoch
 // was set less than cntlr_unhealthy after it, and every ERROR row of the
 // report is one the memo holds, the same map and key, and the same td for a
-// thin row. Rows are compared, not causes (dnv-worker.md Appendix B). A
+// thin row. Rows are compared, not causes (dnv-worker.md, Known limits). A
 // report with no ERROR row — a cntlr read unreachable has its rows UNKNOWN —
 // is presumed nothing, and so is every report against a memo taken over such
 // a report, or over none: a reaction applied on a report with no ERROR row
@@ -1057,20 +1064,22 @@ func (w *spWorker) parsePoolStatus(
 // A breach the worker cannot turn into a grow is NOT an action, and does not
 // end the pass. AR6 scopes its pending rule to "no grow OF THAT KIND starts",
 // so a pending data grow leaves the same slice's metadata — and every other
-// slice — free to grow; and a grow that is pending on the CN ([D15], §10.4)
-// or capped by a §8.5 ceiling can stay that way indefinitely, so ending
+// slice — free to grow; and a grow that is pending on the CN ([D15];
+// architecture.md, Automatic reactions) or capped by a ceiling of
+// architecture.md, GrowSlice, can stay that way indefinitely, so ending
 // the pass on it would disable AR7 and AR8 for the whole SP for exactly as
 // long. Only an APPLIED grow, or one of the two skips AR2 makes pass-ending
 // (ErrPrecondition, no candidate), ends the pass.
 func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
-	// The SP's stored percentage, used as stored (§7): a zero is invalid and
-	// the pass gate already refused it, so there is no default arm here.
+	// The SP's stored percentage, used as stored (architecture.md, Common
+	// validation): a zero is invalid and the pass gate already refused it, so
+	// there is no default arm here.
 	lwm := uint64(
 		p.state.Conf.GetBdevConf().GetDmPoolConf().GetLowWaterMarkPct(),
 	)
 	if lwm > 100 {
-		// §7: values above 100 switch the automation off; operators grow
-		// manually.
+		// architecture.md, Common validation: values above 100 switch the
+		// automation off; operators grow manually.
 		return false
 	}
 	if p.info == nil {
@@ -1110,10 +1119,10 @@ func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 // runGrow runs one AR6 grow of one kind on one slice. It reports whether the
 // pass ends here, which distinguishes the two shapes of "no grow ran":
 //
-//   - the grow is not APPLICABLE — pending (AR6), the §8.5 group ceiling or
-//     ladder cap, no data group to size a data grow by: the record is
-//     emitted and false is returned, so the walk goes on to the other kind,
-//     the next slice and finally to AR7 and AR8;
+//   - the grow is not APPLICABLE — pending (AR6), the group ceiling or ladder
+//     cap of architecture.md, GrowSlice, no data group to size a data grow by:
+//     the record is emitted and false is returned, so the walk goes on to the
+//     other kind, the next slice and finally to AR7 and AR8;
 //   - the grow WAS applicable and did not complete — no candidate, an
 //     ErrPrecondition, a failed scan or op: AR2 ends the pass, so that a pass
 //     that has already touched etcd (or may have) applies nothing else.
@@ -1155,8 +1164,9 @@ func (w *spWorker) runGrow(
 	// AR6: the black list starts empty — a new group may perfectly well land
 	// on a DN that already carries another group of this SP — and grows as
 	// the picks are drawn, so the legs of the ONE new group land on distinct
-	// DNs. The location exclusion is empty for the same reason (§6.5 leaves
-	// the grow on the plain scan).
+	// DNs. The location exclusion is empty for the same reason
+	// (architecture.md, Per-operation allocation, leaves the grow on the plain
+	// scan).
 	cands, err := w.reactor().ops.findDnCandidates(
 		ctx, w.cid, p.cc, extCnt, legs*batch, legs, nil, nil,
 	)
@@ -1209,13 +1219,14 @@ func growPending(
 	return model.GrowPending(slice, isMeta, poolTotal(usage, isMeta), blockSize)
 }
 
-// growExtCnt is the ext_cnt of the group a grow would append (§8.5). The
-// worker computes it because the allocator must search for exactly that size
-// BEFORE model.GrowSlice recomputes it inside its own STM: a data grow uses
-// the slice's first data group's ext_cnt — the original allocation unit — and
-// a meta grow the ladder value, which doubles the slice's meta total. A list
-// already at the §8.5 group ceiling has no group to size at all, and is
-// checked first, as model.GrowSlice checks it ahead of its own sizing.
+// growExtCnt is the ext_cnt of the group a grow would append (architecture.md,
+// GrowSlice). The worker computes it because the allocator must search for
+// exactly that size BEFORE model.GrowSlice recomputes it inside its own STM: a
+// data grow uses the slice's first data group's ext_cnt — the original
+// allocation unit — and a meta grow the ladder value, which doubles the slice's
+// meta total. A list already at the group ceiling of architecture.md,
+// GrowSlice, has no group to size at all, and is checked first, as
+// model.GrowSlice checks it ahead of its own sizing.
 //
 // The second return value is a `reaction skipped` reason, empty on success.
 func growExtCnt(
@@ -1258,16 +1269,18 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 		return false
 	}
 	ids := []slog.Attr{slog.Uint64("old_cntlr_id", oldId)}
-	// The footprint is what one cntlr's CN reserves for the whole SP (§8.6),
-	// and it is what model.ReplaceCntlr re-computes inside its STM: the scan
-	// has to ask for the same number or the pick would fail there.
+	// The footprint is what one cntlr's CN reserves for the whole SP
+	// (architecture.md, Cntlrs), and it is what model.ReplaceCntlr re-computes
+	// inside its STM: the scan has to ask for the same number or the pick would
+	// fail there.
 	footprint := spFootprint(p.state)
 	batch := int(p.cc.GetAllocConf().GetCnBatchSize())
 	// AR7: the old CN is black-listed even when the node itself is healthy —
 	// its cntlr is what failed. The SP's other cntlrs' CNs are excluded by
-	// the §6.4 rule instead, which is spCnAddrs, and their locations by
-	// §6.5's tier 1. Both come from this pass's snapshot, so the same
-	// spCnAddrs goes to model.ReplaceCntlr, which refuses the pick as
+	// the rule of architecture.md, Finding CN candidates, instead, which is
+	// spCnAddrs, and their locations by the tier 1 of architecture.md,
+	// Per-operation allocation. Both come from this pass's snapshot, so the
+	// same spCnAddrs goes to model.ReplaceCntlr, which refuses the pick as
 	// `candidate changed` when the SP has gained a cntlr the snapshot did not
 	// hold; the next pass plans from a snapshot that holds it.
 	spCnAddrs := otherCntlrAddrs(p, oldId)
@@ -1313,7 +1326,7 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 // replaceTarget is AR7's trigger: the cntlr with the smallest cntlr_id that
 // has been unhealthy for cntlr_unhealthy, is not disabled (AR3), and is
 // either not the primary or is the primary of an SP with no failover
-// candidate — the sole-cntlr SP of §0 item 16 — unless one of AR7's two
+// candidate — the sole-cntlr SP of AR7 — unless one of AR7's two
 // refusals holds that primary (below): it is recorded and passed over, and
 // the scan goes on.
 func (w *spWorker) replaceTarget(
@@ -1346,7 +1359,7 @@ func (w *spWorker) replaceTarget(
 		// ERROR row belongs to the stack of a created td whose thin id the
 		// pool no longer holds is not replaced. The replacement would read
 		// the same rows from the same pool. The report names the id only
-		// while it is a converge's (dnv-worker.md Appendix B).
+		// while it is a converge's (dnv-worker.md, Known limits).
 		//
 		// The second is AR5's second, for a replacement
 		// (errorFollowedReplacement): a Check round's report of the same loss
@@ -1403,8 +1416,8 @@ func (r *reactor) errorFollowedReplacement(
 }
 
 // otherCntlrAddrs are the endpoints of every cntlr of the SP except the one
-// being replaced: §6.4 forbids two cntlrs of one SP on one CN, and MD5 takes
-// that list as spCnAddrs.
+// being replaced: architecture.md, Finding CN candidates, forbids two cntlrs of
+// one SP on one CN, and MD5 takes that list as spCnAddrs.
 func otherCntlrAddrs(p *spPass, oldId uint64) []string {
 	addrs := make([]string, 0, len(p.state.Cntlrs))
 	for _, cntlrId := range sortedIds(p.state.Conf.GetCntlrIdList()) {
@@ -1420,14 +1433,15 @@ func otherCntlrAddrs(p *spPass, oldId uint64) []string {
 	return addrs
 }
 
-// otherCntlrLocations is AR7's tier-1 exclusion (§6.5): the failure domain of
-// every CN otherCntlrAddrs names, resolved through the pass's OWN snapshot of
-// the node records — MD3 reads one CnConf per distinct Cntlr.addr_port in the
-// same transaction as the cntlrs — so it costs no further read. A CN missing
-// from that snapshot contributes no location; it is excluded by address
-// anyway. The old cntlr adds no location of its own, on purpose: it is the
-// one leaving, and the replacement is kept off the domains the SP keeps — so
-// the old cntlr's domain is excluded only when a survivor shares it.
+// otherCntlrLocations is AR7's tier-1 exclusion (architecture.md, Per-operation
+// allocation): the failure domain of every CN otherCntlrAddrs names, resolved
+// through the pass's OWN snapshot of the node records — MD3 reads one CnConf
+// per distinct Cntlr.addr_port in the same transaction as the cntlrs — so it
+// costs no further read. A CN missing from that snapshot contributes no
+// location; it is excluded by address anyway. The old cntlr adds no location of
+// its own, on purpose: it is the one leaving, and the replacement is kept off
+// the domains the SP keeps — so the old cntlr's domain is excluded only when a
+// survivor shares it.
 //
 // With the default `location = addr_port` this excludes exactly the CNs
 // spCnAddrs already does, so AR7 behaves as it always has.
@@ -1443,7 +1457,7 @@ func otherCntlrLocations(p *spPass, oldId uint64) []string {
 
 // spFootprint is the Σ ext_cnt over ALL groups of ALL slices of the SP, meta
 // and data alike — the worker-side twin of model's, which recomputes it inside
-// the STM (§8.6).
+// the STM (architecture.md, Cntlrs).
 func spFootprint(state *model.SpState) uint64 {
 	total := uint64(0)
 	for _, sliceId := range state.Conf.GetSliceIdList() {
@@ -1481,12 +1495,12 @@ type repairTarget struct {
 // user migration in flight (hours), a spare that cannot be connected stays
 // pending until its leg has been unhealthy for leg_unhealthy (and one the
 // primary never reports stays pending for good), only DeleteSpareLeg by
-// an operator frees a spare slot (§0 item 17), and a spare whose DN failed
+// an operator frees a spare slot (AR8 step 4), and a spare whose DN failed
 // while it zeroed stays unprovisioned until that DN finishes zeroing it or an
-// operator deletes it. Ending the pass on any of them
-// would leave every OTHER group of the SP degraded on a single md-raid1 member
-// for exactly as long, so a further failure there is data loss. Each is still
-// recorded per leg for visibility (§14.11 case D step 9 greps
+// operator deletes it. Ending the pass on any of them would leave every OTHER
+// group of the SP degraded on a single md-raid1 member for exactly as long, so
+// a further failure there is data loss. Each is still recorded per leg for
+// visibility (AR8 step 4; the worker suite's reaction case greps
 // `reason=spare_list_full`) and the scan moves on.
 func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	for _, target := range repairCandidates(p) {
@@ -1498,8 +1512,9 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 		if !isMdRaid1(p.state.Conf) {
 			// AR8/AR9: a RedundNone group has no redundancy to re-home, so
 			// the worker only ever logs it. An operator moves the data.
-			// Redundancy is an SP-wide property (§8.5), so no later
-			// candidate can be any different and the pass ends here.
+			// Redundancy is an SP-wide property (architecture.md, GrowSlice),
+			// so no later candidate can be any different and the pass ends
+			// here.
 			w.reactionSkipped(
 				ctx, reactionSpareCreate, reasonRedundNone, ids...,
 			)
@@ -1534,7 +1549,7 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			continue
 		}
 		if len(target.grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
-			// §0 item 17: the worker never deletes a parked leg; only
+			// AR8 step 4: the worker never deletes a parked leg; only
 			// DeleteSpareLeg by an operator frees a slot. That is an
 			// operator event on THIS group, so the scan goes on to the next
 			// candidate rather than stranding the rest of the SP behind it.
@@ -1569,7 +1584,7 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 // every leg_list leg that needs repair, in ascending leg_id order — AR8's
 // "several unhealthy legs ⇒ the smallest leg_id first". Spare legs are never
 // scanned — a parked leg keeps its err_epoch and is never repaired again
-// (§0 item 17).
+// (AR8 steps 1 and 4).
 //
 // The whole ordered list is returned rather than only its head because AR8's
 // per-leg preconditions are applied by tryLegRepair as it walks it: the
@@ -1624,10 +1639,11 @@ func legNeedsRepair(p *spPass, leg *pb.Leg) bool {
 }
 
 // spareReady is AR8 step 1's readiness test on one spare: its single side is
-// provisioned (§9.4) and the PRIMARY's latest report has its leg
-// RES_STATUS_OK — connected and probed (§8.12). A leg whose prober on the
-// primary has not completed a round reads RES_STATUS_PENDING (cnagent.md
-// CN11), so a fresh spare is not ready before its first probe.
+// provisioned (architecture.md, Side provisioning protocol) and the PRIMARY's
+// latest report has its leg RES_STATUS_OK — connected and probed
+// (architecture.md, Spare legs). A leg whose prober on the primary has not
+// completed a round reads RES_STATUS_PENDING (cnagent.md CN11), so a fresh
+// spare is not ready before its first probe.
 //
 // Leg.err_epoch is deliberately NOT part of it: a leg the primary reports OK
 // has had its err_epoch cleared by HL2 already, so a parked leg that recovers
@@ -1726,11 +1742,12 @@ func (w *spWorker) switchSpare(
 }
 
 // createSpare runs AR8 step 3: a spare on a FRESH DN, black-listing the DNs of
-// every leg and every spare of the group and, as §6.5's tier 1, excluding
-// their LOCATIONS too, so the replacement does not share the failure domain it
-// exists to replace. Tier 2 — model's rescan without the location exclusion
-// when tier 1 yields fewer than the ONE DN this step places — is what still
-// repairs a group in a cluster with no second domain to offer.
+// every leg and every spare of the group and, as the tier 1 of architecture.md,
+// Per-operation allocation, excluding their LOCATIONS too, so the replacement
+// does not share the failure domain it exists to replace. Tier 2 — model's
+// rescan without the location exclusion when tier 1 yields fewer than the ONE
+// DN this step places — is what still repairs a group in a cluster with no
+// second domain to offer.
 func (w *spWorker) createSpare(
 	ctx context.Context,
 	p *spPass,
@@ -1768,13 +1785,13 @@ func (w *spWorker) createSpare(
 	return true
 }
 
-// grpLocations is AR8's tier-1 exclusion (§6.5): the failure domain of every
-// DN grpAddrs names, resolved through the pass's OWN snapshot of the node
-// records — MD3 reads one DnConf per side addr_port of the SP, spare legs
-// included, in the same transaction as the slices — so the locations come out
-// of the state the pass already decided on and cost no further read. A DN
-// missing from that snapshot contributes no location; it is black-listed by
-// address anyway.
+// grpLocations is AR8's tier-1 exclusion (architecture.md, Per-operation
+// allocation): the failure domain of every DN grpAddrs names, resolved through
+// the pass's OWN snapshot of the node records — MD3 reads one DnConf per side
+// addr_port of the SP, spare legs included, in the same transaction as the
+// slices — so the locations come out of the state the pass already decided on
+// and cost no further read. A DN missing from that snapshot contributes no
+// location; it is black-listed by address anyway.
 //
 // With the default `location = addr_port` this excludes exactly the
 // black-listed DNs' own domains, so AR8 behaves as it always has.
@@ -1853,7 +1870,8 @@ func singleSide(leg *pb.Leg) *pb.Side {
 }
 
 // sortedLegs returns a leg list in ascending leg_id order, leaving the stored
-// list — whose ORDER is the md member order (§8.12) — untouched.
+// list — whose ORDER is the md member order (architecture.md, Spare legs) —
+// untouched.
 func sortedLegs(legList []*pb.Leg) []*pb.Leg {
 	sorted := append([]*pb.Leg(nil), legList...)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -1915,13 +1933,14 @@ func pickDistinct(cands []model.Cand, n int) []model.Cand {
 }
 
 // ---------------------------------------------------------------------------
-// The §12 records (AR2)
+// The records of a pass (AR2; dnv-worker.md, Log records)
 // ---------------------------------------------------------------------------
 
-// reactionApplied logs the §12 `reaction applied` record. The revision is the
-// SpRev the op's STM bumped, read back the way the flips read it (RW18): the
-// ops report their new ids, not the revision, and a concurrent bump would
-// make this report a slightly newer one — a log detail, not a decision.
+// reactionApplied logs the `reaction applied` record (dnv-worker.md, Log
+// records). The revision is the SpRev the op's STM bumped, read back the way
+// the flips read it (RW18): the ops report their new ids, not the revision, and
+// a concurrent bump would make this report a slightly newer one — a log detail,
+// not a decision.
 func (w *spWorker) reactionApplied(
 	ctx context.Context,
 	kind string,
@@ -1939,8 +1958,8 @@ func (w *spWorker) reactionApplied(
 	slog.InfoContext(ctx, msgReactionApplied, attrs...)
 }
 
-// reactionSkipped logs the §12 `reaction skipped` record: the reaction was
-// applicable but did not run.
+// reactionSkipped logs the `reaction skipped` record (dnv-worker.md, Log
+// records): the reaction was applicable but did not run.
 func (w *spWorker) reactionSkipped(
 	ctx context.Context,
 	kind string,

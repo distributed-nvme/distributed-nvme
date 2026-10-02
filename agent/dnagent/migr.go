@@ -77,7 +77,8 @@ func (s *DnAgentServer) ensureMigrSrc(
 // Migration destination (DN13)
 // ---------------------------------------------------------------------------
 
-// ensureMigrDst runs the §11.2 destination sequence and reports whether the
+// ensureMigrDst runs the dst side sequence of architecture.md, Migration, and
+// reports whether the
 // dm-clone is live — which is what decides the per-CN dm-linear targets and
 // ANA groups for this pass.
 func (s *DnAgentServer) ensureMigrDst(
@@ -109,7 +110,8 @@ func (s *DnAgentServer) ensureMigrDst(
 	}
 
 	// (3) one connect attempt per pass, never retried inside the RPC:
-	// "retrying until success" (§11.2) is the DN8 background registry. The
+	// "retrying until success" (architecture.md, Migration, dst step 3) is the
+	// DN8 background registry. The
 	// only other wait here comes after a connect that succeeded: for the
 	// source's namespace node, which the kernel adds from a scan the connect
 	// only queued, pausing DnMigrDstNsWait at most (awaitMigrSrcNs).
@@ -160,7 +162,8 @@ func (s *DnAgentServer) ensureMigrDst(
 	}
 	if created {
 		// Re-apply every chunk of the applied set whenever the dm-clone is
-		// (re)created (§9.6 step 4).
+		// (re)created (architecture.md, Bitmap push protocol,
+		// dnv-agent side step 4).
 		s.applyChunks(ctx, st, plan)
 	}
 	// A hydration knob that would not apply is worth reporting, but it must
@@ -179,7 +182,8 @@ func (s *DnAgentServer) ensureMigrDst(
 			resKeyMigrDstClone, cloneName, hydrationErr.Error())
 		return true
 	}
-	// §9.5: the raw dmsetup status line carries hydration progress.
+	// architecture.md, Live-state reporting: the raw dmsetup status line
+	// carries hydration progress.
 	dstInfo.DmCloneInfo = t.Ok(resKeyMigrDstClone, cloneName, raw)
 	return true
 }
@@ -295,17 +299,20 @@ func (s *DnAgentServer) ensureDmClone(
 	conf := plan.migrDst.GetDmCloneConf()
 	// no_discard_passdown is mandatory on every dnv dm-clone (DN13 step
 	// 4): `blkdiscard` on a dm-clone is this design's metadata-only "mark
-	// this region hydrated" primitive (§9.6, §11.4, §11.5), and dm-clone
+	// this region hydrated" primitive (architecture.md, Bitmap push protocol,
+	// raid0 bitmap math and Clone crash recovery), and dm-clone
 	// turns passdown on by default whenever the destination's discard
 	// granularity is no larger than a region — which a dm-linear over a raw
-	// disk satisfies. The hazard is *after* the §11.2 cutover, not before it:
+	// disk satisfies. The hazard is *after* the cutover (architecture.md,
+	// Migration, dst step 5), not before it:
 	// host IO then flows through this dm-clone, a host write hydrates region
 	// r, and a skip-bitmap chunk whose bit for r was read from the CN thin
 	// metadata before that write can still arrive later (chunk pushes are
 	// legal at any time, and a restart re-applies every stored chunk). The
 	// agent then `blkdiscard`s r; with passdown that discard would reach the
 	// side device and destroy the only copy of an acknowledged write. Without
-	// it the same discard is the metadata no-op that §9.6 and [D7] already
+	// it the same discard is the metadata no-op that
+	// architecture.md, Bitmap push protocol, and [D7] already
 	// assume. Cost: only discards issued during an active migration stop
 	// reaching the disk; after FinishMigration the dm-clone is gone.
 	table := agent.CloneTable(plan.sectors, metaNo, destNo, srcNo,
@@ -333,7 +340,8 @@ func (s *DnAgentServer) ensureDmClone(
 		targets[0].Args[3] == fmt.Sprintf("%d", regionSectors) {
 		// Suspended on the table it wants — an interrupted reload, or a
 		// failed one whose old table is wanted again, since a reload fails
-		// closed (dnagent.md §2.8) — it is resumed ([D12]).
+		// closed (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`)
+		// — it is resumed ([D12]).
 		if dev.Suspended {
 			return false, s.dm.Resume(ctx, name)
 		}
@@ -396,7 +404,7 @@ func (s *DnAgentServer) ensureHydration(
 //
 // The loop is enrolled in the server's WaitGroup so WaitBackground covers the
 // connect retries too, not just zeroing (SH27). Like startZeroing it
-// therefore refuses once rootCtx is done: an armed §11.2 fence timer is not
+// therefore refuses once rootCtx is done: an armed DN12 fence timer is not
 // enrolled and can still reach a converge after the join returned, and a
 // bg.Add after bg.Wait panics.
 func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
@@ -466,7 +474,7 @@ func (s *DnAgentServer) migrRetryLoop(
 }
 
 // reconvergeSide re-runs one side's converge from a background goroutine
-// under the DN1 locks. It backs both the DN8 connect retry and the §11.2
+// under the DN1 locks. It backs both the DN8 connect retry and the DN12
 // fence timer — anything that has to happen later without blocking an RPC.
 func (s *DnAgentServer) reconvergeSide(
 	ctx context.Context,

@@ -1,12 +1,13 @@
 // Package worker is dnv-worker's control-plane engine (dnv-worker.md): the
-// vote layer that registers this process and computes shard ownership (§6),
-// the shard workers that watch one revision prefix each (§7), the per-object
-// revision workers that drive the agents through Syncup*/Check* (§8), the
-// health bookkeeping (§9), the bitmap pushes (§10) and the automatic
-// reactions (§11).
+// vote layer that registers this process and computes shard ownership
+// (VW1-VW11), the shard workers that watch one revision prefix each (SW1-SW6),
+// the per-object revision workers that drive the agents through Syncup*/Check*
+// (RW1-RW21), the health bookkeeping (HL1-HL6), the bitmap pushes (BM1-BM6) and
+// the automatic reactions (AR1-AR9, SPD1-SPD14, CLD1-CLD12).
 //
 // It talks to etcd only through etcdutil and to the agents only as a gRPC
-// client (layout.md §3); it never serves gRPC and never talks to hosts.
+// client (layout.md, Dependency rules); it never serves gRPC and never talks to
+// hosts.
 package worker
 
 import (
@@ -25,8 +26,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/model"
 )
 
-// The normative msg strings of dnv-worker.md §12. The integration suite (§14)
-// greps them, so they are constants and never formatted.
+// The normative msg strings of dnv-worker.md, Log records. The integration
+// suite (dnv-worker.md, Integration test plan) greps them, so they are
+// constants and never formatted.
 const (
 	msgWorkerStarting   = "worker starting"
 	msgWorkerStopping   = "worker stopping"
@@ -60,7 +62,8 @@ type Config struct {
 	// registered, voted and driven independently (VW10).
 	Roles []string
 	// VoteInterval is the registry heartbeat period (VW2). The dead
-	// threshold is 2 x this and is never a constant of its own (§2.1).
+	// threshold is 2 x this and is never a constant of its own (dnv-worker.md,
+	// Additions to `common/constants.go`).
 	VoteInterval time.Duration
 	// GraceTime is how long an observed membership transition must hold
 	// before it is committed (VW5).
@@ -96,7 +99,7 @@ type tickerHandle struct {
 }
 
 // clock is the package's single source of time. Every timer and every "now"
-// of worker/ goes through it so that the unit tests of §13 can drive the vote
+// of worker/ goes through it so that the unit tests can drive the vote
 // grace windows, the liveness deadlines and the round timers deterministically
 // instead of sleeping.
 //
@@ -171,7 +174,7 @@ type deps struct {
 	conns  *connCache
 	health healthWriter
 	clk    clock
-	// kinds resolves a role's shard plumbing (SW1). It is a field so the §13
+	// kinds resolves a role's shard plumbing (SW1). It is a field so the
 	// vote tests can substitute recording fakes for the real shard and
 	// revision workers.
 	kinds func(role string) (revKind, bool)
@@ -198,8 +201,8 @@ func newSeed() (string, error) {
 }
 
 // seedPrefix is the first 8 characters of a seed, the identity half of every
-// trace id this worker mints (RW10). The §14 suite matches
-// trace_id | split("-")[0] against it.
+// trace id this worker mints (RW10). The worker suite (dnv-worker.md,
+// Integration test plan) matches trace_id | split("-")[0] against it.
 func seedPrefix(seed string) string {
 	if len(seed) < 8 {
 		return seed
@@ -219,7 +222,7 @@ func newTraceCtx(ctx context.Context, seed string) context.Context {
 // ---------------------------------------------------------------------------
 
 // Run mints the incarnation seed, starts the process-wide ClusterConf cache
-// (RW21) and the vote worker (§6), and blocks until ctx ends (CM4).
+// (RW21) and the vote worker (VW1-VW11), and blocks until ctx ends (CM4).
 //
 // On shutdown it performs CM5 in order: stop the heartbeat loop; delete this
 // worker's own registrations best-effort so peers start their grace windows

@@ -1,10 +1,11 @@
-// clone.go is the `clone` group (dnvctl.md §5.9): the five RPCs of the
-// destination half of a cross-SP copy (architecture.md §8.9). A clone names one
-// thin device of THIS SP as the destination of a dm-clone whose source is a
-// namespace somewhere else, which is why `clone create` carries a whole `src-`
-// family of flags describing a thing this SP cannot see.
+// clone.go is the `clone` group (dnvctl.md, `clone` — `ctl/clone.go`): the
+// five RPCs of the destination half of a cross-SP copy (architecture.md,
+// Clones). A clone names one thin device of THIS SP as the destination of a
+// dm-clone whose source is a namespace somewhere else, which is why
+// `clone create` carries a whole `src-` family of flags describing a thing
+// this SP cannot see.
 //
-// Four of the five are SP-scoped mutators and take the §4 sp_rev token;
+// Four of the five are SP-scoped mutators and take the CT3 sp_rev token;
 // `clone get` is a pure read and takes none.
 package ctl
 
@@ -16,7 +17,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// registerClone installs `dnvctl clone …`. Five rows in §5.9, five leaves —
+// registerClone installs `dnvctl clone …`. Five clone RPCs, five leaves —
 // CT1 allows no sixth.
 func registerClone(root *cobra.Command) {
 	root.AddCommand(group("clone", "destination side of a cross-SP copy",
@@ -31,8 +32,8 @@ func registerClone(root *cobra.Command) {
 // cloneSrcTrConfList is the repeated `src_tr_conf` of the two commands that
 // carry it, CreateClone and UpdateCloneTrConf. It lives here rather than in
 // root.go because only this group needs it, and it is prefixed with the group
-// name so it cannot collide with a sibling file's helper (§1.2, the gatewayctl
-// lesson).
+// name so it cannot collide with a sibling file's helper (dnvctl.md, Files:
+// the gatewayctl lesson).
 //
 // The list is a one-element list of the `src-` transport when trConfOf returns
 // a conf, and an EMPTY list — never nil — when all four parts were given as
@@ -139,7 +140,7 @@ func cloneDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// cloneGetCmd is GetClone. A pure read, so it carries no token (§4), and a
+// cloneGetCmd is GetClone. A pure read, so it carries no token (CT3), and a
 // typed --rev is a usage error here.
 func cloneGetCmd() *cobra.Command {
 	cmd := leaf("get", "read one clone (GetClone)",
@@ -202,11 +203,12 @@ func cloneSetTrCmd() *cobra.Command {
 // page at that chunk's current length. The Clone record carries no chunk count:
 // how many chunks a clone holds is how many chunk keys it has.
 //
-// --bm-hex splits the two failure kinds §5.9 insists on: an EMPTY value sends
-// an empty bitmap on purpose, so the gateway's "bitmap must not be empty"
-// refusal stays reachable, while a malformed non-empty value never leaves the
-// process and is a usage error (exit 2, §7.12 c6). hexBytesOf is exactly that
-// rule, so this command only has to let its error out.
+// --bm-hex splits the two failure kinds dnvctl.md, `clone` — `ctl/clone.go`,
+// insists on: an EMPTY value sends an empty bitmap on purpose, so the
+// gateway's "bitmap must not be empty" refusal stays reachable, while a
+// malformed non-empty value never leaves the process and is a usage error
+// (exit 2, CT8). hexBytesOf is exactly that rule, so this command only has
+// to let its error out.
 func cloneAppendBmCmd() *cobra.Command {
 	cmd := leaf("append-bm", "append a source bitmap chunk "+
 		"(AppendCloneBitmap)",

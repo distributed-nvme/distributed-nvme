@@ -13,8 +13,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// §6.14 — the dm-thin metadata reader (CN25-CN27). The fixture is the case-B
-// pool of cnagent_integtest.md §12: a 64-block td whose virtual blocks
+// The dm-thin metadata reader (CN25-CN27). The fixture is the case-B pool of
+// cnagent_integtest.md, Cases (thinbm): a 64-block td whose virtual blocks
 // {0,5,6,7} are written, landing on pool-data blocks 0..3.
 const caseBDump = `<superblock uuid="" time="0" transaction="0" flags="0" ` +
 	`version="2" data_block_size="2048" nr_data_blocks="0">
@@ -89,8 +89,8 @@ func TestThinDeviceBitmap(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	scriptDump(srv, node, caseBDump)
 
-	// Bit k = 1 iff virtual block start+k is unmapped — the single §11.4
-	// wire inversion.
+	// Bit k = 1 iff virtual block start+k is unmapped — the single wire
+	// inversion of architecture.md, raid0 bitmap math.
 	if got := tdBm(t, srv, 0, 0); got != "1effffffffffffff" {
 		t.Fatalf("full td bitmap is %q, want 1effffffffffffff", got)
 	}
@@ -268,7 +268,7 @@ func TestThinDumpDirIsPrivate(t *testing.T) {
 func TestThinDeviceBitmapSharedSubtree(t *testing.T) {
 	srv, node := newTestServer(t)
 	// The gateway only ever publishes a snapshot whose origin is already
-	// materialized (ThinDeviceCreated.md U2-S1), so the origin carries
+	// materialized (architecture.md, Thin devices), so the origin carries
 	// `created` and its dev_id is in the pool before this cntlr converges.
 	node.holdThinIds(poolName(srv), 1)
 	tds := []*pb.ThinDevice{
@@ -365,7 +365,7 @@ func TestReserveRetriesOnceWhenHeld(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The §11.4 raid0 fold (CN22)
+// The raid0 fold of architecture.md, raid0 bitmap math (CN22)
 // ---------------------------------------------------------------------------
 
 // chunked is one slice's bitmap held as the single chunk 0 — the shape every
@@ -443,10 +443,11 @@ func TestAllUnmappedPadsWithZeros(t *testing.T) {
 	}
 }
 
-// regionSkippableNaive is the §11.4 address mapping applied literally, one
-// fine-grained offset at a time. It is the reference the cycle-walking
+// regionSkippableNaive is the address mapping of architecture.md, raid0 bitmap
+// math, applied literally, one fine-grained offset at a time. It is the
+// reference the cycle-walking
 // implementation is differentially tested against: the two must agree for
-// every geometry the §8.9 validation admits.
+// every geometry the CreateClone validation (architecture.md, Clones) admits.
 func regionSkippableNaive(
 	r uint64,
 	regionSize uint64,
@@ -465,8 +466,9 @@ func regionSkippableNaive(
 	return true
 }
 
-// TestRegionSkippableMatchesTheAddressMapping sweeps the geometries §11.4
-// allows (1 <= slice_cnt <= common.MaxSliceCntPerSp, stripe_size = i x 4 KiB,
+// TestRegionSkippableMatchesTheAddressMapping sweeps the geometries
+// architecture.md, raid0 bitmap math, allows
+// (1 <= slice_cnt <= common.MaxSliceCntPerSp, stripe_size = i x 4 KiB,
 // block_size = k x stripe_size) against pseudo-random per-slice bitmaps.
 // CreateClone is what admits them (gateway/validate.go validateCloneGeometry),
 // so the widest shape swept here is written as that constant and not as the
@@ -584,7 +586,8 @@ func TestShortChunkTailReadsAsWritten(t *testing.T) {
 }
 
 // TestAbsentMiddleChunkKeepsLaterChunksInPlace is the case that distinguishes
-// §9.6's self-positioning from a concatenation model. Chunks 0 and 2 are
+// the self-positioning of architecture.md, Bitmap push protocol, from a
+// concatenation model. Chunks 0 and 2 are
 // present and chunk 1 is missing: chunk 2's bits must stay at their own
 // offset, 16C bits in. A concatenation would have slid them down behind chunk
 // 0 — reporting bit 8 as skippable and bit 16C as absent, both wrong, and the
@@ -606,8 +609,9 @@ func TestAbsentMiddleChunkKeepsLaterChunksInPlace(t *testing.T) {
 	assertSkippable(t, b, 2*testChunkBits+8, false)
 }
 
-// TestChunksOfCutsAtChunkBoundaries covers the three shapes the §11.5
-// recovery hands chunksOf: shorter than C, exactly C, and one byte past it.
+// TestChunksOfCutsAtChunkBoundaries covers the three shapes the recovery of
+// architecture.md, Clone crash recovery, hands chunksOf: shorter than C,
+// exactly C, and one byte past it.
 func TestChunksOfCutsAtChunkBoundaries(t *testing.T) {
 	const size = common.CloneBmChunkBytes
 	for _, tc := range []struct {
@@ -638,7 +642,8 @@ func TestChunksOfCutsAtChunkBoundaries(t *testing.T) {
 	}
 }
 
-// TestDstBitmapLongerThanAChunkIsSplit is the §11.5 regression pin: applyDst
+// TestDstBitmapLongerThanAChunkIsSplit is the regression pin for
+// architecture.md, Clone crash recovery: applyDst
 // Bitmaps builds its per-slice bitmaps locally, so it must cut them at C
 // before handing them to the fold. Wrapping the whole bitmap as chunk 0
 // instead leaves every bit past the first MiB addressed to a chunk that does

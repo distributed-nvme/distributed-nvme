@@ -11,7 +11,7 @@ import (
 
 // putDnCap writes one DN capacity key. The allocator reads nothing else: the
 // index alone carries free_ext_cnt (key) and location (value), which is what
-// makes a scan need no point reads (§5.6, [D5]).
+// makes a scan need no point reads (architecture.md, Capacity index keys; [D5]).
 func putDnCap(
 	t *testing.T,
 	cli *etcdutil.Client,
@@ -55,7 +55,8 @@ func addrsOf(cands []Cand) []string {
 	return addrs
 }
 
-// TestFindDnCandidatesBinWalk exercises the §6.3 walk end to end (MD5, MD9):
+// TestFindDnCandidatesBinWalk exercises the DN candidate walk end to end
+// (MD5, MD9; architecture.md, Finding DN candidates):
 // the too-small bin is skipped, each bin is descending, a bin is abandoned at
 // the first DN below candExt, and the remaining bins are still walked.
 func TestFindDnCandidatesBinWalk(t *testing.T) {
@@ -111,7 +112,8 @@ func TestFindDnCandidatesBinWalk(t *testing.T) {
 	}
 
 	// Nothing is large enough: the caller gets an empty list, not an error
-	// (§6.5 turns that into RESOURCE_EXHAUSTED).
+	// (architecture.md, Per-operation allocation, turns that into
+	// RESOURCE_EXHAUSTED).
 	cands, err = FindDnCandidates(ctx, cli, cid, cc, 100000, 1, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("FindDnCandidates: %v", err)
@@ -121,7 +123,8 @@ func TestFindDnCandidatesBinWalk(t *testing.T) {
 	}
 }
 
-// TestFindDnCandidatesLocationDedupe checks the §6.3 LocList rule: one
+// TestFindDnCandidatesLocationDedupe checks the taken-locations rule of
+// architecture.md, Finding DN candidates: one
 // allocation round never returns two DNs from the same failure domain.
 func TestFindDnCandidatesLocationDedupe(t *testing.T) {
 	cli := newTestClient(t)
@@ -144,7 +147,8 @@ func TestFindDnCandidatesLocationDedupe(t *testing.T) {
 	}
 }
 
-// TestFindDnCandidatesLists checks the two NodeSelector rules of §6.3: the
+// TestFindDnCandidatesLists checks the two NodeSelector rules of
+// architecture.md, Finding DN candidates: the
 // black list always excludes, and a non-empty white list excludes everything
 // it does not name.
 func TestFindDnCandidatesLists(t *testing.T) {
@@ -204,7 +208,8 @@ func TestFindDnCandidatesLists(t *testing.T) {
 
 // antiAffineFixture is the three-DN cluster the two-tier tests use: the
 // group's own DN (dn-a) and a second DN in its failure domain (dn-b), plus one
-// DN in another domain (dn-c). It is the shape §6.5 tier 1 exists for — a
+// DN in another domain (dn-c). It is the shape tier 1 of architecture.md,
+// Per-operation allocation, exists for — a
 // black list of addr_ports alone leaves dn-b eligible.
 func antiAffineFixture(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	t.Helper()
@@ -213,7 +218,8 @@ func antiAffineFixture(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	putDnCap(t, cli, cid, 1, 20, "dn-c:9000", "rack1")
 }
 
-// TestFindDnCandidatesExcludeLocs pins §6.5 tier 1: the caller's failure
+// TestFindDnCandidatesExcludeLocs pins tier 1 of architecture.md,
+// Per-operation allocation: the caller's failure
 // domains are in the location set before the walk starts, so a DN that merely
 // shares a domain with a black-listed one is skipped too — which black-listing
 // the addr_port alone never did, because a black-listed DN is skipped before
@@ -263,7 +269,8 @@ func TestFindDnCandidatesExcludeLocs(t *testing.T) {
 	}
 }
 
-// TestFindDnCandidatesAntiAffine pins the two tiers of §6.5: tier 1 alone when
+// TestFindDnCandidatesAntiAffine pins the two tiers of architecture.md,
+// Per-operation allocation: tier 1 alone when
 // it has enough, a tier-2 rescan without the location exclusion when it has
 // not — the DN black list applying to both — and a nil exclusion that is the
 // plain scan with no second scan at all.
@@ -323,7 +330,8 @@ func TestFindDnCandidatesAntiAffine(t *testing.T) {
 	}
 }
 
-// TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt is the §6.5 trigger
+// TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt is the tier trigger of
+// architecture.md, Per-operation allocation,
 // itself: tier 2 fires on requiredCnt — the DNs the caller must actually place
 // — and NEVER on candCnt, the oversampled scan width (RequiredCnt ×
 // dn_batch_size, default 16). A scan returns at most one candidate per
@@ -369,7 +377,8 @@ func TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt(t *testing.T) {
 	}
 }
 
-// TestFindDnCandidatesAntiAffineMergesTier1 pins the merge of §6.5: tier 2
+// TestFindDnCandidatesAntiAffineMergesTier1 pins the merge of architecture.md,
+// Per-operation allocation: tier 2
 // walks free-count-descending and stops at candCnt, and the excluded domains
 // usually hold the fullest DNs — so a tier 2 that REPLACED tier 1 could drop a
 // distinct-domain DN tier 1 had found. Tier 1's entries stay at the head and
@@ -404,7 +413,8 @@ func TestFindDnCandidatesAntiAffineMergesTier1(t *testing.T) {
 	}
 }
 
-// TestFindCnCandidates exercises the §6.4 scan: no bins, descending, the same
+// TestFindCnCandidates exercises the scan of architecture.md, Finding CN
+// candidates: no bins, descending, the same
 // list and location rules, plus the per-SP exclusion (MD5, MD9).
 func TestFindCnCandidates(t *testing.T) {
 	cli := newTestClient(t)
@@ -448,7 +458,8 @@ func TestFindCnCandidates(t *testing.T) {
 	}
 }
 
-// TestFindCnCandidatesAntiAffine pins the cntlr half of §6.5's two tiers:
+// TestFindCnCandidatesAntiAffine pins the cntlr half of the two tiers of
+// architecture.md, Per-operation allocation:
 // tier 1 seeds the SP's cntlr locations, so a CN that merely shares a domain
 // with one of the SP's CNs is skipped; tier 2 rescans without them only when
 // tier 1 found no CN at all — the one CN every cntlr pick places — and it
@@ -544,7 +555,8 @@ func TestFindCnCandidatesAntiAffine(t *testing.T) {
 	}
 }
 
-// TestPickRandom checks the §6.5 pick: n distinct entries drawn from the
+// TestPickRandom checks the pick of architecture.md, Per-operation allocation:
+// n distinct entries drawn from the
 // batch, the input untouched, and the degenerate bounds.
 func TestPickRandom(t *testing.T) {
 	cands := []Cand{
@@ -579,7 +591,8 @@ func TestPickRandom(t *testing.T) {
 		t.Errorf("PickRandom(_, 10) = %v", addrsOf(got))
 	}
 	// Over many draws every candidate is eventually picked first: the pick
-	// is what spreads concurrent allocations (§6.5).
+	// is what spreads concurrent allocations (architecture.md, Per-operation
+	// allocation).
 	seen := make(map[string]struct{})
 	for i := 0; i < 500; i++ {
 		seen[PickRandom(cands, 1)[0].AddrPort] = struct{}{}

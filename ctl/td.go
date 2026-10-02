@@ -1,17 +1,19 @@
-// This file is the `td` group: the thin devices of architecture.md §8.7 and
-// the two bitmap reads of §8.13 (dnvctl.md §5.6, five RPCs).
+// This file is the `td` group: the thin devices of
+// architecture.md, Thin devices, and the two bitmap reads of
+// architecture.md, Bitmap reads (dnvctl.md, `td` — `ctl/td.go`, five RPCs).
 //
 // Every request here is SP-scoped, so cluster_name and sp_name come from the
-// §2.1 globals --cluster and --sp and never from a local flag; what is left is
-// only the flags that name the device and window the reads. The two mutators
-// carry `sp_rev` from the global --rev, presence-based per §4; the three reads
-// carry no token at all.
+// globals --cluster and --sp (dnvctl.md, Global flags, env, config) and never
+// from a local flag; what is left is only the flags that name the device and
+// window the reads. The two mutators carry `sp_rev` from the global --rev,
+// presence-based per CT3; the three reads carry no token at all.
 //
-// `td get-leg-bm` sits in this group because §5.6 puts it here: a leg is not a
-// thin device, but the command is the same measurement through the same CN
-// path as `td get-bm`, and the two are the whole CLI's only deviation from
-// CT4's "print the reply message" — they print hexBitmapResult instead,
-// because protojson renders a bytes field as base64 (§3.1).
+// `td get-leg-bm` sits in this group because dnvctl.md, Conventions, puts it
+// here: a leg is not a thin device, but the command is the same measurement
+// through the same CN path as `td get-bm`, and the two are the whole CLI's
+// only deviation from CT4's "print the reply message" — they print
+// hexBitmapResult instead, because protojson renders a bytes field as base64
+// (CT4).
 package ctl
 
 import (
@@ -23,7 +25,7 @@ import (
 )
 
 // registerTd adds the `td` group to the root. NewRootCmd calls this by name,
-// so the name and signature are the contract (§1.2).
+// so the name and signature are the contract (dnvctl.md, Files).
 func registerTd(root *cobra.Command) {
 	root.AddCommand(group(
 		"td", "thin devices of a storage pool",
@@ -102,17 +104,17 @@ func tdDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// tdListCmd is ListThinDevices — the `created` poll of ThinDeviceCreated.md
-// R13. The gateway always writes `created` false and only the sp-worker flips
-// it, so this command is how an operator learns a device is materialized, the
-// first condition for snapshotting it (a clone's destination also waits until
-// the clone has been deleted and drained, ThinDeviceCreated.md U2-S1);
-// §3.1's EmitUnpopulated is what keeps the false visible in the JSON rather
+// tdListCmd is ListThinDevices — the `created` poll, the client's wait
+// primitive of architecture.md, Thin devices. The gateway always writes
+// `created` false and only the sp-worker flips it, so this command is how an
+// operator learns a device is materialized, the first condition for
+// snapshotting it (a clone's destination also waits until the clone has been
+// deleted and drained, architecture.md, Thin devices: CreateThinDevice);
+// CT4's EmitUnpopulated is what keeps the false visible in the JSON rather
 // than eliding it as a proto3 default.
 //
 // The request is nothing but the two scope globals: ListThinDevices is one of
-// the List* RPCs with no pagination, so there are no page flags either (§5.6
-// lists none).
+// the List* RPCs with no pagination, so there are no page flags either.
 func tdListCmd() *cobra.Command {
 	return leaf(
 		"list", "list the thin devices of a pool (ListThinDevices)",
@@ -131,16 +133,16 @@ func tdListCmd() *cobra.Command {
 }
 
 // tdGetBmCmd is GetThinDeviceBitmap: the allocation bitmap of one slice of one
-// thin device, measured live on the primary cntlr's CN (architecture.md
-// §8.13). Read-only, hence no token.
+// thin device, measured live on the primary cntlr's CN (architecture.md,
+// Bitmap reads). Read-only, hence no token.
 //
 // --start/--cnt are the window in blocks; both default to 0, which asks the CP
 // for the whole slice — dnvctl substitutes no window of its own (CT8). The
-// identity flag is --name, not gatewayctl's --td: §5.0 makes the identity flag
-// uniform across a group, and within this command there is only one name to
-// mean.
+// identity flag is --name, not gatewayctl's --td: dnvctl.md, Conventions,
+// makes the identity flag uniform across a group, and within this command
+// there is only one name to mean.
 //
-// The reply is reshaped into the §3.1 hex map instead of being emitted as a
+// The reply is reshaped into the CT4 hex map instead of being emitted as a
 // message, so the bitmap reads as hex rather than protojson's base64.
 func tdGetBmCmd() *cobra.Command {
 	cmd := leaf(
@@ -175,9 +177,9 @@ func tdGetBmCmd() *cobra.Command {
 
 // tdGetLegBmCmd is GetLegBitmap: the same measurement for one leg of a raid1
 // group. A leg has no name, so it is addressed by id — a base-0 hexOf value
-// like every other id flag (§5.0) — and the request carries no slice_idx,
-// because a leg is not sliced. Read-only, same window flags, same §3.1 hex map
-// as `td get-bm`.
+// like every other id flag (dnvctl.md, Conventions) — and the request
+// carries no slice_idx, because a leg is not sliced. Read-only, same window
+// flags, same CT4 hex map as `td get-bm`.
 func tdGetLegBmCmd() *cobra.Command {
 	cmd := leaf(
 		"get-leg-bm", "read a raid1 leg's bitmap (GetLegBitmap)",

@@ -1,13 +1,13 @@
-// Command dnv-cdc is the NVMe-oF central discovery controller (cdc.md §6):
-// one cobra root command without subcommands that parses the CM1 flags
-// through viper, builds the process's single etcdutil client (EU1) and hands
-// off to cdc.Run, which owns the etcd watcher, the per-host view registry and
-// the NVMe/TCP listener.
+// Command dnv-cdc is the NVMe-oF central discovery controller
+// (cdc.md, `cmd/dnv-cdc`): one cobra root command without subcommands that
+// parses the CM1 flags through viper, builds the process's single etcdutil
+// client (EU1) and hands off to cdc.Run, which owns the etcd watcher, the
+// per-host view registry and the NVMe/TCP listener.
 //
-// main itself is deliberately thin (layout.md §5): it never touches etcd, it
-// never opens a socket, and the "cdc starting" / "cdc stopping" records of §7
-// are emitted by cdc.Run, which is why the endpoints travel to it in
-// cdc.Config (CM3).
+// main itself is deliberately thin (layout.md, `cmd/` wiring): it never
+// touches etcd, it never opens a socket, and the "cdc starting" / "cdc
+// stopping" records of cdc.md, Log records, are emitted by cdc.Run, which is
+// why the endpoints travel to it in cdc.Config (CM3).
 package main
 
 import (
@@ -123,7 +123,7 @@ type options struct {
 }
 
 // optionsFromViper reads and validates the CM1 values after the binding above.
-// It performs no I/O and logs nothing, so the §8 unit tests can drive every
+// It performs no I/O and logs nothing, so the unit tests can drive every
 // CM2 branch directly.
 func optionsFromViper() (*options, error) {
 	endpoints := splitList(viper.GetString("etcd-endpoints"))
@@ -190,7 +190,7 @@ func splitList(raw string) []string {
 // single hex digits, each claiming the sixteen shard codes h0..hf (DS2). The
 // spelling is deliberately strict — "0f" or "F" is a typo for a range, not a
 // range — because a mis-parsed digit is a silent coverage gap no instance can
-// detect (§0 #3).
+// detect (DS2).
 func parseRanges(raw string) ([]uint32, error) {
 	items := splitList(raw)
 	if len(items) == 0 {

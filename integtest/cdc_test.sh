@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 #
-# cdc_test.sh — the `dnv-cdc` integration test of doc/cdc.md §9. Four servers,
-# a real single-node etcd, a real four-instance dnv-cdc fleet, real nvmet
-# targets over dm-zero and two real kernel NVMe hosts, driven from this machine
-# over ssh by integtest/cdcctl (the gateway's write path for CdcEntry keys).
+# cdc_test.sh — the `dnv-cdc` integration test of doc/cdc.md, Integration test
+# plan. Four servers, a real single-node etcd, a real four-instance dnv-cdc
+# fleet, real nvmet targets over dm-zero and two real kernel NVMe hosts, driven
+# from this machine over ssh by integtest/cdcctl (the gateway's write path for
+# CdcEntry keys).
 #
 #   bash integtest/cdc_test.sh [--only <case>] [--cleanup-only] \
 #       user@<s1> user@<s2> user@<h1> user@<h2>
 #
-# Cases (§9.1), in order, each in its own cluster ids and each after a fleet
-# restart and a `cdcctl wipe` (§9.9): smoke, matrix, lowlevel, stas, ha.
-# Cleanup runs unconditionally at the start and, on success only, at the end:
-# a failing run leaves etcd's data, every cdc log, the nvmet/dm state and the
-# host connections in place and dumps the §9.16 diagnostics.
+# Cases (Integration test plan, Cases), in order, each in its own cluster ids
+# and each after a fleet restart and a `cdcctl wipe`: smoke, matrix, lowlevel,
+# stas, ha. Cleanup runs unconditionally at the start and, on success only, at
+# the end: a failing run leaves etcd's data, every cdc log, the nvmet/dm state
+# and the host connections in place and dumps the diagnostics (Integration
+# test plan, Cleanup).
 #
 # SUDO: s1 needs none — etcd, the cdc fleet and cdcctl are plain user
 # processes. s2 and both hosts need passwordless sudo: nvmet configfs, device
@@ -38,7 +40,7 @@
 #     case L's back the instant an AEN landed, which is what case L measures.
 #  3. ssC uses shard code `80`, not `08`: DS2 gives range digit h the codes
 #     h0..hf, so 08 belongs to range 0 and would land in the LOW half,
-#     contradicting §9.11's grid.
+#     contradicting the matrix case's grid (Integration test plan, Cases).
 #  4. nvme-stas sends the TP-8010 DIM command (opcode 21h) WITH in-capsule
 #     data to every discovery controller. Terminating the connection over that
 #     — the original reading of NP2 — put stas in a permanent connect/reset
@@ -48,7 +50,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constants (§9.3, §9.5, §9.9)
+# Constants (Integration test plan, Topology, Cases and What a pass means)
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -78,20 +80,20 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # that named constants bound. The one that SIZES the requirement is
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
-# (architecture.md §8.4); the sp drain's D2 batch (dnv-worker.md §11.6) and a
-# created-flip transaction of MaxFlipCreatedPerTxn tds (dnv-worker.md RW19)
-# are two more, and their compare counts are asserted from the named
-# constants in gateway/txnbudget_test.go, not restated here. The cdc suite
-# creates and drains no storage pools, so the flag changes nothing it
-# observes; it is passed anyway so that every etcd this tree starts — these
-# three suites and the Go test launchers in etcdutil, model, worker and
-# gateway — gets the flag from the same constant.
+# (architecture.md, Storage pools); the sp drain's D2 batch (dnv-worker.md
+# SPD10) and a created-flip transaction of MaxFlipCreatedPerTxn tds
+# (dnv-worker.md RW19) are two more, and their compare counts are asserted
+# from the named constants in gateway/txnbudget_test.go, not restated here.
+# The cdc suite creates and drains no storage pools, so the flag changes
+# nothing it observes; it is passed anyway so that every etcd this tree
+# starts — these three suites and the Go test launchers in etcdutil, model,
+# worker and gateway — gets the flag from the same constant.
 ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-cdc-integtest
 
-# §9.3 ports: none shared with the worker suite (12379/12380, 296xx/297xx) or
-# the agent suites (29528/29529/4200).
+# The ports (Integration test plan, Topology): none shared with the worker
+# suite (12379/12380, 296xx/297xx) or the agent suites (29528/29529/4200).
 ETCD_CLIENT_PORT=13379
 ETCD_PEER_PORT=13380
 CDC_PORT_BASE=18009               # cdc0..cdc3 -> 18009..18012
@@ -103,11 +105,12 @@ S2_PORTS=(14420 14421 14422 14423)
 DNV_PREFIX=dnv
 
 CDC_DIRS=(cdc0 cdc1 cdc2 cdc3)
-# The §9.3 range split: two twins of the low half, two of the high half.
+# The range split (Integration test plan, Topology): two twins of the low
+# half, two of the high half.
 CDC_RANGE_LOW=0,1,2,3,4,5,6,7
 CDC_RANGE_HIGH=8,9,a,b,c,d,e,f
 
-# §9.9 polling budgets.
+# Polling budgets (Integration test plan, What a pass means).
 WAIT_SHORT=5
 WAIT_AEN=15
 WAIT_CONN=20
@@ -116,11 +119,13 @@ WAIT_STAS=30
 SETTLE=3
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it:cdc
-# §9.5: the ghost identity, used only through an explicit -q/-I pair from h1.
+# The ghost identity (Integration test plan, Topology), used only through an
+# explicit -q/-I pair from h1.
 GHOST_NQN="$NQN_PREFIX:ghost"
 
-# The seven subsystems of §9.5, created once at setup. SS_UUID is the
-# namespace uuid a host waits for; SS_PORTS is the setup-shape port link list.
+# The seven test subsystems (Integration test plan, Topology), created once at
+# setup. SS_UUID is the namespace uuid a host waits for; SS_PORTS is the
+# setup-shape port link list.
 SS_NAMES=(ssa ssb ssc ssd sse ssf ssx)
 UUID_PREFIX=0000cdc0-0000-4000-8000-0000000000
 declare -A SS_UUID=(
@@ -132,8 +137,8 @@ declare -A SS_PORTS=(
 	[ssa]="1" [ssb]="2" [ssc]="3" [ssd]="1 2" [sse]="3" [ssf]="4" [ssx]="4"
 )
 
-# The §9.5 entry set: shard code, sp id and ss id per subsystem. ssC sits at
-# shard 80, the high half's first code (cdc.md §9.5 — an earlier draft's 08
+# The entry set: shard code, sp id and ss id per subsystem. ssC sits at
+# shard 80, the high half's first code (cdc.md DS2 — an earlier draft's 08
 # would have landed it in range 0's low half; the doc records the correction).
 declare -A E_SHARD=(
 	[ssa]=00 [ssb]=07 [ssc]=80 [ssd]=ff [sse]=3c [ssf]=81 [ssx]=05
@@ -145,9 +150,9 @@ declare -A E_SS=(
 	[ssa]=0xa [ssb]=0xb [ssc]=0xc [ssd]=0xd [sse]=0xe [ssf]=0xf [ssx]=0x11
 )
 
-# §9.5 cluster ids, one per case. The cross-cluster entry (ssF) lives in the
-# case id with a leading 1 nibble, as §9.5's own example spells it (M ->
-# 0x1cdc2).
+# The cluster ids, one per case (Integration test plan, Cases). The
+# cross-cluster entry (ssF) lives in the case id with a leading 1 nibble
+# (M -> 0x1cdc2).
 declare -A CASE_CID=(
 	[smoke]=0xcdc1 [matrix]=0xcdc2 [lowlevel]=0xcdc3 [stas]=0xcdc4 [ha]=0xcdc5
 )
@@ -164,7 +169,8 @@ AEN_PROP='NVME_AEN=0x70f002'
 
 S1="" S2="" H1="" H2=""
 IP1="" IP2="" IPH1="" IPH2=""
-# H1NQN/H2NQN are the hosts' own /etc/nvme/hostnqn, read at setup (§9.5).
+# H1NQN/H2NQN are the hosts' own /etc/nvme/hostnqn, read at setup
+# (Integration test plan, Topology).
 H1NQN="" H2NQN=""
 GHOST_ID=""
 JQ=jq
@@ -229,7 +235,7 @@ on_exit() {
 		log "PASS"
 	else
 		log ""
-		log "########## diagnostics (§9.16) ##########"
+		log "########## diagnostics (Integration test plan, Cleanup) ##########"
 		diagnostics || true
 		log ""
 		log "debris left in place on all four servers; failing stage '$STAGE'"
@@ -239,7 +245,7 @@ on_exit() {
 }
 
 # ---------------------------------------------------------------------------
-# Remote execution (§9.2)
+# Remote execution (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 # ssh_to runs a command on one server. QUIET is raised while wait_until and
@@ -291,10 +297,11 @@ host_nqn() { # <h1|h2>
 
 ok_or_true() { "$@" || true; }
 
-# ctl is the §9.6 driver wrapper: every call carries the endpoint, the case's
-# cluster and the stage's trace id. Each argument is quoted for the REMOTE
-# shell with printf %q, because an etcd key and an NQN both contain characters
-# the remote shell would otherwise re-split.
+# ctl is the driver wrapper (Integration test plan, The driver, `cdcctl`):
+# every call carries the endpoint, the case's cluster and the stage's trace
+# id. Each argument is quoted for the REMOTE shell with printf %q, because an
+# etcd key and an NQN both contain characters the remote shell would otherwise
+# re-split.
 ctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -302,7 +309,8 @@ ctl() {
 		"--cluster $CID --trace-id $TRACE $quoted"
 }
 
-# ctl2 is ctl against the second cluster id (the cross-cluster entry, §9.5).
+# ctl2 is ctl against the second cluster id (the cross-cluster entry;
+# Integration test plan, Cases).
 ctl2() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -360,7 +368,7 @@ ccount() { # <filter> [jq args…]
 }
 
 # ---------------------------------------------------------------------------
-# Polling (§9.9)
+# Polling (Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
 # wait_until polls once a second until the command exits 0, else dies.
@@ -384,7 +392,7 @@ wait_until() { # <secs> <label> <cmd…>
 
 # assert_none is wait_until's negative twin: settle, then require the command
 # to exit NON-zero. It is how every "and the other host saw nothing" assertion
-# of §0 #5 is made.
+# of DS6 is made.
 assert_none() { # <secs> <label> <cmd…>
 	local secs=$1 label=$2
 	shift 2
@@ -401,7 +409,7 @@ assert_none() { # <secs> <label> <cmd…>
 }
 
 # ---------------------------------------------------------------------------
-# The cdc fleet (§9.3)
+# The cdc fleet (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 cdc_port() { printf '%d' $((CDC_PORT_BASE + $1)); }
@@ -487,13 +495,13 @@ stop_fleet() {
 }
 
 # ---------------------------------------------------------------------------
-# Driving etcd (§9.6)
+# Driving etcd (Integration test plan, The driver, `cdcctl`)
 # ---------------------------------------------------------------------------
 
 # tr_arg renders one --tr value for a nvmet port number.
 tr_arg() { printf 'tcp,ipv4,%s,%d' "$IP2" $((NVMET_PORT_BASE + $1 - 1)); }
 
-# put_entry writes one CdcEntry of the §9.5 set. Ports is a space-separated
+# put_entry writes one CdcEntry of the entry set. Ports is a space-separated
 # list of nvmet port numbers, in the order they must appear (it is the DS5
 # tr-conf index). Every remaining argument is an allowed hostnqn; none means
 # an open entry, visible to everyone (DS4).
@@ -528,7 +536,7 @@ del_entry() { # <ss>
 
 wipe_entries() { ctl wipe >/dev/null; }
 
-# put_matrix writes the whole §9.5 entry set for the current case.
+# put_matrix writes the whole entry set for the current case.
 put_matrix() {
 	put_entry ssa "1"
 	put_entry ssb "2" "$H1NQN"
@@ -539,12 +547,12 @@ put_matrix() {
 }
 
 # ---------------------------------------------------------------------------
-# Discovery assertions (§9.9)
+# Discovery assertions (Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
 # disc_raw runs one `nvme discover` and PROPAGATES its exit status. identity
-# "ghost" adds the §9.5 ghost's -q/-I pair, which the kernel's 1:1 hostnqn rule
-# makes mandatory together (§9.4 item 7).
+# "ghost" adds the ghost's -q/-I pair, which the kernel's 1:1 hostnqn rule
+# makes mandatory together (Integration test plan, Topology).
 #
 # The status matters: an empty discovery log is `{"genctr":N,"records":[]}`
 # with status 0, while an instance that is down, a refused connection or a
@@ -600,7 +608,8 @@ disc_json() { # <h1|h2> <instance> [ghost]
 }
 
 # recs_of turns one discover's JSON into the set of (subnqn, traddr, trsvcid)
-# triples, one per line and sorted — the §9.9 comparison unit.
+# triples, one per line and sorted — the comparison unit of Integration test
+# plan, What a pass means.
 recs_of() {
 	"$JQ" -r '[.records[]? |
 		"\(.subnqn)|\(.traddr)|\(.trsvcid)"] | sort | .[]'
@@ -663,9 +672,9 @@ wait_disc() { # <secs> <h1|h2> <instance> <identity|""> <label> <ss:port…>
 	log "  ok: $label"
 }
 
-# twins_agree is the §9.14 step 3 assertion: two instances of one range serve
-# byte-identical, NON-EMPTY content. Emptiness is excluded on purpose — two
-# failed discovers also "agree".
+# twins_agree is the ha case's twin assertion (Integration test plan, Cases;
+# DS2): two instances of one range serve byte-identical, NON-EMPTY content.
+# Emptiness is excluded on purpose — two failed discovers also "agree".
 twins_agree() { # <h1|h2> <instance a> <instance b>
 	local ja jb a b
 	ja=$(disc_try "$1" "$2") || return 1
@@ -676,7 +685,8 @@ twins_agree() { # <h1|h2> <instance a> <instance b>
 }
 
 # disc_dev_set / disc_dev_genctr re-read the log through an EXISTING
-# persistent controller (§9.9: GENCTR is only meaningful on one).
+# persistent controller: GENCTR is only meaningful on one (DS7; Integration
+# test plan, What a pass means).
 disc_dev_json() { # <h1|h2> <nvmeN>
 	local out rc=0
 	# nvme-cli prints an "ignoring non matching command-line options" note
@@ -714,7 +724,7 @@ assert_dev_disc() { # <h1|h2> <nvmeN> <label> <ss:port…>
 }
 
 # ---------------------------------------------------------------------------
-# Host state (§9.8, §9.9)
+# Host state (Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
 uuid_path() { printf '/dev/disk/by-id/nvme-uuid.%s' "${SS_UUID[$1]}"; }
@@ -796,7 +806,8 @@ test_subsystems() { # <h1|h2>
 }
 
 # subsys_trsvcids lists the transport service ids of one subsystem's live
-# paths, sorted — the "two paths, one subsystem" assertion of §9.11 step 4.
+# paths, sorted — the "two paths, one subsystem" assertion of the matrix case
+# (Integration test plan, Cases).
 subsys_trsvcids() { # <h1|h2> <ss>
 	subsys_json "$1" | "$JQ" -r --arg n "$NQN_PREFIX:$2" \
 		'[.[]?.Subsystems[]? | select(.NQN == $n) | .Paths[]? |
@@ -804,9 +815,10 @@ subsys_trsvcids() { # <h1|h2> <ss>
 }
 
 # disc_ctrl_count is how many LIVE discovery controllers point at the cdc
-# fleet — four per host once stas has converged (§9.13 step 1), three while one
-# instance is down (§9.14 step 1). The state matters: a controller whose
-# instance died stays listed, in `connecting`, until stas's ctrl_loss_tmo.
+# fleet — four per host once stas has converged (the stas case), three while
+# one instance is down (the ha case; both in Integration test plan, Cases).
+# The state matters: a controller whose instance died stays listed, in
+# `connecting`, until stas's ctrl_loss_tmo.
 disc_ctrl_count() { # <h1|h2>
 	subsys_json "$1" | "$JQ" -r --arg ip "$IP1" \
 		'[.[]?.Subsystems[]? |
@@ -830,7 +842,7 @@ host_wipe_data() { # <h1|h2>
 }
 
 # ---------------------------------------------------------------------------
-# Uevent capture (§9.12)
+# Uevent capture (Integration test plan, The host helper, `cdc_host.sh`)
 # ---------------------------------------------------------------------------
 
 uevents_start() { # <h1|h2>
@@ -848,7 +860,7 @@ uevents_stop() { # <h1|h2>
 aen_count() { # <h1|h2> <nvmeN>
 	# Same guard as count_recs: awk prints 0 on empty input, so a capture
 	# that could not be READ would otherwise read as "no AEN arrived" — the
-	# exact answer every §0 #5 negative below is looking for.
+	# exact answer every DS6 negative below is looking for.
 	local out
 	out=$(rlog "$(host_target "$1")" "$WORK/uevents.log" |
 		awk -v dev="$2" -v prop="$AEN_PROP" '
@@ -874,7 +886,7 @@ assert_aen_count() { # <h1|h2> <nvmeN> <want> <label>
 }
 
 # ---------------------------------------------------------------------------
-# nvme-stas (§9.8)
+# nvme-stas (Integration test plan, The host helper, `cdc_host.sh`)
 # ---------------------------------------------------------------------------
 
 stas_start() { # <h1|h2>
@@ -908,8 +920,9 @@ wait_stas_converged() { # <h1|h2>
 	log "  ok: $1 holds four discovery connections to $IP1"
 }
 
-# no_test_subsystems is the §9.13 step 6 assertion: stacd disconnected
-# everything whose DLPE vanished. It is deliberately not a bare
+# no_test_subsystems is the stas case's mass-disconnect assertion (CM4;
+# Integration test plan, Cases): stacd disconnected everything whose DLPE
+# vanished. It is deliberately not a bare
 # `[ -z "$(test_subsystems …)" ]`: subsys_json's die runs inside that
 # substitution and ends only the subshell, so a listing that failed would come
 # back empty, read as "no subsystems" and pass the wipe stage's waits at their
@@ -924,12 +937,15 @@ no_test_subsystems() { # <h1|h2>
 }
 
 # ---------------------------------------------------------------------------
-# The two remote helper scripts (§9.7, §9.8)
+# The two remote helper scripts (Integration test plan, The target helper,
+# `cdc_target.sh`, and The host helper, `cdc_host.sh`)
 # ---------------------------------------------------------------------------
 #
 # They are generated here and scp'd rather than kept as files of their own, so
-# integtest/ still holds exactly the two artifacts §9.2 names. Everything they
-# do needs root on the server they run on, so both are invoked through sudo.
+# integtest/ still holds exactly the suite's two artifacts, the script and the
+# driver (Integration test plan, The host helper, `cdc_host.sh`). Everything
+# they do needs root on the server they run on, so both are invoked through
+# sudo.
 
 TMPDIR_LOCAL=""
 
@@ -937,9 +953,10 @@ write_target_helper() { # <path>
 	cat > "$1" <<'TARGET_EOF'
 #!/usr/bin/env bash
 #
-# cdc_target.sh — the nvmet side of the dnv-cdc integration suite (cdc.md
-# §9.7). Runs on server 2 under sudo. Verbs: setup <ip>, link <ss> <port>,
-# unlink <ss> <port>, teardown.
+# cdc_target.sh — the nvmet side of the dnv-cdc integration suite (cdc.md,
+# Integration test plan, The target helper, `cdc_target.sh`). Runs on server 2
+# under sudo. Verbs: setup <ip>, link <ss> <port>, unlink <ss> <port>,
+# teardown.
 #
 # `setup` is rerun-tolerant, with the nvmet configfs rules baked in: every
 # mkdir is create-guarded and every attribute is written ONLY when the object
@@ -970,9 +987,9 @@ uuid_of() {
 	esac
 }
 
-# ports_of is the §9.5 setup shape: which nvmet ports a subsystem is linked to
-# when nothing has moved. ssD deliberately sits on two, which is what gives one
-# subsystem two paths on the host.
+# ports_of is the setup shape (Integration test plan, Topology): which nvmet
+# ports a subsystem is linked to when nothing has moved. ssD deliberately sits
+# on two, which is what gives one subsystem two paths on the host.
 ports_of() {
 	case "$1" in
 	ssa) echo 1 ;;
@@ -1054,7 +1071,8 @@ setup() {
 			# Deliberately allow any host: if dnv-cdc ever leaks an entry
 			# to the wrong host the resulting connect SUCCEEDS and the
 			# wrong-device assertion catches it, instead of nvmet's own ACL
-			# masking the leak (§0 #14).
+			# masking the leak (Integration test plan, The target helper,
+			# `cdc_target.sh`).
 			echo 1 > "$dir/attr_allow_any_host" || die "$ss allow_any_host"
 			echo dnv-it > "$dir/attr_model" 2>/dev/null || true
 		fi
@@ -1130,8 +1148,9 @@ write_host_helper() { # <path>
 	cat > "$1" <<'HOST_EOF'
 #!/usr/bin/env bash
 #
-# cdc_host.sh — the host side of the dnv-cdc integration suite (cdc.md §9.8,
-# §9.15). Runs on h1/h2 under sudo. Verbs:
+# cdc_host.sh — the host side of the dnv-cdc integration suite (cdc.md,
+# Integration test plan, The host helper, `cdc_host.sh`, and Cleanup). Runs on
+# h1/h2 under sudo. Verbs:
 #
 #   wipe <cdc-ip>          disconnect every dnv-it subsystem and every
 #                          discovery controller pointing at the cdc fleet
@@ -1264,7 +1283,8 @@ stas_start() { # <ip> <work> <p0> <p1> <p2> <p3>
 		echo 'pleo=disabled'
 		echo
 		echo '[Service Discovery]'
-		# No mDNS: the suite's endpoints are static (cdc.md §1 out of scope).
+		# No mDNS: the suite's endpoints are static (cdc.md, Scope and
+		# placement, out of scope).
 		echo 'zeroconf=disabled'
 		echo
 		echo '[Discovery controller connection management]'
@@ -1386,7 +1406,7 @@ ship_helpers() {
 }
 
 # ---------------------------------------------------------------------------
-# Cleanup (§9.15)
+# Cleanup (Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 s1_cleanup_script() {
@@ -1414,9 +1434,9 @@ echo cleaned
 EOF
 }
 
-# cleanup is §9.15, in order: hosts first (their reconnect loops must die
-# before their targets vanish), then the nvmet target, then s1. end removes
-# $WORK everywhere and puts the hosts' autoconnect back.
+# cleanup is Integration test plan, Cleanup, in order: hosts first (their
+# reconnect loops must die before their targets vanish), then the nvmet target,
+# then s1. end removes $WORK everywhere and puts the hosts' autoconnect back.
 cleanup() { # <end 0|1>
 	local end=$1
 	log "[cleanup] hosts: stop stas, stop captures, disconnect everything ours"
@@ -1448,11 +1468,12 @@ cleanup() { # <end 0|1>
 			ok_or_true h "$hostsel" "rm -rf $WORK"
 		done
 	fi
-	# nvme-stas stays installed and the kernel modules stay loaded (§9.15).
+	# nvme-stas stays installed and the kernel modules stay loaded
+	# (Integration test plan, Cleanup).
 }
 
 # ---------------------------------------------------------------------------
-# Diagnostics (§9.16)
+# Diagnostics (Integration test plan, Cleanup)
 # ---------------------------------------------------------------------------
 
 banner() {
@@ -1511,7 +1532,7 @@ diagnostics() {
 }
 
 # ---------------------------------------------------------------------------
-# Preflight (§9.4)
+# Preflight (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 need_local() {
@@ -1535,7 +1556,7 @@ resolve_jq() {
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
-# fetch_etcd is the download-and-verify path of §9.2, shared with the worker
+# fetch_etcd is the download-and-verify path, shared with the worker
 # suite: a cached tarball whose sha256 already matches the pin is never
 # re-downloaded, so a repeat run costs nothing and a fresh checkout still works.
 fetch_etcd() {
@@ -1626,7 +1647,7 @@ ports_free() { # <target> <port…>
 }
 
 # preflight_servers runs AFTER the start-of-run cleanup: the port checks are
-# only meaningful once a crashed prior run's processes are gone (§9.4).
+# only meaningful once a crashed prior run's processes are gone.
 preflight_servers() {
 	STAGE="preflight (servers)"
 	log "=== preflight: servers"
@@ -1683,7 +1704,7 @@ preflight_servers() {
 
 	# 5. h1/h2: nvme-stas, installed if it is not there. It is the ONE step
 	#    that needs outbound network, and cleanup leaves the package
-	#    installed (§9.4 item 5).
+	#    installed (Integration test plan, Cleanup).
 	for hostsel in h1 h2; do
 		if ! hu "$hostsel" "command -v stafd >/dev/null"; then
 			log "  installing nvme-stas on $hostsel"
@@ -1720,7 +1741,7 @@ preflight_servers() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup (§9.3, §9.5)
+# Setup (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
 etcd_reachable() {
@@ -1730,7 +1751,7 @@ etcd_reachable() {
 setup() {
 	CASE=setup
 
-	stage layout "create the §9.3 tree and ship the binaries"
+	stage layout "create the work directory tree and ship the binaries"
 	s1 "mkdir -p $WORK/bin $WORK/etcd $(printf "$WORK/%s " "${CDC_DIRS[@]}")"
 	SETUP_DONE=1
 	log "[s1] scp etcd etcdctl dnv-cdc cdcctl -> $WORK/bin"
@@ -1759,7 +1780,7 @@ setup() {
 	CID=0x1 # any cluster: ping does not use it
 	wait_until "$WAIT_SHORT" "etcd to answer a cdcctl ping" etcd_reachable
 
-	stage target "build the §9.5 nvmet topology on s2"
+	stage target "build the nvmet topology on s2 (Integration test plan, Topology)"
 	s2 "$WORK/cdc_target.sh setup $IP2" || die "cdc_target.sh setup failed"
 
 	stage hosts "mask the kernel autoconnect and mint the ghost identity"
@@ -1781,7 +1802,7 @@ setup() {
 }
 
 # ---------------------------------------------------------------------------
-# Per-case reset (§9.9)
+# Per-case reset (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 # case_reset gives each case a pristine fleet, an empty {p} cdc prefix, its own
@@ -1832,9 +1853,10 @@ ctrl_live() { # <h1|h2> <nvmeN>
 	hu "$1" "test -e /sys/class/nvme/$2/subsysnqn"
 }
 
-# read_zeros is the §9.10 step 4 data-path check: 4 KiB off the namespace must
-# be 4 KiB of zeros, because the nvmet backend is a dm-zero device. dd is
-# invoked WITHOUT iflag=: the lab's uutils dd mishandles it.
+# read_zeros is the smoke case's data-path check (Integration test plan,
+# Cases): 4 KiB off the namespace must be 4 KiB of zeros, because the nvmet
+# backend is a dm-zero device. dd is invoked WITHOUT iflag=: the lab's uutils
+# dd mishandles it.
 read_zeros() { # <h1|h2> <ss>
 	local out
 	out=$(h "$1" "dd if=$(uuid_path "$2") bs=4096 count=1 2>/dev/null |" \
@@ -1843,8 +1865,8 @@ read_zeros() { # <h1|h2> <ss>
 	log "  ok: $1 read 4 KiB of zeros from $2"
 }
 
-# cdc_msg_count counts one §7 record across one instance's log, with optional
-# jq bindings.
+# cdc_msg_count counts one record of cdc.md, Log records, across one
+# instance's log, with optional jq bindings.
 cdc_msg_count() { # <dir> <msg> [jq args…]
 	local dir=$1 msg=$2
 	shift 2
@@ -1856,7 +1878,7 @@ connected_hosts() { # <dir> -> the hostnqns that connected, sorted unique
 }
 
 # ---------------------------------------------------------------------------
-# Case S — smoke (§9.10)
+# Case S — smoke (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_smoke() {
@@ -1920,11 +1942,11 @@ disc_empty() { # <h1|h2> <instance>
 }
 
 # ---------------------------------------------------------------------------
-# Case M — matrix (§9.11)
+# Case M — matrix (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_matrix() {
-	stage put "put the whole §9.5 entry set (ssF in cluster $CID2)"
+	stage put "put the whole entry set (ssF in cluster $CID2)"
 	put_matrix
 	# Each half owns exactly three of the six entries, so three put events
 	# per instance is the whole matrix having landed. All FOUR instances are
@@ -1978,8 +2000,9 @@ case_matrix() {
 		connect_all h1 "$i" >/dev/null
 		connect_all h2 "$i" >/dev/null
 	done
-	# Await every expected node (§9.9) rather than sampling once: connect-all
-	# returns before udev has published the by-id links.
+	# Await every expected node (Integration test plan, What a pass means)
+	# rather than sampling once: connect-all returns before udev has
+	# published the by-id links.
 	for ss in ssa ssb ssd sse; do wait_dev h1 "$ss"; done
 	for ss in ssa ssc ssd ssf; do wait_dev h2 "$ss"; done
 	# The absences are checked only after the presences AND a settle, so a
@@ -2001,7 +2024,7 @@ case_matrix() {
 }
 
 # ---------------------------------------------------------------------------
-# Case L — lowlevel (§9.12), stas stopped
+# Case L — lowlevel (Integration test plan, Cases), stas stopped
 # ---------------------------------------------------------------------------
 
 case_lowlevel() {
@@ -2045,7 +2068,7 @@ case_lowlevel() {
 	g1b=$(disc_dev_genctr h1 "$devx")
 	assert_gt "$g1b" "$g1" "h1 genctr after gaining ssE"
 	assert_dev_disc h1 "$devx" "h1 after gaining ssE" ssa:1 ssb:2 sse:3
-	# The §0 #5 negative: a change invisible to h2 before AND after is not an
+	# The DS6 negative: a change invisible to h2 before AND after is not an
 	# AEN and not even a GENCTR move for it.
 	sleep "$SETTLE"
 	assert_aen_count h2 "$devy" 0 "h2 AENs after an h1-only change"
@@ -2112,7 +2135,7 @@ closed_ge() { # <dir> <n>
 }
 
 # ---------------------------------------------------------------------------
-# Case T — stas (§9.13)
+# Case T — stas (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 case_stas() {
@@ -2180,7 +2203,7 @@ case_stas() {
 	wait_until "$WAIT_STAS" "h2 to hold no dnv-it subsystem" \
 		no_test_subsystems h2
 
-	stage restore "put s2 back into the §9.5 setup shape"
+	stage restore "put s2 back into the setup shape (Integration test plan, Cases)"
 	s2 "$WORK/cdc_target.sh link sse 3" >/dev/null ||
 		die "restoring the sse port-3 link failed"
 	s2 "$WORK/cdc_target.sh unlink sse 4" >/dev/null ||
@@ -2215,7 +2238,7 @@ ss_repointed() { # <h1|h2> <ss> <trsvcid…>
 }
 
 # ---------------------------------------------------------------------------
-# Case H — ha (§9.14)
+# Case H — ha (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
 connected_hosts_since() { # <dir> <baseline record count>
@@ -2239,13 +2262,13 @@ disc_ctrls_are() { # <h1|h2> <n>
 	[ "$(disc_ctrl_count "$1")" = "$2" ]
 }
 
-# data_undisturbed is §9.14 step 4's "undisturbed throughout", the
-# ss_repointed pattern applied to the full-fleet restart: it probes case H's
-# four data device nodes (h1 ssA ssB, h2 ssA ssC), dies on the first one
-# missing, then answers as the wrapped predicate. Every wait of the fleet stage
-# polls through it, so a data connection that is gone at any poll fails the
-# case — two point samples would pass one that dropped and came back between
-# them.
+# data_undisturbed is "undisturbed throughout" (Integration test plan, What a
+# pass means), the ss_repointed pattern applied to the full-fleet restart: it
+# probes case H's four data device nodes (h1 ssA ssB, h2 ssA ssC), dies on the
+# first one missing, then answers as the wrapped predicate. Every wait of the
+# fleet stage polls through it, so a data connection that is gone at any poll
+# fails the case — two point samples would pass one that dropped and came back
+# between them.
 data_undisturbed() { # <cmd…>
 	local pair
 	for pair in h1:ssa h1:ssb h2:ssa h2:ssc; do
@@ -2317,10 +2340,10 @@ case_ha() {
 	done
 	# The data connections are to s2's nvmet, not to the cdc fleet, so they
 	# must be untouched by the fleet dying, by its relaunch and by the hosts
-	# reading its logs again (§9.14 step 4: data connections are undisturbed
-	# throughout the full-fleet restart). Every wait of this stage from here
-	# on polls through data_undisturbed, which probes all four device nodes
-	# each time.
+	# reading its logs again (Integration test plan, What a pass means: data
+	# connections are undisturbed throughout the full-fleet restart). Every
+	# wait of this stage from here on polls through data_undisturbed, which
+	# probes all four device nodes each time.
 	for dir in "${CDC_DIRS[@]}"; do
 		wait_until "$WAIT_SHORT" "$dir to exit" \
 			data_undisturbed cdc_gone "$dir"
@@ -2430,7 +2453,7 @@ main() {
 	log "  h1:                    $H1   ip $IPH1"
 	log "  h2:                    $H2   ip $IPH2"
 	log "NOTE: this suite occupies all four lab VMs; no other dnv suite may"
-	log "      run anywhere in the lab while it does (§9.2)."
+	log "      run anywhere in the lab while it does (Integration test plan, Topology)."
 
 	if [ "$CLEANUP_ONLY" -eq 1 ]; then
 		STAGE="cleanup-only"

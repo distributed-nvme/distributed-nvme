@@ -8,11 +8,13 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Stored-conf validation (dnagent.md §2.1, architecture.md §7)
+// Stored-conf validation (dnagent.md, Shared mechanism — package `agent`;
+// architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 //
 // conf.go is a deliberate SECOND copy of model's stored-conf rules, because
-// layout.md §3 forbids the agent packages from importing model. The error
+// layout.md, Dependency rules, forbids the agent packages from importing model.
+// The error
 // strings are the contract that keeps the two copies in step: the gateway
 // turns model's into an ABORTED message, the agents put these into an
 // AgentReply's details, and one grep finds every refusal. So the table below
@@ -20,14 +22,15 @@ import (
 // model/capacity_test.go asserts — a change made to one copy and not the
 // other goes red here or there.
 //
-// The defaults themselves stay out of this package. cnagent.md §7 item 10
-// greps agent/ for the four `common.Default*` conf constants and requires no
-// hit, because an agent that can name one is an agent that could substitute
-// it; the fixtures below therefore carry plain numbers.
+// The defaults themselves stay out of this package: the agent holds no conf
+// default of its own (cnagent.md CN8, CN13) and its code names none of the
+// four `common.Default*` conf constants, because an agent that can name one is
+// an agent that could substitute it; the fixtures below therefore carry plain
+// numbers.
 
 // confBdevConf is a stored BdevConf with every member ValidateBdevConf
 // requires concrete, and no redund_conf — which is the redund_none choice
-// (architecture.md §8.4), the arm that has no bitmap at all.
+// (architecture.md, Storage pools), the arm that has no bitmap at all.
 func confBdevConf() *pb.BdevConf {
 	return &pb.BdevConf{
 		DmPoolConf: &pb.DmPoolConf{
@@ -90,9 +93,9 @@ func TestValidateBdevConf(t *testing.T) {
 			conf: confRaid1BdevConf(128),
 		},
 		{
-			// Above 100 means "never auto-grow this pool" (§7) and is a
-			// value, not a fault: this validator checks presence, never
-			// range.
+			// Above 100 means "never auto-grow this pool" (architecture.md,
+			// Common validation) and is a value, not a fault: this validator
+			// checks presence, never range.
 			name: "low_water_mark_pct above 100",
 			conf: autoGrowOff,
 		},

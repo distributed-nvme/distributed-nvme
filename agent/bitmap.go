@@ -5,11 +5,13 @@ import (
 	"sort"
 )
 
-// Bitmap conventions (architecture.md §9.6, §11.4):
+// Bitmap conventions (architecture.md, Bitmap push protocol and
+// raid0 bitmap math):
 //
 //   - Every Gateway/etcd/Push*Bitmap bitmap is "1 = unwritten/skippable";
-//     thin-pool metadata and the §11.4 formulas are "written/copied = 1". The
-//     inversion happens exactly once, where thin-pool metadata is read — so
+//     thin-pool metadata and the raid0 bitmap math formulas are
+//     "written/copied = 1". The inversion happens exactly once, where thin-pool
+//     metadata is read — so
 //     the chunks that reach an agent are already in wire convention and a set
 //     bit means "this region need not be copied".
 //   - Bits are addressed LSB-first inside each byte: bit i lives in
@@ -23,7 +25,8 @@ const bitsPerByte = 8
 // BitmapBitCount is the number of bits a chunk carries.
 //
 // It is for **wire chunks only**, where every bit of every byte is meaningful
-// by construction (chunks are byte-aligned, §11.4). It must never be used as
+// by construction (chunks are byte-aligned; architecture.md,
+// raid0 bitmap math). It must never be used as
 // the bit count of a bitmap whose logical length is not a multiple of 8 — a
 // side's zeroed_bits, say: there it would count the trailing pad bits and
 // report a 10-extent side as 16-extent.
@@ -41,9 +44,9 @@ func BitmapBit(bitmap []byte, idx uint64) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Explicit-bit-count helpers (§9.4 side provisioning).
+// Explicit-bit-count helpers (architecture.md, Side provisioning protocol).
 //
-// The §9.4 side-provisioning bitmap (DnDiskTable.SideRecord.zeroed_bits, bit i
+// The side-provisioning bitmap (DnDiskTable.SideRecord.zeroed_bits, bit i
 // = logical extent i is zeroed) uses the same LSB-first encoding as the wire
 // chunks above, but its logical length — the side's extent count — is rarely a
 // multiple of 8. Every helper below therefore takes that count explicitly and
@@ -99,8 +102,8 @@ func BitmapAllSet(bitmap []byte, bits uint64) bool {
 
 // BitmapFirstUnset returns the lowest index < bits whose bit is 0, and false
 // when every one of the first bits bits is set. It is the batch cursor of the
-// §9.4 zeroing loop: the first not-yet-zeroed extent, which is correct even
-// when the set bits are not a contiguous prefix.
+// zeroing loop (dnagent.md DN9): the first not-yet-zeroed extent, which is
+// correct even when the set bits are not a contiguous prefix.
 func BitmapFirstUnset(bitmap []byte, bits uint64) (uint64, bool) {
 	for idx := uint64(0); idx < bits; idx++ {
 		if !BitmapBit(bitmap, idx) {
@@ -193,7 +196,8 @@ func (c *ChunkSet) ContiguousPrefix() []byte {
 }
 
 // CloneChunkKey addresses one clone bitmap chunk: the source slice it
-// describes and its index within that slice's bitmap (§9.6).
+// describes and its index within that slice's bitmap (architecture.md,
+// Bitmap push protocol).
 type CloneChunkKey struct {
 	SliceIdx uint32
 	BmIdx    uint32
@@ -205,7 +209,8 @@ type CloneChunkKey struct {
 // (SH22): chunks may arrive in any order, a chunk may be missing entirely, and
 // one may keep growing in place up to its fixed capacity ([D8]). There is
 // deliberately no ContiguousPrefix analogue — concatenating clone chunks would
-// place them at the wrong offsets; the §11.4 fold reads them in place instead.
+// place them at the wrong offsets; the fold of architecture.md,
+// raid0 bitmap math, reads them in place instead.
 // The applied set reported through BitmapInfo.chunk_id_list is always derived
 // from this set, so it survives restarts (SH21).
 type CloneChunkSet struct {
@@ -261,8 +266,10 @@ type SkipRange struct {
 //
 // Bit i of the bitmap describes region shiftRegions+i of the device — the dn
 // shift by the leg's meta_blocks, whose blocks are never skippable because
-// the md superblock and write-intent bitmap must be copied verbatim (§8.11,
-// §3.6). regionSize is the dm-clone region (= the SP's block_size) and
+// the md superblock and write-intent bitmap must be copied verbatim
+// (architecture.md, Migrations, and
+// Group on-leg layout: meta region, data region, health block). regionSize is
+// the dm-clone region (= the SP's block_size) and
 // regionCnt bounds the device, so a bitmap longer than the device discards
 // nothing beyond it.
 func SkipRanges(

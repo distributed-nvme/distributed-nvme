@@ -16,7 +16,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// §6.27 — a zero conf member is refused (CN8, dnagent.md §2.1)
+// A zero conf member is refused (CN8, dnagent.md SH9)
 // ---------------------------------------------------------------------------
 //
 // The control plane resolves every defaultable member when it writes the
@@ -26,7 +26,8 @@ import (
 //
 // The four messages below are asserted verbatim and are the same literals
 // model/capacity_test.go asserts of model.ValidateBdevConf, which is what
-// keeps the two deliberate copies of the rule in step (dnagent.md §2.1).
+// keeps the two deliberate copies of the rule in step (dnagent.md, Files under
+// Shared mechanism — package `agent`).
 
 const (
 	msgNoBlockSize = "invalid stored conf: " +
@@ -81,7 +82,7 @@ func zeroConfReq(o reqOpts, zero func(conf *pb.BdevConf)) *pb.SyncupCntlrRequest
 	return req
 }
 
-// assertRefusalRecord is the one Error record §7 asks for: msg
+// assertRefusalRecord is the one Error record CN8 asks for: msg
 // msgInvalidStoredConf, the validator's own text under "error", and the ids
 // that name the cntlr an operator has to go look at.
 func assertRefusalRecord(
@@ -221,7 +222,8 @@ func storedProto(
 }
 
 // A redund_none conf with no bitmap chunk count is ACCEPTED: that member
-// exists only under the md-raid1 arm of the oneof (§8.4), so its absence is
+// exists only under the md-raid1 arm of the oneof (architecture.md, Storage
+// pools), so its absence is
 // correct rather than a missing default. The fixture's default redund_conf is
 // redund_none, so the plain converge is the assertion — but the cn's own
 // validator is checked directly too, because a fixture that happened to stop
@@ -272,7 +274,8 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 		node.Reset()
 		reconcileForTest(t, srv)
 
-		// The CN base state (§3.2) still converges — the mount, the arena
+		// The CN base state (architecture.md, Controller node, common) still
+		// converges — the mount, the arena
 		// file, the loop device and the port. The refusal is scoped to the
 		// cntlr, and every object a cntlr converge would build or sweep is
 		// named by one of these: its dm devices, its md arrays, its leg
@@ -343,7 +346,7 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.33 — an unreadable cn file deletes nothing it might own (CN2)
+// An unreadable cn file deletes nothing it might own (CN2)
 // ---------------------------------------------------------------------------
 
 // seedCntlrFiles writes the fixture cntlr's state file — a primary with one

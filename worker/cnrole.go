@@ -13,9 +13,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// cnDriver is the cn role's half of the per-object loop (§8.3), the mirror
-// image of dnDriver: CnConf at CnConfKey, SyncupCn carrying the CN's
-// cntlr_pointer_list and the cluster's qos_ratio, CheckCn rounds, HL1 health.
+// cnDriver is the cn role's half of the per-object loop (dnv-worker.md,
+// cn role — `worker/cnrole.go`), the mirror image of dnDriver: CnConf at
+// CnConfKey, SyncupCn carrying the CN's cntlr_pointer_list and the cluster's
+// qos_ratio, CheckCn rounds, HL1 health.
 type cnDriver struct {
 	deps *deps
 	cid  uint64
@@ -27,8 +28,9 @@ type cnDriver struct {
 	// mu guards lastInfo, the latest CnInfo the agent reported (RW2, HL5).
 	// fold runs on the stream's PUMP goroutine for a CheckCn reply and on the
 	// LOOP's for a SyncupCn one, while the loop reads the field in observe and
-	// rewrites the message's rows in place in unreachable (§9.5) — see
-	// dnDriver.mu for the RW4 step 4 overlap the lock closes.
+	// rewrites the message's rows in place in unreachable (architecture.md,
+	// Live-state reporting) — see dnDriver.mu for the RW4 step 4 overlap the
+	// lock closes.
 	mu       sync.Mutex
 	lastInfo *pb.CnInfo
 
@@ -48,17 +50,18 @@ func (d *cnDriver) info() *pb.CnInfo {
 	return d.lastInfo
 }
 
-// markInfoUnknown is §9.5's "no answer from the node" applied in place to the
-// last known info, under the lock a concurrent fold takes (HL1).
+// markInfoUnknown is the "no answer from the node" of architecture.md,
+// Live-state reporting, applied in place to the last known info, under the lock
+// a concurrent fold takes (HL1).
 func (d *cnDriver) markInfoUnknown() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	markCnUnknown(d.lastInfo)
 }
 
-// newCnDriver builds the cn driver of one revision worker (§8.3). host is the
-// generic loop this driver belongs to; like the dn driver it never calls back
-// into it.
+// newCnDriver builds the cn driver of one revision worker (dnv-worker.md,
+// cn role — `worker/cnrole.go`). host is the generic loop this driver belongs
+// to; like the dn driver it never calls back into it.
 func newCnDriver(p revWorkerParams, host *revWorker) objDriver {
 	d := &cnDriver{
 		deps:     p.deps,
@@ -71,7 +74,8 @@ func newCnDriver(p revWorkerParams, host *revWorker) objDriver {
 	return d
 }
 
-// logAttrs are the CN's ids as the §12 records carry them.
+// logAttrs are the CN's ids as the records of dnv-worker.md, Log records, carry
+// them.
 func (d *cnDriver) logAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.Uint64("cluster_id", d.cid),
@@ -96,7 +100,7 @@ func (d *cnDriver) interval(cc *pb.ClusterConf) time.Duration {
 }
 
 // setDesired installs a new revision and endpoint (RW3). A moved CN re-syncs
-// at its new endpoint exactly like a moved DN (§10.2).
+// at its new endpoint exactly like a moved DN (architecture.md, dn / cn roles).
 func (d *cnDriver) setDesired(next desiredState) {
 	d.revision = next.revision
 	d.addr = next.handle
@@ -114,10 +118,11 @@ func (d *cnDriver) openStream(
 	return &cnCheckStream{driver: d, stream: stream}, nil
 }
 
-// syncup issues one SyncupCn (RW5, §8.3). A missing CnConf is logged and
-// skipped, and the next round retries. The read re-seeds the health memo from
-// the CN's record, as the dn driver's does (HL3); a quiet CN never syncs, and
-// its monitor's refresh reads the record instead.
+// syncup issues one SyncupCn (RW5; dnv-worker.md, cn role —
+// `worker/cnrole.go`). A missing CnConf is logged and skipped, and the next
+// round retries. The read re-seeds the health memo from the CN's record, as the
+// dn driver's does (HL3); a quiet CN never syncs, and its monitor's refresh
+// reads the record instead.
 func (d *cnDriver) syncup(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -158,7 +163,7 @@ func (d *cnDriver) observe(ctx context.Context, r *replyState) {
 }
 
 // unreachable folds a broken stream or a missed reply into the CN's health
-// (HL1, §9.5).
+// (HL1; architecture.md, Live-state reporting).
 func (d *cnDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.health.observe(ctx, healthUnreachable, "")
@@ -213,8 +218,9 @@ func (s *cnCheckStream) closeSend() error {
 	return s.stream.CloseSend()
 }
 
-// cnSyncupRequest builds the SyncupCn request of §8.3: the cntlr pointer list
-// is CnConf's, authoritative and complete (§9.1), and qos_ratio is the
+// cnSyncupRequest builds the SyncupCn request (dnv-worker.md, cn role —
+// `worker/cnrole.go`): the cntlr pointer list is CnConf's, authoritative and
+// complete (architecture.md, Common agent rules), and qos_ratio is the
 // cluster conf's as stored (RW9).
 func cnSyncupRequest(
 	cid uint64,

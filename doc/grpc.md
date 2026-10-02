@@ -1,585 +1,195 @@
-# grpc.md — gRPC Interceptor Specification (dnv)
+# grpc.md — gRPC interceptors
 
-Status: **normative**. Read `log.md` first — this document reuses
-`WithTraceId`, `TraceIdFromCtx`, `TraceIdMetadataKey` and `PbToLogValue`, and
-follows its rules (Info records, typed attributes).
+This document owns the four gRPC interceptors every dnv connection and server
+chains: the trace-id propagation between context and gRPC metadata, the
+logging of every request and reply message with its record names and
+ordering, the wiring rule that puts both chains on every dnv client
+connection and server, and the conventions the integration-test drivers and
+fakes follow instead. It leans on `log.md` for the helpers it reuses
+(`WithTraceId`, `TraceIdFromCtx`, `TraceIdMetadataKey`, `PbToLogValue`) and
+for its rules on Info records and typed attributes, on `schema.proto` for the
+three services (`Gateway`, `DiskNodeAgent`, `ControllerNodeAgent`), and on
+`architecture.md`, System overview, for who calls whom.
 
-Required background: `schema.proto` (services `Gateway`, `DiskNodeAgent`,
-`ControllerNodeAgent`; note that the four `Check*` RPCs — `CheckDn`, `CheckSide`,
-`CheckCn`, `CheckCntlr` — are bidirectional streams and every other RPC is unary),
-`architecture.md` §1/§9/§10 (who calls whom), `log.md`.
+## Placement
 
----
+The interceptors live in package `common`, in `common/interceptor.go`. They
+apply to dnv-internal gRPC only: the `Gateway` service (dnvctl and users to
+dnv-gateway) and the agent services (dnv-gateway and dnv-worker to
+dnv-agent). They are not attached to the etcd client: etcd logging is done at
+the call sites (`log.md`, etcd), because a message logger on etcd's own RPCs
+would log raw key and value bytes and violate the human-readable-data rule.
 
-## 1. Scope and placement
+Of the RPCs `schema.proto` declares, the four `Check*` RPCs — `CheckDn`,
+`CheckSide`, `CheckCn`, `CheckCntlr` — are bidirectional streams and every
+other RPC is unary, so four interceptors are required: unary client
+(`GrpcUnaryClientInterceptor`), stream client
+(`GrpcStreamClientInterceptor`), unary server
+(`GrpcUnaryServerInterceptor`) and stream server
+(`GrpcStreamServerInterceptor`). They depend on the gRPC and protobuf
+modules (`dependencies.md`, Direct dependencies).
 
-* File: `common/interceptor.go` (+ `common/interceptor_test.go`), package
-  `common`.
-* The interceptors apply to **dnv-internal gRPC** only: the `Gateway` service
-  (dnvctl/users → dnv-gateway) and the agent services (dnv-gateway/dnv-worker
-  → dnv-agent). They are **not** attached to the etcd client — etcd logging is
-  done at the call sites per `log.md` §5.3 (attaching a message logger to
-  etcd's own RPCs would log raw key/value bytes, violating the
-  "human readable data" rule).
-* Because `schema.proto` uses both unary and bidirectional-streaming RPCs,
-  four interceptors are required: unary client, stream client, unary server,
-  stream server.
-* Dependencies: `google.golang.org/grpc`, `google.golang.org/protobuf`.
-
-## 2. Normative requirements
-
-### 2.1 Trace-id propagation
+## Trace-id propagation
 
 T1. **Client side (unary and stream)**: if the outgoing ctx carries a trace id
     (`TraceIdFromCtx`), append it to the outgoing gRPC metadata under
-    `TraceIdMetadataKey` (`"trace_id"`) with
-    `metadata.AppendToOutgoingContext`. If the ctx carries none, do nothing —
-    the interceptor never invents a trace id.
+    `TraceIdMetadataKey` with `metadata.AppendToOutgoingContext`. If the ctx
+    carries none, do nothing — the interceptor never invents a trace id.
 
-T2. **Server side (unary and stream)**: if the incoming metadata contains a
-    non-empty `"trace_id"` value, take the first value and put it into the
-    request ctx with `WithTraceId` **before** any logging and before invoking
-    the handler, so every downstream record (handler logic, `OsClient` calls,
-    etcd calls, further outbound RPCs) carries it. For streams this means
-    wrapping the `grpc.ServerStream` so `Context()` returns the enriched ctx.
+T2. **Server side (unary and stream)**: if the incoming metadata carries a
+    non-empty value under `TraceIdMetadataKey`, take the first value and put
+    it into the request ctx with `WithTraceId` **before** any logging and
+    before invoking the handler, so every downstream record (handler logic,
+    `OsClient` calls, etcd calls, further outbound RPCs) carries it. For
+    streams this means wrapping the `grpc.ServerStream` so its `Context`
+    method returns the enriched ctx.
 
-T3. Propagation is transitive end to end by construction: dnvctl mints an id →
-    client interceptor puts it in metadata → gateway server interceptor puts
-    it in ctx → gateway's outbound agent calls go through the client
-    interceptor with that ctx → agent server interceptor restores it → the
-    agent's `OsClient`/state-file logs carry the same `trace_id`.
-    A stream's metadata travels once, when the stream opens, so a long-lived
-    `Check*` stream (`architecture.md` §9.7) carries in its metadata only the
-    id of the worker round that opened it, while every round runs under an
-    id of its own (`dnv-worker.md` RW10). On these streams the id therefore
-    also travels in the request: every `Check*Request` the worker sends
-    carries its round's id in `trace_id`, and the agent runs the round under
-    it (`agent.CheckRoundCtx`, `dnagent.md` SH24), so that round's `os …`
-    records carry the round's id; an empty `trace_id` keeps the stream's.
-    The stream's own per-message records (L4) are logged under the stream
-    ctx and keep the id it was opened with; a round's id shows in the `data`
-    of its request's `grpc client send` / `grpc server recv` records.
+T3. Propagation is transitive end to end by construction: dnvctl mints an id,
+    the client interceptor puts it in metadata, the gateway's server
+    interceptor puts it in ctx, the gateway's outbound agent calls go through
+    the client interceptor with that ctx, the agent's server interceptor
+    restores it, and the agent's `OsClient` and state-file logs carry the
+    same `trace_id`. A stream's metadata travels once, when the stream
+    opens, so a long-lived `Check*` stream (`architecture.md`, Check
+    streams) carries in its metadata only the id of the worker round that
+    opened it, while every round runs under an id of its own
+    (`dnv-worker.md` RW10). On these streams the id therefore also travels
+    in the request: every `Check*Request` the worker sends carries its
+    round's id in `trace_id`, and the agent runs the round under it
+    (`agent.CheckRoundCtx`, `dnagent.md` SH24), so that round's
+    `os command` and file records carry the round's id; an empty `trace_id`
+    keeps the stream's. The stream's own per-message records (L4) are logged
+    under the stream ctx and keep the id its metadata brought at open; a
+    round's id shows in the `data` of its request's `grpc client send` and
+    `grpc server recv` records.
 
-T4. Minting trace ids is the entry points' job, not the §3 interceptors'
-    (non-normative recommendation): `dnvctl` creates one per CLI invocation,
-    `dnv-worker` one per RW10 unit of work — each Check round (an in-round
-    syncup shares the round's id), each out-of-round syncup, sp fan-out,
-    reaction pass, report/flip STM and bitmap chunk push — and `dnv-gateway` mints one for a
-    request that arrived without one — not in its handlers but in its own
-    `ensureTraceIdUnary`/`ensureTraceIdStream` interceptors
-    (`gateway/traceid.go`), which `serverOptions` (`gateway/server.go`) chains
-    AHEAD of the §4 pair, so the id is already in the incoming metadata when
-    the shared chain logs the request (`gateway.md` §0 #6, §3). Each daemon
-    also mints one at startup, for its startup and other process-lifetime
-    records; `dnv-agent` mints one per attempt of a background task
-    (`dnagent.md` SH27: each background re-converge of a side or a cntlr,
-    each zeroing batch, each leg probe round) — all but one: the cn sweep's
-    background `nvme disconnect` (`cnagent.md` CN10) runs under the id of
-    the pass that set it going, and mints one only when that pass had none —
-    and `dnv-cdc` one per accepted host connection, one per scan attempt
-    (the watch it opens included) and one per applied watch event. The §3
-    interceptors themselves never mint. The generator, `common.NewTraceId` in
-    `common/log.go`, in outline:
+T4. Minting trace ids is the entry points' job, not the interceptors' (for
+    the entry points a recommendation; the interceptors themselves never
+    mint). `dnvctl` creates one per CLI invocation; `dnv-worker` one per unit
+    of work, an in-round syncup sharing the round's id (`dnv-worker.md`
+    RW10); `dnv-gateway` mints one for a request
+    that arrived without one — not in its handlers but in its own
+    `ensureTraceIdUnary` and `ensureTraceIdStream` interceptors
+    (`gateway/traceid.go`), which `serverOptions` chains ahead of the shared
+    pair, so the id is already in the incoming metadata when the shared
+    chain logs the request (`gateway.md`, Serving and lifecycle). Each
+    daemon also mints one at startup, for its startup and other
+    process-lifetime records; `dnv-agent` mints one per attempt of a
+    background task, all but one: the cn sweep's background
+    "nvme disconnect" runs under the id of the pass that set it going and
+    mints one only when that pass had none (`dnagent.md` SH27, `cnagent.md`
+    CN10); and `dnv-cdc` mints one per accepted host connection, one per
+    scan attempt (the watch it opens included) and one per applied watch
+    event. The generator is `NewTraceId` (`log.md`, Placement).
 
-    ```go
-    func NewTraceId() string {
-        var b [8]byte
-        rand.Read(b[:]) // crypto/rand
-        return hex.EncodeToString(b[:])
-    }
-    // ctx := common.WithTraceId(context.Background(), common.NewTraceId())
-    ```
-
-### 2.2 Message logging
+## Message logging
 
 L1. Every request and reply **message** is logged at Info with
-    `slog.InfoContext` using the (trace-enriched) ctx. Attributes:
-    `method` (the full method string, e.g. `/DiskNodeAgent/SyncupSide`),
-    `data` (`slog.Any` of `PbToLogValue(msg)`), and `error?` (only when the
-    call/step failed). `PbToLogValue` guarantees that `bytes` fields — the
-    `bitmap` payloads of `Push*Bitmap`, `Append*Bitmap`, `Get*Bitmap`/`Get*Bm`
-    — are logged as `"<N bytes>"` only.
+    `slog.InfoContext` using the trace-enriched ctx. Attributes: `method`
+    (the full method string), `data` (`slog.Any` of the message as
+    `PbToLogValue` renders it), and "error?" (only when the call or step
+    failed). `PbToLogValue` guarantees that `bytes` fields — the `bitmap`
+    payloads of `Push*Bitmap`, `Append*Bitmap` and `Get*Bitmap`/`Get*Bm` —
+    are logged as a byte count only. Only populated fields appear
+    (`log.md` R10), so a reply whose fields all hold their zero values
+    renders as an empty object; that is acceptable.
 
-L2. Canonical `msg` strings (normative):
+L2. The record names are normative:
 
-    | side | event | msg |
-    |---|---|---|
-    | client | unary request sent | `grpc client request` |
-    | client | unary reply received | `grpc client reply` |
-    | client | stream opened | `grpc client stream open` |
-    | client | stream message sent | `grpc client send` |
-    | client | stream message received | `grpc client recv` |
-    | server | unary request received | `grpc server request` |
-    | server | unary reply sent | `grpc server reply` |
-    | server | stream opened | `grpc server stream open` |
-    | server | stream message received | `grpc server recv` |
-    | server | stream message sent | `grpc server send` |
-    | server | stream handler returned | `grpc server stream close` |
+    * client side: `grpc client request` (unary request sent),
+      `grpc client reply` (unary reply received), `grpc client stream open`
+      (stream opened), `grpc client send` (stream message sent) and
+      `grpc client recv` (stream message received);
+    * server side: `grpc server request` (unary request received),
+      `grpc server reply` (unary reply sent), `grpc server stream open`
+      (stream opened), `grpc server recv` (stream message received),
+      `grpc server send` (stream message sent) and
+      `grpc server stream close` (stream handler returned).
 
-L3. Unary ordering: client logs the request before invoking and the
-    reply/error after; server logs the request after trace extraction (T2) and
-    the reply/error after the handler returns. On error, the reply record
-    carries `method` + `error` and omits `data` (the reply message is not
-    meaningful).
+L3. Unary ordering: the client logs the request before invoking and the
+    reply or error after; the server logs the request after trace extraction
+    (T2) and the reply or error after the handler returns. On error, the
+    reply record carries `method` and `error` and omits `data` (the reply
+    message is not meaningful).
 
-L4. Stream rules: `stream open` records carry `method` (+ `error?` if opening
-    failed). Each `SendMsg`/`RecvMsg` logs one record per message. A client
-    `RecvMsg` returning `io.EOF` is the normal end of stream and is **not**
-    logged; a server `RecvMsg` returning `io.EOF` likewise. Any other
-    `Send/Recv` error logs `method` + `error` without `data`. There is no
-    client-side "stream close" record (streams end via EOF/ctx); the server
-    logs `grpc server stream close` when the handler returns.
+L4. Stream rules: `stream open` records carry `method` (plus "error?" if
+    opening failed). Each `SendMsg` and `RecvMsg` logs one record per
+    message. A client `RecvMsg` returning `io.EOF` is the normal end of
+    stream and is **not** logged; a server `RecvMsg` returning `io.EOF`
+    likewise. Any other send or receive error logs `method` and `error`
+    without `data`. There is no client-side "stream close" record (streams
+    end via EOF or ctx); the server logs `grpc server stream close` when the
+    handler returns.
 
-L5. If a message is not a `proto.Message` (defensive; should not happen with
-    generated code), fall back to `slog.Any("data", msg)`.
+L5. If a message is not a `proto.Message` (defensive; it does not happen
+    with generated code), fall back to `slog.Any` of the raw message.
 
-L6. The long-lived `Check*` streams of `architecture.md` §9.7 carry one
-    request/reply pair per health round; with per-message logging each round
-    produces its own records, just as every unary `Syncup*`/`Push*Bitmap` call
-    produces one request and one reply record — which is exactly the intent of
-    the "all grpc client/server request/reply" rule.
+L6. The long-lived `Check*` streams (`architecture.md`, Check streams) carry
+    one request/reply pair per health round; with per-message logging each
+    round produces its own records, just as every unary `Syncup*` and
+    `Push*Bitmap` call produces one request and one reply record — which is
+    exactly the intent of the "all grpc client/server request/reply" rule
+    (`log.md` R8).
 
-## 3. Reference implementation — `common/interceptor.go` (complete)
+## Wiring
 
-```go
-package common
+Every dnv binary uses both chain options on every dnv connection and server.
+A client connection (dnvctl to the gateway; the gateway and the worker to the
+agents) is dialed with `grpc.NewClient` under plaintext transport credentials
+(`insecure.NewCredentials`) and both client chain options,
+`grpc.WithChainUnaryInterceptor` with `GrpcUnaryClientInterceptor` and
+`grpc.WithChainStreamInterceptor` with `GrpcStreamClientInterceptor`. A server
+(the gateway's `Gateway` service; the agents' `DiskNodeAgent` and
+`ControllerNodeAgent`) is built with `grpc.NewServer` under both server chain
+options, `grpc.ChainUnaryInterceptor` with `GrpcUnaryServerInterceptor` and
+`grpc.ChainStreamInterceptor` with `GrpcStreamServerInterceptor`; the gateway
+chains its trace-id mint ahead of them (T4).
 
-import (
-	"context"
-	"errors"
-	"io"
-	"log/slog"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/proto"
-)
-
-// pbLogAttr renders a gRPC message for logging (log.md R10, grpc.md L1/L5).
-func pbLogAttr(key string, msg any) slog.Attr {
-	if pbMsg, ok := msg.(proto.Message); ok {
-		return slog.Any(key, PbToLogValue(pbMsg))
-	}
-	return slog.Any(key, msg)
-}
-
-// attachTraceId copies the ctx trace id into the outgoing metadata (T1).
-func attachTraceId(ctx context.Context) context.Context {
-	if traceId, ok := TraceIdFromCtx(ctx); ok {
-		return metadata.AppendToOutgoingContext(
-			ctx, TraceIdMetadataKey, traceId,
-		)
-	}
-	return ctx
-}
-
-// extractTraceId copies the incoming-metadata trace id into the ctx (T2).
-func extractTraceId(ctx context.Context) context.Context {
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if vals := md.Get(TraceIdMetadataKey); len(vals) > 0 && vals[0] != "" {
-			return WithTraceId(ctx, vals[0])
-		}
-	}
-	return ctx
-}
-
-// ---------------------------------------------------------------------------
-// Client side
-// ---------------------------------------------------------------------------
-
-// GrpcUnaryClientInterceptor propagates the trace id and logs the request and
-// reply of every unary call.
-func GrpcUnaryClientInterceptor() grpc.UnaryClientInterceptor {
-	return func(
-		ctx context.Context,
-		method string,
-		req any,
-		reply any,
-		cc *grpc.ClientConn,
-		invoker grpc.UnaryInvoker,
-		opts ...grpc.CallOption,
-	) error {
-		ctx = attachTraceId(ctx)
-		slog.InfoContext(ctx, "grpc client request",
-			slog.String("method", method),
-			pbLogAttr("data", req),
-		)
-		err := invoker(ctx, method, req, reply, cc, opts...)
-		if err != nil {
-			slog.InfoContext(ctx, "grpc client reply",
-				slog.String("method", method),
-				slog.String("error", err.Error()),
-			)
-			return err
-		}
-		slog.InfoContext(ctx, "grpc client reply",
-			slog.String("method", method),
-			pbLogAttr("data", reply),
-		)
-		return nil
-	}
-}
-
-// GrpcStreamClientInterceptor propagates the trace id at stream creation and
-// logs every sent/received message.
-func GrpcStreamClientInterceptor() grpc.StreamClientInterceptor {
-	return func(
-		ctx context.Context,
-		desc *grpc.StreamDesc,
-		cc *grpc.ClientConn,
-		method string,
-		streamer grpc.Streamer,
-		opts ...grpc.CallOption,
-	) (grpc.ClientStream, error) {
-		ctx = attachTraceId(ctx)
-		clientStream, err := streamer(ctx, desc, cc, method, opts...)
-		if err != nil {
-			slog.InfoContext(ctx, "grpc client stream open",
-				slog.String("method", method),
-				slog.String("error", err.Error()),
-			)
-			return nil, err
-		}
-		slog.InfoContext(ctx, "grpc client stream open",
-			slog.String("method", method),
-		)
-		return &loggingClientStream{
-			ClientStream: clientStream,
-			ctx:          ctx,
-			method:       method,
-		}, nil
-	}
-}
-
-type loggingClientStream struct {
-	grpc.ClientStream
-	ctx    context.Context
-	method string
-}
-
-func (s *loggingClientStream) SendMsg(m any) error {
-	err := s.ClientStream.SendMsg(m)
-	if err != nil {
-		slog.InfoContext(s.ctx, "grpc client send",
-			slog.String("method", s.method),
-			slog.String("error", err.Error()),
-		)
-		return err
-	}
-	slog.InfoContext(s.ctx, "grpc client send",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
-	return nil
-}
-
-func (s *loggingClientStream) RecvMsg(m any) error {
-	err := s.ClientStream.RecvMsg(m)
-	if errors.Is(err, io.EOF) {
-		return err // normal end of stream: not logged (L4)
-	}
-	if err != nil {
-		slog.InfoContext(s.ctx, "grpc client recv",
-			slog.String("method", s.method),
-			slog.String("error", err.Error()),
-		)
-		return err
-	}
-	slog.InfoContext(s.ctx, "grpc client recv",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Server side
-// ---------------------------------------------------------------------------
-
-// GrpcUnaryServerInterceptor extracts the trace id from metadata into the ctx
-// and logs the request and reply of every unary call.
-func GrpcUnaryServerInterceptor() grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context,
-		req any,
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	) (any, error) {
-		ctx = extractTraceId(ctx)
-		slog.InfoContext(ctx, "grpc server request",
-			slog.String("method", info.FullMethod),
-			pbLogAttr("data", req),
-		)
-		reply, err := handler(ctx, req)
-		if err != nil {
-			slog.InfoContext(ctx, "grpc server reply",
-				slog.String("method", info.FullMethod),
-				slog.String("error", err.Error()),
-			)
-			return reply, err
-		}
-		slog.InfoContext(ctx, "grpc server reply",
-			slog.String("method", info.FullMethod),
-			pbLogAttr("data", reply),
-		)
-		return reply, nil
-	}
-}
-
-// GrpcStreamServerInterceptor extracts the trace id into the stream context
-// and logs every received/sent message.
-func GrpcStreamServerInterceptor() grpc.StreamServerInterceptor {
-	return func(
-		srv any,
-		serverStream grpc.ServerStream,
-		info *grpc.StreamServerInfo,
-		handler grpc.StreamHandler,
-	) error {
-		ctx := extractTraceId(serverStream.Context())
-		slog.InfoContext(ctx, "grpc server stream open",
-			slog.String("method", info.FullMethod),
-		)
-		wrapped := &loggingServerStream{
-			ServerStream: serverStream,
-			ctx:          ctx,
-			method:       info.FullMethod,
-		}
-		err := handler(srv, wrapped)
-		if err != nil {
-			slog.InfoContext(ctx, "grpc server stream close",
-				slog.String("method", info.FullMethod),
-				slog.String("error", err.Error()),
-			)
-			return err
-		}
-		slog.InfoContext(ctx, "grpc server stream close",
-			slog.String("method", info.FullMethod),
-		)
-		return nil
-	}
-}
-
-type loggingServerStream struct {
-	grpc.ServerStream
-	ctx    context.Context
-	method string
-}
-
-// Context returns the trace-enriched ctx so handler code (and everything it
-// calls: OsClient, etcd helpers, outbound RPCs) logs with the trace id (T2).
-func (s *loggingServerStream) Context() context.Context {
-	return s.ctx
-}
-
-func (s *loggingServerStream) RecvMsg(m any) error {
-	err := s.ServerStream.RecvMsg(m)
-	if errors.Is(err, io.EOF) {
-		return err // client finished sending: not logged (L4)
-	}
-	if err != nil {
-		slog.InfoContext(s.ctx, "grpc server recv",
-			slog.String("method", s.method),
-			slog.String("error", err.Error()),
-		)
-		return err
-	}
-	slog.InfoContext(s.ctx, "grpc server recv",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
-	return nil
-}
-
-func (s *loggingServerStream) SendMsg(m any) error {
-	err := s.ServerStream.SendMsg(m)
-	if err != nil {
-		slog.InfoContext(s.ctx, "grpc server send",
-			slog.String("method", s.method),
-			slog.String("error", err.Error()),
-		)
-		return err
-	}
-	slog.InfoContext(s.ctx, "grpc server send",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
-	return nil
-}
-```
-
-## 4. Wiring (every dnv binary MUST use both chain options on every dnv connection/server)
-
-Client connections (dnvctl → gateway; gateway/worker → agents):
-
-```go
-conn, err := grpc.NewClient(
-	target,
-	grpc.WithTransportCredentials(insecure.NewCredentials()),
-	grpc.WithChainUnaryInterceptor(common.GrpcUnaryClientInterceptor()),
-	grpc.WithChainStreamInterceptor(common.GrpcStreamClientInterceptor()),
-)
-```
-
-Servers (gateway's `Gateway` service; agents' `DiskNodeAgent` /
-`ControllerNodeAgent`):
-
-```go
-grpcServer := grpc.NewServer(
-	grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
-	grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-)
-```
+Who is a server or a client of whom:
 
 | binary | server interceptors on | client interceptors on |
 |---|---|---|
-| dnv-gateway | its `Gateway` gRPC server | its connections to dn/cn agents (`GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, the `GetCntlrInfo`/`GetSideInfo` force=false checks of `DeleteClone`/`FinishMigration`, the `Get*Bm` bitmap reads) |
-| dnv-worker | — | its connections to dn/cn agents (`Syncup*`, `Push*Bitmap`, the `Check*` streams — the worker never calls `Get*Info`) |
-| dnv-agent dn / cn | its `DiskNodeAgent` / `ControllerNodeAgent` server | — |
-| dnvctl | — | its connection to the gateway (mints a trace id per invocation, T4) |
-| dnv-cdc | — | — (talks only to etcd; excluded, see §1) |
+| dnv-gateway | its `Gateway` gRPC server | its connections to dn and cn agents: the `Get*Size` calls, the `Get*Info` behind its `Inspect*`, the `GetCntlrInfo` and `GetSideInfo` checks that `DeleteClone` and `FinishMigration` make when `force` is false, and the `Get*Bm` bitmap reads (`gateway.md`, Agent calls) |
+| dnv-worker | — | its connections to dn and cn agents: `Syncup*`, `Push*Bitmap` and the `Check*` streams; the worker never calls `Get*Info` |
+| dnv-agent, dn and cn roles | its `DiskNodeAgent` or `ControllerNodeAgent` server | — |
+| dnvctl | — | its connection to the gateway (it mints a trace id per invocation, T4) |
+| dnv-cdc | — | — (it talks only to etcd and is excluded, see Placement) |
 
-Those five dnv binaries (`log.md` §1) are the whole of the rule. The
-`integtest/` drivers are not dnv components; §6 records the conventions they
-follow instead.
+Those five dnv binaries (`log.md`, Placement) are the whole of the rule. The
+`integtest/` drivers are not dnv components; the conventions they follow
+instead are the next section's.
 
-## 5. Example output
+## Drivers and fakes
 
-One (unary) `PushMigrBitmap` chunk, worker side then agent side:
-
-```json
-{"time":"...","level":"INFO","msg":"grpc client request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"...","level":"INFO","msg":"grpc server request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"...","level":"INFO","msg":"grpc server reply","method":"/DiskNodeAgent/PushMigrBitmap","data":{"agent_reply":{}},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"...","level":"INFO","msg":"grpc client reply","method":"/DiskNodeAgent/PushMigrBitmap","data":{"agent_reply":{}},"trace_id":"a1b2c3d4e5f60718"}
-```
-
-and one round on a long-lived `CheckDn` stream — the round that opened it, so
-the request's `trace_id` and the records' are the same id (T3):
-
-```json
-{"time":"...","level":"INFO","msg":"grpc client send","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true,"trace_id":"0a1b2c3d4e5f6071"},"trace_id":"0a1b2c3d4e5f6071"}
-{"time":"...","level":"INFO","msg":"grpc server recv","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true,"trace_id":"0a1b2c3d4e5f6071"},"trace_id":"0a1b2c3d4e5f6071"}
-{"time":"...","level":"INFO","msg":"grpc server send","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48 provisioning=0","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
-{"time":"...","level":"INFO","msg":"grpc client recv","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48 provisioning=0","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
-```
-
-(`agent_reply` renders as `{}` because `code = 0` and an empty `details` are proto3
-zero values and therefore unpopulated; a zero-valued scalar such as `bm_idx = 0` is
-omitted altogether. That is acceptable.)
-
-## 6. Tests and acceptance checklist
-
-Unit tests (`common/interceptor_test.go`) using
-`google.golang.org/grpc/test/bufconn` and the generated stubs from
-`schema.proto`:
-
-1. **Unary trace propagation**: register a stub `DiskNodeAgent` whose
-   `GetDnInfo` reads `metadata.FromIncomingContext` and also calls
-   `TraceIdFromCtx(ctx)`; dial via bufconn with both client interceptors;
-   call with `ctx = WithTraceId(context.Background(), "t-123")`; assert the
-   server saw metadata `trace_id=["t-123"]` and `TraceIdFromCtx` returned
-   `"t-123"` inside the handler.
-2. **No minting**: the same call without a ctx trace id produces no
-   `trace_id` metadata key.
-3. **Stream propagation**: a stub `CheckDn` echo handler asserts
-   `TraceIdFromCtx(stream.Context())` inside the handler (verifies the
-   `Context()` override).
-4. **Log records**: install a capturing handler (JSONHandler over a
-   `bytes.Buffer` wrapped in `TraceIdHandler`, as in `log.md` §7) around a
-   unary call and a two-round `CheckDn` stream exchange; assert the exact
-   `msg` strings of L2 appear in order, each with `method` and `trace_id`,
-   and with `data` on every request/reply record — the three stream
-   open/close records carry no `data` (L4), and the test asserts its absence
-   there; assert no record is emitted for the terminating `io.EOF`.
-5. **Bytes redaction**: send a `PushMigrBitmapRequest` with a 4-byte bitmap
-   through the (unary) `PushMigrBitmap`; assert the captured
-   `grpc client request` / `grpc server request` records contain
-   `"bitmap":"<4 bytes>"` and not the payload.
-6. **Error path**: a handler returning `status.Error(codes.Aborted, "boom")`
-   yields a `grpc server reply` / `grpc client reply` record with the `error`
-   attribute and no `data` attribute.
-
-Acceptance: `go test ./common/...` passes; every `grpc.NewClient` /
-`grpc.NewServer` call site reachable from the five `cmd/` binaries (except the
-etcd client) uses the chain options of §4 — today five of them:
-`gateway/server.go` (through `serverOptions`), `gateway/common.go`,
-`worker/conn.go`, `agent/agent.go` and `ctl/root.go`'s `dial`, which is
-dnvctl's connection to the gateway; a manual end-to-end run shows one
-`trace_id` value flowing dnvctl → gateway → agent across
-`grpc client request`, `grpc server request`, `os command` and `etcd put`
-records. `TestRefListingsVerbatim` (`common/doclisting_test.go`, run by
-`go test ./common/...`) holds §3's listing byte-identical to
-`common/interceptor.go`, so the listing and the file are edited together.
-
-The `integtest/` drivers are scoped out of that grep on purpose; what they do
-instead is recorded here, so that the one carve-out left does not live only in
-`gatewayctl`'s code comment:
+The `integtest/` drivers are scoped out of the wiring rule on purpose.
 
 * `gatewayctl`, `cnagentctl` and `dnagentctl` dial **without** the client
-  interceptors. A driver is not a dnv component, and its own request/reply
-  records would only duplicate what the gateway or agent it calls already
-  logs — the suites read the daemon's log, not the driver's. Each instead
-  passes its `--trace-id` as plain outgoing metadata
-  (`metadata.AppendToOutgoingContext` with `common.TraceIdMetadataKey`), which
-  is all T2 needs on the far side, so the T3 chain the suites assert holds
+  interceptors. A driver is not a dnv component, and its own request and
+  reply records would only duplicate what the gateway or agent it calls
+  already logs — the suites read the daemon's log, not the driver's. Each
+  instead passes its `--trace-id` as plain outgoing metadata
+  (`metadata.AppendToOutgoingContext` with `TraceIdMetadataKey`), which is
+  all T2 needs on the far side, so the T3 chain the suites assert holds
   unchanged; `dnagentctl` and `cnagentctl` also put it in the `trace_id` of
   their `Check*` requests, as the worker does (T3).
-  `integtest/fakeagent` does install both server interceptors of
-  §4: it stands in for an agent, and its `agent.log` is the record the suites
-  read for what the worker sent — `worker_test.sh` matches `grpc server *`
-  records only, never the worker's own client-side ones, which carry the same
-  payloads (§5 prints one such pair). `integtest/fakegateway` does the same
-  for the dnvctl suite: it serves all 59 `Gateway` methods behind both server
+* `integtest/fakeagent` installs both server interceptors of the wiring
+  rule: it stands in for an agent, and its `agent.log` is the record the
+  suites read for what the worker sent — `worker_test.sh` matches
+  `grpc server *` records only, never the worker's own client-side ones,
+  which carry the same payloads. `integtest/fakegateway` does the same for
+  the dnvctl suite: it serves every `Gateway` method behind both server
   interceptors, and its `fakegateway.log` is the record `dnvctl_test.sh`
   reads for which RPC dnvctl put on the wire and under which trace id — it
   selects `grpc server request` records by `trace_id` and `method`; the
-  request payloads it asserts come from the fake's `state.json` (`dnvctl.md`
-  §7.5, §7.7).
+  request payloads it asserts come from the fake's `state.json`
+  (`dnvctl.md`, Integration test plan).
 * None of the five drivers installs a logger of its own: each inherits
-  `common`'s `init()` chain, which already puts the JSON records on **stderr**
-  (`log.md` R2, R3). That inheritance is what keeps a driver's **stdout** the
-  result channel — one JSON document per invocation for most subcommands, one
-  line per key or entry for the listing ones (`workerctl list-keys` and
-  `list-workers`, `cdcctl list`), and a plain line or two for the handful that
-  print a derived value instead (`host-id` on both agent drivers,
-  `cnagentctl`'s hex `get-td-bm` / `get-leg-bm`, `wait-hydrated
-  --sample-only`) — which the suites parse with `jq`, read line by line, or
-  capture whole. `gatewayctl`, `workerctl` and `cdcctl` used to re-install a
-  `TraceIdHandler` of their own over a `slog.NewJSONHandler(os.Stderr, nil)` —
-  nil options, so it pinned the level at Info and dropped `common`'s
-  `LevelVar`; with the default already there that carve-out is gone, and none
-  of the three logs on its own account anyway — the only log records reaching
+  `common`'s default chain, which is what keeps its stdout the result channel
+  the suites parse (`log.md` R3). The only log records reaching a driver's
   stderr are the `etcd *` ones `etcdutil` emits under `workerctl` and
-  `cdcctl`, while `gatewayctl` calls nothing that logs; each driver's `die`
-  and usage diagnostics share the stream as plain text. `dnagentctl` and
-  `cnagentctl` never call `slog` (neither imports `log/slog`), and the suites
-  read their stdout with no redirect at all — a plain command substitution, or
-  a pipe into `jq`: before the default moved, that was safe only by the
-  accident that the two never log; it is now safe structurally.
-  `integtest/fakeagent` inherits the same default and, as a daemon emitting an
-  interceptor record per gRPC message, logs far more than a one-shot driver;
-  its records still reach `agent.log` because the launcher merges both streams
-  (`>> …/agent.log 2>&1`), so the file the suite reads holds what it held
-  before. `integtest/fakegateway` is launched the same way by
-  `dnvctl_test.sh` (`>> …/fakegateway.log 2>&1`), so the interceptor records
-  that suite reads land in `fakegateway.log` from stderr.
-
-## 7. Amendments applied to this document
-
-Recorded for traceability; the edits are already applied. Appended rather than
-inserted because §2, §3 and §4 are cited by number from `log.md` and
-`layout.md`.
-
-* Side provisioning ([D15]) — the §5 `CheckDn` sample's `meta_info.details` gained the
-  trailing ` provisioning=0` field. `DiskMeta.Describe()` now renders
-  `seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d`,
-  the appended count being the sides whose §9.4 zeroing has not finished
-  (`dnagent.md` DN18). Sample values only; no interceptor behaviour changed.
-* The default logger moved to stderr (`log.md` R2) — §6's second driver bullet
-  no longer records a logging carve-out. `gatewayctl`, `workerctl` and
-  `cdcctl` deleted the handler chain they used to re-install, so nothing
-  outside `common`'s `init()` and the unit tests calls `slog.SetDefault`; the
-  bullet now says what each driver inherits and why its stdout stays the
-  result channel. §6's acceptance inventory gained the fifth §4 call site it
-  had been missing, `ctl/root.go`'s `dial` — the dnvctl → gateway connection
-  §4's table already lists. No interceptor behaviour changed.
+  `cdcctl` — `gatewayctl` calls nothing that logs, and `dnagentctl` and
+  `cnagentctl` never call `slog` — while each driver's die and usage
+  diagnostics share that stream as plain text. `fakeagent` and `fakegateway`
+  inherit the same default and, as daemons emitting an interceptor record per
+  gRPC message, log far more than a one-shot driver; the suite that launches
+  each captures its stderr into the log file it reads.

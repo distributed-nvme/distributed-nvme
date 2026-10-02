@@ -165,8 +165,9 @@ func (s *CnAgentServer) ensureDmMulti(
 		// the live table therefore never means "reload"; it means the
 		// effective state lost a group that is already serving, which the
 		// provisioning deferral is not allowed to do (it holds *new* groups
-		// out until they are ready, architecture.md §8.5). Report it so the
-		// §10.4 reactions or an operator repair the group instead.
+		// out until they are ready, architecture.md, GrowSlice). Report it so
+		// the automatic reactions (architecture.md, Automatic reactions) or an
+		// operator repair the group instead.
 		if live, desired := liveConcatSectors(targets),
 			wantConcatSectors(want); live > desired {
 			return false, fmt.Errorf(
@@ -350,7 +351,8 @@ func (s *CnAgentServer) probeDmConcat(
 // removeDm removes a dm device if it exists and reports whether it is gone
 // afterwards. A suspended device is resumed first: `dmsetup remove` does not
 // succeed on one. Nothing dnv builds is suspended in steady state any more —
-// an effectively suspended ns-dev is parked, live (CN16, §11.6) — so the
+// an effectively suspended ns-dev is parked, live (CN16; architecture.md,
+// Namespace suspend semantics) — so the
 // resume is a guard for a device an older build, or a reload that was
 // interrupted or failed (Dm.Reload fails closed), left behind.
 func (s *CnAgentServer) removeDm(ctx context.Context, name string) bool {

@@ -13,21 +13,21 @@
 //   - CT8 — no client-side validation. dnvctl rejects only what fails to
 //     PARSE (exit 2), which for --timeout, a deadline rather than a request
 //     value, includes NaN and ±Inf (timeoutOf), plus a --rev typed on a
-//     command whose request has no token field to put it in (run, §4);
+//     command whose request has no token field to put it in (run, CT3);
 //     every parsed value is sent as typed and the gateway's validation is
 //     the only validator. Empty required fields, contradictory flags and
 //     unknown enum numbers are all forwarded.
-//   - CT9 — only the env-backed globals (every §2.1 flag but --rev) have a
+//   - CT9 — only the env-backed globals (every global flag but --rev) have a
 //     second carrier: they are bound into viper, so a DNVCTL_* environment
 //     variable or a --config file supplies one just as the flag does. --rev
 //     and every leaf flag are read off the parsed command line and nothing
-//     else (§0 #15): a token, a force or a name is typed per command, and a
+//     else (CT9): a token, a force or a name is typed per command, and a
 //     leaf value is parsed before the dial — by pflag, or by the readers
 //     below and spParseLevel/spRedundConf for the flags pflag holds as
 //     strings — so text that does not fit is exit 2, never a cast that reads
 //     back as zero. The comma-split list flags below stay plain strings for
-//     §5.0's replace-on-each-occurrence rule, which pflag's own slice flags
-//     do not follow (they append).
+//     the replace-on-each-occurrence rule (dnvctl.md, Conventions), which
+//     pflag's own slice flags do not follow (they append).
 package ctl
 
 import (
@@ -60,19 +60,20 @@ import (
 // DNVCTL_<FLAG_WITH_UNDERSCORES> (CT9). No other flag has one.
 const envPrefix = "DNVCTL"
 
-// defaultTimeout is the per-invocation deadline in seconds (§2.1). It is a
-// literal, not common.DefaultGatewayAgentTimeout: the two coincide at 10 but
-// mean different things, and dnvctl must not inherit a change to the
-// gateway's own per-agent budget.
+// defaultTimeout is the per-invocation deadline in seconds (dnvctl.md,
+// Global flags, env, config). It is a literal, not
+// common.DefaultGatewayAgentTimeout: the two coincide at 10 but mean
+// different things, and dnvctl must not inherit a change to the gateway's
+// own per-agent budget.
 const defaultTimeout = 10.0
 
 // job is one RPC invocation. It returns whatever should be rendered on
 // stdout: a reply message for 57 of the 59 commands, and a plain
-// map[string]any for the two bitmap reads (§3.1).
+// map[string]any for the two bitmap reads (CT4).
 type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 
 // ---------------------------------------------------------------------------
-// Exit codes and error rendering (CT5, §3.2)
+// Exit codes and error rendering (CT5)
 // ---------------------------------------------------------------------------
 
 // rpcFailure is the exit-1 class: the RPC, or the connection carrying it,
@@ -88,7 +89,7 @@ func (e *rpcFailure) Unwrap() error { return e.err }
 
 // codeNames spells every gRPC code the way the wire and the specs do —
 // UPPER_SNAKE — because codes.Code.String() is CamelCase and operators grep
-// for the wire spelling (§3.2).
+// for the wire spelling (CT5).
 var codeNames = map[codes.Code]string{
 	codes.OK:                 "OK",
 	codes.Canceled:           "CANCELLED",
@@ -118,9 +119,9 @@ func codeName(c codes.Code) string {
 	return fmt.Sprintf("CODE_%d", uint32(c))
 }
 
-// Execute runs the CLI and returns the process exit code (§3.2):
+// Execute runs the CLI and returns the process exit code (CT5):
 //
-//	0  the RPC returned OK; the §3.1 document is on stdout, stderr is empty
+//	0  the RPC returned OK; the CT4 document is on stdout, stderr is empty
 //	1  the RPC or the connection failed; stdout is empty, stderr is one line
 //	2  a usage error; stdout is empty, no RPC was issued
 func Execute() int {
@@ -141,11 +142,12 @@ func Execute() int {
 }
 
 // ---------------------------------------------------------------------------
-// The root command (§2.1)
+// The root command (dnvctl.md, Global flags, env, config)
 // ---------------------------------------------------------------------------
 
 // NewRootCmd builds the whole command tree. It is exported so the unit tests
-// can drive the real tree through argv rather than a stand-in (CT-T2).
+// can drive the real tree through argv rather than a stand-in (the argv →
+// request tests of dnvctl.md, Conventions).
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "dnvctl",
@@ -160,7 +162,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		// The root is a group like any other: `dnvctl` alone is a usage
 		// error, not a success that happens to print help on the stdout
-		// §3.1 reserves. See group() for why this needs a RunE.
+		// CT4 reserves. See group() for why this needs a RunE.
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return needsSubcommand(cmd, args)
@@ -189,8 +191,9 @@ func NewRootCmd() *cobra.Command {
 	return root
 }
 
-// addGlobalFlags declares the §2.1 persistent flags. Only --cluster, --sp and
-// --rev fill request fields; the rest steer the invocation itself.
+// addGlobalFlags declares the persistent flags, the globals of dnvctl.md,
+// Global flags, env, config. Only --cluster, --sp and --rev fill request
+// fields; the rest steer the invocation itself.
 func addGlobalFlags(root *cobra.Command) {
 	flags := root.PersistentFlags()
 	flags.String("gateway-address", "",
@@ -211,8 +214,8 @@ func addGlobalFlags(root *cobra.Command) {
 		"optional viper config file for the env-backed globals")
 }
 
-// envGlobals are the §2.1 globals that have an environment and a config
-// carrier besides the flag: every persistent flag but --rev (CT9, §0 #15). A
+// envGlobals are the globals that have an environment and a config
+// carrier besides the flag: every persistent flag but --rev (CT9). A
 // revision token is per object and per write, so an exported DNVCTL_REV
 // would stamp one number on every later write that carries a token; it is
 // read off the command line alone, like every leaf flag (see invoked).
@@ -247,13 +250,14 @@ func bindViper(cmd *cobra.Command) error {
 // ---------------------------------------------------------------------------
 
 // dialFunc is the seam the unit tests replace: production dials a real
-// gateway, CT-T2's recordingClient and CT-T4's stub client do not.
+// gateway, the argv → request tests' recordingClient and the CT5 tests'
+// stub client do not.
 type dialFunc func(ctx context.Context, address string) (
 	pb.GatewayClient, func() error, error)
 
-// dial is the production dialFunc: the grpc.md §4 mandatory client block.
-// Both chains are installed even though all 59 RPCs are unary, because §4
-// says both chains on every dnv connection.
+// dial is the production dialFunc: the mandatory client block of grpc.md,
+// Wiring. Both chains are installed even though all 59 RPCs are unary,
+// because grpc.md, Wiring, says both chains on every dnv connection.
 func dial(_ context.Context, address string) (
 	pb.GatewayClient, func() error, error,
 ) {
@@ -278,7 +282,7 @@ var dialer dialFunc = dial
 //
 // A returned *rpcFailure is exit 1; every other error is a usage error and
 // exit 2. The ordering matters: everything that can fail to PARSE is done
-// BEFORE the dial, so a usage error provably issues no RPC (CT-T4, §7.12 c5).
+// BEFORE the dial, so a usage error provably issues no RPC (CT5, CT8).
 func run(cmd *cobra.Command, build func() (job, error)) error {
 	address := strings.TrimSpace(viper.GetString("gateway-address"))
 	if address == "" {
@@ -296,7 +300,7 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 		return err
 	}
 	// A typed --rev that build never read has no field to travel in: this
-	// command's request carries no token (§4). Sending the request without
+	// command's request carries no token (CT3). Sending the request without
 	// it would drop, unseen, a gate the operator asked for, so it is a usage
 	// error, refused before the dial like every other.
 	if invoked.Changed("rev") && !revRead {
@@ -304,10 +308,10 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 			cmd.CommandPath())
 	}
 
-	// The trace id: --trace-id when non-empty, else the T4 mint. The §4
-	// client chain moves it into the outgoing trace_id metadata; dnvctl
-	// never touches metadata itself (that shortcut belongs to the integtest
-	// drivers, grpc.md §6).
+	// The trace id: --trace-id when non-empty, else the T4 mint. The client
+	// chain of grpc.md, Wiring, moves it into the outgoing trace_id metadata;
+	// dnvctl never touches metadata itself (that shortcut belongs to the
+	// integtest drivers, grpc.md, Drivers and fakes).
 	traceId := strings.TrimSpace(viper.GetString("trace-id"))
 	if traceId == "" {
 		traceId = common.NewTraceId()
@@ -350,14 +354,14 @@ func leaf(use, short string, build func() (job, error)) *cobra.Command {
 // cobra's (*Command).execute returns flag.ErrHelp for any command that is not
 // Runnable BEFORE it calls ValidateArgs, and ExecuteC treats flag.ErrHelp as
 // success — so a group without a RunE answers `dnvctl td lst` by printing its
-// help to STDOUT and exiting 0. That breaks §3.2 (an unknown command must be
-// exit 2 with empty stdout) and §3.1 (stdout carries the result document and
+// help to STDOUT and exiting 0. That breaks CT5 (an unknown command must be
+// exit 2 with empty stdout) and CT4 (stdout carries the result document and
 // nothing else) at once, and it tells a script that mistyped a verb that it
 // succeeded. Being Runnable puts ValidateArgs back in the path, where
 // cobra.NoArgs produces the `unknown command` error a typo deserves.
 //
 // `--help` is unaffected: cobra handles the help flag before any of this, so
-// the stock help of §0 #3 still prints to stdout and exits 0.
+// the stock help (dnvctl.md, Conventions) still prints to stdout and exits 0.
 func group(use, short string, leaves ...*cobra.Command) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
@@ -384,13 +388,14 @@ func needsSubcommand(cmd *cobra.Command, args []string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Result rendering (CT4, §3.1)
+// Result rendering (CT4)
 // ---------------------------------------------------------------------------
 
 // marshalOpts renders every reply. UseProtoNames keeps the JSON field names
 // identical to schema.proto's spelling; EmitUnpopulated keeps a false/0/[]
-// field visible, which is what the `created` poll of ThinDeviceCreated.md R13
-// needs from `td list`.
+// field visible, which is what the `created` poll
+// (architecture.md, Thin devices: the client's wait primitive) needs from
+// `td list`.
 var marshalOpts = protojson.MarshalOptions{
 	UseProtoNames:   true,
 	EmitUnpopulated: true,
@@ -429,7 +434,7 @@ func emit(result any) error {
 	return nil
 }
 
-// hexBitmapResult is §3.1's one deviation. protojson renders a bytes field as
+// hexBitmapResult is CT4's one deviation. protojson renders a bytes field as
 // base64, which is neither what an operator wants to read nor what the suite
 // asserts, so the two bitmap reads return this map instead of their reply
 // message. byte_cnt travels with it so a length check needs no arithmetic on
@@ -491,14 +496,15 @@ var invoked *pflag.FlagSet
 // revRead records that the command being run read its token: revToken sets
 // it and run clears it before each build. The 34 token carriers read --rev
 // in build, and the 25 commands whose request has no token field never do,
-// so a typed --rev left unread is how run knows it has nowhere to go (§4).
+// so a typed --rev left unread is how run knows it has nowhere to go (CT3).
 var revRead bool
 
 // leafValue reads one flag of the invoked command through pflag's typed
 // getter. pflag already parsed the value with the command line, so the only
 // errors left are a name the command does not declare or a reader of the
-// wrong type — bugs in this package, not operator errors, and the §7.10 sweep
-// drives every leaf — so it panics rather than reading back as a zero.
+// wrong type — bugs in this package, not operator errors, and the
+// integration suite's sweep (dnvctl.md, Integration test plan) drives every
+// leaf — so it panics rather than reading back as a zero.
 func leafValue[T any](
 	name string, get func(*pflag.FlagSet, string) (T, error),
 ) T {
@@ -611,8 +617,8 @@ func u32ListOf(name string) ([]uint32, error) {
 
 // hexBytesOf parses a lowercase-or-uppercase hex bitmap. An EMPTY value is
 // not an error — it sends an empty bitmap on purpose — but a malformed
-// non-empty one is a usage error (exit 2), per §5.9's note on
-// `clone append-bm`.
+// non-empty one is a usage error (exit 2), per the note on
+// `clone append-bm` in dnvctl.md, `clone` — `ctl/clone.go`.
 func hexBytesOf(name string) ([]byte, error) {
 	raw := strings.TrimSpace(strOf(name))
 	if raw == "" {
@@ -626,7 +632,7 @@ func hexBytesOf(name string) ([]byte, error) {
 }
 
 // ---------------------------------------------------------------------------
-// The two scope globals (§5.0)
+// The two scope globals (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
 // clusterOf fills `cluster_name`. It is the global for 55 of the 58 requests
@@ -650,7 +656,7 @@ func clusterNameOf() string {
 func spOf() string { return viper.GetString("sp") }
 
 // ---------------------------------------------------------------------------
-// Revision tokens (CT3, §4)
+// Revision tokens (CT3)
 // ---------------------------------------------------------------------------
 
 // revToken reports the request's token revision and whether the operator
@@ -664,7 +670,7 @@ func spOf() string { return viper.GetString("sp") }
 //	                               revision starts at 1 and only grows
 //
 // "Given" is pflag's Changed bit — the flag was typed on this command line —
-// never a value from some other carrier: --rev has none (CT9, §0 #15), so an
+// never a value from some other carrier: --rev has none (CT9), so an
 // exported DNVCTL_REV cannot put a token on a write nobody typed it for. A
 // typed --rev must parse, an empty one included (`--rev "$REV"` with REV
 // unset is a usage error, not an ungated write). Calling it records the read
@@ -712,7 +718,7 @@ func cnRev() (*pb.CnRev, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared flag helpers (§5.0)
+// Shared flag helpers (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
 // pageFlags adds the two flags every paged List* takes. A count of 0 asks for

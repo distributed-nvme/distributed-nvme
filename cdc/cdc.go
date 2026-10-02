@@ -1,12 +1,13 @@
 // Package cdc is dnv-cdc's engine (cdc.md): the etcd watcher over the
-// {p} cdc keys (§4), the per-active-host view registry (§3) and the NVMe/TCP
-// discovery controller that answers hosts on the well-known discovery NQN
-// (§5).
+// {p} cdc keys (WV1 to WV6), the per-active-host view registry (DS1 to DS11)
+// and the NVMe/TCP discovery controller that answers hosts on the well-known
+// discovery NQN (NP1 to NP14).
 //
 // It reads etcd through etcdutil and NEVER writes it (WV6), serves and dials
 // no gRPC (grpc.md records "cdc: none"), and never touches the local kernel's
 // nvmet: a discovery controller built on kernel referrals cannot filter per
-// host, which is the whole reason this package exists (§0 #1).
+// host, which is the whole reason this package exists
+// (cdc.md, Scope and placement).
 package cdc
 
 import (
@@ -26,8 +27,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 )
 
-// The normative msg strings of §7. The §9 suite greps them, so they are
-// constants and never formatted.
+// The normative msg strings of cdc.md, Log records. The cdc suite (cdc.md,
+// Integration test plan) greps them, so they are constants and never
+// formatted.
 const (
 	msgCdcStarting     = "cdc starting"
 	msgScanComplete    = "cdc scan complete"
@@ -44,7 +46,7 @@ const (
 	msgCdcStopping = "cdc stopping"
 )
 
-// The `cdc entry skipped` reasons of §7.
+// The `cdc entry skipped` reasons of cdc.md, Log records.
 const (
 	skipMalformedKey   = "malformed_key"
 	skipMalformedValue = "malformed_value"
@@ -52,7 +54,7 @@ const (
 	skipForeignAdrFam  = "foreign_adr_fam"
 )
 
-// The `host disconnected` reasons of §7.
+// The `host disconnected` reasons of cdc.md, Log records.
 const (
 	reasonClosed    = "closed"
 	reasonKeepAlive = "keep_alive"
@@ -71,7 +73,7 @@ type Config struct {
 	// h0…hf (DS2). Non-empty and duplicate-free.
 	Ranges []uint32
 	// TrType, AdrFam, TrAddr and TrSvcId are the listen endpoint. TrType is
-	// always common.DefaultCdcTrType (§0 #2); AdrFam is reported in no log
+	// always common.DefaultCdcTrType (CM2); AdrFam is reported in no log
 	// entry of dnv-cdc's own — it describes the LISTEN address, while each
 	// discovery log entry carries the address family of the CN port it
 	// names (DS3).
@@ -83,7 +85,7 @@ type Config struct {
 	// never dials them itself; they exist for the `cdc starting` record.
 	Endpoints []string
 	// RescanInterval overrides common.DefaultCdcRescanInterval (WV5). Zero
-	// means the default; only the §8 tests set it.
+	// means the default; only the unit tests set it.
 	RescanInterval time.Duration
 }
 
@@ -114,11 +116,11 @@ func (c Config) rangeStrings() []string {
 // Clock (testability)
 // ---------------------------------------------------------------------------
 
-// clock is the package's source of time for every timer the §8 tests drive:
+// clock is the package's source of time for every timer the unit tests drive:
 // the keep-alive deadlines of NP10, the rescan cadence of WV5 and the
 // one-minute timer of CM4's first-scan wait all go through it, so those tests
 // drive them without sleeping. NP1's acceptRetryDelay pause and NP13's
-// socketWriteTimeout deadline call time directly (cdc.md §8).
+// socketWriteTimeout deadline call time directly (NP1, NP13).
 type clock interface {
 	now() time.Time
 	after(d time.Duration) <-chan time.Time
@@ -136,7 +138,7 @@ func (realClock) after(d time.Duration) <-chan time.Time { return time.After(d) 
 // ---------------------------------------------------------------------------
 
 // etcdStore is the etcd surface this package uses (EU2, EU3).
-// *etcdutil.Client implements it as-is; the §8 tests substitute an in-memory
+// *etcdutil.Client implements it as-is; the unit tests substitute an in-memory
 // fake. There is no write method on purpose: WV6 forbids one.
 type etcdStore interface {
 	Range(ctx context.Context, prefix string) ([]etcdutil.KV, int64, error)

@@ -13,8 +13,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The [D13] on-disk format, exercised against the fakeNode segment store —
-// dnagent.md §6 test 13.
+// The [D13] on-disk format (dnagent.md DN5), exercised against the fakeNode
+// segment store.
 
 const (
 	metaDisk       = "/dev/meta-disk"
@@ -558,8 +558,9 @@ func TestDiskMetaStaleSlotRejectedAfterReformat(t *testing.T) {
 			t.Fatalf("AllocSide: %v", err)
 		}
 	}
-	// Re-format: cleanup zeroes only the header block (dnagent_integtest.md
-	// §16), so both slots survive with their old uuid and their high seqs.
+	// Re-format: cleanup zeroes only the header block (dnagent_integtest.md,
+	// Teardown and cleanup), so both slots survive with their old uuid and
+	// their high seqs.
 	node.corruptBlock(metaDisk, common.DnHeaderOffset,
 		make([]byte, common.DnHeaderSize))
 
@@ -732,7 +733,7 @@ func TestDiskMetaAllocSideContiguous(t *testing.T) {
 		t.Fatalf("first allocation = %v, want one run 0+4", first.GetRunList())
 	}
 	if sideZeroedCnt(first) != 0 || sideExtCnt(first) != 4 {
-		t.Errorf("a fresh record must start not-zeroed (§9.4): %d/%d",
+		t.Errorf("a fresh record must start not-zeroed (DN9): %d/%d",
 			sideZeroedCnt(first), sideExtCnt(first))
 	}
 	if len(first.GetZeroedBits()) != 0 {
@@ -954,7 +955,7 @@ func TestDiskMetaFreeIsIdempotent(t *testing.T) {
 	}
 }
 
-// The §9.4 batch setter: half-open ranges, an idempotent re-set that writes
+// The DN9 batch setter: half-open ranges, an idempotent re-set that writes
 // nothing, and progress that survives the A/B slot round trip.
 func TestDiskMetaSetSideZeroed(t *testing.T) {
 	meta, node := formatted(t)
@@ -1210,8 +1211,8 @@ func TestDiskMetaRecordSnapshots(t *testing.T) {
 }
 
 // The envelope: the magics, the version, the seq and the format_uuid that
-// architecture.md §3.1 names, at the byte offsets diskmeta.go's "Envelope
-// layout" block fixes (dnagent.md §6 test 13).
+// architecture.md, Disk node, names, at the byte offsets diskmeta.go's
+// "Envelope layout" block fixes (dnagent.md DN5).
 func TestDiskMetaEnvelopeLayout(t *testing.T) {
 	_, node := formatted(t)
 	ctx := context.Background()

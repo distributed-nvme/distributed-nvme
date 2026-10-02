@@ -1,4 +1,5 @@
-// The worker half of the sp drain (dnv-worker.md §11.6, rules SPD1-SPD14).
+// The worker half of the sp drain (dnv-worker.md, The sp drain, rules
+// SPD1-SPD14).
 //
 // DeleteStoragePool no longer tears an SP down; it LATCHES it, committing
 // `deleting = true` plus one SpRev bump (SPD3/SPD4). The staged teardown that
@@ -35,10 +36,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/model"
 )
 
-// The §12-style records of the drain. msgSpDrainDone is the one an operator
-// waits for; msgSpDrainFailed carries every SPD2 refusal and every STM failure.
-// msgSpDrainStep is non-normative — like msgReactionSuppressed and
-// msgPoolStatusUnparsable it exists so that an operator (and the §14 suite) can
+// The records of the drain, in the style of dnv-worker.md, Log records.
+// msgSpDrainDone is the one an operator waits for; msgSpDrainFailed carries
+// every SPD2 refusal and every STM failure. msgSpDrainStep is non-normative —
+// like msgReactionSuppressed and msgPoolStatusUnparsable it exists so that an
+// operator (and the worker suite, dnv-worker.md, Integration test plan) can
 // see the drain advancing batch by batch rather than only that it finished.
 const (
 	msgSpDrainFailed = "sp drain failed"
@@ -148,11 +150,12 @@ func (w *spWorker) drainStepped(
 	}
 }
 
-// drainFailed turns one failed step into the §12 record (SPD6). A
-// model.ErrPrecondition contributes the precondition that did not hold — SPD2's
-// three refusals land here — and every failure, precondition or not, carries the
-// error text: unlike a reaction, a drain step that does not run leaves an object
-// nothing else will ever remove, so its cause is never elided.
+// drainFailed turns one failed step into the "sp drain failed" record (SPD6;
+// dnv-worker.md, Log records). A model.ErrPrecondition contributes the
+// precondition that did not hold — SPD2's three refusals land here — and every
+// failure, precondition or not, carries the error text: unlike a reaction, a
+// drain step that does not run leaves an object nothing else will ever remove,
+// so its cause is never elided.
 func (w *spWorker) drainFailed(
 	ctx context.Context,
 	phase string,

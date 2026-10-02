@@ -19,11 +19,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/model"
 )
 
-// The §4 watcher tests: the scan that builds the owned map (WV1/WV2), the DS2
-// ownership arithmetic, the events that flow through the DS6 impact pass
-// (WV3), the rescan a watch failure forces and the diff it produces (WV4),
-// the retry cadence of a failing Range (WV5) with the held state still served
-// through it (DS10), and the read-only rule (WV6).
+// The tests of cdc.md, The etcd watcher: the scan that builds the owned map
+// (WV1/WV2), the DS2 ownership arithmetic, the events that flow through the
+// DS6 impact pass (WV3), the rescan a watch failure forces and the diff it
+// produces (WV4), the retry cadence of a failing Range (WV5) with the held
+// state still served through it (DS10), and the read-only rule (WV6).
 
 // watchHostNqn is the host every impact assertion in this file is made for.
 const watchHostNqn = "nqn.2026-01.io.dnv-test:cdc:host1"
@@ -111,8 +111,8 @@ func (s *watchStore) WatchTyped(
 }
 
 // watchHarness is one watcher under test: the fake store and fake clock it
-// runs on, the registry it feeds, the capture the §7 assertions read, and the
-// goroutine running the WV1 loop.
+// runs on, the registry it feeds, the capture the assertions on
+// cdc.md, Log records, read, and the goroutine running the WV1 loop.
 type watchHarness struct {
 	t      *testing.T
 	store  *watchStore
@@ -282,7 +282,7 @@ func TestWatchScanBuildsOwnedMap(t *testing.T) {
 		"nqn.2026-01.io.dnv-test:cdc:ssb", nil,
 		tcpConf("10.0.0.2", "4420"),
 	))
-	// One rdma transport (skipped, §0 #2) and one tcp one (served).
+	// One rdma transport (skipped, DS3) and one tcp one (served).
 	h.store.set(t, mixedKey, cdcEntry(
 		"nqn.2026-01.io.dnv-test:cdc:ssc", []string{watchHostNqn},
 		trConf("rdma", common.DefaultCdcAdrFam, "10.0.0.3", "4420"),

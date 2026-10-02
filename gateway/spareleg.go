@@ -10,25 +10,27 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.12 (gateway.md §5.11): the three RPCs that
-// give an md-raid1 group its standby capacity. A spare leg is a Leg in the
-// group's spare_leg_list — every cntlr connects to its side and health-checks
-// it (§3.3 step 1), but md never sees the leg until SwitchSpareLeg moves it
-// into leg_list, so a spare is pre-connected capacity and nothing more.
+// This file is architecture.md, Spare legs (gateway.md, Spare legs): the three
+// RPCs that give an md-raid1 group its standby capacity. A spare leg is a Leg
+// in the group's spare_leg_list — every cntlr connects to its side and
+// health-checks it (architecture.md, Primary cntlr, step 1), but md never sees
+// the leg until SwitchSpareLeg moves it into leg_list, so a spare is
+// pre-connected capacity and nothing more.
 //
 // All three requests address a group by grp_id and carry NO slice id, so each
 // handler must first find the slice that holds the group. CreateSpareLeg and
-// SwitchSpareLeg locate it in a plain snapshot (§5.11) that plans but does
-// not decide — everything it read is read again inside the model op's own
-// STM; DeleteSpareLeg has no snapshot at all — its locate runs directly
-// inside the gateway's one deciding transaction. Either way a group that
-// moved, a token that went stale or a spare list that filled up between plan
-// and decision is caught where it matters.
+// SwitchSpareLeg locate it in a plain snapshot (gateway.md, Spare legs) that
+// plans but does not decide — everything it read is read again inside the
+// model op's own STM; DeleteSpareLeg has no snapshot at all — its locate runs
+// directly inside the gateway's one deciding transaction. Either way a group
+// that moved, a token that went stale or a spare list that filled up between
+// plan and decision is caught where it matters.
 //
-// Two of the three are model ops the sp-worker's §10.4 leg repair already
-// drives (§0 #4: reused, never duplicated); DeleteSpareLeg is the gateway's
-// own STM, because no worker reaction ever removes a spare — a parked leg
-// stays parked until an operator frees the slot (dnv-worker.md §0 #17, AR8).
+// Two of the three are model ops the sp-worker's leg repair (architecture.md,
+// Automatic reactions) already drives (gateway.md, Scope and placement:
+// reused, never duplicated); DeleteSpareLeg is the gateway's own STM, because
+// no worker reaction ever removes a spare — a parked leg stays parked until an
+// operator frees the slot (dnv-worker.md AR8 step 4).
 
 // The op names the model helpers put into their error messages and the bump
 // helpers cite; they are the RPC names so a log line names something
@@ -47,9 +49,9 @@ const (
 // that sent a stale one always sees ABORTED "stale revision" and never a
 // NOT_FOUND computed against a slice list it has not read. tok is the token
 // MESSAGE: GW6 is presence-based, so a nil tok is a client that deliberately
-// sent none and openSp lets it through unchecked (§0 #7). That same absence
+// sent none and openSp lets it through unchecked (GW6). That same absence
 // then reaches model.checkSpRev as expectRev 0, which reads 0 as "skip the
-// check entirely" (gateway.md §2.2 #3) — the two layers agree, because a live
+// check entirely" (gateway.md GW6) — the two layers agree, because a live
 // SpRev starts at 1 and a token that is merely present-with-0 has already been
 // refused above.
 func openGrpForSpareLeg(
@@ -76,8 +78,9 @@ func openGrpForSpareLeg(
 }
 
 // snapshotGrpForSpareLeg runs openGrpForSpareLeg in a read-only snapshot: the
-// plain pre-read the two model-backed RPCs plan from (§5.11, §5.8). Every
-// read is served at one store revision, so the SpConf, the slice list and the
+// plain pre-read the two model-backed RPCs plan from (gateway.md, Spare legs;
+// architecture.md, STM discipline). Every read is served at one store
+// revision, so the SpConf, the slice list and the
 // group agree with each other — a plan assembled from a torn read would pick
 // a DN for a group that no longer has that size.
 //
@@ -145,17 +148,19 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 	return kept
 }
 
-// CreateSpareLeg is architecture.md §8.12's CreateSpareLeg: one more Leg in
-// the group's spare_leg_list, carrying one Side on a DN the group does not
-// already occupy and, whenever the cluster has one to offer, in a failure
-// domain it does not already occupy either — a spare in the domain of the leg
-// it exists to replace dies with it (§6.5's two tiers: the domain exclusion
+// CreateSpareLeg is the CreateSpareLeg of architecture.md, Spare legs: one
+// more Leg in the group's spare_leg_list, carrying one Side on a DN the group
+// does not already occupy and, whenever the cluster has one to offer, in a
+// failure domain it does not already occupy either — a spare in the domain of
+// the leg it exists to replace dies with it (the two tiers of architecture.md,
+// Per-operation allocation: the domain exclusion
 // yields rather than refuse the spare altogether).
 //
-// It is a GW9 candidate unit around model.CreateSpareLeg (§0 #4): the DN scan
-// is a range query and therefore runs outside every transaction, and the pick
-// is re-validated against its exact capacity key inside the op's STM. A pick
-// whose key moved comes back as errCandidateChanged through mapModelErr and
+// It is a GW9 candidate unit around model.CreateSpareLeg (gateway.md, Scope
+// and placement): the DN scan is a range query and therefore runs outside
+// every transaction, and the pick is re-validated against its exact capacity
+// key inside the op's STM. A pick whose key moved comes back as
+// errCandidateChanged through mapModelErr and
 // re-runs the whole unit, scan included — re-running only the op would
 // re-validate the same dead pick for ever.
 //
@@ -163,8 +168,9 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 // them again inside its STM, where they are authoritative, but a group that
 // is RedundNone or already full would otherwise pay for a candidate scan
 // whose result the op can only throw away. The pre-check is also what gives
-// them §8.12's codes — INVALID_ARGUMENT and RESOURCE_EXHAUSTED — since model
-// raises every one of its own preconditions as FAILED_PRECONDITION.
+// them the codes of architecture.md, Spare legs — INVALID_ARGUMENT and
+// RESOURCE_EXHAUSTED — since model raises every one of its own preconditions
+// as FAILED_PRECONDITION.
 func (s *Server) CreateSpareLeg(
 	ctx context.Context,
 	req *pb.CreateSpareLegRequest,
@@ -189,8 +195,9 @@ func (s *Server) CreateSpareLeg(
 	if err != nil {
 		return nil, err
 	}
-	// Redundancy is an SP-wide property the group only inherits (§8.4), so
-	// the test is the SP's STORED bdev_conf — the merge CreateStoragePool
+	// Redundancy is an SP-wide property the group only inherits
+	// (architecture.md, Storage pools), so the test is the SP's STORED
+	// bdev_conf — the merge CreateStoragePool
 	// wrote, never a re-resolution against ClusterConf, whose redund_conf may
 	// have been meant for a different SP.
 	if !isMdRaid1(spBdevConf(sc.Conf)) {
@@ -205,13 +212,16 @@ func (s *Server) CreateSpareLeg(
 			common.MaxSpareLegPerGrp)
 	}
 	// The spare joins an existing Group and inherits its geometry unchanged
-	// (§8.12: no §3.6 layout is computed), so the candidate must have room
-	// for exactly one more copy of the group's ext_cnt.
+	// (architecture.md, Spare legs: no on-leg layout — architecture.md, Group
+	// on-leg layout: meta region, data region, health block — is computed), so
+	// the candidate must have room for exactly one more copy of the group's
+	// ext_cnt.
 	extCnt := loc.Grp.GetExtCnt()
 	what := fmt.Sprintf("spare leg for group %d", req.GetGrpId())
-	// §6.5 tier 1: the group's failure DOMAINS, not merely its DNs. Read once
-	// for the whole candidate unit, outside every transaction, because a
-	// location is immutable in v1 (§8.2).
+	// Tier 1 of architecture.md, Per-operation allocation: the group's failure
+	// DOMAINS, not merely its DNs. Read once for the whole candidate unit,
+	// outside every transaction, because a location is immutable in v1
+	// (architecture.md, Disk nodes).
 	excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, loc.Grp)
 	if err != nil {
 		return nil, err
@@ -229,7 +239,8 @@ func (s *Server) CreateSpareLeg(
 		}
 		// The Side the op writes is provisioned = false ([D15]); only the
 		// sp-worker flips it, after the dn agent has zeroed the whole side
-		// (§9.4), which is why a fresh spare cannot be switched in at once.
+		// (architecture.md, Side provisioning protocol), which is why a fresh
+		// spare cannot be switched in at once.
 		newId, err := model.CreateSpareLeg(
 			ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
 			req.GetSpRev().GetRevision(), loc.SliceId, req.GetGrpId(),
@@ -247,8 +258,8 @@ func (s *Server) CreateSpareLeg(
 	return &pb.CreateSpareLegReply{LegId: legId}, nil
 }
 
-// DeleteSpareLeg is architecture.md §8.12's DeleteSpareLeg: the spare leaves
-// spare_leg_list and its side gives the DN back what it took.
+// DeleteSpareLeg is the DeleteSpareLeg of architecture.md, Spare legs: the
+// spare leaves spare_leg_list and its side gives the DN back what it took.
 //
 // This is the gateway's own STM — model exports no op for it — and the whole
 // RPC is that one transaction (GW8): resolve, token, group and spare leg by
@@ -259,9 +270,11 @@ func (s *Server) CreateSpareLeg(
 //
 // No CN and no cntlr is touched, exactly as model.CreateSpareLeg touches
 // none: the footprint a cntlr's CN reserves for the SP is Σ ext_cnt over
-// GROUPS (§8.4, §8.6), and a spare leg changes no group's ext_cnt. The bumps
-// are therefore one SpRev (the slice changed) and one DnRev per DN the ledger
-// touched (§5.5), the DnRev coming from the ledger's flush.
+// GROUPS (architecture.md, Storage pools; architecture.md, Cntlrs), and a
+// spare leg changes no group's ext_cnt. The bumps are therefore one SpRev (the
+// slice changed) and one DnRev per DN the ledger touched (architecture.md,
+// Revision keys and the sync fan-out), the DnRev coming from the ledger's
+// flush.
 func (s *Server) DeleteSpareLeg(
 	ctx context.Context,
 	req *pb.DeleteSpareLegRequest,
@@ -288,11 +301,12 @@ func (s *Server) DeleteSpareLeg(
 				"spare leg %d not found in group %d",
 				req.GetLegId(), req.GetGrpId())
 		}
-		// A spare's side can be a migration source (§8.11 takes any leg of
-		// the SP), and the destination then hangs off this very leg.
-		// Releasing both would leave the Migration naming sides in no leg,
-		// which neither FinishMigration nor CancelMigration can end — and an
-		// SP whose migr_name_list never empties can never be deleted.
+		// A spare's side can be a migration source (architecture.md,
+		// Migrations, takes any leg of the SP), and the destination then hangs
+		// off this very leg. Releasing both would leave the Migration naming
+		// sides in no leg, which neither FinishMigration nor CancelMigration
+		// can end — and an SP whose migr_name_list never empties can never be
+		// deleted.
 		if len(spare.GetSideList()) > 1 {
 			return errMigrRunning(spare)
 		}
@@ -326,34 +340,38 @@ func (s *Server) DeleteSpareLeg(
 	return &pb.DeleteSpareLegReply{LegId: req.GetLegId()}, nil
 }
 
-// SwitchSpareLeg is architecture.md §8.12's SwitchSpareLeg, the only way a
-// spare becomes active: the spare takes the target's POSITION in leg_list —
-// the md member slot the array is missing — and the target is parked in
-// spare_leg_list, still connected and probed but never repaired again.
+// SwitchSpareLeg is the SwitchSpareLeg of architecture.md, Spare legs, the
+// only way a spare becomes active: the spare takes the target's POSITION in
+// leg_list — the md member slot the array is missing — and the target is
+// parked in spare_leg_list, still connected and probed but never repaired
+// again.
 //
-// The swap is model.SwitchSpareLeg, the same op the sp-worker's §10.4 leg
-// repair calls (§0 #4), and its preconditions are this RPC's. The one that a
-// caller meets in practice is §9.4's: the spare's side must be `provisioned`,
-// because switching to a side that has not finished zeroing would put an
-// unwritten member into the array. It surfaces as FAILED_PRECONDITION, which
-// is the code §10.14 step 3 expects.
+// The swap is model.SwitchSpareLeg, the same op the sp-worker's leg repair
+// (architecture.md, Automatic reactions) calls (gateway.md, Scope and
+// placement), and its preconditions are this RPC's. The one that a caller
+// meets in practice is that of architecture.md, Side provisioning protocol:
+// the spare's side must be `provisioned`, because switching to a side that has
+// not finished zeroing would put an unwritten member into the array. It
+// surfaces as FAILED_PRECONDITION, which is the code the faults case of
+// gateway.md, Integration test plan, expects (GW7).
 //
 // The pre-read checks the two leg ids for membership as well as the group, so
-// an id that is in neither list is §8.12's NOT_FOUND rather than the
-// FAILED_PRECONDITION model would raise for it. It deliberately does NOT look
-// at `provisioned`: that verdict belongs to the deciding STM, where it cannot
-// be raced.
+// an id that is in neither list is the NOT_FOUND of architecture.md, Spare
+// legs, rather than the FAILED_PRECONDITION model would raise for it. It
+// deliberately does NOT look at `provisioned`: that verdict belongs to the
+// deciding STM, where it cannot be raced.
 //
 // It does refuse either leg while a migration is running on it — two sides,
-// §8.11 — with CreateMigration's own message: a migration holds its leg until
-// Finish or Cancel ends it, so a migrating leg is neither promoted nor parked
-// (dnv-worker.md AR8 leaves one alone for the same reason). That refusal is a
-// pre-read too; model.SwitchSpareLeg re-checks both legs inside its STM, with
-// its own reasons. That re-check is what refuses a switch when a migration of
-// either leg started after the leg was read: the worker's own AR8 switch,
-// which passes no token, and this one when the request carried none. In that
-// race a request that carried a token is refused first, by the STM's token
-// check (ABORTED "stale revision"), because CreateMigration bumped SpRev.
+// architecture.md, Migrations — with CreateMigration's own message: a
+// migration holds its leg until Finish or Cancel ends it, so a migrating leg
+// is neither promoted nor parked (dnv-worker.md AR8 leaves one alone for the
+// same reason). That refusal is a pre-read too; model.SwitchSpareLeg re-checks
+// both legs inside its STM, with its own reasons. That re-check is what
+// refuses a switch when a migration of either leg started after the leg was
+// read: the worker's own AR8 switch, which passes no token, and this one when
+// the request carried none. In that race a request that carried a token is
+// refused first, by the STM's token check (ABORTED "stale revision"), because
+// CreateMigration bumped SpRev.
 func (s *Server) SwitchSpareLeg(
 	ctx context.Context,
 	req *pb.SwitchSpareLegRequest,

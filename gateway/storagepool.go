@@ -13,14 +13,16 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.4 / §8.5 and gateway.md §5.4: the seven
+// This file is architecture.md, Storage pools; architecture.md, GrowSlice; and
+// gateway.md, Storage pools and GrowSlice: the seven
 // storage-pool RPCs plus GrowSlice.
 //
 // It is the only file that CREATES an SP, and therefore the only one that has
 // to make three separate allocations agree inside one transaction: the DNs
-// that carry every leg (§6.5), the CNs that carry every cntlr, and the per-SP
-// id counter that names all of them. All three are decided from scans that
-// necessarily ran OUTSIDE the transaction, so every one of them is re-checked
+// that carry every leg (architecture.md, Per-operation allocation), the CNs
+// that carry every cntlr, and the per-SP id counter that names all of them.
+// All three are decided from scans that necessarily ran OUTSIDE the
+// transaction, so every one of them is re-checked
 // against its exact capacity key inside it and the whole unit — scan and
 // commit — is retried when one moved (GW9).
 //
@@ -46,7 +48,8 @@ const (
 // Pre-STM planning helpers
 // ---------------------------------------------------------------------------
 
-// spPreReadCluster is the plain pre-read §5.8 allows for the work that cannot
+// spPreReadCluster is the plain pre-read architecture.md, STM discipline,
+// allows for the work that cannot
 // wait for the transaction: a candidate scan needs the cluster_id, the extent
 // size and the batch sizes, and an STM cannot range at all. Where a
 // transaction follows, its resolveCluster stays authoritative — everything
@@ -72,8 +75,9 @@ func spPreReadCluster(
 	return model.ClusterId(name, cc.GetCreationEpoch()), cc, nil
 }
 
-// spDefaultCntlidSlots is the `cntlid_slot_list = [0..7]` default of §8.4: an
-// SP that names no slots may use every slot a CN has.
+// spDefaultCntlidSlots is the `cntlid_slot_list = [0..7]` default of
+// architecture.md, Storage pools: an SP that names no slots may use every slot
+// a CN has.
 func spDefaultCntlidSlots() []uint32 {
 	slots := make([]uint32, 0, common.CnCntlidSlotCnt)
 	for slot := uint32(0); slot < common.CnCntlidSlotCnt; slot++ {
@@ -83,10 +87,10 @@ func spDefaultCntlidSlots() []uint32 {
 }
 
 // spMergeUint64 is one member of decision D-C's merge: the request wins unless
-// it left the member at the proto3 zero that means "unset" (§7). A member zero
-// on BOTH sides is settled afterwards, by model.ResolveBdevConf — never here,
-// so that "inherit from the cluster" stays distinguishable from "take the
-// constant".
+// it left the member at the proto3 zero that means "unset" (architecture.md,
+// Common validation). A member zero on BOTH sides is settled afterwards, by
+// model.ResolveBdevConf — never here, so that "inherit from the cluster" stays
+// distinguishable from "take the constant".
 func spMergeUint64(reqValue uint64, clusterValue uint64) uint64 {
 	if reqValue != 0 {
 		return reqValue
@@ -112,9 +116,10 @@ func redundKindSet(conf *pb.RedundConf) bool {
 
 // mergeSpBdevConf is decision D-C: the bdev_conf CreateStoragePool STORES is
 // the member-wise merge of the request over ClusterConf.bdev_conf, plus the
-// one structural default of §8.4 — a redund_conf unset in both is redund_none.
-// The caller passes the result through model.ResolveBdevConf, which settles
-// any member still zero on both sides against the §7 constants; the three
+// one structural default of architecture.md, Storage pools — a redund_conf
+// unset in both is redund_none. The caller passes the result through
+// model.ResolveBdevConf, which settles any member still zero on both sides
+// against the constants of architecture.md, Common validation; the three
 // rungs (request, cluster, constant) therefore all land in the stored message.
 //
 // The merge is stored rather than re-resolved at read time because an SP's
@@ -124,10 +129,10 @@ func redundKindSet(conf *pb.RedundConf) bool {
 // because the stored members are CONCRETE — a stored zero would still float
 // with whatever constant the reading binary carried.
 //
-// bdev_feature_list has no merge: §7 refuses a non-empty one on both the
-// cluster and the SP, so there is never anything to carry over. The chosen
-// redund_conf is cloned because it ends up inside a stored message and must
-// not alias a request the caller still owns.
+// bdev_feature_list has no merge: architecture.md, Common validation, refuses
+// a non-empty one on both the cluster and the SP, so there is never anything
+// to carry over. The chosen redund_conf is cloned because it ends up inside a
+// stored message and must not alias a request the caller still owns.
 func mergeSpBdevConf(
 	reqConf *pb.BdevConf,
 	clusterConf *pb.BdevConf,
@@ -155,12 +160,13 @@ func mergeSpBdevConf(
 // mergeRedundConf is the redund_conf half of decision D-C's member-wise merge.
 //
 // The KIND is a choice, not a member: the request's wins, then the cluster's,
-// and an unset oneof on both is §8.4's structural default redund_none. But
-// when both sides choose md-raid1 the merge has to continue INSIDE the chosen
-// message, or a `--raid1` that names no chunk count would silently discard the
-// cluster's bitmap_chunk_block_cnt and give the SP a different §3.6 geometry
-// than the cluster was configured for — the exact drift "member-wise" exists
-// to prevent.
+// and an unset oneof on both is the structural default redund_none of
+// architecture.md, Storage pools. But when both sides choose md-raid1 the
+// merge has to continue INSIDE the chosen message, or a `--raid1` that names
+// no chunk count would silently discard the cluster's bitmap_chunk_block_cnt
+// and give the SP a different geometry (architecture.md, Group on-leg layout:
+// meta region, data region, health block) than the cluster was configured for
+// — the exact drift "member-wise" exists to prevent.
 //
 // The result is always a fresh message: it ends up inside a stored SpConf and
 // must not alias a request the caller still owns.
@@ -182,8 +188,9 @@ func mergeRedundConf(
 		}
 	}
 	if redundKindSet(reqConf) || !redundKindSet(clusterConf) {
-		// The request chose redund_none, or neither chose anything: §8.4's
-		// "redund_conf unset ⇒ redund_none" covers both.
+		// The request chose redund_none, or neither chose anything: the
+		// "redund_conf unset ⇒ redund_none" of architecture.md, Storage pools,
+		// covers both.
 		return &pb.RedundConf{
 			RedunKind: &pb.RedundConf_RedundNone{
 				RedundNone: &pb.RedundNone{},
@@ -193,7 +200,8 @@ func mergeRedundConf(
 	return proto.Clone(clusterConf).(*pb.RedundConf)
 }
 
-// validateMergedBdevConf judges §7's geometry rules on the bdev_conf a
+// validateMergedBdevConf judges the geometry rules of architecture.md, Common
+// validation, on the bdev_conf a
 // CreateStoragePool would store: the request merged over the cluster's conf
 // and resolved. The request itself was judged only between the members it
 // states; a member it omits is inherited, and whether that one meets the rest
@@ -207,16 +215,17 @@ func validateMergedBdevConf(bdev *pb.BdevConf) error {
 	return nil
 }
 
-// growSliceCnBudget is §8.5's CN half of RESOURCE_EXHAUSTED: a grow every
-// cntlr of the SP will stack needs extCnt free extents on every one of their
-// CNs (§6.5). It reads the cntlrs and their CnConfs at one store revision, so
-// the answer describes one consistent moment rather than a walk that a
-// concurrent delete could tear.
+// growSliceCnBudget is the CN half of the RESOURCE_EXHAUSTED of
+// architecture.md, GrowSlice: a grow every cntlr of the SP will stack needs
+// extCnt free extents on every one of their CNs (architecture.md,
+// Per-operation allocation). It reads the cntlrs and their CnConfs at one
+// store revision, so the answer describes one consistent moment rather than a
+// walk that a concurrent delete could tear.
 //
 // A cntlr or a CnConf whose key is gone is skipped rather than raised: this is
-// a pre-check whose only job is to give the common case the code §8.5 names,
-// and the deciding STM re-reads all of it — model.chargeSpCns is what actually
-// refuses.
+// a pre-check whose only job is to give the common case the code
+// architecture.md, GrowSlice, names, and the deciding STM re-reads all of it —
+// model.chargeSpCns is what actually refuses.
 func (s *Server) growSliceCnBudget(
 	ctx context.Context,
 	cid uint64,
@@ -255,7 +264,8 @@ func (s *Server) growSliceCnBudget(
 }
 
 // spGrpPlan is one group CreateStoragePool intends to build. It carries no
-// ids — those are minted inside the STM — only what the §6.5 scan and
+// ids — those are minted inside the STM — only what the scan of
+// architecture.md, Per-operation allocation, and
 // model.GroupBlocks need, and the position that fixes decision D-D's mint
 // order.
 type spGrpPlan struct {
@@ -264,11 +274,12 @@ type spGrpPlan struct {
 	ExtCnt   uint64
 }
 
-// planSpGroups is the §8.4 step-1 plan, in decision D-D's order: per slice one
-// META group of 1 extent — the first rung of the §8.5 ladder — followed by one
-// DATA group of init_ext_cnt. The order is the contract: the DN scan draws its
-// picks in it and the STM mints ids in it, so a retried attempt reproduces
-// exactly the same write set.
+// planSpGroups is the plan of CreateStoragePool's Action step 1
+// (architecture.md, Storage pools), in decision D-D's order: per slice one
+// META group of 1 extent — the first rung of the ladder of architecture.md,
+// GrowSlice — followed by one DATA group of init_ext_cnt. The order is the
+// contract: the DN scan draws its picks in it and the STM mints ids in it, so
+// a retried attempt reproduces exactly the same write set.
 func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 	plans := make([]spGrpPlan, 0, 2*sliceCnt)
 	for sliceIdx := 0; sliceIdx < sliceCnt; sliceIdx++ {
@@ -284,7 +295,8 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 // The RPCs
 // ---------------------------------------------------------------------------
 
-// CreateStoragePool is architecture.md §8.4's CreateStoragePool.
+// CreateStoragePool is the CreateStoragePool of architecture.md, Storage
+// pools.
 //
 // The whole RPC is ONE candidate unit (GW9): both scans run outside the
 // transaction, the transaction re-validates every single pick against the
@@ -295,18 +307,20 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 //
 // The scans need the extent size, the batch sizes and the leg count, all of
 // which live in ClusterConf, so each iteration starts with one plain pre-read
-// of it (§5.8). That read decides nothing but three refusals: NOT_FOUND for a
-// cluster that is not there, ABORTED for a stored conf that fails §7 (the
-// allocator's gate, run before anything is computed from it), and the §7
-// geometry of the request merged over it, judged before the scans so that a
-// request whose merge breaks a rule is INVALID_ARGUMENT even on a cluster too
-// short of nodes for them. The in-STM read is authoritative and judges all
-// three again; when it yields a different cluster_id — the cluster was
-// deleted and re-created under the scan — or a different leg count, every
+// of it (architecture.md, STM discipline). That read decides nothing but three
+// refusals: NOT_FOUND for a cluster that is not there, ABORTED for a stored
+// conf that fails architecture.md, Common validation (the allocator's gate,
+// run before anything is computed from it), and the geometry (architecture.md,
+// Common validation) of the request merged over it, judged before the scans so
+// that a request whose merge breaks a rule is INVALID_ARGUMENT even on a
+// cluster too short of nodes for them. The in-STM read is authoritative and
+// judges all three again; when it yields a different cluster_id — the cluster
+// was deleted and re-created under the scan — or a different leg count, every
 // pick was drawn for a different SP shape and the unit re-plans.
 //
 // Nothing is bumped here. SpRev is CREATED at revision 1, and the DN/CN
-// revisions are bumped once per node by the two ledgers' flush (§5.5), however
+// revisions are bumped once per node by the two ledgers' flush
+// (architecture.md, Revision keys and the sync fan-out), however
 // many sides or cntlrs of this SP one node ended up carrying.
 func (s *Server) CreateStoragePool(
 	ctx context.Context,
@@ -339,16 +353,17 @@ func (s *Server) CreateStoragePool(
 			cntlrCnt, common.MinCntlrCntPerSp, common.MaxCntlrCntPerSp)
 	}
 	if cntlrCnt > len(slots) {
-		// §11.8: the cntlid slots of one SP's cntlrs are all distinct, so a
-		// list shorter than cntlr_cnt cannot name them.
+		// architecture.md, cntlid slots: the cntlid slots of one SP's cntlrs
+		// are all distinct, so a list shorter than cntlr_cnt cannot name them.
 		return nil, errInvalid(
 			"cntlr_cnt %d exceeds the %d entries of cntlid_slot_list",
 			cntlrCnt, len(slots))
 	}
 	sliceCnt := int(req.GetSliceCnt())
 	if sliceCnt == 0 {
-		// §7's "substitute the default", exactly as for cntlr_cnt above: a
-		// zero slice_cnt is a request for common.DefaultSliceCntPerSp, which
+		// The "substitute the default" of architecture.md, Common validation,
+		// exactly as for cntlr_cnt above: a zero slice_cnt is a request for
+		// common.DefaultSliceCntPerSp, which
 		// is what both CLI drivers' --slice-cnt help promises. planSpGroups
 		// and the slice loop of the STM read this local, so the substituted
 		// count is the one the SP is built with. CreateClone's src_slice_cnt
@@ -390,8 +405,8 @@ func (s *Server) CreateStoragePool(
 		return nil, err
 	}
 	plans := planSpGroups(sliceCnt, req.GetInitExtCnt())
-	// §6.5: one cntlr's CN reserves the WHOLE SP, because every cntlr stacks
-	// every group of every slice.
+	// architecture.md, Per-operation allocation: one cntlr's CN reserves the
+	// WHOLE SP, because every cntlr stacks every group of every slice.
 	footprint := uint64(0)
 	for _, plan := range plans {
 		footprint += plan.ExtCnt
@@ -406,14 +421,16 @@ func (s *Server) CreateStoragePool(
 		// The allocator's conf gate, run before anything is computed from the
 		// stored conf: the merge below would resolve a zero read back out of
 		// the store into a constant and judge the request against that, where
-		// §5.9 makes a stored conf that fails §7 ABORTED, never
+		// architecture.md, UNEXPECTED_ERROR → `ABORTED`, makes a stored conf
+		// that fails architecture.md, Common validation, ABORTED, never
 		// INVALID_ARGUMENT.
 		if err := model.ValidateClusterConf(scanCc); err != nil {
 			return errAborted("%v", err)
 		}
 		scanBdev := model.ResolveBdevConf(mergeSpBdevConf(
 			req.GetBdevConf(), scanCc.GetBdevConf()))
-		// §7's geometry rules on the conf this SP would store, judged BEFORE
+		// The geometry rules of architecture.md, Common validation, on the
+		// conf this SP would store, judged BEFORE
 		// the scans: a scan run first would answer a request whose merge
 		// breaks one RESOURCE_EXHAUSTED on a cluster short of nodes, sending
 		// the operator to add capacity for a pool that is refused anyway.
@@ -421,11 +438,13 @@ func (s *Server) CreateStoragePool(
 			return err
 		}
 		legs := legCntOf(scanBdev)
-		// §6.5 DN scan, in decision D-D's group order. The black list starts
+		// The DN scan of architecture.md, Per-operation allocation, in
+		// decision D-D's group order. The black list starts
 		// as the request's own (pickDns folds dn_selector.black_list in) and
 		// grows with every pick, so every leg of the WHOLE SP lands on a
 		// distinct DN — not merely every leg of one group. ExcludeLocs stays
-		// empty: §6.5 leaves CreateStoragePool's DN scans out of the two-tier
+		// empty: architecture.md, Per-operation allocation, leaves
+		// CreateStoragePool's DN scans out of the two-tier
 		// rule (only its CN picks below are two-tier) — a group being created
 		// has no failure domains of its own to keep out of yet, and the scan's
 		// own one-DN-per-location rule already spreads each group.
@@ -442,7 +461,8 @@ func (s *Server) CreateStoragePool(
 			dnPicks = append(dnPicks, picks)
 			dnBlack = append(dnBlack, candAddrs(picks)...)
 		}
-		// §6.5 CN scan: one pick per cntlr, each for the SP's whole
+		// The CN scan of architecture.md, Per-operation allocation: one pick
+		// per cntlr, each for the SP's whole
 		// footprint, each black-listed so two cntlrs never share a CN, and
 		// each pick's location excluded from every later pick's tier 1 so
 		// the cntlrs spread over failure domains while a domain none of them
@@ -477,7 +497,8 @@ func (s *Server) CreateStoragePool(
 				// its picks describe an SP this transaction is not building.
 				return errCandidateChanged
 			}
-			// §7's geometry rules once more, on the conf this SP will STORE
+			// The geometry rules of architecture.md, Common validation, once
+			// more, on the conf this SP will STORE
 			// and before any id is minted. The ClusterConf of an unchanged
 			// cluster_id is the one the pre-read returned (it is write-once),
 			// so this verdict is the one reached before the scans; it is
@@ -523,7 +544,8 @@ func (s *Server) CreateStoragePool(
 				cntlrIds[idx] = minter.mint()
 				conf.CntlrIdList = append(conf.CntlrIdList, cntlrIds[idx])
 			}
-			// The cluster's stored extent size, used as stored (§7):
+			// The cluster's stored extent size, used as stored
+			// (architecture.md, Common validation):
 			// CreateCluster resolved it, and a zero here would be corruption.
 			if err := model.ValidateClusterConf(cc); err != nil {
 				return errAborted("%v", err)
@@ -552,10 +574,12 @@ func (s *Server) CreateStoragePool(
 					metaBlocks, dataBlocks, err := model.GroupBlocks(
 						plan.ExtCnt, extentSize, bdev)
 					if err != nil {
-						// §8.4's INVALID_ARGUMENT for the geometry: the
-						// requested group is too small to carry its own §3.6
-						// metadata, or init_ext_cnt × extent_size overflows
-						// uint64.
+						// The INVALID_ARGUMENT of architecture.md, Storage
+						// pools, for the geometry: the requested group is too
+						// small to carry its own metadata (architecture.md,
+						// Group on-leg layout: meta region, data region,
+						// health block), or init_ext_cnt × extent_size
+						// overflows uint64.
 						return errInvalid("%v", err)
 					}
 					grp := &pb.Group{
@@ -581,7 +605,9 @@ func (s *Server) CreateStoragePool(
 								NvmeTrConf: dn.GetNvmeTrConf(),
 								ErrEpoch:   0,
 								// [D15]: the sp-worker flips it once the DN
-								// agent has zeroed the side (§9.4, §10.3).
+								// agent has zeroed the side (architecture.md,
+								// Side provisioning protocol; architecture.md,
+								// sp role).
 								Provisioned: false,
 							}},
 						})
@@ -622,7 +648,8 @@ func (s *Server) CreateStoragePool(
 				builtCntlrs = append(builtCntlrs, &pb.Cntlr{
 					AddrPort:   cand.AddrPort,
 					NvmeTrConf: cn.GetNvmeTrConf(),
-					// §11.8: the slots of one SP's cntlrs are all distinct,
+					// architecture.md, cntlid slots: the slots of one SP's
+					// cntlrs are all distinct,
 					// and the list was checked long enough for cntlr_cnt.
 					CntlidSlot: slots[idx],
 					Primary:    idx == 0,
@@ -648,7 +675,8 @@ func (s *Server) CreateStoragePool(
 			stm.Put(confKey, conf)
 			stm.Put(model.SpNameKey(cid, spId),
 				&pb.SpName{SpName: req.GetSpName()})
-			// The rev key is created, not bumped: revision starts at 1 (§5.5)
+			// The rev key is created, not bumped: revision starts at 1
+			// (architecture.md, Revision keys and the sync fan-out)
 			// and carries the sp_name a watching worker needs to form the
 			// SpConf key without a second lookup [D10].
 			stm.Put(model.SpRevKey(minted.Shard, cid, spId), &pb.SpRev{
@@ -673,8 +701,9 @@ func (s *Server) CreateStoragePool(
 	return &pb.CreateStoragePoolReply{SpId: spId}, nil
 }
 
-// DeleteStoragePool is architecture.md §8.4's DeleteStoragePool, amended by
-// gateway.md §5.4 as amended 2026-09-15: it LATCHES the SP and returns.
+// DeleteStoragePool is the DeleteStoragePool of architecture.md, Storage
+// pools, amended by gateway.md, Storage pools and GrowSlice, as amended
+// 2026-09-15: it LATCHES the SP and returns.
 //
 // It is the one mutator that opens an SP with rejectDeleting = false: an SP
 // whose teardown has begun refuses every other change, and refusing the RPC
@@ -687,8 +716,9 @@ func (s *Server) CreateStoragePool(
 // cascades: by that precondition a deletable SP has no children a user owns, so
 // the "other resources" the drain removes are only the SP's own bookkeeping.
 //
-// Why a latch and not the one-shot teardown it replaces (§8.4's "Why not one
-// transaction", dnv-worker.md §11.6): that transaction was unbounded in the DN
+// Why a latch and not the one-shot teardown it replaces (architecture.md,
+// Storage pools, DeleteStoragePool; dnv-worker.md, The sp drain): that
+// transaction was unbounded in the DN
 // dimension — already about 532 writes at the then-maximum 16-slice shape,
 // over the common.EtcdMaxTxnOps of the time, with no tripwire — and the slice
 // ceiling has doubled since; GrowSlice on top of that lets a slice's group
@@ -763,13 +793,14 @@ func (s *Server) DeleteStoragePool(
 	return &pb.DeleteStoragePoolReply{SpId: spId}, nil
 }
 
-// GetStoragePool is architecture.md §8.4's GetStoragePool: one Snapshot, so
-// the SpConf, its token and every listed sub-object come from ONE store
-// revision. A reply assembled from several revisions could show a cntlr list
-// from before a CreateCntlr next to an SpRev from after it, and a client that
-// then used that token would be refused for a reason it could not see.
+// GetStoragePool is the GetStoragePool of architecture.md, Storage pools: one
+// Snapshot, so the SpConf, its token and every listed sub-object come from ONE
+// store revision. A reply assembled from several revisions could show a cntlr
+// list from before a CreateCntlr next to an SpRev from after it, and a client
+// that then used that token would be refused for a reason it could not see.
 //
-// A listed key that is missing is §5.9's ABORTED, not an omission: the id
+// A listed key that is missing is an ABORTED (architecture.md,
+// UNEXPECTED_ERROR → `ABORTED`), not an omission: the id
 // lists are the SP's inventory, and a reply that quietly dropped an entry
 // would tell a caller the object never existed.
 func (s *Server) GetStoragePool(
@@ -819,11 +850,13 @@ func (s *Server) GetStoragePool(
 	return reply, nil
 }
 
-// ListStoragePools is architecture.md §8.4's ListStoragePools (GW10).
+// ListStoragePools is the ListStoragePools of architecture.md, Storage pools
+// (GW10).
 //
-// Like every paged list it uses plain reads and no transaction (§5.7), but it
-// still needs the cluster_id its prefix is built from, which is the one plain
-// pre-read of ClusterConf §5.7 prescribes.
+// Like every paged list it uses plain reads and no transaction
+// (architecture.md, page_token), but it still needs the cluster_id its prefix
+// is built from, which is the one plain pre-read of ClusterConf that
+// architecture.md, page_token, prescribes.
 func (s *Server) ListStoragePools(
 	ctx context.Context,
 	req *pb.ListStoragePoolsRequest,
@@ -833,10 +866,10 @@ func (s *Server) ListStoragePools(
 	); err != nil {
 		return nil, err
 	}
-	// GW4: the two page arguments are pure §7 checks, so they run
-	// before the ClusterConf read the prefix needs — a bad count or
-	// page_token must be INVALID_ARGUMENT, not the NOT_FOUND a missing
-	// cluster would otherwise answer first.
+	// GW4: the two page arguments are pure checks of architecture.md, Common
+	// validation, so they run before the ClusterConf read the prefix needs — a
+	// bad count or page_token must be INVALID_ARGUMENT, not the NOT_FOUND a
+	// missing cluster would otherwise answer first.
 	if err := validatePageArgs(
 		req.GetCount(), req.GetPageToken(),
 	); err != nil {
@@ -858,19 +891,21 @@ func (s *Server) ListStoragePools(
 	}, nil
 }
 
-// UpdateStoragePoolCntlidSlotList is architecture.md §8.4's
-// UpdateStoragePoolCntlidSlotList.
+// UpdateStoragePoolCntlidSlotList is the UpdateStoragePoolCntlidSlotList of
+// architecture.md, Storage pools.
 //
-// The list's shape is checked outside the STM (§7: values below 8, no
-// duplicates, and — unlike CreateStoragePool — not empty, because an SP with
-// no slot can produce no side). The state-dependent half has to be inside it:
-// a slot may only leave the list when nothing uses it, and what uses one is
+// The list's shape is checked outside the STM (architecture.md, Common
+// validation: values below 8, no duplicates, and — unlike CreateStoragePool —
+// not empty, because an SP with no slot can produce no side). The
+// state-dependent half has to be inside it: a slot may only leave the list
+// when nothing uses it, and what uses one is
 // every cntlr's cntlid_slot and every side's, which are only knowable from the
 // cntlrs and slices this transaction reads.
 //
 // Sides are included, not just cntlrs, because a side's cntlid_slot is what
-// the DN's nvmet subsystem exports it under (§11.8); dropping a slot a side
-// still names would make the SP undeployable, not merely inconsistent.
+// the DN's nvmet subsystem exports it under (architecture.md, cntlid slots);
+// dropping a slot a side still names would make the SP undeployable, not
+// merely inconsistent.
 func (s *Server) UpdateStoragePoolCntlidSlotList(
 	ctx context.Context,
 	req *pb.UpdateStoragePoolCntlidSlotListRequest,
@@ -942,8 +977,9 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 	return &pb.UpdateStoragePoolCntlidSlotListReply{SpId: spId}, nil
 }
 
-// UpdateStoragePoolLevel is architecture.md §8.4's UpdateStoragePoolLevel: the
-// staged disaster-recovery / maintenance switch of §11.7.
+// UpdateStoragePoolLevel is the UpdateStoragePoolLevel of architecture.md,
+// Storage pools: the staged disaster-recovery / maintenance switch of
+// architecture.md, SpLevel.
 //
 // The level is not applied here in any sense — it rides in both Syncup*
 // requests, so the bump is the whole mechanism: the workers see the new SpRev,
@@ -951,7 +987,7 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 // the level allows.
 //
 // It is written and bumped unconditionally even when the level is unchanged:
-// §0 #17's idempotent no-write covers the three Update*Enabled/Disabled RPCs
+// GW6's idempotent no-write covers the three Update*Enabled/Disabled RPCs
 // only, and an operator resending a level after a partial convergence wants
 // exactly the re-push a bump produces.
 func (s *Server) UpdateStoragePoolLevel(
@@ -988,9 +1024,9 @@ func (s *Server) UpdateStoragePoolLevel(
 	return &pb.UpdateStoragePoolLevelReply{SpId: spId}, nil
 }
 
-// FindStoragePoolNames is architecture.md §8.4's FindStoragePoolNames: the
-// reverse lookup admin tooling and log analysis need, because keys and device
-// names carry sp_id and never sp_name.
+// FindStoragePoolNames is the FindStoragePoolNames of architecture.md, Storage
+// pools: the reverse lookup admin tooling and log analysis need, because keys
+// and device names carry sp_id and never sp_name.
 //
 // It is a Snapshot — one store revision, no commit — so a batch of ids is
 // answered from one consistent view rather than from a store that moved
@@ -1028,7 +1064,7 @@ func (s *Server) FindStoragePoolNames(
 	return &pb.FindStoragePoolNamesReply{SpIdToName: found}, nil
 }
 
-// GrowSlice is architecture.md §8.5's GrowSlice.
+// GrowSlice is the RPC of architecture.md, GrowSlice.
 //
 // The transaction is model.GrowSlice's, not this handler's: the gateway and
 // the sp-worker's AR6 auto-grow append a group by the same op, so the rule
@@ -1038,24 +1074,25 @@ func (s *Server) FindStoragePoolNames(
 // every cntlr's CN itself, in the same transaction as the write, and a bump
 // here would be a second one.
 //
-// req.ext_cnt never reaches the model (decision D-E): it is only §8.5's
-// exclusivity signal — a data grow states one, a meta grow must not, because
-// meta sizes come from the ladder. The size the DN scan must ask for is the
-// one model.GrowSlice will itself compute, so it is recomputed here from the
-// same inputs: the slice's first data group, or the meta ladder.
+// req.ext_cnt never reaches the model (decision D-E): it is only the
+// exclusivity signal of architecture.md, GrowSlice — a data grow states one, a
+// meta grow must not, because meta sizes come from the ladder. The size the DN
+// scan must ask for is the one model.GrowSlice will itself compute, so it is
+// recomputed here from the same inputs: the slice's first data group, or the
+// meta ladder.
 //
-// poolTotal is math.MaxUint64 (gateway.md §5.4, architecture.md §8.5;
-// TestGrowSliceConsecutiveDataGrows pins it). model.GrowSlice re-applies AR6's
-// pending rule, which exists so that a WORKER cannot issue a second grow
-// before the primary has reported the first; a user-driven GrowSlice is
-// explicit operator intent, and the gateway holds no pool report to judge
-// "pending" with, so the rule is disabled by passing a total no group total
-// can reach.
+// poolTotal is math.MaxUint64 (gateway.md, Storage pools and GrowSlice;
+// architecture.md, GrowSlice; TestGrowSliceConsecutiveDataGrows pins it).
+// model.GrowSlice re-applies AR6's pending rule, which exists so that a WORKER
+// cannot issue a second grow before the primary has reported the first; a
+// user-driven GrowSlice is explicit operator intent, and the gateway holds no
+// pool report to judge "pending" with, so the rule is disabled by passing a
+// total no group total can reach.
 //
 // The planning pre-reads sit INSIDE the candidate unit: a re-scan that
 // re-planned from the same stale slice would ask for the same wrong size for
 // ever, so each iteration re-reads what it plans from (all of it outside every
-// STM, §5.8).
+// STM, architecture.md, STM discipline).
 func (s *Server) GrowSlice(
 	ctx context.Context,
 	req *pb.GrowSliceRequest,
@@ -1082,17 +1119,17 @@ func (s *Server) GrowSlice(
 	var grpId uint64
 	err := candidateUnit(ctx, func() error {
 		grpId = 0
-		// The planning pre-read is ONE read-only snapshot (§5.8) opened with
-		// openSp, so the token is checked before any other state check
-		// (GW6): a client that sent a stale one sees ABORTED "stale
-		// revision" and never a NOT_FOUND computed against a slice list it
-		// has not read.
+		// The planning pre-read is ONE read-only snapshot (architecture.md,
+		// STM discipline) opened with openSp, so the token is checked before
+		// any other state check (GW6): a client that sent a stale one sees
+		// ABORTED "stale revision" and never a NOT_FOUND computed against a
+		// slice list it has not read.
 		//
-		// GW6 is presence-based (§0 #7), and the two layers agree by
+		// GW6 is presence-based, and the two layers agree by
 		// construction: a request that carried NO token passes nil here, is
 		// let through unchecked, and then reaches model.GrowSlice below as
 		// expectRev 0 — which model.checkSpRev reads as "skip the check
-		// entirely", the worker's mode (gateway.md §2.2 #3). Such a grow
+		// entirely", the worker's mode (gateway.md GW6). Such a grow
 		// commits with no optimistic-concurrency gate, which is exactly what
 		// omitting the token asks for. A token that is merely
 		// present-with-0 is a different thing: a live SpRev starts at 1, so
@@ -1115,7 +1152,8 @@ func (s *Server) GrowSlice(
 			sliceKey := model.SliceKey(cid, conf.GetSpId(), req.GetSliceId())
 			slice = &pb.Slice{}
 			if !stm.Get(sliceKey, slice) {
-				// A listed slice whose key is gone is §5.9's ABORTED,
+				// A listed slice whose key is gone is an ABORTED
+				// (architecture.md, UNEXPECTED_ERROR → `ABORTED`),
 				// exactly as in loadSlices: the SP has lost an invariant key.
 				return errAborted("slice key %q is missing", sliceKey)
 			}
@@ -1124,7 +1162,8 @@ func (s *Server) GrowSlice(
 		if snapErr != nil {
 			return mapStmErr(snapErr)
 		}
-		// Both confs as stored (§7). Validating before the ladder is what
+		// Both confs as stored (architecture.md, Common validation).
+		// Validating before the ladder is what
 		// keeps model.MetaLadderExtCnt's "false" meaning the 16 GiB cap and
 		// nothing else: an unvalidated zero extent size would report the same
 		// false and be reported to the operator as a metadata ceiling.
@@ -1134,10 +1173,10 @@ func (s *Server) GrowSlice(
 		if err := model.ValidateBdevConf(conf.GetBdevConf()); err != nil {
 			return errAborted("%v", err)
 		}
-		// The §8.5 group ceiling is, like the ladder cap below, the slice's
-		// own permanent state — a live slice's groups are only ever
-		// appended — so it is FAILED_PRECONDITION (GW7) though it is a
-		// count, and it is answered HERE, ahead of the scan, so that a
+		// The group ceiling of architecture.md, GrowSlice, is, like the ladder
+		// cap below, the slice's own permanent state — a live slice's groups
+		// are only ever appended — so it is FAILED_PRECONDITION (GW7) though
+		// it is a count, and it is answered HERE, ahead of the scan, so that a
 		// cluster short of DNs cannot report it as a candidate shortfall.
 		// model.GrowSlice re-checks it in-STM, under the same code.
 		if model.GrpListFull(slice, req.GetIsMeta()) {
@@ -1161,9 +1200,9 @@ func (s *Server) GrowSlice(
 			if !ok {
 				// The 16 GiB dm-thin metadata cap is the SP's own permanent
 				// ceiling — object state, not exhaustible capacity — so it
-				// is FAILED_PRECONDITION (architecture.md §8.5, gateway.md
-				// GW7; model.GrowSlice's in-STM re-check of the same cap
-				// already maps there).
+				// is FAILED_PRECONDITION (architecture.md, GrowSlice;
+				// gateway.md GW7; model.GrowSlice's in-STM re-check of the
+				// same cap already maps there).
 				return errPrecondition(
 					"slice %d has %d meta extents and cannot grow past the "+
 						"16 GiB dm-thin metadata cap",
@@ -1180,13 +1219,15 @@ func (s *Server) GrowSlice(
 			// caller's ext_cnt (D-E).
 			extCnt = slice.GetDataGrpList()[0].GetExtCnt()
 		}
-		// §8.5 Errors: "RESOURCE_EXHAUSTED ... when any cntlr's CN has
-		// free_ext_cnt below the new group's ext_cnt". Every cntlr of the SP
-		// stacks the new group, so every one of their CNs reserves it
-		// (§6.5), and model.chargeSpCns refuses inside the STM when one
-		// cannot — but as an ErrPrecondition, which mapModelErr can only
-		// render as FAILED_PRECONDITION. The check is therefore made HERE,
-		// where the shortfall still has a name and the §8.5 code.
+		// The Errors of architecture.md, GrowSlice: "RESOURCE_EXHAUSTED ...
+		// when any cntlr's CN has free_ext_cnt below the new group's ext_cnt".
+		// Every cntlr of the SP stacks the new group, so every one of their
+		// CNs reserves it (architecture.md, Per-operation allocation), and
+		// model.chargeSpCns refuses inside the STM when one cannot — but as an
+		// ErrPrecondition, which mapModelErr can only render as
+		// FAILED_PRECONDITION. The check is therefore made HERE, where the
+		// shortfall still has a name and the code of architecture.md,
+		// GrowSlice.
 		//
 		// It is a pre-check, not the decision: the STM re-charges every CN
 		// from what IT reads, so a CN that lost its budget in between still
@@ -1198,12 +1239,14 @@ func (s *Server) GrowSlice(
 		}
 		// D-F: the black list is the request's own and nothing is ever
 		// appended to it — one scan-and-pick round serves the whole group
-		// (§6.5): the scan keeps one candidate per DN and per location, and
+		// (architecture.md, Per-operation allocation): the scan keeps one
+		// candidate per DN and per location, and
 		// the random pick draws the group's legs as distinct entries from it,
 		// so the new group spreads over distinct DNs while another group's
 		// DNs stay allowed. (worker/reaction.go runGrow reaches the same
 		// spread its own way, via pickDistinct.) ExcludeLocs stays empty for
-		// the same reason: §6.5 leaves GrowSlice out of the two-tier rule — a
+		// the same reason: architecture.md, Per-operation allocation, leaves
+		// GrowSlice out of the two-tier rule — a
 		// grow spreads the NEW group, it does not avoid the slice's existing
 		// failure domains.
 		picks, err := pickDns(

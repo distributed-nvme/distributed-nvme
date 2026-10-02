@@ -22,7 +22,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// bufconn agents (the §13 "fake agents built from the generated servers")
+// bufconn agents (fake agents built from the generated servers)
 // ---------------------------------------------------------------------------
 
 // stubDnAgent is a DiskNodeAgent whose CheckDn and SyncupDn behavior each
@@ -245,7 +245,7 @@ func (f *agentFleet) serve(
 }
 
 // dial is the connCache dialer of RW7 pointed at the fleet: the same chain
-// options grpc.md §4 requires, over bufconn instead of TCP.
+// options grpc.md, Wiring, requires, over bufconn instead of TCP.
 func (f *agentFleet) dial(addrPort string) (*grpc.ClientConn, error) {
 	f.mu.Lock()
 	lis, ok := f.listeners[addrPort]
@@ -305,9 +305,9 @@ func newRevHarness(t *testing.T) *revHarness {
 }
 
 // setClusterConf installs a cluster conf in the RW21 cache exactly as given.
-// It resolves nothing, mirroring the cache itself (§7) — which is the only
-// reason a test can hand the loop a conf the gateway could not have written
-// and watch it refuse.
+// It resolves nothing, mirroring the cache itself (architecture.md, Common
+// validation) — which is the only reason a test can hand the loop a conf the
+// gateway could not have written and watch it refuse.
 func (h *revHarness) setClusterConf(cid uint64, cc *pb.ClusterConf) {
 	h.deps.conf.mu.Lock()
 	h.deps.conf.entries[cid] = cc
@@ -727,14 +727,14 @@ func testRevisionIdleWithoutClusterConf(t *testing.T) {
 	})
 }
 
-// TestRevisionIdlesOnAnInvalidClusterConf is the §7 twin of the test above,
-// for a cluster that IS in the cache but whose stored conf the gateway could
-// not have written. The loop never leaves the gate — no stream, no syncup, no
-// health write — because the alternative is worse than idling: what such a
-// conf is missing is geometry, the bin ladder MD4 keys capacity by and the
-// extent_size the dn agent formats every disk header with (§3.1), so a round
-// computed from guessed values would commit the cluster to numbers nobody else
-// holds.
+// TestRevisionIdlesOnAnInvalidClusterConf is the twin of the test above under
+// architecture.md, Common validation, for a cluster that IS in the cache but
+// whose stored conf the gateway could not have written. The loop never leaves
+// the gate — no stream, no syncup, no health write — because the alternative is
+// worse than idling: what such a conf is missing is geometry, the bin ladder
+// MD4 keys capacity by and the extent_size the dn agent formats every disk
+// header with (architecture.md, Disk node), so a round computed from guessed
+// values would commit the cluster to numbers nobody else holds.
 //
 // The bad conf is installed BEFORE the worker starts, so what this test pins
 // is that the gate sits ahead of round(): the worker never dials, never opens
@@ -744,7 +744,8 @@ func testRevisionIdleWithoutClusterConf(t *testing.T) {
 // because there is nothing to hand back. The test below, reaching the refusal
 // from a connected state, is where refuseConf's quiesce() is pinned.
 //
-// The record is its own, not "cluster conf missing": §14 greps that string for
+// The record is its own, not "cluster conf missing": the worker suite
+// (dnv-worker.md, Integration test plan) greps that string for
 // the absent-cluster case, and an operator who sees it goes looking for a
 // deleted cluster instead of the field that is wrong.
 func TestRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
@@ -757,7 +758,7 @@ func testRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
 	h.fleet.addDn(t, testAddr, stub)
 	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
 	// Stored without a dn_bin_conf: proto3 hands the reader the all-zero
-	// shift set, which §6.2 does not accept as a ladder.
+	// shift set, which architecture.md, DN bins, does not accept as a ladder.
 	h.setClusterConf(testCid, testClusterConf(func(cc *pb.ClusterConf) {
 		cc.DnBinConf = nil
 	}))
@@ -808,13 +809,14 @@ func testRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
 		func() bool { return stub.checkCount() >= 1 })
 }
 
-// TestRevisionQuiescesWhenARunningConfGoesBad is the CONNECTED half of the §7
-// refusal: a worker that is already driving its object — one Check stream
-// open over one RW7 connection reference — and whose cluster conf then becomes
-// unusable. RW9's promise for that case is not merely "no new round": it is
-// that the loop gives the stream and the reference BACK, so an operator who
-// corrupted a cluster conf does not leave one idle gRPC connection per object
-// pinned open for as long as it takes to fix it.
+// TestRevisionQuiescesWhenARunningConfGoesBad is the CONNECTED half of the
+// refusal of architecture.md, Common validation: a worker that is already
+// driving its object — one Check stream open over one RW7 connection reference
+// — and whose cluster conf then becomes unusable. RW9's promise for that case
+// is not merely "no new round": it is that the loop gives the stream and the
+// reference BACK, so an operator who corrupted a cluster conf does not leave
+// one idle gRPC connection per object pinned open for as long as it takes to
+// fix it.
 //
 // Every assertion below is therefore about state the cold-start test cannot
 // enter: it asserts refs == 1 and one live stream BEFORE the conf goes bad, so
@@ -1216,13 +1218,13 @@ func testRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	}
 }
 
-// TestSyncupLeftoverLogged pins the §12 "syncup leftover" record: a Syncup*
-// reply carrying common.ReplyCodeLeftover was ACCEPTED — the desired state is
-// stored and every wanted object converged — so it is not a rejection and must
-// never be logged as one. What it adds is the agent's own account of what the
-// node still holds that the desired state does not want (or of an enumeration
-// that did not answer), which is the only place a lingering leftover becomes
-// visible in the worker log.
+// TestSyncupLeftoverLogged pins the "syncup leftover" record (log.md,
+// Leftovers): a Syncup* reply carrying common.ReplyCodeLeftover was ACCEPTED —
+// the desired state is stored and every wanted object converged — so it is not
+// a rejection and must never be logged as one. What it adds is the agent's own
+// account of what the node still holds that the desired state does not want (or
+// of an enumeration that did not answer), which is the only place a lingering
+// leftover becomes visible in the worker log.
 func TestSyncupLeftoverLogged(t *testing.T) {
 	h := newRevHarness(t)
 	const details = "leftover(2): d4:dnv-...-d4-..., d0:dnv-...-d0-..."

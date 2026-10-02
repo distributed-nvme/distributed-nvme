@@ -1,8 +1,9 @@
 // Command dnagentctl is the gRPC driver of the dn-agent integration test
-// (doc/dnagent_integtest.md §8). The agent serves plaintext gRPC without
-// server reflection, so grpcurl cannot drive it; this binary speaks the
-// generated DiskNodeAgent client instead and prints every reply as protojson
-// (proto field names) on stdout for the test script to parse with jq.
+// (doc/dnagent_integtest.md, The driver: `dnagentctl`). The agent serves
+// plaintext gRPC without server reflection, so grpcurl cannot drive it; this
+// binary speaks the generated DiskNodeAgent client instead and prints every
+// reply as protojson (proto field names) on stdout for the test script to
+// parse with jq.
 //
 // It exits non-zero on a gRPC error or when agent_reply.code differs from
 // --expect-code (default 0), so the caller's `set -e` catches both.
@@ -31,7 +32,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Flag value types. Every id flag accepts decimal or 0x hex (§8).
+// Flag value types. Every id flag accepts decimal or 0x hex.
 // ---------------------------------------------------------------------------
 
 type hexUint uint64
@@ -146,7 +147,7 @@ type globals struct {
 	expectCode uint
 }
 
-// bind registers the §8 global flags on a subcommand's flag set, so they may
+// bind registers the global flags on a subcommand's flag set, so they may
 // be given in any order after the subcommand name. The two pollers
 // (wait-hydrated, wait-zeroed) bind with withTimeout = false and spend
 // --timeout on their own polling budget instead.
@@ -295,7 +296,8 @@ func sidePointerOf(sp, leg, side *hexUint) *pb.SidePointer {
 }
 
 // cmdGetDnSize doubles as the agent liveness probe: GetDnSize takes no lock,
-// so --wait retries it until the freshly started agent answers (§7 step 6).
+// so --wait retries it until the freshly started agent answers
+// (dnagent_integtest.md, Cases, the setup paragraph).
 func cmdGetDnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-dn-size", &g)
@@ -368,7 +370,7 @@ func cmdSyncupSide(args []string) {
 	sp, leg, side := sidePointerFlags(fs)
 	var revision, extCnt, primaryCn hexUint
 	var standbys hexUintList
-	cntlidSlot := fs.Uint("cntlid-slot", 0, "cntlid slot (architecture.md §11.8)")
+	cntlidSlot := fs.Uint("cntlid-slot", 0, "cntlid slot (architecture.md, cntlid slots)")
 	spLevel := fs.String("sp-level", "readwrite", "sp level name")
 	migrSrc := fs.String("migr-src", "",
 		"migr_src_conf as migr:dstSide:dstDn")
@@ -381,11 +383,12 @@ func cmdSyncupSide(args []string) {
 	hydrThreshold := fs.Uint("hydr-threshold", 0, "dm-clone hydration threshold")
 	hydrBatch := fs.Uint("hydr-batch", 0, "dm-clone hydration batch size")
 	bmCnt := fs.Uint("bm-cnt", 0, "number of bitmap chunks the CP will push")
-	// The §9.4 provisioning gates. Both default to false, which is proto3's
-	// zero and the value the gateway writes for a brand new side, so every
-	// steady-state call site must pass them explicitly. Go's flag package never
-	// consumes the following argument for a bool, so callers must always write
-	// --provisioned=true, never --provisioned true.
+	// The provisioning gates of architecture.md, Side provisioning protocol.
+	// Both default to false, which is proto3's zero and the value the gateway
+	// writes for a brand new side, so every steady-state call site must pass
+	// them explicitly. Go's flag package never consumes the following argument
+	// for a bool, so callers must always write --provisioned=true, never
+	// --provisioned true.
 	provisioned := fs.Bool("provisioned", false,
 		"side_conf.provisioned — the CP's export gate; false means "+
 			"allocate and zero only, no per-CN export stacks")
@@ -437,7 +440,7 @@ func cmdSyncupSide(args []string) {
 			MigrId:    migrId,
 			SrcSideId: srcSideId,
 			SrcDnId:   srcDnId,
-			// The whole harness runs nvme over tcp/ipv4 (§8).
+			// The whole harness runs nvme over tcp/ipv4.
 			SrcNvmeTrConf: &pb.NvmeTrConf{
 				TrType:  "tcp",
 				AdrFam:  "ipv4",
@@ -553,9 +556,9 @@ func cmdGetSideInfo(args []string) {
 		die("GetSideInfo failed: %v", err)
 	}
 	emit(reply)
-	// The §9.4 provisioning counters as one human line on **stderr**: stdout
-	// stays exactly one protojson line, because case D diffs it (§8) and every
-	// caller parses it with jq.
+	// The provisioning counters (architecture.md, Side provisioning protocol)
+	// as one human line on **stderr**: stdout stays exactly one protojson line,
+	// because case D diffs it and every caller parses it with jq.
 	fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d\n",
 		reply.GetSideInfo().GetZeroedExtCnt(),
 		reply.GetSideInfo().GetTotalExtCnt())
@@ -648,11 +651,12 @@ func cmdCheckSide(args []string) {
 
 // cmdWaitHydrated polls GetSideInfo until the destination dm-clone reports
 // every region hydrated, parsing the raw `dmsetup status` line the agent puts
-// in migr_dst_info.dm_clone_info.details (§9.5). --min-first asserts a floor
-// on the first sample this poll takes. Case C's bitmap jump (§14 layer 3) is
-// not checked with it: the suite polls only after the ANA wait and the
+// in migr_dst_info.dm_clone_info.details (architecture.md,
+// Live-state reporting). --min-first asserts a floor on the first sample this
+// poll takes. Case C's bitmap jump (dnagent_integtest.md, Cases, migr_bitmap)
+// is not checked with it: the suite polls only after the ANA wait and the
 // read-through probe, when hydration may be complete, so the script reads the
-// jump off the step 11 reply instead.
+// jump off the enabling converge's reply instead.
 func cmdWaitHydrated(args []string) {
 	var g globals
 	fs := flag.NewFlagSet("wait-hydrated", flag.ExitOnError)
@@ -730,7 +734,7 @@ func cmdWaitHydrated(args []string) {
 }
 
 // cmdWaitZeroed polls GetSideInfo until the side reports every logical extent
-// zeroed (the §9.4 provisioning protocol). It is the script's
+// zeroed (architecture.md, Side provisioning protocol). It is the script's
 // stand-in for the sp-worker's flip rule: once it returns, the caller re-sends
 // the same SyncupSide at a fresh revision with --provisioned=true.
 //

@@ -1,4 +1,5 @@
-// CT-T2 — argv → request (dnvctl.md §6).
+// argv → request (dnvctl.md, Conventions, and the group sections; CT3, CT8,
+// CT9).
 //
 // This is the heart of the unit suite: what dnvctl puts on the wire for a
 // given command line. Every row drives the REAL cobra tree through
@@ -9,10 +10,11 @@
 // asserted, at its default, so a value that starts leaking into a request
 // nobody listed fails here.
 //
-// The sweep table is §7.10's, argv for argv. The integration suite asserts
-// the same 59 invocations against a real wire, so a row changed here and not
-// there — or the other way round — shows up as a disagreement between the two
-// suites rather than as a quiet gap.
+// The sweep table is the sweep case's (dnvctl.md, Integration test plan),
+// argv for argv. The integration suite asserts the same 59 invocations
+// against a real wire, so a row changed here and not there — or the other way
+// round — shows up as a disagreement between the two suites rather than as a
+// quiet gap.
 package ctl
 
 import (
@@ -30,7 +32,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The §7.6 fixture values. Payload only — nothing here is ever dialed.
+// The integration suite's fixture values (integtest/dnvctl_test.sh). Payload
+// only — nothing here is ever dialed.
 const (
 	itDnAddr   = "127.0.0.1:29901"
 	itCnAddr   = "127.0.0.1:29902"
@@ -45,14 +48,14 @@ const (
 
 // wantSpRev / wantDnRev / wantCnRev build the expected token message. They
 // are functions rather than package vars so no row can share — and mutate —
-// another row's expectation. Only `revision` is ever set: §4 says the echo
+// another row's expectation. Only `revision` is ever set: CT3 says the echo
 // fields stay empty because the gateway compares nothing else.
 func wantSpRev(revision uint64) *pb.SpRev { return &pb.SpRev{Revision: revision} }
 func wantDnRev(revision uint64) *pb.DnRev { return &pb.DnRev{Revision: revision} }
 func wantCnRev(revision uint64) *pb.CnRev { return &pb.CnRev{Revision: revision} }
 
-// wantTrConf is trConfFlags' default transport (§5.0): the conf a command
-// sends when the operator touches none of the four flags.
+// wantTrConf is trConfFlags' default transport (dnvctl.md, Conventions): the
+// conf a command sends when the operator touches none of the four flags.
 func wantTrConf() *pb.NvmeTrConf {
 	return &pb.NvmeTrConf{
 		TrType:  "tcp",
@@ -62,8 +65,9 @@ func wantTrConf() *pb.NvmeTrConf {
 	}
 }
 
-// sweepRow is one §7.10 step: the argv after the global prefix, the RPC it
-// must drive, and the request it must produce.
+// sweepRow is one step of the sweep case (dnvctl.md, Integration test plan):
+// the argv after the global prefix, the RPC it must drive, and the request it
+// must produce.
 type sweepRow struct {
 	step int
 	rpc  string
@@ -71,11 +75,12 @@ type sweepRow struct {
 	want proto.Message
 }
 
-// sweepRows is §7.10's 59-step table, in §5 order. Together with the global
-// prefix (--cluster itctl --sp sp0) it is the complete CT-T2 corpus: every
-// command covered at least once, every field of every request asserted.
+// sweepRows is the sweep case's 59-step table, in the order of
+// dnvctl.md, The command tree. Together with the global prefix (--cluster
+// itctl --sp sp0) it is the complete argv → request corpus: every command
+// covered at least once, every field of every request asserted.
 var sweepRows = []sweepRow{
-	// ---- §5.1 cluster ----
+	// ---- cluster ----
 	{1, "CreateCluster",
 		[]string{"cluster", "create", "--name", "c1",
 			"--extent-size", "67108864"},
@@ -98,7 +103,7 @@ var sweepRows = []sweepRow{
 		// The one request with no cluster_name field at all.
 		&pb.ListClustersRequest{Count: 2, PageToken: "pt0"}},
 
-	// ---- §5.2 dn ----
+	// ---- dn ----
 	{5, "CreateDiskNode",
 		[]string{"dn", "create", "--addr", itDnAddr, "--location", "rack0"},
 		&pb.CreateDiskNodeRequest{
@@ -134,7 +139,7 @@ var sweepRows = []sweepRow{
 		&pb.InspectDiskNodeRequest{
 			ClusterName: itCluster, AddrPort: itDnAddr}},
 
-	// ---- §5.3 cn: the six dn mirrors ----
+	// ---- cn: the six dn mirrors ----
 	{11, "CreateControllerNode",
 		[]string{"cn", "create", "--addr", itCnAddr, "--location", "rack1"},
 		&pb.CreateControllerNodeRequest{
@@ -171,15 +176,15 @@ var sweepRows = []sweepRow{
 		&pb.InspectControllerNodeRequest{
 			ClusterName: itCluster, AddrPort: itCnAddr}},
 
-	// ---- §5.4 sp ----
+	// ---- sp ----
 	{17, "CreateStoragePool",
 		[]string{"sp", "create", "--cntlr-cnt", "2", "--slice-cnt", "1",
 			"--init-ext-cnt", "2", "--slots", "0,1",
 			"--low-water-mark-pct", "30"},
-		// bdev_conf is ALWAYS sent with a redund_conf (§0 #11); no --rev,
-		// which the request has no token for (§4); dm_pool_conf carries
-		// the mark alone, --block-size being untyped; dm_raid0_conf and
-		// event_threshold stay absent.
+		// bdev_conf is ALWAYS sent with a redund_conf
+		// (dnvctl.md, `sp` — `ctl/sp.go`); no --rev, which the request has no
+		// token for (CT3); dm_pool_conf carries the mark alone, --block-size
+		// being untyped; dm_raid0_conf and event_threshold stay absent.
 		&pb.CreateStoragePoolRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
@@ -247,7 +252,7 @@ var sweepRows = []sweepRow{
 		&pb.InspectSideRequest{
 			ClusterName: itCluster, SpName: itSp, SideId: 5}},
 
-	// ---- §5.5 cntlr ----
+	// ---- cntlr ----
 	{26, "CreateCntlr",
 		[]string{"cntlr", "create", "--slot", "1", "--rev", "7"},
 		&pb.CreateCntlrRequest{
@@ -267,7 +272,8 @@ var sweepRows = []sweepRow{
 	{28, "UpdateCntlrEnabled",
 		[]string{"cntlr", "set-enabled", "--id", "3", "--enabled=false",
 			"--rev", "7"},
-		// The `=` spelling is the only one that turns a bool off (§5.0).
+		// The `=` spelling is the only one that turns a bool off (dnvctl.md,
+		// Conventions).
 		&pb.UpdateCntlrEnabledRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
@@ -280,7 +286,7 @@ var sweepRows = []sweepRow{
 		&pb.InspectCntlrRequest{
 			ClusterName: itCluster, SpName: itSp, CntlrId: 3}},
 
-	// ---- §5.6 td ----
+	// ---- td ----
 	{30, "CreateThinDevice",
 		[]string{"td", "create", "--name", "t0", "--size", "67108864",
 			"--rev", "7"},
@@ -321,7 +327,7 @@ var sweepRows = []sweepRow{
 			BlockCnt:    64,
 		}},
 
-	// ---- §5.7 ss ----
+	// ---- ss ----
 	{35, "CreateSubsystem",
 		[]string{"ss", "create", "--nqn", itNqn, "--hosts", itHostNqn,
 			"--rev", "7"},
@@ -354,7 +360,7 @@ var sweepRows = []sweepRow{
 			AllowedHosts: []string{"a", "b"},
 		}},
 
-	// ---- §5.8 ns ----
+	// ---- ns ----
 	{39, "CreateNamespace",
 		[]string{"ns", "create", "--nqn", itNqn, "--idx", "1", "--td", "t0",
 			"--uuid", itUuid, "--nguid", itNguid, "--rev", "7"},
@@ -391,7 +397,8 @@ var sweepRows = []sweepRow{
 	{42, "UpdateNamespaceSuspended",
 		[]string{"ns", "set-suspended", "--nqn", itNqn, "--idx", "1",
 			"--rev", "7"},
-		// --suspended defaults to TRUE on this command alone (§5.8).
+		// --suspended defaults to TRUE on this command alone
+		// (dnvctl.md, `ns` — `ctl/ns.go`).
 		&pb.UpdateNamespaceSuspendedRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
@@ -401,7 +408,7 @@ var sweepRows = []sweepRow{
 			Suspended:   true,
 		}},
 
-	// ---- §5.9 clone ----
+	// ---- clone ----
 	{43, "CreateClone",
 		[]string{"clone", "create", "--name", "cl0", "--dst-td", "t1",
 			"--src-nqn", itSrcNqn, "--src-idx", "0", "--src-slices", "1",
@@ -458,7 +465,7 @@ var sweepRows = []sweepRow{
 			Bitmap:      []byte{0xa5},
 		}},
 
-	// ---- §5.10 xfer ----
+	// ---- xfer ----
 	{48, "CreateTransfer",
 		[]string{"xfer", "create", "--name", "x0", "--ori-nqn", itNqn,
 			"--ori-idx", "1", "--hosts", itHostNqn, "--auto-suspend",
@@ -497,7 +504,7 @@ var sweepRows = []sweepRow{
 			AllowedHosts: []string{"c"},
 		}},
 
-	// ---- §5.11 migr ----
+	// ---- migr ----
 	{52, "CreateMigration",
 		[]string{"migr", "create", "--name", "m0", "--src-side", "5",
 			"--hyd-threshold", "8", "--hyd-batch", "4", "--rev", "7"},
@@ -543,7 +550,7 @@ var sweepRows = []sweepRow{
 			Bitmap:      []byte{0xa5, 0xa5},
 		}},
 
-	// ---- §5.12 spare ----
+	// ---- spare ----
 	{57, "CreateSpareLeg",
 		[]string{"spare", "create", "--grp", "1", "--rev", "7"},
 		&pb.CreateSpareLegRequest{
@@ -574,7 +581,8 @@ var sweepRows = []sweepRow{
 		}},
 }
 
-// TestSweepArgvToRequest runs §7.10's 59 steps against the recording client.
+// TestSweepArgvToRequest runs the sweep case's 59 steps against the recording
+// client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
 		t.Run(rpcToCmd[row.rpc], func(t *testing.T) {
@@ -613,11 +621,12 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 	}
 }
 
-// TestGlobalsFillEveryRequestThatHasThem pins §2.1's two counts — cluster_name
-// in 58 of the 59 requests, sp_name in 41 — by reading the field off every
-// captured request rather than by trusting the table. A command that stopped
-// filling a global would show up as a mismatch in the sweep; a command whose
-// REQUEST stopped carrying the field shows up here.
+// TestGlobalsFillEveryRequestThatHasThem pins the two counts behind
+// dnvctl.md, Global flags, env, config — cluster_name in 58 of the 59
+// requests, sp_name in 41 — by reading the field off every captured request
+// rather than by trusting the table. A command that stopped filling a global
+// would show up as a mismatch in the sweep; a command whose REQUEST stopped
+// carrying the field shows up here.
 func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 	clusterFields, spFields := 0, 0
 	for _, row := range sweepRows {
@@ -656,10 +665,10 @@ func stringField(msg proto.Message, name string) string {
 }
 
 // ---------------------------------------------------------------------------
-// The §4 token trio
+// The CT3 token trio
 // ---------------------------------------------------------------------------
 
-// TestTokenPresenceTrio is the §4 rule, on one command of each token family.
+// TestTokenPresenceTrio is the CT3 rule, on one command of each token family.
 // The three cases are genuinely different wire content, not three spellings
 // of one: absent means the gateway skips its GW6 check entirely, present-zero
 // is the deliberate always-stale probe, and present-N is the ordinary
@@ -746,7 +755,7 @@ func TestTokenPresenceTrio(t *testing.T) {
 	})
 }
 
-// TestTokenCarriersMatchSection4 pins the other half of §4: WHICH commands
+// TestTokenCarriersMatchCT3 pins the other half of CT3: WHICH commands
 // carry a token. It drives each of the 34 sweep rows whose request has a
 // token field twice — once with the row's --rev 7 and once without — and
 // asserts the token is sent exactly when --rev is typed; the count pins the
@@ -754,7 +763,7 @@ func TestTokenPresenceTrio(t *testing.T) {
 // invisible to the sweep table (which fixes both argv and expectation
 // together) and shows up here. The other 25 refuse --rev outright
 // (TestRevOnATokenlessCommandIsAUsageError).
-func TestTokenCarriersMatchSection4(t *testing.T) {
+func TestTokenCarriersMatchCT3(t *testing.T) {
 	carriers := 0
 	for _, row := range sweepRows {
 		tokenField := revTokenField(row.want.ProtoReflect().Descriptor())
@@ -784,7 +793,7 @@ func TestTokenCarriersMatchSection4(t *testing.T) {
 
 // TestRevOnATokenlessCommandIsAUsageError is the complement of the test
 // above: on the 25 commands whose request has no token field, a typed --rev
-// is a usage error — exit 2, §3.2's refusal line on stderr word for word, no
+// is a usage error — exit 2, CT5's refusal line on stderr word for word, no
 // RPC issued. It used to be dropped unread, so `cluster delete --rev 7`
 // deleted with no gate while looking gated, and even `--rev zz`, which every
 // carrier refuses, exited 0; each row is driven with a parsable, an
@@ -835,7 +844,7 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 	}
 }
 
-// revTokenField is a request's §4 token field — sp_rev, dn_rev or cn_rev —
+// revTokenField is a request's CT3 token field — sp_rev, dn_rev or cn_rev —
 // or nil when the request carries none.
 func revTokenField(
 	desc protoreflect.MessageDescriptor,
@@ -862,7 +871,7 @@ func stripRev(argv []string) []string {
 }
 
 // ---------------------------------------------------------------------------
-// The nil rules of the shared flag helpers (§5.0)
+// The nil rules of the shared flag helpers (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
 // TestTrConfNilRule covers both halves of trConfOf's contract: the four flags
@@ -953,9 +962,10 @@ func TestEventThresholdFieldsMapOneToOne(t *testing.T) {
 }
 
 // TestCloneSrcTrConfEmptyList is the clone group's deliberate departure from
-// the nil rule (§5.9): with all four `src-` flags emptied the list must be
-// EMPTY rather than nil, because the gateway's "src_tr_conf must not be
-// empty" refusal has to stay reachable from the CLI.
+// the nil rule (dnvctl.md, `clone` — `ctl/clone.go`): with all four `src-`
+// flags emptied the list must be EMPTY rather than nil, because the
+// gateway's "src_tr_conf must not be empty" refusal has to stay reachable
+// from the CLI.
 //
 // proto.Equal cannot see the difference — an empty repeated field and an
 // absent one are the same message — so this asserts on the Go slice itself.
@@ -1027,9 +1037,9 @@ func TestDmCloneConfNilRule(t *testing.T) {
 	wantRequest(t, other.DmCloneConf, &pb.DmCloneConf{HydrationBatchSize: 4})
 }
 
-// TestListFlagsReplaceOnSet pins §5.0's list rule: a repeated occurrence
-// REPLACES, empty items are dropped, and an empty value clears the list
-// rather than leaving the previous one in place.
+// TestListFlagsReplaceOnSet pins the list rule of dnvctl.md, Conventions: a
+// repeated occurrence REPLACES, empty items are dropped, and an empty value
+// clears the list rather than leaving the previous one in place.
 func TestListFlagsReplaceOnSet(t *testing.T) {
 	replaced := runArgv(t, "UpdateSubsystemHosts", "ss", "set-hosts",
 		"--nqn", itNqn, "--hosts", "a,b", "--hosts", "c,d").(*pb.UpdateSubsystemHostsRequest)
@@ -1071,9 +1081,10 @@ func TestListFlagsReplaceOnSet(t *testing.T) {
 	})
 }
 
-// TestSpCreateAlwaysSendsRedundConf is §0 #11: `sp create` sends a bdev_conf
-// with a redund_conf for BOTH --redund values, and the default is raid1 even
-// though the flag was never typed.
+// TestSpCreateAlwaysSendsRedundConf pins the default of
+// dnvctl.md, `sp` — `ctl/sp.go`: `sp create` sends a bdev_conf with a
+// redund_conf for BOTH --redund values, and the default is raid1 even though
+// the flag was never typed.
 func TestSpCreateAlwaysSendsRedundConf(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1127,17 +1138,18 @@ func TestSpCreateAlwaysSendsRedundConf(t *testing.T) {
 			}
 			if len(req.BdevConf.BdevFeatureList) != 0 {
 				t.Errorf("sp create sent bdev_feature_list %v, want none "+
-					"(§1.1)", req.BdevConf.BdevFeatureList)
+					"(dnvctl.md, In scope / out of scope)",
+					req.BdevConf.BdevFeatureList)
 			}
 		})
 	}
 }
 
-// TestSpCreateOptionalConfs covers the other half of §5.4: dm_raid0_conf
-// appears only when --stripe-size is non-zero, dm_pool_conf only when
-// --block-size or --low-water-mark-pct is (the mark's half is
-// TestSpCreateLowWaterMark's), and event_threshold only when at least one
-// --thr-* is.
+// TestSpCreateOptionalConfs covers the other half of
+// dnvctl.md, `sp` — `ctl/sp.go`: dm_raid0_conf appears only when
+// --stripe-size is non-zero, dm_pool_conf only when --block-size or
+// --low-water-mark-pct is (the mark's half is TestSpCreateLowWaterMark's),
+// and event_threshold only when at least one --thr-* is.
 func TestSpCreateOptionalConfs(t *testing.T) {
 	req := runArgv(t, "CreateStoragePool", "sp", "create",
 		"--stripe-size", "16384", "--block-size", "1048576",
@@ -1221,7 +1233,7 @@ func TestSpLevelSpellings(t *testing.T) {
 	}
 
 	// The default is the enum's zero value, so omitting the flag sends no
-	// surprise (§5.4).
+	// surprise (dnvctl.md, `sp` — `ctl/sp.go`).
 	req := runArgv(t, "UpdateStoragePoolLevel", "sp", "set-level").(*pb.UpdateStoragePoolLevelRequest)
 	if req.SpLevel != pb.SpLevel_SP_LEVEL_READWRITE {
 		t.Errorf("a bare sp set-level sent %v, want READWRITE", req.SpLevel)
@@ -1256,10 +1268,10 @@ func TestClusterCreateExtentSize(t *testing.T) {
 	}
 
 	// An explicitly typed zero is the same as not typing the flag at all —
-	// §5.0's "not given" convention for an optional sub-message, the same
-	// rule as `sp create`'s --stripe-size. What CT8 forbids is the other
-	// move: translating a 0 into common.DefaultDnExtSize here rather than
-	// leaving the gateway to resolve it.
+	// the "not given" convention of dnvctl.md, Conventions, for an optional
+	// sub-message, the same rule as `sp create`'s --stripe-size. What CT8
+	// forbids is the other move: translating a 0 into common.DefaultDnExtSize
+	// here rather than leaving the gateway to resolve it.
 	zero := runArgv(t, "CreateCluster", "cluster", "create",
 		"--name", "c1", "--extent-size", "0").(*pb.CreateClusterRequest)
 	if zero.DnBinConf != nil {
@@ -1275,7 +1287,7 @@ func TestClusterCreateExtentSize(t *testing.T) {
 		"--name", "c1", "--extent-size", "1").(*pb.CreateClusterRequest)
 	wantRequest(t, tiny.DnBinConf, &pb.DnBinConf{ExtentSize: 1})
 
-	// The command line is this flag's only carrier (CT9, §0 #15), and a
+	// The command line is this flag's only carrier (CT9), and a
 	// ClusterConf is write-once, so a second one would do its worst here: a
 	// stale DNVCTL_EXTENT_SIZE would size every cluster created under it,
 	// and text viper could not cast used to read back as 0 — the gateway
@@ -1306,11 +1318,11 @@ func TestClusterCreateExtentSize(t *testing.T) {
 	})
 }
 
-// TestClusterNameFallback is §5.0's first field→flag exception, in all three
-// states: --name wins, an empty --name falls back to the global, and
-// `cluster list` — the one request with no cluster_name — declares no --name
-// at all, so naming one is a usage error rather than a silently dropped
-// value.
+// TestClusterNameFallback is the first field→flag exception of dnvctl.md,
+// Conventions, in all three states: --name wins, an empty --name falls back
+// to the global, and `cluster list` — the one request with no cluster_name —
+// declares no --name at all, so naming one is a usage error rather than a
+// silently dropped value.
 func TestClusterNameFallback(t *testing.T) {
 	named := runArgv(t, "GetCluster", "cluster", "get", "--name", "other").(*pb.GetClusterRequest)
 	if named.ClusterName != "other" {
@@ -1347,12 +1359,13 @@ func TestClusterNameFallback(t *testing.T) {
 	}
 }
 
-// TestGlobalsAreIgnoredWhereTheFieldIsAbsent is the other half of §2.1: a
-// --cluster or --sp left empty is sent empty, and a command whose request
-// lacks the field simply ignores it (CT8). The proof that `cluster list`,
-// `sp list` and `sp find-names` ignore --sp is structural — their requests
-// have no sp_name field — so what is asserted here is that naming the globals
-// does not turn into some OTHER field of those requests.
+// TestGlobalsAreIgnoredWhereTheFieldIsAbsent is the other half of dnvctl.md,
+// Global flags, env, config: a --cluster or --sp left empty is sent empty,
+// and a command whose request lacks the field simply ignores it (CT8). The
+// proof that `cluster list`, `sp list` and `sp find-names` ignore --sp is
+// structural — their requests have no sp_name field — so what is asserted
+// here is that naming the globals does not turn into some OTHER field of
+// those requests.
 func TestGlobalsAreIgnoredWhereTheFieldIsAbsent(t *testing.T) {
 	list := runArgv(t, "ListClusters", "cluster", "list").(*pb.ListClustersRequest)
 	wantRequest(t, list, &pb.ListClustersRequest{})
@@ -1391,7 +1404,7 @@ func TestEnvBinding(t *testing.T) {
 		ClusterName: "flagclu", SpName: "envsp"})
 }
 
-// TestLeafFlagsIgnoreTheEnvironment is the other half of CT9 (§0 #15): only
+// TestLeafFlagsIgnoreTheEnvironment is the other half of CT9: only
 // the env-backed globals have an environment or config carrier. --rev and
 // every leaf flag are read off the command line alone, so a variable
 // exported for one command, or a key sitting in a config file, cannot put a
@@ -1403,7 +1416,7 @@ func TestEnvBinding(t *testing.T) {
 // (hexOf for --id, idListOf for --ids, u32ListOf for --slots, hexBytesOf for
 // --bm-hex, strListOf for --hosts); TestClusterCreateExtentSize holds the
 // uint64 one — because each reader could grow a fallback of its own, and
-// each of those five read viper itself before §0 #15.
+// each of those five read viper itself before CT9.
 func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
 	t.Run("DNVCTL_REV sends no token", func(t *testing.T) {
 		t.Setenv("DNVCTL_REV", "12")
@@ -1436,9 +1449,9 @@ func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
 		}
 	})
 
-	// --enabled defaults to true (§5.5); were the environment its carrier,
-	// an exported DNVCTL_ENABLED=false would disable a controller on every
-	// `set-enabled` typed without the flag.
+	// --enabled defaults to true (dnvctl.md, `cntlr` — `ctl/cntlr.go`); were
+	// the environment its carrier, an exported DNVCTL_ENABLED=false would
+	// disable a controller on every `set-enabled` typed without the flag.
 	t.Run("DNVCTL_ENABLED leaves --enabled at its default", func(t *testing.T) {
 		t.Setenv("DNVCTL_ENABLED", "false")
 		req := runArgv(t, "UpdateCntlrEnabled",
@@ -1459,7 +1472,7 @@ func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
 	})
 
 	// hexOf (the id flags), idListOf, u32ListOf, hexBytesOf and strListOf
-	// parse strOf's text, and each read viper itself before §0 #15, so each
+	// parse strOf's text, and each read viper itself before CT9, so each
 	// is pinned on its own.
 	t.Run("the id, list and hex readers take nothing from the environment",
 		func(t *testing.T) {
@@ -1613,8 +1626,8 @@ func TestBadNumericEnvIsAUsageError(t *testing.T) {
 	})
 }
 
-// TestIdFlagsAcceptBase0 pins §5.0's id rule across the groups that declare
-// one: 17 and 0x11 name the same object.
+// TestIdFlagsAcceptBase0 pins the id rule of dnvctl.md, Conventions, across
+// the groups that declare one: 17 and 0x11 name the same object.
 func TestIdFlagsAcceptBase0(t *testing.T) {
 	cntlr := runArgv(t, "DeleteCntlr",
 		"cntlr", "delete", "--id", "0x11").(*pb.DeleteCntlrRequest)
@@ -1659,7 +1672,7 @@ func TestIdFlagsAcceptBase0(t *testing.T) {
 // TestBitmapHexToBytes covers hexBytesOf's two accepted inputs: an EMPTY
 // value sends an empty bitmap on purpose (so the gateway's "must not be
 // empty" refusal stays reachable), and a well-formed value is decoded as
-// typed. The malformed case is a usage error and lives in CT-T4.
+// typed. The malformed case is a usage error and lives in the CT5 tests.
 func TestBitmapHexToBytes(t *testing.T) {
 	empty := runArgv(t, "AppendCloneBitmap",
 		"clone", "append-bm", "--name", "cl0").(*pb.AppendCloneBitmapRequest)

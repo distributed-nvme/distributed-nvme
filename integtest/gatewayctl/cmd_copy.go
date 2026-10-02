@@ -1,15 +1,16 @@
-// The copy half of the §10.8 subcommand table: clones (architecture.md §8.9),
-// migrations (§8.11), spare legs (§8.12) and the two bitmap reads (§8.13).
+// The copy half of the driver's subcommand table: clones, migrations, spare
+// legs and the two bitmap reads (architecture.md, Clones, Migrations,
+// Spare legs and Bitmap reads).
 //
 // Everything here is SP-scoped, so every mutator carries the SP's revision
 // token as `--rev` and every reader carries none — the read RPCs take no token
-// at all (gateway.md §5.5). `--rev 0` is a legal, deliberate value: a zero
-// token is the "I did not read first" case the B4 stage sends on purpose, so
-// no subcommand of this file second-guesses it.
+// at all (gateway.md GW6). `--rev 0` is a legal, deliberate
+// value: a zero token is the "I did not read first" case the B4 stage sends on
+// purpose, so no subcommand of this file second-guesses it.
 //
 // The two bitmap reads are the one place where a job returns something other
 // than its reply message: protojson would print the `bitmap` bytes as base64,
-// and §10.8 says bitmaps are printed as hex, so they return a plain map that
+// and this driver prints bitmaps as hex, so they return a plain map that
 // resultToAny passes through untouched.
 package main
 
@@ -29,7 +30,8 @@ import (
 // dmCloneConfFlags registers the two dm-clone hydration knobs shared by
 // CreateClone and CreateMigration and returns their accessor.
 //
-// Both knobs are proto3 "unset means default at use time" values (§7, GW11):
+// Both knobs are proto3 "unset means default at use time" values
+// (architecture.md, Common validation; GW11):
 // validateBound lets a zero through and the handler stores the pair as it
 // arrived — the sp-worker fills a migration's zeros in as it builds the side
 // request (worker/sprole.go's migrCloneConf), while a clone's pair reaches the
@@ -59,8 +61,9 @@ func dmCloneConfFlags(fs *flag.FlagSet) func() *pb.DmCloneConf {
 // dnSelectorFlags registers the NodeSelector of the two RPCs that allocate a
 // fresh DN side — CreateMigration's destination and CreateSpareLeg's spare —
 // and returns their accessor. Both lists are comma-separated addr:port lists
-// (§6.3). An entirely empty selector is sent as nil, so "no preference" and
-// "an empty black list" stay the same request the gateway's own callers make.
+// (architecture.md, Finding DN candidates). An entirely empty selector is sent
+// as nil, so "no preference" and "an empty black list" stay the same request
+// the gateway's own callers make.
 func dnSelectorFlags(fs *flag.FlagSet) func() *pb.NodeSelector {
 	var black, white stringList
 	fs.Var(&black, "dn-black",
@@ -94,8 +97,8 @@ func bitmapArg(spec string) []byte {
 	return nil
 }
 
-// hexBitmapResult reshapes a bitmap reply for the script (§10.8, "bitmaps
-// printed as hex"). protojson renders a bytes field as base64, which is not
+// hexBitmapResult reshapes a bitmap reply for the script, which gets bitmaps
+// printed as hex. protojson renders a bytes field as base64, which is not
 // what the fakes are seeded with nor what the assertions quote, so both reads
 // return this plain map instead of their reply message; resultToAny prints a
 // non-proto result as it is. byte_cnt travels with it so a length assertion
@@ -108,7 +111,7 @@ func hexBitmapResult(bitmap []byte) map[string]any {
 }
 
 // ---------------------------------------------------------------------------
-// clone (architecture.md §8.9)
+// clone (architecture.md, Clones)
 // ---------------------------------------------------------------------------
 
 // setupCreateClone drives CreateClone: it names one thin device of this SP as
@@ -172,7 +175,7 @@ func setupCreateClone(fs *flag.FlagSet) job {
 // --force is the whole point of the subcommand: without it the gateway must
 // PROVE from the primary's CN that the copy finished before it removes the
 // dm-clone, and an unreachable agent is a refusal rather than a pass; with it
-// the proof is skipped, which is how §10.11 step 13 abandons a clone whose
+// the proof is skipped, which is how case S stage 13 abandons a clone whose
 // fake source has already been torn down.
 func setupDeleteClone(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
@@ -252,7 +255,7 @@ func setupSetCloneTr(fs *flag.FlagSet) job {
 // --bm-idx is the chunk's fixed position WITHIN that one slice and says nothing
 // about any other slice. The Clone record carries no chunk count at all — how
 // many chunks a clone holds is how many chunk keys it has — which is why
-// §10.11 step 13 asserts the three PAIRS it sent rather than any number on the
+// case S stage 13 asserts the three PAIRS it sent rather than any number on the
 // record.
 func setupAppendCloneBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
@@ -283,7 +286,7 @@ func setupAppendCloneBm(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// migration (architecture.md §8.11)
+// migration (architecture.md, Migrations)
 // ---------------------------------------------------------------------------
 
 // setupCreateMigr drives CreateMigration: it gives one leg a second side on a
@@ -389,7 +392,7 @@ func setupGetMigr(fs *flag.FlagSet) job {
 
 // setupAppendMigrBm drives AppendMigrationBitmap. It is AppendCloneBitmap
 // without the chunk address: a migration copies one side, so its chunks are a
-// single sequence the record's bm_cnt numbers as they arrive (§10.11 step 14
+// single sequence the record's bm_cnt numbers as they arrive (case S stage 14
 // appends two and asserts it reaches 2) — there is no slice to name and no
 // index to choose. An empty --bm-hex is again sent as an empty bitmap so the
 // gateway's own refusal is the one under test.
@@ -417,7 +420,7 @@ func setupAppendMigrBm(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// spare leg (architecture.md §8.12)
+// spare leg (architecture.md, Spare legs)
 // ---------------------------------------------------------------------------
 
 // setupCreateSpare drives CreateSpareLeg: it allocates one extra leg for a
@@ -448,7 +451,7 @@ func setupCreateSpare(fs *flag.FlagSet) job {
 
 // setupDeleteSpare drives DeleteSpareLeg. Both ids are given: --grp says which
 // group holds the spare list and --leg which entry of it goes away, which is
-// how §10.11 step 15 releases the leg a switch parked.
+// how case S stage 15 releases the leg a switch parked.
 func setupDeleteSpare(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
@@ -473,8 +476,8 @@ func setupDeleteSpare(fs *flag.FlagSet) job {
 
 // setupSwitchSpare drives SwitchSpareLeg, the swap: --spare is the parked leg
 // that becomes active and --target the active leg it replaces, which is then
-// parked in the spare list. Naming both sides explicitly is what lets §10.11
-// step 15 assert the reply's curr_active_leg_id / curr_spare_leg_id pair
+// parked in the spare list. Naming both sides explicitly is what lets case S
+// stage 15 assert the reply's curr_active_leg_id / curr_spare_leg_id pair
 // rather than infer which way the swap went.
 func setupSwitchSpare(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
@@ -501,7 +504,7 @@ func setupSwitchSpare(fs *flag.FlagSet) job {
 }
 
 // ---------------------------------------------------------------------------
-// bitmap reads (architecture.md §8.13)
+// bitmap reads (architecture.md, Bitmap reads)
 // ---------------------------------------------------------------------------
 
 // setupGetTdBm drives GetThinDeviceBitmap: the allocation bitmap of one slice
@@ -509,8 +512,8 @@ func setupSwitchSpare(fs *flag.FlagSet) job {
 // takes no token.
 //
 // --start and --cnt are the paging window in blocks; both default to zero,
-// which asks the CP for the whole slice. The reply is reshaped into the §10.8
-// hex map instead of being printed as protojson base64.
+// which asks the CP for the whole slice. The reply is reshaped into the hex
+// map of hexBitmapResult instead of being printed as protojson base64.
 func setupGetTdBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	tdName := fs.String("td", "", "td_name")

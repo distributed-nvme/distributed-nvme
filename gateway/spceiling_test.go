@@ -12,8 +12,9 @@ import (
 // TestDrainSpSliceAtTheCeiling is for the sp drain: the one create that is
 // committed against a real etcd at the widest shape the ceilings allow. It
 // sits apart from handler_sp_test.go only because it is the txn-budget proof
-// rather than another §8.4 behaviour, and it builds on that file's fixtures
-// (sptNewEnv, sptSpec, walkSides) rather than a second set of its own.
+// rather than another behaviour of architecture.md, Storage pools, and it
+// builds on that file's fixtures (sptNewEnv, sptSpec, walkSides) rather than a
+// second set of its own.
 
 // TestCreateStoragePoolAtTheCeiling is the PROOF that
 // TestCreateStoragePoolBudget can only approximate: one MAXIMUM-shape create —
@@ -41,12 +42,13 @@ import (
 // three — but no DN in this fixture does, and the same holds of the CN twin,
 // which is what the last assertion below checks rather than assumes.)
 //
-// It also exercises §6.5's distinct-NODE property at the CEILING rather than
-// at the two slices TestCreateStoragePoolWriteSet uses, on both sides: the DN
+// It also exercises the distinct-NODE property of architecture.md,
+// Per-operation allocation, at the CEILING rather than at the two slices
+// TestCreateStoragePoolWriteSet uses, on both sides: the DN
 // black list grows across groups, so the spCreateGrpsPerSlice x
 // MaxSliceCntPerSp x MaxAllocLegPerGrp sides sit on that many DISTINCT disk
 // nodes, and the CN picks — the growing CN black list and, every CN here being
-// its own location, §6.5's tier-1 location exclusion as well — put the
+// its own location, that section's tier-1 location exclusion as well — put the
 // MaxCntlrCntPerSp cntlrs on that many distinct controller nodes. The budget
 // arithmetic cannot check either — sharing a node would make the transaction
 // smaller, not larger — which is exactly why both are asserted here. (The DN
@@ -67,8 +69,9 @@ import (
 //     scan, PickRandom would return 1 < MaxAllocLegPerGrp, and the first
 //     md-raid1 group would be refused RESOURCE_EXHAUSTED — a failure that has
 //     nothing to do with the transaction size.
-//   - one cntlr's CN reserves the WHOLE SP (§6.5): footprint is the sum of
-//     ext_cnt over every group, i.e. slice_cnt x (1 + init_ext_cnt). Only one
+//   - one cntlr's CN reserves the WHOLE SP (architecture.md, Per-operation
+//     allocation): footprint is the sum of ext_cnt over every group, i.e.
+//     slice_cnt x (1 + init_ext_cnt). Only one
 //     of the two ways that can go wrong is a refusal. At the fixture's own
 //     sptInitExt of 4 the footprint is 160 against the stock sptCnFree of 64,
 //     no CN clears the scan's free-extent filter and pickCn returns
@@ -114,8 +117,9 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 			common.MaxSliceCntPerSp, dnCnt, cnCnt, err)
 	}
 
-	// Read the SP back through §8.4's own read path, not out of the fixture:
-	// what the transaction committed is what a caller can see.
+	// Read the SP back through its own read path, GetStoragePool
+	// (architecture.md, Storage pools), not out of the fixture: what the
+	// transaction committed is what a caller can see.
 	get, err := env.srv.GetStoragePool(env.ctx, &pb.GetStoragePoolRequest{
 		ClusterName: env.name,
 		SpName:      spName,
@@ -141,7 +145,8 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 			len(get.GetCntlrList()), common.MaxCntlrCntPerSp)
 	}
 
-	// §6.5 at the ceiling: one side per leg, one DN per side, no DN twice.
+	// architecture.md, Per-operation allocation, at the ceiling: one side per leg,
+	// one DN per side, no DN twice.
 	sides := env.walkSides(conf)
 	if len(sides) != dnCnt {
 		t.Fatalf("the SP has %d sides, want %d = %d groups per slice x %d "+
@@ -154,20 +159,22 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 	}
 	if len(seen) != dnCnt {
 		t.Fatalf("the %d sides sit on %d distinct disk nodes, want %d: the "+
-			"growing black list of §6.5 no longer puts every leg of the "+
+			"growing black list of architecture.md, Per-operation "+
+			"allocation, no longer puts every leg of the "+
 			"WHOLE sp on a DN of its own, and the transaction this test "+
 			"commits is smaller than the one the budget is computed for",
 			len(sides), len(seen), dnCnt)
 	}
 
-	// §6.5's CN half. A cntlr that shares its CN with another costs 7 compares
-	// rather than 8: the ledger's three reads and four writes — CnConf, the
-	// capacity key, CnRev — happen once for that CN instead of twice, while
-	// the Cntlr put is per cntlr_id and happens either way.
+	// The CN half of architecture.md, Per-operation allocation. A cntlr that
+	// shares its CN with another costs 7 compares rather than 8: the ledger's
+	// three reads and four writes — CnConf, the capacity key, CnRev — happen once
+	// for that CN instead of twice, while the Cntlr put is per cntlr_id and
+	// happens either way.
 	//
 	// Unlike the DN arm above this one is not what pins its black list. Every
 	// CN the fixture plants is its own location with room for the SP, so
-	// §6.5's tier-1 location exclusion keeps the picks on distinct CNs by
+	// the tier-1 location exclusion keeps the picks on distinct CNs by
 	// itself — tier 1 never comes up empty here — and a create that
 	// lost its cnBlack list passes here every run (mutation-checked: five runs,
 	// five passes). The list is what keeps a TIER-2 pick — one made once no
@@ -184,7 +191,8 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 	}
 	if len(seenCn) != cnCnt {
 		t.Fatalf("the %d cntlrs sit on %d distinct controller nodes, want "+
-			"%d: the §6.5 CN picks no longer put every cntlr of the "+
+			"%d: the CN picks of architecture.md, Per-operation allocation, "+
+			"no longer put every cntlr of the "+
 			"sp on a CN of its own, and the transaction this test commits is "+
 			"smaller than the one the budget is computed for",
 			len(get.GetCntlrList()), len(seenCn), cnCnt)

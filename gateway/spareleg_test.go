@@ -11,12 +11,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The migration guard of architecture.md §8.12's DeleteSpareLeg and
-// SwitchSpareLeg (gateway.md §5.11), on the fixture of handler_vol_test.go.
+// The migration guard of DeleteSpareLeg and SwitchSpareLeg (architecture.md,
+// Spare legs; gateway.md, Spare legs), on the fixture of handler_vol_test.go.
 //
-// Between CreateMigration and Finish/Cancel a leg owns two sides (§8.11), and
-// the source may be the side of a SPARE leg as well as of an active one. Both
-// RPCs used to take such a leg away from under its migration: DeleteSpareLeg
+// Between CreateMigration and Finish/Cancel a leg owns two sides
+// (architecture.md, Migrations), and the source may be the side of a SPARE leg
+// as well as of an active one. Both RPCs used to take such a leg away from
+// under its migration: DeleteSpareLeg
 // released both sides and dropped the leg, and SwitchSpareLeg parked a
 // migrating active leg where the delete could reach it. Either way the
 // Migration was left naming sides in no leg, so FinishMigration and
@@ -28,7 +29,8 @@ const splMigrName = "migr-a"
 
 // splMigrate starts splMigrName with srcSideId as its source and its
 // destination pinned to dstAddr, and returns the destination's side_id:
-// migr_id and dst_side_id are the next two ids, in that order (§8.11).
+// migr_id and dst_side_id are the next two ids, in that order
+// (architecture.md, Migrations).
 func splMigrate(env *volEnv, srcSideId uint64, dstAddr string) uint64 {
 	env.t.Helper()
 	reply, err := env.srv.CreateMigration(env.ctx, &pb.CreateMigrationRequest{
@@ -74,9 +76,9 @@ func splReadySpare(env *volEnv) uint64 {
 }
 
 // splWantMigrationRunning asserts CreateMigration's own refusal of a leg that
-// already owns two sides (§8.11), naming that leg. It reports rather than
-// stops, so a test can still show what the store did after an RPC that should
-// have refused.
+// already owns two sides (architecture.md, Migrations), naming that leg. It
+// reports rather than stops, so a test can still show what the store did after
+// an RPC that should have refused.
 func splWantMigrationRunning(t *testing.T, err error, legId uint64) {
 	t.Helper()
 	if status.Code(err) != codes.FailedPrecondition {

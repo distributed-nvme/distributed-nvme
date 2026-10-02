@@ -44,7 +44,8 @@ const (
 )
 
 // dmKindIdCnt is how many 16-hex-digit id fields a name of each kind carries
-// (Appendix B). ParseDmName enforces it, so a name whose shape does not match
+// (architecture.md, dm device names; cnagent.md, Additions to `common`, for
+// c9 to cb). ParseDmName enforces it, so a name whose shape does not match
 // its kind is "not a dnv dm name" rather than a half-decoded one.
 var dmKindIdCnt = map[DmKind]int{
 	DmKindDnError:     3,
@@ -110,7 +111,7 @@ type NameFmt struct {
 }
 
 // NewNameFmt builds the process-wide NameFmt from the prefixes in
-// constants.go (architecture.md §4). localStorPrefix comes from the agent's
+// constants.go (architecture.md, Naming). localStorPrefix comes from the agent's
 // --local-store flag; an empty string selects DefaultLocalStorPrefix.
 func NewNameFmt(localStorPrefix string) *NameFmt {
 	if localStorPrefix == "" {
@@ -242,7 +243,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 	return uint32(h.Sum64())
 }
 
-// CnMdDevName is the array's /dev/md/{name} (architecture.md §4.3): 28 hex
+// CnMdDevName is the array's /dev/md/{name} (architecture.md, md names): 28 hex
 // chars, so even as a named array's kernel disk name ("md_" + 28) it stays
 // within DISK_NAME_LEN (32). grpIdx keeps its two digits only because
 // GrowSlice holds each group list to MaxGrpCntPerSlice
@@ -270,9 +271,10 @@ func (nf *NameFmt) CnMdDevName(
 
 // CnMdArrayName is the array's superblock name (mdadm --name). The fixed
 // "dnv-" prefix is what the udev guard matches
-// (ENV{MD_NAME}=="dnv-*|*:dnv-*", architecture.md §4.3 / Appendix A — the
-// second alternative covers the homehost:name form `mdadm --examine --export`
-// reports); 26 chars, within mdadm's 32-byte limit.
+// (ENV{MD_NAME}=="dnv-*|*:dnv-*", architecture.md, md names; Components:
+// invocation reference — the second alternative covers the homehost:name
+// form `mdadm --examine --export` reports); 26 chars, within mdadm's 32-byte
+// limit.
 func (nf *NameFmt) CnMdArrayName(
 	spId uint64,
 	sliceIdx uint32,
@@ -412,7 +414,7 @@ func (nf *NameFmt) CnNsDevName(
 	)
 }
 
-// CnLegName is the cn-local leg wrapper of architecture.md §3.3 step 1
+// CnLegName is the cn-local leg wrapper of architecture.md, Primary cntlr, step 1
 // ([D1]): one dm-linear over the leg's single nvme multipath namespace
 // device, kept as the leg-level indirection point (what a teardown reloads
 // onto an error target, and what md/groups consume as the member device).
@@ -433,9 +435,10 @@ func (nf *NameFmt) CnLegName(
 	)
 }
 
-// CnGrpName is a RedundNone group device (§3.3 step 2): a dm-linear over the
-// single leg's data region. RedundMdRaid1 groups use the md names of §4.3
-// instead and have no dm name.
+// CnGrpName is a RedundNone group device (architecture.md, Primary cntlr,
+// step 2): a dm-linear over the single leg's data region. RedundMdRaid1
+// groups use the md names of architecture.md, md names, instead and have no
+// dm name.
 func (nf *NameFmt) CnGrpName(
 	clusterId uint64,
 	cnId uint64,
@@ -600,7 +603,7 @@ func (nf *NameFmt) CnHostNqn(
 // SideToCnNqn is keyed by leg_id, not side_id, and carries no dn_id: both
 // sides of a migrating leg export this same subsystem NQN from their two DNs,
 // so the CN's kernel aggregates them into one nvme multipath namespace and
-// ANA picks the live path (architecture.md §4.4, §11.2).
+// ANA picks the live path (architecture.md, NQNs; Migration).
 func (nf *NameFmt) SideToCnNqn(
 	clusterId uint64,
 	spId uint64,
@@ -651,7 +654,7 @@ func (nf *NameFmt) XferNqn(
 }
 
 // DnNsIdentity derives the deterministic namespace identity that both sides
-// of a leg MUST present identically (architecture.md §3.1): 16 bytes of
+// of a leg MUST present identically (architecture.md, Disk node): 16 bytes of
 // sha256("dnv-ns:{cluster:%016x}:{sp:%016x}:{leg:%016x}"), rendered as an
 // RFC-4122-shaped uuid string and a 32-hex-digit nguid.
 func DnNsIdentity(clusterId, spId, legId uint64) (uuid string, nguid string) {
@@ -745,7 +748,8 @@ func (nf *NameFmt) LocalMigrBmPath(
 
 // LocalCloneBmPath names one clone bitmap chunk file. A clone chunk is
 // addressed by the PAIR (src_slice_idx, bm_idx) — the source slice it
-// describes and its index within that slice's bitmap (§9.6) — so the name
+// describes and its index within that slice's bitmap (architecture.md,
+// Bitmap push protocol) — so the name
 // carries two %02x segments where LocalMigrBmPath carries one. The file name
 // is only an address: the CONTENT (a stored PushCloneBitmapRequest) is what
 // the startup reconcile decodes the pair from.

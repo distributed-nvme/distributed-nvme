@@ -18,14 +18,15 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is gateway.md §9.3 for architecture.md §8.1 (the four cluster
-// RPCs), §8.2 (the six disk-node RPCs) and §8.3 (the six controller-node
-// RPCs), driven against the real etcd of §9.1 through a Server built by
-// newTestServer.
+// This file is the handler tests (gateway.md GW5 to GW12) for architecture.md,
+// Clusters (the four cluster RPCs), Disk nodes (the six disk-node RPCs) and
+// Controller nodes (the six controller-node RPCs), driven against the real etcd
+// of etcdenv_test.go through a Server built by newTestServer.
 //
 // Every happy path asserts the EXACT keys the RPC is specified to write and
 // nothing else: the whole stored message through proto.Equal, the capacity key
-// as a key STRING built from the numbers §5.6 puts in it, and the globals'
+// as a key STRING built from the numbers architecture.md, Capacity index keys,
+// puts in it, and the globals'
 // next_id and shard_bucket. A handler that wrote the right fields under a
 // slightly wrong key would pass a getter-by-getter test and fail here, which
 // is the point — the key layout is the contract every worker and the allocator
@@ -40,8 +41,8 @@ import (
 // hnodeName is a name no other test in the package can collide with: the "hn-"
 // prefix is this file's, and testSeq is the run-wide counter that keeps two
 // iterations of the same test under -count=2 apart. Cluster names are keys
-// (§5.2) and the etcd server is shared, so a fixed literal would make a test
-// depend on whether an earlier one had run.
+// (architecture.md, cluster_id derivation) and the etcd server is shared, so a
+// fixed literal would make a test depend on whether an earlier one had run.
 func hnodeName(kind string) string {
 	return fmt.Sprintf("hn-%s-%d", kind, testSeq.Add(1))
 }
@@ -63,7 +64,7 @@ func hnodeGet(t *testing.T, s *Server, key string, msg proto.Message) {
 // It is a keys-only range rather than a point read because it must work on a
 // key whose message type the caller has no reason to know — a capacity key, a
 // global, a conf — and because the mod_revision is what "untouched" means: two
-// assertions in this file (§0 #17's idempotent no-write and every "nothing was
+// assertions in this file (GW6's idempotent no-write and every "nothing was
 // written" refusal) are exactly the statement that this number did not move.
 func hnodeModRev(t *testing.T, s *Server, key string) int64 {
 	t.Helper()
@@ -87,7 +88,8 @@ func hnodeExists(t *testing.T, s *Server, key string) bool {
 
 // hnodeWantMsg asserts that a refusal explains itself with the sentence its
 // spec gives it. The integration suite greps these strings, so a handler that
-// returned the right code with a different reason would still break §10.
+// returned the right code with a different reason would still break that suite
+// (gateway.md, Integration test plan).
 func hnodeWantMsg(t *testing.T, err error, want string, label string) {
 	t.Helper()
 	if err == nil {
@@ -112,7 +114,8 @@ func hnodeWantProto(
 }
 
 // hnodeZeroBucket is the shard_bucket a global carries while the cluster holds
-// no object of that kind: ShardBucketSize zeros (§5.4).
+// no object of that kind: ShardBucketSize zeros
+// (architecture.md, Globals: id allocation + shard buckets).
 func hnodeZeroBucket() []uint32 {
 	return make([]uint32, common.ShardBucketSize)
 }
@@ -128,9 +131,10 @@ func hnodeBucket(shards ...uint32) []uint32 {
 }
 
 // hnodeDnCapacityKeys is every DN capacity key of one cluster, over all four
-// bins of §6.2.
+// bins of architecture.md, DN bins.
 //
-// The §5.6 rule is a presence rule — the key exists if and only if the node is
+// The rule of architecture.md, Capacity index keys, is a presence rule — the
+// key exists if and only if the node is
 // allocatable — so the SET of keys is what a create or an update has to be
 // checked against. A point read of the key the test expects would miss the
 // interesting failure: a key written under the wrong bin or the wrong
@@ -153,7 +157,8 @@ func hnodeDnCapacityKeys(t *testing.T, s *Server, cid uint64) []string {
 }
 
 // hnodeCnCapacityKeys is hnodeDnCapacityKeys for a CN, which needs one scan
-// because CN capacity keys carry no bin index (§6.4).
+// because CN capacity keys carry no bin index (architecture.md, Finding CN
+// candidates).
 func hnodeCnCapacityKeys(t *testing.T, s *Server, cid uint64) []string {
 	t.Helper()
 	keys := []string{}
@@ -178,9 +183,11 @@ func hnodeWantKeys(t *testing.T, got []string, want []string, label string) {
 	}
 }
 
-// hnodeDnShard is the shard_code the create drew for one DN (§5.4).
+// hnodeDnShard is the shard_code the create drew for one DN (architecture.md,
+// Globals: id allocation + shard buckets).
 //
-// A rev key is id-keyed UNDER a shard code (§5.1), and that code is the
+// A rev key is id-keyed UNDER a shard code (architecture.md, Key grammar), and
+// that code is the
 // allocator's draw rather than anything derivable from the dn_id — so a test
 // that needs the rev key of a node it registered reads it back off the conf the
 // create wrote, exactly the way every handler forms the key.
@@ -200,16 +207,18 @@ func hnodeCnShard(t *testing.T, s *Server, cid uint64, addrPort string) uint32 {
 }
 
 // ---------------------------------------------------------------------------
-// §8.1 CreateCluster
+// CreateCluster (architecture.md, Clusters)
 // ---------------------------------------------------------------------------
 
-// TestCreateClusterWritesConfAndThreeGlobals pins §8.1's write set and §5.2's
-// derived id: one ClusterConf under the name plus the three globals under the
+// TestCreateClusterWritesConfAndThreeGlobals pins the write set of
+// architecture.md, Clusters, and the derived id of architecture.md, cluster_id
+// derivation: one ClusterConf under the name plus the three globals under the
 // id, and cluster_id = fnv64a(name ‖ creation_epoch) of the epoch the handler
 // stamped — the reply's id must be exactly the one recomputable from what was
 // stored, or no later RPC could address the cluster's keys at all.
 //
-// The five sub-messages are asserted as the handler RESOLVED them (§7): what
+// The five sub-messages are asserted as the handler RESOLVED them
+// (architecture.md, Common validation): what
 // the request said where it said anything, and the concrete constant in every
 // member it left unset. Freezing DefaultDnExtSize into the stored conf is the
 // POINT, not a mistake — ClusterConf is write-once, so a concrete extent size
@@ -273,8 +282,8 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 			// The request's, not the 64 KiB constant.
 			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 128 * 1024},
 			// redund_conf stays unset: it is a CHOICE, not a default, and an
-			// unset oneof already means redund_none (§8.4). Resolution never
-			// invents a redundancy kind for a cluster.
+			// unset oneof already means redund_none (architecture.md, Storage
+			// pools). Resolution never invents a redundancy kind for a cluster.
 		},
 		DnBinConf: &pb.DnBinConf{
 			// The request's 2 GiB, and the ladder it left entirely unset.
@@ -294,7 +303,8 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 		},
 	}, "stored cluster_conf")
 
-	// next_id starts at 1 and the bucket is ShardBucketSize zeros (§5.4). A
+	// next_id starts at 1 and the bucket is ShardBucketSize zeros
+	// (architecture.md, Globals: id allocation + shard buckets). A
 	// fresh slice per global: they are three independent counters and an
 	// aliased bucket would make one kind's mint move another kind's shard.
 	dnGlobal := &pb.DnGlobal{}
@@ -317,9 +327,9 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 	}, "sp_global")
 }
 
-// TestCreateClusterResolvesAnEmptyRequest is the headline of §7's write-time
-// resolution: a request that asks for nothing stores a ClusterConf with
-// nothing left to ask for.
+// TestCreateClusterResolvesAnEmptyRequest is the headline of the write-time
+// resolution of architecture.md, Common validation: a request that asks for
+// nothing stores a ClusterConf with nothing left to ask for.
 //
 // Every defaultable member is asserted as a CONCRETE number rather than
 // against the common.Default* it came from, and deliberately so — the whole
@@ -329,9 +339,9 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 // changed constant apart from a correct write.
 //
 // cluster_name is the one member the request still carries: it is the key the
-// conf is stored under (§5.2) and the §9.1 etcd is shared, so an omitted name
-// would put every test in this file on the single "default" cluster. Nothing
-// else is set.
+// conf is stored under (architecture.md, cluster_id derivation) and the etcd of
+// etcdenv_test.go is shared, so an omitted name would put every test in this
+// file on the single "default" cluster. Nothing else is set.
 func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 	s := newTestServer(t)
 	name := hnodeName("resolved")
@@ -357,7 +367,8 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 			},
 			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 64 * 1024},
 			// redund_conf stays unset: an unset oneof already means
-			// redund_none (§8.4), and nothing invents a redundancy kind.
+			// redund_none (architecture.md, Storage pools), and nothing invents a
+			// redundancy kind.
 		},
 		DnBinConf: &pb.DnBinConf{
 			ExtentSize: 1024 * 1024 * 1024, // 1 GiB
@@ -377,20 +388,23 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 
 	// The other side of the same rule: what CreateCluster writes is exactly
 	// what every later reader demands of it, so the stored conf must satisfy
-	// the check those readers run instead of resolving (§7).
+	// the check those readers run instead of resolving (architecture.md, Common
+	// validation).
 	if err := model.ValidateClusterConf(cc); err != nil {
 		t.Errorf("the conf CreateCluster stored does not validate: %v", err)
 	}
 }
 
-// TestCreateClusterRefusesANonLadderShiftSet pins the other arm of §6.2's
-// all-or-nothing shift rule at the RPC: a set that is not
+// TestCreateClusterRefusesANonLadderShiftSet pins the other arm of the
+// all-or-nothing shift rule of architecture.md, DN bins, at the RPC: a set that
+// is not
 // 0 <= bin0 < bin1 < bin2 < bin3 <= 63 is INVALID_ARGUMENT, and nothing is
 // written.
 //
 // It is refused rather than quietly replaced because the stored ladder is what
 // every capacity key in the cluster is written under for the cluster's whole
-// life — no reader resolves it again (§7) — and ClusterConf is write-once, so
+// life — no reader resolves it again (architecture.md, Common validation) — and
+// ClusterConf is write-once, so
 // an operator handed a silently different ladder has no RPC to correct it
 // with. The all-zero set stays legal: it is proto3's "unset" asking for
 // 0/4/8/12, which TestCreateClusterResolvesAnEmptyRequest pins.
@@ -432,7 +446,8 @@ func TestCreateClusterRefusesANonLadderShiftSet(t *testing.T) {
 	}
 }
 
-// TestCreateClusterNameCollisionWritesNothing pins the ALREADY_EXISTS of §8.1
+// TestCreateClusterNameCollisionWritesNothing pins the ALREADY_EXISTS of
+// architecture.md, Clusters,
 // and the rule behind every refusal in this file: the closure returns before
 // its first Put, so the stored ClusterConf is not merely still correct, it was
 // not rewritten — its mod_revision has not moved.
@@ -579,7 +594,8 @@ func hnodeApplyIds(t *testing.T, s *Server, keys []string, remove bool) {
 	}
 }
 
-// TestCreateClusterRefusesAClusterIdInUse pins §8.1's hash-collision guard: a
+// TestCreateClusterRefusesAClusterIdInUse pins the hash-collision guard of
+// architecture.md, Clusters: a
 // cluster whose derived cluster_id is already carrying a global is refused with
 // ALREADY_EXISTS and writes nothing, because the alternative is two clusters
 // silently sharing every key prefix in the store.
@@ -648,10 +664,11 @@ func TestCreateClusterRefusesAClusterIdInUse(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.1 DeleteCluster, GetCluster, ListClusters
+// DeleteCluster, GetCluster, ListClusters (architecture.md, Clusters)
 // ---------------------------------------------------------------------------
 
-// TestDeleteClusterRemovesConfAndGlobals pins §8.1's delete: the ClusterConf
+// TestDeleteClusterRemovesConfAndGlobals pins the delete of architecture.md,
+// Clusters: the ClusterConf
 // and all three globals go in one transaction, and the reply carries the id
 // that has just stopped existing — it is derived, not stored, so a client that
 // did not keep it could never name it again.
@@ -683,9 +700,11 @@ func TestDeleteClusterRemovesConfAndGlobals(t *testing.T) {
 	wantCode(t, err, codes.NotFound, "GetCluster after DeleteCluster")
 }
 
-// TestDeleteClusterBucketSumGate pins the emptiness precondition of §8.1: it is
-// sum(shard_bucket) over all THREE globals, not a range read, because §5.4
-// makes that sum the cluster's live object count by construction. Each row
+// TestDeleteClusterBucketSumGate pins the emptiness precondition of
+// architecture.md, Clusters: it is sum(shard_bucket) over all THREE globals,
+// not a range read, because architecture.md, Globals: id allocation + shard
+// buckets, makes that sum the cluster's live object count by construction.
+// Each row
 // claims one bucket entry of one global and asserts the refusal names that
 // kind, writes nothing, and stops naming it once the bucket is empty again.
 func TestDeleteClusterBucketSumGate(t *testing.T) {
@@ -754,7 +773,8 @@ func TestDeleteClusterBucketSumGate(t *testing.T) {
 	}
 }
 
-// TestGetClusterReadsConfAndGlobals pins §8.1's read: the reply carries the
+// TestGetClusterReadsConfAndGlobals pins the read of architecture.md, Clusters:
+// the reply carries the
 // name, the derived id and all four messages at ONE store revision, and the
 // globals show the mints that have happened — which is what makes GetCluster
 // the only way a client learns a cluster's object counts.
@@ -780,7 +800,8 @@ func TestGetClusterReadsConfAndGlobals(t *testing.T) {
 	hnodeGet(t, s, model.ClusterConfKey(name), cc)
 	hnodeWantProto(t, reply.GetClusterConf(), cc, "cluster_conf")
 	// One DN has been minted: next_id has moved on and the first shard bucket
-	// carries it. The other two globals are still untouched (§5.4).
+	// carries it. The other two globals are still untouched (architecture.md,
+	// Globals: id allocation + shard buckets).
 	hnodeWantProto(t, reply.GetDnGlobal(), &pb.DnGlobal{
 		NextId:      2,
 		ShardBucket: hnodeBucket(0),
@@ -795,7 +816,8 @@ func TestGetClusterReadsConfAndGlobals(t *testing.T) {
 	}, "sp_global")
 }
 
-// TestListClustersPagesAndRejectsABadToken pins GW10/§5.7 on the one list that
+// TestListClustersPagesAndRejectsABadToken pins GW10 and architecture.md,
+// page_token, on the one list that
 // resolves no cluster at all: a page is the key suffixes under the ClusterConf
 // prefix, the next token is the last key of the page, and a token that is not
 // base64 is INVALID_ARGUMENT rather than an empty first page.
@@ -860,20 +882,22 @@ func TestListClustersPagesAndRejectsABadToken(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.2 disk nodes
+// architecture.md, Disk nodes
 // ---------------------------------------------------------------------------
 
-// TestCreateDiskNodeWritesFourKeys pins §8.2's whole write set, row by row: the
-// DnConf, the DnRev the owning dn-worker watches, the §5.6 capacity key and the
-// cluster's DnGlobal.
+// TestCreateDiskNodeWritesFourKeys pins the whole write set of architecture.md,
+// Disk nodes, row by row: the DnConf, the DnRev the owning dn-worker watches,
+// the capacity key (architecture.md, Capacity index keys) and the cluster's
+// DnGlobal.
 //
 // The rows are chosen to pin four separate rules at once: total_ext_cnt is the
-// reported size divided by the cluster's extent_size and ROUNDS DOWN (§6.1); an
-// omitted location defaults to the node's own endpoint (§8.2 Defaults); the
+// reported size divided by the cluster's extent_size and ROUNDS DOWN
+// (architecture.md, Size → extents); an omitted location defaults to the node's
+// own endpoint (CreateDiskNode's Defaults, architecture.md, Disk nodes); the
 // shard code is the index of the smallest bucket entry, first index on ties, so
 // three creates land on shards 0, 1 and 2 (GW12); and a node created disabled
 // gets no capacity key at all, in any bin — it is invisible to the allocator
-// from its first instant (§5.6).
+// from its first instant (architecture.md, Capacity index keys).
 func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -892,8 +916,9 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 		wantBin   uint32
 	}{
 		{
-			// 16.5 GiB against the default 1 GiB extent: §6.1 floors it to 16,
-			// which is exactly bin 1's level (1 << DefaultDnBin1Shift).
+			// 16.5 GiB against the default 1 GiB extent: architecture.md,
+			// Size → extents, floors it to 16, which is exactly bin 1's level
+			// (1 << DefaultDnBin1Shift).
 			label:     "default location",
 			size:      16<<30 + 512<<20,
 			wantId:    1,
@@ -939,7 +964,8 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 			location = addr
 		}
 		// err_epoch 0, an empty side_ptr_list and free == total are the state
-		// of a node that is healthy and hosts nothing yet (§8.2).
+		// of a node that is healthy and hosts nothing yet
+		// (architecture.md, Disk nodes).
 		dn := &pb.DnConf{}
 		hnodeGet(t, s, model.DnConfKey(cid, addr), dn)
 		hnodeWantProto(t, dn, &pb.DnConf{
@@ -970,9 +996,10 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 	}
 
 	// The capacity index is asserted as a whole key SET: the bin and the free
-	// count are key fields the §6.3 walk scans by, so a right-valued key under
-	// a wrong bin would be invisible to the allocator — and to a point read of
-	// the key the test expected. The disabled node contributes nothing (§5.6).
+	// count are key fields the walk of architecture.md, Finding DN candidates,
+	// scans by, so a right-valued key under a wrong bin would be invisible to the
+	// allocator — and to a point read of the key the test expected. The disabled
+	// node contributes nothing (architecture.md, Capacity index keys).
 	hnodeWantKeys(
 		t, hnodeDnCapacityKeys(t, s, cid), wantCapKeys, "dn capacity index")
 
@@ -986,12 +1013,14 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 	}, "dn_global after three creates")
 }
 
-// TestCreateDiskNodeRefusalsWriteNothing pins the two §8.2 refusals that can
+// TestCreateDiskNodeRefusalsWriteNothing pins the two refusals of
+// architecture.md, Disk nodes, that can
 // happen after the cluster has been resolved: a second create under the same
 // addr_port is ALREADY_EXISTS, and a node whose reported size does not cover
 // one extent is INVALID_ARGUMENT. Neither may leave a trace — in particular
-// neither may consume a dn_id, because ids are never reused (§5.4) and a
-// refused create that burned one would leave a permanent hole.
+// neither may consume a dn_id, because ids are never reused (architecture.md,
+// Globals: id allocation + shard buckets) and a refused create that burned one
+// would leave a permanent hole.
 func TestCreateDiskNodeRefusalsWriteNothing(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1020,8 +1049,8 @@ func TestCreateDiskNodeRefusalsWriteNothing(t *testing.T) {
 			dn.GetLocation(), "rack-1")
 	}
 
-	// Half an extent: §6.1 floors total_ext_cnt to 0 and a node that can hold
-	// nothing must not be registered at all.
+	// Half an extent: architecture.md, Size → extents, floors total_ext_cnt to 0
+	// and a node that can hold nothing must not be registered at all.
 	tiny := fakeAddrPort(t, "tiny")
 	startFakeAgent(t, tiny, 512<<20)
 	_, err = s.CreateDiskNode(ctx, &pb.CreateDiskNodeRequest{
@@ -1041,19 +1070,21 @@ func TestCreateDiskNodeRefusalsWriteNothing(t *testing.T) {
 // TestNodeBudgetsDivideByTheStoredExtentSize is the discriminator the two
 // budget tests above cannot be: they run on mustCluster's cluster, whose
 // extent size the gateway resolved to common.DefaultDnExtSize, so their
-// expected total_ext_cnt is the same number whether §6.1 divided by the value
-// it read from the ClusterConf or by the constant.
+// expected total_ext_cnt is the same number whether the handler divided
+// (architecture.md, Size → extents) by the value it read from the ClusterConf
+// or by the constant.
 //
 // This cluster asks for 2 GiB extents, so the two are different numbers, and
 // each row states both: a 5 GiB disk node is 2 extents here and would be 5
 // under the default, and a 9 GiB controller-node budget is 4 here and would be
-// 9. Both RPCs floor (§6.1), which is why the sizes are deliberately not
-// multiples of the extent size.
+// 9. Both RPCs floor (architecture.md, Size → extents), which is why the sizes
+// are deliberately not multiples of the extent size.
 func TestNodeBudgetsDivideByTheStoredExtentSize(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 	cluster := hnodeName("extsize")
-	// Only the extent size is named: an all-zero shift set is what §7 accepts
+	// Only the extent size is named: an all-zero shift set is what
+	// architecture.md, Common validation, accepts
 	// as "no opinion about the ladder", and CreateCluster resolves it to the
 	// 0/4/8/12 default before storing, so the cluster is concrete throughout.
 	reply, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
@@ -1071,7 +1102,8 @@ func TestNodeBudgetsDivideByTheStoredExtentSize(t *testing.T) {
 	hnodeGet(t, s, model.DnConfKey(cid, dnAddr), dn)
 	if dn.GetTotalExtCnt() != 2 || dn.GetFreeExtCnt() != 2 {
 		t.Errorf("dn: %d/%d extents, want 2/2 — 5 GiB over the cluster's "+
-			"stored 2 GiB extent, not over the §7 default",
+			"stored 2 GiB extent, not over the default of "+
+			"architecture.md, Common validation",
 			dn.GetTotalExtCnt(), dn.GetFreeExtCnt())
 	}
 
@@ -1081,12 +1113,14 @@ func TestNodeBudgetsDivideByTheStoredExtentSize(t *testing.T) {
 	hnodeGet(t, s, model.CnConfKey(cid, cnAddr), cn)
 	if cn.GetTotalExtCnt() != 4 || cn.GetFreeExtCnt() != 4 {
 		t.Errorf("cn: %d/%d extents, want 4/4 — 9 GiB over the cluster's "+
-			"stored 2 GiB extent, not over the §7 default",
+			"stored 2 GiB extent, not over the default of "+
+			"architecture.md, Common validation",
 			cn.GetTotalExtCnt(), cn.GetFreeExtCnt())
 	}
 }
 
-// TestGetDiskNodeReturnsConfAndToken pins §8.2's read: the reply is the stored
+// TestGetDiskNodeReturnsConfAndToken pins the read of architecture.md,
+// Disk nodes: the reply is the stored
 // DnConf plus the DnRev that is the client's token for the next mutator, both
 // from one store revision, and the addr_port it was asked for.
 func TestGetDiskNodeReturnsConfAndToken(t *testing.T) {
@@ -1179,13 +1213,15 @@ func TestListDiskNodesPagesAndRejectsABadToken(t *testing.T) {
 	wantCode(t, err, codes.NotFound, "ListDiskNodes of an unknown cluster")
 }
 
-// TestUpdateDiskNodeDisabledMovesOnlyTheCapacityKey pins §8.2's one post-create
-// writer. `disabled` decides whether the allocator can see the node and nothing
-// else, so the RPC writes the DnConf and maintains the §5.6 capacity key, bumps
+// TestUpdateDiskNodeDisabledMovesOnlyTheCapacityKey pins the one post-create
+// writer of architecture.md, Disk nodes. `disabled` decides whether the
+// allocator can see the node and nothing else, so the RPC writes the DnConf and
+// maintains the capacity key (architecture.md, Capacity index keys), bumps
 // NO revision — the agent is never told, and the sides the node already hosts
 // keep running — and makes no agent call.
 //
-// The second half is §0 #17: a request that asks for the flag the node already
+// The second half is GW6's idempotent no-write: a request that asks for the
+// flag the node already
 // carries writes NOTHING. Every call below sends the current token, so GW6's
 // comparison runs and passes on each of them, and the no-op is not a way for a
 // client holding a STALE token to get an OK — a client that sends no token at
@@ -1226,14 +1262,15 @@ func TestUpdateDiskNodeDisabledMovesOnlyTheCapacityKey(t *testing.T) {
 		"the capacity index of a cluster whose only DN is disabled")
 	if got := hnodeModRev(t, s, revKey); got != revBefore {
 		t.Errorf(
-			"dn_rev was bumped: %d -> %d; §8.2 exempts this RPC",
+			"dn_rev was bumped: %d -> %d; architecture.md, "+
+				"Disk nodes, exempts this RPC",
 			revBefore, got)
 	}
 	if got := dnTok(t, s, cluster, addr); got != 1 {
 		t.Errorf("dn_rev revision: got %d, want 1", got)
 	}
 
-	// §0 #17: the same request again writes nothing at all.
+	// GW6: the same request again writes nothing at all.
 	confRev := hnodeModRev(t, s, confKey)
 	_, err = s.UpdateDiskNodeDisabled(ctx, &pb.UpdateDiskNodeDisabledRequest{
 		ClusterName: cluster,
@@ -1289,12 +1326,14 @@ func TestUpdateDiskNodeDisabledMovesOnlyTheCapacityKey(t *testing.T) {
 	}
 }
 
-// TestDeleteDiskNodeReleasesTheShard pins §8.2's delete: the DnRev key whose
+// TestDeleteDiskNodeReleasesTheShard pins the delete of architecture.md,
+// Disk nodes: the DnRev key whose
 // disappearance stops the owning dn-worker, the DnConf and the capacity key go
 // in one commit; the global's bucket entry is released but next_id keeps
 // growing, because a dn_id is never reused.
 //
-// It also pins the ORDER of §8.2's occupancy gate against GW6: a node that
+// It also pins the ORDER of the occupancy gate of architecture.md, Disk nodes,
+// against GW6: a node that
 // still hosts a side is refused, but a stale token is refused FIRST — an
 // operator working from an out-of-date GetDiskNode must be told its view is
 // stale, not told about sides it never saw.
@@ -1334,8 +1373,8 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 		ShardBucket: hnodeBucket(1),
 	}, "dn_global after a delete")
 
-	// The survivor now hosts a side. §8.2 refuses to delete it, and GW6 puts
-	// the token check ahead of that gate.
+	// The survivor now hosts a side. architecture.md, Disk nodes, refuses to
+	// delete it, and GW6 puts the token check ahead of that gate.
 	dn := &pb.DnConf{}
 	hnodeGet(t, s, model.DnConfKey(cid, second), dn)
 	dn.SidePtrList = []*pb.SidePointer{{SpId: 7, LegId: 8, SideId: 9}}
@@ -1366,8 +1405,9 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 	}
 }
 
-// TestInspectDiskNodeRepliesTheAppliedRevision pins architecture.md §8.2 and
-// gateway.md §5.2: the reply's `applied_revision` is the one the agent's
+// TestInspectDiskNodeRepliesTheAppliedRevision pins architecture.md,
+// Disk nodes, and gateway.md, Disk nodes: the reply's `applied_revision` is
+// the one the agent's
 // GetDnInfo reply carries — its last applied revision — NOT the DnRev stored
 // in etcd. The fake answers with a value no bump sequence reaches, so a
 // handler that regressed to the stored revision would be unmistakable.
@@ -1410,13 +1450,13 @@ func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 		t.Errorf("GetDnInfo call count: got %d, want 1", got)
 	}
 	// The create that set this node up probed the agent for its size exactly
-	// once, before its transaction (AG1, §5.8).
+	// once, before its transaction (AG1; architecture.md, STM discipline).
 	if got := agent.callCount("GetDnSize"); got != 1 {
 		t.Errorf("GetDnSize call count: got %d, want 1", got)
 	}
 
 	// A bumped rev key must not move the reply: the store is not the source
-	// (§8.2), the agent's reply is.
+	// (architecture.md, Disk nodes), the agent's reply is.
 	mustPut(t, newTestClient(t), model.DnRevKey(0, cid, 1), &pb.DnRev{
 		AddrPort: addr,
 		Revision: 5,
@@ -1433,18 +1473,19 @@ func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.3 controller nodes
+// architecture.md, Controller nodes
 // ---------------------------------------------------------------------------
 
-// TestCreateControllerNodeAppliesTheBudgetRule pins the one place §8.3 is not a
-// character-for-character mirror of §8.2: a DN reports a disk it has measured
-// and the gateway believes it, while a CN reports how much working space the
-// operator lets dnv use — an opinion, so §6.1 reads it with a floor and a
+// TestCreateControllerNodeAppliesTheBudgetRule pins the one place
+// architecture.md, Controller nodes, is not a character-for-character mirror of
+// its Disk nodes: a DN reports a disk it has measured and the gateway believes
+// it, while a CN reports how much working space the operator lets dnv use — an
+// opinion, so architecture.md, Size → extents, reads it with a floor and a
 // ceiling before dividing by extent_size.
 //
-// The rows are the three arms of that rule plus its collision with §6.1's
-// floor: MinCnCap itself is a legal budget that yields less than one extent,
-// and a node that can hold nothing must not be registered.
+// The rows are the three arms of that rule plus its collision with the floor of
+// Size → extents: MinCnCap itself is a legal budget that yields less than one
+// extent, and a node that can hold nothing must not be registered.
 func TestCreateControllerNodeAppliesTheBudgetRule(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1526,8 +1567,9 @@ func TestCreateControllerNodeAppliesTheBudgetRule(t *testing.T) {
 			AddrPort: addr,
 			Revision: 1,
 		}, tc.label+": cn_rev")
-		// A CN capacity key carries no bin index (§6.4): the whole key is the
-		// cluster, the free count and the address.
+		// A CN capacity key carries no bin index (architecture.md, Finding
+		// CN candidates): the whole key is the cluster, the free count and the
+		// address.
 		capKey := model.CnCapacityKey(cid, tc.wantExt, addr)
 		wantCapKeys = append(wantCapKeys, capKey)
 		capacity := &pb.CnCapacity{}
@@ -1549,9 +1591,9 @@ func TestCreateControllerNodeAppliesTheBudgetRule(t *testing.T) {
 	}, "cn_global after three creates and one refusal")
 }
 
-// TestCreateControllerNodeCollisionWritesNothing is §8.2's ALREADY_EXISTS
-// mirrored onto §8.3: a second create under the same addr_port is refused and
-// consumes no cn_id.
+// TestCreateControllerNodeCollisionWritesNothing is the ALREADY_EXISTS of
+// architecture.md, Disk nodes, mirrored onto Controller nodes: a second create
+// under the same addr_port is refused and consumes no cn_id.
 func TestCreateControllerNodeCollisionWritesNothing(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1577,7 +1619,8 @@ func TestCreateControllerNodeCollisionWritesNothing(t *testing.T) {
 	}
 }
 
-// TestGetControllerNodeReturnsConfAndToken is §8.2's read mirrored: the stored
+// TestGetControllerNodeReturnsConfAndToken is the read of architecture.md,
+// Disk nodes, mirrored: the stored
 // CnConf plus the CnRev that is the client's token, from one store revision.
 func TestGetControllerNodeReturnsConfAndToken(t *testing.T) {
 	s := newTestServer(t)
@@ -1660,8 +1703,9 @@ func TestListControllerNodesPagesAndRejectsABadToken(t *testing.T) {
 		t, err, codes.InvalidArgument, "ListControllerNodes with a bad token")
 }
 
-// TestUpdateControllerNodeDisabledMovesOnlyTheCapacityKey is §8.2's
-// UpdateDiskNodeDisabled mirrored onto §8.3, including §0 #17's idempotent
+// TestUpdateControllerNodeDisabledMovesOnlyTheCapacityKey is
+// UpdateDiskNodeDisabled (architecture.md, Disk nodes) mirrored onto Controller
+// nodes, including GW6's idempotent
 // no-write: neither the rev key nor the capacity key may be touched by a call
 // that asks for the flag the node already carries.
 func TestUpdateControllerNodeDisabledMovesOnlyTheCapacityKey(t *testing.T) {
@@ -1697,7 +1741,8 @@ func TestUpdateControllerNodeDisabledMovesOnlyTheCapacityKey(t *testing.T) {
 		"the capacity index of a cluster whose only CN is disabled")
 	if got := hnodeModRev(t, s, revKey); got != revBefore {
 		t.Errorf(
-			"cn_rev was bumped: %d -> %d; §8.3 exempts this RPC",
+			"cn_rev was bumped: %d -> %d; architecture.md, "+
+				"Controller nodes, exempts this RPC",
 			revBefore, got)
 	}
 
@@ -1747,7 +1792,8 @@ func TestUpdateControllerNodeDisabledMovesOnlyTheCapacityKey(t *testing.T) {
 	}
 }
 
-// TestDeleteControllerNodeReleasesTheShard is §8.2's delete mirrored onto §8.3,
+// TestDeleteControllerNodeReleasesTheShard is the delete of architecture.md,
+// Disk nodes, mirrored onto Controller nodes,
 // where the occupancy gate is `cntlr_ptr_list` instead of `side_ptr_list`, and
 // the same GW6 ordering applies: a stale token beats the gate.
 func TestDeleteControllerNodeReleasesTheShard(t *testing.T) {
@@ -1818,7 +1864,7 @@ func TestDeleteControllerNodeReleasesTheShard(t *testing.T) {
 
 // TestInspectControllerNodeRepliesTheAppliedRevision is
 // TestInspectDiskNodeRepliesTheAppliedRevision on the CN side
-// (architecture.md §8.3): the reply's `applied_revision` is the one the
+// (architecture.md, Controller nodes): the reply's `applied_revision` is the one the
 // agent's GetCnInfo reply carries, never the CnRev the store holds.
 func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 	s := newTestServer(t)
@@ -1865,7 +1911,7 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 	}
 
 	// A bumped rev key must not move the reply: the store is not the source
-	// (§8.3), the agent's reply is.
+	// (architecture.md, Controller nodes), the agent's reply is.
 	mustPut(t, newTestClient(t), model.CnRevKey(0, cid, 1), &pb.CnRev{
 		AddrPort: addr,
 		Revision: 5,
@@ -1886,8 +1932,8 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 // GW6 across both node kinds
 // ---------------------------------------------------------------------------
 
-// TestNodeMutatorsRefuseAPresentStaleToken pins the refusal half of GW6 and
-// §0 #7 on all four token-taking node RPCs at once: when the request CARRIES a
+// TestNodeMutatorsRefuseAPresentStaleToken pins the refusal half of GW6 on all
+// four token-taking node RPCs at once: when the request CARRIES a
 // token message, the stored revision must equal the one inside it EXACTLY, and
 // anything else is ABORTED "stale revision" — decided before the mutator looks
 // at any other precondition.
@@ -1914,7 +1960,7 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 // fixture can still end on "nothing was written": every row below is a
 // refusal, so nothing below reaches a Put.
 //
-// The handlers are called in process (§9.3), so `dn_rev: &pb.DnRev{}` reaches
+// The handlers are called in process, so `dn_rev: &pb.DnRev{}` reaches
 // them exactly as present-and-empty. That is also what the wire does: a proto3
 // message field set to an empty message is emitted as a zero-length field and
 // decodes back to a non-nil message, so presence survives a round trip and a
@@ -2041,7 +2087,7 @@ func TestNodeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 }
 
 // TestNodeMutatorsRunWithNoTokenAtAll is the other half of GW6's presence rule
-// (§0 #7) on the same four node RPCs: a request that carries NO token message
+// on the same four node RPCs: a request that carries NO token message
 // skips the revision comparison entirely and is judged only on its own
 // preconditions. The mutator RUNS.
 //
@@ -2050,16 +2096,19 @@ func TestNodeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 // refusal but a silent no-op: a handler that returned OK while writing nothing
 // would satisfy "no error" and betray every caller that used the bypass.
 //
-// What "moved" means is different per RPC, and §5.5 is why:
+// What "moved" means is different per RPC, and architecture.md, Revision keys
+// and the sync fan-out, is why:
 //
-//   - The two Update*Disabled RPCs rewrite the conf and maintain the §5.6
-//     capacity key but bump NO revision (§8.2 and §8.3 exempt them; the agent
+//   - The two Update*Disabled RPCs rewrite the conf and maintain the capacity
+//     key (architecture.md, Capacity index keys) but bump NO revision
+//     (architecture.md, Disk nodes and Controller nodes, exempt them; the agent
 //     is never told). So the evidence is the stored `disabled` flag and the
 //     capacity index, asserted while the rev key is asserted NOT to have moved.
 //   - The two Delete* RPCs take the rev key away together with the conf and the
 //     capacity key, so there is no revision left to inspect. The evidence is the
 //     whole key set gone in one commit plus the bucket entry released in the
-//     global, with next_id still growing (§5.4).
+//     global, with next_id still growing
+//     (architecture.md, Globals: id allocation + shard buckets).
 //
 // Neither shape can show GW6's bump-on-success half; on these four RPCs there
 // is no bump to see, and that clause is the SP-scoped mutators' to pin.
@@ -2129,14 +2178,16 @@ func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
 		"the DN capacity index after a token-less disable")
 	if got := hnodeModRev(t, s, dnUpdRevKey); got != dnRevBefore {
 		t.Errorf(
-			"dn_rev was bumped: %d -> %d; §8.2 exempts this RPC whether or "+
+			"dn_rev was bumped: %d -> %d; architecture.md, Disk nodes, "+
+				"exempts this RPC whether or "+
 				"not a token was sent", dnRevBefore, got)
 	}
 	if got := dnTok(t, s, cluster, dnUpd); got != 1 {
 		t.Errorf("dn_rev revision: got %d, want 1", got)
 	}
 
-	// UpdateControllerNodeDisabled, no CnRev at all: the §8.3 mirror.
+	// UpdateControllerNodeDisabled, no CnRev at all: the mirror of
+	// architecture.md, Controller nodes.
 	updCn, err := s.UpdateControllerNodeDisabled(
 		ctx, &pb.UpdateControllerNodeDisabledRequest{
 			ClusterName: cluster,
@@ -2159,7 +2210,8 @@ func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
 		"the CN capacity index after a token-less disable")
 	if got := hnodeModRev(t, s, cnUpdRevKey); got != cnRevBefore {
 		t.Errorf(
-			"cn_rev was bumped: %d -> %d; §8.3 exempts this RPC whether or "+
+			"cn_rev was bumped: %d -> %d; architecture.md, Controller "+
+				"nodes, exempts this RPC whether or "+
 				"not a token was sent", cnRevBefore, got)
 	}
 	if got := cnTok(t, s, cluster, cnUpd); got != 1 {
@@ -2191,7 +2243,8 @@ func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
 		ShardBucket: hnodeBucket(dnUpdShard),
 	}, "dn_global after a token-less delete")
 
-	// DeleteControllerNode, no CnRev at all: the §8.3 mirror.
+	// DeleteControllerNode, no CnRev at all: the mirror of architecture.md,
+	// Controller nodes.
 	delCn, err := s.DeleteControllerNode(
 		ctx, &pb.DeleteControllerNodeRequest{
 			ClusterName: cluster,
@@ -2230,12 +2283,14 @@ func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
 // TestNodeMutatorsStillReadTheRevKeyWithNoToken pins the limit of the bypass:
 // skipping the COMPARISON is not skipping the READ. GW6 reads the rev key on
 // every one of these four RPCs whether or not a token came with the request,
-// and §5.9 makes a missing invariant key ABORTED — so a token-less request
+// and architecture.md, UNEXPECTED_ERROR → `ABORTED`, makes a missing invariant
+// key ABORTED — so a token-less request
 // against a node whose rev key has vanished is still refused, and refused with
 // the "<x>_rev key %q is missing" sentence rather than with "stale revision".
 //
 // That distinction is the whole point of the row: "no token" must mean "no
-// optimistic-concurrency gate", never "no §5.1 invariant". Keeping the key in
+// optimistic-concurrency gate", never "no invariant of architecture.md,
+// Key grammar". Keeping the key in
 // the STM's read set is also what makes a skipped check no weaker than a
 // checked one against a DELETE of the object racing the same transaction.
 //

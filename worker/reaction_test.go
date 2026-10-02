@@ -14,7 +14,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// The fixture SP of §11 (§13: "the pending rule … with real §3.6 geometry")
+// The fixture SP of AR1-AR9 (AR6's pending rule with real group geometry per
+// architecture.md, Group on-leg layout: meta region, data region, health block)
 // ---------------------------------------------------------------------------
 
 const (
@@ -68,10 +69,12 @@ const (
 
 // reactBdevConf is the fixture's SP-wide geometry: the concrete bdev_conf
 // CreateStoragePool stores (testBdevConf), with the pool block size and bitmap
-// chunk count spelled out from the constants above so the §3.6 arithmetic in
-// this file and the stored conf can never drift apart. Every member is
-// concrete because §7 resolves them on the write path — a zero anywhere in
-// here is what model.ValidateBdevConf refuses.
+// chunk count spelled out from the constants above so the group-layout
+// arithmetic (architecture.md, Group on-leg layout: meta region, data region,
+// health block) in this file and the stored conf can never drift apart. Every
+// member is concrete because architecture.md, Common validation, resolves them
+// on the write path — a zero anywhere in here is what model.ValidateBdevConf
+// refuses.
 func reactBdevConf() *pb.BdevConf {
 	conf := testBdevConf()
 	conf.DmPoolConf.DataBlockSize = reactBlockSize
@@ -88,8 +91,9 @@ func reactBdevConf() *pb.BdevConf {
 // reactClusterConf is the cluster the fixture SP lives in: the stored conf of
 // testClusterConf with 64 MiB extents and an alloc_conf of its own, so the
 // batch sizes the candidate scans below assert on can only have come from this
-// message. Both values are inside the §7 bounds [1, 1024], so the pass gate
-// (model.ValidateClusterConf) accepts the fixture.
+// message. Both values are inside the bounds [1, 1024] of architecture.md,
+// Common validation, so the pass gate (model.ValidateClusterConf) accepts the
+// fixture.
 func reactClusterConf() *pb.ClusterConf {
 	return testClusterConf(func(cc *pb.ClusterConf) {
 		cc.DnBinConf.ExtentSize = reactExtentSize
@@ -99,7 +103,8 @@ func reactClusterConf() *pb.ClusterConf {
 	})
 }
 
-// reactGroup builds one group with the real §3.6 block counts of extCnt
+// reactGroup builds one group with the real block counts (architecture.md,
+// Group on-leg layout: meta region, data region, health block) of extCnt
 // extents and one single-sided leg per (leg_id, side_id, addr) triple.
 func reactGroup(
 	t *testing.T,
@@ -238,8 +243,8 @@ type candQuery struct {
 	spCn        []string
 }
 
-// fakeReactionOps is the §13 stand-in for model: canned candidates, a canned
-// error and a record of every scan and every mutation.
+// fakeReactionOps is the unit tests' stand-in for model: canned candidates, a
+// canned error and a record of every scan and every mutation.
 type fakeReactionOps struct {
 	mu      sync.Mutex
 	dnCands []model.Cand
@@ -558,7 +563,8 @@ func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
 	clk := newFakeClock()
 	store := newFakeStore()
 	d := newTestDeps(testConfig(common.WorkerRoleSp), store, clk)
-	// As stored: the cache resolves nothing (§7), and neither does this.
+	// As stored: the cache resolves nothing (architecture.md, Common
+	// validation), and neither does this.
 	setCachedConf(d, testCid, reactClusterConf())
 	store.seed(t, model.SpRevKey(testShard, testCid, testSpId), &pb.SpRev{
 		Revision: reactSpRevision,
@@ -617,7 +623,8 @@ func (h *reactHarness) setPool(sliceId uint64, status pb.ResStatus, details stri
 	}
 }
 
-// setLegRow installs one leg's §3.6 probe row on the primary (AR8 readiness).
+// setLegRow installs one leg's probe row (architecture.md, Group on-leg layout:
+// meta region, data region, health block) on the primary (AR8 readiness).
 func (h *reactHarness) setLegRow(legId uint64, status pb.ResStatus) {
 	h.t.Helper()
 	child, ok := h.w.cntlrs[reactCntlrA]
@@ -711,7 +718,8 @@ func (h *reactHarness) wantOps(want ...string) []reactionCall {
 	return calls
 }
 
-// wantApplied asserts the kinds of the §12 `reaction applied` records.
+// wantApplied asserts the kinds of the `reaction applied` records
+// (dnv-worker.md, Log records).
 func (h *reactHarness) wantApplied(want ...string) []map[string]any {
 	h.t.Helper()
 	recs := h.logs.withMsg(msgReactionApplied)
@@ -945,10 +953,10 @@ func TestReactionDisabledCntlrIsHandsOff(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestReactionDisabledPrimaryFailsOver pins AR5's second trigger: `disabled`
-// on the PRIMARY fires on its own and immediately (architecture.md §8.6 —
-// "disabling the current primary triggers the §10.4 primary re-election"),
-// with no threshold to wait out. AR3's hands-off rule is unchanged in the
-// other direction: a disabled cntlr is still never a candidate.
+// on the PRIMARY fires on its own and immediately (architecture.md, Cntlrs —
+// "disabling the current primary triggers the primary re-election of Automatic
+// reactions"), with no threshold to wait out. AR3's hands-off rule is unchanged
+// in the other direction: a disabled cntlr is still never a candidate.
 func TestReactionDisabledPrimaryFailsOver(t *testing.T) {
 	t.Run("healthy disabled primary", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -1680,10 +1688,10 @@ func TestReactionBadPoolLineLoggedOncePerChange(t *testing.T) {
 
 // TestReactionGrowOnlyForOkPool pins AR6's "an ERROR / PROVISIONING / absent
 // pool is never grown", and the two readings of low_water_mark_pct that are
-// left now that §7 resolves it at write time: above 100 is the kill switch and
-// grows nothing quietly, zero is a conf CreateStoragePool could not have
-// written and is REFUSED — the pass gate stops before any reaction, where
-// tryGrow used to substitute 50 and grow.
+// left now that architecture.md, Common validation, resolves it at write time:
+// above 100 is the kill switch and grows nothing quietly, zero is a conf
+// CreateStoragePool could not have written and is REFUSED — the pass gate stops
+// before any reaction, where tryGrow used to substitute 50 and grow.
 func TestReactionGrowOnlyForOkPool(t *testing.T) {
 	total := reactDataBlocks(t, 2)
 	breach := poolLine(1, 1000, total, total)
@@ -1765,8 +1773,9 @@ func TestReactionDataGrowPending(t *testing.T) {
 	if query.kind != "dn" || query.candExt != 2 {
 		t.Fatalf("scan = %+v, want ext_cnt 2 of the first data group", query)
 	}
-	// One batch per leg of the cluster's STORED alloc_conf.dn_batch_size (§7).
-	// The fixture's value is not the §7 default, so a scan that substituted
+	// One batch per leg of the cluster's STORED alloc_conf.dn_batch_size
+	// (architecture.md, Common validation). The fixture's value is not the
+	// default of architecture.md, Common validation, so a scan that substituted
 	// the constant would ask for 32 here.
 	if query.candCnt != 2*reactDnBatch {
 		t.Fatalf("candCnt = %d, want two stored dn_batch_size", query.candCnt)
@@ -1813,7 +1822,8 @@ func TestReactionMetaGrowPending(t *testing.T) {
 	if !calls[0].isMeta {
 		t.Fatalf("grow = %+v, want a meta grow", calls[0])
 	}
-	// The §8.5 ladder: a slice whose meta groups total 1 extent grows by 1.
+	// The meta ladder of architecture.md, GrowSlice: a slice whose meta groups
+	// total 1 extent grows by 1.
 	if query := h.rops.allQueries()[0]; query.candExt != 1 {
 		t.Fatalf("scan = %+v, want the ladder ext_cnt 1", query)
 	}
@@ -1898,8 +1908,8 @@ func TestReactionGrowNeedsOneCandidatePerLeg(t *testing.T) {
 
 // reactPendingDataGrow puts the fixture slice into AR6's PENDING data state:
 // a second data group exists in etcd but the pool still reports the pre-grow
-// total, exactly as it does while the CN defers the grow ([D15], §10.4). It
-// returns the reported data total.
+// total, exactly as it does while the CN defers the grow ([D15];
+// architecture.md, Automatic reactions). It returns the reported data total.
 func reactPendingDataGrow(t *testing.T, h *reactHarness) uint64 {
 	t.Helper()
 	h.slice().DataGrpList = append(h.slice().DataGrpList, reactGroup(
@@ -1911,8 +1921,9 @@ func reactPendingDataGrow(t *testing.T, h *reactHarness) uint64 {
 
 // TestReactionPendingGrowDoesNotBlockThePass pins AR6's "while pending, no
 // grow OF THAT KIND starts" against AR2's one-action rule: a grow that is not
-// APPLICABLE — pending, or capped by the §8.5 meta ladder — is not an action,
-// so it holds back neither the pool's other grow kind nor AR7 and AR8.
+// APPLICABLE — pending, or capped by the meta ladder of architecture.md,
+// GrowSlice — is not an action, so it holds back neither the pool's other grow
+// kind nor AR7 and AR8.
 //
 // Without this the deferral is self-locking: the one reaction that can clear a
 // grow the CN deferred on a provisioning leg is AR8 on that very group, and it
@@ -1975,8 +1986,9 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 	t.Run("leg repair while the meta ladder is capped", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.dnCands(reactDnC)
-		// 256 × 64 MiB = the §8.5 16 GiB dm-thin metadata ceiling: the meta
-		// grow can never run again for this slice.
+		// 256 × 64 MiB = the 16 GiB dm-thin metadata ceiling of
+		// architecture.md, GrowSlice: the meta grow can never run again for
+		// this slice.
 		h.slice().MetaGrpList = []*pb.Group{reactGroup(
 			t, reactMetaGrp, 256,
 			[]uint64{reactMetaLegA, reactMetaLegB},
@@ -1997,11 +2009,11 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 	t.Run("leg repair while the data group list is full", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.dnCands(reactDnC, reactDnD)
-		// The §8.5 group ceiling: the data list already holds
-		// MaxGrpCntPerSlice groups, so no data grow can ever run again for
-		// this slice. The pool reports every group's blocks, more than the
-		// pending rule's sum over all but the newest, so the grow is not
-		// pending either: the ceiling is the only thing holding it.
+		// The group ceiling of architecture.md, GrowSlice: the data list
+		// already holds MaxGrpCntPerSlice groups, so no data grow can ever run
+		// again for this slice. The pool reports every group's blocks, more
+		// than the pending rule's sum over all but the newest, so the grow is
+		// not pending either: the ceiling is the only thing holding it.
 		for idx := 1; idx < common.MaxGrpCntPerSlice; idx++ {
 			id := uint64(5000 + 10*idx)
 			h.slice().DataGrpList = append(h.slice().DataGrpList, reactGroup(
@@ -2030,8 +2042,8 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 	t.Run("meta grows while the data group list is full", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.dnCands(reactDnC, reactDnD)
-		// The §8.5 group ceiling is per list: a data list at
-		// MaxGrpCntPerSlice holds back no metadata grow, and metadata
+		// The group ceiling of architecture.md, GrowSlice, is per list: a data
+		// list at MaxGrpCntPerSlice holds back no metadata grow, and metadata
 		// filling up puts the pool into needs_check.
 		for idx := 1; idx < common.MaxGrpCntPerSlice; idx++ {
 			id := uint64(5000 + 10*idx)
@@ -2080,7 +2092,8 @@ func TestReactionPreconditionSkips(t *testing.T) {
 
 // TestReactionReplaceCntlrBlackList pins AR7's black list and its spCnAddrs:
 // the old CN is excluded even though the node itself is healthy, and the SP's
-// other cntlrs' CNs are handed over as the §6.4 exclusion.
+// other cntlrs' CNs are handed over as the exclusion of architecture.md,
+// Finding CN candidates.
 func TestReactionReplaceCntlrBlackList(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(700)
@@ -2101,9 +2114,9 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 	if query.candExt != 3 {
 		t.Fatalf("candExt = %d, want the SP footprint 3", query.candExt)
 	}
-	// The cluster's STORED alloc_conf.cn_batch_size (§7). The fixture stores a
-	// different value in each of the two batch-size members, so this also pins
-	// WHICH one a cn scan reads.
+	// The cluster's STORED alloc_conf.cn_batch_size (architecture.md, Common
+	// validation). The fixture stores a different value in each of the two
+	// batch-size members, so this also pins WHICH one a cn scan reads.
 	if query.candCnt != reactCnBatch {
 		t.Fatalf("candCnt = %d, want the stored cn_batch_size", query.candCnt)
 	}
@@ -2123,12 +2136,13 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 }
 
 // TestReactionReplaceCntlrExcludesCntlrLocations pins AR7's tier-1 exclusion
-// (§6.5): the cn scan carries the locations of the SP's OTHER cntlrs' CNs,
-// read from the pass's own snapshot of the node records (MD3) rather than from
-// a second etcd round-trip, so the replacement lands outside the failure
-// domains the surviving cntlrs occupy whenever tier 1 finds a CN. The old
-// cntlr adds no location of its own — it is the one leaving — so its domain is
-// excluded only through a survivor that shares it.
+// (architecture.md, Per-operation allocation): the cn scan carries the
+// locations of the SP's OTHER cntlrs' CNs, read from the pass's own snapshot of
+// the node records (MD3) rather than from a second etcd round-trip, so the
+// replacement lands outside the failure domains the surviving cntlrs occupy
+// whenever tier 1 finds a CN. The old cntlr adds no location of its own — it is
+// the one leaving — so its domain is excluded only through a survivor that
+// shares it.
 func TestReactionReplaceCntlrExcludesCntlrLocations(t *testing.T) {
 	build := func(t *testing.T, locA string, locB string) *reactHarness {
 		t.Helper()
@@ -2181,8 +2195,9 @@ func TestReactionReplaceCntlrExcludesCntlrLocations(t *testing.T) {
 	})
 
 	t.Run("the default location is the addr_port", func(t *testing.T) {
-		// The §8.3 default makes the exclusion the same CN spCnAddrs already
-		// excludes, which is AR7's behavior before the two tiers covered it.
+		// The default of architecture.md, Controller nodes, makes the exclusion
+		// the same CN spCnAddrs already excludes, which is AR7's behavior
+		// before the two tiers covered it.
 		h := build(t, reactCnA, reactCnB)
 		h.pass()
 		wantScan(t, h, []string{reactCnA})
@@ -2203,9 +2218,10 @@ func TestReactionReplaceCntlrExcludesCntlrLocations(t *testing.T) {
 	})
 }
 
-// TestReactionReplaceSolePrimary pins §0 item 16: the primary of an SP with no
-// failover candidate is replaced by a new PRIMARY, and AR5's no-candidate
-// record is emitted first — the one skip that does not end the pass.
+// TestReactionReplaceSolePrimary pins AR7's sole-primary variant: the primary
+// of an SP with no failover candidate is replaced by a new PRIMARY, and AR5's
+// no-candidate record is emitted first — the one skip that does not end the
+// pass.
 func TestReactionReplaceSolePrimary(t *testing.T) {
 	state := reactFixture(t)
 	state.Conf.CntlrIdList = []uint64{reactCntlrA}
@@ -2721,8 +2737,9 @@ func TestReactionLegRepairCase1(t *testing.T) {
 		if query.candExt != 2 {
 			t.Fatalf("candExt = %d, want the group's ext_cnt", query.candExt)
 		}
-		// The cluster's STORED alloc_conf.dn_batch_size (§7), which is not the
-		// constant a substitution would produce.
+		// The cluster's STORED alloc_conf.dn_batch_size (architecture.md,
+		// Common validation), which is not the constant a substitution would
+		// produce.
 		if query.candCnt != reactDnBatch {
 			t.Fatalf("candCnt = %d, want the stored dn_batch_size",
 				query.candCnt)
@@ -2900,7 +2917,7 @@ func TestReactionLegRepairSkips(t *testing.T) {
 // actually repairable.
 //
 // Every one of them lasts: a two-sided leg has a user migration in flight
-// (hours), a full spare list is an operator event (§0 item 17), a pending
+// (hours), a full spare list is an operator event (AR8 step 4), a pending
 // spare stays pending for up to leg_unhealthy while it reads ERROR and for
 // good if the primary never reports it, and a spare whose DN failed while it
 // zeroed stays unprovisioned until that DN finishes zeroing it or an operator
@@ -3289,9 +3306,9 @@ func TestReactionSpareReadiness(t *testing.T) {
 	})
 }
 
-// TestReactionParkedLegIsNeverRepaired pins §0 item 17: only leg_list legs are
-// repaired, so the leg parked by a previous switch — err_epoch and all — is
-// left alone.
+// TestReactionParkedLegIsNeverRepaired pins AR8 steps 1 and 4: only leg_list
+// legs are repaired, so the leg parked by a previous switch — err_epoch and all
+// — is left alone.
 func TestReactionParkedLegIsNeverRepaired(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
@@ -3309,9 +3326,10 @@ func TestReactionParkedLegIsNeverRepaired(t *testing.T) {
 }
 
 // TestReactionSpareCreateExcludesGroupLocations pins AR8 step 3's tier-1
-// exclusion (§6.5): the scan carries the DNs of every leg and spare of the
-// group AND their locations, read from the pass's own snapshot of the node
-// records (MD3) rather than from a second etcd round-trip.
+// exclusion (architecture.md, Per-operation allocation): the scan carries the
+// DNs of every leg and spare of the group AND their locations, read from the
+// pass's own snapshot of the node records (MD3) rather than from a second etcd
+// round-trip.
 func TestReactionSpareCreateExcludesGroupLocations(t *testing.T) {
 	build := func(t *testing.T, locA string, locB string) *reactHarness {
 		t.Helper()
@@ -3339,7 +3357,7 @@ func TestReactionSpareCreateExcludesGroupLocations(t *testing.T) {
 		// The tier-2 trigger is the ONE DN this step places, never the
 		// oversampled candCnt: with dn_batch_size = 16 no realistic cluster
 		// fills a batch out of one domain each, and tier 1 would be discarded
-		// every time (§6.5).
+		// every time (architecture.md, Per-operation allocation).
 		if queries[0].requiredCnt != 1 {
 			t.Errorf("required_cnt = %d, want 1", queries[0].requiredCnt)
 		}
@@ -3364,8 +3382,9 @@ func TestReactionSpareCreateExcludesGroupLocations(t *testing.T) {
 	})
 
 	t.Run("the default location is the addr_port", func(t *testing.T) {
-		// The §8.2 default makes the exclusion degenerate to the DN black
-		// list, which is AR8's behavior before the two tiers existed.
+		// The default of architecture.md, Disk nodes, makes the exclusion
+		// degenerate to the DN black list, which is AR8's behavior before the
+		// two tiers existed.
 		h := build(t, reactDnA, reactDnB)
 		h.pass()
 		h.wantOps("create_spare")
@@ -3400,13 +3419,14 @@ func TestReactionPassNeedsClusterConf(t *testing.T) {
 	h.wantApplied()
 }
 
-// TestReactionPassRefusesAnInvalidConf checks the §7 pass gate. Both stored
-// confs are needed and both are checked before the pass is built: every
-// allocating reaction computes with the cluster's extent_size and batch sizes,
-// and AR6 reads low_water_mark_pct and data_block_size straight off the SP's
-// own bdev_conf. Either one unusable makes the pass a complete no-op — no
-// candidate scan, no model op, no `reaction applied` and no `reaction skipped`
-// — with one Error record naming the field.
+// TestReactionPassRefusesAnInvalidConf checks the pass gate (architecture.md,
+// Common validation). Both stored confs are needed and both are checked before
+// the pass is built: every allocating reaction computes with the cluster's
+// extent_size and batch sizes, and AR6 reads low_water_mark_pct and
+// data_block_size straight off the SP's own bdev_conf. Either one unusable
+// makes the pass a complete no-op — no candidate scan, no model op, no
+// `reaction applied` and no `reaction skipped` — with one Error record naming
+// the field.
 //
 // The fixture is set up to WANT a reaction (an unhealthy primary, a breached
 // pool), so a pass that did nothing because there was nothing to do could not

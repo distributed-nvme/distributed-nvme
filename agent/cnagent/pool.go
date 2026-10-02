@@ -41,7 +41,8 @@ func poolSegments(grps []*grpPlan) []dmSegment {
 // A grown group whose sides are still provisioning is simply not in the
 // effective lists yet ([D15]): the concats and the pool keep their old size, the
 // serving pool keeps reporting OK with its raw `dmsetup status` details — the
-// §10.4 auto-grow parses them, so PROVISIONING must never reach this row — and
+// thin-pool auto-grow (architecture.md, Automatic reactions) parses them, so
+// PROVISIONING must never reach this row — and
 // the reload happens on the pass where the group clears.
 func (s *CnAgentServer) ensureSlice(
 	ctx context.Context,
@@ -71,8 +72,10 @@ func (s *CnAgentServer) ensureSlice(
 			poolKey, sp.poolFinalName, err.Error())
 		return false
 	}
-	// §9.5/CN28: details is the raw `dmsetup status` line — the worker parses
-	// the metadata and data used/total out of it for the §10.4 auto-grow.
+	// CN28 (architecture.md, Live-state reporting): details is the raw
+	// `dmsetup status` line — the worker parses the metadata and data
+	// used/total out of it for the thin-pool auto-grow (architecture.md,
+	// Automatic reactions).
 	raw, err := s.dm.Status(ctx, sp.poolFinalName)
 	if err != nil {
 		info.SliceIdToDmPool[sp.sliceId] = st.tracker.Err(
@@ -85,7 +88,8 @@ func (s *CnAgentServer) ensureSlice(
 }
 
 // poolArgs is the dm thin-pool table's leading arguments. A fresh pool needs
-// its metadata to read zero, and it provably does: the §9.4 protocol writes
+// its metadata to read zero, and it provably does: the protocol of
+// architecture.md, Side provisioning protocol, writes
 // zeros over the whole side before its first export and opens the
 // `provisioned` gate only when the last extent's bit is set ([D15]) — the same
 // guarantee that funds CN12's `--assume-clean`, and the reason a recycled
@@ -174,16 +178,17 @@ func (s *CnAgentServer) ensurePool(
 // ensureThin converges one td's thin volume in one slice. The pool message
 // that creates the thin device id is sent only when the dm device is absent
 // *and* the td is a plain one the control plane has not seen materialized —
-// `!created && ori_id == 0` (U4-S1). Both clauses are re-derivable from the
+// `!created && ori_id == 0` (CN14). Both clauses are re-derivable from the
 // request alone, which is what let the pre-pass handoff map go: every message
 // of an uncreated snapshot belongs to the build() pre-pass, and a created td
 // is never messaged by anyone.
 //
 // `created` means the sp-worker has seen this td's thin volume OK in every
-// slice (§10.3), so the id exists in every slice pool and a bare `dmsetup
+// slice (architecture.md, sp role), so the id exists in every slice pool and a
+// bare `dmsetup
 // create` attaches it. When that fails because a pool no longer holds the
 // id, the row reads RES_STATUS_ERROR and no later converge messages either
-// (U4-S2): pool-metadata loss surfaces as an intervention event instead of a
+// (CN14): pool-metadata loss surfaces as an intervention event instead of a
 // fresh, empty volume silently taking over a live dev_id.
 //
 // For an uncreated plain td the old rule stands: a message for an id the
@@ -223,7 +228,8 @@ func (s *CnAgentServer) ensureThin(
 // createThinId sends one slice's `create_thin`. Its only caller is ensureThin
 // and only for an uncreated plain td: an uncreated snapshot's `create_snap`
 // belongs to the build() pre-pass, which is the only caller of createSnapId
-// (U4-S3), and a created td of either kind is never messaged at all (U4-S2).
+// (CN14, case 3), and a created td of either kind is never messaged at all
+// (CN14).
 func (s *CnAgentServer) createThinId(
 	ctx context.Context,
 	tp *tdPlan,

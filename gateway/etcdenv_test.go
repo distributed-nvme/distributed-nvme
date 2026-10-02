@@ -27,16 +27,17 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is gateway.md §9.1 and §9.4: the package's one etcd server, the
-// one in-process fake agent, and the handful of helpers every other
-// gateway/*_test.go builds its fixture out of. Nothing here tests a handler
-// beyond what it takes to prove the fixture itself is sound.
+// This file is the package's one etcd server (dnv-worker.md MD9, EU7), the one
+// in-process fake agent (gateway.md AG1 to AG4), and the handful of helpers
+// every other gateway/*_test.go builds its fixture out of. Nothing here tests a
+// handler beyond what it takes to prove the fixture itself is sound.
 //
 // The etcd half is the shape of model/etcdenv_test.go copied verbatim,
 // deliberately duplicated rather than factored into a package of its own
 // (MD9/EU7): it is a test fixture, and a shared one would put a third package
 // between gateway and etcdutil for no gain. Everything goes through etcdutil,
-// so the gateway's tests import no etcd client either (layout.md §3).
+// so the gateway's tests import no etcd client either (layout.md, Dependency
+// rules).
 //
 // CONTRACT for the rest of the package — these names and signatures are what
 // the other test files are written against:
@@ -140,7 +141,8 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// The deployment requirement of gateway.md §2.1, not a tuning knob:
+		// The deployment requirement of gateway.md, Additions to
+		// `common/constants.go`, not a tuning knob:
 		// CreateStoragePool's maximum shape is 967 compares — the transaction
 		// the number is SIZED by — the sp drain's D2 batch 486 (SPD13) and a
 		// created-flip transaction of MaxFlipCreatedPerTxn tds, 514 (RW19),
@@ -204,13 +206,13 @@ func waitForEtcd(endpoint string) error {
 // testSockDir is the directory fakeAddrPort puts its unix sockets in, made by
 // TestMain so that every socket of the run dies with the run. It is short on
 // purpose: a unix socket path is capped at ~104 bytes by the kernel and an
-// addr_port at common.MaxStrSize (64) by §7, and both caps apply to the whole
-// "unix://" target the gateway dials.
+// addr_port at common.MaxStrSize (64) by architecture.md, Common validation,
+// and both caps apply to the whole "unix://" target the gateway dials.
 var testSockDir string
 
 func TestMain(m *testing.M) {
 	// The gateway emits an LG2 record per RPC and etcdutil one per call
-	// (log.md §5.3). The tests assert behavior, not logs, so the records go
+	// (log.md, etcd). The tests assert behavior, not logs, so the records go
 	// nowhere and keep the test output readable.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	// findEtcdBin first, because a misconfigured ETCD_BIN exits before
@@ -274,16 +276,17 @@ func newTestClient(t *testing.T) *etcdutil.Client {
 }
 
 // testCid gives each test its own cluster id, so that the shared etcd needs no
-// cleanup between tests: two clusters never share a key (§5.2). It is for
-// tests that write §5 keys directly; a test that goes through CreateCluster
+// cleanup between tests: two clusters never share a key (architecture.md,
+// cluster_id derivation). It is for tests that write keys of architecture.md,
+// etcd data model, directly; a test that goes through CreateCluster
 // gets the same isolation from a per-test cluster NAME, because the handler
 // folds a fresh creation_epoch into the id it mints.
 func testCid(t *testing.T) uint64 {
 	t.Helper()
 	// The creation epoch is a per-invocation counter, not 0: ClusterId folds
-	// it in (§5.2), so every call — including the second and third iteration
-	// of the same test under `go test -count=3`, and two tests running in
-	// parallel — gets its own key space.
+	// it in (architecture.md, cluster_id derivation), so every call — including
+	// the second and third iteration of the same test under `go test -count=3`,
+	// and two tests running in parallel — gets its own key space.
 	return model.ClusterId(t.Name(), testCidSeq.Add(1))
 }
 
@@ -308,7 +311,7 @@ func mustPut(
 }
 
 // ---------------------------------------------------------------------------
-// The in-process agent (§9.4)
+// The in-process agent (AG1 to AG4)
 // ---------------------------------------------------------------------------
 //
 // One fake serves BOTH generated agent services on one listener, because the
@@ -383,8 +386,8 @@ func (f *fakeAgent) setFail(err error) {
 }
 
 // setBlock makes every method hang until the returned func is called or the
-// caller's deadline expires — the §9.4 timeout path. The unblock func is
-// idempotent so a test can defer it and still call it explicitly.
+// caller's deadline expires — the agent timeout path (AG2, AG3). The unblock
+// func is idempotent so a test can defer it and still call it explicitly.
 func (f *fakeAgent) setBlock() func() {
 	block := make(chan struct{})
 	f.mu.Lock()
@@ -395,7 +398,7 @@ func (f *fakeAgent) setBlock() func() {
 }
 
 // setInfo installs the *Info messages the Inspect* RPCs must pass through
-// unchanged (§9.4). A nil argument leaves that one alone.
+// unchanged. A nil argument leaves that one alone.
 func (f *fakeAgent) setInfo(
 	dnInfo *pb.DnInfo,
 	sideInfo *pb.SideInfo,
@@ -483,9 +486,9 @@ func (f *fakeDnServer) GetDnInfo(
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
 	// The revision the agent reports is the one every Inspect* reply MUST
-	// carry back to the client (architecture.md §8.2); it is a distinctive
-	// number here so that a handler which regressed to the stored rev key
-	// would be caught.
+	// carry back to the client (architecture.md, Disk nodes); it is a
+	// distinctive number here so that a handler which regressed to the stored
+	// rev key would be caught.
 	return &pb.GetDnInfoReply{
 		Revision: fakeAgentRevision,
 		DnInfo:   f.agent.dnInfo,
@@ -581,8 +584,9 @@ func (f *fakeCnServer) GetLegBm(
 }
 
 // fakeAgentRevision is the `revision` every fake *Info reply carries, and —
-// architecture.md §8.2/§8.6 — the number every Inspect* reply MUST carry back
-// as its `applied_revision`. A rev key starts at 1 and is bumped one at a
+// architecture.md, Disk nodes and Cntlrs — the number every Inspect* reply
+// MUST carry back as its `applied_revision`. A rev key starts at 1 and is
+// bumped one at a
 // time, so a value no plausible bump sequence reaches makes a handler that
 // regressed to the stored revision unmistakable.
 const fakeAgentRevision = uint64(0xfa5e)
@@ -603,7 +607,8 @@ func fakeAddrPort(t *testing.T, name string) string {
 	addrPort := "unix://" + path
 	if len(addrPort) > common.MaxStrSize {
 		t.Fatalf(
-			"addr_port %q is %d bytes, over the §7 maximum of %d: "+
+			"addr_port %q is %d bytes, over the maximum of %d "+
+				"(architecture.md, Common validation): "+
 				"set TMPDIR to something shorter",
 			addrPort, len(addrPort), common.MaxStrSize)
 	}
@@ -658,10 +663,10 @@ func startFakeAgent(t *testing.T, addrPort string, size uint64) *fakeAgent {
 // Handler-test helpers
 // ---------------------------------------------------------------------------
 
-// newTestServer builds a Server over the shared etcd, with no listener: §9.3
-// drives the handlers as plain method calls, so nothing but the gRPC
-// interceptors is left out and every assertion is about etcd state and the
-// reply message.
+// newTestServer builds a Server over the shared etcd, with no listener: the
+// handler tests drive the handlers as plain method calls, so nothing but the
+// gRPC interceptors is left out and every assertion is about etcd state and
+// the reply message.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	return NewServer(newTestClient(t))
@@ -670,9 +675,9 @@ func newTestServer(t *testing.T) *Server {
 // mustCluster creates one cluster and returns its cluster_id.
 //
 // name is the caller's, not defaulted: the cluster is a test's key space
-// (§5.2), and two tests sharing the literal "default" would share every key
-// under it. A test that wants the defaulting path exercises it by passing ""
-// to the handler under test, not here.
+// (architecture.md, cluster_id derivation), and two tests sharing the literal
+// "default" would share every key under it. A test that wants the defaulting
+// path exercises it by passing "" to the handler under test, not here.
 func mustCluster(t *testing.T, s *Server, name string) uint64 {
 	t.Helper()
 	reply, err := s.CreateCluster(context.Background(),
@@ -687,7 +692,8 @@ func mustCluster(t *testing.T, s *Server, name string) uint64 {
 // with mustPut: the message CreateCluster would have STORED, not the request it
 // was handed.
 //
-// Every defaultable member of a stored ClusterConf is concrete (§7): the
+// Every defaultable member of a stored ClusterConf is concrete
+// (architecture.md, Common validation): the
 // handler resolves the request once, on the write path, and every reader
 // afterwards refuses a zero through model.ValidateClusterConf rather than
 // substituting one. A fixture that wrote a sparse conf would therefore not be
@@ -698,8 +704,10 @@ func mustCluster(t *testing.T, s *Server, name string) uint64 {
 // the handlers a test is usually about.
 //
 // extentSize and poolBlockSize are the two members a fixture actually chooses:
-// the §6.1 allocation unit every ext_cnt is counted in, and the §3.6 pool block
-// every meta_blocks/data_blocks is computed in. Everything else is the concrete
+// the allocation unit every ext_cnt is counted in (architecture.md, Size →
+// extents), and the pool block every meta_blocks/data_blocks is computed in
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block). Everything else is the concrete
 // value the handler would have resolved. A caller with no opinion passes
 // common.DefaultDnExtSize and common.DefaultDmPoolDataBlockSize — there is no
 // "unset" rung left on this side of the write, so a zero would be a bad conf
@@ -740,8 +748,9 @@ func testStoredClusterConf(
 	}
 }
 
-// testTrConf is the transport conf a fixture node is registered with. §8.2
-// refuses an empty one, and making it distinct per node is what lets a
+// testTrConf is the transport conf a fixture node is registered with.
+// CreateDiskNode (architecture.md, Disk nodes) refuses an empty one, and
+// making it distinct per node is what lets a
 // CdcEntry or a Side be checked field by field against the node it names.
 func testTrConf(addrPort string) *pb.NvmeTrConf {
 	return &pb.NvmeTrConf{
@@ -758,7 +767,8 @@ func testTrConf(addrPort string) *pb.NvmeTrConf {
 // The agent comes first because CreateDiskNode probes GetDnSize before it
 // writes anything (AG1): without a listener the RPC is ABORTED and no DnConf
 // exists. size is the byte count the fake reports, so a caller sizes a node in
-// bytes and lets §6.1's floor division decide its total_ext_cnt.
+// bytes and lets the floor division of architecture.md, Size → extents, decide
+// its total_ext_cnt.
 func mustDn(
 	t *testing.T,
 	s *Server,
@@ -784,8 +794,8 @@ func mustDn(
 
 // mustCn is mustDn for a controller node. size is the budget the fake reports
 // to GetCnSize, which cnCapBudget floors at MinCnCap and caps at MaxCnCap
-// before §6.1 divides it — so a caller that wants a predictable
-// total_ext_cnt passes something inside that window.
+// before architecture.md, Size → extents, divides it — so a caller that wants
+// a predictable total_ext_cnt passes something inside that window.
 func mustCn(
 	t *testing.T,
 	s *Server,
@@ -886,8 +896,8 @@ func wantCode(t *testing.T, err error, want codes.Code, label string) {
 // TestFakeAgentAnswersAndSeesTheTraceId pins the two properties every
 // agent-path test rests on: the fake really serves both generated services
 // over a real connection, and the trace id the caller put in its ctx arrives
-// at the far end (T3, grpc.md §4). It needs no etcd, so it is one of the tests
-// that still run when the suite skips.
+// at the far end (T3; grpc.md, Wiring). It needs no etcd, so it is one of the
+// tests that still run when the suite skips.
 func TestFakeAgentAnswersAndSeesTheTraceId(t *testing.T) {
 	addrPort := fakeAddrPort(t, "trace")
 	agent := startFakeAgent(t, addrPort, 7<<30)
@@ -953,8 +963,8 @@ func TestFakeAgentFailurePropagates(t *testing.T) {
 
 // TestTestCidIsolatesKeySpaces pins the fixture rule that makes the shared
 // etcd need no cleanup: testCid folds a per-invocation counter into the id
-// (§5.2), so two calls — the same test under -count=2 included — never share
-// a key prefix. It needs no etcd.
+// (architecture.md, cluster_id derivation), so two calls — the same test under
+// -count=2 included — never share a key prefix. It needs no etcd.
 func TestTestCidIsolatesKeySpaces(t *testing.T) {
 	first := testCid(t)
 	second := testCid(t)
@@ -967,8 +977,9 @@ func TestTestCidIsolatesKeySpaces(t *testing.T) {
 }
 
 // TestFixtureBuildsACluster is the fixture end to end: mustCluster,
-// mustDn and mustCn must leave exactly the §5 keys CreateCluster,
-// CreateDiskNode and CreateControllerNode are specified to write, and the tok
+// mustDn and mustCn must leave exactly the keys (architecture.md, etcd data
+// model) CreateCluster, CreateDiskNode and CreateControllerNode are specified
+// to write, and the tok
 // helpers must return the revisions those RPCs stamped. Everything else in the
 // package builds on this, so it is asserted key by key rather than through the
 // Get* replies alone.
@@ -1010,7 +1021,7 @@ func TestFixtureBuildsACluster(t *testing.T) {
 
 	dnAddr := fakeAddrPort(t, "dn")
 	// 100 GiB against the default 1 GiB extent is 100 extents, and free ==
-	// total on a node that hosts nothing yet (§8.2).
+	// total on a node that hosts nothing yet (architecture.md, Disk nodes).
 	dnId := mustDn(t, s, name, dnAddr, "rack-1", 100<<30)
 	dn := &pb.DnConf{}
 	if found, err := s.cli.Get(
@@ -1046,7 +1057,7 @@ func TestFixtureBuildsACluster(t *testing.T) {
 
 	cnAddr := fakeAddrPort(t, "cn")
 	// 1 TiB is inside [MinCnCap, MaxCnCap], so cnCapBudget passes it through
-	// and §6.1 turns it into 1024 extents.
+	// and architecture.md, Size → extents, turns it into 1024 extents.
 	cnId := mustCn(t, s, name, cnAddr, "rack-2", 1<<40)
 	cn := &pb.CnConf{}
 	if found, err := s.cli.Get(
@@ -1075,8 +1086,8 @@ func TestFixtureBuildsACluster(t *testing.T) {
 
 // TestFixtureCodeMapping is wantCode against one refusal of every GW7 class
 // the fixture RPCs can raise, which pins both the helper and the mapping the
-// rest of the package will assert with it. Each row also proves the §0 #17 /
-// GW6 ordering it belongs to: the ABORTED row sends a dn_rev message that is
+// rest of the package will assert with it. Each row also proves the GW6
+// ordering it belongs to: the ABORTED row sends a dn_rev message that is
 // PRESENT and one ahead of the stored revision, because GW6 compares only the
 // token a request actually carries. A request that sends no dn_rev at all
 // skips the comparison instead of being refused, and is covered — as a
@@ -1090,7 +1101,7 @@ func TestFixtureCodeMapping(t *testing.T) {
 	mustDn(t, s, name, dnAddr, "rack-1", 100<<30)
 
 	// wantMsg, where a row sets it, is the exact status message: the ABORTED
-	// row is GW6's, and "stale revision" (§0 #7) is the whole of what a token
+	// row is GW6's, and "stale revision" is the whole of what a token
 	// mismatch is allowed to say, so the row asserts the sentence and not only
 	// the class.
 	for _, tc := range []struct {
@@ -1209,9 +1220,10 @@ func TestFixtureCodeMapping(t *testing.T) {
 //
 //   - No dn_rev in the request at all: the comparison is skipped, and
 //     UpdateDiskNodeDisabled is judged only by its own preconditions — so it
-//     succeeds, flips the flag and drops the capacity key (§5.6), while the
-//     stored DnRev stays where it was, because Update*Disabled is one of the
-//     mutations §5.5 exempts from the bump.
+//     succeeds, flips the flag and drops the capacity key (architecture.md,
+//     Capacity index keys), while the stored DnRev stays where it was, because
+//     Update*Disabled is one of the mutations architecture.md, Revision keys and
+//     the sync fan-out, exempts from the bump.
 //   - A dn_rev message that IS there but carries revision 0 — whether written
 //     out as &pb.DnRev{} or as the echoed addr_port with the revision field
 //     left at its zero value — is a real token, not an omission, and is
@@ -1300,8 +1312,9 @@ func TestFixtureAbsentTokenSkipsTheRevisionCheck(t *testing.T) {
 	if !dn.GetDisabled() {
 		t.Errorf("the tokenless UpdateDiskNodeDisabled must have written")
 	}
-	// A disabled DN implies no capacity key (§5.6), so MaintainDnCapacity
-	// deleting it is the second, independent witness that the mutation ran.
+	// A disabled DN implies no capacity key (architecture.md, Capacity index
+	// keys), so MaintainDnCapacity deleting it is the second, independent witness
+	// that the mutation ran.
 	if found, err := s.cli.Get(
 		ctx, capKey, &pb.DnCapacity{},
 	); err != nil {
@@ -1310,7 +1323,8 @@ func TestFixtureAbsentTokenSkipsTheRevisionCheck(t *testing.T) {
 		t.Errorf("dn_capacity %s survived the disable", capKey)
 	}
 	// Skipping the comparison is not bumping: Update*Disabled never bumps
-	// (§5.5), so the token GetDiskNode hands out is still the fixture's 1.
+	// (architecture.md, Revision keys and the sync fan-out), so the token
+	// GetDiskNode hands out is still the fixture's 1.
 	if got := dnTok(t, s, name, dnAddr); got != 1 {
 		t.Errorf("dnTok after the tokenless disable: got %d, want 1", got)
 	}
@@ -1341,7 +1355,8 @@ func TestFixtureAbsentTokenSkipsTheRevisionCheck(t *testing.T) {
 }
 
 // testClusterEpoch reads back one cluster's creation_epoch, which is the only
-// stored half of the derived cluster_id (§5.2).
+// stored half of the derived cluster_id
+// (architecture.md, cluster_id derivation).
 func testClusterEpoch(t *testing.T, s *Server, name string) uint64 {
 	t.Helper()
 	cc := &pb.ClusterConf{}

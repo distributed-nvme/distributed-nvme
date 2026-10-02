@@ -22,7 +22,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The invocation from cdc.md §6 (architecture.md §13, amended per §10).
+// An example invocation of the CM1 flags.
 var exampleArgs = []string{
 	"--etcd-endpoints", "192.168.0.10:2379,192.168.0.11:2379",
 	"--range", "0,1,2,3,4,5,6,7",
@@ -245,7 +245,7 @@ func TestParseRanges(t *testing.T) {
 }
 
 // CM2: every --range spelling that is not a single lower-case hex digit is a
-// refusal, because a mis-parsed digit is a silent coverage gap (§0 #3).
+// refusal, because a mis-parsed digit is a silent coverage gap (DS2).
 func TestParseRangesRejects(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -486,9 +486,9 @@ func TestZeroDialTimeoutIsPassedThrough(t *testing.T) {
 // CM2/CM3 — the happy path and the cdc.Config it builds
 // ---------------------------------------------------------------------------
 
-// CM2/CM3: the §6 example parses, every value arrives through viper, and the
-// options become exactly the cdc.Config of the CM1 table — the endpoints
-// travel along for the `cdc starting` record (LG, CM4).
+// CM2/CM3: the example invocation parses, every value arrives through viper,
+// and the options become exactly the cdc.Config of the CM1 table — the
+// endpoints travel along for the `cdc starting` record (LG, CM4).
 func TestExampleInvocationBuildsCdcConfig(t *testing.T) {
 	opts := mustOptions(t, exampleArgs)
 	got := cdc.Config{
@@ -514,7 +514,7 @@ func TestExampleInvocationBuildsCdcConfig(t *testing.T) {
 	}
 	// CM1 owns no rescan override: WV5's cadence is the package default.
 	if got.RescanInterval != 0 {
-		t.Errorf("RescanInterval = %v, want 0 (only the §8 tests set it)",
+		t.Errorf("RescanInterval = %v, want 0 (only the unit tests set it)",
 			got.RescanInterval)
 	}
 }
@@ -549,8 +549,9 @@ func reservePort(t *testing.T) string {
 	return port
 }
 
-// startingRecord is the `cdc starting` record of §7 as CM3 hands its fields
-// over: every value below comes from the cdc.Config run built.
+// startingRecord is the `cdc starting` record of cdc.md, Log records, as CM3
+// hands its fields over: every value below comes from the cdc.Config run
+// built.
 type startingRecord struct {
 	Msg       string   `json:"msg"`
 	Ranges    []string `json:"ranges"`

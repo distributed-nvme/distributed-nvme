@@ -20,24 +20,26 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is gateway.md §9.3 for the volume half of the API: architecture.md
-// §8.7 (thin devices), §8.8 (subsystems and namespaces), §8.9 (clones), §8.10
-// (transfers), §8.11 (migrations) and §8.12 (spare legs).
+// This file is the handler tests (gateway.md GW5 to GW12) for the volume half
+// of the API, in architecture.md: Thin devices; Subsystems, namespaces; Clones;
+// Transfers; Migrations; and Spare legs.
 //
 // Every test drives a real Server over the shared etcd of etcdenv_test.go and
 // then asserts the EXACT store state — keys, ids, name lists, capacity keys
-// and the §5.5 revisions — rather than only the reply, because a handler that
-// replies correctly and writes the wrong key set is exactly the bug §9.3 asks
-// these tests to catch. Refusals are asserted the other way round: the code
-// AND the fact that nothing moved, which is the "an error out of the closure
-// aborts the transaction uncommitted" contract (EU4) every §8 precondition
-// rests on.
+// and the revisions of architecture.md, Revision keys and the sync fan-out —
+// rather than only the reply, because a handler that replies correctly and
+// writes the wrong key set is exactly the bug these tests are there to catch.
+// Refusals are asserted the other way round: the code AND the fact that nothing
+// moved, which is the "an error out of the closure aborts the transaction
+// uncommitted" contract (EU4) every precondition of architecture.md,
+// `service Gateway` — RPC specifications, rests on.
 //
 // The fixture is written with plain puts instead of the create RPCs on
 // purpose. CreateDiskNode / CreateControllerNode reach an agent (AG1) and
 // CreateStoragePool runs the allocator, so building the SP through them would
-// make every test below depend on §8.2/§8.4 as well as on the rule it pins;
-// the agent paths have their own tests (§9.4).
+// make every test below depend on architecture.md, Disk nodes and Storage
+// pools, as well as on the rule it pins; the agent paths have their own tests
+// (agentpath_test.go).
 
 // ---------------------------------------------------------------------------
 // The fixture: one md-raid1 SP with two cntlrs and one slice
@@ -55,7 +57,8 @@ const (
 	volSlot    = uint32(3)
 	volSlotAlt = uint32(4)
 
-	// A host-facing subsystem NQN lies outside the dnv namespace (§7); a
+	// A host-facing subsystem NQN lies outside the dnv namespace
+	// (architecture.md, Common validation); a
 	// host NQN and a clone's src_nqn need not, so the other four keep it.
 	volNqn    = "nqn.2024-01.io.example:vol-a"
 	volNqnB   = "nqn.2024-01.io.example:vol-b"
@@ -87,15 +90,18 @@ const (
 	volCnB = "cn-b:9000"
 
 	// The cluster's stored extent size and the SP's stored pool block size.
-	// Like volStripe below, neither is its §7 default (1 GiB and 1 MiB): a
-	// fixture that stored the constant could not tell a handler that READ it
-	// from one that SUBSTITUTED it, since the two would produce the same
-	// number. volSlice's group geometry is §3.6 for these two values.
+	// Like volStripe below, neither is its default under architecture.md, Common
+	// validation (1 GiB and 1 MiB): a fixture that stored the constant could not
+	// tell a handler that READ it from one that SUBSTITUTED it, since the two
+	// would produce the same number. volSlice's group geometry is architecture.md,
+	// Group on-leg layout: meta region, data region, health block, for these two
+	// values.
 	volExtSize   = uint64(4) << 30
 	volPoolBlock = uint64(2) << 20
 	// volStripe is deliberately NOT DefaultDmRaid0StripeSize: the size rule
-	// of §8.7 must be computed from the SP's STORED geometry, so a fixture
-	// that happened to match the constant could not tell the two apart.
+	// of architecture.md, Thin devices, must be computed from the SP's STORED
+	// geometry, so a fixture that happened to match the constant could not tell
+	// the two apart.
 	volStripe     = uint64(128) * 1024
 	volMetaExtCnt = uint64(1)
 	volDataExtCnt = uint64(4)
@@ -108,7 +114,8 @@ const (
 
 // volClusterSeq numbers the cluster names the fixture hands out, so that two
 // tests — and two iterations of one test under -count=N — never share a
-// cluster_id and the shared etcd needs no cleanup (§5.2).
+// cluster_id and the shared etcd needs no cleanup
+// (architecture.md, cluster_id derivation).
 var volClusterSeq atomic.Uint64
 
 // volTrConf is one node's transport configuration. It is derived from the
@@ -128,7 +135,8 @@ func volTrConf(addrPort string) *pb.NvmeTrConf {
 // own — every test creates exactly the objects its rule needs.
 //
 // Its bdev_conf is concrete in every defaultable member, because that is what
-// CreateStoragePool stores (§7) and what the RPCs below read as stored:
+// CreateStoragePool stores (architecture.md, Common validation) and what the
+// RPCs below read as stored:
 // CreateThinDevice refuses a zero in it as an invalid stored conf rather than
 // replacing it, and the others simply compute with whatever is there. The
 // stripe is the exception that proves the rule — volStripe is not the constant
@@ -175,10 +183,13 @@ func volSide(sideId uint64, addrPort string) *pb.Side {
 
 // volSlice is the fixture's single slice: one meta group and one data group,
 // each an md-raid1 pair on dn-a and dn-b. dn-c and dn-d are therefore the only
-// destinations a migration or a spare leg of either group can land on (§6.5),
+// destinations a migration or a spare leg of either group can land on
+// (architecture.md, Per-operation allocation),
 // which is what makes the allocating tests below deterministic.
 //
-// The two groups' block counts are §3.6 for volExtSize / volPoolBlock and the
+// The two groups' block counts are those of architecture.md, Group on-leg
+// layout: meta region, data region, health block, for volExtSize / volPoolBlock
+// and the
 // default 128-block bitmap chunk, so the fixture is a world CreateStoragePool
 // could have written: the 1-extent meta group is 4 GiB / 2 MiB = 2048 pool
 // blocks less 3 meta (md superblock block, one bitmap block for the
@@ -240,7 +251,8 @@ type volEnv struct {
 // newVolEnv writes the whole fixture and returns the environment the tests
 // drive. It skips when no etcd binary is available (EU7).
 //
-// The cluster is name-keyed and its id is derived (§5.2), so a unique name and
+// The cluster is name-keyed and its id is derived
+// (architecture.md, cluster_id derivation), so a unique name and
 // a unique creation_epoch together give the test its own key space; testCid's
 // per-invocation counter is what makes the epoch unique across -count=N.
 func newVolEnv(t *testing.T) *volEnv {
@@ -255,7 +267,8 @@ func newVolEnv(t *testing.T) *volEnv {
 		srv:     NewServer(cli),
 		cluster: name,
 		cid:     model.ClusterId(name, epoch),
-		// What CreateCluster would have stored, concrete throughout (§7): the
+		// What CreateCluster would have stored, concrete throughout
+		// (architecture.md, Common validation): the
 		// migration and spare-leg RPCs below read the bin ladder and the batch
 		// sizes as stored and refuse a zero.
 		cc: testStoredClusterConf(epoch, volExtSize, volPoolBlock),
@@ -299,8 +312,9 @@ func newVolEnv(t *testing.T) *volEnv {
 	return env
 }
 
-// putDn writes one DnConf, the capacity key the §5.6 presence rule implies for
-// it and its DnRev, all consistently.
+// putDn writes one DnConf, the capacity key the presence rule of
+// architecture.md, Capacity index keys, implies for it and its DnRev, all
+// consistently.
 func (e *volEnv) putDn(
 	addrPort string,
 	dnId uint64,
@@ -332,7 +346,8 @@ func (e *volEnv) putDn(
 // putCn writes one CnConf, its capacity key and its CnRev. No RPC of this file
 // charges a CN — a thin device, a subsystem, a clone, a transfer, a migration
 // destination and a spare leg all leave every cntlr's footprint unchanged
-// (§8.4, §8.6, §8.12) — so these records exist only to be asserted UNTOUCHED.
+// (architecture.md, Storage pools, Cntlrs and Spare legs) — so these records
+// exist only to be asserted UNTOUCHED.
 func (e *volEnv) putCn(addrPort string, cnId uint64, shard uint32) {
 	e.t.Helper()
 	cn := &pb.CnConf{
@@ -355,8 +370,9 @@ func (e *volEnv) putCn(addrPort string, cnId uint64, shard uint32) {
 	)
 }
 
-// dnCapKey is the capacity key a DN with that many free extents has (§5.6,
-// §6.2), which is what the allocating tests below assert moved.
+// dnCapKey is the capacity key a DN with that many free extents has
+// (architecture.md, Capacity index keys and DN bins), which is what the
+// allocating tests below assert moved.
 func (e *volEnv) dnCapKey(addrPort string, freeExt uint64) string {
 	e.t.Helper()
 	binIdx, ok := model.DnBinIdx(freeExt, e.cc.GetDnBinConf())
@@ -414,7 +430,8 @@ func (e *volEnv) spRev() uint64 {
 
 // token is the SpRev message a mutator has to carry to be let through right
 // now: GW6 compares only `revision`, and only when the message is there at all,
-// so this is the one value a present token may hold (§5.5, §0 #7).
+// so this is the one value a present token may hold
+// (architecture.md, Revision keys and the sync fan-out).
 func (e *volEnv) token() *pb.SpRev {
 	e.t.Helper()
 	return &pb.SpRev{Revision: e.spRev()}
@@ -587,14 +604,16 @@ func volGrpOf(t *testing.T, slice *pb.Slice, grpId uint64) *pb.Group {
 // volDnSelector pins the allocator to one disk node. Every allocating RPC of
 // this file scans the DN capacity index outside its transaction (GW9) and then
 // PickRandoms from what it found, so a test that wants an EXACT destination
-// has to leave exactly one candidate — which is what a white list does (§6.3).
+// has to leave exactly one candidate — which is what a white list does
+// (architecture.md, Finding DN candidates).
 func volDnSelector(addrPort string) *pb.NodeSelector {
 	return &pb.NodeSelector{WhiteList: []string{addrPort}}
 }
 
 // relocateDn moves one DN into another failure domain. Both copies have to
-// move: the DnConf the §6.5 location exclusion reads, and the copy the
-// capacity-key value carries so that the scan needs no point read ([D5]).
+// move: the DnConf the location exclusion of architecture.md, Per-operation
+// allocation, reads, and the copy the capacity-key value carries so that the
+// scan needs no point read ([D5]).
 func (e *volEnv) relocateDn(addrPort string, location string) {
 	e.t.Helper()
 	dn := e.dn(addrPort)
@@ -605,8 +624,9 @@ func (e *volEnv) relocateDn(addrPort string, location string) {
 }
 
 // setDnFree rewrites one DN's free_ext_cnt and moves its capacity key with it
-// (§5.6). It is how a test decides which candidate the scan sees FIRST: one
-// bin is one descending range over free counts (§6.3), so the emptier DN can
+// (architecture.md, Capacity index keys). It is how a test decides which
+// candidate the scan sees FIRST: one bin is one descending range over free
+// counts (architecture.md, Finding DN candidates), so the emptier DN can
 // only be reached past the fuller one.
 func (e *volEnv) setDnFree(addrPort string, freeExt uint64) {
 	e.t.Helper()
@@ -623,7 +643,7 @@ func (e *volEnv) setDnFree(addrPort string, freeExt uint64) {
 
 // dropDn leaves the cluster without that DN as an allocator sees it: no
 // capacity key, so it is no candidate, and no conf, so it contributes no
-// location either (§6.5).
+// location either (architecture.md, Per-operation allocation).
 func (e *volEnv) dropDn(addrPort string) {
 	e.t.Helper()
 	dn := e.dn(addrPort)
@@ -642,7 +662,8 @@ func (e *volEnv) dropDn(addrPort string) {
 // be the location rule's doing, never the index order's.
 const volDnCFree = volDnFree * 2
 
-// volTwoDomainEnv is the §6.5 two-tier fixture: dn-c joins dn-a's failure
+// volTwoDomainEnv is the two-tier fixture of architecture.md, Per-operation
+// allocation: dn-c joins dn-a's failure
 // domain — dn-a carries a side of every group — so dn-d is the only candidate
 // in a domain of its own, and dn-c is the one the scan would otherwise hand
 // back first.
@@ -662,7 +683,8 @@ func volTwoDomainEnv(t *testing.T) *volEnv {
 }
 
 // volTier1DrawCnt is how often the two tier-1 assertions below re-run against a
-// FRESH fixture. At the gateway the §6.5 requiredCnt is observed only through
+// FRESH fixture. At the gateway the requiredCnt of architecture.md,
+// Per-operation allocation, is observed only through
 // the pick, and PickRandom draws uniformly, so the exact regression the
 // requiredCnt trigger exists to refuse — handing FindDnCandidatesAntiAffine the
 // oversampled scan width (Legs × dn_batch_size) where the DNs to place belong
@@ -677,13 +699,14 @@ func volTwoDomainEnv(t *testing.T) *volEnv {
 const volTier1DrawCnt = 12
 
 // ---------------------------------------------------------------------------
-// §8.7 CreateThinDevice
+// CreateThinDevice (architecture.md, Thin devices)
 // ---------------------------------------------------------------------------
 
-// TestCreateThinDeviceWritesRowAndAdvancesCounters pins §8.7's whole write
-// set: the ThinDevice row (created = false, ori_id 0 for a fresh device), the
-// SpConf whose td_name_list gained the name and whose next_id and next_dev_id
-// each advanced by exactly one, and the single SpRev bump they share (§5.5).
+// TestCreateThinDeviceWritesRowAndAdvancesCounters pins the whole write set of
+// architecture.md, Thin devices: the ThinDevice row (created = false, ori_id 0
+// for a fresh device), the SpConf whose td_name_list gained the name and whose
+// next_id and next_dev_id each advanced by exactly one, and the single SpRev
+// bump they share (architecture.md, Revision keys and the sync fan-out).
 func TestCreateThinDeviceWritesRowAndAdvancesCounters(t *testing.T) {
 	env := newVolEnv(t)
 	reply, err := env.srv.CreateThinDevice(env.ctx, &pb.CreateThinDeviceRequest{
@@ -725,7 +748,8 @@ func TestCreateThinDeviceWritesRowAndAdvancesCounters(t *testing.T) {
 	}
 }
 
-// TestCreateThinDeviceDevIdSequence pins the §5.4 dev_id sequence: dev_ids come
+// TestCreateThinDeviceDevIdSequence pins the dev_id sequence (architecture.md,
+// Globals: id allocation + shard buckets): dev_ids come
 // from next_dev_id, start at 1 and are never reused, and each device also draws
 // exactly one per-SP id from next_id. Both counters have to advance in lock
 // step across a run of creates, because dev_id is the id a snapshot's ori_id
@@ -768,12 +792,14 @@ func TestCreateThinDeviceDevIdSequence(t *testing.T) {
 	}
 }
 
-// TestCreateThinDeviceSnapshotGateConsumesNothing is §8.7's snapshot gate: an
+// TestCreateThinDeviceSnapshotGateConsumesNothing is the snapshot gate of
+// architecture.md, Thin devices: an
 // origin whose created flag the sp-worker has not set yet refuses the request
 // with FAILED_PRECONDITION and must write LITERALLY nothing — no row, no
 // td_name_list entry, no next_id or next_dev_id consumption and no SpRev bump.
 //
-// The counters are the point. Ids are never reused (§5.4), so an id burned by
+// The counters are the point. Ids are never reused
+// (architecture.md, Globals: id allocation + shard buckets), so an id burned by
 // a refusal is visible for the life of the SP; the check therefore sits before
 // the minter is ever built.
 func TestCreateThinDeviceSnapshotGateConsumesNothing(t *testing.T) {
@@ -790,7 +816,8 @@ func TestCreateThinDeviceSnapshotGateConsumesNothing(t *testing.T) {
 	})
 	msg := volWantCode(t, err, codes.FailedPrecondition)
 	if !strings.Contains(msg, "is not created yet") {
-		t.Errorf("message %q must carry §8.7's normative refusal", msg)
+		t.Errorf("message %q must carry the normative refusal of "+
+			"architecture.md, Thin devices", msg)
 	}
 	env.wantUntouched(before, beforeRev)
 	if env.exists(
@@ -832,11 +859,12 @@ func TestCreateThinDeviceSnapshotOfCreatedOrigin(t *testing.T) {
 	}
 }
 
-// TestCreateThinDeviceRefusesASnapshotOfACloneDestination is §8.7's second
-// snapshot refusal: a clone hydrates INTO its destination td, and while it
+// TestCreateThinDeviceRefusesASnapshotOfACloneDestination is the second
+// snapshot refusal of architecture.md, Thin devices: a clone hydrates INTO its
+// destination td, and while it
 // does, that td's thin volumes hold only the regions hydrated so far — dm-clone
-// serves every other read from the source (§8.9) — so a create_snap of them
-// would hand the client a partial copy as its snapshot.
+// serves every other read from the source (architecture.md, Clones) — so a
+// create_snap of them would hand the client a partial copy as its snapshot.
 //
 // The destination starts uncreated, the fresh td [D3] asks for, so the first
 // request meets both refusals and must get the created one: it is checked
@@ -918,7 +946,8 @@ func TestCreateThinDeviceRefusesASnapshotOfACloneDestination(t *testing.T) {
 	}
 }
 
-// TestCreateThinDeviceRefusals is the §8.7 error table. Every row asserts the
+// TestCreateThinDeviceRefusals is the error table of architecture.md,
+// Thin devices. Every row asserts the
 // code AND that the SP did not move, because each of these refusals returns
 // before the first Put and must therefore leave the store byte-identical.
 func TestCreateThinDeviceRefusals(t *testing.T) {
@@ -1008,11 +1037,12 @@ func TestCreateThinDeviceRefusals(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.7 DeleteThinDevice
+// DeleteThinDevice (architecture.md, Thin devices)
 // ---------------------------------------------------------------------------
 
-// TestDeleteThinDeviceReferenceGuards pins §8.7's three FAILED_PRECONDITION
-// guards, each with nothing written: a td that backs a namespace, a td that is
+// TestDeleteThinDeviceReferenceGuards pins the three FAILED_PRECONDITION
+// guards of architecture.md, Thin devices, each with nothing written: a td that
+// backs a namespace, a td that is
 // the destination of a clone, and a td with a snapshot the sp-worker has not
 // materialized yet. All three are decided INSIDE the deleting transaction —
 // the third on the snapshots its plan found, verified by the pool's identity
@@ -1082,7 +1112,8 @@ func TestDeleteThinDeviceReferenceGuards(t *testing.T) {
 }
 
 // TestDeleteThinDeviceReportsEverySnapshotBlocker pins the "every blocker, not
-// only the first" half of §8.7's third guard: the operator's next step is to
+// only the first" half of the third guard of architecture.md, Thin devices: the
+// operator's next step is to
 // wait for all of them, so a one-at-a-time refusal would make that a guessing
 // game.
 func TestDeleteThinDeviceReportsEverySnapshotBlocker(t *testing.T) {
@@ -1453,11 +1484,13 @@ func TestDeleteThinDeviceReplansAfterAPoolRecreate(t *testing.T) {
 	}
 }
 
-// TestThinDeviceSameNameRecreateTakesFreshIds walks §8.7's same-name recreate:
+// TestThinDeviceSameNameRecreateTakesFreshIds walks the same-name recreate of
+// architecture.md, Thin devices:
 // a td created, deleted and created again under the SAME name is a DIFFERENT
 // device — a fresh td_id and the next dev_id, `created` false again — because
-// a delete returns nothing to either counter (§5.4) and the sp-worker's flip
-// is a fact about the pool metadata of THAT dev_id.
+// a delete returns nothing to either counter
+// (architecture.md, Globals: id allocation + shard buckets) and the sp-worker's
+// flip is a fact about the pool metadata of THAT dev_id.
 //
 // The last step is why the delete guard matches on dev_id: a snapshot record
 // left over from the dead device names a dev_id nothing carries any more, so
@@ -1526,7 +1559,8 @@ func TestThinDeviceSameNameRecreateTakesFreshIds(t *testing.T) {
 	}
 }
 
-// TestListThinDevicesReadsWholeMap pins §8.7's wait primitive: one Snapshot
+// TestListThinDevicesReadsWholeMap pins the wait primitive of architecture.md,
+// Thin devices: one Snapshot
 // over the SpConf and every td it lists, so the map a client polls `created`
 // through can never be a torn read.
 func TestListThinDevicesReadsWholeMap(t *testing.T) {
@@ -1555,10 +1589,11 @@ func TestListThinDevicesReadsWholeMap(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.8 subsystems
+// Subsystems (architecture.md, Subsystems, namespaces)
 // ---------------------------------------------------------------------------
 
-// TestCreateSubsystemWritesEntryAndCdc pins §8.8's three-key write set: the
+// TestCreateSubsystemWritesEntryAndCdc pins the three-key write set of
+// architecture.md, Subsystems, namespaces: the
 // Subsystem with serial = %016x(ss_id) and model = "dnv" [D2], the CdcEntry
 // dnv-cdc serves the discovery log from, and the SpConf whose nqn_list gained
 // the NQN and whose next_id advanced — all under one SpRev bump.
@@ -1638,7 +1673,8 @@ func TestCreateSubsystemAdvertisesOnlyEnabledCntlrs(t *testing.T) {
 	}
 }
 
-// TestUpdateSubsystemHostsRewritesBothCopies pins §8.8's two-copy rule: the
+// TestUpdateSubsystemHostsRewritesBothCopies pins the two-copy rule of
+// architecture.md, Subsystems, namespaces: the
 // Subsystem's allowed_hosts is what every cntlr's nvmet allowed_hosts is built
 // from and the CdcEntry's is what dnv-cdc filters its discovery log with, so
 // the two move together in one transaction and under one bump.
@@ -1739,7 +1775,8 @@ func TestUpdateSubsystemHostsRecreatesMissingCdcEntry(t *testing.T) {
 	}
 }
 
-// TestDeleteSubsystem pins both halves of §8.8's delete: namespaces block it
+// TestDeleteSubsystem pins both halves of the delete of architecture.md,
+// Subsystems, namespaces: namespaces block it
 // (a namespace is a device a host may still be using) while allowed hosts
 // never do (a host entry is a permission that goes with the subsystem), and a
 // successful delete removes the CdcEntry in the same transaction so dnv-cdc
@@ -1806,8 +1843,9 @@ func TestDeleteSubsystem(t *testing.T) {
 	})
 }
 
-// TestListSubsystemsReadsWholeMap pins §8.8's read: one Snapshot whose reply
-// agrees with the nqn_list it was read from.
+// TestListSubsystemsReadsWholeMap pins the read of architecture.md,
+// Subsystems, namespaces: one Snapshot whose reply agrees with the nqn_list it
+// was read from.
 func TestListSubsystemsReadsWholeMap(t *testing.T) {
 	env := newVolEnv(t)
 	env.putSubsystem(volNqn, 501, nil)
@@ -1828,10 +1866,11 @@ func TestListSubsystemsReadsWholeMap(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.8 namespaces
+// Namespaces (architecture.md, Subsystems, namespaces)
 // ---------------------------------------------------------------------------
 
-// volUuidPattern is the canonical RFC 4122 version 4 form §8.8 says an empty
+// volUuidPattern is the canonical RFC 4122 version 4 form architecture.md,
+// Subsystems, namespaces, says an empty
 // dev_uuid defaults to: lower-case, dashed, with the version nibble and the
 // variant bits stamped. A host that parses the version would reject anything
 // else, and validateDevIdentity accepts only this shape — so a generated
@@ -1843,7 +1882,8 @@ var volUuidPattern = regexp.MustCompile(
 // lower-case hex characters.
 var volNguidPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// TestCreateNamespaceGeneratesIdentities pins §8.8's Defaults: an empty
+// TestCreateNamespaceGeneratesIdentities pins CreateNamespace's Defaults
+// (architecture.md, Subsystems, namespaces): an empty
 // dev_uuid and dev_nguid are generated inside the transaction, in exactly the
 // forms validateDevIdentity accepts, and two namespaces never draw the same
 // value — the identity ends up in host-visible identify data, where a
@@ -1905,7 +1945,8 @@ func TestCreateNamespaceGeneratesIdentities(t *testing.T) {
 
 // TestCreateNamespaceKeepsSuppliedIdentity pins the other branch of the same
 // Defaults row: a supplied uuid/nguid is stored verbatim, and the suspended
-// flag the request carries is stored with it (§11.3 creates the destination's
+// flag the request carries is stored with it (the flow of architecture.md,
+// Transfer + clone = cross-SP live migration, creates the destination's
 // namespaces already suspended).
 func TestCreateNamespaceKeepsSuppliedIdentity(t *testing.T) {
 	env := newVolEnv(t)
@@ -1937,7 +1978,8 @@ func TestCreateNamespaceKeepsSuppliedIdentity(t *testing.T) {
 	}
 }
 
-// TestCreateNamespaceRefusals is §8.8's error table for the one field the user
+// TestCreateNamespaceRefusals is the error table of architecture.md,
+// Subsystems, namespaces, for the one field the user
 // chooses: ns_idx is the NVMe NSID, so 0 (reserved by NVMe) and a value the
 // subsystem already uses are INVALID_ARGUMENT and never ALREADY_EXISTS — a
 // namespace is a field of the subsystem, not a key of its own.
@@ -2017,9 +2059,10 @@ func TestCreateNamespaceRefusals(t *testing.T) {
 // Subsystem value: DeleteNamespace (which returns no id to any counter, since
 // per-SP ids are never reused), UpdateNamespaceDev (which repoints the ns at
 // another td by ID) and UpdateNamespaceSuspended (which writes and bumps even
-// when the flag does not move — §0 #17's idempotent no-write covers the three
-// Update*Enabled/Disabled RPCs only, and the §11.3 choreography relies on the
-// bump reaching the cntlrs).
+// when the flag does not move — GW6's idempotent no-write covers the three
+// Update*Enabled/Disabled RPCs only, and the choreography of architecture.md,
+// Transfer + clone = cross-SP live migration, relies on the bump reaching the
+// cntlrs).
 func TestNamespaceUpdatesAndDelete(t *testing.T) {
 	env := newVolEnv(t)
 	env.putSubsystem(volNqn, 501, []*pb.Namespace{{
@@ -2099,7 +2142,7 @@ func TestNamespaceUpdatesAndDelete(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.10 transfers
+// architecture.md, Transfers
 // ---------------------------------------------------------------------------
 
 // volCreateTransfer creates the fixture's standard transfer over an origin
@@ -2122,7 +2165,8 @@ func volCreateTransfer(env *volEnv, name string) *pb.CreateTransferReply {
 	return reply
 }
 
-// TestCreateTransferWritesRecord pins §8.10's write set: the Transfer row is a
+// TestCreateTransferWritesRecord pins the write set of architecture.md,
+// Transfers: the Transfer row is a
 // pointer into the SP's own subsystem table, so the origin is resolved inside
 // the transaction and stored as (ori_nqn, ori_ns_idx) verbatim, and nothing
 // touches a CdcEntry — an xfer subsystem is never discovery-advertised.
@@ -2160,7 +2204,8 @@ func TestCreateTransferWritesRecord(t *testing.T) {
 	}
 }
 
-// TestCreateTransferRefusals pins §8.10's error table. A transfer that pointed
+// TestCreateTransferRefusals pins the error table of architecture.md,
+// Transfers. A transfer that pointed
 // at a namespace which does not exist would make every cntlr build a stack
 // over nothing, which is why both halves of the origin are NOT_FOUND.
 func TestCreateTransferRefusals(t *testing.T) {
@@ -2231,7 +2276,8 @@ func TestCreateTransferRefusals(t *testing.T) {
 	}
 }
 
-// TestUserNqnRules pins §7's NQN rules on subsystem NQNs, first on the two
+// TestUserNqnRules pins the NQN rules of architecture.md, Common validation, on
+// subsystem NQNs, first on the two
 // fields its dnv-namespace rule covers: CreateSubsystem's nqn and
 // CreateTransfer's ori_nqn. The agents attribute a subsystem by parsing its
 // NQN, so a user NQN inside the dnv namespace would read as one dnv minted —
@@ -2244,10 +2290,11 @@ func TestCreateTransferRefusals(t *testing.T) {
 // is invalid, and the refusal must not depend on the origin being absent.
 //
 // The dnv-namespace rule is the subsystem's own: a transfer's allowed_hosts
-// carries the destination cntlrs' CnHostNqns (§8.10), so one case creates a
-// transfer whose allowed host is one.
+// carries the destination cntlrs' CnHostNqns (architecture.md, Transfers), so
+// one case creates a transfer whose allowed host is one.
 //
-// The last two groups pin what §7 leaves a subsystem stored before these
+// The last two groups pin what architecture.md, Common validation, leaves a
+// subsystem stored before these
 // rules. One stored under a dnv name that passes the pattern is still served
 // by UpdateSubsystemHosts, CreateNamespace, UpdateNamespaceDev and
 // UpdateNamespaceSuspended. One stored under a name the pattern or the ".."
@@ -2506,7 +2553,8 @@ func volEmptyAndDelete(env *volEnv, nqn string) {
 	}
 }
 
-// TestDeleteTransferFinalizeSuspendsOrigin is [D-G] and §8.10's force flag:
+// TestDeleteTransferFinalizeSuspendsOrigin is [D-G] and the force flag of
+// architecture.md, Transfers:
 // force == false FINALIZES a completed hand-over and therefore sets
 // suspended = true on the origin namespace in the SAME transaction that
 // removes the record — the only thing that closes the window in which the next
@@ -2675,12 +2723,13 @@ func TestGetAndUpdateTransferHosts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.9 clones
+// architecture.md, Clones
 // ---------------------------------------------------------------------------
 
 // volCloneSrcSliceCnt is the source geometry the clone tests are created with.
 // It is deliberately > 6 so that AppendCloneBitmap can address source slice 5:
-// a chunk is addressed by the PAIR (src_slice_idx, bm_idx) (§8.9), and only a
+// a chunk is addressed by the PAIR (src_slice_idx, bm_idx) (architecture.md,
+// Clones), and only a
 // slice index well above every bm_idx the tests send can tell a key built from
 // the pair apart from one built from either index alone.
 const volCloneSrcSliceCnt = uint32(8)
@@ -2713,7 +2762,8 @@ func volCreateClone(
 	return reply
 }
 
-// TestCreateCloneWritesRecord pins §8.9's write set: the destination td is
+// TestCreateCloneWritesRecord pins the write set of architecture.md, Clones: the
+// destination td is
 // resolved to its td_id, so a renamed or recreated device can never silently
 // become the destination (an id is never reused). The record carries no chunk
 // count — the source bitmap is a pure optimization that may arrive later, and
@@ -2753,7 +2803,8 @@ func TestCreateCloneWritesRecord(t *testing.T) {
 	}
 }
 
-// TestCreateCloneRefusesASecondCloneOnOneTd pins §8.9's one-destination rule:
+// TestCreateCloneRefusesASecondCloneOnOneTd pins the one-destination rule of
+// architecture.md, Clones:
 // two dm-clones writing the same raid0 would each believe they own its
 // regions, so the second create is FAILED_PRECONDITION and writes nothing.
 func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
@@ -2782,7 +2833,8 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 	env.wantUntouched(before, beforeRev)
 }
 
-// TestAppendCloneBitmapPairAddressing pins the two rules §8.9 gives the source
+// TestAppendCloneBitmapPairAddressing pins the two rules architecture.md,
+// Clones, gives the source
 // bitmap: a chunk is ADDRESSED by the PAIR (src_slice_idx, bm_idx), and it
 // grows in place by appending (the pages of one chunk concatenate into the
 // bytes that chunk holds of the slice's bitmap).
@@ -2803,7 +2855,8 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 // page and place its bits at the chunk's own offset, which PushCloneBitmap
 // would hand the primary as "never written".
 //
-// Nothing here reads the Clone record: it carries no chunk count (§8.9), and
+// Nothing here reads the Clone record: it carries no chunk count
+// (architecture.md, Clones), and
 // an append does not rewrite it. The bytes are stored verbatim (GW14, [D-J]):
 // the gateway never inspects or rewrites a bit.
 func TestAppendCloneBitmapPairAddressing(t *testing.T) {
@@ -2878,7 +2931,8 @@ func TestAppendCloneBitmapPairAddressing(t *testing.T) {
 	}
 }
 
-// TestAppendCloneBitmapRefusals pins all five bounds of §8.9, each by its GW7
+// TestAppendCloneBitmapRefusals pins all five bounds of architecture.md, Clones,
+// each by its GW7
 // code. The three index-and-shape rows are INVALID_ARGUMENT: they judge THIS
 // request against the geometry the clone was created with, against
 // MaxCloneBmCnt, and against one chunk's capacity — a page longer than a whole
@@ -2998,8 +3052,9 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 	})
 }
 
-// TestDeleteCloneDropsChunksAndResumesNs pins §8.9's teardown across the LATCH
-// and the drain that finishes it (dnv-worker.md §11.7): the Clone row, every
+// TestDeleteCloneDropsChunksAndResumesNs pins the teardown of architecture.md,
+// Clones, across the LATCH and the drain that finishes it
+// (dnv-worker.md, The clone drain): the Clone row, every
 // chunk key and the clone_name_list entry all go, and the destination's
 // namespaces are resumed — the clone record being the only thing that
 // remembers why they were suspended.
@@ -3052,7 +3107,7 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 		SpRev:       env.token(),
 		CloneName:   "clone-a",
 		// force skips the hydration proof, which is the only part of this
-		// RPC that leaves etcd (§9.4 covers that path).
+		// RPC that leaves etcd (agentpath_test.go covers that path).
 		Force: true,
 	})
 	if err != nil {
@@ -3109,8 +3164,9 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 
 // TestDeleteCloneWithoutPrimaryCntlr pins the one force == false refusal that
 // never leaves etcd: with no primary cntlr there is nobody whose
-// clone_id_to_dm_clone row could prove the copy finished, and §8.9 makes
-// unproven hydration FAILED_PRECONDITION rather than the usual AG3 ABORTED.
+// clone_id_to_dm_clone row could prove the copy finished, and architecture.md,
+// Clones, makes unproven hydration FAILED_PRECONDITION rather than the usual
+// AG3 ABORTED.
 func TestDeleteCloneWithoutPrimaryCntlr(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -3140,7 +3196,8 @@ func TestDeleteCloneWithoutPrimaryCntlr(t *testing.T) {
 	}
 }
 
-// TestGetAndUpdateCloneTrConf pins the read and §8.9's transport rewrite: the
+// TestGetAndUpdateCloneTrConf pins the read and the transport rewrite of
+// architecture.md, Clones: the
 // list is a REPLACEMENT and never a merge, because an address that is gone
 // must stop being retried by the primary.
 func TestGetAndUpdateCloneTrConf(t *testing.T) {
@@ -3177,7 +3234,7 @@ func TestGetAndUpdateCloneTrConf(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.11 migrations
+// architecture.md, Migrations
 // ---------------------------------------------------------------------------
 
 // volCreateMigration hangs one migration destination off the fixture's data
@@ -3199,13 +3256,15 @@ func volCreateMigration(env *volEnv, name string) *pb.CreateMigrationReply {
 	return reply
 }
 
-// TestCreateMigrationChargesDestination pins §8.11's whole allocation: the leg
-// gains a SECOND side, written provisioned = false ([D15]) on a DN no leg of
-// the group already uses, holding the first cntlid slot that differs from the
-// source's ([D-I], §11.8), and the DN's ledger entry moves by exactly the
-// group's ext_cnt — record, capacity key and revision bump included (§5.5,
-// §5.6). Nothing else in the SP is touched: a migration destination changes no
-// group's ext_cnt, so no cntlr's CN is charged (§8.4, §8.6).
+// TestCreateMigrationChargesDestination pins the whole allocation of
+// architecture.md, Migrations: the leg gains a SECOND side, written
+// provisioned = false ([D15]) on a DN no leg of the group already uses, holding
+// the first cntlid slot that differs from the source's ([D-I]; architecture.md,
+// cntlid slots), and the DN's ledger entry moves by exactly the group's ext_cnt
+// — record, capacity key and revision bump included (architecture.md,
+// Revision keys and the sync fan-out, and Capacity index keys). Nothing else in
+// the SP is touched: a migration destination changes no group's ext_cnt, so no
+// cntlr's CN is charged (architecture.md, Storage pools and Cntlrs).
 func TestCreateMigrationChargesDestination(t *testing.T) {
 	env := newVolEnv(t)
 	reply := volCreateMigration(env, "migr-a")
@@ -3320,8 +3379,9 @@ func volMigrationDst(env *volEnv) (string, error) {
 	return leg.GetSideList()[1].GetAddrPort(), nil
 }
 
-// TestCreateMigrationPrefersAnotherFailureDomain pins §6.5's two tiers on
-// §8.11's destination scan: tier 1 keeps the destination out of the failure
+// TestCreateMigrationPrefersAnotherFailureDomain pins the two tiers of
+// architecture.md, Per-operation allocation, on the destination scan of
+// architecture.md, Migrations: tier 1 keeps the destination out of the failure
 // domains the group already occupies — dn-c is excluded although no side of
 // the group is on it, because it shares dn-a's domain — and when no other
 // domain is left tier 2 places the destination there anyway. A migration that
@@ -3369,7 +3429,7 @@ type volReadHookKey struct{}
 // volReadHook runs a second actor at one exact point of a request: right after
 // the request's first read of one key. etcdutil logs every read — plain,
 // snapshot and STM alike — once the value is fetched and before its caller
-// sees it, under the caller's own ctx (log.md §5.3), so a slog handler that
+// sees it, under the caller's own ctx (log.md, etcd), so a slog handler that
 // recognizes that record is a seam no production code had to grow. The two
 // actors still run one after the other, never concurrently: the request waits
 // inside its own log call until the actor returns. Only records whose ctx
@@ -3490,7 +3550,8 @@ func volSpareOnDnC(env *volEnv) error {
 }
 
 // TestCreateMigrationRefusesADnTheGroupAlreadyUses pins the deciding STM's own
-// check of the round's plan against the group (§8.11, GW9). A round plans its
+// check of the round's plan against the group (architecture.md, Migrations;
+// GW9). A round plans its
 // black list and its tier-1 locations from the group as its snapshot read it,
 // so a side another request hangs off the group after that read — a migration
 // of the group's OTHER leg, or a spare — is missing from that plan: the scan
@@ -3499,14 +3560,16 @@ func volSpareOnDnC(env *volEnv) error {
 // deciding STM reads it shows the change: the round is a changed candidate,
 // the next round plans again from the group as it now stands, and the
 // destination lands where a serial run would put it. Two legs of one group on
-// one disk node is what the black list exists to rule out (§6.5), and
+// one disk node is what the black list exists to rule out (architecture.md,
+// Per-operation allocation), and
 // finishing both migrations would leave it for good; two legs in one failure
 // domain is what tier 1 exists to avoid while the cluster has another.
 //
 // In the two disk-node cases every draw is forced: dn-d shares dn-c's failure
 // domain and holds less, so the first scan offers dn-c alone (one DN per
-// domain, fullest first, §6.3), and the second — dn-c black-listed and its
-// domain excluded — offers dn-d alone, through tier 2 (§6.5). The spare case
+// domain, fullest first, architecture.md, Finding DN candidates), and the
+// second — dn-c black-listed and its domain excluded — offers dn-d alone,
+// through tier 2 (architecture.md, Per-operation allocation). The spare case
 // is there because a check that walks only the group's active legs still
 // passes the other one.
 //
@@ -3560,7 +3623,8 @@ func TestCreateMigrationRefusesADnTheGroupAlreadyUses(t *testing.T) {
 					volDnC, legOf[volDnC], tc.actorLegId)
 			}
 			// Each DN is charged once, by the request that meant it, and the
-			// refused round wrote nothing: one SpRev bump per request (§5.5).
+			// refused round wrote nothing: one SpRev bump per request
+			// (architecture.md, Revision keys and the sync fan-out).
 			for _, want := range []struct {
 				addrPort string
 				free     uint64
@@ -3608,14 +3672,15 @@ func TestCreateMigrationRefusesADnTheGroupAlreadyUses(t *testing.T) {
 	})
 }
 
-// TestCancelMigrationIsTheExactMirror pins §8.11's rollback: whatever
+// TestCancelMigrationIsTheExactMirror pins the rollback of architecture.md,
+// Migrations: whatever
 // CreateMigration charged is returned, the destination side leaves the leg and
 // the record and EVERY bitmap chunk go with it — while the source side, which
 // the create never touched, is left byte-identical.
 //
 // The revisions are the one thing that does NOT mirror: a bump is a monotone
 // counter that tells a worker "read again", so cancelling adds a bump rather
-// than undoing one (§5.5).
+// than undoing one (architecture.md, Revision keys and the sync fan-out).
 func TestCancelMigrationIsTheExactMirror(t *testing.T) {
 	env := newVolEnv(t)
 	sliceBefore := env.slice()
@@ -3690,11 +3755,12 @@ func TestCancelMigrationIsTheExactMirror(t *testing.T) {
 	}
 }
 
-// TestFinishMigrationReleasesSource pins §8.11's other terminal RPC: the
+// TestFinishMigrationReleasesSource pins the other terminal RPC of
+// architecture.md, Migrations: the
 // destination becomes the leg's only side and the SOURCE's extents and pointer
 // go back to its DN, which is what makes the source agent tear the side down
 // on its next syncup. force = true skips the hydration proof, the only part of
-// the RPC that leaves etcd (§9.4 covers that path).
+// the RPC that leaves etcd (agentpath_test.go covers that path).
 func TestFinishMigrationReleasesSource(t *testing.T) {
 	env := newVolEnv(t)
 	created := volCreateMigration(env, "migr-a")
@@ -3754,8 +3820,9 @@ func TestFinishMigrationReleasesSource(t *testing.T) {
 	}
 }
 
-// TestFinishMigrationChecksTheTokenInPhaseOne pins GW6's order on §8.11's
-// two-phase finish: a stale token is ABORTED "stale revision" in PHASE 1,
+// TestFinishMigrationChecksTheTokenInPhaseOne pins GW6's order on the two-phase
+// finish of architecture.md, Migrations: a stale token is ABORTED "stale
+// revision" in PHASE 1,
 // ahead of the migration lookup and ahead of the hydration proof, exactly as
 // DeleteClone's phase 1 answers it. The deciding STM checks the token too
 // (AG4), but a check left there alone comes after two answers computed
@@ -3888,7 +3955,8 @@ func TestFinishMigrationRefusesADeletingPoolInPhaseOne(t *testing.T) {
 	env.wantUntouched(before, beforeRev)
 }
 
-// TestCreateMigrationRefusals pins §8.11's error table, each with nothing
+// TestCreateMigrationRefusals pins the error table of architecture.md,
+// Migrations, each with nothing
 // written — the destination must never be charged for a request that fails.
 func TestCreateMigrationRefusals(t *testing.T) {
 	for _, tc := range []struct {
@@ -3983,7 +4051,8 @@ func TestCreateMigrationRefusals(t *testing.T) {
 	}
 }
 
-// TestAppendMigrationBitmapIsAppendOnly pins §8.11's append rule: a chunk
+// TestAppendMigrationBitmapIsAppendOnly pins the append rule of
+// architecture.md, Migrations: a chunk
 // lands at bm_idx = the CURRENT bm_cnt and the count then advances, so a
 // written chunk is immutable and the index is a consequence of how many chunks
 // exist rather than a request field. The bytes are verbatim (GW14, [D-J]).
@@ -4041,7 +4110,8 @@ func TestAppendMigrationBitmapIsAppendOnly(t *testing.T) {
 	}
 }
 
-// TestGetMigration pins §8.11's read: the record is replied verbatim, bm_cnt
+// TestGetMigration pins the read of architecture.md, Migrations: the record is
+// replied verbatim, bm_cnt
 // included, which is what tells a caller how many chunks it has appended.
 func TestGetMigration(t *testing.T) {
 	env := newVolEnv(t)
@@ -4072,7 +4142,7 @@ func TestGetMigration(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §8.12 spare legs
+// architecture.md, Spare legs
 // ---------------------------------------------------------------------------
 
 // volCreateSpareLeg parks one spare on dn-c for the fixture's data group and
@@ -4092,7 +4162,8 @@ func volCreateSpareLeg(env *volEnv) uint64 {
 	return reply.GetLegId()
 }
 
-// TestCreateSpareLegAppendsStandbyCapacity pins §8.12's allocation: the spare
+// TestCreateSpareLegAppendsStandbyCapacity pins the allocation of
+// architecture.md, Spare legs: the spare
 // joins the EXISTING group and inherits its geometry unchanged, so its side is
 // charged the group's ext_cnt on a DN the group does not already occupy, its
 // leg_idx is the next unused member slot, and its side is provisioned = false
@@ -4171,8 +4242,9 @@ func volSpareLegDst(env *volEnv) (string, error) {
 	return grp.GetSpareLegList()[0].GetSideList()[0].GetAddrPort(), nil
 }
 
-// TestCreateSpareLegPrefersAnotherFailureDomain pins §6.5's two tiers on
-// §8.12's scan: a spare in the failure domain of the leg it exists to replace
+// TestCreateSpareLegPrefersAnotherFailureDomain pins the two tiers of
+// architecture.md, Per-operation allocation, on the scan of architecture.md,
+// Spare legs: a spare in the failure domain of the leg it exists to replace
 // dies with it, so tier 1 excludes the group's domains — dn-c is skipped for
 // sharing dn-a's, not for carrying a side — while tier 2 still creates the
 // spare when the cluster has no other domain to offer, because no spare at all
@@ -4214,7 +4286,8 @@ func TestCreateSpareLegPrefersAnotherFailureDomain(t *testing.T) {
 	})
 }
 
-// TestCreateSpareLegRefusals pins the three §8.12 pre-checks that give this
+// TestCreateSpareLegRefusals pins the three pre-checks of architecture.md,
+// Spare legs, that give this
 // RPC its own codes: model raises every one of its preconditions as
 // FAILED_PRECONDITION, so a RedundNone group and a full spare list have to be
 // judged before the op is called if they are to be INVALID_ARGUMENT and
@@ -4319,10 +4392,12 @@ func TestCreateSpareLegRefusals(t *testing.T) {
 	}
 }
 
-// TestDeleteSpareLegReturnsCapacity pins §8.12's delete: the spare leaves
-// spare_leg_list and its side gives the DN back exactly what it took — one
-// DnConf write, one capacity key and one DnRev bump (§5.5, §5.6) — under one
-// SpRev bump. No CN is touched: a spare leg changes no group's ext_cnt.
+// TestDeleteSpareLegReturnsCapacity pins the delete of architecture.md,
+// Spare legs: the spare leaves spare_leg_list and its side gives the DN back
+// exactly what it took — one DnConf write, one capacity key and one DnRev bump
+// (architecture.md, Revision keys and the sync fan-out, and Capacity index keys)
+// — under one SpRev bump. No CN is touched: a spare leg changes no group's
+// ext_cnt.
 func TestDeleteSpareLegReturnsCapacity(t *testing.T) {
 	env := newVolEnv(t)
 	sliceBefore := env.slice()
@@ -4394,7 +4469,8 @@ func TestDeleteSpareLegNeverTouchesAnActiveLeg(t *testing.T) {
 	}
 }
 
-// TestSwitchSpareLegRefusesAnUnprovisionedSpare pins §9.4's precondition, the
+// TestSwitchSpareLegRefusesAnUnprovisionedSpare pins the precondition of
+// architecture.md, Side provisioning protocol, the
 // one a caller meets in practice: a side that has not finished zeroing would
 // put an unwritten member into the md array, so the switch is
 // FAILED_PRECONDITION until the sp-worker has flipped `provisioned` — and it
@@ -4423,14 +4499,16 @@ func TestSwitchSpareLegRefusesAnUnprovisionedSpare(t *testing.T) {
 	}
 }
 
-// TestSwitchSpareLegSwapsPositions pins §8.12's swap: the spare takes the
+// TestSwitchSpareLegSwapsPositions pins the swap of architecture.md, Spare legs:
+// the spare takes the
 // target's POSITION in leg_list — the md member slot the array is missing —
 // and the target is parked in spare_leg_list, still connected and probed but
 // never repaired again. The reply is the two request ids exchanged.
 func TestSwitchSpareLegSwapsPositions(t *testing.T) {
 	env := newVolEnv(t)
 	legId := volCreateSpareLeg(env)
-	// Play the sp-worker: the zeroing of §9.4 has finished. A direct put, so
+	// Play the sp-worker: the zeroing of architecture.md, Side provisioning
+	// protocol, has finished. A direct put, so
 	// the SP's revision — and therefore the token below — does not move.
 	slice := env.slice()
 	spare := spareLegOf(volGrpOf(t, slice, volDataGrpId), legId)
@@ -4477,7 +4555,8 @@ func TestSwitchSpareLegSwapsPositions(t *testing.T) {
 	}
 }
 
-// TestSwitchSpareLegUnknownIds pins §8.12's NOT_FOUND: the pre-read checks
+// TestSwitchSpareLegUnknownIds pins the NOT_FOUND of architecture.md,
+// Spare legs: the pre-read checks
 // both ids for membership in the right list, so an id that is in neither is a
 // NOT_FOUND rather than the FAILED_PRECONDITION model would raise for it.
 func TestSwitchSpareLegUnknownIds(t *testing.T) {
@@ -4518,7 +4597,7 @@ func TestSwitchSpareLegUnknownIds(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GW6 / §0 #7: the revision token
+// GW6: the revision token
 // ---------------------------------------------------------------------------
 
 // volSeedTokenFixture writes one of every object the token cases address,
@@ -4549,7 +4628,8 @@ func volSeedTokenFixture(env *volEnv) {
 	env.putSpConf(conf)
 }
 
-// volTokenCase is one SP-scoped mutator of §8.7–§8.12 as the two GW6 tests
+// volTokenCase is one SP-scoped mutator of architecture.md, Thin devices
+// through Spare legs, as the two GW6 tests
 // below drive it: once with present tokens that cannot match the stored
 // revision (refused, every one of them), and once with no token message at all
 // (the revision comparison is skipped and the mutator is judged only by its own
@@ -4578,7 +4658,8 @@ type volTokenCase struct {
 }
 
 // volTokenCases is the mutator list both GW6 tests run: every SP-scoped
-// mutator of §8.7–§8.12, each written against the state volSeedTokenFixture
+// mutator of architecture.md, Thin devices through Spare legs, each written
+// against the state volSeedTokenFixture
 // seeds — one shared seeding for the refusal test, a fresh one per case for the
 // bypass test. The two tests share this one list on purpose: a mutator added to
 // the API is then either covered by both or by neither, and the strict half can
@@ -4607,7 +4688,8 @@ func volTokenCases() []volTokenCase {
 					})
 				return err
 			},
-			// The seeded td backs the seeded namespace, so §8.7's in-use gate
+			// The seeded td backs the seeded namespace, so the in-use gate of
+			// architecture.md, Thin devices,
 			// refuses it — a check that lives far behind the revision one.
 			bypassCode: codes.FailedPrecondition,
 			bypassMsg: fmt.Sprintf(
@@ -4635,8 +4717,9 @@ func volTokenCases() []volTokenCase {
 					})
 				return err
 			},
-			// The seeded subsystem still holds its namespace, which is §8.8's
-			// own refusal and not the revision check's.
+			// The seeded subsystem still holds its namespace, which is
+			// DeleteSubsystem's own refusal (architecture.md,
+			// Subsystems, namespaces) and not the revision check's.
 			bypassCode: codes.FailedPrecondition,
 			bypassMsg: fmt.Sprintf(
 				"subsystem %q still holds 1 namespaces", volNqn),
@@ -4716,8 +4799,8 @@ func volTokenCases() []volTokenCase {
 					})
 				return err
 			},
-			// The seeded td is already clone-a's destination, and §8.9 allows
-			// one clone per thin device.
+			// The seeded td is already clone-a's destination, and
+			// architecture.md, Clones, allows one clone per thin device.
 			bypassCode: codes.FailedPrecondition,
 			bypassMsg: "thin device \"vol\" is already the destination " +
 				"of clone \"clone-a\"",
@@ -4823,7 +4906,8 @@ func volTokenCases() []volTokenCase {
 				return err
 			},
 			// The seeded migration names the two sides of the fixture's data
-			// group, which are in DIFFERENT legs, so §8.11's finish refuses it.
+			// group, which are in DIFFERENT legs, so the finish of
+			// architecture.md, Migrations, refuses it.
 			// This is the one bypass refusal that is itself ABORTED, and it is
 			// why both tests compare the MESSAGE and not only the code: an
 			// ABORTED here is a real precondition talking, not GW6.
@@ -4879,8 +4963,8 @@ func volTokenCases() []volTokenCase {
 					})
 				return err
 			},
-			// leg_a is an ACTIVE leg of the group, never a spare, so §8.12's
-			// lookup in spare_leg_list misses it.
+			// leg_a is an ACTIVE leg of the group, never a spare, so the lookup
+			// of architecture.md, Spare legs, in spare_leg_list misses it.
 			bypassCode: codes.NotFound,
 			bypassMsg: fmt.Sprintf(
 				"spare leg %d not found in group %d",
@@ -4897,8 +4981,8 @@ func volTokenCases() []volTokenCase {
 					})
 				return err
 			},
-			// Spare id 1 is nothing the fixture ever wrote, so §8.12's lookup
-			// in spare_leg_list misses it.
+			// Spare id 1 is nothing the fixture ever wrote, so the lookup of
+			// architecture.md, Spare legs, in spare_leg_list misses it.
 			bypassCode: codes.NotFound,
 			bypassMsg: fmt.Sprintf(
 				"spare leg 1 not found in group %d", volDataGrpId),
@@ -4906,8 +4990,9 @@ func volTokenCases() []volTokenCase {
 	}
 }
 
-// TestVolumeMutatorsRefuseAPresentStaleToken is GW6 and §0 #7 over every
-// SP-scoped mutator of §8.7–§8.12, for the half of the rule that refuses: a
+// TestVolumeMutatorsRefuseAPresentStaleToken is GW6 over every SP-scoped
+// mutator of architecture.md, Thin devices through Spare legs, for the half of
+// the rule that refuses: a
 // request that DOES carry a token message is held to strict equality with the
 // stored revision, and every value that is not it — a revision left far behind,
 // the proto zero value, and a message that echoes only the sp_name handle —
@@ -4965,8 +5050,10 @@ func TestVolumeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 // request that carries NO token message at all has its revision comparison
 // skipped, and the mutator then runs on its other preconditions alone. That is
 // a bypass, not a refusal, so it is asserted positively — for each mutator,
-// exactly the outcome its own §8 rules produce against volSeedTokenFixture:
-// a clean run and a single §5.5 bump for the seventeen the fixture satisfies,
+// exactly the outcome its own rules produce against volSeedTokenFixture
+// (architecture.md, `service Gateway` — RPC specifications): a clean run and a
+// single bump (architecture.md, Revision keys and the sync fan-out) for the
+// seventeen the fixture satisfies,
 // and that mutator's OWN code and sentence for the six it does not. What may
 // never come back is ABORTED "stale revision"; FinishMigration's case shows why
 // the message and not only the code has to be compared, since its precondition
@@ -4999,8 +5086,10 @@ func TestVolumeMutatorsWithoutATokenSkipTheCheck(t *testing.T) {
 				}
 				// The bump is what makes the success load-bearing here: the
 				// mutator ran to the end of its transaction, wrote, and told
-				// the workers so (§5.5). WHAT it wrote is pinned by that
-				// mutator's own test above; this one owns the revision.
+				// the workers so
+				// (architecture.md, Revision keys and the sync fan-out). WHAT it
+				// wrote is pinned by that mutator's own test above; this one
+				// owns the revision.
 				if got := env.spRev(); got != beforeRev+1 {
 					t.Errorf("sp_rev: got %d, want %d "+
 						"(a bypassed mutator still bumps exactly once)",

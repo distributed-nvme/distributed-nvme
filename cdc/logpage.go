@@ -39,7 +39,8 @@ const (
 
 // The field VALUES of DS3. TRTYPE/ADRFAM are the specs' transport and address
 // family codes; SUBTYPE says these entries name NVM subsystems, never further
-// discovery services (dnv-cdc serves no referrals, §0 #1).
+// discovery services (dnv-cdc serves no referrals,
+// cdc.md, Scope and placement).
 const (
 	trTypeTcp = 3
 
@@ -79,7 +80,7 @@ const recFmtV0 = 0
 // ---------------------------------------------------------------------------
 
 // trTypeCode maps a CdcEntry transport type to its TRTYPE byte. Only tcp is
-// implemented (§0 #2); anything else makes the element unrenderable and the
+// implemented (DS3); anything else makes the element unrenderable and the
 // caller skips it with `cdc entry skipped`, reason foreign_tr_type.
 func trTypeCode(trType string) (uint8, bool) {
 	if trType == common.DefaultCdcTrType {
@@ -126,9 +127,10 @@ func putField(dst []byte, value string) {
 
 // renderEntry renders one transport-configuration element of one CdcEntry
 // into one discovery log entry (DS3). The second return is "" on success and
-// otherwise the §7 `cdc entry skipped` reason that dropped the element — a
-// transport or an address family dnv-cdc cannot name has no byte to put in
-// the record. The rest of the entry still serves either way.
+// otherwise the `cdc entry skipped` reason (cdc.md, Log records) that
+// dropped the element — a transport or an address family dnv-cdc cannot name
+// has no byte to put in the record. The rest of the entry still serves
+// either way.
 func renderEntry(nqn string, conf *pb.NvmeTrConf) ([]byte, string) {
 	trType, ok := trTypeCode(conf.GetTrType())
 	if !ok {

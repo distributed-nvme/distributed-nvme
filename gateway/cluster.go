@@ -9,11 +9,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.1 / gateway.md §5.1: the four cluster RPCs.
+// This file is architecture.md, Clusters / gateway.md, Clusters: the four
+// cluster RPCs.
 //
 // The cluster is the one resource whose identity is derived rather than
 // stored: `ClusterConf` is the only name-keyed message and
-// `cluster_id = fnv64a(name ‖ creation_epoch)` (§5.2) prefixes every other key
+// `cluster_id = fnv64a(name ‖ creation_epoch)` (architecture.md, cluster_id
+// derivation) prefixes every other key
 // in the store. That makes this file the two ends of GW5 — `CreateCluster` is
 // the only mutator that does not resolve a cluster (it mints the epoch the
 // resolution would read), and `ListClusters` is the only list that needs no
@@ -22,11 +24,12 @@ import (
 // Nothing here bumps a revision: `DnRev`/`CnRev`/`SpRev` are per-object keys
 // that do not exist yet at `CreateCluster` and can no longer exist at
 // `DeleteCluster` (its emptiness gate is exactly the statement that none do),
-// so §5.5's fan-out has nothing to reach and no op name is cited.
+// so the fan-out of architecture.md, Revision keys and the sync fan-out, has
+// nothing to reach and no op name is cited.
 
-// CreateCluster is architecture.md §8.1's CreateCluster: the one RPC that
-// computes cluster_id without reading ClusterConf first, because it is the RPC
-// that mints creation_epoch.
+// CreateCluster is the CreateCluster of architecture.md, Clusters: the one RPC
+// that computes cluster_id without reading ClusterConf first, because it is
+// the RPC that mints creation_epoch.
 //
 // The epoch is stamped ONCE, outside the STM (GW8): an internal retry of this
 // attempt re-runs the closure against the same epoch and therefore rewrites
@@ -35,15 +38,16 @@ import (
 // different cluster_id — which is precisely why the hash-collision guard below
 // is re-evaluated inside every attempt rather than hoisted out.
 //
-// ClusterConf is write-once (§8.1: no UpdateCluster* RPC exists, deliberately),
-// so this is the only chance its members ever get to be made concrete, and
-// both halves happen here in this order: validateClusterConfInput bounds the
-// RAW request — where a proto3 zero still means "give me the default" and a
-// non-zero value outside its range is refused, and then judges §7's geometry
-// rules once more on a resolved copy of its bdev_conf — and
-// model.ResolveClusterConf then turns the accepted request into the concrete
-// message that is stored.
-// The order is load-bearing: resolving first would replace every omitted
+// ClusterConf is write-once (architecture.md, Clusters: no UpdateCluster* RPC
+// exists, deliberately), so this is the only chance its members ever get to be
+// made concrete, and both halves happen here in this order:
+// validateClusterConfInput bounds the RAW request — where a proto3 zero still
+// means "give me the default" and a non-zero value outside its range is
+// refused, and then judges the geometry rules of architecture.md, Common
+// validation, once more on a resolved copy of
+// its bdev_conf — and model.ResolveClusterConf then turns the accepted request
+// into the concrete message that is stored. The order is load-bearing:
+// resolving first would replace every omitted
 // member with a constant and make the bound checks tautologies.
 //
 // Nothing downstream resolves again. A zero read back out of this key is
@@ -77,12 +81,13 @@ func (s *Server) CreateCluster(
 			return errExists("cluster %q already exists", name)
 		}
 		cid = model.ClusterId(name, creationEpoch)
-		// The hash-collision guard of §8.1. A 64-bit fnv1a of name ‖ epoch
-		// colliding with a live cluster is vanishingly unlikely, but the
-		// consequence would be two clusters silently sharing every key
-		// prefix, so it is checked rather than assumed. The three globals are
-		// distinct proto types, hence three reads instead of a loop; the
-		// short circuit is safe because any hit aborts the transaction.
+		// The hash-collision guard of architecture.md, Clusters. A 64-bit
+		// fnv1a of name ‖ epoch colliding with a live cluster is vanishingly
+		// unlikely, but the consequence would be two clusters silently sharing
+		// every key prefix, so it is checked rather than assumed. The three
+		// globals are distinct proto types, hence three reads instead of a
+		// loop; the short circuit is safe because any hit aborts the
+		// transaction.
 		if stm.Get(model.DnGlobalKey(cid), &pb.DnGlobal{}) ||
 			stm.Get(model.CnGlobalKey(cid), &pb.CnGlobal{}) ||
 			stm.Get(model.SpGlobalKey(cid), &pb.SpGlobal{}) {
@@ -92,7 +97,8 @@ func (s *Server) CreateCluster(
 		}
 		stm.Put(confKey, conf)
 		// next_id starts at 1 and shard_bucket is ShardBucketSize zeros
-		// (§5.4). A fresh bucket per global rather than one shared slice:
+		// (architecture.md, Globals: id allocation + shard buckets). A fresh
+		// bucket per global rather than one shared slice:
 		// they are three independent counters and must never alias.
 		stm.Put(model.DnGlobalKey(cid), &pb.DnGlobal{
 			NextId:      1,
@@ -114,19 +120,20 @@ func (s *Server) CreateCluster(
 	return &pb.CreateClusterReply{ClusterId: cid}, nil
 }
 
-// DeleteCluster is architecture.md §8.1's DeleteCluster.
+// DeleteCluster is the DeleteCluster of architecture.md, Clusters.
 //
 // The emptiness precondition is sum(shard_bucket) == 0 on ALL THREE globals,
-// not a range read: §5.4 makes the sum the cluster's live object count by
-// construction (every create increments a bucket, every delete decrements
-// one), so the check is three point reads the STM already needs for the
-// deletes. A missing global is §5.9's ABORTED — the cluster's invariant keys
-// are gone and the count cannot be established, and an RPC never guesses at a
-// precondition it cannot read.
+// not a range read: architecture.md, Globals: id allocation + shard buckets,
+// makes the sum the cluster's live object count by construction (every create
+// increments a bucket, every delete decrements one), so the check is three
+// point reads the STM already needs for the deletes. A missing global is an
+// ABORTED (architecture.md, UNEXPECTED_ERROR → `ABORTED`) — the cluster's
+// invariant keys are gone and the count cannot be established, and an RPC
+// never guesses at a precondition it cannot read.
 //
 // The reply carries the deleted cluster_id because it is derived, not stored:
 // a later CreateCluster with the same name stamps a new epoch and therefore
-// reports a different one (§8.1).
+// reports a different one (architecture.md, Clusters).
 func (s *Server) DeleteCluster(
 	ctx context.Context,
 	req *pb.DeleteClusterRequest,
@@ -180,7 +187,7 @@ func (s *Server) DeleteCluster(
 	return &pb.DeleteClusterReply{ClusterId: cid}, nil
 }
 
-// GetCluster is architecture.md §8.1's GetCluster.
+// GetCluster is the GetCluster of architecture.md, Clusters.
 //
 // It is a Snapshot, not a RunSTM (GW5): the four messages are read at one
 // store revision and nothing is written, so a concurrent CreateDiskNode can
@@ -238,14 +245,16 @@ func (s *Server) GetCluster(
 	return reply, nil
 }
 
-// ListClusters is architecture.md §8.1's ListClusters: the one list — indeed
-// the one RPC other than CreateCluster — that resolves no cluster at all (GW5).
+// ListClusters is the ListClusters of architecture.md, Clusters: the one list
+// — indeed the one RPC other than CreateCluster — that resolves no cluster at
+// all (GW5).
 //
 // It needs none: ClusterConf is the only name-keyed message, so its prefix can
 // be ranged without a cluster_id, and the names it returns are the key
 // suffixes. Turning a listed name into an id is GetCluster's job. Like every
-// paged list it uses plain reads and no transaction (§5.7) — a transaction
-// cannot range, and a page is a snapshot of names, not an invariant.
+// paged list it uses plain reads and no transaction (architecture.md,
+// page_token) — a transaction cannot range, and a page is a snapshot of names,
+// not an invariant.
 func (s *Server) ListClusters(
 	ctx context.Context,
 	req *pb.ListClustersRequest,

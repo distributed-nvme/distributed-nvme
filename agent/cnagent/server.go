@@ -1,11 +1,13 @@
-// Package cnagent implements the cn policy of cnagent.md §4: the
+// Package cnagent implements the cn policy of cnagent.md, The cn role —
+// package `cnagent`: the
 // ControllerNodeAgent service — which leg connections, md arrays, thin pools,
 // dm and nvmet objects a controller node builds, and when. All mechanism
 // (bootstrap, local store, revision gate, locks, ResInfo tracking, the dm /
 // nvmet / nvme-host wrappers, the bitmap store) comes from package agent; the
 // tools only this role runs — mdadm and thin-provisioning-tools — are wrapped
 // here (md.go, thinbm.go) because a wrapper with a single role is role code
-// (dnagent.md §1 split rule). The §3.2 base state and the clone-metadata slot
+// (the split rule of dnagent.md, Scope and placement). The base state of
+// architecture.md, Controller node, common, and the clone-metadata slot
 // allocator that replaced LVM live in clonemeta.go ([D14]).
 package cnagent
 
@@ -26,7 +28,7 @@ type CnAgentServer struct {
 	pb.UnimplementedControllerNodeAgentServer
 
 	oc      common.OsClient
-	probeIO LegProbeIO // CN11 probe IO — deliberately NOT via oc (osclient.md §4.5.1)
+	probeIO LegProbeIO // CN11 probe IO — deliberately NOT via oc (osclient.md, Exported raw helpers and the probe-IO carve-out)
 	nf      *common.NameFmt
 	cmd     *agent.Cmd
 	store   *agent.Store
@@ -85,7 +87,7 @@ type CnAgentServer struct {
 }
 
 // cnState is one synced CN: its last fully applied SyncupCnRequest plus the
-// ResInfo history of the §3.2 base state.
+// ResInfo history of the base state (architecture.md, Controller node, common).
 // The loop device carrying the clone-metadata arena is deliberately *not* a
 // field here: it is kernel-assigned state, re-learned from `losetup
 // --associated` on every converge and probe pass and never cached across one
@@ -187,7 +189,8 @@ func NewCnAgentServer(
 	return &CnAgentServer{
 		oc: oc,
 		// The probers get the direct-syscall implementation, never a wrapper
-		// over oc (osclient.md §4.5.1); tests swap the field after construction,
+		// over oc (osclient.md, Exported raw helpers and the probe-IO
+		// carve-out); tests swap the field after construction,
 		// which is why the constructor's signature is unchanged.
 		probeIO:  directLegProbeIO{},
 		nf:       nf,

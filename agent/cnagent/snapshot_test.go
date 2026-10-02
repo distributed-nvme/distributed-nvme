@@ -13,7 +13,8 @@ import (
 // A snapshot is point-in-time across slices (CN14's quiesce)
 // ---------------------------------------------------------------------------
 //
-// A td is a dm-striped raid0 across one thin volume per slice (§3.3), so a
+// A td is a dm-striped raid0 across one thin volume per slice
+// (architecture.md, Primary cntlr), so a
 // snapshot needs one `create_snap` per slice. Sent independently, slice 0's
 // snapshot and slice 1's snapshot date from different instants and any host
 // write landing between them is in one and not the other — a torn snapshot,
@@ -25,7 +26,7 @@ import (
 //
 // The origin carries `created` because that is the only shape the gateway can
 // produce: `CreateThinDevice` refuses a snapshot whose origin is not
-// materialized in every slice pool (ThinDeviceCreated.md U2-S1), so a
+// materialized in every slice pool (architecture.md, Thin devices), so a
 // td_list holding a snapshot always holds a created origin — or no origin at
 // all. It changes nothing in the tests below, whose origin is built by the
 // preceding revision-2 converge and therefore never messaged again either
@@ -65,7 +66,7 @@ func syncupSnapshot(
 	return reply
 }
 
-// TestSnapshotQuiescesOriginRaid0 is U1-T2 case 1: the origin's raid0 is
+// TestSnapshotQuiescesOriginRaid0 pins CN14's quiesce: the origin's raid0 is
 // suspended across *every* slice's create_snap, each of which keeps its own
 // nested per-slice origin-thin suspend, and the snap thin devices are created
 // only after the raid0 resumes — their content was fixed at message time.
@@ -101,7 +102,7 @@ func TestSnapshotQuiescesOriginRaid0(t *testing.T) {
 	// Exactly one message per slice. indexOfCall and assertOrder both stop at
 	// the first match, so only a count catches a second create_snap emitted
 	// after the resume — which no path can now produce, because ensureThin
-	// never messages a td with ori_id != 0 (U4-S1).
+	// never messages a td with ori_id != 0 (CN14).
 	for _, sliceId := range []uint64{testSlice, testSlice2} {
 		if n := len(node.callsMatching(snapMessage(srv, sliceId))); n != 1 {
 			t.Fatalf("slice %#x: %d create_snap calls, want exactly 1",
@@ -120,7 +121,7 @@ func TestSnapshotQuiescesOriginRaid0(t *testing.T) {
 	assertOk(t, info.GetTdIdToRaid0()[testSnapTd], "snap raid0")
 }
 
-// TestSnapshotResumesRaid0AfterAFailedMessage is U1-T2 case 2 ([D12]): a
+// TestSnapshotResumesRaid0AfterAFailedMessage pins CN14's resume ([D12]): a
 // scripted failure of the *second* slice's create_snap still resumes the
 // origin's raid0. No path out of the sequence may leave a device suspended —
 // a suspended raid0 stalls the td's host IO and wedges any scanner that opens
@@ -150,7 +151,7 @@ func TestSnapshotResumesRaid0AfterAFailedMessage(t *testing.T) {
 	}
 }
 
-// TestSnapshotReapplySuspendsNothing is U1-T2 case 3 (SH16): every snap thin
+// TestSnapshotReapplySuspendsNothing is SH16's re-apply: every snap thin
 // device is already present, so the pre-pass has nothing to do — no quiesce
 // and no message. A suspend here would stall the origin's host IO on every
 // converge round the worker drives.
@@ -158,7 +159,8 @@ func TestSnapshotReapplySuspendsNothing(t *testing.T) {
 	srv, node := newTestServer(t)
 	// The origin is built by the revision-2 converge syncupSnapshot runs and
 	// only then does the snapshot join td_list — the two-pass shape every
-	// other test here uses, and the only one the gateway produces (U2-S1).
+	// other test here uses, and the only one the gateway produces
+	// (architecture.md, Thin devices).
 	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
 	syncupSnapshot(t, srv, node, o)
 
@@ -171,7 +173,7 @@ func TestSnapshotReapplySuspendsNothing(t *testing.T) {
 	assertOnlyPersisted(t, node)
 }
 
-// TestPlainThinNeverQuiescesARaid0 is U1-T2 case 5: an ordinary td is
+// TestPlainThinNeverQuiescesARaid0 is CN14's case 2: an ordinary td is
 // create_thin and quiesces nothing. The second converge is what makes it
 // meaningful — by then the first td's raid0 is live, so an implementation
 // that bracketed every td and not only snapshots would be caught here.
@@ -192,19 +194,21 @@ func TestPlainThinNeverQuiescesARaid0(t *testing.T) {
 	assertNoCall(t, node, "create_snap")
 }
 
-// TestSnapshotMessagesWithoutTheOriginDevice is U4-T1, the fresh-primary
-// shape and the reason the pre-pass's origin-device filter could go. The
-// origin's ids are in every slice pool — the control plane says so with
+// TestSnapshotMessagesWithoutTheOriginDevice is the fresh-primary shape of
+// CN14's pre-pass and the reason the pre-pass's origin-device filter could go.
+// The origin's ids are in every slice pool — the control plane says so with
 // `created` — but *this* cntlr has just been rebuilt, so no dm device of
 // either td exists when the pre-pass runs. It must message anyway: declining
-// here (as the pre-U4 filter did) would hand the slice to a lazy path that no
+// here (as the earlier origin-device filter did) would hand the slice to a
+// lazy path that no
 // longer exists and lose the snapshot outright.
 //
 // Nothing is quiesced, because nothing is live yet, and no `create_thin` is
-// sent for the created origin (U4-S2) — the bare `dmsetup create` re-attaches
+// sent for the created origin (CN14) — the bare `dmsetup create` re-attaches
 // the id the CN21 teardown left in the pool metadata.
 func TestSnapshotMessagesWithoutTheOriginDevice(t *testing.T) {
-	// U4-S4: td_list order carries no meaning any more. Both orders must
+	// CN14, order independence: td_list order carries no meaning any more.
+	// Both orders must
 	// record the same messages, the same absence of suspends and the same
 	// device creations. Not a literal call-for-call multiset: the fake hands
 	// out minor numbers in creation order, so the two runs' raid0 tables
@@ -265,10 +269,10 @@ func TestSnapshotMessagesWithoutTheOriginDevice(t *testing.T) {
 	}
 }
 
-// TestCreatedTdIsNeverMessaged is U4-T2: the plain-td half of U4-S1's first
-// row. `created` is the control plane's word that dev_id 1 is in every slice
+// TestCreatedTdIsNeverMessaged is the plain-td half of CN14's case 1.
+// `created` is the control plane's word that dev_id 1 is in every slice
 // pool, so a fresh primary attaches it with a bare `dmsetup create` and sends
-// nothing. The CN9 order test (§6 test 5) still sees create_thin because its
+// nothing. The CN9 order test still sees create_thin because its
 // tds are `created = false`.
 func TestCreatedTdIsNeverMessaged(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -291,11 +295,12 @@ func TestCreatedTdIsNeverMessaged(t *testing.T) {
 	assertOnlyPersisted(t, node)
 }
 
-// TestCreatedSnapshotIsNeverMessaged is U4-T3: the same rule for a snapshot.
+// TestCreatedSnapshotIsNeverMessaged is the same rule for a snapshot (CN14).
 // Both ids are in the pool, so the pre-pass has nothing to claim — no
 // `create_snap`, and therefore no quiesce of an origin that is not even
 // carrying IO yet. The second case drops the origin from td_list entirely:
-// U2 lets it be deleted once every snapshot of it is created, and that
+// the gateway (architecture.md, Thin devices, DeleteThinDevice) lets it be
+// deleted once every snapshot of it is created, and that
 // changes nothing here, because there is nothing to message and nothing to
 // quiesce either way.
 func TestCreatedSnapshotIsNeverMessaged(t *testing.T) {
@@ -348,8 +353,9 @@ func TestCreatedSnapshotIsNeverMessaged(t *testing.T) {
 	}
 }
 
-// TestCreatedTdWithAMissingIdIsAnError is U4-T4, the price U4-S2 deliberately
-// pays. A created td whose id a pool no longer holds cannot be repaired by a
+// TestCreatedTdWithAMissingIdIsAnError is the price CN14's "A created td is
+// never messaged on any pass" deliberately pays. A created td whose id a pool
+// no longer holds cannot be repaired by a
 // message — a `create_thin` would hand the live dev_id a fresh, empty volume
 // — so the failing `dmsetup create` is reported as it happened and left
 // there. No converge, at any revision, self-heals it.
@@ -374,8 +380,9 @@ func TestCreatedTdWithAMissingIdIsAnError(t *testing.T) {
 		"lost thin id, second converge")
 }
 
-// TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing is U4-T5, R11: the
-// origin guarantee is the gateway's to keep and the agent does not re-check
+// TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing is CN14's "A violated
+// precondition is left to dm-thin": the origin guarantee is the gateway's to
+// keep and the agent does not re-check
 // it. A `create_snap` whose origin the pool lacks fails at the message, the
 // `dmsetup create` behind it fails too, and the row says so — with the td
 // still `created = false`, which is exactly what makes the next converge try
@@ -414,10 +421,10 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 // ready slice's create_snap must still go out. Dropping it would lose the
 // snapshot outright.
 //
-// U4-S3 also drops the pre-pass's `origin.deferred` early return, and this
+// CN14's pre-pass also drops the `origin.deferred` early return, and this
 // fixture is where that shows: the origin's raid0 was built by the
 // revision-2 converge and is still live, so it is quiesced around the one
-// message it is possible to send. Before U4 the deferred plan sent the
+// message it is possible to send. An earlier deferred plan sent the
 // caller down ensureThin's lazy path, which bracketed only the per-slice
 // origin thin. Quiescing the live raid0 is the CN14 quiesce applied honestly, so
 // the assertion is the bracket, not its absence.
@@ -446,9 +453,9 @@ func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 }
 
 // TestSnapshotClaimsASliceEvenWhenItsMessageFailed pins "exactly one
-// create_snap per slice, none after the raid0 resume". Before U4 a handoff
+// create_snap per slice, none after the raid0 resume". An earlier handoff
 // map carried that property; it now holds by construction, because ensureThin
-// never messages a td with ori_id != 0 (U4-S1) and the pre-pass is the only
+// never messages a td with ori_id != 0 (CN14) and the pre-pass is the only
 // caller of createSnapId. A re-send would put that slice's create_snap after
 // the resume — dating its snapshot from after host IO restarted, which is the
 // very tear the quiesce exists to prevent. The one-shot failCmd is what makes such a

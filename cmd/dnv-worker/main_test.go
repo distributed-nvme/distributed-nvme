@@ -19,7 +19,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The invocation from architecture.md §13.
+// An example invocation of the CM1 flags.
 var exampleArgs = []string{
 	"--etcd-endpoints",
 	"192.168.0.10:2379,192.168.0.11:2379,192.168.0.12:2379",
@@ -165,7 +165,7 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
-// CM2: the §13 example parses and every value arrives through viper.
+// CM2: the example invocation parses and every value arrives through viper.
 func TestExampleInvocationParses(t *testing.T) {
 	opts := mustOptions(t, exampleArgs)
 	want := []string{

@@ -10,7 +10,7 @@ import (
 
 // This file is the NVMe/TCP PDU codec of cdc.md NP2/NP3: the byte layouts the
 // specs define, the subset dnv-cdc implements, and nothing else. It knows
-// about sockets only through io.Reader/io.Writer, so the §8 tests drive it
+// about sockets only through io.Reader/io.Writer, so the unit tests drive it
 // over a pipe.
 //
 // Every multi-byte field on the wire is little-endian, as the specs require.
@@ -275,7 +275,7 @@ func buildTermReq(fes uint16, fei uint32) []byte {
 // Capsules (NP2)
 // ---------------------------------------------------------------------------
 
-// completion is one CQE, named field by field so the §8 tests can assert on
+// completion is one CQE, named field by field so the unit tests can assert on
 // it without decoding bytes.
 type completion struct {
 	dw0    uint32
@@ -303,7 +303,8 @@ func buildCapsuleResp(c completion) []byte {
 	return buf
 }
 
-// parseCapsuleResp is the inverse, for the in-process fake host of §8.
+// parseCapsuleResp is the inverse, for the in-process fake host of the unit
+// tests (NP2, NP3).
 func parseCapsuleResp(p *pdu) completion {
 	return completion{
 		dw0:    binary.LittleEndian.Uint32(p.hdr[8:12]),

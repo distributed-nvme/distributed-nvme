@@ -1,16 +1,18 @@
-// cn.go is the `cn` group (dnvctl.md §5.3): the six ControllerNode RPCs.
+// cn.go is the `cn` group (dnvctl.md, `cn` — `ctl/cn.go`): the six
+// ControllerNode RPCs.
 //
-// §5.3 defines the group as "exact `dn` mirrors ... same flags", and that is
-// literal: the DN and CN message families differ on the wire only in their
-// names and in which revision token they carry (CnRev here, DnRev there), so
-// every verb, every flag spelling and every default matches ctl/dn.go row for
-// row. A change to one is a change to both.
+// dnvctl.md, `cn` — `ctl/cn.go`, defines the group as mirroring `dn`
+// exactly, with "the same verbs and the same flags", and that is literal:
+// the DN and CN message families differ on the wire only in their names and
+// in which revision token they carry (CnRev here, DnRev there), so every
+// verb, every flag spelling and every default matches ctl/dn.go row for row.
+// A change to one is a change to both.
 //
 // The only package-level name this file adds beyond registerCn is cnAddrFlag,
 // which five of the six leaves need. It carries the group prefix on purpose:
 // dn.go declares the identical --addr flag for its own leaves and the two
 // files share one package, so an unprefixed nodeAddrFlag would collide the
-// moment both land (§1.2, the gatewayctl lesson).
+// moment both land (dnvctl.md, Files: the gatewayctl lesson).
 package ctl
 
 import (
@@ -23,7 +25,8 @@ import (
 )
 
 // cnAddrFlag declares the group's identity flag: a controller node's name IS
-// its ip:port (§5.0), so `addr_port` is what every CN request is keyed on.
+// its ip:port (dnvctl.md, Conventions), so `addr_port` is what every CN
+// request is keyed on.
 //
 // It has no default, and an omitted --addr therefore sends an EMPTY
 // addr_port rather than being rejected here — CT8 leaves "required field is
@@ -32,7 +35,8 @@ func cnAddrFlag(flags *pflag.FlagSet) {
 	flags.String("addr", "", "controller node addr_port as ip:port")
 }
 
-// registerCn builds the `cn` group and hangs it off the root (§5.3).
+// registerCn builds the `cn` group and hangs it off the root (dnvctl.md,
+// `cn` — `ctl/cn.go`).
 func registerCn(root *cobra.Command) {
 	// cn create — CreateControllerNode. The gateway answers this one by
 	// calling the CN agent's GetCnSize inline, so the invocation's trace id
@@ -40,7 +44,8 @@ func registerCn(root *cobra.Command) {
 	//
 	// --location defaults to empty rather than to a rack name because the
 	// gateway then defaults it to addr_port itself; the four transport flags
-	// default through trConfFlags to tcp/ipv4/127.0.0.1/4420 (§5.0).
+	// default through trConfFlags to tcp/ipv4/127.0.0.1/4420 (dnvctl.md,
+	// Conventions).
 	create := leaf("create", "create a controller node",
 		func() (job, error) {
 			cluster := clusterOf()
@@ -72,7 +77,7 @@ func registerCn(root *cobra.Command) {
 	// cn delete — DeleteControllerNode, the first of the group's two token
 	// carriers. cnRev() is nil unless --rev was typed, and that nil must
 	// reach the field as nil: GW6 is presence-based, so an absent token
-	// means "skip the check" and a present one means strict equality (§4).
+	// means "skip the check" and a present one means strict equality (CT3).
 	del := leaf("delete", "delete a controller node",
 		func() (job, error) {
 			rev, err := cnRev()
@@ -94,7 +99,7 @@ func registerCn(root *cobra.Command) {
 		})
 	cnAddrFlag(del.Flags())
 
-	// cn get — GetControllerNode. This is the CnRev token source (§4): its
+	// cn get — GetControllerNode. This is the CnRev token source (CT3): its
 	// reply carries the CnConf and the current cn_rev, which is where an
 	// operator reads the number to pass back as --rev.
 	get := leaf("get", "read a controller node's conf and cn_rev token",
@@ -138,7 +143,8 @@ func registerCn(root *cobra.Command) {
 	// cn set-disabled — UpdateControllerNodeDisabled. --disabled carries an
 	// explicit value rather than toggling the stored one, so re-sending the
 	// state the node already has is the gateway's idempotent no-op (no write,
-	// no revision bump, OK) instead of flipping it back (§5.2).
+	// no revision bump, OK) instead of flipping it back (dnvctl.md,
+	// Conventions).
 	setDisabled := leaf("set-disabled",
 		"set a controller node's disabled flag",
 		func() (job, error) {

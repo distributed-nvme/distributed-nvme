@@ -41,7 +41,7 @@ func (f *fakeStm) Rev(key string) int64 { return 0 }
 var _ etcdutil.STM = (*fakeStm)(nil)
 
 // ---------------------------------------------------------------------------
-// Shared stored-conf fixtures (architecture.md §7)
+// Shared stored-conf fixtures (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 //
 // Defaults are resolved once, on the write path, so a stored ClusterConf or
@@ -52,8 +52,8 @@ var _ etcdutil.STM = (*fakeStm)(nil)
 // on the result.
 
 // testBinConf is the 0/4/8/12 shift ladder — bin levels 1 / 16 / 256 / 4096
-// (§6.2) — with 1 GiB extents. It is written out rather than defaulted,
-// because binLevels shifts what it is given: it is the same ladder
+// (architecture.md, DN bins) — with 1 GiB extents. It is written out rather
+// than defaulted, because binLevels shifts what it is given: it is the same ladder
 // ResolveDnBinConf picks for a request that named none, which keeps these
 // fixtures representative of a real cluster's stored conf.
 func testBinConf() *pb.DnBinConf {
@@ -67,8 +67,8 @@ func testBinConf() *pb.DnBinConf {
 }
 
 // testBdevConf is a stored BdevConf with dataBlockSize as its pool block size
-// and no redund_conf, which is the redund_none choice (§8.4). Every member
-// ValidateBdevConf requires is concrete.
+// and no redund_conf, which is the redund_none choice (architecture.md,
+// Storage pools). Every member ValidateBdevConf requires is concrete.
 func testBdevConf(dataBlockSize uint64) *pb.BdevConf {
 	return &pb.BdevConf{
 		DmPoolConf: &pb.DmPoolConf{
@@ -120,7 +120,7 @@ func testClusterConf() *pb.ClusterConf {
 }
 
 // ---------------------------------------------------------------------------
-// Write-path resolution (architecture.md §7)
+// Write-path resolution (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
 func TestResolveDnBinConf(t *testing.T) {
@@ -313,7 +313,8 @@ func noneConf() *pb.RedundConf {
 	}
 }
 
-// TestResolveBdevConf pins §7 member by member: a zero takes the constant, a
+// TestResolveBdevConf pins architecture.md, Common validation, member by
+// member: a zero takes the constant, a
 // named value is kept, and the two members that are NOT plain defaults — a
 // low_water_mark_pct above 100, which means "never auto-grow this pool", and
 // the redund_conf choice, which is a choice and not a default — are left
@@ -339,7 +340,8 @@ func TestResolveBdevConf(t *testing.T) {
 			wantStripe:    common.DefaultDmRaid0StripeSize,
 		},
 		{
-			// An unset redund_conf already means redund_none (§8.4), so
+			// An unset redund_conf already means redund_none (architecture.md,
+			// Storage pools), so
 			// nothing here may promote it to a bitmap-carrying md-raid1.
 			name:          "empty: no redund kind is invented either",
 			conf:          &pb.BdevConf{},
@@ -366,8 +368,8 @@ func TestResolveBdevConf(t *testing.T) {
 			wantStripe:    common.DefaultDmRaid0StripeSize,
 		},
 		{
-			// Above 100 is the §7 "auto-grow off" setting, never a value to
-			// clamp or replace.
+			// Above 100 is the "auto-grow off" setting of architecture.md, Common
+			// validation, never a value to clamp or replace.
 			name: "low_water_mark_pct above 100 survives",
 			conf: &pb.BdevConf{
 				DmPoolConf: &pb.DmPoolConf{LowWaterMarkPct: 4096},
@@ -523,21 +525,22 @@ func TestResolveClusterConf(t *testing.T) {
 		t.Error("ResolveClusterConf(nil) is not the pure defaults")
 	}
 	// What CreateCluster stores is what its readers accept: the two families
-	// are each other's mirror image (§7), so a resolved conf must validate.
+	// are each other's mirror image (architecture.md, Common validation), so a
+	// resolved conf must validate.
 	if err := ValidateClusterConf(ResolveClusterConf(nil)); err != nil {
 		t.Errorf("a resolved ClusterConf must validate: %v", err)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Stored-conf validation (architecture.md §7)
+// Stored-conf validation (architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 //
 // The error strings are part of the contract, not decoration: the gateway
 // turns them into an ABORTED message, the worker logs them under
 // msgInvalidStoredConf, and the agents carry a second copy of these rules with
-// the SAME text (layout.md §3 forbids them importing model). So the tables
-// below pin the whole string, prefix included.
+// the SAME text (layout.md, Dependency rules, forbids them importing model).
+// So the tables below pin the whole string, prefix included.
 
 func TestValidateBdevConf(t *testing.T) {
 	// A stored conf as CreateStoragePool writes it; each case below changes
@@ -559,7 +562,8 @@ func TestValidateBdevConf(t *testing.T) {
 		wantErr string
 	}{
 		{
-			// No redund_conf at all is the redund_none choice (§8.4), and a
+			// No redund_conf at all is the redund_none choice (architecture.md,
+			// Storage pools), and a
 			// redund_none pool has no bitmap: the missing chunk count is
 			// correct, not an omission.
 			name: "redund_none, no bitmap chunk count",
@@ -574,7 +578,8 @@ func TestValidateBdevConf(t *testing.T) {
 			conf: testRaid1BdevConf(common.DefaultDmPoolDataBlockSize, 128),
 		},
 		{
-			// Above 100 means "never auto-grow" (§7) and is a value, not a
+			// Above 100 means "never auto-grow" (architecture.md, Common validation)
+			// and is a value, not a
 			// fault; ValidateBdevConf checks presence, never range.
 			name: "low_water_mark_pct above 100",
 			conf: autoGrowOff,
@@ -641,10 +646,11 @@ func TestValidateClusterConf(t *testing.T) {
 			name: "as CreateCluster stores it",
 		},
 		{
-			// A DN header is formatted with extent_size (§3.1), so a cluster
-			// whose DNs are correctly formatted at a size §7 would reject on
-			// the request must keep working: presence is checked, range never.
-			name: "an extent_size outside the §7 request bounds",
+			// A DN header is formatted with extent_size (architecture.md, Disk node),
+			// so a cluster whose DNs are correctly formatted at a size
+			// architecture.md, Common validation, would reject on the request must
+			// keep working: presence is checked, range never.
+			name: "an extent_size outside the request bounds",
 			tweak: func(cc *pb.ClusterConf) {
 				cc.DnBinConf.ExtentSize = 1024
 			},
@@ -770,7 +776,7 @@ func TestValidateClusterConf(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bins (MD4, §6.2)
+// Bins (MD4; architecture.md, DN bins)
 // ---------------------------------------------------------------------------
 
 func TestDnBinIdx(t *testing.T) {
@@ -796,7 +802,8 @@ func TestDnBinIdx(t *testing.T) {
 		{"at level3", ladder, 4096, 3, true},
 		{"far above level3", ladder, 1 << 40, 3, true},
 		// An unwritten dn_bin_conf is NOT resolved to that ladder any more
-		// (§7): binLevels shifts the four zeros it is given, every level is
+		// (architecture.md, Common validation): binLevels shifts the four zeros it
+		// is given, every level is
 		// 1 << 0, and any free count at all lands in the top bin. An op that
 		// reaches it without refusing an unusable conf first gets these
 		// nonsense levels deliberately — a plausible default is what a stored
@@ -826,7 +833,7 @@ func TestDnBinIdx(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The §5.6 presence rule (MD4)
+// The presence rule of architecture.md, Capacity index keys (MD4)
 // ---------------------------------------------------------------------------
 
 // healthyDn is an allocatable DN; each case below breaks exactly one clause.
@@ -926,7 +933,8 @@ func TestMaintainDnCapacity(t *testing.T) {
 	cid := ClusterId(t.Name(), 0)
 	cc := testClusterConf()
 	// free 10 under the stored 0/4/8/12 ladder is bin 0 (levels
-	// 1/16/256/4096); MaintainDnCapacity shifts that ladder as stored (§7).
+	// 1/16/256/4096); MaintainDnCapacity shifts that ladder as stored
+	// (architecture.md, Common validation).
 	key10 := DnCapacityKey(cid, 0, 10, addrPort)
 	key20 := DnCapacityKey(cid, 1, 20, addrPort)
 
@@ -1052,7 +1060,7 @@ func TestMaintainCnCapacity(t *testing.T) {
 	}
 
 	// A budget that ran out removes the key: CnAllocatable requires a
-	// nonzero free_ext_cnt (§5.6).
+	// nonzero free_ext_cnt (architecture.md, Capacity index keys).
 	s = newFakeStm()
 	MaintainCnCapacity(s, cid, addrPort, withFree(5), withFree(0))
 	if !equalStrings(s.dels, []string{key5}) || len(s.puts) != 0 {

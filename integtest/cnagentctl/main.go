@@ -1,5 +1,6 @@
 // Command cnagentctl is the gRPC driver of the cn-agent integration test
-// (doc/cnagent_integtest.md §8). The agent serves plaintext gRPC without
+// (doc/cnagent_integtest.md, The driver: `cnagentctl`). The agent serves
+// plaintext gRPC without
 // server reflection, so grpcurl cannot drive it; this binary speaks the
 // generated ControllerNodeAgent client instead and prints every reply as
 // protojson (proto field names) on stdout for the test script to parse with
@@ -32,7 +33,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Flag value types. Every id flag accepts decimal or 0x hex (§8).
+// Flag value types. Every id flag accepts decimal or 0x hex
+// (cnagent_integtest.md, The driver: `cnagentctl`).
 // ---------------------------------------------------------------------------
 
 type hexUint uint64
@@ -92,7 +94,8 @@ type globals struct {
 	expectCode uint
 }
 
-// bind registers the §8 global flags on a subcommand's flag set, so they may
+// bind registers the driver's global flags (cnagent_integtest.md,
+// The driver: `cnagentctl`) on a subcommand's flag set, so they may
 // be given in any order after the subcommand name. wait-hydrated binds with
 // withTimeout = false and spends --timeout on its own polling budget.
 func (g *globals) bind(fs *flag.FlagSet, withTimeout bool) {
@@ -157,7 +160,8 @@ func emit(msg proto.Message) {
 // emitBitmap prints a bitmap reply: the raw bytes as lowercase hex on the
 // first line, the bit count on the second. The bitmap RPCs carry no
 // AgentReply, and their protojson would render the bytes as base64 — the
-// script asserts the hex string itself (§12, §13).
+// script asserts the hex string itself (cnagent_integtest.md, Cases, thinbm
+// and clone_xfer).
 func emitBitmap(bitmap []byte) {
 	fmt.Println(hex.EncodeToString(bitmap))
 	fmt.Printf("bits=%d\n", len(bitmap)*8)
@@ -248,7 +252,8 @@ func cntlrPointerOf(sp, cntlr *hexUint) *pb.CntlrPointer {
 }
 
 // cmdGetCnSize doubles as the agent liveness probe: GetCnSize takes no lock,
-// so --wait retries it until the freshly started agent answers (§7 step 7).
+// so --wait retries it until the freshly started agent answers
+// (cnagent_integtest.md, Cases, the setup paragraph).
 func cmdGetCnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-size", &g)
@@ -318,7 +323,8 @@ func cmdSyncupCn(args []string) {
 
 // cmdSyncupCntlr reads one complete SyncupCntlrRequest as protojson: the
 // message is far too deep for flags, so the script generates it as a file and
-// edits only the fields that change between steps (§8). The ids are
+// edits only the fields that change between steps (cnagent_integtest.md,
+// The driver: `cnagentctl`). The ids are
 // cross-checked against the globals, which is what catches a request file
 // aimed at the wrong node.
 func cmdSyncupCntlr(args []string) {
@@ -614,8 +620,9 @@ func cmdGetLegBm(args []string) {
 // cmdWaitHydrated polls GetCntlrInfo until the clone reports every region
 // hydrated, parsing the raw `dmsetup status` line the agent puts in
 // cntlr_info.clone_id_to_dm_clone[<clone>].details. --min-first asserts the
-// bitmap jump: case C's first sample must already show >= 32/64 (§13 stage
-// 5), and --sample-only stops right there, taking exactly one sample so the
+// bitmap jump: case C's first sample must already show >= 32/64
+// (cnagent_integtest.md, Cases, clone_xfer), and --sample-only stops right
+// there, taking exactly one sample so the
 // mid-hydration probe never waits for the copy to finish.
 func cmdWaitHydrated(args []string) {
 	var g globals
@@ -676,7 +683,8 @@ func cmdWaitHydrated(args []string) {
 			fmt.Fprintf(os.Stderr,
 				"cnagentctl: hydrated %d/%d\n",
 				status.HydratedRegions, status.TotalRegions)
-			// The single sample of the §13 stage 5 probe: --min-first is
+			// The single sample of clone_xfer's stage 5 probe
+			// (cnagent_integtest.md, Cases, clone_xfer): --min-first is
 			// the assertion, the ratio is the observation the script logs
 			// as the read-through window HIT or missed.
 			if *sampleOnly {
@@ -711,7 +719,7 @@ func cmdWaitHydrated(args []string) {
 // cmdMdName prints the md names of one raid1 group, which is how the test
 // finds /dev/md/<dev_name>: the device name folds the cluster and cn ids
 // through the package-private fnv getShortId, so it cannot be computed in
-// bash (§5).
+// bash (architecture.md, md names).
 func cmdMdName(args []string) {
 	var g globals
 	fs := newFlagSet("md-name", &g)

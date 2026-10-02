@@ -17,11 +17,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// This file is the per-connection admin-queue state machine of §5: one
-// goroutine reads PDUs, a second delivers AENs and a third reaps the
-// connection when its keep-alive expires. Every field of the connection state
-// is behind mu; every socket write is behind wmu, so an AEN and a command
-// response can never interleave inside one PDU.
+// This file is the per-connection admin-queue state machine of
+// cdc.md, The NVMe/TCP discovery service: one goroutine reads PDUs, a second
+// delivers AENs and a third reaps the connection when its keep-alive
+// expires. Every field of the connection state is behind mu; every socket
+// write is behind wmu, so an AEN and a command response can never interleave
+// inside one PDU.
 
 // ---------------------------------------------------------------------------
 // Values this controller reports (NP6, NP7, NP14)
@@ -100,7 +101,7 @@ type conn struct {
 	done chan struct{}
 	// wake carries one bit: "there may be an AEN to deliver". Its capacity
 	// of one is what makes multiple impacts before a delivery coalesce
-	// (§0 #7).
+	// (NP11).
 	wake chan struct{}
 	// kick makes the keep-alive loop recompute its deadline, which it must
 	// whenever the idle budget SHRANK under the timer it is already sleeping
@@ -123,7 +124,7 @@ type conn struct {
 	cc        uint32
 	csts      uint32
 	// aenCfg is feature 0Bh, default 0: a host that has not enabled the
-	// discovery-log-change notice gets no AEN (NP9, §0 #8).
+	// discovery-log-change notice gets no AEN (NP9).
 	aenCfg uint32
 	// pending is the NP11 pending bit and pendingGenCtr the GENCTR that set
 	// it, for the `aen sent` record.
@@ -133,8 +134,8 @@ type conn struct {
 	// Requests, oldest first (NP11).
 	aers    []uint16
 	lastAct time.Time
-	// closeReason is the §7 `host disconnected` reason, set by whoever ends
-	// the connection first.
+	// closeReason is the `host disconnected` reason (cdc.md, Log records), set
+	// by whoever ends the connection first.
 	closeReason string
 	closing     bool
 }
@@ -249,7 +250,7 @@ func (c *conn) finish() {
 // keepAliveLoop is NP10: a connection that has said nothing for its timeout is
 // reaped. KATO > 0 expires at KATO + common.DefaultCdcKeepAliveGraceMs;
 // KATO = 0 — a one-shot `nvme discover` — expires after
-// common.DefaultCdcZeroKatoTmoMs idle (§0 #9).
+// common.DefaultCdcZeroKatoTmoMs idle (NP10).
 //
 // The deadline is recomputed at every wake-up, so a command that arrives late
 // in a window simply pushes the next one out. A budget that SHRANK cannot
@@ -413,12 +414,12 @@ func (c *conn) dispatch(p *pdu) error {
 // (opcode 21h) with its 1024 byte payload in the capsule to every discovery
 // controller it connects to. Answering C2HTermReq puts the host in a
 // permanent connect/reset loop, whereas refusing the COMMAND — invalid
-// opcode, DNR, per NP12 and §0 #2's "nothing registers into it" — is what the
-// specs prescribe and what stas is written to handle. The framing itself is
-// already bounded: readPdu refuses any PDU whose data would exceed
-// common.CdcMaxH2CData — a plen past maxPduLen, the header plus that cap —
-// before a byte of it is buffered, which is the framing cap NP2 exists to
-// enforce.
+// opcode, DNR, per NP12 and the "nothing registers into it" of cdc.md,
+// The NVMe/TCP discovery service — is what the specs prescribe and what stas
+// is written to handle. The framing itself is already bounded: readPdu
+// refuses any PDU whose data would exceed common.CdcMaxH2CData — a plen past
+// maxPduLen, the header plus that cap — before a byte of it is buffered,
+// which is the framing cap NP2 exists to enforce.
 func (c *conn) handleCapsule(p *pdu) error {
 	s := sqe(p.hdr[pduCommonHdrLen : pduCommonHdrLen+sqeLen])
 	isConnect := s.opc() == opcFabrics && s.fctype() == fctypeConnect
@@ -487,7 +488,7 @@ func (c *conn) handleConnect(s sqe, data []byte) error {
 			connectIpo(connectCmdRecfmtOff, false), 0)
 	}
 	if s.connectQid() != 0 {
-		// There are no I/O queues (§0 #2).
+		// There are no I/O queues (NP4).
 		return c.respond(cid, statusConnectParam,
 			connectIpo(connectCmdQidOff, false), 0)
 	}
@@ -706,7 +707,7 @@ const (
 	// controller.
 	cntrlTypeDiscovery = 2
 	// oaesDiscChange is OAES bit 31: this controller supports Discovery Log
-	// Page Change notices, which is what makes the host enable them (§0 #8).
+	// Page Change notices, which is what makes the host enable them (NP9).
 	oaesDiscChange = 1 << 31
 	// ctrattHostId128 says the host identifier is 128 bits, as fabrics
 	// hosts always send it.
@@ -726,8 +727,9 @@ const (
 	sqesValue = 0x66
 	cqesValue = 0x44
 	// dctypeDdc is DCTYPE 1, "Direct Discovery Controller": dnv-cdc serves
-	// discovery but accepts no TP-8010 registration (§0 #2), so a host must
-	// not treat it as a Centralized Discovery Controller to register with.
+	// discovery but accepts no TP-8010 registration
+	// (cdc.md, The NVMe/TCP discovery service), so a host must not treat it as
+	// a Centralized Discovery Controller to register with.
 	dctypeDdc = 1
 )
 
@@ -780,7 +782,7 @@ func putAscii(dst []byte, value string) {
 
 // handleGetLogPage serves the discovery log out of a snapshot taken right
 // here, when the command arrived (DS9). RAE is accepted and ignored: event
-// clearing is delivery-based (§0 #7).
+// clearing is delivery-based (NP11).
 func (c *conn) handleGetLogPage(s sqe) error {
 	cid := s.cid()
 	if s.logLid() != lidDiscovery {
@@ -826,7 +828,7 @@ func (c *conn) handleSetFeatures(s sqe) error {
 		c.aenCfg = value
 		c.mu.Unlock()
 		// A host that enables the notice while an impact is already pending
-		// must still get it (§0 #7).
+		// must still get it (NP11).
 		c.poke()
 		return c.respond(cid, statusSuccess, 0, 0)
 	case fidKeepAliveTimer:
@@ -890,7 +892,7 @@ func (c *conn) notify(genCtr uint64) {
 }
 
 // poke wakes the AEN goroutine. The channel's capacity of one IS the
-// coalescing of §0 #7: several impacts before a delivery are one wake-up.
+// coalescing of NP11: several impacts before a delivery are one wake-up.
 func (c *conn) poke() {
 	select {
 	case c.wake <- struct{}{}:

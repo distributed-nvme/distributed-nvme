@@ -13,7 +13,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// CloneMeta wraps the CN base-state tooling of Appendix A — the tmpfs mount,
+// CloneMeta wraps the CN base-state tooling (architecture.md, Controller node,
+// common; cnagent.md CN5) — the tmpfs mount,
 // its sparse backing file and the single loop device — plus the clone-metadata
 // slot allocator that replaced the clone VG ([D14]). No LVM
 // runs anywhere in dnv any more: the bare `vgs`/`lvs` label scan touched every
@@ -21,7 +22,8 @@ import (
 // held dm-suspended, which wedge LVM in unkillable D state — the [D13](a)
 // class the dn agent evicted first. (The CN no longer suspends those: an
 // effectively suspended namespace is parked, live, on the td's dm-error
-// (§11.6, [D12]). The scan is gone regardless.)
+// (architecture.md, Namespace suspend semantics; [D12]). The scan is gone
+// regardless.)
 //
 // The allocator's registry is the kernel's own dm tables: every kind-`cb`
 // wrapper's `0 {len} linear {loopdev} {offset}` line records its own
@@ -529,8 +531,8 @@ func (s *CnAgentServer) planArena(
 // found it, shared by the CN28 probe row and the CN18 rebuild test: present, a
 // single linear target of exactly the budgeted size, and backed by the
 // *currently probed* loop device. Any mismatch — a tmpfs remounted under a live
-// agent is the interesting one — is an error whose repair is the §11.5 clone
-// rebuild.
+// agent is the interesting one — is an error whose repair is the clone
+// rebuild of architecture.md, Clone crash recovery.
 //
 // It is not the only source of the CN28 `clone_id_to_meta` row: when the arena
 // cannot supply this clone's slot the probe answers that row from
@@ -567,7 +569,8 @@ func cloneMetaSlotStatus(
 // cloneMetaConverged reports whether this clone's wrapper is already the one
 // CN18 wants. A wrapper that is present and matches is reused as-is and is
 // **never** re-discarded: it carries a live dm-clone's superblock, and the
-// "the wrapper survived, the dm-clone did not" case of §11.5 depends on it.
+// "the wrapper survived, the dm-clone did not" case of architecture.md, Clone
+// crash recovery, depends on it.
 func (s *CnAgentServer) cloneMetaConverged(
 	ctx context.Context,
 	arena *cloneMetaArena,

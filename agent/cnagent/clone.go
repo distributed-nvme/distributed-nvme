@@ -89,7 +89,8 @@ func (s *CnAgentServer) ensureClone(
 	info.CloneIdToTarget[cp.cloneId] = st.tracker.Ok(
 		tgtKey, cp.clone.GetSrcNqn(), pathStates(view))
 
-	// (2) the dm-clone's metadata. This build is a §11.5 recovery whenever
+	// (2) the dm-clone's metadata. This build is a recovery (architecture.md,
+	// Clone crash recovery) whenever
 	// that metadata does not survive — the volatile clone-metadata arena is
 	// gone (CN reboot, failover to a CN that never ran the clone, tmpfs loss),
 	// or the clone has never been built at all. The metadata **wrapper** alone
@@ -109,7 +110,8 @@ func (s *CnAgentServer) ensureClone(
 	// nothing, and registers the retry; CN16 reads the status again and
 	// moves no ns-dev onto a dm-clone it has not seen hydrating (nsDevNow).
 	// On a first build the destination td is empty by contract ([D3]), so
-	// the §11.5 read costs one metadata snapshot and discards nothing.
+	// the recovery's read (architecture.md, Clone crash recovery) costs one
+	// metadata snapshot and discards nothing.
 	arena, err := s.planArena(ctx, plan)
 	if err != nil {
 		info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(
@@ -135,7 +137,8 @@ func (s *CnAgentServer) ensureClone(
 	}
 	recovery := !metaOk || dmDev == nil || !hydrating
 	if recovery {
-		// §11.5 step 1 comes first: nothing may serve the td while the
+		// Step 1 of architecture.md, Clone crash recovery, comes first:
+		// nothing may serve the td while the
 		// destination bitmaps are still being applied, or a read of an
 		// already-copied (and possibly since-rewritten) region would be
 		// fetched from the source again, returning stale data over the newer
@@ -181,7 +184,8 @@ func (s *CnAgentServer) ensureClone(
 	if created || recovery {
 		// (4) destination bitmaps first on a recovery, then every locally
 		// present source chunk. The destination bitmaps must be applied in
-		// full before the dm-clone handles any IO (§11.5): a clone that
+		// full before the dm-clone handles any IO (architecture.md, Clone
+		// crash recovery): a clone that
 		// hydrates without them re-fetches regions the destination already
 		// owns, overwriting newer local bytes with stale source bytes. A
 		// partial apply — a read or a discard that failed — therefore fails
@@ -219,8 +223,9 @@ func (s *CnAgentServer) ensureClone(
 		s.startConnectRetry(st, plan)
 		return true
 	}
-	// §9.5: the raw dm-clone status line carries hydration progress, which is
-	// what DeleteClone's force check reads.
+	// architecture.md, Live-state reporting: the raw dm-clone status line
+	// carries hydration progress, which is what DeleteClone's force check
+	// reads.
 	raw, err := s.dm.Status(ctx, cp.finalName)
 	if err != nil {
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
@@ -358,8 +363,9 @@ func (s *CnAgentServer) ensureDmClone(
 		return false, err
 	}
 	conf := cp.clone.GetDmCloneConf()
-	// no_discard_passdown is not optional here (CN18 step 3, Appendix A's
-	// `2 no_hydration …`): CN22 and the §11.5 recovery mark regions hydrated
+	// no_discard_passdown is not optional here (CN18 step 3 and [D7]: the
+	// table's `2 no_hydration …`): CN22 and the recovery of architecture.md,
+	// Clone crash recovery, mark regions hydrated
 	// by `blkdiscard`ing them, and with passdown enabled dm-clone would remap
 	// those discards to the destination raid0 — unmapping the very blocks the
 	// destination already owns, and any host write that landed on a hydrated
@@ -474,7 +480,8 @@ func (s *CnAgentServer) cloneStatus(
 }
 
 // parkTdNsDevs reloads every ns-dev backed by one td onto its dm-error, so the
-// td serves nothing while a clone is (re)built over it (§11.5 step 1).
+// td serves nothing while a clone is (re)built over it (architecture.md,
+// Clone crash recovery, step 1).
 func (s *CnAgentServer) parkTdNsDevs(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -493,7 +500,7 @@ func (s *CnAgentServer) parkTdNsDevs(
 }
 
 // probeCloneDm is the read-only view of a dm-clone: the raw status line rides
-// into details (§9.5).
+// into details (architecture.md, Live-state reporting).
 func (s *CnAgentServer) probeCloneDm(
 	ctx context.Context,
 	cp *clonePlan,

@@ -57,7 +57,8 @@ func TestFailoverWithTransferReleasesTheStack(t *testing.T) {
 			t.Fatalf("%s survived the demotion", name)
 		}
 	}
-	// A standby keeps the transfer exported, error-backed (§3.4).
+	// A standby keeps the transfer exported, error-backed (architecture.md,
+	// Standby cntlr).
 	table := node.dms[xferName(srv, testXfer)].table
 	if !strings.Contains(table, " error") {
 		t.Fatalf("the standby's transfer device is %q, want an error table",
@@ -227,7 +228,8 @@ func TestStoppedPassDemotesATransferWithADepartedOrigin(t *testing.T) {
 
 // CN22/CN19: a clone the role or the level merely suppresses keeps its chunk
 // files. Deleting them made the worker re-push forever and left a promoted
-// standby's §11.5 rebuild nothing to skip with.
+// standby's rebuild (architecture.md, Clone crash recovery) nothing to skip
+// with.
 func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 	srv, node := newTestServer(t)
 	// A standby that nonetheless carries the clone in its desired state.
@@ -263,7 +265,8 @@ func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 	}
 }
 
-// §11.5 keys off missing dm-clone *metadata*, not off the metadata wrapper: a
+// The recovery of architecture.md, Clone crash recovery, keys off missing
+// dm-clone *metadata*, not off the metadata wrapper: a
 // pass that created the wrapper and then failed to build the dm-clone leaves a
 // freshly discarded slot that dm-clone would format fresh, with nothing
 // hydrated.
@@ -307,7 +310,8 @@ func removeCloneDevice(node *fakeNode, srv *CnAgentServer) {
 	delete(node.devSize, "/dev/mapper/"+name)
 }
 
-// §11.5: the destination bitmaps must be applied in full before the dm-clone
+// architecture.md, Clone crash recovery: the destination bitmaps must be
+// applied in full before the dm-clone
 // handles any IO. A read that fails must therefore leave nothing able to serve
 // or hydrate — not enable hydration and report OK.
 func TestCloneRecoveryFailsClosed(t *testing.T) {
@@ -340,7 +344,8 @@ func TestCloneRecoveryFailsClosed(t *testing.T) {
 	}
 }
 
-// §11.1.1 puts "one leg available" in case 2 (assemble, let mdadm decide),
+// architecture.md, "Make sure all groups are available", puts "one leg
+// available" in case 2 (assemble, let mdadm decide),
 // never in case 1: creating with --assume-clean over the available subset
 // would resync the unavailable survivor's data away.
 func TestGroupNeverCreatesOverASubsetOfLegs(t *testing.T) {
@@ -442,7 +447,8 @@ func TestAllowAnyHostIsWrittenAfterTheUnlink(t *testing.T) {
 // converge reports every cntlr-scoped resource RES_STATUS_MISSING /
 // "sp_level" rather than leaving it out, because "a worker cannot tell an
 // omitted resource from one the agent never looked at" (CN19) and because
-// show_info promises the complete current CntlrInfo (§9.7). A probe that
+// show_info promises the complete current CntlrInfo (architecture.md, Check
+// streams). A probe that
 // returned early skipped seven row families the converge fills.
 func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 	srv, _ := newTestServer(t)

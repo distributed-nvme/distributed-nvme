@@ -12,9 +12,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The etcd-backed half of the §13 list (EU7): everything here goes through
-// the real etcdutil client and the real model ops, and skips cleanly when no
-// etcd binary is available.
+// The etcd-backed half of the unit tests (EU7, MD9): everything here goes
+// through the real etcdutil client and the real model ops, and skips cleanly
+// when no etcd binary is available.
 
 // TestHealthWritesThroughModel checks HL1/HL3 against real etcd: the monitor
 // writes only on a transition, model.SetDnErrEpoch never restarts the
@@ -42,7 +42,7 @@ func TestHealthWritesThroughModel(t *testing.T) {
 	d.conf.entries[cid] = testClusterConf()
 
 	owner := newDnMonitor(d, cid, 11, func() string { return addr })
-	// A second owner of the same DN, the accepted overlap of §0 item 4.
+	// A second owner of the same DN, the accepted overlap of VW7.
 	peer := newDnMonitor(d, cid, 11, func() string { return addr })
 
 	owner.observe(ctx, healthUnreachable, "")
@@ -204,8 +204,9 @@ func TestReactionCnScanThroughModel(t *testing.T) {
 }
 
 // TestConfCacheAgainstEtcd runs the RW21 cache over the real client: scan,
-// watch, key -> id derivation, delete, and the §7 rule that the value a reader
-// gets is the value that was written — no default is applied on the way out.
+// watch, key -> id derivation, delete, and the rule of architecture.md, Common
+// validation, that the value a reader gets is the value that was written — no
+// default is applied on the way out.
 func TestConfCacheAgainstEtcd(t *testing.T) {
 	cli := newTestClient(t)
 	captureLogs(t)
@@ -235,8 +236,9 @@ func TestConfCacheAgainstEtcd(t *testing.T) {
 
 	// Deliberately NOT a conf the gateway could have written: no
 	// health_check_conf at all. It comes back exactly as it went in, over the
-	// real client and the real decode path, because §7 moved every default to
-	// the write side and the cache resolves nothing.
+	// real client and the real decode path, because architecture.md, Common
+	// validation, moved every default to the write side and the cache resolves
+	// nothing.
 	stored := &pb.ClusterConf{
 		CreationEpoch: epoch,
 		QosRatio:      &pb.QosRatio{BytesPerIops: 512},
@@ -268,10 +270,10 @@ func TestConfCacheAgainstEtcd(t *testing.T) {
 	})
 }
 
-// TestVoteWorkerAgainstEtcd is the end-to-end smoke of §6 over real etcd: the
-// worker registers, observes its own key in its own first scan, drives
-// nothing for one grace window, then owns every shard of its role, and
-// deletes its registration on a graceful stop (CM5).
+// TestVoteWorkerAgainstEtcd is the end-to-end smoke of the vote worker
+// (VW1-VW11) over real etcd: the worker registers, observes its own key in its
+// own first scan, drives nothing for one grace window, then owns every shard of
+// its role, and deletes its registration on a graceful stop (CM5).
 func TestVoteWorkerAgainstEtcd(t *testing.T) {
 	cli := newTestClient(t)
 	logs := captureLogs(t)

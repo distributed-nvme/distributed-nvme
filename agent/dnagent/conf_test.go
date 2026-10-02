@@ -19,7 +19,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// §6.23 — a zero conf member is refused (DN4, §2.1)
+// A zero conf member is refused (DN4; dnagent.md,
+// Shared mechanism — package `agent`)
 // ---------------------------------------------------------------------------
 //
 // extent_size is what this disk's header was formatted with and what every
@@ -31,12 +32,13 @@ import (
 //
 // The message is asserted verbatim and is the same literal
 // model/capacity_test.go asserts of model.ValidateClusterConf, which is what
-// keeps the two deliberate copies of the rule in step (§2.1).
+// keeps the two deliberate copies of the rule in step (dnagent.md,
+// Shared mechanism — package `agent`).
 
 const msgNoExtentSize = "invalid stored conf: dn_bin_conf.extent_size is zero"
 
 // logCapture reads back the records the dn agent emits for itself. The buffer
-// is mutex-guarded because slog.Default is process-wide and the §9.4 zeroing
+// is mutex-guarded because slog.Default is process-wide and the DN9 zeroing
 // goroutines may be logging.
 type logCapture struct {
 	mu  sync.Mutex
@@ -87,7 +89,8 @@ func captureLogs(t *testing.T) *logCapture {
 	return capture
 }
 
-// assertRefusalRecord is the one Error record §7 asks for: msg
+// assertRefusalRecord is the one Error record
+// architecture.md, Common validation, asks for: msg
 // msgInvalidStoredConf carrying the validator's own text and the ids that
 // name what an operator has to go look at.
 func assertRefusalRecord(
@@ -217,7 +220,8 @@ func TestSyncupDnRefusesAZeroExtentSize(t *testing.T) {
 }
 
 // TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown is the startup
-// half of DN2's §7 refusal, and the shape of it is the whole point.
+// half of DN2's refusal (architecture.md, Common validation), and the shape
+// of it is the whole point.
 //
 // The obvious implementation — skip the file — is DESTRUCTIVE: with no dn-*
 // file left unread, Reconcile's side loop reads a missing DN record as "this
@@ -329,7 +333,7 @@ func TestSyncupDnAcceptsAConcreteExtentSize(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.25 — an unreadable store file deletes nothing it might own (DN2)
+// An unreadable store file deletes nothing it might own (DN2)
 // ---------------------------------------------------------------------------
 
 // newDiskNode is a fake node holding the --disk device and the nvmet root and
@@ -343,7 +347,7 @@ func newDiskNode() *fakeNode {
 }
 
 // TestReconcileKeepsTheSidesOfAnUnreadableDnFile pins the other dn-* file
-// DN2 cannot use, beside §6.23's zero conf: one that does not decode. There
+// DN2 cannot use, beside DN4's zero conf: one that does not decode. There
 // is no request to load, so the DN is skipped — and the skip used to send
 // every side of it down the pointer-absent branch, which deleted each side's
 // state file and bitmap chunks for want of a list that could not be read. Now
@@ -718,7 +722,7 @@ func TestReconcileKeepsTheChunksOfAnUnreadableSideFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.26 — an interrupted write is never loaded (SH6, DN2)
+// An interrupted write is never loaded (SH6, DN2)
 // ---------------------------------------------------------------------------
 
 // TestReconcileNeverLoadsAnInterruptedWrite: a restart keeps the committed

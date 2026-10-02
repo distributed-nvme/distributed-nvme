@@ -1,4 +1,5 @@
-// Package dnagent implements the dn policy of dnagent.md §4: the
+// Package dnagent implements the dn policy of
+// dnagent.md, The dn role — package `dnagent`: the
 // DiskNodeAgent service — which disk-metadata records, dm tables and nvmet
 // objects a disk node builds, and when. All mechanism (bootstrap, local store, revision gate,
 // locks, ResInfo tracking, OS wrappers, bitmap store) comes from package
@@ -35,17 +36,18 @@ type DnAgentServer struct {
 	disk string
 	port agent.PortConf
 
-	// fenceWait is the §11.2 src-cutover grace window (common.SuspendSeconds).
+	// fenceWait is the src-cutover grace window of architecture.md, Migration,
+	// src step 2 (common.SuspendSeconds).
 	// It is a field rather than a constant so tests can shorten it; nothing
 	// else ever changes it.
 	fenceWait time.Duration
 
-	// zeroRetryInterval paces the §9.4 background zeroing loop's retries
+	// zeroRetryInterval paces the DN9 background zeroing loop's retries
 	// (common.DnZeroRetryInterval). Field rather than constant for the same
 	// reason as fenceWait: no unit test can wait out the production value.
 	zeroRetryInterval time.Duration
 
-	// zeroSlots holds one token per §9.4 zeroing batch in flight, so at most
+	// zeroSlots holds one token per zeroing batch in flight, so at most
 	// common.DnZeroConcurrency of them run at once on this agent however many
 	// of its sides are zeroing (DN9).
 	zeroSlots chan struct{}
@@ -67,7 +69,7 @@ type DnAgentServer struct {
 
 	// bg tracks every background goroutine that owns a child process, so
 	// agent.Serve can join them after GracefulStop and no orphan
-	// `blkdiscard --zeroout` ever outlives the agent (§9.4, SH27).
+	// `blkdiscard --zeroout` ever outlives the agent (DN9, SH27).
 	bg sync.WaitGroup
 
 	// mu guards the in-memory mirrors of the local store below: which DNs
@@ -79,13 +81,13 @@ type DnAgentServer struct {
 	sides map[string]*sideState
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the DN8
-	// background retries and the §9.4 zeroing loops hang off it so shutdown
+	// background retries and the DN9 zeroing loops hang off it so shutdown
 	// stops them.
 	rootCtx context.Context
 }
 
-// WaitBackground joins the dn background goroutines enrolled in bg — the §9.4
-// zeroing loops and the DN8 connect retries. The §11.2 fence timer is the
+// WaitBackground joins the dn background goroutines enrolled in bg — the DN9
+// zeroing loops and the DN8 connect retries. The DN12 fence timer is the
 // deliberate carve-out (SH27); rootCtx cancellation is what stops that one.
 // cmd/dnv-agent passes it to agent.Serve, which cancels rootCtx and calls it
 // after GracefulStop has drained the last RPC (SH27).
@@ -135,7 +137,7 @@ type sideState struct {
 	retrying bool
 	cancel   context.CancelFunc
 
-	// zeroing/zeroCancel/zeroDone drive the §9.4 background side-zeroing
+	// zeroing/zeroCancel/zeroDone drive the DN9 background side-zeroing
 	// goroutine. zeroDone is closed by the goroutine on exit, which is what
 	// makes cancel-and-wait possible before the side device is removed — its
 	// `blkdiscard --zeroout` child holds that device open.
@@ -148,7 +150,8 @@ type sideState struct {
 	zeroErr error
 
 	// fenceAt is when this side's per-CN dm-linears were suspended for the
-	// §11.2 src cutover; zero when no fence is in progress. fenceTimer
+	// src cutover (architecture.md, Migration, src step 2); zero when no fence
+	// is in progress. fenceTimer
 	// re-runs the converge at the end of the window so the RPC never waits
 	// for it. Both are in-memory only: after a restart a suspended linear
 	// has no recorded start, and DN12 treats a side in which the restart
@@ -279,10 +282,10 @@ func (s *DnAgentServer) sideKeysOf(clusterId, dnId uint64) []string {
 // GetDnSize returns the byte size of the --disk device's **data area** — the
 // raw size minus DnDataOffset, the fixed [D13] prefix the header, the two
 // volume-table slots and the clone-metadata area occupy. The CP divides this
-// by extent_size to get total_ext_cnt (§6.1), so there is no further
-// subtraction anywhere. It has no AgentReply, so failure travels in the gRPC
-// status (§9.1); dn_id is for logging only, and the call takes no lock and
-// touches no store (DN3).
+// by extent_size to get total_ext_cnt (architecture.md, Size → extents), so
+// there is no further subtraction anywhere. It has no AgentReply, so failure
+// travels in the gRPC status (architecture.md, Common agent rules); dn_id is
+// for logging only, and the call takes no lock and touches no store (DN3).
 func (s *DnAgentServer) GetDnSize(
 	ctx context.Context,
 	req *pb.GetDnSizeRequest,

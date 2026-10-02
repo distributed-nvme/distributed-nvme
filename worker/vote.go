@@ -18,14 +18,16 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The "reason" attribute of the §12 "worker fenced" record (VW8).
+// The "reason" attribute of the "worker fenced" record (VW8; dnv-worker.md, Log
+// records).
 const (
 	fenceHeartbeatStalled = "heartbeat_stalled"
 	fenceWatchStalled     = "watch_stalled"
 	fenceKeyDeleted       = "key_deleted"
 )
 
-// The "state" attributes of the §12 membership records (VW3, VW6).
+// The "state" attributes of the membership records (VW3, VW6; dnv-worker.md,
+// Log records).
 const (
 	stateLive      = "live"
 	stateDead      = "dead"
@@ -296,7 +298,8 @@ type incarnation struct {
 }
 
 // markRegistered reports whether this is the FIRST successful put of a role,
-// which is what the §12 "worker registered" record marks (VW2).
+// which is what the "worker registered" record marks (VW2; dnv-worker.md, Log
+// records).
 func (inc *incarnation) markRegistered(role string) bool {
 	inc.regMu.Lock()
 	defer inc.regMu.Unlock()
@@ -317,10 +320,10 @@ func (inc *incarnation) deferFence(reason string) {
 }
 
 // ---------------------------------------------------------------------------
-// The vote worker (§6)
+// The vote worker (VW1-VW11)
 // ---------------------------------------------------------------------------
 
-// voteWorker is the per-process vote layer (§6). It owns the seed, the
+// voteWorker is the per-process vote layer (VW1-VW11). It owns the seed, the
 // heartbeat loop, one registry watch per role, the per-registration state
 // machines, the effective membership of every role, the ownership computation
 // and the lifecycle of the shard workers.
@@ -357,8 +360,8 @@ func newVoteWorker(d *deps, seed string) *voteWorker {
 	}
 }
 
-// currentSeed is the seed of the live incarnation, which the §12
-// "worker stopping" record carries (CM5/CM6).
+// currentSeed is the seed of the live incarnation, which the "worker stopping"
+// record carries (CM5/CM6; dnv-worker.md, Log records).
 func (v *voteWorker) currentSeed() string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -395,7 +398,7 @@ func (v *voteWorker) run(ctx context.Context) {
 	}
 }
 
-// startIncarnation registers under a seed and starts observing (§6.2-§6.4).
+// startIncarnation registers under a seed and starts observing (VW2-VW7).
 // The FIRST put of every role happens here, before the observers scan, so the
 // worker's own registration is part of its own first scan or its own first
 // watch events (VW2/VW3).
@@ -510,7 +513,7 @@ func (v *voteWorker) putAll(inc *incarnation) bool {
 // this tick. Folding a successful put in first would make (a) true only on a
 // tick whose put failed, and the case VW8(a) calls out by name — a process
 // stopped by SIGSTOP or a paused VM, whose resume tick's put SUCCEEDS after a
-// long monotonic gap (Appendix A, t=800) — would be undetectable.
+// long monotonic gap — would be undetectable.
 func (v *voteWorker) onHeartbeat(msg hbMsg) {
 	inc := v.inc
 	if inc == nil || msg.gen != inc.gen {
@@ -720,8 +723,7 @@ func (v *voteWorker) onWatch(msg watchMsg) {
 	// worker that was stopped (SIGSTOP, a paused VM) comes back to a peer's
 	// VW6 garbage-collecting delete of its key and to its own catch-up put at
 	// the same moment; the fence must then name the cause — its heartbeat
-	// stalled for the dead threshold — and not the consequence (Appendix A
-	// t=800, §14.11 case E step 7).
+	// stalled for the dead threshold — and not the consequence (VW8 (a)).
 	if own && v.checkHeartbeatStall(inc, now) {
 		return
 	}
@@ -753,7 +755,7 @@ func (v *voteWorker) onWatch(msg watchMsg) {
 			// apart. Keeping one would be worse than useless: a credit taken
 			// for a delete whose event never arrives outlives it and swallows
 			// the next, genuine, peer delete — exactly the split-brain VW8(c)
-			// exists to close (Appendix B).
+			// exists to close (dnv-worker.md, Known limits).
 			v.fence(inc, fenceKeyDeleted)
 			return
 		}
@@ -901,9 +903,9 @@ func (v *voteWorker) observed(
 // It is idempotent, because VW7 arms a timer for targets that are already the
 // committed state (see observed): such a commit is "a no-op except for the VW6
 // garbage collection". It therefore neither logs "membership committed" nor
-// recomputes ownership — nothing about the membership changed, and §13 keeps
-// the promise that a flapping key never commits — while the collection of a
-// nonmember target still runs.
+// recomputes ownership — nothing about the membership changed, and the unit
+// tests keep VW5's promise that a flapping key never commits — while the
+// collection of a nonmember target still runs.
 //
 // The ONE registration it never collects is this worker's own: that key's owner
 // is alive and still heartbeating, so the commit takes VW8's exit instead
@@ -955,17 +957,18 @@ func (v *voteWorker) commit(
 // it would un-register a live worker, drop it out of its own effective set,
 // release every shard with no "worker fenced" record, and let the next tick
 // re-create the key — peers would see a delete and an appear for a seed that
-// never stopped running. It also defeats the §12 observability contract, where
-// "worker fenced" is what an operator greps to see a worker leave. So the
-// commit is abandoned and VW8's single "the fleet gave up on me" path runs
-// instead. It is reachable whenever the grace window is short enough to close
-// before the next heartbeat tick's VW8 check, which CM3 explicitly permits
-// (a grace window below the dead threshold is "legal but pointless").
+// never stopped running. It also defeats the observability contract of
+// dnv-worker.md, Log records, where "worker fenced" is what an operator greps
+// to see a worker leave. So the commit is abandoned and VW8's single "the fleet
+// gave up on me" path runs instead. It is reachable whenever the grace window
+// is short enough to close before the next heartbeat tick's VW8 check, which
+// CM3 explicitly permits (a grace window below the dead threshold is "legal but
+// pointless").
 //
 // The reason names the CAUSE, not the consequence. VW8 (a) and (b) are re-tested
 // first, in that order — this observer stopped seeing its own key because its
 // heartbeat stopped reaching etcd, or because its watch stopped echoing its
-// puts — which is also what keeps §14.11 case E step 7 true: a resumed
+// puts — which is also what keeps the vote case (VW8 (a)) true: a resumed
 // SIGSTOPped worker fences as heartbeat_stalled whichever of its expired timers
 // the loop drains first. Only when neither holds is the key genuinely gone from
 // the registry without this process deleting it — VW8(c)'s fact, learned from a
@@ -1015,7 +1018,7 @@ func (v *voteWorker) recomputeOwnership(inc *incarnation, rs *roleState) {
 // do) consider it dead. It is judged on monotonic readings, which is what
 // catches a process that was stopped (SIGSTOP, a paused VM): the clock
 // advanced while it was frozen, so the resume tick measures the whole gap
-// even though its own put succeeds (VW4, Appendix A t=800).
+// even though its own put succeeds (VW4).
 //
 // It reports whether the worker fenced, after which the caller must not touch
 // the old incarnation any more.
@@ -1066,7 +1069,7 @@ func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 //
 // The shard workers are stopped and JOINED before the new incarnation starts,
 // so every "shard released" of the old seed is logged before anything is
-// driven under the new one (§14).
+// driven under the new one (dnv-worker.md, Integration test plan).
 func (v *voteWorker) fence(inc *incarnation, reason string) {
 	seed, err := newSeed()
 	if err != nil {

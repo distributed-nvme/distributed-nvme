@@ -11,10 +11,11 @@ import (
 )
 
 // SectorSize is the device-mapper unit: every table size and offset is in
-// 512-byte sectors (architecture.md Appendix A).
+// 512-byte sectors.
 const SectorSize = 512
 
-// Dm wraps the Appendix A device-mapper command patterns.
+// Dm wraps the device-mapper command patterns of
+// dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`.
 type Dm struct {
 	osBase
 }
@@ -127,7 +128,8 @@ func (d *Dm) Table(ctx context.Context, name string) ([]DmTarget, error) {
 }
 
 // Status returns the raw `dmsetup status` output (the dm-clone hydration
-// line rides into ResInfo.details verbatim, §9.5).
+// line rides into ResInfo.details verbatim; architecture.md,
+// Live-state reporting).
 func (d *Dm) Status(ctx context.Context, name string) (string, error) {
 	stdout, stderr, _, err := d.run(ctx, "dmsetup", "status", name)
 	if err != nil {
@@ -182,9 +184,10 @@ func (d *Dm) LoadTable(
 	return d.runOk(ctx, "dmsetup", "reload", name, "--table", table)
 }
 
-// Reload swaps a live device's table: suspend, load, resume (Appendix A),
-// returning at the first command that fails. It fails CLOSED (decided
-// 2026-09-29, dnagent.md §2.8): a load that fails returns its error with the
+// Reload swaps a live device's table: suspend, load, resume, returning at the
+// first command that fails. It fails CLOSED (decided 2026-09-29;
+// dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`,
+// "A reload fails closed"): a load that fails returns its error with the
 // device still suspended on its old table, and nothing here resumes it. After a
 // refused load a resume would reinstate that old table, and where the reload
 // retires it — a fence or a park onto a dm-error ([D12]) — the device would
@@ -195,11 +198,13 @@ func (d *Dm) LoadTable(
 // the kernel treats a suspend of an already suspended device as a no-op, so
 // running Reload again retries just the load and the resume.
 // Short of a failed command or a restarted agent, no dnv suspension outlives
-// the operation that took it: the dn's §11.2 cutover window is bounded by
+// the operation that took it: the dn's cutover window (architecture.md,
+// Migration, src step 2) is bounded by
 // `SuspendSeconds` and ends in a reload — which is what errors the deferred IO
 // instead of replaying it — and the cn's only remaining one is CN14's snapshot
-// quiesce, resumed inside the same converge pass. The §11.6 namespace
-// suspension that used to be unbounded is now a *park*: a reload onto the td's
+// quiesce, resumed inside the same converge pass. The namespace suspension
+// (architecture.md, Namespace suspend semantics) that used to be unbounded is
+// now a *park*: a reload onto the td's
 // dm-error, live (cnagent.md CN16).
 func (d *Dm) Reload(
 	ctx context.Context,
@@ -287,7 +292,8 @@ func (d *Dm) DevNo(ctx context.Context, path string) (string, error) {
 }
 
 // BlkDiscardRange discards one byte range of a device — how the agents mark
-// dm-clone regions "already hydrated" (§9.6, §11.4).
+// dm-clone regions "already hydrated" (architecture.md, Bitmap push protocol
+// and raid0 bitmap math).
 func (d *Dm) BlkDiscardRange(
 	ctx context.Context,
 	dev string,
@@ -300,8 +306,9 @@ func (d *Dm) BlkDiscardRange(
 		dev)
 }
 
-// BlkZeroout writes zeros over one byte range of a device — the §9.4 side
-// provisioning primitive ([D15]). Unlike BlkDiscardRange (a
+// BlkZeroout writes zeros over one byte range of a device — the side
+// provisioning primitive (architecture.md, Side provisioning protocol;
+// [D15]). Unlike BlkDiscardRange (a
 // metadata-only "mark hydrated" hint) this is a *guaranteed* zero write:
 // discard-reads-zeros is not a hardware guarantee (the kernel dropped
 // discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is optional) and dnv is
@@ -342,7 +349,8 @@ const sysfsBlockDir = "/sys/class/block"
 
 // WriteZeroesMaxBytes reads
 // /sys/class/block/{kname}/queue/write_zeroes_max_bytes for dev — the DN5
-// fail-fast check behind §9.4's fast-Write-Zeroes assumption. A 0 there means
+// fail-fast check behind the fast-Write-Zeroes assumption of architecture.md,
+// Side provisioning protocol. A 0 there means
 // the kernel would fall back to writing zero pages at bulk speed, so the
 // assumption cannot hold and the DN must be taken out of allocation.
 //
@@ -385,7 +393,9 @@ func (d *Dm) WriteZeroesMaxBytes(
 }
 
 // ---------------------------------------------------------------------------
-// Table builders (Appendix A). Device references are "major:minor" strings.
+// Table builders (dnagent.md,
+// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`). Device references are
+// "major:minor" strings.
 // ---------------------------------------------------------------------------
 
 func ErrorTable(sectors uint64) string {
@@ -404,7 +414,8 @@ func FlakeyErrorWritesTable(sectors uint64, dev string) string {
 	return fmt.Sprintf("0 %d flakey %s 0 0 1 1 error_writes", sectors, dev)
 }
 
-// The remaining Appendix A targets — striped, thin-pool, thin — have no
+// The remaining dm targets of architecture.md, Data-plane device stacks —
+// striped, thin-pool, thin — have no
 // builder here on purpose. dm-thin and dm-stripe print their tables back with
 // status-derived arguments appended, so the cn role compares a *prefix* of the
 // arguments rather than a whole string; it therefore builds those tables from
@@ -457,20 +468,22 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 // reachable through `dmsetup message` on a live device, which is how they are
 // changed later.
 //
-// noDiscardPassdown matters because §9.6/§11.4 use `blkdiscard` on the
+// noDiscardPassdown matters because architecture.md, Bitmap push protocol and
+// raid0 bitmap math, use `blkdiscard` on the
 // dm-clone as a metadata-only "mark this region hydrated" primitive. dm-clone
 // enables discard passdown by default whenever the destination advertises a
 // discard granularity no larger than a region, and then *also* remaps the
 // discard to the destination — which would unmap exactly the blocks the
 // destination already owns. Every dnv caller therefore passes true, with no
-// exceptions: on the cn clone because the §9.6 chunk pushes
-// mark regions hydrated, and on the dn migration because after the §11.2
-// cutover host IO flows through the dst dm-clone, so a chunk whose bits were
+// exceptions: on the cn clone because the chunk pushes of Bitmap push protocol
+// mark regions hydrated, and on the dn migration because after the cutover
+// (architecture.md, Migration, dst step 5) host IO flows through the dst
+// dm-clone, so a chunk whose bits were
 // read from the CN thin metadata *before* a host write can arrive afterwards
 // and blkdiscard a region the host has already written — with passdown that
 // discard would reach the dst side device and destroy the only copy of an
-// acknowledged write (cnagent.md CN18 step 3, Appendix A's
-// `2 no_hydration no_discard_passdown`, [D7]).
+// acknowledged write (cnagent.md CN18 step 3, dnagent.md DN13 and [D7]: the
+// features `2 no_hydration no_discard_passdown`).
 func CloneTable(
 	sectors uint64,
 	metaDev string,

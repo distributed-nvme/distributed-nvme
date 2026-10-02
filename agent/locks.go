@@ -2,8 +2,8 @@ package agent
 
 import "sync"
 
-// LockSet is the node/object lock hierarchy (dnagent.md §2.6). Lock order is
-// always node before object; object locks are created on first use and
+// LockSet is the node/object lock hierarchy (dnagent.md SH10-SH13). Lock order
+// is always node before object; object locks are created on first use and
 // dropped only during teardown while the node write lock is held.
 //
 // Node write lock: the startup reconcile and the node-level syncup (SH10).

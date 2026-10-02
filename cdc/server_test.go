@@ -105,7 +105,7 @@ func TestHostStateDroppedAtLastDisconnect(t *testing.T) {
 			"a hostnqn closed, want 2", n)
 	}
 
-	// The last one takes the state with it (§0 #6: this is what restarts
+	// The last one takes the state with it (DS7: this is what restarts
 	// GENCTR for the next connection).
 	a2.close()
 	logs.waitFor(t, msgHostDisconnected, 2)
@@ -127,7 +127,7 @@ func TestHostStateDroppedAtLastDisconnect(t *testing.T) {
 	}
 }
 
-// TestReconnectingHostRestartsGenCtr proves §0 #6 through the socket: a
+// TestReconnectingHostRestartsGenCtr proves DS7 through the socket: a
 // hostnqn whose last connection dropped is a new host when it comes back, so
 // its GENCTR starts at 1 again even though the served entries moved on.
 func TestReconnectingHostRestartsGenCtr(t *testing.T) {
@@ -155,8 +155,9 @@ func TestReconnectingHostRestartsGenCtr(t *testing.T) {
 }
 
 // TestServerShutdownClosesEveryConnection proves NP1's SIGTERM behavior and
-// the §7 reason it logs: the listener stops accepting, every live connection
-// is closed as `shutdown`, and the host states go with them.
+// the reason it logs (cdc.md, Log records): the listener stops accepting,
+// every live connection is closed as `shutdown`, and the host states go with
+// them.
 func TestServerShutdownClosesEveryConnection(t *testing.T) {
 	logs := captureLogs(t)
 	ts := startServer(t)

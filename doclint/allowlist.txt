@@ -1,0 +1,1 @@
+# doclint exceptions: "<check> <token>", check in ids|ident|path|value|history

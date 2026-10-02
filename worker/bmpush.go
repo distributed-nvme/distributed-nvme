@@ -14,21 +14,23 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/model"
 )
 
-// The bitmap pushes of dnv-worker.md §10 (BM1-BM6), the worker half of
-// architecture.md §9.6: the skip bitmaps of §8.9/§8.11 reach the data plane
-// exclusively through the unary PushMigrBitmap / PushCloneBitmap RPCs, never
-// through a Syncup*.
+// The bitmap pushes of dnv-worker.md (BM1-BM6), the worker half of
+// architecture.md, Bitmap push protocol: the skip bitmaps of its Clones and
+// Migrations reach the data plane exclusively through the unary
+// PushMigrBitmap / PushCloneBitmap RPCs, never through a Syncup*.
 //
-// One pusher belongs to one sp child (a side or a cntlr, §8.4) and sequences
+// One pusher belongs to one sp child (a side or a cntlr, RW14) and sequences
 // that child's chunks: one push in flight per migration / clone, ascending
 // (src_slice_idx, bm_idx), the next part only after a code == 0 reply (BM3).
 // That order is load-bearing for a MIGRATION, whose chunks concatenate in
-// bm_idx order; a clone's chunks are self-positioned pairs (§9.6), so the same
-// order is merely deterministic there. Different migrations / clones of one
-// child push independently and may run concurrently toward the same agent,
-// which is what §9.6 step 4 allows and step 3 bounds.
+// bm_idx order; a clone's chunks are self-positioned pairs (architecture.md,
+// Bitmap push protocol), so the same order is merely deterministic there.
+// Different migrations / clones of one child push independently and may run
+// concurrently toward the same agent, which is what that protocol's dnv-worker
+// side allows in its step 4 and bounds in its step 3.
 
-// msgBitmapPushed is the §12 record of one delivered chunk (BM3).
+// msgBitmapPushed is the record of one delivered chunk (BM3; dnv-worker.md, Log
+// records).
 const msgBitmapPushed = "bitmap pushed"
 
 // msgBitmapPushFailed is the non-normative companion of msgBitmapPushed: a
@@ -37,7 +39,8 @@ const msgBitmapPushed = "bitmap pushed"
 // code 0.
 const msgBitmapPushFailed = "bitmap push failed"
 
-// The "kind" attribute of the §12 "bitmap pushed" record (BM1).
+// The "kind" attribute of the "bitmap pushed" record (BM1; dnv-worker.md, Log
+// records).
 const (
 	bmKindMigr  = "migr"
 	bmKindClone = "clone"
@@ -58,7 +61,7 @@ type bmPart struct {
 	sliceIdx uint32
 	// bmIdx is the chunk index: the append sequence for a migration, the
 	// chunk's fixed position WITHIN source slice sliceIdx's bitmap for a
-	// clone (§9.6).
+	// clone (architecture.md, Bitmap push protocol).
 	bmIdx  uint32
 	bitmap []byte
 }
@@ -66,7 +69,7 @@ type bmPart struct {
 // bmPlan is the work one Syncup* reply's diff produced for ONE migration or
 // clone (BM2): the chunks the agent does not hold, ascending by
 // (src_slice_idx, bm_idx), which is what makes a migration's chunk
-// concatenation interpretable (§9.6).
+// concatenation interpretable (architecture.md, Bitmap push protocol).
 //
 // A plan carries no revision. A push is position-addressed data keyed by an
 // id that is never reused, it never advances the agent's stored revision, and
@@ -101,20 +104,22 @@ func memoKeyOf(resId uint64, chunk model.BmChunk) bmMemoKey {
 // bmPusherParams is everything a pusher needs at construction. fetch and
 // deliver are the two kind-specific halves — where the chunk comes from and
 // which RPC carries it — so that BM1-BM6 are implemented once for both kinds
-// and the §13 tests can drive them without an agent.
+// and the unit tests can drive them without an agent.
 type bmPusherParams struct {
 	deps *deps
 	seed string
-	// kind is bmKindMigr or bmKindClone, the §12 "kind" attribute.
+	// kind is bmKindMigr or bmKindClone, the "kind" attribute (dnv-worker.md,
+	// Log records).
 	kind string
 	// addrPort is the agent this child drives; BM4's target rule is enforced
 	// by the caller, which submits a plan only for the destination side's DN
 	// resp. the primary cntlr's CN.
 	addrPort string
-	// idAttr is the name of the resource-id attribute of the §12 record:
-	// "migr_id" or "clone_id".
+	// idAttr is the name of the resource-id attribute of the record
+	// (dnv-worker.md, Log records): "migr_id" or "clone_id".
 	idAttr string
-	// ids are the object's own ids, as the §12 records carry them.
+	// ids are the object's own ids, as the records of dnv-worker.md, Log
+	// records, carry them.
 	ids []slog.Attr
 	// fetch reads one chunk's VALUE out of etcd (BM1), at the pair that
 	// addresses it. It reports found = false when the key is gone.
@@ -133,7 +138,7 @@ type bmPusherParams struct {
 	) (uint32, string, error)
 }
 
-// bmPusher is the push engine of one sp child (§10). Its public surface is
+// bmPusher is the push engine of one sp child (BM1-BM6). Its public surface is
 // two calls from the child's loop goroutine — missing (BM2/BM5) and submit
 // (BM3) — plus stop, which the coordinator makes after joining the child's
 // loop. A failure raises no flag and re-arms nothing: it is logged, and the
@@ -177,7 +182,7 @@ type bmPusher struct {
 	stopped  bool
 }
 
-// newBmPusher builds one child's push engine (§10).
+// newBmPusher builds one child's push engine (BM1-BM6).
 func newBmPusher(p bmPusherParams) *bmPusher {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &bmPusher{
@@ -397,8 +402,9 @@ func (p *bmPusher) pushOne(
 	slog.InfoContext(ctx, msgBitmapPushed, attrs...)
 	if code != 0 {
 		// The agent does not know the object, or the chunk's address is out
-		// of range for it. The §12 record above carries only the code, so the
-		// agent's own explanation is logged next to it and the plan ends.
+		// of range for it. The "bitmap pushed" record above (dnv-worker.md, Log
+		// records) carries only the code, so the agent's own explanation is
+		// logged next to it and the plan ends.
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
 			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.Uint64("code", uint64(code)),
@@ -439,9 +445,9 @@ func (p *bmPusher) connect() (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
-// attrs are the §12 "bitmap pushed" attributes of one chunk: kind, the
-// object's ids, the resource id and the chunk's address (BM1). src_slice_idx
-// is the clone chunk's source slice and always 0 for kind=migr.
+// attrs are the "bitmap pushed" attributes (dnv-worker.md, Log records) of one
+// chunk: kind, the object's ids, the resource id and the chunk's address (BM1).
+// src_slice_idx is the clone chunk's source slice and always 0 for kind=migr.
 func (p *bmPusher) attrs(resId uint64, sliceIdx uint32, bmIdx uint32) []any {
 	attrs := make([]any, 0, len(p.ids)+5)
 	attrs = append(attrs, slog.String("kind", p.kind))

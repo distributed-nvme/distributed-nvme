@@ -113,7 +113,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	})
 	// Two chunks of source slice 0 and one of source slice 1: the fixture's
 	// (1, 0) and (0, 0) share a bm_idx and are still two chunks, because a
-	// clone chunk is addressed by the pair (architecture.md §9.6).
+	// clone chunk is addressed by the pair (architecture.md, Bitmap push protocol).
 	for _, pair := range [][2]uint32{{0, 0}, {0, 1}, {1, 0}} {
 		mustPut(
 			t, cli,
@@ -157,7 +157,7 @@ func bmIndexes(chunks []BmChunk) []uint32 {
 }
 
 // bmPairs renders a clone chunk list as the (src_slice_idx, bm_idx) addresses
-// it carries (architecture.md §9.6).
+// it carries (architecture.md, Bitmap push protocol).
 func bmPairs(chunks []BmChunk) [][2]uint32 {
 	out := make([][2]uint32, 0, len(chunks))
 	for _, chunk := range chunks {

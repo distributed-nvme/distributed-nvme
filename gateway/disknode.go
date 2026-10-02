@@ -11,30 +11,33 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md §8.2 / gateway.md §5.2: the six RPCs that own a
-// disk node's four keys — `dn_conf` (authoritative, keyed by addr_port),
-// `dn_capacity` (the allocator index, present iff the node is allocatable per
-// §5.6), `dn_rev` (the id-keyed handle a dn-worker watches, §5.5) and the
-// cluster's `DnGlobal` (id + shard minting, §5.4).
+// This file is architecture.md, Disk nodes / gateway.md, Disk nodes: the six
+// RPCs that own a disk node's four keys — `dn_conf` (authoritative, keyed by
+// addr_port), `dn_capacity` (the allocator index, present iff the node is
+// allocatable per architecture.md, Capacity index keys), `dn_rev` (the
+// id-keyed handle a dn-worker watches, architecture.md, Revision keys and the
+// sync fan-out) and the cluster's `DnGlobal` (id + shard minting,
+// architecture.md, Globals: id allocation + shard buckets).
 //
 // None of the six bumps a revision. A DN's desired state is its `DnConf`, and
 // the only RPC here that writes one after creation is UpdateDiskNodeDisabled,
-// which §8.2 explicitly exempts: `disabled` gates CP scheduling only, exactly
-// like `err_epoch` and capacity-key maintenance, so no agent has to be told
-// about it and sides already hosted by the node keep running. That is why no
-// op-name constant is declared in this file — no bump helper and no model op
-// that names an op is called from it.
+// which architecture.md, Disk nodes, explicitly exempts: `disabled` gates CP
+// scheduling only, exactly like `err_epoch` and capacity-key maintenance, so
+// no agent has to be told about it and sides already hosted by the node keep
+// running. That is why no op-name constant is declared in this file — no bump
+// helper and no model op that names an op is called from it.
 //
 // Two of the six leave etcd (AG1): CreateDiskNode needs the node's disk size
 // before it can compute `total_ext_cnt`, and InspectDiskNode needs the agent's
 // live view. Both calls sit strictly outside the transaction, one before it
 // and one after it.
 
-// CreateDiskNode is architecture.md §8.2's CreateDiskNode.
+// CreateDiskNode is the CreateDiskNode of architecture.md, Disk nodes.
 //
 // The disk size comes from the node itself, so the handler is a pre-STM agent
-// call followed by one STM (AG1, §5.8). The size probe needs a `cluster_id`,
-// which since §5.2 depends on `ClusterConf.creation_epoch`, so a plain Get of
+// call followed by one STM (AG1; architecture.md, STM discipline). The size
+// probe needs a `cluster_id`, which, per architecture.md, cluster_id
+// derivation, depends on `ClusterConf.creation_epoch`, so a plain Get of
 // ClusterConf supplies it for the request only: the in-STM read stays
 // authoritative and it is that ClusterConf's `extent_size` that
 // `total_ext_cnt` is computed from, so a cluster deleted and recreated between
@@ -60,12 +63,13 @@ func (s *Server) CreateDiskNode(
 		return nil, err
 	}
 	if trConfEmpty(req.GetNvmeTrConf()) {
-		// §8.2 refuses an empty transport conf outright: a DN with no
-		// transport can never be connected to by a cntlr, so the record
-		// would describe a node no SP could ever use.
+		// architecture.md, Disk nodes, refuses an empty transport conf
+		// outright: a DN with no transport can never be connected to by a
+		// cntlr, so the record would describe a node no SP could ever use.
 		return nil, errInvalid("nvme_tr_conf must not be empty")
 	}
-	// §8.2 Defaults: an omitted location is the node's own endpoint, which
+	// CreateDiskNode's Defaults (architecture.md, Disk nodes): an omitted
+	// location is the node's own endpoint, which
 	// makes every node its own failure domain until an operator groups them.
 	location := req.GetLocation()
 	if location == "" {
@@ -84,7 +88,7 @@ func (s *Server) CreateDiskNode(
 	probeCid := model.ClusterId(clusterName, probeConf.GetCreationEpoch())
 	var dnSize uint64
 	// dn_id 0: the node has not been given one yet and the agent needs none —
-	// it uses the id for logging only (§8.2).
+	// it uses the id for logging only (architecture.md, Disk nodes).
 	agentErr := withDnAgent(ctx, req.GetAddrPort(),
 		func(ctx context.Context, client pb.DiskNodeAgentClient) error {
 			reply, err := client.GetDnSize(ctx, &pb.GetDnSizeRequest{
@@ -98,7 +102,8 @@ func (s *Server) CreateDiskNode(
 			return nil
 		})
 	if agentErr != nil {
-		// AG3: a transport failure or a non-OK status is §5.9's ABORTED. The
+		// AG3: a transport failure or a non-OK status is an ABORTED
+		// (architecture.md, UNEXPECTED_ERROR → `ABORTED`). The
 		// node is not registered, so there is nothing to roll back.
 		return nil, errAborted(
 			"get dn size from %q: %v", req.GetAddrPort(), agentErr)
@@ -115,9 +120,10 @@ func (s *Server) CreateDiskNode(
 		if stm.Get(confKey, &pb.DnConf{}) {
 			return errExists("disk node %q already exists", req.GetAddrPort())
 		}
-		// §6.1: counts round down, and the agent already reported the data
-		// area only, so nothing further is subtracted here. extent_size is
-		// read exactly as CreateCluster stored it (§7) — it is what this
+		// architecture.md, Size → extents: counts round down, and the agent
+		// already reported the data area only, so nothing further is
+		// subtracted here. extent_size is read exactly as CreateCluster stored
+		// it (architecture.md, Common validation) — it is what this
 		// node's disk header will be formatted with — so the stored conf is
 		// validated first rather than divided by.
 		if err := model.ValidateClusterConf(cc); err != nil {
@@ -134,7 +140,8 @@ func (s *Server) CreateDiskNode(
 		global := &pb.DnGlobal{}
 		if !stm.Get(globalKey, global) {
 			// The cluster exists but its DnGlobal does not: an invariant key
-			// CreateCluster writes is gone, which is §5.9's ABORTED and never
+			// CreateCluster writes is gone, which is an ABORTED
+			// (architecture.md, UNEXPECTED_ERROR → `ABORTED`) and never
 			// a reason to invent a global here — minting from a fresh one
 			// would hand out ids the cluster has already used.
 			return errAborted("dn_global key %q is missing", globalKey)
@@ -147,7 +154,7 @@ func (s *Server) CreateDiskNode(
 		}
 		// err_epoch 0 and an empty side_ptr_list are the proto3 zeros a fresh
 		// node carries: it is healthy and hosts no side yet. free = total for
-		// the same reason (§8.2).
+		// the same reason (architecture.md, Disk nodes).
 		newDn := &pb.DnConf{
 			DnId:        drawn.Id,
 			ShardCode:   drawn.Shard,
@@ -160,10 +167,11 @@ func (s *Server) CreateDiskNode(
 		stm.Put(confKey, newDn)
 		// The capacity key is written iff the new node is allocatable, so a
 		// node created with disabled = true is invisible to the allocator
-		// from its first instant (§5.6).
+		// from its first instant (architecture.md, Capacity index keys).
 		model.MaintainDnCapacity(stm, cid, req.GetAddrPort(), cc, nil, newDn)
 		// The DnRev key appearing is what makes the owning dn-worker start
-		// syncing and health-checking the node (§5.5). It is written in the
+		// syncing and health-checking the node (architecture.md, Revision keys
+		// and the sync fan-out). It is written in the
 		// same transaction as the DnConf that worker will read, and the
 		// commit is atomic, so the watch can never fire on a node whose
 		// record is not there yet.
@@ -183,15 +191,15 @@ func (s *Server) CreateDiskNode(
 	return &pb.CreateDiskNodeReply{DnId: dnId}, nil
 }
 
-// DeleteDiskNode is architecture.md §8.2's DeleteDiskNode.
+// DeleteDiskNode is the DeleteDiskNode of architecture.md, Disk nodes.
 //
 // It reaches no agent by design: removing the DnRev key stops the dn-worker,
 // and once no desired state describes the node its agent process can simply
-// be stopped (§8.2). The occupancy check is `side_ptr_list`, and it runs
-// AFTER the token check (GW6) so an operator working from a stale
-// GetDiskNode is told its view is stale, not told about sides it never saw.
-// An operator who sent no token has opted out of that ordering (GW6 is
-// presence-based, §0 #7) and is told about the sides directly.
+// be stopped (architecture.md, Disk nodes). The occupancy check is
+// `side_ptr_list`, and it runs AFTER the token check (GW6) so an operator
+// working from a stale GetDiskNode is told its view is stale, not told about
+// sides it never saw. An operator who sent no token has opted out of that
+// ordering (GW6 is presence-based) and is told about the sides directly.
 func (s *Server) DeleteDiskNode(
 	ctx context.Context,
 	req *pb.DeleteDiskNodeRequest,
@@ -235,11 +243,12 @@ func (s *Server) DeleteDiskNode(
 		// The last check before the first write, and so the last point at
 		// which this transaction can still return having staged nothing.
 		// MaintainDnCapacity below names the key to delete by shifting the
-		// STORED ladder (§7), so against a conf CreateCluster could not have
-		// written it names a key nothing ever wrote: the delete would miss,
-		// the node's real capacity key would outlive its DnConf, and once the
-		// conf was repaired the §6.5 scan would keep offering free space on a
-		// node that is gone. The check runs after the token and the
+		// STORED ladder (architecture.md, Common validation), so against a
+		// conf CreateCluster could not have written it names a key nothing
+		// ever wrote: the delete would miss, the node's real capacity key
+		// would outlive its DnConf, and once the conf was repaired the scan of
+		// architecture.md, Per-operation allocation, would keep offering free
+		// space on a node that is gone. The check runs after the token and the
 		// side_ptr_list check so an operator still hears about a stale view
 		// or about the sides first — those are answers about the request,
 		// this one is about the store.
@@ -247,17 +256,20 @@ func (s *Server) DeleteDiskNode(
 			return errAborted("%v", err)
 		}
 		// Deleting the rev key is the event that stops the owning dn-worker
-		// health-checking the node (§5.5); DnConf and the capacity key go
+		// health-checking the node (architecture.md, Revision keys and the
+		// sync fan-out); DnConf and the capacity key go
 		// with it in one atomic commit, so no worker ever sees a node whose
 		// conf is gone but whose rev key survives.
 		stm.Del(model.DnRevKey(dn.GetShardCode(), cid, dn.GetDnId()))
 		stm.Del(confKey)
 		// dn is the record THIS transaction read, which is what makes the
-		// capacity-key delete exact: the key embeds free_ext_cnt (§5.6).
+		// capacity-key delete exact: the key embeds free_ext_cnt
+		// (architecture.md, Capacity index keys).
 		model.MaintainDnCapacity(stm, cid, req.GetAddrPort(), cc, dn, nil)
 		// Only the bucket is decremented; next_id keeps growing, because ids
 		// are never reused and an agent may assume a deleted node never comes
-		// back under the same id (§5.4).
+		// back under the same id (architecture.md, Globals: id allocation +
+		// shard buckets).
 		global.ShardBucket = releaseShard(
 			global.GetShardBucket(), dn.GetShardCode())
 		stm.Put(globalKey, global)
@@ -270,15 +282,16 @@ func (s *Server) DeleteDiskNode(
 	return &pb.DeleteDiskNodeReply{DnId: dnId}, nil
 }
 
-// GetDiskNode is architecture.md §8.2's GetDiskNode.
+// GetDiskNode is the GetDiskNode of architecture.md, Disk nodes.
 //
 // It is a Snapshot, not a RunSTM: both keys must come from one store revision,
 // because the reply's DnRev is the client's optimistic-concurrency token for
-// the next mutator (§5.5) and a token read at a different revision than the
+// the next mutator (architecture.md, Revision keys and the sync fan-out) and a
+// token read at a different revision than the
 // conf it describes would let a client act on a view that never existed. The
 // request names the node by addr_port, so DnConf must be read first — the
 // id-keyed DnRev key cannot be formed before its dn_id and shard_code are
-// known (§8.2).
+// known (architecture.md, Disk nodes).
 func (s *Server) GetDiskNode(
 	ctx context.Context,
 	req *pb.GetDiskNodeRequest,
@@ -308,7 +321,8 @@ func (s *Server) GetDiskNode(
 		if !stm.Get(revKey, dnRev) {
 			// Every existing DnConf has a DnRev — CreateDiskNode writes both
 			// in one transaction — so a missing one is a lost invariant key
-			// (§5.9), not a node that has yet to be registered.
+			// (architecture.md, UNEXPECTED_ERROR → `ABORTED`), not a node that
+			// has yet to be registered.
 			return errAborted("dn_rev key %q is missing", revKey)
 		}
 		conf, rev = dn, dnRev
@@ -324,14 +338,14 @@ func (s *Server) GetDiskNode(
 	}, nil
 }
 
-// ListDiskNodes is architecture.md §8.2's ListDiskNodes.
+// ListDiskNodes is the ListDiskNodes of architecture.md, Disk nodes.
 //
-// §5.7 keeps the list RPCs out of the STM entirely — a transaction cannot
-// range — so the cluster is resolved with one plain Get instead: the reply is
-// a page of names, not a consistent view of anything, and a node created or
-// deleted while the page is being read is exactly the kind of change a paged
-// listing is allowed to straddle. The names returned are the `addr_port` key
-// suffixes under the prefix (GW10).
+// architecture.md, page_token, keeps the list RPCs out of the STM entirely — a
+// transaction cannot range — so the cluster is resolved with one plain Get
+// instead: the reply is a page of names, not a consistent view of anything,
+// and a node created or deleted while the page is being read is exactly the
+// kind of change a paged listing is allowed to straddle. The names returned
+// are the `addr_port` key suffixes under the prefix (GW10).
 func (s *Server) ListDiskNodes(
 	ctx context.Context,
 	req *pb.ListDiskNodesRequest,
@@ -341,10 +355,10 @@ func (s *Server) ListDiskNodes(
 	); err != nil {
 		return nil, err
 	}
-	// GW4: the two page arguments are pure §7 checks, so they run
-	// before the ClusterConf read the prefix needs — a bad count or
-	// page_token must be INVALID_ARGUMENT, not the NOT_FOUND a missing
-	// cluster would otherwise answer first.
+	// GW4: the two page arguments are pure checks of architecture.md, Common
+	// validation, so they run before the ClusterConf read the prefix needs — a
+	// bad count or page_token must be INVALID_ARGUMENT, not the NOT_FOUND a
+	// missing cluster would otherwise answer first.
 	if err := validatePageArgs(
 		req.GetCount(), req.GetPageToken(),
 	); err != nil {
@@ -369,16 +383,18 @@ func (s *Server) ListDiskNodes(
 	return &pb.ListDiskNodesReply{AddrPort: names, PageToken: next}, nil
 }
 
-// UpdateDiskNodeDisabled is architecture.md §8.2's UpdateDiskNodeDisabled.
+// UpdateDiskNodeDisabled is the UpdateDiskNodeDisabled of architecture.md,
+// Disk nodes.
 //
 // `disabled` is a scheduling flag and nothing else: it decides whether the
-// allocator may see the node, i.e. whether the §5.6 capacity key exists, and
+// allocator may see the node, i.e. whether the capacity key of
+// architecture.md, Capacity index keys, exists, and
 // it is invisible to the agent. That is why this handler bumps no revision
 // and makes no agent call — sides the node already hosts keep running — and
 // why the whole mutation is one DnConf write plus MaintainDnCapacity.
 //
 // When the stored flag already equals the requested one the handler writes
-// nothing at all (§0 #17): a token that was sent has still been checked first,
+// nothing at all (GW6): a token that was sent has still been checked first,
 // so a stale client is refused rather than silently told its no-op succeeded,
 // and a genuine repeat costs one empty transaction.
 func (s *Server) UpdateDiskNodeDisabled(
@@ -419,7 +435,8 @@ func (s *Server) UpdateDiskNodeDisabled(
 		// be wrong about, and above the Put, because a refusal must stage no
 		// write. Flipping the flag moves a capacity key in both directions —
 		// disabling deletes the key the STORED ladder names, enabling writes
-		// it back (§5.6) — so a conf CreateCluster could not have written
+		// it back (architecture.md, Capacity index keys) — so a conf
+		// CreateCluster could not have written
 		// would leave a disabled node in the index, or index an enabled one
 		// under a bin its free count does not belong to.
 		if err := model.ValidateClusterConf(cc); err != nil {
@@ -439,12 +456,12 @@ func (s *Server) UpdateDiskNodeDisabled(
 	return &pb.UpdateDiskNodeDisabledReply{DnId: dnId}, nil
 }
 
-// InspectDiskNode is architecture.md §8.2's InspectDiskNode: the node as its
-// agent currently sees it, for diagnostics.
+// InspectDiskNode is the InspectDiskNode of architecture.md, Disk nodes: the
+// node as its agent currently sees it, for diagnostics.
 //
 // The reply is the agent's, whole: `applied_revision` and `dn_info` both
-// come from the GetDnInfo reply (architecture.md §8.2, deliberately not the
-// stored rev key), so the pair is one coherent agent snapshot and a caller
+// come from the GetDnInfo reply (architecture.md, Disk nodes, deliberately not
+// the stored rev key), so the pair is one coherent agent snapshot and a caller
 // can diff `applied_revision` against the desired-state token GetDiskNode
 // hands out.
 //

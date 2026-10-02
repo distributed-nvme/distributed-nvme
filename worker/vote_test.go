@@ -190,8 +190,8 @@ func newVoteHarnessOn(
 // newVoteHarnessCfg runs the vote worker under a Config the caller chose. CM3
 // makes a --vote-grace-time below the dead threshold legal — "a grace window
 // shorter than the dead threshold is legal but pointless", warned about and
-// never rejected — so §6 has to stay correct there too, and that is the range
-// the own-key cases below need.
+// never rejected — so the vote worker (VW1-VW11) has to stay correct there too,
+// and that is the range the own-key cases below need.
 func newVoteHarnessCfg(
 	t *testing.T,
 	cfg Config,
@@ -1010,13 +1010,12 @@ func testVoteFenceHeartbeatStalled(t *testing.T) {
 	})
 }
 
-// TestVoteFenceHeartbeatStalledAfterFreeze is the case VW8(a) names and
-// Appendix A walks at t=800: a process stopped by SIGSTOP (or a paused VM)
-// resumes after more than the dead threshold and its catch-up put SUCCEEDS.
-// The gap that fences it is the one measured against the last tick that
-// reached etcd, so it MUST be evaluated before this tick's success is folded
-// in; and the reason is heartbeat_stalled — the cause — not the stale watch
-// the freeze also left behind (§14.11 case E step 7).
+// TestVoteFenceHeartbeatStalledAfterFreeze is the case VW8(a) names: a process
+// stopped by SIGSTOP (or a paused VM) resumes after more than the dead
+// threshold and its catch-up put SUCCEEDS. The gap that fences it is the one
+// measured against the last tick that reached etcd, so it MUST be evaluated
+// before this tick's success is folded in; and the reason is heartbeat_stalled
+// — the cause — not the stale watch the freeze also left behind (VW8 (a)).
 func TestVoteFenceHeartbeatStalledAfterFreeze(t *testing.T) {
 	synctest.Test(t, testVoteFenceHeartbeatStalledAfterFreeze)
 }
@@ -1221,7 +1220,8 @@ func staleOwnKey(t *testing.T) (*voteHarness, string) {
 // is neither. It would drop the worker out of its own effective set
 // (member_cnt 0), release every shard and leave the next tick to re-create the
 // key — a delete and an appear for a seed that never stopped running — with no
-// "worker fenced" record, which is what §12 and §14 read a departure from.
+// "worker fenced" record, which is what dnv-worker.md, Log records, and its
+// Integration test plan read a departure from.
 func TestVoteOwnKeyIsNeverSelfCollected(t *testing.T) {
 	synctest.Test(t, testVoteOwnKeyIsNeverSelfCollected)
 }
@@ -1267,9 +1267,9 @@ func testVoteOwnKeyIsNeverSelfCollected(t *testing.T) {
 // TestVoteOwnKeyDeleteAlwaysFences is VW8(c) with nothing left that could
 // swallow it. A worker that has itself deleted one of its own registrations
 // earlier must still fence when a PEER deletes the key it is running under:
-// Appendix B's split-brain bound assumes the peer the fleet gave up on rejoins
-// with a fresh identity, and a missed (c) leaves two workers driving the same
-// shards under seeds both of them believe are live.
+// The split-brain bound of dnv-worker.md, Known limits, assumes the peer the
+// fleet gave up on rejoins with a fresh identity, and a missed (c) leaves two
+// workers driving the same shards under seeds both of them believe are live.
 func TestVoteOwnKeyDeleteAlwaysFences(t *testing.T) {
 	synctest.Test(t, testVoteOwnKeyDeleteAlwaysFences)
 }
@@ -1368,12 +1368,12 @@ func TestVoteDeferredFenceIsRetried(t *testing.T) {
 	}
 }
 
-// TestVoteFenceRejoinsWhileWatchesTearDown exercises the interleaving the §13
-// harness used to dodge by muting the fake store: a fence cancels the old
-// incarnation's watches (VW8) while its new incarnation is already putting its
-// first registrations (VW2). Nothing may deliver an event into a channel that
-// is being closed, so this is a -race test — un-muted, and with two roles, so
-// two watches tear down against the rejoin's two puts.
+// TestVoteFenceRejoinsWhileWatchesTearDown exercises the interleaving the
+// unit-test harness used to dodge by muting the fake store: a fence cancels the
+// old incarnation's watches (VW8) while its new incarnation is already putting
+// its first registrations (VW2). Nothing may deliver an event into a channel
+// that is being closed, so this is a -race test — un-muted, and with two roles,
+// so two watches tear down against the rejoin's two puts.
 func TestVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
 	synctest.Test(t, testVoteFenceRejoinsWhileWatchesTearDown)
 }
@@ -1386,7 +1386,7 @@ func testVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
 
 	// A tick's put is held while the monotonic clock runs past the dead
 	// threshold, so releasing it fences VW8(a) with every watch still open and
-	// still delivering (Appendix A t=800).
+	// still delivering.
 	entered, _ := store.gatePut(workerRegKey(common.WorkerRoleDn, old))
 	h.clk.advance(interval)
 	waitClosed(t, "the heartbeat put to reach the store", entered)
@@ -1407,9 +1407,9 @@ func testVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
 	h.settle()
 }
 
-// TestVoteFenceReleasesShardsBeforeRejoin checks the §14 property: a fenced
-// worker logs "shard released" for every shard it held BEFORE anything runs
-// under the new seed.
+// TestVoteFenceReleasesShardsBeforeRejoin checks the property of dnv-worker.md,
+// Integration test plan: a fenced worker logs "shard released" for every shard
+// it held BEFORE anything runs under the new seed.
 func TestVoteFenceReleasesShardsBeforeRejoin(t *testing.T) {
 	synctest.Test(t, testVoteFenceReleasesShardsBeforeRejoin)
 }
@@ -1543,9 +1543,9 @@ func testVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 // DefaultWorkerSyncupTimeout; a fence that deleted only afterwards would let
 // its peers see the old seed go only when that drain ends or its deadline
 // passes, whichever comes first, and leave its shards undriven that much
-// longer than the grace window (Appendix B). And a delete can take
-// DefaultEtcdOpTimeout per role when etcd is out of reach, the usual cause of
-// a VW8(a) fence; shard workers not yet told to stop would go on driving
+// longer than the grace window (dnv-worker.md, Known limits). And a delete can
+// take DefaultEtcdOpTimeout per role when etcd is out of reach, the usual cause
+// of a VW8(a) fence; shard workers not yet told to stop would go on driving
 // behind it.
 func TestVoteFenceDeletesRegsBeforeDrainingShards(t *testing.T) {
 	synctest.Test(t, testVoteFenceDeletesRegsBeforeDrainingShards)

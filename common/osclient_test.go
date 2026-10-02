@@ -17,7 +17,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// RunCommand (osclient.md §8.1, §8.2)
+// RunCommand (osclient.md, RunCommand)
 // ---------------------------------------------------------------------------
 
 func TestRunCommandExitCodes(t *testing.T) {
@@ -69,8 +69,8 @@ func TestRunCommandStreams(t *testing.T) {
 	}
 }
 
-// The caller owns the deadline (architecture.md §7): the ctx firing SIGTERMs
-// the process.
+// The caller owns the deadline (architecture.md, Common validation): the ctx
+// firing SIGTERMs the process.
 func TestRunCommandSoftTimeoutSigterm(t *testing.T) {
 	client := NewLimitedOsClient(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -120,7 +120,7 @@ func TestRunCommandHardTimeoutSigkill(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Concurrency limit (osclient.md §8.4, §4.1)
+// Concurrency limit (osclient.md, Construction and concurrency limit)
 // ---------------------------------------------------------------------------
 
 func TestInFlightLimit(t *testing.T) {
@@ -183,7 +183,8 @@ func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// File and proto I/O (osclient.md §8.5, §8.6)
+// File and proto I/O (osclient.md, ReadFile / WriteFile / WriteFileDirect;
+// ReadProto / WriteProto)
 // ---------------------------------------------------------------------------
 
 func TestFileRoundTrip(t *testing.T) {
@@ -349,7 +350,7 @@ func TestProtoRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Logging (osclient.md §8.7, §4.6)
+// Logging (osclient.md, Logging)
 // ---------------------------------------------------------------------------
 
 func hasAttrs(t *testing.T, rec map[string]any, keys ...string) {
@@ -553,7 +554,8 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ReadBlock / WriteBlock (osclient.md §8.9, §4.5 — architecture.md [D13])
+// ReadBlock / WriteBlock (osclient.md, ReadBlock / WriteBlock —
+// architecture.md [D13])
 // ---------------------------------------------------------------------------
 
 func TestBlockRoundTrip(t *testing.T) {
@@ -673,9 +675,9 @@ func TestReadBlockShortReadIsError(t *testing.T) {
 	}
 }
 
-// osclient.md §8.8: WriteFileDirect creates a missing file and overwrites an
-// existing one in place, with no temp file left behind, and emits its own
-// "os write file direct" record.
+// osclient.md, ReadFile / WriteFile / WriteFileDirect: WriteFileDirect creates
+// a missing file and overwrites an existing one in place, with no temp file
+// left behind, and emits its own "os write file direct" record.
 func TestWriteFileDirect(t *testing.T) {
 	capture := captureLogs(t)
 	client := NewLimitedOsClient(0)
@@ -724,7 +726,8 @@ func TestWriteFileDirect(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Raw helpers — WriteBlockAt / ReadBlockDirectAt (osclient.md §4.5.1):
+// Raw helpers — WriteBlockAt / ReadBlockDirectAt (osclient.md, Exported raw
+// helpers and the probe-IO carve-out):
 // exported, unlogged, semaphore-free
 // ---------------------------------------------------------------------------
 
@@ -773,9 +776,11 @@ func TestReadBlockDirectAtIsCloseOnExec(t *testing.T) {
 	}
 }
 
-// TestReadBlockDirectAt covers the exported raw helpers of osclient.md
-// §4.5.1: the write + O_DIRECT read-back the §3.6 leg health probe
-// needs, now package functions outside the OsClient. t.TempDir() may sit on
+// TestReadBlockDirectAt covers the exported raw helpers of osclient.md,
+// Exported raw helpers and the probe-IO carve-out: the write + O_DIRECT
+// read-back the leg health probe needs (architecture.md, Group on-leg
+// layout: meta region, data region, health block), now package functions
+// outside the OsClient. t.TempDir() may sit on
 // tmpfs, which rejects O_DIRECT outright, so the round trip is skipped with a
 // diagnostic there — the alignment rejection and the log silence are checked
 // regardless, since neither reaches the filesystem.
@@ -838,8 +843,8 @@ func TestReadBlockDirectAt(t *testing.T) {
 
 	// The raw helpers are silent by construction: they hold no semaphore
 	// slot and emit no record, which is why every direct caller MUST log its
-	// own (osclient.md §4.5.1 — the prober's "probe write block" /
-	// "probe read block direct").
+	// own (osclient.md, Exported raw helpers and the probe-IO carve-out —
+	// the prober's "probe write block" / "probe read block direct").
 	if recs := capture.records(t); len(recs) != 0 {
 		t.Errorf("the raw helpers logged %d records: %s",
 			len(recs), capture.buf.String())

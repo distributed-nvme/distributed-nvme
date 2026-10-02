@@ -12,7 +12,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is the READ half of gateway.md §9.3's GW11 item: a fixture that
+// This file is the READ half of the tests of gateway.md GW11: a fixture that
 // plants a sparse stored conf and the RPCs that read it refusing with ABORTED.
 //
 // The WRITE half — what CreateCluster and CreateStoragePool put in the store —
@@ -20,7 +20,8 @@ import (
 // make the confs below reachable only by planting them: every defaultable
 // member is resolved on the write path, so a zero read back out of etcd is
 // corruption or foreign data and a reader that substituted a constant for it
-// would format a pool one way and address it another (§7, GW11).
+// would format a pool one way and address it another (architecture.md, Common
+// validation; GW11).
 //
 // Three things make each refusal attributable to the gate rather than to
 // something else about the request:
@@ -40,8 +41,8 @@ import (
 // from the constants they name. model.ValidateClusterConf/ValidateBdevConf
 // compose them and model/capacity_test.go pins them there; what is asserted
 // HERE is that the sentence survives the trip through a handler's errAborted
-// to the client, prefix and field name intact (§7's "the prefix an operator
-// and the acceptance checklist grep for").
+// to the client, prefix and field name intact (architecture.md, Common
+// validation: "the prefix an operator and the acceptance checklist grep for").
 const (
 	scMsgDnBatchSize = "invalid stored conf: " +
 		"alloc_conf.dn_batch_size 0 is outside [1, 1024]"
@@ -116,7 +117,7 @@ func scWantUntouched(
 }
 
 // scPutCc plants one stored ClusterConf under the cluster's name key, with
-// mustPut — the fixture's own writer (§9.3). Planting is what it takes: the
+// mustPut — the fixture's own writer. Planting is what it takes: the
 // gateway writes this key in exactly one place (CreateCluster, which stores
 // model.ResolveClusterConf's output) and deletes it in one other, so no
 // request can leave a conf here that model.ValidateClusterConf refuses.
@@ -147,7 +148,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 }
 
 // ---------------------------------------------------------------------------
-// The stored ClusterConf (GW11, §7)
+// The stored ClusterConf (GW11; architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
 // TestStoredClusterConfZeroIsRefusedByEveryReader plants a sparse stored
@@ -159,15 +160,16 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //
 //   - CreateDiskNode and CreateControllerNode check inside their own STM,
 //     immediately above the division that turns the node's byte count into
-//     extents (§6.1) — the zero the gate refuses is the one that would
-//     otherwise be divided by;
+//     extents (architecture.md, Size → extents) — the zero the gate refuses is
+//     the one that would otherwise be divided by;
 //   - GrowSlice checks both confs after its snapshot and before the meta
 //     ladder, so that model.MetaLadderExtCnt's "false" can keep meaning the
 //     16 GiB cap and nothing else;
 //   - the five allocating RPCs — CreateStoragePool, GrowSlice, CreateCntlr,
 //     CreateSpareLeg and CreateMigration, i.e. every caller of pickDns or
-//     pickCn — reach the check through the §6.5 scan, which refuses rather
-//     than scan with a batch size of zero: a zero width finds no candidate
+//     pickCn — reach the check through the scan (architecture.md,
+//     Per-operation allocation), which refuses rather than scan with a batch
+//     size of zero: a zero width finds no candidate
 //     and would report a cluster full of free extents as RESOURCE_EXHAUSTED.
 //     CreateStoragePool runs that gate itself as well, just before its scans
 //     and ahead of the merged geometry it judges there, so its refusal comes
@@ -179,7 +181,8 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     ledger and has no conf gate of its own, and all three are driven here
 //     rather than one standing for the rest, so moving any of them off the
 //     shared constructor is caught. DeleteStoragePool used to be the fourth;
-//     it releases nothing since it became a latch (§8.4), and the gate its
+//     it releases nothing since it became a latch (architecture.md, Storage
+//     pools), and the gate its
 //     release moved to — model.DrainSpSlice's, which needs the same ladder for
 //     the same MaintainDnCapacity reason — is pinned by
 //     TestDrainSliceRefusesAnInvalidStoredConf in model/drain_test.go. The
@@ -187,7 +190,8 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     these paths: MaintainDnCapacity names the key to delete by shifting the
 //     stored ladder, so a gate-less release deletes a key nothing wrote and
 //     strands the live one — which outlives the DnConf and keeps being
-//     offered by the §6.5 scan once the conf is repaired;
+//     offered by the scan of architecture.md, Per-operation allocation, once
+//     the conf is repaired;
 //   - DeleteDiskNode and UpdateDiskNodeDisabled check in their own STM, as
 //     the last thing before their first write. Both move exactly one capacity
 //     key and nothing else, so without a gate their whole effect would be the
@@ -195,7 +199,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //
 // Each gate validates the WHOLE stored conf rather than the member it is
 // about to use, which is why one zeroed member reaches all twelve. Two are
-// planted in turn: `dn_bin_conf.extent_size`, the §9 fixture's member and the
+// planted in turn: `dn_bin_conf.extent_size`, the fixture's member and the
 // one a gateway that lost its gate would divide by, and
 // `alloc_conf.dn_batch_size`, which nothing divides by — so the second row
 // keeps failing as an assertion rather than a panic when a gate is removed.
@@ -221,15 +225,18 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	dataGrp := slice.GetDataGrpList()[0]
 	grpId := dataGrp.GetGrpId()
 	// The source of the migration below: one side of the data group, whose
-	// leg holds exactly one, so §8.11's "a migration is already running on
-	// this leg" precondition cannot stand in for the conf refusal.
+	// leg holds exactly one, so the "a migration is already running on this
+	// leg" precondition (architecture.md, Migrations) cannot stand in for the
+	// conf refusal.
 	srcSideId := dataGrp.GetLegList()[0].GetSideList()[0].GetSideId()
 	// What the three ledger cases release, built while the conf is still
-	// healthy, each on an object of its own so that no case's own §8
-	// preconditions can stand in for the conf refusal:
+	// healthy, each on an object of its own so that no case's own preconditions
+	// (architecture.md, `service Gateway` — RPC specifications) can stand in for
+	// the conf refusal:
 	//
 	//   - a spare leg on the META group, not the data group the CreateSpareLeg
-	//     case below adds one to, so neither can fill the other's §8.12 slot;
+	//     case below adds one to, so neither can fill the other's slot
+	//     (architecture.md, Spare legs);
 	//   - a migration on the data group's SECOND leg, which FinishMigration
 	//     ends, leaving leg 0 free for the CreateMigration case;
 	//   - a migration on the meta group's first leg, which CancelMigration
@@ -271,10 +278,11 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	cnAddr := fakeAddrPort(t, "sc-cn")
 	startFakeAgent(t, cnAddr, 1<<40)
 	// The node DeleteDiskNode is about, created after every SP above so it
-	// hosts no side: §8.2's "delete or migrate the owning storage pools
-	// first" is the one refusal that would otherwise hide the conf's. It is
-	// created ENABLED, so it carries a capacity key and its delete is a real
-	// MaintainDnCapacity delete rather than a no-op on an absent key (§5.6).
+	// hosts no side: DeleteDiskNode's "delete or migrate the owning storage
+	// pools first" (architecture.md, Disk nodes) is the one refusal that would
+	// otherwise hide the conf's. It is created ENABLED, so it carries a capacity
+	// key and its delete is a real MaintainDnCapacity delete rather than a no-op
+	// on an absent key (architecture.md, Capacity index keys).
 	delDnAddr := fakeAddrPort(t, "sc-del-dn")
 	startFakeAgent(t, delDnAddr, 100<<30)
 	if _, err := env.srv.CreateDiskNode(env.ctx, &pb.CreateDiskNodeRequest{
@@ -298,8 +306,9 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 			return err
 		}},
 		{"FinishMigration", func() error {
-			// force: §8.11's hydration proof is a GetSideInfo on the
-			// destination DN's agent, which this fixture has no listener for
+			// force: the hydration proof of architecture.md, Migrations, is a
+			// GetSideInfo on the destination DN's agent, which this fixture has no
+			// listener for
 			// — without the flag the case would be FAILED_PRECONDITION from
 			// the agent path and never reach the deciding STM at all. force
 			// skips only that judgement; the transaction below it, ledger
@@ -331,7 +340,7 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 			return err
 		}},
 		{"UpdateDiskNodeDisabled", func() error {
-			// A flag the stored record does not already carry: §0 #17's
+			// A flag the stored record does not already carry: GW6's
 			// no-op arm returns nil BEFORE the gate, precisely because a
 			// request that writes nothing maintains no capacity key.
 			_, err := env.srv.UpdateDiskNodeDisabled(env.ctx,
@@ -370,15 +379,15 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 		{"GrowSlice", func() error {
 			// No SpRev: GW6 is presence-based, so a request that carries no
 			// token is never compared and no stale-revision refusal can
-			// stand in for the conf's (§0 #7).
+			// stand in for the conf's.
 			_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
 				ClusterName: env.name,
 				SpName:      sptSpName,
 				SliceId:     sliceId,
-				// §8.5 refuses a data grow that names no ext_cnt before it
-				// reads anything, so the request has to carry one to reach
-				// the conf at all. What it grows by is the slice's own
-				// allocation unit either way (D-E).
+				// architecture.md, GrowSlice, refuses a data grow that names no
+				// ext_cnt before it reads anything, so the request has to carry
+				// one to reach the conf at all. What it grows by is the slice's
+				// own allocation unit either way (D-E).
 				ExtCnt: 1,
 			})
 			return err
@@ -387,9 +396,10 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 			_, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
 				ClusterName: env.name,
 				SpName:      sptSpName,
-				// §8.4's default slot list is [0..7] and CreateStoragePool
-				// hands its idx-th cntlr slots[idx], so the fixture SP's two
-				// cntlrs hold 0 and 1 and slot 2 passes the §11.8 rules.
+				// The default slot list of architecture.md, Storage pools, is
+				// [0..7] and CreateStoragePool hands its idx-th cntlr
+				// slots[idx], so the fixture SP's two cntlrs hold 0 and 1 and
+				// slot 2 passes the rules of architecture.md, cntlid slots.
 				CntlidSlot: 2,
 			})
 			return err
@@ -452,10 +462,12 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 // Validate{Cluster,Bdev}Conf across the package and each of the twelve hits is
 // followed by exactly that line. CreateStoragePool is the one chosen because
 // it reads the whole conf on its way through — the ladder and the batch sizes
-// in the allocator, the extent size in the STM for §3.6.
+// in the allocator, the extent size in the STM for the group layout of
+// architecture.md, Group on-leg layout: meta region, data region, health block.
 //
 // The ladder row is what a genuinely SPARSE conf looks like rather than a
-// hand-zeroed one: bin1_shift's §7 constant is 4 and bin0's is 0, so a
+// hand-zeroed one: bin1_shift's constant (architecture.md, Common validation)
+// is 4 and bin0's is 0, so a
 // message written by something that skipped the resolve comes back with the
 // ladder collapsed at the bottom rather than merely missing a number.
 func TestStoredClusterConfRefusalNamesTheZeroedMember(t *testing.T) {
@@ -502,28 +514,30 @@ func TestStoredClusterConfRefusalNamesTheZeroedMember(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The stored SpConf.bdev_conf (GW11, §7)
+// The stored SpConf.bdev_conf (GW11; architecture.md, Common validation)
 // ---------------------------------------------------------------------------
 
 // TestStoredSpBdevConfZeroIsRefusedByEveryReader is the SP-side mirror: the
 // bdev_conf CreateStoragePool resolved, written back sparse, refused by the
 // two RPCs that compute from an SP's own geometry.
 //
-// CreateThinDevice reads it for the stripe it sizes against (§8.7) and
-// GrowSlice for the §3.6 layout of the group it adds, and each has its own
+// CreateThinDevice reads it for the stripe it sizes against (architecture.md,
+// Thin devices) and GrowSlice for the layout of the group it adds
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block), and each has its own
 // gate — GrowSlice's sits right below the ClusterConf gate the test above
 // drives, so the two tests together cover both of its checks.
 //
-// Two members are planted in turn. `dm_raid0_conf.stripe_size` is the §9
+// Two members are planted in turn. `dm_raid0_conf.stripe_size` is the
 // fixture's, and it is also the member that makes the gate's placement
 // visible: CreateThinDevice's own next check is `unit == 0`, so without the
 // gate a zero stripe would come back as the SP "has no slice" instead of as
 // the conf fault it is. `bitmap_chunk_block_cnt` is the member nobody named —
 // sptDefaultSpec's request chooses the md-raid1 KIND and nothing else, and
 // the fixture cluster has no redund_conf to inherit a count from, so the
-// stored 128 came from the §7 constant alone (its write side is
-// TestCreateStoragePoolResolvesTheMergedBdevConf) — which makes a zero there
-// exactly what a pre-GW11 write left behind.
+// stored 128 came from the constant alone (architecture.md, Common validation;
+// its write side is TestCreateStoragePoolResolvesTheMergedBdevConf) — which
+// makes a zero there exactly what a pre-GW11 write left behind.
 func TestStoredSpBdevConfZeroIsRefusedByEveryReader(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	env.createSp(sptDefaultSpec(sptSpName))
@@ -538,16 +552,18 @@ func TestStoredSpBdevConfZeroIsRefusedByEveryReader(t *testing.T) {
 					SpName:      sptSpName,
 					TdName:      "sc-td",
 					// slice_cnt 2 x the stored 64 KiB stripe = 128 KiB, and 1
-					// GiB is 8192 of those: a size the §8.7 rule accepts, so
-					// the only thing left to refuse it is the conf.
+					// GiB is 8192 of those: a size the rule of architecture.md,
+					// Thin devices, accepts, so the only thing left to refuse it
+					// is the conf.
 					Size: 1 << 30,
 				})
 			return err
 		}},
 		{"GrowSlice", func() error {
-			// ext_cnt as in the ClusterConf test above: §8.5's pure check
-			// runs before any read and would otherwise refuse this request
-			// as INVALID_ARGUMENT without ever reaching the conf.
+			// ext_cnt as in the ClusterConf test above: the pure check of
+			// architecture.md, GrowSlice, runs before any read and would
+			// otherwise refuse this request as INVALID_ARGUMENT without ever
+			// reaching the conf.
 			_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
 				ClusterName: env.name,
 				SpName:      sptSpName,

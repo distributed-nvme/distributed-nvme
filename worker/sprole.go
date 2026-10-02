@@ -1,18 +1,18 @@
-// The sp role of dnv-worker.md §8.4 (RW14-RW20).
+// The sp role of dnv-worker.md (RW14-RW20).
 //
 // The sp revision worker is not a per-object loop but a COORDINATOR: on every
 // desired change (an SpRev put: revision + sp_name) it loads the whole SP with
 // model.LoadSp, builds one SyncupSideRequest per side — spare legs' sides
 // included — and one SyncupCntlrRequest per cntlr (RW15/RW16), and diffs those
-// against its running children. Each child is an ordinary revision worker of
-// §8.1 with the side resp. cntlr driver below, so "one goroutine, one Check*
-// stream, one round timer per object" (RW1) holds for sides and cntlrs exactly
-// as it does for DNs and CNs.
+// against its running children. Each child is an ordinary revision worker
+// (RW1-RW12) with the side resp. cntlr driver below, so "one goroutine, one
+// Check* stream, one round timer per object" (RW1) holds for sides and cntlrs
+// exactly as it does for DNs and CNs.
 //
 // What the coordinator keeps for itself is everything that is not per-object:
 // the two flips (RW18/RW19), the Leg health rows — which the PRIMARY cntlr
 // reports but which are written on the SLICE, so only the coordinator knows
-// where they go (HL2) — and the reaction pass (§11).
+// where they go (HL2) — and the reaction pass (AR1-AR9).
 package worker
 
 import (
@@ -32,17 +32,20 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// msgFlipApplied is the §12 record of the two flips (RW18, RW19).
+// msgFlipApplied is the record of the two flips (RW18, RW19; dnv-worker.md, Log
+// records).
 const msgFlipApplied = "flip applied"
 
-// The "kind" attribute of the §12 "flip applied" record.
+// The "kind" attribute of the "flip applied" record (dnv-worker.md, Log
+// records).
 const (
 	flipKindProvisioned = "provisioned"
 	flipKindCreated     = "created"
 )
 
-// Non-normative records of the sp coordinator. The §12 strings are the ones
-// the §14 suite greps; these exist so an operator can see why an SP is not
+// Non-normative records of the sp coordinator. The strings of dnv-worker.md,
+// Log records, are the ones the worker suite (dnv-worker.md, Integration test
+// plan) greps; these exist so an operator can see why an SP is not
 // being driven.
 const (
 	// msgSpDeleting is RW14's ErrNotFound path: the SpConf is gone, the SP is
@@ -84,7 +87,7 @@ type spConfRefusal struct {
 // ---------------------------------------------------------------------------
 
 // spOps is everything the sp coordinator reads and writes through model. It is
-// an interface so the §13 tests can drive a real coordinator against a fixture
+// an interface so the unit tests can drive a real coordinator against a fixture
 // SpState without etcd; production is modelSpOps, which does nothing but call
 // model (whose ops re-validate inside their own STM).
 type spOps interface {
@@ -95,7 +98,8 @@ type spOps interface {
 		spName string,
 	) (*model.SpState, error)
 	// flipProvisioned is RW18/MD6; it returns the sides it actually wrote,
-	// which is what the §12 "flip applied" record names (one per side).
+	// which is what the "flip applied" record (dnv-worker.md, Log records)
+	// names (one per side).
 	flipProvisioned(
 		ctx context.Context,
 		cid uint64,
@@ -239,7 +243,8 @@ type cntlrChild struct {
 	plan   *cntlrPlan
 }
 
-// legRow is one leg's §3.6 probe row as the PRIMARY cntlr reported it (HL2).
+// legRow is one leg's probe row (architecture.md, Group on-leg layout: meta
+// region, data region, health block) as the PRIMARY cntlr reported it (HL2).
 // The child cannot write it: the record lives on the leg's SLICE and only the
 // coordinator knows which slice that is.
 type legRow struct {
@@ -283,7 +288,7 @@ type sideSynced struct {
 // ---------------------------------------------------------------------------
 
 // spWorker is the sp role's revision worker: a coordinator with one child
-// goroutine per side and per cntlr (§8.4).
+// goroutine per side and per cntlr (RW14).
 type spWorker struct {
 	deps  *deps
 	ops   spOps
@@ -329,10 +334,10 @@ type spWorker struct {
 	// reaction pass each refused on, so a steady bad conf costs one Error
 	// record rather than one per tick.
 	confRefusal spConfRefusal
-	// react is the §11 half of the coordinator: the model surface of the
-	// automatic reactions, the little memo their log records need, and the
-	// records AR5 and AR7 decide by, of the last failover and the last
-	// replacement of a primary it applied (reaction.go).
+	// react is the reaction half of the coordinator (AR1-AR9): the model
+	// surface of the automatic reactions, the little memo their log records
+	// need, and the records AR5 and AR7 decide by, of the last failover and the
+	// last replacement of a primary it applied (reaction.go).
 	react *reactor
 }
 
@@ -342,7 +347,7 @@ func newSpWorker(p revWorkerParams) revWorkerHandle {
 	return startSpWorker(p, &modelSpOps{cli: p.deps.cli})
 }
 
-// startSpWorker is newSpWorker with the model surface injected, so the §13
+// startSpWorker is newSpWorker with the model surface injected, so the unit
 // tests drive a real coordinator without etcd.
 func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -481,8 +486,9 @@ func (w *spWorker) tickPeriod() time.Duration {
 	return roundPeriod(cc.GetHealthCheckConf().GetCntlrInterval())
 }
 
-// attrs are the §12 "revision worker started"/"stopped" attributes of the
-// coordinator. Its children add side_pointer / cntlr_pointer of their own.
+// attrs are the "revision worker started"/"stopped" attributes (dnv-worker.md,
+// Log records) of the coordinator. Its children add side_pointer /
+// cntlr_pointer of their own.
 func (w *spWorker) attrs() []any {
 	return []any{
 		slog.String("role", common.WorkerRoleSp),
@@ -502,7 +508,8 @@ func (w *spWorker) fanOut() {
 			// RW14: the SP is being deleted. The children keep driving what
 			// they have until the SpRev delete arrives (SW3) — the agents
 			// tear their resources down through the DN's and CN's pointer
-			// lists (§9.1), so the sp role has nothing left to send.
+			// lists (architecture.md, Common agent rules), so the sp role has
+			// nothing left to send.
 			slog.InfoContext(ctx, msgSpDeleting,
 				slog.Uint64("cluster_id", w.cid),
 				slog.Uint64("sp_id", w.spId),
@@ -547,10 +554,12 @@ func (w *spWorker) fanOut() {
 		)
 	}
 	if err := model.ValidateBdevConf(state.Conf.GetBdevConf()); err != nil {
-		// §7: the SP's stored geometry is what every side and cntlr request
-		// is built from. dm_raid0_conf.stripe_size is read on no worker path
-		// at all, and redund_md_raid1.bitmap_chunk_block_cnt only inside
-		// model.GrowSlice's §3.6 geometry; otherwise both travel verbatim
+		// architecture.md, Common validation: the SP's stored geometry is what
+		// every side and cntlr request is built from. dm_raid0_conf.stripe_size
+		// is read on no worker path at all, and
+		// redund_md_raid1.bitmap_chunk_block_cnt only inside model.GrowSlice's
+		// geometry (architecture.md, Group on-leg layout: meta region, data
+		// region, health block); otherwise both travel verbatim
 		// inside the bdev_conf buildCntlrPlans forwards, so this is the one
 		// place the worker can refuse to hand the cn agent a geometry nobody
 		// chose.
@@ -592,8 +601,9 @@ func (w *spWorker) refuseSpConf(ctx context.Context, err error) {
 
 // buildPlan turns one loaded SP into every request the fan-out sends
 // (RW15/RW16). It resolves each side's dn_id through SpState.DnByAddr and each
-// cntlr's cn_id through CnByAddr (§10.3): those two maps are read at the same
-// store revision as the SP itself, so no request can mix two views.
+// cntlr's cn_id through CnByAddr (architecture.md, sp role): those two maps are
+// read at the same store revision as the SP itself, so no request can mix two
+// views.
 func (w *spWorker) buildPlan(
 	ctx context.Context,
 	state *model.SpState,
@@ -653,7 +663,7 @@ func (w *spWorker) buildPlan(
 	}
 	// RW15: every OTHER cntlr is a standby of the side — disabled ones
 	// included, because a disabled cntlr keeps its standby shape
-	// (cnagent.md §4) — in SpConf.cntlr_id_list order, so an unchanged state
+	// (cnagent.md CN9) — in SpConf.cntlr_id_list order, so an unchanged state
 	// produces a byte-identical request.
 	standby := make([]uint64, 0, len(conf.GetCntlrIdList()))
 	for _, cntlrId := range conf.GetCntlrIdList() {
@@ -717,7 +727,8 @@ func (w *spWorker) buildPlan(
 }
 
 // buildSidePlans walks every side of the SP — both groups of every slice, both
-// the active legs and the SPARE legs (RW14, §8.12) — and builds its request.
+// the active legs and the SPARE legs (RW14; architecture.md, Spare legs) — and
+// builds its request.
 //
 // withRequests is false while the SP's cntlr set is unresolved: the walk then
 // only indexes the legs, which is what lets the coordinator keep placing the
@@ -829,9 +840,9 @@ func (w *spWorker) buildSidePlan(
 
 // addMigrConf adds RW15's migr_src_conf / migr_dst_conf when a Migration of
 // the SP names this side. Only a leg with TWO sides can carry a migration: one
-// side is the source, the other the destination (§11.2). It reports whether
-// the request is complete — a migration whose peer side's DN cannot be
-// resolved leaves this child idle rather than sending half a role.
+// side is the source, the other the destination (architecture.md, Migration).
+// It reports whether the request is complete — a migration whose peer side's DN
+// cannot be resolved leaves this child idle rather than sending half a role.
 func (w *spWorker) addMigrConf(
 	ctx context.Context,
 	plan *spPlan,
@@ -906,7 +917,8 @@ func (w *spWorker) addMigrConf(
 }
 
 // buildCntlrPlans is RW16: every cntlr of the SP receives the full state
-// (§10.3), in SpConf's list orders so the requests are deterministic.
+// (architecture.md, sp role), in SpConf's list orders so the requests are
+// deterministic.
 func (w *spWorker) buildCntlrPlans(
 	ctx context.Context,
 	plan *spPlan,
@@ -928,7 +940,8 @@ func (w *spWorker) buildCntlrPlans(
 		if !ok {
 			continue
 		}
-		// The key the cn agent reads (RW16, §9.3).
+		// The key the cn agent reads (RW16; architecture.md, `service
+		// ControllerNodeAgent`).
 		idToSlice[fmt.Sprintf(common.IdKeyFmt, sliceId)] = slice
 	}
 	clones := make([]*pb.Clone, 0, len(conf.GetCloneNameList()))
@@ -1189,9 +1202,9 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 	w.idleCnt = plan.unresolved
 }
 
-// startSideChild starts one side child (RW14): an ordinary revision worker of
-// §8.1 with the side driver, which waits for the stop of the side's previous
-// child if that is still running (RW1).
+// startSideChild starts one side child (RW14): an ordinary revision worker
+// (RW1-RW12) with the side driver, which waits for the stop of the side's
+// previous child if that is still running (RW1).
 func (w *spWorker) startSideChild(key sideKey, p *sidePlan) *sideChild {
 	params := revWorkerParams{
 		deps:  w.deps,
@@ -1492,7 +1505,8 @@ func (w *spWorker) reseedHealth(
 	}
 }
 
-// applyProvisionedFlip runs RW18's STM and logs the §12 record.
+// applyProvisionedFlip runs RW18's STM and logs the "flip applied" record
+// (dnv-worker.md, Log records).
 func (w *spWorker) applyProvisionedFlip(
 	ctx context.Context,
 	sides []model.SideRef,
@@ -1517,7 +1531,7 @@ func (w *spWorker) applyProvisionedFlip(
 	}
 	// One record per side the STM WROTE, never per candidate reported: a side
 	// another owner flipped first is not this worker's flip, and the record
-	// carries the revision this STM produced (§12).
+	// carries the revision this STM produced (dnv-worker.md, Log records).
 	revision := w.currentRevision(ctx)
 	for _, ref := range flipped {
 		slog.InfoContext(ctx, msgFlipApplied,
@@ -1532,7 +1546,8 @@ func (w *spWorker) applyProvisionedFlip(
 	}
 }
 
-// applyCreatedFlip runs RW19's STM and logs the §12 record.
+// applyCreatedFlip runs RW19's STM and logs the "flip applied" record
+// (dnv-worker.md, Log records).
 func (w *spWorker) applyCreatedFlip(ctx context.Context, cands []model.TdRef) {
 	if len(cands) == 0 {
 		return
@@ -1567,9 +1582,10 @@ func (w *spWorker) applyCreatedFlip(ctx context.Context, cands []model.TdRef) {
 }
 
 // currentRevision reads the SpRev the flip just bumped, for the "revision"
-// attribute of the §12 record. The flip ops report only how many records they
-// wrote, so the new revision is read back; a concurrent bump would make this
-// report a slightly newer one, which is a log detail, not a decision.
+// attribute of the "flip applied" record (dnv-worker.md, Log records). The flip
+// ops report only how many records they wrote, so the new revision is read
+// back; a concurrent bump would make this report a slightly newer one, which is
+// a log detail, not a decision.
 func (w *spWorker) currentRevision(ctx context.Context) uint64 {
 	rev := &pb.SpRev{}
 	found, err := w.deps.store.Get(
@@ -1585,8 +1601,8 @@ func (w *spWorker) currentRevision(ctx context.Context) uint64 {
 // The side child (RW15, RW17, RW18, HL2, BM1-BM6)
 // ---------------------------------------------------------------------------
 
-// sideDriver is one side's half of the per-object loop (§8.4). Everything but
-// the plan slot runs on the child's own goroutine (RW1).
+// sideDriver is one side's half of the per-object loop (RW14-RW20). Everything
+// but the plan slot runs on the child's own goroutine (RW1).
 type sideDriver struct {
 	deps   *deps
 	host   *revWorker
@@ -1661,7 +1677,7 @@ func newSideDriver(
 		},
 		// A migration has one bitmap per leg, addressed by bm_idx alone: the
 		// pusher's shared fetch signature carries a source slice index, and
-		// it is always 0 here (§9.6).
+		// it is always 0 here (architecture.md, Bitmap push protocol).
 		fetch: func(
 			ctx context.Context,
 			name string,
@@ -1725,7 +1741,8 @@ func (d *sideDriver) current() *sidePlan {
 	return d.plan
 }
 
-// logAttrs are the side's ids as the §12 records carry them.
+// logAttrs are the side's ids as the records of dnv-worker.md, Log records,
+// carry them.
 func (d *sideDriver) logAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.Uint64("cluster_id", d.cid),
@@ -1734,7 +1751,8 @@ func (d *sideDriver) logAttrs() []slog.Attr {
 	}
 }
 
-// childAttrs is the side_pointer an sp child's lifecycle records carry (§12).
+// childAttrs is the side_pointer an sp child's lifecycle records carry
+// (dnv-worker.md, Log records).
 func (d *sideDriver) childAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.Any("side_pointer", common.PbToLogValue(d.ptr)),
@@ -1757,7 +1775,8 @@ func (d *sideDriver) setDesired(next desiredState) {
 	d.current()
 }
 
-// openStream opens the side's CheckSide stream (RW4 step 1, §9.7).
+// openStream opens the side's CheckSide stream (RW4 step 1; architecture.md,
+// Check streams).
 func (d *sideDriver) openStream(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -1792,7 +1811,8 @@ func (d *sideDriver) syncup(
 
 // migrChunkIds is a migration agent's applied set in the pusher's shape: a
 // migration reports the flat bm_idx_list of its one bitmap, which names no
-// source slice, so every chunk of it is at slice 0 (§9.6).
+// source slice, so every chunk of it is at slice 0 (architecture.md, Bitmap
+// push protocol).
 func migrChunkIds(bmIdxList []uint32) []model.BmChunk {
 	out := make([]model.BmChunk, 0, len(bmIdxList))
 	for _, bmIdx := range bmIdxList {
@@ -1893,8 +1913,8 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 }
 
 // unreachable folds a broken stream or a missed reply into the side's health
-// (HL2). The in-memory info is marked RES_STATUS_UNKNOWN (§9.5) and never
-// written to etcd.
+// (HL2). The in-memory info is marked RES_STATUS_UNKNOWN (architecture.md,
+// Live-state reporting) and never written to etcd.
 func (d *sideDriver) unreachable(ctx context.Context) {
 	markSideUnknown(d.info())
 	d.health.observe(ctx, healthUnreachable, "")
@@ -1972,7 +1992,7 @@ func sideCheckRequest(
 // The cntlr child (RW16, RW17, RW19, HL2, BM1-BM6)
 // ---------------------------------------------------------------------------
 
-// cntlrDriver is one cntlr's half of the per-object loop (§8.4).
+// cntlrDriver is one cntlr's half of the per-object loop (RW14-RW20).
 type cntlrDriver struct {
 	deps   *deps
 	host   *revWorker
@@ -2129,7 +2149,8 @@ func (d *cntlrDriver) current() *cntlrPlan {
 	return d.plan
 }
 
-// logAttrs are the cntlr's ids as the §12 records carry them.
+// logAttrs are the cntlr's ids as the records of dnv-worker.md, Log records,
+// carry them.
 func (d *cntlrDriver) logAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.Uint64("cluster_id", d.cid),
@@ -2138,7 +2159,8 @@ func (d *cntlrDriver) logAttrs() []slog.Attr {
 	}
 }
 
-// childAttrs is the cntlr_pointer an sp child's lifecycle records carry (§12).
+// childAttrs is the cntlr_pointer an sp child's lifecycle records carry
+// (dnv-worker.md, Log records).
 func (d *cntlrDriver) childAttrs() []slog.Attr {
 	return []slog.Attr{
 		slog.Any("cntlr_pointer", common.PbToLogValue(d.ptr)),
@@ -2161,7 +2183,8 @@ func (d *cntlrDriver) setDesired(next desiredState) {
 	d.current()
 }
 
-// openStream opens the cntlr's CheckCntlr stream (RW4 step 1, §9.7).
+// openStream opens the cntlr's CheckCntlr stream (RW4 step 1; architecture.md,
+// Check streams).
 func (d *cntlrDriver) openStream(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -2259,17 +2282,17 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// meaningless for the promotion (one the agent applied but whose reply
 	// was lost leaves the agent at the driven revision). Rounds and syncups
 	// run on this child's one goroutine, and a revision carries one set of
-	// roles: a role change bumps SpRev (architecture.md §5.5) and the fan-out
-	// builds no plan from a state newer than its label (RW14), an etcd
-	// restore, which can reuse a revision, aside. So an accepted reply at the
-	// driven revision of an ENABLED primary is a report of the primary shape.
-	// The role gate is the cn agent's own (cnagent.md CN9: primary iff
-	// primary && !disabled): a disabled primary converges the standby shape,
-	// so its clean reply proves nothing, and the gateway's UpdateCntlrEnabled
-	// marks a primary it re-enables settling again. And the report must show
-	// the stack built (primaryShapeBuilt): a new SP's primary reports its
-	// pools and what is over them PROVISIONING, clean, until its sides are
-	// zeroed, and a Check round between a converge that left members
+	// roles: a role change bumps SpRev (architecture.md, Revision keys and the
+	// sync fan-out) and the fan-out builds no plan from a state newer than its
+	// label (RW14), an etcd restore, which can reuse a revision, aside. So an
+	// accepted reply at the driven revision of an ENABLED primary is a report
+	// of the primary shape. The role gate is the cn agent's own (cnagent.md
+	// CN9: primary iff primary && !disabled): a disabled primary converges the
+	// standby shape, so its clean reply proves nothing, and the gateway's
+	// UpdateCntlrEnabled marks a primary it re-enables settling again. And the
+	// report must show the stack built (primaryShapeBuilt): a new SP's primary
+	// reports its pools and what is over them PROVISIONING, clean, until its
+	// sides are zeroed, and a Check round between a converge that left members
 	// unavailable and the retry that builds over them reports the unbuilt
 	// devices MISSING, clean too when the SP has no td; settling on either
 	// would leave the build that follows to primary_unhealthy.
@@ -2305,7 +2328,8 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	d.send(ctx, rep)
 }
 
-// legRows is the PRIMARY's §3.6 probe of every leg it reported, spares
+// legRows is the PRIMARY's probe (architecture.md, Group on-leg layout: meta
+// region, data region, health block) of every leg it reported, spares
 // included (HL2). ERROR sets the leg's err_epoch, OK clears it, everything
 // else neither.
 func (d *cntlrDriver) legRows(info *pb.CntlrInfo) []legRow {
@@ -2322,7 +2346,8 @@ func (d *cntlrDriver) legRows(info *pb.CntlrInfo) []legRow {
 }
 
 // logStandbyLegRows is HL2's "a standby's leg row is logged, never recorded":
-// a standby reports transport liveness and ana_state (§3.6), which says
+// a standby reports transport liveness and ana_state (architecture.md, Group
+// on-leg layout: meta region, data region, health block), which says
 // nothing about the leg's health. Logged only when the row changes, so a
 // standing row does not repeat every round.
 func (d *cntlrDriver) logStandbyLegRows(
@@ -2362,17 +2387,18 @@ func (d *cntlrDriver) send(ctx context.Context, rep spReport) {
 }
 
 // unreachable folds a broken stream or a missed reply into the cntlr's health
-// (HL2, §9.5). It reports nothing about the legs: only an ERROR row from the
-// primary sets a leg's err_epoch, and an unreachable primary is the CNTLR's
-// health, not the legs'.
+// (HL2; architecture.md, Live-state reporting). It reports nothing about the
+// legs: only an ERROR row from the primary sets a leg's err_epoch, and an
+// unreachable primary is the CNTLR's health, not the legs'.
 func (d *cntlrDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.health.observe(ctx, healthUnreachable, "")
 }
 
-// markInfoUnknown is §9.5's "no answer from the node" applied to the last
-// known info in place. It takes the driver's lock because the coordinator may
-// be snapshotting the same message for a reaction pass (AR1).
+// markInfoUnknown is the "no answer from the node" of architecture.md,
+// Live-state reporting, applied to the last known info in place. It takes the
+// driver's lock because the coordinator may be snapshotting the same message
+// for a reaction pass (AR1).
 func (d *cntlrDriver) markInfoUnknown() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -2455,9 +2481,9 @@ func cntlrCheckRequest(
 // completedTds applies RW19's conditions (2), (3) and (4) — condition (1),
 // an accepted code (0 or common.ReplyCodeLeftover, accepted), is the
 // caller's — to one CntlrInfo, and returns the td_ids the reply COMPLETES
-// (architecture.md §10.3): the thin info exists, its
-// slice_id_to_dm_thin key set equals the SP's slice ids exactly (every slice,
-// no extra, no missing) and every row is RES_STATUS_OK.
+// (architecture.md, sp role): the thin info exists, its slice_id_to_dm_thin key
+// set equals the SP's slice ids exactly (every slice, no extra, no missing) and
+// every row is RES_STATUS_OK.
 //
 // Anything else is "not yet": no entry at all (a standby, cnagent.md CN14
 // "primary only"), a partial map, or any MISSING/ERROR/PROVISIONING/UNKNOWN
@@ -2504,16 +2530,18 @@ func sideOfLeg(leg *pb.Leg, sideId uint64) *pb.Side {
 // dataBlockSize is the pool's STORED data block size: what a migration
 // destination's dm-clone uses as its region size (RW15) and what AR6 converts
 // a meta group's data region with. It substitutes nothing — CreateStoragePool
-// made the value concrete (§7) and both callers sit behind a ValidateBdevConf
-// gate. It stays a one-line delegation to model so this pre-check and the
-// GrowSlice STM cannot end up meaning different fields.
+// made the value concrete (architecture.md, Common validation) and both callers
+// sit behind a ValidateBdevConf gate. It stays a one-line delegation to model
+// so this pre-check and the GrowSlice STM cannot end up meaning different
+// fields.
 func dataBlockSize(bdevConf *pb.BdevConf) uint64 {
 	return model.PoolBlockSize(bdevConf)
 }
 
-// migrCloneConf resolves the §7 defaults of a migration's dm-clone knobs
-// before they are sent (RW15). The conf is copied, never patched in place: it
-// belongs to the loaded state, which the coordinator hands to every child.
+// migrCloneConf resolves the defaults (architecture.md, Common validation) of a
+// migration's dm-clone knobs before they are sent (RW15). The conf is copied,
+// never patched in place: it belongs to the loaded state, which the coordinator
+// hands to every child.
 func migrCloneConf(conf *pb.DmCloneConf) *pb.DmCloneConf {
 	out := &pb.DmCloneConf{
 		HydrationThreshold: conf.GetHydrationThreshold(),

@@ -1,9 +1,10 @@
-// Tests for the parsing surface of workerctl (dnv-worker.md §14.8). The
-// driver writes straight into the etcd the whole suite reads back, so a
-// malformed test invocation must fail loudly here rather than land garbage in
-// a key: these cover every tuple form of the §14.8 flag table, the 0x hex ids,
-// the bitmap payload, the §5.3 key kind → message mapping of `get`, and the
-// put-sp wiring validation that joins the placement flags on their ids.
+// Tests for the parsing surface of workerctl (dnv-worker.md,
+// Integration test plan, The driver). The driver writes straight into the etcd
+// the whole suite reads back, so a malformed test invocation must fail loudly
+// here rather than land garbage in a key: these cover every tuple form of its
+// flags, the 0x hex ids, the bitmap payload, the key kind → message mapping of
+// `get` (architecture.md, Key table), and the put-sp wiring validation that
+// joins the placement flags on their ids.
 package main
 
 import (
@@ -86,7 +87,7 @@ func TestTriBool(t *testing.T) {
 		t.Fatalf("Set(false) failed: %v", err)
 	}
 	// "given false" must differ from "not given": set-cntlr changes only the
-	// flags the caller named (§14.8).
+	// flags the caller named.
 	if !flag.set || flag.value {
 		t.Fatalf("Set(false) gave set=%v value=%v", flag.set, flag.value)
 	}
@@ -198,7 +199,8 @@ func TestParseGroupSpec(t *testing.T) {
 		"1:2:meta:1",
 		"1:2:mirror:1:raid1",
 		"1:2:meta:1:raid5",
-		// ext_cnt 0 has no §3.6 geometry at all.
+		// ext_cnt 0 has no group geometry at all (architecture.md, Group
+		// on-leg layout: meta region, data region, health block).
 		"1:2:meta:0:raid1",
 	} {
 		if _, err := parseGroupSpec(bad); err == nil {
@@ -328,8 +330,8 @@ func TestParseSpLevel(t *testing.T) {
 			t.Errorf("parseSpLevel(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
-	// 47 is between two defined levels: storing it would leave a level no §7
-	// rule knows.
+	// 47 is between two defined levels: storing it would leave a level no rule
+	// of architecture.md, Common validation, knows.
 	for _, bad := range []string{"", "47", "-1", "nonesuch"} {
 		if _, err := parseSpLevel(bad); err == nil {
 			t.Errorf("parseSpLevel(%q) succeeded, want an error", bad)
@@ -337,8 +339,8 @@ func TestParseSpLevel(t *testing.T) {
 	}
 }
 
-// TestMessageForKey pins the §5.3 mapping `get` uses: the SECOND field of a
-// key names the message its value decodes into.
+// TestMessageForKey pins the mapping `get` uses (architecture.md, Key table):
+// the SECOND field of a key names the message its value decodes into.
 func TestMessageForKey(t *testing.T) {
 	cases := []struct {
 		key  string
@@ -527,7 +529,7 @@ func TestNvmeTrConfOf(t *testing.T) {
 	}
 	// The node's own port, so two nodes on one host get distinct
 	// NvmeTrConfs and a CdcEntry's transport list stays attributable
-	// (§14.11 case D step 3).
+	// (worker_test.sh case D step 3).
 	if conf.GetTrSvcId() != "29600" {
 		t.Fatalf("tr_svc_id = %q, want %q", conf.GetTrSvcId(), "29600")
 	}
@@ -566,8 +568,9 @@ func TestNsIdentityIsDeterministic(t *testing.T) {
 	}
 }
 
-// smokePlan is the §14.11 case S placement: two cntlrs, one slice, a raid1
-// meta group of 1 extent and a raid1 data group of 2, four sides on two DNs.
+// smokePlan is worker_test.sh's case S placement: two cntlrs, one slice, a
+// raid1 meta group of 1 extent and a raid1 data group of 2, four sides on two
+// DNs.
 func smokePlan() (cntlrs, slices, groups, legs, sides []string) {
 	return []string{"1:1:0:true", "2:2:1:false"},
 		[]string{"1:0"},
@@ -587,11 +590,12 @@ func TestBuildSpPlan(t *testing.T) {
 	if !plan.raid1 {
 		t.Fatalf("plan.raid1 = false")
 	}
-	// Σ ext_cnt over ALL groups is what one cntlr's CN reserves (§8.4).
+	// Σ ext_cnt over ALL groups is what one cntlr's CN reserves
+	// (architecture.md, Storage pools).
 	if plan.footprint != 3 {
 		t.Fatalf("footprint = %d, want 3", plan.footprint)
 	}
-	// next_id must be past every id the script assigned (§14.5).
+	// next_id must be past every id the script assigned.
 	if plan.nextId != 12 {
 		t.Fatalf("next_id = %d, want 12", plan.nextId)
 	}
@@ -768,7 +772,8 @@ func TestBuildSpPlanRequiresEveryPart(t *testing.T) {
 	if _, err := buildSpPlan(c, s, nil, l, si, slots); err == nil {
 		t.Errorf("a plan with no --group was accepted")
 	}
-	// Fewer slots than cntlrs cannot give every cntlr a distinct one (§11.8).
+	// Fewer slots than cntlrs cannot give every cntlr a distinct one
+	// (architecture.md, cntlid slots).
 	if _, err := buildSpPlan(c, s, g, l, si, []uint32{0}); err == nil {
 		t.Errorf("a plan with fewer slots than cntlrs was accepted")
 	}
@@ -793,8 +798,8 @@ func TestContainsNameAndAdvanceNextId(t *testing.T) {
 }
 
 // TestShardFlag pins the one place where a decimal reading would be silently
-// wrong: §14.11 case E spreads DNs over the shard codes "00", "55", "aa" and
-// "ff", which are the common.ShardCodeFmt spelling and therefore hex.
+// wrong: worker_test.sh's case E spreads DNs over the shard codes "00", "55",
+// "aa" and "ff", which are the common.ShardCodeFmt spelling and therefore hex.
 func TestShardFlag(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -825,7 +830,8 @@ func TestShardFlag(t *testing.T) {
 	if got := shard.String(); got != "ff" {
 		t.Fatalf("String() = %q, want ff", got)
 	}
-	// 256 and up have no two-digit %02x spelling and no bucket slot (§5.4).
+	// 256 and up have no two-digit %02x spelling and no bucket slot
+	// (architecture.md, Globals: id allocation + shard buckets).
 	for _, bad := range []string{"", "100", "-1", "zz", "0x100"} {
 		var shard shardFlag
 		if err := shard.Set(bad); err == nil {
