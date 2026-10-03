@@ -673,10 +673,10 @@ func TestAgentPathCreateControllerNodeCapBudget(t *testing.T) {
 
 // TestAgentPathInspectRepliesTheAppliedRevision pins architecture.md,
 // Disk nodes and Cntlrs: an Inspect* reply's `applied_revision` is the one
-// the agent's
-// own reply carries — its last applied revision — never the one stored in an
-// etcd rev key. The rev keys are hand-written to a value the agent does not
-// report, so a handler that regressed to the stored revision fails here.
+// the agent's own reply carries — the revision of the last Syncup* it
+// accepted for the object — never the one stored in an etcd rev key. The rev
+// keys are hand-written to a value the agent does not report, so a handler
+// that regressed to the stored revision fails here.
 //
 // The *Info message travels with it: both fields are the agent's, verbatim,
 // because the whole point of Inspect* is one coherent live snapshot the

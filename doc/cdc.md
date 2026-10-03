@@ -22,9 +22,9 @@ hosts (`architecture.md`, System overview and dnv-cdc): it watches the
 `{p} cdc` keys, keeps a per-host filtered view of the discovery log,
 answers the well-known discovery subsystem NQN, `NvmeDiscoveryNqn`, over
 NVMe/TCP, and sends Discovery Log Page Change AENs to exactly the hosts a
-change impacts. It never writes etcd, never serves or dials gRPC, so it
-chains no interceptor (`grpc.md`, Wiring), and never touches the local
-kernel's nvmet.
+change impacts. It never writes etcd, never serves or dials dnv-internal
+gRPC, so it chains no interceptor (`grpc.md`, Wiring), and never touches the
+local kernel's nvmet.
 
 The discovery controller is implemented in userspace and served straight
 from etcd, with no kernel state to converge, rather than built as a hub of
@@ -63,7 +63,7 @@ Packages and files (`layout.md`, Directory tree and Dependency rules):
 
 | package | files | may import (internal) |
 |---|---|---|
-| `cdc` | `cdc.go` (`Run`, the dependencies), `watch.go` (The etcd watcher), `view.go` (The discovery service model), `logpage.go` (the DS3 and DS9 rendering), `server.go` (the listener, NP1), `conn.go` (the per-connection state, NP4 to NP12), `pdu.go` (the NP2 and NP3 codec) | `common`, `pb`, `etcdutil`, `model` |
+| `cdc` | `cdc.go` (`Run`, the dependencies), `watch.go` (The etcd watcher), `view.go` (The discovery service model), `logpage.go` (the DS3 and DS9 rendering), `server.go` (the listener, NP1), `conn.go` (the per-connection state, NP1's per-connection goroutines, and NP4 to NP13), `pdu.go` (the NP2 and NP3 codec) | `common`, `pb`, `etcdutil`, `model` |
 | `cmd/dnv-cdc` | `main.go` | `cdc`, `common`, `etcdutil`, plus cobra and viper |
 
 Out of scope here: how operators distribute cdc endpoints to hosts (static
@@ -358,7 +358,8 @@ SQHD is maintained in every response.
 
 NP5. **Connect.** Connect validates its connect data: SUBNQN must be
 `NvmeDiscoveryNqn` (else connect invalid parameters, IPO pointing at
-SUBNQN), HOSTNQN well-formed (at most `MaxNqnLength` bytes); HOSTID is
+SUBNQN), HOSTNQN non-empty and at most `MaxNqnLength` bytes (else connect
+invalid host, IPO pointing at HOSTNQN), its format unchecked; HOSTID is
 recorded for the logs. KATO comes from the command. On success a CNTLID
 from the round-robin counter, which wraps at `CdcCntlIdMax`, is assigned
 and returned, the connection registers under its hostnqn (DS7), and
@@ -527,7 +528,9 @@ owns:
 * `signal received` with `signal` at the first SIGINT or SIGTERM, and
   `second signal, exiting without a clean drain`, at Warn, with `signal`
   (CM5);
-* `etcd client close failed`, at Error, with `error`, best effort (CM5);
+* `etcd client close failed`, at Error, with `error`, best effort, when
+  closing the client fails at stop (CM5) or on a start whose listener
+  cannot be opened (CM4);
 * `cdc stopping` (CM5).
 
 Only these records are normative, and the cdc suite may key off none of
@@ -547,10 +550,12 @@ equally supported: the AEN path is stock kernel — the host kernel publishes
 the discovery-change AEN as an "NVME_AEN" uevent — and nvme-stas adds the
 automatic connect, re-point and disconnect on top. The suite tests the two
 layers separately, so that an nvme-stas configuration problem cannot be
-mistaken for a cdc bug. It does not prove the gateway-to-`CdcEntry`
-pipeline, which the worker suite proves by asserting `CdcEntry` contents
-(`dnv-worker.md`, Integration test plan), data-path correctness beyond one
-read (the agent suites), or etcd failures.
+mistaken for a cdc bug. It does not prove what the gateway and the worker
+write into `CdcEntry`: the gateway suite reads back the entry the gateway's
+subsystem and cntlr RPCs write (`gateway.md`, Integration test plan), and
+the worker suite asserts the cntlr replacement's rewrite of it
+(`dnv-worker.md`, Integration test plan). Nor does it prove data-path
+correctness beyond one read (the agent suites) or etcd failures.
 
 **Topology.** The developer machine builds the binaries and drives four lab
 servers over ssh; the suite occupies all four, so no other suite may run in

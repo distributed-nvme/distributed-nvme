@@ -893,10 +893,10 @@ func (s *CnAgentServer) assembleGroup(
 // The held set is the dm names sysfs gave the array's members
 // (dev-*/block/dm/name), compared with the leg_list wrapper names — the key
 // Detail matched the array by — and each held member is addressed by its dm
-// path. Nothing here runs lsblk (amended 2026-09-26): the sets used to be
-// keyed by device number, and an lsblk of a leg_list wrapper that did not
-// answer read as "not wanted" and failed and removed that in-sync member. A
-// leg whose wrapper this pass could not build is never available, so the add
+// path. Nothing here runs lsblk: were the wanted set keyed by device numbers
+// from an lsblk of each leg_list wrapper, one that did not answer would read
+// as "not wanted" and fail and remove that wrapper's in-sync member. A leg
+// whose wrapper this pass could not build is never available, so the add
 // loop leaves it alone, and its member, if md still holds one, stays wanted.
 // `mdadm --fail` and `--remove` open the member's path (open only, no IO) and
 // then act on its device number. `--remove` can sleep in md's suspend for as

@@ -95,8 +95,10 @@ func (s *DnAgentServer) WaitBackground() {
 	s.bg.Wait()
 }
 
-// dnState is one synced DN: its last fully applied request plus the ResInfo
-// history of its node-level resources.
+// dnState is one synced DN: its last accepted request as this process holds it
+// (SH8) — a SyncupDn stores it once it has passed the revision and conf gates,
+// before its converge runs — plus the ResInfo history of its node-level
+// resources.
 type dnState struct {
 	// req is replaced only under the node write lock (SyncupDn), which
 	// orders it against every reader, since each holds the node lock. It is

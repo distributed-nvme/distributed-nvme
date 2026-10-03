@@ -391,16 +391,15 @@ func TestBmObjectsPushIndependently(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// [D13] — a failed push is logged, and nothing else
+// BM6 — a failed push is logged, ends its plan and arms nothing
 // ---------------------------------------------------------------------------
 
-// TestPushFailureIsLoggedOnly pins what replaced BM6: a push that fails — for
-// any of the three reasons there are — is LOGGED, ends the rest of that plan,
-// and arms nothing. There is no flag left to raise: the diff a push comes from
-// is computed from the agent's own acknowledged set in the next Syncup* reply,
-// so a chunk that did not land is simply missing again next round and is
-// re-planned there. BM6's extra equal-revision re-sync only hastened that by
-// one round and cost a full re-apply of the object to do it.
+// TestPushFailureIsLoggedOnly pins BM6: a push that fails — for any of the
+// three reasons BM6 lists — is LOGGED, ends the rest of that plan, and arms
+// nothing: no flag, no push-specific timer, no push-driven re-sync. The diff
+// a push comes from is computed from the agent's own acknowledged set in the
+// next Syncup* reply (BM2, refined by BM5), so that diff treats a chunk that
+// did not land exactly as if its push had never been tried.
 //
 // The sub-cases are the three failure paths of pushOne, plus the end-to-end
 // negative: nothing the push path does makes the child issue a Syncup*.

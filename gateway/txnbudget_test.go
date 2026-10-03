@@ -462,10 +462,9 @@ const (
 	tdDeleteReadsPerClone = 1 // the Clone
 	tdDeleteReadsPerTd    = 0 // the walk is the plan's, outside the STM
 	// TODAY's two ceilings and the compare count the factors produce at them
-	// — the 75 common/constants.go's EtcdMaxTxnOps comment and gateway.md,
-	// Additions to `common/constants.go`, quote. Separate assertions, for the
-	// clone tripwire's reason: a ceiling change and a retyped factor must not
-	// fail alike.
+	// — the 75 common/constants.go's EtcdMaxTxnOps comment quotes. Separate
+	// assertions, for the clone tripwire's reason: a ceiling change and a
+	// retyped factor must not fail alike.
 	tdDeleteMaxSsCnt    = 4
 	tdDeleteMaxCloneCnt = 64
 	tdDeleteMaxCompares = 75
@@ -499,8 +498,7 @@ func TestDeleteThinDeviceBudget(t *testing.T) {
 				"MaxCloneCntPerSp %d, want the pinned %d and %d. Re-pin "+
 				"tdDeleteMaxSsCnt, tdDeleteMaxCloneCnt and tdDeleteMaxCompares "+
 				"together, and with them the count common/constants.go's "+
-				"EtcdMaxTxnOps comment and gateway.md, Additions to "+
-				"`common/constants.go`, quote",
+				"EtcdMaxTxnOps comment quotes",
 			common.MaxSsCntPerSp, common.MaxCloneCntPerSp,
 			tdDeleteMaxSsCnt, tdDeleteMaxCloneCnt)
 	}

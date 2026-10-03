@@ -744,9 +744,8 @@ func testRevisionIdleWithoutClusterConf(t *testing.T) {
 // because there is nothing to hand back. The test below, reaching the refusal
 // from a connected state, is where refuseConf's quiesce() is pinned.
 //
-// The record is its own, not "cluster conf missing": the worker suite
-// (dnv-worker.md, Integration test plan) greps that string for
-// the absent-cluster case, and an operator who sees it goes looking for a
+// The record is its own, not "cluster conf missing": that string means the
+// absent-cluster case (RW9), and an operator who sees it goes looking for a
 // deleted cluster instead of the field that is wrong.
 func TestRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
 	synctest.Test(t, testRevisionIdlesOnAnInvalidClusterConf)

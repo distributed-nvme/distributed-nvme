@@ -292,7 +292,7 @@ func TestStateCountsAndLastRequest(t *testing.T) {
 			req["sp_rev"])
 	}
 	if req["cluster_name"] != "itctl" || req["sp_name"] != "sp0" {
-		t.Errorf("stored globals = %v/%v, want itctl/sp0",
+		t.Errorf("stored cluster_name/sp_name = %v/%v, want itctl/sp0",
 			req["cluster_name"], req["sp_name"])
 	}
 	if req["td_name"] != "t0" {

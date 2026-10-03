@@ -46,12 +46,8 @@ func TraceIdFromCtx(ctx context.Context) (string, bool) {
 	return traceId, true
 }
 
-// NewTraceId mints a new trace id. Entry points create one (dnvctl per CLI
-// invocation, dnv-worker per sync/health round, dnv-gateway for a request that
-// arrived without one, in its own ensureTraceId interceptors; every daemon at
-// startup; dnv-agent per background attempt, dnv-cdc per host connection, scan
-// and watch event); the shared interceptors (grpc.md, Placement) never invent
-// one (T4).
+// NewTraceId mints a new trace id for the entry points of grpc.md T4; the
+// shared interceptors never mint one.
 func NewTraceId() string {
 	var b [8]byte
 	// crypto/rand.Read never returns an error (it panics on failure since

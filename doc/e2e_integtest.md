@@ -104,7 +104,8 @@ set is chosen just before its pool is built, and a case without one dies rather
 than defaulting. smoke, ops and copy build under a quiet set longer than any
 wait, a wide margin rather than a proof, as a failover or a spare leg
 mid-operation would invalidate their absolute counts and digests; under it such
-a reaction is a finding about the lab. react builds under a short set, as cntlr
+a reaction is a finding about the lab. react builds under the short reacting
+set, as cntlr
 replacement and leg repair wait out thresholds whose defaults lie beyond any
 wait the suite could afford (`dnv-worker.md` AR7, AR8). The quiet set names all
 four, as an omitted or zero threshold resolves to its default when read
@@ -176,13 +177,14 @@ blocking where nothing said it would, so the run dies with diagnostics, never
 hangs.
 
 E2E8. **Pids in files, signals by pid, `pkill` only from helper files with
-bracketed patterns.** Every process the suite starts records its pid: the
-control-plane daemons are stopped by theirs, and the react case stops each
-agent it kills by that agent's pid file. The cleanup's pattern sweeps, which
-also reach a crashed run's processes whose pid files are gone, sit in helper
-files on the guest behind helper verbs, bracketed so they never match the ssh
-command's own shell, and qualified by the suite's work directory or its etcd
-name so they never touch another suite's processes.
+bracketed patterns.** Every agent and every control-plane daemon the suite
+starts, etcd included, records its pid: the control-plane daemons are stopped
+by theirs, and the react case stops each agent it kills by that agent's pid
+file. The cleanup's pattern sweeps, which also reach a crashed run's
+processes whose pid files are gone, sit in helper files on the guest behind
+helper verbs, bracketed so they never match the ssh command's own shell, and
+qualified by the suite's work directory or its etcd name so they never touch
+another suite's processes.
 
 E2E9. **Never run while another dnv suite runs anywhere in the lab.** The suite
 occupies every guest it names; no other suite binds its ports, but its cn
@@ -400,8 +402,9 @@ guest resumes suspended devices first. The order:
 md arrays are named by udev's recorded name, else by mdadm's export, never by
 mdadm's scan, which prints no name on these guests; only dnv arrays are
 stopped. The port drop refuses a port whose service id lies outside the suite's
-band, naming its likely owner — the band is the disk nodes' on both roles, so a
-stranger's port on a controller node bound inside it is removed, not refused —
+band, naming its likely owner — the band is the disk nodes' on both roles, so on
+a controller node, whose cleanup drops only the cn agent's own port id, a
+stranger's port under that id bound inside the band is removed, not refused —
 and removes one with no service id, the debris of an agent killed mid-creation,
 which refusing would leave forever. Residue under an older dm-kind spelling is
 invisible to the cleanup and the residue check; the agent suites' wipe clears

@@ -19,9 +19,9 @@ func resetNextId(e *opsEnv, nextId uint64) {
 
 // TestSpNextIdReservesZero pins the id floor (architecture.md, Globals: id
 // allocation + shard buckets): per-SP
-// sub-object ids come from SpConf.next_id, which "starts at 1", so 0 is not a
-// legal id — it is the reserved "none" sentinel failoverCandidate returns and
-// the reaction pass compares against.
+// sub-object ids come from SpConf.next_id, which starts at SpFirstId, so 0 is
+// not a legal id — it is the reserved "none" sentinel failoverCandidate returns
+// and the reaction pass compares against.
 func TestSpNextIdReservesZero(t *testing.T) {
 	for _, tc := range []struct {
 		name string

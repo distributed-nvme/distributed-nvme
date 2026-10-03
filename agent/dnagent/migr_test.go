@@ -586,7 +586,7 @@ func TestMigrationSourceSequence(t *testing.T) {
 	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
 	errName := nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0)
 	// (1) every namespace inaccessible, (2) reload every per-CN dm-linear
-	// onto its dm-error ([D12]; newTestServer runs with the DN12 grace
+	// onto its dm-error ([D12]; newTestServer runs with the DN12 cutover
 	// window off, so phase 2 happens at once — TestMigrationSourceFence
 	// covers the window), (3) build + export.
 	assertOrder(t, node,
@@ -1060,7 +1060,7 @@ func TestLostStoreSiblingSideKeepsAMigrationDestination(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // pushReq is one chunk on its way to the destination side. A push carries no
-// revision ([D13]): it is position-addressed data keyed by an id that is never
+// revision (DN15): it is position-addressed data keyed by an id that is never
 // reused, so there is nothing for the side's stored revision to be compared
 // with.
 func pushReq(bmIdx uint32, migrId uint64, bitmap []byte) *pb.PushMigrBitmapRequest {
@@ -1075,13 +1075,12 @@ func pushReq(bmIdx uint32, migrId uint64, bitmap []byte) *pb.PushMigrBitmapReque
 }
 
 // TestPushHasNoRevisionGate is the dn twin of the cn agent's test of the same
-// name: PushMigrBitmap carries no revision and the handler compares none, so a
-// chunk the worker planned against a report the side's stored revision has
-// since superseded is applied rather than discarded. The old gate refused
-// exactly that, and refusing it only ever threw away work that was about to be
-// redone. The refusal that survives is the object one — a migration the stored
-// request does not name is ReplyCodeUnknownObject with a message the worker
-// logs.
+// name (DN15): PushMigrBitmap carries no revision and the handler compares
+// none, so a chunk the worker planned against a report the side's stored
+// revision has since superseded is applied rather than discarded. A revision
+// gate would only ever throw away work that is about to be redone. The handler
+// refuses by name instead — a migration the stored request does not name is
+// ReplyCodeUnknownObject with a message the worker logs.
 func TestPushHasNoRevisionGate(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -1098,8 +1097,8 @@ func TestPushHasNoRevisionGate(t *testing.T) {
 		t.Fatalf("advancing the stored revision: %v", err)
 	}
 
-	// Nothing on the wire can carry a revision any more, so no later edit can
-	// reintroduce the gate without changing the proto.
+	// The request has no revision field, so no edit can add a revision gate
+	// without changing the proto.
 	if (&pb.PushMigrBitmapRequest{}).ProtoReflect().Descriptor().
 		Fields().ByName("revision") != nil {
 		t.Fatal("PushMigrBitmapRequest still carries a revision field")
@@ -1135,7 +1134,7 @@ func TestPushHasNoRevisionGate(t *testing.T) {
 		t.Fatalf("applied set = %v, want the pushed chunk 0", got)
 	}
 
-	// The object refusal is untouched, message and all.
+	// The refusal by name holds, message and all.
 	unknown, err := srv.PushMigrBitmap(ctx,
 		pushReq(0, testMigrId+1, []byte{0x05}))
 	if err != nil {
@@ -1530,7 +1529,7 @@ func TestMigrationSourceFence(t *testing.T) {
 			info.GetStatus(), info.GetDetails())
 	}
 	if !strings.Contains(info.GetDetails(), "grace window") {
-		t.Errorf("dm_linear details = %q, want the grace-window note",
+		t.Errorf("dm_linear details = %q, want the cutover grace window note",
 			info.GetDetails())
 	}
 	// A probe agrees, and does not mutate (DN16/SH25).
@@ -1567,7 +1566,7 @@ func TestMigrationSourceFence(t *testing.T) {
 	}
 	for _, name := range []string{linName, stbName} {
 		if node.dms[name].suspended {
-			t.Errorf("%s outlived the grace window suspended", name)
+			t.Errorf("%s outlived the cutover window suspended", name)
 		}
 	}
 	if !strings.Contains(node.dms[linName].table, errNo) {
@@ -1607,7 +1606,7 @@ func TestFenceTimerRetiresTheLinears(t *testing.T) {
 		defer node.mu.Unlock()
 		return !node.dms[linName].suspended
 	}) {
-		t.Fatal("the grace window never ended on its own")
+		t.Fatal("the cutover window never ended on its own")
 	}
 	node.mu.Lock()
 	table := node.dms[linName].table
@@ -1649,10 +1648,10 @@ func TestFenceClearedWhenTheSourceRoleEnds(t *testing.T) {
 	}
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 	if srv.inFence(st) {
-		t.Error("the grace window outlived the migration source role")
+		t.Error("the cutover window outlived the migration source role")
 	}
 	if st.fenceTimer != nil {
-		t.Error("the grace-window timer was not stopped")
+		t.Error("the cutover-window timer was not stopped")
 	}
 }
 
@@ -1707,7 +1706,7 @@ func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
 		defer node.mu.Unlock()
 		return !node.dms[linName].suspended
 	}) {
-		t.Fatal("the grace window ended with the per-CN dm-linears still " +
+		t.Fatal("the cutover window ended with the per-CN dm-linears still " +
 			"suspended and nothing left to re-arm")
 	}
 	// Same proof as in TestFenceAdoptedSettlesAtTheGate, counted rather than
@@ -1764,7 +1763,7 @@ func TestFenceClearedOnARoleEndWithABrokenSideDevice(t *testing.T) {
 	}
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 	if srv.inFence(st) {
-		t.Error("the grace window outlived the migration source role")
+		t.Error("the cutover window outlived the migration source role")
 	}
 }
 
@@ -1992,10 +1991,10 @@ func TestNoSideInsideTheFenceWindow(t *testing.T) {
 	}
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 	if srv.inFence(st) {
-		t.Error("the level change did not end the grace window")
+		t.Error("the level change did not end the cutover window")
 	}
 	if st.fenceTimer != nil {
-		t.Error("the grace-window timer outlived the window")
+		t.Error("the cutover-window timer outlived the window")
 	}
 
 	// The pass completes, and the rows are the ones the level demands: the
@@ -2408,7 +2407,7 @@ func TestFenceEndedDoesNotOutliveTheRole(t *testing.T) {
 	table := node.dms[linName].table
 	node.mu.Unlock()
 	if !suspended {
-		t.Error("the next cutover skipped its grace window")
+		t.Error("the next migration skipped its cutover window")
 	}
 	if reloads := node.callsMatching(
 		"cmd dmsetup reload " + linName); len(reloads) != 0 {
@@ -2517,7 +2516,7 @@ func TestFenceNotRestartedAcrossAnAgentRestart(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if node.dms[linName].suspended {
-		t.Error("the restart started a second grace window")
+		t.Error("the restart started a second cutover window")
 	}
 	if !strings.Contains(node.dms[linName].table, errNo) {
 		t.Errorf("the reconcile did not retire the fenced linear: %q",
@@ -2556,8 +2555,8 @@ func TestFenceWindowSurvivesAnUnrelatedAgentRestart(t *testing.T) {
 	table := node.dms[linName].table
 	node.mu.Unlock()
 	if !suspended {
-		t.Error("the first cutover after an unrelated restart skipped the " +
-			"grace window")
+		t.Error("the first migration after an unrelated restart skipped its " +
+			"cutover window")
 	}
 	if node.hasCall("cmd dmsetup reload " + linName) {
 		t.Error("phase 2 ran inside the window")

@@ -195,7 +195,7 @@ func awaitDisconnects(t *testing.T, srv *CnAgentServer) {
 // cnSweepOnlyDisconnects is the reply of a pass that disconnects anything:
 // ReplyCodeLeftover naming nvme host connections and nothing else — no other
 // leftover, no enumeration failure. The disconnects run off the pass's locks
-// (CN21), so every connection the pass sets disconnecting is still there when
+// (CN10), so every connection the pass sets disconnecting is still there when
 // it replies, and only a later pass's own probe finds it gone.
 func cnSweepOnlyDisconnects(t *testing.T, reply *pb.AgentReply, label string) {
 	t.Helper()
@@ -385,16 +385,15 @@ func TestRemovedCntlrKilledButCompleted(t *testing.T) {
 }
 
 // TestSweepStopsANamedArrayNode pins the sweep's stop of an array on a named
-// kernel node (CN12, CN21; amended 2026-09-26). With mdadm.conf `CREATE
-// names=yes` the group's array runs on md_<name>, which /sys/block lists
-// under that name; ListArrays names it /dev/md_<name>, and that is the node
-// `mdadm --stop` gets and Gone reads — never the /dev/md/<name> symlink,
-// which depends on udev having run. The fake resolves the symlink's spelling
-// too, so only the exact command tells the two apart. Two node names are
-// run: md_<CnMdDevName>, hex, which the agent's own `--create` and
-// `--assemble` of /dev/md/<CnMdDevName> give it, and md_<CnMdArrayName>, not
-// hex, which an `--assemble --scan` or incremental assembly gives it from the
-// superblock name.
+// kernel node (CN12, CN21). With mdadm.conf `CREATE names=yes` the group's
+// array runs on md_<name>, which /sys/block lists under that name; ListArrays
+// names it /dev/md_<name>, and that is the node `mdadm --stop` gets and Gone
+// reads — never the /dev/md/<name> symlink, which depends on udev having run.
+// The fake resolves the symlink's spelling too, so only the exact command
+// tells the two apart. Two node names are run: md_<CnMdDevName>, hex, which
+// the agent's own `--create` and `--assemble` of /dev/md/<CnMdDevName> give
+// it, and md_<CnMdArrayName>, not hex, which an `--assemble --scan` or
+// incremental assembly gives it from the superblock name.
 func TestSweepStopsANamedArrayNode(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -601,7 +600,7 @@ func TestReconcileSweepsAtStartup(t *testing.T) {
 		node.Reset()
 		fresh := newCnServer(node)
 		reconcileForTest(t, fresh)
-		// The legs' disconnects run off the startup pass (CN21) and change
+		// The legs' disconnects run off the startup pass (CN10) and change
 		// the node under the reads below.
 		awaitDisconnects(t, fresh)
 		cnSweepNoDmLeft(t, node)
@@ -1129,10 +1128,10 @@ func TestUnownedXferConnectionSwept(t *testing.T) {
 //
 // Attribution by the stored plan is what this replaces, and it could not
 // survive the drop-at-pointer-removal of architecture.md, Teardown by sweep:
-// the file that held the NQN list is
-// dropped the moment the pointer goes, which is precisely when the subsystem has to be found. A
-// subsystem whose namespace backs onto a removed sp's ns-dev is that sp's and
-// goes with it; one with no attributable namespace at all — what a teardown
+// the file that held the NQN list is dropped the moment the pointer goes,
+// which is precisely when the subsystem has to be found. A subsystem whose
+// namespace is backed by a removed sp's ns-dev is that sp's and goes with
+// it; one with no attributable namespace at all — what a teardown
 // killed between two rmdirs leaves — is unowned and only the node-level sweep
 // may remove it; one backed by an ns-dev the desired state still wants is
 // untouchable, because a host is using it right now.

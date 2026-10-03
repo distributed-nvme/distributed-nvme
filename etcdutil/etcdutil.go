@@ -627,25 +627,26 @@ func (v *stmView) Rev(key string) int64 {
 // run is the shared body of RunSTM and Snapshot. readOnly makes the attempt
 // end before its commit (see Snapshot).
 //
-// EU5 (as amended) budgets the WHOLE transaction with
+// EU5 budgets the WHOLE transaction with
 // common.DefaultEtcdOpTimeout — every EU4 conflict retry included, never per
 // attempt. concurrency.NewSTM owns its retry loop and fixes its abort ctx at
-// construction, so a per-attempt deadline could not be expressed through it
-// anyway; the whole-transaction bound is the specified behavior, not an
+// construction, so a per-attempt deadline cannot be expressed through it;
+// the whole-transaction bound is the specified behavior, not an
 // approximation of a per-attempt one.
 //
 // The alternative — re-running NewSTM under a fresh budget whenever the old one
-// expired — was tried and rejected: a budget expiry caused by contention is
+// expired — is rejected: a budget expiry caused by contention is
 // indistinguishable from one caused by an unreachable etcd, so that loop never
-// terminates while etcd is down and wedges the calling worker goroutine, which
+// terminates while etcd is down and wedges the calling goroutine, which
 // is strictly worse than the behaviour below. Reimplementing serializable-
 // snapshot conflict detection to get a true per-attempt bound is not worth it.
 //
-// What the deviation costs: under sustained write contention on one key a
-// transaction can exhaust the 10 s across its attempts and return a deadline
-// error while the caller's ctx is still alive. That is benign here — every
-// caller is a worker whose retry cadence is its own round (RW12), and every
-// mutation re-validates its preconditions on the next pass (MD7, AR2).
+// What the whole-transaction bound costs: under sustained write contention on
+// one key a transaction can exhaust the 10 s across its attempts and return a
+// deadline error while the caller's ctx is still alive. That is benign for the
+// worker — its retry cadence is its own round (RW12), and every mutation
+// re-validates its preconditions on the next pass (MD7, AR2) — and a caller
+// with no round of its own is left to decide what to do with the error (EU6).
 func (c *Client) run(
 	ctx context.Context,
 	f func(s STM) error,

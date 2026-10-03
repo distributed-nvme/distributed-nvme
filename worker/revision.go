@@ -38,7 +38,8 @@ type desiredState struct {
 // only on these fields, and the driver folds the info into health and the
 // kind-specific consequences from its own observe (HL4).
 type replyState struct {
-	// revision is the agent's last fully applied revision for the object.
+	// revision is the reply's revision: that of the last request the agent
+	// accepted for the object (architecture.md, Live-state reporting).
 	revision uint64
 	// code and details are the reply's AgentReply.
 	code    uint32
@@ -662,9 +663,9 @@ func (w *revWorker) idle() {
 
 // refuseConf is idle's twin for a cluster whose stored conf cannot be used
 // (architecture.md, Common validation): the same quiesced state — stream
-// dropped, RW7 connection reference released — but its own record, so the grep
-// of the worker suite (dnv-worker.md, Integration test plan) for "cluster conf
-// missing" keeps meaning "the cluster is not in the cache" and nothing else.
+// dropped, RW7 connection reference released — but its own record, so an
+// operator's grep for "cluster conf missing" keeps meaning "the cluster is not
+// in the cache" and nothing else (RW9).
 func (w *revWorker) refuseConf(err error) {
 	w.quiesce()
 	w.idleLogged = false

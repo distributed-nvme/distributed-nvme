@@ -49,7 +49,7 @@ import (
 // the window's IO onto the side's data (a reload fails closed: dnagent.md,
 // OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
 
-// beginFence reports whether this side is still inside the grace window, and
+// beginFence reports whether this side is still inside the cutover window, and
 // starts the clock the first time it is asked. The caller holds the side's
 // object lock.
 //

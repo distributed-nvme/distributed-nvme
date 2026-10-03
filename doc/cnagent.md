@@ -81,10 +81,7 @@ and comments `common/constants.go` holds:
   region, data region, health block): the payload is the magic, the writer
   id and a timestamp, never interpreted on read (`architecture.md`, [D6]).
 * `CnConnectRetryInterval`, the pace of the background retries of a cn
-  cntlr's converge (CN10): after a leg or a clone source failed to
-  converge, a later step of a clone failed (CN18 says which) — a
-  recovery's destination bitmaps not applied among them — or a `leg_list`
-  member that is not available (CN12); the cn twin of
+  cntlr's converge after any of CN10's triggers; the cn twin of
   `DnMigrConnectRetryInterval`.
 * `CnConnectPassBudget`, `CnConnectRetryPause` and `CnNsScanPause`, the
   connect step's one wait budget per converge pass (CN10, CN18), shared by
@@ -106,9 +103,12 @@ for them:
 
 * `CnLegName`, the cn-local leg wrapper (`architecture.md`, [D1], and
   Primary cntlr): one dm-linear over the leg's single nvme multipath
-  namespace device, kept as the leg-level indirection point — what a
-  teardown reloads onto an error target, and what md and groups consume as
-  the member device.
+  namespace device, sized from the desired state, never from probing the
+  device (CN10). md and groups consume it as the member device instead of
+  the namespace device, whose name is the kernel's and can change across
+  reconnects: a dnv-named member is what a group finds its array by and
+  matches its members against `leg_list` by (CN12), and what the sweep
+  attributes an array by (CN21).
 * `CnGrpName`, a `RedundNone` group device: a dm-linear over the single
   leg's data region. `RedundMdRaid1` groups use the md names
   (`architecture.md`, md names) instead and have no dm name.
@@ -131,21 +131,12 @@ unambiguous.
 
 The kind field of a dm name is a role letter plus a hex digit (`DmKind`:
 `DmKindCnPoolMeta` through `DmKindCnCloneMeta` on this side,
-`DmKindDnError` through `DmKindDnMigrMeta` on the dn's). The letter is not
-decoration. cn ids and dn ids come from separate counters (the `next_id`
-of `CnGlobal` and of `DnGlobal`) and can collide numerically, so on a node
-running both agents a bare digit would leave a name ambiguous between a cn
-leg wrapper and a dn kind of the same digit. That ambiguity is
-load-bearing because CN21 makes removal name-driven: a sweep decides what
-to remove by reading back the names the kernel hands it, and a name it
-decodes into the wrong role is a device torn down by the wrong agent. The
-hazard is mis-attribution, not non-attribution: a name that decodes to
-nothing at all is dropped by every attribution path there is — a failed
-`ParseDmName` keeps the device out of the snapshot's "ours" set, an md
-array with one such member is silently dropped and never stopped, and
-`IsDnvNqn` holds the subsystem back — so it is a device this agent can
-never sweep rather than one it might sweep by mistake (`architecture.md`,
-dm-device kinds). NQN kinds keep their bare digit: an NQN already carries
+`DmKindDnError` through `DmKindDnMigrMeta` on the dn's). On a node
+running both agents, whose cn and dn ids can collide numerically, the
+letter keeps a name from decoding into the wrong role, and CN21 removes
+by the names it reads back: a name decoded into the wrong role is a
+device torn down by the wrong agent (`architecture.md`, dm-device kinds).
+NQN kinds keep their bare digit: an NQN already carries
 the dnv prefix, and neither role enumerates the other's NQN kinds.
 
 `IsDnvNqn` exists for the case the parsers' strictness creates: an NQN
@@ -305,11 +296,11 @@ wrappers, the `LegProbeIO` of the CN11 probers, the `LockSet` (object key:
 the `LocalCntlrPath` id tuple), the `--capacity` value and the port conf
 (`PortConf`: the transport flags plus `--nvmet-port-id`). A leaf mutex
 guards the in-memory mirrors of the local store — two maps: cn requests,
-and cntlr states (applied request, `ResInfo` tracker, a per-clone
+and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and three
 registries that mirror nothing: in each cntlr's state the connect-retry
 and prober registries, and the CN10 disconnect registry, in memory only,
-never persisted. Each state's applied request is an atomic pointer,
+never persisted. Each state's request is an atomic pointer,
 stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
 lock, and a request is never modified once stored. The tracker has its
@@ -585,14 +576,11 @@ When the architecture decides the enforcement mechanism, it lands as a
 new converge step here; nothing else in this document changes.
 
 CN7. Persist first, then drop, then sweep. The request is written to
-`LocalCnPath` before the converge, not after it — the one place this
-agent deviates from `dnagent.md` SH5, and only for the pointer list. The node-level
-sweep below is what removes the resources of a cntlr whose pointer has
-just left the list, and it can block for a whole failfast window on a
-dead leg; a request cancelled inside that window would otherwise skip the
-save entirely, and the next startup reconcile would rebuild the cntlr
-from the old list against sides that no longer exist. With the new list
-on disk first, a crash mid-sweep is nothing worse than a startup sweep.
+`LocalCnPath` before the converge, not after it, as `dnagent.md` SH5
+states for a parent request and for SH5's reason: the node-level sweep
+below is what removes the resources of a cntlr whose pointer has just
+left the list, and it can block for a whole failfast window on a dead
+leg.
 
 Then the CN5 base-state converge. Then the `cntlr_pointer_list` diff
 against the local `cntlr-*` files (`architecture.md`, Common agent rules:
@@ -772,8 +760,9 @@ device under it is parked or demoted — by pre-step 2 or 3, or by the
 build phase — and runs on every converge:
 
 1. **ANA.** Every namespace of the plan whose desired "ana_grpid" is
-   `AnaGrpIdInaccessible` — a suspended one, a standby's, a deferred one
-   (CN16), and every transfer namespace the same — is moved there first,
+   `AnaGrpIdInaccessible` — a suspended one, a standby's, a deferred one,
+   one at `SP_LEVEL_DISABLE` (CN16), and every transfer namespace the
+   same — is moved there first,
    probe-first. The loop is over the plan, not over the wanted set, and
    the difference is the whole of `SP_LEVEL_DISABLE`: `wantAny` is false
    there, so the wanted set holds no namespace and no subsystem at all,
@@ -894,8 +883,8 @@ A connect failure marks that leg `RES_STATUS_ERROR` and registers the
 cntlr in a background retry registry that re-runs the converge every
 `CnConnectRetryInterval` under the CN1 locks until a pass registers it no
 more, or teardown (the `dnagent.md` DN13 pattern); the RPC itself retries a connect,
-or waits for its head, only as far as the pass's budget allows. Five
-things register it: a leg that failed to converge — its connect, its
+or waits for its head, only as far as the pass's budget allows. These
+register it: a leg that failed to converge — its connect, its
 multipath namespace or its wrapper (above), an unknown controller or a
 disconnect of its subsystem still in flight (below) — a clone source whose
 connection failed, or whose disconnect is still in flight (below), a clone
@@ -908,7 +897,7 @@ unassembled — and a `RedundNone` SP's pools unbuilt — until the next
 revision bump, because nothing else re-runs that converge), and an ns-dev
 the build held off its td's raid0 while a dm-clone the plan does not want
 may still be live (CN18). Every attempt mints its own trace id (CN2) and
-is a whole converge, which decides afresh whether any of the five still
+is a whole converge, which decides afresh whether any of them still
 holds; the first converge that finds none stops the retry.
 
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
@@ -959,10 +948,11 @@ connection under its locks and nothing more: one with no controller is
 gone; one the probe could not read is a leftover and nothing is issued for
 it; one with a controller is a leftover of that pass, which sets its
 disconnect going — unless one already runs — from a goroutine on `rootCtx`
-that carries the pass's trace id and takes none of the CN1 locks. A later
-pass's probe is what finds it gone. At most `disconnectConcurrency` of
-these disconnects — a fixed fraction of `DefaultOsClientLimit` — run at
-once; the rest wait for a slot and stay registered while they wait.
+that carries the pass's trace id, or a fresh one when the pass had none,
+and takes none of the CN1 locks. A later pass's probe is what finds it
+gone. At most `disconnectConcurrency` of these disconnects — a fixed
+fraction of `DefaultOsClientLimit` — run at once; the rest wait for a
+slot and stay registered while they wait.
 Uncapped, one L10 of many legs or one pool drain would set them all going
 together, and each delete a vanished target stalls holds an `OsClient`
 slot for the admin timeout — enough of them, and the node's converges and
@@ -1201,7 +1191,7 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   reads ENOENT and is recorded, so a foreign array cannot hold an
   assembly off for good. Nothing re-drives the refused assembly either —
   unless the same pass registers the CN10 retry for something else (any
-  of CN10's four, among them a `leg_list` member of any group of this
+  of CN10's triggers, among them a `leg_list` member of any group of this
   cntlr that is not available, above), whose next attempt is a whole
   converge and tries the group again: the group's error is a row, not a
   reply code (CN29), the error itself registers no CN10 background retry,
@@ -1497,11 +1487,10 @@ delete and re-create a snapshot whose creation raced a crash
 not point-in-time consistency: the next primary sends the remaining
 messages, every row goes `OK`, and the flag flips.
 
-The persisted `SyncupCntlrRequest` carries `created` too (`dnagent.md` SH8: apply,
-then persist). Between a td's materialization and the flip's re-sync the
-stored copy still says false, which is harmless — the devices exist, so
-nothing messages — and is corrected by the bump's higher-revision
-request.
+The persisted `SyncupCntlrRequest` carries `created` too (`dnagent.md`
+SH5). Between a td's materialization and the flip's re-sync the stored
+copy still says false, which is harmless — the devices exist, so nothing
+messages — and is corrected by the bump's higher-revision request.
 
 A td leaving `td_list` is deleted by the sweep (CN21), which is where its
 layer order already puts the pieces: its namespaces, ns-devs, raid0 and
@@ -1656,15 +1645,17 @@ whose reload keeps failing its load stays suspended, queueing its IO,
 until a reload or a resume of it succeeds. An unwanted one that no path
 of a pass meets — below a layer the chain stopped at, or anywhere on a
 pass whose sweep an unanswered listing stopped (CN21) — is met by the
-first pass whose chain reaches it. `ensureNsDev` and `removeDm`
-bare-resume a device whose table already matches, and `ensureNsDev` one
-it holds off the raid0 (CN18) as well. `parkNsDev` — CN9's pre-step 2,
+first pass whose chain reaches it. `ensureNsDev` bare-resumes a device
+whose table already matches, and one it holds off the raid0 (CN18) as
+well. `parkNsDev` — CN9's pre-step 2,
 the park of an ns-dev of the plan, which has a plan to reload from —
 reloads one whose table does not match, and one whose table does match
 while it is suspended, and that reload resumes it as a side effect.
 CN21's P0 is neither of those two: it is `parkByTable`, which has no plan
 at all for an ns-dev nothing wants, so it bare-resumes an already-parked
-one and reloads only an unparked one. `UpdateNamespaceDev` arrives as a
+one and reloads only an unparked one. `removeDm` resumes any suspended
+device it is about to remove, whatever its table: `dmsetup remove` does
+not succeed on a suspended device. `UpdateNamespaceDev` arrives as a
 changed `td_id` and is exactly one ns-dev reload — the nvmet
 "device_path" never changes.
 
@@ -1694,8 +1685,9 @@ listings answer removes it.
 
 **ANA**: `AnaGrpIdOptimized` iff primary and not disabled and not
 effectively suspended and its backing chain is not provisioning-deferred
-(CN9); else `AnaGrpIdInaccessible` (single "ana_grpid" writes, `dnagent.md` SH19). The
-last conjunct is what makes initial provisioning painless for hosts:
+(CN9) and the `sp_level` is below `SP_LEVEL_DISABLE` (CN9's `wantAny`);
+else `AnaGrpIdInaccessible` (single "ana_grpid" writes, `dnagent.md` SH19). The
+deferral conjunct is what makes initial provisioning painless for hosts:
 while the td's legs are still zeroing, the namespace stays inaccessible
 and hosts queue on the path instead of eating IO errors from an
 error-backed ns-dev; it flips to optimized on the converge that follows
@@ -2292,13 +2284,15 @@ L7. each thin volume removed and then, only if its pool is one the
 desired state still wants, the pool-side delete of its id under CN14's
 rule.
 
-L8. thin pools, then the concats under them. A pool's verified removal drops
-the slice's activation-sweep arming (CN14) with the pool's life; in the
-branch where the removal is not verified the pool is reported as a leftover
-in the same breath, and the arming is kept, because dropping it there would
-lose the thin-id sweep for good: once the device does go and the level comes
-back up, `ensurePool` probe-matches the surviving device and arms nothing,
-so every id deleted meanwhile keeps its data blocks for the life of the
+L8. thin pools, then the concats under them. An arming of CN14's
+activation sweep ends with its pool's life, but the layer drops its
+pools' armings together, and only once every pool removal of the layer
+is verified; while any is unverified the layer keeps them all, and each
+unverified pool is reported as a leftover. An unverified pool may have
+survived, and the next converge that wants it again finds the device
+present and arms nothing (`ensurePool` arms only a pool it creates), so
+dropping the arming there would lose the thin-id sweep for good: every
+id deleted meanwhile would keep its data blocks for the life of the
 pool. Keeping an arming too long costs one idempotent sweep; dropping one
 too early cannot be repaired.
 
@@ -2347,9 +2341,9 @@ that simply re-runs next round costs nothing, because by then the
 failfast window has passed and the same order succeeds.
 
 The same rule applies inside a layer that has an order of its own. L8
-names the concats as leftovers without attempting them when the pool
-above them would not go: they are present and unwanted whether or not
-the pool still maps them, and a leftover nothing names is a leftover
+names the concats as leftovers without attempting them when any pool of
+the layer would not go: they are present and unwanted whether or not a
+pool still maps them, and a leftover nothing names is a leftover
 nothing re-drives. L5 is the one layer whose set is computed when it is
 reached rather than when the chain was built, so a stopped descent still
 gets a truthful answer there too: a source still mapped by a clone that
@@ -2459,9 +2453,9 @@ correctness-neutral loss `architecture.md`, [D8], already accepts. Reply
 
 CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
 `revision`, the info. An unknown CN or cntlr pointer — one this process
-holds no request for, as when none was ever applied, or when the startup
+holds no request for, as when none was ever accepted, or when the startup
 reload could not load or skipped its file (CN2) and none has been
-applied since — ⇒ `ReplyCodeUnknownObject` with a zero `revision`. For a
+accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision`. For a
 known object the `agent_reply` is the read-only verdict of CN30. Never
 mutates.
 
@@ -2495,10 +2489,10 @@ leaked reservation blocks the next reserve and pins the pool's metadata
 blocks; on the caller's own context, a caller that went away before the
 release, such as one whose client gave up in the middle of the dump,
 would take the release with it and leave the reservation held until some
-later reserve on that pool met it. A reserve that fails "already
-reserved" — a reservation an earlier reserve made and nothing released,
-such as one whose reserve was killed after its message ran — is released
-and retried once. The XML goes to a file, never to stdout: the OS
+later reserve on that pool met it. A reserve refused because a metadata
+snapshot is already held — one an earlier reserve made and nothing
+released, such as one whose reserve was killed after its message ran — is
+retried once after a release. The XML goes to a file, never to stdout: the OS
 command record logs a command's stdout in full (`log.md`, OS commands
 and file IO), and a dump is one element per mapped run — large on a
 fragmented slice, once per slice per read — while the record of reading
@@ -2972,10 +2966,11 @@ report no `Syncup*` could ever clear.
   not drift apart).
 * A promotion that outruns the sides' flip serves IO errors until the
   retry builds the stack: CN16's ANA rule reads the plan — primary, not
-  disabled, not effectively suspended, not deferred — and not the stack,
-  so the promotion's own converge moves its namespaces to optimized even
-  when its late members kept the stack from being built — a group with no
-  available leg, a pool over a side that still exports dm-error — and the
+  disabled, not effectively suspended, not deferred, below
+  `SP_LEVEL_DISABLE` — and not the stack, so the promotion's own converge
+  moves its namespaces to optimized even when its late members kept the
+  stack from being built — a group with no available leg, a pool over a
+  side that still exports dm-error — and the
   ns-dev reload onto the raid0 (CN16 rule 6) failed with the raid0
   missing: the ns-dev stays on the td's `CnErrorName`, the standby table
   of rule 2. A host's IO on that path fails with target-internal (DNR)

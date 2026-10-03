@@ -138,8 +138,8 @@ declare -A SS_PORTS=(
 )
 
 # The entry set: shard code, sp id and ss id per subsystem. ssC sits at
-# shard 80, the high half's first code (cdc.md DS2 — an earlier draft's 08
-# would have landed it in range 0's low half; the doc records the correction).
+# shard 80, the high half's first code: range digit 8 owns the codes 80 to 8f
+# (cdc.md DS2).
 declare -A E_SHARD=(
 	[ssa]=00 [ssb]=07 [ssc]=80 [ssd]=ff [sse]=3c [ssf]=81 [ssx]=05
 )

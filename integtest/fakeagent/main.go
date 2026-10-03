@@ -1096,10 +1096,10 @@ func (a *fakeAgent) gateSyncupLocked(
 	return 0, ""
 }
 
-// gatePushLocked is the gate of the Push* RPCs. A push carries no revision
-// any more: the only rejections left are behavior.json's forced code and an
-// id the object's last request does not name (dnv-worker.md,
-// Integration test plan, The fake agent).
+// gatePushLocked is the gate of the Push* RPCs. A push carries no revision:
+// its only rejections are behavior.json's forced code and an object its
+// node's last syncup does not list or an id the object's last request does
+// not name (dnv-worker.md, Integration test plan, The fake agent).
 func (a *fakeAgent) gatePushLocked(
 	key string, resId uint64, known bool,
 ) (uint32, string) {
@@ -1194,9 +1194,9 @@ type checkResult struct {
 }
 
 // checkGateLocked resolves a Check* round for one object: the gate's code and
-// the agent's last fully applied revision (architecture.md, Check streams — a
-// reply whose revision differs from the request's is what makes the worker
-// re-issue the object's Syncup*).
+// the object's stored revision (architecture.md, Check streams — a reply
+// whose revision differs from the request's is what makes the worker re-issue
+// the object's Syncup*).
 func (a *fakeAgent) checkGateLocked(key string, known bool) checkResult {
 	if !known {
 		return checkResult{

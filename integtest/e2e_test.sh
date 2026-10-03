@@ -5,7 +5,8 @@
 # dnv-gateway, a real dnv-worker and a real dnv-cdc on the control-plane VM,
 # many real `dnv-agent dn` instances per DN VM over loop devices, one real
 # `dnv-agent cn` per CN VM (md-raid1 + dm-thin + dm-striped + nvmet), and two
-# real kernel NVMe hosts that reach their namespaces only through the cdc.
+# real kernel NVMe hosts that reach their namespaces through the cdc, but for
+# the direct connects E2E10 names.
 # Every control-plane call is the SHIPPED `bin/dnvctl`, run on the cp guest
 # over ssh (E2E2) — no workerctl, no gatewayctl, no direct etcd write.
 #
@@ -47,9 +48,13 @@
 #  3. Every pkill lives in a helper FILE on the guest and its pattern is
 #     bracketed ([d]nv-agent). `pkill -f` matches the wrapping `bash -lc` argv
 #     of the ssh command itself, so a pattern in an ssh command STRING kills
-#     its own shell (E2E8). Processes this suite starts are signalled by the
-#     pid it recorded, not by pattern; the pkill sweeps are the cleanup
-#     fallback for a pid file that is gone.
+#     its own shell (E2E8). Every agent and control-plane daemon this suite
+#     starts records its pid: the control-plane daemons are stopped by theirs,
+#     and the react case stops each agent it kills by that agent's pid file.
+#     The cleanup's pkill sweeps run whether or not a pid file exists, so they
+#     also reach a crashed run's processes whose pid files are gone, and each
+#     pattern is qualified by $WORK or by the etcd name, so it never touches
+#     another suite's processes.
 #  4. nvmet teardown order: rmdir ports/<id>/ana_groups/3 and .../2 BEFORE
 #     rmdir ports/<id>, or the rmdir fails with "Directory not empty" and the
 #     leftover port fails the NEXT suite's setup.
@@ -210,9 +215,12 @@ DN_TRSVCID_BASE=4300
 MAX_DNS_PER_VM=50
 
 # One cn agent per CN VM. Its trsvcid repeats the DN base, which is safe
-# because it is a different guest; the port sweep therefore accepts 4300
-# on a CN VM and 4300..4349 on a DN VM, and refuses to touch an nvmet port
-# outside that band (it belongs to another suite, or to a human).
+# because it is a different guest. port_drop judges a port by the DN band,
+# TRSVCID_MIN..TRSVCID_MAX, on both roles: on a CN VM it removes port
+# CN_PORT_ID even when a stranger bound it inside that band, rather than
+# refusing it (e2e_integtest.md, "Cleanup, and why the order is what it
+# is"), and it refuses to touch an nvmet port outside the band (it belongs
+# to another suite, or to a human).
 CN_GRPC_PORT=29950
 CN_TRSVCID=4300
 # The cn agent is launched without --nvmet-port-id, so it converges
@@ -331,9 +339,9 @@ THR_QUIET_LEG=3600
 # side_unhealthy/leg_unhealthy, and at the gateway defaults (600, 600, 1200 —
 # common.DefaultCntlrUnhealthy, DefaultSideUnhealthy and DefaultLegUnhealthy)
 # neither is observable inside any bound this
-# suite could sanely wait out. react therefore keeps the short set
+# suite could sanely wait out. react therefore builds under the reacting set
 # (e2e_integtest.md, Topology and parameters, Event thresholds) and
-# pays for them: its OWN build can produce a failover and a spare before the
+# pays for it: its OWN build can produce a failover and a spare before the
 # case starts, which is why every react assertion is written against a shape
 # snapshot rather than against a count (see the react section's header).
 THR_REACT_PRIMARY=5
@@ -357,7 +365,7 @@ THR_REACT="$THR_REACT --thr-side $THR_REACT_SIDE --thr-leg $THR_REACT_LEG"
 # progress messages name the individual threshold the operator is waiting on
 # (primary_unhealthy in step 3, cntlr_unhealthy in step 4, side/leg_unhealthy in
 # step 5). No wait bound in this file is computed from any of them — WAIT_REACT
-# is a flat number sized by hand against react's own short set.
+# is a flat number sized by hand against the reacting set.
 # sp_thresholds is the only writer; the initial value is the quiet set so that
 # nothing is ever unset under `set -u`, and main overwrites it before the first
 # sp is created.
@@ -491,7 +499,7 @@ WAIT_DELETE=900        # `sp delete` to drain to NOT_FOUND. The drain is the
 WAIT_REACT=120         # an automatic reaction to land after its threshold.
                        # Unchanged: it is threshold + a few 5s worker passes
                        # (the vote loop), and every threshold it bounds is
-                       # react's own short set
+                       # in the reacting set
 WAIT_HOST=60           # a host device/ANA state to appear — and the
                        # per-command watchdog of ssh_host_watched (the Host
                        # IO section names what runs under it), so a watched
@@ -1130,7 +1138,7 @@ roles (repeatable flags; nothing is positional, nothing is hardcoded):
   --dn    at least LEGS (2 for raid1, 1 for none), and in practice 4:
                       \$DNS_PER_VM \`dnv-agent dn\` instances each
                       (passwordless sudo)
-  --host  exactly 2   real kernel NVMe hosts, reached only through the cdc
+  --host  exactly 2   real kernel NVMe hosts, reached through the cdc (E2E10)
                       (passwordless sudo)
 
 parameters:
@@ -2666,7 +2674,7 @@ helper_node_source() {
 
 # --- the agent processes -----------------------------------------------------
 
-# kill_agents stops every dnv-agent of one role THIS RUN STARTED on this guest.
+# kill_agents stops every dnv-agent of one role THIS SUITE STARTED on this guest.
 # The pattern is bracketed so it cannot match the argv of anything in this
 # suite's own ssh chain, and pkill and pgrep both exclude themselves.
 #
@@ -2677,7 +2685,7 @@ helper_node_source() {
 # suites run the same binaries as the same login user on these very guests
 # (the lab note dnv-integtest-lab-vms lists the shared VMs). An unqualified
 # sweep would kill them. A previous e2e run used the same $WORK, so the
-# fallback still reaches the corpses it is for.
+# sweep also reaches a crashed run's agents.
 #
 # TERM first: both roles install signal.NotifyContext for SIGINT and SIGTERM
 # (cmd/dnv-agent/main.go:166-168, :204-206), which unwinds agent.Serve. The dn
@@ -3650,13 +3658,6 @@ cn_cleanup_phase2() { # [extra host nqn…]
 
 # cn_residue is the CN half of smoke's teardown assertion: no dm device, no
 # md array, no nvmet subsystem of this suite may survive the sp.
-#
-# ITS md LINE IS BLIND AND IS NOT FIXED HERE. `mdadm --detail --scan` prints no
-# `name=` field on these guests (md_stop_all's comment has the measurement), so
-# the grep below matches nothing whatever this guest holds, and the md third of
-# this assertion passes for free. The dm and nvmet lines are unaffected. The
-# fix is the one md_stop_all took — /proc/mdstat plus MD_NAME out of `udevadm
-# info` — and it belongs with dn_md_residue, which carries the identical grep.
 cn_residue() {
 	dm_names
 	subsys_names | grep -F -e "$NQN_PREFIX:" -e "$NQN_IT" || true
@@ -4028,7 +4029,7 @@ HELPER_HOST_EOF
 # cdc_test.sh start the very same dnv-worker, dnv-gateway and dnv-cdc binaries
 # as the same login user on this same cp guest (the cdc suite's four VMs
 # include it — lab note dnv-integtest-lab-vms). What makes them safe is that
-# every pattern names something only THIS run's processes carry: $WORK for the
+# every pattern names something only THIS suite's processes carry: $WORK for the
 # three dnv binaries, which remote_start launches as "$WORK/bin/dnv-…", and
 # `--name $ETCD_NAME` for etcd, whose name is dnv-e2e-it against the other
 # suites' dnv-it, dnv-gw-it and dnv-cdc-it and none of which is a substring of
@@ -4039,9 +4040,9 @@ helper_cp_source() {
 	cat <<'HELPER_CP_EOF'
 
 # stop_all ends the four control-plane processes: first by the pid each
-# remote_start recorded, then, only as a fallback for a pid file a crash lost,
-# by BRACKETED pattern. CONT before TERM, because a stopped process would
-# otherwise never see the TERM.
+# remote_start recorded, then, unconditionally, as the fallback for a pid file
+# a crash lost, by BRACKETED pattern. CONT before TERM, because a stopped
+# process would otherwise never see the TERM.
 #
 # Every fallback pattern is qualified: the three dnv ones by $WORK, the
 # absolute path remote_start launches them by, and etcd by this suite's own
@@ -7116,8 +7117,8 @@ connect_verdict() { # <h> <subnqn> <verb> <rc> <ctrl_cnt> <what was offered>
 
 # host_connect_all connects host <h> to everything the cdc offers it, then
 # proves a controller for <subnqn> exists. The cdc endpoint is not a parameter
-# because E2E10 admits no other one: a host reaches its namespaces ONLY through
-# the cdc.
+# because the cdc is the one discovery controller a host uses (E2E10); the
+# connects E2E10 makes direct go through host_connect.
 host_connect_all() { # <h> <subnqn> [extra…]
 	local h=$1 sub=$2 out rc cnt
 	shift 2
@@ -7163,8 +7164,7 @@ connect_added_ctrl() { # <h> <subnqn> <traddr>
 }
 
 # host_connect is the single-subsystem form, for a namespace reached without
-# the discovery log: a transfer (which is in no CdcEntry) and a re-connect to
-# one named transport while the log still advertises others.
+# the discovery log: the direct connects E2E10 names.
 host_connect() { # <h> <traddr> <trsvcid> <subnqn> [extra…]
 	local h=$1 a=$2 s=$3 sub=$4 out rc cnt
 	shift 4
@@ -7349,9 +7349,9 @@ setup_register_nodes() {
 			# wait_until ran its predicate in THIS shell and returned on the
 			# call that succeeded, so $CTL_OUT is that instance's reply.
 			# port_info's res_name is the agent's own port id as %d
-			# (agent/dnagent/probe.go:47; doc/dnagent.md DN18 pins the same
-			# string — '"1" unless --nvmet-port-id says otherwise, so on a
-			# node running several agents the rows differ'), so this is the
+			# (agent/dnagent/probe.go:52; doc/dnagent.md DN18 names the row
+			# by the agent's port id as a decimal, so on a node running
+			# several agents the rows differ), so this is the
 			# end-to-end proof that --nvmet-port-id reached the agent and
 			# that the DNS_PER_VM agents of one kernel are not all
 			# converging ports/1.
@@ -7950,7 +7950,7 @@ setup_connect_host0() {
 	# because connect-all connects every transport the log offers.
 	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID"
 
-	# E2E10: the host reaches its namespaces ONLY through the cdc, and this
+	# E2E10: host0 reaches $SS0 through the cdc here, and this
 	# connect is the suite's own act — nvmf-connect@.service is masked, so
 	# nothing else can have made a path. host_connect_all proves a controller
 	# for $SS0 exists afterwards; nvme-cli's exit code proves nothing.
@@ -7965,12 +7965,11 @@ setup_connect_host0() {
 	wait_dev 0 "$UUID1"
 
 	# The standby's path to the SAME namespace is inaccessible, and that is
-	# desired state rather than a fault: CN16 as amended by [D15] gives a
-	# namespace AnaGrpIdOptimized only when the cntlr is primary, not
-	# disabled, not effectively suspended and not provisioning-deferred
-	# (agent/cnagent/plan.go:822-829); everything else stays in
-	# AnaGrpIdInaccessible, whose port group carries ana_state
-	# "inaccessible" (agent/nvmet.go:24-40, common/constants.go:233-235).
+	# desired state rather than a fault: CN16's ANA rule, its deferral
+	# conjunct ([D15]) included, gives AnaGrpIdOptimized only to a primary's
+	# namespaces (buildSubsystems in agent/cnagent/plan.go); everything else
+	# stays in AnaGrpIdInaccessible, whose port group carries ana_state
+	# "inaccessible" ([D4]; AnaStateOf in agent/nvmet.go).
 	host_wait_ana 0 "$SS0" "$STANDBY_TRADDR" "$UUID1" inaccessible
 
 	# Both CONTROLLERS are live even though only one path serves IO: an ANA
@@ -8439,15 +8438,6 @@ case_teardown() {
 }
 
 case_residue() {
-	# READ THE md THIRD OF THIS STAGE AS "NOT ASKED":
-	# both probes below still grep `mdadm --detail --scan` for a name that
-	# command does not print on these guests, so their md half matches nothing
-	# on every guest and passes whatever is held. The dm and nvmet thirds are
-	# real. The stage banner below still names md because that is what the
-	# stage is meant to assert; every line that reports a RESULT and names md
-	# — the DN assertion text, the CN wait label and the closing log — says
-	# the md third was not asked, and they go back to plain claims when the
-	# probes move to MD_NAME the way md_stop_all did.
 	stage 91 "residue: no DN capacity held, no dm/md/nvmet object of $SP left"
 	local v k out
 
@@ -8465,9 +8455,9 @@ case_residue() {
 	done
 
 	# Then the guests themselves. dn_residue is dm devices plus tree-minted
-	# nvmet subsystems; cn_residue adds the dnv md arrays — blindly, see the
-	# note on the stage line and on dn_md_residue. Loop devices are
-	# deliberately in neither: the agents keep serving on them until cleanup, so
+	# nvmet subsystems; cn_residue adds the dnv md arrays, which dn_md_residue
+	# lists on a DN VM. Loop devices are deliberately in none of the three:
+	# the agents keep serving on them until cleanup, so
 	# they belong to the run and not to the sp.
 	RESIDUE_LAST=""
 	for v in "${!DN[@]}"; do
@@ -8479,18 +8469,17 @@ case_residue() {
 		out=$(dn_md_residue "$v") ||
 			die "dn$v: listing the md arrays failed (ssh or sudo), so the" \
 				"'no dnv md array on a DN' assertion could not be taken"
-		# Only a CN assembles one (CN12) — but this probe is the blind
-		# one, so a pass here is "not asked".
+		# Only a CN assembles one on purpose (CN12): a dnv array here is a
+		# stray assembly the DN's md mask exists to stop (rule 7).
 		assert_eq "${out//[[:space:]]/}" "" \
-			"dn$v holds no dnv md array (NOT ASKED)"
+			"dn$v holds no dnv md array"
 	done
 	for v in "${!CN[@]}"; do
 		wait_until "$WAIT_DELETE" \
-			"cn$v to hold no dm device or subsystem of this suite (its md list is the blind probe)" \
+			"cn$v to hold no dm device, md array or subsystem of this suite" \
 			cn_residue_empty "$v"
 	done
-	log "  every dn and cn guest is free of this sp's dm and nvmet objects" \
-		"(the md third was NOT ASKED)"
+	log "  every dn and cn guest is free of this sp's dm, md and nvmet objects"
 }
 
 # read_space fills the three globals from one guest's `space` verb. It exists
@@ -9462,8 +9451,9 @@ ops_slots() {
 	esac
 	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
 		"host0's path to the primary is still live"
-	# A standby's namespaces are ANA-inaccessible: CN16 as amended by [D15]
-	# gives AnaGrpIdOptimized only to a primary's (agent/cnagent/plan.go:822-829).
+	# A standby's namespaces are ANA-inaccessible: CN16's ANA rule, its
+	# deferral conjunct ([D15]) included, gives AnaGrpIdOptimized only to a
+	# primary's (buildSubsystems in agent/cnagent/plan.go).
 	host_wait_ana 0 "$SS0" "$traddr3" "$UUID1" inaccessible
 
 	# DeleteCntlr refuses an enabled cntlr — "disabling is what triggers the
@@ -10749,8 +10739,8 @@ side_hydrated() { # <side id>
 # grp_md_clean is "md has finished rebuilding onto the promoted spare".
 #
 # WHAT THE ROW ACTUALLY CARRIES: probeGroup composes the details of
-# grp_id_to_md_raid from sysfs (mdStateLine in agent/cnagent/md.go;
-# cnagent.md CN28, amended 2026-09-26 — it used to be mdadm's `State:` line):
+# grp_id_to_md_raid from sysfs, not from mdadm's State line (mdStateLine
+# in agent/cnagent/md.go; cnagent.md CN28):
 # md/array_state, then "degraded" while md/degraded is non-zero, then the
 # word of a sync that is running with its "(<done> / <total>)" sectors. A
 # running array of the group's own legs is RES_STATUS_OK, however degraded (a
@@ -10774,12 +10764,14 @@ side_hydrated() { # <side id>
 # `spare switch` changes WHICH legs the group has, not HOW MANY, so in the
 # window between the RPC returning and the CN converging the array is still
 # the old, whole pair and reports "clean". A bare md-state test would pass
-# there and prove nothing. InspectCntlr's applied_revision is the agent's last
-# fully applied SyncupCntlr revision (gateway/cntlr.go's InspectCntlr copies
-# the agent's own GetCntlrInfo reply revision), and the worker builds that
-# request with the SP's current SpRev (worker/sprole.go:948, carried into the
-# cntlr child at :1072-1075). So "applied_revision >= the SpRev the switch
-# bumped to" is the proof that the array being read is the NEW one.
+# there and prove nothing. InspectCntlr's applied_revision is the revision of
+# the last SyncupCntlr the agent accepted, read under the per-cntlr lock that
+# SyncupCntlr holds across its whole converge (gateway/cntlr.go's InspectCntlr
+# copies the agent's own GetCntlrInfo reply revision), and the worker builds
+# that request with the SP's current SpRev (buildCntlrPlans in
+# worker/sprole.go, handed to the cntlr child by releaseCntlrs). So
+# "applied_revision >= the SpRev the switch bumped to" is the proof that the
+# array being read is the NEW one.
 grp_md_clean() { # <cntlr id> <grp id> <min applied revision>
 	local st det rev sig
 	if ! ctl_try cntlr inspect --id "$1"; then
@@ -13590,8 +13582,9 @@ react_replace() {
 	wait_until "$WAIT_HOST" \
 		"host0's path to the replacement cntlr $REACT_REPL_ID ($REACT_REPL_TRADDR) to go live" \
 		host_path_live 0 "$SS0" "$REACT_REPL_TRADDR"
-	# A standby's namespaces are ANA-inaccessible: CN16 as amended by [D15]
-	# gives AnaGrpIdOptimized only to a primary's.
+	# A standby's namespaces are ANA-inaccessible: CN16's ANA rule, its
+	# deferral conjunct ([D15]) included, gives AnaGrpIdOptimized only to a
+	# primary's.
 	host_wait_ana 0 "$SS0" "$REACT_REPL_TRADDR" "$UUID1" inaccessible
 	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
 		"host0's path to the primary is still live"
@@ -13653,7 +13646,7 @@ react_leg_repair() {
 	# worker has applied so far, which must not grow (both asserted at its
 	# end). A dead member is a LEG fault: the primary's md row reads it from
 	# sysfs as OK (degraded once md or the spare switch has failed the
-	# member; cnagent.md CN28, amended 2026-09-26). While that row came from
+	# member; cnagent.md CN28). While that row came from
 	# `mdadm --detail`, the probe could block on the dead member past its
 	# timeout and read ERROR, and AR5 failed the primary over — the first
 	# failover of the ping-pong the run that found it died of, in this

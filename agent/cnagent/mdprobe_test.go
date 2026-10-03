@@ -24,16 +24,15 @@ func mdLookup(ctx context.Context, md *Md, names ...string) (*MdDetail, error) {
 	return md.Detail(ctx, walk, names)
 }
 
-// TestMdDetailFromSysfsOnly pins where CN12 and CN28 read an array from
-// (amended 2026-09-26). Detail used to run `mdadm --detail`, which loads a
-// superblock from a member device: when that member's DN side had gone, the
-// read sat in the multipath head's requeue list until the path's failfast
-// expired, the soft timeout killed it, and the group's md row read ERROR for a
-// member fault the leg row already reports. md rows count toward cntlr health,
-// so that ERROR failed the primary over, and the failover ping-pong found
-// 2026-09-24 started there. Before that, the same kill read as "absent" had
-// let a teardown skip `mdadm --stop`. Now the answer comes from /sys/block,
-// which touches no member, and no mdadm runs at all.
+// TestMdDetailFromSysfsOnly pins where CN12 and CN28 read an array from:
+// /sys/block, which touches no member, and no mdadm runs at all. Not from
+// `mdadm --detail`, which loads a superblock from a member device: when that
+// member's DN side has gone, the read sits in the multipath head's requeue
+// list until the path's failfast expires, and a run the soft timeout killed
+// would read the group's md row ERROR for a member fault the leg row already
+// reports. md rows count toward cntlr health, so that ERROR would fail the
+// primary over; and the same kill, read as "absent", would let a teardown
+// skip `mdadm --stop`.
 //
 // The array is found by member, never by name: it is the one holding any of
 // the group's leg wrappers, so either leg finds it and a set naming none of
@@ -965,15 +964,14 @@ func TestMdListArraysFromSysfsOnly(t *testing.T) {
 }
 
 // TestMdNamedKernelNode pins that an array whose kernel node is named, not
-// numbered, is found by every reader of /sys/block (CN12, amended
-// 2026-09-26). With mdadm.conf `CREATE names=yes`, mdadm creates
-// /dev/md/<name> on the kernel node md_<name> (architecture.md, md names,
-// sizes CnMdDevName for it), and /sys/block lists md_<name>. The md rows are
-// read from the walk: a walk listing md[0-9]+ alone would read the group's
-// running
-// array as absent on every Check round and send every converge into an
-// assembly of an array already active — ERROR on every md row of the cn —
-// and the sweep would never stop such an array either (the stop itself is
+// numbered, is found by every reader of /sys/block (CN12). With mdadm.conf
+// `CREATE names=yes`, mdadm creates /dev/md/<name> on the kernel node
+// md_<name> (architecture.md, md names, sizes CnMdDevName for it), and
+// /sys/block lists md_<name>. The md rows are read from the walk: a walk
+// listing md[0-9]+ alone would read the group's running array as absent on
+// every Check round and send every converge into an assembly of an array
+// already active — ERROR on every md row of the cn — and the sweep would
+// never stop such an array either (the stop itself is
 // TestSweepStopsANamedArrayNode's).
 func TestMdNamedKernelNode(t *testing.T) {
 	ctx := context.Background()

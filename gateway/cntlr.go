@@ -511,7 +511,7 @@ func (s *Server) UpdateCntlrEnabled(
 // CnConf is a lost invariant key.
 //
 // The reply is the agent's, whole: `applied_revision` (the revision of
-// the last SyncupCntlr the agent applied for this cntlr) and `cntlr_info`
+// the last SyncupCntlr the agent accepted for this cntlr) and `cntlr_info`
 // both come from the GetCntlrInfo reply (architecture.md, Cntlrs) — diff
 // `applied_revision` against the SpRev token
 // GetStoragePool hands out to see how far the agent lags desired state.
@@ -616,7 +616,7 @@ func (s *Server) InspectCntlr(
 // is — DeleteDiskNode refuses a DN that still carries side pointers.
 //
 // The reply is the agent's, whole: `applied_revision` (the revision of
-// the last SyncupSide the agent applied for this side) and `side_info`
+// the last SyncupSide the agent accepted for this side) and `side_info`
 // both come from the GetSideInfo reply (architecture.md, Cntlrs) — diff
 // `applied_revision` against the SpRev token
 // GetStoragePool hands out to see how far the agent lags desired state.

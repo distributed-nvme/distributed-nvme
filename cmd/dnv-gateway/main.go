@@ -73,8 +73,8 @@ func newRootCmd() *cobra.Command {
 // There is deliberately no --etcd-op-timeout — every plain etcd operation, and
 // every STM transaction as a whole with its conflict retries, is bounded by
 // common.DefaultEtcdOpTimeout (EU5) — and no default gRPC port:
-// --grpc-address is required exactly as the agent's is, and 29527 stays a
-// documented example rather than a constant (CM2).
+// --grpc-address is required exactly as the agent's is, and no default-port
+// constant exists (CM2).
 func addFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 	flags.String("grpc-network", "tcp", "net.Listen network")

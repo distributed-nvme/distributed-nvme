@@ -291,7 +291,7 @@ count_recs() { recs "$@" | wc -l | tr -d ' \n'; }
 # id (Integration test plan, The fake gateway). The wire method is
 # `/Gateway/<Rpc>` — schema.proto declares no proto package, so there is no
 # package prefix — and no Gateway RPC name is a suffix of another, which is
-# what makes the spec's `endswith` matcher exact.
+# what makes this suite's `endswith` matcher exact.
 # Case S step 1 pins the full method string once, so a future package statement
 # would be caught there rather than silently widening this filter.
 req_recs() { # <Rpc> <trace id>
@@ -500,8 +500,9 @@ assert_count_delta() { # <Rpc> <delta> <label>
 # assert_req is the sweep's core assertion (Integration test plan, Cases): the
 # recorded request must equal the argv-implied one as a WHOLE object. Equality
 # rather than a field walk is deliberate — it is the only form that also proves
-# the absences the spec names (no ori_name, no sp_rev, no dm_raid0_conf), and
-# jq object equality ignores key order, which protojson does not fix.
+# the absences this suite asserts (among them no ori_name, no sp_rev and no
+# dm_raid0_conf), and jq object equality ignores key order, which protojson
+# does not fix.
 assert_req() { # <Rpc> <want json>
 	local got want
 	got=$(state_req "$CTL_POST" "$1")
@@ -1112,8 +1113,8 @@ EOF
 		  \"td_name\":\"t1\"}" \
 		ns set-dev --nqn "$NQN" --idx 1 --td t1 --rev 7
 	# The flag's default is TRUE here (`ns` — `ctl/ns.go`), so the bare form
-	# must send suspended = true — the one place in the CLI where an
-	# unmentioned boolean is not false.
+	# must send suspended = true — one of the two leaves where an unmentioned
+	# boolean is not false (`cntlr set-enabled`'s --enabled is the other).
 	sweep_step 42 UpdateNamespaceSuspended \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"nqn\":\"$NQN\",\"ns_idx\":1,
@@ -1339,7 +1340,8 @@ EOF
 	# -------------------------------------------------------------------
 	stage 7 "cluster get --name wins over the global --cluster"
 	# -------------------------------------------------------------------
-	# The fallback direction (empty --name ⇒ the global) is sweep step 03.
+	# The fallback direction (empty --name ⇒ the global --cluster) is sweep
+	# step 03.
 	ctl_ok cluster get --name other
 	assert_req GetCluster '{"cluster_name":"other"}'
 }

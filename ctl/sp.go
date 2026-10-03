@@ -12,7 +12,7 @@
 //     exceptions of dnvctl.md, Conventions: the global --sp fills it on every
 //     request that carries it, `sp create` included. `sp list` and
 //     `sp find-names` have no sp_name field at all, so for those two the
-//     global is simply ignored.
+//     global flag is simply ignored.
 //   - Four commands carry a token: delete, set-cntlid-slots, set-level and
 //     grow-slice call spRev. The four reads carry none, and neither does
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where

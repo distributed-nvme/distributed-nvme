@@ -323,7 +323,7 @@ ns_by_id() { "$CTL" ns-id --cluster "$CLUSTER" --sp "$1" --leg "$2" | "$JQ" -r .
 # ---------------------------------------------------------------------------
 # CN emulation (dnagent_integtest.md, Topology): this suite exercises the DN
 # contract without a CN, so CN identities are plain
-# `nvme connect --hostnqn <CnHostNqn>` from the VMs, cross-connected.
+# `nvme connect --hostnqn <CnHostNqn>` from the VMs.
 # ---------------------------------------------------------------------------
 
 # host_id mirrors common.NvmeHostId. Every emulated connect must pass it: the
@@ -1013,8 +1013,9 @@ lab_wipe() {
 	# frees their member wrappers, but the members still carry md
 	# superblocks, and a dm device that reappears — or that udev re-examines
 	# while this is running — is re-assembled into a fresh array that pins
-	# the wrapper again (the auto-assembly this suite masks during a run is
-	# not masked before one). Measured on a cn guest 2026-09-18: one pass
+	# the wrapper again (this suite installs no udev rule and masks nothing,
+	# so udev can re-assemble an array from its members).
+	# Measured on a cn guest 2026-09-18: one pass
 	# reported `dm left:` EMPTY and left 8 kind-9 wrappers held open by 4
 	# re-assembled arrays; a second, identical invocation removed all of
 	# them. So the sequence runs until the node is clean, not once.
@@ -1116,7 +1117,7 @@ lab_wipe() {
 	# a cleanup nobody can trust, which is the same rule the sweep this suite
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
-	# devices, the udev rule, the nvmet port — belongs to the ordinary
+	# devices, the nvmet port — belongs to the ordinary
 	# cleanup that runs after it and is not counted here.
 	#
 	# A `dmsetup ls` that did not answer is no evidence of a clean node: the
@@ -1873,8 +1874,10 @@ migr_prep_data() { # m
 # level in makes the two calls provably identical apart from it.
 #
 # The destination has already been provisioned by migr_provision_dst, so every
-# call here carries --provisioned=true: re-sending false
-# would retract the export stacks a later stage relies on.
+# call here carries --provisioned=true, because the worker's flag is monotone,
+# false to true only (dnagent.md DN9). Re-sending false would close the
+# provisioned gate, which skips the per-CN stacks and every step of the
+# migration destination (dnagent.md DN10, DN13) and tears nothing down (DN10).
 migr_declare_dst() { # m revision sp_level
 	local m=$1 rev=$2 level=$3 out
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
@@ -2491,7 +2494,7 @@ case_migr_bitmap() {
 		local revs=("" "$1" "$2") m out
 		for m in 1 2; do
 			# A push carries no revision: it is position-addressed data the
-			# agent takes whenever it knows the migration ([D13]).
+			# agent takes whenever it knows the migration (dnagent.md DN15).
 			ctl "${MDSTDN[$m]}" push-migr-bm \
 				--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
 				--migr "${MID[$m]}" --bm-idx 0 --bitmap-hex "$C_BM0" >/dev/null
@@ -2976,7 +2979,7 @@ case_restart() {
 			die "restart: dn$idx mutated after the restart:"$'\n'"$muts"
 	done
 
-	stage stale "only a stale rejection proves the revision survived"
+	stage stale "a stale SyncupDn is refused after the restart"
 	ctl 1 syncup-dn --revision "$((REV[1] - 1))" \
 		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$srcside" \
 		--expect-code 1 >/dev/null

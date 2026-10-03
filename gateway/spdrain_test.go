@@ -17,10 +17,11 @@ import (
 // The teardown assertions of architecture.md, Storage pools, did not move with
 // it — they are still the only proof that a delete returns every extent it
 // charged — so the tests that own them run the drain here, through sptDrain,
-// exactly as the sp coordinator would. That is the same stand-in the suite of
-// dnv-worker.md, Integration test plan, makes with `wctl set-provisioned` and
-// `wctl set-created`: a worker-role write driven from a gateway test, so that
-// the gateway's end state can be asserted without a worker process.
+// exactly as the sp coordinator would. That is the stand-in the gateway suite
+// makes with `wctl drain-sp`, as it makes the worker's flips with
+// `wctl set-provisioned` and `wctl set-created` (gateway.md, Integration test
+// plan): a worker-role write driven from a gateway test, so that the gateway's
+// end state can be asserted without a worker process.
 
 // sptDrainSteps bounds sptDrain so a drain that cannot progress fails the test
 // instead of spinning. The largest shape these fixtures build is 2 slices x 2

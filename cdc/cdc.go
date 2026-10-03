@@ -4,9 +4,9 @@
 // discovery NQN (NP1 to NP14).
 //
 // It reads etcd through etcdutil and NEVER writes it (WV6), serves and dials
-// no gRPC (grpc.md records "cdc: none"), and never touches the local kernel's
-// nvmet: a discovery controller built on kernel referrals cannot filter per
-// host, which is the whole reason this package exists
+// no dnv-internal gRPC (grpc.md, Wiring), and never touches the local
+// kernel's nvmet: a discovery controller built on kernel referrals cannot
+// filter per host, which is the whole reason this package exists
 // (cdc.md, Scope and placement).
 package cdc
 

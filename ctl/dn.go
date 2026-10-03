@@ -136,8 +136,9 @@ func dnGetCmd() *cobra.Command {
 }
 
 // dnListCmd drives ListDiskNodes. Unlike `cluster list` this one IS cluster
-// scoped, so it fills cluster_name from the global alongside the page flags.
-// Count is narrowed to the wire's uint32 the same way `cluster list` does it.
+// scoped, so it fills cluster_name from the global --cluster alongside the
+// page flags. Count is read off the Uint32 --count the same way
+// `cluster list` does it.
 func dnListCmd() *cobra.Command {
 	cmd := leaf("list", "list disk node addr_ports (ListDiskNodes)",
 		func() (job, error) {

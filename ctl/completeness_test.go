@@ -224,8 +224,8 @@ func TestEveryLeafIsRunnable(t *testing.T) {
 	walk(NewRootCmd())
 }
 
-// leafFlags is every command's flags beyond the globals, listed command by
-// command. The shared helpers are expanded into the flags they really
+// leafFlags is every command's flags beyond the global flags, listed command
+// by command. The shared helpers are expanded into the flags they really
 // declare, because that expansion is itself part of the surface: trConfFlags
 // puts four flags on a command, under a prefix that differs between `dn
 // create` (unprefixed) and `clone create` (`src-`), and reading the wrong
@@ -351,9 +351,10 @@ func TestLeafFlagsMatchTable(t *testing.T) {
 	}
 }
 
-// TestRootPersistentFlags pins the globals (dnvctl.md, Global flags, env, config), and nothing
-// else promoted to the root by accident. A local flag that drifted onto the
-// root would be silently accepted on every one of the 59 commands.
+// TestRootPersistentFlags pins the global flags (dnvctl.md, Global flags,
+// env, config), and nothing else promoted to the root by accident. A local
+// flag that drifted onto the root would be silently accepted on every one of
+// the 59 commands.
 func TestRootPersistentFlags(t *testing.T) {
 	want := []string{"cluster", "config", "gateway-address", "rev", "sp",
 		"timeout", "trace-id"}
@@ -369,16 +370,16 @@ func TestRootPersistentFlags(t *testing.T) {
 		t.Errorf("the root declares %v, want %v", got, want)
 	}
 
-	// CT9's env-backed set is every global but --rev (CT9), so a global
-	// added to the root has to be placed on one side or the other here.
+	// CT9's env-backed set is every global flag but --rev (CT9), so a global
+	// flag added to the root has to be placed on one side or the other here.
 	envBacked := slices.DeleteFunc(slices.Clone(want),
 		func(name string) bool { return name == "rev" })
 	gotEnv := slices.Sorted(slices.Values(envGlobals))
 	if !slices.Equal(gotEnv, envBacked) {
-		t.Errorf("the env-backed globals are %v, want %v", gotEnv, envBacked)
+		t.Errorf("the env-backed global flags are %v, want %v", gotEnv, envBacked)
 	}
 
-	// The globals' defaults. --timeout is the only one that is not empty.
+	// The global flags' defaults. --timeout is the only one that is not empty.
 	// --rev's empty default is not what makes "not given" (CT3) — that is
 	// pflag's Changed bit, read in revToken — but a string flag keeps the
 	// value's base-0 parse, and its usage error, next to that rule.

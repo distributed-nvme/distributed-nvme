@@ -3909,8 +3909,8 @@ func readSpRev(
 // ---------------------------------------------------------------------------
 
 // cmdGet reads any key and prints it as protojson, choosing the message type
-// from the key's SECOND field — the "message kind" column of architecture.md,
-// Key table.
+// from the key's SECOND field, the kind that follows the prefix in the key
+// column of architecture.md, Key table.
 func cmdGet(g *globals, args []string) {
 	fs := newFlagSet("get", g)
 	key := fs.String("key", "", "the full key (required)")

@@ -113,8 +113,8 @@ func fail(op string, reason string) error {
 
 // SpFirstId is the lowest per-SP sub-object id. Every one of them — cntlr_id,
 // slice_id, grp_id, leg_id, side_id, ss_id, ns_id, td_id, clone_id, xfer_id,
-// migr_id — comes from the single SpConf.next_id counter, which
-// architecture.md, Globals: id allocation + shard buckets, says "starts at 1".
+// migr_id — comes from the single SpConf.next_id counter, which starts at
+// SpFirstId (architecture.md, Globals: id allocation + shard buckets).
 //
 // 0 is therefore not a legal id, and the control plane relies on that: it is
 // the reserved "none" sentinel of every id-valued result. failoverCandidate
@@ -2011,10 +2011,9 @@ func grpHostsAddr(grp *pb.Group, addrPort string) bool {
 	return false
 }
 
-// nextLegIdx is 1 + the largest leg_idx over BOTH lists of the group
-// (architecture.md, Spare legs: "the next unused idx in the group"), so an
-// active leg and a spare never
-// share one — the idx names the md member slot.
+// nextLegIdx is 1 + the largest leg_idx over BOTH lists of the group, the
+// next unused index in the group (architecture.md, Spare legs), so an active
+// leg and a spare never share one — the idx names the md member slot.
 func nextLegIdx(grp *pb.Group) uint32 {
 	legLists := [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()}
 	maxIdx := uint32(0)

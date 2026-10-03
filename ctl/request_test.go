@@ -96,7 +96,8 @@ var sweepRows = []sweepRow{
 		&pb.DeleteClusterRequest{ClusterName: "c1"}},
 	{3, "GetCluster",
 		[]string{"cluster", "get"},
-		// No --name: the group falls back to the global (clusterNameOf).
+		// No --name: the group falls back to the global --cluster
+		// (clusterNameOf).
 		&pb.GetClusterRequest{ClusterName: itCluster}},
 	{4, "ListClusters",
 		[]string{"cluster", "list", "--count", "2", "--page-token", "pt0"},
@@ -213,7 +214,7 @@ var sweepRows = []sweepRow{
 		&pb.GetStoragePoolRequest{ClusterName: itCluster, SpName: itSp}},
 	{20, "ListStoragePools",
 		[]string{"sp", "list", "--count", "4"},
-		// No sp_name field: the global is ignored.
+		// No sp_name field: the global --sp is ignored.
 		&pb.ListStoragePoolsRequest{ClusterName: itCluster, Count: 4}},
 	{21, "UpdateStoragePoolCntlidSlotList",
 		[]string{"sp", "set-cntlid-slots", "--slots", "0,1,2", "--rev", "7"},
@@ -623,10 +624,10 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins the two counts behind
 // dnvctl.md, Global flags, env, config — cluster_name in 58 of the 59
-// requests, sp_name in 41 — by reading the field off every captured request
-// rather than by trusting the table. A command that stopped filling a global
-// would show up as a mismatch in the sweep; a command whose REQUEST stopped
-// carrying the field shows up here.
+// requests, sp_name in 41 — by reading the field off every request type
+// rather than by trusting the table. A command that stopped filling a field
+// from its global flag would show up as a mismatch in the sweep; a command
+// whose REQUEST stopped carrying the field shows up here.
 func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 	clusterFields, spFields := 0, 0
 	for _, row := range sweepRows {
@@ -638,7 +639,7 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			spFields++
 			if got := stringField(row.want, "sp_name"); got != itSp {
 				t.Errorf("step %d (%s) expects sp_name %q, want the "+
-					"global %q", row.step, row.rpc, got, itSp)
+					"global --sp %q", row.step, row.rpc, got, itSp)
 			}
 		}
 	}
@@ -1320,9 +1321,9 @@ func TestClusterCreateExtentSize(t *testing.T) {
 
 // TestClusterNameFallback is the first field→flag exception of dnvctl.md,
 // Conventions, in all three states: --name wins, an empty --name falls back
-// to the global, and `cluster list` — the one request with no cluster_name —
-// declares no --name at all, so naming one is a usage error rather than a
-// silently dropped value.
+// to the global --cluster, and `cluster list` — the one request with no
+// cluster_name — declares no --name at all, so naming one is a usage error
+// rather than a silently dropped value.
 func TestClusterNameFallback(t *testing.T) {
 	named := runArgv(t, "GetCluster", "cluster", "get", "--name", "other").(*pb.GetClusterRequest)
 	if named.ClusterName != "other" {
@@ -1331,7 +1332,7 @@ func TestClusterNameFallback(t *testing.T) {
 
 	fallback := runArgv(t, "GetCluster", "cluster", "get").(*pb.GetClusterRequest)
 	if fallback.ClusterName != itCluster {
-		t.Errorf("a bare cluster get sent %q, want the global %q",
+		t.Errorf("a bare cluster get sent %q, want the global --cluster %q",
 			fallback.ClusterName, itCluster)
 	}
 
@@ -1339,7 +1340,7 @@ func TestClusterNameFallback(t *testing.T) {
 	// value, not on whether the flag was typed.
 	emptied := runArgv(t, "GetCluster", "cluster", "get", "--name=").(*pb.GetClusterRequest)
 	if emptied.ClusterName != itCluster {
-		t.Errorf("--name= sent %q, want the global %q",
+		t.Errorf("--name= sent %q, want the global --cluster %q",
 			emptied.ClusterName, itCluster)
 	}
 
@@ -1364,8 +1365,8 @@ func TestClusterNameFallback(t *testing.T) {
 // and a command whose request lacks the field simply ignores it (CT8). The
 // proof that `cluster list`, `sp list` and `sp find-names` ignore --sp is
 // structural — their requests have no sp_name field — so what is asserted
-// here is that naming the globals does not turn into some OTHER field of
-// those requests.
+// here is that naming the global flags does not turn into some OTHER field
+// of those requests.
 func TestGlobalsAreIgnoredWhereTheFieldIsAbsent(t *testing.T) {
 	list := runArgv(t, "ListClusters", "cluster", "list").(*pb.ListClustersRequest)
 	wantRequest(t, list, &pb.ListClustersRequest{})
@@ -1386,9 +1387,9 @@ func TestGlobalsAreIgnoredWhereTheFieldIsAbsent(t *testing.T) {
 }
 
 // TestEnvBinding is CT9's precedence, and the reason every test in this
-// package resets viper: every global but --rev is env-backed through viper's
-// AutomaticEnv, so DNVCTL_CLUSTER is ambient context for every invocation and
-// an explicit flag beats it.
+// package resets viper: every global flag but --rev is env-backed through
+// viper's AutomaticEnv, so DNVCTL_CLUSTER is ambient context for every
+// invocation and an explicit flag beats it.
 func TestEnvBinding(t *testing.T) {
 	t.Setenv("DNVCTL_CLUSTER", "envclu")
 	t.Setenv("DNVCTL_SP", "envsp")
@@ -1405,8 +1406,8 @@ func TestEnvBinding(t *testing.T) {
 }
 
 // TestLeafFlagsIgnoreTheEnvironment is the other half of CT9: only
-// the env-backed globals have an environment or config carrier. --rev and
-// every leaf flag are read off the command line alone, so a variable
+// the env-backed global flags have an environment or config carrier. --rev
+// and every leaf flag are read off the command line alone, so a variable
 // exported for one command, or a key sitting in a config file, cannot put a
 // token, a name, a boolean such as a force, a count, an id, a list or a
 // bitmap into a request nobody typed it for. Each case leaves the flag
@@ -1445,7 +1446,7 @@ func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
 			"cluster", "get").(*pb.GetClusterRequest)
 		if req.ClusterName != itCluster {
 			t.Errorf("DNVCTL_NAME=other sent cluster_name %q, want the "+
-				"global %q", req.ClusterName, itCluster)
+				"global --cluster %q", req.ClusterName, itCluster)
 		}
 	})
 
@@ -1514,10 +1515,10 @@ func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
 }
 
 // TestBadNumericEnvIsAUsageError is the refusal half of CT9: an env-backed
-// global keeps its environment and config carriers, so text there that is
-// not a number is what the same text as a flag argument is — a usage error
+// global flag keeps its environment and config carriers, so text there that
+// is not a number is what the same text as a flag argument is — a usage error
 // before any dial — never a cast that reads back as zero. --timeout is the
-// one numeric env-backed global, and a zero there is a deadline that has
+// one numeric env-backed global flag, and a zero there is a deadline that has
 // already passed. NaN and ±Inf parse on every carrier, the flag's included,
 // and name no deadline, so each is refused from each; and a positive value
 // past time.Duration's range is saturated, not converted into a deadline

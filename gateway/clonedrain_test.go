@@ -451,8 +451,10 @@ func volLatchClone(env *volEnv, name string) {
 // STM:
 //
 //   - the name is NOT reusable until then;
-//   - `DeleteStoragePool` keeps refusing while any clone drains, with the
-//     count it still holds (`still holds 1 clones`);
+//   - `DeleteStoragePool` keeps refusing while any clone drains, and the
+//     thin-device refusal is the one a caller meets (architecture.md,
+//     Clones), so this test lifts the td name out to reach the clones row
+//     (`still holds 1 clones`);
 //   - the DESTINATION thin device is held too: `DeleteThinDevice` of it
 //     refuses, which the one-shot delete never did — so abandoning a clone is
 //     delete-clone, poll until gone, then delete-td / delete-sp;

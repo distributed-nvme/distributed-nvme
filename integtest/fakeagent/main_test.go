@@ -418,12 +418,12 @@ func TestGateStaleSyncupRevision(t *testing.T) {
 	}
 }
 
-// TestPushIsNotGatedOnRevision is what [D13] left of the fake agent's old
-// second rejection (BM3): a Push* carries no revision at all, so the fake's
-// gatePushLocked has nothing to compare and a chunk planned against a report
-// the desired state has since superseded is still recorded. The descriptor
-// check is the part a future edit cannot quietly undo — a revision field could
-// only come back by being added to the proto again.
+// TestPushIsNotGatedOnRevision pins the revision-free push (dnv-worker.md BM3;
+// architecture.md, Bitmap push protocol): a Push* carries no revision at all,
+// so the fake's gatePushLocked has nothing to compare and a chunk planned
+// against a report the desired state has since superseded is still recorded.
+// The descriptor check is the part a future edit cannot quietly undo — a
+// revision field could only come back by being added to the proto again.
 func TestPushIsNotGatedOnRevision(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
@@ -442,9 +442,8 @@ func TestPushIsNotGatedOnRevision(t *testing.T) {
 	}
 
 	// The side's stored revision moves far past the round the push below was
-	// planned in. Under the old gate this was the rejection; now it is a
-	// plain accept, because a chunk is position-addressed data keyed by an id
-	// that is never reused.
+	// planned in, and the push is still a plain accept, because a chunk is
+	// position-addressed data keyed by an id that is never reused.
 	syncupDn(t, dnClient, 9, ptr)
 	syncupSide(t, dnClient, ptr, 9, 30)
 	reply, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{

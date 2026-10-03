@@ -110,7 +110,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		st := newSideState(req)
 		// Any per-CN linear this side left suspended belongs to the previous
 		// process; DN12 retires it at once rather than opening a second
-		// grace window — provided adoptFence finds one of them suspended. If
+		// cutover window — provided adoptFence finds one of them suspended. If
 		// none of its probes answers it finds nothing, which is DN12 rule 1's
 		// known limit, and so is a side this loop never gets here with — its
 		// file missing or unreadable, or skipped above with its dn file — or
@@ -190,11 +190,11 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	// A side whose pointer has left its parent's list is FORGOTTEN here —
 	// file, chunks, memory entry, object lock and goroutines — without any
 	// attempt to remove its resources. The node-level sweep below finds them
-	// by name, which the teardown this replaced could not: it deleted the
-	// same state after a best-effort removal pass whose every step only
-	// logged its failure. A missing DN reads as a list that names no side —
-	// unless a dn-* file did not load, and then its sides never got this far
-	// (unreadParent).
+	// by name, which a teardown that deletes the same state after a
+	// best-effort removal pass cannot: when every step of that pass only
+	// logs its failure, nothing enumerates the object again. A missing DN
+	// reads as a list that names no side — unless a dn-* file did not load,
+	// and then its sides never got this far (unreadParent).
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
 		req := st.req.Load()
@@ -428,14 +428,16 @@ func (s *DnAgentServer) knownSides() (
 	return known, haveState, true
 }
 
-// claimedMigrs lists the (sp_id, migr_id) pairs a live destination role owns.
+// claimedMigrs lists the (sp_id, migr_id) pairs whose migr_dst_conf a held
+// side's stored request carries, at every level: a clone-metadata slot
+// belongs to the migration, not to the destination role a level suppresses,
+// so its claim carries no level gate (DN6).
 // The REQUEST alone decides: it is stored (sideState.req, an atomic store)
 // before any converge builds a thing, so no role this process started can use
 // a metadata slot whose claim is not visible here; one whose request a lost
-// store took is what spFullyKnown, both callers' other half, waits out. The
-// "last applied conf" this used to also consult was memory of a past
-// converge — the very thing that let a role whose teardown failed keep its
-// slot claimed for ever.
+// store took is what spFullyKnown, both callers' other half, waits out. No
+// memory of a past converge is consulted: a claim remembered from one would
+// keep the slot of a role whose teardown failed claimed for ever.
 func (s *DnAgentServer) claimedMigrs() map[[2]uint64]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -558,10 +560,10 @@ func (s *DnAgentServer) syncupDn(
 	// The dn file is persisted BEFORE the sweep, not after it. The
 	// sweep is what removes the resources of a side whose pointer has just
 	// left the list, and it can block for the whole failfast window on a dead
-	// remote; a request cancelled in that window used to skip the save
-	// entirely, and the next Reconcile then rebuilt the side from the OLD
-	// list. With the new list on disk first, a crash mid-sweep is nothing but
-	// a startup sweep.
+	// remote; a request cancelled in that window would skip a save placed
+	// after it, and the next Reconcile would read the OLD list, which still
+	// names the side. With the new list on disk first, a crash mid-sweep is
+	// nothing but a startup sweep.
 	path := s.nf.LocalDnPath(req.GetClusterId(), req.GetDnId())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting dn state failed",
@@ -777,10 +779,10 @@ func (s *DnAgentServer) dropRemovedSides(
 	}
 }
 
-// dropSideState is the bookkeeping half of the old teardown. The zeroing
-// goroutine is cancelled AND JOINED: its `blkdiscard --zeroout` child holds
-// /dev/mapper/{DnSideName} open, and `dmsetup remove` on a device with an
-// open fd fails EBUSY, so the sweep that follows would find the side device
+// dropSideState is the bookkeeping half of a side's teardown (SH7). The
+// zeroing goroutine is cancelled AND JOINED: its `blkdiscard --zeroout` child
+// holds /dev/mapper/{DnSideName} open, and `dmsetup remove` on a device with
+// an open fd fails EBUSY, so the sweep that follows would find the side device
 // pinned by this very process. The wait is bounded — the child is SIGTERMed
 // at CmdSoftTimeout and SIGKILLed at CmdHardTimeout, a child in an
 // uninterruptible kernel wait aside (SH15) — and the loop never blocks on a

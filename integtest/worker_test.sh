@@ -2364,8 +2364,8 @@ EOF
 	# failover, so by the time these polls return it may already have
 	# deleted C1's record — a C1 that AR7 replaced is as demoted as one that
 	# reads primary false, and only a record gone with no replacement is a
-	# failure (*amended 2026-09-26*: the settle write that follows a
-	# failover left this read losing that race in 2 runs of 3).
+	# failure (the settle write that follows a failover left this read
+	# losing that race in 2 runs of 3).
 	local c1_primary
 	c1_primary=$(cntlr_field sp0 1 primary 2>/dev/null || true)
 	if [ -z "$c1_primary" ]; then
@@ -2532,10 +2532,7 @@ EOF
 
 	# PENDING (AR6, stateless). The reported total is still 125 while the
 	# slice's data groups excluding the newest already total 125, so
-	# 125 <= 125 and no second grow may start. (The doc's illustrative
-	# 600/2048 numbers cannot express this at the real group geometry of
-	# architecture.md, Group on-leg layout: meta region, data region, health
-	# block.)
+	# 125 <= 125 and no second grow may start.
 	grows=$(reaction_cnt grow_data)
 	local pendings
 	pendings=$(reaction_skip_cnt grow_data grow_pending)
@@ -3989,9 +3986,9 @@ EOF
 		flip_gt "$flips" provisioned
 
 	stage 3 "both sides released together: one flip per side, one bump per STM"
-	# The handoff case (dnv-worker.md, Integration test plan, Cases) asks for
-	# "exactly one flip record and SpRev advanced by exactly one" when both
-	# sides finish together, but RW18 only says several
+	# The handoff case (dnv-worker.md, Integration test plan, Cases) asks of
+	# the flip only that one in the middle of a handoff is applied exactly
+	# once, and for sides that finish together RW18 says only that several
 	# sides reported within one round MAY share one STM — and the coordinator
 	# logs one record per side it WROTE, all carrying that STM's revision. So
 	# the batched round is run (step 2 releases one side at a time and never

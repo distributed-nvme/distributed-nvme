@@ -86,8 +86,10 @@ type CnAgentServer struct {
 	sleep         func(context.Context, time.Duration) error
 }
 
-// cnState is one synced CN: its last fully applied SyncupCnRequest plus the
-// ResInfo history of the base state (architecture.md, Controller node, common).
+// cnState is one synced CN: its last accepted SyncupCnRequest as this process
+// holds it (SH8) — a SyncupCn stores it once it has passed the revision gate,
+// before its converge runs — plus the ResInfo history of the base state
+// (architecture.md, Controller node, common).
 // The loop device carrying the clone-metadata arena is deliberately *not* a
 // field here: it is kernel-assigned state, re-learned from `losetup
 // --associated` on every converge and probe pass and never cached across one

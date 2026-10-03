@@ -6,7 +6,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **AEN, discovery-log-change AEN** — The asynchronous event the cdc completes on a host's armed asynchronous event request when that host's rendered discovery log changes. A change that moves a host's view marks it dirty and sets a pending bit on each of the host's connections; several impacts before delivery coalesce into one event.
 
-**agent** — Either role of `dnv-agent`: the process on a disk node or a controller node that converges the local device-mapper, md, nvmet and nvme-host state to the desired state it is sent, persists the last applied request per object, and reports live state. An agent never talks to etcd.
+**agent** — Either role of `dnv-agent`: the process on a disk node or a controller node that converges the local device-mapper, md, nvmet and nvme-host state to the desired state it is sent, persists the last accepted request per object, and reports live state. An agent never talks to etcd.
 
 **allowed hosts** — The host NQNs a subsystem admits (`allowed_hosts`). An empty list opens a host-facing subsystem to every host ("attr_allow_any_host") and shows its cdc entry to every host; every dnv-internal subsystem links only the hosts it lists, so a transfer, which lists the destination cntlrs' host NQNs, admits none with an empty list.
 
@@ -48,13 +48,13 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **CdcEntry** — The etcd record per subsystem that the cdc serves: the subsystem NQN, the transport of every enabled cntlr's controller node, and the allowed hosts. The gateway writes it and puts a missing one back when it rewrites it, while the worker's cntlr replacement rewrites the transports only of an entry that exists.
 
-**check round, health check round** — One request-and-reply exchange on an object's check stream, sent by the worker at the interval the cluster's `health_check_conf` sets per object kind and answered with the agent's last applied revision, the verdict and, when it changed, the info. The worker re-syncs the object when the reply's revision or code says so.
+**check round, health check round** — One request-and-reply exchange on an object's check stream, sent by the worker at the interval the cluster's `health_check_conf` sets per object kind and answered with the revision of the last request the agent accepted for the object (see `dnagent.md` SH25), the verdict and, when it changed, the info. The worker re-syncs the object when the reply's revision or code says so.
 
 **check stream** — The long-lived bidirectional stream the owning worker keeps open per disk node, side, controller node and cntlr (`CheckDn`, `CheckSide`, `CheckCn`, `CheckCntlr`). It carries no desired state; it lets the worker read live state each round cheaply instead of polling `Get*Info`.
 
 **chunk store, bitmap-chunk store** — The agent mechanism that persists each received push as its own file before applying it and derives the applied set from the files present (`LocalMigrBmPath`, `LocalCloneBmPath`). A chunk whose file the startup reload did not load stays out of the applied set until a push rewrites it or a later restart loads it.
 
-**claim rule** — The sweep's test for an object whose name carries no side, such as a migration device or export: it goes unless a side the agent holds state for still wants it, read from that side's stored request under the same gate that keeps the object in the wanted set.
+**claim rule** — The sweep's test for an object whose name carries no side, such as a migration device or export: it goes unless a side the agent holds state for still wants it, read from that side's stored request under the same gate that keeps the object in the wanted set; the claim on a migration's clone-metadata slot carries no level gate (see `dnagent.md` DN6).
 
 **cleanup, debris** — A suite's scrub of what its runs leave behind, run at the start of every run and at the end only on success, each step tolerating absence; the e2e suite also scrubs between cases and stops a run whose scrub did not finish. A failed run leaves its debris, its processes, devices, connections and logs, in place and prints diagnostics instead.
 
@@ -114,7 +114,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **disk node, DN** — A machine contributing one raw block device formatted with the dnv disk format, from whose data area extents are handed to sides. It runs a dn agent and exports its sides over that agent's nvmet port.
 
-**dm kind** — The role letter plus hex digit in every dnv dm-device name that says which agent role and which device kind it is (`DmKind`, `ParseDmName`): `d` kinds for the dn role, `c` kinds for the cn role. A sweep attributes a device by it, and a name that does not decode exactly is not a dnv name.
+**dm kind** — The role letter plus hex digit in every dnv dm-device name that says which agent role and which device kind it is (`DmKind`, `ParseDmName`): `d` kinds for the dn role, `c` kinds for the cn role. A sweep attributes a device by it, and a name that does not decode exactly is not a dnv name, except under a cn's kind-`cb` prefix, where that cn's node-level sweep matches names by the prefix alone and removes the unwanted ones without decoding them (see `architecture.md`, dm-device kinds).
 
 **dm-error, reload target** — The permanent error device every dnv stack reloads a path onto to take it out of service: per thin device on a controller node, where parked ns-devs point (`CnErrorName`), and per cntlr on a side, where a standby's dm-linear points (`DnErrorName`). A reload onto it fails IO instead of replaying it.
 
@@ -138,7 +138,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **emulated host** — The agent suites' stand-in for an initiator that is not a dnv process: a plain `nvme connect` from a lab VM under a chosen host NQN and the host id derived from it (`NvmeHostId`), playing the controller nodes in the dn suite and the host in the cn suite. In the dn suite a VM holds several such identities, and an identity may reach its own VM's exports as well as the other VM's; the cn suite uses one fixed host NQN.
 
-**entry point** — A place that mints a trace id, which the interceptors never do: dnvctl per invocation unless `--trace-id` is given, the worker per unit of work, the gateway for a request that arrives without one, and every daemon at startup and for its own background work; the suites' drivers pass theirs in (see `grpc.md` T4).
+**entry point** — A place that mints a trace id, which the interceptors never do (see `grpc.md` T4): each daemon at startup; the agent per attempt of a background task, with the one exception T4 names; the cdc per accepted host connection, per scan attempt and per applied watch event; dnvctl per invocation unless `--trace-id` is given; the gateway for a request that arrives without one; and the worker per unit of work. The suites' drivers mint none: each carries the id its suite gives it through `--trace-id`, if any (see `grpc.md`, Drivers and fakes, and `log.md` R5).
 
 **enumeration** — A sweep's listing of what the node holds: the dm devices, the nvmet tree and the nvme-host subsystems, and on the cn the md arrays. An enumeration that did not answer makes the verdict unclean and licenses no removal, on the cn any of the four stopping the whole sweep and on the dn the dm listing (see `architecture.md`, Teardown by sweep).
 
@@ -154,7 +154,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **failover** — The sp worker's reaction that makes a healthy, enabled standby the primary when the primary is disabled or has been unhealthy past the primary threshold, held to the cntlr threshold when that is longer while it is settling, and not where a failover cannot help, such as an error any primary would read alike (see `dnv-worker.md` AR5). The old primary becomes a standby and the new one is settling until its stack is seen built and clean.
 
-**fake agent, fake gateway** — The suites' stand-ins for the processes they do not run, each behind the real server interceptors so its log records every message it receives: `fakeagent` plays the dn and cn agents for the worker and gateway suites, answering from its behavior file and from each object's last applied request, which its state file keeps across a restart. `fakegateway` plays the gateway for the dnvctl suite, recording each method's call count and last request before answering from its behavior file.
+**fake agent, fake gateway** — The suites' stand-ins for the processes they do not run, each behind the real server interceptors so its log records every message it receives: `fakeagent` plays the dn and cn agents for the worker and gateway suites, answering from its behavior file and from each object's last accepted request, which its state file keeps across a restart. `fakegateway` plays the gateway for the dnvctl suite, recording each method's call count and last request before answering from its behavior file.
 
 **fan-out, sync fan-out** — The delivery a revision bump sets off: the worker syncs every object the revision covers, and for a pool the coordinator builds every side and cntlr request once and hands each child its own, unordered within each kind and sides before cntlrs (see `dnv-worker.md` RW14).
 
@@ -202,9 +202,11 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, each with a status and details, built by the converge as it runs for a syncup reply and from probes alone for a check round or an info read.
 
-**inspect** — The gateway's live read of an object's info and applied revision (`InspectDiskNode`, `InspectControllerNode`, `InspectSide`, `InspectCntlr`), answered from the info read of the agent that hosts the object rather than from etcd.
+**inspect** — The gateway's live read of an object's info and of the revision of the last request its agent accepted for it (`InspectDiskNode`, `InspectControllerNode`, `InspectSide`, `InspectCntlr`; `applied_revision`), answered from the info read of the agent that hosts the object rather than from etcd.
 
 **interceptor** — One of the four shared gRPC interceptors in `common` that every dnv client connection and server chains (`GrpcUnaryClientInterceptor` and its stream and server siblings): they move the trace id between context and gRPC metadata and log every request and reply message, and they never mint an id (see `grpc.md`, T1 to T4).
+
+**invariant key** — A key the data model guarantees present while its parent exists: the revision keys, the globals, the record of every object a conf lists, and the node record a stored side or cntlr names. A read that reaches one through its parent and finds it absent has found a lost invariant, which the gateway never answers `NOT_FOUND` (see `architecture.md`, Key table).
 
 **latch** — The one-way `deleting` flag that `DeleteStoragePool` and `DeleteClone` set in their transaction: every other mutating call on the object is refused, a repeated delete is a no-op, and the sp worker's drain takes it from there.
 
@@ -230,7 +232,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **level, sp level** — A pool's degradation ladder (`SpLevel`), from read-write through read-only, no clone, no thin pool, no redundancy, no migration and no side, to disabled; each step suppresses the resources above it so an operator can take a damaged pool apart in stages, and read-only is enforced on the controller node by failing writes.
 
-**local store** — The directory an agent keeps the last fully applied request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync and rename. After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup.
+**local store** — The directory an agent keeps the last accepted request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync and rename. After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup.
 
 **location** — The failure-domain string a node registers (`location`), defaulting to its address: the allocator never places two legs in one location within one allocation round, and keeps a pool's new cntlrs, a spare leg and a migration destination out of occupied locations at its first tier only.
 
@@ -352,7 +354,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **ResStatus** — The status of one info row (`ResStatus`): missing, error, ok, provisioning for a healthy resource that is not ready, pending for a leg no probe round has completed, and unknown, which only the worker assigns to an object it cannot reach.
 
-**revision** — The monotonic counter per disk node, controller node and storage pool (`DnRev`, `CnRev`, `SpRev`) that every transaction changing agent-visible desired state bumps once; the worker syncs an object when its revision moves, and the agent remembers the last revision it applied.
+**revision** — The monotonic counter per disk node, controller node and storage pool (`DnRev`, `CnRev`, `SpRev`) that every transaction changing agent-visible desired state bumps once; the worker syncs an object when its revision moves, and the agent keeps the revision of the last request it accepted for the object (see `dnagent.md` SH8).
 
 **revision gate** — An agent's check of a syncup's revision against its stored request's (`GateRevision`): a lower one is refused as stale (`ReplyCodeStaleRevision`) and an equal one re-applies idempotently, before the request becomes desired state. An object the node does not hold is refused beside it as unknown (`ReplyCodeUnknownObject`).
 
@@ -450,7 +452,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **vote worker** — The per-process layer that registers the worker's seed, watches every worker's registration, commits a membership after the grace window, computes shard ownership and starts and stops shard workers.
 
-**wanted set** — The names a converge computes from its request's plan: every dm device, md array, export, connection and record the object should hold at the plan's level and role. The sweep removes what is held and not wanted, and the build ensures what is wanted; on the cn a resource the provisioning gate defers stays wanted, so the sweep does not remove what the build is about to create.
+**wanted set** — The names a converge computes from its request's plan: every dm device, md array, export, connection and record the object should hold at the plan's level and role. The sweep removes what is held and not wanted, and the build ensures what is wanted; on the cn a resource the provisioning gate defers stays wanted, and on the dn so does everything above the side device of a side not yet zeroed and provisioned (see `dnagent.md` DN6), so the sweep does not remove what the build is about to create.
 
 **watcher** — The cdc's reader of the entry keys: one scan to fill the registry, then a watch that applies each event, and a wholesale rescan when the watch breaks; until the first scan completes it serves no host.
 

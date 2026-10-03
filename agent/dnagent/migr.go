@@ -24,10 +24,12 @@ import (
 // one unit, every migration costs >= 2 units, so 24 *minimum-cost* destination
 // roles is the node-wide ceiling — and fewer for large sides at a small
 // region size, where the one-byte-per-region term dominates (a 1 TiB side at
-// 1 MiB regions costs 2 units, at 64 KiB regions 5). Nothing gates the
-// destination count against this; exhaustion is reported the way the cn arena
-// reports it (clonemeta.go's cloneMetaUnits carries the same note), and
-// growing DnCloneMetaSize would be a format-version bump.
+// 1 MiB regions costs 2 units, at 64 KiB regions 5). This is the dn twin of
+// the cn arena ceiling (clonemeta.go's cloneMetaUnits). Nothing gates the
+// destination count against this ceiling; the converge that meets exhaustion
+// reports it on the migr_dst_info rows (DN13: target_info RES_STATUS_MISSING,
+// dm_clone_info RES_STATUS_ERROR with the allocator's message), and growing
+// DnCloneMetaSize would be a format-version bump.
 const migrMetaBaseSize = 4 * 1024 * 1024
 
 func migrMetaSize(regions uint64) uint64 {

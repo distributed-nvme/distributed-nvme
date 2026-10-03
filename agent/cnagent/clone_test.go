@@ -55,7 +55,7 @@ func cloneOfTd(cloneId uint64, srcNqn string, dstTdId uint64) *pb.Clone {
 }
 
 // pushChunk pushes one chunk of the pair (srcSliceIdx, bmIdx); pushBitmap is
-// the one-slice fixture's chunk (0, 0). A push carries no revision ([D13]):
+// the one-slice fixture's chunk (0, 0). A push carries no revision (CN22):
 // it is position-addressed data keyed by an id that is never reused, so there
 // is nothing for the cntlr's stored revision to be compared with.
 func pushChunk(
@@ -910,9 +910,9 @@ func TestCloneTeardownOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delete clone: %v", err)
 	}
-	// The source's disconnect runs off the pass's locks (CN21), so it is the
+	// The source's disconnect runs off the pass's locks (CN10), so it is the
 	// pass's one leftover, and it is set going only once the clone and its
-	// metadata wrapper are gone.
+	// metadata wrapper are gone (CN21).
 	cnSweepOnlyDisconnects(t, reply.GetAgentReply(), "delete clone")
 	cnSweepAssertDetails(t, reply.GetAgentReply(), testSrcNqn, "delete clone")
 	awaitDisconnects(t, srv)
@@ -994,7 +994,7 @@ func TestCloneMetaFirstFitAndRecycling(t *testing.T) {
 		clones: []*pb.Clone{second}})); err != nil {
 		t.Fatalf("retire the first clone: %v", err)
 	}
-	// Its source's disconnect runs off the pass (CN21) and changes the node
+	// Its source's disconnect runs off the pass (CN10) and changes the node
 	// under the reads below.
 	awaitDisconnects(t, srv)
 	if _, ok := node.dms[firstDm]; ok {
@@ -1541,16 +1541,17 @@ func TestPushCloneBitmapGates(t *testing.T) {
 	pushChunk(t, srv, 0, common.MaxCloneBmCnt-1, []byte{0xff})
 }
 
-// TestPushHasNoRevisionGate pins [D13] on the cn side: PushCloneBitmap carries
-// no revision and the handler compares none, so a chunk the worker planned
+// TestPushHasNoRevisionGate pins the revision-free push of architecture.md,
+// Bitmap push protocol, on the cn side (CN22): PushCloneBitmap carries no
+// revision and the handler compares none, so a chunk the worker planned
 // against a report the cntlr's stored revision has since superseded is applied
-// rather than discarded. The old gate refused exactly this, and refusing it
-// only ever threw away work that was about to be redone — a chunk is
-// position-addressed data at a (clone_id, src_slice_idx, bm_idx) whose ids are
-// never reused, and a push never advances the stored revision.
+// rather than discarded. A revision gate would only ever throw away work that
+// is about to be redone — a chunk is position-addressed data at a
+// (clone_id, src_slice_idx, bm_idx) whose ids are never reused, and a push
+// never advances the stored revision.
 //
-// The one refusal that survives is the object one: a clone the stored request
-// does not name is ReplyCodeUnknownObject with a message the worker logs.
+// The handler refuses by name instead: a clone the stored request does not
+// name is ReplyCodeUnknownObject with a message the worker logs.
 func TestPushHasNoRevisionGate(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -1565,8 +1566,8 @@ func TestPushHasNoRevisionGate(t *testing.T) {
 		t.Fatalf("advancing the stored revision: %v", err)
 	}
 
-	// Nothing on the wire can carry a revision any more, so no later edit can
-	// reintroduce the gate without changing the proto.
+	// The request has no revision field, so no edit can add a revision gate
+	// without changing the proto.
 	if (&pb.PushCloneBitmapRequest{}).ProtoReflect().Descriptor().
 		Fields().ByName("revision") != nil {
 		t.Fatal("PushCloneBitmapRequest still carries a revision field")
@@ -1596,7 +1597,7 @@ func TestPushHasNoRevisionGate(t *testing.T) {
 		t.Fatalf("applied set = %v, want the pushed pair (0, 0)", got)
 	}
 
-	// The object refusal is untouched, message and all.
+	// The refusal by name holds, message and all.
 	unknownReply, err := srv.PushCloneBitmap(ctx, &pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
 		CloneId: 0x999, SrcSliceIdx: 0, BmIdx: 0, Bitmap: []byte{0xff},

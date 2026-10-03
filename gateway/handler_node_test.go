@@ -186,11 +186,11 @@ func hnodeWantKeys(t *testing.T, got []string, want []string, label string) {
 // hnodeDnShard is the shard_code the create drew for one DN (architecture.md,
 // Globals: id allocation + shard buckets).
 //
-// A rev key is id-keyed UNDER a shard code (architecture.md, Key grammar), and
-// that code is the
-// allocator's draw rather than anything derivable from the dn_id — so a test
-// that needs the rev key of a node it registered reads it back off the conf the
-// create wrote, exactly the way every handler forms the key.
+// A rev key is id-keyed UNDER a shard code (architecture.md, Key table), and
+// that code is the allocator's draw rather than anything derivable from the
+// dn_id — so a test that needs the rev key of a node it registered reads it
+// back off the conf the create wrote, exactly the way every handler after the
+// create forms the key.
 func hnodeDnShard(t *testing.T, s *Server, cid uint64, addrPort string) uint32 {
 	t.Helper()
 	dn := &pb.DnConf{}
@@ -1084,8 +1084,8 @@ func TestNodeBudgetsDivideByTheStoredExtentSize(t *testing.T) {
 	ctx := context.Background()
 	cluster := hnodeName("extsize")
 	// Only the extent size is named: an all-zero shift set is what
-	// architecture.md, Common validation, accepts
-	// as "no opinion about the ladder", and CreateCluster resolves it to the
+	// gateway.md, Clusters, accepts as a request for the default ladder, and
+	// CreateCluster resolves it to the
 	// 0/4/8/12 default before storing, so the cluster is concrete throughout.
 	reply, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
 		ClusterName: cluster,
@@ -1407,10 +1407,10 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 
 // TestInspectDiskNodeRepliesTheAppliedRevision pins architecture.md,
 // Disk nodes, and gateway.md, Disk nodes: the reply's `applied_revision` is
-// the one the agent's
-// GetDnInfo reply carries — its last applied revision — NOT the DnRev stored
-// in etcd. The fake answers with a value no bump sequence reaches, so a
-// handler that regressed to the stored revision would be unmistakable.
+// the one the agent's GetDnInfo reply carries — the revision of the last
+// SyncupDn it accepted — NOT the DnRev stored in etcd. The fake answers with a
+// value no bump sequence reaches, so a handler that regressed to the stored
+// revision would be unmistakable.
 func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -2290,7 +2290,7 @@ func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
 //
 // That distinction is the whole point of the row: "no token" must mean "no
 // optimistic-concurrency gate", never "no invariant of architecture.md,
-// Key grammar". Keeping the key in
+// Key table". Keeping the key in
 // the STM's read set is also what makes a skipped check no weaker than a
 // checked one against a DELETE of the object racing the same transaction.
 //

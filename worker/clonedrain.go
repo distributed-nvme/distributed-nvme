@@ -37,8 +37,9 @@ import (
 
 // The records of the clone drain (dnv-worker.md, Log records), in the same
 // house style as the sp drain's. msgCloneDrainStep is non-normative — it names
-// no decision — but a max-shape drain is four batches and this is the only
-// record that shows them.
+// no decision — but it is the only record that shows a drain's batches: a
+// max-shape drain spreads MaxSliceCntPerSp × MaxCloneBmCnt chunks over batches
+// of MaxDelBmPerTxn, and gateway/clonedrain_test.go pins the batch count.
 const (
 	msgCloneDrainFailed = "clone drain failed"
 	msgCloneDrainStep   = "clone drain step"

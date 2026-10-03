@@ -851,7 +851,7 @@ func (v *voteWorker) onTimer(msg timerMsg) {
 // transition implies — member when the registration is now observed live,
 // nonmember otherwise.
 //
-// VW5 (as amended) mandates arming the grace timer on EVERY observed
+// VW5 mandates arming the grace timer on EVERY observed
 // transition — even when target already equals effective(k) — and VW7 relies
 // on it: the disappear of a key that never became effective "starts a
 // disappear timer whose commit is a no-op except for the VW6 garbage
@@ -867,8 +867,8 @@ func (v *voteWorker) onTimer(msg timerMsg) {
 // a commit whose target already equals the committed state changes no
 // membership, logs nothing and recomputes no ownership — VW5's guarantee that
 // a registration flapping faster than the grace time never changes anybody's
-// effective membership and never delays anybody else's commit holds exactly as
-// before — and performs only the VW6 collection when that target is nonmember.
+// effective membership and never delays anybody else's commit holds all the
+// same — and performs only the VW6 collection when that target is nonmember.
 func (v *voteWorker) observed(
 	inc *incarnation,
 	rs *roleState,
@@ -962,8 +962,8 @@ func (v *voteWorker) commit(
 // to see a worker leave. So the commit is abandoned and VW8's single "the fleet
 // gave up on me" path runs instead. It is reachable whenever the grace window
 // is short enough to close before the next heartbeat tick's VW8 check, which
-// CM3 explicitly permits (a grace window below the dead threshold is "legal but
-// pointless").
+// CM3 explicitly permits (a grace window not longer than the dead threshold is
+// "legal but pointless").
 //
 // The reason names the CAUSE, not the consequence. VW8 (a) and (b) are re-tested
 // first, in that order — this observer stopped seeing its own key because its

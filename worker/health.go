@@ -869,7 +869,7 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // cntlr by, grp_id_to_md_raid aside, reads RES_STATUS_PROVISIONING, or
 // RES_STATUS_MISSING with details other than CN19's "sp_level"
 // (common.ResDetailsSpLevel, the cn agent's own value). HL2's settle requires
-// it (*amended 2026-09-26*). A new SP's primary reports a slice's pool rows,
+// it. A new SP's primary reports a slice's pool rows,
 // and the thin volumes in that pool, PROVISIONING until every leg of the
 // groups under it has a provisioned side, and its raid0s — with the ns-devs,
 // namespaces, clones and transfers over them — until no slice is deferred

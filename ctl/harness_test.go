@@ -4,7 +4,7 @@
 //
 // The one rule that shapes this file is that dnvctl's configuration lives in
 // a GLOBAL: viper is a process-wide singleton, bindViper binds the invoked
-// command's env-backed globals into it, and AutomaticEnv reads the live
+// command's env-backed global flags into it, and AutomaticEnv reads the live
 // environment. A flag bound by one test is therefore visible to the next one
 // unless the singleton is cleared, and a test that passes because of a
 // leftover binding is a lie rather than a pass. So every entry point here
@@ -30,8 +30,8 @@ import (
 )
 
 // TestMain clears the DNVCTL_* environment before any test runs. The CLI
-// reads the env-backed globals via AutomaticEnv (CT9), so a developer with
-// DNVCTL_CLUSTER or DNVCTL_GATEWAY_ADDRESS exported in their shell would
+// reads the env-backed global flags via AutomaticEnv (CT9), so a developer
+// with DNVCTL_CLUSTER or DNVCTL_GATEWAY_ADDRESS exported in their shell would
 // otherwise get a different request out of every table row — and on the
 // machine where the variable happens to hold the value a row expects, a green
 // run that proves nothing. The prefix comes from root.go's own envPrefix so
@@ -202,8 +202,8 @@ func runArgv(t *testing.T, rpc string, argv ...string) proto.Message {
 }
 
 // runArgvFull is runArgv without the global prefix, for the tests that own
-// the globals themselves — the CT9 env precedence cases, and the ones that
-// prove a command works with a global left empty.
+// the global flags themselves — the CT9 env precedence cases, and the ones
+// that prove a command works with a global flag left empty.
 func runArgvFull(t *testing.T, rpc string, argv ...string) proto.Message {
 	t.Helper()
 	client := &recordingClient{want: rpc}

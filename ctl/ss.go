@@ -2,7 +2,7 @@
 // Subsystems, namespaces (dnvctl.md, `ss` — `ctl/ss.go`, four RPCs).
 //
 // A subsystem is SP-scoped like everything in the groups `td` through `migr`,
-// so cluster_name and sp_name come from the globals
+// so cluster_name and sp_name come from the global flags
 // (dnvctl.md, Global flags, env, config) and the only identity flag is
 // --nqn. The three mutators carry `sp_rev` from the global --rev
 // (presence-based, CT3); `ss list` carries no token and takes no page flags,
@@ -98,8 +98,8 @@ func ssDeleteCmd() *cobra.Command {
 
 // ssListCmd is ListSubsystems: the read-back that carries each subsystem's
 // namespaces with it, and the only place a namespace is visible from the
-// gateway. The request is nothing but the two scope globals — no token, and no
-// page flags because the RPC is unpaginated.
+// gateway. The request is nothing but the two scope global flags — no token,
+// and no page flags because the RPC is unpaginated.
 func ssListCmd() *cobra.Command {
 	return leaf(
 		"list", "list the subsystems of a pool (ListSubsystems)",

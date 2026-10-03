@@ -3,10 +3,10 @@
 // architecture.md, Bitmap reads (dnvctl.md, `td` — `ctl/td.go`, five RPCs).
 //
 // Every request here is SP-scoped, so cluster_name and sp_name come from the
-// globals --cluster and --sp (dnvctl.md, Global flags, env, config) and never
-// from a local flag; what is left is only the flags that name the device and
-// window the reads. The two mutators carry `sp_rev` from the global --rev,
-// presence-based per CT3; the three reads carry no token at all.
+// global flags --cluster and --sp (dnvctl.md, Global flags, env, config) and
+// never from a local flag; what is left includes the flags that name the
+// device and window the reads. The two mutators carry `sp_rev` from the
+// global --rev, presence-based per CT3; the three reads carry no token at all.
 //
 // `td get-leg-bm` sits in this group because dnvctl.md, Conventions, puts it
 // here: a leg is not a thin device, but the command is the same measurement
@@ -113,8 +113,8 @@ func tdDeleteCmd() *cobra.Command {
 // CT4's EmitUnpopulated is what keeps the false visible in the JSON rather
 // than eliding it as a proto3 default.
 //
-// The request is nothing but the two scope globals: ListThinDevices is one of
-// the List* RPCs with no pagination, so there are no page flags either.
+// The request is nothing but the two scope global flags: ListThinDevices is
+// one of the List* RPCs with no pagination, so there are no page flags either.
 func tdListCmd() *cobra.Command {
 	return leaf(
 		"list", "list the thin devices of a pool (ListThinDevices)",

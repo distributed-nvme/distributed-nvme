@@ -2005,8 +2005,8 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 // reach the fixture the other one reads.
 //
 // The sp_rev key is still READ on the way through — it is an invariant key of
-// architecture.md, Key grammar, whose absence is ABORTED either way — and since
-// the RPC became a latch (architecture.md, Storage pools) a token-less delete
+// architecture.md, Key table, whose absence is ABORTED either way — and because
+// the RPC is a latch (architecture.md, Storage pools) a token-less delete
 // bumps it exactly like a token-carrying one; the
 // drain then deletes it at D3. What the second subtest therefore pins is the
 // whole effect of the bypass: the latch commits, and the teardown it starts
@@ -2939,8 +2939,8 @@ func TestGrowSliceGroupListFull(t *testing.T) {
 }
 
 // TestGrowSliceRefusals pins the refusals of architecture.md, GrowSlice: the
-// ext_cnt / is_meta exclusivity of architecture.md, Common validation, a
-// slice_id the SP does not list, and GW6's token check —
+// ext_cnt / is_meta exclusivity, a slice_id the SP does not list, and GW6's
+// token check —
 // which openSp runs BEFORE the slice lookup, so a client whose token does not
 // match hears "stale revision" and never a NOT_FOUND computed against a list
 // it has not read.

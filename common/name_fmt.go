@@ -416,8 +416,11 @@ func (nf *NameFmt) CnNsDevName(
 
 // CnLegName is the cn-local leg wrapper of architecture.md, Primary cntlr, step 1
 // ([D1]): one dm-linear over the leg's single nvme multipath namespace
-// device, kept as the leg-level indirection point (what a teardown reloads
-// onto an error target, and what md/groups consume as the member device).
+// device, sized from the desired state, never from probing (cnagent.md
+// CN10). md and the group devices consume it as the member device in place
+// of the kernel's namespace node, so a member carries a dnv name: what a
+// group finds its md array by (cnagent.md CN12) and a sweep attributes one
+// by (cnagent.md CN21).
 func (nf *NameFmt) CnLegName(
 	clusterId uint64,
 	cnId uint64,

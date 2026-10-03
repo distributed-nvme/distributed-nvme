@@ -9,8 +9,8 @@ import (
 // FakeOsClient is a configurable OsClient test double: set only the function
 // fields your test needs; unset fields succeed with zero values.
 //
-// It is exported (not a _test.go file) so that agent/worker/gateway tests in
-// other packages can reuse it (osclient.md, Test double — `common/osclient_fake.go`).
+// It is exported (not a _test.go file) so that tests in other packages can
+// reuse it (osclient.md, Test double — `common/osclient_fake.go`).
 type FakeOsClient struct {
 	RunCommandFn      func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
 	ReadFileFn        func(ctx context.Context, path string) (string, error)

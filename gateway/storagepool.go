@@ -26,13 +26,13 @@ import (
 // against its exact capacity key inside it and the whole unit — scan and
 // commit — is retried when one moved (GW9).
 //
-// The counterpart is DeleteStoragePool, which no longer reverses any of it
-// itself: it LATCHES the SP (`deleting = true` plus one SpRev bump) and the
-// worker's drain (model/drain.go) takes it apart in bounded steps. Partial
-// teardown is therefore a real, visible state — what the old one-shot really
-// guaranteed was not atomicity but AGREEMENT, that DN and CN budgets never
-// disagree with the keys describing them, and every drain batch preserves that
-// by releasing budget in the same transaction that shrinks the describing key.
+// The counterpart is DeleteStoragePool, which reverses none of it itself: it
+// LATCHES the SP (`deleting = true` plus one SpRev bump) and the worker's
+// drain (model/drain.go) takes it apart in bounded steps. Partial teardown is
+// therefore a real, visible state — what a single transaction would protect
+// is not atomicity but AGREEMENT, that DN and CN budgets never disagree with
+// the keys describing them, and every drain batch preserves that by releasing
+// budget in the same transaction that shrinks the describing key.
 
 // The op names the bump helpers cite, so a log record names something
 // greppable. They are the RPC names verbatim.
@@ -702,8 +702,8 @@ func (s *Server) CreateStoragePool(
 }
 
 // DeleteStoragePool is the DeleteStoragePool of architecture.md, Storage
-// pools, amended by gateway.md, Storage pools and GrowSlice, as amended
-// 2026-09-15: it LATCHES the SP and returns.
+// pools, and of gateway.md, Storage pools and GrowSlice: it LATCHES the SP and
+// returns.
 //
 // It is the one mutator that opens an SP with rejectDeleting = false: an SP
 // whose teardown has begun refuses every other change, and refusing the RPC
@@ -716,14 +716,11 @@ func (s *Server) CreateStoragePool(
 // cascades: by that precondition a deletable SP has no children a user owns, so
 // the "other resources" the drain removes are only the SP's own bookkeeping.
 //
-// Why a latch and not the one-shot teardown it replaces (architecture.md,
-// Storage pools, DeleteStoragePool; dnv-worker.md, The sp drain): that
-// transaction was unbounded in the DN
-// dimension — already about 532 writes at the then-maximum 16-slice shape,
-// over the common.EtcdMaxTxnOps of the time, with no tripwire — and the slice
-// ceiling has doubled since; GrowSlice on top of that lets a slice's group
-// count grow far past that shape (to common.MaxGrpCntPerSlice groups per
-// group list), so no single transaction can ever be proven legal. The
+// Why a latch and not a one-shot teardown (architecture.md, Storage pools,
+// DeleteStoragePool; dnv-worker.md, The sp drain): that transaction's size
+// grows with the SP's shape, and GrowSlice lets a slice's group count grow far
+// past the shape CreateStoragePool builds (to common.MaxGrpCntPerSlice groups
+// per group list), so no single transaction can ever be proven legal. The
 // worker's drain (model/drain.go) takes it apart in steps whose size is a
 // constant (SPD10/SPD11), and SPD14 is the tripwire pair that keeps it so.
 //
@@ -735,7 +732,7 @@ func (s *Server) CreateStoragePool(
 //
 // Consequences, stated for the record: CreateStoragePool keeps failing
 // AlreadyExists on the surviving `sp_conf` key until the drain's D3 removes it,
-// so name reuse resumes only then; and this RPC now returns while the SP still
+// so name reuse resumes only then; and this RPC returns while the SP still
 // exists, so an observer polls GetStoragePool until NOT_FOUND.
 func (s *Server) DeleteStoragePool(
 	ctx context.Context,

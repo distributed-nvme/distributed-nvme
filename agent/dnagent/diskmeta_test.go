@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -1385,5 +1386,85 @@ func TestDiskMetaAllocIsDeterministic(t *testing.T) {
 	}
 	if strings.Count(first, "count:1") != 7 {
 		t.Errorf("the fallback did not stitch seven 1-extent runs: %s", first)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SH15 — the soft timeout on every block call
+// ---------------------------------------------------------------------------
+
+// TestDiskMetaBlockCallsCarryTheSoftTimeout: DiskMeta calls the OsClient
+// directly, so each ReadBlock and WriteBlock it makes must reach it on a ctx
+// carrying the soft timeout of agent.CmdCtx (architecture.md, Common
+// validation; SH15). The ctx the test hands in carries no deadline, so any
+// deadline a call carries is DiskMeta's own.
+func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
+	_, node := newTestMeta(t)
+	oc := node.osClient()
+	var reads, writes int
+	var unbounded []string
+	bounded := func(ctx context.Context) bool {
+		deadline, ok := ctx.Deadline()
+		return ok &&
+			time.Until(deadline) <= common.CmdSoftTimeout*time.Second
+	}
+	readBlock, writeBlock := oc.ReadBlockFn, oc.WriteBlockFn
+	oc.ReadBlockFn = func(
+		ctx context.Context, path string, offset uint64, length uint64,
+	) ([]byte, error) {
+		reads++
+		if !bounded(ctx) {
+			unbounded = append(unbounded,
+				fmt.Sprintf("readblock off=%d len=%d", offset, length))
+		}
+		return readBlock(ctx, path, offset, length)
+	}
+	oc.WriteBlockFn = func(
+		ctx context.Context, path string, offset uint64, data []byte,
+	) error {
+		writes++
+		if !bounded(ctx) {
+			unbounded = append(unbounded,
+				fmt.Sprintf("writeblock off=%d len=%d", offset, len(data)))
+		}
+		return writeBlock(ctx, path, offset, data)
+	}
+	open := func() *DiskMeta {
+		meta := NewDiskMeta(oc, metaDisk)
+		meta.SetDiskSize(metaDiskSize)
+		return meta
+	}
+	ctx := context.Background()
+
+	// EnsureFormatted's header read and its slot and header writes, a table
+	// write, the clone-metadata zeroing, a header probe, and a fresh load of
+	// the header and both slots.
+	meta := open()
+	if err := meta.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
+		t.Fatalf("EnsureFormatted: %v", err)
+	}
+	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+	if _, err := meta.AllocCloneMeta(
+		ctx, testSp, testMigrId, 1<<20); err != nil {
+		t.Fatalf("AllocCloneMeta: %v", err)
+	}
+	if _, err := meta.ProbeHeader(
+		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		t.Fatalf("ProbeHeader: %v", err)
+	}
+	if _, err := open().SideRecords(ctx); err != nil {
+		t.Fatalf("SideRecords after a reload: %v", err)
+	}
+
+	if reads == 0 || writes == 0 {
+		t.Fatalf("%d block reads and %d block writes: the check is vacuous",
+			reads, writes)
+	}
+	if len(unbounded) != 0 {
+		t.Errorf("block calls without the SH15 soft timeout: %v",
+			unbounded)
 	}
 }

@@ -232,8 +232,10 @@ func syncupSideTwoPhase(
 	t.Helper()
 	ctx := context.Background()
 	sideId := req.GetSidePointer().GetSideId()
-	// The flip is one-way: a side that has already provisioned is never sent
-	// back through phase 1, which would retract its live exports.
+	// Phase 1 is there to allocate and zero the side, so a side whose record
+	// is already fully zeroed skips it. That is economy, not safety: a
+	// re-send at provisioned = false closes DN9's gate, and a closed gate
+	// tears nothing down (DN10).
 	rec, ok, err := srv.meta.LookupSide(ctx, testSp, sideId)
 	if err != nil {
 		t.Fatalf("LookupSide: %v", err)

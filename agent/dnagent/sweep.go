@@ -401,7 +401,7 @@ func (s *DnAgentServer) runChain(
 	// device holds never completes, and holding such bios is what the cutover
 	// window (architecture.md, Migration, src step 2) is for. The cutover
 	// fence leaves exactly such devices behind,
-	// and not only under a side torn down inside the grace window: a level
+	// and not only under a side torn down inside the cutover window: a level
 	// raised to SP_LEVEL_NO_SIDE keeps the linears and takes only the exports
 	// off them ([D12]). A SyncupSide that also ends the source role gets here
 	// with the side's linears already resumed by its pre-step

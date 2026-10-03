@@ -23,7 +23,7 @@ import (
 // chain's own request/reply records carry the id.
 
 // ensureTraceIdCtx returns ctx whose INCOMING metadata carries a trace_id,
-// minting one when absent (gateway.md GW2, grpc.md T4's MAY). Injecting
+// minting one when absent (gateway.md GW2, grpc.md T4). Injecting
 // into the metadata — not the ctx value — upstream of the shared chain is
 // deliberate: common's interceptor then adopts it exactly as "a request that
 // arrived with one", its own request/reply records carry the id, and

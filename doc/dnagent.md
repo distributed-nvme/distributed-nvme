@@ -199,9 +199,9 @@ ctx captured at `Reconcile`, which `Serve` derives from its own ctx and
 cancels before returning — and, the background disconnect aside, mints a
 fresh trace id per attempt (`common.NewTraceId`), taking the SH11 locks for
 the attempt only, never across the whole task. The background disconnect is
-one command of the pass that set it going: it carries that pass's trace id
-instead of minting one and, like the CN11 probers, takes no SH11 lock at
-all.
+one command of the pass that set it going: it carries that pass's trace id,
+minting one only when that pass had none, and, like the CN11 probers,
+takes no SH11 lock at all.
 
 A background task may additionally run a **child process**, and DN9's
 `blkdiscard --zeroout` batches are the first that does. Such a child must
@@ -256,10 +256,10 @@ empty.
 ### Local store — `store.go`
 
 SH4. The store holds exactly what `architecture.md`, Common agent rules and
-Agent local-store paths, prescribe: the last fully applied `Syncup*Request`
-per object and one file per received `Push*BitmapRequest` chunk, written via
-`OsClient.WriteProto` (atomic replace) at the `Local*Path` locations, read
-back via `ReadProto`.
+Agent local-store paths, prescribe: the last accepted `Syncup*Request` per
+object, persisted at the point SH5 gives, and one file per received
+`Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
+replace) at the `Local*Path` locations and read back via `ReadProto`.
 
 SH5. An **object** request (`SyncupSide`/`SyncupCntlr`) is persisted after
 its converge pass completes. A **parent** request (`SyncupDn`/`SyncupCn`)
@@ -325,9 +325,9 @@ the file finds the pointer absent and deletes it.
 ### Revision gate — `revision.go`
 
 SH8. Per `architecture.md`, Common agent rules, with `stored` = revision of
-the last fully applied request for the object, as this process holds it
-(zero when it holds none, as for an object whose file the startup reload did
-not load): `GateRevision` returns nil when the request may be applied —
+the last accepted request for the object, as this process holds it (zero
+when it holds none, as for an object whose file the startup reload did not
+load): `GateRevision` returns nil when the request may be applied —
 incoming at or above stored, equal meaning an idempotent re-apply — and a
 `ReplyCodeStaleRevision` rejection whose `details` name the incoming and the
 stored revision for a stale one.
@@ -378,7 +378,7 @@ SH13. Lock order is node then object, never nested object locks. Probing
 under a lock is acceptable: every OS command is bounded by
 `CmdSoftTimeout`/`CmdHardTimeout` (SH15) except a child in an
 uninterruptible kernel wait (SH15) — which is why the cn sweep's
-`nvme disconnect` runs off the locks (`cnagent.md` CN21) — and an
+`nvme disconnect` runs off the locks (`cnagent.md` CN10) — and an
 in-process `OsClient` file or block call is bounded only up to its syscall:
 its ctx is checked once, before it (`osclient.md`, ReadFile / WriteFile /
 WriteFileDirect), so a sysfs, configfs or device access the kernel holds
@@ -449,11 +449,12 @@ known limit (Known limits).
 SH15. Every wrapper call wraps its ctx with a deadline of `CmdSoftTimeout`
 before calling the `OsClient` (the soft/hard timeout contract of
 `architecture.md`, Common validation; `osclient.md`, RunCommand, handles
-SIGTERM and SIGKILL). This covers the raw-device `ReadBlock`/`WriteBlock`
-calls of the [D13] metadata path too. A role package that calls the
-`OsClient` directly instead of through a wrapper — the `cnagent.md` CN12
-sysfs leg walk, and CN25's read of the `thin_dump` file — takes the same
-bound from the exported `agent.CmdCtx`. The bound holds in full only for a
+SIGTERM and SIGKILL). A role package that calls the `OsClient` directly
+instead of through a wrapper — the `cnagent.md` CN10 sysfs leg walk
+(`readSysfs`), CN25's read of the `thin_dump` file, and the dn's
+raw-device `ReadBlock`/`WriteBlock` calls of the [D13] disk metadata
+(`DiskMeta`) — takes the same bound from the exported `agent.CmdCtx`. The
+bound holds in full only for a
 child the signals end. An in-process `OsClient` call — a file, proto or
 block read or write — is bounded only until its syscall starts: its ctx is
 checked once, before it (`osclient.md`, ReadFile / WriteFile /
@@ -461,7 +462,7 @@ WriteFileDirect). A child blocked in an uninterruptible kernel wait is not
 bounded at all: both signals are delivered, and the call returns, and gives
 back its `OsClient` slot, only when the kernel does (an `nvme disconnect`
 whose target vanishes mid-delete waits out the kernel's admin timeout;
-`cnagent.md` CN21 runs the cn sweep's off the locks, while the cn build's
+`cnagent.md` CN10 runs the cn sweep's off the locks, while the cn build's
 dead-path disconnect and the dn sweep's source-connection disconnect still
 run under them — Known limits).
 
@@ -652,17 +653,21 @@ not decode, DN2's skips while a `dn-*` or `side-*` file does not load, and
 `cnagent.md` CN2's while a `cn-*` or `cntlr-*` file does not — is in no
 applied set until a push rewrites it or a later restart loads it.
 
-SH22. The math skeleton of `architecture.md`, raid0 bitmap math, lives
-here: chunk placement (concatenated — migration — or self-positioned
-`src_slice_idx` and `bm_idx` chunk of fixed capacity `CloneBmChunkBytes` —
-clone) and the fully-skippable-region to `blkdiscard` range computation
-(`SkipRanges`, `ApplySkipRanges`). The single wire-convention inversion
+SH22. Of `architecture.md`, raid0 bitmap math, this file holds the
+migration's chunk placement (concatenation in `bm_idx` order,
+`ChunkSet.ContiguousPrefix`, SH23), the store of a clone's chunks
+(`CloneChunkSet`), each self-positioned by its `src_slice_idx` and `bm_idx`
+pair at the fixed capacity `CloneBmChunkBytes`, and the
+fully-skippable-region to `blkdiscard` range computation (`SkipRanges`,
+`ApplySkipRanges`). Where a clone chunk's bits land, and the fold over the
+source geometry, are the cn agent's (`cnagent.md`, Files). The single
+wire-convention inversion
 (**wire 1 = unwritten/skippable**) is *not* here: the one place that reads
 the "written/copied = 1" side of the convention is the thin-pool metadata
 reader in `agent/cnagent/thinbm.go`, so that is where it inverts, exactly
 once, and every chunk reaching this file is already in wire convention.
-Role packages supply only the positioning parameters (the dn shifts by the
-leg's `meta_blocks` first, `architecture.md`, Bitmap push protocol).
+The dn supplies only the positioning parameters (it shifts by the leg's
+`meta_blocks` first, `architecture.md`, Bitmap push protocol).
 
 SH23. Migration chunks are interpretable only as a contiguous prefix from
 `bm_idx` zero; the apply computation uses the longest contiguous prefix of
@@ -687,7 +692,7 @@ that first round's id. An empty `trace_id` keeps the stream ctx's id.
 SH25. Per round, under the SH11/SH12 locks: validate the object (unknown ⇒
 reply `agent_reply.code` of `ReplyCodeUnknownObject`, `revision` zero, no
 info — the stream stays open), probe the **fresh** live state, reply
-`revision` = last fully applied revision.
+`revision` = the revision of the last accepted request (SH8's `stored`).
 
 SH26. Info inclusion: always when `show_info` is true; when false, on the
 first reply of the stream and whenever the freshly probed `*Info` differs
@@ -1154,10 +1159,10 @@ at all nothing is authoritative and the sweep does nothing.
 **Scope 2, side-level.** Inside `convergeSide` and ahead of its build phase
 (`SyncupSide`), under whatever DN1 locks that caller holds (SH10/SH11). Its
 wanted set is exactly what the build phase would ensure for this side's
-plan, with the source deferral of `architecture.md`, Migration, already
-applied: `DnSideName` at every level (DN11), the per-CN `DnErrorName` and
-`DnLinearName` while `sp_level` keeps the dm layer, the `SideToCnNqn`
-exports while it keeps the export layer, `DnMigrSrcName` and its
+plan were DN9's gate open, with the source deferral of `architecture.md`,
+Migration, already applied: `DnSideName` at every level (DN11), the per-CN
+`DnErrorName` and `DnLinearName` while `sp_level` keeps the dm layer, the
+`SideToCnNqn` exports while it keeps the export layer, `DnMigrSrcName` and its
 `MigrSrcNqn` export while an **effective** `migr_src_conf` is set — each
 still under the level gate above it (DN12) — and `DnMigrFinalName`,
 `DnMigrMetaDmName` and the source connection while a destination role is
@@ -1215,7 +1220,7 @@ held (both scopes, above). The side export carries no dn id at all and the
 source connection carries only the **source** DN's, so neither names the
 agent holding it; both are visible to every agent sharing the kernel, so
 each needs attributing first. A side export is attributed by the per-CN
-dm-linear its namespace backs: one naming another dn agent's per-CN linear
+dm-linear that backs its namespace: one naming another dn agent's per-CN linear
 (`DmKindDnLinear`) is **foreign** and is never touched; one naming ours
 belongs to the side in that name, and survives for as long as that side is
 in an authoritative list, which is what keeps a side that must be rebuilt
@@ -1298,7 +1303,8 @@ destination has not provisioned claims nothing, `architecture.md`,
 Migration), its `migr_dst_conf` under a wanted destination role, its export
 under a wanted export layer.
 
-**A claim carries its claimant's gate, and the source needs two of them.**
+**A claim on a kernel object carries its claimant's gate, and the source
+needs two of them.**
 A claim is not "this object exists"; it is "somebody still WANTS it", so it
 is recorded only under the same condition that keeps the object in the
 wanted set. The migration source is the one role whose two objects part
@@ -1321,6 +1327,17 @@ wait holds them), with no "applied destination" to remember — a field
 holding one would be overwritten by the very converge that is supposed to
 retry the removal.
 
+The claim on a clone-metadata slot, which the record rule below reads, is
+not a claim on a kernel object and carries no level gate: a held side
+claims the slot for as long as its stored request carries that migration's
+`migr_dst_conf`, at every level. The slot holds the dm-clone's persistent
+metadata and belongs to the migration, not to the role a level suppresses:
+a level at or above `SP_LEVEL_NO_MIGRATION` takes the dm-clone, its
+wrapper and its source connection and keeps the slot. Freed, the slot
+would lose the hydration state: the slot allocated again when the level
+comes back down starts with its head zeroed (DN13), and the freed units
+can go to another migration meanwhile.
+
 **The layers.** Each scope removes its unwanted objects in one order,
 top-down. Every position is a dependency, not a preference.
 
@@ -1333,7 +1350,7 @@ holds never completes, since such a target queues bios with no timeout and
 no error path ([D12]), and the agent cannot know that none is held. The
 cutover of `architecture.md`, Migration, leaves exactly such devices behind
 — holding the old primary's in-flight IO is what its window is for — and
-not only under a side torn down inside the grace window: `SP_LEVEL_NO_SIDE`
+not only under a side torn down inside the cutover window: `SP_LEVEL_NO_SIDE`
 keeps the linears and takes only the exports off them. The linear under an
 export is the one its attribution read off the namespace (above). A bare
 resume would free the device too, but against the table it was suspended
@@ -1409,7 +1426,8 @@ pointer list, and freeing those extents makes the next `SyncupSide` either
 re-allocate them and zero live data away (`provisioned` false) or, at
 `provisioned` true, refuse to allocate and report the side permanently dead
 ("record missing", DN9) — both outcomes lose the data. A `CloneMetaRecord`
-is an orphan only when no held side claims its `(sp_id, migr_id)` **and**
+is an orphan only when no held side claims its `(sp_id, migr_id)` (a
+claim no level gates, above) **and**
 every side of that `sp_id` this node may host is one whose local state the
 agent actually holds — otherwise a side it has not heard from yet could
 still own the slot, and freeing it would strand an in-flight migration
@@ -1836,11 +1854,15 @@ DN13. **Migration destination** (`migr_dst_conf` set).
 
 **Provisioning first.** While the destination side's own
 `side_conf.provisioned` is false, or any of its `zeroed_bits` is unset,
-**none** of steps (1) to (5) run. The side converges to the DN9 shape only
-— the extent record, `DnSideName` and the zeroing goroutine — with no
-per-CN stacks, no metadata slot, no `nvme connect` and no dm-clone;
-`migr_dst_info.target_info` and `.dm_clone_info` report
-`RES_STATUS_PROVISIONING` with details "side provisioning". Bitmap chunks
+**none** of steps (1) to (5) run. The converge goes no further than the
+DN9 shape — the extent record, `DnSideName` and the zeroing goroutine —
+and sets up none of the per-CN stacks, the metadata slot, the source
+connection or the dm-clone. Nor does the gate remove any of them: neither
+the flag nor the bits enter the wanted set the sweep removes against
+(DN6). Below `SP_LEVEL_NO_MIGRATION`, `migr_dst_info.target_info` and
+`.dm_clone_info` report `RES_STATUS_PROVISIONING` with details "side
+provisioning" — at or above it the level comes first and no
+`migr_dst_info` row is emitted at all (DN18). Bitmap chunks
 pushed meanwhile are still persisted and counted as applied (DN15) and are
 applied when the dm-clone is finally created. Cancelling the migration
 inside this window is the DN9 cancel-and-wait path: the goroutine is
@@ -1923,8 +1945,9 @@ tick later at worst. Shutdown still stops an attempt in flight, because
 `rootCtx` is cancelled before `WaitBackground` joins (SH27).
 
 **Retiring the role is the sweep's, and it starts with a repoint.** When
-`migr_dst_conf` goes — the finish of `architecture.md`, Migration, a level
-at or above `SP_LEVEL_NO_MIGRATION`, or the side leaving its DN's list —
+`migr_dst_conf` goes — the finish of `architecture.md`, Migration, or the
+side leaving its DN's list — or a level at or above
+`SP_LEVEL_NO_MIGRATION` suppresses the role,
 `DnMigrFinalName`, `DnMigrMetaDmName` and the source connection stop being
 wanted and DN6's layers take them, clone before connection and wrapper
 after both, once every side of the sp this node may host is held. All
@@ -1949,7 +1972,10 @@ the clone's removal fails EBUSY under the linear and the whole chain waits
 a round for the build phase to repoint it. The metadata slot is released
 only after the wrapper's removal has been **verified**, and only when the
 record rule (DN6) also proves the slot orphaned; a slot whose wrapper would
-not go stays allocated and is retried by the next pass.
+not go stays allocated and is retried by the next pass. A level that only
+suppresses the role leaves `migr_dst_conf` in the request, and with it the
+slot's claim, which no level gates (DN6): the slot stays allocated, and the
+dm-clone a lower level rebuilds over it resumes from its metadata.
 
 **Chunks of a previous migration on the same side are quarantined.** The
 side records the `migr_id` its stored chunks belong to, and a destination
@@ -1967,9 +1993,12 @@ its dm-clone metadata needs — a fixed base plus one byte per region, rounded
 up to whole `DnCloneMetaUnit`s — so the area bounds the concurrent
 destination roles per DN, and bounds them tighter for large sides at small
 block sizes. `MaxMigrCntPerSp` bounds none of this and the control plane
-does not gate against it (`architecture.md`, Migrations): exhaustion is
-reported as `RES_STATUS_ERROR` on the `migr_dst_info` rows — the dn twin of
-the cn arena ceiling in `cnagent.md` CN18.
+does not gate against it (`architecture.md`, Migrations): the converge
+that meets exhaustion reports it on the `migr_dst_info` rows —
+`target_info` `RES_STATUS_MISSING`, its details naming the missing clone
+metadata, since no connect is attempted without a slot, and
+`dm_clone_info` `RES_STATUS_ERROR` with the allocator's message — the dn
+twin of the cn arena ceiling in `cnagent.md` CN18.
 
 DN14. Persist (SH5); reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
@@ -2004,8 +2033,8 @@ omits the index, and the worker pushes it again on a later round. Reply
 
 DN16. Read-only: probe fresh under the DN1 locks and reply `agent_reply`,
 `revision`, the info. An unknown DN or side pointer — one this process
-holds no request for, as when none was ever applied, or when the startup
-reload could not load or skipped its file (DN2) and none has been applied
+holds no request for, as when none was ever accepted, or when the startup
+reload could not load or skipped its file (DN2) and none has been accepted
 since — ⇒ `ReplyCodeUnknownObject` with `revision` zero.
 
 For a **known** object the `agent_reply` is the **verdict**: the sweep of
@@ -2114,7 +2143,7 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 * `cn_id_to_dm_error` and `cn_id_to_dm_linear` per cn, named `DnErrorName`
   and `DnLinearName`: `dmsetup info` plus `dmsetup table` (`probeDmTarget`;
   the linear's target — side device, dm-error or dm-clone — must match the
-  desired role). Inside the grace window of `architecture.md`, Migration,
+  desired role). Inside the cutover window of `architecture.md`, Migration,
   the expected target is the **pre-fence** one and the details are
   "suspended (migration cutover grace window)"; the probe never starts a
   window (DN16). While DN9's gate is closed no device is expected to exist
@@ -2133,13 +2162,18 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   walk** (the subsystem matched by "subsysnqn", the controllers' "state"
   — never `nvme list-subsys`) shows a live controller for it (liveness
   only, SH20); `RES_STATUS_PROVISIONING`, details "side provisioning",
-  while the destination side is still zeroing (DN13).
+  while DN9's gate is closed on the destination side (DN13).
 * `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: `dmsetup
   status`; the details carry the raw status line (`architecture.md`,
   Live-state reporting — hydration progress); `RES_STATUS_PROVISIONING`,
-  details "side provisioning", while the destination side is still zeroing
-  (DN13). The `DnMigrMetaDmName` wrapper has no `ResInfo` of its own: its
-  health folds into this one.
+  details "side provisioning", while DN9's gate is closed on the
+  destination side (DN13). The `DnMigrMetaDmName` wrapper has no `ResInfo`
+  of its own: its health folds into this one.
+
+The level comes first for both `migr_dst_info` rows: at a level that does
+not want the destination role (`SP_LEVEL_NO_MIGRATION` and above, DN11)
+neither row is emitted, whether or not DN9's gate is open; below it, a
+destination behind the closed gate reports both `RES_STATUS_PROVISIONING`.
 
 DN19. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in
@@ -2159,9 +2193,9 @@ are not listings are folded into the same outcome, in that same form, so
 that they drive the same re-send: DN6's record step on a disk whose
 identity is not confirmed, and — in the read-only verdict only — a side
 with extents still to zero and no zeroing goroutine (DN16). The full list
-goes to the agent log once per pass as the "sweep leftover" record
-(`log.md`, Leftovers), so a lingering leftover is visible every round
-rather than once.
+goes to the agent log as the "sweep leftover" record (`log.md`,
+Leftovers), so a lingering leftover is visible every round rather than
+once.
 
 It is **not** a rejection (SH9). The request was applied, the desired state
 is stored, and the `*Info` rows are the converge's full account of every

@@ -16,9 +16,10 @@ three services (`Gateway`, `DiskNodeAgent`, `ControllerNodeAgent`), and on
 The interceptors live in package `common`, in `common/interceptor.go`. They
 apply to dnv-internal gRPC only: the `Gateway` service (dnvctl and users to
 dnv-gateway) and the agent services (dnv-gateway and dnv-worker to
-dnv-agent). They are not attached to the etcd client: etcd logging is done at
-the call sites (`log.md`, etcd), because a message logger on etcd's own RPCs
-would log raw key and value bytes and violate the human-readable-data rule.
+dnv-agent). They are not attached to the etcd client, because a message
+logger on etcd's own RPCs would log raw key and value bytes and violate the
+human-readable-data rule: etcd logging is implemented once, inside the
+central helpers of `etcdutil` (`log.md`, etcd), not at the call sites.
 
 Of the RPCs `schema.proto` declares, the four `Check*` RPCs — `CheckDn`,
 `CheckSide`, `CheckCn`, `CheckCntlr` — are bidirectional streams and every
@@ -44,8 +45,8 @@ T2. **Server side (unary and stream)**: if the incoming metadata carries a
     streams this means wrapping the `grpc.ServerStream` so its `Context`
     method returns the enriched ctx.
 
-T3. Propagation is transitive end to end by construction: dnvctl mints an id,
-    the client interceptor puts it in metadata, the gateway's server
+T3. Propagation is transitive end to end by construction: dnvctl sets an id
+    (T4), the client interceptor puts it in metadata, the gateway's server
     interceptor puts it in ctx, the gateway's outbound agent calls go through
     the client interceptor with that ctx, the agent's server interceptor
     restores it, and the agent's `OsClient` and state-file logs carry the
@@ -63,24 +64,26 @@ T3. Propagation is transitive end to end by construction: dnvctl mints an id,
     round's id shows in the `data` of its request's `grpc client send` and
     `grpc server recv` records.
 
-T4. Minting trace ids is the entry points' job, not the interceptors' (for
-    the entry points a recommendation; the interceptors themselves never
-    mint). `dnvctl` creates one per CLI invocation; `dnv-worker` one per unit
+T4. Minting trace ids is the entry points' job, never the interceptors':
+    the shared interceptors only move an id that is already there between
+    ctx and metadata (T1, T2). `dnvctl` mints one per CLI invocation unless
+    `--trace-id` supplies one (`dnvctl.md` CT2); `dnv-worker` one per unit
     of work, an in-round syncup sharing the round's id (`dnv-worker.md`
-    RW10); `dnv-gateway` mints one for a request
-    that arrived without one — not in its handlers but in its own
-    `ensureTraceIdUnary` and `ensureTraceIdStream` interceptors
-    (`gateway/traceid.go`), which `serverOptions` chains ahead of the shared
-    pair, so the id is already in the incoming metadata when the shared
-    chain logs the request (`gateway.md`, Serving and lifecycle). Each
-    daemon also mints one at startup, for its startup and other
-    process-lifetime records; `dnv-agent` mints one per attempt of a
+    RW10); `dnv-gateway` one for a request that arrived without one
+    (`gateway.md` GW2), not in its handlers but in its entry-point mint,
+    `ensureTraceIdUnary` and `ensureTraceIdStream` (`gateway/traceid.go`),
+    which `serverOptions` chains first, upstream of the shared pair, so the
+    shared chain adopts the id as it adopts a client's and logs the request
+    under it. Each daemon also mints one at startup, for its startup and
+    other process-lifetime records; `dnv-agent` mints one per attempt of a
     background task, all but one: the cn sweep's background
     "nvme disconnect" runs under the id of the pass that set it going and
     mints one only when that pass had none (`dnagent.md` SH27, `cnagent.md`
     CN10); and `dnv-cdc` mints one per accepted host connection, one per
     scan attempt (the watch it opens included) and one per applied watch
-    event. The generator is `NewTraceId` (`log.md`, Placement).
+    event. The generator is `NewTraceId` (`log.md`, Placement); the ids the
+    worker mints per unit of work put a prefix of its seed in front of the
+    generator's output (`dnv-worker.md` RW10).
 
 ## Message logging
 
@@ -152,8 +155,8 @@ Who is a server or a client of whom:
 | dnv-gateway | its `Gateway` gRPC server | its connections to dn and cn agents: the `Get*Size` calls, the `Get*Info` behind its `Inspect*`, the `GetCntlrInfo` and `GetSideInfo` checks that `DeleteClone` and `FinishMigration` make when `force` is false, and the `Get*Bm` bitmap reads (`gateway.md`, Agent calls) |
 | dnv-worker | — | its connections to dn and cn agents: `Syncup*`, `Push*Bitmap` and the `Check*` streams; the worker never calls `Get*Info` |
 | dnv-agent, dn and cn roles | its `DiskNodeAgent` or `ControllerNodeAgent` server | — |
-| dnvctl | — | its connection to the gateway (it mints a trace id per invocation, T4) |
-| dnv-cdc | — | — (it talks only to etcd and is excluded, see Placement) |
+| dnvctl | — | its connection to the gateway (it mints a trace id per invocation unless `--trace-id` supplies one, T4) |
+| dnv-cdc | — | — (no dnv-internal gRPC: it talks to etcd and serves hosts over NVMe/TCP, `cdc.md`, Scope and placement) |
 
 Those five dnv binaries (`log.md`, Placement) are the whole of the rule. The
 `integtest/` drivers are not dnv components; the conventions they follow

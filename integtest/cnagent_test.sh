@@ -463,9 +463,10 @@ cnctl() {
 # bump_dn_rev/bump_cn_rev advance a node's monotonic revision counter
 # (cnagent_integtest.md, Conventions, Revisions).
 # They must run in the parent shell — never inside a command substitution or a
-# background job, both of which would increment a copy. On a CN one counter is
-# shared by SyncupCn and SyncupCntlr (the single CnRev of architecture.md,
-# Revision keys and the sync fan-out), so bump_cn_sync
+# background job, both of which would increment a copy. On a CN the suite's one
+# counter feeds both SyncupCn and SyncupCntlr, though the worker labels them
+# with CnRev and with the SP's SpRev (architecture.md, dn / cn roles; sp
+# role), and each RPC is gated against what it last stored, so bump_cn_sync
 # additionally records the revision SyncupCn stored: that, not the counter, is
 # what CheckCn echoes back.
 bump_dn_rev() { DNREV[$1]=$((DNREV[$1] + 1)); }
@@ -578,7 +579,7 @@ leg_state() { # cnvm sp leg cn dnidx
 # Sides first: a promote that converges before its legs have optimized paths
 # finds them unavailable (architecture.md,
 # "Make sure all groups are available") and fails the md
-# assembly of its own converge. Since 2026-09-26 the agent's CN10 retry
+# assembly of its own converge. The agent's CN10 retry
 # finishes that assembly once they are optimized (cnagent.md CN12), but case
 # A's promote stage asserts its md rows OK and both --assembles under the
 # promote's own trace id, which holds only behind the barrier. Case A's
@@ -2160,8 +2161,10 @@ lab_wipe() {
 	# frees their member wrappers, but the members still carry md
 	# superblocks, and a dm device that reappears — or that udev re-examines
 	# while this is running — is re-assembled into a fresh array that pins
-	# the wrapper again ([[dn-guest-auto-assembles-md]] is the same mechanism
-	# on a DN). Measured on cn0 2026-09-18: one pass reported `dm left:`
+	# the wrapper again (a DN meets the same mechanism: the md superblock a
+	# CN writes to a leg travels down the side export into the dm devices
+	# that back it on the DN, where udev can auto-assemble an array from that
+	# superblock). Measured on cn0 2026-09-18: one pass reported `dm left:`
 	# EMPTY and left 8 kind-9 wrappers held open by 4 re-assembled arrays; a
 	# second, identical invocation removed all of them. So the sequence runs
 	# until the node is clean, not once.
@@ -2631,14 +2634,13 @@ dn_pointers() { # dnidx sp:leg:side…
 
 # SIDE_PROVISIONED remembers which sides have already been through the
 # two-phase provisioning (architecture.md, Side provisioning protocol), keyed
-# dnidx:sp:leg:side. The memo is load-bearing,
-# not tidiness: cases A and D call dn_side again at the failover flip to move
-# the primary, and re-converging an already-serving side with
-# provisioned = false is a perfectly legal request that the converge matrix
-# answers with "no exports" (architecture.md, Side provisioning protocol,
-# Converge matrix row 3) — i.e. it would retract the
-# live export stacks in the middle of a failover. Phase 1 therefore runs
-# exactly once per side. Each case resets the map.
+# dnidx:sp:leg:side. The redund case calls dn_side again at its failover
+# flips to move the primary, and the memo takes those calls straight to
+# phase 2, because the worker's flag is monotone, false to true only
+# (dnagent.md DN9). A re-send at provisioned = false would close the
+# provisioned gate, which skips the per-CN stacks and tears nothing down
+# (dnagent.md DN10).
+# Phase 1 therefore runs exactly once per side. Each case resets the map.
 declare -A SIDE_PROVISIONED=()
 
 # dn_side converges one side: the DN-side backing every CN leg connects to.
@@ -2791,7 +2793,7 @@ dn_drop_until_clean() { # dnidx secs
 
 # cn_drop empties a CN's cntlr pointer list, which is the declarative cntlr
 # teardown of CN7/CN21. The sweep sets its leg disconnects going off its locks
-# (CN21), so the pass that does replies ReplyCodeLeftover naming the
+# (CN10), so the pass that does replies ReplyCodeLeftover naming the
 # connections, and the same request is clean once they have returned: the
 # worker's re-send, which is cn_drop_until_clean at the new revision.
 cn_drop() { # cnidx
@@ -3201,7 +3203,7 @@ case_redund() {
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund post-failover write"
 
 	stage degrade "a dead leg: the md rows stay OK, read from sysfs"
-	# CN28 as amended 2026-09-26: the md row is read from /sys/block/mdN/md,
+	# CN28: the md row is read from /sys/block/mdN/md,
 	# never from `mdadm --detail`, which loads the superblock from a member
 	# device and, when that member's DN side has gone, blocks until the
 	# path's failfast expires — ~13 s after the side died, past the 3 s soft
@@ -3355,7 +3357,7 @@ case_redund() {
 		"redund write after readwrite"
 
 	stage lateflip "a promotion that outruns the sides' flip completes on the retry"
-	# CN12 as amended 2026-09-26, link 1 of the failover ping-pong: a
+	# CN12's late-member retry and link 1 of the failover ping-pong: a
 	# failover's SyncupCntlr waits for the sides' SyncupSide answers, but one
 	# cntlr_interval at most ([D16]), so a promoted standby can still read its
 	# legs before any side has flipped. Every path is then live but still
@@ -4321,10 +4323,10 @@ case_clone_xfer() {
 	# opens it gets EIO at once instead of wedging in D state ([D12]).
 	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the transfer origin"
 	assert_opens_eio 1 "$nsdev1" "clone_xfer: the transfer origin"
-	# The ordering rule of architecture.md, Namespace suspend semantics, on
+	# The ordering rule of architecture.md, [D12], on
 	# hardware: the ANA move to `inaccessible` is
 	# written before the ns-dev is touched, which is why the park needs no
-	# grace window — nvmet refuses IO to an inaccessible namespace at the
+	# cutover window — nvmet refuses IO to an inaccessible namespace at the
 	# target, so nothing of the host's is in flight when the reload lands.
 	seq=$(helper 1 "cn_events $TRACE")
 	# The path is anchored on the ORIGIN's namespace: this same converge also
@@ -4633,7 +4635,7 @@ case_clone_xfer() {
 		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
-	# The source's disconnect runs off the sweep's locks (CN21), so a pass
+	# The source's disconnect runs off the sweep's locks (CN10), so a pass
 	# that still finds a controller of the :4: connection names it as a
 	# leftover (code 4), and the worker's re-send of the same request is clean
 	# once the disconnect has returned. It may find none: CN1's pass above
@@ -4864,7 +4866,7 @@ case_restart() {
 			die "restart: $name differs across the restart"
 	done
 	# An active array is recognized, not re-assembled. It is read from
-	# /sys/block (CN12, 2026-09-26), so a `--detail` here is as wrong as a
+	# /sys/block (CN12), so a `--detail` here is as wrong as a
 	# mutation and is no longer excluded.
 	for idx in 1 2; do
 		got=$(helper "$idx" cn_events | grep -E '^mdadm ' |
@@ -4893,7 +4895,7 @@ case_restart() {
 			die "restart: cn$idx mutated after the restart:"$'\n'"$muts"
 	done
 
-	stage stale "only a stale rejection proves the revision survived"
+	stage stale "a stale SyncupCn is refused after the restart"
 	cnctl 1 syncup-cn --revision "$((CNSYNC[1] - 1))" --cntlr "$sp:$c1" \
 		--expect-code 1 >/dev/null
 

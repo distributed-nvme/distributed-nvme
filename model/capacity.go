@@ -135,8 +135,9 @@ func resolveInterval(interval uint32) uint32 {
 }
 
 // ResolveHealthCheckConf returns a copy of conf with the four round intervals
-// resolved (architecture.md, Common validation): each is the object kind's
-// round timeout (architecture.md, Clusters), so none of them may ever be zero.
+// resolved (architecture.md, Common validation): each is its object kind's
+// round interval (architecture.md, Check streams) and round timeout
+// (dnv-worker.md RW8), so none of them may ever be zero.
 func ResolveHealthCheckConf(conf *pb.HealthCheckConf) *pb.HealthCheckConf {
 	return &pb.HealthCheckConf{
 		DnInterval:    resolveInterval(conf.GetDnInterval()),

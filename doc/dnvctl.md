@@ -47,8 +47,9 @@ global flags, the viper binding (CT9), the dial (CT2), the per-invocation
 trace id (Trace ids), the readers of leaf values and the shared flag helpers
 (Conventions), the token builders (CT3), the emit pipeline (CT4), and the
 error rendering and exit codes (CT5). There is one file per noun group,
-named after the group, each declaring only its group's register function
-(`registerCluster` and its siblings) plus its job funcs, so the sibling
+named after the group, each declaring its group's register function
+(`registerCluster` and its siblings), its job funcs and any parser or flag
+helper kept beside them, under names carrying the group's name, so the sibling
 files share no package-level flag names (the gatewayctl lesson). The command
 tree and its viper binding live in `ctl/`, never in `cmd/dnvctl`
 (`layout.md`, Dependency rules): `ctl/` imports only `common` and `pb`
@@ -81,11 +82,11 @@ silenced by design (`log.md` R6).
 ### Global flags, env, config
 
 A command line is "dnvctl <group> <verb> [flags]", and the root's persistent
-flags are the globals. `--gateway-address` is the gateway's ip:port; it is
+flags are the global flags. `--gateway-address` is the gateway's ip:port; it is
 required and has no default, because unlike the test driver dnvctl has no
 lab address worth baking in, and it is one address, with no multi-gateway
 failover list, because operators front the gateways themselves. `--cluster`
-and `--sp` are the scope globals: they fill `cluster_name` and `sp_name` of
+and `--sp` are the scope global flags: they fill `cluster_name` and `sp_name` of
 every request that has the field — all requests but one carry a cluster
 name, and most carry a pool name — so neither is a leaf flag (Conventions).
 `--rev` is the revision token (CT3): only the token-carrying mutators take
@@ -93,16 +94,16 @@ it, it is a usage error on every other leaf, and it is read off the
 command line alone. `--timeout` is the per-invocation deadline in seconds,
 `--trace-id` overrides the per-invocation trace-id mint (Trace ids), and
 `--config` names an optional viper config file, which supplies the
-env-backed globals only.
+env-backed global flags only.
 
-CT9. **Environment and config binding, globals only.** Before a leaf runs,
-the root binds the env-backed globals — every global but `--rev` — into
+CT9. **Environment and config binding, global flags only.** Before a leaf runs,
+the root binds every global flag but `--rev` — the env-backed ones — into
 viper the way the four daemons bind their flags (`bindViper`), except that
-it binds those globals one by one, each looked up in the invoked command's
+it binds those flags one by one, each looked up in the invoked command's
 flag set, where a daemon binds its whole flag set; the environment prefix is
 `DNVCTL`, a dash in a flag name becomes an underscore, every bound key is
 looked up in the environment, and the optional `--config` file is read.
-Those globals are read back through viper — flag over environment over
+Those global flags are read back through viper — flag over environment over
 config file over default, viper's standard order — so `DNVCTL_CLUSTER`,
 `DNVCTL_SP` and `DNVCTL_GATEWAY_ADDRESS` work as ambient context. `--rev`
 and every leaf flag are read off the parsed command line and never through
@@ -123,7 +124,7 @@ pflag, with the command line, for the flags declared as pflag numbers or
 booleans, and by dnvctl's own parsers for the id flags, `--ids`, `--slots`,
 `--bm-hex`, `--level` and `--redund`, which are declared as strings
 (Conventions, CT8) — so text that does not fit is exit 2 with no RPC issued.
-`--timeout`, the one numeric env-backed global, is parsed from whichever
+`--timeout`, the one numeric env-backed global flag, is parsed from whichever
 carrier supplied it: `DNVCTL_TIMEOUT` holding text that is not a number, or
 such text under the `timeout` key of the config file, is a usage error (exit
 2, no RPC issued) just as the same text after `--timeout` is, never a zero
@@ -138,7 +139,7 @@ by its own value: the call fails DEADLINE_EXCEEDED (exit 1).
 
 A `--cluster` or `--sp` left empty is sent empty; a command whose request
 lacks the field, such as `cluster list` or `sp find-names`, ignores the
-global (CT8).
+global flag (CT8).
 
 ### Connection
 
@@ -289,7 +290,7 @@ agent that hosts the object, not from etcd. The bitmap RPCs are `get-bm`,
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:
 
-* `cluster_name` and `sp_name` come from the scope globals `--cluster` and
+* `cluster_name` and `sp_name` come from the scope global flags `--cluster` and
   `--sp`, `sp create` included, except that the `cluster` group's own
   commands name their cluster with `--name`, which falls back to the global
   `--cluster` when it is empty (gatewayctl's `clusterNameOf` rule);
@@ -376,7 +377,7 @@ makes the same claim on the wire (Integration test plan).
 ### `cluster` — `ctl/cluster.go`
 
 `cluster list` is the one request with no `cluster_name`: it ignores both
-scope globals.
+scope global flags.
 
 One `cluster create` flag, and only one, reaches a `ClusterConf` member:
 `--extent-size` sets `dn_bin_conf.extent_size`, the DN and CN allocation
@@ -604,7 +605,7 @@ the reset's own readiness probe, so counters are read only as deltas.
   empty on both successes.
 * sweep — one step per RPC, in tree order, each asserting exit 0, a stdout
   that parses, the recorded request equal to the argv-implied one as a whole
-  object, scope globals and token included, and the RPC's count moved by
+  object, scope global flags and token included, and the RPC's count moved by
   exactly one; a closing audit finds one request record under each step's
   trace id, over as many distinct RPCs as there are steps. Four replies are
   byte-exact goldens: an empty canned reply, a revision beyond the exact
@@ -612,8 +613,9 @@ the reset's own readiness probe, so counters are read only as deltas.
 * behavior — the token trio: no `--rev` sends no token message, `--rev 0` a
   present empty one, a hex value its base-0 parse; `sp create`'s other
   redundancy arm; `td list` rendering `created` both true and false;
-  `DNVCTL_CLUSTER` filling the global and the flag winning over it; and a
-  `cluster` command's `--name` winning over `--cluster`.
+  `DNVCTL_CLUSTER` filling `--cluster` and `--cluster` on the command line
+  winning over it; and a `cluster` command's `--name` winning over
+  `--cluster`.
 * errors — injected refusals rendered per CT5, the stale-revision refusal an
   operator meets among them; and three usage errors — an unknown flag, a
   malformed `--bm-hex`, a `--rev` on a command with no token field — each
@@ -625,7 +627,7 @@ the reset's own readiness probe, so counters are read only as deltas.
 **Rules exercised.** The smoke case exercises CT2's trace id on the wire and
 its mint, CT4's parsing stdout and CT7's empty stderr; the sweep
 exercises CT1 on the wire, the field and flag rules of Conventions — the
-scope globals, the `cluster` group's `--name`, the selector and dm-clone
+scope global flags, the `cluster` group's `--name`, the selector and dm-clone
 nil rules, `sp create`'s always-present `redund_conf`, `--extent-size` and
 `--low-water-mark-pct`, a clone chunk's pair of distinct indices — CT3's
 token on exactly its carriers, and CT4's goldens: the emitted defaults and

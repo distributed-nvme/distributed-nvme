@@ -2351,9 +2351,9 @@ func TestSwitchSpareLegKilledVerb(t *testing.T) {
 }
 
 // TestGroupNeverCreatesBesideARunningArray is the both-legs-replaced shape
-// (CN12, 2026-09-26): an array runs under the group's name holding none of
-// the wrappers leg_list now names — both legs switched out while this cntlr
-// was not converging, parked in spare_leg_list or already released. Md.Detail
+// (CN12): an array runs under the group's name holding none of the wrappers
+// leg_list now names — both legs switched out while this cntlr was not
+// converging, parked in spare_leg_list or already released. Md.Detail
 // finds an array by its leg_list members only, so it reads the group as
 // absent and the assembly runs; the fresh legs carry no superblock, which is
 // case 1, and a create there would put a second array under the name the
@@ -3118,14 +3118,14 @@ func TestGroupUnansweredSysfsReadIsAnError(t *testing.T) {
 	}
 }
 
-// TestGroupMembersComparedByName pins CN12's member comparison (amended
-// 2026-09-26): the held set is the dm names sysfs gave the array's members,
-// compared with the leg_list wrapper names, and reconcileMembers runs no
-// lsblk. Keyed by device number, an lsblk of a leg_list wrapper that did not
-// answer left that wrapper out of the wanted set, its in-sync member counted
-// as an extra, and an equal-revision converge --failed and --removed it — the
-// add loop skipped it for the same reason, and the mirror ran on one member
-// until some unrelated converge.
+// TestGroupMembersComparedByName pins CN12's member comparison: the held set
+// is the dm names sysfs gave the array's members, compared with the leg_list
+// wrapper names, and reconcileMembers runs no lsblk. Keyed by device number,
+// an lsblk of a leg_list wrapper that did not answer would leave that wrapper
+// out of the wanted set, its in-sync member would count as an extra, and an
+// equal-revision converge would --fail and --remove it — the add loop would
+// skip it for the same reason, and the mirror would run on one member until
+// some unrelated converge.
 func TestGroupMembersComparedByName(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -3439,21 +3439,20 @@ func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 	return reply.GetCntlrInfo()
 }
 
-// TestLateMembersRegisterTheRetry is link 1 of the failover ping-pong (CN12
-// as amended 2026-09-26). The worker's sides-first hold is bounded ([D16]),
-// so a promoted standby can still read its legs before the sides' ANA flips
-// have reached its sysfs: the paths are live but still non-optimized, those
-// legs are not available, and a group left with no available leg reports "no
-// available leg" with no mdadm run.
-// Nothing re-drives that converge — the worker re-syncs on a revision or a
+// TestLateMembersRegisterTheRetry is link 1 of the failover ping-pong (CN12).
+// The worker's sides-first hold is bounded ([D16]), so a promoted standby can
+// still read its legs before the sides' ANA flips have reached its sysfs: the
+// paths are live but still non-optimized, those legs are not available, and a
+// group left with no available leg reports "no available leg" with no mdadm
+// run. Nothing re-drives that converge — the worker re-syncs on a revision or a
 // reply code, never on a row — so it registers the CN10 retry itself. A late
 // member in any group registers it, not just one in the last group the pass
-// converges: "meta only" leaves the meta group, which the pass converges
-// before the data group, late and the data group whole. An attempt that
-// still finds a member late keeps the retry, since the sides' flips can take
-// longer than one CnConnectRetryInterval. Once the paths read optimized, the
-// retry's next attempt assembles the late arrays and builds the stack above
-// them, and, with no member late any more, stops the retry.
+// converges: "meta only" leaves the meta group, which the pass converges before
+// the data group, late and the data group whole. An attempt that still finds a
+// member late keeps the retry, since the sides' flips can take longer than one
+// CnConnectRetryInterval. Once the paths read optimized, the retry's next
+// attempt assembles the late arrays and builds the stack above them, and, with
+// no member late any more, stops the retry.
 func TestLateMembersRegisterTheRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -3837,16 +3836,16 @@ func TestLateMemberIsAddedByTheRetry(t *testing.T) {
 }
 
 // TestLateRedundNoneLegRegistersTheRetry is link 1 for a RedundNone SP,
-// redund_conf's default (CN12 as amended 2026-09-26). The group's dm-linear
-// is built whatever its leg's availability, but the pool create above it
-// reads the pool's metadata through the meta group's leg, and a side that
-// has not flipped to this CN yet exports dm-error to it: the promotion's
-// pool create fails, and only a later converge builds the pool and the
-// stack above it. So an unavailable RedundNone leg registers the CN10 retry
-// as an md member does; an attempt while it is still late keeps it, and the
-// attempt after the paths read optimized stops it. The fake does not model
-// dm-error IO — it builds the pool over a non-optimized leg — so this pins
-// the registration, not the pool failure.
+// redund_conf's default (CN12). The group's dm-linear is built whatever its
+// leg's availability, but the pool create above it reads the pool's metadata
+// through the meta group's leg, and a side that has not flipped to this CN
+// yet exports dm-error to it: the promotion's pool create fails, and only a
+// later converge builds the pool and the stack above it. So an unavailable
+// RedundNone leg registers the CN10 retry as an md member does; an attempt
+// while it is still late keeps it, and the attempt after the paths read
+// optimized stops it. The fake does not model dm-error IO — it builds the
+// pool over a non-optimized leg — so this pins the registration, not the
+// pool failure.
 func TestLateRedundNoneLegRegistersTheRetry(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -5273,17 +5272,18 @@ func TestCntlidRangeMovesBetweenSlots(t *testing.T) {
 // Park before remove (CN9/CN21)
 // ---------------------------------------------------------------------------
 
-// TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN9's retire
+// TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN21's retire
 // order for a namespace that *leaves* the desired state. CN21's rationale is
-// that a dm-suspended device blocks both the nvmet disable above it and its
-// own removal. Since 2026-09-16 (architecture.md, Namespace suspend semantics;
-// [D12]) this agent never leaves one
-// suspended, so the only way a teardown still meets one is an **older build's
-// leftover** — which is exactly what the two ordering sub-cases fixture. The
-// park — the reload onto the td's `CnErrorName`, whose internal resume is the
-// whole point — therefore has to precede the nvmet removal, not follow it
-// inside `removeDm`. The third sub-case is the steady state: an already
-// parked namespace needs no reload at all.
+// that a dm-suspended device blocks the nvmet disable above it, and CN16's that
+// it blocks its own removal. No pass of this agent leaves an ns-dev suspended
+// unless a `dmsetup` command on it fails (architecture.md, Namespace suspend
+// semantics; [D12]), yet a teardown can still meet one — the leftover of such a
+// failure, of an interrupted reload or of an **older build** (CN16) — and an
+// older build's leftover is exactly what the two ordering sub-cases fixture.
+// The park — the reload onto the td's `CnErrorName`, whose internal resume is
+// the whole point — therefore has to precede the nvmet removal, not follow it
+// inside `removeDm`. The third sub-case is the steady state: an already parked
+// namespace needs no reload at all.
 func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 	// Converge A: a primary serving one deliberately suspended namespace. It
 	// ends *parked* — live on the td's dm-error — and its ana_grpid is already
@@ -5486,7 +5486,7 @@ func TestSpLevelLadder(t *testing.T) {
 		t.Fatalf("NO_MIGRATION mutated relative to NO_REDUND: %q", call)
 	}
 
-	// CN21: the legs' disconnects run off the pass's locks, so the pass that
+	// CN10: the legs' disconnects run off the pass's locks, so the pass that
 	// sets them going names the connections as leftovers.
 	cnSweepOnlyDisconnects(t,
 		send(pb.SpLevel_SP_LEVEL_NO_SIDE).GetAgentReply(), "NO_SIDE")
@@ -5536,7 +5536,7 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncupCn: %v", err)
 	}
-	// CN21: the legs' disconnects run off the pass's locks, so the pass that
+	// CN10: the legs' disconnects run off the pass's locks, so the pass that
 	// sets them going names the two connections, and nothing else, as
 	// leftovers.
 	cnSweepOnlyDisconnects(t, reply.GetAgentReply(), "the teardown")

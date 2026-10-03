@@ -17,7 +17,7 @@
 //     every parsed value is sent as typed and the gateway's validation is
 //     the only validator. Empty required fields, contradictory flags and
 //     unknown enum numbers are all forwarded.
-//   - CT9 — only the env-backed globals (every global flag but --rev) have a
+//   - CT9 — only the env-backed global flags (every one but --rev) have a
 //     second carrier: they are bound into viper, so a DNVCTL_* environment
 //     variable or a --config file supplies one just as the flag does. --rev
 //     and every leaf flag are read off the parsed command line and nothing
@@ -56,7 +56,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// envPrefix names the environment carrier of an env-backed global,
+// envPrefix names the environment carrier of an env-backed global flag,
 // DNVCTL_<FLAG_WITH_UNDERSCORES> (CT9). No other flag has one.
 const envPrefix = "DNVCTL"
 
@@ -170,7 +170,7 @@ func NewRootCmd() *cobra.Command {
 		// The binding must happen after cobra has merged the root's
 		// persistent flags into the invoked leaf's flag set, which
 		// ParseFlags does before PersistentPreRunE runs — so cmd.Flags()
-		// here holds the globals bindViper looks up.
+		// here holds the global flags bindViper looks up.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			return bindViper(cmd)
 		},
@@ -191,9 +191,9 @@ func NewRootCmd() *cobra.Command {
 	return root
 }
 
-// addGlobalFlags declares the persistent flags, the globals of dnvctl.md,
-// Global flags, env, config. Only --cluster, --sp and --rev fill request
-// fields; the rest steer the invocation itself.
+// addGlobalFlags declares the persistent flags, the global flags of
+// dnvctl.md, Global flags, env, config. Only --cluster, --sp and --rev fill
+// request fields; the rest steer the invocation itself.
 func addGlobalFlags(root *cobra.Command) {
 	flags := root.PersistentFlags()
 	flags.String("gateway-address", "",
@@ -211,10 +211,10 @@ func addGlobalFlags(root *cobra.Command) {
 	flags.String("trace-id", "",
 		"override the per-invocation trace id mint")
 	flags.String("config", "",
-		"optional viper config file for the env-backed globals")
+		"optional viper config file for the env-backed global flags")
 }
 
-// envGlobals are the globals that have an environment and a config
+// envGlobals are the global flags that have an environment and a config
 // carrier besides the flag: every persistent flag but --rev (CT9). A
 // revision token is per object and per write, so an exported DNVCTL_REV
 // would stamp one number on every later write that carries a token; it is
@@ -224,8 +224,8 @@ var envGlobals = []string{
 }
 
 // bindViper wires flags, config file and environment together the way the
-// four daemons do (CT9), for the env-backed globals only: it binds each of
-// them from the invoked command's flag set and binds nothing else, and no
+// four daemons do (CT9), for the env-backed global flags only: it binds each
+// of them from the invoked command's flag set and binds nothing else, and no
 // other value is ever read through viper.
 func bindViper(cmd *cobra.Command) error {
 	for _, name := range envGlobals {
@@ -277,8 +277,8 @@ func dial(_ context.Context, address string) (
 // touches it.
 var dialer dialFunc = dial
 
-// run is every leaf command's RunE body: resolve the globals, build the
-// traced and deadlined context, dial, invoke, render.
+// run is every leaf command's RunE body: resolve the global flags, build
+// the traced and deadlined context, dial, invoke, render.
 //
 // A returned *rpcFailure is exit 1; every other error is a usage error and
 // exit 2. The ordering matters: everything that can fail to PARSE is done
@@ -450,18 +450,19 @@ func hexBitmapResult(bitmap []byte) map[string]any {
 // Reading values back (CT9)
 // ---------------------------------------------------------------------------
 
-// timeoutOf is --timeout, the one numeric env-backed global, as the budget
-// run hands context.WithTimeout. Its environment and config carriers hand
-// viper text, and viper's GetFloat64 casts text that is not a number to 0 — a
-// deadline that has already passed — so the text is parsed here, and text
-// that is not a number is refused as pflag refuses it as a flag argument: a
-// usage error, before any dial. Go's float parser, which is pflag's too, also
-// accepts NaN and ±Inf, which name no deadline, so those are refused the same
-// way from every carrier. Any other value is kept as typed — zero or negative
-// is a deadline already passed, and the call fails DEADLINE_EXCEEDED — but
-// saturated at time.Duration's range, about 292 years: out of range, Go
-// leaves the float-to-integer conversion to the implementation, and amd64
-// answers math.MinInt64, an expired deadline for --timeout 1e10.
+// timeoutOf is --timeout, the one numeric env-backed global flag, as the
+// budget run hands context.WithTimeout. Its environment and config carriers
+// hand viper text, and viper's GetFloat64 casts text that is not a number to
+// 0 — a deadline that has already passed — so the text is parsed here, and
+// text that is not a number is refused as pflag refuses it as a flag
+// argument: a usage error, before any dial. Go's float parser, which is
+// pflag's too, also accepts NaN and ±Inf, which name no deadline, so those
+// are refused the same way from every carrier. Any other value is kept as
+// typed — zero or negative is a deadline already passed, and the call fails
+// DEADLINE_EXCEEDED — but saturated at time.Duration's range, about 292
+// years: out of range, Go leaves the float-to-integer conversion to the
+// implementation, and amd64 answers math.MinInt64, an expired deadline for
+// --timeout 1e10.
 func timeoutOf() (time.Duration, error) {
 	raw := strings.TrimSpace(viper.GetString("timeout"))
 	seconds, err := strconv.ParseFloat(raw, 64)
@@ -632,18 +633,19 @@ func hexBytesOf(name string) ([]byte, error) {
 }
 
 // ---------------------------------------------------------------------------
-// The two scope globals (dnvctl.md, Conventions)
+// The two scope global flags (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
-// clusterOf fills `cluster_name`. It is the global for 55 of the 58 requests
-// that carry the field; only the `cluster` group's own three commands
-// override it, through clusterNameOf. Like spOf it reads an env-backed
-// global, so it reads viper, where bindViper put the flag's carriers (CT9).
+// clusterOf fills `cluster_name`. It is the global --cluster for 55 of the 58
+// requests that carry the field; only the `cluster` group's own three
+// commands override it, through clusterNameOf. Like spOf it reads an
+// env-backed global flag, so it reads viper, where bindViper put the flag's
+// carriers (CT9).
 func clusterOf() string { return viper.GetString("cluster") }
 
 // clusterNameOf is the `cluster` group's rule: its own --name wins, and an
 // empty --name falls back to the global --cluster. A `cluster` command is the
-// only place the field is addressed by anything but the global.
+// only place the field is addressed by anything but the global flag.
 func clusterNameOf() string {
 	if name := strOf("name"); name != "" {
 		return name

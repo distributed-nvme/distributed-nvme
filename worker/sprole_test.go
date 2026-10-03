@@ -2174,8 +2174,8 @@ func testSpFanOutWaitsForItsRevision(t *testing.T) {
 	state := spFixture()
 	delete(state.DnByAddr, spDnD)
 	h.ops.setState(state)
-	// Every cntlr agent answers a Check at the revision it last applied, as
-	// the cn agent does, with a clean CntlrInfo.
+	// Every cntlr agent answers a Check at the revision of the last request
+	// it accepted, as the cn agent does, with a clean CntlrInfo.
 	for _, stub := range h.cntlrs {
 		stub.checkReply = func(*pb.CheckCntlrRequest) *pb.CheckCntlrReply {
 			var rev uint64
@@ -3768,9 +3768,9 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
 	// Both cntlrs that can hold the role answer as the cn agent does: the
 	// converge's report on a SyncupCntlr, the probe's on a Check round at the
-	// revision last applied, the lost td's rows only while the request says
-	// primary and enabled. A Check before any SyncupCntlr answers revision 0,
-	// which re-syncs (RW4 step 5).
+	// revision of the last request accepted, the lost td's rows only while the
+	// request says primary and enabled. A Check before any SyncupCntlr answers
+	// revision 0, which re-syncs (RW4 step 5).
 	actsPrimary := func(req *pb.SyncupCntlrRequest) bool {
 		return req.GetCntlr().GetPrimary() && !req.GetCntlr().GetDisabled()
 	}

@@ -217,8 +217,8 @@ const (
 	// CloneBmChunkBytes is the fixed capacity of one clone bitmap chunk and
 	// the quantum that positions it: chunk (s, b) holds bytes
 	// [b*CloneBmChunkBytes, b*CloneBmChunkBytes+len) of source slice s's
-	// bitmap. 1 MiB keeps a grown chunk value plus the Clone and rev-bump
-	// puts inside etcd's default ~1.5 MiB request cap, and every
+	// bitmap. 1 MiB keeps a grown chunk value plus the rev-bump put inside
+	// etcd's default ~1.5 MiB request cap, and every
 	// PushCloneBitmap message inside gRPC's default 4 MiB. It is a clone
 	// positioning quantum only — migration appends have no byte cap.
 	CloneBmChunkBytes = 1 << 20
@@ -376,11 +376,9 @@ const (
 	LegHealthBlockSize = 4096
 	LegHealthMagic     = "DNVHLTH1"
 
-	// Seconds between background retries of a cn cntlr's converge
-	// (cnagent.md CN10): after a leg or a clone source failed to converge, a
-	// later step of a clone failed (CN18 says which) — a recovery's
-	// destination bitmaps not applied among them — or a leg_list member that
-	// is not available (CN12); the cn twin of DnMigrConnectRetryInterval.
+	// Seconds between background retries of a cn cntlr's converge after any
+	// of CN10's triggers (cnagent.md CN10); the cn twin of
+	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,

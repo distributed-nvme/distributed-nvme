@@ -42,9 +42,9 @@ dependency rule:
 | file | holds |
 |---|---|
 | `gateway/server.go` | `Server`, `Run`, the gRPC server and its interceptor chains (GW1 to GW3) |
-| `gateway/traceid.go` | the trace-id mint: the `ensureTraceIdUnary` and `ensureTraceIdStream` interceptors chained ahead of the shared pair (GW2) |
-| `gateway/common.go` | resolution, the token check, error mapping, the candidate unit, id minting, paging and the agent connection (GW5 to GW7, GW9, GW10, GW12, AG2) |
-| `cluster.go`, `disknode.go`, `controllernode.go`, `storagepool.go`, `cntlr.go`, `thindevice.go`, `subsystem.go`, `clone.go`, `transfer.go`, `migration.go`, `spareleg.go`, `bitmap.go` | the handlers, one file per resource group of Handlers by resource group: `storagepool.go` holds `GrowSlice` too, `cntlr.go` holds `InspectCntlr` and `InspectSide`, and `subsystem.go` holds the subsystems, the namespaces and the `CdcEntry` writes |
+| `gateway/traceid.go` | the gateway's entry-point trace-id mint, `ensureTraceIdUnary` and `ensureTraceIdStream`, chained ahead of the shared pair of server interceptors (GW2) |
+| `gateway/common.go` | resolution, the token check, error mapping, the candidate unit, id minting, paging and the agent connection (GW5 to GW7, GW9, GW10, GW12, AG2); and the `CdcEntry` maintenance the cntlr mutators and `UpdateSubsystemHosts` share (`eachCdcEntry`, `rebuildCdcEntry`) |
+| `cluster.go`, `disknode.go`, `controllernode.go`, `storagepool.go`, `cntlr.go`, `thindevice.go`, `subsystem.go`, `clone.go`, `transfer.go`, `migration.go`, `spareleg.go`, `bitmap.go` | the handlers, one file per resource group of Handlers by resource group: `storagepool.go` holds `GrowSlice` too, `cntlr.go` holds `InspectCntlr` and `InspectSide`, and `subsystem.go` holds the subsystems, the namespaces and the subsystem RPCs' own `CdcEntry` writes, while the cntlr mutators rewrite the entries through `gateway/common.go` |
 | `gateway/alloc.go` | the per-operation candidate compositions of `architecture.md`, Per-operation allocation, and the DN and CN ledgers |
 | `gateway/validate.go` | the request validation of `architecture.md`, Common validation (GW4) |
 | `cmd/dnv-gateway/main.go` | the command (CM1 to CM3) |
@@ -87,8 +87,8 @@ agent and a hung etcd bound an RPC alike.
 `CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk, and the
 quantum that positions it: chunk (s, b) holds the bytes of source slice s's
 bitmap from b times `CloneBmChunkBytes` on, at most `CloneBmChunkBytes` of
-them (Clones). Its size keeps a grown chunk value plus the `Clone` and
-rev-bump puts of one `AppendCloneBitmap` inside etcd's default request cap,
+them (Clones). Its size keeps a grown chunk value plus the rev-bump put of
+one `AppendCloneBitmap` inside etcd's default request cap,
 and every `PushCloneBitmap` message inside gRPC's default message cap. It is
 a clone positioning quantum only — migration appends carry no byte cap.
 `MaxCloneBmCnt` counts the chunks ONE source slice's bitmap may be split
@@ -149,18 +149,18 @@ emits `gateway starting` (with the config) as its first record and
 `gateway stopping` on the way out, closes the client as the last step of its
 drain (so `main` does not, CM3), and serves exactly as `Serve` in
 `agent/agent.go` does: it listens on the configured network and address;
-builds the gRPC server from `serverOptions`, which chains the gateway-local
-`ensureTraceIdUnary` and `ensureTraceIdStream` FIRST and
-`common.GrpcUnaryServerInterceptor` and `common.GrpcStreamServerInterceptor`
-behind them; registers the `Gateway` service; starts a goroutine that turns
-the end of the ctx into `GracefulStop`; emits an Info `gateway serving`
-record with `network` and `address`; then serves. The gateway mints a trace
-id for a request that arrived without one (it is one of the entry points of
-`grpc.md` T4): when the incoming metadata carries no `trace_id`, the first
-interceptor injects a fresh `common.NewTraceId` into the incoming metadata,
-so the mint happens upstream of the shared interceptors, which adopt it as
-they adopt a client's and never mint themselves, and `common/interceptor.go`
-stays untouched.
+builds the gRPC server from `serverOptions`, which chains the gateway's
+entry-point trace-id mint, `ensureTraceIdUnary` and `ensureTraceIdStream`,
+FIRST and the shared pair, `common.GrpcUnaryServerInterceptor` and
+`common.GrpcStreamServerInterceptor`, behind it; registers the `Gateway`
+service; starts a goroutine that turns the end of the ctx into
+`GracefulStop`; emits an Info `gateway serving` record with `network` and
+`address`; then serves. The gateway mints a trace id for a request that
+arrived without one (it is one of the entry points of `grpc.md` T4): when
+the incoming metadata carries no `trace_id`, the mint injects a fresh
+`common.NewTraceId` into the incoming metadata, upstream of the shared
+interceptors and outside `common/interceptor.go`, and they adopt it as they
+adopt a client's and never mint themselves.
 
 GW3. **Shutdown** is `GracefulStop`: in-flight handlers finish (each bounded
 by its client deadline and the per-STM budget of `dnv-worker.md` EU5), new
@@ -342,8 +342,11 @@ uncommitted (`dnv-worker.md` EU4).
   not concrete (GW11; the message is `model`'s, beginning
   "invalid stored conf: "); an agent gRPC failure where the RPC says so.
 
-`model.ErrNotFound` (from `LoadSp`) maps to `NOT_FOUND`; an `ErrPrecondition`
-with reason "candidate changed" maps to nothing (GW9).
+`model.ErrNotFound` maps to `NOT_FOUND`, though none of the three shared
+mutations (GW6) returns it: when the SP its handler resolved is gone by the time
+the mutation's own STM runs, `checkSpRev` or `loadSpConfForOp` refuses with
+an `ErrPrecondition`, so the client sees `FAILED_PRECONDITION`. An
+`ErrPrecondition` with reason "candidate changed" maps to nothing (GW9).
 
 The dividing line: `RESOURCE_EXHAUSTED` is capacity or quota that could be
 freed or extended (extents, candidates, count ceilings — though not
@@ -397,9 +400,11 @@ moved fails GW6 first, `ABORTED` (Thin devices).
 
 GW10. **Pagination** (`architecture.md`, page_token). The `page_token` is
 the last returned key in base64 standard encoding; a decode failure is
-`INVALID_ARGUMENT`; an empty token is the start of the prefix; the range
-starts at the key **after** the decoded one; a reply whose page is not full
-returns an empty token. The prefixes are `model`'s `ClusterConfPrefix`,
+`INVALID_ARGUMENT`; an empty token is the start of the prefix; a page
+holds, in key order, the names whose keys sort **after** the decoded one, at
+most `count` of them as GW4 resolves it; a reply whose page is not full
+returns an empty token, which ends the listing. The prefixes are `model`'s
+`ClusterConfPrefix`,
 `DnConfPrefix`, `CnConfPrefix` and `SpConfPrefix`, the last three of the
 cluster id; the returned names are the key suffixes after the prefix. Paging
 is implemented in `gateway/` (`pageNames`): `model` carries no helper for it
@@ -956,8 +961,11 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
 * **CreateClone** — validate the bounds of `architecture.md`, Clones
   (`validateCloneGeometry`: `src_slice_cnt` from one to
   `MaxSliceCntPerSp`, the source stripe and block sizes within their bounds
-  and the block a multiple of the stripe); STM: resolve; token; the name
-  free, else `ALREADY_EXISTS`; the destination td by name (`NOT_FOUND`);
+  and the block a multiple of the stripe); STM: resolve; token;
+  `clone_name_list` at `MaxCloneCntPerSp` is `RESOURCE_EXHAUSTED`; the name
+  free, else `ALREADY_EXISTS`; the destination td by name (`NOT_FOUND`); a
+  destination td that any `Clone.dst_td_id` names (walk `clone_name_list`,
+  a draining clone included) is `FAILED_PRECONDITION`;
   mint `clone_id`; put the `Clone` with its `dst_td_id`; append to
   `clone_name_list`; `BumpSpRev`. Reply `clone_id`. The "destination td
   must be empty" precondition is documented-unverifiable
@@ -1285,11 +1293,13 @@ gateway keeps level Info by doing nothing (`log.md` R6).
 
 ## Log records
 
-LG1. The gateway adds no bespoke logging for gRPC or etcd traffic: the Info
-classes of `log.md` R8 are fully covered by the interceptor chains (every
+LG1. The gateway adds no bespoke logging for gRPC or etcd traffic: the gRPC
+and etcd items of `log.md` R8 are fully covered by the interceptor chains (every
 server and client request and reply, the trace id included; `grpc.md`, L1
 to L6) and by `etcdutil` (every get, put, delete and range, once per STM
 attempt — duplicates on retry are expected and acceptable; `log.md`, etcd).
+The OS-command and file items of `log.md` R8 are implemented inside
+`LimitedOsClient`, which the gateway never uses.
 
 LG2. The records this component owns, all through the ctx forms:
 `gateway starting` (`grpc_network`, `grpc_address`, `etcd_endpoints`) and
@@ -1345,7 +1355,10 @@ gateway, never through `workerctl`.
 
 * smoke (one gateway) — the full lifecycle: every RPC's happy path but
   `ListStoragePools`, which the parallel and restart cases run, each
-  mutation's exact write set read back; every defaultable member of the
+  mutation's exact write set read back, the `CdcEntry` the cdc serves
+  included — as `CreateSubsystem` writes it, as `UpdateSubsystemHosts` and
+  the cntlr mutators rewrite it, and gone with its subsystem; every
+  defaultable member of the
   stored confs resolved on the write path; paging with its empty last page
   and a malformed token; the inspects and bitmap reads passing the agent's
   bytes and applied revision through verbatim, a revision no stored rev key
@@ -1418,10 +1431,11 @@ at the end only on success: a failing run leaves etcd's data, every log and
 every behavior file in place and prints its diagnostics — the failing stage
 and its trace id, the tail of every process log, a full dump of the dnv
 keys and the listening ports — so the debris is what the developer reads.
-Cleanup signals every process the suite started, by its recorded pid with a
-pattern kill as a safety net, and removes the suite's work directory;
-nothing outside that directory is touched, and the suite leaves no kernel
-state, no packages and no users behind.
+Cleanup signals every daemon the suite started — etcd, the gateways and the
+fake agents — by its recorded pid with a pattern kill as a safety net, and
+removes the suite's work directory; nothing outside that directory is
+touched, and the suite leaves no kernel state, no packages and no users
+behind.
 
 **The driver, `gatewayctl`.** `gatewayctl` is the gRPC driver of this
 suite, in the style of the agent suites' drivers: the gateway serves

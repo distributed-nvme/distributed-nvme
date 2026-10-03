@@ -186,7 +186,7 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		{"empty --rev",
 			[]string{"td", "create", "--name", "t0", "--rev="}},
 		// CT3: a --rev on a command whose request has no token field, here
-		// typed ahead of the group, as a global may be.
+		// typed ahead of the group, as a global flag may be.
 		{"--rev with no token field",
 			[]string{"--rev", "7", "cluster", "delete", "--name", "c1"}},
 		{"malformed --bm-hex",

@@ -3,8 +3,8 @@
 // cluster as a whole. This is the one group whose commands do not simply
 // take the global --cluster: each of `create`, `delete` and `get` declares
 // its own --name, which WINS when non-empty and falls back to the global
-// when empty (the field→flag rule of dnvctl.md, Conventions; gatewayctl's
-// clusterNameOf).
+// flag when empty (the field→flag rule of dnvctl.md, Conventions;
+// gatewayctl's clusterNameOf).
 // root.go's clusterNameOf implements that fallback; the flag itself is
 // declared here because only this group has it.
 //

@@ -559,8 +559,8 @@ environment satisfies them.
 CM3. **Validation.** `--etcd-endpoints` non-empty; `--roles` a non-empty,
 duplicate-free subset of the three roles; both timers positive;
 `--vote-grace-time` SHOULD exceed twice `--vote-interval` (a warning is
-logged otherwise — a grace window shorter than the dead threshold is legal
-but pointless).
+logged otherwise — a grace window not longer than the dead threshold is
+legal but pointless).
 
 CM4. **Startup.** Install the default JSON logger (`common`'s `init`), mint
 a startup trace id, build the `etcdutil` client (EU1), then call
@@ -664,11 +664,13 @@ absent from the rescan transition to dead; the watch restarts from the
 rescan's revision plus one.
 
 VW4. The stored `epoch` is **never** compared with local time. Liveness
-depends only on the observer's own monotonic clock and the events it saw; NTP
-is an operational nicety (the epoch is what `workerctl list-workers` and
-operators read), not a correctness requirement (`architecture.md`, [D17]). The
-epoch is informational: NTP remains an operational assumption, but not a
-correctness dependency.
+depends only on the observer's own monotonic clock and the events it saw; the
+epoch is informational, what `workerctl list-workers` and operators read
+(`architecture.md`, [D17]). Clock agreement across workers (NTP) is an
+operational assumption, not a correctness dependency: the vote worker reads
+only its own clock, and a skew between workers shifts, by at most its size,
+the moment a reaction measured from an `err_epoch` another worker stamped
+fires.
 
 ### Grace and effective membership
 
@@ -744,7 +746,9 @@ every heartbeat tick and on every own-key watch event:
 * (c) a delete event for its own key that this process did not issue — a
   peer committed it dead (VW6).
 
-Fencing means: log `worker fenced` (`reason`, `old_seed`, `new_seed`); stop
+Fencing means: mint a new seed (VW1) — first, because the `worker fenced`
+record names it and a fence that cannot mint one tears nothing down (below);
+log `worker fenced` (`reason`, `old_seed`, `new_seed`); stop
 the heartbeat loop and join it, so no put of the old seed lands after its
 delete; start the graceful stop of every shard worker of every role, in
 parallel (SW5), and go on without waiting for it — every shard worker is
@@ -759,7 +763,7 @@ deletes because a delete that cannot land — a VW8 (a) fence is usually cut
 off from etcd — takes up to `DefaultEtcdOpTimeout` per role, and shard
 workers not yet told to stop would go on driving rounds and `Syncup*` calls
 behind it. Then join the drain; discard every tracking entry, timer and
-effective set; mint a new seed (VW1) and restart VW2 to VW7 from scratch;
+effective set; and restart VW2 to VW7 from scratch under the new seed;
 VW7 applies to the new incarnation: nothing is driven until one full grace
 window after the new seed's first successful put. There is no "resume with
 the old seed" path — a worker that lost etcd for the dead threshold is a
@@ -1481,7 +1485,9 @@ turn (Known limits).
 for the SP's first primary, and its `UpdateCntlrEnabled` when it re-enables a
 cntlr that is still primary — its agent then builds the primary stack from the
 standby shape it held while disabled) and cleared by `SetCntlrErrEpoch` with a
-zero epoch and the settle argument on the settle condition above. The revision
+zero epoch and the settle argument on the settle condition above, or by a
+`Failover` that demotes the cntlr before it settles (MD6) — the flag describes
+a primary, and a standby's would steer nothing. The revision
 gate is load-bearing: when the promotion's `SyncupCntlr` never reached the
 agent (a transport failure before the agent stored the request), the next
 Check round's reply carries the previous revision and describes the
@@ -1638,7 +1644,8 @@ rules of the sp children.
 BM1. **Sources.** For a side that is a migration's destination: the
 `MigrBitmap` chunks of that migration, indexes from zero below `bm_cnt`.
 For the cntlr that is **primary**: the `CloneBitmap` chunks of every clone
-of the SP, each addressed by the pair `(src_slice_idx, bm_idx)` (MD2).
+of the SP that is not deleting (CLD5), each addressed by the pair
+`(src_slice_idx, bm_idx)` (MD2).
 Chunk addresses come from the snapshot's keys-only scans (`MigrBmIdx` and
 `CloneBmIdx`, MD3) — a migration chunk's address is its `bm_idx` alone,
 carried at slice index zero; chunk **values** are read one at a time
@@ -2713,9 +2720,12 @@ revision gate being per object and not per cluster.
   clone chunk, a rejected syncup that blocks the diff, arms nothing and is
   re-driven only by the `Check*` reply's own code, and a primary change;
 * reaction — failover of an unhealthy and of a disabled primary, cntlr
-  replacement including the sole primary, data and meta auto-grow with the
-  pending rule, leg repair in both cases, a full spare list, suppression, and
-  the settle with a settling primary held to `cntlr_unhealthy`;
+  replacement including the sole primary, the `CdcEntry` a replacement
+  rewrites (read back as exactly the transports of the SP's cntlrs after it:
+  the replaced cntlr's gone, its successor's in), data and meta auto-grow
+  with the pending rule, leg repair in both cases, a full spare list,
+  suppression, and the settle with a settling primary held to
+  `cntlr_unhealthy`;
 * drain — the sp drain by the real coordinator (one D1, one D2 batch per
   slice, D3, every ledger restored), its resume from the `SpConf` alone after
   an in-case stop and restart of the workers that keeps etcd's keys, and its
@@ -2759,8 +2769,9 @@ since no fake computes a sweep verdict and no case forces that code; and
 `bitmap push failed`, which the forced-code lever cannot stage either.
 
 Out of scope: real agents; more than one server; a three-member etcd; etcd
-quorum loss, restore or compaction races; clock-skew injection, the design
-depending on no clock (VW4); TLS and authentication, the fabric being trusted
+quorum loss, restore or compaction races; clock-skew injection, clock
+agreement across workers being no correctness dependency (VW4); TLS and
+authentication, the fabric being trusted
 (`architecture.md`, v1 assumptions and known limits); failures of `RedundNone`
 legs, for which nothing automatic is specified; and a clone push to a primary
 whose build is still deferred. Two things the clone drain's design asks for
@@ -2817,8 +2828,8 @@ worker. It applies the agents' revision gate per object and their ordering
 rule — a side or cntlr its node's last syncup does not list is an unknown
 object, which the worker's independent roles must survive (RW5) — refuses a
 push for a migration or clone its object's last request does not name, and
-derives every `*Info` row from the last applied request. It persists its
-last applied requests and the chunks it received, so a killed and restarted
+derives every `*Info` row from the last accepted request. It persists its
+last accepted requests and the chunks it received, so a killed and restarted
 fake replies like a restarted agent. A behavior file per fake, re-read
 whenever it changes, sets per object the row statuses — a cntlr's row
 optionally only while that cntlr is primary, because the fake reports a

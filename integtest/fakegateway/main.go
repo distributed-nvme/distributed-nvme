@@ -670,8 +670,10 @@ func (g *fakeGateway) waitForHang(ctx context.Context, method string) error {
 	}
 }
 
-// call is the whole per-call pipeline of Integration test plan, The fake
-// gateway, in the order it fixes: reload, record, hang, code, reply.
+// call is the whole per-call pipeline: reload, record, hang, code, reply. Of
+// that order, dnvctl.md, Integration test plan, The fake gateway, fixes only
+// that every call is recorded first and then answered from the behavior file;
+// the hang before the code is this fake's own (TestHangAndCodeOrder).
 func (g *fakeGateway) call(
 	ctx context.Context, method string, req proto.Message,
 ) (proto.Message, error) {

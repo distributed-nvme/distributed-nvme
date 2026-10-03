@@ -200,8 +200,9 @@ the proto (un)marshal **and** the logging. Direct `clientv3` or STM
 the rule cannot be enforced. The records, all Info, via `slog.InfoContext`:
 
 * a point read logs `etcd get` with `key`, `found`, `value` (the decoded
-  message as `PbToLogValue` renders it; omitted when not found) and
-  "error?";
+  message as `PbToLogValue` renders it; present only when the key was found
+  and its stored value decoded: a value that did not decode logs `found`
+  true with `error` and no `value`) and "error?";
 * a write logs `etcd put` with `key`, `value` (the message being stored) and
   "error?";
 * a delete logs `etcd delete` with `key` and "error?";

@@ -41,8 +41,7 @@ import (
 // from the constants they name. model.ValidateClusterConf/ValidateBdevConf
 // compose them and model/capacity_test.go pins them there; what is asserted
 // HERE is that the sentence survives the trip through a handler's errAborted
-// to the client, prefix and field name intact (architecture.md, Common
-// validation: "the prefix an operator and the acceptance checklist grep for").
+// to the client, prefix and field name intact (GW11).
 const (
 	scMsgDnBatchSize = "invalid stored conf: " +
 		"alloc_conf.dn_batch_size 0 is outside [1, 1024]"
@@ -466,7 +465,7 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 // architecture.md, Group on-leg layout: meta region, data region, health block.
 //
 // The ladder row is what a genuinely SPARSE conf looks like rather than a
-// hand-zeroed one: bin1_shift's constant (architecture.md, Common validation)
+// hand-zeroed one: bin1_shift's constant (architecture.md, DN bins)
 // is 4 and bin0's is 0, so a
 // message written by something that skipped the resolve comes back with the
 // ladder collapsed at the bottom rather than merely missing a number.

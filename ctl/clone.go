@@ -30,8 +30,7 @@ func registerClone(root *cobra.Command) {
 }
 
 // cloneSrcTrConfList is the repeated `src_tr_conf` of the two commands that
-// carry it, CreateClone and UpdateCloneTrConf. It lives here rather than in
-// root.go because only this group needs it, and it is prefixed with the group
+// carry it, CreateClone and UpdateCloneTrConf. It is prefixed with the group
 // name so it cannot collide with a sibling file's helper (dnvctl.md, Files:
 // the gatewayctl lesson).
 //

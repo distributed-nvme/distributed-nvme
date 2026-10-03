@@ -50,7 +50,7 @@ type fakeNode struct {
 	// how the suite reproduces that window deterministically.
 	lsGhosts []string
 	// wedgedDisables names every nvmet namespace disable — an `enable` = 0
-	// write — issued while the dm device the namespace backs was suspended.
+	// write — issued while the dm device backing the namespace was suspended.
 	// That write first waits for every request in flight on the namespace,
 	// and one whose bio a suspended dm target holds never completes — the
 	// cutover window (architecture.md, Migration, src step 2) holds exactly

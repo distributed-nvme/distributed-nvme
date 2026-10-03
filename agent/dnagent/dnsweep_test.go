@@ -952,7 +952,7 @@ func TestSuspendedLinearResumedBeforeNvmetDisable(t *testing.T) {
 	primarySuspended := node.dms[primary].suspended
 	node.mu.Unlock()
 	if !primarySuspended {
-		t.Error("the sweep ended the grace window of a wanted linear")
+		t.Error("the sweep ended the cutover window of a wanted linear")
 	}
 }
 
@@ -1296,12 +1296,12 @@ func TestUnansweredEnumerationRemovesNothingDn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A claim carries its claimant's gate
+// A claim on a kernel object carries its claimant's gate
 // ---------------------------------------------------------------------------
 
 // TestMigrationSourceSweptByLevel pins the rule a claim map is easy to get
-// wrong: a claim is not "this object exists", it is "somebody still WANTS
-// it", so it has to carry that somebody's gate.
+// wrong: a claim on a kernel object is not "this object exists", it is
+// "somebody still WANTS it", so it has to carry that somebody's gate.
 //
 // The migration SOURCE is the one role whose two objects are wanted at
 // different levels — the `d2` linear under wantDm, its `:3:` export under

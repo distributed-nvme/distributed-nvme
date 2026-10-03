@@ -31,7 +31,7 @@ func cmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 // (architecture.md, Common validation; SH15). The unexported
 // cmdCtx stays; this is the same thing for role packages that call the
 // OsClient directly (the cn sysfs walk of leg.go, the thin_dump file read of
-// thinbm.go).
+// thinbm.go, the dn disk-metadata block reads and writes of diskmeta.go).
 func CmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return cmdCtx(ctx)
 }

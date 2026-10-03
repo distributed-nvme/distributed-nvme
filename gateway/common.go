@@ -318,7 +318,7 @@ func openSpFlags(
 // optimistic-concurrency gate — the caller has opted out of it.
 //
 // The rev key is read either way: it is an invariant key (architecture.md, Key
-// grammar) whose absence is an ABORTED (architecture.md, UNEXPECTED_ERROR →
+// table) whose absence is an ABORTED (architecture.md, UNEXPECTED_ERROR →
 // `ABORTED`), the bump helpers below rely on it having been read, and
 // keeping it in the STM's read set makes a skipped check no weaker against a
 // concurrent DELETE of the object than a checked one.
@@ -466,10 +466,10 @@ func mintClusterId(
 		)
 	}
 	if nextId == 0 {
-		// next_id "starts at 1" (architecture.md, Globals: id allocation +
-		// shard buckets); a proto3 zero is a global written
-		// without it and must never mint the 0 that every id-valued result
-		// reserves for "none".
+		// next_id starts at one (architecture.md, Globals: id allocation +
+		// shard buckets); a proto3 zero is a global written without it and
+		// must never mint the 0 that every id-valued result reserves for
+		// "none".
 		nextId = 1
 	}
 	sized[best]++

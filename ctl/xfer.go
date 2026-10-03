@@ -21,7 +21,7 @@ import (
 
 // registerXfer adds the `xfer` group to the root. The identity flag is the
 // group-uniform `--name` (dnvctl.md, Conventions), and
-// `sp_name`/`cluster_name` come from the globals on all four.
+// `sp_name`/`cluster_name` come from the global flags on all four.
 func registerXfer(root *cobra.Command) {
 	root.AddCommand(group(
 		"xfer",

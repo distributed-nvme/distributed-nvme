@@ -27,8 +27,8 @@ import (
 )
 
 // registerMigr adds the `migr` group to the root. Identity is the
-// group-uniform `--name`; `sp_name`/`cluster_name` come from the globals on
-// all five.
+// group-uniform `--name`; `sp_name`/`cluster_name` come from the global
+// flags on all five.
 func registerMigr(root *cobra.Command) {
 	root.AddCommand(group(
 		"migr",

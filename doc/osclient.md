@@ -117,7 +117,7 @@ the method set is exactly these eight, each taking the caller's ctx:
     back the semaphore slot it holds, only then. An `nvme disconnect` whose
     target vanishes mid-delete waits out the kernel's admin timeout this
     way, which is why the cn sweep issues it off its locks (`cnagent.md`
-    CN21).
+    CN10).
 * Exit-code mapping: a nil error → 0; an `exec.ExitError` → its exit code
   (a signal-killed process reports -1 here, with a non-nil error —
   acceptable); any other error (start failure, ctx cancelled before start)
@@ -153,19 +153,14 @@ the method set is exactly these eight, each taking the caller's ctx:
 
   `agent.Reported` (`agent/oswrap.go`) is the one predicate — a nil error,
   or an exit code above zero — and `osBase.runProbe` is the only probe
-  wrapper that applies it: `Md.HasSuperblock`, `Md.NameInUse` (an lsblk of
-  the array's node under "/dev/md" whose "not in use" lets `cnagent.md`
-  CN12's case 1 run `mdadm --create`), `Dm.Info`, `osBase.listDir` /
-  `dirExists` (hence `Nvmet`'s existence checks and `NvmeHost`'s sysfs
-  listings, and the cn leg walk's listing of "/sys/class/nvme-subsystem",
-  through `Cmd.ListDir`) all probe through it, each returning "absent" only
-  for a reported non-zero exit and an error otherwise. `osBase.dirMtime`,
-  the stat age of a subsystem directory (`dnagent.md` DN6), probes through
-  it the same way, and an answer that is not a number is an error too.
-  `CloneMeta.Mounted` and `CloneMeta.FileSize`, the findmnt and the stat of
-  `cnagent.md` CN5's clone-metadata arena, probe through it as well: a run
-  of either that did not answer is an error, never "absent". The
-  predicate's one other caller, `Dm.BlkZeroout`, is not a probe: it returns
+  wrapper that applies it, so it is the one place a probe's exit code is
+  classified. Every probe whose non-zero exit means "absent" runs through
+  it, a role package's own through `Cmd.RunProbe` or `Cmd.ListDir` — the cn
+  agent's thin_dump directory stat calls `Cmd.RunProbe` directly — and
+  answers "absent" only for a reported non-zero exit and an error for a run
+  that did not answer; `dnagent.md` SH15 names the primitives whose callers
+  act on that "absent".
+  The predicate's one other caller, `Dm.BlkZeroout`, is not a probe: it returns
   the verdict as answered, so the `dnagent.md` DN9 zeroing loop can tell a
   batch the soft timeout killed from one the tool refused. The enumerators
   a removal decision is taken from — `Dm.List`, `Md.ListArrays`,
@@ -328,7 +323,7 @@ sanctioned direct-syscall path in dnv:
 * *It may block indefinitely, by design.* A leg with no serving path (a
   ctrl_loss_tmo of -1) queues IO forever, so the calling goroutine sits in
   uninterruptible D state until that IO is errored — which happens only when
-  the agent disconnects the path (`cnagent.md` CN21). This is the feature
+  the agent disconnects the path (`cnagent.md` CN10). This is the feature
   working: a hung probe is how a silently stalled target is detected. Two
   consequences the implementer must not design around: **cancelling the
   prober's context does not unblock a syscall already in flight** (the
@@ -361,7 +356,7 @@ sanctioned direct-syscall path in dnv:
   hence the helpers, not a second `OsClient` and not a probe budget.
 * *Who may call them.* Only the cn agent's lock-free prober goroutines
   (`cnagent.md` CN1 and CN11), through the small fakeable probe-IO
-  dependency defined alongside `healthcheck.go`. These two helpers are the
+  dependency defined in `healthcheck.go`. These two helpers are the
   only block-IO syscalls any package outside `common` may call; every other
   caller — the dn `diskmeta.go` header/volume-table path above all — keeps
   using the `OsClient` methods of "ReadBlock / WriteBlock".
@@ -416,7 +411,7 @@ Notes:
 `FakeOsClient` is the configurable `OsClient` test double: a function field
 per interface method, of which a test sets only the ones it needs; an unset
 field succeeds with zero values. It is exported — not a `_test.go` file — so
-agent, worker and gateway tests in other packages can reuse it. It has no
+tests in other packages can reuse it. It has no
 field for the direct read: the probe read is not on the interface, and probe
 IO is faked through the cn agent's own probe-IO dependency (`cnagent.md`,
 Leg-probe IO leaves the `OsClient`, and Server type and lock mapping), not

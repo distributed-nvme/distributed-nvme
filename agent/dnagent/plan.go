@@ -234,10 +234,10 @@ func (p *sidePlan) cntlidRange() (uint32, uint32) {
 	return min, min + uint32(common.DnCntlidSlotStep) - 1
 }
 
-// linearBacking is the table target of one CN's dm-linear: the LV for the
-// primary CN, the dm-error device for standbys — and, on a migration
-// destination, the dm-clone for the primary once it is live and dm-error for
-// everyone until then (architecture.md, Disk node and Migration).
+// linearBacking is the table target of one CN's dm-linear: the side device
+// (DnSideName) for the primary CN, the dm-error device for standbys — and, on
+// a migration destination, the dm-clone for the primary once it is live and
+// dm-error for everyone until then (architecture.md, Disk node and Migration).
 //
 // A migration *source* fences every per-CN linear — the primary's included —
 // onto its dm-error ([D12]; architecture.md, Migration, src step 2). Its
@@ -261,7 +261,7 @@ func (p *sidePlan) linearBacking(cnId uint64, cloneLive bool) string {
 	return p.sideDevPath
 }
 
-// preFenceBacking is where a per-CN dm-linear sits during the src grace window
+// preFenceBacking is where a per-CN dm-linear sits during the cutover window
 // of architecture.md, Migration, src step 2: still exactly where it sat before
 // the migration started,
 // because the fence suspends the device in place and only swaps the table at

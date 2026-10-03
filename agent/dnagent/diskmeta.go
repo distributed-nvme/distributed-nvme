@@ -8,7 +8,6 @@ import (
 	"hash/crc32"
 	"sort"
 	"sync"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -31,7 +30,8 @@ type DiskMeta struct {
 	disk string
 
 	// mu guards everything below. It is a leaf lock: the OS calls it covers
-	// are all bounded by the SH15 soft timeout.
+	// all carry the SH15 soft timeout, which bounds a block read or write
+	// only until its syscall starts (readBlock).
 	mu sync.Mutex
 	// loaded is set once a load succeeded; a load that fails is simply not
 	// remembered, so the next call retries it and a transient read error
@@ -90,18 +90,20 @@ func NewDiskMeta(oc common.OsClient, disk string) *DiskMeta {
 	return &DiskMeta{oc: oc, disk: disk, newestSlot: -1}
 }
 
-// readBlock / writeBlock wrap every raw-device call in the soft timeout
-// (architecture.md, Common validation),
-// exactly as the osBase wrappers do for commands (SH15). Without it a stalled
-// device would hold the DiskMeta mutex — and, through it, a converge pass —
-// indefinitely.
+// readBlock / writeBlock bound every raw-device call by the soft timeout
+// (architecture.md, Common validation; SH15), taken from agent.CmdCtx, the
+// same bound the osBase wrappers put on their calls. Like that of any
+// in-process OsClient call, the bound holds only until the syscall starts
+// (SH15): it ends a wait for an OsClient slot, which would otherwise hold the
+// DiskMeta mutex — and, through it, a converge pass — for as long as the
+// slots stay taken, but a read or write the kernel holds returns only when
+// the kernel does.
 func (d *DiskMeta) readBlock(
 	ctx context.Context,
 	offset uint64,
 	length uint64,
 ) ([]byte, error) {
-	cctx, cancel := context.WithTimeout(
-		ctx, common.CmdSoftTimeout*time.Second)
+	cctx, cancel := agent.CmdCtx(ctx)
 	defer cancel()
 	return d.oc.ReadBlock(cctx, d.disk, offset, length)
 }
@@ -111,8 +113,7 @@ func (d *DiskMeta) writeBlock(
 	offset uint64,
 	data []byte,
 ) error {
-	cctx, cancel := context.WithTimeout(
-		ctx, common.CmdSoftTimeout*time.Second)
+	cctx, cancel := agent.CmdCtx(ctx)
 	defer cancel()
 	return d.oc.WriteBlock(cctx, d.disk, offset, data)
 }

@@ -291,12 +291,12 @@ func (s *CnAgentServer) listDir(
 }
 
 // readSysfs reads one sysfs attribute under the soft timeout of
-// architecture.md, Common validation (SH15). This
-// walk calls the OsClient directly rather than through an `agent` OS wrapper,
-// so the bound every other OS touch gets for free has to be applied here
-// explicitly (SH15): the /sys/class/nvme* tree can stall while a
-// controller is mid-reset or being torn down, which is exactly when the walk
-// runs. listDir above is already bounded, through cmd.Run.
+// architecture.md, Common validation (SH15). This walk calls the OsClient
+// directly rather than through an `agent` OS wrapper, so the bound has to be
+// applied here explicitly, as every direct OsClient caller of a role package
+// does (SH15): the /sys/class/nvme* tree can stall while a controller is
+// mid-reset or being torn down, which is exactly when the walk runs. listDir
+// above is already bounded, through cmd.Run.
 func (s *CnAgentServer) readSysfs(
 	ctx context.Context,
 	path string,

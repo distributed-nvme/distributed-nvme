@@ -750,10 +750,11 @@ func TestValidateTrConfEmpty(t *testing.T) {
 }
 
 // TestValidateTrConfList pins the list form CreateClone and UpdateCloneTrConf
-// take: at least one entry, no entry empty, every member a valid name
-// (architecture.md, Common validation). A clone with no source address could
-// never connect, so an empty list is a Common validation violation and not a
-// defaulted field.
+// take: every non-empty member a valid name (architecture.md, Common
+// validation), at least one entry, and no entry empty. A clone with no source
+// address could never connect, so an empty list is refused and not defaulted:
+// CreateClone answers an empty src_tr_conf INVALID_ARGUMENT (architecture.md,
+// Clones), and UpdateCloneTrConf shares the check.
 func TestValidateTrConfList(t *testing.T) {
 	good := &pb.NvmeTrConf{
 		TrType:  "tcp",
@@ -1638,10 +1639,10 @@ func TestValidateDevIdentity(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestValidateCloneGeometry pins the three source-geometry bounds of
-// CreateClone and the divisibility rule between two of them. The numbers
-// describe the SOURCE SP, which this cluster cannot read, so architecture.md,
-// Common validation, is the only place they are ever checked: src_slice_cnt ∈
-// [1, MaxSliceCntPerSp],
+// CreateClone and the divisibility rule between two of them (architecture.md,
+// Clones). The numbers describe the SOURCE SP, which this cluster cannot read,
+// so CreateClone's request check is the only place the gateway checks them:
+// src_slice_cnt ∈ [1, MaxSliceCntPerSp],
 // src_stripe_size = i x 4 KiB with i ∈ [1, 256], src_block_size = j x 64 KiB
 // with j ∈ [1, 16384], and src_block_size a multiple of src_stripe_size —
 // without which a clone region would straddle a raid0 stripe boundary and the
@@ -1713,13 +1714,14 @@ func TestValidateCloneGeometry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bitmaps (architecture.md, Clones and Migrations)
+// Bitmaps (architecture.md, Clones; gateway.md, Migrations)
 // ---------------------------------------------------------------------------
 
-// TestValidateBitmap pins the one thing the gateway ever asserts about a
+// TestValidateBitmap pins the one thing validateBitmap asserts about a
 // bitmap. GW14 makes the payload opaque — Append*Bitmap stores the bytes
-// verbatim and never inspects a bit — so the only rule of architecture.md,
-// Common validation, left is that an append must actually carry something.
+// verbatim and never inspects a bit — so the payload rule both appends share
+// is that an append must actually carry something (architecture.md, Clones;
+// gateway.md, Migrations).
 func TestValidateBitmap(t *testing.T) {
 	cases := []struct {
 		name   string

@@ -485,7 +485,7 @@ reset_state() { # <agent>
 #
 # It exists because two gateway RPCs — DeleteClone and FinishMigration with
 # force = false — read an *Info the fake derives from the LAST Syncup* request
-# it applied, and this suite runs no dnv-worker, so no Syncup* ever arrives.
+# it accepted, and this suite runs no dnv-worker, so no Syncup* ever arrives.
 # Hand-writing the state is the fake's documented operator-edit path
 # (integtest/fakeagent: state.json is protojson so it stays human-editable),
 # and it is what lets the suite present a cntlr or a side that already knows
@@ -1565,12 +1565,12 @@ case_smoke() {
 	stage 4 "inspect-dn / inspect-cn: the agent's applied revision and live info"
 	# -------------------------------------------------------------------
 	# The suite runs NO dnv-worker, so no Syncup* has ever reached a fake and
-	# every *Info it derives from "the last applied request" is absent. That
+	# every *Info it derives from "the last accepted request" is absent. That
 	# is the truthful live state of the node, not a failure of the call (AG3),
 	# and the reply's applied_revision is the agent's — the revision of the
-	# last applied Syncup*, 0 for a fake that has applied nothing
-	# (architecture.md, Disk nodes and Controller nodes), never the stored
-	# rev key.
+	# last Syncup* it accepted for the node, 0 for a fake that has accepted
+	# nothing (architecture.md, Disk nodes and Controller nodes), never the
+	# stored rev key.
 	out=$(gw inspect-dn --addr "$(dn_addr 0)")
 	assert_field "$out" '.applied_revision' "0" \
 		"inspect-dn applied_revision of an unsynced fake"
@@ -2605,10 +2605,10 @@ EOF
         "revision":"7",
         "side_conf":{"ext_cnt":"1","primary_cn_id":"$primaryCnId"}}}}}
 EOF
-	# architecture.md, Cntlrs: the reply's applied_revision is the agent's own
-	# last applied revision for the object, passed through with the info. The
-	# seeded 7 is distinctive — the stored sp_rev is far past 7 by this
-	# stage, so a handler that regressed to the store cannot pass.
+	# architecture.md, Cntlrs: the reply's applied_revision is the revision of
+	# the last request the agent accepted for the object, passed through with
+	# the info. The seeded 7 is distinctive — the stored sp_rev is far past 7
+	# by this stage, so a handler that regressed to the store cannot pass.
 	out=$(gw inspect-cntlr --sp sp0 --id "$primaryId")
 	assert_field "$out" '.applied_revision' "7" \
 		"inspect-cntlr applied_revision is the seeded agent revision"
@@ -3235,7 +3235,7 @@ case_parallel() {
 	# Teardown in reverse dependency order, each wave with tokens refetched
 	# after the previous one. The order is forced by the RPCs themselves:
 	# DeleteSubsystem refuses while a namespace is left, DeleteThinDevice
-	# while a namespace backs it, and DeleteStoragePool while ANY of the five
+	# while it backs a namespace, and DeleteStoragePool while ANY of the five
 	# name lists is non-empty — which is what makes ten OK delete-sp at the
 	# end a proof that all thirty earlier deletes landed, on all ten SPs.
 	wave=""
@@ -3958,7 +3958,7 @@ faults_gwx_out() { # <UPPER_SNAKE code> <args…>
 
 # faults_seed_cn_state writes the CN fake's state.json so GetCntlrInfo has a
 # cntlr to report on at all. Every *Info the fake returns is derived from the
-# last Syncup* request it applied (dnv-worker.md, Integration test plan,
+# last Syncup* request it accepted (dnv-worker.md, Integration test plan,
 # The fake agent, `fakeagent`) and this suite runs no dnv-worker,
 # so an unseeded fake answers with a nil CntlrInfo and DeleteClone would
 # refuse for the wrong reason. The object keys use DECIMAL ids.
@@ -4101,8 +4101,8 @@ faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 
 	# GW5: ClusterConf is the first read of every STM, so a missing cluster is
 	# refused before the SP is even looked for. The `gw` wrapper puts
-	# --cluster BEFORE the subcommand and gatewayctl binds its globals on the
-	# subcommand's flag set as well, so this later --cluster wins.
+	# --cluster BEFORE the subcommand and gatewayctl binds its global flags on
+	# the subcommand's flag set as well, so this later --cluster wins.
 	gwx NOT_FOUND get-sp --cluster nosuch --sp sp0
 
 	gwx NOT_FOUND get-sp --sp nosuchsp
@@ -4168,12 +4168,12 @@ faults_agent_battery() {
 
 	clear_behavior dn0
 	# clear_behavior restores: the same read now succeeds. dn_info is null
-	# because the fake has applied no SyncupDn — this suite runs no worker —
+	# because the fake has accepted no SyncupDn — this suite runs no worker —
 	# and applied_revision is 0 for the same reason.
 	out=$(gw inspect-dn --addr "$dn0Addr")
 	assert_field "$out" '.dn_info' "null" "dn0: DnInfo of an unsynced fake"
 	assert_field "$out" '.applied_revision' "0" \
-		"dn0: the restored fake has still applied nothing"
+		"dn0: the restored fake has still accepted nothing"
 
 	# A closed port: grpc.NewClient does not block, so the failure surfaces on
 	# the call and is refused immediately — nowhere near the 10 s budget.

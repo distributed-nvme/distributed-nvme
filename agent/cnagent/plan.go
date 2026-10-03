@@ -383,8 +383,8 @@ type nsPlan struct {
 	// under every other rule. CN16 serves through that dm-clone only while
 	// its live status shows hydration on (nsDevNow).
 	clone *clonePlan
-	// deferred mirrors td.deferred: the fourth conjunct of the CN16 ANA rule
-	// as amended by [D15]. The ns-dev and the nvmet namespace still exist — over
+	// deferred mirrors td.deferred: the fourth conjunct of the CN16 ANA
+	// rule ([D15]). The ns-dev and the nvmet namespace still exist — over
 	// the td's permanent dm-error — but nothing under them can serve, so the
 	// namespace stays inaccessible and both rows report PROVISIONING.
 	deferred bool
@@ -858,11 +858,12 @@ func (p *cntlrPlan) buildSubsystems() {
 				np.clone = cp
 			}
 			np.anaGrpId = common.AnaGrpIdInaccessible
-			// CN16 as amended by [D15]: optimized iff primary ∧ not disabled
-			// (folded into p.primary) ∧ not effectively suspended ∧ the
-			// backing chain is not provisioning-deferred. During initial
-			// provisioning hosts queue on an inaccessible path instead of
-			// eating IO errors from an error-backed ns-dev.
+			// CN16: optimized iff primary ∧ not disabled (folded into
+			// p.primary) ∧ not effectively suspended ∧ the backing chain is
+			// not provisioning-deferred ([D15]) ∧ sp_level below
+			// SP_LEVEL_DISABLE (wantAny). During initial provisioning hosts
+			// queue on an inaccessible path instead of eating IO errors from
+			// an error-backed ns-dev.
 			if p.primary && p.wantAny && !np.suspended && !np.deferred {
 				np.anaGrpId = common.AnaGrpIdOptimized
 			}
