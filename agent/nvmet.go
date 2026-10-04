@@ -266,8 +266,12 @@ func (n *Nvmet) probePort(
 // Subsystem
 // ---------------------------------------------------------------------------
 
-// SubsysConf is one nvmet subsystem. Empty/zero fields are left alone: the
-// DN↔DN migration-source subsystem carries no host-facing identity.
+// SubsysConf is one nvmet subsystem. Serial, Model and the cntlid range are
+// left alone while empty or zero: the DN↔DN migration-source subsystem carries
+// no host-facing identity. AllowedHosts is the exact set of hosts the
+// subsystem admits, host-facing or dnv-internal alike, and an empty list
+// admits no host: allowed_hosts is the only admission gate, and dnv never
+// sets "attr_allow_any_host" (architecture.md, Primary cntlr, step 6).
 type SubsysConf struct {
 	Nqn          string
 	Serial       string
@@ -275,26 +279,15 @@ type SubsysConf struct {
 	CntlidMin    uint32
 	CntlidMax    uint32
 	AllowedHosts []string
-	// AllowAnyHost is the CN host-facing case of an empty `allowed_hosts`
-	// list (architecture.md, Primary cntlr, step 6): the subsystem accepts
-	// every hostnqn. Every dnv-internal subsystem leaves it false and lists its
-	// one peer instead.
-	AllowAnyHost bool
 }
 
-// allowAnyHostAttr is written out of order relative to the other attributes;
-// see EnsureSubsystem.
-const allowAnyHostAttr = "attr_allow_any_host"
-
-func (c SubsysConf) allowAnyHostValue() string {
-	if c.AllowAnyHost {
-		return "1"
-	}
-	return "0"
-}
-
+// attrs lists the attributes ProbeSubsystem compares and EnsureSubsystem's
+// attribute loop writes, in the loop's order. "attr_allow_any_host" is always
+// "0" and comes first, so a later attribute that nvmet refuses, which stops
+// the loop, cannot keep a subsystem found open from being closed; the probe's
+// comparison of it is what reports such a subsystem as not converged.
 func (c SubsysConf) attrs() [][2]string {
-	attrs := [][2]string{{allowAnyHostAttr, c.allowAnyHostValue()}}
+	attrs := [][2]string{{"attr_allow_any_host", "0"}}
 	if c.Serial != "" {
 		attrs = append(attrs, [2]string{"attr_serial", c.Serial})
 	}
@@ -344,17 +337,11 @@ func (n *Nvmet) EnsureSubsystem(
 	if err := n.raiseCntlidMax(ctx, subsysPath, conf); err != nil {
 		return err
 	}
-	// nvmet refuses `attr_allow_any_host = 1` while explicit host links
-	// remain (-EINVAL, "Can't set allow_any_host when explicit hosts are
-	// set!"), so that value is written *after* the unlink loop below; `0` is
-	// written before the link loop, because nvmet equally refuses a new host
-	// link while allow_any_host is 1. Writing it first either way would make
-	// a subsystem whose allowed_hosts list is emptied fail every converge
-	// forever.
+	// The attribute loop writes "attr_allow_any_host" = 0 before the host
+	// links: nvmet refuses a new host link while the attribute is 1 (-EINVAL),
+	// and the same write closes a subsystem found open, whoever opened it.
+	// Nothing here writes 1 (SubsysConf).
 	for _, attr := range conf.attrs() {
-		if attr[0] == allowAnyHostAttr && conf.AllowAnyHost {
-			continue
-		}
 		if _, err := n.ensureAttr(
 			ctx, subsysPath+"/"+attr[0], attr[1]); err != nil {
 			return err
@@ -391,12 +378,6 @@ func (n *Nvmet) EnsureSubsystem(
 			}
 		}
 	}
-	if conf.AllowAnyHost {
-		if _, err := n.ensureAttr(
-			ctx, subsysPath+"/"+allowAnyHostAttr, "1"); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -428,7 +409,9 @@ func (n *Nvmet) raiseCntlidMax(
 }
 
 // ProbeSubsystem reports whether the subsystem exists with the desired
-// attributes and allowed hosts.
+// attributes and allowed hosts. The attributes are attrs(), so an
+// "attr_allow_any_host" that reads 1 is a mismatch: a subsystem found open is
+// not converged, whatever its host links.
 func (n *Nvmet) ProbeSubsystem(
 	ctx context.Context,
 	conf SubsysConf,

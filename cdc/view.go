@@ -104,15 +104,12 @@ func (e *entry) addSkip(reason string) {
 	e.skips = append(e.skips, reason)
 }
 
-// visibleTo is DS4: an entry with an empty allowed_hosts is visible to
-// everyone, otherwise exactly to the hostnqns it names, matched as exact
-// strings.
+// visibleTo is DS4: an entry is visible exactly to the hostnqns its
+// allowed_hosts names, matched as exact strings, so an entry with an empty
+// allowed_hosts is visible to no host.
 func (e *entry) visibleTo(hostNqn string) bool {
 	if e == nil {
 		return false
-	}
-	if len(e.allowed) == 0 {
-		return true
 	}
 	_, ok := e.allowed[hostNqn]
 	return ok
@@ -128,9 +125,11 @@ func (e *entry) contribution(hostNqn string) ([]byte, uint64) {
 	return e.records, e.numRec
 }
 
-// sameAs reports whether two renderings of one key are indistinguishable to
-// every host: same rendered records AND same visibility. It is what makes a
-// re-put of an unchanged value a no-op.
+// sameAs reports whether two renderings of one key carry the same rendered
+// records AND the same allowed set, which makes them indistinguishable to
+// every host. It is what makes a re-put of an unchanged value a no-op. A pair
+// it calls different can still look the same to every host — two renderings
+// that name no host, say — and apply's per-host compare then impacts nobody.
 func (e *entry) sameAs(o *entry) bool {
 	if e == nil || o == nil {
 		return e == o

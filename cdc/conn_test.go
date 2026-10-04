@@ -165,7 +165,8 @@ func connStatus(t *testing.T, c completion, want uint16, what string) {
 	}
 }
 
-// connEntry is the fixture CdcEntry the log-page tests serve.
+// connEntry is the fixture CdcEntry the log-page tests serve. It is visible
+// exactly to the hosts it names, and to none when it names none (DS4).
 func connEntry(nqn, addr, port string, allowed ...string) *pb.CdcEntry {
 	return cdcEntry(nqn, allowed, tcpConf(addr, port))
 }
@@ -723,8 +724,10 @@ func TestGetLogPagePagedReads(t *testing.T) {
 	ts := startServer(t)
 	// Two entries, injected before the host connects, so its view is
 	// rendered at attach with GENCTR 1 (DS7).
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
-	connInject(ts, 2, connEntry("nqn.2016-06.io.dnv:ss1", "10.0.0.2", "4421"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
+	connInject(ts, 2, connEntry("nqn.2016-06.io.dnv:ss1", "10.0.0.2", "4421",
+		connHostA))
 	h := ts.dial()
 	h.connectOk(connHostA)
 
@@ -850,7 +853,8 @@ func TestGetLogPageRejects(t *testing.T) {
 // overrun a real host's buffer, which no status code can undo.
 func TestTransfersHonorTheSglLength(t *testing.T) {
 	ts := startServer(t)
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 	h := ts.dial()
 	h.connectOk(connHostA)
 
@@ -896,7 +900,8 @@ func TestTransfersHonorTheSglLength(t *testing.T) {
 // connection's pending state.
 func TestGetLogPageRaeIsAcceptedAndIgnored(t *testing.T) {
 	ts := startServer(t)
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 	h := ts.dial()
 	h.connectOk(connHostA)
 	cRae, withRae := connGetLog(h, lidDiscovery, true, 2048, 0)
@@ -922,7 +927,8 @@ func TestGetLogPageServesASnapshot(t *testing.T) {
 	if numRec := binary.LittleEndian.Uint64(first[8:16]); numRec != 0 {
 		t.Fatalf("numrec %d on an empty view, want 0", numRec)
 	}
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 	_, second := connGetLog(h, lidDiscovery, false, 2048, 0)
 	if genCtr := binary.LittleEndian.Uint64(second[0:8]); genCtr != 2 {
 		t.Fatalf("genctr %d after one impact, want 2", genCtr)
@@ -934,14 +940,18 @@ func TestGetLogPageServesASnapshot(t *testing.T) {
 
 // TestLogPageIsFilteredPerHost proves DS4/DS5 through the socket, which is the
 // reason this controller exists at all (cdc.md, Scope and placement): two
-// hosts connected to one instance are served different logs, and an entry
-// with an empty allowed_hosts is served to both.
+// hosts connected to one instance are served different logs, an entry naming
+// both is served to both, and an entry with an empty allowed_hosts is served
+// to neither — it sorts after every record the test reads by position, so
+// the record counts are what would show it served.
 func TestLogPageIsFilteredPerHost(t *testing.T) {
 	ts := startServer(t)
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:shared", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:shared", "10.0.0.1", "4420",
+		connHostA, connHostB))
 	connInject(ts, 2, connEntry(
 		"nqn.2016-06.io.dnv:bonly", "10.0.0.2", "4421", connHostB,
 	))
+	connInject(ts, 3, connEntry("nqn.2016-06.io.dnv:nobody", "10.0.0.3", "4422"))
 	a := ts.dial()
 	b := ts.dial()
 	a.connectOk(connHostA)
@@ -980,7 +990,8 @@ func TestFeaturesAenConfigGatesAens(t *testing.T) {
 	h := ts.dial()
 	cntlId := h.connectOk(connHostA)
 	aer := h.armAer()
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 
 	// The default configuration is 0, so nothing may be delivered. There is
 	// no event to wait for here — the assertion is that none arrives.
@@ -1073,7 +1084,8 @@ func TestAerArmedThenImpacted(t *testing.T) {
 	// in order, so a completed Keep Alive proves the AER is already armed —
 	// without it this test would silently be the impact-then-arm one below.
 	connStatus(t, h.keepAlive(), statusSuccess, "keep alive")
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 	c := h.await(aer)
 	connStatus(t, c, statusSuccess, "aen")
 	if c.dw0 != aenDiscLogChanged {
@@ -1089,7 +1101,8 @@ func TestAerImpactedThenArmedCompletesImmediately(t *testing.T) {
 	h := ts.dial()
 	h.connectOk(connHostA)
 	h.enableAen()
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 	aer := h.armAer()
 	c := h.await(aer)
 	connStatus(t, c, statusSuccess, "aen")
@@ -1110,7 +1123,8 @@ func TestAerImpactsCoalesce(t *testing.T) {
 		"nqn.2016-06.io.dnv:ss1",
 		"nqn.2016-06.io.dnv:ss2",
 	} {
-		connInject(ts, uint64(i+1), connEntry(nqn, "10.0.0.1", "4420"))
+		connInject(ts, uint64(i+1), connEntry(nqn, "10.0.0.1", "4420",
+			connHostA))
 	}
 	first := h.armAer()
 	c := h.await(first)
@@ -1129,6 +1143,43 @@ func TestAerImpactsCoalesce(t *testing.T) {
 	_, data := connGetLog(h, lidDiscovery, false, 1024, 0)
 	if genCtr := binary.LittleEndian.Uint64(data[0:8]); genCtr != 4 {
 		t.Fatalf("genctr %d after three impacts, want 4", genCtr)
+	}
+}
+
+// TestAerNotSentForAnEntryNamingNoHost proves DS4's empty list through the
+// socket: an entry whose allowed_hosts is empty is visible to no host, so
+// neither its put nor its delete impacts the connected host — no AEN and no
+// GENCTR move (DS6) — while the next entry that names the host completes the
+// same armed AER at once, which proves the AER was armed throughout.
+func TestAerNotSentForAnEntryNamingNoHost(t *testing.T) {
+	ts := startServer(t)
+	h := ts.dial()
+	h.connectOk(connHostA)
+	h.enableAen()
+	aer := h.armAer()
+	// A completed Keep Alive proves the AER is armed, as in
+	// TestAerArmedThenImpacted.
+	connStatus(t, h.keepAlive(), statusSuccess, "keep alive")
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:nobody", "10.0.0.1", "4420"))
+	connInject(ts, 1, nil)
+	// There is no event to wait for — the assertion is that none arrives.
+	if c, ok := h.pollPending(200 * time.Millisecond); ok {
+		t.Fatalf("an AEN was delivered for an entry naming no host: %+v", c)
+	}
+	_, data := connGetLog(h, lidDiscovery, false, 1024, 0)
+	if genCtr := binary.LittleEndian.Uint64(data[0:8]); genCtr != 1 {
+		t.Fatalf("genctr %d after a put and a delete naming no host, want 1",
+			genCtr)
+	}
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 0 {
+		t.Fatalf("numrec %d, want 0", numRec)
+	}
+	connInject(ts, 2, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
+	c := h.await(aer)
+	connStatus(t, c, statusSuccess, "aen")
+	if c.dw0 != aenDiscLogChanged {
+		t.Fatalf("aen dword0 %#08x, want %#08x", c.dw0, aenDiscLogChanged)
 	}
 }
 

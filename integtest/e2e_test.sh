@@ -6788,11 +6788,11 @@ td_created() { # <td name>
 #
 # So nothing was listening on either advertised address: an nvmet port with no
 # subsystem linked to it does not listen at all (memory note
-# nvmet-referral-port-needs-subsystem). It was NOT an allowed_hosts race — in
-# cn2's first window allowed_hosts was empty and attr_allow_any_host was 1,
-# which admits everybody — and it was NOT the cdc, the NQNs, the hostid or the
-# transports: a manual connect-all minutes later, with the same arguments,
-# brought up both paths.
+# nvmet-referral-port-needs-subsystem). It was NOT an allowed_hosts race — a
+# host a subsystem does not admit gets its socket and is refused by the
+# fabrics Connect command, never with ECONNREFUSED — and it was NOT the cdc,
+# the NQNs, the hostid or the transports: a manual connect-all minutes later,
+# with the same arguments, brought up both paths.
 #
 # WHAT THE GATE ASKS, and why it is the agent's own words rather than a sleep.
 # The two rows are doc/cnagent.md's probe table (CN28):
@@ -7864,10 +7864,10 @@ setup_export_ns() {
 
 	# `ss create` is issued WITHOUT --hosts and the list is set afterwards,
 	# which is the plan's order and also exercises UpdateSubsystemHosts.
-	# It leaves a window in which the subsystem's CdcEntry has an empty
-	# allowed_hosts and is therefore visible to EVERY host (cdc/view.go:
-	# 103-115, DS4). Nothing connects in that window: the hosts are masked
-	# (rule 6) and every connect in this suite is the suite's own act.
+	# The window between the two is closed: an empty allowed_hosts admits no
+	# host and shows the CdcEntry to no host
+	# (architecture.md, Primary cntlr; cdc.md DS4), so the subsystem is
+	# staged, closed to every host, until set-hosts grants the two below.
 	ctl_ok ss create --nqn "$SS0"
 	SS0_ID=$(jq_of "$CTL_OUT" '.ss_id')
 	case "$SS0_ID" in
@@ -7941,10 +7941,12 @@ setup_connect_host0() {
 		"one discovery record per non-disabled cntlr (enabledCntlrTrConfs)"
 
 	# THE DISCOVERY LOG IS NOT THE DATA PLANE, and this is the wait run 3 did
-	# not have. The cdc serves the log out of etcd, so it advertised both
-	# transports the instant `ss create` committed — 1.75 s and 4.19 s before
-	# the two CN agents had created the nvmet subsystem and linked it to their
-	# ports, which is what makes those ports listen at all. Both connects took
+	# not have. The cdc serves the log out of etcd, so it advertises both
+	# transports to host0 the instant `ss set-hosts` commits (the `ss create`
+	# before it names no host, cdc.md DS4), whatever the CN agents have built
+	# by then. Run 3's connect-all came 1.75 s and 4.19 s before the two CN
+	# agents had created the nvmet subsystem and linked it to their ports,
+	# which is what makes those ports listen at all. Both connects took
 	# ECONNREFUSED and connect-all exited 0 anyway. wait_ns_exported_all's
 	# header has the measured timeline; it covers EVERY non-disabled cntlr,
 	# because connect-all connects every transport the log offers.

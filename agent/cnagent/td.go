@@ -331,20 +331,21 @@ func (s *CnAgentServer) parkNsDev(
 // CN16 — host-facing nvmet objects
 // ---------------------------------------------------------------------------
 
+// subsysConf is one host-facing subsystem's nvmet conf. Its allowed hosts are
+// the record's list verbatim, and an empty list admits no host
+// (architecture.md, Primary cntlr, step 6).
 func (s *CnAgentServer) subsysConf(
 	plan *cntlrPlan,
 	sp *ssPlan,
 ) agent.SubsysConf {
 	cntlidMin, cntlidMax := plan.cntlidRange()
-	hosts := sp.ss.GetAllowedHosts()
 	return agent.SubsysConf{
 		Nqn:          sp.nqn,
 		Serial:       sp.ss.GetSerial(),
 		Model:        sp.ss.GetModel(),
 		CntlidMin:    cntlidMin,
 		CntlidMax:    cntlidMax,
-		AllowedHosts: hosts,
-		AllowAnyHost: len(hosts) == 0,
+		AllowedHosts: sp.ss.GetAllowedHosts(),
 	}
 }
 

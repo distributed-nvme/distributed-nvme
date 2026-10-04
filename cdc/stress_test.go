@@ -25,6 +25,8 @@ import (
 // on an outcome (an AEN arrived, a count reached zero, a bounded elapsed
 // time), never on a sleep having been long enough.
 
+// stressEntry is entry i of the stress fixtures, visible exactly to the
+// hostnqns allowed names: to none when it names none (DS4).
 func stressEntry(i int, allowed []string) *entry {
 	return newEntry(cdcEntry(
 		fmt.Sprintf("nqn.2024-01.dnv:ss%d", i),
@@ -39,6 +41,11 @@ func TestStressHostsAndWatcher(t *testing.T) {
 
 	const hostCount = 8
 	const connsPerHost = 3
+	hostNqn := func(i int) string { return fmt.Sprintf("nqn.2024-01.dnv:h%d", i) }
+	allHosts := make([]string, hostCount)
+	for i := range allHosts {
+		allHosts[i] = hostNqn(i)
+	}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
@@ -64,14 +71,20 @@ func TestStressHostsAndWatcher(t *testing.T) {
 				m := map[entryKey]*entry{}
 				for j := 0; j < 20; j++ {
 					m[entryKey{cid: 1, shard: uint32(j % 16), spId: uint64(j % 7), ssId: uint64(j % 5)}] =
-						stressEntry(i+j, nil)
+						stressEntry(i+j, allHosts)
 				}
 				deliver(ts.reg.replace(ctx, m))
 				continue
 			}
-			var allowed []string
-			if i%3 == 0 {
-				allowed = []string{fmt.Sprintf("nqn.2024-01.dnv:h%d", i%hostCount)}
+			// Visible to one host when i is a multiple of three, to no host
+			// (DS4) when it is otherwise a multiple of eleven, and to every
+			// host in all other cases.
+			allowed := allHosts
+			switch {
+			case i%3 == 0:
+				allowed = []string{hostNqn(i % hostCount)}
+			case i%11 == 0:
+				allowed = nil
 			}
 			deliver(ts.reg.apply(ctx, k, stressEntry(i, allowed)))
 		}
@@ -86,7 +99,7 @@ func TestStressHostsAndWatcher(t *testing.T) {
 				defer h.close()
 				h.handshake()
 				c := h.connect(
-					fmt.Sprintf("nqn.2024-01.dnv:h%d", hi),
+					hostNqn(hi),
 					common.NvmeDiscoveryNqn, 0,
 					common.CdcMaxAdminSqSize-1, 0,
 				)
@@ -133,17 +146,21 @@ func TestStressWatcherPlusServerShutdown(t *testing.T) {
 	go func() { defer close(done); w.run(ctx) }()
 
 	fw := ts.store.nextWatch(t)
+	hostNqns := make([]string, 4)
+	for i := range hostNqns {
+		hostNqns[i] = fmt.Sprintf("nqn.2024-01.dnv:g%d", i)
+	}
 	var hosts []*fakeHost
-	for i := 0; i < 4; i++ {
+	for _, hostNqn := range hostNqns {
 		h := ts.dial()
-		h.connectOk(fmt.Sprintf("nqn.2024-01.dnv:g%d", i))
+		h.connectOk(hostNqn)
 		h.enableAen()
 		h.armAer()
 		hosts = append(hosts, h)
 	}
 	for i := 0; i < 200; i++ {
 		fw.put(testKey(uint32(i%16), uint64(i), 1),
-			cdcEntry(fmt.Sprintf("nqn.2024-01.dnv:x%d", i), nil,
+			cdcEntry(fmt.Sprintf("nqn.2024-01.dnv:x%d", i), hostNqns,
 				tcpConf("10.0.0.5", "4420")))
 	}
 	// Kill the hosts mid-flight.
@@ -169,15 +186,16 @@ func TestStressWatcherPlusServerShutdown(t *testing.T) {
 // NP11 "never lost": with exactly one AER armed at all times, every impact
 // must produce an AEN.
 func TestAenIsNeverLostUnderLoad(t *testing.T) {
+	const hostNqn = "nqn.2024-01.dnv:aen"
 	ts := startServer(t)
 	h := ts.dial()
-	h.connectOk("nqn.2024-01.dnv:aen")
+	h.connectOk(hostNqn)
 	h.enableAen()
 	ctx := context.Background()
 	for i := 0; i < 300; i++ {
 		h.armAer()
 		k := entryKey{cid: 1, shard: 0, spId: uint64(i), ssId: 1}
-		deliver(ts.reg.apply(ctx, k, stressEntry(i, nil)))
+		deliver(ts.reg.apply(ctx, k, stressEntry(i, []string{hostNqn})))
 		c, ok := h.pollPending(3 * time.Second)
 		if !ok {
 			t.Fatalf("iteration %d: no aen", i)
@@ -191,17 +209,19 @@ func TestAenIsNeverLostUnderLoad(t *testing.T) {
 // The impact races the arming: the AER is armed from one goroutine while the
 // impact lands from another. The bit must never be dropped.
 func TestAenImpactRacesArming(t *testing.T) {
+	const hostNqn = "nqn.2024-01.dnv:race"
 	ts := startServer(t)
 	ctx := context.Background()
 	for round := 0; round < 60; round++ {
 		h := ts.dial()
-		h.connectOk("nqn.2024-01.dnv:race")
+		h.connectOk(hostNqn)
 		h.enableAen()
 		ready := make(chan struct{})
 		go func() {
 			<-ready
 			k := entryKey{cid: 1, shard: 0, spId: uint64(round), ssId: 1}
-			deliver(ts.reg.apply(ctx, k, stressEntry(round, nil)))
+			deliver(ts.reg.apply(ctx, k,
+				stressEntry(round, []string{hostNqn})))
 		}()
 		close(ready)
 		h.armAer()
@@ -215,9 +235,10 @@ func TestAenImpactRacesArming(t *testing.T) {
 // A host that stops reading must not stall the watcher, and shutdown must
 // still complete promptly.
 func TestDeafHostDoesNotStallWatcherOrShutdown(t *testing.T) {
+	const hostNqn = "nqn.2024-01.dnv:deaf"
 	ts := startServer(t)
 	h := ts.dial()
-	h.connectOk("nqn.2024-01.dnv:deaf")
+	h.connectOk(hostNqn)
 	h.enableAen()
 	for i := 0; i < 4; i++ {
 		h.armAer()
@@ -236,12 +257,13 @@ func TestDeafHostDoesNotStallWatcherOrShutdown(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// The watcher path must still run at full speed.
+	// The watcher path must still run at full speed, with every apply
+	// impacting the deaf host.
 	ctx := context.Background()
 	start := time.Now()
 	for i := 0; i < 500; i++ {
 		k := entryKey{cid: 1, shard: 0, spId: uint64(i), ssId: 1}
-		deliver(ts.reg.apply(ctx, k, stressEntry(i, nil)))
+		deliver(ts.reg.apply(ctx, k, stressEntry(i, []string{hostNqn})))
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Errorf("watcher stalled by a deaf host: %v", d)
@@ -260,6 +282,9 @@ func TestDeafHostDoesNotStallWatcherOrShutdown(t *testing.T) {
 
 // Connect/disconnect churn against a churning registry.
 func TestConnectChurnLeaksNothing(t *testing.T) {
+	hostNqns := []string{
+		"nqn.2024-01.dnv:c0", "nqn.2024-01.dnv:c1", "nqn.2024-01.dnv:c2",
+	}
 	ts := startServer(t)
 	ctx := context.Background()
 	stop := make(chan struct{})
@@ -276,7 +301,7 @@ func TestConnectChurnLeaksNothing(t *testing.T) {
 			if i%5 == 0 {
 				deliver(ts.reg.apply(ctx, k, nil))
 			} else {
-				deliver(ts.reg.apply(ctx, k, stressEntry(i, nil)))
+				deliver(ts.reg.apply(ctx, k, stressEntry(i, hostNqns)))
 			}
 		}
 	}()
@@ -286,7 +311,7 @@ func TestConnectChurnLeaksNothing(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 			for n := 0; n < 60; n++ {
 				h := ts.dial()
-				h.connectOk(fmt.Sprintf("nqn.2024-01.dnv:c%d", g%3))
+				h.connectOk(hostNqns[g%len(hostNqns)])
 				h.enableAen()
 				h.armAer()
 				h.getLogPage(lidDiscovery, 4096, 0)

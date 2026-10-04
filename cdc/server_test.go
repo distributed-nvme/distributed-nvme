@@ -135,7 +135,8 @@ func TestReconnectingHostRestartsGenCtr(t *testing.T) {
 	ts := startServer(t)
 	first := ts.dial()
 	first.connectOk(connHostA)
-	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420"))
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
 	_, data := connGetLog(first, lidDiscovery, false, 2048, 0)
 	if genCtr := binary.LittleEndian.Uint64(data[0:8]); genCtr != 2 {
 		t.Fatalf("genctr %d after one impact, want 2", genCtr)
@@ -271,7 +272,8 @@ func srvServedTheEntry(t *testing.T, h *fakeHost, subNqn string) {
 func TestNoDiscoveryAnswerBeforeTheFirstScan(t *testing.T) {
 	const subNqn = "nqn.2016-06.io.dnv:ss0"
 	store := newFakeStore()
-	store.set(t, testKey(0x01, 0x1, 0xa), connEntry(subNqn, "10.0.0.1", "4420"))
+	store.set(t, testKey(0x01, 0x1, 0xa), connEntry(subNqn, "10.0.0.1", "4420",
+		connHostA))
 	store.failRange(errors.New("etcd unavailable"))
 	ts := startInstance(t, store)
 
@@ -318,7 +320,8 @@ func TestNoDiscoveryAnswerBeforeTheFirstScan(t *testing.T) {
 func TestNoDiscoveryAnswerWhileTheFirstScanFills(t *testing.T) {
 	const subNqn = "nqn.2016-06.io.dnv:ss0"
 	store := newFakeStore()
-	store.set(t, testKey(0x01, 0x1, 0xa), connEntry(subNqn, "10.0.0.1", "4420"))
+	store.set(t, testKey(0x01, 0x1, 0xa), connEntry(subNqn, "10.0.0.1", "4420",
+		connHostA))
 	entered, release := store.holdDecode()
 	ts := startInstance(t, store)
 	h := ts.dial()
@@ -416,9 +419,10 @@ func TestAnEmptyFirstScanStillOpensTheAcceptLoop(t *testing.T) {
 	logs := captureLogs(t)
 	store := newFakeStore()
 	// A foreign shard only: the instance owns codes 00-0f, so the store is
-	// not empty but the scan keeps nothing of it.
+	// not empty but the scan keeps nothing of it. The entry names the host
+	// that reads below, so an entry the scan wrongly kept would be served.
 	store.set(t, testKey(0x21, 0x1, 0xa), connEntry("nqn.2016-06.io.dnv:ssx",
-		"10.0.0.1", "4420"))
+		"10.0.0.1", "4420", connHostA))
 	ts := startInstance(t, store)
 	scans := logs.waitFor(t, msgScanComplete, 1)
 	if got := watchAttrInt(t, scans[0], "entries"); got != 0 {

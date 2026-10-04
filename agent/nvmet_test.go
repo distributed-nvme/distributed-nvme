@@ -1,0 +1,298 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	iofs "io/fs"
+	"sort"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/distributed-nvme/distributed-nvme/common"
+)
+
+// ---------------------------------------------------------------------------
+// Subsystem admission (architecture.md, Primary cntlr, step 6)
+//
+// The host links are the only admission gate of every subsystem dnv builds,
+// host-facing or dnv-internal: an empty AllowedHosts admits no host, and
+// "attr_allow_any_host" is only ever written 0, ahead of the host links.
+// ---------------------------------------------------------------------------
+
+const (
+	admissionNqn   = "nqn.2024-01.io.dnv-it:s:vol1"
+	admissionHostA = "nqn.2024-01.io.dnv-it:host:a"
+	admissionHostB = "nqn.2024-01.io.dnv-it:host:b"
+)
+
+// fakeConfigfs is the part of the nvmet configfs tree EnsureSubsystem and
+// ProbeSubsystem touch, with nvmet's two allow-any-host refusals: a host link
+// is refused while the subsystem's "attr_allow_any_host" is 1, and a 1 is
+// refused while a host is linked, both EINVAL. A new subsystem directory comes
+// with its allowed_hosts directory and the attribute at 0, as nvmet makes it.
+// changes is every write, mkdir, link and unlink, in order.
+type fakeConfigfs struct {
+	dirs    map[string]bool
+	files   map[string]string
+	links   map[string]string
+	changes []string
+}
+
+func newFakeConfigfs() *fakeConfigfs {
+	return &fakeConfigfs{
+		dirs: map[string]bool{
+			NvmetRoot + "/subsystems": true,
+			NvmetRoot + "/hosts":      true,
+		},
+		files: map[string]string{},
+		links: map[string]string{},
+	}
+}
+
+func (c *fakeConfigfs) mkdir(path string) {
+	c.dirs[path] = true
+	if path[:strings.LastIndex(path, "/")] == NvmetRoot+"/subsystems" {
+		c.dirs[path+"/allowed_hosts"] = true
+		c.files[path+"/attr_allow_any_host"] = "0"
+	}
+}
+
+// openSubsys plants a subsystem that admits every host: the attribute at 1,
+// and so no host link, which nvmet refuses beside it.
+func (c *fakeConfigfs) openSubsys(nqn string) {
+	path := NvmetRoot + "/subsystems/" + nqn
+	c.mkdir(path)
+	c.files[path+"/attr_allow_any_host"] = "1"
+}
+
+func (c *fakeConfigfs) hostLinks(subsysPath string) []string {
+	var out []string
+	for link := range c.links {
+		if strings.HasPrefix(link, subsysPath+"/allowed_hosts/") {
+			out = append(out, link[strings.LastIndex(link, "/")+1:])
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (c *fakeConfigfs) children(dir string) []string {
+	seen := map[string]bool{}
+	for _, set := range []map[string]bool{c.dirs, keysOf(c.files),
+		keysOf(c.links)} {
+		for path := range set {
+			if strings.HasPrefix(path, dir+"/") &&
+				!strings.Contains(path[len(dir)+1:], "/") {
+				seen[path[len(dir)+1:]] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func keysOf(m map[string]string) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for key := range m {
+		out[key] = true
+	}
+	return out
+}
+
+func (c *fakeConfigfs) osClient() *common.FakeOsClient {
+	return &common.FakeOsClient{
+		RunCommandFn: func(
+			ctx context.Context, cmd string, args []string, stdin string,
+		) (string, string, int, error) {
+			path := args[len(args)-1]
+			switch cmd {
+			case "ls":
+				if !c.dirs[path] {
+					return "", "", 2, errors.New("exit status 2")
+				}
+				return strings.Join(c.children(path), "\n") + "\n", "", 0,
+					nil
+			case "mkdir":
+				c.changes = append(c.changes, "mkdir "+path)
+				c.mkdir(path)
+				return "", "", 0, nil
+			case "ln":
+				c.changes = append(c.changes, "link "+path)
+				subsysPath := path[:strings.LastIndex(path, "/allowed_hosts/")]
+				if c.files[subsysPath+"/attr_allow_any_host"] == "1" {
+					return "", "ln: Invalid argument", 1,
+						errors.New("exit status 1")
+				}
+				c.links[path] = args[len(args)-2]
+				return "", "", 0, nil
+			case "rm":
+				c.changes = append(c.changes, "unlink "+path)
+				delete(c.links, path)
+				return "", "", 0, nil
+			}
+			return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
+		},
+		ReadFileFn: func(ctx context.Context, path string) (string, error) {
+			data, ok := c.files[path]
+			if !ok {
+				return "", fmt.Errorf("no such file: %s: %w", path,
+					iofs.ErrNotExist)
+			}
+			return data, nil
+		},
+		WriteFileDirectFn: func(
+			ctx context.Context, path string, data string,
+		) error {
+			c.changes = append(c.changes, "write "+path+"="+data)
+			subsysPath := path[:strings.LastIndex(path, "/")]
+			if !c.dirs[subsysPath] {
+				return &iofs.PathError{Op: "write", Path: path,
+					Err: iofs.ErrNotExist}
+			}
+			if strings.HasSuffix(path, "/attr_allow_any_host") &&
+				strings.TrimSpace(data) == "1" &&
+				len(c.hostLinks(subsysPath)) > 0 {
+				return &iofs.PathError{Op: "write", Path: path,
+					Err: syscall.EINVAL}
+			}
+			c.files[path] = data
+			return nil
+		},
+	}
+}
+
+// admissionConfs is a subsystem in the two shapes dnv builds: with a
+// host-facing identity (a cn subsystem, a transfer, a side export) and with
+// none (a migration-source export). Admission is the same rule for both.
+func admissionConfs(hosts ...string) map[string]SubsysConf {
+	return map[string]SubsysConf{
+		"identity": {Nqn: admissionNqn, Serial: "000000000000000a",
+			Model: "dnv", CntlidMin: 1, CntlidMax: 8, AllowedHosts: hosts},
+		"no identity": {Nqn: admissionNqn, AllowedHosts: hosts},
+	}
+}
+
+// assertAdmits checks the subsystem is closed and links exactly want, never
+// had a 1 written, and probes converged.
+func assertAdmits(
+	t *testing.T,
+	cfs *fakeConfigfs,
+	nvmet *Nvmet,
+	conf SubsysConf,
+	want ...string,
+) {
+	t.Helper()
+	subsysPath := nvmet.SubsysPath(conf.Nqn)
+	if got := cfs.files[subsysPath+"/attr_allow_any_host"]; got != "0" {
+		t.Fatalf("attr_allow_any_host is %q, want 0", got)
+	}
+	if got := cfs.hostLinks(subsysPath); strings.Join(got, ",") !=
+		strings.Join(want, ",") {
+		t.Fatalf("host links %v, want %v", got, want)
+	}
+	for _, change := range cfs.changes {
+		if strings.HasSuffix(change, "/attr_allow_any_host=1") {
+			t.Fatalf("%s was written: dnv never opens a subsystem", change)
+		}
+	}
+	ok, details, err := nvmet.ProbeSubsystem(context.Background(), conf)
+	if err != nil || !ok {
+		t.Fatalf("ProbeSubsystem = %v, %q, %v; want converged",
+			ok, details, err)
+	}
+}
+
+// TestEnsureSubsystemEmptyListAdmitsNoHost: an empty list builds a subsystem
+// no host can reach — the attribute stays at nvmet's 0 and nothing is linked —
+// and that subsystem probes converged.
+func TestEnsureSubsystemEmptyListAdmitsNoHost(t *testing.T) {
+	for name, conf := range admissionConfs() {
+		t.Run(name, func(t *testing.T) {
+			cfs := newFakeConfigfs()
+			nvmet := NewNvmet(cfs.osClient())
+			if err := nvmet.EnsureSubsystem(
+				context.Background(), conf); err != nil {
+				t.Fatalf("EnsureSubsystem: %v", err)
+			}
+			assertAdmits(t, cfs, nvmet, conf)
+		})
+	}
+}
+
+// TestEnsureSubsystemClosesAnOpenSubsystemFirst: a subsystem found admitting
+// every host probes as not converged, and the converge closes it whatever the
+// list. With a host to admit, the fake refuses that host's link while the
+// attribute is still 1, so a converge that linked before writing the 0 fails
+// here as it fails on nvmet.
+func TestEnsureSubsystemClosesAnOpenSubsystemFirst(t *testing.T) {
+	for _, hosts := range [][]string{nil, {admissionHostA}} {
+		for name, conf := range admissionConfs(hosts...) {
+			t.Run(fmt.Sprintf("%s, %d hosts", name, len(hosts)),
+				func(t *testing.T) {
+					cfs := newFakeConfigfs()
+					cfs.openSubsys(conf.Nqn)
+					nvmet := NewNvmet(cfs.osClient())
+					ok, details, err := nvmet.ProbeSubsystem(
+						context.Background(), conf)
+					if err != nil || ok ||
+						!strings.Contains(details, "attr_allow_any_host") {
+						t.Fatalf("the open subsystem probes %v, %q, %v; "+
+							"want not converged on attr_allow_any_host",
+							ok, details, err)
+					}
+					if err := nvmet.EnsureSubsystem(
+						context.Background(), conf); err != nil {
+						t.Fatalf("EnsureSubsystem: %v", err)
+					}
+					assertAdmits(t, cfs, nvmet, conf, hosts...)
+				})
+		}
+	}
+}
+
+// TestEnsureSubsystemEmptyingTheListRevokesEveryHost: emptying the list
+// unlinks every host and leaves the attribute untouched at 0, so revoking
+// every host is a list like any other. Until that converge runs, the probe
+// reports a host still linked, since the empty list admits none.
+func TestEnsureSubsystemEmptyingTheListRevokesEveryHost(t *testing.T) {
+	granted := admissionConfs(admissionHostA, admissionHostB)
+	for name, conf := range admissionConfs() {
+		t.Run(name, func(t *testing.T) {
+			cfs := newFakeConfigfs()
+			nvmet := NewNvmet(cfs.osClient())
+			if err := nvmet.EnsureSubsystem(
+				context.Background(), granted[name]); err != nil {
+				t.Fatalf("grant: %v", err)
+			}
+			assertAdmits(t, cfs, nvmet, granted[name],
+				admissionHostA, admissionHostB)
+
+			ok, details, err := nvmet.ProbeSubsystem(
+				context.Background(), conf)
+			if err != nil || ok ||
+				!strings.Contains(details, "unexpected allowed host") {
+				t.Fatalf("the unrevoked subsystem probes %v, %q, %v; "+
+					"want not converged on a linked host", ok, details, err)
+			}
+
+			cfs.changes = nil
+			if err := nvmet.EnsureSubsystem(
+				context.Background(), conf); err != nil {
+				t.Fatalf("revoke: %v", err)
+			}
+			assertAdmits(t, cfs, nvmet, conf)
+			for _, change := range cfs.changes {
+				if strings.HasSuffix(change, "/attr_allow_any_host=0") {
+					t.Fatalf("%s: the revoke rewrote a closed attribute",
+						change)
+				}
+			}
+		})
+	}
+}

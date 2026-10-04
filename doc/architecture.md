@@ -299,10 +299,10 @@ back, while on the CN a namespace that fails to build does not. Teardown
 runs in reverse, the port link first (`dnagent.md` SH19). The CN's host-facing and transfer subsystems and
 a DN's side exports carry a cntlid range, a serial and a model, and their
 namespaces an identity; a migration-source export carries none of them,
-only its allowed host and its namespace's "device_path" and ANA group. The
-host policy has an order of its own: "attr_allow_any_host" is cleared
-before the host links are made and set only after the stale links are
-gone (Primary cntlr, step 6). A later ANA transition rewrites only the
+only its allowed host and its namespace's "device_path" and ANA group.
+Every subsystem, that one included, has "attr_allow_any_host" written "0"
+with its attributes, before its host links are made
+(Primary cntlr, step 6). A later ANA transition rewrites only the
 namespace's "ana_grpid" ([D4]).
 
 ### Disk node
@@ -729,21 +729,25 @@ available"):
 6. **Host-facing nvmet**: per `Subsystem` an nvmet subsystem on the CN's
    port, with "attr_cntlid_min" and "attr_cntlid_max" from
    `Cntlr.cntlid_slot`, `serial` and `model` from the etcd `Subsystem`, and
-   the allowed hosts as configured (an empty list ⇒ "attr_allow_any_host"
-   set). This is the only subsystem dnv ever opens to any host: every
-   dnv-internal subsystem keeps "attr_allow_any_host" clear and links its
-   hosts, a transfer subsystem included, whose record's list is used
-   verbatim, so an empty one admits no host. nvmet refuses a host link
-   while the attribute is set and refuses setting it while hosts are
-   linked, so the agent clears it before linking hosts and removes stale
-   links before setting it (`EnsureSubsystem`). Per `Namespace`: an nvmet
-   namespace whose nsid is `ns_idx`, whose "device_path" is the
-   namespace's own `CnNsDevName`, whose "uuid" and "nguid" come from the
-   etcd record, and which is a member of the fixed optimized ANA group
-   [D4] (primary) unless `suspended` (Subsystems, namespaces) — suspended
-   ⇒ the ns-dev is parked on its td's dm-error and the namespace moved to
-   the inaccessible group everywhere (Namespace suspend semantics;
-   `cnagent.md` CN16).
+   the allowed hosts as configured. The allowed hosts are the only
+   admission gate of every subsystem dnv builds, host-facing or
+   dnv-internal, a transfer subsystem included, whose record's list is
+   used verbatim: a subsystem admits exactly the hosts its list names, and
+   an empty list admits no host. A storage export defaults to deny: a
+   `Subsystem` created without hosts, to have its namespaces attached
+   before any host is let in, stays closed, its `CdcEntry` shown to no host
+   (`cdc.md` DS4), until its hosts are granted; an empty list revokes every
+   host; and host-facing and internal subsystems share one rule. dnv never
+   sets "attr_allow_any_host", a mode no dnv flow needs: an agent writes it
+   "0" before it links a subsystem's hosts, because nvmet refuses a new host
+   link while it is set, and the same write closes a subsystem found with
+   it set (`EnsureSubsystem`). Per `Namespace`: an nvmet namespace whose
+   nsid is `ns_idx`, whose "device_path" is the namespace's own
+   `CnNsDevName`, whose "uuid" and "nguid" come from the etcd record, and
+   which is a member of the fixed optimized ANA group [D4] (primary) unless
+   `suspended` (Subsystems, namespaces) — suspended ⇒ the ns-dev is parked
+   on its td's dm-error and the namespace moved to the inaccessible group
+   everywhere (Namespace suspend semantics; `cnagent.md` CN16).
 7. **Clones, transfers and migrations** hosted by the SP, per Procedures.
 
 ```mermaid
@@ -2303,7 +2307,8 @@ of every **enabled** cntlr's CN as `nvme_tr_conf_list`, and
 `nqn` gets the length check alone; `NOT_FOUND` nqn; `FAILED_PRECONDITION`
 `ns_list` non-empty (`allowed_hosts` never block, they go implicitly).
 Action: STM: remove from `nqn_list`, delete the `Subsystem` and its
-`CdcEntry`, bump `SpRev`. dnv-cdc sends a discovery-log-change AEN; hosts
+`CdcEntry`, bump `SpRev`. dnv-cdc sends a discovery-log-change AEN to the
+hosts whose discovery log the deletion changes (`cdc.md` DS6); hosts
 running nvme-stas disconnect automatically. Reply `ss_id`.
 
 **ListSubsystems** — STM read of `nqn_list` and each `Subsystem` into
@@ -4564,12 +4569,12 @@ filtering on the {shard_code} field of each key (DS2, WV2). For each
 host-facing subsystem and rewrites its hosts, and the gateway and the
 worker rewrite its transports as cntlrs change (`cdc.md`, Scope and
 placement) — it advertises one discovery log record per element of
-`nvme_tr_conf_list` to the hosts the entry's `allowed_hosts` admits, an
-empty list admitting every host (DS3, DS4), and it sends a
-discovery-log-change AEN to exactly the hosts whose rendered, filtered log
-changes (DS6), the generation counter being kept per instance and host
-while that host holds a live connection (DS7). Hosts running nvme-stas
-then connect and disconnect automatically, which is what makes
+`nvme_tr_conf_list` (DS3) to exactly the hosts the entry's
+`allowed_hosts` names, to no host while that list is empty (DS4); and it
+sends a discovery-log-change AEN to exactly the hosts whose rendered,
+filtered log changes (DS6), the generation counter being kept per instance
+and host while that host holds a live connection (DS7). Hosts running
+nvme-stas then connect and disconnect automatically, which is what makes
 `DeleteSubsystem`, `CreateCntlr` and `UpdateCntlrEnabled` transparent to
 hosts.
 

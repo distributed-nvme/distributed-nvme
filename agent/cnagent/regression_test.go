@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -402,36 +403,135 @@ func TestGrowSliceReloadsThePool(t *testing.T) {
 	)
 }
 
-// CN16: `attr_allow_any_host = 1` is refused by nvmet while explicit host
-// links remain, so emptying `allowed_hosts` must unlink first.
-func TestAllowAnyHostIsWrittenAfterTheUnlink(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Subsystem admission (CN16; architecture.md, Primary cntlr, step 6)
+//
+// The host links are the only admission gate: an empty `allowed_hosts` admits
+// no host, and "attr_allow_any_host" is only ever written 0, ahead of the host
+// links, since nvmet refuses a host link while it is 1.
+// ---------------------------------------------------------------------------
+
+// fixtureSubsysPath is one entry under the fixture's host-facing subsystem.
+func fixtureSubsysPath(rel string) string {
+	return agent.NvmetRoot + "/subsystems/" + testNqn + "/" + rel
+}
+
+// subsysWithHosts is defaultSubsys admitting exactly the given hosts; no
+// argument is the empty list.
+func subsysWithHosts(hosts ...string) map[string]*pb.Subsystem {
+	subsys := defaultSubsys(false)
+	subsys[testNqn].AllowedHosts = hosts
+	return subsys
+}
+
+// probedSubsysRow is the fixture subsystem's row as the check channel reads it.
+func probedSubsysRow(t *testing.T, srv *CnAgentServer) *pb.ResInfo {
+	t.Helper()
+	reply, err := srv.GetCntlrInfo(context.Background(),
+		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr()})
+	if err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	return reply.GetCntlrInfo().GetSsIdToSubsystem()[testSs]
+}
+
+// TestEmptyingAllowedHostsRevokesEveryHost: emptying the list removes the
+// last host link and leaves the subsystem closed, "attr_allow_any_host" still
+// 0 and untouched, and both channels report that closed subsystem converged.
+func TestEmptyingAllowedHostsRevokesEveryHost(t *testing.T) {
 	srv, node := newTestServer(t)
-	withHost := defaultSubsys(false)
-	withHost[testNqn].AllowedHosts = []string{testHostNqn}
 	syncupBoth(t, srv, reqOpts{
-		revision: 2, primary: true, subsys: withHost})
-	linkPath := "/sys/kernel/config/nvmet/subsystems/" + testNqn +
-		"/allowed_hosts/" + testHostNqn
-	if _, ok := node.links[linkPath]; !ok {
+		revision: 2, primary: true, subsys: subsysWithHosts(testHostNqn)})
+	attr := fixtureSubsysPath("attr_allow_any_host")
+	link := fixtureSubsysPath("allowed_hosts/" + testHostNqn)
+	if _, ok := node.links[link]; !ok {
 		t.Fatalf("the host was never linked")
 	}
+	if got := node.files[attr]; got != "0" {
+		t.Fatalf("attr_allow_any_host is %q after the build, want 0", got)
+	}
+	assertNoCall(t, node, "writedirect "+attr+"=1")
 
 	node.Reset()
-	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
-		revision: 3, primary: true})); err != nil {
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, subsys: subsysWithHosts()}))
+	if err != nil {
 		t.Fatalf("empty the host list: %v", err)
 	}
-	attrPath := "/sys/kernel/config/nvmet/subsystems/" + testNqn +
-		"/attr_allow_any_host"
-	assertOrder(t, node,
-		"cmd rm -f "+linkPath,
-		"writedirect "+attrPath+"=1",
-	)
-	if node.files[attrPath] != "1" {
-		t.Fatalf("attr_allow_any_host is %q, want 1", node.files[attrPath])
-	}
-	if _, ok := node.links[linkPath]; ok {
+	if _, ok := node.links[link]; ok {
 		t.Fatalf("the retired host link survived")
+	}
+	assertNoCall(t, node, "writedirect "+attr)
+	if got := node.files[attr]; got != "0" {
+		t.Fatalf("attr_allow_any_host is %q, want 0", got)
+	}
+	assertOk(t, reply.GetCntlrInfo().GetSsIdToSubsystem()[testSs],
+		"converged subsystem with no host")
+	assertOk(t, probedSubsysRow(t, srv), "probed subsystem with no host")
+}
+
+// TestAnOpenSubsystemIsClosedBeforeAnyHostLink: a subsystem found with
+// "attr_allow_any_host" at 1 — and so with no host link, which nvmet refuses
+// beside it — converges closed whatever its list, and with a host to admit,
+// the 0 is written before that host's link, which nvmet refuses while the
+// attribute is 1.
+func TestAnOpenSubsystemIsClosedBeforeAnyHostLink(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hosts []string
+	}{
+		{name: "no host"},
+		{name: "one host", hosts: []string{testHostNqn}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			attr := fixtureSubsysPath("attr_allow_any_host")
+			node.files[attr] = "1"
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					subsys: subsysWithHosts(tc.hosts...)}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if got := node.files[attr]; got != "0" {
+				t.Fatalf("attr_allow_any_host is %q, want 0", got)
+			}
+			assertNoCall(t, node, "writedirect "+attr+"=1")
+			for _, hostNqn := range tc.hosts {
+				link := fixtureSubsysPath("allowed_hosts/" + hostNqn)
+				assertOrder(t, node,
+					"writedirect "+attr+"=0",
+					"cmd ln -s "+agent.NvmetRoot+"/hosts/"+hostNqn+" "+link,
+				)
+				if _, ok := node.links[link]; !ok {
+					t.Fatalf("%s was never linked", hostNqn)
+				}
+			}
+			assertOk(t, reply.GetCntlrInfo().GetSsIdToSubsystem()[testSs],
+				"converged subsystem")
+		})
+	}
+}
+
+// TestProbeReportsAnOpenSubsystem: the check channel compares
+// "attr_allow_any_host" with every other attribute, so a subsystem found open
+// is not converged. With an empty list the host links match exactly, so the
+// attribute alone decides the row.
+func TestProbeReportsAnOpenSubsystem(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	assertOk(t, probedSubsysRow(t, srv), "probed closed subsystem")
+
+	node.files[fixtureSubsysPath("attr_allow_any_host")] = "1"
+	row := probedSubsysRow(t, srv)
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(row.GetDetails(), "attr_allow_any_host") {
+		t.Fatalf("the open subsystem probes %v/%q, want ERROR naming "+
+			"attr_allow_any_host", row.GetStatus(), row.GetDetails())
 	}
 }
 

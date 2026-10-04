@@ -1668,20 +1668,20 @@ min: a move up writes "attr_cntlid_max" first and a move down
 writes neither; the transfer subsystem's range (CN17) moves the same way —
 "attr_serial" and "attr_model"
 verbatim from the record (the gateway stamped them, `architecture.md`,
-[D2]), "attr_allow_any_host" set iff `allowed_hosts` is empty, else host
-links exactly per the list; per `Namespace` an nvmet namespace whose nsid
-is `ns_idx`, whose "device_path" is its own ns-dev, with "uuid" and
-"nguid" from the record. A namespace that has left `ns_list` under a
-subsystem that stays is not the build's to remove: CN21's L1 alone
-removes it (and so nothing does under a subsystem whose NQN carries the
-dnv prefix but decodes to nothing, which the sweep never attributes —
-Additions to `common`; `architecture.md`, Common validation),
-`AnaGrpIdInaccessible` first, after P0 has parked or resumed the ns-dev
-under it — or failed to, which does not stop L1 (CN21) — and only from an
-enumeration that answered. A pass in which one did not — one of the four
-listings, or the sweep's own listing of that subsystem's namespaces —
-leaves it where it is with a non-OK verdict, and the next pass whose
-listings answer removes it.
+[D2]), "attr_allow_any_host" written "0" before the host links, and host
+links exactly per `allowed_hosts`, so an empty list admits no host
+(`architecture.md`, Primary cntlr, step 6); per `Namespace` an nvmet
+namespace whose nsid is `ns_idx`, whose "device_path" is its own ns-dev,
+with "uuid" and "nguid" from the record. A namespace that has left `ns_list`
+under a subsystem that stays is not the build's to remove: CN21's L1 alone
+removes it (and so nothing does under a subsystem whose NQN carries the dnv
+prefix but decodes to nothing, which the sweep never attributes — Additions
+to `common`; `architecture.md`, Common validation), `AnaGrpIdInaccessible`
+first, after P0 has parked or resumed the ns-dev under it — or failed to,
+which does not stop L1 (CN21) — and only from an enumeration that answered.
+A pass in which one did not — one of the four listings, or the sweep's own
+listing of that subsystem's namespaces — leaves it where it is with a non-OK
+verdict, and the next pass whose listings answer removes it.
 
 **ANA**: `AnaGrpIdOptimized` iff primary and not disabled and not
 effectively suspended and its backing chain is not provisioning-deferred
@@ -2598,8 +2598,9 @@ its `res_name` and what its probe checks:
   reserved, `architecture.md`, [D14]) and per-clone metadata health lives
   in `clone_id_to_meta`.
 * `ss_id_to_subsystem`, named by the subsystem NQN: configfs: present,
-  cntlid range, serial and model (trimmed, `dnagent.md` SH17), allowed hosts exactly
-  as desired.
+  "attr_allow_any_host" "0" (one found with it set reports
+  `RES_STATUS_ERROR`), cntlid range, serial and model (trimmed,
+  `dnagent.md` SH17), allowed hosts exactly as desired.
 * `ns_id_to_namespace`, named by the NQN and the namespace index: the
   nvmet namespace is enabled, with the "device_path", "uuid" and "nguid"
   as desired (the identity compared through `agent.SameNsId` — configfs

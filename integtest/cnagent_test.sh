@@ -742,7 +742,9 @@ join_json() {
 
 # req_none writes a whole request file (cnagent_integtest.md,
 # The driver: `cnagentctl`): the S-shaped RedundNone SP, one
-# primary cntlr, one td, one subsystem with one namespace.
+# primary cntlr, one td, one subsystem with one namespace. allowed_hosts is
+# the emulated host role's NQN: every case that builds this subsystem connects
+# that host to it, and an empty list would admit no host (cnagent.md CN16).
 req_none() { # file cnidx dnidx sp cntlr slot ss_nqn uuid suspended
 	local file=$1 cn=$2 dn=$3 sp=$4 cntlr=$5 slot=$6 nqn=$7 uuid=$8 susp=$9
 	cat >"$file" <<EOF
@@ -769,7 +771,7 @@ req_none() { # file cnidx dnidx sp cntlr slot ss_nqn uuid suspended
   },
   "td_list": [$(req_td "$S_TD" 1 0)],
   "nqn_to_subsystem": {
-    "$nqn": $(req_subsys "$S_SS" "[]" \
+    "$nqn": $(req_subsys "$S_SS" "[\"$HOST_NQN\"]" \
 			"$(req_ns "$S_NS" 1 "$S_TD" "$uuid" "$susp")")
   }
 }
@@ -2983,9 +2985,11 @@ case_smoke() {
 		"$(cn_dm_name ca "$cn" "$sp" "$S_DGRP")"; do
 		assert_eq "$(helper "$cn" "dm_state $name")" live "smoke $name"
 	done
-	assert_eq "$(helper "$cn" "ss_attr '$nqn' attr_allow_any_host")" 1 \
+	# The host links are the subsystem's only admission gate: the attribute
+	# stays 0 and the one link is the emulated host's (cnagent.md CN16).
+	assert_eq "$(helper "$cn" "ss_attr '$nqn' attr_allow_any_host")" 0 \
 		"smoke $nqn attr_allow_any_host"
-	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "" \
+	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "$HOST_NQN" \
 		"smoke $nqn allowed_hosts"
 
 	stage host "the host connects and the path goes live/optimized"
@@ -4069,10 +4073,12 @@ case_thinbm() {
 	# snapshot of a td it has not seen materialized in every slice pool
 	# (architecture.md, Thin devices), so this is the only td_list a real worker
 	# could publish here. The snapshot itself is uncreated, which is what
-	# still puts its create_snap inside the origin's quiesce below.
+	# still puts its create_snap inside the origin's quiesce below. Its
+	# subsystem admits the emulated host, which reads it in snapio.
 	req_set "$req" ".td_list = [$(req_td "$S_TD" 1 0 true),
 		$(req_td "$B_TD2" 2 1)]
-		| .nqn_to_subsystem[\"$snapnqn\"] = $(req_subsys "$B_SS2" "[]" \
+		| .nqn_to_subsystem[\"$snapnqn\"] = $(req_subsys "$B_SS2" \
+		"[\"$HOST_NQN\"]" \
 		"$(req_ns "$B_NS2" 1 "$B_TD2" "$snapuuid" false)")"
 	bump_cn_rev "$cn"
 	cntlrrev=${CNREV[$cn]}

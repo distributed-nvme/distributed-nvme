@@ -31,6 +31,11 @@ const (
 	vwHost3 = vwHostPrefix + "33333333-3333-3333-3333-333333333333"
 )
 
+// vwEveryHost names all three fixture hosts. An entry a test needs visible to
+// every host it attaches names them, because an entry with an empty
+// allowed_hosts is visible to no host (DS4).
+var vwEveryHost = []string{vwHost1, vwHost2, vwHost3}
+
 // The subsystem NQNs of the fixtures.
 const (
 	vwNqnA = "nqn.2024-01.io.dnv:ss-a"
@@ -229,7 +234,7 @@ func TestSkipAndServeInAView(t *testing.T) {
 	f.attach(vwHost1, 1)
 	good1 := tcpConf(vwAddr1, vwSvcId1)
 	good2 := tcpConf(vwAddr2, vwSvcId2)
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil,
+	f.put(vwKeyA, cdcEntry(vwNqnA, []string{vwHost1},
 		good1,
 		trConf("rdma", common.DefaultCdcAdrFam, vwAddr1, vwSvcId2),
 		good2,
@@ -250,9 +255,9 @@ func TestSkipAndServeInAView(t *testing.T) {
 // DS4 — visibility
 // ---------------------------------------------------------------------------
 
-// TestEntryVisibleTo proves the DS4 table: an empty allowed_hosts is visible
-// to everyone, a non-empty one exactly to the hostnqns it names, matched as
-// exact strings.
+// TestEntryVisibleTo proves the DS4 table: an entry is visible exactly to the
+// hostnqns its allowed_hosts names, matched as exact strings, so an empty
+// list, nil or zero-length, is visible to no host.
 func TestEntryVisibleTo(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -260,8 +265,9 @@ func TestEntryVisibleTo(t *testing.T) {
 		host    string
 		want    bool
 	}{
-		{"nil list sees everyone", nil, vwHost1, true},
-		{"empty list sees everyone", []string{}, vwHost1, true},
+		{"nil list sees no host", nil, vwHost1, false},
+		{"empty list sees no host", []string{}, vwHost1, false},
+		{"empty list hides from the empty hostnqn", []string{}, "", false},
 		{"member of a one host list", []string{vwHost1}, vwHost1, true},
 		{"non member of a one host list", []string{vwHost2}, vwHost1, false},
 		{
@@ -305,9 +311,10 @@ func TestEntryVisibleTo(t *testing.T) {
 	}
 }
 
-// TestVisibilityInAView proves DS4 through the served views: three hosts, one
-// open entry and one restricted entry (the ssA/ssB shape of the cdc suite's
-// lowlevel case).
+// TestVisibilityInAView proves DS4 through the served views: three hosts, an
+// entry that names no host (ssA of the cdc suite's lowlevel case), one that
+// names two of the hosts and one that names all three. The entry naming no
+// host is in no view, and each host sees exactly the entries that name it.
 func TestVisibilityInAView(t *testing.T) {
 	f := vwNew(t)
 	f.attach(vwHost1, 1)
@@ -315,17 +322,19 @@ func TestVisibilityInAView(t *testing.T) {
 	f.attach(vwHost3, 1)
 	confA := tcpConf(vwAddr1, vwSvcId1)
 	confB := tcpConf(vwAddr1, vwSvcId2)
+	confE := tcpConf(vwAddr2, vwSvcId1)
 	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA))
 	f.put(vwKeyB, cdcEntry(vwNqnB, []string{vwHost1, vwHost2}, confB))
-	recA := vwRecord(t, vwNqnA, confA)
+	f.put(vwKeyE, cdcEntry(vwNqnE, vwEveryHost, confE))
 	recB := vwRecord(t, vwNqnB, confB)
+	recE := vwRecord(t, vwNqnE, confE)
 	cases := []struct {
 		host string
 		want []byte
 	}{
-		{vwHost1, append(append([]byte(nil), recA...), recB...)},
-		{vwHost2, append(append([]byte(nil), recA...), recB...)},
-		{vwHost3, recA},
+		{vwHost1, append(append([]byte(nil), recB...), recE...)},
+		{vwHost2, append(append([]byte(nil), recB...), recE...)},
+		{vwHost3, recE},
 	}
 	for _, tc := range cases {
 		_, numRec, body := f.view(tc.host)
@@ -350,22 +359,22 @@ func vwOrdered() []vwPut {
 	return []vwPut{
 		{
 			key: entryKey{cid: 0x0cdc, shard: 0x00, spId: 1, ssId: 1},
-			msg: cdcEntry("nqn.2024-01.io.dnv:o1", nil,
+			msg: cdcEntry("nqn.2024-01.io.dnv:o1", vwEveryHost,
 				tcpConf(vwAddr1, vwSvcId1)),
 		},
 		{
 			key: entryKey{cid: 0x0cdc, shard: 0x00, spId: 1, ssId: 2},
-			msg: cdcEntry("nqn.2024-01.io.dnv:o2", nil,
+			msg: cdcEntry("nqn.2024-01.io.dnv:o2", vwEveryHost,
 				tcpConf(vwAddr1, vwSvcId2)),
 		},
 		{
 			key: entryKey{cid: 0x0cdc, shard: 0x00, spId: 2, ssId: 1},
-			msg: cdcEntry("nqn.2024-01.io.dnv:o3", nil,
+			msg: cdcEntry("nqn.2024-01.io.dnv:o3", vwEveryHost,
 				tcpConf(vwAddr2, vwSvcId1)),
 		},
 		{
 			key: entryKey{cid: 0x0cdc, shard: 0x3c, spId: 1, ssId: 1},
-			msg: cdcEntry("nqn.2024-01.io.dnv:o4", nil,
+			msg: cdcEntry("nqn.2024-01.io.dnv:o4", vwEveryHost,
 				// Two transport configurations: their order inside the
 				// entry is the tr-conf index, the last DS5 key.
 				tcpConf(vwAddr1, vwSvcId1),
@@ -373,7 +382,7 @@ func vwOrdered() []vwPut {
 		},
 		{
 			key: entryKey{cid: 0x1cdc, shard: 0x00, spId: 1, ssId: 1},
-			msg: cdcEntry("nqn.2024-01.io.dnv:o5", nil,
+			msg: cdcEntry("nqn.2024-01.io.dnv:o5", vwEveryHost,
 				tcpConf(vwAddr2, vwSvcId2)),
 		},
 	}
@@ -490,7 +499,12 @@ func TestRegistryImpact(t *testing.T) {
 	confA := tcpConf(vwAddr1, vwSvcId1)
 	confA2 := tcpConf(vwAddr1, vwSvcId2)
 	confB := tcpConf(vwAddr2, vwSvcId1)
-	openA := cdcEntry(vwNqnA, nil, confA)
+	// sharedA and sharedB name every fixture host, so every attached host
+	// sees them.
+	sharedA := cdcEntry(vwNqnA, vwEveryHost, confA)
+	sharedB := cdcEntry(vwNqnB, vwEveryHost, confB)
+	// noHostA names no host, so it is visible to none (DS4).
+	noHostA := cdcEntry(vwNqnA, nil, confA)
 
 	cases := []struct {
 		name    string
@@ -502,7 +516,7 @@ func TestRegistryImpact(t *testing.T) {
 	}{
 		{
 			name:    "gain",
-			initial: []vwPut{{vwKeyA, openA}},
+			initial: []vwPut{{vwKeyA, sharedA}},
 			hosts:   []string{vwHost1, vwHost2},
 			key:     vwKeyB,
 			after:   cdcEntry(vwNqnB, []string{vwHost1}, confB),
@@ -514,7 +528,7 @@ func TestRegistryImpact(t *testing.T) {
 		{
 			name: "loss by allowed_hosts removal",
 			initial: []vwPut{
-				{vwKeyA, openA},
+				{vwKeyA, sharedA},
 				{vwKeyB, cdcEntry(
 					vwNqnB, []string{vwHost1, vwHost2}, confB)},
 			},
@@ -530,7 +544,7 @@ func TestRegistryImpact(t *testing.T) {
 		{
 			name: "loss by delete",
 			initial: []vwPut{
-				{vwKeyA, openA},
+				{vwKeyA, sharedA},
 				{vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB)},
 			},
 			hosts: []string{vwHost1, vwHost2},
@@ -543,10 +557,10 @@ func TestRegistryImpact(t *testing.T) {
 		},
 		{
 			name:    "tr conf change inside a visible entry",
-			initial: []vwPut{{vwKeyA, openA}},
+			initial: []vwPut{{vwKeyA, sharedA}},
 			hosts:   []string{vwHost1, vwHost2},
 			key:     vwKeyA,
-			after:   cdcEntry(vwNqnA, nil, confA2),
+			after:   cdcEntry(vwNqnA, vwEveryHost, confA2),
 			want: map[string]vwImpact{
 				vwHost1: {genCtr: 2, numRec: 1, poked: 2},
 				vwHost2: {genCtr: 2, numRec: 1, poked: 2},
@@ -554,10 +568,10 @@ func TestRegistryImpact(t *testing.T) {
 		},
 		{
 			name:    "tr conf added inside a visible entry",
-			initial: []vwPut{{vwKeyA, openA}},
+			initial: []vwPut{{vwKeyA, sharedA}},
 			hosts:   []string{vwHost1, vwHost2},
 			key:     vwKeyA,
-			after:   cdcEntry(vwNqnA, nil, confA, confA2),
+			after:   cdcEntry(vwNqnA, vwEveryHost, confA, confA2),
 			want: map[string]vwImpact{
 				vwHost1: {genCtr: 2, numRec: 2, poked: 2},
 				vwHost2: {genCtr: 2, numRec: 2, poked: 2},
@@ -566,7 +580,7 @@ func TestRegistryImpact(t *testing.T) {
 		{
 			name: "invisible before and after",
 			initial: []vwPut{
-				{vwKeyA, openA},
+				{vwKeyA, sharedA},
 				{vwKeyE, cdcEntry(vwNqnE, []string{vwHost3}, confB)},
 			},
 			// h3 is NOT attached: the entry is invisible to every active
@@ -582,7 +596,7 @@ func TestRegistryImpact(t *testing.T) {
 		{
 			name: "invisible entry deleted",
 			initial: []vwPut{
-				{vwKeyA, openA},
+				{vwKeyA, sharedA},
 				{vwKeyE, cdcEntry(vwNqnE, []string{vwHost3}, confB)},
 			},
 			hosts: []string{vwHost1, vwHost2},
@@ -599,7 +613,7 @@ func TestRegistryImpact(t *testing.T) {
 			// sees must not move the first host's GENCTR at all.
 			name: "membership preserving allowed_hosts edit",
 			initial: []vwPut{
-				{vwKeyA, openA},
+				{vwKeyA, sharedA},
 				{vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB)},
 			},
 			hosts: []string{vwHost1, vwHost2},
@@ -611,35 +625,85 @@ func TestRegistryImpact(t *testing.T) {
 			},
 		},
 		{
-			name:    "empty allowed_hosts fans out to every active host",
-			initial: nil,
+			// DS4's empty list: an entry naming no host is in no view,
+			// so putting it impacts no active host.
+			name:    "an entry with an empty allowed_hosts impacts no host",
+			initial: []vwPut{{vwKeyB, sharedB}},
 			hosts:   []string{vwHost1, vwHost2, vwHost3},
 			key:     vwKeyA,
-			after:   openA,
+			after:   noHostA,
 			want: map[string]vwImpact{
-				vwHost1: {genCtr: 2, numRec: 1, poked: 2},
-				vwHost2: {genCtr: 2, numRec: 1, poked: 2},
-				vwHost3: {genCtr: 2, numRec: 1, poked: 2},
+				vwHost1: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost2: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost3: {genCtr: 1, numRec: 1, poked: 0},
 			},
 		},
 		{
-			name:    "restricted entry opened to everyone",
-			initial: []vwPut{{vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB)}},
+			// The two renderings differ, so sameAs does not end the put
+			// early, and still no host sees either of them.
+			name: "a tr conf change inside an entry naming no host",
+			initial: []vwPut{
+				{vwKeyA, noHostA},
+				{vwKeyB, sharedB},
+			},
+			hosts: []string{vwHost1, vwHost2, vwHost3},
+			key:   vwKeyA,
+			after: cdcEntry(vwNqnA, nil, confA2),
+			want: map[string]vwImpact{
+				vwHost1: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost2: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost3: {genCtr: 1, numRec: 1, poked: 0},
+			},
+		},
+		{
+			name: "deleting an entry naming no host impacts no host",
+			initial: []vwPut{
+				{vwKeyA, noHostA},
+				{vwKeyB, sharedB},
+			},
+			hosts: []string{vwHost1, vwHost2, vwHost3},
+			key:   vwKeyA,
+			after: nil,
+			want: map[string]vwImpact{
+				vwHost1: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost2: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost3: {genCtr: 1, numRec: 1, poked: 0},
+			},
+		},
+		{
+			// Revoking every host is an empty list, which takes the
+			// entry out of every view it was in.
+			name:    "revoking every host",
+			initial: []vwPut{{vwKeyB, sharedB}},
 			hosts:   []string{vwHost1, vwHost2, vwHost3},
 			key:     vwKeyB,
 			after:   cdcEntry(vwNqnB, nil, confB),
 			want: map[string]vwImpact{
-				vwHost1: {genCtr: 1, numRec: 1, poked: 0},
+				vwHost1: {genCtr: 2, numRec: 0, poked: 2},
+				vwHost2: {genCtr: 2, numRec: 0, poked: 2},
+				vwHost3: {genCtr: 2, numRec: 0, poked: 2},
+			},
+		},
+		{
+			// Granting hosts to an entry that named none impacts exactly
+			// the hosts granted.
+			name:    "granting hosts to an entry naming no host",
+			initial: []vwPut{{vwKeyB, cdcEntry(vwNqnB, nil, confB)}},
+			hosts:   []string{vwHost1, vwHost2, vwHost3},
+			key:     vwKeyB,
+			after:   cdcEntry(vwNqnB, []string{vwHost1, vwHost2}, confB),
+			want: map[string]vwImpact{
+				vwHost1: {genCtr: 2, numRec: 1, poked: 2},
 				vwHost2: {genCtr: 2, numRec: 1, poked: 2},
-				vwHost3: {genCtr: 2, numRec: 1, poked: 2},
+				vwHost3: {genCtr: 1, numRec: 0, poked: 0},
 			},
 		},
 		{
 			name:    "identical re-put",
-			initial: []vwPut{{vwKeyA, openA}},
+			initial: []vwPut{{vwKeyA, sharedA}},
 			hosts:   []string{vwHost1, vwHost2},
 			key:     vwKeyA,
-			after:   cdcEntry(vwNqnA, nil, tcpConf(vwAddr1, vwSvcId1)),
+			after:   cdcEntry(vwNqnA, vwEveryHost, tcpConf(vwAddr1, vwSvcId1)),
 			want: map[string]vwImpact{
 				vwHost1: {genCtr: 1, numRec: 1, poked: 0},
 				vwHost2: {genCtr: 1, numRec: 1, poked: 0},
@@ -659,7 +723,7 @@ func TestRegistryImpact(t *testing.T) {
 		},
 		{
 			name:    "delete of a key that was never there",
-			initial: []vwPut{{vwKeyA, openA}},
+			initial: []vwPut{{vwKeyA, sharedA}},
 			hosts:   []string{vwHost1},
 			key:     vwKeyE,
 			after:   nil,
@@ -747,8 +811,11 @@ func TestRegistryGenCtrBumpsOnlyOnImpact(t *testing.T) {
 			wantOne: 1, wantTwo: 1,
 		},
 		{
-			name:    "an open entry impacts both",
-			event:   func() { f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA)) },
+			name: "an entry naming both hosts impacts both",
+			event: func() {
+				f.put(vwKeyA, cdcEntry(
+					vwNqnA, []string{vwHost1, vwHost2}, confA))
+			},
 			wantOne: 2, wantTwo: 2,
 		},
 		{
@@ -774,7 +841,17 @@ func TestRegistryGenCtrBumpsOnlyOnImpact(t *testing.T) {
 			wantOne: 3, wantTwo: 3,
 		},
 		{
-			name:    "deleting the open entry impacts both",
+			name:    "an entry naming no host impacts nobody",
+			event:   func() { f.put(vwKeyE, cdcEntry(vwNqnE, nil, confA)) },
+			wantOne: 3, wantTwo: 3,
+		},
+		{
+			name:    "deleting the entry naming no host impacts nobody",
+			event:   func() { f.del(vwKeyE) },
+			wantOne: 3, wantTwo: 3,
+		},
+		{
+			name:    "deleting the entry naming both impacts both",
 			event:   func() { f.del(vwKeyA) },
 			wantOne: 4, wantTwo: 4,
 		},
@@ -808,8 +885,8 @@ func TestRegistryRendersAViewOnlyWhenItIsRead(t *testing.T) {
 	confA := tcpConf(vwAddr1, vwSvcId1)
 	confA2 := tcpConf(vwAddr1, vwSvcId2)
 	confB := tcpConf(vwAddr2, vwSvcId1)
-	hosts := []string{vwHost1, vwHost2, vwHost3}
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA))
+	hosts := vwEveryHost
+	f.put(vwKeyA, cdcEntry(vwNqnA, vwEveryHost, confA))
 	for _, host := range hosts {
 		f.attach(host, 1)
 	}
@@ -819,8 +896,8 @@ func TestRegistryRendersAViewOnlyWhenItIsRead(t *testing.T) {
 	// hosts: A gains a second record, B appears, A goes. Not one view is
 	// rendered, and every host is still told, each time with the NUMREC its
 	// view then has.
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA, confA2))
-	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
+	f.put(vwKeyA, cdcEntry(vwNqnA, vwEveryHost, confA, confA2))
+	f.put(vwKeyB, cdcEntry(vwNqnB, vwEveryHost, confB))
 	f.del(vwKeyA)
 	if got := f.renders() - base; got != 0 {
 		t.Fatalf("three events rendered %d views, want 0", got)
@@ -899,12 +976,19 @@ func TestRegistryRendersAViewOnlyWhenItIsRead(t *testing.T) {
 // BenchmarkViewEventFanout measures DS6's cost rule with 200 active hosts
 // that all see the same 2000 records (2000 KiB of view each) and a watch
 // event on an entry every one of them sees, the widest fan-out one event can
-// have. "event" is that event applied, which the watcher does holding the
-// registry lock, and delivered; "event+reads" adds the Get Log Page snapshot
-// every impacted host then takes, which is where a view's render is paid.
+// have. Every entry names all 200 hosts, since an entry with an empty
+// allowed_hosts is visible to no host (DS4). "event" is that event applied,
+// which the watcher does holding the registry lock, and delivered;
+// "event+reads" adds the Get Log Page snapshot every impacted host then
+// takes, which is where a view's render is paid.
 func BenchmarkViewEventFanout(b *testing.B) {
 	const hostCnt = 200
 	const recordCnt = 2000
+	hosts := make([]string, hostCnt)
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("%s%08x-0000-0000-0000-000000000000",
+			vwHostPrefix, i)
+	}
 	for _, bc := range []struct {
 		name  string
 		reads bool
@@ -916,13 +1000,11 @@ func BenchmarkViewEventFanout(b *testing.B) {
 			ctx := context.Background()
 			reg := newRegistry()
 			for i := 0; i < recordCnt; i++ {
-				reg.apply(ctx, vwKey(0x10, uint64(i), 1), stressEntry(i, nil))
+				reg.apply(ctx, vwKey(0x10, uint64(i), 1),
+					stressEntry(i, hosts))
 			}
-			hosts := make([]string, hostCnt)
-			for i := range hosts {
-				hosts[i] = fmt.Sprintf("%s%08x-0000-0000-0000-000000000000",
-					vwHostPrefix, i)
-				reg.attach(hosts[i], stubConn())
+			for _, host := range hosts {
+				reg.attach(host, stubConn())
 			}
 			// The event flips the first entry's transport between two ports,
 			// neither of them its initial one, so every event moves every
@@ -930,8 +1012,8 @@ func BenchmarkViewEventFanout(b *testing.B) {
 			k := vwKey(0x10, 0, 1)
 			const nqn = "nqn.2024-01.dnv:ss0"
 			flip := [2]*entry{
-				newEntry(cdcEntry(nqn, nil, tcpConf(vwAddr1, vwSvcId1))),
-				newEntry(cdcEntry(nqn, nil, tcpConf(vwAddr1, vwSvcId2))),
+				newEntry(cdcEntry(nqn, hosts, tcpConf(vwAddr1, vwSvcId1))),
+				newEntry(cdcEntry(nqn, hosts, tcpConf(vwAddr1, vwSvcId2))),
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -960,7 +1042,7 @@ func TestHostStateLifecycle(t *testing.T) {
 	f := vwNew(t)
 	confA := tcpConf(vwAddr1, vwSvcId1)
 	confB := tcpConf(vwAddr2, vwSvcId2)
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA))
+	f.put(vwKeyA, cdcEntry(vwNqnA, []string{vwHost1}, confA))
 
 	if got := f.reg.hostCount(); got != 0 {
 		t.Fatalf("hostCount before any connection = %d, want 0", got)
@@ -979,7 +1061,7 @@ func TestHostStateLifecycle(t *testing.T) {
 	}
 
 	// An impact moves it, and pokes the one connection there is.
-	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
+	f.put(vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB))
 	if genCtr, _, _ = f.view(vwHost1); genCtr != 2 {
 		t.Fatalf("after an impact: genctr = %d, want 2", genCtr)
 	}
@@ -1025,7 +1107,7 @@ func TestHostStateLifecycle(t *testing.T) {
 	}
 
 	// While the host is gone the served state moves on, unnoticed.
-	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
+	f.put(vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB))
 
 	// A new connection of the same hostnqn restarts at 1 (DS7) and sees
 	// the current state, not the one it left.
@@ -1073,13 +1155,13 @@ func TestRegistryReplaceMatchesApply(t *testing.T) {
 
 	// The state both registries start from.
 	initial := []vwPut{
-		{vwKeyA, cdcEntry(vwNqnA, nil, confA)},
+		{vwKeyA, cdcEntry(vwNqnA, vwEveryHost, confA)},
 		{vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB)},
 	}
 	// The changes: A's transport moves, B is deleted, E appears for h2, and
 	// an entry only h3 (never connected) can see churns.
 	final := []vwPut{
-		{vwKeyA, cdcEntry(vwNqnA, nil, confA2)},
+		{vwKeyA, cdcEntry(vwNqnA, vwEveryHost, confA2)},
 		{vwKeyE, cdcEntry(vwNqnE, []string{vwHost2}, confE)},
 		{vwKey(0x3c, 9, 9), cdcEntry("nqn.2024-01.io.dnv:ss-x",
 			[]string{vwHost3}, confE)},
@@ -1276,6 +1358,54 @@ func TestRegistryReplaceDiffsADirtyView(t *testing.T) {
 	}
 }
 
+// TestRegistryReplaceIgnoresEntriesNamingNoHost proves DS4's empty list on
+// the WV4 path: a rescan whose only differences are entries with an empty
+// allowed_hosts — one appears, one moves its transport, one goes — installs
+// the new map and impacts no active host, just as the same changes arriving
+// as events impact none (DS6).
+func TestRegistryReplaceIgnoresEntriesNamingNoHost(t *testing.T) {
+	f := vwNew(t)
+	confA := tcpConf(vwAddr1, vwSvcId1)
+	confA2 := tcpConf(vwAddr1, vwSvcId2)
+	confB := tcpConf(vwAddr2, vwSvcId1)
+	confE := tcpConf(vwAddr2, vwSvcId2)
+	keyX := vwKey(0x3c, 9, 9)
+	// One entry every host sees, so no view is empty, and two that name no
+	// host.
+	f.put(vwKeyA, cdcEntry(vwNqnA, vwEveryHost, confA))
+	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
+	f.put(keyX, cdcEntry("nqn.2024-01.io.dnv:ss-x", nil, confE))
+	for _, host := range vwEveryHost {
+		f.attach(host, 2)
+	}
+
+	ds := f.reg.replace(f.ctx, map[entryKey]*entry{
+		vwKeyA: newEntry(cdcEntry(vwNqnA, vwEveryHost, confA)),
+		vwKeyB: newEntry(cdcEntry(vwNqnB, nil, confA2)),
+		vwKeyE: newEntry(cdcEntry(vwNqnE, nil, confE)),
+	})
+	deliver(ds)
+
+	if len(ds) != 0 {
+		t.Errorf("%d deliveries, want 0", len(ds))
+	}
+	if got := f.reg.entryCount(); got != 3 {
+		t.Errorf("entryCount after the rescan = %d, want 3", got)
+	}
+	for _, host := range vwEveryHost {
+		genCtr, numRec, body := f.view(host)
+		if genCtr != 1 || numRec != 1 {
+			t.Errorf("%s = (%d, %d), want (1, 1)", host, genCtr, numRec)
+		}
+		if !bytes.Equal(body, vwRecord(t, vwNqnA, confA)) {
+			t.Errorf("%s was not served exactly the entry naming it", host)
+		}
+		if got := f.pokes(host); got != 0 {
+			t.Errorf("%s: %d connections poked, want 0", host, got)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DS9 — snapshot isolation
 // ---------------------------------------------------------------------------
@@ -1295,8 +1425,8 @@ func TestSnapshotIsolation(t *testing.T) {
 	confA2 := tcpConf(vwAddr1, vwSvcId2)
 	confB := tcpConf(vwAddr2, vwSvcId1)
 	confC := tcpConf(vwAddr2, vwSvcId2)
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA))
-	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
+	f.put(vwKeyA, cdcEntry(vwNqnA, []string{vwHost1}, confA))
+	f.put(vwKeyB, cdcEntry(vwNqnB, []string{vwHost1}, confB))
 	f.attach(vwHost1, 1)
 
 	genCtr, numRec, body := f.reg.snapshot(vwHost1)
@@ -1309,11 +1439,11 @@ func TestSnapshotIsolation(t *testing.T) {
 	// An equal-length change and a second command's snapshot of it, then a
 	// growing change, all while the command is still paging through the
 	// snapshot it took.
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA2))
+	f.put(vwKeyA, cdcEntry(vwNqnA, []string{vwHost1}, confA2))
 	if midGen, _, _ := f.reg.snapshot(vwHost1); midGen != 2 {
 		t.Fatalf("the second command's snapshot genctr = %d, want 2", midGen)
 	}
-	f.put(vwKeyE, cdcEntry(vwNqnE, nil, confC))
+	f.put(vwKeyE, cdcEntry(vwNqnE, []string{vwHost1}, confC))
 
 	if !bytes.Equal(body, keep) {
 		t.Error("a later apply or render mutated a taken snapshot's body")
@@ -1358,7 +1488,7 @@ func TestViewChangedRecords(t *testing.T) {
 	f := vwNew(t)
 	confA := tcpConf(vwAddr1, vwSvcId1)
 	confB := tcpConf(vwAddr2, vwSvcId2)
-	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA))
+	f.put(vwKeyA, cdcEntry(vwNqnA, vwEveryHost, confA))
 	f.attach(vwHost1, 2)
 	f.attach(vwHost2, 1)
 	if got := logs.count(msgViewChanged); got != 0 {
@@ -1416,5 +1546,14 @@ func TestViewChangedRecords(t *testing.T) {
 	}
 	if recs[1]["numrec"] != uint64(2) {
 		t.Errorf("host 2 numrec = %v, want 2", recs[1]["numrec"])
+	}
+
+	// An entry that names no host is visible to no host (DS4): neither its
+	// put nor its delete is logged.
+	f.put(vwKeyE, cdcEntry(vwNqnE, nil, confA))
+	f.del(vwKeyE)
+	if got := logs.count(msgViewChanged); got != 2 {
+		t.Errorf("an entry naming no host took the %q records to %d, want 2",
+			msgViewChanged, got)
 	}
 }

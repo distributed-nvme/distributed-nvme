@@ -149,12 +149,13 @@ Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the
-legs, pending until their probers' first round (CN11); an empty `allowed_hosts`
-admitting any host (CN16); host IO; clean check rounds, the namespace identity
-included (`dnagent.md` SH17); the raw thin-pool status line the auto-grow
-parses (CN28); and a teardown by an empty pointer list, re-sent while it
-replies leftover (CN7, CN21), leaving the CN no dm device, clone-metadata
-wrapper (CN18) or host-facing subsystem and a clean `GetCnInfo` (CN30).
+legs, pending until their probers' first round (CN11); the subsystem admitting
+exactly the emulated host, "attr_allow_any_host" "0" (CN16); host IO; clean
+check rounds, the namespace identity included (`dnagent.md` SH17); the raw
+thin-pool status line the auto-grow parses (CN28); and a teardown by an empty
+pointer list, re-sent while it replies leftover (CN7, CN21), leaving the CN no
+dm device, clone-metadata wrapper (CN18) or host-facing subsystem and a clean
+`GetCnInfo` (CN30).
 
 **redund** builds md-raid1 groups across both DNs under a primary and a
 standby. The primary creates both with `--assume-clean` over zeroed legs

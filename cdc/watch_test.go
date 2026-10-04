@@ -272,14 +272,16 @@ func TestWatchScanBuildsOwnedMap(t *testing.T) {
 	badValueKey := testKey(0x00, 0x3, 0xd)
 	badKey := model.CdcEntryPrefix() + "not-a-cdc-entry-key"
 
+	// Every entry below names the host whose view is asserted at the end,
+	// so whatever the scan keeps of them is served to that host (DS4).
 	h.store.set(t, ownedKey, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssa", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
 		tcpConf("10.0.0.1", "4420"),
 	))
 	// Owned by range 1, which this instance was not given: expected, and
 	// therefore silent.
 	h.store.set(t, foreignShardKey, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssb", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssb", []string{watchHostNqn},
 		tcpConf("10.0.0.2", "4420"),
 	))
 	// One rdma transport (skipped, DS3) and one tcp one (served).
@@ -300,7 +302,7 @@ func TestWatchScanBuildsOwnedMap(t *testing.T) {
 	// decodes.
 	h.store.setRaw(badValueKey, []byte{0xff, 0x01, 0x02})
 	h.store.set(t, badKey, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:sse", nil,
+		"nqn.2026-01.io.dnv-test:cdc:sse", []string{watchHostNqn},
 		tcpConf("10.0.0.5", "4420"),
 	))
 	wantRev := h.store.currentRev()
@@ -339,8 +341,8 @@ func TestWatchScanBuildsOwnedMap(t *testing.T) {
 	}
 
 	// The foreign transport and the foreign address family were each
-	// dropped and the rest of their entries still serve: this host sees the
-	// open entry plus the surviving half of each of the other two.
+	// dropped and the rest of their entries still serve: this host sees all
+	// of ownedKey's entry plus the surviving half of each of the other two.
 	h.attachHost(watchHostNqn)
 	h.assertView(watchHostNqn, 1, 3)
 }
@@ -463,9 +465,10 @@ func TestWatchAppliesEvents(t *testing.T) {
 	unownedKey := testKey(0x91, 0x1, 0xc)
 	badKey := model.CdcEntryPrefix() + "still-not-a-key"
 
-	// A put on an owned key: upsert, log, impact.
+	// A put on an owned key: upsert, log, impact. Every entry of this test
+	// names the host, so only parsing keeps one from impacting it.
 	gen.put(keyA, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssa", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
 		tcpConf("10.0.0.1", "4420"),
 	))
 	applied := h.logs.waitFor(t, msgEntryApplied, 1)
@@ -494,11 +497,11 @@ func TestWatchAppliesEvents(t *testing.T) {
 	// are applied serially, so the third one's record proves the first two
 	// are done being ignored.
 	gen.put(unownedKey, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssx", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssx", []string{watchHostNqn},
 		tcpConf("10.0.0.9", "4420"),
 	))
 	gen.put(badKey, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssy", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssy", []string{watchHostNqn},
 		tcpConf("10.0.0.8", "4420"),
 	))
 	gen.put(keyB, cdcEntry(
@@ -573,6 +576,48 @@ func TestWatchAppliesEvents(t *testing.T) {
 	}
 }
 
+// TestWatchAppliesAnEntryNamingNoHost proves WV3 for an entry whose
+// allowed_hosts is empty: its put and its delete are applied and logged like
+// any other event, and impact no host (DS4, DS6) — no `view changed`, no
+// GENCTR move and no poke — while the registry holds the entry in between.
+func TestWatchAppliesAnEntryNamingNoHost(t *testing.T) {
+	h := newWatchHarness(t, 0x0)
+	h.start()
+	h.logs.waitFor(t, msgScanComplete, 1)
+	gen := h.store.nextWatch(t)
+	c := h.attachHost(watchHostNqn)
+	key := testKey(0x01, 0x1, 0xa)
+
+	gen.put(key, cdcEntry(
+		"nqn.2026-01.io.dnv-test:cdc:ssa", nil,
+		tcpConf("10.0.0.1", "4420"),
+	))
+	applied := h.logs.waitFor(t, msgEntryApplied, 1)
+	if got := watchAttrString(t, applied[0], "op"); got != "put" {
+		t.Errorf("cdc entry applied op = %q, want %q", got, "put")
+	}
+	if got := h.reg.entryCount(); got != 1 {
+		t.Errorf("registry holds %d entries after the put, want 1", got)
+	}
+	h.assertView(watchHostNqn, 1, 0)
+
+	gen.del(key)
+	applied = h.logs.waitFor(t, msgEntryApplied, 2)
+	if got := watchAttrString(t, applied[1], "op"); got != "delete" {
+		t.Errorf("cdc entry applied op = %q, want %q", got, "delete")
+	}
+	if got := h.reg.entryCount(); got != 0 {
+		t.Errorf("registry holds %d entries after the delete, want 0", got)
+	}
+	h.assertView(watchHostNqn, 1, 0)
+	if poked(c) {
+		t.Error("an entry naming no host poked the host's connection")
+	}
+	if got := h.logs.count(msgViewChanged); got != 0 {
+		t.Errorf("%d view changed records, want 0", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WV4 — watch failure
 // ---------------------------------------------------------------------------
@@ -642,7 +687,7 @@ func TestWatchRescanDiffsMissedChange(t *testing.T) {
 	h := newWatchHarness(t, 0x0)
 	keyA := testKey(0x01, 0x1, 0xa)
 	h.store.set(t, keyA, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssa", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
 		tcpConf("10.0.0.1", "4420"),
 	))
 	h.start()
@@ -695,7 +740,7 @@ func TestWatchRetriesFailedScan(t *testing.T) {
 	h := newWatchHarness(t, 0x0)
 	keyA := testKey(0x01, 0x1, 0xa)
 	h.store.set(t, keyA, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssa", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
 		tcpConf("10.0.0.1", "4420"),
 	))
 	h.start()
@@ -796,7 +841,7 @@ func TestWatchNeverWrites(t *testing.T) {
 	keyA := testKey(0x01, 0x1, 0xa)
 	keyB := testKey(0x02, 0x1, 0xb)
 	h.store.set(t, keyA, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssa", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
 		tcpConf("10.0.0.1", "4420"),
 	))
 	before := h.store.keys()
@@ -807,7 +852,7 @@ func TestWatchNeverWrites(t *testing.T) {
 	h.attachHost(watchHostNqn)
 
 	gen.put(keyB, cdcEntry(
-		"nqn.2026-01.io.dnv-test:cdc:ssb", nil,
+		"nqn.2026-01.io.dnv-test:cdc:ssb", []string{watchHostNqn},
 		tcpConf("10.0.0.2", "4420"),
 	))
 	h.logs.waitFor(t, msgEntryApplied, 1)

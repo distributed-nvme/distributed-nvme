@@ -8,7 +8,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **agent** — Either role of `dnv-agent`: the process on a disk node or a controller node that converges the local device-mapper, md, nvmet and nvme-host state to the desired state it is sent, persists the last accepted request per object, and reports live state. An agent never talks to etcd.
 
-**allowed hosts** — The host NQNs a subsystem admits (`allowed_hosts`). An empty list opens a host-facing subsystem to every host ("attr_allow_any_host") and shows its cdc entry to every host; every dnv-internal subsystem links only the hosts it lists, so a transfer, which lists the destination cntlrs' host NQNs, admits none with an empty list.
+**allowed hosts** — The host NQNs a subsystem admits (`allowed_hosts`), its only admission gate, by one rule for host-facing and dnv-internal subsystems alike: a subsystem admits exactly the hosts its list names, and a host-facing subsystem's cdc entry is shown to exactly those hosts. An empty list therefore admits no host and shows the entry to no host, which is how a subsystem is staged before its hosts are granted, or closed to new connections by revoking every host (see `architecture.md`, Primary cntlr, and `cdc.md` DS4).
 
 **ANA groups, fixed ANA groups** — The groups every agent's nvmet port carries with fixed ids and states, optimized, non-optimized and inaccessible, written once at port setup (`AnaGrpIdOptimized`, `AnaGrpIdNonOptimized`, `AnaGrpIdInaccessible`). Every ANA transition moves a namespace by rewriting its "ana_grpid"; a group keeps its fixed state, which the port converge only restores.
 

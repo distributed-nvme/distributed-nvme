@@ -211,8 +211,9 @@ func TestStringListKeepsOrder(t *testing.T) {
 	if strings.Join(list, ",") != "nqn.h1,nqn.h2" {
 		t.Fatalf("allowed = %v, want [nqn.h1 nqn.h2]", []string(list))
 	}
-	// An empty --allowed would be a host nothing can ever match, and DS4
-	// would filter every host out of an entry that was meant to be open.
+	// No host connects under an empty host NQN (NP5 refuses an empty
+	// HOSTNQN), so an empty --allowed would be a host nothing can ever match;
+	// the driver refuses it rather than storing it.
 	if err := list.Set("  "); err == nil {
 		t.Fatalf("Set of an empty hostnqn succeeded, want an error")
 	}
@@ -232,11 +233,11 @@ func TestEntryKeyGolden(t *testing.T) {
 	}
 }
 
-// TestOpenEntryRendersEmptyAllowedHosts is why marshalOpts sets
-// EmitUnpopulated: ssA is the DS6 entry visible to everyone, and its
-// allowed_hosts must be readable as an explicit [] in a `list` row rather than
-// be missing from the document.
-func TestOpenEntryRendersEmptyAllowedHosts(t *testing.T) {
+// TestEntryNamingNoHostRendersEmptyAllowedHosts is why marshalOpts sets
+// EmitUnpopulated: where the suite puts ssA naming no host (DS4's empty list),
+// its allowed_hosts must be readable as an explicit [] in a `list` row rather
+// than be missing from the document.
+func TestEntryNamingNoHostRendersEmptyAllowedHosts(t *testing.T) {
 	entry := &pb.CdcEntry{
 		Nqn: "nqn.2024-01.io.dnv-it:cdc:ssa",
 		NvmeTrConfList: []*pb.NvmeTrConf{{

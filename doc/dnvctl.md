@@ -502,7 +502,11 @@ its device with the group's `--name`, where gatewayctl spells it `--td`.
 `ss list` is the only gateway read that shows namespaces: a namespace is a
 field of its subsystem, so the `ns` group creates and changes namespaces but
 has no read of its own. `ss set-hosts` is a full replacement of
-`allowed_hosts`.
+`allowed_hosts`. An empty list admits no host
+(`architecture.md`, Primary cntlr), which is how a subsystem is staged or
+closed to new connections: one made by `ss create` without `--hosts` admits
+no host until `ss set-hosts` grants its hosts, and `ss set-hosts` with an
+empty `--hosts` revokes every host.
 
 ### `ns` — `ctl/ns.go`
 

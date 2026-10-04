@@ -28,9 +28,9 @@
 //     They carry --trace-id, so a failing run still correlates every write of
 //     the driver with the case that made it.
 //   - protojson is emitted with EmitUnpopulated, so an entry with no
-//     allowed_hosts — the DS6 "visible to everyone" entry, which the suite
-//     uses for ssA — reads back as an explicit [] instead of vanishing from
-//     the document.
+//     allowed_hosts — visible to no host (DS4), the way put_matrix writes
+//     ssA — reads back as an explicit [] instead of vanishing from the
+//     document.
 //   - Ids accept decimal or 0x hex; --shard is always read as HEX (the suite
 //     spreads the entry set over 00, 07, 3c, 80, ff and 81).
 //
@@ -91,7 +91,8 @@ func usageDie(format string, args ...any) {
 // marshalOpts renders every message this driver prints. UseProtoNames keeps
 // the JSON field names identical to the schema.proto spelling the assertions
 // quote (nvme_tr_conf_list, allowed_hosts); EmitUnpopulated keeps an empty
-// repeated field visible, which is what an open entry (DS6) needs.
+// repeated field visible, so an entry that names no host (DS4) prints its
+// allowed_hosts as [].
 var marshalOpts = protojson.MarshalOptions{
 	UseProtoNames:   true,
 	EmitUnpopulated: true,
@@ -495,7 +496,8 @@ func cmdPut(g *globals, args []string) {
 		"one nvme_tr_conf, "+trConfForm+" (repeatable, order preserved)")
 	var allowed stringList
 	fs.Var(&allowed, "allowed",
-		"one allowed hostnqn (repeatable; none at all means every host)")
+		"one allowed hostnqn (repeatable; with none, the entry is "+
+			"visible to no host, cdc.md DS4)")
 	fs.Parse(args)
 
 	key, cid := entryKey(g, &shard, spId, ssId)

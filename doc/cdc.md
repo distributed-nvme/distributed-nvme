@@ -158,7 +158,10 @@ entry per element of `nvme_tr_conf_list`:
   collision is harmless, because the field is informational.
 
 DS4. **Visibility.** Host h — its Connect hostnqn, matched as an exact
-string — sees entry e iff e's `allowed_hosts` is empty or contains h.
+string — sees entry e iff e's `allowed_hosts` contains h, so an entry with
+an empty `allowed_hosts` is visible to no host. Visibility thereby mirrors
+the subsystem's admission (`architecture.md`, Primary cntlr, step 6): a
+host is offered only subsystems whose allowed hosts name it.
 
 DS5. **View.** A host's view is the rendered records of its visible owned
 entries in the deterministic order (`cluster_id`, `shard_code`, `sp_id`,
@@ -175,9 +178,10 @@ is set on each of the host's connections, and delivery is attempted on each
 not even its GENCTR. So a watched change produces an AEN only on the hosts
 whose rendered, filtered log page content actually changes — gaining an
 entry, losing one (including by `allowed_hosts` removal), or a field change
-inside a visible entry — and an entry with an empty `allowed_hosts` is
-visible to everyone, so its changes impact every active host. An
-`allowed_hosts` edit that keeps a host's membership changes no rendered
+inside a visible entry. An entry with an empty `allowed_hosts` is visible to
+no host (DS4), so while its list stays empty nothing that happens to it
+impacts a host: not its creation, not a field change and not its deletion.
+An `allowed_hosts` edit that keeps a host's membership changes no rendered
 byte and therefore does not impact it (the cdc suite asserts this).
 
 The decision renders no view: the event changes one entry, whose place in
@@ -585,22 +589,25 @@ the same target.
   boundary, a real host connect through the cdc, one read of the dm-zero
   backend, and the clean deletion of the entry;
 * matrix — the full grid of every instance against every identity, exact
-  in every cell: twins identical, each host's union complete, the open
-  entry visible to anyone, a genuinely empty log for the ghost in one half,
-  two records for the subsystem on two ports, an entry of a second cluster,
-  and each host connecting to exactly the subsystems it may see, ending
-  with two live paths to the two-port subsystem;
+  in every cell: twins identical, each host's union complete, an entry
+  with an empty `allowed_hosts` visible to no identity, a genuinely empty
+  log for the ghost from every instance and for the second host from one
+  half, two records for the subsystem on two ports, an entry of a second
+  cluster, and each host connecting to exactly the subsystems it may see,
+  ending with two live paths to the two-port subsystem;
 * lowlevel — plain nvme-cli with nvme-stas stopped, over one persistent
   discovery connection per host: the AEN uevent reaches exactly the
-  impacted host, each host's GENCTR moves only on its own impact, an
+  impacted hosts, each host's GENCTR moves only on its own impact, an
   `allowed_hosts` edit that keeps a host's membership moves nothing for
-  it, and the controllers stay live across several keep-alive periods;
+  it, the deletion of an entry with an empty `allowed_hosts` moves nothing
+  for either host, and the controllers stay live across several keep-alive
+  periods;
 * stas — nvme-stas end to end: its discovery connections to every
-  instance, data connections with no manual command, auto-connect of a new
-  entry, re-point of a subsystem whose entry moves its transport the way a
-  cntlr replacement does, with the device surviving throughout,
-  auto-disconnect of a deleted entry, and a mass disconnect when the prefix
-  is wiped;
+  instance, data connections with no manual command to exactly the entries
+  each host sees, auto-connect of a new entry, re-point of a subsystem
+  whose entry moves its transport the way a cntlr replacement does, with
+  the device surviving throughout, auto-disconnect of a deleted entry, and
+  a mass disconnect when the prefix is wiped;
 * ha — with nvme-stas running: a killed twin costs nothing while the other
   serves its half alone, a restarted twin serves exactly what its twin
   serves, and a full-fleet kill and relaunch under live hosts leaves every
@@ -610,16 +617,17 @@ the same target.
 WV1, WV3, DS2 at the instance boundary, DS7 (a put while no host is
 connected moves no view) and the connection records of NP5 and NP13; the
 matrix case DS1 to DS5 against real kernels — DS1's all-cluster watch,
-DS2's sharding, DS3's record per transport, DS4's filtering and DS5's
-identical twins; the lowlevel case DS6, DS7, DS8 and NP11 on stock kernels
-with no nvme-stas anywhere, and NP10 on live controllers; the stas case
-DS6's AENs driving nvme-stas's connect, re-point and disconnect with no
-operator action, and NP2 and NP12 on the in-capsule Discovery Information
-Management command nvme-stas sends to every discovery controller; and the
-ha case DS2's twins, WV1's recovery of identical served state from etcd
-alone and DS11's reconnect and catch-up. Left to the unit tests, never
-forced on hardware: log paging past one page, keep-alive expiry and
-AER-limit exhaustion.
+DS2's sharding, DS3's record per transport, DS4's filtering (an entry with
+an empty `allowed_hosts` included) and DS5's identical twins; the lowlevel
+case DS6 (an entry with an empty `allowed_hosts` included), DS7, DS8 and
+NP11 on stock kernels with no nvme-stas anywhere, and NP10 on live
+controllers; the stas case DS6's AENs driving nvme-stas's connect,
+re-point and disconnect with no operator action, and NP2 and NP12 on the
+in-capsule Discovery Information Management command nvme-stas sends to
+every discovery controller; and the ha case DS2's twins, WV1's recovery of
+identical served state from etcd alone and DS11's reconnect and catch-up.
+Left to the unit tests, never forced on hardware: log paging past one
+page, keep-alive expiry and AER-limit exhaustion.
 
 Out of scope: etcd quorum loss and compaction races; TLS and in-band
 authentication; non-TCP transports; digests; scale — every shard code,

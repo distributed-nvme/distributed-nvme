@@ -391,8 +391,7 @@ wait_until() { # <secs> <label> <cmd…>
 }
 
 # assert_none is wait_until's negative twin: settle, then require the command
-# to exit NON-zero. It is how every "and the other host saw nothing" assertion
-# of DS6 is made.
+# to exit NON-zero.
 assert_none() { # <secs> <label> <cmd…>
 	local secs=$1 label=$2
 	shift 2
@@ -504,7 +503,7 @@ tr_arg() { printf 'tcp,ipv4,%s,%d' "$IP2" $((NVMET_PORT_BASE + $1 - 1)); }
 # put_entry writes one CdcEntry of the entry set. Ports is a space-separated
 # list of nvmet port numbers, in the order they must appear (it is the DS5
 # tr-conf index). Every remaining argument is an allowed hostnqn; none means
-# an open entry, visible to everyone (DS4).
+# an entry that names no host, visible to no host (DS4).
 put_entry() { # <ss> <"ports"> [allowed…]
 	local ss=$1 ports=$2
 	shift 2
@@ -536,7 +535,8 @@ del_entry() { # <ss>
 
 wipe_entries() { ctl wipe >/dev/null; }
 
-# put_matrix writes the whole entry set for the current case.
+# put_matrix writes the whole entry set for the current case. ssA names no
+# host: it is DS4's empty list, held by the low half and shown to no identity.
 put_matrix() {
 	put_entry ssa "1"
 	put_entry ssb "2" "$H1NQN"
@@ -1882,8 +1882,8 @@ connected_hosts() { # <dir> -> the hostnqns that connected, sorted unique
 # ---------------------------------------------------------------------------
 
 case_smoke() {
-	stage put "put ssA: cluster $CID, shard ${E_SHARD[ssa]}, open, port1"
-	put_entry ssa "1"
+	stage put "put ssA: cluster $CID, shard ${E_SHARD[ssa]}, H1 only, port1"
+	put_entry ssa "1" "$H1NQN"
 	wait_until "$WAIT_SHORT" "cdc0 to apply the put" \
 		cdc_applied_ge cdc0 1
 
@@ -1933,6 +1933,17 @@ cdc_applied_ge() { # <dir> <n>
 		'select(.msg == "cdc entry applied" and .op == "put")')" -ge "$2" ]
 }
 
+# cdc_deletes_at counts the deletes one instance has applied, and
+# cdc_deletes_gt is the polling form against a baseline: the anchor of a
+# delete that must impact no host, where no AEN arrives to wait for.
+cdc_deletes_at() { # <dir>
+	count_recs "$1" 'select(.msg == "cdc entry applied" and .op == "delete")'
+}
+
+cdc_deletes_gt() { # <dir> <baseline>
+	[ "$(cdc_deletes_at "$1")" -gt "$2" ]
+}
+
 # disc_empty needs the instance to ANSWER with an empty log, which is not the
 # same thing as failing to answer.
 disc_empty() { # <h1|h2> <instance>
@@ -1959,21 +1970,23 @@ case_matrix() {
 	done
 
 	stage grid "the 4 instances x 3 identities discover grid"
-	# H1 sees A (open), B and E (named) in the low half, D in the high half.
-	assert_disc h1 0 "" "cdc0 / H1" ssa:1 ssb:2 sse:3
-	assert_disc h1 1 "" "cdc1 / H1" ssa:1 ssb:2 sse:3
+	# ssA names no host, so no identity sees it in any cell, although the
+	# low half holds it (DS4's empty list). H1 sees B and E in the low half
+	# and D in the high half.
+	assert_disc h1 0 "" "cdc0 / H1" ssb:2 sse:3
+	assert_disc h1 1 "" "cdc1 / H1" ssb:2 sse:3
 	assert_disc h1 2 "" "cdc2 / H1" ssd:1 ssd:2
 	assert_disc h1 3 "" "cdc3 / H1" ssd:1 ssd:2
-	# H2 sees only the open A in the low half; C, D and the cross-cluster F
-	# in the high half.
-	assert_disc h2 0 "" "cdc0 / H2" ssa:1
-	assert_disc h2 1 "" "cdc1 / H2" ssa:1
+	# H2 gets a genuinely empty log in the low half, and C, D and the
+	# cross-cluster F in the high half.
+	assert_disc h2 0 "" "cdc0 / H2"
+	assert_disc h2 1 "" "cdc1 / H2"
 	assert_disc h2 2 "" "cdc2 / H2" ssc:3 ssd:1 ssd:2 ssf:4
 	assert_disc h2 3 "" "cdc3 / H2" ssc:3 ssd:1 ssd:2 ssf:4
-	# The ghost is allowed nowhere, so it sees the open entry and nothing
-	# else — and a genuinely empty log in the high half.
-	assert_disc h1 0 ghost "cdc0 / ghost" ssa:1
-	assert_disc h1 1 ghost "cdc1 / ghost" ssa:1
+	# The ghost is named nowhere, so it gets a genuinely empty log from
+	# every instance.
+	assert_disc h1 0 ghost "cdc0 / ghost"
+	assert_disc h1 1 ghost "cdc1 / ghost"
 	assert_disc h1 2 ghost "cdc2 / ghost"
 	assert_disc h1 3 ghost "cdc3 / ghost"
 
@@ -2003,13 +2016,15 @@ case_matrix() {
 	# Await every expected node (Integration test plan, What a pass means)
 	# rather than sampling once: connect-all returns before udev has
 	# published the by-id links.
-	for ss in ssa ssb ssd sse; do wait_dev h1 "$ss"; done
-	for ss in ssa ssc ssd ssf; do wait_dev h2 "$ss"; done
+	for ss in ssb ssd sse; do wait_dev h1 "$ss"; done
+	for ss in ssc ssd ssf; do wait_dev h2 "$ss"; done
 	# The absences are checked only after the presences AND a settle, so a
 	# device that was merely slow cannot read as a device that was filtered.
+	# ssA names no host, so no discovery log offers it and neither host
+	# connects it.
 	sleep "$SETTLE"
-	assert_no_dev h1 "h1 has neither of H2's" ssc ssf
-	assert_no_dev h2 "h2 has neither of H1's" ssb sse
+	assert_no_dev h1 "h1 has neither of H2's, nor ssA" ssa ssc ssf
+	assert_no_dev h2 "h2 has neither of H1's, nor ssA" ssa ssb sse
 
 	stage multipath "ssD shows two live paths on h2: one subsystem, two CNs"
 	svcids=$(subsys_trsvcids h2 ssd)
@@ -2019,8 +2034,8 @@ case_matrix() {
 	stage disconnect "disconnect every dnv-it subsystem on both hosts"
 	host_wipe h1
 	host_wipe h2
-	wait_dev_gone h1 ssa
-	wait_dev_gone h2 ssa
+	wait_dev_gone h1 ssd
+	wait_dev_gone h2 ssd
 }
 
 # ---------------------------------------------------------------------------
@@ -2031,7 +2046,7 @@ case_lowlevel() {
 	[ "$STAS_RUNNING" = 0 ] ||
 		die "case lowlevel needs the stas daemons stopped"
 
-	stage put "put ssA (open, port1) and ssB (H1, port2)"
+	stage put "put ssA (no host, port1) and ssB (H1, port2)"
 	put_entry ssa "1"
 	put_entry ssb "2" "$H1NQN"
 	wait_until "$WAIT_SHORT" "cdc0 to apply both entries" cdc_applied_ge cdc0 2
@@ -2053,8 +2068,10 @@ case_lowlevel() {
 	local g1 g2
 	g1=$(disc_dev_genctr h1 "$devx")
 	g2=$(disc_dev_genctr h2 "$devy")
-	assert_dev_disc h1 "$devx" "h1 baseline" ssa:1 ssb:2
-	assert_dev_disc h2 "$devy" "h2 baseline" ssa:1
+	# cdc0 holds ssA, which names no host, so neither baseline lists it
+	# (DS4), and h2's is a genuinely empty log.
+	assert_dev_disc h1 "$devx" "h1 baseline" ssb:2
+	assert_dev_disc h2 "$devy" "h2 baseline"
 	log "  baseline genctr: h1 $g1, h2 $g2"
 
 	stage capture "start the udev captures on both hosts"
@@ -2067,14 +2084,14 @@ case_lowlevel() {
 	local g1b g2b
 	g1b=$(disc_dev_genctr h1 "$devx")
 	assert_gt "$g1b" "$g1" "h1 genctr after gaining ssE"
-	assert_dev_disc h1 "$devx" "h1 after gaining ssE" ssa:1 ssb:2 sse:3
+	assert_dev_disc h1 "$devx" "h1 after gaining ssE" ssb:2 sse:3
 	# The DS6 negative: a change invisible to h2 before AND after is not an
 	# AEN and not even a GENCTR move for it.
 	sleep "$SETTLE"
 	assert_aen_count h2 "$devy" 0 "h2 AENs after an h1-only change"
 	g2b=$(disc_dev_genctr h2 "$devy")
 	assert_eq "$g2b" "$g2" "h2 genctr after an h1-only change"
-	assert_dev_disc h2 "$devy" "h2 unchanged" ssa:1
+	assert_dev_disc h2 "$devy" "h2 unchanged"
 
 	stage widen "widen ssB to [H1, H2]: h2 gains it, h1's BYTES do not move"
 	put_entry ssb "2" "$H1NQN" "$H2NQN"
@@ -2082,7 +2099,7 @@ case_lowlevel() {
 	local g2c
 	g2c=$(disc_dev_genctr h2 "$devy")
 	assert_gt "$g2c" "$g2b" "h2 genctr after gaining ssB"
-	assert_dev_disc h2 "$devy" "h2 after gaining ssB" ssa:1 ssb:2
+	assert_dev_disc h2 "$devy" "h2 after gaining ssB" ssb:2
 	# DS6 is defined on RENDERED CONTENT: allowed_hosts is not log-page
 	# content, so an edit that keeps h1's membership moves nothing for h1.
 	# This is the only place the rule is observable.
@@ -2095,17 +2112,50 @@ case_lowlevel() {
 	put_entry sse "3" "$H2NQN"
 	wait_aen h1 "$devx" 2
 	wait_aen h2 "$devy" 2
-	assert_dev_disc h1 "$devx" "h1 after losing ssE" ssa:1 ssb:2
-	assert_dev_disc h2 "$devy" "h2 after gaining ssE" ssa:1 ssb:2 sse:3
-	assert_gt "$(disc_dev_genctr h1 "$devx")" "$g1b" "h1 genctr after the move"
-	assert_gt "$(disc_dev_genctr h2 "$devy")" "$g2c" "h2 genctr after the move"
+	assert_dev_disc h1 "$devx" "h1 after losing ssE" ssb:2
+	assert_dev_disc h2 "$devy" "h2 after gaining ssE" ssb:2 sse:3
+	local g1d g2d
+	g1d=$(disc_dev_genctr h1 "$devx")
+	g2d=$(disc_dev_genctr h2 "$devy")
+	assert_gt "$g1d" "$g1b" "h1 genctr after the move"
+	assert_gt "$g2d" "$g2c" "h2 genctr after the move"
 
-	stage open "delete the open ssA: an empty allowed_hosts impacts everyone"
+	stage nohost "delete ssA, which names no host: neither host is impacted"
+	# The DS6 negative of DS4's empty list: ssA was in neither host's view,
+	# so its delete is not an AEN, not a GENCTR move and not a `view
+	# changed` record for either. No AEN comes to wait for, so cdc0's own
+	# record of the delete is the anchor, and the settle after it covers
+	# anything the delete would still have on its way to a host.
+	local dels views
+	dels=$(cdc_deletes_at cdc0)
+	views=$(cdc_msg_count cdc0 "view changed")
 	del_entry ssa
-	wait_aen h1 "$devx" 3
-	wait_aen h2 "$devy" 3
+	wait_until "$WAIT_SHORT" "cdc0 to apply the delete of ssA" \
+		cdc_deletes_gt cdc0 "$dels"
+	sleep "$SETTLE"
+	assert_eq "$(cdc_msg_count cdc0 "view changed")" "$views" \
+		"cdc0 view changed records after deleting ssA"
+	assert_aen_count h1 "$devx" 2 "h1 AENs after deleting ssA"
+	assert_aen_count h2 "$devy" 2 "h2 AENs after deleting ssA"
+	assert_eq "$(disc_dev_genctr h1 "$devx")" "$g1d" \
+		"h1 genctr after deleting ssA"
+	assert_eq "$(disc_dev_genctr h2 "$devy")" "$g2d" \
+		"h2 genctr after deleting ssA"
 	assert_dev_disc h1 "$devx" "h1 after deleting ssA" ssb:2
 	assert_dev_disc h2 "$devy" "h2 after deleting ssA" ssb:2 sse:3
+
+	stage delete "delete ssB, which names both hosts: both lose it"
+	# A loss by delete on both hosts at once, which also proves both
+	# captures were live through the negative above.
+	del_entry ssb
+	wait_aen h1 "$devx" 3
+	wait_aen h2 "$devy" 3
+	assert_dev_disc h1 "$devx" "h1 after deleting ssB"
+	assert_dev_disc h2 "$devy" "h2 after deleting ssB" sse:3
+	assert_gt "$(disc_dev_genctr h1 "$devx")" "$g1d" \
+		"h1 genctr after deleting ssB"
+	assert_gt "$(disc_dev_genctr h2 "$devy")" "$g2d" \
+		"h2 genctr after deleting ssB"
 
 	stage keepalive "3 x the 5 s KATO: both controllers stay live"
 	sleep 16
@@ -2139,7 +2189,7 @@ closed_ge() { # <dir> <n>
 # ---------------------------------------------------------------------------
 
 case_stas() {
-	stage put "put ssA, ssB, ssC, ssD, ssE and the cross-cluster ssF"
+	stage put "put ssA (no host), ssB, ssC, ssD, ssE and the cross-cluster ssF"
 	put_matrix
 	wait_until "$WAIT_SHORT" "cdc0 to apply its three entries" \
 		cdc_applied_ge cdc0 3
@@ -2159,10 +2209,13 @@ case_stas() {
 
 	stage autoconnect "the data connections appear with no nvme command at all"
 	local ss
-	for ss in ssa ssb ssd sse; do wait_dev h1 "$ss"; done
-	for ss in ssa ssc ssd ssf; do wait_dev h2 "$ss"; done
-	assert_no_dev h1 "h1 got nothing of H2's" ssc ssf
-	assert_no_dev h2 "h2 got nothing of H1's" ssb sse
+	for ss in ssb ssd sse; do wait_dev h1 "$ss"; done
+	for ss in ssc ssd ssf; do wait_dev h2 "$ss"; done
+	# The absences after a settle, as in the matrix case: ssA names no host,
+	# so it is in no discovery log stacd reads and neither host connects it.
+	sleep "$SETTLE"
+	assert_no_dev h1 "h1 got nothing of H2's, nor ssA" ssa ssc ssf
+	assert_no_dev h2 "h2 got nothing of H1's, nor ssA" ssa ssb sse
 	local svcids
 	svcids=$(subsys_trsvcids h1 ssd)
 	assert_eq "$svcids" "$(printf '%d\n%d' $((NVMET_PORT_BASE)) \
@@ -2290,8 +2343,8 @@ case_ha() {
 		stas_start_both
 	fi
 
-	stage put "put ssA (open, port1) and ssC (H2, port3)"
-	put_entry ssa "1"
+	stage put "put ssA (H1 and H2, port1) and ssC (H2, port3)"
+	put_entry ssa "1" "$H1NQN" "$H2NQN"
 	put_entry ssc "3" "$H2NQN"
 	wait_stas_converged h1
 	wait_stas_converged h2
