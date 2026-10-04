@@ -3655,9 +3655,9 @@ device is there, the next enumeration finds it.
   file or loop device, or the agent's port or one of its ANA groups — that
   the call's probe read absent, and an ANA group it read in a state other
   than its fixed one while the port's transport attributes match
-  (`cnagent.md` CN30). The agent log carries the full list once per pass
-  (`log.md`, Leftovers), so a lingering leftover is visible every round
-  rather than once.
+  (`cnagent.md` CN30). The agent log carries the full list (`log.md`,
+  Leftovers), so a lingering leftover is visible every round rather than
+  once.
 
 ## Workers
 
