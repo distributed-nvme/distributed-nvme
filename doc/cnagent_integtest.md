@@ -63,6 +63,13 @@ the dm-clone table. This suite adds:
   so a side removed under a CN draws the refusal that deletes the CN's leg
   controllers, though a leg's loss timeout never gives up (`dnagent.md` SH20),
   and the host's controller to a wiped CN must be replaced.
+* When a subsystem on the port does not admit a host, nvmet refuses the host's
+  Connect to it and leaves a kernel-log record naming that host and that
+  subsystem, a record no other connect failure leaves, so the suite reads an
+  admission refusal from that record (Conventions).
+* nvmet checks admission only when a host connects, so removing a host's link
+  from a subsystem leaves the host's controller to it live, which smoke
+  asserts after revoking the host.
 * The suite installs the md udev mask of `architecture.md`, Components:
   invocation reference, for the run and removes it at cleanup, the VMs being
   shared; the preflight checks that the stock incremental-assembly rule honours
@@ -121,15 +128,19 @@ names (`CnMdDevName`) and a host NQN's host id.
   reads the level's details. A failed read taken for an absence passes every
   negative on it (`cnagent.md` CN21): a residue check's failed dm or nvmet
   listing prints a failing line, a status-less check reply fails, the long-dead
-  stage counts a path absent only once the same read saw it live, and the
-  park's open check and the dead-leg "no mdadm" carry positive controls. Other
+  stage counts a path absent only once the same read saw it live, an admission
+  refusal needs nvmet's own refusal record behind a fresh mark, and the park's
+  open check and the dead-leg "no mdadm" carry positive controls. Other
   negatives pass on a read that failed: the partition stages' waits for a path
   to leave live and the finalize's check for a source controller accept the
-  "none" a failed listing returns; `mutations`, `events` and `cn_cmds_since`
-  print nothing for a log they cannot read, so restart's zero-mutation and
-  mdadm checks and the late flip's "assembled nothing" have no positive
-  control; and the reads of /proc/mdstat, the standby's no-array check and the
-  md part of the residue check, take a failure for no array.
+  "none" a failed listing returns; the no-path check after an admission
+  refusal accepts it too and the check that a subsystem lists no host takes a
+  failed read for an empty list, both backed by the refusal record;
+  `mutations`, `events` and `cn_cmds_since` print nothing for a log they
+  cannot read, so restart's zero-mutation and mdadm checks and the late flip's
+  "assembled nothing" have no positive control; and the reads of
+  /proc/mdstat, the standby's no-array check and the md part of the residue
+  check, take a failure for no array.
 * **Steady state.** One `CheckCn` and one `CheckCntlr` round per CN reply code
   zero, the revision that RPC stored and every row OK (`cnagent.md` CN24,
   CN30), the cntlr round first waiting out a fresh primary's pending legs
@@ -149,8 +160,11 @@ Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the
-legs, pending until their probers' first round (CN11); the subsystem admitting
-exactly the emulated host, "attr_allow_any_host" "0" (CN16); host IO; clean
+legs, pending until their probers' first round (CN11); admission on real
+nvmet (CN16): built with no allowed host the subsystem keeps
+"attr_allow_any_host" "0", probes clean and refuses the emulated host's
+connect; granted, it admits exactly that host; revoked again, the
+connected host keeps its path and its next connect is refused; host IO; clean
 check rounds, the namespace identity included (`dnagent.md` SH17); the raw
 thin-pool status line the auto-grow parses (CN28); and a teardown by an empty
 pointer list, re-sent while it replies leftover (CN7, CN21), leaving the CN no
@@ -212,7 +226,8 @@ one NQN and namespace identity from disjoint cntlid slots. The stored-suspended
 destination and the transfer's origin are parked, live on the td's dm-error,
 the origin's ANA moved first, so an open fails at once and nothing is
 dm-suspended (`cnagent.md` CN9, CN16 rule 1; `architecture.md`, Namespace
-suspend semantics, [D12]); the transfer admits only the destination CN (CN17).
+suspend semantics, [D12]); the transfer admits only the destination CN (CN17)
+and refuses the emulated host, which its list does not name.
 Gated at the no-clone level (CN19), two chunks of one source slice push
 race-free and prove the pair addressing (CN20, CN22). At read-write one
 converge hole-punches an arena range for the wrapper (CN18 step 2;

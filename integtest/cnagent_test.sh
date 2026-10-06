@@ -547,6 +547,32 @@ host_disconnect() { # hostvm nqn
 	sshv_ok "$1" "nvme disconnect -n '$2' || true"
 }
 
+# host_refused connects the emulated host to a subsystem that must not admit
+# it and asserts the refusal by its cause, not by the connect's exit status:
+# nvmet's own kernel-log line naming this host and this subsystem, behind a
+# marker written just before the attempt, and then no path on the host. A
+# connect that fails for another reason — a subsystem off the port, a broken
+# host identity — leaves no such line, and nvme-cli's status cannot tell the
+# two apart.
+host_refused() { # hostvm cnidx nqn label
+	local mark i got=live
+	mark="dnv-cn-it $TRACE $(date +%s%N)"
+	helper "$2" "kmsg_mark '$mark'"
+	if host_connect "$1" "$2" "$3"; then
+		die "$4: the host connected to $3, which does not admit it"
+	fi
+	assert_eq "$(helper "$2" "kmsg_refused '$mark' '$HOST_NQN' '$3'")" yes \
+		"$4: nvmet refused the host by admission"
+	for ((i = 0; i < 10; i++)); do
+		got=$(host_state "$1" "$3" "$2")
+		if [ "$got" = none ]; then
+			break
+		fi
+		sleep 0.5
+	done
+	assert_eq "$got" none "$4: the host holds no path to $3"
+}
+
 host_state() { # hostvm nqn cnidx
 	helper "$1" "path_field '$2' '${IP[$3]}' State"
 }
@@ -1120,6 +1146,26 @@ allowed_hosts() { ls "$NVMET/subsystems/$1/allowed_hosts" 2>/dev/null || true; }
 
 port_linked() {
 	if [ -e "$NVMET/ports/1/subsystems/$1" ]; then echo linked; else echo no; fi
+}
+
+# kmsg_mark <text> — one line into the kernel log, so that a later read can
+# start behind it.
+kmsg_mark() { echo "$1" >/dev/kmsg; }
+
+# kmsg_refused <mark> <hostnqn> <subsysnqn> — "yes" when nvmet has logged,
+# behind the last <mark>, that it refused that host's Connect to that
+# subsystem because the subsystem does not admit the host. It is the positive
+# half of a refused connect: a connect that fails for any other reason — a
+# subsystem that is not there or not on the port, a broken host identity —
+# leaves no such line.
+kmsg_refused() {
+	if dmesg | awk -v m="$1" 'index($0, m) { buf = ""; f = 1; next }
+		f { buf = buf $0 "\n" } END { printf "%s", buf }' |
+		grep -qF "connect by host $2 for subsystem $3 not allowed"; then
+		echo yes
+	else
+		echo no
+	fi
 }
 
 mdstat() { cat /proc/mdstat 2>/dev/null || true; }
@@ -2961,6 +3007,9 @@ case_smoke() {
 	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
 	assert_cn_info_ok "$out" "smoke syncup-cn"
 	req_none "$req" "$cn" "$dn" "$sp" "$cntlr" "$slot" "$nqn" "$uuid" false
+	# The subsystem is built with an empty allowed_hosts first: it admits no
+	# host until the grant stage below (cnagent.md CN16).
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = []"
 	bump_cn_rev "$cn"
 	cntlrrev=${CNREV[$cn]}
 	out=$(cn_syncup_cntlr "$cn" "$req")
@@ -2985,8 +3034,28 @@ case_smoke() {
 		"$(cn_dm_name ca "$cn" "$sp" "$S_DGRP")"; do
 		assert_eq "$(helper "$cn" "dm_state $name")" live "smoke $name"
 	done
-	# The host links are the subsystem's only admission gate: the attribute
-	# stays 0 and the one link is the emulated host's (cnagent.md CN16).
+
+	stage closed "an empty allowed_hosts admits no host"
+	# The host links are the subsystem's only admission gate (cnagent.md
+	# CN16): the attribute is 0 and nothing is linked. The attribute read and
+	# the port link keep the empty listing honest, since allowed_hosts prints
+	# nothing for a subsystem that is not there either.
+	assert_eq "$(helper "$cn" "ss_attr '$nqn' attr_allow_any_host")" 0 \
+		"smoke closed $nqn attr_allow_any_host"
+	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "" \
+		"smoke closed $nqn allowed_hosts"
+	assert_eq "$(helper "$cn" "port_linked '$nqn'")" linked \
+		"smoke closed $nqn is on the port"
+	# A check round reads the subsystem with no host link as converged.
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
+	host_refused "$hv" "$cn" "$nqn" "smoke closed"
+
+	stage grant "the emulated host is granted"
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = [\"$HOST_NQN\"]"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "smoke grant"
 	assert_eq "$(helper "$cn" "ss_attr '$nqn' attr_allow_any_host")" 0 \
 		"smoke $nqn attr_allow_any_host"
 	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "$HOST_NQN" \
@@ -3019,8 +3088,25 @@ case_smoke() {
 		grep -qE 'thin-pool .*[0-9]+/[0-9]+[[:space:]]+[0-9]+/[0-9]+' ||
 		die "smoke pool details is not a thin-pool status line: $got"
 
-	stage teardown "empty cntlr list, then empty side list"
+	stage revoke "emptying allowed_hosts closes the subsystem to new connections"
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = []"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "smoke revoke"
+	assert_eq "$(helper "$cn" "ss_attr '$nqn' attr_allow_any_host")" 0 \
+		"smoke revoke $nqn attr_allow_any_host"
+	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "" \
+		"smoke revoke $nqn allowed_hosts"
+	# nvmet checks the list at Connect only: the controller the host already
+	# holds stays live, and it is the next connect that is refused.
+	assert_eq "$(host_state "$hv" "$nqn" "$cn")" live \
+		"smoke revoke: the connected host keeps its path"
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
 	host_disconnect "$hv" "$nqn"
+	host_refused "$hv" "$cn" "$nqn" "smoke revoke"
+
+	stage teardown "empty cntlr list, then empty side list"
 	cn_drop "$cn"
 	dn_drop "$dn"
 	got=$(helper "$cn" "cn_residue $(hex16 "${CNID[$cn]}")")
@@ -4354,6 +4440,9 @@ case_clone_xfer() {
 	assert_eq "$(helper 1 "allowed_hosts '$xnqn'")" \
 		"$(cn_host_nqn "$CLUSTER" "${CNID[2]}")" \
 		"clone_xfer: the xfer allows exactly CN2"
+	# And a host the list does not name is refused: the emulated host is not
+	# CN2 (cnagent.md CN17).
+	host_refused "$hv" 1 "$xnqn" "clone_xfer: the xfer"
 
 	stage gate "stage 3: the clone is declared gated, then the chunk is pushed"
 	req_set "$req2" ".sp_level = \"SP_LEVEL_NO_CLONE\"
