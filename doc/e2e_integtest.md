@@ -22,10 +22,11 @@ no leg repair:
   transaction `EtcdMaxTxnOps` is sized by, at two cntlrs rather than the widest
   shape's cntlr ceiling: a pool no other suite builds on real agents.
 * **The operator surface works against a real control plane.** Every `Gateway`
-  RPC but six is issued by the shipped `dnvctl` against a real gateway, etcd
-  and agents, and no echoed id is the whole of an assertion: a mutation is read
-  back from its record and, where the device is the point, from its agent, or,
-  for a few, proved by its effect, which is what the suite observes.
+  RPC but the cluster and node deletions and listings is issued by the
+  shipped `dnvctl` against a real gateway, etcd and agents, and no echoed id
+  is the whole of an assertion: a mutation is read back from its record and,
+  where the device is the point, from its agent, or, for a few, proved by its
+  effect, which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
   slice grows and the level ladder, a failover, a leg repair and all between.
@@ -38,7 +39,7 @@ no leg repair:
   its extents back, no node guest holds a dnv dm device, md array or nvmet
   subsystem, and allocation stays under a per-file and a whole-run cap.
 
-**What it does not prove.** The six RPCs it never issues, the deletions and
+**What it does not prove.** The RPCs it never issues, the deletions and
 listings of clusters, disk nodes and controller nodes: the gateway suite covers
 the node deletions, and this run discards the whole cluster between cases.
 Error paths, beyond the few refusals the ops case asserts on purpose and the
@@ -222,7 +223,7 @@ hand-copy; and `MaxAllocLegPerGrp`, cross-checked against the leg count.
 
 ## The cases
 
-Four cases run in order, each on a fresh pool (E2E11): smoke, ops, copy and
+The cases run in order, each on a fresh pool (E2E11): smoke, ops, copy and
 react. Each stage has its own trace id, sent by every dnvctl call of the stage
 and carried by the gateway's records and an agent's records of the reads the
 gateway makes for that call, never by the converge it sets off, which runs

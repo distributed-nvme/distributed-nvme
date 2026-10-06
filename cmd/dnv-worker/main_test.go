@@ -88,7 +88,7 @@ func TestRootCommandHasNoSubcommands(t *testing.T) {
 	}
 }
 
-// CM1: exactly the six flags of the table, and no --etcd-op-timeout (EU5).
+// CM1: exactly the flags of CM1, and no --etcd-op-timeout (EU5).
 func TestFlagSetIsExactlyCM1(t *testing.T) {
 	root := newRootCmd()
 	got := longFlagNames(root.Flags().FlagUsages())
@@ -141,7 +141,7 @@ func TestHelpListsExactlyTheCM1Flags(t *testing.T) {
 // CM1/CM2 — defaults and binding
 // ---------------------------------------------------------------------------
 
-// CM1: every default is the constant the table names.
+// CM1: every default is the one CM1 names.
 func TestDefaults(t *testing.T) {
 	opts := mustOptions(t, []string{"--etcd-endpoints", "127.0.0.1:2379"})
 	if want := []string{"dn", "cn", "sp"}; !reflect.DeepEqual(opts.roles, want) {

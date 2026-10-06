@@ -622,12 +622,12 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 	}
 }
 
-// TestGlobalsFillEveryRequestThatHasThem pins the two counts behind
-// dnvctl.md, Global flags, env, config — cluster_name in 58 of the 59
-// requests, sp_name in 41 — by reading the field off every request type
-// rather than by trusting the table. A command that stopped filling a field
-// from its global flag would show up as a mismatch in the sweep; a command
-// whose REQUEST stopped carrying the field shows up here.
+// TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
+// fields that the scope global flags (dnvctl.md, Global flags, env, config)
+// fill: cluster_name in 58 of the 59, sp_name in 41. It reads the field off
+// every request type. A command that stopped filling a field from its global
+// flag would show up as a mismatch in the sweep; a command whose REQUEST
+// stopped carrying the field shows up here.
 func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 	clusterFields, spFields := 0, 0
 	for _, row := range sweepRows {

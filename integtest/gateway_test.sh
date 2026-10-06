@@ -59,7 +59,7 @@ WORKERCTL_BIN="$BIN_DIR/workerctl"
 FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 
 # The pinned etcd release — the same block, the same cache and the same digest
-# as worker_test.sh, so the two suites share one download.
+# as every other suite that starts an etcd, so they all share one download.
 ETCD_VERSION=v3.6.14
 ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
@@ -1161,9 +1161,10 @@ smoke_cap_free() { # <dn_capacity|cn_capacity> <addr_port>
 
 # smoke_check_dn is the per-DN half of the write-set audit (gateway.md,
 # Storage pools and GrowSlice; architecture.md, Capacity index keys), in one
-# place because steps 6, 7, 14, 15 and 17 all owe exactly these four facts:
-# free = total − what the SP's groups charge, one pointer per side, a capacity
-# key that agrees with the record, and the DnRev the ledger's flush left.
+# place because the smoke case's create-sp, grow-slice, migration and
+# spare-leg stages all owe exactly these four facts: free = total − what the
+# SP's groups charge, one pointer per side, a capacity key that agrees with
+# the record, and the DnRev the ledger's flush left.
 smoke_check_dn() { # <sp> <addr_port> <want dn_rev>
 	local sp=$1 addr=$2 wantRev=$3 charge sides free
 	charge=$(smoke_dn_charge "$sp" "$addr")

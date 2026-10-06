@@ -578,7 +578,7 @@ named in no entry's allowed hosts, discovers from the first host under an
 explicit host NQN and host id. The suite's ports collide with no other
 suite's.
 
-**Cases.** Five cases run in a fixed order, fail-fast, each against a wiped
+**Cases.** The cases run in a fixed order, fail-fast, each against a wiped
 cdc prefix, its own fabricated cluster ids and a restarted fleet whose logs
 start empty, so nothing leaks between cases and every count a case makes
 counts only its own records. The target is built once at setup, and the

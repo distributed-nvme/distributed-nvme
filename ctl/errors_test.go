@@ -59,9 +59,10 @@ func TestAbortedStaleRevision(t *testing.T) {
 	}
 }
 
-// TestRpcFailureLines walks the codes an operator actually meets (the errors
-// case's four injections plus the two transport ones,
-// dnvctl.md, Integration test plan) through the same line.
+// TestRpcFailureLines walks more codes an operator actually meets through
+// the same line: the errors case's other injections, the transport case's
+// codes (dnvctl.md, Integration test plan), and codes the dnvctl suite never
+// produces.
 func TestRpcFailureLines(t *testing.T) {
 	cases := []struct {
 		code    codes.Code

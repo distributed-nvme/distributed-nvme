@@ -51,7 +51,7 @@ it.
 `OsClient` is the contract every consumer compiles against and every
 implementation — `LimitedOsClient` in production, `FakeOsClient` in tests —
 satisfies; `common/osclient.go` holds the signatures, which are fixed, and
-the method set is exactly these eight, each taking the caller's ctx:
+the method set is exactly the following, each taking the caller's ctx:
 
 * `RunCommand` executes an OS binary with its command-line arguments and an
   optional stdin payload (empty when none) and returns the captured stdout
@@ -85,7 +85,7 @@ the method set is exactly these eight, each taking the caller's ctx:
   reason: during convergence an agent fans out many dmsetup, mdadm, nvme and
   blkdiscard invocations plus state-file writes, and the default bounds fork
   and disk pressure while leaving ample parallelism.
-* The limit caps the **sum of in-flight calls across all eight interface
+* The limit caps the **sum of in-flight calls across all interface
   methods**. It deliberately does **not** cover the package-level helpers of
   the carve-out: probe IO must never consume a slot. One weighted semaphore
   (`semaphore.NewWeighted`) carries the limit. Every public method first

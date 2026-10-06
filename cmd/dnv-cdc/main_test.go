@@ -112,7 +112,7 @@ func TestRootCommandHasNoSubcommands(t *testing.T) {
 	}
 }
 
-// CM1: exactly the eight flags of the table, and no --etcd-op-timeout (EU5).
+// CM1: exactly the flags of CM1, and no --etcd-op-timeout (EU5).
 func TestFlagSetIsExactlyCM1(t *testing.T) {
 	root := newRootCmd()
 	got := longFlagNames(root.Flags().FlagUsages())
@@ -165,9 +165,9 @@ func TestHelpListsExactlyTheCM1Flags(t *testing.T) {
 // CM1 — defaults
 // ---------------------------------------------------------------------------
 
-// CM1: every default is the constant the table names, and the --range
-// default is CdcRangeAll: all sixteen digits, in order, so a single instance
-// with no --range owns the whole space (DS2).
+// CM1: every default is the constant CM1 names, and the --range default is
+// CdcRangeAll: all sixteen digits, in order, so a single instance with no
+// --range owns the whole space (DS2).
 func TestDefaults(t *testing.T) {
 	opts := mustOptions(t, minArgs)
 	want := []uint32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
@@ -487,7 +487,7 @@ func TestZeroDialTimeoutIsPassedThrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // CM2/CM3: the example invocation parses, every value arrives through viper,
-// and the options become exactly the cdc.Config of the CM1 table — the
+// and the options become exactly the cdc.Config of the CM1 flags — the
 // endpoints travel along for the `cdc starting` record (LG, CM4).
 func TestExampleInvocationBuildsCdcConfig(t *testing.T) {
 	opts := mustOptions(t, exampleArgs)
@@ -694,8 +694,7 @@ func TestEnvironmentSuppliesEveryValue(t *testing.T) {
 	}
 }
 
-// CM1: a flag beats the environment for every flag of the table, not only
-// --range.
+// CM1: a flag beats the environment for flags other than --range too.
 func TestFlagBeatsEnvironment(t *testing.T) {
 	t.Setenv("DNV_CDC_ETCD_ENDPOINTS", "10.0.0.1:2379")
 	t.Setenv("DNV_CDC_ETCD_DIAL_TIMEOUT", "2")

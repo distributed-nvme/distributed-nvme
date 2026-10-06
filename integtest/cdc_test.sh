@@ -81,8 +81,8 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # from the named constants in gateway/txnbudget_test.go, not restated here.
 # The cdc suite creates and drains no storage pools, so the flag changes
 # nothing it observes; it is passed anyway so that every etcd this tree
-# starts — these three suites and the Go test launchers in etcdutil, model,
-# worker and gateway — gets the flag from the same constant.
+# starts — in the shell suites that start one and in the Go test launchers of
+# etcdutil, model, worker and gateway — gets the flag from the same constant.
 ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-cdc-integtest
@@ -118,9 +118,9 @@ NQN_PREFIX=nqn.2024-01.io.dnv-it:cdc
 # explicit -q/-I pair from h1.
 GHOST_NQN="$NQN_PREFIX:ghost"
 
-# The seven test subsystems (Integration test plan, Topology), created once at
-# setup. SS_UUID is the namespace uuid a host waits for; SS_PORTS is the
-# setup-shape port link list.
+# The test subsystems (Integration test plan, Topology), seven in this suite,
+# created once at setup. SS_UUID is the namespace uuid a host waits for;
+# SS_PORTS is the setup-shape port link list.
 SS_NAMES=(ssa ssb ssc ssd sse ssf ssx)
 UUID_PREFIX=0000cdc0-0000-4000-8000-0000000000
 declare -A SS_UUID=(

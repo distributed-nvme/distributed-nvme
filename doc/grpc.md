@@ -158,7 +158,7 @@ Who is a server or a client of whom:
 | dnvctl | — | its connection to the gateway (it mints a trace id per invocation unless `--trace-id` supplies one, T4) |
 | dnv-cdc | — | — (no dnv-internal gRPC: it talks to etcd and serves hosts over NVMe/TCP, `cdc.md`, Scope and placement) |
 
-Those five dnv binaries (`log.md`, Placement) are the whole of the rule. The
+Those dnv binaries (`log.md`, Placement) are the whole of the rule. The
 `integtest/` drivers are not dnv components; the conventions they follow
 instead are the next section's.
 
@@ -186,8 +186,8 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   selects `grpc server request` records by `trace_id` and `method`; the
   request payloads it asserts come from the fake's `state.json`
   (`dnvctl.md`, Integration test plan).
-* None of the five drivers installs a logger of its own: each inherits
-  `common`'s default chain, which is what keeps its stdout the result channel
+* No driver installs a logger of its own: each inherits `common`'s
+  default chain, which is what keeps its stdout the result channel
   the suites parse (`log.md` R3). The only log records reaching a driver's
   stderr are the `etcd *` ones `etcdutil` emits under `workerctl` and
   `cdcctl` — `gatewayctl` calls nothing that logs, and `dnagentctl` and

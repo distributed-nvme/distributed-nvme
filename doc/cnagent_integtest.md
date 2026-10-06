@@ -16,7 +16,7 @@ instances behind the sides, the dn role having its own suite. It exercises
 every `ControllerNodeAgent` RPC and reads the kernel state beside the agent's
 report. It proves the happy path; error paths are out of scope but for the
 stale probe, the dead leg, the promotion that outruns the sides' flip, and the
-leftover, an accepted request reporting residue (`cnagent.md` CN20). Six cases
+leftover, an accepted request reporting residue (`cnagent.md` CN20). The cases
 run in a fixed order, fail-fast — smoke, redund, teardown, thinbm, clone_xfer,
 restart — each under pool ids of its own and each leaving nothing of its pools,
 a teardown per case and per stage that also keeps the run inside a DN's data
@@ -48,7 +48,7 @@ among them (`architecture.md`, [D13], [D14]); nvmet configfs, md support,
 native multipath and the udev rule the md mask needs; the free space and
 punch-hole support of the work directory's filesystem and the free memory; and,
 once each loop device exists, its Write Zeroes (`dnagent.md` DN5). iptables is
-left to the two partition stages, so a VM without it fails in the stage that
+left to the partition stages, so a VM without it fails in the stage that
 needs it rather than a run that might never reach one.
 
 ## Lab facts
@@ -194,12 +194,12 @@ then stops (CN10, CN12; `architecture.md`, [D16]).
 finishes when what lies under it is gone, long gone, under load or unreachable,
 and what cannot go is reported and retried, never forgotten (`cnagent.md` CN7,
 CN20, CN21, CN30). Its request is what a pool drain sends while the sides
-vanish: an empty pointer list, re-sent at the stored revision. Five stages
-rebuild the redund shape, each under its own pool and namespace identity so
-residue names its stage, and each first proves the shape up, both arrays
-running and the host on both paths, since a teardown of a stack that never came
-up passes every residue check. In the first three the DN drops finish in one
-pass while the primary still holds every leg (`dnagent.md` DN6). The stages:
+vanish: an empty pointer list, re-sent at the stored revision. Each stage
+rebuilds the redund shape under its own pool and namespace identity, so residue
+names its stage, and each first proves the shape up, both arrays running and
+the host on both paths, since a teardown of a stack that never came up passes
+every residue check. In the first three stages the DN drops finish in one pass
+while the primary still holds every leg (`dnagent.md` DN6). The stages:
 sides gone; paths long dead, live before and gone after the refused reconnect;
 IO in flight, where no write succeeds after the sides go and one fails or stays
 queued on the host, as a park killed at its timeout leaves it, while the parks,

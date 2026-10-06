@@ -73,8 +73,8 @@ WORK=/var/tmp/dnv-dnvctl-integtest
 # The ports (Integration test plan, Topology). 29841 is deliberately never
 # listened on — the transport case dials it expecting a refusal — so preflight
 # must prove BOTH free, and cleanup must leave BOTH free. Both are outside
-# every range the other five suites and production use (15379/15380,
-# 29810-29832, 29527, 2379, 295xx, 296xx, 297xx, 298[1-3]x).
+# every range another suite or production uses (the port inventory beside
+# ETCD_CLIENT_PORT (e2e_test.sh)).
 FGW_PORT=29840
 DEAD_PORT=29841
 ALL_PORTS=(29840 29841)

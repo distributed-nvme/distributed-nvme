@@ -501,9 +501,9 @@ const (
 	// batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the default
 	// (dnv-worker.md CLD11).
 	//
-	// The Go test etcd launchers pass it from here; the three shell suites
-	// that start an etcd cannot import common, so they read it at preflight
-	// from workerctl's constants subcommand.
+	// The Go test etcd launchers pass it from here; the shell suites that
+	// start an etcd cannot import common, so they read it at preflight from
+	// workerctl's constants subcommand.
 	EtcdMaxTxnOps = 1024
 	// MaxFlipCreatedPerTxn is the most candidates ONE created-flip
 	// transaction carries (dnv-worker.md RW19). model.FlipCreated

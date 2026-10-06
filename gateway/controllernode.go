@@ -30,7 +30,10 @@ import (
 //   - delete's occupancy precondition is `cntlr_ptr_list`;
 //   - capacity maintenance is `model.MaintainCnCapacity`, which takes no
 //     ClusterConf because a CN capacity key carries no bin index
-//     (architecture.md, Finding CN candidates);
+//     (architecture.md, Finding CN candidates), so DeleteControllerNode and
+//     UpdateControllerNodeDisabled skip the model.ValidateClusterConf check
+//     their disk-node twins make before moving a key the stored ladder names
+//     (gateway.md GW11);
 //   - InspectControllerNode calls `GetCnInfo`.
 //
 // None of the six bumps a revision, and no op-name constant is therefore

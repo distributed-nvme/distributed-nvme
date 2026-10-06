@@ -585,7 +585,7 @@ per CT5 and carries trace ids per CT2 — with the gateway replaced by
 `integtest/fakegateway`, so the suite tests dnvctl only. Gateway semantics —
 validation, tokens, transactions — stay the gateway suite's job
 (`gateway.md`, Integration test plan), and the data plane is not touched.
-Correctness only: the suite's two timing assertions bound a deadline, not a
+Correctness only: the suite's timing assertions bound a deadline, not a
 latency.
 
 **Topology.** One VM, in the pattern of the worker and gateway suites: the
@@ -600,7 +600,7 @@ thread that ties a script stage to the fake's records, and brings back in
 one round trip the exit code, stderr, stdout and the fake's state file from
 before and after the call.
 
-**Cases.** Five cases run in a fixed order, fail-fast, each against a
+**Cases.** The cases run in a fixed order, fail-fast, each against a
 restarted fake whose behavior file is reset and whose state file holds only
 the reset's own readiness probe, so counters are read only as deltas.
 
@@ -611,9 +611,9 @@ the reset's own readiness probe, so counters are read only as deltas.
   that parses, the recorded request equal to the argv-implied one as a whole
   object, scope global flags and token included, and the RPC's count moved by
   exactly one; a closing audit finds one request record under each step's
-  trace id, over as many distinct RPCs as there are steps. Four replies are
-  byte-exact goldens: an empty canned reply, a revision beyond the exact
-  range of a JSON number, and the two hex maps.
+  trace id, over as many distinct RPCs as there are steps. The replies held
+  to byte-exact goldens are an empty canned reply, a revision beyond the
+  exact range of a JSON number, and the bitmap reads' hex maps.
 * behavior — the token trio: no `--rev` sends no token message, `--rev 0` a
   present empty one, a hex value its base-0 parse; `sp create`'s other
   redundancy arm; `td list` rendering `created` both true and false;
@@ -621,9 +621,9 @@ the reset's own readiness probe, so counters are read only as deltas.
   winning over it; and a `cluster` command's `--name` winning over
   `--cluster`.
 * errors — injected refusals rendered per CT5, the stale-revision refusal an
-  operator meets among them; and three usage errors — an unknown flag, a
-  malformed `--bm-hex`, a `--rev` on a command with no token field — each
-  exit 2 with the fake's count unmoved.
+  operator meets among them; and usage errors — an unknown flag, a malformed
+  `--bm-hex`, a `--rev` on a command with no token field — each exit 2 with
+  the fake's count unmoved.
 * transport — a dial to the port nothing listens on is UNAVAILABLE and fails
   fast; a hanging fake under a short `--timeout` is DEADLINE_EXCEEDED within
   a bound; and clearing the hang restores the command.

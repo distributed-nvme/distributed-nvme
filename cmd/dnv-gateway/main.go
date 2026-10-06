@@ -67,8 +67,9 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
-// addFlags declares the CM2 flag set: the two gRPC-server flags of
-// cmd/dnv-agent and the two etcd flags of cmd/dnv-worker.
+// addFlags declares the CM2 flag set: --grpc-network and --grpc-address, as
+// in cmd/dnv-agent, and --etcd-endpoints, --etcd-dial-timeout and --config,
+// as in cmd/dnv-worker.
 //
 // There is deliberately no --etcd-op-timeout — every plain etcd operation, and
 // every STM transaction as a whole with its conflict retries, is bounded by

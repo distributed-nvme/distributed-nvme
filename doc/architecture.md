@@ -1661,7 +1661,7 @@ every RPC that takes one. Every RPC except `CreateCluster` and
 the prefix of every other key the RPC touches. An RPC that names an SP then
 also resolves the `SpConf` of its `sp_name` (`NOT_FOUND` if absent). Both
 checks are implied below, and both live inside the RPC's STM, except in
-the three RPCs that make the `ClusterConf` read in a planning snapshot
+the RPCs that make the `ClusterConf` read in a planning snapshot
 instead (STM discipline; `gateway.md` GW5). In every mutating SP RPC
 except `DeleteStoragePool` the deciding transaction refuses an SP whose
 `SpConf.deleting` is true with `FAILED_PRECONDITION`, so nothing such an

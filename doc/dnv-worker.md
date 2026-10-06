@@ -2549,9 +2549,10 @@ transaction. A batch also fits etcd's DEFAULT cap, which asks no deployment
 change: the requirement is `EtcdMaxTxnOps` for the transactions that do NOT
 fit it, such as `CreateStoragePool`'s maximum shape, which is what that number
 is sized by (`gateway.md`, Additions to `common/constants.go`), the sp drain's
-D2 batch (SPD13) and the created flip's transaction (RW19). One test asserts
-all four compare counts from the named constants, and another drains a whole
-maximum-shape rectangle against a real etcd to pin the batch COUNT.
+D2 batch (SPD13) and the created flip's transaction (RW19). Tests pin, from
+the named constants, the batch's compare count and those of the transactions
+just named, and a drain of a whole maximum-shape rectangle against a real etcd
+pins the batch COUNT.
 
 ## Log records
 
@@ -2814,9 +2815,10 @@ those gates are the gateway's and re-implementing a public precondition in a
 driver is how the two drift apart — so a case plants exactly the state it
 means to. Its drain loops are the gateway suite's stand-ins for the worker;
 this suite uses them only to build a partly drained SP or clone for the resume
-steps. Two of its subcommands open no etcd and run on the driver, so that a
-shell suite reads the Go constants it sizes itself by, `EtcdMaxTxnOps` among
-them, and the group geometry `GrowSlice` computes, instead of copying either.
+steps. Its `constants` and `geometry` subcommands open no etcd and run on the
+driver, so that a shell suite reads the Go constants it sizes itself by,
+`EtcdMaxTxnOps` among them, and the group geometry `GrowSlice` computes,
+instead of copying either.
 
 **The fake agent, `fakeagent`.** `fakeagent` serves the generated
 `DiskNodeAgent` and `ControllerNodeAgent` services with the real server

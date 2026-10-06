@@ -610,12 +610,17 @@ and field-level rules stay in the cited section of `architecture.md`,
 ### Controller nodes
 
 The exact mirror of Disk nodes over `CnConf`, the CN capacity key, `CnRev`
-and `CnGlobal`, with three differences: `CreateControllerNode` calls
+and `CnGlobal`, with these differences: `CreateControllerNode` calls
 `GetCnSize` and maps the reply per `architecture.md`, Size → extents (a zero
 takes `DefaultCnCap`, a size above `MaxCnCap` is clamped to it, and a
-non-zero one below `MinCnCap` is treated as zero); the delete's occupancy
-precondition is `cntlr_ptr_list`; `InspectControllerNode` calls `GetCnInfo`.
-The same six RPCs: create, delete, get, list, update-disabled and inspect.
+non-zero one below `MinCnCap` is treated as zero); the per-cluster ceiling is
+`MaxCnCntPerCluster`; the delete's occupancy precondition is
+`cntlr_ptr_list`; the capacity maintenance is `model.MaintainCnCapacity`,
+which needs no `ClusterConf` because a CN capacity key carries no bin index
+(`architecture.md`, Capacity index keys), so `DeleteControllerNode` and
+`UpdateControllerNodeDisabled` run no `model.ValidateClusterConf` (GW11);
+`InspectControllerNode` calls `GetCnInfo`. The same six RPCs: create,
+delete, get, list, update-disabled and inspect.
 
 ### Storage pools and GrowSlice
 

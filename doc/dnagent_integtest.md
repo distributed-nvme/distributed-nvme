@@ -17,7 +17,7 @@ exercising every `DiskNodeAgent` RPC and reading the kernel state itself
 beside the agent's report. It proves the happy path: error paths are out of
 scope but for the restart case's stale probe, and a leftover reply is no
 exception, being an accepted request with residue (`dnagent.md` SH9, DN19).
-Six cases run in a fixed order, fail-fast — smoke, sides, migr_full,
+The cases run in a fixed order, fail-fast — smoke, sides, migr_full,
 migr_bitmap, teardown, restart — each under storage-pool ids of its own, and
 each ends with neither node holding anything of its pool.
 
