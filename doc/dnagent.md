@@ -260,7 +260,17 @@ SH4. The store holds exactly what `architecture.md`, Common agent rules and
 Agent local-store paths, prescribe: the last accepted `Syncup*Request` per
 object, persisted at the point SH5 gives, and one file per received
 `Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
-replace) at the `Local*Path` locations and read back via `ReadProto`.
+replace) at the `Local*Path` locations and read back via `ReadProto`. Both
+run on a ctx carrying the SH15 soft timeout, as the store's `ls` and `rm` do
+(SH6, SH7): the calls are in-process, so the bound ends only a wait for an
+`OsClient` slot. A save takes its slot under the locks its RPC holds
+(SH10, SH11), and without the bound a save that finds every slot held could
+wait until the RPC's deadline. A save the bound cuts off fails like any
+other and is only logged. Where the save is the RPC's last step, the RPC
+then returns and releases its locks: an object request is saved last, after
+its converge (SH5), and a chunk whose save failed is acked at once
+(DN15, `cnagent.md` CN22). A parent request is saved before its converge
+(SH5), which runs under the node write lock whatever the save's outcome.
 
 SH5. An **object** request (`SyncupSide`/`SyncupCntlr`) is persisted after
 its converge pass completes. A **parent** request (`SyncupDn`/`SyncupCn`)
@@ -624,8 +634,8 @@ not be "fixed" to dashes. `Disconnect` is `nvme disconnect --nqn`;
 liveness and per-path ANA state — `nvme list-subsys` carries none of the
 three, listing no namespaces at all and no ANA state without a namespace
 block device argument (`cnagent.md` CN12 and CN28, which reads the same
-tree for legs). Every read of that walk carries the SH15 soft timeout like
-any other OS touch: unlike most of sysfs, the nvme class directories can
+tree for legs). Every read of that walk carries the SH15 soft timeout:
+unlike most of sysfs, the nvme class directories can
 stall while a controller is mid-reset or being torn down, which is exactly
 when these probes run, and no converge — nor, through the DN1 and CN1
 locks, a whole node's RPC surface — may be held on one. The bound is on the

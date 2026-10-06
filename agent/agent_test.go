@@ -327,25 +327,40 @@ func TestStoreListUnreadablePrefixIsFatal(t *testing.T) {
 	}
 }
 
-// TestStoreCommandsCarryTheSoftTimeout: the store's two commands, SH6's `ls`
-// and SH7's `rm`, reach the OsClient on a ctx carrying the soft timeout
-// (architecture.md, Common validation; SH15). The caller owns that deadline
-// and the LimitedOsClient adds none (osclient.md, RunCommand), so without the
-// wrap a wedged `ls` would hold the
-// startup reconcile, node lock and all, for ever, and a wedged `rm` the pass
-// that drops an object.
-func TestStoreCommandsCarryTheSoftTimeout(t *testing.T) {
+// TestStoreCallsCarryTheSoftTimeout: every call the store makes — SH6's `ls`,
+// SH7's `rm` and SH4's proto read and write — reaches the OsClient on a ctx
+// carrying the soft timeout (architecture.md, Common validation; SH15). The
+// caller owns that deadline and the LimitedOsClient adds none (osclient.md,
+// RunCommand), so without the wrap a wedged `ls` would hold the startup
+// reconcile, node lock and all, for ever, a wedged `rm` the pass that drops
+// an object, and a save waiting for an OsClient slot the node lock of the RPC
+// it runs in.
+func TestStoreCallsCarryTheSoftTimeout(t *testing.T) {
 	var cmds, unbounded []string
+	bounded := func(ctx context.Context, name string) {
+		cmds = append(cmds, name)
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > common.CmdSoftTimeout*time.Second {
+			unbounded = append(unbounded, name)
+		}
+	}
 	oc := &common.FakeOsClient{
+		ReadProtoFn: func(
+			ctx context.Context, path string, target proto.Message,
+		) error {
+			bounded(ctx, "readproto")
+			return nil
+		},
+		WriteProtoFn: func(
+			ctx context.Context, path string, msg proto.Message,
+		) error {
+			bounded(ctx, "writeproto")
+			return nil
+		},
 		RunCommandFn: func(
 			ctx context.Context, name string, args []string, stdin string,
 		) (string, string, int, error) {
-			cmds = append(cmds, name)
-			deadline, ok := ctx.Deadline()
-			if !ok || time.Until(deadline) >
-				common.CmdSoftTimeout*time.Second {
-				unbounded = append(unbounded, name)
-			}
+			bounded(ctx, name)
 			// An interrupted write, so the listing's own rm (SH6) is
 			// bounded here too.
 			if name == "ls" {
@@ -362,13 +377,22 @@ func TestStoreCommandsCarryTheSoftTimeout(t *testing.T) {
 		context.Background(), "/store/dn-1", "/store/side-2"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if got := strings.Join(cmds, " "); got != "ls rm rm" {
-		t.Fatalf("commands = %q, want exactly one ls and the listing's "+
-			"rm, then the Remove's rm", got)
+	req := &pb.SyncupDnRequest{}
+	if err := store.Save(
+		context.Background(), "/store/dn-1", req); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := store.Load(
+		context.Background(), "/store/dn-1", req); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := strings.Join(cmds, " "); got !=
+		"ls rm rm writeproto readproto" {
+		t.Fatalf("calls = %q, want exactly one ls and the listing's rm, "+
+			"the Remove's rm, then the Save and the Load", got)
 	}
 	if len(unbounded) != 0 {
-		t.Errorf("store commands without the SH15 soft timeout: %v",
-			unbounded)
+		t.Errorf("store calls without the SH15 soft timeout: %v", unbounded)
 	}
 }
 

@@ -31,8 +31,8 @@ type fakeNode struct {
 
 	calls []string
 	// sysfsNoDeadline records every /sys read that arrived on a ctx carrying
-	// no deadline. The leg walk's sysfs reads are
-	// SH15-bounded like every other OS touch, so this must stay empty.
+	// no deadline. The leg walk's sysfs reads carry the SH15 soft timeout
+	// (readSysfs takes it from agent.CmdCtx), so this must stay empty.
 	sysfsNoDeadline []string
 	// traced is every command and file read keyed by the trace id of the
 	// ctx it ran on: the trace_id its `os command` / `os read file` record
