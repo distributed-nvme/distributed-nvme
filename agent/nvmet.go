@@ -281,11 +281,14 @@ type SubsysConf struct {
 	AllowedHosts []string
 }
 
-// attrs lists the attributes ProbeSubsystem compares and EnsureSubsystem's
-// attribute loop writes, in the loop's order. "attr_allow_any_host" is always
-// "0" and comes first, so a later attribute that nvmet refuses, which stops
-// the loop, cannot keep a subsystem found open from being closed; the probe's
-// comparison of it is what reports such a subsystem as not converged.
+// attrs lists the attributes ProbeSubsystem compares. "attr_allow_any_host"
+// is always "0" and comes first. EnsureSubsystem writes it right after it
+// has the subsystem directory (closeSubsys), ahead of raiseCntlidMax and the
+// attribute loop, so nothing after the close can stop a converge with a
+// subsystem found open still open. The close's own write can fail like any
+// write, and the probe's comparison of the attribute is what reports a
+// subsystem left open as not converged. The loop writes the rest in this
+// order, and raiseCntlidMax may write "attr_cntlid_max" ahead of it.
 func (c SubsysConf) attrs() [][2]string {
 	attrs := [][2]string{{"attr_allow_any_host", "0"}}
 	if c.Serial != "" {
@@ -326,6 +329,12 @@ func (n *Nvmet) EnsureSubsystem(
 			return err
 		}
 	}
+	// Fail closed, and first: nothing below — the cntlid write, an attribute
+	// nvmet refuses — may stop this converge with the subsystem still
+	// admitting every host.
+	if err := n.closeSubsys(ctx, subsysPath); err != nil {
+		return err
+	}
 	// nvmet refuses an `attr_cntlid_min` above the subsystem's current
 	// `attr_cntlid_max`, and an `attr_cntlid_max` below its current
 	// `attr_cntlid_min` (-EINVAL either way). attrs() lists min before max,
@@ -337,11 +346,8 @@ func (n *Nvmet) EnsureSubsystem(
 	if err := n.raiseCntlidMax(ctx, subsysPath, conf); err != nil {
 		return err
 	}
-	// The attribute loop writes "attr_allow_any_host" = 0 before the host
-	// links: nvmet refuses a new host link while the attribute is 1 (-EINVAL),
-	// and the same write closes a subsystem found open, whoever opened it.
-	// Nothing here writes 1 (SubsysConf).
-	for _, attr := range conf.attrs() {
+	// The rest of attrs(): closeSubsys has written its first entry.
+	for _, attr := range conf.attrs()[1:] {
 		if _, err := n.ensureAttr(
 			ctx, subsysPath+"/"+attr[0], attr[1]); err != nil {
 			return err
@@ -379,6 +385,15 @@ func (n *Nvmet) EnsureSubsystem(
 		}
 	}
 	return nil
+}
+
+// closeSubsys writes "attr_allow_any_host" = 0, the first entry of attrs().
+// It closes a subsystem found open, whoever opened it, and it precedes the
+// host links: nvmet refuses a new host link while the attribute is 1
+// (-EINVAL). Nothing writes 1 (SubsysConf).
+func (n *Nvmet) closeSubsys(ctx context.Context, subsysPath string) error {
+	_, err := n.ensureAttr(ctx, subsysPath+"/attr_allow_any_host", "0")
+	return err
 }
 
 // raiseCntlidMax writes conf's attr_cntlid_max ahead of EnsureSubsystem's

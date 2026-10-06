@@ -42,6 +42,12 @@ type fakeConfigfs struct {
 	links   map[string]string
 	readErr map[string]error
 	changes []string
+	// discovered makes every "attr_serial" and "attr_model" write fail
+	// EINVAL, as nvmet does once a host has identified the subsystem.
+	discovered bool
+	// unwritable makes every write of one path fail EIO: a write that did
+	// not go through, as when the soft timeout cuts it off.
+	unwritable string
 }
 
 func newFakeConfigfs() *fakeConfigfs {
@@ -169,6 +175,15 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 				return &iofs.PathError{Op: "write", Path: path,
 					Err: syscall.EINVAL}
 			}
+			if path == c.unwritable {
+				return &iofs.PathError{Op: "write", Path: path,
+					Err: syscall.EIO}
+			}
+			if c.discovered && (strings.HasSuffix(path, "/attr_serial") ||
+				strings.HasSuffix(path, "/attr_model")) {
+				return &iofs.PathError{Op: "write", Path: path,
+					Err: syscall.EINVAL}
+			}
 			c.files[path] = data
 			return nil
 		},
@@ -261,6 +276,57 @@ func TestEnsureSubsystemClosesAnOpenSubsystemFirst(t *testing.T) {
 					assertAdmits(t, cfs, nvmet, conf, hosts...)
 				})
 		}
+	}
+}
+
+// TestEnsureSubsystemClosesBeforeAnythingThatCanStopIt: the close of a
+// subsystem found open is the first thing EnsureSubsystem writes, so a
+// converge stopped by a later step still leaves that subsystem closed. Two
+// such stops are planted here: a failed write of the cntlid max raised for a
+// subsystem adopted from a lower slot, and an identity attribute nvmet
+// refuses once a host has identified the subsystem.
+func TestEnsureSubsystemClosesBeforeAnythingThatCanStopIt(t *testing.T) {
+	for name, stop := range map[string]func(
+		cfs *fakeConfigfs, subsysPath string, conf *SubsysConf,
+	){
+		"the cntlid max write fails": func(
+			cfs *fakeConfigfs, subsysPath string, conf *SubsysConf,
+		) {
+			// A range wholly below the wanted one, so the max is raised
+			// ahead of the attribute loop (raiseCntlidMax).
+			conf.CntlidMin, conf.CntlidMax = 100, 108
+			cfs.files[subsysPath+"/attr_cntlid_min"] = "1"
+			cfs.files[subsysPath+"/attr_cntlid_max"] = "8"
+			cfs.unwritable = subsysPath + "/attr_cntlid_max"
+		},
+		"nvmet refuses the serial": func(
+			cfs *fakeConfigfs, subsysPath string, conf *SubsysConf,
+		) {
+			cfs.files[subsysPath+"/attr_serial"] = "another serial"
+			cfs.discovered = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conf := admissionConfs(admissionHostA)["identity"]
+			cfs := newFakeConfigfs()
+			cfs.openSubsys(conf.Nqn)
+			nvmet := NewNvmet(cfs.osClient())
+			subsysPath := nvmet.SubsysPath(conf.Nqn)
+			stop(cfs, subsysPath, &conf)
+			if err := nvmet.EnsureSubsystem(
+				context.Background(), conf); err == nil {
+				t.Fatal("fixture is wrong: the converge was not stopped")
+			}
+			closed := "write " + subsysPath + "/attr_allow_any_host=0"
+			if len(cfs.changes) == 0 || cfs.changes[0] != closed {
+				t.Errorf("changes = %v, want %q first", cfs.changes, closed)
+			}
+			if got := cfs.files[subsysPath+"/attr_allow_any_host"]; got !=
+				"0" {
+				t.Errorf("the stopped converge left attr_allow_any_host "+
+					"at %q, want 0", got)
+			}
+		})
 	}
 }
 
