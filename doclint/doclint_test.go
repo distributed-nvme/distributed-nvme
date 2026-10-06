@@ -10,10 +10,14 @@
 //     the tree;
 //   - no numeric literal beside a named constant (the value lives in the code);
 //   - no dates in a doc (history lives in git); history words are reported
-//     with -v only.
+//     with -v only;
+//   - an "identifier (path/file.ext)" pointer resolves, and what follows a
+//     document's name and a comma is a rule id or a heading text of that
+//     document (citelint_test.go).
 //
 // Exceptions live in allowlist.txt beside this file, one per line:
-// "<check> <token>", where check is one of ids, ident, path, value, history.
+// "<check> <token>", where check is one of ids, ident, path, value, history,
+// identptr, heading.
 package doclint
 
 import (
