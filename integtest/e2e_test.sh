@@ -11621,11 +11621,11 @@ copy_xfer_delete() {
 #
 # WHAT IT DOES HAVE TO WAIT FOR, AND THE TRAP THAT MAKES IT MANDATORY. "ANA
 # picks the live one" is true only once there IS one. agent/dnagent/plan.go's
-# anaGrpId (:270-286) puts a migration SOURCE in AnaGrpIdInaccessible the
-# moment the migration exists, and a DESTINATION in AnaGrpIdInaccessible until
-# `cloneLive` — which is nothing more than "the dm-clone device is present"
-# (agent/dnagent/probe.go:215-218). So between `migr create` and the
-# destination's dm-clone being built, EVERY path of that leg is inaccessible,
+# anaGrpId puts a migration SOURCE in AnaGrpIdInaccessible once
+# its destination is provisioned, and a DESTINATION in AnaGrpIdInaccessible
+# until `cloneLive`, which holds once its converge has a dm-clone to serve
+# through (ensureMigrDst, agent/dnagent/migr.go). So from that provisioning
+# until the destination serves, EVERY path of that leg is inaccessible,
 # and an inaccessible nvme namespace REQUEUES rather than errors. A host read
 # issued in that window blocks in D state, where `timeout` cannot reach it
 # (memory notes ana-inaccessible-ns-no-blockdev and
@@ -11695,12 +11695,12 @@ copy_migration() {
 		"instance $k ($saddr); the group holds $before_addrs on VMs $before_vms"
 
 	# THE LEG BITMAP IS READ BEFORE THE MIGRATION EXISTS, and that is not a
-	# stylistic ordering. `migr create` takes the SOURCE side ANA-inaccessible
-	# at once — agent/dnagent/plan.go:270-286, `migrSrc != nil` =>
-	# AnaGrpIdInaccessible — and the DESTINATION stays inaccessible until its
-	# dm-clone exists (`migrDst != nil && !cloneLive`, where cloneLive is just
-	# "the dm-clone device is there", agent/dnagent/probe.go:215-218). So from
-	# the create until hydration begins, this leg has no usable path on any CN.
+	# stylistic ordering. Once the destination is provisioned the SOURCE side
+	# goes ANA-inaccessible — agent/dnagent/plan.go's anaGrpId, `migrSrc != nil` =>
+	# AnaGrpIdInaccessible — and the DESTINATION stays inaccessible until it
+	# has a dm-clone to serve through (`migrDst != nil && !cloneLive`, where
+	# cloneLive comes from ensureMigrDst, agent/dnagent/migr.go). So from then
+	# until the destination serves, this leg has no usable path on any CN.
 	# GetLegBm goes to the PRIMARY CN and walks the slice's thin-pool METADATA,
 	# which lives on the slice's META groups and not on this DATA group, so it
 	# would very likely be safe inside that window — reading it before the
@@ -11816,9 +11816,9 @@ copy_migration() {
 	ctl_fail NOT_FOUND migr get --name "$MIGR0"
 
 	# THE LEG MUST BE SERVING AGAIN BEFORE ANY HOST IO TOUCHES IT. A migration
-	# SOURCE side is ANA-inaccessible from the moment the migration exists, and
-	# a destination side is inaccessible until its dm-clone exists
-	# (agent/dnagent/plan.go:270-286). Both conditions are cleared by now — the
+	# SOURCE side is ANA-inaccessible once its destination is provisioned, and
+	# a destination side while it does not serve through its dm-clone
+	# (agent/dnagent/plan.go's anaGrpId). Both conditions are cleared by now — the
 	# record is gone — but the DN rewrites `ana_grpid` on its NEXT syncup, so
 	# this reads the primary CN's own view of its path to the surviving side
 	# instead of assuming the rewrite has landed. An inaccessible namespace
@@ -11864,9 +11864,10 @@ copy_migration() {
 		"migr_name_list is empty again"
 	ctl_fail NOT_FOUND migr get --name "$MIGR1"
 
-	# The same wait, for the same reason: `migr create` took this side
-	# ANA-inaccessible and the cancel only removed the record — the DN's next
-	# syncup is what puts the namespace back in the optimized group.
+	# The same wait, for the same reason: this side went ANA-inaccessible if
+	# its destination was provisioned before the cancel, and the cancel only
+	# removed the record — the DN's next syncup is what puts the namespace back
+	# in the optimized group.
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
 	check_sha0 "after a migration was cancelled"
 }

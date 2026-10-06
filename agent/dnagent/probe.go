@@ -212,7 +212,9 @@ func (s *DnAgentServer) probeSideDm(
 
 // probeAboveSideDev probes everything the side's desired state puts on top of
 // the side device. It is shared by GetSideInfo/CheckSide and by a converge
-// pass that could not get past the side device.
+// pass whose migration destination could not read where its per-CN stacks
+// are (convergeSide's migrCloneUnread branch), which reports those rows
+// instead of converging them.
 func (s *DnAgentServer) probeAboveSideDev(
 	ctx context.Context,
 	st *sideState,
@@ -328,6 +330,22 @@ func (s *DnAgentServer) probeAboveSideDev(
 		dstInfo := &pb.SideInfo_MigrDstInfo{}
 		info.MigrDstInfo = dstInfo
 		nqn := plan.srcNqnOfDst()
+		// DN13 step 2's refusal, with the rows the converge reports for it
+		// (ensureMigrDst): a metadata area that cannot supply this
+		// migration's slot is one refusal, not an absent target beside an
+		// absent dm-clone. Answering the plain MISSING pair here would trade
+		// the rows, and the epoch on them, with the converge on every round —
+		// and ERROR is the status the worker's health pass keys on. Read-only
+		// (DN16, SH25): the refusal is computed from the loaded table.
+		if !cloneLive {
+			if refusal := s.migrMetaRefusal(ctx, plan); refusal != nil {
+				dstInfo.TargetInfo = t.Missing(
+					resKeyMigrDstTarget, nqn, detailsCloneMetaMissing)
+				dstInfo.DmCloneInfo = t.Err(resKeyMigrDstClone,
+					plan.migrFinalName(), refusal.Error())
+				return
+			}
+		}
 		state, err := s.host.ListSubsys(ctx, nqn)
 		switch {
 		case err != nil:

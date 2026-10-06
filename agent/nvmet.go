@@ -700,6 +700,31 @@ func (n *Nvmet) NsDevicePath(
 	return n.readAttrStrict(ctx, n.NsPath(nqn, nsid)+"/device_path")
 }
 
+// NsAnaGrpId reads one namespace's ANA group. It is how a destination pass
+// whose step stopped reads whether a per-CN stack serves through the dm-clone
+// (dnagent.md DN13), so it reads through the strict probe: ok is false only
+// when the attribute is not there, and a read that did not answer, or a value
+// that is not a number, is an error, never a group. Taken as a group that is
+// not optimized, such a read would reload the leg's only serving path onto
+// its dm-error.
+func (n *Nvmet) NsAnaGrpId(
+	ctx context.Context,
+	nqn string,
+	nsid int,
+) (int, bool, error) {
+	path := n.NsPath(nqn, nsid) + "/ana_grpid"
+	value, ok, err := n.readAttrStrict(ctx, path)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	grpId, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false, fmt.Errorf("read %s: %q is not a group id",
+			path, value)
+	}
+	return grpId, true, nil
+}
+
 // RemoveNamespace disables and removes one namespace, leaving its subsystem in
 // place (reverse build order, SH19). Absent objects are skipped.
 func (n *Nvmet) RemoveNamespace(

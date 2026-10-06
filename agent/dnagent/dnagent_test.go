@@ -2949,9 +2949,11 @@ func TestATransientHeaderReadDoesNotFreezeTheSides(t *testing.T) {
 
 // The clone-metadata record is handed out on the same terms as the side's,
 // after the same restart. Were it refused where the side record is handed
-// out, the converge that gets past the side device would read the dm-clone
-// as not live and reload a live destination's primary dm-linear off the
-// clone onto its dm-error — an outage of the leg.
+// out, the converge that gets past the side device would stop at DN13 step 2
+// over a slot this node holds and report dm_clone_info ERROR, which the
+// dm_clone_info check catches. A stop at step 2 leaves the primary's
+// dm-linear on the live dm-clone all the same (migrDstStopped), which the
+// reload and table checks pin.
 func TestATransientHeaderReadKeepsALiveCloneServing(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -3862,7 +3864,7 @@ func TestProbeSideDevErrorPaths(t *testing.T) {
 		}
 	}
 	// The per-CN stacks are still reported, so the operator sees the whole
-	// picture (probeAboveSideDev on the not-ready path).
+	// picture (reportAboveSideDeferred on the not-ready path).
 	if len(reply.GetSideInfo().GetCnIdToDmError()) == 0 {
 		t.Error("the not-ready path reported nothing above the side device")
 	}

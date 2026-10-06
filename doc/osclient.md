@@ -186,11 +186,11 @@ the method set is exactly these eight, each taking the caller's ctx:
   attached. The file-read half of the same rule is `osBase.readAttrStrict`
   over `ReadFile`: only `fs.ErrNotExist` is "absent", every other error
   propagates, which is what keeps a stalled sysfs or configfs read
-  (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, the "enable" reads of
-  `Nvmet.RemoveNamespace` / `RemoveSubsystem`, the attribute reads of
-  `Nvmet.ProbePortState`, the port read of `cnagent.md` CN30's verdict, and
-  the cn leg walk's "subsysnqn" read, through `Cmd.ReadAttr`) from making a
-  live object read as an absent one.
+  (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, `Nvmet.NsAnaGrpId`, the
+  "enable" reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`, the
+  attribute reads of `Nvmet.ProbePortState`, the port read of `cnagent.md`
+  CN30's verdict, and the cn leg walk's "subsysnqn" read, through
+  `Cmd.ReadAttr`) from making a live object read as an absent one.
 
 ### ReadFile / WriteFile / WriteFileDirect
 

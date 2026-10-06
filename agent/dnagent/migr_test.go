@@ -365,7 +365,8 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 		t.Fatalf("SyncupSide: %v", err)
 	}
 	if st.retrying {
-		t.Error("retry registration survived a successful connect")
+		t.Error("retry registration survived a pass that ran the whole " +
+			"destination sequence")
 	}
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
@@ -2783,73 +2784,48 @@ func TestFenceRestartThatHoldsNoSideOpensAWholeWindow(t *testing.T) {
 	}
 }
 
-// TestMigrationConnectSucceedsFromTheRetryLoop pins the DN8 loop's one
-// non-obvious property: the converge that finally connects must survive its
-// own call to stopMigrRetry.
+// TestMigrationConnectSucceedsFromTheRetryLoop pins that the DN8 loop alone
+// finishes a destination whose connect was refused: with no further RPC the
+// destination ends serving through its dm-clone, and the loop's own pass —
+// the one that gets it there — deregisters it.
 //
-// The existing retry test above drives the second converge from an RPC, and
-// an RPC-driven converge runs on the gRPC context — which stopMigrRetry's
-// cancel cannot touch. That is why it passed for as long as the bug was
-// there. The retry LOOP's converge is the only one that runs on the very
-// context stopMigrRetry cancels, so it is the only shape in which "connect
-// succeeded" and "cancel everything" happen in the same pass, in that order.
-// Before the fix every OS call after the stopMigrRetry failed on the dead
-// context: the dm-clone was never created, `retrying` was already false so
-// nothing ticked again, and the side sat at `dm_clone: RES_STATUS_MISSING,
-// target not connected` for ever while the controller it names was `live`.
-// An e2e `copy` case measured exactly that on 2026-09-19, after one transient
-// connect failure.
-//
-// The assertion is the dm-clone's existence, not a call order: what the bug
-// destroyed was the REST of the converge, so the thing to pin is that the
-// rest of it ran.
+// The retry test above drives its second converge from an RPC. Here every
+// step after the refused connect, DN13 step (5) included, runs in a pass of
+// the loop, on the ctx the loop hands its attempts (rootCtx,
+// migrRetryLoop). That pass deregisters the loop as its last act
+// (settleMigrRetry), so the assertion is the end state, not a call order:
+// the primary's stack on the dm-clone, its namespace optimized, and no
+// retry left.
 func TestMigrationConnectSucceedsFromTheRetryLoop(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
 	srv.migrRetryInterval = 5 * time.Millisecond
 	syncupBoth(t, srv, 1, testSide)
+	names := newMigrDstNames()
 
-	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
-	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
-
-	// One transient failure, exactly as the lab produced: the first connect
-	// is refused, every later one succeeds.
-	node.failCmd["nvme connect"] = "failed to write to nvme-fabrics device"
+	// Every connect is refused until the registration has been read, and
+	// succeeds from then on: a loop pass that connected first would finish
+	// the build, and deregister, before the test could look.
+	setFailAlways(node, "nvme connect", "failed to write to nvme-fabrics device")
 	if _, err := srv.SyncupSide(ctx,
 		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
-	srv.mu.Lock()
-	retrying := st.retrying
-	srv.mu.Unlock()
-	if !retrying {
+	if !migrRetrying(srv) {
 		t.Fatal("fixture is wrong: no background retry was registered")
 	}
-	if dmPresent(node, cloneName) {
+	if dmPresent(node, names.clone) {
 		t.Fatal("fixture is wrong: the dm-clone was built despite the " +
 			"refused connect")
 	}
+	clearFailAlways(node, "nvme connect")
 
-	// No further RPC. The retry loop alone has to get there.
-	deadline := time.Now().Add(5 * time.Second)
-	for !dmPresent(node, cloneName) && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !dmPresent(node, cloneName) {
-		srv.mu.Lock()
-		retrying = st.retrying
-		srv.mu.Unlock()
-		t.Fatalf("the retry loop connected but never built %s "+
-			"(retrying = %v): the converge that called stopMigrRetry "+
-			"cancelled its own context", cloneName, retrying)
-	}
-	srv.mu.Lock()
-	retrying = st.retrying
-	srv.mu.Unlock()
-	if retrying {
-		t.Error("the retry registration survived a successful connect")
-	}
+	// No further RPC. The retry loop alone has to get there, and the pass
+	// that does deregisters it.
+	waitUntil(t, "the retry loop to leave the destination serving through "+
+		"its dm-clone with no retry registered", func() bool {
+		return servesThroughClone(t, srv, node, names) && !migrRetrying(srv)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -2986,7 +2962,9 @@ func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 	})
 
 	// A read that fails ends the wait at once: no pause, and the target
-	// carries the read's error.
+	// carries the read's error. The connection is then not known to be gone,
+	// so the pass counts as a stopped step, not as a lost source: its
+	// dm_clone_info row says the target was not read.
 	t.Run("a failed read ends the wait", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		ctx := context.Background()
@@ -3019,6 +2997,12 @@ func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 		if waited := clock.Now().Sub(start); waited != 0 {
 			t.Fatalf("the pass waited %v after a failed read, want none",
 				waited)
+		}
+		dm := reply.GetSideInfo().GetMigrDstInfo().GetDmCloneInfo()
+		if dm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			!strings.Contains(dm.GetDetails(), "target not read") {
+			t.Errorf("dm_clone_info = %v %q, want ERROR \"target not read\"",
+				dm.GetStatus(), dm.GetDetails())
 		}
 	})
 }

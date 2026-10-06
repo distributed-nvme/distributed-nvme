@@ -146,18 +146,22 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 	s.mu.Unlock()
 }
 
-// settleFence is the fence bookkeeping of a converge that took the DN9
-// side-device gate (syncup_side.go's `state != sideDevReady`
-// fork) and so never reached ensureCnDm.
+// settleFence is the fence bookkeeping of the two converges that stop short
+// of ensureCnDm while the per-CN layer is still wanted: one that took the DN9
+// side-device gate (syncup_side.go's `state != sideDevReady` fork), or one
+// whose migration destination could not read where its per-CN stacks are
+// (convergeSide's migrCloneUnread branch).
 //
-// Without it the window can end with the per-CN dm-linears still suspended and
-// nothing left to re-arm: the timer nils itself before it converges
-// (armFenceTimer), unfenceLinears runs only from the sweep's pre-step and only
-// for a side that is no longer a migration source, there is no periodic side
-// converge, and a CheckSide round neither converges nor bumps a revision — so
-// one transient `dmsetup info` failure on the side device would leave
-// suspended devices behind until the worker happened to re-sync the side. A suspended dm target queues bios with no timeout (see the header), so
-// [D12]'s bound is the safety property, not a best effort.
+// Without it the window can end with the per-CN dm-linears still suspended
+// and nothing left to re-arm: the timer nils itself before it converges
+// (armFenceTimer), unfenceLinears runs only from the sweep's pre-step and
+// only for a side that is no longer a migration source, the one periodic
+// side converge, the DN8 retry, would take the same gate, and a CheckSide
+// round neither converges nor bumps a revision — so one transient
+// `dmsetup info` failure on the side device would leave suspended devices
+// behind until the worker happened to re-sync the side. A suspended dm target
+// queues bios with no timeout (see the header), so [D12]'s bound is the
+// safety property, not a best effort.
 //
 // Inside the window it only re-arms the timer. Once the window has elapsed it
 // finishes phase 2 itself. That is safe under the DN9 gate: the dm-error and

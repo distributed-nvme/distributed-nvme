@@ -837,10 +837,10 @@ func (s *CnAgentServer) connectRetryLoop(
 		case <-ticker.C:
 		}
 		// The attempt runs on rootCtx, never on this loop's ctx, for the
-		// reason dnagent's migrRetryLoop carries in full: a converge that
-		// finally connects calls stopConnectRetry, which cancels exactly
-		// this loop's ctx, so an attempt running on it would cancel ITSELF
-		// and abandon the rest of the pass.
+		// reason dnagent's migrRetryLoop carries in full: the pass that ends
+		// the retry calls stopConnectRetry, which cancels exactly this
+		// loop's ctx, so an attempt running on it would cancel ITSELF and
+		// abandon the rest of the pass.
 		//
 		// Unlike the dn's, this one was not yet producing a failure — do not
 		// go looking for one. Both of this agent's stopConnectRetry sites

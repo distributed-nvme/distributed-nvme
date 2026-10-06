@@ -80,7 +80,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **conf gate** — An agent's refusal of a request whose conf carries a value the control plane cannot have written, such as a zero geometry member (`ReplyCodeInvalidConf`). It runs after the revision gate and before the request becomes desired state, so nothing converges and nothing is persisted.
 
-**connect retry** — An agent's background re-converge of an object whose last pass left a reason to try again: on the dn a migration destination whose connect or wait for the source's namespace failed, on the cn a leg or clone source that failed to converge, a failed clone step, a group member that is not yet available, or an ns-dev the build held off its raid0 (see `cnagent.md` CN10). Each attempt is a whole converge that decides afresh whether a reason to retry remains.
+**connect retry** — An agent's background re-converge of an object whose last pass left a reason to try again: on the dn, a migration destination whose build stopped short, at the connect to its source or at another step (see `dnagent.md` DN13); on the cn, a leg or clone source that failed to converge, a failed clone step, a group member that is not yet available, or an ns-dev the build held off its raid0 (see `cnagent.md` CN10). Each attempt is a whole converge that decides afresh whether a reason to retry remains.
 
 **control plane, data plane** — The control plane is etcd plus the stateless processes on the control-plane servers, gateway, worker and cdc; the data plane is the disk nodes, the controller nodes and the NVMe-oF paths between them and the hosts.
 
@@ -314,7 +314,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **positive control** — A suite's proof that the read behind a negative assertion can see what it asserts absent, such as the same read seeing a path live before it counts the path gone, so a read that failed cannot pass the negative.
 
-**pre-steps** — The transitions a cn converge pass makes before its sweep's layers: every namespace the plan wants inaccessible moves there first, on every pass, and then planned ns-devs are parked and unserved transfer devices demoted, those two only on a pass whose listings all answered (see `cnagent.md` CN9).
+**pre-steps** — The transitions a converge pass makes before its sweep's layers. On the cn every namespace the plan wants inaccessible moves there first, on every pass, and then planned ns-devs are parked and unserved transfer devices demoted, those two only on a pass whose listings all answered (see `cnagent.md` CN9). On the dn they are the side-level transitions ahead of the sweep's layers: the end of a destination role's retry, the fence's clear, resume and mark, and the repoint of the per-CN dm-linears off a dm-clone about to be removed, made only by a pass whose `dmsetup ls` answered (see `dnagent.md` DN6).
 
 **preflight** — A suite's checks before any case runs: the tools and kernel features each guest needs, the freshness of the binaries, the lab wiring, and the absence of residue from an earlier run.
 
@@ -364,7 +364,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **revision worker** — The worker goroutine per revision key that pushes each revision of its object to the agent and runs its check stream and health rounds; for the sp role it is the coordinator with a child per side and per cntlr.
 
-**rootCtx** — The agent's lifetime context (`rootCtx`) that background tasks run on, so the end of a request never cancels a connect retry, a zeroing goroutine, a fence timer or a background disconnect. Process exit cancels it and waits only for the dn agent's zeroing workers (see `dnagent.md` SH27).
+**rootCtx** — The agent's lifetime context (`rootCtx`) that background tasks run on, so the end of a request never cancels a connect retry, a zeroing goroutine, a fence timer or a background disconnect. Process exit cancels it and waits only for the dn agent's zeroing workers and connect retries (see `dnagent.md` SH27).
 
 **rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: disable it, delete it, then create a cntlr with a free slot (`UpdateCntlrEnabled`, `DeleteCntlr`, `CreateCntlr`).
 

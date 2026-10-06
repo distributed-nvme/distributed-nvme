@@ -721,11 +721,12 @@ func parentDir(path string) string {
 // A CANCELLED CONTEXT FAILS, the way the production client does.
 // common/osclient.go runs every command through exec.CommandContext and tests
 // ctx.Err() at the head of each file operation, so a converge whose context
-// dies part-way stops doing work at that point. The fake ignored the context
-// entirely, which made it blind to a whole class of bug by construction: a
-// DN8 retry converge that cancelled its OWN context in stopMigrRetry ran to
-// completion here and stalled for ever on the lab, and the unit test written
-// for it passed against the broken code until this check existed.
+// dies part-way stops doing work at that point. A fake that ignored the
+// context would be blind to a whole class of bug by construction: a DN8 retry
+// pass that cancels its OWN context — the sweep pre-step's stopMigrRetry, for
+// a destination role no longer wanted — would run to completion here, so
+// TestARoleEndedUnderAnUnlistedSweepIsTornDownByTheRetry would pass with the
+// loop's attempts on the loop's ctx instead of rootCtx (migrRetryLoop).
 func (f *fakeNode) ctxErr(ctx context.Context) error {
 	if ctx == nil {
 		return nil

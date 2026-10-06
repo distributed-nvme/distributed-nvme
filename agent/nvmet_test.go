@@ -32,11 +32,15 @@ const (
 // is refused while the subsystem's "attr_allow_any_host" is 1, and a 1 is
 // refused while a host is linked, both EINVAL. A new subsystem directory comes
 // with its allowed_hosts directory and the attribute at 0, as nvmet makes it.
-// changes is every write, mkdir, link and unlink, in order.
+// changes is every write, mkdir, link and unlink, in order. readErr answers a
+// read of one path with an error that is not fs.ErrNotExist: a read that did
+// not answer, or an attribute that could not be read, as opposed to one that
+// is not there.
 type fakeConfigfs struct {
 	dirs    map[string]bool
 	files   map[string]string
 	links   map[string]string
+	readErr map[string]error
 	changes []string
 }
 
@@ -46,8 +50,9 @@ func newFakeConfigfs() *fakeConfigfs {
 			NvmetRoot + "/subsystems": true,
 			NvmetRoot + "/hosts":      true,
 		},
-		files: map[string]string{},
-		links: map[string]string{},
+		files:   map[string]string{},
+		links:   map[string]string{},
+		readErr: map[string]error{},
 	}
 }
 
@@ -139,6 +144,9 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 			return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
 		},
 		ReadFileFn: func(ctx context.Context, path string) (string, error) {
+			if err, ok := c.readErr[path]; ok {
+				return "", err
+			}
 			data, ok := c.files[path]
 			if !ok {
 				return "", fmt.Errorf("no such file: %s: %w", path,
@@ -294,5 +302,54 @@ func TestEnsureSubsystemEmptyingTheListRevokesEveryHost(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Namespace reads
+// ---------------------------------------------------------------------------
+
+// TestNsAnaGrpIdIsStrict pins the read by which a destination pass whose step
+// stopped decides whether a per-CN stack serves through its dm-clone
+// (dnagent.md DN13). A namespace with no ana_grpid is an answer: it is in no
+// group. A read that did not answer, or could not be read, and a value that is
+// not a number must be errors: taken as a group that is not optimized, they
+// would reload the leg's only serving path onto its dm-error.
+func TestNsAnaGrpIdIsStrict(t *testing.T) {
+	ctx := context.Background()
+	cfs := newFakeConfigfs()
+	nvmet := NewNvmet(cfs.osClient())
+	// The fixture is filled through the same NsPath the production code
+	// builds, so a change to the configfs layout cannot leave this test
+	// passing against paths nobody reads.
+	grp := func(nsid int) string {
+		return nvmet.NsPath(admissionNqn, nsid) + "/ana_grpid"
+	}
+	cfs.files[grp(1)] = fmt.Sprintf("%d\n", common.AnaGrpIdNonOptimized)
+	// nsid 2 stalled, nsid 3 could not be read at all, and nsid 4 holds no
+	// number.
+	cfs.readErr[grp(2)] = context.DeadlineExceeded
+	cfs.readErr[grp(3)] = errors.New("input/output error")
+	cfs.files[grp(4)] = "optimized\n"
+
+	grpId, ok, err := nvmet.NsAnaGrpId(ctx, admissionNqn, 1)
+	if err != nil || !ok || grpId != common.AnaGrpIdNonOptimized {
+		t.Fatalf("a readable ana_grpid gave (%d, %v, %v), want (%d, true, "+
+			"nil)", grpId, ok, err, common.AnaGrpIdNonOptimized)
+	}
+
+	// Absent: the namespace is not there, so it serves through nothing.
+	if grpId, ok, err = nvmet.NsAnaGrpId(ctx, admissionNqn, 5); err != nil ||
+		ok {
+		t.Fatalf("an absent ana_grpid gave (%d, %v, %v), want no group and "+
+			"no error", grpId, ok, err)
+	}
+
+	for _, nsid := range []int{2, 3, 4} {
+		if grpId, ok, err = nvmet.NsAnaGrpId(
+			ctx, admissionNqn, nsid); err == nil {
+			t.Fatalf("nsid %d: gave (%d, %v, nil), want an error: no group "+
+				"was read", nsid, grpId, ok)
+		}
 	}
 }

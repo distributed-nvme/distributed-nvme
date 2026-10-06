@@ -1017,10 +1017,12 @@ func (d *DiskMeta) FreeSide(
 // after the record means the slot is already clean.
 //
 // An existing record passes the same identity gate as a new one, exactly as
-// AllocSide's does. Gated differently from the side record, it could be
-// refused in a converge that got past the side device, which would read a
-// live dm-clone as not live and reload the destination's primary dm-linear
-// onto its dm-error.
+// AllocSide's does (confirmedLocked): its slot is this node's only if its
+// table is. Gated differently from the side record, it could be refused in
+// a converge that got past the side device: that pass would stop at DN13
+// step 2 with the refusal on its migr_dst_info rows, and a destination whose
+// dm-clone is not built yet could not build while the refusal lasts. A
+// dm-clone that serves keeps serving either way (migrDstStopped).
 func (d *DiskMeta) AllocCloneMeta(
 	ctx context.Context,
 	spId uint64,
@@ -1039,21 +1041,9 @@ func (d *DiskMeta) AllocCloneMeta(
 		return nil, fmt.Errorf("clone metadata size is 0")
 	}
 	units := (bytes + common.DnCloneMetaUnit - 1) / common.DnCloneMetaUnit
-	if rec := findCloneMeta(d.table, spId, migrId); rec != nil {
-		// The slot is fixed once allocated, like a side's extents: report a
-		// request that no longer fits rather than silently under-sizing the
-		// dm-clone's metadata device.
-		if rec.GetUnitCount() < units {
-			return nil, fmt.Errorf(
-				"allocated %d clone-metadata units, want %d",
-				rec.GetUnitCount(), units)
-		}
-		return rec, nil
-	}
-	start, err := allocContiguous(d.freeUnitMap(), dnCloneMetaUnitCnt, units)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"allocating %d clone-metadata units: %w", units, err)
+	have, start, err := d.planCloneMetaLocked(spId, migrId, units)
+	if err != nil || have != nil {
+		return have, err
 	}
 	if err := d.zeroCloneMetaHead(ctx, start); err != nil {
 		return nil, err
@@ -1070,6 +1060,57 @@ func (d *DiskMeta) AllocCloneMeta(
 		return nil, err
 	}
 	return findCloneMeta(d.table, spId, migrId), nil
+}
+
+// planCloneMetaLocked is the decision half of AllocCloneMeta, with nothing
+// written: the record when the slot is already there and big enough, the
+// start of the run a new one would take, or the refusal. AllocCloneMeta and
+// CloneMetaRefusal share it so that both report one refusal in one text.
+func (d *DiskMeta) planCloneMetaLocked(
+	spId uint64,
+	migrId uint64,
+	units uint64,
+) (*pb.DnDiskTable_CloneMetaRecord, uint64, error) {
+	if rec := findCloneMeta(d.table, spId, migrId); rec != nil {
+		// The slot is fixed once allocated, like a side's extents: report a
+		// request that no longer fits rather than silently under-sizing the
+		// dm-clone's metadata device.
+		if rec.GetUnitCount() < units {
+			return nil, 0, fmt.Errorf(
+				"allocated %d clone-metadata units, want %d",
+				rec.GetUnitCount(), units)
+		}
+		return rec, 0, nil
+	}
+	start, err := allocContiguous(d.freeUnitMap(), dnCloneMetaUnitCnt, units)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"allocating %d clone-metadata units: %w", units, err)
+	}
+	return nil, start, nil
+}
+
+// CloneMetaRefusal is AllocCloneMeta's refusal by the clone-metadata area,
+// computed without allocating, zeroing or saving anything: the error
+// planCloneMetaLocked gives for this slot — a record smaller than the
+// request, or no free run that fits it — and nil when the area would supply
+// one. Nothing else AllocCloneMeta refuses is checked: not the identity gate
+// it applies first (confirmedLocked), and a table that cannot be read, an
+// unformatted disk and a zero size (no caller passes one) read as nil.
+func (d *DiskMeta) CloneMetaRefusal(
+	ctx context.Context,
+	spId uint64,
+	migrId uint64,
+	bytes uint64,
+) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.load(ctx); err != nil || !d.formatted || bytes == 0 {
+		return nil
+	}
+	units := (bytes + common.DnCloneMetaUnit - 1) / common.DnCloneMetaUnit
+	_, _, err := d.planCloneMetaLocked(spId, migrId, units)
+	return err
 }
 
 // dnCloneMetaZero is the prefix a fresh dm-clone metadata slot must read as

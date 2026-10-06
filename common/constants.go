@@ -298,9 +298,10 @@ const (
 	// recomputed by enumerating the node on every Syncup* and every Check*.
 	ReplyCodeLeftover = 4
 
-	// Seconds between background retries of a pending migration-destination
-	// nvme connect (dnagent.md DN13; the loop is SH27's "DN8 retry", so
-	// nicknamed for the DN8-gated converge it re-runs).
+	// Seconds between background retries of a migration destination whose
+	// build stopped short, at its nvme connect or at another step
+	// (dnagent.md DN13; the loop is SH27's "DN8 retry", so nicknamed for the
+	// DN8-gated converge it re-runs).
 	DnMigrConnectRetryInterval = 5
 
 	// The migration destination's wait for the source namespace (dnagent.md

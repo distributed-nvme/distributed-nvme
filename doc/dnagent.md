@@ -129,8 +129,9 @@ The constants this document relies on, whose values and comments
   the specific value only sets the level of the worker's "syncup rejected"
   record and otherwise serves details and tests.
 * `DnMigrConnectRetryInterval`, the pace of the background retries of a
-  pending migration-destination `nvme connect` (DN13; the loop is SH27's
-  "DN8 retry", so nicknamed for the DN8-gated converge it re-runs).
+  migration destination whose build stopped short, at its `nvme connect`
+  or at another step (DN13; the loop is SH27's "DN8 retry", so nicknamed
+  for the DN8-gated converge it re-runs).
 * `DnMigrDstNsWait` and `DnMigrDstNsPause`, the migration destination's
   wait for the source namespace after a connect that succeeded (DN13):
   re-read, pausing the latter between reads and the former in all. Not a
@@ -189,8 +190,8 @@ local-store prefix unreadable); per-resource failures are captured as
 
 SH27. **Background tasks and process exit.** (Numbered last because SH rules
 are append-only — SH1 to SH26 are cited from code comments and must not
-shift.) A role server MAY run goroutines outside any RPC: the DN8
-migration-connect retry (so nicknamed for the DN8-gated converge it re-runs;
+shift.) A role server MAY run goroutines outside any RPC: the DN8 retry of
+a migration destination (so nicknamed for the DN8-gated converge it re-runs;
 the retry loop itself is specified in DN13), the DN12 fence timer, the DN9
 side-zeroing workers, the cn's connect retry, the CN11 leg probers and the
 cn sweep's background `nvme disconnect` (`cnagent.md` CN10). Every one of
@@ -533,8 +534,12 @@ namespace's "device_path", by which the cn sweep attributes a host-facing
 subsystem no stored request claims — one with no attributable namespace is
 unowned, and the node-level sweep removes it, `cnagent.md` CN21 — and by
 which DN6 attributes a `SideToCnNqn` export: an export whose read did not
-answer is foreign for that pass and named as a failed enumeration), the
-"enable" reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
+answer is foreign for that pass and named as a failed enumeration),
+`Nvmet.NsAnaGrpId` (a namespace's "ana_grpid", by which DN13 reads, in a
+destination pass whose step stopped, whether a per-CN stack serves through
+the dm-clone: a group read that did not answer, taken as not optimized,
+would reload the leg's only serving path onto its dm-error), the "enable"
+reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
 "absent" would skip the disabling write and the rmdir of a namespace the
 kernel still has enabled), the attribute reads of `Nvmet.ProbePortState`
 (`cnagent.md` CN30: a group whose state read did not answer, read as
@@ -851,7 +856,7 @@ formatter, the local store, the `DiskMeta`, the `Dm`, `Nvmet` and
 `NvmeHost` wrappers — the `OsClient`-backed wrappers, no raw client field —
 the `LockSet` (object key = the `LocalSidePath` id tuple), the `--disk`
 path, the port conf (`--tr-*` plus `--nvmet-port-id` as one `PortConf`),
-the per-object `ResInfo` trackers, the pending-connect retry registry, the
+the per-object `ResInfo` trackers, the DN8 retry registry (DN13), the
 per-side zeroing registry and its zeroing slots (DN9), and the SH27
 background-task bookkeeping: the `rootCtx` captured at `Reconcile` plus the
 wait group that `WaitBackground` waits on.
@@ -1174,7 +1179,11 @@ side's own `SyncupSide`, or Scope 1 once the side has left the list — and
 this pass holds only the node read lock, beside every other side's converge
 on this kernel, a sibling agent's included: a side-level sweep that judged
 the whole sp would strip a sibling's half-built export of another leg of
-its host link and namespace.
+its host link and namespace. A side-level sweep whose `dmsetup ls` did not
+answer removes nothing (`architecture.md`, Teardown by sweep), not even a
+chunk file (DN2), and runs none of its pre-steps: DN13's retry
+deregistration, DN12's window clear, resume and mark, and the repoint
+(below).
 
 The node write lock excludes every side-level sweep while the node-level
 one runs, so the two scopes never race. Those locks are per process: they
@@ -1782,7 +1791,8 @@ Four rules keep the suspension bounded, which is what makes it safe:
   every converge of a side whose *effective* `migr_src_conf` is absent —
   dropped, or deferred behind `dst_provisioned` false — clears the window
   and resumes every per-CN dm-linear of that side it finds suspended
-  (`unfenceLinears`), so nothing has to remember that a window was ever
+  (`unfenceLinears`), unless its sweep could not list the node's dm
+  devices (DN6), so nothing has to remember that a window was ever
   opened. The set comes from the **enumeration** of what the node holds,
   not from the plan's cn list: a linear built for a CN that has since left
   `standby_id_list` is exactly the one a remembered list would miss, and
@@ -1821,11 +1831,11 @@ Four rules keep the suspension bounded, which is what makes it safe:
   timer nils itself before converging, the only other unfences are the two
   above and neither applies while the role, the side and its exports are
   still wanted, the agent's one periodic converge — DN8's connect retry,
-  armed only while a destination role's connect is failing — would take
-  this same gate, and a `CheckSide` round neither converges nor bumps a
-  revision. One transient probe failure would otherwise leave the linears
-  suspended, queueing bios with no timeout, until the worker next happened
-  to re-sync the side. Running phase 2 under that gate is safe: the
+  armed only while a destination role's build has stopped short (DN13) —
+  would take this same gate, and a `CheckSide` round neither converges nor
+  bumps a revision. One transient probe failure would otherwise leave the
+  linears suspended, queueing bios with no timeout, until the worker next
+  happened to re-sync the side. Running phase 2 under that gate is safe: the
   dm-error and the dm-linear are the devices the fence itself suspended,
   not something built on top of the side, and retiring them only moves the
   side further from exporting data.
@@ -1902,11 +1912,15 @@ move its namespace to `AnaGrpIdOptimized`, the standbys' to
 Migration; the implemented converge order differs without changing any end
 state (`SyncupSide` builds bottom-up: slot, connect, clone, linear,
 "ana_grpid"): `ensureMigrDst` runs steps (2) to (4) **before** the per-CN
-stacks converge, so on a pass where the connect succeeds the per-CN
-dm-linears are *created* directly on the dm-clone and the primary's
-namespace goes straight to `AnaGrpIdOptimized` — step (1)'s dm-error and
-`AnaGrpIdInaccessible` shape and step (5)'s *reload* occur only while the
-connect is still retrying across passes. "Retrying until success"
+stacks converge, so the pass that first builds those stacks *creates* the
+primary's dm-linear directly on the dm-clone and puts its namespace
+straight into `AnaGrpIdOptimized`, unless a step of it stops (below).
+Step (1)'s dm-error and `AnaGrpIdInaccessible` shape is what a pass builds
+when its source connection answers with no namespace device, or when a
+step stops and the pass finds the dm-clone absent or, with every read
+answered, no per-CN stack serving through it (below); step (5)'s *reload*
+then moves the primary onto the dm-clone in a later pass that has one to
+serve through, the retry's or an RPC's. "Retrying until success"
 (`architecture.md`, Migration) is implemented without retrying inside the
 RPC: a converge pass attempts the connect **once**, and after a connect
 that succeeded it re-reads the subsystem until the source's namespace
@@ -1919,23 +1933,70 @@ twin of `cnagent.md` CN10's head wait); a read that fails ends that wait at
 once. When the connect fails, or the namespace has still not appeared, the
 pass records `target_info` as `RES_STATUS_ERROR` and registers the side in
 a background retry registry that re-runs the destination converge every
-`DnMigrConnectRetryInterval` under the DN1 locks. It is deregistered on
-success, by the sweep's pre-step as soon as a destination role stops being
-wanted, and by the drop of a side whose pointer has left the list (DN6) —
-always by the state, never by remembering that it was once registered.
+`DnMigrConnectRetryInterval` under the DN1 locks. Every other step that
+stops registers it too — the slot or its wrapper, a walk of the source
+connection that did not answer, the dm-clone, the status read — and so do
+hydration that will not converge (a knob or the enable) and a step (5)
+that leaves the primary's dm-linear or its export unconverged (the linear
+onto the dm-clone, the namespace in `AnaGrpIdOptimized`). The worker
+re-sends a `SyncupSide` on a revision or a reply code, never on a row
+(`dnv-worker.md` RW4), so a step nothing retried would stay undone until
+the SP's next revision; with the source having handed IO over by then
+(DN12), a destination not serving through its dm-clone would leave the
+leg with no serving path for that long, and one whose hydration is off
+would copy nothing in the background. The side is deregistered as the
+last act of a pass whose steps up to the status read held and whose step
+(5) converged the primary's dm-linear and export (`settleMigrRetry`); by
+the sweep's pre-step in the first converge that finds the destination
+role no longer wanted and lists the node's dm devices (DN6), which is the
+`SyncupSide` that ends the role unless its `dmsetup ls` did not answer;
+and by the drop of a side whose pointer has left the list (DN6) — always
+by the state, never by remembering that it was once registered.
 
-**The deregistration runs inside the very converge it is ending, and that
-is the sharp edge.** Registering creates a cancellable context and
-deregistering cancels it — so the attempt the retry loop runs must not be
-the thing that context governs. A loop that converged on its own context
-would reach the deregistration in the pass that finally connects, cancel
-itself, and then fail every remaining OS call of that pass on the dead
-context: the dm-clone would never be created, the registration would
-already be cleared so nothing would tick again, and the side would sit at
-a `dm_clone_info` of `RES_STATUS_MISSING`, "target not connected", **for
-ever** — while the controller that reading names is live. One transient
-connect failure is enough to reach that path, and an RPC-driven converge
-cannot show it, because an RPC-driven converge runs on the gRPC context,
+**Short of the source connection's own answer, a step that stops takes the
+serving path neither onto the dm-clone nor off it.** Where the per-CN
+stacks go is read instead from the dm-clone and the side's per-CN stacks
+as the pass finds them (`migrDstStopped`): when a stack serves through the
+dm-clone — its dm-linear maps it and its namespace is in
+`AnaGrpIdOptimized` — the primary's goes or stays on it as after the whole
+sequence; when the dm-clone is absent, or every read answered and no stack
+serves through it, the stacks sit on their dm-errors with every namespace
+`AnaGrpIdInaccessible` (step 1); when a read the answer needs did not
+answer — the dm-clone's own, its device number, a dm-linear's or a
+namespace's — and no stack was found serving through it, the pass leaves
+the per-CN stacks exactly as they are and reports them as a check round
+would. One unanswered command must not reload the leg's only serving path
+onto its dm-error, and a stopped pass must not put the stacks back on a
+dm-clone the source connection's answer took them off. The namespace's
+group is the half of the reading that records that answer: the pass that
+takes the stacks off moves the namespaces out of `AnaGrpIdOptimized` even
+when its reload of a dm-linear is refused, and that dm-linear stays on the
+dm-clone (a reload fails closed, and a later pass's pre-step resumes it
+there). The read covers only the CNs the side's request lists, so when a
+primary flip also drops the old primary, whose stack goes with it (DN6),
+the read finds no stack serving through the dm-clone and the new primary
+waits on its dm-error for the retry. The source
+connection's own answer, that there is no namespace device to read from —
+no controller and a connect that failed or brought none, or a controller
+without one — puts the stacks on their dm-errors whatever the dm-linears
+show, as a level that suppresses the role does (DN11): the dm-clone has
+lost the device it reads unhydrated regions from. The pass leaves the
+dm-clone in place. Hydration that will not converge (a knob or the
+enable), with the status read after it answering, is decided like the
+whole sequence: steps (2) to (4) held, the dm-clone reads through to the
+source this pass found, and the primary's stack goes onto it.
+
+**A deregistration can fall inside a pass of the very loop it ends, and
+that is the sharp edge.** Registering creates a cancellable context and
+deregistering cancels it, and a pass of the loop can be the one that
+deregisters: as its last act, when its whole sequence held
+(`settleMigrRetry`), or in its sweep's pre-step, when it is the first
+converge to find the destination role no longer wanted and list the
+node's dm devices (above). An attempt run on that context would fail
+every OS call that follows the deregistration in its pass, with the
+registration already cleared so that nothing ticks again: where in a pass
+a deregistration falls would decide whether the rest of the pass runs. An
+RPC-driven converge cannot show it, because it runs on the gRPC context,
 which the cancel cannot touch.
 
 So the loop's context governs the **loop**, not the attempt: each attempt
@@ -1998,7 +2059,11 @@ that meets exhaustion reports it on the `migr_dst_info` rows —
 `target_info` `RES_STATUS_MISSING`, its details naming the missing clone
 metadata, since no connect is attempted without a slot, and
 `dm_clone_info` `RES_STATUS_ERROR` with the allocator's message — the dn
-twin of the cn arena ceiling in `cnagent.md` CN18.
+twin of the cn arena ceiling in `cnagent.md` CN18. The check rounds report
+the same pair (DN18), so the side stays unhealthy for as long as it is
+starved, and the retry above, which re-runs the build every
+`DnMigrConnectRetryInterval` meanwhile, builds the destination with no
+further request once the units are free.
 
 DN14. Persist (SH5); reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
@@ -2168,7 +2233,13 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   Live-state reporting — hydration progress); `RES_STATUS_PROVISIONING`,
   details "side provisioning", while DN9's gate is closed on the
   destination side (DN13). The `DnMigrMetaDmName` wrapper has no `ResInfo`
-  of its own: its health folds into this one.
+  of its own: its health folds into this one. While the dm-clone is absent
+  and the clone-metadata area cannot supply this migration's slot, the
+  probe reports the converge's own pair instead — `target_info`
+  `RES_STATUS_MISSING` naming the missing clone metadata and this row
+  `RES_STATUS_ERROR` with the allocator's message (DN13) — computed from
+  the loaded volume table with nothing allocated (`CloneMetaRefusal`), so
+  the two channels do not trade the rows every round.
 
 The level comes first for both `migr_dst_info` rows: at a level that does
 not want the destination role (`SP_LEVEL_NO_MIGRATION` and above, DN11)
@@ -2178,7 +2249,11 @@ destination behind the closed gate reports both `RES_STATUS_PROVISIONING`.
 DN19. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in
 `details` and the converge pass **continues** with the remaining resources
-— the agent converges as much as it can.
+— the agent converges as much as it can — except for a layer a gate holds
+back on purpose, which the pass reports instead: the per-CN stacks and the
+migration roles above a side device short of ready (DN9, DN10), and the
+per-CN stacks of a migration destination whose stopped pass could not
+read where they are (DN13).
 
 **Leftovers are the one non-protocol outcome that travels in
 `agent_reply`**, and the reason is structural: the `*Info` rows are keyed

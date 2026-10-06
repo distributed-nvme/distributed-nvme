@@ -120,9 +120,25 @@ func (s *DnAgentServer) convergeSide(
 		s.moveCnAnaGroups(ctx, plan, common.AnaGrpIdInaccessible)
 	}
 
-	cloneLive := false
+	cloneLive, dstHeld := false, false
 	if plan.wantMigr {
-		cloneLive = s.ensureMigrDst(ctx, st, plan, info)
+		var clone migrCloneState
+		clone, dstHeld = s.ensureMigrDst(ctx, st, plan, info)
+		switch clone {
+		case migrCloneUp:
+			cloneLive = true
+		case migrCloneUnread:
+			// Nothing decides the per-CN stacks this pass, so they stay
+			// where they are and are only reported, as a check round would
+			// report them; the retry the destination registered converges
+			// them. The fence is settled as under the DN9 gate above, for
+			// the same reason: [D12]'s bound does not wait for a probe.
+			s.settleFence(ctx, st, plan)
+			dstInfo := info.MigrDstInfo
+			s.probeAboveSideDev(ctx, st, plan, info)
+			info.MigrDstInfo = dstInfo
+			return info, sweep
+		}
 	}
 	s.ensureCnDm(ctx, st, plan, info, cloneLive)
 	switch {
@@ -135,6 +151,12 @@ func (s *DnAgentServer) convergeSide(
 	}
 	if plan.wantExport {
 		s.ensureCnExports(ctx, st, plan, info, cloneLive)
+	}
+	if dstHeld {
+		// DN13 step (5) has run: whether the destination still needs its
+		// retry is decided last, so no OS call of this pass follows its
+		// deregistration.
+		s.settleMigrRetry(st, plan, info)
 	}
 	return info, sweep
 }
@@ -573,10 +595,7 @@ func (s *DnAgentServer) ensureDmLinear(
 	if err != nil {
 		return err
 	}
-	converged := len(targets) == 1 && targets[0].Type == "linear" &&
-		targets[0].Length == sectors && len(targets[0].Args) == 2 &&
-		targets[0].Args[0] == devNo && targets[0].Args[1] == "0"
-	if !converged || dev.ReadOnly {
+	if !linearMaps(targets, sectors, devNo) || dev.ReadOnly {
 		return s.dm.Reload(ctx, name, table)
 	}
 	// A device an older (pre-[D12]) build left suspended, one a crash
@@ -588,6 +607,15 @@ func (s *DnAgentServer) ensureDmLinear(
 		return s.dm.Resume(ctx, name)
 	}
 	return nil
+}
+
+// linearMaps reports whether a live table is the one ensureDmLinear builds
+// over devNo: a single "linear" target of the side's whole size, from
+// sector 0 of the device.
+func linearMaps(targets []agent.DmTarget, sectors uint64, devNo string) bool {
+	return len(targets) == 1 && targets[0].Type == "linear" &&
+		targets[0].Length == sectors && len(targets[0].Args) == 2 &&
+		targets[0].Args[0] == devNo && targets[0].Args[1] == "0"
 }
 
 // ---------------------------------------------------------------------------

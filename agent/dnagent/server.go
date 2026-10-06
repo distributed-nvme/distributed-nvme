@@ -52,11 +52,12 @@ type DnAgentServer struct {
 	// of its sides are zeroing (DN9).
 	zeroSlots chan struct{}
 
-	// migrRetryInterval paces the DN8 background migration-connect retry
-	// (common.DnMigrConnectRetryInterval), a field for the same reason. It
-	// is what lets a test drive the successful connect from the RETRY LOOP
-	// rather than from an RPC, which is the only shape in which that
-	// converge runs on the loop's own cancellable context.
+	// migrRetryInterval paces the DN8 retry of a migration destination
+	// (common.DnMigrConnectRetryInterval; DN13), a field for the same
+	// reason. It is what lets a test finish a destination's build from the
+	// RETRY LOOP rather than from an RPC: a pass of the loop can deregister
+	// the loop it runs in, which is why its attempts run on rootCtx
+	// (migrRetryLoop).
 	migrRetryInterval time.Duration
 
 	// now and sleep are the clock seams, real by default: DN6's orphan age
@@ -135,7 +136,7 @@ type sideState struct {
 	// chunkMigrId identifies the migration the chunks belong to, so chunks
 	// left over from an earlier migration are never applied to a new one.
 	chunkMigrId uint64
-	// retrying/cancel drive the DN8 background migration-connect retry.
+	// retrying/cancel drive the DN8 retry of a migration destination (DN13).
 	retrying bool
 	cancel   context.CancelFunc
 
