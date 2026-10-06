@@ -248,10 +248,10 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 // What the row rests on is the RunE ctl/root.go's group() gives every group.
 // A group issues no RPC of its own, so the obvious shape is a parent with no
 // Run/RunE — and cobra's (*Command).execute returns flag.ErrHelp for any
-// command that is not Runnable BEFORE it ever calls ValidateArgs
-// (cobra@v1.10.2 command.go:955, above the ValidateArgs call at :968), while
+// command that is not Runnable BEFORE it ever calls ValidateArgs, while
 // ExecuteC treats flag.ErrHelp as success — "always show help if requested,
-// even if SilenceErrors is in effect", command.go:1152. That shape would
+// even if SilenceErrors is in effect", as the comment on ExecuteC's
+// flag.ErrHelp check says. That shape would
 // answer `dnvctl td lst` with a page of help text on STDOUT and exit 0,
 // breaking CT5's "unknown command ⇒ exit 2, stdout empty, no RPC issued"
 // (CT4's stdout promise is scoped to an RPC path, and this argv issues no
@@ -261,8 +261,8 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 //
 // The group's `Args` alone would not have saved it: cobra reaches the
 // not-Runnable branch first. Nor would Find's legacyArgs fallback, which
-// names an unknown command for the ROOT only (args.go:35, `!cmd.HasParent()`)
-// and is consulted only when `Args == nil` (command.go:775) — this root
+// names an unknown command for the ROOT only (its `!cmd.HasParent()` check)
+// and is consulted only when `Args == nil` — this root
 // declares `Args: cobra.NoArgs`, so the sibling case `dnvctl nosuchgroup
 // list` exits 2 by the same mechanism one level up: the root's RunE makes it
 // Runnable, and ValidateArgs' cobra.NoArgs — not needsSubcommand — returns

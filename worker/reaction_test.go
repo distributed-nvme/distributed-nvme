@@ -3175,8 +3175,8 @@ func TestReactionSpareReadiness(t *testing.T) {
 	// THE FRESH-SPARE TRANSIENT. HL2 probes spares too, so a spare whose side
 	// has just been provisioned reads ERROR while the primary connects to it,
 	// and its leg carries an err_epoch seconds old. That is a spare on its way,
-	// not a dead one: counting it dead made AR8 create a second spare for one
-	// repair (the e2e suite's react case, 2026-09-18).
+	// not a dead one: counting it dead would make AR8 create a second spare
+	// for one repair.
 	t.Run("fresh spare still connecting", func(t *testing.T) {
 		h := build(t, true, pb.ResStatus_RES_STATUS_ERROR, 0)
 		h.legOf(spareLegId).ErrEpoch = h.ago(5)

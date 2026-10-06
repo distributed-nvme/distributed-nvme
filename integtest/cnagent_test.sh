@@ -178,10 +178,9 @@ assert_eq() { [ "$1" = "$2" ] || die "$3: got '$1', want '$2'"; }
 # assert_parked pins the park (architecture.md, Namespace suspend semantics)
 # of one effectively suspended namespace:
 # the ns-dev is **live** and its table is a plain dm-linear over its td's
-# `CnErrorName`, offset 0 (CN16 rule 1). Before 2026-09-16 that namespace was
-# held `dmsetup suspend`ed on its ordinary backing instead; asserting `live`
-# alone would not catch a park onto the wrong device, and asserting the table
-# alone would not catch one left suspended, so both halves are here.
+# `CnErrorName`, offset 0 (CN16 rule 1). `live` alone misses a park onto the
+# wrong device and the table alone misses one left suspended, so both halves
+# are asserted.
 assert_parked() { # vm nsdev tderrdev label
 	local vm=$1 nsdev=$2 errdev=$3 label=$4 errno got
 	assert_eq "$(helper "$vm" "dm_state $nsdev")" live "$label: ns-dev is live"
@@ -1646,8 +1645,8 @@ cn_requests_since() {
 # (osclient.md, Exported raw helpers and the probe-IO carve-out).
 # Probe commands (lsblk, dmsetup info|table|status|ls, ls, findmnt, stat,
 # losetup --associated, mdadm --examine, nvme list-subsys) are expected and
-# deliberately not in the list; the cn agent no longer runs `mdadm --detail`
-# at all (its md reads are sysfs since 2026-09-26), which is a read too.
+# deliberately not in the list; the cn agent reads md state from sysfs and
+# never runs `mdadm --detail`, which is a read too.
 mutations() {
 	local trace=${1:-} log=${2:-$CN_LOG}
 	jq -r --arg t "$trace" '
@@ -1845,11 +1844,10 @@ clone_bm_files() {
 # resume_suspended sweeps up suspended dm devices before anything reads them.
 # A dn cutover window holds linears suspended (DN12's fence, bounded by
 # SuspendSeconds), and an interrupted reload can leave anything so. On CN VMs
-# it is debris cleanup only since 2026-09-16: the cn agent no longer suspends
-# a transfer origin — an effectively suspended namespace is *parked*, live on
-# the td's dm-error (CN16; architecture.md, Namespace suspend semantics) — so
-# the only suspended CN device a run can
-# meet is one an older build or a killed agent left behind. Anything that
+# it is debris cleanup only: an effectively suspended namespace is *parked*,
+# live on the td's dm-error (CN16; architecture.md, Namespace suspend
+# semantics), so the only suspended CN device a run can meet is one an older
+# build, a killed agent or a failed dmsetup command left behind. Anything that
 # reads a suspended device (`dmsetup remove`, disabling the nvmet namespace
 # above it, and above all a block-device scan) blocks in uninterruptible D
 # state and wedges the node until reboot. The pattern is deliberately looser
@@ -1927,23 +1925,18 @@ drop_subsys_glob() {
 # homehost prefix, so both forms are matched — the same `dnv-*|*:dnv-*` pair
 # install_udev_rule writes into the mask, against the same MD_NAME property.
 #
-# IT USED TO FILTER ON `mdadm --detail --scan`, WHICH PRINTS NO NAME on these
-# guests (measured on the lab, kernel 7.0.0-31 / Ubuntu 26.04 mdadm,
-# 2026-09-17):
-# the scan line is `ARRAY /dev/md/<hex MD_DEVNAME> metadata=1.2` and nothing
-# more, so every line hit `continue` and the function stopped nothing, ever.
-# `udevadm info --query=property` has it.
+# On these guests (kernel 7.0.0-31, Ubuntu 26.04 mdadm) `mdadm --detail --scan`
+# prints `ARRAY /dev/md/<hex MD_DEVNAME> metadata=1.2` and no array name, so
+# a filter on it would stop nothing; udev's MD_NAME has the name.
 #
 # THE TWO READS GO BLIND ON DIFFERENT ARRAYS, which is why both are here.
 # udev's MD_NAME is imported from `mdadm --detail --no-devices --export` on the
 # array (/usr/lib/udev/rules.d/63-md-raid-arrays.rules), so the udev read is
 # that answer cached and the fallback is it live. udev has nothing for an array
 # in state `clear` or `inactive`, because the line before that import in the
-# same file jumps past it on exactly those states; mdadm has nothing when it
-# cannot read a member's superblock, which is what the 59 wedged arrays of
-# 2026-09-17 were: `--detail --export` had lost MD_NAME there and `--examine`
-# failed on the member, and the explanation to hand is that dm_force_remove's
-# `--force` had just put error targets under their legs. An array that is both
+# same file jumps past it on exactly those states; mdadm has no name for an
+# array whose member superblock it cannot read, as after dm_force_remove's
+# `--force` puts an error target under a leg. An array that is both
 # — inactive over unreadable members — is named by neither and is still
 # skipped.
 #
@@ -2210,10 +2203,9 @@ lab_wipe() {
 	# the wrapper again (a DN meets the same mechanism: the md superblock a
 	# CN writes to a leg travels down the side export into the dm devices
 	# that back it on the DN, where udev can auto-assemble an array from that
-	# superblock). Measured on cn0 2026-09-18: one pass reported `dm left:`
-	# EMPTY and left 8 kind-9 wrappers held open by 4 re-assembled arrays; a
-	# second, identical invocation removed all of them. So the sequence runs
-	# until the node is clean, not once.
+	# superblock). On a cn guest one pass can leave leg wrappers held open by
+	# re-assembled arrays; a second, identical pass removes them. So the
+	# sequence runs until the node is clean, not once.
 	local pass
 	for pass in 1 2 3; do
 		if [ "$pass" -gt 1 ] && [ -z "$(dmsetup ls 2>/dev/null |
@@ -2401,13 +2393,9 @@ ship_helper() {
 # what the wipe deliberately leaves — $WORK, the loop devices, the tmpfs, the
 # udev rule and the nvmet port.
 #
-# EACH VM'S STATUS IS READ, and that is the whole point of the rewrite. This
-# used to be `helper_ok … &` with `wait "$pid" || true`, which discards both:
-# on 2026-09-18 a wipe left cn0 holding 8 kind-9 wrappers and 4 md arrays,
-# printed only the other VM's clean residue report — the two VMs' output
-# interleaves, so a missing report does not stand out — and exited PASS. The
-# next run then died in a residue stage on debris the wipe had claimed to
-# remove. A verb whose failure cannot be seen is worse than no verb, which is
+# EACH VM'S STATUS IS READ, because the two VMs' output interleaves and a
+# missing report does not stand out.
+# A verb whose failure cannot be seen is worse than no verb, which is
 # the same rule the sweep this suite tests is built on.
 wipe_all() {
 	local idx pid rc pids=() bad=()
@@ -2534,8 +2522,8 @@ preflight_vms() {
 		# --reload`, and md_stop_all's MD_NAME read — the first of its two
 		# name sources, and the only one that answers for an array whose
 		# members mdadm can no longer read. mdadm is the other source and is
-		# also what does the stopping, so a VM without it makes that verb the
-		# silent no-op it was until 2026-09-17. Note this list is reached
+		# also what does the stopping, so a VM without it makes that verb a
+		# silent no-op. Note this list is reached
 		# AFTER the start-of-run cleanup_all and not at all under
 		# --cleanup-only, so those sweeps run unchecked.
 		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm truncate stat findmnt thin_dump; do command -v \$b >/dev/null || echo \$b; done")
@@ -3295,9 +3283,8 @@ case_redund() {
 	# never from `mdadm --detail`, which loads the superblock from a member
 	# device and, when that member's DN side has gone, blocks until the
 	# path's failfast expires — ~13 s after the side died, past the 3 s soft
-	# timeout. The kill turned the md row ERROR, an md row counts toward
-	# cntlr health, and that failed the primary over: the first failover of
-	# the ping-pong found 2026-09-24. The partition (case T's, on vm1's
+	# timeout. If the kill turned the md row ERROR, the row would count toward
+	# cntlr health and fail the primary over. The partition (case T's, on vm1's
 	# INPUT from vm2 to the nvme-tcp port) takes CN2's two legs into DN1
 	# away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
 	# disk 0 of their arrays, the member the old `--detail` loaded its
@@ -4548,8 +4535,8 @@ case_clone_xfer() {
 	# also erasing the destination.
 	#
 	# The whole feature list is pinned, not just the one word: the exact
-	# `2 no_hydration no_discard_passdown` agent.CloneTable emits from its
-	# derived feature count (agent/dm.go:405-419), the same string CN18 step 3
+	# `2 no_hydration no_discard_passdown` CloneTable (agent/dm.go) emits
+	# from its derived feature count, the same string CN18 step 3
 	# and architecture.md, [D7], name. The
 	# `dmsetup message $clonedm 0 enable_hydration`
 	# asserted a few lines above does NOT weaken it — dm-clone's
@@ -4943,8 +4930,7 @@ case_restart() {
 	# "health probe pending" until their first post-restart round, so the
 	# snapshot waits that out first; after it a primary's OK row reads "" and
 	# a standby's the sysfs transport report of kernel state the restart
-	# leaves alone. (Until 2026-09-26 the leg details were left out too, for
-	# the restarted primary's old OK "health probe pending" row.)
+	# leaves alone.
 	wait_legs_probed 1 "$sp" "$c1" 20 "restart post-snapshot"
 	local norm='walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
 	cnctl 1 get-cn-info >"$snap/cn1.post.raw"

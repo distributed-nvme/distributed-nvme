@@ -185,8 +185,8 @@ func (d *Dm) LoadTable(
 }
 
 // Reload swaps a live device's table: suspend, load, resume, returning at the
-// first command that fails. It fails CLOSED (decided 2026-09-29;
-// dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`,
+// first command that fails. It fails CLOSED
+// (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`,
 // "A reload fails closed"): a load that fails returns its error with the
 // device still suspended on its old table, and nothing here resumes it. After a
 // refused load a resume would reinstate that old table, and where the reload

@@ -1,2 +1,2 @@
 # doclint exceptions: "<check> <token>", check in
-# ids|ident|path|value|history|identptr|heading
+# ids|ident|path|value|history|identptr|heading|pointer|note

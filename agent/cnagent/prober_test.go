@@ -329,7 +329,8 @@ func TestStandbyStartsNoProber(t *testing.T) {
 // a fault — the DN grants the optimized group to the primary CN alone, so
 // every other CN's path sits in the non-optimized group over a dm-error
 // backing, which is exactly the shape the redund lab case pins OK (leg rows
-// OK, integtest/cnagent_test.sh:1742-1743; ana `non-optimized`, :1774-1779).
+// OK in stage `cn` and ana `non-optimized` in stage `assert` of
+// case_redund (integtest/cnagent_test.sh)).
 // `optimized` is the post-flip pre-promote window and passes too. A leg
 // carrying two sides is mid-migration (CN10) and exempt.
 func TestTransportHealthAnaState(t *testing.T) {
@@ -440,8 +441,7 @@ func TestTransportHealthAnaState(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestFakeProbeIoDefaultsAndOverrides pins the double's FakeOsClient-style
-// contract, the way common's TestFakeReadBlockDirect used to pin the OsClient
-// fake's: unset halves succeed with zero values, set halves dispatch.
+// contract: unset halves succeed with zero values, set halves dispatch.
 func TestFakeProbeIoDefaultsAndOverrides(t *testing.T) {
 	var io LegProbeIO = &fakeProbeIO{}
 	if err := io.Write(context.Background(), "/dev/mapper/x", 0,

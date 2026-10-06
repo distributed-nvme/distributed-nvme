@@ -282,9 +282,8 @@ gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
 # (Integration test plan, The etcd verification, `workerctl`): the raw decoded
 # etcd state, read back by a binary that is NOT the code under test. Its only
 # writes in this suite are the worker-role stand-ins named there —
-# set-created, set-provisioned and, since the two delete RPCs became latches,
-# drain-sp (2026-09-15) and drain-clone (2026-09-16), which finish the
-# teardowns `delete-sp` and `delete-clone` now only start. Every drain step
+# set-created, set-provisioned, drain-sp and drain-clone; the drains finish the
+# teardowns the latching `delete-sp` and `delete-clone` start. Every drain step
 # bumps SpRev, so a case that holds a token must `refresh_rev` after one,
 # exactly as after a mutator.
 wctl() {
@@ -2255,7 +2254,7 @@ EOF
 		'.clones.cl0.src_tr_conf_list[0].tr_addr')" "127.0.0.2" \
 		"clone src_tr_conf tr_addr after the update"
 	# --force skips the hydration proof (AG4), which is how a clone whose
-	# source never existed is abandoned. Since 2026-09-16 the deciding STM
+	# source never existed is abandoned. The deciding STM
 	# LATCHES instead of sweeping (gateway.md, Clones): it sets `deleting`,
 	# RESUMES every namespace backed by the destination td (DeleteClone's
 	# Action, architecture.md, Clones) — here the one step
@@ -4447,8 +4446,8 @@ case_faults() {
 		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"
 
 	# The thirteenth guard of this stage — an SP-level mutator refused
-	# because the SP is `deleting` — has no probe HERE on purpose, but not for
-	# the old reason: since 2026-09-15 `delete-sp` sets the flag
+	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
+	# sets the flag
 	# (gateway.md, Storage pools and GrowSlice), and step 17 of case S drives
 	# the gate for real. It cannot be driven here, because this stage's sp0
 	# must stay live for the rest of the battery and the latch is one-way.

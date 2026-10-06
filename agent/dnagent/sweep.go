@@ -17,11 +17,10 @@ import (
 //
 // Same principle as the cn's: what to remove is derived by subtracting the
 // desired state from what the node actually holds, and nothing about a failed
-// removal is remembered. The dn's version of the bug the design started from
-// is worse than a leak: teardownForbidden and retireMigrDst diffed against
-// sideState.appliedCnIds / appliedMigrSrc / appliedMigrDst, and every one of
-// those fields was overwritten on the way through the converge — so a per-CN
-// stack whose removal failed was forgotten, while the ALLOCATION RECORD under
+// removal is remembered. On the dn, deriving removals from a memory of past
+// converges would be worse than a leak: a converge that overwrote that
+// memory on its way through would forget a per-CN stack whose removal
+// failed, while the ALLOCATION RECORD under
 // it could still be freed by a probe that read a killed `dmsetup info` as
 // "the device is gone". Freeing a record whose device still maps those
 // extents hands them to the next side: a corruption path, not a leak.
@@ -671,9 +670,8 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // The two scopes
 // ---------------------------------------------------------------------------
 
-// sweepSide is the side-level pass that replaced teardownForbidden and
-// retireMigrDst. It runs in convergeSide in their place, under the node read
-// lock and this side's object lock.
+// sweepSide is the side-level pass of DN6. It runs in convergeSide, under the
+// node read lock and this side's object lock.
 //
 // remove = false is the read-only verdict the Check rounds and GetSideInfo
 // take: same enumeration, same comparison, nothing touched — plus the one

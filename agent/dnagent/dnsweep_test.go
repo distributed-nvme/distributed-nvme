@@ -409,11 +409,10 @@ func TestKilledDmInfoDoesNotFreeARecord(t *testing.T) {
 // removal cannot work, and the clone, its metadata wrapper and (because both
 // rest on it) the side device itself wait a round for the build phase.
 //
-// The pass runs on a RESTARTED agent on purpose. The repoint used to be
-// driven by sideState.appliedMigrDst, a memory of the previous converge that
-// no restart could carry, so the one case where the removal was needed most
-// — a process that came up after the cutover — was the case the old code
-// could not see. Reading the live table instead is what makes the repoint a
+// The pass runs on a RESTARTED agent on purpose: a memory of the previous
+// converge would not survive the restart, and a process that came up after
+// the cutover is where the removal is needed most.
+// Reading the live table instead is what makes the repoint a
 // property of the node rather than of the agent's memory.
 func TestFinishedMigrationRepointsThenRemovesClone(t *testing.T) {
 	srv, node := newTestServer(t)

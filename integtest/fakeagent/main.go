@@ -899,7 +899,7 @@ func (a *fakeAgent) chunkIdListLocked(
 	return a.state[key].chunkIdList(resId)
 }
 
-// sliceIdListLocked returns the sorted slice ids of a cntlr's last request.
+// sliceIdList returns the sorted slice ids of a cntlr's last request.
 // id_to_slice is keyed by common.IdKeyFmt ("%016x").
 func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 	idList := make([]uint64, 0, len(req.GetIdToSlice()))

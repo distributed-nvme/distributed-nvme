@@ -27,12 +27,9 @@ import (
 //     instead of it (CLD7): the SP is healthy, and its other children must keep
 //     converging while one of its clones goes away.
 //
-// What DeleteClone replaced: a single deciding STM that swept the whole
-// rectangle of chunk keys — 512 deletes at today's 32×16 and, back when it was
-// 256 at 16×16, the founding justification for the OLD EtcdMaxTxnOps = 512.
-// Both ceilings are expected to grow and one of them has (MaxSliceCntPerSp
-// doubled on 2026-09-17); incremental deletion makes growth change the batch
-// COUNT and never the transaction's legality.
+// A single deciding STM sweeping the whole MaxSliceCntPerSp x MaxCloneBmCnt
+// rectangle of chunk keys would grow with both ceilings; incremental deletion
+// makes growth change the batch COUNT and never the transaction's legality.
 
 // The Op names of the two clone-drain ops, the exported function names as
 // everywhere else in this package.

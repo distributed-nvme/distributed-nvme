@@ -83,9 +83,7 @@
 #     read-only) assembles it on the DN, and the array holds whichever of the
 #     two udev probed first; either way the side cannot be removed (a pinned
 #     linear holds it open too) and dn_cleanup grinds past CLEANUP_TIMEOUT.
-#     Observed 2026-09-17: 35 stray arrays on one DN VM, 28 on another —
-#     exactly the two DN VMs that carried no md udev rule at all. THIS mask
-#     was on none of the four: it went on the CN VMs only.
+#     An unmasked DN VM collects dozens of stray arrays in a default-shape run.
 #  8. NEVER run this suite while any other dnv suite runs anywhere in the lab
 #     (E2E9). It occupies all ten guests, and its CN agents mount their tmpfs
 #     at /tmp/dnv-tmpfs — the very path cnagent_test.sh owns.
@@ -93,8 +91,7 @@
 #     byte offset, so a length-changing edit kills the run with a bogus syntax
 #     error at an unrelated line.
 #
-# Spec: doc/e2e_integtest.md (rules E2E1..). Where a comment here cites a Go
-# file:line it was re-derived from the tree, not copied from a plan.
+# Spec: doc/e2e_integtest.md (rules E2E1..).
 
 set -euo pipefail
 
@@ -113,8 +110,8 @@ WORKER_BIN="$REPO_ROOT/bin/dnv-worker"
 CDC_BIN="$REPO_ROOT/bin/dnv-cdc"
 DNVCTL_BIN="$REPO_ROOT/bin/dnvctl"
 
-# cnagentctl is built for ONE subcommand, `host-id --hostnqn` (common.NvmeHostId
-# at common/name_fmt.go:784), so the suite can pass the kernel's required
+# cnagentctl is built for ONE subcommand, `host-id --hostnqn`
+# (NvmeHostId (common/name_fmt.go)), so the suite can pass the kernel's required
 # explicit --hostid. workerctl is built for ONE subcommand, `constants`, which
 # prints the Go constants as JSON on the driver. Neither is ever shipped to a
 # guest — the same arrangement cdc_test.sh uses for workerctl.
@@ -133,21 +130,20 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement of every etcd serving dnv,
 # not a knob of this suite, and the one constant this suite MUST NOT type out:
 # read_constants() fills it at preflight from `workerctl constants`, exactly as
-# worker_test.sh:955-968, gateway_test.sh and cdc_test.sh do since 6995e5a.
-# (The plan asked for a literal 1024 "as in the other suites"; the other
-# suites carry no literal any more, and a hand-copied one is precisely what
-# `workerctl constants` was added to end — integtest/workerctl/main.go:1216.)
+# read_constants (worker_test.sh), gateway_test.sh and cdc_test.sh do. The
+# other suites carry no literal, and a hand-copied one is precisely what
+# cmdConstants (integtest/workerctl/main.go) is there to end.
 #
 # It matters here more than in any other suite: THIS suite is the one that
 # actually issues CreateStoragePool at its widest shape, whose compare count is
 # 7 + slice_cnt + 7 x (2 x slice_cnt x MaxAllocLegPerGrp) + 8 x cntlr_cnt
-# (common/constants.go:355-357, the constant itself at :386) = 951 for the
+# (the comment of EtcdMaxTxnOps (common/constants.go)) = 951 for the
 # default run (32 slices, raid1, cntlr_cnt 2) and 967 at MaxCntlrCntPerSp. An
 # etcd started below that fails the create with "too many operations in txn
 # request".
 ETCD_MAX_TXN_OPS=
 # common.MaxAllocLegPerGrp, from the same JSON: the legs per group the
-# allocator actually uses for md-raid1 (gateway/alloc.go:32-37 returns it, or 1
+# allocator actually uses for md-raid1 (legCntOf (gateway/alloc.go) returns it, or 1
 # for redund_none). read_constants cross-checks LEGS against it, because every
 # number below — DN picks, DNS_PER_VM, the create's size — is a multiple of it.
 MAX_ALLOC_LEG_PER_GRP=
@@ -171,11 +167,11 @@ HELPER=/var/tmp/dnv-e2e-helper.sh
 
 NVMET=/sys/kernel/config/nvmet
 
-# common.DefaultTmpfsPrefix (common/constants.go:139). A cn agent's tmpfs is
+# common.DefaultTmpfsPrefix (common/constants.go). A cn agent's tmpfs is
 # NOT derived from --local-store: NewNameFmt sets tmpfsPrefix unconditionally
 # and CnTmpfsPath returns <prefix>/<cluster_id>-<cn_id>, both %016x
-# (common/name_fmt.go:115-125, :451-461). No flag moves it. So CN state lives
-# BOTH under $WORK and here —
+# (NewNameFmt and CnTmpfsPath (common/name_fmt.go)). No flag moves it. So CN
+# state lives BOTH under $WORK and here —
 # which is why the space guard and cleanup must both look here, and why rule 8
 # above forbids running while the cn suite (same path) runs.
 TMPFS_DIR=/tmp/dnv-tmpfs
@@ -193,11 +189,9 @@ TMPFS_DIR=/tmp/dnv-tmpfs
 # 29527, etcd 2379.
 #
 # Nothing below is BOUND by any of them. Two numbers do APPEAR elsewhere:
-# dnvctl_test.sh:82-83 carries 127.0.0.1:29901 and :29902 as payload for its
-# fake to record — that suite never dials them, and its own port list is
-# (29840 29841). The plan's flat "no port here appears in any other suite's
-# block" is false as written; "no port here is bound by another suite" is what
-# holds.
+# DN_ADDR and CN_ADDR (dnvctl_test.sh) carry 127.0.0.1:29901 and :29902 as
+# payload for its fake to record — that suite never dials them, and its own
+# port list is (29840 29841).
 ETCD_CLIENT_PORT=16379
 ETCD_PEER_PORT=16380
 GW_PORT=29850
@@ -207,7 +201,7 @@ CDC_PORT=18020
 # 4300+k, nvmet port id k+1. Each agent needs its own trsvcid — two listeners
 # cannot share one TCP port — and therefore its own configfs port, which is
 # what `dnv-agent --nvmet-port-id` buys. ana_groups nest UNDER the port
-# (agent/nvmet.go:55-61), so distinct port ids also give each agent its own
+# (AnaGroupPath (agent/nvmet.go)), so distinct port ids also give each agent its own
 # groups 1/2/3. MAX_DNS_PER_VM keeps the gRPC block below CN_GRPC_PORT:
 # 29900 + 49 = 29949 < 29950.
 DN_PORT_BASE=29900
@@ -274,13 +268,13 @@ STRIPE_SIZE=1048576
 
 # `sp create --init-ext-cnt`: extents per data group. 0 is refused by the
 # gateway, and this value also fixes AR6's grow size — a data grow appends a
-# group of the FIRST data group's ext_cnt (worker/reaction.go:1033-1038).
+# group of the FIRST data group's ext_cnt (growExtCnt (worker/reaction.go)).
 INIT_EXT_CNT=1
 
 # `sp create --cntlr-cnt`: one primary and one standby, on two of the three CN
 # VMs. The third CN is deliberately spare, so AR7 has somewhere to put a
 # replacement (cn placement dedupes by location the same way dn placement does,
-# model/alloc.go:280-284).
+# FindCnCandidates (model/alloc.go)).
 CNTLR_CNT=2
 
 # `sp create --slots`: the cntlid slot list ops' set-cntlid-slots step grows to
@@ -300,16 +294,14 @@ SLOTS=0,1
 # event_threshold alone. So the set a case needs has to be chosen before its sp
 # exists, which is why this is a parameter of setup_create_sp and not of a case.
 #
-# WHAT THE FIRST REAL RUN MEASURED (2026-09-17, commit deca203, all ten lab
-# guests). Building the default shape — 32 slices, raid1, 64 md arrays over 128
-# legs, 32 thin pools — kept the primary CN spawning 126,657 processes over
-# 8m45s: 82,099 dmsetup, 20,127 mdadm, 16,795 lsblk, about 240 a second
-# sustained on a 2-vCPU guest. (That is the whole window, restarts included —
+# THE LOAD OF A DEFAULT-SHAPE BUILD. In the measured window of a default-shape
+# build — 32 slices, raid1, 64 md arrays over 128 legs, 32 thin pools — the
+# primary CN spawns about 240 processes a second on a 2-vCPU guest for about 9
+# minutes. (That is the whole window, restarts included —
 # see WAIT_BUILD.) Under that load the primary cannot answer a health check inside
 # five seconds, the worker sets its err_epoch, and AR5 moves the role. The new
 # primary then starts the SAME build from scratch, goes unresponsive
-# in its turn and hands the role back: the first run recorded
-# failover 1->2, a spare_create, and failover 2->1, all inside setup.
+# in its turn and can hand the role back, all inside setup.
 #
 # NOTE CAREFULLY, because it is what decides the shape of the fix:
 # common.DefaultPrimaryUnhealthy is ALSO 5, and model.ResolveEventThreshold
@@ -387,7 +379,7 @@ VOTE_GRACE=6
 # (Dm.BlkZeroout, agent/dm.go) is a BLKZEROOUT, which asks the loop device for
 # Write Zeroes without unmap, and the loop driver turns that into an fallocate
 # on the backing file that allocates the range without writing data — NOT a
-# hole punch (measured 2026-09-29 on the lab's 7.0 guests: `stat %b` grows by
+# hole punch (measured on the lab's 7.0 guests: `stat %b` grows by
 # the zeroed length). So every extent a disk node zeroes for a side costs
 # EXTENT_SIZE in its backing file whether or not anything writes it, and the
 # E2E5 caps below count it. A write_zeroes_max_bytes of 0 would not change
@@ -400,32 +392,29 @@ BACKING_SIZE=2G
 # Space guard (E2E5), asserted after every case: allocated bytes of one
 # backing file, and allocated bytes of everything this run wrote on all guests.
 #
-# RUN_CAP_BYTES is DERIVED in derive_params, not set here, because the plan's
-# flat 8 GiB is below the floor of the very shape this suite exists to test.
-# The plan built that figure out of the INCREMENTAL writes — clone hydration,
-# migration, the spare switch, AR6, host patterns, thin metadata — and never
-# counted the storage pool's own data. The sp's sides are
-# LEGS x GRP_CNT x INIT_EXT_CNT x EXTENT_SIZE, which at the default shape is
-# 2 x 64 x 1 x 64 MiB = 8 GiB EXACTLY, so the cap equalled the floor and the
-# guard could not pass: run 5 measured 9204092928 bytes against 8589934592 and
-# failed with every per-file allocation well inside its own cap.
+# RUN_CAP_BYTES is DERIVED in derive_params, not set here. The sp's own sides
+# are LEGS x GRP_CNT x INIT_EXT_CNT x EXTENT_SIZE, which at the default shape
+# is 2 x 64 x 1 x 64 MiB = 8 GiB EXACTLY, so a flat 8 GiB cap equals the floor
+# and can never pass.
 DN_CAP_BYTES=$((256 << 20))
 RUN_CAP_BYTES=0
 
-# The cluster and sp every case works in, and the dnvctl globals that carry
-# them (ctl/root.go:187-197: --gateway-address, --cluster, --sp, --trace-id).
+# The cluster and sp every case works in, and the dnvctl global flags that
+# carry them (--gateway-address, --cluster, --sp, --trace-id; dnvctl.md,
+# Global flags, env, config).
 CLUSTER=e2e
 SP=sp0
 
-# common.NqnPrefix (common/constants.go:137) — the prefix of every NQN the
+# common.NqnPrefix (common/constants.go) — the prefix of every NQN the
 # TREE mints (side-to-cn `:2:`, migration source `:3:`, transfer `:4:`). The
 # suite computes some of those (e2e_integtest.md, Topology and parameters)
 # and sweeps all of them in cleanup; it never mints one.
 NQN_PREFIX=nqn.2024-01.io.dnv
 
 # The prefix of every subsystem THIS SUITE creates with `ss create --nqn`. A
-# host-facing subsystem NQN is literally that flag's string (ctl/ss.go:53 sends
-# it unmunged; gateway/subsystem.go:142 validates it and never rewrites it), so
+# host-facing subsystem NQN is literally that flag's string (sent unmunged by
+# ssCreateCmd (ctl/ss.go); CreateSubsystem (gateway/subsystem.go) validates it
+# and never rewrites it), so
 # this is a suite choice, not a tree format, as long as it stays outside the dnv
 # namespace nqn.2024-01.io.dnv:, which CreateSubsystem refuses (architecture.md,
 # Common validation). Distinct from cdc_test.sh's nqn.2024-01.io.dnv-it:cdc.
@@ -433,7 +422,7 @@ NQN_IT=nqn.2024-01.io.dnv-it:e2e
 
 # Fixed v4 uuids for the namespaces the suite creates. `ns create --uuid` is
 # always passed: an empty dev_uuid makes the gateway mint a RANDOM one
-# (gateway/subsystem.go:426-431), and the host resolves its device as
+# (newDevUuid (gateway/subsystem.go)), and the host resolves its device as
 # /dev/disk/by-id/nvme-uuid.<uuid>, which a random value would make
 # unpredictable.
 UUID1=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c01
@@ -442,11 +431,10 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 # Polling budgets, in seconds. Every one of them bounds a wait_until; none of
 # them is a sleep.
 #
-# THE BIG ONES ARE SIZED AGAINST A MEASURED WINDOW, NOT AN ESTIMATE. The plan's
-# "expect ~5 min per build" is optimistic for this shape and the first real run
-# proved it: the primary CN's agent log spans 8m45s (525 s) of build work and
-# records 126,657 process spawns in it — 82,099 dmsetup, 20,127 mdadm, 16,795
-# lsblk, about 240 a second sustained on a 2-vCPU guest.
+# THE BIG ONES ARE SIZED AGAINST A MEASURED WINDOW, NOT AN ESTIMATE. Five
+# minutes per build is optimistic for this shape: in the measured window the
+# primary CN's agent log spans 8m45s (525 s) of build work and records 126,657
+# process spawns in it, about 240 a second sustained on a 2-vCPU guest.
 #
 # READ 525 s FOR WHAT IT IS. It is the longest build WINDOW the lab has
 # produced, and not the cost of one uninterrupted build. Two failovers fired
@@ -461,8 +449,7 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 #
 # The constraint is the process-spawn rate of a 2-vCPU guest; it is NOT memory
 # (all three CN guests held ~2.8 GiB of 3.4 GiB free throughout, with load
-# averages under 1), so the plan's first fallback of raising the CN guests
-# to 8 GiB addresses the wrong resource.
+# averages under 1).
 #
 # THE LINE BETWEEN THE TWO BIG BUDGETS IS "FROM NOTHING" vs "AN INCREMENT", not
 # "a cntlr stack" vs "everything else". WAIT_BUILD is a WHOLE cntlr stack built
@@ -542,7 +529,7 @@ HOST_IP=()
 
 # Parsed parameters and the numbers derived from them (derive_params).
 #
-# GRP_CNT is the plan's "GROUPS" under another name, and the name is not a
+# GRP_CNT is not called GROUPS, and the name is not a
 # preference: bash's own GROUPS is a special array of the user's gids and an
 # assignment to it is SILENTLY IGNORED, so `GROUPS=$((2 * SLICE_CNT))` leaves
 # $GROUPS as the primary gid (1000 on these guests) and every number derived
@@ -579,7 +566,7 @@ QUIET=0
 # whose trsvcid is outside this suite's band, i.e. one that was never ours to
 # remove. on_exit and --cleanup-only turn it into a non-zero exit, because a
 # leftover port with live ana_groups is what fails the NEXT suite's setup
-# (memory note nvmet-port-teardown-ana-groups) and a WARNING in the middle of an
+# (rule 4 above) and a WARNING in the middle of an
 # hours-long transcript is not how the operator finds that out.
 CLEANUP_DIRTY=0
 
@@ -593,16 +580,17 @@ CLEANUP_DIRTY=0
 # tolerant of ABSENCE — a guest with nothing on it prints its sentinel and the
 # run goes on — but a verb that timed out is not absence, it is debris that
 # survived, and continuing past it puts the run into a preflight failure about
-# whatever the debris collides with first. On 2026-09-17 that was an nvmet
-# port, and the port message blamed a refusal that had never happened.
+# whatever the debris collides with first, with a message that blames the
+# wrong step.
 # cleanup_start_gate turns this list into a die.
 CLEANUP_UNFINISHED=""
 
 # --timeout on every dnvctl call. dnvctl's own default is 10 s
-# (ctl/root.go:58, a per-INVOCATION deadline), which is not enough for this
-# suite's heaviest calls: `sp create` at 32 slices runs 2 x slice_cnt = 64 DN
-# candidate scans, each a full descending range over the capacity index with
-# one proto decode per DN (model/alloc.go:113-141), before it commits a
+# (defaultTimeout (ctl/root.go), a per-INVOCATION deadline), which is not
+# enough for this suite's heaviest calls: `sp create` at 32 slices runs 2 x
+# slice_cnt = 64 DN candidate scans (FindDnCandidates (model/alloc.go)), each
+# a full descending range over the capacity index with one proto decode per
+# DN, before it commits a
 # 951-compare transaction. The default here is raised once, and a single call
 # that needs more gets it from ctl_timeout without changing the file's default.
 CTL_TIMEOUT_DEFAULT=30
@@ -636,8 +624,9 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 FRAME=@@e2e-frame@@
 
 # ---------------------------------------------------------------------------
-# Logging, assertions, failure handling (shapes from cnagent_test.sh:145-165
-# and dnvctl_test.sh:163-212)
+# Logging, assertions, failure handling (shapes from stage, die and
+# assert_eq (cnagent_test.sh) and from assert_field, assert_jq and
+# assert_parses (dnvctl_test.sh))
 # ---------------------------------------------------------------------------
 
 log() { echo "$*" >&2; }
@@ -680,7 +669,7 @@ assert_between() {
 jq_of() { printf '%s' "$1" | "$JQ" -r "$2"; }
 
 # assert_field reads one field out of a JSON document. dnvctl renders 64-bit
-# proto fields as JSON STRINGS and 32-bit ones as bare numbers (ctl/root.go:357-360,
+# proto fields as JSON STRINGS and 32-bit ones as bare numbers (emit (ctl/root.go),
 # doc/dnvctl.md CT4), and `byte_cnt` in the two bitmap replies is a Go int,
 # so it is a number too — every comparison here is textual, through jq -r.
 assert_field() { # <json> <filter> <want> <label>
@@ -756,7 +745,7 @@ on_exit() {
 			# the operator has to act on. There is no failing stage to name.
 			cleanup_dirty_banner
 		else
-			log "debris left in place on all ten guests; failing stage '$STAGE'"
+			log "debris left in place on every guest; failing stage '$STAGE'"
 			log "pull the stage's records on the guest that carries the log with:"
 			log "  jq 'select(.trace_id==\"$TRACE\")' <the log under $WORK>"
 		fi
@@ -770,10 +759,10 @@ on_exit() {
 # One ssh helper per role family. cp needs no root at all — etcd, the gateway,
 # the worker, the cdc and dnvctl are plain user processes — while the DN, CN
 # and host guests need passwordless sudo for configfs, dm, md, loop devices and
-# `nvme connect`. The `sudo -n bash -c $(printf '%q' …)` shape is cdc_test.sh's
-# (:246-258): -n so a sudo that would prompt fails instead of hanging, and %q
-# so an argument containing a space or a metacharacter is not re-split by the
-# remote shell.
+# `nvme connect`. The `sudo -n bash -c $(printf '%q' …)` shape is that of s2
+# and h (cdc_test.sh): -n so a sudo that would prompt fails instead of hanging,
+# and %q so an argument containing a space or a metacharacter is not re-split
+# by the remote shell.
 # ---------------------------------------------------------------------------
 
 # ssh_to runs one command on one target. QUIET is raised while wait_until
@@ -878,16 +867,15 @@ helper_cp_ok() { helper_cp "$@" || true; }
 dn_grpc_port() { printf '%s' "$((DN_PORT_BASE + $1))"; }
 dn_trsvcid() { printf '%s' "$((DN_TRSVCID_BASE + $1))"; }
 
-# nvmet port ids are 1-based (common.NvmetPortId = 1 is the default of
-# `dnv-agent --nvmet-port-id`, cmd/dnv-agent/main.go:88, common/constants.go:226),
+# nvmet port ids are 1-based (common.NvmetPortId (common/constants.go) = 1 is
+# the default of `--nvmet-port-id` in addCommonFlags (cmd/dnv-agent/main.go)),
 # so instance 0 keeps the historical port 1 and instance k takes k+1.
 dn_port_id() { printf '%s' "$(($1 + 1))"; }
 
 # One directory per process, each holding that process's pid file, log, store
 # and (on a DN) its backing file — the shape gateway_test.sh's remote_start
-# expects ($WORK/<dir>/pid). The plan wrote the cn store as
-# $WORK/cn-store; it lives at $WORK/cn/store here so the cn agent has a
-# directory like every other process.
+# expects ($WORK/<dir>/pid). The cn store lives at $WORK/cn/store so the cn
+# agent has a directory like every other process.
 dn_dir() { printf '%s/dn%s' "$WORK" "$1"; }
 dn_backing() { printf '%s/dn%s/backing.img' "$WORK" "$1"; }
 dn_store() { printf '%s/dn%s/store' "$WORK" "$1"; }
@@ -899,7 +887,7 @@ cn_store() { printf '%s/cn/store' "$WORK"; }
 cn_log() { printf '%s/cn/agent.log' "$WORK"; }
 
 # ---------------------------------------------------------------------------
-# Polling (dnvctl_test.sh:300-316)
+# Polling (wait_until (dnvctl_test.sh))
 #
 # wait_until runs its predicate in the PARENT shell, so a predicate that fills
 # globals (ctl_try) keeps them.
@@ -924,7 +912,8 @@ wait_until() { # <secs> <label> <cmd…>
 }
 
 # ---------------------------------------------------------------------------
-# The dnvctl driver (E2E2; wrappers from dnvctl_test.sh:322-457)
+# The dnvctl driver (E2E2; wrappers from ctl_exec, ctl_ok, ctl_fail and
+# ctl_fail_msg (dnvctl_test.sh))
 #
 # dnvctl runs ON cp (E2E2) — one ssh per call, a few hundred per run. Its three
 # streams are kept separable by writing them to files on cp first: that is the
@@ -935,7 +924,8 @@ wait_until() { # <secs> <label> <cmd…>
 
 # ctl_prefix is the global argv every call carries. --rev is deliberately NOT
 # in it: the revision token is PRESENCE-based (an omitted --rev sends no token
-# message at all, ctl/root.go:193-194), so passing one would change what the
+# message at all; see the --rev flag of addGlobalFlags (ctl/root.go)), so
+# passing one would change what the
 # gateway checks on every mutator. A case that means to test the token passes
 # --rev itself.
 ctl_prefix() {
@@ -1001,7 +991,7 @@ ctl_ok() { # <args…>
 	assert_parses "$CTL_OUT" "dnvctl $*"
 }
 
-# ctl_fail is the failure wrapper (ctl/root.go:117-132): exit 1, EMPTY stdout,
+# ctl_fail is the failure wrapper (Execute (ctl/root.go)): exit 1, EMPTY stdout,
 # and exactly ONE stderr line of the shape
 # `dnvctl: <UPPER_SNAKE CODE>: <message> (trace_id <id>)`. The message is only
 # shape-checked here.
@@ -1084,7 +1074,7 @@ resolve_jq() {
 }
 
 # read_constants is how this shell reads a Go value instead of copying it
-# (worker_test.sh:955-968). `workerctl constants` opens no etcd client and
+# (read_constants (worker_test.sh)). `workerctl constants` opens no etcd client and
 # reads no key, so it runs LOCALLY on the binary preflight has just built. It
 # must run AFTER resolve_jq and AFTER parse_args, because it also cross-checks
 # LEGS.
@@ -1107,7 +1097,7 @@ read_constants() {
 			"'$MAX_ALLOC_LEG_PER_GRP' in $json"
 		;;
 	esac
-	# gateway/alloc.go:32-37 returns common.MaxAllocLegPerGrp for an md-raid1
+	# legCntOf (gateway/alloc.go) returns common.MaxAllocLegPerGrp for an md-raid1
 	# group and 1 otherwise. If that constant ever moves, every number derived
 	# from LEGS — the DN picks, DNS_PER_VM, the create's compare count — is
 	# wrong, and the suite would fail much later with an unrelated message.
@@ -1155,7 +1145,7 @@ parameters:
   --only <case>       run one case: ${CASES[*]}
   --cleanup-only      run the start cleanup on every guest and stop
 
-The ten guests must be ten DIFFERENT machines, and no other dnv suite may run
+Every guest must be a DIFFERENT machine, and no other dnv suite may run
 anywhere in the lab while this one does.
 EOF
 	exit 2
@@ -1182,8 +1172,8 @@ is_ipv4() { # <string>
 	[ "$n" -eq 4 ]
 }
 
-# parse_args follows the argument idiom of cnagent_test.sh:4288-4328 and
-# cdc_test.sh:2300-2341, extended to repeatable role flags. Both `--flag value`
+# parse_args follows the argument idiom of parse_args (cnagent_test.sh) and
+# parse_args (cdc_test.sh), extended to repeatable role flags. Both `--flag value`
 # and `--flag=value` are accepted for every flag; anything else, including any
 # positional word, is a usage error.
 parse_args() {
@@ -1278,7 +1268,7 @@ parse_args() {
 	# minimum, so the arms are checked before the counts.
 	case "$REDUND" in
 	raid1) LEGS=2 ;; # common.MaxAllocLegPerGrp, cross-checked in read_constants
-	none) LEGS=1 ;;  # gateway/alloc.go:32-37 returns 1 for every other arm
+	none) LEGS=1 ;;  # legCntOf (gateway/alloc.go) returns 1 for every other arm
 	*) usage ;;
 	esac
 
@@ -1353,10 +1343,10 @@ parse_args() {
 # touches a guest.
 derive_params() {
 	# Two groups per slice — one meta, one data — for every slice, from
-	# planSpGroups (gateway/storagepool.go:254-263), and LEGS sides per group.
+	# planSpGroups (gateway/storagepool.go), and LEGS sides per group.
 	GRP_CNT=$((2 * SLICE_CNT))
 
-	# The space guard's run cap, derived from the shape rather than the plan's
+	# The space guard's run cap, derived from the shape rather than a
 	# flat 8 GiB (see RUN_CAP_BYTES's comment for why that could never pass).
 	#
 	# SP_DATA_BYTES is the floor: every one of the LEGS*GRP_CNT sides is
@@ -1384,13 +1374,14 @@ derive_params() {
 
 	# Every one of the CREATE's LEGS*GRP_CNT sides lands on a DISTINCT disk node:
 	# the create's black list starts as the request's and grows with every pick
-	# (gateway/storagepool.go:393-403), so 128 sides at the default shape need
-	# 128 DNs that have never been picked.
+	# (the DN scan of CreateStoragePool (gateway/storagepool.go)), so 128 sides
+	# at the default shape need 128 DNs that have never been picked.
 	#
-	# A scan returns at most ONE candidate per LOCATION (model/alloc.go:137-141),
-	# and E2E4 makes a DN VM's location its role name, so a group draws its LEGS
-	# sides from LEGS DIFFERENT VMs and a pick fails the moment fewer than LEGS
-	# VMs still hold an unpicked DN (gateway/alloc.go:99-103).
+	# A scan returns at most ONE candidate per LOCATION (the location check of
+	# FindDnCandidates (model/alloc.go)), and E2E4 makes a DN VM's location its
+	# role name, so a group draws its LEGS sides from LEGS DIFFERENT VMs and a
+	# pick fails the moment fewer than LEGS VMs still hold an unpicked DN (the
+	# RESOURCE_EXHAUSTED refusal of pickDns (gateway/alloc.go)).
 	#
 	# THE BOUND IS SIZED BY ops STEP 8 AND NOT BY THE CREATE, because the sp
 	# the create builds is not the widest state the run passes through. Both
@@ -1421,25 +1412,22 @@ derive_params() {
 	#      DNs on LEGS different VMs for the disabled one to be the difference
 	#      between a grow that could succeed and one that cannot. By then ops
 	#      step 2 has grown the sp TWICE, and a grow does not avoid the DNs the
-	#      sp already uses: GrowSlice passes a nil black list and a nil
-	#      ExcludeLocs (gateway/storagepool.go:1138-1145), so a grown group may
+	#      sp already uses: GrowSlice (gateway/storagepool.go) passes a nil
+	#      black list and a nil ExcludeLocs to pickDns, so a grown group may
 	#      take fresh DNs and the sp stands at GRP_CNT + 2 groups. Step 8 comes
-	#      up short — FEWER than LEGS, which is LEGS-1 and not zero; the run
-	#      that forced this bound found exactly one — only if divisor VMs are
-	#      FULL, which costs divisor x N occupied DNs against the at most
-	#      CAP*(GRP_CNT + 2) that can ever be occupied there, so
+	#      up short — FEWER than LEGS, which is LEGS-1 and not zero — only if
+	#      divisor VMs are FULL, which costs divisor x N occupied DNs against
+	#      the at most CAP*(GRP_CNT + 2) that can ever be occupied there, so
 	#      divisor x N > CAP*(GRP_CNT + 2) makes it impossible.
 	#
 	# (b)'s right side exceeds (a)'s, so (b) implies (a) and the bound is the
 	# least N satisfying (b): floor(CAP*(GRP_CNT + 2) / divisor) + 1. That is 45
-	# for 4 VMs, 32 slices, raid1 and 3 for one slice on the same four. The
-	# create-only ceil(LEGS*GRP_CNT / divisor) this replaced gave 43 and 2 — and
-	# the 2 is a run that died: at one slice the create's 4 sides plus the two
-	# grows' 4 filled 7 of the 8 DNs, one VM was left with a free one, and step
-	# 8 needed two (observed 2026-09-18, and the create itself was never in
-	# trouble). CAP is what keeps the replacement from over-charging raid1 on
-	# exactly two DN VMs, where the OLD bound was already about twice what the
-	# create can consume.
+	# for 4 VMs, 32 slices, raid1 and 3 for one slice on the same four. A
+	# create-only bound, ceil(LEGS*GRP_CNT / divisor), gives 43 and 2, and the
+	# 2 is too few: at one slice the create's 4 sides plus the two grows' 4 can
+	# fill 7 of the 8 DNs, leaving one VM with a free one, and step 8 needs
+	# two. CAP is what keeps the bound from over-charging raid1 on exactly two
+	# DN VMs.
 	#
 	# WHAT THIS BOUND IS NOT DERIVED FROM. react's AR6 grow and AR8 spare leg
 	# add sides of their own, and AR8 wants a DN carrying exactly one side of
@@ -1474,10 +1462,11 @@ derive_params() {
 			# four creates in five at LEGS*GRP_CNT/V per VM (32 for the default
 			# shape), and a create that does succeed there leaves every VM at
 			# zero free DNs, so every later migration destination and spare leg
-			# has nowhere anti-affine to go: FindDnCandidatesAntiAffine then
-			# RELAXES (model/alloc.go:202-228) and can put both sides of one
-			# leg on one kernel, where SideToCnNqn — which carries no dn_id
-			# (common/name_fmt.go:541-557) — collides between the two agents.
+			# has nowhere anti-affine to go:
+			# FindDnCandidatesAntiAffine (model/alloc.go) then RELAXES and can
+			# put both sides of one leg on one kernel, where
+			# SideToCnNqn (common/name_fmt.go) — which carries no dn_id —
+			# collides between the two agents.
 			log "WARNING: --dns-per-vm $DNS_PER_VM is below the placement" \
 				"bound $DNS_PER_VM_BOUND for $DN_VM_CNT DN VMs,"
 			log "         $SLICE_CNT slices and $REDUND. The ops case's step" \
@@ -1536,9 +1525,9 @@ derive_params() {
 
 	DN_TOTAL=$((DN_VM_CNT * DNS_PER_VM))
 
-	# gateway/thindevice.go:154-171: a td's size must be a positive multiple of
-	# slice_cnt x stripe_size, computed from the SP's stored values. Every
-	# `td create --size` in this suite is a multiple of TD_UNIT.
+	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
+	# multiple of slice_cnt x stripe_size, computed from the SP's stored
+	# values. Every `td create --size` in this suite is a multiple of TD_UNIT.
 	TD_UNIT=$((SLICE_CNT * STRIPE_SIZE))
 }
 
@@ -1548,23 +1537,23 @@ derive_params() {
 #
 # Every formatter below was re-derived from common/name_fmt.go in THIS tree.
 # The kind digit is a constant there, not a literal
-# (common/name_fmt.go:76-82: NqnKindDnHost = 0x0, NqnKindCnHost = 0x1,
+# (NqnKind (common/name_fmt.go): NqnKindDnHost = 0x0, NqnKindCnHost = 0x1,
 # NqnKindSideToCn = 0x2, NqnKindMigrSrc = 0x3, NqnKindXfer = 0x4), printed with
 # %01x; every id is printed with %016x. The prefix is nf.nqnPrefix, which
-# NewNameFmt loads unconditionally from common.NqnPrefix
-# (common/name_fmt.go:115-125) — no flag and no request field moves it — so
+# NewNameFmt (common/name_fmt.go) loads unconditionally from common.NqnPrefix
+# — no flag and no request field moves it — so
 # $NQN_PREFIX is the whole story, and it is the same literal
-# integtest/cnagent_test.sh:85 carries.
+# NQN_PREFIX (integtest/cnagent_test.sh) carries.
 #
 # THE ARGUMENT ORDER IS NOT UNIFORM, and that is the easy mistake here:
 #
-#   DnHostNqn   (cluster, dn)                common/name_fmt.go:569-580
-#   CnHostNqn   (cluster, cn)                common/name_fmt.go:582-593
-#   SideToCnNqn (cluster, sp, LEG, cn)       common/name_fmt.go:599-614
-#   MigrSrcNqn  (cluster, DN, sp, migr)      common/name_fmt.go:616-631
-#   XferNqn     (cluster, sp, xfer)          common/name_fmt.go:633-646
+#   DnHostNqn   (cluster, dn)
+#   CnHostNqn   (cluster, cn)
+#   SideToCnNqn (cluster, sp, LEG, cn)
+#   MigrSrcNqn  (cluster, DN, sp, migr)
+#   XferNqn     (cluster, sp, xfer)
 #
-# SideToCnNqn keys on leg_id and carries NO dn id — its comment at :595-598
+# SideToCnNqn (common/name_fmt.go) keys on leg_id and carries NO dn id — its comment
 # says why: both sides of a migrating leg export the same subsystem NQN from
 # their two DNs, so the CN's kernel aggregates them into one multipath
 # namespace and ANA picks the live path. MigrSrcNqn does carry a dn id, and
@@ -1577,10 +1566,10 @@ derive_params() {
 # are used today — side_to_cn_nqn, cn_host_nqn and xfer_nqn; dn_host_nqn and
 # migr_src_nqn have no caller, and each carries a line saying so rather than
 # leaving it to be found. A host-facing subsystem NQN is a
-# different thing entirely — it is literally the `ss create --nqn` string
-# (ctl/ss.go:53 sends it unmunged; gateway/subsystem.go:142 validates it, the
-# dnv-namespace refusal included, and never rewrites it), which is why $NQN_IT
-# is a suite choice and these are not.
+# different thing entirely — it is literally the `ss create --nqn` string (sent
+# unmunged by ssCreateCmd (ctl/ss.go); CreateSubsystem (gateway/subsystem.go)
+# validates it, the dnv-namespace refusal included, and never rewrites it),
+# which is why $NQN_IT is a suite choice and these are not.
 # ---------------------------------------------------------------------------
 
 # Every NQN above starts with the cluster id, and the cluster id only exists
@@ -1595,12 +1584,12 @@ require_cluster_id() {
 # hex16 renders one id the way every Go formatter does, with %016x. Its input
 # is a DECIMAL id, which is exactly what dnvctl prints: protojson renders a
 # uint64 proto field as a JSON STRING of decimal digits and a uint32 as a bare
-# number (ctl/root.go:357-360, doc/dnvctl.md CT4), so an id arrives here as
+# number (emit (ctl/root.go), doc/dnvctl.md CT4), so an id arrives here as
 # text either way and is handed to printf as text.
 #
-# It is deliberately NOT `printf '%016x' "$(($1))"` (cnagent_test.sh:452): that
+# It is deliberately NOT `printf '%016x' "$(($1))"` (hex16 (cnagent_test.sh)): that
 # suite's ids are small literals it chose itself, but a cluster id is a 64-bit
-# fnv1a of name+epoch (model/keys.go:112-119) and has an even chance of landing
+# fnv1a of name+epoch (ClusterId (model/keys.go)) and has an even chance of landing
 # above 2^63, where bash's signed arithmetic wraps to a negative number. Both
 # forms print the same 16 hex digits on bash 5.2, but only the direct one never
 # represents the value as negative on the way.
@@ -1615,9 +1604,9 @@ require_cluster_id() {
 # string instead.
 #
 # Nothing downstream catches the usual poison, `notanid-empty` or
-# `notanid-null`: common.ValidNqnPattern is
-# `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
-# (common/constants.go:14), whose suffix set takes its letters, digits and
+# `notanid-null`: common.ValidNqnPattern (common/constants.go) is
+# `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`,
+# whose suffix set takes its letters, digits and
 # '-', so an NQN carrying it still passes the gateway's validateNqn
 # (gateway/validate.go) — src_nqn and allowed_hosts get no dnv-namespace
 # check — and only a bad id holding a character outside that set, or a "..",
@@ -1681,11 +1670,12 @@ xfer_nqn() { # <sp_id> <xfer_id>
 		"$(hex16 "$1")" "$(hex16 "$2")"
 }
 
-# host_id mirrors common.NvmeHostId (common/name_fmt.go:784-789):
+# host_id mirrors common.NvmeHostId (common/name_fmt.go):
 # sha256("dnv-hostid:" + hostnqn), rendered 8-4-4-4-12. It runs on the DRIVER —
-# `cnagentctl host-id --hostnqn <nqn>` (integtest/cnagentctl/main.go:745-755) is
-# a pure function of its argument that opens no client and reads no key — and
-# that one subcommand is the only reason this suite builds cnagentctl.
+# `cnagentctl host-id --hostnqn <nqn>` is a pure function of its argument
+# that opens no client and reads no key — and that one subcommand,
+# cmdHostId (integtest/cnagentctl/main.go), is the only reason this suite
+# builds cnagentctl.
 #
 # It is NOT what the two hosts connect with: they connect as themselves
 # (e2e_integtest.md, Topology and parameters), with their own
@@ -1714,9 +1704,10 @@ host_id() { # <hostnqn>
 # Both hosts reach their namespaces as themselves: the nqn in
 # /etc/nvme/hostnqn, which is what `ss set-hosts --hosts` must name, and the id
 # in /etc/nvme/hostid, which every `nvme connect`/`connect-all` passes
-# explicitly (rule 2). cdc_test.sh:1644-1655 is the model — it generates both
-# files when they are absent and asserts the two hosts differ — and the guest
-# preflight section owns that generation. Everything here only READS.
+# explicitly (rule 2). Step 4 of preflight_servers (cdc_test.sh) is the
+# model — it generates both files when they are absent and asserts the two
+# hosts differ — and the guest preflight section owns that generation.
+# Everything here only READS.
 #
 # HOST_NQN and HOST_HOSTID are 0-indexed like HOST[]: host0's identity is
 # ${HOST_NQN[0]} / ${HOST_HOSTID[0]}. They are arrays, so a bare $HOST_NQN
@@ -1755,9 +1746,9 @@ read_host_identity() { # <h>
 #
 # A namespace's dev_uuid is RANDOM unless `ns create --uuid` supplies one: the
 # gateway mints an RFC 4122 v4 uuid for an empty dev_uuid
-# (gateway/subsystem.go:426-431, newDevUuid at :83-101). So the suite always
+# (CreateNamespace and newDevUuid (gateway/subsystem.go)). So the suite always
 # passes --uuid $UUID1/$UUID2 and resolves the device by that uuid — the by-id
-# idiom of cnagent_test.sh:494 and cdc_test.sh:719.
+# idiom of host_dev (cnagent_test.sh) and uuid_path (cdc_test.sh).
 #
 # The multipath head node under /dev/disk/by-id is the only name to use. The
 # per-controller path device (nvme<X>c<Y>n<Z>) is hidden and has no /dev node,
@@ -1779,13 +1770,14 @@ host_dev() { # <uuid>
 #  - APPEARING. A namespace whose only path has never been usable gets no head
 #    disk at all — the multipath head is added the first time a path goes live
 #    — so setup must wait_dev AFTER the path's ANA state is optimized, not
-#    before. (Measured in this lab, memory note ana-inaccessible-ns-no-blockdev.)
+#    before. (Measured in this lab.)
 #  - DISAPPEARING. An ANA change does NOT take away a head disk that already
 #    exists. `ns set-suspended` and an xfer's --auto-suspend are a PARK, not a
 #    removal: the cn agent keeps the nvmet namespace, points the ns-dev's table
 #    at the td's dm-error and moves the namespace to the inaccessible ANA group
-#    (agent/cnagent/plan.go:345-353 "a **park**, not a dm suspension … and the
-#    device stays live", :819-828). The host keeps its node and requeues IO.
+#    (the comment of nsPlan.suspended (agent/cnagent/plan.go): "a **park**, not
+#    a dm suspension … and the device stays live"; buildSubsystems plans it).
+#    The host keeps its node and requeues IO.
 #
 # So wait_dev_gone is for `ns delete`, where the nvmet namespace really goes
 # away. After a SUSPEND, assert with host_wait_ana … inaccessible — never with
@@ -1807,7 +1799,7 @@ wait_dev() { # <h> <uuid> [secs]
 # wait_dev_gone is the other direction — after `ns delete` or an `ss delete`
 # that takes the namespace with it, NOT after a suspend (see above). It is
 # deliberately not named wait_gone: that
-# name belongs to the process-control copy from gateway_test.sh:508-511, which
+# name belongs to the process-control copy of wait_gone (gateway_test.sh), which
 # waits for a pid.
 wait_dev_gone() { # <h> <uuid> [secs]
 	wait_until "${3:-$WAIT_HOST}" \
@@ -1816,14 +1808,16 @@ wait_dev_gone() { # <h> <uuid> [secs]
 }
 
 # ---------------------------------------------------------------------------
-# NVMe paths and ANA state (cnagent_test.sh:824-872, with three changes)
+# NVMe paths and ANA state: path_field and ana_state (cnagent_test.sh), with
+# three changes
 #
 # Change 1: the parsing runs on the DRIVER. cnagent_test.sh's path_field is a
 # GUEST function that pipes `nvme list-subsys -o json` through the guest's jq;
 # this suite asks no guest for a jq (resolve_jq builds one for the driver
 # only), so the json crosses the ssh and "$JQ" reads it here. The filter is
-# cnagent_test.sh:835-838 with two additions: change 2 below, and `.Address //
-# ""` so a path object without an Address is skipped instead of aborting jq.
+# that of path_field (cnagent_test.sh) with two additions: change 2 below, and
+# `.Address // ""` so a path object without an Address is skipped instead of
+# aborting jq.
 #
 # Change 2: the selector takes a trsvcid as well as a traddr. On a CN, two
 # paths of one subsystem can share a traddr and differ only in trsvcid — a DN
@@ -1932,12 +1926,10 @@ ANA_LAST=""
 # ANA_CTRL is the CONTROLLER the same predicate resolved, or "none" when there
 # was not one. It exists because "none" is an answer ana_of gives for two
 # different faults — no controller at all, and a controller whose namespaces do
-# not include this uuid — and collapsing them is what cost run 3 (2026-09-17)
-# its diagnosis: setup step 10 died with "timed out waiting for host0 ANA
-# 'optimized' … via 192.168.122.77" when host0 held NO CONTROLLER AT ALL, and
-# the message sent the reader to ANA and to the cdc, neither of which had
-# anything wrong with it. host_wait_ana/cn_wait_ana split the two waits so each
-# fault gets its own sentence; this global is what the diagnostics dump reads.
+# not include this uuid — and collapsing them sends the reader to ANA and the
+# cdc when the host holds no controller at all. host_wait_ana/cn_wait_ana split
+# the two waits so each fault gets its own sentence; this global is what the
+# diagnostics dump reads.
 # Filled by the same *_is predicates and under the same rule as ANA_LAST.
 ANA_CTRL=""
 
@@ -1945,7 +1937,7 @@ ANA_CTRL=""
 #
 # It has to come from sysfs: nvme-cli 2.16's `list-subsys -o json` carries no
 # ANA state (only `show-topology` does, and that one is keyed by namespace and
-# needs a device argument), which is why cnagent_test.sh:845-858 reads the
+# needs a device argument), which is why ana_state (cnagent_test.sh) reads the
 # attribute directly too.
 #
 # The ADDITION is the namespace selector. cnagent_test.sh takes the first
@@ -1972,7 +1964,7 @@ ANA_CTRL=""
 #   ambiguous-ns   <uuid> was "" — the caller expects a single namespace — but
 #                  the controller has several
 # Pass an empty <uuid> only where exactly one namespace is certain: a CN's
-# controller to a side, whose nsid is a fixed 1 (agent/dnagent/plan.go:51).
+# controller to a side, whose nsid is sideNsid (agent/dnagent/plan.go), a fixed 1.
 ana_of() { # <ssh-wrapper> <idx> <ctrl> <uuid|"">
 	local fn=$1 idx=$2 ctrl=$3 uuid=$4 pat lines
 	if [ "$ctrl" = none ] || [ -z "$ctrl" ]; then
@@ -2050,11 +2042,11 @@ host_ctrl_is_present() { # <h> <nqn> <traddr>
 #
 # TWO WAITS, ONE BUDGET, AND THE SPLIT IS THE POINT. ana_of answers `none` for
 # a controller that is not there and for a controller whose namespaces do not
-# include this uuid, and run 3 (2026-09-17) died on the first while the message
-# described the second: "timed out waiting for host0 ANA 'optimized' for ns
-# 2b6f0cc9-… via 192.168.122.77" was emitted when host0 held no controller at
-# all, because `nvme connect-all` had exited 0 having connected nothing. The
-# reader was sent to ANA and to the cdc; the fault was in neither.
+# include this uuid, and a single wait would die on the first while its message
+# describes the second: "timed out after <secs>s waiting for: host0 ANA
+# 'optimized' for ns <uuid> via <traddr>" when host0 holds no controller at all,
+# because `nvme connect-all` can exit 0 having connected nothing. The reader
+# would be sent to ANA and to the cdc, not to the missing controller.
 #
 # So the no-controller case gets its own wait and its own sentence, and the ANA
 # wait that follows runs on the REMAINDER of the same budget — the caller asked
@@ -2078,7 +2070,7 @@ host_wait_ana() { # <h> <nqn> <traddr> <uuid> <want> [secs]
 # connection to ONE side of a leg. A traddr alone does not identify that path,
 # because DNS_PER_VM dn agents share a DN VM's IP, so this one also takes the
 # instance's service id (dn_trsvcid <k>). The uuid is empty on purpose: the
-# side namespace sits at the fixed nsid 1 (agent/dnagent/plan.go:51) and is the
+# side namespace sits at the fixed nsid sideNsid (agent/dnagent/plan.go) and is the
 # only one the dn agent puts in that subsystem — and if that ever stops being
 # true, ana_of answers ambiguous-ns instead of picking one.
 cn_ana_is() { # <v> <nqn> <traddr> <trsvcid> <want>
@@ -2113,7 +2105,7 @@ cn_wait_ana() { # <v> <nqn> <traddr> <trsvcid> <want> [secs]
 }
 
 # ---------------------------------------------------------------------------
-# Host IO (cnagent_test.sh:590-604)
+# Host IO, after sha_range and write_range (cnagent_test.sh)
 #
 # RULE 1 IS ABSOLUTE HERE: no iflag=, no oflag=, anywhere, ever. The guests
 # ship uutils dd 0.8.0, whose iflag=direct fails with EINVAL on a plain
@@ -2232,7 +2224,8 @@ host_write_range() { # <h> <src> <dst> <countMiB> [seekMiB]
 # It is synchronous, unlike host_sha_probe, and that is a claim about one
 # level only: the sole place this suite writes into a device it expects to
 # refuse is SP_LEVEL_READONLY, where the ns-dev carries dm-flakey's
-# `error_writes` table (agent/dm.go:376-381, doc/cnagent.md CN19). dm-flakey
+# `error_writes` table (doc/cnagent.md CN19), the one
+# FlakeyErrorWritesTable (agent/dm.go) builds. dm-flakey
 # fails such a bio with an error — it does not requeue it — so nothing here
 # can leave a task in D state, which is the one thing that would need the
 # detached shape. Do NOT reuse it against a suspended or ANA-inaccessible
@@ -2301,7 +2294,7 @@ host_sha_probe() { # <h> <path> <countMiB> <skipMiB> [secs]
 #      and dn_location <v> = dn<v> is the string every agent of that VM
 #      registers as --location (E2E4) — which is what makes the allocator spread
 #      a group's legs across VMs, because a scan returns at most one candidate
-#      per location (model/alloc.go:137-141).
+#      per location (the location check of FindDnCandidates (model/alloc.go)).
 #   k  the instance index WITHIN one VM, 0..DNS_PER_VM-1. It names a PROCESS:
 #      dn_grpc_port, dn_trsvcid, dn_port_id, dn_dir, dn_backing, dn_store and
 #      dn_log are functions of k ALONE, because they are ports and paths on VM
@@ -2366,7 +2359,7 @@ dn_key() { printf '%s:%s' "$1" "$2"; }
 #
 # The script is generated as an EXPANDED preamble (the run's paths and
 # numbers, straight from this file's constants, so nothing is re-typed) plus a
-# LITERAL body (`<<'EOF'`, which expands nothing). cnagent_test.sh:797-1984
+# LITERAL body (`<<'EOF'`, which expands nothing). vm_helper_source (cnagent_test.sh)
 # re-types its globals inside the quoted heredoc; the split here is the same
 # idea with one source of truth. Every function in the body may use only
 # variables the preamble sets — the guest runs with `set -u`, so a forgotten
@@ -2411,11 +2404,11 @@ NVMET="$NVMET"
 TMPFS_DIR="$TMPFS_DIR"
 NQN_PREFIX="$NQN_PREFIX"
 NQN_IT="$NQN_IT"
-# common.DmPrefix (common/constants.go:136): every dm device either agent
-# creates is dnv-<cluster16>-<node16>-<kind2>-… (common/name_fmt.go:69-86),
-# where kind2 is the role letter 'c' or 'd' followed by one hex digit.
+# common.DmPrefix (common/constants.go): every dm device either agent
+# creates is dnv-<cluster16>-<node16>-<kind2>-…, where kind2 is the role letter
+# 'c' or 'd' followed by one hex digit, a DmKind (common/name_fmt.go).
 DM_PREFIX="dnv"
-# The md assembly mask cnagent_test.sh:1420-1428 installs, by the same path.
+# The md assembly mask of install_udev_rule (cnagent_test.sh), by the same path.
 # BOTH node roles install it here (rule 7, install_udev_rule), and the verbs
 # that do live in the shared node body. This preamble is shared by all four
 # roles, so a host and a cp helper define the name and never use it.
@@ -2514,7 +2507,7 @@ ports_busy() { # <port…>
 
 # mkwork creates $WORK and the named subdirectories. The 0777 is what lets the
 # plain-user scp of ship_binaries write into a tree the sudo helper created
-# (cnagent_test.sh:2206 does the same); on cp, where the helper is already the
+# (setup (cnagent_test.sh) does the same); on cp, where the helper is already the
 # plain user, it changes nothing that matters.
 mkwork() { # <subdir…>
 	local d
@@ -2588,9 +2581,9 @@ dir_bytes() { # <dir>
 
 # space reports this guest's three numbers (E2E5) as key=value lines. tmpfs is
 # reported everywhere and is 0 where no cn agent runs: $TMPFS_DIR is NOT under
-# $WORK (common/constants.go:139 fixes it at /tmp/dnv-tmpfs and no flag moves
-# it), so `rm -rf $WORK` never touches it and a guard that only looked at
-# $WORK would miss a CN's whole clone-metadata arena.
+# $WORK (DefaultTmpfsPrefix (common/constants.go) fixes it at /tmp/dnv-tmpfs
+# and no flag moves it), so `rm -rf $WORK` never touches it and a guard that
+# only looked at $WORK would miss a CN's whole clone-metadata arena.
 space() {
 	local free
 	free=$(df -Pk /var/tmp 2>/dev/null | awk 'NR==2{print $4}')
@@ -2624,7 +2617,7 @@ logtail() { # <lines> <file…>
 }
 
 # grep_log is logtail's filter: a FIXED-STRING match, last <lines> hits. The
-# dnv binaries log slog JSON to STDERR (common/log.go:99-113), which is why
+# dnv binaries log slog JSON to STDERR (init (common/log.go)), which is why
 # every launch here redirects 2>&1 into the log file; an error record is
 # `"level":"ERROR"` in that JSON.
 grep_log() { # <fixed-string> <lines> <file…>
@@ -2646,14 +2639,14 @@ HELPER_COMMON_EOF
 # --- the body the two agent roles share ------------------------------------
 #
 # Everything below is copied from integtest/cnagent_test.sh's shipped helper
-# (the functions of `vm_helper_source`, :797-1984) and dnagent_test.sh's
-# cleanup (:784), with four deliberate changes:
+# (the functions of `vm_helper_source`) and dnagent_test.sh's
+# cleanup, with four deliberate changes:
 #
 #   a. disconnect_prefix reads /sys/class/nvme-subsystem/*/subsysnqn instead of
 #      piping `nvme list-subsys -o json` through the guest's jq
-#      (cnagent_test.sh:1562). This suite installs no jq on any guest —
-#      resolve_jq builds one for the DRIVER — and cdc_test.sh:1142-1153
-#      already does it from sysfs.
+#      (as disconnect_prefix (cnagent_test.sh) does). This suite installs no jq
+#      on any guest — resolve_jq builds one for the DRIVER — and
+#      disconnect_test_subsystems (cdc_test.sh) already does it from sysfs.
 #   b. dm_kind_names takes no node id. cnagent_test.sh passes one because both
 #      roles share a VM there; the kind now carries the role letter (c0…cb,
 #      d0…d5) so the roles no longer overlap, but the node id still scopes a
@@ -2661,8 +2654,11 @@ HELPER_COMMON_EOF
 #      and a CN VM only the cn agent, so filtering by kind alone is both
 #      sufficient and what catches an instance whose ids the driver no longer
 #      knows.
-#   c. the nvmet port teardown is a guarded sweep over many ports, not
-#      `rmdir ports/1`. See ports_sweep.
+#   c. the nvmet port teardown goes through port_drop, which refuses a port
+#      outside this suite's service-id band; the cn and dn suites remove
+#      ports/1 unguarded, though in the same order (ana_groups 3 and 2
+#      first). A DN sweeps every id up to MAX_DNS_PER_VM (ports_sweep), a CN
+#      drops CN_PORT_ID.
 #   d. install_udev_rule / remove_udev_rule are HERE and not in the cn body.
 #      cnagent_test.sh runs both roles on one VM, so the question never arose;
 #      here the roles are on different guests and both need the mask — the CN
@@ -2683,15 +2679,15 @@ helper_node_source() {
 # so every agent this run owns carries that absolute path in its argv, while a
 # `dnv-agent` of cnagent_test.sh or dnagent_test.sh does not — and those
 # suites run the same binaries as the same login user on these very guests
-# (the lab note dnv-integtest-lab-vms lists the shared VMs). An unqualified
+# (the lab VMs are shared). An unqualified
 # sweep would kill them. A previous e2e run used the same $WORK, so the
 # sweep also reaches a crashed run's agents.
 #
 # TERM first: both roles install signal.NotifyContext for SIGINT and SIGTERM
-# (cmd/dnv-agent/main.go:166-168, :204-206), which unwinds agent.Serve. The dn
-# additionally JOINS its background goroutines on the way out (:187,
+# in runDn and runCn (cmd/dnv-agent/main.go), which unwinds agent.Serve. The dn
+# additionally JOINS its background goroutines on the way out (runDn passes
 # srv.WaitBackground — the zeroing loop of dnagent.md DN9 owns a
-# `blkdiscard --zeroout` child); the cn passes nil (:225) and deliberately
+# `blkdiscard --zeroout` child); runCn passes nil and deliberately
 # does not, so a dn can take
 # noticeably longer to go than a cn. KILL only after that.
 kill_agents() { # <dn|cn>
@@ -2784,13 +2780,7 @@ suspended_dms() {
 # dm_force_remove removes one device, falling back to --force (which swaps in
 # an error table when the device is still open) rather than blocking.
 #
-# THE THREE CALLS WERE RE-EXAMINED ON 2026-09-17 AND LEFT ALONE, because the
-# case that made them expensive was never this function's. What made the
-# 2026-09-17 cleanup grind was md_stop_all stopping nothing, so ~128 devices
-# were still pinned under live arrays — the kind-c9 leg wrappers on a CN, a
-# side or the per-CN linear over it on a DN — and every one of them took all
-# three calls; with md_stop_all fixed the busy case should not arise from md.
-# The two shapes, read separately:
+# The two shapes in which all three calls run, read separately:
 #   - A DEVICE THAT IS ALREADY GONE costs three immediate failures and not
 #     three timeouts: each call is one device-mapper ioctl the kernel answers
 #     with "Device does not exist", so nothing waits and no bound is reached.
@@ -2838,8 +2828,9 @@ dm_remove_all() {
 
 # disconnect_prefix drops every connection whose subsystem NQN starts with the
 # prefix. It reads sysfs, not `nvme list-subsys -o json`, because no guest in
-# this suite has a jq (cdc_test.sh:1142-1153 is the same shape). A whole-NQN
-# disconnect is only ever used where every path of that NQN is being retired.
+# this suite has a jq; disconnect_test_subsystems (cdc_test.sh) is the same
+# shape. A whole-NQN disconnect is only ever used where every path of that
+# NQN is being retired.
 disconnect_prefix() { # <nqn prefix>
 	local sysfs nqn
 	for sysfs in /sys/class/nvme-subsystem/*/subsysnqn; do
@@ -2914,9 +2905,8 @@ hosts_drop() { # [extra nqn…]
 }
 
 # port_trsvcid prints one port's service id with spaces stripped. The strip is
-# not cosmetic: nvmet reads several addr_* attributes back space-padded
-# (memory note nvmet-configfs-idempotency), and cdc_test.sh:1072 strips
-# it for the same comparison.
+# not cosmetic: nvmet reads several addr_* attributes back space-padded,
+# and ours_port (cdc_test.sh) strips it for the same comparison.
 port_trsvcid() { # <port id>
 	local got
 	[ -d "$NVMET/ports/$1" ] || {
@@ -2929,7 +2919,7 @@ port_trsvcid() { # <port id>
 }
 
 # port_drop removes ONE nvmet port, and refuses to touch one that is not this
-# suite's. The judgement is the service id, exactly as cdc_test.sh:1069-1074
+# suite's. The judgement is the service id, exactly as ours_port (cdc_test.sh)
 # judges its own: this suite's agents listen on $TRSVCID_MIN..$TRSVCID_MAX
 # (4300..4349), the dn and cn suites use 4200 and the cdc suite 14420..14423,
 # so a port outside the band belongs to another suite or to a human and
@@ -2937,10 +2927,10 @@ port_trsvcid() { # <port id>
 #
 # ORDER IS LOAD-BEARING. ana_groups 3 and 2 are removed BEFORE the port, or
 # the rmdir fails with "Directory not empty" and the leftover port fails the
-# NEXT suite's setup (memory note nvmet-port-teardown-ana-groups). Group 1
+# NEXT suite's setup. Group 1
 # already exists when the port is created and is not one the agent made; the
 # agent creates 2 and 3 and writes the three fixed ana_states
-# (agent/nvmet.go:23-28, :138-156).
+# in EnsurePort (agent/nvmet.go), over fixedAnaGrpIds.
 port_drop() { # <port id>
 	local id=$1 svc grp
 	[ -d "$NVMET/ports/$id" ] || {
@@ -3014,16 +3004,13 @@ nvmet_tree() {
 # may not carry a homehost prefix, and because the name is the only thing that
 # separates one of our arrays from a lab guest's own.
 #
-# IT USED TO READ `mdadm --detail --scan` AND THAT COMMAND HAS NO NAME IN IT.
-# Measured on cn2 (192.168.122.77, kernel 7.0.0-31, Ubuntu 26.04 mdadm) on
-# 2026-09-17: the scan prints
+# IT DOES NOT READ `mdadm --detail --scan`, WHICH HAS NO NAME IN IT.
+# Measured on cn2 (kernel 7.0.0-31, Ubuntu 26.04 mdadm), the scan prints
 #
 #   ARRAY /dev/md/6030def500000000000000010800 metadata=1.2
 #
 # and nothing else — the path carries MD_DEVNAME, which is hex, not the name —
-# so the old `*name=dnv-*` case could never fire. A `bash -x` trace of the real
-# verb: 59 ARRAY lines, 59 `case`s, 59 `continue`s, zero `mdadm --stop`. The
-# function had never stopped anything on this lab. udev has the name on the
+# so a `*name=dnv-*` case never fires. udev has the name on the
 # assembled device:
 #
 #   $ udevadm info --query=property --name=/dev/md88
@@ -3051,7 +3038,7 @@ nvmet_tree() {
 #     limits ("A disk node holds the controller node's md superblocks"), before
 #     mdadm-last-resort promotes it — and for good, if nothing does.
 #   - mdadm has nothing when it cannot read a member's superblock. That is
-#     what the 59 wedged arrays of 2026-09-17 looked like: `mdadm --detail
+#     what the 59 wedged arrays of one failed cleanup looked like: `mdadm --detail
 #     --export` printed MD_UUID and MD_DEVNAME but no MD_NAME and
 #     `mdadm --examine --export` answered "No md superblock detected on
 #     /dev/dm-12" — an unreadable member, and the explanation to hand is that
@@ -3075,7 +3062,7 @@ nvmet_tree() {
 # part that fails: `mdadm --stop` was measured working on an inactive array on
 # that guest. It is the name read that does.
 #
-# THE MASK WAS NEVER IMPLICATED and needs no change, but it is TWO rules and
+# THE MASK NEEDS NO CHANGE, but it is TWO rules and
 # only the first is scoped. The first — ACTION=="add|change",
 # SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member" — IMPORTs MD_NAME
 # from `mdadm --examine --export` on the MEMBER's devnode, the event whose
@@ -3098,8 +3085,8 @@ nvmet_tree() {
 # writes into the mask (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
 # property — the two are no longer two different readings of "the name". It is
 # the name the cn agent gives every array it creates
-# (common.NameFmt.CnMdArrayName, common/name_fmt.go:266-287, passed as `--name`
-# at agent/cnagent/md.go:671 with `--homehost any` at :679), so a guest's own
+# (common.NameFmt.CnMdArrayName (common/name_fmt.go), passed as `--name`
+# by Md.Create (agent/cnagent/md.go) with `--homehost any`), so a guest's own
 # root or data array is never touched — only an array minted by a dnv cn agent,
 # whether it was assembled here on purpose or by the stock udev rule behind our
 # back.
@@ -3109,13 +3096,12 @@ nvmet_tree() {
 # kept MD_NAME out of the db over members mdadm cannot read, either command
 # hitting its bound — matches neither pattern, so the loop skips it. That is
 # the safe direction of the two and the one this function may not lose; it is
-# also the direction that makes the verb silently do nothing, which is exactly
-# the failure above, so mdadm and udevadm are both required tools for BOTH
-# node roles (DN_TOOLS, CN_TOOLS) and preflight fails on a guest without
-# either.
+# also the direction that makes the verb silently do nothing, so mdadm and
+# udevadm are both required tools for BOTH node roles (DN_TOOLS, CN_TOOLS) and
+# preflight fails on a guest without either.
 #
-# PREFLIGHT DOES NOT COVER EVERY CALL, and the gap is where the 2026-09-17
-# failure sat: preflight_guests runs AFTER the unconditional start cleanup
+# PREFLIGHT DOES NOT COVER EVERY CALL:
+# preflight_guests runs AFTER the unconditional start cleanup
 # (main, and e2e_integtest.md, Preflight), and `--cleanup-only` does not
 # preflight at all. So on a guest
 # missing one of the two tools, the start sweep — the one that recovers a
@@ -3178,8 +3164,8 @@ mdstat() {
 # --- the md assembly mask ----------------------------------------------------
 #
 # install_udev_rule masks the stock incremental md assembly for dnv arrays, so
-# the agent is the only assembler. The rule text is cnagent_test.sh:1420-1428
-# verbatim: the stock 64-md-raid-assembly.rules skips a device whose
+# the agent is the only assembler. install_udev_rule (cnagent_test.sh) writes the
+# same rule, verbatim: the stock 64-md-raid-assembly.rules skips a device whose
 # SYSTEMD_READY is 0, and this file is 63-, so it runs first and sets it. It is
 # scoped by MD_NAME, so it suppresses ONLY arrays a dnv cn agent minted and
 # leaves the guest's own arrays — a root filesystem raid above all — assembling
@@ -3195,19 +3181,17 @@ mdstat() {
 #     lands on the DN's local storage and the DN's own udev sees a
 #     linux_raid_member. On TWO devices, and the lab evidence does not say
 #     which one it took: the nvmet namespace exports the per-CN linear
-#     (agent/dnagent/syncup_side.go:593), which ensureDmLinear builds over the
-#     side at offset 0 for its whole length (:525-562), so the superblock sits
+#     (DevicePath in ensureCnExports (agent/dnagent/syncup_side.go)), which
+#     ensureDmLinear builds over the side at offset 0 for its whole length, so
+#     the superblock sits
 #     at the same offset in the kind-d1 linear and in the kind-d4 side and udev
 #     probes both. `mdadm -I` assembles it there — degraded, auto-read-only,
 #     over one of the DN's own dm devices — and that array holds that device
 #     open. Either way the side stays: a pinned kind-d1 linear holds the kind-d4
 #     side open in its turn, so dn_cleanup's dm_remove_kind runs past its bound
-#     whichever of the two it is. Measured on 2026-09-17: the two DN VMs with
+#     whichever of the two it is. Measured: two DN VMs with
 #     no rule file in /etc/udev/rules.d carried 35 and 28 such arrays and both
-#     timed out; the two that did carried none and cleaned up fine. What those
-#     two had was 58-dnv-test.rules, left behind by the dnagent lab work — a
-#     different rule, not this mask, and not in this tree; that it also kept
-#     the arrays away was incidental, and is not something to rely on.
+#     timed out.
 #
 # The DN does not get a BROADER mask, although it owns no dnv array and could
 # in principle take one: a rule that masked every linux_raid_member would also
@@ -3275,8 +3259,8 @@ loop_devs() {
 
 # loop_teardown unformats and detaches them. Zeroing the 4 KiB header is
 # enough to unformat: the volume-table slots are inert without it (dnagent.md
-# DN5, agent/dnagent/diskmeta.go:128 reads exactly common.DnHeaderSize at
-# offset 0). conv=fsync and no oflag=, per rule 1.
+# DN5, and DiskMeta.load (agent/dnagent/diskmeta.go) reads exactly
+# common.DnHeaderSize at offset 0). conv=fsync and no oflag=, per rule 1.
 loop_teardown() {
 	local dev
 	for dev in $(loop_devs); do
@@ -3378,7 +3362,7 @@ dn_up() {
 	pat="[-]-grpc-address $ip:$gport "
 	pid=$(pgrep -f -- "$pat" | head -n 1) || pid=""
 	if [ -z "$pid" ]; then
-		# The agent logs slog JSON to STDERR (common/log.go:99-113), so
+		# The agent logs slog JSON to STDERR (init (common/log.go)), so
 		# 2>&1 is what fills the log file at all. >> and not >, so an
 		# external truncation resets the write offset.
 		nohup "$WORK/bin/dnv-agent" dn \
@@ -3406,13 +3390,12 @@ dn_up() {
 
 # dn_cleanup is the disk-node half of e2e_integtest.md, "Cleanup, and why the
 # order is what it is". The order is integtest/dnagent_test.sh's
-# cleanup (:784) with one change: the side subsystems' CONTROLLERS are not
+# cleanup with one change: the side subsystems' CONTROLLERS are not
 # disconnected here, because they belong to the CN guests. That is why
 # cleanup_all must finish the CN phases BEFORE it calls this — a subsystem
 # unlinked from its port under a live controller kills that controller with
-# DNR and the host never reconnects by itself (memory note
-# nvmet-port-unlink-dnr-kills-host-ctrl), which is acceptable during teardown
-# and not before it.
+# DNR while the port keeps listening and leaves it retrying once the port has
+# nothing left, which is acceptable during teardown and not before it.
 dn_cleanup() {
 	kill_agents dn >/dev/null
 	resume_suspended
@@ -3431,10 +3414,7 @@ dn_cleanup() {
 	# — only swaps in an error table and leaves the device there. So each pinned
 	# device can cost the best part of half a minute and survive anyway — twice
 	# over where the array sits on the linear, once for the linear and once for
-	# the side it goes on holding. On 2026-09-17 dn2 (35 arrays) and dn3
-	# (28) both ran past CLEANUP_TIMEOUT that way, and stopping the arrays by
-	# hand was what let the identical --cleanup-only finish on all ten
-	# guests.
+	# the side it goes on holding.
 	#
 	# It is kept even though install_udev_rule now runs on DN VMs: a guest
 	# that ran an older version of this suite, or one whose rule did not take,
@@ -3442,12 +3422,8 @@ dn_cleanup() {
 	# MD_NAME of `dnv-…` or `<homehost>:dnv-…` (see its own comment), so it
 	# cannot touch an array of the guest's own.
 	#
-	# IT ONLY STARTED WORKING ON 2026-09-17. Until then it filtered on a
-	# `name=` field `mdadm --detail --scan` does not print on these guests, so
-	# it stopped nothing, and the arrays described above were still standing
-	# when the dm removals below ran — which is what made every one of them
-	# take dm_force_remove's fallback. The cost figure above is that no-op's,
-	# not this verb's.
+	# The per-device cost figure above is for arrays left standing when the dm
+	# removals below run, not this verb's normal cost.
 	md_stop_all
 
 	# nvmet first: a namespace must be disabled before the dm device under it
@@ -3507,9 +3483,7 @@ diag() {
 	dmsetup status 2>/dev/null
 	echo "--- suspended dnv dm devices ---"
 	suspended_dms
-	# md on a DISK NODE is always a fault, and it is one this dump used to
-	# hide: the 2026-09-17 stray arrays had to be found by hand, with
-	# /proc/mdstat over ssh, after dn_cleanup had already timed out twice.
+	# md on a DISK NODE is always a fault.
 	echo "--- /proc/mdstat (a DN must show none) ---"
 	mdstat
 	echo "--- mdadm --detail --scan (a DN must show none) ---"
@@ -3539,7 +3513,7 @@ helper_cn_source() {
 
 # tmpfs_teardown releases the cn agent's clone-metadata arena: the loop
 # devices over its tmpfs files first, then the mounts, then the directory.
-# Copied from integtest/cnagent_test.sh:1673.
+# Copied from tmpfs_teardown (integtest/cnagent_test.sh).
 tmpfs_teardown() {
 	local dev mnt
 	for dev in $(losetup -a 2>/dev/null | grep -F "$TMPFS_DIR/" | cut -d: -f1); do
@@ -3559,7 +3533,8 @@ tmpfs_teardown() {
 # otherwise assemble an array the agent is in the middle of creating.
 #
 # No --nvmet-port-id: the cn agent takes the default, common.NvmetPortId = 1
-# (cmd/dnv-agent/main.go:88), which is the port cn_cleanup removes. Only the
+# in addCommonFlags (cmd/dnv-agent/main.go), which is the port cn_cleanup_phase2
+# removes. Only the
 # dn agents need distinct ids, because only they share a kernel.
 cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 	local dir=$1 store=$2 log=$3 ip=$4 gport=$5 svcid=$6 cap=$7 pid pat udev
@@ -3601,8 +3576,9 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 	return 0
 }
 
-# cn_cleanup_phase1 and cn_cleanup_phase2 are integtest/cnagent_test.sh's
-# :1726 / :1755 split, minus its dn half. The split is what makes the ordering
+# cn_cleanup_phase1 and cn_cleanup_phase2 are cleanup_phase1 and
+# cleanup_phase2 (integtest/cnagent_test.sh), minus their dn half. The split is
+# what makes the ordering
 # safe across guests: a dm-clone flushes through its transfer source on
 # removal, and that source is an nvmet export on one of these CN guests (the
 # copy case makes the clone source a transfer of the same sp). So every clone
@@ -3704,15 +3680,15 @@ helper_host_source() {
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 
 # identity generates /etc/nvme/hostnqn and /etc/nvme/hostid if they are
-# absent and prints both. cdc_test.sh:1644-1646 is the model. It is
+# absent and prints both. The model is the host-identity step of
+# preflight_servers (cdc_test.sh). It is
 # deliberately GENERATE-IF-ABSENT and never overwrite: the kernel keeps a
 # strict 1:1 hostnqn<->hostid map, so a file replaced under a live association
-# is how the EINVAL of memory note nvme-connect-flag-and-hostid-traps happens,
+# is how `nvme connect` comes to fail EINVAL,
 # and any other user of the guest shares this identity.
 #
-# For the same reason nothing here ever REMOVES them. The plan offered to
-# remove an identity the suite created; cdc_test.sh leaves them too, and a
-# hostnqn is node identity rather than run state.
+# For the same reason nothing here ever REMOVES them: a hostnqn is node
+# identity rather than run state (cdc_test.sh leaves it too).
 identity() {
 	mkdir -p /etc/nvme
 	[ -s /etc/nvme/hostnqn ] || nvme gen-hostnqn >/etc/nvme/hostnqn
@@ -3729,10 +3705,10 @@ identity() {
 
 # mask neutralises the kernel's own autoconnector for the whole run (rule 6).
 # /usr/lib/udev/rules.d/70-nvmf-autoconnect.rules starts nvmf-connect@.service
-# on the discovery AEN this suite's own connects cause (NVME_AEN=0x70f002,
-# memory note nvme-discovery-aen-uevent), and a connection made behind the
+# on the discovery AEN this suite's own connects cause (NVME_AEN=0x70f002),
+# and a connection made behind the
 # suite's back would carry the node's default host id and appear in
-# list-subsys as a path nothing here created. cdc_test.sh:1180-1184.
+# list-subsys as a path nothing here created. See do_mask (cdc_test.sh).
 #
 # IT VERIFIES RATHER THAN ANNOUNCING. The two `systemctl mask` calls carry
 # `|| true` — a mask can fail on a read-only /etc, on a unit systemd does not
@@ -3766,8 +3742,7 @@ unmask() {
 
 # stas_state reports the two nvme-stas daemons. They must be inactive for the
 # whole run: stacd connects on its own and stafd owns discovery controllers,
-# and nvme-stas sends a DIM in-capsule to every discovery controller it knows
-# (memory note nvme-stas-sends-dim-in-capsule).
+# and nvme-stas sends a DIM in-capsule to every discovery controller it knows.
 stas_state() {
 	printf 'stafd=%s stacd=%s\n' \
 		"$(systemctl is-active stafd 2>/dev/null || true)" \
@@ -3802,7 +3777,7 @@ disconnect_prefix() { # <nqn prefix>
 # disconnect_discovery drops the discovery controllers pointing at one
 # address, by DEVICE (-d): a discovery subsystem's NQN is the same well-known
 # string for every target, so -n would take down discovery controllers this
-# suite never created. cdc_test.sh:1155-1169.
+# suite never created. See disconnect_discovery (cdc_test.sh).
 disconnect_discovery() { # <traddr>
 	local ctrl nqn addr name
 	for ctrl in /sys/class/nvme/nvme*; do
@@ -3823,13 +3798,14 @@ disconnect_discovery() { # <traddr>
 # wipe drops every connection to a subsystem whose NQN starts with $NQN_IT or
 # $NQN_PREFIX, plus the discovery controllers pointing at the cdc it is given.
 # It never uses `nvme disconnect-all`, which would take down subsystems no dnv
-# suite has anything to do with (cdc_test.sh:1135-1136).
+# suite has anything to do with (the header of the host helper that
+# write_host_helper (cdc_test.sh) writes says the same).
 #
 # "EVERY CONNECTION THIS SUITE COULD HAVE MADE AND NOTHING ELSE" IS WHAT THIS
 # USED TO CLAIM, AND IT IS FALSE. $NQN_PREFIX is `nqn.2024-01.io.dnv` with no
 # terminator, so the prefix test also matches `nqn.2024-01.io.dnv-it:cdc:*` —
 # cdc_test.sh's own host-facing subsystems, on the very host guests that suite
-# shares with this one (lab note dnv-integtest-lab-vms: .193 and .197 are in
+# shares with this one (.193 and .197 are in
 # both). That is convenient at the START, where a dead cdc suite's leftovers
 # are debris to be swept, and it is another reason rule 8 forbids running two
 # dnv suites at once. The discovery sweep is NOT affected: disconnect_discovery
@@ -3839,7 +3815,7 @@ disconnect_discovery() { # <traddr>
 # WHAT IS LEFT IS REPORTED. Every `nvme disconnect` above is `|| true` with its
 # output thrown away — a disconnect that fails is otherwise completely silent,
 # and the one caller that depends on the result unlinks a subsystem right
-# afterwards, which kills any surviving controller with DNR. So the sweep ends
+# afterwards, which leaves any surviving controller retrying. So the sweep ends
 # by re-reading sysfs, and a `wipe_left=` line is the evidence that it did not
 # finish. The `wiped` sentinel stays LAST: cleanup_report matches it with
 # `grep -x` and tolerates other lines, but a reader should still find it where
@@ -3865,12 +3841,13 @@ wipe() { # [cdc traddr]
 # propagating the exit status: an empty log is {"genctr":N,"records":[]} with
 # status 0, while an instance that is down is non-zero, and swallowing the
 # difference would make a "serves nothing" assertion pass on a dead cdc
-# (cdc_test.sh:552-560).
+# (see disc_raw (cdc_test.sh)).
 #
 # -q and -I are the host's own identity and are passed explicitly (rule 2):
 # nvme-cli fills an omitted -I from /etc/nvme/hostid, so a -q that is not that
-# file's partner fails EINVAL under the kernel's 1:1 rule. cdc_test.sh:552-560
-# passes the pair for the same reason.
+# file's partner fails EINVAL under the kernel's 1:1 rule.
+# The ghost branch of disc_raw (cdc_test.sh) passes the ghost's -q/-I pair for
+# the same reason.
 discover() { # <traddr> <trsvcid> <hostnqn> <hostid>
 	nvme discover -t tcp -a "$1" -s "$2" -q "$3" -I "$4" -o json
 }
@@ -3919,14 +3896,14 @@ report_ctrls() { # <nqn>
 # both given, for the reason above; --fast_io_fail_tmo, if a caller ever adds
 # it through <extra…>, has UNDERSCORES.
 #
-# `nvme connect-all` EXITS 0 HAVING CONNECTED NOTHING, measured on host0 in
-# this lab on 2026-09-17 in TWO shapes, and neither of them is a target
+# `nvme connect-all` EXITS 0 HAVING CONNECTED NOTHING, measured on this lab's
+# nvme-cli in TWO shapes, and neither of them is a target
 # refusing a connect:
 #
-#   * NOTHING LISTENING on an address the discovery log advertised. This is
-#     run 3's own failure: exit 0, nothing on stdout, nothing on stderr, and
+#   * NOTHING LISTENING on an address the discovery log advertised: exit 0,
+#     nothing on stdout, nothing on stderr, and
 #     `failed to connect socket: -111` — ECONNREFUSED — in the host's dmesg,
-#     once per discovery record. nvme-cli reported neither and returned 0.
+#     once per discovery record. nvme-cli reports neither and returns 0.
 #   * AN EMPTY DISCOVERY LOG. Presenting a hostnqn that is not in the
 #     subsystem's allowed_hosts, DS4 hides the entry (cdc/view.go, doc/cdc.md
 #     DS4), the log page comes back empty and there is nothing to connect to:
@@ -3938,8 +3915,9 @@ report_ctrls() { # <nqn>
 # refuses both leave rc 0 — not that every failure does. (Run as a non-root
 # user the same command fails loudly with EACCES on /dev/nvme-fabrics and
 # rc=1, so a silent success is not a sudo question.) So
-# the status is reported as a word rather than propagated — cdc_test.sh:818
-# swallows it with `|| true` for the same reason — and the SUBSYSTEM NQN is
+# the status is reported as a word rather than propagated —
+# connect_all (cdc_test.sh) swallows it with `|| true` for the same reason —
+# and the SUBSYSTEM NQN is
 # taken as an argument purely so report_ctrls can answer the only question that
 # matters: does a controller for it exist now. The driver dies on zero
 # (connect_verdict); nothing here interprets the number.
@@ -4028,7 +4006,7 @@ HELPER_HOST_EOF
 # saying it did would be false: worker_test.sh, gateway_test.sh and
 # cdc_test.sh start the very same dnv-worker, dnv-gateway and dnv-cdc binaries
 # as the same login user on this same cp guest (the cdc suite's four VMs
-# include it — lab note dnv-integtest-lab-vms). What makes them safe is that
+# include it). What makes them safe is that
 # every pattern names something only THIS suite's processes carry: $WORK for the
 # three dnv binaries, which remote_start launches as "$WORK/bin/dnv-…", and
 # `--name $ETCD_NAME` for etcd, whose name is dnv-e2e-it against the other
@@ -4094,8 +4072,9 @@ cp_cleanup() {
 	return 0
 }
 
-# reset_etcd is the plan's between-cases step: every case starts from an EMPTY
-# etcd (E2E11), and the data directory is what carries the state. The caller
+# reset_etcd wipes the etcd data directory, which is what carries the state.
+# Its caller, reset_control_plane, is not the between-cases step: each case's
+# empty etcd (E2E11) comes from cp_cleanup removing $WORK. The caller
 # stops the four processes first — removing a live etcd's data directory is
 # not a reset, it is a corruption.
 reset_etcd() {
@@ -4133,7 +4112,8 @@ HELPER_CP_EOF
 
 # --- the dispatcher, last in every role's script ----------------------------
 #
-# `"$@"` alone (cnagent_test.sh:1986) turns a typo into `command not found`
+# `"$@"` alone (the last line vm_helper_source (cnagent_test.sh) writes)
+# turns a typo into `command not found`
 # with status 127 and no hint. This one names the verb and lists what the
 # guest actually has, which is the difference between "the helper is stale"
 # and "the driver called the wrong thing".
@@ -4233,16 +4213,11 @@ ship_helpers() {
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
-# fetch_etcd is worker_test.sh:923-944 verbatim, byte for byte (only this
+# fetch_etcd is fetch_etcd (worker_test.sh) verbatim, byte for byte (only this
 # comment differs): the download-and-verify path of the pinned release. It is
 # idempotent — a cached tarball whose sha256 already matches the pin is never
 # re-downloaded — so this suite needs no network on any repeat run, while a
 # fresh checkout still works.
-#
-# The line number is worth a word: this plan's own commit 1 (99c4688) added
-# the workerctl-constants block to worker_test.sh and pushed fetch_etcd down
-# by 28 lines, so the ":895-920" every earlier document cites is that file
-# BEFORE commit 1. sha256_of, which fetch_etcd calls, is now :917.
 fetch_etcd() {
 	mkdir -p "$CACHE_DIR"
 	if [ -f "$ETCD_TAR" ] && [ "$(sha256_of "$ETCD_TAR")" = "$ETCD_SHA256" ]; then
@@ -4378,14 +4353,15 @@ ship_binaries() {
 }
 
 # ---------------------------------------------------------------------------
-# Process control on cp (gateway_test.sh:490-511, with a target argument)
+# Process control on cp (remote_start, sig_dir, proc_gone and
+# wait_gone (gateway_test.sh), with a target argument)
 # ---------------------------------------------------------------------------
 #
 # The four control-plane processes are launched with `nohup … >> log 2>&1
 # </dev/null &`, their pid is recorded from $! in $WORK/<dir>/pid, and they
 # are signalled by THAT pid (E2E8). >> and not >, so an external truncation
 # resets the write offset instead of leaving a hole; 2>&1 because every dnv
-# binary logs to STDERR (common/log.go:99-113) and stdout is reserved for a
+# binary logs to STDERR, per init (common/log.go), and stdout is reserved for a
 # payload; and the redirections together release the ssh channel, which a
 # background child still holding the session's pipes would keep open for as
 # long as it runs.
@@ -4507,7 +4483,7 @@ start_worker() {
 }
 
 # One cdc, serving every shard: --range is left at its default
-# (common.CdcRangeAll, cmd/dnv-cdc/main.go:75-77), which is what makes a
+# (common.CdcRangeAll, in addFlags (cmd/dnv-cdc/main.go)), which is what makes a
 # single instance answer for the whole cluster. Its listener is the address
 # both hosts discover against (E2E10). --tr-addr takes an IP literal only, which
 # is why parse_args refuses a --cp that is not one.
@@ -4527,8 +4503,8 @@ cp_port_up() { # <port>
 
 # start_cp_daemons brings the control plane up in dependency order and proves
 # each listener before the next process needs it. The worker is the one with
-# no wait: it binds no port at all (cmd/dnv-worker/main.go:77-89 declares only
-# etcd and vote flags — there is no --grpc-address), so what proves it is
+# no wait: it binds no port at all (addFlags (cmd/dnv-worker/main.go) declares
+# no listener flag — there is no --grpc-address), so what proves it is
 # alive is the work it does, not a socket.
 #
 # This does NOT prove the gateway SERVES — that is `cluster get` returning,
@@ -4666,14 +4642,14 @@ stop_cn_agent() { # <v> [secs]
 #
 # WHEN THIS RUNS. main's order is preflight_driver -> ship_helpers ->
 # cleanup_all -> preflight_guests -> setup, so every check below runs AFTER the
-# unconditional start cleanup and BEFORE the first setup write. The plan's
-# wording is "before any cleanup or setup writes"; the port checks and the
-# nvmet-port check cannot mean anything there, and the two suites that
+# unconditional start cleanup and BEFORE the first setup write. Port and
+# nvmet-port checks taken before the start cleanup would describe the previous
+# run's debris, not whether this run can start, and the two suites that
 # already do this say
-# so in the same place — cnagent_test.sh:2122-2123 ("the port check can only be
-# meaningful once a crashed prior run's agents are gone") and
-# cdc_test.sh:1601-1602. Nothing in the start cleanup writes suite state: it
-# only removes, so no check below reads something this run made.
+# so in the same place — preflight_vms (cnagent_test.sh) ("the port check can
+# only be meaningful once a crashed prior run's agents are gone") and
+# preflight_servers (cdc_test.sh). Nothing in the start cleanup writes suite
+# state: it only removes, so no check below reads something this run made.
 #
 # It dies on the FIRST failure, naming the guest and the fix. A preflight that
 # collected three problems and reported them together would still have to be
@@ -4682,14 +4658,14 @@ stop_cn_agent() { # <v> [secs]
 # TWO STEPS HERE WRITE, and both are preconditions rather than suite state:
 # `modprobe` of the module list, and `mount -t configfs` if /sys/kernel/config
 # is not mounted. The agents hardcode the configfs path and neither mount nor
-# modprobe anything (agent/nvmet.go:13 `NvmetRoot`), so the harness does it —
-# cnagent_test.sh:2146 in its own preflight, for the same reason.
+# modprobe anything (see NvmetRoot (agent/nvmet.go)), so the harness does it —
+# as preflight_vms (cnagent_test.sh) does, for the same reason.
 # ---------------------------------------------------------------------------
 
 # Floors, in BYTES (the guest helper's `space` verb answers in bytes, and
 # /proc/meminfo's KiB is converted on the driver — one unit everywhere).
 #
-# MEM_MIN_BYTES is the plan's 2 GiB. cnagent_test.sh:2163 asks 1.5 GiB for two
+# MEM_MIN_BYTES is 2 GiB. preflight_vms (cnagent_test.sh) asks 1.5 GiB for two
 # agents; a DN VM here runs DNS_PER_VM of them (45 in the default lab shape)
 # and a CN VM holds 64 md arrays and 32 thin pools, so the floor is raised
 # rather than copied.
@@ -4723,7 +4699,7 @@ FREE_MIN_CP=$((2 << 30))
 # cleans up after itself, so the START cleanup usually finds either nothing or
 # the remains of a run that stopped part way.
 #
-# TWO VERBS ARE HEAVY, and only one of them is understood.
+# TWO VERBS ARE HEAVY.
 #   - dn_cleanup, on one DN VM: up to DNS_PER_VM instances' worth — 45 in the
 #     default shape — of nvmet ports with their ana_groups, 45 loop teardowns
 #     (a 4 KiB dd, a wipefs and a losetup -d each), the dm devices of every
@@ -4738,48 +4714,20 @@ FREE_MIN_CP=$((2 << 30))
 #     over the 64 arrays at `timeout 15` each, then nine dm kinds plus
 #     dm_remove_all, where a device that will not go costs dm_force_remove's
 #     10 + 10 + 15 s.
-# On 2026-09-17 cn_cleanup_phase2 ran past the 300 s then in force on cn0 and
-# cn2. That was written down here as having NO explanation, on the ground that
-# the md chain is a DN story and this verb runs before any DN is touched
-# (e2e_integtest.md, Known limits, "A disk node holds the controller node's md
-# superblocks"). Half of that ground is gone: md_stop_all is ONE function in
-# the shared node body and it was a no-op on BOTH roles, so this verb's own
-# `md_stop_all` — which sits between the top-of-stack dm kinds and the kind
-# ca/c9/cb wrappers precisely to unpin the LEG wrappers — stopped nothing
-# either, and every kind-c9 leg wrapper under a live array (up to 128 in the
-# default shape) would then have gone the long way round through
-# dm_force_remove. Kind c9 and not kind ca: an md member is a CnLegName
-# device, and CnGrpName is the RedundNone group device, which a raid1 group
-# does not have at all
-# (common/name_fmt.go:410-449). That is a mechanism, not a finding: what it
-# still does not explain is the STANDBY. "Two CNs and not the third" needs no
-# explaining: CNTLR_CNT is 2 and --cn is at least 3 (three in the lab), so at
-# least one CN carries no cntlr of this sp at all (SPARE_CN_LIST, logged on
-# every run) and its
-# cn_cleanup_phase2 is a walk over empty `dmsetup ls` output. The other two are
-# both heavy — 128 kind-c9 leg wrappers and 128 `:2:` connections each — but
-# only the PRIMARY has arrays (CN12: "Groups (md.go; primary only — a standby
-# has none)"), and the mask is what keeps a stray one off the standby's leg
-# wrappers, which carry md superblocks of their own. So the md no-op is a
-# mechanism for the CN that was primary and not for the other one. The number
-# below was chosen with the standby's overrun unexplained and stays where it is
-# until a run measures it.
+# cn_cleanup_phase2's own `md_stop_all` sits between the top-of-stack dm kinds
+# and the kind ca/c9/cb wrappers precisely to unpin the LEG wrappers, which
+# under a live array (up to 128 in the default shape) would otherwise go the
+# long way round through dm_force_remove. Kind c9 and not kind ca: an md
+# member is a CnLegName (common/name_fmt.go) device, and CnGrpName is the
+# RedundNone group device, which a raid1 group does not have at all. Only the
+# PRIMARY has arrays (CN12), and the mask is what keeps a stray one off the
+# standby's leg wrappers, which carry md superblocks of their own.
 #
-# THE MEASURED FIGURE, and it is the only one there is: on 2026-09-17, after
-# the stray arrays of the first run had been stopped by hand, one
-# `--cleanup-only` finished on all ten guests inside the 300 s that was in
-# force, with no warning and no timeout, leaving ports=0 dm=0 loop=0 md=0 on
-# every DN. READ IT NARROWLY: it was the SECOND sweep over that debris. The
-# first had run to the end on six of the ten guests and part way on the other
-# four (dn2, dn3, cn0, cn2), so the only guests still holding a DN's whole
-# port-and-loop debris — 43 and 43, which ports_sweep and loop_teardown sit too
-# late in dn_cleanup to have reached — were dn2 and dn3. The per-verb times
-# were not recorded either, so 300 s is an upper bound on what was seen and not
-# a reading of it.
+# THE MEASURED FIGURE: the only measurement is a second cleanup over a failed
+# run's debris finishing inside 300 s, with no per-verb times.
 #
 # 600 s is that bound doubled: enough headroom for a failed run at 32 slices to
-# leave more than the successful one did, and for a CN timeout nobody has
-# explained yet.
+# leave more than the successful one did.
 #
 # WHAT IT DOES NOT BOUND, and the distinction is the whole of rule 5: a task in
 # uninterruptible D state. `timeout` sends SIGTERM and then waits for the child
@@ -4805,7 +4753,7 @@ FSTRIM_TIMEOUT=120
 # One diagnostic dump per guest. Bounded because diagnostics runs when
 # something is already wrong, which is exactly when a guest command hangs.
 DIAG_TIMEOUT=60
-# Lines of each log the failure dump carries (the plan says 200).
+# Lines of each log the failure dump carries.
 DIAG_LOG_LINES=200
 # How many of one DN VM's agent logs the dump tails in full. A DN VM runs
 # DNS_PER_VM agents (45 in the default shape); tailing all of them on all four
@@ -4814,8 +4762,8 @@ DIAG_LOG_LINES=200
 DIAG_MAX_DN_LOGS=6
 
 # The tools each role needs, as a plain word list. These are the ones this
-# suite's HELPER and the AGENTS actually run — not cnagent_test.sh:2142's list
-# copied over:
+# suite's HELPER and the AGENTS actually run — not the tool list of
+# preflight_vms (cnagent_test.sh) copied over:
 #   - no `jq`: no guest in this suite parses JSON. resolve_jq builds one for
 #     the DRIVER, and the helper reads sysfs instead (disconnect_prefix,
 #     port_trsvcid).
@@ -4850,22 +4798,21 @@ NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 # which is the only place either is used and runs on DN VMs alone.
 #
 # mdadm and udevadm are on a DN for the same verbs they are on a CN for, and
-# they are NOT decoration, and udevadm is no longer the milder of the two,
-# which is the one thing this note used to get wrong. md_stop_all takes the
+# they are NOT decoration. md_stop_all takes the
 # array's name from `udevadm info` and falls back to `mdadm --detail
 # --no-devices --export` (its own comment says which array each read misses).
 # So mdadm is doubly load-bearing — it is the fallback name source AND the
-# thing that does the stopping, and a node without it makes the verb the silent
-# no-op of 2026-09-17 outright — while a node without udevadm keeps the stop
+# thing that does the stopping, and a node without it makes the verb a silent
+# no-op outright — while a node without udevadm keeps the stop
 # and loses the one name source that survives members mdadm cannot read.
 # Preflight is what makes either loud, FOR THE SWEEPS THAT COME AFTER IT:
 # cleanup_all runs before preflight_guests (main, and e2e_integtest.md,
 # Preflight) and `--cleanup-only`
 # never preflights at all, so on a guest missing a tool the start sweep — which
-# is where the 2026-09-17 failure happened, and which is also what recovers a
+# is what recovers a
 # crashed run — gets one unguarded pass, and so does every `--cleanup-only`
 # invocation. From the first between-cases sweep on, the guest has been
-# checked. udevadm has two more callers besides:
+# checked. udevadm has other callers besides: md_names reads names with it, and
 # install_udev_rule and remove_udev_rule both run `udevadm control --reload`,
 # and what that buys is that the mask takes effect AT ONCE. systemd-udevd
 # notices a changed rules directory on its own — that is the same property
@@ -4875,16 +4822,16 @@ NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 # is mdadm as well, though by the absolute path udev rules use; `command -v` is
 # the proxy for it here, exactly as it is on a CN.)
 DN_TOOLS="$NODE_TOOLS truncate wipefs dd mdadm udevadm"
-# mdadm: the cn agent (agent/cnagent/md.go:630-723) and md_stop_all. udevadm:
-# md_stop_all's name read and install_udev_rule's reload. findmnt: the cn
-# diag's tmpfs listing.
+# mdadm: the cn agent's Md (agent/cnagent/md.go), md_stop_all, md_names and the
+# cn diag. udevadm: md_stop_all's and md_names' name reads, and the reloads of
+# install_udev_rule and remove_udev_rule. findmnt: the cn diag's tmpfs listing.
 CN_TOOLS="$NODE_TOOLS mdadm udevadm findmnt"
 # The hosts run no dnv binary at all. nvme: every connect and disconnect.
 # uuidgen: /etc/nvme/hostid when it is absent. systemctl: the nvmf-connect mask
 # and the stafd/stacd check. dd + sha256sum: the host IO helpers. udevadm is
 # the proxy for a working udev, because /dev/disk/by-id/nvme-uuid.<uuid> is a
-# udev symlink and host_dev has no other stable name to use (cdc_test.sh:1642
-# requires it on a host for the same reason).
+# udev symlink and host_dev has no other stable name to use
+# (preflight_servers (cdc_test.sh) requires it on a host for the same reason).
 #
 # du/df/tail are here because a HOST runs the same common helper body the nodes
 # do: case_space_guard and space_note_case call `space` on both hosts (du for
@@ -4901,7 +4848,8 @@ HOST_TOOLS="$HOST_TOOLS du df tail"
 # the failure dump runs `grep_log` there over the four daemon logs.
 CP_TOOLS="ss pgrep pkill awk sed du df tail nohup grep timeout"
 
-# The module list of cnagent_test.sh:2146 minus dm-flakey, which only that
+# The module list of preflight_vms (cnagent_test.sh) minus dm-flakey, which
+# only that
 # suite's fault injection needs. modprobe is best-effort on purpose: a module
 # built into the kernel makes `modprobe` fail, and what matters is the assert
 # that follows (the nvmet configfs tree, /proc/mdstat, multipath).
@@ -4914,7 +4862,8 @@ tools_cmd() { # <tool…>
 	printf 'for b in %s; do command -v $b >/dev/null 2>&1 || echo $b; done; true' "$*"
 }
 
-# modules_cmd is cnagent_test.sh:2146 as a function. Best-effort modprobe, then
+# modules_cmd is the modprobe line of preflight_vms (cnagent_test.sh) as a
+# function. Best-effort modprobe, then
 # the configfs mount if it is missing, then `true` so the caller's status is
 # the ssh's and not the last modprobe's.
 modules_cmd() { # <module…>
@@ -4945,8 +4894,8 @@ assert_bytes() { # <got> <floor> <label>
 # transport service id. e2e_integtest.md, "Cleanup, and why the order is what
 # it is", requires the refusal to say that, and the answer
 # is only useful if it is derived from the suites' own declarations:
-# dnagent_test.sh:35 and cnagent_test.sh:50 both set TR_SVC_ID=4200;
-# cdc_test.sh:85 sets NVMET_PORT_BASE=14420 for its four ports 14420..14423.
+# TR_SVC_ID (dnagent_test.sh) and TR_SVC_ID (cnagent_test.sh) are both 4200;
+# NVMET_PORT_BASE (cdc_test.sh) is 14420, for its four ports 14420..14423.
 # gateway_test.sh's 4420/4421/4429 are payload its fake records and never
 # binds, so a real port on 4420 is the nvme-tcp default and not that suite's.
 port_owner_hint() { # <trsvcid>
@@ -4961,12 +4910,12 @@ port_owner_hint() { # <trsvcid>
 		;;
 	4200)
 		printf 'trsvcid 4200 is the dn/cn agent suites'
-		printf ' (dnagent_test.sh:35, cnagent_test.sh:50)'
+		printf ' (TR_SVC_ID (dnagent_test.sh), TR_SVC_ID (cnagent_test.sh))'
 		return 0
 		;;
 	1442[0-3])
 		printf 'trsvcid %s is the cdc suite' "$1"
-		printf ' (cdc_test.sh:85, NVMET_PORT_BASE=14420)'
+		printf ' (NVMET_PORT_BASE (cdc_test.sh) is 14420)'
 		return 0
 		;;
 	4420 | 4421)
@@ -4989,10 +4938,9 @@ port_owner_hint() { # <trsvcid>
 
 # port_cleanup_cause says why a port is STILL THERE after the start cleanup has
 # already swept this guest. It is written against port_drop's own branches and
-# not against an impression of them, because the second run of 2026-09-17 died
-# on exactly that difference: it told the operator the cleanup had "refused" a
-# port whose trsvcid was 4300 — inside this suite's own band, which is the one
-# case port_drop REMOVES.
+# not against an impression of them, because a message that says "refused" for
+# a port inside this suite's own band, which port_drop removes, sends the
+# operator after the wrong cause.
 #
 # port_drop (the helper) decides on the service id alone, and has FOUR outcomes,
 # not three:
@@ -5063,8 +5011,7 @@ port_cleanup_cause() { # <trsvcid, possibly empty> <swept: yes|unknown>
 	# NOT "look for a WARNING line": by this point there cannot be one.
 	# cleanup_report prints WARNING exactly when a verb missed its sentinel,
 	# that is what fills CLEANUP_UNFINISHED, and cleanup_start_gate dies on it
-	# before preflight runs. Sending the operator to grep for a line the
-	# control flow excludes is the 2026-09-17 mistake in a new place.
+	# before preflight runs.
 	printf ' A cleanup verb that stopped part way is NOT a candidate here:'
 	printf ' cleanup_start_gate would have killed the run before preflight.'
 	printf ' One thing it cannot rule out is a stranger: if another dnv suite'
@@ -5077,7 +5024,7 @@ port_cleanup_cause() { # <trsvcid, possibly empty> <swept: yes|unknown>
 
 # nvmet_ports_of lists one guest's nvmet ports as "<id>:<trsvcid>" lines, with
 # the service id space-stripped (nvmet reads several addr_* attributes back
-# space-padded — memory note nvmet-configfs-idempotency, and cdc_test.sh:1072
+# space-padded, and ours_port (cdc_test.sh)
 # strips it in the same comparison). An absent /sys/kernel/config/nvmet leaves
 # the glob unmatched and the output empty, which is the right answer: nvmet
 # state lives in the module and cannot outlive it.
@@ -5100,7 +5047,7 @@ nvmet_ports_of() { # <ssh-wrapper> <index>
 #   1. An id this run will use. EnsurePort is probe-first but NOT read-only on
 #      a port that already exists: it reuses the directory and REWRITES
 #      addr_trtype/addr_adrfam/addr_traddr/addr_trsvcid through ensureAttr
-#      (agent/nvmet.go:114 EnsurePort, the rewrite loop at :129-137). So an
+#      (the attribute loop of EnsurePort (agent/nvmet.go)). So an
 #      agent given --nvmet-port-id k+1 would hijack a stranger's port rather
 #      than fail, and break whatever owns it.
 #   2. A service id this run will bind. Two nvmet ports cannot listen on one
@@ -5112,8 +5059,7 @@ nvmet_ports_of() { # <ssh-wrapper> <index>
 # which the start gate does not die on), outside every sweep's id range, or
 # made after the sweep by something that should not be running (E2E9). It is
 # NOT one the cleanup skipped, and port_cleanup_cause is where each message
-# gets that distinction right — getting it wrong here is what sent the
-# 2026-09-17 diagnosis after the wrong cause.
+# gets that distinction right.
 #
 # THE TWO DIES PASS DIFFERENT <swept> ARGUMENTS, and the difference is load
 # bearing. The first fires only for 1 <= id <= idmax, and idmax is DNS_PER_VM
@@ -5137,7 +5083,7 @@ assert_no_nvmet_conflict() { # <label> <idmax> <svclo> <svchi> <listing>
 				"(addr_trsvcid=${svc:-none}) and this run needs that id." \
 				"$(port_owner_hint "$svc")." \
 				"An agent given that id would rewrite its addr_*" \
-				"attributes (agent/nvmet.go:129-137), so the run stops here." \
+				"attributes through EnsurePort (agent/nvmet.go), so the run stops here." \
 				"$(port_cleanup_cause "$svc" yes)"
 		fi
 		case "$svc" in
@@ -5200,10 +5146,12 @@ preflight_node() { # <role: dn|cn> <index>
 
 	# nvme_core.multipath is load-bearing on BOTH roles, and on the dn for a
 	# reason that is easy to miss: a migration DESTINATION is an nvme host —
-	# agent/dnagent/migr.go:115 calls s.host.Connect — and the agent reads its
+	# ensureMigrDst (agent/dnagent/migr.go) calls s.host.Connect — and the
+	# agent reads its
 	# source's state out of /sys/class/nvme-subsystem, where the namespace head
 	# (nvme0n1) and the hidden per-path device that carries ana_state
-	# (nvme0c1n1) only exist when multipath is on (agent/nvmehost.go:116-133).
+	# (nvme0c1n1) only exist when multipath is on (nvmeNsEntryPattern and
+	# nvmePathEntryPattern (agent/nvmehost.go)).
 	got=$("$sshw" "$v" \
 		"cat /sys/module/nvme_core/parameters/multipath 2>/dev/null" \
 		"|| echo MISSING") ||
@@ -5220,7 +5168,8 @@ preflight_node() { # <role: dn|cn> <index>
 		die "$label: reading /proc/mdstat failed"
 	assert_eq "$got" /proc/mdstat "$label: md support"
 	# The 63-dnv-md.rules mask dn_up and cn_up install works by setting
-	# SYSTEMD_READY=0 (cnagent_test.sh:1424), which only suppresses the stock
+	# SYSTEMD_READY=0 (see install_udev_rule (cnagent_test.sh)), which only
+	# suppresses the stock
 	# incremental assembly if the stock rule honours it. Both roles install
 	# the mask, so both roles need the precondition checked: on a DN a stock
 	# rule that ignored SYSTEMD_READY would leave the mask inert and the stray
@@ -5284,8 +5233,8 @@ preflight_node() { # <role: dn|cn> <index>
 			"$(printf '%s' "$busy" | tr '\n' ' ')— something else is using" \
 			"them, or an agent of a previous run survived the cleanup"
 
-	# The nvmet port conflict (the plan has it as "the port ranges free"; a
-	# configfs port is not a socket, so it needs its own check).
+	# The nvmet port conflict (a configfs port is not a socket, so it needs
+	# its own check).
 	local listing idmax svclo svchi
 	listing=$(nvmet_ports_of "$sshw" "$v") ||
 		die "$label: listing the nvmet ports failed"
@@ -5345,8 +5294,8 @@ preflight_host() { # <h>
 
 	# stafd/stacd must not be running for the whole run: stacd connects on its
 	# own, stafd owns discovery controllers, and nvme-stas sends a DIM
-	# in-capsule to every discovery controller it learns about (memory note
-	# nvme-stas-sends-dim-in-capsule). "unknown" or "failed" is fine — the
+	# in-capsule to every discovery controller it learns about.
+	# "unknown" or "failed" is fine — the
 	# failure mode is a RUNNING one, and `active`/`activating` are the words
 	# systemctl uses for that.
 	out=$(helper_host "$h" stas_state) || die "$label: the stas_state verb failed"
@@ -5422,10 +5371,10 @@ preflight_guests() {
 	for v in "${!CN[@]}"; do preflight_node cn "$v"; done
 	for v in "${!HOST[@]}"; do preflight_host "$v"; done
 
-	# cdc_test.sh:1649-1655's assertion: two hosts that share a hostnqn are
-	# one host to the target, `ss set-hosts` would name the same entry twice,
-	# and the copy case's "host1 sees the transfer, host0 does not" could not
-	# be told apart.
+	# The same assertion as preflight_servers (cdc_test.sh): two hosts that
+	# share a hostnqn are one host to the target, `ss set-hosts` would name the
+	# same entry twice, and the copy case's "host1 sees the transfer, host0 does
+	# not" could not be told apart.
 	assert_ne "${HOST_NQN[0]}" "${HOST_NQN[1]}" "the two hosts' hostnqn"
 
 	log "preflight (guests) ok"
@@ -5520,8 +5469,7 @@ preflight_loop_devices() {
 # What it does instead is REPORT, loudly, through cleanup_report: a missing
 # sentinel line, and any REFUSED or STUCK nvmet port. Those two words are the
 # ones that matter to the next person, because a leftover port with live ana
-# groups is what fails the NEXT suite's setup (memory note
-# nvmet-port-teardown-ana-groups).
+# groups is what fails the NEXT suite's setup.
 #
 # Reporting is not the end of it. cleanup_report raises CLEANUP_DIRTY for the
 # two findings that mean THIS run left something behind — a missing sentinel
@@ -5531,12 +5479,13 @@ preflight_loop_devices() {
 # the one that would discover it, hours later, as a setup failure it did not
 # cause.
 #
-# THE ORDER IS LOAD-BEARING, and it is the plan's:
+# THE ORDER IS LOAD-BEARING (e2e_integtest.md, Cleanup, and why the order is
+# what it is):
 #
 #   1. HOSTS FIRST. They hold the controllers over this suite's own
 #      subsystems. A subsystem unlinked from its port under a live controller
-#      kills that controller with DNR and the host never reconnects by itself
-#      (memory note nvmet-port-unlink-dnr-kills-host-ctrl) — acceptable during
+#      kills that controller with DNR while the port keeps listening, and
+#      leaves it retrying once the port has nothing left — acceptable during
 #      teardown, but only after the host has stopped issuing IO.
 #   2. ALL CNs, cleanup_phase1. Every clone goes before any transfer
 #      subsystem is dropped: a dm-clone flushes through its transfer source on
@@ -5583,7 +5532,7 @@ cleanup_report() { # <label> <verb> <sentinel> <rc> <output>
 		CLEANUP_DIRTY=1
 	fi
 	if [ -n "$hits" ]; then
-		log "  !!! $label: the nvmet port sweep did not finish cleanly."
+		log "  !!! $label: the nvmet port teardown did not finish cleanly."
 		printf '%s\n' "$hits" >&2
 		for svc in $(printf '%s\n' "$hits" |
 			sed -n 's/.*trsvcid=\([0-9][0-9]*\).*/\1/p'); do
@@ -5606,7 +5555,7 @@ cleanup_dirty_banner() {
 	log ""
 	log "##############################################################"
 	log "LAB NOT CLEAN — nothing this run TESTED failed, but the end"
-	log "cleanup did not finish on at least one of the ten guests."
+	log "cleanup did not finish on every guest."
 	log ""
 	log "Search this transcript upwards for 'WARNING:' (a cleanup verb that"
 	log "never printed its sentinel: it timed out after ${CLEANUP_TIMEOUT}s,"
@@ -5653,11 +5602,8 @@ cleanup_dirty_banner() {
 # opposite of absence — it means the sweep did not run to the end and the
 # debris it was supposed to remove is still there. Going on from that puts the
 # run into a preflight failure about whatever the debris collides with FIRST,
-# which is a misleading place to stop: on 2026-09-17 two DN VMs timed out in
-# dn_cleanup (35 and 28 stray md arrays, each pinning a dm device of ours), the
-# run continued, and preflight died on an nvmet port with a message that
-# blamed a refusal the cleanup had never made — three steps and one wrong
-# explanation away from the actual fault.
+# which is a misleading place to stop, with a message that blames the wrong
+# step.
 #
 # THE END CLEANUP IS NOT GATED HERE AND MUST NOT BE. on_exit runs it only after
 # every assertion has passed, and there a die would skip the other nine guests;
@@ -5665,8 +5611,8 @@ cleanup_dirty_banner() {
 # and cleanup_dirty_banner. --cleanup-only is an end cleanup by the same
 # argument and is left alone too.
 #
-# THE REMEDY IS BUILT FROM WHAT WAS RECORDED, not from the one case that has
-# been seen. This gate runs BEFORE preflight_guests, so it is now the first
+# THE REMEDY IS BUILT FROM WHAT WAS RECORDED, not from the one known cause of
+# a DN timeout. This gate runs BEFORE preflight_guests, so it is now the first
 # thing an unreachable guest, or one without passwordless sudo, runs into: a
 # fixed DN-md remedy would send that operator to `cat /proc/mdstat` on a guest
 # they cannot ssh to, when what they need is preflight's own sentence about
@@ -5714,19 +5660,9 @@ cleanup_start_gate() { # <what this cleanup was: for the message>
 		remedy="$remedy --no-devices --export /dev/mdN\`."
 	fi
 	if [ -n "$saw_cn" ]; then
-		remedy="$remedy A CN TIMEOUT HAS NO CONFIRMED CAUSE: cn_cleanup_phase2"
-		remedy="$remedy ran past the bound on two CN VMs on 2026-09-17."
-		remedy="$remedy The candidate is the same md no-op the DNs had —"
-		remedy="$remedy md_stop_all is one function on both roles and stopped"
-		remedy="$remedy nothing until 2026-09-17, so this verb's kind-c9 leg"
-		remedy="$remedy wrappers stayed pinned under live arrays —"
-		remedy="$remedy but it covers the PRIMARY only, since only a primary"
-		remedy="$remedy assembles arrays (CN12); the standby holds as many leg"
-		remedy="$remedy wrappers and no array, and a spare CN holds no cntlr"
-		remedy="$remedy at all (CNTLR_CNT=2), so it is the standby's overrun"
-		remedy="$remedy that is"
-		remedy="$remedy open. On the CN carrying the stack"
-		remedy="$remedy the verb is as heavy as anything here — up to 128"
+		remedy="$remedy A CN TIMEOUT HAS NO CONFIRMED CAUSE."
+		remedy="$remedy On the CN carrying the stack, cn_cleanup_phase2"
+		remedy="$remedy is as heavy as anything here — up to 128"
 		remedy="$remedy \`nvme disconnect\`s, 64 \`mdadm"
 		remedy="$remedy --stop\`s and a whole 32-slice dm stack — so start with"
 		remedy="$remedy \`dmsetup ls --tree\` and \`cat /proc/mdstat\` there,"
@@ -5830,8 +5766,7 @@ cleanup_all() {
 
 	# Only now the DN VMs. dn_cleanup kills every [d]nv-agent from the helper,
 	# then per instance drops the :2:/:3: subsystems and the dm kinds, sweeps
-	# ports 1..MAX_DNS_PER_VM (which is the plan's "any leftover ports/<k> for k
-	# in 2..MAX_DNS_PER_VM", plus port 1), zeroes each loop's first 4 KiB with
+	# ports 1..MAX_DNS_PER_VM, zeroes each loop's first 4 KiB with
 	# conv=fsync, wipefs, losetup -d, and removes $WORK.
 	log "--- cleanup: dn VMs"
 	for v in "${!DN[@]}"; do
@@ -5845,8 +5780,7 @@ cleanup_all() {
 	# The closing trim (e2e_integtest.md, Known limits). Without the operator's
 	# `discard='unmap'` change to each domain's vda <driver> line, the guest
 	# filesystem has nothing to
-	# forward a discard to and this is a harmless no-op — which is the lab's
-	# state as of 2026-09-17, checked then: no `discard=` on any domain. With
+	# forward a discard to and this is a harmless no-op. With
 	# it, every block this run dirtied is returned to the qcow2 image. It is
 	# best-effort on every guest, cp included, where this suite otherwise
 	# never asks for root.
@@ -5869,14 +5803,15 @@ cleanup_all() {
 # throw the etcd data directory away, start them again. The agents and the
 # backing files are deliberately left running.
 #
-# IT IS NOT THE BETWEEN-CASES STEP AND NOTHING CALLS IT. The plan asks for
-# exactly this between cases, and it is not enough: a second `cluster create`
+# IT IS NOT THE BETWEEN-CASES STEP AND NOTHING CALLS IT. Between cases it
+# is not enough: a second `cluster create`
 # mints a
 # new cluster_id (fnv64a over the name and a fresh creation_epoch,
-# gateway/cluster.go:59 + model/keys.go:112-120) and new dn_ids, and every DN's
+# CreateCluster (gateway/cluster.go) + ClusterId (model/keys.go)) and new
+# dn_ids, and every DN's
 # 4 KiB disk header still names the old ones, so EnsureFormatted refuses each
 # one as a "foreign disk" and never re-formats
-# (agent/dnagent/diskmeta.go:299-324). main therefore calls
+# (confirmedLocked (agent/dnagent/diskmeta.go)). main therefore calls
 # setup_between_cases, which is cleanup_all + setup_infra + setup_case. This
 # stays defined
 # because it is the right tool for a case that wants a fresh etcd WITHOUT
@@ -6000,7 +5935,7 @@ diag_banner() { # <text>
 # shell, ssh_sudo %q-quotes it for that shell and then `bash -c` parses it —
 # so exactly one layer of quoting is consumed on the way. A plain
 # '"level":"ERROR"' written here therefore arrives as level:ERROR and matches
-# nothing (the dnv binaries log slog JSON, common/log.go:99-113, where an
+# nothing (the dnv binaries log slog JSON — init (common/log.go) — where an
 # error record really is the seven characters "level":"ERROR" with the quotes
 # in the text). The value below is the token WITH its single quotes, so what
 # survives the guest's parse is the pattern.
@@ -6109,11 +6044,11 @@ diagnostics() {
 			log "  (no reply: the call failed — see cp's last.err above)"
 		fi
 		# The cntlr ids are NOT in the cntlr_list entries: pb/schema.proto's
-		# Cntlr (:401-417) carries addr_port, nvme_tr_conf, cntlid_slot,
+		# Cntlr carries addr_port, nvme_tr_conf, cntlid_slot,
 		# primary, disabled, err_epoch and settling and no id at all. The
-		# ids live in sp_conf.cntlr_id_list (:391) as JSON strings of
+		# ids live in sp_conf.cntlr_id_list as JSON strings of
 		# decimal digits (CT4), and that list is what `cntlr inspect --id`
-		# takes (ctl/cntlr.go:32, :146).
+		# takes; cntlrIdFlag (ctl/cntlr.go) declares the flag.
 		ids=$(jq_of "$spout" '.sp_conf.cntlr_id_list[]' 2>/dev/null) || ids=""
 		for id in $ids; do
 			diag_ctl cntlr inspect --id "$id"
@@ -6150,7 +6085,7 @@ diagnostics() {
 
 	# (d) the CN VMs: one agent each, so its whole log is fair game.
 	#
-	# `nvme list-subsys` is the plan's own item and is NOT in the helper's diag,
+	# `nvme list-subsys` is NOT in the helper's diag,
 	# which lists subsystem NQNs out of sysfs instead (no guest here has a jq
 	# for `-o json`). On a CN the difference matters: a 32-slice raid1 sp
 	# gives it 2 x 32 x LEGS paths, and their states are what a hung md leg
@@ -6172,8 +6107,8 @@ diagnostics() {
 		diag_banner "dn$v (${DN_IP[$v]})"
 		dump_dn "$v" diag
 		# A DN holds connections too — a migration destination is an nvme
-		# host (agent/dnagent/migr.go:115) — so its path list belongs in the
-		# dump for the same reason as the CN's.
+		# host, connected by ensureMigrDst (agent/dnagent/migr.go) — so its path
+		# list belongs in the dump for the same reason as the CN's.
 		log "--- dn$v nvme list-subsys ---"
 		ssh_dn_ok "$v" "timeout $DIAG_TIMEOUT nvme list-subsys"
 		log "--- dn$v agent logs with ERROR records (path:count) ---"
@@ -6244,21 +6179,21 @@ diagnostics() {
 # ===========================================================================
 # WHY THE SPLIT IS NOT `reset_control_plane` ALONE, AND WHY THAT MATTERS
 # ===========================================================================
-# The plan says the between-cases step is "stop the four cp daemons, rm -rf
-# $WORK/etcd, restart". That is NOT sufficient, and the suite would fail on
+# An etcd-only reset between cases — stop the four cp daemons, rm -rf
+# $WORK/etcd, restart — is NOT sufficient, and the suite would fail on
 # the SECOND case with a message about a foreign disk:
 #
 #   * `cluster create` stamps creation_epoch = time.Now().UnixNano()
-#     (gateway/cluster.go:59) and the cluster id is fnv64a(name ‖ epoch)
-#     (model/keys.go:112-120), so a second create of the SAME name after an
+#     (CreateCluster (gateway/cluster.go)) and the cluster id is fnv64a(name ‖ epoch)
+#     (ClusterId (model/keys.go)), so a second create of the SAME name after an
 #     etcd reset mints a DIFFERENT cluster_id. The dn_ids are re-minted from
 #     a fresh DnGlobal too.
 #   * A dn agent writes cluster_id, dn_id and extent_size into the 4 KiB disk
 #     header at format time, and EnsureFormatted REFUSES a disk whose header
 #     names another cluster/dn/extent ("foreign disk: cluster/dn/extent is
-#     …, want …", agent/dnagent/diskmeta.go:299-324); ProbeHeader reports the
-#     same (:534-540) and mutableLocked then refuses to touch the volume
-#     table at all (:408-420). It never re-formats.
+#     …, want …", foreignDiskError (agent/dnagent/diskmeta.go)); ProbeHeader
+#     reports the same and confirmedLocked then refuses to touch the volume
+#     table at all. It never re-formats.
 #
 # So every case must start on disks with NO header, which means the backing
 # files and the local stores have to go — i.e. dn_cleanup / the two cn phases,
@@ -6270,33 +6205,33 @@ diagnostics() {
 # rebuilding the data plane; no case of e2e_integtest.md, The cases, needs that.
 #
 # ===========================================================================
-# CORRECTIONS TO THE PLAN'S SETUP THAT ARE LOAD-BEARING HERE
+# SETUP FACTS THAT ARE LOAD-BEARING HERE
 # ===========================================================================
-#  a. Its step 2 says "`dnvctl cluster get` until OK". Against an EMPTY etcd
-#     `cluster get` is NOT ok — resolveCluster answers NOT_FOUND
-#     (gateway/common.go:191-193) — so an
+#  a. Against an EMPTY etcd `cluster get` is NOT ok —
+#     resolveCluster (gateway/common.go) answers NOT_FOUND — so an
 #     "until rc 0" poll would burn its whole budget every run. gateway_serving
 #     below treats `dnvctl: NOT_FOUND:` as the healthy answer and anything
 #     else (UNAVAILABLE from the dial, above all) as not-yet.
-#  b. Its step 5 says to "retry UNAVAILABLE" while an agent is still
-#     starting. The gateway does not produce UNAVAILABLE there: a transport
+#  b. While an agent is still starting, the gateway does not produce
+#     UNAVAILABLE: a transport
 #     failure or non-OK status from the agent's GetDnSize/GetCnSize is AG3's
-#     ABORTED (gateway/disknode.go:100-104, gateway/controllernode.go:134-138,
-#     errAborted = codes.Aborted at gateway/common.go:68-70). ctl_create_try
+#     ABORTED (the agentErr branch of CreateDiskNode (gateway/disknode.go)
+#     and of CreateControllerNode (gateway/controllernode.go);
+#     errAborted (gateway/common.go) is codes.Aborted). ctl_create_try
 #     therefore retries ANY failure and stops on rc 0 — plus ALREADY_EXISTS,
 #     which is what a retry sees when dnvctl's own --timeout fired on a call
 #     the gateway had already committed.
-#  c. Its step 6 asks for a `cntlr_list | length == 2` check. The ids for
+#  c. The ids for
 #     `cntlr inspect --id` are NOT in cntlr_list — pb/schema.proto's Cntlr
-#     (:401-417) has addr_port, nvme_tr_conf, cntlid_slot, primary, disabled,
+#     has addr_port, nvme_tr_conf, cntlid_slot, primary, disabled,
 #     err_epoch and settling and no id field. They live in sp_conf.cntlr_id_list, and
-#     the two lists are PARALLEL because loadCntlrs walks cntlr_id_list in
-#     order (gateway/alloc.go:496-511). sp_read_roles asserts that the two
+#     the two lists are PARALLEL because loadCntlrs (gateway/alloc.go) walks
+#     cntlr_id_list in order. sp_read_roles asserts that the two
 #     lengths agree before it pairs them.
 #  d. Nothing here asserts `sp_rev.revision == 1`. The create writes revision
-#     1 (gateway/storagepool.go:600-604) but the sp-worker's provisioned flip
-#     bumps it (model/ops.go:886-898 ends in BumpSpRev), so by the time the
-#     first `sp get` returns the number has already moved.
+#     1 in CreateStoragePool (gateway/storagepool.go), but the sp-worker's
+#     provisioned flip, FlipProvisioned (model/ops.go), ends in BumpSpRev, so
+#     by the time the first `sp get` returns the number has already moved.
 # ---------------------------------------------------------------------------
 
 # --- state this section fills; the cases read it ----------------------------
@@ -6310,7 +6245,7 @@ SP_ID=""
 SP_JSON=""
 
 # The cntlrs, as five PARALLEL arrays indexed by position in cntlr_list (see
-# correction (c) above). CNTLR_IDS[i] is the id `cntlr inspect --id` takes,
+# setup fact (c) above). CNTLR_IDS[i] is the id `cntlr inspect --id` takes,
 # and CNTLR_DISABLED[i] is that cntlr's `disabled` flag as the text true or
 # false — the one a disabled cntlr's discovery entry turns on (a disabled
 # cntlr's transport is dropped from the CdcEntry, enabledCntlrTrConfs).
@@ -6381,8 +6316,8 @@ DISC_JSON=""
 #   assert_field "$SP_JSON" "[$SP_SIDE_PATH] | length" 128 "sides"
 #
 # SP_GRP_PATH walks the slices outermost and, within each slice, meta groups
-# before data groups — the order allGroups uses for one slice
-# (gateway/alloc.go:513-518). SP_LEG_PATH is leg_list
+# before data groups — the order allGroups (gateway/alloc.go) uses for one
+# slice. SP_LEG_PATH is leg_list
 # ONLY — spare_leg_list is deliberately a separate fragment, because md
 # members come from leg_list alone (doc/cnagent.md CN12; doc/architecture.md,
 # Spare legs).
@@ -6394,8 +6329,8 @@ SP_SIDE_PATH="$SP_LEG_PATH | .side_list[]"
 # Every side of the sp, PARKED AND SPARE LEGS INCLUDED. It exists for two
 # things. One is the "is anything still zeroing?" poll below: a spare
 # leg's side is created provisioned = false like any other and only the
-# sp-worker flips it, and model.SwitchSpareLeg refuses a spare whose side is
-# not provisioned ("spare side is not provisioned", model/ops.go:1905-1907).
+# sp-worker flips it, and model.SwitchSpareLeg (model/ops.go) refuses a spare
+# whose side is not provisioned ("spare side is not provisioned").
 # A poll over SP_SIDE_PATH alone would answer "nothing left to do" the instant
 # `spare create` returned and the switch would then be refused. The other is
 # react step 5's choice of a disk node that carries exactly one side of the
@@ -6423,7 +6358,7 @@ SP_UNPROV_CNT="[$SP_ANY_SIDE_PATH | select(.provisioned | not)] | length"
 #
 # The `// {}` is not decoration. InspectCntlr answers with a NULL cntlr_info
 # when the CN agent does not know the controller yet: the agent answers
-# UnknownObjectReply with a nil CntlrInfo (agent/cnagent/server.go:362-370)
+# UnknownObjectReply with a nil CntlrInfo (GetCntlrInfo (agent/cnagent/server.go))
 # and the gateway copies the reply's revision and cntlr_info across without
 # reading its agent_reply (gateway/cntlr.go's InspectCntlr). `null[]` is a jq
 # ERROR, not an empty iteration — so without the guard every poll before
@@ -6516,8 +6451,8 @@ sp_read_roles() {
 	'' | *[!0-9]*) die "sp get carried no cntlr_list: $SP_JSON" ;;
 	esac
 	ids=$(sp_field '.sp_conf.cntlr_id_list | length')
-	# The pairing this whole function rests on: loadCntlrs reads the cntlrs
-	# in sp_conf.cntlr_id_list order (gateway/alloc.go:496-511), so position
+	# The pairing this whole function rests on: loadCntlrs (gateway/alloc.go)
+	# reads the cntlrs in sp_conf.cntlr_id_list order, so position
 	# i of cntlr_list is the cntlr whose id is cntlr_id_list[i]. If that ever
 	# stops holding, every `cntlr inspect --id` below would inspect the wrong
 	# controller and still return a plausible document.
@@ -6569,10 +6504,11 @@ sp_read_roles() {
 		"the standby's addr_port $STANDBY_ADDR names one of the --cn guests"
 
 	# The spare CNs: every --cn guest carrying no cntlr of this sp. cn
-	# placement dedupes by location (model/alloc.go:280-284) and an omitted
-	# location becomes the node's own addr_port
-	# (gateway/controllernode.go:104-107), so with one cn agent per VM the
-	# CNTLR_CNT cntlrs are on CNTLR_CNT different VMs and the rest are spare.
+	# placement dedupes by location in FindCnCandidates (model/alloc.go), and
+	# an omitted location becomes the node's own addr_port in
+	# CreateControllerNode (gateway/controllernode.go), so with one cn agent
+	# per VM the CNTLR_CNT cntlrs are on CNTLR_CNT different VMs and the rest
+	# are spare.
 	SPARE_CN_LIST=()
 	SPARE_CN=-1
 	for v in "${!CN[@]}"; do
@@ -6600,7 +6536,7 @@ sp_read_roles() {
 # for a second call)
 # ---------------------------------------------------------------------------
 
-# gateway_serving is setup step 2's readiness test. See correction (a): against
+# gateway_serving is setup step 2's readiness test. See setup fact (a): against
 # an empty etcd the healthy answer is NOT_FOUND, not OK. Anything else — the
 # UNAVAILABLE of a gateway that is not listening yet, an ABORTED from an etcd
 # that has not elected itself — is not-yet.
@@ -6614,7 +6550,7 @@ gateway_serving() {
 	return 1
 }
 
-# ctl_create_try is the retrying create of setup step 5. See correction (b):
+# ctl_create_try is the retrying create of setup step 5. See setup fact (b):
 # the code to wait through is ABORTED, and ALREADY_EXISTS is a SUCCESS — the
 # record is there, which is all the caller wanted, and the only way to see it
 # is a create whose reply dnvctl gave up on after the gateway had committed.
@@ -6635,7 +6571,7 @@ ctl_create_try() { # <args…>
 
 # dn_node_ready is setup step 5's "the dn-worker has formatted the disk" poll.
 # All three DnInfo rows are checked, not just disk_info, because each proves a
-# different thing (agent/dnagent/probe.go:15-56):
+# different thing, as probeDn (agent/dnagent/probe.go) builds them:
 #   disk_info  the agent can measure --disk at all
 #   meta_info  ProbeHeader accepted the 4 KiB header for THIS cluster_id,
 #              dn_id and extent_size, and checkWriteZeroes did not find a
@@ -6645,7 +6581,7 @@ ctl_create_try() { # <args…>
 #              which is why preflight_loop_devices gates the number itself)
 #   port_info  ProbePort found ports/<--nvmet-port-id> carrying the four
 #              addr_* attributes this agent was launched with AND the three
-#              fixed ANA groups in their fixed states (agent/nvmet.go:163-207)
+#              fixed ANA groups in their fixed states (probePort (agent/nvmet.go))
 # A dn_info of `null` (the agent has never been told about this dn) reads as
 # null through jq and simply is not RES_STATUS_OK, so the poll keeps going.
 dn_node_ready() { # <v> <k>
@@ -6660,7 +6596,7 @@ dn_node_ready() { # <v> <k>
 # cn_node_ready is the CN twin. CnInfo's four rows are the base state of
 # architecture.md, Controller node, common: the tmpfs, the clone-metadata
 # file, its loop device and the nvmet port
-# (agent/cnagent/syncup_cn.go:348-411).
+# (probeCn (agent/cnagent/syncup_cn.go)).
 cn_node_ready() { # <v>
 	if ! ctl_try cn inspect --addr "$(cn_addr "$1")"; then
 		return 1
@@ -6717,9 +6653,9 @@ sp_sides_provisioned() {
 #     holds at READWRITE — one leg row per leg of every group (both roles), one
 #     md/linear row per group, one thin-pool row per slice;
 #   * grp_id_to_md_raid is expected for `none` as well as raid1, because the
-#     probe's switch is on plan.wantGrp and not on the redundancy arm, and
-#     probeGroup answers for a RedundNone dm-linear exactly as it does for an
-#     array (agent/cnagent/probe.go:62-78, agent/cnagent/md.go:954-985);
+#     group switch of probeCntlr (agent/cnagent/probe.go) is on plan.wantGrp
+#     and not on the redundancy arm, and probeGroup (agent/cnagent/md.go)
+#     answers for a RedundNone dm-linear exactly as it does for an array;
 #   * a standby's legs DO reach RES_STATUS_OK: CN11 gives it the transport probe
 #     (a live controller per desired side, plus an ana_state of optimized or
 #     non-optimized on a single-sided leg) in place of the primary's block
@@ -6758,54 +6694,35 @@ td_created() { # <td name>
 # The data-plane gate: has the AGENT built what the host is about to connect to
 # ---------------------------------------------------------------------------
 #
-# WHY THIS EXISTS — run 3, 2026-09-17, commit 7721516. The cdc serves its
+# WHY THIS EXISTS. The cdc serves its
 # discovery log out of etcd, so it advertises a subsystem and every one of its
 # transports the instant the GATEWAY commits the record, which is ahead of any
-# CN agent having built the nvmet objects behind it. Setup step 10 discovered
-# $SS0 and connected 0.4 s later. Measured on 2026-09-17, host0's dmesg against
-# the two CN agent logs (dmesg converted to wall clock on the audit record that
-# carries both a kernel timestamp and a unix one):
+# CN agent having built the nvmet objects behind it. A host that connects in
+# that window can find nothing listening on an advertised address: an nvmet
+# port with no subsystem linked to it does not listen at all, so the
+# subsystem connect is refused at the TCP level
+# (`failed to connect socket: -111` in dmesg, ECONNREFUSED), and
+# connect-all still exits 0. It is NOT an allowed_hosts race — a host a
+# subsystem does not admit gets its socket and is refused by the fabrics
+# Connect command, never with ECONNREFUSED.
 #
-#   20:09:13.56  host0 `nvme discover` — two records, served correctly
-#   20:09:13.94  host0 `nvme connect-all` — the discovery controller comes up,
-#                then BOTH subsystem connects are refused at the TCP level
-#                (`nvme nvme1: failed to connect socket: -111`, ECONNREFUSED),
-#                and connect-all exits 0
-#   20:09:15.70  the standby cn0 creates the nvmet subsystem and links it to
-#                its port — 1.75 s TOO LATE
-#   20:09:17.64  cn0 enables its ns 1 at ana_grpid 3
-#   20:09:18.13  the primary cn2 creates the subsystem and links it — 4.19 s
-#                too late
-#   20:09:23.30  cn2 writes allowed_hosts, creates and enables ns 1 and moves
-#                it to ana_grpid 1 — 9.38 s too late
-#   20:10:13     host_wait_ana's 60 s runs out, blaming ANA
-#
-# The same instants are in the reply this gate reads: run 3's `cntlr inspect`
-# dump carries ss_id_to_subsystem["356"].epoch 1789675755 for the standby and
-# 1789675758 for the primary, and ns_id_to_namespace["357"].epoch 1789675757
-# and 1789675763 — 20:09:15/18 and 20:09:17/23. BOTH cntlrs report both rows
-# RES_STATUS_OK, standby included, which is why one predicate serves both roles.
-#
-# So nothing was listening on either advertised address: an nvmet port with no
-# subsystem linked to it does not listen at all (memory note
-# nvmet-referral-port-needs-subsystem). It was NOT an allowed_hosts race — a
-# host a subsystem does not admit gets its socket and is refused by the
-# fabrics Connect command, never with ECONNREFUSED — and it was NOT the cdc,
-# the NQNs, the hostid or the transports: a manual connect-all minutes later,
-# with the same arguments, brought up both paths.
+# BOTH cntlrs, standby included, report the two rows described below as
+# RES_STATUS_OK once the objects are built, which is why one predicate serves
+# both roles.
 #
 # WHAT THE GATE ASKS, and why it is the agent's own words rather than a sleep.
 # The two rows are doc/cnagent.md's probe table (CN28):
 #
 #   ss_id_to_subsystem[ss] OK ⇒ the nvmet subsystem exists, its cntlid range,
-#     serial and model match, its allowed_hosts are EXACTLY the desired set
-#     (agent/nvmet.go:398-415 — it checks both inclusions), and it is LINKED TO
-#     THE NVMET PORT (probeExport, agent/cnagent/td.go:387-393). The link is the
+#     serial and model match, attr_allow_any_host is 0, its allowed_hosts are
+#     EXACTLY the desired set (ProbeSubsystem (agent/nvmet.go) — it checks both
+#     inclusions), and it is LINKED TO THE NVMET PORT
+#     (probeExport (agent/cnagent/td.go)). The link is the
 #     conjunct that matters most here: it is what makes the port listen.
 #   ns_id_to_namespace[ns] OK ⇒ the nvmet namespace exists, is enabled, carries
 #     the desired device_path/uuid/nguid and sits in the ana_grpid CN16 wants
-#     for THIS cntlr's role (probeNamespaceObject, td.go:397-426) — which is 1
-#     on a primary and 3 on a standby, so the gate is the same one for both.
+#     for THIS cntlr's role (probeNamespaceObject (agent/cnagent/td.go)) —
+#     1 on a primary and 3 on a standby, so the gate is the same one for both.
 #     A provisioning-deferred backing chain reports RES_STATUS_PROVISIONING
 #     ([D15], CN9), which is not ready and must not pass; that is why the test
 #     is `= RES_STATUS_OK` and never "not MISSING".
@@ -6868,7 +6785,7 @@ wait_ns_exported() { # <cntlr id> <what> <ss_id> <ns_id> [sp name] [secs]
 
 # wait_ns_exported_all is the connect-all form. `nvme connect-all` connects
 # EVERY transport the discovery log offers, and the log carries one record per
-# non-disabled cntlr (enabledCntlrTrConfs, gateway/subsystem.go:188-194), so
+# non-disabled cntlr (enabledCntlrTrConfs (gateway/common.go)), so
 # every one of them has to be listening — not just the primary. Run 3 lost both.
 #
 # It reads the CNTLR_* arrays, so the caller must have run sp_read_roles for
@@ -6920,8 +6837,8 @@ wait_xfer_exported() { # <cntlr id> <what> <xfer_id> [secs]
 # Discovery through the cdc (setup step 10; E2E10)
 # ---------------------------------------------------------------------------
 
-# disc_records renders one discovery log as the comparison unit cdc_test.sh
-# uses (:601-605): one "<subnqn>|<traddr>|<trsvcid>" line per record, sorted.
+# disc_records renders one discovery log as recs_of (cdc_test.sh) does, the
+# comparison unit: one "<subnqn>|<traddr>|<trsvcid>" line per record, sorted.
 # Driver-side, like every other parse here — no guest has a jq.
 disc_records() { # <discovery json>
 	printf '%s' "$1" | "$JQ" -r \
@@ -6948,9 +6865,9 @@ host_disc() { # <h>
 
 # disc_want_of_sp builds the record set the cdc MUST serve for the subsystems
 # of this sp, from the transports `ss create` actually wrote into the CdcEntry:
-# enabledCntlrTrConfs(cntlrs), i.e. one record per non-disabled cntlr
-# (gateway/subsystem.go:188-194). Comparing against that — rather than against
-# a hand-written pair of IPs — is what makes the assertion prove the cdc
+# enabledCntlrTrConfs(cntlrs) in CreateSubsystem (gateway/subsystem.go), i.e.
+# one record per non-disabled cntlr. Comparing against that — rather than
+# against a hand-written pair of IPs — is what makes the assertion prove the cdc
 # serves what the gateway stored.
 disc_want_of_sp() { # <subsystem nqn> → DISC_WANT
 	local lines="" i
@@ -6993,17 +6910,16 @@ host_disc_is() { # <h>
 # (rule 6): the kernel's autoconnector is masked for the whole run.
 #
 # THEY VERIFY; THEY DO NOT TRUST rc. `nvme connect-all` EXITS 0 HAVING
-# CONNECTED NOTHING — measured on host0 against this very lab on 2026-09-17 in
+# CONNECTED NOTHING — measured on host0 against this very lab in
 # two shapes, NEITHER of which is a target refusing a connect: with nothing
-# listening on an address the discovery log advertised (run 3's own failure,
-# `failed to connect socket: -111` in dmesg, once per record) and with an EMPTY
+# listening on an address the discovery log advertised
+# (`failed to connect socket: -111` in dmesg, once per record) and with an EMPTY
 # discovery log (a hostnqn outside allowed_hosts, so DS4 hid the entry and
 # nothing was attempted at all — nothing on stdout, nothing on stderr, nothing
 # in dmesg, `nvme list-subsys` empty afterwards). Those are two observations
 # and not a law about nvme-cli, and the plain `nvme connect` behind
 # host_connect was not one of them — which is exactly why neither wrapper
-# judges by rc. Run 3 took an rc=0 as evidence that a path existed, and died
-# 60 s later in host_wait_ana with a message about ANA. So the helper reports
+# judges by rc. So the helper reports
 # the controllers that exist for the subsystem AFTER the command and
 # connect_verdict dies on zero.
 #
@@ -7028,9 +6944,9 @@ host_disc_is() { # <h>
 #   * what the failure looks like on the wire. `connect-all` walks a discovery
 #     log and reaches a port that may have no subsystem linked to it at all,
 #     which is ECONNREFUSED — run 3's shape. `connect` names ONE address, and
-#     an agent has exactly ONE nvmet port (agent/nvmet.go:80-99, "the one port
-#     per agent") shared by every subsystem that agent exports, while cn_up
-#     starts exactly one cn agent per CN guest — so at host_connect's
+#     an agent has exactly ONE nvmet port (PortConf (agent/nvmet.go), "the one
+#     port per agent") shared by every subsystem that agent exports, while
+#     cn_up starts exactly one cn agent per CN guest — so at host_connect's
 #     sites the port can already be listening for a DIFFERENT subsystem while
 #     the one being connected does not exist yet, and printing the ECONNREFUSED
 #     hint there would send the reader at the wrong thing.
@@ -7062,7 +6978,7 @@ connect_verdict() { # <h> <subnqn> <verb> <rc> <ctrl_cnt> <what was offered>
 			if [ "$verb" = connect-all ]; then
 				rcsaid="AND NVME-CLI EXITED 0. THAT IS NOT EVIDENCE THAT"
 				rcsaid="$rcsaid ANYTHING CONNECTED: \`nvme connect-all\` was"
-				rcsaid="$rcsaid measured in this lab on 2026-09-17 exiting 0,"
+				rcsaid="$rcsaid measured in this lab exiting 0,"
 				rcsaid="$rcsaid with nothing on stdout and nothing on stderr,"
 				rcsaid="$rcsaid both when nothing was listening on an address"
 				rcsaid="$rcsaid the discovery log advertised and when the"
@@ -7070,7 +6986,7 @@ connect_verdict() { # <h> <subnqn> <verb> <rc> <ctrl_cnt> <what was offered>
 			else
 				rcsaid="AND NVME-CLI EXITED 0, WHICH IS NOT EVIDENCE THAT"
 				rcsaid="$rcsaid ANYTHING CONNECTED. The silent zero measured in"
-				rcsaid="$rcsaid this lab on 2026-09-17 was"
+				rcsaid="$rcsaid this lab was"
 				rcsaid="$rcsaid \`nvme connect-all\`'s, not this verb's, so take"
 				rcsaid="$rcsaid it as a reason to distrust rc rather than as a"
 				rcsaid="$rcsaid measurement of \`nvme connect\` — the controller"
@@ -7083,8 +6999,7 @@ connect_verdict() { # <h> <subnqn> <verb> <rc> <ctrl_cnt> <what was offered>
 		if [ "$verb" = connect-all ]; then
 			mech="An nvmet port with no subsystem linked to it does not listen"
 			mech="$mech at all — the host then sees ECONNREFUSED, which dmesg"
-			mech="$mech prints as \`failed to connect socket: -111\`, and that"
-			mech="$mech is what run 3 (2026-09-17) took on both of its records."
+			mech="$mech prints as \`failed to connect socket: -111\`."
 		else
 			mech="This connect named ONE address. That CN runs one cn agent,"
 			mech="$mech an agent has one nvmet port, and every subsystem it"
@@ -7106,8 +7021,7 @@ connect_verdict() { # <h> <subnqn> <verb> <rc> <ctrl_cnt> <what was offered>
 			"agent AFTER the gateway commits the record. $mech" \
 			"Read the CN guest's /var/tmp/dnv-e2e/cn/agent.log for when it" \
 			"created /sys/kernel/config/nvmet/subsystems/$sub and linked it to" \
-			"its port; run 3 (2026-09-17) lost exactly that race by 1.75 s and" \
-			"4.19 s."
+			"its port."
 	fi
 	[ "$rc" = 0 ] ||
 		log "  WARNING: nvme $verb exited $rc on host$h, although $cnt" \
@@ -7189,7 +7103,7 @@ setup_infra() {
 	SETUP_DONE=1
 	CASE=setup
 
-	stage 01 "ship the binaries and create $WORK on all ten guests"
+	stage 01 "ship the binaries and create $WORK on every guest"
 	prepare_work
 	ship_binaries
 	# The hosts are re-masked here and not only in preflight_guests, because
@@ -7214,7 +7128,7 @@ setup_infra() {
 	start_cp_daemons
 	# start_cp_daemons proved four listeners. This proves the gateway SERVES,
 	# which is a different thing: it has to have dialled etcd and answered an
-	# RPC. NOT_FOUND is the healthy answer here — see correction (a).
+	# RPC. NOT_FOUND is the healthy answer here — see setup fact (a).
 	wait_until "$WAIT_CP_READY" \
 		"the gateway on $CP_IP:$GW_PORT to answer \`cluster get\`" \
 		gateway_serving
@@ -7266,12 +7180,13 @@ setup_create_cluster() {
 		"cluster get's cluster_id vs the CreateCluster reply's"
 	assert_field "$CTL_OUT" '.cluster_name' "$CLUSTER" "cluster get's name"
 
-	# What `--extent-size` bought, and the whole reason commit 3 exists.
+	# What `--extent-size` bought.
 	# model.ResolveDnBinConf takes the four bin shifts as a SET: an
 	# extent-size-only request leaves them all zero, binLadderOk rejects that
 	# as a ladder, and all four are replaced together with
-	# DefaultDnBin0..3Shift = 0/4/8/12 (model/capacity.go:71-89,
-	# common/constants.go:18-21). So the stored conf is the operator's size on
+	# DefaultDnBin0..3Shift = 0/4/8/12 (ResolveDnBinConf (model/capacity.go);
+	# DefaultDnBin0Shift to DefaultDnBin3Shift (common/constants.go)). So the
+	# stored conf is the operator's size on
 	# the default ladder, and a cluster conf is WRITE-ONCE — there is no
 	# UpdateCluster — which is why a wrong number here is permanent.
 	assert_field "$CTL_OUT" '.cluster_conf.dn_bin_conf.extent_size' \
@@ -7297,9 +7212,9 @@ setup_register_nodes() {
 
 	# E2E4: every dnagent of one VM registers --location dn<v>, the VM's role.
 	# That is what makes the allocator spread a group's legs across VMs — a
-	# scan returns at most one candidate per location (model/alloc.go:137-141)
-	# — and therefore what keeps two sides of one leg off one kernel, where
-	# SideToCnNqn (which carries no dn_id, common/name_fmt.go:599-614) would
+	# FindDnCandidates (model/alloc.go) scan returns at most one candidate per
+	# location — and therefore what keeps two sides of one leg off one kernel,
+	# where SideToCnNqn (common/name_fmt.go), which carries no dn_id, would
 	# collide between the two agents.
 	#
 	# The four --tr-* values are passed explicitly and identically to the
@@ -7349,8 +7264,8 @@ setup_register_nodes() {
 			# wait_until ran its predicate in THIS shell and returned on the
 			# call that succeeded, so $CTL_OUT is that instance's reply.
 			# port_info's res_name is the agent's own port id as %d
-			# (agent/dnagent/probe.go:52; doc/dnagent.md DN18 names the row
-			# by the agent's port id as a decimal, so on a node running
+			# (probeDn (agent/dnagent/probe.go); doc/dnagent.md DN18 names
+			# the row by the agent's port id as a decimal, so on a node running
 			# several agents the rows differ), so this is the
 			# end-to-end proof that --nvmet-port-id reached the agent and
 			# that the DNS_PER_VM agents of one kernel are not all
@@ -7420,8 +7335,8 @@ setup_create_sp() {
 	# per-invocation deadline and this is the heaviest call in the suite.
 	# CreateStoragePool runs 2 x slice_cnt = $GRP_CNT DN candidate scans
 	# before the transaction, each a full descending walk of the capacity
-	# index with one proto decode per DN (model/alloc.go:113-141), and then
-	# commits a transaction whose compare list is
+	# index with one proto decode per DN (FindDnCandidates (model/alloc.go)),
+	# and then commits a transaction whose compare list is
 	# 7 + slice_cnt + 7 x sides + 8 x cntlr_cnt — 951 at the default shape,
 	# which is why etcd runs with --max-txn-ops=$ETCD_MAX_TXN_OPS.
 	#
@@ -7451,16 +7366,16 @@ setup_create_sp() {
 	assert_field "$SP_JSON" '.sp_conf.sp_id' "$SP_ID" \
 		"sp_conf.sp_id vs the CreateStoragePool reply"
 	# Not `== 1`: the create writes revision 1, but the sp-worker's
-	# provisioned flip bumps it (model/ops.go:886-898), so this races.
+	# provisioned flip bumps it (FlipProvisioned (model/ops.go)), so this races.
 	assert_ge "$(sp_field '.sp_rev.revision')" 1 "sp_rev.revision"
 
 	# --- the slice / group / leg / side shape (planSpGroups + the STM) ------
 	#
-	# planSpGroups emits, per slice, one META group of exactly one extent
-	# followed by one DATA group of init_ext_cnt (gateway/storagepool.go:
-	# 254-263), and the STM builds legs 0..legs-1 under each with exactly one
-	# side each (:513-542). slice_list comes back in sp_conf.slice_id_list
-	# order, i.e. slice_idx ascending (gateway/alloc.go:478-493).
+	# planSpGroups (gateway/storagepool.go) emits, per slice, one META group
+	# of exactly one extent followed by one DATA group of init_ext_cnt, and
+	# CreateStoragePool's STM builds legs 0..legs-1 under each with exactly
+	# one side each. slice_list comes back in sp_conf.slice_id_list
+	# order, i.e. slice_idx ascending (loadSlices (gateway/alloc.go)).
 	assert_field "$SP_JSON" '.slice_list | length' "$SLICE_CNT" "slices"
 	assert_field "$SP_JSON" '.sp_conf.slice_id_list | length' "$SLICE_CNT" \
 		"sp_conf.slice_id_list"
@@ -7494,8 +7409,8 @@ setup_create_sp() {
 
 	# architecture.md, Per-operation allocation: the DN black list starts as the
 	# request's and grows with every pick
-	# (gateway/storagepool.go:393-403), so every side of the WHOLE sp — not
-	# merely of one group — is on a DISTINCT disk node.
+	# (dnBlack in CreateStoragePool (gateway/storagepool.go)), so every side
+	# of the WHOLE sp — not merely of one group — is on a DISTINCT disk node.
 	assert_field "$SP_JSON" "[$SP_SIDE_PATH] | length" "$((GRP_CNT * LEGS))" \
 		"sides"
 	assert_field "$SP_JSON" "[$SP_SIDE_PATH | .addr_port] | unique | length" \
@@ -7523,21 +7438,22 @@ setup_create_sp() {
 	assert_jq "$SP_JSON" ".sp_conf.cntlid_slot_list == [$SLOTS]" \
 		"sp_conf.cntlid_slot_list is --slots as given"
 	# architecture.md, cntlid slots: the slots of one sp's cntlrs are all
-	# distinct, and the STM hands
-	# out slots[idx] in cntlr order (gateway/storagepool.go:567-583).
+	# distinct, and the STM of CreateStoragePool (gateway/storagepool.go) hands
+	# out slots[idx] in cntlr order.
 	assert_jq "$SP_JSON" \
 		"[.cntlr_list[].cntlid_slot] == .sp_conf.cntlid_slot_list[0:$CNTLR_CNT]" \
 		"cntlr i carries cntlid_slot_list[i]"
-	# Every SIDE carries slots[0] (gateway/storagepool.go:526). ops step
-	# 3's "--slots 1,2 drops slot 0" refusal is exactly this fact, so it is
-	# worth pinning here where a failure is still readable.
+	# Every SIDE carries slots[0] in CreateStoragePool (gateway/storagepool.go).
+	# ops step 3's "--slots 1,2" refusal names the cntlr that uses slot 0 and
+	# never reaches the sides, so this fact is pinned here, where a failure is
+	# still readable.
 	assert_jq "$SP_JSON" \
 		"[$SP_SIDE_PATH | select(.cntlid_slot != $slot0)] | length == 0" \
 		"every side carries cntlid_slot_list[0] = $slot0"
 
 	# --- the conf that was actually stored ---------------------------------
-	# ResolveBdevConf keeps a non-zero stripe_size verbatim
-	# (model/capacity.go:156-185), so this is the value the react case's
+	# ResolveBdevConf (model/capacity.go) keeps a non-zero stripe_size
+	# verbatim, so this is the value the react case's
 	# strided writes depend on: with a 1 MiB stripe, every offset
 	# k x (slice_cnt x 1 MiB) lands in slice 0.
 	assert_field "$SP_JSON" '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size' \
@@ -7554,9 +7470,9 @@ setup_create_sp() {
 			"the sp's redundancy arm is none"
 		;;
 	esac
-	# EventThreshold is stored exactly as sent (gateway/storagepool.go:457) —
-	# nothing resolves it — so this is also the proof that $THR split into its
-	# eight words instead of arriving as one.
+	# CreateStoragePool (gateway/storagepool.go) stores EventThreshold exactly
+	# as sent — nothing resolves it — so this is also the proof that $THR split
+	# into its eight words instead of arriving as one.
 	assert_field "$SP_JSON" '.sp_conf.event_threshold.primary_unhealthy' \
 		"$THR_PRIMARY" "event_threshold.primary_unhealthy (uint32, a bare number)"
 	assert_field "$SP_JSON" '.sp_conf.event_threshold.cntlr_unhealthy' \
@@ -7576,9 +7492,8 @@ setup_create_sp() {
 # Setup step 7 — provisioning, the primary's stack, the standby's shape
 # ---------------------------------------------------------------------------
 
-# setup_assert_standby is the step the plan refuses to guess at: "the standby's
-# inspect reports whatever doc/cnagent.md specifies for a standby — assert
-# that, do not assume". What doc/cnagent.md specifies, rule by rule:
+# setup_assert_standby takes its standby assertions from doc/cnagent.md.
+# What doc/cnagent.md specifies, rule by rule:
 #
 #   CN10 (legs)   "every leg of every group of every slice … both roles", so a
 #                 standby DOES report leg_id_to_leg, one row per leg.
@@ -7594,23 +7509,24 @@ setup_create_sp() {
 # Which of those two a standby is, only the code says, and the answer is the
 # second — the row is LEFT OUT. The mechanism is not one shared arm, though,
 # and saying so would be the false universal this project keeps producing;
-# it is four different shapes in agent/cnagent/probe.go, each of which happens
-# to be false on a standby:
+# it is four different shapes in probeCntlr (agent/cnagent/probe.go), each of
+# which happens to be false on a standby:
 #
-#   :62-78   groups — a three-armed switch, `case plan.wantGrp && deferred` /
-#            `case plan.wantGrp` / `case plan.primary`; none matches.
-#   :80-114  pools and both concats — `if !plan.wantPool { if plan.primary {
-#            …MISSING… }; continue }`; the inner guard is what is false.
-#   :116-142 thin volumes — `for _, tp := range plan.tds { if !plan.primary {
-#            continue } … }`; no ThinInfo entry is created at all.
-#   :144-182 raid0 — the same three-armed switch as groups.
+#   groups — a three-armed switch, `case plan.wantGrp && deferred` /
+#     `case plan.wantGrp` / `case plan.primary`; none matches.
+#   pools and both concats — `if !plan.wantPool { if plan.primary {
+#     …MISSING… }; continue }`; the inner guard is what is false.
+#   thin volumes — `for _, tp := range plan.tds { if !plan.primary {
+#     continue } … }`; no ThinInfo entry is created at all.
+#   raid0 — the same three-armed switch as groups.
 #
 # So the maps are EMPTY, not full of MISSING rows, and protojson's
 # EmitUnpopulated renders an empty map as {} — `| length` is 0, not null.
 #
 # td_id_to_dm_error is deliberately NOT asserted below. CN15 gives the standby
 # the per-td dm-error, and that loop is gated on plan.wantAny (true at
-# READWRITE for BOTH roles, agent/cnagent/plan.go:442), not on plan.primary.
+# READWRITE for BOTH roles, as newCntlrPlan (agent/cnagent/plan.go) sets it),
+# not on plan.primary.
 #
 # Asserting emptiness rather than "no OK rows" is the point: it is the only
 # form that would catch a standby which had started building a pool. Note that
@@ -7705,7 +7621,7 @@ setup_wait_stack() {
 	# where that is most likely: a demoted old primary tears down 32 pools and 64
 	# md arrays before it looks like a standby, and the instant that teardown ends
 	# its err_epoch clears and it is a failover candidate again
-	# (worker/reaction.go:645-651, failoverEligible). What every step after this
+	# (failoverEligible (worker/reaction.go)). What every step after this
 	# one needs — setup_create_td's raid0 wait, step 09's namespace, step 10's
 	# host connect, all of which read PRIMARY_* — is a primary that holds a
 	# complete stack NOW. So the pair runs in a loop whose exit condition is that
@@ -7741,13 +7657,14 @@ setup_wait_stack() {
 		assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" \
 			"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
 			"every leg of the primary is RES_STATUS_OK"
-		# applied_revision is the agent's own view of how far it has converged
+		# applied_revision is the revision of the last SyncupCntlr the agent
+		# accepted for this cntlr, whatever its converge's outcome
 		# (InspectCntlrReply.applied_revision comes from the agent, not from the
 		# rev key), so a zero here would mean the CN has never accepted a
 		# revision-gated SyncupCntlr and every row above was read off a node that
 		# is converging blind.
 		assert_ge "$(jq_of "$CTL_OUT" '.applied_revision')" 1 \
-			"the primary has applied at least one SyncupCntlr revision"
+			"the primary has accepted at least one SyncupCntlr revision"
 
 		# THE ROLES ARE RE-READ HERE, because the wait above may have followed a
 		# failover: PRIMARY_*/STANDBY_* still name the controllers the sides-
@@ -7820,9 +7737,9 @@ setup_wait_stack() {
 # ---------------------------------------------------------------------------
 
 setup_create_td() {
-	# gateway/thindevice.go:154-171: a td's size must be a positive multiple
-	# of slice_cnt x stripe_size, which is TD_UNIT (32 MiB at the default
-	# shape). t0 is four of them, 128 MiB.
+	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
+	# multiple of slice_cnt x stripe_size, which is TD_UNIT (32 MiB at the
+	# default shape). t0 is four of them, 128 MiB.
 	TD0_SIZE=$((4 * TD_UNIT))
 	stage 08 "td create --name $TD0 --size $TD0_SIZE ($((TD0_SIZE / 1048576)) MiB, 4 x TD_UNIT)"
 	ctl_ok td create --name "$TD0" --size "$TD0_SIZE"
@@ -7833,7 +7750,7 @@ setup_create_td() {
 
 	# The gateway always writes `created` false; only the sp-worker flips it,
 	# once the primary has materialised the thin volumes (architecture.md, Thin
-	# devices, "The client's wait primitive"; ctl/td.go:104-108).
+	# devices, "The client's wait primitive"; tdListCmd (ctl/td.go)).
 	wait_until "$WAIT_PROVISION" "$TD0 to report created" td_created "$TD0"
 	assert_field "$CTL_OUT" '.name_to_td | length' 1 \
 		"the sp holds exactly one thin device"
@@ -7863,7 +7780,7 @@ setup_export_ns() {
 	stage 09 "ss create $SS0, set-hosts, ns create --idx 1 --td $TD0 --uuid $UUID1"
 
 	# `ss create` is issued WITHOUT --hosts and the list is set afterwards,
-	# which is the plan's order and also exercises UpdateSubsystemHosts.
+	# which exercises UpdateSubsystemHosts.
 	# The window between the two is closed: an empty allowed_hosts admits no
 	# host and shows the CdcEntry to no host
 	# (architecture.md, Primary cntlr; cdc.md DS4), so the subsystem is
@@ -7880,7 +7797,7 @@ setup_export_ns() {
 	ctl_ok ss set-hosts --nqn "$SS0" --hosts "${HOST_NQN[0]},${HOST_NQN[1]}"
 
 	# --uuid is always passed: an empty dev_uuid makes the gateway mint a
-	# RANDOM v4 (gateway/subsystem.go:426-431), and the host resolves the
+	# RANDOM v4 (newDevUuid (gateway/subsystem.go)), and the host resolves the
 	# device as /dev/disk/by-id/nvme-uuid.<uuid>.
 	ctl_ok ns create --nqn "$SS0" --idx 1 --td "$TD0" --uuid "$UUID1"
 	NS1_ID=$(jq_of "$CTL_OUT" '.ns_id')
@@ -7936,20 +7853,21 @@ setup_connect_host0() {
 	# `.records | length` is the one number in this step that nothing here
 	# derived: it is what the cdc's reply actually carried, before
 	# disc_records rendered it (enabledCntlrTrConfs writes one transport per
-	# non-disabled cntlr into the CdcEntry, gateway/subsystem.go:188-194).
+	# non-disabled cntlr into the CdcEntry that
+	# CreateSubsystem (gateway/subsystem.go) puts).
 	assert_field "$DISC_JSON" '.records | length' "$CNTLR_CNT" \
 		"one discovery record per non-disabled cntlr (enabledCntlrTrConfs)"
 
-	# THE DISCOVERY LOG IS NOT THE DATA PLANE, and this is the wait run 3 did
-	# not have. The cdc serves the log out of etcd, so it advertises both
+	# THE DISCOVERY LOG IS NOT THE DATA PLANE, and this is the wait between
+	# the two. The cdc serves the log out of etcd, so it advertises both
 	# transports to host0 the instant `ss set-hosts` commits (the `ss create`
 	# before it names no host, cdc.md DS4), whatever the CN agents have built
-	# by then. Run 3's connect-all came 1.75 s and 4.19 s before the two CN
-	# agents had created the nvmet subsystem and linked it to their ports,
-	# which is what makes those ports listen at all. Both connects took
-	# ECONNREFUSED and connect-all exited 0 anyway. wait_ns_exported_all's
-	# header has the measured timeline; it covers EVERY non-disabled cntlr,
-	# because connect-all connects every transport the log offers.
+	# by then. A connect-all made before the two CN agents have created the
+	# nvmet subsystem and linked it to their ports, which is what makes those
+	# ports listen at all, takes ECONNREFUSED on both connects and still
+	# exits 0 having connected nothing. wait_ns_exported_all covers
+	# EVERY non-disabled cntlr, because connect-all connects every transport the
+	# log offers.
 	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID"
 
 	# E2E10: host0 reaches $SS0 through the cdc here, and this
@@ -8093,8 +8011,8 @@ setup() {
 # --local-store with it — and only the two cn phases remove the CN's store and
 # its tmpfs arena. So the between-cases step is cleanup_all followed by a
 # fresh setup_infra and a fresh setup_case, and the run pays for a second full
-# build per case. That build is the 8m45s window of the WAIT_BUILD comment, not
-# the ~5 minutes the plan budgets, so a four-case run is well over an hour.
+# build per case. That build is the 8m45s window of the WAIT_BUILD comment, so
+# a four-case run is well over an hour.
 #
 # cleanup_all never dies, but cleanup_start_gate after it does: a verb that
 # never reached its sentinel here means the previous case's debris is still on
@@ -8114,7 +8032,7 @@ setup_between_cases() {
 	# assertion it has nothing to do with.
 	stage 00 "between cases: tearing the data plane down and rebuilding it"
 	log "    (a fresh cluster_id makes every existing DN disk header foreign,"
-	log "     agent/dnagent/diskmeta.go:299-324 — an etcd reset alone is not"
+	log "     EnsureFormatted (agent/dnagent/diskmeta.go) — an etcd reset alone is not"
 	log "     enough)"
 	cleanup_all
 	# The between-cases sweep is a START cleanup for the case that follows —
@@ -8142,24 +8060,25 @@ setup_between_cases() {
 # are `case_teardown`, `case_residue` and `case_space_guard`, and `case_finish`
 # is the three in order.
 #
-# THREE ORDERING FACTS, each re-derived rather than copied:
+# THREE ORDERING FACTS:
 #
 #  a. The NAMESPACE goes first and the SUBSYSTEM only after the hosts have
 #     disconnected. `ns delete` removes an nvmet namespace under a live
 #     controller and the host answers by dropping the head disk — that is the
 #     one direction in which `wait_dev_gone` means anything, because a SUSPEND
 #     never removes the node (it parks the ns-dev on the td's dm-error,
-#     agent/cnagent/plan.go:345-353). `ss delete` is a different act: a
+#     nsPlan (agent/cnagent/plan.go)). `ss delete` is a different act: a
 #     subsystem unlinked from its port under a live controller kills that
-#     controller with DNR and the host never reconnects by itself (memory note
-#     nvmet-port-unlink-dnr-kills-host-ctrl), so the hosts stop first. That is
+#     controller with DNR while the port keeps listening, and leaves it
+#     retrying until ctrl_loss_tmo when, as here, the subsystem is the port's
+#     last (e2e_integtest.md, Known limits), so the hosts stop first. That is
 #     the same order, for the same reason, that cleanup_all uses.
 #  b. `sp delete` is REFUSED while the sp still holds a thin device, a
 #     subsystem, a clone, a transfer or a migration: those are objects a user
 #     made and must remove first, while cntlrs, slices, groups, legs and sides
-#     are created implicitly and drained implicitly
-#     (gateway/storagepool.go:622-654, "The five name lists are the whole
-#     precondition"). So case_teardown ASSERTS first that the case left exactly
+#     are created implicitly and drained implicitly ("The five name lists
+#     are the whole precondition", DeleteStoragePool (gateway/storagepool.go)).
+#     So case_teardown ASSERTS first that the case left exactly
 #     one subsystem, one namespace and one thin device. A case that forgot to
 #     remove its own objects then fails here with that sentence rather than
 #     with a bare FAILED_PRECONDITION from the gateway three calls later.
@@ -8211,7 +8130,7 @@ host_wait_sha() { # <h> <path> <countMiB> <want> <secs> <label>
 	log "  host$1: sha256 of the first $3 MiB of $2 = $SHA_LAST"
 }
 
-# check_sha0 is the plan's "✓" in one line: host0's namespace still holds the
+# check_sha0 is the data check in one line: host0's namespace still holds the
 # BASELINE_MIB MiB setup wrote, byte for byte.
 check_sha0() { # <what just happened>
 	local dev
@@ -8239,7 +8158,7 @@ sp_gone() {
 # not need to be: CreateDiskNode computes total_ext_cnt from the node's disk
 # size and the cluster's extent_size and a DN that carries nothing has
 # free_ext_cnt equal to it, so the invariant is free == total with an empty
-# side_ptr_list (pb/schema.proto:337-348). Checking both is what separates
+# side_ptr_list of DnConf (pb/schema.proto). Checking both is what separates
 # "the capacity came back" from "the pointer list was cleared but the number
 # was not" — the two are written by the same ledger flush and a mismatch
 # between them is the bug this assertion exists for.
@@ -8319,7 +8238,7 @@ cn_residue_empty() { # <v>
 # The third was the one that mattered, and it is now CLOSED. This probe used to
 # run `mdadm --detail --scan | grep -oE 'name=…dnv-…'`, and on these guests that
 # scan prints no `name=` field at all (md_stop_all's comment carries the
-# measurement and the bash -x trace), so the grep matched nothing on every DN,
+# measurement), so the grep matched nothing on every DN,
 # always, and the assertion passed whatever the guest held — while the DN md
 # mask it exists to verify was exactly the thing that had been wrong. It reads
 # MD_NAME per array now, the way md_stop_all does. cn_residue's md line had the
@@ -8362,8 +8281,9 @@ case_teardown() {
 	# inside wipe is `|| true` with its output discarded, so the verb exits 0
 	# whether the connections went or not — and this is the one place where
 	# that matters: `ss delete` below unlinks the subsystem, and a subsystem
-	# that disappears under a live controller kills it with DNR (memory note
-	# nvmet-port-unlink-dnr-kills-host-ctrl). wipe re-reads sysfs and prints
+	# that disappears under a live controller leaves it retrying when, as
+	# here, the subsystem is the port's last, and kills it with DNR while the
+	# port keeps listening (fact (a)). wipe re-reads sysfs and prints
 	# `wipe_left=` when anything survived.
 	for h in "${!HOST[@]}"; do
 		wout=$(helper_host "$h" wipe "$CP_IP") ||
@@ -8377,21 +8297,21 @@ case_teardown() {
 			# `nqn.2024-01.io.dnv` with no terminator, so a `wipe_left=` line
 			# can just as well carry cdc_test.sh's `nqn.2024-01.io.dnv-it:cdc:*`
 			# from the host guests the two suites share (see wipe's header).
-			# The DNR sentence is about $SS0 and belongs only to a survivor
-			# that IS $SS0, so it is said only then.
+			# The live-controller sentence is about $SS0 and belongs only to a
+			# survivor that IS $SS0, so it is said only then.
 			left=$(printf '%s\n' "$wout" | sed -n 's/^wipe_left=//p' | tail -n 1)
 			case " $left " in
 			*" $SS0 "*)
 				die "host$h still holds a connection to: $left." \
 					"\`wipe\` swept both dnv NQN prefixes and these survived." \
 					"$SS0 is among them, and \`ss delete\` below would unlink" \
-					"it under a live controller and kill that controller with" \
-					"DNR, so this stops here instead."
+					"it under a live controller and leave that controller" \
+					"retrying until ctrl_loss_tmo, so this stops here instead."
 				;;
 			*)
 				die "host$h still holds a connection to: $left." \
 					"\`wipe\` swept both dnv NQN prefixes and these survived." \
-					"$SS0 is NOT among them, so the DNR hazard \`ss delete\`" \
+					"$SS0 is NOT among them, so the hazard \`ss delete\`" \
 					"poses is not the immediate one — but a sweep that did not" \
 					"finish is itself the fault to read, and another dnv" \
 					"suite holding paths on this guest breaks rule 8."
@@ -8414,8 +8334,8 @@ case_teardown() {
 	# message. ctl_ok's first assertion is on the exit code, so a refusal would
 	# report "got '1', want '0'" and throw away the sentence that says WHICH
 	# object is still there — and the pre-checks above cover only subsystems and
-	# thin devices, while DeleteStoragePool's precondition is five name lists
-	# (clones, transfers and migrations too, gateway/storagepool.go:629-634).
+	# thin devices, while DeleteStoragePool (gateway/storagepool.go) has five
+	# name lists as its precondition (clones, transfers and migrations too).
 	ctl_exec sp delete
 	if [ "$CTL_RC" != 0 ]; then
 		die "\`sp delete\` was refused, so the case left an object behind that" \
@@ -8532,13 +8452,13 @@ read_space() { # <helper wrapper> <index|""> <label>
 #   RUN_CAP_BYTES everything this run wrote on all ten guests, $WORK plus
 #                 $TMPFS_DIR. The tmpfs is counted separately because it is NOT
 #                 under $WORK: CnTmpfsPath is fixed at common.DefaultTmpfsPrefix
-#                 and no flag moves it (common/name_fmt.go:115-125, :451-461), so
+#                 and no flag moves it (NewNameFmt (common/name_fmt.go)), so
 #                 a guard that only looked at $WORK would miss a CN's whole
 #                 clone-metadata arena.
 #
-# The free-space floors are preflight's own, deliberately rather than the plan's
-# flat 10 GiB: the statement worth making is "the run left the guest as usable
-# as preflight demanded it be", and one number in two places that disagree is
+# The free-space floors are preflight's own: the statement worth making is
+# "the run left the guest as usable as preflight demanded it be", and one
+# number in two places that disagree is
 # how a floor stops meaning anything. The hosts have no preflight floor (they
 # run no dnv binary and hold only the pattern file), so their numbers are
 # reported and counted but not asserted against a floor of their own.
@@ -8599,8 +8519,8 @@ case_space_guard() {
 	log "  cp: work=$SPACE_WORK tmpfs=$SPACE_TMPFS free=$SPACE_FREE"
 
 	assert_le "$total" "$RUN_CAP_BYTES" \
-		"allocated bytes this run holds on all ten guests"
-	log "  total allocated on all ten guests: $total bytes (cap $RUN_CAP_BYTES)"
+		"allocated bytes this run holds on every guest"
+	log "  total allocated on every guest: $total bytes (cap $RUN_CAP_BYTES)"
 }
 
 case_finish() {
@@ -8647,14 +8567,14 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: ops (e2e_integtest.md, The cases, ops) — the nine numbered steps
+# Case: ops (e2e_integtest.md, The cases, ops) — the nine steps of case_ops
 # ---------------------------------------------------------------------------
 #
 # Every sp-scoped mutator and reader dnvctl has, against the real gateway, on
 # the sp setup built; host0's data is re-read after each marked step, and
 # the digest must still be SHA0.
 #
-# The three names ops adds to the sp. All three are bare jq identifiers,
+# The names ops adds to the sp. Each is a bare jq identifier,
 # because `td list` is keyed by td_name and `.name_to_td.<name>` is how every
 # filter here reaches a row.
 SNAP0=s0
@@ -8698,23 +8618,21 @@ sp_totals_of() { # <sp get reply> <what>
 # The shape target, re-read on every poll
 # ---------------------------------------------------------------------------
 #
-# WHY IT CANNOT BE READ ONCE, from the first real run (2026-09-17, deca203).
-# Two predicates had the same defect in two shapes: setup's cntlr_stack_ready
-# took its leg target from the CONSTANT GRP_CNT x LEGS, and cntlr_full_ready
-# took its from a `sp_totals` reading made once, before the wait began. Setup
-# step 7 hit the first of them. While it waited, AR8 created a spare leg — the
-# reacting thresholds were still in force for every case then — and the agent
-# correctly reported 129 leg rows, because CN10 walks spare_leg_list as well as
-# leg_list. The target stayed 128. The transcript's last line is
+# WHY IT CANNOT BE READ ONCE. A leg target read once — from the CONSTANT
+# GRP_CNT x LEGS, or from a `sp_totals` reading made before the wait began —
+# goes stale when a spare leg appears. If AR8 creates one while such a wait
+# runs (the reacting thresholds let it), the agent correctly reports one leg
+# row more, because CN10 walks spare_leg_list as well as leg_list, and the
+# target does not move. At the default shape the wait then logs, for example,
 #
 #     cntlr 1: pools 21/32, groups 49/64, legs 129/128
 #
-# and no amount of time could have made that poll pass: the sp really did hold
-# 128 legs and exactly one spare, and the agent's leg_id_to_leg held exactly
+# and no amount of time can make that poll pass: the sp really does hold
+# 128 legs and exactly one spare, and the agent's leg_id_to_leg holds exactly
 # those 129 ids. A wait whose target cannot be reached is not a slow wait, it is
 # a hang with a stopwatch on it.
 #
-# So the two predicates below re-read the totals on EVERY poll, with one extra
+# So the predicates below re-read the totals on EVERY poll, with one extra
 # `sp get` per poll as the price, and they SHOUT when the shape moves under
 # them. The shout is not decoration: while one of these waits is running the
 # suite itself is blocked, so nothing it did can have changed the shape — and
@@ -8825,14 +8743,15 @@ cntlr_full_ready() { # <cntlr id>
 # primary, with two, or whose two parallel lists disagree sends the poll round
 # again rather than failing — but none of those states is reachable through
 # `sp get` today, and the comment must not claim the election passes through
-# them. GetStoragePool answers out of one `Snapshot`, so the whole reply is a
-# single store revision (gateway/storagepool.go:720-765); every writer of the
+# them. GetStoragePool (gateway/storagepool.go) answers out of one `Snapshot`,
+# so the whole reply is a single store revision; every writer of the
 # `primary` flag leaves exactly one primary in that revision (`idx == 0` at
-# create, gateway/storagepool.go:574; false at gateway/cntlr.go's CreateCntlr;
+# CreateStoragePool (gateway/storagepool.go);
+# false at gateway/cntlr.go's CreateCntlr;
 # the old cntlr's own flag at model.ReplaceCntlr, which deletes the old key in
 # the same STM; and model.Failover flips both primary booleans in one STM); and
-# loadCntlrs walks cntlr_id_list and returns ABORTED
-# on a missing key (gateway/alloc.go:496-511), so the two lists cannot come back
+# loadCntlrs (gateway/alloc.go) walks cntlr_id_list and returns ABORTED
+# on a missing key, so the two lists cannot come back
 # different lengths. The guards are cheap, and they are what keeps a future
 # non-atomic writer — or a reply this code could not otherwise tell from a valid
 # one — from being read as a stack that is simply not finished yet.
@@ -8849,8 +8768,8 @@ primary_stack_ready() {
 	case "$n$ids" in
 	'' | *[!0-9]*) return 1 ;;
 	esac
-	# The same pairing sp_read_roles rests on: loadCntlrs reads the cntlrs in
-	# sp_conf.cntlr_id_list order (gateway/alloc.go:496-511), so position i of
+	# The same pairing sp_read_roles rests on: loadCntlrs (gateway/alloc.go)
+	# reads the cntlrs in sp_conf.cntlr_id_list order, so position i of
 	# cntlr_list is the cntlr whose id is cntlr_id_list[i]. transpose would pad
 	# the shorter list with nulls, so the lengths are checked first.
 	[ "$n" = "$ids" ] || return 1
@@ -8954,7 +8873,7 @@ standby_shape_ready() {
 	fi
 	# $CTL_OUT is still the `sp get` sp_totals_poll just read. The same pairing
 	# sp_read_roles rests on: position i of cntlr_list is the cntlr whose id is
-	# cntlr_id_list[i] (gateway/alloc.go:496-511). transpose would pad the
+	# cntlr_id_list[i] (loadCntlrs (gateway/alloc.go)). transpose would pad the
 	# shorter list with nulls, so unequal lengths answer " " and both ids come
 	# out empty.
 	roles=$(jq_of "$CTL_OUT" \
@@ -9042,15 +8961,12 @@ cntlr_pos_of_addr() { # <addr_port> → index | -1
 # status, so the wait after it is what proves the disconnect landed — which is
 # the whole reason a `none` reading is the right thing to demand there.
 #
-# IT IS NOT THE PREDICATE FOR A `cntlr delete`, and one site used it that way
-# until the 2026-09-17 `--slice-cnt 1` run died on it: 60 s in ops step 3 after
-# a delete the control plane had carried out correctly (the record was gone,
-# the sp was back to two cntlrs, and on the CN both
-# /sys/kernel/config/nvmet/subsystems/ and .../ports/1/subsystems/ were empty),
-# while host0 sat on the path in state `connecting`. The comment this one
-# replaces cited memory note nvmet-port-unlink-dnr-kills-host-ctrl for "a
-# subsystem that disappears under a live controller refuses the reconnect with
-# DNR, so the kernel deletes the controller". That note is about a PORT UNLINK
+# IT IS NOT THE PREDICATE FOR A `cntlr delete`: after a delete the control
+# plane has carried out correctly (the record gone, and on the CN both
+# /sys/kernel/config/nvmet/subsystems/ and .../ports/1/subsystems/ empty),
+# the host stays on the path in state `connecting`. A controller whose
+# subsystem disappeared has its reconnect refused with DNR
+# only after a PORT UNLINK
 # on a port that goes on carrying OTHER subsystems and therefore goes on
 # LISTENING: the reconnect reaches a target that answers, and a DNR answer is
 # what deletes the controller. Take a port's LAST subsystem away and it does
@@ -9058,8 +8974,8 @@ cntlr_pos_of_addr() { # <addr_port> → index | -1
 # direction, "the port link that makes the port listen" — the reconnect gets
 # ECONNREFUSED, and ECONNREFUSED is a
 # retry and not a refusal. The controller then stays put until ctrl_loss_tmo,
-# which is a retry budget rather than a deadline (memory note
-# nvme-io-error-timing-matrix) and which no connect in this suite overrides, so
+# which is a retry budget rather than a deadline and which no connect in this
+# suite overrides, so
 # it is the kernel's 600 s default: ten times WAIT_HOST and equal to
 # WAIT_PROVISION, which makes "wait for the controller to disappear" a race
 # against the budget wherever it is used rather than an assertion.
@@ -9200,7 +9116,7 @@ ops_reads() {
 
 	# FindStoragePoolNames answers a map keyed by the uint64 sp_id, and
 	# protojson renders a uint64 MAP KEY as a QUOTED decimal string (CT4,
-	# pinned by ctl/render_test.go:108-117) — so the lookup is by the same
+	# pinned by TestRenderGoldens (ctl/render_test.go)) — so the lookup is by the same
 	# decimal text `sp create` handed back, not by a number.
 	ctl_ok sp find-names --ids "$SP_ID"
 	assert_field "$CTL_OUT" ".sp_id_to_name[\"$SP_ID\"]" "$SP" \
@@ -9234,8 +9150,8 @@ ops_reads() {
 # gateway/storagepool.go), so a grown group MAY land on a DN that already carries
 # another group's side. What does still hold, and is asserted, is the
 # per-group rule: one scan keeps at most one candidate per location
-# (model/alloc.go:137-141), so the LEGS legs of the new group are on LEGS
-# different DN VMs.
+# (FindDnCandidates (model/alloc.go)), so the LEGS legs of the new group
+# are on LEGS different DN VMs.
 ops_grow() {
 	stage 02 "sp grow-slice: one meta grow and one data grow"
 	local midx=0 didx=1 mslice dslice grp before_grps
@@ -9244,11 +9160,12 @@ ops_grow() {
 	before_grps=$SP_GRP_TOTAL
 	# The id comes from sp_conf.slice_id_list and NOT from slice_list: pb.Slice
 	# carries slice_idx, meta_grp_list and data_grp_list and no id at all
-	# (pb/schema.proto:420-424). loadSlices walks conf.GetSliceIdList() in list
-	# order and appends (gateway/alloc.go:478-493), so slice_list[i] is the
+	# (message Slice (pb/schema.proto)). loadSlices (gateway/alloc.go) walks
+	# conf.GetSliceIdList() in list order and appends, so slice_list[i] is the
 	# slice whose id is slice_id_list[i] — the same pairing sp_read_roles
 	# relies on for cntlrs, and setup pinned both lists to SLICE_CNT entries.
-	# `--slice` takes an id, not an index (ctl/sp.go:422, "slice_id to grow").
+	# `--slice` takes an id, not an index (spGrowSliceCmd (ctl/sp.go),
+	# "slice_id to grow").
 	mslice=$(sp_field ".sp_conf.slice_id_list[$midx]")
 	dslice=$(sp_field ".sp_conf.slice_id_list[$didx]")
 	case "$mslice$dslice" in
@@ -9318,16 +9235,16 @@ ops_grow() {
 # The two refusals are the point of the step, so their MESSAGES are
 # asserted and not merely their code. Both come from the same handler, and the
 # order of its two loops decides which one fires:
-# UpdateStoragePoolCntlidSlotList checks every CNTLR first (:856-863) and only
-# then every SIDE (:864-878, gateway/storagepool.go), so
+# UpdateStoragePoolCntlidSlotList (gateway/storagepool.go) checks every CNTLR
+# first and only then every SIDE, so
 #
 #   --slots 1,2   drops slot 0, which cntlr <the first cntlr> uses
 #   --slots 0,2   drops slot 1, which cntlr <the second cntlr> uses
 #
-# and the side loop is never reached in either case. The plan's gloss on the
-# first one ("slot 0 used by every side") names a fact that is TRUE — every side
-# carries cntlid_slot_list[0], gateway/storagepool.go:526, which setup pins —
-# but not the message that comes back. The id in each message is minted, so
+# and the side loop is never reached in either case. Slot 0 is used by every
+# side as well — each carries cntlid_slot_list[0], which setup pins
+# (CreateStoragePool (gateway/storagepool.go)) — but the refusal names the
+# cntlr that uses the slot, not a side. The id in each message is minted, so
 # ctl_fail_grep and its fixed-string substring are what this needs;
 # ctl_fail_msg cannot express it.
 ops_slots() {
@@ -9406,7 +9323,7 @@ ops_slots() {
 	# The cdc must advertise the new transport before host0 can reach it, and
 	# disc_want_of_sp derives the expectation from the cntlrs themselves — one
 	# record per NON-disabled cntlr, which is what `ss create` wrote into the
-	# CdcEntry (enabledCntlrTrConfs, gateway/subsystem.go:188-194).
+	# CdcEntry (CreateSubsystem (gateway/subsystem.go), from enabledCntlrTrConfs).
 	disc_want_of_sp "$SS0"
 	DISC_LAST=""
 	wait_until "$WAIT_HOST" \
@@ -9415,8 +9332,8 @@ ops_slots() {
 	# And the new cntlr's AGENT must have built the export before host0 tries
 	# it. cntlr_legs_full_ready above says only that it connected its legs; the
 	# subsystem and the namespace are the LAST rows a cntlr builds, and an
-	# nvmet port with no subsystem linked to it does not listen (run 3's
-	# failure — see wait_ns_exported). The other two cntlrs have been exporting
+	# nvmet port with no subsystem linked to it does not listen (see
+	# wait_ns_exported). The other two cntlrs have been exporting
 	# since setup, so the gate covers all three and returns at once for them.
 	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID"
 	host_connect_all 0 "$SS0"
@@ -9490,13 +9407,12 @@ ops_slots() {
 	assert_field "$SP_JSON" '.cntlr_list | length' "$CNTLR_CNT" \
 		"the sp is back to its $CNTLR_CNT cntlrs"
 	# WHAT THE HOST OWES AFTER A `cntlr delete`, and it is NOT that the
-	# controller object disappears — that is what the 2026-09-17 `--slice-cnt 1`
-	# run spent 60 s waiting for. What was on the guests when that wait expired:
-	# the record gone, the sp back to two cntlrs, cn$spare's
+	# controller object disappears. What the guests hold once the delete has
+	# converged: the record gone, the sp back to two cntlrs, cn$spare's
 	# /sys/kernel/config/nvmet/subsystems/ AND .../ports/1/subsystems/ both
-	# EMPTY — the agent had retired the host-facing subsystem exactly as it
+	# EMPTY — the agent has retired the host-facing subsystem exactly as it
 	# should — and host0 still holding the controller in state `connecting`.
-	# That is the ECONNREFUSED ending: the port had lost its last subsystem, an
+	# That is the ECONNREFUSED ending: the port has lost its last subsystem, an
 	# nvmet port with none does not listen, and a refused connect is a RETRY.
 	# The controller then sits in `connecting` until ctrl_loss_tmo, which is a
 	# budget and not a deadline and which no connect here overrides, so it is
@@ -9549,13 +9465,9 @@ ops_slots() {
 	# subsystem's namespace HEAD lives as long as any path device still
 	# references it. So while it sits there host0 cannot lose
 	# /dev/disk/by-id/nvme-uuid.$UUID1 no matter how correctly both surviving
-	# CNs remove the namespace — which is what made case_teardown's
-	# `wait_dev_gone` unsatisfiable. That was not a regression in anything the
-	# agents do: a 2026-09-18 run of this case at 02b303c and one of the same
-	# case with teardown-by-sweep applied both died at it-ops-90 on the same
-	# 60 s wait, with host0 holding exactly this shape (nvme1 live, nvme2 live,
-	# nvme3 connecting, one by-id link, `hidden=1` path device present). The
-	# two steps were simply written against each other.
+	# CNs remove the namespace — which would make case_teardown's
+	# `wait_dev_gone` unsatisfiable through no fault of the agents: the two
+	# steps would simply work against each other.
 	#
 	# Disconnecting the controller BY DEVICE is what closes it, and it costs
 	# the later assertion nothing: --device takes this one controller and
@@ -9602,13 +9514,13 @@ ops_inspect() {
 	case "$total" in
 	'' | *[!0-9]* | 0) die "side $sid reports total_ext_cnt '$total'" ;;
 	esac
-	# pb/schema.proto:230 says it in the field's own comment: "always filled;
-	# equal => fully zeroed". A side is exported only once it is, which is what
-	# Side.provisioned then records.
+	# SideInfo.total_ext_cnt (pb/schema.proto) says it in its own comment:
+	# "always filled; equal => fully zeroed". A side is exported only once it
+	# is, which is what Side.provisioned then records.
 	assert_eq "$zeroed" "$total" \
 		"side $sid is fully zeroed (zeroed_ext_cnt == total_ext_cnt)"
 	assert_ge "$(jq_of "$CTL_OUT" '.applied_revision')" 1 \
-		"the DN agent has applied at least one SyncupSide revision"
+		"the DN agent has accepted at least one SyncupSide revision"
 
 	ctl_ok dn inspect --addr "$saddr"
 	assert_field "$CTL_OUT" '.dn_info.disk_info.status' RES_STATUS_OK \
@@ -9645,29 +9557,29 @@ ops_inspect() {
 # READWRITE, asserting the DOCUMENTED shape at each rung rather than assuming
 # one. The shape comes
 # from doc/cnagent.md CN19's table and was re-derived from
-# agent/cnagent/probe.go, which is the only place that decides what
-# InspectCntlr reports:
+# probeCntlr (agent/cnagent/probe.go), which is the only place that decides
+# what InspectCntlr reports:
 #
-#   the gates            agent/cnagent/plan.go:442-450
+#   the gates            newCntlrPlan (agent/cnagent/plan.go)
 #     wantAny   = level <  DISABLE
 #     wantLeg   =           level < NO_SIDE
 #     wantGrp   = primary && level < NO_REDUND
 #     wantPool  = primary && level < NO_THINPOOL
 #     wantClone = primary && level < NO_CLONE
 #   what a gate that is false produces, on the PRIMARY
-#     legs       probe.go:50-53    Missing(details "sp_level")
-#     groups     probe.go:62-78    Missing on the `case plan.primary` arm (:74-76)
+#     legs       the leg loop      Missing(details "sp_level")
+#     groups     the group switch  Missing on the `case plan.primary` arm
 #     pools and both concats
-#                probe.go:85-95    Missing, inside `if plan.primary`
-#     td raid0   probe.go:162-181  Missing on the `case plan.primary` arm (:178-180)
+#                the slice loop    Missing, inside `if plan.primary`
+#     td raid0   the raid0 switch  Missing on the `case plan.primary` arm
 #     td dm-error
-#                probe.go:146-161  Missing on the `else` of `if plan.wantAny`,
+#                the td loop       Missing on the `else` of `if plan.wantAny`,
 #                                  so DISABLE only — and its own comment says
 #                                  the row is reported MISSING rather than left
 #                                  out, because "omitted" and "never looked at"
 #                                  must not be the same document
 #     subsystems, namespaces, ns-devs and xfers
-#                probe.go:265-273 → syncup_cntlr.go:583-610 reportSuppressed,
+#                reportSuppressed (agent/cnagent/syncup_cntlr.go),
 #                                   reached only at DISABLE (!wantAny)
 #
 # So a suppressed row is PRESENT and RES_STATUS_MISSING with details
@@ -9695,20 +9607,20 @@ ops_inspect() {
 # Two consequences of the DISABLE rung that the steps below depend on:
 #  - the host-facing subsystem goes with everything else, on BOTH cntlrs:
 #    the wanted set is empty at DISABLE (CN19), so the sweep's L1 (CN21)
-#    removes every subsystem of the sp (removeExportVerified,
-#    agent/cnagent/sweep.go:716-721, over removeExport at
-#    agent/cnagent/dmutil.go:382-389), which unlinks it from the port and
+#    removes every subsystem of the sp
+#    (removeExportVerified (agent/cnagent/sweep.go), over
+#    removeExport (agent/cnagent/dmutil.go)), which unlinks it from the port and
 #    removes it. And $SS0 is the only subsystem either CN's
 #    port carries — the whole ops case issues no second `ss create`, no `xfer
 #    create` and no `clone create` at any step, and one cn agent has one nvmet
-#    port shared by everything it exports (agent/nvmet.go:80) — so each port
-#    loses its LAST subsystem and stops listening.
+#    port shared by everything it exports (PortConf (agent/nvmet.go)) — so each
+#    port loses its LAST subsystem and stops listening.
 #
 #    THAT IS NOT THE DNR ENDING this comment used to claim. A port that does
 #    not listen refuses nothing: the reconnect gets ECONNREFUSED, which is a
 #    retry (e2e_integtest.md, Known limits, "A host controller outlives a
 #    target that stops listening", and host_path_gone's header for the
-#    measurement it came from). So host0's controllers go to `connecting`
+#    mechanism). So host0's controllers go to `connecting`
 #    rather than away, on
 #    ctrl_loss_tmo's 600 s retry budget, and which side of that budget the
 #    climb back to READWRITE lands on is what decides whether the kernel
@@ -9717,8 +9629,8 @@ ops_inspect() {
 #    came back — a controller that has been `connecting` since the DISABLE rung
 #    is still a controller for ctrls_of to count — which is why that step waits
 #    for `live` on both transports afterwards instead.
-#  - none of this is a health event: worker/health.go's cntlrObservation
-#    (:526-569) reacts to RES_STATUS_ERROR rows only, so a ladder full of
+#  - none of this is a health event: cntlrObservation (worker/health.go)
+#    reacts to RES_STATUS_ERROR rows only, so a ladder full of
 #    MISSING rows never makes the primary look unhealthy and no re-election
 #    happens under it.
 LEVEL_WANT=()
@@ -9965,7 +9877,7 @@ ops_levels() {
 	# FROM-NOTHING rebuild, not an incremental convergence: DISABLE suppressed
 	# every resource CN19 names on both cntlrs, and build() is sequential with
 	# legs first and the subsystem among the last rows
-	# (agent/cnagent/syncup_cntlr.go:216-219, then the subsystem loop), so the
+	# (CnAgentServer.build (agent/cnagent/syncup_cntlr.go)), so the
 	# standby's ss_id_to_subsystem row cannot go RES_STATUS_OK until all
 	# $SP_LEG_TOTAL legs have been reconnected. That is the WAIT_BUILD comment's
 	# piece of work, and it is the same budget ops_set_level's own wait spends
@@ -10006,15 +9918,15 @@ ops_levels() {
 # A snapshot, the two bitmap reads and a second thin device.
 #
 # `td create --ori <origin> --size 0` is the ONE case in which a zero size is
-# legal: the pre-STM check refuses `size == 0 && ori_name == ""`
-# (gateway/thindevice.go:88-92) and the STM then inherits the origin's size and
-# re-checks it against the same slice_cnt x stripe_size unit (:143-171).
+# legal: the pre-STM check of CreateThinDevice (gateway/thindevice.go) refuses
+# `size == 0 && ori_name == ""` and the STM then inherits the origin's size and
+# re-checks it against the same slice_cnt x stripe_size unit.
 #
 # `td get-bm --cnt 0` asks for the WHOLE slice — dnvctl substitutes no window
-# of its own (ctl/td.go:169-170, CT8). The reply is not a proto message but the
-# CT4 hex map `{"bitmap_hex","byte_cnt"}`, and byte_cnt is a Go `int`
-# (ctl/root.go:400-405), so it renders as a BARE NUMBER while every uint64 in
-# this file is a quoted string.
+# of its own (tdGetBmCmd (ctl/td.go), CT8). The reply is not a proto message
+# but the CT4 hex map `{"bitmap_hex","byte_cnt"}`, and byte_cnt is a Go `int`
+# (hexBitmapResult (ctl/root.go)), so it renders as a BARE NUMBER while every
+# uint64 in this file is a quoted string.
 ops_snapshot() {
 	stage 06 "td create --ori (snapshot), td get-bm, td get-leg-bm, a second td"
 	local snapid hex bytes legid t0dev
@@ -10043,10 +9955,10 @@ ops_snapshot() {
 		"bitmap_hex is exactly two hex digits per byte_cnt byte"
 	# THE WIRE CONVENTION IS INVERTED, and asserting "some bit is set" would
 	# assert the opposite of what this step is for. architecture.md, Bitmap
-	# reads, and agent/cnagent/thinbm.go:277-279 both say bit k = 1 iff block
-	# start+k is
-	# UNMAPPED: thinDeviceBitmap starts from allUnmapped (every real bit 1,
-	# :286) and CLEARS the range of every mapped extent (:291). A td nobody
+	# reads, and thinDeviceBitmap (agent/cnagent/thinbm.go) both say bit k = 1
+	# iff block start+k is
+	# UNMAPPED: thinDeviceBitmap starts from allUnmapped (every real bit 1)
+	# and CLEARS the range of every mapped extent. A td nobody
 	# ever wrote therefore answers all-ones, and "some bit set" would pass on
 	# it — and a slice that happened to be FULLY written would answer all
 	# zeros and fail it.
@@ -10054,7 +9966,7 @@ ops_snapshot() {
 	# What setup's write pins is block 0: dm-striped maps chunk c of a td to
 	# slice c mod slice_cnt, so the first STRIPE_SIZE bytes host0 wrote at
 	# offset 0 are block 0 of slice 0's thin volume, whatever SLICE_CNT is.
-	# Bits are LSB-first within a byte (clearBitRange, thinbm.go:233-235:
+	# Bits are LSB-first within a byte (clearBitRange (thinbm.go):
 	# `bitmap[lo/8] &^= 1 << (lo % 8)`), so block 0 is bit 0 of byte 0, i.e.
 	# the low bit of the first two hex digits. bitmap_hex is at least two
 	# digits here — the two assertions above pin byte_cnt >= 1 and the length.
@@ -10074,12 +9986,12 @@ ops_snapshot() {
 		# `>= 1`, not `>= 0`: byte_cnt is len() of a Go slice, so `>= 0` holds
 		# for every possible reply including an empty one and could never
 		# fail. It really is non-empty here — `--cnt 0` means "the whole leg"
-		# (ctl/td.go:208) and bitmapWindow turns that into gp.dataBlocks
-		# (agent/cnagent/bitmapread.go:141-142, :181-183), which for a DATA
+		# (tdGetLegBmCmd (ctl/td.go)) and bitmapWindow turns that into gp.dataBlocks
+		# (its call in GetLegBm (agent/cnagent/bitmapread.go)), which for a DATA
 		# group of INIT_EXT_CNT x $EXTENT_SIZE at a 1 MiB pool block is 64
 		# blocks, 8 bytes. The leg is a data leg: it came out of
 		# data_grp_list, and a META leg would answer all-zero instead
-		# (bitmapread.go:146-153).
+		# (the isMeta branch of GetLegBm (agent/cnagent/bitmapread.go)).
 		bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
 		assert_ge "$bytes" 1 "leg $legid's bitmap byte_cnt"
 		hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
@@ -10090,15 +10002,15 @@ ops_snapshot() {
 			"skipping td get-leg-bm"
 	fi
 
-	# The second thin device is deliberately $TD0's size and not the plan's one
+	# The second thin device is deliberately $TD0's size and not one
 	# TD_UNIT. Step 7 repoints a LIVE namespace at it, and nvmet fixes a
-	# namespace's capacity when it enables it: agent.NsConf carries nqn, nsid,
-	# device_path, uuid, nguid and ana_grpid and NO size (agent/nvmet.go:425-432),
+	# namespace's capacity when it enables it: agent.NsConf (agent/nvmet.go)
+	# carries nqn, nsid, device_path, uuid, nguid and ana_grpid and NO size,
 	# and nothing here writes the kernel's revalidate_size. A td of another size
 	# would therefore leave the host's reported capacity stale — a separate
 	# mechanism, and not what step 7 is about. Equal sizes make
-	# UpdateNamespaceDev exactly what its handler says it is: "invisible to the
-	# host" (gateway/subsystem.go:513-521).
+	# UpdateNamespaceDev (gateway/subsystem.go) exactly what its handler says it
+	# is: "invisible to the host".
 	ctl_ok td create --name "$TD1" --size "$TD0_SIZE"
 	wait_until "$WAIT_PROVISION" "$TD1 to report created" td_created "$TD1"
 	assert_field "$CTL_OUT" '.name_to_td | length' 3 \
@@ -10122,8 +10034,9 @@ ops_snapshot() {
 # requeued bios wedge anything that touches it — including host_drop_caches,
 # which issues a `sync`. The assertion that it happened is therefore an ANA
 # read and never a dd, and never wait_dev_gone either: a park keeps the device
-# (agent/cnagent/plan.go:345-353 "a **park**, not a dm suspension … and the
-# device stays live"), so wait_dev_gone would burn its whole budget and die.
+# (nsPlan.suspended (agent/cnagent/plan.go): "a **park**, not a dm suspension
+# … and the device stays live"), so wait_dev_gone would burn its whole budget
+# and die.
 ops_namespace() {
 	stage 07 "ns set-suspended (a park, not a removal), then ns set-dev"
 	local dev zero
@@ -10166,17 +10079,18 @@ ops_namespace() {
 # `disabled` on a node is a SCHEDULING flag and nothing else: it decides whether
 # the allocator may see the node, i.e. whether its capacity key exists
 # (architecture.md, Capacity index keys), and it is invisible to the agent —
-# sides and cntlrs the node already hosts
-# keep running (gateway/disknode.go:372-383). So the way to prove it took
+# sides and cntlrs the node already hosts keep running
+# (UpdateDiskNodeDisabled (gateway/disknode.go)). So the way to prove it took
 # effect is to ask the allocator for that node by name and be refused.
 #
 # The refusal is RESOURCE_EXHAUSTED because the scan found too few candidates:
 # pickDns draws plan.Legs of them and errExhausted's message is
 # "<what>: %d disk nodes with %d free extents, need %d"
-# (gateway/alloc.go:98-102), with `what` = "grow slice"
-# (gateway/storagepool.go:1145). The white list is
+# (pickDns (gateway/alloc.go)), with `what` = "grow slice"
+# (GrowSlice (gateway/storagepool.go)). The white list is
 # exactly LEGS free DNs on LEGS DIFFERENT VMs, one of them the disabled one:
-# a scan keeps at most one candidate per location (model/alloc.go:137-141), so
+# a scan keeps at most one candidate per location
+# (FindDnCandidates (model/alloc.go)), so
 # LEGS DNs on LEGS locations would yield LEGS candidates and SUCCEED if the
 # disabled one were still visible, and yields LEGS-1 and fails because it is
 # not. One DN fewer, or two on one VM, and the step would prove nothing.
@@ -10250,7 +10164,7 @@ ops_disabled() {
 	# takes nothing out of service, and `cntlr create` white-listing it is then
 	# the one allocation that can only be answered by that node. pickCn draws
 	# exactly one candidate and answers "<op>: no controller node with %d free
-	# extents" when it cannot (gateway/alloc.go:137-141).
+	# extents" when it cannot (pickCn (gateway/alloc.go)).
 	if [ "$SPARE_CN" -lt 0 ]; then
 		log "  every --cn guest carries a cntlr of $SP; skipping the cn half of step 8"
 	else
@@ -10284,7 +10198,7 @@ ops_delete_tds() {
 	stage 09 "td delete $SNAP0 and $TD1, leaving only $TD0 for the teardown"
 	# The snapshot goes first. Not because the gateway demands that order — a
 	# CREATED snapshot does not block its origin; only an uncreated one does
-	# (tdUncreatedSnapshots, gateway/thindevice.go:255-261) — but because
+	# (tdUncreatedSnapshots (gateway/thindevice.go)) — but because
 	# deleting the origin of a live snapshot is the copy case's business, not
 	# this one's.
 	ctl_ok td delete --name "$SNAP0"
@@ -10324,13 +10238,12 @@ case_ops() {
 # steps move one leg's side between disk nodes.
 #
 # ===========================================================================
-# THE THREE DEVIATIONS FROM THE PLAN'S LITERAL WORDING, AND WHY EACH IS FORCED
+# THREE CONSTRAINTS ON THIS CASE, AND WHY EACH IS FORCED
 # ===========================================================================
 #
-#  a. Its copy step 1 says "no host0 IO from here until step 4" and step 2
-#     then asks for a host0 `sha_range` while the origin namespace is still
-#     parked. Those two sentences cannot both be obeyed. The trap is real and
-#     recorded (memory note ana-inaccessible-ns-no-blockdev, rule 5 of the
+#  a. No host0 IO while the origin namespace is parked, which it is from
+#     copy step 1's `xfer create --auto-suspend` until the transfer is
+#     deleted. The trap is real (rule 5 of the
 #     header): host_drop_caches issues a `sync`, and every read helper in this
 #     file drops caches first. So this case does ALL of its host0 IO after the
 #     transfer is deleted, and the clone's data is proved there. It costs
@@ -10343,10 +10256,11 @@ case_ops() {
 #     is gone reads `CnRaid0Name` over $TD_CLONE's own thin volumes (CN16
 #     rule 6), which only holds the bytes hydration actually wrote.
 #
-#  b. Its copy step 1 says host1 "`discover`s" the transfer and runs
-#     `connect-all`. It cannot. Every CdcEntry key is keyed on a SUBSYSTEM's
-#     ss_id and is written only where a subsystem is (gateway/subsystem.go:190,
-#     :248, :344; model/ops.go:1635-1659 rewrites the entries of nqn_list), a
+#  b. host1 cannot `discover` the transfer and run `connect-all`, because a
+#     Transfer is never advertised: every CdcEntry key is keyed on a SUBSYSTEM's
+#     ss_id and is written only where a subsystem is (CreateSubsystem,
+#     DeleteSubsystem and UpdateSubsystemHosts (gateway/subsystem.go);
+#     rewriteCdcEntries (model/ops.go) rewrites the entries of nqn_list), a
 #     Transfer has no ss_id and is in no nqn_list, and
 #     `grep -rn 'Xfer\|xfer' cdc/*.go gateway/subsystem.go` is empty. ctl/xfer.go
 #     says the same in the command's own doc comment ("the xfer subsystem is
@@ -10358,12 +10272,12 @@ case_ops() {
 #     `nguid`, so $XNQN's ns 1 and $SS0's ns 1 are two namespaces of two
 #     subsystems carrying one identity. They are never put on one kernel here.
 #
-#  c. Its copy step 5's `spare switch` and `spare delete` are written without
-#     `--grp`. ctl/spare.go declares `--grp` on ALL THREE leaves (create:
+#  c. `spare switch` and `spare delete` need `--grp`, as `spare create` does:
+#     ctl/spare.go declares `--grp` on ALL THREE leaves (create:
 #     --grp; delete: --grp --leg; switch: --grp --spare --target), because
 #     CreateSpareLegRequest/DeleteSpareLegRequest/SwitchSpareLegRequest each
 #     carry grp_id and the handlers locate the slice from it
-#     (openGrpForSpareLeg). The flags below are the file's, not the plan's.
+#     (openGrpForSpareLeg).
 #
 # ===========================================================================
 # THE SAME-SP SOURCE AND ITS FALLBACK, WHICH IS A REAL BRANCH AND NOT A COMMENT
@@ -10371,9 +10285,9 @@ case_ops() {
 # This case makes the clone SOURCE a transfer of the SAME sp: the primary CN
 # opens an nvme-tcp connection to its own nvmet port and reads $TD0's raid0 back
 # through it. Nothing in the tree refuses that — CreateClone's only check on
-# `src_nqn` is validateNqn's format test (gateway/clone.go:111) and its STM
+# `src_nqn` is validateNqn's format test, and its STM
 # checks four things, none of them about the source's location
-# (gateway/clone.go:124-186) — so it is legal by construction. Whether one
+# (CreateClone (gateway/clone.go)) — so it is legal by construction. Whether one
 # kernel being both initiator and target for the same bytes WORKS is a
 # property of the lab's kernel, not of this tree, so the suite does not assume
 # it.
@@ -10384,19 +10298,20 @@ case_ops() {
 #   1. the connect never came up. `clone_id_to_target` is the CN's verdict on
 #      the source subsystem: Ok with the path states when a live controller is
 #      there, Missing when the subsystem is not, Err with the connect error
-#      otherwise (agent/cnagent/probe.go:222-235, agent/cnagent/clone.go:60-71).
+#      otherwise (probeCntlr (agent/cnagent/probe.go) and
+#      ensureClone (agent/cnagent/clone.go)).
 #      A row that is still not RES_STATUS_OK $WAIT_SRC_CONNECT seconds after
 #      the clone was created is the "connect refused" case.
 #   2. hydration froze. The dm-clone's `details` is the raw `dmsetup status`
-#      line (agent/cnagent/clone.go:394-412), whose seventh field is
-#      `<hydrated>/<total>` — the same field the gateway parses in
-#      hydrationComplete (gateway/common.go:916-949). A same-kernel loopback
+#      line (ensureClone and probeCloneDm (agent/cnagent/clone.go)), whose
+#      seventh field is `<hydrated>/<total>` — the same field the gateway
+#      parses in hydrationComplete (gateway/common.go). A same-kernel loopback
 #      that deadlocks under writeback pressure HANGS rather than failing, so a
 #      status line that has not moved for $WAIT_HYDRATE_STALL seconds while
 #      the device itself is RES_STATUS_OK is the second trigger. Without it
 #      the case would burn its whole budget and never reach the fallback.
 #
-# What the fallback builds is the plan's own: a second storage pool $SP_SRC with
+# The fallback builds a second storage pool $SP_SRC with
 # one slice, `--redund none` and ONE cntlr pinned to a CN that is NOT sp0's
 # primary, carrying its own thin device, subsystem and namespace, which host1
 # writes a pattern into. The clone then reads it over a real network hop.
@@ -10407,9 +10322,9 @@ case_ops() {
 # without changing --dns-per-vm: every DN is a $BACKING_SIZE loop device and a
 # side of sp0 costs it $INIT_EXT_CNT extents of $EXTENT_SIZE, so a DN that
 # already carries one still reports free_ext_cnt > 0 (`dn get`), and
-# CreateStoragePool's black list is per-request — it excludes the DNs THIS
-# create picked, not the DNs another sp uses (gateway/storagepool.go:393-403).
-# The plan's "add +2 to DNS_PER_VM in that branch" is therefore unnecessary
+# the black list of CreateStoragePool (gateway/storagepool.go) is per-request —
+# it excludes the DNs THIS create picked, not the DNs another sp uses.
+# Raising DNS_PER_VM in that branch is therefore unnecessary
 # here; what would actually fail is a create with no candidate at all, and that
 # comes back as RESOURCE_EXHAUSTED from `sp create`, through ctl_ok, as a die.
 #
@@ -10423,7 +10338,7 @@ case_ops() {
 #    but its effect on the region set is not something `cntlr inspect` reports.
 #    What IS asserted is that the RPC is accepted and echoes the clone id.
 #  * That a grown sp still puts every side on a distinct DN. GrowSlice passes
-#    a nil black list (gateway/storagepool.go:1138-1145) — but nothing in this
+#    a nil black list (GrowSlice (gateway/storagepool.go)) — but nothing in this
 #    case grows the sp, so the create-time property still holds and the
 #    per-group rule is what the migration and spare steps check.
 # ---------------------------------------------------------------------------
@@ -10432,7 +10347,7 @@ case_ops() {
 #
 # $TD_CLONE must be a bare jq identifier for the same reason $TD0 is: `td
 # list` is keyed by td_name and every filter reaches a row as
-# `.name_to_td.<name>`. c0, m0, m1, x0 and k0 are the plan's own names; ops used
+# `.name_to_td.<name>`. c0, m0, m1, x0 and k0 are this case's names; ops used
 # s0 and t1 and they died with its sp.
 XFER0=x0
 CLONE0=k0
@@ -10450,7 +10365,7 @@ TD_SRC=t0
 
 # The third fixed v4 uuid, for the fallback source's namespace. It must differ
 # from $UUID1 and $UUID2: host1 holds the transfer's namespace (which carries
-# $UUID1, deviation (b)) at the same time as this one.
+# $UUID1, constraint (b)) at the same time as this one.
 UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 
 # --- budgets ----------------------------------------------------------------
@@ -10471,8 +10386,8 @@ UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 #   CN and competes with the same work.
 # WAIT_SRC_CONNECT — how long the CN may take to bring the source connection
 #   up before "it never will" is the honest reading. The CN retries a failed
-#   source connect from its own registry (agent/cnagent/clone.go:66
-#   startConnectRetry), so this must be several retries wide, not one.
+#   source connect from its own registry (ensureClone (agent/cnagent/clone.go)
+#   calls startConnectRetry), so this must be several retries wide, not one.
 # WAIT_HYDRATE_STALL — how long a LIVE dm-clone's status line may stand still
 #   before the copy is called frozen. It is deliberately smaller than
 #   WAIT_HYDRATE: the stall is what routes to the fallback, and a stall
@@ -10483,8 +10398,8 @@ WAIT_HYDRATE_STALL=90
 
 # --- state this case fills --------------------------------------------------
 
-# The transfer and its computed subsystem NQN (XferNqn carries cluster,
-# sp and xfer, in that order — common/name_fmt.go:575-588).
+# The transfer and its computed subsystem NQN (XferNqn (common/name_fmt.go)
+# carries cluster, sp and xfer, in that order).
 XFER0_ID=""
 XNQN=""
 
@@ -10495,7 +10410,7 @@ NS2_ID=""
 
 # Every CN's CnHostNqn, as the comma list `xfer set-hosts --hosts` takes, plus
 # the primary's own — which is the one the clone's connect will present
-# (agent/cnagent/plan.go:960-962 hostNqn() = CnHostNqn(cluster, cn_id)).
+# (cntlrPlan.hostNqn (agent/cnagent/plan.go) = CnHostNqn(cluster, cn_id)).
 CN_HOST_NQNS=""
 PRIMARY_CN_NQN=""
 PRIMARY_CN_ID=""
@@ -10563,10 +10478,10 @@ COPY_GRP0='.slice_list[0].data_grp_list[0]'
 #   <hydrated>/<total> <hydrating> <#feature args> …
 #
 # and the agents put that line verbatim into a ResInfo's details
-# (architecture.md, Live-state reporting) — the CN for a clone
-# (agent/cnagent/clone.go:394-412), the DN for a migration's
+# (architecture.md, Live-state reporting) — the CN for a clone (ensureClone
+# and probeCloneDm (agent/cnagent/clone.go)), the DN for a migration's
 # destination side. The gateway reads field 7 of it, counting from <start> as
-# field 1, in hydrationComplete (gateway/common.go:932-949), and refuses both
+# field 1, in hydrationComplete (gateway/common.go), and refuses both
 # `clone delete` and `migr finish` unless it parses and says done >= total.
 # These two helpers read the same field, so a wait that succeeds here is a
 # wait after which those two RPCs cannot answer FAILED_PRECONDITION for the
@@ -10630,7 +10545,7 @@ src_sp_gone() {
 # copy_xfer_host_linked is the observable that `xfer set-hosts` has REACHED the
 # CN, as opposed to having been written to etcd. nvmet's allowed_hosts is a
 # directory of symlinks, one per permitted host nqn
-# (agent/nvmet.go:307-333 links them under
+# (EnsureSubsystem (agent/nvmet.go) links them under
 # <subsys>/allowed_hosts/<hostnqn>), so its presence is the kernel's own
 # answer. Waiting for it is what keeps the clone's first connect attempt from
 # being refused and pushed into the CN's retry registry — which would still
@@ -10658,8 +10573,8 @@ copy_xfer_host_linked() { # <cn v> <hostnqn>
 #
 # Reading the two rows separately is deliberate. `clone_id_to_target` is the
 # SOURCE CONNECTION's row and `clone_id_to_dm_clone` the DEVICE's, and CN18's
-# step-1 failure branch sets the first to Err and the second to MISSING
-# "source not connected" (agent/cnagent/clone.go:60-71) — so a source fault
+# step-1 failure branch (ensureClone (agent/cnagent/clone.go)) sets the first
+# to Err and the second to MISSING "source not connected" — so a source fault
 # and a device fault are distinguishable, and only the first one routes to the
 # fallback. The stall test is additionally gated on the device being
 # RES_STATUS_OK: a dm-clone that was never built is somebody else's problem
@@ -10684,7 +10599,7 @@ copy_clone_progress() { # <cntlr id> <clone id>
 	sig="target=$tgt dm_clone=$dm hydrated=$frac"
 	# The mark moves only when the SIGNATURE moves, which is what makes this a
 	# no-progress detector and not a timer: a status line that keeps printing
-	# the same fraction is exactly the frozen copy the fact check warns about.
+	# the same fraction is exactly what a frozen copy looks like.
 	if [ "$sig" != "$COPY_HYD_SIG" ]; then
 		COPY_HYD_SIG=$sig
 		COPY_HYD_MARK=$SECONDS
@@ -10711,10 +10626,10 @@ copy_clone_progress() { # <cntlr id> <clone id>
 
 # side_hydrated is the migration's twin of the above, one layer down: the
 # destination SIDE's dm-clone lives on its DN, so the row is InspectSide's
-# migr_dst_info.dm_clone_info (pb/schema.proto:219-222) and not a CntlrInfo
-# map. It is exactly what FinishMigration's own proof reads — a GetSideInfo of
-# the DESTINATION side, then hydrationComplete on
-# migr_dst_info.dm_clone_info.details (gateway/migration.go:461-480) — so a
+# migr_dst_info.dm_clone_info (SideInfo.MigrDstInfo (pb/schema.proto)) and
+# not a CntlrInfo map. It is exactly what FinishMigration (gateway/migration.go)
+# reads as its own proof — a GetSideInfo of the DESTINATION side, then
+# hydrationComplete on migr_dst_info.dm_clone_info.details — so a
 # `migr finish` issued after this wait cannot be refused for lack of proof.
 #
 # Until the destination side has finished zeroing there is no dm-clone at all
@@ -10835,10 +10750,10 @@ src_td_created() { # <sp name> <td name>
 # copy_src_sp_build, with one slice, --redund none and ONE cntlr, and nothing in
 # this file grows it, spares it or fails it over:
 #
-#   * a spare needs raid1 — CreateSpareLeg and AR8 both refuse a RedundNone
-#     group ("there is no redundancy to repair", gateway/spareleg.go:194-198;
-#     reason=redund_none, worker/reaction.go:1195-1203), so no spare_leg_list
-#     entry can appear and the leg count cannot move;
+#   * a spare needs raid1 — CreateSpareLeg (gateway/spareleg.go) and AR8
+#     (tryLegRepair (worker/reaction.go)) both refuse a RedundNone group
+#     ("there is no redundancy to repair"; reason=redund_none), so no
+#     spare_leg_list entry can appear and the leg count cannot move;
 #   * AR5 needs a failover candidate and this pool has exactly one cntlr;
 #   * AR6 would need its pool over the low water mark, and this pool holds one
 #     copy of $TD0_SIZE with nothing else written into it;
@@ -10875,8 +10790,8 @@ src_raid0_ready() { # <sp name> <cntlr id> <count>
 #
 # `xfer set-hosts --hosts` on a transfer carries the DESTINATION cntlrs' host
 # NQNs, and a cntlr's CN presents CnHostNqn(cluster_id, cn_id) on every
-# connection it makes (agent/cnagent/plan.go:960-962). The cn_id is minted by
-# the gateway, so it is read back from `cn get`, never computed.
+# connection it makes (cntlrPlan.hostNqn (agent/cnagent/plan.go)). The cn_id
+# is minted by the gateway, so it is read back from `cn get`, never computed.
 #
 # All $CN_CNT of them go in, not just the primary's: the list is what an
 # nvmet subsystem's allowed_hosts becomes, and a failover between now and the
@@ -10999,8 +10914,8 @@ copy_transfer() {
 	# AND THE PARK IS NOT THE GATE. It is tempting to read the ANA move above as
 	# proof that the agent has converged the transfer, and it is not: the park is
 	# done by the SWEEP and the transfer's subsystem and namespace by the BUILD
-	# phase that follows it (convergeCntlr is "one sweep top-down, then one build
-	# phase bottom-up", agent/cnagent/syncup_cntlr.go:94-95; doc/cnagent.md
+	# phase that follows it (convergeCntlr (agent/cnagent/syncup_cntlr.go) is
+	# "one sweep top-down, then one build phase bottom-up"; doc/cnagent.md
 	# CN9's ANA and park pre-steps put the park in the sweep by name).
 	# So host0's ns 1 can be inaccessible while $XNQN does not exist yet, and a
 	# connect issued then would not produce a controller. What that failure would
@@ -11013,7 +10928,7 @@ copy_transfer() {
 		"$XFER0's subsystem $XNQN on cn$PRIMARY_CN ($PRIMARY_TRADDR:$PRIMARY_TRSVCID)" \
 		"$XFER0_ID"
 
-	# Deviation (b): a direct connect, to the PRIMARY's transport, because the
+	# Constraint (b): a direct connect, to the PRIMARY's transport, because the
 	# transfer is not in any CdcEntry. The standby exports $XNQN too, over a
 	# plain dm-error table and ANA inaccessible (CN17); this case does not
 	# connect it, so the one path host1 holds is the serving one.
@@ -11025,7 +10940,7 @@ copy_transfer() {
 	# The uuid is $UUID1 and that is not a copy-paste error: CN17 gives the
 	# transfer's namespace the ORIGIN namespace's uuid and nguid, so host1
 	# resolves it under the same by-id name host0 uses for $SS0's ns 1. The
-	# two are on different kernels, which is deviation (b)'s second reason.
+	# two are on different kernels, which is constraint (b)'s second reason.
 	host_wait_ana 1 "$XNQN" "$PRIMARY_TRADDR" "$UUID1" optimized
 	wait_dev 1 "$UUID1"
 	assert_eq "$(host_path_state 1 "$XNQN" "$PRIMARY_TRADDR")" live \
@@ -11079,8 +10994,8 @@ copy_src_sp_build() {
 		# Every CN already carries a cntlr of sp0. The STANDBY's CN is still
 		# the right pick: the point of the fallback is that the clone's
 		# INITIATOR (the primary) and its TARGET are different kernels, and
-		# pickCn only excludes CNs that already hold a cntlr of the SAME sp
-		# (gateway/alloc.go:108-142), so sp1 may land there.
+		# pickCn (gateway/alloc.go) only excludes CNs that already hold a
+		# cntlr of the SAME sp, so sp1 may land there.
 		cnv=$STANDBY_CN
 	fi
 	[ "$cnv" -ge 0 ] && [ "$cnv" != "$PRIMARY_CN" ] ||
@@ -11091,7 +11006,7 @@ copy_src_sp_build() {
 		"cn$cnv ($addr) — one slice, --redund none, one cntlr"
 
 	# --slots 0: cntlr_cnt must not exceed len(cntlid_slot_list)
-	# (gateway/storagepool.go:319-324), and one cntlr needs one slot.
+	# (CreateStoragePool (gateway/storagepool.go)), and one cntlr needs one slot.
 	# $THR is UNQUOTED so its eight words split, exactly as setup_create_sp
 	# passes it — and it is the same set, because sp_thresholds chose it for the
 	# copy case and this pool lives inside that case. That is the QUIET set, and
@@ -11147,8 +11062,8 @@ copy_src_sp_build() {
 	# maps the whole of $TD_CLONE and reads the source through it, so the
 	# source must be at LEAST that big; equal is the simplest way to be sure,
 	# and it keeps the digest comparison an identity rather than a prefix.
-	# gateway/thindevice.go:145-171 wants a positive multiple of slice_cnt x
-	# stripe_size, which for this pool is one stripe.
+	# CreateThinDevice (gateway/thindevice.go) wants a positive multiple of
+	# slice_cnt x stripe_size, which for this pool is one stripe.
 	[ "$COPY_SRC_STRIPE" -gt 0 ] && [ "$COPY_SRC_SLICES" -gt 0 ] ||
 		die "$SP_SRC reports slice_cnt $COPY_SRC_SLICES and stripe" \
 			"$COPY_SRC_STRIPE; neither may be zero"
@@ -11180,8 +11095,8 @@ copy_src_sp_build() {
 
 	# The three calls above are control-plane writes and nothing more: this
 	# pool's own cntlr still has to create the nvmet subsystem, link it to its
-	# port and enable the namespace before anything can connect (run 3's
-	# failure — see wait_ns_exported). One cntlr, so one gate, and it is
+	# port and enable the namespace before anything can connect (see
+	# wait_ns_exported). One cntlr, so one gate, and it is
 	# addressed through --sp like every other read of this pool.
 	wait_ns_exported "$SRC_CNTLR_ID" \
 		"$SS_SRC ns 1 on $SRC_TRADDR:$SRC_TRSVCID" \
@@ -11226,7 +11141,8 @@ copy_src_sp_build() {
 # The order is case_teardown's, for case_teardown's reasons: the namespace goes
 # first UNDER the live controller (the one direction wait_dev_gone means
 # something), the host lets go before the subsystem is unlinked (a subsystem
-# unlinked under a live controller kills it with DNR), and only then the
+# unlinked under a live controller kills it with DNR, or leaves it retrying
+# when the subsystem is its port's last, as on a spare CN), and only then the
 # subsystem, the thin device and the pool.
 copy_src_sp_teardown() {
 	log "  removing the fallback source pool $SP_SRC"
@@ -11270,8 +11186,8 @@ copy_clone_build() {
 	log "      src transport tcp/ipv4 $COPY_SRC_TRADDR:$COPY_SRC_TRSVCID"
 	log "      expected digest of the first $BASELINE_MIB MiB: $COPY_SRC_SHA"
 
-	# All four --src-tr-* are passed. trConfFlags declares DEFAULTS
-	# (tcp/ipv4/127.0.0.1/4420, ctl/root.go:617-622) rather than empty
+	# All four --src-tr-* are passed. trConfFlags (ctl/root.go) declares
+	# DEFAULTS (tcp/ipv4/127.0.0.1/4420) rather than empty
 	# strings, so an omitted --src-tr-addr would silently send 127.0.0.1 and
 	# the CN would connect to its own loopback on the wrong port.
 	ctl_ok clone create --name "$CLONE0" --dst-td "$TD_CLONE" \
@@ -11320,11 +11236,11 @@ copy_clone_build() {
 		--slice-idx 0 --start 0 --cnt 0
 	bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
 	assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-		"byte_cnt is a Go int and renders as a bare number (ctl/root.go:400-405)"
+		"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
 	assert_ge "$bytes" 1 \
 		"slice 0 of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
 	assert_le "$bytes" 1048576 \
-		"one chunk may not exceed common.CloneBmChunkBytes (gateway/clone.go:588-591)"
+		"one chunk may not exceed common.CloneBmChunkBytes (AppendCloneBitmap (gateway/clone.go))"
 	hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
 	assert_eq "${#hex}" "$((bytes * 2))" \
 		"bitmap_hex is two hex digits per byte_cnt byte"
@@ -11341,8 +11257,8 @@ copy_clone_build() {
 
 	# UpdateCloneTrConf with the SAME transport: the RPC exists for a source
 	# that moved, and re-sending the current one is the only way to exercise
-	# it without moving anything. ensureCloneSource skips an entry it is
-	# already connected to (agent/cnagent/clone.go:197-200), so this cannot
+	# it without moving anything. ensureCloneSource (agent/cnagent/clone.go)
+	# skips an entry it is already connected to, so this cannot
 	# disturb a connection that is already up.
 	ctl_ok clone set-tr --name "$CLONE0" \
 		--src-tr-type tcp --src-adr-fam ipv4 \
@@ -11374,7 +11290,8 @@ copy_clone_build() {
 # that a failed clone partially hydrated
 # violates both. `td delete` also refuses while the clone still exists
 # ("thin device %s is the destination of clone %s",
-# gateway/thindevice.go:246-253), which is why the drain is waited out first.
+# decideDeleteThinDevice (gateway/thindevice.go)), which is why the drain is
+# waited out first.
 copy_clone_abandon() {
 	log "!!! copy: abandoning clone $CLONE0 — $COPY_SRC_FAULT"
 	log "!!! copy: the $COPY_SRC_BRANCH source is unusable in this lab;" \
@@ -11473,7 +11390,7 @@ copy_clone() {
 	# rule 5 backs it with CnCloneFinalName; when the clone goes, rule 6 moves
 	# the same ns-dev onto $TD_CLONE's own raid0. Both halves are asserted —
 	# this one by the ANA state and the device node, the next stage's by the
-	# digest, which is read only after the transfer is gone (deviation (a)).
+	# digest, which is read only after the transfer is gone (constraint (a)).
 	ctl_ok ns create --nqn "$SS0" --idx 2 --td "$TD_CLONE" --uuid "$UUID2"
 	NS2_ID=$(jq_of "$CTL_OUT" '.ns_id')
 	case "$NS2_ID" in
@@ -11501,8 +11418,8 @@ copy_clone() {
 
 	# `clone delete` WITHOUT --force is the point: the gateway must prove
 	# hydration from the primary's own clone_id_to_dm_clone row before it
-	# latches (gateway/clone.go:369-408), so a successful call is a second,
-	# independent confirmation of the wait above.
+	# latches (checkCloneHydrated (gateway/clone.go)), so a successful call is
+	# a second, independent confirmation of the wait above.
 	ctl_ok clone get --name "$CLONE0"
 	assert_field "$CTL_OUT" '.clone.deleting' false \
 		"the clone is still live before the delete"
@@ -11538,14 +11455,14 @@ copy_clone() {
 # `xfer delete --force` is the ABORT path and the flag is not optional here:
 # without it the STM also writes `suspended = true` on the origin namespace,
 # FINALIZING the hand-over so the source stays retired (ctl/xfer.go's delete
-# comment; the write itself is gateway/transfer.go:192-207). This case wants
-# the origin back.
+# comment; the write itself is the `!force` branch of
+# DeleteTransfer (gateway/transfer.go)). This case wants the origin back.
 #
 # host1 lets go BEFORE the subsystem is unlinked, which is case_teardown's
 # rule (a) applied here: a subsystem unlinked from its port under a live
 # controller refuses the reconnect with DNR and the kernel deletes the
-# controller (memory note nvmet-port-unlink-dnr-kills-host-ctrl). And the
-# note's precondition HOLDS at this site, which is why the sentence may be
+# controller. That needs a port that goes on listening for other subsystems,
+# and that precondition HOLDS at this site, which is why the sentence may be
 # written flat here and may not be written at all in ops step 3: the port being
 # unlinked from is the PRIMARY CN's, and $SS0's own subsystem stays linked to
 # it throughout this case, so the port goes on listening and the reconnect
@@ -11580,7 +11497,7 @@ copy_xfer_delete() {
 	wait_dev 0 "$UUID1"
 	log "  host0's origin namespace is live again; host0 IO is legal from here"
 
-	# Deviation (a): the destination's digest, read now — through
+	# Constraint (a): the destination's digest, read now — through
 	# $TD_CLONE's own raid0, with no dm-clone above it and no source
 	# connection anywhere — so it can only be what hydration wrote.
 	dev=$(host_dev "$UUID2")
@@ -11612,8 +11529,8 @@ copy_xfer_delete() {
 # the operator commits with `migr finish` or rolls back with `migr cancel`.
 #
 # WHY NOTHING ABOVE THE LEG NOTICES. Both sides of a migrating leg export the
-# SAME subsystem NQN — SideToCnNqn keys on (cluster, sp, LEG, cn) and carries
-# no dn id (common/name_fmt.go:599-614, and its own comment says why) — so
+# SAME subsystem NQN — SideToCnNqn (common/name_fmt.go) keys on (cluster, sp,
+# LEG, cn) and carries no dn id (its own comment says why) — so
 # every CN's kernel aggregates the two as two paths of one namespace and ANA
 # picks the live one. md never sees a member change, which is why this step
 # asserts that the host still reads SHA0 across the commit and does NOT wait
@@ -11627,9 +11544,7 @@ copy_xfer_delete() {
 # through (ensureMigrDst, agent/dnagent/migr.go). So from that provisioning
 # until the destination serves, EVERY path of that leg is inaccessible,
 # and an inaccessible nvme namespace REQUEUES rather than errors. A host read
-# issued in that window blocks in D state, where `timeout` cannot reach it
-# (memory notes ana-inaccessible-ns-no-blockdev and
-# timeout-does-not-bound-suspended-dm-read).
+# issued in that window blocks in D state, where `timeout` cannot reach it.
 #
 # This step therefore issues NO host IO between `migr create` and the wait
 # that proves the leg is serving again, and it proves that from the PRIMARY
@@ -11638,9 +11553,9 @@ copy_xfer_delete() {
 #
 # The worker will not interfere, and that holds for a reason that does not
 # depend on a number: AR8 skips a leg with two sides outright ("two sides means
-# a user migration is in flight on this leg", worker/reaction.go:1205-1207), so the
-# whole window is invisible to leg repair however long it lasts. The copy case's
-# sp also carries the QUIET threshold set (leg_unhealthy $THR_LEG s), so
+# a user migration is in flight on this leg", tryLegRepair (worker/reaction.go)),
+# so the whole window is invisible to leg repair however long it lasts. The copy
+# case's sp also carries the QUIET threshold set (leg_unhealthy $THR_LEG s), so
 # nothing here is even close to a threshold — but the migration would be safe at
 # the reacting set too, which is why the two-sides rule is the argument and the
 # threshold is only the belt.
@@ -11652,9 +11567,8 @@ copy_xfer_delete() {
 # is a weaker promise: tier 1 of architecture.md, Per-operation allocation,
 # excludes the group's failure domains, and tier 2 RESCANS WITHOUT that
 # exclusion whenever tier 1 yields fewer
-# candidates than the legs being placed (gateway/alloc.go:67-104, and the
-# fact check's own warning: assert LOCATIONS, not just addr_ports, and know
-# that tier 2 relaxes them).
+# candidates than the legs being placed (pickDns (gateway/alloc.go)). So
+# assert LOCATIONS, not just addr_ports, and know that tier 2 relaxes them.
 #
 # Tier 1 falls short only when no DN outside the group's locations can take
 # the group's ext_cnt — which at a shape with more DN VMs than legs means the
@@ -11696,7 +11610,7 @@ copy_migration() {
 
 	# THE LEG BITMAP IS READ BEFORE THE MIGRATION EXISTS, and that is not a
 	# stylistic ordering. Once the destination is provisioned the SOURCE side
-	# goes ANA-inaccessible — agent/dnagent/plan.go's anaGrpId, `migrSrc != nil` =>
+	# goes ANA-inaccessible — anaGrpId (agent/dnagent/plan.go), `migrSrc != nil` =>
 	# AnaGrpIdInaccessible — and the DESTINATION stays inaccessible until it
 	# has a dm-clone to serve through (`migrDst != nil && !cloneLive`, where
 	# cloneLive comes from ensureMigrDst, agent/dnagent/migr.go). So from then
@@ -11731,8 +11645,8 @@ copy_migration() {
 	case ",$before_addrs," in
 	*",$dstaddr,"*)
 		die "the migration destination $dstaddr is a disk node the group" \
-			"already occupies; grpDnAddrs seeds the black list" \
-			"(gateway/migration.go:251, gateway/alloc.go:545-556), so this" \
+			"already occupies; grpDnAddrs (gateway/alloc.go) seeds the black list" \
+			"of CreateMigration (gateway/migration.go), so this" \
 			"cannot happen"
 		;;
 	esac
@@ -11756,7 +11670,7 @@ copy_migration() {
 	# [D-I]: the destination side takes the first cntlid slot that differs
 	# from the source's, because the two sides of ONE leg are aggregated by
 	# every CN and must occupy different CNTLID ranges
-	# (gateway/migration.go:84-93).
+	# (migrDstCntlidSlot (gateway/migration.go)).
 	assert_jq "$SP_JSON" \
 		"($COPY_GRP0.leg_list[0]
 		  | ([.side_list[] | .cntlid_slot] | unique | length)) == 2" \
@@ -11818,7 +11732,7 @@ copy_migration() {
 	# THE LEG MUST BE SERVING AGAIN BEFORE ANY HOST IO TOUCHES IT. A migration
 	# SOURCE side is ANA-inaccessible once its destination is provisioned, and
 	# a destination side while it does not serve through its dm-clone
-	# (agent/dnagent/plan.go's anaGrpId). Both conditions are cleared by now — the
+	# (anaGrpId (agent/dnagent/plan.go)). Both conditions are cleared by now — the
 	# record is gone — but the DN rewrites `ana_grpid` on its NEXT syncup, so
 	# this reads the primary CN's own view of its path to the surviving side
 	# instead of assuming the rewrite has landed. An inaccessible namespace
@@ -11880,9 +11794,8 @@ copy_migration() {
 # health-checks but that md never sees, until SwitchSpareLeg trades it for an
 # active one (architecture.md, Spare legs). The suite skips this step under
 # --redund none (e2e_integtest.md, Known limits), and the gateway would
-# refuse it anyway: CreateSpareLeg answers
-# INVALID_ARGUMENT "group %d is RedundNone: there is no redundancy to repair"
-# (gateway/spareleg.go:194-198).
+# refuse it anyway: CreateSpareLeg (gateway/spareleg.go) answers
+# INVALID_ARGUMENT "group %d is RedundNone: there is no redundancy to repair".
 #
 # THE LEG-ROW ARITHMETIC IS WHY cntlr_full_ready EXISTS. CN10 walks
 # spare_leg_list as well as leg_list, so a spare adds a leg_id_to_leg row on
@@ -11900,8 +11813,8 @@ copy_spare() {
 		log ""
 		log "=== copy step 5 (spare legs) SKIPPED: --redund $REDUND." \
 			"A RedundNone group has one leg and no md array, and" \
-			"CreateSpareLeg refuses it with INVALID_ARGUMENT" \
-			"(gateway/spareleg.go:194-198)."
+			"CreateSpareLeg (gateway/spareleg.go) refuses it with" \
+			"INVALID_ARGUMENT."
 		return 0
 	fi
 	stage 05 "spare create, spare switch and spare delete on slice 0's data group"
@@ -11942,8 +11855,8 @@ copy_spare() {
 	case ",$before_addrs," in
 	*",$spareaddr,"*)
 		die "the spare landed on $spareaddr, a disk node the group already" \
-			"occupies; grpDnAddrs seeds the black list" \
-			"(gateway/spareleg.go:225, gateway/alloc.go:545-556)"
+			"occupies; grpDnAddrs (gateway/alloc.go) seeds the black list" \
+			"of CreateSpareLeg (gateway/spareleg.go)"
 		;;
 	esac
 	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
@@ -11952,7 +11865,7 @@ copy_spare() {
 			die "the spare landed on a DN VM the group already occupies" \
 				"($before_vms). Tier 1 (architecture.md, Per-operation" \
 				"allocation) excludes the group's locations" \
-				"(gateway/spareleg.go:215) and relaxes only when no DN" \
+				"(CreateSpareLeg (gateway/spareleg.go)) and relaxes only when no DN" \
 				"outside them can take the group's ext_cnt"
 			;;
 		esac
@@ -11966,8 +11879,8 @@ copy_spare() {
 
 	# A spare's side is created provisioned = false and only the sp-worker
 	# flips it, after the DN has zeroed the whole side ([D15]) — which is
-	# exactly why model.SwitchSpareLeg refuses an unprovisioned spare ("spare
-	# side is not provisioned", model/ops.go:1905-1907). So the wait is a
+	# exactly why model.SwitchSpareLeg (model/ops.go) refuses an unprovisioned
+	# spare ("spare side is not provisioned"). So the wait is a
 	# precondition of the next call, not a nicety — and it is the reason
 	# SP_UNPROV_CNT walks SP_ANY_SIDE_PATH: a poll over the active legs alone
 	# would answer 0 the instant `spare create` returned.
@@ -11989,7 +11902,7 @@ copy_spare() {
 	# The swap. Naming both sides explicitly is what lets the reply be
 	# asserted: curr_active_leg_id is the spare and curr_spare_leg_id the
 	# target, read back from the request by the handler
-	# (gateway/spareleg.go:374-382).
+	# (SwitchSpareLeg (gateway/spareleg.go)).
 	ctl_ok spare switch --grp "$gid" --spare "$spare" --target "$target"
 	assert_field "$CTL_OUT" '.curr_active_leg_id' "$spare" \
 		"SwitchSpareLegReply.curr_active_leg_id"
@@ -12057,22 +11970,20 @@ case_copy() {
 # the record the reaction actually writes. One pass per SP per cntlr_interval
 # (5 s, common.DefaultHealthCheckInterval through
 # health_check_conf.cntlr_interval) and AT MOST ONE ACTION PER PASS
-# (worker/reaction.go:1-35), so every wait below is "threshold + a few passes"
-# and never a sleep.
+# (the header comment of worker/reaction.go), so every wait below is
+# "threshold + a few passes" and never a sleep.
 #
 # ===========================================================================
-# WHAT EACH REACTION NEEDS TO BE TRIGGERED AT ALL — and this is where the plan's
-# wording is wrong twice, in ways that would have cost a whole lab run
+# WHAT EACH REACTION NEEDS TO BE TRIGGERED AT ALL
 # ===========================================================================
 #
 #  AR6 (thin-pool auto-grow). tryGrow walks the slices in slice_id_list order
 #  and compares the PRIMARY's own `dmsetup status` numbers:
 #  `usedData * 100 > lwm * totalData`, lwm =
-#  bdev_conf.dm_pool_conf.low_water_mark_pct (worker/reaction.go:875-918, the
-#  comparison itself at :908). So the trigger is a THIN-POOL occupancy rather
-#  than a byte count, and this case computes how many 1 MiB chunks it has to
-#  write from the pool's own used/total pair instead of trusting the plan's
-#  literal "40".
+#  bdev_conf.dm_pool_conf.low_water_mark_pct (tryGrow (worker/reaction.go)).
+#  So the trigger is a THIN-POOL occupancy rather than a byte count, and this
+#  case computes how many 1 MiB chunks it has to write from the pool's own
+#  used/total pair rather than from a fixed count.
 #
 #  AR5 (primary failover). tryFailover fires once the primary's err_epoch is
 #  primary_unhealthy seconds old, or cntlr_unhealthy seconds old — when that
@@ -12096,10 +12007,10 @@ case_copy() {
 #  that replacement, only on rows the primary it replaced failed on
 #  (dnv-worker.md AR7's two refusals), neither of which any case here
 #  plants (replaceTarget in worker/reaction.go).
-#  THAT IS THE CHAIN the plan's risk note names: with
+#  THAT IS THE CHAIN: with
 #  a healthy standby present, AR7 refuses to touch the primary until AR5 has
-#  moved the role away — and model.ReplaceCntlr refuses it a second time inside
-#  its own STM ("failover candidate exists", model/ops.go:1488-1490). So this
+#  moved the role away — and model.ReplaceCntlr (model/ops.go) refuses it a
+#  second time inside its own STM ("failover candidate exists"). So this
 #  case asserts AR5 by THE PRIMARY FLAG MOVING (the old record survives, with
 #  primary = false — model.Failover rewrites the two cntlr records in one STM,
 #  flipping both `primary` flags and the `settling` flags (the new primary
@@ -12111,23 +12022,23 @@ case_copy() {
 #  AR8 (leg repair). legNeedsRepair REQUIRES `Leg.err_epoch != 0` before either
 #  threshold is even looked at, and its own comment says why: "a side the
 #  worker cannot reach while the primary still sees the leg healthy triggers
-#  nothing" (worker/reaction.go:1282-1304). A leg's err_epoch comes from the
-#  PRIMARY's CN11 probe, which is a real write+O_DIRECT read of the leg's
-#  health block through the leg wrapper (agent/cnagent/healthcheck.go:216-239,
-#  CN28 at :254-285).
+#  nothing" (legNeedsRepair (worker/reaction.go)). A leg's err_epoch comes
+#  from the PRIMARY's CN11 probe, runLegProbe (agent/cnagent/healthcheck.go),
+#  which is a real write+O_DIRECT read of the leg's health block through the
+#  leg wrapper (CN28 in legProbeOutcome).
 #  ⇒ **KILLING THE DN AGENT IS NOT ENOUGH.** An agent's nvmet subsystem, its
 #  port and its dm-linear live in the KERNEL and outlive the process that
 #  created them, so with the agent dead the CN's probe IO still succeeds, the
-#  leg stays RES_STATUS_OK, err_epoch stays 0 and AR8 never fires: the plan's
-#  "kill one dnagent … after 30 s + intervals the worker has created a spare"
+#  leg stays RES_STATUS_OK, err_epoch stays 0 and AR8 never fires: a case
+#  that killed one dn agent and then waited for the worker's spare
 #  would simply run out its budget. This case therefore kills the agent AND
 #  drops that instance's nvmet port (the helper's `port_drop`, which is exactly
 #  what the start cleanup would do to it), which is what a dead DN VM looks
 #  like from both planes: the gRPC rounds fail (side err_epoch, side_unhealthy
 #  = $THR_SIDE) and the data path goes away (leg err_epoch, and the CNs connect
 #  with --fast_io_fail_tmo common.DefaultNvmeFastIoFailTmo = 5 and
-#  --ctrl-loss-tmo -1, agent/nvmehost.go:47-56, so the probe fails fast instead
-#  of hanging).
+#  --ctrl-loss-tmo -1, NvmeHost.Connect (agent/nvmehost.go), so the probe fails
+#  fast instead of hanging).
 #
 # ===========================================================================
 # THE ONE HOST-SIDE HAZARD THIS CASE HAS TO DISARM ITSELF
@@ -12145,29 +12056,27 @@ case_copy() {
 # `connect` verbs, the same pair copy step 1 uses for host1). A real node
 # failure would have taken that path down by itself; the suite does it by hand
 # because it only killed a process. From AR7 on, `connect_all` is safe again —
-# ReplaceCntlr rewrites the CdcEntries (model/ops.go:1561-1567), so the dead
+# ReplaceCntlr (model/ops.go) rewrites the CdcEntries, so the dead
 # CN's transport is no longer in any discovery log and cannot be reconnected.
 #
 # ===========================================================================
 # WHAT IS NOT ASSERTED, DELIBERATELY
 # ===========================================================================
-#  * That AR6's new group avoids the DNs the slice already occupies. The plan
-#    says "the new group's legs sit on two DNs outside the old group" and the
-#    code
+#  * That AR6's new group avoids the DNs the slice already occupies. The code
 #    says the opposite in as many words: runGrow passes a NIL black list and a
 #    nil location exclusion, "the black list starts empty — a new group may
 #    perfectly well land on a DN that already carries another group of this SP"
-#    (worker/reaction.go:964-971). What DOES hold, and is asserted, is the
+#    (runGrow (worker/reaction.go)). What DOES hold, and is asserted, is the
 #    per-group rule: one scan keeps at most one candidate per location
-#    (model/alloc.go:137-141) and pickDistinct then dedupes by addr_port
-#    (worker/reaction.go:1569-1592), so the LEGS legs of the NEW group are on
+#    (FindDnCandidates (model/alloc.go)) and pickDistinct (worker/reaction.go)
+#    then dedupes by addr_port, so the LEGS legs of the NEW group are on
 #    LEGS different DNs on LEGS different DN VMs.
 #  * That the old primary's namespace goes ANA-inaccessible after AR5. Nothing
 #    can make it: its agent is dead (see above). The failover is asserted on the
 #    record and on the NEW primary serving the data.
 #  * That the parked leg AR8 leaves behind is removed. `sp delete` does not
 #    list spare legs among its five blockers, and the drain releases them
-#    explicitly (model/drain.go:369-375 legsOf, "active legs first, spares
+#    explicitly (legsOf (model/drain.go), "active legs first, spares
 #    after … both are released"), so case_residue's capacity check covers it.
 #
 # ===========================================================================
@@ -12217,7 +12126,7 @@ case_copy() {
 
 # --- the objects this case creates ------------------------------------------
 #
-# a0 is the plan's own name for the AR6 target and is a bare jq identifier like
+# a0 is the name for the AR6 target and is a bare jq identifier like
 # every other td name here (`td list` is keyed by td_name). t0/s0/t1/c0 are
 # taken by setup, ops and copy; a0 was left free for this case.
 TD_REACT=a0
@@ -12266,13 +12175,13 @@ REACT_OLD_PRIMARY_SLOT=""
 REACT_OLD_PRIMARY_CN=-1
 # The standby AR5 must elect: with $CNTLR_CNT cntlrs it is the only candidate,
 # and AR5 takes the smallest cntlr_id among the healthy, enabled, non-primary
-# ones (worker/reaction.go:625-638, failoverEligible at :645-651).
+# ones (newPass and failoverEligible (worker/reaction.go)).
 REACT_OLD_STANDBY_ID=""
 # The CN(s) that carried no cntlr when the kill happened — where AR7's
 # replacement must land, because a CN with a cntlr of this SP is excluded by
 # architecture.md, Finding CN candidates (otherCntlrAddrs), and the dead one
-# is black-listed by AR7 itself
-# (worker/reaction.go:1067-1073). REACT_SPARE_CN is the first of them, for the
+# is black-listed by AR7 itself (tryReplaceCntlr (worker/reaction.go)).
+# REACT_SPARE_CN is the first of them, for the
 # log line; REACT_SPARE_ADDRS is the whole set as a ,-delimited string with
 # leading and trailing commas, because with more than three --cn guests
 # model.PickRandom may take any of them and an equality against one would be a
@@ -12371,15 +12280,14 @@ REACT_MAX_CHUNKS=128
 # (e2e_integtest.md, The cases, react)
 # ---------------------------------------------------------------------------
 #
-# WHY THE OFFSETS LAND IN SLICE 0, re-derived from the table the cn agent
-# builds rather than from the plan: raid0Args emits one dm-striped stripe per
-# slice, in slice_idx order, with a chunk size of
-# dm_raid0_conf.stripe_size / 512 sectors (agent/cnagent/td.go:19-39, over
-# plan.slices which buildSlices sorts by slice_idx, agent/cnagent/plan.go).
+# WHY THE OFFSETS LAND IN SLICE 0: raid0Args (agent/cnagent/td.go) emits one
+# dm-striped stripe per slice, in slice_idx order, with a chunk size of
+# dm_raid0_conf.stripe_size / 512 sectors (over plan.slices which buildSlices
+# sorts by slice_idx, agent/cnagent/plan.go).
 # dm-striped sends chunk c of the device to stripe c mod N, so with N =
 # $SLICE_CNT stripes the td offsets k x ($SLICE_CNT x stripe) are chunks
 # k x $SLICE_CNT and every one of them is stripe index 0 — the slice with
-# slice_idx 0, which setup pinned as .slice_list[0] (gateway/alloc.go:478-493
+# slice_idx 0, which setup pinned as .slice_list[0] (loadSlices (gateway/alloc.go)
 # returns the slices in slice_id_list order, i.e. slice_idx ascending, and
 # setup asserts the 0..n-1 numbering).
 #
@@ -12389,7 +12297,8 @@ REACT_MAX_CHUNKS=128
 # general formula for a shape this file cannot produce.
 #
 # These three are host_sha_range / host_write_range (the Host IO helpers, from
-# cnagent_test.sh:590-604) with a stride: ONE ssh per operation, a C-style bash
+# sha_range and write_range (cnagent_test.sh)) with a stride: ONE ssh per
+# operation, a C-style bash
 # loop (no `seq`: nothing outside $HOST_TOOLS may be used on a host), `bs=1M
 # count=1` per chunk, conv=fsync on the writes and NEVER an iflag=/oflag=
 # (rule 1). `\$((…))` is what reaches the guest as `$((…))`; the driver expands
@@ -12453,7 +12362,7 @@ react_wait_chunks() { # <h> <path> <cnt> <stride> <start> <want> <secs> <label>
 #
 # The primary puts the raw `dmsetup status` line of each pool into the details
 # of its slice_id_to_dm_pool row, and the worker parses it with
-# parseThinPoolStatus (worker/reaction.go:776-814): it LOCATES the `thin-pool`
+# parseThinPoolStatus (worker/reaction.go): it LOCATES the `thin-pool`
 # token rather than counting a fixed column, because the line may or may not
 # carry the device name and the start/length pair, and then reads
 #
@@ -12462,7 +12371,8 @@ react_wait_chunks() { # <h> <path> <cnt> <stride> <start> <want> <secs> <label>
 # as the three fields after it. This awk is that rule, one-for-one — offset 2
 # is the metadata ratio and offset 3 the data ratio — and it answers the
 # sentinel `none` rather than "" when the line does not parse, which is exactly
-# the case AR6 skips and logs ("an unparsable line is skipped", :833-859).
+# the case AR6 skips and logs ("an unparsable line is skipped",
+# parsePoolStatus (worker/reaction.go)).
 react_pool_frac() { # <raw dmsetup status details> <2 = meta, 3 = data>
 	local out
 	out=$(printf '%s\n' "$1" | awk -v off="$2" '
@@ -12664,11 +12574,10 @@ react_primary_moved() { # <old cntlr id>
 # elected cntlr is SETTLING for all of it (dnv-worker.md HL2: a promoted primary
 # settles at its first clean report as primary that shows its stack built),
 # and AR5 holds a settling primary to cntlr_unhealthy — $THR_REACT_CNTLR
-# seconds here — rather than to primary_unhealthy ($THR_REACT_PRIMARY);
-# before 2026-09-26 it was the 5 s one.
+# seconds here — rather than to primary_unhealthy ($THR_REACT_PRIMARY).
 # Meanwhile AR7 has minted the replacement on an idle
-# CN with err_epoch 0, which is all failoverEligible asks for
-# (worker/reaction.go:645-651), so AR5 has a candidate again and can move the
+# CN with err_epoch 0, which is all failoverEligible (worker/reaction.go)
+# asks for, so AR5 has a candidate again and can move the
 # role off the cntlr it just elected. Pinned to that cntlr, the wait would then
 # be comparing a STANDBY against $SLICE_CNT pools and $SP_GRP_TOTAL groups —
 # rows CN12 and CN13 say a standby never has — and would spend its whole
@@ -12683,7 +12592,7 @@ react_primary_moved() { # <old cntlr id>
 # here, in seconds, naming what happened, instead of timing out in twenty minutes
 # and then failing step 4 on an assertion that has become a false statement.
 #
-# WHY IT ALSO WAITS FOR settling false (added 2026-09-26). A built stack is the
+# WHY IT ALSO WAITS FOR settling false. A built stack is the
 # agent's report; `settling` false in `sp get` is the worker's statement that it
 # saw this cntlr clean as primary, its stack built, at the revision it drives,
 # which is what ends the cntlr_unhealthy hold above. The field is a literal
@@ -12725,8 +12634,8 @@ react_new_primary_ready() { # <the cntlr AR5 elected>
 }
 
 # react_cntlr_replaced is AR7's: the dead cntlr's id is gone from
-# cntlr_id_list (ReplaceCntlr deletes the old key and appends a NEW id,
-# model/ops.go:1526-1559) and the SP still holds its full cntlr count, the
+# cntlr_id_list (ReplaceCntlr (model/ops.go) deletes the old key and appends
+# a NEW id) and the SP still holds its full cntlr count, the
 # swap being one STM.
 react_cntlr_replaced() { # <old cntlr id>
 	local gone n
@@ -12742,9 +12651,9 @@ react_cntlr_replaced() { # <old cntlr id>
 	[ "$gone" = 0 ] && [ "$n" = "$CNTLR_CNT" ]
 }
 
-# react_cn_has_no_cntlr reads the NODE record, not the sp: releaseCn takes the
-# (sp_id, cntlr_id) pointer out of the CN's cntlr_ptr_list and gives the
-# footprint back (model/ops.go:1576-1602), so an empty list is the CN's own
+# react_cn_has_no_cntlr reads the NODE record, not the sp:
+# releaseCn (model/ops.go) takes the (sp_id, cntlr_id) pointer out of the CN's
+# cntlr_ptr_list and gives the footprint back, so an empty list is the CN's own
 # answer that it no longer hosts a controller of any sp.
 react_cn_has_no_cntlr() { # <cn addr_port>
 	local n
@@ -12761,14 +12670,13 @@ react_cn_has_no_cntlr() { # <cn addr_port>
 # react_spare_cnt_reaches is the wait for AR8's create: true once the group
 # holds AT LEAST <want> spare legs. At least, and not exactly, so that a double
 # create fails on the assertion that names it and not as a timeout: if AR8
-# creates two spares for one repair — which it did until 2026-09-23, see
-# pendingSpare in worker/reaction.go — and the wait's FIRST grown reading lands
+# ever creates two spares for one repair (pendingSpare in worker/reaction.go
+# guards against it) and the wait's FIRST grown reading lands
 # after both, the count goes from before straight to before + 2, and an
 # equality wait burns its whole WAIT_REACT and dies naming the wait instead of
 # the fault. That is defensive rather than observed: the creates are separate
 # passes at least one cntlr_interval apart (AR2) and this wait polls from before
-# the first, so only a poll stalled for more than a pass gets there (in the run
-# that found the double create, the equality form read before + 1). Stopping at
+# the first, so only a poll stalled for more than a pass gets there. Stopping at
 # the first grown count hands the verdict to the assertions after it, "exactly
 # one spare leg is new since AR8 started" and the parked-set comparison after
 # the switch, which exist to catch that fault.
@@ -12788,9 +12696,10 @@ react_spare_cnt_reaches() { # <want>
 	[ "$n" -ge "$1" ]
 }
 
-# react_spare_switched is AR8 step 1 seen from the record: SwitchSpareLeg puts
+# react_spare_switched is AR8 step 1 seen from the record:
+# SwitchSpareLeg (model/ops.go) puts
 # the spare in the target's POSITION in leg_list and parks the target in
-# spare_leg_list, keeping its err_epoch (model/ops.go:1851-1857). So the test is
+# spare_leg_list, keeping its err_epoch. So the test is
 # "the dead leg is no longer active AND is now parked" — both halves, because
 # either one alone is also what a half-applied transaction would look like.
 react_spare_switched() { # <dead leg id>
@@ -12828,8 +12737,8 @@ react_snapshot() {
 	case "$REACT_BASE_SLICE0_DATA" in
 	'' | *[!0-9]* | 0)
 		die "slice 0 reports '$REACT_BASE_SLICE0_DATA' data groups;" \
-			"every slice is created with exactly one (planSpGroups," \
-			"gateway/storagepool.go:254-263)"
+			"every slice is created with exactly one" \
+			"(planSpGroups (gateway/storagepool.go))"
 		;;
 	esac
 	log "  $SP starts this case with $REACT_BASE_GRP_TOTAL groups," \
@@ -12849,8 +12758,8 @@ react_snapshot() {
 
 # --- step 1 -----------------------------------------------------------------
 #
-# The plan's "setup, plus `td create --name a0 --size $((64*TD_UNIT))` (2 GiB)
-# and `ns create … --idx 2 --td a0 --uuid $UUID2` on host0", plus the four
+# Setup, plus `td create --name a0 --size $((64*TD_UNIT))` (2 GiB)
+# and `ns create … --idx 2 --td a0 --uuid $UUID2` on host0, plus the four
 # geometry facts the next step's arithmetic rests on — every one of them read
 # back from the sp and asserted, not assumed.
 
@@ -12865,15 +12774,15 @@ react_target() {
 	# "Slice 0" means slice_idx 0, and that is what the strided writes reach:
 	# raid0Args fills stripe i from plan.slices[i], which cntlrPlan sorts by
 	# slice_idx. sp get returns the slices in slice_id_list order, i.e.
-	# slice_idx ascending (gateway/alloc.go:478-493), which setup pinned as
+	# slice_idx ascending (loadSlices (gateway/alloc.go)), which setup pinned as
 	# 0..slice_cnt-1 with no gap.
 	assert_field "$SP_JSON" '.slice_list[0].slice_idx' 0 \
 		"slice_list[0] is slice_idx 0 — the stripe every strided write lands in"
-	# The id is read from sp_conf.slice_id_list, which loadSlices walks in list
-	# order to build slice_list (gateway/alloc.go:478-493): position 0 of one
-	# is position 0 of the other. pb.Slice itself carries no id
-	# (pb/schema.proto:420-424), and slice_id is what
-	# cntlr_info.slice_id_to_dm_pool is keyed by (pb/schema.proto:243).
+	# The id is read from sp_conf.slice_id_list, which
+	# loadSlices (gateway/alloc.go) walks in list order to build slice_list:
+	# position 0 of one is position 0 of the other. pb.Slice (pb/schema.proto)
+	# itself carries no id, and slice_id is what
+	# cntlr_info.slice_id_to_dm_pool (pb/schema.proto) is keyed by.
 	REACT_SLICE0_ID=$(sp_field '.sp_conf.slice_id_list[0]')
 	case "$REACT_SLICE0_ID" in
 	'' | *[!0-9]* | 0)
@@ -12904,8 +12813,8 @@ react_target() {
 	# THIS file rather than immovable facts: $STRIPE_SIZE is the constant
 	# setup passes as `sp create --stripe-size`, and the block size is what the
 	# gateway resolves when no --block-size is given — dnvctl has that flag
-	# (ctl/sp.go:211-212) and this suite deliberately never passes it, so the
-	# stored value is common.DefaultDmPoolDataBlockSize.
+	# (spCreateCmd (ctl/sp.go)) and this suite deliberately never passes it,
+	# so the stored value is common.DefaultDmPoolDataBlockSize.
 	stripe=$(sp_field '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size')
 	block=$(sp_field '.sp_conf.bdev_conf.dm_pool_conf.data_block_size')
 	assert_eq "$stripe" "$STRIPE_SIZE" "the sp's stored dm-striped chunk"
@@ -12918,7 +12827,7 @@ react_target() {
 		"the stride in MiB: slice_cnt x stripe, which is $((SLICE_CNT * stripe)) bytes"
 
 	# The percentage the worker compares against, read from the sp because that
-	# is where tryGrow reads it (worker/reaction.go:876-885); above 100 switches
+	# is where tryGrow (worker/reaction.go) reads it; above 100 switches
 	# AR6 off entirely, which would make this whole step wait for nothing.
 	REACT_LWM=$(sp_field '.sp_conf.bdev_conf.dm_pool_conf.low_water_mark_pct')
 	case "$REACT_LWM" in
@@ -12927,7 +12836,7 @@ react_target() {
 		;;
 	esac
 	msg="dm_pool_conf.low_water_mark_pct: a 0 is refused by the pass gate and"
-	msg="$msg anything above 100 switches AR6 off (worker/reaction.go:876-885)"
+	msg="$msg anything above 100 switches AR6 off (tryGrow (worker/reaction.go))"
 	assert_between "$REACT_LWM" 1 100 "$msg"
 
 	# a0 is 2 GiB = 64 x TD_UNIT, so each slice's thin volume is
@@ -13047,8 +12956,8 @@ react_grow_polls() { # <predicate> <args…>
 #
 # AR6. The chunk count is COMPUTED from the pool's own used/total pair and the
 # sp's low_water_mark_pct, because that is what the worker compares
-# (`usedData * 100 > lwm * totalData`, worker/reaction.go:908): the plan's
-# literal 40 is right for the default shape and silently wrong for any other,
+# (`usedData * 100 > lwm * totalData` in tryGrow (worker/reaction.go)): a
+# literal chunk count is right for one shape and silently wrong for any other,
 # while `floor(lwm x total / 100) + 1 - used` is the number that crosses the
 # mark at every shape. Four blocks of margin cover the metadata the pool
 # allocates alongside the data and any block the earlier cases' writes did not
@@ -13090,7 +12999,7 @@ react_grow() {
 
 	react_pool_read "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID"
 	msg="slice 0's thin pool on the primary: AR6 never grows an ERROR,"
-	msg="$msg PROVISIONING or absent pool (worker/reaction.go:895-898)"
+	msg="$msg PROVISIONING or absent pool (tryGrow (worker/reaction.go))"
 	assert_eq "$REACT_POOL_STATUS" RES_STATUS_OK "$msg"
 	total0=$REACT_POOL_TOTAL
 
@@ -13135,8 +13044,8 @@ react_grow() {
 	assert_field "$SP_JSON" "$COPY_GRP0.grp_id" "$REACT_GRP_ID" \
 		"the grow APPENDED: data_grp_list[0] is still the group setup created"
 	ext0=$(sp_field "$COPY_GRP0.ext_cnt")
-	msg="a data grow appends the slice's FIRST data group's ext_cnt (growExtCnt,"
-	msg="$msg worker/reaction.go:1021-1053, and model.GrowSlice recomputes it)"
+	msg="a data grow appends the slice's FIRST data group's ext_cnt"
+	msg="$msg (growExtCnt (worker/reaction.go), and model.GrowSlice recomputes it)"
 	assert_field "$SP_JSON" "$REACT_GRP1.ext_cnt" "$ext0" "$msg"
 	assert_field "$SP_JSON" "$REACT_GRP1.leg_list | length" "$LEGS" \
 		"the new group has $LEGS leg(s)"
@@ -13146,12 +13055,11 @@ react_grow() {
 		"[$REACT_GRP1.leg_list[] | select((.side_list | length) != 1)] | length == 0" \
 		"every leg of the new group has exactly one side"
 	# WHERE IT LANDED. What the code guarantees is the per-group rule: a scan
-	# keeps at most one candidate per location (model/alloc.go:137-141) and
-	# pickDistinct then dedupes by addr_port (worker/reaction.go:1569-1592).
-	# What it does NOT guarantee — and what the plan claims — is that the new
-	# group avoids the DNs the slice already occupies: runGrow passes a nil
-	# black list and a nil location exclusion (worker/reaction.go:964-971), so
-	# that is deliberately not asserted here.
+	# (FindDnCandidates (model/alloc.go)) keeps at most one candidate per
+	# location and pickDistinct (worker/reaction.go) then dedupes by addr_port.
+	# What it does NOT guarantee is that the new group avoids the DNs the slice
+	# already occupies: runGrow (worker/reaction.go) passes a nil black list and
+	# a nil location exclusion, so that is deliberately not asserted here.
 	assert_jq "$SP_JSON" \
 		"([$REACT_GRP1.leg_list[] | .side_list[] | .addr_port]
 		  | unique | length) == $LEGS" \
@@ -13192,13 +13100,12 @@ react_grow() {
 	# does not have to: this run writes a handful of blocks into slices 1..4
 	# (setup's baseline and step 3's fresh write) against the same per-slice
 	# total, and metadata is counted in dm-thin's fixed 4 KiB blocks over the
-	# slice's whole meta group (worker/reaction.go:114-117).
+	# slice's whole meta group (poolUsage (worker/reaction.go)).
 	assert_le "$((REACT_POOL_USED * 100))" "$((REACT_LWM * REACT_POOL_TOTAL))" \
 		"the grown pool is back under ${REACT_LWM}% of its new total"
 
 	# The data. Every chunk is read back from the device after a cache drop and
-	# compared against the reference digest, and ns 1's baseline is re-read too
-	# (the plan's "host0 ns 1 too").
+	# compared against the reference digest, and ns 1's baseline is re-read too.
 	react_wait_chunks 0 "$dev" "$REACT_CHUNKS" "$REACT_STRIDE_MIB" 0 \
 		"$REACT_PAT_SHA" "$WAIT_HOST" \
 		"host0 to read every strided chunk of $TD_REACT back after the grow"
@@ -13249,8 +13156,8 @@ react_failover() {
 		"the standby is $REACT_OLD_STANDBY_ID on cn$STANDBY_CN;" \
 		"carrying no cntlr:${REACT_SPARE_ADDRS//,/ }"
 
-	# THE HOST LETS GO FIRST, and this is the one act in this case the plan
-	# does not ask for. Killing the agent does not remove the nvmet subsystem,
+	# THE HOST LETS GO FIRST (e2e_integtest.md, The cases, react).
+	# Killing the agent does not remove the nvmet subsystem,
 	# namespace or ANA group it created — those are kernel objects — so the
 	# dead CN goes on advertising ns 1 and ns 2 as `optimized` with nothing
 	# left to rewrite ana_grpid. The instant AR5 promotes the standby host0
@@ -13345,9 +13252,9 @@ react_failover() {
 	#
 	# So it is skipped, loudly, in exactly that case — and skipping it
 	# loses nothing about AR5, because AR7 cannot have run unless AR5 ran
-	# first: replaceTarget skips a primary while a failover candidate exists
-	# (worker/reaction.go:1116-1120) and model.ReplaceCntlr refuses one again
-	# inside its STM ("failover candidate exists", model/ops.go:1489),
+	# first: replaceTarget (worker/reaction.go) skips a primary while a failover
+	# candidate exists and model.ReplaceCntlr (model/ops.go) refuses one again
+	# inside its STM ("failover candidate exists"),
 	# and at CNTLR_CNT 2 the standby is always such a candidate.
 	if [ "$(jq_of "$SP_JSON" \
 		"[.sp_conf.cntlr_id_list[] | select(. == \"$REACT_OLD_PRIMARY_ID\")] | length")" = 1 ]; then
@@ -13365,7 +13272,7 @@ react_failover() {
 			"replacement itself."
 	fi
 	# This one holds either way: AR7 deletes the old cntlr key and appends a
-	# new id in the same STM (model/ops.go:1526-1559), so the count is
+	# new id in the same STM (ReplaceCntlr (model/ops.go)), so the count is
 	# CNTLR_CNT before and after it.
 	assert_field "$SP_JSON" '.cntlr_list | length' "$CNTLR_CNT" \
 		"AR5 changed no cntlr count — it moved a flag"
@@ -13430,7 +13337,7 @@ react_failover() {
 		"host0 holds NO path to the dead cn$REACT_OLD_PRIMARY_CN"
 	check_sha0 "after AR5 elected cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN"
 
-	# The plan's "a fresh 4 MiB write + read-back succeeds", written through
+	# A fresh write and its read-back, written through
 	# the new primary at 1 MiB into $TD_REACT: chunks 1..$BASELINE_MIB of the
 	# device,
 	# which are slices 1..$BASELINE_MIB and therefore touch neither slice 0's
@@ -13459,7 +13366,7 @@ react_replace() {
 	stage 04 "AR7: the dead cntlr is replaced on the CN that carried none"
 	local out i cnt=0 idx=-1 hits msg
 
-	# The chain the plan's risk note names: replaceTarget skips a PRIMARY
+	# The chain: replaceTarget skips a PRIMARY
 	# while a failover candidate exists, and model.ReplaceCntlr refuses it again
 	# inside its STM, so AR7 can only act on a cntlr AR5 has already demoted.
 	out=$(helper_cn "$REACT_OLD_PRIMARY_CN" alive "$(cn_pid_file)") ||
@@ -13489,7 +13396,7 @@ react_replace() {
 			"$REACT_NEW_PRIMARY_ID was the primary this case elected and" \
 			"rebuilt, cntlr $PRIMARY_CNTLR_ID holds the role now. AR7's" \
 			"replacement is healthy, so it is a failover candidate" \
-			"(failoverEligible, worker/reaction.go:645-651), and the" \
+			"(failoverEligible (worker/reaction.go)), and the" \
 			"$THR_SET set's ${THR_PRIMARY}s primary_unhealthy ($THR) is" \
 			"short enough for a busy CN to trip. This step cannot judge AR7" \
 			"after that: it resolves the replacement by elimination from the" \
@@ -13573,7 +13480,7 @@ react_replace() {
 	# In the log is not the same as listening. cntlr_legs_full_ready above says
 	# the replacement connected its legs; its host-facing subsystem and
 	# namespace are the last rows it builds, and until the subsystem is linked
-	# to its nvmet port that port does not listen (run 3's failure — see
+	# to its nvmet port that port does not listen (see
 	# wait_ns_exported). The gate covers the new primary too, and returns on
 	# the first poll for it.
 	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID"
@@ -13594,9 +13501,9 @@ react_replace() {
 
 	# The killed agent comes back and finds it owns nothing. CN7 is what makes
 	# that observable: SyncupCn tears down every cntlr whose pointer is gone
-	# from the node's cntlr_ptr_list (agent/cnagent/syncup_cn.go:157-158:
+	# from the node's cntlr_ptr_list (syncupCn (agent/cnagent/syncup_cn.go):
 	# dropRemovedCntlrs forgets it and sweepCn removes what it left; the same
-	# test on the restart path at :97-116).
+	# test on the restart path, in Reconcile).
 	# It is also what clears the md arrays, dm devices and nvmet exports the
 	# dead agent left in this guest's kernel — the suite's own cleanup_all
 	# would clear them too, but only at the end of the run, and case_residue
@@ -13632,7 +13539,7 @@ react_leg_repair() {
 		log ""
 		log "=== react step 05 (AR8 leg repair) SKIPPED: --redund $REDUND." \
 			"A RedundNone group has no redundancy to re-home, so AR8 only" \
-			"logs it (reason=redund_none, worker/reaction.go:1195-1203) and" \
+			"logs it (reason=redund_none, in tryLegRepair (worker/reaction.go)) and" \
 			"an operator moves the data."
 		return 0
 	fi
@@ -13703,8 +13610,8 @@ react_leg_repair() {
 	# kill takes down exactly the one side this step names. A spare or parked
 	# leg on that node is always ANOTHER group's: this case never creates a
 	# spare itself, so every one is AR8's, and createSpare black-lists every DN
-	# of the group's own legs and spares (grpAddrs,
-	# worker/reaction.go:1468-1482). AR8 never repairs a spare either
+	# of the group's own legs and spares (grpAddrs (worker/reaction.go)).
+	# AR8 never repairs a spare either
 	# (repairCandidates walks leg_list only), so an idle one going down moves
 	# none of the deltas below. The one it can move is a spare that another
 	# group's repair is still waiting for: pendingSpare reads a spare whose
@@ -13754,9 +13661,9 @@ react_leg_repair() {
 		"side $REACT_SIDE_ID's addr_port $REACT_SIDE_ADDR names a dn instance"
 	diag_note_dn "$REACT_DN_VM" "$REACT_DN_INST"
 	# The group's occupied DNs and VMs, SPARE LEGS INCLUDED. That is not caution,
-	# it is what the code black-lists: grpAddrs walks GetLegList() and
-	# GetSpareLegList() (worker/reaction.go:1468-1482) and grpLocations resolves
-	# a location for every address grpAddrs names (:1448-1466). A `before` set
+	# it is what the code black-lists: grpAddrs (worker/reaction.go) walks
+	# GetLegList() and GetSpareLegList() and grpLocations resolves
+	# a location for every address grpAddrs names. A `before` set
 	# taken over the active legs alone would be a weaker statement than the one
 	# AR8 actually makes, and on a group that already carries a spare it would
 	# be the wrong set.
@@ -13844,9 +13751,9 @@ react_leg_repair() {
 	sp_refresh
 	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
 		"the group still has $LEGS active leg(s)"
-	# THE SET AFTER THE SWITCH, derived rather than assumed: SwitchSpareLeg
-	# takes the new spare OUT of spare_leg_list and puts the dead leg IN
-	# (model/ops.go:1851-1857), so the group's spare set is exactly what it was
+	# THE SET AFTER THE SWITCH, derived rather than assumed:
+	# SwitchSpareLeg (model/ops.go) takes the new spare OUT of spare_leg_list and
+	# puts the dead leg IN, so the group's spare set is exactly what it was
 	# before AR8 plus the dead leg — and its size is unchanged by the switch,
 	# which is why the sp-wide count below is before + 1 and not before + 2.
 	assert_jq "$SP_JSON" \
@@ -13858,8 +13765,8 @@ react_leg_repair() {
 		"the sp holds one more parked leg than when AR8 started"
 
 	# THE PROMOTED LEG IS READ OUT OF leg_list AFTER THE SWITCH, not out of
-	# spare_leg_list before it: SwitchSpareLeg puts the spare in the target's
-	# POSITION and parks the target in its place (model/ops.go:1851-1857), so
+	# spare_leg_list before it: SwitchSpareLeg (model/ops.go) puts the spare in
+	# the target's POSITION and parks the target in its place, so
 	# after the switch spare_leg_list holds the DEAD leg and only the position
 	# names the promotion. Reading it here also makes the step independent of
 	# how fast the two AR8 passes followed each other.
@@ -13888,8 +13795,8 @@ react_leg_repair() {
 	case ",$before_addrs," in
 	*",$spareaddr,"*)
 		die "the spare landed on $spareaddr, a disk node the group already" \
-			"occupies; grpAddrs seeds AR8's black list" \
-			"(worker/reaction.go:1468-1482)"
+			"occupies; grpAddrs (worker/reaction.go) seeds AR8's" \
+			"black list"
 		;;
 	esac
 	if [ "$DN_VM_CNT" -gt "$LEGS" ]; then
@@ -13898,7 +13805,7 @@ react_leg_repair() {
 			die "the spare landed on a DN VM the group already occupies" \
 				"($before_vms). AR8 passes grpLocations as the tier-1" \
 				"exclusion of architecture.md, Per-operation allocation" \
-				"(worker/reaction.go:1405-1421), and tier 2 relaxes" \
+				"(createSpare (worker/reaction.go)), and tier 2 relaxes" \
 				"it only when no DN outside those domains can take the" \
 				"group's ext_cnt"
 			;;
@@ -13949,7 +13856,7 @@ react_leg_repair() {
 	msg="$msg again, the parked one included"
 	wait_until "$WAIT_PROVISION" "$msg" cntlr_full_ready "$PRIMARY_CNTLR_ID"
 	log "  the parked leg $REACT_LEG_ID is connected again; the sp drain at" \
-		"teardown is what releases its extent (model/drain.go:369-375" \
+		"teardown is what releases its extent (popGrps (model/drain.go)" \
 		"releases spare legs with the active ones)"
 
 	# No failover during the stage: the dead disk node took one leg, which
@@ -14009,7 +13916,7 @@ case_react() {
 # inside case_finish: per backing file `stat -c '%b %B'` <= $DN_CAP_BYTES
 # through the `alloc` verb, the sum of every guest's work= and tmpfs= <=
 # $RUN_CAP_BYTES, and the free-space floors preflight used. This is the other
-# half the plan asks for — "print the totals in the run summary" — and it is
+# half — the totals printed in the run summary — and it is
 # deliberately a SEPARATE, read-only pass rather than an edit to that function:
 #
 #   * it is an independent reading: the summary's numbers are measured again,
@@ -14122,8 +14029,7 @@ run_case() { # <case name>
 # main (E2E1, E2E6, E2E11; setup step 1)
 # ---------------------------------------------------------------------------
 #
-# The order every section above was written against, and the two places it is
-# NOT the plan's literal wording:
+# The order every section above is written against:
 #
 #   parse_args -> trap on_exit EXIT -> log_topology
 #     -> [--cleanup-only: ship_helpers, cleanup_all, stop]
@@ -14131,13 +14037,13 @@ run_case() { # <case name>
 #     -> preflight_guests
 #     -> setup -> the case loop -> run_summary
 #
-#  a. PREFLIGHT RUNS AFTER THE START CLEANUP, not before it. The plan says
-#     "before any cleanup or setup writes", but a port check, a `ports_busy`
-#     and an nvmet-port conflict check taken before the cleanup answer about the
-#     PREVIOUS run's corpses, not about whether this run can start.
-#     cnagent_test.sh:2122-2123 and cdc_test.sh:1601-1602 put theirs in the same
-#     place for the same reason. Nothing in cleanup_all writes suite state — it
-#     only removes — so no check is reading something this run made.
+#  a. PREFLIGHT RUNS AFTER THE START CLEANUP, not before it: a port check, a
+#     `ports_busy` and an nvmet-port conflict check taken before the cleanup
+#     answer about the PREVIOUS run's corpses, not about whether this run can
+#     start. preflight_vms (cnagent_test.sh) and preflight_servers (cdc_test.sh)
+#     run in the same place for the same reason. Nothing in cleanup_all writes
+#     suite state — it only removes — so no check is reading something this
+#     run made.
 #
 #     cleanup_start_gate sits between them for that argument to hold: those
 #     checks are only about this run if the cleanup they follow actually ran.
@@ -14149,19 +14055,19 @@ run_case() { # <case name>
 #  b. THE BETWEEN-CASES STEP IS setup_between_cases (cleanup_all + setup_infra
 #     + setup_case — it rebuilds the sp as well as the infrastructure, because
 #     cleanup_all has just deleted both),
-#     NOT the plan's "stop the four cp daemons, rm -rf $WORK/etcd, restart".
+#     NOT an etcd reset (stop the four cp daemons, rm -rf $WORK/etcd, restart).
 #     That narrower step is what reset_control_plane does and it is genuinely
-#     not enough here; re-derived from the tree today rather than taken from
-#     the setup section's word:
-#       * CreateCluster stamps creation_epoch = uint64(time.Now().UnixNano())
-#         (gateway/cluster.go:59) and model.ClusterId is fnv64a over the name
-#         bytes followed by that epoch as 8 big-endian bytes (model/keys.go:
-#         112-120), so a second `cluster create --name e2e` against a wiped etcd
+#     not enough here:
+#       * CreateCluster (gateway/cluster.go) stamps creation_epoch
+#         = uint64(time.Now().UnixNano()) and model.ClusterId (model/keys.go)
+#         is fnv64a over the name bytes followed by that epoch as 8 big-endian
+#         bytes, so a second `cluster create --name e2e` against a wiped etcd
 #         mints a DIFFERENT cluster_id. The dn_ids are re-minted too.
 #       * A dn agent wrote cluster_id, dn_id and extent_size into the 4 KiB disk
 #         header at format time, and EnsureFormatted REFUSES a disk whose header
 #         names another one — "foreign disk: cluster/dn/extent is %d/%d/%d, want
-#         %d/%d/%d" (agent/dnagent/diskmeta.go:299-324). It never re-formats.
+#         %d/%d/%d" (foreignDiskError (agent/dnagent/diskmeta.go)).
+#         It never re-formats.
 #     So case 2 would come up with every one of its DN_TOTAL disks reporting
 #     RES_STATUS_ERROR, and setup's meta_info wait would burn WAIT_PROVISION on
 #     each of them. Only dn_cleanup's loop_teardown (zero the first 4 KiB,
@@ -14169,15 +14075,13 @@ run_case() { # <case name>
 #     the two cn phases remove a CN's store and its tmpfs arena — which is
 #     exactly cleanup_all, in exactly the order it already gets right. The price
 #     is a second full build per case — the 8m45s window of the WAIT_BUILD
-#     comment, not the plan's optimistic ~5 min; the alternative is a suite
-#     that cannot run its second case.
+#     comment; the alternative is a suite that cannot run its second case.
 #
-#     The plan offered gateway_test.sh as the precedent for the narrow reset.
-#     It is not one, in either direction. That suite's per-case reset is
-#     `wipe_etcd`
-#     (integtest/gateway_test.sh:563-568): `etcdctl del --prefix` against a
+#     gateway_test.sh is no precedent for the narrow reset, in either direction.
+#     That suite's per-case reset is
+#     wipe_etcd (integtest/gateway_test.sh): `etcdctl del --prefix` against a
 #     RUNNING etcd with the gateways stopped, not a data-directory wipe at all
-#     — and its own comment at :564-565 calls it
+#     — and its own comment calls it
 #     "the only non-workerctl write this suite performs". Here that would break
 #     E2E2: every control-plane write in this file is the shipped dnvctl, and
 #     etcdctl is put on cp for READ-ONLY diagnostics. It also would not help,
@@ -14243,7 +14147,7 @@ log_topology() {
 		"this file while it runs (bash re-seeks by byte offset)."
 }
 
-# run_summary is the plan's "print the totals in the run summary", plus the
+# run_summary prints the space totals (space_summary), plus the
 # shape the totals belong to. It ASSERTS nothing — every cap is
 # case_space_guard's, per case — and it must run BEFORE main returns, because
 # on_exit's end cleanup removes the very files space_note_case counted.

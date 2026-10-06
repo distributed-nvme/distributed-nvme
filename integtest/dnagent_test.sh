@@ -1015,10 +1015,9 @@ lab_wipe() {
 	# while this is running — is re-assembled into a fresh array that pins
 	# the wrapper again (this suite installs no udev rule and masks nothing,
 	# so udev can re-assemble an array from its members).
-	# Measured on a cn guest 2026-09-18: one pass
-	# reported `dm left:` EMPTY and left 8 kind-9 wrappers held open by 4
-	# re-assembled arrays; a second, identical invocation removed all of
-	# them. So the sequence runs until the node is clean, not once.
+	# On a cn guest one pass can leave leg wrappers held open by
+	# re-assembled arrays; a second, identical pass removes them. So the
+	# sequence runs until the node is clean, not once.
 	local pass
 	for pass in 1 2 3; do
 		if [ "$pass" -gt 1 ] && [ -z "$(dmsetup ls 2>/dev/null |
@@ -1179,13 +1178,9 @@ ship_helper() {
 # what the wipe deliberately leaves — $WORK, the loop devices and the nvmet
 # port.
 #
-# EACH VM'S STATUS IS READ, and that is the whole point of the rewrite. This
-# used to be `helper_ok … &` with `wait "$pid" || true`, which discards both:
-# on 2026-09-18 a wipe left one guest holding 8 kind-9 wrappers and 4 md
-# arrays, printed only the other VM's clean residue report — the two VMs'
-# output interleaves, so a missing report does not stand out — and exited
-# PASS. The next run then died in a residue stage on debris the wipe had
-# claimed to remove. A verb whose failure cannot be seen is worse than no
+# EACH VM'S STATUS IS READ, because the two VMs' output interleaves and a
+# missing report does not stand out.
+# A verb whose failure cannot be seen is worse than no
 # verb, which is the same rule the sweep this suite tests is built on.
 wipe_all() {
 	local idx rc pids=() bad=()
@@ -1928,8 +1923,8 @@ migr_declare_dst() { # m revision sp_level
 		# side device and destroy an acknowledged write.
 		#
 		# The whole feature list is pinned, not just the one word: the exact
-		# `2 no_hydration no_discard_passdown` of agent.CloneTable's derived
-		# feature count (agent/dm.go:405-419), which is the exact pair
+		# `2 no_hydration no_discard_passdown` CloneTable (agent/dm.go) emits
+		# from its derived feature count, which is the exact pair
 		# dnagent_integtest.md, Cases, requires of the clone's table (DN13;
 		# architecture.md, [D7]). `dmsetup message …
 		# enable_hydration` does NOT weaken it — dm-clone's STATUSTYPE_TABLE

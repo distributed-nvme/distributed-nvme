@@ -461,7 +461,7 @@ message Clone {
     DmCloneConf dm_clone_conf = 9;
     bool auto_resume = 10;
     reserved 11;
-    reserved "bm_cnt";  // was: uint32 bm_cnt (deleted 2026-09-16).
+    reserved "bm_cnt";  // was: uint32 bm_cnt (deleted).
                         // Reserving the NUMBER is what keeps a future varint
                         // field from decoding an old record's counter as
                         // itself; the name goes with it.

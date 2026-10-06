@@ -249,8 +249,8 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 		t.Fatalf("ana_grpid is %q, want 1 (optimized)", got)
 	}
 
-	// auto_resume = false leaves it effectively suspended — which since
-	// 2026-09-16 means **parked**: CN16 rule 1 wins over the clone backing of
+	// auto_resume = false leaves it effectively suspended, which means
+	// **parked**: CN16 rule 1 wins over the clone backing of
 	// rule 5, so the ns-dev is a live dm-linear over the td's dm-error and
 	// the namespace is inaccessible. Nothing is dm-suspended ([D12]).
 	clone := cloneOf()

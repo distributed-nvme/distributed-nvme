@@ -376,9 +376,9 @@ func sweepScopes() []sweepScope {
 // with no namespace, linked to no port, is every export's shape between its
 // subsystem mkdir and its namespace mkdir, and for the later part of that
 // window it already carries the CN's host link. On a kernel several dn agents
-// share, the build may be a sibling's, which no claim of ours can show: the
-// e2e copy case's setup of 2026-09-28 lost a leg that way — a sibling's
-// side-level sweep stripped the export's host link and namespace — and a
+// share, the build may be a sibling's, which no claim of ours can show: a
+// leg would be lost that way — a sibling's side-level sweep would strip the
+// export's host link and namespace — and a
 // broken dn export is rebuilt only by some later converge of its side, which
 // the breakage never triggers. So such an export goes only once its directory
 // is older than DnExportOrphanGrace; a younger one is left alone — not
@@ -530,11 +530,10 @@ func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 
 // TestSideScopeJudgesItsOwnLegOnly pins the own-leg rule. The side-level sweep
 // runs under the node READ lock, beside every other side's converge on this
-// kernel, and its own comment always said it judges its own side's exports;
-// it judged the whole sp, which is how, in the e2e copy case's setup of
-// 2026-09-28, the sweep of a side of leg 5 stripped a sibling agent's
-// half-built leg-12 export of its host link and namespace.
-// Now another leg's export is skipped by its NQN alone, before any read, in
+// kernel, so it judges its own leg's exports only: a sweep that judged the
+// whole sp would strip a sibling agent's half-built export of another leg of
+// its host link and namespace.
+// Another leg's export is skipped by its NQN alone, before any read, in
 // every shape — even the old orphan the node-level pass WOULD remove, which
 // the second half shows: removing it is that pass's business, and it does.
 func TestSideScopeJudgesItsOwnLegOnly(t *testing.T) {

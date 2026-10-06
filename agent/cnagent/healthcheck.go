@@ -262,9 +262,9 @@ func healthBlockPayload(cnId uint64, unixNano int64) []byte {
 // RES_STATUS_PENDING "health probe pending": the wrapper exists and no round
 // of this cntlr's current prober has said anything about the leg yet (a
 // promotion and an agent restart start a fresh one, whatever an earlier
-// prober reported). It was OK until 2026-09-26, and an OK row clears
-// Leg.err_epoch (HL2): every promotion's fresh probers cleared a dead leg's
-// err_epoch, and an unprobed spare read ready to AR8.
+// prober reported). Before any completion it is never OK: an OK row clears
+// Leg.err_epoch (HL2), so a promotion's fresh probers would clear a dead
+// leg's err_epoch and an unprobed spare would read ready to AR8.
 func (s *CnAgentServer) legProbeOutcome(
 	st *cntlrState,
 	lp *legPlan,

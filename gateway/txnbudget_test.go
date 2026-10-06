@@ -35,12 +35,9 @@ const (
 	cloneDrainMaxCompares = 68
 )
 
-// TestCloneDrainBatchBudget is CLD11's arithmetic tripwire, and the tripwire
-// that REPLACED TestDeleteCloneTxnBudget: the rectangle transaction that one
-// guarded — the whole rectangle of chunk keys swept in DeleteClone's deciding
-// STM — does not exist any more. DeleteClone latches (gateway.md, Clones) and
-// the worker drains the chunk keys in batches of a constant size
-// (dnv-worker.md, The clone drain).
+// TestCloneDrainBatchBudget is CLD11's arithmetic tripwire: DeleteClone
+// latches (gateway.md, Clones) and the worker drains the chunk keys in batches
+// of a constant size (dnv-worker.md, The clone drain).
 //
 // The arithmetic is one line, because chunk removal is LEDGER-FREE — no DN or
 // CN accounting, pure point deletes. etcd caps a transaction at
@@ -53,9 +50,9 @@ const (
 //	compares = their sum          <- what etcd checks
 //
 // and it is independent of every ceiling constant. That is the property worth
-// guarding: growing MaxCloneBmCnt or MaxSliceCntPerSp now changes the batch
-// COUNT and never the transaction's legality, which is what decoupled the
-// deployment requirement from the clone shape.
+// guarding: growing MaxCloneBmCnt or MaxSliceCntPerSp changes the batch COUNT
+// and never the transaction's legality, so the deployment requirement does not
+// depend on the clone shape.
 func TestCloneDrainBatchBudget(t *testing.T) {
 	const budget = common.MaxDelBmPerTxn +
 		cloneDrainReads + cloneDrainWritesFixed

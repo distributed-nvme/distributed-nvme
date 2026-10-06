@@ -606,7 +606,7 @@ func (f *fakeNode) mtimeOf(path string) int64 {
 // rather than echoing back the bytes written. device_uuid and device_nguid
 // both accept a bare 32-hex-digit string and both always read back
 // dash-separated, which is what makes a byte-wise idempotency check on the
-// nguid rewrite it forever (agent.sameNsId).
+// nguid rewrite it forever (agent.SameNsId).
 func configfsNormalize(path, data string) string {
 	base := path[strings.LastIndex(path, "/")+1:]
 	if base != "device_uuid" && base != "device_nguid" {

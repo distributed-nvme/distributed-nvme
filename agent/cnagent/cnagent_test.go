@@ -4946,8 +4946,8 @@ func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
 	})
 
 	// (d) The same guard one layer down, in `ensureDmSingle`: the td's raid0
-	// found suspended with its correct table. The park ([D12]) made that
-	// resume unconditional by deleting `keepSuspended`, and nothing else in
+	// found suspended with its correct table. The park ([D12]) makes that
+	// resume unconditional, and nothing else in
 	// the package converges a suspended raid0, pool or thin volume — so
 	// without this sub-case the guard could be dropped as dead and the next
 	// converge after a killed agent would leave the stack wedged under a

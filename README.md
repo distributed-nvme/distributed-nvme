@@ -73,6 +73,10 @@ state the current design, its roles, contracts, invariants, orderings and gates,
 and each decision with its reason. The code is the source of truth for every
 detail, so a document never restates a constant's value, a signature or a flag
 table. Each rule has exactly one owner document; anywhere else a rule is cited
-by its id, as in "`gateway.md` GW6", or by its owner's heading text, never by a
-section number, and never restated. `go test ./doclint/`, which `test` also
-runs, checks the documents, this README and the citations in the code.
+by its id, as in "`gateway.md` GW6", or by its owner's heading text, which the
+bold lead-in of a paragraph under that heading may follow, never by a section
+number, and never restated. A comment or a message names code by identifier,
+as in "ProbeSubsystem (agent/nvmet.go)", never by a line number, and carries
+no date and no citation of a note kept outside the repository.
+`go test ./doclint/`, which `test` also runs, checks the documents, this
+README, and the citations, pointers and dates in the code.

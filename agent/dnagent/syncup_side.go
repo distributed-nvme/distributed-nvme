@@ -76,11 +76,8 @@ func (s *DnAgentServer) convergeSide(
 	plan := newSidePlan(s.nf, st.req.Load(), extentSize)
 	info := &pb.SideInfo{}
 
-	// The sweep replaced teardownForbidden and retireMigrDst, and with them
-	// the applied* fields they diffed against. Those fields were memory of a
-	// past converge that the converge itself then overwrote, so a removal
-	// that failed was forgotten; what to remove is now derived by subtracting
-	// this plan from what the node actually holds.
+	// What to remove is derived by subtracting the desired state from what
+	// the node actually holds, never from memory of a past converge.
 	sweep := s.sweepSide(ctx, st, plan, true)
 
 	state := s.ensureSideDev(ctx, st, plan, info)

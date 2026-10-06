@@ -384,7 +384,7 @@ func (f *fakeNode) releaseCmd(key string) {
 // OsClient (osclient.md, Exported raw helpers and the probe-IO carve-out) but
 // the raw WriteBlockAt/ReadBlockDirectAt
 // helpers, faked through the LegProbeIO double below, and the interface has
-// no ReadBlockDirect to wire at all.
+// no O_DIRECT read to wire at all.
 // ReadBlockFn stays connected so that a buffered read — which the probe must
 // never issue — is still recorded rather than silently succeeding.
 func (f *fakeNode) osClient() *common.FakeOsClient {
@@ -678,7 +678,7 @@ func (f *fakeNode) cntlidRefusal(path, data string) error {
 // rather than echoing back the bytes written. device_uuid and device_nguid
 // both accept a bare 32-hex-digit string and both always read back
 // dash-separated, which is what makes a byte-wise idempotency check on the
-// nguid rewrite it forever (agent.sameNsId).
+// nguid rewrite it forever (agent.SameNsId).
 func configfsNormalize(path, data string) string {
 	base := path[strings.LastIndex(path, "/")+1:]
 	if base != "device_uuid" && base != "device_nguid" {
