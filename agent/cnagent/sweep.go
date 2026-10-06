@@ -76,7 +76,8 @@ type cnActual struct {
 	// array to stop and read clean, and L10 would disconnect unwanted legs
 	// from under a live one.
 	mdListed bool
-	// hostSubsys is every nvme subsystem this host holds a controller for.
+	// hostSubsys is every nvme subsystem entry this host holds, including
+	// one the kernel keeps with no controller (disconnectVerified).
 	hostSubsys []agent.SubsysBrief
 	// hostListed is dmListed for hostSubsys: the sysfs subsystem walk
 	// answered.
@@ -1139,12 +1140,14 @@ func (s *CnAgentServer) stopArrayVerified(
 // it gone. A disconnect already in flight is not issued a second time.
 //
 // "Gone" is the absence of any CONTROLLER, not the absence of the
-// subsystem directory: the kernel keeps /sys/class/nvme-subsystem/nvme-subsysN
-// around after its last controller is deleted, with its attributes readable
-// and its namespace and controller nodes gone. Such a subsystem holds nothing
-// open — no block device, no path — and waiting for the directory itself
-// would report a leftover for ever and re-drive the worker every round;
-// disconnecting it again would be a command per round.
+// subsystem directory (architecture.md, Teardown by sweep): the kernel keeps
+// /sys/class/nvme-subsystem/nvme-subsysN after its last controller is deleted
+// for as long as something, such as a leg wrapper or a dm-clone, holds its
+// multipath head open, with its attributes readable and its namespace and
+// controller nodes gone. Such a subsystem is no connection — no block device,
+// no path — so reading the directory itself as present would stop the descent
+// below its layer for as long as that holder stays, and disconnecting it
+// again would be a command per pass.
 func (s *CnAgentServer) disconnectVerified(
 	ctx context.Context,
 	nqn string,

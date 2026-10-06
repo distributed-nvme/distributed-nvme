@@ -164,9 +164,13 @@ func (h *NvmeHost) readTrimmed(
 	return h.readAttrStrict(ctx, path)
 }
 
-// ListSubsys probes one subsystem NQN: whether the host holds a controller
-// for it, whether any path is live, and the block device of its namespace.
-// An absent subsystem is "not found", never an error.
+// ListSubsys probes one subsystem NQN: whether the host holds its subsystem
+// entry (Found), the controllers in it (Paths), whether any path is live, and
+// the block device of its namespace. An absent subsystem is "not found",
+// never an error. Found is not "connected": while something holds the
+// subsystem's multipath head open, the kernel keeps its entry after the last
+// controller, with no controller and no namespace node in it, so whether the
+// NQN is connected is read from Paths, never from Found.
 func (h *NvmeHost) ListSubsys(
 	ctx context.Context,
 	nqn string,
@@ -262,10 +266,11 @@ func (h *NvmeHost) SubsysDevicePath(
 	return "", nil
 }
 
-// ListAllSubsys enumerates every subsystem this host holds a controller for.
-// It is what lets a sweep find connections no desired state names — a clone
-// source whose cntlr is gone, a leg of an sp that left the pointer list —
-// which a per-NQN lookup by definition cannot.
+// ListAllSubsys enumerates every subsystem entry this host holds, an entry
+// the kernel keeps with no controller included (ListSubsys). It is what lets
+// a sweep find connections no desired state names — a clone source whose
+// cntlr is gone, a leg of an sp that left the pointer list — which a per-NQN
+// lookup by definition cannot.
 func (h *NvmeHost) ListAllSubsys(ctx context.Context) ([]SubsysBrief, error) {
 	entries, err := h.listSysfs(ctx, sysfsNvmeSubsysDir)
 	if err != nil {

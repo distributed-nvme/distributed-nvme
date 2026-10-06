@@ -1416,10 +1416,16 @@ sysfs walk for a connection — and that probe, never the removal command's
 exit status, is the evidence. A killed command may have completed in the
 kernel, and a killed probe proves nothing at all (SH15). For a connection
 the question that walk asks is whether any **controller** is left, not
-whether the subsystem is: the kernel keeps the subsystem entry under
-"/sys/class/nvme-subsystem" after the last controller of an NQN is deleted,
-and an entry with no controller holds nothing open, so waiting for the
-directory itself would report a leftover that never goes.
+whether the subsystem is: the kernel keeps the subsystem's entry after its
+last controller is deleted for as long as something holds its multipath
+head open (`architecture.md`, Teardown by sweep), and a controller whose
+device is deleted, which the subsystem lists until the last reference to
+it drops, is gone (`cnagent.md` CN10). L3 removes the dm-clone before it
+disconnects, so what keeps an entry past that disconnect is something
+other than this agent's dm-clone. Read as present, such an entry would
+hold back the layers below L3 in the pass that disconnected it, and no
+later pass names it: with no controller, it has no "hostnqn" to be
+attributed by (above).
 
 **The record rule.** An allocation record is released **only** after the
 sweep has verified its device is gone **and** the authoritative pointer
@@ -1922,15 +1928,28 @@ answered, no per-CN stack serving through it (below); step (5)'s *reload*
 then moves the primary onto the dm-clone in a later pass that has one to
 serve through, the retry's or an RPC's. "Retrying until success"
 (`architecture.md`, Migration) is implemented without retrying inside the
-RPC: a converge pass attempts the connect **once**, and after a connect
-that succeeded it re-reads the subsystem until the source's namespace
-device is there, pausing `DnMigrDstNsPause` between reads and
-`DnMigrDstNsWait` in all (`awaitMigrSrcNs`, a `WaitBudget`) — the kernel
-returns from the connect once the controller is live and only queues the
-namespace scan that adds the device, so a single re-read could fail the
-target "controller has no namespace" for a device milliseconds away (the dn
-twin of `cnagent.md` CN10's head wait); a read that fails ends that wait at
-once. When the connect fails, or the namespace has still not appeared, the
+RPC: a converge pass whose sysfs walk finds no controller for the source —
+no subsystem entry, an entry the kernel keeps with no controller in it
+(`architecture.md`, Teardown by sweep), or one that lists only controllers
+whose device is deleted (`cnagent.md` CN10) — attempts the connect
+**once**, and after a connect that succeeded it re-reads the subsystem
+until the source's namespace device is there, pausing `DnMigrDstNsPause`
+between reads and `DnMigrDstNsWait` in all (`awaitMigrSrcNs`, a
+`WaitBudget`) — the kernel returns from the connect once the controller is
+live and only queues the namespace scan that adds the device, so a single
+re-read could fail the target "controller has no namespace" for a device
+milliseconds away (the dn twin of `cnagent.md` CN10's head wait); a read
+that fails ends that wait at once. The dm-clone holds the source's
+multipath head open, so after the host deletes the source's controllers —
+as it does when the target refuses a reconnect with DNR — the walk finds
+the subsystem's entry still there with no controller in it, and the side's
+next converge connects again: step (4) reloads the dm-clone onto the
+namespace device the new controller brings, a new multipath head with a
+new device number. On a destination whose last pass left no retry
+registered — its steps up to the status read held, hydration included, and
+its step (5) converged (`settleMigrRetry`, below) — that converge is its
+next `SyncupSide` or DN2's re-run (Known limits). When the connect fails,
+or the namespace has still not appeared, the
 pass records `target_info` as `RES_STATUS_ERROR` and registers the side in
 a background retry registry that re-runs the destination converge every
 `DnMigrConnectRetryInterval` under the DN1 locks. Every other step that
@@ -2335,3 +2354,15 @@ is still a protocol-level refusal.
   only the cn sweep's runs off them (`cnagent.md` CN10 and CN21). A target
   that vanishes mid-delete therefore holds the side's converge, and the
   `SyncupSide` carrying it, for the kernel's admin timeout (SH15).
+* A migration destination whose last pass left no connect retry
+  registered — its steps up to the status read held, hydration included,
+  and its step (5) converged (DN13) — has nothing that converges it again
+  by itself: its check rounds converge nothing, and a source with no
+  controller leaves their verdict at zero (DN16). So when the host deletes
+  the source's controllers under a dm-clone that serves — as it does when
+  the target refuses a reconnect with DNR — no connect follows until the
+  side's next converge: a `SyncupSide` that the SP's next revision or a
+  non-zero reply code brings (`dnv-worker.md` RW4), or DN2's re-run after
+  a restart. Until then the probe reports `migr_dst_info.target_info`
+  `RES_STATUS_ERROR`, and the dm-clone has no source for the regions it
+  has not hydrated.

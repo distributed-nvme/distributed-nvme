@@ -581,6 +581,69 @@ func TestMigrationCloneRemovedBeforeItsSourceDisconnect(t *testing.T) {
 	})
 }
 
+// TestMigrationSourceGoneBesideADeletedController pins what L3's probe
+// reads as gone (DN6): a controller that `nvme disconnect` deleted can stay
+// listed in its subsystem until the last reference to it drops, with nothing
+// of it left to read (cnagent.md CN10), and it is no controller (hasCtrl).
+// The SyncupSide that ends the destination role finds the source connection
+// gone after its one disconnect and descends below L3, so the clone-metadata
+// wrapper and its record go in that same pass.
+func TestMigrationSourceGoneBesideADeletedController(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	names := newMigrDstNames()
+	srcNqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
+	syncupBoth(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !connPresent(node, srcNqn) || !dmPresent(node, names.meta) {
+		t.Fatal("fixture is wrong: the destination holds no source " +
+			"connection or no clone-metadata wrapper")
+	}
+	node.mu.Lock()
+	node.listedAfterDisconnect[srcNqn] = true
+	node.mu.Unlock()
+	node.Reset()
+
+	reply, err := srv.SyncupSide(ctx, sideReq(3, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := node.callsMatching(
+		"cmd nvme disconnect --nqn " + srcNqn); len(got) != 1 {
+		t.Fatalf("%d disconnects, want exactly 1: %v", len(got), got)
+	}
+	state, err := srv.host.ListSubsys(ctx, srcNqn)
+	if err != nil {
+		t.Fatalf("ListSubsys: %v", err)
+	}
+	if !state.Found || len(state.Paths) == 0 || hasCtrl(state) {
+		t.Fatalf("fixture is wrong: the walk reads found=%v, %d listed "+
+			"controller(s), a live one %v; want the deleted controller "+
+			"still listed", state.Found, len(state.Paths), hasCtrl(state))
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("code = %d (%s), want 0", got,
+			reply.GetAgentReply().GetDetails())
+	}
+	for _, name := range []string{names.clone, names.meta} {
+		if dmPresent(node, name) {
+			t.Errorf("%s survived the pass that ended the role", name)
+		}
+	}
+	_, ok, err := srv.meta.LookupCloneMeta(ctx, testSp, testMigrId)
+	if err != nil {
+		t.Fatalf("LookupCloneMeta: %v", err)
+	}
+	if ok {
+		t.Error("the clone-metadata record survived the pass that ended " +
+			"the role")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Cross-side objects: judged by the claim rule, not by a name
 // ---------------------------------------------------------------------------

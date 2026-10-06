@@ -2710,9 +2710,9 @@ teardown_dead_source() {
 		assert_eq "$(helper "$idx" "subsys_present '$srcnqn'")" no \
 			"vm$idx still exports the migration source"
 		# The connection the clone hydrated through. "Gone" is the absence of
-		# a CONTROLLER, which is what the agent's own probe asks: the kernel
-		# can keep a subsystem directory after its last controller has died,
-		# and an empty subsystem holds nothing open.
+		# a CONTROLLER, which is what the agent's own probe asks (dnagent.md
+		# DN6): the kernel keeps a subsystem's directory after its last
+		# controller while something holds its multipath head open.
 		assert_eq "$(helper "$idx" "ctrl_of '$srcnqn' '${IP[$src]}'")" none \
 			"vm$idx still holds a controller to the dead source"
 	done

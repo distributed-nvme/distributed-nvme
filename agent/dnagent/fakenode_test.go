@@ -97,6 +97,19 @@ type fakeNode struct {
 	// pendingNs are the namespaces nsMisses deferred, keyed by the
 	// subsystem's sysfs directory.
 	pendingNs map[string]*pendingNs
+	// lostAfterConnect, keyed by NQN, makes the next connect that joins a
+	// subsystem the kernel kept (dropCtrlsWhileHeld) answer success and then
+	// lose the controller and the head it added before anything reads it;
+	// the held head keeps the subsystem's directory (dropHeld). It fires
+	// once.
+	lostAfterConnect map[string]bool
+	// listedAfterDisconnect, keyed by NQN, makes the next
+	// `nvme disconnect --nqn` of it leave each controller it deletes listed
+	// in the subsystem, with nothing of it left to read, as the kernel does
+	// until the last reference to a deleted controller drops; those
+	// references keep the subsystem's directory (dropHeld, with listed). It
+	// fires once.
+	listedAfterDisconnect map[string]bool
 	// nextSubsys and nextCtrl are monotonic and never reused. Sizing the
 	// index off len(conns) let a disconnect hand the next connect an index a
 	// live subsystem was still using, so two subsystems collided on one
@@ -204,6 +217,12 @@ type fakeConn struct {
 	// index its sysfs names are built from.
 	nqn string
 	idx int
+	// head is the instance of the subsystem's multipath head, the n<head> of
+	// device and of each controller's path device. kept marks a subsystem
+	// whose controllers and namespace node are gone while its directory stays
+	// (dropHeld); the next connect joins it with a new head.
+	head int
+	kept bool
 	// ctrls is every controller attached to this subsystem. A subsystem can
 	// hold more than one — the two sides of a migrating leg share one NQN
 	// ([D1]) — which is exactly why `nvme disconnect --device` exists and
@@ -263,6 +282,9 @@ func newFakeNode() *fakeNode {
 
 		gate:     make(map[string]chan struct{}),
 		hardGate: make(map[string]chan struct{}),
+
+		lostAfterConnect:      make(map[string]bool),
+		listedAfterDisconnect: make(map[string]bool),
 	}
 }
 
@@ -1457,13 +1479,18 @@ func (f *fakeNode) cmdNvme(args []string) (string, int) {
 // subsystem — the two sides of a migrating leg share one NQN ([D1]) — and
 // every index is drawn from a monotonic counter, so a disconnected
 // subsystem's /sys/class/nvme-subsystem path is never handed to a later one.
+// A connect to a subsystem the kernel kept with no controller
+// (dropCtrlsWhileHeld) joins it with a new head, and when lostAfterConnect
+// names the NQN it answers success with what it added already gone again.
 func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	nqn := flagValue(args, "--nqn")
 	if nqn == "" {
 		return "", 3
 	}
 	conn, ok := f.conns[nqn]
-	if !ok {
+	joined := ok && conn.kept
+	switch {
+	case !ok:
 		idx := f.nextSubsys
 		f.nextSubsys++
 		conn = &fakeConn{
@@ -1472,15 +1499,20 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 			subsys: fmt.Sprintf("nvme-subsys%d", idx),
 			nqn:    nqn,
 			idx:    idx,
+			head:   1,
 		}
 		f.conns[nqn] = conn
 		f.addSubsysSysfs(conn)
-		if misses := f.nsMisses[nqn]; misses > 0 {
-			f.pendingNs["/sys/class/nvme-subsystem/"+conn.subsys] =
-				&pendingNs{misses: misses, conn: conn}
-		} else {
-			f.addNsSysfs(conn)
-		}
+		f.scanNs(conn)
+	case conn.kept:
+		// The controller joins the subsystem the kernel kept, and the scan
+		// adds a NEW head beside the held one, whose instance and device
+		// number its holder keeps taken.
+		conn.kept = false
+		conn.state = "live"
+		conn.head++
+		conn.device = fmt.Sprintf("nvme%dn%d", conn.idx, conn.head)
+		f.scanNs(conn)
 	}
 	ctrlName := fmt.Sprintf("nvme%d", f.nextCtrl)
 	f.nextCtrl++
@@ -1490,26 +1522,36 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 		trSvcId: flagValue(args, "--trsvcid"),
 		trType:  flagValue(args, "--transport"),
 		state:   conn.state,
-		pathDev: fmt.Sprintf("nvme%dc%sn1", conn.idx,
-			strings.TrimPrefix(ctrlName, "nvme")),
+		pathDev: fmt.Sprintf("nvme%dc%sn%d", conn.idx,
+			strings.TrimPrefix(ctrlName, "nvme"), conn.head),
 		hostNqn: flagValue(args, "--hostnqn"),
 	}
 	conn.ctrls = append(conn.ctrls, ctrl)
 	f.addCtrlSysfs(conn, ctrl)
 	conn.refresh()
+	if joined && f.lostAfterConnect[nqn] {
+		delete(f.lostAfterConnect, nqn)
+		f.dropHeld(conn, false)
+	}
 	return "", 0
 }
 
 // nvmeDisconnect handles both forms. `--nqn` drops every controller of the
-// subsystem; `--device` drops exactly one, which is the only way to retire
-// the dead side of a migrating leg without killing the live one (SH20,
-// cnagent.md, `NvmeHost.DisconnectDevice`). Neither is idempotent: nvme-cli
-// exits non-zero when it finds nothing to disconnect.
+// subsystem, leaving each listed when listedAfterDisconnect names the NQN;
+// `--device` drops exactly one, which is the only way to retire the dead side
+// of a migrating leg without killing the live one (SH20, cnagent.md,
+// `NvmeHost.DisconnectDevice`). Neither is idempotent: nvme-cli exits
+// non-zero when it finds nothing to disconnect.
 func (f *fakeNode) nvmeDisconnect(args []string) (string, int) {
 	if nqn := flagValue(args, "--nqn"); nqn != "" {
 		conn, ok := f.conns[nqn]
 		if !ok {
 			return "", 1
+		}
+		if f.listedAfterDisconnect[nqn] {
+			delete(f.listedAfterDisconnect, nqn)
+			f.dropHeld(conn, true)
+			return "", 0
 		}
 		for _, ctrl := range append([]*fakeCtrl(nil), conn.ctrls...) {
 			f.dropCtrl(conn, ctrl)
@@ -1559,6 +1601,17 @@ func (f *fakeNode) addNsSysfs(conn *fakeConn) {
 	f.devNo["/dev/"+conn.device] = f.newDevNo()
 }
 
+// scanNs is the namespace scan a connect queues: addNsSysfs at once, or after
+// the listings nsMisses defers it by.
+func (f *fakeNode) scanNs(conn *fakeConn) {
+	if misses := f.nsMisses[conn.nqn]; misses > 0 {
+		f.pendingNs["/sys/class/nvme-subsystem/"+conn.subsys] =
+			&pendingNs{misses: misses, conn: conn}
+		return
+	}
+	f.addNsSysfs(conn)
+}
+
 // addCtrlSysfs materialises one controller: its link under the subsystem, its
 // own directory with transport, address and state, and the hidden path device
 // that is the only place ana_state lives.
@@ -1576,8 +1629,11 @@ func (f *fakeNode) addCtrlSysfs(conn *fakeConn, ctrl *fakeCtrl) {
 	f.files[ctrlDir+"/"+ctrl.pathDev+"/ana_state"] = "optimized\n"
 }
 
-// dropCtrl removes one controller; the subsystem itself goes only with its
-// last path, which is what the kernel does.
+// dropCtrl removes one controller, and the subsystem's directory with its
+// last one, which is what the kernel does while nothing holds the
+// subsystem's multipath head open; while something does, it keeps the
+// directory with no controller (architecture.md, Teardown by sweep), which
+// dropCtrlsWhileHeld models.
 func (f *fakeNode) dropCtrl(conn *fakeConn, ctrl *fakeCtrl) {
 	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
 	ctrlDir := "/sys/class/nvme/" + ctrl.name
@@ -1598,6 +1654,48 @@ func (f *fakeNode) dropCtrl(conn *fakeConn, ctrl *fakeCtrl) {
 	f.dropSubsysSysfs(conn)
 	delete(f.devNo, "/dev/"+conn.device)
 	delete(f.conns, conn.nqn)
+}
+
+// dropCtrlsWhileHeld is the kernel deleting every controller of a subsystem
+// whose multipath head something holds open, as a migration destination's
+// dm-clone holds its source's — after a reconnect the target refused with
+// DNR, say: the controllers and the head's namespace node, its /dev node
+// included, go; the subsystem's directory and its subsysnqn stay. With
+// listed, the subsystem still lists each deleted controller, as the kernel
+// does until the last reference to it drops, with nothing of it left to
+// read. The next connect to the NQN joins that subsystem with a new head
+// (nvmeConnect). It returns the device number the dropped node had, "" when
+// there was none.
+func (f *fakeNode) dropCtrlsWhileHeld(nqn string, listed bool) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	conn, ok := f.conns[nqn]
+	if !ok || conn.kept {
+		return ""
+	}
+	return f.dropHeld(conn, listed)
+}
+
+// dropHeld is dropCtrlsWhileHeld for a connection already looked up, with
+// f.mu held.
+func (f *fakeNode) dropHeld(conn *fakeConn, listed bool) string {
+	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
+	for _, ctrl := range conn.ctrls {
+		ctrlDir := "/sys/class/nvme/" + ctrl.name
+		if !listed {
+			delete(f.dirs, subsysDir+"/"+ctrl.name)
+		}
+		deleteTree(f.dirs, ctrlDir)
+		deleteTree(f.files, ctrlDir)
+	}
+	conn.ctrls = nil
+	conn.refresh()
+	conn.kept = true
+	delete(f.pendingNs, subsysDir)
+	delete(f.dirs, subsysDir+"/"+conn.device)
+	devNo := f.devNo["/dev/"+conn.device]
+	delete(f.devNo, "/dev/"+conn.device)
+	return devNo
 }
 
 func (f *fakeNode) dropSubsysSysfs(conn *fakeConn) {

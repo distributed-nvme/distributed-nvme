@@ -64,9 +64,13 @@ less legibly. The suite rests on these lab facts:
   listing carries no ANA state, and it prints nothing at all on a node with no
   controller.
 * A port or subsystem removed under a live connection, while the port keeps
-  listening, kills the host's controller for good (a port left with no
-  subsystem stops listening instead, and its controllers retry), and the kernel keeps a subsystem's directory after its
-  last controller: "disconnected" means no controller (`dnagent.md` DN6).
+  listening, kills the host's controller for good once its reconnect attempt
+  finds the subsystem still gone (a port left with no subsystem stops
+  listening instead, and its controllers retry). While something holds a
+  subsystem's multipath head open, as a dm table over it does, the kernel
+  keeps the subsystem's directory after its last controller, with no
+  controller and no namespace node in it: "disconnected" means no controller
+  (`dnagent.md` DN6).
 * A dm-clone's table reprints its creation arguments, keeping no-hydration
   after hydration is enabled; only its status shows the live flags.
 * A dm-delay device wedges udev's workers unless a "58-*" udev rule turns off

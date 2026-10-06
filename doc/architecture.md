@@ -3585,10 +3585,14 @@ device is there, the next enumeration finds it.
   process. So the exit status never decides. A fresh probe does, and a
   probe that did not answer either reads as *unknown*, which counts as
   still present. For an nvme connection that probe asks for a CONTROLLER,
-  not for the subsystem directory: the kernel keeps the subsystem's entry
-  under "/sys/class/nvme-subsystem" after its last controller is deleted,
-  and that directory — no path, no block device, nothing held open — would
-  otherwise be reported as a leftover for ever. On the DN the consequence
+  not for the subsystem directory: after its last controller is deleted
+  the kernel keeps the subsystem's entry under "/sys/class/nvme-subsystem",
+  with no controller and no namespace node in it, for as long as
+  something holds its multipath head open — a dm table or an md array
+  over that head — and drops the entry once the holder lets go. Such an
+  entry is no connection, and read as present it would stop the descent
+  below the connection's layer over a connection that no longer exists.
+  On the DN the consequence
   is sharper than a leak: a side's or a migration's allocation record is
   released only once its device is **verified** gone, because freeing
   extents a live device still maps hands the same blocks to the next side

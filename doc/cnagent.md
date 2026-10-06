@@ -2325,12 +2325,12 @@ at the soft timeout may well have completed in the kernel — the ioctl
 finishes whatever happens to the process — so only a fresh probe can
 say, and a probe that itself did not answer counts as not removed. For a
 connection, "gone" is the absence of any controller, not of the
-subsystem directory: the kernel keeps the subsystem's entry under
-"/sys/class/nvme-subsystem" after its last controller is deleted,
-attributes still readable, controller and namespace nodes gone. Such a
-subsystem holds nothing open — no block device, no path — so waiting for
-the directory itself would report a leftover for ever and re-drive the
-worker every round over a connection that no longer exists.
+subsystem directory, which the kernel keeps after the last controller
+only while something, such as a leg wrapper or a dm-clone, holds the
+multipath head open (`architecture.md`, Teardown by sweep). Read as
+present, such a directory would stop the descent below its layer, and set
+another `nvme disconnect` going on every pass, for as long as that
+holder stays.
 
 **The stop rule** (`architecture.md`, Teardown by sweep): every removal
 of a layer is attempted, but the chain does not descend below a layer

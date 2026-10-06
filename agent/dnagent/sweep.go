@@ -51,9 +51,10 @@ type dnActual struct {
 	// so deriving one from an unanswered enumeration is the corruption path,
 	// not merely a leak.
 	dmListed bool
-	// hostSubsys is every nvme subsystem this host holds a controller for —
-	// on the dn that means the migration-source connections a destination
-	// side makes.
+	// hostSubsys is every nvme subsystem entry this host holds, including
+	// one the kernel keeps with no controller (disconnectVerified) — on the
+	// dn, those of the migration-source connections a destination side
+	// makes.
 	hostSubsys []agent.SubsysBrief
 	// nvmetSubsys is every subsystem in the target's configfs tree.
 	nvmetSubsys []string
@@ -335,10 +336,13 @@ func (s *DnAgentServer) removeExportVerified(
 	return !exists
 }
 
-// disconnectVerified drops an nvme host connection and re-probes sysfs. As on
-// the cn side, "gone" is the absence of any CONTROLLER: the kernel keeps the
-// subsystem directory after its last controller is deleted, and it then holds
-// nothing open.
+// disconnectVerified drops an nvme host connection and re-probes sysfs.
+// "Gone" is the absence of any CONTROLLER (hasCtrl; architecture.md, Teardown
+// by sweep): the kernel keeps the subsystem directory after its last
+// controller is deleted for as long as something holds its multipath head
+// open, and it lists a deleted controller until the last reference to it
+// drops (cnagent.md CN10). Neither a kept directory nor a deleted controller
+// is a connection.
 func (s *DnAgentServer) disconnectVerified(
 	ctx context.Context,
 	nqn string,
@@ -351,7 +355,7 @@ func (s *DnAgentServer) disconnectVerified(
 			slog.String("error", err.Error()))
 		return false
 	}
-	return !state.Found || len(state.Paths) == 0
+	return !hasCtrl(state)
 }
 
 func (s *DnAgentServer) removeDms(
