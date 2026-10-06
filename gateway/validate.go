@@ -553,20 +553,22 @@ func validateCloneGeometry(
 		return errInvalid("src_slice_cnt %d is outside [1, %d]",
 			sliceCnt, common.MaxSliceCntPerSp)
 	}
-	const stripeUnit = uint64(4 * 1024)
-	const stripeMax = 256 * stripeUnit
+	// The bounds are the pool's own (validateBdevConf), by name: a pool this
+	// cluster accepts is then a legal clone source by construction.
+	const stripeUnit = uint64(common.MinDmRaid0StripeSize)
+	const stripeMax = uint64(common.MaxDmRaid0StripeSize)
 	if stripeSize == 0 || stripeSize%stripeUnit != 0 ||
 		stripeSize > stripeMax {
 		return errInvalid(
-			"src_stripe_size %d must be i x 4KiB with 1 <= i <= 256",
-			stripeSize)
+			"src_stripe_size %d must be a positive multiple of %d, "+
+				"at most %d", stripeSize, stripeUnit, stripeMax)
 	}
-	const blockUnit = uint64(64 * 1024)
-	const blockMax = 16384 * blockUnit
+	const blockUnit = uint64(common.MinDmPoolDataBlockSize)
+	const blockMax = uint64(common.MaxDmPoolDataBlockSize)
 	if blockSize == 0 || blockSize%blockUnit != 0 || blockSize > blockMax {
 		return errInvalid(
-			"src_block_size %d must be j x 64KiB with 1 <= j <= 16384",
-			blockSize)
+			"src_block_size %d must be a positive multiple of %d, "+
+				"at most %d", blockSize, blockUnit, blockMax)
 	}
 	if blockSize%stripeSize != 0 {
 		return errInvalid(

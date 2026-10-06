@@ -1642,19 +1642,27 @@ func TestValidateDevIdentity(t *testing.T) {
 // CreateClone and the divisibility rule between two of them (architecture.md,
 // Clones). The numbers describe the SOURCE SP, which this cluster cannot read,
 // so CreateClone's request check is the only place the gateway checks them:
-// src_slice_cnt ∈ [1, MaxSliceCntPerSp],
-// src_stripe_size = i x 4 KiB with i ∈ [1, 256], src_block_size = j x 64 KiB
-// with j ∈ [1, 16384], and src_block_size a multiple of src_stripe_size —
-// without which a clone region would straddle a raid0 stripe boundary and the
-// per-slice bitmaps of architecture.md, Bitmap reads, would address the wrong
-// bytes.
+// src_slice_cnt ∈ [1, MaxSliceCntPerSp], src_stripe_size a positive multiple
+// of MinDmRaid0StripeSize at most MaxDmRaid0StripeSize, src_block_size a
+// positive multiple of MinDmPoolDataBlockSize at most MaxDmPoolDataBlockSize,
+// and src_block_size a multiple of src_stripe_size — without which a clone
+// region would straddle a raid0 stripe boundary and the per-slice bitmaps of
+// architecture.md, Bitmap reads, would address the wrong bytes.
+//
+// Every unit and ceiling below is built from the constant that names it, the
+// one the pool itself is checked against (CreateStoragePool for the slice
+// count, validateBdevConf for the stripe and block sizes), so a constant that
+// moves moves the check and this test together and a legal pool stays a legal
+// clone source.
 //
 // Every case states all three numbers so that a bound and the divisibility
 // rule can never be confused for one another: the only member under test is
 // the one the case name mentions, the other two are always legal.
 func TestValidateCloneGeometry(t *testing.T) {
-	const kib4 = uint64(4 * 1024)
-	const kib64 = uint64(64 * 1024)
+	const stripeUnit = uint64(common.MinDmRaid0StripeSize)
+	const stripeMax = uint64(common.MaxDmRaid0StripeSize)
+	const blockUnit = uint64(common.MinDmPoolDataBlockSize)
+	const blockMax = uint64(common.MaxDmPoolDataBlockSize)
 	cases := []struct {
 		name       string
 		sliceCnt   uint32
@@ -1662,45 +1670,44 @@ func TestValidateCloneGeometry(t *testing.T) {
 		blockSize  uint64
 		want       codes.Code
 	}{
-		{"the smallest legal geometry", 1, kib4, kib64, codes.OK},
+		{"the smallest legal geometry", 1, stripeUnit, blockUnit, codes.OK},
 		{
 			"the largest legal geometry",
-			common.MaxSliceCntPerSp, 256 * kib4, 16384 * kib64, codes.OK,
+			common.MaxSliceCntPerSp, stripeMax, blockMax, codes.OK,
 		},
-		{"src_slice_cnt 0", 0, kib4, kib64, codes.InvalidArgument},
+		{"src_slice_cnt 0", 0, stripeUnit, blockUnit, codes.InvalidArgument},
 		{
 			"src_slice_cnt above MaxSliceCntPerSp",
-			common.MaxSliceCntPerSp + 1, kib4, kib64, codes.InvalidArgument,
+			common.MaxSliceCntPerSp + 1, stripeUnit, blockUnit,
+			codes.InvalidArgument,
 		},
-		{"src_stripe_size 0", 1, 0, kib64, codes.InvalidArgument},
+		{"src_stripe_size 0", 1, 0, blockUnit, codes.InvalidArgument},
 		{
-			"src_stripe_size not a multiple of 4 KiB",
-			1, kib4 + 1, kib64, codes.InvalidArgument,
-		},
-		{
-			"src_stripe_size at 256 x 4 KiB",
-			1, 256 * kib4, 256 * kib4, codes.OK,
+			"src_stripe_size not a multiple of its unit",
+			1, stripeUnit + 1, (stripeUnit + 1) * blockUnit,
+			codes.InvalidArgument,
 		},
 		{
-			"src_stripe_size at 257 x 4 KiB",
-			1, 257 * kib4, 16384 * kib64, codes.InvalidArgument,
+			"src_stripe_size one unit above its maximum",
+			1, stripeMax + stripeUnit, (stripeMax/stripeUnit + 1) * blockUnit,
+			codes.InvalidArgument,
 		},
-		{"src_block_size 0", 1, kib4, 0, codes.InvalidArgument},
+		{"src_block_size 0", 1, stripeUnit, 0, codes.InvalidArgument},
 		{
-			"src_block_size not a multiple of 64 KiB",
-			1, kib4, kib64 + kib4, codes.InvalidArgument,
+			"src_block_size not a multiple of its unit",
+			1, stripeUnit, blockUnit + stripeUnit, codes.InvalidArgument,
 		},
 		{
-			"src_block_size at 16385 x 64 KiB",
-			1, kib4, 16385 * kib64, codes.InvalidArgument,
+			"src_block_size one unit above its maximum",
+			1, stripeUnit, blockMax + blockUnit, codes.InvalidArgument,
 		},
 		{
 			"src_block_size not a multiple of src_stripe_size",
-			1, 3 * kib4, kib64, codes.InvalidArgument,
+			1, 3 * stripeUnit, blockUnit, codes.InvalidArgument,
 		},
 		{
 			"src_block_size equal to src_stripe_size",
-			1, 16 * kib4, kib64, codes.OK,
+			1, blockUnit, blockUnit, codes.OK,
 		},
 	}
 	for _, item := range cases {

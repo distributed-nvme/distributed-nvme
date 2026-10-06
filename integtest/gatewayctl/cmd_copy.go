@@ -82,10 +82,11 @@ func dnSelectorFlags(fs *flag.FlagSet) func() *pb.NodeSelector {
 // carries.
 //
 // An empty value is deliberately NOT a driver error. parseHexBitmap refuses
-// it, but "bitmap must not be empty" is one of the refusals the gateway owns
-// and case C asserts, so an empty --bm-hex must travel to the gateway as an
-// empty bitmap and come back as INVALID_ARGUMENT from there. Anything else
-// that fails to decode is a mistake in the script itself and is a usage error.
+// it, but "bitmap must not be empty" is a refusal the gateway owns
+// (validateBitmap), so an empty --bm-hex travels to the gateway as an empty
+// bitmap and comes back as INVALID_ARGUMENT from there; no suite stage sends
+// one, and TestValidateBitmap pins that refusal. Anything else that fails to
+// decode is a mistake in the script itself and is a usage error.
 func bitmapArg(spec string) []byte {
 	bitmap, err := parseHexBitmap(spec)
 	if err == nil {
@@ -119,14 +120,17 @@ func hexBitmapResult(bitmap []byte) map[string]any {
 //
 // The source geometry flags are separate because the gateway checks each of
 // them on its own (validateCloneGeometry): --src-slices is the source SP's
-// slice count, --src-stripe its raid0 stripe and --src-block the dm-clone
-// region size, and case C walks every one of the three past its bound.
+// slice count, --src-stripe its raid0 stripe and --src-block its block size,
+// the bytes one bit of the skip bitmap covers. Case S stage 13 sends all three
+// at their ceilings; no suite stage sends one past its bound, and
+// TestValidateCloneGeometry pins those refusals.
 //
 // The source transport is registered through trConfFlags under the `src-`
 // prefix and becomes the single entry of the repeated src_tr_conf. When all
 // four parts are given as empty strings the accessor returns nil and the
-// request carries an EMPTY list, which is exactly what case C's validation
-// battery needs to see refused ("src_tr_conf must not be empty").
+// request carries an EMPTY list, which the gateway refuses ("src_tr_conf must
+// not be empty"); no suite stage sends one, and TestValidateTrConfList pins
+// that refusal.
 func setupCreateClone(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
@@ -219,8 +223,9 @@ func setupGetClone(fs *flag.FlagSet) job {
 // setupSetCloneTr drives UpdateCloneTrConf, the RPC that re-points a stored
 // clone at a moved source. The transport flags are the same `src-` prefixed
 // set CreateClone registers, so the same spelling that created a clone
-// updates it, and an all-empty set again sends an empty list for the refusal
-// case C expects.
+// updates it, and an all-empty set again sends an empty list, which the
+// gateway refuses ("src_tr_conf must not be empty"); no suite stage sends
+// one, and TestValidateTrConfList pins that refusal.
 func setupSetCloneTr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
