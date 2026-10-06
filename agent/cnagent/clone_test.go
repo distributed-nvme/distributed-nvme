@@ -1709,12 +1709,12 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 
 // TestWrapperEnumerationSurvivesAVanishedWrapper: the kind-`cb` name list comes
 // from a `dmsetup ls` snapshot that is stale the instant it is printed —
-// SyncupCntlr holds only the node *read* lock, so another cntlr's retire or
-// SP_LEVEL_DISABLE teardown can remove a wrapper between the `ls` and the
-// `dmsetup table` of that name. Failing the whole CN-wide enumeration on it
-// flipped a healthy, serving clone of an unrelated cntlr to RES_STATUS_ERROR,
-// and ERROR — unlike PROVISIONING — feeds err_epoch and the reactions of
-// architecture.md, dn / cn roles and Automatic reactions ([D14]).
+// SyncupCntlr holds only the node *read* lock, so another cntlr's sweep
+// (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a wrapper between the
+// `ls` and the `dmsetup table` of that name. Failing the whole CN-wide
+// enumeration on it flipped a healthy, serving clone of an unrelated cntlr to
+// RES_STATUS_ERROR, and ERROR — unlike PROVISIONING — feeds err_epoch and the
+// reactions of architecture.md, dn / cn roles and Automatic reactions ([D14]).
 func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -1780,7 +1780,7 @@ func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 // TestCloneWrapperRemovalTakesTheArenaLock: removing a kind-`cb` wrapper is a
 // mutation of the allocator's registry — the dm table set itself — so it
 // belongs inside cloneMetaMu with the enumerate → discard → create section it
-// races (CN18). Without it a retire on one cntlr can delete a wrapper
+// races (CN18). Without it a sweep on one cntlr can delete a wrapper
 // in the middle of another cntlr's allocation.
 func TestCloneWrapperRemovalTakesTheArenaLock(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1789,7 +1789,7 @@ func TestCloneWrapperRemovalTakesTheArenaLock(t *testing.T) {
 	metaDm := cloneMetaName(srv, testClone)
 
 	// Stand in for the concurrent allocator: hold the leaf lock and let the
-	// retire run.
+	// sweep run.
 	srv.cloneMetaMu.Lock()
 	retired := make(chan struct{})
 	var retireErr error
@@ -1810,7 +1810,7 @@ func TestCloneWrapperRemovalTakesTheArenaLock(t *testing.T) {
 	select {
 	case <-retired:
 	case <-time.After(10 * time.Second):
-		t.Fatalf("the retire never completed after the lock was released")
+		t.Fatalf("the sweep never completed after the lock was released")
 	}
 	if retireErr != nil {
 		t.Fatalf("retire: %v", retireErr)

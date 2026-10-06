@@ -579,7 +579,7 @@ func validateCloneGeometry(
 }
 
 // validateBitmap refuses an empty Append*Bitmap payload (architecture.md,
-// Clones; gateway.md, Migrations).
+// Clones; architecture.md, Migrations).
 func validateBitmap(bitmap []byte) error {
 	if len(bitmap) == 0 {
 		return errInvalid("bitmap must not be empty")

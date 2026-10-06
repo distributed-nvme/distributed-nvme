@@ -37,9 +37,12 @@
 # goes through `jq -R 'fromjson? // empty'` (recs/recsr below) — a partial last
 # line is dropped, never fails an assertion.
 #
-# Signals: the three gateways share one command line, so every process's pid is
-# recorded from `$!` into $WORK/<dir>/pid at launch and every signal goes by
-# pid. The `pkill -f` forms appear in cleanup() only.
+# Signals: the three gateways share one command line apart from their port, so
+# every process remote_start launches (etcd, the gateways, the fake agents)
+# has its pid recorded from `$!` into $WORK/<dir>/pid, and every signal goes
+# by pid. The restart case's killer.sh is the one background process without
+# one: it exits by itself within seconds. The `pkill -f` forms appear in
+# cleanup() only.
 
 set -euo pipefail
 
@@ -1562,7 +1565,7 @@ case_smoke() {
 		"list-cns page 2 token (a short page ends the listing)"
 
 	# -------------------------------------------------------------------
-	stage 4 "inspect-dn / inspect-cn: the agent's applied revision and live info"
+	stage 4 "inspect-dn / inspect-cn: the agent's revision and live info"
 	# -------------------------------------------------------------------
 	# The suite runs NO dnv-worker, so no Syncup* has ever reached a fake and
 	# every *Info it derives from "the last accepted request" is absent. That
@@ -1584,7 +1587,7 @@ case_smoke() {
 	# Seeding state.json is the fake's documented operator-edit path
 	# (integtest/fakeagent), and it is what lets this stage also prove the
 	# PASS-THROUGH half of the RPC: whatever the agent reports arrives at the
-	# caller untouched. The seeded applied revision is a distinctive 7 — the
+	# caller untouched. The seeded revision is a distinctive 7 — the
 	# stored rev key is still 1, so the two cannot be confused.
 	set_state dn0 <<EOF
 {"objects":{"dn":{"revision":7,"request":{
@@ -2644,8 +2647,8 @@ EOF
 	# reconnecting to it (architecture.md, Subsystems, namespaces).
 	assert_eq "$(key_count cdc)" "0" "cdc keys after delete-ss"
 	# The snapshot-child gate, observed: t1 is an uncreated snapshot of t0, so
-	# t0 cannot go first — retire runs before build (CN9), and a delete of the
-	# origin now would send `delete {ori dev_id}` before `create_snap`.
+	# t0 cannot go first — the sweep runs before the build (CN9), and a delete
+	# of the origin now would send `delete {ori dev_id}` before `create_snap`.
 	assert_no_write "delete-td of an origin with an uncreated snapshot" \
 		gwx FAILED_PRECONDITION delete-td --sp sp0 --rev "$SP_REV" --name t0
 	out=$(gw delete-td --sp sp0 --rev "$SP_REV" --name t1)

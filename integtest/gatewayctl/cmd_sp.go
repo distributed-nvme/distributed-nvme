@@ -65,12 +65,16 @@ func spSelectorFlags(fs *flag.FlagSet, prefix string) func() *pb.NodeSelector {
 // is the exception — the same section answers INVALID_ARGUMENT to it — so a
 // script that wants an SP must pass that one.
 //
-// --stripe-size, --block-size and --feature-junk exist for the case C
-// validation battery (its stage 1, GW4): the first two push the DmRaid0Conf
-// and DmPoolConf bounds, and --feature-junk appends one empty BdevFeature
-// purely so the "bdev_feature_list must be empty" rule can be watched refusing
-// a request. A BdevConf is built only when --raid1 or one of those three asks
-// for it, so the default request carries no bdev_conf at all.
+// --stripe-size and --block-size fill bdev_conf.dm_raid0_conf.stripe_size
+// and bdev_conf.dm_pool_conf.data_block_size, each sent only when non-zero.
+// The gateway suite passes neither flag. The gateway judges both sizes
+// against their bounds and the geometry rules (validateBdevConf), and its
+// TestValidateBdevConf and TestBdevConfGeometryRules pin those refusals.
+// --feature-junk appends one empty BdevFeature purely so the case C
+// validation battery (its stage 1; gateway.md GW4) can watch the
+// "bdev_feature_list must be empty" rule refuse a request. A BdevConf is
+// built only when --raid1 or one of those three flags asks for it, so the
+// default request carries no bdev_conf at all.
 //
 // The four --thr-* flags fill EventThreshold, where 0 again means "use the
 // default", so the message is sent only when at least one is set. The four
@@ -199,8 +203,10 @@ func setupGetSp(fs *flag.FlagSet) job {
 // setupListSps drives ListStoragePools
 // (gateway.md, Storage pools and GrowSlice). --count is the page size that
 // the clamp of architecture.md, Common validation, turns into 64 when it is
-// 0 and refuses above 1024, and --page-token continues a previous page — the
-// pair case C probes with a bad token.
+// 0 and refuses above 1024, and --page-token continues a previous page. The
+// suite's list-sps reads send neither flag (case C probes a bad count and a
+// bad token on list-clusters instead), and TestListStoragePools pins both
+// refusals for ListStoragePools.
 func setupListSps(fs *flag.FlagSet) job {
 	count := fs.Uint("count", 0, "page size; 0 asks for the default of 64")
 	pageToken := fs.String("page-token", "",
@@ -245,10 +251,10 @@ func setupSetCntlidSlots(fs *flag.FlagSet) job {
 
 // setupSetSpLevel drives UpdateStoragePoolLevel
 // (gateway.md, Storage pools and GrowSlice). --level goes through main.go's
-// parseSpLevel, which also accepts a raw number so the script can send a
-// level the enum does not declare and watch the gateway refuse it (case C
-// stage 1, GW4). The parse happens inside the job, not in setup, because
-// setup runs before Parse.
+// parseSpLevel, which also accepts a raw number, so a level the enum does
+// not declare reaches the gateway and is refused there (validateSpLevel); no
+// suite stage sends one, and TestValidateSpLevel pins that refusal. The parse
+// happens inside the job, not in setup, because setup runs before Parse.
 func setupSetSpLevel(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
@@ -332,9 +338,10 @@ func setupGrowSlice(fs *flag.FlagSet) job {
 
 // setupCreateCntlr drives CreateCntlr (gateway.md, Cntlrs and inspects).
 // --slot is the cntlid_slot the new controller takes; it must be in the SP's
-// cntlid_slot_list and unused, which is the state-dependent refusal the suite
-// drives by asking twice for the same slot. --cn-black keeps a race's two jobs
-// off each other's CN.
+// cntlid_slot_list and unused, else the gateway refuses the request. The
+// gateway suite's one create-cntlr takes a free slot, and
+// TestCreateCntlrRefusals pins both refusals as INVALID_ARGUMENT. --cn-black
+// and --cn-white fill cn_selector; the gateway suite passes neither.
 func setupCreateCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint

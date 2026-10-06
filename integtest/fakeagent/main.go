@@ -16,7 +16,7 @@
 //	               instantly zeroed. A malformed file is logged and ignored,
 //	               keeping the previous behaviour, so a bad file fails a test
 //	               on its assertion instead of killing the agent.
-//	state.json     the last applied request and revision per object plus the
+//	state.json     the last accepted request and revision per object plus the
 //	               received bitmap chunks (address + byte length; a migration
 //	               chunk is addressed by its bm_idx alone, a clone chunk by the
 //	               (src_slice_idx, bm_idx) pair it sits at: architecture.md,
@@ -164,7 +164,7 @@ func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
 // optional: a row may set only the status, only the details, or both.
 //
 // WhenPrimary gates the override on the cntlr's role: it applies only while
-// the cntlr's last applied request carries cntlr.primary = true, so a row
+// the cntlr's last accepted request carries cntlr.primary = true, so a row
 // planted on a standby bites the moment a failover promotes it and not
 // before (dnv-worker.md, Integration test plan, The fake agent; the settling
 // step of worker_test.sh case D). The fake reports a standby's pool and md rows
@@ -318,7 +318,7 @@ func parseBehavior(data []byte) (*behaviorFile, error) {
 // state.json (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
-// objectState is one object's last applied request. Chunks maps a
+// objectState is one object's last accepted request. Chunks maps a
 // migration/clone id to a chunk key (migrChunkKey resp. cloneChunkKey) to the
 // chunk's byte length, which is all the applied-set report needs
 // (architecture.md, Bitmap push protocol).
@@ -700,7 +700,7 @@ func (a *fakeAgent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
 
 // resolveCntlrRow is resolveRow for a cntlr object: a row override marked
 // when_primary is skipped while primary — the cntlr.primary of the cntlr's
-// last applied request — is false (dnv-worker.md,
+// last accepted request — is false (dnv-worker.md,
 // Integration test plan, The fake agent).
 func (a *fakeAgent) resolveCntlrRow(
 	objKey string, primary bool, keys ...string,
@@ -765,7 +765,7 @@ func (a *fakeAgent) epochLocked(
 }
 
 // ---------------------------------------------------------------------------
-// *Info derivation from the last applied request
+// *Info derivation from the last accepted request
 // (dnv-worker.md, Integration test plan, The fake agent)
 // ---------------------------------------------------------------------------
 
@@ -796,7 +796,7 @@ func (a *fakeAgent) cnInfoLocked() *pb.CnInfo {
 	}
 }
 
-// sideInfoLocked derives SideInfo from the side's last applied request: one
+// sideInfoLocked derives SideInfo from the side's last accepted request: one
 // row per per-CN export stack (primary_cn_id when non-zero plus every
 // standby_id_list entry), the migration roles only when the request carried
 // their conf, and the provisioning counters — total = ext_cnt and
@@ -914,7 +914,7 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 	return idList
 }
 
-// cntlrInfoLocked derives CntlrInfo from the cntlr's last applied request:
+// cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
 // one row per object it named — per slice, per group (meta and data), per leg
 // AND per spare leg of every group, per td, per subsystem, per namespace, per
 // clone and per xfer. td_id_to_thin_info is filled only when the request's
@@ -1150,7 +1150,7 @@ func (a *fakeAgent) cntlrKnownLocked(ptr *pb.CntlrPointer) bool {
 }
 
 // migrKnownLocked reports whether a migr_id appears in the side's last
-// applied request, in either the source or the destination role.
+// accepted request, in either the source or the destination role.
 func (a *fakeAgent) migrKnownLocked(key string, migrId uint64) bool {
 	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
 	if req == nil {
@@ -1166,7 +1166,7 @@ func (a *fakeAgent) migrKnownLocked(key string, migrId uint64) bool {
 }
 
 // cloneKnownLocked reports whether a clone_id appears in the cntlr's last
-// applied request.
+// accepted request.
 func (a *fakeAgent) cloneKnownLocked(key string, cloneId uint64) bool {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {

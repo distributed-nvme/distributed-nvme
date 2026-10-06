@@ -260,9 +260,12 @@ var spLevels = map[string]pb.SpLevel{
 	"DISABLE":      pb.SpLevel_SP_LEVEL_DISABLE,
 }
 
-// parseSpLevel accepts a level name, a full enum name or a raw number, so the
-// script can also send a level the enum does not declare and watch the
-// gateway refuse it (the faults case's validation battery, GW4).
+// parseSpLevel accepts a level name, a full enum name or a raw number in
+// int32 range. A number the enum does not declare is deliberately not a
+// driver error: refusing it is the gateway's job (validateSpLevel), so it
+// travels to the gateway as given and comes back as INVALID_ARGUMENT from
+// there; no suite stage sends one, and TestValidateSpLevel pins that
+// refusal.
 func parseSpLevel(spec string) (pb.SpLevel, error) {
 	key := strings.ToUpper(strings.TrimSpace(spec))
 	key = strings.TrimPrefix(key, "SP_LEVEL_")

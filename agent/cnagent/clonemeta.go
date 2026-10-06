@@ -282,11 +282,12 @@ func (c *CloneMeta) Wrappers(
 		if err != nil {
 			// The name list is a snapshot that is stale the instant it is
 			// printed: SyncupCntlr holds only the node read lock, so another
-			// cntlr's retire or SP_LEVEL_DISABLE teardown can remove a wrapper
-			// between the `ls` and this `table`. A wrapper that is gone claims
-			// no units, so the name is dropped rather than failing the CN-wide
-			// enumeration and flipping healthy clones of unrelated cntlrs to
-			// RES_STATUS_ERROR (ERROR feeds err_epoch; PROVISIONING does not).
+			// cntlr's sweep (CN21), at SP_LEVEL_DISABLE or otherwise, can
+			// remove a wrapper between the `ls` and this `table`. A wrapper
+			// that is gone claims no units, so the name is dropped rather than
+			// failing the CN-wide enumeration and flipping healthy clones of
+			// unrelated cntlrs to RES_STATUS_ERROR (ERROR feeds err_epoch;
+			// PROVISIONING does not).
 			//
 			// Absence is confirmed rather than assumed: a `table` that fails
 			// for a wrapper that is still *there* is a real failure and stays
@@ -513,8 +514,8 @@ func (s *CnAgentServer) cloneMetaArena(
 // on the plan, so a cntlr with N clones still issues one `losetup` and one
 // `dmsetup ls` (CN18: the loop device is re-learned every pass and
 // the probe compares against the *currently probed* one). The cache lives
-// exactly as long as the pass — the plan kept in cntlrState.applied is only
-// ever consulted for the retire diff, which names devices and probes nothing.
+// exactly as long as the pass: each pass builds its plan afresh
+// (newCntlrPlan), and nothing keeps a plan between passes.
 func (s *CnAgentServer) planArena(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -643,9 +644,9 @@ func (s *CnAgentServer) ensureCloneMeta(
 // a *mutation of the registry* — the registry being the kernel's dm table set
 // itself — so it belongs in the same critical section as the
 // enumerate → discard → create of ensureCloneMeta (CN18): two cntlrs of
-// one CN converge concurrently under the node read lock, and a retire that
+// one CN converge concurrently under the node read lock, and a sweep that
 // deleted a wrapper in the middle of another cntlr's allocation would both
-// break that enumeration and free a run under it.
+// invalidate that enumeration and free a run under it.
 //
 // cloneMetaMu stays a leaf: the only thing held inside it here is one bounded
 // `dmsetup info`/`remove` pair, and no other lock is ever acquired under it.

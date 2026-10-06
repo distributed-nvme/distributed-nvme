@@ -192,9 +192,9 @@ func setupSetSsHosts(fs *flag.FlagSet) job {
 // setupCreateNs drives CreateNamespace.
 //
 // --idx is the NVMe NSID the host will see and is the user's to choose, so it
-// has no useful default; 0 is reserved and the gateway refuses it, which is
-// what the suite's invalid-argument stage sends
-// (gateway.md, Integration test plan).
+// has no useful default; 0 is reserved and the gateway refuses it ("ns_idx
+// must not be 0"); no suite stage sends it, and TestCreateNamespaceRefusals
+// pins that refusal.
 //
 // --uuid and --nguid stay empty by default because an empty dev_uuid /
 // dev_nguid is the documented "mint one" request (CreateNamespace's Defaults,

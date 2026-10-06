@@ -957,7 +957,7 @@ func (w *spWorker) buildCntlrPlans(
 			// sp_level. Full absence is deliberately distinct from level
 			// suppression: a level-suppressed clone (SP_LEVEL_NO_CLONE) keeps
 			// its local chunk files for a later rebuild, while a deleting one
-			// must lose them — and the cn agent's removed-clone retire path
+			// must lose them — and the cn agent's sweep (cnagent.md CN21)
 			// drops them precisely when the clone id is absent from the plan.
 			// The primary's child is handed this exclusion when the RW14
 			// sides-first hold the latch's fan-out lands in releases the

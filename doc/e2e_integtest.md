@@ -265,8 +265,9 @@ message wherever a cntlr's slot would go (`architecture.md`, cntlid slots); a
 third cntlr's whole life, a standby with every leg, no stack and an
 inaccessible namespace, refused deletion while enabled, out of the discovery
 log once disabled, and no longer a usable path once deleted (`architecture.md`,
-Cntlrs); the level ladder down to disabled and back, each rung awaited at the
-primary's applied revision (`dnv-worker.md` RW14) and showing exactly the
+Cntlrs); the level ladder down to disabled and back, each rung awaited until
+the primary's `applied_revision` reaches the pool's revision read right
+after the level change (`dnv-worker.md` RW14) and showing exactly the
 suppressed rows missing with the fixed level marker (`ResDetailsSpLevel`) as
 their details (`cnagent.md` CN19; `architecture.md`, SpLevel), the read-only
 rung still reading the data and keeping a write off the media (`cnagent.md`

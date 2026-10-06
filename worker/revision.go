@@ -267,9 +267,9 @@ func (w *revWorker) desiredRevision() uint64 {
 	return w.desired.revision
 }
 
-// run is the per-object loop (RW4). Its seven steps are round(); step 7 —
-// re-arming the timer AFTER the round, so a slow round never queues a burst
-// of catch-up rounds (RW8) — is wait().
+// run is the per-object loop (RW4). Of its six steps, round() is 1-5, and
+// step 6 — re-arming the timer AFTER the round, so a slow round never queues a
+// burst of catch-up rounds (RW8) — is wait().
 func (w *revWorker) run() {
 	defer close(w.done)
 	if !awaitPredecessor(w.ctx, w.after) {
@@ -329,7 +329,7 @@ func (w *revWorker) run() {
 	}
 }
 
-// round runs one Check round (RW4 steps 1-6).
+// round runs one Check round (RW4 steps 1-5).
 func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 	ctx := newTraceCtx(w.ctx, w.seed)
 
@@ -407,7 +407,7 @@ func (w *revWorker) fail(ctx context.Context) {
 	w.driver.unreachable(ctx)
 }
 
-// wait is RW4 step 7: it arms the round timer AFTER the round (RW8) and stays
+// wait is RW4 step 6: it arms the round timer AFTER the round (RW8) and stays
 // responsive to a desired change (RW6) and to a graceful stop (RW11). cc is
 // nil while the loop idles (RW9), where a desired change is recorded but
 // nothing is sent. It returns false when the worker must stop.

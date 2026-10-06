@@ -164,9 +164,10 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 // safety property, not a best effort.
 //
 // Inside the window it only re-arms the timer. Once the window has elapsed it
-// finishes phase 2 itself. That is safe under the DN9 gate: the dm-error and
-// the dm-linear are the devices the fence suspended, not something built on
-// top of the side, and retiring them only moves the side *further* from
+// finishes phase 2 itself. That is safe under the DN9 gate: it only puts each
+// per-CN dm-linear on its dm-error, building either device where it is absent
+// (a level with no export layer marks the window over, endFence, even on a
+// side whose gate never opened), and that only moves the side *further* from
 // exporting data — which is exactly what the end of the window is for.
 func (s *DnAgentServer) settleFence(
 	ctx context.Context,

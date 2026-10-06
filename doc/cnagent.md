@@ -2600,7 +2600,8 @@ its `res_name` and what its probe checks:
 * `ss_id_to_subsystem`, named by the subsystem NQN: configfs: present,
   "attr_allow_any_host" "0" (one found with it set reports
   `RES_STATUS_ERROR`), cntlid range, serial and model (trimmed,
-  `dnagent.md` SH17), allowed hosts exactly as desired.
+  `dnagent.md` SH17), allowed hosts exactly as desired, and linked to the
+  port (`probeExport`).
 * `ns_id_to_namespace`, named by the NQN and the namespace index: the
   nvmet namespace is enabled, with the "device_path", "uuid" and "nguid"
   as desired (the identity compared through `agent.SameNsId` — configfs

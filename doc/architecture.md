@@ -3115,8 +3115,9 @@ match the record's runs reads `RES_STATUS_ERROR` (`dnagent.md` DN18).
 * `RES_STATUS_ERROR` — tried and failed; `details` says why, or carries
   the command output — *needs intervention*.
 * `RES_STATUS_OK`.
-* `RES_STATUS_PROVISIONING` — deliberately not created, or being
-  prepared: **healthy, not ready, no action needed**.
+* `RES_STATUS_PROVISIONING` — deliberately not created, being prepared,
+  or kept unprobed behind a side's provisioning gate that closed again
+  (`dnagent.md` DN9): **healthy, not ready, no action needed**.
 * `RES_STATUS_PENDING` — the primary's prober for the leg, started at the
   leg's build, at a promotion or at an agent restart, has not completed a
   round, or none is registered yet: **no verdict, no action needed**.
@@ -3152,8 +3153,9 @@ Automatic reactions. `RES_STATUS_PENDING` neither sets nor clears it.
 `RES_STATUS_PROVISIONING` **never** sets `err_epoch` (dn / cn roles, sp
 role) and never counts as a bad status for the capacity keys (Capacity
 index keys): it marks a resource excluded from the *effective* desired
-state while a side of its backing chain is still zeroing (Side
-provisioning protocol, [D15]). Only the deferred resources carry it — a
+state while a side of its backing chain is still zeroing, or while a
+side's own provisioning gate holds it back (Side provisioning protocol,
+[D15]). Only the deferred resources carry it — a
 serving thin pool keeps reporting `RES_STATUS_OK` with its raw `dmsetup
 status` details even while a grow is deferred, so the thin-pool auto-grow
 of Automatic reactions keeps parsing them. `SideInfo` additionally
@@ -3428,14 +3430,14 @@ device is there, the next enumeration finds it.
   belonging to a side or an sp whose pointer has left the parent's list,
   plus the objects no side or sp can be read off at all. *Object-level*,
   inside one side's or cntlr's own converge, under the node read lock plus
-  that object's own lock — so the objects of one node converge
-  concurrently — in place of a retire phase: that object's resources minus
-  its **wanted set**, which is what the build phase would ensure for the
-  stored request with every [D15] deferral that merely postpones an object
-  left in the set. A provisioning leg's wrapper and a deferred group's
-  array are wanted although the build skips them, or the pass that is
-  about to build them would sweep them away first. The one deferral that
-  shrinks the set instead is the source role of Migration: `dst_provisioned`
+  that object's own lock, so the objects of one node converge
+  concurrently: that object's resources minus its **wanted set**, which is
+  what the build phase would ensure for the stored request with every
+  [D15] deferral that merely postpones an object left in the set. A
+  provisioning leg's wrapper and a deferred group's array are wanted
+  although the build skips them, or the pass that is about to build them
+  would sweep them away first. The one deferral that shrinks the set
+  instead is the source role of Migration: `dst_provisioned`
   false is *defined* to be equivalent to no `migr_src_conf` at all, so a
   deferred source is neither built nor wanted (`dnagent.md` DN6). The
   node-level pass never touches a side or sp that *is* in the pointer
@@ -4184,8 +4186,9 @@ sides.
 the destination `Side` with `provisioned` false (Migrations), so the
 destination DN runs only the Side provisioning protocol: allocate the runs,
 build `DnSideName`, zero it batch by batch. No per-CN stacks, no metadata
-slot, no `nvme connect`, no dm-clone; the `migr_dst_info` rows report
-`RES_STATUS_PROVISIONING`.
+slot, no `nvme connect`, no dm-clone; what the destination's
+`migr_dst_info` rows report meanwhile, and at which levels, is
+`dnagent.md` DN13.
 
 For the **src** side, `migr_src_conf.dst_provisioned` false is normative
 and means: **behave exactly as if `migr_src_conf` were absent** — keep

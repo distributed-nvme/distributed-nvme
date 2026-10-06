@@ -1639,12 +1639,10 @@ cn_requests_since() {
 # Exported raw helpers and the probe-IO carve-out):
 # they call the raw block-IO syscalls directly and log their own records as
 # `probe write block` / `probe read block direct`, which are not in this grep
-# list by construction. So no path-based exemption is needed any more, and
-# `os write block` — the one block-IO msg an OsClient still emits
-# (common/osclient.go:335) — is a mutation without qualification. There is no
-# read-side msg left to grep for: the probe-IO carve-out deleted `OsClient.ReadBlockDirect` and
-# its log record outright, and the package-level `ReadBlockDirectAt` that
-# replaced it logs nothing at all
+# list by construction. So no path-based exemption is needed, and
+# `os write block` is a mutation without qualification. The OsClient's other
+# block record, `os read block`, is a read and not in the list; the cn agent
+# issues neither, and the probers' `ReadBlockDirectAt` logs nothing
 # (osclient.md, Exported raw helpers and the probe-IO carve-out).
 # Probe commands (lsblk, dmsetup info|table|status|ls, ls, findmnt, stat,
 # losetup --associated, mdadm --examine, nvme list-subsys) are expected and

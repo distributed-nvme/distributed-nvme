@@ -191,7 +191,8 @@ func newVoteHarnessOn(
 // makes a --vote-grace-time not longer than the dead threshold legal — "a
 // grace window not longer than the dead threshold is legal but pointless",
 // warned about and never rejected — so the vote worker (VW1-VW11) has to stay
-// correct there too, and that is the range the own-key cases below need.
+// correct there too. The own-key cases below (staleOwnKeyConfig) need a grace
+// shorter than the vote interval, which lies inside that range.
 func newVoteHarnessCfg(
 	t *testing.T,
 	cfg Config,
@@ -1155,10 +1156,10 @@ func testVoteFenceKeyDeleted(t *testing.T) {
 
 // staleOwnKeyConfig is the CM3-legal configuration the own-key cases need: a
 // grace window that closes before the next heartbeat tick can run VW8's checks,
-// so a commit for the worker's OWN registration is reached first. CM3 calls a
-// grace window not longer than the dead threshold "legal but pointless" and
-// only warns (cmd/dnv-worker); the shipped defaults (10/60) never reach it,
-// which is why the rest of this file cannot see what it exposes.
+// so a commit for the worker's OWN registration is reached first. With one role
+// whose puts return promptly, that takes a grace shorter than the vote
+// interval, which lies inside the range CM3 only warns about (cmd/dnv-worker):
+// a grace window not longer than the dead threshold is "legal but pointless".
 func staleOwnKeyConfig() Config {
 	return Config{
 		Roles:        []string{common.WorkerRoleDn},

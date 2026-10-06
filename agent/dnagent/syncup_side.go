@@ -701,9 +701,15 @@ func (s *DnAgentServer) moveCnAnaGroups(
 // ---------------------------------------------------------------------------
 
 // reportAboveSideDeferred fills every row above the side device with
-// RES_STATUS_PROVISIONING. It probes nothing, because there is nothing to look
-// at: those resources are deliberately not created while the side underneath
-// them is not exportable.
+// RES_STATUS_PROVISIONING. It probes nothing: the rows report that DN9's gate
+// is closed, not what exists above the side device. Behind the closed gate
+// nothing above the side device is created except by settleFence: its DN12
+// phase 2 creates a migration source's per-CN dm-error and dm-linear where
+// they are absent, even on a side whose gate never opened, since a level
+// with no export layer ends the window (endFence).
+// A gate that closes again on a side that already exports (DN9) removes
+// nothing, because the sweep's wanted set ignores the gate, so the resources
+// behind these rows can still exist and serve.
 //
 // PROVISIONING never feeds err_epoch (architecture.md, Live-state reporting),
 // which is the point: one cause is
@@ -740,9 +746,13 @@ func (s *DnAgentServer) reportAboveSideDeferred(
 		s.reportMigrSrcDeferred(st, plan, info)
 	}
 	if plan.wantMigr {
-		// The destination provisions first, under this same protocol: linear
-		// and zeroing only, no metadata slot, no connect, no dm-clone
-		// (architecture.md, Migration).
+		// The destination provisions first, under this same protocol
+		// (architecture.md, Migration): behind the closed gate no metadata
+		// slot, source connection or dm-clone is built for it. A gate that
+		// closes again removes none of them that a pass built while it was
+		// open (the sweep's wanted set ignores the gate, DN13), and these two
+		// rows do not probe them, so PROVISIONING here does not mean that no
+		// dm-clone exists.
 		dstInfo := &pb.SideInfo_MigrDstInfo{}
 		info.MigrDstInfo = dstInfo
 		nqn := plan.srcNqnOfDst()

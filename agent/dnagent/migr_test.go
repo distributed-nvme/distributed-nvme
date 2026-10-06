@@ -156,11 +156,6 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	}
 }
 
-// architecture.md, Migration, under [D15]: a migration destination provisions
-// before it does anything
-// else — the aggregate dm-linear and the zeroing, and nothing above it: no
-// clone-metadata slot, no connect, no dm-clone. Its migr_dst_info rows report
-// PROVISIONING throughout.
 // The finish step (architecture.md, Migrations, `FinishMigration`): the
 // request drops migr_dst_conf and the destination
 // becomes a plain side. The dm-clone sits *under* the per-CN dm-linear, so the
@@ -218,6 +213,11 @@ func TestMigrationDestinationFinishRepointsBeforeRemovingTheClone(t *testing.T) 
 	}
 }
 
+// architecture.md, Migration, under [D15]: a migration destination provisions
+// before it does anything else — the aggregate dm-linear and the zeroing, and
+// nothing above it: no clone-metadata slot, no connect, no dm-clone. Below
+// SP_LEVEL_NO_MIGRATION its migr_dst_info rows report PROVISIONING throughout
+// (DN13).
 func TestMigrationDestinationProvisionsFirst(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)

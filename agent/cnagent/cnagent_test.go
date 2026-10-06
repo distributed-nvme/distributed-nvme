@@ -4736,11 +4736,12 @@ func TestNamespaceSuspend(t *testing.T) {
 
 // TestParkIsIdempotent is SH16 for the park. The old suspend branch was
 // trivially idempotent (`np.suspended && !dev.Suspended`); the park's
-// idempotence rests on `parkNsDev`'s own `parked` predicate, which the retire
-// phase reaches first for an effectively suspended namespace — so a drift
-// there would reload a live, correct ns-dev on every converge round the worker
-// drives. (`ensureNsDev`'s `nsDevTableMatches` is the second gate and is
-// already satisfied by the time it runs here.)
+// idempotence rests on `parkNsDev`'s own `parked` predicate, which CN9's
+// pre-step 2 (the park of a planned ns-dev) reaches first for an effectively
+// suspended namespace — so a drift there would reload a live, correct ns-dev
+// on every converge round the worker drives. (`ensureNsDev`'s
+// `nsDevTableMatches` is the second gate and is already satisfied by the time
+// it runs here.)
 func TestParkIsIdempotent(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
@@ -4866,13 +4867,14 @@ func TestParkedNamespaceProbe(t *testing.T) {
 	}
 }
 
-// TestSuspendedNsDevFromAnOlderBuildIsResumed is the upgrade path (CN16): the
-// three shapes in which an agent that never suspends can
-// still meet a suspended ns-dev, and how each converges on the first pass.
+// TestSuspendedNsDevFromAnOlderBuildIsResumed is the upgrade and failure path
+// (CN16): three shapes in which a pass can meet a suspended ns-dev, and how
+// each converges on the first pass. An older build, or a reload that was
+// interrupted or failed (Dm.Reload fails closed), leaves an ns-dev suspended.
 func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
-	// leftover re-creates what a pre-2026-09-16 agent (or an interrupted
-	// reload) left behind, and returns the count of ns-dev reloads and resumes
-	// the next converge issues.
+	// leftover re-creates what an older build, or a reload that was
+	// interrupted or failed, left behind, and returns the count of ns-dev
+	// reloads and resumes the next converge issues.
 	leftover := func(
 		t *testing.T,
 		suspended bool,
@@ -5272,17 +5274,18 @@ func TestCntlidRangeMovesBetweenSlots(t *testing.T) {
 // Park before remove (CN9/CN21)
 // ---------------------------------------------------------------------------
 
-// TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN21's retire
-// order for a namespace that *leaves* the desired state. CN21's rationale is
-// that a dm-suspended device blocks the nvmet disable above it, and CN16's that
-// it blocks its own removal. No pass of this agent leaves an ns-dev suspended
-// unless a `dmsetup` command on it fails (architecture.md, Namespace suspend
-// semantics; [D12]), yet a teardown can still meet one — the leftover of such a
-// failure, of an interrupted reload or of an **older build** (CN16) — and an
-// older build's leftover is exactly what the two ordering sub-cases fixture.
-// The park — the reload onto the td's `CnErrorName`, whose internal resume is
-// the whole point — therefore has to precede the nvmet removal, not follow it
-// inside `removeDm`. The third sub-case is the steady state: an already parked
+// TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN21's order
+// (the P0 park before L1's nvmet removal) for a namespace that *leaves* the
+// desired state. CN21's rationale is that a dm-suspended device blocks the
+// nvmet disable above it, and CN16's that it blocks its own removal. No pass
+// of this agent leaves an ns-dev suspended unless a `dmsetup` command on it
+// fails (architecture.md, Namespace suspend semantics; [D12]), yet a teardown
+// can still meet one — the leftover of such a failure, of an interrupted
+// reload or of an **older build** (CN16) — and an older build's leftover is
+// exactly what the two ordering sub-cases fixture. The park — the reload onto
+// the td's `CnErrorName`, whose internal resume is the whole point —
+// therefore has to precede the nvmet removal, not follow it inside
+// `removeDm`. The third sub-case is the steady state: an already parked
 // namespace needs no reload at all.
 func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 	// Converge A: a primary serving one deliberately suspended namespace. It
@@ -5297,10 +5300,11 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 		node.Reset()
 		return srv, node
 	}
-	// olderBuildLeftover puts the ns-dev back into the state a pre-2026-09-16
-	// agent left it in: held `dmsetup suspend`ed, its table still the rule-6
-	// raid0. Nothing this build does produces it; it is the upgrade path, and
-	// the reason the park still has to come first.
+	// olderBuildLeftover puts the ns-dev into the state a park whose load
+	// failed leaves (Dm.Reload fails closed), which an older build also left:
+	// held `dmsetup suspend`ed, its table still the rule-6 raid0. That state
+	// is why the park has to come first: the nvmet disable above a suspended
+	// device does not complete.
 	olderBuildLeftover := func(t *testing.T, srv *CnAgentServer,
 		node *fakeNode) {
 		t.Helper()
@@ -5356,15 +5360,16 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 			"cmd dmsetup remove "+nsDevName(srv, testNs),
 		)
 		assertParkedOnError(t, srv, node)
-		// One park call, not one per retire step: an ordering assertion stops
-		// at its first match and cannot see a second one. The count is over
-		// `parkNsDev`'s own `dmsetup table` probe, which every call makes
-		// before it decides anything — counting reloads would prove nothing,
-		// because `parkNsDev` is idempotent (td.go: already linear over the
-		// errorName and resumed returns *before* `Reload`) and so a second
-		// park emits no dmsetup command at all. `dmsetup info` is no counter
-		// either: `removeDm` probes the same device below. It says nothing
-		// about any other ns-dev — this fixture removes exactly one.
+		// One park, not one per layer: an ordering assertion stops at its
+		// first match and cannot see a second one. The count is over
+		// `parkByTable`'s own `dmsetup table` read (CN21's P0), which every
+		// call that finds the device makes before it decides anything —
+		// counting reloads would prove nothing, because `parkByTable` leaves
+		// alone a device already linear over a kind-c5 dm-error (it only
+		// resumes one that is suspended), so a second park issues no reload.
+		// `dmsetup info` is no counter either: `removeDm` probes the same
+		// device below. It says nothing about any other ns-dev — this
+		// fixture removes exactly one.
 		parks := node.callsMatching(
 			"cmd dmsetup table " + nsDevName(srv, testNs))
 		if len(parks) != 1 {
@@ -5394,11 +5399,11 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 		assertParkedOnError(t, srv, node)
 	})
 
-	// The steady state after 2026-09-16: converge A already parked the ns-dev,
-	// so the sweep's park pre-step finds the table it wants on a live device and
-	// `parkNsDev` returns before it issues anything. The nvmet disable and the
-	// removal then work on a device nobody ever suspended — which is the whole
-	// point of the park, and what the two sub-cases above can no longer show.
+	// The steady state: converge A already parked the ns-dev, so the chain's
+	// P0 (`parkByTable`) finds it live and linear over a kind-c5 dm-error, and
+	// changes nothing (no suspend, reload or resume). The nvmet disable and
+	// the removal then work on a device nobody ever suspended — which is the
+	// whole point of the park, and what the two sub-cases above cannot show.
 	t.Run("an already parked namespace needs no reload", func(t *testing.T) {
 		srv, node := convergeA(t)
 		subsys := defaultSubsys(false)

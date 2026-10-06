@@ -1721,14 +1721,14 @@ func TestValidateCloneGeometry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bitmaps (architecture.md, Clones; gateway.md, Migrations)
+// Bitmaps (architecture.md, Clones; architecture.md, Migrations)
 // ---------------------------------------------------------------------------
 
 // TestValidateBitmap pins the one thing validateBitmap asserts about a
 // bitmap. GW14 makes the payload opaque — Append*Bitmap stores the bytes
 // verbatim and never inspects a bit — so the payload rule both appends share
 // is that an append must actually carry something (architecture.md, Clones;
-// gateway.md, Migrations).
+// architecture.md, Migrations).
 func TestValidateBitmap(t *testing.T) {
 	cases := []struct {
 		name   string

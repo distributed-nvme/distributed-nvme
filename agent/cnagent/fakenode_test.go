@@ -55,11 +55,11 @@ type fakeNode struct {
 	// need no separate lookup.
 	thinPools map[string]map[uint32]bool
 	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
-	// listing is an inherently stale snapshot — another cntlr's retire or
-	// SP_LEVEL_DISABLE teardown runs under the same node *read* lock and can
-	// remove a wrapper between the `ls` and the `dmsetup table` of that one
-	// name — and this is how the suite reproduces that window deterministically
-	// ([D14]).
+	// listing is an inherently stale snapshot — another cntlr's sweep
+	// (CN21), at SP_LEVEL_DISABLE or otherwise, runs under the same node
+	// *read* lock and can remove a wrapper between the `ls` and the
+	// `dmsetup table` of that one name — and this is how the suite
+	// reproduces that window deterministically ([D14]).
 	lsGhosts []string
 	// dmLsLegacyDevNo switches `dmsetup ls` to the older "(253, 4)" device
 	// number spelling. Dm.List normalizes both into "253:4"; nothing on the
@@ -1282,7 +1282,7 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		if holder := f.heldBy("/dev/mapper/" + name); holder != "" {
 			// A device another live table still maps is open, and the
 			// kernel refuses to remove it (-EBUSY). Modelling this is what
-			// makes a retire phase that runs out of order fail a test
+			// makes a teardown that runs out of order fail a test
 			// rather than only a real node.
 			f.dispatchStderr = "device-mapper: remove ioctl on " + name +
 				" failed: Device or resource busy (held by " + holder + ")"

@@ -408,8 +408,9 @@ primary's leg rows (`cnagent.md` CN11), and never `RES_STATUS_UNKNOWN`
 has not completed a round since it started (a build, a promotion or an agent
 restart) — no verdict*, and it neither sets nor clears `Leg.err_epoch`
 (`architecture.md`, Live-state reporting and sp role).
-`RES_STATUS_PROVISIONING` means *deliberately not created yet, healthy, no
-action needed*: it is what a resource waiting behind DN9's provisioning gate
+`RES_STATUS_PROVISIONING` means *deliberately not created yet, or kept
+unprobed behind DN9's gate after it closed again, healthy, no action
+needed*: it is what a resource waiting behind DN9's provisioning gate
 reports, and unlike `RES_STATUS_ERROR` it never feeds `err_epoch`
 (`architecture.md`, Live-state reporting, dn / cn roles, sp role and
 Automatic reactions). A resource that leaves the desired state must lose its
@@ -1614,9 +1615,12 @@ disk extent**: extents freed and reallocated to a new side start
 all-not-zeroed again, whatever happened to them before, because `AllocSide`
 is the only constructor of a record and `FreeSide` deletes records whole.
 
-`provisioned` is monotone — the worker only ever flips it false to true
-(the flip rule of `architecture.md`, Live-state reporting) and bits are
-only ever set — so the gate never tears an already-exporting stack down.
+`provisioned` only ever flips false to true (the flip rule of
+`architecture.md`, sp role) and the agent only ever sets bits, yet the gate
+can close again on a side that already exports: a row 5 or row 6 outcome
+below, or any fault of the side device (DN12). Closing it removes nothing,
+because the sweep's wanted set is what the build would ensure were the gate
+open (DN6).
 
 **Converge matrix** (`side_conf.provisioned` × local state):
 
@@ -1701,12 +1705,13 @@ yet, and `n` must never be taken from the request.
 DN10. **Per-CN export stacks.** They converge **only** with DN9's gate open
 — `side_conf.provisioned` true and every `zeroed_bits` bit set. While it is
 closed the whole per-CN stack is skipped (dm-error, dm-linear, nvmet
-subsystem, namespace) and nothing is torn down either, because the gate is
-monotone; each `cn_id_to_dm_error` / `cn_id_to_dm_linear` /
-`cn_id_to_nvmeof` entry reports `RES_STATUS_PROVISIONING` with details
-"side provisioning" (DN18). The fault of a row 5 or row 6 side stays on
-`side_dev_info` alone — duplicating one cause across every per-CN row would
-multiply `err_epoch` churn. With the gate open, for `primary_cn_id` and
+subsystem, namespace), but never a migration source's fence (DN12), and
+nothing is torn down either (DN9); each
+`cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` entry
+reports `RES_STATUS_PROVISIONING` with details "side provisioning" (DN18).
+The fault of a row 5 or row 6 side stays on `side_dev_info` alone —
+duplicating one cause across every per-CN row would multiply `err_epoch`
+churn. With the gate open, for `primary_cn_id` and
 every `standby_id_list` entry: `DnErrorName` (dm-error sized like
 `DnSideName`), `DnLinearName` (table → the side device for the primary CN,
 the dm-error for standbys), nvmet subsystem `SideToCnNqn` on the node port
@@ -1851,10 +1856,11 @@ Four rules keep the suspension bounded, which is what makes it safe:
   would take this same gate, and a `CheckSide` round neither converges nor
   bumps a revision. One transient probe failure would otherwise leave the
   linears suspended, queueing bios with no timeout, until the worker next
-  happened to re-sync the side. Running phase 2 under that gate is safe: the
-  dm-error and the dm-linear are the devices the fence itself suspended,
-  not something built on top of the side, and retiring them only moves the
-  side further from exporting data.
+  happened to re-sync the side. Running phase 2 under that gate is safe: it
+  only puts each per-CN dm-linear on its dm-error, building either device
+  where it is absent, as after a level with no export layer marked the
+  fence over (`endFence`), and that only moves the side further from
+  exporting data.
 
 While the window is open the per-CN `dm_linear_info` is `RES_STATUS_OK`
 with details "suspended (migration cutover grace window)": it is an
@@ -2191,7 +2197,8 @@ of a converge they re-run for a reason of their own.
 
 DN18. Probe map (all via SH17 conventions; a `res_name` and a probe per
 resource). `RES_STATUS_PROVISIONING` rows are **healthy**: the resource is
-deliberately not created yet, no action is needed, and the worker never
+deliberately not created yet, or kept unprobed behind DN9's gate after it
+closed again (DN9), no action is needed, and the worker never
 turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 `RES_STATUS_ERROR` keeps meaning *needs intervention*.
 
@@ -2240,8 +2247,10 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   desired role). Inside the cutover window of `architecture.md`, Migration,
   the expected target is the **pre-fence** one and the details are
   "suspended (migration cutover grace window)"; the probe never starts a
-  window (DN16). While DN9's gate is closed no device is expected to exist
-  and both report `RES_STATUS_PROVISIONING`, details "side provisioning".
+  window (DN16). While DN9's gate is closed neither device is probed and
+  both report `RES_STATUS_PROVISIONING`, details "side provisioning",
+  whether or not they exist: a gate that closes again on a side that
+  already exports removes nothing (DN9).
 * `cn_id_to_nvmeof` per cn, named by the `SideToCnNqn`: configfs —
   subsystem present with its attributes, namespace enabled over the right
   "device_path" and in the desired "ana_grpid", linked to the port

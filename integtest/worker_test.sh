@@ -3379,10 +3379,10 @@ case_drain() {
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
 	# CLD5, observed from the agent's side: the latched clone left every
-	# cntlr's plan. That exclusion IS the teardown — the cn agent's
-	# removed-clone retire path drops the stack and the local chunk files
-	# precisely when the id stops appearing — so the SP must keep syncing
-	# while carrying no clone at all.
+	# cntlr's plan. That exclusion IS the teardown — the cn agent's sweep
+	# (cnagent.md CN21) drops the stack and the local chunk files precisely
+	# when the id stops appearing — so the SP must keep syncing while
+	# carrying no clone at all.
 	wait_until "$WAIT_SYNCUP" "cn0: a NEW SyncupCntlr with the clone excluded" \
 		reqs_gt "$excluded_before" cn0 SyncupCntlr \
 		'((.clone_list // []) | length) == 0'

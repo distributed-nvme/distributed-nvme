@@ -624,11 +624,12 @@ func TestTheCheckRoundMirrorsTheDisconnectGate(t *testing.T) {
 	}
 }
 
-// TestABackgroundDisconnectCarriesThePassTraceId pins CN10's "the goroutine
-// carries the pass's trace id": the disconnect is one command of that pass,
-// and its `os command` record is how a stall is read back out of the log — a
-// record of `nvme disconnect` whose previous record of the same trace id is
-// the admin timeout older.
+// TestABackgroundDisconnectCarriesThePassTraceId pins CN10's "carries the
+// pass's trace id, or a fresh one when the pass had none" for a pass that
+// has one: the disconnect is one command of that pass, and its `os command`
+// record is how a stall is read back out of the log — a record of
+// `nvme disconnect` whose previous record of the same trace id is the admin
+// timeout older.
 func TestABackgroundDisconnectCarriesThePassTraceId(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2})

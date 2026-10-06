@@ -15,10 +15,8 @@
 //     away.
 //   - The teardown comes from EXCLUSION rather than from a step (CLD5). From
 //     the first post-latch fan-out the deleting clone is absent from every
-//     cntlr's plan and from the primary's chunk-push plans, and the CN's
-//     existing removed-clone retire path dismantles the stack exactly once.
-//     Zero agent changes: to an agent this is indistinguishable from today's
-//     post-delete syncup.
+//     cntlr's plan and from the primary's chunk-push plans, and the cn
+//     agent's sweep (cnagent.md CN21) dismantles the stack exactly once.
 //   - The final step BUMPS SpRev instead of deleting it. The SP outlives the
 //     clone, so the bump is every mutator's normal epilogue rather than the
 //     stop signal the sp drain's D3 removes.

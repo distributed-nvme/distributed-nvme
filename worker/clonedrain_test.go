@@ -48,8 +48,8 @@ func (h *reactHarness) withClone(name string, id uint64, pairs [][2]uint32) {
 	h.state.CloneBmIdx[name] = chunks
 }
 
-// TestCloneDrainDerivation is CLD7's derivation half, all three states, plus
-// the control that keeps a live clone out of it.
+// TestCloneDrainDerivation is CLD7's derivation half, both states, plus the
+// control that keeps a live clone out of it.
 func TestCloneDrainDerivation(t *testing.T) {
 	t.Run("chunks remain", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -387,11 +387,12 @@ func TestCloneDrainArmsAfterACommittedBatch(t *testing.T) {
 //
 // Full absence is deliberately distinct from level suppression. A
 // level-suppressed clone (SP_LEVEL_NO_CLONE) keeps its local chunk files for a
-// later rebuild; a deleting one must lose them, and the cn agent's
-// removed-clone retire path drops them precisely when the clone id is absent
-// from the plan. That retire is the whole teardown — zero agent changes — so
-// an exclusion that only removed the chunk plans, or only the clone_list,
-// would leave the CN's dm-clone standing for ever.
+// later rebuild; a deleting one must lose them, and the cn agent's sweep
+// (cnagent.md CN21) drops them precisely when the clone id is absent from the
+// plan. That sweep, and the build phase after it, are the whole physical
+// teardown (CLD5), so a clone an exclusion left in a cntlr's clone_list would
+// keep its chunk files there, and on the primary what the level leaves of its
+// stack, until the final STM (CLD9) takes it out of the plan.
 func TestCloneExclusionFromThePlans(t *testing.T) {
 	for _, level := range []pb.SpLevel{
 		pb.SpLevel_SP_LEVEL_READWRITE,

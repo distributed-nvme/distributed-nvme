@@ -25,10 +25,9 @@
 # through `jq -R 'fromjson? // empty'` (recs below) — a partial last line is
 # dropped, never fails an assertion.
 #
-# FOUR THINGS THIS SUITE ESTABLISHED ON REAL HARDWARE (Linux 7.0, nvme-cli
-# 2.16, nvme-stas 2.4.1). doc/cdc.md was corrected against each of them at
-# implementation time; they are repeated here because they are the reason
-# several assertions below look the way they do:
+# THREE THINGS THIS SUITE ESTABLISHED ON REAL HARDWARE (Linux 7.0, nvme-cli
+# 2.16, nvme-stas 2.4.1). They are the reason several assertions below look
+# the way they do:
 #
 #  1. The discovery AEN reaches a host as the udev property
 #     NVME_AEN=0x70f002 (the AER completion's dword 0 verbatim), NOT as
@@ -38,14 +37,10 @@
 #     unit on both hosts and cleanup unmasks it (nvme-stas 2.x has no knob of
 #     its own). It is masked for EVERY case: it would otherwise connect behind
 #     case L's back the instant an AEN landed, which is what case L measures.
-#  3. ssC uses shard code `80`, not `08`: DS2 gives range digit h the codes
-#     h0..hf, so 08 belongs to range 0 and would land in the LOW half,
-#     contradicting the matrix case's grid (Integration test plan, Cases).
-#  4. nvme-stas sends the TP-8010 DIM command (opcode 21h) WITH in-capsule
+#  3. nvme-stas sends the TP-8010 DIM command (opcode 21h) WITH in-capsule
 #     data to every discovery controller. Terminating the connection over that
-#     — the original reading of NP2 — put stas in a permanent connect/reset
-#     loop; refusing the command with invalid opcode is what it expects. Case
-#     T is what caught it, and what keeps it caught.
+#     puts stas in a permanent connect/reset loop; refusing the command with
+#     invalid opcode is what it expects (cdc.md NP2). Case T guards this.
 #
 set -euo pipefail
 
@@ -160,7 +155,7 @@ declare -A CASE_CID=(
 CASES=(smoke matrix lowlevel stas ha)
 
 # The uevent property the discovery-log-change AEN reaches a host as (header
-# deviation 1).
+# item 1).
 AEN_PROP='NVME_AEN=0x70f002'
 
 # ---------------------------------------------------------------------------
@@ -856,7 +851,7 @@ uevents_stop() { # <h1|h2>
 # aen_count is how many discovery-log-change AENs one host's capture holds for
 # one controller. `udevadm monitor --property` prints one blank-line-separated
 # block per event, so the count is the number of blocks whose DEVPATH ends in
-# that controller AND that carry the AEN property (header deviation 1).
+# that controller AND that carry the AEN property (header item 1).
 aen_count() { # <h1|h2> <nvmeN>
 	# Same guard as count_recs: awk prints 0 on empty input, so a capture
 	# that could not be READ would otherwise read as "no AEN arrived" — the

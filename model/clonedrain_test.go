@@ -454,8 +454,9 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 // untouched but for the one name the final STM removes.
 //
 // Clone chunks are not budgeted to any node and the CN arena units behind the
-// metadata wrapper are agent-local, freed by the retire path — which is what
-// makes a batch a constant 68 ops whatever the ceilings become.
+// metadata wrapper are agent-local, freed by the cn agent's sweep
+// (cnagent.md CN21) — which is what makes a batch a constant 68 ops whatever
+// the ceilings become.
 func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()

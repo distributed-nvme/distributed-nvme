@@ -53,14 +53,13 @@ func errPrecondition(format string, args ...any) error {
 	return status.Errorf(codes.FailedPrecondition, format, args...)
 }
 
-// errExhausted is a cardinality ceiling: the Max*CntPerCluster / Max*CntPerSp
-// gates, "too few candidates" (architecture.md, Per-operation allocation) and
-// the Append*Bitmap count caps. GW7's
-// dividing line: RESOURCE_EXHAUSTED is capacity or quota that could be freed
-// or extended, FAILED_PRECONDITION the object's own state forbidding the
-// operation — which is why the meta ladder cap left this list for
-// errPrecondition, and why GrowSlice's common.MaxGrpCntPerSlice group ceiling,
-// a count that nothing frees, never joined it.
+// errExhausted is GW7's RESOURCE_EXHAUSTED, whose cases are count ceilings,
+// "too few candidates" (architecture.md, Per-operation allocation) and
+// capacity shortfalls. GW7's dividing line: RESOURCE_EXHAUSTED is capacity or
+// quota that could be freed or extended, FAILED_PRECONDITION the object's own
+// state forbidding the operation — which is why the meta ladder cap is an
+// errPrecondition, not an errExhausted, and so is GrowSlice's
+// common.MaxGrpCntPerSlice group ceiling (architecture.md, GrowSlice).
 func errExhausted(format string, args ...any) error {
 	return status.Errorf(codes.ResourceExhausted, format, args...)
 }
@@ -843,8 +842,8 @@ func findNs(subsystem *pb.Subsystem, nsIdx uint32) *pb.Namespace {
 // One CdcEntry exists per Subsystem of the SP and advertises the transport
 // address of every enabled cntlr's CN. Three RPCs move an address in or out of
 // all of them at once — CreateCntlr, DeleteCntlr and UpdateCntlrEnabled — and
-// they all go through these two helpers so the entries can never disagree
-// about what is advertised.
+// they all go through addCdcTrConf and dropCdcTrConf so the entries can never
+// disagree about what is advertised.
 
 // eachCdcEntry applies f to the CdcEntry of every subsystem of the SP and
 // writes back whatever f changed.

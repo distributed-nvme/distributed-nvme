@@ -79,7 +79,8 @@ func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 
 // Provisioning is the [D15] outcome: the resource is deliberately not created
 // yet, because the sides underneath it are still being zeroed
-// (architecture.md, Side provisioning protocol). It
+// (architecture.md, Side provisioning protocol), or, on the dn, a side's
+// provisioning gate that closed again keeps it unprobed (dnagent.md DN9). It
 // means healthy / not ready / no action needed, and — unlike ERROR — never
 // feeds err_epoch (architecture.md, Live-state reporting, dn / cn roles,
 // sp role and Automatic reactions).

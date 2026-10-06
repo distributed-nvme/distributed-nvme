@@ -25,8 +25,8 @@ import (
 )
 
 // cnAddrFlag declares the group's identity flag: a controller node's name IS
-// its ip:port (dnvctl.md, Conventions), so `addr_port` is what every CN
-// request is keyed on.
+// its ip:port (dnvctl.md, Conventions), so every leaf but `cn list` keys its
+// request on `addr_port`.
 //
 // It has no default, and an omitted --addr therefore sends an EMPTY
 // addr_port rather than being rejected here — CT8 leaves "required field is

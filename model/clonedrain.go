@@ -18,8 +18,9 @@ import (
 //
 //   - It is LEDGER-FREE. Clone chunks are not budgeted to any node and the CN
 //     arena units behind the metadata wrapper are agent-local, freed by the
-//     retire path, so no `dn_*` or `cn_*` key is ever touched. That is what
-//     makes a batch a constant 68 compares whatever the ceilings become.
+//     cn agent's sweep (cnagent.md CN21), so no `dn_*` or `cn_*` key is ever
+//     touched. That is what makes a batch a constant 68 compares whatever the
+//     ceilings become.
 //   - The SP OUTLIVES the clone, so the final STM bumps SpRev like every other
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than
@@ -104,10 +105,11 @@ func loadCloneForOp(
 // which is what this drain derives its position from — and rewriting the record
 // would both cost an op and invent a second copy of the truth.
 //
-// Physical effect: none. The CN dropped its local chunk files at retire — the
-// first syncup after the latch, where the clone is already absent from the
-// plan — agents never read etcd, and an excluded clone has no bitmap pusher, so
-// the batch is pure bookkeeping removal.
+// Physical effect: none (CLD8). The CN drops its local chunk files in its sweep
+// (cnagent.md CN21) once the clone has left the cntlr's request, which the
+// latch's fan-out does (CLD5); agents never read etcd; and a push of the clone
+// that finds a chunk key a batch deleted ends there, harmlessly (CLD5). So the
+// batch is pure bookkeeping removal.
 func DrainCloneBm(
 	ctx context.Context,
 	cli *etcdutil.Client,

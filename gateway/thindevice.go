@@ -24,7 +24,7 @@ import (
 // td's thin volume RES_STATUS_OK in EVERY slice of the SP. Snapshot creation
 // is gated on it because `create_snap` has a kernel-level dependency on the
 // origin's id already being in each slice pool, and origin deletion is gated
-// on it because retire runs before build (cnagent.md CN9), so an origin
+// on it because the sweep runs before the build (cnagent.md CN9), so an origin
 // leaving td_list in the converge that would first materialize its snapshot
 // would send `delete {ori dev_id}` before `create_snap` and lose the snapshot
 // for good.

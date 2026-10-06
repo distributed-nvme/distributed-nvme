@@ -1,8 +1,8 @@
 // The disk node subcommands of dnvctl (dnvctl.md, `dn` — `ctl/dn.go`): the
 // six RPCs that manage a DN inside one cluster. Every one of them takes
-// cluster_name from the global --cluster (dnvctl.md, Conventions) and names
-// its node with --addr, because a DN's name IS its agent's ip:port — there
-// is no separate id to type.
+// cluster_name from the global --cluster (dnvctl.md, Conventions), and all
+// but `dn list` name their node with --addr, because a DN's name IS its
+// agent's ip:port — there is no separate id to type.
 //
 // Two of the six are token-carrying mutators (CT3): `dn delete` and
 // `dn set-disabled` send dn_rev, built by root.go's dnRev from the global
@@ -190,7 +190,8 @@ func dnSetDisabledCmd() *cobra.Command {
 
 // dnInspectCmd drives InspectDiskNode, which the gateway answers by calling
 // the DN agent's GetDnInfo — a live read of the node, not of etcd, whose reply
-// pairs the DnInfo with the revision the agent has actually applied.
+// pairs the DnInfo with the revision of the last SyncupDn the agent accepted
+// for the node.
 func dnInspectCmd() *cobra.Command {
 	cmd := leaf("inspect", "read a disk node live from its agent "+
 		"(InspectDiskNode)",

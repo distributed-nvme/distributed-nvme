@@ -697,11 +697,11 @@ func transportHealth(
 // again by the first pass that finds the controller still there after the
 // goroutine has gone.
 //
-// The goroutine carries the pass's trace id — the command is that pass's own,
-// only not waited for — and takes none of the CN1 locks. It is not joined at
-// exit (`dnagent.md` SH27): the child holds nothing a restarted agent needs,
-// and a delete already in the kernel finishes whether or not anybody waits
-// for it.
+// The goroutine carries the pass's trace id, or a fresh one when the pass had
+// none — the command is that pass's own, only not waited for — and takes
+// none of the CN1 locks. It is not joined at exit (`dnagent.md` SH27): the
+// child holds nothing a restarted agent needs, and a delete already in the
+// kernel finishes whether or not anybody waits for it.
 //
 // At most disconnectConcurrency of them run at once. The rest wait for a
 // slot and stay registered while they wait, so a queued disconnect keeps the

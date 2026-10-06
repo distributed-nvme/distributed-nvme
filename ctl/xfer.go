@@ -143,8 +143,8 @@ func xferGetCmd() *cobra.Command {
 
 // xferSetHostsCmd is UpdateTransferHosts — the RPC for "the destination cntlr
 // moved to another CN". Like every --hosts in dnvctl the value REPLACES the
-// stored `allowed_hosts` rather than adding to it, so an empty --hosts clears
-// the list and locks the subsystem down.
+// stored `allowed_hosts` rather than adding to it, so an empty --hosts revokes
+// every host (architecture.md, Primary cntlr, step 6).
 func xferSetHostsCmd() *cobra.Command {
 	cmd := leaf(
 		"set-hosts",

@@ -120,8 +120,9 @@ func TestParseSpLevel(t *testing.T) {
 		{"readonly", pb.SpLevel_SP_LEVEL_READONLY, true},
 		{"SP_LEVEL_NO_THINPOOL", pb.SpLevel_SP_LEVEL_NO_THINPOOL, true},
 		{"112", pb.SpLevel_SP_LEVEL_DISABLE, true},
-		// A number the enum does not declare is accepted here on purpose, so
-		// the faults case's validation battery can watch the GATEWAY refuse it.
+		// A number the enum does not declare is accepted here on purpose:
+		// refusing it is the gateway's job (validateSpLevel). No suite stage
+		// sends one, and TestValidateSpLevel pins that refusal.
 		{"7", pb.SpLevel(7), true},
 		{"nope", 0, false},
 	}

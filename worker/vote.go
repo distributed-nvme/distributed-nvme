@@ -960,19 +960,28 @@ func (v *voteWorker) commit(
 // never stopped running. It also defeats the observability contract of
 // dnv-worker.md, Log records, where "worker fenced" is what an operator greps
 // to see a worker leave. So the commit is abandoned and VW8's single "the fleet
-// gave up on me" path runs instead. It is reachable whenever the grace window
-// is short enough to close before the next heartbeat tick's VW8 check, which
-// CM3 explicitly permits (a grace window not longer than the dead threshold is
-// "legal but pointless").
+// gave up on me" path runs instead. It is reachable whenever that commit comes
+// before a VW8 check has fenced the worker. A tick runs its check only after
+// its puts returned, so for a worker of one role whose own key has gone dead at
+// its deadline (VW3), that takes a grace shorter than about one vote interval
+// while puts return promptly, and allows a longer one while a tick's puts block
+// on an unreachable etcd. With several roles it can come at any grace, the
+// defaults included: VW8 (b) counts an echo of any role, so while every put
+// lands and only some roles' watches have stopped echoing them, no VW8 check
+// fences the worker and this commit does.
 //
-// The reason names the CAUSE, not the consequence. VW8 (a) and (b) are re-tested
-// first, in that order — this observer stopped seeing its own key because its
-// heartbeat stopped reaching etcd, or because its watch stopped echoing its
-// puts — which is also what keeps the vote case (VW8 (a)) true: a resumed
-// SIGSTOPped worker fences as heartbeat_stalled whichever of its expired timers
-// the loop drains first. Only when neither holds is the key genuinely gone from
-// the registry without this process deleting it — VW8(c)'s fact, learned from a
-// rescan (VW3) instead of from a delete event.
+// The reason names the CAUSE, not the consequence, wherever VW8 can tell them
+// apart. checkFence first retries any fence a failed seed mint had deferred,
+// under that fence's own reason. With no such fence pending, VW8 (a) and (b)
+// are re-tested first, in that order — this observer stopped seeing its own
+// key because its heartbeat stopped reaching etcd, or because its watch
+// stopped echoing its puts — which is also what keeps the vote case (VW8 (a))
+// true: a resumed SIGSTOPped worker fences as heartbeat_stalled whichever of
+// its expired timers the loop drains first.
+// Otherwise the reason is key_deleted: the key genuinely gone from the registry
+// without this process deleting it — VW8(c)'s fact, learned from a rescan (VW3)
+// instead of from a delete event — or, with several roles, a stall (b) cannot
+// see, some roles' watches having stopped echoing while another's had not.
 func (v *voteWorker) fenceSelfStale(inc *incarnation, now time.Time) bool {
 	if v.checkFence(inc, now) {
 		return true

@@ -312,8 +312,7 @@ uncommitted (`dnv-worker.md` EU4).
 * `FAILED_PRECONDITION`: a documented public precondition fails, a
   `model.ErrPrecondition` with any reason but the two below included — the
   meta ladder cap among them, and `GrowSlice`'s `MaxGrpCntPerSlice` group
-  ceiling: a count, but one nothing frees, since a live slice's groups are
-  only appended.
+  ceiling (`architecture.md`, GrowSlice).
 * `RESOURCE_EXHAUSTED`: a global's `shard_bucket` sum at `Max*CntPerCluster`;
   the per-SP and per-group count ceilings — `cntlr_id_list` at
   `MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at
@@ -350,9 +349,9 @@ an `ErrPrecondition`, so the client sees `FAILED_PRECONDITION`. An
 
 The dividing line: `RESOURCE_EXHAUSTED` is capacity or quota that could be
 freed or extended (extents, candidates, count ceilings — though not
-`GrowSlice`'s `MaxGrpCntPerSlice`, which nothing frees);
-`FAILED_PRECONDITION` is the object's own state forbidding the operation,
-that group ceiling included, since a live slice's groups are only appended.
+`GrowSlice`'s `MaxGrpCntPerSlice` group ceiling, `architecture.md`,
+GrowSlice); `FAILED_PRECONDITION` is the object's own state forbidding the
+operation.
 A `GrowSlice` capacity shortfall sits on both sides, on either half of the
 allocation. A CN-budget shortfall is `RESOURCE_EXHAUSTED` when `GrowSlice`'s
 pre-check sees it, but `FAILED_PRECONDITION` when it only appears in the
@@ -605,7 +604,7 @@ and field-level rules stay in the cited section of `architecture.md`,
   that wants the desired-state token calls `GetDiskNode`); **after** the STM
   call `GetDnInfo` with the cluster id and `dn_id`; an agent failure is
   `ABORTED`. Reply `applied_revision` and `dn_info`, both from the agent's
-  reply (`architecture.md`, Disk nodes — deliberately the agent's applied
+  reply (`architecture.md`, Disk nodes — deliberately the agent's
   revision, never the stored rev key).
 
 ### Controller nodes
@@ -1361,7 +1360,7 @@ gateway, never through `workerctl`.
   defaultable member of the
   stored confs resolved on the write path; paging with its empty last page
   and a malformed token; the inspects and bitmap reads passing the agent's
-  bytes and applied revision through verbatim, a revision no stored rev key
+  bytes and revision through verbatim, a revision no stored rev key
   holds; the worker flips the snapshot and spare-switch preconditions wait
   for; the clone's pair-addressed chunks, its latch with the destination
   namespace resumed, its repeat delete and its refusals while latched, then

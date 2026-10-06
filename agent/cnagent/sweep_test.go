@@ -275,10 +275,11 @@ func TestSweepFailureRetries(t *testing.T) {
 	}
 }
 
-// TestSweepSurvivesDeleteFailure is why the sweep does not reuse deleteThinId:
-// that path swallows the message error by design (CN14's fire-and-forget
-// retire), and a swallowed error here would disarm the slice with the stray
-// still in the pool — a leak nothing would ever look at again.
+// TestSweepSurvivesDeleteFailure is why the activation sweep does not reuse
+// deleteThinIdByName: that path, CN21's L7 delete, swallows the message error
+// by design (CN14 leaves a failed delete message to the pool's next rebuild),
+// and a swallowed error here would disarm the slice with the stray still in
+// the pool — a leak nothing would look at again before that rebuild.
 func TestSweepSurvivesDeleteFailure(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)

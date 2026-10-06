@@ -172,9 +172,9 @@ func (s *CnAgentServer) ensureNsDev(
 	}
 	hold := cloneMayLinger && np.td != nil &&
 		np.backingName == np.td.raid0Name
-	// The td's dm-error is the one backing that may not exist yet when a
-	// namespace is pointed at it — the sweep's park pre-step reaches here
-	// before the build phase creates it.
+	// The td's dm-error is ensured again here, probe-first: the build's td
+	// loop ensures it earlier in the pass (CN15), and this retries it on a
+	// pass in which that step failed.
 	if np.td != nil && np.backingName == np.td.errorName {
 		if err := s.ensureDmError(
 			ctx, np.td.errorName, np.td.sectors); err != nil {
@@ -286,16 +286,16 @@ func onDevice(targets []agent.DmTarget, devNo string) bool {
 		targets[0].Args[0] == devNo
 }
 
-// parkNsDev reloads one ns-dev onto its td's dm-error. It is both
-// old_primary step 3 of architecture.md, Failover, and the "park before
-// teardown" of CN21: the ns-dev must
-// stop mapping whatever is about to be removed under it, and the reload's own
-// flushing suspend is what completes the in-flight IO on the old table. The
-// reload also resumes a device an **older build** left deliberately suspended
-// (or a reload that was interrupted or failed left behind), which that
-// device's own removal and the nvmet disable above it require — when its own
-// commands succeed: one whose load fails leaves the device suspended
-// (Dm.Reload fails closed).
+// parkNsDev reloads one ns-dev onto its td's dm-error. It is CN9's
+// pre-step 2, the park of a planned ns-dev, which performs old_primary step 3
+// of architecture.md, Failover, and it is the park of a clone recovery
+// (CN18 step 2); the park of an unwanted ns-dev is CN21's P0, parkByTable.
+// Where a removal follows, the ns-dev must stop mapping whatever is about to
+// be removed under it, and the reload's own flushing suspend is what
+// completes the in-flight IO on the old table. The reload also resumes a
+// device an **older build** left deliberately suspended (or a reload that
+// was interrupted or failed left behind) — when its own commands succeed:
+// one whose load fails leaves the device suspended (Dm.Reload fails closed).
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -363,8 +363,8 @@ func (s *CnAgentServer) nsConf(np *nsPlan, anaGrpId int) agent.NsConf {
 // ensureNamespaceObject creates or converges one nvmet namespace **without**
 // moving its ANA group: an existing namespace keeps the group it has and the
 // CN9 final pass promotes it, a fresh one starts `inaccessible`. Folding the
-// ANA write in here would both break the retire→build ordering and make an
-// idempotent re-apply write `ana_grpid` twice.
+// ANA write in here would both break the sweep-then-build ordering (CN9) and
+// make an idempotent re-apply write `ana_grpid` twice.
 func (s *CnAgentServer) ensureNamespaceObject(
 	ctx context.Context,
 	np *nsPlan,

@@ -696,9 +696,7 @@ registration that flaps faster than the grace time therefore still never
 changes anybody's effective membership, and never delays the commit of any
 other registration. One commit is never a collection: a nonmember target for
 the observer's **own** still-heartbeating key takes VW8's fence exit instead
-of deleting a live worker's registration (reachable when the grace window
-closes before the next heartbeat tick's VW8 check — a grace time below the
-dead threshold, legal per CM3).
+of deleting a live worker's registration.
 
 VW6. **Commit** of a key and a target: set the key's effective state to the
 target; log `membership committed`; if the target is nonmember: issue a

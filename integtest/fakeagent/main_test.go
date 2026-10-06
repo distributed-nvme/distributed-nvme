@@ -527,7 +527,7 @@ func TestForcedReplyCodeCarriesLeftover(t *testing.T) {
 
 // TestGateUnknownPushId covers the fake's push refusal (dnv-worker.md,
 // Integration test plan, The fake agent): a Push* naming a migr_id/clone_id
-// absent from the object's last applied request is ReplyCodeUnknownObject.
+// absent from the object's last accepted request is ReplyCodeUnknownObject.
 func TestGateUnknownPushId(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
@@ -872,8 +872,8 @@ func TestCntlrInfoDerivation(t *testing.T) {
 
 // TestCntlrInfoWhenPrimary is the fake's when_primary (dnv-worker.md,
 // Integration test plan, The fake agent): the row override applies only while
-// the cntlr's last applied request carries cntlr.primary = true, and an ungated
-// override beside it applies either way.
+// the cntlr's last accepted request carries cntlr.primary = true, and an
+// ungated override beside it applies either way.
 func TestCntlrInfoWhenPrimary(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {"rows": {
 	  "slice_id_to_dm_pool.1": {"status": "ERROR", "details": "settling test",

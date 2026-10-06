@@ -13,12 +13,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Regressions for the defects an adversarial review of the CN9 retire phase,
-// the CN18 clone paths and the CN12/CN13 wrappers turned up. Each one failed
-// before its fix; the fake node models dm/md holders, so an out-of-order
-// teardown now surfaces as a real EBUSY rather than only on a node.
+// Pins for defect shapes of the CN9 pass, the CN18 clone paths and the
+// CN12/CN13 wrappers. The fake node models dm/md holders, so an out-of-order
+// teardown surfaces as a real EBUSY.
 
-// A transfer's dm-linear maps the origin td's raid0. If the retire phase does
+// A transfer's dm-linear maps the origin td's raid0. If CN9's pre-step 3 does
 // not demote it to an error table, `dmsetup remove` of that raid0 fails EBUSY
 // and the whole cascade behind it — thin volumes, pool, concats,
 // `mdadm --stop` — fails with it, leaving a demoted cntlr with its arrays
