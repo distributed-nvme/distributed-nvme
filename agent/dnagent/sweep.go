@@ -670,8 +670,10 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // The two scopes
 // ---------------------------------------------------------------------------
 
-// sweepSide is the side-level pass of DN6. It runs in convergeSide, under the
-// node read lock and this side's object lock.
+// sweepSide is the side-level pass of DN6. It runs in convergeSide, under
+// the DN1 locks of convergeSide's caller: the node read lock and this side's
+// object lock in SyncupSide and reconvergeSide, the node write lock in the
+// startup Reconcile.
 //
 // remove = false is the read-only verdict the Check rounds and GetSideInfo
 // take: same enumeration, same comparison, nothing touched — plus the one
@@ -701,8 +703,9 @@ func (s *DnAgentServer) sweepSide(
 		remove = false
 	}
 	// spKnown is sweepDn's fullyKnown for this side's sp, and it is read
-	// BEFORE the claims: this pass holds only the node read lock, so another
-	// side's SyncupSide may store its request meanwhile. Read first, such a
+	// BEFORE the claims: outside the startup Reconcile this pass holds only
+	// the node read lock, so another side's SyncupSide may store its request
+	// meanwhile. Read first, such a
 	// side is either still missing from haveState, which keeps the gate
 	// shut, or visible to the claims; read the other way round, it could
 	// open the gate on claims that miss it.
@@ -1107,7 +1110,8 @@ func (s *DnAgentServer) collectExports(
 			// The side-level scope judges its OWN leg's exports and nothing
 			// else: another leg's export is its own side's business — that
 			// side's SyncupSide, or the node-level pass once the side has
-			// left the list — and this pass holds only the node READ lock.
+			// left the list — and outside the startup Reconcile this pass holds
+			// only the node READ lock.
 			// The NQN names the leg ((cluster, sp, leg, cn)), so this costs
 			// no read, and it comes before every read: a sibling agent's
 			// export of another leg of this sp — built on this kernel in the

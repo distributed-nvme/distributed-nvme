@@ -408,12 +408,11 @@ primary's leg rows (`cnagent.md` CN11), and never `RES_STATUS_UNKNOWN`
 has not completed a round since it started (a build, a promotion or an agent
 restart) — no verdict*, and it neither sets nor clears `Leg.err_epoch`
 (`architecture.md`, Live-state reporting and sp role).
-`RES_STATUS_PROVISIONING` means *deliberately not created yet, or kept
-unprobed behind DN9's gate after it closed again, healthy, no action
-needed*: it is what a resource waiting behind DN9's provisioning gate
-reports, and unlike `RES_STATUS_ERROR` it never feeds `err_epoch`
-(`architecture.md`, Live-state reporting, dn / cn roles, sp role and
-Automatic reactions). A resource that leaves the desired state must lose its
+`RES_STATUS_PROVISIONING` means *healthy, not ready, no action needed*,
+with the meaning `architecture.md`, Live-state reporting, gives it (DN18
+and `cnagent.md` CN28 say which rows carry it), and unlike
+`RES_STATUS_ERROR` it never feeds `err_epoch` (`architecture.md`,
+Live-state reporting, dn / cn roles, sp role and Automatic reactions). A resource that leaves the desired state must lose its
 history, or the next object built with the same id would inherit a dead
 one's epoch and read as unchanged since. An object whose own converge
 derives a per-resource key set — a side (DN6), a cntlr (`cnagent.md` CN9) —
@@ -1863,11 +1862,12 @@ Four rules keep the suspension bounded, which is what makes it safe:
   exporting data.
 
 While the window is open the per-CN `dm_linear_info` is `RES_STATUS_OK`
-with details "suspended (migration cutover grace window)": it is an
-expected, time-bounded state, and the probe expects the **pre-fence** table
-there rather than the dm-error, so a healthy cutover reports no table
-mismatch — except in the second window of Known limits, opened over tables
-phase 2 has already swapped.
+with details "suspended (migration cutover grace window)", unless DN9's
+gate is closed, when it reads `RES_STATUS_PROVISIONING` unprobed (DN18):
+it is an expected, time-bounded state, and the probe expects the
+**pre-fence** table there rather than the dm-error, so a healthy cutover
+reports no table mismatch — except in the second window of Known limits,
+opened over tables phase 2 has already swapped.
 
 **Ending the role removes nothing directly.** `DnMigrSrcName` and its
 `MigrSrcNqn` export simply stop being wanted, and the sweep takes them (DN6
@@ -2197,8 +2197,9 @@ of a converge they re-run for a reason of their own.
 
 DN18. Probe map (all via SH17 conventions; a `res_name` and a probe per
 resource). `RES_STATUS_PROVISIONING` rows are **healthy**: the resource is
-deliberately not created yet, or kept unprobed behind DN9's gate after it
-closed again (DN9), no action is needed, and the worker never
+deliberately not created yet, being prepared (the side device while it
+zeroes at `provisioned` false, DN9), or kept unprobed behind DN9's gate
+after it closed again (DN9), no action is needed, and the worker never
 turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 `RES_STATUS_ERROR` keeps meaning *needs intervention*.
 
@@ -2247,9 +2248,10 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   desired role). Inside the cutover window of `architecture.md`, Migration,
   the expected target is the **pre-fence** one and the details are
   "suspended (migration cutover grace window)"; the probe never starts a
-  window (DN16). While DN9's gate is closed neither device is probed and
-  both report `RES_STATUS_PROVISIONING`, details "side provisioning",
-  whether or not they exist: a gate that closes again on a side that
+  window (DN16). While DN9's gate is closed neither device is probed and,
+  below `SP_LEVEL_DISABLE` (at it neither row is emitted, DN11), both
+  report `RES_STATUS_PROVISIONING`, details "side provisioning", whether
+  or not they exist: a gate that closes again on a side that
   already exports removes nothing (DN9).
 * `cn_id_to_nvmeof` per cn, named by the `SideToCnNqn`: configfs —
   subsystem present with its attributes, namespace enabled over the right
@@ -2260,7 +2262,10 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   and the `MigrSrcNqn`: the dm target probe and configfs. With
   `migr_src_conf.dst_provisioned` false neither object exists by design
   (DN12) and both report `RES_STATUS_PROVISIONING`, details "side
-  provisioning".
+  provisioning". While DN9's gate is closed on the source side neither is
+  probed either: each reports `RES_STATUS_PROVISIONING`, details "side
+  provisioning" (the export row only below `SP_LEVEL_NO_SIDE`), whether or
+  not the objects exist (DN9).
 * `migr_dst_info.target_info`, named by the `MigrSrcNqn`: the SH20 **sysfs
   walk** (the subsystem matched by "subsysnqn", the controllers' "state"
   — never `nvme list-subsys`) shows a live controller for it (liveness

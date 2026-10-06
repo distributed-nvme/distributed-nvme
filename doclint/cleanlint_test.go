@@ -13,6 +13,11 @@ import (
 //   - no dates: history lives in git;
 //   - no citation of a note kept outside the repository.
 //
+// Each check matches the one form the tree used: a "path.ext:N" pointer into
+// a .go, .sh, .proto or .md file, an ISO date, the words outsideNoteRe
+// matches. A bare ":N", a pointer into other source, or a note cited by its
+// path passes them.
+//
 // Exceptions go in allowlist.txt under the checks pointer, history and note.
 
 var (

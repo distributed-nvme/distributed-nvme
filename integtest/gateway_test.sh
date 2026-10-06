@@ -91,9 +91,9 @@ ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-gateway-integtest
 
-# Ports (Integration test plan, Topology): a fresh block, disjoint from every
-# other suite (worker 12379/29600s/29700s, cdc 13379/18009-12/14420-23, agent
-# suites 29528/29529, production 29527/2379).
+# Ports (Integration test plan, Topology): a fresh block, outside every range
+# another suite or production uses (the port inventory beside ETCD_CLIENT_PORT
+# (e2e_test.sh)).
 ETCD_CLIENT_PORT=15379
 ETCD_PEER_PORT=15380
 GW_PORT_BASE=29810  # gw0..gw2 -> 29810..29812
@@ -284,8 +284,8 @@ gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
 # writes in this suite are the worker-role stand-ins named there —
 # set-created, set-provisioned, drain-sp and drain-clone; the drains finish the
 # teardowns the latching `delete-sp` and `delete-clone` start. Every drain step
-# bumps SpRev, so a case that holds a token must `refresh_rev` after one,
-# exactly as after a mutator.
+# but the sp drain's last, which deletes the SpRev key, bumps SpRev, so a case
+# that holds a token must `refresh_rev` after one, exactly as after a mutator.
 wctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")

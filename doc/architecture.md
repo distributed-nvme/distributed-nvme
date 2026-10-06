@@ -3152,10 +3152,11 @@ Automatic reactions. `RES_STATUS_PENDING` neither sets nor clears it.
 
 `RES_STATUS_PROVISIONING` **never** sets `err_epoch` (dn / cn roles, sp
 role) and never counts as a bad status for the capacity keys (Capacity
-index keys): it marks a resource excluded from the *effective* desired
-state while a side of its backing chain is still zeroing, or while a
-side's own provisioning gate holds it back (Side provisioning protocol,
-[D15]). Only the deferred resources carry it — a
+index keys): it marks a side device still zeroing (Side provisioning
+protocol), and a resource excluded from the *effective* desired state
+while a side of its backing chain is still zeroing, or while a side's own
+provisioning gate holds it back (Side provisioning protocol, [D15]). Only
+those carry it — a
 serving thin pool keeps reporting `RES_STATUS_OK` with its raw `dmsetup
 status` details even while a grow is deferred, so the thin-pool auto-grow
 of Automatic reactions keeps parsing them. `SideInfo` additionally

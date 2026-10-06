@@ -3103,10 +3103,10 @@ nvmet_tree() {
 # PREFLIGHT DOES NOT COVER EVERY CALL:
 # preflight_guests runs AFTER the unconditional start cleanup
 # (main, and e2e_integtest.md, Preflight), and `--cleanup-only` does not
-# preflight at all. So on a guest
-# missing one of the two tools, the start sweep — the one that recovers a
-# crashed run — and `--cleanup-only` each get one silent no-op pass, and only
-# the sweeps after preflight are covered.
+# preflight at all. So on a guest missing mdadm, the start sweep — the one
+# that recovers a crashed run — and `--cleanup-only` each get one silent no-op
+# pass, and on a guest missing udevadm one pass that skips the arrays only udev
+# can name; only the sweeps after preflight are covered.
 #
 # THE /proc/mdstat PATTERN IS `^md[^ :]+` and not `^md[0-9]*`, which would
 # match the bare `md` of a line like `md_dnv-… : active` — mdadm names the
@@ -6786,7 +6786,7 @@ wait_ns_exported() { # <cntlr id> <what> <ss_id> <ns_id> [sp name] [secs]
 # wait_ns_exported_all is the connect-all form. `nvme connect-all` connects
 # EVERY transport the discovery log offers, and the log carries one record per
 # non-disabled cntlr (enabledCntlrTrConfs (gateway/common.go)), so
-# every one of them has to be listening — not just the primary. Run 3 lost both.
+# every one of them has to be listening — not just the primary.
 #
 # It reads the CNTLR_* arrays, so the caller must have run sp_read_roles for
 # the shape it is about to connect to; disc_want_of_sp, which every connect-all
@@ -6943,7 +6943,7 @@ host_disc_is() { # <h>
 #     stands on without claiming a reading nobody took.
 #   * what the failure looks like on the wire. `connect-all` walks a discovery
 #     log and reaches a port that may have no subsystem linked to it at all,
-#     which is ECONNREFUSED — run 3's shape. `connect` names ONE address, and
+#     which is ECONNREFUSED (see wait_ns_exported). `connect` names ONE address, and
 #     an agent has exactly ONE nvmet port (PortConf (agent/nvmet.go), "the one
 #     port per agent") shared by every subsystem that agent exports, while
 #     cn_up starts exactly one cn agent per CN guest — so at host_connect's
@@ -7055,7 +7055,7 @@ host_connect_all() { # <h> <subnqn> [extra…]
 # there ctrl_cnt is >= 1 whatever the new transport did, connect_verdict cannot
 # fire, and a connect-all that silently added nothing would fall through to the
 # host_path_live wait and die WAIT_HOST later naming the path instead of the
-# connect. That is the same class of defect run 3 died of.
+# connect.
 #
 # It is INSTANTANEOUS for the reason the file's header gives: both nvme verbs
 # are synchronous, so when the command returns the controller either exists or

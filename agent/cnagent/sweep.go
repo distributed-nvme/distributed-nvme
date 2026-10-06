@@ -1397,10 +1397,11 @@ func (s *CnAgentServer) orphanCloneMetaNames(
 // The two scopes
 // ---------------------------------------------------------------------------
 
-// sweepCntlr is the cntlr-level pass that replaced the retire phase. It runs
-// in convergeCntlr in retire's place, under the node read lock and this
-// cntlr's object lock, and it removes only objects attributed to this cntlr's
-// sp — which is what lets two cntlrs of one CN converge concurrently.
+// sweepCntlr is the cntlr-level pass of CN21. It runs in convergeCntlr,
+// under the CN1 locks of convergeCntlr's caller: the node read lock and this
+// cntlr's object lock in SyncupCntlr and reconvergeCntlr, the node write lock
+// in the startup Reconcile. It removes only objects attributed to this
+// cntlr's sp — which is what lets two cntlrs of one CN converge concurrently.
 //
 // remove = false is the read-only VERDICT the Check rounds and Get*Info take:
 // the same enumeration and the same comparison, with nothing touched (CN23).

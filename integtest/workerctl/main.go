@@ -1224,11 +1224,10 @@ func cmdPing(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdConstants prints the common package's transaction-budget constants as one
-// JSON object. It exists because a shell suite cannot import common: worker,
-// gateway and cdc each have to launch etcd with
+// JSON object. It exists because a shell suite cannot import common: every
+// shell suite that starts an etcd has to launch it with
 // --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test plan,
-// Topology), and before this subcommand all three carried the number as a
-// hand-copied literal.
+// Topology), and reads the number here instead of typing it.
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell

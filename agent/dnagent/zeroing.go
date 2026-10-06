@@ -58,7 +58,8 @@ type zeroJob struct {
 }
 
 // startZeroing registers the side's zeroing loop if it is not running already.
-// The caller holds the node read lock and the side's object lock.
+// The caller holds the DN1 locks of a side converge: the node read lock and
+// the side's object lock, or the node write lock in the startup Reconcile.
 //
 // It refuses once rootCtx is done (SH27): an armed DN12 fence timer
 // is not enrolled in the WaitGroup and can still reach a converge after

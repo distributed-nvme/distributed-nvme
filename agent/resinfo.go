@@ -77,13 +77,17 @@ func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_ERROR, details)
 }
 
-// Provisioning is the [D15] outcome: the resource is deliberately not created
-// yet, because the sides underneath it are still being zeroed
-// (architecture.md, Side provisioning protocol), or, on the dn, a side's
-// provisioning gate that closed again keeps it unprobed (dnagent.md DN9). It
-// means healthy / not ready / no action needed, and — unlike ERROR — never
-// feeds err_epoch (architecture.md, Live-state reporting, dn / cn roles,
-// sp role and Automatic reactions).
+// Provisioning is the [D15] outcome (architecture.md, Live-state reporting):
+// the resource is deliberately not created yet while a side it depends on
+// provisions (architecture.md, Side provisioning protocol); or it exists and
+// is being prepared — the dn's side device while it zeroes, and on the cn a
+// deferred td's ns-devs and nvmet namespaces and a deferred transfer's
+// device, subsystem and namespace, all backed by an error table (cnagent.md
+// CN16, CN17); or, on the dn, it sits above a side device whose provisioning
+// gate is closed and is reported unprobed, whether or not it exists
+// (dnagent.md DN9, DN18). It means healthy / not ready / no action needed,
+// and — unlike ERROR — never feeds err_epoch (architecture.md, Live-state
+// reporting, dn / cn roles, sp role and Automatic reactions).
 func (t *ResTracker) Provisioning(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_PROVISIONING, details)
 }

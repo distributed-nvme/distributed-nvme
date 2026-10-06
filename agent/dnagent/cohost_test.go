@@ -377,8 +377,8 @@ func sweepScopes() []sweepScope {
 // subsystem mkdir and its namespace mkdir, and for the later part of that
 // window it already carries the CN's host link. On a kernel several dn agents
 // share, the build may be a sibling's, which no claim of ours can show: a
-// leg would be lost that way — a sibling's side-level sweep would strip the
-// export's host link and namespace — and a
+// leg would be lost that way — a sibling's sweep would strip the export's
+// host link and namespace — and a
 // broken dn export is rebuilt only by some later converge of its side, which
 // the breakage never triggers. So such an export goes only once its directory
 // is older than DnExportOrphanGrace; a younger one is left alone — not

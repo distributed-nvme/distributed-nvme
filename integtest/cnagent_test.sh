@@ -1941,11 +1941,12 @@ drop_subsys_glob() {
 # skipped.
 #
 # An unreadable name matches neither pattern, so the array is left alone: this
-# verb never stops an array that is not a dnv one, and a guest without udevadm
-# or without mdadm gets the old no-op back rather than a wrong stop — which is
-# why both are in the preflight tool list. Note where that list is NOT reached:
-# preflight_vms runs after the unconditional start cleanup, and --cleanup-only
-# skips it entirely, so those two sweeps each get one unguarded pass.
+# verb never stops an array that is not a dnv one; a guest without mdadm stops
+# nothing, and one without udevadm skips the arrays only udev can name, rather
+# than stopping a wrong one — which is why both are in the preflight tool list.
+# Note where that list is NOT reached: preflight_vms runs after the
+# unconditional start cleanup, and --cleanup-only skips it entirely, so those
+# two sweeps each get one unguarded pass.
 #
 # The /proc/mdstat pattern is `^md[^ :]+`: `^md[0-9]*` also matches the bare
 # `md` of a `md_<name> : active` line (mdadm.conf `CREATE names=yes`), and

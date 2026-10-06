@@ -363,8 +363,9 @@ func (s *CnAgentServer) nsConf(np *nsPlan, anaGrpId int) agent.NsConf {
 // ensureNamespaceObject creates or converges one nvmet namespace **without**
 // moving its ANA group: an existing namespace keeps the group it has and the
 // CN9 final pass promotes it, a fresh one starts `inaccessible`. Folding the
-// ANA write in here would both break the sweep-then-build ordering (CN9) and
-// make an idempotent re-apply write `ana_grpid` twice.
+// ANA write in here would both break the build's "objects first, ANA last"
+// order (CN9's ANA rewrite to optimized comes last, as ensureXferNamespace
+// keeps it too) and make an idempotent re-apply write `ana_grpid` twice.
 func (s *CnAgentServer) ensureNamespaceObject(
 	ctx context.Context,
 	np *nsPlan,
