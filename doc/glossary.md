@@ -96,7 +96,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **cutover window, cutover grace window** — The bounded suspension a migration source holds each of its per-CN dm-linears in before reloading it onto its dm-error (`SuspendSeconds`), so IO the old primary still had in flight is absorbed and then failed rather than replayed onto the side's data. The first converge at or after its deadline ends it and tearing down the side or its exports ends it early; it is a floor, and a bound only as far as the reloads succeed (see `dnagent.md` DN12).
 
-**dead threshold** — Twice the vote interval: a registration whose put an observer has not seen for that long is observed dead, and a worker whose own heartbeat has not reached etcd for that long fences itself (see `dnv-worker.md` VW3, VW8).
+**dead threshold** — Twice the vote interval: a registration whose put an observer has not seen for that long is observed dead (see `dnv-worker.md` VW3).
 
 **deciding STM, deciding transaction** — The transaction that commits an RPC's mutation; in a two-phase RPC it is the second one, which re-runs the full resolution and the token check and trusts what the first phase found only as a hint (see `gateway.md` GW8, AG4).
 
@@ -370,7 +370,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **seed, registration** — Each worker process mints a fresh seed per incarnation and keeps one registration per role under it (`WorkerReg`), re-put every vote interval with no etcd lease: observers judge it by their own clock and delete the key of one they commit dead (see `dnv-worker.md` VW2, VW6). The seed enters the worker's tickets, and a worker that fences itself rejoins under a new one.
 
-**self-fence** — A worker's exit when its heartbeat has not reached etcd for the dead threshold, its own puts stop being echoed by its watch, or a peer deletes its key: it stops every shard worker at once, deletes its registrations and rejoins under a fresh seed, driving nothing for one grace window (see `dnv-worker.md` VW8).
+**self-fence** — A worker's exit when its heartbeat has not fully reached etcd, or its own puts have not been echoed by its watch, for the dead threshold plus one vote interval, when a peer deletes its key, or when its own observer would commit its own key nonmember: it stops every shard worker at once, deletes its registrations and rejoins under a fresh seed, driving nothing for one grace window (see `dnv-worker.md` VW5, VW8).
 
 **sentinel, start gate** — The e2e cleanup's check of its own completion: every cleanup verb prints a sentinel line when it finishes, and after the start and between-cases sweeps the start gate (`cleanup_start_gate`) stops the run when a verb never printed it (see `e2e_integtest.md` E2E6).
 

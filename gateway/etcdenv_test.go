@@ -50,7 +50,6 @@ import (
 //	testStoredClusterConf(epoch, extentSize, poolBlockSize) *pb.ClusterConf
 //	mustDn(t, s, cluster, addr, loc, size) uint64
 //	mustCn(t, s, cluster, addr, loc, size) uint64
-//	spTok(t, s, cluster, spName) uint64
 //	dnTok(t, s, cluster, addrPort) uint64
 //	cnTok(t, s, cluster, addrPort) uint64
 //	wantCode(t, err, code, label)
@@ -341,8 +340,6 @@ type fakeAgent struct {
 	sideInfo  *pb.SideInfo
 	cnInfo    *pb.CnInfo
 	cntlrInfo *pb.CntlrInfo
-	tdBitmap  []byte
-	legBitmap []byte
 }
 
 // enter is what every fake method runs first: it records the call and the T3
@@ -368,13 +365,6 @@ func (f *fakeAgent) enter(ctx context.Context, method string) error {
 		}
 	}
 	return nil
-}
-
-// setSize changes what GetDnSize/GetCnSize report from the next call on.
-func (f *fakeAgent) setSize(size uint64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.size = size
 }
 
 // setFail makes every method answer err, which is how a test drives AG3's
@@ -419,15 +409,6 @@ func (f *fakeAgent) setInfo(
 	if cntlrInfo != nil {
 		f.cntlrInfo = cntlrInfo
 	}
-}
-
-// setBitmaps installs the bytes GetThinDeviceBm/GetLegBm return, which GW14
-// says the gateway must reply verbatim.
-func (f *fakeAgent) setBitmaps(tdBitmap []byte, legBitmap []byte) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.tdBitmap = tdBitmap
-	f.legBitmap = legBitmap
 }
 
 // callCount is how many times one method was called — the count, not the
@@ -566,9 +547,7 @@ func (f *fakeCnServer) GetThinDeviceBm(
 	if err := f.agent.enter(ctx, "GetThinDeviceBm"); err != nil {
 		return nil, err
 	}
-	f.agent.mu.Lock()
-	defer f.agent.mu.Unlock()
-	return &pb.GetThinDeviceBmReply{Bitmap: f.agent.tdBitmap}, nil
+	return &pb.GetThinDeviceBmReply{}, nil
 }
 
 func (f *fakeCnServer) GetLegBm(
@@ -578,9 +557,7 @@ func (f *fakeCnServer) GetLegBm(
 	if err := f.agent.enter(ctx, "GetLegBm"); err != nil {
 		return nil, err
 	}
-	f.agent.mu.Lock()
-	defer f.agent.mu.Unlock()
-	return &pb.GetLegBmReply{Bitmap: f.agent.legBitmap}, nil
+	return &pb.GetLegBmReply{}, nil
 }
 
 // fakeAgentRevision is the `revision` every fake *Info reply carries, and —
@@ -819,28 +796,16 @@ func mustCn(
 	return reply.GetCnId()
 }
 
-// spTok is the revision an SP-scoped mutator has to put in its SpRev message
+// dnTok is the revision a DN-scoped mutator has to put in its DnRev message
 // right now — when it sends one at all. GW6 is presence-based: a request that
-// carries no SpRev skips the comparison, and one that carries an SpRev is held
+// carries no DnRev skips the comparison, and one that carries a DnRev is held
 // to exact equality against this number, so a token built out of anything else
 // (0 included) is ABORTED "stale revision".
 //
-// The three tok helpers read through the Get* RPCs rather than off the rev
-// key, because that is the only way a client ever learns a token: a test that
+// The two tok helpers read through the Get* RPCs rather than off the rev key,
+// because that is the only way a client ever learns a token: a test that
 // reached into etcd for it could pass while the reply that carries it to a
 // real caller was empty.
-func spTok(t *testing.T, s *Server, cluster string, spName string) uint64 {
-	t.Helper()
-	reply, err := s.GetStoragePool(context.Background(),
-		&pb.GetStoragePoolRequest{ClusterName: cluster, SpName: spName})
-	if err != nil {
-		t.Fatalf("GetStoragePool %q: %v", spName, err)
-	}
-	return reply.GetSpRev().GetRevision()
-}
-
-// dnTok is spTok for a DN: the revision a DnRev message has to carry to pass
-// GW6, for the requests that carry one.
 func dnTok(t *testing.T, s *Server, cluster string, addrPort string) uint64 {
 	t.Helper()
 	reply, err := s.GetDiskNode(context.Background(),
@@ -851,7 +816,7 @@ func dnTok(t *testing.T, s *Server, cluster string, addrPort string) uint64 {
 	return reply.GetDnRev().GetRevision()
 }
 
-// cnTok is spTok for a CN: the revision a CnRev message has to carry to pass
+// cnTok is dnTok for a CN: the revision a CnRev message has to carry to pass
 // GW6, for the requests that carry one.
 func cnTok(t *testing.T, s *Server, cluster string, addrPort string) uint64 {
 	t.Helper()

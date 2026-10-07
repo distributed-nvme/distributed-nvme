@@ -41,7 +41,6 @@ const (
 	opDeleteStoragePool               = "DeleteStoragePool"
 	opUpdateStoragePoolCntlidSlotList = "UpdateStoragePoolCntlidSlotList"
 	opUpdateStoragePoolLevel          = "UpdateStoragePoolLevel"
-	opGrowSlice                       = "GrowSlice"
 )
 
 // ---------------------------------------------------------------------------

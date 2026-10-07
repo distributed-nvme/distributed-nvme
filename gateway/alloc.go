@@ -765,13 +765,3 @@ func findGrp(
 	}
 	return sliceLocation{}, false
 }
-
-// sliceOf finds a slice by id in a loaded list.
-func sliceOf(conf *pb.SpConf, slices []*pb.Slice, sliceId uint64) *pb.Slice {
-	for idx, id := range conf.GetSliceIdList() {
-		if id == sliceId && idx < len(slices) {
-			return slices[idx]
-		}
-	}
-	return nil
-}

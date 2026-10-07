@@ -190,16 +190,6 @@ func (c *Cmd) RunOk(ctx context.Context, name string, args ...string) error {
 	return c.runOk(ctx, name, args...)
 }
 
-// RunStdinOk is RunOk with a stdin payload.
-func (c *Cmd) RunStdinOk(
-	ctx context.Context,
-	stdin string,
-	name string,
-	args ...string,
-) error {
-	return c.runStdinOk(ctx, stdin, name, args...)
-}
-
 func cmdError(
 	name string,
 	args []string,

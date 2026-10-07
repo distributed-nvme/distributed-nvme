@@ -262,11 +262,6 @@ func (w *revWorker) stop() {
 	<-w.done
 }
 
-// desiredRevision is the revision the object is being driven to (RW2).
-func (w *revWorker) desiredRevision() uint64 {
-	return w.desired.revision
-}
-
 // run is the per-object loop (RW4). Of its six steps, round() is 1-5, and
 // step 6 — re-arming the timer AFTER the round, so a slow round never queues a
 // burst of catch-up rounds (RW8) — is wait().

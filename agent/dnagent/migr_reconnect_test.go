@@ -153,7 +153,7 @@ func assertCloneOnTheNewHead(
 // the source's subsystem directory while the dm-clone holds its multipath
 // head. A directory with no controller is not a connection, and neither is a
 // deleted controller the directory still lists until the last reference to
-// it drops (hasCtrl): one SyncupSide connects again, reloads the dm-clone
+// it drops (HasCtrl): one SyncupSide connects again, reloads the dm-clone
 // onto the source's new device and leaves the destination serving through
 // it, with no retry left.
 func TestMigrationDestinationReconnectsASourceWithNoController(t *testing.T) {
@@ -353,7 +353,7 @@ func TestMigrationDestinationReadsAPathlessHeadAsNoConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSubsys: %v", err)
 	}
-	if hasCtrl(state) || state.DevicePath == "" {
+	if state.HasCtrl() || state.DevicePath == "" {
 		t.Fatalf("fixture is wrong: the walk reads %d controller(s), "+
 			"namespace %q; want the kept head with no controller",
 			len(state.Paths), state.DevicePath)

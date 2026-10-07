@@ -19,7 +19,8 @@ Module: `github.com/distributed-nvme/distributed-nvme`.
 
 ## Start here
 
-Read [`doc/glossary.md`](doc/glossary.md) first: it defines the project
+Read [`doc/core_glossary.md`](doc/core_glossary.md) first: the core words in
+plain language. [`doc/glossary.md`](doc/glossary.md) defines the full
 vocabulary the documents use. Then read
 [`doc/architecture.md`](doc/architecture.md), the design as a whole: the object
 model, the device stacks, naming, the etcd data model, allocation, common

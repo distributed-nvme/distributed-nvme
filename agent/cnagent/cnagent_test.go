@@ -53,15 +53,12 @@ const (
 	testClone2     = uint64(0x1d)
 	testClone3     = uint64(0x2d)
 	testSnapTd     = uint64(0xe)
-	testSnapSs     = uint64(0xf)
-	testSnapNs     = uint64(0x10)
 	testCapacity   = uint64(1099511627776)
 	testBlockSize  = uint64(1 << 20)
 	testStripeSize = uint64(65536)
 	testTdSize     = uint64(64 << 20)
 
 	testNqn     = "nqn.2024-01.io.dnv-it:s:vol1"
-	testSnapNqn = "nqn.2024-01.io.dnv-it:s:snap1"
 	testHostNqn = "nqn.2024-01.io.dnv-it:host:0"
 	testUuid    = "11111111-1111-4111-8111-111111111111"
 	testNguid   = "11111111111141118111111111111111"

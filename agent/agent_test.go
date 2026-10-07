@@ -929,6 +929,57 @@ func TestListSubsysReadsSysfs(t *testing.T) {
 	}
 }
 
+// TestHasCtrlSkipsADeletedController pins HasCtrl over the walk: a subsystem
+// keeps listing a controller whose device the kernel has deleted until the
+// last reference to it drops, with nothing of it left to read (cnagent.md
+// CN10). The walk lists it in Paths with only its name, and it is no
+// controller; one whose state reads beside it is, connecting or not.
+func TestHasCtrlSkipsADeletedController(t *testing.T) {
+	const nqn = "nqn.2024-01.io.dnv:4:a:b:c"
+	const subsysDir = "/sys/class/nvme-subsystem/nvme-subsys0"
+	fs := &fakeSysfs{
+		dirs: map[string][]string{
+			"/sys/class/nvme-subsystem": {"nvme-subsys0"},
+			subsysDir:                   {"nvme3", "subsysnqn"},
+		},
+		files: map[string]string{
+			subsysDir + "/subsysnqn": nqn + "\n",
+		},
+	}
+	host := NewNvmeHost(fs.osClient())
+	state, err := host.ListSubsys(context.Background(), nqn)
+	if err != nil {
+		t.Fatalf("ListSubsys: %v", err)
+	}
+	if !state.Found || len(state.Paths) != 1 ||
+		state.Paths[0] != (PathState{Name: "nvme3"}) {
+		t.Fatalf("want the deleted controller listed by name alone, "+
+			"got %+v", state)
+	}
+	if state.HasCtrl() {
+		t.Error("a deleted controller counts as a controller")
+	}
+
+	fs.dirs[subsysDir] = []string{"nvme3", "nvme4", "subsysnqn"}
+	fs.dirs["/sys/class/nvme/nvme4"] = []string{"address", "state"}
+	fs.files["/sys/class/nvme/nvme4/state"] = "connecting\n"
+	fs.files["/sys/class/nvme/nvme4/address"] =
+		"traddr=10.0.0.1,trsvcid=4420\n"
+	state, err = host.ListSubsys(context.Background(), nqn)
+	if err != nil {
+		t.Fatalf("ListSubsys: %v", err)
+	}
+	if !state.HasCtrl() {
+		t.Errorf("a connecting controller beside a deleted one counts as "+
+			"none: %+v", state.Paths)
+	}
+
+	var none *SubsysState
+	if none.HasCtrl() || (&SubsysState{Found: true}).HasCtrl() {
+		t.Error("a nil state, or an entry with no controller, has one")
+	}
+}
+
 func anySuffix(paths []string, suffix string) bool {
 	for _, path := range paths {
 		if strings.HasSuffix(path, suffix) {

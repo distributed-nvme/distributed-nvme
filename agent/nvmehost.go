@@ -80,8 +80,27 @@ type SubsysState struct {
 	DevicePath string
 	// Paths carries one entry per controller of the subsystem, so a caller
 	// can pick a single path out of a multipath subsystem (DisconnectDevice)
-	// or judge per-side liveness and ANA state (cnagent.md CN11/CN12).
+	// or judge per-side liveness and ANA state (cnagent.md CN11/CN12). A
+	// controller whose device the kernel has deleted stays listed until the
+	// last reference to it drops, with every field but Name empty (HasCtrl).
 	Paths []PathState
+}
+
+// HasCtrl reports whether the walk found a controller in the subsystem. A
+// controller counts only when its "state" reads present: the subsystem keeps
+// listing a deleted controller until the last reference to it drops, with
+// nothing of it left to read (cnagent.md CN10), and such a controller is no
+// connection. A nil state has no controller.
+func (s *SubsysState) HasCtrl() bool {
+	if s == nil {
+		return false
+	}
+	for _, path := range s.Paths {
+		if path.State != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // PathState is one controller (one path) of a subsystem.
@@ -170,7 +189,7 @@ func (h *NvmeHost) readTrimmed(
 // never an error. Found is not "connected": while something holds the
 // subsystem's multipath head open, the kernel keeps its entry after the last
 // controller, with no controller and no namespace node in it, so whether the
-// NQN is connected is read from Paths, never from Found.
+// NQN is connected is read from HasCtrl, never from Found.
 func (h *NvmeHost) ListSubsys(
 	ctx context.Context,
 	nqn string,

@@ -2561,3 +2561,61 @@ func TestUnreadableCloneTableKeepsEverySource(t *testing.T) {
 		}
 	}
 }
+
+// TestADeletedSourceControllerHoldsNothing pins what L5's probe reads as gone
+// (CN21): a clone source whose disconnect deleted its controller can stay
+// listed in its subsystem until the last reference to that controller drops,
+// with nothing of it left to read (CN10), and such a controller is no
+// controller (HasCtrl). The pass after that disconnect sets no second
+// disconnect of the source going and descends below L5. Read as a
+// connection, the source would hold the cntlr's descent at L5 — and, L5's set
+// being node-wide, every cntlr's on the CN while no dm-clone is live there —
+// and would set one more whole-NQN disconnect going on every pass for as long
+// as the reference lived.
+func TestADeletedSourceControllerHoldsNothing(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	srcDisconnect := "cmd nvme disconnect --nqn " + testSrcNqn
+
+	// rev 3: the clone leaves and its source's disconnect is set going. While
+	// it runs, the kernel deletes the controller and its namespace node and
+	// keeps listing the controller.
+	node.blockCmd(srcDisconnect)
+	t.Cleanup(func() { node.releaseCmd(srcDisconnect) })
+	if _, err := srv.SyncupCntlr(ctx,
+		cntlrReq(reqOpts{revision: 3, primary: true})); err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	waitFor(t, func() bool { return node.hasCall(srcDisconnect) })
+	node.deleteCtrlDevice(testSrcNqn, testIp2, testSvcId2)
+	node.dropNsHead(testSrcNqn)
+	node.releaseCmd(srcDisconnect)
+	awaitDisconnects(t, srv)
+	state, err := srv.host.ListSubsys(ctx, testSrcNqn)
+	if err != nil || len(state.Paths) != 1 || state.Paths[0].State != "" {
+		t.Fatalf("fixture: want one listed controller with no state, "+
+			"got %+v, %v", state, err)
+	}
+
+	// rev 4: SP_LEVEL_NO_SIDE, so the legs under L5 are unwanted.
+	node.Reset()
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{revision: 4,
+		primary: true, level: pb.SpLevel_SP_LEVEL_NO_SIDE}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	awaitDisconnects(t, srv)
+	if got := node.callsMatching(srcDisconnect); len(got) != 0 {
+		t.Errorf("the source was disconnected again: %q", got)
+	}
+	node.mu.Lock()
+	_, legKept := node.dms[legName(srv, testMetaLeg)]
+	node.mu.Unlock()
+	if legKept {
+		t.Errorf("the descent stopped above the legs: code %d, %s",
+			reply.GetAgentReply().GetCode(),
+			reply.GetAgentReply().GetDetails())
+	}
+}

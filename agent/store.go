@@ -40,11 +40,6 @@ func NewStore(oc common.OsClient, localStorPrefix string) *Store {
 	return &Store{oc: oc, prefix: localStorPrefix}
 }
 
-// Prefix is the directory the store lives in.
-func (s *Store) Prefix() string {
-	return s.prefix
-}
-
 // List enumerates the store and returns, per requested kind prefix, the full
 // paths of the matching files in ascending name order (SH6). A failure to
 // read the prefix is the one fatal startup condition of SH3.

@@ -41,7 +41,7 @@ Unit tests are colocated `_test.go` files inside each package.
 |---|---|
 | `go.mod`, `go.sum` | the module (Module identity) and its requirements (`dependencies.md`, Direct dependencies) |
 | `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), and vet and test over the whole module |
-| `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, and `glossary.md`, the project vocabulary |
+| `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, `glossary.md`, the project vocabulary, and `core_glossary.md`, its core words in plain language |
 | `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and the built drivers and the etcd download cache in `integtest/bin/` |
 | `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation) |
 | `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |

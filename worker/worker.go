@@ -75,10 +75,20 @@ type Config struct {
 }
 
 // deadThreshold is 2 x the vote interval: a registration whose put has not
-// been observed for this long is dead (VW3), and a worker whose own heartbeat
-// or watch has been silent for this long fences itself (VW8).
+// been observed for this long is dead (VW3).
 func (c Config) deadThreshold() time.Duration {
 	return 2 * c.VoteInterval
+}
+
+// fenceThreshold is the dead threshold plus one vote interval: a worker whose
+// own heartbeat has not fully reached etcd, or whose own watch has echoed none
+// of its puts, for this long fences itself (VW8 (a) and (b)). The extra
+// interval lets it ride out one tick whose puts fail, as long as its puts
+// return, and are echoed, within the interval: its observers, its own
+// included, see that at most as a flap, which a grace window longer than the
+// flap absorbs (VW5).
+func (c Config) fenceThreshold() time.Duration {
+	return c.deadThreshold() + c.VoteInterval
 }
 
 // ---------------------------------------------------------------------------

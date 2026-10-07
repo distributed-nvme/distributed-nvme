@@ -723,7 +723,9 @@ func (v *voteWorker) onWatch(msg watchMsg) {
 	// worker that was stopped (SIGSTOP, a paused VM) comes back to a peer's
 	// VW6 garbage-collecting delete of its key and to its own catch-up put at
 	// the same moment; the fence must then name the cause — its heartbeat
-	// stalled for the dead threshold — and not the consequence (VW8 (a)).
+	// stalled for fenceThreshold, which that delete implies whenever the
+	// grace window is at least one vote interval — and not the consequence
+	// (VW8 (a)).
 	if own && v.checkHeartbeatStall(inc, now) {
 		return
 	}
@@ -961,32 +963,48 @@ func (v *voteWorker) commit(
 // dnv-worker.md, Log records, where "worker fenced" is what an operator greps
 // to see a worker leave. So the commit is abandoned and VW8's single "the fleet
 // gave up on me" path runs instead. It is reachable whenever that commit comes
-// before a VW8 check has fenced the worker. A tick runs its check only after
-// its puts returned, so for a worker of one role whose own key has gone dead at
-// its deadline (VW3), that takes a grace shorter than about one vote interval
-// while puts return promptly, and allows a longer one while a tick's puts block
-// on an unreachable etcd. With several roles it can come at any grace, the
+// before a VW8 check has fenced the worker. The own key goes dead the dead
+// threshold after this observer last saw it put (VW3) and is committed one
+// grace window later, while VW8 waits one vote interval longer than the dead
+// threshold — (a) from the start of the last tick whose puts all landed, (b)
+// from the last echo — and a tick runs its checks only after its puts
+// returned. So for a worker of one role whose own key has gone dead at its
+// deadline, while puts return promptly, the commit comes first with a grace
+// window shorter than one to two vote intervals when the puts land and only
+// the watch is silent, depending on where the last echo fell between two
+// ticks, and with one shorter than one interval less the echo's lag behind its
+// tick when the puts fail; a tick's puts that block on an unreachable etcd
+// allow a longer one. With several roles it can come at any grace, the
 // defaults included: VW8 (b) counts an echo of any role, so while every put
 // lands and only some roles' watches have stopped echoing them, no VW8 check
 // fences the worker and this commit does.
 //
 // The reason names the CAUSE, not the consequence, wherever VW8 can tell them
-// apart. checkFence first retries any fence a failed seed mint had deferred,
-// under that fence's own reason. With no such fence pending, VW8 (a) and (b)
-// are re-tested first, in that order — this observer stopped seeing its own
-// key because its heartbeat stopped reaching etcd, or because its watch
-// stopped echoing its puts — which is also what keeps the vote case (VW8 (a))
-// true: a resumed SIGSTOPped worker fences as heartbeat_stalled whichever of
-// its expired timers the loop drains first.
+// apart. A fence a failed seed mint had deferred is retried first, under that
+// fence's own reason. With no such fence pending, the signals of VW8 (a) and
+// (b) are tested, in that order, against the dead threshold, by which this
+// observer judged its own key dead, and not against fenceThreshold, which
+// neither may have reached yet: this observer stopped seeing its own key
+// because its heartbeat stopped reaching etcd, or because its watch stopped
+// echoing its puts. That is also what keeps the vote case (VW8 (a)) true: a
+// resumed SIGSTOPped worker fences as heartbeat_stalled whichever of its
+// expired timers the loop drains first.
 // Otherwise the reason is key_deleted: the key genuinely gone from the registry
 // without this process deleting it — VW8(c)'s fact, learned from a rescan (VW3)
 // instead of from a delete event — or, with several roles, a stall (b) cannot
 // see, some roles' watches having stopped echoing while another's had not.
 func (v *voteWorker) fenceSelfStale(inc *incarnation, now time.Time) bool {
-	if v.checkFence(inc, now) {
-		return true
+	dead := v.deps.cfg.deadThreshold()
+	reason := fenceKeyDeleted
+	switch {
+	case inc.pendingFence != "":
+		reason = inc.pendingFence
+	case now.Sub(inc.lastOkPut) >= dead:
+		reason = fenceHeartbeatStalled
+	case now.Sub(inc.lastOwnEcho) >= dead:
+		reason = fenceWatchStalled
 	}
-	v.fence(inc, fenceKeyDeleted)
+	v.fence(inc, reason)
 	return true
 }
 
@@ -1023,11 +1041,15 @@ func (v *voteWorker) recomputeOwnership(inc *incarnation, rs *roleState) {
 // ---------------------------------------------------------------------------
 
 // checkHeartbeatStall applies VW8(a) alone: the worker's heartbeat has not
-// reached etcd for the dead threshold, so its peers are about to (or already
-// do) consider it dead. It is judged on monotonic readings, which is what
-// catches a process that was stopped (SIGSTOP, a paused VM): the clock
-// advanced while it was frozen, so the resume tick measures the whole gap
-// even though its own put succeeds (VW4).
+// fully reached etcd for fenceThreshold, so its peers observe it dead, or are
+// about to, in each role whose puts did not land. One tick whose puts fail
+// leaves lastOkPut only the dead threshold old at the next tick when the puts
+// return within the interval, and (a) rides it out: its observers, its own
+// included, see at most a flap, which a grace window longer than the flap
+// absorbs. It is judged on monotonic readings, which is what catches a process
+// that was stopped (SIGSTOP, a paused VM): the clock advanced while it was
+// frozen, so the resume tick measures the whole gap even though its own put
+// succeeds (VW4).
 //
 // It reports whether the worker fenced, after which the caller must not touch
 // the old incarnation any more.
@@ -1035,7 +1057,7 @@ func (v *voteWorker) checkHeartbeatStall(
 	inc *incarnation,
 	now time.Time,
 ) bool {
-	if now.Sub(inc.lastOkPut) < v.deps.cfg.deadThreshold() {
+	if now.Sub(inc.lastOkPut) < v.deps.cfg.fenceThreshold() {
 		return false
 	}
 	v.fence(inc, fenceHeartbeatStalled)
@@ -1043,11 +1065,11 @@ func (v *voteWorker) checkHeartbeatStall(
 }
 
 // checkFence applies VW8 (a) and then (b), after retrying a fence a failed seed
-// mint had deferred. It is called on every heartbeat tick, on every own-key
-// watch event and before this worker's own registration would be collected
-// (fenceSelfStale); (c) is applied where the delete arrives. It reports whether
-// the worker fenced, after which the caller must not touch the old incarnation
-// any more.
+// mint had deferred. It is called on every heartbeat tick and on every own-key
+// watch event; (c) is applied where the delete arrives, and fenceSelfStale,
+// reached before this worker's own registration would be collected, names its
+// own reason against the dead threshold. It reports whether the worker fenced,
+// after which the caller must not touch the old incarnation any more.
 func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 	// A fence VW8 already demanded but could not apply — the seed mint failed
 	// (VW1) — is retried before anything else. (a) and (b) are conditions and
@@ -1064,8 +1086,12 @@ func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 	}
 	// (b) the worker's own put is not echoed by its own watch while puts
 	// report success — the "while puts report success" half is implied here,
-	// because (a) has just established that a put landed recently.
-	if now.Sub(inc.lastOwnEcho) >= v.deps.cfg.deadThreshold() {
+	// because (a) has just established that a put landed recently. It waits as
+	// long as (a): a missed put is also a missed echo, and on the very tick (a)
+	// rides out, checks that run before that tick's own echo arrives find the
+	// last echo about the dead threshold old, so a wait of only the dead
+	// threshold could fence there.
+	if now.Sub(inc.lastOwnEcho) >= v.deps.cfg.fenceThreshold() {
 		v.fence(inc, fenceWatchStalled)
 		return true
 	}
@@ -1073,8 +1099,8 @@ func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 }
 
 // fence stops driving everything and rejoins as a fresh identity (VW8): there
-// is no "resume with the old seed" path — a worker that lost etcd for the dead
-// threshold is a new worker, exactly like a restart.
+// is no "resume with the old seed" path — a worker that lost etcd for
+// fenceThreshold is a new worker, exactly like a restart.
 //
 // The shard workers are stopped and JOINED before the new incarnation starts,
 // so every "shard released" of the old seed is logged before anything is

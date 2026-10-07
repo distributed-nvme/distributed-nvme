@@ -191,7 +191,7 @@ func newVoteHarnessOn(
 // makes a --vote-grace-time not longer than the dead threshold legal — "a
 // grace window not longer than the dead threshold is legal but pointless",
 // warned about and never rejected — so the vote worker (VW1-VW11) has to stay
-// correct there too. The own-key cases below (staleOwnKeyConfig) need a grace
+// correct there too. The own-key cases below (staleOwnKeyConfig) use a grace
 // shorter than the vote interval, which lies inside that range.
 func newVoteHarnessCfg(
 	t *testing.T,
@@ -982,7 +982,8 @@ func fenceRecord(t *testing.T, h *voteHarness) map[string]any {
 }
 
 // TestVoteFenceHeartbeatStalled is VW8 (a): the heartbeat has not reached etcd
-// for the dead threshold.
+// for fenceThreshold, the dead threshold plus one vote interval. At the dead
+// threshold itself the worker still rides it out.
 func TestVoteFenceHeartbeatStalled(t *testing.T) {
 	synctest.Test(t, testVoteFenceHeartbeatStalled)
 }
@@ -991,7 +992,11 @@ func testVoteFenceHeartbeatStalled(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
 	h.store.setPutErr(errors.New("etcd down"))
-	h.advance(2 * h.deps.cfg.VoteInterval)
+	h.advance(h.deps.cfg.deadThreshold())
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times at the dead threshold", got)
+	}
+	h.advance(h.deps.cfg.fenceThreshold() - h.deps.cfg.deadThreshold())
 	waitFor(t, "fence", func() bool {
 		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
 	})
@@ -1011,9 +1016,102 @@ func testVoteFenceHeartbeatStalled(t *testing.T) {
 	})
 }
 
+// TestVoteOneFailedTickDoesNotFence is VW8 (a)'s margin: one tick whose puts
+// fail leaves lastOkPut and the last own echo the dead threshold old at the
+// next tick, short of fenceThreshold, so that tick's put lands and nothing
+// fences. Its observers see at most a flap, which the grace window absorbs.
+// Whether that tick's checks run before or after its own echo arrives is the
+// scheduler's choice, so (b)'s margin is pinned by TestVoteFenceWatchStalled
+// instead.
+func TestVoteOneFailedTickDoesNotFence(t *testing.T) {
+	synctest.Test(t, testVoteOneFailedTickDoesNotFence)
+}
+
+func testVoteOneFailedTickDoesNotFence(t *testing.T) {
+	h := newVoteHarness(t, common.WorkerRoleDn)
+	own := h.vote.currentSeed()
+	key := workerRegKey(common.WorkerRoleDn, own)
+	interval := h.deps.cfg.VoteInterval
+	h.advance(6 * interval) // the ticks at t=10..60 land
+	h.store.setPutErr(errors.New("etcd down"))
+	h.advance(interval) // the tick at t=70 fails
+	h.store.setPutErr(nil)
+	n := len(h.store.opLog())
+	h.advance(2 * interval) // the ticks at t=80 and t=90 land
+	if got := h.logs.withMsg(msgWorkerFenced); len(got) != 0 {
+		t.Fatalf("one failed tick fenced the worker: %v", got)
+	}
+	if got := h.vote.currentSeed(); got != own {
+		t.Fatalf("seed = %s, want %s", got, own)
+	}
+	puts := 0
+	for _, op := range h.store.opLog()[n:] {
+		switch op {
+		case "put " + key:
+			puts++
+		case "delete " + key:
+			t.Fatalf("the worker's own key was deleted: %v",
+				h.store.opLog()[n:])
+		}
+	}
+	if puts != 2 {
+		t.Fatalf("%d puts of %s after the failed round, want 2: %v",
+			puts, key, h.store.opLog()[n:])
+	}
+}
+
+// TestVoteTwoFailedTicksFence is the other side of that margin: two ticks in
+// a row whose puts fail leave lastOkPut fenceThreshold old at the third tick,
+// and that tick fences as heartbeat_stalled although its own put lands.
+func TestVoteTwoFailedTicksFence(t *testing.T) {
+	synctest.Test(t, testVoteTwoFailedTicksFence)
+}
+
+func testVoteTwoFailedTicksFence(t *testing.T) {
+	h := newVoteHarness(t, common.WorkerRoleDn)
+	old := h.vote.currentSeed()
+	key := workerRegKey(common.WorkerRoleDn, old)
+	interval := h.deps.cfg.VoteInterval
+	h.advance(6 * interval) // the ticks at t=10..60 land
+	h.store.setPutErr(errors.New("etcd down"))
+	h.advance(2 * interval) // the ticks at t=70 and t=80 fail
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times before the third tick", got)
+	}
+	h.store.setPutErr(nil)
+	n := len(h.store.opLog())
+	h.advance(interval) // the tick at t=90 lands
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	rec := fenceRecord(t, h)
+	if rec["reason"] != fenceHeartbeatStalled {
+		t.Fatalf("reason = %v, want %s", rec["reason"], fenceHeartbeatStalled)
+	}
+	if rec["old_seed"] != old {
+		t.Fatalf("old_seed = %v, want %s", rec["old_seed"], old)
+	}
+	waitFor(t, "the fence's delete of the old key", func() bool {
+		return !h.store.has(key)
+	})
+	landed := false
+	for _, op := range h.store.opLog()[n:] {
+		if op == "put "+key {
+			landed = true
+		}
+		if op == "delete "+key {
+			break
+		}
+	}
+	if !landed {
+		t.Fatalf("the t=90 put did not land before the fence deleted %s: %v",
+			key, h.store.opLog()[n:])
+	}
+}
+
 // TestVoteFenceHeartbeatStalledAfterFreeze is the case VW8(a) names: a process
-// stopped by SIGSTOP (or a paused VM) resumes after more than the dead
-// threshold and its catch-up put SUCCEEDS. The gap that fences it is the one
+// stopped by SIGSTOP (or a paused VM) resumes once fenceThreshold has elapsed
+// and its catch-up put SUCCEEDS. The gap that fences it is the one
 // measured against the last tick that reached etcd, so it MUST be evaluated
 // before this tick's success is folded in; and the reason is heartbeat_stalled
 // — the cause — not the stale watch the freeze also left behind (VW8 (a)).
@@ -1034,7 +1132,7 @@ func testVoteFenceHeartbeatStalledAfterFreeze(t *testing.T) {
 	h.clk.advance(interval)
 	waitClosed(t, "the heartbeat put to reach the store", entered)
 	// The monotonic clock runs on while the process is frozen (VW4).
-	h.clk.advance(2 * interval)
+	h.clk.advance(h.deps.cfg.fenceThreshold() - interval)
 	h.settle()
 	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
 		t.Fatalf("fenced %d times while frozen, before any tick landed", got)
@@ -1087,8 +1185,8 @@ func testVoteRescanIsNotAWatchEcho(t *testing.T) {
 		t.Fatalf("fenced %d times one interval after the last echo", got)
 	}
 
-	// One more interval and the last echo is 2 x interval old.
-	h.advance(interval)
+	// Two more intervals and the last echo is fenceThreshold old.
+	h.advance(h.deps.cfg.fenceThreshold() - interval)
 	waitFor(t, "fence", func() bool {
 		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
 	})
@@ -1098,7 +1196,8 @@ func testVoteRescanIsNotAWatchEcho(t *testing.T) {
 }
 
 // TestVoteFenceWatchStalled is VW8 (b): the worker's own puts succeed but its
-// own watch stops echoing them.
+// own watch stops echoing them for fenceThreshold. At the dead threshold the
+// worker still rides it out, as it rides out one failed tick (VW8 (a)).
 func TestVoteFenceWatchStalled(t *testing.T) {
 	synctest.Test(t, testVoteFenceWatchStalled)
 }
@@ -1107,7 +1206,11 @@ func testVoteFenceWatchStalled(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
 	h.store.setMuteEvents(true)
-	h.advance(2 * h.deps.cfg.VoteInterval)
+	h.advance(h.deps.cfg.deadThreshold())
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times at the dead threshold", got)
+	}
+	h.advance(h.deps.cfg.fenceThreshold() - h.deps.cfg.deadThreshold())
 	waitFor(t, "fence", func() bool {
 		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
 	})
@@ -1154,12 +1257,14 @@ func testVoteFenceKeyDeleted(t *testing.T) {
 	})
 }
 
-// staleOwnKeyConfig is the CM3-legal configuration the own-key cases need: a
-// grace window that closes before the next heartbeat tick can run VW8's checks,
-// so a commit for the worker's OWN registration is reached first. With one role
-// whose puts return promptly, that takes a grace shorter than the vote
-// interval, which lies inside the range CM3 only warns about (cmd/dnv-worker):
-// a grace window not longer than the dead threshold is "legal but pointless".
+// staleOwnKeyConfig is the CM3-legal configuration the own-key cases use: a
+// grace window that closes before the first heartbeat tick whose VW8 checks can
+// fence, so a commit for the worker's OWN registration is reached first. With
+// one role whose puts return promptly and whose echoes have no lag, as in this
+// harness, a grace shorter than the vote interval does that whether the watch
+// is silent or the puts fail (fenceSelfStale gives the bounds), and it lies
+// inside the range CM3 only warns about (cmd/dnv-worker): a grace window not
+// longer than the dead threshold is "legal but pointless".
 func staleOwnKeyConfig() Config {
 	return Config{
 		Roles:        []string{common.WorkerRoleDn},
@@ -1189,7 +1294,7 @@ func staleOwnKey(t *testing.T) (*voteHarness, string) {
 	// Push the last own-key ECHO off the tick grid: the t=10 tick's put is
 	// held and lands at t=15, so lastSeen = lastOwnEcho = 15 and the own key's
 	// deadline (35) falls strictly before the first tick that can trip VW8(b)
-	// (40).
+	// (50).
 	entered, left := store.gatePut(key)
 	h.advance(9 * time.Second)
 	waitClosed(t, "the held put to reach the store", entered)
@@ -1262,6 +1367,49 @@ func testVoteOwnKeyIsNeverSelfCollected(t *testing.T) {
 	})
 	if h.store.has(workerRegKey(common.WorkerRoleDn, own)) {
 		t.Fatalf("the fenced seed is still registered")
+	}
+}
+
+// TestVoteOwnKeyCommitNamesTheHeartbeatStall is fenceSelfStale's reason when
+// the puts fail: with a grace window shorter than one vote interval less the
+// last echo's lag (none in this harness), the own key's commit comes before
+// VW8 (a) reaches fenceThreshold, and the fence still names the cause, judged
+// against the dead threshold by which this observer let its own key go dead
+// (VW3), not the watch the failed puts left without an echo.
+func TestVoteOwnKeyCommitNamesTheHeartbeatStall(t *testing.T) {
+	synctest.Test(t, testVoteOwnKeyCommitNamesTheHeartbeatStall)
+}
+
+func testVoteOwnKeyCommitNamesTheHeartbeatStall(t *testing.T) {
+	cfg := staleOwnKeyConfig()
+	cfg.GraceTime = 4 * time.Second
+	h := newVoteHarnessCfg(t, cfg, newVoteHookStore())
+	own := h.vote.currentSeed()
+	interval := h.deps.cfg.VoteInterval
+	h.advance(6 * interval) // the ticks at t=10..60 land
+	h.store.setPutErr(errors.New("etcd down"))
+	// The ticks at t=70 and t=80 fail; at t=80 the own key's deadline fires.
+	h.advance(2 * interval)
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times before the own key's commit", got)
+	}
+	// t=84: its grace window closes on a nonmember target, and the commit
+	// takes VW8's exit instead (fenceSelfStale).
+	h.advance(cfg.GraceTime)
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	rec := fenceRecord(t, h)
+	if rec["reason"] != fenceHeartbeatStalled {
+		t.Fatalf("reason = %v, want %s", rec["reason"], fenceHeartbeatStalled)
+	}
+	if rec["old_seed"] != own {
+		t.Fatalf("old_seed = %v, want %s", rec["old_seed"], own)
+	}
+	for _, c := range h.committed(common.WorkerRoleDn, own) {
+		if c["state"] == stateNonmember {
+			t.Fatalf("the worker committed ITSELF nonmember: %v", c)
+		}
 	}
 }
 
@@ -1385,13 +1533,13 @@ func testVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
 	old := h.vote.currentSeed()
 	interval := h.deps.cfg.VoteInterval
 
-	// A tick's put is held while the monotonic clock runs past the dead
-	// threshold, so releasing it fences VW8(a) with every watch still open and
-	// still delivering.
+	// A tick's put is held while the monotonic clock runs to fenceThreshold,
+	// so releasing it fences VW8(a) with every watch still open and still
+	// delivering.
 	entered, _ := store.gatePut(workerRegKey(common.WorkerRoleDn, old))
 	h.clk.advance(interval)
 	waitClosed(t, "the heartbeat put to reach the store", entered)
-	h.clk.advance(2 * interval)
+	h.clk.advance(h.deps.cfg.fenceThreshold() - interval)
 	h.settle()
 	store.releasePut()
 
@@ -1604,7 +1752,7 @@ func testVoteFenceDeletesRegsBeforeDrainingShards(t *testing.T) {
 
 	// VW8(b): the puts keep landing while the watch stops echoing them.
 	h.store.setMuteEvents(true)
-	h.advance(2 * h.deps.cfg.VoteInterval)
+	h.advance(h.deps.cfg.fenceThreshold())
 	waitFor(t, "fence", func() bool {
 		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
 	})
@@ -1739,7 +1887,7 @@ func testVoteFenceStopsShardsDuringAHandoff(t *testing.T) {
 
 	// VW8(b): the puts keep landing while the watch stops echoing them.
 	h.store.setMuteEvents(true)
-	h.advance(2 * h.deps.cfg.VoteInterval)
+	h.advance(h.deps.cfg.fenceThreshold())
 	waitFor(t, "fence", func() bool {
 		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
 	})

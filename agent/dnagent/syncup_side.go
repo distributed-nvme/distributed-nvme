@@ -816,12 +816,12 @@ func (s *DnAgentServer) disconnect(ctx context.Context, nqn string) {
 			slog.String("error", err.Error()))
 		return
 	}
-	// A subsystem with no controller (hasCtrl) is no connection — one the
+	// A subsystem with no controller (HasCtrl) is no connection — one the
 	// kernel keeps after its last controller went, which it does while
 	// something holds its multipath head open, or one that lists only
 	// controllers already deleted: it has no controller left for
 	// `nvme disconnect` to delete.
-	if !hasCtrl(state) {
+	if !state.HasCtrl() {
 		return
 	}
 	if err := s.host.Disconnect(ctx, nqn); err != nil {

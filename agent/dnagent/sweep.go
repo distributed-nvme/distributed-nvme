@@ -336,7 +336,7 @@ func (s *DnAgentServer) removeExportVerified(
 }
 
 // disconnectVerified drops an nvme host connection and re-probes sysfs.
-// "Gone" is the absence of any CONTROLLER (hasCtrl; architecture.md, Teardown
+// "Gone" is the absence of any CONTROLLER (HasCtrl; architecture.md, Teardown
 // by sweep): the kernel keeps the subsystem directory after its last
 // controller is deleted for as long as something holds its multipath head
 // open, and it lists a deleted controller until the last reference to it
@@ -354,7 +354,7 @@ func (s *DnAgentServer) disconnectVerified(
 			slog.String("error", err.Error()))
 		return false
 	}
-	return !hasCtrl(state)
+	return !state.HasCtrl()
 }
 
 func (s *DnAgentServer) removeDms(

@@ -32,14 +32,10 @@ import (
 // no worker reaction ever removes a spare — a parked leg stays parked until an
 // operator frees the slot (dnv-worker.md AR8 step 4).
 
-// The op names the model helpers put into their error messages and the bump
-// helpers cite; they are the RPC names so a log line names something
+// opDeleteSpareLeg is the op name DeleteSpareLeg's own STM gives its ledger
+// flush and the bump helper; it is the RPC name so a log line names something
 // greppable.
-const (
-	opCreateSpareLeg = "CreateSpareLeg"
-	opDeleteSpareLeg = "DeleteSpareLeg"
-	opSwitchSpareLeg = "SwitchSpareLeg"
-)
+const opDeleteSpareLeg = "DeleteSpareLeg"
 
 // openGrpForSpareLeg is the opening the three spare-leg RPCs share: resolve
 // the cluster and the SP, check the token, then locate the group by id across

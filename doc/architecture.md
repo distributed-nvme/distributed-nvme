@@ -3700,9 +3700,10 @@ membership change moves only the shards whose winner changed (VW9). A
 worker acts only on the shards it currently owns and starts and stops its
 per-shard workers gracefully on every effective change (`dnv-worker.md`
 SW1, SW5). It **fences** itself — stops driving everything and rejoins as
-a fresh identity — when its own heartbeat cannot reach etcd for the dead
-threshold, when its own puts stop being echoed by its watch, or when it
-sees its own key deleted by a peer (VW8).
+a fresh identity — when its own heartbeat has not fully reached etcd, or
+its own puts have not been echoed by its watch, for the time VW8 sets, when
+it sees its own key deleted by a peer (VW8), or when its own observer would
+commit its own key nonmember (VW5).
 
 ### dn / cn roles
 

@@ -198,16 +198,14 @@ const (
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
 
-	// DefaultCloneThreshold/DefaultCloneBatchSize are written down for
-	// symmetry with the migration pair, but nothing reads them: a clone's
-	// DmCloneConf is stored as sent and forwarded to the cn agent untouched,
-	// so a zero there leaves the dm-clone target's own default in place
-	// (model/ops.go, ResolveEventThreshold's note). Only the migration pair
-	// is resolved, by worker/sprole.go's migrCloneConf.
-	MaxCloneThreshold     = 8
-	DefaultCloneThreshold = 1
-	MaxCloneBatchSize     = 4
-	DefaultCloneBatchSize = 1
+	// The clone pair has no defaults: a clone's DmCloneConf is stored as sent
+	// and forwarded to the cn agent untouched, so a zero there leaves the
+	// dm-clone target's own default in place (model/ops.go,
+	// ResolveEventThreshold's note). Only the migration pair is resolved, by
+	// worker/sprole.go's migrCloneConf. validateDmCloneConf
+	// (gateway/validate.go) holds both pairs to these two maxima.
+	MaxCloneThreshold = 8
+	MaxCloneBatchSize = 4
 	// MaxCloneBmCnt is the number of chunks ONE source slice's bitmap may be
 	// split into: a clone bitmap chunk is addressed (src_slice_idx, bm_idx)
 	// and bm_idx < MaxCloneBmCnt (architecture.md, Bitmap push protocol).
@@ -223,9 +221,7 @@ const (
 	// positioning quantum only — migration appends have no byte cap.
 	CloneBmChunkBytes = 1 << 20
 
-	MaxMigrThreshold     = 8
 	DefaultMigrThreshold = 1
-	MaxMigrBatchSize     = 4
 	DefaultMigrBatchSize = 1
 	MaxMigrBmCnt         = 4
 

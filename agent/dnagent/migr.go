@@ -164,12 +164,12 @@ func (s *DnAgentServer) ensureMigrDst(
 	// answered "no controller".
 	unread := err != nil
 	// No controller is no connection, so the pass connects when the walk
-	// answered and found none (hasCtrl): no subsystem, or one the kernel
+	// answered and found none (HasCtrl): no subsystem, or one the kernel
 	// keeps with no controller in it, which it does for as long as something
 	// holds the subsystem's multipath head open, as the dm-clone holds the
 	// source's (architecture.md, Teardown by sweep). The cn twin is
 	// ensureCloneSource.
-	if err == nil && !hasCtrl(state) {
+	if err == nil && !state.HasCtrl() {
 		if connErr := s.host.Connect(ctx, agent.TrConf{
 			TrType:  plan.migrDst.GetSrcNvmeTrConf().GetTrType(),
 			AdrFam:  plan.migrDst.GetSrcNvmeTrConf().GetAdrFam(),
@@ -185,7 +185,7 @@ func (s *DnAgentServer) ensureMigrDst(
 	switch {
 	case err != nil:
 		dstInfo.TargetInfo = t.Err(resKeyMigrDstTarget, nqn, err.Error())
-	case !hasCtrl(state):
+	case !state.HasCtrl():
 		dstInfo.TargetInfo = t.Err(
 			resKeyMigrDstTarget, nqn, "no controller for the subsystem")
 	case state.DevicePath == "":
@@ -203,7 +203,7 @@ func (s *DnAgentServer) ensureMigrDst(
 			resKeyMigrDstClone, cloneName, "target not read: "+err.Error())
 		return s.migrDstStopped(ctx, st, plan), false
 	}
-	if err != nil || !hasCtrl(state) || state.DevicePath == "" {
+	if err != nil || !state.HasCtrl() || state.DevicePath == "" {
 		dstInfo.DmCloneInfo = t.Missing(
 			resKeyMigrDstClone, cloneName, "target not connected")
 		s.startMigrRetry(st, plan)
@@ -247,23 +247,6 @@ func (s *DnAgentServer) ensureMigrDst(
 	// Every step here held. The retry is not deregistered here: step (5)
 	// has not run yet (settleMigrRetry).
 	return migrCloneUp, true
-}
-
-// hasCtrl reports whether the walk found a controller in the subsystem. A
-// controller counts only when its "state" reads present: the subsystem keeps
-// listing a deleted controller until the last reference to it drops, with
-// nothing of it left to read (cnagent.md CN10), and such a controller is no
-// connection.
-func hasCtrl(state *agent.SubsysState) bool {
-	if state == nil {
-		return false
-	}
-	for _, path := range state.Paths {
-		if path.State != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // detailsCloneMetaMissing is what `migr_dst_info.target_info` reports when

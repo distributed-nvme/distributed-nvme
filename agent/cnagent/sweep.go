@@ -651,22 +651,16 @@ func (s *CnAgentServer) removeDmVerified(
 
 // removeCloneMetaDmVerified is removeDmVerified under cloneMetaMu: removing a
 // kind-cb wrapper frees its units in the arena's next enumeration, so it is a
-// registry mutation (CN18) and may not race another cntlr's allocation.
+// registry mutation (CN18) and may not race another cntlr's allocation. It
+// must never be called from a path that already holds the mutex
+// (ensureCloneMeta, reconcileCloneMeta), which call s.removeDm directly.
 func (s *CnAgentServer) removeCloneMetaDmVerified(
 	ctx context.Context,
 	name string,
 ) bool {
 	s.cloneMetaMu.Lock()
 	defer s.cloneMetaMu.Unlock()
-	s.removeDm(ctx, name)
-	dev, err := s.dm.Info(ctx, name)
-	if err != nil {
-		slog.ErrorContext(ctx, "verifying a dm removal failed",
-			slog.String("name", name),
-			slog.String("error", err.Error()))
-		return false
-	}
-	return dev == nil
+	return s.removeDmVerified(ctx, name)
 }
 
 // removeExportVerified removes an nvmet subsystem and re-probes configfs for
@@ -1147,7 +1141,15 @@ func (s *CnAgentServer) stopArrayVerified(
 // controller nodes gone. Such a subsystem is no connection — no block device,
 // no path — so reading the directory itself as present would stop the descent
 // below its layer for as long as that holder stays, and disconnecting it
-// again would be a command per pass.
+// again would be a command per pass. Nor is a controller the subsystem still
+// lists after its device was deleted, until the last reference to it drops
+// (HasCtrl; CN10): nothing of it is left to read or to delete. Read as
+// present, it would hold the descent the same way and set a whole-NQN
+// disconnect going on every pass; for a clone source, each one would reopen a
+// window like the one cnagent.md, Known limits, describes: a build whose
+// request is stored after the pass's read finds the deleted controller at no
+// address, connects the source afresh and loses that controller to the
+// disconnect.
 func (s *CnAgentServer) disconnectVerified(
 	ctx context.Context,
 	nqn string,
@@ -1159,7 +1161,7 @@ func (s *CnAgentServer) disconnectVerified(
 			slog.String("error", err.Error()))
 		return false
 	}
-	if !state.Found || len(state.Paths) == 0 {
+	if !state.HasCtrl() {
 		return true
 	}
 	s.startDisconnect(ctx, nqn)

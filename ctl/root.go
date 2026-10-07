@@ -557,19 +557,6 @@ func hexOf(name string) (uint64, error) {
 	return value, nil
 }
 
-// hex32Of is hexOf for a 32-bit field.
-func hex32Of(name string) (uint32, error) {
-	raw := strings.TrimSpace(strOf(name))
-	if raw == "" {
-		return 0, nil
-	}
-	value, err := strconv.ParseUint(raw, 0, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid --%s: %w", name, err)
-	}
-	return uint32(value), nil
-}
-
 // strListOf is a comma-split string list. It REPLACES on each occurrence
 // rather than accumulating, and empty items are dropped, so `--hosts a,,b` is
 // two hosts. An empty flag is an empty list, which several RPCs treat as a

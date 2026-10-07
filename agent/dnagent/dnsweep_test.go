@@ -583,7 +583,7 @@ func TestMigrationCloneRemovedBeforeItsSourceDisconnect(t *testing.T) {
 // TestMigrationSourceGoneBesideADeletedController pins what L3's probe
 // reads as gone (DN6): a controller that `nvme disconnect` deleted can stay
 // listed in its subsystem until the last reference to it drops, with nothing
-// of it left to read (cnagent.md CN10), and it is no controller (hasCtrl).
+// of it left to read (cnagent.md CN10), and it is no controller (HasCtrl).
 // The SyncupSide that ends the destination role finds the source connection
 // gone after its one disconnect and descends below L3, so the clone-metadata
 // wrapper and its record go in that same pass.
@@ -619,10 +619,10 @@ func TestMigrationSourceGoneBesideADeletedController(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSubsys: %v", err)
 	}
-	if !state.Found || len(state.Paths) == 0 || hasCtrl(state) {
+	if !state.Found || len(state.Paths) == 0 || state.HasCtrl() {
 		t.Fatalf("fixture is wrong: the walk reads found=%v, %d listed "+
 			"controller(s), a live one %v; want the deleted controller "+
-			"still listed", state.Found, len(state.Paths), hasCtrl(state))
+			"still listed", state.Found, len(state.Paths), state.HasCtrl())
 	}
 	if got := reply.GetAgentReply().GetCode(); got != 0 {
 		t.Errorf("code = %d (%s), want 0", got,

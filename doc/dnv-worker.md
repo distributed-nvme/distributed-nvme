@@ -560,7 +560,10 @@ CM3. **Validation.** `--etcd-endpoints` non-empty; `--roles` a non-empty,
 duplicate-free subset of the three roles; both timers positive;
 `--vote-grace-time` SHOULD exceed twice `--vote-interval` (a warning is
 logged otherwise — a grace window not longer than the dead threshold is
-legal but pointless).
+legal but pointless, and with one not longer than one vote interval the
+peers of a worker cut off from etcd can commit it dead about when it fences
+itself, or before, since VW8 (a) waits one interval past the dead
+threshold).
 
 CM4. **Startup.** Install the default JSON logger (`common`'s `init`), mint
 a startup trace id, build the `etcdutil` client (EU1), then call
@@ -733,14 +736,31 @@ primary over on it first (HL3, Known limits).
 VW8. A worker MUST **fence** itself when any of these holds, checked on
 every heartbeat tick and on every own-key watch event:
 
-* (a) now minus `lastOkPut` has reached the dead threshold — its heartbeat
-  has not reached etcd for that long; peers are about to (or already do)
-  consider it dead. This also covers a process that was stopped (SIGSTOP, a
-  VM pause): the monotonic clock advances meanwhile.
-* (b) its own put is not echoed by its own watch: the latest observed put
-  event for its own key (any role) is older than the dead threshold while
-  puts report success — the watch is broken and its view of the peers is
-  stale.
+* (a) now minus `lastOkPut` has reached the dead threshold plus one vote
+  interval — its heartbeat has not fully reached etcd for that long, as
+  when the puts of two ticks in a row failed, and its peers observe it
+  dead, or are about to, in each role whose puts did not land. This also
+  covers a process that was stopped (SIGSTOP, a VM pause): the monotonic
+  clock advances meanwhile, and a tick checks (a) before it records its
+  own put, so the tick the process resumes with fences although its put
+  lands. A single tick whose puts fail does not fence a worker whose puts
+  return, and are echoed, within the vote interval, and whose observers'
+  grace windows, its own included, outlast the dead and live flap they then
+  see (VW3, VW5): the next tick finds `lastOkPut` the dead threshold old.
+  Fencing on one failed tick would leave the worker's shards undriven for
+  about a grace window over a short etcd outage, such as a leader election,
+  and an outage that fails one tick on every worker would fence them all at
+  once. The cost: a worker cut off from etcd fences up to one interval later
+  while its puts fail promptly, and possibly later still while they hang,
+  and the time between its self-fence and its peers' commit of it shrinks
+  by as much (CM3).
+* (b) its own put is not echoed by its own watch: the dead threshold plus
+  one vote interval has passed since the latest observed put event for its
+  own key (any role) while puts report success — the watch is broken and
+  its view of the peers is stale. It waits as long as (a) because a missed
+  put is also a missed echo: on the very tick (a) rides out, checks that run
+  before that tick's own echo arrives find the last echo about the dead
+  threshold old, so a wait of only the dead threshold could fence there.
 * (c) a delete event for its own key that this process did not issue — a
   peer committed it dead (VW6).
 
@@ -764,13 +784,14 @@ behind it. Then join the drain; discard every tracking entry, timer and
 effective set; and restart VW2 to VW7 from scratch under the new seed;
 VW7 applies to the new incarnation: nothing is driven until one full grace
 window after the new seed's first successful put. There is no "resume with
-the old seed" path — a worker that lost etcd for the dead threshold is a
-new worker, exactly like a restart; one code path serves every "the fleet
-gave up on me" case. A fence whose new seed cannot be minted (VW1) tears
-nothing down and is instead **remembered** and retried on every following
-heartbeat tick, ahead of the checks above: (a) and (b) are conditions that
-would fire again by themselves, but (c) is an event whose delete has
-already been consumed, so a fence dropped there would be lost for good.
+the old seed" path — a worker that lost etcd for the dead threshold plus
+one vote interval is a new worker, exactly like a restart; one code path
+serves every "the fleet gave up on me" case. A fence whose new seed cannot
+be minted (VW1) tears nothing down and is instead **remembered** and
+retried on every following heartbeat tick, ahead of the checks above: (a)
+and (b) are conditions that would fire again by themselves, but (c) is an
+event whose delete has already been consumed, so a fence dropped there
+would be lost for good.
 
 ### Tickets and ownership
 

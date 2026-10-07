@@ -558,20 +558,6 @@ func (s *CnAgentServer) disconnectDeadPaths(
 	}
 }
 
-// nsDeviceOf finds a subsystem's namespace device — the clone source of CN18
-// step 1, matched by src_nqn plus nsid.
-func (s *CnAgentServer) nsDeviceOf(
-	ctx context.Context,
-	nqn string,
-	nsIdx uint32,
-) (string, error) {
-	view, err := s.readSubsys(ctx, nqn, nsIdx)
-	if err != nil {
-		return "", err
-	}
-	return view.nsDev, nil
-}
-
 // legInfo is the CN28 leg report, shared by the converge pass and the probe:
 // on a primary the wrapper table plus the CN11 block-probe outcome, on a
 // standby the wrapper table plus transport liveness and ana_state per desired

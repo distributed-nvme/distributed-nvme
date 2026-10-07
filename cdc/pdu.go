@@ -76,8 +76,6 @@ const (
 const (
 	fesInvalidPduHdr     = 0x01
 	fesPduSequenceErr    = 0x02
-	fesHdrDigestErr      = 0x03
-	fesDataOutOfRange    = 0x04
 	fesDataLimitExceeded = 0x05
 	fesUnsupportedParam  = 0x06
 )
@@ -458,14 +456,12 @@ const (
 	scSuccess       = 0x00
 	scInvalidOpcode = 0x01
 	scInvalidField  = 0x02
-	scInternal      = 0x06
 )
 
 // Command-specific status codes, including the fabrics ones.
 const (
 	scAsyncEventLimit      = 0x05
 	scConnectInvalidFormat = 0x80
-	scConnectCtrlBusy      = 0x81
 	scConnectInvalidParam  = 0x82
 	scConnectInvalidHost   = 0x84
 )
@@ -487,11 +483,11 @@ func nvmeStatus(sct uint16, sc uint16, dnr bool) uint16 {
 // statusSuccess is the status of every command that worked.
 var statusSuccess = nvmeStatus(sctGeneric, scSuccess, false)
 
-// The three statuses NP12 hands out by default.
+// The two statuses NP12 hands out by default, the one of an AER past NP11's
+// limit, and NP5's Connect refusals.
 var (
 	statusInvalidField  = nvmeStatus(sctGeneric, scInvalidField, true)
 	statusInvalidOpcode = nvmeStatus(sctGeneric, scInvalidOpcode, true)
-	statusInternal      = nvmeStatus(sctGeneric, scInternal, true)
 	statusAsyncLimit    = nvmeStatus(sctCommandSpecific, scAsyncEventLimit, true)
 	statusConnectParam  = nvmeStatus(sctCommandSpecific, scConnectInvalidParam, true)
 	statusConnectFormat = nvmeStatus(sctCommandSpecific, scConnectInvalidFormat, true)
@@ -515,7 +511,6 @@ func connectIpo(offset uint16, inData bool) uint32 {
 // The connect-data field offsets IPO points at (NP5).
 const (
 	connectDataHostIdOff  = 0
-	connectDataCntlIdOff  = 16
 	connectDataSubNqnOff  = 256
 	connectDataHostNqnOff = 512
 	connectDataLen        = 1024

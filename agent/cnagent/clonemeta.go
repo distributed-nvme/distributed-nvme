@@ -640,27 +640,6 @@ func (s *CnAgentServer) ensureCloneMeta(
 	return nil
 }
 
-// removeCloneMetaDm removes one kind-`cb` wrapper under cloneMetaMu. Removal is
-// a *mutation of the registry* — the registry being the kernel's dm table set
-// itself — so it belongs in the same critical section as the
-// enumerate → discard → create of ensureCloneMeta (CN18): two cntlrs of
-// one CN converge concurrently under the node read lock, and a sweep that
-// deleted a wrapper in the middle of another cntlr's allocation would both
-// invalidate that enumeration and free a run under it.
-//
-// cloneMetaMu stays a leaf: the only thing held inside it here is one bounded
-// `dmsetup info`/`remove` pair, and no other lock is ever acquired under it.
-// It must therefore never be called from a path that already holds the mutex
-// (ensureCloneMeta, reconcileCloneMeta), which call s.removeDm directly.
-func (s *CnAgentServer) removeCloneMetaDm(
-	ctx context.Context,
-	name string,
-) bool {
-	s.cloneMetaMu.Lock()
-	defer s.cloneMetaMu.Unlock()
-	return s.removeDm(ctx, name)
-}
-
 // probeCloneMeta is the ordinary read-only CN28 row of clone_id_to_meta: the
 // wrapper's own dm table, in place of the `lvs` scan the clone VG needed. The
 // row for a clone whose slot the arena cannot supply comes from
