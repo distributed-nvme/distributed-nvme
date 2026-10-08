@@ -477,12 +477,16 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` is the other one, for
-// a computed value). The suites read three of its keys: every suite that
-// starts an etcd launches it with EtcdMaxTxnOps, e2e cross-checks
-// MaxAllocLegPerGrp and the gateway suite creates its stage-13 clone at
-// MaxSliceCntPerSp. One of those three dropped or renamed here would
-// otherwise surface only when a suite is run, at its preflight. The other
-// three keys are pinned as well, because a case may size itself against them.
+// a computed value). The suites read six of its keys at preflight, and stop
+// there when one is missing: every suite that starts an etcd launches it with
+// EtcdMaxTxnOps, e2e cross-checks MaxAllocLegPerGrp, the gateway suite
+// creates its stage-13 clone at MaxSliceCntPerSp and checks the health
+// intervals a new cluster stores against DefaultHealthCheckInterval, and the
+// worker and e2e suites read that interval, DefaultPrimaryUnhealthy and
+// DemotionHoldTimeout for their failover cases. One of those six dropped or
+// renamed here would otherwise surface only when a suite is run, at its
+// preflight. The other three keys are pinned as well, because a case may size
+// itself against them.
 func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 	read, write, err := os.Pipe()
 	if err != nil {
@@ -509,6 +513,10 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
 		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
 		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
+
+		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
+		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
 	}
 	for key, value := range want {
 		if have, ok := got[key]; !ok || have != value {
@@ -836,6 +844,122 @@ func TestShardFlag(t *testing.T) {
 		var shard shardFlag
 		if err := shard.Set(bad); err == nil {
 			t.Errorf("Set(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+// TestPlantedEpoch pins set-epoch's value: --age seconds before now, or 0
+// for --clear, exactly one of them, and never an age that would land on 0,
+// which reads as healthy rather than as an epoch planted long ago.
+func TestPlantedEpoch(t *testing.T) {
+	const now = 1_000_000
+	cases := []struct {
+		age        uint64
+		ageGiven   bool
+		clearEpoch bool
+		want       uint64
+		ok         bool
+	}{
+		{30, true, false, now - 30, true},
+		{0, true, false, now, true},
+		{now - 1, true, false, 1, true},
+		{0, false, true, 0, true},
+		{now, true, false, 0, false},
+		{now + 1, true, false, 0, false},
+		{30, true, true, 0, false},
+		{0, false, false, 0, false},
+	}
+	for _, tc := range cases {
+		got, err := plantedEpoch(now, tc.age, tc.ageGiven, tc.clearEpoch)
+		if !tc.ok {
+			if err == nil {
+				t.Errorf("plantedEpoch(age %d given %v clear %v) = %d, "+
+					"want an error", tc.age, tc.ageGiven, tc.clearEpoch, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("plantedEpoch(age %d given %v clear %v) = %d, %v; "+
+				"want %d", tc.age, tc.ageGiven, tc.clearEpoch, got, err,
+				tc.want)
+		}
+	}
+}
+
+// TestSetSliceEpoch pins where set-epoch finds a leg or a side: in either
+// group list and on an active or a spare leg, as the health ops do, touching
+// that one object and nothing else.
+func TestSetSliceEpoch(t *testing.T) {
+	newSlice := func() *pb.Slice {
+		return &pb.Slice{
+			MetaGrpList: []*pb.Group{{
+				GrpId: 1,
+				LegList: []*pb.Leg{{
+					LegId: 1, SideList: []*pb.Side{{SideId: 11}},
+				}},
+				SpareLegList: []*pb.Leg{{
+					LegId: 2, ErrEpoch: 7,
+					SideList: []*pb.Side{{SideId: 12, ErrEpoch: 8}},
+				}},
+			}},
+			DataGrpList: []*pb.Group{{
+				GrpId: 2,
+				LegList: []*pb.Leg{{
+					LegId: 3, SideList: []*pb.Side{{SideId: 13}},
+				}},
+			}},
+		}
+	}
+	cases := []struct {
+		kind  string
+		id    uint64
+		old   uint64
+		found bool
+		// read returns the epoch the case set, from a fresh walk.
+		read func(*pb.Slice) uint64
+	}{
+		{"leg", 2, 7, true, func(s *pb.Slice) uint64 {
+			return s.GetMetaGrpList()[0].GetSpareLegList()[0].GetErrEpoch()
+		}},
+		{"leg", 3, 0, true, func(s *pb.Slice) uint64 {
+			return s.GetDataGrpList()[0].GetLegList()[0].GetErrEpoch()
+		}},
+		{"side", 12, 8, true, func(s *pb.Slice) uint64 {
+			return s.GetMetaGrpList()[0].GetSpareLegList()[0].
+				GetSideList()[0].GetErrEpoch()
+		}},
+		{"side", 13, 0, true, func(s *pb.Slice) uint64 {
+			return s.GetDataGrpList()[0].GetLegList()[0].
+				GetSideList()[0].GetErrEpoch()
+		}},
+		{"leg", 11, 0, false, nil},
+		{"side", 3, 0, false, nil},
+		{"cntlr", 1, 0, false, nil},
+	}
+	for _, tc := range cases {
+		slice := newSlice()
+		old, found := setSliceEpoch(slice, tc.kind, tc.id, 42)
+		if found != tc.found || old != tc.old {
+			t.Errorf("setSliceEpoch(%s %d) = %d, %v; want %d, %v",
+				tc.kind, tc.id, old, found, tc.old, tc.found)
+			continue
+		}
+		if !found {
+			if !proto.Equal(slice, newSlice()) {
+				t.Errorf("setSliceEpoch(%s %d) found nothing and still "+
+					"changed the slice: %v", tc.kind, tc.id, slice)
+			}
+			continue
+		}
+		if got := tc.read(slice); got != 42 {
+			t.Errorf("setSliceEpoch(%s %d) left %d, want 42",
+				tc.kind, tc.id, got)
+		}
+		// Undo the one write: what remains must be the fixture.
+		setSliceEpoch(slice, tc.kind, tc.id, tc.old)
+		if !proto.Equal(slice, newSlice()) {
+			t.Errorf("setSliceEpoch(%s %d) changed more than its object: %v",
+				tc.kind, tc.id, slice)
 		}
 	}
 }

@@ -1111,6 +1111,254 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 	})
 }
 
+// setCntlrInterval stores a cntlr_interval in the cluster's conf, the way
+// setCnBatchSize stores a batch size. A value from
+// common.MinHealthCheckInterval to common.MaxHealthCheckInterval passes the
+// stored-conf gate, so the conf stays one CreateCluster could have written; a
+// value outside that range plants a conf the gate refuses.
+func (e *sptEnv) setCntlrInterval(interval uint32) {
+	e.t.Helper()
+	e.cc.HealthCheckConf.CntlrInterval = interval
+	mustPut(e.t, e.cli, model.ClusterConfKey(e.name), e.cc)
+}
+
+// TestCreateStoragePoolJudgesThePrimaryThreshold pins the primary-threshold
+// rule of architecture.md, Common validation, at the RPC: the request's
+// primary_unhealthy, after its default is resolved, against twice the
+// cntlr_interval of the cluster the pool is created in. The interval is the
+// cluster's, so the rule is judged where the merged geometry is
+// (TestCreateStoragePoolJudgesTheMergedGeometry): on the plain pre-read,
+// after the stored-conf gate and the merged geometry and before both scans,
+// and again on the transaction's own read.
+//
+// The cluster has two CNs, one for each of the two cntlrs sptDefaultSpec asks
+// for, and a stored cntlr_interval just over half of
+// common.DefaultPrimaryUnhealthy, so that its bound, twice the interval, is
+// above that default. Each refusal must be INVALID_ARGUMENT, name both fields
+// with the numbers they are judged at and write nothing. The refused requests
+// are an unset primary_unhealthy, one a second under the bound, and two unset
+// ones that a scan refuses at the bound: one asks for a cntlr more than the
+// cluster has CNs, the other for a data group larger than any DN's free
+// extents. The rule is judged before both scans, so neither may become a
+// scan's RESOURCE_EXHAUSTED, and a control per scan shows that the same shape
+// at the bound does. The DN control must carry the DN scan's message, not the
+// CN scan's: its footprint is too large for every CN as well, and only a
+// refusal by the DN scan, which runs first, lets its row tell a rule judged
+// before both scans from one judged between them. A create at the bound is
+// accepted and stores the threshold as sent (GW11); an unset one under the
+// name that pool then holds is still INVALID_ARGUMENT, not ALREADY_EXISTS.
+//
+// Two refusals come before the rule, each with primary_unhealthy unset, which
+// breaks the rule at the interval stored. A stored cntlr_interval above
+// common.MaxHealthCheckInterval is a conf CreateCluster could not have
+// written, so it is the stored-conf gate's ABORTED (GW11), never this rule's
+// INVALID_ARGUMENT, which would blame the request for the cluster's fault. A
+// request whose merged bdev_conf breaks a geometry rule gets the merged
+// geometry's refusal (TestCreateStoragePoolJudgesTheMergedGeometry), not this
+// one.
+//
+// The transaction's own verdict is reached by raising the interval while the
+// request scans: the pre-read passed a request at the bound it read, and only
+// the transaction reads the raised one. Last, at the default interval an unset
+// primary_unhealthy is accepted, as every pool a request naming no threshold
+// creates in a cluster created with no interval.
+func TestCreateStoragePoolJudgesThePrimaryThreshold(t *testing.T) {
+	// interval is the smallest cntlr_interval whose two rounds exceed
+	// common.DefaultPrimaryUnhealthy, so an unset primary_unhealthy is under
+	// its bound.
+	const interval = uint32(common.DefaultPrimaryUnhealthy/2 + 1)
+	env := sptNewEnv(t, sptDnCnt, sptCntlrCnt, sptCnFree)
+	env.setCntlrInterval(interval)
+	// request is sptDefaultSpec's request under name, with
+	// primary_unhealthy left unset when primary is zero.
+	request := func(name string, primary uint32) *pb.CreateStoragePoolRequest {
+		req := sptDefaultSpec(name).req(env.name)
+		req.EventThreshold.PrimaryUnhealthy = primary
+		return req
+	}
+	// wantRefused asserts the rule's refusal: the code, both fields at the
+	// numbers they are judged at, and no write since before.
+	wantRefused := func(
+		t *testing.T,
+		err error,
+		before map[string][]byte,
+		primary uint32,
+		cntlrInterval uint32,
+	) {
+		t.Helper()
+		sptWantCode(t, err, codes.InvalidArgument)
+		msg := status.Convert(err).Message()
+		for _, want := range []string{
+			fmt.Sprintf("event_threshold.primary_unhealthy %d ", primary),
+			fmt.Sprintf("health_check_conf.cntlr_interval %d", cntlrInterval),
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message %q does not name %q", msg, want)
+			}
+		}
+		if changed := sptChangedKeys(before, env.dump()); len(changed) != 0 {
+			t.Errorf("a refusal wrote %v", changed)
+		}
+	}
+	// shape gives a request the cntlr count and the data group size of a
+	// scan-refused row, each only when it is not zero.
+	shape := func(
+		req *pb.CreateStoragePoolRequest,
+		cntlrCnt uint32,
+		initExt uint64,
+	) {
+		if cntlrCnt != 0 {
+			req.CntlrCnt = cntlrCnt
+		}
+		if initExt != 0 {
+			req.InitExtCnt = initExt
+		}
+	}
+	for idx, tc := range []struct {
+		name string
+		// primary is the primary_unhealthy sent, 0 for none.
+		primary  uint32
+		cntlrCnt uint32
+		initExt  uint64
+	}{
+		{"primary unset, its default under the bound", 0, 0, 0},
+		{"primary a second under the bound", 2*interval - 1, 0, 0},
+		{"one cntlr more than the cluster has CNs", 0, sptCntlrCnt + 1, 0},
+		{"a data group larger than any DN's free extents", 0, 0, sptDnFree + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := request(fmt.Sprintf("bad%d", idx), tc.primary)
+			shape(sent, tc.cntlrCnt, tc.initExt)
+			judged := tc.primary
+			if judged == 0 {
+				judged = common.DefaultPrimaryUnhealthy
+			}
+			before := env.dump()
+			_, err := env.srv.CreateStoragePool(env.ctx, sent)
+			wantRefused(t, err, before, judged, interval)
+		})
+	}
+	for idx, tc := range []struct {
+		name     string
+		cntlrCnt uint32
+		initExt  uint64
+		// scan names the scan that must refuse the shape, and refusal is a
+		// phrase only that scan's message carries.
+		scan    string
+		refusal string
+	}{
+		{
+			"the CN control: that cntlr count at the bound",
+			sptCntlrCnt + 1, 0, "CN", "no controller node",
+		},
+		{
+			"the DN control: that data group at the bound",
+			0, sptDnFree + 1, "DN", "disk nodes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := request(fmt.Sprintf("control%d", idx), 2*interval)
+			shape(sent, tc.cntlrCnt, tc.initExt)
+			before := env.dump()
+			_, err := env.srv.CreateStoragePool(env.ctx, sent)
+			sptWantCode(t, err, codes.ResourceExhausted)
+			if msg := status.Convert(err).Message(); !strings.Contains(
+				msg, tc.refusal) {
+				t.Errorf("message %q is not the %s scan's", msg, tc.scan)
+			}
+			changed := sptChangedKeys(before, env.dump())
+			if len(changed) != 0 {
+				t.Errorf("a refusal wrote %v", changed)
+			}
+		})
+	}
+
+	t.Run("a stored interval the conf gate refuses", func(t *testing.T) {
+		defer env.setCntlrInterval(interval)
+		env.setCntlrInterval(common.MaxHealthCheckInterval + 1)
+		before := env.dump()
+		_, err := env.srv.CreateStoragePool(env.ctx, request("gate", 0))
+		sptWantCode(t, err, codes.Aborted)
+		want := fmt.Sprintf("invalid stored conf: "+
+			"health_check_conf.cntlr_interval %d is outside [%d, %d]",
+			common.MaxHealthCheckInterval+1,
+			common.MinHealthCheckInterval, common.MaxHealthCheckInterval)
+		if msg := status.Convert(err).Message(); msg != want {
+			t.Errorf("message %q, want %q", msg, want)
+		}
+		if changed := sptChangedKeys(before, env.dump()); len(changed) != 0 {
+			t.Errorf("a refusal wrote %v", changed)
+		}
+	})
+	t.Run("a merged bdev_conf that breaks a geometry rule", func(t *testing.T) {
+		sent := request("geometry", 0)
+		// Three chunk blocks of the cluster's data_block_size, a power of
+		// two, make a chunk that is not a power of two. The request states
+		// no block size, so only the merge breaks the rule.
+		sent.GetBdevConf().GetRedundConf().GetRedundMdRaid1().
+			BitmapChunkBlockCnt = 3
+		if err := validateBdevConf(sent.GetBdevConf()); err != nil {
+			t.Fatalf("the request must be legal as sent: %v", err)
+		}
+		before := env.dump()
+		_, err := env.srv.CreateStoragePool(env.ctx, sent)
+		sptWantCode(t, err, codes.InvalidArgument)
+		msg := status.Convert(err).Message()
+		if !strings.HasPrefix(msg, "bdev_conf merged over the cluster's: ") ||
+			!strings.Contains(msg, "bitmap_chunk_block_cnt") {
+			t.Errorf("message %q is not the merged geometry's refusal", msg)
+		}
+		if changed := sptChangedKeys(before, env.dump()); len(changed) != 0 {
+			t.Errorf("a refusal wrote %v", changed)
+		}
+	})
+
+	atBound := request(sptSpName, 2*interval)
+	if _, err := env.srv.CreateStoragePool(env.ctx, atBound); err != nil {
+		t.Fatalf("CreateStoragePool at the bound: %v", err)
+	}
+	if got := env.spConf(sptSpName).GetEventThreshold(); !proto.Equal(
+		got, atBound.GetEventThreshold()) {
+		t.Errorf("event_threshold: stored %v, want %v as sent",
+			got, atBound.GetEventThreshold())
+	}
+	t.Run("primary unset under a name already taken", func(t *testing.T) {
+		before := env.dump()
+		_, err := env.srv.CreateStoragePool(env.ctx, request(sptSpName, 0))
+		wantRefused(t, err, before, common.DefaultPrimaryUnhealthy, interval)
+	})
+
+	t.Run("an interval raised under the scan", func(t *testing.T) {
+		defer env.setCntlrInterval(interval)
+		prev := slog.Default()
+		hook := &sptRecordHook{
+			Handler: prev.Handler(),
+			trigger: sptIsCnScan(env),
+			count:   func(slog.Record) bool { return false },
+			actor:   func() { env.setCntlrInterval(interval + 1) },
+		}
+		slog.SetDefault(slog.New(hook))
+		defer slog.SetDefault(prev)
+		before := env.dump()
+		_, err := env.srv.CreateStoragePool(
+			context.WithValue(env.ctx, sptHookKey{}, true),
+			request("raised", 2*interval))
+		if !hook.fired.Load() {
+			t.Fatalf("the request never scanned a CN, so no interval is " +
+				"raised under it")
+		}
+		wantRefused(t, err, before, 2*interval, interval+1)
+	})
+
+	env.setCntlrInterval(common.DefaultHealthCheckInterval)
+	if _, err := env.srv.CreateStoragePool(
+		env.ctx, request("default", 0),
+	); err != nil {
+		t.Errorf("CreateStoragePool with the default threshold at the "+
+			"default interval: %v", err)
+	}
+}
+
 // TestCreateStoragePoolNodeAccounting pins the capacity-key and revision half
 // (architecture.md, Capacity index keys; Revision keys and the sync fan-out) of
 // architecture.md, Storage pools: every
@@ -3120,8 +3368,8 @@ const sptNqn = "nqn.2024-01.io.dnv:spt-pool0"
 const sptSsId = uint64(9001)
 
 // addSubsystem gives the SP one subsystem and the CdcEntry that advertises
-// every ENABLED cntlr's CN (architecture.md, Subsystems, namespaces) — the
-// state CreateSubsystem leaves behind,
+// the CN of every cntlr the listing rule lists, in cntlr_id_list order
+// (architecture.md [D18]) — the state CreateSubsystem leaves behind,
 // written directly because this file's subject is the cntlr RPCs that MAINTAIN
 // that entry, not the one that creates it.
 func (e *sptEnv) addSubsystem(spId uint64) {
@@ -3131,21 +3379,36 @@ func (e *sptEnv) addSubsystem(spId uint64) {
 	mustPut(e.t, e.cli, model.SpConfKey(e.cid, sptSpName), conf)
 	mustPut(e.t, e.cli, model.SubsystemKey(e.cid, spId, sptNqn),
 		&pb.Subsystem{SsId: sptSsId, Serial: "s0", Model: "dnv"})
-	var trConfs []*pb.NvmeTrConf
+	var cntlrs []*pb.Cntlr
 	for _, cntlrId := range conf.GetCntlrIdList() {
-		cntlr := e.cntlr(spId, cntlrId)
-		if cntlr.GetDisabled() {
-			continue
-		}
-		trConfs = append(trConfs, cntlr.GetNvmeTrConf())
+		cntlrs = append(cntlrs, e.cntlr(spId, cntlrId))
 	}
 	mustPut(e.t, e.cli, model.CdcEntryKey(e.cid, 0, spId, sptSsId),
-		&pb.CdcEntry{Nqn: sptNqn, NvmeTrConfList: trConfs})
+		&pb.CdcEntry{
+			Nqn:            sptNqn,
+			NvmeTrConfList: model.CdcTrConfList(cntlrs),
+		})
+}
+
+// stampErrEpoch writes one cntlr's err_epoch straight into its key, without
+// the CdcEntry rewrite the worker's health write makes in the same
+// transaction (model.SetCntlrErrEpoch): the entry keeps what it lists, so the
+// RPC a test drives next is the one that has to apply the listing rule.
+func (e *sptEnv) stampErrEpoch(spId uint64, cntlrId uint64, epoch uint64) {
+	e.t.Helper()
+	cntlr := e.cntlr(spId, cntlrId)
+	cntlr.ErrEpoch = epoch
+	mustPut(e.t, e.cli, model.CntlrKey(e.cid, spId, cntlrId), cntlr)
+}
+
+// cdcAddrs is the tr_addr list of the SP's one CdcEntry.
+func (e *sptEnv) cdcAddrs(spId uint64) []string {
+	e.t.Helper()
+	return sptTrAddrs(e.cdcEntry(0, spId, sptSsId).GetNvmeTrConfList())
 }
 
 // sptTrAddrs is the tr_addr of every entry of a transport list, which is what
-// a CdcEntry assertion compares — the four members are compared by trConfEqual
-// everywhere else, and tr_addr is this fixture's node identity.
+// a CdcEntry assertion compares: tr_addr is this fixture's node identity.
 func sptTrAddrs(list []*pb.NvmeTrConf) []string {
 	out := make([]string, 0, len(list))
 	for _, conf := range list {
@@ -3157,9 +3420,9 @@ func sptTrAddrs(list []*pb.NvmeTrConf) []string {
 // TestCreateCntlr pins CreateCntlr (architecture.md, Cntlrs): a standby is
 // added on a CN that hosts none of the SP's cntlrs, it reserves the SP's whole
 // footprint there (architecture.md, Per-operation allocation), it is enabled
-// from birth so its CN joins every CdcEntry of the SP (architecture.md,
-// Subsystems, namespaces), the id joins cntlr_id_list, and SpRev and the CN's
-// CnRev each bump exactly once.
+// with a zero err_epoch from birth so the listing rule lists its CN in every
+// CdcEntry of the SP, in cntlr_id_list order (architecture.md [D18]), the id
+// joins cntlr_id_list, and SpRev and the CN's CnRev each bump exactly once.
 func TestCreateCntlr(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -3219,12 +3482,13 @@ func TestCreateCntlr(t *testing.T) {
 		t.Errorf("cn %q: revision %d, want exactly one bump to 2",
 			cntlr.GetAddrPort(), got)
 	}
-	entry := env.cdcEntry(0, spId, sptSsId)
-	got := sptTrAddrs(entry.GetNvmeTrConfList())
-	if len(got) != sptCntlrCnt+1 ||
-		got[sptCntlrCnt] != cntlr.GetAddrPort() {
-		t.Errorf("cdc entry: got %v, want %q appended",
-			got, cntlr.GetAddrPort())
+	var wantAddrs []string
+	for _, id := range conf.GetCntlrIdList() {
+		wantAddrs = append(wantAddrs, env.cntlr(spId, id).GetAddrPort())
+	}
+	if got := env.cdcAddrs(spId); fmt.Sprint(got) != fmt.Sprint(wantAddrs) {
+		t.Errorf("cdc entry: got %v, want every cntlr in cntlr_id_list "+
+			"order %v", got, wantAddrs)
 	}
 	if rev := env.spRev(0, spId); rev != 2 {
 		t.Errorf("sp_rev: got %d, want exactly one bump to 2", rev)
@@ -4254,10 +4518,12 @@ func TestDeleteCntlr(t *testing.T) {
 }
 
 // TestUpdateCntlrEnabled pins the enable flag of architecture.md, Cntlrs,
-// together with its side effect of architecture.md, Subsystems, namespaces:
-// disabling takes the cntlr's CN out of every CdcEntry of the SP at
-// the same instant its namespaces go ANA-inaccessible, enabling puts it back,
-// and each transition bumps SpRev exactly once.
+// together with its side effect under the listing rule of architecture.md
+// [D18]: disabling takes the cntlr's CN out of every CdcEntry of the SP at the
+// same instant its namespaces go ANA-inaccessible, enabling a healthy cntlr
+// puts it back in cntlr_id_list order, and each transition bumps SpRev exactly
+// once. The primary is the first id, so its disable and enable show the
+// order: an enable that added the address at the end would list it last.
 func TestUpdateCntlrEnabled(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -4293,7 +4559,7 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 		t.Errorf("sp_rev: got %d, want exactly one bump to 2", rev)
 	}
 
-	// Enabling puts the address back, at the end of the list.
+	// Enabling a standby with a zero err_epoch lists its address again.
 	if _, err := env.srv.UpdateCntlrEnabled(
 		env.ctx, &pb.UpdateCntlrEnabledRequest{
 			ClusterName: env.name,
@@ -4331,7 +4597,9 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 	// Re-enabling the PRIMARY marks it settling again (dnv-worker.md HL2):
 	// its agent rebuilds the primary stack from the standby shape it held
 	// while disabled. It is planted settled first, as a primary the worker
-	// has already seen clean, and the disable leaves the flag alone.
+	// has already seen clean, and the disable leaves the flag alone. The
+	// disable unlists it although it stays the primary, and the enable lists
+	// it again ahead of the standby, its place in cntlr_id_list.
 	primaryId := conf.GetCntlrIdList()[0]
 	settled := env.cntlr(spId, primaryId)
 	settled.Settling = false
@@ -4340,9 +4608,16 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 		rev      uint64
 		enabled  bool
 		settling bool
+		addrs    []string
 	}{
-		{rev: 3, enabled: false, settling: false},
-		{rev: 4, enabled: true, settling: true},
+		{
+			rev: 3, enabled: false, settling: false,
+			addrs: []string{standbyAddr},
+		},
+		{
+			rev: 4, enabled: true, settling: true,
+			addrs: []string{primaryAddr, standbyAddr},
+		},
 	} {
 		if _, err := env.srv.UpdateCntlrEnabled(
 			env.ctx, &pb.UpdateCntlrEnabledRequest{
@@ -4359,15 +4634,21 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 			t.Errorf("primary after enabled=%v: settling %v, want %v",
 				tc.enabled, got, tc.settling)
 		}
+		if got := env.cdcAddrs(spId); fmt.Sprint(got) != fmt.Sprint(tc.addrs) {
+			t.Errorf("cdc entry after the primary's enabled=%v: got %v, "+
+				"want %v", tc.enabled, got, tc.addrs)
+		}
 	}
 }
 
 // TestCntlrMutatorsRecreateAMissingCdcEntry pins what the three cntlr mutators
 // do with a listed subsystem whose CdcEntry key is gone: they write it back in
 // the same transaction, rebuilt from the Subsystem record — the NQN it is
-// listed under and its allowed_hosts — and advertising every cntlr that is
-// ENABLED once the mutator's own change is applied (architecture.md,
-// Subsystems, namespaces). Skipping the entry
+// listed under and its allowed_hosts — and advertising every cntlr the
+// listing rule lists once the mutator's own change is applied
+// (architecture.md [D18]); every cntlr here has a zero err_epoch, so that is
+// every enabled one.
+// Skipping the entry
 // would answer OK while the subsystem stays out of dnv-cdc's discovery log,
 // and no later RPC would put the key back.
 //
@@ -4465,6 +4746,197 @@ func TestCntlrMutatorsRecreateAMissingCdcEntry(t *testing.T) {
 			if !proto.Equal(entry, want) {
 				t.Errorf("recreated cdc entry:\n got %v\nwant %v", entry, want)
 			}
+		})
+	}
+}
+
+// sptListWorld is the world of one TestCntlrMutatorsApplyTheListingRule case:
+// the default SP with its subsystem, and its cntlrs by role — "primary" and
+// "standby" from the create, and "third" once the case adds one.
+type sptListWorld struct {
+	t    *testing.T
+	env  *sptEnv
+	spId uint64
+	ids  map[string]uint64
+}
+
+// token is the SpRev the SP carries at the call, so every mutation of a case
+// is let through and bumps it once.
+func (w *sptListWorld) token() *pb.SpRev {
+	w.t.Helper()
+	return &pb.SpRev{Revision: w.env.spRev(0, w.spId)}
+}
+
+// create adds the "third" cntlr through CreateCntlr.
+func (w *sptListWorld) create() {
+	w.t.Helper()
+	reply, err := w.env.srv.CreateCntlr(w.env.ctx, &pb.CreateCntlrRequest{
+		ClusterName: w.env.name,
+		SpName:      sptSpName,
+		SpRev:       w.token(),
+		CntlidSlot:  2,
+	})
+	if err != nil {
+		w.t.Fatalf("CreateCntlr: %v", err)
+	}
+	w.ids["third"] = reply.GetCntlrId()
+}
+
+// setEnabled runs UpdateCntlrEnabled on one role and checks the flag moved, so
+// that no case passes on a no-op.
+func (w *sptListWorld) setEnabled(role string, enabled bool) {
+	w.t.Helper()
+	if _, err := w.env.srv.UpdateCntlrEnabled(
+		w.env.ctx, &pb.UpdateCntlrEnabledRequest{
+			ClusterName: w.env.name,
+			SpName:      sptSpName,
+			SpRev:       w.token(),
+			CntlrId:     w.ids[role],
+			Enabled:     enabled,
+		}); err != nil {
+		w.t.Fatalf("UpdateCntlrEnabled %s enabled=%v: %v", role, enabled, err)
+	}
+	if got := w.env.cntlr(w.spId, w.ids[role]).GetDisabled(); got == enabled {
+		w.t.Fatalf("%s: disabled %v after enabled=%v", role, got, enabled)
+	}
+}
+
+// remove runs DeleteCntlr on one role.
+func (w *sptListWorld) remove(role string) {
+	w.t.Helper()
+	if _, err := w.env.srv.DeleteCntlr(w.env.ctx, &pb.DeleteCntlrRequest{
+		ClusterName: w.env.name,
+		SpName:      sptSpName,
+		SpRev:       w.token(),
+		CntlrId:     w.ids[role],
+	}); err != nil {
+		w.t.Fatalf("DeleteCntlr %s: %v", role, err)
+	}
+}
+
+// stamp sets one role's err_epoch with stampErrEpoch, which leaves the entry
+// as it is.
+func (w *sptListWorld) stamp(role string) {
+	w.t.Helper()
+	w.env.stampErrEpoch(w.spId, w.ids[role], 1000)
+}
+
+// wantListed asserts that the entry lists exactly the CNs of roles, in that
+// order.
+func (w *sptListWorld) wantListed(what string, roles ...string) {
+	w.t.Helper()
+	want := make([]string, 0, len(roles))
+	for _, role := range roles {
+		want = append(want, w.env.cntlr(w.spId, w.ids[role]).GetAddrPort())
+	}
+	if got := w.env.cdcAddrs(w.spId); fmt.Sprint(got) != fmt.Sprint(want) {
+		w.t.Errorf("cdc entry %s: got %v, want %v (%v)",
+			what, got, want, roles)
+	}
+}
+
+// TestCntlrMutatorsApplyTheListingRule pins the listing rule of architecture.md
+// [D18] on the three cntlr mutators: each one sets the WHOLE
+// nvme_tr_conf_list of every CdcEntry of the SP from the cntlrs its
+// transaction reads, its own change included — the primary and every
+// enabled standby with a zero err_epoch, in cntlr_id_list order — rather than
+// adding or dropping the one address it changed.
+//
+// Three kinds of case tell the two apart. In the first, stampErrEpoch sets a
+// standby's err_epoch and leaves the entry listing it, a state no writer
+// leaves behind; the mutator that runs next changes another cntlr and must
+// still drop it. In the second, the enable of a cntlr whose err_epoch is set
+// lists it only when it is the primary: a standby with one is no candidate of
+// the failover of dnv-worker.md AR5, and the worker lists it at its next clean
+// round, while a primary keeps its path, because a serving primary is never
+// taken away from hosts. In the third, an enable puts the address back at its
+// place in cntlr_id_list, where an add would put it last.
+func TestCntlrMutatorsApplyTheListingRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// run drives the case and returns the roles the entry must then
+		// list, in that order.
+		run func(w *sptListWorld) []string
+	}{
+		{
+			name: "create beside a standby whose err_epoch is set",
+			run: func(w *sptListWorld) []string {
+				w.stamp("standby")
+				w.wantListed("before the create", "primary", "standby")
+				w.create()
+				return []string{"primary", "third"}
+			},
+		},
+		{
+			name: "disable beside a standby whose err_epoch is set",
+			run: func(w *sptListWorld) []string {
+				w.create()
+				w.stamp("standby")
+				w.wantListed("before the disable",
+					"primary", "standby", "third")
+				w.setEnabled("third", false)
+				return []string{"primary"}
+			},
+		},
+		{
+			name: "delete beside a standby whose err_epoch is set",
+			run: func(w *sptListWorld) []string {
+				w.create()
+				w.setEnabled("third", false)
+				w.stamp("standby")
+				w.wantListed("before the delete", "primary", "standby")
+				w.remove("third")
+				return []string{"primary"}
+			},
+		},
+		{
+			name: "enable a standby whose err_epoch is set",
+			run: func(w *sptListWorld) []string {
+				w.setEnabled("standby", false)
+				w.stamp("standby")
+				w.setEnabled("standby", true)
+				return []string{"primary"}
+			},
+		},
+		{
+			name: "enable a primary whose err_epoch is set",
+			run: func(w *sptListWorld) []string {
+				w.setEnabled("primary", false)
+				w.wantListed("after the primary's disable", "standby")
+				w.stamp("primary")
+				w.setEnabled("primary", true)
+				return []string{"primary", "standby"}
+			},
+		},
+		{
+			name: "enable the middle one of three cntlrs",
+			run: func(w *sptListWorld) []string {
+				w.create()
+				w.setEnabled("standby", false)
+				w.wantListed("after the disable", "primary", "third")
+				w.setEnabled("standby", true)
+				return []string{"primary", "standby", "third"}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+			spId := env.createSp(sptDefaultSpec(sptSpName))
+			env.addSubsystem(spId)
+			conf := env.spConf(sptSpName)
+			w := &sptListWorld{
+				t:    t,
+				env:  env,
+				spId: spId,
+				ids: map[string]uint64{
+					"primary": conf.GetCntlrIdList()[0],
+					"standby": conf.GetCntlrIdList()[1],
+				},
+			}
+			if !env.cntlr(spId, w.ids["primary"]).GetPrimary() {
+				t.Fatalf("the first id of cntlr_id_list is not the primary")
+			}
+			w.wantListed("after its last mutation", tc.run(w)...)
 		})
 	}
 }
@@ -4570,8 +5042,8 @@ func TestUpdateCntlrEnabledNoWrite(t *testing.T) {
 // bypass that only ever produced no-ops would pass that test while writing
 // nothing anywhere, which is not the rule GW6 states.
 //
-// So the side effect of architecture.md, Subsystems, namespaces, is pinned with
-// it: the disable takes the cntlr's CN
+// So the side effect under the listing rule of architecture.md [D18] is pinned
+// with it: the disable takes the cntlr's CN
 // out of the SP's CdcEntry at the same instant its namespaces go
 // ANA-inaccessible, and SpRev bumps once — a token-less mutation is a full
 // mutation, visible to every agent and every other client.

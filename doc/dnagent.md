@@ -1539,9 +1539,9 @@ sectors for the table).
 Then the protocol — **whole-side zeroing behind a `provisioned` gate**
 ([D15]: a discard is not a zero guarantee — the kernel does not promise
 that a discarded region reads as zeros, and NVMe read-zeroes after
-deallocate is optional — so a trim funds neither dnv's multi-tenant "no
-tenant ever reads another tenant's bytes" requirement nor the places the
-design assumes zeros: a recycled extent can hold a previous SP's valid
+deallocate is optional — so a trim funds neither dnv's promise about the
+data of a storage pool (`architecture.md`, System overview) nor the places
+the design assumes zeros: a recycled extent can hold a previous SP's valid
 thin-pool superblock, or a stale md superblock that flips `cnagent.md` CN12
 into the wrong assembly case):
 
@@ -1860,10 +1860,10 @@ With the gate open, the five dst steps of `architecture.md`, Migration,
 numbered as there. What the dn adds to them: the slot of step (2) is
 contiguous `DnCloneMetaUnit` units of the [D13] clone-metadata area, sized
 for the side's region count, and its head is zeroed **before** its record
-is persisted so that a previous tenant's bytes cannot be misparsed as a
-dm-clone superblock; the connect of step (3) carries the hostnqn
-`DnHostNqn` of this cluster and dn (SH20), the one field by which the
-connection is later attributed to this agent (DN6); the dm-clone of step
+is persisted so that bytes an earlier migration left in those units cannot
+be misparsed as a dm-clone superblock; the connect of step (3) carries the
+hostnqn `DnHostNqn` of this cluster and dn (SH20), the one field by which
+the connection is later attributed to this agent (DN6); the dm-clone of step
 (4) carries the features **no_hydration and no_discard_passdown** — both
 are mandatory on **every** dnv dm-clone, dn and cn alike (`cnagent.md`
 CN18), because the bitmap protocols of `architecture.md`, Bitmap push

@@ -187,7 +187,8 @@ const (
 // dm-linear that concatenates them, and keep the background zeroing goroutine
 // running until every logical extent is zeroed.
 //
-// Zeroing is whole-side and mandatory: dnv is multi-tenant and
+// Zeroing is whole-side and mandatory: a new side must never expose a
+// previous pool's bytes (architecture.md, System overview) and
 // discard-reads-zeros is not a hardware guarantee, so `blkdiscard --zeroout`
 // is what actually funds "a fresh side reads as zeros" ([D15]). The bits live
 // in the record because zeroed is a property of the side's *allocation*, not

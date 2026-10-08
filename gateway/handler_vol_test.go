@@ -554,6 +554,54 @@ func (e *volEnv) putSubsystem(
 	e.putSpConf(conf)
 }
 
+// patchCntlr rewrites one of the fixture's two cntlrs in place. The listing
+// rule of architecture.md [D18] reads its disabled, primary and err_epoch, and
+// nothing here rewrites a CdcEntry by it: the RPC a test drives next is the
+// one that has to apply the rule.
+func (e *volEnv) patchCntlr(cntlrId uint64, patch func(cntlr *pb.Cntlr)) {
+	e.t.Helper()
+	key := model.CntlrKey(e.cid, volSpId, cntlrId)
+	cntlr := &pb.Cntlr{}
+	e.get(key, cntlr)
+	patch(cntlr)
+	mustPut(e.t, e.cli, key, cntlr)
+}
+
+// putCdcList replaces the nvme_tr_conf_list of one subsystem's CdcEntry with
+// the volTrConf of addrs, keeping the rest of the entry.
+func (e *volEnv) putCdcList(ssId uint64, addrs ...string) {
+	e.t.Helper()
+	entry := e.cdcEntry(ssId)
+	entry.NvmeTrConfList = nil
+	for _, addr := range addrs {
+		entry.NvmeTrConfList = append(entry.NvmeTrConfList, volTrConf(addr))
+	}
+	mustPut(e.t, e.cli,
+		model.CdcEntryKey(e.cid, volShard, volSpId, ssId), entry)
+}
+
+// volWantTrConfs asserts that a transport list is exactly the volTrConf of
+// addrs, in that order.
+func volWantTrConfs(
+	t *testing.T,
+	what string,
+	got []*pb.NvmeTrConf,
+	addrs ...string,
+) {
+	t.Helper()
+	want := make([]*pb.NvmeTrConf, 0, len(addrs))
+	for _, addr := range addrs {
+		want = append(want, volTrConf(addr))
+	}
+	same := len(got) == len(want)
+	for idx := 0; same && idx < len(got); idx++ {
+		same = proto.Equal(got[idx], want[idx])
+	}
+	if !same {
+		t.Errorf("%s: nvme_tr_conf_list %v, want %v", what, got, want)
+	}
+}
+
 // wantUntouched is the "a refusal writes nothing" assertion of the handler
 // pattern: an error returned from an STM closure aborts the transaction
 // uncommitted (EU4), so neither the SP's revision nor any counter or name list
@@ -1642,33 +1690,91 @@ func TestCreateSubsystemWritesEntryAndCdc(t *testing.T) {
 	}
 }
 
-// TestCreateSubsystemAdvertisesOnlyEnabledCntlrs pins the one rule that makes
-// the CdcEntry more than a copy of the cntlr list: a DISABLED cntlr is not
-// advertised, because its namespaces are ANA inaccessible and a host that
-// discovered its address would keep connecting to a path that serves nothing.
-func TestCreateSubsystemAdvertisesOnlyEnabledCntlrs(t *testing.T) {
-	env := newVolEnv(t)
-	mustPut(t, env.cli, model.CntlrKey(env.cid, volSpId, volCntlrB), &pb.Cntlr{
-		AddrPort:   volCnB,
-		NvmeTrConf: volTrConf(volCnB),
-		CntlidSlot: 1,
-		Disabled:   true,
-	})
-	reply, err := env.srv.CreateSubsystem(env.ctx, &pb.CreateSubsystemRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		Nqn:         volNqn,
-	})
-	if err != nil {
-		t.Fatalf("CreateSubsystem: %v", err)
-	}
-	entry := env.cdcEntry(reply.GetSsId())
-	want := []*pb.NvmeTrConf{volTrConf(volCnA)}
-	if len(entry.GetNvmeTrConfList()) != 1 ||
-		!proto.Equal(entry.GetNvmeTrConfList()[0], want[0]) {
-		t.Errorf("nvme_tr_conf_list: got %v, want %v",
-			entry.GetNvmeTrConfList(), want)
+// TestCreateSubsystemAdvertisesOnlyListedCntlrs pins the listing rule of
+// architecture.md [D18] on the entry CreateSubsystem writes, the rule that
+// makes the CdcEntry more than a copy of the cntlr list: a cntlr is advertised
+// while it is enabled and either is the primary or has a zero err_epoch — the
+// primary and every standby the failover of dnv-worker.md AR5 may elect — in
+// cntlr_id_list order. Neither a disabled cntlr, whose namespaces are ANA
+// inaccessible, nor a standby with an err_epoch is such a candidate, so a host
+// that discovered either would hold a path no failover makes serve; a primary
+// with an err_epoch keeps its path, because a serving primary is never taken
+// away from hosts.
+//
+// The fixture's cntlr_id_list is [A, B], A the primary. The last case reverses
+// it, so that an entry in cntlr_id order, or with the primary first, reads
+// differently from one in cntlr_id_list order.
+func TestCreateSubsystemAdvertisesOnlyListedCntlrs(t *testing.T) {
+	disabled := func(cntlr *pb.Cntlr) { cntlr.Disabled = true }
+	unhealthy := func(cntlr *pb.Cntlr) { cntlr.ErrEpoch = 1000 }
+	for _, tc := range []struct {
+		name string
+		// patchA and patchB rewrite cntlr A, the primary, and cntlr B.
+		patchA func(cntlr *pb.Cntlr)
+		patchB func(cntlr *pb.Cntlr)
+		// order replaces cntlr_id_list when it is set.
+		order []uint64
+		want  []string
+	}{
+		{
+			name:   "a disabled standby",
+			patchB: disabled,
+			want:   []string{volCnA},
+		},
+		{
+			name:   "a standby whose err_epoch is set",
+			patchB: unhealthy,
+			want:   []string{volCnA},
+		},
+		{
+			name:   "a primary whose err_epoch is set",
+			patchA: unhealthy,
+			want:   []string{volCnA, volCnB},
+		},
+		{
+			name:   "a disabled primary",
+			patchA: disabled,
+			want:   []string{volCnB},
+		},
+		{
+			name:   "a disabled primary and a standby whose err_epoch is set",
+			patchA: disabled,
+			patchB: unhealthy,
+			want:   nil,
+		},
+		{
+			name:  "cntlr_id_list order",
+			order: []uint64{volCntlrB, volCntlrA},
+			want:  []string{volCnB, volCnA},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			if tc.patchA != nil {
+				env.patchCntlr(volCntlrA, tc.patchA)
+			}
+			if tc.patchB != nil {
+				env.patchCntlr(volCntlrB, tc.patchB)
+			}
+			if tc.order != nil {
+				conf := env.spConf()
+				conf.CntlrIdList = tc.order
+				env.putSpConf(conf)
+			}
+			reply, err := env.srv.CreateSubsystem(
+				env.ctx, &pb.CreateSubsystemRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       env.token(),
+					Nqn:         volNqn,
+				})
+			if err != nil {
+				t.Fatalf("CreateSubsystem: %v", err)
+			}
+			volWantTrConfs(t, "cdc entry",
+				env.cdcEntry(reply.GetSsId()).GetNvmeTrConfList(),
+				tc.want...)
+		})
 	}
 }
 
@@ -1714,63 +1820,164 @@ func TestUpdateSubsystemHostsRewritesBothCopies(t *testing.T) {
 		t.Errorf("cdc allowed_hosts: got %v, want %v",
 			entry.GetAllowedHosts(), want)
 	}
-	if len(entry.GetNvmeTrConfList()) != 2 {
-		t.Errorf("the transports are the cntlrs' and must not move: %v",
-			entry.GetNvmeTrConfList())
-	}
+	// The transports are the listing rule's (architecture.md [D18]), which
+	// lists both cntlrs before the update and after it.
+	volWantTrConfs(t, "cdc entry", entry.GetNvmeTrConfList(), volCnA, volCnB)
 	if rev := env.spRev(); rev != 3 {
 		t.Errorf("sp_rev: got %d, want 3", rev)
+	}
+}
+
+// TestUpdateSubsystemHostsRewritesAStaleList pins that UpdateSubsystemHosts,
+// like every writer of a CdcEntry, sets the entry's nvme_tr_conf_list by the
+// listing rule of architecture.md [D18] from the cntlrs its transaction
+// reads, not only when it rebuilds a missing entry: the list it writes back
+// beside the new allowed_hosts is the rule's, whatever the entry held. Each
+// case plants a list the rule does not give: one that holds a standby whose
+// err_epoch is set, leaves out a listed cntlr, has the two in the other order
+// or holds an address no cntlr has. The update must put the rule's list in its
+// place.
+func TestUpdateSubsystemHostsRewritesAStaleList(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// patchB rewrites cntlr B, the standby, when it is set.
+		patchB func(cntlr *pb.Cntlr)
+		stale  []string
+		want   []string
+	}{
+		{
+			name:   "a standby whose err_epoch is set",
+			patchB: func(cntlr *pb.Cntlr) { cntlr.ErrEpoch = 1000 },
+			stale:  []string{volCnA, volCnB},
+			want:   []string{volCnA},
+		},
+		{
+			name:  "a listed cntlr left out",
+			stale: []string{volCnA},
+			want:  []string{volCnA, volCnB},
+		},
+		{
+			name:  "the other order",
+			stale: []string{volCnB, volCnA},
+			want:  []string{volCnA, volCnB},
+		},
+		{
+			name:  "an address no cntlr has",
+			stale: []string{volCnA, volCnB, "cn-gone:9000"},
+			want:  []string{volCnA, volCnB},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.putSubsystem(volNqn, 501, nil)
+			if tc.patchB != nil {
+				env.patchCntlr(volCntlrB, tc.patchB)
+			}
+			env.putCdcList(501, tc.stale...)
+			if _, err := env.srv.UpdateSubsystemHosts(
+				env.ctx, &pb.UpdateSubsystemHostsRequest{
+					ClusterName:  env.cluster,
+					SpName:       volSpName,
+					SpRev:        env.token(),
+					Nqn:          volNqn,
+					AllowedHosts: []string{volHostA},
+				}); err != nil {
+				t.Fatalf("UpdateSubsystemHosts: %v", err)
+			}
+			entry := env.cdcEntry(501)
+			volWantTrConfs(t, "cdc entry", entry.GetNvmeTrConfList(),
+				tc.want...)
+			if entry.GetNqn() != volNqn ||
+				fmt.Sprint(entry.GetAllowedHosts()) !=
+					fmt.Sprint([]string{volHostA}) {
+				t.Errorf("cdc entry: nqn %q, allowed_hosts %v; want %q "+
+					"and [%s]", entry.GetNqn(), entry.GetAllowedHosts(),
+					volNqn, volHostA)
+			}
+		})
 	}
 }
 
 // TestUpdateSubsystemHostsRecreatesMissingCdcEntry pins the other half of the
 // two-copy rule: a subsystem whose CdcEntry key is gone gets it back in the
 // same transaction, rebuilt from what the entry is made of — the NQN, the
-// transports of every ENABLED cntlr's CN and the new allowed_hosts — exactly
-// as CreateSubsystem wrote it. Skipping it instead answered OK while the
-// subsystem stayed out of dnv-cdc's discovery log. cntlr B is disabled so that
-// the rebuild is seen to apply CreateSubsystem's filter, not copy the cntlr
-// list.
+// transports of every cntlr the listing rule of architecture.md [D18] lists,
+// in cntlr_id_list order, and the new allowed_hosts — exactly as
+// CreateSubsystem writes it. Skipping it would answer OK while the subsystem
+// stays out of dnv-cdc's discovery log. The cases leave out a disabled standby
+// and one whose err_epoch is set, and keep a primary whose err_epoch is set, so
+// the rebuild is seen to apply CreateSubsystem's rule: neither a copy of the
+// cntlr list nor a filter on one field.
 func TestUpdateSubsystemHostsRecreatesMissingCdcEntry(t *testing.T) {
-	env := newVolEnv(t)
-	mustPut(t, env.cli, model.CntlrKey(env.cid, volSpId, volCntlrB), &pb.Cntlr{
-		AddrPort:   volCnB,
-		NvmeTrConf: volTrConf(volCnB),
-		CntlidSlot: 1,
-		Disabled:   true,
-	})
-	env.putSubsystem(volNqn, 501, nil)
-	entryKey := model.CdcEntryKey(env.cid, volShard, volSpId, 501)
-	if err := env.cli.Delete(env.ctx, entryKey); err != nil {
-		t.Fatalf("Delete %s: %v", entryKey, err)
-	}
-	_, err := env.srv.UpdateSubsystemHosts(
-		env.ctx, &pb.UpdateSubsystemHostsRequest{
-			ClusterName:  env.cluster,
-			SpName:       volSpName,
-			SpRev:        env.token(),
-			Nqn:          volNqn,
-			AllowedHosts: []string{volHostA},
+	for _, tc := range []struct {
+		name string
+		// patchA and patchB rewrite cntlr A, the primary, and cntlr B.
+		patchA func(cntlr *pb.Cntlr)
+		patchB func(cntlr *pb.Cntlr)
+		want   []string
+	}{
+		{
+			name:   "a disabled standby",
+			patchB: func(cntlr *pb.Cntlr) { cntlr.Disabled = true },
+			want:   []string{volCnA},
+		},
+		{
+			name:   "a standby whose err_epoch is set",
+			patchB: func(cntlr *pb.Cntlr) { cntlr.ErrEpoch = 1000 },
+			want:   []string{volCnA},
+		},
+		{
+			name:   "a primary whose err_epoch is set",
+			patchA: func(cntlr *pb.Cntlr) { cntlr.ErrEpoch = 1000 },
+			want:   []string{volCnA, volCnB},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			if tc.patchA != nil {
+				env.patchCntlr(volCntlrA, tc.patchA)
+			}
+			if tc.patchB != nil {
+				env.patchCntlr(volCntlrB, tc.patchB)
+			}
+			env.putSubsystem(volNqn, 501, nil)
+			entryKey := model.CdcEntryKey(env.cid, volShard, volSpId, 501)
+			if err := env.cli.Delete(env.ctx, entryKey); err != nil {
+				t.Fatalf("Delete %s: %v", entryKey, err)
+			}
+			_, err := env.srv.UpdateSubsystemHosts(
+				env.ctx, &pb.UpdateSubsystemHostsRequest{
+					ClusterName:  env.cluster,
+					SpName:       volSpName,
+					SpRev:        env.token(),
+					Nqn:          volNqn,
+					AllowedHosts: []string{volHostA},
+				})
+			if err != nil {
+				t.Fatalf("UpdateSubsystemHosts: %v", err)
+			}
+			if !env.exists(entryKey, &pb.CdcEntry{}) {
+				t.Fatalf("UpdateSubsystemHosts left the CdcEntry missing")
+			}
+			wantEntry := &pb.CdcEntry{
+				Nqn:          volNqn,
+				AllowedHosts: []string{volHostA},
+			}
+			for _, addr := range tc.want {
+				wantEntry.NvmeTrConfList = append(
+					wantEntry.NvmeTrConfList, volTrConf(addr))
+			}
+			if got := env.cdcEntry(501); !proto.Equal(got, wantEntry) {
+				t.Errorf("recreated cdc entry:\n got %v\nwant %v",
+					got, wantEntry)
+			}
+			if got := env.subsystem(volNqn).GetAllowedHosts(); len(got) != 1 {
+				t.Errorf("subsystem allowed_hosts: got %v", got)
+			}
+			if rev := env.spRev(); rev != 2 {
+				t.Errorf("sp_rev: got %d, want 2", rev)
+			}
 		})
-	if err != nil {
-		t.Fatalf("UpdateSubsystemHosts: %v", err)
-	}
-	if !env.exists(entryKey, &pb.CdcEntry{}) {
-		t.Fatalf("the missing CdcEntry was not recreated")
-	}
-	wantEntry := &pb.CdcEntry{
-		Nqn:            volNqn,
-		NvmeTrConfList: []*pb.NvmeTrConf{volTrConf(volCnA)},
-		AllowedHosts:   []string{volHostA},
-	}
-	if got := env.cdcEntry(501); !proto.Equal(got, wantEntry) {
-		t.Errorf("recreated cdc entry:\n got %v\nwant %v", got, wantEntry)
-	}
-	if got := env.subsystem(volNqn).GetAllowedHosts(); len(got) != 1 {
-		t.Errorf("subsystem allowed_hosts: got %v", got)
-	}
-	if rev := env.spRev(); rev != 2 {
-		t.Errorf("sp_rev: got %d, want 2", rev)
 	}
 }
 

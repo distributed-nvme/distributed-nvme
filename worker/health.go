@@ -210,6 +210,10 @@ type healthMonitor struct {
 	// put and whose agent keeps answering code 0 never syncs. nil for the sp
 	// kinds, which the sp coordinator's passes re-seed.
 	load func(ctx context.Context) (errEpoch uint64, found bool, err error)
+	// verdict is told every verdict the monitor reaches — true for
+	// unhealthy, false for clean — whether or not it writes: the sp
+	// coordinator's own-verdict memo (AR10). nil for the dn and cn kinds.
+	verdict func(unhealthy bool)
 
 	known     bool
 	unhealthy bool
@@ -359,6 +363,9 @@ func (m *healthMonitor) observeSettle(
 		// neither ERROR nor OK or is absent (legObservation), neither set
 		// nor clear.
 		return false
+	}
+	if m.verdict != nil {
+		m.verdict(unhealthy)
 	}
 	m.refresh(ctx)
 	transition := !(m.known && m.unhealthy == unhealthy)
@@ -587,7 +594,7 @@ func markCnUnknown(info *pb.CnInfo) {
 }
 
 // ---------------------------------------------------------------------------
-// HL2 — the sp-object tables (used by the sp role, RW14-RW20)
+// HL2 — the sp-object tables (used by the sp role, RW14-RW20, RW22)
 // ---------------------------------------------------------------------------
 
 // newCntlrMonitor builds the health monitor of one cntlr (HL2).
@@ -882,7 +889,8 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // finds a member not available (a promotion ahead of the sides' ANA flips, a
 // provisioned flip ahead of the side's export) reports the groups and pools it
 // could not build ERROR and leaves them to the CN10 retry, whose first pass
-// comes 5 s later; a Check round in between probes the absent devices and
+// comes one CnConnectRetryInterval later; a Check round in between probes the
+// absent devices and
 // reports them MISSING "", not ERROR, and in an SP with no td, as a new SP is
 // until one is created, that reply has no ERROR row outside leg_id_to_leg (a
 // td's raid0 row reads ERROR while its thins are absent; a leg row reads the

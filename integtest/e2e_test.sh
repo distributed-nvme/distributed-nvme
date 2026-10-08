@@ -20,7 +20,7 @@
 #             [--redund raid1|none] [--dns-per-vm N]
 #
 # Cases, in order, each from an EMPTY etcd and a freshly built storage pool
-# (E2E11): smoke, ops, copy, react. `--only` picks one. Cleanup runs
+# (E2E11): smoke, ops, copy, react, cutoff. `--only` picks one. Cleanup runs
 # unconditionally at the START and, on success only, at the END (E2E6): a
 # failing run leaves every process, dm/md/nvmet object, loop device, host
 # connection and log in place and dumps diagnostics instead. The START
@@ -50,7 +50,9 @@
 #     of the ssh command itself, so a pattern in an ssh command STRING kills
 #     its own shell (E2E8). Every agent and control-plane daemon this suite
 #     starts records its pid: the control-plane daemons are stopped by theirs,
-#     and the react case stops each agent it kills by that agent's pid file.
+#     the react case stops each agent it kills by that agent's pid file, and
+#     the cutoff case stops and continues the agent it cuts off by its pid
+#     file too (SIGSTOP, then SIGCONT).
 #     The cleanup's pkill sweeps run whether or not a pid file exists, so they
 #     also reach a crashed run's processes whose pid files are gone, and each
 #     pattern is qualified by $WORK or by the etcd name, so it never touches
@@ -66,14 +68,19 @@
 #     runs detached, with the GROUP's stdout redirected, or command
 #     substitution hangs with it. Every other dd read on a host, and every
 #     write a host makes into a device except host_write_probe's (which
-#     dm-flakey fails rather than requeues), runs under a watchdog on the
-#     DRIVER (ssh_host_watched), whose child is the local ssh: IO that blocks
-#     where nothing said it would is abandoned there and the run dies with
-#     its diagnostics instead of hanging.
+#     dm-flakey fails rather than requeues) and the cutoff case's write
+#     loop's (detached, reporting through files, as its writes are meant to
+#     queue), runs under a watchdog on the DRIVER (ssh_host_watched), whose
+#     child is the local ssh: IO that blocks where nothing said it would is
+#     abandoned there and the run dies with its diagnostics instead of
+#     hanging.
 #  6. `nvmf-connect@.service` is masked on both hosts for the whole run
 #     (E2E10): the kernel's own autoconnector matches the discovery AEN
 #     (NVME_AEN=0x70f002) and would connect behind the suite's back. Every
-#     connect here is the suite's own act.
+#     connect here is the suite's own act, but inside the cutoff case, where
+#     host0's connects are nvme-stas's on purpose — that case starts stas with
+#     the autoconnector still masked, and stops it and hands host0 back
+#     before its ending.
 #  7. The `63-dnv-md.rules` mask goes on the CN VMs AND on the DN VMs. md runs
 #     only on a CN, but the md SUPERBLOCK that CN writes travels down the side
 #     export and lands on the DN's own storage, so a `linux_raid_member` shows
@@ -147,6 +154,17 @@ ETCD_MAX_TXN_OPS=
 # for redund_none). read_constants cross-checks LEGS against it, because every
 # number below — DN picks, DNS_PER_VM, the create's size — is a multiple of it.
 MAX_ALLOC_LEG_PER_GRP=
+# The three health timers, from the same JSON, so that no copied literal can
+# go stale the day one moves: common.DefaultHealthCheckInterval, the
+# cntlr_interval every cluster of this suite stores (`cluster create` has no
+# flag for it), by which read_constants sizes the cutoff set and checks every
+# set's primary threshold; and two the suite only logs,
+# common.DefaultPrimaryUnhealthy, what a pool created without --thr-primary
+# reads, and common.DemotionHoldTimeout, how long a fan-out that demotes a
+# primary holds its sides for the demoted cntlr (dnv-worker.md RW22).
+DEFAULT_HC_INTERVAL=
+DEFAULT_PRIMARY_UNHEALTHY=
+DEMOTION_HOLD_TIMEOUT=
 
 # ---------------------------------------------------------------------------
 # Constants: paths (e2e_integtest.md, Topology and parameters)
@@ -228,9 +246,12 @@ TRSVCID_MAX=$((DN_TRSVCID_BASE + MAX_DNS_PER_VM - 1))
 # Constants: the shape of the run (E2E12)
 #
 # A shell suite cannot import package common, so every number a Go constant
-# owns is repeated here WITH the constant it mirrors. Two of them are not
-# repeated at all but read from `workerctl constants` above, because they are
-# deployment requirements rather than choices (EtcdMaxTxnOps, MaxAllocLegPerGrp).
+# owns is repeated here WITH the constant it mirrors. Five of them are not
+# repeated at all but read from `workerctl constants` above: two because they
+# are deployment requirements rather than choices (EtcdMaxTxnOps,
+# MaxAllocLegPerGrp), and the three health timers, which the cutoff case
+# reads (DefaultHealthCheckInterval, DefaultPrimaryUnhealthy,
+# DemotionHoldTimeout).
 # ---------------------------------------------------------------------------
 
 # common.MaxSliceCntPerSp — the widest sp the gateway accepts, enforced by
@@ -282,7 +303,7 @@ CNTLR_CNT=2
 SLOTS=0,1
 
 # event_threshold, in seconds (ctl/sp.go declares the four flags;
-# worker/reaction.go consumes them). TWO SETS, ONE PER KIND OF CASE, and
+# worker/reaction.go consumes them). THREE SETS, ONE PER KIND OF CASE, and
 # sp_thresholds picks between them before each sp is built.
 #
 # WHY THE CHOICE IS MADE AT CREATE TIME AND NOWHERE ELSE. There is no RPC that
@@ -298,17 +319,21 @@ SLOTS=0,1
 # 64 md arrays over 128 legs, 32 thin pools — keeps the primary CN spawning a
 # few hundred processes a second on a 2-vCPU guest for minutes on end (the
 # whole build window, restarts included — see WAIT_BUILD). Under that load the
-# primary cannot answer a health check inside five seconds, the worker sets its
-# err_epoch, and AR5 moves the role. The new primary then starts the SAME build
-# from scratch, goes unresponsive in its turn and can hand the role back, all
-# inside setup.
+# primary cannot answer a health check inside one check round — the round's
+# timeout is the cluster's cntlr_interval, which here is always
+# common.DefaultHealthCheckInterval, as `cluster create` has no flag for it —
+# the worker sets its err_epoch, and AR5 moves the role. The new primary then
+# starts the SAME build from scratch, goes unresponsive in its turn and can
+# hand the role back, all inside setup.
 #
-# NOTE CAREFULLY, because it is what decides the shape of the remedy:
-# common.DefaultPrimaryUnhealthy is ALSO 5, and model.ResolveEventThreshold
-# turns an absent flag into it. So
-# the failover loop is NOT caused by an aggressive suite value — omitting
-# --thr-primary would produce exactly the same five seconds. The only way out is
-# a LONG value, passed explicitly, at create.
+# NOTE CAREFULLY, because it is what decides the shape of the remedy: an absent
+# flag resolves to common.DefaultPrimaryUnhealthy (model.ResolveEventThreshold),
+# which is short by design — a primary cut off from the control plane is meant
+# to fail over within seconds, and the gateway accepts any primary threshold
+# that covers two check rounds (architecture.md, Common validation). So the
+# failover loop is NOT caused by an aggressive suite value — omitting
+# --thr-primary would produce a threshold just as short. The only way out is a
+# LONG value, passed explicitly, at create.
 #
 # THE QUIET SET — smoke, ops and copy. These three cases test operations, not
 # reactions: a failover or a spare in the middle of one is noise that
@@ -342,13 +367,38 @@ THR_REACT_CNTLR=20
 THR_REACT_SIDE=20
 THR_REACT_LEG=30
 
-# The two argv strings, composed once so log_topology can print both and
+# THE CUTOFF SET — cutoff alone. That case stops the primary's agent and
+# measures what a host sees until the role has moved, so the failover must
+# land within seconds: the primary threshold is two of the cluster's
+# cntlr_interval, the shortest the gateway accepts (architecture.md, Common
+# validation), so that a single missed round followed by a prompt clean round
+# fails nothing over (dnv-worker.md, Known limits). It is not typed here:
+# read_constants computes it from
+# common.DefaultHealthCheckInterval, the cntlr_interval every cluster of this
+# suite stores. Everything else may not react at all while the agent is
+# stopped, so the other three are the quiet set's: AR7 must not replace the
+# stopped cntlr before the case continues it, AR8 has no leg fault to repair,
+# and the elected standby is held to cntlr_unhealthy while it settles
+# (dnv-worker.md AR5, HL2), so its own build cannot hand the role back. leg
+# exceeds side, as validateEventThreshold (gateway/validate.go) demands.
+THR_CUT_PRIMARY=""
+THR_CUT_CNTLR=1800
+THR_CUT_SIDE=1800
+THR_CUT_LEG=3600
+
+# The argv strings, composed once so log_topology can print them and
 # sp_thresholds only has to choose. Each splits into eight words at the call
-# site (see setup_create_sp).
+# site (see setup_create_sp). The cutoff set's is composed by read_constants,
+# the first place its primary threshold is known; log_topology runs before
+# that and prints THR_CUT_SHOW instead.
 THR_QUIET="--thr-primary $THR_QUIET_PRIMARY --thr-cntlr $THR_QUIET_CNTLR"
 THR_QUIET="$THR_QUIET --thr-side $THR_QUIET_SIDE --thr-leg $THR_QUIET_LEG"
 THR_REACT="--thr-primary $THR_REACT_PRIMARY --thr-cntlr $THR_REACT_CNTLR"
 THR_REACT="$THR_REACT --thr-side $THR_REACT_SIDE --thr-leg $THR_REACT_LEG"
+THR_CUT=""
+THR_CUT_SHOW="--thr-primary <2 x common.DefaultHealthCheckInterval>"
+THR_CUT_SHOW="$THR_CUT_SHOW --thr-cntlr $THR_CUT_CNTLR"
+THR_CUT_SHOW="$THR_CUT_SHOW --thr-side $THR_CUT_SIDE --thr-leg $THR_CUT_LEG"
 
 # The ACTIVE set: the four numbers the sp now being built will carry, and the
 # argv that carries them. They exist as four variables and not as one opaque
@@ -358,7 +408,8 @@ THR_REACT="$THR_REACT --thr-side $THR_REACT_SIDE --thr-leg $THR_REACT_LEG"
 # progress messages name the individual threshold the operator is waiting on
 # (primary_unhealthy in step 3, cntlr_unhealthy in step 4, side/leg_unhealthy in
 # step 5). No wait bound in this file is computed from any of them — WAIT_REACT
-# is a flat number sized by hand against the reacting set.
+# is a flat number sized by hand against the reacting set — and one assertion
+# is: the cutoff case's bound on how soon its failover lands.
 # sp_thresholds is the only writer; the initial value is the quiet set so that
 # nothing is ever unset under `set -u`, and main overwrites it before the first
 # sp is created.
@@ -481,9 +532,9 @@ WAIT_DELETE=900        # `sp delete` to drain to NOT_FOUND. The drain is the
                        # retired on its DN — so it is sized against the build
                        # window, not against an incremental one
 WAIT_REACT=120         # an automatic reaction to land after its threshold.
-                       # It is threshold + a few 5s worker passes
-                       # (the vote loop), and every threshold it bounds is
-                       # in the reacting set
+                       # It is threshold + a few worker passes, one per
+                       # cntlr_interval, and every threshold it bounds is
+                       # in the reacting set or the cutoff set's primary
 WAIT_HOST=60           # a host device/ANA state to appear — and the
                        # per-command watchdog of ssh_host_watched (the Host
                        # IO section names what runs under it), so a watched
@@ -501,11 +552,12 @@ WAIT_HOST=60           # a host device/ANA state to appear — and the
 # and not a wait to sit through.
 SETUP_STACK_ROUNDS=3
 
-CASES=(smoke ops copy react)
+CASES=(smoke ops copy react cutoff)
 
 # The cases this run will actually execute, in CASES order with --only applied.
-# main fills it BEFORE setup, because setup builds the FIRST case's sp and
-# sp_thresholds has to know whose sp that is.
+# main fills it BEFORE the guest preflight, which checks nvme-stas on host0
+# only when the cutoff case is in it, and so before setup too, which builds
+# the FIRST case's sp — sp_thresholds has to know whose sp that is.
 RUN_CASES=()
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1154,44 @@ read_constants() {
 			"$MAX_ALLOC_LEG_PER_GRP: re-derive the numbers of" \
 			"e2e_integtest.md, Topology and parameters"
 	fi
+	local key val
+	for key in DefaultHealthCheckInterval DefaultPrimaryUnhealthy \
+		DemotionHoldTimeout; do
+		val=$(jq_of "$json" ".$key")
+		case "$val" in
+		'' | *[!0-9]* | 0)
+			die "workerctl constants: $key is '$val' in $json"
+			;;
+		esac
+		case "$key" in
+		DefaultHealthCheckInterval) DEFAULT_HC_INTERVAL=$val ;;
+		DefaultPrimaryUnhealthy) DEFAULT_PRIMARY_UNHEALTHY=$val ;;
+		DemotionHoldTimeout) DEMOTION_HOLD_TIMEOUT=$val ;;
+		esac
+	done
+	# The cutoff set's primary threshold, and with it the set's argv (see
+	# THE CUTOFF SET above).
+	THR_CUT_PRIMARY=$((2 * DEFAULT_HC_INTERVAL))
+	THR_CUT="--thr-primary $THR_CUT_PRIMARY --thr-cntlr $THR_CUT_CNTLR"
+	THR_CUT="$THR_CUT --thr-side $THR_CUT_SIDE --thr-leg $THR_CUT_LEG"
+	# The gateway refuses a pool whose primary threshold covers fewer than two
+	# of its cluster's cntlr_interval (architecture.md, Common validation), and
+	# every cluster here stores the default interval. A set below that floor
+	# would fail its case's `sp create` with INVALID_ARGUMENT two builds into
+	# the run, so it fails here instead, naming the set.
+	for val in "quiet $THR_QUIET_PRIMARY" "reacting $THR_REACT_PRIMARY" \
+		"cutoff $THR_CUT_PRIMARY"; do
+		[ "${val#* }" -ge "$((2 * DEFAULT_HC_INTERVAL))" ] ||
+			die "the ${val%% *} threshold set's primary_unhealthy ${val#* }" \
+				"is under two of common.DefaultHealthCheckInterval" \
+				"($DEFAULT_HC_INTERVAL), which the gateway refuses at" \
+				"\`sp create\` (architecture.md, Common validation)"
+	done
 	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	log "  health timers: common.DefaultHealthCheckInterval" \
+		"$DEFAULT_HC_INTERVAL s, common.DefaultPrimaryUnhealthy" \
+		"$DEFAULT_PRIMARY_UNHEALTHY s, common.DemotionHoldTimeout" \
+		"$DEMOTION_HOLD_TIMEOUT s; the cutoff set is $THR_CUT"
 }
 
 # ---------------------------------------------------------------------------
@@ -2121,11 +2210,13 @@ cn_wait_ana() { # <v> <nqn> <traddr> <trsvcid> <want> [secs]
 # So every foreground read here — host_sha_range (and through it host_sha_is
 # and check_sha0), react_chunk_sha (and through it react_chunks_are) — the
 # cache drop in front of them, and the device writes of host_write_range and
-# react_chunk_write run under ssh_host_watched below. Three host dd's do
+# react_chunk_write run under ssh_host_watched below. Four host dd's do
 # not: host_sha_probe detaches its own and answers inside its budget,
-# host_make_pattern writes a file on the host's own disk, and
+# host_make_pattern writes a file on the host's own disk,
 # host_write_probe writes only where dm-flakey fails the bio instead of
-# requeueing it (its header says why that is safe).
+# requeueing it (its header says why that is safe), and the cutoff case's
+# write loop (wloop_start in the host helper) runs detached and reports
+# through files, because its writes are meant to queue through a failover.
 # ---------------------------------------------------------------------------
 
 # ssh_host_watched is ssh_host under a watchdog on the DRIVER: WAIT_HOST
@@ -2476,6 +2567,54 @@ alive() { # <pidfile>
 	return 0
 }
 
+# sig_pidfile sends one job-control signal to ONE recorded process — the
+# cutoff case stops a cn agent with STOP and lets it go on with CONT — and
+# prints the state /proc then shows for it, as `state=<letter>`: T is stopped,
+# any other letter is not, and `gone` is a process that is not there. The
+# state is read back rather than assumed because delivery is asynchronous, so
+# the read is retried for a moment until it shows what the signal asks for.
+# The comm field of /proc/<pid>/stat may hold spaces and parentheses, which is
+# why the state is taken from after its LAST closing parenthesis.
+sig_pidfile() { # <pidfile> <STOP|CONT>
+	local f=$1 sig=$2 pid stat rest st="" i
+	case "$sig" in
+	STOP | CONT) ;;
+	*)
+		echo "sig_pidfile: refusing signal '$sig'"
+		return 0
+		;;
+	esac
+	[ -f "$f" ] || {
+		echo "no pid file $f"
+		return 0
+	}
+	pid=$(cat "$f" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*)
+		echo "pid file $f holds '$pid'"
+		return 0
+		;;
+	esac
+	kill -"$sig" "$pid" 2>/dev/null || {
+		echo "state=gone"
+		return 0
+	}
+	for ((i = 0; i < 20; i++)); do
+		stat=$(cat "/proc/$pid/stat" 2>/dev/null) || {
+			st=gone
+			break
+		}
+		rest=${stat##*) }
+		st=${rest%% *}
+		case "$sig:$st" in
+		STOP:T | CONT:[!T]) break ;;
+		esac
+		sleep 0.1
+	done
+	printf 'state=%s\n' "$st"
+	return 0
+}
+
 # --- ports -------------------------------------------------------------------
 
 # listening is a PREDICATE: exit 0 when something holds that TCP port. It is
@@ -2685,8 +2824,13 @@ helper_node_source() {
 # `blkdiscard --zeroout` child); runCn passes nil and deliberately
 # does not, so a dn can take
 # noticeably longer to go than a cn. KILL only after that.
+#
+# CONT before the TERM, as kill_pidfile and the cp helper's stop_all send it:
+# a cutoff run that failed leaves its cut-off cn agent STOPPED, and a stopped
+# process would not act on the TERM until the KILL took it.
 kill_agents() { # <dn|cn>
 	local pat="$WORK/bin/[d]nv-agent $1" i
+	pkill -CONT -f "$pat" >/dev/null 2>&1
 	pkill -f "$pat" >/dev/null 2>&1
 	for ((i = 0; i < 40; i++)); do
 		pgrep -f "$pat" >/dev/null 2>&1 || break
@@ -3636,6 +3780,11 @@ cn_residue() {
 diag() {
 	echo "--- dnv-agent processes ---"
 	agent_pids cn
+	# The recorded agent's process state: T is an agent the cutoff case
+	# stopped and did not get to continue.
+	echo "--- the recorded cn agent's state (T = stopped) ---"
+	ps -o pid=,stat=,etime= -p "$(cat "$WORK/cn/pid" 2>/dev/null)" 2>/dev/null ||
+		echo "(no recorded agent running)"
 	echo "--- dmsetup ls --tree ---"
 	dmsetup ls --tree 2>/dev/null
 	echo "--- dmsetup status ---"
@@ -3733,12 +3882,411 @@ unmask() {
 }
 
 # stas_state reports the two nvme-stas daemons. They must be inactive for the
-# whole run: stacd connects on its own and stafd owns discovery controllers,
-# and nvme-stas sends a DIM in-capsule to every discovery controller it knows.
+# whole run but for the cutoff case on host0: stacd connects on its own and
+# stafd owns discovery controllers, and nvme-stas sends a DIM in-capsule to
+# every discovery controller it knows.
 stas_state() {
 	printf 'stafd=%s stacd=%s\n' \
 		"$(systemctl is-active stafd 2>/dev/null || true)" \
 		"$(systemctl is-active stacd 2>/dev/null || true)"
+	return 0
+}
+
+# --- nvme-stas, for the cutoff case on host0 ---------------------------------
+#
+# The settings are the cdc suite's (the stas_start of the host helper
+# write_host_helper (cdc_test.sh) generates), with ONE controller line: this
+# run's single cdc. stacd's own [Controllers] stays empty, so every path it
+# makes comes from a discovery log entry and goes when the entry does, and the
+# kernel's autoconnector stays masked (rule 6), so stacd is the only
+# connector. nvme-stas is never installed here: preflight checks it is there.
+#
+# The host's own two files are copied ONCE into $WORK/stas-backup, with a
+# marker that tells "nothing to copy" from "no copy taken", so stas_restore
+# never invents a file the host never had and never touches a stas this suite
+# did not start. host_cleanup restores before it removes $WORK, which is what
+# recovers a failed cutoff run at the next start cleanup or --cleanup-only.
+STAS_BACKUP="$WORK/stas-backup"
+
+# stas_check is the cutoff case's preflight: the version of both daemons — a
+# 1.x stas would fail later and silently, never connecting — whether systemd
+# knows both units, and the tools the case's own verbs need on this host.
+stas_check() {
+	local d v t missing=""
+	for d in stafd stacd; do
+		if command -v "$d" >/dev/null 2>&1; then
+			v=$("$d" --version 2>&1 | head -n 1)
+		else
+			v=absent
+		fi
+		printf '%s_version=%s\n' "$d" "${v:-unreadable}"
+		printf '%s_load=%s\n' "$d" \
+			"$(systemctl show -p LoadState --value "$d.service" 2>/dev/null)"
+	done
+	for t in nohup dmesg readlink; do
+		command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+	done
+	printf 'missing=%s\n' "${missing# }"
+	return 0
+}
+
+# stas_conf_sum prints the digest of each of the host's two stas files, or
+# `absent`, on one line, so the case can prove the restore put back exactly
+# what it found.
+stas_conf_sum() {
+	local f s
+	for f in stafd.conf stacd.conf; do
+		if [ -f "/etc/stas/$f" ]; then
+			s=$(sha256sum "/etc/stas/$f" 2>/dev/null | cut -d' ' -f1)
+		else
+			s=absent
+		fi
+		printf '%s=%s ' "$f" "${s:-unreadable}"
+	done
+	printf '\n'
+	return 0
+}
+
+# stas_start is non-zero on any failure, like the agents' dn_up and cn_up, so
+# the driver can die with a message. It refuses a stas that is running without
+# this suite's marker: that one is somebody's own, and preflight should have
+# stopped the run before it.
+stas_start() { # <cdc traddr> <cdc trsvcid>
+	local ip=$1 port=$2 f
+	command -v stafd >/dev/null 2>&1 || {
+		echo "stas_start: stafd is not installed" >&2
+		return 1
+	}
+	if [ ! -f "$STAS_BACKUP/.taken" ]; then
+		if systemctl is-active --quiet stafd ||
+			systemctl is-active --quiet stacd; then
+			echo "stas_start: nvme-stas is running and this suite did not" \
+				"start it" >&2
+			return 1
+		fi
+		mkdir -p "$STAS_BACKUP" || return 1
+		for f in stafd.conf stacd.conf; do
+			if [ -f "/etc/stas/$f" ]; then
+				cp -p "/etc/stas/$f" "$STAS_BACKUP/$f" || return 1
+			fi
+		done
+		touch "$STAS_BACKUP/.taken" || return 1
+	fi
+	mkdir -p /etc/stas || return 1
+	{
+		echo '[Global]'
+		echo 'tron=false'
+		echo 'hdr-digest=false'
+		echo 'data-digest=false'
+		echo 'kato=10'
+		echo 'ignore-iface=false'
+		echo 'ip-family=ipv4'
+		# dnv-cdc advertises no PLEOS, so stafd would not use PLEO anyway;
+		# saying so keeps the request shape pinned across stas versions.
+		echo 'pleo=disabled'
+		echo
+		echo '[Service Discovery]'
+		echo 'zeroconf=disabled'
+		echo
+		echo '[Discovery controller connection management]'
+		echo 'persistent-connections=true'
+		echo
+		echo '[Controllers]'
+		echo "controller = transport=tcp;traddr=$ip;trsvcid=$port"
+	} >/etc/stas/stafd.conf || return 1
+	{
+		echo '[Global]'
+		echo 'tron=false'
+		echo 'hdr-digest=false'
+		echo 'data-digest=false'
+		echo 'ip-family=ipv4'
+		echo
+		echo '[I/O controller connection management]'
+		# Connect every entry of the log, and disconnect what stacd itself
+		# made once its entry is gone.
+		echo 'disconnect-scope=only-stas-connections'
+		echo 'disconnect-trtypes=tcp'
+		echo 'connect-attempts-on-ncc=0'
+		echo
+		echo '[Controllers]'
+	} >/etc/stas/stacd.conf || return 1
+	systemctl restart stafd stacd || {
+		echo "stas_start: restarting stafd and stacd failed" >&2
+		return 1
+	}
+	systemctl is-active --quiet stafd || {
+		echo "stas_start: stafd is not active" >&2
+		return 1
+	}
+	systemctl is-active --quiet stacd || {
+		echo "stas_start: stacd is not active" >&2
+		return 1
+	}
+	echo "stas=started"
+	return 0
+}
+
+# stas_restore stops stas and puts the host's own files back, but only where
+# stas_start took the copy: without the marker it does nothing at all. stacd
+# goes first: a stacd that loses its stafd reads that as a restart and goes on
+# acting on the connections it made. Both keep their kernel connections when
+# they stop (stacd always, stafd under persistent-connections), so what stas
+# made stays until the caller disconnects it. A copy that cannot be put back
+# keeps the backup and says so, and host_cleanup then keeps $WORK around it.
+stas_restore() {
+	local f ok=1
+	[ -f "$STAS_BACKUP/.taken" ] || {
+		echo "stas=untouched"
+		return 0
+	}
+	timeout 60 systemctl stop stacd >/dev/null 2>&1 || true
+	timeout 60 systemctl stop stafd >/dev/null 2>&1 || true
+	for f in stafd.conf stacd.conf; do
+		if [ -f "$STAS_BACKUP/$f" ]; then
+			cp -p "$STAS_BACKUP/$f" "/etc/stas/$f" || ok=0
+		else
+			rm -f "/etc/stas/$f" || ok=0
+		fi
+	done
+	if [ "$ok" = 1 ]; then
+		rm -rf "$STAS_BACKUP"
+		echo "stas=restored"
+	else
+		echo "stas=RESTORE_FAILED"
+	fi
+	return 0
+}
+
+# stas_journal is the diagnostics' view of both daemons.
+stas_journal() {
+	journalctl -u stafd -u stacd -n 200 --no-pager 2>/dev/null ||
+		echo "(no journal for stafd/stacd)"
+	return 0
+}
+
+# --- the cutoff case's write loop and kernel-log witness ---------------------
+#
+# The loop is the second host process this suite leaves running detached, and
+# like host_sha_probe's reader it reports through files, because its writes
+# are MEANT to block: through the stall between the old primary's path going
+# and the new primary's namespace turning optimized, a write is queued in the
+# kernel, not failed. Each write is ONE 4 KiB dd with conv=fsync and no
+# direct flag (rule 1), copied from slot <i mod slots> of a pattern file to the
+# same slot of the device, whose range the case pre-filled with that pattern,
+# so the range digests to the pattern at the end — a write that landed zeros or
+# in the wrong place shows there. Each finished write appends one line, `ok
+# <i> <slot> <t0> <t1>` or `fail … rc=<status>`, its times bash's EPOCHREALTIME
+# in microseconds.
+#
+# THREE GUARDS keep it from writing anywhere else. First, it writes only to
+# the kernel name the by-id link resolved to at its start. Its dd never
+# creates that output (conv=nocreat), so a head that went away fails the write
+# instead of turning it into a regular file in /dev, which would outlive the
+# run and shadow the next head of that name. Before every write it also checks
+# that the name is still a block device with the uuid it was given, which
+# skips a head reborn under that name for another namespace. The check and
+# dd's open are two steps, so a head reborn in the instant between them could
+# still take one write; a head goes only when host0 loses its last path to
+# the namespace, which this case never expects. Second, it stops when its stop
+# file appears or its directory goes, which host_cleanup's `rm -rf $WORK`
+# does. Third, it stops by itself after <secs>, so a failed run left in place
+# does not write for ever.
+WLOOP_DIR="$WORK/wloop"
+
+wloop_start() { # <uuid> <pattern file> <slots> <secs>
+	local uuid=$1 src=$2 slots=$3 secs=$4 link node cur="" pid
+	if [ -z "${EPOCHREALTIME:-}" ]; then
+		echo "wloop_start: this bash has no EPOCHREALTIME" >&2
+		return 1
+	fi
+	wloop_stop >/dev/null
+	rm -rf "$WLOOP_DIR"
+	mkdir -p "$WLOOP_DIR" || return 1
+	link="/dev/disk/by-id/nvme-uuid.$uuid"
+	node=$(readlink -f "$link" 2>/dev/null) || node=""
+	[ -n "$node" ] && [ -b "$node" ] || {
+		echo "wloop_start: $link resolves to no block device ('$node')" >&2
+		return 1
+	}
+	{ read -r cur <"/sys/block/${node##*/}/uuid"; } 2>/dev/null || cur=""
+	[ "$cur" = "$uuid" ] || {
+		echo "wloop_start: /sys/block/${node##*/}/uuid reads '$cur'," \
+			"not $uuid" >&2
+		return 1
+	}
+	[ -s "$src" ] || {
+		echo "wloop_start: no pattern file $src" >&2
+		return 1
+	}
+	nohup bash "$0" wloop_run "$WLOOP_DIR" "$node" "$uuid" "$src" "$slots" \
+		"$secs" </dev/null >/dev/null 2>>"$WLOOP_DIR/run.err" &
+	pid=$!
+	echo "$pid" >"$WLOOP_DIR/pid"
+	sleep 0.5
+	kill -0 "$pid" 2>/dev/null || {
+		echo "wloop_start: the loop exited at once; run.err:" >&2
+		tail -n 20 "$WLOOP_DIR/run.err" >&2
+		return 1
+	}
+	printf 'wloop=started pid=%s node=%s\n' "$pid" "$node"
+	return 0
+}
+
+# wloop_run is the loop itself, started DETACHED by wloop_start: its own
+# argument list carries $WLOOP_DIR, which is what qualifies wloop_stop's
+# fallback sweep.
+wloop_run() { # <dir> <node> <uuid> <pattern file> <slots> <secs>
+	local dir=$1 node=$2 uuid=$3 src=$4 slots=$5 secs=$6
+	local name=${2##*/} i=0 slot t0 t1 rc cur end
+	end=$((SECONDS + secs))
+	while [ -d "$dir" ] && [ ! -e "$dir/stop" ] && [ "$SECONDS" -lt "$end" ]; do
+		slot=$((i % slots))
+		cur=""
+		{ read -r cur <"/sys/block/$name/uuid"; } 2>/dev/null
+		t0=${EPOCHREALTIME/[.,]/}
+		if [ -b "$node" ] && [ "$cur" = "$uuid" ]; then
+			dd if="$src" of="$node" bs=4096 count=1 skip="$slot" seek="$slot" \
+				conv=fsync,nocreat status=none 2>>"$dir/dd.err"
+			rc=$?
+		else
+			rc=nodev
+		fi
+		t1=${EPOCHREALTIME/[.,]/}
+		if [ "$rc" = 0 ]; then
+			echo "ok $i $slot $t0 $t1" >>"$dir/log"
+		else
+			echo "fail $i $slot $t0 $t1 rc=$rc" >>"$dir/log"
+		fi
+		i=$((i + 1))
+		sleep 0.05
+	done
+	echo "$i" >"$dir/exit" 2>/dev/null
+	return 0
+}
+
+# wloop_stat prints one summary line and then, when any write failed, the
+# first failures and the tail of dd's stderr: `ok=N fail=M max_write_ms=X
+# idle_ms=Y running=yes|no`. max_write_ms is the longest single write — the
+# stall, since one dd is queued through all of it — and idle_ms is how long
+# ago the last write finished, which grows while one is queued.
+wloop_stat() {
+	local pid running=no now
+	[ -d "$WLOOP_DIR" ] || {
+		echo "wloop=absent"
+		return 0
+	}
+	pid=$(cat "$WLOOP_DIR/pid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*) ;;
+	*) kill -0 "$pid" 2>/dev/null && running=yes ;;
+	esac
+	now=${EPOCHREALTIME/[.,]/}
+	{ cat "$WLOOP_DIR/log" 2>/dev/null; } | awk -v now="$now" -v running="$running" '
+		$1 == "ok" { ok++ }
+		$1 == "fail" {
+			fail++
+			if (fail <= 5) bad[fail] = $0
+		}
+		$1 == "ok" || $1 == "fail" {
+			d = $5 - $4
+			if (d > max) max = d
+			last = $5
+		}
+		END {
+			idle = (last > 0) ? (now - last) / 1000 : -1
+			printf "ok=%d fail=%d max_write_ms=%d idle_ms=%d running=%s\n",
+				ok, fail, max / 1000, idle, running
+			for (i = 1; i <= fail && i <= 5; i++) print "wloop_fail: " bad[i]
+		}'
+	if [ -s "$WLOOP_DIR/dd.err" ]; then
+		tail -n 5 "$WLOOP_DIR/dd.err" | sed 's/^/wloop_dd: /'
+	fi
+	return 0
+}
+
+# wloop_stop asks the loop to stop and waits for it, and kills it when the
+# wait runs out: a write queued in the kernel holds the loop until the device
+# serves IO again, and the dd itself may then stay behind in D state (E2E7)
+# whatever is done to the loop. The fallback sweep reaches a loop whose pid
+# file is gone; its pattern is bracketed and qualified by $WLOOP_DIR (rule 3).
+wloop_stop() { # [secs]
+	local secs=${1:-30} pid="" i
+	if [ ! -d "$WLOOP_DIR" ]; then
+		pkill -9 -f "[w]loop_run $WLOOP_DIR " >/dev/null 2>&1
+		echo "wloop=absent"
+		return 0
+	fi
+	: >"$WLOOP_DIR/stop"
+	pid=$(cat "$WLOOP_DIR/pid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*) pid="" ;;
+	esac
+	for ((i = 0; i < secs * 4; i++)); do
+		[ -e "$WLOOP_DIR/exit" ] && break
+		[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || break
+		sleep 0.25
+	done
+	if [ -e "$WLOOP_DIR/exit" ]; then
+		echo "wloop=stopped"
+		return 0
+	fi
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		kill -TERM "$pid" 2>/dev/null
+		sleep 1
+		kill -KILL "$pid" 2>/dev/null
+		pkill -9 -f "[w]loop_run $WLOOP_DIR " >/dev/null 2>&1
+		echo "wloop=killed"
+		return 0
+	fi
+	pkill -9 -f "[w]loop_run $WLOOP_DIR " >/dev/null 2>&1
+	echo "wloop=gone"
+	return 0
+}
+
+# kmsg_mark writes <tag> into the kernel log and answers `kmsg=marked` only if
+# dmesg then shows it: the witness below counts from the LAST copy of the tag,
+# so a log it cannot read must not pass for a clean one.
+kmsg_mark() { # <tag>
+	local n
+	echo "$1" >/dev/kmsg 2>/dev/null || {
+		echo "kmsg=unwritable"
+		return 0
+	}
+	n=$(dmesg 2>/dev/null | grep -cF -- "$1" || true)
+	if [ "${n:-0}" -ge 1 ]; then
+		echo "kmsg=marked"
+	else
+		echo "kmsg=unreadable"
+	fi
+	return 0
+}
+
+# kmsg_errors is the second witness of the cutoff case's "no failed write",
+# because dd's own status alone proves less than it seems (the ops case's
+# READONLY rung says why): the count of kernel lines after the last <tag> that
+# report a failed IO — the block layer's `<kind> error, dev …`, a buffered
+# write's `Buffer I/O error … lost async page write`, and multipath's `no
+# available path - failing I/O` — then up to twenty of them. The tag gone
+# from the ring buffer answers `unreadable`, never 0.
+kmsg_errors() { # <tag>
+	dmesg 2>/dev/null | awk -v tag="$1" '
+		index($0, tag) {
+			seen = 1
+			n = 0
+			next
+		}
+		seen && /I\/O error|error, dev |failing I\/O|lost (async|sync) page write/ {
+			n++
+			if (n <= 20) hit[n] = $0
+		}
+		END {
+			if (!seen) {
+				print "kmsg_errors=unreadable"
+				exit
+			}
+			print "kmsg_errors=" (n + 0)
+			for (i = 1; i <= n && i <= 20; i++) print "kmsg: " hit[i]
+		}'
 	return 0
 }
 
@@ -3936,9 +4484,30 @@ connect() { # <traddr> <trsvcid> <subnqn> <hostnqn> <hostid> [extra…]
 	return 0
 }
 
+# host_cleanup is a holder-first sweep of its own. The cutoff case's write loop
+# goes first, so nothing writes into a device while the sweep takes its paths
+# away; then the case's nvme-stas, so no stacd reconnects what `wipe` drops
+# and no stafd re-creates the discovery controller, and its config is put back
+# while $WORK still holds the copy; then the connections; and $WORK last.
+# A run that never reached the cutoff case finds neither and moves on.
+#
+# A copy stas_restore could not put back keeps $WORK, which then holds the
+# only copy of the host's own two files, and the sweep ends non-zero WITHOUT
+# its sentinel and with a line saying where the copy is. cleanup_report shows
+# a verb's output only when the sentinel is missing, and it raises
+# CLEANUP_DIRTY, which is the truth here: the host is left on this suite's
+# stas settings. The next sweep tries the restore again.
 host_cleanup() { # [cdc traddr]
+	local stas
+	wloop_stop >/dev/null
+	stas=$(stas_restore)
 	wipe "${1:-}" >/dev/null
 	unmask >/dev/null
+	if [ "$stas" = "stas=RESTORE_FAILED" ]; then
+		echo "stas=RESTORE_FAILED: this host's own /etc/stas files could not" \
+			"be put back; their copy stays in $STAS_BACKUP, so $WORK is kept"
+		return 1
+	fi
 	rm -rf "$WORK"
 	echo cleaned
 	return 0
@@ -3977,6 +4546,18 @@ diag() {
 	systemctl is-enabled nvmf-connect.target 2>&1 || true
 	echo "--- stas ---"
 	stas_state
+	# The cutoff case's own state on this host: whether a stas copy is still
+	# taken (the case did not get to restore it), the config stas runs on, the
+	# daemons' journal, and the write loop's summary and logs.
+	echo "--- stas backup taken: $([ -f "$STAS_BACKUP/.taken" ] && echo yes || echo no) ---"
+	echo "--- /etc/stas/stafd.conf and stacd.conf, comments dropped ---"
+	grep -v -e '^#' -e '^[[:space:]]*$' /etc/stas/stafd.conf /etc/stas/stacd.conf \
+		2>/dev/null || true
+	echo "--- stafd/stacd journal ---"
+	stas_journal | tail -n 60
+	echo "--- cutoff write loop ---"
+	wloop_stat
+	logtail 20 "$WLOOP_DIR/log" "$WLOOP_DIR/dd.err" "$WLOOP_DIR/run.err"
 	echo "--- blocked tasks ---"
 	ps -eo stat,pid,comm 2>/dev/null | awk '$1 ~ /D/' || true
 	echo "--- space ---"
@@ -4626,6 +5207,14 @@ stop_dn_instance() { # <v> <k> [secs]
 
 stop_cn_agent() { # <v> [secs]
 	helper_cn "$1" kill_pidfile "$(cn_pid_file)" "${2:-15}"
+}
+
+# cn_sig sends STOP or CONT to the one cn agent of a CN VM by the pid its
+# launcher recorded, and prints the `state=<letter>` the helper read back
+# (sig_pidfile): what the cutoff case needs, an agent that stops answering
+# while every kernel object it built goes on serving.
+cn_sig() { # <v> <STOP|CONT>
+	helper_cn "$1" sig_pidfile "$(cn_pid_file)" "$2"
 }
 
 # ---------------------------------------------------------------------------
@@ -5282,9 +5871,11 @@ preflight_host() { # <h>
 			"failed: $out"
 	read_host_identity "$h"
 
-	# stafd/stacd must not be running for the whole run: stacd connects on its
-	# own, stafd owns discovery controllers, and nvme-stas sends a DIM
-	# in-capsule to every discovery controller it learns about.
+	# stafd/stacd must not be running when the run starts: stacd connects on
+	# its own, stafd owns discovery controllers, and nvme-stas sends a DIM
+	# in-capsule to every discovery controller it learns about. The one place
+	# they run is inside the cutoff case, on host0, which starts them itself
+	# and stops them before its ending.
 	# "unknown" or "failed" is fine — the
 	# failure mode is a RUNNING one, and `active`/`activating` are the words
 	# systemctl uses for that.
@@ -5297,6 +5888,13 @@ preflight_host() { # <h>
 	esac
 	log "  $label nvme-stas: $out"
 
+	# The cutoff case runs nvme-stas on host0 itself, so there it must also be
+	# INSTALLED, at 2.x, with both units known to systemd. Never installed by
+	# this suite: a host without it fails here, naming the package.
+	if [ "$h" = 0 ] && run_has_case cutoff; then
+		preflight_stas "$h"
+	fi
+
 	# Rule 6: the kernel's own autoconnector matches the discovery AEN this
 	# suite's connects cause and would make paths nothing here created.
 	# The word is the evidence: `mask` re-reads both units with
@@ -5308,6 +5906,54 @@ preflight_host() { # <h>
 		"$label: the nvmf-connect@.service and nvmf-connect.target masks (rule 6)"
 
 	log "  $label ok"
+}
+
+# run_has_case answers whether <case> is in this run's list. main fills
+# RUN_CASES before preflight_guests for exactly this question.
+run_has_case() { # <case name>
+	local name
+	for name in "${RUN_CASES[@]:-}"; do
+		[ "$name" = "$1" ] && return 0
+	done
+	return 1
+}
+
+# preflight_stas is the cutoff case's own host check (preflight_host calls it
+# for host0 when that case is in the run): nvme-stas 2.x installed — the
+# version check is the cdc suite's, as a 1.x host would not fail but silently
+# never connect — both units loaded, and the tools of the case's write loop
+# and kernel-log witness. Inactive is preflight_host's own check, above.
+preflight_stas() { # <h>
+	local h=$1 out line key val stafd="" stacd="" missing=""
+	out=$(helper_host "$h" stas_check) || die "host$h: the stas_check verb failed"
+	while IFS= read -r line; do
+		key=${line%%=*}
+		val=${line#*=}
+		case "$key" in
+		stafd_version) stafd=$val ;;
+		stacd_version) stacd=$val ;;
+		stafd_load | stacd_load)
+			assert_eq "$val" loaded \
+				"host$h: systemd's LoadState of ${key%_load}.service (the cutoff case runs it)"
+			;;
+		missing) missing=$val ;;
+		esac
+	done < <(printf '%s\n' "$out")
+	case "$stafd" in
+	*" 2."*) ;;
+	*)
+		die "host$h: the cutoff case needs nvme-stas 2.x on host0 and" \
+			"\`stafd --version\` says '$stafd'. Install the distribution's" \
+			"nvme-stas package; this suite never installs it"
+		;;
+	esac
+	case "$stacd" in
+	*" 2."*) ;;
+	*) die "host$h: \`stacd --version\` says '$stacd', not nvme-stas 2.x" ;;
+	esac
+	[ -z "$missing" ] ||
+		die "host$h: missing tool(s) for the cutoff case: $missing"
+	log "  host$h nvme-stas for the cutoff case: $stafd, both units loaded"
 }
 
 # preflight_cp is the cp block of e2e_integtest.md, Preflight. cp is the one
@@ -5443,7 +6089,7 @@ preflight_loop_devices() {
 # main before anything is built (E2E6), by setup_between_cases before each case
 # after the first (E2E11 — that one is a START cleanup too, for the case
 # it precedes), by on_exit on SUCCESS (E2E6), and by `--cleanup-only` on its
-# own. So a four-case run calls it five times. It is written to be tolerant of
+# own. So a five-case run calls it six times. It is written to be tolerant of
 # total absence — every guest call tolerates a non-zero status, either as an
 # _ok form or, for the verbs, through cleanup_verb's `|| rc=$?` — and never dies:
 #
@@ -5549,8 +6195,9 @@ cleanup_dirty_banner() {
 	log ""
 	log "Search this transcript upwards for 'WARNING:' (a cleanup verb that"
 	log "never printed its sentinel: it timed out after ${CLEANUP_TIMEOUT}s,"
-	log "the guest was unreachable, or the helper is stale) and for 'STUCK'"
-	log "(an nvmet port of this suite that would not go)."
+	log "the guest was unreachable, the helper is stale, or a host could not"
+	log "put its own nvme-stas files back) and for 'STUCK' (an nvmet port of"
+	log "this suite that would not go)."
 	log ""
 	log "A leftover nvmet port fails the NEXT suite's setup. On the guest:"
 	log "  sudo rmdir $NVMET/ports/<id>/ana_groups/3"
@@ -5717,8 +6364,8 @@ cleanup_verb() { # <ssh-wrapper> <index|""> <label> <sentinel> <verb…>
 cleanup_all() {
 	local v extra=""
 
-	# Cleared here and not at the top of the file: cleanup_all runs five times
-	# in a full four-case run (the start sweep, one per between-cases step, the
+	# Cleared here and not at the top of the file: cleanup_all runs six times
+	# in a full five-case run (the start sweep, one per between-cases step, the
 	# end one), and only the LAST says anything about the state this run leaves
 	# the lab in. See CLEANUP_DIRTY's own comment. CLEANUP_UNFINISHED goes with
 	# it, and for the same reason: cleanup_start_gate must judge THIS sweep.
@@ -6234,16 +6881,20 @@ diagnostics() {
 SP_ID=""
 SP_JSON=""
 
-# The cntlrs, as five PARALLEL arrays indexed by position in cntlr_list (see
-# setup fact (c) above). CNTLR_IDS[i] is the id `cntlr inspect --id` takes,
-# and CNTLR_DISABLED[i] is that cntlr's `disabled` flag as the text true or
-# false — the one a disabled cntlr's discovery entry turns on (a disabled
-# cntlr's transport is dropped from the CdcEntry, enabledCntlrTrConfs).
+# The cntlrs, as seven PARALLEL arrays indexed by position in cntlr_list (see
+# setup fact (c) above). CNTLR_IDS[i] is the id `cntlr inspect --id` takes.
+# The last three are what the listing rule reads (architecture.md [D18];
+# cntlr_listed below): CNTLR_DISABLED[i] and CNTLR_PRIMARY[i] are that cntlr's
+# `disabled` and `primary` flags as the text true or false, and
+# CNTLR_ERR_EPOCH[i] its err_epoch as dnvctl renders a uint64, a decimal
+# string, "0" when the cntlr is healthy.
 CNTLR_IDS=()
 CNTLR_ADDRS=()
 CNTLR_TRADDRS=()
 CNTLR_TRSVCIDS=()
 CNTLR_DISABLED=()
+CNTLR_PRIMARY=()
+CNTLR_ERR_EPOCH=()
 
 # The two roles, resolved by sp_read_roles. *_POS is the position in those
 # arrays and *_CN is the CN VM index (an index into CN[]/CN_IP[]). Both are -1
@@ -6453,6 +7104,8 @@ sp_read_roles() {
 	CNTLR_TRADDRS=()
 	CNTLR_TRSVCIDS=()
 	CNTLR_DISABLED=()
+	CNTLR_PRIMARY=()
+	CNTLR_ERR_EPOCH=()
 	PRIMARY_POS=-1
 	STANDBY_POS=-1
 	for ((i = 0; i < n; i++)); do
@@ -6461,12 +7114,20 @@ sp_read_roles() {
 		CNTLR_TRADDRS[i]=$(sp_field ".cntlr_list[$i].nvme_tr_conf.tr_addr")
 		CNTLR_TRSVCIDS[i]=$(sp_field ".cntlr_list[$i].nvme_tr_conf.tr_svc_id")
 		CNTLR_DISABLED[i]=$(sp_field ".cntlr_list[$i].disabled")
+		CNTLR_ERR_EPOCH[i]=$(sp_field ".cntlr_list[$i].err_epoch")
 		case "${CNTLR_IDS[$i]}" in
 		'' | *[!0-9]*)
 			die "cntlr_id_list[$i] is '${CNTLR_IDS[$i]}', not a decimal id"
 			;;
 		esac
+		case "${CNTLR_ERR_EPOCH[$i]}" in
+		'' | *[!0-9]*)
+			die "cntlr ${CNTLR_IDS[$i]}'s err_epoch reads" \
+				"'${CNTLR_ERR_EPOCH[$i]}', not a decimal string"
+			;;
+		esac
 		prim=$(sp_field ".cntlr_list[$i].primary")
+		CNTLR_PRIMARY[i]=$prim
 		if [ "$prim" = true ]; then
 			[ "$PRIMARY_POS" -lt 0 ] ||
 				die "two cntlrs of $SP claim primary" \
@@ -6771,8 +7432,10 @@ wait_ns_exported() { # <cntlr id> <what> <ss_id> <ns_id> [sp name] [secs]
 
 # wait_ns_exported_all is the connect-all form. `nvme connect-all` connects
 # EVERY transport the discovery log offers, and the log carries one record per
-# non-disabled cntlr (enabledCntlrTrConfs (gateway/common.go)), so
-# every one of them has to be listening — not just the primary.
+# cntlr the listing rule lists (architecture.md [D18], model.CdcTrConfList
+# (model/ops.go)) — every enabled one, in the steady state each connect-all
+# site first waits for (wait_all_listed) — so every one of them has to be
+# listening, not just the primary.
 #
 # It reads the CNTLR_* arrays, so the caller must have run sp_read_roles for
 # the shape it is about to connect to; disc_want_of_sp, which every connect-all
@@ -6786,9 +7449,11 @@ wait_ns_exported_all() { # <nqn> <ss_id> <ns_id> [secs]
 	[ "${#CNTLR_IDS[@]}" -gt 0 ] ||
 		die "wait_ns_exported_all before sp_read_roles"
 	for i in "${!CNTLR_IDS[@]}"; do
-		# A disabled cntlr's transport is not in the CdcEntry, so connect-all
-		# never reaches it and it must not be waited for either — the same skip
-		# disc_want_of_sp makes, for the same reason.
+		# A disabled cntlr's transport is in no CdcEntry, so connect-all never
+		# reaches it and it must not be waited for either. An enabled cntlr is
+		# waited for even while its err_epoch keeps it out of the records: it
+		# returns to them at its next clean round, and its export is what a
+		# host then connects to.
 		[ "${CNTLR_DISABLED[$i]}" = false ] || continue
 		wait_ns_exported "${CNTLR_IDS[$i]}" \
 			"$1 (ns_id $3) over its own transport ${CNTLR_TRADDRS[$i]}:${CNTLR_TRSVCIDS[$i]}" \
@@ -6849,25 +7514,102 @@ host_disc() { # <h>
 	esac
 }
 
+# cntlr_listed is the listing rule of architecture.md [D18] — the one every
+# writer of a CdcEntry applies, model.CdcListed (model/ops.go) — over the
+# arrays sp_read_roles filled: cntlr <i>'s transport is in the pool's discovery
+# records while it is enabled and either is the primary or has a zero
+# err_epoch. So a disabled cntlr is never listed, an enabled primary always
+# is, and a standby leaves the records while it is unhealthy and returns at
+# its next clean round.
+cntlr_listed() { # <position in the CNTLR_* arrays>
+	[ "${CNTLR_DISABLED[$1]}" = false ] &&
+		{ [ "${CNTLR_PRIMARY[$1]}" = true ] || [ "${CNTLR_ERR_EPOCH[$1]}" = 0 ]; }
+}
+
 # disc_want_of_sp builds the record set the cdc MUST serve for the subsystems
-# of this sp, from the transports `ss create` actually wrote into the CdcEntry:
-# enabledCntlrTrConfs(cntlrs) in CreateSubsystem (gateway/subsystem.go), i.e.
-# one record per non-disabled cntlr. Comparing against that — rather than
-# against a hand-written pair of IPs — is what makes the assertion prove the cdc
-# serves what the gateway stored.
+# of this sp: one record per cntlr cntlr_listed lists, from the transports and
+# flags sp_read_roles read out of the same `sp get`. Comparing against that —
+# rather than against a hand-written pair of IPs — is what makes the
+# assertion prove the cdc serves what the records say.
+#
+# THE EXPECTATION IS A SNAPSHOT, and a standby's err_epoch can move between the
+# `sp get` it came from and the discovery read. So a site that needs every
+# cntlr in the log — every one that connects all of them afterwards — first
+# waits for every enabled cntlr to be listed (wait_all_listed, which re-reads
+# the roles), and the exact wait after it then holds unless the state moves
+# again.
 disc_want_of_sp() { # <subsystem nqn> → DISC_WANT
 	local lines="" i
 	[ "${#CNTLR_TRADDRS[@]}" -gt 0 ] ||
 		die "disc_want_of_sp before sp_read_roles"
 	for i in "${!CNTLR_TRADDRS[@]}"; do
-		# A DISABLED cntlr's transport is not in the entry, so it must not be
-		# in the expectation either. Nothing is disabled at setup; ops
-		# step 3 is where it matters, which is why the skip is here rather
-		# than in a comment saying it cannot happen.
-		[ "${CNTLR_DISABLED[$i]}" = false ] || continue
+		cntlr_listed "$i" || continue
 		lines="$lines$1|${CNTLR_TRADDRS[$i]}|${CNTLR_TRSVCIDS[$i]}"$'\n'
 	done
 	DISC_WANT=$(printf '%s' "$lines" | sort)
+}
+
+# sp_all_listed is the polling predicate wait_all_listed runs: true once every
+# enabled cntlr of the sp is listed by the rule cntlr_listed states, read from
+# a fresh `sp get` per poll. The cntlrs that are not are logged when that set
+# changes — a standby whose err_epoch is set is the reading worth seeing
+# early — and the winning poll's reply stays in $CTL_OUT. A reply whose two
+# cntlr lists disagree in length is polled through, for the reason
+# primary_stack_ready's header gives.
+LISTED_LAST=""
+
+sp_all_listed() {
+	local n ids out
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	n=$(jq_of "$CTL_OUT" '.cntlr_list | length')
+	ids=$(jq_of "$CTL_OUT" '.sp_conf.cntlr_id_list | length')
+	case "$n$ids" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$n" = "$ids" ] || return 1
+	out=$(jq_of "$CTL_OUT" \
+		'[.sp_conf.cntlr_id_list, .cntlr_list] | transpose
+		 | map(select((.[1].disabled | not) and (.[1].primary | not)
+		              and .[1].err_epoch != "0")
+		       | "\(.[0]) (err_epoch \(.[1].err_epoch))")
+		 | join(", ")')
+	if [ "$out" != "$LISTED_LAST" ]; then
+		LISTED_LAST=$out
+		if [ -n "$out" ]; then
+			log "  out of $SP's discovery records for now: cntlr $out"
+		fi
+	fi
+	[ -z "$out" ]
+}
+
+# wait_all_listed bounds that wait and then re-reads the roles from the winning
+# poll, so the disc_want_of_sp after it builds its expectation from the state
+# the wait proved.
+wait_all_listed() { # <secs> <what>
+	LISTED_LAST=""
+	wait_until "$1" "$2" sp_all_listed
+	SP_JSON=$CTL_OUT
+	sp_read_roles
+}
+
+# host_disc_is_listed is host_disc_is with its expectation rebuilt on EVERY
+# poll, from a fresh `sp get` and the listing rule over that reply, sorted as
+# disc_records sorts. It is for the one wait whose cntlr set can still change
+# under it: react's reconnect after its failover, which AR7's replacement may
+# join at any poll, where an expectation built once would go stale for good.
+host_disc_is_listed() { # <h> <subsystem nqn>
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	DISC_WANT=$(jq_of "$CTL_OUT" \
+		"[.sp_conf.cntlr_id_list, .cntlr_list] | transpose
+		 | map(select((.[1].disabled | not)
+		              and (.[1].primary or .[1].err_epoch == \"0\"))
+		       | \"$2|\(.[1].nvme_tr_conf.tr_addr)|\(.[1].nvme_tr_conf.tr_svc_id)\")
+		 | sort | .[]")
+	host_disc_is "$1"
 }
 
 # host_disc_is is the polling predicate: the host's whole discovery log equals
@@ -6893,7 +7635,8 @@ host_disc_is() { # <h>
 #
 # host_connect_all and host_connect are the ONLY places the driver reaches
 # nvme-cli's connect verbs. Every connect in this suite is the suite's own act
-# (rule 6): the kernel's autoconnector is masked for the whole run.
+# (rule 6) except inside the cutoff case, where host0's connects are
+# nvme-stas's: the kernel's autoconnector is masked for the whole run.
 #
 # THEY VERIFY; THEY DO NOT TRUST rc. `nvme connect-all` EXITS 0 HAVING
 # CONNECTED NOTHING — measured on host0 against this very lab in
@@ -7276,13 +8019,13 @@ setup_register_nodes() {
 # ---------------------------------------------------------------------------
 
 # sp_thresholds selects the event_threshold set the NEXT `sp create` will carry
-# (the two sets of e2e_integtest.md, Topology and parameters, Event
-# thresholds, and the measurements behind them). main calls it once before
-# setup and once before each setup_between_cases, so the sp a case works in is
-# always built with that case's set — the only moment the choice can be made,
-# because no RPC changes a threshold afterwards.
+# (the sets of e2e_integtest.md, Topology and parameters, Event thresholds,
+# and the measurements behind them). main calls it once before setup and once
+# before each setup_between_cases, so the sp a case works in is always built
+# with that case's set — the only moment the choice can be made, because no
+# RPC changes a threshold afterwards.
 #
-# An unknown name DIES rather than defaulting: a fifth case added to $CASES is a
+# An unknown name DIES rather than defaulting: a case added to $CASES is a
 # decision about whether it may tolerate a reaction mid-run, and silently giving
 # it the quiet set would make that decision invisibly.
 sp_thresholds() { # <case name>
@@ -7294,6 +8037,19 @@ sp_thresholds() { # <case name>
 		THR_SIDE=$THR_REACT_SIDE
 		THR_LEG=$THR_REACT_LEG
 		THR=$THR_REACT
+		;;
+	cutoff)
+		# Its primary threshold is read_constants', which preflight_driver
+		# runs before any sp is built.
+		[ -n "$THR_CUT_PRIMARY" ] ||
+			die "sp_thresholds cutoff before read_constants: the cutoff" \
+				"set's primary threshold is not known yet"
+		THR_SET=cutoff
+		THR_PRIMARY=$THR_CUT_PRIMARY
+		THR_CNTLR=$THR_CUT_CNTLR
+		THR_SIDE=$THR_CUT_SIDE
+		THR_LEG=$THR_CUT_LEG
+		THR=$THR_CUT
 		;;
 	smoke | ops | copy)
 		THR_SET=quiet
@@ -7825,6 +8581,12 @@ setup_export_ns() {
 setup_connect_host0() {
 	stage 10 "host0 discovers $SS0 through the cdc on $CP_IP:$CDC_PORT and connects"
 
+	# Both cntlrs listed first: host0 connects both transports below and
+	# asserts a path through each, and a standby whose err_epoch a missed
+	# round set is out of the records until its next clean round
+	# (architecture.md [D18]; disc_want_of_sp's header).
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records (a zero err_epoch on the standby)"
 	disc_want_of_sp "$SS0"
 	DISC_LAST=""
 	wait_until "$WAIT_HOST" \
@@ -7834,15 +8596,15 @@ setup_connect_host0() {
 	printf '%s\n' "$DISC_LAST" >&2
 	# Counted on the RAW discovery document, not on DISC_LAST. host_disc_is
 	# has just proved DISC_LAST = DISC_WANT as whole strings, and DISC_WANT is
-	# built one line per non-disabled cntlr, so counting DISC_LAST's lines
-	# would re-count what the wait already compared and could never fail.
+	# built one line per listed cntlr, so counting DISC_LAST's lines would
+	# re-count what the wait already compared and could never fail.
 	# `.records | length` is the one number in this step that nothing here
 	# derived: it is what the cdc's reply actually carried, before
-	# disc_records rendered it (enabledCntlrTrConfs writes one transport per
-	# non-disabled cntlr into the CdcEntry that
-	# CreateSubsystem (gateway/subsystem.go) puts).
+	# disc_records rendered it (CreateSubsystem (gateway/subsystem.go) writes
+	# one transport per listed cntlr into the CdcEntry, model.CdcTrConfList,
+	# and both are listed here).
 	assert_field "$DISC_JSON" '.records | length' "$CNTLR_CNT" \
-		"one discovery record per non-disabled cntlr (enabledCntlrTrConfs)"
+		"one discovery record per listed cntlr (architecture.md [D18])"
 
 	# THE DISCOVERY LOG IS NOT THE DATA PLANE, and this is the wait between
 	# the two. The cdc serves the log out of etcd, so it advertises both
@@ -7949,6 +8711,8 @@ setup_case() {
 	CNTLR_TRADDRS=()
 	CNTLR_TRSVCIDS=()
 	CNTLR_DISABLED=()
+	CNTLR_PRIMARY=()
+	CNTLR_ERR_EPOCH=()
 	SS0_ID=""
 	TD0_ID=""
 	NS1_ID=""
@@ -8028,7 +8792,7 @@ setup_between_cases() {
 	cleanup_start_gate "between-cases"
 	setup_infra
 	# setup_case is re-entrant by construction: its first act is to clear
-	# CLUSTER_ID, SP_ID, SP_JSON, the five CNTLR_* arrays, SS0_ID, TD0_ID,
+	# CLUSTER_ID, SP_ID, SP_JSON, the seven CNTLR_* arrays, SS0_ID, TD0_ID,
 	# NS1_ID, SHA0 and DIAG_DN, so nothing of the previous case can be read by
 	# mistake.
 	setup_case
@@ -8038,13 +8802,13 @@ setup_between_cases() {
 # The ending every case shares (e2e_integtest.md, The cases; E2E5)
 # ---------------------------------------------------------------------------
 #
-# Each of the four cases ends the same way: delete what the case built, delete
+# Each of the five cases ends the same way: delete what the case built, delete
 # the sp, wait for the sp-worker's drain to make `sp get` answer NOT_FOUND,
 # assert that nothing of the sp survives on any guest, and assert the two E2E5
 # allocation caps. smoke IS that ending — its whole content is setup plus this —
-# and ops, copy and react put their own steps in front of it. The three pieces
-# are `case_teardown`, `case_residue` and `case_space_guard`, and `case_finish`
-# is the three in order.
+# and ops, copy, react and cutoff put their own steps in front of it. The three
+# pieces are `case_teardown`, `case_residue` and `case_space_guard`, and
+# `case_finish` is the three in order.
 #
 # THREE ORDERING FACTS:
 #
@@ -8520,13 +9284,13 @@ case_finish() {
 # "setup 1-11, then teardown … then the residue assertions." Setup has already
 # run when this is called — main builds the sp before the case loop — so smoke
 # adds no operation of its own. What it is FOR is the pair of statements the
-# other three cases each assume and none of them proves on its own: that the
+# other cases each assume and none of them proves on its own: that the
 # widest sp this tree can build comes up whole, and that deleting it gives
 # every extent back and leaves no dm, md or nvmet object behind on any of the
 # seven data-plane guests.
 #
-# It is the cheapest case and it runs first (CASES=(smoke ops copy react)), so
-# a lab that cannot build the shape at all fails in one build rather than four.
+# It is the cheapest case and it runs first in CASES, so a lab that cannot
+# build the shape at all fails in one build rather than five.
 case_smoke() {
 	CASE=smoke
 	stage 01 "smoke: the sp setup built is the subject; this case tears it down"
@@ -8707,14 +9471,15 @@ cntlr_full_ready() { # <cntlr id>
 # the wait would burn its whole WAIT_BUILD before dying with a message about a
 # controller that is doing exactly what a standby should.
 #
-# TWO WAITS USE IT, and they want different things from a move. Setup's
-# (setup_wait_stack) absorbs it: any of the sp's cntlrs may build the stack, so
-# the wait follows the role and the caller re-reads the roles afterwards.
-# react's stage 03 (react_new_primary_ready) cannot absorb it: its step 04 is
-# written about the cntlr AR5 elected, so it wraps this and stops the run the
-# moment the role leaves that cntlr. The pinned form, cntlr_full_ready, is for
-# the steps that watch an INCREMENTAL convergence on a named controller under
-# the quiet set, where nothing may move the role at all.
+# ITS WAITS WANT DIFFERENT THINGS FROM A MOVE. Setup's (setup_wait_stack)
+# absorbs it: any of the sp's cntlrs may build the stack, so the wait follows
+# the role and the caller re-reads the roles afterwards. A rebuild after a
+# failover cannot absorb it — react's stage 03 (react_new_primary_ready) and
+# cutoff's stage 05 (cut_new_primary_ready): the steps after each are written
+# about the cntlr AR5 elected, so each wraps this and stops the run the moment
+# the role leaves that cntlr. The pinned form, cntlr_full_ready, is for the
+# steps that watch an INCREMENTAL convergence on a named controller under the
+# quiet set, where nothing may move the role at all.
 #
 # So this follows the role and SAYS SO when it moves. It does not make a
 # failover invisible — a move is logged with both ids and the progress line
@@ -8835,9 +9600,10 @@ cntlr_legs_full_ready() { # <cntlr id>
 # what a primary should. That is the same unsatisfiable-target shape the pinned
 # stack wait had, one role over.
 #
-# It is setup's wait alone, and setup runs at CNTLR_CNT 2 — its caller asserts
-# that before the wait — so "the cntlr that is not the primary" names exactly
-# one controller. A reply that does not show exactly one primary AND exactly one
+# Its waits — setup's, and the cutoff case's stage 06 for the old primary's
+# return — run at CNTLR_CNT 2, which setup's caller and cut_snapshot each
+# assert first, so "the cntlr that is not the primary" names exactly one
+# controller. A reply that does not show exactly one primary AND exactly one
 # non-primary is polled through, for the reason primary_stack_ready's header
 # gives. The winning poll's id is left in STANDBY_WAIT_ID and $CTL_OUT is that
 # cntlr's inspect reply, so the assertions after the wait read the node the
@@ -8931,19 +9697,21 @@ cntlr_pos_of_addr() { # <addr_port> → index | -1
 	printf -- '-1'
 }
 
-# host_path_gone is the negation a site needs after host <h> has been told to
-# `nvme disconnect` from <nqn>: that verb deletes the controller OBJECT, so the
-# path leaves `nvme list-subsys` altogether. path_field answers the word "none"
-# when there is no such path, never "", which is why this compares text.
+# host_path_gone is the negation a site needs after the controller of a path
+# has been DELETED — by host <h>'s own `nvme disconnect` from <nqn>, or by
+# nvme-stas's stacd once the path's discovery record is gone: either deletes
+# the controller OBJECT, so the path leaves `nvme list-subsys` altogether.
+# path_field answers the word "none" when there is no such path, never "",
+# which is why this compares text.
 #
-# ALL FOUR OF ITS CALL SITES ARE EXACTLY THAT, and none of them is anything
-# else: copy's fallback-source teardown and its `xfer delete` stage each run
-# `helper_host 1 disconnect_prefix …` first, and react step 3 runs
-# `helper_host 0 disconnect_prefix "$SS0"` before the kill — one call covering
-# both of its waits, since that verb is by NQN and takes down every controller
-# of the subsystem. Each of those three calls discards every `nvme disconnect`'s
-# status, so the wait after it is what proves the disconnect landed — which is
-# the whole reason a `none` reading is the right thing to demand there.
+# A SITE USES IT ONLY AFTER ONE OF THOSE TWO. The suite's own disconnects are
+# `helper_host <h> disconnect_prefix …`, which is by NQN, so one call covers
+# the waits for every controller of the subsystem; that verb discards every
+# `nvme disconnect`'s status, so the wait after it is what proves the
+# disconnect landed — which is the whole reason a `none` reading is the right
+# thing to demand there. The cutoff case's stage 04, which waits for stacd's,
+# uses cut_old_path_dropped instead: a listing that failed reads as no path at
+# all, which this predicate takes for gone.
 #
 # IT IS NOT THE PREDICATE FOR A `cntlr delete`: after a delete the control
 # plane has carried out correctly (the record gone, and on the CN both
@@ -9306,8 +10074,12 @@ ops_slots() {
 
 	# The cdc must advertise the new transport before host0 can reach it, and
 	# disc_want_of_sp derives the expectation from the cntlrs themselves — one
-	# record per NON-disabled cntlr, which is what `ss create` wrote into the
-	# CdcEntry (CreateSubsystem (gateway/subsystem.go), from enabledCntlrTrConfs).
+	# record per cntlr the listing rule lists (architecture.md [D18]), and a
+	# cntlr is listed from its creation (gateway/cntlr.go's CreateCntlr). All
+	# three must be listed for the three paths this step asserts, so the wait
+	# for that comes first (disc_want_of_sp's header).
+	wait_all_listed "$WAIT_PROVISION" \
+		"all $((CNTLR_CNT + 1)) cntlrs of $SP to be in its discovery records"
 	disc_want_of_sp "$SS0"
 	DISC_LAST=""
 	wait_until "$WAIT_HOST" \
@@ -9377,7 +10149,10 @@ ops_slots() {
 		"the third cntlr is disabled"
 	# A disabled cntlr's address leaves every CdcEntry at the same instant
 	# (architecture.md, Subsystems, namespaces), so the discovery log host0 sees
-	# must shrink back to the two.
+	# must shrink back to the two — both of them listed, which is waited for
+	# first, as above.
+	wait_all_listed "$WAIT_PROVISION" \
+		"the two enabled cntlrs of $SP to be in its discovery records"
 	disc_want_of_sp "$SS0"
 	DISC_LAST=""
 	wait_until "$WAIT_HOST" \
@@ -9843,8 +10618,14 @@ ops_levels() {
 	# subsystems under them: both CN ports lost their last subsystem there, so
 	# the reconnect had nothing to refuse it. The note above ops_level_want has
 	# the mechanism and what it costs the checks below.
-	sp_refresh
-	sp_read_roles
+	#
+	# Both cntlrs listed before the discovery wait, as at every connect-all
+	# site (disc_want_of_sp's header), on WAIT_BUILD for the reason the export
+	# gate below gives: the standby rebuilds from nothing, and an ERROR row of
+	# that rebuild sets its err_epoch, which keeps it out of the records until
+	# a clean round. A healthy standby returns on the first poll.
+	wait_all_listed "$WAIT_BUILD" \
+		"both cntlrs of $SP to be in its discovery records after the ladder"
 	disc_want_of_sp "$SS0"
 	DISC_LAST=""
 	wait_until "$WAIT_HOST" \
@@ -11950,8 +12731,8 @@ case_copy() {
 #
 # The worker's reactions, each triggered by a real fault and each asserted from
 # the record the reaction actually writes. One pass per SP per cntlr_interval
-# (5 s, common.DefaultHealthCheckInterval through
-# health_check_conf.cntlr_interval) and AT MOST ONE ACTION PER PASS
+# (health_check_conf.cntlr_interval, which every cluster of this suite stores
+# as common.DefaultHealthCheckInterval) and AT MOST ONE ACTION PER PASS
 # (the header comment of worker/reaction.go), so every wait below is
 # "threshold + a few passes" and never a sleep.
 #
@@ -11971,8 +12752,11 @@ case_copy() {
 #  primary_unhealthy seconds old, or cntlr_unhealthy seconds old — when that
 #  is the longer, as it is in this set — while the primary is settling, i.e.
 #  has not yet reported its stack built and clean as primary since it got
-#  the role (dnv-worker.md HL2, AR5; tryFailover in worker/reaction.go). The
-#  primary stage 03 kills has normally settled long before: setup waits for
+#  the role (dnv-worker.md HL2, AR5; tryFailover in worker/reaction.go), and
+#  only once this worker has itself judged the primary unhealthy
+#  (dnv-worker.md AR10), which every missed round of the killed agent gives
+#  it. The primary stage 03 kills has normally settled long before: setup
+#  waits for
 #  its whole stack, and its first clean report as primary that shows the
 #  stack built settles it — the earlier ones, sent while the new SP's sides
 #  are still zeroing, read its pools PROVISIONING and settle nothing
@@ -11981,8 +12765,10 @@ case_copy() {
 #  the agent is enough — the control path is what AR5 watches.
 #
 #  AR7 (cntlr replacement). replaceTarget takes the smallest cntlr_id that has
-#  been unhealthy for cntlr_unhealthy, is not disabled, and is either not the
-#  primary or is the primary of an SP with no failover candidate — unless
+#  been unhealthy for cntlr_unhealthy, was last judged unhealthy by this
+#  worker itself (dnv-worker.md AR10), which the killed agent's missed rounds
+#  keep doing, is not disabled, and is either not the primary or is the
+#  primary of an SP with no failover candidate — unless
 #  the report the pass holds for that primary is HL2 shared state (a lost
 #  thin id's stack alone), or that primary is the replacement the worker
 #  last made for a primary and fails, since less than cntlr_unhealthy after
@@ -12034,12 +12820,13 @@ case_copy() {
 # primary also owns, which is corruption, not a failed assertion.
 #
 # So this case drops host0's connection to $SS0 BEFORE it kills the agent and
-# reconnects it to the new primary alone (the helper's `disconnect_prefix` and
-# `connect` verbs, the same pair copy step 1 uses for host1). A real node
+# reconnects it through the cdc once the new primary is built. A real node
 # failure would have taken that path down by itself; the suite does it by hand
-# because it only killed a process. From AR7 on, `connect_all` is safe again —
-# ReplaceCntlr (model/ops.go) rewrites the CdcEntries, so the dead
-# CN's transport is no longer in any discovery log and cannot be reconnected.
+# because it only killed a process. The reconnect cannot reach the dead CN:
+# the failover's own transaction applies the listing rule (architecture.md
+# [D18]), under which the demoted cntlr, its err_epoch set and its agent dead
+# so nothing clears it, is in no discovery record, and AR7's ReplaceCntlr
+# (model/ops.go) later deletes it outright.
 #
 # ===========================================================================
 # WHAT IS NOT ASSERTED, DELIBERATELY
@@ -12075,7 +12862,7 @@ case_copy() {
 # The consequence is real, not hypothetical. Building this shape keeps the
 # primary CN spawning dmsetup, mdadm and lsblk processes for minutes on end
 # on a 2-vCPU guest — the whole window, restarts included, see WAIT_BUILD —
-# and under that load it cannot answer a health check inside five seconds. A
+# and under that load it cannot answer a health check inside one check round. A
 # build under this set can record, all inside setup, a `failover`, a
 # `spare_create` and a `failover` back.
 #
@@ -12491,10 +13278,11 @@ react_pool_grew() { # <cntlr id> <slice id> <old total>
 
 # worker_failover_cnt prints how many failovers the worker has applied so far:
 # the `reaction applied` records with kind failover in its log (dnv-worker.md,
-# Log records). The react case has one sp, so the count is that sp's. A log that
+# Log records). Every case has one sp, so the count is that sp's. A log that
 # cannot be read is fatal rather than a zero: a zero read at both ends would
 # pass the caller's unchanged-count assertion without having read the log (and
-# by stage 05 the count is not zero: stage 03's AR5 failover is already in it).
+# by react's stage 05 the count is not zero: stage 03's AR5 failover is
+# already in it).
 worker_failover_cnt() {
 	local n
 	n=$(ssh_cp "grep -c '\"msg\":\"reaction applied\".*\"kind\":\"failover\"' \
@@ -12504,6 +13292,40 @@ worker_failover_cnt() {
 	'' | *[!0-9]*) die "the worker log's failover count read '$n'" ;;
 	esac
 	echo "$n"
+}
+
+# worker_last_failover prints the cntlr ids of the LAST failover record of the
+# same log as "<old_cntlr_id> <new_cntlr_id>", or nothing when there is none.
+# The record is slog JSON with the ids as bare numbers, parsed on the driver;
+# `fromjson?` drops a line torn by a write still in progress.
+worker_last_failover() {
+	local line
+	line=$(ssh_cp "grep '\"msg\":\"reaction applied\".*\"kind\":\"failover\"' \
+		$WORK/worker/worker.log | tail -n 1") ||
+		die "cannot read the failover records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$line" ] || return 0
+	printf '%s\n' "$line" | "$JQ" -R -r \
+		'fromjson? // empty | "\(.old_cntlr_id) \(.new_cntlr_id)"'
+}
+
+# worker_demotion_unsynced_cnt counts the worker's `sp demotion unsynced`
+# records whose cntlr_ids name <cntlr id>: a fan-out that demoted that cntlr
+# held its sides for the demotion's whole wait, common.DemotionHoldTimeout,
+# because the cntlr never reported it applied (dnv-worker.md RW22). Fatal on
+# a log it cannot read, as worker_failover_cnt is.
+worker_demotion_unsynced_cnt() { # <cntlr id>
+	local lines n
+	lines=$(ssh_cp "grep -F '\"msg\":\"sp demotion unsynced\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read the demotion records in $WORK/worker/worker.log on $CP_IP"
+	if [ -z "$lines" ]; then
+		echo 0
+		return 0
+	fi
+	n=$(printf '%s\n' "$lines" | "$JQ" -R -r \
+		"fromjson? // empty | select([.cntlr_ids[]? | select(. == $1)] | length > 0) | .revision" |
+		grep -c . || true)
+	echo "${n:-0}"
 }
 
 # react_primary_moved is AR5's whole observable: EXACTLY one cntlr is primary
@@ -12888,10 +13710,12 @@ react_target() {
 # exists to expose: the grow's first converge on the primary can race the new
 # sides' disk nodes (the connect before the export is linked, the namespace
 # head before the kernel's scan adds it), report the unbuilt group — and with
-# it the pool — as ERROR, and AR5 fails the settled primary over on that one
-# round. Following the new primary would turn that into a silent pass. So the
-# roles are re-read the way primary_stack_ready reads them, and a move stops
-# the run at once, naming both controllers and the worker's own record of the
+# it the pool — as ERROR, and should that ERROR outlast the set's
+# primary_unhealthy, which the gateway makes cover two rounds at least
+# (architecture.md, Common validation), AR5 fails the settled primary over.
+# Following the new primary would turn that into a silent pass. So the roles
+# are re-read the way primary_stack_ready reads them, and a move stops the run
+# at once, naming both controllers and the worker's own record of the
 # failover. A reply with no primary, with two, or with unequal lists is polled
 # through, for the reason primary_stack_ready's header gives.
 REACT_GROW_PRIMARY=""
@@ -13012,7 +13836,7 @@ react_grow() {
 
 	REACT_POOL_LAST=""
 	msg="AR6 to append one more data group to slice 0 (the worker reads the"
-	msg="$msg primary's pool status once per 5s pass)"
+	msg="$msg primary's pool status once per pass, one per cntlr_interval)"
 	wait_until "$WAIT_REACT" "$msg" react_grow_polls \
 		react_grow_progress "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID" \
 		"$((before_data + 1))"
@@ -13098,7 +13922,7 @@ react_grow() {
 
 react_failover() {
 	stage 03 "AR5: kill the primary's cn agent and watch the standby be elected"
-	local out dev2 msg spare
+	local out dev2 msg spare hits
 
 	sp_refresh
 	sp_read_roles
@@ -13143,8 +13967,9 @@ react_failover() {
 	# would hold two optimized paths to one namespace, and a write down the
 	# stale one would allocate blocks in a dm-thin metadata image the new
 	# primary also owns. A real node failure takes that path down; a killed
-	# process does not, so the suite does it here and reconnects to the new
-	# primary alone.
+	# process does not, so the suite does it here and reconnects host0 through
+	# the cdc once the failover has taken the dead CN out of the discovery
+	# records.
 	# The `||` catches ssh or the dispatch and nothing more — disconnect_prefix
 	# discards every disconnect's status and ends `return 0` — so the invariant
 	# above is carried by the two host_path_gone waits below, not by this line.
@@ -13185,7 +14010,7 @@ react_failover() {
 	REACT_ROLE_LAST=""
 	msg="AR5 to move the primary role off cntlr $REACT_OLD_PRIMARY_ID"
 	msg="$msg (primary_unhealthy ${THR_PRIMARY}s after its err_epoch, then the"
-	msg="$msg next 5s pass)"
+	msg="$msg next pass, one per cntlr_interval)"
 	wait_until "$WAIT_REACT" "$msg" \
 		react_primary_moved "$REACT_OLD_PRIMARY_ID"
 	# The predicate ran in this shell and returned on the call that succeeded.
@@ -13298,16 +14123,44 @@ react_failover() {
 		"the new primary to report CN19's READWRITE shape, subsystem and namespace rows included" \
 		cntlr_level_ready "$PRIMARY_CNTLR_ID"
 
-	# host0 comes back on the new primary's transport ALONE — a direct
-	# `connect`, not `connect-all`, because the cdc still advertises the dead
-	# CN's transport until AR7 rewrites the CdcEntries in step 4.
+	# host0 comes back THROUGH THE CDC (E2E10). The failover's own transaction
+	# applied the listing rule (architecture.md [D18]): the dead cntlr is a
+	# standby whose err_epoch is set, and with its agent dead nothing clears
+	# it, so it is in no discovery record while the new primary is. AR7 may
+	# replace it at any moment — its threshold is shorter than a wide build —
+	# and a replacement is listed from its creation, so the log is compared
+	# with the rule over a fresh `sp get` on every poll (host_disc_is_listed)
+	# and then searched for the dead CN's transport and the new primary's.
 	#
-	# The export gate for this connect is the cntlr_level_ready wait directly
+	# The export gate for the new primary is the cntlr_level_ready wait directly
 	# above, whose LEVEL_WANT includes ss_id_to_subsystem and
 	# ns_id_to_namespace: it is the same question wait_ns_exported asks, over
 	# every row of the cntlr rather than two of them, so there is no second
-	# poll here. host_connect still verifies afterwards.
-	host_connect 0 "$PRIMARY_TRADDR" "$PRIMARY_TRSVCID" "$SS0"
+	# poll here. A replacement AR7 made meanwhile may not export yet, and
+	# connect-all then gets no controller for it, which costs nothing: step 4
+	# connects it behind its own gate. host_connect_all verifies the count and
+	# connect_added_ctrl the new primary's path in particular, as the count
+	# could be the replacement's alone.
+	sp_refresh
+	sp_read_roles
+	if [ "$PRIMARY_CNTLR_ID" != "$REACT_NEW_PRIMARY_ID" ]; then
+		die "AR5 fired again before host0 reconnected: cntlr" \
+			"$REACT_NEW_PRIMARY_ID was elected and rebuilt, cntlr" \
+			"$PRIMARY_CNTLR_ID holds the role now, so the reconnect below" \
+			"and step 4 would judge the wrong cntlr"
+	fi
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to serve $SS0 to host0 as the listing rule lists it, without the dead cn$REACT_OLD_PRIMARY_CN" \
+		host_disc_is_listed 0 "$SS0"
+	hits=$(printf '%s\n' "$DISC_LAST" |
+		grep -cF -- "|$REACT_OLD_PRIMARY_TRADDR|" || true)
+	assert_eq "$hits" 0 \
+		"the dead CN's transport is out of host0's discovery log (the failover took it out)"
+	hits=$(printf '%s\n' "$DISC_LAST" | grep -cF -- "|$PRIMARY_TRADDR|" || true)
+	assert_eq "$hits" 1 "and the new primary's transport is in it"
+	host_connect_all 0 "$SS0"
+	connect_added_ctrl 0 "$SS0" "$PRIMARY_TRADDR"
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
 	wait_dev 0 "$UUID1"
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
@@ -13441,19 +14294,25 @@ react_replace() {
 		"CN13: a standby has no thin pools"
 
 	# The discovery log moved with the record: ReplaceCntlr rewrites every
-	# CdcEntry of the sp, swapping the old transport for the new one. That is
-	# also what makes `connect-all` safe again — the dead CN is not in any log,
-	# so nothing can reconnect to the stack its dead agent left behind.
+	# CdcEntry of the sp by the listing rule (architecture.md [D18]), so the
+	# dead cntlr — out of the records since the failover took it out — is gone
+	# with its key, and the replacement, enabled from birth with a zero
+	# err_epoch, is listed. Both cntlrs listed is waited for first, as at
+	# every connect-all site (disc_want_of_sp's header): host0 connects the
+	# replacement below.
+	wait_all_listed "$WAIT_PROVISION" \
+		"the new primary and the replacement to be in $SP's discovery records"
 	disc_want_of_sp "$SS0"
 	DISC_LAST=""
 	wait_until "$WAIT_HOST" \
 		"the cdc to serve $SS0 over the new primary and the replacement" \
 		host_disc_is 0
 	hits=$(printf '%s\n' "$DISC_LAST" |
-		grep -cF -- "$REACT_OLD_PRIMARY_TRADDR" || true)
+		grep -cF -- "|$REACT_OLD_PRIMARY_TRADDR|" || true)
 	assert_eq "$hits" 0 \
 		"the dead CN's transport is out of host0's discovery log"
-	hits=$(printf '%s\n' "$DISC_LAST" | grep -cF -- "$REACT_REPL_TRADDR" || true)
+	hits=$(printf '%s\n' "$DISC_LAST" |
+		grep -cF -- "|$REACT_REPL_TRADDR|" || true)
 	assert_ne "$hits" 0 "and the replacement's transport is in it"
 
 	# In the log is not the same as listening. cntlr_legs_full_ready above says
@@ -13884,6 +14743,823 @@ case_react() {
 }
 
 # ---------------------------------------------------------------------------
+# Case: cutoff — a primary cut off from the control plane, as a host that
+# follows the discovery log sees it (e2e_integtest.md, The cases, cutoff)
+# ---------------------------------------------------------------------------
+#
+# The case stops the primary's cn agent with SIGSTOP and keeps it stopped until
+# the failover has been watched to its end. A stopped agent answers no health
+# round, but every kernel object it built goes on serving: its nvmet target
+# keeps host0's writes flowing into md and dm-thin, and md keeps writing both
+# legs. That is a CN cut off from the control plane and not from its hosts and
+# disks — the shape the worker's demotion hold exists for — and, unlike the
+# react case's kill, host0 is NOT disconnected by hand first: what takes its
+# path away is the cdc and nvme-stas, which is the subject.
+#
+# WHAT IT PROVES, in the order a host meets it:
+#
+#  * The failover lands within seconds of the stop. The cutoff set's primary
+#    threshold is two check rounds, AR5 fires only on a verdict of this worker
+#    (dnv-worker.md AR10) and every missed round gives it one, so the bound is
+#    that threshold plus three rounds — up to one until the next round starts,
+#    that round's timeout, which stamps the err_epoch, and up to one until the
+#    pass that acts — plus CUT_SLACK for the driver's own polling.
+#  * The failover's own transaction takes the old primary out of the discovery
+#    records: it is then a standby whose err_epoch is set, which the listing
+#    rule does not list (architecture.md [D18]). Read through host1, which runs
+#    no nvme-stas, so the read never races a stafd.
+#  * host0's stacd drops its path to the old primary, while the fan-out holds
+#    the sides for the demotion the stopped agent never acknowledges
+#    (dnv-worker.md RW22). The worker's `sp demotion unsynced` record naming
+#    that cntlr is the proof that the hold ran its whole wait.
+#  * Not one write fails. Writes go on finishing between the stop and the
+#    failover, as the stopped agent's kernel objects serve on until the fence;
+#    that growth is asserted, or a loop stalled before the cut would pass every
+#    zero-failure check with nothing measured. host0's path to the standby
+#    stays live, inaccessible until the new primary is built, so the head
+#    queues IO rather than failing it, and the fence that follows the hold
+#    finds no host IO on the old primary, whose path is gone by then. The
+#    loop's records and the kernel log after a marker are the two witnesses.
+#  * The writes run again once the new primary has built its stack and its
+#    namespaces turn optimized on host0.
+#  * After SIGCONT the old primary converges to a standby, its err_epoch
+#    clears (dnv-worker.md HL2), its address returns to the records, and
+#    host0's stacd reconnects it as an inaccessible path. The worker applied
+#    one failover in all. The case reads the err_epoch only once the standby
+#    shape is in place, so it does not show that the clear waits for a reply
+#    of the revision the worker drives; the unit test
+#    TestStandbyCleanReplyBelowItsRevisionClearsNothing does.
+#
+# THE HOST-SIDE EXCEPTIONS, both inside this case alone. host0 runs nvme-stas,
+# where E2E10 wants it inactive: stafd and stacd on the cdc suite's settings
+# against this run's cdc, the kernel's autoconnector still masked (rule 6),
+# host0's own stas configuration copied before and put back after. host0's
+# suite-made paths are dropped before stas starts, so stacd is the only
+# connector, and stacd's paths are dropped and the suite's own made again
+# before the ending, so case_teardown finds host0 as setup leaves it. And a
+# second detached host process, the write loop, where E2E7 runs every other
+# host write under a driver-side watchdog: its writes are meant to queue
+# through the stall, so it reports through files, as host_sha_probe's reader
+# does.
+#
+# FROM THE STOP TO THE RESUME the driver issues no host0 device IO, not even a
+# cache drop, whose `sync` would wait on the stalled head (rule 5); everything
+# it reads there is sysfs, the loop's files and the kernel log.
+#
+# A FAILED RUN keeps all of it (E2E6): the agent stopped, stas running on the
+# suite's settings with host0's copy in $WORK, the loop running or queued. The
+# next start cleanup or --cleanup-only recovers it: host_cleanup stops the loop
+# and restores stas before it wipes, and kill_agents continues a stopped agent
+# before its TERM.
+#
+# WHAT IS MEASURED, NOT PRESUMED. Whether the kernel queues or fails the write
+# in flight when stacd deletes the only optimized path, and whether the hold
+# outlasts stacd's soak, is what the zero-failure assertions measure; a failed
+# write stops the run at once, with the records that show it.
+
+# --- the objects this case creates ------------------------------------------
+#
+# w0 is the scratch thin device under the loop's namespace, a bare jq
+# identifier like every td name here (t0/s0/t1/c0/a0 are the other cases').
+# Its namespace is ns idx 2 of $SS0, with $UUID2, as copy's and react's are;
+# its id gets its own global for the reason REACT_NS2_ID's comment gives.
+TD_CUT=w0
+CUT_TD_ID=""
+CUT_TD_SIZE=""
+CUT_NS2_ID=""
+
+# The loop's range: CUT_RANGE_MIB MiB at offset 0 of ns 2, pre-filled with
+# CUT_PAT, whose digest is CUT_PAT_SHA, and rewritten 4 KiB slot by slot.
+CUT_RANGE_MIB=1
+CUT_SLOTS=$((CUT_RANGE_MIB * 256))
+CUT_PAT=""
+CUT_PAT_SHA=""
+
+# Writes the loop must finish before the cut, and again after the resume,
+# before either counts as running.
+CUT_WARMUP=20
+
+# The driver's own polling slack on the failover bound: each poll is an ssh
+# plus wait_until's half second, and the stop is timed when its ssh returns.
+CUT_SLACK=15
+
+# The loop's self-stop, in seconds: the bounds of every wait from its start in
+# stage 03 to its stop in stage 07, summed, and one WAIT_BUILD more for the
+# time the polls and the readings between the waits take themselves. The sum
+# is the new primary's build and the old primary's teardown (WAIT_BUILD each);
+# the listed check before the stop, the new primary's raid0 and level rows and
+# the old primary's err_epoch (WAIT_PROVISION each); the failover
+# (WAIT_REACT) and its record (WAIT_SHORT); and fourteen host waits
+# (WAIT_HOST: eight polls, five ANA waits, one read-back). So it outlives a
+# passing run however slow its waits, and still ends a failed one left in
+# place. A wait added between those two stages adds its bound here.
+CUT_LOOP_MAX=$((2 * WAIT_BUILD + 4 * WAIT_PROVISION + WAIT_REACT + WAIT_SHORT +
+	14 * WAIT_HOST + WAIT_BUILD))
+
+# The kernel-log marker the loop's witness counts from, minted per run.
+CUT_KMSG_TAG=""
+
+# host0's two stas files as stage 02 found them (stas_conf_sum).
+CUT_STAS_SUM=""
+
+# The cluster's cntlr_interval, read at stage 00.
+CUT_CI=0
+
+# The primary the case stops and the standby AR5 must elect, read once at stage
+# 00 and never recomputed: every assertion of the cut is about these two.
+CUT_OLD_ID=""
+CUT_OLD_TRADDR=""
+CUT_OLD_TRSVCID=""
+CUT_OLD_CN=-1
+CUT_NEW_ID=""
+CUT_NEW_TRADDR=""
+CUT_NEW_TRSVCID=""
+CUT_NEW_CN=-1
+
+# The worker's records before the cut: failovers applied, and demotion holds
+# that ended by their timer naming the primary.
+CUT_FO_BEFORE=0
+CUT_DEMOTE_BEFORE=0
+
+# Driver-clock instants ($SECONDS) of the stop, of the failover seen, of
+# host0's path to the old primary seen gone, and of the new primary's
+# namespaces seen optimized on host0.
+CUT_T_STOP=0
+CUT_T_FO=0
+CUT_T_DROP=0
+CUT_T_ANA=0
+
+# The loop's last summary (cut_wloop_read): writes finished and failed, the
+# longest single write and how long ago the last one finished, in ms, and
+# whether the loop process is there. CUT_WLOOP_OUT is the verb's whole answer,
+# failed records included, for a failure message.
+CUT_OK=0
+CUT_FAIL=0
+CUT_MAX_MS=0
+CUT_IDLE_MS=0
+CUT_RUNNING=""
+CUT_WLOOP_OUT=""
+
+# --- predicates and readers -------------------------------------------------
+
+# cntlr_field_of reads one field of the cntlr whose id is <cntlr id> out of an
+# `sp get` reply, through the pairing sp_read_roles rests on (loadCntlrs
+# (gateway/alloc.go)): position i of cntlr_list is the cntlr whose id is
+# sp_conf.cntlr_id_list[i]. It answers `null` when no cntlr has that id.
+cntlr_field_of() { # <sp get reply> <cntlr id> <field>
+	jq_of "$1" "[.sp_conf.cntlr_id_list, [.cntlr_list[].$3]] | transpose
+		| map(select(.[0] == \"$2\") | .[1]) | first"
+}
+
+# cntlr_field_is is the polling form, on a fresh `sp get` per poll, whose
+# reply stays in $CTL_OUT. It logs the reading when it changes, under the
+# discipline of ANA_LAST: a wait_until label is expanded once, at the call.
+CNTLR_FIELD_LAST=""
+
+cntlr_field_is() { # <cntlr id> <field> <want>
+	local got sig
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	got=$(cntlr_field_of "$CTL_OUT" "$1" "$2")
+	sig="cntlr $1: $2 $got"
+	if [ "$sig" != "$CNTLR_FIELD_LAST" ]; then
+		CNTLR_FIELD_LAST=$sig
+		log "  $sig"
+	fi
+	[ "$got" = "$3" ]
+}
+
+# host_dc_live is true once host <h> holds a LIVE discovery controller to this
+# run's cdc: in this case, stafd's persistent one.
+host_dc_live() { # <h>
+	local out n
+	out=$(helper_host "$1" ctrls_of nqn.2014-08.org.nvmexpress.discovery) ||
+		return 1
+	n=$(printf '%s\n' "$out" | grep -F 'state=live' |
+		grep -cF "traddr=$CP_IP,trsvcid=$CDC_PORT" || true)
+	[ "${n:-0}" -ge 1 ]
+}
+
+# cut_wloop_read fills the CUT_* loop summary from host0's wloop_stat verb, in
+# the PARENT shell, and answers false on an answer it cannot parse — a poll's
+# failed ssh is one more poll, not a verdict.
+cut_wloop_read() {
+	local out first kv
+	out=$(helper_host 0 wloop_stat) || return 1
+	first=$(printf '%s\n' "$out" | sed -n 1p)
+	case "$first" in
+	ok=*) ;;
+	*) return 1 ;;
+	esac
+	CUT_WLOOP_OUT=$out
+	for kv in $first; do
+		case "$kv" in
+		ok=*) CUT_OK=${kv#ok=} ;;
+		fail=*) CUT_FAIL=${kv#fail=} ;;
+		max_write_ms=*) CUT_MAX_MS=${kv#max_write_ms=} ;;
+		idle_ms=*) CUT_IDLE_MS=${kv#idle_ms=} ;;
+		running=*) CUT_RUNNING=${kv#running=} ;;
+		esac
+	done
+	case "$CUT_OK$CUT_FAIL$CUT_MAX_MS" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+# cut_loop_verdict is what every reading of the running loop asserts: no
+# write failed, and the loop is still there. A failed write is THE finding
+# this case exists for, so it stops the run at once, from inside a poll as
+# well (wait_until runs its predicate in this shell), printing the failed
+# records and dd's stderr.
+cut_loop_verdict() { # <when>
+	if [ "$CUT_FAIL" != 0 ]; then
+		printf '%s\n' "$CUT_WLOOP_OUT" >&2
+		die "host0's write loop recorded $CUT_FAIL FAILED write(s) $1." \
+			"The records above carry each one's slot, its start and end in" \
+			"microseconds and dd's status; the kernel's side is in host0's" \
+			"dmesg below the marker '$CUT_KMSG_TAG'. A host following the" \
+			"discovery log must see this failover as a pause"
+	fi
+	[ "$CUT_RUNNING" = yes ] ||
+		die "host0's write loop is not running $1 (its last summary:" \
+			"${CUT_WLOOP_OUT%%$'\n'*}); its run.err and log tail are in" \
+			"host0's diagnostics below"
+}
+
+# cut_loop_ok_reaches is the polling form: true once the loop has finished
+# <n> writes, with the verdict above on every reading.
+cut_loop_ok_reaches() { # <n> <when>
+	cut_wloop_read || return 1
+	cut_loop_verdict "$2"
+	[ "$CUT_OK" -ge "$1" ]
+}
+
+# cut_loop_check is one reading and its verdict, for the assertions between the
+# waits.
+cut_loop_check() { # <when>
+	cut_wloop_read || die "host0: the write loop's summary could not be read $1"
+	cut_loop_verdict "$1"
+	log "  host0's write loop $1: $CUT_OK write(s) done, none failed," \
+		"the longest ${CUT_MAX_MS} ms, the last ${CUT_IDLE_MS} ms ago"
+}
+
+# cut_kmsg_clean is the kernel-log witness: no line reporting a failed IO
+# after the marker on host0 (kmsg_errors). A marker the ring buffer no longer
+# holds is a die too, never a clean answer.
+cut_kmsg_clean() { # <when>
+	local out first
+	out=$(helper_host 0 kmsg_errors "$CUT_KMSG_TAG") ||
+		die "host0: the kmsg_errors verb failed $1"
+	first=$(printf '%s\n' "$out" | sed -n 1p)
+	case "$first" in
+	kmsg_errors=0) ;;
+	kmsg_errors=unreadable)
+		die "host0's kernel log no longer holds the marker" \
+			"'$CUT_KMSG_TAG' $1, so its IO errors cannot be counted: the" \
+			"ring buffer wrapped. dmesg is in host0's diagnostics below"
+		;;
+	*)
+		printf '%s\n' "$out" >&2
+		die "host0's kernel log reports failed IO after the marker" \
+			"'$CUT_KMSG_TAG' $1 ($first); the lines are above"
+		;;
+	esac
+	log "  host0's kernel log $1: no failed IO after the marker"
+}
+
+# cut_new_primary_ready is stage 05's rebuild wait: primary_stack_ready, which
+# follows the role, stopped the moment the role leaves the cntlr AR5 elected,
+# and then the worker's own word that it settled — the settling read
+# react_new_primary_ready makes, for that function's reasons.
+cut_new_primary_ready() { # <the cntlr AR5 elected>
+	local rc=0
+	primary_stack_ready || rc=1
+	if [ -n "$PRIMARY_WAIT_ID" ] && [ "$PRIMARY_WAIT_ID" != "$1" ]; then
+		die "the primary role left cntlr $1 while it built the stack, for" \
+			"cntlr $PRIMARY_WAIT_ID. With the old primary's agent stopped no" \
+			"other cntlr has the zero err_epoch failoverEligible" \
+			"(worker/reaction.go) asks of a candidate, so this second" \
+			"failover is one this case cannot explain"
+	fi
+	[ "$rc" = 0 ] || return 1
+	cntlr_field_is "$1" settling false
+}
+
+# --- step 0: the pool the case cuts off -------------------------------------
+#
+# Three things must hold before the stop means anything. The primary must be
+# SETTLED: a settling primary is held to cntlr_unhealthy, which this set makes
+# long, and would not fail over inside any bound (dnv-worker.md AR5, HL2); the
+# first primary is created settling and settles once its stack is built. Both
+# cntlrs must be in the discovery records, the standby above all, as stacd
+# connects only what the log lists and the standby's path is what keeps
+# host0's IO queued through the stall. And the cluster's cntlr_interval must
+# be the one read_constants sized the set by.
+cut_snapshot() {
+	stage 00 "the pool the cut is about: a settled primary, both cntlrs listed"
+	local ci settled
+
+	assert_eq "$CNTLR_CNT" 2 \
+		"this case is written for a cntlr_cnt of 2 (one standby to elect)"
+	ctl_ok cluster get --name "$CLUSTER"
+	ci=$(jq_of "$CTL_OUT" '.cluster_conf.health_check_conf.cntlr_interval')
+	case "$ci" in
+	'' | *[!0-9]* | 0) die "the cluster's cntlr_interval reads '$ci'" ;;
+	esac
+	assert_eq "$ci" "$DEFAULT_HC_INTERVAL" \
+		"the cluster's cntlr_interval: created without one, it stores common.DefaultHealthCheckInterval"
+	CUT_CI=$ci
+
+	sp_refresh
+	sp_read_roles
+	settled=$PRIMARY_CNTLR_ID
+	CNTLR_FIELD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $settled to be settled (the worker saw it clean as primary with its stack built)" \
+		cntlr_field_is "$settled" settling false
+	# The listed wait reads the roles once more, from its winning poll, and
+	# nothing may have moved since the settled one, or the cut below would be
+	# about another cntlr.
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records (a zero err_epoch on the standby)"
+	assert_eq "$PRIMARY_CNTLR_ID" "$settled" \
+		"the primary is still the cntlr that settled"
+	assert_eq "$(cntlr_field_of "$SP_JSON" "$PRIMARY_CNTLR_ID" settling)" false \
+		"the primary is still settled"
+
+	CUT_OLD_ID=$PRIMARY_CNTLR_ID
+	CUT_OLD_TRADDR=$PRIMARY_TRADDR
+	CUT_OLD_TRSVCID=$PRIMARY_TRSVCID
+	CUT_OLD_CN=$PRIMARY_CN
+	CUT_NEW_ID=$STANDBY_CNTLR_ID
+	CUT_NEW_TRADDR=$STANDBY_TRADDR
+	CUT_NEW_TRSVCID=$STANDBY_TRSVCID
+	CUT_NEW_CN=$STANDBY_CN
+	log "  the cut stops cntlr $CUT_OLD_ID's agent on cn$CUT_OLD_CN" \
+		"($CUT_OLD_TRADDR); AR5 must elect cntlr $CUT_NEW_ID on" \
+		"cn$CUT_NEW_CN ($CUT_NEW_TRADDR); cntlr_interval ${CUT_CI}s," \
+		"primary_unhealthy ${THR_PRIMARY}s, the demotion hold" \
+		"${DEMOTION_HOLD_TIMEOUT}s"
+}
+
+# --- step 1: the loop's namespace -------------------------------------------
+#
+# A scratch namespace and not ns 1: at one slice t0 is exactly the baseline
+# setup wrote, so ns 1 has no room the loop could rewrite without touching
+# SHA0's bytes. BOTH cntlrs must export it, as stacd connects both transports
+# in step 2 and the standby's path is the one that carries the stall.
+cut_target() {
+	stage 01 "td create $TD_CUT and ns idx 2 for the write loop, pre-filled"
+	local dev
+
+	sp_refresh
+	sp_read_roles
+	CUT_TD_SIZE=$((4 * TD_UNIT))
+	assert_ge "$CUT_TD_SIZE" "$((CUT_RANGE_MIB * 1048576))" \
+		"$TD_CUT holds the loop's $CUT_RANGE_MIB MiB range"
+	ctl_ok td create --name "$TD_CUT" --size "$CUT_TD_SIZE"
+	CUT_TD_ID=$(jq_of "$CTL_OUT" '.td_id')
+	case "$CUT_TD_ID" in
+	'' | *[!0-9]* | 0) die "td create returned td_id '$CUT_TD_ID'" ;;
+	esac
+	wait_until "$WAIT_PROVISION" "$TD_CUT to report created" \
+		td_created "$TD_CUT"
+	assert_field "$CTL_OUT" '.name_to_td | length' 2 \
+		"the sp holds $TD0 and $TD_CUT"
+	# `created` covers the thin volumes; the raid0 is the row a namespace's
+	# dm-linear points at (CN16), as react_target says.
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID to build a raid0 for both thin devices" \
+		cntlr_raid0_ready "$PRIMARY_CNTLR_ID" 2
+
+	ctl_ok ns create --nqn "$SS0" --idx 2 --td "$TD_CUT" --uuid "$UUID2"
+	CUT_NS2_ID=$(jq_of "$CTL_OUT" '.ns_id')
+	case "$CUT_NS2_ID" in
+	'' | *[!0-9]* | 0) die "ns create returned ns_id '$CUT_NS2_ID'" ;;
+	esac
+	wait_ns_exported_all "$SS0" "$SS0_ID" "$CUT_NS2_ID"
+	# host0 still holds setup's two paths, and the kernel adds the namespace
+	# on the AEN: ANA first, device second (host_dev_present's comment).
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
+	wait_dev 0 "$UUID2"
+
+	dev=$(host_dev "$UUID2")
+	CUT_PAT="$WORK/pattern-cut"
+	host_make_pattern 0 "$CUT_PAT" "$CUT_RANGE_MIB"
+	CUT_PAT_SHA=$(host_sha_range 0 "$CUT_PAT" "$CUT_RANGE_MIB") ||
+		die "host0: digesting the loop's pattern failed"
+	assert_eq "${#CUT_PAT_SHA}" 64 "the loop's pattern digest is 64 hex digits"
+	host_write_range 0 "$CUT_PAT" "$dev" "$CUT_RANGE_MIB" 0
+	host_wait_sha 0 "$dev" "$CUT_RANGE_MIB" "$CUT_PAT_SHA" "$WAIT_HOST" \
+		"host0 to read the pre-filled range of $dev back"
+}
+
+# --- step 2: host0 handed to nvme-stas --------------------------------------
+#
+# host0 lets go of setup's paths first, so stacd makes every path it holds:
+# it only disconnects what it made itself (disconnect-scope
+# only-stas-connections), and a path it adopted rather than made is a
+# question this case does not need to ask. host_path_gone is the right demand
+# for an explicit disconnect (host_path_gone's header). The discovery
+# controller sweep is for a stray one: setup's connect-all leaves none.
+cut_stas_up() {
+	stage 02 "host0 handed to nvme-stas, pointed at this run's cdc"
+	local out cnt dev
+
+	out=$(helper_host 0 mask) || die "host0: the mask verb failed"
+	assert_eq "$out" masked \
+		"host0: the autoconnector stays masked under nvme-stas (rule 6)"
+	helper_host 0 disconnect_prefix "$SS0" >/dev/null ||
+		die "host0: the disconnect_prefix verb could not be run for $SS0"
+	wait_until "$WAIT_HOST" "host0 to drop setup's path to $PRIMARY_TRADDR" \
+		host_path_gone 0 "$SS0" "$PRIMARY_TRADDR"
+	wait_until "$WAIT_HOST" "host0 to drop setup's path to $STANDBY_TRADDR" \
+		host_path_gone 0 "$SS0" "$STANDBY_TRADDR"
+	helper_host 0 disconnect_discovery "$CP_IP" >/dev/null ||
+		die "host0: the disconnect_discovery verb failed"
+
+	CUT_STAS_SUM=$(helper_host 0 stas_conf_sum) ||
+		die "host0: the stas_conf_sum verb failed"
+	log "  host0's own stas files: $CUT_STAS_SUM"
+	out=$(helper_host 0 stas_start "$CP_IP" "$CDC_PORT") ||
+		die "host0: starting nvme-stas failed (its message is above): $out"
+	assert_eq "$(printf '%s\n' "$out" | tail -n 1)" "stas=started" \
+		"host0: the stas_start verb's last word"
+
+	wait_until "$WAIT_HOST" \
+		"host0's stafd to hold a live discovery controller to $CP_IP:$CDC_PORT" \
+		host_dc_live 0
+	wait_until "$WAIT_HOST" \
+		"host0's stacd to connect the primary's transport $PRIMARY_TRADDR" \
+		host_path_live 0 "$SS0" "$PRIMARY_TRADDR"
+	wait_until "$WAIT_HOST" \
+		"host0's stacd to connect the standby's transport $STANDBY_TRADDR" \
+		host_path_live 0 "$SS0" "$STANDBY_TRADDR"
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
+	host_wait_ana 0 "$SS0" "$STANDBY_TRADDR" "$UUID1" inaccessible
+	host_wait_ana 0 "$SS0" "$STANDBY_TRADDR" "$UUID2" inaccessible
+	wait_dev 0 "$UUID1"
+	wait_dev 0 "$UUID2"
+	out=$(helper_host 0 report_ctrls "$SS0") ||
+		die "host0: the report_ctrls verb failed"
+	cnt=$(printf '%s\n' "$out" | sed -n 's/^ctrl_cnt=//p' | tail -n 1)
+	assert_eq "$cnt" 2 \
+		"host0 holds exactly the two controllers stacd made for $SS0"
+	check_sha0 "through the paths nvme-stas made"
+	dev=$(host_dev "$UUID2")
+	host_wait_sha 0 "$dev" "$CUT_RANGE_MIB" "$CUT_PAT_SHA" "$WAIT_HOST" \
+		"host0 to read the loop's pre-filled range through nvme-stas's paths"
+}
+
+# --- step 3: the write loop and the witness ---------------------------------
+cut_loop_start() {
+	stage 03 "a detached 4 KiB write loop on host0, and a kernel-log marker"
+	local out
+
+	CUT_KMSG_TAG="dnv-e2e-cutoff-mark-$(hex16 "$CLUSTER_ID")"
+	out=$(helper_host 0 kmsg_mark "$CUT_KMSG_TAG") ||
+		die "host0: the kmsg_mark verb failed"
+	assert_eq "$out" "kmsg=marked" \
+		"host0: the kernel-log marker '$CUT_KMSG_TAG' is written and read back"
+	out=$(helper_host 0 wloop_start "$UUID2" "$CUT_PAT" "$CUT_SLOTS" \
+		"$CUT_LOOP_MAX") ||
+		die "host0: starting the write loop failed (its message is above)"
+	printf '%s\n' "$out" >&2
+	wait_until "$WAIT_HOST" \
+		"host0's write loop to finish $CUT_WARMUP writes to $(host_dev "$UUID2")" \
+		cut_loop_ok_reaches "$CUT_WARMUP" "while warming up"
+	cut_loop_check "before the cut"
+}
+
+# --- step 4: the cut --------------------------------------------------------
+cut_stop_primary() {
+	stage 04 "SIGSTOP the primary's cn agent: failover, withdrawal, path drop"
+	local out ids bound ok_stop
+
+	# Stage 00's two conditions once more, right before the stop: the standby
+	# still listed, so it is still a failover candidate, and host0 still
+	# holding stacd's path to it, the path that is to carry the stall. A
+	# standby that turned unhealthy in between leaves the records and host0's
+	# stacd drops its path, and a failover arriving before stacd had
+	# reconnected it would leave host0 with no path at all.
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records before the stop"
+	assert_eq "$PRIMARY_CNTLR_ID" "$CUT_OLD_ID" \
+		"the primary is still the cntlr stage 00 recorded"
+	wait_until "$WAIT_HOST" \
+		"host0 to hold a live path to the standby ($CUT_NEW_TRADDR) before the stop" \
+		host_path_live 0 "$SS0" "$CUT_NEW_TRADDR"
+	CUT_FO_BEFORE=$(worker_failover_cnt)
+	CUT_DEMOTE_BEFORE=$(worker_demotion_unsynced_cnt "$CUT_OLD_ID")
+
+	out=$(cn_sig "$CUT_OLD_CN" STOP) || die "cn$CUT_OLD_CN: the sig_pidfile verb failed"
+	assert_eq "$out" "state=T" \
+		"cn$CUT_OLD_CN's agent after SIGSTOP (/proc shows it stopped)"
+	CUT_T_STOP=$SECONDS
+	# The positive control of every zero-failure check below: until the
+	# failover, and the fence after its hold, the stopped agent's kernel
+	# objects go on serving host0's writes, so the loop's count must grow
+	# between this reading and the one when the failover is seen. A loop
+	# already stalled at the stop would pass those checks with nothing
+	# measured.
+	cut_loop_check "right after the stop"
+	ok_stop=$CUT_OK
+
+	REACT_ROLE_LAST=""
+	wait_until "$WAIT_REACT" \
+		"AR5 to move the primary role off the stopped cntlr $CUT_OLD_ID (primary_unhealthy ${THR_PRIMARY}s after its err_epoch, then the next pass)" \
+		react_primary_moved "$CUT_OLD_ID"
+	CUT_T_FO=$SECONDS
+	SP_JSON=$CTL_OUT
+	# Read at once, before the new primary can serve anything: its plan waits
+	# out the demotion hold and the sides, and its build follows. A write that
+	# had queued before the stop could otherwise finish through it and count.
+	cut_loop_check "when the failover was seen"
+	assert_ge "$CUT_OK" "$((ok_stop + 1))" \
+		"host0's finished writes when the failover was seen, against $ok_stop right after the stop (none in between means the loop stalled before the cut, so no zero-failure check below would measure it)"
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$CUT_NEW_ID" \
+		"AR5 elected the standby, the only candidate"
+	assert_eq "$(cntlr_field_of "$SP_JSON" "$CUT_OLD_ID" primary)" false \
+		"the stopped cntlr $CUT_OLD_ID is a standby"
+	assert_ne "$(cntlr_field_of "$SP_JSON" "$CUT_OLD_ID" err_epoch)" 0 \
+		"the stopped cntlr $CUT_OLD_ID's err_epoch is set"
+	bound=$((THR_PRIMARY + 3 * CUT_CI + CUT_SLACK))
+	assert_le "$((CUT_T_FO - CUT_T_STOP))" "$bound" \
+		"seconds from the stop to the failover seen (primary_unhealthy ${THR_PRIMARY}s + 3 rounds of ${CUT_CI}s + ${CUT_SLACK}s of polling)"
+	# The record follows the commit the poll above saw by a moment, so it is
+	# waited for, briefly, before the count is asserted.
+	wait_until "$WAIT_SHORT" "the worker to log the failover it applied" \
+		cut_failover_logged
+	assert_eq "$(worker_failover_cnt)" "$((CUT_FO_BEFORE + 1))" \
+		"the worker applied exactly one failover"
+	ids=$(worker_last_failover)
+	assert_eq "$ids" "$CUT_OLD_ID $CUT_NEW_ID" \
+		"the worker's last failover record's old_cntlr_id and new_cntlr_id"
+
+	# The cdc withdrew the old primary, read through host1 (the header).
+	DISC_WANT="$SS0|$CUT_NEW_TRADDR|$CUT_NEW_TRSVCID"
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to list only the new primary's transport for $SS0 (host1's view)" \
+		host_disc_is 1
+
+	# host0's stacd dropped its path to the old primary, while its path to
+	# the new primary — the path that queues host0's IO through the stall —
+	# stays live. `gone` and not `not live`: the old primary's target still
+	# answers, so only stacd's disconnect can take the path away, and that
+	# deletes the controller.
+	wait_until "$WAIT_HOST" \
+		"host0's stacd to drop its path to the old primary ($CUT_OLD_TRADDR) with its path to the new primary ($CUT_NEW_TRADDR) live" \
+		cut_old_path_dropped
+	CUT_T_DROP=$SECONDS
+	log "  the failover landed $((CUT_T_FO - CUT_T_STOP))s after the stop" \
+		"(bound ${bound}s); host0 had no path to the old primary by" \
+		"$((CUT_T_DROP - CUT_T_FO))s after the failover was seen, as these" \
+		"polls measure it; the demotion hold keeps the sides back" \
+		"${DEMOTION_HOLD_TIMEOUT}s"
+
+	wait_until "$WAIT_HOST" \
+		"the worker to record the demotion hold ending by its timer, naming the stopped cntlr $CUT_OLD_ID (dnv-worker.md RW22)" \
+		cut_demotion_recorded
+	cut_loop_check "after the old primary's path went"
+	cut_kmsg_clean "after the old primary's path went"
+}
+
+# cut_old_path_dropped is true when one reading of host0's paths shows the old
+# primary's gone and the new primary's live. A failed ssh or a listing taken
+# while stacd deletes the controller reads as no path at all, which alone
+# would pass for "gone"; it cannot show the new path live.
+cut_old_path_dropped() {
+	local j
+	j=$(host_subsys_json 0)
+	[ "$(path_field "$j" "$SS0" "$CUT_OLD_TRADDR" "" State)" = none ] &&
+		[ "$(path_field "$j" "$SS0" "$CUT_NEW_TRADDR" "" State)" = live ]
+}
+
+# cut_failover_logged is true once the worker's log holds a failover record
+# more than before the cut.
+cut_failover_logged() {
+	[ "$(worker_failover_cnt)" -gt "$CUT_FO_BEFORE" ]
+}
+
+# cut_demotion_recorded is true once the worker's log holds one more `sp
+# demotion unsynced` record naming the stopped cntlr than before the cut.
+cut_demotion_recorded() {
+	[ "$(worker_demotion_unsynced_cnt "$CUT_OLD_ID")" -gt "$CUT_DEMOTE_BEFORE" ]
+}
+
+# --- step 5: the new primary and the resume ---------------------------------
+cut_resume() {
+	stage 05 "the new primary builds the stack, and host0's writes run again"
+	local stalled
+
+	cut_wloop_read || die "host0: the write loop's summary could not be read"
+	cut_loop_verdict "while the new primary builds"
+	stalled=$CUT_OK
+
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	stack_wait_reset
+	# WAIT_BUILD: a whole stack from nothing, on a node that had only legs —
+	# react's stage 03 says why, and its wait is this one's model.
+	wait_until "$WAIT_BUILD" \
+		"the new primary cntlr $CUT_NEW_ID on cn$CUT_NEW_CN to build $SLICE_CNT pools, $SP_GRP_TOTAL groups and $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs and settle" \
+		cut_new_primary_ready "$CUT_NEW_ID"
+	wait_until "$WAIT_PROVISION" \
+		"the new primary to build the raid0 of $TD0 and $TD_CUT" \
+		cntlr_raid0_ready "$CUT_NEW_ID" 2
+	ops_level_want READWRITE
+	LEVEL_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the new primary to report CN19's READWRITE shape, subsystem and namespace rows included" \
+		cntlr_level_ready "$CUT_NEW_ID"
+
+	host_wait_ana 0 "$SS0" "$CUT_NEW_TRADDR" "$UUID2" optimized
+	host_wait_ana 0 "$SS0" "$CUT_NEW_TRADDR" "$UUID1" optimized
+	CUT_T_ANA=$SECONDS
+	wait_until "$WAIT_HOST" \
+		"host0's write loop to run again once the new primary serves it ($CUT_WARMUP more writes than the $stalled done before the stall)" \
+		cut_loop_ok_reaches "$((stalled + CUT_WARMUP))" "after the resume"
+	log "  host0's writes ran again $((SECONDS - CUT_T_ANA))s after its" \
+		"namespaces turned optimized on the new primary; the longest single" \
+		"write, the one queued through the stall, took ${CUT_MAX_MS} ms"
+	cut_loop_check "after the resume"
+	cut_kmsg_clean "after the resume"
+	# Safe again: the head is served, so neither the cache drop's `sync` nor
+	# the read can queue.
+	check_sha0 "after the new primary took over from the stopped one"
+}
+
+# --- step 6: the old primary continued --------------------------------------
+cut_cont_primary() {
+	stage 06 "SIGCONT: the old primary converges to a standby and returns"
+	local out want
+
+	out=$(cn_sig "$CUT_OLD_CN" CONT) || die "cn$CUT_OLD_CN: the sig_pidfile verb failed"
+	case "$out" in
+	state=T | state=gone | state=)
+		die "cn$CUT_OLD_CN's agent after SIGCONT reads '$out'; it must run again"
+		;;
+	state=*) ;;
+	*) die "cn$CUT_OLD_CN: sig_pidfile answered '$out'" ;;
+	esac
+
+	# It still runs the primary shape at the revision it was stopped at; the
+	# demotion tears its pools and arrays down, over legs whose sides fenced
+	# it. WAIT_BUILD, as for any teardown of a whole stack.
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	stack_wait_reset
+	wait_until "$WAIT_BUILD" \
+		"the old primary cntlr $CUT_OLD_ID to tear its stack down and hold the standby shape" \
+		standby_shape_ready
+	assert_eq "$STANDBY_WAIT_ID" "$CUT_OLD_ID" \
+		"the standby that shape belongs to is the old primary"
+	setup_assert_standby "$CTL_OUT"
+
+	CNTLR_FIELD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the old primary's err_epoch to clear (a clean reply at the revision the worker drives, dnv-worker.md HL2)" \
+		cntlr_field_is "$CUT_OLD_ID" err_epoch 0
+	SP_JSON=$CTL_OUT
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$CUT_NEW_ID" \
+		"the new primary keeps the role while the old one returns"
+
+	# Its address is back in the records (host1's view), and host0's stacd
+	# reconnects it as a standby's path.
+	want=$(printf '%s\n%s\n' \
+		"$SS0|$CUT_OLD_TRADDR|$CUT_OLD_TRSVCID" \
+		"$SS0|$CUT_NEW_TRADDR|$CUT_NEW_TRSVCID" | sort)
+	disc_want_of_sp "$SS0"
+	assert_eq "$DISC_WANT" "$want" \
+		"the listing rule lists both cntlrs again (architecture.md [D18])"
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to list the old primary's transport again for $SS0 (host1's view)" \
+		host_disc_is 1
+	wait_until "$WAIT_HOST" \
+		"host0's stacd to reconnect the old primary's transport $CUT_OLD_TRADDR" \
+		host_path_live 0 "$SS0" "$CUT_OLD_TRADDR"
+	host_wait_ana 0 "$SS0" "$CUT_OLD_TRADDR" "$UUID1" inaccessible
+	host_wait_ana 0 "$SS0" "$CUT_OLD_TRADDR" "$UUID2" inaccessible
+	assert_eq "$(host_path_state 0 "$SS0" "$CUT_NEW_TRADDR")" live \
+		"host0's path to the new primary is still live"
+	host_wait_ana 0 "$SS0" "$CUT_NEW_TRADDR" "$UUID2" optimized
+	assert_eq "$(worker_failover_cnt)" "$((CUT_FO_BEFORE + 1))" \
+		"still one failover: the old primary's return moved no role"
+	cut_loop_check "after the old primary returned as a standby"
+	cut_kmsg_clean "after the old primary returned as a standby"
+}
+
+# --- step 7: nvme-stas stopped, host0 handed back ---------------------------
+#
+# stacd and stafd both keep their kernel connections when they stop, so the
+# paths stacd made and the discovery controller stafd held are dropped by
+# hand, and host0 connects through the cdc as setup does.
+cut_stas_down() {
+	stage 07 "the loop and nvme-stas stopped, host0 handed back to the suite"
+	local out dev
+
+	out=$(helper_host 0 wloop_stop) || die "host0: the wloop_stop verb failed"
+	assert_eq "$out" "wloop=stopped" \
+		"host0's write loop stopped at its stop file, every write finished"
+	cut_wloop_read || die "host0: the write loop's last summary could not be read"
+	if [ "$CUT_FAIL" != 0 ]; then
+		cut_loop_verdict "at its end"
+	fi
+	assert_eq "$CUT_RUNNING" no "the write loop process is gone"
+	log "  host0's write loop ended after $CUT_OK write(s), none failed;" \
+		"the longest took ${CUT_MAX_MS} ms"
+	cut_kmsg_clean "at the loop's end"
+	dev=$(host_dev "$UUID2")
+	host_wait_sha 0 "$dev" "$CUT_RANGE_MIB" "$CUT_PAT_SHA" "$WAIT_HOST" \
+		"host0 to read the loop's range back as the pattern (no write landed zeros or elsewhere)"
+
+	out=$(helper_host 0 stas_restore) || die "host0: the stas_restore verb failed"
+	assert_eq "$out" "stas=restored" \
+		"host0: nvme-stas stopped and its own files put back"
+	out=$(helper_host 0 stas_state) || die "host0: the stas_state verb failed"
+	assert_eq "$out" "stafd=inactive stacd=inactive" "host0's nvme-stas units"
+	out=$(helper_host 0 stas_conf_sum) || die "host0: the stas_conf_sum verb failed"
+	assert_eq "$out" "$CUT_STAS_SUM" \
+		"host0's stas files are byte for byte what stage 02 found"
+
+	helper_host 0 disconnect_prefix "$SS0" >/dev/null ||
+		die "host0: the disconnect_prefix verb could not be run for $SS0"
+	helper_host 0 disconnect_discovery "$CP_IP" >/dev/null ||
+		die "host0: the disconnect_discovery verb failed"
+	wait_until "$WAIT_HOST" "host0 to drop stacd's path to $CUT_NEW_TRADDR" \
+		host_path_gone 0 "$SS0" "$CUT_NEW_TRADDR"
+	wait_until "$WAIT_HOST" "host0 to drop stacd's path to $CUT_OLD_TRADDR" \
+		host_path_gone 0 "$SS0" "$CUT_OLD_TRADDR"
+	out=$(helper_host 0 ctrls_of nqn.2014-08.org.nvmexpress.discovery) ||
+		die "host0: the ctrls_of verb failed"
+	assert_eq "$(printf '%s\n' "$out" |
+		grep -cF "traddr=$CP_IP,trsvcid=$CDC_PORT" || true)" 0 \
+		"host0 holds no discovery controller to the cdc once stafd's is disconnected"
+
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records"
+	disc_want_of_sp "$SS0"
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to serve $SS0 to host0 over both cntlr transports" \
+		host_disc_is 0
+	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID"
+	wait_ns_exported_all "$SS0" "$SS0_ID" "$CUT_NS2_ID"
+	host_connect_all 0 "$SS0"
+	connect_added_ctrl 0 "$SS0" "$PRIMARY_TRADDR"
+	connect_added_ctrl 0 "$SS0" "$STANDBY_TRADDR"
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID2" optimized
+	host_wait_ana 0 "$SS0" "$STANDBY_TRADDR" "$UUID1" inaccessible
+	host_wait_ana 0 "$SS0" "$STANDBY_TRADDR" "$UUID2" inaccessible
+	wait_dev 0 "$UUID1"
+	wait_dev 0 "$UUID2"
+	check_sha0 "after host0 was handed back to the suite's own paths"
+	assert_eq "$(worker_failover_cnt)" "$((CUT_FO_BEFORE + 1))" \
+		"the worker applied one failover in the whole case"
+}
+
+# --- step 8 -----------------------------------------------------------------
+cut_drop_target() {
+	stage 08 "delete ns idx 2 and $TD_CUT, leaving $SS0 ns 1 and $TD0"
+	ctl_ok ns delete --nqn "$SS0" --idx 2
+	assert_field "$CTL_OUT" '.ns_id' "$CUT_NS2_ID" "DeleteNamespaceReply.ns_id"
+	# A real removal, so the head disk goes (react_drop_target says why that
+	# is the one direction wait_dev_gone means anything).
+	wait_dev_gone 0 "$UUID2"
+	ctl_ok td delete --name "$TD_CUT"
+	assert_field "$CTL_OUT" '.td_id' "$CUT_TD_ID" "DeleteThinDeviceReply.td_id"
+	ctl_ok td list
+	assert_field "$CTL_OUT" '.name_to_td | length' 1 \
+		"only $TD0 is left for the teardown"
+	assert_jq "$CTL_OUT" ".name_to_td | has(\"$TD0\")" "and it is $TD0"
+	check_sha0 "after the cutoff case deleted its own namespace and thin device"
+}
+
+case_cutoff() {
+	CASE=cutoff
+	cut_snapshot
+	cut_target
+	cut_stas_up
+	cut_loop_start
+	cut_stop_primary
+	cut_resume
+	cut_cont_primary
+	cut_stas_down
+	cut_drop_target
+	case_finish
+}
+
+# ---------------------------------------------------------------------------
 # The space guard's run summary (E2E5)
 # ---------------------------------------------------------------------------
 #
@@ -14010,7 +15686,7 @@ run_case() { # <case name>
 #   parse_args -> trap on_exit EXIT -> log_topology
 #     -> [--cleanup-only: ship_helpers, cleanup_all, stop]
 #     -> preflight_driver -> ship_helpers -> cleanup_all -> cleanup_start_gate
-#     -> preflight_guests
+#     -> the run list (RUN_CASES) -> preflight_guests
 #     -> setup -> the case loop -> run_summary
 #
 #  a. PREFLIGHT RUNS AFTER THE START CLEANUP, not before it: a port check, a
@@ -14090,6 +15766,9 @@ log_topology() {
 	log "              react           $THR_REACT"
 	log "              (reacting: AR5/AR7/AR8 must fire inside a bound, so" \
 		"react's own build may react too)"
+	log "              cutoff          $THR_CUT_SHOW"
+	log "              (cutoff: a stopped primary fails over within seconds," \
+		"and nothing else may react while it is stopped)"
 	log "  placement: $DNS_PER_VM dnagent(s) per DN VM (E2E3 bound" \
 		"$DNS_PER_VM_BOUND), $DN_TOTAL disk nodes on $DN_VM_CNT DN VM(s)"
 	log "  sizes:     extent $EXTENT_SIZE, stripe $STRIPE_SIZE," \
@@ -14191,14 +15870,14 @@ main() {
 	# the guest was really swept. See cleanup_start_gate.
 	cleanup_start_gate start
 
-	preflight_guests
-
-	# THE RUN LIST IS COMPUTED BEFORE ANYTHING IS BUILT, because `setup` builds
-	# the FIRST case's sp and sp_thresholds has to know whose sp that is: the
-	# event_threshold set is chosen at `sp create` and no RPC changes it
-	# afterwards. parse_args has already refused an --only that names no
-	# case, so this list cannot come out empty; it is checked anyway, because an
-	# empty list would otherwise index an empty array under `set -u`.
+	# THE RUN LIST IS COMPUTED BEFORE THE GUEST PREFLIGHT AND BEFORE ANYTHING
+	# IS BUILT. The preflight checks nvme-stas on host0 only when the cutoff
+	# case will run (preflight_stas), and `setup` builds the FIRST case's sp,
+	# so sp_thresholds has to know whose sp that is: the event_threshold set is
+	# chosen at `sp create` and no RPC changes it afterwards. parse_args has
+	# already refused an --only that names no case, so this list cannot come
+	# out empty; it is checked anyway, because an empty list would otherwise
+	# index an empty array under `set -u`.
 	local name i ran=""
 	RUN_CASES=()
 	for name in "${CASES[@]}"; do
@@ -14209,6 +15888,8 @@ main() {
 	done
 	[ "${#RUN_CASES[@]}" -ge 1 ] ||
 		die "no case to run: --only '$ONLY' matched none of ${CASES[*]}"
+
+	preflight_guests
 
 	# Setup steps 1-11, built for the FIRST case that will run. setup_infra raises
 	# SETUP_DONE the moment it writes anything, which is what switches on_exit

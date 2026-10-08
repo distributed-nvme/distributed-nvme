@@ -472,9 +472,9 @@ func cmdPing(g *globals, args []string) {
 
 // cmdPut writes one CdcEntry at model.CdcEntryKey (Integration test plan, The
 // driver) — what the gateway does at CreateSubsystem / UpdateSubsystemHosts /
-// CreateCntlr / DeleteCntlr / UpdateCntlrEnabled and the worker at
-// ReplaceCntlr (cdc.md, Scope and placement), reduced to the one key dnv-cdc
-// reads.
+// CreateCntlr / DeleteCntlr / UpdateCntlrEnabled and the worker at a cntlr's
+// health write, Failover and ReplaceCntlr (cdc.md, Scope and placement),
+// reduced to the one key dnv-cdc reads.
 //
 // It is ONE plain Put, not a read-modify-write: the stored value is the whole
 // message, and the rewrites of the lowlevel case ("ssE now allows only H2",

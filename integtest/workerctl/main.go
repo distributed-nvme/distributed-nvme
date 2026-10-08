@@ -1109,6 +1109,7 @@ var commands = []command{
 	{"set-level", cmdSetLevel},
 	{"set-lwm", cmdSetLwm},
 	{"set-free", cmdSetFree},
+	{"set-epoch", cmdSetEpoch},
 	{"set-created", cmdSetCreated},
 	{"set-provisioned", cmdSetProvisioned},
 	{"set-deleting", cmdSetDeleting},
@@ -1171,9 +1172,10 @@ func newFlagSet(name string, g *globals) *flag.FlagSet {
 }
 
 // splitKind peels the `dn|cn|sp` positional argument of bump-rev / del-rev /
-// get-rev / set-free off the argument list. It is accepted both before the
-// flags (worker_test.sh's spelling) and after them, since Go's flag package
-// stops at the first non-flag argument either way.
+// get-rev / set-free, and the `cntlr|leg|side` one of set-epoch, off the
+// argument list. It is accepted both before the flags (worker_test.sh's
+// spelling) and after them, since Go's flag package stops at the first
+// non-flag argument either way.
 func splitKind(args []string) (string, []string) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		return args[0], args[1:]
@@ -1223,18 +1225,23 @@ func cmdPing(g *globals, args []string) {
 // constants, geometry — the two subcommands that touch no etcd
 // ---------------------------------------------------------------------------
 
-// cmdConstants prints the common package's transaction-budget constants as one
-// JSON object. It exists because a shell suite cannot import common: every
-// shell suite that starts an etcd has to launch it with
-// --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test plan,
-// Topology), and reads the number here instead of typing it.
+// cmdConstants prints, as one JSON object, the common package's constants a
+// shell suite reads instead of typing: transaction budgets and their factors,
+// the slice ceiling and the health timers. It exists because a shell suite
+// cannot import common: every shell suite that starts an etcd has to launch
+// it with --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test
+// plan, Topology), and reads the number here instead of typing it.
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
 // that reads it. Four more are the factors of the SPD13/CLD11 budgets a suite
 // may want to size a case against, and MaxSliceCntPerSp is the slice ceiling —
 // CreateClone's src_slice_cnt bound — that the gateway suite creates a clone
-// at, which is why that suite must read it rather than type it.
+// at, which is why that suite must read it rather than type it. The last
+// three are the timers a suite sizes its health and failover waits by: the
+// default check interval a cluster created without one stores, the default
+// primary threshold a pool created without one reads, and the demotion
+// hold's wait (dnv-worker.md RW22).
 //
 // It dials nothing and needs no --cluster, so a suite runs it on the DRIVER
 // against the binary it has just built, before any host is contacted.
@@ -1249,6 +1256,10 @@ func cmdConstants(g *globals, args []string) {
 		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
 		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
 		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
+
+		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
+		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
 	})
 }
 
@@ -2644,9 +2655,10 @@ func cmdPutTd(g *globals, args []string) {
 
 // cmdPutSs writes one Subsystem, its SpConf.nqn_list entry and the SP's
 // CdcEntry (architecture.md, Subsystems, namespaces: CreateSubsystem; and
-// dnv-cdc): the discovery entry is keyed by the SP's shard code and lists
-// every cntlr's transport, and it is what case D3 reads back after a cntlr
-// replacement.
+// dnv-cdc): the discovery entry is keyed by the SP's shard code and lists the
+// transport of every cntlr the listing rule lists (architecture.md [D18]),
+// and it is what case D3 reads back after a cntlr replacement and case H
+// after every failover.
 func cmdPutSs(g *globals, args []string) {
 	fs := newFlagSet("put-ss", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2720,21 +2732,24 @@ func cmdPutSs(g *globals, args []string) {
 			advanceNextId(conf, spec.nsId)
 		}
 		s.Put(key, subsystem)
-		// The discovery entry advertises every cntlr of the SP
-		// (architecture.md, dnv-cdc).
-		trList := make([]*pb.NvmeTrConf, 0, len(conf.GetCntlrIdList()))
+		// The discovery entry lists what the listing rule lists
+		// (architecture.md [D18]), as CreateSubsystem writes it.
+		cntlrs := make([]*pb.Cntlr, 0, len(conf.GetCntlrIdList()))
 		for _, cntlrId := range conf.GetCntlrIdList() {
 			cntlr := &pb.Cntlr{}
 			if !s.Get(model.CntlrKey(cid, target.spId, cntlrId), cntlr) {
 				return fmt.Errorf("cntlr %#x not found", cntlrId)
 			}
-			trList = append(trList, cntlr.GetNvmeTrConf())
+			cntlrs = append(cntlrs, cntlr)
 		}
 		s.Put(
 			model.CdcEntryKey(
 				cid, conf.GetShardCode(), target.spId, uint64(id),
 			),
-			&pb.CdcEntry{Nqn: *nqn, NvmeTrConfList: trList},
+			&pb.CdcEntry{
+				Nqn:            *nqn,
+				NvmeTrConfList: model.CdcTrConfList(cntlrs),
+			},
 		)
 		conf.NqnList = append(conf.NqnList, *nqn)
 		s.Put(model.SpConfKey(cid, target.name), conf)
@@ -3414,6 +3429,160 @@ func cmdSetFree(g *globals, args []string) {
 		"free_ext_cnt": *freeExt,
 		"allocatable":  allocatable,
 	})
+}
+
+// cmdSetEpoch plants one err_epoch and writes nothing else: a Cntlr's, or a
+// Leg's or a Side's inside its Slice, set --age seconds before now, or
+// cleared with --clear. Now is the clock of the host it runs on, which in the
+// suites is the test server, whose clock the workers read too. It is raw
+// (dnv-worker.md, Integration test plan, The driver): it bumps no revision,
+// as no health write does (HL3), and touches no CdcEntry and no settling
+// flag. On a leg, a side, a primary or a disabled cntlr, a health write that
+// sets or clears the epoch can leave just that as well, so there a case
+// plants the epoch an earlier owner or another observer would have left
+// (worker_test.sh case H plants a primary's). A health write that sets or
+// clears the epoch of an enabled standby also rewrites the SP's CdcEntry
+// records, because that epoch decides whether the listing rule lists the
+// standby (architecture.md [D18]; dnv-worker.md HL2). This command leaves
+// them as they are, so after it the records may disagree with that rule
+// about such a cntlr.
+func cmdSetEpoch(g *globals, args []string) {
+	fs := newFlagSet("set-epoch", g)
+	kind, rest := splitKind(args)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var id hexUint
+	fs.Var(&id, "id", "cntlr_id, leg_id or side_id (required)")
+	var sliceId hexUint
+	fs.Var(&sliceId, "slice", "slice_id of the leg or the side")
+	age := fs.Uint64("age", 0, "seconds before now the err_epoch is set to")
+	clearEpoch := fs.Bool("clear", false, "set the err_epoch to 0 instead")
+	fs.Parse(rest)
+	kind = kindArg(fs, kind, "cntlr", "leg", "side")
+
+	if uint64(id) == 0 {
+		die("--id is required and must not be 0")
+	}
+	if (kind == "cntlr") != (uint64(sliceId) == 0) {
+		die("--slice is required for a leg or a side, and refused for a " +
+			"cntlr")
+	}
+	ageGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "age" {
+			ageGiven = true
+		}
+	})
+	epoch, err := plantedEpoch(
+		uint64(time.Now().Unix()), *age, ageGiven, *clearEpoch,
+	)
+	if err != nil {
+		die("set-epoch: %v", err)
+	}
+
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	var old uint64
+	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		if _, err := getSpConf(s, cid, target); err != nil {
+			return err
+		}
+		if kind == "cntlr" {
+			key := model.CntlrKey(cid, target.spId, uint64(id))
+			cntlr := &pb.Cntlr{}
+			if !s.Get(key, cntlr) {
+				return fmt.Errorf("%q not found", key)
+			}
+			old = cntlr.GetErrEpoch()
+			cntlr.ErrEpoch = epoch
+			s.Put(key, cntlr)
+			return nil
+		}
+		key := model.SliceKey(cid, target.spId, uint64(sliceId))
+		slice := &pb.Slice{}
+		if !s.Get(key, slice) {
+			return fmt.Errorf("%q not found", key)
+		}
+		var found bool
+		old, found = setSliceEpoch(slice, kind, uint64(id), epoch)
+		if !found {
+			return fmt.Errorf("slice %#x holds no %s %#x",
+				uint64(sliceId), kind, uint64(id))
+		}
+		s.Put(key, slice)
+		return nil
+	})
+	if err != nil {
+		die("set-epoch: %v", err)
+	}
+	emit(map[string]any{
+		"sp_name":       target.name,
+		"kind":          kind,
+		"id":            idHex(uint64(id)),
+		"slice_id":      idHex(uint64(sliceId)),
+		"err_epoch":     epoch,
+		"old_err_epoch": old,
+	})
+}
+
+// plantedEpoch is the err_epoch set-epoch writes: age seconds before now, or
+// 0 when clearEpoch asks for it. Exactly one of the two must be given. An
+// err_epoch is a unix second and 0 reads as healthy, so an age that reaches
+// back to the epoch itself is refused rather than written as a clear.
+func plantedEpoch(
+	now uint64, age uint64, ageGiven bool, clearEpoch bool,
+) (uint64, error) {
+	switch {
+	case ageGiven && clearEpoch:
+		return 0, fmt.Errorf("--age and --clear exclude each other")
+	case clearEpoch:
+		return 0, nil
+	case !ageGiven:
+		return 0, fmt.Errorf("one of --age and --clear is required")
+	case age >= now:
+		return 0, fmt.Errorf("--age %d reaches back to the unix epoch", age)
+	}
+	return now - age, nil
+}
+
+// setSliceEpoch sets the err_epoch of one leg, or of one side, of a slice —
+// in a meta or a data group, on an active or a spare leg, wherever the health
+// ops look them up (model.SetLegErrEpoch, model.SetSideErrEpoch) — and
+// returns the value it replaced; found is false when the slice holds no such
+// object.
+func setSliceEpoch(
+	slice *pb.Slice, kind string, id uint64, epoch uint64,
+) (old uint64, found bool) {
+	grps := append(
+		append([]*pb.Group(nil), slice.GetMetaGrpList()...),
+		slice.GetDataGrpList()...,
+	)
+	for _, grp := range grps {
+		legs := append(
+			append([]*pb.Leg(nil), grp.GetLegList()...),
+			grp.GetSpareLegList()...,
+		)
+		for _, leg := range legs {
+			if kind == "leg" && leg.GetLegId() == id {
+				old = leg.GetErrEpoch()
+				leg.ErrEpoch = epoch
+				return old, true
+			}
+			if kind != "side" {
+				continue
+			}
+			for _, side := range leg.GetSideList() {
+				if side.GetSideId() == id {
+					old = side.GetErrEpoch()
+					side.ErrEpoch = epoch
+					return old, true
+				}
+			}
+		}
+	}
+	return 0, false
 }
 
 // ---------------------------------------------------------------------------

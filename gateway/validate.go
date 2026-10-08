@@ -17,11 +17,12 @@ import (
 // read, so a malformed request is refused without touching the store.
 // Validation that depends on stored state — a cntlid slot already in use, an
 // ns_idx already taken, a size that must divide the SP's stripe — is not here;
-// it happens inside the RPC's STM. CreateStoragePool also runs
-// validateBdevConf on a conf that depends on stored state, the bdev_conf it
-// merges over the cluster's: once over the conf its plain pre-read returned,
-// before its scans, and once more inside its STM. The geometry rules of
-// architecture.md, Common validation, must hold for what the SP stores,
+// it happens inside the RPC's STM. CreateStoragePool also runs two checks
+// that depend on the cluster it reads: validateBdevConf on the bdev_conf it
+// merges over the cluster's, and validatePrimaryThreshold against the
+// cluster's cntlr_interval — each once over the conf its plain pre-read
+// returned, before its scans, and once more inside its STM. The geometry rules
+// of architecture.md, Common validation, must hold for what the SP stores,
 // and only the merge shows what an omitted member becomes.
 //
 // The rule for bounded numerics is that of architecture.md, Common validation:
@@ -425,16 +426,46 @@ func validateBdevConf(conf *pb.BdevConf) error {
 const maxMdBitmapChunk = uint64(1) << 30
 
 // validateEventThreshold checks the four thresholds and their one cross-field
-// rule (architecture.md, Common validation): leg_unhealthy MUST exceed
-// side_unhealthy AFTER the defaults are resolved, because the leg repair of
-// dnv-worker.md AR8 fires on the side threshold when the
-// DN looks dead and on the leg threshold when only the cntlr's path is bad.
+// rule that reads the request alone (architecture.md, Common validation; the
+// one that reads the cluster is validatePrimaryThreshold): leg_unhealthy MUST
+// exceed side_unhealthy AFTER the defaults are resolved, because the leg
+// repair of dnv-worker.md AR8 fires on the side threshold when the DN looks
+// dead and on the leg threshold when only the cntlr's path is bad.
 func validateEventThreshold(threshold *pb.EventThreshold) error {
 	resolved := model.ResolveEventThreshold(threshold)
 	if resolved.GetLegUnhealthy() <= resolved.GetSideUnhealthy() {
 		return errInvalid(
 			"event_threshold.leg_unhealthy %d must exceed side_unhealthy %d",
 			resolved.GetLegUnhealthy(), resolved.GetSideUnhealthy())
+	}
+	return nil
+}
+
+// minPrimaryRounds is how many of its cluster's cntlr_interval a pool's
+// primary_unhealthy must cover at least (validatePrimaryThreshold).
+const minPrimaryRounds = 2
+
+// validatePrimaryThreshold is the rule of architecture.md, Common validation,
+// that ties a pool's primary threshold to its cluster: primary_unhealthy,
+// after its default is resolved, must cover at least two of the cluster's
+// cntlr_interval. The err_epoch one missed check round stamps lives about one
+// interval, until the next round clears it, and the rule leaves a second
+// interval of margin; dnv-worker.md, Known limits, says when one missed round
+// can still reach the threshold. It reads stored state, the cluster's
+// health_check_conf, so it is one of the
+// checks CreateStoragePool runs where it runs validateMergedBdevConf: on its
+// plain pre-read, before the scans, and once more inside its STM.
+func validatePrimaryThreshold(
+	threshold *pb.EventThreshold,
+	hc *pb.HealthCheckConf,
+) error {
+	primary := uint64(model.ResolveEventThreshold(threshold).GetPrimaryUnhealthy())
+	floor := minPrimaryRounds * uint64(hc.GetCntlrInterval())
+	if primary < floor {
+		return errInvalid(
+			"event_threshold.primary_unhealthy %d must be at least %d, "+
+				"twice the cluster's health_check_conf.cntlr_interval %d",
+			primary, floor, hc.GetCntlrInterval())
 	}
 	return nil
 }

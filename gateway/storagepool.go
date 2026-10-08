@@ -55,8 +55,9 @@ const (
 // read here is re-derived and re-checked inside it — so nothing read here is
 // trusted for a write. The only verdicts reached on this read are refusals:
 // NOT_FOUND for a missing cluster and, in CreateStoragePool, the stored-conf
-// gate and the merged geometry, judged here so that they come before the
-// scans and judged again in its transaction.
+// gate, the merged geometry and the primary threshold against the cluster's
+// cntlr_interval, judged here so that they come before the scans and judged
+// again in its transaction.
 func spPreReadCluster(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -309,14 +310,16 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 //
 // The scans need the extent size, the batch sizes and the leg count, all of
 // which live in ClusterConf, so each iteration starts with one plain pre-read
-// of it (architecture.md, STM discipline). That read decides nothing but three
+// of it (architecture.md, STM discipline). That read decides nothing but four
 // refusals: NOT_FOUND for a cluster that is not there, ABORTED for a stored
 // conf that fails architecture.md, Common validation (the allocator's gate,
-// run before anything is computed from it), and the geometry (architecture.md,
-// Common validation) of the request merged over it, judged before the scans so
-// that a request whose merge breaks a rule is INVALID_ARGUMENT even on a
-// cluster too short of nodes for them. The in-STM read is authoritative and
-// judges all three again; when it yields a different cluster_id — the cluster
+// run before anything is computed from it), and the two rules of
+// architecture.md, Common validation, that read the cluster — the geometry of
+// the request merged over it, and the primary threshold against its
+// cntlr_interval — judged before the scans so that a request that breaks one
+// is INVALID_ARGUMENT even on a cluster too short of nodes for them. The
+// in-STM read is authoritative and judges all four again; when it yields a
+// different cluster_id — the cluster
 // was deleted and re-created under the scan — or a different leg count, every
 // pick was drawn for a different SP shape and the unit re-plans.
 //
@@ -439,6 +442,14 @@ func (s *Server) CreateStoragePool(
 		if err := validateMergedBdevConf(scanBdev); err != nil {
 			return err
 		}
+		// The primary threshold against the cluster's cntlr_interval
+		// (architecture.md, Common validation), before the scans for the
+		// same reason.
+		if err := validatePrimaryThreshold(
+			req.GetEventThreshold(), scanCc.GetHealthCheckConf(),
+		); err != nil {
+			return err
+		}
 		legs := legCntOf(scanBdev)
 		// The DN scan of architecture.md, Per-operation allocation, in
 		// GW15's group order. The black list starts
@@ -507,6 +518,11 @@ func (s *Server) CreateStoragePool(
 			// judged here too because this read, not that one, is
 			// authoritative.
 			if err := validateMergedBdevConf(bdev); err != nil {
+				return err
+			}
+			if err := validatePrimaryThreshold(
+				req.GetEventThreshold(), cc.GetHealthCheckConf(),
+			); err != nil {
 				return err
 			}
 			confKey := model.SpConfKey(cid, req.GetSpName())

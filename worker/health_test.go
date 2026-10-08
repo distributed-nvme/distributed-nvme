@@ -430,6 +430,58 @@ func TestHealthTransitionsOnly(t *testing.T) {
 	}
 }
 
+// TestHealthVerdictIsToldWithoutAWrite pins the hook AR10's memo hangs on: a
+// monitor tells its verdict hook every verdict it reaches — unhealthy for an
+// unreachable object or an ERROR row, clean for a clean round — whether or
+// not the verdict is a transition it writes, and tells it nothing for an
+// observation that neither sets nor clears. A verdict counts when its write
+// fails, too: it is still this coordinator's judgement of the object. And a
+// memo re-seeded from a record that already says unhealthy — another
+// observer's epoch — makes the next unhealthy verdict no transition, which
+// must still reach the hook, or the epoch could never fire a reaction.
+func TestHealthVerdictIsToldWithoutAWrite(t *testing.T) {
+	captureLogs(t)
+	d, writer := healthTestDeps(t)
+	monitor := newCntlrMonitor(d, 7, 0x5100, 1)
+	var told []bool
+	monitor.verdict = func(unhealthy bool) { told = append(told, unhealthy) }
+	ctx := context.Background()
+
+	monitor.observe(ctx, healthUnreachable, "")
+	monitor.observe(ctx, healthErrorRow, "ss")
+	monitor.observe(ctx, healthNone, "")
+	monitor.observe(ctx, healthClean, "")
+	monitor.observe(ctx, healthClean, "")
+	want := []bool{true, true, false, false}
+	if fmt.Sprint(told) != fmt.Sprint(want) {
+		t.Fatalf("verdicts told = %v, want %v", told, want)
+	}
+	if got := len(writer.all()); got != 2 {
+		t.Fatalf("%d writes, want the set and the clear only", got)
+	}
+
+	told = nil
+	monitor.seedRecord(1234)
+	monitor.observe(ctx, healthErrorRow, "ss")
+	if got := len(writer.all()); got != 2 {
+		t.Fatalf("an ERROR row on a record already unhealthy wrote: %v",
+			writer.all())
+	}
+	if len(told) != 1 || !told[0] {
+		t.Fatalf("verdicts told = %v, want [true] without a write", told)
+	}
+
+	told = nil
+	writer.mu.Lock()
+	writer.err = errors.New("etcd down")
+	writer.mu.Unlock()
+	monitor.observe(ctx, healthClean, "")
+	if len(told) != 1 || told[0] {
+		t.Fatalf("verdicts told = %v, want [false] though the write failed",
+			told)
+	}
+}
+
 // TestHealthOfferPredatingOwnWriteIsDropped pins offerRecord's guard (HL3).
 // The sp coordinator reads a side or cntlr child's write count before the load
 // whose record it offers, and the child drops the offer when it has written
@@ -1252,7 +1304,7 @@ func TestHealthDnWriteRefusesAnInvalidConf(t *testing.T) {
 }
 
 // TestHealthSpMonitorsCarryTheirIds pins the HL2 monitors' log identities,
-// which the sp role (RW14-RW20) reuses.
+// which the sp role (RW14-RW20, RW22) reuses.
 func TestHealthSpMonitorsCarryTheirIds(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)

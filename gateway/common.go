@@ -776,15 +776,6 @@ func removeId(list []uint64, id uint64) []uint64 {
 	return kept
 }
 
-// trConfEqual is the identity two NvmeTrConf values are compared by
-// everywhere a transport list is maintained: all four members.
-func trConfEqual(a *pb.NvmeTrConf, b *pb.NvmeTrConf) bool {
-	return a.GetTrType() == b.GetTrType() &&
-		a.GetAdrFam() == b.GetAdrFam() &&
-		a.GetTrAddr() == b.GetTrAddr() &&
-		a.GetTrSvcId() == b.GetTrSvcId()
-}
-
 // ---------------------------------------------------------------------------
 // Shared SP walks (used by more than one handler file)
 // ---------------------------------------------------------------------------
@@ -807,22 +798,6 @@ func primaryCntlr(
 	return 0, nil, false
 }
 
-// enabledCntlrTrConfs is the nvme_tr_conf of every ENABLED cntlr's CN, in
-// cntlr_id_list order: exactly the `nvme_tr_conf_list` a CdcEntry advertises
-// (architecture.md, Subsystems, namespaces). A disabled cntlr is not
-// advertised — its namespaces are ANA inaccessible — which is why
-// UpdateCntlrEnabled maintains the list too.
-func enabledCntlrTrConfs(cntlrs []*pb.Cntlr) []*pb.NvmeTrConf {
-	var list []*pb.NvmeTrConf
-	for _, cntlr := range cntlrs {
-		if cntlr.GetDisabled() {
-			continue
-		}
-		list = append(list, cntlr.GetNvmeTrConf())
-	}
-	return list
-}
-
 // findNs locates one namespace of a subsystem by its ns_idx — the NVMe NSID,
 // which is what every namespace RPC addresses it by.
 func findNs(subsystem *pb.Subsystem, nsIdx uint32) *pb.Namespace {
@@ -835,15 +810,17 @@ func findNs(subsystem *pb.Subsystem, nsIdx uint32) *pb.Namespace {
 }
 
 // ---------------------------------------------------------------------------
-// CdcEntry maintenance (architecture.md, Cntlrs; architecture.md, Subsystems,
-// namespaces)
+// CdcEntry maintenance (architecture.md [D18]; architecture.md, Cntlrs;
+// architecture.md, Subsystems, namespaces)
 // ---------------------------------------------------------------------------
 //
 // One CdcEntry exists per Subsystem of the SP and advertises the transport
-// address of every enabled cntlr's CN. Three RPCs move an address in or out of
-// all of them at once — CreateCntlr, DeleteCntlr and UpdateCntlrEnabled — and
-// they all go through addCdcTrConf and dropCdcTrConf so the entries can never
-// disagree about what is advertised.
+// address of every cntlr the listing rule lists (model.CdcListed). Three RPCs
+// change what it lists for all of them at once — CreateCntlr, DeleteCntlr and
+// UpdateCntlrEnabled — and they all go through syncCdcEntries, which sets the
+// whole list from the cntlrs the transaction reads, so the entries can never
+// disagree about what is advertised; the subsystem RPCs write the same list.
+// The worker writes it by the same rule (model rewriteCdcEntries).
 
 // eachCdcEntry applies f to the CdcEntry of every subsystem of the SP and
 // writes back whatever f changed.
@@ -856,10 +833,7 @@ func findNs(subsystem *pb.Subsystem, nsIdx uint32) *pb.Namespace {
 // Skipping it would answer OK while the subsystem stayed out of dnv-cdc's
 // discovery log: dnv-cdc drops an entry whose key is deleted (cdc.md WV3), so
 // no host could discover the subsystem until something put the key back. The
-// view may or may not hold the caller's own cntlr write yet —
-// CreateCntlr and DeleteCntlr make theirs first, UpdateCntlrEnabled after —
-// and the result is the same either way, because f's add is idempotent and
-// its drop removes whatever is there.
+// view holds the caller's own cntlr write: every caller makes it first.
 func eachCdcEntry(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -890,11 +864,11 @@ func eachCdcEntry(
 // rebuildCdcEntry is one subsystem's CdcEntry as CreateSubsystem writes it
 // (architecture.md, Subsystems, namespaces), recomputed from what this
 // transaction reads: the NQN the subsystem is listed under, the Subsystem's
-// allowed_hosts and the transport of every ENABLED cntlr's CN in cntlr_id_list
-// order. Every field is derived, none is guessed, which is why
-// UpdateSubsystemHosts and the cntlr mutators put this
-// back when they find the entry's key missing, rather than skip the entry.
-// The worker's ReplaceCntlr (model rewriteCdcEntries) still skips it.
+// allowed_hosts and the transport of every cntlr the listing rule lists, in
+// cntlr_id_list order (architecture.md [D18]). Every field is derived, none
+// is guessed, which is why UpdateSubsystemHosts and the cntlr mutators put
+// this back when they find the entry's key missing, rather than skip the
+// entry. The worker's writers (model rewriteCdcEntries) skip it.
 func rebuildCdcEntry(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -907,45 +881,24 @@ func rebuildCdcEntry(
 	}
 	return &pb.CdcEntry{
 		Nqn:            nqn,
-		NvmeTrConfList: enabledCntlrTrConfs(cntlrs),
+		NvmeTrConfList: model.CdcTrConfList(cntlrs),
 		AllowedHosts:   subsystem.GetAllowedHosts(),
 	}, nil
 }
 
-// addCdcTrConf appends one transport address to every CdcEntry of the SP,
-// skipping the entries that already advertise it so the operation is
-// idempotent.
-func addCdcTrConf(
-	stm etcdutil.STM,
-	sc *spScope,
-	tr *pb.NvmeTrConf,
-) error {
+// syncCdcEntries sets the nvme_tr_conf_list of every CdcEntry of the SP by
+// the listing rule (architecture.md [D18]), from the cntlrs this transaction
+// reads, the caller's own cntlr write included. The list is the whole rule's,
+// not one address added or dropped, so a call that changes nothing leaves
+// every entry as it was.
+func syncCdcEntries(stm etcdutil.STM, sc *spScope) error {
+	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return err
+	}
+	list := model.CdcTrConfList(cntlrs)
 	return eachCdcEntry(stm, sc, func(entry *pb.CdcEntry) {
-		for _, item := range entry.GetNvmeTrConfList() {
-			if trConfEqual(item, tr) {
-				return
-			}
-		}
-		entry.NvmeTrConfList = append(entry.NvmeTrConfList, tr)
-	})
-}
-
-// dropCdcTrConf removes every occurrence of one transport address from every
-// CdcEntry of the SP.
-func dropCdcTrConf(
-	stm etcdutil.STM,
-	sc *spScope,
-	tr *pb.NvmeTrConf,
-) error {
-	return eachCdcEntry(stm, sc, func(entry *pb.CdcEntry) {
-		kept := make([]*pb.NvmeTrConf, 0, len(entry.GetNvmeTrConfList()))
-		for _, item := range entry.GetNvmeTrConfList() {
-			if trConfEqual(item, tr) {
-				continue
-			}
-			kept = append(kept, item)
-		}
-		entry.NvmeTrConfList = kept
+		entry.NvmeTrConfList = list
 	})
 }
 

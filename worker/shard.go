@@ -466,7 +466,7 @@ func cnKind() revKind {
 }
 
 // spKind is the sp role's shard plumbing: {p} sp_rev {s}␠ holding SpRev,
-// whose handle is the sp_name (RW14-RW20).
+// whose handle is the sp_name (RW14-RW20, RW22).
 func spKind() revKind {
 	return revKind{
 		role:     common.WorkerRoleSp,

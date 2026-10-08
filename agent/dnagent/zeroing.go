@@ -12,12 +12,12 @@ import (
 // connect-retry registry (migr.go) and of the cn leg probers
 // (cnagent/healthcheck.go).
 //
-// dnv is multi-tenant: one tenant must never read another's bytes. discard is
-// not a zero guarantee (the kernel dropped discard_zeroes_data in 4.12 and
-// NVMe DLFEAT read-zeroes is optional), so every side is fully zeroed with
-// `blkdiscard --zeroout` before its first export, tracked per logical extent
-// in the side's on-disk allocation record and gated by the CP-visible
-// `provisioned` flag ([D15]).
+// A new side must never expose a previous pool's bytes (architecture.md,
+// System overview). discard is not a zero guarantee (the kernel dropped
+// discard_zeroes_data in 4.12 and NVMe DLFEAT read-zeroes is optional), so
+// every side is fully zeroed with `blkdiscard --zeroout` before its first
+// export, tracked per logical extent in the side's on-disk allocation record
+// and gated by the CP-visible `provisioned` flag ([D15]).
 //
 // The work is a goroutine rather than part of the RPC because a whole side is
 // minutes of IO: a node-read holder plus one queued SyncupDn writer would

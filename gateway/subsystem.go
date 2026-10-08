@@ -21,9 +21,9 @@ import (
 // A namespace is not a key of its own: it lives inside its Subsystem's value,
 // which is why the three namespace updaters all end by writing the Subsystem
 // key back. None of them touches the CdcEntry — an entry carries only the
-// subsystem's NQN, its allowed hosts and the transports of the enabled cntlrs
-// (architecture.md, Subsystems, namespaces), and no namespace field appears in
-// the discovery log.
+// subsystem's NQN, its allowed hosts and the transports of the cntlrs the
+// listing rule lists (architecture.md [D18]), and no namespace field appears
+// in the discovery log.
 
 // The op names the bump helper records, one per mutator so a log line names
 // something greppable. ListSubsystems has none: it never bumps.
@@ -133,8 +133,10 @@ func newDevNguid() (string, error) {
 // discovery log from — plus the one SpRev bump they share (architecture.md,
 // Revision keys and the sync fan-out). The CdcEntry
 // is written here and not left to dnv-cdc because the entry IS the desired
-// state: it lists the transports of every ENABLED cntlr's CN, and a disabled
-// cntlr is deliberately not advertised, its namespaces being ANA inaccessible.
+// state: it lists the transports of the cntlrs the listing rule lists
+// (architecture.md [D18]) — the primary and every enabled standby with a zero
+// err_epoch — and a disabled cntlr is deliberately not advertised, its
+// namespaces being ANA inaccessible.
 func (s *Server) CreateSubsystem(
 	ctx context.Context,
 	req *pb.CreateSubsystemRequest,
@@ -199,7 +201,7 @@ func (s *Server) CreateSubsystem(
 			model.CdcEntryKey(sc.Cid, sc.Shard(), sc.SpId(), ssId),
 			&pb.CdcEntry{
 				Nqn:            req.GetNqn(),
-				NvmeTrConfList: enabledCntlrTrConfs(cntlrs),
+				NvmeTrConfList: model.CdcTrConfList(cntlrs),
 				AllowedHosts:   req.GetAllowedHosts(),
 			})
 		minter.commit(conf)
@@ -320,7 +322,9 @@ func (s *Server) ListSubsystems(
 // hosts, exactly as eachCdcEntry does for the cntlr mutators: skipping it
 // would answer OK while the subsystem stayed out of dnv-cdc's discovery log
 // for every host, the newly allowed ones included (dnv-cdc drops an entry
-// whose key is deleted, cdc.md WV3).
+// whose key is deleted, cdc.md WV3). An entry that exists gets its
+// nvme_tr_conf_list set by the listing rule as well (architecture.md
+// [D18]): every writer of an entry lists by the one rule.
 // The entry is read, and rebuilt if missing, before the first write, as
 // CreateSubsystem reads its cntlrs: a lost cntlr key then refuses the RPC
 // before anything is staged.
@@ -364,6 +368,13 @@ func (s *Server) UpdateSubsystemHosts(
 			if err != nil {
 				return err
 			}
+		} else {
+			// Every writer of an entry lists by the one rule ([D18]).
+			cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+			if err != nil {
+				return err
+			}
+			entry.NvmeTrConfList = model.CdcTrConfList(cntlrs)
 		}
 		subsystem.AllowedHosts = req.GetAllowedHosts()
 		stm.Put(

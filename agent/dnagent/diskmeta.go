@@ -561,8 +561,8 @@ func (d *DiskMeta) provisioningSideCntLocked() uint64 {
 	return cnt
 }
 
-// ProbeHeader re-reads only the 4 KiB header — cheap enough for the 5 s
-// health rounds — and verifies magic, version, CRC and identity.
+// ProbeHeader re-reads only the 4 KiB header — cheap enough for the health
+// rounds at any interval — and verifies magic, version, CRC and identity.
 //
 // What it reads is also this cache's view of the disk (DN18). A header that
 // is not the one the table in memory was loaded under — blank, corrupt, or
@@ -802,7 +802,7 @@ func runTotal(rec *pb.DnDiskTable_SideRecord) uint64 {
 // agent/bitmap.go's LSB-first one, and the bit count is ALWAYS the record's own
 // extent total — never agent.BitmapBitCount, which returns len(bits)*8 and
 // would make a 10-extent side look 16-extent, fire "zeroed == total" early and
-// export another tenant's bytes.
+// export a previous pool's bytes.
 //
 // The helpers are free functions on the record rather than DiskMeta methods so
 // the converge, the probe and the zeroing loop can all work off one LookupSide
@@ -1009,8 +1009,8 @@ func (d *DiskMeta) FreeSide(
 
 // AllocCloneMeta reserves a contiguous run of DnCloneMetaUnit units for one
 // migration's dm-clone metadata. The first 8 KiB of a freshly chosen slot is
-// zeroed **before** the record is persisted (DN13): without it stale bytes
-// from a previous tenant would be misparsed as a valid dm-clone superblock. A
+// zeroed **before** the record is persisted (DN13): without it stale bytes in
+// those units would be misparsed as a valid dm-clone superblock. A
 // crash after the zeroing but before the record leaves the units free and
 // re-zeroed next time; a crash after the record means the slot is already
 // clean.

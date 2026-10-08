@@ -1,13 +1,14 @@
-// The automatic reactions of dnv-worker.md (AR1-AR9), run by the sp coordinator
-// (RW14) as one PASS per SP per cntlr_interval (AR1).
+// The automatic reactions of dnv-worker.md (AR1-AR10), run by the sp
+// coordinator (RW14) as one PASS per SP per cntlr_interval (AR1).
 //
 // A pass is stateless by construction, but for two records: it starts from a
-// fresh model.LoadSp snapshot plus the in-memory CntlrInfo the PRIMARY cntlr's
-// child last reported, decides ONE action (AR2), and forgets everything again
-// — everything but AR5's record of the last failover it applied
-// (failoverMemo) and AR7's of the last replacement of a primary (replaceMemo),
-// which say why the role moved or the primary was replaced, facts no etcd
-// record keeps.
+// fresh model.LoadSp snapshot, the in-memory CntlrInfo the PRIMARY cntlr's
+// child last reported and a copy of AR10's memo of this coordinator's own
+// verdicts (verdictMemo), decides ONE action (AR2), and
+// forgets everything again — everything but AR5's record of the last failover
+// it applied (failoverMemo) and AR7's of the last replacement of a primary
+// (replaceMemo), which say why the role moved or the primary was replaced,
+// facts no etcd record keeps.
 // Two owners overlapping on one SP therefore cannot apply an action twice — every
 // action is a model op that re-validates its own preconditions inside its STM
 // (MD6/MD7), and the loser gets model.ErrPrecondition back. The one exception
@@ -31,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -480,11 +482,12 @@ func (o *modelReactionOps) finishCloneDelete(
 // The reactor: the little state a stateless pass still keeps
 // ---------------------------------------------------------------------------
 
-// reactor is the sp coordinator's reaction half (AR1-AR9): the model surface,
+// reactor is the sp coordinator's reaction half (AR1-AR10): the model surface,
 // plus the two memos that exist only to keep the log honest and the two records
-// AR5 and AR7 decide by. No other decision is ever taken from a memo — AR6's
-// pending rule and AR8's spare rules are reconstructed from etcd and the status
-// line on every pass (AR6).
+// AR5 and AR7 decide by. Apart from AR10's memo of the coordinator's own
+// verdicts (verdictMemo), which gates every threshold reaction, no other
+// decision is taken from a memo — AR6's pending rule and AR8's spare rules are
+// reconstructed from etcd and the status line on every pass (AR6).
 type reactor struct {
 	ops reactionOps
 	// badLine is the last unparsable pool status line per slice_id, so a
@@ -517,12 +520,149 @@ func (w *spWorker) reactor() *reactor {
 }
 
 // ---------------------------------------------------------------------------
+// The own-verdict memo (AR10)
+// ---------------------------------------------------------------------------
+
+// verdictMemo is AR10's memo: the objects of the SP — cntlrs, legs and sides
+// — whose latest health verdict by this coordinator's own monitors is
+// unhealthy. A threshold reaction fires only for an object it holds, so an
+// err_epoch an earlier owner left, or another observer wrote, fires nothing
+// before this coordinator has judged the object itself, while the clock still
+// runs from the stored epoch (AR4). The cntlr and side monitors note their
+// verdicts from the children's goroutines, while the leg monitors and the pass
+// work on the coordinator's, so it is locked. It lives with the coordinator,
+// from its start to its stop, which is the coordinator's tenure of the SP: a
+// restart or a handoff begins with an empty memo. A nil memo holds nothing.
+type verdictMemo struct {
+	mu     sync.Mutex
+	cntlrs map[uint64]bool
+	legs   map[uint64]bool
+	sides  map[sideKey]bool
+}
+
+// newVerdictMemo builds an empty memo.
+func newVerdictMemo() *verdictMemo {
+	return &verdictMemo{
+		cntlrs: make(map[uint64]bool),
+		legs:   make(map[uint64]bool),
+		sides:  make(map[sideKey]bool),
+	}
+}
+
+// noteCntlr records one verdict on a cntlr: unhealthy adds it, clean drops
+// it.
+func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	noteVerdict(m.cntlrs, cntlrId, unhealthy)
+}
+
+// noteLeg records one verdict on a leg.
+func (m *verdictMemo) noteLeg(legId uint64, unhealthy bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	noteVerdict(m.legs, legId, unhealthy)
+}
+
+// noteSide records one verdict on a side.
+func (m *verdictMemo) noteSide(key sideKey, unhealthy bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	noteVerdict(m.sides, key, unhealthy)
+}
+
+// noteVerdict is the one update every kind shares.
+func noteVerdict[K comparable](set map[K]bool, key K, unhealthy bool) {
+	if unhealthy {
+		set[key] = true
+		return
+	}
+	delete(set, key)
+}
+
+// judgedSet is one pass's copy of the memo (AR10): the cntlrs, legs and
+// sides this coordinator last judged unhealthy.
+type judgedSet struct {
+	cntlrs map[uint64]bool
+	legs   map[uint64]bool
+	sides  map[sideKey]bool
+}
+
+// snapshot copies the memo for one pass, after it has dropped every object
+// the pass's snapshot no longer lists: ids are never reused within an SP, so
+// such an entry could only grow the memo.
+func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
+	out := judgedSet{
+		cntlrs: make(map[uint64]bool),
+		legs:   make(map[uint64]bool),
+		sides:  make(map[sideKey]bool),
+	}
+	if m == nil {
+		return out
+	}
+	legs := make(map[uint64]bool)
+	sides := make(map[sideKey]bool)
+	for _, slice := range state.Slices {
+		for _, grp := range allGroups(slice) {
+			for _, list := range [][]*pb.Leg{
+				grp.GetLegList(),
+				grp.GetSpareLegList(),
+			} {
+				for _, leg := range list {
+					legs[leg.GetLegId()] = true
+					for _, side := range leg.GetSideList() {
+						sides[sideKey{
+							legId:  leg.GetLegId(),
+							sideId: side.GetSideId(),
+						}] = true
+					}
+				}
+			}
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for cntlrId := range m.cntlrs {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.cntlrs, cntlrId)
+			continue
+		}
+		out.cntlrs[cntlrId] = true
+	}
+	for legId := range m.legs {
+		if !legs[legId] {
+			delete(m.legs, legId)
+			continue
+		}
+		out.legs[legId] = true
+	}
+	for key := range m.sides {
+		if !sides[key] {
+			delete(m.sides, key)
+			continue
+		}
+		out.sides[key] = true
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // The pass (AR1, AR2)
 // ---------------------------------------------------------------------------
 
 // spPass is one evaluation of the reactions for one SP (AR1): the fresh
 // snapshot, the cluster conf, the resolved thresholds, the primary cntlr with
-// the latest CntlrInfo its child reported, and now in unix seconds.
+// the latest CntlrInfo its child reported, the copy of AR10's memo, and now in
+// unix seconds.
 type spPass struct {
 	state *model.SpState
 	cc    *pb.ClusterConf
@@ -540,6 +680,9 @@ type spPass struct {
 	// failoverCand is AR5's election, computed once because AR7's
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
 	failoverCand uint64
+	// judged is AR10's memo as the pass began: the objects this coordinator
+	// last judged unhealthy, which alone a threshold may fire on.
+	judged judgedSet
 }
 
 // reactionPass is RW20's hook: one automatic-reaction pass for this SP, on the
@@ -658,10 +801,11 @@ func (w *spWorker) refuseReactionConf(ctx context.Context, err error) {
 // failover, thin-pool auto-grow, cntlr replacement, leg repair (AR5-AR8).
 func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 	p := &spPass{
-		state: state,
-		cc:    cc,
-		th:    model.ResolveEventThreshold(state.Conf.GetEventThreshold()),
-		now:   w.deps.clk.nowUnix(),
+		state:  state,
+		cc:     cc,
+		th:     model.ResolveEventThreshold(state.Conf.GetEventThreshold()),
+		now:    w.deps.clk.nowUnix(),
+		judged: w.verdicts.snapshot(state),
 	}
 	for _, cntlrId := range sortedIds(state.Conf.GetCntlrIdList()) {
 		cntlr, ok := state.Cntlrs[cntlrId]
@@ -694,10 +838,10 @@ func failoverEligible(cntlr *pb.Cntlr) bool {
 // primaryInfo is the latest CntlrInfo the PRIMARY cntlr's child reported
 // (AR1). AR6 reads the pool usage out of it and AR8 the spare readiness; a
 // cntlr whose child has not reported yet — or that has no child at all,
-// because its CN could not be resolved or RW14's sides-first hold has not
-// started it yet, or whose child still drives the standby plan because that
-// hold has not handed it the promotion yet — yields nil, and both reactions
-// then wait rather than guess.
+// because its CN could not be resolved or a hold (RW22's demotion hold, then
+// RW14's sides-first barrier) has not started it yet, or whose child still
+// drives the standby plan because that hold has not handed it the promotion
+// yet — yields nil, and both reactions then wait rather than guess.
 //
 // The plan test keeps a held promotion out of the pass. The snapshot the pass
 // loads names the new primary as soon as the failover commits, while that
@@ -789,7 +933,10 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		threshold = p.th.GetCntlrUnhealthy()
 	}
 	if !p.primary.GetDisabled() {
-		if !reached(p.now, p.primary.GetErrEpoch(), threshold) {
+		// AR10: the threshold fires only on a primary this coordinator has
+		// judged unhealthy itself; the disabled trigger needs no verdict.
+		if !reached(p.now, p.primary.GetErrEpoch(), threshold) ||
+			!p.judged.cntlrs[p.primaryId] {
 			return false
 		}
 		// AR5's first refusal: a report whose every ERROR row belongs to the
@@ -1295,8 +1442,9 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 }
 
 // replaceTarget is AR7's trigger: the cntlr with the smallest cntlr_id that
-// has been unhealthy for cntlr_unhealthy, is not disabled (AR3), and is
-// either not the primary or is the primary of an SP with no failover
+// has been unhealthy for cntlr_unhealthy, whose latest verdict by this
+// coordinator is unhealthy (AR10), is not disabled (AR3), and is either not
+// the primary or is the primary of an SP with no failover
 // candidate — the sole-cntlr SP of AR7 — unless one of AR7's two
 // refusals holds that primary (below): it is recorded and passed over, and
 // the scan goes on.
@@ -1312,7 +1460,9 @@ func (w *spWorker) replaceTarget(
 		if cntlr.GetDisabled() {
 			continue
 		}
-		if !reached(p.now, cntlr.GetErrEpoch(), p.th.GetCntlrUnhealthy()) {
+		// AR10: only a cntlr this coordinator has judged unhealthy itself.
+		if !reached(p.now, cntlr.GetErrEpoch(), p.th.GetCntlrUnhealthy()) ||
+			!p.judged.cntlrs[cntlrId] {
 			continue
 		}
 		if cntlr.GetPrimary() && p.failoverCand != 0 {
@@ -1587,7 +1737,8 @@ func repairCandidates(p *spPass) []*repairTarget {
 
 // legNeedsRepair is AR8's two triggers. Both require Leg.err_epoch != 0: a
 // side the worker cannot reach while the primary still sees the leg healthy
-// triggers nothing.
+// triggers nothing. Both also require this coordinator's own verdict (AR10):
+// on the leg, and in case 2 on the side whose clock fires as well.
 //
 //	Case 1 — the leg has been unhealthy for leg_unhealthy: the primary has no
 //	         healthy path to it, possibly a CN↔DN problem, hence the long wait.
@@ -1595,14 +1746,16 @@ func repairCandidates(p *spPass) []*repairTarget {
 //	         side_unhealthy: the DN itself is probably dead, hence the short
 //	         wait.
 func legNeedsRepair(p *spPass, leg *pb.Leg) bool {
-	if leg.GetErrEpoch() == 0 {
+	if leg.GetErrEpoch() == 0 || !p.judged.legs[leg.GetLegId()] {
 		return false
 	}
 	if reached(p.now, leg.GetErrEpoch(), p.th.GetLegUnhealthy()) {
 		return true
 	}
 	for _, side := range leg.GetSideList() {
-		if reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) {
+		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
+		if p.judged.sides[key] &&
+			reached(p.now, side.GetErrEpoch(), p.th.GetSideUnhealthy()) {
 			return true
 		}
 	}

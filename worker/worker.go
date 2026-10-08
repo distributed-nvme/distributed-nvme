@@ -2,8 +2,8 @@
 // vote layer that registers this process and computes shard ownership
 // (VW1-VW11), the shard workers that watch one revision prefix each (SW1-SW6),
 // the per-object revision workers that drive the agents through Syncup*/Check*
-// (RW1-RW21), the health bookkeeping (HL1-HL6), the bitmap pushes (BM1-BM6) and
-// the automatic reactions (AR1-AR9, SPD1-SPD14, CLD1-CLD12).
+// (RW1-RW22), the health bookkeeping (HL1-HL6), the bitmap pushes (BM1-BM6) and
+// the automatic reactions (AR1-AR10, SPD1-SPD14, CLD1-CLD12).
 //
 // It talks to etcd only through etcdutil and to the agents only as a gRPC
 // client (layout.md, Dependency rules); it never serves gRPC and never talks to

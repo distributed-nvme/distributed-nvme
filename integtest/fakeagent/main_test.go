@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 
@@ -1254,6 +1256,302 @@ func TestCheckCntlrHang(t *testing.T) {
 		t.Fatal("the round did not resume when hang was cleared")
 	}
 	stream2.CloseSend()
+}
+
+// cntlrRound opens a fresh CheckCntlr stream for the fixture's cntlr, sends one
+// round on it and returns the channel the round's outcome lands on, with the
+// stream's cancel — what the worker does on a round timeout.
+func cntlrRound(
+	t *testing.T, cnClient pb.ControllerNodeAgentClient,
+) (chan error, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := cnClient.CheckCntlr(ctx)
+	if err != nil {
+		cancel()
+		t.Fatalf("CheckCntlr: %v", err)
+	}
+	if err := stream.Send(&pb.CheckCntlrRequest{
+		ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 5,
+	}); err != nil {
+		cancel()
+		t.Fatalf("CheckCntlr send: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.Recv()
+		done <- err
+	}()
+	return done, cancel
+}
+
+// cnRound runs one CheckCn round on a fresh stream, which also makes the fake
+// load a changed behavior file, and fails unless it is answered.
+func cnRound(t *testing.T, cnClient pb.ControllerNodeAgentClient) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := cnClient.CheckCn(ctx)
+	if err != nil {
+		t.Fatalf("CheckCn: %v", err)
+	}
+	if err := stream.Send(&pb.CheckCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 1,
+	}); err != nil {
+		t.Fatalf("CheckCn send: %v", err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("CheckCn recv: %v", err)
+	}
+	stream.CloseSend()
+}
+
+// wantHeld fails when a call that must be held has returned.
+func wantHeld(t *testing.T, what string, done chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		t.Fatalf("%s returned while held: %v", what, err)
+	case <-time.After(2 * hangPollInterval):
+	}
+}
+
+// wantReturned waits for a call to return and hands back its error.
+func wantReturned(t *testing.T, what string, done chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return", what)
+		return nil
+	}
+}
+
+// TestCheckCntlrHangRounds is the fake's hang_rounds lever (worker_test.sh
+// case H's single missed round): each of the next N rounds of the object
+// after the file is loaded is held until its stream ends — a reload that
+// clears the lever does not answer it, and another object's round is answered
+// meanwhile — and the round after them is answered at once. A rewrite of the
+// file counts its rounds afresh.
+func TestCheckCntlrHangRounds(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"hang_rounds": 1}}}`)
+
+	done, cancel := cntlrRound(t, cnClient)
+	wantHeld(t, "the counted round", done)
+	// The CheckCn round reloads the cleared file while the cntlr's round is
+	// held: the reload re-arms nothing, and the held round stays held.
+	writeFile(t, agent, behaviorFileName, `{}`)
+	cnRound(t, cnClient)
+	wantHeld(t, "the counted round after the reload", done)
+	cancel()
+	if err := wantReturned(t, "the counted round", done); err == nil {
+		t.Fatal("the counted round replied after its stream ended")
+	}
+	done, cancel = cntlrRound(t, cnClient)
+	if err := wantReturned(t, "the round after it", done); err != nil {
+		t.Fatalf("the round after the counted one failed: %v", err)
+	}
+	cancel()
+
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"hang_rounds": 2}}}`)
+	for idx := range 2 {
+		done, cancel = cntlrRound(t, cnClient)
+		wantHeld(t, fmt.Sprintf("counted round %d", idx+1), done)
+		cancel()
+		if err := wantReturned(t, "a counted round", done); err == nil {
+			t.Fatalf("counted round %d replied", idx+1)
+		}
+	}
+	done, cancel = cntlrRound(t, cnClient)
+	if err := wantReturned(t, "the round after two", done); err != nil {
+		t.Fatalf("the round after the two counted ones failed: %v", err)
+	}
+	cancel()
+
+	// A load that drops the lever drops the rounds it had not spent: the
+	// CheckCn round loads one counted round, and the cntlr's own round
+	// reloads the file without it first.
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"hang_rounds": 1}}}`)
+	cnRound(t, cnClient)
+	writeFile(t, agent, behaviorFileName, `{}`)
+	done, cancel = cntlrRound(t, cnClient)
+	if err := wantReturned(t, "the round after the lever went", done); err != nil {
+		t.Fatalf("the round after the lever went failed: %v", err)
+	}
+	cancel()
+}
+
+// TestSyncupCntlrHangSyncup is the fake's hang_syncup lever (worker_test.sh
+// case H's demotion that a stalled old primary never confirms): a
+// SyncupCntlr is held unanswered while the lever is set, with the lock
+// released, so the object's own Check round and another object's syncup still
+// answer; a held request whose caller gives up ends unapplied, and one still
+// held when the script clears the lever is applied as usual.
+func TestSyncupCntlrHangSyncup(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"hang_syncup": true}}}`)
+
+	demotion := cntlrFixture(false)
+	demotion.Revision = 6
+	type outcome struct {
+		reply *pb.SyncupCntlrReply
+		err   error
+	}
+	send := func(ctx context.Context) chan outcome {
+		out := make(chan outcome, 1)
+		go func() {
+			reply, err := cnClient.SyncupCntlr(ctx, demotion)
+			out <- outcome{reply, err}
+		}()
+		return out
+	}
+	held := func(what string, out chan outcome) {
+		t.Helper()
+		select {
+		case got := <-out:
+			t.Fatalf("%s returned while held: %v, %v", what, got.reply, got.err)
+		case <-time.After(2 * hangPollInterval):
+		}
+	}
+	returned := func(what string, out chan outcome) outcome {
+		t.Helper()
+		select {
+		case got := <-out:
+			return got
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not return", what)
+			return outcome{}
+		}
+	}
+	// storedRevision is the revision a Check round reports: that of the last
+	// SyncupCntlr the fake applied. The round is answered while a syncup of
+	// the same object is held, or the bounded stream fails the test.
+	storedRevision := func() uint64 {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Second)
+		defer cancel()
+		stream, err := cnClient.CheckCntlr(ctx)
+		if err != nil {
+			t.Fatalf("CheckCntlr: %v", err)
+		}
+		if err := stream.Send(&pb.CheckCntlrRequest{
+			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 6,
+		}); err != nil {
+			t.Fatalf("CheckCntlr send: %v", err)
+		}
+		reply, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("a Check round while a syncup is held: %v", err)
+		}
+		return reply.GetRevision()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := send(ctx)
+	held("the demotion", out)
+	if got := storedRevision(); got != 5 {
+		t.Fatalf("stored revision while the demotion is held = %d, want 5", got)
+	}
+	if _, err := cnClient.SyncupCn(context.Background(), &pb.SyncupCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 2,
+		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
+	}); err != nil {
+		t.Fatalf("SyncupCn while another object's syncup is held: %v", err)
+	}
+	cancel()
+	if got := returned("the abandoned demotion", out); status.Code(got.err) !=
+		codes.Canceled {
+		t.Fatalf("the abandoned demotion = %v, %v; want codes.Canceled",
+			got.reply, got.err)
+	}
+	// Past one poll the handler has seen its caller go: clearing the lever
+	// now must not apply what nobody waits for.
+	time.Sleep(3 * hangPollInterval)
+	writeFile(t, agent, behaviorFileName, `{}`)
+	if got := storedRevision(); got != 5 {
+		t.Fatalf("stored revision after the abandoned demotion = %d, "+
+			"want 5 (applied after its caller gave up)", got)
+	}
+
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"hang_syncup": true}}}`)
+	out = send(context.Background())
+	held("the second demotion", out)
+	writeFile(t, agent, behaviorFileName, `{}`)
+	got := returned("the released demotion", out)
+	if got.err != nil {
+		t.Fatalf("the released demotion failed: %v", got.err)
+	}
+	if code := got.reply.GetAgentReply().GetCode(); code != 0 {
+		t.Fatalf("the released demotion code = %d, want 0", code)
+	}
+	if got.reply.GetRevision() != 6 {
+		t.Fatalf("the released demotion revision = %d, want 6",
+			got.reply.GetRevision())
+	}
+}
+
+// TestHangSyncupEveryKind pins that hang_syncup reaches every Syncup*, each
+// held under its own object's key and answered once the lever is cleared.
+func TestHangSyncupEveryKind(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	ptr := sidePtr(1, 3, 5)
+	syncupDn(t, dnClient, 1, ptr)
+	syncupSide(t, dnClient, ptr, 1, 0)
+
+	cases := []struct {
+		method string
+		key    string
+		call   func() error
+	}{
+		{"SyncupDn", dnObjKey, func() error {
+			_, err := dnClient.SyncupDn(context.Background(),
+				&pb.SyncupDnRequest{
+					ClusterId: 1, DnId: 1, Revision: 2,
+					SidePointerList: []*pb.SidePointer{ptr},
+					ExtentSize:      67108864,
+				})
+			return err
+		}},
+		{"SyncupSide", sideObjKey(ptr), func() error {
+			_, err := dnClient.SyncupSide(context.Background(),
+				&pb.SyncupSideRequest{
+					ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 2,
+					SideConf: &pb.SyncupSideRequest_SideConf{
+						ExtCnt: 2, PrimaryCnId: 1,
+					},
+				})
+			return err
+		}},
+		{"SyncupCn", cnObjKey, func() error {
+			_, err := cnClient.SyncupCn(context.Background(),
+				&pb.SyncupCnRequest{ClusterId: 1, CnId: 1, Revision: 1})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		writeFile(t, agent, behaviorFileName, fmt.Sprintf(
+			`{"objects": {%q: {"hang_syncup": true}}}`, tc.key))
+		done := make(chan error, 1)
+		go func() { done <- tc.call() }()
+		wantHeld(t, tc.method, done)
+		writeFile(t, agent, behaviorFileName, `{}`)
+		if err := wantReturned(t, tc.method, done); err != nil {
+			t.Fatalf("%s released: %v", tc.method, err)
+		}
+	}
 }
 
 // TestCheckSideDropStream is the fake's drop_stream lever (dnv-worker.md,

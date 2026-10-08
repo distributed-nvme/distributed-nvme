@@ -1122,7 +1122,7 @@ func TestDiskMetaZeroedBitsEncoding(t *testing.T) {
 // sideNextZeroBatch walks a side in DnZeroBatchExtCnt-sized steps and stops
 // exactly at the side's extent total, which is not a multiple of 8 (nor of the
 // batch size) — the case where a pad-bit-counting cursor would run off the end
-// of the side and zero another tenant's extents.
+// of the side.
 func TestDiskMetaNextZeroBatchSteps(t *testing.T) {
 	meta, _ := formatted(t)
 	ctx := context.Background()

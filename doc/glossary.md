@@ -48,7 +48,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **cdc, central discovery controller** — `dnv-cdc`, the control-plane process that serves the well-known NVMe-oF discovery subsystem over NVMe/TCP from the `CdcEntry` keys it watches, keeps one filtered view per connected host, sends AENs to the hosts a change impacts, and closes a connection that sends no command within its keep-alive timeout. It registers nothing and never writes etcd.
 
-**CdcEntry** — The etcd record per subsystem that the cdc serves: the subsystem NQN, the transport of every enabled cntlr's controller node, and the allowed hosts. The gateway writes it and puts a missing one back when it rewrites it, while the worker's cntlr replacement rewrites the transports only of an entry that exists.
+**CdcEntry, discovery records** — The etcd record per subsystem that the cdc serves, a pool's entries being its discovery records: the subsystem NQN, the transports of the controller nodes of the cntlrs the listing rule lists, and the allowed hosts. Every writer sets the whole transport list by that rule from the cntlrs its transaction reads: the gateway's subsystem and cntlr calls, which put back an entry they find missing, and the worker's health write for a cntlr, its failover and its cntlr replacement, which rewrite only an entry that exists (see `architecture.md` [D18]).
 
 **chain** — The cn sweep's ordered removal list for one sp: the layers, each with P0 ahead of it, built from the pass's enumerations against the sp's wanted set and walked top-down under the stop rule. A node-level pass runs a chain per sp that has left the pointer list and a cntlr-level pass one for its own sp; an enumeration that did not answer stops the pass before any chain runs (see `cnagent.md` CN21).
 
@@ -94,7 +94,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **converge** — An agent's one pass that brings its node's state for an object to the request it holds: probe-first, bottom-up build, top-down removal by sweep, with every failure captured in a row rather than aborting the pass. A converge is idempotent and crash-restartable.
 
-**coordinator** — The sp role's revision worker for one storage pool: it loads the pool, builds every side and cntlr request, keeps one child goroutine per side and per cntlr, runs the flips and the reaction pass, and holds each fan-out's cntlr requests until the sides report it applied or one cntlr interval has passed.
+**coordinator** — The sp role's revision worker for one storage pool: it loads the pool, builds every side and cntlr request, keeps one child goroutine per side and per cntlr, runs the flips and the reaction pass, and hands each fan-out on through the hold. Its own health verdicts on the pool's cntlrs, legs and sides are the ones the own-verdict rule counts, from its start to its stop, so a restart or a shard handoff begins with none.
 
 **created, materialization** — The thin-device flag the sp worker sets once the primary has reported the device's thin volume OK in every slice, and never clears (`ThinDevice.created`). Only a created thin device can be snapshotted, an origin is not deleted while a snapshot of it is uncreated, and no converge sends a created thin device a create or snapshot message again, though one that leaves `td_list` is still sent the delete message (see `cnagent.md` CN14).
 
@@ -108,7 +108,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **deferred, provisioning deferral, provisioning gate** — The cn agent's exclusion of a resource from its effective desired state while a side under it is still being zeroed: a provisioning leg and the group over it, which also takes every later group of its list out of the pool's concat, a slice left with no effective group in either list, and the thin devices over such a slice with their namespaces, transfers and clones (see `cnagent.md` CN9). A deferred row reports provisioning, never error, unless the level also suppresses it.
 
-**demote, demotion** — The move of a cntlr from primary to standby, which a failover decides and the cntlr's next converge carries out: its namespaces move inaccessible and are parked, its arrays stop, and its legs stay connected (see `architecture.md`, Standby cntlr). Also a cn converge's pre-step that reloads a transfer device this cntlr no longer serves onto an error table of its own size, so that it lets go of the origin's raid0 (see `cnagent.md` CN9).
+**demote, demotion** — The syncup that makes a primary a standby, which a failover decides, and the converge in which the cntlr's agent carries it out: its namespaces move inaccessible first and are parked, its arrays stop, and its legs stay connected (see `architecture.md`, Standby cntlr). A fan-out that demotes a primary hands that cntlr its demotion at once and holds the sides and the other cntlrs until it reports it applied, or for `DemotionHoldTimeout` at most (see hold; `dnv-worker.md` RW22). Also a cn converge's pre-step that reloads a transfer device this cntlr no longer serves onto an error table of its own size, so that it lets go of the origin's raid0 (see `cnagent.md` CN9).
+
+**demotion hold** — The first wait of the hold, which only a fan-out that demotes a primary runs, ahead of the sides-first hold (see hold; `dnv-worker.md` RW22).
 
 **desired state** — What etcd records a node or a pool should look like, carried whole in every syncup request. Agents converge to it, and removal is derived from the difference between it and what the node holds.
 
@@ -150,7 +152,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **enumeration** — A sweep's listing of what the node holds: the dm devices, the nvmet tree and the nvme-host subsystems, and on the cn the md arrays. An enumeration that did not answer makes the verdict unclean and licenses no removal, on the cn any of the four stopping the whole sweep and on the dn the dm listing (see `architecture.md`, Teardown by sweep).
 
-**err_epoch, health epoch** — The time the worker found an object unhealthy after last seeing it healthy, zero while it is healthy (`err_epoch`); it stays put while the object stays unhealthy, so the event thresholds that trigger reactions measure from it. It never bumps a revision, and a node with one set loses its capacity key.
+**err_epoch, health epoch** — The time the worker found an object unhealthy after last seeing it healthy, zero while it is healthy (`err_epoch`); it stays put while the object stays unhealthy, so the event thresholds that trigger reactions measure from it. It never bumps a revision, a node with one set loses its capacity key, and an enabled standby with one set is out of its pool's discovery records (see listing rule).
 
 **event thresholds** — The per-pool durations an object must stay unhealthy before a reaction fires: primary unhealthy, cntlr unhealthy, side unhealthy and leg unhealthy (`EventThreshold`). They are stored as sent and resolved when read.
 
@@ -162,13 +164,15 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **failfast window** — The time after a connected target stops answering during which the connecting kernel still queues IO to the lost path instead of failing it: the fast IO fail timeout every agent connection is made with (`DefaultNvmeFastIoFailTmo`; see `dnagent.md` SH20), while its controller-loss timeout reconnects forever. A command that opens a device over such a path blocks for the whole window, so a sweep that meets one on a dead remote reports what it could not reach and succeeds on a later round, once the window has passed (see `architecture.md`, Teardown by sweep).
 
-**failover** — The sp worker's reaction that makes a healthy, enabled standby the primary when the primary is disabled or has been unhealthy past the primary threshold, held to the cntlr threshold when that is longer while it is settling, and not where a failover cannot help, such as an error any primary would read alike (see `dnv-worker.md` AR5). The old primary becomes a standby and the new one is settling until its stack is seen built and clean.
+**failover** — The sp worker's reaction that makes a healthy, enabled standby the primary when the primary is disabled or has been unhealthy past the primary threshold, held to the cntlr threshold when that is longer while it is settling, and not where a failover cannot help, such as an error any primary would read alike (see `dnv-worker.md` AR5); the unhealthy trigger also needs the coordinator's own verdict (see own-verdict rule). Its transaction takes an old primary that has a health epoch out of the discovery records (see listing rule). The old primary becomes a standby and the new one is settling until its stack is seen built and clean.
 
 **fake agent, fake gateway** — The suites' stand-ins for the processes they do not run, each behind the real server interceptors so its log records every message it receives: `fakeagent` plays the dn and cn agents for the worker and gateway suites, answering from its behavior file and from each object's last accepted request, which its state file keeps across a restart. `fakegateway` plays the gateway for the dnvctl suite, recording each method's call count and last request before answering from its behavior file.
 
-**fan-out, sync fan-out** — The delivery a revision bump sets off: the worker syncs every object the revision covers, and for a pool the coordinator builds every side and cntlr request once and hands each child its own, unordered within each kind and sides before cntlrs (see `dnv-worker.md` RW14).
+**fan-out, sync fan-out** — The delivery a revision bump sets off: the worker syncs every object the revision covers, and for a pool the coordinator builds every side and cntlr request once and hands each child its own through the hold: the sides unordered among themselves and before the cntlrs, except that a fan-out that demotes a primary hands that cntlr its demotion before the sides (see `dnv-worker.md` RW14, RW22).
 
-**fence** — The dn agent's cut of a side's per-CN path by reloading its dm-linear onto the dm-error: a primary flip reloads the old primary's linear at once, and a migration source fences in two phases, suspending each linear in place for the cutover window and then reloading it (see `dnagent.md` DN12). A reload that fails leaves the linear suspended on its old table, so the path fails closed rather than serving stale bytes; a worker's own fence is the self-fence.
+**fence** — The dn agent's cut of a side's per-CN path by reloading its dm-linear onto the dm-error, so that the cntlr's reads and writes of the leg through that side fail: a failover's primary flip reloads the old primary's linear at once, on every side of the pool, and a migration source fences in two phases, suspending each linear in place for the cutover window and then reloading it (see `dnagent.md` DN12). A reload that fails leaves the linear suspended on its old table, so the path fails closed rather than serving stale bytes; a worker's own fence is the self-fence.
+
+**fence-first window** — The time from the sides' fence of an old primary's legs until its agent applies its demotion, in which that primary answers host IO on its still-optimized path with target-internal errors (see `architecture.md`, Failover; `dnv-worker.md` RW14, RW22).
 
 **flip** — A worker-owned, one-way write of a readiness flag once the agents report it earned: the provisioned flip on a side whose zeroing is complete (`FlipProvisioned`) and the created flip on a thin device whose volume is OK in every slice (`FlipCreated`). Each flip bumps the pool's revision so the next syncup carries the flag.
 
@@ -194,11 +198,13 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **health block** — The reserved block every leg carries in its meta region, behind the md superblock and write-intent bitmap of a redundant leg, that the primary's leg health probe reads and writes; probe IO never touches the data region.
 
-**health bookkeeping** — The worker's maintenance of each object's health epoch and of a new primary's settling flag: written only on a health transition or a settle, in one transaction that bumps no revision, and logged. Each observation is compared with the health state, an in-memory cache of the record that the record's loads re-seed (see `dnv-worker.md` HL3).
+**health bookkeeping** — The worker's maintenance of each object's health epoch and of a new primary's settling flag: written only on a health transition or a settle, in one transaction that bumps no revision, and logged. A cntlr's write that moves it in or out of the listing rule, an enabled standby's health epoch set or cleared, also rewrites its pool's discovery records in that transaction (see `dnv-worker.md` HL2). Each observation is compared with the health state, an in-memory cache of the record that the record's loads re-seed (see `dnv-worker.md` HL3).
+
+**hold** — The coordinator's wait before it hands on the later part of a fan-out, in two waits, the demotion hold and the sides-first hold, each ended by the reports it waits for or at the latest by its timer, a timer's end being logged. The demotion hold comes only with a fan-out that demotes a primary, which in production only a failover's does: that cntlr is handed its demotion at once, and the sides' and the other cntlrs' syncups wait until it reports its demotion applied or `DemotionHoldTimeout` has passed (see `dnv-worker.md` RW22). The sides-first hold, every fan-out's, follows: the cntlrs' syncups wait until every running side child reports the revision applied or one `cntlr_interval` has passed since that wait began (see `dnv-worker.md` RW14). The worker judges no reachability, so an old primary that never answers uses up the first wait, and neither wait is a correctness dependency (see `architecture.md` [D16]). The settling hold of a new primary (see settling) and leg repair's wait for a pending spare are other waits.
 
 **hole punch** — The discard the cn agent issues through the arena's loop device over a newly chosen clone-metadata range before it creates the slot's wrapper: on the tmpfs-backed arena file it zeroes the range by file semantics and frees its pages, so a recycled unit never shows a previous clone's dm-clone superblock. A wrapper that already exists and matches is never re-punched, since that would wipe a live superblock (see `cnagent.md` CN18).
 
-**host** — The NVMe-oF initiator that reads a pool's namespaces: a kernel nvme host that discovers them through the cdc and aggregates every cntlr's export of a subsystem into one multipath device, following ANA to the primary.
+**host** — The NVMe-oF initiator that reads a pool's namespaces: a kernel nvme host that discovers them through the cdc, connects to the cntlrs the discovery records list through nvme-stas or an equivalent that follows the discovery log, and aggregates their exports of a subsystem into one multipath device, following ANA to the primary (see `architecture.md`, Host view).
 
 **host NQN** — The NQN an nvme host connects under and an allowed-hosts list names, from which its host id is derived (`NvmeHostId`): an agent connects as its controller node's `CnHostNqn` for legs and clone sources, or as `DnHostNqn` for a migration destination, and a side's export to a controller node admits that node's `CnHostNqn` alone.
 
@@ -250,6 +256,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **level, sp level** — A pool's degradation ladder (`SpLevel`), from read-write through read-only, no clone, no thin pool, no redundancy, no migration and no side, to disabled; each step suppresses the resources above it so an operator can take a damaged pool apart in stages, and read-only is enforced on the controller node by failing writes.
 
+**listing rule, discovery listing rule** — The rule that decides which cntlrs' addresses a pool's discovery records carry: a cntlr is listed while it is enabled and either is the primary or has a zero health epoch, which names the primary and every standby a failover may elect (`CdcListed`, `CdcTrConfList`; see `architecture.md` [D18]). Every writer of a `CdcEntry` applies it.
+
 **local store** — The directory an agent keeps the last accepted request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync and rename. After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup.
 
 **location** — The failure-domain string a node registers (`location`), defaulting to its address: the allocator never places two legs in one location within one allocation round, and keeps a pool's new cntlrs, a spare leg and a migration destination out of occupied locations at its first tier only.
@@ -292,7 +300,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **ns-dev** — The namespace's own dm-linear on a controller node (`CnNsDevName`), the device nvmet exports, whose table follows a backing state machine: the thin device's raid0 while the namespace serves, the dm-error while it is parked, and the clone device while a clone fills the thin device.
 
-**nvme-stas** — The production host stack: it holds a persistent discovery connection to every configured cdc endpoint and connects, re-points and disconnects the host's controllers on the discovery-log-change AENs; plain nvme-cli is equally supported.
+**nvme-stas** — The production host stack: it holds a persistent discovery connection to every configured cdc endpoint and connects, re-points and disconnects the host's controllers on the discovery-log-change AENs. Under its default disconnect scope a host running it lets go of a path it manages once no cdc endpoint it reads still lists it, such as a failed-over primary's that the discovery records dropped (see `architecture.md`, Host view). It manages the connections it makes and the ones it takes over: a connection it finds already open to the same address and subsystem under the same host NQN, even one made by hand with nvme-cli, it takes over instead of connecting again. It never drops a controller named in its own configuration (see `architecture.md`, Known limits).
 
 **object** — In an agent, a side or a cntlr as opposed to the node that is its parent (see `dnagent.md` SH5, SH10). In the worker, the unit of driving: a disk node, a controller node, a side or a cntlr, each with one check stream, one goroutine and one desired request at a time, where a newer request replaces one not yet sent.
 
@@ -301,6 +309,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **origin, snapshot** — A snapshot is a thin device created from another, its origin, by a pool snapshot message in every slice (`ori_id`); the origin must be created first and is not deleted while an uncreated snapshot of it exists.
 
 **OS client** — The one door through which agents run OS commands and do file, block and protobuf IO (`OsClient`, implemented by `LimitedOsClient` and faked by `FakeOsClient`): it bounds concurrency with a semaphore, answers the caller's deadline with SIGTERM and then SIGKILL at the hard timeout, and logs each operation; the leg health probers' direct IO is its one sanctioned bypass.
+
+**own-verdict rule, own verdict** — The rule that a threshold reaction fires only for an object whose latest health verdict by this coordinator is unhealthy: the primary for a failover, the cntlr for a cntlr replacement, and for a leg repair the leg and, when the side's threshold triggers it, that side as well (see `dnv-worker.md` AR10). The clock still runs from the stored health epoch, a verdict counts whether or not it writes the record, and the disabled trigger of a failover needs no verdict. A coordinator starts with no verdict, so a health epoch an earlier owner left, or another observer wrote, fires nothing before this coordinator has judged the object unhealthy itself.
 
 **P0** — The step before every layer of the cn sweep's chain that parks every unwanted ns-dev by its own live table, so that the namespace above it can be disabled and its in-flight host IO completes instead of being replayed onto a stack about to go (see `cnagent.md` CN21).
 
@@ -350,7 +360,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **quiesce, snapshot pre-pass** — The primary's suspension of a thin device's raid0 around the pool messages that create its snapshot in every slice, so the snapshot is consistent across slices.
 
-**quiet set, reacting set** — The event thresholds the e2e suite builds each case's pool under: the quiet set, longer than any wait, so that no reaction fires mid-case, and the short reacting set under which the react case waits out cntlr replacement and leg repair.
+**quiet set, reacting set, cutoff set** — The event thresholds the e2e suite builds each case's pool under: the quiet set, longer than any wait, so that no reaction fires mid-case; the short reacting set under which the react case waits out cntlr replacement and leg repair; and the cutoff set of the cutoff case, whose primary threshold is the shortest the gateway accepts on the suite's cluster while the other three are long, so that its failover comes fast and no other threshold reaction fires within the case.
 
 **raid0** — The dm-striped device over a thin device's per-slice thin volumes (`CnRaid0Name`), the block device a namespace, a clone or a transfer is built on, striped by the pool's geometry.
 
@@ -358,7 +368,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **reaction** — One of the sp worker's automatic reactions: failover, auto-grow, cntlr replacement and leg repair. A pass applies at most one and logs it as applied or skipped with its reason.
 
-**reaction pass** — The coordinator's periodic evaluation of a pool from a fresh snapshot against the event thresholds and the pool's level: it applies at most one reaction per pass, so that each reaction's effect is seen before the next decision, and it also runs the drain steps of a latched pool or clone (see `dnv-worker.md` AR1, AR2).
+**reaction pass** — The coordinator's periodic evaluation of a pool from a fresh snapshot against the event thresholds and the pool's level: it applies at most one reaction per pass, so that each reaction's effect is seen before the next decision, and it also runs the drain steps of a latched pool or clone (see `dnv-worker.md` AR1, AR2). A threshold reaction fires only under the own-verdict rule.
 
 **reconcile** — An agent's startup pass: load the stored requests, converge each object once under the node write lock, then serve. A file that does not load is skipped, and with it every file of a node whose own file did not load; a skipped object is neither converged nor swept and answers unknown until its syncup comes again.
 
@@ -410,7 +420,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **side** — `Side`, the disk-node resident part of a leg: runs of extents in the node's volume table, the side device over them (`DnSideName`, the dm-linear that zeroing writes through and the primary's per-CN linear maps), and one export stack per cntlr of the pool. It carries the provisioned flag and, while the leg migrates, a source or destination role.
 
-**sides first, sides-first hold** — The coordinator's hold of a fan-out's cntlr requests until every running side child has reported that revision applied or one cntlr interval has passed, a timer release being logged (see `dnv-worker.md` RW14). It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
+**sides first, sides-first hold** — The second wait of the hold, which every fan-out of a pool goes through: the cntlrs' syncups wait until every running side child has reported the revision applied or one cntlr interval has passed since that wait began, a timer release being logged (see hold; `dnv-worker.md` RW14). It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
 
 **skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying.
 
@@ -424,7 +434,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **stage** — One step of a suite case, run under its own trace id, which every call the step makes carries into the records it causes; work the worker then does for it runs under the worker's own ids.
 
-**standby** — A cntlr that is not primary: it keeps its connection to every leg so a failover is fast, and exports every namespace over the dm-error in the inaccessible group, so hosts see the path and a failover only moves the stack.
+**standby** — A cntlr that is not primary: it keeps its connection to every leg so a failover is fast, and exports every namespace over the dm-error in the inaccessible group, so the hosts the discovery records send to it hold its path and a failover only moves the stack. The records list an enabled standby only while its health epoch is zero (see listing rule), so hosts that follow them let go of an unhealthy standby's path until its next clean round lists it again.
 
 **STM** — The etcd software transaction (`RunSTM`) every mutation of the gateway and the worker runs in: reads are collected, the writes commit only if nothing read has changed, and the function is retried otherwise; the vote worker's registration writes are plain puts and deletes. A deciding STM re-validates its preconditions inside it.
 
@@ -441,6 +451,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **syncup** — The unary delivery of an object's desired state to its agent (`SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`): gated by revision and conf, converged, persisted when accepted, and answered with a reply code and details.
 
 **sysfs walk** — An agent's reading of its nvme host connections from sysfs rather than nvme list-subsys: the subsystem entry whose NQN matches, the namespace entry that names the multipath head, and the controller entries, each path read through its address, state and ANA state (see `cnagent.md` CN10).
+
+**tenant** — A user of a multi-tenant block storage system that runs dnv as its data plane, for example behind Kubernetes or OpenStack Cinder. dnv knows no tenants: it authenticates no user, which the layer above does, and admits a host by its NQN alone (see allowed hosts). What it promises that layer is that the data of one storage pool is never readable from another storage pool unless that layer exports it there itself, for example with a transfer; the zeroing of every new side serves that promise (see `architecture.md`, System overview, and [D15]).
 
 **thin device, td** — `ThinDevice`, a pool volume: one thin volume per slice under the same thin id (`CnThinDevName`, created or snapshotted by a pool message and deleted by one), joined by a raid0 on the primary. It may be an origin, a snapshot or both, and carries the created flag.
 
@@ -462,7 +474,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **two-phase RPC** — A gateway RPC that must ask an agent between its reads and its commit: a read-only first phase resolves the objects, the agent call runs outside any transaction, and the deciding second phase re-runs the full resolution and the token check, trusting the first phase's facts only as hints, so a token-carrying request sees any interleaved mutation as stale (see `gateway.md` AG4).
 
-**verdict** — The sweep's comparison of what a scope holds with what it wants, answered as the reply code: clean, or leftover while the scope holds an unwanted object, a listing did not answer, or a condition only a syncup cures is found. A check round or an info read computes it with the removals left out, a syncup from the sweep it has just run; it is recomputed every time and stored nowhere, and it is distinct from the worker's health verdict on an object's health epoch.
+**verdict** — The sweep's comparison of what a scope holds with what it wants, answered as the reply code: clean, or leftover while the scope holds an unwanted object, a listing did not answer, or a condition only a syncup cures is found. A check round or an info read computes it with the removals left out, a syncup from the sweep it has just run; it is recomputed every time and stored nowhere, and it is distinct from the worker's health verdict on an object's health epoch, the one the own-verdict rule counts.
 
 **view** — The rendered discovery records of one connected host: the owned entries visible to it, in a fixed order, materialized only while the host holds a connection. An impact marks the view dirty, and it is re-rendered at the host's next read of its log page or by a rescan that comes first (see `cdc.md` DS5, DS6).
 

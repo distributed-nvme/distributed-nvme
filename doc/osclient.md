@@ -269,7 +269,7 @@ methods.
   (`dnagent_integtest.md`, Assumptions and preflight checks).
 * The payload is **never** logged: the records carry `path`, `offset` and
   `length` only (Logging). Metadata blocks are large and uninteresting in a
-  log, and a device region may hold arbitrary tenant bytes.
+  log, and a device region may hold arbitrary user data.
 
 ### Exported raw helpers and the probe-IO carve-out
 
@@ -356,7 +356,7 @@ sanctioned direct-syscall path in dnv:
 
 Everything "ReadBlock / WriteBlock" says about payload logging (`path`,
 `offset` and `length` only, never `data` — a device region may hold arbitrary
-tenant bytes) and about never shelling out to dd (the lab's uutils dd and its
+user data) and about never shelling out to dd (the lab's uutils dd and its
 broken direct-IO flags, `dnagent_integtest.md`, Assumptions and preflight
 checks) applies to the helpers and to the prober's records unchanged.
 

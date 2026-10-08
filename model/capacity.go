@@ -122,7 +122,8 @@ func ResolveAllocConf(conf *pb.AllocConf) *pb.AllocConf {
 }
 
 // resolveInterval applies the rule of architecture.md, Common validation, to
-// one health-check interval: 0 => 5 seconds, then clamped to [1, 3600].
+// one health-check interval: 0 => DefaultHealthCheckInterval, then clamped to
+// [MinHealthCheckInterval, MaxHealthCheckInterval].
 func resolveInterval(interval uint32) uint32 {
 	if interval == 0 {
 		interval = common.DefaultHealthCheckInterval

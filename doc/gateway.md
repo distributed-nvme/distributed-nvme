@@ -40,12 +40,13 @@ The package's files follow `layout.md`, Directory tree: serving and the
 trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
 token check, error mapping, the candidate unit, id minting, paging and the
 agent connection (GW5 to GW7, GW9, GW10, GW12, AG2), with the `CdcEntry`
-maintenance the cntlr mutators and `UpdateSubsystemHosts` share
-(`eachCdcEntry`, `rebuildCdcEntry`); the handlers, one file per resource
-group of Handlers by resource group; the per-operation candidate
-compositions of `architecture.md`, Per-operation allocation, with the DN
-and CN ledgers; and the request validation (GW4). `cmd/dnv-gateway` is the
-command (CM1 to CM3); `integtest/gatewayctl/` and
+maintenance the cntlr mutators and `UpdateSubsystemHosts` share, which sets
+an entry's whole transport list by the listing rule of `architecture.md` [D18]
+(`syncCdcEntries`, `eachCdcEntry`, `rebuildCdcEntry`); the handlers, one file
+per resource group of Handlers by resource group; the per-operation
+candidate compositions of `architecture.md`, Per-operation allocation, with
+the DN and CN ledgers; and the request validation (GW4). `cmd/dnv-gateway`
+is the command (CM1 to CM3); `integtest/gatewayctl/` and
 `integtest/gateway_test.sh` are the suite's driver and script (Integration
 test plan).
 
@@ -186,11 +187,13 @@ token decode — before the three cluster-scoped List handlers' `ClusterConf`
 read; `ListClusters` reaches the same two checks through `pageNames` before
 its range (GW10). Violations are `INVALID_ARGUMENT` before any etcd read.
 State-dependent validation (a slot in use, an `ns_idx` taken, the geometry
-rules on the `bdev_conf` `CreateStoragePool` merges over the cluster's, …)
-happens inside the STM. `CreateStoragePool` judges that merged `bdev_conf`
+rules on the `bdev_conf` `CreateStoragePool` merges over the cluster's, the
+primary threshold judged against the cluster's `cntlr_interval`
+(`architecture.md`, Common validation), …) happens inside the STM.
+`CreateStoragePool` judges the merged `bdev_conf` and the primary threshold
 before its STM as well, right after its plain pre-read of `ClusterConf` and
-before its candidate scans (Storage pools and GrowSlice), so a request whose
-merge breaks a rule is `INVALID_ARGUMENT` even on a cluster whose scans would
+before its candidate scans (Storage pools and GrowSlice), so a request that
+breaks either rule is `INVALID_ARGUMENT` even on a cluster whose scans would
 come up short (`RESOURCE_EXHAUSTED`).
 
 GW5. **Resolution in-STM.** Resolution is the in-STM reads that turn
@@ -610,10 +613,13 @@ delete, get, list, update-disabled and inspect.
   members it set (a refusal is `INVALID_ARGUMENT`, and the message says it
   concerns the merged conf), and before the scans, so that a cluster short
   of nodes does not answer a request that breaks a rule `RESOURCE_EXHAUSTED`
-  first; then the DN scan per group (`pickDns`) and the CN scan per cntlr
-  (`pickCn`) of `architecture.md`, Per-operation allocation, which owns the
-  growing black list, the random pick and the two CN tiers; too few at any
-  point is `RESOURCE_EXHAUSTED`.
+  first; `validatePrimaryThreshold` of the request's `event_threshold`
+  against that `ClusterConf`, the rule of `architecture.md`, Common
+  validation, that ties a pool's primary threshold to its cluster's
+  `cntlr_interval`, there for the same reason; then the DN scan per group
+  (`pickDns`) and the CN scan per cntlr (`pickCn`) of `architecture.md`,
+  Per-operation allocation, which owns the growing black list, the random
+  pick and the two CN tiers; too few at any point is `RESOURCE_EXHAUSTED`.
 
   STM, in this order: resolve; build the `bdev_conf` to store as
   `model.ResolveBdevConf` of `mergeSpBdevConf` of the request over the
@@ -622,9 +628,10 @@ delete, get, list, update-disabled and inspect.
   Storage pools; GW11) — and
   fail the unit right there, before a single other key is read, when this
   transaction's cluster id or that conf's leg count no longer matches the
-  one the scan drew its picks for; `validateMergedBdevConf` on that conf
-  once more (`ClusterConf` is write-once, so for an unchanged cluster id
-  this repeats the verdict of the pre-read, but the in-STM read is the
+  one the scan drew its picks for; `validateMergedBdevConf` on that conf and
+  `validatePrimaryThreshold` on the `ClusterConf` this STM read, once more
+  each (`ClusterConf` is write-once, so for an unchanged cluster id these
+  repeat the verdicts of the pre-read, but the in-STM read is the
   authoritative one); `SpConfKey` present is `ALREADY_EXISTS`; mint `sp_id`
   and the shard from `SpGlobal` (GW12), then every `cntlr_id` in pick order
   (GW15); `model.ValidateClusterConf` before the cluster's `extent_size` is
@@ -752,24 +759,27 @@ position, and a re-run of the STM closure on the same picks and reads
   `SpRev` bump fails a sent token first; re-verify the pick's capacity key
   (`verifyPick`); mint `cntlr_id`; put the `Cntlr` (`addr_port`, the CN's
   `nvme_tr_conf`, `cntlid_slot`, `primary` false, `disabled` false); append
-  to `cntlr_id_list`; the CN's bookkeeping and `BumpCnRev`; append the CN's
-  `nvme_tr_conf` to **every** `CdcEntry` of the SP (`addCdcTrConf`, which
-  walks `nqn_list` to each `Subsystem` and its `CdcEntryKey` through
-  `eachCdcEntry` and rebuilds a missing entry with `rebuildCdcEntry` before
-  changing it, as `architecture.md`, Cntlrs, requires; `DeleteCntlr`, with
-  `dropCdcTrConf`, and a flag-changing `UpdateCntlrEnabled`, with either
-  helper, walk the entries the same way); `BumpSpRev`. Reply `cntlr_id`.
+  to `cntlr_id_list`; the CN's bookkeeping and `BumpCnRev`; set the
+  transport list of **every** `CdcEntry` of the SP by the listing rule
+  (`architecture.md` [D18]) from the cntlrs this STM reads, the new one
+  included (`syncCdcEntries`, which walks `nqn_list` to each `Subsystem`
+  and its `CdcEntryKey` through `eachCdcEntry` and rebuilds a missing entry
+  with `rebuildCdcEntry` before setting it, as `architecture.md`, Cntlrs,
+  requires; `DeleteCntlr` and a flag-changing `UpdateCntlrEnabled` set the
+  entries the same way, each after its own `Cntlr` write); `BumpSpRev`.
+  Reply `cntlr_id`.
 * **DeleteCntlr** — STM: resolve; token; `primary` false and `disabled`
   true, else `FAILED_PRECONDITION`; reverse everything `CreateCntlr` did
-  (the id list, the key, the CN's bookkeeping with `BumpCnRev`, the
-  transport conf out of every `CdcEntry`); `BumpSpRev`. Reply `cntlr_id`.
+  (the id list, the key, the CN's bookkeeping with `BumpCnRev`, and every
+  `CdcEntry` set again by the listing rule, without the deleted cntlr);
+  `BumpSpRev`. Reply `cntlr_id`.
 * **UpdateCntlrEnabled** — STM: resolve; token; a no-op when already at the
-  requested state (GW6); else set `disabled` to the negation of `enabled`
-  and add (enable) or remove (disable) the transport conf in every
-  `CdcEntry` — an enable of a cntlr that is still `primary` also sets
-  `settling` (`dnv-worker.md` HL2: the re-enabled primary builds its stack
-  from the standby shape, as a promoted one does) — `BumpSpRev`. Reply
-  `cntlr_id` and `enabled`.
+  requested state (GW6); else set `disabled` to the negation of `enabled` —
+  an enable of a cntlr that is still `primary` also sets `settling`
+  (`dnv-worker.md` HL2: the re-enabled primary builds its stack from the
+  standby shape, as a promoted one does) — put the `Cntlr`, and then set
+  every `CdcEntry` by the listing rule (`syncCdcEntries`;
+  `architecture.md` [D18]); `BumpSpRev`. Reply `cntlr_id` and `enabled`.
 * **InspectCntlr** — STM: resolve; the `Cntlr` by id (`NOT_FOUND`), keeping
   its `addr_port` and the `CnConf`'s `cn_id` (read `CnConfKey` of that
   address in the same STM; deliberately no `SpRev` read); after the STM,
@@ -844,9 +854,10 @@ are those of `architecture.md`, Subsystems, namespaces.
   `ss_id` rendered with `IdKeyFmt` and the model is `subsystemModel`
   (`architecture.md`, [D2]); put the `Subsystem` with an empty `ns_list`
   and the `allowed_hosts`, append to `nqn_list`, and put the `CdcEntry` —
-  the NQN, the transport confs of every **enabled** cntlr's CN, the
-  `allowed_hosts` — at `CdcEntryKey` of the cluster id, the shard, `sp_id`
-  and `ss_id`. Reply `ss_id`.
+  the NQN, the transport confs of the cntlrs the listing rule lists
+  (`model.CdcTrConfList`; `architecture.md` [D18]), the `allowed_hosts` —
+  at `CdcEntryKey` of the cluster id, the shard, `sp_id` and `ss_id`. Reply
+  `ss_id`.
 * **DeleteSubsystem** — the NQN checked for length alone (`architecture.md`,
   Common validation, so a subsystem stored under an NQN the rules refuse can
   still be deleted; the same section says what a CN keeps of one in the dnv
@@ -855,9 +866,10 @@ are those of `architecture.md`, Subsystems, namespaces.
 * **ListSubsystems** — one STM: `nqn_list` to each `Subsystem` into
   `nqn_to_subsystem`; a listed key that is missing is `ABORTED`.
 * **UpdateSubsystemHosts** — rewrite `allowed_hosts` in **both** the
-  `Subsystem` and its `CdcEntry`; a `CdcEntry` whose key is missing is
-  rebuilt as `CreateSubsystem` writes it and written with the new hosts.
-  Reply `ss_id`.
+  `Subsystem` and its `CdcEntry`, and set that entry's transport list by
+  the listing rule as every writer does (`architecture.md` [D18]); a
+  `CdcEntry` whose key is missing is rebuilt as `CreateSubsystem` writes it
+  (`rebuildCdcEntry`) and written with the new hosts. Reply `ss_id`.
 * **CreateNamespace** — the subsystem by NQN; `ns_idx` non-zero and unused
   in this subsystem; the td by `td_name`; mint `ns_id`; defaults: an empty
   `dev_uuid` is a random RFC 4122 version 4 UUID in the canonical dashed
@@ -1220,8 +1232,10 @@ server and listens on its loopback, on a port block disjoint from every
 other suite: one etcd, configured the way every etcd serving dnv must be
 (its transaction-op cap at `EtcdMaxTxnOps`, which the suite reads from the
 `workerctl` it has just built instead of copying the number, as it reads
-`MaxSliceCntPerSp` for the clone it creates at that ceiling); three gateway
-instances on one launch line that differs only in the gRPC address; four fake DNs and three fake
+`MaxSliceCntPerSp` for the clone it creates at that ceiling and
+`DefaultHealthCheckInterval` for the health intervals the smoke case
+expects in the stored `ClusterConf`); three gateway instances on one launch
+line that differs only in the gRPC address; four fake DNs and three fake
 CNs, in distinct locations because the CN scan dedupes locations too, served
 by `fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test
 plan); and the two drivers, `gatewayctl` for the RPCs and `workerctl` for
@@ -1238,17 +1252,20 @@ gateway, never through `workerctl`.
 * smoke (one gateway) — the full lifecycle: every RPC's happy path but
   `ListStoragePools`, which the parallel and restart cases run, each
   mutation's exact write set read back, the `CdcEntry` the cdc serves
-  included — as `CreateSubsystem` writes it, as `UpdateSubsystemHosts` and
-  the cntlr mutators rewrite it, and gone with its subsystem; every
-  defaultable member of the
-  stored confs resolved on the write path; paging with its empty last page
-  and a malformed token; the inspects and bitmap reads passing the agent's
-  bytes and revision through verbatim, a revision no stored rev key
-  holds; the worker flips the snapshot and spare-switch preconditions wait
-  for; the clone's pair-addressed chunks, its latch with the destination
-  namespace resumed, its repeat delete and its refusals while latched, then
-  its drain; and the sp latch with the refusals it brings, then its drain,
-  after which every extent and capacity key is back and no dnv key is left.
+  included — its transport list read back against the listing rule of
+  `architecture.md` [D18] as `CreateSubsystem` writes it and as
+  `UpdateSubsystemHosts` sets it, once more while a cntlr is disabled,
+  which a list of every cntlr would fail, but only the list's length as
+  the cntlr mutators change it, and the entry gone with its subsystem;
+  every defaultable member of the stored confs resolved on the write path;
+  paging with its empty last page and a malformed token; the inspects and
+  bitmap reads passing the agent's bytes and revision through verbatim, a
+  revision no stored rev key holds; the worker flips the snapshot and
+  spare-switch preconditions wait for; the clone's pair-addressed chunks,
+  its latch with the destination namespace resumed, its repeat delete and
+  its refusals while latched, then its drain; and the sp latch with the
+  refusals it brings, then its drain, after which every extent and
+  capacity key is back and no dnv key is left.
 * parallel (three gateways, disjoint resources) — waves of concurrent
   creates and deletes across all three instances all succeed, the minted
   ids forming the expected sets and the accounting exact: every free count
@@ -1261,10 +1278,16 @@ gateway, never through `workerctl`.
   on "stale revision", as a liveness loop that converges.
 * faults (one gateway) — the refusal batteries on a live pool: validation,
   not-found and precondition classes, each refusal provably writing
-  nothing; agent faults — a hung agent bounded by the agent-call budget, a
-  closed port refused fast, inspects of hung and stopped fakes; and the
-  hydration checks of `DeleteClone` and `FinishMigration` refusing on
-  incomplete hydration and on an unreachable agent, `force` skipping them.
+  nothing; the primary threshold's floor of `architecture.md`, Common
+  validation, from both sides — the validation battery refuses a pool
+  whose primary threshold is one second under twice the cluster's stored
+  `cntlr_interval`, and the same request at exactly twice it is accepted
+  with its threshold stored as sent, the pool then deleted and drained so
+  that every node gets back what its create took; agent faults — a hung
+  agent bounded by the agent-call budget, a closed port refused fast,
+  inspects of hung and stopped fakes; and the hydration checks of
+  `DeleteClone` and `FinishMigration` refusing on incomplete hydration and
+  on an unreachable agent, `force` skipping them.
 * restart (kill under load) — one gateway is killed with SIGKILL while it
   provably holds a create in its handler; every pool of the wave is then
   either complete or absent, never partial, and the accounting matches the
@@ -1276,14 +1299,29 @@ gateway, never through `workerctl`.
 **Rules exercised.** The smoke case exercises GW4 to GW12 and GW14 across
 every resource group, GW5's `deleting` gate on a latched pool, GW10's
 paging, GW11's write-time resolution, AG1 and AG3 on the inspects and the
-bitmap reads, and the trace-id chain of GW2 and AG2; the parallel case GW9
-— candidate units that lose a pick and run again, invisibly — and GW12
-under concurrency; the contention case GW6 as fence and as liveness loop,
-GW8 and GW12 (a loser burns no id); the faults case GW4, GW7 throughout,
-AG2's budget, AG3 and AG4; and the restart case GW1, with the atomicity of
-one STM per RPC (GW8). Left to the unit tests: `CreateCluster`'s
-hash-collision guard, GW10's token-decode internals, `GracefulStop` (GW3),
-and the token-less path of GW6, which the driver never sends (below).
+bitmap reads, the trace-id chain of GW2 and AG2, and the listing rule of
+`architecture.md` [D18] on the `CdcEntry` transport lists it reads back;
+the parallel case GW9 — candidate units that lose a pick and run again,
+invisibly — and GW12 under concurrency; the contention case GW6 as fence
+and as liveness loop, GW8 and GW12 (a loser burns no id); the faults
+case GW4, GW7 throughout, AG2's budget, AG3 and AG4, and the primary
+threshold's floor of `architecture.md`, Common validation, from both
+sides, with GW11's `event_threshold` stored as sent; and the restart
+case GW1, with the atomicity of one STM per RPC (GW8). The smoke case
+sees only part of the listing rule. No worker runs, and the suite's rule
+on `workerctl` writes (below) forbids setting an `err_epoch`, so every
+cntlr's health epoch stays zero and the rule lists exactly the enabled
+cntlrs: the case shows a disabled cntlr left out, but it cannot tell the
+rule apart from a list of every enabled cntlr, since it never sees how
+the rule treats a cntlr with a health epoch, a standby left out and a
+primary kept. Left to the unit tests: `CreateCluster`'s hash-collision
+guard, the token-decode internals of GW10, `GracefulStop` (GW3) and the
+token-less path of GW6, which the driver never sends (below); the listing
+rule for a cntlr with a health epoch, the transports the cntlr mutators
+write, which the suite only counts, and the order of the list, which it
+never checks; and the primary threshold's floor for a threshold left to
+its default, and where `CreateStoragePool` judges it, before its
+candidate scans and again in its STM.
 
 Out of scope: performance, latency and soak; real agents, `dnv-worker`,
 `dnv-cdc` and `dnvctl`; a multi-member etcd; etcd outages (unit level only);
@@ -1305,7 +1343,9 @@ A bracket read that fails stops the run, because two failed reads would
 compare equal. Waits are bounded polls for process readiness only: the
 gateway is synchronous, so no stage ever sleeps waiting for etcd content.
 After every successful pool mutation, a worker flip included, the script
-refreshes its token from `GetStoragePool`.
+refreshes its token from `GetStoragePool`, except where no token is left
+to send: after a `DeleteStoragePool` latch it drains at once, and after
+the sp drain, which removes the pool.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run —
 before the server preflight, so a crashed earlier run cannot fail it — and
@@ -1341,12 +1381,13 @@ code under test: after every mutating stage the script reads raw decoded
 etcd state through `workerctl`'s read-only subcommands, and the gateway's
 own get, list and inspect replies must agree with it. `workerctl` also
 answers the readiness probe of etcd and, on the developer machine before
-anything is shipped, prints the Go constants the suite sizes itself by. The only writes
-it performs here are the worker-role ones, the suite playing the worker:
-the flips `set-created` and `set-provisioned`, at exactly the stages where
-a gateway precondition waits on the worker, and the drains `drain-sp` and
-`drain-clone`, standing in for the sp coordinator after a latch the gateway
-committed (`dnv-worker.md`, The sp drain and The clone drain). Every flip
+anything is shipped, prints the Go constants the suite reads instead of
+copying them (above). The only writes it performs here are the
+worker-role ones, the suite playing the worker: the flips `set-created`
+and `set-provisioned`, at exactly the stages where a gateway precondition
+waits on the worker, and the drains `drain-sp` and `drain-clone`, standing
+in for the sp coordinator after a latch the gateway committed
+(`dnv-worker.md`, The sp drain and The clone drain). Every flip
 and every drain step bumps `SpRev` as the worker's own would, except the sp
 drain's last step, which deletes the key, so the script's token bookkeeping
 counts them. Any other `workerctl` write would test `workerctl` rather than

@@ -2430,7 +2430,8 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 // round lists /sys/block and each array's md/ directory once for all of its
 // groups, not once per group. A listing is an `ls` — a process — and a walk
 // per group lists every array of the node per group: at 32 slices, 64 groups
-// over 64 arrays, 4160 listings a round where the whole round has 5 s. The
+// over 64 arrays, 4160 listings a round where the whole round has one
+// cntlr_interval. The
 // round's other listing is the verdict's own (CN30), which enumerates the
 // node exactly as the sweep does. Neither lists or reads any /sys/block entry
 // that is not an array node: a CN's dm devices and nvme heads outnumber its

@@ -315,7 +315,8 @@ func (h *revHarness) setClusterConf(cid uint64, cc *pb.ClusterConf) {
 }
 
 // defaultConf installs the concrete stored conf of testClusterConf, whose four
-// intervals are the 5 s the gateway resolved them to.
+// intervals are DefaultHealthCheckInterval, what the gateway resolves an
+// omitted one to.
 func (h *revHarness) defaultConf() {
 	h.setClusterConf(testCid, testClusterConf())
 }

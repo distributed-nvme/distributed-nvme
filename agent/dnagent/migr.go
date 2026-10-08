@@ -388,7 +388,7 @@ func (s *DnAgentServer) awaitMigrSrcNs(
 // the wrapper dm-linear over it. The wrapper exists because the dm-clone
 // target reads its metadata device from sector 0 and takes no offset
 // argument (DN13); AllocCloneMeta zeroes a freshly chosen slot's first 8 KiB
-// before its record is persisted, so a previous tenant's bytes can never be
+// before its record is persisted, so stale bytes in that slot can never be
 // misparsed as a valid dm-clone superblock.
 func (s *DnAgentServer) ensureMigrMeta(
 	ctx context.Context,

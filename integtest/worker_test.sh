@@ -9,10 +9,10 @@
 #   bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@ip
 #
 # The plan's cases, in order, each in its own cluster `it-<case>` and each
-# after a fleet restart: smoke, revision, health, bitmap, reaction, drain,
-# vote, handoff. Cleanup runs unconditionally at the start and, on success only, at
-# the end: a failing run leaves etcd's data, every log and every behavior file
-# in place and dumps the diagnostics.
+# after a fleet restart: smoke, revision, health, bitmap, reaction, failover,
+# drain, vote, handoff. Cleanup runs unconditionally at the start and, on
+# success only, at the end: a failing run leaves etcd's data, every log and
+# every behavior file in place and dumps the diagnostics.
 #
 # NO SUDO anywhere: nothing in this suite needs root. Everything the script
 # creates lives under $WORK on the server, and cleanup removes exactly that.
@@ -69,6 +69,15 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # groups — and clone-drain batches, which fit etcd's default anyway (CLD11).
 # Its created flips carry one td each: no pool here holds a second.
 ETCD_MAX_TXN_OPS=
+
+# The timers case H runs at, read the same way by read_constants(): the
+# check interval a cluster created without one stores, the primary threshold
+# a pool created without one reads, and the wait of the demotion hold
+# (dnv-worker.md RW22). Case H sizes from them every wait and every bound that
+# rests on a check round, a threshold or the demotion hold.
+DEFAULT_HC_INTERVAL=
+DEFAULT_PRIMARY_UNHEALTHY=
+DEMOTION_HOLD=
 
 WORK=/var/tmp/dnv-worker-integtest
 
@@ -140,7 +149,7 @@ CLONE_ID=0x30
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it
 
-CASES=(smoke revision health bitmap reaction drain vote handoff)
+CASES=(smoke revision health bitmap reaction failover drain vote handoff)
 
 DN_DIRS=(dn0 dn1 dn2 dn3)
 CN_DIRS=(cn0 cn1 cn2)
@@ -1003,14 +1012,29 @@ read_constants() {
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
 			"common.EtcdMaxTxnOps from it and must not guess it"
-	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
-	case "$ETCD_MAX_TXN_OPS" in
+	ETCD_MAX_TXN_OPS=$(constant_of "$json" EtcdMaxTxnOps)
+	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	DEFAULT_HC_INTERVAL=$(constant_of "$json" DefaultHealthCheckInterval)
+	DEFAULT_PRIMARY_UNHEALTHY=$(constant_of "$json" DefaultPrimaryUnhealthy)
+	DEMOTION_HOLD=$(constant_of "$json" DemotionHoldTimeout)
+	log "  case H timers: common.DefaultHealthCheckInterval" \
+		"$DEFAULT_HC_INTERVAL s, common.DefaultPrimaryUnhealthy" \
+		"$DEFAULT_PRIMARY_UNHEALTHY s, common.DemotionHoldTimeout" \
+		"$DEMOTION_HOLD s"
+}
+
+# constant_of prints one value of `workerctl constants` and dies unless it
+# is a plain non-negative number: an absent key reads as "null", and every
+# use of these values is arithmetic.
+constant_of() { # <json> <Go identifier>
+	local value
+	value=$(jq_of "$1" ".$2")
+	case "$value" in
 	'' | *[!0-9]*)
-		die "workerctl constants: EtcdMaxTxnOps is" \
-			"'$ETCD_MAX_TXN_OPS' in $json"
+		die "workerctl constants: $2 is '$value' in $1"
 		;;
 	esac
-	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	printf '%s' "$value"
 }
 
 # geometry_json prints `workerctl geometry`'s reply for one group of this
@@ -2308,7 +2332,9 @@ EOF
 	stage 2 "AR5 failover: the primary's own row fails it"
 	# Step 3's AR7 replacement hangs off the SAME err_epoch this step stamps:
 	# worker/reaction.go's replaceTarget wants only !disabled, err_epoch +
-	# cntlr_unhealthy (4 s) reached and !primary; model.Failover flips Primary
+	# cntlr_unhealthy (4 s) reached, !primary and this coordinator's own
+	# unhealthy verdict on the cntlr (dnv-worker.md AR10), which C1's ERROR row
+	# keeps giving; model.Failover flips Primary
 	# and leaves ErrEpoch alone; and cn 3 has had a budget for the 3-extent
 	# footprint since step 1. So the replacement lands ~2 s after the failover
 	# — while this step is still polling — and every baseline step 3 compares
@@ -2410,12 +2436,14 @@ EOF
 		"cn 3 cntlr_ptr_list after the replacement"
 	assert_eq "$(cn_free 3)" $((cn3_free_before - 3)) "cn 3 budget debited"
 	assert_ge "$(cn_rev 3)" $((cn3_rev_before + 1)) "cn 3 CnRev bumped"
-	# The CdcEntry was rewritten in the replacement's own STM. Each node's
-	# NvmeTrConf carries that node's OWN port as tr_svc_id (workerctl), so the
-	# list is attributable per CN and step 3's "lists cn 2 and cn 3, not
-	# cn 1" is checkable as a SET. The expectation is also derived from what
-	# the SP actually holds, because put-ss appends one entry per cntlr with
-	# no dedupe: the two must agree.
+	# The CdcEntry follows the listing rule (architecture.md [D18]): step 2's
+	# failover took cn 1's transport out in its own STM, C1 being a standby
+	# with an err_epoch from then on, and the replacement's own STM listed
+	# the new cntlr, a clean standby. Each node's NvmeTrConf carries that
+	# node's OWN port as tr_svc_id (workerctl), so the list is attributable
+	# per CN and step 3's "lists cn 2 and cn 3, not cn 1" is checkable as a
+	# SET. The expectation is also derived from what the SP actually holds —
+	# the primary and a clean standby, both listed: the two must agree.
 	local cdc cdc_ports want_ports
 	cdc=$(ctl get --key "$cdc_key")
 	assert_field "$cdc" .nqn "$NQN_PREFIX:ss0" "the CdcEntry's nqn"
@@ -3065,6 +3093,684 @@ side_provisioned() { # <sp> <slice> <side id>
 leg_in_list() { # <sp> <slice> <meta|data> <grp id> <leg id>
 	active_legs "$1" "$2" "$3" "$4" | awk -v l="$5" '$1 == l { found = 1 }
 		END { exit !found }'
+}
+
+# ---------------------------------------------------------------------------
+# Case H — failover (dnv-worker.md, Integration test plan, Cases)
+# ---------------------------------------------------------------------------
+#
+# Failovers at the shipped default timers, watched through the discovery
+# records and the fakes' request records. The CdcEntry lists a cntlr while it
+# is enabled and either is the primary or has a zero err_epoch
+# (architecture.md [D18]); a fan-out that demotes a primary hands that cntlr
+# its demotion at once and holds the sides and the other cntlrs until the
+# demotion is applied or DemotionHoldTimeout passes (dnv-worker.md RW22); a
+# threshold reaction fires only on an object this coordinator itself last
+# judged unhealthy (dnv-worker.md AR10).
+
+# cntlr_key and sp_rev_key spell two keys for mod_rev (architecture.md, Key
+# grammar): ids in common.IdKeyFmt, which is how $CID is already spelled, and
+# every SP of this suite on shard 00.
+cntlr_key() { # <sp id> <cntlr id>
+	printf '%s cntlr %s %016x %016x' "$DNV_PREFIX" "$CID" "$1" "$2"
+}
+
+sp_rev_key() { # <sp id>
+	printf '%s sp_rev 00 %s %016x' "$DNV_PREFIX" "$CID" "$1"
+}
+
+# mod_rev prints the etcd mod_revision of one key — the revision of the
+# transaction that last wrote it — read with the shipped etcdctl, or fails
+# when the read did or the key is absent.
+mod_rev() { # <key>
+	local out rev
+	out=$(sshw "$WORK/bin/etcdctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"get $(printf '%q' "$1") -w json") || return 1
+	rev=$(jq_of "$out" '.kvs[0].mod_revision // empty') || return 1
+	case "$rev" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	printf '%s' "$rev"
+}
+
+# same_txn asserts that two keys were last written by one transaction: they
+# carry one mod_revision.
+same_txn() { # <key> <key> <label>
+	local first second
+	first=$(mod_rev "$1") || die "$3: the mod_revision of '$1' could not be read"
+	second=$(mod_rev "$2") || die "$3: the mod_revision of '$2' could not be read"
+	assert_eq "$second" "$first" "$3: the mod_revision of '$2' against '$1'"
+}
+
+# cdc_ports prints a CdcEntry's transports as its sorted, comma-joined
+# tr_svc_id list — each a CN's own port (cn_port) — or fails when the read
+# did; cn_ports spells a set of CN ids the same way.
+cdc_ports() { # <cdc key>
+	local out
+	out=$(ctl get --key "$1") || return 1
+	jq_of "$out" '[.nvme_tr_conf_list[]?.tr_svc_id] | sort | join(",")'
+}
+
+cn_ports() { # <cn id…>
+	local id ports=()
+	for id in "$@"; do ports+=("$(cn_port "$id")"); done
+	printf '%s\n' "${ports[@]}" | sort | tr '\n' ',' | sed 's/,$//'
+}
+
+# cdc_is is the wait_until predicate "the CdcEntry lists exactly these CNs";
+# a read that failed keeps the poll running.
+cdc_is() { # <cdc key> <cn id…>
+	local key=$1 got
+	shift
+	got=$(cdc_ports "$key") || return 1
+	[ "$got" = "$(cn_ports "$@")" ]
+}
+
+# cdc_lacks_or_die is the predicate of a negative: whether the CdcEntry lacks
+# one CN. It dies on a failed read, as td_created_or_die does: read as an
+# empty list, a dropped ssh would decide the negative.
+cdc_lacks_or_die() { # <cdc key> <cn id>
+	local got
+	got=$(cdc_ports "$1") ||
+		die "the CdcEntry could not be read: a read that failed lists nothing"
+	case ",$got," in
+	*",$(cn_port "$2"),"*) return 1 ;;
+	esac
+	return 0
+}
+
+# req_first prints "<epoch> <trace_id>" of the FIRST request one fake received
+# for a method whose `.data` matches a filter, or fails while there is none.
+# The server interceptor logs a unary request on arrival, before the fake's
+# handler runs, so a request the fake then holds (hang_syncup) is timed when
+# it arrived.
+req_first() { # <agent> <method> <filter over .data> [jq args…]
+	local agent=$1 method=$2 filter=$3 line
+	shift 3
+	line=$(recsr "$(apath "$agent")" \
+		'select(.msg == "grpc server request")
+		 | select((.method | split("/") | last) == $m)
+		 | select(has("data")) | select(.data | '"$filter"')
+		 | "\(.time) \(.trace_id)"' --arg m "$method" "$@" | sed -n 1p) ||
+		return 1
+	[ -n "$line" ] || return 1
+	printf '%s %s\n' "$(ts_epoch "${line%% *}")" "${line##* }"
+}
+
+# reply_for prints "<epoch> <code>" of the reply one fake logged to the
+# request of one trace id — a unary request and its reply share it — the
+# code being the reply's agent_reply.code, or fails while there is none: a
+# held request has no reply yet, and one that ended on its caller's deadline
+# logged an error instead of a message.
+reply_for() { # <agent> <method> <trace_id>
+	local line
+	line=$(recsr "$(apath "$1")" \
+		'select(.msg == "grpc server reply")
+		 | select((.method | split("/") | last) == $m)
+		 | select(.trace_id == $t) | select(has("data"))
+		 | "\(.time) \(.data.agent_reply.code // 0)"' \
+		--arg m "$2" --arg t "$3" | sed -n 1p) || return 1
+	[ -n "$line" ] || return 1
+	printf '%s %s\n' "$(ts_epoch "${line%% *}")" "${line##* }"
+}
+
+# replied_before asserts that one fake answered a request, with code 0, no
+# later than a given epoch: the barrier between two requests, read from the
+# records of the fakes that received them.
+replied_before() { # <agent> <method> <"epoch trace_id" of the request> <epoch> <label>
+	local reply
+	reply=$(reply_for "$1" "$2" "${3##* }") ||
+		die "$5: $1 has no reply to the $2 of trace ${3##* }"
+	assert_eq "${reply##* }" 0 "$5: the code of $1's reply"
+	ts_ge "$4" "${reply%% *}" ||
+		die "$5: $1 replied at ${reply%% *}, after $4"
+}
+
+# epoch_delta and epoch_min compute on the epochs req_first and reply_for
+# print. printf keeps the fraction, which awk's print would round to six
+# significant digits.
+epoch_delta() { # <later> <earlier>
+	awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", a - b }'
+}
+
+epoch_min() { # <epoch> <epoch>
+	awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", (a < b ? a : b) }'
+}
+
+# reaction_revision prints the `revision` of the n-th `reaction applied`
+# record of one kind, over every worker log of the case in time order: the
+# SpRev the coordinator read back right after the reaction's STM. It fails
+# when there is no n-th record, and when any one log could not be read, as
+# wcount does: a log left out of the merge would move the n-th record.
+reaction_revision() { # <kind> <n from 1>
+	local w t r out all= line
+	for w in "${SEEN_WORKERS[@]}"; do
+		out=$(recsr "$(wpath "$w")" \
+			'select(.msg == "reaction applied") | select(.kind == $k)
+			 | "\(.time) \(.revision)"' --arg k "$1") || return 1
+		all+="$out"$'\n'
+	done
+	line=$(printf '%s' "$all" | while read -r t r; do
+		if [ -n "$t" ]; then printf '%s %s\n' "$(ts_epoch "$t")" "$r"; fi
+	done | sort -n | sed -n "${2}p") || return 1
+	[ -n "$line" ] || return 1
+	printf '%s\n' "${line##* }"
+}
+
+# want_number dies unless a revision or an err_epoch read back is a plain
+# non-zero number: a wait for "set" is met by a failed read too, and a 0
+# would put every compare against it in 1970 (case D step 2).
+want_number() { # <value> <label>
+	case "$1" in
+	'' | 0 | *[!0-9]*) die "$2 read back as '$1'" ;;
+	esac
+}
+
+reaction_any_cnt() { wcount 'select(.msg == "reaction applied")'; }
+
+# cntlr_health_cnt counts the `health changed` records (dnv-worker.md, Log
+# records) of one cntlr for one reason, over every worker log of the case
+# or, given a worker, over that worker's log alone.
+cntlr_health_cnt() { # <sp id> <cntlr id> <reason> [worker]
+	local filter='select(.msg == "health changed" and .record == "cntlr")
+		| select((.sp_id | tostring) == $sp and (.cntlr_id | tostring) == $c
+			and .reason == $rea)'
+	if [ $# -ge 4 ]; then
+		count_recs "$(wpath "$4")" "$filter" \
+			--arg sp "$1" --arg c "$2" --arg rea "$3"
+	else
+		wcount "$filter" --arg sp "$1" --arg c "$2" --arg rea "$3"
+	fi
+}
+
+# demotion_unsynced_cnt counts the `sp demotion unsynced` records of one SP
+# at one revision (dnv-worker.md RW22: the demotion hold ended by its wait)
+# and, given a list, only those whose cntlr_ids — the demoted cntlrs that had
+# not reported — are exactly that comma-joined list.
+demotion_unsynced_cnt() { # <sp id> <revision> [cntlr ids]
+	wcount 'select(.msg == "sp demotion unsynced")
+		| select((.sp_id | tostring) == $sp and (.revision | tostring) == $r)
+		| select($ids == "*"
+			or ((.cntlr_ids // []) | map(tostring) | join(",")) == $ids)' \
+		--arg sp "$1" --arg r "$2" --arg ids "${3-*}"
+}
+
+demotion_unsynced_all() { wcount 'select(.msg == "sp demotion unsynced")'; }
+
+# stored_interval prints one health_check_conf member of the case's
+# ClusterConf as workerctl stored it.
+stored_interval() { # <member>
+	ctl get --key "$DNV_PREFIX cluster_conf $CLUSTER" |
+		"$JQ" -r --arg f "$1" '.health_check_conf[$f]'
+}
+
+case_failover() {
+	CASE=failover
+	local hc=$DEFAULT_HC_INTERVAL pt=$DEFAULT_PRIMARY_UNHEALTHY
+	local hold=$DEMOTION_HOLD
+	local at_rev='(.revision | tostring) == $r'
+	local promotes="$at_rev and (.cntlr.primary // false)"
+	local demotes="$at_rev and ((.cntlr.primary // false) | not)"
+	local i member
+
+	stage 1 "the fixture at the default timers: sp0 with three cntlrs, td0 and ss0"
+	new_cluster failover --dn-interval 0 --cn-interval 0 \
+		--side-interval 0 --cntlr-interval 0
+	for member in dn_interval cn_interval side_interval cntlr_interval; do
+		assert_eq "$(stored_interval "$member")" "$hc" \
+			"health_check_conf.$member stored for a 0 (the default)"
+	done
+	# Stage 6 rests on it: one missed round followed by a prompt clean round
+	# cannot reach the default primary threshold (architecture.md, Common
+	# validation; dnv-worker.md, Known limits).
+	assert_ge "$pt" $((2 * hc)) \
+		"the default primary threshold against two default check intervals"
+	put_dn 1 8
+	put_dn 2 8
+	for i in 1 2 3; do put_cn "$i" 64; done
+	# No --thresholds: the pool reads every default. The cntlr, side and leg
+	# ones are minutes long, so nothing replaces a cntlr or repairs a leg
+	# inside the case: only failovers move a role.
+	ctl put-sp --name sp0 --id 1 --shard 00 --slots 0,1,2 --level 0 \
+		--lwm "$LWM" \
+		--cntlr 1:1:0:true --cntlr 2:2:1:false --cntlr 3:3:2:false \
+		--slice 1:0 \
+		--group 1:1:data:2:raid1 \
+		--leg 1:1:0 --leg 1:2:1 \
+		--side 1:1:1:0 --side 2:2:2:0
+	assert_field "$(ctl get-sp --sp sp0)" \
+		'.sp_conf.event_threshold.primary_unhealthy | tostring' 0 \
+		"sp0's stored primary threshold (0: the default applies)"
+	ctl put-td --sp sp0 --name td0 --id "$TD_ID" --size 10737418240
+	local ss_out cdc_key
+	ss_out=$(ctl put-ss --sp sp0 --nqn "$NQN_PREFIX:ss0" --id "$SS_ID" \
+		--ns "$NS_ID:1:$TD_ID")
+	cdc_key=$(jq_of "$ss_out" .cdc_key)
+	case "$cdc_key" in
+	"$DNV_PREFIX cdc "*) ;;
+	*) die "put-ss printed no CdcEntry key: $ss_out" ;;
+	esac
+	wait_until "$WAIT_SYNCUP" "every side of slice 1 provisioned" \
+		all_provisioned sp0 1
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"thin_ok": true}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "td0 created true" td_created sp0 td0
+	# A settling primary is held to the cntlr threshold (AR5); every
+	# threshold this case times is a settled primary's.
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 settled (settling false)" \
+		cntlr_settled sp0 1
+	assert_eq "$(cdc_ports "$cdc_key")" "$(cn_ports 1 2 3)" \
+		"the CdcEntry lists the primary and both clean standbys"
+	mod_rev "$(sp_rev_key 1)" >/dev/null ||
+		die "no SpRev key at '$(sp_rev_key 1)': the spelling mod_rev compares by"
+
+	stage 2 "a hung standby leaves the CdcEntry and comes back, with no bump and no reaction"
+	# The listing rule rides the health write: the STM that sets or clears
+	# a standby's err_epoch rewrites the entry, so the two keys carry one
+	# mod_revision, and no health write bumps SpRev (HL3).
+	local sprev reactions c2_unreach c2_recov
+	sprev=$(sp_rev 1)
+	reactions=$(reaction_any_cnt)
+	c2_unreach=$(cntlr_health_cnt 1 2 unreachable)
+	c2_recov=$(cntlr_health_cnt 1 2 recovered)
+	set_behavior cn1 <<'EOF'
+{"objects": {"cntlr 1:2": {"hang": true}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "C2 err_epoch set by its missed round" \
+		cntlr_epoch_set sp0 2
+	same_txn "$(cntlr_key 1 2)" "$cdc_key" "C2 turned unhealthy"
+	assert_eq "$(cdc_ports "$cdc_key")" "$(cn_ports 1 3)" \
+		"the CdcEntry while C2 is unhealthy"
+	assert_ge "$(cntlr_health_cnt 1 2 unreachable)" $((c2_unreach + 1)) \
+		"health changed record=cntlr reason=unreachable for C2"
+	clear_behavior cn1
+	wait_until $((2 * hc + WAIT_SHORT)) "C2 err_epoch cleared" \
+		cntlr_epoch_clear sp0 2
+	same_txn "$(cntlr_key 1 2)" "$cdc_key" "C2 clean again"
+	assert_eq "$(cdc_ports "$cdc_key")" "$(cn_ports 1 2 3)" \
+		"the CdcEntry once C2 is clean again"
+	assert_ge "$(cntlr_health_cnt 1 2 recovered)" $((c2_recov + 1)) \
+		"health changed record=cntlr reason=recovered for C2"
+	assert_eq "$(sp_rev 1)" "$sprev" "SpRev across the standby's round trip"
+	assert_eq "$(reaction_any_cnt)" "$reactions" \
+		"reactions while a standby was unhealthy"
+
+	stage 3 "an unhealthy primary with no candidate keeps its record (AR5)"
+	# Both standbys go first, each its own way. C3 reports an ERROR row,
+	# which every reply of it carries — its Check rounds and the syncup the
+	# failover of stage 4 sends it alike — so it stays unhealthy and unlisted
+	# through that failover; a hung standby would answer the syncup and read
+	# clean for a round.
+	set_behavior cn1 <<'EOF'
+{"objects": {"cntlr 1:2": {"hang": true}}}
+EOF
+	set_behavior cn2 <<'EOF'
+{"objects": {"cntlr 1:3": {"rows": {"slice_id_to_dm_pool.1":
+  {"status": "ERROR", "details": "pool failed"}}}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "C2 err_epoch set" cntlr_epoch_set sp0 2
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch set" cntlr_epoch_set sp0 3
+	wait_until "$WAIT_SHORT" "the CdcEntry to list the primary alone" \
+		cdc_is "$cdc_key" 1
+	local skips failovers cdc_rev
+	skips=$(reaction_skip_cnt failover "no candidate")
+	failovers=$(reaction_cnt failover)
+	cdc_rev=$(mod_rev "$cdc_key") ||
+		die "the CdcEntry's mod_revision could not be read"
+	# C1 stalls the way a stopped cn agent does: neither its Check rounds
+	# nor its syncups are answered.
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"hang": true, "hang_syncup": true}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 err_epoch set by its missed round" \
+		cntlr_epoch_set sp0 1
+	wait_until $((pt + 2 * hc + WAIT_SHORT)) \
+		"reaction skipped kind=failover reason=no candidate" \
+		reaction_skip_ge $((skips + 1)) failover "no candidate"
+	# A serving primary is never taken away from the hosts: listed while it
+	# is the primary, whatever its err_epoch — and the entry was not even
+	# rewritten for a moment, since no transaction has touched it.
+	assert_none_for $((pt + hc)) "the unhealthy primary leaving the CdcEntry" \
+		cdc_lacks_or_die "$cdc_key" 1
+	assert_eq "$(mod_rev "$cdc_key")" "$cdc_rev" \
+		"the CdcEntry's mod_revision while the primary is unhealthy"
+	assert_eq "$(reaction_cnt failover)" "$failovers" \
+		"failovers with no candidate"
+	assert_eq "$(cntlr_field sp0 1 primary)" true \
+		"C1 primary with no candidate"
+
+	stage 4 "a hung primary fails over: its demotion, the sides a DemotionHoldTimeout later, then the promotion"
+	# C2 comes back clean, a candidate again, and the next pass fails C1
+	# over (AR5): C1's missed rounds are this coordinator's own verdict
+	# (dnv-worker.md AR10).
+	local unsynced rev
+	unsynced=$(demotion_unsynced_all)
+	clear_behavior cn1
+	wait_until $((2 * hc + WAIT_SHORT)) "C2 err_epoch cleared" \
+		cntlr_epoch_clear sp0 2
+	wait_until $((2 * hc + WAIT_SHORT)) "reaction applied kind=failover" \
+		reaction_ge $((failovers + 1)) failover
+	rev=$(reaction_revision failover $((failovers + 1))) ||
+		die "failover $((failovers + 1)) of the case has no revision:" \
+			"a worker log could not be read, or it holds no such record"
+	want_number "$rev" "the failover record's revision"
+	log "  the failover's STM bumped SpRev to $rev"
+	assert_eq "$(sp_rev 1)" "$rev" "SpRev right after the failover"
+	# The failover's own STM took C1 out of the entry (architecture.md
+	# [D18]): a demoted cntlr with an err_epoch is a standby the rule does
+	# not list, and C1, stalled, has written nothing since its missed round.
+	same_txn "$(sp_rev_key 1)" "$cdc_key" "the failover"
+	assert_eq "$(cdc_ports "$cdc_key")" "$(cn_ports 2)" \
+		"the CdcEntry after the failover (C1 demoted and unhealthy, C3 unhealthy)"
+	assert_eq "$(cntlr_field sp0 1 primary)" false \
+		"C1 primary after the failover"
+	assert_eq "$(cntlr_field sp0 2 primary)" true \
+		"C2 primary after the failover"
+	# Read, not cntlr_epoch_set: that predicate takes a failed read for "set".
+	local stalled_epoch
+	stalled_epoch=$(cntlr_field sp0 1 err_epoch)
+	want_number "$stalled_epoch" "C1's err_epoch while it stalls"
+
+	log "  4.1: the order, read from the fakes' request records"
+	wait_until $((hold + 2 * hc + WAIT_SHORT)) \
+		"cn1: the SyncupCntlr promoting C2 at revision $rev" \
+		req_ge 1 cn1 SyncupCntlr "$promotes" --arg r "$rev"
+	wait_until "$WAIT_SHORT" "cn2: a SyncupCntlr at revision $rev" \
+		req_ge 1 cn2 SyncupCntlr "$at_rev" --arg r "$rev"
+	local dem pro c3 side0 side1 first_side gap
+	dem=$(req_first cn0 SyncupCntlr "$demotes" --arg r "$rev") ||
+		die "cn0 received no demotion of C1 at revision $rev"
+	side0=$(req_first dn0 SyncupSide \
+		"$at_rev and (.side_conf.primary_cn_id | tostring) == \"2\"" \
+		--arg r "$rev") ||
+		die "dn0 received no SyncupSide naming cn 2 primary at revision $rev"
+	side1=$(req_first dn1 SyncupSide \
+		"$at_rev and (.side_conf.primary_cn_id | tostring) == \"2\"" \
+		--arg r "$rev") ||
+		die "dn1 received no SyncupSide naming cn 2 primary at revision $rev"
+	pro=$(req_first cn1 SyncupCntlr "$promotes" --arg r "$rev") ||
+		die "cn1 received no promotion of C2 at revision $rev"
+	c3=$(req_first cn2 SyncupCntlr "$at_rev" --arg r "$rev") ||
+		die "cn2 received no SyncupCntlr at revision $rev"
+	first_side=$(epoch_min "${side0%% *}" "${side1%% *}")
+	gap=$(epoch_delta "$first_side" "${dem%% *}")
+	log "  C1's demotion at ${dem%% *}, the first side $gap s later"
+	# Nobody answers the demotion, so RW22's demotion hold keeps the sides back
+	# for its whole wait: not less — its timer is armed a moment before the
+	# demotion leaves, and RW14's interval-long bound is shorter — and not the
+	# syncup deadline (RW5) the demotion call itself waits out; the upper bound
+	# allows a busy coordinator.
+	awk -v g="$gap" -v h="$hold" 'BEGIN { exit !(g >= h - 0.3 && g <= h + 1.5) }' ||
+		die "the sides were told the failover $gap s after C1's demotion," \
+			"want DemotionHoldTimeout ($hold s)"
+	assert_eq "$(demotion_unsynced_cnt 1 "$rev" 1)" 1 \
+		"sp demotion unsynced records at revision $rev naming C1"
+	assert_eq "$(demotion_unsynced_all)" $((unsynced + 1)) \
+		"sp demotion unsynced records of the stage"
+	# RW14 then holds the cntlrs until both sides answered the revision.
+	replied_before dn0 SyncupSide "$side0" "${pro%% *}" \
+		"side 1 before C2's promotion"
+	replied_before dn1 SyncupSide "$side1" "${pro%% *}" \
+		"side 2 before C2's promotion"
+	replied_before dn0 SyncupSide "$side0" "${c3%% *}" \
+		"side 1 before C3's syncup"
+	replied_before dn1 SyncupSide "$side1" "${c3%% *}" \
+		"side 2 before C3's syncup"
+
+	log "  4.2: C1 resumes: it applies the held demotion and is listed again as a clean standby"
+	local c1_recov reply
+	c1_recov=$(cntlr_health_cnt 1 1 recovered)
+	clear_behavior cn0
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 err_epoch cleared" \
+		cntlr_epoch_clear sp0 1
+	reply=$(reply_for cn0 SyncupCntlr "${dem##* }") ||
+		die "cn0: the held demotion of C1 was never answered"
+	assert_eq "${reply##* }" 0 "cn0: the code of the reply to the held demotion"
+	assert_ge "$(cntlr_health_cnt 1 1 recovered)" $((c1_recov + 1)) \
+		"health changed record=cntlr reason=recovered for C1"
+	wait_until "$WAIT_SHORT" "the CdcEntry to list C1 and C2" \
+		cdc_is "$cdc_key" 1 2
+	clear_behavior cn2
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch cleared" \
+		cntlr_epoch_clear sp0 3
+	wait_until "$WAIT_SHORT" "the CdcEntry to list all three cntlrs" \
+		cdc_is "$cdc_key" 1 2 3
+
+	stage 5 "a reachable primary's demotion releases its sides at once (dnv-worker.md RW22)"
+	# The disabled trigger fails C2 over at the next pass, with no
+	# threshold (AR5). The disable is workerctl's raw write, which leaves the
+	# CdcEntry as it is; the failover's STM unlists the disabled cntlr.
+	local dis_rev
+	failovers=$(reaction_cnt failover)
+	unsynced=$(demotion_unsynced_all)
+	dis_rev=$(ctl set-cntlr --sp sp0 --id 2 --disabled=true | "$JQ" -r .sp_rev)
+	want_number "$dis_rev" "the disable's SpRev"
+	wait_until $((2 * hc + WAIT_SHORT)) \
+		"reaction applied kind=failover (C2 disabled)" \
+		reaction_ge $((failovers + 1)) failover
+	rev=$(reaction_revision failover $((failovers + 1))) ||
+		die "failover $((failovers + 1)) of the case has no revision:" \
+			"a worker log could not be read, or it holds no such record"
+	want_number "$rev" "the failover record's revision"
+	[ "$rev" -gt "$dis_rev" ] ||
+		die "the failover's revision $rev is not past the disable's $dis_rev"
+	assert_eq "$(cntlr_field sp0 1 primary)" true \
+		"C1, the lowest clean standby, primary after the failover"
+	same_txn "$(sp_rev_key 1)" "$cdc_key" "the failover of the disabled primary"
+	assert_eq "$(cdc_ports "$cdc_key")" "$(cn_ports 1 3)" \
+		"the CdcEntry after the failover (C2 disabled)"
+	wait_until $((2 * hc + WAIT_SHORT)) \
+		"cn0: the SyncupCntlr promoting C1 at revision $rev" \
+		req_ge 1 cn0 SyncupCntlr "$promotes" --arg r "$rev"
+	dem=$(req_first cn1 SyncupCntlr "$demotes" --arg r "$rev") ||
+		die "cn1 received no demotion of C2 at revision $rev"
+	side0=$(req_first dn0 SyncupSide \
+		"$at_rev and (.side_conf.primary_cn_id | tostring) == \"1\"" \
+		--arg r "$rev") ||
+		die "dn0 received no SyncupSide naming cn 1 primary at revision $rev"
+	side1=$(req_first dn1 SyncupSide \
+		"$at_rev and (.side_conf.primary_cn_id | tostring) == \"1\"" \
+		--arg r "$rev") ||
+		die "dn1 received no SyncupSide naming cn 1 primary at revision $rev"
+	pro=$(req_first cn0 SyncupCntlr "$promotes" --arg r "$rev") ||
+		die "cn0 received no promotion of C1 at revision $rev"
+	first_side=$(epoch_min "${side0%% *}" "${side1%% *}")
+	replied_before cn1 SyncupCntlr "$dem" "$first_side" \
+		"C2's demotion answered before any side was told"
+	gap=$(epoch_delta "$first_side" "${dem%% *}")
+	log "  C2's demotion at ${dem%% *}, answered, the first side $gap s later"
+	awk -v g="$gap" -v h="$hold" 'BEGIN { exit !(g < h / 2) }' ||
+		die "the sides waited $gap s for an answered demotion," \
+			"want well under DemotionHoldTimeout ($hold s)"
+	replied_before dn0 SyncupSide "$side0" "${pro%% *}" \
+		"side 1 before C1's promotion"
+	replied_before dn1 SyncupSide "$side1" "${pro%% *}" \
+		"side 2 before C1's promotion"
+	assert_eq "$(demotion_unsynced_cnt 1 "$rev")" 0 \
+		"sp demotion unsynced records at revision $rev"
+	assert_eq "$(demotion_unsynced_all)" "$unsynced" \
+		"sp demotion unsynced records of the stage"
+
+	stage 6 "the primary threshold is two rounds: one missed round followed by a prompt answer never fails over, every round missed does (AR5)"
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 settled after its promotion" \
+		cntlr_settled sp0 1
+	log "  6.1: one missed round, the next one answered"
+	local c1_unreach
+	failovers=$(reaction_cnt failover)
+	c1_unreach=$(cntlr_health_cnt 1 1 unreachable)
+	c1_recov=$(cntlr_health_cnt 1 1 recovered)
+	# hang_rounds holds exactly one round until the worker times it out, so
+	# the miss does not depend on how fast this script polls.
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"hang_rounds": 1}}}
+EOF
+	wait_until $((3 * hc + WAIT_SHORT)) "C1 unreachable for the held round" \
+		count_gt "$c1_unreach" cntlr_health_cnt 1 1 unreachable
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 recovered at the round after it" \
+		count_gt "$c1_recov" cntlr_health_cnt 1 1 recovered
+	# The err_epoch is whole seconds, and the next round goes one interval
+	# after the missed one timed out (RW8): its clean verdict replaces the
+	# unhealthy one in the memo, and clears the epoch, before now -
+	# err_epoch can reach the threshold.
+	assert_none_for $((2 * pt + 2 * hc)) "a failover on one missed round" \
+		reaction_ge $((failovers + 1)) failover
+	assert_eq "$(cntlr_health_cnt 1 1 unreachable)" $((c1_unreach + 1)) \
+		"C1's unreachable records (one round held)"
+	assert_eq "$(cntlr_field sp0 1 primary)" true \
+		"C1 primary after one missed round"
+	assert_eq "$(cntlr_field sp0 1 err_epoch)" 0 \
+		"C1's err_epoch after one missed round"
+
+	log "  6.2: every round missed"
+	local c1_epoch failover_at
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"hang": true}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 err_epoch set" cntlr_epoch_set sp0 1
+	c1_epoch=$(cntlr_field sp0 1 err_epoch)
+	want_number "$c1_epoch" "C1's err_epoch"
+	wait_until $((pt + 2 * hc + WAIT_SHORT)) "reaction applied kind=failover" \
+		reaction_ge $((failovers + 1)) failover
+	# Timed against the epoch the worker stamped, as case D step 2 times
+	# its failover: AR5 fires at the first pass once now - err_epoch reaches
+	# the threshold, so within one interval of it.
+	failover_at=$(reaction_epochs failover | sed -n "$((failovers + 1))p")
+	[ -n "$failover_at" ] || die "no failover record to time"
+	ts_ge "$failover_at" $((c1_epoch + pt)) ||
+		die "the failover ran at $failover_at, before C1's err_epoch" \
+			"$c1_epoch + the ${pt}s primary threshold"
+	ts_lt "$failover_at" $((c1_epoch + pt + hc + 2)) ||
+		die "the failover ran at $failover_at, later than one interval" \
+			"past C1's err_epoch $c1_epoch + the ${pt}s primary threshold"
+	wait_until "$WAIT_SHORT" "C3 primary true" cntlr_is_primary sp0 3
+	clear_behavior cn0
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 err_epoch cleared" \
+		cntlr_epoch_clear sp0 1
+	wait_until "$WAIT_SHORT" "the CdcEntry to list C1 and C3" \
+		cdc_is "$cdc_key" 1 3
+
+	stage 7 "after a handoff a stale err_epoch fires nothing before the new owner's own verdict (dnv-worker.md AR10)"
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 settled after its promotion" \
+		cntlr_settled sp0 3
+	# The epoch is the current owner's own verdict, written while sp_level
+	# suppresses every reaction (AR3).
+	ctl set-level --sp sp0 --level 48
+	set_behavior cn2 <<EOF
+{"objects": {"cntlr 1:3": {"rows": {"ss_id_to_subsystem.$((SS_ID))":
+  {"status": "ERROR", "details": "subsystem gone"}}}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch set under suppression" \
+		cntlr_epoch_set sp0 3
+	local c3_epoch refused
+	c3_epoch=$(cntlr_field sp0 3 err_epoch)
+	want_number "$c3_epoch" "C3's err_epoch"
+	# From here on C3 answers nothing anyone can judge: a rejected reply
+	# neither sets nor clears (HL2), so the epoch outlives its writer.
+	refused=$(replies cn2 SyncupCntlr '(.agent_reply.code // 0) == 2')
+	set_behavior cn2 <<'EOF'
+{"objects": {"cntlr 1:3": {"reply_code": 2}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "cn2: a SyncupCntlr refused with code 2" \
+		reply_gt "$refused" cn2 SyncupCntlr '(.agent_reply.code // 0) == 2'
+	local owner new_owner new8 lift level new_recov now_at
+	reactions=$(reaction_any_cnt)
+	owner=$(owner_of sp 00)
+	[ -n "$owner" ] || die "no owner for (sp, 00)"
+	log "  (sp, 00) is owned by $owner"
+	sig_dir "$owner" KILL
+	wait_gone "$owner" "$WAIT_SHORT"
+	# Lifted while (sp, 00) has no owner: the next owner finds the SP
+	# unsuppressed, C3's err_epoch past the threshold, C3 settled and C1 a
+	# clean candidate — everything a pass reads but a verdict of its own.
+	lift=$(ctl set-level --sp sp0 --level 0)
+	level=$(jq_of "$lift" .sp_level)
+	wait_until "$WAIT_MEMBERSHIP" "another worker to own (sp, 00)" \
+		shard_owner_changed sp 00 "$owner"
+	new_owner=$(owner_of sp 00)
+	new8=$(seed8 "$new_owner")
+	log "  (sp, 00) moved to $new_owner"
+	wait_until "$WAIT_MEMBERSHIP" "cn2: CheckCntlr rounds from the new owner" \
+		trace_req_ge 1 cn2 CheckCntlr "$new8"
+	assert_none_for $((3 * hc + 2)) \
+		"a reaction before the new owner judged C3 itself" \
+		count_gt "$reactions" reaction_any_cnt
+	# Not vacuous: every other input of AR5's threshold arm says fail over.
+	assert_eq "$(cntlr_field sp0 3 err_epoch)" "$c3_epoch" \
+		"C3's err_epoch across the handoff"
+	assert_eq "$(cntlr_field sp0 3 primary)" true "C3 primary across the handoff"
+	assert_eq "$(cntlr_field sp0 3 settling)" false "C3 settled across the handoff"
+	assert_eq "$(cntlr_field sp0 1 err_epoch)" 0 "C1, the candidate, clean"
+	assert_eq "$(cntlr_field sp0 1 disabled)" false "C1, the candidate, enabled"
+	assert_field "$(ctl get-sp --sp sp0)" .sp_conf.sp_level "$level" \
+		"sp0's sp_level after the lift"
+	now_at=$(server_now)
+	ts_ge "$(ts_epoch "$now_at")" $((c3_epoch + pt)) ||
+		die "C3's err_epoch $c3_epoch is not past the threshold at $now_at"
+
+	log "  7.2: C3 answers again: the new owner's first verdict clears it"
+	new_recov=$(cntlr_health_cnt 1 3 recovered "$new_owner")
+	clear_behavior cn2
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch cleared" \
+		cntlr_epoch_clear sp0 3
+	assert_ge "$(cntlr_health_cnt 1 3 recovered "$new_owner")" \
+		$((new_recov + 1)) \
+		"health changed record=cntlr reason=recovered for C3 in $new_owner's log"
+	assert_eq "$(reaction_any_cnt)" "$reactions" "reactions across the handoff"
+
+	stage 8 "a verdict that writes nothing still counts (dnv-worker.md AR10, HL3)"
+	# A planted err_epoch — what another observer would have written — is
+	# no verdict of this coordinator's and fires nothing on its own, even
+	# right after the coordinator judged C3 unhealthy and then clean: its
+	# memo keeps each object's latest verdict alone. Its passes hand the
+	# record to C3's monitor (HL3), so C3's next unhealthy reply is no
+	# transition and writes nothing, and the failover follows all the same.
+	# The age is past the primary threshold and short of the cntlr one.
+	local c3_unreach c3_recov
+	c3_unreach=$(cntlr_health_cnt 1 3 unreachable "$new_owner")
+	c3_recov=$(cntlr_health_cnt 1 3 recovered "$new_owner")
+	set_behavior cn2 <<'EOF'
+{"objects": {"cntlr 1:3": {"hang_rounds": 1}}}
+EOF
+	wait_until $((3 * hc + WAIT_SHORT)) "C3 unreachable for one held round" \
+		count_gt "$c3_unreach" cntlr_health_cnt 1 3 unreachable "$new_owner"
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 recovered at the round after it" \
+		count_gt "$c3_recov" cntlr_health_cnt 1 3 recovered "$new_owner"
+	refused=$(replies cn2 SyncupCntlr '(.agent_reply.code // 0) == 2')
+	set_behavior cn2 <<'EOF'
+{"objects": {"cntlr 1:3": {"reply_code": 2}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "cn2: a SyncupCntlr refused with code 2" \
+		reply_gt "$refused" cn2 SyncupCntlr '(.agent_reply.code // 0) == 2'
+	local planted c3_rows
+	failovers=$(reaction_cnt failover)
+	planted=$(ctl set-epoch cntlr --sp sp0 --id 3 --age $((pt + 30)) |
+		"$JQ" -r .err_epoch)
+	want_number "$planted" "the planted err_epoch"
+	assert_eq "$(cntlr_field sp0 3 err_epoch)" "$planted" \
+		"C3's err_epoch after the plant"
+	assert_none_for $((3 * hc + 1)) \
+		"a failover on an err_epoch this coordinator did not judge" \
+		reaction_ge $((failovers + 1)) failover
+	c3_rows=$(cntlr_health_cnt 1 3 error_row)
+	set_behavior cn2 <<EOF
+{"objects": {"cntlr 1:3": {"rows": {"ss_id_to_subsystem.$((SS_ID))":
+  {"status": "ERROR", "details": "subsystem gone"}}}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) \
+		"reaction applied kind=failover on C3's own verdict" \
+		reaction_ge $((failovers + 1)) failover
+	assert_eq "$(cntlr_health_cnt 1 3 error_row)" "$c3_rows" \
+		"C3's error_row records: its verdict wrote nothing"
+	assert_eq "$(cntlr_field sp0 3 err_epoch)" "$planted" \
+		"C3's err_epoch is still the planted one"
+	wait_until "$WAIT_SHORT" "C1 primary true" cntlr_is_primary sp0 1
+	clear_behavior cn2
+	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch cleared" \
+		cntlr_epoch_clear sp0 3
+	wait_until "$WAIT_SHORT" "the CdcEntry to list C1 and C3" \
+		cdc_is "$cdc_key" 1 3
+	log "  leaving one worker killed; the next fleet restart returns to w1 w2 w3"
 }
 
 # ---------------------------------------------------------------------------

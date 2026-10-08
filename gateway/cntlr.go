@@ -297,10 +297,10 @@ func (s *Server) CreateCntlr(
 			minter := newSpIdMinter(conf)
 			cntlrId = minter.mint()
 			// primary and disabled are both false: a new cntlr is a standby
-			// that the failover election of dnv-worker.md AR5 may
-			// later promote, and it is enabled
-			// from birth, which is what puts its CN into every CdcEntry
-			// below.
+			// that the failover election of dnv-worker.md AR5 may later
+			// promote, and it is enabled with a zero err_epoch from birth,
+			// which is what lists its CN in every CdcEntry below
+			// (architecture.md [D18]).
 			stm.Put(model.CntlrKey(sc.Cid, sc.SpId(), cntlrId), &pb.Cntlr{
 				AddrPort:   cand.AddrPort,
 				NvmeTrConf: cn.GetNvmeTrConf(),
@@ -319,9 +319,7 @@ func (s *Server) CreateCntlr(
 			if err := ledger.flush(opCreateCntlr); err != nil {
 				return err
 			}
-			if err := addCdcTrConf(
-				stm, sc, cn.GetNvmeTrConf(),
-			); err != nil {
+			if err := syncCdcEntries(stm, sc); err != nil {
 				return err
 			}
 			minter.commit(conf)
@@ -407,10 +405,8 @@ func (s *Server) DeleteCntlr(
 		// A disabled cntlr's address is already out of every entry, so this
 		// normally changes nothing; it runs anyway because "reverse
 		// everything CreateCntlr did" must not depend on another RPC having
-		// run, and dropping an address that is not there is a no-op.
-		if err := dropCdcTrConf(
-			stm, sc, cntlr.GetNvmeTrConf(),
-		); err != nil {
+		// run, and the rule's list without this cntlr is what is left.
+		if err := syncCdcEntries(stm, sc); err != nil {
 			return err
 		}
 		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), conf)
@@ -427,10 +423,12 @@ func (s *Server) DeleteCntlr(
 //
 // Disabling removes the cntlr from primary eligibility and makes its
 // namespaces ANA-inaccessible, so its CN must stop being advertised in the
-// SP's CdcEntries at the same instant (architecture.md, Subsystems,
-// namespaces) — a host that discovers a disabled controller finds only
-// inaccessible paths there. Enabling puts the
-// address back. Disabling the last enabled cntlr is allowed and stops IO;
+// SP's CdcEntries at the same instant (architecture.md [D18]) — a host that
+// discovers a disabled controller finds only inaccessible paths there.
+// Enabling puts the address back when the listing rule lists the cntlr: at
+// once for the primary or a standby with a zero err_epoch, and at its next
+// clean round for any other. Disabling the last enabled cntlr is allowed and
+// stops IO;
 // that is the operator's call to make, and dnvctl does not warn about it
 // (dnvctl.md CT8).
 //
@@ -472,19 +470,18 @@ func (s *Server) UpdateCntlrEnabled(
 			return nil
 		}
 		cntlr.Disabled = want
-		if req.GetEnabled() {
+		if req.GetEnabled() && cntlr.GetPrimary() {
 			// A re-enabled primary settles again (HL2), as a promoted one.
-			if cntlr.GetPrimary() {
-				cntlr.Settling = true
-			}
-			err = addCdcTrConf(stm, sc, cntlr.GetNvmeTrConf())
-		} else {
-			err = dropCdcTrConf(stm, sc, cntlr.GetNvmeTrConf())
-		}
-		if err != nil {
-			return err
+			cntlr.Settling = true
 		}
 		stm.Put(key, cntlr)
+		// The listing rule ([D18]): a disable takes the cntlr out of every
+		// entry; an enable lists it again only when it is the primary or
+		// its err_epoch is zero, and otherwise the worker lists it at its
+		// next clean round.
+		if err := syncCdcEntries(stm, sc); err != nil {
+			return err
+		}
 		return bumpSp(stm, opUpdateCntlrEnabled, sc)
 	})
 	if err != nil {

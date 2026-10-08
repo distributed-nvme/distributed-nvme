@@ -165,7 +165,7 @@ Command stdin, stdout and stderr are logged in full; the `TruncForLog`
 truncation applies to file data only. The two raw-block records — the DN's
 on-disk metadata path (`architecture.md`, [D13]) — deliberately carry no
 `data` attribute at all: the blocks are large, opaque, and may hold
-arbitrary tenant bytes.
+arbitrary user data.
 
 Two block-IO records are emitted **outside** `LimitedOsClient`, by the cn
 agent's `directLegProbeIO`, because the CN11 leg health probers deliberately

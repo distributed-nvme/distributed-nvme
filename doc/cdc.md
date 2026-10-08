@@ -5,10 +5,11 @@ This document owns the `dnv-cdc` binary: package `cdc` and the
 etcd watcher (WV1 to WV6), the NVMe/TCP discovery service (NP1 to NP14),
 the command (CM1 to CM5), its log records and the intent of the cdc
 integration suite. It leans on `architecture.md` for the system context,
-the etcd data model with the `CdcEntry` key, and the RPCs that write the
-entries; on `dnv-worker.md` for `etcdutil` (EU1 to EU7) and the key helpers
-of `model` (MD2); on `log.md` and `grpc.md` for logging and trace ids; and
-on `layout.md` for package placement and the dependency rules.
+the etcd data model with the `CdcEntry` key, and the listing rule that
+decides an entry's transports, with the writers that apply it ([D18]); on
+`dnv-worker.md` for `etcdutil` (EU1 to EU7) and the key helpers of `model`
+(MD2); on `log.md` and `grpc.md` for logging and trace ids; and on
+`layout.md` for package placement and the dependency rules.
 "The specs" are the NVMe Base 2.x, NVMe over Fabrics and NVMe/TCP
 specifications: the byte encodings — the identify layout, the log entry
 layout, the status codes — are theirs, and this document names fields,
@@ -35,10 +36,9 @@ connection per controller node, defeating centralization; it needs an
 anchor subsystem just to listen, because a referral-only nvmet port never
 comes up; and its AENs cannot carry per-host meaning.
 
-The gateway and the worker maintain the entries (`architecture.md`,
-Subsystems, namespaces; `architecture.md`, Cntlrs); `dnv-cdc`, the only
-process that renders them to a host, reads them and never writes them
-(WV6).
+The gateway and the worker maintain the entries, every writer by the
+listing rule of `architecture.md` [D18]. `dnv-cdc`, the only process that
+renders them to a host, reads them and never writes them (WV6).
 
 One process, three parts:
 
@@ -212,10 +212,12 @@ offsets within one command are therefore self-consistent; consistency
 across commands is the host's GENCTR re-read protocol, as the specs intend.
 
 DS10. **Staleness.** Through etcd outages `dnv-cdc` keeps serving its last
-known state (WV5): stale-but-consistent beats unavailable for an advisory
-service. Recovery rescans diff against the held state — each re-renders
-every active host and impacts, by the DS6 rule, the hosts whose view moved
-(WV4) — so changes missed during the outage still AEN. A last known state
+known state (WV5): stale-but-consistent beats unavailable, though a stale
+instance also keeps listing an old primary a failover has taken out of the
+entries (`architecture.md` [D18]; `architecture.md`, Known limits).
+Recovery rescans diff against the held state — each re-renders every active
+host and impacts, by the DS6 rule, the hosts whose view moved (WV4) — so
+changes missed during the outage still AEN. A last known state
 exists only once the first scan has landed: before it the registry is
 empty, which is not the same as "no subsystems", so nothing is served from
 it — the accept loop starts only after that scan (CM4).
@@ -529,17 +531,19 @@ single-node etcd — against real kernel NVMe hosts and real nvmet targets:
 range sharding and twin equality, per-host filtering, the per-host AEN and
 GENCTR semantics of DS6 and DS7, automatic connect, re-point and disconnect
 end to end through nvme-stas, and the high availability of twins and of
-restarts. nvme-stas is the production host stack, and plain nvme-cli is
-equally supported: the AEN path is stock kernel — the host kernel publishes
-the discovery-change AEN as an "NVME_AEN" uevent — and nvme-stas adds the
-automatic connect, re-point and disconnect on top. The suite tests the two
-layers separately, so that an nvme-stas configuration problem cannot be
-mistaken for a cdc bug. It does not prove what the gateway and the worker
-write into `CdcEntry`: the gateway suite reads back the entry the gateway's
-subsystem and cntlr RPCs write (`gateway.md`, Integration test plan), and
-the worker suite asserts the cntlr replacement's rewrite of it
-(`dnv-worker.md`, Integration test plan). Nor does it prove data-path
-correctness beyond one read (the agent suites) or etcd failures.
+restarts. nvme-stas is the production host stack, and the service serves
+plain nvme-cli equally: the AEN path is stock kernel — the host kernel
+publishes the discovery-change AEN as an "NVME_AEN" uevent — and nvme-stas
+adds the automatic connect, re-point and disconnect on top, which is the
+host's part of the failover contract (`architecture.md`, Host view). The
+suite tests the two layers separately, so that an nvme-stas configuration
+problem cannot be mistaken for a cdc bug. It does not prove what the
+gateway and the worker write into `CdcEntry`: the gateway suite reads back
+the entry the gateway's subsystem and cntlr RPCs write (`gateway.md`,
+Integration test plan), and the worker suite asserts the worker's rewrites
+of it, at a cntlr's health transitions, at a failover and at a cntlr
+replacement (`dnv-worker.md`, Integration test plan). Nor does it prove
+data-path correctness beyond one read (the agent suites) or etcd failures.
 
 **Topology.** The developer machine builds the binaries and drives four lab
 servers over ssh; the suite occupies all four, so no other suite may run in
@@ -639,9 +643,9 @@ equality re-check would be wrong by construction.
 **The host helper, `cdc_host.sh`.** The host helper carries the host-side
 actions that hold state: the nvme-stas control, which saves the host's own
 nvme-stas configuration, writes the suite's — every cdc endpoint, no mDNS,
-connect every entry and disconnect only the connections nvme-stas itself
-made once their entry vanishes — and restores the original afterwards; the
-masking of the kernel's autoconnect unit, which would otherwise connect on
+connect every entry and disconnect only the connections nvme-stas made or
+took over once their entry vanishes — and restores the original afterwards;
+the masking of the kernel's autoconnect unit, which would otherwise connect on
 the very AEN the lowlevel case measures, so it is masked for every case and
 setup checks the mask rather than trusting it; the uevent capture of the
 lowlevel case; and the scoped wipes. The wipes disconnect only the test

@@ -4,7 +4,7 @@ This document owns the design of dnv as a whole: the system overview, the
 object model, the data-plane device stacks, naming, the etcd data model,
 allocation, common validation, the `service Gateway` API contract, the
 agent contract both roles share, the worker contract, the procedures that
-span components, the recorded design decisions [D1] to [D17] and the
+span components, the recorded design decisions [D1] to [D18] and the
 known limits. It leans on the component documents for how
 each component carries its part out — `gateway.md` for the gateway,
 `dnv-worker.md` for the workers with `model` and `etcdutil`, `dnagent.md`
@@ -24,6 +24,18 @@ migration) on **controller nodes (CN)**, and exports virtual volumes to
 plane keeps all desired state in **etcd**; stateless control-plane
 processes (gateway, workers, cdc) and per-node agents converge the data
 plane to that desired state. See fig. `070Cluster`.
+
+dnv can be the data plane of a multi-tenant block storage system, for
+example behind Kubernetes or OpenStack Cinder. It knows no tenants and
+authenticates no user: the layer above authenticates its users and decides
+which storage pools, subsystems and hosts serve each of them. What dnv
+promises that layer is that the data of one storage pool is never readable
+from another storage pool, unless that layer exports it there itself, for
+example with a transfer (Transfers). The extents a pool frees can go to the
+sides of
+any other pool, so every side is zeroed before its first export ([D15]).
+The promise is about stored data, not about the network: the fabric under
+dnv is trusted (Known limits).
 
 ```mermaid
 flowchart LR
@@ -199,10 +211,11 @@ always means the SP's `DmPoolConf.data_block_size`.
   `err_epoch`, which is in unix **seconds**.
 * **err_epoch** — The unix seconds at which a worker found the object
   unhealthy after last seeing it healthy; zero while it is healthy. It
-  stays put while the object stays unhealthy (`dnv-worker.md` HL3), and it
-  is compared against the `EventThreshold` to trigger the automatic
-  reactions (Automatic reactions). A node with a nonzero `err_epoch` also
-  loses its capacity key (Capacity index keys).
+  stays put while the object stays unhealthy (`dnv-worker.md` HL3), and the
+  automatic reactions measure their thresholds, the `EventThreshold`, from
+  it (Automatic reactions). A node with a nonzero `err_epoch` also loses
+  its capacity key (Capacity index keys), and a cntlr with one leaves its
+  SP's discovery records unless it is the primary ([D18]).
 * **settling** — `Cntlr.settling`: true from the moment a cntlr becomes
   primary — created as one by `CreateStoragePool`, promoted by a failover,
   created as one by a sole-primary replacement, or re-enabled by
@@ -210,8 +223,8 @@ always means the SP's `DmPoolConf.data_block_size`.
   first observes it clean in that role, enabled, at the revision it drives
   and with its stack built, the rows its `sp_level` suppresses aside
   (`dnv-worker.md` HL2 says which rows read as built), or until a failover
-  demotes it first. While it is set, the failover holds an unhealthy
-  primary to `cntlr_unhealthy` instead of `primary_unhealthy` when that is
+  demotes it first. While it is set, the failover judges an unhealthy
+  primary by `cntlr_unhealthy` instead of `primary_unhealthy` when that is
   the longer; a `disabled` one still fails over at once (`dnv-worker.md`
   AR5). It is health bookkeeping of the same kind as `err_epoch`: set by
   the op that makes the cntlr primary, cleared by the observation that
@@ -498,10 +511,11 @@ to the `MigrSrcNqn` of the cluster, `migr_dst_conf.src_dn_id`, sp and
 migration at `migr_dst_conf.src_nvme_tr_conf` (hostnqn `DnHostNqn`); a
 dm-clone metadata **slot** in the [D13] clone-metadata area — whole
 `DnCloneMetaUnit` units, with its head zeroed before its record is
-persisted so a previous tenant's bytes can never be misparsed as a dm-clone
-superblock — fronted by a wrapper dm-linear `DnMigrMetaDmName` (dm kind
-`DmKindDnMigrMeta`), because the dm-clone target reads its metadata device
-from sector zero and takes no offset argument; and a dm-clone device
+persisted so whatever an earlier migration left there can never be
+misparsed as a dm-clone superblock — fronted by a wrapper dm-linear
+`DnMigrMetaDmName` (dm kind `DmKindDnMigrMeta`), because the dm-clone
+target reads its metadata device from sector zero and takes no offset
+argument; and a dm-clone device
 `DnMigrFinalName` (dest the local side device, source the connected nvme
 device, region size `migr_dst_conf.block_size`). The per-cntlr dm-linears of
 the destination side sit on top of the dm-clone (primary CN) or the dm-error
@@ -568,7 +582,8 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    node's. `CnConf.nvme_tr_conf`, given to `CreateControllerNode`, is the
    operator's copy of them; the control plane copies it into the
    `Cntlr.nvme_tr_conf` of every cntlr this CN hosts and serves it to hosts
-   in the discovery log (dnv-cdc). Every host-facing subsystem and every
+   in the discovery log while the SP's discovery records list that cntlr
+   ([D18]; dnv-cdc). Every host-facing subsystem and every
    transfer subsystem of every cntlr on this CN attaches to the port. As on
    a disk node the port is one per **agent**, at the configfs id
    `NvmetPortId` unless `--nvmet-port-id` says otherwise
@@ -823,12 +838,19 @@ flowchart BT
 NQN and namespace identity from every cntlr, aggregated by the host
 kernel.*
 
-A host discovers the SP's subsystems through dnv-cdc, connects to every
-enabled cntlr's port, and the kernel aggregates the paths into one nvme
-multipath device because all cntlrs export the same subsystem NQN and the
-same namespace identity ("nguid" and "uuid"), with distinct cntlids
-guaranteed by cntlid slots. Primary path ANA optimized, standby paths
-inaccessible.
+A host discovers the SP's subsystems through dnv-cdc and connects, through
+nvme-stas or an equivalent that follows the discovery log, to the port of
+every cntlr the SP's discovery records list: every enabled cntlr that is
+the primary or has a zero `err_epoch` ([D18]). The kernel aggregates the
+paths into one nvme multipath device because all cntlrs export the same
+subsystem NQN and the same namespace identity ("nguid" and "uuid"), with
+distinct cntlids guaranteed by cntlid slots. Primary path ANA optimized,
+standby paths inaccessible. Following the discovery log is the host's part
+of a failover: it is what drops a failed-over primary's path, and for an
+old primary that does not answer its demotion within the demotion hold
+it does so before the sides fence that primary (Failover). A path that
+nothing following the discovery log manages is never dropped (Known
+limits).
 
 ### Group on-leg layout: meta region, data region, health block
 
@@ -1097,7 +1119,7 @@ this document relies on:
 | `CnConf` | {p} cn_conf {cluster_id} {addr_port} | includes `location` |
 | `DnCapacity` | {p} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port} | allocation index (Capacity index keys); value = the location copy [D5] |
 | `CnCapacity` | {p} cn_capacity {cluster_id} {free_ext_cnt} {addr_port} | idem |
-| `CdcEntry` | {p} cdc {cluster_id} {shard_code} {sp_id} {ss_id} | the shard code is the SP's; watched by dnv-cdc |
+| `CdcEntry` | {p} cdc {cluster_id} {shard_code} {sp_id} {ss_id} | the shard code is the SP's; watched by dnv-cdc; its `nvme_tr_conf_list` lists the cntlrs of [D18] |
 | `SpConf` | {p} sp_conf {cluster_id} {sp_name} | |
 | `Cntlr` | {p} cntlr {cluster_id} {sp_id} {cntlr_id} | |
 | `Slice` | {p} slice {cluster_id} {sp_id} {slice_id} | groups, legs and sides embedded |
@@ -1154,8 +1176,10 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
 
 * Any STM that changes agent-visible desired state of a DN, CN or SP bumps
   the matching revision **once**, even if it touched many sub-keys.
-* `err_epoch` and capacity-key maintenance never bump revisions; they only
-  gate control-plane scheduling. Every `SpConf` or sub-object mutation of
+* `err_epoch` and capacity-key maintenance never bump revisions: they gate
+  control-plane scheduling and, for a cntlr, its place in the discovery
+  records ([D18]), whose `CdcEntry` keys dnv-cdc watches directly, so no
+  agent needs to hear of either. Every `SpConf` or sub-object mutation of
   `service Gateway` — RPC specifications bumps `SpRev` unless the RPC's
   spec says otherwise.
 * The request-side `DnRev`, `CnRev` and `SpRev` fields are
@@ -1561,6 +1585,22 @@ maintained per Capacity index keys; a delete reverses both.
   fires on the side threshold when the DN itself looks dead and on the leg
   threshold when only the cntlr's path is bad, so the leg threshold is the
   longer wait by construction (`dnv-worker.md` AR8).
+* `EventThreshold.primary_unhealthy`, after its default is resolved, must
+  be at least two of the cluster's `health_check_conf.cntlr_interval`
+  (`INVALID_ARGUMENT` otherwise). The rule reads the cluster as well as the
+  request, so `CreateStoragePool` judges it against the stored
+  `ClusterConf`, on its plain pre-read before the scans and again in its
+  STM (Storage pools). The reason: a check round that gets no reply stamps
+  the primary's `err_epoch`, and the next round, due one interval later,
+  clears it when that round is clean (`dnv-worker.md` RW4, RW8), so the
+  epoch of one missed round lives about one interval, and the rule leaves
+  a second interval of margin before that epoch can fail the primary
+  over. The margin is not a guarantee: `dnv-worker.md`, Known limits, says
+  when one missed round can still reach the threshold. The defaults meet
+  the rule exactly, `DefaultPrimaryUnhealthy` being two of
+  `DefaultHealthCheckInterval`, so an SP on a cluster whose
+  `cntlr_interval` is longer than its default must set `primary_unhealthy`
+  itself.
 * `QosRatio.bytes_per_iops` and `bytes_per_bps` are **not** range-checked:
   nothing enforces them (Controller node, common), and any value is stored
   as sent.
@@ -1814,7 +1854,8 @@ cluster's `extent_size` holds that few `data_block_size` blocks — or when
 `cntlid_slot_list` has duplicates, values at or above `CnCntlidSlotCnt`,
 or fewer entries than `cntlr_cnt`; and for any violation of Common
 validation in `bdev_conf` or `event_threshold`, the `bdev_conf` geometry
-rules being judged on the merged conf the SP stores as well (step 2).
+rules being judged on the merged conf the SP stores as well, and
+`primary_unhealthy` against the cluster's `cntlr_interval` (step 2).
 Defaults: `cntlr_cnt` is `DefaultCntlrCntPerSp`; `slice_cnt` is
 `DefaultSliceCntPerSp`; `cntlid_slot_list` is every slot below
 `CnCntlidSlotCnt`; `bdev_conf` is taken member-wise from
@@ -1848,14 +1889,17 @@ Action:
    omitted is inherited, and only the merge shows whether it meets the
    ones the request set), so a request whose merge breaks a rule is
    `INVALID_ARGUMENT`, not `RESOURCE_EXHAUSTED`, even while the cluster
-   lacks the DNs or CNs the scan would need. In the STM, in this order:
+   lacks the DNs or CNs the scan would need. The primary threshold of
+   Common validation is judged against that pre-read's `cntlr_interval` at
+   the same point, for the same reason. In the STM, in this order:
    merge and resolve `bdev_conf` against the `ClusterConf` this
    transaction read, **before any id is minted**, and refuse the picks
    right there if the leg count or the `cluster_id` moved since the scan;
    the geometry rules on that resolved `bdev_conf` once more
    (`ClusterConf` is write-once, so for an unchanged `cluster_id` this
    repeats the pre-read's verdict, but this read is the authoritative
-   one); the `sp_conf` existence check; allocate `sp_id` and `shard_code`
+   one), and the primary threshold against that `ClusterConf`; the
+   `sp_conf` existence check; allocate `sp_id` and `shard_code`
    from `SpGlobal`; validate that `ClusterConf` (Common validation) and
    compute every group's `meta_blocks` and `data_blocks` (Group on-leg
    layout: meta region, data region, health block) from the resolved
@@ -2032,16 +2076,18 @@ read of its cntlrs did not hold, and the scan and the STM re-run as a unit
 from a fresh read (`gateway.md` GW9): the scan's CN exclusion and tier-1
 locations come from that earlier read, so a cntlr committed since could
 have the pick land in its failure domain or on its CN. The STM then writes
-the new `Cntlr` (`primary` false, `disabled` false), appends its id, does
-the CN bookkeeping with its `CnRev`, appends the CN's `nvme_tr_conf` to
-every `CdcEntry` of the SP, and bumps `SpRev`. A subsystem whose
-`CdcEntry` is missing gets it back here, rebuilt as `CreateSubsystem`
-writes it (Subsystems, namespaces) and then changed like the rest;
-`DeleteCntlr` and an `UpdateCntlrEnabled` that changes the flag put a
-missing entry back the same way. The sp worker's cntlr replacement
-(Automatic reactions) does not: it rewrites only the entries that exist
-and leaves a missing one missing (`dnv-worker.md` MD6). The sp worker's
-next `SyncupSide` round tells every side about the new standby
+the new `Cntlr` (`primary` false, `disabled` false, a zero `err_epoch`),
+appends its id, does the CN bookkeeping with its `CnRev`, rewrites every
+`CdcEntry` of the SP by the listing rule of [D18], which lists the new
+cntlr from its creation, and bumps `SpRev`. A subsystem whose `CdcEntry`
+is missing gets it back here, rebuilt as `CreateSubsystem` writes it
+(Subsystems, namespaces); `DeleteCntlr`, an `UpdateCntlrEnabled` that
+changes the flag and `UpdateSubsystemHosts` put a missing entry back the
+same way. The sp worker's writers of the entries — its health write for a
+cntlr (sp role), its failover and its cntlr replacement (Automatic
+reactions) — do not: they rewrite only the entries that exist and leave a
+missing one missing (`dnv-worker.md` MD6). The sp worker's next
+`SyncupSide` round tells every side about the new standby
 (`side_conf.standby_id_list`), and the sides grow a dm-error, dm-linear
 and nvmet export for it (Disk node). Reply `cntlr_id`.
 
@@ -2050,19 +2096,24 @@ Errors: `NOT_FOUND` when the id is not in the list; `FAILED_PRECONDITION`
 when `primary` is true or `disabled` is false (disable first, so that a
 failover has already happened before the record disappears).
 Action: STM: remove the id and the `Cntlr` key; the CN bookkeeping (the
-footprint back, its `CnRev`); remove the CN's `nvme_tr_conf` from every
-`CdcEntry`; bump `SpRev`. The sides drop the export, and the cn agent
-tears down its stack. Reply `cntlr_id`.
+footprint back, its `CnRev`); rewrite every `CdcEntry` of the SP by the
+listing rule of [D18], which leaves the deleted cntlr out; bump `SpRev`.
+The sides drop the export, and the cn agent tears down its stack. Reply
+`cntlr_id`.
 
 **UpdateCntlrEnabled** —
 Action: an STM sets `Cntlr.disabled` to the negation of the request's
-`enabled`; a disable removes, an enable appends, the CN's `nvme_tr_conf`
-in every `CdcEntry`; an enable of a cntlr that is still `primary` also
-sets `settling` (Terminology and object model: its cn agent held the
-standby shape while it was disabled and now builds the primary stack, the
-work of a promotion); bump `SpRev`. Idempotent. A disabled cntlr leaves
-primary eligibility and its namespaces go ANA-inaccessible; disabling the
-current primary triggers the primary re-election of Automatic reactions;
+`enabled`; an enable of a cntlr that is still `primary` also sets
+`settling` (Terminology and object model: its cn agent held the standby
+shape while it was disabled and now builds the primary stack, the work of
+a promotion); the STM then rewrites every `CdcEntry` of the SP by the
+listing rule of [D18] and bumps `SpRev`. A disable takes the cntlr out of
+the entries at once; an enable lists it at once only when it is the
+primary or its `err_epoch` is zero, and any other at the sp worker's next
+clean verdict on it (sp role). Idempotent. A disabled cntlr leaves primary
+eligibility and its namespaces go ANA-inaccessible; disabling the current
+primary triggers the primary re-election of Automatic reactions, whose
+fan-out hands the disabled primary its demotion first (sp role);
 disabling the last enabled cntlr is allowed but stops IO. No warning is
 given: dnvctl issues no RPC the operator did not type (`dnvctl.md` CT8).
 Reply `cntlr_id` and `enabled`.
@@ -2251,7 +2302,7 @@ fails the host-NQN rules. Action: STM: `ss_id` from `next_id`; the serial
 is the `ss_id` rendered with `IdKeyFmt` and the model is
 `subsystemModel` ([D2]); write the `Subsystem` with an empty `ns_list`,
 append to `nqn_list`, write the `CdcEntry` — the NQN, the transport confs
-of every **enabled** cntlr's CN as `nvme_tr_conf_list`, and
+of the cntlrs the listing rule of [D18] lists as `nvme_tr_conf_list`, and
 `allowed_hosts` —, bump `SpRev`. Reply `ss_id`.
 
 **DeleteSubsystem** — Errors: of the NQN rules of Common validation the
@@ -2259,16 +2310,17 @@ of every **enabled** cntlr's CN as `nvme_tr_conf_list`, and
 `ns_list` non-empty (`allowed_hosts` never block, they go implicitly).
 Action: STM: remove from `nqn_list`, delete the `Subsystem` and its
 `CdcEntry`, bump `SpRev`. dnv-cdc sends a discovery-log-change AEN to the
-hosts whose discovery log the deletion changes (`cdc.md` DS6); hosts
-running nvme-stas disconnect automatically. Reply `ss_id`.
+hosts whose discovery log the deletion changes (`cdc.md` DS6); hosts that
+follow the discovery log (Host view) disconnect automatically. Reply
+`ss_id`.
 
 **ListSubsystems** — STM read of `nqn_list` and each `Subsystem` into
 `nqn_to_subsystem`.
 
 **UpdateSubsystemHosts** — STM: update `Subsystem.allowed_hosts` and
-`CdcEntry.allowed_hosts`, bump `SpRev`; a missing `CdcEntry` is written
-back, rebuilt as `CreateSubsystem` writes it, with the new hosts. Reply
-`ss_id`.
+`CdcEntry.allowed_hosts`, set the entry's `nvme_tr_conf_list` by the
+listing rule of [D18], bump `SpRev`; a missing `CdcEntry` is written back,
+rebuilt as `CreateSubsystem` writes it, with the new hosts. Reply `ss_id`.
 
 **CreateNamespace** — Errors: `NOT_FOUND` nqn or td; `RESOURCE_EXHAUSTED`
 when `ns_list` holds `MaxNsCntPerSs` namespaces or more;
@@ -2927,18 +2979,19 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
 
 ### Side provisioning protocol
 
-dnv is a **multi-tenant** service: one tenant must never be able to read
-another tenant's bytes. A discard cannot give that guarantee:
-discard-reads-zeros is not a hardware property — the kernel does not
-promise that a discarded region reads as zeros, and NVMe read-zeroes after
-deallocate is optional. Stale bytes also break correctness where this
-design *assumes* zeros: a recycled meta-group extent can hold a previous
-SP's valid thin-metadata superblock (a fresh pool would adopt stale
-metadata), and a stale md superblock flips "Make sure all groups are
-available" into the wrong assembly case with no `--zero-superblock`
-escape. Therefore **every side is fully zeroed before its first export**,
-tracked per extent on disk, gated by a CP-visible `provisioned` flag
-([D15]).
+A new side is built from extents that an earlier side, of any pool, may
+have written, and it must never expose a previous pool's bytes (System
+overview). A discard cannot give that guarantee: discard-reads-zeros is
+not a hardware property — the kernel does not promise that a discarded
+region reads as zeros, and NVMe read-zeroes after deallocate is
+optional. Stale bytes also break
+correctness where this design *assumes* zeros: a recycled meta-group
+extent can hold a previous SP's valid thin-metadata superblock (a fresh
+pool would adopt stale metadata), and a stale md superblock flips "Make
+sure all groups are available" into the wrong assembly case with no
+`--zero-superblock` escape. Therefore **every side is fully zeroed before
+its first export**, tracked per extent on disk, gated by a CP-visible
+`provisioned` flag ([D15]).
 
 **Key invariant.** *Zeroed is a property of the side's allocation, not of
 the disk extent* — extents freed and reallocated to a new side start
@@ -3423,12 +3476,30 @@ revision and `sp_name` — the `SpConf` key suffix, so this path needs no
 cntlr**, with the new revision; each request always carries the full
 desired state (Common agent rules), and each side's DN and each cntlr's CN
 is resolved by reading the `DnConf` or `CnConf` at the record's endpoint
-(`dnv-worker.md` RW14). **Sides first**: the cntlrs' requests — a
-failover's demotion as much as its promotion (Failover) — are held until
-the sides the worker drives have reported the new revision applied, or for
-one `cntlr_interval` at most. The order mitigates three races and is no
-correctness dependency ([D16]); `dnv-worker.md` RW14 says which sides are
-waited for, when the hold releases and what it costs.
+(`dnv-worker.md` RW14). The fan-out holds requests back in two waits, the
+demotion hold and the sides-first hold, and neither is a correctness
+dependency ([D16]):
+
+* **Demotion first.** A fan-out that makes a primary a standby — in
+  production only a failover does, on either of its triggers — hands that
+  cntlr its demotion at once, and holds every side request and every other
+  cntlr request until the demoted cntlr has reported the new revision
+  applied, or for `DemotionHoldTimeout` at most (`dnv-worker.md` RW22).
+  The worker judges no reachability: a reachable old primary that applies
+  its demotion within the bound is ANA inaccessible before any side fences
+  it, and the bound lets the hosts of an unreachable one drop the path the
+  failover withdrew (Failover, [D16]).
+* **Sides first.** The cntlrs' requests are then held until the sides the
+  worker drives have reported the new revision applied, or for one
+  `cntlr_interval` at most, counted from the end of the demotion hold when
+  the fan-out had one. The order mitigates three races; `dnv-worker.md`
+  RW14 says which sides are waited for, when the hold releases and what it
+  costs.
+
+A cntlr replacement is no demotion: it deletes the old cntlr, whose stack
+goes with its CN's `SyncupCn` (dn / cn roles), so the sp role has no
+request to hand that cntlr first, and a replacement starts no demotion
+hold of its own.
 
 Bitmap chunks travel over the dedicated `PushCloneBitmap` and
 `PushMigrBitmap` calls instead of the `Syncup*` requests (Bitmap push
@@ -3443,7 +3514,11 @@ streams) feed health: `err_epoch` is set and cleared on the `Cntlr`, `Leg`
 and `Side` records accordingly, in STMs that bump no revision — a failing
 health block (Group on-leg layout: meta region, data region, health block)
 reported by the primary turns into `Leg.err_epoch`; a side's own stream
-and rows turn into `Side.err_epoch` (`dnv-worker.md` HL2).
+and rows turn into `Side.err_epoch` (`dnv-worker.md` HL2). When a cntlr's
+write moves it into or out of the listing of [D18], the same STM rewrites
+the SP's discovery records, still bumping no revision: an enabled standby
+leaves them when its `err_epoch` is set and returns when it is cleared,
+while an enabled primary stays listed either way.
 `RES_STATUS_PROVISIONING` entries never set `err_epoch` on any of the
 three ([D15], Live-state reporting), and a `RES_STATUS_PENDING` leg row
 neither sets nor clears `Leg.err_epoch` (Live-state reporting).
@@ -3481,8 +3556,16 @@ at or above `SP_LEVEL_NO_THINPOOL`, a disabled cntlr is never a candidate,
 replaced or repaired, and a `deleting` SP runs a step of its drain instead
 (`dnv-worker.md` AR3). A threshold is breached when now minus `err_epoch`
 is at least the SP's `event_threshold` field of that kind, a zero field
-meaning its default (Common validation; `dnv-worker.md` AR4). The four
-reactions:
+meaning its default (Common validation; `dnv-worker.md` AR4). A breach
+fires a reaction — the failover of an unhealthy primary, a cntlr
+replacement, a leg repair on either of its clocks — only on an object
+whose latest health verdict by this worker's coordinator of the SP is
+unhealthy. A coordinator has no verdict when it starts, after a restart
+and after a handoff alike; the clock still runs from the stored
+`err_epoch`, and the disabled trigger needs no verdict (`dnv-worker.md`
+AR10). An epoch that an earlier owner left, or that another observer
+wrote, therefore fires nothing before this worker has judged the object
+itself. The four reactions:
 
 * **Failover** (`dnv-worker.md` AR5): an unhealthy primary — or a
   `disabled` one, with no threshold wait (Cntlrs) — gives the role to a
@@ -3497,8 +3580,10 @@ reactions:
   — a non-primary one, or the primary of an SP with no failover candidate
   — is replaced on a fresh CN by an internal `ReplaceCntlr`, one
   transaction doing what `DeleteCntlr` and `CreateCntlr` do without
-  `DeleteCntlr`'s not-primary and disabled preconditions (`dnv-worker.md`
-  MD6).
+  `DeleteCntlr`'s not-primary and disabled preconditions, the rewrite of
+  the discovery records by [D18] included (`dnv-worker.md` MD6). It
+  deletes the old cntlr rather than demoting it, so it starts no demotion
+  hold of its own (sp role).
 * **Leg repair** (`dnv-worker.md` AR8): a leg unhealthy for `leg_unhealthy`,
   or unhealthy while its side has been unhealthy for `side_unhealthy`, is
   switched out for a ready spare by an internal `SwitchSpareLeg`; when the
@@ -3516,7 +3601,13 @@ An SP has several cntlrs; exactly one is primary. A failover switches the
 primary from one cntlr (**old_primary**) to another (**new_primary**) and
 involves three kinds of participants: the two cntlrs and the **sides**. The
 trigger is only ever an etcd change (Automatic reactions, or
-`UpdateCntlrEnabled`), delivered by revision-ordered syncups.
+`UpdateCntlrEnabled`), delivered by revision-ordered syncups in the two
+waits of sp role's hold: the demotion of **old_primary** first; the **sides** once
+old_primary has reported its demotion applied or `DemotionHoldTimeout` has
+passed (`dnv-worker.md` RW22); and **new_primary** once the sides have
+reported the revision applied or one `cntlr_interval` has passed
+(`dnv-worker.md` RW14). The two waits narrow what hosts see, and safety rests
+on the sides' flips and md's arbitration below, not on them ([D16]).
 
 **old_primary** — on a `SyncupCntlr` saying it is not primary (a revision
 higher than everything it has seen):
@@ -3537,10 +3628,10 @@ revision):
 1. Make sure all groups are available ("Make sure all groups are
    available"). A group whose member is not yet available is retried by
    the agent until it is (`cnagent.md` CN10); the worker is not involved.
-   The unordered fan-out of [D16] can land this `SyncupCntlr` before the
-   sides' ANA flips have reached the new primary, and nothing re-sends it
-   on that account; the sides-first hold (sp role, `dnv-worker.md` RW14)
-   makes that rarer, not impossible.
+   The fan-out's two waits are bounded in time ([D16]), so this `SyncupCntlr`
+   can land before the sides' ANA flips have reached the new primary, and
+   nothing re-sends it on that account; the sides-first hold (sp role,
+   `dnv-worker.md` RW14) makes that rarer, not impossible.
 2. Create the pools, thin volumes and raid0 devices (Primary cntlr, steps
    3 to 5).
 3. Reload every namespace's `CnNsDevName` from its td's `CnErrorName` onto
@@ -3559,6 +3650,12 @@ The failover's own transaction marks the new primary settling; until it
 has reported its stack built and clean as primary, a failover of it for
 being unhealthy waits `cntlr_unhealthy` instead of `primary_unhealthy`
 when that is the longer, unless it is disabled (`dnv-worker.md` HL2, AR5).
+The same transaction rewrites the SP's discovery records by [D18]: an old
+primary failed over for being unhealthy leaves them there, before either
+wait of the fan-out has begun, and one failed over for being disabled
+left them with its disable. Either returns to them as a standby once
+enabled and clean again; the new primary was listed already, as every
+candidate is.
 
 **sides** — on a `SyncupSide` (the highest revision) showing a changed
 primary. One converge pass, with no waits and no suspensions ([D12]) as
@@ -3579,45 +3676,58 @@ wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`): one whose load fails
 leaves the device suspended on its old table, queueing its IO; what that
 costs when it is the reload of step 2 is `dnagent.md`, Known limits.
 
-**Why unordered fan-out is write-safe ([D16]).** The sp worker pushes the
-failover's `SyncupSide` and `SyncupCntlr` calls with no cross-side
-ordering, so mid-failover the old primary can still hold a live path to one
-leg while the new primary already owns another. Two mechanisms make that
-harmless, and both are load-bearing: (a) each side's flip is **atomic
-within one DN converge** — the old primary's dm-linear reloads onto
-dm-error in the same pass that puts the new primary's onto the side device
-— so a single leg never has two writers, short of a reload whose load
-fails (the known limit above); and (b) across the legs of a group, **md's
-own arbitration** decides: a leg whose superblock still claims a clean full
-array is not started degraded on its own ("Make sure all groups are
-available"), and once both legs are reachable the event counts pick the
-newer one and resync overwrites the stale leg. dnv adds no fencing epoch of
-its own, so (b) is an explicit dependency on mdadm's behaviour, and no
-suite in the tree pins that behaviour (Known limits).
+**Why the fan-out needs no order to be write-safe ([D16]).** The sp worker
+pushes the failover's `SyncupSide` calls with no order among the sides,
+and each wait of its fan-out ends at its bound whether the reports it
+waits for came or not, so mid-failover the old primary can still hold a
+live path to one leg while the new primary already owns another. Two
+mechanisms make that harmless, and both are load-bearing: (a) each side's
+flip is **atomic within one DN converge** — the old primary's dm-linear
+reloads onto dm-error in the same pass that puts the new primary's onto
+the side device — so a single leg never has two writers, short of a reload
+whose load fails (the known limit above); and (b) across the legs of a
+group, **md's own arbitration** decides: a leg whose superblock still
+claims a clean full array is not started degraded on its own ("Make sure
+all groups are available"), and once both legs are reachable the event
+counts pick the newer one and resync overwrites the stale leg. dnv adds no
+fencing epoch of its own, so (b) is an explicit dependency on mdadm's
+behaviour, and no suite in the tree pins that behaviour (Known limits).
 
-**Host-visible errors when the old primary is alive but CP-unreachable
-([D16]).** The common failover — a dead CN — is clean from the host's side
-once the new primary's stack is built: its paths drop, IO queues, and the
-new primary's optimized flip releases it. A promotion that outruns the
-sides' ANA flips (new_primary step 1) can make that flip over dm-error,
-and the released IO then fails until the agent's retry builds the stack
-(new_primary step 4). An old primary that keeps running while only its
-**control-plane** connectivity is lost cannot apply the syncup that demotes
-it: its host-facing namespaces stay in the optimized ANA group while the
-sides fence its data paths underneath ([D16], whose write-safety the
-paragraph above explains). Its md arrays then fail, and the errors nvmet
-returns on the still-optimized path are target-internal (DNR), not path
-errors — host multipath does **not** retry them on the new primary's path,
-so applications can see IO errors until the old primary reconnects to the
-CP and applies its demotion, or is stopped. Under the sides-first hold, a
-CP-reachable old primary that is still serving goes through the same
-state: its demoting `SyncupCntlr` is held until the sides, whose converge
-of the failover fences it, have reported that revision applied, so host IO
-on its path fails from the fence until it has applied **old_primary** step
-1: the hold — about the sides' round trip, and up to one `cntlr_interval`
-while a side does not report (`dnv-worker.md` RW14) — then that request's
-delivery, its wait for the cntlr's object lock (`cnagent.md` CN1) and its
-converge up to step 1. [D16] records this as the accepted cost.
+**What hosts see at a failover ([D16]).** The common failover — a dead CN
+— is clean from the host's side once the new primary's stack is built:
+its paths drop, IO queues, and the new primary's optimized flip releases
+it. A promotion that outruns the sides' ANA flips (new_primary step 1) can
+make that flip over dm-error, and the released IO then fails until the
+agent's retry builds the stack (new_primary step 4). In two cases an old
+primary that is still running stops taking host IO before the sides fence
+it, and the worker need not know which case it is in:
+
+* An old primary that applies its demotion inside the demotion hold (sp
+  role) moves its namespaces to ANA inaccessible (**old_primary** step 1)
+  before any side fences it, so hosts queue their IO for the new primary's
+  optimized flip — a pause, not errors.
+* An old primary that keeps running while only its **control-plane**
+  connectivity is lost never answers, so the demotion hold runs to its
+  bound. Its
+  address is out of the discovery records by then — taken out by the
+  failover's own transaction, or by the disable that triggered the
+  failover ([D18]) — and dnv-cdc has told the hosts; a host that follows
+  the discovery log (Host view) drops the path inside the demotion hold,
+  before the fence, and its IO then queues as for a dead CN.
+
+What is left is an old primary still on a host's path at the fence that
+has not applied its demotion: a path nothing following the discovery log
+manages, a discovery view a cdc instance keeps stale, a demotion its agent
+cannot apply within the demotion hold, or a failover fanned out with no
+demotion hold by a coordinator that has just started, after a restart or a
+handoff, as when the failover's owner lost the shard before its demotion
+hold ended (Known limits). Its md arrays fail once the sides have fenced its
+legs ([D16], whose write-safety the paragraph above explains), and the
+errors nvmet returns on the still-optimized path are target-internal
+(DNR), not path errors — host multipath does **not** retry them on the new
+primary's path, so applications can see IO errors until the old primary
+applies its demotion or is stopped. [D16] records why that residue is
+accepted.
 
 #### "Make sure all groups are available"
 
@@ -4054,21 +4164,28 @@ to WV6) and the NVMe/TCP discovery service (NP1 to NP14). An instance
 serves the ranges it is configured with — a range is the shard codes that
 share one first hex digit — by watching the cdc prefix and filtering on
 each key's shard code (`cdc.md` DS2). For each `CdcEntry` it owns — the
-gateway and the worker write them as host-facing subsystems and cntlrs
-change (Subsystems, namespaces; Cntlrs) — it renders the discovery log
-records (`cdc.md` DS3), shows each host exactly the entries whose
-`allowed_hosts` name it (`cdc.md` DS4), and sends a discovery-log-change
-AEN to the hosts whose rendered log changes (`cdc.md` DS6, DS7). Hosts
-running nvme-stas then connect and disconnect automatically, which is what
-makes `DeleteSubsystem`, `CreateCntlr` and `UpdateCntlrEnabled`
-transparent to hosts.
+gateway writes them as host-facing subsystems and cntlrs change, and the
+sp worker as a cntlr's health changes and at a failover or a cntlr
+replacement, every writer by the listing rule of [D18] (Subsystems,
+namespaces; Cntlrs; sp role) — it renders the discovery log records
+(`cdc.md` DS3), shows each host exactly the entries whose `allowed_hosts`
+name it (`cdc.md` DS4), and sends a discovery-log-change AEN to the hosts
+whose rendered log changes (`cdc.md` DS6, DS7). Hosts that follow the
+discovery log, through nvme-stas or an equivalent (Host view), then
+connect and disconnect automatically, which is what makes
+`DeleteSubsystem`, `CreateCntlr` and `UpdateCntlrEnabled` transparent to
+hosts, and what takes a failed-over primary's path away from them, before
+the sides fence it when it does not answer its demotion within the
+demotion hold (Failover).
 
 Redundancy is twins, not fail-over: the instances configured for one range
 all serve it, and hosts hold discovery connections to every cdc endpoint
 (`cdc.md` DS2; the placement is `cdc.md`, `cmd/dnv-cdc`). An instance
 answers no host until its first scan of etcd has landed, and from then on
 keeps serving its last known state through etcd outages (`cdc.md` CM4,
-DS10).
+DS10). A twin that has lost etcd therefore keeps listing a path the
+records have withdrawn, and nvme-stas keeps a path for as long as any
+discovery controller it reads lists it (Known limits).
 
 ## Components: invocation reference
 
@@ -4379,8 +4496,8 @@ document and the component documents cite it by its id.
   probed loop device is `RES_STATUS_ERROR` and is repaired by the clone
   rebuild (Clone crash recovery).
 * **[D15] Whole-side zeroing behind a `provisioned` gate;
-  `RES_STATUS_PROVISIONING`.** dnv is multi-tenant, so a new side must
-  never expose a previous tenant's bytes. A trim cannot deliver that:
+  `RES_STATUS_PROVISIONING`.** A new side must never expose a previous
+  pool's bytes (System overview). A trim cannot deliver that:
   `blkdiscard` does not imply zeros (the kernel does not promise that a
   discarded region reads as zeros, and NVMe's read-zeroes after deallocate
   is optional). Nor is a trim enough for correctness: a recycled
@@ -4408,36 +4525,52 @@ document and the component documents cite it by its id.
   group assembly (`cnagent.md` CN12) and the fresh-thin-pool metadata
   assumption (`cnagent.md` CN13).
 * **[D16] Failover fencing has no epoch; safety = per-side atomic flip + md
-  arbitration.** A failover's only cross-node coordination is the revisioned
-  fan-out of sp role, unordered among the sides. Its sides-first order — the
-  cntlrs' requests held until every side the worker drives has reported the
-  revision applied, for one `cntlr_interval` at most (`dnv-worker.md` RW14)
-  — mitigates three races: a promotion outrunning the sides' ANA flips, a
-  cntlr's connect outrunning a new side's export, and a leg removal's
-  disconnect on a CN overlapping the disk node's unlink of that side's
-  export. It is no correctness dependency: at the bound the cntlrs go
-  whether every side has reported or not, and nothing below relies on it.
+  arbitration.** Among the nodes a failover moves — the cntlrs and the
+  sides — the only coordination is the revisioned fan-out of sp role,
+  unordered among the sides; toward hosts the failover also withdraws the
+  old primary's address from the discovery records ([D18]). The fan-out
+  comes in two waits, each bounded in time. The demotion hold hands the
+  old primary its demotion first and holds the sides and the other cntlrs
+  until it reports the demotion applied, for `DemotionHoldTimeout` at most
+  (`dnv-worker.md` RW22): an old primary that applies its demotion within
+  the bound moves its namespaces to ANA inaccessible before any side
+  fences it, so hosts queue their IO instead of failing it, and for an
+  unreachable one the bound is what a host that follows the discovery log
+  needs to drop the withdrawn path (`dnv-worker.md` RW22 says how it is sized).
+  The worker judges no reachability: an old primary that answers ends the
+  demotion hold early, and one that never answers uses up the bound its hosts
+  need. The
+  sides-first hold then keeps back the cntlrs' requests until every side the
+  worker drives has reported the revision applied, for one
+  `cntlr_interval` at most (`dnv-worker.md` RW14), which mitigates three
+  races: a promotion outrunning the sides' ANA flips, a cntlr's connect
+  outrunning a new side's export, and a leg removal's disconnect on a CN
+  overlapping the disk node's unlink of that side's export. Neither wait
+  is a correctness dependency: at each bound the next requests go whether
+  the awaited reports came or not, and nothing below relies on them.
   Correctness rests on two things (Failover, "Make sure all groups are
   available"): each DN converges its side's old-primary-to-dm-error and
-  new-primary-to-side-device reloads in one pass, so one leg never has two
-  writers — short of a reload of the old primary's linear whose load fails
-  (`dnagent.md`, Known limits); and mdadm's assembly rules arbitrate across
-  legs — a stale leg whose superblock claims a clean full array will not
-  start degraded alone, and event counts plus resync direction repair
-  divergence once both legs return. md's assembly behaviour is therefore a
-  load-bearing external dependency, and no suite in the tree pins it (Known
-  limits). The accepted cost is an old primary that is alive but
-  not yet demoted: fenced at the DNs but still advertising optimized, it
-  returns DNR internal errors that host multipath does not fail over from,
-  so applications can see EIO — at a failover of a primary still serving,
-  until it applies its demotion, which waits in the sides-first hold with
-  the other cntlrs' requests (the hold lasts about the sides' round trip, up
-  to one `cntlr_interval` while a side does not report, and the demotion's
-  delivery and its converge up to the ANA move come on top), and, for the
-  control-plane-partitioned old primary of Failover, until it re-syncs or is
-  stopped. Closing both edges takes a fencing epoch checked on the data path
-  (NVMe reservations, or a per-revision gate at the side exports) — not more
-  ordering in the worker, which cannot reach a partitioned node anyway.
+  new-primary-to-side-device reloads in one pass, so one leg never has
+  two writers — short of a reload of the old
+  primary's linear whose load fails (`dnagent.md`, Known limits); and
+  mdadm's assembly rules arbitrate across legs — a stale leg whose
+  superblock claims a clean full array will not start degraded alone, and
+  event counts plus resync direction repair divergence once both legs
+  return. md's assembly behaviour is therefore a load-bearing external
+  dependency, and no suite in the tree pins it (Known limits). For a host
+  that follows the discovery log, the two waits and the withdrawal close
+  both edges of a failover: an old primary that applies its demotion within
+  the demotion hold is inaccessible before the fence, and one the worker
+  cannot reach is off the host's paths before it. Two costs are accepted.
+  Every failover of an old primary that does not answer, a dead CN's
+  among them, spends the demotion hold's bound before its sides are
+  told, and its new primary comes up that much later. And an old primary
+  still on a host's path at the fence that has not applied its demotion —
+  the residual cases of Known limits — returns DNR
+  internal errors that host multipath does not fail over from, so
+  applications can see EIO until it applies its demotion or is stopped.
+  Closing that residue takes a fencing epoch checked on the data path (NVMe
+  reservations, or a per-revision gate at the side exports).
 * **[D10] Id-keyed revision keys.** `DnRev`, `CnRev` and `SpRev` are keyed
   by `dn_id`, `cn_id` and `sp_id`, not by the `addr_port` or `sp_name`
   that keys the matching `DnConf`, `CnConf` or `SpConf`; the mutable handle
@@ -4482,6 +4615,48 @@ document and the component documents cite it by its id.
   keys are garbage-collected by their observers instead of expiring — which
   is also what lets a worker detect that the fleet has given up on it (it
   sees its own key deleted) and rejoin as a fresh identity.
+* **[D18] The discovery records list the enabled primary and every standby
+  a failover may elect.** A cntlr's address is in its SP's discovery
+  records — the `nvme_tr_conf_list` of every `CdcEntry` of the SP, one
+  entry per subsystem — while the cntlr is enabled and either is the
+  primary or has a zero `err_epoch`. That is the listing rule. It lives in
+  one place, `model` (`CdcListed`, `CdcTrConfList`), and every writer of the
+  records applies it: the gateway's subsystem and cntlr calls (Subsystems,
+  namespaces; Cntlrs), and the sp worker's health write for a cntlr, its
+  failover and its cntlr replacement (sp role, Automatic reactions). Each
+  writer sets the whole list from the cntlrs its own transaction reads, in
+  `cntlr_id_list` order, and never adds or drops a single address, so no
+  interleaving of writers can leave a list the rule does not give; a
+  gateway writer puts a missing entry back, and a worker writer leaves it
+  missing (Cntlrs). The reasons: a serving primary is never taken away from
+  hosts, so a primary with an error that no failover fixes keeps its path
+  and the IO it still serves; the health epoch exists already, so the rule
+  needs no new field; and the rule names exactly the standbys the failover
+  may elect (`dnv-worker.md` AR5), so a host that follows the records
+  holds a path to every cntlr that can become its next primary and to no
+  standby that cannot.
+
+  The consequences. A new cntlr is listed from its creation, enabled and
+  with a zero `err_epoch`: a host that connects to it before its agent has
+  built the subsystem only retries, and listing it only once built would
+  need a field for a harmless case. The failover's own transaction takes
+  out an old primary that has an `err_epoch`, so hosts that follow the
+  discovery log drop its path, and for one that does not answer its
+  demotion they drop it while the demotion hold still keeps the sides back
+  (Failover). Its next clean verdict lists it again as a standby, if it is
+  enabled; a clean reply at a revision older than the one the worker
+  drives gives no verdict, so that an old primary that resumes is not
+  listed while it still exports its namespaces optimized, possibly over
+  legs the sides have fenced (`dnv-worker.md` HL2). An enabled standby
+  leaves the records when its `err_epoch` is set and returns when it is
+  cleared: hosts drop and re-add a path that is ANA inaccessible
+  anyway, with IO untouched, and nothing damps that churn, which shows in
+  the worker's health records and points at the sick standby. An enable
+  lists a cntlr at once only when it is the primary or its `err_epoch` is
+  zero, and any other at the worker's next clean verdict on it. A health
+  write still bumps no revision (Revision keys and the sync fan-out):
+  dnv-cdc watches the `CdcEntry` keys themselves, and no agent's desired
+  state moves.
 
 ## Known limits
 
@@ -4532,13 +4707,14 @@ that component's document and only pointed to here.
   metadata is corrupt. A pool-metadata `RES_STATUS_ERROR` is therefore an
   operator-intervention event (activate read-only, "thin_repair" onto fresh
   space by hand).
-* **The fabric is trusted.** gRPC is plaintext (`grpc.md`, Wiring), etcd
-  access is whatever the deployment configures, and data-plane access
-  control is host-NQN allow-lists — a spoofable identifier. dnv has no NVMe
-  in-band authentication and no TLS. The [D15] multi-tenant guarantee is
-  about *stored bytes* (no tenant ever reads another's stale blocks); it
-  does not defend against an attacker on the storage network. Deploy on an
-  isolated, trusted fabric.
+* **The fabric is trusted.** dnv authenticates no user and no host beyond
+  its NQN: gRPC is plaintext (`grpc.md`, Wiring), etcd access is whatever
+  the deployment configures, and data-plane access control is host-NQN
+  allow-lists — a spoofable identifier. dnv has no NVMe in-band
+  authentication and no TLS; the layer above authenticates its users
+  (System overview). The [D15] guarantee is that a new side never exposes
+  a previous pool's bytes; it does not defend against an attacker on the
+  storage network. Deploy on an isolated, trusted fabric.
 * **QoS is not enforced** (Controller node, common): agents accept and persist
   `qos_ratio` and enforce nothing (`cnagent.md` CN6).
 * **Snapshot creation is not atomic across a primary crash.** With the
@@ -4568,6 +4744,46 @@ that component's document and only pointed to here.
   survivor whose superblock still counts a clean full array; no suite in
   the tree asserts that refusal, so nothing in the tree detects a change
   in the deployed mdadm's behaviour.
+* **A stale discovery view keeps a withdrawn path.** A cdc twin that has
+  lost etcd keeps serving its last known records (dnv-cdc; `cdc.md` DS10),
+  a failed-over primary's address among them, and nvme-stas keeps a path
+  for as long as any discovery controller it reads still lists it
+  (`cdc.md` DS2). A host running nvme-stas whose discovery connections
+  include such a twin keeps the old primary's path past the fence
+  (Failover).
+* **A path that nothing following the discovery log manages is never
+  dropped.** A path connected by hand on a host that runs no nvme-stas or
+  equivalent, or a controller named in nvme-stas's own configuration
+  rather than discovered, stays when the records withdraw its cntlr, so
+  that host keeps a failed-over primary's path past the fence (Host view,
+  Failover).
+* **An old primary that cannot apply its demotion within the demotion
+  hold fails IO from the fence.** An agent whose demotion waits behind a
+  slow converge for the cntlr's locks (`cnagent.md` CN1; the head-of-line
+  blocking above) applies it only after the sides have fenced its legs,
+  and until then answers IO errors on its still-optimized path to every
+  host still on that path — a host of the two entries above, or one whose
+  discovery-log follower drops the path later than the demotion hold ends
+  (Failover).
+* **A cntlr replacement of a serving primary can fence it first.** A
+  replacement deletes the cntlr it replaces, so its fan-out starts no
+  demotion hold and keeps the sides-first order (`dnv-worker.md` RW14,
+  RW22). When the replaced cntlr is a primary that still serves — the
+  sole-primary replacement of Automatic reactions — its sides drop its
+  exports in no order with its CN's teardown of its stack, which the CN
+  learns of from its own node's syncup, and until that teardown it answers
+  IO errors on its still-optimized path to every host still on it. The
+  case needs a pool with no failover candidate, whose hosts lose the old
+  primary's path either way; the replacement's path comes with its build.
+* **A failover with no demotion hold can fence the old primary first**
+  (`dnv-worker.md` RW22 and Known limits). When the SP's shard changes
+  owner, or its worker restarts, before a failover's demotion hold ends,
+  or a coordinator that has just started fans a failover out before its
+  first hold has started its cntlr children, the sides can fence the old
+  primary before it has applied its demotion, and until it has, it answers
+  IO errors on its still-optimized path to every host still on that path.
+  A host that follows the discovery log still drops the path the failover
+  withdrew, possibly only after the fence (Failover).
 * **Read-only reaches a CN only with its converge.** A CN that has not yet
   converged to a revision carrying `SP_LEVEL_READONLY` keeps serving
   writes until it syncs; there is no DN-side enforcement point that could

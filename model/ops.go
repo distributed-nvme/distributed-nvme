@@ -171,8 +171,11 @@ func ReleaseShard(bucket []uint32, shard uint32) []uint32 {
 // whether to call one; nothing may re-implement the rule.
 //
 // A nil threshold — an SP written without one — resolves to the pure
-// defaults. No upper bound applies: architecture.md, Common validation, only
-// requires each value to be >= 1, which is what a resolved zero already is.
+// defaults. Nothing here clamps a value: architecture.md, Common validation,
+// gives the four no maximum, a resolved zero already meets their floor of 1,
+// and its two other rules — leg_unhealthy above side_unhealthy, and
+// primary_unhealthy at least two of its cluster's cntlr_interval — are judged
+// by the gateway at the pool's creation.
 //
 // event_threshold is deliberately still resolved at read time, and stored as
 // sent. It is a policy timer, not geometry: nothing is formatted or addressed
@@ -753,8 +756,14 @@ func SetCnErrEpoch(
 // observation of the cntlr as primary at the revision it drives that shows its
 // stack built (HL2), and a settle with a nonzero epoch clears nothing — an
 // unhealthy observation proves no role. A no-op when nothing changes. A Cntlr
-// has no capacity key and health never bumps a revision, so this is the whole
-// mutation.
+// has no capacity key and health never bumps a revision; what it has instead
+// is its place in the discovery records. A change that moves the cntlr in or
+// out of the listing rule (architecture.md [D18]) — the err_epoch of an
+// enabled standby set or cleared — rewrites every CdcEntry of the SP in the
+// same STM, so a standby leaves the records when it turns unhealthy and
+// returns at its next clean round. A cntlr whose SP's name record or SpConf
+// is missing, or names another sp_id, has no records to rewrite; no writer
+// leaves one, as the sp drain deletes every cntlr before those keys.
 func SetCntlrErrEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -770,6 +779,7 @@ func SetCntlrErrEpoch(
 		if !s.Get(key, cntlr) {
 			return fail(opSetCntlrErrEpoch, "cntlr not found")
 		}
+		listed := CdcListed(cntlr)
 		value, changed := applyErrEpoch(cntlr.GetErrEpoch(), epoch)
 		cntlr.ErrEpoch = value
 		if settle && epoch == 0 && cntlr.GetSettling() {
@@ -780,7 +790,14 @@ func SetCntlrErrEpoch(
 			return nil
 		}
 		s.Put(key, cntlr)
-		return nil
+		if CdcListed(cntlr) == listed {
+			return nil
+		}
+		conf, ok := spConfById(s, cid, spId)
+		if !ok {
+			return nil
+		}
+		return rewriteCdcEntries(s, opSetCntlrErrEpoch, cid, conf)
 	})
 }
 
@@ -1083,12 +1100,15 @@ func failoverCandidate(
 // Cntlrs), and the new
 // one is the healthy, enabled, non-primary cntlr with the smallest cntlr_id.
 // Both primary booleans flip in one STM, the new primary is marked settling,
-// and SpRev is bumped once; the data-plane choreography is that of
+// every CdcEntry of the SP is rewritten by the listing rule (architecture.md
+// [D18]), and SpRev is bumped once; the data-plane choreography is that of
 // architecture.md, Failover, and belongs to the agents.
 //
-// Every precondition is re-validated here, election included: two owners
-// overlapping on one SP (VW7) cannot both apply it, because the second
-// finds the old cntlr no longer primary.
+// Every precondition the store holds is re-validated here, election
+// included, so two owners overlapping on one SP (VW7) cannot both apply it:
+// the second finds the old cntlr no longer primary. What no STM sees is not
+// re-checked: AR5's two refusals, which read a report, and AR10's own
+// verdict.
 func Failover(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1166,6 +1186,15 @@ func Failover(
 		fresh.Settling = true
 		s.Put(oldKey, old)
 		s.Put(newKey, fresh)
+		// The listing rule ([D18]) in the same transaction: an old primary
+		// with an err_epoch leaves the discovery records here, so hosts that
+		// follow them drop its path while the fan-out holds its sides
+		// (dnv-worker.md RW22); its next clean round lists it again as a
+		// standby. The new primary was listed already, as every candidate
+		// is.
+		if err := rewriteCdcEntries(s, opFailover, cid, conf); err != nil {
+			return err
+		}
 		return BumpSpRev(s, opFailover, shard, cid, spId)
 	})
 }
@@ -1564,10 +1593,11 @@ func chargeSpCns(
 // that CN gets its pointer removed, the SP footprint back, its capacity key
 // maintained and its CnRev bumped; the new Cntlr is written with
 // cntlr_id = SpConf.next_id++ and settling iff asPrimary, and its CN charged
-// the same way; every CdcEntry of the SP that exists loses the old
-// nvme_tr_conf and gains the new one, and a missing one stays missing —
-// unlike the gateway's DeleteCntlr and CreateCntlr, which rebuild it (see
-// rewriteCdcEntries); SpConf is rewritten and SpRev bumped once.
+// the same way; every CdcEntry of the SP that exists is rewritten by the
+// listing rule (architecture.md [D18]), which drops the old cntlr and lists
+// the new one, and a missing one stays missing — unlike the gateway's
+// DeleteCntlr and CreateCntlr, which rebuild it (see rewriteCdcEntries);
+// SpConf is rewritten and SpRev bumped once.
 func ReplaceCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1700,11 +1730,7 @@ func ReplaceCntlr(
 		conf.CntlrIdList = append(
 			removeId(conf.GetCntlrIdList(), oldId), newId,
 		)
-		err = rewriteCdcEntries(
-			s, opReplaceCntlr, cid, shard, conf,
-			old.GetNvmeTrConf(), cn.GetNvmeTrConf(),
-		)
-		if err != nil {
+		if err := rewriteCdcEntries(s, opReplaceCntlr, cid, conf); err != nil {
 			return err
 		}
 		s.Put(SpConfKey(cid, spName), conf)
@@ -1774,78 +1800,118 @@ func removeId(ids []uint64, id uint64) []uint64 {
 	return kept
 }
 
-// rewriteCdcEntries swaps one cntlr's transport address for another in every
-// discovery entry of the SP (architecture.md, Cntlrs): one CdcEntry per
-// Subsystem of nqn_list,
-// whose key needs the subsystem's ss_id — so each Subsystem is read first.
+// ---------------------------------------------------------------------------
+// The discovery listing rule (architecture.md [D18])
+// ---------------------------------------------------------------------------
+
+// CdcListed is the listing rule of architecture.md [D18]: a cntlr's
+// transport address is in its SP's CdcEntry records while the cntlr is
+// enabled and either is the primary or has a zero err_epoch — the primary
+// and every standby the failover may elect (failoverCandidate). Every writer
+// of a CdcEntry applies it: the gateway's subsystem and cntlr calls, and in
+// this package the cntlr health write, Failover and ReplaceCntlr.
+func CdcListed(cntlr *pb.Cntlr) bool {
+	return !cntlr.GetDisabled() &&
+		(cntlr.GetPrimary() || cntlr.GetErrEpoch() == 0)
+}
+
+// CdcTrConfList is the nvme_tr_conf_list of every CdcEntry of an SP
+// (architecture.md [D18]): the nvme_tr_conf of every cntlr CdcListed lists,
+// in the order given, which every caller makes the SP's cntlr_id_list order.
+func CdcTrConfList(cntlrs []*pb.Cntlr) []*pb.NvmeTrConf {
+	var list []*pb.NvmeTrConf
+	for _, cntlr := range cntlrs {
+		if CdcListed(cntlr) {
+			list = append(list, cntlr.GetNvmeTrConf())
+		}
+	}
+	return list
+}
+
+// rewriteCdcEntries applies the listing rule ([D18]) to every discovery entry
+// of the SP: one CdcEntry per Subsystem of nqn_list, whose key needs the
+// subsystem's ss_id — so each Subsystem is read first — and whose
+// nvme_tr_conf_list becomes CdcTrConfList of the SP's cntlrs as this
+// transaction reads them, the caller's own writes included. A listed cntlr
+// whose key is missing has no address to list. An entry whose list is
+// already the rule's is not written, so dnv-cdc sees no put that changes
+// nothing.
 //
 // A listed Subsystem that is missing aborts the op: its CdcEntry key cannot be
-// formed, so the entry would keep advertising a controller that no longer
-// exists, and an op never writes half of what it owes. A Subsystem whose
-// CdcEntry key is missing is skipped, so ReplaceCntlr leaves that entry
-// missing. That is a choice of scope, not a limit: every field of an entry can
-// be derived from the NQN it is listed under, the Subsystem and the SP's
-// enabled cntlrs, and the gateway's CreateCntlr, DeleteCntlr, flag-changing
-// UpdateCntlrEnabled and UpdateSubsystemHosts rebuild a missing entry that
-// way (gateway rebuildCdcEntry).
+// formed, so the entry would keep advertising what the rule no longer lists,
+// and an op never writes half of what it owes. A Subsystem whose CdcEntry key
+// is missing is skipped, so the worker leaves that entry missing. That is a
+// choice of scope, not a limit: every field of an entry can be derived from
+// the NQN it is listed under, the Subsystem and the SP's cntlrs, and the
+// gateway's CreateCntlr, DeleteCntlr, flag-changing UpdateCntlrEnabled and
+// UpdateSubsystemHosts rebuild a missing entry that way (gateway
+// rebuildCdcEntry).
 func rewriteCdcEntries(
 	s etcdutil.STM,
 	op string,
 	cid uint64,
-	shard uint32,
 	conf *pb.SpConf,
-	oldTr *pb.NvmeTrConf,
-	newTr *pb.NvmeTrConf,
 ) error {
+	cntlrs := make([]*pb.Cntlr, 0, len(conf.GetCntlrIdList()))
+	for _, cntlrId := range conf.GetCntlrIdList() {
+		cntlr := &pb.Cntlr{}
+		if s.Get(CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
+			cntlrs = append(cntlrs, cntlr)
+		}
+	}
+	list := CdcTrConfList(cntlrs)
 	for _, nqn := range conf.GetNqnList() {
 		subsystem := &pb.Subsystem{}
 		if !s.Get(SubsystemKey(cid, conf.GetSpId(), nqn), subsystem) {
 			return fail(op, "subsystem not found")
 		}
-		key := CdcEntryKey(cid, shard, conf.GetSpId(), subsystem.GetSsId())
+		key := CdcEntryKey(
+			cid, conf.GetShardCode(), conf.GetSpId(), subsystem.GetSsId())
 		entry := &pb.CdcEntry{}
 		if !s.Get(key, entry) {
 			continue
 		}
-		entry.NvmeTrConfList = appendTrConf(
-			removeTrConf(entry.GetNvmeTrConfList(), oldTr),
-			newTr,
-		)
+		if trConfListEqual(entry.GetNvmeTrConfList(), list) {
+			continue
+		}
+		entry.NvmeTrConfList = list
 		s.Put(key, entry)
 	}
 	return nil
 }
 
-// removeTrConf drops every entry equal to target from a transport list.
-func removeTrConf(
-	list []*pb.NvmeTrConf,
-	target *pb.NvmeTrConf,
-) []*pb.NvmeTrConf {
-	kept := make([]*pb.NvmeTrConf, 0, len(list))
-	for _, item := range list {
-		if proto.Equal(item, target) {
-			continue
-		}
-		kept = append(kept, item)
+// trConfListEqual reports whether two transport lists hold equal members in
+// the same order.
+func trConfListEqual(a []*pb.NvmeTrConf, b []*pb.NvmeTrConf) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return kept
+	for idx := range a {
+		if !proto.Equal(a[idx], b[idx]) {
+			return false
+		}
+	}
+	return true
 }
 
-// appendTrConf adds one transport to a list unless an equal one is already
-// there, which keeps the rewrite idempotent.
-func appendTrConf(
-	list []*pb.NvmeTrConf,
-	target *pb.NvmeTrConf,
-) []*pb.NvmeTrConf {
-	if target == nil {
-		return list
+// spConfById reads the SpConf of the SP spId names, through the sp_id ->
+// sp_name record (MD2), and reports whether it found one that still carries
+// that id: the SpConf is name-keyed, and a name re-used since names another
+// SP.
+func spConfById(
+	s etcdutil.STM,
+	cid uint64,
+	spId uint64,
+) (*pb.SpConf, bool) {
+	name := &pb.SpName{}
+	if !s.Get(SpNameKey(cid, spId), name) {
+		return nil, false
 	}
-	for _, item := range list {
-		if proto.Equal(item, target) {
-			return list
-		}
+	conf := &pb.SpConf{}
+	if !s.Get(SpConfKey(cid, name.GetSpName()), conf) {
+		return nil, false
 	}
-	return append(list, target)
+	return conf, conf.GetSpId() == spId
 }
 
 // ---------------------------------------------------------------------------

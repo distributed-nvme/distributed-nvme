@@ -309,8 +309,9 @@ func (d *Dm) BlkDiscardRange(
 // [D15]). Unlike BlkDiscardRange (a
 // metadata-only "mark hydrated" hint) this is a *guaranteed* zero write:
 // discard-reads-zeros is not a hardware guarantee (the kernel dropped
-// discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is optional) and dnv is
-// multi-tenant, so one tenant must never read another's stale bytes.
+// discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is optional) and a new
+// side must never expose a previous pool's bytes (architecture.md, System
+// overview).
 //
 // It must never be pointed at the CN clone-metadata arena: that arena is a
 // sparse tmpfs file and --zeroout would materialize it in RAM, which is why

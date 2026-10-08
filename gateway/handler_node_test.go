@@ -379,10 +379,10 @@ func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
 		},
 		AllocConf: &pb.AllocConf{DnBatchSize: 16, CnBatchSize: 16},
 		HealthCheckConf: &pb.HealthCheckConf{
-			DnInterval:    5,
-			CnInterval:    5,
-			SideInterval:  5,
-			CntlrInterval: 5,
+			DnInterval:    2,
+			CnInterval:    2,
+			SideInterval:  2,
+			CntlrInterval: 2,
 		},
 	}, "the cluster_conf stored for an empty request")
 

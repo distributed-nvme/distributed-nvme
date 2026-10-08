@@ -28,11 +28,11 @@ func (s *DnAgentServer) probeDn(
 		s.meta.SetDiskSize(size)
 	}
 
-	// Only the 4 KiB header is re-read: cheap enough for the 5 s health
-	// rounds, and enough to catch a wiped, corrupt or foreign disk. What it
-	// reads also moves DiskMeta's own view, in memory and nowhere else: a
-	// header other than the one the loaded volume table came from drops that
-	// table, so the next call re-reads the disk (DN18).
+	// Only the 4 KiB header is re-read: cheap enough for the health rounds
+	// at any interval, and enough to catch a wiped, corrupt or foreign disk.
+	// What it reads also moves DiskMeta's own view, in memory and nowhere
+	// else: a header other than the one the loaded volume table came from
+	// drops that table, so the next call re-reads the disk (DN18).
 	details, err := s.meta.ProbeHeader(ctx, req.GetClusterId(),
 		req.GetDnId(), req.GetExtentSize())
 	switch {

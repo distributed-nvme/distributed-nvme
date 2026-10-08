@@ -27,7 +27,7 @@ const (
 
 	MaxHealthCheckInterval     = 3600
 	MinHealthCheckInterval     = 1
-	DefaultHealthCheckInterval = 5
+	DefaultHealthCheckInterval = 2
 
 	MinAllocDnBatchSize     = 1
 	MaxAllocDnBatchSize     = 1024
@@ -226,7 +226,7 @@ const (
 	DefaultMigrBatchSize = 1
 	MaxMigrBmCnt         = 4
 
-	DefaultPrimaryUnhealthy    = 5
+	DefaultPrimaryUnhealthy    = 4
 	DefaultCntlrUnhealthy      = 600
 	DefaultSideUnhealthy       = 600
 	DefaultLegUnhealthy        = 1200
@@ -435,6 +435,11 @@ const (
 	// Per-call deadlines of the worker's agent RPCs (RW5, BM3).
 	DefaultWorkerSyncupTimeout = 60
 	DefaultWorkerPushTimeout   = 60
+	// Seconds a fan-out that demotes a primary holds its sides and its other
+	// cntlrs for the demoted cntlr to report its demotion applied (RW22): long
+	// enough for a host running nvme-stas to drop the path the failover took
+	// out of the discovery records before the sides fence it.
+	DemotionHoldTimeout = 3
 	// etcd client: dial, and per plain operation / per whole
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5

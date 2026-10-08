@@ -14,7 +14,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// The fixture SP of AR1-AR9 (AR6's pending rule with real group geometry per
+// The fixture SP of AR1-AR10 (AR6's pending rule with real group geometry per
 // architecture.md, Group on-leg layout: meta region, data region, health block)
 // ---------------------------------------------------------------------------
 
@@ -543,8 +543,16 @@ func (o *fakeReactionOps) cloneBatches() [][]model.BmChunk {
 // ---------------------------------------------------------------------------
 
 // reactHarness drives w.reactionPass synchronously over a fixture SpState:
-// the pass is a pure function of the snapshot, the primary's CntlrInfo and
-// now, so no goroutine and no clock stepping is needed to test it.
+// the pass is a pure function of the snapshot, the primary's CntlrInfo, the
+// coordinator's own verdicts and now, so no goroutine and no clock stepping is
+// needed to test it.
+//
+// AR10 lets a threshold fire only on an object the coordinator's own monitors
+// judged unhealthy. Unless a test turns judgeStored off, every load notes a
+// verdict of unhealthy for each cntlr, leg and side whose stored err_epoch is
+// set, as the monitors of a coordinator that has driven the SP all along
+// would have: the tests of the other rules then need no verdict of their own,
+// and the AR10 tests drive the memo themselves.
 type reactHarness struct {
 	t     *testing.T
 	logs  *logCapture
@@ -555,6 +563,9 @@ type reactHarness struct {
 	ops   *fakeSpOps
 	rops  *fakeReactionOps
 	w     *spWorker
+	// judgeStored is the AR10 shortcut described above; true unless a test
+	// turns it off.
+	judgeStored bool
 }
 
 func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
@@ -571,13 +582,51 @@ func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
 		SpName:   testSpName,
 	})
 	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
 	ops := &fakeSpOps{state: state}
 	rops := &fakeReactionOps{}
 	w.ops = ops
 	w.react = newReactor(rops)
-	return &reactHarness{
+	h := &reactHarness{
 		t: t, logs: logs, clk: clk, store: store, deps: d,
-		state: state, ops: ops, rops: rops, w: w,
+		state: state, ops: ops, rops: rops, w: w, judgeStored: true,
+	}
+	ops.onLoad = func(loaded *model.SpState) {
+		if h.judgeStored {
+			judgeStoredEpochs(w.verdicts, loaded)
+		}
+	}
+	return h
+}
+
+// judgeStoredEpochs notes a verdict of unhealthy in memo for every cntlr, leg
+// and side of state whose err_epoch is set.
+func judgeStoredEpochs(memo *verdictMemo, state *model.SpState) {
+	for cntlrId, cntlr := range state.Cntlrs {
+		if cntlr.GetErrEpoch() != 0 {
+			memo.noteCntlr(cntlrId, true)
+		}
+	}
+	for _, slice := range state.Slices {
+		for _, grp := range allGroups(slice) {
+			for _, list := range [][]*pb.Leg{
+				grp.GetLegList(), grp.GetSpareLegList(),
+			} {
+				for _, leg := range list {
+					if leg.GetErrEpoch() != 0 {
+						memo.noteLeg(leg.GetLegId(), true)
+					}
+					for _, side := range leg.GetSideList() {
+						if side.GetErrEpoch() != 0 {
+							memo.noteSide(sideKey{
+								legId:  leg.GetLegId(),
+								sideId: side.GetSideId(),
+							}, true)
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -3398,6 +3447,162 @@ func TestReactionSpareCreateNoCandidate(t *testing.T) {
 	h.pass()
 	h.wantOps()
 	h.wantSkipped(reactionSpareCreate, reasonNoCandidate)
+}
+
+// ---------------------------------------------------------------------------
+// AR10 — the own-verdict rule
+// ---------------------------------------------------------------------------
+
+// TestReactionNeedsOwnVerdict pins AR10: a threshold reaction fires only on an
+// object whose latest health verdict by this coordinator is unhealthy, however
+// old its stored err_epoch, while the clock still runs from that epoch — a
+// verdict given now on an epoch an hour old fires at once — and a reaction the
+// rule holds back logs nothing. The disabled trigger needs no verdict, and
+// neither does AR8 step 2's test of a dead spare, which reads the epochs as
+// stored. The harness's stored-epoch shortcut is off, so every verdict here is
+// one the test notes.
+func TestReactionNeedsOwnVerdict(t *testing.T) {
+	newHarness := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		h.judgeStored = false
+		return h
+	}
+
+	t.Run("failover", func(t *testing.T) {
+		h := newHarness(t)
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		h.w.verdicts.noteCntlr(reactCntlrA, true)
+		h.pass()
+		h.wantOps("failover")
+	})
+
+	t.Run("failover after a clean verdict", func(t *testing.T) {
+		h := newHarness(t)
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
+		h.w.verdicts.noteCntlr(reactCntlrA, true)
+		h.w.verdicts.noteCntlr(reactCntlrA, false)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+	})
+
+	t.Run("the disabled trigger", func(t *testing.T) {
+		h := newHarness(t)
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.pass()
+		h.wantOps("failover")
+	})
+
+	t.Run("cntlr replacement", func(t *testing.T) {
+		h := newHarness(t)
+		h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.cnCands(reactCnC)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		h.w.verdicts.noteCntlr(reactCntlrB, true)
+		h.pass()
+		h.wantOps("replace")
+	})
+
+	t.Run("leg repair, the leg's clock", func(t *testing.T) {
+		h := newHarness(t)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(common.DefaultLegUnhealthy)
+		h.dnCands(reactDnC)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		h.w.verdicts.noteLeg(reactDataLegA, true)
+		h.pass()
+		h.wantOps("create_spare")
+	})
+
+	t.Run("leg repair, the side's clock", func(t *testing.T) {
+		h := newHarness(t)
+		leg := h.legOf(reactDataLegA)
+		leg.ErrEpoch = h.ago(1)
+		side := leg.SideList[0]
+		side.ErrEpoch = h.ago(common.DefaultSideUnhealthy)
+		key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
+		h.dnCands(reactDnC)
+		// The leg judged, the side not: case 2's clock has no verdict.
+		h.w.verdicts.noteLeg(reactDataLegA, true)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		// The side judged, the leg not: no leg verdict, no repair.
+		h.w.verdicts.noteLeg(reactDataLegA, false)
+		h.w.verdicts.noteSide(key, true)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		h.w.verdicts.noteLeg(reactDataLegA, true)
+		h.pass()
+		h.wantOps("create_spare")
+	})
+
+	t.Run("a dead spare needs no verdict", func(t *testing.T) {
+		// A spare whose leg has read ERROR for leg_unhealthy is dead by its
+		// stored epoch alone, with no verdict of this coordinator on it, so
+		// it holds nothing and the judged leg gets a new spare.
+		h := newHarness(t)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
+			LegId: 700, LegIdx: 2,
+			ErrEpoch: h.ago(common.DefaultLegUnhealthy),
+			SideList: []*pb.Side{{
+				SideId: 800, AddrPort: reactDnC, Provisioned: true,
+			}},
+		})
+		h.setLegRow(700, pb.ResStatus_RES_STATUS_ERROR)
+		h.dnCands(reactDnD)
+		h.w.verdicts.noteLeg(reactDataLegA, true)
+		h.pass()
+		h.wantOps("create_spare")
+	})
+}
+
+// TestVerdictMemoDropsWhatTheSnapshotDoesNotList pins the memo's pruning: a
+// verdict on a cntlr, leg or side the pass's snapshot no longer lists — a
+// replaced cntlr, a removed leg — is dropped rather than kept for ever, ids
+// being never reused within an SP. A nil memo, a coordinator assembled by
+// hand, holds nothing.
+func TestVerdictMemoDropsWhatTheSnapshotDoesNotList(t *testing.T) {
+	state := reactFixture(t)
+	leg := state.Slices[reactSliceId].GetDataGrpList()[0].GetLegList()[0]
+	listed := sideKey{
+		legId:  leg.GetLegId(),
+		sideId: leg.GetSideList()[0].GetSideId(),
+	}
+	gone := sideKey{legId: 9001, sideId: 9002}
+	memo := newVerdictMemo()
+	memo.noteCntlr(reactCntlrB, true)
+	memo.noteCntlr(9000, true)
+	memo.noteLeg(leg.GetLegId(), true)
+	memo.noteLeg(9001, true)
+	memo.noteSide(listed, true)
+	memo.noteSide(gone, true)
+	got := memo.snapshot(state)
+	if !got.cntlrs[reactCntlrB] || !got.legs[leg.GetLegId()] ||
+		!got.sides[listed] {
+		t.Fatalf("snapshot %+v lost a listed object's verdict", got)
+	}
+	if got.cntlrs[9000] || got.legs[9001] || got.sides[gone] {
+		t.Fatalf("snapshot %+v kept an unlisted object's verdict", got)
+	}
+	if len(memo.cntlrs) != 1 || len(memo.legs) != 1 || len(memo.sides) != 1 {
+		t.Fatalf("memo kept %d cntlrs, %d legs, %d sides, want one each",
+			len(memo.cntlrs), len(memo.legs), len(memo.sides))
+	}
+	var none *verdictMemo
+	none.noteCntlr(reactCntlrB, true)
+	if got := none.snapshot(state); len(got.cntlrs) != 0 {
+		t.Fatalf("a nil memo judged %v", got.cntlrs)
+	}
 }
 
 // ---------------------------------------------------------------------------

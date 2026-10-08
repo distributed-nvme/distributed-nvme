@@ -196,6 +196,12 @@ type objectBehavior struct {
 	Hang              bool                    `json:"hang,omitempty"`
 	DropStream        bool                    `json:"drop_stream,omitempty"`
 	ReplyCode         uint32                  `json:"reply_code,omitempty"`
+	// HangSyncup holds the object's Syncup* the way Hang holds its Check
+	// rounds (hangSyncup), and HangRounds holds the next that many Check
+	// rounds after the file is loaded, each until its stream ends
+	// (waitForRound).
+	HangSyncup bool   `json:"hang_syncup,omitempty"`
+	HangRounds uint32 `json:"hang_rounds,omitempty"`
 
 	// status is Status parsed once by validate; chunkIdList is ChunkIdList's
 	// "s:b" strings parsed by the same pass.
@@ -443,6 +449,10 @@ type fakeAgent struct {
 	behSize    int64
 	behPresent bool
 	epochs     map[string]map[string]*epochEntry
+	// heldRounds counts, per object, the Check rounds hang_rounds still
+	// holds: armed from the file each time it is loaded
+	// (reloadBehaviorLocked) and spent one per round (waitForRound).
+	heldRounds map[string]uint32
 }
 
 func newFakeAgent(ctx context.Context, dir string, size uint64) (*fakeAgent, error) {
@@ -450,11 +460,12 @@ func newFakeAgent(ctx context.Context, dir string, size uint64) (*fakeAgent, err
 		return nil, err
 	}
 	agent := &fakeAgent{
-		dir:    dir,
-		size:   size,
-		state:  make(map[string]*objectState),
-		beh:    &behaviorFile{},
-		epochs: make(map[string]map[string]*epochEntry),
+		dir:        dir,
+		size:       size,
+		state:      make(map[string]*objectState),
+		beh:        &behaviorFile{},
+		epochs:     make(map[string]map[string]*epochEntry),
+		heldRounds: make(map[string]uint32),
 	}
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
@@ -474,7 +485,8 @@ func (a *fakeAgent) refreshLocked(ctx context.Context) {
 // reloadBehaviorLocked implements the behavior file's re-read on every request
 // when its mtime or size changed (dnv-worker.md,
 // Integration test plan, The fake agent). A malformed file is logged once per
-// mtime or size change and ignored, keeping the previous behaviour.
+// mtime or size change and ignored, keeping the previous behaviour. Every load
+// re-arms hang_rounds from the file, so a rewrite counts its rounds afresh.
 func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
 	path := filepath.Join(a.dir, behaviorFileName)
 	info, err := os.Stat(path)
@@ -486,6 +498,7 @@ func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
 			a.behPresent = false
 			a.behMtime = time.Time{}
 			a.behSize = 0
+			clear(a.heldRounds)
 		}
 		return
 	}
@@ -511,6 +524,12 @@ func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
 		return
 	}
 	a.beh = parsed
+	clear(a.heldRounds)
+	for key, ob := range parsed.Objects {
+		if ob != nil && ob.HangRounds != 0 {
+			a.heldRounds[key] = ob.HangRounds
+		}
+	}
 	slog.InfoContext(ctx, "behavior file loaded",
 		slog.String("path", path),
 		slog.Int("object_cnt", len(parsed.Objects)))
@@ -1239,7 +1258,7 @@ func (t *infoTracker) include(showInfo bool, info proto.Message) bool {
 // hangPollInterval is how often a hanging round re-reads behavior.json.
 const hangPollInterval = 200 * time.Millisecond
 
-// waitForRound applies the fake's two stream levers (dnv-worker.md,
+// waitForRound applies the fake's stream levers (dnv-worker.md,
 // Integration test plan, The fake agent) between a Check* request and its
 // reply, and reports whether the stream must be dropped.
 //
@@ -1250,6 +1269,13 @@ const hangPollInterval = 200 * time.Millisecond
 // timeout), so no goroutine is leaked per round, and it also returns once the
 // script clears the lever, so a fake whose stream the worker happens to keep
 // open cannot stay wedged.
+//
+// hang_rounds is hang counted: each of the next that many rounds of the
+// object after the file is loaded is held until its stream ends, and the
+// rounds after them are answered — so a case misses exactly the rounds it
+// asks for, whatever its own polls cost. Clearing the file does not release
+// a round it holds: the worker's round timeout ends it. drop_stream wins over
+// both.
 func (a *fakeAgent) waitForRound(
 	ctx context.Context, key string,
 ) (bool, error) {
@@ -1260,9 +1286,17 @@ func (a *fakeAgent) waitForRound(
 		if ob := a.objBehaviorLocked(key); ob != nil {
 			hang, drop = ob.Hang, ob.DropStream
 		}
+		held := !drop && a.heldRounds[key] != 0
+		if held {
+			a.heldRounds[key]--
+		}
 		a.mu.Unlock()
 		if drop {
 			return true, nil
+		}
+		if held {
+			<-ctx.Done()
+			return false, ctx.Err()
 		}
 		if !hang {
 			return false, nil
@@ -1290,15 +1324,40 @@ func (a *fakeAgent) waitForRound(
 // (which is what the gateway's timeout cancels) or the script clears the
 // lever.
 func (a *fakeAgent) hangUnary(ctx context.Context, key string) error {
+	return a.holdUnary(ctx, key, func(ob *objectBehavior) bool {
+		return ob.Hang
+	})
+}
+
+// hangSyncup applies behavior.json's `hang_syncup` lever to one object's
+// Syncup*, the way hang holds its Check rounds: an agent that takes the
+// request and never answers it, as a stopped cn agent does with the demotion
+// of dnv-worker.md RW22 (worker_test.sh case H). The server interceptor logs
+// the request on arrival, before this runs, so its record times it exactly. A
+// held request ends unapplied when the caller's context does — the worker's
+// per-call deadline (RW5) — and is applied as usual once the script clears
+// the lever. hang alone never holds a Syncup*.
+func (a *fakeAgent) hangSyncup(ctx context.Context, key string) error {
+	return a.holdUnary(ctx, key, func(ob *objectBehavior) bool {
+		return ob.HangSyncup
+	})
+}
+
+// holdUnary is the wait of hangUnary and hangSyncup: it holds one unary
+// request of an object while lever reports true for the object's entry in
+// behavior.json, re-read every hangPollInterval with the lock released.
+func (a *fakeAgent) holdUnary(
+	ctx context.Context, key string, lever func(*objectBehavior) bool,
+) error {
 	for {
 		a.mu.Lock()
 		a.refreshLocked(ctx)
-		hang := false
+		hold := false
 		if ob := a.objBehaviorLocked(key); ob != nil {
-			hang = ob.Hang
+			hold = lever(ob)
 		}
 		a.mu.Unlock()
-		if !hang {
+		if !hold {
 			return nil
 		}
 		select {
@@ -1338,6 +1397,9 @@ func (a *fakeAgent) GetDnSize(
 func (a *fakeAgent) SyncupDn(
 	ctx context.Context, req *pb.SyncupDnRequest,
 ) (*pb.SyncupDnReply, error) {
+	if err := a.hangSyncup(ctx, dnObjKey); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1365,11 +1427,14 @@ func (a *fakeAgent) SyncupDn(
 func (a *fakeAgent) SyncupSide(
 	ctx context.Context, req *pb.SyncupSideRequest,
 ) (*pb.SyncupSideReply, error) {
+	key := sideObjKey(req.GetSidePointer())
+	if err := a.hangSyncup(ctx, key); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
 
-	key := sideObjKey(req.GetSidePointer())
 	if !a.sideKnownLocked(req.GetSidePointer()) {
 		return &pb.SyncupSideReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
@@ -1569,6 +1634,9 @@ func (a *fakeAgent) GetCnSize(
 func (a *fakeAgent) SyncupCn(
 	ctx context.Context, req *pb.SyncupCnRequest,
 ) (*pb.SyncupCnReply, error) {
+	if err := a.hangSyncup(ctx, cnObjKey); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1596,11 +1664,14 @@ func (a *fakeAgent) SyncupCn(
 func (a *fakeAgent) SyncupCntlr(
 	ctx context.Context, req *pb.SyncupCntlrRequest,
 ) (*pb.SyncupCntlrReply, error) {
+	key := cntlrObjKey(req.GetCntlrPointer())
+	if err := a.hangSyncup(ctx, key); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
 
-	key := cntlrObjKey(req.GetCntlrPointer())
 	if !a.cntlrKnownLocked(req.GetCntlrPointer()) {
 		return &pb.SyncupCntlrReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,

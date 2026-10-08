@@ -40,6 +40,8 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 **storage pool, SP** — The unit that serves volumes. It has cntlrs on controller nodes, and disk space on disk nodes that is organized as slices, groups and legs. Thin devices are created in it.
 
+**tenant** — A user of the block storage system built on dnv, for example a Kubernetes or OpenStack Cinder user. dnv knows no tenants and authenticates nobody. What it promises the layer above is that the data of one storage pool is never readable from another storage pool.
+
 **cntlr** — One instance of a storage pool on one controller node. A pool has one or more cntlrs, each on a different controller node. Exactly one of them is the primary, and the others are standby.
 
 **primary** — The cntlr that serves IO. It connects the legs, assembles the RAID1 arrays, runs the thin pools and exports the namespaces as ANA optimized. Only the worker changes which cntlr is the primary.
@@ -89,6 +91,12 @@ The core words of dnv in plain language: the short list to read first. The entri
 **reaction** — Something the worker does to a storage pool on its own, without an operator: failover, auto-grow, cntlr replacement or leg repair. A reaction never deletes user data.
 
 **failover** — The reaction that makes a healthy standby the primary when the primary is disabled or has been unhealthy for too long. The old primary becomes a standby.
+
+**demotion** — The syncup that tells the old primary it is a standby. Its namespaces move to ANA inaccessible, its arrays stop, and its legs stay connected.
+
+**fence** — The step where a disk node cuts the old primary's path to a side by reloading it onto an error target, so that the old primary can no longer read or write the leg. A failover fences the old primary on every side of the pool.
+
+**hold** — The worker's wait before it sends a pool's syncups to the cntlrs: first until the old primary reports its demotion applied, then until the sides report the new revision applied, each bounded in time.
 
 **cntlr replacement** — The reaction that deletes a cntlr that has been unhealthy for too long and creates a new one on another controller node.
 

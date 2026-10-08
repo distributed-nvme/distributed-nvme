@@ -1324,6 +1324,156 @@ func TestValidateEventThresholdMessageIsResolved(t *testing.T) {
 	validateWantMsg(t, "resolved leg_unhealthy", err, "1200")
 }
 
+// TestValidatePrimaryThreshold pins the one threshold rule of architecture.md,
+// Common validation, that reads the cluster: a pool's primary_unhealthy, after
+// its default is resolved, must be at least twice the cluster's
+// health_check_conf.cntlr_interval, so that the err_epoch one missed check
+// round stamps, which the next round clears, has a second interval of margin
+// before the failover of dnv-worker.md AR5 can fire on it — a margin, not a
+// guarantee (dnv-worker.md, Known limits).
+//
+// As for the leg-over-side rule above, the unset rows are the ones that matter.
+// At the default interval an unset primary_unhealthy is accepted: that is every
+// pool that a request naming no threshold creates in a cluster created with no
+// interval. That row fails when a change to either constant puts
+// DefaultPrimaryUnhealthy under twice DefaultHealthCheckInterval. At
+// overDefault the same unset member is refused, because its default is under
+// that interval's bound: a validator that skipped an unset member would accept
+// it, and one that compared the raw zero would refuse the default row instead.
+func TestValidatePrimaryThreshold(t *testing.T) {
+	// overDefault is the smallest cntlr_interval whose two rounds exceed
+	// DefaultPrimaryUnhealthy.
+	const overDefault = common.DefaultPrimaryUnhealthy/2 + 1
+	// interval is a cluster's health_check_conf with the other three
+	// intervals at their default, as CreateCluster stores them.
+	interval := func(cntlr uint32) *pb.HealthCheckConf {
+		return &pb.HealthCheckConf{
+			DnInterval:    common.DefaultHealthCheckInterval,
+			CnInterval:    common.DefaultHealthCheckInterval,
+			SideInterval:  common.DefaultHealthCheckInterval,
+			CntlrInterval: cntlr,
+		}
+	}
+	cases := []struct {
+		name      string
+		threshold *pb.EventThreshold
+		hc        *pb.HealthCheckConf
+		want      codes.Code
+	}{
+		{
+			"nil at the default interval",
+			nil, interval(common.DefaultHealthCheckInterval), codes.OK,
+		},
+		{
+			"primary unset at the default interval",
+			&pb.EventThreshold{SideUnhealthy: 3, LegUnhealthy: 9},
+			interval(common.DefaultHealthCheckInterval), codes.OK,
+		},
+		{
+			"nil at an interval whose two rounds exceed the default",
+			nil, interval(overDefault), codes.InvalidArgument,
+		},
+		{
+			"primary unset at an interval whose two rounds exceed the default",
+			&pb.EventThreshold{CntlrUnhealthy: 600},
+			interval(overDefault), codes.InvalidArgument,
+		},
+		{
+			"primary stated at twice the interval",
+			&pb.EventThreshold{PrimaryUnhealthy: 14}, interval(7), codes.OK,
+		},
+		{
+			"primary stated one under twice the interval",
+			&pb.EventThreshold{PrimaryUnhealthy: 13}, interval(7),
+			codes.InvalidArgument,
+		},
+		{
+			"the smallest interval, primary at twice it",
+			&pb.EventThreshold{
+				PrimaryUnhealthy: 2 * common.MinHealthCheckInterval,
+			},
+			interval(common.MinHealthCheckInterval), codes.OK,
+		},
+		{
+			"the smallest interval, primary one under twice it",
+			&pb.EventThreshold{
+				PrimaryUnhealthy: 2*common.MinHealthCheckInterval - 1,
+			},
+			interval(common.MinHealthCheckInterval), codes.InvalidArgument,
+		},
+		{
+			"the largest interval, primary at twice it",
+			&pb.EventThreshold{
+				PrimaryUnhealthy: 2 * common.MaxHealthCheckInterval,
+			},
+			interval(common.MaxHealthCheckInterval), codes.OK,
+		},
+		{
+			"the largest interval, primary one under twice it",
+			&pb.EventThreshold{
+				PrimaryUnhealthy: 2*common.MaxHealthCheckInterval - 1,
+			},
+			interval(common.MaxHealthCheckInterval), codes.InvalidArgument,
+		},
+		{
+			"only cntlr_interval counts: the other three at the maximum",
+			&pb.EventThreshold{PrimaryUnhealthy: 2},
+			&pb.HealthCheckConf{
+				DnInterval:    common.MaxHealthCheckInterval,
+				CnInterval:    common.MaxHealthCheckInterval,
+				SideInterval:  common.MaxHealthCheckInterval,
+				CntlrInterval: 1,
+			},
+			codes.OK,
+		},
+		{
+			"only cntlr_interval counts: the other three at the minimum",
+			&pb.EventThreshold{PrimaryUnhealthy: 5},
+			&pb.HealthCheckConf{
+				DnInterval:    common.MinHealthCheckInterval,
+				CnInterval:    common.MinHealthCheckInterval,
+				SideInterval:  common.MinHealthCheckInterval,
+				CntlrInterval: 3,
+			},
+			codes.InvalidArgument,
+		},
+		{
+			"the other three thresholds never take part",
+			&pb.EventThreshold{
+				PrimaryUnhealthy: 4,
+				CntlrUnhealthy:   1,
+				SideUnhealthy:    1,
+				LegUnhealthy:     100000,
+			},
+			interval(2), codes.OK,
+		},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			validateWantCode(t, "validatePrimaryThreshold",
+				validatePrimaryThreshold(item.threshold, item.hc), item.want)
+		})
+	}
+}
+
+// TestValidatePrimaryThresholdMessageIsResolved pins that the refusal quotes
+// the RESOLVED primary_unhealthy, the bound it misses and the interval the
+// bound comes from. A message echoing the request's zero would tell an
+// operator "primary_unhealthy 0 must be at least 6", which hides that the
+// default did the work, and a message without the interval would not say that
+// the cluster, which the request cannot change, sets the bound.
+func TestValidatePrimaryThresholdMessageIsResolved(t *testing.T) {
+	err := validatePrimaryThreshold(
+		&pb.EventThreshold{}, &pb.HealthCheckConf{CntlrInterval: 3})
+	validateWantCode(t, "primary unset at interval 3",
+		err, codes.InvalidArgument)
+	validateWantMsg(t, "resolved primary_unhealthy", err,
+		"event_threshold.primary_unhealthy 4 ")
+	validateWantMsg(t, "the bound", err, "at least 6")
+	validateWantMsg(t, "the cluster's interval", err,
+		"health_check_conf.cntlr_interval 3")
+}
+
 // ---------------------------------------------------------------------------
 // CreateCluster's write-once conf (architecture.md, Clusters)
 // ---------------------------------------------------------------------------

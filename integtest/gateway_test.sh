@@ -113,6 +113,13 @@ DNV_PREFIX=dnv
 # geometry instead of the boundary it is named for.
 MAX_SLICE_CNT=
 
+# common.DefaultHealthCheckInterval — what every health_check_conf member of a
+# cluster created without one is stored as (GW11), and case S stage 1 pins the
+# stored conf to it. It is NOT typed here either: read_constants() fills it
+# at preflight from `workerctl constants`, so the pin states the rule — the
+# stored interval is the default — and not a copy of the number.
+DEFAULT_HEALTH_INTERVAL=
+
 # Identity plan.
 CLUSTER=itgw
 GW_DIRS=(gw0 gw1 gw2)
@@ -905,8 +912,8 @@ read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps and common.MaxSliceCntPerSp from it" \
-			"and must not guess them"
+			"common.EtcdMaxTxnOps, common.MaxSliceCntPerSp and" \
+			"common.DefaultHealthCheckInterval from it and must not guess them"
 	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
 	case "$ETCD_MAX_TXN_OPS" in
 	'' | *[!0-9]*)
@@ -923,6 +930,15 @@ read_constants() {
 		;;
 	esac
 	log "  stage 13's --src-slices = common.MaxSliceCntPerSp = $MAX_SLICE_CNT"
+	DEFAULT_HEALTH_INTERVAL=$(jq_of "$json" .DefaultHealthCheckInterval)
+	case "$DEFAULT_HEALTH_INTERVAL" in
+	'' | *[!0-9]*)
+		die "workerctl constants: DefaultHealthCheckInterval is" \
+			"'$DEFAULT_HEALTH_INTERVAL' in $json"
+		;;
+	esac
+	log "  case S's stored health intervals =" \
+		"common.DefaultHealthCheckInterval = $DEFAULT_HEALTH_INTERVAL"
 }
 
 preflight_driver() {
@@ -1300,6 +1316,23 @@ smoke_td_field() { # <sp> <td_name> <field>
 	smoke_jq "$(sp_json "$1")" '.tds[$t] | .[$f]' --arg t "$2" --arg f "$3"
 }
 
+# smoke_listed_svcids prints, as one sorted JSON array, the tr_svc_id of every
+# stored cntlr of the SP that the listing rule lists: enabled, and the primary
+# or with a zero err_epoch (architecture.md [D18]). That is the transport set
+# every CdcEntry of the SP must carry, whichever writer set its list last, so
+# stage 10 compares each read-back of the entry against it.
+smoke_listed_svcids() { # <sp>
+	local json
+	json=$(sp_json "$1") ||
+		die "smoke_listed_svcids: \`workerctl get-sp --sp $1\` failed"
+	smoke_jq "$json" '
+		[.cntlrs[]
+		 | select((.disabled | not)
+		     and (.primary or (.err_epoch | tostring) == "0"))
+		 | .nvme_tr_conf.tr_svc_id]
+		| sort | @json'
+}
+
 # smoke_dn_free_sum is Σ free_ext_cnt over the four DNs — the aggregate the
 # teardown of step 17 must restore exactly, and the cross-check that no
 # per-DN assertion above quietly agreed with a wrong topology.
@@ -1338,7 +1371,9 @@ case_smoke() {
 	# sub-message, and GW11 resolves every defaultable member at WRITE
 	# time, so what is in the store is CONCRETE — this is the assertion that
 	# catches a conf stored with a zero geometry. Only
-	# qos_ratio, which is not defaultable, is still absent.
+	# qos_ratio, which is not defaultable, is still absent. The four health
+	# intervals share one default, common.DefaultHealthCheckInterval, which
+	# preflight reads from the binary into DEFAULT_HEALTH_INTERVAL.
 	assert_eq "$(jq_of "$cc" '.qos_ratio')" "null" \
 		"ClusterConf.qos_ratio is not defaultable and stays absent"
 	local probe field want
@@ -1352,10 +1387,10 @@ case_smoke() {
 		'.dn_bin_conf.bin3_shift|12' \
 		'.alloc_conf.dn_batch_size|16' \
 		'.alloc_conf.cn_batch_size|16' \
-		'.health_check_conf.dn_interval|5' \
-		'.health_check_conf.cn_interval|5' \
-		'.health_check_conf.side_interval|5' \
-		'.health_check_conf.cntlr_interval|5' ; do
+		".health_check_conf.dn_interval|$DEFAULT_HEALTH_INTERVAL" \
+		".health_check_conf.cn_interval|$DEFAULT_HEALTH_INTERVAL" \
+		".health_check_conf.side_interval|$DEFAULT_HEALTH_INTERVAL" \
+		".health_check_conf.cntlr_interval|$DEFAULT_HEALTH_INTERVAL" ; do
 		field=${probe%%|*}
 		want=${probe##*|}
 		assert_eq "$(jq_of "$cc" "$field")" "$want" \
@@ -1957,8 +1992,13 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.nqn_list | @json')" \
 		"[\"$nqn\"]" "sp0 nqn_list"
 	# The CdcEntry IS desired state (architecture.md, Subsystems, namespaces) —
-	# it lists the transports of every ENABLED cntlr's CN, which dnv-cdc serves
-	# the discovery log from.
+	# it lists the transports of the cntlrs the listing rule lists, every
+	# enabled cntlr that is the primary or has a zero err_epoch
+	# (architecture.md [D18]), and dnv-cdc serves the discovery log from it.
+	# No worker runs in this suite and the suite writes no err_epoch itself
+	# (Integration test plan, The etcd verification, `workerctl`), so every
+	# err_epoch stays zero and the rule lists exactly the enabled cntlrs;
+	# smoke_listed_svcids spells the whole rule all the same.
 	local cdcKey cdc
 	cdcKey="$DNV_PREFIX cdc $cidHex $(printf '%02x' "$(sp_shard sp0)")"
 	cdcKey="$cdcKey $(printf '%016x' "$spId") $(printf '%016x' "$ssId")"
@@ -1967,10 +2007,8 @@ EOF
 	assert_eq "$(jq_of "$cdc" '.allowed_hosts | @json')" "[\"$host0\"]" \
 		"CdcEntry allowed_hosts"
 	assert_eq "$(jq_of "$cdc" '[.nvme_tr_conf_list[].tr_svc_id] | sort | @json')" \
-		"$(smoke_jq "$(sp_json sp0)" \
-			'[.cntlrs[] | select(.disabled | not) | .nvme_tr_conf.tr_svc_id]
-			 | sort | @json')" \
-		"CdcEntry carries both enabled cntlrs' transports"
+		"$(smoke_listed_svcids sp0)" \
+		"CdcEntry carries the transports of both listed cntlrs"
 	assert_eq "$(key_count cdc)" "1" "one cdc key per subsystem"
 	# The host list is stored TWICE on purpose and both copies move together:
 	# nvmet's allowed_hosts comes from the Subsystem, the discovery filter
@@ -1982,8 +2020,18 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" \
 		'.subsystems[$n].allowed_hosts | @json' --arg n "$nqn")" \
 		"[\"$host0\",\"$host1\"]" "subsystem allowed_hosts after set-ss-hosts"
-	assert_eq "$(jq_of "$(raw_key "$cdcKey")" '.allowed_hosts | @json')" \
+	cdc=$(raw_key "$cdcKey")
+	assert_eq "$(jq_of "$cdc" '.allowed_hosts | @json')" \
 		"[\"$host0\",\"$host1\"]" "CdcEntry allowed_hosts after set-ss-hosts"
+	# UpdateSubsystemHosts also sets the entry's transport list, by the
+	# listing rule (architecture.md [D18]), so the list is read back here as
+	# well: the create-cntlr below sets every entry's list again and would
+	# hide a wrong one. The count is fixed here, apart from
+	# smoke_listed_svcids, so a wrong selector cannot agree with a wrong list.
+	assert_eq "$(jq_of "$cdc" '.nvme_tr_conf_list | length')" "2" \
+		"CdcEntry transport count after set-ss-hosts"
+	assert_eq "$(jq_of "$cdc" '[.nvme_tr_conf_list[].tr_svc_id] | sort | @json')" \
+		"$(smoke_listed_svcids sp0)" "CdcEntry transports after set-ss-hosts"
 	# A third cntlr on the one CN that carries none, in the slot step 8 added.
 	#
 	# Which CN that is cannot be hardcoded: the allocator picks the SP's two
@@ -2012,10 +2060,13 @@ EOF
 	local newCntlrJson
 	newCntlrJson=$(smoke_jq "$(sp_json sp0)" '.cntlrs[$c] | @json' \
 		--arg c "$(printf '%016x' "$newCntlr")")
-	# A new cntlr is a standby, enabled from birth (architecture.md, Cntlrs) —
-	# which is what puts its CN into the CdcEntry below.
+	# A new cntlr is a standby, enabled from birth (architecture.md, Cntlrs),
+	# and its err_epoch is zero — which is what lists its CN in the CdcEntry
+	# below (architecture.md [D18]).
 	assert_field "$newCntlrJson" '.primary' "false" "the new cntlr is a standby"
 	assert_field "$newCntlrJson" '.disabled' "false" "the new cntlr is enabled"
+	assert_field "$newCntlrJson" '.err_epoch' "0" \
+		"the new cntlr starts with a zero err_epoch"
 	assert_field "$newCntlrJson" '.cntlid_slot' "2" "the new cntlr's cntlid_slot"
 	assert_field "$newCntlrJson" '.addr_port' "$freeCn" \
 		"the new cntlr landed on the CN carrying none"
@@ -2023,8 +2074,7 @@ EOF
 		"3" "CdcEntry gained the new cntlr's transport"
 	smoke_check_cn sp0 "$freeCn" 2
 	# Disabling makes its namespaces ANA-inaccessible, so its CN must stop
-	# being advertised at the same instant
-	# (architecture.md, Subsystems, namespaces).
+	# being advertised at the same instant (architecture.md [D18]).
 	out=$(gw set-cntlr-enabled --sp sp0 --rev "$SP_REV" --id "$newCntlr" \
 		--enabled=false)
 	refresh_rev sp0
@@ -2033,6 +2083,24 @@ EOF
 		--arg c "$(printf '%016x' "$newCntlr")")" "true" "the cntlr is disabled"
 	assert_eq "$(jq_of "$(raw_key "$cdcKey")" '.nvme_tr_conf_list | length')" \
 		"2" "CdcEntry dropped the disabled cntlr's transport"
+	# A host-list write while a cntlr is disabled is what tells the listing
+	# rule apart from a list of every cntlr: UpdateSubsystemHosts must leave
+	# the disabled one out (architecture.md [D18]). The hosts are sent
+	# unchanged, so only the transport list is under test.
+	out=$(gw set-ss-hosts --sp sp0 --rev "$SP_REV" --nqn "$nqn" \
+		--hosts "$host0,$host1")
+	refresh_rev sp0
+	assert_field "$out" '.ss_id' "$ssId" \
+		"set-ss-hosts reply ss_id, with a cntlr disabled"
+	cdc=$(raw_key "$cdcKey")
+	assert_eq "$(jq_of "$cdc" '.nvme_tr_conf_list | length')" "2" \
+		"set-ss-hosts with a cntlr disabled: CdcEntry transport count"
+	assert_eq "$(jq_of "$cdc" '[.nvme_tr_conf_list[].tr_svc_id] | sort | @json')" \
+		"$(smoke_listed_svcids sp0)" \
+		"set-ss-hosts with a cntlr disabled leaves its transport out"
+	# An enable lists a standby again at once only when its err_epoch is zero
+	# (architecture.md [D18]); this one's is, as no worker runs here and the
+	# suite writes no err_epoch.
 	out=$(gw set-cntlr-enabled --sp sp0 --rev "$SP_REV" --id "$newCntlr" --enabled)
 	refresh_rev sp0
 	assert_eq "$(jq_of "$(raw_key "$cdcKey")" '.nvme_tr_conf_list | length')" \
@@ -3880,7 +3948,9 @@ case_contention() {
 # its first Put therefore leaves the revision exactly where it was. The
 # batteries additionally compare sp0's whole decoded state before and after, so
 # a refusal that somehow rewrote a field in place — leaving the key count
-# alone — would still be caught.
+# alone — would still be caught. Step 1 also proves the primary threshold's
+# floor from its accepted side: a pool created exactly at the floor, outside
+# the bracket because it writes, then drained again.
 #
 # Steps 4 and 5 are the agent half. AG2 bounds every gateway->agent call at
 # common.DefaultGatewayAgentTimeout, which is what makes a hung agent
@@ -3908,6 +3978,33 @@ faults_sp_snapshot() { # <sp name>
 		die "faults_sp_snapshot: \`workerctl get-sp --sp $1\` failed;" \
 			"a read that did not answer is not an unchanged SP"
 	jq_of "$json" 'del(.store_rev) | @json'
+}
+
+# faults_node_snapshot prints every DnConf and CnConf of the case, one line
+# each, then the dn_capacity and cn_capacity keys: the node accounting a
+# pool's create charges and its drain gives back (gateway.md, Storage pools
+# and GrowSlice), for stage 1's proof that the pool it creates at the primary
+# threshold's floor, once drained, leaves that accounting as it found it. A
+# failed read DIES, as faults_sp_snapshot's does, and every caller captures
+# the snapshot in a main-shell assignment for the same reason.
+faults_node_snapshot() {
+	local i json
+	for i in "${!DN_DIRS[@]}"; do
+		json=$(dn_json "$(dn_addr "$i")") ||
+			die "faults_node_snapshot: \`workerctl get-dn\` of dn$i failed"
+		jq_of "$json" '@json'
+	done
+	for i in "${!CN_DIRS[@]}"; do
+		json=$(cn_json "$(cn_addr "$i")") ||
+			die "faults_node_snapshot: \`workerctl get-cn\` of cn$i failed"
+		jq_of "$json" '@json'
+	done
+	json=$(wctl list-keys --prefix dn_capacity) ||
+		die "faults_node_snapshot: listing the dn_capacity keys failed"
+	printf '%s\n' "$json"
+	json=$(wctl list-keys --prefix cn_capacity) ||
+		die "faults_node_snapshot: listing the cn_capacity keys failed"
+	printf '%s\n' "$json"
 }
 
 # faults_nonprimary_cntlr prints the cntlr_id of one cntlr of the SP that is
@@ -4028,11 +4125,13 @@ EOF
 
 # faults_validation_battery is stage 1 of case C (GW4): every rule of
 # architecture.md, Common validation, that is checkable without stored state,
-# plus the two that are not (the td size unit and the cntlid slots) which the
+# plus three that are not: the td size unit and the cntlid slots, which the
 # handlers evaluate inside their STM and which therefore still return before
-# the first Put.
-faults_validation_battery() {
-	local long65 slice
+# the first Put, and the primary threshold's floor against the cluster's
+# cntlr_interval, which CreateStoragePool judges on its plain pre-read,
+# before any scan, and again in its STM.
+faults_validation_battery() { # <the cluster's stored cntlr_interval>
+	local interval=$1 long65 slice low
 	# MaxStrSize is 64 bytes, so 65 'a's is the shortest over-long name.
 	long65=$(printf 'a%.0s' {1..65})
 	slice=$(sp_first_slice sp0)
@@ -4093,6 +4192,24 @@ faults_validation_battery() {
 		"count 0 is accepted and lists the one cluster"
 	assert_field "$FAULTS_OUT" '.page_token' "" \
 		"count 0: a non-full page ends the listing"
+
+	# The primary threshold's floor (architecture.md, Common validation):
+	# primary_unhealthy, after its default, must be at least twice the
+	# cluster's cntlr_interval, so one second less is refused. The request is
+	# otherwise exactly the one stage 1 then sees accepted at the floor, and
+	# the message must carry both numbers judged, each matched whole (the
+	# threshold up to the space after it, the interval up to the end of the
+	# message), so the refusal is provably this rule's and not some other
+	# INVALID_ARGUMENT.
+	low=$((2 * interval - 1))
+	faults_gwx_out INVALID_ARGUMENT create-sp --sp spthr \
+		--cntlr-cnt "$SP_CNTLR_CNT" --slice-cnt "$SP_SLICE_CNT" \
+		--init-ext-cnt "$SP_INIT_EXT" --raid1 --thr-primary "$low"
+	assert_eq "$(smoke_jq "$FAULTS_OUT" \
+		'.message | contains($p) and endswith($i)' \
+		--arg p "event_threshold.primary_unhealthy $low " \
+		--arg i "health_check_conf.cntlr_interval $interval")" "true" \
+		"the refusal names primary_unhealthy $low and cntlr_interval $interval"
 }
 
 # faults_notfound_battery is stage 2 of case C (GW7): one probe per missing id —
@@ -4349,16 +4466,64 @@ case_faults() {
 	assert_ne "$slice" "0" "sp0: slice_id"
 
 	# -----------------------------------------------------------------
-	stage 1 "validation battery: every validation refusal is INVALID_ARGUMENT"
+	stage 1 "validation battery, then a pool at the primary threshold's floor"
 	# -----------------------------------------------------------------
+	# The primary threshold's floor is twice the cluster's cntlr_interval, read
+	# from the stored conf rather than typed: the cluster took the gateway's
+	# default, and the floor moves with it.
+	local interval floor
+	interval=$(jq_of "$(raw_key "$(cluster_key)")" \
+		'.health_check_conf.cntlr_interval')
+	case "$interval" in
+	'' | 0 | *[!0-9]*)
+		die "no usable health_check_conf.cntlr_interval in the stored" \
+			"ClusterConf: '$interval'"
+		;;
+	esac
+	floor=$((2 * interval))
 	# ONE shared bracket around the whole batch: the claim
 	# being proved is about the batch ("none of these wrote"), and a
 	# per-call bracket would only re-assert it more slowly.
 	local before after
 	before=$(faults_sp_snapshot sp0)
-	assert_no_write "step 1: the validation battery" faults_validation_battery
+	assert_no_write "step 1: the validation battery" \
+		faults_validation_battery "$interval"
 	after=$(faults_sp_snapshot sp0)
 	assert_eq "$after" "$before" "step 1: sp0's content must not change"
+
+	# The floor's other side, outside the bracket because it writes: the
+	# battery's refused request with primary_unhealthy exactly at the floor
+	# is accepted, and the threshold is stored exactly as sent — the three
+	# members the request left at zero stay zero, resolved only when read
+	# (architecture.md, Common validation). The extra pool is then latched
+	# and drained, the way case S stage 17 tears sp0 down, and must give
+	# every node back exactly what its create took, so no later count of the
+	# case moves.
+	local nodesBefore nodesAfter thrRev
+	nodesBefore=$(faults_node_snapshot)
+	gw create-sp --sp spthr --cntlr-cnt "$SP_CNTLR_CNT" \
+		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" --raid1 \
+		--thr-primary "$floor" >/dev/null
+	verify_sp spthr
+	assert_field "$(sp_json spthr)" \
+		'.sp_conf.event_threshold
+		 | [ .primary_unhealthy, .cntlr_unhealthy, .side_unhealthy,
+		     .leg_unhealthy ] | @json' \
+		"[$floor,0,0,0]" "spthr: event_threshold is stored exactly as sent"
+	assert_field "$(gw get-sp --sp spthr)" \
+		'.sp_conf.event_threshold.primary_unhealthy' "$floor" \
+		"get-sp read-back agrees on primary_unhealthy"
+	thrRev=$(sp_rev_of spthr)
+	gw delete-sp --sp spthr --rev "$thrRev" >/dev/null
+	out=$(wctl drain-sp --sp spthr)
+	assert_field "$out" '.sp_deleted' "true" \
+		"spthr: the drain reached its final STM"
+	gwx NOT_FOUND get-sp --sp spthr
+	nodesAfter=$(faults_node_snapshot)
+	assert_eq "$nodesAfter" "$nodesBefore" \
+		"spthr: every node is back to where its create found it"
+	# sp0 is another pool: its token is untouched by spthr's whole life.
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "sp0's SpRev after spthr"
 
 	# -----------------------------------------------------------------
 	stage 2 "NOT_FOUND battery: one probe per missing id"

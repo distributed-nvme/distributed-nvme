@@ -5,7 +5,12 @@ of disk nodes into storage pools, runs the volume logic (thin provisioning,
 striping, redundancy, snapshots, cloning, live migration) on controller nodes,
 and exports virtual volumes to hosts over NVMe-oF with native NVMe multipath
 and ANA. etcd holds all desired state; the control-plane processes and the
-per-node agents converge the data plane to it. The binaries:
+per-node agents converge the data plane to it. It can be the data plane of a
+multi-tenant block storage system, for example behind Kubernetes or OpenStack
+Cinder: it leaves the authentication of users to the layer above, and it keeps
+the data of one storage pool unreadable from any other storage pool unless
+that layer exports it there itself, for example with a transfer
+(`architecture.md`, System overview). The binaries:
 
 - `dnv-gateway` serves the `Gateway` gRPC API, stateless and active-active.
 - `dnv-worker` turns the desired state into agent calls, runs the automatic

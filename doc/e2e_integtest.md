@@ -13,7 +13,7 @@ facts the suites driving real agents share.
 One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
-five statements; a smaller shape proves no ceiling, and one without redundancy
+six statements; a smaller shape proves no ceiling, and one without redundancy
 no leg repair:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
@@ -29,15 +29,26 @@ no leg repair:
   effect, which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
-  slice grows and the level ladder, a failover, a leg repair and all between.
+  slice grows and the level ladder, failovers, a leg repair and all between.
 * **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8): a
   killed cn agent moves the primary role and then loses its cntlr, a killed dn
   agent with its nvmet port removed loses its leg to a spare, and strided
   writes that push a thin pool past its low water mark gain its slice a data
   group.
+* **A primary cut off from the control plane fails over as a pause**
+  (`architecture.md`, Failover; `dnv-worker.md` RW22). Its cn agent is
+  stopped while every kernel object it built goes on serving host0, which
+  runs nvme-stas against the cdc and writes in a loop: the failover lands
+  within a bound set by its short primary threshold, the old primary's
+  address leaves the discovery records (`architecture.md` [D18]), nvme-stas
+  drops host0's path to it before the fence, so not one write fails, and the
+  writes run again once the new primary has built its stack; continued, the
+  old primary returns as a standby and is listed again.
 * **The lab is left as it was found.** After every case every disk node has all
   its extents back, no node guest holds a dnv dm device, md array or nvmet
-  subsystem, and allocation stays under a per-file and a whole-run cap.
+  subsystem, and allocation stays under a per-file and a whole-run cap; the
+  cutoff case also stops nvme-stas on host0 and puts host0's own configuration
+  of it back byte for byte.
 
 **What it does not prove.** The RPCs it never issues, the deletions and
 listings of clusters, disk nodes and controller nodes: the gateway suite covers
@@ -47,7 +58,10 @@ Error paths, beyond the few refusals the ops case asserts on purpose and the
 are the gateway and dnvctl suites'. Concurrency: one dnvctl call and one case
 at a time, and never a revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
-two usable controllers (Known limits).
+two usable controllers (Known limits). A failover of a primary that still
+answers: the two failovers the cases cause lose an agent that answers nothing,
+one killed and one stopped, so neither shows a demotion hold that the old
+primary's report ends early (`dnv-worker.md` RW22).
 
 ## Topology and parameters
 
@@ -59,14 +73,15 @@ ops case's third cntlr and the cntlr replacement land. The disk-node guests, at
 least as many as a group has legs, run many `dnv-agent dn` instances each,
 every one on its own loop device and its own nvmet port and service id, as two
 ports cannot listen on one address, all registered at their guest's location
-(E2E4). Two hosts run only the kernel's nvme-tcp stack and nvme-cli.
+(E2E4). Two hosts run only the kernel's nvme-tcp stack and nvme-cli, but for
+nvme-stas on host0 inside the cutoff case (E2E10).
 
 The control plane has a guest of its own, as in a deployment
 (`architecture.md`, System overview): it holds no kernel state and runs without
-root, the react case's faults never reach the processes that must observe and
-repair them, and its address, an IP literal as the cdc requires, is what the
-hosts discover against. Every daemon log lives under a work directory the
-between-cases rebuild removes, so each case's logs replace the last and a
+root, the react and cutoff cases' faults never reach the processes that must
+observe and repair them, and its address, an IP literal as the cdc requires, is
+what the hosts discover against. Every daemon log lives under a work directory
+the between-cases rebuild removes, so each case's logs replace the last and a
 passing run leaves none. Every node guest carries the suite's md assembly mask
 while its agents run, installed before an agent starts: on a controller node
 the stock udev rule would otherwise race the agent for an array it is creating,
@@ -106,13 +121,23 @@ than defaulting. smoke, ops and copy build under a quiet set longer than any
 wait, a wide margin rather than a proof, as a failover or a spare leg
 mid-operation would invalidate their absolute counts and digests; under it such
 a reaction is a finding about the lab. react builds under the short reacting
-set, as cntlr
-replacement and leg repair wait out thresholds whose defaults lie beyond any
-wait the suite could afford (`dnv-worker.md` AR7, AR8). The quiet set names all
-four, as an omitted or zero threshold resolves to its default when read
-(`gateway.md` GW11; `dnv-worker.md` AR4) and the default primary threshold is
-short; its leg threshold exceeds its side threshold (`architecture.md`, Common
-validation).
+set, as cntlr replacement and leg repair wait out thresholds whose defaults lie
+beyond any wait the suite could afford (`dnv-worker.md` AR7, AR8). cutoff
+builds under the cutoff set, as its failover must come within seconds of the
+cut: its primary threshold is the shortest the gateway accepts on the suite's
+clusters, derived from the tree's default check interval rather than typed
+(E2E12). Its other three are the quiet set's, as nothing else may react while
+the primary's agent is stopped: cntlr replacement must not replace the stopped
+cntlr before the case continues it, leg repair has no fault to repair, and the
+elected standby is held to the cntlr threshold while it settles
+(`dnv-worker.md` AR5, HL2), so its own build cannot hand the role back. Every
+set names all four, as an omitted or zero threshold resolves to its default
+when read (`gateway.md` GW11; `dnv-worker.md` AR4) and the default primary
+threshold is short; in every set the leg threshold exceeds the side threshold
+and the primary threshold meets the gateway's floor (`architecture.md`, Common
+validation). The driver checks every set's primary threshold against that
+floor at preflight, so a set below it stops the run before anything is built,
+not at its case's create.
 
 ## The rules
 
@@ -169,23 +194,33 @@ cleaning, while a run that fails an assertion removes nothing.
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every write is
 buffered and synced and every read that must reach the media follows a cache
-drop. The read-only level's read, which may block, runs detached and answers
-"blocked" within its own budget, as `timeout` cannot bound a task in
-uninterruptible sleep; every other host read, cache drop and device write,
-except that level's refused write, which dm-flakey fails rather than queues,
-runs under a driver-side watchdog (`ssh_host_watched`) that abandons IO
-blocking where nothing said it would, so the run dies with diagnostics, never
-hangs.
+drop. Two host processes run detached, as their IO may block and `timeout`
+cannot bound a task in uninterruptible sleep: the read-only level's read, which
+answers "blocked" within its own budget, and the cutoff case's write loop,
+whose writes are meant to queue through a failover. The loop reports through
+files and keeps to its own namespace: it writes only to the device the
+namespace's link named at its start, never creating that device node, and
+checks before every write that the device still carries the namespace's uuid.
+It stops on its stop file, with its work directory, or by itself after a bound
+sized to outlive a passing run, so that a failed run left in place stops
+writing. Every other host read, cache drop and device write, except the
+read-only level's refused write, which dm-flakey fails rather than queues, runs
+under a driver-side watchdog (`ssh_host_watched`) that abandons IO blocking
+where nothing said it would, so the run dies with diagnostics, never hangs.
 
 E2E8. **Pids in files, signals by pid, `pkill` only from helper files with
 bracketed patterns.** Every agent and every control-plane daemon the suite
 starts, etcd included, records its pid: the control-plane daemons are stopped
-by theirs, and the react case stops each agent it kills by that agent's pid
-file. The cleanup's pattern sweeps, which also reach a crashed run's
-processes whose pid files are gone, sit in helper files on the guest behind
-helper verbs, bracketed so they never match the ssh command's own shell, and
-qualified by the suite's work directory or its etcd name so they never touch
-another suite's processes.
+by theirs, the react case stops each agent it kills by that agent's pid file,
+and the cutoff case stops and continues the agent it cuts off by its pid file,
+with SIGSTOP and then SIGCONT, reading the process state back, as a signal is
+delivered asynchronously. Every stop of an agent, by pid or by pattern, sends
+SIGCONT before SIGTERM, so that an agent a failed cutoff run left stopped acts
+on its termination. The cleanup's pattern sweeps, which also reach a crashed
+run's processes whose pid files are gone, sit in helper files on the guest
+behind helper verbs, bracketed so they never match the ssh command's own shell,
+and qualified by the suite's work directory or its etcd name so they never
+touch another suite's processes.
 
 E2E9. **One dnv suite runs at a time in the lab** (`layout.md`, Directory
 tree). The suite occupies every guest it names; no other suite binds its
@@ -194,16 +229,28 @@ the first ssh and checks what it can, that no port of its block listens and no
 nvmet port it needs exists.
 
 E2E10. **Hosts reach namespaces through the cdc, and every path a host holds is
-the suite's own.** The kernel's autoconnector is masked at preflight and at
-every rebuild and read back, and nvme-stas must be inactive. A host discovers
-through the cdc wherever the subsystem has a `CdcEntry`, expecting one record
-per enabled cntlr (`cdc.md` DS3). Three connects are direct by necessity: to
-the transfer, which has no `CdcEntry`; to the copy case's fallback source,
-where discovery would also bring in a namespace whose uuid host1 already holds;
-and to the new primary after a failover, while the cdc still advertises the
-dead node until its replacement. Every connect sits between an export gate and
-a connect verdict, as the discovery log runs ahead of the data plane and
-nvme-cli can exit zero having connected nothing.
+the suite's own, but for nvme-stas's inside the cutoff case.** The kernel's
+autoconnector is masked at preflight and at every rebuild and read back, and
+nvme-stas must be inactive at preflight. The one exception is host0 inside the
+cutoff case, whose subject is what a host running nvme-stas sees: there
+nvme-stas runs on the cdc suite's settings (`cdc.md`, Integration test plan)
+against this run's cdc alone, the autoconnector still masked, and host0 lets
+go of its own paths before nvme-stas starts and gets them back once it stops,
+so every path host0 holds meanwhile is one nvme-stas made from a discovery
+record; host0's own nvme-stas configuration is copied before and put back
+after. A host discovers through the cdc wherever the subsystem has a
+`CdcEntry`, expecting one record per cntlr the listing rule lists
+(`architecture.md` [D18]; `cdc.md` DS3). A step that needs every enabled cntlr
+in the log first waits until each is listed, as a standby whose health epoch
+is set is out of the records until its next clean round. Two connects are
+direct by necessity: to the transfer, which has no `CdcEntry`; and to the copy
+case's fallback source, where discovery would also bring in a namespace whose
+uuid host1 already holds. After react's failover host0 reconnects through the
+cdc, whose records leave the dead cntlr out: the failover's own transaction
+rewrote them, and nothing clears the dead cntlr's health epoch. Every
+connect the suite makes sits between an export gate and a connect verdict, as
+the discovery log runs ahead of the data plane and nvme-cli can exit zero
+having connected nothing.
 
 E2E11. **Each case starts from an empty etcd and a freshly built pool.** An
 etcd reset is not enough: a recreated cluster mints new cluster and disk-node
@@ -215,18 +262,23 @@ infrastructure and the whole of setup, which clears every id the last case
 read; that rebuild is also where the next case's thresholds take effect.
 
 E2E12. **The shell literals mirror named constants and say so.** Every number a
-Go constant owns is repeated beside a comment naming the constant, except two
+Go constant owns is repeated beside a comment naming the constant, except five
 read from `workerctl constants` at the driver's preflight: `EtcdMaxTxnOps`,
 which etcd must be started with and which this suite, committing the
 transaction it is sized by at two cntlrs, short of the widest shape, must not
-hand-copy; and `MaxAllocLegPerGrp`, cross-checked against the leg count.
+hand-copy; `MaxAllocLegPerGrp`, cross-checked against the leg count;
+`DefaultHealthCheckInterval`, the check interval every cluster of the suite
+stores, from which the cutoff set's primary threshold is derived and against
+which every set's primary threshold is checked; and `DefaultPrimaryUnhealthy`
+and `DemotionHoldTimeout`, which the run only prints, the second beside the
+cutoff case's timings.
 
 ## The cases
 
-The cases run in order, each on a fresh pool (E2E11): smoke, ops, copy and
-react. Each stage has its own trace id, sent by every dnvctl call of the stage
-and carried by the gateway's records and an agent's records of the reads the
-gateway makes for that call, never by the converge it sets off, which runs
+The cases run in order, each on a fresh pool (E2E11): smoke, ops, copy, react
+and cutoff. Each stage has its own trace id, sent by every dnvctl call of the
+stage and carried by the gateway's records and an agent's records of the reads
+the gateway makes for that call, never by the converge it sets off, which runs
 under the worker's ids (`dnv-worker.md` RW10). Every wait on a condition is a
 bounded poll, never a fixed sleep: a stack built from nothing gets the widest
 budget, an increment a narrower one, and a reaction its threshold plus a few
@@ -308,14 +360,64 @@ The primary's cn agent is killed, host0 having let go first since a killed
 agent's nvmet objects go on advertising optimized, and the standby must become
 primary and build the stack, held to the cntlr threshold while settling
 (`dnv-worker.md` AR5, HL2; `architecture.md`, Failover); a second failover
-stops the run. The dead cntlr is replaced on a node that held none, keeping
-its slot and role (`dnv-worker.md` AR7), and the dead agent, restarted,
-removes what it left (`cnagent.md` CN7). Leg repair (raid1 only) needs both
-planes, as kernel objects outlive their agent: a dn agent is killed and its
-nvmet port removed, on a disk node with no other side of the pool, and the
-group must gain a spare outside its nodes, park the dead leg and rebuild md
-(`dnv-worker.md` AR8; `cnagent.md` CN11, CN28), with no failover meanwhile,
-proved by an unchanged count of the worker's failover records.
+stops the run. host0 then reconnects through the cdc, whose records the
+failover's own transaction rewrote without the dead cntlr
+(`architecture.md` [D18]). The dead cntlr is replaced on a node that held
+none, keeping its slot and role (`dnv-worker.md` AR7), and the dead agent,
+restarted, removes what it left (`cnagent.md` CN7). Leg repair (raid1 only)
+needs both planes, as kernel objects outlive their agent: a dn agent is killed
+and its nvmet port removed, on a disk node with no other side of the pool, and
+the group must gain a spare outside its nodes, park the dead leg and rebuild
+md (`dnv-worker.md` AR8; `cnagent.md` CN11, CN28), with no failover
+meanwhile, proved by an unchanged count of the worker's failover records.
+
+**cutoff** proves that a primary cut off from the control plane fails over as
+a pause for a host that follows the discovery log (`architecture.md`,
+Failover; `architecture.md`, Host view). Its pool's primary must first have
+settled, as a settling primary is held to the long cntlr threshold
+(`dnv-worker.md` AR5, HL2), and both cntlrs must be listed, as nvme-stas
+connects only what the log lists and the standby's path is the one that
+carries host0 through the stall. host0 is then handed to nvme-stas (E2E10),
+which must connect both cntlrs, and once a marker is written into host0's
+kernel log a detached loop of small synced writes runs on a scratch namespace
+(E2E7). The primary's cn agent is stopped, not killed (E2E8): it answers no
+check round while every kernel object it built goes on serving host0, one of
+the two cases the demotion hold serves and the one its wait is sized for
+(`dnv-worker.md` RW22). Unlike in react, host0 is not disconnected by hand, as
+taking its path away is the part of the cdc and of nvme-stas this case is
+about. Writes must go on finishing between the stop and the failover, as the
+stopped agent's kernel objects serve on until the fence: that is the positive
+control of every zero-failure check, since a loop stalled before the cut would
+pass them with nothing measured. The primary
+role must move to the standby within a bound of the cutoff set's primary
+threshold, the check rounds the worker needs to judge the stop and to act on
+it, and the driver's polling slack, with one failover more in the worker's
+records, naming the two (`dnv-worker.md` AR5, AR10); the old primary's address
+must leave the discovery records, read through host1, which runs no nvme-stas
+(`architecture.md` [D18]); nvme-stas must drop host0's path to it; and the
+worker must record that the demotion hold ran to its timer, as the stopped
+agent never reports its demotion applied. Not one write may fail while the
+loop runs, by the loop's records and by the kernel log after the marker, and
+that is what shows the path went before the fence: from the fence the old
+primary answers writes on its path with errors (`architecture.md`, Known
+limits). The writes must run again once the new primary has built its stack
+and its namespaces have turned optimized on host0; from the stop until then
+the driver does no device IO on host0, not even a cache drop, whose sync would
+wait on the stalled head. Whether the kernel requeues the write in flight when
+nvme-stas deletes the only optimized path, and whether the demotion hold outlasts
+nvme-stas's delay, are measured by these assertions, not presumed: a failed
+write fails the run no later than the driver's next reading of the loop's
+records.
+
+Continued, the old primary must converge to a standby, its health epoch clear
+(`dnv-worker.md` HL2), its address return to the records and nvme-stas
+reconnect it as an inaccessible path, with still one failover in all. Then the
+loop stops and its range reads back as its pattern, nvme-stas stops and
+host0's own configuration of it is back byte for byte, host0 reconnects
+through the cdc, and the case deletes its scratch namespace and thin device.
+So the ending finds only setup's subsystem, namespace and thin device, and
+only the suite's own paths on host0, while the primary role stays on the cntlr
+the failover elected.
 
 **The ending every case shares** proves that a pool deletes back to nothing:
 only setup's subsystem, namespace and thin device may remain before it; a
@@ -360,10 +462,14 @@ port, as a configfs port does not listen until a subsystem is linked and an
 agent would adopt and rewrite an existing port of its id (`dnagent.md` SH19);
 that a host is a clean initiator — sudo, nvme-tcp and multipath, its identity
 files, generated if absent and never overwritten, nvme-stas inactive and the
-masked autoconnector (E2E10); and that the control-plane guest has its tools,
-its ports free and the free-space floor the space guard holds it to, and needs
-no sudo: the closing trim is the one root command tried there and may be
-refused. The loop devices are checked once the agents have made them (E2E5).
+masked autoconnector (E2E10); that host0, when the cutoff case is in the run,
+has the tools of the case's write loop and kernel-log witness and nvme-stas 2.x
+installed, both its units known to systemd, as a 1.x one would fail later and
+silently, never connecting, nvme-stas being a package the suite never
+installs; and that the control-plane guest has its tools, its ports free and
+the free-space floor the space guard holds it to, and needs no sudo: the
+closing trim is the one root command tried there and may be refused. The loop
+devices are checked once the agents have made them (E2E5).
 The tool check covers only the sweeps after it: the start sweep runs before it
 and a cleanup-only run skips it, so on a guest missing mdadm or udevadm their
 md stop can silently leave dnv arrays standing.
@@ -381,21 +487,31 @@ rests on one principle, a holder goes before what it holds, and on what this
 lab does when it is broken. Hosts go before every target, as they hold the
 controllers, and a subsystem removed under a live controller kills it with DNR
 while its port keeps listening and leaves it retrying once the port has
-nothing left (`cnagent_integtest.md`, Lab facts); a host drops the suite's and
-dnv's NQNs and its discovery controller, never every controller, unmasks, and
-keeps its identity files, node identity rather than run state, the dnv prefix
-also taking the cdc suite's subsystems on a shared host (E2E9). Every
-controller node goes before any disk node, as its stacks sit on the disk
-nodes' sides, in the cn agent suite's order (`cnagent_integtest.md`, Teardown
-and cleanup) and in two phases across all of them, so that every clone final
-is gone, removed while its transfer source is connected, before any transfer
-goes, as a dm-clone flushes through its source (`cnagent.md` L3). On a
-disk-node guest every dnv md array goes before any dm device, as an array
-assembled from the controller node's superblocks pins the device under it
-(Known limits), each loop device's header is zeroed before it is detached, and
-the mask goes once no device exposes a dnv superblock. The control plane goes
-by recorded pids, the pattern sweep as fallback (E2E8), and a best-effort
-filesystem trim on every guest closes.
+nothing left (`cnagent_integtest.md`, Lab facts). On a host the cutoff case's
+write loop stops first, so that nothing writes into a device while its paths
+go, then nvme-stas, so that nothing reconnects what the sweep drops, the host's
+own nvme-stas configuration going back while the work directory still holds
+its copy and an nvme-stas the suite never started being left alone; then the
+host drops the suite's and dnv's NQNs and its discovery controller, never
+every controller, unmasks, and keeps its identity files, node identity rather
+than run state, the dnv prefix also taking the cdc suite's subsystems on a
+shared host (E2E9). A copy it cannot put back keeps the work directory, which
+then holds the host's only copy of its files, and the host's verb ends without
+its sentinel, saying where the copy is, so the sweep reports itself unfinished
+and the next one tries again. A failed cutoff run, which can leave its loop
+running, nvme-stas on the suite's settings and its agent stopped (E2E6), is
+thus recovered by the next start cleanup or a cleanup-only run, whose stop
+continues the agent first (E2E8). Every controller node goes before any disk
+node, as its stacks sit on the disk nodes' sides, in the cn agent suite's order
+(`cnagent_integtest.md`, Teardown and cleanup) and in two phases across all of
+them, so that every clone final is gone, removed while its transfer source is
+connected, before any transfer goes, as a dm-clone flushes through its source
+(`cnagent.md` L3). On a disk-node guest every dnv md array goes before any dm
+device, as an array assembled from the controller node's superblocks pins the
+device under it (Known limits), each loop device's header is zeroed before it
+is detached, and the mask goes once no device exposes a dnv superblock. The
+control plane goes by recorded pids, the pattern sweep as fallback (E2E8), and
+a best-effort filesystem trim on every guest closes.
 
 md arrays are named by udev's recorded name, else by mdadm's export, never by
 mdadm's scan, which prints no name on these guests; only dnv arrays are
@@ -418,9 +534,12 @@ bounded, as a guest command hangs exactly when something is wrong. The context
 names the stage, its trace id and the case, and the last ANA state, controller
 and path state the probes read, which tell no path from a path without the
 namespace and a live path from a retrying one; each guest's kernel, device,
-nvmet and log state follows, and the failure line ends with the filter that
-pulls the stage's records. When the stage connected, the host's kernel log is
-the record of what the connect attempted.
+nvmet and log state follows, a host's with its nvme-stas state, configuration
+and journal and the cutoff case's write-loop records, and a controller node's
+with its recorded agent's process state, which shows an agent the cutoff case
+left stopped; the failure line ends with the filter that pulls the stage's
+records. When the stage connected, the host's kernel log is the record of what
+the connect attempted.
 
 ## Known limits
 
@@ -450,10 +569,11 @@ the record of what the connect attempted.
   (`cnagent_integtest.md`, Lab facts), retrying until its loss timeout and
   pinning its namespace head through its hidden path device. So after a cntlr
   delete the suite asserts only that the path is not live, then disconnects the
-  survivor by device; a wait after an explicit disconnect demands the path
-  gone, which a wrong address also satisfies.
-* **A blocked probe or abandoned host IO leaves an unkillable dd or sync
-  behind** (E2E7) until its device or path serves IO again.
+  survivor by device; a wait after a disconnect, the suite's own or
+  nvme-stas's, demands the path gone, which a wrong address also satisfies.
+* **A blocked probe, abandoned host IO, or the write the cutoff case's loop had
+  queued when it was stopped leaves an unkillable dd or sync behind** (E2E7)
+  until its device or path serves IO again.
 * **react's build may react.** At the widest shape a building primary cannot
   answer a health check within a short primary threshold, the default
   included, so the role can move and move back; a settling primary is
@@ -467,6 +587,40 @@ the record of what the connect attempted.
 * **The grow race is absorbed, not removed.** The worker's sides-first hold
   (`dnv-worker.md` RW14) and the cn agent's in-pass connect retry (`cnagent.md`
   CN10) absorb a connect that reaches a grown group's side before its export
-  exists, but an export linked later leaves the group unbuilt for a round, a
-  settled primary can be failed over on that one round (`dnv-worker.md`, Known
-  limits), and react then stops the run.
+  exists, but an export linked later leaves the group unbuilt, and with it the
+  primary unhealthy, until a later converge builds it; should that outlast the
+  reacting set's primary threshold, the settled primary is failed over
+  (`dnv-worker.md` AR5), and react then stops the run.
+* **The cutoff case shows the margin of the path's drop over the fence by its
+  outcome only.** nvme-stas's delay before it disconnects a withdrawn path and
+  the demotion hold leave that margin (`dnv-worker.md` RW22); the case
+  asserts that no write fails and logs when its polls saw the path gone, but
+  times neither the drop nor the fence. On a host that drops the path after
+  the fence, a write sent in between fails (`architecture.md`, Known limits),
+  and with it the case.
+* **The drop is asserted only on paths nvme-stas made.** host0 lets go of its
+  own paths before nvme-stas starts, so a path nvme-stas took over is not
+  exercised, and one it does not manage it never drops (`architecture.md`,
+  Known limits).
+* **dd's status alone does not prove a write landed.** The loop judges each
+  write by dd's exit status, which rests on the guests' dd reporting a failed
+  fsync, and nothing here proves that it does; so the kernel log after the
+  case's marker is the second witness, and a marker the log no longer holds
+  fails the case rather than passing it. The range's final digest shows that no
+  write landed wrong bytes, not that each one landed, as every slot already
+  holds what the loop writes there.
+* **The write loop's uuid check and its write are two steps** (E2E7), so a
+  device node reborn under the same name for another namespace in the instant
+  between them could take one write; a node goes only with host0's last path
+  to its namespace, which the case never expects.
+* **The cutoff case's pause lasts the new primary's build.** A standby holds no
+  group and no pool (`cnagent.md` CN12, CN13), so from the moment host0's path
+  to the old primary goes, the loop's write in flight waits until the new
+  primary has built the whole stack and turned its namespaces optimized, which
+  at the widest shape takes minutes; the case bounds that wait only by the
+  build's own and logs how long the write took.
+* **nvme-stas keeps its connections when it stops.** nvme-stas 2.4.1, the
+  lab's version, keeps the kernel connections it made when it stops, its
+  connector always and its discovery daemon under persistent connections, so
+  the cutoff case disconnects them itself before it hands host0 back, and a
+  host's cleanup drops what a failed run left.
