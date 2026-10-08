@@ -144,10 +144,10 @@ func TestParseSpLevel(t *testing.T) {
 	}
 }
 
-// TestCodeNamesAreUpperSnake is a regression guard: codes.Code.String()
-// renders CamelCase, so upper-casing it yields ALREADYEXISTS and no --expect
-// on a multi-word code would ever match. Every name must be UPPER_SNAKE, and
-// every code the gateway can return must be in the table.
+// TestCodeNamesAreUpperSnake pins that every name is UPPER_SNAKE:
+// codes.Code.String() renders CamelCase, so upper-casing it yields
+// ALREADYEXISTS and no --expect on a multi-word code would ever match. Every
+// code the gateway can return must be in the table.
 func TestCodeNamesAreUpperSnake(t *testing.T) {
 	for code, name := range codeNames {
 		if name != strings.ToUpper(name) {
@@ -416,8 +416,8 @@ func TestCreateSpRequest(t *testing.T) {
 
 // TestSpRevTokenIsAlwaysPresent pins GW6 as the driver sees it: an omitted
 // --rev sends the ZERO token, not an absent message, and a PRESENT zero can
-// never match a stored revision that starts at 1. Since GW6 became
-// presence-based this is what keeps case B step 4 a refusal — an absent
+// never match a stored revision that starts at 1. GW6 is presence-based, so
+// this is what keeps case B step 4 a refusal — an absent
 // message would be waved through — so this test guards the whole B4 stage,
 // not just a marshalling detail.
 func TestSpRevTokenIsAlwaysPresent(t *testing.T) {

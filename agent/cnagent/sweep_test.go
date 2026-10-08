@@ -86,15 +86,14 @@ func syncupCntlrAt(
 	return reply
 }
 
-// TestRetireSkipsThinDeleteWithoutPool is the long-missing CN14 pin, and the
-// leak the activation sweep exists to heal: the per-td `delete` is gated on
-// plan.wantPool, so the one fan-out that both removes the td and takes the
-// pool away — a demote coalesced with a delete (RW3) — sends nothing, and
-// afterwards nothing remembers the td at all. The gate itself is
-// correct (a standby has no pool device, and only the primary may write pool
-// metadata), which is why the fix is the sweep and not the removal of this
-// behavior.
-func TestRetireSkipsThinDeleteWithoutPool(t *testing.T) {
+// TestThinDeleteSkippedWithoutPool pins CN14 and the leak the activation
+// sweep heals: the per-td `delete` is gated on plan.wantPool, so the one
+// fan-out that both removes the td and takes the pool away — a demote
+// coalesced with a delete (RW3) — sends nothing, and afterwards nothing
+// remembers the td at all. The gate itself is correct (a standby has no pool
+// device, and only the primary may write pool metadata), so the sweep heals
+// the leak and the gate stays.
+func TestThinDeleteSkippedWithoutPool(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)
 	node.holdThinIds(pool, sweepLiveDevId)

@@ -1443,7 +1443,7 @@ case_transport() {
 	ctl_fail UNAVAILABLE cluster list
 	elapsed=$((SECONDS - started))
 	ctl_defaults
-	# "Well inside the 10 s default": a refusal must come back because the
+	# Well inside ctl's defaultTimeout: a refusal must come back because the
 	# connection was refused, not because the deadline expired — and those
 	# two are only distinguishable by the clock.
 	assert_between "$elapsed" 0 5 "a refused dial must fail fast (seconds)"

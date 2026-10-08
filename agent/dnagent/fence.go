@@ -8,8 +8,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The src-cutover fence ([D12];
-// architecture.md, Failover and Migration, src step 2).
+// The src-cutover fence ([D12]; architecture.md, Migration, src step 2).
 //
 // Handing a leg over to its migration destination happens in one converge
 // pass, but the per-CN dm-linears of the source are retired in two phases:
@@ -39,15 +38,14 @@ import (
 // timeout and no error path, so anything that reads it — a udev worker, an
 // operator's lsblk, any block-device scan — blocks in uninterruptible D
 // state; `exit_aio` then makes that task unkillable and the node needs a
-// reboot. Nothing in the dn agent scans block
-// devices any more ([D13] removed the LVM commands that did), so the exposure
-// is external tooling during the window. Keeping the window bounded, and
-// never letting a device outlive it, is what makes the trade acceptable. The
-// bound does not hold across DN12 rule 1's known limit (beginFence), nor
-// past a command that fails: a phase-2 reload whose load fails leaves the
-// linear suspended rather than resume it onto its pre-fence table and replay
-// the window's IO onto the side's data (a reload fails closed: dnagent.md,
-// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
+// reboot. No dnv agent scans block devices, and no LVM command runs on the dn
+// ([D13]), so the exposure is external tooling during the window. Keeping the
+// window bounded, and never letting a device outlive it, is what makes the
+// trade acceptable. The bound does not hold across DN12 rule 1's known limit
+// (beginFence), nor past a command that fails: a phase-2 reload whose load
+// fails leaves the linear suspended rather than resume it onto its pre-fence
+// table and replay the window's IO onto the side's data (a reload fails
+// closed: dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
 
 // beginFence reports whether this side is still inside the cutover window, and
 // starts the clock the first time it is asked. The caller holds the side's

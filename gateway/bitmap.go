@@ -53,7 +53,7 @@ type bitmapTarget struct {
 //
 // An SP with no primary is FAILED_PRECONDITION rather than NOT_FOUND: the SP
 // and its cntlrs exist, but no node has been promoted yet (the sp-worker
-// elects one, architecture.md, sp role), so the bitmap is unavailable *for
+// elects one, dnv-worker.md AR5), so the bitmap is unavailable *for
 // now* — a caller that retries after promotion succeeds, which is what a
 // precondition means.
 //
@@ -108,7 +108,7 @@ func openBitmapTarget(
 // `block_cnt == 0` means "to the end of the volume" and is passed through
 // unchanged: the agent is the only party that knows where the end is.
 //
-// The reply is the agent's bytes VERBATIM (GW14, [D-J]). The wire convention
+// The reply is the agent's bytes VERBATIM (GW14). The wire convention
 // — bit k = 1 iff block start_block+k is unmapped, LSB-first within each byte
 // (bit i at `bitmap[i/8] & (1 << (i%8))`), trailing pad bits 0 — is produced
 // by the agent, which inverts thin-pool metadata's native "mapped = written"
@@ -209,7 +209,7 @@ func (s *Server) GetThinDeviceBitmap(
 // then walks that slice's pool metadata down through the group geometry to
 // this leg's data region.
 //
-// The reply is the agent's bytes VERBATIM (GW14, [D-J]) — same convention as
+// The reply is the agent's bytes VERBATIM (GW14) — same convention as
 // GetThinDeviceBitmap, bit k = 1 iff no pool block maps there, LSB-first with
 // zero pad bits, produced by the agent and never touched here.
 func (s *Server) GetLegBitmap(

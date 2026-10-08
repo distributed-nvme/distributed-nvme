@@ -75,7 +75,7 @@ type sweepRow struct {
 	want proto.Message
 }
 
-// sweepRows is the sweep case's 59-step table, in the order of
+// sweepRows is the sweep case's table, one row per RPC, in the order of
 // dnvctl.md, The command tree. Together with the global prefix (--cluster
 // itctl --sp sp0) it is the complete argv → request corpus: every command
 // covered at least once, every field of every request asserted.
@@ -757,13 +757,13 @@ func TestTokenPresenceTrio(t *testing.T) {
 }
 
 // TestTokenCarriersMatchCT3 pins the other half of CT3: WHICH commands
-// carry a token. It drives each of the 34 sweep rows whose request has a
-// token field twice — once with the row's --rev 7 and once without — and
-// asserts the token is sent exactly when --rev is typed; the count pins the
-// 34. A token quietly added to a read, or dropped from a mutator, is
-// invisible to the sweep table (which fixes both argv and expectation
-// together) and shows up here. The other 25 refuse --rev outright
-// (TestRevOnATokenlessCommandIsAUsageError).
+// carry a token. It drives each sweep row whose request has a token field
+// twice — once with the row's --rev 7 and once without — and asserts the
+// token is sent exactly when --rev is typed; the assertion below pins how
+// many rows carry one. A token quietly added to a read, or dropped from a
+// mutator, is invisible to the sweep table (which fixes both argv and
+// expectation together) and shows up here. The rows without a token field
+// refuse --rev outright (TestRevOnATokenlessCommandIsAUsageError).
 func TestTokenCarriersMatchCT3(t *testing.T) {
 	carriers := 0
 	for _, row := range sweepRows {
@@ -793,11 +793,11 @@ func TestTokenCarriersMatchCT3(t *testing.T) {
 }
 
 // TestRevOnATokenlessCommandIsAUsageError is the complement of the test
-// above: on the 25 commands whose request has no token field, a typed --rev
+// above: on the commands whose request has no token field, a typed --rev
 // is a usage error — exit 2, CT5's refusal line on stderr word for word, no
-// RPC issued. It used to be dropped unread, so `cluster delete --rev 7`
-// deleted with no gate while looking gated, and even `--rev zz`, which every
-// carrier refuses, exited 0; each row is driven with a parsable, an
+// RPC issued. Dropped unread, `cluster delete --rev 7` would delete with no
+// gate while looking gated, and even `--rev zz`, which every carrier
+// refuses, would exit 0; each row is driven with a parsable, an
 // unparsable and an empty value. The empty one is `--rev "$REV"` with REV
 // unset: a refusal keyed on the value rather than on the flag being typed
 // would let it through, and the request would go out ungated.
@@ -1241,9 +1241,9 @@ func TestSpLevelSpellings(t *testing.T) {
 	}
 }
 
-// TestClusterCreateExtentSize states what sweep step 1 cannot. That row now
-// TYPES the flag, and the table is pinned at 59 rows, one per RPC, so no
-// second `cluster create` row can exist. What the row stopped saying is
+// TestClusterCreateExtentSize states what sweep step 1 cannot. That row
+// TYPES the flag, and the table is pinned at one row per RPC, so no
+// second `cluster create` row can exist. What the row cannot say is
 // asserted here — a bare `cluster create` sends no dn_bin_conf — together
 // with the three things it never could: an explicit --extent-size 0 sends
 // none either, an out-of-range value still travels, and the command line is
@@ -1291,7 +1291,7 @@ func TestClusterCreateExtentSize(t *testing.T) {
 	// The command line is this flag's only carrier (CT9), and a
 	// ClusterConf is write-once, so a second one would do its worst here: a
 	// stale DNVCTL_EXTENT_SIZE would size every cluster created under it,
-	// and text viper could not cast used to read back as 0 — the gateway
+	// and text viper cannot cast would read back as 0 — the gateway
 	// default, permanently — where pflag refuses the same text below.
 	t.Run("the environment is not a carrier", func(t *testing.T) {
 		for _, value := range []string{"67108864", "-1"} {
@@ -1609,8 +1609,8 @@ func TestBadNumericEnvIsAUsageError(t *testing.T) {
 	})
 
 	// 1e10 s is past time.Duration's reach (math.MaxInt64 ns, about 292
-	// years). Converted rather than saturated, it became math.MinInt64 on
-	// amd64: a deadline that had already passed.
+	// years). Converted rather than saturated, it becomes math.MinInt64 on
+	// amd64: a deadline already passed.
 	t.Run("a value past time.Duration's range is saturated", func(t *testing.T) {
 		var rec dialRecord
 		client := &recordingClient{want: "ListClusters"}

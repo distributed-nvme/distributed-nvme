@@ -799,9 +799,9 @@ func startOrphanCn(t *testing.T, h *revHarness) *orphanNode {
 // TestOrphanedEpochIsClearedByTheOwner (HL3), through the real dn and cn
 // loops: the memo is a cache of the record, so an owner whose DnConf/CnConf
 // another observer rewrote after the owner's own write puts the record back
-// at its first verdict after it next reads it. The monitor used to compare
-// every verdict with the last one it had written, found no transition and
-// wrote nothing, so a DN kept an orphaned epoch — and no capacity key (MD4) —
+// at its first verdict after it next reads it. A monitor that compared each
+// verdict only with the last one it wrote would find no transition and write
+// nothing, so a DN would keep an orphaned epoch — and no capacity key (MD4) —
 // until it genuinely flapped.
 //
 // First a quiet node: its revision does not move, so it never syncs, and the

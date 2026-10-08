@@ -16,13 +16,13 @@ import (
 //
 // Between CreateMigration and Finish/Cancel a leg owns two sides
 // (architecture.md, Migrations), and the source may be the side of a SPARE leg
-// as well as of an active one. Both RPCs used to take such a leg away from
-// under its migration: DeleteSpareLeg
-// released both sides and dropped the leg, and SwitchSpareLeg parked a
-// migrating active leg where the delete could reach it. Either way the
-// Migration was left naming sides in no leg, so FinishMigration and
-// CancelMigration answered ABORTED for ever and the SP, whose migr_name_list
-// could never empty, could never be deleted.
+// as well as of an active one. Without the guard either RPC would take such a
+// leg away from under its migration: DeleteSpareLeg would release both sides
+// and drop the leg, and SwitchSpareLeg would park a migrating active leg where
+// the delete could reach it. Either way the Migration would be left naming
+// sides in no leg, FinishMigration and CancelMigration would answer ABORTED
+// for ever and the SP, whose migr_name_list could never empty, could never be
+// deleted.
 
 // splMigrName is the one migration each test below starts.
 const splMigrName = "migr-a"

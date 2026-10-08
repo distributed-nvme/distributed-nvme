@@ -775,7 +775,7 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 // a transfer out of one of them, the three of a clone onto it. The pool lives
 // on the SP's legs, so whichever cntlr holds the primary role reads the same
 // rows, and no failover or replacement brings the td, or anything over it,
-// back: an operator does (architecture.md, v1 assumptions and known limits).
+// back: an operator does (architecture.md, Known limits).
 // Every other ERROR row is the cntlr's own.
 // It returns those tds, ascending, when the info carries ERROR rows and every
 // one of them is of the shared-state class, and nil when one is the cntlr's
@@ -877,8 +877,8 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // and a transfer's device, subsystem and namespace are built meanwhile but
 // read PROVISIONING all the same): a clean reply that says nothing about the
 // build still to come, and a settle on it would leave that build to be judged
-// by primary_unhealthy, which at 32 slices failed the building primary over
-// (e2e_integtest.md, Known limits). MISSING is the other half. A converge that
+// by primary_unhealthy, which a long first build exceeds. MISSING is the
+// other half. A converge that
 // finds a member not available (a promotion ahead of the sides' ANA flips, a
 // provisioned flip ahead of the side's export) reports the groups and pools it
 // could not build ERROR and leaves them to the CN10 retry, whose first pass

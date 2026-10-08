@@ -140,17 +140,15 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// The deployment requirement of gateway.md, Additions to
-		// `common/constants.go`, not a tuning knob:
-		// CreateStoragePool's maximum shape is 967 compares — the transaction
-		// the number is SIZED by — the sp drain's D2 batch 486 (SPD13) and a
-		// created-flip transaction of MaxFlipCreatedPerTxn tds, 514 (RW19),
-		// while etcd's default cap is 128, so a test etcd without the flag
-		// would fail transactions the deployment runs fine. (DeleteClone's
-		// rectangle sweep — then 256 keys, at the 16-slice ceiling of the
-		// time — was this flag's founding justification and is gone; the clone
-		// drain's batches fit the default.) All three are COMMITTED against a
-		// real etcd: the create in this package's
+		// The deployment requirement of gateway.md, Constants this
+		// document owns, not a tuning knob: CreateStoragePool's maximum
+		// shape — the transaction the number is SIZED by — the sp drain's
+		// D2 batch (SPD13) and a created-flip transaction of
+		// MaxFlipCreatedPerTxn tds (RW19) all exceed etcd's default cap
+		// (gateway/txnbudget_test.go derives their compare counts), so a
+		// test etcd without the flag would fail transactions the deployment
+		// runs fine; the clone drain's batches fit the default. All three
+		// are COMMITTED against a real etcd: the create in this package's
 		// TestCreateStoragePoolAtTheCeiling, the sp batch in model's
 		// TestDrainSpSliceAtTheCeiling and the created flip in model's
 		// TestFlipCreatedAtTheTdCeiling.

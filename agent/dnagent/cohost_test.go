@@ -30,11 +30,10 @@ import (
 // leak but a live-data outage on somebody else's sp: the export is the path a
 // CN is doing IO over, and the connection feeds a hydrating clone.
 //
-// These tests exist because both foreign arms were added after the LAB found
-// them, and a unit suite in which every object belongs to the agent under
-// test cannot fail when they regress — it never presents one. Each case is
-// paired with the same fixture built under OUR ids, so no arm can pass by
-// sweeping nothing.
+// A unit suite in which every object belongs to the agent under test never
+// presents a sibling's object, so neither foreign arm can fail there. Each
+// case here is paired with the same fixture built under OUR ids, so no arm
+// can pass by sweeping nothing.
 
 const (
 	siblingDn   = testDn + 1
@@ -302,10 +301,10 @@ func linkPresent(node *fakeNode, link string) bool {
 	return ok
 }
 
-// sweepScope is one of the two sweeps DN6 runs, driven the way the lab drives
-// it: the node-level one by a SyncupDn, the side-level one by a SyncupSide of
-// the side the fixture converged. read is the same scope's read-only verdict,
-// the Get*Info (and Check round) answer.
+// sweepScope is one of the two sweeps DN6 runs, driven the way the worker
+// drives it: the node-level one by a SyncupDn, the side-level one by a
+// SyncupSide of the side the fixture converged. read is the same scope's
+// read-only verdict, the Get*Info (and Check round) answer.
 type sweepScope struct {
 	name string
 	// stray names the export the arms seed. The side-level scope judges its

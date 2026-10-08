@@ -424,7 +424,7 @@ func TestParseRevKeyRejectsMalformed(t *testing.T) {
 }
 
 // TestParseCdcEntryKeyRoundTrip round-trips the discovery-entry parser over
-// the edges of every field (MD2; cdc.md, Addition to `model/keys.go`). It is
+// the edges of every field (MD2; cdc.md, Key helpers this document owns). It is
 // the ground truth for the
 // field ORDER: CdcEntryKey writes cluster_id before shard_code, the opposite
 // of the rev keys, and a parser that swapped the two would still round-trip

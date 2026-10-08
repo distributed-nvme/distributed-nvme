@@ -1463,7 +1463,8 @@ func testVoteOwnKeyDeleteAlwaysFences(t *testing.T) {
 // has already consumed the delete event that carried it, so a dropped (c)
 // fence would be lost for good.
 //
-// crypto/rand.Read does not fail today, so the deferral is driven directly.
+// crypto/rand.Read cannot be made to fail here, so the deferral is driven
+// directly.
 // Every call below runs on this goroutine, exactly where the vote loop would
 // run it, so the incarnation is touched by nobody else.
 func TestVoteDeferredFenceIsRetried(t *testing.T) {
@@ -1517,8 +1518,8 @@ func TestVoteDeferredFenceIsRetried(t *testing.T) {
 	}
 }
 
-// TestVoteFenceRejoinsWhileWatchesTearDown exercises the interleaving the
-// unit-test harness used to dodge by muting the fake store: a fence cancels the
+// TestVoteFenceRejoinsWhileWatchesTearDown exercises the interleaving a muted
+// fake store would hide: a fence cancels the
 // old incarnation's watches (VW8) while its new incarnation is already putting
 // its first registrations (VW2). Nothing may deliver an event into a channel
 // that is being closed, so this is a -race test — un-muted, and with two roles,

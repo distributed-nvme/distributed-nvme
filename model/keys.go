@@ -672,7 +672,7 @@ func ParseCnCapacityKey(key string) (uint64, string, bool) {
 }
 
 // ParseCdcEntryKey decodes a CdcEntry key as seen on dnv-cdc's prefix watch
-// (MD2; cdc.md, Addition to `model/keys.go`). Its field order is the key's
+// (MD2; cdc.md, Key helpers this document owns). Its field order is the key's
 // own and is deliberately
 // NOT the rev keys' order: cluster_id comes BEFORE shard_code, so that the
 // single CdcEntryPrefix watch spans every cluster (DS1) and dnv-cdc decides

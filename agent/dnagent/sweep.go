@@ -29,7 +29,7 @@ import (
 //
 //   - a record is released only after the sweep has VERIFIED its device is
 //     gone, and only for a side or migration the authoritative pointer lists
-//     prove unwanted (the sweepOrphanRecords proof, unchanged);
+//     prove unwanted (the sweepOrphanRecords proof);
 //   - migration objects are keyed by (sp, migr) and belong to no side, so
 //     they are judged by a claim rule over every side this agent holds rather
 //     than by an sp id in the name. That is what lets a FINISHED migration's
@@ -763,10 +763,10 @@ func (s *DnAgentServer) cloneMetaGate(identified bool) recordGate {
 
 // sweepMigrChunks deletes the bitmap chunk files of a migration this side no
 // longer plays the destination of (SH21). It is a sweep of the LOCAL STORE
-// against the request, the dn twin of the cn's sweepCloneChunks: the files
-// used to be dropped only by ensureMigrDst, which a side whose migr_dst_conf
-// has gone never reaches — so a finished migration left its chunks on disk
-// until the next startup reconcile happened to notice them.
+// against the request, the dn twin of the cn's sweepCloneChunks: ensureMigrDst
+// cannot drop them, because a side whose migr_dst_conf has gone never reaches
+// it, and a chunk file whose migration the request no longer names is swept
+// here.
 //
 // A destination role the LEVEL merely suppresses keeps its chunks: they stay
 // applied-by-file, and deleting them would make the worker re-push every one
@@ -1415,7 +1415,7 @@ func (s *DnAgentServer) sweepDn(
 	// a pointer in an authoritative list. A :2: NQN carries no dn id — both
 	// sides of a migrating leg export the same one ([D1]) — so without this
 	// an agent sharing a VM with others would read the namespaces of every
-	// one of THEIR exports on every pass, which on a lab node running
+	// one of THEIR exports on every pass, which on a node running
 	// dozens of dn agents is the whole configfs tree per round. It does not
 	// skip a sibling's export of an sp both agents hold sides of, which is
 	// why classifyExport attributes each of those that has its namespace

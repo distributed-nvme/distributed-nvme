@@ -464,9 +464,9 @@ cluster_key() { printf '%s cluster_conf %s' "$DNV_PREFIX" "$CLUSTER"; }
 # ---------------------------------------------------------------------------
 
 # set_behavior writes one fake's behavior.json from a here-doc on stdin. The
-# fake re-reads the file whenever its mtime changes, so the write must be
-# atomic: a half-written file would be parsed, rejected and IGNORED, silently
-# keeping the previous behaviour.
+# fake re-reads the file whenever its mtime or size changes, so the write
+# must be atomic: a half-written file would be parsed, rejected and IGNORED,
+# silently keeping the previous behaviour.
 set_behavior() { # <agent>   (JSON on stdin)
 	local agent=$1
 	[ "$QUIET" -eq 1 ] || log "[server] behavior -> $agent"
@@ -1334,10 +1334,10 @@ case_smoke() {
 	# cluster_id derivation), so an epoch of 0 would make every cluster of
 	# this name share one key prefix.
 	assert_ne "$(jq_of "$cc" '.creation_epoch')" "0" "ClusterConf creation_epoch"
-	# "confs resolved" (gateway.md, Clusters): the request carried none of the
-	# five sub-messages, and GW11 resolves every defaultable member at WRITE
+	# "confs resolved" (gateway.md, Clusters): the request carried no
+	# sub-message, and GW11 resolves every defaultable member at WRITE
 	# time, so what is in the store is CONCRETE — this is the assertion that
-	# would have caught a storage pool created with a zero geometry. Only
+	# catches a conf stored with a zero geometry. Only
 	# qos_ratio, which is not defaultable, is still absent.
 	assert_eq "$(jq_of "$cc" '.qos_ratio')" "null" \
 		"ClusterConf.qos_ratio is not defaultable and stays absent"
@@ -1777,9 +1777,9 @@ EOF
 	grpAddrs=$(smoke_grp_addrs sp0 "$grpId")
 	assert_eq "$(printf '%s\n' "$grpAddrs" | wc -l | tr -d ' ')" "2" \
 		"the new meta group's legs are on two distinct DNs"
-	# D-F: only the DNs the NEW group landed on were charged, so only their
-	# DnRev moved — the ledger bumps once per node it touched (architecture.md,
-	# Revision keys and the sync fan-out).
+	# architecture.md, Per-operation allocation: only the DNs the NEW group
+	# landed on were charged, so only their DnRev moved — the ledger bumps once
+	# per node it touched (architecture.md, Revision keys and the sync fan-out).
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
 		want=${beforeRev[i]}
@@ -1800,8 +1800,9 @@ EOF
 		[ "$(smoke_cn_cntlrs sp0 "$addr")" = 0 ] || want=3
 		smoke_check_cn sp0 "$addr" "$want"
 	done
-	# D-E: req.ext_cnt is only the "this is a data grow" signal; the size
-	# added is the slice's ORIGINAL allocation unit, data_grp_list[0].ext_cnt.
+	# architecture.md, GrowSlice: req.ext_cnt is only the "this is a data grow"
+	# signal; the size added is the slice's ORIGINAL allocation unit,
+	# data_grp_list[0].ext_cnt.
 	out=$(gw grow-slice --sp sp0 --rev "$SP_REV" --slice "$slice" --ext 2)
 	refresh_rev sp0
 	grpId=$(jq_of "$out" '.grp_id')
@@ -1924,7 +1925,7 @@ EOF
 	local t1Id
 	t1Id=$(jq_of "$out" '.td_id')
 	assert_field "$out" '.dev_id' "2" "create-td t1 dev_id"
-	# [D-H]: a snapshot points at its origin by dev_id and inherits its size.
+	# GW17: a snapshot points at its origin by dev_id and inherits its size.
 	assert_eq "$(smoke_td_field sp0 t1 ori_id)" "$t0Dev" "t1 ori_id is t0's dev_id"
 	assert_eq "$(smoke_td_field sp0 t1 size)" "$TD_SIZE" "t1 inherits t0's size"
 	assert_eq "$(smoke_td_field sp0 t1 created)" "false" "t1 created"
@@ -2254,8 +2255,8 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" \
 		'.clones.cl0.src_tr_conf_list[0].tr_addr')" "127.0.0.2" \
 		"clone src_tr_conf tr_addr after the update"
-	# --force skips the hydration proof (AG4), which is how a clone whose
-	# source never existed is abandoned. The deciding STM
+	# --force skips the hydration proof (AG3; gateway.md, Clones), which is
+	# how a clone whose source never existed is abandoned. The deciding STM
 	# LATCHES instead of sweeping (gateway.md, Clones): it sets `deleting`,
 	# RESUMES every namespace backed by the destination td (DeleteClone's
 	# Action, architecture.md, Clones) — here the one step
@@ -2427,8 +2428,9 @@ EOF
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - 12))" \
 		"Σ DN free restored by the cancel"
 	# The finish path, on a fresh migration. --force skips the "fully
-	# hydrated" proof the destination DN would otherwise have to give (AG4) —
-	# no worker ever pushed a dm-clone status line to these fakes.
+	# hydrated" proof the destination DN would otherwise have to give (AG3;
+	# gateway.md, Migrations) — no worker ever pushed a dm-clone status line
+	# to these fakes.
 	out=$(gw create-migr --sp sp0 --rev "$SP_REV" --name m1 --src-side "$srcSide")
 	refresh_rev sp0
 	migrId=$(jq_of "$out" '.migr_id')
@@ -2561,7 +2563,7 @@ EOF
 	# -------------------------------------------------------------------
 	stage 16 "get-td-bm / get-leg-bm and the two inspects"
 	# -------------------------------------------------------------------
-	# GW14/[D-J]: the agent's bytes travel verbatim, and this fake replies an
+	# GW14: the agent's bytes travel verbatim, and this fake replies an
 	# empty bitmap, so the pass-through is an empty hex string of length 0.
 	out=$(gw get-td-bm --sp sp0 --td t0 --slice-idx 0)
 	assert_field "$out" '.byte_cnt' "0" "get-td-bm byte_cnt"
@@ -2799,8 +2801,8 @@ EOF
 # result array comes back on stdout; ssh forwards our stdin to gatewayctl on
 # the server, so the wave never touches a temporary file.
 #
-# --timeout 30 rather than the 10 s default: ten allocating RPCs contend on the
-# same four DN and three CN keys, and GW9 re-runs a whole candidate unit
+# --timeout 30 rather than gatewayctl's default: ten allocating RPCs contend
+# on the same four DN and three CN keys, and GW9 re-runs a whole candidate unit
 # (scan + STM) after every "candidate changed", so a job's WALL time is a
 # retry queue, not one round trip. The timeout must not be the thing that
 # decides a wave (Integration test plan, What the suite proves: this suite
@@ -3881,7 +3883,7 @@ case_contention() {
 # alone — would still be caught.
 #
 # Steps 4 and 5 are the agent half. AG2 bounds every gateway->agent call at
-# common.DefaultGatewayAgentTimeout (10 s), which is what makes a hung agent
+# common.DefaultGatewayAgentTimeout, which is what makes a hung agent
 # bound an RPC exactly as a hung etcd does; and both force = false proofs
 # (DeleteClone and FinishMigration; architecture.md, Clones and Migrations)
 # treat an unreachable agent as "hydration unproven" rather than as permission
@@ -4067,14 +4069,14 @@ faults_validation_battery() {
 		--slots 0,0,1
 	gwx INVALID_ARGUMENT set-cntlid-slots --sp sp0 --rev "$SP_REV" --slots 8
 
-	# GW10 pagination: a count above MaxListCnt (1024) is REFUSED, never
+	# GW10 pagination: a count above MaxListCnt is REFUSED, never
 	# silently capped, and a page token that is not base64 is malformed
 	# input, not an empty page.
 	gwx INVALID_ARGUMENT list-clusters --count 2000
 	gwx INVALID_ARGUMENT list-clusters --page-token '!!'
 
 	# The structural bdev rule of architecture.md, Common validation:
-	# bdev_feature_list MUST be empty in v1.
+	# bdev_feature_list must be empty.
 	# --feature-junk appends one empty BdevFeature; the rest of the request is
 	# the test-time shape, because validateBdevConf runs AFTER the cntlr/slice
 	# /init_ext_cnt bounds and a short request would be refused before it.
@@ -4102,10 +4104,11 @@ faults_validation_battery() {
 faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	local ssNqn=$1 grp=$2 leg=$3
 
-	# GW5: ClusterConf is the first read of every STM, so a missing cluster is
-	# refused before the SP is even looked for. The `gw` wrapper puts
-	# --cluster BEFORE the subcommand and gatewayctl binds its global flags on
-	# the subcommand's flag set as well, so this later --cluster wins.
+	# GW5: ClusterConf is the first read of every RPC this battery probes, so
+	# a missing cluster is refused before the SP is even looked for. The `gw`
+	# wrapper puts --cluster BEFORE the subcommand and gatewayctl binds its
+	# global flags on the subcommand's flag set as well, so this later
+	# --cluster wins.
 	gwx NOT_FOUND get-sp --cluster nosuch --sp sp0
 
 	gwx NOT_FOUND get-sp --sp nosuchsp
@@ -4155,9 +4158,10 @@ faults_agent_battery() {
 	# succeeds and only the call stalls. The addr must differ from dn0's own
 	# or the STM would refuse it as ALREADY_EXISTS; "localhost:29820" reaches
 	# the same listener under a name the DnConf key does not hold yet.
-	# gatewayctl's own deadline defaults to 10 s, the same as the gateway's
-	# agent budget, so --timeout 30 keeps the driver from firing first and
-	# turning the gateway's ABORTED into a client-side DEADLINE_EXCEEDED.
+	# gatewayctl's own deadline default equals the gateway's agent budget
+	# (DefaultGatewayAgentTimeout), so --timeout 30 keeps the driver from
+	# firing first and turning the gateway's ABORTED into a client-side
+	# DEADLINE_EXCEEDED.
 	set_behavior dn0 <<<'{"objects":{"dn":{"hang":true}}}'
 	start=$SECONDS
 	gw --timeout 30 --expect ABORTED create-dn --addr localhost:29820 \
@@ -4165,7 +4169,7 @@ faults_agent_battery() {
 	FAULTS_HUNG_SECS=$((SECONDS - start))
 
 	# The same hang seen through a read: InspectDiskNode's GetDnInfo is an
-	# agent call like any other and gets the same 10 s budget (AG3 maps the
+	# agent call like any other and gets the same budget (AG3 maps the
 	# transport failure to ABORTED).
 	gw --timeout 30 --expect ABORTED inspect-dn --addr "$dn0Addr"
 
@@ -4179,7 +4183,7 @@ faults_agent_battery() {
 		"dn0: the restored fake has still accepted nothing"
 
 	# A closed port: grpc.NewClient does not block, so the failure surfaces on
-	# the call and is refused immediately — nowhere near the 10 s budget.
+	# the call and is refused immediately — nowhere near the agent budget.
 	start=$SECONDS
 	gwx ABORTED create-dn --addr 127.0.0.1:29999 --location rack9 \
 		--tr-svc-id 4429
@@ -4246,7 +4250,7 @@ case_faults() {
 	wctl set-created --sp sp0 --name tp >/dev/null
 	refresh_rev sp0
 	# A snapshot inherits its origin's size, which is the one case
-	# architecture.md, Thin devices, lets size be 0 ([D-H]).
+	# architecture.md, Thin devices, lets size be 0 (GW17).
 	gw create-td --sp sp0 --rev "$SP_REV" --name ts --ori tp >/dev/null
 	refresh_rev sp0
 
@@ -4475,9 +4479,9 @@ case_faults() {
 	after=$(faults_sp_snapshot sp0)
 	assert_eq "$after" "$before" "step 4: sp0's content must not change"
 
-	# The AG2 bound: DefaultGatewayAgentTimeout is 10 s and this asserts a
-	# generous upper fence rather than a tight one, because the window also
-	# contains one ssh round trip and the gateway's own dial.
+	# The AG2 bound: DefaultGatewayAgentTimeout bounds the hang, and this
+	# asserts a generous upper fence rather than a tight one, because the
+	# window also contains one ssh round trip and the gateway's own dial.
 	assert_between "$FAULTS_HUNG_SECS" 10 15 \
 		"a hung listening agent bounds the RPC at the AG2 budget"
 	# The other half of the same claim: a refusal that needs no timeout does
@@ -5031,10 +5035,10 @@ case_restart() {
 	# the jobs, and while gw1 still holds one of its create-sp. That window
 	# closes as soon as gw1 has answered its last create-sp. The ten do
 	# commit one after another (each rewrites the cluster's SpGlobal and
-	# charges all four DNs), which stretches it, yet on a local copy of the
-	# setup gw1 had answered all of its creates within about 150 ms of the
-	# barrier, and a kill sent from the driver would have to open a whole
-	# ssh connection inside that. So the kill is ARMED ON THE SERVER:
+	# charges all four DNs), which stretches it, yet gw1 answers all of its
+	# creates in less time than a whole ssh connection takes to open, and a
+	# kill sent from the driver would have to open one. So the kill is ARMED
+	# ON THE SERVER:
 	# restart_killer_script is shipped into gw1's dir and started in the
 	# race's own ssh session, just before gatewayctl, and it SIGKILLs gw1 by
 	# recorded pid the moment gw1's log holds a create-sp request of this

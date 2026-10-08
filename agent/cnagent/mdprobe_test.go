@@ -496,7 +496,7 @@ func TestMdWalkUnansweredArray(t *testing.T) {
 // loses its record, never keeps it: its member directory may now carry
 // another dm name — a dm-N name is the dm minor, which a new leg wrapper can
 // reuse — and the stale record would hand a lookup that array as the group's
-// own, with the old dm name on a member that is another device.
+// own, with the stale dm name on a member that is another device.
 func TestMdWalkRefreshUnanswered(t *testing.T) {
 	ctx := context.Background()
 	const legA = "/dev/mapper/dnv-leg-a"
@@ -740,8 +740,7 @@ func TestMdStateLine(t *testing.T) {
 // TestMdHasSuperblockKilledIsAnError pins the most destructive reading of a
 // killed probe in the tree. `mdadm --examine` opens and reads the member
 // device, so it blocks on a dead leg until failfast, and its answer selects
-// between the two assembly cases of architecture.md, "Make sure all groups are
-// available": create, or assemble. "No
+// between the two assembly cases of cnagent.md CN12: create, or assemble. "No
 // superblock" on every available member means case 1, and case 1 is `mdadm
 // --create --assume-clean` — over whatever those members already hold. So a
 // kill read as "no superblock" does not leak anything; it destroys the
@@ -758,8 +757,8 @@ func TestMdHasSuperblockKilledIsAnError(t *testing.T) {
 	md := NewMd(node.osClient())
 
 	// The tool ran and answered: this device carries no md metadata. That is
-	// the case 1 answer of architecture.md, "Make sure all groups are
-	// available", not a failure — a freshly zeroed side.
+	// the case 1 answer of cnagent.md CN12, not a failure — a freshly zeroed
+	// side.
 	has, err := md.HasSuperblock(ctx, member)
 	if err != nil {
 		t.Fatalf("a device without a superblock errored: %v", err)

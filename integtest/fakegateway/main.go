@@ -1,6 +1,6 @@
 // Command fakegateway is the fake dnv gateway of the dnvctl integration suite
 // (doc/dnvctl.md, Integration test plan, The fake gateway, `fakegateway`). It
-// serves all 59 methods of the generated `Gateway` service on a plaintext
+// serves every method of the generated `Gateway` service on a plaintext
 // listener behind the real server interceptors of doc/grpc.md, Wiring, so
 // `fakegateway.log` carries one `grpc server request`/`reply` record per call
 // with the caller's trace id — the suite's evidence of what dnvctl put on the
@@ -95,15 +95,15 @@ type methodTypes struct {
 // gatewayMethodTypes maps every `service Gateway` method name to its types.
 //
 // It is derived from the service's own descriptor in this one place, so it
-// cannot drift: a renamed reply message or a 60th RPC changes the descriptor
+// cannot drift: a renamed reply message or an added RPC changes the descriptor
 // and this map with it. Building it by hand, or by concatenating "Reply" onto
-// the method name at 59 call sites, is exactly the drift this avoids.
+// the method name at every call site, is exactly the drift this avoids.
 //
 // The compiler is NOT the backstop here — the embedded
-// UnimplementedGatewayServer would silently satisfy a 60th method with an
+// UnimplementedGatewayServer would silently satisfy an added method with an
 // Unimplemented stub — so main_test.go is: it pins the map against
-// pb.Gateway_ServiceDesc.Methods in both directions and drives all 59
-// methods, which is what would fail the day the service grows.
+// pb.Gateway_ServiceDesc.Methods in both directions and drives every
+// method, which is what fails when the service grows.
 var gatewayMethodTypes = newGatewayMethodTypes()
 
 func newGatewayMethodTypes() map[string]methodTypes {
@@ -285,7 +285,7 @@ func (mb *methodBehavior) validate(where string, reply proto.Message) error {
 	}
 	if reply == nil {
 		// A reply type is per method, so a "default" reply could not be
-		// decoded, let alone applied to all 59 methods at once. Rejecting
+		// decoded, let alone applied to every method at once. Rejecting
 		// it beats accepting a key that silently does nothing.
 		return fmt.Errorf(
 			"%s: \"reply\" belongs under \"methods\", not \"default\"", where)
@@ -366,14 +366,14 @@ type stateFile struct {
 // The fake
 // ---------------------------------------------------------------------------
 
-// fakeGateway implements all 59 methods of service Gateway. Every field
+// fakeGateway implements every method of service Gateway. Every field
 // behind mu is shared by the concurrent handlers of one process: the suite
 // drives one command at a time, but nothing about a gRPC server guarantees
 // that, and a torn state.json would be an unreproducible test failure.
 //
 // UnimplementedGatewayServer is embedded because the generated interface
 // demands it (pb/schema_grpc.pb.go), not because anything is left
-// unimplemented — all 59 methods below shadow its stubs.
+// unimplemented — every method below shadows its stubs.
 type fakeGateway struct {
 	pb.UnimplementedGatewayServer
 
@@ -705,7 +705,7 @@ func (g *fakeGateway) call(
 }
 
 // serve adapts call to one handler's concrete reply type. Go has no generic
-// methods, so this is a free function; the type parameter is what the 59
+// methods, so this is a free function; the type parameter is what the
 // one-line handlers below spell out.
 func serve[RepT proto.Message](
 	g *fakeGateway, ctx context.Context, method string, req proto.Message,
@@ -719,7 +719,7 @@ func serve[RepT proto.Message](
 	if !ok {
 		// Only reachable if a handler passed a method name the registry
 		// does not know, or one belonging to a different reply type.
-		// main_test.go drives all 59 methods to keep it unreachable.
+		// main_test.go drives every method to keep it unreachable.
 		return zero, status.Errorf(codes.Internal,
 			"%s: the registry produced %T, not the handler's reply type",
 			method, reply)
@@ -728,7 +728,7 @@ func serve[RepT proto.Message](
 }
 
 // ---------------------------------------------------------------------------
-// The 59 Gateway methods, in pb.Gateway_ServiceDesc order (Integration test
+// The Gateway methods, in pb.Gateway_ServiceDesc order (Integration test
 // plan, The fake gateway)
 // ---------------------------------------------------------------------------
 //

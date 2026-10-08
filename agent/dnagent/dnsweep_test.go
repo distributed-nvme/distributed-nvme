@@ -227,10 +227,9 @@ func (o sideObjects) assertAllGone(t *testing.T, node *fakeNode) {
 // FIRST: a side whose pointer has left its DN's list has its state file, its
 // chunks, its memory entry and its
 // object lock dropped in the same pass, before a single removal is attempted.
-// A removal path that needed any of it would leak every such side for ever —
-// which is exactly the bug this design started from, where the teardown
-// deleted the state after a best-effort pass whose every step only logged its
-// failure.
+// A removal path that needed any of it would leak every such side for ever:
+// a teardown that deletes the state after a best-effort pass whose every step
+// only logs its failure forgets the side.
 func TestRemovedSideSweptByName(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -349,11 +348,10 @@ func TestSideRecordFreedOnlyAfterDeviceGone(t *testing.T) {
 // `dmsetup info` killed, the agent cannot know whether the side device is
 // there, and "I could not tell" must never be read as "it is gone".
 //
-// Before the fix Dm.Info returned nil, nil on ANY failure, so a killed probe
-// reported the device absent, removeDm reported success and the caller freed
-// the extents underneath a device that was still live. That is why Dm.Info
-// now separates a tool that answered "no such device" from a tool that did
-// not answer at all.
+// Dm.Info separates a tool that answered "no such device" from a tool that
+// did not answer at all: a killed probe read as absent would let removeDm
+// report success and the caller free the extents underneath a device that is
+// still live.
 func TestKilledDmInfoDoesNotFreeARecord(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -729,11 +727,9 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // held side of its own claims — in the verdict of every Check round and in
 // every SyncupDn — and on a shared kernel nearly all of those are the
 // siblings': each side-holding agent exports its own leg of the sp, one
-// export per cn. Attributing each with an `ls` exec of its namespaces made
-// every side-holding agent's pass grow with everybody else's exports of the
-// sp, so the node ran about s·(s−1) execs per cn per round for s
-// side-holding agents: at 32 slices most of the roughly 617 execs a second
-// estimated for one disk-node VM.
+// export per cn. Attributing each with an `ls` exec of its namespaces would
+// make every side-holding agent's pass grow with everybody else's exports of
+// the sp — about s·(s−1) execs per cn per round for s side-holding agents.
 //
 // dnv builds every side export with one namespace, nsid 1, so its
 // device_path is read directly and the namespaces are listed only when there
@@ -1190,8 +1186,8 @@ func TestCheckDnReportsLeftover(t *testing.T) {
 // The clone-metadata record and the proof it waits for
 // ---------------------------------------------------------------------------
 
-// TestCloneMetaRecordFreedUnderTheProof pins the second half of the
-// probe-verified "gone" of architecture.md, Teardown by sweep, the one a device
+// TestCloneMetaRecordFreedUnderTheProof pins the second half of the record
+// rule of dnagent.md DN6 (architecture.md, Teardown by sweep), the one a device
 // probe alone cannot supply: a clone-metadata slot is released
 // only when no held side claims its migration AND every side of that sp
 // this node may host is a side whose local state the agent actually holds.
@@ -1368,16 +1364,15 @@ func TestUnansweredEnumerationRemovesNothingDn(t *testing.T) {
 // The migration SOURCE is the one role whose two objects are wanted at
 // different levels — the `d2` linear under wantDm, its `:3:` export under
 // wantExport — and `SP_LEVEL_NO_SIDE` sits exactly between them. A single
-// ungated claim (which is what this started as) made both objects permanently
-// unsweepable: `sideWanted` correctly dropped them from the wanted set, but
-// every sweep skipped anything the claim map held, so they were neither
-// removed NOR reported. The reply stayed code 0, so the worker never
-// re-drove, and an sp taken to NO_SIDE — the level whose whole point is that
-// it is off the network — went on exporting its migration source until
-// `migr_src_conf` itself was dropped.
+// ungated claim would make both objects permanently unsweepable: `sideWanted`
+// drops them from the wanted set, but a sweep that skips whatever the claim
+// map holds would neither remove NOR report them. The reply would stay code
+// 0, so the worker would never re-drive, and an sp taken to NO_SIDE — the
+// level whose whole point is that it is off the network — would go on
+// exporting its migration source until `migr_src_conf` itself is dropped.
 //
-// Each level is asserted for BOTH objects, because the gate that was missing
-// is precisely the one that tells them apart.
+// Each level is asserted for BOTH objects, because the gate is what tells
+// them apart.
 func TestMigrationSourceSweptByLevel(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srcDm := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)

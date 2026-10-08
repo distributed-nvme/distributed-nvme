@@ -288,9 +288,9 @@ type incarnation struct {
 	// pendingFence is the reason of a fence VW8 demanded that could NOT be
 	// applied, because minting the new seed failed (VW1). checkFence retries it
 	// on every following heartbeat tick: (a) and (b) are conditions that still
-	// hold and would fire again on their own, but (c) is an EVENT — the delete
-	// has already been consumed by the time the mint fails — so without this
-	// the fence would be lost for good.
+	// hold and would fire again on their own, but (c) and (d) are EVENTS — the
+	// delete, or the own-key commit, has already been consumed by the time the
+	// mint fails — so without this the fence would be lost for good.
 	pendingFence string
 
 	regMu      sync.Mutex
@@ -786,9 +786,8 @@ func (v *voteWorker) armDeadline(
 ) {
 	entry.stopDeadline()
 	entry.deadlineGen++
-	// The deadline sits at lastSeen + 2 x interval; lastSeen is "now" at
-	// every call site today, but computing it from the stored monotonic
-	// reading is what VW3 says and keeps a future caller honest.
+	// The deadline sits at lastSeen + 2 x interval, computed from the stored
+	// monotonic reading, as VW3 states.
 	remaining := entry.lastSeen.
 		Add(v.deps.cfg.deadThreshold()).
 		Sub(v.deps.clk.now())
@@ -950,8 +949,9 @@ func (v *voteWorker) commit(
 	return false
 }
 
-// fenceSelfStale takes VW8's exit for the one commit VW6's garbage collection
-// must never perform: a nonmember target for this worker's OWN registration.
+// fenceSelfStale is VW8 (d): the exit for the one commit VW6's garbage
+// collection must never perform, a nonmember target for this worker's OWN
+// registration.
 //
 // VW6 defines the collection as removing "a key whose owner died", and VW8 says
 // a worker the fleet considers dead is a NEW worker that mints a fresh seed.
@@ -989,10 +989,9 @@ func (v *voteWorker) commit(
 // echoing its puts. That is also what keeps the vote case (VW8 (a)) true: a
 // resumed SIGSTOPped worker fences as heartbeat_stalled whichever of its
 // expired timers the loop drains first.
-// Otherwise the reason is key_deleted: the key genuinely gone from the registry
-// without this process deleting it — VW8(c)'s fact, learned from a rescan (VW3)
-// instead of from a delete event — or, with several roles, a stall (b) cannot
-// see, some roles' watches having stopped echoing while another's had not.
+// Otherwise the reason is key_deleted, the fallback when neither signal is
+// stale (VW8 (d)): with several roles, a stall (b) cannot see, some roles'
+// watches having stopped echoing while another's has not.
 func (v *voteWorker) fenceSelfStale(inc *incarnation, now time.Time) bool {
 	dead := v.deps.cfg.deadThreshold()
 	reason := fenceKeyDeleted
@@ -1066,15 +1065,16 @@ func (v *voteWorker) checkHeartbeatStall(
 
 // checkFence applies VW8 (a) and then (b), after retrying a fence a failed seed
 // mint had deferred. It is called on every heartbeat tick and on every own-key
-// watch event; (c) is applied where the delete arrives, and fenceSelfStale,
-// reached before this worker's own registration would be collected, names its
-// own reason against the dead threshold. It reports whether the worker fenced,
-// after which the caller must not touch the old incarnation any more.
+// watch event; (c) is applied where the delete arrives, and (d) in
+// fenceSelfStale, reached before this worker's own registration would be
+// collected, which names its reason against the dead threshold. It reports
+// whether the worker fenced, after which the caller must not touch the old
+// incarnation any more.
 func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 	// A fence VW8 already demanded but could not apply — the seed mint failed
 	// (VW1) — is retried before anything else. (a) and (b) are conditions and
-	// would fire again by themselves; (c) is an event whose delete has already
-	// been consumed, so only this brings it back.
+	// would fire again by themselves; (c) and (d) are events whose delete or
+	// own-key commit has already been consumed, so only this brings them back.
 	if inc.pendingFence != "" {
 		v.fence(inc, inc.pendingFence)
 		return true
@@ -1110,9 +1110,10 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 	if err != nil {
 		// Nothing is torn down, and the fence is REMEMBERED. Re-testing the
 		// VW8 conditions would only bring (a) and (b) back: checkFence looks at
-		// lastOkPut and lastOwnEcho, never at "a peer deleted my key" — that
-		// one is an event, and the caller has already consumed it — so a (c)
-		// fence dropped here would be lost for good. Every following heartbeat
+		// lastOkPut and lastOwnEcho, never at "a peer deleted my key" or at
+		// the own-key commit — those are events the caller has already
+		// consumed — so a (c) or (d) fence dropped here would be lost for
+		// good. Every following heartbeat
 		// tick now retries it (checkFence).
 		inc.deferFence(reason)
 		slog.ErrorContext(inc.ctx, "worker fence deferred",

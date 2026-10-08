@@ -52,7 +52,7 @@ const (
 	volNextId    = uint64(1000)
 	volNextDevId = uint32(1)
 	// volSlot is the cntlid slot every fixture side holds, volSlotAlt the
-	// first different entry of cntlid_slot_list — which is what [D-I] makes
+	// first different entry of cntlid_slot_list — which is what GW18 makes
 	// a migration destination take.
 	volSlot    = uint32(3)
 	volSlotAlt = uint32(4)
@@ -91,8 +91,9 @@ const (
 
 	// The cluster's stored extent size and the SP's stored pool block size.
 	// Like volStripe below, neither is its default under architecture.md, Common
-	// validation (1 GiB and 1 MiB): a fixture that stored the constant could not
-	// tell a handler that READ it from one that SUBSTITUTED it, since the two
+	// validation (DefaultDnExtSize, DefaultDmPoolDataBlockSize): a fixture that
+	// stored the constant could not tell a handler that READ it from one that
+	// SUBSTITUTED it, since the two
 	// would produce the same number. volSlice's group geometry is architecture.md,
 	// Group on-leg layout: meta region, data region, health block, for these two
 	// values.
@@ -829,7 +830,7 @@ func TestCreateThinDeviceSnapshotGateConsumesNothing(t *testing.T) {
 
 // TestCreateThinDeviceSnapshotOfCreatedOrigin is the other half of the gate:
 // once the origin is created, the snapshot is written with ori_id = the
-// ORIGIN'S dev_id and, per [D-H], inherits the origin's size when the request
+// ORIGIN'S dev_id and, per GW17, inherits the origin's size when the request
 // carries none.
 func TestCreateThinDeviceSnapshotOfCreatedOrigin(t *testing.T) {
 	env := newVolEnv(t)
@@ -1184,12 +1185,10 @@ func TestDeleteThinDeviceHappyPath(t *testing.T) {
 //
 // The td ceiling is what makes this the case to pin. The third guard walks
 // td_name_list for uncreated snapshots of the target, and a deciding STM that
-// made that walk itself compared every td it read: 3 writes and 4 fixed reads,
-// the target among them, plus one per other td came to MaxTdCntPerSp + 6 =
-// 1030 compares here, past the 1024 etcd accepts. From 1019 tds up — fewer
-// once the pool has subsystems or clones — no td of the pool could be deleted
-// at all, whichever one was named, and nothing else shrinks td_name_list.
-// TestDeleteThinDeviceBudget pins the arithmetic of the STM that replaced it.
+// walked td_name_list itself would compare every td it read — MaxTdCntPerSp
+// plus a fixed handful, past EtcdMaxTxnOps — so no td of a full pool could be
+// deleted at all, whichever one was named, and nothing else shrinks
+// td_name_list. TestDeleteThinDeviceBudget pins the arithmetic.
 //
 // The tokens are counted rather than read back: each create must bump SpRev
 // exactly once for the next one's token to match, so the loop asserts that as
@@ -2553,7 +2552,7 @@ func volEmptyAndDelete(env *volEnv, nqn string) {
 	}
 }
 
-// TestDeleteTransferFinalizeSuspendsOrigin is [D-G] and the force flag of
+// TestDeleteTransferFinalizeSuspendsOrigin is GW16 and the force flag of
 // architecture.md, Transfers:
 // force == false FINALIZES a completed hand-over and therefore sets
 // suspended = true on the origin namespace in the SAME transaction that
@@ -2613,7 +2612,7 @@ func TestDeleteTransferFinalizeSuspendsOrigin(t *testing.T) {
 	}
 }
 
-// TestDeleteTransferFinalizeSkipsMissingOrigin is [D-G]'s second half: on the
+// TestDeleteTransferFinalizeSkipsMissingOrigin is GW16's second half: on the
 // finalize path a missing origin subsystem or ns_idx is SKIPPED and not an
 // error, because the transfer is being deleted either way and the RPC must not
 // become unable to complete because the namespace it points at was removed
@@ -2857,7 +2856,7 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 //
 // Nothing here reads the Clone record: it carries no chunk count
 // (architecture.md, Clones), and
-// an append does not rewrite it. The bytes are stored verbatim (GW14, [D-J]):
+// an append does not rewrite it. The bytes are stored verbatim (GW14):
 // the gateway never inspects or rewrites a bit.
 func TestAppendCloneBitmapPairAddressing(t *testing.T) {
 	env := newVolEnv(t)
@@ -3059,13 +3058,12 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 // namespaces are resumed — the clone record being the only thing that
 // remembers why they were suspended.
 //
-// One of those four moved when the sweep did, and the test is arranged around
-// it: the namespace resume rides the LATCH, in the same SpRev bump as the
-// exclusion (CLD4), while the keys go asynchronously. If the resume were
-// deferred to the final STM instead, CN16's auto_resume override would vanish
-// when the clone left the plan while etcd still said suspended, and the
-// destination namespace would go dark for the whole drain — a host-visible
-// outage the one-shot never had.
+// The test is arranged around the one of those four with its own timing: the
+// namespace resume rides the LATCH, in the same SpRev bump as the exclusion
+// (CLD4), while the keys go asynchronously. Deferred to the final STM
+// instead, CN16's auto_resume override would vanish when the clone left the
+// plan while etcd still said suspended, and the destination namespace would
+// go dark for the whole drain.
 //
 // The chunks are written on TWO different source slices, so a drain that
 // walked bm_idx alone would leave one slice's chunks behind, and sparsely, so
@@ -3259,7 +3257,7 @@ func volCreateMigration(env *volEnv, name string) *pb.CreateMigrationReply {
 // TestCreateMigrationChargesDestination pins the whole allocation of
 // architecture.md, Migrations: the leg gains a SECOND side, written
 // provisioned = false ([D15]) on a DN no leg of the group already uses, holding
-// the first cntlid slot that differs from the source's ([D-I]; architecture.md,
+// the first cntlid slot that differs from the source's (GW18; architecture.md,
 // cntlid slots), and the DN's ledger entry moves by exactly the group's ext_cnt
 // — record, capacity key and revision bump included (architecture.md,
 // Revision keys and the sync fan-out, and Capacity index keys). Nothing else in
@@ -4055,7 +4053,7 @@ func TestCreateMigrationRefusals(t *testing.T) {
 // architecture.md, Migrations: a chunk
 // lands at bm_idx = the CURRENT bm_cnt and the count then advances, so a
 // written chunk is immutable and the index is a consequence of how many chunks
-// exist rather than a request field. The bytes are verbatim (GW14, [D-J]).
+// exist rather than a request field. The bytes are verbatim (GW14).
 func TestAppendMigrationBitmapIsAppendOnly(t *testing.T) {
 	env := newVolEnv(t)
 	created := volCreateMigration(env, "migr-a")
@@ -5059,7 +5057,7 @@ func TestVolumeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 // the message and not only the code has to be compared, since its precondition
 // speaks ABORTED too.
 //
-// Each case gets a FRESH environment, which is the price of the new rule: these
+// Each case gets a FRESH environment, which is the price of a bypass: these
 // calls MUTATE. Sharing one fixture the way the refusal test above does would
 // let CreateThinDevice's write decide what DeleteThinDevice sees and let
 // DeleteClone's success turn the next case's lookup into a NOT_FOUND.

@@ -689,16 +689,12 @@ func TestGroupBlocks(t *testing.T) {
 	}
 }
 
-// TestGroupBlocksRefusesAZero is the mirror image of the case this test made
-// until the defaults moved: the three numbers the group geometry
+// TestGroupBlocksRefusesAZero pins that the three numbers the group geometry
 // (architecture.md, Group on-leg layout: meta region, data region, health
-// block) needs used to be resolved here, so a caller that passed zeros got
-// exactly the geometry of
-// one that passed the constants. They are stored values now, concrete since
-// the create RPC wrote them (architecture.md, Common validation), and a zero
-// is corruption or foreign data —
-// GroupBlocks refuses it by name instead of guessing a geometry a pool may not
-// have been formatted with.
+// block) needs are stored values, concrete since the create RPC wrote them
+// (architecture.md, Common validation), and that a zero is corruption or
+// foreign data — GroupBlocks refuses it by name instead of guessing a geometry
+// a pool may not have been formatted with.
 func TestGroupBlocksRefusesAZero(t *testing.T) {
 	noBlockSize := testRaid1BdevConf(opsBlockSize, 128)
 	noBlockSize.DmPoolConf.DataBlockSize = 0
@@ -739,7 +735,7 @@ func TestGroupBlocksRefusesAZero(t *testing.T) {
 	}
 }
 
-// TestPoolBlockSize pins the plain accessor it became (architecture.md, Common
+// TestPoolBlockSize pins the plain accessor (architecture.md, Common
 // validation): it reports the
 // stored value and substitutes nothing, so a conf that somehow carries a zero
 // reports zero and its caller's ValidateBdevConf gate is what refuses it — a
@@ -785,7 +781,7 @@ func TestMetaLadderExtCnt(t *testing.T) {
 	if _, ok := MetaLadderExtCnt(1, common.MaxDnExtSize); ok {
 		t.Errorf("1 TiB extents must cap immediately")
 	}
-	// A zero extent size is no longer defaulted (architecture.md, Common
+	// A zero extent size is not defaulted (architecture.md, Common
 	// validation): it is a divide by zero,
 	// so the last-resort guard reports false rather than panicking. Callers
 	// validate the ClusterConf first, which is what keeps this arm
@@ -1928,9 +1924,8 @@ func TestGrowSliceData(t *testing.T) {
 
 // TestGrowSliceRefusesASecondGrowForOneBreach is AR2's "two owners overlapping
 // on one SP cannot apply an action twice — the second STM fails its
-// precondition", applied to GrowSlice, whose STM used to have no re-validating
-// precondition of its own (nor did CreateSpareLeg's, whose partial one
-// TestCreateSpareLegRefusesWhileASpareIsPending pins).
+// precondition", applied to GrowSlice's STM (CreateSpareLeg's is
+// TestCreateSpareLegRefusesWhileASpareIsPending's).
 //
 // Both owners evaluate the SAME pre-grow snapshot during an accepted
 // shard-handoff overlap (VW7): both find AR6's pending rule false, both
@@ -2327,10 +2322,10 @@ func TestGrowSlicePreconditions(t *testing.T) {
 // TestGrowSliceRefusesAnInvalidStoredConf pins the gate (architecture.md,
 // Common validation) at the top of the
 // GrowSlice STM. Both confs are validated before anything is computed from
-// them — the two zeros below are exactly the two the op used to substitute a
-// constant for — and the refusal is an ErrPrecondition, so the transaction
-// aborts without committing and every key the op would have written is left
-// as it was.
+// them — the two zeros below are the two members a reader must never
+// substitute a constant for — and the refusal is an ErrPrecondition, so the
+// transaction aborts without committing and every key the op would have
+// written is left as it was.
 func TestGrowSliceRefusesAnInvalidStoredConf(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

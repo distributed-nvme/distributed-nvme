@@ -405,11 +405,11 @@ func TestLoadSpEmptyBitmapIndex(t *testing.T) {
 	}
 }
 
-// TestLoadSpSkipsOldFormatCloneBmKeys is MD3's whole compatibility story under
-// test: a key of the superseded one-value-per-source-slice format sits under
-// the very prefix MD3 scans, and the load drops it rather than failing or
-// inventing an address for it. Nothing tolerates it, nothing deletes it.
-func TestLoadSpSkipsOldFormatCloneBmKeys(t *testing.T) {
+// TestLoadSpSkipsAStrayCloneBmKey pins MD3's skip: a key under the very prefix
+// MD3 scans that ParseCloneBmKey rejects — a six-field key, clone_name followed
+// by ONE index field (MD2) — is skipped, and the load neither fails nor invents
+// an address for it. Nothing tolerates it, nothing deletes it.
+func TestLoadSpSkipsAStrayCloneBmKey(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
 	cid := testCid(t)
@@ -425,7 +425,7 @@ func TestLoadSpSkipsOldFormatCloneBmKeys(t *testing.T) {
 		CloneBitmapKey(cid, fixtureSpId, "clone0", 3, 0),
 		&pb.CloneBitmap{Bitmap: []byte{0xff}},
 	)
-	// The superseded key: clone_name followed by ONE index field.
+	// The stray key: clone_name followed by ONE index field.
 	mustPut(
 		t, cli,
 		joinKey(

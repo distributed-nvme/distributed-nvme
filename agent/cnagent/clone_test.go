@@ -266,8 +266,8 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 	}
 }
 
-// TestCloneRecovery is the rebuild of architecture.md, Clone crash recovery:
-// the volatile metadata wrapper is
+// TestCloneRecovery is the rebuild of architecture.md, Clone crash recovery,
+// in the step order of cnagent.md CN18: the volatile metadata wrapper is
 // gone, so the destination thin bitmaps are read and applied before hydration
 // is ever enabled, with the ns-devs parked on dm-error throughout.
 func TestCloneRecovery(t *testing.T) {
@@ -317,7 +317,7 @@ func TestCloneRecovery(t *testing.T) {
 		"cmd dmsetup reload "+nsDevName(srv, testNs),
 	)
 	// Parking comes before the metadata snapshot is even taken
-	// (architecture.md, Clone crash recovery, step 1): nothing may serve the
+	// (the park of the recovery build, cnagent.md CN18): nothing may serve the
 	// td while the bitmaps are being applied.
 	park := node.indexOfCall("cmd dmsetup reload " + nsDevName(srv, testNs))
 	snap := node.indexOfCall(
@@ -470,8 +470,8 @@ func TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps(t *testing.T) {
 			assertNoCall(t, node,
 				"cmd blkdiscard --offset 0 --length 8388608 "+loop)
 			// The stale dm-clone goes before a fresh one is created over the
-			// same wrapper (architecture.md, Clone crash recovery, steps
-			// 1-2); one whose removal is refused is
+			// same wrapper (the recovery build of cnagent.md CN18, which keeps
+			// a matching wrapper); one whose removal is refused is
 			// kept, and the bitmaps above landed on it.
 			if tc.survives {
 				if !node.hasCall("cmd dmsetup remove " + clone) {
@@ -957,9 +957,10 @@ func wrapperTable(node *fakeNode, loop string, unitStart uint64) string {
 }
 
 // TestCloneMetaFirstFitAndRecycling pins the allocator: contiguous units,
-// first fit over the free runs, and a run freed by a retired clone handed out
-// again — hole-punched **before** anything is created, because a freed unit
-// still holds the previous clone's valid dm-clone superblock.
+// first fit over the free runs, and a run freed when a clone leaves the
+// request handed out again — hole-punched **before** anything is created,
+// because a freed unit still holds the previous clone's valid dm-clone
+// superblock.
 func TestCloneMetaFirstFitAndRecycling(t *testing.T) {
 	srv, node := newTestServer(t)
 	first := cloneOf()
@@ -1026,9 +1027,9 @@ func TestCloneMetaFirstFitAndRecycling(t *testing.T) {
 	assertNoCall(t, node, "cmd dmsetup create "+secondDm)
 }
 
-// TestCloneMetaArenaExhaustion is the old lvcreate-ENOSPC equivalent: with no
-// contiguous run left the clone's metadata and dm-clone rows go ERROR and
-// nothing is built, while the pass itself carries on (CN29).
+// TestCloneMetaArenaExhaustion: with no contiguous run left the clone's
+// metadata and dm-clone rows go ERROR and nothing is built, while the pass
+// itself carries on (CN29).
 func TestCloneMetaArenaExhaustion(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -1422,7 +1423,7 @@ func TestCloneMetaOrphanWrapperSwept(t *testing.T) {
 // agent case: the wrapper is still there but no longer backed by the currently
 // probed loop device. CN28 reports ERROR and the converge repairs it through
 // the rebuild of architecture.md, Clone crash recovery — removing the dm-clone
-// first, so the wrapper's own
+// first (cnagent.md CN18), so the wrapper's own
 // removal cannot fail EBUSY.
 func TestCloneMetaWrapperMismatchRebuilds(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1713,8 +1714,9 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 // (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a wrapper between the
 // `ls` and the `dmsetup table` of that name. Failing the whole CN-wide
 // enumeration on it flipped a healthy, serving clone of an unrelated cntlr to
-// RES_STATUS_ERROR, and ERROR — unlike PROVISIONING — feeds err_epoch and the
-// reactions of architecture.md, dn / cn roles and Automatic reactions ([D14]).
+// RES_STATUS_ERROR, and ERROR — unlike PROVISIONING — feeds err_epoch
+// (dnv-worker.md HL2) and the reactions of architecture.md, Automatic
+// reactions ([D14]).
 func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{

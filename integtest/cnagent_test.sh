@@ -52,7 +52,7 @@ DN_GRPC_PORT=29528
 CN_GRPC_PORT=29529
 TR_SVC_ID=4200
 CLUSTER=0x1
-EXTENT_SIZE=67108864 # 64 MiB — MinDnExtSize; the proto field is raw bytes
+EXTENT_SIZE=67108864 # common.MinDnExtSize; the proto field is raw bytes
 # GetDnSize reports the [D13] data area, not the raw device
 # (cnagent_integtest.md, Cases, the setup paragraph): 2 GiB
 # backing file, 2147483648 - 268435456 = 1879048192.
@@ -195,8 +195,8 @@ assert_parked() { # vm nsdev tderrdev label
 
 # assert_opens_eio is the observable the park exists for: a local block-device
 # walker that opens a parked ns-dev gets an IO error *within the timeout*
-# instead of wedging in uninterruptible D state, which is what the old held
-# suspension did to it ([D12]).
+# instead of wedging in uninterruptible D state, which is what a held
+# suspension does to it ([D12]).
 assert_opens_eio() { # vm nsdev label
 	local rc
 	rc=$(helper "$1" "open_rc $2")
@@ -250,8 +250,8 @@ assert_not_ok() {
 }
 
 # assert_provisioning_or_ok accepts the two statuses a DN side may legally hold
-# at provisioned = false (architecture.md, Side provisioning protocol, the
-# Converge matrix rows 2 and 3):
+# at provisioned = false (the converge matrix's zeroing and zeroed rows with a
+# record present, dnagent.md DN9):
 # PROVISIONING while the background zeroing goroutine still has extents to go,
 # and OK once every bit is set. Zeroing 64-128 MiB on a loop device is a
 # `fallocate`, so which of the two a phase-1 reply carries is a genuine race —
@@ -295,7 +295,7 @@ assert_provisioning() { # json path label
 }
 
 # assert_suppressed reads a resource CN19 gated off: not OK, with "sp_level" as
-# the reason. The details check is what keeps it exact now that
+# the reason. The details check is what keeps it exact, because
 # RES_STATUS_PROVISIONING also satisfies "not OK" — a deferred resource reports
 # "provisioning", never "sp_level" (CN19; cnagent_integtest.md, Conventions,
 # Negatives are exact).
@@ -334,10 +334,9 @@ assert_thin_ok() { # json td slice label
 }
 
 # assert_cn_info_ok covers the four base-state resources of CnInfo
-# (architecture.md, Controller node, common). The
-# fifth — the old clone-VG row — went away with LVM: the clone-metadata arena
-# is now the loop device itself (loop_dev_info) plus the kind-cb wrapper dm
-# tables, and the proto field is `reserved 5` ([D14]).
+# (architecture.md, Controller node, common). The clone-metadata arena has
+# no row of its own: it is the loop device itself (loop_dev_info) plus the
+# kind-cb wrapper dm tables, and the proto keeps field 5 `reserved` ([D14]).
 assert_cn_info_ok() { # json label
 	local field
 	for field in port_info tmpfs_info tmp_file_info loop_dev_info; do
@@ -422,11 +421,12 @@ helper_ok() {
 # dnctl drives one dn agent, cnctl one cn agent. Every call carries the current
 # stage's trace id.
 #
-# The drivers' 10 s default suits the read-only RPCs, but one converge pass
-# runs dozens of OS commands, each with its own soft/hard budget: a cn primary
-# converge connects four legs, creates two md arrays, a pool, thin volumes, a
-# raid0 and the nvmet objects. Syncups therefore get a much larger budget; a
-# caller's own --timeout still wins, since it lands later on the command line.
+# The drivers' default --timeout suits the read-only RPCs, but one converge
+# pass runs dozens of OS commands, each with its own soft/hard budget: a cn
+# primary converge connects four legs, creates two md arrays, a pool, thin
+# volumes, a raid0 and the nvmet objects. Syncups therefore get a much larger
+# budget; a caller's own --timeout still wins, since it lands later on the
+# command line.
 dnctl() {
 	local idx=$1
 	shift
@@ -488,10 +488,9 @@ d16() { printf '%u' "$(($1))"; }
 
 # cn_dm_name mirrors every cn dm formatter: dnv-{cluster}-{cn}-{kind}-{ids…}
 # with the kind fields of architecture.md, dm device names — every cn kind is
-# the role letter `c` in front of
-# the old digit: c0 pool-meta, c1 pool-data, c2 pool-final, c3 thin, c4 raid0,
-# c5 error, c6 ns-dev, c7 clone-final, c8 xfer-final, c9 leg, ca group,
-# cb clone-meta.
+# the role letter `c` and one hex digit: c0 pool-meta, c1 pool-data,
+# c2 pool-final, c3 thin, c4 raid0, c5 error, c6 ns-dev, c7 clone-final,
+# c8 xfer-final, c9 leg, ca group, cb clone-meta.
 cn_dm_name() { # kind cnidx id…
 	local kind=$1 cn=$2 id
 	shift 2
@@ -514,9 +513,9 @@ xfer_nqn() { # cluster sp xfer
 
 # clone_meta_dm mirrors common.CnCloneMetaDmName (CN18): the
 # kind-cb dm-linear wrapper that carries one dm-clone's metadata, allocated out
-# of the loop-device arena. It replaced the clone VG's metadata LV, and with it
-# the doubled-dash `dnv--clone--vg-*` gotcha — a wrapper is created by the
-# agent with `dmsetup create` and carries single dashes.
+# of the loop-device arena. A wrapper is created by the agent with `dmsetup
+# create` and carries single dashes — none of the doubled-dash escaping of an
+# LVM node's `dnv--clone--vg-*` name.
 clone_meta_dm() { # cnidx sp clone
 	cn_dm_name cb "$1" "$2" "$3"
 }
@@ -602,8 +601,7 @@ leg_state() { # cnvm sp leg cn dnidx
 # leg_wait_ana waits for one leg's path on one CN to reach an ANA state. In a
 # failover it is the ordering barrier of cnagent_integtest.md, Conventions,
 # Sides first: a promote that converges before its legs have optimized paths
-# finds them unavailable (architecture.md,
-# "Make sure all groups are available") and fails the md
+# finds them unavailable (cnagent.md CN12) and fails the md
 # assembly of its own converge. The agent's CN10 retry
 # finishes that assembly once they are optimized (cnagent.md CN12), but case
 # A's promote stage asserts its md rows OK and both --assembles under the
@@ -1682,13 +1680,13 @@ mutations() {
 # devices, md arrays and nvmet subsystems. The teardown assertions require empty
 # output, so neither `dmsetup ls` nor the `ls` of the nvmet subsystems may
 # print nothing when it fails: each prints one line saying so instead, its
-# error text folded into it, and that line fails the assertion — before, the
-# failure printed nothing and read as a clean node nobody had listed. The dm
-# pattern's [cd][0-9a-f] kind field already covers the kind-cb clone-metadata
-# wrappers that replaced the clone VG's LVs ([D14]), so a leaked arena
-# allocation is caught here for free. An md array is named as well as its
-# members: md_names by the array's own name, md_member_names by its members'
-# dm names, which carry the sp id too — the one md route that still names an
+# error text folded into it, and that line fails the assertion — a failure
+# that printed nothing would read as a clean node nobody had listed. The dm
+# pattern's [cd][0-9a-f] kind field covers the kind-cb clone-metadata wrappers
+# ([D14]), so a leaked arena allocation is caught here for free. An md array
+# is named as well as its members: md_names by the array's own name,
+# md_member_names by its members' dm names, which carry the sp id too — the
+# one md route that still names an
 # `inactive` array whose members neither udev nor mdadm can read. The member
 # route adds no detection over the dm line above: while `dmsetup ls` answers,
 # every member it reports is an sp dm device that the listing already shows,
@@ -1805,9 +1803,9 @@ dnv_dm_cnt() {
 
 # dm_kind_names <kind> [node16] — the dm devices of one kind, optionally of one
 # node only. Both roles name their devices dnv-{cluster}-{node}-{kind}-…, and
-# the kind now carries the role letter (c0…cb, d0…d5), so it no longer overlaps
-# between the roles; the node id is kept because it still scopes a teardown
-# pass to one of the two agents sharing this VM.
+# the kind carries the role letter (c0…cb, d0…d5), so it never overlaps
+# between the roles; the node id scopes a teardown pass to one of the two
+# agents sharing this VM.
 dm_kind_names() {
 	agent_dm_names | awk -F- -v k="$1" -v n="${2:-}" \
 		'$4 == k && (n == "" || $3 == n)'
@@ -1822,7 +1820,7 @@ clone_meta_wrappers() { dm_kind_names cb "${1:-}"; }
 # clone_bm_files <cluster16> <cn16> <sp16> <clone16> — the basenames of one
 # clone's bitmap chunk files in the cn store, sorted. A clone chunk is
 # addressed by the PAIR (src_slice_idx, bm_idx), so LocalCloneBmPath ends in
-# TWO %02x segments (cnagent.md, Additions to `common`) where the single-index
+# TWO %02x segments (cnagent.md, Names and constants in `common`) where the single-index
 # format had one.
 # The name is only an address — the reconcile decodes the pair from the
 # persisted PushCloneBitmapRequest inside the file — which is exactly why it
@@ -1846,14 +1844,14 @@ clone_bm_files() {
 # SuspendSeconds), and an interrupted reload can leave anything so. On CN VMs
 # it is debris cleanup only: an effectively suspended namespace is *parked*,
 # live on the td's dm-error (CN16; architecture.md, Namespace suspend
-# semantics), so the only suspended CN device a run can meet is one an older
-# build, a killed agent or a failed dmsetup command left behind. Anything that
+# semantics), so the only suspended CN device a run can meet is one a killed
+# agent or a failed dmsetup command left behind. Anything that
 # reads a suspended device (`dmsetup remove`, disabling the nvmet namespace
 # above it, and above all a block-device scan) blocks in uninterruptible D
 # state and wedges the node until reboot. The pattern is deliberately looser
-# than agent_dm_names' so it also sweeps up debris an older pre-arena run left behind on
-# a shared lab VM — including LVM's own doubled-dash nodes (dnv--clone--vg-*),
-# which no current run can produce.
+# than agent_dm_names' so it also sweeps up any `dnv`-named debris on a shared
+# lab VM — LVM's doubled-dash nodes (dnv--clone--vg-*) included, which no
+# agent produces.
 resume_suspended() {
 	local row name
 	# `:..s`, not `:.-s` — see suspended_agent_dms: `.-` would skip `LIsw`, the
@@ -1973,10 +1971,10 @@ md_stop_all() {
 
 # md_names prints the MD_NAME of every assembled dnv array, one per line, by
 # md_stop_all's route and for md_stop_all's reason: `mdadm --detail --scan`
-# prints no `name=` field on these guests, so the `grep -oE "name=…dnv-…"` that
-# `residue` used matched NOTHING and the teardown's md assertion passed
-# vacuously. Empty output is still the pass; the difference is that it is now
-# empty because there is no array, not because the field was never there.
+# prints no `name=` field on these guests, so a `grep -oE "name=…dnv-…"`
+# over it would match NOTHING and the teardown's md assertion would pass
+# vacuously. Empty output is the pass, and this route makes it empty because
+# there is no array, not because the field is never there.
 md_names() {
 	local d name
 	for d in $(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null); do
@@ -2039,8 +2037,8 @@ loop_devs() {
 # dm-clone is removed while its :4: source connection is still up — a clone
 # flushes through its source on removal and blocks without it.
 #
-# Kind cb (the clone-metadata wrappers that replaced the clone VG) joins the dm
-# passes rather than getting a teardown of its own.
+# Kind cb (the clone-metadata wrappers) joins the dm passes rather than
+# getting a teardown of its own.
 # It must come after kind c7: the dm-clone holds its wrapper open, and a
 # wrapper left behind holds the loop device open, wedging tmpfs_teardown's
 # `losetup -d` with EBUSY.
@@ -2168,12 +2166,12 @@ cleanup_phase2() { # <cn16> <dn16>
 # NOT part of a run: only the driver's --wipe reaches it.
 #
 # Why it exists at all: every teardown verb above removes dm devices BY KIND,
-# and the kind literals they pass are the new, role-lettered ones (c0…cb,
-# d0…d5). Residue an older binary left on a shared lab VM carries the old
-# single-digit spelling (0…b), so those verbs walk straight past it and it
-# stays there forever, pinning loop devices and nvmet objects the next run
-# needs. This one reads no kind at all — everything named `dnv*` goes, both
-# spellings and the pre-arena `dnv--clone--vg-*` LVM debris with it.
+# and the kind literals they pass are the role-lettered ones (c0…cb, d0…d5).
+# Residue on a shared lab VM whose name carries no such kind — a bare-digit
+# kind field, or an LVM `dnv--clone--vg-*` node — is walked straight past by
+# those verbs and stays there forever, pinning loop devices and nvmet objects
+# the next run needs. This one reads no kind at all — everything named `dnv*`
+# goes, whatever its spelling.
 #
 # That is also why it is not wired into cleanup: on a shared VM it would
 # destroy a CONCURRENT run's objects, and `nvme disconnect-all` takes every
@@ -2280,11 +2278,11 @@ lab_wipe() {
 		resume_suspended
 	done
 
-	# The residue is the report AND the exit status. It used to be the report
-	# alone, on the reasoning that this verb is best-effort like every other
-	# one here — but the driver runs both VMs concurrently and discards their
-	# status, so a wipe that left one VM full of debris printed the other
-	# VM's clean report and the run said PASS. A cleanup that cannot fail is
+	# The residue is the report AND the exit status, although this verb is
+	# best-effort like every other one here: the driver runs both VMs
+	# concurrently and their output interleaves, so a wipe that only printed
+	# its report could leave one VM full of debris behind the other VM's
+	# clean report, and the run would say PASS. A cleanup that cannot fail is
 	# a cleanup nobody can trust, which is the same rule the sweep this suite
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
@@ -2804,10 +2802,10 @@ dn_drop_until_clean() { # dnidx secs
 		code=$(jq_of "$out" '.agent_reply.code // 0')
 		details=$(jq_of "$out" '.agent_reply.details // ""')
 		# The FIRST reply is the evidence this helper exists to produce: a
-		# sweep that REPORTED its leftover is a different animal from the old
-		# teardown, which dropped the failure, deleted the object's state file
-		# anyway and replied OK. Only this reply tells the two apart, and it
-		# is gone by the time the loop ends.
+		# sweep that REPORTS its leftover is told apart from a teardown that
+		# drops the failure, deletes the object's state file anyway and
+		# replies OK only by this reply, and it is gone by the time the loop
+		# ends.
 		if [ "$first" -eq 1 ]; then
 			log "[$STAGE] dn$idx first drop reply: code $code, details '$details'"
 			first=0
@@ -3068,7 +3066,7 @@ case_smoke() {
 	out=$(cnctl "$cn" get-cntlr-info --sp "$sp" --cntlr "$cntlr")
 	got=$(jq_of "$out" \
 		".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$S_SLICE")\"].details // \"\"")
-	# The thin-pool auto-grow (architecture.md, Automatic reactions) parses
+	# The thin-pool auto-grow (dnv-worker.md AR6) parses
 	# metadata and data used/total out of this raw
 	# `dmsetup status` line.
 	printf '%s\n' "$got" |
@@ -3165,9 +3163,8 @@ case_redund() {
 
 	stage assert "primary md state, standby shape, host isolation"
 	# CN12 case 1: neither member carries an md superblock — which after the
-	# whole-side zeroing (architecture.md, Side provisioning protocol) is
-	# exactly the freshly-provisioned case
-	# ([D15] replaced the old trim) — so the arrays are created,
+	# whole-side zeroing (architecture.md, Side provisioning protocol; [D15])
+	# is exactly the freshly-provisioned case — so the arrays are created,
 	# never assembled.
 	seq=$(helper 1 "cn_events $cntrace")
 	assert_eq "$(event_cnt "$seq" '^mdadm --create .*--run .*--assume-clean')" 2 \
@@ -3283,12 +3280,12 @@ case_redund() {
 	# CN28: the md row is read from /sys/block/mdN/md,
 	# never from `mdadm --detail`, which loads the superblock from a member
 	# device and, when that member's DN side has gone, blocks until the
-	# path's failfast expires — ~13 s after the side died, past the 3 s soft
-	# timeout. If the kill turned the md row ERROR, the row would count toward
-	# cntlr health and fail the primary over. The partition (case T's, on vm1's
-	# INPUT from vm2 to the nvme-tcp port) takes CN2's two legs into DN1
-	# away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
-	# disk 0 of their arrays, the member the old `--detail` loaded its
+	# path's failfast expires — ~13 s after the side died, well past
+	# CmdSoftTimeout. If the kill turned the md row ERROR, the row would count
+	# toward cntlr health and fail the primary over. The partition (case T's,
+	# on vm1's INPUT from vm2 to the nvme-tcp port) takes CN2's two legs into
+	# DN1 away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
+	# disk 0 of their arrays, the member `mdadm --detail` would load its
 	# superblock from. It also cuts the emulated host's path to CN1, the
 	# standby's, inaccessible since the failover; it reconnects once the
 	# rule goes, and the lateflip stage waits for it to be live before it
@@ -3325,8 +3322,8 @@ case_redund() {
 			"member is partitioned away"
 	# The rounds begin once that path has left `live` (its State, for
 	# leg_wait_not_live's reason), which is when the controller's error
-	# recovery fails the write above: from there on a plain member read, the
-	# old `mdadm --detail` probe's, sits at the multipath head until the
+	# recovery fails the write above: from there on a plain member read — an
+	# `mdadm --detail` probe's — sits at the multipath head until the
 	# failfast interval expires, so these rounds are the ones it would fail.
 	leg_wait_not_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
 	mkey=$(d16 "$A_MGRP")
@@ -3564,19 +3561,19 @@ case_redund() {
 # Case T — teardown (cnagent_integtest.md, Cases, teardown)
 # ---------------------------------------------------------------------------
 #
-# The bug this case exists for (cnagent_integtest.md, Cases, teardown):
-# `dnvctl sp delete` drains an sp by
-# deleting the cntlr records and, 12 ms later, the slice records, and by design
-# never waits on an agent. So a CN is told to tear its stack down while the DN
-# sides under it are already vanishing. In that window `mdadm --detail` blocked
-# on a member read that sat in the multipath head's requeue list, was killed at
-# the 3 s soft timeout, and the old `Md.Detail` read the kill as "the array is
-# absent" — so no `mdadm --stop` was issued, the un-stopped array pinned its two
-# leg wrappers, both `dmsetup remove`s failed EBUSY, the failures were
-# discarded, the cntlr's state file and memory entry were deleted anyway and
-# the reply was OK. Nothing ever looked at those two wrappers again.
+# The hazard this case exists for (cnagent_integtest.md, Cases, teardown):
+# `dnvctl sp delete` drains an sp by deleting the cntlr records and then the
+# slice records, and by design never waits on an agent. So a CN is told to
+# tear its stack down while the DN sides under it are already vanishing. In
+# that window an `mdadm --detail` blocks on a member read that sits in the
+# multipath head's requeue list, and the soft timeout kills the command. A
+# teardown that read the kill as "the array is absent" would issue no
+# `mdadm --stop`; the un-stopped array would pin its two leg wrappers, both
+# `dmsetup remove`s would fail EBUSY, and a teardown that discarded the
+# failures, deleted the cntlr's state file and memory entry anyway and
+# replied OK would never look at those two wrappers again.
 #
-# What replaced it (architecture.md, Teardown by sweep; cnagent.md CN21, CN30):
+# The rule (architecture.md, Teardown by sweep; cnagent.md CN21, CN30):
 # removal is a SWEEP. Whatever the node
 # actually holds, minus what the desired state wants, is removed top-down;
 # every removal is verified by a probe that cannot block on a dead remote; and
@@ -3708,11 +3705,10 @@ teardown_assert_clean() { # sp label
 # tear down while they are still vanishing, with nothing in between. The host
 # is disconnected first so that no host IO is in flight — that is what makes
 # the first command to touch a dead leg the array's own member read rather than
-# a flush, and it is why this stage is the teardown-by-sweep plan's one-time
-# mutation check (cnagent_integtest.md, Cases, teardown): on the pre-fix binary
-# it is expected to fail at its residue
-# assertion, with the two kind-c9 wrappers of a group pinned by an array that
-# was never stopped.
+# a flush, and it is why this stage is the teardown-by-sweep plan's mutation
+# check (cnagent_integtest.md, Cases, teardown): a teardown that is not a
+# sweep fails at its residue assertion, with the two kind-c9 wrappers of a
+# group pinned by an array that is never stopped.
 s1_sides_gone() {
 	local sp=${T_SP[1]} uuid=${T_UUID[1]} hv=2
 	local nqn="$NQN_IT_PREFIX:t:s1"
@@ -3893,9 +3889,9 @@ s3_io_in_flight() {
 	# first, the teardown unlinks the subsystem from the port with the write
 	# still in flight, the host loses its path, and it queues the write: a
 	# multipath head keeps IO while any controller of it is still reconnecting,
-	# and host_connect leaves their loss timeout at the default 600 s. A lab run
-	# met the second, and the earlier form of this check, one `eio` within 20 s,
-	# failed on it.
+	# and host_connect leaves their loss timeout at the default 600 s. So
+	# writer_in_flight accepts either outcome; only neither showing, or a
+	# write that succeeded, fails the stage.
 	rc=0
 	got=$(helper "$hv" "writer_in_flight '$dev' $((ok + 1)) $eio 5 20") ||
 		rc=$?
@@ -4280,8 +4276,8 @@ case_thinbm() {
 	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
 
 	stage teardown "empty cntlr list, then empty side list"
-	# The two host_disconnects the rebuild stage moved up are harmless
-	# repeats if the host reconnected; nothing here depends on them.
+	# No host_disconnect here: the host left both subsystems at the drop
+	# stage, and nothing in this stage depends on it.
 	cn_drop "$cn"
 	dn_drop "$dn"
 	assert_no_residue "$sp"
@@ -4446,12 +4442,12 @@ case_clone_xfer() {
 		--bitmap-hex 00000000ffffffff >/dev/null
 	# A second chunk of the SAME source slice at a non-zero bm_idx. It is the
 	# suite's proof that bm_idx addresses a chunk within one slice's bitmap
-	# and no longer names the slice itself: src_slice_cnt is 1 here, so the
-	# single-index gate would have refused this push as an unknown source
+	# and not the slice itself: src_slice_cnt is 1 here, so a gate that read
+	# bm_idx as a slice index would refuse this push as an unknown source
 	# slice (code 2, a hard failure of the call below). Chunk (0, 1) covers
 	# bits 8*CloneBmChunkBytes upward — far past this clone's 64 regions — so
 	# it is stored, reported and reloaded, and changes no blkdiscard anywhere
-	# in the case; the stage 4 arithmetic below stays exactly as it was.
+	# in the case; the stage 4 arithmetic below is unaffected by it.
 	cnctl 2 push-clone-bm --sp "$sp2" --cntlr "$cntlr" \
 		--clone "$C_CLONE" --src-slice-idx 0 --bm-idx 1 \
 		--bitmap-hex ff >/dev/null
@@ -4619,9 +4615,9 @@ case_clone_xfer() {
 	# Clone crash recovery), while the
 	# re-created pool's CN14 activation sweep dumps the same metadata through
 	# the same reserve → thin_dump → release helper before any clone does. A
-	# startup reconcile arms that sweep and skips it, so today the fresh log
-	# holds one triplet; a first-match anchor would take the sweep's the day
-	# it held two, and pass with no destination read at all.
+	# startup reconcile arms that sweep and skips it, so the fresh log holds
+	# one triplet; a first-match anchor would take the sweep's if it ever
+	# held two, and pass with no destination read at all.
 	dump=$(event_last "$seq" '^thin_dump ')
 	[ -n "$dump" ] || die "clone_xfer recovery: no thin_dump in the fresh log"
 	at=$(event_line "$seq" "^dmsetup create $clonedm( |\$)")
@@ -4707,9 +4703,9 @@ case_clone_xfer() {
 	rev1=${CNREV[1]}
 	out=$(cn_syncup_cntlr 1 "$req1")
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer source retired"
-	# "Retired" is now a parked device, not a suspended one: the transfer is
-	# gone and the stored `suspended` flag carries the state on (architecture.md,
-	# Namespace suspend semantics).
+	# A retired source is a parked device, not a suspended one: the
+	# transfer is gone and the stored `suspended` flag carries the state on
+	# (architecture.md, Namespace suspend semantics).
 	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the retired source"
 	assert_opens_eio 1 "$nsdev1" "clone_xfer: the retired source"
 	req_set "$req2" ".clone_list = []
@@ -4947,7 +4943,7 @@ case_restart() {
 	done
 	# An active array is recognized, not re-assembled. It is read from
 	# /sys/block (CN12), so a `--detail` here is as wrong as a
-	# mutation and is no longer excluded.
+	# mutation and is not excluded.
 	for idx in 1 2; do
 		got=$(helper "$idx" cn_events | grep -E '^mdadm ' |
 			grep -Ev -- '--examine' || true)
@@ -5006,9 +5002,8 @@ usage: bash integtest/cnagent_test.sh [--only <case>] [--cleanup-only] \\
 cases: ${CASES[*]}
 
 --wipe is the ONE-TIME lab wipe: it removes EVERY dnv object on both VMs,
-including residue an older binary left under the pre-role-letter dm kind
-spelling, then runs the ordinary cleanup. It runs no case. Never run it
-while another suite is using these VMs.
+whatever dm kind spelling its name carries, then runs the ordinary cleanup.
+It runs no case. Never run it while another suite is using these VMs.
 EOF
 	exit 2
 }

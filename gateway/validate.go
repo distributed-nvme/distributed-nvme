@@ -107,9 +107,8 @@ func validateNqn(field string, value string) error {
 // allowed_hosts holds CnHostNqns), a clone's src_nqn (another SP's XferNqn)
 // and the nqn of UpdateSubsystemHosts, CreateNamespace, UpdateNamespaceDev
 // and UpdateNamespaceSuspended keep plain validateNqn, so a subsystem stored
-// in the dnv namespace before this rule can still be updated if its NQN
-// passes validateNqn; DeleteNamespace and DeleteSubsystem take
-// validateExistingNqn.
+// in the dnv namespace can still be updated when its NQN passes
+// validateNqn; DeleteNamespace and DeleteSubsystem take validateExistingNqn.
 func validateHostFacingNqn(field string, value string) error {
 	if err := validateNqn(field, value); err != nil {
 		return err
@@ -124,11 +123,9 @@ func validateHostFacingNqn(field string, value string) error {
 // validateExistingNqn is the length check of architecture.md, Common
 // validation, alone, for the nqn of the two RPCs that empty and delete a
 // subsystem: DeleteNamespace and DeleteSubsystem. A subsystem stored under an
-// NQN that architecture.md, Common validation, came to refuse later — the
-// pattern was tightened, and the ".." and dnv-namespace refusals were added —
-// can still be emptied and deleted, and its SP after it. Nothing more is
-// needed here: the nqn only ever names an exact subsystem key, and a string no
-// subsystem is stored under is NOT_FOUND there.
+// NQN those rules refuse can still be emptied and deleted, and its SP after
+// it. Nothing more is needed here: the nqn only ever names an exact subsystem
+// key, and a string no subsystem is stored under is NOT_FOUND there.
 func validateExistingNqn(field string, value string) error {
 	if value == "" {
 		return errInvalid("%s must not be empty", field)
@@ -309,8 +306,8 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 
 // validateBdevConf checks the bounds of a BdevConf (architecture.md, Common
 // validation), its four geometry
-// rules, and the two structural rules: bdev_feature_list MUST be empty in this
-// version, and RedundConf accepts only redund_none and redund_md_raid1 (the
+// rules, and the two structural rules: bdev_feature_list must be empty, and
+// RedundConf accepts only redund_none and redund_md_raid1 (the
 // proto oneof has no third case, so an unset oneof is the only other shape and
 // means redund_none).
 //
@@ -430,7 +427,7 @@ const maxMdBitmapChunk = uint64(1) << 30
 // validateEventThreshold checks the four thresholds and their one cross-field
 // rule (architecture.md, Common validation): leg_unhealthy MUST exceed
 // side_unhealthy AFTER the defaults are resolved, because the leg repair of
-// architecture.md, Automatic reactions, fires on the side threshold when the
+// dnv-worker.md AR8 fires on the side threshold when the
 // DN looks dead and on the leg threshold when only the cntlr's path is bad.
 func validateEventThreshold(threshold *pb.EventThreshold) error {
 	resolved := model.ResolveEventThreshold(threshold)
@@ -477,8 +474,9 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 
 // validateCntlidSlotList checks a cntlid_slot_list (architecture.md, Storage
 // pools; architecture.md, cntlid slots): every
-// value below CnCntlidSlotCnt (8) and no duplicates. An empty list is legal
-// here and defaults to [0..7] at CreateStoragePool; UpdateStoragePoolCntlidSlotList
+// value below CnCntlidSlotCnt and no duplicates. An empty list is legal
+// here and defaults to every slot below CnCntlidSlotCnt at
+// CreateStoragePool; UpdateStoragePoolCntlidSlotList
 // refuses one, because an SP with no slots can produce no side.
 func validateCntlidSlotList(slots []uint32, allowEmpty bool) error {
 	if len(slots) == 0 {

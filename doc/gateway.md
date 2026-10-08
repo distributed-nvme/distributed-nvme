@@ -3,7 +3,8 @@
 This document owns the `dnv-gateway` binary: package `gateway`, the
 stateless server of the `Gateway` gRPC service, with its serving and
 lifecycle (GW1 to GW3), the handler pattern every RPC follows (GW4 to GW12
-and GW14), the mechanism of each handler by resource group, the agent calls
+and GW14), the mechanism of each handler by resource group (GW15 to GW18
+among them), the agent calls
 (AG1 to AG4), the `cmd/dnv-gateway` command (CM1 to CM3), its log records
 (LG1 to LG3) and the intent of the gateway integration suite. It owns how the
 gateway carries out an RPC — files, helpers, STM shapes, error mapping and
@@ -35,20 +36,18 @@ The STM bodies of the public RPCs live in the per-resource files of
 `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — are reused, never
 duplicated (`dnv-worker.md` MD8).
 
-Files, as a guide to the package; an implementation may split differently
-but keeps the package boundaries (`layout.md`, Directory tree) and the
-dependency rule:
-
-| file | holds |
-|---|---|
-| `gateway/server.go` | `Server`, `Run`, the gRPC server and its interceptor chains (GW1 to GW3) |
-| `gateway/traceid.go` | the gateway's entry-point trace-id mint, `ensureTraceIdUnary` and `ensureTraceIdStream`, chained ahead of the shared pair of server interceptors (GW2) |
-| `gateway/common.go` | resolution, the token check, error mapping, the candidate unit, id minting, paging and the agent connection (GW5 to GW7, GW9, GW10, GW12, AG2); and the `CdcEntry` maintenance the cntlr mutators and `UpdateSubsystemHosts` share (`eachCdcEntry`, `rebuildCdcEntry`) |
-| `cluster.go`, `disknode.go`, `controllernode.go`, `storagepool.go`, `cntlr.go`, `thindevice.go`, `subsystem.go`, `clone.go`, `transfer.go`, `migration.go`, `spareleg.go`, `bitmap.go` | the handlers, one file per resource group of Handlers by resource group: `storagepool.go` holds `GrowSlice` too, `cntlr.go` holds `InspectCntlr` and `InspectSide`, and `subsystem.go` holds the subsystems, the namespaces and the subsystem RPCs' own `CdcEntry` writes, while the cntlr mutators rewrite the entries through `gateway/common.go` |
-| `gateway/alloc.go` | the per-operation candidate compositions of `architecture.md`, Per-operation allocation, and the DN and CN ledgers |
-| `gateway/validate.go` | the request validation of `architecture.md`, Common validation (GW4) |
-| `cmd/dnv-gateway/main.go` | the command (CM1 to CM3) |
-| `integtest/gatewayctl/` and `integtest/gateway_test.sh` | the integration suite's driver and script (Integration test plan) |
+The package's files follow `layout.md`, Directory tree: serving and the
+trace-id mint (GW1 to GW3); the shared handler helpers — resolution, the
+token check, error mapping, the candidate unit, id minting, paging and the
+agent connection (GW5 to GW7, GW9, GW10, GW12, AG2), with the `CdcEntry`
+maintenance the cntlr mutators and `UpdateSubsystemHosts` share
+(`eachCdcEntry`, `rebuildCdcEntry`); the handlers, one file per resource
+group of Handlers by resource group; the per-operation candidate
+compositions of `architecture.md`, Per-operation allocation, with the DN
+and CN ledgers; and the request validation (GW4). `cmd/dnv-gateway` is the
+command (CM1 to CM3); `integtest/gatewayctl/` and
+`integtest/gateway_test.sh` are the suite's driver and script (Integration
+test plan).
 
 Dependency rule (`layout.md`, Dependency rules): `gateway` imports only
 `common`, `pb`, `etcdutil` and `model` plus the gRPC runtime — it is a gRPC
@@ -72,7 +71,7 @@ bump helpers and the expected revision of the three shared mutations (GW6),
 the list-range prefixes (GW10), and the conf resolvers and stored-conf
 validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to MD9).
 
-### Additions to `common/constants.go`
+### Constants this document owns
 
 Three constants are this document's, and `common/constants.go` is
 authoritative for their comments.
@@ -84,17 +83,12 @@ gateway's agent RPCs — `GetDnSize` and `GetCnSize`, the `Get*Info` behind
 around each dial and call (AG2). It equals `DefaultEtcdOpTimeout`, so a hung
 agent and a hung etcd bound an RPC alike.
 
-`CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk, and the
-quantum that positions it: chunk (s, b) holds the bytes of source slice s's
-bitmap from b times `CloneBmChunkBytes` on, at most `CloneBmChunkBytes` of
-them (Clones). Its size keeps a grown chunk value plus the rev-bump put of
-one `AppendCloneBitmap` inside etcd's default request cap,
-and every `PushCloneBitmap` message inside gRPC's default message cap. It is
-a clone positioning quantum only — migration appends carry no byte cap.
-`MaxCloneBmCnt` counts the chunks ONE source slice's bitmap may be split
-into (a `bm_idx` is below it, Clones) and is NOT a bound on the source slice
-count — that is `MaxSliceCntPerSp`, which `CreateClone`'s geometry check
-already enforces.
+`CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk and the
+quantum that positions it; the chunk rule it sizes is `architecture.md`,
+Bitmap push protocol. Its size keeps a grown chunk value plus the rev-bump
+put of one `AppendCloneBitmap` inside etcd's default request cap, and every
+`PushCloneBitmap` message inside gRPC's default message cap. It is a clone
+positioning quantum only — migration appends carry no byte cap.
 
 `EtcdMaxTxnOps` is a deployment requirement, not a client setting: every
 etcd serving dnv runs with `--max-txn-ops` at this value or higher, well
@@ -124,10 +118,11 @@ No other constant is this document's. `MaxAllocLegPerGrp` and
 appear here through the transaction budget above, and `MaxAllocLegPerGrp`
 also as the md-raid1 leg count of `legCntOf`; `DefaultSliceCntPerSp`,
 the count substituted for a zero `slice_cnt`, is carried by
-`architecture.md`, Storage pools, and only restated under Storage pools and
-GrowSlice; `DefaultClusterName`, `ShardBucketSize`, the `Max*CntPerCluster`
-ceilings, `MaxCloneBmCnt`, `MaxMigrBmCnt` and the bounds of
-`architecture.md`, Common validation, are `architecture.md`'s.
+`architecture.md`, Storage pools (Storage pools and GrowSlice only names
+where the handler substitutes it); `DefaultClusterName`,
+`ShardBucketSize`, the `Max*CntPerCluster` ceilings, `MaxCloneBmCnt`,
+`MaxMigrBmCnt` and the bounds of `architecture.md`, Common validation, are
+`architecture.md`'s.
 
 ## Serving and lifecycle
 
@@ -145,7 +140,7 @@ the same case by construction.
 
 GW2. **Serving.** `gateway.Run` takes the etcd client and a `gateway.Config`
 holding the gRPC network, the gRPC address and the etcd endpoints. `Run`
-emits `gateway starting` (with the config) as its first record and
+emits `gateway starting` as its first record and
 `gateway stopping` on the way out, closes the client as the last step of its
 drain (so `main` does not, CM3), and serves exactly as `Serve` in
 `agent/agent.go` does: it listens on the configured network and address;
@@ -154,8 +149,8 @@ entry-point trace-id mint, `ensureTraceIdUnary` and `ensureTraceIdStream`,
 FIRST and the shared pair, `common.GrpcUnaryServerInterceptor` and
 `common.GrpcStreamServerInterceptor`, behind it; registers the `Gateway`
 service; starts a goroutine that turns the end of the ctx into
-`GracefulStop`; emits an Info `gateway serving` record with `network` and
-`address`; then serves. The gateway mints a trace id for a request that
+`GracefulStop`; emits `gateway serving`; then serves. The gateway mints a
+trace id for a request that
 arrived without one (it is one of the entry points of `grpc.md` T4): when
 the incoming metadata carries no `trace_id`, the mint injects a fresh
 `common.NewTraceId` into the incoming metadata, upstream of the shared
@@ -199,56 +194,54 @@ merge breaks a rule is `INVALID_ARGUMENT` even on a cluster whose scans would
 come up short (`RESOURCE_EXHAUSTED`).
 
 GW5. **Resolution in-STM.** Resolution is the in-STM reads that turn
-`cluster_name`, and `sp_name`, into the cluster id and the `SpConf`
-(`architecture.md`, STM discipline); GW11's resolution of conf defaults is a
-different operation, and the text says which it means. Except
-`CreateCluster` and `ListClusters`, the STM's first read is
-`model.ClusterConfKey` of the `cluster_name` (defaulted to
-`common.DefaultClusterName`) — absent is `NOT_FOUND` — and the cluster id,
-`model.ClusterId` of the name and the stored creation epoch, prefixes every
-further key. `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` make that
-read in their planning `Snapshot` only (Storage pools and GrowSlice, Spare
-legs): their later transactions — the deciding STM, which is the `model` op
-the sp worker shares, and `GrowSlice`'s CN-budget pre-check — take the
-cluster id, and the `ClusterConf` where they use it, from that snapshot and
-never read `ClusterConf` themselves. SP-scoped RPCs then read
-`model.SpConfKey` of the cluster id and the `sp_name` — absent is
-`NOT_FOUND`; mutators (except `DeleteStoragePool`) fail
-`FAILED_PRECONDITION` when `SpConf.deleting` is set. `DeleteStoragePool` is
-what SETS that flag (Storage pools and GrowSlice), so the gate is live from
-the moment it commits until the drain removes the key. The **paged**
-`List*` RPCs (clusters, disk nodes, controller nodes, storage pools) use
-plain reads, not an STM (`architecture.md`, page_token): the three
-cluster-scoped ones do one `Get` of `ClusterConf` for the cluster id and
-then range; `ListClusters` ranges the `cluster_conf` prefix directly, there
-being no cluster id to derive. `ListThinDevices`, `ListSubsystems` and the
-single-object `Get*` RPCs are one-STM consistency reads (Thin devices,
-Subsystems and namespaces, Clones).
+`cluster_name`, and `sp_name`, into the cluster id and the `SpConf`; the
+contract — the `ClusterConf` read first, the `SpConf` read, the `deleting`
+gate every mutating SP RPC but `DeleteStoragePool` applies, and the three
+RPCs that make the `ClusterConf` read in a planning snapshot — is
+`architecture.md`, `service Gateway` — RPC specifications, and STM
+discipline. GW11's resolution of conf defaults is a different operation,
+and the text says which it means. `resolveCluster` makes the first read of
+every handler's STM and planning snapshot, except `CreateCluster`'s and
+`ListClusters`' — the two RPCs that resolve no cluster — and the later
+transactions of the three RPCs named below: `model.ClusterConfKey` of the
+`cluster_name`, defaulted to `common.DefaultClusterName`, yielding the
+`ClusterConf` and the cluster id, `model.ClusterId` of the name and the
+stored creation epoch, which prefixes every further key. `resolveSp` then
+reads `model.SpConfKey` of the cluster id and the `sp_name` and applies the
+`deleting` gate when its caller asks for it. The SP-scoped handlers open
+with one of three wrappers over that pair: `openSp` — resolution with the
+gate, then the `SpRev` read and GW6's token check — opens every planning
+snapshot and the deciding STM of every SP-scoped mutator but
+`DeleteStoragePool` and the three whose deciding STM is a `model` op;
+`openSpRead` — resolution without the gate and without the token check —
+opens every SP-scoped read-only RPC and `DeleteClone`'s phase 1 (Clones);
+`openSpFlags` is `openSp` with the gate selectable, and `DeleteStoragePool`
+is its one caller with the gate off (Storage pools and GrowSlice).
+`GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` resolve in their planning
+`Snapshot` only (Storage pools and GrowSlice, Spare legs): their later
+transactions — the deciding STM, which is the `model` op the sp worker
+shares, and `GrowSlice`'s CN-budget pre-check — take the cluster id, and the
+`ClusterConf` where they use it, from that snapshot and never read
+`ClusterConf` themselves. The **paged** `List*` RPCs use plain reads, not an
+STM (`architecture.md`, page_token; GW10). `ListThinDevices`,
+`ListSubsystems` and the single-object `Get*` RPCs are one-STM consistency
+reads (Thin devices, Subsystems and namespaces, Clones).
 
 GW6. **Token check, presence-based.** The token is the request's revision
-token: its `DnRev`, `CnRev` or `SpRev` message (`architecture.md`, Revision
-keys and the sync fan-out). Immediately after resolution and before any
-other state check, a mutator reads its rev key (`SpRevKey` of the SP's
-shard, the cluster id and the sp id, and likewise `DnRevKey` and
-`CnRevKey`). It then asserts that the stored revision equals the token's
-**only when the request carries the token message**; a mismatch is
-`ABORTED` with the message "stale revision". A request that carries no token
-message skips the comparison and proceeds.
-
-Presence, not value, selects the mode. With the message **absent** the
-mutator runs with no optimistic-concurrency gate, which is what omitting the
-token asks for; everything else is unchanged: the rev key is still read (a
-missing one is still `ABORTED`), the other preconditions still apply, and a
-successful mutation still bumps. With the message **present** the comparison
-is strict equality. Because a stored revision starts at one and only grows, a
-message carrying a zero revision — or carrying only the echoed `addr_port`
-or `sp_name` — can never match and is always `ABORTED`: that keeps the
-deliberate always-stale probe available, and it is why presence and not the
-zero value is the discriminator. Clients obtain tokens from the `Get*` RPCs,
-and an operator who wants the gate sends one; omitting it is opting out, per
-request. The cost — a token-less mutator can lose an update, and AG4's
-two-phase safety argument does not cover it — is accepted: omitting the
-token is opting out of the gate.
+token: its `DnRev`, `CnRev` or `SpRev` message. The contract — presence,
+not value, selects the mode; a present zero is a real token that never
+matches; the echoed handle inside the message is ignored; a token-less
+mutator accepts the lost update — is `architecture.md`, Revision keys and
+the sync fan-out; `checkSpToken`, `checkDnToken` and `checkCnToken` carry it
+out. Immediately after resolution and before any other state check, a
+mutator reads its rev key (`SpRevKey` of the SP's shard, the cluster id and
+the sp id, and likewise `DnRevKey` and `CnRevKey`). It then asserts that
+the stored revision equals the token's **only when the request carries the
+token message**; a mismatch is `ABORTED` with the message "stale revision".
+A request that carries no token message skips the comparison and proceeds
+with no optimistic-concurrency gate, everything else unchanged: the rev key
+is still read, the other preconditions still apply, and a successful
+mutation still bumps. AG4 says what the skipped check costs a two-phase RPC.
 
 The rev key is read either way: it is an invariant key of
 `architecture.md`, Key table, whose absence is `ABORTED`
@@ -271,8 +264,6 @@ through `openSpRead`, which has no `deleting` gate, before its
 `checkSpToken`: only its deciding STM applies the gate, so a stale token's
 `ABORTED`, phase 1's other answers — `NOT_FOUND` for an unknown clone among
 them — and the hydration check's agent call all come ahead of it (Clones).
-The echoed `addr_port` or `sp_name` inside the token message is ignored
-(`architecture.md`, Revision keys and the sync fan-out).
 
 The three `model` mutations the gateway shares with the worker —
 `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` — take an expected
@@ -383,12 +374,10 @@ candidate unit: scan candidates outside (`model.FindDnCandidatesAntiAffine`
 or `model.FindCnCandidatesAntiAffine`, then `model.PickRandom`), then run the
 STM, which re-reads each pick's exact capacity key (the bin index, free
 extents and endpoint its `Cand` carries) and fails `ErrPrecondition`
-"candidate changed" when one is gone — `CreateStoragePool`'s STM also when
-its cluster id or leg count no longer matches the scan's (Storage pools and
-GrowSlice), `CreateCntlr`'s when the SP, as it reads it, has a cntlr on a CN
-the read its scan was planned from did not hold (Cntlrs and inspects),
-`CreateMigration`'s when the group, as it reads it, has gained a DN since the
-read its scan was planned from (Migrations). On that error — and only that
+"candidate changed" when one is gone, or when the RPC's own plan re-check
+fails — `CreateStoragePool`'s cluster id and leg count (`architecture.md`,
+Storage pools), `CreateCntlr`'s and `CreateMigration`'s gain checks
+(`architecture.md`, Per-operation allocation). On that error — and only that
 error — the handler re-scans and retries until the ctx ends (then
 `ABORTED`); the reason is never surfaced to a client. `DeleteThinDevice` runs
 the same loop without allocating: its scan is the plan's walk for uncreated
@@ -397,31 +386,31 @@ not the one the plan walked or its `SpRev.revision` is no longer the one the
 plan read — though a request carrying the token that finds the revision
 moved fails GW6 first, `ABORTED` (Thin devices).
 
-GW10. **Pagination** (`architecture.md`, page_token). The `page_token` is
-the last returned key in base64 standard encoding; a decode failure is
-`INVALID_ARGUMENT`; an empty token is the start of the prefix; a page
-holds, in key order, the names whose keys sort **after** the decoded one, at
-most `count` of them as GW4 resolves it; a reply whose page is not full
-returns an empty token, which ends the listing. The prefixes are `model`'s
-`ClusterConfPrefix`,
-`DnConfPrefix`, `CnConfPrefix` and `SpConfPrefix`, the last three of the
-cluster id; the returned names are the key suffixes after the prefix. Paging
-is implemented in `gateway/` (`pageNames`): `model` carries no helper for it
-beyond those prefix builders.
+GW10. **Pagination.** The token, the page and the plain reads of the paged
+lists are `architecture.md`, page_token; `pageNames` carries them out. It
+resolves `count` through `pageLimit` (GW4), decodes the token, ranges the
+prefix outside any STM, cuts the page after the decoded key and returns the
+next token, empty when the page is not full. `validatePageArgs` runs the
+same two checks ahead of the three cluster-scoped lists' plain
+`ClusterConf` read, so a bad `count` or token is answered before a missing
+cluster is. The prefixes are `model`'s `ClusterConfPrefix`, `DnConfPrefix`,
+`CnConfPrefix` and `SpConfPrefix`, the last three of the cluster id; the
+returned names are the key suffixes after the prefix. Paging is implemented
+in `gateway/`: `model` carries no helper for it beyond those prefix
+builders.
 
-GW11. **Defaults resolved at WRITE time** (`architecture.md`, Common
-validation). The rungs are a member from the request, else from the owning
-`ClusterConf`, else from a constant of `common/constants.go` — and ALL of
-them are applied by the RPC that writes the conf, so every stored conf
-anything is formatted or addressed with is concrete in every DEFAULTABLE
-member and nothing downstream substitutes (the `redund_conf` oneof is a
-choice and not a default — unset still means `redund_none`
-(`architecture.md`, Storage pools) — and the two exceptions to the rule,
-`event_threshold` and the `dm_clone_conf` hydration pair, close it below).
-`CreateCluster` stores `model.ResolveClusterConf` of its request, which
+GW11. **Defaults resolved at WRITE time.** The rule, its two reasons, its
+order after the request validation and the two stored messages it exempts
+are `architecture.md`, Common validation, and its order after
+`CreateStoragePool`'s merge is `architecture.md`, Storage pools; the rungs
+are a member from the request, else from the owning
+`ClusterConf`, else from a constant of `common/constants.go`, all applied by
+the RPC that writes the conf. This rule is where each handler carries that
+out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
 settles `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf`
-(Clusters); `CreateStoragePool` stores `model.ResolveBdevConf` of D-C's
-merge (Storage pools and GrowSlice). A handler that then COMPUTES with a
+(Clusters); `CreateStoragePool` stores `model.ResolveBdevConf` of the merge
+`mergeSpBdevConf` makes over the cluster's conf (`architecture.md`, Storage
+pools; Storage pools and GrowSlice). A handler that then COMPUTES with a
 stored member validates it first and REFUSES rather than guessing around a
 zero: `model.ValidateClusterConf` in `CreateDiskNode` and
 `CreateControllerNode` (before dividing a reported size by `extent_size`),
@@ -445,20 +434,6 @@ which `mapModelErr` renders `FAILED_PRECONDITION`; the handler's pre-check
 above is what makes that a race rather than the ordinary path, the same
 asymmetry GW7 records for `chargeSpCns`.
 
-Resolving at use time has two costs, and they are why resolution happens on
-the write path: a consumer that forgets to resolve computes with zeros in
-silence — no reader can tell a member the user omitted from one the user
-chose, and an SP's `bdev_conf` reaches the cn agent as stored — and a stored
-zero pins geometry to whatever `common.Default*` the RUNNING binary carries,
-so editing a constant would re-geometry live storage pools and strand every
-capacity key already written under the old bin ladder. Two consequences an
-implementer must keep: resolution runs AFTER the GW4 validation of the
-request — on the raw request a zero still means "give me the default", so
-resolving first would make every bound check a tautology — and AFTER the
-member-wise merge in `CreateStoragePool`, never before it, because a
-resolved request has no member left at the zero that inherits from the
-cluster.
-
 The resolvers and validators are `model`'s. `model.ResolveBdevConf` is the
 write-time resolver `CreateStoragePool` stores through, and
 `model.ResolveClusterConf` applies it to a `ClusterConf`'s own `bdev_conf`
@@ -478,34 +453,31 @@ with `model.ResolveDnBinConf`, so resolver and validator cannot drift; the
 all-zero shift set a `ClusterConf` written without a `dn_bin_conf` would
 carry is therefore NOT valid stored state.
 
-Two conf messages are resolved when they are READ instead, and both are
-stored exactly as sent, because both are policy knobs rather than geometry —
-nothing is formatted or addressed with either, and an operator reads back
-what they asked for (`architecture.md`, Common validation, names the same
-two). `event_threshold` is resolved member-wise by
-`model.ResolveEventThreshold`. The `dm_clone_conf` hydration pair is the
-other: `CreateClone` and `CreateMigration` store the request's message as it
-arrived (`architecture.md`, Clones and Migrations), the sp worker fills a
-migration's zeros in with their constants as it builds the side request
-(`dnv-worker.md` RW15), and a zero in a clone's is simply never messaged to
-the dm-clone target by the cn agent (`ensureHydrationKnobs`, which sends the
-`hydration_threshold` and `hydration_batch_size` messages of `cnagent.md`
-CN18 step 3, sends each only for a non-zero member), leaving the target's
-own default in place (`architecture.md`, Common validation).
+The two stored messages `architecture.md`, Common validation, exempts are
+stored exactly as sent: `CreateStoragePool` stores `event_threshold` as the
+request carried it, and `model.ResolveEventThreshold` resolves it
+member-wise where it is read; `CreateClone` and `CreateMigration` store the
+`dm_clone_conf` hydration pair as it arrived (`architecture.md`, Clones and
+Migrations), the sp worker resolving a migration's (`dnv-worker.md` RW15)
+and the cn agent messaging only a clone's non-zero members (`cnagent.md`
+CN18).
 
 GW12. **Id minting.** Cluster-scoped ids follow `architecture.md`, Globals:
-id allocation + shard buckets, inside the STM: read the global, take its
-`next_id` as the id and advance it; the shard code is the index of the
-smallest `shard_bucket` entry (the first on ties), and that entry is
-incremented; the `Max*CntPerCluster` gate is the bucket sum before the
-increment. Deletion decrements the bucket and never reuses an id. Per-SP ids
-come from `model.SpNextId`, the per-SP id read: it returns
-`SpConf.next_id` clamped to `SpFirstId` and mutates nothing, so every caller
-advances and persists `next_id` itself, as the `model` ops and the gateway's
-`spIdMinter` do. A thin device's `dev_id` comes from `SpConf.next_dev_id`,
-advanced once per device (an `ori_id` of zero means no origin).
+id allocation + shard buckets, inside the STM: `mintClusterId`, which
+`CreateDiskNode`, `CreateControllerNode` and `CreateStoragePool` run on the
+global they read, draws the id and the shard code and applies the
+`Max*CntPerCluster` gate; `releaseShard`, which `DeleteDiskNode` and
+`DeleteControllerNode` run, gives the bucket entry back (the sp drain gives
+an SP's back from the worker, `dnv-worker.md` SPD12). Per-SP ids come from
+`model.SpNextId`, the per-SP id read: it returns `SpConf.next_id` clamped
+to `SpFirstId` and mutates nothing, so every caller advances and persists
+`next_id` itself — the gateway through a `spIdMinter`, created inside the
+STM closure on the `SpConf` being written and committed back into it once,
+so a retried attempt mints the same ids; the `model` ops advance it
+themselves. A thin device's `dev_id` comes from `SpConf.next_dev_id`
+through `nextDevId`, advanced once per device.
 
-GW14. **D-J. Bitmaps are opaque.** Bitmap bytes cross the gateway VERBATIM
+GW14. **Bitmaps are opaque.** Bitmap bytes cross the gateway VERBATIM
 in both directions: `AppendCloneBitmap` and `AppendMigrationBitmap` store
 what the request carries (Clones, Migrations — the push of those stored
 chunks to the agents is the worker's, `dnv-worker.md` BM1 to BM6, not a
@@ -528,18 +500,12 @@ and field-level rules stay in the cited section of `architecture.md`,
 * **CreateCluster** — validate the confs (`architecture.md`, Common
   validation) on the RAW request, where a zero still asks for the default,
   and its `bdev_conf` once more resolved, where an omitted member meets the
-  geometry rules as its constant (a refusal is `INVALID_ARGUMENT`, prefixed
-  "bdev_conf with its defaults filled in:"). The `dn_bin_conf` shifts are
-  not bounded one by one but judged as a set (`architecture.md`, DN bins),
-  all-or-nothing: all four zero asks for the default ladder and is accepted;
-  any other set that is not a strictly increasing ladder within the shift
-  bounds is `INVALID_ARGUMENT`, because the stored ladder is what every
-  capacity key of this cluster is written under for the cluster's whole life
-  and an operator handed a silently different ladder has no RPC to correct
-  it (`ClusterConf` is write-once). Stamp the creation epoch — the wall clock
-  in nanoseconds — **once, outside** the STM (retries of this attempt reuse
-  it; a client retry stamps anew, `architecture.md`, Clusters), and build the
-  message to store outside it too, for the same reason: it is
+  geometry rules as its constant (a refusal is `INVALID_ARGUMENT`, and the
+  message says the defaults were filled in); the `dn_bin_conf` shifts are
+  judged as a set, all-or-nothing (`architecture.md`, DN bins). Stamp the
+  creation epoch **once, outside** the STM, so that the STM's retries of
+  this attempt reuse it (`architecture.md`, Clusters), and build the message
+  to store outside it too, for the same reason: it is
   `model.ResolveClusterConf` of the request's conf members plus that epoch,
   so `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf` land
   concrete and only `qos_ratio` and the epoch pass through as given (GW11;
@@ -558,7 +524,8 @@ and field-level rules stay in the cited section of `architecture.md`,
 * **GetCluster** — one STM: the `ClusterConf`, the cluster id, the three
   globals (a missing global is `ABORTED`). Reply the name, the cluster id,
   the conf and the globals.
-* **ListClusters** — no cluster resolution (the one exception); a paged
+* **ListClusters** — no cluster resolution (with `CreateCluster`, one of
+  the two RPCs that resolve no cluster, GW5); a paged
   plain range over `ClusterConfPrefix` (GW10); the names are the key
   suffixes.
 
@@ -611,9 +578,8 @@ and field-level rules stay in the cited section of `architecture.md`,
 
 The exact mirror of Disk nodes over `CnConf`, the CN capacity key, `CnRev`
 and `CnGlobal`, with these differences: `CreateControllerNode` calls
-`GetCnSize` and maps the reply per `architecture.md`, Size → extents (a zero
-takes `DefaultCnCap`, a size above `MaxCnCap` is clamped to it, and a
-non-zero one below `MinCnCap` is treated as zero); the per-cluster ceiling is
+`GetCnSize` and maps the reply through `cnCapBudget`, the budget rule of
+`architecture.md`, Size → extents; the per-cluster ceiling is
 `MaxCnCntPerCluster`; the delete's occupancy precondition is
 `cntlr_ptr_list`; the capacity maintenance is `model.MaintainCnCapacity`,
 which needs no `ClusterConf` because a CN capacity key carries no bin index
@@ -624,21 +590,14 @@ delete, get, list, update-disabled and inspect.
 
 ### Storage pools and GrowSlice
 
-* **CreateStoragePool** — validate: the `cntlid_slot_list` entries below
-  `CnCntlidSlotCnt`, with no duplicates; `cntlr_cnt` between
-  `MinCntlrCntPerSp` and `MaxCntlrCntPerSp` and at most the length of the
-  slot list; `slice_cnt` at most `MaxSliceCntPerSp`; `init_ext_cnt` at
-  least one; the confs per `architecture.md`, Common validation. A zero
-  `cntlr_cnt` and a zero `slice_cnt` are requests for a default, not
-  refusals: each is replaced — before the bound above it is judged — by
+* **CreateStoragePool** — validate the request against the bounds and
+  defaults of `architecture.md`, Storage pools, and the confs against
+  `architecture.md`, Common validation: a zero `cntlr_cnt` and a zero
+  `slice_cnt` are replaced — before the bound above each is judged — by
   `DefaultCntlrCntPerSp` and `DefaultSliceCntPerSp`, and it is the
-  substituted count the plan and the STM's slice loop build the SP from
-  (`architecture.md`, Storage pools, its defaults). A zero `init_ext_cnt` is
-  still `INVALID_ARGUMENT`, and so is `CreateClone`'s zero `src_slice_cnt`
-  (Clones): that one describes a source which already exists, so no default
-  can stand in for it.
+  substituted count the plan and the STM's slice loop build the SP from.
 
-  Pre-STM plan (`planSpGroups`), in D-D's order: per slice the meta group
+  Pre-STM plan (`planSpGroups`), in GW15's order: per slice the meta group
   (one extent) first, then the data group (`init_ext_cnt` extents) — extent
   counts only; `model.GroupBlocks` turns each into `meta_blocks` and
   `data_blocks` in the STM, where the conf it needs has been read and
@@ -646,27 +605,21 @@ delete, get, list, update-disabled and inspect.
   `model.ValidateClusterConf` as the scans gate it (a stored conf that fails
   it is `ABORTED`, GW11, before anything is computed from it), and over it
   the same merge and resolution the STM makes below, which gives the scans
-  their leg count; `validateBdevConf` on that conf
-  (`validateMergedBdevConf`), because the raw request was judged by the
-  geometry rules only between the members it set (a refusal is
-  `INVALID_ARGUMENT`, prefixed "bdev_conf merged over the cluster's:"), and
-  before the scans, so that a cluster short of nodes does not answer a
-  request that breaks a rule `RESOURCE_EXHAUSTED` first; then scan DNs per
-  group with the growing black list of `architecture.md`, Per-operation
-  allocation (the group's leg count — one for `RedundNone`,
-  `MaxAllocLegPerGrp` for `RedundMdRaid1` (`legCntOf`) — drawn from
-  `dn_batch_size` times that many candidates, a random pick, the picked DNs
-  black-listed so every leg of the SP lands on a distinct DN) and CNs (the
-  candidate extent count is the sum of `ext_cnt` over all groups;
-  `cntlr_cnt` rounds, a random pick, black-listed, and the two tiers applied
-  — tier 1 of every later round excludes the `location`s of the CNs already
-  picked, tier 2 drops that exclusion when tier 1 finds no CN); too few at
-  any point is `RESOURCE_EXHAUSTED`.
+  their leg count (`legCntOf`); `validateMergedBdevConf` on that conf,
+  because the raw request was judged by the geometry rules only between the
+  members it set (a refusal is `INVALID_ARGUMENT`, and the message says it
+  concerns the merged conf), and before the scans, so that a cluster short
+  of nodes does not answer a request that breaks a rule `RESOURCE_EXHAUSTED`
+  first; then the DN scan per group (`pickDns`) and the CN scan per cntlr
+  (`pickCn`) of `architecture.md`, Per-operation allocation, which owns the
+  growing black list, the random pick and the two CN tiers; too few at any
+  point is `RESOURCE_EXHAUSTED`.
 
   STM, in this order: resolve; build the `bdev_conf` to store as
   `model.ResolveBdevConf` of `mergeSpBdevConf` of the request over the
   cluster's — merge first so an omitted member still inherits from the
-  cluster, resolve second so what is stored is concrete (D-C, GW11) — and
+  cluster, resolve second so what is stored is concrete (`architecture.md`,
+  Storage pools; GW11) — and
   fail the unit right there, before a single other key is read, when this
   transaction's cluster id or that conf's leg count no longer matches the
   one the scan drew its picks for; `validateMergedBdevConf` on that conf
@@ -674,7 +627,7 @@ delete, get, list, update-disabled and inspect.
   this repeats the verdict of the pre-read, but the in-STM read is the
   authoritative one); `SpConfKey` present is `ALREADY_EXISTS`; mint `sp_id`
   and the shard from `SpGlobal` (GW12), then every `cntlr_id` in pick order
-  (D-D); `model.ValidateClusterConf` before the cluster's `extent_size` is
+  (GW15); `model.ValidateClusterConf` before the cluster's `extent_size` is
   used (a zero is `ABORTED`, GW11); then per slice its `slice_id` and, in
   plan order, its meta group before its data group — for each,
   `model.GroupBlocks` against that `extent_size` and the resolved
@@ -694,47 +647,34 @@ delete, get, list, update-disabled and inspect.
   and `BumpDnRev` once; per CN likewise with `cntlr_ptr_list` and
   `BumpCnRev`; last the updated `SpGlobal`. Reply `sp_id`.
 
-  **D-C.** The `bdev_conf` `CreateStoragePool` STORES is the member-wise
-  merge of the request over `ClusterConf.bdev_conf`: a member wins unless
-  left at the proto3 zero that means "unset"; the redundancy KIND is a
-  oneof choice (the request's, else the cluster's, else `redund_none`), and
-  a kind chosen by both merges member-wise inside. The merge then passes
-  through `model.ResolveBdevConf`, which settles any member still zero on
-  both sides against its constant, so all three rungs land in the stored
-  message (GW11). That stored `bdev_conf` is never re-resolved at read time,
-  and an SP's geometry is therefore immutable under later cluster-default
-  edits — immutable only because those stored members are CONCRETE, since a
-  stored zero would float with whatever constant the reading binary carries.
+GW15. **One fixed create order.** `CreateStoragePool` plans, scans and
+mints in one fixed order — per slice the one-extent meta group, then the
+data group; the cntlr ids first, in pick order, then per slice its
+`slice_id` and, in plan order, each group's `grp_id` and per leg a `leg_id`
+and its `side_id` — so the scan's picks and the STM's ids line up by plan
+position, and a re-run of the STM closure on the same picks and reads
+(GW8) reproduces exactly the same write set.
 
-  **D-D.** `CreateStoragePool` plans, scans and mints in one fixed order —
-  per slice the one-extent meta group, then the data group; the cntlr ids
-  first, in pick order — so a retried candidate unit reproduces exactly the
-  same write set.
 * **DeleteStoragePool** — it LATCHES, and the sp worker drains
-  (`dnv-worker.md`, The sp drain). STM: `openSpFlags` with the `deleting`
+  (`dnv-worker.md` SPD9 to SPD12). STM: `openSpFlags` with the `deleting`
   gate off — resolve, read the `SpRev`, run GW6's token check; if `deleting`
   is ALREADY true return OK here, with **no writes and no bump** (a repeat
   delete must not invalidate every client's token to force a pointless
   re-resolve; the token check has already run, so a stale token still
-  ABORTs first; `dnv-worker.md` SPD3); else all five name lists
-  (`td_name_list`, `nqn_list`, `clone_name_list`, `xfer_name_list`,
-  `migr_name_list`) empty, else `FAILED_PRECONDITION`; put the `SpConf` with
-  `deleting` true; `BumpSpRev`. Reply `sp_id` — the repeat-delete no-op
-  replies with it too, since the RPC resolved the SP before short-circuiting
-  and `DeleteStoragePoolReply` carries nothing else. The emptiness check and
-  the latch share the STM with the reads, so they are atomic, and once
-  latched `resolveSp`'s `rejectDeleting` gate refuses every other mutator —
-  no new child can appear after the check, ever (`dnv-worker.md` SPD4).
+  ABORTs first); else all five name lists (`td_name_list`, `nqn_list`,
+  `clone_name_list`, `xfer_name_list`, `migr_name_list`) empty, else
+  `FAILED_PRECONDITION`; put the `SpConf` with `deleting` true; `BumpSpRev`.
+  Reply `sp_id` — the repeat-delete no-op replies with it too, since the RPC
+  resolved the SP before short-circuiting and `DeleteStoragePoolReply`
+  carries nothing else. The emptiness check and the latch share the STM
+  with the reads, so they are atomic, and once latched `resolveSp`'s
+  `rejectDeleting` gate refuses every other mutator — no new child can
+  appear after the check, ever; no path writes `deleting` false back on an
+  existing SP, so the latch is one-way across restarts of every component.
   Nothing else is written: the SP, its cntlrs, its slices and every extent
-  they charge survive the reply, and partial teardown is a real, visible
-  state (`architecture.md`, Storage pools). What a one-shot teardown would
-  guarantee is not atomicity but AGREEMENT — DN and CN budgets never
-  disagreeing with the keys that describe them — and every drain batch keeps
-  it by releasing budget in the same transaction that shrinks the describing
-  key. Consequences: `CreateStoragePool` keeps failing `ALREADY_EXISTS` on
-  the surviving `sp_conf` key until the drain's last transaction, so name
-  reuse resumes only then, and an observer polls `GetStoragePool` until
-  `NOT_FOUND`.
+  they charge survive the reply. Why the teardown is a drain and not one
+  transaction, and what a caller sees while it runs, is `architecture.md`,
+  Storage pools.
 * **GetStoragePool** — one STM: the `SpConf`, the `SpRev`, every listed
   `Cntlr`, every listed `Slice`; a missing listed key is `ABORTED`. Reply all
   of it (the `SpRev` is the token source).
@@ -750,99 +690,75 @@ delete, get, list, update-disabled and inspect.
   STM): the `ClusterConf` to the cluster id, then per requested `sp_id` a
   read of `SpNameKey`; unknown ids are omitted, never an error. Reply the
   map.
-* **GrowSlice** — validate the exclusivity of `architecture.md`, GrowSlice:
-  a data grow (`is_meta` false) states a positive `ext_cnt`, a meta grow
-  (`is_meta` true) states none, else `INVALID_ARGUMENT`. A `Snapshot`
-  pre-read for planning, whose `ClusterConf` and SP `bdev_conf` are both
-  validated before anything is sized from them (`model.ValidateClusterConf`,
+* **GrowSlice** — validate the exclusivity of `architecture.md`, GrowSlice
+  (a data grow states a positive `ext_cnt`, a meta grow none, else
+  `INVALID_ARGUMENT`). Everything after that runs inside one candidate unit
+  (GW9), so every round re-plans from a fresh read instead of asking for the
+  same stale size again: a `Snapshot` pre-read for planning, opened with
+  `openSp` (resolution, the `deleting` gate and the token check first,
+  GW6), whose `ClusterConf` and SP `bdev_conf` are both validated before
+  anything is sized from them (`model.ValidateClusterConf`,
   `model.ValidateBdevConf`; a failure is `ABORTED`, GW11) — which is also
   what keeps a false from `model.MetaLadderExtCnt` meaning the meta cap and
-  nothing else, since an unvalidated zero `extent_size` would report the same
-  false and reach the operator as a metadata ceiling. Before it plans, the
-  handler answers the group ceiling of `architecture.md`, GrowSlice, from the
-  same snapshot: a slice whose list of the requested kind already holds
-  `MaxGrpCntPerSlice` groups (`model.GrpListFull`) is `FAILED_PRECONDITION`,
-  GW7's object-state class, ahead of the scan, so a cluster short of DNs
-  cannot report it as `RESOURCE_EXHAUSTED`; `model.GrowSlice` re-checks it
-  in-STM. The plan itself is the slice's current meta total for
-  `model.MetaLadderExtCnt` — the cap reached is `FAILED_PRECONDITION`, GW7's
-  object-state class — and the request's own black list, which is the entire
-  seed of the scan (D-F); then a second `Snapshot`, the CN-budget pre-check
-  (`growSliceCnBudget`), over the SP's cntlrs and their `CnConf`s at one
-  store revision — every cntlr stacks the new group, so every one of their
-  CNs needs the new group's extent count free (the size D-E recomputes,
-  never the request's `ext_cnt`), and a shortfall is the
-  `RESOURCE_EXHAUSTED` of `architecture.md`, GrowSlice, named with the CN
-  that is short; a cntlr or `CnConf` key gone under the snapshot is skipped,
-  not raised, because this only gives the common case its documented code
-  and the STM re-reads all of it; the candidate unit; then the call of
+  nothing else, since an unvalidated zero `extent_size` would report the
+  same false and reach the operator as a metadata ceiling; the group ceiling
+  of `architecture.md`, GrowSlice, answered from the same snapshot
+  (`model.GrpListFull`, `FAILED_PRECONDITION`, GW7's object-state class)
+  ahead of the scan, so a cluster short of DNs cannot report it as
+  `RESOURCE_EXHAUSTED` (`model.GrowSlice` re-checks it in-STM); the new
+  group's size, computed as `architecture.md`, GrowSlice, says and never
+  taken from the request's `ext_cnt` — the slice's first data group's
+  `ext_cnt` for a data grow, `model.MetaLadderExtCnt` of the slice's meta
+  total for a meta grow, the cap reached being `FAILED_PRECONDITION`; the
+  CN-budget pre-check (`growSliceCnBudget`), a second `Snapshot` over the
+  SP's cntlrs and their `CnConf`s at one store revision — every cntlr stacks
+  the new group, so every one of their CNs needs that size free, and a
+  shortfall is the `RESOURCE_EXHAUSTED` of `architecture.md`, GrowSlice,
+  named with the CN that is short; a cntlr or `CnConf` key gone under the
+  snapshot is skipped, not raised, because this only gives the common case
+  its documented code and the STM re-reads all of it; the DN scan
+  (`pickDns`) with the request's own black list and no location exclusion,
+  as `architecture.md`, Per-operation allocation, has it; then the call of
   `model.GrowSlice` with the token's revision as its expected revision
-  (GW6), which re-validates in-STM and bumps the `SpRev`, the leg DNs' revs
-  and — through `chargeSpCns`, which charges the CN of every cntlr — those
-  CNs' `CnRev`s itself (`architecture.md`, GrowSlice). A CN that loses its
-  budget in the window after the pre-check is therefore still refused, but
-  by `chargeSpCns` as an `ErrPrecondition`, so the caller sees
+  (GW6) and the largest pool total (`math.MaxUint64`), which leaves the
+  pending rule of `dnv-worker.md` AR6 to the worker's auto-grow
+  (`architecture.md`, GrowSlice). The op re-validates in-STM and bumps the
+  `SpRev`, the leg DNs' revs and — through `chargeSpCns`, which charges the
+  CN of every cntlr — those CNs' `CnRev`s itself. A CN that loses its budget
+  in the window after the pre-check is therefore still refused, but by
+  `chargeSpCns` as an `ErrPrecondition`, so the caller sees
   `FAILED_PRECONDITION` instead: the pre-check is deliberately the generous
   one, since only the STM decides. `ReasonStaleRevision` maps to `ABORTED`,
   any other `ErrPrecondition` to `FAILED_PRECONDITION`. Reply `slice_id` and
   `grp_id`.
 
-  **D-B.** The gateway passes `model.GrowSlice` the largest possible pool
-  total, `math.MaxUint64`: the pending rule of `dnv-worker.md` AR6 gates
-  only the worker's auto-grow, never a user-driven grow (`architecture.md`,
-  GrowSlice).
-
-  **D-E.** `GrowSlice`'s request `ext_cnt` never reaches the model: it is
-  only the exclusivity signal (a data grow states one, a meta grow must
-  not); sizes are recomputed from the stored first data group or the meta
-  ladder.
-
-  **D-F.** `GrowSlice`'s DN black list is the request's own and nothing
-  else; the gateway never appends to it, because one scan-and-pick round
-  serves the whole new group and the location rule of `architecture.md`,
-  Finding DN candidates, already leaves the candidate list with one entry
-  per DN and per location, so the group's legs land on distinct DNs anyway.
-  The worker's auto-grow (`dnv-worker.md` AR6) draws from the same kind of
-  list and reaches the same distinctness by black-listing each pick as it
-  goes.
-
 ### Cntlrs and inspects
 
-* **CreateCntlr** — validate the slot; a candidate unit for one CN (the
-  candidate extent count is the sum of every group's `ext_cnt`; the scan
-  excludes the CNs of the SP's cntlrs (`architecture.md`, Finding CN
-  candidates) and, at tier 1 of `architecture.md`, Per-operation allocation,
-  their `location`s; tier 2 drops the location exclusion when tier 1 finds
-  no CN). Each round plans from one read-only `Snapshot` opened with
+* **CreateCntlr** — validate the slot; a candidate unit for one CN
+  (`pickCn`, with the CN exclusion and the two tiers of `architecture.md`,
+  Per-operation allocation). Each round plans from one read-only `Snapshot` opened with
   `openSp`, as `CreateMigration`'s planning read is: resolve, the `deleting`
   gate included, then the token (GW6), so a deleting SP is
   `FAILED_PRECONDITION` and a stale token `ABORTED` before the scan can
   answer `RESOURCE_EXHAUSTED` for want of an eligible CN — to a stale
   client, an answer computed against cntlrs it has not read; then the SP's
   slices, which size the scan, and its cntlrs, whose CNs the scan excludes.
-  The locations are read after the snapshot, from those CNs' `CnConf`s —
-  `cnLocations`, sound outside every transaction because a location never
-  changes (`architecture.md`, Controller nodes) and because the STM
-  re-checks the plan's cntlrs, below. STM: resolve; token; the slot in
-  `cntlid_slot_list` and unused, else `INVALID_ARGUMENT`; the SP as this STM
-  reads it having a cntlr on a CN the round's plan did not hold is candidate
-  changed (GW9: the round planned its CN exclusion and tier-1 locations from
-  the cntlrs as it read them, and a cntlr committed since — by another
-  `CreateCntlr`, or the worker's cntlr replacement, `dnv-worker.md` AR7 —
-  was not among them, so the pick may sit in its failure domain behind a
-  capacity key that still verifies, or on its very CN when the scan ran
-  after its charge; the next round plans from the SP with that cntlr in it;
-  only a gain is checked, and only a token-less request meets one here,
-  since the gain's `SpRev` bump fails a sent token first); re-verify the
-  pick's capacity key; mint `cntlr_id`; put the `Cntlr` (`addr_port`, the
-  CN's `nvme_tr_conf`, `cntlid_slot`, `primary` false, `disabled` false);
-  append to `cntlr_id_list`; the CN's bookkeeping and `BumpCnRev`; append
-  the CN's `nvme_tr_conf` to **every** `CdcEntry` of the SP (walk `nqn_list`
-  to each `Subsystem` and its `CdcEntryKey`; an entry whose key is missing
-  is first rebuilt as `CreateSubsystem` writes it, from the `Subsystem` and
-  the cntlrs as this STM reads them, then changed like the rest —
-  `DeleteCntlr` and a flag-changing `UpdateCntlrEnabled` walk the entries
-  the same way); `BumpSpRev`. Reply `cntlr_id`.
+  The locations are read after the snapshot, from those CNs' `CnConf`s
+  (`cnLocations`), outside every transaction. STM: resolve; token; the slot
+  in `cntlid_slot_list` and unused, else `INVALID_ARGUMENT`; the gain check
+  of `architecture.md`, Per-operation allocation — the SP as this STM reads
+  it having a cntlr on a CN the round's plan did not hold is candidate
+  changed (GW9), which only a token-less request meets, since the gain's
+  `SpRev` bump fails a sent token first; re-verify the pick's capacity key
+  (`verifyPick`); mint `cntlr_id`; put the `Cntlr` (`addr_port`, the CN's
+  `nvme_tr_conf`, `cntlid_slot`, `primary` false, `disabled` false); append
+  to `cntlr_id_list`; the CN's bookkeeping and `BumpCnRev`; append the CN's
+  `nvme_tr_conf` to **every** `CdcEntry` of the SP (`addCdcTrConf`, which
+  walks `nqn_list` to each `Subsystem` and its `CdcEntryKey` through
+  `eachCdcEntry` and rebuilds a missing entry with `rebuildCdcEntry` before
+  changing it, as `architecture.md`, Cntlrs, requires; `DeleteCntlr`, with
+  `dropCdcTrConf`, and a flag-changing `UpdateCntlrEnabled`, with either
+  helper, walk the entries the same way); `BumpSpRev`. Reply `cntlr_id`.
 * **DeleteCntlr** — STM: resolve; token; `primary` false and `disabled`
   true, else `FAILED_PRECONDITION`; reverse everything `CreateCntlr` did
   (the id list, the key, the CN's bookkeeping with `BumpCnRev`, the
@@ -887,27 +803,22 @@ delete, get, list, update-disabled and inspect.
   origin's `dev_id` or zero; put the `ThinDevice` with `created` false;
   append to `td_name_list`; `BumpSpRev`. Reply `td_id` and `dev_id`.
 
-  **D-H.** A `size` of zero is legal exactly when `ori_name` is set: a
-  snapshot inherits its origin's size.
-* **DeleteThinDevice** — a plan, then a deciding STM, looped as a GW9 unit.
-  Plan, one read-only `Snapshot`: resolve; token; the td (`NOT_FOUND`); walk
-  `td_name_list` for the tds whose `ori_id` is this td's `dev_id` and whose
-  `created` is false (a listed key missing is `ABORTED`) and keep their
-  names, the resolved cluster id and `sp_id`, and the `SpRev.revision` it
-  read. The walk is the one read that grows with `MaxTdCntPerSp`, and it
-  stays out of the STM because the STM compares every key it read: inside,
-  a full pool's delete would exceed `EtcdMaxTxnOps` (Additions to
-  `common/constants.go`). STM: resolve; token; a cluster id, `sp_id` or
-  `SpRev.revision` other than the plan's is candidate changed, re-plan. The
-  ids are there because a recreated SP's `SpRev` starts again at one, so
-  the revision alone cannot tell two SPs of one name apart; the revision
-  because every write to a td bumps `SpRev`: a snapshot created between the
-  plan and this STM's commit moves the revision this STM reads, or,
-  committing after that read, conflicts the STM on the `SpRev` key and
-  moves it for the re-run. A token-less request then trips this check and
-  re-plans; a token-carrying one fails the token check before it — its
-  token is the revision the plan read — `ABORTED` ("stale revision"), no
-  re-plan. Then the td (`NOT_FOUND`); `FAILED_PRECONDITION` when it is
+GW17. **A snapshot inherits its size.** `CreateThinDevice` accepts a `size`
+of zero exactly when `ori_name` is set, and the snapshot then takes its
+origin's size; a fresh device asking for a zero `size` is
+`INVALID_ARGUMENT` before any read.
+
+* **DeleteThinDevice** — a plan, then a deciding STM, looped as a GW9 unit;
+  why the snapshot walk stays out of the deciding transaction and how the
+  pool's identity and revision close the window between the two is
+  `architecture.md`, Thin devices. Plan, one read-only `Snapshot`: resolve;
+  token; the td (`NOT_FOUND`); walk `td_name_list` for the tds whose
+  `ori_id` is this td's `dev_id` and whose `created` is false (a listed key
+  missing is `ABORTED`) and keep their names, the resolved cluster id and
+  `sp_id`, and the `SpRev.revision` it read. STM: resolve; token; a cluster
+  id, `sp_id` or `SpRev.revision` other than the plan's is candidate
+  changed, re-plan — a token-carrying request fails the token check ahead
+  of it, `ABORTED`, no re-plan. Then the td (`NOT_FOUND`); `FAILED_PRECONDITION` when it is
   referenced by any `Namespace.td_id` (walk `nqn_list` to each `Subsystem`'s
   `ns_list`), by any `Clone.dst_td_id` (walk `clone_name_list`), or when a
   td the plan named still has this td's `dev_id` as its `ori_id` and
@@ -924,11 +835,12 @@ delete, get, list, update-disabled and inspect.
 
 ### Subsystems and namespaces
 
-All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
+All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`. The codes
+are those of `architecture.md`, Subsystems, namespaces.
 
 * **CreateSubsystem** — the NQN valid (`architecture.md`, Common
   validation, the dnv-namespace rule included; the discovery NQN can never
-  validate) and absent, else `ALREADY_EXISTS`; mint `ss_id`; the serial is
+  validate) and absent; mint `ss_id`; the serial is
   `ss_id` rendered with `IdKeyFmt` and the model is `subsystemModel`
   (`architecture.md`, [D2]); put the `Subsystem` with an empty `ns_list`
   and the `allowed_hosts`, append to `nqn_list`, and put the `CdcEntry` —
@@ -938,64 +850,61 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
 * **DeleteSubsystem** — the NQN checked for length alone (`architecture.md`,
   Common validation, so a subsystem stored under an NQN the rules refuse can
   still be deleted; the same section says what a CN keeps of one in the dnv
-  namespace); the subsystem by NQN (`NOT_FOUND`); `ns_list` empty, else
-  `FAILED_PRECONDITION`; delete the `Subsystem`, the `CdcEntry` and the list
-  entry. Reply `ss_id`.
+  namespace); the subsystem by NQN; `ns_list` empty; delete the
+  `Subsystem`, the `CdcEntry` and the list entry. Reply `ss_id`.
 * **ListSubsystems** — one STM: `nqn_list` to each `Subsystem` into
-  `nqn_to_subsystem` (missing is `ABORTED`).
+  `nqn_to_subsystem`; a listed key that is missing is `ABORTED`.
 * **UpdateSubsystemHosts** — rewrite `allowed_hosts` in **both** the
   `Subsystem` and its `CdcEntry`; a `CdcEntry` whose key is missing is
   rebuilt as `CreateSubsystem` writes it and written with the new hosts.
   Reply `ss_id`.
-* **CreateNamespace** — the subsystem by NQN (`NOT_FOUND`); `ns_idx`
-  non-zero and unused in this subsystem, else `INVALID_ARGUMENT`; the td by
-  `td_name` (`NOT_FOUND`); mint `ns_id`; defaults: an empty `dev_uuid` is a
-  random RFC 4122 version 4 UUID in the canonical dashed form, an empty
-  `dev_nguid` a random NGUID in hex; append to `ns_list`. Reply `ns_id`.
+* **CreateNamespace** — the subsystem by NQN; `ns_idx` non-zero and unused
+  in this subsystem; the td by `td_name`; mint `ns_id`; defaults: an empty
+  `dev_uuid` is a random RFC 4122 version 4 UUID in the canonical dashed
+  form, an empty `dev_nguid` a random NGUID in hex; append to `ns_list`.
+  Reply `ns_id`.
 * **DeleteNamespace** — the NQN checked for length alone, as for
-  `DeleteSubsystem`; locate by NQN and `ns_idx` (`NOT_FOUND`); remove from
-  `ns_list`. Reply `ns_id`.
-* **UpdateNamespaceDev** — locate the namespace; resolve the new `td_name`
-  (`NOT_FOUND`); repoint the namespace's td reference. Reply `ns_id`.
+  `DeleteSubsystem`; locate by NQN and `ns_idx`; remove from `ns_list`.
+  Reply `ns_id`.
+* **UpdateNamespaceDev** — locate the namespace; resolve the new `td_name`;
+  repoint the namespace's td reference. Reply `ns_id`.
 * **UpdateNamespaceSuspended** — locate the namespace; set `suspended`.
   Reply `ns_id`.
 
 ### Clones
 
+The codes are those of `architecture.md`, Clones, and the ones the bullets
+below name.
+
 * **CreateClone** — validate the bounds of `architecture.md`, Clones
-  (`validateCloneGeometry`: `src_slice_cnt` from one to
-  `MaxSliceCntPerSp`, the source stripe and block sizes within their bounds
-  and the block a multiple of the stripe); STM: resolve; token;
-  `clone_name_list` at `MaxCloneCntPerSp` is `RESOURCE_EXHAUSTED`; the name
-  free, else `ALREADY_EXISTS`; the destination td by name (`NOT_FOUND`); a
-  destination td that any `Clone.dst_td_id` names (walk `clone_name_list`,
-  a draining clone included) is `FAILED_PRECONDITION`;
-  mint `clone_id`; put the `Clone` with its `dst_td_id`; append to
-  `clone_name_list`; `BumpSpRev`. Reply `clone_id`. The "destination td
-  must be empty" precondition is documented-unverifiable
-  (`architecture.md`, [D3]). The per-CN clone budget is not tracked:
-  `architecture.md`, Clones, lets a gateway track it in etcd, and this one
-  does not.
+  (`validateCloneGeometry`); STM: resolve; token; the `MaxCloneCntPerSp`
+  ceiling, checked ahead of the name; the name free; the destination td by
+  name; a destination td that any `Clone.dst_td_id` names (walk
+  `clone_name_list`, a draining clone included) is refused; mint
+  `clone_id`; put the `Clone` with its `dst_td_id`; append to
+  `clone_name_list`; `BumpSpRev`. Reply `clone_id`. The per-CN clone budget
+  is not tracked: `architecture.md`, Clones, lets a gateway track it in
+  etcd, and this one does not.
 * **DeleteClone** — it LATCHES, and the sp worker drains (`dnv-worker.md`,
   The clone drain). Two-phase (AG4). Phase 1 STM (read-only): resolve,
   through `openSpRead` and so without the SP's `deleting` gate, which only
   phase 2 applies (GW6); the token, checked explicitly because phase 1 is
   the decision on the path below and `openSpRead` skips the check (a stale
   token must still ABORT ahead of the clone's `deleting` answer); the clone
-  (`NOT_FOUND`); **if the clone's `deleting` is already true, return OK
-  here** — with no writes, no bump and NO agent call (`dnv-worker.md`
-  CLD3). The short-circuit sits before the agent call and not in phase 2
-  for a reason that is not an optimization: after the latch the CN has
-  torn the stack down, so `GetCntlrInfo` no longer reports the dm-clone and a
-  hydration check would wedge every repeat delete in `FAILED_PRECONDITION`
-  for ever. Otherwise, when `force` is false, also resolve the **primary**
-  cntlr's `addr_port` and `cn_id` — an SP with no primary cntlr is
-  `FAILED_PRECONDITION`, since there is nobody to prove hydration with and a
-  promotion makes the retry succeed (`force` true skips the lookup
+  (`loadClone`); **if the clone's `deleting` is already true, return OK
+  here** — with no writes, no bump and NO agent call. The short-circuit
+  sits before the agent call and not in phase 2 for a reason that is not an
+  optimization: after the latch the CN has torn the stack down, so
+  `GetCntlrInfo` no longer reports the dm-clone and a hydration check would
+  wedge every repeat delete in `FAILED_PRECONDITION` for ever. Otherwise,
+  when `force` is false, also resolve the **primary** cntlr's `addr_port`
+  and `cn_id` — an SP with no primary cntlr is `FAILED_PRECONDITION`: there
+  is nobody to prove hydration with, and a promotion makes the retry succeed
+  (`force` true skips the lookup
   entirely: no agent call follows, which is what lets force delete a clone
   whose cntlr is unreachable). Between the phases, `force` false calls
-  `GetCntlrInfo`; incomplete hydration **or an unreachable agent** is
-  `FAILED_PRECONDITION` (`architecture.md`, Clones). Phase 2 STM
+  `GetCntlrInfo` and judges hydration with `hydrationComplete`; incomplete
+  hydration **or an unreachable agent** is `FAILED_PRECONDITION`. Phase 2 STM
   (deciding): full re-resolution and the token check (GW6 — any interleaved
   mutation bumped `SpRev`, so a token the request carried subsumes the
   staleness of phase 1; a token-less request gets the re-resolution only,
@@ -1004,68 +913,52 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   nothing but the resume, the latch and the bump — `suspended` false on
   every namespace whose `td_id` is the clone's `dst_td_id`, as one
   `Subsystem` put per subsystem that actually changed and none for the rest
-  (`resumeCloneDstNs`; `architecture.md`, Clones — the destination
-  namespaces resume, their data being local, the twin of `DeleteTransfer`'s
-  finalize under Transfers), the `Clone` put with `deleting` true and every
-  other field unchanged, and `BumpSpRev` (`dnv-worker.md` CLD4). Reply
-  `clone_id`.
+  (`resumeCloneDstNs`; the destination namespaces resume, their data being
+  local, the twin of `DeleteTransfer`'s finalize under Transfers), the
+  `Clone` put with `deleting` true and every other field unchanged, and
+  `BumpSpRev`. Reply `clone_id`.
 
-  It does NOT delete the `Clone` key, does not touch a chunk key and does
-  not shrink `clone_name_list`: the name must survive until the drain's
-  last transaction, because `model.LoadSp` fetches clones by iterating it.
-  The resume rides the LATCH so that it and the fan-out exclusion arrive in
-  one `SpRev` bump; deferred, the destination namespace would go dark for
-  the whole drain. Consequences for callers, all following from the `Clone`
-  key and its list entry surviving: a `DeleteClone` returns while the clone
-  still exists, so an observer polls `GetClone` until `NOT_FOUND`; a
-  same-name `CreateClone` keeps failing until then — `ALREADY_EXISTS`, or
-  `RESOURCE_EXHAUSTED` on an SP whose `clone_name_list` the surviving entry
-  holds at `MaxCloneCntPerSp`, that ceiling being checked ahead of the name,
-  which also fails an UNRELATED `CreateClone` for the whole drain; a
-  `CreateClone` onto the same destination td, a `DeleteThinDevice` of that
-  td and a `CreateThinDevice` snapshotting it all keep failing
-  `FAILED_PRECONDITION` because their scans walk `clone_name_list`; and
-  `DeleteStoragePool` keeps refusing while any clone drains.
-* **loadLiveClone** — the gate of `dnv-worker.md` CLD1 that the two clone
-  mutators that ADDRESS an existing clone open with: `UpdateCloneTrConf`
-  and `AppendCloneBitmap` answer `FAILED_PRECONDITION` when `deleting` is
-  true. (`CreateClone` addresses none and needs no gate: the surviving key
+  The latch does NOT delete the `Clone` key, does not touch a chunk key and
+  does not shrink `clone_name_list`: the name must survive until the
+  drain's last transaction, because `model.LoadSp` fetches clones by
+  iterating it. The latch is one-way: no path writes `deleting` false back
+  on a `Clone`. The resume rides the LATCH so that it and the fan-out
+  exclusion arrive in one `SpRev` bump; deferred, the destination namespace
+  would go dark for the whole drain. What a caller meets while the clone
+  drains is `architecture.md`, Clones.
+* **loadLiveClone** — the gate the two clone mutators that ADDRESS an
+  existing clone open with: `UpdateCloneTrConf` and `AppendCloneBitmap`
+  answer `FAILED_PRECONDITION` when `deleting` is true. (`CreateClone`
+  addresses none and needs no gate: the surviving key
   and list entry keep it refused.) The append half is load-bearing, not
   cosmetic: a racing append could otherwise write a chunk key behind the
   drain, and the drain's final emptiness guard rests on "after the latch,
   no chunk key can ever appear again". `GetClone` and `DeleteClone`'s own
   phase 1 keep using plain `loadClone`.
 * **GetClone** — one STM read. Reply the `Clone`.
-* **UpdateCloneTrConf** — STM: resolve; token; the clone; replace
-  `src_tr_conf_list`; `BumpSpRev`. Reply `clone_id`.
+* **UpdateCloneTrConf** — STM: resolve; token; the clone
+  (`loadLiveClone`); replace `src_tr_conf_list`; `BumpSpRev`. Reply
+  `clone_id`.
 * **AppendCloneBitmap** — one chunk of the SOURCE bitmap, addressed by the
-  PAIR (`src_slice_idx`, `bm_idx`). Chunk (s, b) holds the bytes of source
-  slice s's bitmap from b times C on, at most C of them, C being
-  `CloneBmChunkBytes` (Additions to `common/constants.go`): `src_slice_idx`
-  picks the source slice, `bm_idx` fixes the chunk's byte offset WITHIN
-  that one slice at the fixed quantum C and says nothing about any other
-  slice. No chunk's meaning depends on any other chunk's existence or
-  length, so a caller may append to any (s, b) at any time, in any order,
-  and may leave chunks unsent entirely; an absent chunk reads as all-zero
-  (all written) and a short chunk's missing tail reads as written, both the
-  safe direction (`architecture.md`, Bitmap push protocol). Validation:
-  `bitmap` non-empty (`INVALID_ARGUMENT`, `validateBitmap`, shared with
-  `AppendMigrationBitmap`), then a page of at most C bytes, else
-  `INVALID_ARGUMENT` — handler-local and NOT in `validateBitmap`, because it
-  is judged on this request alone (a page longer than a whole chunk fits
-  nowhere, whatever is already stored) and migration chunks carry no byte
-  cap of their own. STM: resolve; token; the clone; `src_slice_idx` below
-  `src_slice_cnt`, else `INVALID_ARGUMENT` (`src_slice_cnt` is the WHOLE
-  slice bound — `CreateClone` already holds it to `MaxSliceCntPerSp`, so a
-  second constant check here would judge nothing the geometry has not
-  judged already); `bm_idx` below `MaxCloneBmCnt`, else `INVALID_ARGUMENT`;
-  read the chunk at `CloneBitmapKey` of the pair — an absent key decodes to
-  an empty bitmap, which is what makes "create if absent" fall out and is
-  the same read the ceiling check needs; the stored length plus the page's
-  at most C, else `RESOURCE_EXHAUSTED` (GW7's ceiling-reached case: C bounds
-  the STORED chunk, not one page); **append** the bytes to that chunk — the
-  action of `architecture.md`, Clones, because the caller pages one source
-  slice's bitmap through `GetThinDeviceBitmap` and the pages of ONE chunk
+  PAIR (`src_slice_idx`, `bm_idx`); how a chunk is positioned and what an
+  absent chunk or a short tail means is `architecture.md`, Bitmap push
+  protocol. Validation: `bitmap` non-empty (`validateBitmap`, shared with
+  `AppendMigrationBitmap`), then a page of at most `CloneBmChunkBytes` —
+  handler-local and NOT in `validateBitmap`, because it is judged on this
+  request alone (a page longer than a whole chunk fits nowhere, whatever is
+  already stored) and migration chunks carry no byte cap of their own. STM:
+  resolve; token; the clone (`loadLiveClone`, so an append to a latched
+  clone is refused and the clone key is in the STM's read set either way);
+  `src_slice_idx` below `src_slice_cnt` (the WHOLE slice bound —
+  `CreateClone` already holds it to `MaxSliceCntPerSp`, so a second constant
+  check here would judge nothing the geometry has not judged already);
+  `bm_idx` below `MaxCloneBmCnt`; read the chunk at `CloneBitmapKey` of the
+  pair — an absent key decodes to an empty bitmap, which is what makes
+  "create if absent" fall out and is the same read the ceiling check needs;
+  the stored length plus the page's at most `CloneBmChunkBytes`, else
+  `RESOURCE_EXHAUSTED` (GW7's ceiling-reached case: the constant bounds the
+  STORED chunk, not one page); **append** the bytes to that chunk — the
+  action of `architecture.md`, Clones, because the pages of ONE chunk
   concatenate into exactly the bytes that chunk holds (`architecture.md`,
   Bitmap push protocol), so a replace would keep only the last page and
   place its bits at the chunk's own offset, which `PushCloneBitmap` would
@@ -1073,68 +966,61 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   regions the source really wrote. The `Clone` record is **not rewritten**:
   it carries no chunk count, and how many chunks a clone holds is how many
   `CloneBitmap` keys it has — which is what the drain and `PushCloneBitmap`
-  read. It opens with `loadLiveClone`, so an append to a latched clone is
-  `FAILED_PRECONDITION` (`dnv-worker.md` CLD1) and the clone key is in the
-  STM's read set either way; `BumpSpRev`. Reply `clone_id`.
+  read; `BumpSpRev`. Reply `clone_id`.
 
 ### Transfers
 
-All pure etcd, the standard mutator shape. **CreateTransfer** refuses an
-`ori_nqn` that breaks the NQN rules of `architecture.md`, Common
-validation, the dnv-namespace one included (`INVALID_ARGUMENT`), resolves
-the origin namespace per `architecture.md`, Transfers, mints `xfer_id` and
-appends to `xfer_name_list`. **DeleteTransfer** with `force` false
-*finalizes*: it additionally sets `suspended` true on the origin namespace
-in the same STM; with `force` true it *aborts* (the origin untouched); both
-delete the `Transfer` and its list entry and `BumpSpRev`. **GetTransfer** is
-one STM read. **UpdateTransferHosts** rewrites `allowed_hosts` (the
-transfer's own — no `CdcEntry` involvement). The replies carry `xfer_id`.
+All pure etcd, the standard mutator shape; the codes are those of
+`architecture.md`, Transfers. **CreateTransfer** refuses an `ori_nqn` that
+breaks the NQN rules of `architecture.md`, Common validation, the
+dnv-namespace one included, resolves the origin namespace per
+`architecture.md`, Transfers, mints `xfer_id` and appends to
+`xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
+additionally sets `suspended` true on the origin namespace in the same STM;
+with `force` true it *aborts* (the origin untouched); both delete the
+`Transfer` and its list entry and `BumpSpRev`. **GetTransfer** is one STM
+read. **UpdateTransferHosts** rewrites `allowed_hosts` (the transfer's own —
+no `CdcEntry` involvement). The replies carry `xfer_id`.
 
-**D-G.** `DeleteTransfer`'s finalize skips a vanished origin subsystem or
-`ns_idx` instead of failing: the transfer is being deleted either way, and
-the RPC must stay able to complete.
+GW16. **Finalize skips a vanished origin.** `DeleteTransfer`'s finalize
+skips an origin subsystem or `ns_idx` that no longer exists instead of
+failing: the transfer is being deleted either way, and the RPC must stay
+able to complete.
 
 ### Migrations
 
-* **CreateMigration** — locate `src_side_id` by a slice scan (`NOT_FOUND`);
-  its leg already holding two sides is `FAILED_PRECONDITION`; a candidate
-  unit for one DN (the candidate extent count is the group's `ext_cnt`; the
-  black list is seeded with the DNs of every leg and side of the group, and
-  the two tiers of `architecture.md`, Per-operation allocation, apply —
-  tier 1 also excludes those DNs' `location`s, read outside every
-  transaction through `grpDnLocations` because a location never changes
-  (`architecture.md`, Disk nodes); tier 2 rescans without the location
-  exclusion when tier 1 yields fewer than the **one DN** this RPC places —
-  never when it merely falls short of the oversampled candidate count — and
-  its candidates are merged behind tier 1's; each round reads the group
-  afresh — hence the candidate extent count, the black list and the
-  locations — before it scans). STM: resolve; token; re-verify the
-  topology; the group as this STM reads it holding a DN the round's read of
-  it did not is candidate changed (GW9: the round planned its black list
-  and tier-1 locations from the group as it read it, and a side hung off
-  the group since — a migration of its other leg, a spare — was not in that
-  group, so the pick may sit on that side's DN or in its failure domain,
-  and the next round plans from the group with the side in it; a pick on a
-  DN of the group always trips this, the scan having black-listed every DN
-  the round read; only a token-less request meets a gained DN here, since
-  the new side's `SpRev` bump fails a sent token first); re-verify the
-  capacity key; mint `migr_id` and `dst_side_id`; append the new `Side` to
-  the leg per `architecture.md`, Migrations (`provisioned` false, a
-  `cntlid_slot` other than the source side's, D-I); the destination DN's
-  bookkeeping and `BumpDnRev`; put the `Migration`; `BumpSpRev`. Reply
-  `migr_id`.
+The codes are those of `architecture.md`, Migrations.
 
-  **D-I.** A migration destination side's cntlid slot is the first
-  `cntlid_slot_list` entry that differs from the source side's; a list
-  offering no second value is `FAILED_PRECONDITION` (`architecture.md`,
-  cntlid slots).
+* **CreateMigration** — locate `src_side_id` by a slice scan; its leg
+  already holding two sides is refused; a candidate unit for one DN
+  (`pickDns`, with the black list and the two tiers of `architecture.md`,
+  Per-operation allocation; the group's DN locations are read outside every
+  transaction through `grpDnLocations`; each round reads the group afresh —
+  hence the candidate extent count, the black list and the locations —
+  before it scans). STM: resolve; token; re-verify the topology; the gain
+  check of `architecture.md`, Per-operation allocation — the group as this
+  STM reads it holding a DN the round's read of it did not is candidate
+  changed (GW9), which only a token-less request meets, since the new
+  side's `SpRev` bump fails a sent token first; re-verify the capacity key
+  (`verifyPick`); mint `migr_id` and `dst_side_id`; append the new `Side` to
+  the leg per `architecture.md`, Migrations (`provisioned` false, the
+  `cntlid_slot` of GW18); the destination DN's bookkeeping and `BumpDnRev`;
+  put the `Migration`; `BumpSpRev`. Reply `migr_id`.
+
+GW18. **The destination side's slot.** A migration destination side takes
+the first `cntlid_slot_list` entry that differs from the source side's
+(`migrDstCntlidSlot`), the one slot constraint a side has
+(`architecture.md`, cntlid slots); a list offering no second value is
+`FAILED_PRECONDITION`, a standing property of the SP's own configuration
+rather than a candidate problem.
+
 * **FinishMigration** — two-phase like `DeleteClone`. Phase 1 (read-only)
   opens with `openSp`, as `CreateMigration`'s planning read does: resolve,
   the `deleting` gate included, then the token, so a deleting SP is
   `FAILED_PRECONDITION` and a stale token `ABORTED` ahead of the migration
-  lookup and of any agent call; then the migration (`NOT_FOUND`); with
-  `force` false, the **destination** side's DN. Between the phases, `force`
-  false calls `GetSideInfo` and judges hydration from
+  lookup and of any agent call; then the migration; with `force` false, the
+  **destination** side's DN. Between the phases, `force` false calls
+  `GetSideInfo` and judges hydration with `hydrationComplete` from
   `migr_dst_info.dm_clone_info`; incomplete or unreachable is
   `FAILED_PRECONDITION`. Deciding STM: re-resolve and the token; apply the
   finish of `architecture.md`, Migrations (the destination side becomes the
@@ -1147,52 +1033,48 @@ the RPC must stay able to complete.
   delete the `Migration`, its chunks and its list entry); `BumpSpRev`. Reply
   `migr_id`.
 * **GetMigration** — one STM read.
-* **AppendMigrationBitmap** — validate non-empty; STM: resolve; token; the
-  migration; `bm_cnt` at `MaxMigrBmCnt` is `RESOURCE_EXHAUSTED`; put a
+* **AppendMigrationBitmap** — validate non-empty (`validateBitmap`); STM:
+  resolve; token; the migration; the `MaxMigrBmCnt` ceiling on `bm_cnt`; put a
   **new** chunk at the index `bm_cnt` (chunks are immutable, append-only);
   advance `bm_cnt`; `BumpSpRev`. Reply `migr_id`.
 
 ### Spare legs
 
-The requests carry `grp_id` but no slice id, so each handler must locate the
+The codes are those of `architecture.md`, Spare legs. The requests carry
+`grp_id` but no slice id, so each handler must locate the
 slice containing the group. `CreateSpareLeg` and `SwitchSpareLeg` do it by
 scanning the SP's slices in a plain snapshot (the model op re-verifies in
 its own STM); `DeleteSpareLeg` has no snapshot — its locate runs directly
 inside its one deciding STM below.
 
-* **CreateSpareLeg** — a `RedundNone` group is `INVALID_ARGUMENT`; a
-  candidate unit for one DN (the black list is the group's leg and side
-  DNs, under the same two-tier rule of `architecture.md`, Per-operation
-  allocation, as `CreateMigration`: tier 1 excludes their `location`s too,
-  and tier 2 drops that exclusion — when tier 1 offers nothing for the one
-  DN this RPC places — rather than leave the group unrepaired); then the
-  call of `model.CreateSpareLeg` with the token's revision as its expected
-  revision (GW6), whose STM also refuses while a spare of the group still
-  has an unprovisioned side (`FAILED_PRECONDITION` through
-  `ErrPrecondition`, reason "spare_unprovisioned" — `dnv-worker.md` AR8
-  step 3). Reply `leg_id`. (The spare's side is written `provisioned`
-  false.)
+* **CreateSpareLeg** — a `RedundNone` group is refused; a candidate unit
+  for one DN (`pickDns`, with the black list and the two tiers of
+  `architecture.md`, Per-operation allocation); then the call of
+  `model.CreateSpareLeg` with the token's revision as its expected revision
+  (GW6), whose STM also refuses while a spare of the group still has an
+  unprovisioned side (`FAILED_PRECONDITION` through `ErrPrecondition`,
+  `dnv-worker.md` AR8). Reply `leg_id`. (The spare's side is written
+  `provisioned` false.)
 * **DeleteSpareLeg** — STM: resolve; token; the group and the spare leg by
-  id (`NOT_FOUND`); a spare with two sides is `FAILED_PRECONDITION`, with
-  `CreateMigration`'s own two-sides message (a migration is running on it,
-  and releasing both sides would strand the `Migration`, `architecture.md`,
-  Spare legs); remove it from `spare_leg_list`, release its DN (with
-  `BumpDnRev`); `BumpSpRev`. Reply `leg_id`.
-* **SwitchSpareLeg** — the pre-read refuses either leg with two sides,
-  `FAILED_PRECONDITION`, with the same message; then the call of
-  `model.SwitchSpareLeg` with the token's revision as its expected revision
-  (GW6); its own preconditions apply (the spare's side must be
-  `provisioned` — `architecture.md`, Side provisioning protocol — and each
-  leg must have exactly one side, the pre-read's check again inside the
-  STM; either failing is `FAILED_PRECONDITION` through `ErrPrecondition`).
-  Reply `curr_active_leg_id` and `curr_spare_leg_id`.
+  id; a spare with two sides is refused with `CreateMigration`'s own
+  two-sides message (`architecture.md`, Spare legs, says why); remove it
+  from `spare_leg_list`, release its DN (with `BumpDnRev`); `BumpSpRev`.
+  Reply `leg_id`.
+* **SwitchSpareLeg** — the pre-read refuses either leg with two sides with
+  the same message; then the call of `model.SwitchSpareLeg` with the
+  token's revision as its expected revision (GW6); its own preconditions of
+  `architecture.md`, Spare legs, apply, the pre-read's two-sides check again
+  inside the STM among them, each `FAILED_PRECONDITION` through
+  `ErrPrecondition`. Reply `curr_active_leg_id` and `curr_spare_leg_id`.
 
 ### Bitmap reads
 
 Both are read-only and two-phase: one STM resolves, then one agent call.
-Both address the SP through its **primary** cntlr, so an SP with none is
-`FAILED_PRECONDITION`: there is no controller to ask, and a promotion makes
-the retry succeed, which is what a precondition means.
+Both address the SP through its **primary** cntlr (`openBitmapTarget`), so
+an SP with none is `FAILED_PRECONDITION`: there is no controller to ask, and
+a promotion makes the retry succeed, which is what a precondition means.
+The codes are those of `architecture.md`, Bitmap reads, and the ones the
+bullets below name.
 
 * **GetThinDeviceBitmap** — STM: resolve; the td by name to its `td_id`;
   the **primary** cntlr to its `addr_port` and, through `CnConfKey`, its
@@ -1208,15 +1090,12 @@ the retry succeed, which is what a precondition means.
 
 ## Agent calls
 
-AG1. **Placement.** Agent calls happen strictly outside STMs
-(`architecture.md`, STM discipline): *before* the STM for `CreateDiskNode`
-and `CreateControllerNode` (`Get*Size`), *after* the resolving STM for
-`Inspect*` and the bitmap reads, *between* the two STMs for `DeleteClone`
-and `FinishMigration` with `force` false — except that a `DeleteClone`
-whose clone is ALREADY `deleting` answers in phase 1 and makes no agent call
-at all (Clones, `dnv-worker.md` CLD3). When a call needs the cluster id, a
-plain pre-read of `ClusterConf` supplies it; the in-STM read stays
-authoritative.
+AG1. **Placement.** Agent calls happen outside STMs (`architecture.md`, STM
+discipline); the matrix below places each one. A `DeleteClone` whose clone
+is ALREADY `deleting` answers in phase 1 and makes no agent call at all
+(Clones). The two pre-STM size calls take the cluster id from a plain
+pre-read of `ClusterConf`, the in-STM read staying authoritative; the calls
+after resolution take it from the resolving transaction.
 
 AG2. **Connection.** Per call (`withAgentConn`): a ctx derived from the
 request's with `DefaultGatewayAgentTimeout` as its timeout, one plaintext
@@ -1242,7 +1121,8 @@ a token, the token check makes any interleaved mutation visible as
 exactly as safe as a one-STM RPC. A **token-less** request keeps the full
 re-resolution but not that visibility — GW6 is presence-based, so an
 interleaved mutation it did not observe stays invisible to it. That is the
-AG4 half of the token-less cost GW6 accepts.
+AG4 half of the token-less cost `architecture.md`, Revision keys and the
+sync fan-out, accepts.
 
 The complete call matrix:
 
@@ -1277,12 +1157,13 @@ environment lookup, an optional `--config` file); an I/O-free
 `optionsFromViper`; and comma-splitting of list flags through the local
 `splitList` idiom.
 
-CM2. **Flags.** `--grpc-network` (tcp by default) and `--grpc-address`
-(required), as in `cmd/dnv-agent`; `--etcd-endpoints` (required),
-`--etcd-dial-timeout` (defaulting to `common.DefaultEtcdDialTimeout`) and
-`--config`, as in `cmd/dnv-worker`. Deliberately no `--etcd-op-timeout`
-(`dnv-worker.md` EU5) and no default gRPC port: `--grpc-address` is
-required exactly as the agent's is, and no default-port constant exists.
+CM2. **Flags.** The gRPC flags are the agent command's network and address
+pair, the etcd flags the worker command's endpoints and dial timeout, and
+the optional config file is the one both carry; the gateway adds no flag of
+its own, and each flag keeps its sibling's default and required status.
+Deliberately no etcd operation-timeout flag (`dnv-worker.md` EU5) and no
+default gRPC port: the address is required exactly as the agent's is, and
+no default-port constant exists.
 
 CM3. **Startup.** `run` binds viper, reads the options, mints a startup
 trace id (`common.WithTraceId` of a fresh `common.NewTraceId`), derives a
@@ -1305,15 +1186,12 @@ attempt — duplicates on retry are expected and acceptable; `log.md`, etcd).
 The OS-command and file items of `log.md` R8 are implemented inside
 `LimitedOsClient`, which the gateway never uses.
 
-LG2. The records this component owns, all through the ctx forms:
-`gateway starting` (`grpc_network`, `grpc_address`, `etcd_endpoints`) and
-`gateway stopping` from `gateway.Run`, with `etcd client close failed`
-(`error`) between them when GW2's deferred close of the client fails;
-`gateway serving` (`network`, `address`) just before serving;
+LG2. The record names this component owns, all emitted through the ctx
+forms, are normative: `gateway starting` and `gateway stopping` from
+`gateway.Run`, with `etcd client close failed` between them when GW2's
+deferred close of the client fails; `gateway serving` just before serving;
 `signal received` and `second signal, exiting without a clean drain` from
-`main`'s `watchSignals`. All are Info except two Warns: the failed close,
-and the second signal — giving up the drain abandons in-flight RPCs, so it
-is not a routine event.
+`main`'s `watchSignals`.
 
 LG3. Protobuf in any gateway-authored record goes through
 `common.PbToLogValue` (`log.md` R10); `bytes` fields, the bitmaps, therefore

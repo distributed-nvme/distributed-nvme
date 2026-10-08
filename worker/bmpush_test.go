@@ -367,9 +367,9 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 	}
 }
 
-// TestBmObjectsPushIndependently checks BM3 and step 4 of the dnv-worker side
-// of architecture.md, Bitmap push protocol: different clones push
-// independently and may be in flight toward one agent at the same time.
+// TestBmObjectsPushIndependently checks what BM3 allows between objects:
+// different clones push independently and may be in flight toward one agent
+// at the same time.
 func TestBmObjectsPushIndependently(t *testing.T) {
 	captureLogs(t)
 	rec := newPushRecorder()

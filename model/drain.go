@@ -13,15 +13,12 @@ import (
 // The sp drain (dnv-worker.md, The sp drain): the three worker-side ops
 // that tear a LATCHED storage pool down in bounded steps.
 //
-// DeleteStoragePool no longer tears anything down. It commits `deleting = true`
-// plus one SpRev bump and returns (SPD3/SPD4), because the one-shot teardown it
-// replaced was unbounded in the DN dimension — already about 532 writes at the
-// then-maximum 16-slice shape, over the EtcdMaxTxnOps of the time, and the
-// slice ceiling has doubled since — and grown far past that shape by GrowSlice
-// (to common.MaxGrpCntPerSlice groups per group list), so no single
-// transaction could ever be proven legal. What the one-shot really
-// guaranteed was not atomicity but AGREEMENT: DN and CN budgets must never
-// disagree with the keys that describe them. That is preserved here by
+// DeleteStoragePool commits `deleting = true` plus one SpRev bump and returns
+// (SPD3/SPD4), because a one-shot teardown is unbounded in the DN dimension
+// and grows with GrowSlice (to common.MaxGrpCntPerSlice groups per group
+// list), so no single transaction could be proven legal. What a one-shot
+// would guarantee is not atomicity but AGREEMENT: DN and CN budgets must never
+// disagree with the keys that describe them. That is kept here by
 // construction rather than by a single STM — every batch releases budget in the
 // same transaction that shrinks the describing key, so at every commit boundary
 // the keys and the budgets agree exactly (SPD13).

@@ -54,8 +54,8 @@ func TestMain(m *testing.M) {
 // ---------------------------------------------------------------------------
 
 // recordingClient implements pb.GatewayClient for the tests. It embeds the
-// interface — the gatewayctl precedent — but every one of the 59 methods is
-// overridden below, so the embedded nil is unreachable today and the panic a
+// interface — the gatewayctl precedent — but every method is overridden
+// below, so the embedded nil is unreachable and the panic a
 // mis-driven test gets is rpcCall's named one rather than a bare nil
 // dereference.
 //

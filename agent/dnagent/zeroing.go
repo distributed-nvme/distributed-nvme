@@ -8,8 +8,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The background side-zeroing loop of
-// architecture.md, Side provisioning protocol — the dn twin of the DN8
+// The background side-zeroing loop of dnagent.md DN9 — the dn twin of the DN8
 // connect-retry registry (migr.go) and of the cn leg probers
 // (cnagent/healthcheck.go).
 //

@@ -12,12 +12,12 @@ import (
 
 // The gateway half of the sp drain (gateway.md, Storage pools and GrowSlice;
 // dnv-worker.md, The sp drain): DeleteStoragePool LATCHES and returns, and
-// everything that used to be its transaction is now the worker's.
+// the drain is the worker's.
 //
-// The teardown assertions of architecture.md, Storage pools, did not move with
-// it — they are still the only proof that a delete returns every extent it
-// charged — so the tests that own them run the drain here, through sptDrain,
-// exactly as the sp coordinator would. That is the stand-in the gateway suite
+// The teardown assertions of architecture.md, Storage pools, are the only
+// proof that a delete returns every extent it charged, so the tests that own
+// them run the drain here, through sptDrain, exactly as the sp coordinator
+// would. That is the stand-in the gateway suite
 // makes with `wctl drain-sp`, as it makes the worker's flips with
 // `wctl set-provisioned` and `wctl set-created` (gateway.md, Integration test
 // plan): a worker-role write driven from a gateway test, so that the gateway's
@@ -126,9 +126,9 @@ func sptChangedKeys(before map[string][]byte, after map[string][]byte) []string 
 // SpRev bump, and NOTHING else.
 //
 // It is asserted as a key-set difference rather than as a list of things that
-// are still there, because the failure this guards against is a leftover half
-// of the one-shot teardown — a cntlr key deleted, a DN credited, a bucket slot
-// released — and only a whole-cluster diff sees all of those at once.
+// are still there, because the failure this guards against is a half-done
+// teardown inside the delete — a cntlr key deleted, a DN credited, a bucket
+// slot released — and only a whole-cluster diff sees all of those at once.
 func TestDeleteStoragePoolLatchesOnly(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))

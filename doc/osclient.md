@@ -24,11 +24,10 @@ it.
   `common/osclient_fake.go` (the test double). Package `common`, alongside
   `constants.go` and `name_fmt.go` (the `Local*Path` files that go through
   `ReadProto` and `WriteProto`).
-* Consumers: primarily `dnv-agent` in both roles, for its dmsetup, mdadm,
-  nvme and nvmet-configfs work and for persisting the `Local*Path` protobuf
-  state files; the userspace copier of `architecture.md`, raid0 bitmap math
-  (future work outside `dnvctl`) may use it too. **All** OS command
-  execution and disk file IO in production code goes through an `OsClient`
+* Consumers: `dnv-agent` in both roles, for its dmsetup, mdadm, nvme and
+  nvmet-configfs work and for persisting the `Local*Path` protobuf state
+  files. **All** OS command execution and disk file IO in production code
+  goes through an `OsClient`
   — never call `os/exec` or `os.ReadFile`/`os.WriteFile` directly outside
   this file. This is what makes the logging rules of `log.md` R8 (its first
   two items) enforceable and makes every consumer unit-testable via
@@ -155,8 +154,7 @@ the method set is exactly the following, each taking the caller's ctx:
   or an exit code above zero — and `osBase.runProbe` is the only probe
   wrapper that applies it, so it is the one place a probe's exit code is
   classified. Every probe whose non-zero exit means "absent" runs through
-  it, a role package's own through `Cmd.RunProbe` or `Cmd.ListDir` — the cn
-  agent's thin_dump directory stat calls `Cmd.RunProbe` directly — and
+  it, a role package's own through `Cmd.RunProbe` or `Cmd.ListDir`, and
   answers "absent" only for a reported non-zero exit and an error for a run
   that did not answer; `dnagent.md` SH15 names the primitives whose callers
   act on that "absent".
@@ -166,16 +164,8 @@ the method set is exactly the following, each taking the caller's ctx:
   a removal decision is taken from — `Dm.List`, `Md.ListArrays`,
   `NvmeHost.ListAllSubsys`, `Nvmet.ListSubsystems` — and `Md.Gone`, the
   probe that judges a stop, propagate that error to their caller instead of
-  answering "nothing there". `Md.Walk` / `Md.Detail`, which read the md
-  groups from the same sysfs tree (`cnagent.md` CN12), never answer
-  "nothing there" for a read that did not answer either: a "/sys/block"
-  listing or a read of the matched array that did not answer is an error;
-  an array whose md listing or member dm-name read did not answer is
-  recorded as unanswered rather than failing the walk, and `Md.Detail`
-  returns that error only when no answering array holds the group's legs —
-  none matched, or the match stopped since the walk — and beside a match it
-  leaves it alone, so that a read of another sp's array never turns this
-  sp's md rows to error. The agents' sweeps record an enumeration that did
+  answering "nothing there"; the md walk applies the same rule
+  (`cnagent.md` CN12). The agents' sweeps record an enumeration that did
   not answer as a failure of the pass (`SweepResult.Fail`, which keeps it
   from being clean exactly as a leftover object does), because a listing
   that failed cannot prove a node holds nothing. `Dm.List` goes one step

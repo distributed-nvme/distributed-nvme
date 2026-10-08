@@ -35,17 +35,10 @@ connection per controller node, defeating centralization; it needs an
 anchor subsystem just to listen, because a referral-only nvmet port never
 comes up; and its AENs cannot carry per-host meaning.
 
-Who writes what it reads: the gateway creates and deletes `CdcEntry` at
-`CreateSubsystem` and `DeleteSubsystem`, puts a missing one back when an
-`UpdateSubsystemHosts`, `CreateCntlr`, `DeleteCntlr` or flag-changing
-`UpdateCntlrEnabled` commits, and rewrites `allowed_hosts` at
-`UpdateSubsystemHosts`; gateway and worker rewrite `nvme_tr_conf_list` at
-`CreateCntlr`, `DeleteCntlr`, `UpdateCntlrEnabled` and `ReplaceCntlr`
-(`architecture.md`, `service Gateway` — RPC specifications; `dnv-worker.md`
-MD8). `dnv-cdc` is the only serving consumer; the gateway and worker also
-read entries inside their own read-modify-write STMs (the `allowed_hosts`
-and `nvme_tr_conf_list` rewrites above), but nothing else ever renders them
-to a host.
+The gateway and the worker maintain the entries (`architecture.md`,
+Subsystems, namespaces; `architecture.md`, Cntlrs); `dnv-cdc`, the only
+process that renders them to a host, reads them and never writes them
+(WV6).
 
 One process, three parts:
 
@@ -59,12 +52,8 @@ dnv-cdc process  (--range …; one listener)
                    Features, Keep Alive, AER)
 ```
 
-Packages and files (`layout.md`, Directory tree and Dependency rules):
-
-| package | files | may import (internal) |
-|---|---|---|
-| `cdc` | `cdc.go` (`Run`, the dependencies), `watch.go` (The etcd watcher), `view.go` (The discovery service model), `logpage.go` (the DS3 and DS9 rendering), `server.go` (the listener, NP1), `conn.go` (the per-connection state, NP1's per-connection goroutines, and NP4 to NP13), `pdu.go` (the NP2 and NP3 codec) | `common`, `pb`, `etcdutil`, `model` |
-| `cmd/dnv-cdc` | `main.go` | `cdc`, `common`, `etcdutil`, plus cobra and viper |
+The package `cdc` is the engine and `cmd/dnv-cdc` the command; what each
+may import is `layout.md`, Dependency rules.
 
 Out of scope here: how operators distribute cdc endpoints to hosts (static
 nvme-cli scripts or the nvme-stas configuration; mDNS discovery, TP-8009,
@@ -73,7 +62,7 @@ suite leaves out (Integration test plan).
 
 ## Constants and schema
 
-### Additions to `common/constants.go`
+### Constants this document owns
 
 The shared constants of `dnv-cdc` are one region of the constant block in
 `common/constants.go`, which is authoritative for their comments:
@@ -84,9 +73,10 @@ The shared constants of `dnv-cdc` are one region of the constant block in
   `CdcAdrFamIpv6`, its other accepted value (CM1, CM2); `DefaultCdcTrSvcId`,
   the default `--tr-svc-id`, the standard discovery port;
 * `CdcRangeAll`, the `--range` default: every range (CM1);
-* `CdcMaxAdminSqSize`, the admin submission queue's entry count: CAP.MQES
-  is one less, Connect's SQSIZE is capped at it (NP4), and it is the ASQSZ
-  of every discovery log entry (DS3);
+* `CdcMaxAdminSqSize`, the admin submission queue's entry count: CAP.MQES,
+  a 0's-based value, is one less, Connect's 0's-based SQSIZE is capped at
+  CAP.MQES so the queue never holds more entries than this (NP4), and it is
+  the ASQSZ of every discovery log entry (DS3);
 * `CdcAerl`, Identify's AERL: up to `CdcAerl` + 1 outstanding AERs per
   connection (NP11);
 * `CdcMaxH2CData`, ICResp's MAXH2CDATA and the framing cap of `readPdu`: a
@@ -105,7 +95,7 @@ The shared constants of `dnv-cdc` are one region of the constant block in
 * `DefaultCdcRescanInterval`, the seconds between retries of a failed etcd
   scan (WV5).
 
-### Addition to `model/keys.go`
+### Key helpers this document owns
 
 `CdcEntryKey` and `CdcEntryPrefix` are `model`'s (`dnv-worker.md` MD2), and
 so is the parser `ParseCdcEntryKey`, in the same style as `ParseDnRevKey`:
@@ -113,9 +103,8 @@ a malformed key parses as not ok, and the watcher skips it (WV2).
 
 ### Schema
 
-This document adds nothing to `pb/schema.proto`: `CdcEntry`, with `nqn`,
-`nvme_tr_conf_list` and `allowed_hosts`, and its key schema are
-`architecture.md`'s (Key table).
+`CdcEntry` — `nqn`, `nvme_tr_conf_list` and `allowed_hosts` — and its key
+schema belong to `architecture.md`, Key table.
 
 ## The discovery service model
 
@@ -182,7 +171,7 @@ inside a visible entry. An entry with an empty `allowed_hosts` is visible to
 no host (DS4), so while its list stays empty nothing that happens to it
 impacts a host: not its creation, not a field change and not its deletion.
 An `allowed_hosts` edit that keeps a host's membership changes no rendered
-byte and therefore does not impact it (the cdc suite asserts this).
+byte and therefore does not impact it.
 
 The decision renders no view: the event changes one entry, whose place in
 the DS5 order its key fixes, so a view differs exactly when the records the
@@ -253,8 +242,13 @@ serially. Log `cdc scan complete` after each scan.
 
 WV2. **Parse and filter.** Keys parse with `ParseCdcEntryKey`; a key whose
 shard code is not owned is skipped silently — it is expected, the key-field
-filter of `architecture.md`, dnv-cdc — and a malformed key or value logs
-`cdc entry skipped` and is dropped (the rule of `dnv-worker.md` SW2).
+filter of `architecture.md`, dnv-cdc — and a malformed key logs
+`cdc entry skipped` and is dropped, from a scan and from a watch event
+alike (the rule of `dnv-worker.md` SW2). A malformed value is dropped the
+same way by a scan; in a watch event it ends the watch generation instead,
+because `WatchTyped` reports a value it cannot decode as the watch's error,
+so the rescan that follows (WV4) is what skips it: one such put costs a
+rescan and a re-render of every active host.
 
 WV3. **Events.** A put upserts the entry (log `cdc entry applied`, `op`
 put); a delete removes it (`op` delete). Either way the DS6 impact pass runs
@@ -355,7 +349,8 @@ both digests disabled regardless of what the host requested (a controller
 enables only what both sides support), MAXH2CDATA `CdcMaxH2CData`.
 
 NP4. **One admin queue.** The first capsule MUST be a Fabrics Connect of
-the admin queue; SQSIZE is honored up to `CdcMaxAdminSqSize`. A Connect of
+the admin queue; SQSIZE, a 0's-based value, is capped at CAP.MQES, so the
+admin queue never exceeds `CdcMaxAdminSqSize` entries. A Connect of
 any other queue is refused with connect invalid parameters — there are no
 I/O queues. The Disable SQ Flow Control attribute is honored; without it,
 SQHD is maintained in every response.
@@ -455,18 +450,14 @@ every host is already tested against.
 
 ## `cmd/dnv-cdc`
 
-CM1. **Flags.** A cobra root command with viper and no subcommands; the
-environment prefix is `DNV_CDC_`, and every flag is also settable through a
-`--config` file. `--etcd-endpoints` (required), the comma-separated client
-endpoints; `--etcd-dial-timeout`, in seconds, defaulting to the worker's
-`DefaultEtcdDialTimeout`; `--range`, comma-separated hex digits each
-claiming the shards h0 to hf, defaulting to `CdcRangeAll`; `--tr-type`,
-defaulting to `DefaultCdcTrType`, the one value it accepts; `--adr-fam`,
-`DefaultCdcAdrFam` by default, or `CdcAdrFamIpv6`; `--tr-addr` (required),
-the listen address; `--tr-svc-id`, the listen port, defaulting to
-`DefaultCdcTrSvcId`; and `--config`, the optional config file. `--range`
-defaults to every range, mirroring the worker's `--roles` defaulting to all
-three roles: a single-instance deployment needs no sharding flags.
+CM1. **Flags.** A cobra root command with viper and no subcommands: the
+environment prefix is `DNV_CDC_`, every flag is also a config-file key and
+an environment variable, and the optional `--config` file is read when it
+is named. `--etcd-endpoints` and `--tr-addr` are required. `--range`
+defaults to `CdcRangeAll`, every range, mirroring the worker's `--roles`
+defaulting to all three roles: a single-instance deployment needs no
+sharding flag. The flags, their types and their defaults are the code's,
+and `--help` lists them.
 
 CM2. **Validation.** Refuse to start on a `--range` element outside
 [0-9a-f], a duplicate element, a `--tr-type` other than tcp, an unparsable
@@ -484,11 +475,10 @@ the watcher's first scan has landed. Before that scan the registry holds no
 state at all — empty, not "no subsystems" — yet a host answered out of it
 would be told there are no subsystems. After a control-plane restart in
 which etcd answers later than `dnv-cdc` listens, every discovery controller
-would tell every host so at once, which is the very shape the cdc suite
-uses to make nvme-stas disconnect everything (Integration test plan). So
-until then nothing is accepted (NP1), and every `firstScanLogInterval` of
-waiting logs `cdc waiting for first scan` at Error. A SIGTERM while waiting
-still ends the process (CM5).
+would tell every host so at once, and nvme-stas would disconnect the data
+connections it made. So until then nothing is accepted (NP1), and every
+`firstScanLogInterval` of waiting logs `cdc waiting for first scan` at
+Error. A SIGTERM while waiting still ends the process (CM5).
 
 CM5. **Lifecycle logs, the stop half.** `cdc stopping` on SIGTERM or
 SIGINT, after the listener and the watcher have stopped.
@@ -504,42 +494,32 @@ with its own `--tr-addr`, and omits `--range`, whose default is every range
 
 The records of `dnv-cdc` are JSON records under the rules of `log.md`, R1
 to R12, at Info unless stated. Record names and attribute names are
-normative: the cdc suite parses them. The "etcd …" records `etcdutil` emits
-for every scan, decode and watch event come on top (`log.md`, etcd), and
-`dnv-cdc` has no gRPC records (`grpc.md`, Wiring). The records this binary
-owns:
+normative, and so are the reason values of `cdc entry skipped` and
+`host disconnected`, so that the cdc suite can read them (Integration test
+plan); the normative record names and those reasons are constants in
+`cdc`, never formatted. The "etcd …" records `etcdutil` emits for every
+scan, decode and watch event come on top (`log.md`, etcd), and `dnv-cdc`
+has no gRPC records (`grpc.md`, Wiring). The normative records and the
+decision each marks:
 
-* `cdc starting` with `ranges`, `endpoints`, `tr_addr` and `tr_svc_id`, and
-  `cdc waiting for first scan`, at Error, once per `firstScanLogInterval`
-  while the first scan has not landed (CM4);
-* `cdc scan complete` with `entries` (the owned count) and `rev`, at every
-  scan and rescan (WV1);
-* `cdc watch restarting` with `error` and `compacted` (a bool) (WV4);
-* `cdc entry applied` with `key` and `op`, put or delete (WV3);
-* `cdc entry skipped` with `key` and `reason`: `malformed_key` or
-  `malformed_value` (WV2), `foreign_tr_type` or `foreign_adr_fam` (DS3);
-* `host connected` with `hostnqn`, `hostid`, `cntlid`, `kato_ms` and
-  `remote` (NP5);
-* `host disconnected` with `hostnqn`, `cntlid` and `reason`: `closed`,
-  `keep_alive`, `pdu_error` or `shutdown` (NP13);
-* `view changed` with `hostnqn`, `genctr` and `numrec`, per impacted host
-  (DS6);
-* `aen sent` with `hostnqn`, `cntlid` and `genctr`, per delivered AER
-  (DS8);
-* `pdu error` with `remote` and `reason` (NP2);
-* `cdc accept failed`, at Error, with `error`, on a listener error that is
-  not the shutdown (NP1);
-* `signal received` with `signal` at the first SIGINT or SIGTERM, and
-  `second signal, exiting without a clean drain`, at Warn, with `signal`
-  (CM5);
-* `etcd client close failed`, at Error, with `error`, best effort, when
-  closing the client fails at stop (CM5) or on a start whose listener
-  cannot be opened (CM4);
-* `cdc stopping` (CM5).
+* `cdc starting` and `cdc stopping`, the two ends of the lifecycle (CM4,
+  CM5);
+* `cdc scan complete`, a scan or rescan that landed (WV1);
+* `cdc watch restarting`, a watch generation ended by an error, a
+  compaction included (WV4);
+* `cdc entry applied`, a put or a delete folded into the held state (WV3);
+* `cdc entry skipped`, with the reason: a malformed key or value dropped
+  (WV2), or a transport element the record cannot name (DS3);
+* `host connected` and `host disconnected`, the latter with the reason, the
+  life of a connection that completed Connect (NP5, NP13);
+* `view changed`, once per impacted host, with its new GENCTR (DS6);
+* `aen sent`, once per delivered AER (DS8);
+* `pdu error`, a terminal framing error (NP2).
 
-Only these records are normative, and the cdc suite may key off none of
-the Error and Warn ones: those exist so a failure is visible in the
-diagnostics, not so the suite can count them.
+The Error and Warn records — the wait for the first scan (CM4), a failed
+accept (NP1), the second signal (CM5) and a failed client close (CM4, CM5)
+— and the signal record are diagnostics, not normative: they exist so a
+failure is visible, and the suite keys off none of them.
 
 ## Integration test plan
 
@@ -578,56 +558,19 @@ named in no entry's allowed hosts, discovers from the first host under an
 explicit host NQN and host id. The suite's ports collide with no other
 suite's.
 
-**Cases.** The cases run in a fixed order, fail-fast, each against a wiped
-cdc prefix, its own fabricated cluster ids and a restarted fleet whose logs
-start empty, so nothing leaks between cases and every count a case makes
-counts only its own records. The target is built once at setup, and the
-one case that changes it restores it before it finishes, so every case sees
-the same target.
-
-* smoke — bring-up: scan, one entry, per-range serving at the instance
-  boundary, a real host connect through the cdc, one read of the dm-zero
-  backend, and the clean deletion of the entry;
-* matrix — the full grid of every instance against every identity, exact
-  in every cell: twins identical, each host's union complete, an entry
-  with an empty `allowed_hosts` visible to no identity, a genuinely empty
-  log for the ghost from every instance and for the second host from one
-  half, two records for the subsystem on two ports, an entry of a second
-  cluster, and each host connecting to exactly the subsystems it may see,
-  ending with two live paths to the two-port subsystem;
-* lowlevel — plain nvme-cli with nvme-stas stopped, over one persistent
-  discovery connection per host: the AEN uevent reaches exactly the
-  impacted hosts, each host's GENCTR moves only on its own impact, an
-  `allowed_hosts` edit that keeps a host's membership moves nothing for
-  it, the deletion of an entry with an empty `allowed_hosts` moves nothing
-  for either host, and the controllers stay live across several keep-alive
-  periods;
-* stas — nvme-stas end to end: its discovery connections to every
-  instance, data connections with no manual command to exactly the entries
-  each host sees, auto-connect of a new entry, re-point of a subsystem
-  whose entry moves its transport the way a cntlr replacement does, with
-  the device surviving throughout, auto-disconnect of a deleted entry, and
-  a mass disconnect when the prefix is wiped;
-* ha — with nvme-stas running: a killed twin costs nothing while the other
-  serves its half alone, a restarted twin serves exactly what its twin
-  serves, and a full-fleet kill and relaunch under live hosts leaves every
-  data connection undisturbed and the AEN path working.
-
-**Rules exercised.** The smoke case exercises the launch (CM1 to CM3),
-WV1, WV3, DS2 at the instance boundary, DS7 (a put while no host is
-connected moves no view) and the connection records of NP5 and NP13; the
-matrix case DS1 to DS5 against real kernels — DS1's all-cluster watch,
-DS2's sharding, DS3's record per transport, DS4's filtering (an entry with
-an empty `allowed_hosts` included) and DS5's identical twins; the lowlevel
-case DS6 (an entry with an empty `allowed_hosts` included), DS7, DS8 and
-NP11 on stock kernels with no nvme-stas anywhere, and NP10 on live
-controllers; the stas case DS6's AENs driving nvme-stas's connect,
-re-point and disconnect with no operator action, and NP2 and NP12 on the
-in-capsule Discovery Information Management command nvme-stas sends to
-every discovery controller; and the ha case DS2's twins, WV1's recovery of
-identical served state from etcd alone and DS11's reconnect and catch-up.
-Left to the unit tests, never forced on hardware: log paging past one
-page, keep-alive expiry and AER-limit exhaustion.
+**Cases.** The cases run in a fixed order and fail fast, each against a
+wiped cdc prefix, its own fabricated cluster ids and a restarted fleet
+whose logs start empty, so nothing leaks between cases and every count a
+case makes counts only its own records; the target is built once at setup,
+and the one case that changes it restores it. Together they exercise the
+launch (CM1 to CM3), the watcher's scan, events and recovery of identical
+served state from etcd alone (WV1, WV3), the discovery service model on
+real kernels (DS1 to DS8 and DS11, an entry with an empty `allowed_hosts`
+included), the connection records and keep-alive of NP5, NP10 and NP13,
+the AER path (NP11), and NP2 and NP12 on the in-capsule Discovery
+Information Management command nvme-stas sends to every discovery
+controller. Left to the unit tests, never forced on hardware: log paging
+past one page, keep-alive expiry and AER-limit exhaustion.
 
 Out of scope: etcd quorum loss and compaction races; TLS and in-band
 authentication; non-TCP transports; digests; scale — every shard code,

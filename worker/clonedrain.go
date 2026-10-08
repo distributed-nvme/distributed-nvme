@@ -1,7 +1,7 @@
 // The worker half of the clone drain (dnv-worker.md, The clone drain, rules
 // CLD1-CLD12).
 //
-// DeleteClone no longer sweeps a clone's bitmap chunks. It LATCHES the clone —
+// DeleteClone LATCHES the clone (CLD4) —
 // `deleting = true`, the destination namespaces resumed, one SpRev bump — and
 // the sp coordinator removes the chunk keys in batches of a constant size and
 // then the clone itself.

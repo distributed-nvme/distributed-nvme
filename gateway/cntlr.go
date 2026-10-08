@@ -237,7 +237,7 @@ func (s *Server) CreateCntlr(
 			slot := req.GetCntlidSlot()
 			allowed := false
 			for _, item := range conf.GetCntlidSlotList() {
-				// At most CnCntlidSlotCnt (8) entries, so a linear scan is
+				// At most CnCntlidSlotCnt entries, so a linear scan is
 				// the right shape.
 				if item == slot {
 					allowed = true
@@ -297,7 +297,7 @@ func (s *Server) CreateCntlr(
 			minter := newSpIdMinter(conf)
 			cntlrId = minter.mint()
 			// primary and disabled are both false: a new cntlr is a standby
-			// that the election of architecture.md, Automatic reactions, may
+			// that the failover election of dnv-worker.md AR5 may
 			// later promote, and it is enabled
 			// from birth, which is what puts its CN into every CdcEntry
 			// below.
@@ -341,7 +341,7 @@ func (s *Server) CreateCntlr(
 //
 // It refuses a primary and refuses an enabled cntlr (`primary == true` or
 // `disabled == false` ⇒ FAILED_PRECONDITION): disabling is what triggers the
-// re-election of architecture.md, Automatic reactions, and takes the
+// failover election of dnv-worker.md AR5 and takes the
 // controller's namespaces ANA-inaccessible, so requiring the disable first
 // means a failover has already happened by the
 // time the record disappears — hosts have moved before their paths do.
@@ -431,9 +431,8 @@ func (s *Server) DeleteCntlr(
 // namespaces) — a host that discovers a disabled controller finds only
 // inaccessible paths there. Enabling puts the
 // address back. Disabling the last enabled cntlr is allowed and stops IO;
-// that is the operator's call to make. dnvctl does NOT warn about it in v1: the
-// warning would need a pre-read, and dnvctl issues no RPC the operator did not
-// type (dnvctl.md CT8). It is deferred until this reply carries the hint.
+// that is the operator's call to make, and dnvctl does not warn about it
+// (dnvctl.md CT8).
 //
 // Enabling a cntlr that is still the primary also marks it settling
 // (dnv-worker.md HL2): its cn agent converged the standby shape while it was

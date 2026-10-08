@@ -36,7 +36,7 @@ NVMET=/sys/kernel/config/nvmet
 GRPC_PORT=29528
 TR_SVC_ID=4200
 CLUSTER=0x1
-EXTENT_SIZE=67108864 # 64 MiB — MinDnExtSize; the proto field is raw bytes
+EXTENT_SIZE=67108864 # common.MinDnExtSize; the proto field is raw bytes
 # GetDnSize reports the [D13] *data area*, not the raw device: the fixed
 # DnDataOffset (256 MiB) prefix — header block, the two volume-table slots and
 # the clone-metadata area — is already subtracted, so the CP does no further
@@ -153,8 +153,8 @@ assert_gated() {
 }
 
 # assert_provisioning_or_ok accepts the two statuses a side may legally hold at
-# provisioned = false (rows 2 and 3 of the converge matrix in architecture.md,
-# Side provisioning protocol):
+# provisioned = false (the converge matrix's zeroing and zeroed rows with a
+# record present, dnagent.md DN9):
 # PROVISIONING while the background goroutine still has extents to zero, and OK
 # once every bit is set. Zeroing 64-128 MiB on a loop device is a `fallocate`,
 # so which of the two a phase-1 reply carries is a genuine race — do not pick
@@ -249,9 +249,9 @@ helper_ok() {
 
 # ctl drives one agent. Every call carries the current stage's trace id.
 #
-# The driver's default 10 s deadline suits the read-only RPCs, but one
-# converge pass runs dozens of OS commands, each with its own 3 s soft / 5 s
-# hard budget (architecture.md, Common validation) — enabling a migration
+# The driver's default --timeout suits the read-only RPCs, but one
+# converge pass runs dozens of OS commands, each with its own soft and hard
+# budget (architecture.md, Common validation) — enabling a migration
 # destination alone creates a clone-metadata wrapper, an nvme connection, a
 # dm-clone and reloads the export stack, with the two concurrent migrations
 # converging on both nodes at once. Syncups get a much larger budget; a
@@ -543,7 +543,7 @@ host_subsys_present() {
 
 # residue <sp16> — everything still on this node for one storage pool; the
 # teardown assertions require empty output.
-# The dm-name pattern covers the side device too, now that it is dm kind d4.
+# The dm-name pattern covers the side device too (dm kind d4).
 #
 # It is one of the absence helpers. residue, export_dms, dm_kind_names,
 # fenced_linears, the three agent-log readers below, host_subsys_present and
@@ -574,7 +574,7 @@ residue() {
 # before the side is fully zeroed — so it deliberately does NOT match kind d4
 # (DnSideName): the side device is exactly what phase (a) is supposed to
 # build, and `residue` would report it. See common/name_fmt.go for the kind
-# constants (every dn kind is the role letter `d` in front of the old digit)
+# constants (every dn kind is the role letter `d` and one hex digit)
 # and DnErrorName/DnLinearName for the field order,
 # dnv-<cluster16>-<dn16>-<kind>-<sp16>-<side16>-<cn16>.
 #
@@ -646,14 +646,13 @@ any_clone_discards() {
 #
 # The command and its verb are bound to variables BEFORE the verb lists: a
 # list piped into index() is the input its argument is evaluated against, so
-# `["blkdiscard"] | index(.cmd)` reads `.cmd` off the list and raises an error
-# on EVERY command record. That is how this helper once printed no command at
-# all: jq reported each error and went on to the next record, and the errors
-# went unseen behind a `2>/dev/null || true`. Dropping that alone would not
-# have failed the call under a C jq, which exits with the last record's
-# status (see the note above clone_discards): only a log that happened to end
-# in a command record would have. Run as one evaluation, the command pass
-# below fails on the first such error.
+# `["blkdiscard"] | index(.cmd)` would read `.cmd` off the list and raise an
+# error on EVERY command record — jq reports each error and goes on to the
+# next record, so behind a `2>/dev/null || true` the helper would print no
+# command at all, and a C jq exits with the last record's status (see the
+# note above clone_discards), so only a log that happened to end in a command
+# record would fail the call. Run as one evaluation, the command pass below
+# fails on the first such error.
 mutations() {
 	local log=${1:-$WORK/agent.log}
 	jq -rn '
@@ -944,8 +943,9 @@ cleanup() {
 		rmdir "$NVMET/ports/1" 2>/dev/null
 	fi
 
-	# Defensive: nothing the current agent builds is ever left suspended
-	# ([D12]), but pre-[D12] debris would wedge the reads below.
+	# Defensive: nothing the agent builds is ever left suspended ([D12]),
+	# but a device a killed agent or a failed dmsetup command left suspended
+	# would wedge the reads below.
 	resume_suspended
 
 	# Unformat each loop device: zeroing the 4 KiB header is enough, because
@@ -969,12 +969,12 @@ cleanup() {
 # reaches it.
 #
 # Why it exists at all: every teardown verb above removes dm devices BY KIND,
-# and the kind literals they pass are the new, role-lettered ones (c0…cb,
-# d0…d5). Residue an older binary left on a shared lab VM carries the old
-# single-digit spelling (0…b), so those verbs walk straight past it and it
-# stays there forever, pinning loop devices and nvmet objects the next run
-# needs. This one reads no kind at all — everything named `dnv*` goes, both
-# spellings and the pre-arena `dnv--clone--vg-*` LVM debris with it.
+# and the kind literals they pass are the role-lettered ones (c0…cb, d0…d5).
+# Residue on a shared lab VM whose name carries no such kind — a bare-digit
+# kind field, or an LVM `dnv--clone--vg-*` node — is walked straight past by
+# those verbs and stays there forever, pinning loop devices and nvmet objects
+# the next run needs. This one reads no kind at all — everything named `dnv*`
+# goes, whatever its spelling.
 #
 # That is also why it is not wired into cleanup — though not because it would
 # destroy a CONCURRENT run's objects: so does cleanup, which kills every
@@ -1063,8 +1063,8 @@ lab_wipe() {
 		# nvmet, port links first — a subsystem still linked to a port cannot be
 		# removed, and a namespace must be disabled before its backing dm device
 		# can go. drop_subsystems takes ONE nqn kind digit; the wipe wants the
-		# plan's whole `nqn.2024-01.io.dnv*` glob, residue of a kind this build
-		# no longer mints included, so the sweep is written out here.
+		# plan's whole `nqn.2024-01.io.dnv*` glob, every kind digit included,
+		# so the sweep is written out here.
 		if [ -d "$NVMET" ]; then
 			local subsys ns host link
 			for link in "$NVMET"/ports/*/subsystems/"$NQN_PREFIX"*; do
@@ -1108,11 +1108,11 @@ lab_wipe() {
 		resume_suspended
 	done
 
-	# The residue is the report AND the exit status. It used to be the report
-	# alone, on the reasoning that this verb is best-effort like every other
-	# one here — but the driver runs both VMs concurrently and discards their
-	# status, so a wipe that left one VM full of debris printed the other
-	# VM's clean report and the run said PASS. A cleanup that cannot fail is
+	# The residue is the report AND the exit status, although this verb is
+	# best-effort like every other one here: the driver runs both VMs
+	# concurrently and their output interleaves, so a wipe that only printed
+	# its report could leave one VM full of debris behind the other VM's
+	# clean report, and the run would say PASS. A cleanup that cannot fail is
 	# a cleanup nobody can trust, which is the same rule the sweep this suite
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
@@ -1410,9 +1410,9 @@ assert_no_residue() { # sp
 # The sweep removes what the desired state no longer wants, verifies every
 # removal with a probe that cannot block, and replies with the leftover code
 # while anything is still there. The first `dmsetup remove` of a dm-clone
-# whose source has just died is killed at the 3 s soft timeout; its kernel
+# whose source has just died is killed at CmdSoftTimeout; its kernel
 # operation completes when the queued hydration IO fails at fast_io_fail_tmo
-# (5 s), and the pass after that finds the device gone.
+# (DefaultNvmeFastIoFailTmo), and the pass after that finds the device gone.
 #
 # Re-driving is the worker's own rule, and the loop is the suite playing that
 # part: in production the retry comes from the CHECK round — the agent
@@ -2452,9 +2452,9 @@ case_migr_full() {
 		assert_eq "$got" "${PAT_SHA[$m]}" "migr $m full-copy sha256"
 		# Discard-based skipping must not happen without bitmaps. The
 		# provisioning `blkdiscard --zeroout` of architecture.md,
-		# Side provisioning protocol, that replaced the old side-create
-		# trim targets the side device (dnv-*-d4-*), never a dm-clone
-		# (dnv-*-d3-*), so it does not match this filter either.
+		# Side provisioning protocol, targets the side device
+		# (dnv-*-d4-*), never a dm-clone (dnv-*-d3-*), so it does not
+		# match this filter either.
 		local discards
 		discards=$(helper "${MDSTDN[$m]}" any_clone_discards)
 		[ -z "$discards" ] ||
@@ -2519,7 +2519,7 @@ case_migr_bitmap() {
 		# Those zeros are *guaranteed* by the destination's
 		# `blkdiscard --zeroout` provisioning (architecture.md,
 		# Side provisioning protocol) rather than hoped for from
-		# discard-reads-zeros, which was never a hardware guarantee ([D15]).
+		# discard-reads-zeros, which no hardware guarantees ([D15]).
 		sshv "$vm" "dd if=$dev of=$WORK/tail-$m.bin bs=1M skip=64 count=64 status=none"
 		got=$(sshv "$vm" "dd if=/dev/zero bs=1M count=64 status=none > $WORK/zero-$m.bin; cmp -s $WORK/tail-$m.bin $WORK/zero-$m.bin && echo zeros || echo data")
 		assert_eq "$got" zeros "migr $m second 64 MiB must be zeros"
@@ -2547,10 +2547,10 @@ case_migr_bitmap() {
 # ACTUALLY holds minus what the desired state wants, so a teardown that cannot
 # finish REPORTS what is left — an accepted reply carrying the leftover code 4
 # and naming the objects — and the next pass of the same revision finishes it.
-# The defect this replaced forgot the object together with the plan that named
-# it, and nothing ever looked again.
+# A teardown that forgot the object together with the plan that named it
+# would leave nothing to look again.
 #
-# `dead_source` is the DN's own version of that defect. A migration
+# `dead_source` is the DN's own shape of that forgetting. A migration
 # destination hydrates through an nvme connection to its source; the source
 # export is then yanked with the destination never told, and the destination
 # is torn down immediately. The order the sweep has to keep is the whole
@@ -2963,8 +2963,7 @@ case_restart() {
 		--bm-cnt 1)
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side2"
 	# The post-restart log covers the startup reconcile and these re-applies.
-	# This is also the resume-at-k net (architecture.md,
-	# Side provisioning protocol): `blkdiscard` is in
+	# This is also the resume-at-k net (dnagent.md DN9): `blkdiscard` is in
 	# mutations()' verb list, so a reconcile that re-zeroes an already-complete
 	# side — the resume logic reading its bits wrong — fails the case here.
 	for idx in 1 2; do
@@ -3004,9 +3003,8 @@ usage: bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \\
 cases: ${CASES[*]}
 
 --wipe is the ONE-TIME lab wipe: it removes EVERY dnv object on both VMs,
-including residue an older binary left under the pre-role-letter dm kind
-spelling, then runs the ordinary cleanup. It runs no case. Never run it
-while another suite is using these VMs.
+whatever dm kind spelling its name carries, then runs the ordinary cleanup.
+It runs no case. Never run it while another suite is using these VMs.
 EOF
 	exit 2
 }

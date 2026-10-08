@@ -16,12 +16,12 @@ import (
 //
 // Every test in this file pins one property of the same rule: what the agent
 // REMOVES is derived by enumerating the node and subtracting the desired
-// state, and nothing about a past failure is ever remembered. The old retire
-// phase derived removals from "the plan I applied last time minus the plan I
-// am applying now" and then overwrote the applied plan whether or not the
-// removals worked, so a removal that failed was forgotten together with the
-// plan that named it — which is how one killed `mdadm --detail` leaked an
-// array and its two leg wrappers for ever.
+// state, and nothing about a past failure is ever remembered. A removal
+// derived from a remembered plan — "the plan I applied last time minus the
+// plan I am applying now", the applied plan overwritten whether or not the
+// removals worked — forgets a failed removal together with the plan that
+// named it, and one killed `mdadm --detail` would then leak an array and its
+// leg wrappers for ever.
 //
 // The tests are therefore written against OBJECTS and REPLY CODES, not
 // against the shape of any plan: a sweep that only works while its cntlr's
@@ -66,8 +66,8 @@ func cnSweepAssertCode(
 }
 
 // cnSweepAssertDetails is the other half of a leftover reply: the worker logs
-// these details and an operator reads them, so a code-4 reply that names
-// nothing is a regression of its own.
+// these details and an operator reads them, so a ReplyCodeLeftover reply
+// that names nothing is a fault of its own.
 func cnSweepAssertDetails(
 	t *testing.T,
 	reply *pb.AgentReply,
@@ -143,7 +143,7 @@ func cnSweepFirstRemoval(node *fakeNode) (int, string) {
 }
 
 // cnSweepAssertNoRemoval is the negative form, with the whole call log in the
-// failure so a regression is diagnosable from one run.
+// failure so a fault is diagnosable from one run.
 func cnSweepAssertNoRemoval(t *testing.T, node *fakeNode) {
 	t.Helper()
 	if idx, call := cnSweepFirstRemoval(node); idx >= 0 {
@@ -648,7 +648,7 @@ func TestReconcileSweepsAtStartup(t *testing.T) {
 // again must find its request where it left it.
 //
 // The sweep is what makes this one rule instead of two: nothing about
-// DISABLE is special-cased any more, it is simply a plan that wants nothing.
+// DISABLE is special-cased; it is simply a plan that wants nothing.
 func TestDisableLevelSweepsEverything(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -737,7 +737,7 @@ func TestDisableCreatesNoParkTarget(t *testing.T) {
 // TestStandbyKeepsOnlyStandbyObjects pins the failover half (architecture.md,
 // Failover): the
 // sweep is the whole implementation of "the desired set shrank to the standby
-// shape", with no retire step naming any object by hand.
+// shape", with no removal step naming any object by hand.
 //
 // What a standby must NOT keep is everything that writes: the md arrays whose
 // superblocks only one CN may own, the thin-pool whose metadata lives on the
@@ -806,23 +806,22 @@ func TestStandbyKeepsOnlyStandbyObjects(t *testing.T) {
 	assertParked(t, srv, node, testNs, testTd, "demoted ns-dev")
 }
 
-// TestRetireByEnumeration is the case the old incremental retire could never
-// repair. It computed what to remove as "the plan I applied last time minus
-// the plan I am applying now" and then overwrote the applied plan, so a group
-// whose `mdadm --stop` failed was never named again — not by the next pass,
-// which diffs the same request against itself, and not by any later one. The
-// sweep derives the same work from the node, so the retry is simply the next
-// pass.
+// TestFailedRemovalIsRetriedByEnumeration pins that the retry of a failed
+// removal is the next pass: the sweep derives the work from the node, so a
+// group whose `mdadm --stop` failed is named again by the re-sync at the same
+// revision. A diff of the plan applied last time against the plan being
+// applied would name it on no later pass — not the next, which diffs the same
+// request against itself, and not any after it.
 //
 // The re-sync runs at the SAME revision on purpose: that is what the worker
-// issues while a reply is non-zero, and it is exactly the pass the old diff
-// turned into a no-op.
+// issues while a reply is non-zero, and it is exactly the pass such a diff
+// would turn into a no-op.
 //
 // The sp sits at SP_LEVEL_NO_THINPOOL so that the group's array is the only
 // thing above it: a live pool concat may never shrink (CN13, dmutil.go), so
 // on a serving pool the removal of a group is refused by design and would
 // hide what this test is about.
-func TestRetireByEnumeration(t *testing.T) {
+func TestFailedRemovalIsRetriedByEnumeration(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
 	grown := cntlrReq(reqOpts{revision: 2, primary: true, raid1: true,
@@ -890,10 +889,10 @@ func TestRetireByEnumeration(t *testing.T) {
 //
 // The namespace here moves to another td, so the desired backing is a raid0
 // and not the dm-error: the park can only come from reading the ns-dev's live
-// table and recognising the device it maps as unwanted. The old retire phase
-// answered the same question from the plan it had applied last time, which is
-// memory this design does without — and which is simply absent after a
-// restart, when the live table is still exactly where the last pass left it.
+// table and recognising the device it maps as unwanted. A plan applied last
+// time would answer the same question from memory, which this design does
+// without — and which is simply absent after a restart, when the live table
+// is still exactly where the last pass left it.
 func TestParkBeforeRemoval(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: twoTds()})
@@ -918,7 +917,7 @@ func TestParkBeforeRemoval(t *testing.T) {
 		"cmd dmsetup remove "+raid0Name(srv, testTd),
 	)
 	// The park's target is the NEW td's dm-error, which is what the ns-dev
-	// has to sit on while the old one is dismantled under it.
+	// has to sit on while the previous one is dismantled under it.
 	parked := node.callsMatching("cmd dmsetup reload " + nsDev)
 	if len(parked) == 0 {
 		t.Fatalf("the ns-dev was never reloaded:\n%s",
@@ -959,7 +958,7 @@ func TestThinDeleteOnlyUnderWantedPool(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: twoTds()})
 
 	// The live volume carries a dev_id no request of this cntlr names — what
-	// an interrupted pass or an older build leaves behind. Only the table can
+	// an interrupted pass leaves behind. Only the table can
 	// say which id the pool has to be told about.
 	// 5 is neither td's dev_id and neither td's id, so a `delete 5` can only
 	// have come from the table.
@@ -1126,7 +1125,7 @@ func TestUnownedXferConnectionSwept(t *testing.T) {
 // nothing of ours, so once no stored cntlr names it the only thing left that
 // can attribute it is what its namespaces are backed by.
 //
-// Attribution by the stored plan is what this replaces, and it could not
+// Attribution by a stored plan could not
 // survive the drop-at-pointer-removal of architecture.md, Teardown by sweep:
 // the file that held the NQN list is dropped the moment the pointer goes,
 // which is precisely when the subsystem has to be found. A subsystem whose
@@ -1352,12 +1351,12 @@ func TestUnansweredEnumerationRemovesNothing(t *testing.T) {
 }
 
 // TestNamespaceRemovalIsTheChainsAlone: a namespace that left `ns_list`
-// while its subsystem stays is removed by CN21's L1 and by nothing else. The
-// build phase used to drop it too, from its own listing, which put a second
-// removal beside the chain: one that ran when the pass's enumeration had not
-// answered — the pass that must touch nothing — and that skipped L1's move to
-// inaccessible, so a host holding the path lost it under IO instead of being
-// told to stop using it.
+// while its subsystem stays is removed by CN21's L1 and by nothing else. A
+// removal in the build phase, from its own listing, would put a second
+// removal beside the chain: one that runs when the pass's enumeration has not
+// answered — the pass that must touch nothing — and that skips L1's move to
+// inaccessible, so a host holding the path would lose it under IO instead of
+// being told to stop using it.
 func TestNamespaceRemovalIsTheChainsAlone(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -1835,7 +1834,7 @@ func TestUnansweredNamespaceListingRemovesNoNamespace(t *testing.T) {
 // that stays. Its removal is L1's and nothing else's
 // (TestNamespaceRemovalIsTheChainsAlone), and P0 comes first because
 // disabling the namespace closes the ns-dev under it, which does not complete
-// on a dm-suspended device — the state an older build's leftover is in here.
+// on a dm-suspended device — the state the leftover is in here.
 // A stopped pass runs neither, so nothing touches the namespace: the reply
 // names it — or, when that is the listing that did not answer, the nvmet
 // listing — and the next pass whose listings answer parks the ns-dev before
@@ -1848,7 +1847,7 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 			srv, node := newTestServer(t)
 			syncupBoth(t, srv, reqOpts{
 				revision: 2, primary: true, suspended: true})
-			// An older build's leftover: the ns-dev held dm-suspended, its
+			// The leftover of a failed park: the ns-dev held dm-suspended, its
 			// table still over the raid0.
 			nsDev := node.dms[nsDevName(srv, testNs)]
 			nsDev.table = agent.LinearTable(testTdSize/512,
@@ -1924,7 +1923,7 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 // host's write made to the raid0 directly. That is live whenever a clone
 // still hydrating is deleted with force, in three shapes: a namespace serving
 // through the dm-clone (auto_resume; once more with its ns-dev left
-// dm-suspended by an older build, which is resumed where it is), one parked
+// dm-suspended by a failed reload, which is resumed where it is), one parked
 // while the clone ran (auto_resume false — the delete's latch resumes it in
 // the same revision), and a namespace new in that revision. On the stopped
 // pass each stays off the raid0 and none is moved to the optimized group —
@@ -1959,10 +1958,9 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 		name string
 		from reqOpts
 		to   reqOpts
-		// suspended leaves the ns-dev dm-suspended after the fixture, as
-		// an older build held one for a namespace suspend (architecture.md,
-		// Namespace suspend semantics): kept where it is, it is still
-		// resumed.
+		// suspended leaves the ns-dev dm-suspended after the fixture, as a
+		// failed reload leaves one (architecture.md, Namespace suspend
+		// semantics): kept where it is, it is still resumed.
 		suspended bool
 		want      []nsWant
 	}{
@@ -1971,7 +1969,7 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 				clones: []*pb.Clone{cloneOf()}},
 			reqOpts{revision: 3, primary: true}, false,
 			[]nsWant{{testNs, 1, "clone", "1"}}},
-		{"held suspended by an older build",
+		{"held suspended by a failed reload",
 			reqOpts{revision: 2, primary: true,
 				clones: []*pb.Clone{cloneOf()}},
 			reqOpts{revision: 3, primary: true}, true,

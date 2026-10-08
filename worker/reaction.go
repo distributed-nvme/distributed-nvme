@@ -17,39 +17,11 @@
 // no spare before (else the winner's create filled the list) and the two
 // picked different DNs (AR2).
 //
-// Two spec ambiguities are resolved here, both in one place so a reader does
-// not have to reconstruct them:
-//
-//  1. AR2 says a `reaction skipped` ends the pass, while AR6, AR7 and AR8
-//     each define conditions under which a reaction is simply NOT APPLICABLE
-//     to a given cntlr, slice or leg. Taken literally both cannot hold. The
-//     invariant AR2 is protecting is that AT MOST ONE ACTION IS APPLIED PER
-//     SP PER PASS, and "not applicable, keep looking" is not an action, so
-//     the pass CONTINUES past: AR5's no failover candidate (AR7's
-//     sole-primary variant is defined as "AR5 found none", so AR7's sole-cntlr
-//     repair would otherwise be unreachable); AR5's shared_state and
-//     same_error, each a primary the pass declines to move, which can last
-//     until an operator acts; AR6's grow_pending, grp_list_full,
-//     meta_ladder_cap and no_data_group (AR6 scopes pending to "no grow OF THAT
-//     KIND", and all four can hold indefinitely — a grow deferred on the CN, a
-//     ceiling of architecture.md, GrowSlice — so ending the pass would disable
-//     AR7 and AR8 for as long as they do); AR7's shared_state and same_error,
-//     each a primary it declines to replace, which can last as long as AR5's
-//     and move the scan to the next cntlr (an unhealthy standby is still
-//     replaced, and AR8 still runs); and AR8's leg_has_two_sides,
-//     spare_list_full, spare_unprovisioned and step 2's "wait for the pending
-//     spare", which move the scan to the next candidate leg (a migration lasts
-//     hours, only an operator frees a spare slot (AR8 step 4), a spare whose DN
-//     failed while it zeroed stays unprovisioned until that DN finishes zeroing
-//     it or an operator deletes it, and a spare that cannot be connected stays
-//     pending for up to leg_unhealthy — one that is never reported at all,
-//     for good).
-//     Everything else ends the pass as AR2 says: every
-//     model.ErrPrecondition, every empty allocator scan and every transient
-//     op failure.
-//  2. AR7 and AR8 do not say which of several eligible cntlrs / legs to take.
-//     Both use the smallest id, the rule AR5 states explicitly, so a pass is
-//     deterministic and two overlapping owners choose the same target.
+// Which skips end the pass and which move the scan on is AR2's list, and AR8
+// takes the smallest leg_id first. One order the doc leaves to the code: AR7
+// does not say which of several eligible cntlrs is replaced first, and
+// replaceTarget takes the smallest cntlr_id, so a pass is deterministic and
+// two overlapping owners choose the same target.
 package worker
 
 import (
@@ -142,8 +114,8 @@ const (
 const (
 	// msgReactionSuppressed is AR3, logged on the transition only: an SP at
 	// sp_level >= SP_LEVEL_NO_THINPOOL would otherwise produce one record per
-	// cntlr_interval forever. A `deleting` SP is NOT suppressed any more — it
-	// drains (SPD6, drain.go) — so this record no longer has that case.
+	// cntlr_interval forever. A `deleting` SP drains (SPD6, drain.go) and is
+	// not suppressed here, so this record has no such case.
 	msgReactionSuppressed = "reaction suppressed"
 	// msgPoolStatusUnparsable is AR6's "an unparsable line is skipped and
 	// logged once per change".
@@ -630,9 +602,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	}
 	p := w.newPass(state, cc)
 	if state.Conf.GetDeleting() {
-		// SPD6: AR3 splits. A LATCHED SP runs exactly one drain step and
-		// nothing else — regardless of sp_level suppression, because a doomed
-		// SP must drain at any level. drain.go owns the rest.
+		// SPD6: `deleting` is no AR3 suppression. A LATCHED SP runs exactly
+		// one drain step and nothing else — regardless of sp_level
+		// suppression, because a doomed SP must drain at any level. drain.go
+		// owns the rest.
 		//
 		// It also runs ahead of the SP's OWN bdev_conf gate below, deliberately:
 		// the drain reads no geometry at all — no block size, no stripe, no
@@ -746,15 +719,13 @@ func (w *spWorker) primaryInfo(cntlrId uint64) *pb.CntlrInfo {
 	return child.driver.infoSnapshot()
 }
 
-// reactionSuppressed is AR3's surviving half: no reaction runs at
+// reactionSuppressed is AR3: no reaction runs at
 // sp_level >= SP_LEVEL_NO_THINPOOL, where an operator is in charge
 // (architecture.md, SpLevel). The record is emitted on the transition only.
 //
-// The `deleting` half of AR3 has moved (SPD6): a latched SP no longer merely
-// suppresses its reactions, it runs the drain of drain.go instead, and
-// reactionPass routes it there before reaching this gate. This function is
-// therefore never called with `deleting` set, and the sp_level test below stays
-// the whole of it.
+// A `deleting` SP is not suppressed, it drains (SPD6): reactionPass routes it
+// to drainStep before reaching this gate, so this function is never called
+// with `deleting` set and the sp_level test below is the whole of it.
 func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 	conf := p.state.Conf
 	reason := ""
@@ -785,8 +756,8 @@ func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 // tryFailover is AR5. It reports whether the pass ends here.
 //
 // The no-candidate case and the two refusals (shared_state, same_error)
-// deliberately do NOT end the pass: see the file comment, ambiguity (1). They
-// are AR5's skips that let the next reaction run.
+// deliberately do NOT end the pass (AR2): they are AR5's skips that let the
+// next reaction run.
 func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	if p.primary == nil {
 		return false
@@ -1261,8 +1232,8 @@ func growExtCnt(
 
 // tryReplaceCntlr is AR7. It reports whether the pass ends here.
 //
-// A primary its two refusals hold (replaceTarget) does NOT end the pass: see
-// the file comment, ambiguity (1).
+// A primary its two refusals hold (replaceTarget) does NOT end the pass
+// (AR2).
 func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	oldId, old := w.replaceTarget(ctx, p)
 	if old == nil {
@@ -1444,7 +1415,7 @@ func otherCntlrAddrs(p *spPass, oldId uint64) []string {
 // survivor shares it.
 //
 // With the default `location = addr_port` this excludes exactly the CNs
-// spCnAddrs already does, so AR7 behaves as it always has.
+// spCnAddrs already does.
 func otherCntlrLocations(p *spPass, oldId uint64) []string {
 	var locs []string
 	for _, addrPort := range otherCntlrAddrs(p, oldId) {
@@ -1537,12 +1508,12 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			// ready. Every other AR8 skip names the create — the step the
 			// procedure would otherwise have started with.
 			//
-			// The wait holds THIS group only (see the header): it used to
-			// end the pass on the premise that it clears within one
-			// provisioning, which a spare whose leg keeps reading ERROR
-			// outlives by up to leg_unhealthy. Another unhealthy leg of the
-			// same group finds the same pending spare and waits too, so the
-			// scan cannot create a second spare for the group here.
+			// The wait holds THIS group only (AR2): a spare whose leg keeps
+			// reading ERROR stays pending for up to leg_unhealthy, and ending
+			// the pass would hold every other group's repair that long.
+			// Another unhealthy leg of the same group finds the same pending
+			// spare and waits too, so the scan cannot create a second spare
+			// for the group here.
 			w.reactionSkipped(ctx, reactionSpareSwitch, reasonSparePending,
 				withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))...,
 			)
@@ -1678,11 +1649,12 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 // second repair of the same group create a second spare rather than wait for
 // one that will never arrive. A spare is dead when its side has an err_epoch —
 // the worker cannot reach its DN or the side reports an ERROR row (AR8 case
-// 2's condition), which is how a leg parked by case 2 was retired — or when
-// its leg has been unhealthy for leg_unhealthy, which is how a leg parked by
-// case 1 was. Dead is a current state, not an identity: a parked leg whose DN
-// comes back, or that recovers and fails again, is pending again by the same
-// tests, and holds its group's next repair until it reads OK or times out.
+// 2's condition), which a leg parked by case 2 still carries — or when its
+// leg has been unhealthy for leg_unhealthy, which a leg parked by case 1 has
+// already reached. Dead is a current state, not an identity: a parked leg
+// whose DN comes back, or that recovers and fails again, is pending again by
+// the same tests, and holds its group's next repair until it reads OK or
+// times out.
 // A dead spare that is still unprovisioned — its DN failed while it zeroed —
 // makes no room for another: step 3 holds the group instead (tryLegRepair,
 // model.UnprovisionedSpare).
@@ -1692,11 +1664,10 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 // fresh spare's side is provisioned the primary starts connecting to it and
 // may report the leg ERROR until the connect completes, which stamps the
 // leg's err_epoch at once, with no grace (healthMonitor.observe). Read bare,
-// that transient turned the very spare this step waits for into a dead one,
-// and a pass landing inside it created a SECOND spare for one repair —
-// measured in the e2e suite's react case, a transient of 4.7 to 6.4 s against
-// a 5 s pass — contrary to step 2, and holding an extent and a connection per
-// cntlr for a spare no failure asked for.
+// that transient would turn the very spare this step waits for into a dead
+// one, and a pass landing inside it would create a SECOND spare for one repair
+// — contrary to step 2, and holding an extent and a connection per cntlr for a
+// spare no failure asked for.
 //
 // A spare whose leg keeps reading ERROR is dead after leg_unhealthy — the wait
 // AR8 already gives an active leg before it repairs one — and step 3 replaces
@@ -1794,7 +1765,7 @@ func (w *spWorker) createSpare(
 // location; it is black-listed by address anyway.
 //
 // With the default `location = addr_port` this excludes exactly the
-// black-listed DNs' own domains, so AR8 behaves as it always has.
+// black-listed DNs' own domains.
 func grpLocations(state *model.SpState, grp *pb.Group) []string {
 	var locs []string
 	for _, addrPort := range grpAddrs(grp) {

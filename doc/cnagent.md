@@ -1,10 +1,11 @@
 # cnagent.md — the cn role of `dnv-agent`
 
-This document owns the cn role of `dnv-agent`: the additions the role makes
-to the pieces both roles share (the cn constants and name helpers of
-`common`, the probe-IO carve-out that keeps the leg health probes out of
-the `OsClient`, the `NvmeHost.DisconnectDevice` wrapper and the cn-only
-flag of `cmd/dnv-agent`), and the role package `cnagent`, which serves
+This document owns the cn role of `dnv-agent`: the cn's part of the
+packages both roles share (the cn constants and name helpers of `common`,
+the cn side of the probe-IO carve-out that keeps the leg health probes out
+of the `OsClient`, which controller `NvmeHost.DisconnectDevice` selects
+and the cn-only flag of `cmd/dnv-agent`), and the
+role package `cnagent`, which serves
 `ControllerNodeAgent`: the server type and its lock mapping, the startup
 reconcile, `GetCnSize`, `SyncupCn` with the node's base state,
 `SyncupCntlr` with its whole converge (the pass structure and the
@@ -41,20 +42,20 @@ thin-metadata reader — is not promoted into `agent`: by the same split
 rule a wrapper with a single role is role code and lives in
 `agent/cnagent/` (`md.go`, `clonemeta.go`, `thinbm.go`). There is no LVM
 anywhere in dnv (`architecture.md`, [D14]): the clone-metadata arena is a
-slot allocator over one loop device whose registry is the kind-`cb`
-wrapper linears of Additions to `common`. Agents never talk to etcd
+slot allocator over one loop device whose registry is the clone-metadata
+wrapper linears of Names and constants in `common`. Agents never talk to etcd
 (`layout.md`, Dependency rules). The gRPC server carries the server
 interceptors of `grpc.md`, Wiring; the cn agent's outbound connections are
 only `nvme connect`s, never gRPC.
 
-## Additions to the shared pieces
+## The cn's part of the shared packages
 
-### Additions to `common`
+### Names and constants in `common`
 
 The cn constants live in `common/constants.go` and the cn name helpers in
 `common/name_fmt.go`. The parsers that invert the names, `ParseDmName` and
 `ParseNqn`, are shared by both roles and are stated in `dnagent.md`,
-Additions to `common`: strict, because a half-decoded name is one the
+Names and constants in `common`: strict, because a half-decoded name is one the
 caller would remove. The constants this document relies on, whose values
 and comments `common/constants.go` holds:
 
@@ -67,14 +68,15 @@ and comments `common/constants.go` holds:
 * `CnCloneMetaAreaSize` and `CnCloneMetaUnit`, the clone-metadata arena
   (`architecture.md`, [D14]; CN5, CN18): one sparse file (`CnTmpFilePath`)
   on the CN tmpfs, attached to a single loop device, carved into fixed
-  units by the cn slot allocator whose registry is the kind-`cb` wrapper
+  units by the cn slot allocator whose registry is the clone-metadata wrapper
   dm tables themselves. The first is the `truncate` size of that file, and
   so the arena size; the second is the allocation granularity, the cn
   twin of `DnCloneMetaUnit`, and is deliberately not called an "extent",
   which everywhere else in dnv means the DN/CN allocation unit.
 * `CnLegProbeInterval` and `CnLegProbeStallSeconds`, the pace of a
-  primary's leg health-probe rounds and how long one probe IO may stay in
-  flight before the leg is reported stalled (CN11). Probes are
+  primary's leg health-probe rounds and how long one probe round — the
+  write and its read-back — may stay in flight before the leg is reported
+  stalled (CN11). Probes are
   single-flight per leg and run outside every lock.
 * `LegHealthBlockSize` and `LegHealthMagic`, the health block at the tail
   of the leg's meta region (`architecture.md`, Group on-leg layout: meta
@@ -97,7 +99,9 @@ and comments `common/constants.go` holds:
   that drifted on one side would keep every primary whose level suppresses
   a row the settle reads settling for as long as that level stands.
 
-Three dm kinds in the cn namespace, `c9`, `ca` and `cb`, are the cn's own
+Three dm kinds in the cn namespace are the cn's own — `DmKindCnLeg`, the
+leg wrapper; `DmKindCnGrp`, the `RedundNone` group device;
+`DmKindCnCloneMeta`, the clone-metadata wrapper — with their name helpers
 (methods on `NameFmt`), and `architecture.md`, dm-device kinds, points here
 for them:
 
@@ -124,26 +128,18 @@ for them:
 [D1] of `architecture.md` leaves the leg wrapper agent-internal; fixing
 its name here makes it observable (`dmsetup ls`, cleanup by prefix)
 without making it part of any cross-component contract — nothing outside
-the cn agent ever addresses these three devices. For kind `cb` the name is
-more than convenience: the kind-`cb` tables are the allocation registry
-(CN5, CN18), so the prefix-plus-kind filter of `dmsetup ls` must be
-unambiguous.
+the cn agent ever addresses these three devices. For the clone-metadata
+wrapper the name is more than convenience: its tables are the allocation
+registry (CN5, CN18), so the prefix-plus-kind filter of `dmsetup ls` must
+be unambiguous.
 
-The kind field of a dm name is a role letter plus a hex digit (`DmKind`:
-`DmKindCnPoolMeta` through `DmKindCnCloneMeta` on this side,
-`DmKindDnError` through `DmKindDnMigrMeta` on the dn's). On a node
-running both agents, whose cn and dn ids can collide numerically, the
-letter keeps a name from decoding into the wrong role, and CN21 removes
-by the names it reads back: a name decoded into the wrong role is a
-device torn down by the wrong agent (`architecture.md`, dm-device kinds).
-NQN kinds keep their bare digit: an NQN already carries
-the dnv prefix, and neither role enumerates the other's NQN kinds.
-
-`IsDnvNqn` exists for the case the parsers' strictness creates: an NQN
-that carries the dnv prefix but decodes to nothing is not the user-chosen
-host-facing NQN that a false answer from `ParseNqn` otherwise means, and
-CN21 leaves it alone rather than attributing it by its namespaces — a
-malformed name must not get a subsystem deleted.
+The role letter of a dm kind, and why a dnv-prefixed NQN that decodes to
+nothing (`IsDnvNqn`) is never touched, are `architecture.md`, dm-device
+kinds; CN21 removes by the names it reads back, so it attributes by that
+letter and leaves such an NQN's subsystem alone rather than attributing
+it by its namespaces. NQN kinds keep a bare digit (`architecture.md`,
+NQNs): an NQN already carries the dnv prefix, and no kind digit means one
+thing to the dn and another to the cn.
 
 One `common/name_fmt.go` formatter is pair-addressed: a clone bitmap chunk
 is addressed by the pair `(src_slice_idx, bm_idx)` (`architecture.md`,
@@ -153,60 +149,31 @@ segments, where `LocalMigrBmPath` carries the migration chunks' flat
 `src_slice_idx` is below the clone's `src_slice_cnt`, itself at most
 `MaxSliceCntPerSp` (enforced by `CreateClone`), and `bm_idx` is below
 `MaxCloneBmCnt`, which caps the chunks of one source slice's bitmap, each
-of the fixed capacity `CloneBmChunkBytes` (`gateway.md`, Additions to
-`common/constants.go`). The file name is only an address: the persisted
+of the fixed capacity `CloneBmChunkBytes` (`gateway.md`, Constants this
+document owns). The file name is only an address: the persisted
 `PushCloneBitmapRequest` inside the file is what CN2 decodes the pair
 from.
 
 ### Leg-probe IO leaves the `OsClient`
 
-The health probe of `architecture.md`, [D6], reads the block back with
-O_DIRECT: a buffered read (`ReadBlock`) of a just-written block would be
-served from the page cache and observe no device IO at all, making the
-read-back vacuous. But the probe must also be free to hang forever — a
-probe against a pathless leg (a controller connected with no
-controller-loss timeout queues IO indefinitely) is how a silent target
-stall is detected. `LimitedOsClient` is a `DefaultOsClientLimit`-slot
-semaphore held across the blocking syscall, and one dead or partitioned DN
-can back far more legs on a CN than there are slots (`MaxSideCntPerDn`
-bounds one disk node's sides): wedged probes would starve every OS
-operation on the node — including the teardown `nvme disconnect` that is
-the release mechanism for a wedged probe (CN11, CN21) and the mdadm and dm
-commands the automatic reactions need (`architecture.md`, Automatic
-reactions). CN1 keeps the probers out of the lock hierarchy; this rule
-completes the carve-out for the semaphore.
-
-The CN11 probers therefore do not go through the process's
-`LimitedOsClient`. They call the raw block-IO syscalls directly, through
-the two helpers `common/osclient.go` exports, `WriteBlockAt` and
-`ReadBlockDirectAt`, whose exact semantics `osclient.md`, Exported raw
-helpers and the probe-IO carve-out, owns: raw, unlimited, no ctx, no
-logging, no cached fd, a fresh open per call; a buffered pwrite followed
-by fsync, and an O_DIRECT read with an aligned buffer, where the offset
-and length must be block-aligned and a short read is an error. The
-`OsClient` interface carries no direct block read: the prober is the only
-caller of such a read. The cn agent reaches the helpers through the small
-fakeable dependency `LegProbeIO`, defined in `healthcheck.go`, with a
-write half and a direct read half, so unit tests can still script probe
-IO.
-
-The real implementation calls the exported helpers and logs one record
-per half itself — the records of `log.md`, OS commands and file IO, with
-the path, offset and length (plus the error on failure), never the data —
-because these calls do not pass through the `OsClient` that would
-otherwise log them; the fake mirrors `FakeOsClient`'s fn-field style. The
-ctx exists only to carry the CN2 per-attempt trace id into that record
-and to fast-fail an attempt whose ctx is already done (silently — an
-operation that never happened is not logged); it cannot interrupt a
-syscall in flight, which is why the raw helpers take none. Writes need no
-direct twin: `WriteBlockAt` ends in fsync, which forces the write to the
-device and surfaces its error.
-
-The carve-out: probe IO is the one sanctioned direct-syscall path in dnv;
-it may block indefinitely by design; it must never run under a lock (CN1)
-nor through the semaphore. A transport-health gate (skipping a round when
-the sysfs walk shows no live and optimized path) is not part of this
-rule; it may be added later as an optimization.
+The carve-out itself — the two raw helpers `WriteBlockAt` and
+`ReadBlockDirectAt`, why the read-back is O_DIRECT, why probe IO may block
+indefinitely and must never hold a lock or a semaphore slot, and the two
+records the prober writes — is `osclient.md`, Exported raw helpers and the
+probe-IO carve-out. The cn's part: the CN11 probers are the only callers
+of the helpers outside `common/osclient.go` itself, whose
+`LimitedOsClient.WriteBlock` wraps the write half, and they reach the
+helpers through `LegProbeIO`, the small fakeable
+dependency defined in `healthcheck.go`, with a write half and a direct
+read half, so unit tests can still script probe IO. Its real
+implementation calls the exported helpers and logs the two records
+itself, on the prober's per-attempt trace id (CN2); its fake mirrors
+`FakeOsClient`'s fn-field style. The ctx a half takes exists only to carry
+that trace id into the record and to fast-fail an attempt whose ctx is
+already done (silently — an operation that never happened is not logged);
+it cannot interrupt a syscall in flight. So a prober is cancelled and
+never joined (`cmd/dnv-agent cn`; CN11), and every round issues its IO:
+no transport-health gate skips a round.
 
 ### `NvmeHost.DisconnectDevice`
 
@@ -233,26 +200,23 @@ It is the only cn-only flag. `--nvmet-port-id` is a both-roles flag and
 lives in `dnagent.md` CM2 itself: the cn resolves and floor-checks it exactly as the dn
 does (`dnagent.md` CM3), and a cn that keeps the default co-owns the default port with
 a dn agent on the same node (`architecture.md`, Controller node, common).
-The flag is not a licence to run two cn agents on one kernel: a distinct
-port id separates their ports and nothing else, while the host-facing
-subsystem NQN, `XferNqn` and `CnMdArrayName` carry no cn id, and CN
-placement keeps two cntlrs of one SP off one kernel only while that
-kernel's cn agents share one `location`, and even then only at its first
-tier and not reliably between a failed cntlr and its automatic replacement
-— never under the default `location` (`dnagent.md` CM2; `architecture.md`, Controller
-node, common, and Per-operation allocation).
 
-CN-CM2. `runCn` mirrors `runDn` (`dnagent.md` CM4): bind viper, require the common
-values (`--capacity` is optional), resolve and floor-check
-`--nvmet-port-id` (`dnagent.md` CM3), set up a signal-notified ctx, build the process's single `NameFmt` and
-`LimitedOsClient`, construct the `CnAgentServer` with `NewCnAgentServer`
-from the OS client, the name formatter, the local store, the capacity, the
-transport conf and the port id, and call `agent.Serve` with the role's
-reconcile, a register func for `ControllerNodeAgent`, and no `dnagent.md` SH27
-background waiter — the cn joins no background task: a sweep's background
-`nvme disconnect` (CN10) holds nothing a restarted agent needs, and its
-CN11 probers are cancelled at `rootCtx`, never joined (a wedged direct
-read would hang shutdown forever; Leg-probe IO leaves the `OsClient`).
+Run at most one cn agent per kernel: the flag is not a licence for two,
+and the rule — the three cn names that carry no cn id, and why placement
+does not reliably keep two cntlrs of one SP off one kernel — is
+`architecture.md`, Controller node, common. CN21's attribution assumes
+the rule as well: a host-facing subsystem that no cntlr this agent holds
+claims and no namespace attributes is unowned and removed at node level,
+and another cn agent's subsystem passes through that very shape while it
+is being built.
+
+CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
+differences. `--capacity` is optional, since zero is a value (CN3). And
+`agent.Serve` gets no `dnagent.md` SH27 background waiter — the cn joins
+no background task: a sweep's background `nvme disconnect` (CN10) holds
+nothing a restarted agent needs, and its CN11 probers are cancelled at
+`rootCtx`, never joined (a wedged direct read would hang shutdown
+forever; `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
 ## The cn role — package `cnagent`
 
@@ -265,11 +229,10 @@ and the ns-dev backing and ANA state machines of CN16; `syncup_cn.go` and
 `syncup_cntlr.go` the two converges; `leg.go` the CN10 side connections
 and wrappers; `healthcheck.go` the CN11 probers and their `LegProbeIO`
 (direct syscalls, never the `OsClient`); `md.go` the mdadm wrapper, the
-sysfs reads of the arrays (CN12) and the assembly cases of
-`architecture.md`, "Make sure all groups are available"; `clonemeta.go`
+sysfs reads of the arrays and the assembly cases (CN12); `clonemeta.go`
 the base-state wrappers (the tmpfs mount, `truncate`, `losetup`) and the
 CN18 clone-metadata slot allocator — unit accounting over the single loop
-device, the `blkdiscard` recycle guard, the kind-`cb` wrapper linears and
+device, the `blkdiscard` recycle guard, the clone-metadata wrapper linears and
 the `dmsetup ls` plus `dmsetup table` enumeration that is the allocation
 registry; `pool.go` the concats, thin pools and thin volumes; `td.go` the
 raid0, dm-error, ns-dev and flakey tables; `clone.go` CN18 and the clone
@@ -300,7 +263,12 @@ and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and three
 registries that mirror nothing: in each cntlr's state the connect-retry
 and prober registries, and the CN10 disconnect registry, in memory only,
-never persisted. Each state's request is an atomic pointer,
+never persisted. Two more in-memory-only fields of a cntlr's state sit
+outside that mutex, touched only under the cntlr's object lock or the
+node write lock: the marks of CN14's activation sweep (`pendingSweep`)
+and `reqFromRpc`, which says whether the request this process holds
+arrived by the revision-gated RPC (CN14). Each state's request is an
+atomic pointer,
 stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
 lock, and a request is never modified once stored. The tracker has its
@@ -333,18 +301,21 @@ and under its locks the pass only probes the connection.
 
 ### Startup reconcile
 
-CN2. Enumerate the store (`dnagent.md` SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
-load every `cn-*` and `cntlr-*` request into memory first, saving the
-`cntlr-*` files skipped with their CN (below). Then reload every
-`clone-bm-*` chunk into the owning cntlr's `CloneChunkSet` (`dnagent.md` SH21), keyed
+CN2. Enumerate the store (`dnagent.md` SH6) for the cn's three store kinds —
+`StoreKindCn`, the CN request file; `StoreKindCntlr`, the cntlr request
+file; `StoreKindCloneBm`, the clone bitmap chunk file — and load every CN
+and cntlr request into memory first, saving the cntlr files skipped with
+their CN (below). Then reload every chunk into the owning cntlr's
+`CloneChunkSet` (`dnagent.md` SH21), keyed
 by the `(src_slice_idx, bm_idx)` pair the chunk is addressed by — before
 any converge runs, so that a dm-clone the converge (re)builds re-applies
 in the same pass every chunk the node already holds (CN18 step 4). Owner
 and address come out of the file's content: the file is a persisted
 `PushCloneBitmapRequest`, and its `cluster_id`, `cn_id` and
 `cntlr_pointer`, its `clone_id` and its `src_slice_idx` and `bm_idx` are
-what the reload reads. The name carries the same pair (Additions to
-`common`), but only as an address — nothing here parses it. A file that
+what the reload reads. The name carries the same pair (Names and
+constants in `common`), but only as an address — nothing here parses it.
+A file that
 does not decode is logged and skipped; a skipped file is deliberately not
 an orphan and is not deleted — a decode failure says nothing about who
 owns it, so nothing here may conclude the owner is gone. A chunk file
@@ -362,28 +333,38 @@ also over an old dm-clone its removal left in place), or another chunk's
 own push (CN22). Until then the clone re-copies regions it never needed
 to.
 
-A decoded chunk file whose cntlr is not among the loaded `cntlr-*`
+A decoded chunk file whose cntlr is not among the loaded cntlr
 requests, or whose `clone_id` is absent from that cntlr's stored
 `clone_list`, is an orphan — its cntlr or clone was deleted while the
 chunk file survived (`dnagent.md` SH7) — and is deleted here, because it names an
 owner no later pass will ever look for, unless it is skipped (below). A
-chunk whose cntlr is not loaded is no orphan while a `cntlr-*` file does
+chunk whose cntlr is not loaded is no orphan while a cntlr file does
 not load and the chunk's loaded CN still names its cntlr: that file names
 no cntlr, so it may be this cntlr's, and the chunk is skipped like the
 files of a CN that did not load — neither loaded nor deleted — until that
 cntlr's `SyncupCntlr` rewrites its file and the worker pushes the chunk
 again (CN20). A chunk whose loaded CN no longer names its cntlr is an
-orphan whatever `cntlr-*` file failed to decode. A `cn-*` file that does
+orphan whatever cntlr file failed to decode. A CN file that does
 not load — its read fails or it does not decode — is skipped, and while
-one is unread, so is every `cntlr-*` file and `clone-bm-*` chunk whose CN
+one is unread, so is every cntlr file and chunk file whose CN
 is not loaded: a file that did not load names no CN (`dnagent.md` SH6), so any of
 those cntlrs may be one its list still names, and a list that could not
 be read proves nothing about which cntlrs left it. Skipped is neither
-loaded nor deleted: none of them is converged, swept or applied, and
-every one of those files stays on disk exactly as the restart found it —
-loaded, each cntlr would reach the pointer-absent branch below, which
-would delete its request and its chunks for want of a list that could not
-be read. Nor is anything hidden: with none of it in memory, the CN and
+loaded nor deleted: none of them is converged or applied, and every one
+of those files stays on disk exactly as the restart found it — loaded,
+each cntlr would reach the pointer-absent branch below, which would
+delete its request and its chunks for want of a list that could not be
+read. The node-level sweep (CN21) keeps a skipped cntlr's sp stacks
+while its pointer is in the list; but its two request-derived sets —
+the clone-metadata wrappers some `clone_list` names (the arena step
+below) and the clone sources some request names (CN21) — are read from
+the cntlrs in memory alone, so a skipped cntlr's wrapper and clone
+source survive a sweep whose listings answered only while a live dm-clone
+maps them: the wrapper
+refuses its removal with EBUSY and is only reported, and the source
+reads as in use. A wrapper nothing maps goes, and its clone's next
+converge rebuilds it in the recovery an absent dm-clone triggers anyway
+(CN18). Nor is anything hidden: with none of it in memory, the CN and
 each of those cntlrs answer their Check rounds `ReplyCodeUnknownObject`
 (`dnagent.md` SH25), and the worker re-sends each `Syncup*` (`dnv-worker.md` RW4). The
 `SyncupCn` rewrites the file, and from there each skipped cntlr the list
@@ -397,12 +378,12 @@ node-level sweep removes its resources by name (CN21); its files wait for
 a later restart, whose pass finds its pointer absent and drops them
 (`dnagent.md` SH7).
 
-Then, for each `cn-*` request: re-run the `SyncupCn` converge (CN5). Then
-each `cntlr-*` request: if its pointer is absent from the stored
+Then, for each CN request: re-run the `SyncupCn` converge (CN5). Then
+each cntlr request: if its pointer is absent from the stored
 `SyncupCnRequest.cntlr_pointer_list` — a CN with no request loaded reads
 as a list that names no cntlr, and its cntlrs get this far only while no
-`cn-*` file is unread — the cntlr is dropped: its `cntlr-*` and
-`clone-bm-*` files, its memory entry, its object lock and its goroutines
+CN file is unread — the cntlr is dropped: its cntlr file and
+chunk files, its memory entry, its object lock and its goroutines
 go, and nothing of its is removed from the node here. Its resources are
 found afterwards, by name, by the node-level sweep (CN21) that runs next.
 That split is the point: a teardown that deletes the same state after a
@@ -410,7 +391,7 @@ best-effort removal pass whose every step only logs its failure forgets a
 cntlr whose array would not stop with its devices still live, and nothing
 ever enumerates them again (`architecture.md`, Teardown by sweep). Ids
 are never reused, so a dropped cntlr never comes back. Every other
-`cntlr-*` request: re-run the `SyncupCntlr` converge from the stored
+cntlr request: re-run the `SyncupCntlr` converge from the stored
 request — which, per CN18 step 4, runs the clone crash recovery for a
 clone whose dm-clone metadata is missing or unusable, whose dm-clone
 device itself vanished while a healthy wrapper stayed behind, or whose
@@ -422,27 +403,28 @@ drifted — a changed length, devno or region size — is reloaded by step
 re-applied, and is not a recovery; the same drifted table over a missing
 or mismatched wrapper is instead removed and rebuilt by the recovery,
 which never sees the drift. A reboot clears the tmpfs, the loop device
-and every kind-`cb` wrapper together — the arena is volatile with the
+and every clone-metadata wrapper together — the arena is volatile with the
 kernel's dm state — so the reconcile starts from an empty arena; a plain
 agent restart preserves both, and the converge is a no-op re-apply for a
 clone whose build had enabled hydration, while a build the dead agent
 left short of that runs the recovery again — a missing wrapper, a missing
 dm-clone and a dm-clone with hydration still disabled are each a recovery
-trigger. The pass order is therefore: load, then converge every `cn-*`
+trigger. The pass order is therefore: load, then converge every CN's
 base state, then drop the orphan cntlrs, then the node-level sweep per
 CN, then converge every remaining cntlr.
 
-Sweeping the arena is one step of that node-level sweep: a kind-`cb`
-wrapper (prefix `CnCloneMetaDmPrefix`) whose clone appears in no stored
-`cntlr-*` desired state is an orphan and is removed, which frees its
+Sweeping the arena is one step of that node-level sweep: a clone-metadata
+wrapper (prefix `CnCloneMetaDmPrefix`) whose clone appears in no loaded
+cntlr's desired state is an orphan and is removed, which frees its
 units for the next allocation. It compares against a name set built from
-every stored cntlr's `clone_list` — the wrapper sweep needs no parse of
-its own — and it runs from the node-level sweep only, which is to say
+every loaded cntlr's `clone_list` — the wrapper sweep needs no parse of
+its own, and a cntlr whose file is skipped (above) is not in that set —
+and it runs from the node-level sweep only, which is to say
 from here and from `SyncupCn` (CN7), because those are the only two
-places that hold the node write lock and see the complete stored desired
-state; a `SyncupCntlr` sees one cntlr. It runs before the cntlr
+places that hold the node write lock and see every cntlr this process
+holds; a `SyncupCntlr` sees one cntlr. It runs before the cntlr
 converges, not after, and that is safe for the same reason the whole
-sweep is: the wanted set comes from the stored requests, never from what
+sweep is: the wanted set comes from the requests held, never from what
 happens to exist, so a clone this pass is about to (re)build is already
 named by its cntlr's `clone_list` and is never mistaken for an orphan.
 All under the node write lock, with the `dnagent.md` SH2 trace id. Background retries
@@ -467,11 +449,11 @@ CN4. Gate the revision (`dnagent.md` SH8) against the stored `SyncupCnRequest`.
 CN5. Converge the once-per-CN base state of `architecture.md`, Controller
 node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
 
-* **tmpfs** at `CnTmpfsPath`: probe with
-  `findmnt --noheadings --output FSTYPE --target` on the path — a non-zero exit
-  means "nothing mounted there", not a failure, and the reported type is
-  what lets the converge insist the mount is a tmpfs — followed by a
-  second `findmnt --noheadings --output TARGET --mountpoint` on it. The
+* **tmpfs** at `CnTmpfsPath`: probe with `findmnt` for the filesystem type
+  at the path — a non-zero exit means "nothing mounted there", not a
+  failure, and the reported type is what lets the converge insist the
+  mount is a tmpfs — followed by a second `findmnt` asking whether the
+  path is itself a mountpoint. The
   second call exists because the first resolves to the closest enclosing
   mountpoint, so a path that merely lives under another mount would
   answer that mount's type; the second matches only when the path is
@@ -481,8 +463,8 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   `DefaultTmpfsPrefix`, so a tmpfs over that prefix's parent would answer
   for it, the `mount` would be skipped, and the arena would share that
   filesystem instead of getting its own `DefaultCnTmpfsSize`. Absent ⇒
-  `mkdir -p` the mountpoint and `mount -t tmpfs` there with a size option
-  of `DefaultCnTmpfsSize`. A `findmnt`
+  create the mountpoint and `mount` a tmpfs there sized
+  `DefaultCnTmpfsSize`. A `findmnt`
   that did not answer (`dnagent.md` SH15) — either of the two — is not
   "absent": the converge runs the probe once more, from its first call,
   in the same pass and acts on that answer, and when that one does not
@@ -490,16 +472,16 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   is mounted. A mount over the live arena would stack a second, empty
   tmpfs on it: the arena file drops out of sight, so the converge
   truncates a fresh one and attaches a second loop device to it, and
-  every kind-`cb` wrapper still maps the first loop, so every clone on
+  every clone-metadata wrapper still maps the first loop, so every clone on
   the CN is rebuilt (CN18 step 2). The price, when both askings go
   unanswered, is a tmpfs that really is absent — after a reboot, or on a
   new CN — and is not mounted by that pass. The two steps below then
   create nothing either: they create the file and the loop device only
   while `tmpfs_info` is `OK`, on a tmpfs this pass found or mounted at
   the path. Without one the mountpoint may be a bare directory — kept by
-  a reboot, or made by the `mkdir -p` of a `mount` that then failed —
+  a reboot, or made for a `mount` that then failed —
   where a `truncate` would put the arena file on the filesystem that
-  holds the directory and `losetup --find` attach the loop device to that
+  holds the directory and `losetup` attach the loop device to that
   file; the next converge's `mount` would hide that file and bring the
   cascade above: a fresh file, a second loop device, and every clone
   built on the first loop rebuilt. As after a failed `mount`, the arena
@@ -508,8 +490,8 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   (CN30), so the worker re-sends `SyncupCn` every round until a converge
   has built it; a round whose `findmnt` does not answer reads
   `tmpfs_info` `ERROR` and names nothing of the arena.
-* **backing file** `CnTmpFilePath`: probe `stat --format %s`; absent ⇒
-  `truncate --size` of the file to `CnCloneMetaAreaSize` (sparse — tmpfs pages
+* **backing file** `CnTmpFilePath`: probe its size with `stat`; absent ⇒
+  `truncate` the file to `CnCloneMetaAreaSize` (sparse — tmpfs pages
   materialize only as clone metadata is written, and CN18's hole-punch
   `blkdiscard` frees them again), but only while `tmpfs_info` is `OK`
   (above); otherwise an absent file is an `ERROR` on `tmp_file_info`
@@ -520,21 +502,21 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   nothing is truncated — a file that really is absent then waits, as the
   tmpfs does, for a check round that reads it absent and names it (CN30),
   and the `SyncupCn` that round makes the worker re-send.
-* **loop device**: probe `losetup --associated` of the `CnTmpFilePath` (the loop
-  path is re-learned from this probe on every converge and every probe
-  pass — it is kernel-assigned state, never persisted, and a stale cached
-  path is exactly what CN28's arena check must catch); absent ⇒
-  `losetup --find --show` on it, only while `tmpfs_info` is
-  `OK`, as for the file; otherwise, with none attached, `loop_dev_info`
-  is an `ERROR` saying no tmpfs is confirmed. Exactly one loop device:
-  multiple attachments of the same file are unwanted. "Absent" is an
-  answer with no device in it: `losetup --associated` exits zero with no
-  output when nothing is attached, so any failure of it is an `ERROR` on
-  `loop_dev_info` and attaches nothing.
+* **loop device**: probe with `losetup` for the loop devices attached to
+  `CnTmpFilePath` (the loop path is re-learned from this probe on every
+  converge and every probe pass — it is kernel-assigned state, never
+  persisted, and a stale cached path is exactly what CN28's arena check
+  must catch); absent ⇒ `losetup` attaches a free loop device to it, only
+  while `tmpfs_info` is `OK`, as for the file; otherwise, with none
+  attached, `loop_dev_info` is an `ERROR` saying no tmpfs is confirmed.
+  Exactly one loop device: multiple attachments of the same file are
+  unwanted. "Absent" is an answer with no device in it: the probe exits
+  zero with no output when nothing is attached, so any failure of it is
+  an `ERROR` on `loop_dev_info` and attaches nothing.
 * **clone-metadata arena**: nothing to create. The arena is the loop
   device: `cnCloneMetaUnitCnt` units of `CnCloneMetaUnit`, handed out to
   clones by the CN18 slot allocator. There is no on-disk allocation
-  table — enumerating the kind-`cb` wrappers (`dmsetup ls` filtered by
+  table — enumerating the clone-metadata wrappers (`dmsetup ls` filtered by
   `CnCloneMetaDmPrefix`, then `dmsetup table` of each) reconstructs the
   used map, because every wrapper's linear table records its own
   allocation: the loop device's major:minor and the offset in sectors
@@ -557,23 +539,19 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   dm state (`architecture.md`, Controller node, common) — a reboot clears
   both, an agent restart preserves both — so the kernel's dm tables are
   the registry. A reboot therefore leaves an empty arena and clones
-  rebuild through the clone crash recovery (CN18). The orphan sweep of
-  CN2 also runs at the end of this converge, under the same node write
-  lock.
+  rebuild through the clone crash recovery (CN18). The arena sweep of
+  CN2 is not a step of this converge: it runs in the node-level sweep
+  that follows the pointer diff (CN7), under the same node write lock.
 * `EnsurePort` (`dnagent.md` SH19: the agent's `--nvmet-port-id` port, default
   `NvmetPortId`, from the transport flags plus the three fixed ANA
   groups). CN host-facing namespaces only ever use the optimized and the
   inaccessible group — the non-optimized group exists on every port
   (`architecture.md`, [D4]) but no cn code path assigns it.
 
-CN6. QoS is accepted and deliberately not enforced in this version. The
-open issue of `architecture.md`, Controller node, common, stands: an
-io.max written from any agent-created cgroup binds the agent's own tools,
-not the nvmet kernel threads that carry host IO, so programming it would
-only pretend. The agent persists `qos_ratio` with the request (`dnagent.md` SH5 does
-that for free), applies nothing, and reports no QoS resource in `CnInfo`.
-When the architecture decides the enforcement mechanism, it lands as a
-new converge step here; nothing else in this document changes.
+CN6. QoS is accepted, persisted and not applied: the agent persists
+`qos_ratio` with the request (`dnagent.md` SH5 does that for free),
+programs nothing and reports no QoS row in `CnInfo` (`architecture.md`,
+Controller node, common: QoS is not enforced).
 
 CN7. Persist first, then drop, then sweep. The request is written to
 `LocalCnPath` before the converge, not after it, as `dnagent.md` SH5
@@ -583,11 +561,13 @@ left the list, and it can block for a whole failfast window on a dead
 leg.
 
 Then the CN5 base-state converge. Then the `cntlr_pointer_list` diff
-against the local `cntlr-*` files (`architecture.md`, Common agent rules:
-full sync). A pointer in the request without local state needs nothing
+against the loaded cntlr states (`architecture.md`, Common agent rules:
+full sync) — never against the files: a cntlr whose file CN2 skipped is
+not in memory and keeps its file (CN2). A pointer in the request without
+local state needs nothing
 yet — resources come with its first `SyncupCntlr`; the persisted request
 is what makes the pointer known. A local cntlr whose pointer left the
-list is forgotten: its `cntlr-*` and `clone-bm-*` files are deleted, its
+list is forgotten: its cntlr file and chunk files are deleted, its
 connect retry and leg probers are cancelled, its memory entry and object
 lock are dropped (`dnagent.md` SH7) — and nothing of its is removed from the node by
 this step. Then the node-level sweep (CN21) finds its resources by name
@@ -701,8 +681,10 @@ exclusions:
 * bitmap reads follow the effective state as well: CN27's data-group span
   walks the effective `data_grp_list` (leaving a deferred group in the
   walk would silently shift every later group's offset), and `GetLegBm`
-  on a provisioning leg fails the RPC saying so rather than answering
-  "not in its slice's `data_grp_list`".
+  for a leg whose group is not an effective concat target — the
+  provisioning leg's own group, or a group after a deferred one — fails
+  the RPC (CN27) rather than answering "not in its slice's
+  `data_grp_list`".
 
 An initial `CreateStoragePool` in which every leg is still provisioning
 therefore converges to an empty-ish cntlr reporting `PROVISIONING`
@@ -732,19 +714,22 @@ One converge pass has two phases, and the phase order is what implements
   rewrites to optimized last. This is the new primary's part of
   `architecture.md`, Failover.
 
-**The wanted set** is exactly the set of objects the build phase would
-ensure for this plan with every provisioning deferral removed — a
-deferred group's array is wanted although build skips it, or the sweep
-would remove what the next converge is about to create. It is read off
-the plan's own level and role flags, and each row is pinned against the
-ensure that creates it rather than against any prose: the `c9` wrapper
-and its side-export connection under `wantLeg`; the md array (or the `ca`
-linear of a `RedundNone` group) under `wantGrp`; the `c0`, `c1` and `c2`
-pool devices, the `c3` thin volumes and the `c4` raid0 under `wantPool`;
-the `c5` per-td dm-error, the `c6` ns-dev with its nvmet namespace, the
-host-facing subsystems, and the `c8` transfer with its subsystem and
-namespace under `wantAny`; the `c7` dm-clone, the `cb` metadata wrapper
-and the clone-source connection under `wantClone`. The raid0 sits with
+**The wanted set** is the object-level wanted set of `architecture.md`,
+Teardown by sweep — what the build phase would ensure for this plan, with
+every object a provisioning deferral merely postpones left in it (a
+deferred group's array, a provisioning leg's wrapper). It is read off the
+plan's own level and
+role flags, and each row is pinned against the ensure that creates it
+rather than against any prose: the leg wrapper `CnLegName` and its
+side-export connection under `wantLeg`; the md array (or the `CnGrpName`
+linear of a `RedundNone` group) under `wantGrp`; the pool concats and thin
+pool (`CnPoolMetaName`, `CnPoolDataName`, `CnPoolFinalName`), the
+`CnThinDevName` thin volumes and the `CnRaid0Name` raid0 under `wantPool`;
+the per-td `CnErrorName`, the `CnNsDevName` ns-dev with its nvmet
+namespace, the host-facing subsystems, and the `CnXferFinalName` transfer
+with its subsystem and namespace under `wantAny`; the `CnCloneFinalName`
+dm-clone, the `CnCloneMetaDmName` wrapper and the clone-source connection
+under `wantClone`. The raid0 sits with
 the pool, not with `wantAny`, because at `SP_LEVEL_NO_THINPOOL` there is
 no thin volume left to stripe over (CN19) — a standby keeps only what
 that list gives it, which is what makes a primary-to-standby flip nothing
@@ -783,18 +768,19 @@ build phase — and runs on every converge:
    "does this namespace's previous td still exist?" with no memory, and
    it is also right for a device an interrupted pass left mapping
    something no plan ever described. The reload's own flushing suspend is
-   what completes the in-flight host IO — the old primary's next steps of
+   what completes the in-flight host IO — the old primary's next step of
    `architecture.md`, Failover — and without it the removal below fails
    EBUSY behind a live ns-dev. The park creates its error device when it
    is missing, so it does not run at `SP_LEVEL_DISABLE`: the wanted set
-   holds no `c5` there, and one created after the sweep's enumeration
+   holds no dm-error there, and one created after the sweep's enumeration
    would be in no chain — the pass would remove the ns-dev parked on it,
    reply clean, and leave an unwanted device for the next round to find.
    Nothing is lost by skipping it: the wanted set holds no ns-dev at that
    level either, so P0 parks every one by its own live table (CN21),
-   which needs no `c5` — where the td's is missing, it reloads the device
-   onto an error table of its own size.
-3. **Demote of an unserved transfer.** A `c8` device this cntlr no longer
+   which needs no planned dm-error — where the td's is missing, it
+   reloads the device onto an error table of its own size.
+3. **Demote of an unserved transfer.** A transfer device
+   (`CnXferFinalName`) this cntlr no longer
    serves (`xferServed` false in the plan) is reloaded onto an error table
    of its own size, so that it lets go of the origin td's raid0 (CN17) and
    L6 can remove that raid0.
@@ -806,9 +792,8 @@ none of them. See CN21's P0.
 
 A primary-to-standby flip is therefore nothing but "the desired set
 shrank to the standby shape"; standby-to-primary is "it grew".
-`migr_list` is carried in the request but read by nothing: the CN's whole
-part in a migration is that a leg's `side_list` temporarily holds two
-sides (CN10) — the field stays reserved for a future consumer.
+`migr_list` is carried in the request and read by nothing: the CN's whole
+part in a migration is a leg's two-sided `side_list` (CN10).
 
 CN10. Legs (`leg.go`; every leg of every group of every slice in
 `id_to_slice`, `spare_leg_list` included, both roles). Per side in the
@@ -894,9 +879,11 @@ metadata wrapper), a `leg_list` member of a group that is not available
 (CN12: a promotion whose first converge reads its legs before the sides'
 ANA flips have reached this CN's sysfs would otherwise leave its md groups
 unassembled — and a `RedundNone` SP's pools unbuilt — until the next
-revision bump, because nothing else re-runs that converge), and an ns-dev
+revision bump, because nothing else re-runs that converge), an ns-dev
 the build held off its td's raid0 while a dm-clone the plan does not want
-may still be live (CN18). Every attempt mints its own trace id (CN2) and
+may still be live (CN18), and a clone destination's ns-dev whose converge
+fails in a pass whose CN18 finished the clone's build (CN16 rule 5). Every
+attempt mints its own trace id (CN2) and
 is a whole converge, which decides afresh whether any of them still
 holds; the first converge that finds none stops the retry.
 
@@ -1052,9 +1039,9 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   `meta_blocks` and the block size, every member `--failfast`,
   `--homehost any`), whose members are the leg wrappers of `leg_list`
   (never `spare_leg_list`; `architecture.md`, Spare legs). Assembly
-  instantiates `architecture.md`, "Make sure all groups are available",
-  by probing each available member for an md superblock
-  (`mdadm --examine`):
+  is the step of `architecture.md`, Failover, that makes every group
+  available; its cases are these, decided by probing each available
+  member for an md superblock (`mdadm --examine`):
   1. No member has one ⇒ `mdadm --create` with `--run --assume-clean` —
      but only when every `leg_list` member is available and was probed:
      with any member missing, the group is simply unavailable this pass
@@ -1086,10 +1073,9 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   2. Some have one ⇒ `mdadm --assemble` with those; then the sysfs read
      of the array (below) and `--add --failfast` any available member the
      array left out (freshly provisioned additions and stale-metadata
-     re-adds both land here, the remaining cases of `architecture.md`,
-     "Make sure all groups are available" — with a single available
-     member mdadm itself decides whether a degraded start is safe, and a
-     refusal leaves the group `RES_STATUS_ERROR`).
+     re-adds both land here; with a single available member mdadm itself
+     decides whether a degraded start is safe, and a refusal leaves the
+     group `RES_STATUS_ERROR`).
 
   A leg is **available** iff its CN10 converge succeeded this pass — its
   provisioned sides connected, every controller's "address" answered, its
@@ -1119,8 +1105,8 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   its dm-linear (above) is built whatever the leg's availability: the
   layers over it do IO through it — the pool create (CN13) reads the
   pool's metadata through the meta group — and a side that has not
-  flipped to this CN yet exports dm-error to it (`architecture.md`, "Make
-  sure all groups are available"), so a pool over a late meta leg, and
+  flipped to this CN yet exports dm-error to it (`architecture.md`, Disk
+  node), so a pool over a late meta leg, and
   every layer above that pool, is built only by a later converge. No log
   record of its own: the rows already report it — an md group's error,
   or degraded once a probe reads the array, the error of a layer above a
@@ -1339,21 +1325,20 @@ CN13. Per-slice pools (`pool.go`; primary only). Per slice of
 devices, `meta_grp_list` order) and `CnPoolDataName` (data group
 devices), tables via stdin; then the thin-pool `CnPoolFinalName` with the
 block size in sectors and the low-water mark derived from the data
-device's blocks and `low_water_mark_pct`. A zero percentage is invalid
-and never reaches that arithmetic: the control plane resolves an omitted
-percentage to `DefaultPoolLowWatermarkPct` when it writes the conf
-(`architecture.md`, Common validation), so a zero arriving here is a value
-no agent may replace, and CN8's conf gate refuses the request before any
-planning runs. A percentage above one hundred means auto-grow off and
-passes a zero mark — no dm events at all (`architecture.md`, Primary
-cntlr). Nothing is clamped in either direction: the agent holds no
-default of its own, and above one hundred is a legal setting rather than
-an out-of-range one. A fresh pool needs its metadata to read zero, and it
+device's blocks and `low_water_mark_pct` as `architecture.md`, Primary
+cntlr, states — a zero percentage never reaches that arithmetic, since
+CN8's conf gate refuses the request before any planning runs; above one
+hundred passes a zero mark; nothing is clamped in either direction. A
+fresh pool needs its metadata to read zero, and it
 does: the side provisioning protocol writes zeros over every extent of
 every side (`blkdiscard --zeroout`) before the side is ever exported —
 the same guarantee that funds CN12's `--assume-clean`, an actual write of
 zeros rather than a discard whose read-back is hardware-optional
 (`architecture.md`, [D15]).
+
+The pool table carries no feature arguments, so dm-thin's defaults
+apply: a pool out of data space queues writes and then fails them when
+its own timeout runs out (`architecture.md`, Known limits).
 
 `GrowSlice` arrives as longer group lists: the converge reloads the
 concats with the appended targets and reloads the pool table with the
@@ -1638,7 +1623,7 @@ its old table — any reload, since the rule is `Dm.Reload`'s own: for a
 park, resuming that table would put the ns-dev back onto the backing it
 retires and replay onto it the IO the suspend absorbed. A resume that
 fails can leave a device suspended too. A device found suspended is one
-that such a failure, an older build, an interrupted `Reload`, or an agent
+that such a failure, an interrupted `Reload`, or an agent
 killed inside CN14's quiesce bracket left, and every path that meets it
 resumes it — by a reload or by a bare resume, never by leaving it; one
 whose reload keeps failing its load stays suspended, queueing its IO,
@@ -1660,23 +1645,20 @@ changed `td_id` and is exactly one ns-dev reload — the nvmet
 "device_path" never changes.
 
 **nvmet objects** on the node port: per `Subsystem` a subsystem with
-"attr_cntlid_min" and "attr_cntlid_max" from `Cntlr.cntlid_slot`
-(`architecture.md`, cntlid slots) — written in the order nvmet accepts,
-since it refuses a min above the current max and a max below the current
-min: a move up writes "attr_cntlid_max" first and a move down
-"attr_cntlid_min" first, each bound exactly once, and an unchanged range
-writes neither; the transfer subsystem's range (CN17) moves the same way —
+"attr_cntlid_min" and "attr_cntlid_max" from `Cntlr.cntlid_slot`, written
+in the order `architecture.md`, cntlid slots, states (an unchanged range
+writes neither; the transfer subsystem's range, CN17, moves the same way),
 "attr_serial" and "attr_model"
 verbatim from the record (the gateway stamped them, `architecture.md`,
-[D2]), "attr_allow_any_host" written "0" before the host links, and host
-links exactly per `allowed_hosts`, so an empty list admits no host
-(`architecture.md`, Primary cntlr, step 6); per `Namespace` an nvmet
+[D2]), the "attr_allow_any_host" write and the host links per
+`allowed_hosts` as `architecture.md`, Primary cntlr, states (an empty list
+admits no host); per `Namespace` an nvmet
 namespace whose nsid is `ns_idx`, whose "device_path" is its own ns-dev,
 with "uuid" and "nguid" from the record. A namespace that has left `ns_list`
 under a subsystem that stays is not the build's to remove: CN21's L1 alone
 removes it (and so nothing does under a subsystem whose NQN carries the dnv
-prefix but decodes to nothing, which the sweep never attributes — Additions
-to `common`; `architecture.md`, Common validation), `AnaGrpIdInaccessible`
+prefix but decodes to nothing, which the sweep never attributes —
+`architecture.md`, dm-device kinds, and Common validation), `AnaGrpIdInaccessible`
 first, after P0 has parked or resumed the ns-dev under it — or failed to,
 which does not stop L1 (CN21) — and only from an enumeration that answered.
 A pass in which one did not — one of the four listings, or the sweep's own
@@ -1781,35 +1763,30 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    disconnect runs: step 1 fails naming it, and the retry reads the
    source afresh once the disconnect has returned (CN10's disconnect
    registry).
-2. Allocate the clone's metadata slot from the arena of Additions to
-   `common`: `cloneMetaUnits` contiguous units — the dm-clone superblock
+2. Allocate the clone's metadata slot from the arena of Names and
+   constants in `common`: `cloneMetaUnits` contiguous units — the
+   dm-clone superblock
    plus one byte per region, with the region count the td's size in
    blocks, rounded up to whole units (one byte per region over the
    superblock is a generous bound — the dn agent budgets metadata the
    same way) — first-fit over the free ranges of the used map
-   reconstructed from the kind-`cb` wrapper tables (CN5). Exhaustion of
+   reconstructed from the clone-metadata wrapper tables (CN5). Exhaustion of
    the arena ⇒ `clone_id_to_meta` reports `RES_STATUS_ERROR` with the
    allocator's message and `clone_id_to_dm_clone` reports
-   `RES_STATUS_ERROR` "metadata wrapper missing". **The arena is per CN,
-   and it is the real clone ceiling.** `CnTmpFilePath` and
-   `CnCloneMetaDmPrefix` are keyed by the cluster and cn ids, so the
-   arena's units are shared by every clone of every cntlr of the node
-   (up to `MaxCntlrCntPerCn` of them). The ceiling is the arena's unit
-   count divided by the units per clone, summed over the whole CN — the
-   superblock term alone costs one unit, so every real clone costs at
-   least two, and large tds at small block sizes cost far more.
-   `MaxCloneCntPerSp` is a per-SP limit and bounds none of this: two fully
-   cloned SPs on one CN can fill the arena together at the minimum
-   per-clone cost, and one SP alone can
-   exhaust the arena well under its own limit. Nothing gates clone count
-   against arena capacity — the agent reports exhaustion, it does not
-   prevent it — so the control plane must place clones against the
-   per-CN budget, not against `MaxCloneCntPerSp`. Enumerate, discard and
+   `RES_STATUS_ERROR` "metadata wrapper missing". **The arena is per CN.**
+   `CnTmpFilePath` and `CnCloneMetaDmPrefix` are keyed by the cluster and
+   cn ids, so the arena's units are shared by every clone of every cntlr
+   of the node (up to `MaxCntlrCntPerCn` of them), and the CN's clone
+   ceiling is the arena's unit count divided by the units per clone,
+   summed over the whole CN — the superblock term alone costs one unit, so
+   every clone costs at least two, and large tds at small block sizes cost
+   far more. The agent reports exhaustion and prevents nothing; admission
+   against this ceiling is `architecture.md`, Clones. Enumerate, discard and
    create are one critical section under `cloneMetaMu` (Server type and
    lock mapping): two cntlrs of the same CN converge concurrently under
    the node read lock, and two enumerations could otherwise pick the
    same free run and — because the two `dmsetup create`s use different
-   names — silently share one metadata range. Removing a kind-`cb`
+   names — silently share one metadata range. Removing a clone-metadata
    wrapper belongs in that same critical section, for the same reason:
    the registry being the kernel's dm tables, a removal is a mutation of
    it — the units are free the moment the table is gone — and a sweep
@@ -1821,7 +1798,7 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    allocation's mismatched-wrapper removal, and the arena sweep of CN2)
    remove directly: the mutex is a leaf, held across those OS calls and
    never re-entered. Before creating a newly chosen range, punch it on
-   the loop device with `blkdiscard --offset` and `--length` of the range.
+   the loop device with a `blkdiscard` of the range.
    That is the recycled-unit guard, because a freed unit still holds the
    previous clone's valid dm-clone superblock, which a new dm-clone would
    misparse. On a tmpfs-backed file a hole punch is zero-guaranteed by
@@ -1871,19 +1848,20 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    push protocol, and raid0 bitmap math), and with passdown enabled
    dm-clone also remaps the discard to the destination, unmapping the
    very blocks step 4 says are already there; `agent.CloneTable` carries
-   the parameter and both call sites, the cn clone and the dn migration
-   clone alike, pass it, because a `blkdiscard` must stay a metadata-only
-   mark on both. Then the `hydration_threshold` and
+   the parameter and every caller passes it, because a `blkdiscard` must
+   stay a metadata-only mark for the dn migration clone as for the cn
+   clone. Then the `hydration_threshold` and
    `hydration_batch_size` messages from `dm_clone_conf`, one per non-zero
    member the probed status does not already show (probe-first, `dnagent.md` SH16; a
    zero leaves the target's own default in place, `architecture.md`,
    Common validation).
-4. Apply every bitmap chunk of the applied set (`dnagent.md` SH21) — the CN22 fold
-   over the `(src_slice_idx, bm_idx)`-addressed chunks this node holds,
-   read in place — and, when this build is a **recovery**
+4. On a pass whose step 3 created or reloaded the dm-clone, or that is a
+   recovery, apply every bitmap chunk of the applied set (`dnagent.md` SH21)
+   — the CN22 fold over the `(src_slice_idx, bm_idx)`-addressed chunks
+   this node holds, read in place — and, when this build is a **recovery**
    (`architecture.md`, Clone crash recovery: the dm-clone's metadata is
    missing or unusable — a CN reboot takes the tmpfs, the loop device and
-   every kind-`cb` wrapper together, or a failover to a CN that never ran
+   every clone-metadata wrapper together, or a failover to a CN that never ran
    the clone; or the dm-clone device itself vanished while a healthy
    wrapper stayed behind; or the dm-clone is up but its `dmsetup status`
    does not show hydration enabled — "no_hydration" among its feature
@@ -1952,7 +1930,7 @@ which is exactly the order this stack needs. A clone that left
 `clone_list` loses all three; one the role or the level merely
 suppresses loses the dm-clone and the wrapper only — the source
 connection stays, because L5 reads "in use" off every stored cntlr's
-`clone_list` (plus the live kind-`c7` tables), and a suppressed clone is
+`clone_list` (plus the live dm-clone tables), and a suppressed clone is
 still in that list.
 
 * The ns-devs above the destination td go first. A wanted ns-dev whose
@@ -2002,7 +1980,7 @@ still in that list.
   actually removed it the dm-clone still maps its own source and would
   keep it claimed.
 
-The clone's `clone-bm-*` files are not part of that chain. They are
+The clone's chunk files are not part of that chain. They are
 swept separately, at the end of the cntlr-level sweep (CN21), against
 the stored `clone_list` (`dnagent.md` SH7) — a clone that left the list loses them,
 one the role or the level merely suppresses keeps them applied-by-file
@@ -2022,8 +2000,8 @@ it, so the sweep phase takes the layers down; lowering it grows the set
 again and the build phase rebuilds them. There is no level-specific
 teardown code anywhere. Bitmap chunks stay applied-by-file throughout
 (`dnagent.md` SH21). A resource suppressed by the level is reported
-`RES_STATUS_MISSING` with the details `ResDetailsSpLevel` (Additions to
-`common`; the worker's settle reads it). A resource deferred by CN9's
+`RES_STATUS_MISSING` with the details `ResDetailsSpLevel` (Names and
+constants in `common`; the worker's settle reads it). A resource deferred by CN9's
 provisioning gate is a different thing — `RES_STATUS_PROVISIONING` with
 the details "provisioning", at every level — and where both apply, the
 level wins (CN9). The additional cn behavior per level, each holding at
@@ -2031,17 +2009,17 @@ that level and above:
 
 * `SP_LEVEL_READONLY`: every user-facing ns-dev on the primary carries the
   dm-flakey error-writes table over its normal backing (CN16 rule 7) —
-  reads served, writes error (`architecture.md`, [D11]); an effectively
-  suspended namespace is exempt, since rule 1 parks it on the td's
-  dm-error above the flakey rule and it is inaccessible anyway; clone and
-  migration hydration, transfers and health probes are all unaffected.
+  reads served, writes error (`architecture.md`, [D11]); the exemption of
+  an effectively suspended namespace and what the level leaves running
+  are `architecture.md`, SpLevel. Transfers and health probes are
+  unaffected.
 * `SP_LEVEL_NO_CLONE`: no clone stacks: the dm-clone and its metadata
   wrapper are removed (the wrapper's arena units freed), but a
   clone-source connection made at a lower level stays connected, and is
   not even reported as a leftover — the sweep's in-use test is
   level-blind (CN21: a source is in use while any stored cntlr's
   `clone_list` names it, which `sp_level` does not shorten, or a live
-  kind-`c7` table maps it), so it is disconnected only once the clone
+  dm-clone table maps it), so it is disconnected only once the clone
   leaves `clone_list` or the cntlr's stored state goes; the ns-devs of
   clone-target tds go on `CnErrorName` (CN16 rule 4), so an `auto_resume`
   clone's destination namespace stays exported and optimized and its
@@ -2061,10 +2039,10 @@ that level and above:
 * `SP_LEVEL_DISABLE`: the wanted set is empty, which is the whole of this
   level: the CN21 sweep removes every cntlr-scoped object of the sp, and
   only the base state of `architecture.md`, Controller node, common,
-  remains (tmpfs, backing file, loop device, port — every kind-`cb`
+  remains (tmpfs, backing file, loop device, port — every clone-metadata
   wrapper of this sp went with its clone, so the units they held are free
   again; the arena itself is node-wide and another sp's wrappers stay).
-  The `cntlr-*` and `clone-bm-*` files stay — desired state persists. Two
+  The cntlr file and chunk files stay — desired state persists. Two
   things an empty wanted set cannot express are done explicitly beside
   it, because neither is an object on the node: the CN10 and CN18 connect
   retry is cancelled, and every `ResInfo` history of the cntlr is dropped.
@@ -2080,11 +2058,9 @@ and name, a bounded number of them with a tail saying how many more,
 plus one "enumeration failed" entry naming each unanswered enumeration;
 the full list goes to the agent log every pass, in the leftover record
 of `log.md`, Leftovers, so a lingering leftover is visible every round
-and not only once. The code is not a rejection: the request was applied,
-the desired state is stored, every wanted object was converged, and
-`revision` is the request's own — the worker evaluates the rows exactly
-as for code zero and re-issues the `SyncupCntlr` until the code changes.
-Nothing about it is stored: it is recomputed by enumerating the node on
+and not only once. The code means accepted with residue, not a rejection
+(`architecture.md`, Teardown by sweep), and `revision` is the request's
+own. Nothing about it is stored: it is recomputed by enumerating the node on
 every `Syncup*` and every `Check*` (CN30). A cntlr the conf gate refused
 has no verdict at all (CN8): nothing was converged and nothing
 enumerated, so the reply carries `ReplyCodeInvalidConf` and the sweep
@@ -2092,7 +2068,7 @@ never ran.
 
 `bm_info_list` is one `BitmapInfo` per `clone_list` entry of the
 (now-stored) request, its `res_id` the clone id and its `chunk_id_list`
-derived from the `clone-bm-*` files present, save those CN2's reload
+derived from the chunk files present, save those CN2's reload
 left unloaded (`dnagent.md` SH21): one `BmChunkId` of `src_slice_idx` and `bm_idx`
 per chunk this node holds for that clone, ascending by the pair.
 `bm_idx_list` is left unset — that field is the migration applied set
@@ -2145,7 +2121,7 @@ a statement about the sp-scoped chains only. The node-level scope's other
 steps — the arena step (CN2) and the unowned subsystems and source
 connections — are keyed on the stored cntlr requests, not on the pointer
 list, and they do reach an sp that is in it: with the `--local-store`
-lost there is no `cntlr-*` file, so no `clone_list` names any kind-`cb`
+lost there is no cntlr file, so no `clone_list` names any clone-metadata
 wrapper and the arena step attempts every one of them on the node. What
 that costs is bounded rather than prevented — a wrapper a live dm-clone
 still maps refuses with EBUSY and is only reported, and one that does go
@@ -2160,11 +2136,10 @@ fails it — never `Md.Walk`'s unanswered rule), the sysfs subsystem walk
 for nvme host connections, and the listing of the nvmet subsystems tree
 — linked to the port or not, a partially removed subsystem is unlinked
 but present. An enumerator that did not answer leaves its part of the
-snapshot empty and is reported as "enumeration failed"; it never reads as
-"there is nothing there". An empty part is exactly what "nothing there"
-looks like to every removal gated on absence (`architecture.md`,
-Teardown by sweep), so with any one of the four unanswered the sweep
-removes nothing from the node at either scope: no chain runs, neither do
+snapshot empty and is reported as "enumeration failed", and an
+enumeration that did not answer licenses no removal (`architecture.md`,
+Teardown by sweep): with any one of the four unanswered the sweep
+removes nothing from the node at either scope — no chain runs, neither do
 CN9's pre-steps 2 and 3, and what the chain would have removed is only
 reported. The md enumeration is the sharpest case: unanswered, it would
 leave L9 no array to stop and let L10 disconnect unwanted legs from under
@@ -2191,52 +2166,53 @@ L1's alone (below), after P0 (CN16). The snapshot is thrown away at the
 end of the pass: it decides only what to attempt, and every removal
 re-probes its own object.
 
-**Attribution.** A dm device is ours by its parsed name (Additions to
-`common`): role `c`, our cluster, our cn; its sp is the first id. An md
-array carries no sp in its name and is ours only when every member is a
-kind-`c9` wrapper of ours naming one sp — an array with a foreign,
-unparsable or differently-owned member is silently skipped and never
-stopped, which is what leaves a co-hosted dn agent's udev-assembled
-array alone. A side-export host connection is ours by the cn id inside
-the NQN, which is how it is told from one another CN of this cluster
-holds. A clone-source connection of our cluster belongs to no sp — its
-NQN names the source sp, not the cntlr that dials it — so the only test
-there is is "does somebody here still want it": it is in use iff some
-stored cntlr of this CN names it as a clone's `src_nqn` or a live
-kind-`c7` table maps its namespace device, and unowned otherwise. A
+**Attribution** follows `architecture.md`, Teardown by sweep — by name,
+and by what a nameless object is built out of — with these cn readings.
+A dm device is ours by its parsed name (`architecture.md`, dm device
+names): the cn role letter (`DmRoleCn`), our cluster, our cn; its sp is
+the first id. An md array carries no sp in its name and is ours only when
+every member is a leg wrapper (`CnLegName`) of ours naming one sp — an
+array with a foreign, unparsable or differently-owned member is silently
+skipped and never stopped, which is what leaves a co-hosted dn agent's
+udev-assembled array alone. A side-export host connection is ours by the
+cn id inside the NQN, which is how it is told from one another CN of this
+cluster holds. A clone-source connection of our cluster belongs to no sp
+— its NQN names the source sp, not the cntlr that dials it — so the only
+test there is is "does somebody here still want it": it is in use iff
+some cntlr this process holds names it as a clone's `src_nqn` or a live
+dm-clone table maps its namespace device, and unowned otherwise. A
 subsystem in the nvmet tree whose NQN is dnv-format says whose it is
 outright: a transfer subsystem of our cluster is the transfer export of
 the sp its NQN names, and an NQN that carries the dnv prefix but decodes
-to nothing is left alone (Additions to `common`) rather than falling
-through to the rule below. Only a name that decodes as neither — no dnv
-prefix at all — reaches that rule. A host-facing nvmet subsystem carries
-a user-chosen NQN and therefore carries no ids at all, so it is
-attributed in two steps. First, a stored cntlr whose `nqn_to_subsystem`
-still names it settles it, under that cntlr's sp, with nothing read from
+to nothing is left alone (`architecture.md`, dm-device kinds) rather than
+falling through to the rule below. Only a name that decodes as neither —
+no dnv prefix at all — reaches that rule. A host-facing nvmet subsystem
+carries a user-chosen NQN and therefore carries no ids at all, so it is
+attributed in two steps, the request first for the reason
+`architecture.md`, Teardown by sweep, gives. First, a cntlr this process
+holds whose `nqn_to_subsystem` still
+names it settles it, under that cntlr's sp, with nothing read from
 configfs: a cntlr's request is in memory (`putCntlr`) before its converge
 builds anything, so no subsystem can exist whose claim is not already
 visible here — the local-store save comes after the converge (CN20), so
-the guarantee is about this process's state, not about the files. That
-order is load-bearing rather than a saved read — a subsystem whose last
-namespace has just been removed has nothing left to attribute it by, and
-the namespace rule would call it unowned and take the host's subsystem
-away while `nqn_to_subsystem` is still asking for it. Second, for a
-subsystem no stored request claims, the namespaces: a "device_path" that
-parses as a kind-`c6` ns-dev of ours makes it that sp's; one that parses
-as a kind-`c6` ns-dev that is not ours — another cn's, another cluster's
-— makes the subsystem foreign and untouchable, foreign rather than
-unowned because the unowned arm removes; and one with no attributable
-namespace at all is unowned. Those only the node-level scope removes,
-together with the orphan kind-`cb` wrappers (CN2). Calling anything
-unowned assumes at most one cn agent per kernel; a co-hosted dn agent is
-fine, because its NQNs are all dnv-format dn kinds, which never reach
-that arm.
+the guarantee is about this process's state, not about the files. Second,
+for a subsystem no held request claims, its namespaces, in the listing's
+order: the first whose "device_path" parses as an ns-dev (`CnNsDevName`)
+decides for the whole subsystem — one of ours makes it that sp's; one
+that is not ours (another cn's, another cluster's) makes the subsystem
+foreign and untouchable — and a subsystem with no such namespace at all
+is unowned. Those only the node-level scope removes, together with the
+orphan clone-metadata wrappers (CN2). Calling anything unowned assumes
+at most one cn agent per kernel (`cmd/dnv-agent cn`); a co-hosted dn
+agent is fine, because its NQNs are all dnv-format dn kinds, which never
+reach that arm.
 
 **P0, before every layer**: every unwanted ns-dev is parked, unless the
 park fails (below). It has no plan — nothing wanted names it, and its td
 may be leaving in the same pass — so the park is derived from the
-device's own live table. Only one backing names a td: a kind-`c4` raid0,
-whose ids are also its td's kind-`c5` dm-error's, so there the target is
+device's own live table. Only one backing names a td: a raid0
+(`CnRaid0Name`), whose ids are also its td's dm-error's (`CnErrorName`),
+so there the target is
 CN16's own. Anywhere else — a table this build never wrote, an ns-dev
 over a dm-clone — the device is reloaded onto an error table of its own
 size, which is the same thing one indirection shorter. A device already
@@ -2318,29 +2294,20 @@ going (CN14: this is deactivation, the metadata on the legs is the next
 CN's to find, and a created td's volumes are re-attached there without
 any message), and nothing in any layer runs mdadm --detail (CN12).
 
-**"Gone" is probed, never inferred from an exit status**: `dmsetup info`
-for a dm device, "array_state" for an array, a configfs read for a
-namespace or subsystem, the sysfs walk for a connection. A command killed
-at the soft timeout may well have completed in the kernel — the ioctl
-finishes whatever happens to the process — so only a fresh probe can
-say, and a probe that itself did not answer counts as not removed. For a
-connection, "gone" is the absence of any controller, not of the
-subsystem directory, which the kernel keeps after the last controller
-only while something, such as a leg wrapper or a dm-clone, holds the
-multipath head open (`architecture.md`, Teardown by sweep); and a
-controller the subsystem still lists after its device was deleted is no
-controller (CN10). Read as present, such a directory or controller would
-stop the descent below its layer, and set another `nvme disconnect` going
-on every pass, for as long as that holder or the controller's last
-reference stays.
+**"Gone" is probed, never inferred from an exit status**
+(`architecture.md`, Teardown by sweep): `dmsetup info` for a dm device,
+"array_state" for an array, a configfs read for a namespace or subsystem,
+the sysfs walk for a connection — where "gone" is the absence of any
+controller, not of the subsystem directory, and a controller the
+subsystem still lists after its device was deleted is no controller
+(CN10): read as present, either would hold the descent below its layer
+and set a disconnect going on every pass; a probe that itself did not
+answer counts as not removed.
 
-**The stop rule** (`architecture.md`, Teardown by sweep): every removal
-of a layer is attempted, but the chain does not descend below a layer
+**The stop rule** is `architecture.md`, Teardown by sweep: every removal
+of a layer is attempted, and the chain does not descend below a layer
 that left anything behind; the layers underneath report their objects as
-leftovers without being touched. Continuing would disconnect a leg under
-a live array, which is destructive on the migration path — and a pass
-that simply re-runs next round costs nothing, because by then the
-failfast window has passed and the same order succeeds.
+leftovers without being touched.
 
 The same rule applies inside a layer that has an order of its own. L8
 names the concats as leftovers without attempting them when any pool of
@@ -2355,7 +2322,7 @@ clone that did go is.
 **Not on the node.** Two pieces of the cntlr's local state follow the
 same rule and are swept at the end of the cntlr-level sweep of every
 converge — one that an unanswered listing stopped included — ahead of the
-build phase: the `clone-bm-*` files of every clone no longer in
+build phase: the chunk files of every clone no longer in
 `clone_list` (`dnagent.md` SH7 — a sweep of the store against the request, not a side
 effect of removing the clone's wrapper, because a standby builds no
 wrapper at all and keying the deletion off one would leave a deleted
@@ -2387,8 +2354,9 @@ leg.
 
 ### `PushCloneBitmap`
 
-CN22. Gate: the cntlr file must exist and its stored `clone_list` must
-contain `clone_id`, and the chunk's two indexes must each be in range —
+CN22. Gate: this process must hold a request for the cntlr (CN23) whose
+`clone_list` contains `clone_id`, and the chunk's two indexes must each
+be in range —
 `src_slice_idx` below that clone's `src_slice_cnt` and `bm_idx` below
 `MaxCloneBmCnt` — bounded independently, in one `ReplyCodeUnknownObject`
 naming both indexes and both limits. Neither bound may stand in for the
@@ -2559,8 +2527,10 @@ mappings, and over-copying is always safe. A data-group leg: the group's
 span within the `CnPoolDataName` starts at the summed `data_blocks` of
 the preceding `data_grp_list` groups; leg data-region block k is
 pool-data block span start plus k; bit k is one iff no thin device of
-the pool maps that pool-data block (every leg of the group mirrors it,
-so the leg identity beyond its group never enters the math). Windowed
+the pool maps that pool-data block (every member leg of the group mirrors
+it, so the leg identity beyond its group never enters the math; a spare
+leg, which is no member, is answered with its group's bitmap all the
+same, which costs copies at most). Windowed
 from `start_block` for `block_cnt` blocks over the group's
 `data_blocks`, a zero `block_cnt` ⇒ to the end. Same wire encoding as
 CN26 (LSB-first, zero-padded); the CN22 clone-chunk fold uses it too.
@@ -2575,8 +2545,8 @@ return silently wrong data.
 ### Probing and error capture — `probe.go`
 
 CN28. Probe map (`dnagent.md` SH17 conventions plus the cn probes fixed here:
-`findmnt` for mounts, `stat --format %s` for plain files,
-`losetup --associated` for loops, `dmsetup ls` plus `dmsetup table` for
+`findmnt` for mounts, `stat` for plain files,
+`losetup` for loops, `dmsetup ls` plus `dmsetup table` for
 the clone-metadata arena and every other dm device, CN12's sysfs read of
 the array's "md" directory for arrays — never mdadm --detail — and the
 sysfs walk of CN10 — never nvme list-subsys — for every outbound nvme
@@ -2595,7 +2565,7 @@ its `res_name` and what its probe checks:
 * `CnInfo.tmp_file_info`, named by the `CnTmpFilePath`: the `stat` size is
   `CnCloneMetaAreaSize`.
 * `CnInfo.loop_dev_info`, named by the `CnTmpFilePath`:
-  `losetup --associated` lists exactly one loop device — this row covers
+  `losetup` lists exactly one loop device for the file — this row covers
   the whole arena; `CnInfo` carries no clone-VG row (its field is
   reserved, `architecture.md`, [D14]) and per-clone metadata health lives
   in `clone_id_to_meta`.
@@ -2652,8 +2622,8 @@ its `res_name` and what its probe checks:
   is non-zero, then the word of a sync that is running (recovering,
   resyncing, checking, repairing, reshaping; none while "sync_completed"
   reads none) followed by its done and total sectors in parentheses. The
-  words follow mdadm's State line, which the suites grep, and repairing
-  is ours; the state and the sectors are sysfs's. No answering array
+  words follow mdadm's State line, and repairing is ours; the state and
+  the sectors are sysfs's. No answering array
   holds the group's legs (none matched, or the match stopped between the
   walk and its read) and no array of the walk is unanswered, or an
   "array_state" of clear ⇒ `RES_STATUS_MISSING`; an array that is not
@@ -2669,10 +2639,9 @@ its `res_name` and what its probe checks:
   `RedundNone`: `dmsetup table`. A deferred group (CN9) reports
   `RES_STATUS_PROVISIONING` and no mdadm command runs.
 * `leg_id_to_leg`, named by the `CnLegName`: the wrapper table plus, on
-  the primary, the CN11 prober outcome (`RES_STATUS_PENDING` "health
-  probe pending" until its prober's first completed round — a fresh
-  wrapper, a promotion and an agent restart each start a fresh prober,
-  CN11), or, on a standby, the transport per desired side, from sysfs,
+  the primary, the CN11 prober outcome (`RES_STATUS_PENDING` until its
+  prober's first completed round, CN11), or, on a standby, the transport
+  per desired side, from sysfs,
   plus an "ana_state" of optimized or non-optimized on single-sided legs
   — two-sided legs liveness only (CN11). A provisioning leg (a non-empty
   `side_list`, every side unprovisioned, CN9) reports
@@ -2701,7 +2670,7 @@ its `res_name` and what its probe checks:
   wrapper missing" when the arena could not supply the slot (CN18 step
   2).
 * `clone_id_to_meta`, named by the `CnCloneMetaDmName`: `dmsetup table`
-  of the kind-`cb` wrapper: present, length = the CN18-computed unit count
+  of the clone-metadata wrapper: present, length = the CN18-computed unit count
   times `CnCloneMetaUnit`, in sectors, and the table's backing device equals the currently probed
   loop path; any mismatch (such as a tmpfs remounted under a live agent)
   ⇒ `RES_STATUS_ERROR`, whose repair path is the clone rebuild of CN18
@@ -2731,16 +2700,10 @@ reads broken wherever it would read clean, and CN28 reports that as
 `ERROR`.
 
 Two kinds of thing travel in `agent_reply` rather than in the rows:
-protocol failures (the CN8 gates, CN22's), and leftovers. A leftover is
-the one per-resource outcome that cannot ride in a row, and the reason
-is structural rather than a matter of taste: every `*Info` row is keyed
-by the id of a wanted object, and a leftover is by definition something
-nothing wanted names — the sweep found it by enumerating the node, not
-by walking a plan, and there is no id under which to file it. That is
-also why it must not be silent: a teardown whose per-resource failures
-have rows only until it drops exactly the keys that would carry them
-reports nothing afterwards. `ReplyCodeLeftover` is where that outcome
-goes (CN20, CN30). A piece of the CN's base state that a `CheckCn` round
+protocol failures (the CN8 gates, CN22's), and leftovers — the one
+per-resource outcome that cannot ride in a row, carried as
+`ReplyCodeLeftover` (`architecture.md`, Teardown by sweep, and Live-state
+reporting; CN20, CN30). A piece of the CN's base state that a `CheckCn` round
 or a `GetCnInfo` reads absent, and that a `SyncupCn` would build, travels
 in both: its row reads `MISSING` (`ERROR` for the port), and the verdict
 names it too (CN30), because the worker re-syncs on a reply's code and
@@ -2824,7 +2787,7 @@ reports the other's sp chain, because each drives its own `Syncup*`:
 reporting a cntlr's chain leftover on `CheckCn` would re-issue a
 `SyncupCn` that builds no chain for that sp at all (CN21: an sp in the
 pointer list gets none). Two kinds of object both verdicts can name. The
-first is an orphan kind-`cb` wrapper, and that overlap is correct rather
+first is an orphan clone-metadata wrapper, and that overlap is correct rather
 than a leak: the node-level scope owns the arena step whatever sp the
 wrapper belongs to (CN2), while the owning cntlr's own chain meets the
 same device at L4. A wrapper whose `dmsetup remove` will not go is
@@ -2834,7 +2797,7 @@ is the safe direction for a verdict whose only job is to make somebody
 try again. The second is an unowned clone-source connection: it belongs
 to no sp at all, so both scopes enumerate it node-wide (CN21), the
 cntlr-level L5 set being the same "no stored cntlr names it as a clone's
-`src_nqn` and no live kind-`c7` table maps it" set the node-level pass
+`src_nqn` and no live dm-clone table maps it" set the node-level pass
 uses. The same NQN is therefore reported by `CheckCn` and by every
 `CheckCntlr` of this node until it goes — the same one-round-extra,
 never-a-round-less direction. A cntlr whose stored conf the gate refuses
@@ -2911,7 +2874,7 @@ report no `Syncup*` could ever clear.
   nothing stays enabled: the sweep is the only remover of a namespace
   (CN21), and it never attributes a subsystem whose NQN carries the dnv
   prefix but decodes to nothing — neither to an sp nor as unowned
-  (Additions to `common`) — so a namespace `DeleteNamespace` takes out of
+  (`architecture.md`, dm-device kinds) — so a namespace `DeleteNamespace` takes out of
   one stays enabled on every CN that had it, and that sp's chain stops
   at the ns-dev layer on every pass (`architecture.md`, Common
   validation).
@@ -3012,9 +2975,7 @@ report no `Syncup*` could ever clear.
   `RES_STATUS_MISSING` or `RES_STATUS_ERROR` in `clone_id_to_target`.
   Nothing but the retry re-runs the build unless the cntlr is converged
   for another reason (a revision bump, a non-zero reply code, an agent
-  restart). A `clone_id_to_dm_clone` row that says the build is
-  unfinished would need a decision on how the worker's health pass
-  treats it.
+  restart).
 * A controller delete whose target vanishes mid-delete waits out the
   kernel's admin timeout: when a disk node removes a side's export while
   this CN's `nvme disconnect` of the leg is mid-delete — the two ends of
@@ -3062,11 +3023,19 @@ report no `Syncup*` could ever clear.
   underneath. Reads of regions not yet hydrated then fail until a later
   converge of that cntlr connects the source afresh and reloads the
   table. The window runs from that read to the registration.
+* A thin `delete` message that fails after its volume's removal is not
+  re-driven: L7 sends the pool-side delete of a volume's id only once the
+  volume is verified gone (CN21), a `dmsetup message` that fails is
+  logged and nothing more, and no later pass can enumerate a pool id that
+  has no dm device — the only id enumeration is CN14's activation sweep,
+  which the pool device's creation alone arms — so the id's blocks stay
+  allocated for the life of the pool device on this primary, until a
+  rebuild of the pool runs the activation sweep.
 * A base state that cannot be built is re-sent every round: a check
   round that reads absent a piece of the CN's base state that a
   `SyncupCn` would build, or an ANA group in a state other than its fixed
   one on a port whose transport attributes match, names it in its verdict
-  (CN30), so while a `mount`, `truncate`, `losetup --find`, port `mkdir`
+  (CN30), so while a `mount`, `truncate`, `losetup`, port `mkdir`
   or "ana_state" write keeps being refused, the worker re-sends the
   `SyncupCn` every round and each attempt is logged — the agent's
   leftover record of each round names what the round read, and each

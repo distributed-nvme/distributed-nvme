@@ -103,16 +103,13 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-cluster-token", name,
 		// architecture.md, Components: invocation reference: dnv requires
 		// --max-txn-ops=common.EtcdMaxTxnOps of every etcd it runs against;
-		// the server's own default is 128, below CreateStoragePool's
-		// 967-compare maximum shape, which is what SIZES the requirement
-		// (gateway.md, Additions to `common/constants.go`), and below the 486 compares
-		// one maximum-shape sp-drain batch reaches (SPD13) — and THIS package
+		// the server's own default is below the compare counts
+		// CreateStoragePool's maximum shape, which is what SIZES the
+		// requirement (gateway.md, Constants this document owns), and one
+		// maximum-shape sp-drain batch (SPD13) reach — and THIS package
 		// commits that batch, in TestDrainSpSliceAtTheCeiling (SPD14), as it
-		// commits the created flip's 514-compare transactions (RW19) in
+		// commits the created flip's transactions (RW19) in
 		// TestFlipCreatedAtTheTdCeiling.
-		// (DeleteClone's rectangle sweep — then 256 keys, at the 16-slice
-		// ceiling of the time — was this flag's founding justification and is
-		// gone; the clone drain's batches fit the default, CLD11.)
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

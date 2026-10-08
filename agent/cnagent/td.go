@@ -232,10 +232,8 @@ func (s *CnAgentServer) ensureNsDev(
 	// Nothing here suspends the ns-dev but the Reload above, and it leaves the
 	// device suspended only when one of its commands fails. A device found
 	// suspended and not reloaded — its table already the one this pass wants,
-	// or held — is one an **older build** deliberately held suspended for
-	// a namespace suspend (architecture.md, Namespace suspend semantics), or
-	// one a reload that was interrupted or failed left behind;
-	// either way it is resumed, which is the whole of the upgrade path.
+	// or held — is one a reload that was interrupted or failed left behind,
+	// and it is resumed (CN16).
 	if dev.Suspended {
 		return held, s.dm.Resume(ctx, np.devName)
 	}
@@ -287,15 +285,15 @@ func onDevice(targets []agent.DmTarget, devNo string) bool {
 }
 
 // parkNsDev reloads one ns-dev onto its td's dm-error. It is CN9's
-// pre-step 2, the park of a planned ns-dev, which performs old_primary step 3
-// of architecture.md, Failover, and it is the park of a clone recovery
+// pre-step 2, the park of a planned ns-dev, which performs the old primary's
+// reload of architecture.md, Failover, and it is the park of a clone recovery
 // (CN18 step 2); the park of an unwanted ns-dev is CN21's P0, parkByTable.
 // Where a removal follows, the ns-dev must stop mapping whatever is about to
 // be removed under it, and the reload's own flushing suspend is what
 // completes the in-flight IO on the old table. The reload also resumes a
-// device an **older build** left deliberately suspended (or a reload that
-// was interrupted or failed left behind) — when its own commands succeed:
-// one whose load fails leaves the device suspended (Dm.Reload fails closed).
+// device a reload that was interrupted or failed left suspended — when its
+// own commands succeed: one whose load fails leaves the device suspended
+// (Dm.Reload fails closed).
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,

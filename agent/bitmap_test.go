@@ -3,8 +3,7 @@ package agent
 import "testing"
 
 // ---------------------------------------------------------------------------
-// Explicit-bit-count bitmap helpers (zeroed_bits;
-// architecture.md, Side provisioning protocol)
+// Explicit-bit-count bitmap helpers (zeroed_bits; dnagent.md DN9)
 // ---------------------------------------------------------------------------
 
 func TestBitmapByteLen(t *testing.T) {

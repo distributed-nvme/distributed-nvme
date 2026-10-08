@@ -44,7 +44,7 @@ func BitmapBit(bitmap []byte, idx uint64) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Explicit-bit-count helpers (architecture.md, Side provisioning protocol).
+// Explicit-bit-count helpers (dnagent.md DN9).
 //
 // The side-provisioning bitmap (DnDiskTable.SideRecord.zeroed_bits, bit i
 // = logical extent i is zeroed) uses the same LSB-first encoding as the wire

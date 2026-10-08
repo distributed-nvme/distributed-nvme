@@ -34,7 +34,8 @@ R2. The handler chain is `TraceIdHandler` wrapping a `slog.NewJSONHandler` on
     all four ever put there). A consumer that reads stdout alone therefore
     gets the result and never a log record. The etcd client's own logger is
     silenced (`zap.NewNop`, in `etcdutil`) so that stderr carries one JSON
-    stream and it is dnv's; no dnv record comes from anything but
+    stream and it is dnv's — a daemon that exits on an error prints that
+    error there as plain text — and no dnv record comes from anything but
     `log/slog`. All handler options stay at their defaults except `Level`
     (see R6), the one deliberate deviation from nil options, required by the
     per-binary level rule.
@@ -122,8 +123,7 @@ R10. Protobuf messages are rendered for logging exclusively through
 R11. String data written to or read from files is truncated for logging with
      `TruncForLog`: the first `LogStrDataLimit` characters, with a
      "...(N chars total)" suffix when truncated; non-UTF-8 content is
-     replaced by "<binary N bytes>" (this is the "the code should decide"
-     resolution for bytes data). Protobuf files are the exception:
+     replaced by "<binary N bytes>". Protobuf files are the exception:
      `ReadProto` and `WriteProto` log the decoded message via `PbToLogValue`
      instead (see `osclient.md`, Logging).
 
@@ -217,12 +217,11 @@ protobuf bytes. A put whose value fails to unmarshal still emits its
 `etcd watch event` record, carrying `error` and **no** `value` — there is no
 decoded message to render. The unmarshal error then ends that watch
 *generation*, not the watch: the error names the key itself, the consumer
-logs it on the way out — each of the four `WatchTyped` consumers with its
-own record, so grep for all of `cluster conf watch restarting`,
-`rev watch restarting` and `worker reg watch restarting` on the worker and
-`cdc watch restarting` on the cdc (`cdc.md`, WV4) — and its outer loop
-rescans and re-opens the watch, so this record is not the only trace of
-which key broke it. Inside an STM, reads and writes may be re-executed on
+logs it on the way out — each `WatchTyped` consumer with a record of its
+own, the worker's named in `dnv-worker.md`, Log records, and the cdc's in
+`cdc.md` WV4 — and its outer loop rescans and re-opens the watch, so this
+record is not the only trace of which key broke it. Inside an STM, reads
+and writes may be re-executed on
 transaction retry; each attempt logs, so duplicate records for retried
 transactions are expected and acceptable.
 
@@ -241,7 +240,7 @@ thing.
   `cluster_id` plus `cn_id` or `dn_id` for a node-level pass, plus `sp_id`
   and `cntlr_id` or `side_id` for an object-level one — then `leftover_cnt`,
   `leftovers` (the sorted "kind:name" entries joined by a space; `kind` is
-  one of `dm`, `md`, `nvmet`, `nvmet_ns`, `nvme` and `record`) and
+  one of the `LeftoverKind*` labels of `agent/sweep.go`) and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
   the dn, a disk whose identity is not confirmed or a side with extents
@@ -262,13 +261,9 @@ and for as long as such a delete waits out the kernel's admin timeout. A
 disconnect still running goes when it completes, and the next `Check*`
 verdict or `Syncup*` probe finds it gone; a later `Syncup*` sweeps away any
 other leftover and issues again a disconnect that failed. Nothing on the
-agent re-drives that sweep because of a leftover — a `Check*` round
-recomputes the verdict and removes nothing, and the agents' own background
-converges (`cnagent.md` CN10's connect retry, `dnagent.md` DN13's connect
-retry and DN12's fence timer) sweep only while one is registered or armed
-for a reason of its own — so what brings the removal back is the worker
-seeing the leftover code again and re-issuing the syncup (`dnv-worker.md`,
-RW4). Both are emitted once per pass — the agent's on every sweep and every
+agent re-drives that sweep because of a leftover: the worker re-issues the
+syncup on the code (`dnv-worker.md` RW4). Both are emitted once per pass —
+the agent's on every sweep and every
 verdict that was not clean, the worker's on every such reply — so a
 leftover that does NOT go away is in both logs every round, which is
 exactly what distinguishes it from one the next pass removed. A clean pass

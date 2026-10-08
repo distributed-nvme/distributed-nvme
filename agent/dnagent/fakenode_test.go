@@ -71,10 +71,11 @@ type fakeNode struct {
 	links map[string]string
 	// mtimes is each directory's mtime in whole seconds, what `stat -c %Y`
 	// answers (DN6's orphan age). cmdMkdir stamps a directory it creates
-	// with the fake's clock, and — as the lab's 7.0 kernel does — a read or
-	// a write of one of a subsystem's own `attr_*` files stamps that
-	// subsystem's directory again (configfs instantiates the attribute's
-	// inode on every lookup and stamps the parent when it does). A directory
+	// with the fake's clock, and — as a kernel that stamps the parent on an
+	// attribute lookup does — a read or a write of one of a subsystem's own
+	// `attr_*` files stamps that subsystem's directory again (configfs
+	// instantiates the attribute's inode on every lookup, and such a kernel
+	// stamps the parent when it does). A directory
 	// with no entry, which is how a test seeds one straight into dirs, reads
 	// as created "now": YOUNG. A fixture that means an old one says so with
 	// ageDir.
@@ -110,11 +111,11 @@ type fakeNode struct {
 	// references keep the subsystem's directory (dropHeld, with listed). It
 	// fires once.
 	listedAfterDisconnect map[string]bool
-	// nextSubsys and nextCtrl are monotonic and never reused. Sizing the
-	// index off len(conns) let a disconnect hand the next connect an index a
-	// live subsystem was still using, so two subsystems collided on one
-	// /sys/class/nvme-subsystem path and the sysfs walk saw one of them
-	// twice.
+	// nextSubsys and nextCtrl are monotonic and never reused. An index sized
+	// off len(conns) would let a disconnect hand the next connect an index a
+	// live subsystem still uses, so two subsystems would collide on one
+	// /sys/class/nvme-subsystem path and the sysfs walk would see one of
+	// them twice.
 	nextSubsys int
 	nextCtrl   int
 
@@ -564,11 +565,11 @@ func (f *fakeNode) cntlidRefusal(path, data string) error {
 	return nil
 }
 
-// touchAttrParent is the lab kernel's configfs stamp: a lookup of one of an
-// nvmet subsystem's own attribute files — every read and every write of an
-// `attr_*` directly under subsystems/<nqn> — moves that subsystem directory's
-// mtime to now. Namespace attributes live one level down and stamp nothing
-// the sweep reads.
+// touchAttrParent is the configfs stamp of a kernel that stamps a directory
+// on an attribute lookup: a lookup of one of an nvmet subsystem's own
+// attribute files — every read and every write of an `attr_*` directly under
+// subsystems/<nqn> — moves that subsystem directory's mtime to now. Namespace
+// attributes live one level down and stamp nothing the sweep reads.
 func (f *fakeNode) touchAttrParent(path string) {
 	rest, ok := strings.CutPrefix(path, agent.NvmetRoot+"/subsystems/")
 	if !ok {
@@ -1573,7 +1574,7 @@ func (f *fakeNode) nvmeDisconnect(args []string) (string, int) {
 	return "", 1
 }
 
-// refresh keeps the legacy single-controller view pointing at the first
+// refresh keeps the single-controller field pointing at the first
 // controller the subsystem still holds.
 func (c *fakeConn) refresh() {
 	c.ctrl = ""

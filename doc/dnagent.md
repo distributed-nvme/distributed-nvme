@@ -72,7 +72,7 @@ binding (`layout.md`, Directory tree), file names are not. There is no LVM
 wrapper: **no** dnv agent runs any LVM command at all ([D13] on the dn,
 [D14] on the cn).
 
-### Additions to `common`
+### Names and constants in `common`
 
 The agents' constants live in `common/constants.go`, the name helpers in
 `common/name_fmt.go`, and their inverses in `common/name_parse.go`: DN6's
@@ -97,7 +97,8 @@ The constants this document relies on, whose values and comments
 * `AnaGrpIdOptimized`, `AnaGrpIdNonOptimized` and `AnaGrpIdInaccessible`,
   the three fixed ANA groups on every node's port ([D4]). The first always
   exists in nvmet and defaults to optimized; the other two are created at
-  port setup. Group states are written once and never changed; every ANA
+  port setup. Each group's state is fixed: `EnsurePort` writes it
+  probe-first and puts back one found in another state (SH19); every ANA
   transition rewrites a namespace's "ana_grpid" instead.
 * The `AgentReply.code` values. Zero is OK. `ReplyCodeStaleRevision`,
   `ReplyCodeUnknownObject` and `ReplyCodeInvalidConf` are rejections: the
@@ -204,12 +205,14 @@ one command of the pass that set it going: it carries that pass's trace id,
 minting one only when that pass had none, and, like the CN11 probers,
 takes no SH11 lock at all.
 
-A background task may additionally run a **child process**, and DN9's
-`blkdiscard --zeroout` batches are the first that does. Such a child must
-not outlive the agent — the cn sweep's background `nvme disconnect` (below)
-is allowed to — so the dn server registers every goroutine that owns one in
-a wait group before it starts and exposes a `WaitBackground` that waits for
-them; `Serve` takes it as its `waitBackground` parameter, cancels the task
+A background task may additionally run a **child process**: DN9's
+`blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
+retry's, the DN12 fence timer's, the cn connect retry's), and the cn sweep's
+background `nvme disconnect` is one. Such a child must not outlive the
+agent — the cn sweep's background `nvme disconnect` (below) is allowed to
+— so the dn server registers every goroutine that owns one in a wait group
+before it starts and exposes a `WaitBackground` that waits for them;
+`Serve` takes it as its `waitBackground` parameter, cancels the task
 ctx after the graceful stop and then waits. Cancellation kills the in-flight
 child through the SH15 soft/hard timeout machinery (`osclient.md`,
 RunCommand, sends SIGTERM then SIGKILL), so the wait is bounded by
@@ -224,7 +227,10 @@ shutdown forever — cancelling is the whole contract there. Nor is the child
 of the cn sweep's background `nvme disconnect` joined (`cnagent.md` CN10):
 it holds nothing a restarted agent needs, a delete already in the kernel
 finishes whether or not anybody waits for it, and a join could hold shutdown
-for the kernel's whole admin timeout. Object-scoped tasks that hold a device
+for the kernel's whole admin timeout. Nor is the cn's connect retry
+(`cnagent.md` CN10): its attempt runs the bounded commands of an ordinary
+pass, which the cancellation of `rootCtx` ends, and nothing waits for
+them. Object-scoped tasks that hold a device
 open are additionally cancelled **and waited for** at teardown, before the
 resources they hold are removed (DN6, DN9): a live child keeps an fd on the
 dm device and `dmsetup remove` would fail EBUSY.
@@ -295,9 +301,10 @@ SH6. Enumeration on startup: one `ls` of the prefix, run through
 role's `Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide` and
 `StoreKindMigrBm` for the dn; `StoreKindCn`, `StoreKindCntlr` and
 `StoreKindCloneBm` for the cn). File names are used only for discovery; the
-ids come from the decoded protos. The committed file is the only truth. A
-name of one of those kinds that carries `AtomicWriteTmpInfix` is no store
-file but the temp file of a `WriteProto` that did not succeed — one whose
+ids come from the decoded protos. The committed file is the only truth
+(`architecture.md`, Common agent rules): a name of one of those kinds that
+carries `AtomicWriteTmpInfix` is no store file but the temp file of a
+`WriteProto` that did not succeed — one whose
 process died before its rename, for instance; `osclient.md`, ReadFile /
 WriteFile / WriteFileDirect, lists every way one is left behind. The
 enumeration never returns one, so nothing reads it: nothing tells a whole
@@ -338,10 +345,9 @@ the file finds the pointer absent and deletes it.
 SH8. Per `architecture.md`, Common agent rules, with `stored` = revision of
 the last accepted request for the object, as this process holds it (zero
 when it holds none, as for an object whose file the startup reload did not
-load): `GateRevision` returns nil when the request may be applied —
-incoming at or above stored, equal meaning an idempotent re-apply — and a
-`ReplyCodeStaleRevision` rejection whose `details` name the incoming and the
-stored revision for a stale one.
+load): `GateRevision` returns nil when that rule lets the request be
+applied, and a `ReplyCodeStaleRevision` rejection whose `details` name the
+incoming and the stored revision for a stale one.
 
 SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a
 `details` string naming the missing pointer or id. A request whose conf
@@ -448,9 +454,12 @@ writes nothing; the cost is liveness. Its bios queue with no timeout
 phase reloads a device whose live table is not the one it wants and resumes
 one whose live table is, a fenced linear inside its cutover window aside;
 the step before the sweep's first layer reloads onto its dm-error a
-suspended linear it is about to remove or unexport; and the sweep of a side
+suspended linear it is about to remove or unexport; the sweep of a side
 that plays no migration source resumes each per-CN dm-linear of the side it
-finds suspended, on whatever table is live (DN12 rule 2). The cn's paths are
+finds suspended, on whatever table is live (DN12 rule 2); and the sweep's
+removal of a dm device of any kind resumes one it finds suspended, on
+whatever table is live, before the `dmsetup remove`, which does not succeed
+on a suspended device (`removeDm`). The cn's paths are
 `cnagent.md` CN16's. The rule is the wrappers', so it holds for every reload
 of either role, the ones that fence nothing — a grow, a repoint — included,
 and [D12]'s bound on a suspension holds only as far as the reloads succeed;
@@ -567,7 +576,10 @@ converged object issues no mutating command. This is what makes re-applies
 safe: gratuitous re-writes of live objects are not no-ops (re-linking a
 live port-to-subsystem link or reloading a live dm table stalls host IO).
 
-SH17. Probing follows these conventions: `dmsetup status`, `dmsetup table` and `dmsetup ls`, the walk of
+SH17. Probing follows these conventions: read-only commands — the dn's are
+`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`, `lsblk`,
+`stat` and `ls`; the cn's are `cnagent.md` CN28's, and CN12's
+`mdadm --examine` and `lsblk` of the array node — the walk of
 "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact
 — the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
@@ -599,11 +611,15 @@ SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
   `--nvmet-port-id` (`NvmetPortId` by default) with that agent's
   `NvmeTrConf` attributes **and** the three fixed groups: it creates the
   group directories that do not exist, then writes "optimized",
-  "non-optimized" and "inaccessible" into the three groups exactly once
-  (probe-first: skip when already correct). No code path ever writes an
-  "ana_state" after that. Probe-first is also what lets two agents on one
-  node co-own one port id (`architecture.md`, Disk node): the second one
-  finds every attribute already as it wants it and writes nothing. That
+  "non-optimized" and "inaccessible" into the three groups probe-first: a
+  group already in its state is skipped, and one found in another state is
+  rewritten by the next converge that runs `EnsurePort` (on the dn, a DN5
+  converge whose `ProbePort` found the port short of correct). It is the
+  only writer of an "ana_state"; no ANA transition ever writes one — those
+  rewrite a namespace's "ana_grpid". Probe-first is also what lets two
+  agents on one node co-own one port id (`architecture.md`, Disk node): the
+  second one finds every attribute already as it wants it and writes
+  nothing. That
   holds only while their `--tr-*` values agree — two agents sharing a port
   id with different transports would each try to rewrite the other's
   address attributes every round — so agents that need different
@@ -640,18 +656,12 @@ stall while a controller is mid-reset or being torn down, which is exactly
 when these probes run, and no converge — nor, through the DN1 and CN1
 locks, a whole node's RPC surface — may be held on one. The bound is on the
 read's own scheduling, not a magic abort of a read already blocked inside
-the kernel. `DisconnectDevice` (`cnagent.md`, `NvmeHost.DisconnectDevice`)
-is `nvme disconnect --device` for retiring **one** controller of an NQN
-whose other paths must live — the two sides of a migrating leg share a
-subsystem NQN (`architecture.md`, [D1]), so the cn agent cannot use `--nqn` to drop a dead
-side. The controller device is found by the **sysfs walk**, never by
-`nvme list-subsys`: the subsystem directory whose "subsysnqn" equals the
-NQN holds the controller entries, and one is selected by reading the
-controller's "address" and parsing it as comma-separated key-value pairs
-(`ParseNvmeAddress`) to match the dead side — never by field position. A
-controller whose "address" did not answer is never selected — it is
-unknown, never unwanted — and neither is one whose "address" is absent, a
-controller already deleted (`cnagent.md` CN10).
+the kernel. `DisconnectDevice` is `nvme disconnect --device` for retiring
+**one** controller of an NQN whose other paths must live — the two sides of
+a migrating leg share a subsystem NQN (`architecture.md`, [D1]), so the cn
+agent cannot use `--nqn` to drop a dead side; which controller it selects,
+and by which reads, is the cn role's rule (`cnagent.md`,
+`NvmeHost.DisconnectDevice`).
 
 ### Bitmap-chunk store — `bitmap.go`
 
@@ -693,12 +703,13 @@ applied set still reports every chunk in it, not only that prefix.
 ### Check-stream rules
 
 The `Check*` handlers are role code (the stream types differ), but MUST all
-follow these rules (`architecture.md`, Check streams):
+carry out the stream contract of `architecture.md`, Check streams, the same
+way:
 
-SH24. Rounds are worker-initiated: loop on the stream's receive (a receive
-returning end-of-file, or the stream ctx ending, ends the handler with nil);
-exactly one send per received request; never an unsolicited send. Each
-round runs under the trace id its request carries in `trace_id`
+SH24. The handler loops on the stream's receive — a receive returning
+end-of-file, or the stream ctx ending, ends it with nil — and answers each
+request from inside that loop, which is what keeps every reply solicited.
+Each round runs under the trace id its request carries in `trace_id`
 (`agent.CheckRoundCtx`): the stream ctx holds only the id its metadata
 brought at open (`grpc.md` T2) — on a worker's stream, that of the round
 that opened it (T3) — so without it every later round's records would carry
@@ -707,12 +718,13 @@ that first round's id. An empty `trace_id` keeps the stream ctx's id.
 SH25. Per round, under the SH11/SH12 locks: validate the object (unknown ⇒
 reply `agent_reply.code` of `ReplyCodeUnknownObject`, `revision` zero, no
 info — the stream stays open), probe the **fresh** live state, reply
-`revision` = the revision of the last accepted request (SH8's `stored`).
+`revision` = SH8's `stored`.
 
-SH26. Info inclusion: always when `show_info` is true; when false, on the
-first reply of the stream and whenever the freshly probed `*Info` differs
-(a protobuf equality comparison) from the last info actually sent on this
-stream. Otherwise the info field is left unset.
+SH26. Whether a reply carries the `*Info` is the contract's `show_info`
+rule; the handler decides "changed" by a protobuf equality comparison of
+the freshly probed `*Info` against the last info actually sent on this
+stream, and a fresh stream's first probed reply carries it because nothing
+has been sent on that stream yet.
 
 ## `cmd/dnv-agent` — cobra + viper
 
@@ -735,72 +747,20 @@ Disk node; a value below one is refused, CM3); `--local-store`, the
 default; the directory must exist before the agent starts, SH3); and
 `--config`, an optional viper config file. The dn alone takes `--disk`, the
 raw block device that carries the dnv disk format ([D13]; `diskmeta.go`),
-required. The cn alone takes `--capacity`, the capacity budget in bytes this
-CN is willing to host, which `GetCnSize` replies verbatim, zero meaning
-"use the control-plane default" (`cnagent.md`, `cmd/dnv-agent cn`).
+required. The cn alone takes `--capacity` (`cnagent.md`, `cmd/dnv-agent cn`).
 
 Running several agents on one node takes more than distinct port ids. Each
 needs its own `--grpc-address`; two agents of the **same role** also need
-their own `--local-store`, and the dn role needs its own `--disk`. The
-`--tr-*` values follow the port id rather than the agent: agents on
-**distinct** port ids need distinct `--tr-addr`/`--tr-svc-id` pairs,
-because an agent's `NvmeTrConf` is what a CN dials to reach a dn's sides
-and what a host dials to reach a cn's namespaces; agents that **co-own**
-one port id — the dn/cn pair of `architecture.md`, Components: invocation
-reference — must instead pass identical `--tr-*` values, since they
-converge the same address attributes (SH19).
-
-The `--local-store` rule is the one the file names mislead about. The names
-of `architecture.md`, Agent local-store paths, do carry the owning node's
-id — the dn role's kinds key on the cluster and dn ids, the cn role's on
-the cluster and cn ids — but the store is never read back by name: SH6
-enumerates the prefix and filters on the role's three **kind** prefixes
-alone, with no id filter. Two dn agents sharing a prefix would therefore
-each load and converge the other's DN and side records at startup (SH1,
-DN2): each would allocate the other's side out of its **own** `--disk`,
-since the volume table is keyed by `(sp_id, side_id)` alone (DN9), and then
-link the other's `SideToCnNqn` subsystem into its **own** port. The prefix,
-not the file name, is the unit of ownership. A dn and a cn agent may share
-one, because the two roles' kind prefixes are disjoint — which is what lets
-the dn/cn pair of `architecture.md`, Components: invocation reference, both
-run on the default prefix.
-
-One name a dn agent builds is **not** keyed by `dn_id` and names an object
-two agents would fight over: the side subsystem NQN. `SideToCnNqn` is keyed
-by `leg_id` (`architecture.md`, NQNs), and nvmet subsystems live beside the
-ports rather than under them, so two dn agents in one kernel must never
-hold the two sides of one leg. Only a migration ever gives a leg two sides,
-so this is a placement matter rather than an agent-flag one: register every
-DN of one kernel under the same failure domain (`dnvctl dn create
---location`, `architecture.md`, Disk nodes) and the first-tier
-anti-affinity of `architecture.md`, Per-operation allocation, keeps a
-migration destination off its source's kernel. `architecture.md`, Disk
-node, carries the full rule and its caveat — the second tier relaxes that
-exclusion rather than refusing to place. Two further dn-built names carry
-no `dn_id` and are harmless: `CnHostNqn`, whose kernel-global hosts
-directory both agents merely create with `mkdir -p` and no code path
-anywhere removes, and the ns identity `DnNsIdentity`, which lives inside
-the subsystem the NQN above already covers.
-
-The cn role has the mirror-image rule, and a stricter one: run at most
-**one** cn agent per kernel. Three cn names carry no cn id at all — the
-host-facing subsystem NQN is the one the user passed `CreateSubsystem`, so
-every cntlr of that SP exports the identical subsystem (`architecture.md`,
-Primary cntlr, Host view and cntlid slots); `XferNqn` carries no node id
-(`architecture.md`, NQNs); and `CnMdArrayName`, the `mdadm --name`
-superblock name, carries neither cluster nor cn id (`architecture.md`, md
-names). Nor is the placement rule the dn falls back on enough here:
-`architecture.md`, Per-operation allocation, keeps the cntlrs of one SP in
-distinct `location`s only at the first tier, so two cn agents of one kernel
-registered under one `location` can still take two cntlrs of an SP once a
-pick finds no CN with room outside the domains that SP's cntlrs already
-hold (which any SP with more cntlrs than the cluster has domains with room
-reaches), an automatic cntlr replacement may land on the other cn agent of
-the failed cntlr's kernel even at the first tier (`dnv-worker.md` AR7
-excludes only the surviving cntlrs' domains), two left at the default
-`location` are simply two CNs to the allocator, and where the dn's
-collision needs a migration in flight, the cn's needs no more than an SP
-with more than one cntlr, or an automatic replacement of any SP's cntlr.
+their own `--local-store` — SH6 reads the store back by the role's kind
+prefixes alone, so a dn and a cn agent may share one and two agents of one
+role must not — and each dn agent its own `--disk`. The `--tr-*` values
+follow the port id rather than the agent: distinct across port ids,
+identical between the agents that co-own one (SH19). `architecture.md`,
+Disk node, holds the sharing rule with its reasons, and the placement rule
+that comes with a shared kernel: the `SideToCnNqn` export is keyed by the
+leg and not by the dn, so two dn agents of one kernel must never hold the
+two sides of one leg. The cn role's rule is stricter — at most one cn agent
+per kernel (`architecture.md`, Controller node, common).
 
 CM3. Viper binding per subcommand (`bindViper`): bind the command's flags,
 set the environment prefix with the dash-to-underscore key replacer, enable
@@ -881,8 +841,8 @@ lock (key = `(cluster_id, dn_id, sp_id, side_id)`); `GetDnInfo` and one
 
 DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the `SyncupDn`
 converge (DN5 and DN6) from the stored request — **unless** its
-`extent_size` is zero, which only a build older than DN4's conf gate can
-have persisted. Such a file is **loaded** into the in-memory DN set exactly
+`extent_size` is zero, which DN4's gate never persists. Such a file is
+**loaded** into the in-memory DN set exactly
 as read — not skipped like an unreadable one — and refused by `convergeDn`
 instead, once per pass: a zero extent size is not a geometry any converge
 may run on, so the converge stops before DN5 touches anything (no `lsblk`,
@@ -947,17 +907,18 @@ no longer names is in no list and not loaded, so that DN's node-level sweep
 removes its resources by name (DN6); its files wait for a later restart,
 whose pass finds its pointer absent and drops them (SH7).
 
-The order over the rest of the store is: every side whose pointer is absent
-from its DN's stored `side_pointer_list` is dropped, then each usable DN's
-node-level sweep removes what those sides left behind by name, then the
-remaining `side-*` files re-run the `SyncupSide` converge (DN8 to DN14)
-from the stored request — a converge that finds not-yet-zeroed extents
-(re)starts that side's DN9 zeroing goroutine, which is how provisioning
-resumes after a restart. Then re-apply every `migr-bm-*` chunk (SH21 to
-SH23) — except the orphans, which are **deleted** here: a chunk not skipped
-with its DN whose side is not loaded, and a chunk whose `migr_id` no longer
-matches that side's stored `migr_dst_conf`. A chunk whose side is not
-loaded is no orphan while a `side-*` file does not load and the chunk's
+The order over the rest of the store is: the orphan `migr-bm-*` chunks are
+**deleted** as the store is loaded, before any DN converges — a chunk not
+skipped with its DN whose side is not loaded, and a chunk whose `migr_id`
+no longer matches that side's stored `migr_dst_conf`; then every side whose
+pointer is absent from its DN's stored `side_pointer_list` is dropped, then
+each usable DN's node-level sweep removes what those sides left behind by
+name, then the remaining `side-*` files re-run the `SyncupSide` converge
+(DN8 to DN14) from the stored request — a converge that finds
+not-yet-zeroed extents (re)starts that side's DN9 zeroing goroutine, which
+is how provisioning resumes after a restart. Then every chunk that was kept
+is re-applied (SH21 to SH23); that step deletes nothing. A chunk whose side
+is not loaded is no orphan while a `side-*` file does not load and the chunk's
 loaded DN still names its side: that file names no side, so it may be this
 side's, and the chunk is skipped like the files of a DN that did not load —
 neither loaded nor deleted. The chunk's side is then where a lost
@@ -1039,10 +1000,12 @@ probe-first (SH16), building `DnInfo` as it goes:
   answer formats. The format writes slot A with an empty table at the first
   sequence number **first**, then the header (a fresh `format_uuid` from
   the kernel's random source, the request's `cluster_id`, `dn_id` and
-  `extent_size`, and the three layout offsets) — slot-A-before-header makes
-  "a valid header implies at least one valid table slot" an invariant, so a
-  crash between the two writes leaves an inert slot rather than a header
-  with no table. Magic present but version or CRC wrong ⇒ **error**, and
+  `extent_size`, and the three layout fields; the two envelopes, what each
+  holds and what makes a slot a candidate are `architecture.md`, Disk
+  node's) — slot-A-before-header is what lets a load read a valid header
+  with no valid slot as corruption, since a crash between the two writes
+  leaves an inert slot rather than a header with no table. Magic present
+  but version or CRC wrong ⇒ **error**, and
   every later operation errors too — a corrupt header is never formatted
   over. Magic present and valid ⇒ verify `cluster_id`, `dn_id` and
   `extent_size` match; a mismatch is a "foreign disk" error naming both
@@ -1290,18 +1253,18 @@ other failed read of the attribution does: one that did not answer is
 named as a failed enumeration, so the verdict is not clean, and one that
 found the directory gone is simply passed over. The mtime is set at
 `mkdir`, and adding an allowed-host link or a namespace directory under it
-does not move it; but on the lab kernel every lookup of one of the
-subsystem's own "attr_*" files does — a read, a write, even a "stat" of
-one — because configfs instantiates an attribute's inode on each lookup
-and, in that kernel, stamps the parent directory when it does. So the age
-reads "since the subsystem was created or an attribute of it was last
-touched". A first build is young from its `mkdir` on, and its attribute
-writes only keep it so; on that kernel the stamp also protects a rebuild —
-an owner rebuilding, more than the grace after its first `mkdir`, an export
-whose first build stopped before its namespace makes it young again with
-the rebuild's attribute reads. A kernel that stamps the directory only when
-a directory or a link is created under it reads the plain time since the
-`mkdir`, and there such a rebuild reads old. Nothing a sweep does looks up
+does not move it. Kernels differ in one respect. One that stamps the parent
+directory on every lookup of one of the subsystem's own "attr_*" files — a
+read, a write, even a "stat" of one, because configfs instantiates an
+attribute's inode on each lookup — makes the age read "since the subsystem
+was created or an attribute of it was last touched": a first build is
+young from its `mkdir` on, its attribute writes only keep it so, and the
+stamp also protects a rebuild — an owner rebuilding, more than the grace
+after its first `mkdir`, an export whose first build stopped before its
+namespace makes it young again with the rebuild's attribute reads. One that
+stamps the directory only when a directory or a link is created under it
+reads the plain time since the `mkdir`, and there such a rebuild reads old.
+Nothing a sweep does looks up
 one of the subsystem's own "attr_*" files (it reads namespace one's
 "device_path", which sits in the namespace's directory and not the
 subsystem's, and which a namespace-less export does not have; it lists the
@@ -1627,7 +1590,7 @@ open (DN6).
 |---|---|---|---|---|
 | false | absent | — | allocate (bits zero), build the linear, ensure the goroutine | `RES_STATUS_PROVISIONING`, "zeroing 0/n" |
 | false | present | partial | ensure the linear + the goroutine | `RES_STATUS_PROVISIONING`, "zeroing k/n" |
-| false | present | complete | linear ensured; no goroutine; **no exports** | `RES_STATUS_OK` (every per-CN row reports `RES_STATUS_PROVISIONING`, "side provisioning") |
+| false | present | complete | linear ensured; no goroutine; **no exports** | `RES_STATUS_OK` (the per-CN rows the level emits report `RES_STATUS_PROVISIONING`, "side provisioning", DN18) |
 | true | present | complete | full DN10 export converge | normal |
 | true | present | partial | **refuse exports**; keep the goroutine (it self-heals) | `RES_STATUS_ERROR`, "not zeroed" |
 | true | absent | — | **never allocate**; no linear, nothing converges | `RES_STATUS_ERROR`, "record missing" |
@@ -1707,7 +1670,8 @@ closed the whole per-CN stack is skipped (dm-error, dm-linear, nvmet
 subsystem, namespace), but never a migration source's fence (DN12), and
 nothing is torn down either (DN9); each
 `cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` entry
-reports `RES_STATUS_PROVISIONING` with details "side provisioning" (DN18).
+reports `RES_STATUS_PROVISIONING` with details "side provisioning" (the
+export row only below `SP_LEVEL_NO_SIDE`; DN18).
 The fault of a row 5 or row 6 side stays on `side_dev_info` alone —
 duplicating one cause across every per-CN row would multiply `err_epoch`
 churn. With the gate open, for `primary_cn_id` and
@@ -1717,9 +1681,10 @@ the dm-error for standbys), nvmet subsystem `SideToCnNqn` on the node port
 with the allowed hosts set to that CN's `CnHostNqn` alone, the cntlid range
 ("attr_cntlid_min"/"attr_cntlid_max") from `side_conf.cntlid_slot`
 (`architecture.md`, cntlid slots; `DnCntlidSlotBase`, `DnCntlidSlotStep`),
-and one namespace: nsid one, "device_path" = the CN's dm-linear, identity
-from `common.DnNsIdentity` of the cluster, sp and leg ids (Additions to
-`common` — both sides of a migrating leg MUST match), "attr_serial" = the
+and one namespace, `sideNsid`, "device_path" = the CN's dm-linear, identity
+from `common.DnNsIdentity` of the cluster, sp and leg ids (Names and
+constants in `common` — both sides of a migrating leg MUST match),
+"attr_serial" = the
 leg id in `IdKeyFmt`, "attr_model" = `nsModel`. ANA: the primary CN's
 namespace joins `AnaGrpIdOptimized`, standbys join `AnaGrpIdNonOptimized`
 ([D4]; overridden by the migration phases below and by `sp_level`). A
@@ -1760,27 +1725,18 @@ enforced solely on the CN's user-facing namespaces, by reloading each
 `CnNsDevName` onto a dm-flakey table that errors writes (reads pass, writes
 error).
 
-DN12. **Migration source** (`migr_src_conf` set): the sequence of
-`architecture.md`, Migration, in order — (1) move every per-CN namespace to
-`AnaGrpIdInaccessible`, (2) retire every per-CN dm-linear through the
-two-phase fence below, (3) build `DnMigrSrcName` (linear on the side
-device) and export it via subsystem `MigrSrcNqn` on the node port, its
-allowed hosts set to the `DnHostNqn` of `migr_src_conf.dst_dn_id` alone,
-its namespace in `AnaGrpIdOptimized`.
+DN12. **Migration source** (`migr_src_conf` set): the three src steps of
+`architecture.md`, Migration, in order and numbered as there. The dn's part
+of them is the two-phase fence of step 2 (below) and the ANA groups: step 1
+moves the per-CN namespaces to `AnaGrpIdInaccessible`, and the `MigrSrcNqn`
+export's one namespace, `sideNsid`, sits in `AnaGrpIdOptimized`.
 
-**The `dst_provisioned` gate.** `migr_src_conf.dst_provisioned` false means
-the destination side is still being zeroed (DN9), and it is **normative**
-that the source then behaves *exactly as if `migr_src_conf` were absent*:
-no ANA move, no fence, no `DnMigrSrcName`, no migration-source subsystem —
-the side keeps serving its per-CN stacks normally. The only difference is
-reporting: the would-be `migr_src_info.dm_linear_info` and `.nvmeof_info`
-are `RES_STATUS_PROVISIONING` with details "side provisioning" instead of
-absent. Without the gate the source would fence the primary's path the
-moment the migration was created and the leg would have **no serving path
-for the whole zeroing window** (`architecture.md`, Migration). When the
-worker flips the destination side, the next fan-out carries
-`dst_provisioned` true and the sequence above runs unchanged; the
-destination's connect retry (DN13) absorbs any cross-side ordering.
+**The `dst_provisioned` gate.** With `migr_src_conf.dst_provisioned` false
+the source behaves exactly as if `migr_src_conf` were absent
+(`architecture.md`, Migration); the one difference is reporting, where the
+would-be `migr_src_info.dm_linear_info` and `.nvmeof_info` are
+`RES_STATUS_PROVISIONING` with details "side provisioning" instead of
+absent. With it true the three steps run unchanged.
 
 **The step-2 fence ([D12]).** Phase 1: suspend each per-CN dm-linear **in
 place**, leaving its table alone, and record when. Phase 2, on the first
@@ -1900,39 +1856,35 @@ applied when the dm-clone is finally created. Cancelling the migration
 inside this window is the DN9 cancel-and-wait path: the goroutine is
 stopped and waited for before `DnSideName` is removed.
 
-With the gate open, the sequence of `architecture.md`, Migration — (1)
-per-CN stacks on dm-error, all namespaces `AnaGrpIdInaccessible`; (2) the
-dm-clone metadata slot — contiguous `DnCloneMetaUnit` units in the [D13]
-clone-metadata area, sized for the side's region count, its head zeroed
-**before** its record is persisted so a previous tenant's bytes cannot be
-misparsed as a dm-clone superblock — plus its wrapper dm-linear
-`DnMigrMetaDmName` (the dm-clone target reads its metadata device from
-sector zero and takes no offset argument); (3) `nvme connect` to the
-`MigrSrcNqn` of the cluster, `migr_dst_conf.src_dn_id`, sp and migration
-at `src_nvme_tr_conf` with hostnqn `DnHostNqn` of this cluster and dn
-(SH20); (4) dm-clone `DnMigrFinalName` (meta = the step-2 wrapper, dest =
-the side device, source = the nvme device, region size = `block_size`,
-features **no_hydration and no_discard_passdown** — both are mandatory on
-**every** dnv dm-clone, dn and cn alike (`cnagent.md` CN18), because the
-bitmap protocols of `architecture.md`, Bitmap push protocol and raid0
-bitmap math, use `blkdiscard` on a dm-clone as the metadata-only "mark this
-region hydrated" primitive: dm-clone turns discard passdown on by default
-whenever the destination's discard granularity is no larger than one region
-— a dm-linear over a raw disk always satisfies that — and would then *also*
-remap the discard to the destination. The hazard is **after** the cutover,
-not before it: host IO already flows through the destination dm-clone, a
-host write hydrates region *r*, and a skip-bitmap chunk whose bit for *r*
-was read from the CN thin metadata before that write arrives later — pushes
-are legal at any time and a restart re-applies every stored chunk — so the
-resulting `blkdiscard` would destroy the only copy of an acknowledged
-write. Without passdown the same discard is the metadata no-op that
-`architecture.md`, Bitmap push protocol, and `architecture.md`, [D7] assume. Knobs from
-`dm_clone_conf`); (5) reload the primary CN's dm-linear onto the dm-clone,
-move its namespace to `AnaGrpIdOptimized`, the standbys' to
-`AnaGrpIdNonOptimized`; re-apply every bitmap chunk of the applied set
-(SH21). The numbering above follows the logical steps of `architecture.md`,
-Migration; the implemented converge order differs without changing any end
-state (`SyncupSide` builds bottom-up: slot, connect, clone, linear,
+With the gate open, the five dst steps of `architecture.md`, Migration,
+numbered as there. What the dn adds to them: the slot of step (2) is
+contiguous `DnCloneMetaUnit` units of the [D13] clone-metadata area, sized
+for the side's region count, and its head is zeroed **before** its record
+is persisted so that a previous tenant's bytes cannot be misparsed as a
+dm-clone superblock; the connect of step (3) carries the hostnqn
+`DnHostNqn` of this cluster and dn (SH20), the one field by which the
+connection is later attributed to this agent (DN6); the dm-clone of step
+(4) carries the features **no_hydration and no_discard_passdown** — both
+are mandatory on **every** dnv dm-clone, dn and cn alike (`cnagent.md`
+CN18), because the bitmap protocols of `architecture.md`, Bitmap push
+protocol and raid0 bitmap math, use `blkdiscard` on a dm-clone as the
+metadata-only "mark this region hydrated" primitive: dm-clone turns discard
+passdown on by default whenever the destination's discard granularity is no
+larger than one region — a dm-linear over a raw disk always satisfies that
+— and would then *also* remap the discard to the destination. The hazard is
+**after** the cutover, not before it: host IO already flows through the
+destination dm-clone, a host write hydrates region *r*, and a skip-bitmap
+chunk whose bit for *r* was read from the CN thin metadata before that
+write arrives later — pushes are legal at any time and a restart re-applies
+every stored chunk — so the resulting `blkdiscard` would destroy the only
+copy of an acknowledged write. Without passdown the same discard is the
+metadata no-op that `architecture.md`, Bitmap push protocol, and
+`architecture.md`, [D7] assume, and a pass that creates the dm-clone
+re-applies the applied set onto it (SH21 to SH23); and step (5) puts the
+primary's namespace in `AnaGrpIdOptimized` and the standbys' in
+`AnaGrpIdNonOptimized`. The implemented converge order differs from that
+numbering without changing any end state (`SyncupSide` builds bottom-up:
+slot, connect, clone, linear,
 "ana_grpid"): `ensureMigrDst` runs steps (2) to (4) **before** the per-CN
 stacks converge, so the pass that first builds those stacks *creates* the
 primary's dm-linear directly on the dm-clone and puts its namespace
@@ -2116,8 +2068,9 @@ the stored revision, so a push the worker planned against a report the
 agent has since replaced with a newer one is harmless — while rejecting it
 would throw away work the worker has already done and need a whole re-sync
 to re-drive (`dnv-worker.md` BM3). Then SH21 to SH23: persist the chunk at
-`LocalMigrBmPath`, recompute from every chunk of the applied set (shift by
-the leg's `meta_blocks`), `blkdiscard` the fully-skippable regions of
+`LocalMigrBmPath`, recompute from the applied set's contiguous prefix
+(SH23; shifted by the leg's `meta_blocks`), `blkdiscard` the
+fully-skippable regions of
 `DnMigrFinalName`. If the dm-clone does not currently exist — not built
 yet, suppressed by `sp_level`, or still behind DN13's provisioning gate —
 the file still counts as applied; chunks are re-applied whenever the
@@ -2257,7 +2210,7 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   subsystem present with its attributes, namespace enabled over the right
   "device_path" and in the desired "ana_grpid", linked to the port
   (`probeExport`). `RES_STATUS_PROVISIONING`, details "side provisioning",
-  while DN9's gate is closed.
+  while DN9's gate is closed (the row only below `SP_LEVEL_NO_SIDE`).
 * `migr_src_info.dm_linear_info` and `.nvmeof_info`, named `DnMigrSrcName`
   and the `MigrSrcNqn`: the dm target probe and configfs. With
   `migr_src_conf.dst_provisioned` false neither object exists by design
@@ -2390,3 +2343,16 @@ is still a protocol-level refusal.
   a restart. Until then the probe reports `migr_dst_info.target_info`
   `RES_STATUS_ERROR`, and the dm-clone has no source for the regions it
   has not hydrated.
+* The drop of a side whose pointer left the list (DN6) cancels its DN9
+  zeroing goroutine and joins it under the node write lock
+  (`dropSideState`), and the join lasts as long as the in-flight
+  `blkdiscard --zeroout` child does: bounded by the SH15 kill of that
+  child, unless it sits in an uninterruptible kernel wait on a stalled
+  disk, which no signal ends. For that long every RPC of the agent that
+  takes a DN1 lock — every `CheckDn` and `CheckSide` round among them —
+  waits behind the write lock.
+* The dn sweep gates its removals on its `dmsetup ls` alone: an nvmet
+  listing or a host walk that did not answer is named in the verdict, so
+  the reply is not clean and the worker re-drives the pass, but it stops
+  nothing — the layer that removes exports or the one that disconnects
+  source connections finds nothing to remove, and the layers below run on.

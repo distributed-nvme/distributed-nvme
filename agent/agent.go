@@ -3,9 +3,8 @@
 // store, the revision gate, the lock hierarchy, ResInfo tracking, the OS
 // wrappers and the bitmap-chunk store.
 // Policy — which dm tables, md arrays and nvmet objects to build and when —
-// lives in the role packages agent/dnagent and agent/cnagent. No LVs: [D14]
-// removed the clone VG, LVM's last user, so no LVM runs anywhere in dnv
-// (cnagent.md, Scope and placement).
+// lives in the role packages agent/dnagent and agent/cnagent. No LVM runs
+// anywhere in dnv ([D13], [D14]; cnagent.md, Scope and placement).
 package agent
 
 import (

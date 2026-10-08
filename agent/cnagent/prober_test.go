@@ -47,7 +47,7 @@ func withClock(srv *CnAgentServer) *fakeClock {
 }
 
 // logCapture reads back the records the cn agent emits for itself — the
-// prober is now the only cn code that logs its own block IO, so the msgs and
+// prober is the only cn code that logs its own block IO, so the msgs and
 // attrs have to be pinned here (log.md, OS commands and file IO), and the conf
 // refusal of architecture.md, Common validation, is
 // pinned the same way in conf_test.go. The buffer is mutex-guarded
@@ -201,7 +201,7 @@ func TestLegProberPendingAndStalled(t *testing.T) {
 
 	// Before any completion the leg is PENDING "health probe pending": the
 	// wrapper exists and no round has said anything yet. Never OK — an OK
-	// clears Leg.err_epoch (HL2), so a promotion's fresh probers used to
+	// clears Leg.err_epoch (HL2), so a promotion's fresh probers must not
 	// clear a dead leg's.
 	status, details := srv.legProbeOutcome(st, lp)
 	if status != pb.ResStatus_RES_STATUS_PENDING ||
@@ -676,7 +676,7 @@ func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
 }
 
 // TestDirectProbeIoShortCircuitsOnCancel: a cancelled prober starts no IO and
-// logs nothing — the fast fail the OsClient's semaphore acquire used to give.
+// logs nothing.
 func TestDirectProbeIoShortCircuitsOnCancel(t *testing.T) {
 	capture := captureLogs(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -733,8 +733,8 @@ func TestProbersStopOnDemotion(t *testing.T) {
 // sweep never reaches L10: one whose descent stops at an array that would not
 // stop (L9), and one whose sweep an unanswered listing stopped before any
 // layer ran. The trim decides from the plan alone and removes nothing from
-// the node, so neither is a reason to skip it. Run inside L10, it left a
-// demoted primary's probers writing the health block through the standby's
+// the node, so neither is a reason to skip it. Run inside L10, it would leave
+// a demoted primary's probers writing the health block through the standby's
 // legs, and a departed leg's prober writing through a wrapper the plan no
 // longer wants, until some later pass got that far (CN21).
 //
@@ -905,8 +905,8 @@ func TestProbersTrimmedWhenTheDescentStops(t *testing.T) {
 	}
 }
 
-// TestLegUnavailableWhenNotOptimized is the availability test of
-// architecture.md, "Make sure all groups are available": a path
+// TestLegUnavailableWhenNotOptimized is the availability test of cnagent.md
+// CN12: a path
 // that is live but `non-optimized` means the side exports dm-error, so the leg
 // is not available and the array is not built from it.
 func TestLegUnavailableWhenNotOptimized(t *testing.T) {

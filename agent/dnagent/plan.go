@@ -21,7 +21,7 @@ const (
 	resKeyMigrDstClone  = "migr_dst_clone"
 )
 
-// details strings of architecture.md, Side provisioning protocol. The bits
+// details strings of dnagent.md DN9. The bits
 // themselves live in the side's on-disk allocation record ([D13]); these are
 // only what a side reports about them.
 const (

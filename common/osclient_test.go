@@ -69,7 +69,7 @@ func TestRunCommandStreams(t *testing.T) {
 	}
 }
 
-// The caller owns the deadline (architecture.md, Common validation): the ctx
+// The caller owns the deadline (osclient.md, RunCommand): the ctx
 // firing SIGTERMs the process.
 func TestRunCommandSoftTimeoutSigterm(t *testing.T) {
 	client := NewLimitedOsClient(0)
@@ -779,8 +779,8 @@ func TestReadBlockDirectAtIsCloseOnExec(t *testing.T) {
 // TestReadBlockDirectAt covers the exported raw helpers of osclient.md,
 // Exported raw helpers and the probe-IO carve-out: the write + O_DIRECT
 // read-back the leg health probe needs (architecture.md, Group on-leg
-// layout: meta region, data region, health block), now package functions
-// outside the OsClient. t.TempDir() may sit on
+// layout: meta region, data region, health block), which are package
+// functions outside the OsClient. t.TempDir() may sit on
 // tmpfs, which rejects O_DIRECT outright, so the round trip is skipped with a
 // diagnostic there — the alignment rejection and the log silence are checked
 // regardless, since neither reaches the filesystem.

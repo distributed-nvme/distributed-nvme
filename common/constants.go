@@ -95,7 +95,7 @@ const (
 	// MaxAllocLegPerGrp is the allocator's ACTUAL maximum legs per group, as
 	// opposed to the aspirational and unenforced MaxLegPerGrp above: every
 	// allocating path picks between 1 leg (RedundNone) and 2 (RedundMdRaid1),
-	// and nothing in v1 builds a wider group.
+	// and no allocating path builds a wider group.
 	//
 	// SPD1: it is CITED from all three places that make that choice —
 	// gateway/alloc.go legCntOf, model/ops.go legCntOf and worker/reaction.go
@@ -128,10 +128,11 @@ const (
 	// MaxDelBmPerTxn + 1 writes = MaxDelBmPerTxn + 4 = 68, against 65 success
 	// ops. It is independent of every ceiling constant. Growing MaxCloneBmCnt or
 	// MaxSliceCntPerSp therefore grows the batch COUNT and never the
-	// transaction's legality; at today's 32x16 a maximum-shape drain is
-	// ceil(512 / 64) = 8 batches. 68 also fits etcd's DEFAULT --max-txn-ops of
-	// 128 — prose, not a tripwire: the deployment requirement stays
-	// EtcdMaxTxnOps for the transactions that do NOT fit 128, such as
+	// transaction's legality; at the ceilings a maximum-shape drain is
+	// ceil(MaxSliceCntPerSp x MaxCloneBmCnt / MaxDelBmPerTxn) batches. 68 also
+	// fits etcd's DEFAULT --max-txn-ops of 128 — prose, not a tripwire: the
+	// deployment requirement stays EtcdMaxTxnOps for the transactions that do
+	// NOT fit 128, such as
 	// CreateStoragePool's 967-compare maximum shape, the sp drain's
 	// 486-compare D2 batch and the created flip's 514-compare transaction
 	// (see EtcdMaxTxnOps and MaxFlipCreatedPerTxn below).
@@ -250,9 +251,9 @@ const (
 
 	// The three fixed ANA groups on every nvmet port (architecture.md
 	// [D4]). Group 1 always exists in nvmet and defaults to optimized;
-	// groups 2 and 3 are created at port setup. Group states are written
-	// once and never changed; every ANA transition rewrites a namespace's
-	// ana_grpid instead.
+	// groups 2 and 3 are created at port setup. Each group's state is fixed
+	// — EnsurePort writes it probe-first and rewrites a drifted one — and
+	// every ANA transition rewrites a namespace's ana_grpid instead.
 	AnaGrpIdOptimized    = 1
 	AnaGrpIdNonOptimized = 2
 	AnaGrpIdInaccessible = 3
@@ -418,9 +419,9 @@ const (
 	// (dnagent.md DN12).
 	SuspendSeconds = 60
 
-	// dnv-worker (dnv-worker.md, Additions to `common/constants.go`), plus one
+	// dnv-worker (dnv-worker.md, Constants this document owns), plus one
 	// constant this block holds for another document: EtcdMaxTxnOps is the
-	// addition of gateway.md, Additions to `common/constants.go`, and the
+	// addition of gateway.md, Constants this document owns, and the
 	// arithmetic tripwired against it is that section's for CreateStoragePool
 	// and DeleteThinDevice, dnv-worker.md's for the created flip (RW19) and for
 	// the two drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
@@ -487,14 +488,10 @@ const (
 	// walk over every td for uncreated snapshots is a read-only plan outside
 	// the transaction, verified inside it by the pool's identity and revision
 	// (architecture.md, Thin devices), and TestDeleteThinDeviceAtTheTdCeiling commits a
-	// delete in a pool of MaxTdCntPerSp tds. While that walk sat inside the
-	// STM such a delete cost at least MaxTdCntPerSp + 6 = 1030 compares, and
-	// etcd refused it.
+	// delete in a pool of MaxTdCntPerSp tds. A walk inside the STM would cost
+	// one compare per td and put a delete from a full pool past the budget.
 	//
-	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt rectangle sweep — then
-	// 256 keys, at the 16-slice ceiling of the time — was this number's
-	// founding justification and is gone: the clone drain replaced it with
-	// batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the default
+	// The clone drain's batches, MaxDelBmPerTxn + 4 ops each, fit the default
 	// (dnv-worker.md CLD11).
 	//
 	// The Go test etcd launchers pass it from here; the shell suites that
@@ -508,9 +505,9 @@ const (
 	// MaxTdCntPerSp: the sp worker folds every td one drain of its reports
 	// completed into one call, and an SP whose tds were all created before
 	// its pool came up can complete them in one reply. One STM over the whole
-	// list outgrew EtcdMaxTxnOps past 511 candidates and was refused again on
-	// every round, so nothing flipped. Like MaxDelBmPerTxn it bounds
-	// transaction SIZE, not rate, and is a package constant rather than
+	// list would exceed EtcdMaxTxnOps at MaxTdCntPerSp candidates and be
+	// refused on every round, so nothing would flip. Like MaxDelBmPerTxn it
+	// bounds transaction SIZE, not rate, and is a package constant rather than
 	// configuration for that reason.
 	//
 	// The arithmetic is one line. The STM compares every key it read and
@@ -533,7 +530,7 @@ const (
 	WorkerRoleCn = "cn"
 	WorkerRoleSp = "sp"
 
-	// dnv-gateway (gateway.md, Additions to `common/constants.go`). That
+	// dnv-gateway (gateway.md, Constants this document owns). That
 	// section adds three constants and
 	// only this one lands here: CloneBmChunkBytes sits beside MaxCloneBmCnt
 	// above, and EtcdMaxTxnOps in the dnv-worker block, whose header says so.
@@ -546,7 +543,7 @@ const (
 	// hung agent and a hung etcd bound an RPC alike.
 	DefaultGatewayAgentTimeout = 10
 
-	// dnv-cdc (cdc.md, Additions to `common/constants.go`).
+	// dnv-cdc (cdc.md, Constants this document owns).
 	//
 	// NvmeDiscoveryNqn is the well-known discovery subsystem NQN every
 	// host connects to (NP5). It deliberately fails ValidNqnPattern above:
@@ -564,7 +561,8 @@ const (
 	// digit h owns the sixteen shard codes h0…hf (DS2).
 	CdcRangeAll = "0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f"
 	// CdcMaxAdminSqSize is the admin SQ entry count: CAP.MQES is one less,
-	// Connect's SQSIZE is capped at it (NP4) and it is the ASQSZ of every
+	// Connect's 0's-based SQSIZE is capped at CAP.MQES so the queue never
+	// holds more entries than this (NP4), and it is the ASQSZ of every
 	// discovery log entry (DS3). 32 is NVME_AQ_DEPTH, what the Linux host
 	// asks for.
 	CdcMaxAdminSqSize = 32

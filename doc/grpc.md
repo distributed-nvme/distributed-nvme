@@ -152,7 +152,7 @@ Who is a server or a client of whom:
 
 | binary | server interceptors on | client interceptors on |
 |---|---|---|
-| dnv-gateway | its `Gateway` gRPC server | its connections to dn and cn agents: the `Get*Size` calls, the `Get*Info` behind its `Inspect*`, the `GetCntlrInfo` and `GetSideInfo` checks that `DeleteClone` and `FinishMigration` make when `force` is false, and the `Get*Bm` bitmap reads (`gateway.md`, Agent calls) |
+| dnv-gateway | its `Gateway` gRPC server | its connections to dn and cn agents (`gateway.md`, Agent calls) |
 | dnv-worker | — | its connections to dn and cn agents: `Syncup*`, `Push*Bitmap` and the `Check*` streams; the worker never calls `Get*Info` |
 | dnv-agent, dn and cn roles | its `DiskNodeAgent` or `ControllerNodeAgent` server | — |
 | dnvctl | — | its connection to the gateway (it mints a trace id per invocation unless `--trace-id` supplies one, T4) |

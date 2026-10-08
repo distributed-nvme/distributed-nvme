@@ -282,9 +282,8 @@ func TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown(
 	if image := diskImage(node, testDisk); image != "" {
 		t.Errorf("the disk was written:\n%s", image)
 	}
-	// The side survives, state file and all. This is the regression guard:
-	// with the refusal written as a skip, the side's state was dropped and
-	// this file removed.
+	// The side survives, state file and all: a refusal written as a skip
+	// would drop the side's state and remove this file.
 	if _, ok := node.protos[sidePath]; !ok {
 		t.Errorf("the side state file was torn down by a conf refusal")
 	}
@@ -348,11 +347,11 @@ func newDiskNode() *fakeNode {
 
 // TestReconcileKeepsTheSidesOfAnUnreadableDnFile pins the other dn-* file
 // DN2 cannot use, beside DN4's zero conf: one that does not decode. There
-// is no request to load, so the DN is skipped — and the skip used to send
-// every side of it down the pointer-absent branch, which deleted each side's
-// state file and bitmap chunks for want of a list that could not be read. Now
-// the sides are skipped with their DN: neither loaded nor deleted, the node
-// left exactly as the restart found it. Nor are they left looking healthy:
+// is no request to load, so the DN is skipped — and its sides are skipped
+// with it: neither loaded nor deleted, the node left exactly as the restart
+// found it. Sending them down the pointer-absent branch would delete each
+// side's state file and bitmap chunks for want of a list that could not be
+// read. Nor are they left looking healthy:
 // the DN and the side are unknown to the Check rounds — the side still after
 // the re-sent SyncupDn — and an unknown object is what the worker re-sends
 // its Syncup* for (RW4).
@@ -388,8 +387,8 @@ func TestReconcileKeepsTheSidesOfAnUnreadableDnFile(t *testing.T) {
 
 	srv := startTestServer(t, node)
 
-	// Nothing but reads. This is the regression guard: the skip used to
-	// `rm -f` the side's state file and its chunk right here.
+	// Nothing but reads: the skip removes neither the side's state file nor
+	// its chunk.
 	if mutations := node.Mutations(); len(mutations) != 0 {
 		t.Fatalf("a dn state file that did not load tore its sides' "+
 			"state down:\n%s", strings.Join(mutations, "\n"))
@@ -544,8 +543,8 @@ func TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn(t *testing.T) {
 // level down. A side-* file that does not decode names no side, so a chunk
 // whose side did not load may be that file's — and while the chunk's DN still
 // names its side, nothing read here proves the side gone: the chunk is
-// skipped, neither loaded nor deleted. It used to be deleted as an orphan, so
-// a read failure of one file destroyed another. The skip is bounded both
+// skipped, neither loaded nor deleted: a read failure of one file must not
+// destroy another. The skip is bounded both
 // ways: a chunk whose DN no longer names its side is an orphan whatever
 // failed to decode, and so is one whose DN has no file (with no dn-* file
 // left unread); with no side-* file left unread a chunk whose side is not in

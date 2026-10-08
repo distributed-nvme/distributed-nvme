@@ -19,7 +19,7 @@
 //     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
 //     package and the twelve group files must not collide (dnvctl.md,
-//     Files — the gatewayctl lesson).
+//     Files).
 
 package ctl
 
@@ -133,10 +133,8 @@ func registerSp(root *cobra.Command) {
 // same reason — an all-zero EventThreshold would say "default everything" the
 // long way.
 //
-// What is never sent: bdev_feature_list. v1 exposes no BdevFeature flags at
-// all (dnvctl.md, In scope / out of scope; gatewayctl's --feature-junk was a
-// driver-only poke at the gateway's "must be empty" rule and is deliberately
-// not ported).
+// What is never sent: bdev_feature_list. dnvctl exposes no BdevFeature flag
+// (dnvctl.md, In scope / out of scope).
 //
 // CreateStoragePool carries no token — there is no SP yet to have a revision —
 // so a typed --rev is a usage error here.

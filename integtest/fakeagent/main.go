@@ -10,12 +10,12 @@
 //
 // Two files in --dir drive and record the fake:
 //
-//	behavior.json  what to report. Re-read on every request whose mtime
-//	               changed, so the script flips behaviour without restarting
-//	               the fake. Absent (or `{}`) means: every row OK and sides
-//	               instantly zeroed. A malformed file is logged and ignored,
-//	               keeping the previous behaviour, so a bad file fails a test
-//	               on its assertion instead of killing the agent.
+//	behavior.json  what to report. Re-read on every request whose mtime or
+//	               size changed, so the script flips behaviour without
+//	               restarting the fake. Absent (or `{}`) means: every row OK
+//	               and sides instantly zeroed. A malformed file is logged and
+//	               ignored, keeping the previous behaviour, so a bad file
+//	               fails a test on its assertion instead of killing the agent.
 //	state.json     the last accepted request and revision per object plus the
 //	               received bitmap chunks (address + byte length; a migration
 //	               chunk is addressed by its bm_idx alone, a clone chunk by the
@@ -472,9 +472,9 @@ func (a *fakeAgent) refreshLocked(ctx context.Context) {
 }
 
 // reloadBehaviorLocked implements the behavior file's re-read on every request
-// when its mtime changed (dnv-worker.md,
+// when its mtime or size changed (dnv-worker.md,
 // Integration test plan, The fake agent). A malformed file is logged once per
-// mtime and ignored, keeping the previous behaviour.
+// mtime or size change and ignored, keeping the previous behaviour.
 func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
 	path := filepath.Join(a.dir, behaviorFileName)
 	info, err := os.Stat(path)

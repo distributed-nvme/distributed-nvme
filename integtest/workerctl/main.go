@@ -1729,7 +1729,7 @@ func cmdBumpRev(g *globals, args []string) {
 //
 // It rewrites nothing else: Sides already placed on the DN keep the old
 // addr_port copy their Slice holds, because the rev keys have no rename path
-// and no v001 RPC changes a node's endpoint. The suite only moves a DN that
+// and no RPC changes a node's endpoint. The suite only moves a DN that
 // carries no side (worker_test.sh case A step 2, before its SP exists).
 func cmdMoveDn(g *globals, args []string) {
 	fs := newFlagSet("move-dn", g)

@@ -23,9 +23,7 @@ In scope: the `ctl/` library package, the `cmd/dnvctl` wrapper, the
 
 Out of scope, each deliberately:
 
-* the userspace copier of `architecture.md`, raid0 bitmap math, which is
-  future work outside dnvctl: the surface is one command per RPC and nothing
-  else (CT1);
+* any surface beyond one command per RPC (CT1);
 * TLS and authentication: dnv is plaintext gRPC end to end;
 * multi-gateway failover: dnvctl dials the one `--gateway-address`, and
   operators front the gateways themselves;
@@ -36,8 +34,7 @@ Out of scope, each deliberately:
   `ctl/cntlr.go`);
 * `BdevFeature` flags on `sp create`, so its `bdev_conf.bdev_feature_list`
   is never sent: the gateway accepts only an empty feature list
-  (`architecture.md`, Common validation), and gatewayctl's `--feature-junk`,
-  a driver-only poke at that validation, is not ported;
+  (`architecture.md`, Common validation), and dnvctl has no flag for one;
 * shell-completion helpers beyond cobra's stock generator.
 
 ### Files
@@ -50,48 +47,42 @@ error rendering and exit codes (CT5). There is one file per noun group,
 named after the group, each declaring its group's register function
 (`registerCluster` and its siblings), its job funcs and any parser or flag
 helper kept beside them, under names carrying the group's name, so the sibling
-files share no package-level flag names (the gatewayctl lesson). The command
-tree and its viper binding live in `ctl/`, never in `cmd/dnvctl`
-(`layout.md`, Dependency rules): `ctl/` imports only `common` and `pb`
-besides cobra, pflag, viper and the gRPC and protobuf runtimes, and
-`cmd/dnvctl/main.go` is a thin wrapper that imports only `common` and `ctl`,
-sets the log level (CT7) and exits with the code `ctl.Execute` returns
-(CT5). `make build` builds `cmd/dnvctl` with no Makefile edit. The suite is
-`integtest/dnvctl_test.sh` and its fake is `integtest/fakegateway`
-(Integration test plan).
+files share no package-level flag names. The command tree and its viper
+binding live in `ctl/`, never in `cmd/dnvctl`, and what `ctl/` and
+`cmd/dnvctl` may import is `layout.md`, Dependency rules; `cmd/dnvctl/main.go`
+is a thin wrapper that sets the log level (CT7) and exits with the code
+`ctl.Execute` returns (CT5). The suite is `integtest/dnvctl_test.sh` and its
+fake is `integtest/fakegateway` (Integration test plan).
 
 ### Placement rules
 
-CT6. **etcd-free.** dnvctl links no etcd code: its only server-side
-dependency is `pb` plus `common` (`layout.md`, Dependency rules;
-`dependencies.md`, Direct dependencies).
+CT6. **etcd-free.** dnvctl links no etcd code; the import rules that keep
+it so are `layout.md`, Dependency rules.
 
-CT7. **Log level Warn, logs to stderr.** `cmd/dnvctl/main.go` sets the log
-level to Warn as its first statement (`log.md` R6), and that is the whole of
-dnvctl's logging setup: `ctl/` installs no logger of its own, because the
-init of `common` already puts every record on stderr as JSON
-(`log.md` R2, R3). Leaving it there keeps the level live rather than baked
-in — the handler that init builds holds `logLevel`, a slog.LevelVar, so
-`SetLogLevel` still bites after the handler exists — and it leaves stdout
-reserved for the one result document (CT4). Because every record of the
-client interceptors is Info (`grpc.md` L1), dnvctl's own gRPC logging is
-silenced by design (`log.md` R6).
+CT7. **Log level Warn, logs to stderr.** dnvctl logs at Warn, set as the
+first statement of its `main` (`log.md` R6), and that is the whole of its
+logging setup: `ctl/` installs no logger of its own, because the init of
+`common` already puts every record on stderr as JSON (`log.md` R2, R3),
+which leaves stdout reserved for the one result document (CT4). The records
+the Warn level silences are the client interceptors', every one of them
+Info (`grpc.md` L1).
 
 ## Invocation model
 
 ### Global flags, env, config
 
 A command line is "dnvctl <group> <verb> [flags]", and the root's persistent
-flags are the global flags. `--gateway-address` is the gateway's ip:port; it is
-required and has no default, because unlike the test driver dnvctl has no
-lab address worth baking in, and it is one address, with no multi-gateway
-failover list, because operators front the gateways themselves. `--cluster`
-and `--sp` are the scope global flags: they fill `cluster_name` and `sp_name` of
-every request that has the field — all requests but one carry a cluster
-name, and most carry a pool name — so neither is a leaf flag (Conventions).
-`--rev` is the revision token (CT3): only the token-carrying mutators take
-it, it is a usage error on every other leaf, and it is read off the
-command line alone. `--timeout` is the per-invocation deadline in seconds,
+flags are the global flags; `--help` lists them with their types and
+defaults. `--gateway-address` is required and has no default, because
+dnvctl has no lab address worth baking in, and it is one address, with no
+multi-gateway failover list, because operators front the gateways
+themselves. `--cluster` and `--sp` are the scope global flags: they fill
+`cluster_name` and `sp_name` of every request that has the field — all
+requests but one carry a cluster name, and most carry a pool name — so
+neither is a leaf flag (Conventions). `--rev` is the revision token (CT3):
+only the token-carrying mutators take it, it is a usage error on every other
+leaf, and it is read off the command line alone. The rest steer the
+invocation itself: `--timeout` is the per-invocation deadline in seconds,
 `--trace-id` overrides the per-invocation trace-id mint (Trace ids), and
 `--config` names an optional viper config file, which supplies the
 env-backed global flags only.
@@ -168,17 +159,18 @@ the agents' logs.
 ### Result rendering
 
 CT4. **Result rendering.** A successful invocation prints exactly one
-canonical JSON document on stdout, through gatewayctl's emit pipeline: the
-reply is marshalled as protojson with proto field names and its unpopulated
-fields emitted (`marshalOpts`), then re-parsed through encoding/json and
-encoded again, so the document has sorted keys, stable spacing, proto field
-names, proto3 defaults visible and uint64 fields as JSON strings. The two
-bitmap reads, `td get-bm` and `td get-leg-bm`, are the one deviation, for
-gatewayctl's reason — protojson renders a bytes field as base64: they print
-a document of two keys, `bitmap_hex`, the bitmap as lowercase hex with no
-prefix, and `byte_cnt`, its length in bytes (`hexBitmapResult`). Nothing
-else is ever printed to stdout on an RPC path; cobra's stock help and
-completion write their text there too. There is no quiet or verbose mode.
+canonical JSON document on stdout, through its own emit pipeline (`emit`),
+the same shape as gatewayctl's: the reply is marshalled as protojson with
+proto field names and its unpopulated fields emitted (`marshalOpts`), then
+re-parsed through encoding/json and encoded again, so the document has
+sorted keys, stable spacing, proto field names, proto3 defaults visible and
+uint64 fields as JSON strings. The two bitmap reads, `td get-bm` and
+`td get-leg-bm`, are the one deviation, because protojson renders a bytes
+field as base64: they print a document of two keys, `bitmap_hex`, the
+bitmap as lowercase hex with no prefix, and `byte_cnt`, its length in bytes
+(`hexBitmapResult`). Nothing else is ever printed to stdout on an RPC path;
+cobra's stock help and completion write their text there too. There is no
+quiet or verbose mode.
 The emit path is the package's only caller of fmt.Print*, under the
 exemption `log.md` R1 makes for CLI results; the two error lines of CT5 are
 the package's only other direct writes, to stderr from `Execute`, and `ctl/`
@@ -229,12 +221,11 @@ was typed:
 * `--rev` not given: the token field is absent, a nil message.
 * `--rev` with a value, parsed with Go's base-0 rule, so decimal and
   `0x`-prefixed hex both work: the token message is present with `revision`
-  set to it and nothing else set — the gateway compares the revision alone
-  and ignores the token's echo fields (`gateway.md` GW6).
+  set to it and nothing else set (Conventions: the echo field is never
+  sent).
 * `--rev 0`: the message is present with revision zero — proto3 message
-  presence keeps this distinguishable from omission — and is the deliberate
-  always-stale probe, since a stored revision starts above zero and only
-  grows.
+  presence keeps this distinguishable from omission — which is the
+  always-stale probe of `gateway.md` GW6.
 * "Given" means typed on this command line (pflag's Changed bit), nothing
   else: `--rev` has no environment or config carrier (CT9), so an exported
   `DNVCTL_REV` or a `rev` key in the `--config` file sends no token. On a
@@ -248,13 +239,8 @@ was typed:
   would drop it unseen: a `cluster delete` typed with `--rev` would delete
   ungated while looking gated.
 
-The gateway's check is presence-based (`gateway.md` GW6): an absent token
-skips it, and a present one must equal the stored revision. A token-less
-mutator therefore succeeds against a real gateway, and succeeds ungated —
-the bypass costs exactly the optimistic-concurrency gate. For concurrent or
-scripted work the operator still reads the token with `sp get` and passes it
-with `--rev`, and keeps the token-less form for interactive single-operator
-use.
+The check itself — made only when the token message is present — is
+`gateway.md` GW6; a token-less mutator therefore succeeds ungated.
 
 ## The command tree
 
@@ -293,7 +279,7 @@ these exceptions:
 * `cluster_name` and `sp_name` come from the scope global flags `--cluster` and
   `--sp`, `sp create` included, except that the `cluster` group's own
   commands name their cluster with `--name`, which falls back to the global
-  `--cluster` when it is empty (gatewayctl's `clusterNameOf` rule);
+  `--cluster` when it is empty (`clusterNameOf`);
 * a token message takes its `revision` from the global `--rev` (CT3), and
   its echo field — `sp_rev.sp_name`, `dn_rev.addr_port`, `cn_rev.addr_port`
   — is never sent;
@@ -339,21 +325,20 @@ wherever they appear, and the value flags of `sp set-level`,
 `cntlr set-enabled` and `ns set-suspended`. A flag default is not a hidden
 RPC (CT8).
 
-**Shared flag helpers.** Each has one implementation, in `ctl/root.go`:
+**Shared flag helpers.** Each has one implementation, in `ctl/root.go`, and
+`--help` lists the flags it adds:
 
-* `trConfFlags` adds the four flags of an `NvmeTrConf` — `--tr-type`,
-  `--adr-fam`, `--tr-addr` and `--tr-svc-id` — under a prefix: none on
-  `dn create` and `cn create`, `src-` for a clone's source. They default to
-  a lab-shaped loopback TCP transport, and all four emptied make a nil conf
+* `trConfFlags` adds the four flags of an `NvmeTrConf` under a prefix: none
+  on `dn create` and `cn create`, `src-` for a clone's source. They carry a
+  default of their own (Defaults), and all four emptied make a nil conf
   (`trConfOf`).
 * `selectorFlags` adds the black and white lists of a `NodeSelector` under a
-  prefix, `--dn-black` and `--dn-white` or `--cn-black` and `--cn-white`;
-  both empty make a nil selector (`selectorOf`).
-* `dmCloneConfFlags` adds `--hyd-threshold` and `--hyd-batch`; both zero
-  make a nil `DmCloneConf` (`dmCloneConfOf`), the "not given" convention of
+  node prefix; both empty make a nil selector (`selectorOf`).
+* `dmCloneConfFlags` adds the two dm-clone tuning flags; both zero make a
+  nil `DmCloneConf` (`dmCloneConfOf`), the "not given" convention of
   `gateway.md` GW11.
-* `pageFlags` adds `--count`, where zero asks for the server's default page
-  size, and `--page-token`, to the paged list leaves.
+* `pageFlags` adds the page size, where zero asks for the server's default,
+  and the page token to the paged list leaves.
 
 CT8. **No client-side validation.** dnvctl rejects only what fails to parse
 (exit 2) — a malformed `--bm-hex`, a non-numeric id, a `--timeout` that is
@@ -369,10 +354,9 @@ CT1. **Completeness.** The leaves are exhaustive: one per RPC of
 `service Gateway`, none left out and none doubled. A leaf carries the
 `--rev` token exactly when its request has a token field, so the leaves that
 take `--rev` are exactly CT3's carriers, and `--rev` on any other leaf is a usage
-error. Unit tests pin the leaves against `pb.Gateway_ServiceDesc` in both
-directions and against the tree the root actually builds, and the token
-carriers against the requests that have a token field; the integration sweep
-makes the same claim on the wire (Integration test plan).
+error. Both claims are pinned by the unit tests against
+`pb.Gateway_ServiceDesc` and the request types, and made on the wire by the
+integration sweep (Integration test plan).
 
 ### `cluster` — `ctl/cluster.go`
 
@@ -436,8 +420,7 @@ group is a change to both.
 
 `sp create` always sends a `bdev_conf`, because it always sends a
 `redund_conf`: `--redund` picks the arm and defaults to the md-raid1 one, as
-`architecture.md`, Storage pools, says the CLI does, while the gateway reads
-an unset `redund_conf` as `redund_none`. The raid1 arm carries
+`architecture.md`, Storage pools, says the CLI does. The raid1 arm carries
 `--bitmap-chunk-blocks`, zero leaving the control plane its own chunk size,
 and `none` sends `redund_none`. An unknown `--redund` spelling is a parse
 failure (exit 2) rather than a forwarded value, because the flag names a
@@ -446,31 +429,27 @@ follow the "not given" convention: `dm_raid0_conf` is sent only for a
 non-zero `--stripe-size`, `dm_pool_conf` only when `--block-size` or
 `--low-water-mark-pct` is non-zero, carrying both, and `event_threshold`
 only when one of `--thr-primary`, `--thr-cntlr`, `--thr-side` and
-`--thr-leg` is non-zero. `--low-water-mark-pct` is the pool usage percentage
-past which the worker grows a slice (`architecture.md`, Automatic
-reactions): zero leaves the gateway to take the cluster's mark, else
-`DefaultPoolLowWatermarkPct`, and a value above 100 — forwarded as typed
-like every other (CT8) — turns that auto-grow off. A zero `--slice-cnt` or
-`--cntlr-cnt` is forwarded as the zero (CT8), and the gateway substitutes
-`DefaultSliceCntPerSp` or `DefaultCntlrCntPerSp`; a zero `--init-ext-cnt`
-gets no such substitution, and the gateway answers INVALID_ARGUMENT.
+`--thr-leg` is non-zero. `--slice-cnt`, `--cntlr-cnt`, `--init-ext-cnt` and
+`--low-water-mark-pct` are forwarded as typed, a zero and a mark above one
+hundred included (CT8); which zeros the gateway fills with a default and
+which it refuses is `architecture.md`, Storage pools and `architecture.md`,
+Common validation.
 
-`sp delete` latches and returns (`architecture.md`, Storage pools), so a
-successful `sp delete` means teardown started, not gone. An operator polls
-`sp get` until NOT_FOUND; while the pool drains, `sp get` shows `deleting`
-true and a shrinking inventory, an `sp create` of the same name is
-ALREADY_EXISTS, every other `sp` mutator is FAILED_PRECONDITION, and a
-repeated `sp delete` is an OK no-op. dnvctl adds no wait flag: the polls
-would be RPCs the operator did not type (CT8), and the surface stays one
-command per RPC (CT1).
+`sp delete` latches and returns, so a successful `sp delete` means teardown
+started, not gone; the drain, and what the pool answers while it runs, are
+`architecture.md`, Storage pools, and every other mutator under the pool is
+refused while it drains (`architecture.md`, `service Gateway` — RPC
+specifications). dnvctl adds no wait flag: the polls would
+be RPCs the operator did not type (CT8), and the surface stays one command
+per RPC (CT1).
 
-`sp set-cntlid-slots` sends an empty `--slots` as typed and the gateway
+`sp set-cntlid-slots` sends an empty `--slots` as typed, and the gateway
 refuses it, while an empty list on `sp create` asks for the gateway's
-default. `sp set-level` takes a short level name, an `SP_LEVEL_*` name or a
-raw number — the number so that an undeclared enum value is forwarded for
-the gateway to refuse (CT8) — and `--level` defaults to read-write, the
-enum's zero. `sp grow-slice`'s `--meta` and `--ext` do not constrain each
-other client-side (CT8).
+default (`architecture.md`, Storage pools). `sp set-level` takes a short
+level name, an `SP_LEVEL_*` name or a raw number — the number so that an
+undeclared enum value is forwarded for the gateway to refuse (CT8) — and
+`--level` defaults to read-write, the enum's zero. `sp grow-slice`'s
+`--meta` and `--ext` do not constrain each other client-side (CT8).
 
 ### `cntlr` — `ctl/cntlr.go`
 
@@ -478,10 +457,9 @@ other client-side (CT8).
 a cntlr is written `--enabled=false`. Disabling the last enabled cntlr of a
 pool stops its IO; the gateway allows it (`architecture.md`, Cntlrs), and
 dnvctl does not warn: the warning would need a pre-read of the pool's
-cntlrs, an RPC the operator did not type (CT8), so it is deferred until the
-gateway itself carries the hint in its reply. `cntlr delete` needs a cntlr
-that is neither the primary nor enabled; dnvctl checks neither condition,
-both being server state (CT8).
+cntlrs, an RPC the operator did not type (CT8). `cntlr delete` has
+preconditions that are server state (`architecture.md`, Cntlrs); dnvctl
+checks none of them (CT8).
 
 ### `td` — `ctl/td.go`
 
@@ -489,33 +467,29 @@ both being server state (CT8).
 is legal only then, the snapshot inheriting its origin's size;
 dnvctl does not enforce the pairing (CT8). `td list` is the `created` poll,
 the client's wait primitive of `architecture.md`, Thin devices: CT4's
-rendering shows `created` on every thin device, false included. Its reply
-carries no revision while the `created` flip bumps `SpRev`, so the token of
-a snapshot's `td create` comes from an `sp get` made after the last poll —
-for a clone's destination, after `clone get` answers NOT_FOUND (`clone` —
-`ctl/clone.go`), because the latch and the drain bump `SpRev` too.
+rendering shows `created` on every thin device, false included, and that
+same place says when a token read before the poll is stale.
 `td get-bm` and `td get-leg-bm` print the hex map of CT4; `td get-bm` names
 its device with the group's `--name`, where gatewayctl spells it `--td`.
 
 ### `ss` — `ctl/ss.go`
 
-`ss list` is the only gateway read that shows namespaces: a namespace is a
-field of its subsystem, so the `ns` group creates and changes namespaces but
-has no read of its own. `ss set-hosts` is a full replacement of
-`allowed_hosts`. An empty list admits no host
-(`architecture.md`, Primary cntlr), which is how a subsystem is staged or
-closed to new connections: one made by `ss create` without `--hosts` admits
-no host until `ss set-hosts` grants its hosts, and `ss set-hosts` with an
-empty `--hosts` revokes every host.
+`ss list` is the only etcd read that shows a namespace's configuration: a
+namespace is a field of its subsystem, so the `ns` group creates and changes
+namespaces but has no read of its own; `cntlr inspect` shows a cntlr's live
+namespaces, from the agent, not their configuration. `ss set-hosts` sends
+the `--hosts` list as a full replacement of `allowed_hosts`, an empty list
+included, and `ss create` without `--hosts` sends an empty list too; what
+an empty list admits is `architecture.md`, Primary cntlr.
 
 ### `ns` — `ctl/ns.go`
 
-`ns create` with an empty `--uuid` or `--nguid` leaves the gateway to mint
-that identity (`architecture.md`, Subsystems, namespaces); dnvctl generates
-nothing itself. `ns set-suspended` takes `--suspended`, which defaults to
-true, so resuming is written `--suspended=false`; the RPC writes and bumps
-even when the stored flag already matches, outside the idempotent no-write
-of `gateway.md` GW6.
+`ns create` sends `--uuid` and `--nguid` as typed, an empty value leaving
+the gateway to mint that identity (`architecture.md`, Subsystems,
+namespaces); dnvctl generates nothing itself. `ns set-suspended` takes
+`--suspended`, which defaults to true, so resuming is written
+`--suspended=false`; a re-sent matching flag is a write and a bump here,
+unlike the flag updates `gateway.md` GW6 makes a no-op.
 
 ### `clone` — `ctl/clone.go`
 
@@ -524,48 +498,25 @@ of `gateway.md` GW6.
 four `src-` transport flags are emptied, so the gateway's refusal of an
 empty list stays reachable from the CLI (`cloneSrcTrConfList`).
 
-`clone delete` with `--force` skips the proof, read from the primary cntlr's
-CN, that the copy finished. The RPC latches and returns (`architecture.md`,
-Clones), so a successful `clone delete` means teardown started. An operator
-polls `clone get` until NOT_FOUND; while the clone drains, `clone get` shows
-`deleting` true, `clone append-bm` and `clone set-tr` are
-FAILED_PRECONDITION, a same-name `clone create` is ALREADY_EXISTS —
-RESOURCE_EXHAUSTED if the surviving entry holds the pool at
-`MaxCloneCntPerSp`, which also blocks an unrelated `clone create` — and
-`sp delete` is still refused, FAILED_PRECONDITION naming what the pool still
-holds. The count it names is thin devices, which the gateway checks before
-clones: the destination thin device cannot leave `td_name_list` while the
-draining clone is in `clone_name_list`, which lasts until the drain's last
-transaction, so `sp delete` stays refused until the `td delete` below, not
-merely until the drain ends. The destination thin device is held for the
-whole drain too: a `td delete` of it, a snapshot of it and a replacement
-`clone create` onto it are FAILED_PRECONDITION until the drain's last
-transaction, all three scans walking `clone_name_list`. Abandoning a clone
-is therefore `clone delete`, a poll of `clone get` to NOT_FOUND, an
-`ns delete` of the namespace the destination backs — the cross-SP live
-migration shape always has one (`architecture.md`, Transfer + clone =
-cross-SP live migration), and `td delete` checks namespaces before it scans
-the clones — and then `td delete`. A repeated `clone delete` is an OK no-op,
-forced or not. The destination namespace resumes with the latch, not at the
-end of the drain.
+`clone delete` with `--force` sends `force` true, which skips the gateway's
+proof that the copy finished; the RPC latches and returns, so a successful
+`clone delete` means teardown started, not gone. What the clone, its
+destination thin device and the pool answer while the clone drains, and
+the order in which an operator then takes them down, are `architecture.md`,
+Clones. dnvctl adds no wait flag here either (CT8, CT1).
 
 `clone append-bm` addresses a chunk by the pair `--src-slice-idx` and
-`--bm-idx`, never by either alone: chunk (s, b) is the bytes of source slice
-s's bitmap from b times `CloneBmChunkBytes` on, so chunks may be sent in any
-order and left unsent, while the pages of one chunk must arrive in order,
-the gateway appending each at that chunk's current length (`gateway.md`,
-Clones). An empty `--bm-hex` sends an empty bitmap on purpose, so the
-gateway's refusal of one stays reachable; a malformed non-empty value is a
-usage error (exit 2).
+`--bm-idx`, never by either alone; what a chunk is and how its pages append
+is `architecture.md`, Clones. An empty `--bm-hex` sends an empty bitmap on
+purpose, so the gateway's refusal of one stays reachable; a malformed
+non-empty value is a usage error (exit 2).
 
 ### `xfer` — `ctl/xfer.go`
 
-`xfer delete` with `--force` is an abort, not a skipped proof: the origin
-namespace's `suspended` is left false, so the next syncup unparks it and
-restores its ANA state; without `--force` the delete finalizes the
-hand-over, retiring the origin namespace in the same transaction
-(`architecture.md`, Transfers). `xfer set-hosts` replaces the whole host
-list.
+`xfer delete` with `--force` sends `force` true, which the gateway reads as
+an abort rather than the finalizing of a hand-over (`architecture.md`,
+Transfers). `xfer set-hosts` sends the `--hosts` list as a full replacement
+of `allowed_hosts`.
 
 ### `migr` — `ctl/migr.go`
 
@@ -600,58 +551,23 @@ thread that ties a script stage to the fake's records, and brings back in
 one round trip the exit code, stderr, stdout and the fake's state file from
 before and after the call.
 
-**Cases.** The cases run in a fixed order, fail-fast, each against a
+**Cases.** The cases run in a fixed order and fail fast, each against a
 restarted fake whose behavior file is reset and whose state file holds only
 the reset's own readiness probe, so counters are read only as deltas.
-
-* smoke — one call under an explicit trace id, observed on the wire; the
-  same call without `--trace-id`, arriving under a minted id; and stderr
-  empty on both successes.
-* sweep — one step per RPC, in tree order, each asserting exit 0, a stdout
-  that parses, the recorded request equal to the argv-implied one as a whole
-  object, scope global flags and token included, and the RPC's count moved by
-  exactly one; a closing audit finds one request record under each step's
-  trace id, over as many distinct RPCs as there are steps. The replies held
-  to byte-exact goldens are an empty canned reply, a revision beyond the
-  exact range of a JSON number, and the bitmap reads' hex maps.
-* behavior — the token trio: no `--rev` sends no token message, `--rev 0` a
-  present empty one, a hex value its base-0 parse; `sp create`'s other
-  redundancy arm; `td list` rendering `created` both true and false;
-  `DNVCTL_CLUSTER` filling `--cluster` and `--cluster` on the command line
-  winning over it; and a `cluster` command's `--name` winning over
-  `--cluster`.
-* errors — injected refusals rendered per CT5, the stale-revision refusal an
-  operator meets among them; and usage errors — an unknown flag, a malformed
-  `--bm-hex`, a `--rev` on a command with no token field — each exit 2 with
-  the fake's count unmoved.
-* transport — a dial to the port nothing listens on is UNAVAILABLE and fails
-  fast; a hanging fake under a short `--timeout` is DEADLINE_EXCEEDED within
-  a bound; and clearing the hang restores the command.
-
-**Rules exercised.** The smoke case exercises CT2's trace id on the wire and
-its mint, CT4's parsing stdout and CT7's empty stderr; the sweep
-exercises CT1 on the wire, the field and flag rules of Conventions — the
-scope global flags, the `cluster` group's `--name`, the selector and dm-clone
-nil rules, `sp create`'s always-present `redund_conf`, `--extent-size` and
-`--low-water-mark-pct`, a clone chunk's pair of distinct indices — CT3's
-token on exactly its carriers, and CT4's goldens: the emitted defaults and
-key order, uint64 as a string, the hex maps; the behavior case
-exercises CT3's presence trio, CT4 on `created`, CT9's precedence of flag
-over environment and the `cluster` group's `--name`; the errors case
-exercises CT5's whole failure line and CT8's parse-only refusals, CT3's
-refusal of a `--rev` with no field to fill among them, none of them reaching
-the fake; and the transport case exercises CT2's deadline and CT5's
-UNAVAILABLE and DEADLINE_EXCEEDED. Left to the unit tests: what one step per
-RPC has no room for — a bare `cluster create` sending no `dn_bin_conf`, the
-transport-conf nil rule and clone's empty `src_tr_conf`, the
-refusal of `--rev` on every leaf without a token field, the silence of the
-environment and the config file on leaf flags (CT9), `--timeout` refused or
-clamped from every carrier, and the code name of every gRPC code (CT5).
+Together they exercise, on the wire, CT1 with one step per RPC in tree
+order, CT2's trace id and deadline, CT3's token on exactly its carriers and
+its refusal elsewhere, CT4's goldens, CT5's failure line and codes, CT7's
+empty stderr, CT8's parse-only refusals, CT9's precedence of flag over
+environment, and the field and flag rules of Conventions. What one step per
+RPC has no room for is left to the unit tests: the transport conf's nil
+rule and a clone's empty source list, a bare `cluster create` sending no
+`dn_bin_conf`, the silence of the environment and the config file on leaf
+flags (CT9), `--timeout` refused or clamped from every carrier, and the
+code name of every gRPC code (CT5).
 
 Out of scope: real-gateway runs, which are the gateway suite's harness;
-concurrency, which stays with gatewayctl's barrier runner; the copier;
-performance; and any assertion about the gateway's reaction to what dnvctl
-sends.
+concurrency, which stays with gatewayctl's barrier runner; performance; and
+any assertion about the gateway's reaction to what dnvctl sends.
 
 **What a pass means.** Exit status zero and `PASS` mean every case's
 assertions held, in a run that stops at the first failure. A request is

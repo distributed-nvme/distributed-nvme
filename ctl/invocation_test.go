@@ -49,7 +49,7 @@ func TestTimeoutIsApplied(t *testing.T) {
 		t.Errorf("stdout = %q, want empty", res.stdout)
 	}
 	// The deadline must be the one that was asked for: too early would mean
-	// some other timeout is in charge, and the default 10 s would mean the
+	// some other timeout is in charge, and defaultTimeout would mean the
 	// flag is not read at all.
 	if elapsed < 250*time.Millisecond {
 		t.Errorf("gave up after %v, want at least the 0.3 s asked for",

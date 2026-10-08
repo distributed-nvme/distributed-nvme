@@ -40,9 +40,9 @@ func CmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 // common.OsClient.RunCommand returns exitCode -1 together with a non-nil
 // error when the process never reported — killed at the soft timeout, killed
 // at the hard timeout, failed to start, ctx cancelled, semaphore refused —
-// and exitCode > 0 when the tool ran and answered "no". Conflating the two is
-// what let a killed probe read as "the object does not exist": the removal
-// was skipped, the object was forgotten, and nothing enumerated it again.
+// and exitCode > 0 when the tool ran and answered "no". Conflating the two
+// would make a killed probe read as "the object does not exist": the removal
+// is skipped, and nothing enumerates the object again.
 //
 // A killed command may still have completed in the kernel (the ioctl finishes
 // regardless of the signal), so a caller that learns "did not answer" must
@@ -134,7 +134,7 @@ func (b *osBase) runOk(
 // and clone-metadata tooling of `clonemeta.go` (tmpfs, `truncate`, `losetup`,
 // `blkdiscard`) and the thin-provisioning-tools reader (`thinbm.go`), i.e. the
 // file list of `cnagent.md`, Files. There is no LVM in that list, and none
-// anywhere else in dnv: [D14] removed the clone VG, LVM's last user.
+// anywhere else in dnv ([D13], [D14]).
 // By the split rule of `cnagent.md`, Scope and placement, those wrappers stay
 // role code, but they still owe the
 // SH15 soft-timeout discipline and the DN19 error capture, which is exactly
@@ -283,7 +283,8 @@ func (b *osBase) ensureAttr(
 // listDir returns the entries of a directory; ok is false when the directory
 // does not exist. An `ls` that did NOT answer is an error, never "absent":
 // RemoveSubsystem and RemovePortLink walk their children through this, and a
-// killed listing used to make them skip every object silently.
+// killed listing must never read as an empty directory, or they would skip
+// every object silently.
 func (b *osBase) listDir(
 	ctx context.Context,
 	path string,

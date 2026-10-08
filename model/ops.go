@@ -142,9 +142,9 @@ func SpNextId(conf *pb.SpConf) uint64 {
 
 // ReleaseShard is the deletion half of GW12: the deleted object's shard bucket
 // is decremented and its id is never reused. A zero bucket is left alone rather
-// than wrapped around, and a bucket of the wrong length — a global written
-// before ShardBucketSize was what it is, or a hand-edited one — is normalized
-// rather than trusted, exactly as the mint half normalizes it.
+// than wrapped around, and a bucket of the wrong length — a global whose
+// bucket length differs from ShardBucketSize, or a hand-edited one — is
+// normalized rather than trusted, exactly as the mint half normalizes it.
 //
 // It lives in model and not in the gateway because FinishSpDelete, the last STM
 // of the sp drain (SPD12), applies it from the WORKER: DeleteCluster's
@@ -853,7 +853,7 @@ func SetSideErrEpoch(
 }
 
 // ---------------------------------------------------------------------------
-// The two flips (MD6; architecture.md, sp role)
+// The two flips (MD6, RW18, RW19)
 // ---------------------------------------------------------------------------
 
 // SideRef names one side of an SP for FlipProvisioned (MD6): the slice that
@@ -867,15 +867,15 @@ type SideRef struct {
 // TdRef names one thin device for FlipCreated (MD6): the name that keys the
 // record and the td_id RW19 observed complete. Both are needed — the name
 // addresses the key, and the id is what proves the record is still the one
-// that was observed (architecture.md, sp role).
+// that was observed (RW19).
 type TdRef struct {
 	Name string
 	TdId uint64
 }
 
 // FlipProvisioned sets Side.provisioned on every listed side that is still
-// false and bumps SpRev exactly once if at least one was flipped (MD6, RW18;
-// architecture.md, sp role). It returns the sides it ACTUALLY wrote, in the
+// false and bumps SpRev exactly once if at least one was flipped (MD6, RW18).
+// It returns the sides it ACTUALLY wrote, in the
 // order they were
 // listed; the MD6 count is len() of that slice.
 //
@@ -957,7 +957,7 @@ func containsId(ids []uint64, id uint64) bool {
 }
 
 // FlipCreated sets ThinDevice.created on every listed candidate that still
-// needs it (MD6, RW19; architecture.md, sp role). It returns the
+// needs it (MD6, RW19). It returns the
 // candidates it ACTUALLY wrote, in the order they were listed; the MD6 count
 // is len() of that slice.
 //
@@ -976,10 +976,11 @@ func containsId(ids []uint64, id uint64) bool {
 // The list is committed common.MaxFlipCreatedPerTxn candidates at a time, in
 // list order, one STM each, and each STM that wrote bumps SpRev once. The list
 // is as long as the tds one drain of the worker's reports completed, which
-// only MaxTdCntPerSp bounds, and one STM over all of it was refused by etcd
-// past 511 candidates — on every round, so nothing flipped. An error ends the
-// call at the STM that failed: those before it stay committed, and the refs
-// they wrote are returned with the error (TestFlipCreatedStopsAtTheFailingTxn).
+// only MaxTdCntPerSp bounds, and one STM over MaxTdCntPerSp candidates would
+// exceed EtcdMaxTxnOps and be refused on every round, so nothing would flip.
+// An error ends the call at the STM that failed: those before it stay
+// committed, and the refs they wrote are returned with the error
+// (TestFlipCreatedStopsAtTheFailingTxn).
 func FlipCreated(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1003,8 +1004,8 @@ func FlipCreated(
 
 // flipCreatedTxn is one FlipCreated STM, over at most
 // common.MaxFlipCreatedPerTxn candidates: at worst a Get and a Put of each
-// td key plus the SpRev read and put, 2 x 256 + 2 = 514 compares
-// (gateway/txnbudget_test.go's TestFlipCreatedTxnBudget).
+// td key plus the SpRev read and put, 2 x MaxFlipCreatedPerTxn + 2 compares
+// (gateway/txnbudget_test.go's TestFlipCreatedTxnBudget pins the count).
 func flipCreatedTxn(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1867,7 +1868,7 @@ func appendTrConf(
 // which tier 2 relaxes when the cluster has no second domain to offer, so a
 // legitimate spare can land in an occupied domain and this check must still
 // accept it. Re-checking the location here would buy nothing anyway: location
-// is immutable in v1 (architecture.md, Disk nodes), so what the scan read
+// is immutable (architecture.md, Disk nodes), so what the scan read
 // cannot have gone stale. No geometry (architecture.md, Group on-leg layout:
 // meta region, data region, health block) is computed: the spare joins an
 // existing Group

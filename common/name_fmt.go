@@ -11,8 +11,8 @@ import (
 // by one hex digit. The letter is what makes the name attributable
 // on a node that runs both agents: cn ids and dn ids come from separate
 // counters (CnGlobal.next_id, DnGlobal.next_id) and can collide numerically,
-// so a bare digit left `dnv-<cluster>-<node>-9-...` ambiguous between a cn
-// leg wrapper and a dn kind 9 that does not exist yet.
+// so a bare digit would leave `dnv-<cluster>-<node>-9-...` ambiguous between
+// a cn leg wrapper and a dn kind of the same digit.
 type DmKind string
 
 const (
@@ -44,7 +44,7 @@ const (
 )
 
 // dmKindIdCnt is how many 16-hex-digit id fields a name of each kind carries
-// (architecture.md, dm device names; cnagent.md, Additions to `common`, for
+// (architecture.md, dm device names; cnagent.md, Names and constants in `common`, for
 // c9 to cb). ParseDmName enforces it, so a name whose shape does not match
 // its kind is "not a dnv dm name" rather than a half-decoded one.
 var dmKindIdCnt = map[DmKind]int{
@@ -164,8 +164,7 @@ func (nf *NameFmt) DnLinearName(
 }
 
 // DnSideName is the side's data device ([D13]): one dm-linear concatenating
-// the extent runs the on-disk volume table allocated to the side. It is the
-// successor of the LVM logical volume the side used to sit on.
+// the extent runs the on-disk volume table allocated to the side.
 func (nf *NameFmt) DnSideName(
 	clusterId uint64,
 	dnId uint64,

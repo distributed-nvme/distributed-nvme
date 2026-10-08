@@ -140,8 +140,8 @@ func TestMigrationDestinationSequence(t *testing.T) {
 		t.Errorf("dm-linear table %q does not point at the dm-clone (%s)",
 			node.dms[linName].table, want)
 	}
-	// Created with hydration off, then enabled
-	// (architecture.md, Migration, dst steps 4 and 5).
+	// Created with hydration off, then enabled (dnagent.md DN13's dm-clone
+	// step).
 	if node.dms[cloneName].noHydration {
 		t.Error("hydration was never enabled")
 	}
@@ -650,12 +650,12 @@ func TestMigrationSourceSequence(t *testing.T) {
 // A node that lost its --local-store but kept its disk and its kernel state
 // rebuilds every side its DN's pointer list names from what is there (DN8),
 // and the SyncupDn that brings the list back comes before any side's own
-// request. Its node-level sweep judged the migration objects by the claim
-// rule alone, which reads held sides' requests — and none is held yet. A
-// source's `d2` linear and its `:3:` export are claimed by nothing but that
-// side's request, so the sweep took both out from under the destination's
-// dm-clone: every read of a region not yet hydrated failed on the leg the host
-// was using. A migration object names its sp, not a side, so while a side of
+// request. A node-level sweep judging the migration objects by the claim
+// rule alone — which reads held sides' requests, and none is held yet — would
+// take a source's `d2` linear and its `:3:` export, claimed by nothing but
+// that side's request, out from under the destination's dm-clone and fail
+// every read of an unhydrated region on the leg the host is using. A
+// migration object names its sp, not a side, so while a side of
 // that sp is known only by its pointer "no held side claims it" proves
 // nothing, and the object waits for a pass that can prove it — the rule the
 // clone-metadata record already follows (DN6).
@@ -1184,8 +1184,8 @@ func TestPushMigrBitmap(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	// Persist before apply
-	// (architecture.md, Bitmap push protocol, dnv-agent side step 2).
+	// Persist before apply (architecture.md, Bitmap push protocol; dnagent.md
+	// SH21).
 	assertOrder(t, node,
 		"writeproto "+chunkPath,
 		"cmd blkdiscard --offset 3145728 --length 1048576 "+
@@ -1886,13 +1886,13 @@ func TestTeardownInsideTheFenceWindowOverAnUnreadExport(t *testing.T) {
 
 // A level raise to SP_LEVEL_NO_SIDE inside the window takes the exports off
 // linears the fence holds suspended. At that level the linears stay wanted and
-// only the exports above them go, so a sweep that brought out of suspension
-// only the linears it was about to REMOVE touched none of them, and L1
-// disabled every namespace over a suspended device — a write that waits for
-// the namespace's in-flight IO, which is what the window holds, so it does
-// not return; it sits with the node read lock and the side's object lock
-// held, and the next SyncupDn, every Check round and the fence timer itself
-// queue behind it. The level change has to end the window the way its
+// only the exports above them go, so a sweep that resumes only the linears
+// it is about to REMOVE would touch none of them, and L1 would disable every
+// namespace over a suspended device — a write that waits for the namespace's
+// in-flight IO, which is what the window holds, so it would not return; it
+// would sit with the node read lock and the side's object lock held, and the
+// next SyncupDn, every Check round and the fence timer itself would queue
+// behind it. The level change has to end the window the way its
 // deadline would have: each linear put on its dm-error and resumed before its
 // namespace is disabled, so the IO the window absorbed fails instead of
 // replaying onto the side's data, and nothing is left suspended for the build
@@ -2660,8 +2660,7 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 // the node-level sweep keeps the linears of a side its DN's list names. They
 // stay suspended on their pre-fence tables with no window running until the
 // side's SyncupSide, and that pass, finding no window, opens a whole new one
-// over them. This pins the limit as it stands; a fix that adopts the fence at
-// the SyncupSide is meant to turn it red.
+// over them. This pins the known limit (dnagent.md, Known limits).
 func TestFenceRestartThatHoldsNoSideOpensAWholeWindow(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -2868,12 +2867,12 @@ func withDnClock(srv *DnAgentServer, node *fakeNode) *dnClock {
 
 // TestMigrationDestinationAwaitsTheSourceNamespace pins DN13 step (3)'s wait:
 // the kernel returns from `nvme connect` once the controller is live and only
-// queues the scan that adds the namespace node, so the destination's single
-// re-read used to find a controller and no namespace and fail the target
-// "controller has no namespace" for a device milliseconds away. The pass now
-// re-reads, in DnMigrDstNsPause steps, until the device is there — still with
-// exactly one connect, so the dm-clone is built on the first reply and no DN8
-// retry is registered.
+// queues the scan that adds the namespace node, so a single re-read could
+// find a controller and no namespace and fail the target "controller has no
+// namespace" for a device milliseconds away. The pass re-reads, in
+// DnMigrDstNsPause steps, until the device is there — still with exactly one
+// connect, so the dm-clone is built on the first reply and no DN8 retry is
+// registered.
 func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
 	for _, misses := range []int{1, 3} {
 		t.Run(fmt.Sprintf("namespace after %d missed read(s)", misses),

@@ -39,8 +39,8 @@ const (
 // would wedge in D state holding a slot. One dead DN can back many legs of one
 // CN, at which point every OS operation on the node starves — including the
 // teardown `nvme disconnect` that is the documented release mechanism for a
-// wedged probe. A hung probe is partly the feature working, so the fix is to
-// make hanging harmless, not to prevent it.
+// wedged probe. A hung probe is partly the feature working, so the design
+// makes hanging harmless rather than preventing it.
 //
 // Implementations open the device per call (never a cached fd), may block
 // indefinitely, must never be called under a lock, and log their own record
@@ -52,9 +52,9 @@ type LegProbeIO interface {
 
 // directLegProbeIO is the real implementation: the raw helpers of
 // common/osclient.go, no semaphore, no lock, no cached fd. It emits one record
-// per half itself, because the OsClient that used to log these calls is no
-// longer in the path (osclient.md, Exported raw helpers and the probe-IO
-// carve-out). The ctx carries only the
+// per half itself, because no OsClient is in the path to log these calls
+// (osclient.md, Exported raw helpers and the probe-IO carve-out). The ctx
+// carries only the
 // CN2 per-attempt trace id and the cancellation check below — the helpers take
 // none, because a pread in flight cannot be interrupted by one.
 type directLegProbeIO struct{}
@@ -67,9 +67,9 @@ func (directLegProbeIO) Write(
 	offset uint64,
 	data []byte,
 ) error {
-	// A cancelled prober starts no new IO — the same fast fail the OsClient's
-	// semaphore acquire used to give, and silent for the same reason: an
-	// operation that never happened is not logged (osclient.md, Logging).
+	// A cancelled prober starts no new IO — the fast fail an OsClient's
+	// semaphore acquire gives, and silent for the same reason: an operation
+	// that never happened is not logged (osclient.md, Logging).
 	if err := ctx.Err(); err != nil {
 		return err
 	}

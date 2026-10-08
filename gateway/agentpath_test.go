@@ -24,7 +24,7 @@ import (
 )
 
 // This file is the three groups of tests that exercise the gateway as a gRPC
-// PEER rather than as a pile of handlers — the ten agent calls of gateway.md,
+// PEER rather than as a pile of handlers — the agent calls of gateway.md,
 // Agent calls (AG1 to AG4), against a real in-process agent, the served
 // surface of its Serving and lifecycle (GW2, GW3) over bufconn, and one Server
 // driven by two goroutines at once (GW1, GW8).
@@ -828,7 +828,8 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 	// spFixture is the shared bed of the cntlr and side subtests: two fakes,
 	// each serving both agent services — the first registered as a DN and
 	// the one CN, the second as the second DN the whole-SP distinct-DN rule
-	// (D-F) demands (1 slice is still a meta group AND a data group) — under
+	// (architecture.md, Per-operation allocation) demands (1 slice is still a
+	// meta group AND a data group) — under
 	// the smallest SP CreateStoragePool accepts (1 slice, 1 cntlr, RedundNone
 	// — one leg per group). The sp-worker owns SpRev in production; writing
 	// it by hand to storedRev makes the stored number one the agent does not

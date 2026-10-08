@@ -26,8 +26,8 @@ import (
 // bm_idx order; a clone's chunks are self-positioned pairs (architecture.md,
 // Bitmap push protocol), so the same order is merely deterministic there.
 // Different migrations / clones of one child push independently and may run
-// concurrently toward the same agent, which is what that protocol's dnv-worker
-// side allows in its step 4 and bounds in its step 3.
+// concurrently toward the same agent, which BM3 allows between objects while
+// bounding one object's pushes to one in flight.
 
 // msgBitmapPushed is the record of one delivered chunk (BM3; dnv-worker.md, Log
 // records).

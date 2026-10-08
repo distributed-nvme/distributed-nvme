@@ -8,7 +8,7 @@
 // here (md.go, thinbm.go) because a wrapper with a single role is role code
 // (the split rule of dnagent.md, Scope and placement). The base state of
 // architecture.md, Controller node, common, and the clone-metadata slot
-// allocator that replaced LVM live in clonemeta.go ([D14]).
+// allocator (cnagent.md CN18) live in clonemeta.go ([D14]).
 package cnagent
 
 import (
@@ -97,7 +97,7 @@ type CnAgentServer struct {
 // which a SyncupCntlr does not run.
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
-	// stored only under the node write lock, and every reader today holds
+	// stored only under the node write lock, and every reader holds
 	// at least the node lock's read half, so the lock alone would do; it is
 	// an atomic pointer all the same, like cntlrState.req, so that a reader
 	// added off the node lock cannot race it.
@@ -192,8 +192,7 @@ func NewCnAgentServer(
 		oc: oc,
 		// The probers get the direct-syscall implementation, never a wrapper
 		// over oc (osclient.md, Exported raw helpers and the probe-IO
-		// carve-out); tests swap the field after construction,
-		// which is why the constructor's signature is unchanged.
+		// carve-out); tests swap the field after construction.
 		probeIO:  directLegProbeIO{},
 		nf:       nf,
 		cmd:      agent.NewCmd(oc),

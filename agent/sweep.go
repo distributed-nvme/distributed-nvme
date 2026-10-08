@@ -21,8 +21,7 @@ import (
 // SweepResult is the verdict of one such pass. It is a value that lives for
 // the length of the pass and is then thrown away: nothing about it is stored,
 // which is the whole point — a stored "pending" flag is memory of failure,
-// and memory of failure is what let the old teardowns forget an object that
-// would not go.
+// and a teardown that remembers failure forgets an object that would not go.
 
 // LeftoverKind labels a leftover in the reply's details and in the agent log,
 // so an operator reading either can tell which enumeration found it.

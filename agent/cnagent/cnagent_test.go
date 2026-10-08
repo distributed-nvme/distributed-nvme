@@ -209,8 +209,7 @@ type reqOpts struct {
 	// extraSide adds a second side to every leg (a migrating leg, [D1]).
 	extraSide bool
 	// twoLegs gives the data group a second leg, so the assembly cases of
-	// architecture.md, "Make sure all groups are available", that need a real
-	// mirror have one.
+	// cnagent.md CN12 that need a real mirror have one.
 	twoLegs bool
 	// unprovisionedDataLeg makes every side of the data group's leg
 	// provisioned = false, which defers the group and — since it is the
@@ -470,10 +469,10 @@ func assertNoCall(t *testing.T, node *fakeNode, fragment string) {
 	}
 }
 
-// assertSysfsDeadlines is the SH15 regression guard: no read of
-// the CN10 sysfs leg walk may reach the OsClient on a deadline-less ctx
-// (SH15). The per-attribute guard keeps it from going vacuous if a later
-// fixture change stops exercising one of the five reads.
+// assertSysfsDeadlines pins SH15: no read of
+// the CN10 sysfs leg walk may reach the OsClient on a deadline-less ctx.
+// The per-attribute guard keeps it from going vacuous if a later
+// fixture change stops exercising one of the reads.
 func assertSysfsDeadlines(t *testing.T, node *fakeNode) {
 	t.Helper()
 	// Scoped to the walk's own reads: an unscoped "/ana_state" match would
@@ -758,7 +757,7 @@ func TestFreshSyncupCn(t *testing.T) {
 		// The cn file carries the pointer list the node-level sweep
 		// removes against, so it is persisted BEFORE anything is converged or
 		// swept — a crash in the middle is then a startup sweep rather than a
-		// rebuild against the old list.
+		// rebuild against the previous list.
 		"writeproto "+srv.nf.LocalCnPath(testCluster, testCn),
 		"cmd findmnt", "cmd mkdir -p "+tmpfs, "cmd mount -t tmpfs",
 		"cmd stat --format %s "+file,
@@ -773,9 +772,9 @@ func TestFreshSyncupCn(t *testing.T) {
 		"writedirect "+portPathOf(common.NvmetPortId)+
 			"/ana_groups/3/ana_state",
 	)
-	// [D14]: LVM is gone from the CN too — CN5 stops at the loop device and
-	// the arena is carved by the slot allocator. This is the unit-test form
-	// of the repo-wide "no LVM command anywhere" acceptance grep.
+	// [D14]: the CN runs no LVM — CN5 stops at the loop device and the arena
+	// is carved by the slot allocator. This is the unit-test form of the
+	// repo-wide "no LVM command anywhere" acceptance grep.
 	for _, verb := range []string{
 		"cmd pvcreate", "cmd vgcreate", "cmd vgs", "cmd lvcreate",
 		"cmd lvremove", "cmd lvs", "cmd lvchange", "cmd pvs",
@@ -833,7 +832,7 @@ func TestSyncupCnOnNonDefaultPort(t *testing.T) {
 
 	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 
-	// Ahead of assertOrder, which is fatal: a regression that converges the
+	// Ahead of assertOrder, which is fatal: a fault that converges the
 	// default port also drops the ports/7 calls assertOrder asks for, so with
 	// the two the other way round this guard would never get to report.
 	assertDefaultPortUntouched(t, node)
@@ -993,8 +992,8 @@ func (k arenaKill) arm(node *fakeNode, probe string) {
 // and tmpfs_info reads OK; killed every time, tmpfs_info says which probe did
 // not answer.
 // Either way it mounts nothing, truncates nothing and keeps the one loop
-// device. A check round does not ask again: a kill there reads ERROR, where
-// it used to read MISSING.
+// device. A check round does not ask again: a kill there reads ERROR, never
+// MISSING.
 func TestKilledFindmntDoesNotRemountTheArena(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1196,7 +1195,7 @@ func TestAskingAgainBuildsAnAbsentArena(t *testing.T) {
 // filesystem underneath and `losetup --find` attach the loop to it; the next
 // converge mounts over that file, truncates a fresh one and attaches a second
 // loop, and every clone built meanwhile on the first loop is rebuilt — the
-// cascade the killed `findmnt` alone used to cause. So the pass creates
+// cascade a killed `findmnt` read as absence would cause. So the pass creates
 // neither: the file and loop rows read ERROR, and the next SyncupCn, whose
 // commands answer, builds all three exactly once.
 func TestUnconfirmedTmpfsCreatesNoArena(t *testing.T) {
@@ -1354,9 +1353,9 @@ func assertReDriven(
 // naming each, because only the converge of a SyncupCn builds them and the
 // worker re-sends a SyncupCn on a Check reply's code, never on its rows
 // (dnv-worker.md RW4). The rows alone read MISSING or ERROR, and a verdict
-// that stayed clean left the CN without the piece until its next SyncupCn
-// for some other reason or the agent's next start: after a reboot whose
-// mount was refused, no clone could be built on the CN meanwhile. Each
+// that stayed clean would leave the CN without the piece until its next
+// SyncupCn for some other reason or the agent's next start: after a reboot
+// whose mount was refused, no clone could be built on the CN meanwhile. Each
 // re-sent SyncupCn tries again, and the round after the one that builds the
 // piece is clean.
 func TestAnAbsentBaseStateReDrivesTheSyncupCn(t *testing.T) {
@@ -1634,10 +1633,10 @@ func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
 // ANA group of the port in a state other than its fixed one, on a port whose
 // transport attributes all match. nvmet takes an ana_state write whatever is
 // linked to the port, and EnsurePort rewrites a differing state once the
-// attributes match, so a re-sent SyncupCn cures it — and while the verdict
-// stayed clean the worker re-sent none: the group stayed in the wrong state,
-// which its namespaces report to the hosts, until the CN's next SyncupCn for
-// some other reason or the agent's next start. A transport
+// attributes match, so a re-sent SyncupCn cures it — and a verdict that
+// stayed clean would leave the group in the wrong state, which its
+// namespaces report to the hosts, until the CN's next SyncupCn for some
+// other reason or the agent's next start. A transport
 // attribute that differs is not re-driven, not even beside a wrong group
 // state: nvmet refuses every addr_* write while a subsystem is linked to the
 // port (EACCES), when every re-send would fail on it the same way, and the
@@ -1845,8 +1844,8 @@ func TestPrimaryConvergeOrder(t *testing.T) {
 	assertOk(t, info.GetSsIdToSubsystem()[testSs], "subsystem")
 
 	// CN28 (architecture.md, Live-state reporting): the pool details are the
-	// raw dmsetup status line, which the thin-pool auto-grow (architecture.md,
-	// Automatic reactions) parses two used/total pairs out of.
+	// raw dmsetup status line, which the thin-pool auto-grow (dnv-worker.md
+	// AR6) parses two used/total pairs out of.
 	details := info.GetSliceIdToDmPool()[testSlice].GetDetails()
 	if !strings.Contains(details, "thin-pool") ||
 		strings.Count(details, "/") < 2 {
@@ -1975,8 +1974,7 @@ func TestFailoverBackToPrimaryAssembles(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The assembly cases of architecture.md, "Make sure all groups are available",
-// and member reconciliation (CN12)
+// The assembly cases and member reconciliation (cnagent.md CN12)
 // ---------------------------------------------------------------------------
 
 func TestGroupCreateAssumeClean(t *testing.T) {
@@ -2030,9 +2028,9 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 	}
 }
 
-// Case 1.2 of architecture.md, "Make sure all groups are available": exactly
-// one member of a two-leg group carries a superblock — assemble with that one,
-// then add the other.
+// Case 2 of cnagent.md CN12 with a member left out: exactly one member of a
+// two-leg group carries a superblock — assemble with that one, then add the
+// other.
 func TestGroupAssembleThenAddMissingMember(t *testing.T) {
 	srv, node := newTestServer(t)
 	node.superblocks[srv.nf.DmPath(legName(srv, testDataLeg))] = true
@@ -2056,9 +2054,9 @@ func TestGroupAssembleThenAddMissingMember(t *testing.T) {
 	assertNoCall(t, node, "cmd mdadm --detail")
 }
 
-// Case 1.3 of architecture.md, "Make sure all groups are available": both
-// members carry a superblock but mdadm leaves one out for stale metadata — the
-// converge re-adds it, never zero-superblocks it.
+// The stale-metadata re-add of case 2 (cnagent.md CN12): both members carry a
+// superblock but mdadm leaves one out for stale metadata — the converge
+// re-adds it, never zero-superblocks it.
 func TestGroupReaddsLeftOutMember(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -2837,13 +2835,13 @@ func TestGroupBesideAnUnansweredArray(t *testing.T) {
 	}
 }
 
-// TestGroupProbeIsSysfsOnly pins the trigger of the failover ping-pong at the
-// probe itself (CN28). A primary's Check round over an array md has failed a
-// member of (md/degraded 1, the member faulty) reports the md row from sysfs:
-// OK with "degraded" in its details, and not one mdadm command — the old
-// `mdadm --detail` loaded a superblock from a member, blocked on a dead one
-// past the soft timeout, and turned the row ERROR, which counts toward cntlr
-// health and failed the primary over. A rebuild reads in mdadm's own words
+// TestGroupProbeIsSysfsOnly pins the md probe (CN28). A primary's Check round
+// over an array md has failed a member of (md/degraded 1, the member faulty)
+// reports the md row from sysfs: OK with "degraded" in its details, and not
+// one mdadm command, because an `mdadm --detail` loads a superblock from a
+// member, blocks on a dead one past the soft timeout and would turn the row
+// ERROR, which counts toward cntlr health and would fail the primary over. A
+// rebuild reads in mdadm's own words
 // with sysfs's progress. An array that is not running (inactive here, the
 // other states in TestGroupProbeArrayStates) reads ERROR with its state as
 // details, and a converge leaves it alone.
@@ -2917,8 +2915,8 @@ func TestGroupProbeIsSysfsOnly(t *testing.T) {
 // converge's gate. The six running ones read OK with the state and the
 // "degraded" of a failed member. write-pending is the one the fault lives in
 // — md shows it while a superblock write is stuck on a dead member, and the
-// lab read it in exactly that window — so an ERROR there would bring the
-// failover trigger back through the verdict. Every other state reads ERROR
+// lab read it in exactly that window — so an ERROR there would make the
+// verdict a failover trigger. Every other state reads ERROR
 // with the state as details, and "clear", which the lab never showed (a
 // stopped array's /sys/block/mdN goes at once), reads MISSING like an absent
 // array on the Check round. No converge is driven over "clear": md reads
@@ -3060,10 +3058,9 @@ func TestGroupForeignMemberIsAnError(t *testing.T) {
 // array's member names), or whose read of the matched array did not answer,
 // reports the md row ERROR, never MISSING, and a converge refuses with
 // no mdadm at all. Read as absent, a killed member name or array_state would
-// send the group into an assembly beside its running array — the shape a
-// killed `mdadm --detail` once had. A member's block/dev, which only names a
-// foreign member now that members are compared by dm name
-// (TestGroupMembersComparedByName), keeps the same rule.
+// send the group into an assembly beside its running array. A member's
+// block/dev, which only names a foreign member because members are compared
+// by dm name (TestGroupMembersComparedByName), keeps the same rule.
 func TestGroupUnansweredSysfsReadIsAnError(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -3436,7 +3433,7 @@ func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 	return reply.GetCntlrInfo()
 }
 
-// TestLateMembersRegisterTheRetry is link 1 of the failover ping-pong (CN12).
+// TestLateMembersRegisterTheRetry pins the late-member retry (CN12).
 // The worker's sides-first hold is bounded ([D16]), so a promoted standby can
 // still read its legs before the sides' ANA flips have reached its sysfs: the
 // paths are live but still non-optimized, those legs are not available, and a
@@ -3449,7 +3446,7 @@ func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 // member late keeps the retry, since the sides' flips can take longer than one
 // CnConnectRetryInterval. Once the paths read optimized, the retry's next
 // attempt assembles the late arrays and builds the stack above them, and, with
-// no member late any more, stops the retry.
+// no member late, stops the retry.
 func TestLateMembersRegisterTheRetry(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -3750,7 +3747,7 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 // two-leg group: md had failed and removed leg 2's member on the old primary
 // before the demote stopped the array, so leg 1's superblock no longer
 // counts it, and case 2's start from leg 1 alone is one mdadm allows
-// (architecture.md, "Make sure all groups are available"). The promotion
+// (cnagent.md CN12). The promotion
 // starts the array degraded and reports the group
 // OK, but leg 2 — late — still has to be added, and that --add is the
 // retry's: an attempt while it is still late adds nothing and keeps the
@@ -3832,7 +3829,7 @@ func TestLateMemberIsAddedByTheRetry(t *testing.T) {
 	}
 }
 
-// TestLateRedundNoneLegRegistersTheRetry is link 1 for a RedundNone SP,
+// TestLateRedundNoneLegRegistersTheRetry is the same for a RedundNone SP,
 // redund_conf's default (CN12). The group's dm-linear is built whatever its
 // leg's availability, but the pool create above it reads the pool's metadata
 // through the meta group's leg, and a side that has not flipped to this CN
@@ -4117,14 +4114,15 @@ func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {
 // a side, so a read of it that did not answer — any error but ENOENT, such
 // as the soft timeout spent waiting for an OsClient slot, which stalled sysfs
 // reads can hold — leaves the pass not knowing which side, if any, that
-// controller serves. Read as an empty address it matched no desired side, so
-// the connect step asked for its side again: a duplicate the host refuses
-// (EALREADY, and so does the fake), which spent the pass's connect budget on
-// refused connects. And whenever a connect of the pass did succeed — the
+// controller serves. Read as an empty address it would match no desired side,
+// so the connect step would ask for its side again: a duplicate the host
+// refuses (EALREADY, and so does the fake), spending the pass's connect budget
+// on refused connects. And whenever a connect of the pass succeeded — the
 // leg's controller had been lost, or another side had none — and the
 // re-read after it met an address that did not answer, disconnectDeadPaths
-// retired that controller as a dead path: the live, only path of a healthy
-// leg, on a primary an md member, on a migrating leg the serving src path.
+// would retire that controller as a dead path: the live, only path of a
+// healthy leg, on a primary an md member, on a migrating leg the serving src
+// path.
 // The pass must do neither: it disconnects nothing, connects nothing beside
 // it, and fails the leg's converge with the read in its row, which registers
 // the retry; the retry's next attempt, the read answering, finds the
@@ -4311,8 +4309,8 @@ func TestUnansweredAddressReadKeepsTheController(t *testing.T) {
 // already; and the leg converges with no retry, on this pass and on the
 // next, while the subsystem still lists it. Read as unknown, it would hold
 // the leg in ERROR and its side unconnected for as long as the listing
-// lasts; read as an empty address, it drew a disconnect of a device that is
-// no longer there.
+// lasts; read as an empty address, it would draw a disconnect of a device
+// that is no longer there.
 func TestAbsentAddressIsAGoneController(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -4403,23 +4401,22 @@ func subsysnqnPath(t *testing.T, node *fakeNode, nqn string) string {
 // TestUnansweredSubsystemWalkKeepsTheConnections pins CN10's sysfs walk
 // from its top. The leg walk finds a leg's subsystem by listing
 // /sys/class/nvme-subsystem and reading each entry's subsysnqn, and a
-// listing that did not answer, or a subsysnqn read that failed, used to
-// read as "not connected": the listing's failure as no subsystem at all,
-// the read's as some other subsystem's. The connect step then asked for
-// every side of the leg again beside its live controllers — duplicates the
-// host refuses (EALREADY, and so does the fake), which spent the pass's
-// connect budget — the clone source step did the same, and a standby's
-// probe row said the leg had no controller. Now the walk is unknown for
-// the pass, as an unanswered address read is: the leg's (or the source's)
-// converge fails naming the read, connects nothing and registers the
-// retry, whose next attempt, the walk answering, finds the controllers
-// where they were. A match still wins beside a subsysnqn read that failed
-// elsewhere: every controller of one NQN sits in the one subsystem the
-// host keeps for it, so the leg whose own entry answered converges. A
-// failed listing of the matching entry's own directory, which finds its
-// controllers and namespace, always failed the lookup, but the clone's
-// dm-clone row read it, like every failure of the source step, as a source
-// not connected; it is unknown too.
+// listing that did not answer, or a subsysnqn read that failed, is unknown
+// for the pass, as an unanswered address read is: the leg's (or the
+// source's) converge fails naming the read, connects nothing and registers
+// the retry, whose next attempt, the walk answering, finds the controllers
+// where they were. Read as "not connected" — the listing's failure as no
+// subsystem at all, the read's as some other subsystem's — it would make
+// the connect step ask for every side of the leg again beside its live
+// controllers (duplicates the host refuses, EALREADY, and so does the
+// fake, spending the pass's connect budget), the clone source step do the
+// same, and a standby's probe row say the leg had no controller. A match
+// still wins beside a subsysnqn read that failed elsewhere: every
+// controller of one NQN sits in the one subsystem the host keeps for it,
+// so the leg whose own entry answered converges. A failed listing of the
+// matching entry's own directory, which finds its controllers and
+// namespace, fails the lookup, and the clone's dm-clone row reads it as
+// unknown too.
 //
 // The reconnected case is the re-read after a connect of the pass: the
 // data leg's controller was lost, the pass connects its side, and the
@@ -4731,8 +4728,7 @@ func TestNamespaceSuspend(t *testing.T) {
 	}
 }
 
-// TestParkIsIdempotent is SH16 for the park. The old suspend branch was
-// trivially idempotent (`np.suspended && !dev.Suspended`); the park's
+// TestParkIsIdempotent is SH16 for the park. The park's
 // idempotence rests on `parkNsDev`'s own `parked` predicate, which CN9's
 // pre-step 2 (the park of a planned ns-dev) reaches first for an effectively
 // suspended namespace — so a drift there would reload a live, correct ns-dev
@@ -4762,8 +4758,7 @@ func TestParkIsIdempotent(t *testing.T) {
 // TestParkedNamespaceProbe is the CN28 row of a parked ns-dev: `OK, parked`.
 // A dm-suspended ns-dev is an ERROR whatever the plan says — nothing this
 // build produces one, so finding one is a fault to report and not a steady
-// state, which is the direction the old `!= dev.Suspended` comparison had
-// backwards for an effectively suspended namespace.
+// state, for an effectively suspended namespace too.
 func TestParkedNamespaceProbe(t *testing.T) {
 	nsDevRow := func(t *testing.T, srv *CnAgentServer) *pb.ResInfo {
 		t.Helper()
@@ -4864,14 +4859,14 @@ func TestParkedNamespaceProbe(t *testing.T) {
 	}
 }
 
-// TestSuspendedNsDevFromAnOlderBuildIsResumed is the upgrade and failure path
-// (CN16): three shapes in which a pass can meet a suspended ns-dev, and how
-// each converges on the first pass. An older build, or a reload that was
-// interrupted or failed (Dm.Reload fails closed), leaves an ns-dev suspended.
-func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
-	// leftover re-creates what an older build, or a reload that was
-	// interrupted or failed, left behind, and returns the count of ns-dev
-	// reloads and resumes the next converge issues.
+// TestLeftoverSuspendedNsDevIsResumed is the failure path (CN16): three
+// shapes in which a pass can meet a suspended ns-dev, and how each converges
+// on the first pass. A reload that was interrupted or failed (Dm.Reload fails
+// closed) leaves an ns-dev suspended.
+func TestLeftoverSuspendedNsDevIsResumed(t *testing.T) {
+	// leftover re-creates what a reload that was interrupted or failed left
+	// behind, and returns the count of ns-dev reloads and resumes the next
+	// converge issues.
 	leftover := func(
 		t *testing.T,
 		suspended bool,
@@ -4903,14 +4898,14 @@ func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
 			node.devNo["/dev/mapper/"+errorName(srv, testTd)], 0)
 	}
 
-	// (a) Effectively suspended, still on the raid0 the older build left it
+	// (a) Effectively suspended, still on the raid0 a failed park left it
 	// holding: one reload, onto the error backing, and the device ends live.
 	t.Run("effectively suspended, raid0 table", func(t *testing.T) {
 		srv, node, reloads, _ := leftover(t, true, raid0Table)
 		if reloads != 1 {
 			t.Fatalf("want exactly one ns-dev reload, got %d", reloads)
 		}
-		assertParked(t, srv, node, testNs, testTd, "older build, raid0 table")
+		assertParked(t, srv, node, testNs, testTd, "failed park, raid0 table")
 	})
 
 	// (b) Effectively suspended and already on the error table, but held
@@ -4921,7 +4916,8 @@ func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
 		if reloads != 1 {
 			t.Fatalf("want exactly one ns-dev reload, got %d", reloads)
 		}
-		assertParked(t, srv, node, testNs, testTd, "older build, error table")
+		assertParked(t, srv, node, testNs, testTd,
+			"interrupted reload, error table")
 	})
 
 	// (c) Serving, with the table it wants, suspended: a bare `dmsetup
@@ -4954,11 +4950,11 @@ func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 		raid0 := raid0Name(srv, testTd)
 		node.dms[raid0].suspended = true
-		// The asymmetry the park introduced, pinned on the fixture that
-		// already exists: an ns-dev found suspended is an ERROR whatever
-		// the plan says, while every OTHER dm device still probes OK with
-		// `details = "suspended"`. Deliberate — only the ns-dev has a plan
-		// state that used to expect it.
+		// The park's asymmetry, pinned on the fixture that already exists:
+		// an ns-dev found suspended is an ERROR whatever the plan says, while
+		// every OTHER dm device still probes OK with `details = "suspended"`.
+		// Deliberate — only the ns-dev has a plan state a suspend could be
+		// mistaken for.
 		probe, err := srv.GetCntlrInfo(context.Background(),
 			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr()})
@@ -5277,8 +5273,8 @@ func TestCntlidRangeMovesBetweenSlots(t *testing.T) {
 // nvmet disable above it, and CN16's that it blocks its own removal. No pass
 // of this agent leaves an ns-dev suspended unless a `dmsetup` command on it
 // fails (architecture.md, Namespace suspend semantics; [D12]), yet a teardown
-// can still meet one — the leftover of such a failure, of an interrupted
-// reload or of an **older build** (CN16) — and an older build's leftover is
+// can still meet one — the leftover of such a failure or of an interrupted
+// reload (CN16) — and that leftover is
 // exactly what the two ordering sub-cases fixture. The park — the reload onto
 // the td's `CnErrorName`, whose internal resume is the whole point —
 // therefore has to precede the nvmet removal, not follow it inside
@@ -5298,7 +5294,7 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 		return srv, node
 	}
 	// olderBuildLeftover puts the ns-dev into the state a park whose load
-	// failed leaves (Dm.Reload fails closed), which an older build also left:
+	// failed leaves (Dm.Reload fails closed):
 	// held `dmsetup suspend`ed, its table still the rule-6 raid0. That state
 	// is why the park has to come first: the nvmet disable above a suspended
 	// device does not complete.
@@ -5550,9 +5546,9 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 	assertOrder(t, node,
 		// The cntlr is FORGOTTEN first — file, chunks, memory entry —
 		// and its resources are then found by name by the node-level sweep.
-		// The old teardown removed the resources first and deleted the file
-		// whether or not that worked, which is how a cntlr whose array would
-		// not stop was forgotten with its devices still live.
+		// Removing the resources first and deleting the file regardless would
+		// forget a cntlr whose array would not stop, with its devices still
+		// live.
 		"cmd rm -f "+srv.nf.LocalCntlrPath(
 			testCluster, testCn, testSp, testCntlr),
 		"cmd dmsetup reload "+nsDevName(srv, testNs),
@@ -5996,7 +5992,7 @@ func TestProvisioningDeferredGroup(t *testing.T) {
 }
 
 // TestServingPoolStaysOkDuringDeferredGrow is the thin-pool auto-grow guard of
-// architecture.md, Automatic reactions: a GrowSlice
+// dnv-worker.md AR6: a GrowSlice
 // whose new group is still provisioning must leave the *serving* pool alone —
 // OK at its effective (old) size, with the raw `dmsetup status` details the
 // auto-grow parses. A PROVISIONING pool row would switch auto-grow off.

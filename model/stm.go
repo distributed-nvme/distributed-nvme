@@ -262,8 +262,8 @@ func loadSpConf(
 	}
 	// The node records come last: their addresses are embedded in the
 	// slices and cntlrs read above. They are part of the same snapshot
-	// because a side's syncup carries the DN's nvme_tr_conf and a cntlr's
-	// the CN's (architecture.md, sp role), and a reaction weighs their free_ext_cnt.
+	// because a side's request resolves its DN's endpoint and a cntlr's its
+	// CN's (dnv-worker.md RW14), and a reaction weighs their free_ext_cnt.
 	for _, addrPort := range sideAddrs(conf, state.Slices) {
 		key := DnConfKey(cid, addrPort)
 		dn := &pb.DnConf{}
@@ -299,8 +299,8 @@ func migrBmChunk(key string) (uint32, uint32, bool) {
 // loadBmIdx scans one bitmap prefix keys-only at rev and returns the chunks it
 // found (MD3), decoding each key with the parser of that prefix's kind. A key
 // that does not parse is skipped: nothing dnv writes lands under this prefix in
-// another shape, and one stray key — a key of a superseded format, say — must
-// not fail a whole SP load.
+// another shape, and one stray key of another shape must not fail a whole SP
+// load.
 func loadBmIdx(
 	ctx context.Context,
 	cli *etcdutil.Client,

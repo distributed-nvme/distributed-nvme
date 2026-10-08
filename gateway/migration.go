@@ -73,7 +73,7 @@ func migrDropSide(leg *pb.Leg, sideId uint64) {
 	leg.SideList = append(sideList[:idx], sideList[idx+1:]...)
 }
 
-// migrDstCntlidSlot is the destination side's cntlid slot [D-I]: the first
+// migrDstCntlidSlot is the destination side's cntlid slot (GW18): the first
 // entry of the SP's cntlid_slot_list that differs from the source side's.
 //
 // architecture.md, cntlid slots, makes this the one slot constraint a side
@@ -611,8 +611,8 @@ func (s *Server) FinishMigration(
 // destination has copied is thrown away, so there is nothing to prove. The
 // source side is left exactly as it was and returns to normal service on its
 // next SyncupSide; the destination DN sees its pointer disappear and tears the
-// stack down, including the migration's local bitmap files (architecture.md,
-// Bitmap push protocol).
+// stack down, including the migration's local bitmap files (dnagent.md SH7
+// and DN6).
 func (s *Server) CancelMigration(
 	ctx context.Context,
 	req *pb.CancelMigrationRequest,
@@ -723,7 +723,7 @@ func (s *Server) GetMigration(
 // The chunk lands at bm_idx = the CURRENT bm_cnt and the count then advances,
 // which is the whole append rule: a written chunk is immutable, so the index
 // is a consequence of how many chunks exist and never a request field. The
-// bytes are stored verbatim (GW14, [D-J]) — the gateway never inspects or
+// bytes are stored verbatim (GW14) — the gateway never inspects or
 // rewrites a bit; the destination agent is what shifts them by the leg's
 // meta_blocks and blkdiscards the fully skippable regions.
 func (s *Server) AppendMigrationBitmap(

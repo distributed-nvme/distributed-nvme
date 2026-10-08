@@ -12,7 +12,7 @@
 // which five of the six leaves need. It carries the group prefix on purpose:
 // dn.go declares the identical --addr flag for its own leaves and the two
 // files share one package, so an unprefixed nodeAddrFlag would collide the
-// moment both land (dnvctl.md, Files: the gatewayctl lesson).
+// moment both land (dnvctl.md, Files).
 package ctl
 
 import (

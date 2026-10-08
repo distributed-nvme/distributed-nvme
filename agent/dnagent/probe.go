@@ -88,8 +88,8 @@ func (s *DnAgentServer) probeSide(
 	return info
 }
 
-// probeSideDev is the read-only half of the converge matrix of architecture.md,
-// Side provisioning protocol (DN18): it
+// probeSideDev is the read-only half of the converge matrix of dnagent.md
+// DN9 (DN18): it
 // checks the side's allocation record, its zeroing progress and the aggregate
 // dm-linear built from its extent runs, and reports whether the side is
 // exportable.

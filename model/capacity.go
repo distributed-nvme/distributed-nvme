@@ -25,8 +25,8 @@ import (
 // event_threshold in ops.go, and a migration's DmCloneConf in worker/sprole.go
 // — neither is geometry.)
 //
-// Two things resolve-at-read cost, and this is why they live here: a consumer
-// that forgets to resolve (the cn agent did) silently computes with zeros, and
+// Two things resolve-at-read would cost, and this is why they live here: a
+// consumer that forgets to resolve silently computes with zeros, and
 // a stored zero pins geometry to whatever common.Default* the RUNNING binary
 // carries, so changing a constant would re-geometry live storage pools.
 // Concrete stored values make an SP's geometry genuinely immutable.
@@ -173,7 +173,7 @@ func ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf {
 	}
 	// architecture.md, Common validation, refuses a non-empty bdev_feature_list
 	// on both the cluster and the SP,
-	// so this list is always empty today. It is copied element by element
+	// so this list is always empty. It is copied element by element
 	// anyway, for the same reason redund_conf is cloned below: the result ends
 	// up inside a stored message and must not alias a request the caller still
 	// owns.
@@ -489,7 +489,7 @@ func cnCapacityKeyOf(cid uint64, addrPort string, cn *pb.CnConf) string {
 // oldDn MUST be the record as read in this very STM, which is what makes the
 // delete target exact: a capacity key embeds free_ext_cnt, so it can only be
 // removed by the transaction that still knows the count it was written with.
-// The two records share one addrPort — no v001 path renames a node
+// The two records share one addrPort — no path renames a node
 // (architecture.md, Revision keys and the sync fan-out) —
 // which is why it is a parameter rather than a field: DnConf is keyed by
 // addr_port and does not carry it.

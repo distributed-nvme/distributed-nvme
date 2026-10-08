@@ -75,7 +75,7 @@ var zeroConfCases = []struct {
 }
 
 // zeroConfReq is the fixture request with exactly one bdev_conf member
-// cleared — the shape a pre-change cluster's stored conf has.
+// cleared — a shape the agent refuses (architecture.md, Common validation).
 func zeroConfReq(o reqOpts, zero func(conf *pb.BdevConf)) *pb.SyncupCntlrRequest {
 	req := cntlrReq(o)
 	zero(req.BdevConf)
@@ -188,7 +188,7 @@ func TestSyncupCntlrRefusesAZeroConfMember(t *testing.T) {
 			// revision 2 left, so a later teardown still plans from the shape
 			// this agent actually built. The state is re-read rather than
 			// reused, so a refusal that swapped the whole cntlrState in the
-			// map cannot pass by leaving the old object behind.
+			// map cannot pass by leaving the previous object behind.
 			st = srv.getCntlr(key)
 			if st == nil {
 				t.Fatalf("the cntlr state vanished")
@@ -250,8 +250,8 @@ func TestRedundNoneNeedsNoBitmapChunkCount(t *testing.T) {
 // TestConvergeCntlrRefusesAZeroConfMember covers convergeCntlr's own gate —
 // the two entrances that do not come through syncupCntlr.
 func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
-	// The startup Reconcile: an older build persisted the zero, and this one
-	// must skip it exactly as syncupCntlr would have.
+	// The startup Reconcile: the persisted file holds the zero, and the
+	// converge must skip it exactly as syncupCntlr would.
 	t.Run("reconcile", func(t *testing.T) {
 		ctx := context.Background()
 		node := newFakeNode()
@@ -422,11 +422,11 @@ func rmCallsNaming(node *fakeNode, path string) int {
 
 // TestReconcileKeepsTheCntlrsOfAnUnreadableCnFile pins the cn-* file CN2
 // cannot use because it does not decode. There is no request to load, so the
-// CN is skipped — and the skip used to send every cntlr of it down the
-// pointer-absent branch, which deleted each cntlr's state file and its clone
-// bitmap chunks for want of a list that could not be read. Now the cntlrs
-// are skipped with their CN: neither loaded nor deleted, and nothing of them
-// converged, the node left exactly as the restart found it. Nor are they left
+// CN is skipped and its cntlrs are skipped with it: neither loaded nor
+// deleted — never sent down the pointer-absent branch, which would delete
+// each cntlr's state file and its clone bitmap chunks for want of a list that
+// could not be read — and nothing of them converged, the node left exactly as
+// the restart found it. Nor are they left
 // looking healthy: the CN and the cntlr are unknown to the Check rounds — the
 // cntlr still after the re-sent SyncupCn — and an unknown object is what the
 // worker re-sends its Syncup* for (dnv-worker.md RW4). The re-sent
@@ -448,8 +448,8 @@ func TestReconcileKeepsTheCntlrsOfAnUnreadableCnFile(t *testing.T) {
 
 	reconcileForTest(t, srv)
 
-	// Nothing but reads. This is the regression guard: the skip used to
-	// `rm -f` the cntlr's state file and its chunk right here.
+	// Nothing but reads: the skip removes neither the cntlr's state file nor
+	// its chunk.
 	if mutations := node.Mutations(); len(mutations) != 0 {
 		t.Fatalf("a cn state file that did not load tore its cntlrs' "+
 			"state down:\n%s", strings.Join(mutations, "\n"))
@@ -674,8 +674,8 @@ func TestReconcileSkipsOnlyTheCntlrsOfAnUnloadedCn(t *testing.T) {
 // names its cntlr, nothing read here proves the cntlr gone: the chunk is
 // skipped, neither loaded nor deleted, and the cntlr, which nothing loaded,
 // is unknown to its Check round, which is what the worker re-sends its
-// SyncupCntlr for. It used to be deleted as an orphan, so a read failure of
-// one file destroyed another; here that runs beside an undecodable file of
+// SyncupCntlr for. Deleted as an orphan, a read failure of one file would
+// destroy another; here that runs beside an undecodable file of
 // another CN, which keeps out only that CN's cntlrs and chunks. The skip is
 // bounded both ways: a chunk whose loaded CN no longer names its cntlr is an
 // orphan whatever cntlr-* file failed to decode, and with no cntlr-* file

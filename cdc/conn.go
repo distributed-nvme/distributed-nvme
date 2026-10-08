@@ -408,11 +408,10 @@ func (c *conn) dispatch(p *pdu) error {
 // handleCapsule executes one admin command.
 //
 // In-capsule data on a command other than Connect is ACCEPTED AND DISCARDED,
-// not treated as a protocol error (NP2). NP2's earlier reading — that such
-// data is a terminal PDU error — was corrected against the production host
-// stack: nvme-stas sends the TP-8010 Discovery Information Management command
-// (opcode 21h) with its 1024 byte payload in the capsule to every discovery
-// controller it connects to. Answering C2HTermReq puts the host in a
+// not treated as a protocol error (NP2), because the production host stack
+// sends it: nvme-stas sends the TP-8010 Discovery Information Management
+// command (opcode 21h) with its 1024 byte payload in the capsule to every
+// discovery controller it connects to. Answering C2HTermReq puts the host in a
 // permanent connect/reset loop, whereas refusing the COMMAND — invalid
 // opcode, DNR, per NP12 and the "nothing registers into it" of cdc.md,
 // The NVMe/TCP discovery service — is what the specs prescribe and what stas

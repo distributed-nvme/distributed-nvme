@@ -87,7 +87,7 @@ func (e *opsEnv) drainCloneChunkCnt() int {
 // "Exactly the chunks it was handed" is the load-bearing half. An STM cannot
 // range, so the set a batch may touch has to come in from the caller's snapshot
 // scan; a batch that derived the set itself — from the rectangle the record's
-// geometry implies, as the sweep this replaced did — would be back to a
+// geometry implies, as a sweep over the rectangle would — would be back to a
 // transaction whose size is the clone's shape.
 func TestDrainCloneBm(t *testing.T) {
 	env := newOpsEnv(t)
@@ -140,7 +140,7 @@ func TestDrainCloneBm(t *testing.T) {
 //
 // The bound is what makes a batch's size a constant independent of every
 // ceiling, which is the whole point of the design: a caller that handed the
-// op its entire scan would silently rebuild the unbounded sweep this replaced,
+// op its entire scan would silently rebuild an unbounded sweep,
 // and no arithmetic tripwire would notice, because the tripwire counts
 // MaxDelBmPerTxn and not what was actually passed.
 func TestDrainCloneBmRefusesAnOversizedBatch(t *testing.T) {

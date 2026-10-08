@@ -84,11 +84,10 @@ func TestDrainDerivation(t *testing.T) {
 // TestDrainRunsAtEverySpLevel is SPD6's "regardless of sp_level suppression,
 // because a doomed SP must drain at any level".
 //
-// AR3 used to make `deleting` a suppression reason, so a latched SP at
-// SP_LEVEL_NO_THINPOOL would have been suppressed twice over. The split means
-// neither suppression applies: the drain step runs, and — the second half, and
-// the one a reader is most likely to get wrong — NO `reaction suppressed`
-// record is emitted, because nothing was suppressed.
+// `deleting` is not a suppression reason (SPD6 keeps it out of AR3), so the
+// drain step runs on a latched SP at SP_LEVEL_NO_THINPOOL, and — the second
+// half, and the one a reader is most likely to get wrong — NO `reaction
+// suppressed` record is emitted, because nothing was suppressed.
 func TestDrainRunsAtEverySpLevel(t *testing.T) {
 	for _, level := range []pb.SpLevel{
 		pb.SpLevel_SP_LEVEL_READWRITE,

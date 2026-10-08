@@ -85,9 +85,10 @@ func spDefaultCntlidSlots() []uint32 {
 	return slots
 }
 
-// spMergeUint64 is one member of decision D-C's merge: the request wins unless
-// it left the member at the proto3 zero that means "unset" (architecture.md,
-// Common validation). A member zero on BOTH sides is settled afterwards, by
+// spMergeUint64 is one member of the merge of architecture.md, Storage pools:
+// the request wins unless it left the member at the proto3 zero that means
+// "unset" (architecture.md, Common validation). A member zero on BOTH sides is
+// settled afterwards, by
 // model.ResolveBdevConf — never here, so that "inherit from the cluster" stays
 // distinguishable from "take the constant".
 func spMergeUint64(reqValue uint64, clusterValue uint64) uint64 {
@@ -113,7 +114,8 @@ func redundKindSet(conf *pb.RedundConf) bool {
 	return conf.GetRedunKind() != nil
 }
 
-// mergeSpBdevConf is decision D-C: the bdev_conf CreateStoragePool STORES is
+// mergeSpBdevConf is the merge of architecture.md, Storage pools: the
+// bdev_conf CreateStoragePool STORES is
 // the member-wise merge of the request over ClusterConf.bdev_conf, plus the
 // one structural default of architecture.md, Storage pools — a redund_conf
 // unset in both is redund_none. The caller passes the result through
@@ -156,7 +158,8 @@ func mergeSpBdevConf(
 	return merged
 }
 
-// mergeRedundConf is the redund_conf half of decision D-C's member-wise merge.
+// mergeRedundConf is the redund_conf half of the member-wise merge of
+// architecture.md, Storage pools.
 //
 // The KIND is a choice, not a member: the request's wins, then the cluster's,
 // and an unset oneof on both is the structural default redund_none of
@@ -265,7 +268,7 @@ func (s *Server) growSliceCnBudget(
 // spGrpPlan is one group CreateStoragePool intends to build. It carries no
 // ids — those are minted inside the STM — only what the scan of
 // architecture.md, Per-operation allocation, and
-// model.GroupBlocks need, and the position that fixes decision D-D's mint
+// model.GroupBlocks need, and the position that fixes GW15's mint
 // order.
 type spGrpPlan struct {
 	SliceIdx int
@@ -274,7 +277,7 @@ type spGrpPlan struct {
 }
 
 // planSpGroups is the plan of CreateStoragePool's Action step 1
-// (architecture.md, Storage pools), in decision D-D's order: per slice one
+// (architecture.md, Storage pools), in GW15's order: per slice one
 // META group of 1 extent — the first rung of the ladder of architecture.md,
 // GrowSlice — followed by one DATA group of init_ext_cnt. The order is the
 // contract: the DN scan draws its picks in it and the STM mints ids in it, so
@@ -438,7 +441,7 @@ func (s *Server) CreateStoragePool(
 		}
 		legs := legCntOf(scanBdev)
 		// The DN scan of architecture.md, Per-operation allocation, in
-		// decision D-D's group order. The black list starts
+		// GW15's group order. The black list starts
 		// as the request's own (pickDns folds dn_selector.black_list in) and
 		// grows with every pick, so every leg of the WHOLE SP lands on a
 		// distinct DN — not merely every leg of one group. ExcludeLocs stays
@@ -537,7 +540,7 @@ func (s *Server) CreateStoragePool(
 			// still the proto3 zero, so it starts at model.SpFirstId and the
 			// counter it commits is the same on every attempt (GW12).
 			minter := newSpIdMinter(conf)
-			// D-D: every cntlr_id first, in pick order.
+			// GW15: every cntlr_id first, in pick order.
 			cntlrIds := make([]uint64, cntlrCnt)
 			for idx := range cntlrIds {
 				cntlrIds[idx] = minter.mint()
@@ -560,7 +563,7 @@ func (s *Server) CreateStoragePool(
 			}
 			builtSlices := make([]*pb.Slice, 0, sliceCnt)
 			for sliceIdx := 0; sliceIdx < sliceCnt; sliceIdx++ {
-				// D-D: then per slice its slice_id, then the META group and
+				// GW15: then per slice its slice_id, then the META group and
 				// the DATA group in plan order, each one grp_id then per leg
 				// leg_id and its side_id.
 				sliceId := minter.mint()
@@ -1070,7 +1073,7 @@ func (s *Server) FindStoragePoolNames(
 // every cntlr's CN itself, in the same transaction as the write, and a bump
 // here would be a second one.
 //
-// req.ext_cnt never reaches the model (decision D-E): it is only the
+// req.ext_cnt never reaches the model (architecture.md, GrowSlice): it is only the
 // exclusivity signal of architecture.md, GrowSlice — a data grow states one, a
 // meta grow must not, because meta sizes come from the ladder. The size the DN
 // scan must ask for is the one model.GrowSlice will itself compute, so it is
@@ -1212,7 +1215,7 @@ func (s *Server) GrowSlice(
 					req.GetSliceId())
 			}
 			// A data grow adds the slice's original allocation unit, not the
-			// caller's ext_cnt (D-E).
+			// caller's ext_cnt (architecture.md, GrowSlice).
 			extCnt = slice.GetDataGrpList()[0].GetExtCnt()
 		}
 		// The Errors of architecture.md, GrowSlice: "RESOURCE_EXHAUSTED ...
@@ -1233,7 +1236,7 @@ func (s *Server) GrowSlice(
 		if err := s.growSliceCnBudget(ctx, cid, conf, extCnt); err != nil {
 			return err
 		}
-		// D-F: the black list is the request's own and nothing is ever
+		// The black list is the request's own and nothing is ever
 		// appended to it — one scan-and-pick round serves the whole group
 		// (architecture.md, Per-operation allocation): the scan keeps one
 		// candidate per DN and per location, and

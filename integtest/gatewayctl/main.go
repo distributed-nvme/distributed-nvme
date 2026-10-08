@@ -4,7 +4,7 @@
 // the generated pb.GatewayClient instead and prints every reply as protojson
 // (proto field names) on stdout for the test script to parse with jq.
 //
-// It runs ON THE TEST SERVER, where etcd, the three gateways and the seven
+// It runs ON THE TEST SERVER, where etcd, the gateways and the
 // fake agents all listen on the loopback, and is invoked over ssh by
 // integtest/gateway_test.sh (gateway.md, Integration test plan, Topology and
 // The driver, `gatewayctl`).

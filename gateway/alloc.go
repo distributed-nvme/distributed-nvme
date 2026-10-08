@@ -205,8 +205,8 @@ type dnLedger struct {
 // CreateMigration, FinishMigration and CancelMigration — and each builds it
 // before staging its first write, so a refusal here returns having written
 // nothing rather than relying on the transaction being abandoned (EU4).
-// DeleteStoragePool builds none since it became a latch: the worker's drain
-// returns its extents (dnv-worker.md, The sp drain). Two of the five reach a
+// DeleteStoragePool builds none: it latches, and the worker's drain returns
+// the extents (dnv-worker.md, The sp drain). Two of the five reach a
 // conf gate before this one anyway (CreateStoragePool's own, CreateMigration's
 // through pickDns); the other three have none, which is what this covers.
 func newDnLedger(
@@ -584,7 +584,7 @@ func grpDnAddrs(grp *pb.Group) []string {
 //
 // One plain DnConf read per DISTINCT addr_port, outside every STM like the
 // capacity scan it feeds. Reading them before the transaction is sound because
-// `location` is immutable in v1 — CreateDiskNode defaults it to addr_port and
+// `location` is immutable — CreateDiskNode defaults it to addr_port and
 // UpdateDiskNodeDisabled is the only later DN mutator (architecture.md, Disk
 // nodes) — so a location read here cannot have gone stale by the time the op
 // re-validates the pick, which is also why that re-validation stays
@@ -624,7 +624,7 @@ func grpDnLocations(
 // off their CNs.
 //
 // grpDnLocations' CN twin. Reading it before the transaction is sound for two
-// reasons together. `location` is immutable in v1 — CreateControllerNode
+// reasons together. `location` is immutable — CreateControllerNode
 // defaults it to addr_port and UpdateControllerNodeDisabled is the only later
 // CN mutator (architecture.md, Controller nodes) — so no location read here
 // goes stale. And CreateCntlr's STM drops the pick when the SP, as it reads

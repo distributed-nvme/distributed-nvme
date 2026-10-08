@@ -19,8 +19,8 @@ import (
 )
 
 // This file is the handler tests (gateway.md GW5 to GW12) for architecture.md,
-// Clusters (the four cluster RPCs), Disk nodes (the six disk-node RPCs) and
-// Controller nodes (the six controller-node RPCs), driven against the real etcd
+// Clusters, Disk nodes and Controller nodes — the RPCs of cluster.go,
+// disknode.go and controllernode.go — driven against the real etcd
 // of etcdenv_test.go through a Server built by newTestServer.
 //
 // Every happy path asserts the EXACT keys the RPC is specified to write and
@@ -333,7 +333,7 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 //
 // Every defaultable member is asserted as a CONCRETE number rather than
 // against the common.Default* it came from, and deliberately so — the whole
-// reason the resolution moved to the write path is that the stored geometry
+// reason resolution is on the write path is that the stored geometry
 // must stop depending on any constant the binary that reads it next was
 // compiled against, and a want spelled as the constant itself could not tell a
 // changed constant apart from a correct write.

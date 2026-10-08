@@ -68,7 +68,7 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 ## How a change reaches a node
 
-**revision** — A counter kept for every disk node, controller node and storage pool. Every change of its desired state raises it by one. The worker sends a syncup when it sees a revision move, and an agent refuses a syncup whose revision is lower than the one it holds.
+**revision** — A counter kept for every disk node, controller node and storage pool. Every change of its desired state that an agent must see raises it by one. The worker sends a syncup when it sees a revision move, and an agent refuses a syncup whose revision is lower than the one it holds.
 
 **syncup** — The call in which the worker sends an agent the desired state of one disk node, side, controller node or cntlr. It always carries the whole desired state, never only the change. A change of the desired state of a storage pool is sent as a syncup to the sides and the cntlrs of the pool.
 
@@ -78,7 +78,7 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 **leftover** — Something a node still has although the desired state does not want it, because a sweep has not removed it yet. The agent reports it, and the worker sends the syncup again until it is gone.
 
-**check round** — The question the worker asks an agent at a fixed interval about one disk node, side, controller node or cntlr. The agent answers with the revision it holds and with the real state. From the answers the worker decides what is healthy and whether to send the syncup again.
+**check round** — The question the worker asks an agent at a fixed interval about one disk node, side, controller node or cntlr. The agent answers with the revision it holds, whether the node is clean, and the real state when it changed. From the answers the worker decides what is healthy and whether to send the syncup again.
 
 ## Health and reactions
 

@@ -104,25 +104,22 @@ func (s *CnAgentServer) syncupCntlr(
 // cases — a primary→standby flip is nothing but "the desired set shrank to
 // the standby shape", and standby→primary is "it grew".
 //
-// The sweep replaced a retire phase that diffed the plan it applied last time
-// against this one. That diff could name a removal only once: a removal that
-// failed was forgotten together with the old plan, and these are exactly the
-// flows — a level change, a spare switch, a finished migration — where the
-// remote end is dead and a removal DOES fail. The sweep derives the same work
-// from what the node actually holds, so a failed removal is simply found
-// again next pass.
+// The sweep derives its work from what the node actually holds, never from
+// the plan applied last time, so a removal that fails — and in a level
+// change, a spare switch or a finished migration the remote end is dead and
+// a removal DOES fail — is simply found again next pass.
 //
 // `migr_list` is carried in the request and read by nothing: the CN's whole
 // part in a migration is that a leg's side_list temporarily holds two sides
-// (CN10); the field stays reserved for a future consumer.
+// (CN10).
 func (s *CnAgentServer) convergeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 ) (*pb.CntlrInfo, *agent.SweepResult) {
 	// The same refusal (architecture.md, Common validation) as syncupCntlr's,
 	// for the two entrances that do not
-	// come through it: the startup Reconcile, which converges from a file an
-	// older build may have persisted with zeros, and the background connect
+	// come through it: the startup Reconcile, which converges from a file
+	// that may hold zeros, and the background connect
 	// retry, which re-enters with the request it already holds. Refusing
 	// before newCntlrPlan touches nothing at all: the sweep is name-driven
 	// and needs no plan of this cntlr to find its objects later.
@@ -554,9 +551,9 @@ func (s *CnAgentServer) build(
 // It owns *every* message of an uncreated snapshot (CN14): ensureThin never
 // messages a td with ori_id != 0, so a slice this pass declines — or one
 // whose message failed — simply waits for the next converge, which is still
-// driven by the same `created == false`. A failed message is tolerated
-// exactly as before: the pool may already hold the dev_id after a crashed
-// earlier pass, and the `dmsetup create` that follows decides the outcome.
+// driven by the same `created == false`. A failed message is tolerated: the
+// pool may already hold the dev_id after a crashed earlier pass, and the
+// `dmsetup create` that follows decides the outcome.
 func (s *CnAgentServer) snapshotPrePass(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -580,10 +577,9 @@ func (s *CnAgentServer) snapshotPrePass(
 		// CN14: there is no second filter on the origin's own thin device.
 		// The gateway refuses a snapshot of an origin that is not materialized
 		// in every slice pool (architecture.md, Thin devices), so `create_snap`
-		// can no longer be
-		// inverted with the origin's `create_thin` — and whether *this* CN has
-		// built the origin's dm device is irrelevant to a message the pool
-		// metadata answers.
+		// cannot be inverted with the origin's `create_thin` — and whether
+		// *this* CN has built the origin's dm device is irrelevant to a message
+		// the pool metadata answers.
 		dev, err := s.dm.Info(ctx, plan.thinName(tp.tdId, sp.sliceId))
 		if err != nil || dev != nil {
 			continue
@@ -691,7 +687,7 @@ func (s *CnAgentServer) reportSuppressed(
 // reportSliceDeferred fills the three pool rows of a provisioning-deferred
 // slice, shared by the converge pass and the probe ([D15]). A *serving* slice
 // never comes here: its dm_pool row must keep carrying the raw `dmsetup
-// status` line the thin-pool auto-grow (architecture.md, Automatic reactions)
+// status` line the thin-pool auto-grow (dnv-worker.md AR6)
 // parses.
 func (s *CnAgentServer) reportSliceDeferred(
 	st *cntlrState,

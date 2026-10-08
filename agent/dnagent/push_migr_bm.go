@@ -56,8 +56,7 @@ func (s *DnAgentServer) pushMigrBitmap(
 // applyMigrBitmaps recomputes the skippable regions from every chunk of the
 // applied set and marks them hydrated on the dm-clone. A chunk whose dm-clone
 // does not exist yet still counts as applied; it is re-applied when the
-// dm-clone is (re)created
-// (architecture.md, Bitmap push protocol, dnv-agent side steps 2 and 4).
+// dm-clone is (re)created (dnagent.md DN15).
 func (s *DnAgentServer) applyMigrBitmaps(
 	ctx context.Context,
 	st *sideState,

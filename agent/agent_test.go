@@ -696,8 +696,8 @@ func TestTableBuilders(t *testing.T) {
 	}
 	// Builder-level coverage of the single-feature rendering: the derived
 	// `<#feature args>` count must still come out as 1. No dnv call site
-	// passes this combination any more — both dm-clones
-	// pass noDiscardPassdown = true (the case below).
+	// passes this combination — both dm-clones pass noDiscardPassdown = true
+	// (the case below).
 	got := CloneTable(
 		2048, "253:1", "253:2", "259:0", 2048, true, false, 1, 2)
 	want := "0 2048 clone 253:1 253:2 259:0 2048 1 no_hydration 4 " +
@@ -914,9 +914,10 @@ func TestListSubsysReadsSysfs(t *testing.T) {
 	}
 
 	// Every sysfs read of the walk is SH15-bounded, exactly
-	// like every command and every configfs attribute. Reverting the cmdCtx
-	// in readTrimmed fails here. The per-suffix guard keeps the assertion
-	// from going vacuous if a later fixture stops exercising one attribute.
+	// like every command and every configfs attribute: readTrimmed bounds
+	// each read, and an unbounded read fails here. The per-suffix guard keeps
+	// the assertion from going vacuous if a later fixture stops exercising
+	// one attribute.
 	for _, suffix := range []string{
 		"/subsysnqn", "/address", "/transport", "/state", "/ana_state"} {
 		if !anySuffix(fs.read, suffix) {
@@ -993,8 +994,8 @@ func anySuffix(paths []string, suffix string) bool {
 // (s)uspended, (r)ead-only, read-(w)rite". Reading suspended or read-only at
 // the wrong offset silently reports every device as resumed and writeable,
 // which would defeat the [D12] resume-convergence branch and the read-only
-// reload branch alike. The strings below are real captures from the lab
-// kernel.
+// reload branch alike. The first four strings below are attr columns as
+// `dmsetup info` prints them; the last two are truncated on purpose.
 func TestDmInfoAttrPositions(t *testing.T) {
 	for _, tc := range []struct {
 		attr      string

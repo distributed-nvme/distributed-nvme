@@ -61,9 +61,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 			unreadDn = true
 			continue
 		}
-		// architecture.md, Common validation: a file an older build persisted
-		// with a zero extent size is LOADED, and refused below by convergeDn,
-		// rather than skipped here.
+		// architecture.md, Common validation: a stored file with a zero extent
+		// size — one DN4's gate never persists — is LOADED, and refused below
+		// by convergeDn, rather than skipped here.
 		// Skipping it would drop the DN record, and with no dn-* file left
 		// unread the side loop further down reads a missing DN as "this side
 		// left its parent's list" and drops the local state of every one of
@@ -595,8 +595,8 @@ func (s *DnAgentServer) convergeDn(
 
 	// architecture.md, Common validation: the entrance that does not come
 	// through syncupDn's gate is the startup Reconcile, which converges from a
-	// file an older build may have
-	// persisted with a zero. extent_size is what this disk's [D13] header is
+	// stored file that may carry a zero (a conf fault; DN4's gate never
+	// persists one). extent_size is what this disk's [D13] header is
 	// formatted and verified against, so a zero must not reach EnsureFormatted
 	// at all — it would report an identity mismatch naming the disk rather
 	// than the field that is actually wrong. Nothing is mutated on the way

@@ -37,16 +37,16 @@ const (
 	opDeleteThinDevice = "DeleteThinDevice"
 )
 
-// msgOriginNotCreated is the normative refusal of architecture.md, Thin
-// devices, for a snapshot whose origin has not materialized. It is a format
+// msgOriginNotCreated is the refusal architecture.md, Thin devices, names
+// for a snapshot whose origin has not materialized. It is a format
 // constant rather than an inline string because the integration suite greps
 // the sentence, and because it is the one error in this file that also
 // promises the client a way forward.
 const msgOriginNotCreated = "origin %s is not created yet; " +
 	"wait for ListThinDevices to report created = true"
 
-// msgSnapshotNotCreated is the normative detail of architecture.md, Thin
-// devices, for the delete guard that names the blocking snapshot(s).
+// msgSnapshotNotCreated is the detail architecture.md, Thin devices, names
+// for the delete guard that names the blocking snapshot(s).
 const msgSnapshotNotCreated = "snapshot %s of %s is not created yet"
 
 // CreateThinDevice is the CreateThinDevice of architecture.md, Thin devices.
@@ -54,7 +54,7 @@ const msgSnapshotNotCreated = "snapshot %s of %s is not created yet"
 // Only two of its checks of architecture.md, Common validation, are pure and
 // therefore run here (GW4): the names,
 // and `size == 0`, which is legal exactly when `ori_name` is set because a
-// snapshot then inherits the origin's size ([D-H]). The rest of the size rule
+// snapshot then inherits the origin's size (GW17). The rest of the size rule
 // — a positive multiple of `slice_cnt × stripe_size`, which is what lets
 // dm-striped take equal, chunk-aligned members — depends on the SP's stored
 // geometry and on the origin, so it is state-dependent and runs inside the
@@ -92,7 +92,7 @@ func (s *Server) CreateThinDevice(
 		return nil, err
 	}
 	if req.GetSize() == 0 && req.GetOriName() == "" {
-		// A fresh device has nothing to inherit a size from ([D-H]).
+		// A fresh device has nothing to inherit a size from (GW17).
 		return nil, errInvalid(
 			"size must not be 0 unless ori_name is set")
 	}

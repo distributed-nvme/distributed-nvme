@@ -34,8 +34,8 @@
 # DISTINCT disk nodes and 64 md arrays plus 32 thin pools on one CN.
 #
 # ---------------------------------------------------------------------------
-# ABSOLUTE RULES. Every one of these is a failure this lab has already
-# produced; none of them is a style preference.
+# ABSOLUTE RULES. Every one of these guards a failure mode of this lab; none
+# of them is a style preference.
 # ---------------------------------------------------------------------------
 #
 #  1. NEVER pass iflag= or oflag= to dd, here or in any shipped helper. The
@@ -294,16 +294,16 @@ SLOTS=0,1
 # event_threshold alone. So the set a case needs has to be chosen before its sp
 # exists, which is why this is a parameter of setup_create_sp and not of a case.
 #
-# THE LOAD OF A DEFAULT-SHAPE BUILD. In the measured window of a default-shape
-# build — 32 slices, raid1, 64 md arrays over 128 legs, 32 thin pools — the
-# primary CN spawns about 240 processes a second on a 2-vCPU guest for about 9
-# minutes. (That is the whole window, restarts included —
-# see WAIT_BUILD.) Under that load the primary cannot answer a health check inside
-# five seconds, the worker sets its err_epoch, and AR5 moves the role. The new
-# primary then starts the SAME build from scratch, goes unresponsive
-# in its turn and can hand the role back, all inside setup.
+# THE LOAD OF A DEFAULT-SHAPE BUILD. A default-shape build — 32 slices, raid1,
+# 64 md arrays over 128 legs, 32 thin pools — keeps the primary CN spawning a
+# few hundred processes a second on a 2-vCPU guest for minutes on end (the
+# whole build window, restarts included — see WAIT_BUILD). Under that load the
+# primary cannot answer a health check inside five seconds, the worker sets its
+# err_epoch, and AR5 moves the role. The new primary then starts the SAME build
+# from scratch, goes unresponsive in its turn and can hand the role back, all
+# inside setup.
 #
-# NOTE CAREFULLY, because it is what decides the shape of the fix:
+# NOTE CAREFULLY, because it is what decides the shape of the remedy:
 # common.DefaultPrimaryUnhealthy is ALSO 5, and model.ResolveEventThreshold
 # turns an absent flag into it. So
 # the failover loop is NOT caused by an aggressive suite value — omitting
@@ -314,9 +314,10 @@ SLOTS=0,1
 # reactions: a failover or a spare in the middle of one is noise that
 # invalidates its assertions (an absolute side count, a "no spare leg yet", a
 # digest read through a controller that is no longer the primary). So every
-# threshold here is longer than any build can run. 1800 s is 3.4 x the 525 s
-# window the first run measured (see WAIT_BUILD for what that number is and is
-# not), on a shape that is already the widest this tree can build; leg is
+# threshold here is longer than any build can run: 1800 s is several times the
+# longest build window the lab produces (see WAIT_BUILD for what that window
+# is and is not), on a shape that is already the widest this tree can build;
+# leg is
 # doubled because validateEventThreshold (gateway/validate.go) refuses
 # leg_unhealthy <= side_unhealthy after the defaults are resolved. Nothing caps
 # them from above: ResolveEventThreshold's own comment (model/ops.go) says "No
@@ -431,33 +432,30 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 # Polling budgets, in seconds. Every one of them bounds a wait_until; none of
 # them is a sleep.
 #
-# THE BIG ONES ARE SIZED AGAINST A MEASURED WINDOW, NOT AN ESTIMATE. Five
-# minutes per build is optimistic for this shape: in the measured window the
-# primary CN's agent log spans 8m45s (525 s) of build work and records 126,657
-# process spawns in it, about 240 a second sustained on a 2-vCPU guest.
+# THE BIG ONES ARE SIZED AGAINST THE LAB'S BUILD WINDOW, NOT AN ESTIMATE. A
+# few minutes per build is optimistic for this shape: a default-shape build
+# keeps the primary CN's agent spawning a few hundred processes a second on a
+# 2-vCPU guest for minutes on end.
 #
-# READ 525 s FOR WHAT IT IS. It is the longest build WINDOW the lab has
-# produced, and not the cost of one uninterrupted build. Two failovers fired
+# READ THE WINDOW FOR WHAT IT IS. It is the longest build WINDOW the lab
+# produces, and not the cost of one uninterrupted build: failovers can fire
 # inside it (e2e_integtest.md, Topology and parameters, Event thresholds), and
-# each one starts the build again from nothing on the
-# other CN, so the 126,657 spawns are the sum over everything that agent did in
-# those 8m45s — its own attempts, its demotion teardown, its legs. Nor is it a
-# completion time: the suite had already died at its 300 s bound with the
-# primary still climbing, at 21 of 32 pools and 49 of 64 groups. No
-# uninterrupted 32-slice build has been timed yet, so every margin below is a
-# ratio against that window, which is the only number there is to size from.
+# each one starts the build again from nothing on the other CN, so the window
+# is the sum over everything that agent does — its own attempts, its demotion
+# teardown, its legs. Every margin below is a ratio against that window,
+# which is the only number there is to size from.
 #
 # The constraint is the process-spawn rate of a 2-vCPU guest; it is NOT memory
-# (all three CN guests held ~2.8 GiB of 3.4 GiB free throughout, with load
+# (the CN guests keep most of their memory free through a build, with load
 # averages under 1).
 #
 # THE LINE BETWEEN THE TWO BIG BUDGETS IS "FROM NOTHING" vs "AN INCREMENT", not
 # "a cntlr stack" vs "everything else". WAIT_BUILD is a WHOLE cntlr stack built
 # from nothing — and setup's sides wait, which is the other from-nothing
 # convergence in the file: all 128 sides, each zeroed whole before it can be
-# exported, all at once. How long that one takes has not been measured on its
-# own (the first run passed it, then died in the stack wait), so it carries the
-# same generous budget rather than a number nobody has. WAIT_PROVISION is an
+# exported, all at once. How long that one takes is not timed on its own, so
+# it carries the same generous budget rather than a number nobody has.
+# WAIT_PROVISION is an
 # INCREMENTAL convergence on something that already exists, the sides a grow
 # adds among them. They are separate so that a stuck td-create does not cost
 # twenty minutes.
@@ -467,8 +465,8 @@ WAIT_AGENT=30          # `dn create`/`cn create` to stop returning UNAVAILABLE
 WAIT_BUILD=1200        # 32 pools + 64 md arrays + 128 legs on ONE CN, from
                        # nothing — and setup's own first wait, all 128 sides
                        # blkdiscard-zeroed from nothing across the DN agents,
-                       # the other from-nothing convergence in the file. 2.3x
-                       # the 8m45s / 126,657-spawn window above, which leaves
+                       # the other from-nothing convergence in the file. A
+                       # multiple of the build window above, which leaves
                        # margin for a lab under more load and for the react
                        # case, whose build may lose a failover's worth of work
                        # and start again (the reacting set of
@@ -476,15 +474,14 @@ WAIT_BUILD=1200        # 32 pools + 64 md arrays + 128 legs on ONE CN, from
 WAIT_PROVISION=600     # an incremental convergence on something that already
                        # exists: the handful of sides a grow adds, one grown
                        # group's md + pool reload, a td's thin volumes and
-                       # raid0, one leg reconnecting. 2x the old 300 s, which
-                       # was sized against the same optimistic estimate
+                       # raid0, one leg reconnecting
 WAIT_DELETE=900        # `sp delete` to drain to NOT_FOUND. The drain is the
                        # build run backwards on the same 2-vCPU CN — 32 pools,
                        # 64 arrays and 128 legs torn down and every side
-                       # retired on its DN — so it is sized against the 525 s
-                       # window, not against the old 300 s
+                       # retired on its DN — so it is sized against the build
+                       # window, not against an incremental one
 WAIT_REACT=120         # an automatic reaction to land after its threshold.
-                       # Unchanged: it is threshold + a few 5s worker passes
+                       # It is threshold + a few 5s worker passes
                        # (the vote loop), and every threshold it bounds is
                        # in the reacting set
 WAIT_HOST=60           # a host device/ANA state to appear — and the
@@ -498,8 +495,8 @@ WAIT_HOST=60           # a host device/ANA state to appear — and the
 # the sp non-convergent. It is a COUNT and not a budget: each round is two
 # WAIT_BUILDs that SUCCEEDED and were then invalidated by the role moving again
 # (a timeout inside either one dies on the spot, so this never multiplies the
-# wall clock by three). Under react's set one move during setup is ordinary —
-# the first run had two — and a lab that cannot get past three is one where the
+# wall clock by three). Under react's set one or two moves during setup are
+# ordinary, and a lab that cannot get past three is one where the
 # build loses the race against primary_unhealthy every time, which is a finding
 # and not a wait to sit through.
 SETUP_STACK_ROUNDS=3
@@ -826,7 +823,7 @@ ssh_host_user() { # <h> <cmd…>
 # these (rule 3). The helper is shipped to $HELPER on each guest by the setup
 # section; a guest has exactly one role, so one path suffices.
 #
-# Of the four `_ok` twins only helper_cp_ok has a caller today; the cleanup
+# Of the four `_ok` twins only helper_cp_ok has a caller; the cleanup
 # path reaches the dn, cn and host helpers through cleanup_verb instead, which
 # adds the `timeout` those wrappers cannot express. The other three are kept
 # for symmetry, and saying so beats leaving it to be discovered.
@@ -869,7 +866,7 @@ dn_trsvcid() { printf '%s' "$((DN_TRSVCID_BASE + $1))"; }
 
 # nvmet port ids are 1-based (common.NvmetPortId (common/constants.go) = 1 is
 # the default of `--nvmet-port-id` in addCommonFlags (cmd/dnv-agent/main.go)),
-# so instance 0 keeps the historical port 1 and instance k takes k+1.
+# so instance 0 keeps the default port 1 and instance k takes k+1.
 dn_port_id() { printf '%s' "$(($1 + 1))"; }
 
 # One directory per process, each holding that process's pid file, log, store
@@ -1014,11 +1011,10 @@ ctl_fail() { # <UPPER_SNAKE code> <args…>
 
 # ctl_fail_msg is ctl_fail for a failure whose whole message is predictable.
 # Against a REAL gateway that is rare — most messages carry ids — so
-# ctl_fail_grep below is usually the right one, and in the end it is the only
-# one: NO STEP OF THIS SUITE CALLS ctl_fail_msg today. It is kept because it
-# is the stricter assertion of the pair and the next refusal to be covered may
-# have a fixed message; ops step 3's comment already names it as the form it
-# cannot use.
+# ctl_fail_grep below is usually the right one, and in this suite it is the
+# only one: NO STEP OF THIS SUITE CALLS ctl_fail_msg. It is kept because it
+# is the stricter assertion of the pair and a refusal with a fixed message
+# would take it; ops step 3's comment names it as the form it cannot use.
 ctl_fail_msg() { # <UPPER_SNAKE code> <message> <args…>
 	local code=$1 message=$2
 	shift 2
@@ -1311,8 +1307,8 @@ parse_args() {
 	# cp is named by its IPv4 address and never by a hostname: CP_IP becomes
 	# dnv-cdc's --tr-addr, which refuses a name (see is_ipv4), and it is the
 	# traddr the hosts discover against and the cleanup matches their
-	# discovery controllers by. A name used to pass every check and end the
-	# run in setup stage 02 on a 15 s wait for a port that never opened: the
+	# discovery controllers by. A name would pass every other check and end
+	# the run in setup stage 02 waiting for a port that never opens: the
 	# cdc's, or the gateway's (its --grpc-address carries the same name) when
 	# cp cannot bind the name itself.
 	is_ipv4 "$CP_IP" ||
@@ -1364,8 +1360,8 @@ derive_params() {
 	# files, the CN tmpfs arenas, and the sides a case adds after the create.
 	# The CN thin metadata, the md bitmaps and every host or hydration write
 	# into the sp cost nothing here: they land in side extents the zeroing has
-	# already allocated. Run 5 measured 586 MiB of it after the smoke case, the
-	# heaviest contributors being the cp at 296 MiB and cn0 at 79 MiB; 4 GiB
+	# already allocated. The cp's etcd and logs are the heaviest contributors
+	# after a smoke case; 4 GiB
 	# leaves room for the copy and react cases, which write more, while still
 	# being a number a real leak would cross.
 	SP_DATA_BYTES=$((LEGS * GRP_CNT * INIT_EXT_CNT * EXTENT_SIZE))
@@ -1443,8 +1439,7 @@ derive_params() {
 	[ "$divisor" -ge "$LEGS" ] || cap=$divisor
 	DNS_PER_VM_BOUND=$((cap * (GRP_CNT + 2) / divisor + 1))
 	# (a)'s own least N, kept only for the warning below: an override between
-	# this and DNS_PER_VM_BOUND builds the sp fine and dies in ops step 8. It
-	# is 43 at the default shape — the value the whole bound used to be.
+	# this and DNS_PER_VM_BOUND builds the sp fine and dies in ops step 8.
 	local create_bound=$((cap * (GRP_CNT - 1) / divisor + 1))
 
 	if [ -n "$DNS_PER_VM_OPT" ]; then
@@ -1454,8 +1449,8 @@ derive_params() {
 			# it risks, and the two demands above fail at different depths, so
 			# the message names both. Both are SUFFICIENT conditions, so a
 			# value under either one loses the proof rather than predicting the
-			# failure: the default shape sat between the two bounds for every
-			# run before this one and step 8 never starved there. Between the
+			# failure: the default shape sits between the two bounds and step 8
+			# does not starve there. Between the
 			# create's own bound and the full one the create is safe and ops
 			# step 8 is what is at risk; below
 			# the create's bound a simulation of the real algorithm fails about
@@ -1563,7 +1558,7 @@ derive_params() {
 #
 # The suite never MINTS one of these: where it uses one, it computes it to
 # discover, connect, grep and sweep what the agents minted. Three of the five
-# are used today — side_to_cn_nqn, cn_host_nqn and xfer_nqn; dn_host_nqn and
+# have callers — side_to_cn_nqn, cn_host_nqn and xfer_nqn; dn_host_nqn and
 # migr_src_nqn have no caller, and each carries a line saying so rather than
 # leaving it to be found. A host-facing subsystem NQN is a
 # different thing entirely — it is literally the `ss create --nqn` string (sent
@@ -1686,7 +1681,7 @@ xfer_nqn() { # <sp_id> <xfer_id>
 # hostid with EINVAL, and nvme-cli fills an omitted --hostid from the node-wide
 # /etc/nvme/hostid.
 #
-# NO STEP OF THIS SUITE CALLS IT TODAY, and that is worth saying rather than
+# NO STEP OF THIS SUITE CALLS IT, and that is worth saying rather than
 # leaving to be discovered: every `nvme connect`/`connect-all` here — host0 to
 # $SS0, host1 to $XNQN, host1 to the fallback source — passes the host's OWN
 # ${HOST_NQN[h]}/${HOST_HOSTID[h]}, and the only connects made under a minted
@@ -2208,9 +2203,9 @@ host_make_pattern() { # <h> <path> <countMiB>
 # caller runs it bare, so set -e ends the run on any failure: the watchdog's,
 # ssh's and dd's own. dd's reaches it because the `sync` is chained with `&&`,
 # as react_chunk_write ends each of its dd's with `|| exit 1`. After a `;` the
-# remote shell returned the sync's status, so a dd that failed (EIO, ENOSPC, a
-# device node gone) came back 0, and the first thing to fail was the read-back
-# after it, which blamed the read.
+# remote shell would return the sync's status, so a dd that failed (EIO,
+# ENOSPC, a device node gone) would come back 0 and the first thing to fail
+# would be the read-back after it, which blames the read.
 host_write_range() { # <h> <src> <dst> <countMiB> [seekMiB]
 	ssh_host_watched "$1" \
 		"dd if=$2 of=$3 bs=1M count=$4 seek=${5:-0} conv=fsync status=none && sync"
@@ -2250,8 +2245,8 @@ host_sha_range() { # <h> <path> <countMiB> [skipMiB]
 		"dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
 }
 
-# host_sha_probe is host_sha_range for a read that may block: the measured
-# shape for a device whose IO can wedge. The dd runs DETACHED on the guest and
+# host_sha_probe is host_sha_range for a read that may block: the shape for a
+# device whose IO can wedge. The dd runs DETACHED on the guest and
 # reports through a file, and the redirection ON THE GROUP is load-bearing
 # twice over — a background child that still holds the ssh pipe keeps both the
 # remote shell and this driver's $( ) waiting exactly as long as the read does.
@@ -3038,29 +3033,26 @@ nvmet_tree() {
 #     limits ("A disk node holds the controller node's md superblocks"), before
 #     mdadm-last-resort promotes it — and for good, if nothing does.
 #   - mdadm has nothing when it cannot read a member's superblock. That is
-#     what the 59 wedged arrays of one failed cleanup looked like: `mdadm --detail
-#     --export` printed MD_UUID and MD_DEVNAME but no MD_NAME and
-#     `mdadm --examine --export` answered "No md superblock detected on
-#     /dev/dm-12" — an unreadable member, and the explanation to hand is that
-#     the same failed sweep had just run ~128 dm_force_remove fallbacks, whose
-#     `--force` swaps an error target in under exactly those legs (that last
-#     step is inference; the unreadable member is what was measured). That is
-#     a property of those particular arrays and not of
-#     mdadm from the assembled side: measured on the same guest with the same
-#     mdadm, `--detail --no-devices --export` prints MD_NAME for a live dnv
-#     array AND for an inactive one whose one member is readable.
+#     what an array left over a failed sweep's dm_force_remove fallbacks looks
+#     like — `--force` swaps an error target in under exactly those legs:
+#     `mdadm --detail --export` prints MD_UUID and MD_DEVNAME but no MD_NAME
+#     and `mdadm --examine --export` answers "No md superblock detected" — an
+#     unreadable member. That is a property of such arrays and not of mdadm
+#     from the assembled side: on the same guest with the same mdadm,
+#     `--detail --no-devices --export` prints MD_NAME for a live dnv array AND
+#     for an inactive one whose one member is readable.
 #
 # NEITHER SOURCE REACHES AN ARRAY THAT IS BOTH inactive and standing over
 # members mdadm cannot read — which is precisely what a cleanup that fell
 # through to `dmsetup remove --force` leaves behind, and it is permanent:
-# `mdadm --run` on an array over an error target was measured failing with EIO
-# out of `array_state`, so it never leaves `inactive`. That array is
+# `mdadm --run` on an array over an error target fails with EIO out of
+# `array_state`, so it never leaves `inactive`. That array is
 # skipped, it still pins its members, and stopping it needs an operator. The
 # udevadm line the banner and the start gate hand over does not name this one
 # either, by construction; what identifies it is /proc/mdstat — an `inactive`
 # array whose member devices are this suite's dm names. The STOP is not the
-# part that fails: `mdadm --stop` was measured working on an inactive array on
-# that guest. It is the name read that does.
+# part that fails: `mdadm --stop` works on an inactive array on these guests.
+# It is the name read that does.
 #
 # THE MASK NEEDS NO CHANGE, but it is TWO rules and
 # only the first is scoped. The first — ACTION=="add|change",
@@ -3070,10 +3062,10 @@ nvmet_tree() {
 # ENV{SYSTEMD_READY}="0", carries no subsystem and no fs-type match at all;
 # what keeps it off an ARRAY device is the file name. 63-dnv-md.rules sorts
 # ahead of 63-md-raid-arrays.rules, which is what sets MD_NAME on an array, so
-# on the array's own event the property is not there yet to match — measured
-# with the rule installed on cn2: the array's db held MD_NAME and no
-# SYSTEMD_READY, the member held ID_FS_TYPE=linux_raid_member, MD_NAME and
-# SYSTEMD_READY=0. Should a later event ever carry MD_NAME in from the db and
+# on the array's own event the property is not there yet to match — with the
+# rule installed, the array's db holds MD_NAME and no SYSTEMD_READY, and the
+# member holds ID_FS_TYPE=linux_raid_member, MD_NAME and SYSTEMD_READY=0.
+# Should a later event ever carry MD_NAME in from the db and
 # make it match there, it is still not this function's problem: SYSTEMD_READY
 # is a systemd readiness flag and 64-md-raid-assembly.rules reads it to skip
 # INCREMENTAL assembly, which is done to members; `mdadm --stop` and the
@@ -3081,9 +3073,9 @@ nvmet_tree() {
 #
 # WHAT IT MATCHES, because it runs on DN VMs too (dn_cleanup) where no dnv
 # array is ever supposed to exist: an MD_NAME of `dnv-…` or `<homehost>:dnv-…`,
-# and nothing else. That is now the SAME pair of patterns install_udev_rule
+# and nothing else. That is the SAME pair of patterns install_udev_rule
 # writes into the mask (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
-# property — the two are no longer two different readings of "the name". It is
+# property — one reading of "the name" at both ends. It is
 # the name the cn agent gives every array it creates
 # (common.NameFmt.CnMdArrayName (common/name_fmt.go), passed as `--name`
 # by Md.Create (agent/cnagent/md.go) with `--homehost any`), so a guest's own
@@ -3135,11 +3127,10 @@ md_stop_all() {
 
 # md_names prints the MD_NAME of every assembled dnv array, one per line, by
 # md_stop_all's route and for md_stop_all's reason: `mdadm --detail --scan`
-# prints no `name=` field on these guests, so the `grep -oE 'name=…dnv-…'` this
-# replaces matched NOTHING and every residue assertion built on it passed
-# vacuously — a teardown check that could not fail. Empty output is the pass,
-# as it was before; the difference is that it is now empty because there is no
-# array, not because the field was never there.
+# prints no `name=` field on these guests, so a `grep -oE 'name=…dnv-…'` over
+# it matches NOTHING and every residue assertion built on it passes vacuously
+# — a teardown check that could not fail. Empty output is the pass, and it is
+# empty because there is no array, not because the field was never there.
 md_names() {
 	local d name
 	for d in $(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null); do
@@ -3189,9 +3180,9 @@ mdstat() {
 #     over one of the DN's own dm devices — and that array holds that device
 #     open. Either way the side stays: a pinned kind-d1 linear holds the kind-d4
 #     side open in its turn, so dn_cleanup's dm_remove_kind runs past its bound
-#     whichever of the two it is. Measured: two DN VMs with
-#     no rule file in /etc/udev/rules.d carried 35 and 28 such arrays and both
-#     timed out.
+#     whichever of the two it is. A DN VM with no rule file in
+#     /etc/udev/rules.d carries dozens of such arrays, and its cleanup times
+#     out.
 #
 # The DN does not get a BROADER mask, although it owns no dnv array and could
 # in principle take one: a rule that masked every linux_raid_member would also
@@ -3200,17 +3191,18 @@ mdstat() {
 # with it. The narrow rule is exactly as wide as the damage.
 #
 # THE WRITE IS CONDITIONAL AND THE RELOAD IS NOT, and the asymmetry is the
-# point. dn_up calls this once per instance — 45 times on one DN VM in the
-# default shape — and systemd-udevd watches the rules directories, so an
-# unconditional `cat >` would truncate and rewrite a watched file 45 times
-# during agent startup, each truncation a window in which the mask is empty.
-# (That is the one difference from cnagent_test.sh's copy, which installs once
-# per VM and needs no such care.) But the reload is exactly what those 45 calls
-# used to retry for free: its status is discarded here, so if the write became
+# point. dn_up calls this once per instance — DNS_PER_VM times on each DN VM
+# — and systemd-udevd watches the rules directories, so an unconditional
+# `cat >` would truncate and rewrite a watched file that many times during
+# agent startup, each truncation a window in which the mask is empty. (That is
+# the one difference from cnagent_test.sh's copy, which installs once per VM
+# and needs no such care.) But the reload is exactly what those repeated calls
+# retry for free: its status is discarded here, so if the write became
 # conditional AND the reload went with it, one failed reload would leave the
 # mask byte-correct on disk and stale in udevd for the rest of the run, with
 # dn_up reporting udev=present. It is cheap and idempotent, so it runs on both
-# paths and a transient failure gets 42 more chances on a DN VM.
+# paths and a transient failure gets every later instance's call as another
+# chance.
 install_udev_rule() {
 	local want
 	want=$(
@@ -3416,8 +3408,8 @@ dn_cleanup() {
 	# over where the array sits on the linear, once for the linear and once for
 	# the side it goes on holding.
 	#
-	# It is kept even though install_udev_rule now runs on DN VMs: a guest
-	# that ran an older version of this suite, or one whose rule did not take,
+	# It is kept even though install_udev_rule runs on DN VMs: a guest whose
+	# rule did not take, or whose rule file is gone,
 	# must still be cleanable BY THE SUITE. md_stop_all matches only an
 	# MD_NAME of `dnv-…` or `<homehost>:dnv-…` (see its own comment), so it
 	# cannot touch an array of the guest's own.
@@ -3801,8 +3793,8 @@ disconnect_discovery() { # <traddr>
 # suite has anything to do with (the header of the host helper that
 # write_host_helper (cdc_test.sh) writes says the same).
 #
-# "EVERY CONNECTION THIS SUITE COULD HAVE MADE AND NOTHING ELSE" IS WHAT THIS
-# USED TO CLAIM, AND IT IS FALSE. $NQN_PREFIX is `nqn.2024-01.io.dnv` with no
+# THIS SWEEPS MORE THAN THE CONNECTIONS THIS SUITE COULD HAVE MADE.
+# $NQN_PREFIX is `nqn.2024-01.io.dnv` with no
 # terminator, so the prefix test also matches `nqn.2024-01.io.dnv-it:cdc:*` —
 # cdc_test.sh's own host-facing subsystems, on the very host guests that suite
 # shares with this one (.193 and .197 are in
@@ -4707,8 +4699,8 @@ FREE_MIN_CP=$((2 << 30))
 #     a bounded `udevadm info` read per array in /proc/mdstat, a bounded
 #     `mdadm --detail` read for each array udev could not name, and a bounded
 #     `mdadm --stop` for each dnv one.
-#   - cn_cleanup_phase2, at least as heavy and the verb that actually blew the
-#     old bound twice. On the CN carrying the stack it is disconnect_prefix
+#   - cn_cleanup_phase2, at least as heavy and the verb most likely to run
+#     long. On the CN carrying the stack it is disconnect_prefix
 #     over every side connection that CN holds (up to 128 in the default shape
 #     — 64 arrays x 2 legs — each a `timeout 30 nvme disconnect`), md_stop_all
 #     over the 64 arrays at `timeout 15` each, then nine dm kinds plus
@@ -4723,11 +4715,9 @@ FREE_MIN_CP=$((2 << 30))
 # PRIMARY has arrays (CN12), and the mask is what keeps a stray one off the
 # standby's leg wrappers, which carry md superblocks of their own.
 #
-# THE MEASURED FIGURE: the only measurement is a second cleanup over a failed
-# run's debris finishing inside 300 s, with no per-verb times.
-#
-# 600 s is that bound doubled: enough headroom for a failed run at 32 slices to
-# leave more than the successful one did.
+# THE FIGURE: a second cleanup over a failed run's debris finishes well inside
+# half of this bound, with no per-verb times to size from; 600 s is headroom
+# for a failed run at 32 slices to leave more than a successful one does.
 #
 # WHAT IT DOES NOT BOUND, and the distinction is the whole of rule 5: a task in
 # uninterruptible D state. `timeout` sends SIGTERM and then waits for the child
@@ -4738,10 +4728,10 @@ FREE_MIN_CP=$((2 << 30))
 # running first is the only defence there is; this bound catches the KILLABLE
 # grind, which is what dm_force_remove against a pinned device is.
 #
-# The bound is also a wait, and doubling it doubled that too. cleanup_all runs
+# The bound is also a wait. cleanup_all runs
 # its verbs strictly serially — 13 of them in the ten-guest shape (2 host, 3 cn
 # phase1, 3 cn phase2, 4 dn, 1 cp), none backgrounded — so a sweep in which
-# every one hits the bound is 130 minutes, up from 65, before
+# every one hits the bound is 13 x CLEANUP_TIMEOUT before
 # cleanup_start_gate says anything. That is not the operator's first news,
 # which is what makes it bearable: cleanup_report prints its WARNING for each
 # verb as that verb returns, and the gate afterwards is the summary and the
@@ -4779,7 +4769,7 @@ DIAG_MAX_DN_LOGS=6
 # lsblk and blkdiscard are in the SHARED list because both roles really run
 # them: agent/dm.go's DevNo, WriteZeroesMaxBytes and DiskSize are `lsblk`,
 # and blkdiscard runs on both — agent/dnagent/zeroing.go (BlkZeroout, side
-# provisioning: architecture.md, Side provisioning protocol),
+# provisioning: dnagent.md DN9),
 # agent/cnagent/clonemeta.go (BlkDiscardRange, the
 # clone-metadata arena), and ApplySkipRanges (agent/bitmap.go), which marks
 # regions of a dm-clone hydrated on either role.
@@ -4836,7 +4826,7 @@ CN_TOOLS="$NODE_TOOLS mdadm udevadm findmnt"
 # du/df/tail are here because a HOST runs the same common helper body the nodes
 # do: case_space_guard and space_note_case call `space` on both hosts (du for
 # $WORK, df for the free-space line) and the failure dump calls `logtail` on
-# them for $WORK/sha-probe.err. They were missing while the verbs were not.
+# them for $WORK/sha-probe.err.
 HOST_TOOLS="nvme uuidgen systemctl udevadm dd sha256sum awk sed grep timeout"
 HOST_TOOLS="$HOST_TOOLS du df tail"
 # cp runs four unprivileged daemons and dnvctl. `ss` is what the helper's
@@ -5612,7 +5602,7 @@ cleanup_dirty_banner() {
 # argument and is left alone too.
 #
 # THE REMEDY IS BUILT FROM WHAT WAS RECORDED, not from the one known cause of
-# a DN timeout. This gate runs BEFORE preflight_guests, so it is now the first
+# a DN timeout. This gate runs BEFORE preflight_guests, so it is the first
 # thing an unreachable guest, or one without passwordless sudo, runs into: a
 # fixed DN-md remedy would send that operator to `cat /proc/mdstat` on a guest
 # they cannot ssh to, when what they need is preflight's own sentence about
@@ -6635,19 +6625,15 @@ sp_sides_provisioned() {
 	[ "$left" = 0 ]
 }
 
-# THE TWO FRESH-SP PREDICATES THAT USED TO LIVE HERE ARE GONE, and this note is
-# their headstone rather than a style change. cntlr_stack_ready and
-# cntlr_legs_ready took their expected leg count from the constant
-# GRP_CNT x LEGS — the shape a FRESH sp has — and their own comment already
-# warned that CN10 walks spare_leg_list too, so a `spare create`, a
-# `sp grow-slice` or an automatic reaction makes the real count higher and the
-# predicate waits for ever. The first real run walked into exactly that: AR8
-# created one spare during setup step 7 and the wait sat at `legs 129/128` until
-# its budget ran out. A warning in a comment is not a guard, so setup now uses
-# the same live-shape predicates every case uses — cntlr_full_ready and
+# SETUP WAITS ON THE LIVE SHAPE, NOT ON THE FRESH-SP CONSTANT. A predicate
+# that took its expected leg count from GRP_CNT x LEGS — the shape a FRESH sp
+# has — would wait for ever once a `spare create`, a `sp grow-slice` or an
+# automatic reaction made the real count higher, because CN10 walks
+# spare_leg_list too: AR8 can create a spare during setup step 7, and such a
+# wait would sit one leg over its target until its budget ran out. So setup
+# uses the same live-shape predicates every case uses — cntlr_full_ready and
 # cntlr_legs_full_ready, which re-read [$SP_LEG_PATH] plus [$SP_SPARE_LEG_PATH]
-# on every poll. The two facts the old comments carried are kept where they are
-# still true:
+# on every poll. Three facts about the counts those predicates compare:
 #
 #   * the three counts are what doc/cnagent.md CN10/CN12/CN13 say a primary
 #     holds at READWRITE — one leg row per leg of every group (both roles), one
@@ -7580,12 +7566,11 @@ setup_wait_stack() {
 	SP_JSON=$CTL_OUT
 	assert_field "$SP_JSON" "$SP_UNPROV_CNT" 0 "unprovisioned sides"
 	sp_read_roles
-	# THE TARGET OF THE TWO WAITS BELOW IS THE LIVE SHAPE, and this is where the
-	# first real run died. Setup used to wait against the fresh-sp constant
-	# GRP_CNT x LEGS; a spare leg created by AR8 while the wait ran made the
-	# agent report 129 leg rows against a target of 128, and the poll could never
-	# pass however long it was given (the transcript's last line was
-	# `legs 129/128`). primary_stack_ready and standby_shape_ready both go
+	# THE TARGET OF THE TWO WAITS BELOW IS THE LIVE SHAPE. A wait against the
+	# fresh-sp constant GRP_CNT x LEGS could never pass, however long it was
+	# given, once a spare leg created by AR8 while the wait ran made the agent
+	# report one leg row more than the target. primary_stack_ready and
+	# standby_shape_ready both go
 	# through sp_totals_poll, which re-reads the totals on every poll and shouts
 	# when the shape moves — the only form that can both finish and say what
 	# happened.
@@ -7609,8 +7594,9 @@ setup_wait_stack() {
 	# NEITHER WAIT BELOW IS PINNED TO A CNTLR ID, and the stage exits only when
 	# the two agree. primary_stack_ready and standby_shape_ready each resolve
 	# their role from the `sp get` of their own poll, because under react's
-	# threshold set a failover during this build is expected — the first real run
-	# had two — and either wait pinned to an id would end up watching the node in
+	# threshold set a failover during this build is expected — two in one
+	# setup are ordinary — and either wait pinned to an id would end up
+	# watching the node in
 	# the OTHER role, whose target it can then never reach: the stack target
 	# against a standby that by CN12/CN13 builds nothing, or the emptiness target
 	# against a primary that is building everything.
@@ -7998,9 +7984,9 @@ setup() {
 # It is cleanup_all + setup_infra + setup_case, i.e. the whole of `setup` with
 # a teardown in front: E2E11 says every case starts from an EMPTY etcd AND a
 # freshly built sp, and cleanup_all has just removed the sp along with
-# everything else, so the case half has to be rebuilt here too. (An earlier
-# draft of this function stopped after setup_infra; the second case then ran
-# `sp get` against an etcd with no cluster in it and died in its first stage.)
+# everything else, so the case half has to be rebuilt here too. (Stopping
+# after setup_infra would send the second case's first `sp get` against an
+# etcd with no cluster in it.)
 #
 # It is deliberately the big hammer, for the reason argued at the top of this
 # section: a new `cluster create` mints a new cluster_id and new dn_ids, and a
@@ -8011,8 +7997,8 @@ setup() {
 # --local-store with it — and only the two cn phases remove the CN's store and
 # its tmpfs arena. So the between-cases step is cleanup_all followed by a
 # fresh setup_infra and a fresh setup_case, and the run pays for a second full
-# build per case. That build is the 8m45s window of the WAIT_BUILD comment, so
-# a four-case run is well over an hour.
+# build per case. That build is the build window of the WAIT_BUILD comment,
+# paid once more per case.
 #
 # cleanup_all never dies, but cleanup_start_gate after it does: a verb that
 # never reached its sentinel here means the previous case's debris is still on
@@ -8212,7 +8198,7 @@ cn_residue_empty() { # <v>
 }
 
 # dn_md_residue lists any md array on a DN VM whose name carries the dnv
-# prefix. It is the same filter cn_residue applies on a CN, and it is now the
+# prefix. It is the same filter cn_residue applies on a CN, and it is the
 # same CODE: both call the shared node body's `md_names`, which reads MD_NAME
 # per array the way md_stop_all does.
 #
@@ -8228,21 +8214,19 @@ cn_residue_empty() { # <v>
 #
 # THREE WAYS IT COULD ANSWER EMPTY WITHOUT PROVING ANYTHING. Two are closed by
 # preflight and by the wrapper: a guest without mdadm or udevadm answers empty,
-# and both are in DN_TOOLS now — dn_up's mask, dn_cleanup's md_stop_all and
+# and both are in DN_TOOLS — dn_up's mask, dn_cleanup's md_stop_all and
 # md_names all need them — so preflight fails first on a DN that lacks either;
 # and an ssh or sudo that fails at this moment also answers empty, which no
 # tool list covers, so the wrapper is the DYING helper_dn (over ssh_dn, not
 # ssh_dn_ok) and the caller dies on a non-zero status, the shape
 # dn_residue_empty and cn_residue_empty already have.
 #
-# The third was the one that mattered, and it is now CLOSED. This probe used to
-# run `mdadm --detail --scan | grep -oE 'name=…dnv-…'`, and on these guests that
-# scan prints no `name=` field at all (md_stop_all's comment carries the
-# measurement), so the grep matched nothing on every DN,
-# always, and the assertion passed whatever the guest held — while the DN md
-# mask it exists to verify was exactly the thing that had been wrong. It reads
-# MD_NAME per array now, the way md_stop_all does. cn_residue's md line had the
-# identical hole and takes the identical fix, through the same `md_names`.
+# The third is the name read itself. A probe built on `mdadm --detail --scan |
+# grep -oE 'name=…dnv-…'` matches nothing on these guests, where that scan
+# prints no `name=` field at all (md_stop_all's comment), so it would pass
+# whatever the guest held — while the DN md mask it exists to verify is
+# exactly the thing that can be wrong. So it reads MD_NAME per array, the way
+# md_stop_all does, and cn_residue's md line goes through the same `md_names`.
 dn_md_residue() { # <v>
 	helper_dn "$1" md_names
 }
@@ -8551,8 +8535,8 @@ case_smoke() {
 	assert_field "$SP_JSON" '.sp_conf.sp_id' "$SP_ID" \
 		"\`sp get\` still answers for the sp setup created"
 	assert_field "$SP_JSON" '.slice_list | length' "$SLICE_CNT" "slices"
-	# THESE TWO ABSOLUTES ARE DELIBERATE, and after the per-case threshold sets
-	# they carry a second statement as well as the first. smoke's sp is built
+	# THESE TWO ABSOLUTES ARE DELIBERATE, and they carry a second statement as
+	# well as the first. smoke's sp is built
 	# with the QUIET set, so no reaction can fire during or after its build: a
 	# side count that is not GRP_CNT x LEGS, or a spare leg at all, means one
 	# did — which is a finding about the lab, not a shape to accommodate. This
@@ -8583,9 +8567,8 @@ TD1=t1
 # The current shape of the sp, recomputed from a `sp get` rather than from
 # GRP_CNT. Step 2 grows two slices, so from that point on the constants setup
 # asserted against are stale; a spare leg or an automatic reaction moves them
-# too. Setup uses these same general forms — the fresh-sp predicates that once
-# sat beside cntlr_raid0_ready were deleted for the reason their headstone
-# there gives.
+# too. Setup uses these same general forms, for the reason the note above
+# cntlr_raid0_ready gives.
 SP_GRP_TOTAL=0
 SP_LEG_TOTAL=0
 SP_SPARE_TOTAL=0
@@ -8636,7 +8619,7 @@ sp_totals_of() { # <sp get reply> <what>
 # `sp get` per poll as the price, and they SHOUT when the shape moves under
 # them. The shout is not decoration: while one of these waits is running the
 # suite itself is blocked, so nothing it did can have changed the shape — and
-# after the per-case threshold sets a smoke, ops or copy build can no longer
+# under the quiet threshold set a smoke, ops or copy build cannot
 # produce one either. A moved total in those three cases means a reaction fired
 # when none should have, and that is a finding about the run, not a hiccup to
 # absorb.
@@ -8715,10 +8698,11 @@ cntlr_full_ready() { # <cntlr id>
 #
 # Every wait that watches a WHOLE STACK BEING BUILT needs this rather than
 # cntlr_full_ready, and the reason is the react case. Its sp carries the reacting
-# threshold set, primary_unhealthy 5, and the first real run's build moved the
-# role TWICE while setup's own build wait was running (failover 1->2, then 2->1,
-# both inside setup). A wait pinned to the cntlr that was primary when the wait
-# started would then be watching a node that is now a standby: a standby builds
+# threshold set, primary_unhealthy 5, and a build under it can move the role
+# more than once while setup's own build wait is running (a failover 1->2,
+# then 2->1, both inside setup). A wait pinned to the cntlr that was primary
+# when the wait started would then be watching a node that is now a standby: a
+# standby builds
 # no pools and no groups at all (CN12, CN13), so the poll could never pass and
 # the wait would burn its whole WAIT_BUILD before dying with a message about a
 # controller that is doing exactly what a standby should.
@@ -8742,7 +8726,7 @@ cntlr_full_ready() { # <cntlr id>
 # THE THREE SHAPE GUARDS BELOW ARE INSURANCE, NOT A TRANSIENT. A reply with no
 # primary, with two, or whose two parallel lists disagree sends the poll round
 # again rather than failing — but none of those states is reachable through
-# `sp get` today, and the comment must not claim the election passes through
+# `sp get`, and the comment must not claim the election passes through
 # them. GetStoragePool (gateway/storagepool.go) answers out of one `Snapshot`,
 # so the whole reply is a single store revision; every writer of the
 # `primary` flag leaves exactly one primary in that revision (`idx == 0` at
@@ -8846,7 +8830,7 @@ cntlr_legs_full_ready() { # <cntlr id>
 # AND THE EMPTINESS IS ALSO WHY IT FOLLOWS THE ROLE, as primary_stack_ready
 # does. Pinned to the id that was the standby when the wait began, a failover
 # mid-wait would leave it insisting that the new PRIMARY hold no groups and no
-# pools — a target that node spends the next 8m45s making less reachable, so the
+# pools — a target that node spends its whole build making less reachable, so the
 # wait would spend its whole WAIT_BUILD and die about a controller doing exactly
 # what a primary should. That is the same unsatisfiable-target shape the pinned
 # stack wait had, one role over.
@@ -9146,7 +9130,7 @@ ops_reads() {
 # DISTINCT DN. That is a CREATE property — CreateStoragePool grows its black
 # list with every pick (architecture.md, Per-operation allocation) — and
 # GrowSlice deliberately passes a `nil` black
-# list and a nil ExcludeLocs (its pickDns call, under the D-F comment in
+# list and a nil ExcludeLocs (its pickDns call, under the black-list comment in
 # gateway/storagepool.go), so a grown group MAY land on a DN that already carries
 # another group's side. What does still hold, and is asserted, is the
 # per-group rule: one scan keeps at most one candidate per location
@@ -9309,7 +9293,7 @@ ops_slots() {
 	stack_wait_reset
 	# WAIT_BUILD: a cntlr created now has nothing, so this is $SP_LEG_TOTAL
 	# fresh nvme-tcp connections on a CN that held none — the standby half of
-	# the measured build, not an incremental convergence.
+	# a from-nothing build, not an incremental convergence.
 	wait_until "$WAIT_BUILD" \
 		"the third cntlr $c3 on cn$spare to connect every leg as a standby" \
 		cntlr_legs_full_ready "$c3"
@@ -9376,7 +9360,7 @@ ops_slots() {
 	host_wait_ana 0 "$SS0" "$traddr3" "$UUID1" inaccessible
 
 	# DeleteCntlr refuses an enabled cntlr — "disabling is what triggers the
-	# re-election of architecture.md, Automatic reactions, and takes the
+	# failover election of dnv-worker.md AR5 and takes the
 	# controller's namespaces ANA-inaccessible, so requiring the disable first
 	# means a failover has
 	# already happened by the time the record disappears"
@@ -9441,7 +9425,7 @@ ops_slots() {
 	# disable, so it rules out arguments that name nothing — but not host0
 	# losing every controller for $SS0 in between, which reads `none` on this
 	# wait's first poll and passes it. That is exactly the shape of a delete
-	# regression that tore down more than the spare's export, so the surviving
+	# that tore down more than the spare's export, so the surviving
 	# path is re-read here, after the wait, and it is the same assertion this
 	# step already makes before the delete. $PRIMARY_TRADDR was re-read from
 	# `sp get` above, so it names whichever cntlr is primary NOW — a
@@ -9616,7 +9600,7 @@ ops_inspect() {
 #    port shared by everything it exports (PortConf (agent/nvmet.go)) — so each
 #    port loses its LAST subsystem and stops listening.
 #
-#    THAT IS NOT THE DNR ENDING this comment used to claim. A port that does
+#    THAT IS NOT A DNR ENDING. A port that does
 #    not listen refuses nothing: the reconnect gets ECONNREFUSED, which is a
 #    retry (e2e_integtest.md, Known limits, "A host controller outlives a
 #    target that stops listening", and host_path_gone's header for the
@@ -9750,7 +9734,7 @@ ops_set_level() { # <level, without the SP_LEVEL_ prefix>
 	# DISABLE suppresses every resource CN19 names, so the CN tears the whole
 	# stack down; the step back up rebuilds all $SLICE_CNT pools and every md
 	# array from nothing, which is the same piece of work setup pays for, at the
-	# 8m45s / 126,657-spawn scale of the WAIT_BUILD comment. One budget for every rung,
+	# scale of the WAIT_BUILD comment. One budget for every rung,
 	# because the cheap rungs return as soon as the primary has applied them
 	# and cost nothing more.
 	wait_until "$WAIT_BUILD" \
@@ -9799,7 +9783,7 @@ ops_levels() {
 		"host0 still READS its data at SP_LEVEL_READONLY"
 
 	# AND THE OTHER HALF. Reads being served is not what distinguishes
-	# READONLY from READWRITE — a regression that simply stopped asking for the
+	# READONLY from READWRITE — a plan that simply stopped asking for the
 	# dm-flakey table would pass the assertion above, and no other rung of this
 	# ladder covers it either: READONLY's rows read exactly like READWRITE's
 	# (the note above ops_level_want), and a plan without flakey is probed
@@ -9815,8 +9799,8 @@ ops_levels() {
 	# dd's own status is REPORTED and not asserted, the way step 10's
 	# connect-all rc is: the failing write is buffered into host0's page cache
 	# and only fsync can see the error, so the exit code depends on uutils dd
-	# 0.8.0 propagating a conv=fsync failure — which this lab has never
-	# measured. What IS asserted is the media, which is the property CN19
+	# 0.8.0 propagating a conv=fsync failure — which is not asserted here.
+	# What IS asserted is the media, which is the property CN19
 	# states.
 	#
 	# The second cache drop's `sync` DOES have something dirty to flush, unlike
@@ -10380,10 +10364,8 @@ UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 #   pools. It is set to WAIT_PROVISION's number and not to its NAME, so that
 #   the two can be argued about separately: a hydration is bounded by the
 #   nvme-tcp path and by dm-clone's own copy threads, not by the dmsetup/mdadm
-#   spawn rate that decides a build. The 300 s it carried before was sized
-#   against the old 300 s WAIT_PROVISION; that budget doubled on the 8m45s
-#   window the first run measured, and this one follows because the copy runs on the SAME 2-vCPU
-#   CN and competes with the same work.
+#   spawn rate that decides a build. It follows WAIT_PROVISION's size because
+#   the copy runs on the SAME 2-vCPU CN and competes with the same work.
 # WAIT_SRC_CONNECT — how long the CN may take to bring the source connection
 #   up before "it never will" is the honest reading. The CN retries a failed
 #   source connect from its own registry (ensureClone (agent/cnagent/clone.go)
@@ -11667,7 +11649,7 @@ copy_migration() {
 			"(architecture.md, Per-operation allocation) has" \
 			"nowhere anti-affine to go, so the destination VM is not asserted"
 	fi
-	# [D-I]: the destination side takes the first cntlid slot that differs
+	# GW18: the destination side takes the first cntlid slot that differs
 	# from the source's, because the two sides of ONE leg are aggregated by
 	# every CN and must occupy different CNTLID ranges
 	# (migrDstCntlidSlot (gateway/migration.go)).
@@ -12090,15 +12072,12 @@ case_copy() {
 # threshold after CreateStoragePool, so the values the case needs are the values
 # its build runs under.
 #
-# The consequence is measured, not hypothetical. Building this shape kept the
-# primary CN spawning 126,657 processes over 8m45s (82,099 dmsetup, 20,127
-# mdadm, 16,795 lsblk) on a 2-vCPU guest — the whole window, restarts included,
-# see WAIT_BUILD — and under that load it cannot answer a health check inside
-# five seconds. The first real run recorded, all inside setup:
-#
-#     "kind":"failover","old_cntlr_id":1,"new_cntlr_id":2
-#     "kind":"spare_create","slice_id":47,"grp_id":53,"leg_id":56,"spare_leg_id":355
-#     "kind":"failover","old_cntlr_id":2,"new_cntlr_id":1
+# The consequence is real, not hypothetical. Building this shape keeps the
+# primary CN spawning dmsetup, mdadm and lsblk processes for minutes on end
+# on a 2-vCPU guest — the whole window, restarts included, see WAIT_BUILD —
+# and under that load it cannot answer a health check inside five seconds. A
+# build under this set can record, all inside setup, a `failover`, a
+# `spare_create` and a `failover` back.
 #
 # So when this case starts, the sp MAY already hold a spare leg it did not ask
 # for, and the primary MAY be a different controller than the one the create
@@ -12569,8 +12548,8 @@ react_primary_moved() { # <old cntlr id>
 # the worker's own word that the promotion completed.
 #
 # WHY IT IS NOT cntlr_full_ready. The rebuild is a whole stack on a node that had
-# only legs — the WAIT_BUILD comment's piece of work — and the first run proved
-# a CN doing that work misses health rounds and gets its err_epoch stamped. The
+# only legs — the WAIT_BUILD comment's piece of work — and a CN doing that
+# work misses health rounds and gets its err_epoch stamped. The
 # elected cntlr is SETTLING for all of it (dnv-worker.md HL2: a promoted primary
 # settles at its first clean report as primary that shows its stack built),
 # and AR5 holds a settling primary to cntlr_unhealthy — $THR_REACT_CNTLR
@@ -12974,8 +12953,8 @@ react_grow() {
 	# than inherited from step 01: everything AR6 is judged on is a DELTA of
 	# one, and a delta needs a reading from just before the act that causes it.
 	# before_data is also the INDEX the appended group will occupy, because
-	# GrowSlice appends — which is what $REACT_GRP1 becomes, instead of the
-	# literal `[1]` it used to be.
+	# GrowSlice appends — which is what $REACT_GRP1 becomes, rather than a
+	# literal index.
 	#
 	# sp_read_roles comes with them: every read below goes to $PRIMARY_CNTLR_ID
 	# — the pool status AR6 itself compares, and the row react_pool_grew waits
@@ -13287,8 +13266,8 @@ react_failover() {
 	msg="$msg $SLICE_CNT pools, $SP_GRP_TOTAL groups and"
 	msg="$msg $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
 	# WAIT_BUILD: this is a WHOLE stack, built from nothing on a node that had
-	# only legs — the same piece of work setup pays for, at the 8m45s /
-	# 126,657-spawn scale of the WAIT_BUILD comment, and the reason the failover
+	# only legs — the same piece of work setup pays for, at the
+	# scale of the WAIT_BUILD comment, and the reason the failover
 	# loop is self-defeating in the first place.
 	#
 	# react_new_primary_ready, NOT cntlr_full_ready: for the whole of that build
@@ -13556,11 +13535,9 @@ react_leg_repair() {
 	# worker has applied so far, which must not grow (both asserted at its
 	# end). A dead member is a LEG fault: the primary's md row reads it from
 	# sysfs as OK (degraded once md or the spare switch has failed the
-	# member; cnagent.md CN28). While that row came from
-	# `mdadm --detail`, the probe could block on the dead member past its
-	# timeout and read ERROR, and AR5 failed the primary over — the first
-	# failover of the ping-pong the run that found it died of, in this
-	# stage's AR8 wait, with the worker flipping the primary for 48 hours.
+	# member; cnagent.md CN28), never through `mdadm --detail`, which could
+	# block on the dead member past the probe's timeout, read ERROR and have
+	# AR5 fail the primary over.
 	before_primary=$PRIMARY_CNTLR_ID
 	before_failovers=$(worker_failover_cnt)
 	grpid=$(sp_field "$COPY_GRP0.grp_id")
@@ -13568,13 +13545,12 @@ react_leg_repair() {
 		"slice 0's first data group is still the one step 01 recorded"
 
 	# THE SPARE READING THIS WHOLE STEP IS JUDGED AGAINST. It is a snapshot and
-	# not the literal 0 it used to be: this case's build runs under the reacting
-	# threshold set and the first real run produced a spare_create during setup
-	# (see the section header). Asserting "the group holds no spare leg" would
-	# fail a run that behaved exactly as designed — and, worse, the wait below
-	# used to be an exact `== 1`, which on a group that ALREADY held one
-	# would have returned true on its first poll and passed this step without
-	# AR8 having done anything at all.
+	# not a literal 0: this case's build runs under the reacting threshold set,
+	# so a spare_create during setup is ordinary (see the section
+	# header). Asserting "the group holds no spare leg" would fail a run that
+	# behaved exactly as designed — and, worse, an exact `== 1` wait below, on
+	# a group that ALREADY held one, would return true on its first poll and
+	# pass this step without AR8 having done anything at all.
 	#
 	# before_spares is a jq array literal of the group's spare leg ids, sorted,
 	# so the assertions after the switch can be set comparisons. `tojson` on an
@@ -14074,7 +14050,7 @@ run_case() { # <case name>
 #     wipefs, losetup -d) plus its `rm -rf $WORK` removes that header, and only
 #     the two cn phases remove a CN's store and its tmpfs arena — which is
 #     exactly cleanup_all, in exactly the order it already gets right. The price
-#     is a second full build per case — the 8m45s window of the WAIT_BUILD
+#     is a second full build per case — the build window of the WAIT_BUILD
 #     comment; the alternative is a suite that cannot run its second case.
 #
 #     gateway_test.sh is no precedent for the narrow reset, in either direction.
@@ -14109,8 +14085,8 @@ log_topology() {
 	# moment it can be made — `sp create` (sp_thresholds; e2e_integtest.md,
 	# Topology and parameters, Event thresholds).
 	log "  thresholds: smoke/ops/copy  $THR_QUIET"
-	log "              (quiet: no reaction may fire during a build, and the" \
-		"measured build window is 8m45s)"
+	log "              (quiet: no reaction may fire during a build, so each" \
+		"threshold exceeds any build window)"
 	log "              react           $THR_REACT"
 	log "              (reacting: AR5/AR7/AR8 must fire inside a bound, so" \
 		"react's own build may react too)"

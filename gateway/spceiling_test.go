@@ -31,13 +31,13 @@ import (
 // — a new read or write in the create, a change in how etcdutil builds the txn
 // — this test fails with etcd's own "too many operations in txn request" while
 // the tripwire stays green, but only once the true count passes
-// EtcdMaxTxnOps: 967 leaves 57 ops of slack, so an op added PER DN (+128) is
-// caught here and a single fixed one is not.
+// EtcdMaxTxnOps: the slack spCreateMaxCompares leaves under it is less than
+// one op per DN, so an op added PER DN is caught here and a single fixed one
+// is not.
 //
-// Mutation-checked when it was written: this create commits against an etcd
-// started with --max-txn-ops=967 and is REFUSED at 966, so at this shape the
-// tripwire's 967 is the transaction's exact compare count and not merely an
-// upper bound on it. (The four-writes-per-DN factor is an upper bound in
+// At this shape the tripwire's count is the transaction's exact compare
+// count and not merely an upper bound on it: the create is refused one op
+// below it. (The four-writes-per-DN factor is an upper bound in
 // general — a DN that falls out of model.DnAllocatable under its charge costs
 // three — but no DN in this fixture does, and the same holds of the CN twin,
 // which is what the last assertion below checks rather than assumes.)
@@ -55,8 +55,8 @@ import (
 // black list is pinned here and by TestCreateStoragePoolWriteSet; the CN one
 // only by TestCntlrsSpreadAcrossLocations' tier-2 case and
 // TestCreateStoragePoolRefusals' one-CN case — see the CN arm below. What is
-// this test's own is that the two counts are still the ones the 967 was
-// computed from.)
+// this test's own is that the two counts are still the ones
+// spCreateMaxCompares was computed from.)
 //
 // Two fixture facts this test depends on, and they fail DIFFERENTLY. Getting
 // the DN one wrong can only refuse the create. Getting the CN one wrong can
@@ -83,7 +83,7 @@ import (
 //     MaintainCnCapacity issues its del with no put — four writes for that CN
 //     where spCreateWritesPerCn counts five. The create still commits; it is
 //     one compare per CN smaller than the shape this file exists to prove —
-//     963 at today's MaxCntlrCntPerSp of 4.
+//     spCreateMaxCompares less MaxCntlrCntPerSp.
 //     So cnFree is passed as FOUR times the footprint, and the capacity-key
 //     assertion at the end is what keeps the number honest — a silent shrink
 //     is exactly what the exactness claim above cannot survive.
@@ -176,8 +176,8 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 	// CN the fixture plants is its own location with room for the SP, so
 	// the tier-1 location exclusion keeps the picks on distinct CNs by
 	// itself — tier 1 never comes up empty here — and a create that
-	// lost its cnBlack list passes here every run (mutation-checked: five runs,
-	// five passes). The list is what keeps a TIER-2 pick — one made once no
+	// lost its cnBlack list passes here every run. The list is what keeps a
+	// TIER-2 pick — one made once no
 	// CN outside the picks' locations has room — off the SP's own CNs, and
 	// two tests pin it there: dropping the cnBlack append fails
 	// TestCntlrsSpreadAcrossLocations' tier-2 case, whose CNs share

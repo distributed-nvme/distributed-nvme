@@ -33,7 +33,8 @@ as a VM holds several host NQNs and the kernel keeps one per host id. A
 migrating leg's primary connects to both its sides, which export one NQN and
 one namespace identity (`architecture.md`, [D1]), so the host merges them into
 one multipath namespace; hence the sides' distinct cntlid slots
-(`architecture.md`, cntlid slots).
+(`architecture.md`, cntlid slots), and a dead path whose NQN a live path
+shares is dropped by its controller (`dnagent.md` SH20).
 
 ## Assumptions and preflight checks
 
@@ -41,15 +42,16 @@ Assumed and not checked: both VMs are linux/amd64, which the agent is built
 for, on one lab image whose kernel has dm-clone. The preflight installs
 nothing and fails fast, its per-VM half running after the start-of-run
 cleanup, since free agent ports mean something only once a crashed run's
-agents are gone. Per VM it checks passwordless ssh and sudo and the tools (no
-LVM: the dn agent runs none, `architecture.md`, [D13]); loads the nvmet,
-nvme-tcp, dm-clone and loop modules, without verifying each, and mounts
-configfs, neither of which the agent does; then checks that nvmet configfs is
-present, that native multipath is on, which the standby assertions and the
-migration merge need, and the work directory's free space and punch-hole
-support. Once each loop device exists, setup checks that it offers Write
-Zeroes, whose absence the agent's fail-fast (`dnagent.md` DN5) would report
-less legibly. The suite rests on these lab facts:
+agents are gone. It supplies the kernel modules and the configfs mount, which
+the agent neither loads nor mounts, without verifying each module, and checks
+what the suite and the agent need and the agent does not check itself:
+passwordless ssh and sudo, the tools (no LVM: the dn agent runs none,
+`architecture.md`, [D13]), nvmet configfs present, native multipath on, which
+the standby assertions and the migration merge need, the work directory's
+free space and punch-hole support, and the agent ports free; and, once each
+loop device exists, its Write Zeroes, whose absence the agent's fail-fast
+(`dnagent.md` DN5) would report less legibly. The suite rests on these lab
+facts:
 
 * The VMs' uutils dd silently mishandles direct IO, with false failures and
   dropped writes, so the suite never passes dd an input or output flag at all:
@@ -73,9 +75,6 @@ less legibly. The suite rests on these lab facts:
   (`dnagent.md` DN6).
 * A dm-clone's table reprints its creation arguments, keeping no-hydration
   after hydration is enabled; only its status shows the live flags.
-* A dm-delay device wedges udev's workers unless a "58-*" udev rule turns off
-  the device-mapper disk and other rules for it; the suite builds none and
-  installs no such rule, so a udev stall here suspects that rule first.
 
 ## The driver: `dnagentctl`
 
@@ -145,23 +144,21 @@ non-optimized and fail a read, being backed by their dm-errors, and every
 export admits exactly one host NQN, its own controller node's (`dnagent.md`
 DN10).
 
-**migr_full and migr_bitmap** run two migrations at once in opposite
-directions, each node the source of one and the destination of the other, in
-lockstep stages whose two calls go to different agents, along
-`architecture.md`, Migration: the destination provisions first and is declared
-at the no-migration level, with no clone and no connection (`dnagent.md` DN11,
-DN13); the source, told its destination is not provisioned, serves as if no
-migration existed (DN12); the cutover fences the source (`architecture.md`,
-[D12]) while the hosts hold IO; one converge enables the destination, whose
-connection exercises `dnagent.md` SH17 and SH20, and whose clone's table,
-never reloaded, must carry exactly the no-hydration and no-discard-passdown
-pair (DN13; `architecture.md`, [D7]); a read of the last must-copy region
-matches the source, hydrated or not; the finish repoints the per-CN linear
-before the clone, its connection and its wrapper go, then drops the source
-side (`dnagent.md` DN6, L1 to L4, L6); the host disconnects the dead source
-path by its controller, as the shared NQN's other path must live (SH20); and
-the data verifies through the destination path, which also takes a write. The
-teardown's residue check proves the removal order.
+**migr_full and migr_bitmap** prove `architecture.md`, Migration, with two
+migrations at once in opposite directions, each node the source of one and the
+destination of the other, so that every stage's two calls go to different
+agents: a destination declared at the no-migration level provisions with no
+clone and no connection (`dnagent.md` DN11, DN13); a source told its
+destination is not provisioned serves as if no migration existed (DN12); the
+cutover fences the source (`architecture.md`, [D12]), whose path the host then
+reads inaccessible; one converge enables the destination, whose connection
+exercises `dnagent.md` SH17 and SH20, and whose clone's table carries exactly
+the no-hydration and no-discard-passdown pair (DN13; `architecture.md`, [D7]);
+the last must-copy region reads from the destination as the source holds it,
+hydrated or not; the finish leaves nothing of the migration on either node,
+the per-CN linear repointed and the source side dropped (`dnagent.md` DN6, L1
+to L4, L6), which the teardown's residue check proves; and the data verifies
+through the destination path, which also takes a write.
 
 **migr_full** pushes no bitmap: the applied set is empty, the whole device
 matches the source, and no discard reaches any clone. **migr_bitmap** pushes
@@ -178,18 +175,19 @@ assertion.
 
 **teardown** proves `architecture.md`, Teardown by sweep: what cannot go yet
 is reported and finished later, never forgotten (`dnagent.md` DN6, DN7, DN16,
-DN19, SH7). One stage yanks a migration's source export and at once drops the
-destination side; its clone comes off before the connection it hydrates
-through (`dnagent.md` L3), over a source already dead, so while hydration is
-still in flight the removal outlasts a pass and the same revision is re-sent
-until clean, only the leftover code tolerated. Nothing of the migration may
-remain on either node, and a clean read-only `GetDnInfo` proves its allocation
-and clone-metadata records went with their devices, an orphaned record being a
-leftover itself (DN6's record step); that a record never goes before its
-device is left to the unit tests. The other stage holds a side device open
-from outside the agent and drops the side: the leftover reply names it, the
-residue is exactly that device (DN6's layers), the read-only verdict agrees,
-and the same revision, re-sent once the device is free, finishes.
+DN19, SH7), under the two shapes a blocked removal takes. A removal that
+outlasts a pass: a migration's source export is yanked and the destination
+side dropped at once, so its clone comes off before the connection it hydrates
+through (`dnagent.md` L3), over a source already dead; the same revision is
+re-sent until clean, only the leftover code tolerated, nothing of the migration
+may remain on either node, and a clean read-only `GetDnInfo` proves its
+allocation and clone-metadata records went with their devices, an orphaned
+record being a leftover itself (DN6's record step); that a record never goes
+before its device is left to the unit tests. A removal blocked from outside
+the agent: a side device is held open and the side dropped; the leftover reply
+names it, the residue is exactly that device (DN6's layers), the read-only
+verdict agrees, and the same revision, re-sent once the device is free,
+finishes.
 
 **restart** proves persistence and an idempotent reconcile (`dnagent.md` SH1,
 SH4 to SH6, DN2): with a connected side on one node and a gated destination
@@ -217,24 +215,24 @@ success; a failing run leaves its debris and dumps the agents' logs, the dm,
 nvmet and host state of both VMs, the last info of every migration or teardown
 side, and the failing stage's trace id. A cleanup-only run does the scrub
 alone. It takes every `dnv-agent` and every dnv dm device on the node, of
-either role, so no two dnv runs may share a VM. Each step is best-effort; the
-order is load-bearing. The agents go first: a graceful stop ends their
-background tasks and joins their children (`dnagent.md` SH27), but an agent
+either role, which is why one dnv suite runs at a time in the lab
+(`layout.md`, Directory tree). Each step is best-effort, and the order is
+load-bearing on one principle, a holder goes before what it holds: the agents
+go first, a graceful stop joining their children (`dnagent.md` SH27) while one
 killed outright can leave a zeroing child holding a side device a moment
-longer, which the final retry sweep absorbs. Then any process a failed stage
-left holding a device open goes, as nothing removes an open device; then every
-suspended device is resumed, since a run killed in a cutover window leaves the
-source's linears suspended, and a suspended device wedges its removal, the
-namespace disable above it and any block scan. Host controllers go before
-nvmet, which a live connection wedges; exports come down inside out; dm
-devices go top-down, the clones before the migration connections and exports,
-as a clone flushes to its source on removal, with a retry sweep last. Since a
-node's migration source export backs its peer's clone, that protects the peer
-only because both VMs are cleaned at once. Then go the port-level nvmet
-objects; each disk's header block is zeroed, which leaves its volume-table
-slots inert (`architecture.md`, [D13]); and last the loop devices are detached
-and the work directory removed. The helper running all this lives outside it,
-and every run ships it afresh.
+longer, which a final retry sweep absorbs; any process a failed stage left
+holding a device goes before the devices too, as nothing removes an open
+device; host controllers before the nvmet objects they are connected to; dm
+devices top-down, a clone before the migration connection and export it
+flushes to on removal; and a disk's header block zeroed before its loop device
+is detached, which leaves its volume-table slots inert (`architecture.md`,
+[D13]; `dnagent.md` DN5). Two more rules keep the removals from wedging:
+every suspended device is resumed first, since a run killed in a
+cutover window leaves the source's linears suspended and a suspended device
+wedges its removal, the namespace disable above it and any block scan; and
+both VMs are cleaned at once, since a node's migration source export backs its
+peer's clone. The helper running all this lives outside the work directory it
+removes, and every run ships it afresh.
 
 The wipe is a separate flag that runs no case: it reads no dm kind, taking
 dnv-named residue whatever its name decodes to, every dnv nvmet subsystem and

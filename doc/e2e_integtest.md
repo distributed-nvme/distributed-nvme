@@ -187,11 +187,11 @@ helper verbs, bracketed so they never match the ssh command's own shell, and
 qualified by the suite's work directory or its etcd name so they never touch
 another suite's processes.
 
-E2E9. **Never run while another dnv suite runs anywhere in the lab.** The suite
-occupies every guest it names; no other suite binds its ports, but its cn
-agents use the tmpfs path the cn agent suite owns. Nothing can enforce this
-from inside: the suite prints the rule before the first ssh and checks what it
-can, that no port of its block listens and no nvmet port it needs exists.
+E2E9. **One dnv suite runs at a time in the lab** (`layout.md`, Directory
+tree). The suite occupies every guest it names; no other suite binds its
+ports. Nothing can enforce the rule from inside: the suite prints it before
+the first ssh and checks what it can, that no port of its block listens and no
+nvmet port it needs exists.
 
 E2E10. **Hosts reach namespaces through the cdc, and every path a host holds is
 the suite's own.** The kernel's autoconnector is masked at preflight and at
@@ -236,20 +236,19 @@ passes.
 the cluster storing an extent-size-only conf on the default bin ladder
 (`gateway.md` GW11); every node registered, through the `ABORTED` a
 not-yet-serving agent causes (`gateway.md` AG3), with its base rows OK and each
-disk node on its own nvmet port (`dnagent.md` DN5, CM2; `cnagent.md` CN5); and
-the create read back field by field, each side on its own disk node, each group
+disk node on its own nvmet port (`dnagent.md` DN5, CM2; `cnagent.md` CN5); the
+create read back field by field — each side on its own disk node, each group
 across guests, the cntlrs on distinct nodes with one primary, and the slots
-(`architecture.md`, cntlid slots). It waits for every side to be provisioned
-(`architecture.md`, Side provisioning protocol), for the primary's stack and
-the standby's legs with no group or pool (`cnagent.md` CN10, CN12, CN13),
-reading the live shape on every poll, following the primary role until the
-primary's stack is complete and reporting a shape that moves under it, and for
-a created thin device with its raid0 (`dnv-worker.md` RW19; `cnagent.md` CN15).
-A subsystem admitting both hosts gets a namespace over that thin device; host0
-discovers it through the cdc, connects behind the export gate and the connect
-verdict, and sees the namespace optimized through the primary and inaccessible
-through the standby (`cnagent.md` CN16); a random pattern written through it
-gives the digest every later step compares.
+(`architecture.md`, cntlid slots); every side provisioned (`architecture.md`,
+Side provisioning protocol); the primary's stack complete and the standby
+holding legs with no group or pool (`cnagent.md` CN10, CN12, CN13), read from
+the live shape so that a primary role moving under the wait is followed and
+reported; a thin device with its raid0 (`dnv-worker.md` RW19; `cnagent.md`
+CN15); and a namespace over it, under a subsystem admitting both hosts, that
+host0 reaches through the cdc, the export gate and the connect verdict and
+sees optimized through the primary and inaccessible through the standby
+(`cnagent.md` CN16). The random pattern written through it gives the digest
+every later step compares.
 
 **smoke** has setup as its subject: the widest pool comes up whole, and
 deleting it gives every extent back and leaves nothing behind, the two
@@ -260,81 +259,79 @@ one build.
 
 **ops** proves the pool-scoped mutators and readers that setup, copy and the
 ending do not exercise, with absolute counts and an unchanged digest: a meta
-grow by the ladder's next rung and a data grow by the slice's original group
-size (`architecture.md`, GrowSlice); the cntlid slots grown, and refused by
-message wherever a cntlr's slot would go (`architecture.md`, cntlid slots); a
-third cntlr's whole life, a standby with every leg, no stack and an
+and a data grow (`architecture.md`, GrowSlice); the cntlid slots grown, and
+refused wherever a cntlr's slot would go (`architecture.md`, cntlid slots); a
+third cntlr's whole life — a standby with every leg, no stack and an
 inaccessible namespace, refused deletion while enabled, out of the discovery
-log once disabled, and no longer a usable path once deleted (`architecture.md`,
-Cntlrs); the level ladder down to disabled and back, each rung awaited until
-the primary's `applied_revision` reaches the pool's revision read right
-after the level change (`dnv-worker.md` RW14) and showing exactly the
-suppressed rows missing with the fixed level marker (`ResDetailsSpLevel`) as
-their details (`cnagent.md` CN19; `architecture.md`, SpLevel), the read-only
-rung still reading the data and keeping a write off the media (`cnagent.md`
-CN16 rule 7; `architecture.md`, [D11]); a snapshot and both bitmap reads, the
-thin bitmap clear at the block setup wrote, a set bit meaning unmapped
-(`architecture.md`, Bitmap reads; `cnagent.md` CN26, CN27); a namespace suspend
-that parks rather than removes, and a repoint there and back
-(`architecture.md`, Namespace suspend semantics); and a disabled disk node and
-controller node, invisible to the agents, each proved by a refused allocation
-that writes nothing (`architecture.md`, Capacity index keys).
+log once disabled, no usable path once deleted (`architecture.md`, Cntlrs);
+the level ladder down to disabled and back, each rung awaited on the primary's
+`applied_revision` (`dnv-worker.md` RW14) and showing exactly the suppressed
+rows missing with the level marker (`ResDetailsSpLevel`) as their details
+(`cnagent.md` CN19; `architecture.md`, SpLevel), the read-only rung reading
+the data and keeping a write off the media (`cnagent.md` CN16's read-only
+rule; `architecture.md`, [D11]); a snapshot and both bitmap reads, the thin
+bitmap clear at the block setup wrote (`architecture.md`, Bitmap reads;
+`cnagent.md` CN26, CN27); a namespace suspend that parks rather than removes,
+and a repoint there and back (`architecture.md`, Namespace suspend semantics);
+and a disabled disk node and controller node, invisible to the agents, each
+proved by a refused allocation that writes nothing (`architecture.md`,
+Capacity index keys).
 
-**copy** proves the four RPC groups that move bytes. An auto-suspend transfer
-parks the origin namespace, and host1 reads the origin through it, the only
-host the suite connects to it, since the transfer carries the origin's identity
-(`architecture.md`, Transfers; `cnagent.md` CN17). A clone pulls the origin
-through the transfer into a fresh thin device whose namespace is served live
-through the dm-clone (`cnagent.md` CN16 rule 5, CN18); it is deleted unforced
-on the gateway's proof of hydration, and once the transfer is aborted the
-destination is read through its own raid0, which holds only what hydration
-copied (`architecture.md`, Transfer + clone = cross-SP live migration, [D3]); a
-source on the primary's own kernel that fails routes to a second pool on
-another controller node (Known limits). A migration moves a side to a disk node
-outside its group, on a distinct cntlid slot, finishes under the same leg id
-and is awaited to an optimized path before any read (`architecture.md`,
-Migration; `dnagent.md` DN12, DN13); a second is cancelled with its source
-untouched, and the case relies on leg repair leaving a two-sided leg alone
-(`dnv-worker.md` AR8). A spare leg (raid1 only) is connected by both cntlrs and
-switched in, the replaced leg parked; md's rebuild onto it is judged by the
-array's state words rather than its OK status, and the parked leg is then
-deleted (`architecture.md`, Spare legs; `cnagent.md` CN10, CN12, CN28).
+**copy** proves the four RPC groups that move bytes. A transfer, auto-suspended,
+parks the origin namespace and carries its identity, so host1, the only host
+connected to it, reads the origin through it (`architecture.md`, Transfers;
+`cnagent.md` CN17). A clone pulls the origin through the transfer into a fresh
+thin device served live through the dm-clone (`cnagent.md` CN16's clone rule,
+CN18); its unforced delete rests on the gateway's proof of hydration, and with
+the transfer aborted the destination, read through its own raid0 with no
+source left to read through, holds what hydration copied (`architecture.md`,
+Transfer + clone = cross-SP live migration, [D3]); a source on the primary's
+own kernel that fails routes to a second pool on another controller node
+(Known limits). A migration moves
+a side to a disk node outside its group, on a distinct cntlid slot, and
+finishes under the same leg id with an optimized path before any read
+(`architecture.md`, Migration; `dnagent.md` DN12, DN13); a cancelled one
+leaves its source untouched, the case relying on leg repair leaving a
+two-sided leg alone (`dnv-worker.md` AR8). A spare leg (raid1 only) is
+connected by both cntlrs and switched in, the replaced leg parked and then
+deleted, md's rebuild onto it judged by the array's state words rather than
+its OK status (`architecture.md`, Spare legs; `cnagent.md` CN10, CN12, CN28).
 
 **react** proves the four reactions on real faults, each by the record it
-writes, one action per pass making every wait on a reaction a threshold plus a
-few passes (`dnv-worker.md` AR2). Its own build may have reacted, so it judges
-each reaction by a delta from readings taken just before the trigger. Strided
-writes sized from the primary's own pool usage push slice 0's thin pool past
-its mark, and the worker must add exactly one data group and the pool grow on
-the device (`dnv-worker.md` AR6); a primary that moves meanwhile stops the run.
-host0 disconnects first, as a killed agent's nvmet objects would go on
-advertising optimized, and the primary's cn agent is killed: the standby must
-become primary and build the stack, held to the cntlr threshold while settling
-(`dnv-worker.md` AR5, HL2; `architecture.md`, Failover), and a second failover
-stops the run. The dead cntlr is replaced on a node that held none, keeping its
-slot and role (`dnv-worker.md` AR7), and the dead agent, restarted, removes
-what it left (`cnagent.md` CN7). Leg repair (raid1 only) needs both planes, as
-kernel objects outlive their agent: a dn agent is killed and its nvmet port
-removed, on a disk node with no other side of the pool, and the group must gain
-a spare outside its nodes, park the dead leg and rebuild md (`dnv-worker.md`
-AR8; `cnagent.md` CN11, CN28), with no failover meanwhile, proved by an
-unchanged count of the worker's failover records.
+writes, one action per pass making every wait a threshold plus a few passes
+(`dnv-worker.md` AR2); its own build may have reacted, so each reaction is
+judged by a delta from readings taken just before the trigger. Strided writes
+sized from the primary's own pool usage push slice 0's thin pool past its
+mark, and the worker must add exactly one data group and the pool grow on the
+device (`dnv-worker.md` AR6); a primary that moves meanwhile stops the run.
+The primary's cn agent is killed, host0 having let go first since a killed
+agent's nvmet objects go on advertising optimized, and the standby must become
+primary and build the stack, held to the cntlr threshold while settling
+(`dnv-worker.md` AR5, HL2; `architecture.md`, Failover); a second failover
+stops the run. The dead cntlr is replaced on a node that held none, keeping
+its slot and role (`dnv-worker.md` AR7), and the dead agent, restarted,
+removes what it left (`cnagent.md` CN7). Leg repair (raid1 only) needs both
+planes, as kernel objects outlive their agent: a dn agent is killed and its
+nvmet port removed, on a disk node with no other side of the pool, and the
+group must gain a spare outside its nodes, park the dead leg and rebuild md
+(`dnv-worker.md` AR8; `cnagent.md` CN11, CN28), with no failover meanwhile,
+proved by an unchanged count of the worker's failover records.
 
-**The ending every case shares** asserts that only setup's subsystem, namespace
-and thin device remain, deletes the namespace under live controllers so its
-head disk must vanish, has both hosts drop every dnv connection before the
-subsystem goes, so that no live controller is left under it — one would be
-killed with DNR were the port still to carry another subsystem, and left
-retrying, as here, where the subsystem is the port's last (Known limits) — then
-deletes the subsystem, the thin device and the pool, whose delete latches, the
-drain's end showing only as `NOT_FOUND` (`dnv-worker.md`, The sp drain). Every
-disk node must then have its free extents equal its total with an empty side
-pointer list, and no node guest may hold a dnv dm device, nvmet subsystem or md
-array, the last proving on a disk node that its mask held. The space guard caps
-each backing file's allocation, which bounds how many extents its disk node
-zeroed, since zeroing allocates; caps the run's allocation at the pool's own
-extents plus slack; and holds every node and the control-plane guest to
-preflight's free-space floors.
+**The ending every case shares** proves that a pool deletes back to nothing:
+only setup's subsystem, namespace and thin device may remain before it; a
+namespace deleted under live controllers loses its head disk; the subsystem
+goes with no live controller under it, both hosts having let go first — a
+controller left under a removed subsystem is killed with DNR while the port
+carries another subsystem, and left retrying when that subsystem was the
+port's last, as here (Known limits); the pool's delete latches, the drain's
+end showing only as `NOT_FOUND` (`dnv-worker.md`, The sp drain); every disk
+node then has its free extents equal its total with an empty side pointer
+list; no node guest holds a dnv dm device, nvmet subsystem or md array, the
+last proving on a disk node that its mask held; and the space guard holds —
+each backing file's allocation, which bounds the extents its disk node zeroed,
+since zeroing allocates, the run's allocation at the pool's own extents plus
+slack, and every node's and the control-plane guest's free space at
+preflight's floors.
 
 **What a pass means.** Exit status zero and PASS mean that every assertion of
 every case held in a run that stops at its first failure, and that the end
@@ -351,55 +348,54 @@ The driver's checks run first; the guest checks run after the start cleanup and
 its gate and before the first setup write, since port checks taken before the
 cleanup would judge the last run's corpses, and the cleanup writes no suite
 state; a cleanup-only run does neither. Preflight dies on the first failure,
-naming the guest and the fix. The driver needs its tools, a JSON parser, the
-binaries, the tree's constants (E2E12) and a pinned etcd release; every guest
-needs passwordless ssh, checked for all first. A node guest needs passwordless
-sudo; its tools, mdadm and udevadm on both roles; the modules and the nvmet
-tree; native multipath, on a disk node too, where a migration destination reads
-ANA through it; md support and a stock md assembly rule the mask can switch off
-(`architecture.md`, Components: invocation reference); hole punching in its
-work area; memory and free space; none of this run's ports listening; and no
-conflicting nvmet port, as a configfs port does not listen until a subsystem is
-linked and an agent would adopt and rewrite an existing port of its id
-(`dnagent.md` SH19). A host needs passwordless sudo, nvme-tcp and multipath,
-its identity files, generated if absent and never overwritten, nvme-stas
-inactive and the masked autoconnector. The control-plane guest needs its tools,
-its ports free and the free-space floor the space guard holds it to, and no
-sudo, as it runs nothing as root. The loop devices are checked once the agents
-have made them (E2E5). The tool check covers only the sweeps after it: the
-start sweep runs before it and a cleanup-only run skips it, so on a guest
-missing mdadm or udevadm their md stop can silently leave dnv arrays standing.
+naming the guest and the fix. It proves that the driver has its tools, the
+binaries, the tree's constants (E2E12) and a pinned etcd release; that every
+guest answers passwordless ssh; that a node guest has what the sweeps and the
+agents need — sudo, the tools of both roles, the modules and the nvmet tree,
+native multipath on a disk node too, where a migration destination reads ANA
+through it, md support and a stock md assembly rule the mask can switch off
+(`architecture.md`, Components: invocation reference), hole punching, memory
+and free space, none of this run's ports listening, and no conflicting nvmet
+port, as a configfs port does not listen until a subsystem is linked and an
+agent would adopt and rewrite an existing port of its id (`dnagent.md` SH19);
+that a host is a clean initiator — sudo, nvme-tcp and multipath, its identity
+files, generated if absent and never overwritten, nvme-stas inactive and the
+masked autoconnector (E2E10); and that the control-plane guest has its tools,
+its ports free and the free-space floor the space guard holds it to, and needs
+no sudo: the closing trim is the one root command tried there and may be
+refused. The loop devices are checked once the agents have made them (E2E5).
+The tool check covers only the sweeps after it: the start sweep runs before it
+and a cleanup-only run skips it, so on a guest missing mdadm or udevadm their
+md stop can silently leave dnv arrays standing.
 
 ## Cleanup, and why the order is what it is
 
-The cleanup (E2E6) reports every verb that never printed its sentinel, with the
-cause read off its status, and every nvmet port it refused or could not remove,
-since a leftover port with live ANA groups fails the next suite's setup. A
-verb's bound detects a wedge but cannot end a task in uninterruptible sleep,
-which a removal or a scan against a suspended device creates, so every node
-guest resumes suspended devices first. The order:
-
-* **Hosts first**, as they hold the controllers, and a subsystem removed under
-  a live controller kills it with DNR while its port keeps listening and leaves
-  it retrying once the port has nothing left (`cnagent_integtest.md`, Lab
-  facts): each drops the suite's and dnv's NQNs and its discovery controller,
-  never every controller, unmasks, and keeps its identity files, node identity
-  rather than run state. The dnv prefix also takes the cdc suite's subsystems
-  on a shared host (E2E9).
-* **Every controller node, in two phases**, its devices in the cn agent suite's
-  order (`cnagent_integtest.md`, Teardown and cleanup): the first ends with the
-  clone finals, removed while their transfer sources are connected, as a
-  dm-clone flushes through its source (`cnagent.md` L3); the second, once every
-  node has done the first, takes the transfers and the rest. Both end before
-  any disk node is touched, as the controller nodes' stacks sit on the disk
-  nodes' sides.
-* **The disk-node guests.** The agents; every dnv md array before any dm
-  device, as an array assembled from the controller node's superblocks pins the
-  device under it (Known limits); the exports and devices in dependency order;
-  every nvmet port id the suite could own; each loop device's header zeroed
-  before it is detached; and the mask once no device exposes a dnv superblock.
-* **The control plane** by recorded pids, the pattern sweep as fallback; then a
-  best-effort filesystem trim on every guest.
+The cleanup (E2E6) is best-effort and tells on itself: every verb prints a
+sentinel when it finishes, and the sweep reports every verb that never did,
+with the cause read off its status, and every nvmet port it refused or could
+not remove, since a leftover port with live ANA groups fails the next suite's
+setup. A verb's bound detects a wedge but cannot end a task in uninterruptible
+sleep, which a removal or a scan against a suspended device creates, so every
+node guest resumes suspended devices before it removes anything. The order
+rests on one principle, a holder goes before what it holds, and on what this
+lab does when it is broken. Hosts go before every target, as they hold the
+controllers, and a subsystem removed under a live controller kills it with DNR
+while its port keeps listening and leaves it retrying once the port has
+nothing left (`cnagent_integtest.md`, Lab facts); a host drops the suite's and
+dnv's NQNs and its discovery controller, never every controller, unmasks, and
+keeps its identity files, node identity rather than run state, the dnv prefix
+also taking the cdc suite's subsystems on a shared host (E2E9). Every
+controller node goes before any disk node, as its stacks sit on the disk
+nodes' sides, in the cn agent suite's order (`cnagent_integtest.md`, Teardown
+and cleanup) and in two phases across all of them, so that every clone final
+is gone, removed while its transfer source is connected, before any transfer
+goes, as a dm-clone flushes through its source (`cnagent.md` L3). On a
+disk-node guest every dnv md array goes before any dm device, as an array
+assembled from the controller node's superblocks pins the device under it
+(Known limits), each loop device's header is zeroed before it is detached, and
+the mask goes once no device exposes a dnv superblock. The control plane goes
+by recorded pids, the pattern sweep as fallback (E2E8), and a best-effort
+filesystem trim on every guest closes.
 
 md arrays are named by udev's recorded name, else by mdadm's export, never by
 mdadm's scan, which prints no name on these guests; only dnv arrays are
@@ -408,9 +404,9 @@ band, naming its likely owner — the band is the disk nodes' on both roles, so 
 a controller node, whose cleanup drops only the cn agent's own port id, a
 stranger's port under that id bound inside the band is removed, not refused —
 and removes one with no service id, the debris of an agent killed mid-creation,
-which refusing would leave forever. Residue under an older dm-kind spelling is
-invisible to the cleanup and the residue check; the agent suites' wipe clears
-it (`dnagent_integtest.md`, Teardown and cleanup).
+which refusing would leave forever. A dm device whose name carries no
+role-lettered kind is invisible to the cleanup and the residue check; the agent
+suites' wipe clears it (`dnagent_integtest.md`, Teardown and cleanup).
 
 ## Diagnostics on failure
 
@@ -458,12 +454,13 @@ the record of what the connect attempted.
   gone, which a wrong address also satisfies.
 * **A blocked probe or abandoned host IO leaves an unkillable dd or sync
   behind** (E2E7) until its device or path serves IO again.
-* **react's build may react.** At the widest shape a building primary judged by
-  a short primary threshold, the default one included, was failed over and the
-  role came back, which is why a settling primary is held to the cntlr
-  threshold (`dnv-worker.md` HL2); the reacting set's cntlr threshold is still
-  shorter than that build, so react's build can fail over and mint spares
-  repeatedly, and whether it converges at that shape is not established.
+* **react's build may react.** At the widest shape a building primary cannot
+  answer a health check within a short primary threshold, the default
+  included, so the role can move and move back; a settling primary is
+  therefore held to the cntlr threshold (`dnv-worker.md` AR5, HL2); the
+  reacting set's cntlr threshold is still shorter than that build, so react's
+  build can fail over and mint spares repeatedly, and whether it converges at
+  that shape is not established.
 * **The widest build is bounded by the primary's process spawning, not its
   memory**: fewer slices, or no redundancy, shorten it; whether more cores
   would is untested.

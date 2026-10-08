@@ -84,8 +84,8 @@ func loadLiveClone(
 // "already copied"; the CP cannot see whether a td was written, so that
 // stays a documented-unverifiable contract ([D3]). And the ceiling that
 // actually binds is the primary CN's clone-metadata arena, shared by every
-// clone of every cntlr on that CN, not MaxCloneCntPerSp; v1 does not track
-// it (gateway.md, Clones; architecture.md, Clones: CreateClone's Admission
+// clone of every cntlr on that CN, not MaxCloneCntPerSp; the gateway does not
+// track it (gateway.md, Clones; architecture.md, Clones: CreateClone's Admission
 // paragraph), so an over-committed clone is created
 // normally and reports RES_STATUS_ERROR until arena units free up.
 func (s *Server) CreateClone(
@@ -575,7 +575,7 @@ func (s *Server) UpdateCloneTrConf(
 // Clones: AppendCloneBitmap's Errors).
 //
 // The bytes are stored exactly as sent: bitmaps are opaque to the gateway
-// (GW14, [D-J]) — the 1 = never-written, LSB-first convention is the agents'
+// (GW14) — the 1 = never-written, LSB-first convention is the agents'
 // and the callers'.
 func (s *Server) AppendCloneBitmap(
 	ctx context.Context,

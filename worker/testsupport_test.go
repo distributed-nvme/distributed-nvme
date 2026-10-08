@@ -651,12 +651,10 @@ func (c *logCapture) msgOrder(msgs ...string) []string {
 // exactly as stored, and each reader validates it (model.ValidateClusterConf /
 // ValidateBdevConf) and refuses what it cannot use.
 //
-// So a fixture that leaves a defaultable member at its proto3 zero no longer
-// describes a cluster the gateway could have created: it describes a corrupt
-// one, and the loops in this package now refuse it. The two builders below are
-// this package's ONE source of a usable stored conf — before the write-time
-// rule there were seven private ones, which is exactly why half the suite
-// broke when read-time resolution went away.
+// So a fixture that leaves a defaultable member at its proto3 zero describes
+// a corrupt cluster, one the gateway could not have created, and the loops in
+// this package refuse it. The two builders below are this package's ONE
+// source of a usable stored conf.
 //
 // They are written out literally rather than run through model.Resolve*, so a
 // test sees the bytes the worker is actually handed, and so an invalid-conf

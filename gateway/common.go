@@ -667,7 +667,7 @@ func pageNames(
 // ---------------------------------------------------------------------------
 
 // withAgentConn dials one agent, runs f against it and closes the connection
-// (AG2): dial per call, no cache in v1.
+// (AG2): dial per call, no cache.
 //
 // Both interceptor chains are mandatory on every dnv connection (grpc.md,
 // Wiring); they are what forwards the request's trace id to the agent (T3),

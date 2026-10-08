@@ -1,11 +1,10 @@
 // The worker half of the sp drain (dnv-worker.md, The sp drain, rules
 // SPD1-SPD14).
 //
-// DeleteStoragePool no longer tears an SP down; it LATCHES it, committing
-// `deleting = true` plus one SpRev bump (SPD3/SPD4). The staged teardown that
-// follows is the sp coordinator's, entered from AR3's deleting branch: what used
-// to be "no reaction runs for a deleting SP" is now "exactly one DRAIN STEP runs
-// and no reaction at all" (SPD6).
+// DeleteStoragePool LATCHES the SP, committing `deleting = true` plus one
+// SpRev bump (SPD3/SPD4). The staged teardown that follows is the sp
+// coordinator's, entered from the pass's deleting branch: a latched SP runs
+// exactly one DRAIN STEP per pass and no reaction at all (SPD6).
 //
 // Three properties make that a complete loop with no timer and no checkpoint:
 //

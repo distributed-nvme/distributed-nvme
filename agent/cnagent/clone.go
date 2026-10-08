@@ -89,8 +89,8 @@ func (s *CnAgentServer) ensureClone(
 	info.CloneIdToTarget[cp.cloneId] = st.tracker.Ok(
 		tgtKey, cp.clone.GetSrcNqn(), pathStates(view))
 
-	// (2) the dm-clone's metadata. This build is a recovery (architecture.md,
-	// Clone crash recovery) whenever
+	// (2) the dm-clone's metadata. This build is a recovery (its triggers are
+	// cnagent.md CN18's) whenever
 	// that metadata does not survive — the volatile clone-metadata arena is
 	// gone (CN reboot, failover to a CN that never ran the clone, tmpfs loss),
 	// or the clone has never been built at all. The metadata **wrapper** alone
@@ -137,7 +137,8 @@ func (s *CnAgentServer) ensureClone(
 	}
 	recovery := !metaOk || dmDev == nil || !hydrating
 	if recovery {
-		// Step 1 of architecture.md, Clone crash recovery, comes first:
+		// The park of the recovery build (cnagent.md CN18) comes first, for
+		// the invariant of architecture.md, Clone crash recovery:
 		// nothing may serve the td while the
 		// destination bitmaps are still being applied, or a read of an
 		// already-copied (and possibly since-rewritten) region would be
@@ -480,8 +481,8 @@ func (s *CnAgentServer) cloneStatus(
 }
 
 // parkTdNsDevs reloads every ns-dev backed by one td onto its dm-error, so the
-// td serves nothing while a clone is (re)built over it (architecture.md,
-// Clone crash recovery, step 1).
+// td serves nothing while a clone is (re)built over it (the park of the
+// recovery build, cnagent.md CN18).
 func (s *CnAgentServer) parkTdNsDevs(
 	ctx context.Context,
 	plan *cntlrPlan,

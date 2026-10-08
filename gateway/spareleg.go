@@ -26,11 +26,11 @@ import (
 // that moved, a token that went stale or a spare list that filled up between
 // plan and decision is caught where it matters.
 //
-// Two of the three are model ops the sp-worker's leg repair (architecture.md,
-// Automatic reactions) already drives (gateway.md, Scope and placement:
+// Two of the three are model ops the sp-worker's leg repair (dnv-worker.md
+// AR8) already drives (gateway.md, Scope and placement:
 // reused, never duplicated); DeleteSpareLeg is the gateway's own STM, because
 // no worker reaction ever removes a spare — a parked leg stays parked until an
-// operator frees the slot (dnv-worker.md AR8 step 4).
+// operator frees the slot with DeleteSpareLeg (dnv-worker.md AR8).
 
 // opDeleteSpareLeg is the op name DeleteSpareLeg's own STM gives its ledger
 // flush and the bump helper; it is the RPC name so a log line names something
@@ -216,7 +216,7 @@ func (s *Server) CreateSpareLeg(
 	what := fmt.Sprintf("spare leg for group %d", req.GetGrpId())
 	// Tier 1 of architecture.md, Per-operation allocation: the group's failure
 	// DOMAINS, not merely its DNs. Read once for the whole candidate unit,
-	// outside every transaction, because a location is immutable in v1
+	// outside every transaction, because a location is immutable
 	// (architecture.md, Disk nodes).
 	excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, loc.Grp)
 	if err != nil {
@@ -343,7 +343,7 @@ func (s *Server) DeleteSpareLeg(
 // again.
 //
 // The swap is model.SwitchSpareLeg, the same op the sp-worker's leg repair
-// (architecture.md, Automatic reactions) calls (gateway.md, Scope and
+// (dnv-worker.md AR8) calls (gateway.md, Scope and
 // placement), and its preconditions are this RPC's. The one that a caller
 // meets in practice is that of architecture.md, Side provisioning protocol:
 // the spare's side must be `provisioned`, because switching to a side that has

@@ -109,10 +109,9 @@ func registerCntlr(root *cobra.Command) {
 	// argument and rejected by cobra.NoArgs.
 	//
 	// Disabling the last enabled controller stops IO for the pool. The
-	// gateway allows it and dnvctl does not pre-warn in v1 (CT8): the
+	// gateway allows it and dnvctl does not pre-warn (CT8): the
 	// warning would need a pre-read of the pool's controllers, which is an
-	// RPC the operator did not type. It waits until the gateway carries the
-	// hint in the reply itself.
+	// RPC the operator did not type.
 	setEnabled := leaf("set-enabled", "set a controller's enabled flag",
 		func() (job, error) {
 			rev, err := spRev()

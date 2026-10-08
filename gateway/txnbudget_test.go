@@ -23,11 +23,11 @@ import (
 // second half commits a batch of exactly MaxDelBmPerTxn against the real etcd
 // that model's tests start with --max-txn-ops=common.EtcdMaxTxnOps — but, as
 // for the sp batch below, only once the true count passes EtcdMaxTxnOps, and
-// 68 leaves 956 ops of slack that neither test will notice.
+// cloneDrainMaxCompares leaves slack that neither test will notice.
 const (
 	cloneDrainReads       = 3 // SpConf, Clone, SpRev
 	cloneDrainWritesFixed = 1 // the SpRev put; the dels are the batch itself
-	// cloneDrainMaxDels is today's ceiling and cloneDrainMaxCompares the
+	// cloneDrainMaxDels is the ceiling and cloneDrainMaxCompares the
 	// worst-case compare count the factors above produce at it. They are
 	// asserted separately so that a ceiling change and a retyped factor fail
 	// with different messages.
@@ -96,21 +96,21 @@ func TestCloneDrainBatchBudget(t *testing.T) {
 			budget, common.MaxDelBmPerTxn, cloneDrainReads,
 			cloneDrainWritesFixed, common.EtcdMaxTxnOps)
 	}
-	// Prose, not a requirement (CLD11): 68 also fits etcd's DEFAULT cap, so no
-	// clone transaction in the system needs the raised flag any more. The
+	// Prose, not a requirement (CLD11): the batch also fits etcd's DEFAULT
+	// cap, so no clone transaction in the system needs the raised flag. The
 	// deployment requirement stays EtcdMaxTxnOps for the sake of the
 	// transactions that do exceed the default — among them CreateStoragePool's
-	// 967-compare maximum shape, which is the one the number is now SIZED by
-	// (TestCreateStoragePoolBudget below), the SP drain's 486-compare D2
-	// batch and the created flip's 514-compare transaction
+	// maximum shape, which is the one the number is SIZED by
+	// (TestCreateStoragePoolBudget below), the SP drain's D2 batch
+	// (TestSpDrainBatchBudget below) and the created flip's transaction
 	// (TestFlipCreatedTxnBudget below) — and this assertion is what would
 	// notice if the clone half stopped being free of it.
 	const etcdDefaultMaxTxnOps = 128
 	if budget > etcdDefaultMaxTxnOps {
 		t.Errorf("one clone drain batch is %d compares, over etcd's own default "+
 			"cap of %d: the clone path is no longer free of the deployment "+
-			"flag, and the note in gateway.md, Additions to "+
-			"`common/constants.go`, must change with it",
+			"flag, and the note in gateway.md, Constants this "+
+			"document owns, must change with it",
 			budget, etcdDefaultMaxTxnOps)
 	}
 }
@@ -133,7 +133,7 @@ const (
 	spDrainWritesFixed = 3 // Slice del, SpConf put, SpRev put
 	spDrainReadsPerDn  = 2 // DnConf, DnRev
 	spDrainWritesPerDn = 4 // DnConf put, dn_capacity del + put, DnRev put
-	// spDrainMaxDns is the most distinct DNs today's ceilings let one batch
+	// spDrainMaxDns is the most distinct DNs the ceilings let one batch
 	// touch, and spDrainMaxCompares the worst-case compare count the factors
 	// above produce at it. Separate assertions, for the clone tripwire's
 	// reason: a ceiling change and a retyped factor must not fail alike.
@@ -164,8 +164,8 @@ const (
 // cannot be, because nothing here reads the STM: it commits a maximum-shape
 // batch against a real etcd started with --max-txn-ops=common.EtcdMaxTxnOps,
 // so a read or a write ADDED to DrainSpSlice is caught there instead — but
-// only once the true count passes EtcdMaxTxnOps, and 486 leaves 538 ops of
-// slack that neither test will notice.
+// only once the true count passes EtcdMaxTxnOps, and spDrainMaxCompares
+// leaves slack that neither test will notice.
 func TestSpDrainBatchBudget(t *testing.T) {
 	const legs = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
 	const dns = common.MaxDelGrpPerTxn * legs
@@ -247,9 +247,7 @@ func TestSpDrainBatchBudget(t *testing.T) {
 //	D = spCreateGrpsPerSlice x MaxSliceCntPerSp x MaxAllocLegPerGrp
 //
 // init_ext_cnt never enters: it moves ExtCnt VALUES, not key counts. That is
-// what makes this transaction tripwirable at all, and it is why the sentence
-// that used to say its size was the REQUEST's is gone from
-// common/constants.go.
+// what makes this transaction tripwirable at all.
 //
 // Two places where a careless reading of the above goes wrong, and how this
 // file resolves them — both re-derived from the code and from the etcd client
@@ -296,23 +294,18 @@ const (
 	spCreateWritesPerDn    = 4 // DnConf, dn_capacity del + put, DnRev
 	spCreateReadsPerCn     = 3 // the DN three, CN-keyed
 	spCreateWritesPerCn    = 5 // the DN four CN-keyed, plus the Cntlr put
-	// TODAY's ceiling and the compare count the factors produce at it — the
-	// 967 the rest of the tree quotes. Pinned for the reason the two tripwires
-	// above pin theirs, and for one more: the budget below is an INEQUALITY,
-	// and with MaxAllocLegPerGrp and MaxCntlrCntPerSp where they are
-	// spCreateCompares(S) is 39 + 29S, which clears EtcdMaxTxnOps for every
-	// slice ceiling from 1 through 33. Without this pin the ceiling could move
-	// a step at a time under a green suite while every carrier of the 967 —
-	// common/constants.go's EtcdMaxTxnOps comment, spceiling_test.go's header
-	// and the doc prose that `grep -rn 967` turns up — went stale.
+	// The ceiling and the compare count the factors produce at it — the count
+	// common/constants.go's EtcdMaxTxnOps comment quotes. Pinned for the
+	// reason the two tripwires above pin theirs, and for one more: the budget
+	// below is an INEQUALITY with slack, so without this pin the ceiling could
+	// move a step at a time under a green suite while that comment went stale.
 	spCreateMaxSliceCnt = 32
 	spCreateMaxCompares = 967
-	// The HISTORICAL anchor: the shape this model has to reproduce to be
-	// believed. While MaxSliceCntPerSp was 16 the widest create was 503
-	// compares, which is why the old EtcdMaxTxnOps of 512 was exactly tight —
-	// 9 ops of slack, and already the narrower margin of the two bounded
-	// transactions. A model that cannot land on 503 at 16 slices is not a
-	// model of this transaction, whatever it computes at 32.
+	// A second slice count at which the transcription is evaluated, out of
+	// reach of a move of MaxSliceCntPerSp: it fires when a factor is retyped
+	// or another ceiling moves. A model that cannot land on
+	// spCreateOldCompares at spCreateOldSliceCnt slices is not a model of this
+	// transaction, whatever it computes at the ceiling.
 	spCreateOldSliceCnt = 16
 	spCreateOldCompares = 503
 )
@@ -338,13 +331,10 @@ func spCreateCompares(sliceCnt int) int {
 	return reads + writes
 }
 
-// TestCreateStoragePoolBudget is the create's arithmetic tripwire, the one
-// common/constants.go used to say could not be written: the widest
+// TestCreateStoragePoolBudget is the create's arithmetic tripwire: the widest
 // CreateStoragePool must fit inside the transaction size dnv requires of every
 // etcd, and it — not the sp drain's D2 batch — is the transaction
-// EtcdMaxTxnOps is now sized by. It was already the larger of the two while
-// MaxSliceCntPerSp was 16 (503 against the drain's 486); at 32 it is the one
-// the old 512 could not have held.
+// EtcdMaxTxnOps is sized by.
 //
 // Every factor is a NAMED constant, which is the whole point: widening the
 // slice ceiling, the allocator's group shape or the cntlr ceiling past the
@@ -352,11 +342,11 @@ func spCreateCompares(sliceCnt int) int {
 // txn request" out of a create in the field.
 //
 // The headroom is thin and it is a per-DN multiple. D is
-// spCreateGrpsPerSlice x MaxSliceCntPerSp x MaxAllocLegPerGrp = 128 at the
-// current ceilings, so ONE more read or write per DN inside that STM costs 128
-// compares and takes 967 to 1095, over the budget in a single step. A reader
-// who is about to add one should move EtcdMaxTxnOps and the --max-txn-ops of
-// every etcd that serves dnv in the same change, not discover it later.
+// spCreateGrpsPerSlice x MaxSliceCntPerSp x MaxAllocLegPerGrp, so ONE more
+// read or write per DN inside that STM costs D compares and takes the count
+// over the budget in a single step. A reader who is about to add one should
+// move EtcdMaxTxnOps and the --max-txn-ops of every etcd that serves dnv in
+// the same change, not discover it later.
 func TestCreateStoragePoolBudget(t *testing.T) {
 	budget := spCreateCompares(common.MaxSliceCntPerSp)
 	dns := spCreateGrpsPerSlice * common.MaxSliceCntPerSp *
@@ -371,9 +361,9 @@ func TestCreateStoragePoolBudget(t *testing.T) {
 	// two tripwires above — they cannot usefully fail apart here: what the
 	// tree quotes is the compare count, not the slice ceiling, and both a
 	// moved ceiling and a retyped factor make it wrong. Which of the two
-	// happened is what the HISTORY arm below tells apart: it stays green when
-	// only MaxSliceCntPerSp moved and fires alongside this one when a factor
-	// was retyped or one of the other two ceilings moved.
+	// happened is what the second-slice-count arm below tells apart: it
+	// stays green when only MaxSliceCntPerSp moved and fires alongside this
+	// one when a factor was retyped or one of the other two ceilings moved.
 	if common.MaxSliceCntPerSp != spCreateMaxSliceCnt ||
 		budget != spCreateMaxCompares {
 		t.Errorf(
@@ -381,24 +371,22 @@ func TestCreateStoragePoolBudget(t *testing.T) {
 				"%d compares, want the pinned %d at %d slices. Re-pin "+
 				"spCreateMaxSliceCnt and spCreateMaxCompares together, and "+
 				"with them every carrier that quotes the count — "+
-				"common/constants.go's EtcdMaxTxnOps comment, "+
-				"gateway/spceiling_test.go's header and the doc prose "+
-				"`grep -rn %d` turns up",
+				"common/constants.go's EtcdMaxTxnOps comment (`grep -rn %d`)",
 			common.MaxSliceCntPerSp, budget, spCreateMaxCompares,
 			spCreateMaxSliceCnt, spCreateMaxCompares)
 	}
-	// The TRANSCRIPTION, evaluated at the HISTORICAL slice count so that
+	// The TRANSCRIPTION, evaluated at the second slice count so that
 	// raising MaxSliceCntPerSp cannot reach it: it fires when one of the eight
-	// factors above is edited without re-deriving what the model has always
-	// produced, and — since it reads MaxAllocLegPerGrp and MaxCntlrCntPerSp
+	// factors above is edited without re-deriving what the model
+	// produces, and — since it reads MaxAllocLegPerGrp and MaxCntlrCntPerSp
 	// live — when one of the other two ceilings moves under it.
 	if compares := spCreateCompares(spCreateOldSliceCnt); compares !=
 		spCreateOldCompares {
 		t.Errorf(
-			"the CreateStoragePool factors no longer reproduce history: at "+
-				"%d slices, MaxAllocLegPerGrp %d and MaxCntlrCntPerSp %d the "+
-				"model gives %d compares, want the %d that made the old "+
-				"EtcdMaxTxnOps of 512 exactly tight. If you moved one of "+
+			"the CreateStoragePool factors do not reproduce the pinned "+
+				"second shape: at %d slices, MaxAllocLegPerGrp %d and "+
+				"MaxCntlrCntPerSp %d the model gives %d compares, want the "+
+				"pinned %d. If you moved one of "+
 				"those two ceilings, re-derive spCreateOldCompares at it; "+
 				"otherwise a factor was retyped — re-read CreateStoragePool's "+
 				"STM and the dnLedger/cnLedger flushes against the eight "+
@@ -432,8 +420,7 @@ func TestCreateStoragePoolBudget(t *testing.T) {
 // every set above: nothing in this file reads that STM, so a key added to or
 // taken out of it is invisible here. TestDeleteThinDeviceAtTheTdCeiling in
 // gateway/handler_vol_test.go is the half that meets the real transaction —
-// at the td ceiling, the dimension that used to break it, and with no
-// subsystem or clone in the pool.
+// at the td ceiling, with no subsystem or clone in the pool.
 //
 // FIXED — openSp reads ClusterConf, SpConf and SpRev, and the target td is
 // read; the writes are the td's del, the SpConf put and the SpRev put
@@ -449,17 +436,17 @@ func TestCreateStoragePoolBudget(t *testing.T) {
 // SpRev, so a snapshot the plan named still blocks there and the STM refuses:
 // no td but the target is ever in a committed read set. The identity check
 // reads nothing new — the cluster and sp ids come from keys already counted
-// under FIXED. While the walk sat inside the STM this factor was one
-// per td, and deleting from a pool at MaxTdCntPerSp cost 1030 compares before
-// a single subsystem or clone.
+// under FIXED. A walk inside the STM would make this factor one per td and
+// put a delete from a full pool past the budget before a single subsystem or
+// clone.
 const (
 	tdDeleteReadsFixed    = 4 // ClusterConf, SpConf, SpRev, the target td
 	tdDeleteWritesFixed   = 3 // td del, SpConf put, SpRev put
 	tdDeleteReadsPerSs    = 1 // the Subsystem
 	tdDeleteReadsPerClone = 1 // the Clone
 	tdDeleteReadsPerTd    = 0 // the walk is the plan's, outside the STM
-	// TODAY's two ceilings and the compare count the factors produce at them
-	// — the 75 common/constants.go's EtcdMaxTxnOps comment quotes. Separate
+	// The two ceilings and the compare count the factors produce at them —
+	// the count common/constants.go's EtcdMaxTxnOps comment quotes. Separate
 	// assertions, for the clone tripwire's reason: a ceiling change and a
 	// retyped factor must not fail alike.
 	tdDeleteMaxSsCnt    = 4
@@ -469,11 +456,10 @@ const (
 
 // TestDeleteThinDeviceBudget is DeleteThinDevice's arithmetic tripwire, and
 // the reason it sits beside the create's: EtcdMaxTxnOps is SIZED by the widest
-// CreateStoragePool, and the delete is the transaction that silently outgrew
-// it — at the td ceiling its deciding STM compared every td of the pool and
-// etcd refused it. The plan/verify split took the td count out of that STM;
-// this is what notices the count coming back, since one read per td takes the
-// budget past EtcdMaxTxnOps in a single step.
+// CreateStoragePool, and a deciding STM that compared every td of the pool
+// would be refused at the td ceiling. The plan/verify split keeps the td count
+// out of that STM; this is what notices the count coming back, since one read
+// per td takes the budget past EtcdMaxTxnOps in a single step.
 func TestDeleteThinDeviceBudget(t *testing.T) {
 	budget := tdDeleteReadsFixed + tdDeleteWritesFixed +
 		tdDeleteReadsPerSs*common.MaxSsCntPerSp +
@@ -530,9 +516,8 @@ func TestDeleteThinDeviceBudget(t *testing.T) {
 			budget, common.EtcdMaxTxnOps)
 	}
 	// And the create stays the widest transaction, which is what
-	// common/constants.go and gateway.md, Additions to `common/constants.go`, say
-	// sizes EtcdMaxTxnOps. The delete is the one that once made that sentence
-	// false.
+	// common/constants.go and gateway.md, Constants this document owns, say
+	// sizes EtcdMaxTxnOps.
 	if budget > create {
 		t.Errorf(
 			"the widest DeleteThinDevice is %d compares, wider than the "+
@@ -551,11 +536,10 @@ const mdNameMaxSliceIdx = 0x7f
 
 // TestSliceCeilingFitsTheMdNames is the create's OTHER ceiling check, and the
 // reason it sits in this file with TestCreateStoragePoolBudget: raising
-// MaxSliceCntPerSp runs into a second hard limit besides the etcd budget, and
-// only the budget had a tripwire. The second is a NAME WIDTH, it binds at 128
-// slices where the budget binds at 33, and a breach of it is silent — which is
-// why it has never been hit and why it needs an assertion rather than a check
-// in the request path.
+// MaxSliceCntPerSp runs into a second hard limit besides the etcd budget. The
+// second is a NAME WIDTH, it binds at mdNameMaxSliceIdx + 1 slices, far above
+// where the budget binds, and a breach of it is silent — which is why it needs
+// an assertion rather than a check in the request path.
 //
 // A slice index is `Slice.slice_idx`, and gateway/storagepool.go's
 // CreateStoragePool is the only thing in the tree that assigns one: it numbers
@@ -593,16 +577,16 @@ func TestSliceCeilingFitsTheMdNames(t *testing.T) {
 // sets above these are transcribed, and nothing in this file reads that STM:
 // model/ops_test.go's TestFlipCreatedAtTheTdCeiling is the half that commits
 // it against a real etcd — but only once the true count passes
-// EtcdMaxTxnOps, and 514 leaves 510 ops of slack: one more key read or
-// written per candidate (770) still commits there. Nor does this file see
-// the chunk FlipCreated really commits, only the constant: that same model
-// test pins it, from the mod_revision of every td key it flipped.
+// EtcdMaxTxnOps, and flipCreatedMaxCompares leaves slack enough that one
+// more key read or written per candidate still commits there. Nor does this
+// file see the chunk FlipCreated really commits, only the constant: that same
+// model test pins it, from the mod_revision of every td key it flipped.
 const (
 	flipCreatedReadsPerTd  = 1 // the td key
 	flipCreatedWritesPerTd = 1 // the td key, created = true
 	flipCreatedReadsFixed  = 1 // SpRev
 	flipCreatedWritesFixed = 1 // SpRev
-	// flipCreatedMaxTds is today's ceiling and flipCreatedMaxCompares the
+	// flipCreatedMaxTds is the ceiling and flipCreatedMaxCompares the
 	// worst-case compare count the factors above produce at it. Separate
 	// assertions, for the clone tripwire's reason: a ceiling change and a
 	// retyped factor must not fail alike.
@@ -621,8 +605,8 @@ const (
 //	compares = their sum          <- what etcd checks
 //
 // It is independent of MaxTdCntPerSp, which moves the transaction COUNT and
-// never a transaction's legality. Unlike the clone drain's batch, 514 does not
-// fit etcd's default cap of 128: the created flip is one of the transactions
+// never a transaction's legality. Unlike the clone drain's batch, the flip
+// does not fit etcd's default cap: the created flip is one of the transactions
 // the deployment flag exists for.
 func TestFlipCreatedTxnBudget(t *testing.T) {
 	const perTd = flipCreatedReadsPerTd + flipCreatedWritesPerTd
@@ -638,7 +622,7 @@ func TestFlipCreatedTxnBudget(t *testing.T) {
 				"flipCreatedMaxCompares together, the latter at %d per td x "+
 				"tds + %d fixed, and with them every carrier that quotes the "+
 				"count — common/constants.go's MaxFlipCreatedPerTxn comment "+
-				"and the doc prose `grep -rn %d` turns up",
+				"(`grep -rn %d`)",
 			common.MaxFlipCreatedPerTxn, flipCreatedMaxTds, perTd,
 			flipCreatedReadsFixed+flipCreatedWritesFixed,
 			flipCreatedMaxCompares)

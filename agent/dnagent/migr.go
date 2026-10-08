@@ -220,8 +220,7 @@ func (s *DnAgentServer) ensureMigrDst(
 	}
 	if created {
 		// Re-apply every chunk of the applied set whenever the dm-clone is
-		// (re)created (architecture.md, Bitmap push protocol,
-		// dnv-agent side step 4).
+		// (re)created (dnagent.md DN15).
 		s.applyChunks(ctx, st, plan)
 	}
 	// A hydration knob that would not apply is worth reporting, but it must
@@ -364,9 +363,9 @@ func (s *DnAgentServer) migrMetaRefusal(
 // DnMigrDstNsPause between reads and DnMigrDstNsWait in all — the reads
 // themselves are not counted (DN13 step (3)). The kernel returns from
 // `nvme connect` as soon as the controller is live and only QUEUES the
-// namespace scan that adds the device, so the single re-read this replaced
-// could find the controller and no namespace yet, failing the target with
-// "controller has no namespace" for a device milliseconds away.
+// namespace scan that adds the device, so a single re-read could find the
+// controller and no namespace yet, failing the target with "controller has
+// no namespace" for a device milliseconds away.
 // A ListSubsys that fails ends the wait at once. It connects nothing: one
 // connect per pass stays DN13's rule, and the DN8 loop stays the retry.
 func (s *DnAgentServer) awaitMigrSrcNs(

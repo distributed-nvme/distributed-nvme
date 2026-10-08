@@ -875,8 +875,8 @@ func TestReactionQuietPassDoesNothing(t *testing.T) {
 // sp_level >= SP_LEVEL_NO_THINPOOL, and the record is emitted once per
 // transition rather than once per pass.
 //
-// `deleting` is deliberately NOT a row here any more. SPD6 split AR3: a latched
-// SP runs the drain instead of nothing at all, at ANY sp_level, and
+// `deleting` is deliberately not a row here: SPD6 keeps it out of AR3, so a
+// latched SP runs the drain instead of nothing at all, at ANY sp_level, and
 // TestDrainRunsAtEverySpLevel in drain_test.go is where that lives.
 func TestReactionSuppressed(t *testing.T) {
 	cases := []struct {
@@ -1014,8 +1014,8 @@ func TestReactionDisabledPrimaryFailsOver(t *testing.T) {
 // as primary since it acquired the role — is held to cntlr_unhealthy instead
 // of primary_unhealthy when that is the longer; a settled one is judged as
 // before; and the disabled trigger ignores the flag. The fixture's thresholds
-// are the product defaults (5 s and 600 s), so the two readings cannot
-// coincide; the last case inverts them.
+// are the product defaults (DefaultPrimaryUnhealthy, DefaultCntlrUnhealthy),
+// so the two readings cannot coincide; the last case inverts them.
 func TestReactionSettlingPrimary(t *testing.T) {
 	t.Run("settling, primary_unhealthy reached", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -1687,11 +1687,11 @@ func TestReactionBadPoolLineLoggedOncePerChange(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestReactionGrowOnlyForOkPool pins AR6's "an ERROR / PROVISIONING / absent
-// pool is never grown", and the two readings of low_water_mark_pct that are
-// left now that architecture.md, Common validation, resolves it at write time:
-// above 100 is the kill switch and grows nothing quietly, zero is a conf
+// pool is never grown", and the two readings of low_water_mark_pct
+// (architecture.md, Common validation, resolves it at write time): above 100
+// is the kill switch and grows nothing quietly, zero is a conf
 // CreateStoragePool could not have written and is REFUSED — the pass gate stops
-// before any reaction, where tryGrow used to substitute 50 and grow.
+// before any reaction.
 func TestReactionGrowOnlyForOkPool(t *testing.T) {
 	total := reactDataBlocks(t, 2)
 	breach := poolLine(1, 1000, total, total)
@@ -2842,7 +2842,7 @@ func TestReactionLegRepairSkips(t *testing.T) {
 	t.Run("spare list full", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
-		// Two parked legs: each keeps the err_epoch it was retired with, so
+		// Two parked legs: each keeps the err_epoch it was parked with, so
 		// neither is ready nor pending, and the list is full.
 		for idx := 0; idx < common.MaxSpareLegPerGrp; idx++ {
 			h.dataGrp().SpareLegList = append(
@@ -2950,7 +2950,7 @@ func TestReactionLegRepairWalksPastUnrepairableLegs(t *testing.T) {
 	t.Run("full spare list does not hide another group", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		// The meta group holds two parked legs — each keeps the err_epoch it
-		// was retired with, so neither is ready nor pending — and its own
+		// was parked with, so neither is ready nor pending — and its own
 		// active leg has failed. Only DeleteSpareLeg can unblock it.
 		for idx := 0; idx < common.MaxSpareLegPerGrp; idx++ {
 			h.metaGrp().SpareLegList = append(
@@ -3130,9 +3130,8 @@ func TestReactionSpareReadiness(t *testing.T) {
 	})
 
 	// A spare the primary has connected and wrapped but not probed yet reads
-	// PENDING (cnagent.md CN11). It used to read OK "health probe pending"
-	// and was switched in before any probe had run; now it is a pending
-	// spare, so the pass waits for it and creates nothing.
+	// PENDING (cnagent.md CN11), so it is a pending spare: the pass waits for
+	// it, creates nothing and never switches it in before a probe has run.
 	t.Run("probe pending", func(t *testing.T) {
 		h := build(t, true, pb.ResStatus_RES_STATUS_PENDING, 0)
 		info := h.w.cntlrs[reactCntlrA].driver.lastInfo
@@ -3271,8 +3270,8 @@ func TestReactionSpareReadiness(t *testing.T) {
 
 	// The SIDE test stays bare: a side with an err_epoch is one whose DN the
 	// worker cannot reach or that reports an ERROR row (AR8 case 2's
-	// condition) — how a leg parked by case 2 was retired — and it is dead at
-	// once.
+	// condition), which a leg parked by case 2 still carries — and it is dead
+	// at once.
 	t.Run("spare side failing", func(t *testing.T) {
 		h := build(t, true, pb.ResStatus_RES_STATUS_PROVISIONING, 0)
 		h.legOf(spareLegId).SideList[0].ErrEpoch = h.ago(1)

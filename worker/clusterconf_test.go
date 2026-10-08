@@ -70,15 +70,13 @@ func TestConfCacheKeyToIdDerivation(t *testing.T) {
 	}
 }
 
-// TestConfCacheReturnsTheConfAsStored is the mirror image of the resolution
-// the cache used to do: architecture.md, Common validation, makes the gateway
-// resolve every defaultable member at WRITE time, so RW21 hands a reader the
-// stored bytes and changes nothing.
+// TestConfCacheReturnsTheConfAsStored pins RW21: architecture.md, Common
+// validation, makes the gateway resolve every defaultable member at WRITE
+// time, so the cache hands a reader the stored bytes and changes nothing.
 //
-// Three of the members below are values the cache's old resolver WOULD have
-// rewritten on the way out — a dn_interval of 100000 (it clamped to 3600),
-// absent side and cntlr intervals (it substituted 5), no dn_bin_conf at all
-// (it substituted the 0/4/8/12 ladder and DefaultDnExtSize). The fourth, a
+// Three of the members below are values a read-time resolver would be
+// tempted to rewrite on the way out — a dn_interval of 100000, absent side
+// and cntlr intervals, no dn_bin_conf at all. The fourth, a
 // low_water_mark_pct above 100, is the one value NOTHING ever rewrites, on
 // either path: architecture.md, Common validation, gives it a meaning, "never
 // grow this pool automatically". Every one of them comes back untouched. That
@@ -117,7 +115,7 @@ func TestConfCacheReturnsTheConfAsStored(t *testing.T) {
 		t.Fatalf("cached conf =\n%v\nwant the stored\n%v", cc, stored)
 	}
 	// Spelled out for the three members a resolver would have been most
-	// tempted by, so a reintroduced read-time default cannot hide behind a
+	// tempted by, so a read-time default cannot hide behind a
 	// message-level comparison someone later loosens.
 	if got := cc.GetHealthCheckConf().GetDnInterval(); got != 100000 {
 		t.Fatalf("dn_interval = %d, want the stored 100000 unclamped", got)

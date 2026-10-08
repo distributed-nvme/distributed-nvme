@@ -642,8 +642,8 @@ func TestChunksOfCutsAtChunkBoundaries(t *testing.T) {
 	}
 }
 
-// TestDstBitmapLongerThanAChunkIsSplit is the regression pin for
-// architecture.md, Clone crash recovery: applyDst
+// TestDstBitmapLongerThanAChunkIsSplit pins architecture.md, Clone crash
+// recovery: applyDst
 // Bitmaps builds its per-slice bitmaps locally, so it must cut them at C
 // before handing them to the fold. Wrapping the whole bitmap as chunk 0
 // instead leaves every bit past the first MiB addressed to a chunk that does

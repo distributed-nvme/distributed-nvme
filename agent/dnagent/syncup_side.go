@@ -83,8 +83,8 @@ func (s *DnAgentServer) convergeSide(
 	state := s.ensureSideDev(ctx, st, plan, info)
 	if !plan.wantDm {
 		// SP_LEVEL_DISABLE: only the side device, its allocation record and —
-		// because zeroing is bottom-layer provisioning, like the trim it
-		// replaced — its zeroing goroutine remain (DN11; architecture.md,
+		// because zeroing is bottom-layer provisioning, below the level
+		// ladder — its zeroing goroutine remain (DN11; architecture.md,
 		// Side provisioning protocol). The sweep above has already removed
 		// everything else, dm-clone included: at
 		// this level nothing is wanted but the side device, so the per-CN
@@ -163,8 +163,8 @@ func (s *DnAgentServer) convergeSide(
 // ---------------------------------------------------------------------------
 
 // sideDevState is the outcome of one side-device converge — the three things
-// the converge matrix (architecture.md, Side provisioning protocol) has to
-// distinguish, which a bool cannot.
+// the converge matrix (dnagent.md DN9) has to distinguish, which a bool
+// cannot.
 type sideDevState int
 
 const (
@@ -193,8 +193,8 @@ const (
 // in the record because zeroed is a property of the side's *allocation*, not
 // of the disk extent.
 //
-// The six rows of the converge matrix of architecture.md,
-// Side provisioning protocol (request provisioned × local state):
+// The six rows of the converge matrix of dnagent.md DN9 (request provisioned
+// × local state):
 //
 //	false / absent   allocate (bits 0), build the linear, start the goroutine
 //	false / partial  ensure the linear, keep the goroutine
@@ -595,11 +595,11 @@ func (s *DnAgentServer) ensureDmLinear(
 	if !linearMaps(targets, sectors, devNo) || dev.ReadOnly {
 		return s.dm.Reload(ctx, name, table)
 	}
-	// A device an older (pre-[D12]) build left suspended, one a crash
-	// caught mid-reload, or one a failed reload left suspended on the table
-	// that is wanted again (a reload fails closed, dnagent.md,
-	// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`) must converge back to
-	// resumed.
+	// A device found suspended — one a crash caught mid-reload, or one a
+	// failed reload left suspended on the table that is wanted again (a
+	// reload fails closed, dnagent.md,
+	// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`) — must converge back
+	// to resumed.
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}

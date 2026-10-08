@@ -208,7 +208,7 @@ message CnInfo {
     ResInfo tmpfs_info = 2;
     ResInfo tmp_file_info = 3;
     ResInfo loop_dev_info = 4;
-    reserved 5;  // was: ResInfo clone_vg_info (deleted with the clone VG, [D14])
+    reserved 5;  // retired, never reused: a field renumbered onto it would decode silently
 }
 
 message SideInfo {
@@ -431,7 +431,7 @@ message ThinDevice {
     uint64 size = 4;
     // created is set exactly once by the sp-worker, when a cntlr has
     // reported this td's thin volume RES_STATUS_OK in every slice of the SP
-    // (architecture.md, sp role); it is never cleared. It gates snapshot
+    // (dnv-worker.md RW19); it is never cleared. It gates snapshot
     // creation and origin deletion (architecture.md, Thin devices) and tells
     // the cn agent that the ids exist in every slice pool, so no
     // create_thin/create_snap is ever sent for this td again (CN14; the
@@ -461,10 +461,10 @@ message Clone {
     DmCloneConf dm_clone_conf = 9;
     bool auto_resume = 10;
     reserved 11;
-    reserved "bm_cnt";  // was: uint32 bm_cnt (deleted).
-                        // Reserving the NUMBER is what keeps a future varint
-                        // field from decoding an old record's counter as
-                        // itself; the name goes with it.
+    reserved "bm_cnt";  // retired with its number, never reused: a varint
+                        // field renumbered onto 11 would decode a stored
+                        // record's counter as itself, silently; the name
+                        // goes with it.
     // The clone-delete latch (architecture.md, Clones, DeleteClone;
     // dnv-worker.md, The clone drain): DeleteClone sets it and returns, and
     // the sp coordinator drains the chunk keys. Appended, never renumbered —
@@ -1612,7 +1612,7 @@ message DnDiskTable {
     message SideRecord {
         uint64 sp_id = 1;
         uint64 side_id = 2;
-        reserved 3;                       // was: bool trimmed (replaced by zeroed_bits, [D15])
+        reserved 3;                       // retired, never reused: a renumbered field decodes silently
         repeated ExtentRun run_list = 4;  // ordered; concat = side device
         bytes zeroed_bits = 5;            // bit i = logical extent i zeroed;
                                           // LSB-first per agent/bitmap.go

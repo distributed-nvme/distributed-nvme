@@ -195,19 +195,17 @@ func TestPlainThinNeverQuiescesARaid0(t *testing.T) {
 }
 
 // TestSnapshotMessagesWithoutTheOriginDevice is the fresh-primary shape of
-// CN14's pre-pass and the reason the pre-pass's origin-device filter could go.
-// The origin's ids are in every slice pool — the control plane says so with
-// `created` — but *this* cntlr has just been rebuilt, so no dm device of
-// either td exists when the pre-pass runs. It must message anyway: declining
-// here (as the earlier origin-device filter did) would hand the slice to a
-// lazy path that no
-// longer exists and lose the snapshot outright.
+// CN14's pre-pass. The origin's ids are in every slice pool — the control
+// plane says so with `created` — but *this* cntlr has just been rebuilt, so
+// no dm device of either td exists when the pre-pass runs. It must message
+// anyway: declining would lose the snapshot outright, since no other path
+// messages an uncreated snapshot (CN14).
 //
 // Nothing is quiesced, because nothing is live yet, and no `create_thin` is
 // sent for the created origin (CN14) — the bare `dmsetup create` re-attaches
 // the id the CN21 teardown left in the pool metadata.
 func TestSnapshotMessagesWithoutTheOriginDevice(t *testing.T) {
-	// CN14, order independence: td_list order carries no meaning any more.
+	// CN14, order independence: td_list order carries no meaning.
 	// Both orders must
 	// record the same messages, the same absence of suspends and the same
 	// device creations. Not a literal call-for-call multiset: the fake hands
@@ -421,12 +419,10 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 // ready slice's create_snap must still go out. Dropping it would lose the
 // snapshot outright.
 //
-// CN14's pre-pass also drops the `origin.deferred` early return, and this
-// fixture is where that shows: the origin's raid0 was built by the
-// revision-2 converge and is still live, so it is quiesced around the one
-// message it is possible to send. An earlier deferred plan sent the
-// caller down ensureThin's lazy path, which bracketed only the per-slice
-// origin thin. Quiescing the live raid0 is the CN14 quiesce applied honestly, so
+// CN14's pre-pass has no `origin.deferred` early return, and this fixture is
+// where that shows: the origin's raid0 was built by the revision-2 converge
+// and is still live, so it is quiesced around the one message it is possible
+// to send. Quiescing the live raid0 is the CN14 quiesce applied honestly, so
 // the assertion is the bracket, not its absence.
 func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -453,8 +449,8 @@ func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 }
 
 // TestSnapshotClaimsASliceEvenWhenItsMessageFailed pins "exactly one
-// create_snap per slice, none after the raid0 resume". An earlier handoff
-// map carried that property; it now holds by construction, because ensureThin
+// create_snap per slice, none after the raid0 resume". It holds by
+// construction, because ensureThin
 // never messages a td with ori_id != 0 (CN14) and the pre-pass is the only
 // caller of createSnapId. A re-send would put that slice's create_snap after
 // the resume — dating its snapshot from after host IO restarted, which is the

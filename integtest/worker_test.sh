@@ -88,7 +88,7 @@ VOTE_GRACE=6
 HEALTH_INTERVAL=1     # every health_check_conf.*_interval
 THRESHOLDS=2,4,3,6    # primary, cntlr, side, leg
 LWM=50                # low_water_mark_pct
-EXTENT_SIZE=67108864  # 64 MiB = common.MinDnExtSize
+EXTENT_SIZE=67108864  # common.MinDnExtSize
 BLOCK_SIZE=1048576    # 1 MiB, the dm-thin data block
 CHUNK_BLOCKS=128      # bitmap_chunk_block_cnt
 # dm-thin's metadata block size, fixed by the kernel at 4 KiB: the FIRST
@@ -634,9 +634,9 @@ put_cn() { # <id> <free-ext> [extra…]
 # ---------------------------------------------------------------------------
 
 # set_behavior writes one fake's behavior.json from a here-doc on stdin. The
-# fake re-reads the file whenever its mtime changes, so the write must be
-# atomic: a half-written file would be parsed, rejected and IGNORED, silently
-# keeping the previous behaviour.
+# fake re-reads the file whenever its mtime or size changes, so the write must
+# be atomic: a half-written file would be parsed, rejected and IGNORED,
+# silently keeping the previous behaviour.
 set_behavior() { # <agent>   (JSON on stdin)
 	local agent=$1
 	[ "$QUIET" -eq 1 ] || log "[server] behavior -> $agent"
@@ -1406,7 +1406,9 @@ case_smoke() {
 	sleep 5
 	after=$(reqs dn0 CheckDn)
 	assert_ge $((after - before)) 3 "dn0: CheckDn rounds in 5s"
-	# RW4 sends show_info = false; only a first round may ask for the info.
+	# Every CheckDn carries show_info false (RW4 step 2); no round asks for
+	# the info, a fresh stream's first reply carries it unasked (HL5). The
+	# count below skips the first record and asserts every later round.
 	# The read is a statement of its own, so a failed read stops the run:
 	# piped straight into `grep -c … || true`, it would count 0 and pass
 	# this negative on a dropped ssh.
@@ -1709,10 +1711,11 @@ cntlr_epoch_clear() { [ "$(cntlr_field "$1" "$2" err_epoch)" = 0 ]; }
 
 dn_capacity_key() { ctl list-keys --prefix dn_capacity; }
 
-# dn_capacity_gone is HL5's "the capacity key is absent". A `list-keys` that
-# FAILED (a dropped ssh, a busy etcd) prints nothing either, and `-z` cannot
-# tell the two apart: the exit status is checked first, so a failed read leaves
-# the poll running instead of satisfying it.
+# dn_capacity_gone is MD4's presence rule as HL1 applies it: the capacity key
+# is deleted in the STM that sets err_epoch. A `list-keys` that FAILED (a
+# dropped ssh, a busy etcd) prints nothing either, and `-z` cannot tell the
+# two apart: the exit status is checked first, so a failed read leaves the
+# poll running instead of satisfying it.
 dn_capacity_gone() {
 	local out
 	out=$(dn_capacity_key) || return 1
@@ -2364,8 +2367,7 @@ EOF
 	# failover, so by the time these polls return it may already have
 	# deleted C1's record — a C1 that AR7 replaced is as demoted as one that
 	# reads primary false, and only a record gone with no replacement is a
-	# failure (the settle write that follows a failover left this read
-	# losing that race in 2 runs of 3).
+	# failure (the settle write that follows a failover can race this read).
 	local c1_primary
 	c1_primary=$(cntlr_field sp0 1 primary 2>/dev/null || true)
 	if [ -z "$c1_primary" ]; then
@@ -2624,8 +2626,9 @@ EOF
 	# The leg ids G2 holds BEFORE the repair, across both lists. The new spare
 	# is identified against this set rather than by reading spare_leg_list[0]:
 	# the fakes provision instantly and the primary reports the spare OK by
-	# default, so AR8 step 1's switch can land before the assertion runs, and
-	# spare_leg_list[0] is then the PARKED OLD LEG (AR8 step 4), not the spare.
+	# default, so AR8's switch step can land before the assertion runs, and
+	# spare_leg_list[0] is then the PARKED OLD LEG (the switch step of AR8
+	# parks it there), not the spare.
 	legs_before=$(group_legs sp0 1 data 2 | awk '{ print $1 }' | sort -n | tr '\n' ' ')
 	set_behavior "$prim_dir" <<EOF
 {"objects": {"cntlr 1:$prim_id": {"thin_ok": true, "rows": {"leg_id_to_leg.3":
@@ -3257,8 +3260,9 @@ case_drain() {
 	assert_eq "$(key_cnt cntlr)" "0" "cntlr keys after the drain"
 	assert_eq "$(key_cnt slice)" "0" "slice keys after the drain"
 	drain_assert_restored 64 64 2
-	# The phases, observed: D1 once for every cntlr at once, one D2 batch per
-	# SLICE — never one spanning both — and exactly one final STM.
+	# The phases the records must show: D1 once for every cntlr at once,
+	# one D2 batch per SLICE — never one spanning both — and exactly one
+	# final STM.
 	assert_eq "$(drain_step_records cntlrs)" "1" "D1 ran exactly once"
 	assert_eq "$(drain_step_records slice)" "2" \
 		"one D2 batch per slice (a batch never spans slices)"
@@ -3548,8 +3552,8 @@ case_vote() {
 	# `checked` counts the DNs whose shard the join actually moved, and it can
 	# legitimately be 0: the four DN shards are fixed (00, 55, aa, ff) while
 	# w4's seed is random, so P(none of the four moved) = (3/4)^4 ≈ 32 % and
-	# requiring one would fail a third of all runs. So the loop now asserts
-	# something for EVERY DN instead of skipping the unmoved ones: a shard
+	# requiring one would fail a third of all runs. So the loop asserts
+	# something for EVERY DN, the unmoved ones included: a shard
 	# that did not move must never have been driven by anybody but its
 	# unchanged owner, and every SyncupDn of every DN carries revision 1. The
 	# deterministic form of the moved-shard proof is case F step 1, which
@@ -3697,8 +3701,7 @@ case_vote() {
 	# and the victim heartbeats every VOTE_INTERVAL, so the true window is
 	#     [VOTE_INTERVAL + VOTE_GRACE, 2*VOTE_INTERVAL + VOTE_GRACE]
 	# = [8, 10] s at this suite's timers. Where inside that window a run lands
-	# depends on where the kill fell in the victim's heartbeat cycle — one
-	# landing just BEFORE the next heartbeat produced 8.372 s here — so the
+	# depends on where the kill fell in the victim's heartbeat cycle, so the
 	# floor asserted below is VOTE_INTERVAL + VOTE_GRACE and the ceiling
 	# carries the same 2 s of slack as SIGTERM's.
 	#

@@ -17,10 +17,10 @@ import (
 
 // osAnswer is which of the two failure outcomes the OS gives the primitive
 // under test. They are the two halves the whole teardown-by-sweep design
-// rests on, and conflating them is the defect it was written to fix: a
-// removal that was skipped because a killed probe said "already gone", an
-// object forgotten together with the plan that named it, and nothing left on
-// the node that would ever enumerate it again.
+// rests on, and conflating them is the defect the design excludes: a
+// removal skipped because a killed probe said "already gone", an object
+// forgotten together with the plan that named it, and nothing left on the
+// node that would ever enumerate it again.
 type osAnswer int
 
 const (
@@ -76,8 +76,8 @@ func TestKilledProbeIsNotAbsent(t *testing.T) {
 		{
 			// osBase.listDir, through the enumerator that walks configfs.
 			// RemoveSubsystem and RemovePortLink walk their children through
-			// the same listing, so a killed `ls` used to make them skip every
-			// object they should have removed, silently and with no error.
+			// the same listing, so a killed `ls` must not make them skip the
+			// objects they should remove, silently and with no error.
 			name: "listDir",
 			probe: func(answer osAnswer) (bool, error) {
 				fs := &fakeSysfs{
@@ -141,8 +141,8 @@ func TestKilledProbeIsNotAbsent(t *testing.T) {
 		})
 	}
 
-	// agent.Reported itself. Every primitive above is one `if` away from the
-	// bug, and this is that `if`.
+	// agent.Reported itself. Every primitive above is one `if` away from
+	// conflating the two, and this is that `if`.
 	t.Run("Reported", func(t *testing.T) {
 		for _, tc := range []struct {
 			name     string

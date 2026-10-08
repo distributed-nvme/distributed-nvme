@@ -23,8 +23,9 @@ import (
 // pass made. Every test here runs the pass on a fake clock (withPassClock), so
 // "how long" is exact: a failed connect takes no time unless the fake says so
 // (connectTakes), and a pause moves the clock by exactly its length. On that
-// clock a 1 s budget holds exactly ten 100 ms pauses — eleven attempts of a
-// connect that keeps failing.
+// clock the CnConnectPassBudget budget holds exactly CnConnectPassBudget /
+// CnConnectRetryPause pauses — one more attempt than that of a connect that
+// keeps failing.
 
 // withPassClock puts a server's CN10 pass budget on a fake clock: its sleep
 // moves the clock on by exactly the pause, and a slow connect of the fake node
@@ -145,10 +146,8 @@ func syncupGrow(
 // TestConnectRetriedWithinThePass pins the in-pass connect retry: a side whose
 // disk node refuses the first connects — its export not linked into the port
 // yet — is connected by the SAME pass, so the first reply is clean and no
-// background retry is registered. On a primary that is the whole of the e2e
-// react grow's failure: the grow's first report used to carry "pool concat
-// missing", which stamped a settled primary's err_epoch and failed it over
-// one reaction pass later.
+// background retry is registered. Without it a grow's first report would
+// carry "pool concat missing" and stamp a settled primary's err_epoch.
 func TestConnectRetriedWithinThePass(t *testing.T) {
 	t.Run("standby leg", func(t *testing.T) {
 		srv, node := newTestServer(t)
@@ -200,9 +199,8 @@ func TestConnectRetriedWithinThePass(t *testing.T) {
 
 // TestNsHeadAwaitedAfterConnect pins the head wait: the kernel
 // returns from `nvme connect` before its namespace scan has added the
-// multipath head, and a single re-read right after the connect used to fail
-// the leg with "no multipath namespace". The pass now re-reads until the head
-// is there.
+// multipath head, so the pass re-reads until the head is there instead of
+// failing the leg on one read with "no multipath namespace".
 func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 	for _, n := range []int{2, 3} {
 		t.Run(fmt.Sprintf("standby, head on read %d", n), func(t *testing.T) {
@@ -246,9 +244,9 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 
 // TestSlowFailedConnectIsNotRetried pins the charge of a failed connect's own
 // elapsed time. A connect to a disk node whose VM is down takes about 3 s (the
-// kernel's SYN retries, or CmdSoftTimeout) and spends the whole 1 s budget at
-// once, so the pass does NOT try it again: the leg fails exactly as it did
-// before the retry existed, and the background retry takes over.
+// kernel's SYN retries, or CmdSoftTimeout) and spends the whole
+// CnConnectPassBudget at once, so the pass does NOT try it again: the leg
+// fails on its first attempt, and the background retry takes over.
 func TestSlowFailedConnectIsNotRetried(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour

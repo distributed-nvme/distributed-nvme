@@ -13,10 +13,10 @@
 // spells its token `--rev <n>` as a hexUint and sends
 // `SpRev{Revision: n}` with sp_name left empty, because the handler matches
 // on the revision alone. An omitted `--rev` therefore sends a zero token
-// deliberately rather than "no token" — and since GW6 became presence-based
-// that choice is load-bearing, not incidental: a PRESENT
-// zero token is still refused, while an absent message would now be waved
-// through unchecked. This driver never sends an absent one, which is what
+// deliberately rather than "no token" — and GW6 is presence-based, so that
+// choice is load-bearing, not incidental: a PRESENT zero token is refused,
+// while an absent message passes through unchecked. This driver never sends
+// an absent one, which is what
 // keeps the contention case's B4 stage a refusal. dnvctl deliberately does
 // the opposite (dnvctl.md CT3) — do not port this pattern there.
 
@@ -202,8 +202,9 @@ func setupGetSp(fs *flag.FlagSet) job {
 
 // setupListSps drives ListStoragePools
 // (gateway.md, Storage pools and GrowSlice). --count is the page size that
-// the clamp of architecture.md, Common validation, turns into 64 when it is
-// 0 and refuses above 1024, and --page-token continues a previous page. The
+// the clamp of architecture.md, Common validation, turns into DefaultListCnt
+// when it is 0 and refuses above MaxListCnt, and --page-token continues a
+// previous page. The
 // suite's list-sps reads send neither flag (case C probes a bad count and a
 // bad token on list-clusters instead), and TestListStoragePools pins both
 // refusals for ListStoragePools.

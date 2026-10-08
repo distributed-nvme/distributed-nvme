@@ -13,8 +13,8 @@ import (
 // NvmetRoot is the configfs mount point of the kernel NVMe target.
 const NvmetRoot = "/sys/kernel/config/nvmet"
 
-// ANA state strings written into ana_groups/{id}/ana_state, exactly once at
-// port setup ([D4]).
+// ANA state strings written into ana_groups/{id}/ana_state by EnsurePort,
+// probe-first ([D4]): a group found in another state is rewritten.
 const (
 	AnaStateOptimized    = "optimized"
 	AnaStateNonOptimized = "non-optimized"
@@ -110,9 +110,10 @@ func (n *Nvmet) portAttrs(conf PortConf) [][2]string {
 }
 
 // EnsurePort creates ports/{portId} with the node's transport attributes and
-// the three fixed ANA groups, writing each ana_state exactly once. No other
-// code path ever writes an ana_state; every later transition rewrites a
-// namespace's ana_grpid instead.
+// the three fixed ANA groups, writing each ana_state probe-first: a group
+// already in its state is skipped, one found in another state is rewritten.
+// EnsurePort is the only writer of an ana_state; no ANA transition writes
+// one — those rewrite a namespace's ana_grpid (dnagent.md SH19).
 func (n *Nvmet) EnsurePort(
 	ctx context.Context,
 	portId int,
@@ -138,7 +139,8 @@ func (n *Nvmet) EnsurePort(
 		}
 	}
 	// Group 1 always exists in nvmet; 2 and 3 are created here, and only
-	// then are the three fixed states written — once, and never again.
+	// then are the three fixed states written, each through ensureAttr, so a
+	// group already in its state is left untouched.
 	for _, grpId := range fixedAnaGrpIds {
 		groupPath := n.AnaGroupPath(portId, grpId)
 		groupExists, err := n.dirExists(ctx, groupPath)
@@ -542,10 +544,10 @@ func (n *Nvmet) ProbeNamespace(
 // bare 32-hex-digit string or a dash-separated one on write, and both always
 // read back dash-separated *and* lower-cased (the kernel prints them with
 // %pUb). DnNsIdentity supplies the uuid dashed and the nguid bare, so a
-// byte comparison reports a permanent difference on the nguid: every converge
-// then disabled the namespace, rewrote the attribute and re-enabled it — an
-// SH16 idempotency break that momentarily drops a live export's namespace on
-// every Check round — and every probe reported the healthy namespace as
+// byte comparison would report a permanent difference on the nguid: every
+// converge would disable the namespace, rewrite the attribute and re-enable
+// it — an SH16 idempotency break that drops a live export's namespace each
+// time — and every probe would report the healthy namespace as
 // RES_STATUS_ERROR.
 //
 // Both roles compare identities through this one function: the dn's side
@@ -684,17 +686,16 @@ func (n *Nvmet) ListPorts(ctx context.Context) ([]int, error) {
 
 // SubsysMtime is the mtime of one subsystem's configfs directory, the age a
 // sweep judges an unattributable export by (dnagent.md DN6); ok is false when
-// the subsystem is gone. On the lab's 7.0 kernel the mtime is set at `mkdir`
-// and moved to "now" by every lookup of one of the subsystem's OWN attribute
-// files — a read, a write, even a stat of `attr_*`: configfs instantiates an
-// attribute's inode on each lookup and, in that kernel, stamps the parent
-// directory when it does. Adding an allowed-host link or a namespace directory
-// under it does not move it, and neither does listing it. So it reads "time
-// since the subsystem was created or an attribute of it was last touched":
-// a build in flight writes the attributes and reads young, and an export
-// nobody touches ages. A kernel that stamps the directory only when a
-// directory or a link is created under it (7.3 moved configfs's stamp there)
-// reads the mkdir time instead, the plain age of the subsystem.
+// the subsystem is gone. The mtime is set at `mkdir`; adding an allowed-host
+// link or a namespace directory under it does not move it, and neither does
+// listing it. Kernels differ in one respect. One that stamps the parent
+// directory on every lookup of one of the subsystem's OWN attribute files — a
+// read, a write, even a stat of `attr_*`, because configfs instantiates an
+// attribute's inode on each lookup — makes it read "time since the subsystem
+// was created or an attribute of it was last touched": a build in flight
+// writes the attributes and reads young, and an export nobody touches ages.
+// One that stamps the directory only when a directory or a link is created
+// under it reads the mkdir time, the plain age of the subsystem.
 func (n *Nvmet) SubsysMtime(
 	ctx context.Context,
 	nqn string,

@@ -42,7 +42,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `go.mod`, `go.sum` | the module (Module identity) and its requirements (`dependencies.md`, Direct dependencies) |
 | `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), and vet and test over the whole module |
 | `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, `glossary.md`, the project vocabulary, and `core_glossary.md`, its core words in plain language |
-| `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and the built drivers and the etcd download cache in `integtest/bin/` |
+| `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and in `integtest/bin/` the built drivers, the etcd download cache and the gojq fallback a suite installs when the machine running it has no jq |
 | `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation) |
 | `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |
 | `etcdutil/` | the one door to etcd: typed reads, writes, scans and watches and the STM runners over one client, with the protobuf (un)marshaling and the etcd log records inside (`dnv-worker.md`, EU1 to EU7) |
@@ -56,9 +56,9 @@ Unit tests are colocated `_test.go` files inside each package.
 | `ctl/` | dnvctl: the cobra command tree, one file per noun group, and in `ctl/root.go` what the groups share — the viper binding, the dial, the result rendering and the exit codes (`dnvctl.md`) |
 | `integtest/` | the integration suites, one shell script per suite, beside their drivers and fakes (below) |
 | `integtest/dnagentctl/` | the gRPC driver of a real dn agent, which both agent suites use |
-| `integtest/cnagentctl/` | the gRPC driver of the cn agent suite |
+| `integtest/cnagentctl/` | the gRPC driver of the cn agent suite; the end-to-end suite runs it only as a host-id printer |
 | `integtest/fakeagent/` | fake dn and cn agents driven by a behavior file, which the worker and gateway suites run in place of real agents |
-| `integtest/workerctl/` | the etcd driver that plays the gateway in the worker suite, writing through `model` and `etcdutil` as a gateway's STM would; the gateway suite reads etcd back through it and plays the worker through it |
+| `integtest/workerctl/` | the etcd driver that plays the gateway in the worker suite, writing through `model` and `etcdutil` as a gateway's STM would; the gateway suite reads etcd back through it and plays the worker through it; the cdc and end-to-end suites run it only as a constants printer |
 | `integtest/cdcctl/` | the etcd driver that plays the gateway and the worker for the `CdcEntry` keys in the cdc suite |
 | `integtest/gatewayctl/` | the gRPC driver of the gateway suite, one subcommand per `Gateway` RPC |
 | `integtest/fakegateway/` | every `Gateway` method behind a behavior file, which the dnvctl suite runs in place of a gateway |
@@ -76,9 +76,11 @@ dm-zero, and the end-to-end suite on every guest but its control-plane one.
 The worker, gateway and dnvctl suites need no root. The drivers and fakes are
 test drivers only, never linked into a `cmd/` binary. The end-to-end suite
 adds no driver of its own and drives the shipped `dnvctl` for every
-control-plane call (`e2e_integtest.md` E2E2), and it never runs beside
-another suite (`e2e_integtest.md` E2E9). What each suite proves is its
-document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
+control-plane call (`e2e_integtest.md` E2E2). One dnv suite runs at a time
+in the lab: the suites share guests, a run's cleanup cannot tell its own
+dnv processes and devices from another run's, and the end-to-end suite's
+cn agents use the tmpfs path the cn agent suite owns. What each suite
+proves is its document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
 `e2e_integtest.md`, and the Integration test plan of `dnv-worker.md`,
 `cdc.md`, `gateway.md` and `dnvctl.md`.
 

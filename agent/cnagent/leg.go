@@ -21,9 +21,8 @@ import (
 // `nvme list-subsys`, for two measured reasons (CN10, CN12):
 //
 //   - `nvme list-subsys -o json` emits **no** `ANAState` unless it is given a
-//     namespace block device, so the availability test of architecture.md,
-//     "Make sure all groups are available", cannot be
-//     evaluated from it; and with a device argument it answers an
+//     namespace block device, so the availability test of cnagent.md CN12
+//     cannot be evaluated from it; and with a device argument it answers an
 //     all-inaccessible namespace with an *empty* subsystem list, which is
 //     indistinguishable from "not connected".
 //   - sysfs exposes the controller `state` next to the path `ana_state`,
@@ -108,9 +107,8 @@ func (v *subsysView) unknownCtrl() error {
 	return nil
 }
 
-// available is the path half of CN12's availability (architecture.md, "Make
-// sure all groups are available"): a path that is both live and optimized.
-// ensureLegs counts a leg available only when its
+// available is the path half of CN12's availability: a path that is both
+// live and optimized. ensureLegs counts a leg available only when its
 // CN10 converge succeeded too. A `non-optimized` path means the side
 // currently exports dm-error and cannot be used; a path that is merely
 // `connecting` keeps its last-known ANA state, which is why the controller
@@ -311,9 +309,8 @@ func (s *CnAgentServer) readSysfs(
 // ---------------------------------------------------------------------------
 
 // ensureLegs converges every leg of every group of every slice — spare legs
-// included, both roles. It reports which legs are **available**
-// (architecture.md, "Make sure all groups are available"), which is what CN12
-// assembly needs, records each leg's ResInfo, and says
+// included, both roles. It reports which legs are **available** (cnagent.md
+// CN12), which is what the assembly needs, records each leg's ResInfo, and says
 // whether any leg failed to converge — its connect, a controller's address
 // read that did not answer, its multipath namespace or its wrapper — which
 // registers the cntlr for the background retry (build registers it too for a
@@ -461,7 +458,7 @@ const sideNsid = 1
 // export or a dead disk node answers; only the first goes away within a pass,
 // and the budget is what caps how often the other two are retried. The last
 // attempt's error is the one returned, so a leg that stays unconnected reads
-// exactly as it did before the retry existed.
+// as a failed connect.
 func (s *CnAgentServer) connectWithin(
 	ctx context.Context,
 	budget *agent.WaitBudget,
@@ -490,7 +487,7 @@ func (s *CnAgentServer) connectWithin(
 // right after the connect can therefore miss a head that is milliseconds
 // away. Only a connect made in this pass is waited for: a subsystem that was
 // already connected and has no head — a leg whose only path is ANA
-// inaccessible never gets one — is judged on the one read, as before.
+// inaccessible never gets one — is judged on the one read.
 func (s *CnAgentServer) awaitNsHead(
 	ctx context.Context,
 	budget *agent.WaitBudget,
@@ -669,8 +666,8 @@ func transportHealth(
 // with it in an uninterruptible write of the controller's `delete_controller`
 // attribute. No SH15 signal ends that child — SIGTERM at the soft timeout and
 // SIGKILL at the hard one are delivered, and it still returns only when the
-// kernel does — so issued inline it held the cntlr's object lock, and with it
-// every CheckCntlr round of the cntlr (CN1), for the whole minute.
+// kernel does — so issued inline it would hold the cntlr's object lock, and
+// with it every CheckCntlr round of the cntlr (CN1), for the whole minute.
 //
 // The registry is bookkeeping of work in progress, never memory of work that
 // failed: an entry lives exactly as long as its goroutine, and it does two
@@ -691,13 +688,12 @@ func transportHealth(
 //
 // At most disconnectConcurrency of them run at once. The rest wait for a
 // slot and stay registered while they wait, so a queued disconnect keeps the
-// connect steps off its subsystem and is not issued twice either. Inline, a
-// pass issued its disconnects one at a time; uncapped, one L10 of many legs
-// or one pool drain would set them all going together, and each delete a
-// vanished target stalls holds an OsClient slot for the admin timeout. Enough
-// of those would leave no slot for the node's converges and Check rounds,
-// whose OS calls would then be refused at the soft timeout and report ERROR
-// rows on healthy objects.
+// connect steps off its subsystem and is not issued twice either. Uncapped,
+// one L10 of many legs or one pool drain would set them all going together,
+// and each delete a vanished target stalls holds an OsClient slot for the
+// admin timeout. Enough of those would leave no slot for the node's converges
+// and Check rounds, whose OS calls would then be refused at the soft timeout
+// and report ERROR rows on healthy objects.
 func (s *CnAgentServer) startDisconnect(ctx context.Context, nqn string) {
 	s.mu.Lock()
 	if _, inFlight := s.disconnecting[nqn]; inFlight {
@@ -826,17 +822,10 @@ func (s *CnAgentServer) connectRetryLoop(
 		// reason dnagent's migrRetryLoop carries in full: the pass that ends
 		// the retry calls stopConnectRetry, which cancels exactly this
 		// loop's ctx, so an attempt running on it would cancel ITSELF and
-		// abandon the rest of the pass.
-		//
-		// Unlike the dn's, this one was not yet producing a failure — do not
-		// go looking for one. Both of this agent's stopConnectRetry sites
-		// sit where nothing that matters follows them: one is the last
-		// statement of convergeCntlr, the other is the SP_LEVEL_DISABLE arm,
-		// whose sweep has already run and whose build has nothing to do. It
-		// is the SHAPE that is wrong — correct only by statement order, one
-		// edit away from the dn's stall — and the two agents must not differ
-		// here, because this loop is written as "the DN13 pattern" and
-		// whichever copy a reader meets first is the one they will follow.
+		// abandon the rest of the pass. The rule rests on rootCtx alone,
+		// never on where a stopConnectRetry call happens to sit: this loop
+		// is written as the DN13 pattern, and the two agents must not differ
+		// in it.
 		s.reconvergeCntlr(s.rootCtx, key, st)
 		if ctx.Err() != nil || s.rootCtx.Err() != nil {
 			return

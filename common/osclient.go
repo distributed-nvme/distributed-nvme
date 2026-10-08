@@ -150,7 +150,7 @@ func (c *LimitedOsClient) RunCommand(
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	// architecture.md, Common validation: SIGTERM at the (caller-set) soft timeout,
+	// osclient.md, RunCommand: SIGTERM at the (caller-set) soft timeout,
 	// SIGKILL at the hard timeout.
 	cmd.Cancel = func() error {
 		return cmd.Process.Signal(syscall.SIGTERM)

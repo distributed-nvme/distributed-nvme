@@ -1,8 +1,8 @@
 // Command dnv-gateway is the control-plane API server
 // (gateway.md, cmd/dnv-gateway): one cobra root command without subcommands
 // that parses the CM2 flags through viper, builds the process's single
-// etcdutil client (EU1) and hands off to gateway.Run, which serves the 59
-// RPCs of `service Gateway`.
+// etcdutil client (EU1) and hands off to gateway.Run, which serves every
+// method of `service Gateway`.
 //
 // It is the only dnv binary that needs both flag families — the gRPC-server
 // pair of cmd/dnv-agent and the etcd pair of cmd/dnv-worker (CM1).

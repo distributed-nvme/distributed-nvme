@@ -486,7 +486,7 @@ func TestResolveClusterConf(t *testing.T) {
 		t.Error("ResolveClusterConf changed creation_epoch")
 	}
 	// qos_ratio is not defaultable and stays the very message it was given;
-	// bdev_conf, which now goes through ResolveBdevConf, must NOT — a stored
+	// bdev_conf, which goes through ResolveBdevConf, must NOT — a stored
 	// message may never alias the request the caller still owns.
 	if got.GetQosRatio() != stored.GetQosRatio() {
 		t.Error("ResolveClusterConf did not pass qos_ratio through as stored")
@@ -688,7 +688,7 @@ func TestValidateClusterConf(t *testing.T) {
 		{
 			// The all-zero set a DnBinConf written without shifts carries.
 			// It is not a ladder — bin0_shift 0 is legal only as the bottom
-			// of an increasing one — and no reader resolves it any more, so
+			// of an increasing one — and no reader resolves it, so
 			// it is refused rather than silently shifted into 1/1/1/1.
 			name: "the all-zero shift ladder",
 			tweak: func(cc *pb.ClusterConf) {
@@ -801,7 +801,7 @@ func TestDnBinIdx(t *testing.T) {
 		{"below level3", ladder, 4095, 2, true},
 		{"at level3", ladder, 4096, 3, true},
 		{"far above level3", ladder, 1 << 40, 3, true},
-		// An unwritten dn_bin_conf is NOT resolved to that ladder any more
+		// An unwritten dn_bin_conf is NOT resolved to that ladder
 		// (architecture.md, Common validation): binLevels shifts the four zeros it
 		// is given, every level is
 		// 1 << 0, and any free count at all lands in the top bin. An op that

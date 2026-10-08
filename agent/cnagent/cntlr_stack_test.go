@@ -13,9 +13,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Pins for defect shapes of the CN9 pass, the CN18 clone paths and the
-// CN12/CN13 wrappers. The fake node models dm/md holders, so an out-of-order
-// teardown surfaces as a real EBUSY.
+// The cntlr's stack where its order matters: the teardown order of the CN9
+// pass, the CN18 clone paths, the CN12/CN13 wrappers, the CN16 admission
+// rules and the clone-row verdicts. The fake node models dm/md holders, so an
+// out-of-order teardown surfaces as a real EBUSY.
 
 // A transfer's dm-linear maps the origin td's raid0. If CN9's pre-step 3 does
 // not demote it to an error table, `dmsetup remove` of that raid0 fails EBUSY
@@ -265,8 +266,8 @@ func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 	}
 }
 
-// The recovery of architecture.md, Clone crash recovery, keys off missing
-// dm-clone *metadata*, not off the metadata wrapper: a
+// The recovery build of cnagent.md CN18 keys off missing dm-clone *metadata*,
+// not off the metadata wrapper: a
 // pass that created the wrapper and then failed to build the dm-clone leaves a
 // freshly discarded slot that dm-clone would format fresh, with nothing
 // hydrated.
@@ -344,10 +345,10 @@ func TestCloneRecoveryFailsClosed(t *testing.T) {
 	}
 }
 
-// architecture.md, "Make sure all groups are available", puts "one leg
-// available" in case 2 (assemble, let mdadm decide),
-// never in case 1: creating with --assume-clean over the available subset
-// would resync the unavailable survivor's data away.
+// cnagent.md CN12 puts a single available member in case 2 (assemble, and
+// mdadm decides on a degraded start), never in case 1: creating with
+// --assume-clean over the available subset would resync the unavailable
+// survivor's data away.
 func TestGroupNeverCreatesOverASubsetOfLegs(t *testing.T) {
 	srv, node := newTestServer(t)
 	// The second data leg's side exports dm-error, so its path is
@@ -640,12 +641,12 @@ func assertCloneSuppressed(t *testing.T, info *pb.CntlrInfo, label string) {
 }
 
 // TestCloneWithUnresolvableDstTdAgrees: a clone whose dst_td_id is not in
-// td_list is the CN18 error the converge reports on all three rows. The probe
-// used to fall through to the live-source / dm-clone / wrapper probes and
-// answer MISSING (or OK for a stack that outlived the td), and — with
-// region_cnt = 0 — invent a one-unit metadata budget and report a size
-// mismatch that describes nothing on the node. Every interleaved converge and
-// check round then flipped the rows and bumped their epochs.
+// td_list is the CN18 error the converge reports on all three rows, and the
+// probe must report the same. It must not fall through to the live-source /
+// dm-clone / wrapper probes: a MISSING (or an OK for a stack that outlived
+// the td), or — with region_cnt = 0 — a one-unit metadata budget and a size
+// mismatch that describes nothing on the node, would flip the rows and bump
+// their epochs on every interleaved converge and check round.
 func TestCloneWithUnresolvableDstTdAgrees(t *testing.T) {
 	srv, _ := newTestServer(t)
 	// Phase 1: the clone is built over its own destination td, so its metadata

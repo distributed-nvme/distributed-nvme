@@ -13,12 +13,11 @@ import (
 )
 
 // The gateway half of the clone drain (gateway.md, Clones; dnv-worker.md,
-// The clone drain): DeleteClone latches, and the chunk sweep that used to sit
-// in its deciding STM is the worker's.
+// The clone drain): DeleteClone latches, and the chunk sweep is the worker's.
 //
-// As for the sp drain, the END-state assertions did not move with it, so the
-// tests that own them run the drain here through volDrainClone, exactly as the
-// sp coordinator would.
+// As for the sp drain, the END-state assertions live here, so the tests that
+// own them run the drain through volDrainClone, exactly as the sp coordinator
+// would.
 
 // volDrainCloneSteps bounds volDrainClone. A max-shape drain is
 // ceil(MaxSliceCntPerSp*MaxCloneBmCnt / MaxDelBmPerTxn) + 1 = 9 steps — eight
@@ -155,7 +154,7 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 	// CLD4: the unsuspend rides the LATCH, not the final STM. Otherwise CN16's
 	// auto_resume override vanishes when the clone leaves the plan while etcd
 	// still says suspended, and the destination namespace goes dark for the
-	// whole drain — a host-visible outage the one-shot never had.
+	// whole drain.
 	if findNs(env.subsystem(volNqn), 1).GetSuspended() {
 		t.Errorf("the dst namespace must resume with the latch, not later")
 	}
@@ -456,13 +455,13 @@ func volLatchClone(env *volEnv, name string) {
 //     Clones), so this test lifts the td name out to reach the clones row
 //     (`still holds 1 clones`);
 //   - the DESTINATION thin device is held too: `DeleteThinDevice` of it
-//     refuses, which the one-shot delete never did — so abandoning a clone is
+//     refuses — so abandoning a clone is
 //     delete-clone, poll until gone, then delete-td / delete-sp;
 //   - and every one of them resumes the instant the drain finishes.
 //
 // The td half is the one a reader is most likely to miss, and the one with the
 // worst shape: deleting the half-hydrated destination is the natural next step
-// after abandoning a clone, and it is now the step that fails first.
+// after abandoning a clone, and it is the step that fails first.
 func TestCloneDrainConsequences(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -546,16 +545,14 @@ func TestCloneDrainConsequences(t *testing.T) {
 	}
 }
 
-// TestCloneDrainAtTheChunkCeiling is CLD11's PROOF and the repurposed half of
-// the ceiling test it replaced: the whole MaxSliceCntPerSp x MaxCloneBmCnt
-// rectangle is filled — every chunk key the old one-shot could ever have had
-// to sweep — and drained through the real batches, against the real etcd this
-// package runs with --max-txn-ops=common.EtcdMaxTxnOps.
+// TestCloneDrainAtTheChunkCeiling is CLD11's PROOF: the whole
+// MaxSliceCntPerSp x MaxCloneBmCnt rectangle is filled — every chunk key a
+// clone can hold — and drained through the real batches, against the real
+// etcd this package runs with --max-txn-ops=common.EtcdMaxTxnOps.
 //
-// What it proves is the property the arithmetic cannot: the 512 keys leave in
-// ceil(512 / MaxDelBmPerTxn) transactions of a constant size, not in one whose
-// size is the rectangle. (512 = MaxSliceCntPerSp x MaxCloneBmCnt; the body
-// computes it, this sentence spells today's value of it out.)
+// What it proves is the property the arithmetic cannot: with N the
+// rectangle's key count, the keys leave in ceil(N / MaxDelBmPerTxn)
+// transactions of a constant size, not in one whose size is the rectangle.
 func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)

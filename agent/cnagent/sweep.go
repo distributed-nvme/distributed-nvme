@@ -19,14 +19,10 @@ import (
 // Each pass enumerates what exists, subtracts what the desired state wants,
 // removes the rest top-down, verifies each removal with a probe that cannot
 // block on a dead remote, and recomputes "something is left" from scratch.
-//
-// That is what the old retire phase could not do. It computed what to remove
-// as "the plan I applied last time minus the plan I am applying now", and
-// then overwrote the applied plan whether or not the removals worked — so a
-// removal that failed was forgotten together with the plan that named it, and
-// nothing ever enumerated the object again. The leak the design started from
-// (a killed `mdadm --detail` read as "the array is not there", the array left
-// pinning its two leg wrappers for ever) is that shape, not a one-off bug.
+// A removal derived from a remembered plan would forget a failed removal
+// together with the plan that named it, and nothing would enumerate the
+// object again: a killed `mdadm --detail` read as "the array is not there"
+// would leave the array pinning its leg wrappers for ever.
 //
 // Two rules make the sweep safe rather than merely thorough:
 //
@@ -308,8 +304,8 @@ func (s *CnAgentServer) nvmetOwner(
 
 // hostFacingClaim reports whether any cntlr of this cn still names one
 // host-facing NQN in its stored request, and under which sp. It is the
-// request-derived half of the attribution rule (architecture.md, Teardown by
-// sweep): the NQN is the user's own
+// request-derived half of the attribution rule (cnagent.md CN21): the NQN is
+// the user's own
 // string and carries nothing, so "somebody here still wants it" is evidence
 // in its own right — and the only evidence there is for a subsystem that
 // currently has no namespace at all.
@@ -708,8 +704,8 @@ func (s *CnAgentServer) runChain(
 	// failed is still suspended on its old table (Dm.Reload fails closed).
 	//
 	// The size comes from the device's own live table, so this needs neither
-	// the td that used to back it — which may be leaving in the same pass —
-	// nor any memory of what the ns-dev used to map.
+	// the td that backed it — which may be leaving in the same pass — nor any
+	// memory of what the ns-dev mapped before.
 	for _, name := range chain.nsDevs {
 		s.parkByTable(ctx, name, actual)
 	}
@@ -1171,8 +1167,8 @@ func (s *CnAgentServer) disconnectVerified(
 // sweepCloneChunks deletes the bitmap chunk files of every clone this cntlr
 // no longer carries (SH7). It is a sweep of the LOCAL STORE against the
 // request, not a side effect of removing the clone's wrapper: a standby
-// builds no wrapper at all, so keying the deletion off one left a deleted
-// clone's chunks on disk for ever and the worker re-pushing them.
+// builds no wrapper at all, so keying the deletion off one would leave a
+// deleted clone's chunks on disk for ever and the worker re-pushing them.
 //
 // A clone the role or the sp_level merely SUPPRESSES keeps its chunks
 // applied-by-file (CN19, CN22): deleting them on every standby converge would
@@ -1362,8 +1358,8 @@ func (s *CnAgentServer) unownedSrcNqns(
 }
 
 // orphanCloneMetaNames is every kind-cb wrapper of this CN whose clone no
-// stored cntlr wants any more. It is reconcileCloneMeta's rule, computed from
-// the sweep's own snapshot so the verdict and the removal agree.
+// stored cntlr's clone_list names. It is reconcileCloneMeta's rule, computed
+// from the sweep's own snapshot so the verdict and the removal agree.
 func (s *CnAgentServer) orphanCloneMetaNames(
 	clusterId uint64,
 	cnId uint64,
@@ -1562,11 +1558,10 @@ func (s *CnAgentServer) cntlrIdAttrs(plan *cntlrPlan) []any {
 	}
 }
 
-// cntlrAnaPreStep is P1, the first of the transitions the old retire phase
-// computed from the previously applied plan. It is the one of them that runs
-// on every converge, whether or not the snapshot licensed any removal: it
-// decides from the plan alone and removes nothing, and the build phase parks
-// on its strength (sweepCntlr).
+// cntlrAnaPreStep is P1, the first of the pre-steps. It is the one of them
+// that runs on every converge, whether or not the snapshot licensed any
+// removal: it decides from the plan alone and removes nothing, and the build
+// phase parks on its strength (sweepCntlr).
 func (s *CnAgentServer) cntlrAnaPreStep(ctx context.Context, plan *cntlrPlan) {
 	// P1, ANA: every namespace the desired state wants inaccessible is moved
 	// there before anything under it is touched (architecture.md, Failover,
@@ -1611,10 +1606,9 @@ func (s *CnAgentServer) cntlrPreSteps(
 	// chain — the pass would remove the ns-dev parked on it, reply clean, and
 	// leave that device for the next round to find.
 	//
-	// The old retire phase computed this from the previous plan ("does this
-	// namespace's OLD td still exist?"). The live table is the same answer
-	// without the memory — and it is also right for a device an interrupted
-	// pass left pointing somewhere the plan never described.
+	// The live table answers "does this ns-dev still map something unwanted?"
+	// with no memory of a previous plan — and it is also right for a device
+	// an interrupted pass left pointing somewhere the plan never described.
 	for _, np := range plan.namespaces {
 		if np.td == nil || !plan.wantAny {
 			continue
@@ -1644,9 +1638,8 @@ func (s *CnAgentServer) cntlrPreSteps(
 //
 // The size comes from the plan when the origin namespace still resolves, and
 // from the device's OWN LIVE TABLE when it does not — a transfer whose origin
-// td was deleted in the same request has no plan size left. The old retire
-// phase read that fallback off the previously applied plan, which is exactly
-// the remembered state this design does without.
+// td was deleted in the same request has no plan size left, and a previously
+// applied plan is exactly the remembered state this design does without.
 func (s *CnAgentServer) demoteXfer(ctx context.Context, xp *xferPlan) {
 	dev, err := s.dm.Info(ctx, xp.finalName)
 	if err != nil || dev == nil {
@@ -1849,11 +1842,10 @@ func (s *CnAgentServer) sweepCn(
 			res.Add(agent.LeftoverKindNvme, nqn)
 		}
 	}
-	// The kind-cb wrappers are swept by reconcileCloneMeta, which already
-	// worked this way before the design existed: it enumerates the arena and
-	// removes every wrapper no stored cntlr's clone_list names. It is called
-	// from here and nowhere else, so the node write lock this pass holds is
-	// what makes its "every stored cntlr" set stable ([D14]).
+	// The kind-cb wrappers are swept by reconcileCloneMeta, which enumerates
+	// the arena and removes every wrapper no stored cntlr's clone_list names.
+	// It is called from here and nowhere else, so the node write lock this
+	// pass holds is what makes its "every stored cntlr" set stable ([D14]).
 	if remove {
 		s.reconcileCloneMeta(ctx, clusterId, cnId)
 	}

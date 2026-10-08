@@ -85,9 +85,9 @@ func TestDmNames(t *testing.T) {
 	checkName(t, "CnXferFinalName",
 		nf.CnXferFinalName(testCluster, testCn, testSp, testXfer),
 		"dnv-"+c+"-0000000000000005-c8-0000000000000011-0000000000000051")
-	// The three cn kinds added by cnagent.md, Additions to `common`: the [D1]
-	// leg wrapper, the RedundNone group device, and the kind-`cb`
-	// clone-metadata wrapper that replaced the clone-VG metadata LV ([D14]).
+	// The three cn kinds of cnagent.md, Names and constants in `common`: the
+	// [D1] leg wrapper, the RedundNone group device, and the kind-`cb`
+	// clone-metadata wrapper over the arena ([D14]).
 	checkName(t, "CnLegName",
 		nf.CnLegName(testCluster, testCn, testSp, testLeg),
 		"dnv-"+c+"-0000000000000005-c9-0000000000000011-0000000000000015")
@@ -223,10 +223,10 @@ func TestNqns(t *testing.T) {
 	}
 }
 
-// architecture.md, tmpfs / file names. LVM is gone from dnv entirely ([D13]/[D14]):
-// the DN carries the [D13] disk format, and the CN's clone-metadata arena is a
-// slot allocator over one loop device whose kind-`cb` wrapper tables are its
-// registry, so the clone-VG and metadata-LV names are gone with it.
+// architecture.md, tmpfs / file names. dnv uses no LVM ([D13], [D14]): the DN
+// carries the [D13] disk format, and the CN's clone-metadata arena is a slot
+// allocator over one loop device whose kind-`cb` wrapper tables are its
+// registry, so there is no volume-group or logical-volume name to format.
 func TestTmpfsAndFileNames(t *testing.T) {
 	nf := NewNameFmt("")
 	const c = "ebada5168620c5fe"
@@ -305,7 +305,7 @@ func TestNamesAreClusterScoped(t *testing.T) {
 }
 
 // DnNsIdentity is the deterministic namespace identity both sides of a leg
-// present (architecture.md, Disk node; dnagent.md, Additions to `common`).
+// present (architecture.md, Disk node; dnagent.md, Names and constants in `common`).
 func TestDnNsIdentity(t *testing.T) {
 	uuid, nguid := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15)
 	again, againNguid := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15)

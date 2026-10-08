@@ -593,9 +593,7 @@ func TestDrainSpSliceRefusesWhileCntlrsRemain(t *testing.T) {
 
 // TestDrainSliceRefusesAnInvalidStoredConf is the gate (architecture.md,
 // Common validation) DrainSpSlice needs
-// for MaintainDnCapacity's sake, and the one the gateway's
-// TestStoredClusterConfZeroIsRefusedByEveryReader used to reach through
-// DeleteStoragePool's newDnLedger.
+// for MaintainDnCapacity's sake.
 //
 // A capacity key embeds the BIN INDEX the stored ladder yields, so a conf
 // CreateCluster could not have written names a key nothing ever wrote: the
@@ -660,14 +658,12 @@ func TestDrainSliceRefusesAnInvalidStoredConf(t *testing.T) {
 // compare per key the STM read. If that grows — a new write in the batch, a
 // change in how etcdutil builds the txn — this test fails with etcd's own "too
 // many operations in txn request" while the tripwire stays green, but only
-// once the true count passes EtcdMaxTxnOps — and EtcdMaxTxnOps is no longer
-// sized by this batch. At 1024 the 486 leaves 538 ops of slack, so it takes
-// SEVEN ops added per DN (486 + 7×80 = 1046) before etcd refuses: one op per
-// DN is no longer caught here, and a single fixed one never was. The
-// transaction that does size the requirement is CreateStoragePool's, and its
-// own real-etcd proof — gateway/spceiling_test.go's
-// TestCreateStoragePoolAtTheCeiling, whose 967 leaves only 57 — is where a
-// change to how etcdutil builds a txn would now show up first.
+// once the true count passes EtcdMaxTxnOps — which CreateStoragePool sizes,
+// not this batch, so the slack here is wide: etcd refuses only several ops
+// added per DN, and a single fixed one never. The transaction that does size
+// the requirement has its own real-etcd proof — gateway/spceiling_test.go's
+// TestCreateStoragePoolAtTheCeiling, with the least slack — and that is where
+// a change to how etcdutil builds a txn shows up first.
 func TestDrainSpSliceAtTheCeiling(t *testing.T) {
 	const legsPerGrp = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
 	const dnCnt = common.MaxDelGrpPerTxn * legsPerGrp

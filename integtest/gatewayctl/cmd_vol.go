@@ -30,7 +30,7 @@ import (
 //
 // --ori is what makes the call a SNAPSHOT rather than a fresh device: it names
 // an existing thin device of the same SP, and it is also the only way --size
-// may stay 0, because a snapshot inherits the origin's size ([D-H]). It is
+// may stay 0, because a snapshot inherits the origin's size (GW17). It is
 // left empty by default so the plain case sends the "no origin" sentinel.
 func setupCreateTd(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name that owns the thin device")

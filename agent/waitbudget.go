@@ -17,7 +17,7 @@ import (
 // own, so a budget spent by one pass cannot starve the next.
 //
 // A nil *WaitBudget is a budget that is always spent: every Pause refuses, so
-// a caller holding none behaves exactly as it did before budgets existed.
+// a caller holding none never pauses.
 type WaitBudget struct {
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) error

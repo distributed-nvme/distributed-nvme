@@ -32,7 +32,7 @@
 //     ssA — reads back as an explicit [] instead of vanishing from the
 //     document.
 //   - Ids accept decimal or 0x hex; --shard is always read as HEX (the suite
-//     spreads the entry set over 00, 07, 3c, 80, ff and 81).
+//     spreads the entry set over several shard codes).
 //
 // Exit codes: 0 on success, 1 on any error (with a message on stderr), 2 on a
 // usage error.
@@ -69,7 +69,7 @@ const (
 	pingKey = common.DnvPrefix + " ping"
 	// trConfForm is the --tr spelling. Its fields are COMMA-separated, unlike
 	// workerctl's ':'-separated tuples, because tr_addr may be an IPv6
-	// literal (adr_fam ipv6, cdc.md, Additions to `common/constants.go`)
+	// literal (adr_fam ipv6, cdc.md, Constants this document owns)
 	// whose colons would be indistinguishable from field separators.
 	trConfForm = "tr_type,adr_fam,tr_addr,tr_svc_id"
 )
@@ -359,8 +359,8 @@ func (g *globals) clusterId() uint64 {
 	return uint64(g.cluster)
 }
 
-// entryKey builds the one key kind this driver knows (MD2; cdc.md, Addition
-// to `model/keys.go`) out of the four addressing flags, refusing every value
+// entryKey builds the one key kind this driver knows (MD2; cdc.md, Key helpers
+// this document owns) out of the four addressing flags, refusing every value
 // that is missing rather than defaulting it — see shardFlag on why a
 // defaulted key field is invisible until a much later assertion fails.
 func entryKey(g *globals, shard *shardFlag, spId, ssId hexUint) (

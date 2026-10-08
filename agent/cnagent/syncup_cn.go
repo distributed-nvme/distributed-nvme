@@ -24,8 +24,8 @@ import (
 // reboot the tmpfs arena and the dm state are both empty; after a plain agent
 // restart both survive, and the converge re-applies a clone whose build had
 // enabled hydration as a no-op and recovers one the dead agent left short of
-// that) — and finally sweeps the kind-`cb` wrappers no stored cntlr
-// wants any more ([D14]). It runs under the node write lock with the caller's
+// that) — and finally sweeps the kind-`cb` wrappers no stored cntlr's
+// clone_list names ([D14]). It runs under the node write lock with the caller's
 // startup trace id (SH2), and fails only when the local store itself is
 // unreadable (SH3). Background retries (CN10/CN18) and probers (CN11) mint a
 // fresh trace id per attempt.
@@ -165,11 +165,10 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// A cntlr whose pointer has left its parent's list is FORGOTTEN here —
 	// file, chunks, memory entry and object lock — without any attempt to
 	// remove its resources. That is safe because the node-level sweep below
-	// finds those resources by name, and it is better than the teardown this
-	// replaced: a teardown that failed still deleted the file, and nothing
-	// ever looked again. A missing CN reads as a list that names no cntlr —
-	// unless a cn-* file did not load, and then its cntlrs never got this
-	// far (unreadParent).
+	// finds those resources by name, so a removal that fails is found again
+	// by the next sweep instead of being forgotten with the file. A missing
+	// CN reads as a list that names no cntlr — unless a cn-* file did not
+	// load, and then its cntlrs never got this far (unreadParent).
 	for _, key := range s.allCntlrKeys() {
 		st := s.getCntlr(key)
 		req := st.loadReq()
@@ -216,10 +215,9 @@ func (s *CnAgentServer) syncupCn(
 	// The cn file is persisted BEFORE the sweep, not after it. The
 	// sweep is what removes the resources of a cntlr whose pointer has just
 	// left the list, and it can block for the whole failfast window on a dead
-	// leg; a request cancelled in that window used to skip the save entirely,
-	// and the next Reconcile then rebuilt the cntlr from the OLD list against
-	// sides that no longer exist. With the new list on disk first, a crash
-	// mid-sweep is nothing but a startup sweep.
+	// leg; with the new list on disk first, a crash or a cancellation in that
+	// window is nothing but a startup sweep, never a Reconcile that rebuilds
+	// the cntlr from a stale list against sides that no longer exist.
 	path := s.nf.LocalCnPath(req.GetClusterId(), req.GetCnId())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting cn state failed",
@@ -242,12 +240,12 @@ func (s *CnAgentServer) syncupCn(
 // recording each resource's outcome as it goes. A failed resource never aborts
 // the pass (CN29).
 //
-// CN6: QoS is accepted and deliberately **not** enforced in this version. The
-// step 4 open issue of architecture.md, Controller node, common, stands —
-// `io.max` written from any agent-created
-// cgroup binds the agent's own tools, not the nvmet kernel threads that carry
-// host IO — so the agent persists `qos_ratio` with the request (SH5 does that
-// for free), applies nothing, and reports no QoS resource in CnInfo.
+// CN6: QoS is accepted and not enforced (architecture.md, Controller node,
+// common, and Known limits): an `io.max` written from any agent-created cgroup
+// would bind the agent's own tools, not the nvmet kernel threads that carry
+// host IO. The agent persists `qos_ratio` with the request
+// (SH5 does that for free), applies nothing, and reports no QoS resource in
+// CnInfo.
 func (s *CnAgentServer) convergeCn(
 	ctx context.Context,
 	st *cnState,
@@ -415,11 +413,11 @@ func (s *CnAgentServer) ensurePort(
 // are cancelled. Nothing is removed from the node here; the node-level sweep
 // that runs next finds every one of its resources by name.
 //
-// That separation is the whole point of the design. The teardown this
-// replaced deleted the same state AFTER a best-effort removal pass whose
-// every step only logged its failure, so a cntlr whose array would not stop
-// was forgotten with its devices still live and nothing ever enumerated them
-// again. Ids are never reused, so a dropped cntlr never comes back.
+// That separation is the whole point of the design: deleting the same state
+// AFTER a best-effort removal pass whose every step only logged its failure
+// would forget a cntlr whose array would not stop with its devices still
+// live, and nothing would enumerate them again. Ids are never reused, so a
+// dropped cntlr never comes back.
 //
 // The base state itself is never torn down — like the DN port it outlives
 // every cntlr, and only lab cleanup removes it.
@@ -436,8 +434,8 @@ func (s *CnAgentServer) dropRemovedCntlrs(
 	}
 }
 
-// dropCntlrState is the bookkeeping half of the old teardown: stop what this
-// cntlr is running, delete what it persisted, and forget it.
+// dropCntlrState is the bookkeeping half of a cntlr's drop (CN7): stop what
+// this cntlr is running, delete what it persisted, and forget it.
 func (s *CnAgentServer) dropCntlrState(
 	ctx context.Context,
 	key string,

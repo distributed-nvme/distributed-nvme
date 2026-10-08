@@ -252,8 +252,8 @@ func TestFindDnCandidatesExcludeLocs(t *testing.T) {
 		t.Errorf("excludeLocs gave %v", addrsOf(cands))
 	}
 
-	// A nil exclusion changes nothing at all, which is what keeps
-	// CreateStoragePool, GrowSlice and the AR6 grow on today's behavior.
+	// A nil exclusion changes nothing at all, which is what
+	// CreateStoragePool, GrowSlice and the AR6 grow rely on.
 	plain, err := FindDnCandidates(ctx, cli, cid, cc, 20, 10, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("FindDnCandidates: %v", err)

@@ -162,7 +162,7 @@ func (s *Server) CreateTransfer(
 // clone = cross-SP live migration).
 //
 // A missing origin subsystem or ns_idx on the finalize path is skipped, not an
-// error [D-G]: the transfer is being deleted either way, and the RPC must not
+// error (GW16): the transfer is being deleted either way, and the RPC must not
 // become unable to complete because the namespace it points at was removed
 // first.
 func (s *Server) DeleteTransfer(

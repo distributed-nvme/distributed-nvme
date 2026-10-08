@@ -556,10 +556,11 @@ func (w *spWorker) fanOut() {
 	if err := model.ValidateBdevConf(state.Conf.GetBdevConf()); err != nil {
 		// architecture.md, Common validation: the SP's stored geometry is what
 		// every side and cntlr request is built from. dm_raid0_conf.stripe_size
-		// is read on no worker path at all, and
+		// is used as a value by no worker computation, and
 		// redund_md_raid1.bitmap_chunk_block_cnt only inside model.GrowSlice's
 		// geometry (architecture.md, Group on-leg layout: meta region, data
-		// region, health block); otherwise both travel verbatim
+		// region, health block); this gate only checks both for zero, and
+		// otherwise both travel verbatim
 		// inside the bdev_conf buildCntlrPlans forwards, so this is the one
 		// place the worker can refuse to hand the cn agent a geometry nobody
 		// chose.
@@ -2478,10 +2479,10 @@ func cntlrCheckRequest(
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-// completedTds applies RW19's conditions (2), (3) and (4) — condition (1),
-// an accepted code (0 or common.ReplyCodeLeftover, accepted), is the
-// caller's — to one CntlrInfo, and returns the td_ids the reply COMPLETES
-// (architecture.md, sp role): the thin info exists, its slice_id_to_dm_thin key
+// completedTds applies RW19's row conditions — the accepted code (0 or
+// common.ReplyCodeLeftover, accepted) is the caller's to check — to one
+// CntlrInfo, and returns the td_ids the reply COMPLETES
+// (RW19): the thin info exists, its slice_id_to_dm_thin key
 // set equals the SP's slice ids exactly (every slice, no extra, no missing) and
 // every row is RES_STATUS_OK.
 //

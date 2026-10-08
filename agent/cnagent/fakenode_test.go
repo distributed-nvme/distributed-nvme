@@ -61,10 +61,10 @@ type fakeNode struct {
 	// `dmsetup table` of that one name — and this is how the suite
 	// reproduces that window deterministically ([D14]).
 	lsGhosts []string
-	// dmLsLegacyDevNo switches `dmsetup ls` to the older "(253, 4)" device
-	// number spelling. Dm.List normalizes both into "253:4"; nothing on the
-	// lab kernels prints the comma form any more, so this is the only way
-	// the second branch of that normalization is ever exercised.
+	// dmLsLegacyDevNo switches `dmsetup ls` to the "(253, 4)" device number
+	// spelling. Dm.List normalizes both into "253:4"; the lab kernels print
+	// the colon form, so this is the only way the second branch of that
+	// normalization is ever exercised.
 	dmLsLegacyDevNo bool
 
 	// md arrays, keyed by the /dev/md/{name} path
@@ -78,9 +78,8 @@ type fakeNode struct {
 	// superblocks is the set of member devices carrying md metadata.
 	superblocks map[string]bool
 	// assembleDrop models mdadm leaving a member out of an assembly for
-	// stale metadata (architecture.md, "Make sure all groups are available",
-	// case 1.3): the array starts without it and the
-	// agent has to re-add it.
+	// stale metadata (cnagent.md CN12, the stale-metadata re-add of case 2):
+	// the array starts without it and the agent has to re-add it.
 	assembleDrop map[string]bool
 
 	// the base state (architecture.md, Controller node, common): the
@@ -380,8 +379,8 @@ func (f *fakeNode) releaseCmd(key string) {
 }
 
 // osClient is the cn role's OsClient double. Its block-write half is left
-// unwired: since the probe-IO carve-out the CN11 probe does not use the
-// OsClient (osclient.md, Exported raw helpers and the probe-IO carve-out) but
+// unwired: under the probe-IO carve-out (osclient.md, Exported raw helpers
+// and the probe-IO carve-out) the CN11 probe does not use the OsClient but
 // the raw WriteBlockAt/ReadBlockDirectAt
 // helpers, faked through the LegProbeIO double below, and the interface has
 // no O_DIRECT read to wire at all.
@@ -1624,7 +1623,7 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		if dm.heldRoot {
 			held = "123"
 		}
-		// The thin-pool auto-grow (architecture.md, Automatic reactions)
+		// The thin-pool auto-grow (dnv-worker.md AR6)
 		// parses the two used/total pairs out of this.
 		return fmt.Sprintf(
 			"0 %s thin-pool 0 12/1024 5/%s %s rw discard_passdown "+
@@ -1883,7 +1882,7 @@ func (f *fakeNode) arrayByDev(dev string) (string, *fakeArray) {
 
 // installArray puts an array at dev, giving it a kernel node name. An array
 // replacing one at the same path inherits its node, so a re-create does not
-// leak a /sys/block entry; the sysfs subtree of the old one is dropped.
+// leak a /sys/block entry; the sysfs subtree of the replaced one is dropped.
 func (f *fakeNode) installArray(dev string, array *fakeArray) {
 	if old, ok := f.arrays[dev]; ok {
 		f.unpublishArray(old)
@@ -2144,14 +2143,14 @@ func (f *fakeNode) seedArray(dev, name string, members ...string) {
 // ---------------------------------------------------------------------------
 
 // cmdMount mounts a fresh tmpfs at the path. Over a path that already carries
-// one, the new mount STACKS, as the kernel's does: the old tmpfs stays
+// one, the new mount STACKS, as the kernel's does: the earlier tmpfs stays
 // mounted underneath with everything on it, and the path now shows an empty
 // filesystem. So a file under the path is gone from `stat`, and `losetup
 // --associated` stops listing the loop device it backs — losetup matches a
 // loop by the backing file's inode, and a file created there afterwards is a
 // new one — while the loop device itself stays. That is what a converge that
 // read a killed `findmnt` as "nothing mounted" does to the live arena (CN5),
-// and it is modelled so that such a regression shows what follows on a node:
+// and it is modelled so that such a read shows what follows on a node:
 // a fresh `truncate` and a second loop device.
 func (f *fakeNode) cmdMount(args []string) (string, int) {
 	path := args[len(args)-1]

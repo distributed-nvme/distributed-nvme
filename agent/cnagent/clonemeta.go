@@ -16,14 +16,10 @@ import (
 // CloneMeta wraps the CN base-state tooling (architecture.md, Controller node,
 // common; cnagent.md CN5) — the tmpfs mount,
 // its sparse backing file and the single loop device — plus the clone-metadata
-// slot allocator that replaced the clone VG ([D14]). No LVM
-// runs anywhere in dnv any more: the bare `vgs`/`lvs` label scan touched every
-// block device on the node, including the transfer-origin ns-devs the CN then
-// held dm-suspended, which wedge LVM in unkillable D state — the [D13](a)
-// class the dn agent evicted first. (The CN no longer suspends those: an
-// effectively suspended namespace is parked, live, on the td's dm-error
-// (architecture.md, Namespace suspend semantics; [D12]). The scan is gone
-// regardless.)
+// slot allocator over that loop device ([D14]: dnv runs no LVM, whose
+// `vgs`/`lvs` label scan would read every block device on the node and wedge
+// in unkillable D state on the error targets, md members and pathless legs a
+// CN holds).
 //
 // The allocator's registry is the kernel's own dm tables: every kind-`cb`
 // wrapper's `0 {len} linear {loopdev} {offset}` line records its own
@@ -219,9 +215,8 @@ const cnCloneMetaUnitSectors = common.CnCloneMetaUnit / agent.SectorSize
 // clones is the CN-wide ceiling — and far fewer for large tds at a small
 // data_block_size, where region_cnt dominates (a 1 TiB td at the 64 KiB
 // minimum block size costs 5 units). Nothing gates the clone count against
-// this; exhaustion is reported as RES_STATUS_ERROR on the clone's rows, the
-// lvcreate-ENOSPC equivalent (CN18), and retiring any clone
-// on the CN frees its run again.
+// this; exhaustion is reported as RES_STATUS_ERROR on the clone's rows
+// (CN18), and a clone that leaves every stored request frees its run again.
 func cloneMetaUnits(regionCnt uint64) uint64 {
 	bytes := uint64(4*1024*1024) + regionCnt
 	return (bytes + common.CnCloneMetaUnit - 1) / common.CnCloneMetaUnit
@@ -570,8 +565,8 @@ func cloneMetaSlotStatus(
 // cloneMetaConverged reports whether this clone's wrapper is already the one
 // CN18 wants. A wrapper that is present and matches is reused as-is and is
 // **never** re-discarded: it carries a live dm-clone's superblock, and the
-// "the wrapper survived, the dm-clone did not" case of architecture.md, Clone
-// crash recovery, depends on it.
+// "the wrapper survived, the dm-clone did not" case of the recovery build
+// (cnagent.md CN18) depends on it.
 func (s *CnAgentServer) cloneMetaConverged(
 	ctx context.Context,
 	arena *cloneMetaArena,
@@ -640,8 +635,8 @@ func (s *CnAgentServer) ensureCloneMeta(
 	return nil
 }
 
-// probeCloneMeta is the ordinary read-only CN28 row of clone_id_to_meta: the
-// wrapper's own dm table, in place of the `lvs` scan the clone VG needed. The
+// probeCloneMeta is the ordinary read-only CN28 row of clone_id_to_meta, read
+// from the wrapper's own dm table. The
 // row for a clone whose slot the arena cannot supply comes from
 // probeCloneArenaCannotSupply instead, which probeCntlr consults first.
 func (s *CnAgentServer) probeCloneMeta(

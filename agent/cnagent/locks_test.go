@@ -130,10 +130,10 @@ func TestLockSmoke(t *testing.T) {
 // disconnect off the object lock (CN10's disconnect registry). A controller
 // delete whose target vanishes mid-delete waits out the kernel's admin
 // timeout (60 s) in an uninterruptible sysfs write, and no SH15 signal ends
-// it: the child returns when the kernel does. While the sweep ran that child
-// under the cntlr's object lock, every CheckCntlr round of the cntlr — which
-// takes the same lock (CN1) — waited the whole minute, and so did the
-// worker's SyncupCntlr, until its own 60 s deadline.
+// it: the child returns when the kernel does. Run under the cntlr's object
+// lock, that child would hold every CheckCntlr round of the cntlr — which
+// takes the same lock (CN1) — for the whole minute, and the worker's
+// SyncupCntlr with it, until its own 60 s deadline.
 //
 // The disconnect is parked with blockCmd, which ignores ctx exactly as such a
 // child ignores its signals, and the level drop to SP_LEVEL_NO_SIDE wants
@@ -398,7 +398,7 @@ func TestADisconnectOutlivesTheRpcCtx(t *testing.T) {
 // CN10's disconnect registry. The disconnect a sweep sets going can complete
 // after the pass's locks are released, so no lock keeps a later converge off
 // the connection it is deleting: a clone re-created on the same source while
-// the old clone's disconnect is still in the kernel finds a controller at
+// the previous clone's disconnect is still in the kernel finds a controller at
 // every wanted address, connects nothing, and builds its dm-clone on a
 // namespace device about to vanish — every read of a region not yet hydrated
 // then fails until a later converge reloads the table. While that disconnect
@@ -656,7 +656,7 @@ func TestABackgroundDisconnectCarriesThePassTraceId(t *testing.T) {
 }
 
 // TestTheBackgroundDisconnectsRunAFewAtATime pins CN10's cap on the
-// registry's disconnects. Inline, a pass issued them one at a time; off the
+// registry's disconnects. Off the
 // pass, one L10 of many legs or one pool drain would set them all going at
 // once, and each delete a vanished target stalls keeps an OsClient slot for
 // the kernel's admin timeout — enough of them, and the node's converges and
@@ -973,8 +973,7 @@ func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
 // checks here; without it the test proves nothing. The detector reports a
 // pair only when the two accesses happen to interleave between the locks
 // both sides take, so one converge rarely shows it: three hundred beside
-// four reader loops made every measured run report it while the request was
-// a plain pointer.
+// four reader loops is enough to report an unguarded pointer on every run.
 func TestAConvergeDoesNotRaceAnotherCntlrsReads(t *testing.T) {
 	if !raceEnabled {
 		t.Skip("proves nothing without -race")

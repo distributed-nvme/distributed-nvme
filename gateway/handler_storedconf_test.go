@@ -179,11 +179,10 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     gate: those three are every handler that RELEASES DN capacity through a
 //     ledger and has no conf gate of its own, and all three are driven here
 //     rather than one standing for the rest, so moving any of them off the
-//     shared constructor is caught. DeleteStoragePool used to be the fourth;
-//     it releases nothing since it became a latch (architecture.md, Storage
-//     pools), and the gate its
-//     release moved to — model.DrainSpSlice's, which needs the same ladder for
-//     the same MaintainDnCapacity reason — is pinned by
+//     shared constructor is caught. DeleteStoragePool is a latch and releases
+//     nothing (architecture.md, Storage pools); the release's gate is
+//     model.DrainSpSlice's, which needs the same ladder for the same
+//     MaintainDnCapacity reason, and it is pinned by
 //     TestDrainSliceRefusesAnInvalidStoredConf in model/drain_test.go. The
 //     ladder matters most on
 //     these paths: MaintainDnCapacity names the key to delete by shifting the
@@ -208,8 +207,8 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // same stored key, in that order — so what that case pins is the RPC's
 // refusal, not which gate produced it; that the first one runs before the
 // merged geometry is judged is TestCreateStoragePoolJudgesTheMergedGeometry's
-// to pin. CreateMigration is in the same position once newDnLedger has a
-// gate: pickDns runs before it.
+// to pin. Because newDnLedger has a gate, CreateMigration is in the same
+// position: pickDns runs before it.
 //
 // The five release cases come FIRST in the list, because scReplay runs the
 // cases in order against the repaired conf: an allocating case replayed
@@ -386,7 +385,7 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 				// architecture.md, GrowSlice, refuses a data grow that names no
 				// ext_cnt before it reads anything, so the request has to carry
 				// one to reach the conf at all. What it grows by is the slice's
-				// own allocation unit either way (D-E).
+				// own allocation unit either way (architecture.md, GrowSlice).
 				ExtCnt: 1,
 			})
 			return err

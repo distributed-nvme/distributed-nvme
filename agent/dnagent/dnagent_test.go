@@ -664,8 +664,8 @@ func TestSyncupDnTearsDownRemovedSide(t *testing.T) {
 	// The side is FORGOTTEN first — its file and chunks go at pointer
 	// removal — and the sweep then finds its resources by name, top-down:
 	// nvmet exports, the per-CN dm devices, the side device, its allocation
-	// record. The teardown this replaced ran in the opposite order and
-	// deleted the file whether or not the removals worked.
+	// record. A teardown in the opposite order would delete the file whether
+	// or not the removals worked.
 	assertOrder(t, node,
 		"cmd rm -f "+
 			nf.LocalSidePath(testCluster, testDn, testSp, testSide),
@@ -819,8 +819,7 @@ func zerooutBatches(sideDevPath string, extCnt uint64) []string {
 	return out
 }
 
-// The converge matrix of architecture.md, Side provisioning protocol, one
-// sub-test per row.
+// The converge matrix of dnagent.md DN9, one sub-test per row.
 func TestSideProvisioningMatrix(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
@@ -2480,8 +2479,8 @@ func TestDisableLevelKeepsZeroing(t *testing.T) {
 	// The side starts in the steady state, so the teardown below has real
 	// exports and dm-linears to remove; then its record is re-allocated behind
 	// the agent's back, which is what leaves the bits incomplete under a
-	// request that still says provisioned = true (row 5 of the converge matrix
-	// of architecture.md, Side provisioning protocol — the
+	// request that still says provisioned = true (the "not zeroed" row of the
+	// converge matrix of dnagent.md DN9 — the
 	// flag is not what keeps the goroutine, the bits are).
 	syncupBoth(t, srv, 1, testSide)
 	clearZeroed(t, srv, node)
@@ -2655,8 +2654,8 @@ func TestLocalStoreLossKeepsSideAllocation(t *testing.T) {
 	}
 
 	// The CP re-syncs. SyncupDn reintroduces the pointer (DN8 ordering); the
-	// side's state has not arrived yet, which is exactly the window the old
-	// sweep got wrong.
+	// side's state has not arrived yet, which is the window the sweep must
+	// leave alone.
 	node.Reset()
 	if _, err := srv2.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
@@ -2828,9 +2827,9 @@ func TestForeignDiskIsNeverWritten(t *testing.T) {
 // it reads: after a restart whose DN converge had its header read cut off,
 // the first read that answers — the side converge's own — confirms the disk,
 // and a failover of a side the table records converges before any check
-// round. The old agent confirmed the identity in the DN converge alone: one
-// killed read at startup refused every later SyncupSide at AllocSide while
-// CheckDn reported the node clean, and nothing ran the DN converge again
+// round. Confirming the identity in the DN converge alone would let one
+// killed read at startup refuse every later SyncupSide at AllocSide while
+// CheckDn reports the node clean, with nothing running the DN converge again
 // until the next DN revision.
 //
 // While no read of the header has answered at all, the DN's verdict is not
@@ -2908,8 +2907,8 @@ func TestATransientHeaderReadDoesNotFreezeTheSides(t *testing.T) {
 	stopTestServer(t, srv)
 
 	// A restart during which no read of the header answers: nothing
-	// confirms the disk, and a round must say so — a clean verdict here is
-	// what left the old agent unconfirmed until the next DN revision.
+	// confirms the disk, and a round must say so — a clean verdict here
+	// would leave the disk unconfirmed until the next DN revision.
 	setHook(node, node.killReadAlways, header)
 	srv = startTestServer(t, node)
 	reply = checkDn(srv)
@@ -3070,9 +3069,8 @@ func TestATransientHeaderReadKeepsZeroing(t *testing.T) {
 // answers again every check round reads the record back fine. The side's
 // verdict is what notices — a record with extents still to zero and no
 // zeroing goroutine is not clean — and the worker re-sends the SyncupSide
-// whose converge starts the goroutine. The old verdict was clean on every
-// round, and the side reported "zeroing 0/n" for ever with nothing zeroing
-// it.
+// whose converge starts the goroutine. A verdict clean on every round would
+// leave the side reporting "zeroing 0/n" for ever with nothing zeroing it.
 func TestASideLeftWithNothingZeroingIsReDriven(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -3163,10 +3161,10 @@ func TestASideLeftWithNothingZeroingIsReDriven(t *testing.T) {
 // A running zeroing loop reads its record as this node's only (DN5, DN9). A
 // header that turns into another node's under it — the same format, another
 // dn id — makes the next probe drop the table, and the loop's next re-read
-// loads the table under that header. No batch may be computed from it: the
-// loop used to read the record ungated, zero the batch its bits named, have
+// loads the table under that header. No batch may be computed from it: a
+// loop reading the record ungated would zero the batch its bits name, have
 // the bits refused and issue the same batch again every retry interval, for
-// ever, over a disk that was no longer confirmed as this node's.
+// ever, over a disk no longer confirmed as this node's.
 func TestAZeroingLoopIssuesNoBatchUnderAForeignHeader(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -3210,7 +3208,7 @@ func TestAZeroingLoopIssuesNoBatchUnderAForeignHeader(t *testing.T) {
 
 	// The parked batch finishes and its bits are refused. Two sightings of
 	// the refusal, the test clearing the first, are two full turns of the
-	// loop after it: under the old lookup each turn issued a batch first.
+	// loop after it: an ungated lookup would issue a batch on each turn.
 	node.Reset()
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 	refused := func() bool {
@@ -3621,9 +3619,9 @@ func TestABlankHeaderIsNotFormattedUnderAnotherNodesDevice(t *testing.T) {
 // suspended on the table it wants does not stay so. Whatever left one that
 // way — a crash or a failed command inside a reload's suspend/load/resume (a
 // reload fails closed, dnagent.md,
-// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), or an older build — the
-// next converge must resume it, for every dm kind the dn agent owns. (This side
-// has no migr_src_conf, so no window applies.)
+// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`) — the next converge must
+// resume it, for every dm kind the dn agent owns. (This side has no
+// migr_src_conf, so no window applies.)
 func TestConvergeResumesSuspendedDevices(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)

@@ -63,7 +63,7 @@ type Config struct {
 	Roles []string
 	// VoteInterval is the registry heartbeat period (VW2). The dead
 	// threshold is 2 x this and is never a constant of its own (dnv-worker.md,
-	// Additions to `common/constants.go`).
+	// Constants this document owns).
 	VoteInterval time.Duration
 	// GraceTime is how long an observed membership transition must hold
 	// before it is committed (VW5).

@@ -823,7 +823,7 @@ func sideZeroedCnt(rec *pb.DnDiskTable_SideRecord) uint64 {
 }
 
 // sideFullyZeroed is the export gate's local half (architecture.md,
-// Side provisioning protocol, step 4): the agent
+// Side provisioning protocol; the gate step of dnagent.md DN9): the agent
 // trusts its own bits over the request's provisioned flag, because the disk is
 // authoritative ([D13]) and the etcd flag is a gate, never evidence.
 func sideFullyZeroed(rec *pb.DnDiskTable_SideRecord) bool {
@@ -859,10 +859,9 @@ func sideNextZeroBatch(
 // ---------------------------------------------------------------------------
 
 // AllocSide returns the side's existing record, or allocates one. Resize is
-// out of scope, exactly as it was with the fixed-size LV: an existing record
-// whose extent total disagrees with the request is an error. The existing
-// record passes the same identity gate as a new one (confirmedLocked): its
-// extents are this node's only if its table is.
+// out of scope: an existing record whose extent total disagrees with the
+// request is an error. The existing record passes the same identity gate as a
+// new one (confirmedLocked): its extents are this node's only if its table is.
 func (d *DiskMeta) AllocSide(
 	ctx context.Context,
 	spId uint64,
@@ -895,7 +894,7 @@ func (d *DiskMeta) AllocSide(
 	// serialize an empty bytes field, out-of-range bits read as 0, and
 	// BitmapSetRange grows the slice on the first batch — so an absent field
 	// is exactly the protocol's "persist the record with zeroed_bits all 0"
-	// (architecture.md, Side provisioning protocol, step 1),
+	// (the allocation step of dnagent.md DN9),
 	// at no cost in every slot write that follows.
 	//
 	// This literal is also where the [D15] invariant is enforced: **zeroed is a
@@ -921,7 +920,7 @@ func (d *DiskMeta) AllocSide(
 }
 
 // SetSideZeroed marks logical extents [fromExt, toExt) of a side as zeroed —
-// step 3 of architecture.md, Side provisioning protocol, run once per
+// the zeroing step of dnagent.md DN9, run once per
 // completed batch. The range is half-open, and persisting it *after* the
 // `blkdiscard --zeroout` returned is what makes an interrupted batch simply
 // re-run: its bits stay 0, so the next pass redoes it rather than leaving a
@@ -1010,11 +1009,11 @@ func (d *DiskMeta) FreeSide(
 
 // AllocCloneMeta reserves a contiguous run of DnCloneMetaUnit units for one
 // migration's dm-clone metadata. The first 8 KiB of a freshly chosen slot is
-// zeroed **before** the record is persisted (DN13): lvcreate used to zero
-// implicitly, and without it stale bytes from a previous tenant would be
-// misparsed as a valid dm-clone superblock. A crash after the zeroing but
-// before the record leaves the units free and re-zeroed next time; a crash
-// after the record means the slot is already clean.
+// zeroed **before** the record is persisted (DN13): without it stale bytes
+// from a previous tenant would be misparsed as a valid dm-clone superblock. A
+// crash after the zeroing but before the record leaves the units free and
+// re-zeroed next time; a crash after the record means the slot is already
+// clean.
 //
 // An existing record passes the same identity gate as a new one, exactly as
 // AllocSide's does (confirmedLocked): its slot is this node's only if its

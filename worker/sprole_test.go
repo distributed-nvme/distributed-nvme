@@ -1010,8 +1010,8 @@ func TestSpMigrationPeerUnresolvedSkipsSide(t *testing.T) {
 // RW19 candidate selection
 // ---------------------------------------------------------------------------
 
-// TestSpCompletedTds walks the materialization flip of architecture.md, sp
-// role: the four conditions of a complete td and every negative it lists.
+// TestSpCompletedTds walks the created flip of RW19: the four conditions of a
+// complete td and the negative of each.
 func TestSpCompletedTds(t *testing.T) {
 	sliceIds := []uint64{spSliceA, spSliceB}
 	thin := func(rows map[uint64]*pb.ResInfo) *pb.CntlrInfo_ThinInfo {
@@ -3670,7 +3670,7 @@ func testOrphanedEpochIsClearedByTheOwner(t *testing.T) {
 // The shape of TestASharedErrorDoesNotPingPongTheRole, which the other live
 // lost-thin-id tests share. Three windows of pingPongCntlrUnhealthy are what
 // it runs: a primary that took the role never settles (HL2), its report never
-// being clean, so the old code handed the role back once per window.
+// being clean.
 // pingPongInterval is its cntlr_interval and side_interval. Each test runs in
 // a testing/synctest bubble and moves the clock 5 s at a time through
 // advanceUntil, only once every round the last step started has had its reply
@@ -3736,14 +3736,14 @@ func lostThinInfo(converge bool) *pb.CntlrInfo {
 // created td's thin id, so whichever cntlr is primary reports the td's
 // volume, its raid0 and the ns-dev of its namespace failing — its converge's
 // SyncupCntlr reply naming the id missing, every Check round after it reading
-// the volume MISSING — and a standby reports none of it. The old code failed
-// the settled primary over after primary_unhealthy and then, the promoted one
-// never settling, handed the role back once per cntlr_unhealthy, to the peer
-// whose standby report had cleared its err_epoch: host paths moved every
-// window for as long as the td stayed lost. Now a report whose ERROR rows are
-// all the lost td's is no trigger (HL2's shared-state rows), and a probe's,
-// which names no id, fails the primary over once, after which the role is not
-// handed back while the new primary fails only on rows the old one failed on.
+// the volume MISSING — and a standby reports none of it. A report whose ERROR
+// rows are all the lost td's is no trigger (HL2's shared-state rows), and a
+// probe's, which names no id, fails the primary over once, after which the
+// role is not handed back while the new primary fails only on rows the old one
+// failed on; without the two refusals the promoted primary, never settling,
+// would hand the role back once per cntlr_unhealthy to the peer whose standby
+// report had cleared its err_epoch, and host paths would move every window for
+// as long as the td stayed lost.
 // Across three windows there is at most that one failover, the primary's
 // err_epoch stays set, and a pass past its threshold says why nothing moves.
 func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
@@ -3881,10 +3881,10 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 // TestASharedErrorDoesNotReplaceTheCntlr pins AR7's first refusal end to end,
 // on a live coordinator with the fake clock. The pool of one slice has lost a
 // created td's thin id, and the primary has no failover candidate — the
-// fixture's standby is disabled too — so AR7 is what would act on it. The old
-// code replaced it once its err_epoch was cntlr_unhealthy old, and again on
-// every pass after, though a replacement reads the same rows from the same
-// pool. The refusal reads the report the coordinator holds, the primary's
+// fixture's standby is disabled too — so AR7 is what would act on it. Without
+// the refusal it would be replaced once its err_epoch is cntlr_unhealthy old,
+// and again on every pass after, though a replacement reads the same rows from
+// the same pool. The refusal reads the held report, the primary's
 // latest (AR1), which names the id only when it is a converge's: here the cn
 // agent answers as it does once its stream has already sent the probe's view
 // — its first Check, one revision behind as after an agent restart while the
@@ -4112,9 +4112,9 @@ func answerLostThinId(stub *stubCntlrAgent, own bool) {
 // already carries the probe's report, which names none, so at
 // cntlr_unhealthy the report the coordinator holds is the probe's and AR7's
 // first refusal cannot hold it. The primary is replaced, and the replacement
-// builds over the same pool and reads the same rows. The old code replaced
-// it in turn, once per cntlr_unhealthy, for as long as the td stayed lost;
-// now the coordinator keeps the rows of the primary it replaced, and across
+// builds over the same pool and reads the same rows. The coordinator keeps
+// the rows of the primary it replaced, so the replacement is not replaced in
+// turn once per cntlr_unhealthy for as long as the td stays lost: across
 // three windows of cntlr_unhealthy there is that one replacement, the
 // replacement's err_epoch stays set, and a pass says why it stays. A
 // replacement that fails on a row of its own beside the lost td's is still

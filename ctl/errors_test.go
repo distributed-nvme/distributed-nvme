@@ -343,8 +343,8 @@ func TestCodeNamesCoverEveryCode(t *testing.T) {
 	}
 }
 
-// TestCodeNameFallback covers the branch a future gRPC would take: a code no
-// version of the table knows still produces a usable line rather than an
+// TestCodeNameFallback covers the branch an unknown code takes: a code the
+// table does not know still produces a usable line rather than an
 // empty one.
 func TestCodeNameFallback(t *testing.T) {
 	if got := codeName(codes.Code(99)); got != "CODE_99" {

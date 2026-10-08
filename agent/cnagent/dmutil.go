@@ -350,11 +350,10 @@ func (s *CnAgentServer) probeDmConcat(
 
 // removeDm removes a dm device if it exists and reports whether it is gone
 // afterwards. A suspended device is resumed first: `dmsetup remove` does not
-// succeed on one. Nothing dnv builds is suspended in steady state any more —
-// an effectively suspended ns-dev is parked, live (CN16; architecture.md,
-// Namespace suspend semantics) — so the
-// resume is a guard for a device an older build, or a reload that was
-// interrupted or failed (Dm.Reload fails closed), left behind.
+// succeed on one. Nothing dnv builds is suspended in steady state — an
+// effectively suspended ns-dev is parked, live (CN16; architecture.md,
+// Namespace suspend semantics) — so the resume guards a device that a reload
+// which was interrupted or failed (Dm.Reload fails closed) left suspended.
 func (s *CnAgentServer) removeDm(ctx context.Context, name string) bool {
 	dev, err := s.dm.Info(ctx, name)
 	if err != nil {

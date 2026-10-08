@@ -13,7 +13,7 @@
 // --cluster is simply ignored there (dnvctl.md, `cluster` — `ctl/cluster.go`)
 // and --name is not declared on it.
 //
-// One conf flag in v1 (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
+// One conf flag (dnvctl.md, `cluster` — `ctl/cluster.go`): `create`
 // declares --extent-size, which fills dn_bin_conf.extent_size and nothing
 // else. The ClusterConf's other conf members — qos_ratio, bdev_conf,
 // alloc_conf and health_check_conf — have no flag at all, so a created
@@ -62,7 +62,7 @@ func clusterNameFlag(cmd *cobra.Command) {
 
 // clusterCreateCmd drives CreateCluster.
 //
-// --extent-size is the one cluster-conf value v1 exposes. It follows the
+// --extent-size is the one cluster-conf value dnvctl exposes. It follows the
 // `sp create` convention for an optional sub-message (spCreateCmd's
 // --stripe-size and --block-size): zero means "not given", so dn_bin_conf is
 // built only when the flag is non-zero and an untouched create sends no
@@ -85,7 +85,7 @@ func clusterNameFlag(cmd *cobra.Command) {
 // (CT9): DNVCTL_EXTENT_SIZE and an extent-size key in a --config file reach
 // no request. A ClusterConf is write-once — no RPC updates one — so a second
 // carrier would be the worst kind here: a stale variable would size every
-// cluster created under it, and text viper could not cast used to read back
+// cluster created under it, and text viper cannot cast would read back
 // as 0, leaving the cluster on common.DefaultDnExtSize for good.
 // TestClusterCreateExtentSize pins the flag's refusal and the environment's
 // silence.

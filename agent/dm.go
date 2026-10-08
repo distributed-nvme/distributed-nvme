@@ -47,11 +47,10 @@ type DmTarget struct {
 }
 
 // Info returns the live state of a dm device, nil when it does not exist, and
-// an error when `dmsetup info` did not answer. The third case used to be
-// folded into the second, which made every removal's verification a lie: a
-// killed probe reported the device gone, the caller freed the extent record
-// that still backed it, and the next allocation handed those extents out
-// twice.
+// an error when `dmsetup info` did not answer. The third case is never folded
+// into the second: a killed probe read as "gone" would free the extent record
+// that still backs the device, and the next allocation would hand those
+// extents out twice.
 func (d *Dm) Info(ctx context.Context, name string) (*DmDevInfo, error) {
 	stdout, ok, err := d.runProbe(ctx, "dmsetup", "info",
 		"--columns", "--noheadings", "-o", "attr", name)
@@ -201,11 +200,10 @@ func (d *Dm) LoadTable(
 // the operation that took it: the dn's cutover window (architecture.md,
 // Migration, src step 2) is bounded by
 // `SuspendSeconds` and ends in a reload — which is what errors the deferred IO
-// instead of replaying it — and the cn's only remaining one is CN14's snapshot
+// instead of replaying it — and the cn's only one is CN14's snapshot
 // quiesce, resumed inside the same converge pass. The namespace suspension
-// (architecture.md, Namespace suspend semantics) that used to be unbounded is
-// now a *park*: a reload onto the td's
-// dm-error, live (cnagent.md CN16).
+// (architecture.md, Namespace suspend semantics) is a *park*: a reload onto
+// the td's dm-error, live (cnagent.md CN16).
 func (d *Dm) Reload(
 	ctx context.Context,
 	name string,

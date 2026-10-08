@@ -25,9 +25,8 @@
 # through `jq -R 'fromjson? // empty'` (recs below) — a partial last line is
 # dropped, never fails an assertion.
 #
-# THREE THINGS THIS SUITE ESTABLISHED ON REAL HARDWARE (Linux 7.0, nvme-cli
-# 2.16, nvme-stas 2.4.1). They are the reason several assertions below look
-# the way they do:
+# Three facts of the lab stack (Linux 7.0, nvme-cli 2.16, nvme-stas 2.4.1)
+# that shape several assertions below:
 #
 #  1. The discovery AEN reaches a host as the udev property
 #     NVME_AEN=0x70f002 (the AER completion's dword 0 verbatim), NOT as
@@ -915,8 +914,8 @@ wait_stas_converged() { # <h1|h2>
 	log "  ok: $1 holds four discovery connections to $IP1"
 }
 
-# no_test_subsystems is the stas case's mass-disconnect assertion (CM4;
-# Integration test plan, Cases): stacd disconnected everything whose DLPE
+# no_test_subsystems is the stas case's mass-disconnect assertion (cdc.md,
+# Integration test plan; DS6): stacd disconnected everything whose DLPE
 # vanished. It is deliberately not a bare
 # `[ -z "$(test_subsystems …)" ]`: subsys_json's die runs inside that
 # substitution and ends only the subshell, so a listing that failed would come

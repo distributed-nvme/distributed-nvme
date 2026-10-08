@@ -1231,7 +1231,7 @@ func TestBdevConfGeometryRules(t *testing.T) {
 
 // TestValidateEventThreshold pins the leg_unhealthy > side_unhealthy rule, and
 // pins that it is applied AFTER default resolution — that is the whole point
-// of the row. The leg repair of architecture.md, Automatic reactions, fires on
+// of the row. The leg repair of dnv-worker.md AR8 fires on
 // the side threshold when the DN looks dead and on the leg threshold when only
 // the cntlr's path is bad, so the leg wait is the longer one by construction.
 //

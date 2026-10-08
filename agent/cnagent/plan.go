@@ -281,10 +281,9 @@ func (gp *grpPlan) legNames() []string {
 }
 
 // hasLateMember reports whether a group's leg_list holds a member this pass
-// may not use — not available (architecture.md, "Make sure all groups are
-// available": no path both live and optimized, or
-// its connect, its multipath namespace or its wrapper failed, or a
-// controller's address read did not answer, cnagent.md CN10). In an md group
+// may not use — not available (cnagent.md CN12: no path both live and
+// optimized, or its connect, its multipath namespace or its wrapper failed,
+// or a controller's address read did not answer, CN10). In an md group
 // that leaves the group unassembled, assembled degraded without it, with its
 // --add skipped by reconcileMembers, or running with md still holding it —
 // its side died under the array (AR8's case), its path is otherwise no
@@ -873,8 +872,8 @@ func (p *cntlrPlan) buildSubsystems() {
 	}
 }
 
-// effectiveSuspend is CN16's rule (architecture.md, Namespace suspend
-// semantics): a namespace is suspended iff its
+// effectiveSuspend is the effective-suspend rule of cnagent.md CN16: a
+// namespace is suspended iff its
 // stored flag says so **or** an auto_suspend transfer names it — unless an
 // auto_resume clone targets its td, which overrides to not-suspended. That
 // override is the flow of architecture.md, Transfer + clone = cross-SP live
