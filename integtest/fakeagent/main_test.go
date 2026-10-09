@@ -1388,6 +1388,61 @@ func TestCheckCntlrHangRounds(t *testing.T) {
 	cancel()
 }
 
+// TestCheckCntlrDelayRounds is the fake's delay_rounds_ms lever (worker_test.sh
+// case H's missed round followed by a late answer): every round of the object
+// is answered, but no sooner than the delay, while another object's round is
+// answered at once; and a round hang_rounds holds is held first, the delay
+// applying to the rounds after it.
+func TestCheckCntlrDelayRounds(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+	const delay = 600 * time.Millisecond
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"delay_rounds_ms": 600}}}`)
+
+	start := time.Now()
+	done, cancel := cntlrRound(t, cnClient)
+	cnRound(t, cnClient)
+	if elapsed := time.Since(start); elapsed >= delay {
+		t.Fatalf("another object's round took %v, as long as the delay",
+			elapsed)
+	}
+	if err := wantReturned(t, "the late round", done); err != nil {
+		t.Fatalf("the late round failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Fatalf("the round was answered after %v, before the %v delay",
+			elapsed, delay)
+	}
+	cancel()
+
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"hang_rounds": 1, "delay_rounds_ms": 600}}}`)
+	done, cancel = cntlrRound(t, cnClient)
+	// Held, not delayed: a round that is only delayed answers inside this
+	// wait.
+	select {
+	case err := <-done:
+		t.Fatalf("the counted round returned while held: %v", err)
+	case <-time.After(delay + 2*hangPollInterval):
+	}
+	cancel()
+	if err := wantReturned(t, "the counted round", done); err == nil {
+		t.Fatal("the counted round replied")
+	}
+	start = time.Now()
+	done, cancel = cntlrRound(t, cnClient)
+	if err := wantReturned(t, "the round after it", done); err != nil {
+		t.Fatalf("the round after the counted one failed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Fatalf("the round after the counted one came after %v, before "+
+			"the %v delay", elapsed, delay)
+	}
+	cancel()
+}
+
 // TestSyncupCntlrHangSyncup is the fake's hang_syncup lever (worker_test.sh
 // case H's demotion that a stalled old primary never confirms): a
 // SyncupCntlr is held unanswered while the lever is set, with the lock

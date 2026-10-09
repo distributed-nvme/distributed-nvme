@@ -446,15 +446,16 @@ func validateEventThreshold(threshold *pb.EventThreshold) error {
 const minPrimaryRounds = 2
 
 // validatePrimaryThreshold is the rule of architecture.md, Common validation,
-// that ties a pool's primary threshold to its cluster: primary_unhealthy,
-// after its default is resolved, must cover at least two of the cluster's
+// that ties a pool's primary threshold to its cluster: primary_unhealthy, after
+// its default is resolved, must cover at least two of the cluster's
 // cntlr_interval. The err_epoch one missed check round stamps lives about one
 // interval, until the next round clears it, and the rule leaves a second
-// interval of margin; dnv-worker.md, Known limits, says when one missed round
-// can still reach the threshold. It reads stored state, the cluster's
-// health_check_conf, so it is one of the
-// checks CreateStoragePool runs where it runs validateMergedBdevConf: on its
-// plain pre-read, before the scans, and once more inside its STM.
+// interval of margin; a failover also needs two unhealthy verdicts in a row
+// from the primary's rounds (dnv-worker.md AR10), which one missed round
+// followed by a clean answer never gives. It reads stored state, the cluster's
+// health_check_conf, so it is one of the checks CreateStoragePool runs where it
+// runs validateMergedBdevConf: on its plain pre-read, before the scans, and
+// once more inside its STM.
 func validatePrimaryThreshold(
 	threshold *pb.EventThreshold,
 	hc *pb.HealthCheckConf,

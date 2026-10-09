@@ -646,6 +646,182 @@ func TestStandbyCleanReplyBelowItsRevisionClearsNothing(t *testing.T) {
 	})
 }
 
+// TestCntlrRunCountsRoundsOnly pins where AR10's run of unhealthy verdicts
+// comes from: a round's reply with an ERROR row and a round with no reply in
+// time each add one, a Syncup* reply with an ERROR row neither starts the run
+// nor adds to it, and a clean answer of either kind ends it. A round is judged
+// by its own report: a reply that leaves its info out as unchanged repeats
+// what its stream last carried, not a Syncup*'s info stored since. The loop
+// halves show the revision worker marking a round's reply and leaving a
+// Syncup*'s unmarked: the agent answers every round one revision behind, so
+// each round is followed by a Syncup*.
+func TestCntlrRunCountsRoundsOnly(t *testing.T) {
+	ctx := context.Background()
+	failed := func() *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resErr("md", "failed")},
+		}
+	}
+	clean := func() *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resOk("md")},
+		}
+	}
+
+	t.Run("the driver", func(t *testing.T) {
+		captureLogs(t)
+		d := newTestDeps(
+			testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+		)
+		d.health = &fakeHealthWriter{}
+		w := spTestWorker(d)
+		w.verdicts = newVerdictMemo()
+		driver := newCntlrDriver(w, nil, settlePlan(true, false))
+		run := func() int {
+			return w.verdicts.snapshot(spFixture()).runs[spCntlrPrimary]
+		}
+		judged := func() bool {
+			return w.verdicts.snapshot(spFixture()).cntlrs[spCntlrPrimary]
+		}
+		// A round's reply is what its stream carried; nil is a reply that
+		// left its info out as unchanged.
+		round := func(info *pb.CntlrInfo) {
+			if info != nil {
+				driver.storeInfo(info)
+				driver.setStreamInfo(info)
+			}
+			driver.observe(ctx, &replyState{
+				revision: 7, infoPresent: info != nil, fromRound: true,
+			})
+		}
+		syncup := func(info *pb.CntlrInfo) {
+			driver.storeInfo(info)
+			driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		}
+		want := func(what string, wantRun int, wantJudged bool) {
+			t.Helper()
+			if run() != wantRun || judged() != wantJudged {
+				t.Fatalf("%s: run %d, judged %t; want %d, %t", what, run(),
+					judged(), wantRun, wantJudged)
+			}
+		}
+
+		syncup(failed())
+		want("a Syncup reply's ERROR row", 0, true)
+		round(failed())
+		driver.unreachable(ctx)
+		want("a round's ERROR row and a missed round", 2, true)
+		syncup(failed())
+		want("a Syncup reply's ERROR row after them", 2, true)
+		round(clean())
+		want("a clean round", 0, false)
+		round(failed())
+		syncup(clean())
+		want("a clean Syncup reply after a round's ERROR row", 0, false)
+
+		round(clean())
+		syncup(failed())
+		round(nil)
+		round(nil)
+		want("rounds repeating a clean stream after a Syncup's ERROR row",
+			0, true)
+		round(failed())
+		round(nil)
+		want("rounds repeating a stream's ERROR row", 2, true)
+
+		// A round's own clean report ends the run even while the latest
+		// known state is a Syncup*'s ERROR row, which keeps the verdict
+		// unhealthy.
+		round(clean())
+		driver.unreachable(ctx)
+		syncup(failed())
+		round(nil)
+		want("a round repeating a clean stream after a missed round and a "+
+			"Syncup's ERROR row", 0, true)
+	})
+
+	// loop starts a coordinator whose primary's agent answers every round one
+	// revision behind with check's info, and every Syncup with an ERROR row.
+	loop := func(t *testing.T, check *pb.CntlrInfo, omit bool) (
+		*spHarness, func() int, func() int,
+	) {
+		t.Helper()
+		h := newSpHarness(t)
+		h.addFixtureAgents()
+		var mu sync.Mutex
+		var checks int
+		stub := h.cntlrs[spCnA]
+		stub.omitUnchangedInfo = omit
+		stub.syncupReply = func(
+			req *pb.SyncupCntlrRequest,
+		) *pb.SyncupCntlrReply {
+			return &pb.SyncupCntlrReply{
+				Revision: req.GetRevision(), CntlrInfo: failed(),
+			}
+		}
+		stub.checkReply = func(
+			req *pb.CheckCntlrRequest,
+		) *pb.CheckCntlrReply {
+			mu.Lock()
+			checks++
+			mu.Unlock()
+			return &pb.CheckCntlrReply{
+				Revision:  req.GetRevision() - 1,
+				CntlrInfo: proto.Clone(check).(*pb.CntlrInfo),
+			}
+		}
+		w := h.start()
+		h.reactWith(w, &fakeReactionOps{})
+		run := func() int {
+			return w.verdicts.snapshot(spFixture()).runs[spCntlrPrimary]
+		}
+		rounds := func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return checks
+		}
+		return h, run, rounds
+	}
+	settle := func() {
+		until := time.Now().Add(200 * time.Millisecond)
+		for time.Now().Before(until) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	t.Run("the loop", func(t *testing.T) {
+		h, run, rounds := loop(t, failed(), false)
+		waitFor(t, "the first round and its Syncup", func() bool {
+			return run() >= 1 && len(h.cntlrs[spCnA].syncups()) >= 1
+		})
+		settle()
+		if got := rounds(); run() != got {
+			t.Fatalf("run %d after %d rounds, each followed by a Syncup, all "+
+				"with an ERROR row; want one per round only", run(), got)
+		}
+		got := rounds()
+		h.clk.advance(roundInterval)
+		waitFor(t, "the next round's verdict", func() bool {
+			return run() > got
+		})
+	})
+
+	t.Run("the loop, rounds repeating a clean stream", func(t *testing.T) {
+		h, run, _ := loop(t, clean(), true)
+		waitFor(t, "a Syncup after the first round", func() bool {
+			return len(h.cntlrs[spCnA].syncups()) >= 1
+		})
+		for range 3 {
+			h.clk.advance(roundInterval)
+			settle()
+		}
+		if n := len(h.cntlrs[spCnA].syncups()); n < 2 || run() != 0 {
+			t.Fatalf("run %d after %d Syncups with an ERROR row and rounds "+
+				"repeating a clean stream; want no run", run(), n)
+		}
+	})
+}
+
 // settleDriver builds one cntlr child's driver outside any loop, the way the
 // coordinator's startCntlrChild does, over a recording health writer: plan
 // (settlePlan's shape, driving revision 7) and a clean stored CntlrInfo. Its

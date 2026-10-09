@@ -523,12 +523,20 @@ func (w *spWorker) reactor() *reactor {
 // The own-verdict memo (AR10)
 // ---------------------------------------------------------------------------
 
+// failoverRun is the run of unhealthy health verdicts in a row, from the
+// primary's Check* rounds alone, that AR5's threshold trigger needs besides
+// its threshold (AR10): one round missed or slow, followed by a clean answer
+// of either kind, fails no primary over, while a primary that answers no
+// round gives its second such verdict one round later.
+const failoverRun = 2
+
 // verdictMemo is AR10's memo: the objects of the SP — cntlrs, legs and sides
 // — whose latest health verdict by this coordinator's own monitors is
-// unhealthy. A threshold reaction fires only for an object it holds, so an
-// err_epoch an earlier owner left, or another observer wrote, fires nothing
-// before this coordinator has judged the object itself, while the clock still
-// runs from the stored epoch (AR4). The cntlr and side monitors note their
+// unhealthy, and each cntlr's run of unhealthy verdicts from its rounds. A
+// threshold reaction fires only for an object it holds, so an err_epoch an
+// earlier owner left, or another observer wrote, fires nothing before this
+// coordinator has judged the object itself, while the clock still runs from
+// the stored epoch (AR4). The cntlr and side monitors note their
 // verdicts from the children's goroutines, while the leg monitors and the pass
 // work on the coordinator's, so it is locked. It lives with the coordinator,
 // from its start to its stop, which is the coordinator's tenure of the SP: a
@@ -536,21 +544,29 @@ func (w *spWorker) reactor() *reactor {
 type verdictMemo struct {
 	mu     sync.Mutex
 	cntlrs map[uint64]bool
-	legs   map[uint64]bool
-	sides  map[sideKey]bool
+	// runs counts, for each cntlr, the unhealthy verdicts its Check* rounds
+	// gave in a row, each judged by the round's own report (noteRound) — an
+	// ERROR row, or no reply in time — since its last clean answer of either
+	// kind. A Syncup* reply with an ERROR row neither starts a run nor adds
+	// to one: a converge still waiting for a member reports its groups
+	// ERROR, and the next primary would wait too.
+	runs  map[uint64]int
+	legs  map[uint64]bool
+	sides map[sideKey]bool
 }
 
 // newVerdictMemo builds an empty memo.
 func newVerdictMemo() *verdictMemo {
 	return &verdictMemo{
 		cntlrs: make(map[uint64]bool),
+		runs:   make(map[uint64]int),
 		legs:   make(map[uint64]bool),
 		sides:  make(map[sideKey]bool),
 	}
 }
 
-// noteCntlr records one verdict on a cntlr: unhealthy adds it, clean drops
-// it.
+// noteCntlr records one verdict on a cntlr, whichever answer gave it:
+// unhealthy adds it, clean drops it and ends its run.
 func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
 	if m == nil {
 		return
@@ -558,6 +574,25 @@ func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	noteVerdict(m.cntlrs, cntlrId, unhealthy)
+	if !unhealthy {
+		delete(m.runs, cntlrId)
+	}
+}
+
+// noteRound records what one Check* round of a cntlr reported, judged by that
+// round's own report (cntlrDriver.roundInfo): unhealthy — an ERROR row, or no
+// reply in time — adds one to the cntlr's run, clean ends it.
+func (m *verdictMemo) noteRound(cntlrId uint64, unhealthy bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if unhealthy {
+		m.runs[cntlrId]++
+		return
+	}
+	delete(m.runs, cntlrId)
 }
 
 // noteLeg records one verdict on a leg.
@@ -590,9 +625,10 @@ func noteVerdict[K comparable](set map[K]bool, key K, unhealthy bool) {
 }
 
 // judgedSet is one pass's copy of the memo (AR10): the cntlrs, legs and
-// sides this coordinator last judged unhealthy.
+// sides this coordinator last judged unhealthy, and each cntlr's run.
 type judgedSet struct {
 	cntlrs map[uint64]bool
+	runs   map[uint64]int
 	legs   map[uint64]bool
 	sides  map[sideKey]bool
 }
@@ -603,6 +639,7 @@ type judgedSet struct {
 func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	out := judgedSet{
 		cntlrs: make(map[uint64]bool),
+		runs:   make(map[uint64]int),
 		legs:   make(map[uint64]bool),
 		sides:  make(map[sideKey]bool),
 	}
@@ -637,6 +674,13 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 			continue
 		}
 		out.cntlrs[cntlrId] = true
+	}
+	for cntlrId, run := range m.runs {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.runs, cntlrId)
+			continue
+		}
+		out.runs[cntlrId] = run
 	}
 	for legId := range m.legs {
 		if !legs[legId] {
@@ -681,7 +725,8 @@ type spPass struct {
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
 	failoverCand uint64
 	// judged is AR10's memo as the pass began: the objects this coordinator
-	// last judged unhealthy, which alone a threshold may fire on.
+	// last judged unhealthy, which alone a threshold may fire on, and each
+	// cntlr's run of unhealthy verdicts from its rounds.
 	judged judgedSet
 }
 
@@ -934,9 +979,11 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	}
 	if !p.primary.GetDisabled() {
 		// AR10: the threshold fires only on a primary this coordinator has
-		// judged unhealthy itself; the disabled trigger needs no verdict.
+		// judged unhealthy itself, on failoverRun of its rounds in a row;
+		// the disabled trigger needs no verdict.
 		if !reached(p.now, p.primary.GetErrEpoch(), threshold) ||
-			!p.judged.cntlrs[p.primaryId] {
+			!p.judged.cntlrs[p.primaryId] ||
+			p.judged.runs[p.primaryId] < failoverRun {
 			return false
 		}
 		// AR5's first refusal: a report whose every ERROR row belongs to the

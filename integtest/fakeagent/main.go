@@ -202,6 +202,9 @@ type objectBehavior struct {
 	// (waitForRound).
 	HangSyncup bool   `json:"hang_syncup,omitempty"`
 	HangRounds uint32 `json:"hang_rounds,omitempty"`
+	// DelayRoundsMs answers each of the object's Check* rounds that many
+	// milliseconds late, as a busy agent does (waitForRound).
+	DelayRoundsMs uint32 `json:"delay_rounds_ms,omitempty"`
 
 	// status is Status parsed once by validate; chunkIdList is ChunkIdList's
 	// "s:b" strings parsed by the same pass.
@@ -1276,6 +1279,11 @@ const hangPollInterval = 200 * time.Millisecond
 // asks for, whatever its own polls cost. Clearing the file does not release
 // a round it holds: the worker's round timeout ends it. drop_stream wins over
 // both.
+//
+// delay_rounds_ms answers a round that is neither held nor hung that many
+// milliseconds late — a late answer, still in time while the delay stays
+// under the worker's round timeout (worker_test.sh case H's missed round
+// followed by a late one). A stream that ends during the delay gets no reply.
 func (a *fakeAgent) waitForRound(
 	ctx context.Context, key string,
 ) (bool, error) {
@@ -1283,8 +1291,10 @@ func (a *fakeAgent) waitForRound(
 		a.mu.Lock()
 		a.refreshLocked(ctx)
 		hang, drop := false, false
+		var delay time.Duration
 		if ob := a.objBehaviorLocked(key); ob != nil {
 			hang, drop = ob.Hang, ob.DropStream
+			delay = time.Duration(ob.DelayRoundsMs) * time.Millisecond
 		}
 		held := !drop && a.heldRounds[key] != 0
 		if held {
@@ -1299,6 +1309,13 @@ func (a *fakeAgent) waitForRound(
 			return false, ctx.Err()
 		}
 		if !hang {
+			if delay > 0 {
+				select {
+				case <-ctx.Done():
+					return false, ctx.Err()
+				case <-time.After(delay):
+				}
+			}
 			return false, nil
 		}
 		select {

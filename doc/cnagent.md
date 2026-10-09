@@ -2912,8 +2912,10 @@ report no `Syncup*` could ever clear.
   lock too (CN1). The worker waits for a round's reply at most one
   `cntlr_interval` (`dnv-worker.md` RW8); a round that waits behind an
   attempt past that is a missed round, which stamps `Cntlr.err_epoch`
-  (`dnv-worker.md` HL2), and once that has aged the primary-unhealthy threshold the failover reaction (`dnv-worker.md` AR5) can
-  fail over a primary whose only fault is a dead leg — and the new
+  (`dnv-worker.md` HL2), and two such rounds in a row, once that epoch has
+  aged the primary-unhealthy threshold, let the failover reaction
+  (`dnv-worker.md` AR5, AR10) fail over a primary whose only fault is a
+  dead leg — and the new
   primary inherits the same late member, and with it the same retry. The
   connect retry holds that lock too, but only while a side's connect
   fails — and with the CN10 pass budget such an attempt also spends about

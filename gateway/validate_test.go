@@ -1329,8 +1329,9 @@ func TestValidateEventThresholdMessageIsResolved(t *testing.T) {
 // its default is resolved, must be at least twice the cluster's
 // health_check_conf.cntlr_interval, so that the err_epoch one missed check
 // round stamps, which the next round clears, has a second interval of margin
-// before the failover of dnv-worker.md AR5 can fire on it — a margin, not a
-// guarantee (dnv-worker.md, Known limits).
+// before the failover of dnv-worker.md AR5 can fire on it, which also needs
+// two unhealthy verdicts in a row from the primary's rounds (dnv-worker.md
+// AR10).
 //
 // As for the leg-over-side rule above, the unset rows are the ones that matter.
 // At the default interval an unset primary_unhealthy is accepted: that is every

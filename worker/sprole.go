@@ -2216,11 +2216,20 @@ type cntlrDriver struct {
 	ptr  *pb.CntlrPointer
 	addr string
 
-	// mu guards next (RW6) and lastInfo, which fold writes from the stream's
-	// pump goroutine and the loop reads.
+	// mu guards next (RW6), lastInfo, which fold writes from the stream's
+	// pump goroutine and the loop reads, and streamInfo.
 	mu       sync.Mutex
 	next     *cntlrPlan
 	lastInfo *pb.CntlrInfo
+	// streamInfo is the CntlrInfo the open CheckCntlr stream last carried:
+	// what a round's reply that leaves its info out as unchanged repeats,
+	// where lastInfo may hold a Syncup*'s since. AR10's run judges a round
+	// by it; nil until the stream's first info.
+	streamInfo *pb.CntlrInfo
+	// memo is the coordinator's own-verdict memo, and cntlrId this cntlr's
+	// key in it (AR10).
+	memo    *verdictMemo
+	cntlrId uint64
 
 	plan   *cntlrPlan
 	health *healthMonitor
@@ -2255,6 +2264,7 @@ func newCntlrDriver(
 	d.health = newCntlrMonitor(w.deps, w.cid, w.spId, p.cntlrId)
 	d.health.settlePending = p.settling
 	memo, cntlrId := w.verdicts, p.cntlrId
+	d.memo, d.cntlrId = memo, cntlrId
 	d.health.verdict = func(unhealthy bool) {
 		memo.noteCntlr(cntlrId, unhealthy)
 	}
@@ -2326,6 +2336,20 @@ func (d *cntlrDriver) info() *pb.CntlrInfo {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.lastInfo
+}
+
+// setStreamInfo remembers the CntlrInfo the open Check stream last carried,
+// nil for a new stream; roundInfo returns it (AR10's run).
+func (d *cntlrDriver) setStreamInfo(info *pb.CntlrInfo) {
+	d.mu.Lock()
+	d.streamInfo = info
+	d.mu.Unlock()
+}
+
+func (d *cntlrDriver) roundInfo() *pb.CntlrInfo {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.streamInfo
 }
 
 // infoSnapshot returns a COPY of the cntlr's latest info, taken under the
@@ -2411,6 +2435,9 @@ func (d *cntlrDriver) openStream(
 	if err != nil {
 		return nil, fmt.Errorf("check cntlr stream: %w", err)
 	}
+	// A new stream has carried nothing yet: the agent's first reply on it
+	// carries the info, unchanged or not.
+	d.setStreamInfo(nil)
 	return &cntlrCheckStream{driver: d, stream: stream}, nil
 }
 
@@ -2527,6 +2554,14 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// would leave the build that follows to primary_unhealthy.
 	canSettle := plan.primary && !plan.req.GetCntlr().GetDisabled() &&
 		r.revision == plan.req.GetRevision() && primaryShapeBuilt(info)
+	if r.fromRound && obs != healthNone {
+		// AR10: the run judges a round by its own report — the info the
+		// reply carried or, when it left it out as unchanged, the info its
+		// stream last carried — and never by a Syncup*'s info that the
+		// latest known state may hold since.
+		own, _ := cntlrObservation(r.code, d.roundInfo())
+		d.memo.noteRound(d.cntlrId, own != healthClean)
+	}
 	if d.health.observeSettle(ctx, obs, res, canSettle) {
 		slog.InfoContext(ctx, msgCntlrSettled,
 			slog.String("role", common.WorkerRoleSp),
@@ -2625,9 +2660,11 @@ func (d *cntlrDriver) send(ctx context.Context, rep spReport) {
 // unreachable folds a broken stream or a missed reply into the cntlr's health
 // (HL2; architecture.md, Live-state reporting). It reports nothing about the
 // legs: only an ERROR row from the primary sets a leg's err_epoch, and an
-// unreachable primary is the CNTLR's health, not the legs'.
+// unreachable primary is the CNTLR's health, not the legs'. Only a round
+// reaches it, so it adds to AR10's run.
 func (d *cntlrDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
+	d.memo.noteRound(d.cntlrId, true)
 	d.health.observe(ctx, healthUnreachable, "")
 }
 
@@ -2683,6 +2720,9 @@ func (s *cntlrCheckStream) recv() (*replyState, error) {
 	reply, err := s.stream.Recv()
 	if err != nil {
 		return nil, fmt.Errorf("check cntlr recv: %w", err)
+	}
+	if info := reply.GetCntlrInfo(); info != nil {
+		s.driver.setStreamInfo(info)
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),

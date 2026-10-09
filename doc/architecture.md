@@ -1595,8 +1595,11 @@ maintained per Capacity index keys; a delete reverses both.
   clears it when that round is clean (`dnv-worker.md` RW4, RW8), so the
   epoch of one missed round lives about one interval, and the rule leaves
   a second interval of margin before that epoch can fail the primary
-  over. The margin is not a guarantee: `dnv-worker.md`, Known limits, says
-  when one missed round can still reach the threshold. The defaults meet
+  over. Epochs are whole seconds and the next answer can come late, so the
+  margin alone can be crossed; the failover therefore also needs two
+  unhealthy verdicts in a row from the primary's check rounds
+  (`dnv-worker.md` AR10), which one missed round followed by a clean answer
+  never gives. The defaults meet
   the rule exactly, `DefaultPrimaryUnhealthy` being two of
   `DefaultHealthCheckInterval`, so an SP on a cluster whose
   `cntlr_interval` is longer than its default must set `primary_unhealthy`
@@ -3560,7 +3563,9 @@ meaning its default (Common validation; `dnv-worker.md` AR4). A breach
 fires a reaction — the failover of an unhealthy primary, a cntlr
 replacement, a leg repair on either of its clocks — only on an object
 whose latest health verdict by this worker's coordinator of the SP is
-unhealthy. A coordinator has no verdict when it starts, after a restart
+unhealthy, and the failover only once the primary's last two health
+verdicts from check rounds are both unhealthy, with no clean answer, of a
+round or of a syncup, since the earlier of them. A coordinator has no verdict when it starts, after a restart
 and after a handoff alike; the clock still runs from the stored
 `err_epoch`, and the disabled trigger needs no verdict (`dnv-worker.md`
 AR10). An epoch that an earlier owner left, or that another observer

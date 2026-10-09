@@ -371,9 +371,9 @@ THR_REACT_LEG=30
 # measures what a host sees until the role has moved, so the failover must
 # land within seconds: the primary threshold is two of the cluster's
 # cntlr_interval, the shortest the gateway accepts (architecture.md, Common
-# validation), so that a single missed round followed by a prompt clean round
-# fails nothing over (dnv-worker.md, Known limits). It is not typed here:
-# read_constants computes it from
+# validation); a single missed round fails nothing over, since a failover
+# needs two unhealthy rounds in a row (dnv-worker.md AR10). It is not typed
+# here: read_constants computes it from
 # common.DefaultHealthCheckInterval, the cntlr_interval every cluster of this
 # suite stores. Everything else may not react at all while the agent is
 # stopped, so the other three are the quiet set's: AR7 must not replace the
@@ -12751,18 +12751,17 @@ case_copy() {
 #  AR5 (primary failover). tryFailover fires once the primary's err_epoch is
 #  primary_unhealthy seconds old, or cntlr_unhealthy seconds old — when that
 #  is the longer, as it is in this set — while the primary is settling, i.e.
-#  has not yet reported its stack built and clean as primary since it got
-#  the role (dnv-worker.md HL2, AR5; tryFailover in worker/reaction.go), and
-#  only once this worker has itself judged the primary unhealthy
-#  (dnv-worker.md AR10), which every missed round of the killed agent gives
-#  it. The primary stage 03 kills has normally settled long before: setup
-#  waits for
-#  its whole stack, and its first clean report as primary that shows the
-#  stack built settles it — the earlier ones, sent while the new SP's sides
-#  are still zeroing, read its pools PROVISIONING and settle nothing
-#  (cnagent.md CN9). A cntlr's err_epoch is set by
-#  the health monitor when the CN agent's stream cannot be opened, so killing
-#  the agent is enough — the control path is what AR5 watches.
+#  has not yet reported its stack built and clean as primary since it got the
+#  role (dnv-worker.md HL2, AR5; tryFailover in worker/reaction.go), and only
+#  once this worker has itself judged the primary unhealthy on two of its
+#  rounds in a row (dnv-worker.md AR10), which the killed agent's missed
+#  rounds give it. The primary stage 03 kills has normally settled long
+#  before: setup waits for its whole stack, and its first clean report as
+#  primary that shows the stack built settles it — the earlier ones, sent
+#  while the new SP's sides are still zeroing, read its pools PROVISIONING and
+#  settle nothing (cnagent.md CN9). A cntlr's err_epoch is set by the health
+#  monitor when the CN agent's stream cannot be opened, so killing the agent
+#  is enough — the control path is what AR5 watches.
 #
 #  AR7 (cntlr replacement). replaceTarget takes the smallest cntlr_id that has
 #  been unhealthy for cntlr_unhealthy, was last judged unhealthy by this
@@ -14759,11 +14758,14 @@ case_react() {
 # WHAT IT PROVES, in the order a host meets it:
 #
 #  * The failover lands within seconds of the stop. The cutoff set's primary
-#    threshold is two check rounds, AR5 fires only on a verdict of this worker
-#    (dnv-worker.md AR10) and every missed round gives it one, so the bound is
-#    that threshold plus three rounds — up to one until the next round starts,
-#    that round's timeout, which stamps the err_epoch, and up to one until the
-#    pass that acts — plus CUT_SLACK for the driver's own polling.
+#    threshold is two check rounds, and AR5 fires only once this worker has
+#    itself judged the primary unhealthy on two of its rounds in a row
+#    (dnv-worker.md AR10). Every missed round gives such a verdict, and the
+#    second comes one wait and one round timeout after the first, which is
+#    the threshold itself, so the bound is that threshold plus three rounds —
+#    up to one until the next round starts, that round's timeout, which stamps
+#    the err_epoch, and up to one until the pass that acts — plus CUT_SLACK
+#    for the driver's own polling.
 #  * The failover's own transaction takes the old primary out of the discovery
 #    records: it is then a standby whose err_epoch is set, which the listing
 #    rule does not list (architecture.md [D18]). Read through host1, which runs

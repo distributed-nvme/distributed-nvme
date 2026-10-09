@@ -48,6 +48,10 @@ type replyState struct {
 	// show_info = false reply carries one only when something changed, so
 	// health is evaluated on the LATEST KNOWN info either way (HL5).
 	infoPresent bool
+	// fromRound reports whether the reply answered a Check* round rather
+	// than a Syncup*: AR10's run of unhealthy health verdicts, which AR5's
+	// threshold trigger asks two of, counts rounds only.
+	fromRound bool
 }
 
 // checkStream is one object's Check* bidirectional stream (RW4,
@@ -97,11 +101,12 @@ type objDriver interface {
 		cc *pb.ClusterConf,
 	) (*replyState, error)
 	// observe folds one reply — from a round or from a syncup, which are the
-	// same thing here (HL4) — into health and the kind's own consequences
+	// same thing here (HL4) but for AR10's run, which counts rounds only
+	// (replyState.fromRound) — into health and the kind's own consequences
 	// (the flips of RW18/RW19, the pushes of BM1-BM6).
 	observe(ctx context.Context, r *replyState)
 	// unreachable folds a stream that cannot be opened, breaks or misses its
-	// reply into health (HL1/HL2).
+	// reply into health (HL1/HL2). Only a round reaches it (fail).
 	unreachable(ctx context.Context)
 }
 
@@ -382,6 +387,7 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 	// the desired state does not want, every round issues a Syncup* that
 	// sweeps again. No backoff (RW12), and no flag anywhere — the code itself
 	// is the state.
+	reply.fromRound = true
 	w.driver.observe(ctx, reply)
 	needSyncup := reply.code != 0 || reply.revision != w.desired.revision
 	if needSyncup {

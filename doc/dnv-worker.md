@@ -944,7 +944,8 @@ HL3's re-read, and a cntlr's settle memo included (HL2: the record's
 in etcd). BM5's mod-revision memo survives rounds too, but it belongs to
 the pusher, and AR10's memo of the verdicts the rounds reach belongs to the
 sp coordinator: it holds observations, the objects the coordinator last
-judged unhealthy, and no work owed. The memos of what was LOGGED — RW9's
+judged unhealthy and each cntlr's run of unhealthy verdicts from rounds,
+and no work owed. The memos of what was LOGGED — RW9's
 two, plus, on a cntlr child, the last standby leg row logged per leg, so
 HL2's standing row does not repeat every round — never record what is
 owed, and neither does a side or cntlr child's memo of what it REPORTED:
@@ -1731,8 +1732,9 @@ is written once per memo, the op re-reading the record so that a second
 owner's settle writes nothing.
 
 HL4. A `Syncup*` reply's `*Info` is processed exactly like a `Check*`
-reply's (the secondary signal, `architecture.md`, Check streams). A
-`Syncup*` gRPC failure is not by itself a health failure — an unreachable
+reply's (the secondary signal, `architecture.md`, Check streams), but for
+a cntlr's run of unhealthy health verdicts, which counts rounds only
+(AR10). A `Syncup*` gRPC failure is not by itself a health failure — an unreachable
 agent breaks the stream too.
 
 HL5. `show_info` false streams carry an `*Info` only when something
@@ -1973,8 +1975,9 @@ default (`DefaultPrimaryUnhealthy`, `DefaultCntlrUnhealthy`,
 validation). That `leg_unhealthy` exceeds `side_unhealthy`, and that
 `primary_unhealthy` covers at least two of its cluster's `cntlr_interval`,
 are gateway validation rules (`architecture.md`, Common validation); the
-worker is correct either way, and what the second does not cover is in
-Known limits.
+worker is correct either way. The second alone does not keep one missed
+round from failing a primary over, so AR5's threshold trigger also needs
+AR10's run; what that run does not cover is in Known limits.
 
 AR10. **Own verdict.** A threshold reaction — AR5's failover on its
 threshold, AR7's replacement and AR8's repair on either of its clocks —
@@ -1982,10 +1985,19 @@ fires only for an object whose latest health verdict by this coordinator is
 unhealthy; the clock still runs from the stored `err_epoch` (AR4), and
 AR5's `disabled` trigger needs no verdict. AR8's case 1 needs the leg's
 verdict, and its case 2 the leg's and that of the side whose clock fires.
-The coordinator keeps a memo of the verdicts its own monitors reach on its
-cntlrs, legs and sides (HL2): an unhealthy verdict puts the object in, a
-clean one takes it out, and a reply that neither sets nor clears changes
-nothing. A verdict counts whether or not its monitor writes, so one that
+AR5's threshold trigger needs more than the latest verdict: the primary's
+last two verdicts from check rounds — a reply with an `ERROR` row, or a
+round with no reply in time — must both be unhealthy, with no clean answer,
+of a round or of a `Syncup*`, since the earlier of them; a `Syncup*` reply
+with an `ERROR` row neither starts that run nor adds to it. A round counts
+by its own report: the info its reply carried or, when the reply leaves it
+out as unchanged, the info its stream last carried, never a `Syncup*`'s
+info that the latest known state holds since (HL5). The coordinator keeps a
+memo of the verdicts its own monitors reach on its cntlrs, legs and sides
+(HL2): an unhealthy verdict puts the object in, a clean one takes it out,
+and a reply that neither sets nor clears changes nothing; for a cntlr it
+also counts the run of unhealthy verdicts from rounds, which a clean answer
+ends. A verdict counts whether or not its monitor writes, so one that
 finds the record set already — re-seeded from another observer's epoch,
 say (HL3) — counts though it is no transition. The memo lives with the
 coordinator from its start to its stop, which is the coordinator's tenure
@@ -1996,17 +2008,24 @@ logs nothing, as one whose threshold has not run out logs nothing, and no
 `model` op can re-check the rule, since no STM sees the memo. The reasons:
 an epoch an earlier owner left, or another observer wrote (VW7, HL3), fires
 nothing before this coordinator has judged the object itself, and one rule
-for every threshold reaction is simpler than an exception for one. The
-cost: after a restart or a handoff a reaction waits for the first round's
-verdict on its object, and for a leg whose rounds give none, for its
-primary's next converge (Known limits).
+for every threshold reaction is simpler than an exception for one. The run
+is the failover's alone because its threshold is the one counted in check
+rounds: epochs are whole seconds and the next verdict can come late, so one
+missed round could otherwise reach it, and the converge of a grow or of a
+promotion that waits for a member reports its groups `ERROR` though the
+next primary would wait the same, while its next round can miss behind it
+on the cntlr's locks (`cnagent.md` CN1). The cost: after a restart or a
+handoff a reaction waits for the first round's verdict on its object, a
+failover on its threshold for the second, and for a leg whose rounds give
+none, for its primary's next converge (Known limits).
 
 ### Failover
 
 AR5. When the primary cntlr is `disabled`, or has `err_epoch` set, `now`
 minus it at least `primary_unhealthy` — `cntlr_unhealthy`, when that is the
-longer, while it is **settling** (HL2) — and this coordinator's own latest
-verdict on it unhealthy (AR10): the candidate is the cntlr with the
+longer, while it is **settling** (HL2) — and this coordinator's own
+verdicts on it unhealthy for two of its rounds in a row (AR10): the
+candidate is the cntlr with the
 smallest `cntlr_id` among those with `primary` false, `disabled` false and
 `err_epoch` zero; none means `reaction skipped` (`no candidate`) and the
 pass continues (AR2); else `model.Failover` of the old primary and the
@@ -2099,8 +2118,8 @@ rests on the coordinator's record of the last failover it applied, one of
 the two records of its own a pass decides by (AR7's second refusal rests on
 the other): why the role moved is kept in no etcd record. A coordinator
 without it — restarted, handed the shard, or the other owner of an overlap
-(VW7) — can fail over once more once its own verdict reads the primary
-unhealthy (AR10), which records it again.
+(VW7) — can fail over once more once its own verdicts read the primary
+unhealthy for two of its rounds in a row (AR10), which records it again.
 
 ### Thin-pool auto-grow
 
@@ -2813,11 +2832,12 @@ revision gate being per object and not per cluster.
   failover's own transaction takes the old primary out of the records, and
   its first clean round as a standby puts it back; a disabled primary that
   answers its demotion releases the sides at once; one missed round followed
-  by a prompt answer fails no primary over, while a primary that misses
-  every round fails over once its threshold has run out; and a failover on
-  its threshold waits for the coordinator's own verdict, so after a handoff
-  a stale epoch fires nothing before the new owner's own verdict, only the
-  latest verdict counts, and a verdict counts whether or not it writes;
+  by an answer, prompt or late, or by refused replies, fails no primary
+  over, while a primary that misses every round fails over once its
+  threshold has run out; and a
+  failover on its threshold waits for the coordinator's own verdicts, two of
+  its rounds in a row, so after a handoff a stale epoch fires nothing before
+  the new owner's own, and a verdict counts whether or not it writes;
 * drain — the sp drain takes an SP apart in bounded steps and restores every
   ledger, the clone drain removes a clone's chunks in batches and reaches the
   CN as an exclusion, and both resume from etcd alone after a restart of the
@@ -2926,9 +2946,10 @@ behavior file per fake, re-read whenever it changes, sets what each object
 reports and how its streams and replies misbehave. Of its levers, `hang`
 holds an object's `Check*` rounds while it is set, `hang_rounds` holds only
 as many of the next rounds as it counts, so that a case misses exactly the
-rounds it means to whatever its own polls cost, and `hang_syncup` leaves
-the object's `Syncup*` unanswered while it is set, as a stopped cn agent
-leaves its demotion (RW22). It computes no sweep verdict, so it never answers
+rounds it means to whatever its own polls cost, `delay_rounds_ms` answers
+every round late, as a busy agent does, and `hang_syncup` leaves the
+object's `Syncup*` unanswered while it is set, as a stopped cn agent leaves
+its demotion (RW22). It computes no sweep verdict, so it never answers
 `ReplyCodeLeftover` on its own.
 
 ## Known limits
@@ -3002,20 +3023,15 @@ leaves its demotion (RW22). It computes no sweep verdict, so it never answers
   `primary_unhealthy` alone; an old primary that recovered meanwhile gets the
   role back only then, and not while the new primary fails only on rows it
   failed on (AR5's same error).
-* **The primary threshold's floor holds against one missed round only when
-  the next verdict comes promptly.** A missed round stamps the primary's
-  `err_epoch`, and the next round, sent one interval after it (RW8), clears
-  it when clean: that is why `primary_unhealthy` may not be shorter than two
-  `cntlr_interval` (`architecture.md`, Common validation). But epochs and a
-  pass's `now` are whole unix seconds, which can add a second to the age a
-  pass reads, and the next verdict can come late: a next reply that comes
-  late but in time, or the reply to a `Syncup*` that RW6 sends in the wait
-  after the miss and that returns late — a converge that waits for the
-  cntlr's locks behind a long one (`cnagent.md` CN1), say. A pass in
-  between can then fail a settled primary over on that one missed round,
-  which is this coordinator's own verdict, so AR10 does not hold it back.
-  At the smallest `cntlr_interval`, `MinHealthCheckInterval`, even a prompt
-  next round can come too late.
+* **Two missed rounds in a row fail over a primary that is only busy.** A
+  failover on its threshold needs two unhealthy verdicts in a row from the
+  primary's rounds (AR10), so one missed or slow round followed by a clean
+  answer fails no primary over, however late that answer comes, and neither
+  does a `Syncup*` reply that lists a converge still waiting for a member.
+  But the worker judges no reachability: rounds that each wait past their
+  timeout for the cntlr's locks behind a converge that outlasts them
+  (`cnagent.md` CN1) are two missed rounds all the same, and fail over a
+  primary that still serves its hosts once its threshold has run out.
 * **After a restart or a handoff, a leg its primary reads missing waits
   for a converge.** A primary's check round reads a leg whose
   device-mapper wrapper is absent — one it had to build while the leg's
@@ -3081,8 +3097,8 @@ leaves its demotion (RW22). It computes no sweep verdict, so it never answers
   first move on to a cntlr that has not held it. That refusal rests on the
   coordinator's record of the last failover it applied: a coordinator after a
   restart or a shard handoff, or the other owner of an overlap (VW7), has
-  none, and once its own verdict reads the primary unhealthy (AR10) it can
-  fail over once more before it has. It compares rows, not
+  none, and once its own verdicts read the primary unhealthy for two of its
+  rounds in a row (AR10) it can fail over once more before it has. It compares rows, not
   causes: a new primary whose own fault fails only rows the old primary failed
   on is held as well, for as long as that fault lasts or until an operator
   moves the role, every pass logging why. AR7's sole-primary variant takes the
@@ -3139,8 +3155,9 @@ leaves its demotion (RW22). It computes no sweep verdict, so it never answers
   reads no info while the hold keeps the promotion from the child (AR1), so
   the window is the promotion's own round trip. Nor does it hold for an
   `err_epoch` another driver stamped: AR10 holds a reaction until this
-  coordinator's own verdict reads the object unhealthy, but the clock then
-  runs from that stamp, which is the very record the op re-validates against
+  coordinator's own verdict reads the object unhealthy, and a failover on
+  its threshold until its verdicts on two of the primary's rounds in a row
+  do, but the clock then runs from that stamp, which is the very record the op re-validates against
   (the partitioned-observer limit above, HL3).
 * **Log volume**: every round logs a client send and receive record pair per
   object (`grpc.md`, L6) and every heartbeat an `etcd put`; with thousands of

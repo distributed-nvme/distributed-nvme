@@ -599,12 +599,28 @@ func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
 	return h
 }
 
+// roundVerdict notes one Check* round's verdict on a cntlr as its driver
+// does: the round's own report for the run, then the verdict (AR10).
+func roundVerdict(memo *verdictMemo, cntlrId uint64, unhealthy bool) {
+	memo.noteRound(cntlrId, unhealthy)
+	memo.noteCntlr(cntlrId, unhealthy)
+}
+
+// syncupVerdict notes a Syncup* reply's verdict on a cntlr, which counts for
+// the latest verdict and, when clean, ends the run, but never adds to it.
+func syncupVerdict(memo *verdictMemo, cntlrId uint64, unhealthy bool) {
+	memo.noteCntlr(cntlrId, unhealthy)
+}
+
 // judgeStoredEpochs notes a verdict of unhealthy in memo for every cntlr, leg
-// and side of state whose err_epoch is set.
+// and side of state whose err_epoch is set — for a cntlr, failoverRun of them
+// from rounds, the run AR5's threshold trigger needs (AR10).
 func judgeStoredEpochs(memo *verdictMemo, state *model.SpState) {
 	for cntlrId, cntlr := range state.Cntlrs {
 		if cntlr.GetErrEpoch() != 0 {
-			memo.noteCntlr(cntlrId, true)
+			for range failoverRun {
+				roundVerdict(memo, cntlrId, true)
+			}
 		}
 	}
 	for _, slice := range state.Slices {
@@ -3457,10 +3473,14 @@ func TestReactionSpareCreateNoCandidate(t *testing.T) {
 // object whose latest health verdict by this coordinator is unhealthy, however
 // old its stored err_epoch, while the clock still runs from that epoch — a
 // verdict given now on an epoch an hour old fires at once — and a reaction the
-// rule holds back logs nothing. The disabled trigger needs no verdict, and
-// neither does AR8 step 2's test of a dead spare, which reads the epochs as
-// stored. The harness's stored-epoch shortcut is off, so every verdict here is
-// one the test notes.
+// rule holds back logs nothing. A failover on its threshold needs more: two
+// unhealthy verdicts in a row from the primary's rounds, which a clean answer
+// of either kind ends and a Syncup* reply with an ERROR row neither starts nor
+// adds to. The disabled trigger needs no verdict, and neither does AR8 step
+// 2's test of a dead spare, which reads the epochs as stored; a cntlr
+// replacement needs only the latest verdict, a Syncup*'s as much as a
+// round's. The harness's stored-epoch shortcut is off, so every verdict here
+// is one the test notes.
 func TestReactionNeedsOwnVerdict(t *testing.T) {
 	newHarness := func(t *testing.T) *reactHarness {
 		h := newReactHarness(t, reactFixture(t))
@@ -3474,7 +3494,12 @@ func TestReactionNeedsOwnVerdict(t *testing.T) {
 		h.pass()
 		h.wantOps()
 		h.wantNoSkip()
-		h.w.verdicts.noteCntlr(reactCntlrA, true)
+		// One round's verdict: the run is one short.
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
 		h.pass()
 		h.wantOps("failover")
 	})
@@ -3482,11 +3507,63 @@ func TestReactionNeedsOwnVerdict(t *testing.T) {
 	t.Run("failover after a clean verdict", func(t *testing.T) {
 		h := newHarness(t)
 		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
-		h.w.verdicts.noteCntlr(reactCntlrA, true)
-		h.w.verdicts.noteCntlr(reactCntlrA, false)
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		roundVerdict(h.w.verdicts, reactCntlrA, false)
 		h.pass()
 		h.wantOps()
 		h.wantNoSkip()
+	})
+
+	t.Run("a clean answer of either kind ends the run", func(t *testing.T) {
+		for _, round := range []bool{true, false} {
+			h := newHarness(t)
+			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
+			roundVerdict(h.w.verdicts, reactCntlrA, true)
+			if round {
+				roundVerdict(h.w.verdicts, reactCntlrA, false)
+			} else {
+				syncupVerdict(h.w.verdicts, reactCntlrA, false)
+			}
+			roundVerdict(h.w.verdicts, reactCntlrA, true)
+			h.pass()
+			h.wantOps()
+			h.wantNoSkip()
+		}
+	})
+
+	t.Run("a Syncup reply neither starts nor adds to the run", func(t *testing.T) {
+		h := newHarness(t)
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
+		for range 3 {
+			syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		}
+		h.pass()
+		h.wantOps()
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps("failover")
+	})
+
+	t.Run("a grow: the Syncup's ERROR rows, a missed round, a clean round", func(t *testing.T) {
+		// The slice-16 order: the converge reports the new groups ERROR while
+		// a member is not connected yet, the next round misses behind the
+		// agent's retry, and the round after it answers clean.
+		h := newHarness(t)
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+		h.wantNoSkip()
+		roundVerdict(h.w.verdicts, reactCntlrA, false)
+		h.pass()
+		h.wantOps()
 	})
 
 	t.Run("the disabled trigger", func(t *testing.T) {
@@ -3504,7 +3581,8 @@ func TestReactionNeedsOwnVerdict(t *testing.T) {
 		h.pass()
 		h.wantOps()
 		h.wantNoSkip()
-		h.w.verdicts.noteCntlr(reactCntlrB, true)
+		// One Syncup reply's verdict is enough: only the failover counts runs.
+		syncupVerdict(h.w.verdicts, reactCntlrB, true)
 		h.pass()
 		h.wantOps("replace")
 	})
@@ -3569,8 +3647,8 @@ func TestReactionNeedsOwnVerdict(t *testing.T) {
 // TestVerdictMemoDropsWhatTheSnapshotDoesNotList pins the memo's pruning: a
 // verdict on a cntlr, leg or side the pass's snapshot no longer lists — a
 // replaced cntlr, a removed leg — is dropped rather than kept for ever, ids
-// being never reused within an SP. A nil memo, a coordinator assembled by
-// hand, holds nothing.
+// being never reused within an SP, and so is a dropped cntlr's run. A nil
+// memo, a coordinator assembled by hand, holds nothing.
 func TestVerdictMemoDropsWhatTheSnapshotDoesNotList(t *testing.T) {
 	state := reactFixture(t)
 	leg := state.Slices[reactSliceId].GetDataGrpList()[0].GetLegList()[0]
@@ -3580,8 +3658,8 @@ func TestVerdictMemoDropsWhatTheSnapshotDoesNotList(t *testing.T) {
 	}
 	gone := sideKey{legId: 9001, sideId: 9002}
 	memo := newVerdictMemo()
-	memo.noteCntlr(reactCntlrB, true)
-	memo.noteCntlr(9000, true)
+	roundVerdict(memo, reactCntlrB, true)
+	roundVerdict(memo, 9000, true)
 	memo.noteLeg(leg.GetLegId(), true)
 	memo.noteLeg(9001, true)
 	memo.noteSide(listed, true)
@@ -3598,8 +3676,12 @@ func TestVerdictMemoDropsWhatTheSnapshotDoesNotList(t *testing.T) {
 		t.Fatalf("memo kept %d cntlrs, %d legs, %d sides, want one each",
 			len(memo.cntlrs), len(memo.legs), len(memo.sides))
 	}
+	if got.runs[reactCntlrB] != 1 || len(got.runs) != 1 || len(memo.runs) != 1 {
+		t.Fatalf("runs: snapshot %v, memo %v, want only cntlr %d's run of one",
+			got.runs, memo.runs, reactCntlrB)
+	}
 	var none *verdictMemo
-	none.noteCntlr(reactCntlrB, true)
+	roundVerdict(none, reactCntlrB, true)
 	if got := none.snapshot(state); len(got.cntlrs) != 0 {
 		t.Fatalf("a nil memo judged %v", got.cntlrs)
 	}

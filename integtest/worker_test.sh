@@ -3320,9 +3320,10 @@ case_failover() {
 		assert_eq "$(stored_interval "$member")" "$hc" \
 			"health_check_conf.$member stored for a 0 (the default)"
 	done
-	# Stage 6 rests on it: one missed round followed by a prompt clean round
-	# cannot reach the default primary threshold (architecture.md, Common
-	# validation; dnv-worker.md, Known limits).
+	# Stage 6 rests on it: the second missed round, which a failover also
+	# needs (dnv-worker.md AR10), comes about two intervals after the first,
+	# so a primary that misses every round fails over at its threshold
+	# (architecture.md, Common validation).
 	assert_ge "$pt" $((2 * hc)) \
 		"the default primary threshold against two default check intervals"
 	put_dn 1 8
@@ -3592,7 +3593,7 @@ EOF
 	assert_eq "$(demotion_unsynced_all)" "$unsynced" \
 		"sp demotion unsynced records of the stage"
 
-	stage 6 "the primary threshold is two rounds: one missed round followed by a prompt answer never fails over, every round missed does (AR5)"
+	stage 6 "the primary threshold is two rounds: one missed round followed by an answer, prompt or late, or by refused replies, never fails over, every round missed does (AR5, AR10)"
 	wait_until $((2 * hc + WAIT_SHORT)) "C1 settled after its promotion" \
 		cntlr_settled sp0 1
 	log "  6.1: one missed round, the next one answered"
@@ -3610,9 +3611,11 @@ EOF
 	wait_until $((2 * hc + WAIT_SHORT)) "C1 recovered at the round after it" \
 		count_gt "$c1_recov" cntlr_health_cnt 1 1 recovered
 	# The err_epoch is whole seconds, and the next round goes one interval
-	# after the missed one timed out (RW8): its clean verdict replaces the
-	# unhealthy one in the memo, and clears the epoch, before now -
-	# err_epoch can reach the threshold.
+	# after the missed one timed out (RW8): its prompt clean verdict
+	# replaces the unhealthy one in the memo before now - err_epoch can
+	# reach the threshold. So the threshold alone keeps the failover back
+	# here; the steps after it need the run of two unhealthy rounds
+	# (dnv-worker.md AR10).
 	assert_none_for $((2 * pt + 2 * hc)) "a failover on one missed round" \
 		reaction_ge $((failovers + 1)) failover
 	assert_eq "$(cntlr_health_cnt 1 1 unreachable)" $((c1_unreach + 1)) \
@@ -3622,7 +3625,62 @@ EOF
 	assert_eq "$(cntlr_field sp0 1 err_epoch)" 0 \
 		"C1's err_epoch after one missed round"
 
-	log "  6.2: every round missed"
+	log "  6.2: one missed round, the next one answered late"
+	local late_ms
+	c1_unreach=$(cntlr_health_cnt 1 1 unreachable)
+	c1_recov=$(cntlr_health_cnt 1 1 recovered)
+	# The round after the held one is answered just inside the round
+	# timeout, as a busy agent answers. With whole-second epochs the
+	# err_epoch can then pass the threshold for part of a second before the
+	# clean verdict clears it, and a pass, one per interval, falls in that
+	# part only in some runs: this step shows that a late answer fails no
+	# primary over, and the refused replies of the next step pin the run of
+	# two (dnv-worker.md AR10). Only that one round is late.
+	late_ms=$((hc * 1000 - 300))
+	set_behavior cn0 <<EOF
+{"objects": {"cntlr 1:1": {"hang_rounds": 1, "delay_rounds_ms": $late_ms}}}
+EOF
+	wait_until $((3 * hc + WAIT_SHORT)) "C1 unreachable for the held round" \
+		count_gt "$c1_unreach" cntlr_health_cnt 1 1 unreachable
+	wait_until $((2 * hc + WAIT_SHORT)) \
+		"C1 recovered at the late round after it" \
+		count_gt "$c1_recov" cntlr_health_cnt 1 1 recovered
+	clear_behavior cn0
+	assert_none_for $((2 * pt + 2 * hc)) \
+		"a failover on one missed round and a late answer" \
+		reaction_ge $((failovers + 1)) failover
+	assert_eq "$(cntlr_health_cnt 1 1 unreachable)" $((c1_unreach + 1)) \
+		"C1's unreachable records (one round held, the next late)"
+	assert_eq "$(cntlr_field sp0 1 primary)" true \
+		"C1 primary after one missed round and a late answer"
+
+	log "  6.3: one missed round, then only refused replies"
+	local c1_held
+	c1_unreach=$(cntlr_health_cnt 1 1 unreachable)
+	c1_recov=$(cntlr_health_cnt 1 1 recovered)
+	# A refused reply is no health verdict (HL2): it neither ends the run
+	# of one the held round starts nor clears the err_epoch, which passes
+	# the threshold while C1 is still judged unhealthy. From then on every
+	# pass is held back by the run of two alone (dnv-worker.md AR10).
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"hang_rounds": 1, "reply_code": 2}}}
+EOF
+	wait_until $((3 * hc + WAIT_SHORT)) "C1 unreachable for the held round" \
+		count_gt "$c1_unreach" cntlr_health_cnt 1 1 unreachable
+	assert_none_for $((2 * pt + 2 * hc)) \
+		"a failover on one missed round and refused replies" \
+		reaction_ge $((failovers + 1)) failover
+	c1_held=$(cntlr_field sp0 1 err_epoch)
+	want_number "$c1_held" "C1's err_epoch across the refused replies"
+	clear_behavior cn0
+	wait_until $((2 * hc + WAIT_SHORT)) "C1 recovered once it answers" \
+		count_gt "$c1_recov" cntlr_health_cnt 1 1 recovered
+	assert_eq "$(cntlr_health_cnt 1 1 unreachable)" $((c1_unreach + 1)) \
+		"C1's unreachable records (one round held, the rest refused)"
+	assert_eq "$(cntlr_field sp0 1 primary)" true \
+		"C1 primary after one missed round and refused replies"
+
+	log "  6.4: every round missed"
 	local c1_epoch failover_at
 	set_behavior cn0 <<'EOF'
 {"objects": {"cntlr 1:1": {"hang": true}}}
@@ -3633,8 +3691,12 @@ EOF
 	wait_until $((pt + 2 * hc + WAIT_SHORT)) "reaction applied kind=failover" \
 		reaction_ge $((failovers + 1)) failover
 	# Timed against the epoch the worker stamped, as case D step 2 times
-	# its failover: AR5 fires at the first pass once now - err_epoch reaches
-	# the threshold, so within one interval of it.
+	# its failover. AR5 fires at the first pass after the threshold has run
+	# out and the second missed round has been judged (dnv-worker.md AR10).
+	# That round times out about two intervals after the first, which can
+	# be up to a second past the threshold, because err_epoch drops the
+	# fraction of its second. So the failover lands within one interval
+	# and a second of the threshold.
 	failover_at=$(reaction_epochs failover | sed -n "$((failovers + 1))p")
 	[ -n "$failover_at" ] || die "no failover record to time"
 	ts_ge "$failover_at" $((c1_epoch + pt)) ||
@@ -3642,7 +3704,8 @@ EOF
 			"$c1_epoch + the ${pt}s primary threshold"
 	ts_lt "$failover_at" $((c1_epoch + pt + hc + 2)) ||
 		die "the failover ran at $failover_at, later than one interval" \
-			"past C1's err_epoch $c1_epoch + the ${pt}s primary threshold"
+			"and two seconds past C1's err_epoch $c1_epoch + the" \
+			"${pt}s primary threshold"
 	wait_until "$WAIT_SHORT" "C3 primary true" cntlr_is_primary sp0 3
 	clear_behavior cn0
 	wait_until $((2 * hc + WAIT_SHORT)) "C1 err_epoch cleared" \
@@ -3721,11 +3784,12 @@ EOF
 	stage 8 "a verdict that writes nothing still counts (dnv-worker.md AR10, HL3)"
 	# A planted err_epoch — what another observer would have written — is
 	# no verdict of this coordinator's and fires nothing on its own, even
-	# right after the coordinator judged C3 unhealthy and then clean: its
-	# memo keeps each object's latest verdict alone. Its passes hand the
-	# record to C3's monitor (HL3), so C3's next unhealthy reply is no
-	# transition and writes nothing, and the failover follows all the same.
-	# The age is past the primary threshold and short of the cntlr one.
+	# right after the coordinator judged C3 unhealthy and then clean: the
+	# clean verdict took C3 out of its memo and ended C3's run of unhealthy
+	# rounds (dnv-worker.md AR10). Its passes hand the record to C3's
+	# monitor (HL3), so C3's next unhealthy rounds are no transition and
+	# write nothing, and the failover follows the second of them all the
+	# same. The age is past the primary threshold and short of the cntlr one.
 	local c3_unreach c3_recov
 	c3_unreach=$(cntlr_health_cnt 1 3 unreachable "$new_owner")
 	c3_recov=$(cntlr_health_cnt 1 3 recovered "$new_owner")
@@ -3758,10 +3822,10 @@ EOF
   {"status": "ERROR", "details": "subsystem gone"}}}}}
 EOF
 	wait_until $((2 * hc + WAIT_SHORT)) \
-		"reaction applied kind=failover on C3's own verdict" \
+		"reaction applied kind=failover on C3's own verdicts" \
 		reaction_ge $((failovers + 1)) failover
 	assert_eq "$(cntlr_health_cnt 1 3 error_row)" "$c3_rows" \
-		"C3's error_row records: its verdict wrote nothing"
+		"C3's error_row records: its verdicts wrote nothing"
 	assert_eq "$(cntlr_field sp0 3 err_epoch)" "$planted" \
 		"C3's err_epoch is still the planted one"
 	wait_until "$WAIT_SHORT" "C1 primary true" cntlr_is_primary sp0 1
