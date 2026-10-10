@@ -557,11 +557,11 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 // TestTheCheckRoundMirrorsTheDisconnectGate pins the read-only half of
 // ensureCloneSource's registry gate. A converge whose clone source is still
 // being disconnected stops at CN18 step 1 and reports the dm-clone MISSING,
-// so the Check round must not judge the clone's step 2 — the arena refusal
-// pair of probeCloneArenaCannotSupply — however connected the source still
-// looks: the two channels would flip the row, and its epoch, against each
-// other every round. The arena is filled after the converge, so step 2 would
-// refuse this clone's slot the moment a probe reached it.
+// so the Check round must not judge the clone's step 2 — the arena verdict of
+// cloneMetaVerdict — however connected the source still looks: the two
+// channels would flip the row, and its epoch, against each other every
+// round. The arena is filled after the converge, so step 2 would find no
+// free run for this clone's slot the moment a probe reached it.
 func TestTheCheckRoundMirrorsTheDisconnectGate(t *testing.T) {
 	srv, node := newTestServer(t)
 	// The failed step registers the connect retry; a retry pass would sweep
@@ -595,7 +595,7 @@ func TestTheCheckRoundMirrorsTheDisconnectGate(t *testing.T) {
 	node.mu.Lock()
 	node.dms[squatter] = &fakeDm{
 		table: fmt.Sprintf("0 %d linear %s 0",
-			cnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
+			common.CnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
 		thinIds: map[uint32]bool{},
 	}
 	node.devNo["/dev/mapper/"+squatter] = "253:201"

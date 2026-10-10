@@ -483,8 +483,10 @@ func (s *Server) CreateStoragePool(
 		cnPicks := make([]model.Cand, 0, cntlrCnt)
 		var cnBlack, cnLocs []string
 		for idx := 0; idx < cntlrCnt; idx++ {
+			// No metadata units: a new SP has no clone, so its cntlrs' CNs
+			// hold none of its units yet (architecture.md, Metadata units).
 			pick, err := pickCn(
-				ctx, s.cli, scanCid, scanCc, footprint,
+				ctx, s.cli, scanCid, scanCc, footprint, 0,
 				req.GetCnSelector(), cnBlack, nil, cnLocs,
 				"create storage pool")
 			if err != nil {
@@ -609,7 +611,7 @@ func (s *Server) CreateStoragePool(
 					for legIdx, cand := range dnPicks[planIdx] {
 						legId := minter.mint()
 						sideId := minter.mint()
-						dn, err := dnl.verifyPick(cand, plan.ExtCnt)
+						dn, err := dnl.verifyPick(cand, plan.ExtCnt, 0)
 						if err != nil {
 							return err
 						}
@@ -652,7 +654,7 @@ func (s *Server) CreateStoragePool(
 			cnl := newCnLedger(stm, cid)
 			builtCntlrs := make([]*pb.Cntlr, 0, cntlrCnt)
 			for idx, cand := range cnPicks {
-				cn, err := cnl.verifyPick(cand, footprint)
+				cn, err := cnl.verifyPick(cand, footprint, 0)
 				if err != nil {
 					return err
 				}

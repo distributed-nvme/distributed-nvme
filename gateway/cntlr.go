@@ -65,7 +65,8 @@ func resolveCntlr(
 
 // cntlrPlan is what CreateCntlr prepares outside its STM (GW8): the cluster
 // the scan runs in, the number of extents one cntlr of this SP reserves on
-// its CN, the CNs that are already excluded from the draw, and their
+// its CN, the metadata units its CN holds for the SP's clones, the CNs that
+// are already excluded from the draw, and their
 // locations, which tier 1 of the draw excludes as well (architecture.md,
 // Per-operation allocation). The STM holds the pool's cntlrs as it reads them
 // against SpCnAddrs: one on a CN the plan did not hold sends the round back to
@@ -74,6 +75,7 @@ type cntlrPlan struct {
 	Cid       uint64
 	Cc        *pb.ClusterConf
 	ExtCnt    uint64
+	MetaUnits uint64
 	SpCnAddrs []string
 	SpCnLocs  []string
 }
@@ -84,7 +86,11 @@ type cntlrPlan struct {
 //
 // The size is the SP's footprint — Σ ext_cnt over every group of every slice
 // (architecture.md, Storage pools) — which is what one cntlr's CN reserves, so
-// the slices must be read to size the scan at all. The exclusion list is the
+// the slices must be read to size the scan at all, and the SP's clone units —
+// Σ meta_units over every clone, latched ones included (spCloneMetaUnits) —
+// which the new cntlr's CN must have room for in its metadata area, since the
+// cntlr may become the primary and build every clone there (architecture.md,
+// Metadata units). The exclusion list is the
 // addr_port of every CN that already hosts a cntlr of this SP
 // (architecture.md, Finding CN candidates), and the location of each of those
 // CNs is the tier-1 exclusion of architecture.md, Per-operation allocation
@@ -100,13 +106,14 @@ type cntlrPlan struct {
 // rather than "is being deleted". The deciding STM checks both again (AG4);
 // this read only fixes which refusal such a caller is given.
 //
-// The snapshot serves every read at one store revision, so a slice or cntlr
-// its SpConf lists and the store lacks is a lost invariant key, never a torn
-// read, and loadSlices and loadCntlrs answer it ABORTED. The locations are
-// read after the snapshot, outside it, for the reasons cnLocations gives. The
-// plan only shapes the scan: the STM resolves the SP again (architecture.md,
-// STM discipline), recomputes the footprint from the slices it reads and
-// re-checks the plan's cntlrs.
+// The snapshot serves every read at one store revision, so a slice, cntlr or
+// clone its SpConf lists and the store lacks is a lost invariant key, never a
+// torn read, and loadSlices, loadCntlrs and loadClones answer it ABORTED. The
+// locations are read after the snapshot, outside it, for the reasons
+// cnLocations gives. The plan only shapes the scan: the STM resolves the SP
+// again (architecture.md, STM discipline), recomputes the footprint and the
+// clone units from the slices and clones it reads and re-checks the plan's
+// cntlrs.
 func planCreateCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -128,6 +135,10 @@ func planCreateCntlr(
 		if err != nil {
 			return err
 		}
+		clones, err := loadClones(stm, sc.Cid, sc.Conf)
+		if err != nil {
+			return err
+		}
 		addrs := make([]string, 0, len(cntlrs))
 		for _, cntlr := range cntlrs {
 			addrs = append(addrs, cntlr.GetAddrPort())
@@ -136,6 +147,7 @@ func planCreateCntlr(
 			Cid:       sc.Cid,
 			Cc:        sc.Cc,
 			ExtCnt:    spFootprint(slices),
+			MetaUnits: spCloneMetaUnits(clones),
 			SpCnAddrs: addrs,
 		}
 		return nil
@@ -160,13 +172,19 @@ func planCreateCntlr(
 // It allocates, so it is a candidate unit (GW9): the CN scan runs outside the
 // transaction and the transaction re-validates the pick. The scan needs a
 // size, and a cntlr reserves the SP's whole footprint on its CN, so one round
-// is planning read → scan → commit. The planning read opens the pool as the
+// is planning read → scan → commit. The scan also skips every CN whose
+// metadata area lacks room for the SP's clone units, and a round with no CN
+// left for that reason is refused RESOURCE_EXHAUSTED with "metadata room" in
+// its message (pickCn; architecture.md, Metadata units). The planning read
+// opens the pool as the
 // STM does, so a deleting pool and a stale token are refused before the scan
 // (planCreateCntlr). Nothing else it produced is trusted: the STM recomputes
-// the footprint from the slices IT reads and hands it to cnLedger.verifyPick,
-// so a pick that no longer covers the current footprint — because the SP
-// grew, or because the CN was charged by someone else — fails the unit as
-// errCandidateChanged and the whole round runs again (GW9).
+// the footprint and the clone units from the slices and clones IT reads and
+// hands both to cnLedger.verifyPick, so a pick that no longer covers them —
+// because the SP grew or gained a clone, or because the CN was charged by
+// someone else — fails the unit as errCandidateChanged and the whole round
+// runs again (GW9). The new CN is charged the units with its footprint, and
+// its one CnRev bump covers both.
 //
 // The already-used cntlid slots are read from the SP's own cntlrs rather than
 // tracked in a separate list: the Cntlr records are the only place a slot is
@@ -211,7 +229,7 @@ func (s *Server) CreateCntlr(
 			return err
 		}
 		cand, err := pickCn(
-			ctx, s.cli, plan.Cid, plan.Cc, plan.ExtCnt,
+			ctx, s.cli, plan.Cid, plan.Cc, plan.ExtCnt, plan.MetaUnits,
 			req.GetCnSelector(), nil, plan.SpCnAddrs, plan.SpCnLocs,
 			opCreateCntlr)
 		if err != nil {
@@ -289,8 +307,20 @@ func (s *Server) CreateCntlr(
 				return err
 			}
 			extCnt := spFootprint(slices)
+			// The clone units as this transaction reads them, latched clones
+			// included, and not the plan's: a clone created since the plan,
+			// or one whose drain ended since, changes what the new CN is
+			// charged. A pick without room for this sum — a CN the scan saw
+			// with room that has filled up since, or one a clone created
+			// since overfills — is a changed candidate, and the next round's
+			// scan skips it (architecture.md, Metadata units).
+			clones, err := loadClones(stm, sc.Cid, conf)
+			if err != nil {
+				return err
+			}
+			units := spCloneMetaUnits(clones)
 			ledger := newCnLedger(stm, sc.Cid)
-			cn, err := ledger.verifyPick(cand, extCnt)
+			cn, err := ledger.verifyPick(cand, extCnt, units)
 			if err != nil {
 				return err
 			}
@@ -313,6 +343,13 @@ func (s *Server) CreateCntlr(
 				cand.AddrPort,
 				&pb.CntlrPointer{SpId: sc.SpId(), CntlrId: cntlrId},
 				extCnt,
+			); err != nil {
+				return err
+			}
+			// Defensive, as charge's own check is: verifyPick has already
+			// answered a CN short of the units as a changed candidate.
+			if err := ledger.chargeUnits(
+				cand.AddrPort, units, opCreateCntlr,
 			); err != nil {
 				return err
 			}
@@ -346,13 +383,17 @@ func (s *Server) CreateCntlr(
 //
 // Everything CreateCntlr did is undone, item for item, so the two are
 // auditable against each other: the id leaves the list, the key goes,
-// the CN gets its pointer and its footprint back through one flush (one write,
-// one capacity-key maintenance, one CnRev bump), the transport address leaves
-// every CdcEntry, and SpRev bumps once. The footprint returned is the one
-// recomputed from the SP's slices now, which is exactly what is reserved:
-// GrowSlice charges its delta to every cntlr's CN (architecture.md,
-// GrowSlice), so the reservation tracks the current geometry rather than the
-// geometry at creation time.
+// the CN gets its pointer, its footprint and the SP's clone units back through
+// one flush (one write, one capacity-key maintenance, one CnRev bump), the
+// transport address leaves every CdcEntry, and SpRev bumps once. The footprint
+// returned is the one recomputed from the SP's slices now, which is exactly
+// what is reserved: GrowSlice charges its delta to every cntlr's CN
+// (architecture.md, GrowSlice), so the reservation tracks the current
+// geometry rather than the geometry at creation time. The clone units are
+// likewise the sum over the SP's clones now, latched ones included
+// (spCloneMetaUnits): CreateClone charges every cntlr's CN and the clone drain
+// releases from every cntlr's CN, so that sum is what this CN holds for the
+// SP. The release stops at zero (architecture.md, Metadata units).
 func (s *Server) DeleteCntlr(
 	ctx context.Context,
 	req *pb.DeleteCntlrRequest,
@@ -390,12 +431,21 @@ func (s *Server) DeleteCntlr(
 		if err != nil {
 			return err
 		}
+		clones, err := loadClones(stm, sc.Cid, conf)
+		if err != nil {
+			return err
+		}
 		conf.CntlrIdList = removeId(conf.GetCntlrIdList(), req.GetCntlrId())
 		stm.Del(key)
 		ledger := newCnLedger(stm, sc.Cid)
 		if err := ledger.release(
 			cntlr.GetAddrPort(), sc.SpId(), req.GetCntlrId(),
 			spFootprint(slices),
+		); err != nil {
+			return err
+		}
+		if err := ledger.releaseUnits(
+			cntlr.GetAddrPort(), spCloneMetaUnits(clones),
 		); err != nil {
 			return err
 		}

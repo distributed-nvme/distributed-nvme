@@ -1,13 +1,17 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -23,6 +27,10 @@ import (
 // sides in no leg, FinishMigration and CancelMigration would answer ABORTED
 // for ever and the SP, whose migr_name_list could never empty, could never be
 // deleted.
+//
+// The last two tests are CreateSpareLeg's per-round plan: a round whose group
+// gained a DN, or whose pick was disabled or deleted, after its plan is a
+// changed candidate, and the next round plans again.
 
 // splMigrName is the one migration each test below starts.
 const splMigrName = "migr-a"
@@ -254,4 +262,156 @@ func TestSwitchSpareLegRefusesALegUnderMigration(t *testing.T) {
 			t.Errorf("the slice moved on a refusal: %v", got)
 		}
 	})
+}
+
+// volRaceSpareLeg runs a token-less CreateSpareLeg of the data group with no
+// NodeSelector, and runs actor — another writer — inside the request's first
+// read of key, the way volRaceMigrationA races a migration. It fails the test
+// unless the hook fired and both writers succeeded, and returns the addr_port
+// the spare's side landed on.
+func volRaceSpareLeg(
+	t *testing.T,
+	env *volEnv,
+	key string,
+	actor func() error,
+) string {
+	t.Helper()
+	var actorErr error
+	prev := slog.Default()
+	hook := &volReadHook{
+		Handler: prev.Handler(),
+		key:     key,
+		actor:   func() { actorErr = actor() },
+	}
+	slog.SetDefault(slog.New(hook))
+	defer slog.SetDefault(prev)
+	// Bounded twice over, so that a unit which never settles fails as
+	// ABORTED instead of hanging the package: GW9 retries until the round
+	// cap or the ctx's end, whichever comes first.
+	ctx, cancel := context.WithTimeout(
+		context.WithValue(env.ctx, volReadHookKey{}, true), 30*time.Second)
+	defer cancel()
+	_, err := env.srv.CreateSpareLeg(ctx, &pb.CreateSpareLegRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		GrpId:       volDataGrpId,
+	})
+	if !hook.fired.Load() {
+		t.Fatalf("the request never read %s: the other writer never ran "+
+			"and nothing was raced", key)
+	}
+	if actorErr != nil {
+		t.Fatalf("the interleaved writer: %v", actorErr)
+	}
+	if err != nil {
+		t.Fatalf("CreateSpareLeg: %v", err)
+	}
+	grp := volGrpOf(t, env.slice(), volDataGrpId)
+	if len(grp.GetSpareLegList()) != 1 ||
+		len(grp.GetSpareLegList()[0].GetSideList()) != 1 {
+		t.Fatalf("spare_leg_list = %v, want one spare with one side",
+			grp.GetSpareLegList())
+	}
+	return grp.GetSpareLegList()[0].GetSideList()[0].GetAddrPort()
+}
+
+// TestCreateSpareLegReplansAroundADnTheGroupGained pins the per-round plan of
+// CreateSpareLeg (architecture.md, Spare legs; GW9): a round plans its black
+// list and its tier-1 locations from the group as its snapshot read it, so a
+// side another request hangs off the group after that read — here a
+// migration of the group's other leg onto dn-c — is missing from the plan,
+// and the scan offers that side's very DN. model.CreateSpareLeg refuses the
+// gain as candidate changed, and the next round plans from the group as it
+// now stands, so the spare lands where a serial run would put it. A plan read
+// once for the whole unit would be refused the same way in every round until
+// the round cap.
+//
+// Every draw is forced, as in TestCreateMigrationRefusesADnTheGroupAlreadyUses:
+// dn-d shares dn-c's failure domain and holds less, so the first scan offers
+// dn-c alone, and the second — dn-c black-listed and its domain excluded —
+// offers dn-d alone, through tier 2.
+func TestCreateSpareLegReplansAroundADnTheGroupGained(t *testing.T) {
+	env := newVolEnv(t)
+	env.relocateDn(volDnD, volDnC)
+	env.setDnFree(volDnC, volDnCFree)
+	got := volRaceSpareLeg(t, env, model.SliceKey(env.cid, volSpId, volSliceId),
+		func() error { return volMigrateLegB(env) })
+	if got != volDnD {
+		t.Errorf("the spare on %s, want %s", got, volDnD)
+	}
+	grp := volGrpOf(t, env.slice(), volDataGrpId)
+	legOf := make(map[string]uint64)
+	for _, leg := range allLegs(grp) {
+		for _, side := range leg.GetSideList() {
+			addrPort := side.GetAddrPort()
+			if other, ok := legOf[addrPort]; ok && other != leg.GetLegId() {
+				t.Errorf("%s carries a side of leg %d and of leg %d: two "+
+					"legs of group %d on one disk node", addrPort, other,
+					leg.GetLegId(), volDataGrpId)
+			}
+			legOf[addrPort] = leg.GetLegId()
+		}
+	}
+	if legOf[volDnC] != volDataLegB {
+		t.Errorf("%s carries a side of leg %d, want leg %d's destination",
+			volDnC, legOf[volDnC], volDataLegB)
+	}
+	if rev := env.spRev(); rev != 3 {
+		t.Errorf("sp_rev: got %d, want 3 (one bump per request)", rev)
+	}
+}
+
+// TestCreateSpareLegReplansAroundADnDisabledOrDeleted pins model.CreateSpareLeg's
+// reading of a pick gone stale: the DN the scan offered is disabled, or
+// deleted, while the op's transaction runs, and the op answers candidate
+// changed rather than refusing, so the next round scans again and the spare
+// lands on the other DN. dn_batch_size is 1 and dn-c holds the most free
+// extents, so the first scan offers dn-c alone; the other writer runs inside
+// the op's first read of dn-c's record, whose transaction then fails its
+// commit and re-reads the record as the other writer left it.
+func TestCreateSpareLegReplansAroundADnDisabledOrDeleted(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor func(env *volEnv) error
+	}{
+		{
+			name: "disabled",
+			actor: func(env *volEnv) error {
+				_, err := env.srv.UpdateDiskNodeDisabled(env.ctx,
+					&pb.UpdateDiskNodeDisabledRequest{
+						ClusterName: env.cluster,
+						AddrPort:    volDnC,
+						Disabled:    true,
+					})
+				return err
+			},
+		},
+		{
+			name: "deleted",
+			actor: func(env *volEnv) error {
+				env.dropDn(volDnC)
+				return nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.setDnBatchSize(1)
+			env.setDnFree(volDnC, volDnCFree)
+			got := volRaceSpareLeg(t, env, model.DnConfKey(env.cid, volDnC),
+				func() error { return tc.actor(env) })
+			if got != volDnD {
+				t.Errorf("the spare on %s, want %s", got, volDnD)
+			}
+			if free := env.dn(volDnD).GetFreeExtCnt(); free !=
+				volDnFree-volDataExtCnt {
+				t.Errorf("dn-d free_ext_cnt: got %d, want %d", free,
+					volDnFree-volDataExtCnt)
+			}
+			if rev := env.spRev(); rev != 2 {
+				t.Errorf("sp_rev: got %d, want 2 (the spare's one bump)",
+					rev)
+			}
+		})
+	}
 }

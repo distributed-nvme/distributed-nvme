@@ -585,6 +585,24 @@ func assertProvisioning(t *testing.T, info *pb.ResInfo, label string) {
 	}
 }
 
+// assertProvisioningDetails is assertProvisioning for a row whose details say
+// what it waits for: a clone the arena has no free run for reads
+// "waiting for metadata room: " and the allocator's own text (CN18 step 2),
+// fixed for as long as the arena stays as it is.
+func assertProvisioningDetails(
+	t *testing.T,
+	info *pb.ResInfo,
+	want string,
+	label string,
+) {
+	t.Helper()
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_PROVISIONING ||
+		info.GetDetails() != want {
+		t.Fatalf("%s: status %v, details %q, want PROVISIONING/%q",
+			label, info.GetStatus(), info.GetDetails(), want)
+	}
+}
+
 // assertPending is the CN11 row of a primary's leg whose prober has not
 // completed a round: RES_STATUS_PENDING "health probe pending". It is what a
 // converge reply carries here for a primary's freshly built legs: a prober's
@@ -3407,10 +3425,31 @@ func retrying(t *testing.T, srv *CnAgentServer) bool {
 	return st.retrying
 }
 
-// retryAttempt runs one attempt of the CN10 retry by hand: the call
-// connectRetryLoop makes on each tick, on the ctx it makes it on. The tests
-// that use it set a retryInterval no test outlives, so the loop itself never
-// fires and every attempt is one the test ran.
+// metaRetrying reads the fixture cntlr's registration for CN18's
+// clone-metadata retry under s.mu, the lock that guards it.
+func metaRetrying(t *testing.T, srv *CnAgentServer) bool {
+	t.Helper()
+	st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
+	if st == nil {
+		t.Fatalf("the fixture cntlr is not known")
+	}
+	return metaRetryingOf(srv, st)
+}
+
+// metaRetryingOf is metaRetrying for a cntlr state the test holds, which it
+// can still read once the cntlr has been dropped.
+func metaRetryingOf(srv *CnAgentServer, st *cntlrState) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return st.metaRetrying
+}
+
+// retryAttempt runs one attempt of a background retry by hand — the CN10
+// retry's or CN18's clone-metadata retry's, which run the same attempt: the
+// call connectRetryLoop makes on each tick, on the ctx it makes it on. The
+// tests that use it set a retryInterval no test outlives, and a
+// metaRetryInterval too where a clone waits for room, so the loops themselves
+// never fire and every attempt is one the test ran.
 func retryAttempt(t *testing.T, srv *CnAgentServer) {
 	t.Helper()
 	key := cntlrKey(testCluster, testCn, testSp, testCntlr)

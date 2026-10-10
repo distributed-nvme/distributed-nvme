@@ -75,13 +75,15 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
 # (architecture.md, Storage pools); the sp drain's D2 batch (dnv-worker.md
-# SPD10) and a created-flip transaction of MaxFlipCreatedPerTxn tds
-# (dnv-worker.md RW19) are two more, and their compare counts are asserted
+# SPD10), a created-flip transaction of MaxFlipCreatedPerTxn tds
+# (dnv-worker.md RW19) and the worker's cntlr replacement at the ceilings
+# (dnv-worker.md AR7) are three more, and their compare counts are asserted
 # from the named constants in gateway/txnbudget_test.go, not restated here.
-# The cdc suite creates and drains no storage pools, so the flag changes
-# nothing it observes; it is passed anyway so that every etcd this tree
-# starts — in the shell suites that start one and in the Go test launchers of
-# etcdutil, model, worker and gateway — gets the flag from the same constant.
+# The cdc suite creates and drains no storage pools and replaces no cntlr, so
+# the flag changes nothing it observes; it is passed anyway so that every etcd
+# this tree starts — in the shell suites that start one and in the Go test
+# launchers of etcdutil, model, worker and gateway — gets the flag from the
+# same constant.
 ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-cdc-integtest

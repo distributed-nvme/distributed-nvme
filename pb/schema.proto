@@ -346,6 +346,13 @@ message DnConf {
     repeated SidePointer side_ptr_list = 7;
     uint64 total_ext_cnt = 8;
     uint64 free_ext_cnt = 9;
+    // The units of this node's metadata area held by the migration
+    // destinations it hosts (architecture.md, Metadata units):
+    // CreateMigration charges the units it computes and stores in the
+    // migration's meta_units, and FinishMigration and CancelMigration release
+    // what that field records. A write that changes only this count raises no
+    // revision, and a release stops at zero. Appended, never renumbered.
+    uint64 used_meta_units = 10;
 }
 
 // {dnv_prefix} cn_conf {cluster_id} {addr_port}
@@ -359,16 +366,42 @@ message CnConf {
     repeated CntlrPointer cntlr_ptr_list = 7;
     uint64 total_ext_cnt = 8;
     uint64 free_ext_cnt = 9;
+    // The units of this node's metadata area held by clones: every clone of
+    // a pool is charged to the node of each cntlr of the pool
+    // (architecture.md, Metadata units). CreateClone charges it with the
+    // units it computes and stores in the clone's meta_units; CreateCntlr and
+    // ReplaceCntlr charge it, and FinishCloneDelete, DeleteCntlr and
+    // ReplaceCntlr release it, by reading each clone's meta_units. Only
+    // ReplaceCntlr may charge past CnCloneMetaUnitCnt. A write that changes
+    // only this count raises no revision, and a release stops at zero.
+    // Appended, never renumbered.
+    uint64 used_meta_units = 10;
 }
 
 // {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
 message DnCapacity {
     string location = 1;
+    // A copy of the node's DnConf.used_meta_units (architecture.md,
+    // Metadata units): every transaction that writes the key writes it, and
+    // every transaction that changes the count rewrites the key, so it
+    // follows the record. A scan reads the node's free units from it,
+    // DnCloneMetaUnitCnt less this and never below zero, and skips a node
+    // short of what it needs; a value without the field reads as nothing
+    // used. Appended, never renumbered.
+    uint64 used_meta_units = 2;
 }
 
 // {dnv_prefix} cn_capacity {cluster_id} {free_ext_cnt} {addr_port}
 message CnCapacity {
     string location = 1;
+    // A copy of the node's CnConf.used_meta_units (architecture.md,
+    // Metadata units): every transaction that writes the key writes it, and
+    // every transaction that changes the count rewrites the key, so it
+    // follows the record. A scan reads the node's free units from it,
+    // CnCloneMetaUnitCnt less this and never below zero, and skips a node
+    // short of what it needs; a value without the field reads as nothing
+    // used. Appended, never renumbered.
+    uint64 used_meta_units = 2;
 }
 
 // {dnv_prefix} cdc {cluster_id} {shard_code} {sp_id} {ss_id}
@@ -472,6 +505,14 @@ message Clone {
     // a renumbered field decodes silently into unknown fields rather than
     // failing.
     bool deleting = 12;
+    // The metadata units this clone holds on the node of each cntlr of its
+    // pool (architecture.md, Metadata units): common.CloneMetaUnits of the
+    // destination td's size and the pool's data_block_size, set by
+    // CreateClone and never changed. Every later charge and release reads it
+    // here, so a release gives back exactly what was charged. The cn agent
+    // sizes its run with the same formula and does not read it. Appended,
+    // never renumbered.
+    uint64 meta_units = 13;
 }
 
 // {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}
@@ -495,6 +536,13 @@ message Migration {
     uint64 dst_side_id = 3;
     DmCloneConf dm_clone_conf = 4;
     uint32 bm_cnt = 5;
+    // The metadata units this migration holds on its destination disk node
+    // (architecture.md, Metadata units): common.CloneMetaUnits of the moved
+    // side's bytes (its group's ext_cnt times the cluster's extent_size) and
+    // the pool's data_block_size, set by CreateMigration and never changed.
+    // FinishMigration and CancelMigration release exactly this. Appended,
+    // never renumbered.
+    uint64 meta_units = 6;
 }
 
 // {dnv_prefix} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx}

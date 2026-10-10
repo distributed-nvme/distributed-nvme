@@ -3,12 +3,16 @@
 // the whole suite reads back, so a malformed test invocation must fail loudly
 // here rather than land garbage in a key: these cover every tuple form of its
 // flags, the 0x hex ids, the bitmap payload, the key kind → message mapping of
-// `get` (architecture.md, Key table), and the put-sp wiring validation that
-// joins the placement flags on their ids.
+// `get` (architecture.md, Key table), the put-sp wiring validation that
+// joins the placement flags on their ids, and the metadata units the planted
+// copies cost (architecture.md, Metadata units): the units put-clone and
+// put-migr size them by and, over an in-memory STM, put-clone's charge to the
+// CN of every cntlr of the pool and put-migr's charge to its destination DN.
 package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -17,6 +21,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/etcdutil"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -476,14 +482,17 @@ func TestKeyPrefix(t *testing.T) {
 }
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
-// which the shell suites read a Go constant (`geometry` is the other one, for
-// a computed value). The suites read six of its keys at preflight, and stop
-// there when one is missing: every suite that starts an etcd launches it with
-// EtcdMaxTxnOps, e2e cross-checks MaxAllocLegPerGrp, the gateway suite
-// creates its stage-13 clone at MaxSliceCntPerSp and checks the health
-// intervals a new cluster stores against DefaultHealthCheckInterval, and the
-// worker and e2e suites read that interval, DefaultPrimaryUnhealthy and
-// DemotionHoldTimeout for their failover cases. One of those six dropped or
+// which the shell suites read a Go constant (`geometry` and `meta-units` are
+// the others, for computed values). The suites read ten of its keys at
+// preflight, and stop there when one is missing: every suite that starts an
+// etcd launches it with EtcdMaxTxnOps, e2e cross-checks MaxAllocLegPerGrp,
+// the gateway suite creates its stage-13 clone at MaxSliceCntPerSp and checks
+// the health intervals a new cluster stores against
+// DefaultHealthCheckInterval, the worker and e2e suites read that interval,
+// DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases,
+// and the gateway suite's ceiling case fills the metadata areas to
+// CnCloneMetaUnitCnt and DnCloneMetaUnitCnt in units of CnCloneMetaUnit,
+// which it requires DnCloneMetaUnit to equal. One of those ten dropped or
 // renamed here would otherwise surface only when a suite is run, at its
 // preflight. The other three keys are pinned as well, because a case may size
 // itself against them.
@@ -517,6 +526,11 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
 		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
+
+		"CnCloneMetaUnitCnt": common.CnCloneMetaUnitCnt,
+		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
+		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
+		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
 	}
 	for key, value := range want {
 		if have, ok := got[key]; !ok || have != value {
@@ -597,6 +611,615 @@ func TestGeometryEmitsWhatTheSuitesRead(t *testing.T) {
 					tc.name, key, got[key], value)
 			}
 		}
+	}
+}
+
+// captureStdout runs one subcommand and returns what it printed.
+func captureStdout(
+	t *testing.T,
+	cmd func(*globals, []string),
+	args []string,
+) []byte {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	saved := os.Stdout
+	os.Stdout = write
+	g := newGlobals()
+	cmd(&g, args)
+	os.Stdout = saved
+	write.Close()
+	out, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatalf("reading the output: %v", err)
+	}
+	return out
+}
+
+// TestMetaUnitsEmitsWhatTheSuitesRead pins `meta-units`, through which the
+// suites read the units a copy costs (architecture.md, Metadata units)
+// instead of re-deriving the formula: the two agents' own examples, a copy
+// under one block, and every copy the gateway suite's ceiling case, its smoke
+// case and the worker suite's drain case size by it. --block-size defaults to
+// common.DefaultDmPoolDataBlockSize, and a zero for either input is refused.
+func TestMetaUnitsEmitsWhatTheSuitesRead(t *testing.T) {
+	const tib = uint64(1) << 40
+	cases := []struct {
+		name  string
+		args  []string
+		bytes uint64
+		block uint64
+		units uint64
+	}{
+		{"the cn agent's example",
+			[]string{"--bytes", "1099511627776", "--block-size", "65536"},
+			tib, 64 << 10, 5},
+		{"the dn agent's example",
+			[]string{"--bytes", "1099511627776", "--block-size", "1048576"},
+			tib, 1 << 20, 2},
+		{"a copy under one block",
+			[]string{"--bytes", "65536", "--block-size", "1048576"},
+			64 << 10, 1 << 20, 1},
+		{"the ceiling case's clone too big for any CN",
+			[]string{"--bytes", "70368744177664", "--block-size", "65536"},
+			70368744177664, 64 << 10, 257},
+		{"the ceiling case's migration that fills a DN",
+			[]string{"--bytes", "12919261626368", "--block-size", "65536"},
+			12919261626368, 64 << 10, 48},
+		{"the ceiling case's clone of a quarter of a CN",
+			[]string{"--bytes", "17317308137472", "--block-size", "65536"},
+			17317308137472, 64 << 10, 64},
+		{"the ceiling case's two-unit clone",
+			[]string{"--bytes", "274877906944", "--block-size", "65536"},
+			274877906944, 64 << 10, 2},
+		{"the ceiling case's probe migration of one extent",
+			[]string{"--bytes", "1073741824", "--block-size", "65536"},
+			1 << 30, 64 << 10, 2},
+		{"the smoke case's clone",
+			[]string{"--bytes", "67108864", "--block-size", "1048576"},
+			64 << 20, 1 << 20, 2},
+		{"the smoke case's migration of two extents",
+			[]string{"--bytes", "2147483648", "--block-size", "1048576"},
+			2 << 30, 1 << 20, 2},
+		{"the worker suite's drain-case clone",
+			[]string{"--bytes", "10737418240", "--block-size", "1048576"},
+			10 << 30, 1 << 20, 2},
+		{"the default block size",
+			[]string{"--bytes", "1099511627776"},
+			tib, common.DefaultDmPoolDataBlockSize, 2},
+	}
+	for _, tc := range cases {
+		out := captureStdout(t, cmdMetaUnits, tc.args)
+		var got map[string]uint64
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("%s: meta-units printed %q, not one JSON object: %v",
+				tc.name, out, err)
+		}
+		want := map[string]uint64{
+			"bytes": tc.bytes, "block_size": tc.block, "units": tc.units,
+		}
+		for key, value := range want {
+			if have, ok := got[key]; !ok || have != value {
+				t.Errorf("%s: meta-units %s = %d (present %t), want %d",
+					tc.name, key, have, ok, value)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s: meta-units printed %d keys, want %d: %s",
+				tc.name, len(got), len(want), out)
+		}
+		// The subcommand is the formula and nothing else.
+		if formula := common.CloneMetaUnits(tc.bytes, tc.block); formula !=
+			tc.units {
+			t.Errorf("%s: common.CloneMetaUnits = %d, the table says %d",
+				tc.name, formula, tc.units)
+		}
+	}
+	for _, bad := range []struct{ bytes, block uint64 }{
+		{0, 1 << 20}, {1 << 30, 0}, {0, 0},
+	} {
+		if units, err := metaUnitsOf(bad.bytes, bad.block); err == nil {
+			t.Errorf("meta-units --bytes %d --block-size %d = %d, "+
+				"want a refusal", bad.bytes, bad.block, units)
+		}
+	}
+}
+
+// memStm is an in-memory etcdutil.STM over marshaled values, so a value read
+// back is a fresh copy, as it is from etcd, and a staged write is seen by a
+// later read. It counts the reads and the writes of every key: "one write
+// per node" and "zero units read nothing" are counts.
+type memStm struct {
+	vals map[string][]byte
+	gets map[string]int
+	puts map[string]int
+}
+
+func newMemStm() *memStm {
+	return &memStm{
+		vals: make(map[string][]byte),
+		gets: make(map[string]int),
+		puts: make(map[string]int),
+	}
+}
+
+func (m *memStm) Get(key string, msg proto.Message) bool {
+	m.gets[key]++
+	return m.peek(key, msg)
+}
+
+func (m *memStm) Put(key string, msg proto.Message) {
+	m.seed(key, msg)
+	m.puts[key]++
+}
+
+func (m *memStm) Del(key string) { delete(m.vals, key) }
+
+func (m *memStm) Rev(key string) int64 { return 0 }
+
+// seed stores a fixture value without counting a write.
+func (m *memStm) seed(key string, msg proto.Message) {
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		panic(fmt.Sprintf("memStm: marshaling %q: %v", key, err))
+	}
+	m.vals[key] = data
+}
+
+// peek reads a value for an assertion without counting a read.
+func (m *memStm) peek(key string, msg proto.Message) bool {
+	data, ok := m.vals[key]
+	if !ok {
+		return false
+	}
+	if err := proto.Unmarshal(data, msg); err != nil {
+		panic(fmt.Sprintf("memStm: decoding %q: %v", key, err))
+	}
+	return true
+}
+
+// memStm must stay a valid etcdutil.STM.
+var _ etcdutil.STM = (*memStm)(nil)
+
+// testPoolBdev is a stored pool BdevConf with blockSize as its block size:
+// every member model.ValidateBdevConf requires is concrete, and no
+// redund_conf is the redund_none choice.
+func testPoolBdev(blockSize uint64) *pb.BdevConf {
+	return &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize:   blockSize,
+			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+		},
+		DmRaid0Conf: &pb.DmRaid0Conf{
+			StripeSize: common.DefaultDmRaid0StripeSize,
+		},
+	}
+}
+
+// TestCloneChargePerCn pins put-clone's charge (architecture.md, Metadata
+// units): the clone's units once per cntlr on the CN its record names, one
+// write per CN, the capacity value following the record, no CnRev, and no
+// refusal for room — the charge model.FinishCloneDelete gives back.
+func TestCloneChargePerCn(t *testing.T) {
+	const (
+		cid    = uint64(0xc1d)
+		spId   = uint64(7)
+		cnA    = "10.0.0.1:29700"
+		cnB    = "10.0.0.1:29701"
+		cnGone = "10.0.0.1:29702"
+		free   = uint64(64)
+		units  = uint64(4)
+	)
+	// fixture plants a pool whose cntlr id i+1 sits on cntlrCns[i] (an empty
+	// addr is a listed cntlr with no key) and the CNs cnA and cnB, cnA with
+	// usedA units already used. cnGone has no CnConf.
+	fixture := func(usedA uint64, cntlrCns ...string) (*memStm, *pb.SpConf) {
+		m := newMemStm()
+		conf := &pb.SpConf{SpId: spId}
+		for i, addrPort := range cntlrCns {
+			cntlrId := uint64(i + 1)
+			conf.CntlrIdList = append(conf.CntlrIdList, cntlrId)
+			if addrPort == "" {
+				continue
+			}
+			m.seed(model.CntlrKey(cid, spId, cntlrId),
+				&pb.Cntlr{AddrPort: addrPort})
+		}
+		m.seed(model.CnConfKey(cid, cnA), &pb.CnConf{
+			CnId: 1, Location: "rack0", TotalExtCnt: free,
+			FreeExtCnt: free, UsedMetaUnits: usedA,
+		})
+		m.seed(model.CnConfKey(cid, cnB), &pb.CnConf{
+			CnId: 2, Location: "rack1", TotalExtCnt: free,
+			FreeExtCnt: free,
+		})
+		return m, conf
+	}
+	// used reads a CN's count from its record and from its capacity value,
+	// failing when the two disagree or the key is gone.
+	used := func(t *testing.T, m *memStm, addrPort string) uint64 {
+		t.Helper()
+		cn := &pb.CnConf{}
+		if !m.peek(model.CnConfKey(cid, addrPort), cn) {
+			t.Fatalf("%s: no CnConf", addrPort)
+		}
+		value := &pb.CnCapacity{}
+		if !m.peek(model.CnCapacityKey(cid, free, addrPort), value) {
+			t.Fatalf("%s: the capacity key is gone", addrPort)
+		}
+		if value.GetUsedMetaUnits() != cn.GetUsedMetaUnits() {
+			t.Fatalf("%s: capacity value carries %d used units, the "+
+				"record %d", addrPort, value.GetUsedMetaUnits(),
+				cn.GetUsedMetaUnits())
+		}
+		if value.GetLocation() != cn.GetLocation() {
+			t.Fatalf("%s: capacity value location %q, the record %q",
+				addrPort, value.GetLocation(), cn.GetLocation())
+		}
+		return cn.GetUsedMetaUnits()
+	}
+	// onlyNodeWrites fails on any write but a CnConf or a capacity key, and
+	// on a second write of one key: a units-only charge bumps no CnRev.
+	onlyNodeWrites := func(t *testing.T, m *memStm) {
+		t.Helper()
+		for key, cnt := range m.puts {
+			if !strings.HasPrefix(key, common.DnvPrefix+" cn_conf ") &&
+				!strings.HasPrefix(key, common.DnvPrefix+" cn_capacity ") {
+				t.Errorf("the charge wrote %q", key)
+			}
+			if cnt != 1 {
+				t.Errorf("the charge wrote %q %d times, want once", key, cnt)
+			}
+		}
+	}
+
+	t.Run("two cntlrs on two CNs charge each CN once", func(t *testing.T) {
+		m, conf := fixture(10, cnA, cnB)
+		charged, err := chargeCloneCns(m, cid, conf, units)
+		if err != nil {
+			t.Fatalf("chargeCloneCns: %v", err)
+		}
+		if got := used(t, m, cnA); got != 10+units {
+			t.Errorf("cnA used %d, want %d", got, 10+units)
+		}
+		if got := used(t, m, cnB); got != units {
+			t.Errorf("cnB used %d, want %d", got, units)
+		}
+		if len(charged) != 2 || charged[cnA] != units ||
+			charged[cnB] != units {
+			t.Errorf("charged %v, want %d on each of %s and %s",
+				charged, units, cnA, cnB)
+		}
+		onlyNodeWrites(t, m)
+	})
+	t.Run("two cntlrs on one CN charge it twice in one write",
+		func(t *testing.T) {
+			m, conf := fixture(0, cnA, cnB, cnA)
+			charged, err := chargeCloneCns(m, cid, conf, units)
+			if err != nil {
+				t.Fatalf("chargeCloneCns: %v", err)
+			}
+			if got := used(t, m, cnA); got != 2*units {
+				t.Errorf("cnA used %d, want %d", got, 2*units)
+			}
+			if got := used(t, m, cnB); got != units {
+				t.Errorf("cnB used %d, want %d", got, units)
+			}
+			if charged[cnA] != 2*units {
+				t.Errorf("charged %v, want %d on %s", charged, 2*units, cnA)
+			}
+			onlyNodeWrites(t, m)
+		})
+	t.Run("no cntlr charges nothing", func(t *testing.T) {
+		m, conf := fixture(0)
+		charged, err := chargeCloneCns(m, cid, conf, units)
+		if err != nil || len(charged) != 0 || len(m.puts) != 0 {
+			t.Errorf("charged %v, err %v, writes %v; want none",
+				charged, err, m.puts)
+		}
+	})
+	t.Run("zero units read nothing", func(t *testing.T) {
+		m, conf := fixture(0, cnA, cnB)
+		charged, err := chargeCloneCns(m, cid, conf, 0)
+		if err != nil || len(charged) != 0 {
+			t.Errorf("charged %v, err %v; want nothing", charged, err)
+		}
+		if len(m.gets) != 0 || len(m.puts) != 0 {
+			t.Errorf("zero units read %v and wrote %v", m.gets, m.puts)
+		}
+	})
+	t.Run("a CN past its ceiling is charged all the same",
+		func(t *testing.T) {
+			m, conf := fixture(common.CnCloneMetaUnitCnt-1, cnA)
+			if _, err := chargeCloneCns(m, cid, conf, units); err != nil {
+				t.Fatalf("chargeCloneCns refused a full CN: %v", err)
+			}
+			want := uint64(common.CnCloneMetaUnitCnt - 1 + units)
+			if got := used(t, m, cnA); got != want {
+				t.Errorf("cnA used %d, want %d", got, want)
+			}
+			cn := &pb.CnConf{}
+			m.peek(model.CnConfKey(cid, cnA), cn)
+			if free := model.CnFreeMetaUnits(cn); free != 0 {
+				t.Errorf("cnA past its ceiling has %d free units, want 0",
+					free)
+			}
+		})
+	t.Run("a listed cntlr with no key refuses before any write",
+		func(t *testing.T) {
+			m, conf := fixture(0, cnA, "", cnB)
+			_, err := chargeCloneCns(m, cid, conf, units)
+			if err == nil || !strings.Contains(err.Error(), "not found") {
+				t.Fatalf("chargeCloneCns = %v, want a \"not found\" "+
+					"refusal", err)
+			}
+			if len(m.puts) != 0 {
+				t.Errorf("the refusal wrote %v", m.puts)
+			}
+		})
+	t.Run("a CN that is gone is skipped", func(t *testing.T) {
+		m, conf := fixture(0, cnA, cnGone)
+		charged, err := chargeCloneCns(m, cid, conf, units)
+		if err != nil {
+			t.Fatalf("chargeCloneCns: %v", err)
+		}
+		if _, ok := charged[cnGone]; ok {
+			t.Errorf("charged %v names the CN that is gone", charged)
+		}
+		if m.puts[model.CnConfKey(cid, cnGone)] != 0 {
+			t.Errorf("the charge wrote the CnConf of the CN that is gone")
+		}
+		if got := used(t, m, cnA); got != units {
+			t.Errorf("cnA used %d, want %d", got, units)
+		}
+		onlyNodeWrites(t, m)
+	})
+}
+
+// TestMigrDstCharge pins put-migr's charge of its destination DN
+// (architecture.md, Metadata units): the side pointer, the extents and the
+// migration's units in the one write of the record, the capacity value
+// following the record, one DnRev bump, no refusal past the DN's metadata
+// area, and a DN short of extents refused before any write — the charge
+// FinishMigration and CancelMigration give back.
+func TestMigrDstCharge(t *testing.T) {
+	const (
+		cid    = uint64(0xc1d)
+		spId   = uint64(7)
+		dnId   = uint64(0x21)
+		shard  = uint32(3)
+		addr   = "10.0.0.2:29600"
+		total  = uint64(100)
+		free   = uint64(64)
+		extCnt = uint64(2)
+		units  = uint64(3)
+		rev    = uint64(41)
+	)
+	cc := &pb.ClusterConf{DnBinConf: model.ResolveDnBinConf(nil)}
+	ptr := &pb.SidePointer{SpId: spId, LegId: 0x31, SideId: 0x32}
+	held := &pb.SidePointer{SpId: spId, LegId: 0x11, SideId: 0x12}
+	capKey := func(t *testing.T, freeExt uint64) string {
+		t.Helper()
+		binIdx, ok := model.DnBinIdx(freeExt, cc.GetDnBinConf())
+		if !ok {
+			t.Fatalf("%d free extents have no bin", freeExt)
+		}
+		return model.DnCapacityKey(cid, binIdx, freeExt, addr)
+	}
+	// fixture plants the DN with freeExt free extents, used units already
+	// used and one side it already holds, its capacity key as
+	// model.MaintainDnCapacity writes it, and its DnRev at rev; it returns
+	// the record as an STM reads it.
+	fixture := func(t *testing.T, freeExt, used uint64) (*memStm, *pb.DnConf) {
+		t.Helper()
+		m := newMemStm()
+		dn := &pb.DnConf{
+			DnId: dnId, ShardCode: shard, Location: "rack2",
+			TotalExtCnt: total, FreeExtCnt: freeExt, UsedMetaUnits: used,
+			SidePtrList: []*pb.SidePointer{held},
+		}
+		m.seed(model.DnConfKey(cid, addr), dn)
+		m.seed(capKey(t, freeExt), model.DnCapacityValue(dn))
+		m.seed(model.DnRevKey(shard, cid, dnId), &pb.DnRev{Revision: rev})
+		read := &pb.DnConf{}
+		if !m.Get(model.DnConfKey(cid, addr), read) {
+			t.Fatalf("no DnConf at %q", addr)
+		}
+		return m, read
+	}
+	// charged checks one successful charge: the record and its capacity
+	// value carry the extents and the units, the key moved with the free
+	// count, the revision went up once, and nothing else was written.
+	charged := func(t *testing.T, m *memStm, dnRev, used uint64) {
+		t.Helper()
+		dn := &pb.DnConf{}
+		if !m.peek(model.DnConfKey(cid, addr), dn) {
+			t.Fatalf("the charge removed the DnConf")
+		}
+		if dn.GetFreeExtCnt() != free-extCnt {
+			t.Errorf("free_ext_cnt %d, want %d", dn.GetFreeExtCnt(),
+				free-extCnt)
+		}
+		if dn.GetUsedMetaUnits() != used+units {
+			t.Errorf("used_meta_units %d, want %d", dn.GetUsedMetaUnits(),
+				used+units)
+		}
+		ptrs := dn.GetSidePtrList()
+		if len(ptrs) != 2 || !proto.Equal(ptrs[0], held) ||
+			!proto.Equal(ptrs[1], ptr) {
+			t.Errorf("side_ptr_list %v, want %v then %v", ptrs, held, ptr)
+		}
+		if m.peek(capKey(t, free), &pb.DnCapacity{}) {
+			t.Errorf("the capacity key of %d free extents is still there",
+				free)
+		}
+		value := &pb.DnCapacity{}
+		if !m.peek(capKey(t, free-extCnt), value) {
+			t.Fatalf("no capacity key for %d free extents", free-extCnt)
+		}
+		if !proto.Equal(value, model.DnCapacityValue(dn)) {
+			t.Errorf("capacity value %v, the record implies %v", value,
+				model.DnCapacityValue(dn))
+		}
+		got := &pb.DnRev{}
+		m.peek(model.DnRevKey(shard, cid, dnId), got)
+		if got.GetRevision() != rev+1 || dnRev != rev+1 {
+			t.Errorf("DnRev %d, returned %d; want %d once",
+				got.GetRevision(), dnRev, rev+1)
+		}
+		for key, cnt := range m.puts {
+			if key != model.DnConfKey(cid, addr) &&
+				key != capKey(t, free-extCnt) &&
+				key != model.DnRevKey(shard, cid, dnId) {
+				t.Errorf("the charge wrote %q", key)
+			}
+			if cnt != 1 {
+				t.Errorf("the charge wrote %q %d times, want once", key, cnt)
+			}
+		}
+	}
+
+	t.Run("the units ride the extents' write", func(t *testing.T) {
+		m, dn := fixture(t, free, 10)
+		dnRev, err := chargeMigrDst(m, cid, cc, addr, dn, ptr, extCnt, units)
+		if err != nil {
+			t.Fatalf("chargeMigrDst: %v", err)
+		}
+		charged(t, m, dnRev, 10)
+	})
+	t.Run("a DN past its metadata area is charged all the same",
+		func(t *testing.T) {
+			used := uint64(common.DnCloneMetaUnitCnt - 1)
+			m, dn := fixture(t, free, used)
+			dnRev, err := chargeMigrDst(
+				m, cid, cc, addr, dn, ptr, extCnt, units)
+			if err != nil {
+				t.Fatalf("chargeMigrDst refused a full DN: %v", err)
+			}
+			charged(t, m, dnRev, used)
+			after := &pb.DnConf{}
+			m.peek(model.DnConfKey(cid, addr), after)
+			if room := model.DnFreeMetaUnits(after); room != 0 {
+				t.Errorf("a DN past its area has %d free units, want 0",
+					room)
+			}
+		})
+	t.Run("a DN short of extents refuses before any write",
+		func(t *testing.T) {
+			m, dn := fixture(t, extCnt-1, 0)
+			_, err := chargeMigrDst(m, cid, cc, addr, dn, ptr, extCnt, units)
+			if err == nil || !strings.Contains(err.Error(), "free_ext_cnt") {
+				t.Fatalf("chargeMigrDst = %v, want a free_ext_cnt refusal",
+					err)
+			}
+			if len(m.puts) != 0 {
+				t.Errorf("the refusal wrote %v", m.puts)
+			}
+		})
+}
+
+// TestPlantedCloneTd pins how put-clone's --dst-td finds the td it sizes the
+// clone by: a name first, then a td_id among the pool's tds, and a td_id no
+// td carries planted unsized.
+func TestPlantedCloneTd(t *testing.T) {
+	const cid, spId = uint64(0xc1d), uint64(7)
+	m := newMemStm()
+	conf := &pb.SpConf{SpId: spId, TdNameList: []string{"td0", "5"}}
+	m.seed(model.ThinDeviceKey(cid, spId, "td0"),
+		&pb.ThinDevice{TdId: 0x10, Size: 10 << 30})
+	// A td NAMED like an id: the name is tried first, so "5" is this td and
+	// never td_id 5.
+	m.seed(model.ThinDeviceKey(cid, spId, "5"),
+		&pb.ThinDevice{TdId: 0x11, Size: 1 << 30})
+	cases := []struct {
+		dstTd string
+		id    uint64
+		size  uint64
+		found bool
+	}{
+		{"td0", 0x10, 10 << 30, true},
+		{"0x10", 0x10, 10 << 30, true},
+		{"16", 0x10, 10 << 30, true},
+		{"5", 0x11, 1 << 30, true},
+		{"0x99", 0x99, 0, false},
+	}
+	for _, tc := range cases {
+		id, td, err := plantedCloneTd(m, cid, conf, tc.dstTd)
+		if err != nil {
+			t.Errorf("plantedCloneTd(%q): %v", tc.dstTd, err)
+			continue
+		}
+		if id != tc.id || (td != nil) != tc.found ||
+			td.GetSize() != tc.size {
+			t.Errorf("plantedCloneTd(%q) = %#x, %v; want %#x, size %d, "+
+				"found %t", tc.dstTd, id, td, tc.id, tc.size, tc.found)
+		}
+	}
+	if _, _, err := plantedCloneTd(m, cid, conf, "nope"); err == nil {
+		t.Errorf("plantedCloneTd(\"nope\") succeeded, want an error")
+	}
+}
+
+// TestPlantedUnits pins the units put-clone and put-migr store and charge
+// (architecture.md, Metadata units): the formula at the pool's block size,
+// behind the stored conf's gate, and none for a clone with no td to size.
+func TestPlantedUnits(t *testing.T) {
+	small := &pb.SpConf{BdevConf: testPoolBdev(64 << 10)}
+	large := &pb.SpConf{BdevConf: testPoolBdev(1 << 20)}
+	broken := &pb.SpConf{BdevConf: testPoolBdev(0)}
+
+	cloneCases := []struct {
+		name  string
+		conf  *pb.SpConf
+		td    *pb.ThinDevice
+		units uint64
+	}{
+		{"the worker suite's drain-case clone", large,
+			&pb.ThinDevice{Size: 10 << 30}, 2},
+		{"the cn agent's example", small,
+			&pb.ThinDevice{Size: 1 << 40}, 5},
+		{"no td to size", small, nil, 0},
+		{"no td to size, whatever the conf", broken, nil, 0},
+	}
+	for _, tc := range cloneCases {
+		units, err := plantedCloneUnits(tc.conf, tc.td)
+		if err != nil || units != tc.units {
+			t.Errorf("plantedCloneUnits, %s = %d, %v; want %d",
+				tc.name, units, err, tc.units)
+		}
+	}
+	if units, err := plantedCloneUnits(
+		broken, &pb.ThinDevice{Size: 10 << 30}); err == nil {
+		t.Errorf("plantedCloneUnits on a zero block size = %d, want a "+
+			"refusal", units)
+	}
+
+	migrCases := []struct {
+		name       string
+		conf       *pb.SpConf
+		extCnt     uint64
+		extentSize uint64
+		units      uint64
+	}{
+		{"the worker suite's bitmap-case migration", large,
+			2, common.MinDnExtSize, 2},
+		{"the gateway suite's smoke migration", large,
+			2, 1 << 30, 2},
+		{"the ceiling case's migration that fills a DN", small,
+			12032, 1 << 30, common.DnCloneMetaUnitCnt},
+	}
+	for _, tc := range migrCases {
+		units, err := plantedMigrUnits(tc.conf, tc.extCnt, tc.extentSize)
+		if err != nil || units != tc.units {
+			t.Errorf("plantedMigrUnits, %s = %d, %v; want %d",
+				tc.name, units, err, tc.units)
+		}
+	}
+	if units, err := plantedMigrUnits(broken, 2, 1<<30); err == nil {
+		t.Errorf("plantedMigrUnits on a zero block size = %d, want a "+
+			"refusal", units)
 	}
 }
 

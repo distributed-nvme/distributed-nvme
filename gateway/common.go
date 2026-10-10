@@ -55,11 +55,16 @@ func errPrecondition(format string, args ...any) error {
 
 // errExhausted is GW7's RESOURCE_EXHAUSTED, whose cases are count ceilings,
 // "too few candidates" (architecture.md, Per-operation allocation) and
-// capacity shortfalls. GW7's dividing line: RESOURCE_EXHAUSTED is capacity or
-// quota that could be freed or extended, FAILED_PRECONDITION the object's own
-// state forbidding the operation — which is why the meta ladder cap is an
-// errPrecondition, not an errExhausted, and so is GrowSlice's
-// common.MaxGrpCntPerSlice group ceiling (architecture.md, GrowSlice).
+// capacity shortfalls. Metadata units are capacity like extents
+// (architecture.md, Metadata units): a clone create that the metadata area
+// of a CN holding a cntlr of the pool has no room for, a cntlr create or a
+// migration create that finds no candidate node with room, and the ledgers'
+// chargeUnits shortfall all answer it, each message saying "metadata room".
+// GW7's dividing line: RESOURCE_EXHAUSTED is capacity or quota that could be
+// freed or extended, FAILED_PRECONDITION the object's own state forbidding
+// the operation — which is why the meta ladder cap is an errPrecondition, not
+// an errExhausted, and so is GrowSlice's common.MaxGrpCntPerSlice group
+// ceiling (architecture.md, GrowSlice).
 func errExhausted(format string, args ...any) error {
 	return status.Errorf(codes.ResourceExhausted, format, args...)
 }
@@ -111,8 +116,11 @@ func mapStmErr(err error) error {
 // ReasonStaleRevision is the token check the gateway asked the op to run and
 // is ABORTED; ReasonCandidateChanged never reaches a client (GW9: the caller
 // re-runs the whole candidate unit) and is reported to the caller of this
-// helper through isCandidateChanged instead; every other ErrPrecondition is a
-// documented public precondition and therefore FAILED_PRECONDITION.
+// helper through isCandidateChanged instead — CreateSpareLeg's group that
+// gained a DN since the round's plan, and its pick deleted, disabled or
+// otherwise no longer allocatable, or short of extents, since the scan,
+// arrive that way; every other ErrPrecondition is a documented public
+// precondition and therefore FAILED_PRECONDITION.
 func mapModelErr(err error) error {
 	if err == nil {
 		return nil
@@ -139,12 +147,18 @@ func mapModelErr(err error) error {
 
 // errCandidateChanged is the sentinel an allocating STM closure returns when
 // one pick's exact capacity key — the key the scan outside the transaction saw
-// — is no longer there, or when what the scan was planned from has moved
-// under it: CreateStoragePool's cluster_id or leg count, CreateCntlr's SP,
-// which as the closure reads it has a cntlr on a CN the scan's read of its
-// cntlrs did not, or CreateMigration's group, which as the closure reads it
-// occupies a DN the scan's read of it did not. DeleteThinDevice's deciding
-// STM returns it too, for a stale plan:
+// — is no longer there, when the pick's node no longer has the free metadata
+// units the round needs (verifyPick reads them from the node's record, since
+// a write that changes only units leaves the key where it is;
+// architecture.md, Metadata units), or when what the scan was planned from
+// has moved under it: CreateStoragePool's cluster_id or leg count,
+// CreateCntlr's SP, which as the closure reads it has a cntlr on a CN the
+// scan's read of its cntlrs did not, or CreateMigration's group, which as the
+// closure reads it occupies a DN the scan's read of it did not.
+// model.CreateSpareLeg answers it, through mapModelErr, for the same gain on
+// its group and for a pick deleted, disabled or otherwise no longer
+// allocatable, or short of extents, since the scan. DeleteThinDevice's
+// deciding STM returns it too, for a stale plan:
 // another SP than the one the plan walked, or, for a token-less request, a
 // moved SpRev. It is never surfaced to a client (GW9).
 var errCandidateChanged = errors.New("gateway: candidate changed")
@@ -155,21 +169,34 @@ func isCandidateChanged(err error) bool {
 }
 
 // candidateUnit runs one "scan candidates outside the STM, commit inside it"
-// round over and over until the round commits, fails for any other reason, or
-// the request context ends (GW9).
+// round over and over until the round commits, fails for any other reason,
+// the request context ends, or common.MaxCandidateRoundCnt rounds have all
+// answered candidate changed (GW9).
 //
 // The retry covers the WHOLE unit — the scan included — because a pick whose
 // capacity key moved is stale information, not a transient write conflict:
 // re-running only the transaction would re-validate the same dead pick for
 // ever. etcdutil's own conflict retry is a different layer and is untouched.
+//
+// The round cap is what bounds a request whose client set no deadline: under
+// steady churn every round can lose its pick, and without the cap such a
+// request would hold its handler for ever. A unit that reaches it answers
+// ABORTED "did not settle", as one whose ctx ended does, and the client
+// retries. The ctx is checked first, so a request whose deadline passed during
+// the last round names the deadline and not the cap.
 func candidateUnit(ctx context.Context, unit func() error) error {
-	for {
+	for round := 1; ; round++ {
 		err := unit()
 		if !isCandidateChanged(err) {
 			return err
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return errAborted("candidate allocation did not settle: %v", ctxErr)
+		}
+		if round >= common.MaxCandidateRoundCnt {
+			return errAborted(
+				"candidate allocation did not settle in %d rounds",
+				common.MaxCandidateRoundCnt)
 		}
 	}
 }

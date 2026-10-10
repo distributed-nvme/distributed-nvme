@@ -82,6 +82,8 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 **check round** — The question the worker asks an agent at a fixed interval about one disk node, side, controller node or cntlr. The agent answers with the revision it holds, whether the node is clean, and the real state when it changed. From the answers the worker decides what is healthy and whether to send the syncup again.
 
+**row** — One line of an agent's report about one device, export or connection of a node: a status, a short text and the time the status last changed. The status is ok, missing, error, provisioning or pending. The worker reads the rows to judge health, and only an error row, or no answer at all, makes it set a health epoch.
+
 ## Health and reactions
 
 **health epoch** — The time at which the worker first saw a node, a cntlr, a leg or a side unhealthy, written `err_epoch` in the records. It is zero while that node, cntlr, leg or side is healthy.
@@ -119,6 +121,8 @@ The core words of dnv in plain language: the short list to read first. The entri
 **transfer** — The other end of a clone: a storage pool exports one of its volumes over a subsystem made for this purpose, so that a clone in another pool can read it.
 
 **cross-SP live migration** — The move of a volume from one storage pool to another, even in another cluster, while hosts keep using it. It is a transfer in the source pool together with a clone in the destination pool.
+
+**metadata area** — The fixed space where dm-clone keeps the metadata of a copy: a file on a controller node for the clones its primaries pull, a region of the disk on a disk node for the migration destinations it holds. It is handed out in units, and a clone or a destination needs a run of free units.
 
 **drain** — The removal of a storage pool or of a clone in the background. The delete call marks the pool or the clone as deleting, and the worker then removes its parts step by step.
 

@@ -192,20 +192,21 @@ func (e *sptEnv) putDn(
 	freeExt uint64,
 ) {
 	e.t.Helper()
-	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), &pb.DnConf{
+	dn := &pb.DnConf{
 		DnId:        dnId,
 		ShardCode:   shard,
 		NvmeTrConf:  sptTrConf(addrPort),
 		Location:    addrPort,
 		TotalExtCnt: 1024,
 		FreeExtCnt:  freeExt,
-	})
+	}
+	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), dn)
 	mustPut(e.t, e.cli, model.DnRevKey(shard, e.cid, dnId), &pb.DnRev{
 		AddrPort: addrPort,
 		Revision: 1,
 	})
 	if key := e.dnCapacityKey(addrPort, freeExt); key != "" {
-		mustPut(e.t, e.cli, key, &pb.DnCapacity{Location: addrPort})
+		mustPut(e.t, e.cli, key, model.DnCapacityValue(dn))
 	}
 }
 
@@ -217,14 +218,15 @@ func (e *sptEnv) putCn(
 	freeExt uint64,
 ) {
 	e.t.Helper()
-	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), &pb.CnConf{
+	cn := &pb.CnConf{
 		CnId:        cnId,
 		ShardCode:   shard,
 		NvmeTrConf:  sptTrConf(addrPort),
 		Location:    addrPort,
 		TotalExtCnt: 1024,
 		FreeExtCnt:  freeExt,
-	})
+	}
+	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
 	mustPut(e.t, e.cli, model.CnRevKey(shard, e.cid, cnId), &pb.CnRev{
 		AddrPort: addrPort,
 		Revision: 1,
@@ -232,7 +234,7 @@ func (e *sptEnv) putCn(
 	mustPut(
 		e.t, e.cli,
 		model.CnCapacityKey(e.cid, freeExt, addrPort),
-		&pb.CnCapacity{Location: addrPort},
+		model.CnCapacityValue(cn),
 	)
 }
 
@@ -2129,7 +2131,7 @@ func (e *sptEnv) reserveDn(
 		}
 	}
 	if newKey != "" {
-		mustPut(e.t, e.cli, newKey, &pb.DnCapacity{Location: addrPort})
+		mustPut(e.t, e.cli, newKey, model.DnCapacityValue(dn))
 	}
 }
 
@@ -2151,7 +2153,7 @@ func (e *sptEnv) reserveCn(
 	mustPut(
 		e.t, e.cli,
 		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
-		&pb.CnCapacity{Location: addrPort},
+		model.CnCapacityValue(cn),
 	)
 }
 
@@ -3939,7 +3941,7 @@ func (e *sptEnv) relocateCn(addrPort string, location string) {
 	mustPut(
 		e.t, e.cli,
 		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
-		&pb.CnCapacity{Location: location},
+		model.CnCapacityValue(cn),
 	)
 }
 
@@ -4207,7 +4209,7 @@ func sptRecordAttr(rec slog.Record, name string) string {
 }
 
 // setCnFree moves one CN to freeExt free extents, capacity key included,
-// keeping the location it has.
+// keeping the location and the used metadata units it has.
 func (e *sptEnv) setCnFree(addrPort string, freeExt uint64) {
 	e.t.Helper()
 	cn := e.cnConf(addrPort)
@@ -4220,8 +4222,35 @@ func (e *sptEnv) setCnFree(addrPort string, freeExt uint64) {
 	mustPut(
 		e.t, e.cli,
 		model.CnCapacityKey(e.cid, freeExt, addrPort),
-		&pb.CnCapacity{Location: cn.GetLocation()},
+		model.CnCapacityValue(cn),
 	)
+}
+
+// setCnUsed sets one CN's used_meta_units as a write that changes only the
+// count leaves the store (architecture.md, Metadata units): the record and
+// its capacity value carry the new count, the key stays where the free count
+// puts it, and no revision moves. It is how a test fills a CN's metadata area
+// without the clones that would.
+func (e *sptEnv) setCnUsed(addrPort string, used uint64) {
+	e.t.Helper()
+	cn := e.cnConf(addrPort)
+	cn.UsedMetaUnits = used
+	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
+	mustPut(
+		e.t, e.cli,
+		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
+		model.CnCapacityValue(cn),
+	)
+}
+
+// cnCapValue is the value of the capacity key one CN's record implies, which
+// a test reads the CN's used metadata units back from as the scans do.
+func (e *sptEnv) cnCapValue(addrPort string) *pb.CnCapacity {
+	e.t.Helper()
+	value := &pb.CnCapacity{}
+	e.get(model.CnCapacityKey(
+		e.cid, e.cnConf(addrPort).GetFreeExtCnt(), addrPort), value)
+	return value
 }
 
 // setCnBatchSize stores a cn_batch_size in the cluster's conf. At 1 every CN
@@ -4353,8 +4382,9 @@ func TestCreateCntlrReplansAroundACntlrItDidNotSee(t *testing.T) {
 				},
 			}
 			slog.SetDefault(slog.New(hook))
-			// Bounded, so that a unit that never settles fails as ABORTED
-			// instead of hanging the package: GW9 retries until ctx ends.
+			// Bounded twice over, so that a unit that never settles fails as
+			// ABORTED instead of hanging the package: GW9 retries until the
+			// round cap or the ctx's end, whichever comes first.
 			ctx, cancel := context.WithTimeout(
 				context.WithValue(env.ctx, sptHookKey{}, true),
 				30*time.Second)

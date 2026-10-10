@@ -267,11 +267,12 @@ their values:
 * per subsystem: `MaxNsCntPerSs` namespaces and `MaxHostCntPerSs` allowed
   hosts;
 * per node: `MaxSideCntPerDn` sides on a DN, `MaxCntlrCntPerCn` cntlrs on a
-  CN;
-* per group and slice: `MaxLegPerGrp` legs, a ceiling nothing enforces —
-  `MaxAllocLegPerGrp` is the allocator's real per-group leg count —,
-  `MaxSpareLegPerGrp` spare legs, and `MaxGrpCntPerSlice` groups in
-  **each** of a slice's two group lists (md names, GrowSlice);
+  CN; `CnCloneMetaUnitCnt` units of a CN's clone-metadata arena and
+  `DnCloneMetaUnitCnt` units of a DN's clone-metadata area, which the
+  control plane counts (Metadata units);
+* per group and slice: `MaxAllocLegPerGrp` legs, the allocator's per-group
+  leg count, `MaxSpareLegPerGrp` spare legs, and `MaxGrpCntPerSlice` groups
+  in **each** of a slice's two group lists (md names, GrowSlice);
 * bitmaps: `MaxCloneBmCnt` chunks per source slice bitmap of a clone and
   `MaxMigrBmCnt` chunks per migration bitmap; `CloneBmChunkBytes` is one
   clone chunk's capacity **and** its positioning quantum (Bitmap push
@@ -280,9 +281,10 @@ their values:
   dnv must be started with, sized by the widest shape of
   `CreateStoragePool` (Storage pools, Components: invocation reference;
   `gateway.md`, Constants this document owns) and pinned by a test;
-  the sp drain's batch and the created flip's transaction are bounded
-  transactions over etcd's default limit too (`dnv-worker.md` SPD13,
-  RW19). `MaxDelGrpPerTxn` is the groups one sp drain batch removes
+  the sp drain's batch, the created flip's transaction and the cntlr
+  replacement's are bounded transactions over etcd's default limit too
+  (`gateway.md`, Constants this document owns; `dnv-worker.md` SPD13, RW19,
+  MD6). `MaxDelGrpPerTxn` is the groups one sp drain batch removes
   (`dnv-worker.md` SPD10), `MaxDelBmPerTxn` the clone bitmap chunk keys
   one clone drain batch deletes (`dnv-worker.md` CLD8), and
   `MaxFlipCreatedPerTxn` the tds one created-flip transaction carries
@@ -359,8 +361,9 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
      migrations whose **destination** side lives on this DN. A slot is a
      contiguous run of whole units and every migration costs at least two
      of them, the fixed dm-clone metadata base alone filling one, so the
-     area bounds the destination roles one DN can hold (Migrations,
-     `dnagent.md` DN13);
+     area bounds the destination roles one DN can hold; the control plane
+     counts its units per DN (Metadata units; Migrations, `dnagent.md`
+     DN13);
    * the extent area from `DnDataOffset`. Extent *i* lives at
      `DnDataOffset` plus *i* times `extent_size`; the offset is fixed rather
      than extent-aligned on purpose, so the usable size, the disk size minus
@@ -516,9 +519,10 @@ it hosts the **destination** side (`migr_dst_conf`): an nvme host connection
 to the `MigrSrcNqn` of the cluster, `migr_dst_conf.src_dn_id`, sp and
 migration at `migr_dst_conf.src_nvme_tr_conf` (hostnqn `DnHostNqn`); a
 dm-clone metadata **slot** in the [D13] clone-metadata area — whole
-`DnCloneMetaUnit` units, with its head zeroed before its record is
-persisted so whatever an earlier migration left there can never be
-misparsed as a dm-clone superblock — fronted by a wrapper dm-linear
+`DnCloneMetaUnit` units, taken before the side zeroes (Migration), with its
+head zeroed before its record is persisted so whatever an earlier
+migration left there can never be misparsed as a dm-clone superblock —
+fronted by a wrapper dm-linear
 `DnMigrMetaDmName` (dm kind `DmKindDnMigrMeta`), because the dm-clone
 target reads its metadata device from sector zero and takes no offset
 argument; and a dm-clone device
@@ -566,7 +570,8 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    (cn dm kind `DmKindCnCloneMeta`, `cnagent.md`, Names and constants in
    `common`) over a first-fit run of **contiguous** units sized for the
    dm-clone metadata of the clone's region count, the destination td's size
-   over `block_size` (`cnagent.md` CN18); the wrapper exists for the same
+   over `block_size`, by the formula of Metadata units (`cnagent.md` CN18);
+   the wrapper exists for the same
    reason `DnMigrMetaDmName` does — dm-clone reads its superblock from sector
    zero and takes no offset argument. **The kernel's dm tables are the
    allocation registry**: enumerating this CN's wrappers and reading their
@@ -579,8 +584,12 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    it, so a recycled unit can never hand a new dm-clone a previous clone's
    valid dm-clone superblock; **`--zeroout` is forbidden here** — it would
    materialize up to the whole arena in RAM and defeat the sparse file.
-   Arena exhaustion ⇒ the clone's resources report `RES_STATUS_ERROR`
-   ([D14]). The metadata is deliberately volatile: after a reboot a clone
+   The control plane charges each clone to the arena of every CN that
+   holds a cntlr of the clone's pool (Metadata units); an arena that still
+   has no free run for a clone makes the clone's two rows
+   `RES_STATUS_PROVISIONING`, which sets no health epoch, and the cn agent
+   tries again slowly (`cnagent.md` CN18; [D14]). The metadata is
+   deliberately volatile: after a reboot a clone
    is rebuilt from the **destination thin-pool bitmaps** (Clone crash
    recovery) — the copied blocks are exactly the mapped blocks of the
    destination td, so no clone state needs to survive the CN.
@@ -1127,9 +1136,9 @@ this document relies on:
 | `DnRev` | {p} dn_rev {shard_code} {cluster_id} {dn_id} | watched by dn-role workers; value = `addr_port` + `revision` |
 | `CnRev` | {p} cn_rev {shard_code} {cluster_id} {cn_id} | watched by cn-role workers; value = `addr_port` + `revision` |
 | `SpRev` | {p} sp_rev {shard_code} {cluster_id} {sp_id} | watched by sp-role workers; value = `sp_name` + `revision` |
-| `DnConf` | {p} dn_conf {cluster_id} {addr_port} | includes `location` |
-| `CnConf` | {p} cn_conf {cluster_id} {addr_port} | includes `location` |
-| `DnCapacity` | {p} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port} | allocation index (Capacity index keys); value = the location copy [D5] |
+| `DnConf` | {p} dn_conf {cluster_id} {addr_port} | includes `location` and `used_meta_units` (Metadata units) |
+| `CnConf` | {p} cn_conf {cluster_id} {addr_port} | includes `location` and `used_meta_units` (Metadata units) |
+| `DnCapacity` | {p} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port} | allocation index (Capacity index keys); value = the copies of `location` and `used_meta_units` [D5] |
 | `CnCapacity` | {p} cn_capacity {cluster_id} {free_ext_cnt} {addr_port} | idem |
 | `CdcEntry` | {p} cdc {cluster_id} {shard_code} {sp_id} {ss_id} | the shard code is the SP's; watched by dnv-cdc; its `nvme_tr_conf_list` lists the cntlrs of [D18] |
 | `SpConf` | {p} sp_conf {cluster_id} {sp_name} | |
@@ -1137,10 +1146,10 @@ this document relies on:
 | `Slice` | {p} slice {cluster_id} {sp_id} {slice_id} | groups, legs and sides embedded |
 | `ThinDevice` | {p} thin_device {cluster_id} {sp_id} {td_name} | |
 | `Subsystem` | {p} subsystem {cluster_id} {sp_id} {nqn} | namespaces embedded |
-| `Clone` | {p} clone {cluster_id} {sp_id} {clone_name} | |
+| `Clone` | {p} clone {cluster_id} {sp_id} {clone_name} | carries `meta_units`, the clone's metadata units, written by `CreateClone` (Metadata units) |
 | `CloneBitmap` | {p} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx} | one chunk of source slice `src_slice_idx`'s bitmap, self-positioned at byte `bm_idx` times `CloneBmChunkBytes` within it (Bitmap push protocol); `src_slice_idx` is below `src_slice_cnt`, itself at most `MaxSliceCntPerSp`, and `bm_idx` is below `MaxCloneBmCnt` |
 | `Transfer` | {p} transfer {cluster_id} {sp_id} {xfer_name} | |
-| `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | |
+| `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | carries `meta_units`, the destination's metadata units, written by `CreateMigration` (Metadata units) |
 | `MigrBitmap` | {p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx} | `bm_idx` is the append sequence from zero |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
 | `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6 and CM5) |
@@ -1191,7 +1200,10 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
 * `err_epoch` and capacity-key maintenance never bump revisions: they gate
   control-plane scheduling and, for a cntlr, its place in the discovery
   records ([D18]), whose `CdcEntry` keys dnv-cdc watches directly, so no
-  agent needs to hear of either. Every `SpConf` or sub-object mutation of
+  agent needs to hear of either. Nor does a write that changes only a
+  node's `used_meta_units` (Metadata units): no agent reads the count, so a
+  node whose only change is its used units is written and its capacity key
+  rewritten, and its revision stays. Every `SpConf` or sub-object mutation of
   `service Gateway` — RPC specifications bumps `SpRev` unless the RPC's
   spec says otherwise.
 * The request-side `DnRev`, `CnRev` and `SpRev` fields are
@@ -1229,9 +1241,11 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
 `DnCapacity` and `CnCapacity` are pure indexes for the allocator: the key
 encodes the `bin_idx` (DN only) and the `free_ext_cnt`, so a lexicographic
 range scan returns nodes ordered by free space (`FreeSpaceFmt` zero-pads, so
-lexical order is numeric order). The value carries a copy of the node's
-`location`, so a scan needs no extra point reads; `DnConf` and `CnConf` are
-authoritative [D5].
+lexical order is numeric order). The value carries copies of the node's
+`location` and its `used_meta_units`, so a scan needs no extra point read
+for a node's failure domain or for its free metadata units (Metadata
+units); `DnConf` and `CnConf` are authoritative [D5]. A value that does not
+carry the used units reads as nothing used.
 
 **Presence rule.** A node has a capacity key **iff it is currently
 allocatable**. The capacity key is absent while any of these holds:
@@ -1247,9 +1261,14 @@ Whichever STM changes one of those inputs (allocation or free of extents,
 pointer-list growth or shrink, a worker setting or clearing `err_epoch`)
 also deletes or rewrites the capacity key in the same transaction —
 delete-if-present, recreate-when-allocatable (`dnv-worker.md` MD4 implements
-the rule). Consequently the allocator (Allocation) never has to filter by
-health or flags: everything it can see is eligible (it still applies the
-black and white lists, location dedupe and the per-SP CN exclusion).
+the rule). A node's metadata units are no input of the rule: a node whose
+metadata area is full keeps its key, because it still takes work that
+needs no units, and a transaction that changes only its used units
+rewrites the value of the key where it is (Metadata units). Consequently
+the allocator (Allocation) never has to filter by health or flags:
+everything it can see is eligible (it still applies the black and white
+lists, location dedupe, the per-SP CN exclusion and, for a scan that asks
+for metadata units, the floor of free units).
 
 ### page_token
 
@@ -1280,7 +1299,8 @@ and every other key of the RPC is formatted from the `cluster_id` derived
 there. Doing it in-STM also makes the transaction fail correctly when the
 cluster is concurrently deleted or recreated. `GrowSlice`, `CreateSpareLeg`
 and `SwitchSpareLeg` are the exceptions: they make that read in a planning
-snapshot (`gateway.md` GW5). Network calls to agents (`GetDnSize` and
+snapshot, `CreateSpareLeg` in a fresh one each round of its candidate unit
+(`gateway.md` GW5, GW9). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*` and behind the `force` false
 hydration checks of Clones and Migrations, the bitmap reads) must happen
 **outside** the STM, before or after it; when such a call needs
@@ -1338,13 +1358,14 @@ strand every key already in the store.
 
 ### Finding DN candidates
 
-Input: `candExt`, the free extents each candidate needs; `candCnt`, how
-many candidates are wanted; the black and white lists of `addr_port`s of
-the `NodeSelector` (an empty white list admits every DN, and the black
-list always excludes, even a white-listed DN); and `excludeLocs`, the
-`location`s the caller already occupies. Health, flags, fullness and
-side-count eligibility are already enforced by key presence (Capacity
-index keys).
+Input: `candExt`, the free extents each candidate needs; `candUnits`, the
+free metadata units each candidate's clone-metadata area must still have,
+zero for no floor (Metadata units); `candCnt`, how many candidates are
+wanted; the black and white lists of `addr_port`s of the `NodeSelector`
+(an empty white list admits every DN, and the black list always excludes,
+even a white-listed DN); and `excludeLocs`, the `location`s the caller
+already occupies. Health, flags, fullness and side-count eligibility are
+already enforced by key presence (Capacity index keys).
 
 1. Start the taken locations as `excludeLocs` (empty for every operation
    Per-operation allocation leaves on the plain scan), and the candidates
@@ -1353,9 +1374,14 @@ index keys).
    bin whose next level is at most `candExt`. For bin b through bin 3:
    range-scan that bin's `DnCapacity` keys **descending**, largest free
    first; for each DN, stop this bin when its free count is below
-   `candExt`; skip the DN when the lists filter it out or its `location` is
-   already taken; else take it as a candidate and its `location` as taken;
-   return as soon as `candCnt` candidates are collected.
+   `candExt`; skip the DN when the lists filter it out, when its capacity
+   value leaves it fewer free units than `candUnits`, or when its
+   `location` is already taken; else take it as a candidate and its
+   `location` as taken; return as soon as `candCnt` candidates are
+   collected. The skip for want of units passes over one DN and never ends
+   the bin, because the key order says nothing about units, and it comes
+   before the location is taken, so a DN without room does not shut a DN
+   of its location that has room out of the scan.
 3. After bin 3, return whatever was collected; the caller decides whether
    it is enough.
 
@@ -1372,8 +1398,10 @@ The same as Finding DN candidates but without bins: one descending scan
 over the cluster's `CnCapacity` keys, with the taken locations seeded from
 `excludeLocs` (which every CN pick of Per-operation allocation fills, at
 tier 1, with the `location`s of the SP's other cntlrs); it skips
-black-listed, non-white-listed and duplicate-location CNs, plus CNs that
-already host a cntlr of the same SP.
+black-listed, non-white-listed and duplicate-location CNs, CNs that
+already host a cntlr of the same SP and, given a `candUnits` floor, CNs
+whose capacity value leaves fewer free units in their arena, with the same
+placement of that skip as for DNs.
 
 ### Per-operation allocation
 
@@ -1410,7 +1438,8 @@ already host a cntlr of the same SP.
   already carry another group of the slice or SP stay allowed on purpose: a
   grow spreads the new group, it does not avoid the slice's existing ones.
   Meta-group sizes follow the meta ladder (GrowSlice).
-* **CreateMigration** — one DN; `candExt` is the group's `ext_cnt`; the
+* **CreateMigration** — one DN; `candExt` is the group's `ext_cnt` and
+  `candUnits` the migration's metadata units (Metadata units); the
   black list starts with the DNs of every leg and side of the group.
   Placement is **two-tier**, because a black list of `addr_port`s excludes
   DNs and not failure domains: **tier 1** scans with the `location`s of
@@ -1431,12 +1460,25 @@ already host a cntlr of the same SP.
   group, Migrations; `gateway.md` GW9): a side hung off the group meanwhile
   is the only way the set of domains to exclude can grow. That re-check,
   like the in-STM re-validation of the pick itself, stays address-based.
+  The STM also drops a pick whose DN's record no longer has the
+  migration's units, as every pick with a unit floor is dropped (Metadata
+  units).
 * **CreateSpareLeg** — one DN, with the same black-list seeding and the
-  same two tiers as CreateMigration.
+  same two tiers as CreateMigration, and no unit floor. Like
+  CreateMigration it is planned in every round from a fresh read of the
+  group and of its DNs' locations, and its deciding STM, the shared
+  `model.CreateSpareLeg`, is handed the DNs that read held: it drops the
+  pick as candidate changed when the group, as the STM reads it, holds a DN
+  outside them — a spare or a migration destination hung off it since —
+  and when the pick was deleted, disabled or otherwise taken out of
+  allocation, or left short of extents, since the scan (Spare legs;
+  `gateway.md` GW9).
 * **CreateCntlr** — one CN; `candExt` is the sum of every group's `ext_cnt`
-  of the SP; the CNs of the SP's cntlrs are excluded (Finding CN
-  candidates) and their `location`s form tier 1's exclusion, with the same
-  two tiers as CreateStoragePool's CNs. The locations are read before the
+  of the SP, and `candUnits` the SP's clone units, the sum of `meta_units`
+  over every clone of the SP, a draining one included (Metadata units);
+  the CNs of the SP's cntlrs are excluded (Finding CN candidates) and
+  their `location`s form tier 1's exclusion, with the same two tiers as
+  CreateStoragePool's CNs. The locations are read before the
   STM, which is sound because `location` is immutable (Controller nodes) and
   because the STM drops the pick when the SP, as the STM reads it, has a
   cntlr on a CN the read the scan was planned from did not hold (the scan
@@ -1444,14 +1486,137 @@ already host a cntlr of the same SP.
   `gateway.md` GW9): a cntlr committed meanwhile is the only way the set of
   CNs and domains to exclude can grow, and without the check the pick could
   land in its domain, or on its very CN when the scan ran after its charge.
-  The sp worker's cntlr replacement holds the SP's surviving cntlrs to the
-  plan of its own scan the same way (`dnv-worker.md` AR7). That re-check,
-  like the in-STM re-validation of the pick itself, stays address-based.
+  The STM also drops a pick whose CN's record no longer has the SP's clone
+  units, as every pick with a unit floor is dropped (Metadata units). The
+  sp worker's cntlr replacement holds the SP's surviving cntlrs to the plan
+  of its own scan the same way (`dnv-worker.md` AR7), but its scan asks for
+  no units and its transaction charges the new CN past the ceiling if it
+  must (Metadata units). Both checks of the plan, like the in-STM
+  re-validation of the pick itself, stay address-based.
 
 Free-extent bookkeeping happens in the same STM as the pick: each leg's DN
 loses the group's `ext_cnt` from its `free_ext_cnt`, and each cntlr's CN
 the sum of `ext_cnt` over all the SP's groups; the capacity keys are
-maintained per Capacity index keys; a delete reverses both.
+maintained per Capacity index keys; a delete reverses both. The metadata
+units are booked the same way, in the transactions Metadata units names.
+
+### Metadata units
+
+A dm-clone copy keeps its metadata in a **metadata area** of the node that
+builds it: a clone in the clone-metadata arena of its primary's CN
+(Controller node, common), a migration in the [D13] clone-metadata area of
+its destination's DN (Disk node). Both areas are handed out in whole units
+of one size, `CnCloneMetaUnit` and `DnCloneMetaUnit`, and each copy holds
+one contiguous run of them. The control plane counts the units it has
+charged to every node, so that the gateway refuses a copy a node has no
+room for instead of letting the node build it, fail and report an error.
+
+**The formula.** The units a copy needs are the dm-clone superblock,
+`CloneMetaBaseBytes`, plus one byte per region, rounded up to whole units —
+one byte where dm-clone's bitmap needs one bit, a generous bound. A region
+is one pool block, so the regions are the copy's bytes over `block_size`,
+rounded down: a copy smaller than one block needs one unit, and a copy of
+one region or more at least two. The copy's bytes are the destination td's
+`size` for a clone, and the moved group's `ext_cnt` times the cluster's
+`extent_size` for a migration. `common.CloneMetaUnits` is the one
+implementation: the gateway charges by it, and both agents size their
+runs by it (`cnagent.md` CN18, `dnagent.md` DN13). Reason: one owner of
+the arithmetic, so what the control plane counts is what the nodes take;
+the two areas share one unit size, which lets one count serve both.
+
+**The ceilings.** A CN's ceiling is its arena in units,
+`CnCloneMetaUnitCnt`, and a DN's its clone-metadata area in units,
+`DnCloneMetaUnitCnt`. Each area belongs to the node and is shared by every
+copy the node holds, across every SP on it, so `MaxCloneCntPerSp` and
+`MaxMigrCntPerSp` bound none of it.
+
+**The counters.** `CnConf.used_meta_units` and `DnConf.used_meta_units`
+count the units charged to the node. A clone's own units are written on its
+record as `Clone.meta_units`, and a migration's as `Migration.meta_units`,
+by the create, and never change: every later transaction reads them there,
+for two reasons — a clone record names its destination td by id while the
+td's key is its name, so the td's size is no cheap read, and a release
+then gives back exactly what the create charged.
+Units are charged and released in the same transaction as the change that
+needs them:
+
+* `CreateClone` charges the clone's units to the CN of every cntlr of the
+  SP, a disabled one included, once per cntlr; the clone drain's final
+  transaction, `FinishCloneDelete`, releases them from the CN of every
+  cntlr the SP has at that moment, once per cntlr (`dnv-worker.md` CLD9).
+* `CreateCntlr` charges the new cntlr's CN the SP's clone units, the sum of
+  `meta_units` over every clone `clone_name_list` names, a latched one
+  included; `DeleteCntlr` releases that sum from the deleted cntlr's CN;
+  the worker's `ReplaceCntlr` does both, in its one transaction.
+* `CreateMigration` charges the destination DN the migration's units;
+  `FinishMigration` and `CancelMigration` release them from it.
+
+A release stops at zero. A write that changes only a node's used units
+bumps no revision (Revision keys and the sync fan-out). A latched clone
+keeps its units on every cntlr's CN until the drain's final transaction
+removes the record they are read from (Clones). The sp drain releases no
+units: an SP that still lists a clone or a migration cannot be deleted
+(Storage pools). Reason: this is how the free extents are kept — each
+change books its own units in its own transaction, and nothing walks the
+SPs to add them up.
+
+**Every cntlr's CN.** An SP's clones are charged to the CN of every cntlr
+of the SP, not only the primary's. Reason: after a failover or a cntlr
+replacement the new primary builds every clone of the SP on its own CN, so
+a ceiling a failover could cross would be no ceiling. `CreateClone` is
+refused `RESOURCE_EXHAUSTED`, its message naming the CN, when the CN of any
+cntlr of the SP lacks the room, and it then writes nothing (Clones).
+
+**The replacement exception.** The worker's cntlr replacement charges its
+new CN the SP's clone units with no room check, so the CN's count can pass
+its ceiling; it is the one charge that may (`dnv-worker.md` AR7, MD6). Its
+scan asks for no units, so a CN whose area is full is still a candidate.
+Reason: a replacement restores the whole SP, and refusing it for the
+clones would stop every volume of the SP to keep a few copies waiting; a
+primary on that CN builds the clones it finds a run for, and the others
+wait as provisioning (Contiguous runs, below). A node at or past its
+ceiling has no free units, never a count wrapped around, so every scan
+that asks for units passes it over until releases bring it back below.
+
+**The scan skip.** The value of a node's capacity key carries a copy of its
+`used_meta_units` (Capacity index keys, [D5]), and a scan given a floor of
+free units passes over a node whose value leaves it fewer — the ceiling
+less the used units, none once they reach it (Finding DN candidates,
+Finding CN candidates). The gateway's `CreateCntlr` asks for the SP's clone
+units and its `CreateMigration` for the migration's; every other scan asks
+for none (Per-operation allocation). The capacity key proves a pick's free
+extents and nothing about its units, since a write that changes only units
+leaves the key where it is, so the deciding transaction checks the room
+again on the node's record: a pick that has filled up since the scan is a
+changed candidate (`gateway.md` GW9), and the next round's scan passes it
+over. A call whose scan comes up short because of the floor — the same
+scan without it would have found enough nodes — is refused
+`RESOURCE_EXHAUSTED` with a message saying no node has metadata room.
+Units are no input of the presence rule: a full node keeps its key,
+because it still takes work that needs no units — the legs and cntlrs of a
+new SP, a grow, a spare leg, a cntlr replacement. Reason: a refused node
+writes nothing, so a scan that read only free extents would pick it again
+in every round, and the index already carries what a scan needs.
+
+**Contiguous runs.** A copy's units stay one contiguous run on both nodes,
+taken first fit, so an area whose free units lie in runs too short can
+refuse a copy the count allowed, and so can a CN past its ceiling, or a
+node whose sweep has not yet freed a run the count already gave back (a
+release can commit before the node tears the copy down, Teardown by sweep:
+those of `DeleteCntlr`, `ReplaceCntlr`, `FinishMigration` and
+`CancelMigration` commit before the node learns of the change, and the
+clone drain's `FinishCloneDelete` does when the CN's sweep has not yet
+torn the latched clone down). That refusal is a wait, not a fault: the
+node's agent reports the waiting copy's rows `RES_STATUS_PROVISIONING`,
+their details saying that the copy waits for metadata room and carrying
+the area's own text, which sets no health epoch, and it tries again
+(Live-state reporting; `cnagent.md` CN18, `dnagent.md` DN13). An area that did not answer, and a run larger than the
+whole area, which can never fit, read `RES_STATUS_ERROR`. Reason: one rule
+on both nodes and no disk format change; the count keeps the refusal rare,
+and as provisioning it is harmless. Where in each build the run is asked
+for is the build's own rule: a migration destination takes its run before
+it zeroes (Migration), and a clone rebuild asks the arena for room before
+it parks a namespace (Clone crash recovery).
 
 ## Common validation
 
@@ -1893,9 +2058,10 @@ Action:
    on-leg layout needs the resolved `bdev_conf` and the cluster's stored
    `extent_size`, which step 2 is the first to hold (Common validation).
 2. The pre-STM candidate scan and the STM commit re-run as a unit only
-   when the STM finds a candidate changed — a pick it refuses below; an
-   etcd conflict re-runs the STM closure alone (`gateway.md` GW9;
-   `dnv-worker.md` EU4). Before the scan, check a plain pre-read of
+   when the STM finds a candidate changed — a pick it refuses below — and
+   at most for the round cap of `gateway.md` GW9; an etcd conflict re-runs
+   the STM closure alone (`gateway.md` GW9; `dnv-worker.md` EU4). Before
+   the scan, check a plain pre-read of
    `ClusterConf` against Common validation as the scan does (`ABORTED`
    otherwise, UNEXPECTED_ERROR → `ABORTED`), then merge and
    resolve `bdev_conf` against it: the result gives the scan its leg
@@ -2084,17 +2250,22 @@ group's DN extents are charged immediately. Reply `slice_id` and `grp_id`.
 Errors: `RESOURCE_EXHAUSTED` when `cntlr_id_list` is at or above
 `MaxCntlrCntPerSp` or no CN is eligible (Finding CN candidates,
 Per-operation allocation — the presence of a capacity key already implies
-healthy, enabled and not full); `INVALID_ARGUMENT` when `cntlid_slot` is
-not in `SpConf.cntlid_slot_list` or is already used by another **cntlr**
-of the SP (cntlid slots).
+healthy, enabled and not full, and an eligible CN also has room in its
+arena for the SP's clone units: a refusal for want of that room says no CN
+has metadata room, Metadata units); `INVALID_ARGUMENT`
+when `cntlid_slot` is not in `SpConf.cntlid_slot_list` or is already used
+by another **cntlr** of the SP (cntlid slots).
 Action: pick a CN (Per-operation allocation). In the STM, a pick is
 dropped when the SP, as this STM reads it, has a cntlr on a CN the scan's
 read of its cntlrs did not hold, and the scan and the STM re-run as a unit
 from a fresh read (`gateway.md` GW9): the scan's CN exclusion and tier-1
 locations come from that earlier read, so a cntlr committed since could
-have the pick land in its failure domain or on its CN. The STM then writes
+have the pick land in its failure domain or on its CN. A pick whose CN's
+record no longer has room for the SP's clone units, as this STM reads the
+SP's clones, is dropped the same way (Metadata units). The STM then writes
 the new `Cntlr` (`primary` false, `disabled` false, a zero `err_epoch`),
-appends its id, does the CN bookkeeping with its `CnRev`, rewrites every
+appends its id, does the CN bookkeeping — the footprint and the SP's clone
+units — with its `CnRev`, rewrites every
 `CdcEntry` of the SP by the listing rule of [D18], which lists the new
 cntlr from its creation, and bumps `SpRev`. A subsystem whose `CdcEntry`
 is missing gets it back here, rebuilt as `CreateSubsystem` writes it
@@ -2113,8 +2284,9 @@ Errors: `NOT_FOUND` when the id is not in the list; `FAILED_PRECONDITION`
 when `primary` is true or `disabled` is false (disable first, so that a
 failover has already happened before the record disappears).
 Action: STM: remove the id and the `Cntlr` key; the CN bookkeeping (the
-footprint back, its `CnRev`); rewrite every `CdcEntry` of the SP by the
-listing rule of [D18], which leaves the deleted cntlr out; bump `SpRev`.
+footprint back, the SP's clone units back, stopping at zero, its `CnRev`);
+rewrite every `CdcEntry` of the SP by the listing rule of [D18], which
+leaves the deleted cntlr out; bump `SpRev`.
 The sides drop the export, and the cn agent tears down its stack. Reply
 `cntlr_id`.
 
@@ -2416,7 +2588,10 @@ namespace backed by that td is reloaded onto the dm-clone; dm-clone pulls
 missing regions from the source and hydrates in the background.*
 
 **CreateClone** — Errors: `ALREADY_EXISTS` clone key; `RESOURCE_EXHAUSTED`
-at `MaxCloneCntPerSp`; `NOT_FOUND` `dst_td_name`; `FAILED_PRECONDITION` the
+at `MaxCloneCntPerSp`, or when the CN of any cntlr of the SP, a disabled
+one included, lacks room in its arena for the clone's metadata units — the
+message names that CN (Metadata units); `NOT_FOUND` `dst_td_name`;
+`FAILED_PRECONDITION` the
 destination td already targeted by another clone; `INVALID_ARGUMENT` when
 `src_tr_conf` is empty, `src_nqn` is invalid, `src_slice_cnt` is outside
 one to `MaxSliceCntPerSp` (unlike `CreateStoragePool`'s own `slice_cnt`, a
@@ -2431,8 +2606,11 @@ Precondition (not verifiable by the control plane, a documented contract,
 [D3]): the destination td must be **empty** — freshly created and never
 written. Clone crash recovery equates "mapped in the destination thin
 pools" with "already copied", which only holds for an initially empty td.
-Action: STM: `clone_id` from `next_id`; write the `Clone`, append to
-`clone_name_list`, bump `SpRev`. Reply `clone_id`.
+Action: STM: after every other refusal and before any write, the clone's
+units — the formula of Metadata units over the destination td's `size` and
+the SP's `block_size` — charged to the CN of every cntlr of the SP, with no
+`CnRev` bump; `clone_id` from `next_id`; write the `Clone` with its
+`meta_units`, append to `clone_name_list`, bump `SpRev`. Reply `clone_id`.
 
 On the primary cntlr the clone's build ends in the stack of fig.
 `090Clone`: the dm-clone `CnCloneFinalName` — its metadata the wrapper
@@ -2448,17 +2626,21 @@ resume step — Namespace suspend semantics). `cnagent.md` CN18 is the
 sequence. After a CN reboot the primary rebuilds the clone by Clone crash
 recovery before letting any IO through.
 
-Admission: the checks above gate `MaxCloneCntPerSp` only. The binding
-ceiling is the primary CN's clone-metadata arena, whose `CnCloneMetaUnit`
-units are shared by every clone of every cntlr on that CN — every clone
-costs at least two units, large tds at small block sizes far more
-(`cnagent.md` CN18 carries the arithmetic). The control plane does not
-gate against it: an over-committed clone is created normally and its
-`clone_id_to_meta` and `clone_id_to_dm_clone` rows report
-`RES_STATUS_ERROR` until a later converge of the cntlr finds units free;
-the arena's refusal registers no retry of its own (`cnagent.md` CN18).
-Callers must place clones against the per-CN budget, not against
-`MaxCloneCntPerSp`.
+Admission: the ceiling that binds is not `MaxCloneCntPerSp` but the
+clone-metadata arena of each CN that holds a cntlr of the SP, whose units
+are shared by every clone of every cntlr on that CN — a td of one block or
+more costs at least two units, a large td at a small block size far more.
+`CreateClone` charges the clone to the arena of every such CN and refuses
+it when one lacks the room, because any of those cntlrs can become the
+primary that builds every clone of the SP (Metadata units). The primary's
+cn agent therefore meets an arena with no free run only on a CN a cntlr
+replacement charged past its ceiling, where the free units lie in runs too
+short, or where a run the count gave back is not freed yet (Metadata
+units, Contiguous runs); the clone's `clone_id_to_meta` and
+`clone_id_to_dm_clone` rows
+then read `RES_STATUS_PROVISIONING` with the arena's text, no health epoch
+is set, and the agent tries again slowly until a run comes free
+(`cnagent.md` CN18).
 
 **DeleteClone** — Errors: `FAILED_PRECONDITION` when `force` is false and
 hydration is not complete — checked outside the STM through `GetCntlrInfo`
@@ -2484,7 +2666,9 @@ agent's sweep (Teardown by sweep) removes its stack and its
 `LocalCloneBmPath` files by name and disconnects a source no other clone
 on the node uses (`dnv-worker.md` CLD5), while the worker deletes the
 chunk keys in batches and then the `Clone` key together with its
-`clone_name_list` entry.
+`clone_name_list` entry, giving the clone's metadata units back to the CN
+of every cntlr of the SP in that transaction (`dnv-worker.md` CLD9;
+Metadata units).
 
 Consequences, all of them following from the `Clone` key and its
 `clone_name_list` entry surviving until the last transaction: `DeleteClone`
@@ -2497,7 +2681,11 @@ holds at `MaxCloneCntPerSp`, that ceiling being the length of
 second `CreateClone` onto the **same** destination td keeps failing
 `FAILED_PRECONDITION`, because that scan walks `clone_name_list`;
 `DeleteThinDevice` of the destination td, and a `CreateThinDevice`
-snapshotting it (Thin devices), keep failing for the same reason; and
+snapshotting it (Thin devices), keep failing for the same reason; the
+draining clone's metadata units stay charged to the CN of every cntlr of
+the SP, so a `CreateClone` those CNs lack room for, and a `CreateCntlr`
+whose sum counts the draining clone (Metadata units), can be refused for
+room until then; and
 `DeleteStoragePool` keeps refusing while any clone drains — its refusal
 names the first kind of object the pool still holds, checking thin devices
 first, and a draining clone's destination td cannot be deleted while the
@@ -2632,7 +2820,10 @@ Migration.
 **CreateMigration** — Errors: `ALREADY_EXISTS` for a name already in
 `migr_name_list`; `NOT_FOUND` when `src_side_id` is in no leg of the SP,
 spare legs included; `RESOURCE_EXHAUSTED` at `MaxMigrCntPerSp` or when no
-DN is a candidate (Per-operation allocation); `FAILED_PRECONDITION` when
+DN is a candidate (Per-operation allocation) — a DN without room in its
+clone-metadata area for the migration's units is no candidate, and a
+refusal for want of that room says no DN has metadata room (Metadata
+units); `FAILED_PRECONDITION` when
 the owning leg already has two sides (a migration is already running on
 it), or when `cntlid_slot_list` holds no slot different from the source
 side's (cntlid slots: such an SP cannot migrate this leg at all;
@@ -2644,33 +2835,39 @@ of the group did not, and the scan and the STM re-run as a unit from a
 fresh read of the group (`gateway.md` GW9): the scan's black list and
 tier-1 locations come from that earlier read, so a side hung off the group
 since — a migration of its other leg, a spare — could put the pick on its
-DN or in its failure domain. In the STM: `migr_id` and `dst_side_id` from
+DN or in its failure domain. A pick whose DN's record no longer has room
+for the migration's units is dropped the same way (Metadata units). In
+the STM: `migr_id` and `dst_side_id` from
 `next_id`; a new `Side` appended to the leg's `side_list`, with a
 `cntlid_slot` from `cntlid_slot_list` different from the source side's —
 the only slot constraint sides have (cntlid slots) —, `addr_port` and
 `nvme_tr_conf` copied from the destination DN, and `provisioned` false
 ([D15]); a `Migration` written with `migr_id`, `src_side_id`,
-`dst_side_id`, the request's `dm_clone_conf` and a zero `bm_cnt`, its name
-appended to `migr_name_list`; the destination DN's bookkeeping — the side
-in its `side_ptr_list`, the group's `ext_cnt` taken from its
-`free_ext_cnt`, its capacity key per Capacity index keys, its `DnRev`
+`dst_side_id`, the request's `dm_clone_conf`, a zero `bm_cnt` and its
+`meta_units`, its name appended to `migr_name_list`; the destination DN's
+bookkeeping — the side in its `side_ptr_list`, the group's `ext_cnt` taken
+from its `free_ext_cnt`, the migration's units added to its
+`used_meta_units`, its capacity key per Capacity index keys, its `DnRev`
 bumped —; a `SpRev` bump. Reply `migr_id`. The destination side therefore
-provisions (Side provisioning protocol) before any migration machinery
-starts; until the sp worker flips it, `migr_src_conf.dst_provisioned`
-false keeps the source side serving untouched (Migration, which carries
-the data-plane choreography).
+takes its clone-metadata run and then provisions (Side provisioning
+protocol) before any migration machinery starts (Migration, Phase 0); until
+the sp worker flips it, `migr_src_conf.dst_provisioned` false keeps the
+source side serving untouched (Migration, which carries the data-plane
+choreography).
 
-**Admission.** The DN candidate scan covers **extents** only. The
-destination DN's [D13] clone-metadata area — `DnCloneMetaSize` bytes of
-`DnCloneMetaUnit` units per **DN**, shared by every destination role the
-node hosts across every SP — is not part of admission: each migration's
-slot costs a fixed base plus one byte per region of the side, rounded up to
-whole units, so the area bounds the concurrent destination roles of one
-DN, the more tightly the larger the side and the smaller the block size
-(`dnagent.md` DN13). A migration the area cannot serve is still created;
-each converge of its destination that meets the shortfall reports it on
-the `migr_dst_info` rows (`dnagent.md` DN13).
-`MaxMigrCntPerSp` bounds none of this.
+**Admission.** The DN candidate scan covers extents and metadata units.
+The destination DN's [D13] clone-metadata area — `DnCloneMetaSize` bytes
+of `DnCloneMetaUnit` units per **DN**, shared by every destination role
+the node hosts across every SP — gives each migration a run of a fixed
+base plus one byte per region of the side, rounded up to whole units, so
+the area bounds the concurrent destination roles of one DN, the more
+tightly the larger the side and the smaller the block size; the gateway
+counts the area's units and creates no migration whose destination lacks
+the room (Metadata units). `MaxMigrCntPerSp` bounds none of this. A
+destination whose area still has no free run for it (Metadata units,
+Contiguous runs) takes no run, zeroes nothing and reports its rows
+`RES_STATUS_PROVISIONING` with the area's text, so the source keeps serving
+as if no migration had started (`dnagent.md` DN13).
 
 **FinishMigration** — Errors: `FAILED_PRECONDITION` when `force` is false
 and hydration is incomplete, which is checked outside the STM through
@@ -2679,7 +2876,10 @@ and hydration is incomplete, which is checked outside the STM through
 that call is `FAILED_PRECONDITION` too (`gateway.md` AG3). Action: STM:
 remove the **source** `Side` from the leg, the destination side becoming
 its only one; the source DN's bookkeeping (pointer out, extents back,
-capacity key per Capacity index keys, `DnRev`); delete the `Migration` and
+capacity key per Capacity index keys, `DnRev`); the destination DN's
+metadata units back, the migration's `meta_units` leaving its
+`used_meta_units` — a write that changes only units, so the destination's
+`DnRev` stays (Metadata units); delete the `Migration` and
 every `MigrBitmap` and remove the name from `migr_name_list`; bump
 `SpRev`. The destination agent reloads its per-cntlr dm-linears from the
 dm-clone straight onto the side device and drops the dm-clone, the
@@ -2690,7 +2890,8 @@ down. Reply `migr_id`.
 
 **CancelMigration** — the mirror rollback: the STM removes the
 **destination** `Side`, the `Migration` and its bitmaps, returns the
-destination DN's extents, and bumps `SpRev` and the destination's `DnRev`.
+destination DN's extents and the migration's metadata units, and bumps
+`SpRev` and the destination's `DnRev`.
 The source side returns to normal service on the next `SyncupSide` (ANA
 back, the migration export dropped); the destination agent tears its stack
 down, the `LocalMigrBmPath` files included.
@@ -2721,10 +2922,19 @@ skippable dm-clone regions (`dnagent.md` DN15).
 group still has a side that is not `provisioned` (reason
 `model.ReasonSpareUnprovisioned`): for as long as that holds, the refusal
 keeps two overlapping sp-worker owners from creating two spares for one
-repair (`dnv-worker.md` AR2, AR8). Action: STM: a new `Leg` — a fresh
-`leg_id`, `leg_idx` the next unused index in the group, one `Side` written
+repair, and once the first spare's side is flipped the candidate-changed
+refusal below keeps them apart, save in one narrow case (`dnv-worker.md`
+AR2, AR8). Action: one DN, planned in every round from a fresh read of the
+group (Per-operation allocation). The deciding STM is handed the DNs that read found in the
+group, and refuses as candidate changed, so that the gateway plans the
+round again (`gateway.md` GW9), a group that holds a DN outside them — a
+spare or a migration destination added since — and a pick deleted,
+disabled or otherwise taken out of allocation, or left short of extents,
+since the scan. Otherwise the STM writes a new `Leg` — a fresh `leg_id`,
+`leg_idx` the next unused index in the group, one `Side` written
 `provisioned` false ([D15]) — appended to `spare_leg_list`; the DN's
-bookkeeping and `DnRev`; a `SpRev` bump. Every cntlr connects to the
+bookkeeping and `DnRev`; a `SpRev` bump. A spare takes no metadata units.
+Every cntlr connects to the
 spare's side and health-checks it (Primary cntlr, the legs), **but the
 spare is not added to the md array**: it is pre-connected standby capacity
 only. An unprovisioned spare defers only itself — spares never assemble
@@ -2901,7 +3111,9 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   validation); failures are captured into the affected resource's
   `ResInfo` as `RES_STATUS_ERROR` with the reason in `details` rather than
   crashing the reconcile — the agent always converges as much as it can
-  and reports the rest.
+  and reports the rest. A metadata area that has no free run for a copy is
+  no failure: it is a wait, reported `RES_STATUS_PROVISIONING` (Metadata
+  units).
 * **Bitmap durability.** Received `Push*Bitmap` chunks are persisted per
   chunk under `LocalMigrBmPath` or `LocalCloneBmPath`; the applied sets
   reported through `bm_info.bm_idx_list` and `bm_info_list`'s
@@ -3086,7 +3298,9 @@ timeouts stretches every command's bound, not just zeroing's.
 
 **Protocol and gate.** The dn agent allocates the side's extent runs and
 persists their record with the request's length to zero and a zeroed
-count of zero, builds `DnSideName` over the runs, zeroes from the stored
+count of zero, builds `DnSideName` over the runs — a migration destination
+then takes its clone-metadata run, and zeroes nothing while it holds none
+(Migration, Phase 0) —, zeroes from the stored
 count up to the length in the background through that device —
 persisting the count after each batch, so the protocol is restart-safe at
 every point — and converges the per-CN export stacks **only** when the
@@ -3107,7 +3321,8 @@ gate is closed every resource above the side device reports
 every reply and every Check round; equal values, with the length above
 zero, mean the zeroing is complete, which is what the sp worker's flip
 rule reads (sp role). Zeroing runs at **every** `sp_level`,
-`SP_LEVEL_DISABLE` included (SpLevel): it is bottom-layer provisioning.
+`SP_LEVEL_DISABLE` included (SpLevel): it is bottom-layer provisioning, and
+so is a migration destination's taking of the run its zeroing waits for.
 `dnagent.md` DN9 holds the converge matrix, the zeroing goroutine and its
 batch sizing; `dnagent.md` DN18 holds the rows of the read-only probes
 (`GetSideInfo`, `CheckSide`), which never allocate and never start or
@@ -3125,8 +3340,9 @@ stop the goroutine (`dnagent.md` DN16).
   the command output — *needs intervention*.
 * `RES_STATUS_OK`.
 * `RES_STATUS_PROVISIONING` — deliberately not created, being prepared,
-  or kept unprobed behind a side's provisioning gate that closed again
-  (`dnagent.md` DN9): **healthy, not ready, no action needed**.
+  kept unprobed behind a side's provisioning gate that closed again
+  (`dnagent.md` DN9), or waiting for a free run in a node's metadata area
+  (Metadata units): **healthy, not ready, no action needed**.
 * `RES_STATUS_PENDING` — the primary's prober for the leg has not
   completed a round, or none is registered yet: **no verdict, no action
   needed**. Only the primary's leg report produces it (`cnagent.md` CN11).
@@ -3154,10 +3370,14 @@ not read `RES_STATUS_OK`, because an OK clears `Leg.err_epoch` (sp role);
 `RES_STATUS_PROVISIONING` **never** sets `err_epoch` (dn / cn roles, sp
 role) and never counts as a bad status for the capacity keys (Capacity
 index keys): it marks a side device still zeroing (Side provisioning
-protocol), and a resource excluded from the *effective* desired state
-while a side of its backing chain is still zeroing, or while a side's own
-provisioning gate holds it back (Side provisioning protocol, [D15]). Only
-those carry it — a
+protocol), a resource excluded from the *effective* desired state while a
+side of its backing chain is still zeroing, or while a side's own
+provisioning gate holds it back (Side provisioning protocol, [D15]), and
+the rows of a copy that waits for a free run in its node's metadata area —
+a clone's metadata and dm-clone rows on the primary, a migration
+destination's side device and migration rows — whose details say so
+(Metadata units; `cnagent.md` CN18, `dnagent.md` DN13). Only those carry
+it — a
 serving thin pool keeps reporting `RES_STATUS_OK` with its raw `dmsetup
 status` details even while a grow is deferred, so the thin-pool auto-grow
 of Automatic reactions keeps parsing them. `SideInfo` additionally
@@ -3644,8 +3864,11 @@ itself. The four reactions:
   — a non-primary one, or the primary of an SP with no failover candidate
   — is replaced on a fresh CN by an internal `ReplaceCntlr`, one
   transaction doing what `DeleteCntlr` and `CreateCntlr` do without
-  `DeleteCntlr`'s not-primary and disabled preconditions, the rewrite of
-  the discovery records by [D18] included (`dnv-worker.md` MD6). It
+  `DeleteCntlr`'s not-primary and disabled preconditions and without
+  `CreateCntlr`'s room for the SP's clone units — its scan passes over no
+  full CN, and the new CN takes the units even past its ceiling (Metadata
+  units) —, the rewrite of the discovery records by [D18] included
+  (`dnv-worker.md` MD6). It
   deletes the old cntlr rather than demoting it, so it starts no demotion
   hold of its own (sp role).
 * **Leg repair** (`dnv-worker.md` AR8): a leg unhealthy for `leg_unhealthy`,
@@ -3881,10 +4104,20 @@ sides.
 **Phase 0 — the destination provisions first.** `CreateMigration` writes
 the destination `Side` with `provisioned` false (Migrations), so the
 destination DN runs only the Side provisioning protocol: allocate the runs,
-build `DnSideName`, zero the prefix its group needs batch by batch, as for
-any side of the group. No per-CN stacks, no metadata slot, no
-`nvme connect`, no dm-clone; what the destination's `migr_dst_info` rows
-report meanwhile, and at which levels, is `dnagent.md` DN13.
+build `DnSideName`, take the migration's run in the [D13] clone-metadata
+area — its record alone, the run's head zeroed before the record is
+persisted — and only then zero the prefix its group needs batch by batch,
+as for any side of the group. No per-CN stacks, no metadata wrapper, no
+`nvme connect`, no dm-clone. While the area has no free run for it, the
+destination zeroes nothing, so the sp worker never flips it and the source
+serves as if no migration had started; it takes the run once units come
+free (Metadata units). Reason: the source cuts its own paths as soon as the
+destination is provisioned, so a destination that found no room only then
+would leave the leg in the migration gap, where a thin-pool commit on the
+primary can block (Known limits), until room came. The run is taken at
+every `sp_level`, as zeroing is (Side provisioning protocol). What the
+destination's rows report meanwhile, and at which levels, is
+`dnagent.md` DN13.
 
 For the **src** side, `migr_src_conf.dst_provisioned` false is normative
 and means: **behave exactly as if `migr_src_conf` were absent** — keep
@@ -3900,7 +4133,7 @@ carries `side_conf.provisioned` true on the destination and
 sequences below unchanged; the destination's connect retry of step 3
 absorbs any cross-side ordering. The cost is added **migration-start
 latency** — the destination's zeroing pass (Side provisioning protocol),
-before any data moves.
+and on an area with no free run its wait for one, before any data moves.
 `CancelMigration` during the zeroing window cancels the zeroing goroutine
 and waits for it before the dm devices are removed (Side provisioning
 protocol).
@@ -3943,8 +4176,8 @@ agent's converge builds bottom-up and reaches the same end state
 
 1. Create the per-CN subsystems and namespaces with dm-error backing, all
    inaccessible.
-2. Allocate the dm-clone metadata slot in the [D13] clone-metadata area
-   and build its wrapper dm-linear `DnMigrMetaDmName`.
+2. Build the wrapper dm-linear `DnMigrMetaDmName` over the dm-clone
+   metadata slot Phase 0 took in the [D13] clone-metadata area.
 3. `nvme connect` to the `MigrSrcNqn` of the cluster,
    `migr_dst_conf.src_dn_id`, the sp and the `migr_id` at
    `migr_dst_conf.src_nvme_tr_conf`, with the host NQN `DnHostNqn` the
@@ -4128,6 +4361,17 @@ are `cnagent.md` CN18, and the agent puts a td's ns-devs onto its dm-clone
 only while the dm-clone's status shows hydration enabled (`cnagent.md`
 CN16).
 
+A rebuild that must allocate the clone's metadata wrapper, or replace one
+that does not match, first asks whether the arena can supply a fresh run
+for it — before it reads, parks or removes anything, and counting a stale
+or mismatched run of the clone itself as free. When the arena has no free
+run for it, the rebuild parks nothing, keeps whatever still serves, and
+reports the clone's two rows provisioning while it waits for room; for a
+run larger than the whole arena, which can never fit, it parks nothing
+either, and the two rows read `RES_STATUS_ERROR` with no retry (Metadata
+units, Contiguous runs; `cnagent.md` CN18). Reason: parking a serving
+namespace for a run that will not come is an outage for nothing.
+
 The destination bitmaps must be fully applied **before** the dm-clone
 handles any IO — otherwise a read of an already-copied, and possibly
 since-rewritten, region would be fetched from the source again, returning
@@ -4170,7 +4414,9 @@ of the ones before it: `SP_LEVEL_READONLY` fails user writes;
 thin pool; `SP_LEVEL_NO_REDUND` no group device; `SP_LEVEL_NO_MIGRATION` no
 migration dm-clone; `SP_LEVEL_NO_SIDE` exports no side; `SP_LEVEL_DISABLE`
 keeps only that bottom layer. Side zeroing (Side provisioning protocol) is
-part of that bottom layer and keeps running at `SP_LEVEL_DISABLE`. Agents
+part of that bottom layer and keeps running at `SP_LEVEL_DISABLE`, and so
+is a migration destination's clone-metadata record, the run its zeroing
+waits for (Migration, Phase 0). Agents
 treat the level as part of the desired state (it rides in every
 `SyncupSide` and `SyncupCntlr`): raising it tears layers down, lowering it
 rebuilds them.
@@ -4375,12 +4621,15 @@ document and the component documents cite it by its id.
   ("ports/{id}/ana_groups/{grp}"), so the ids mean nothing across ports —
   two agents sharing a kernel under distinct `--nvmet-port-id`s get three
   groups each — and nothing across nodes.
-* **[D5] Location copy in capacity values.** `DnConf.location` and
-  `CnConf.location` are authoritative; the capacity key's value carries a
-  copy so that allocator scans stay read-only range scans. A `location`
-  never changes, and every operation that changes an input of the capacity
-  rule re-puts the node's capacity key, copy included, inside its own STM
-  (`MaintainDnCapacity`, `MaintainCnCapacity`; `dnv-worker.md` MD4).
+* **[D5] Location and unit copies in capacity values.** `DnConf.location`
+  and `CnConf.location` are authoritative, and so are the records'
+  `used_meta_units`; the capacity key's value carries a copy of both so
+  that allocator scans stay read-only range scans — the location for the
+  failure-domain rule, the used units for the free-unit floor of Metadata
+  units, which gives that copy's reason. A `location` never changes, and
+  every operation that changes an input of the capacity rule, or a node's
+  used units, re-puts the node's capacity key, copies included, inside its
+  own STM (`MaintainDnCapacity`, `MaintainCnCapacity`; `dnv-worker.md` MD4).
 * **[D6] Health-block payload.** The leg health probe (Group on-leg layout:
   meta region, data region, health block) writes the magic, the writer id
   and a unix timestamp and reads the block back with O_DIRECT; success
@@ -4570,12 +4819,16 @@ document and the component documents cite it by its id.
   where writing zeros would materialize up to the whole arena in RAM
   (`cnagent.md` CN5, CN18). The reasons: the [D13](a) label-scan class is
   eliminated rather than mitigated, lvm2 is one dependency fewer, and CN
-  naming is as deterministic as everything else. Arena exhaustion reports
-  `RES_STATUS_ERROR` on the clone's resources; orphaned kind-`cb` wrappers
-  are removed by the sweep (Teardown by sweep), which frees their units; a
-  wrapper whose length or backing loop path does not match the currently
-  probed loop device is `RES_STATUS_ERROR` and is repaired by the clone
-  rebuild (Clone crash recovery).
+  naming is as deterministic as everything else. An arena with no free run
+  for a clone reports the clone's two rows `RES_STATUS_PROVISIONING`, and
+  the cn agent tries again slowly (`cnagent.md` CN18); the control plane's
+  count of each CN's units keeps that rare (Metadata units). Orphaned
+  kind-`cb` wrappers are removed by the sweep (Teardown by sweep), which
+  frees their units; a wrapper whose length or backing loop path does not
+  match the currently probed loop device is `RES_STATUS_ERROR` and is
+  repaired by the clone rebuild (Clone crash recovery) — unless the arena
+  has no free run for its replacement, when the clone waits as
+  provisioning instead and the wrapper stays.
 * **[D15] The tenant promise rests on dm-thin; a new side is zeroed where
   the design assumes zeros, behind a `provisioned` gate;
   `RES_STATUS_PROVISIONING`.** A host reads a pool's data only through the
@@ -4943,6 +5196,20 @@ that component's document and only pointed to here.
   IO errors on its still-optimized path to every host still on it. The
   case needs a pool with no failover candidate, whose hosts lose the old
   primary's path either way; the replacement's path comes with its build.
+* **A cntlr replacement can charge a CN past its metadata ceiling.** The
+  replacement takes the SP's clone units onto the new CN whether or not
+  they fit (Metadata units), so a primary on that CN builds the clones it
+  finds a run for and the others wait as provisioning, and the CN takes no
+  clone and no cntlr that needs units until releases bring its count back
+  under the ceiling.
+* **A metadata area can refuse a copy the count allowed.** A copy's run is
+  contiguous, and a release can commit before the node frees the run, so an
+  area whose free units lie in runs too short, or that still holds a run
+  the count gave back, keeps a copy waiting, its rows provisioning, until a
+  run comes free (Metadata units; `cnagent.md` CN18, `dnagent.md` DN13). A
+  clone that waits keeps a settling primary settling (`dnv-worker.md`,
+  Known limits); a migration destination that waits keeps its source
+  serving and the migration from starting.
 * **A failover with no demotion hold can fence the old primary first**
   (`dnv-worker.md` RW22 and Known limits). When the SP's shard changes
   owner, or its worker restarts, before a failover's demotion hold ends,

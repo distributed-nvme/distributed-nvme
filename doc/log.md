@@ -244,11 +244,12 @@ thing.
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
   the dn, a disk whose identity is not confirmed or a side with bytes
-  still to zero and no zeroing goroutine, or, on the cn, a piece of the
-  node's base state a `CheckCn` round's or `GetCnInfo`'s probe read absent,
-  or an ANA group it read in a state other than its fixed one on a port
-  whose transport attributes match — each rendered "what: error" and joined
-  by "; ".
+  still to zero and no zeroing goroutine that is not a migration
+  destination waiting for a free run in the clone-metadata area
+  (`dnagent.md` DN16), or, on the cn, a piece of the node's base state a
+  `CheckCn` round's or `GetCnInfo`'s probe read absent, or an ANA group it
+  read in a state other than its fixed one on a port whose transport
+  attributes match — each rendered "what: error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`
   (the one the request carried) and `details` (the agent's own leftover

@@ -58,8 +58,9 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # that named constants bound. The one that SIZES the requirement is
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
-# (architecture.md, Storage pools); the sp drain's D2 batch (SPD10) and a
-# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19) are two more.
+# (architecture.md, Storage pools); the sp drain's D2 batch (SPD10), a
+# created-flip transaction of MaxFlipCreatedPerTxn tds (RW19) and the cntlr
+# replacement at the ceilings (AR7) are three more.
 # Their compare counts, and the factors that multiply into them, are asserted
 # from the named constants in gateway/txnbudget_test.go, not restated here.
 # This suite runs no gateway — `wctl put-sp` plants its pools directly — so
@@ -67,7 +68,8 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # family well below the ceiling — its widest slice is 21 groups over two DNs,
 # where a maximum batch touches a DN per leg and per spare of MaxDelGrpPerTxn
 # groups — and clone-drain batches, which fit etcd's default anyway (CLD11).
-# Its created flips carry one td each: no pool here holds a second.
+# Its created flips carry one td each: no pool here holds a second. Its cntlr
+# replacements act on pools that hold no clone, so they read none.
 ETCD_MAX_TXN_OPS=
 
 # The timers case H runs at, read the same way by read_constants(): the
@@ -1016,15 +1018,15 @@ fetch_etcd() {
 	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
 }
 
-# read_constants and read_geometry are how this shell reads a Go value instead
-# of copying it. Both run workerctl LOCALLY, on the binary preflight_driver has
-# just built: `constants` and `geometry` open no etcd client and read no key,
-# so neither wants a server, an etcd or a --cluster. A workerctl too old to
-# carry them exits 2 on `unknown subcommand`, which is one thing the dies
-# below report; the other is the driver itself, since the binary they run is
-# cross-built GOOS=linux GOARCH=amd64 like everything else preflight_driver
-# builds and will not exec on a driver that is not the linux/amd64 host the
-# suite assumes.
+# read_constants, read_geometry and meta_units are how this shell reads a Go
+# value instead of copying it. All three run workerctl LOCALLY, on the binary
+# preflight_driver has just built: `constants`, `geometry` and `meta-units`
+# open no etcd client and read no key, so none wants a server, an etcd or a
+# --cluster. A workerctl too old to carry them exits 2 on `unknown
+# subcommand`, which is one thing the dies below report; the other is the
+# driver itself, since the binary they run is cross-built GOOS=linux
+# GOARCH=amd64 like everything else preflight_driver builds and will not exec
+# on a driver that is not the linux/amd64 host the suite assumes.
 read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
@@ -1053,6 +1055,21 @@ constant_of() { # <json> <Go identifier>
 		;;
 	esac
 	printf '%s' "$value"
+}
+
+# meta_units prints the units a metadata area gives one copy of <bytes> in a
+# pool whose block size is <block> (architecture.md, Metadata units), through
+# `workerctl meta-units`, the formula the gateway and `wctl put-clone` charge
+# by. A failed or non-numeric answer DIES.
+meta_units() { # <bytes> <block size>
+	local out units
+	out=$("$WORKERCTL_BIN" meta-units --bytes "$1" --block-size "$2") ||
+		die "\`workerctl meta-units --bytes $1 --block-size $2\` failed"
+	units=$(jq_of "$out" '.units')
+	case "$units" in
+	'' | 0 | *[!0-9]*) die "workerctl meta-units: units is '$units' in $out" ;;
+	esac
+	printf '%s' "$units"
 }
 
 # geometry_json prints `workerctl geometry`'s reply for one group of this
@@ -1252,6 +1269,9 @@ dn_rev() { ctl get-rev dn --id "$1" --shard 00 | "$JQ" -r .revision; }
 cn_rev() { ctl get-rev cn --id "$1" --shard 00 | "$JQ" -r .revision; }
 dn_free() { ctl get-dn --id "$1" | "$JQ" -r .free_ext_cnt; }
 cn_free() { ctl get-cn --id "$1" | "$JQ" -r .free_ext_cnt; }
+# cn_meta_used reads the used units of a CN's metadata area off its record
+# (architecture.md, Metadata units).
+cn_meta_used() { ctl get-cn --id "$1" | "$JQ" -r .used_meta_units; }
 dn_err_epoch() { ctl get-dn --id "$1" | "$JQ" -r .err_epoch; }
 cn_err_epoch() { ctl get-cn --id "$1" | "$JQ" -r .err_epoch; }
 
@@ -4001,6 +4021,34 @@ clone_gone() {
 	[ "$cnt" = 0 ]
 }
 
+# cap_meta_used reads the used units the VALUE of a node's capacity key
+# carries (architecture.md, Capacity index keys; Metadata units), the copy of
+# the record's count that a capacity scan reads. A failed read DIES, and so
+# does a node with no key or with two, which have no one value to read: an
+# absent key would otherwise read as nothing used.
+cap_meta_used() { # <dn_capacity|cn_capacity> <addr_port>
+	local keys cnt key
+	keys=$(ctl list-keys --prefix "$1") ||
+		die "cap_meta_used: \`workerctl list-keys --prefix $1\` failed"
+	cnt=$(printf '%s\n' "$keys" | awk -v a="$2" '$NF == a { n++ } END { print n + 0 }')
+	[ "$cnt" = 1 ] || die "cap_meta_used: $2 has $cnt $1 keys, want 1"
+	key=$(printf '%s\n' "$keys" | awk -v a="$2" '$NF == a && !seen { print; seen = 1 }')
+	jq_of "$(ctl get --key "$key")" '.used_meta_units'
+}
+
+# drain_assert_units is the metadata half of the clone drain's accounting
+# (architecture.md, Metadata units): sp3's clones are charged on cn 1 and
+# cn 2, the CNs of its two cntlrs, and each holds <units> on its record and
+# in its capacity value alike.
+drain_assert_units() { # <units> <label>
+	local i
+	for i in 1 2; do
+		assert_eq "$(cn_meta_used "$i")" "$1" "$2: cn $i used_meta_units"
+		assert_eq "$(cap_meta_used cn_capacity "$(cn_addr "$i")")" "$1" \
+			"$2: cn $i used_meta_units in its cn_capacity value"
+	done
+}
+
 # drain_put_sp plants the case fixture: one SP with TWO slices, each a meta and
 # a data group, every leg on one of the two DNs. Two slices is the smallest
 # shape that proves a batch never spans slices (SPD10) — the drain must take one
@@ -4169,8 +4217,18 @@ case_drain() {
 	# and a single-batch fixture could not tell the two apart.
 	drain_put_sp sp3 4
 	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 10737418240 >/dev/null
+	drain_assert_units 0 "before c0"
 	ctl put-clone --sp sp3 --name c0 --id "$CLONE_ID" --dst-td td0 \
 		--src-slice-cnt 5 >/dev/null
+	# The planted clone is charged as CreateClone charges one
+	# (architecture.md, Metadata units): the formula over td0's size at the
+	# pool's block size, stored on the record and charged to the CN of each
+	# of sp3's cntlrs. The drain's last step must give exactly that back.
+	local cloneUnits
+	cloneUnits=$(meta_units 10737418240 "$BLOCK_SIZE")
+	assert_eq "$(ctl get-sp --sp sp3 | "$JQ" -r '.clones.c0.meta_units')" \
+		"$cloneUnits" "c0 meta_units"
+	drain_assert_units "$cloneUnits" "after put-clone c0"
 	# One ssh for all 65 puts: 65 round trips would dominate the case.
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
 		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
@@ -4200,6 +4258,9 @@ case_drain() {
 		"exactly one \`clone drained\` record"
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
+	# The final STM gives c0's units back on both CNs, so each capacity value
+	# reads its whole area free again.
+	drain_assert_units 0 "after c0 drained"
 	# CLD5, observed from the agent's side: the latched clone left every
 	# cntlr's plan. That exclusion IS the teardown — the cn agent's sweep
 	# (cnagent.md CN21) drops the stack and the local chunk files precisely
@@ -4208,8 +4269,9 @@ case_drain() {
 	wait_until "$WAIT_SYNCUP" "cn0: a NEW SyncupCntlr with the clone excluded" \
 		reqs_gt "$excluded_before" cn0 SyncupCntlr \
 		'((.clone_list // []) | length) == 0'
-	# And the SP itself is untouched by any of it: the clone drain is
-	# ledger-free and the SP outlives the clone.
+	# And the SP itself is untouched by any of it: the clone drain moves no
+	# extent — its last step gives back only the clone's metadata units,
+	# checked above — and the SP outlives the clone.
 	assert_eq "$(key_cnt slice)" "2" "sp3's slices are untouched"
 	assert_eq "$(dn_free 1)" "58" "the clone drain moved no DN budget"
 
@@ -4223,6 +4285,7 @@ case_drain() {
 	local w
 	ctl put-clone --sp sp3 --name c1 --id "$((CLONE_ID + 1))" --dst-td td0 \
 		--src-slice-cnt 5 >/dev/null
+	drain_assert_units "$cloneUnits" "after put-clone c1"
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
 		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--cluster $CLUSTER --trace-id $TRACE put-bitmap --sp sp3" \
@@ -4239,6 +4302,9 @@ case_drain() {
 		"the one batch spent the whole MaxDelBmPerTxn budget"
 	assert_eq "$(key_cnt clone_bitmap)" "1" "one chunk key survives the batch"
 	assert_eq "$(key_cnt clone)" "1" "the clone key survives the batch"
+	# A batch removes chunk keys only: the units stay charged until the
+	# final STM.
+	drain_assert_units "$cloneUnits" "after the partial batch"
 	clone_steps_before=$(clone_drain_step_records)
 	for w in w1 w2 w3; do start_worker "$w"; done
 	for w in w1 w2 w3; do wait_registered "$w"; done
@@ -4257,6 +4323,7 @@ case_drain() {
 		"c1 committed its own final STM"
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
 		"no clone drain step failed"
+	drain_assert_units 0 "after c1's resumed drain"
 }
 
 case_vote() {

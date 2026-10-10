@@ -3,6 +3,8 @@ package model
 import (
 	"context"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -16,11 +18,16 @@ import (
 // position from surviving state, never from a checkpoint", the same
 // one-step-per-pass cadence. Three things differ, and each for a reason:
 //
-//   - It is LEDGER-FREE. Clone chunks are not budgeted to any node and the CN
-//     arena units behind the metadata wrapper are agent-local, freed by the
-//     cn agent's sweep (cnagent.md CN21), so no `dn_*` or `cn_*` key is ever
-//     touched. That is what makes a batch a constant 68 compares whatever the
-//     ceilings become.
+//   - Its batches are LEDGER-FREE. Clone chunks are not budgeted to any node,
+//     so a batch touches no `dn_*` or `cn_*` key, and that is what makes it a
+//     constant 68 compares whatever the ceilings become. The final STM moves
+//     one count and nothing else: the clone's metadata units go back on the
+//     CN of every cntlr of the SP (architecture.md, Metadata units), at most
+//     four compares per cntlr — its Cntlr and its CN's record read, that
+//     record and its capacity key written — over a constant few, so it is
+//     bounded by MaxCntlrCntPerSp. The run behind the metadata wrapper on
+//     each CN is agent-local and freed by the cn agent's sweep (cnagent.md
+//     CN21); the count is what the gateway charges new clones against.
 //   - The SP OUTLIVES the clone, so the final STM bumps SpRev like every other
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than
@@ -175,6 +182,14 @@ func DrainCloneBm(
 // bump is every mutator's normal epilogue rather than a stop-signal deletion.
 // After the commit the name is reusable and `DeleteStoragePool`'s clone
 // precondition no longer sees it.
+//
+// The same STM gives the clone's metadata units back (architecture.md,
+// Metadata units; releaseCloneMetaUnits): its meta_units leave the
+// used_meta_units of the CN of every cntlr the SP has now, once per cntlr and
+// stopping at zero, with the capacity value rewritten and no CnRev bumped,
+// since only a count moves. That is the one ledger the drain touches, and the
+// release happens here, in the step that removes the record the units are
+// read from, so they are given back exactly once.
 func FinishCloneDelete(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -186,8 +201,13 @@ func FinishCloneDelete(
 	cloneId uint64,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, _, err := loadCloneForOp(
+		conf, clone, err := loadCloneForOp(
 			s, opFinishCloneDelete, cid, spName, spId, cloneName, cloneId)
+		if err != nil {
+			return err
+		}
+		err = releaseCloneMetaUnits(
+			s, opFinishCloneDelete, cid, conf, clone.GetMetaUnits())
 		if err != nil {
 			return err
 		}
@@ -196,6 +216,79 @@ func FinishCloneDelete(
 		s.Put(SpConfKey(cid, spName), conf)
 		return BumpSpRev(s, opFinishCloneDelete, shard, cid, spId)
 	})
+}
+
+// releaseCloneMetaUnits gives one clone's units back on the CN of every cntlr
+// of the SP, inside the caller's STM (architecture.md, Metadata units): every
+// one of those CNs was charged the clone's units, by CreateClone or, for a
+// cntlr created or placed later, by CreateCntlr or ReplaceCntlr, which charge
+// the SP's whole clone sum.
+//
+// The release is once per cntlr, so a CN hosting two cntlrs of one SP — a
+// shape architecture.md, Finding CN candidates, forbids but nothing in the
+// store enforces — gives the units back twice, in one write, as
+// releaseSpCns credits the footprint. Each release stops at zero
+// (ReleaseMetaUnits). The capacity value follows (MaintainCnCapacity; the key
+// itself does not move, since units are no input of the presence rule), and
+// no CnRev is bumped: a write that changes only units raises no revision, as
+// a health write raises none, because nothing a CN is sent depends on the
+// count.
+//
+// A listed Cntlr whose key is missing is a REFUSAL, for DrainSpCntlrs's
+// reason: the record is what says which CN holds the units, so without it the
+// release cannot be made exact; the clone then stays latched and the refusal
+// repeats on every pass as `clone drain failed`, reason "cntlr not found",
+// until the key is restored. A CnConf that is gone is skipped, as
+// releaseSpCns skips it: there is nothing left to give the units back to. A
+// clone with zero units reads nothing at all.
+func releaseCloneMetaUnits(
+	s etcdutil.STM,
+	op string,
+	cid uint64,
+	conf *pb.SpConf,
+	units uint64,
+) error {
+	if units == 0 {
+		return nil
+	}
+	// Every Cntlr first, so a refusal returns before a write is staged.
+	addrs := make([]string, 0, len(conf.GetCntlrIdList()))
+	for _, cntlrId := range conf.GetCntlrIdList() {
+		cntlr := &pb.Cntlr{}
+		if !s.Get(CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
+			return fail(op, "cntlr not found")
+		}
+		addrs = append(addrs, cntlr.GetAddrPort())
+	}
+	var order []string
+	old := make(map[string]*pb.CnConf)
+	cur := make(map[string]*pb.CnConf)
+	for _, addrPort := range addrs {
+		newCn, ok := cur[addrPort]
+		if !ok {
+			stored := &pb.CnConf{}
+			if !s.Get(CnConfKey(cid, addrPort), stored) {
+				continue
+			}
+			old[addrPort] = stored
+			newCn = proto.Clone(stored).(*pb.CnConf)
+			cur[addrPort] = newCn
+			order = append(order, addrPort)
+		}
+		newCn.UsedMetaUnits = ReleaseMetaUnits(newCn.GetUsedMetaUnits(), units)
+	}
+	// First-touch order, so one transaction's writes are deterministic. A CN
+	// whose count was already zero has nothing to give back and is not
+	// written.
+	for _, addrPort := range order {
+		newCn := cur[addrPort]
+		if newCn.GetUsedMetaUnits() == old[addrPort].GetUsedMetaUnits() {
+			continue
+		}
+		s.Put(CnConfKey(cid, addrPort), newCn)
+		MaintainCnCapacity(s, cid, addrPort, old[addrPort], newCn)
+	}
+	return nil
 }
 
 // removeName drops one entry from a name list, preserving the order of the

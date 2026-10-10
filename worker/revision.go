@@ -770,14 +770,14 @@ func (w *revWorker) logSyncupRejected(
 // nothing else left, answers code 0 and ends the re-sync.
 // A Check round only recomputes the verdict and removes nothing, and the
 // agent registers nothing for a leftover: its background converges (the cn's
-// connect retry, the dn's connect retry and fence timer) sweep only while one
-// is registered or armed for a reason of its own. So the sweep a leftover
-// brings back is the one in the re-sync RW4 step 5 issues on that verdict,
-// and a leftover that re-sync still finds is logged every round. One only
-// the Check verdict names (a subsystem directory whose last controller is
-// gone, above) is not: the re-sync's removing pass counts it gone, so its
-// reply does not carry it, and what names it every round is the agent's own
-// `sweep leftover` record of each Check verdict.
+// connect retry and clone-metadata retry, the dn's connect retry and fence
+// timer) sweep only while one is registered or armed for a reason of its own.
+// So the sweep a leftover brings back is the one in the re-sync RW4 step 5
+// issues on that verdict, and a leftover that re-sync still finds is logged
+// every round. One only the Check verdict names (a subsystem directory whose
+// last controller is gone, above) is not: the re-sync's removing pass counts
+// it gone, so its reply does not carry it, and what names it every round is
+// the agent's own `sweep leftover` record of each Check verdict.
 func (w *revWorker) logSyncupLeftover(
 	ctx context.Context,
 	revision uint64,

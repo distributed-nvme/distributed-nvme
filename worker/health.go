@@ -896,7 +896,14 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // the cn agent reports is likewise a device not built, or a clone whose
 // source is not connected or could not be read this pass (CN18), so a
 // primary showing one stays settling, held to cntlr_unhealthy, until it
-// clears — for as long as a clone's source stays unconnected or unread. Leg
+// clears — for as long as a clone's source stays unconnected or unread. A
+// clone the cn agent finds no free run for in its CN's metadata area reads
+// PROVISIONING on clone_id_to_meta and clone_id_to_dm_clone (CN18;
+// architecture.md, Metadata units) and holds its primary settling the same
+// way, for as long as it waits for room — on a CN a cntlr replacement charged
+// past its area's ceiling, say, or one whose free units are not contiguous.
+// Neither row is an ERROR, so the wait sets no err_epoch and fails nothing
+// over. Leg
 // rows are left out: a spare whose side is still zeroing reads PROVISIONING
 // there for as long as it zeroes. So are group rows, for a grow: its new
 // groups are appended to their lists and stay out of the live concat while

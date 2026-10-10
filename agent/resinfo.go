@@ -85,9 +85,14 @@ func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 // device, subsystem and namespace, all backed by an error table (cnagent.md
 // CN16, CN17); or, on the dn, it sits above a side device whose provisioning
 // gate is closed and is reported unprobed, whether or not it exists
-// (dnagent.md DN9, DN18). It means healthy / not ready / no action needed,
-// and — unlike ERROR — never feeds err_epoch (architecture.md, Live-state
-// reporting, dn / cn roles, sp role and Automatic reactions).
+// (dnagent.md DN9, DN18); or it waits for a free run in its node's metadata
+// area — on the cn a clone's metadata wrapper and dm-clone (cnagent.md CN18),
+// on the dn a migration destination's side device and migration rows
+// (dnagent.md DN13) — with the details "waiting for metadata room: " and the
+// allocator's own text (architecture.md, Metadata units). It means healthy /
+// not ready / no action needed, and — unlike ERROR — never feeds err_epoch
+// (architecture.md, Live-state reporting, dn / cn roles, sp role and
+// Automatic reactions).
 func (t *ResTracker) Provisioning(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_PROVISIONING, details)
 }

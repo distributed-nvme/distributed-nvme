@@ -30,7 +30,9 @@ import (
 // entire DN agent (RWMutex writer preference) and block the side's Check
 // rounds. The registry is keyed by the side tuple, single-flight per side,
 // created on demand by any converge — the startup reconcile included — that
-// finds zeroing still needed, and sides zero in parallel, at most
+// finds zeroing still needed, except for a migration destination that does
+// not hold its run in the clone-metadata area yet, which starts zeroing only
+// once it does (DN13), and sides zero in parallel, at most
 // common.DnZeroConcurrency batches at a time per agent: N concurrent batches
 // split the disk's zeroing rate N ways, and with no cap a busy DN would have
 // every batch killed at the soft timeout and redone for ever. Each side sizes
@@ -63,7 +65,9 @@ type zeroJob struct {
 
 // startZeroing registers the side's zeroing loop if it is not running already.
 // The caller holds the DN1 locks of a side converge: the node read lock and
-// the side's object lock, or the node write lock in the startup Reconcile.
+// the side's object lock, or the node write lock in the startup Reconcile. On
+// a migration destination that has not provisioned, the caller has taken the
+// destination's run in the clone-metadata area first (holdMigrMeta, DN13).
 //
 // It refuses once rootCtx is done (SH27): an armed DN12 fence timer
 // is not enrolled in the WaitGroup and can still reach a converge after

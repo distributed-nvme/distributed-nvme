@@ -143,15 +143,17 @@ func startEtcd(bin string) (string, func(), error) {
 		// The deployment requirement of gateway.md, Constants this
 		// document owns, not a tuning knob: CreateStoragePool's maximum
 		// shape — the transaction the number is SIZED by — the sp drain's
-		// D2 batch (SPD13) and a created-flip transaction of
-		// MaxFlipCreatedPerTxn tds (RW19) all exceed etcd's default cap
-		// (gateway/txnbudget_test.go derives their compare counts), so a
-		// test etcd without the flag would fail transactions the deployment
-		// runs fine; the clone drain's batches fit the default. All three
-		// are COMMITTED against a real etcd: the create in this package's
+		// D2 batch (SPD13), a created-flip transaction of
+		// MaxFlipCreatedPerTxn tds (RW19) and ReplaceCntlr at the ceilings
+		// (MD6) all exceed etcd's default cap (gateway/txnbudget_test.go
+		// derives their compare counts), so a test etcd without the flag
+		// would fail transactions the deployment runs fine; the clone
+		// drain's batches fit the default. All four are COMMITTED against a
+		// real etcd: the create in this package's
 		// TestCreateStoragePoolAtTheCeiling, the sp batch in model's
-		// TestDrainSpSliceAtTheCeiling and the created flip in model's
-		// TestFlipCreatedAtTheTdCeiling.
+		// TestDrainSpSliceAtTheCeiling, the created flip in model's
+		// TestFlipCreatedAtTheTdCeiling and the replacement in model's
+		// TestReplaceCntlrAtTheCeiling.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

@@ -43,11 +43,11 @@ type CnAgentServer struct {
 	port     agent.PortConf
 
 	// mu guards the in-memory mirrors of the local store below — the two
-	// maps — and three registries that mirror nothing: in each cntlr's state
-	// the connect-retry and prober registries, and the CN10 disconnect
-	// registry. It does not guard the request each state holds, which is an
-	// atomic pointer (cnState.req, cntlrState.req). It is a leaf lock: never
-	// held across an OS call.
+	// maps — and four registries that mirror nothing: in each cntlr's state
+	// the connect-retry, clone-metadata-retry and prober registries, and the
+	// CN10 disconnect registry. It does not guard the request each state
+	// holds, which is an atomic pointer (cnState.req, cntlrState.req). It is
+	// a leaf lock: never held across an OS call.
 	mu     sync.Mutex
 	cns    map[string]*cnState
 	cntlrs map[string]*cntlrState
@@ -70,20 +70,23 @@ type CnAgentServer struct {
 	cloneMetaMu sync.Mutex
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the
-	// CN10/CN18 connect retries, the CN10 background disconnects and the CN11
-	// probers hang off it, so shutdown cancels them.
+	// CN10/CN18 connect retries, CN18's clone-metadata retry, the CN10
+	// background disconnects and the CN11 probers hang off it, so shutdown
+	// cancels them.
 	rootCtx context.Context
 
-	// probeInterval / probeStall / retryInterval are fields rather than
-	// constants, and now and sleep — like probeIO above — are overridable, so
-	// tests can drive the CN11 prober on a short fake clock and off the real
-	// syscalls, and run a converge pass's CN10 connect budget (newPassBudget)
-	// on a fake clock too; nothing else changes them.
-	probeInterval time.Duration
-	probeStall    time.Duration
-	retryInterval time.Duration
-	now           func() time.Time
-	sleep         func(context.Context, time.Duration) error
+	// probeInterval / probeStall / retryInterval / metaRetryInterval are
+	// fields rather than constants, and now and sleep — like probeIO above —
+	// are overridable, so tests can drive the CN11 prober on a short fake
+	// clock and off the real syscalls, run the two background retries'
+	// attempts by hand, and run a converge pass's CN10 connect budget
+	// (newPassBudget) on a fake clock too; nothing else changes them.
+	probeInterval     time.Duration
+	probeStall        time.Duration
+	retryInterval     time.Duration
+	metaRetryInterval time.Duration
+	now               func() time.Time
+	sleep             func(context.Context, time.Duration) error
 }
 
 // cnState is one synced CN: its last accepted SyncupCnRequest as this process
@@ -173,6 +176,11 @@ type cntlrState struct {
 	// retrying/cancel drive the CN10/CN18 background connect retry.
 	retrying bool
 	cancel   context.CancelFunc
+	// metaRetrying/metaCancel drive CN18's clone-metadata retry, the slow
+	// one of a cntlr one of whose clones waits for a free run in the arena
+	// (startCloneMetaRetry).
+	metaRetrying bool
+	metaCancel   context.CancelFunc
 }
 
 // NewCnAgentServer builds the cn role server. oc is the process's single
@@ -211,16 +219,17 @@ func NewCnAgentServer(
 			TrAddr:  trConf.GetTrAddr(),
 			TrSvcId: trConf.GetTrSvcId(),
 		},
-		cns:             make(map[string]*cnState),
-		cntlrs:          make(map[string]*cntlrState),
-		disconnecting:   make(map[string]struct{}),
-		disconnectSlots: make(chan struct{}, disconnectConcurrency),
-		rootCtx:         context.Background(),
-		probeInterval:   common.CnLegProbeInterval * time.Second,
-		probeStall:      common.CnLegProbeStallSeconds * time.Second,
-		retryInterval:   common.CnConnectRetryInterval * time.Second,
-		now:             time.Now,
-		sleep:           agent.SleepCtx,
+		cns:               make(map[string]*cnState),
+		cntlrs:            make(map[string]*cntlrState),
+		disconnecting:     make(map[string]struct{}),
+		disconnectSlots:   make(chan struct{}, disconnectConcurrency),
+		rootCtx:           context.Background(),
+		probeInterval:     common.CnLegProbeInterval * time.Second,
+		probeStall:        common.CnLegProbeStallSeconds * time.Second,
+		retryInterval:     common.CnConnectRetryInterval * time.Second,
+		metaRetryInterval: common.CnCloneMetaRetryInterval * time.Second,
+		now:               time.Now,
+		sleep:             agent.SleepCtx,
 	}
 }
 

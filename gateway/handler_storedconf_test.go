@@ -155,7 +155,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // capacity key from one — the RPCs that take DN capacity as well as the ones
 // that give it back.
 //
-// The twelve cases are five different gates:
+// The twelve cases are six different gates:
 //
 //   - CreateDiskNode and CreateControllerNode check inside their own STM,
 //     immediately above the division that turns the node's byte count into
@@ -172,9 +172,13 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     and would report a cluster full of free extents as RESOURCE_EXHAUSTED.
 //     CreateStoragePool runs that gate itself as well, just before its scans
 //     and ahead of the merged geometry it judges there, so its refusal comes
-//     from that copy. CreateCntlr, CreateSpareLeg and CreateMigration carry
-//     no conf gate of their own (nor does model.CreateSpareLeg), so those
-//     three are the cases that pin the allocator's;
+//     from that copy. CreateCntlr and CreateSpareLeg carry no conf gate of
+//     their own (nor does model.CreateSpareLeg), so those two are the cases
+//     that pin the allocator's;
+//   - CreateMigration's plan computes the destination's metadata units from
+//     the extent size before it scans (migrMetaUnitsOf, architecture.md,
+//     Metadata units), so its refusal comes from that gate, which runs the
+//     same predicate;
 //   - DeleteSpareLeg, FinishMigration and CancelMigration reach newDnLedger's
 //     gate: those three are every handler that RELEASES DN capacity through a
 //     ledger and has no conf gate of its own, and all three are driven here
@@ -207,8 +211,9 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // same stored key, in that order — so what that case pins is the RPC's
 // refusal, not which gate produced it; that the first one runs before the
 // merged geometry is judged is TestCreateStoragePoolJudgesTheMergedGeometry's
-// to pin. Because newDnLedger has a gate, CreateMigration is in the same
-// position: pickDns runs before it.
+// to pin. CreateMigration is in the same position: the same predicate runs in
+// migrMetaUnitsOf in its plan, in pickDns, and in newDnLedger and
+// migrMetaUnitsOf again in its STM, in that order.
 //
 // The five release cases come FIRST in the list, because scReplay runs the
 // cases in order against the repaired conf: an allocating case replayed
@@ -517,14 +522,18 @@ func TestStoredClusterConfRefusalNamesTheZeroedMember(t *testing.T) {
 
 // TestStoredSpBdevConfZeroIsRefusedByEveryReader is the SP-side mirror: the
 // bdev_conf CreateStoragePool resolved, written back sparse, refused by the
-// two RPCs that compute from an SP's own geometry.
+// four RPCs that compute from an SP's own geometry.
 //
 // CreateThinDevice reads it for the stripe it sizes against (architecture.md,
-// Thin devices) and GrowSlice for the layout of the group it adds
+// Thin devices), GrowSlice for the layout of the group it adds
 // (architecture.md, Group on-leg layout: meta region, data region, health
-// block), and each has its own
+// block), and CreateClone and CreateMigration for the pool block size their
+// metadata units are counted in (cloneMetaUnitsOf, migrMetaUnitsOf;
+// architecture.md, Metadata units), and each has its own
 // gate — GrowSlice's sits right below the ClusterConf gate the test above
 // drives, so the two tests together cover both of its checks.
+// FinishMigration and CancelMigration read no geometry: they give back the
+// units the Migration records.
 //
 // Two members are planted in turn. `dm_raid0_conf.stripe_size` is the
 // fixture's, and it is also the member that makes the gate's placement
@@ -538,9 +547,25 @@ func TestStoredClusterConfRefusalNamesTheZeroedMember(t *testing.T) {
 // makes a zero there exactly what a pre-GW11 write left behind.
 func TestStoredSpBdevConfZeroIsRefusedByEveryReader(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
-	env.createSp(sptDefaultSpec(sptSpName))
+	spId := env.createSp(sptDefaultSpec(sptSpName))
+	// The clone case's destination, created while the conf is healthy and
+	// before the healthy copy is taken, so the copy lists it.
+	if _, err := env.srv.CreateThinDevice(env.ctx,
+		&pb.CreateThinDeviceRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			TdName:      "sc-clone-dst",
+			Size:        1 << 30,
+		}); err != nil {
+		t.Fatalf("CreateThinDevice for the CreateClone case: %v", err)
+	}
 	healthy := env.spConf(sptSpName)
 	sliceId := healthy.GetSliceIdList()[0]
+	// The migration case's source: a side of the first data group, whose leg
+	// holds exactly one, so no "a migration is already running on this leg"
+	// refusal can stand in for the conf's.
+	srcSideId := env.slice(spId, sliceId).GetDataGrpList()[0].
+		GetLegList()[0].GetSideList()[0].GetSideId()
 
 	cases := []scCase{
 		{"CreateThinDevice", func() error {
@@ -568,6 +593,31 @@ func TestStoredSpBdevConfZeroIsRefusedByEveryReader(t *testing.T) {
 				SliceId:     sliceId,
 				ExtCnt:      1,
 			})
+			return err
+		}},
+		{"CreateClone", func() error {
+			_, err := env.srv.CreateClone(env.ctx, &pb.CreateCloneRequest{
+				ClusterName:   env.name,
+				SpName:        sptSpName,
+				CloneName:     "sc-clone",
+				SrcTrConf:     []*pb.NvmeTrConf{sptTrConf("src:9000")},
+				SrcNqn:        "nqn.2024-01.io.dnv:src",
+				SrcNsIdx:      1,
+				SrcSliceCnt:   1,
+				SrcStripeSize: 64 * 1024,
+				SrcBlockSize:  1024 * 1024,
+				DstTdName:     "sc-clone-dst",
+			})
+			return err
+		}},
+		{"CreateMigration", func() error {
+			_, err := env.srv.CreateMigration(env.ctx,
+				&pb.CreateMigrationRequest{
+					ClusterName: env.name,
+					SpName:      sptSpName,
+					MigrName:    "sc-migr",
+					SrcSideId:   srcSideId,
+				})
 			return err
 		}},
 	}

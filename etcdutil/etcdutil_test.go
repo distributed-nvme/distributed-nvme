@@ -108,10 +108,12 @@ func startEtcd(bin string) (string, func(), error) {
 		// server's own default is below the compare counts CreateStoragePool's
 		// maximum shape, which is what SIZES the requirement (gateway.md,
 		// Constants this document owns), the sp drain's maximum-shape D2 batch
-		// (SPD13) and one created-flip transaction (RW19, MaxFlipCreatedPerTxn)
-		// reach; gateway/txnbudget_test.go derives the counts, and
-		// TestCreateStoragePoolAtTheCeiling, TestDrainSpSliceAtTheCeiling and
-		// TestFlipCreatedAtTheTdCeiling commit them.
+		// (SPD13), one created-flip transaction (RW19, MaxFlipCreatedPerTxn)
+		// and ReplaceCntlr at the ceilings (MD6) reach;
+		// gateway/txnbudget_test.go derives the counts, and
+		// TestCreateStoragePoolAtTheCeiling, TestDrainSpSliceAtTheCeiling,
+		// TestFlipCreatedAtTheTdCeiling and TestReplaceCntlrAtTheCeiling
+		// commit them.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

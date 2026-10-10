@@ -80,7 +80,6 @@ const (
 	MaxMigrCntPerSp      = 4
 	MaxSideCntPerDn      = 1024
 	MaxCntlrCntPerCn     = 256
-	MaxLegPerGrp         = 8
 	MaxSpareLegPerGrp    = 2
 	// MaxGrpCntPerSlice is the most groups EACH of a slice's two group lists
 	// (meta_grp_list, data_grp_list) holds. A group's two md names carry its
@@ -92,10 +91,9 @@ const (
 	// TestMdNamesAtTheGroupCeiling is the tripwire that fails when the
 	// ceiling is raised past what the names can carry.
 	MaxGrpCntPerSlice = 255
-	// MaxAllocLegPerGrp is the allocator's ACTUAL maximum legs per group, as
-	// opposed to the aspirational and unenforced MaxLegPerGrp above: every
-	// allocating path picks between 1 leg (RedundNone) and 2 (RedundMdRaid1),
-	// and no allocating path builds a wider group.
+	// MaxAllocLegPerGrp is the allocator's per-group leg count, the most legs
+	// a group has: every allocating path picks between 1 leg (RedundNone)
+	// and 2 (RedundMdRaid1), and no allocating path builds a wider group.
 	//
 	// SPD1: it is CITED from all three places that make that choice —
 	// gateway/alloc.go legCntOf, model/ops.go legCntOf and worker/reaction.go
@@ -171,6 +169,16 @@ const (
 	// means the 1 GiB DN/CN allocation unit (DefaultDnExtSize).
 	CnCloneMetaAreaSize = 1 * 1024 * 1024 * 1024
 	CnCloneMetaUnit     = 4 * 1024 * 1024
+	// CnCloneMetaUnitCnt is that arena in units, one arena per CN shared by
+	// every clone of every cntlr on the node: the ceiling of a CN's
+	// used_meta_units, which CreateClone and CreateCntlr never pass and only
+	// ReplaceCntlr may (architecture.md, Metadata units).
+	CnCloneMetaUnitCnt = CnCloneMetaAreaSize / CnCloneMetaUnit
+	// CloneMetaBaseBytes is the dm-clone superblock budget of CloneMetaUnits,
+	// the part of a copy's metadata that does not grow with its regions. It
+	// is exactly one unit of either area, so a copy of one region or more
+	// needs two units or more (architecture.md, Metadata units).
+	CloneMetaBaseBytes = 4 * 1024 * 1024
 
 	// dnv DN disk format ([D13]). All byte offsets on the raw --disk device.
 	DnHeaderOffset     = 0 // 4 KiB header block
@@ -182,6 +190,13 @@ const (
 	DnCloneMetaSize    = 192 * 1024 * 1024 // 48 units
 	DnCloneMetaUnit    = 4 * 1024 * 1024   // slot allocation granularity
 	DnDataOffset       = 256 * 1024 * 1024 // extent area start (fixed!)
+
+	// DnCloneMetaUnitCnt is the DN clone-metadata slot area in units, shared
+	// by every migration destination the node hosts: the ceiling of a DN's
+	// used_meta_units, which CreateMigration never passes (architecture.md,
+	// Metadata units). It is derived from the disk format above and is not
+	// part of it.
+	DnCloneMetaUnitCnt = DnCloneMetaSize / DnCloneMetaUnit
 
 	// DefaultLocalStorPrefix is the directory an agent keeps its local store
 	// in when --local-store is not given (architecture.md, Agent local-store paths).
@@ -284,11 +299,12 @@ const (
 	// leftover by definition has no row — nothing wanted names it. An agent
 	// also reports a few conditions this way so that the worker re-sends the
 	// Syncup* whose converge acts on them (architecture.md, Teardown by sweep):
-	// on a dn a disk identity not yet confirmed or a side with bytes left to
-	// zero and nothing zeroing it, on a cn a piece of the node's base state
-	// that a CheckCn round's or GetCnInfo's probe read absent, or an ANA group
-	// it read in a state other than its fixed one on a port whose transport
-	// attributes match.
+	// on a dn a disk identity not yet confirmed, or a side with bytes left to
+	// zero and nothing zeroing it that is not a migration destination waiting
+	// for a free run in the clone-metadata area (dnagent.md DN16); on a cn a
+	// piece of the node's base state that a CheckCn round's or GetCnInfo's
+	// probe read absent, or an ANA group it read in a state other than its
+	// fixed one on a port whose transport attributes match.
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
 	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)
@@ -297,7 +313,8 @@ const (
 	ReplyCodeLeftover = 4
 
 	// Seconds between background retries of a migration destination whose
-	// build stopped short, at its nvme connect or at another step
+	// build stopped short, at its nvme connect or at another step, and of one
+	// that waits for a free run in the node's metadata area before it zeroes
 	// (dnagent.md DN13; the loop is SH27's "DN8 retry", so nicknamed for the
 	// DN8-gated converge it re-runs).
 	DnMigrConnectRetryInterval = 5
@@ -390,6 +407,13 @@ const (
 	// of CN10's triggers (cnagent.md CN10); the cn twin of
 	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
+	// Seconds between background retries of a cn cntlr's converge while one
+	// of its clones waits for a free run in the node's metadata area
+	// (cnagent.md CN18). It is far slower than CnConnectRetryInterval
+	// because each attempt runs the cntlr's whole converge under the lock the
+	// check rounds need, and a fast retry would make a large pool's check
+	// rounds miss.
+	CnCloneMetaRetryInterval = 60
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,
 	// CN18). A pass — one convergeCntlr, whether a SyncupCntlr, the startup
@@ -434,9 +458,10 @@ const (
 	// dnv-worker (dnv-worker.md, Constants this document owns), plus one
 	// constant this block holds for another document: EtcdMaxTxnOps is the
 	// addition of gateway.md, Constants this document owns, and the
-	// arithmetic tripwired against it is that section's for CreateStoragePool
-	// and DeleteThinDevice, dnv-worker.md's for the created flip (RW19) and for
-	// the two drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
+	// arithmetic tripwired against it is that section's for CreateStoragePool,
+	// DeleteThinDevice, CreateCntlr and DeleteCntlr, dnv-worker.md's for the
+	// created flip (RW19), for the cntlr replacement (MD6) and for the two
+	// drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -495,11 +520,27 @@ const (
 	// transaction is another, 2 x MaxFlipCreatedPerTxn + 2 = 514 COMPARES
 	// (dnv-worker.md RW19; TestFlipCreatedTxnBudget,
 	// TestFlipCreatedAtTheTdCeiling; see MaxFlipCreatedPerTxn below).
+	// ReplaceCntlr is a third (dnv-worker.md MD6): its STM reads every clone
+	// of the pool to move the clones' metadata units from the old cntlr's
+	// node to the new one (architecture.md, Metadata units), so at the
+	// ceilings it commits
 	//
-	// DeleteThinDevice stays below all three — the create, D2 and the flip —
-	// whatever the td count: its deciding STM commits having read the fixed
-	// resolution and token keys, the target td and one key per subsystem and
-	// per clone of the SP, so with its three writes it is
+	//	19 + MaxCntlrCntPerSp + MaxSliceCntPerSp + 3 x MaxSsCntPerSp
+	//	   + MaxCloneCntPerSp = 131 COMPARES
+	//
+	// — 19 fixed keys, one read per cntlr, slice and clone, and a Subsystem
+	// read and a CdcEntry read and put per subsystem
+	// (gateway/txnbudget_test.go's TestReplaceCntlrTxnBudget; model's
+	// TestReplaceCntlrAtTheCeiling commits it). The gateway's CreateCntlr
+	// and DeleteCntlr read every clone of the pool too, for the units the
+	// cntlr's node is charged or given back, and stay under etcd's default:
+	// 124 COMPARES each at the ceilings, four short of it
+	// (TestCreateCntlrTxnBudget, TestDeleteCntlrTxnBudget).
+	//
+	// DeleteThinDevice stays below all four — the create, D2, the flip and
+	// ReplaceCntlr — whatever the td count: its deciding STM commits having
+	// read the fixed resolution and token keys, the target td and one key per
+	// subsystem and per clone of the SP, so with its three writes it is
 	// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the ceilings
 	// (gateway/txnbudget_test.go's TestDeleteThinDeviceBudget). The
 	// walk over every td for uncreated snapshots is a read-only plan outside
@@ -547,9 +588,9 @@ const (
 	WorkerRoleCn = "cn"
 	WorkerRoleSp = "sp"
 
-	// dnv-gateway (gateway.md, Constants this document owns). That
-	// section adds three constants and
-	// only this one lands here: CloneBmChunkBytes sits beside MaxCloneBmCnt
+	// dnv-gateway (gateway.md, Constants this document owns). That section
+	// adds four constants and two land here, DefaultGatewayAgentTimeout and
+	// MaxCandidateRoundCnt: CloneBmChunkBytes sits beside MaxCloneBmCnt
 	// above, and EtcdMaxTxnOps in the dnv-worker block, whose header says so.
 	//
 	// DefaultGatewayAgentTimeout is the per-call budget of the gateway's
@@ -559,6 +600,14 @@ const (
 	// around each dial+call (AG2); chosen equal to DefaultEtcdOpTimeout so a
 	// hung agent and a hung etcd bound an RPC alike.
 	DefaultGatewayAgentTimeout = 10
+	// MaxCandidateRoundCnt is the most rounds one candidate unit runs
+	// (gateway.md GW9): candidateUnit plans again after a round that ends in
+	// candidate changed, and after this many such rounds it answers ABORTED
+	// with the "did not settle" text instead. It keeps a request whose client
+	// set no deadline from spinning a handler for ever under steady churn,
+	// and it is well above the rounds the gateway suite's ten parallel pool
+	// creates can need.
+	MaxCandidateRoundCnt = 32
 
 	// dnv-cdc (cdc.md, Constants this document owns).
 	//

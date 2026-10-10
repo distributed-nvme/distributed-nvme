@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -73,21 +74,43 @@ func loadLiveClone(
 	return clone, nil
 }
 
+// cloneMetaUnitsOf is the metadata units a clone onto td takes in the metadata
+// area of a cntlr's CN (architecture.md, Metadata units):
+// common.CloneMetaUnits of the destination td's size and the SP's stored
+// data_block_size, the inputs the cn agent sizes the clone's run by. The
+// stored bdev_conf is validated first and refused ABORTED (GW11): a zero block
+// size read back out of the store would size every clone at one unit.
+// CreateClone stores the count on the record, so every later charge and
+// release reads it there rather than computing it again.
+func cloneMetaUnitsOf(conf *pb.SpConf, td *pb.ThinDevice) (uint64, error) {
+	bdev := spBdevConf(conf)
+	if err := model.ValidateBdevConf(bdev); err != nil {
+		return 0, errAborted("%v", err)
+	}
+	return common.CloneMetaUnits(td.GetSize(), model.PoolBlockSize(bdev)), nil
+}
+
 // CreateClone is the CreateClone of architecture.md, Clones: one Clone record,
 // one name in `clone_name_list`, one SpRev bump. Everything the primary needs
 // to build the dm-clone is in that record, so the RPC is pure etcd.
 //
-// Two of the section's rules are deliberately NOT enforced here. The
+// One of the section's rules is deliberately NOT enforced here. The
 // destination td MUST be empty — freshly created and never written — because
 // clone crash recovery (architecture.md, Clone crash recovery) equates "mapped
 // in the destination thin pool" with
 // "already copied"; the CP cannot see whether a td was written, so that
-// stays a documented-unverifiable contract ([D3]). And the ceiling that
-// actually binds is the primary CN's clone-metadata arena, shared by every
-// clone of every cntlr on that CN, not MaxCloneCntPerSp; the gateway does not
-// track it (gateway.md, Clones; architecture.md, Clones: CreateClone's Admission
-// paragraph), so an over-committed clone is created
-// normally and reports RES_STATUS_ERROR until arena units free up.
+// stays a documented-unverifiable contract ([D3]).
+//
+// The ceiling that actually binds is not MaxCloneCntPerSp but the metadata
+// area of every CN that holds a cntlr of the SP, each shared by every clone of
+// every cntlr on its node (architecture.md, Metadata units). The clone's
+// units (cloneMetaUnitsOf) are charged to the CN of EVERY cntlr of the SP,
+// disabled ones included, because a failover or a cntlr replacement can make
+// any of them the primary, which builds every clone of the SP on its own CN.
+// A CN short of the room refuses the create RESOURCE_EXHAUSTED before
+// anything is written. The units are stored on the record, where every later
+// charge and release reads them. The charge changes only the CNs' used units,
+// so it rewrites each CN's record and capacity value and bumps no CnRev.
 func (s *Server) CreateClone(
 	ctx context.Context,
 	req *pb.CreateCloneRequest,
@@ -167,6 +190,27 @@ func (s *Server) CreateClone(
 					req.GetDstTdName(), name)
 			}
 		}
+		// The metadata room comes after every other refusal, so a request
+		// that breaks a rule of its own hears that rule, and before any
+		// write: a CN short of room is RESOURCE_EXHAUSTED with nothing
+		// written (architecture.md, Metadata units). One charge per cntlr,
+		// each on the CN its record names, the ledger writing each CN once.
+		units, err := cloneMetaUnitsOf(sc.Conf, td)
+		if err != nil {
+			return err
+		}
+		cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+		if err != nil {
+			return err
+		}
+		ledger := newCnLedger(stm, sc.Cid)
+		what := fmt.Sprintf("clone %q", req.GetCloneName())
+		for _, cntlr := range cntlrs {
+			err := ledger.chargeUnits(cntlr.GetAddrPort(), units, what)
+			if err != nil {
+				return err
+			}
+		}
 		minter := newSpIdMinter(sc.Conf)
 		cloneId = minter.mint()
 		stm.Put(cloneKey, &pb.Clone{
@@ -180,7 +224,11 @@ func (s *Server) CreateClone(
 			DstTdId:       td.GetTdId(),
 			DmCloneConf:   req.GetDmCloneConf(),
 			AutoResume:    req.GetAutoResume(),
+			MetaUnits:     units,
 		})
+		if err := ledger.flush(opCreateClone); err != nil {
+			return err
+		}
 		sc.Conf.CloneNameList = append(
 			sc.Conf.CloneNameList, req.GetCloneName())
 		minter.commit(sc.Conf)

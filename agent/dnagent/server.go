@@ -63,10 +63,10 @@ type DnAgentServer struct {
 
 	// migrRetryInterval paces the DN8 retry of a migration destination
 	// (common.DnMigrConnectRetryInterval; DN13), a field for the same
-	// reason. It is what lets a test finish a destination's build from the
-	// RETRY LOOP rather than from an RPC: a pass of the loop can deregister
-	// the loop it runs in, which is why its attempts run on rootCtx
-	// (migrRetryLoop).
+	// reason. It is what lets a test finish a destination's build, or take
+	// the run a destination waits for, from the RETRY LOOP rather than from
+	// an RPC: a pass of the loop can deregister the loop it runs in, which is
+	// why its attempts run on rootCtx (migrRetryLoop).
 	migrRetryInterval time.Duration
 
 	// now and sleep are the clock seams, real by default: DN6's orphan age
@@ -145,7 +145,9 @@ type sideState struct {
 	// chunkMigrId identifies the migration the chunks belong to, so chunks
 	// left over from an earlier migration are never applied to a new one.
 	chunkMigrId uint64
-	// retrying/cancel drive the DN8 retry of a migration destination (DN13).
+	// retrying/cancel drive the DN8 retry of a migration destination (DN13):
+	// one whose build stopped short, or one that has not provisioned and
+	// waits for its run in the clone-metadata area before it zeroes.
 	retrying bool
 	cancel   context.CancelFunc
 

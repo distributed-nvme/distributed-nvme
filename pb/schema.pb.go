@@ -2591,16 +2591,23 @@ func (x *SpRev) GetRevision() uint64 {
 
 // {dnv_prefix} dn_conf {cluster_id} {addr_port}
 type DnConf struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DnId          uint64                 `protobuf:"varint,1,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
-	ShardCode     uint32                 `protobuf:"varint,2,opt,name=shard_code,json=shardCode,proto3" json:"shard_code,omitempty"`
-	Disabled      bool                   `protobuf:"varint,3,opt,name=disabled,proto3" json:"disabled,omitempty"`
-	ErrEpoch      uint64                 `protobuf:"varint,4,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
-	NvmeTrConf    *NvmeTrConf            `protobuf:"bytes,5,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
-	Location      string                 `protobuf:"bytes,6,opt,name=location,proto3" json:"location,omitempty"`
-	SidePtrList   []*SidePointer         `protobuf:"bytes,7,rep,name=side_ptr_list,json=sidePtrList,proto3" json:"side_ptr_list,omitempty"`
-	TotalExtCnt   uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"`
-	FreeExtCnt    uint64                 `protobuf:"varint,9,opt,name=free_ext_cnt,json=freeExtCnt,proto3" json:"free_ext_cnt,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	DnId        uint64                 `protobuf:"varint,1,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
+	ShardCode   uint32                 `protobuf:"varint,2,opt,name=shard_code,json=shardCode,proto3" json:"shard_code,omitempty"`
+	Disabled    bool                   `protobuf:"varint,3,opt,name=disabled,proto3" json:"disabled,omitempty"`
+	ErrEpoch    uint64                 `protobuf:"varint,4,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	NvmeTrConf  *NvmeTrConf            `protobuf:"bytes,5,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
+	Location    string                 `protobuf:"bytes,6,opt,name=location,proto3" json:"location,omitempty"`
+	SidePtrList []*SidePointer         `protobuf:"bytes,7,rep,name=side_ptr_list,json=sidePtrList,proto3" json:"side_ptr_list,omitempty"`
+	TotalExtCnt uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"`
+	FreeExtCnt  uint64                 `protobuf:"varint,9,opt,name=free_ext_cnt,json=freeExtCnt,proto3" json:"free_ext_cnt,omitempty"`
+	// The units of this node's metadata area held by the migration
+	// destinations it hosts (architecture.md, Metadata units):
+	// CreateMigration charges the units it computes and stores in the
+	// migration's meta_units, and FinishMigration and CancelMigration release
+	// what that field records. A write that changes only this count raises no
+	// revision, and a release stops at zero. Appended, never renumbered.
+	UsedMetaUnits uint64 `protobuf:"varint,10,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2698,18 +2705,35 @@ func (x *DnConf) GetFreeExtCnt() uint64 {
 	return 0
 }
 
+func (x *DnConf) GetUsedMetaUnits() uint64 {
+	if x != nil {
+		return x.UsedMetaUnits
+	}
+	return 0
+}
+
 // {dnv_prefix} cn_conf {cluster_id} {addr_port}
 type CnConf struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CnId          uint64                 `protobuf:"varint,1,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
-	ShardCode     uint32                 `protobuf:"varint,2,opt,name=shard_code,json=shardCode,proto3" json:"shard_code,omitempty"`
-	Disabled      bool                   `protobuf:"varint,3,opt,name=disabled,proto3" json:"disabled,omitempty"`
-	ErrEpoch      uint64                 `protobuf:"varint,4,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
-	NvmeTrConf    *NvmeTrConf            `protobuf:"bytes,5,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
-	Location      string                 `protobuf:"bytes,6,opt,name=location,proto3" json:"location,omitempty"`
-	CntlrPtrList  []*CntlrPointer        `protobuf:"bytes,7,rep,name=cntlr_ptr_list,json=cntlrPtrList,proto3" json:"cntlr_ptr_list,omitempty"`
-	TotalExtCnt   uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"`
-	FreeExtCnt    uint64                 `protobuf:"varint,9,opt,name=free_ext_cnt,json=freeExtCnt,proto3" json:"free_ext_cnt,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	CnId         uint64                 `protobuf:"varint,1,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
+	ShardCode    uint32                 `protobuf:"varint,2,opt,name=shard_code,json=shardCode,proto3" json:"shard_code,omitempty"`
+	Disabled     bool                   `protobuf:"varint,3,opt,name=disabled,proto3" json:"disabled,omitempty"`
+	ErrEpoch     uint64                 `protobuf:"varint,4,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	NvmeTrConf   *NvmeTrConf            `protobuf:"bytes,5,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
+	Location     string                 `protobuf:"bytes,6,opt,name=location,proto3" json:"location,omitempty"`
+	CntlrPtrList []*CntlrPointer        `protobuf:"bytes,7,rep,name=cntlr_ptr_list,json=cntlrPtrList,proto3" json:"cntlr_ptr_list,omitempty"`
+	TotalExtCnt  uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"`
+	FreeExtCnt   uint64                 `protobuf:"varint,9,opt,name=free_ext_cnt,json=freeExtCnt,proto3" json:"free_ext_cnt,omitempty"`
+	// The units of this node's metadata area held by clones: every clone of
+	// a pool is charged to the node of each cntlr of the pool
+	// (architecture.md, Metadata units). CreateClone charges it with the
+	// units it computes and stores in the clone's meta_units; CreateCntlr and
+	// ReplaceCntlr charge it, and FinishCloneDelete, DeleteCntlr and
+	// ReplaceCntlr release it, by reading each clone's meta_units. Only
+	// ReplaceCntlr may charge past CnCloneMetaUnitCnt. A write that changes
+	// only this count raises no revision, and a release stops at zero.
+	// Appended, never renumbered.
+	UsedMetaUnits uint64 `protobuf:"varint,10,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2807,10 +2831,25 @@ func (x *CnConf) GetFreeExtCnt() uint64 {
 	return 0
 }
 
+func (x *CnConf) GetUsedMetaUnits() uint64 {
+	if x != nil {
+		return x.UsedMetaUnits
+	}
+	return 0
+}
+
 // {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
 type DnCapacity struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Location      string                 `protobuf:"bytes,1,opt,name=location,proto3" json:"location,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Location string                 `protobuf:"bytes,1,opt,name=location,proto3" json:"location,omitempty"`
+	// A copy of the node's DnConf.used_meta_units (architecture.md,
+	// Metadata units): every transaction that writes the key writes it, and
+	// every transaction that changes the count rewrites the key, so it
+	// follows the record. A scan reads the node's free units from it,
+	// DnCloneMetaUnitCnt less this and never below zero, and skips a node
+	// short of what it needs; a value without the field reads as nothing
+	// used. Appended, never renumbered.
+	UsedMetaUnits uint64 `protobuf:"varint,2,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2852,10 +2891,25 @@ func (x *DnCapacity) GetLocation() string {
 	return ""
 }
 
+func (x *DnCapacity) GetUsedMetaUnits() uint64 {
+	if x != nil {
+		return x.UsedMetaUnits
+	}
+	return 0
+}
+
 // {dnv_prefix} cn_capacity {cluster_id} {free_ext_cnt} {addr_port}
 type CnCapacity struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Location      string                 `protobuf:"bytes,1,opt,name=location,proto3" json:"location,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Location string                 `protobuf:"bytes,1,opt,name=location,proto3" json:"location,omitempty"`
+	// A copy of the node's CnConf.used_meta_units (architecture.md,
+	// Metadata units): every transaction that writes the key writes it, and
+	// every transaction that changes the count rewrites the key, so it
+	// follows the record. A scan reads the node's free units from it,
+	// CnCloneMetaUnitCnt less this and never below zero, and skips a node
+	// short of what it needs; a value without the field reads as nothing
+	// used. Appended, never renumbered.
+	UsedMetaUnits uint64 `protobuf:"varint,2,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2895,6 +2949,13 @@ func (x *CnCapacity) GetLocation() string {
 		return x.Location
 	}
 	return ""
+}
+
+func (x *CnCapacity) GetUsedMetaUnits() uint64 {
+	if x != nil {
+		return x.UsedMetaUnits
+	}
+	return 0
 }
 
 // {dnv_prefix} cdc {cluster_id} {shard_code} {sp_id} {ss_id}
@@ -3467,7 +3528,15 @@ type Clone struct {
 	// the sp coordinator drains the chunk keys. Appended, never renumbered —
 	// a renumbered field decodes silently into unknown fields rather than
 	// failing.
-	Deleting      bool `protobuf:"varint,12,opt,name=deleting,proto3" json:"deleting,omitempty"`
+	Deleting bool `protobuf:"varint,12,opt,name=deleting,proto3" json:"deleting,omitempty"`
+	// The metadata units this clone holds on the node of each cntlr of its
+	// pool (architecture.md, Metadata units): common.CloneMetaUnits of the
+	// destination td's size and the pool's data_block_size, set by
+	// CreateClone and never changed. Every later charge and release reads it
+	// here, so a release gives back exactly what was charged. The cn agent
+	// sizes its run with the same formula and does not read it. Appended,
+	// never renumbered.
+	MetaUnits     uint64 `protobuf:"varint,13,opt,name=meta_units,json=metaUnits,proto3" json:"meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3577,6 +3646,13 @@ func (x *Clone) GetDeleting() bool {
 		return x.Deleting
 	}
 	return false
+}
+
+func (x *Clone) GetMetaUnits() uint64 {
+	if x != nil {
+		return x.MetaUnits
+	}
+	return 0
 }
 
 // {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}
@@ -3703,12 +3779,19 @@ func (x *Transfer) GetAutoSuspend() bool {
 
 // {dnv_prefix} migration {cluster_id} {sp_id} {migr_name}
 type Migration struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MigrId        uint64                 `protobuf:"varint,1,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
-	SrcSideId     uint64                 `protobuf:"varint,2,opt,name=src_side_id,json=srcSideId,proto3" json:"src_side_id,omitempty"`
-	DstSideId     uint64                 `protobuf:"varint,3,opt,name=dst_side_id,json=dstSideId,proto3" json:"dst_side_id,omitempty"`
-	DmCloneConf   *DmCloneConf           `protobuf:"bytes,4,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
-	BmCnt         uint32                 `protobuf:"varint,5,opt,name=bm_cnt,json=bmCnt,proto3" json:"bm_cnt,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	MigrId      uint64                 `protobuf:"varint,1,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
+	SrcSideId   uint64                 `protobuf:"varint,2,opt,name=src_side_id,json=srcSideId,proto3" json:"src_side_id,omitempty"`
+	DstSideId   uint64                 `protobuf:"varint,3,opt,name=dst_side_id,json=dstSideId,proto3" json:"dst_side_id,omitempty"`
+	DmCloneConf *DmCloneConf           `protobuf:"bytes,4,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
+	BmCnt       uint32                 `protobuf:"varint,5,opt,name=bm_cnt,json=bmCnt,proto3" json:"bm_cnt,omitempty"`
+	// The metadata units this migration holds on its destination disk node
+	// (architecture.md, Metadata units): common.CloneMetaUnits of the moved
+	// side's bytes (its group's ext_cnt times the cluster's extent_size) and
+	// the pool's data_block_size, set by CreateMigration and never changed.
+	// FinishMigration and CancelMigration release exactly this. Appended,
+	// never renumbered.
+	MetaUnits     uint64 `protobuf:"varint,6,opt,name=meta_units,json=metaUnits,proto3" json:"meta_units,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3774,6 +3857,13 @@ func (x *Migration) GetDmCloneConf() *DmCloneConf {
 func (x *Migration) GetBmCnt() uint32 {
 	if x != nil {
 		return x.BmCnt
+	}
+	return 0
+}
+
+func (x *Migration) GetMetaUnits() uint64 {
+	if x != nil {
+		return x.MetaUnits
 	}
 	return 0
 }
@@ -14362,7 +14452,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\"<\n" +
 	"\x05SpRev\x12\x17\n" +
 	"\asp_name\x18\x01 \x01(\tR\x06spName\x12\x1a\n" +
-	"\brevision\x18\x02 \x01(\x04R\brevision\"\xb8\x02\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\"\xe0\x02\n" +
 	"\x06DnConf\x12\x13\n" +
 	"\x05dn_id\x18\x01 \x01(\x04R\x04dnId\x12\x1d\n" +
 	"\n" +
@@ -14375,7 +14465,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rside_ptr_list\x18\a \x03(\v2\f.SidePointerR\vsidePtrList\x12\"\n" +
 	"\rtotal_ext_cnt\x18\b \x01(\x04R\vtotalExtCnt\x12 \n" +
 	"\ffree_ext_cnt\x18\t \x01(\x04R\n" +
-	"freeExtCnt\"\xbb\x02\n" +
+	"freeExtCnt\x12&\n" +
+	"\x0fused_meta_units\x18\n" +
+	" \x01(\x04R\rusedMetaUnits\"\xe3\x02\n" +
 	"\x06CnConf\x12\x13\n" +
 	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\x12\x1d\n" +
 	"\n" +
@@ -14388,13 +14480,17 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x0ecntlr_ptr_list\x18\a \x03(\v2\r.CntlrPointerR\fcntlrPtrList\x12\"\n" +
 	"\rtotal_ext_cnt\x18\b \x01(\x04R\vtotalExtCnt\x12 \n" +
 	"\ffree_ext_cnt\x18\t \x01(\x04R\n" +
-	"freeExtCnt\"(\n" +
+	"freeExtCnt\x12&\n" +
+	"\x0fused_meta_units\x18\n" +
+	" \x01(\x04R\rusedMetaUnits\"P\n" +
 	"\n" +
 	"DnCapacity\x12\x1a\n" +
-	"\blocation\x18\x01 \x01(\tR\blocation\"(\n" +
+	"\blocation\x18\x01 \x01(\tR\blocation\x12&\n" +
+	"\x0fused_meta_units\x18\x02 \x01(\x04R\rusedMetaUnits\"P\n" +
 	"\n" +
 	"CnCapacity\x12\x1a\n" +
-	"\blocation\x18\x01 \x01(\tR\blocation\"y\n" +
+	"\blocation\x18\x01 \x01(\tR\blocation\x12&\n" +
+	"\x0fused_meta_units\x18\x02 \x01(\x04R\rusedMetaUnits\"y\n" +
 	"\bCdcEntry\x12\x10\n" +
 	"\x03nqn\x18\x01 \x01(\tR\x03nqn\x126\n" +
 	"\x11nvme_tr_conf_list\x18\x02 \x03(\v2\v.NvmeTrConfR\x0envmeTrConfList\x12#\n" +
@@ -14446,7 +14542,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05model\x18\x03 \x01(\tR\x05model\x12#\n" +
 	"\ans_list\x18\x04 \x03(\v2\n" +
 	".NamespaceR\x06nsList\x12#\n" +
-	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"\x9a\x03\n" +
+	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"\xb9\x03\n" +
 	"\x05Clone\x12\x19\n" +
 	"\bclone_id\x18\x01 \x01(\x04R\acloneId\x124\n" +
 	"\x10src_tr_conf_list\x18\x02 \x03(\v2\v.NvmeTrConfR\rsrcTrConfList\x12\x17\n" +
@@ -14461,7 +14557,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vauto_resume\x18\n" +
 	" \x01(\bR\n" +
 	"autoResume\x12\x1a\n" +
-	"\bdeleting\x18\f \x01(\bR\bdeletingJ\x04\b\v\x10\fR\x06bm_cnt\"%\n" +
+	"\bdeleting\x18\f \x01(\bR\bdeleting\x12\x1d\n" +
+	"\n" +
+	"meta_units\x18\r \x01(\x04R\tmetaUnitsJ\x04\b\v\x10\fR\x06bm_cnt\"%\n" +
 	"\vCloneBitmap\x12\x16\n" +
 	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"\xa2\x01\n" +
 	"\bTransfer\x12\x17\n" +
@@ -14470,13 +14568,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\n" +
 	"ori_ns_idx\x18\x03 \x01(\rR\boriNsIdx\x12#\n" +
 	"\rallowed_hosts\x18\x04 \x03(\tR\fallowedHosts\x12!\n" +
-	"\fauto_suspend\x18\x05 \x01(\bR\vautoSuspend\"\xad\x01\n" +
+	"\fauto_suspend\x18\x05 \x01(\bR\vautoSuspend\"\xcc\x01\n" +
 	"\tMigration\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\x12\x1e\n" +
 	"\vsrc_side_id\x18\x02 \x01(\x04R\tsrcSideId\x12\x1e\n" +
 	"\vdst_side_id\x18\x03 \x01(\x04R\tdstSideId\x120\n" +
 	"\rdm_clone_conf\x18\x04 \x01(\v2\f.DmCloneConfR\vdmCloneConf\x12\x15\n" +
-	"\x06bm_cnt\x18\x05 \x01(\rR\x05bmCnt\"$\n" +
+	"\x06bm_cnt\x18\x05 \x01(\rR\x05bmCnt\x12\x1d\n" +
+	"\n" +
+	"meta_units\x18\x06 \x01(\x04R\tmetaUnits\"$\n" +
 	"\n" +
 	"MigrBitmap\x12\x16\n" +
 	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"!\n" +

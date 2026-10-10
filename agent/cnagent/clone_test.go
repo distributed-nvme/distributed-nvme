@@ -2,10 +2,14 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -1028,97 +1032,1199 @@ func TestCloneMetaFirstFitAndRecycling(t *testing.T) {
 	assertNoCall(t, node, "cmd dmsetup create "+secondDm)
 }
 
-// TestCloneMetaArenaExhaustion: with no contiguous run left the clone's
-// metadata and dm-clone rows go ERROR and nothing is built, while the pass
-// itself carries on (CN29).
-func TestCloneMetaArenaExhaustion(t *testing.T) {
-	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+// plantWrapper puts a kind-`cb` wrapper on the node behind the agent's back:
+// another cntlr's clone on this CN, holding unitCnt units from unitStart on
+// the arena's loop device. The arena is per CN, so another sp's wrapper fills
+// it as well as this cntlr's own would — and it has to be another sp's,
+// because this cntlr's own sweep removes a wrapper of testSp that no clone of
+// testSp's request names. dropWrapper takes it away again, the way that
+// clone's own teardown frees its run.
+func plantWrapper(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+	cloneId uint64,
+	unitStart uint64,
+	unitCnt uint64,
+) string {
+	t.Helper()
 	loop := loopDev(t, srv, node)
-
-	// A kind-`cb` wrapper claiming every unit of the arena, planted behind
-	// the agent's back. The arena is per CN, so a wrapper of ANOTHER sp
-	// exhausts it just as well — and it has to be another sp's, because this
-	// cntlr's own sweep would remove a wrapper of testSp that no clone of
-	// testSp's request names.
-	const fillerSp = testSp + 1
-	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, fillerSp, 0x999)
-	node.dms[filler] = &fakeDm{
-		table: fmt.Sprintf("0 %d linear %s 0",
-			cnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
+	name := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp+1, cloneId)
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.dms[name] = &fakeDm{
+		table: fmt.Sprintf("0 %d linear %s %d",
+			unitCnt*cnCloneMetaUnitSectors, node.devNo[loop],
+			unitStart*cnCloneMetaUnitSectors),
 		thinIds: map[uint32]bool{},
 	}
-	node.devNo["/dev/mapper/"+filler] = "253:200"
+	node.devNo["/dev/mapper/"+name] = node.newDevNo()
+	return name
+}
+
+func dropWrapper(node *fakeNode, name string) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	delete(node.dms, name)
+	delete(node.devNo, "/dev/mapper/"+name)
+	delete(node.devSize, "/dev/mapper/"+name)
+}
+
+// checkRound is one CN24 check round of the fixture cntlr at a revision, and
+// the rows it probed.
+func checkRound(
+	t *testing.T,
+	srv *CnAgentServer,
+	revision uint64,
+) *pb.CntlrInfo {
+	t.Helper()
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: revision,
+		}, nil)
+	if probed == nil {
+		t.Fatalf("the check round carried no CntlrInfo")
+	}
+	return probed
+}
+
+// assertSameCloneRows holds the check round to the converge on the clone's
+// two step-2 rows, epoch included: ResTracker.Set overwrites, so a probe that
+// answered anything else would replace the converge's verdict, and the two
+// channels would trade the rows, and their epochs, on every round.
+func assertSameCloneRows(
+	t *testing.T,
+	converged *pb.CntlrInfo,
+	probed *pb.CntlrInfo,
+) {
+	t.Helper()
+	for _, row := range []struct {
+		label string
+		rows  func(*pb.CntlrInfo) map[uint64]*pb.ResInfo
+	}{
+		{"clone_id_to_meta", (*pb.CntlrInfo).GetCloneIdToMeta},
+		{"clone_id_to_dm_clone", (*pb.CntlrInfo).GetCloneIdToDmClone},
+	} {
+		want := row.rows(converged)[testClone]
+		got := row.rows(probed)[testClone]
+		if !proto.Equal(got, want) {
+			t.Fatalf("the check round reports %s as %v, the converge as %v",
+				row.label, got, want)
+		}
+	}
+}
+
+// waitingForTwoUnits is the details text of both rows of the fixture's clone
+// while the arena has no free run for its two units.
+const waitingForTwoUnits = "waiting for metadata room: no contiguous run " +
+	"of 2 clone-metadata units in the 256-unit arena"
+
+// TestCloneMetaNoRunIsProvisioning: an arena that answered and has no free
+// run for a clone's metadata does not fail the clone, it makes it wait (CN18
+// step 2). Both of the clone's step-2 rows read RES_STATUS_PROVISIONING with
+// the allocator's own text — the converge's and the check round's alike, so
+// they never trade the rows — and PROVISIONING sets no health epoch. Nothing
+// of the clone is built: no wrapper, no hole punch, no dm-clone, no bitmap
+// read. Its td's ns-dev is parked, with an OK row, because a dm-clone that
+// does not exist shows no hydration (CN16 rule 5). The cntlr registers CN18's
+// slow clone-metadata retry, never the CN10 one, and the first attempt that
+// finds room builds the clone, moves the ns-dev onto it and ends the retry.
+func TestCloneMetaNoRunIsProvisioning(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	loop := loopDev(t, srv, node)
+	filler := plantWrapper(t, srv, node, 0x999, 0, common.CnCloneMetaUnitCnt)
 
 	node.Reset()
 	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
 		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
 	if err != nil {
-		t.Fatalf("exhausted arena: %v", err)
+		t.Fatalf("full arena: %v", err)
 	}
-	meta := reply.GetCntlrInfo().GetCloneIdToMeta()[testClone]
-	if meta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		!strings.Contains(meta.GetDetails(),
-			"no contiguous run of 2 clone-metadata units in the "+
-				"256-unit arena") {
-		t.Fatalf("clone_id_to_meta is %v/%q",
-			meta.GetStatus(), meta.GetDetails())
-	}
-	dm := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
-	if dm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		dm.GetDetails() != "metadata wrapper missing" {
-		t.Fatalf("clone_id_to_dm_clone is %v/%q",
-			dm.GetStatus(), dm.GetDetails())
-	}
-	assertNoCall(t, node, "cmd dmsetup create "+cloneName(srv, testClone))
+	info := reply.GetCntlrInfo()
+	assertProvisioningDetails(t, info.GetCloneIdToMeta()[testClone],
+		waitingForTwoUnits, "clone meta")
+	assertProvisioningDetails(t, info.GetCloneIdToDmClone()[testClone],
+		waitingForTwoUnits, "dm-clone")
 	// The source connection is fine, so its row is not dragged down with it.
-	assertOk(t, reply.GetCntlrInfo().GetCloneIdToTarget()[testClone],
-		"clone target")
+	assertOk(t, info.GetCloneIdToTarget()[testClone], "clone target")
+	metaDm := cloneMetaName(srv, testClone)
+	clone := cloneName(srv, testClone)
+	for _, call := range []string{"cmd dmsetup create " + metaDm,
+		"cmd dmsetup create " + clone, "cmd blkdiscard", "cmd thin_dump"} {
+		assertNoCall(t, node, call)
+	}
+	assertParked(t, srv, node, testNs, testTd, "the waiting clone's td")
+	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+	if !metaRetrying(t, srv) {
+		t.Fatalf("a clone waiting for room registered no clone-metadata retry")
+	}
+	if retrying(t, srv) {
+		t.Fatalf("a clone waiting for room registered the CN10 retry")
+	}
 
-	// The CN24 check round must report the *same* pair. ResTracker.Set
-	// overwrites, so a probe that answered the plain "no wrapper, no dm-clone"
-	// MISSING here would replace the converge's verdict, and the two channels
-	// would trade these two rows — and the `epoch` on them — on every round.
+	// The check round reports the same pair, and finds it from this round's
+	// enumeration with nothing allocated, punched or created (CN23).
 	node.Reset()
-	_, probed := srv.checkCntlrRound(context.Background(),
-		&pb.CheckCntlrRequest{
-			ClusterId: testCluster, CnId: testCn,
-			CntlrPointer: cntlrPtr(), Revision: 3,
-		}, nil)
-	probedMeta := probed.GetCloneIdToMeta()[testClone]
-	if probedMeta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		probedMeta.GetDetails() != meta.GetDetails() {
-		t.Fatalf("the check round flipped clone_id_to_meta to %v/%q, want the "+
-			"converge's ERROR/%q",
-			probedMeta.GetStatus(), probedMeta.GetDetails(), meta.GetDetails())
-	}
-	probedDm := probed.GetCloneIdToDmClone()[testClone]
-	if probedDm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		probedDm.GetDetails() != "metadata wrapper missing" {
-		t.Fatalf("the check round flipped clone_id_to_dm_clone to %v/%q, want "+
-			"the converge's ERROR/%q", probedDm.GetStatus(),
-			probedDm.GetDetails(), "metadata wrapper missing")
-	}
-	// The source is still connected on this round, which is what lets the probe
-	// answer for CN18 step 2 at all: a clone whose step 1 has not succeeded is
-	// one the converge never carried that far.
+	probed := checkRound(t, srv, 3)
+	assertSameCloneRows(t, info, probed)
 	assertOk(t, probed.GetCloneIdToTarget()[testClone], "probed clone target")
-	// Preserving that verdict must not cost the probe its read-only contract
-	// (CN23): the arena question is answered from this pass's enumeration, with
-	// no allocation, no hole punch and no `dmsetup create`.
+	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+
+	// Room comes back when the other clone goes, which no request of this
+	// cntlr says; the slow retry's next attempt builds the clone, moves the
+	// ns-dev onto it and ends the retry.
+	dropWrapper(node, filler)
+	node.Reset()
+	retryAttempt(t, srv)
+	nsDev := nsDevName(srv, testNs)
+	assertOrder(t, node,
+		"cmd blkdiscard --offset 0 --length 8388608 "+loop,
+		"cmd dmsetup create "+metaDm,
+		"cmd dmsetup create "+clone,
+		"cmd dmsetup message "+clone+" 0 enable_hydration",
+		"cmd dmsetup reload "+nsDev)
+	cloneNo := node.devNo["/dev/mapper/"+clone]
+	if got, want := node.dms[nsDev].table,
+		agent.LinearTable(testTdSize/512, cloneNo, 0); got != want {
+		t.Fatalf("the ns-dev table is %q, want the dm-clone %q", got, want)
+	}
+	built := probedCntlrInfo(t, srv)
+	assertOk(t, built.GetCloneIdToMeta()[testClone], "built clone meta")
+	assertOk(t, built.GetCloneIdToDmClone()[testClone], "built dm-clone")
+	assertOk(t, built.GetNsIdToDmLinear()[testNs], "built ns-dev")
+	if metaRetrying(t, srv) {
+		t.Fatalf("the clone-metadata retry outlived the build it finished")
+	}
+	if retrying(t, srv) {
+		t.Fatalf("the build registered the CN10 retry")
+	}
+}
+
+// TestCloneMetaNoRunErrorIsTyped pins the allocator's typed "no free run"
+// (CN18 step 2): the converge and the probe tell an arena that waits for room
+// from every other failure by the error's type, never by its text, and the
+// text stays what the rows carry after their fixed prefix. A run larger than
+// the whole arena can never come and is a plain error, and so is a hole punch
+// that fails inside Alloc.
+func TestCloneMetaNoRunErrorIsTyped(t *testing.T) {
+	total := uint64(common.CnCloneMetaUnitCnt)
+	full := make(map[uint64]struct{}, total)
+	for i := uint64(0); i < total; i++ {
+		full[i] = struct{}{}
+	}
+	_, err := cloneMetaAllocContiguous(full, total, 2)
+	var noRun *cloneMetaNoRunError
+	if !errors.As(err, &noRun) || !isCloneMetaNoRun(err) {
+		t.Fatalf("a full arena answered %T %v, want the typed no-run error",
+			err, err)
+	}
+	if got, want := err.Error(), "no contiguous run of 2 clone-metadata "+
+		"units in the 256-unit arena"; got != want {
+		t.Fatalf("the no-run text is %q, want %q", got, want)
+	}
+	if got := detailsWaitingForRoom(err); got != waitingForTwoUnits {
+		t.Fatalf("the row text is %q, want %q", got, waitingForTwoUnits)
+	}
+	if !isCloneMetaNoRun(fmt.Errorf("wrapped: %w", err)) {
+		t.Fatalf("a wrapped no-run error is not found by its type")
+	}
+	// Free units split into runs too short are no free run either.
+	split := make(map[uint64]struct{}, total/2)
+	for i := uint64(0); i < total; i += 2 {
+		split[i] = struct{}{}
+	}
+	if _, err := cloneMetaAllocContiguous(
+		split, total, 2); !isCloneMetaNoRun(err) {
+		t.Fatalf("an arena of one-unit runs answered %v, want no free run",
+			err)
+	}
+	// The whole arena fits an empty one; one unit more never fits any.
+	if start, err := cloneMetaAllocContiguous(
+		map[uint64]struct{}{}, total, total); err != nil || start != 0 {
+		t.Fatalf("the whole arena in an empty one: start %d, err %v",
+			start, err)
+	}
+	_, err = cloneMetaAllocContiguous(map[uint64]struct{}{}, total, total+1)
+	if err == nil || isCloneMetaNoRun(err) {
+		t.Fatalf("a run larger than the arena answered %T %v, want a plain "+
+			"error", err, err)
+	}
+	if !strings.Contains(err.Error(), "larger than the 256-unit arena") {
+		t.Fatalf("a run larger than the arena answered %q", err.Error())
+	}
+
+	// Alloc hands the typed error back unwrapped, before it runs anything.
+	node := newFakeNode()
+	cmeta := NewCloneMeta(node.osClient())
+	const loop, loopNo = "/dev/loop0", "7:0"
+	used := map[string]cloneMetaSlot{"stranger": {
+		name: "stranger", devNo: loopNo, unitStart: 0, unitCount: total,
+		sectors: total * cnCloneMetaUnitSectors,
+	}}
+	_, err = cmeta.Alloc(context.Background(), "wrapper", loop, loopNo,
+		used, 2)
+	if _, ok := err.(*cloneMetaNoRunError); !ok {
+		t.Fatalf("Alloc in a full arena answered %T %v, want the typed "+
+			"error unwrapped", err, err)
+	}
+	if calls := node.Calls(); len(calls) != 0 {
+		t.Fatalf("Alloc in a full arena ran %v", calls)
+	}
+	// A hole punch that fails is a failure of its own, not a wait for room.
+	node.failCmd["blkdiscard --offset 0 --length 8388608 "+loop] =
+		"blkdiscard: " + loop + ": BLKDISCARD ioctl failed: " +
+			"Operation not supported"
+	_, err = cmeta.Alloc(context.Background(), "wrapper", loop, loopNo,
+		map[string]cloneMetaSlot{}, 2)
+	if err == nil || isCloneMetaNoRun(err) {
+		t.Fatalf("a failed hole punch answered %T %v, want a plain error",
+			err, err)
+	}
+}
+
+// TestCloneMetaCanSupplyFreesTheClonesOwnRun pins the room check's one
+// difference from the allocation it predicts: the clone's own wrapper claims
+// nothing, because a wrapper that does not match is removed before its fresh
+// run is allocated (ensureCloneMeta), so its run is free by the time Alloc
+// looks (architecture.md, Clone crash recovery). Any other name's run, on the
+// arena's loop device, stays taken; a wrapper on another loop device claims
+// nothing at all. The check is pure: the arena it reads is left as it is.
+func TestCloneMetaCanSupplyFreesTheClonesOwnRun(t *testing.T) {
+	const loopNo, staleNo = "7:0", "7:9"
+	total := uint64(common.CnCloneMetaUnitCnt)
+	cp := &clonePlan{metaDmName: "own", metaUnits: 2,
+		metaSectors: 2 * cnCloneMetaUnitSectors}
+	slotOf := func(name, devNo string, start, cnt uint64) cloneMetaSlot {
+		return cloneMetaSlot{name: name, devNo: devNo, unitStart: start,
+			unitCount: cnt, sectors: cnt * cnCloneMetaUnitSectors}
+	}
+	arenaOf := func(slots ...cloneMetaSlot) *cloneMetaArena {
+		arena := &cloneMetaArena{loopDev: "/dev/loop0", loopDevNo: loopNo,
+			slots: make(map[string]cloneMetaSlot, len(slots))}
+		for _, slot := range slots {
+			arena.slots[slot.name] = slot
+		}
+		return arena
+	}
+	// The clone's own wrapper runs one sector into a third unit, so it does
+	// not match and claims [0,3); a stranger holds every unit after it.
+	own := slotOf("own", loopNo, 0, 3)
+	own.sectors = 2*cnCloneMetaUnitSectors + 1
+	stranger := slotOf("stranger", loopNo, 3, total-3)
+
+	arena := arenaOf(own, stranger)
+	if err := cloneMetaCanSupply(arena, cp); err != nil {
+		t.Fatalf("the clone's own run is not counted as free: %v", err)
+	}
+	if got := arena.slots["own"]; got != own {
+		t.Fatalf("the room check changed the arena: %+v", got)
+	}
+	if taken := cloneMetaTakenUnits(arena.slots, loopNo, "own"); len(taken) !=
+		int(total-3) {
+		t.Fatalf("%d units taken without the clone's own, want %d",
+			len(taken), total-3)
+	}
+	// The same run under another name is someone else's.
+	other := own
+	other.name = "other"
+	if err := cloneMetaCanSupply(
+		arenaOf(other, stranger), cp); !isCloneMetaNoRun(err) {
+		t.Fatalf("another clone's run was counted as free: %v", err)
+	}
+	// A wrapper on a loop device the arena no longer lives on claims
+	// nothing: units [0,2) are free beside a stranger holding the rest.
+	stale := slotOf("stale", staleNo, 0, 2)
+	rest := slotOf("stranger", loopNo, 2, total-2)
+	if err := cloneMetaCanSupply(arenaOf(stale, rest), cp); err != nil {
+		t.Fatalf("a wrapper on another loop device claimed units: %v", err)
+	}
+}
+
+// TestCloneRecoveryWithoutRoomParksNothing is the recovery's room check
+// (architecture.md, Clone crash recovery): a clone whose wrapper must be
+// replaced — here a tmpfs remounted under the live agent, so the wrapper is
+// backed by a device that is no longer the arena's loop — while its old
+// dm-clone still serves, in an arena with no free run for the new wrapper.
+// Parking the namespace for a run that will not come would be an outage for
+// nothing, so the pass parks, removes and allocates nothing: the ns-dev keeps
+// serving through the old dm-clone, both clone rows read PROVISIONING, and
+// the slow clone-metadata retry is registered. Once room comes back, the
+// retry's attempt rebuilds the clone in the CN18 order.
+func TestCloneRecoveryWithoutRoomParksNothing(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	loop := loopDev(t, srv, node)
+	metaDm := cloneMetaName(srv, testClone)
+	clone := cloneName(srv, testClone)
+	nsDev := nsDevName(srv, testNs)
+	onClone := agent.LinearTable(testTdSize/512,
+		node.devNo["/dev/mapper/"+clone], 0)
+	if node.dms[nsDev].table != onClone {
+		t.Fatalf("the case is vacuous: the ns-dev %q does not serve "+
+			"through the dm-clone", node.dms[nsDev].table)
+	}
+	stale := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+	node.dms[metaDm].table = fmt.Sprintf("0 %d linear %s 0",
+		2*cnCloneMetaUnitSectors, stale)
+	filler := plantWrapper(t, srv, node, 0x999, 0, common.CnCloneMetaUnitCnt)
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("recovery without room: %v", err)
+	}
+	info := reply.GetCntlrInfo()
+	assertProvisioningDetails(t, info.GetCloneIdToMeta()[testClone],
+		waitingForTwoUnits, "clone meta")
+	assertProvisioningDetails(t, info.GetCloneIdToDmClone()[testClone],
+		waitingForTwoUnits, "dm-clone")
+	for _, call := range []string{"cmd dmsetup reload " + nsDev,
+		"cmd dmsetup remove " + clone, "cmd dmsetup remove " + metaDm,
+		"cmd blkdiscard", "cmd thin_dump"} {
+		assertNoCall(t, node, call)
+	}
+	if got := node.dms[nsDev].table; got != onClone {
+		t.Fatalf("the ns-dev table is %q, want the serving dm-clone %q",
+			got, onClone)
+	}
+	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+	if !metaRetrying(t, srv) {
+		t.Fatalf("a recovery waiting for room registered no " +
+			"clone-metadata retry")
+	}
+	if retrying(t, srv) {
+		t.Fatalf("a recovery waiting for room registered the CN10 retry")
+	}
+
+	node.Reset()
+	probed := checkRound(t, srv, 3)
+	assertSameCloneRows(t, info, probed)
+	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+
+	// Room comes back: the attempt runs the recovery the room check held
+	// off, in the order of TestCloneMetaWrapperMismatchRebuilds.
+	dropWrapper(node, filler)
+	node.Reset()
+	retryAttempt(t, srv)
+	assertOrder(t, node,
+		"cmd dmsetup reload "+nsDev,
+		"cmd dmsetup remove "+clone,
+		"cmd dmsetup remove "+metaDm,
+		"cmd blkdiscard --offset 0 --length 8388608 "+loop,
+		"cmd dmsetup create "+metaDm,
+		"cmd dmsetup create "+clone,
+		"cmd dmsetup message "+clone+" 0 enable_hydration")
+	if got, want := node.dms[metaDm].table,
+		wrapperTable(node, loop, 0); got != want {
+		t.Fatalf("the rebuilt wrapper table is %q, want %q", got, want)
+	}
+	if got, want := node.dms[nsDev].table, agent.LinearTable(testTdSize/512,
+		node.devNo["/dev/mapper/"+clone], 0); got != want {
+		t.Fatalf("the ns-dev table is %q, want the new dm-clone %q",
+			got, want)
+	}
+	built := probedCntlrInfo(t, srv)
+	assertOk(t, built.GetCloneIdToMeta()[testClone], "rebuilt clone meta")
+	assertOk(t, built.GetCloneIdToDmClone()[testClone], "rebuilt dm-clone")
+	if metaRetrying(t, srv) || retrying(t, srv) {
+		t.Fatalf("a retry outlived the rebuild")
+	}
+}
+
+// TestCloneRecoveryReusesTheClonesOwnRun: a wrapper that does not match by
+// its length alone holds its own run, and when that run is the only room the
+// arena has left, the recovery still runs — the room check counts the
+// clone's own run as free, because the wrapper is removed before its fresh
+// run is allocated. Read as taken, it would leave the clone waiting for room
+// for ever.
+func TestCloneRecoveryReusesTheClonesOwnRun(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	loop := loopDev(t, srv, node)
+	metaDm := cloneMetaName(srv, testClone)
+	clone := cloneName(srv, testClone)
+	nsDev := nsDevName(srv, testNs)
+	// One sector into a third unit: the wrapper claims [0,3), and another
+	// clone holds every unit after it.
+	node.dms[metaDm].table = fmt.Sprintf("0 %d linear %s 0",
+		2*cnCloneMetaUnitSectors+1, node.devNo[loop])
+	plantWrapper(t, srv, node, 0x999, 3, common.CnCloneMetaUnitCnt-3)
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("rebuild over the clone's own run: %v", err)
+	}
+	assertOrder(t, node,
+		"cmd dmsetup reload "+nsDev,
+		"cmd dmsetup remove "+clone,
+		"cmd dmsetup remove "+metaDm,
+		"cmd blkdiscard --offset 0 --length 8388608 "+loop,
+		"cmd dmsetup create "+metaDm,
+		"cmd dmsetup create "+clone,
+		"cmd dmsetup message "+clone+" 0 enable_hydration",
+		"cmd dmsetup reload "+nsDev)
+	if got, want := node.dms[metaDm].table,
+		wrapperTable(node, loop, 0); got != want {
+		t.Fatalf("the rebuilt wrapper table is %q, want %q", got, want)
+	}
+	info := reply.GetCntlrInfo()
+	assertOk(t, info.GetCloneIdToMeta()[testClone], "clone meta")
+	assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
+	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+	if metaRetrying(t, srv) || retrying(t, srv) {
+		t.Fatalf("a rebuild that finished registered a retry")
+	}
+}
+
+// TestCloneMetaRemovedWrapperFreesItsRunInThePass: the room check of a later
+// clone reads the pass's cached enumeration, so that view follows what the
+// pass itself did to the arena. Here the first clone's mismatched wrapper is
+// removed and its fresh allocation then fails; its run is free in the kernel
+// from that removal on, and the second clone, whose only room it is, is
+// built there in the same pass instead of waiting for room.
+func TestCloneMetaRemovedWrapperFreesItsRunInThePass(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	first := cloneOf()
+	second := cloneOfTd(testClone2, testSrcNqn2, testSnapTd)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: twoTds(),
+		clones: []*pb.Clone{first}})
+	loop := loopDev(t, srv, node)
+	firstDm := cloneMetaName(srv, testClone)
+	// The first clone's wrapper runs one sector into a third unit, so it
+	// claims [0,3), and another clone holds every unit after it.
+	node.dms[firstDm].table = fmt.Sprintf("0 %d linear %s 0",
+		2*cnCloneMetaUnitSectors+1, node.devNo[loop])
+	plantWrapper(t, srv, node, 0x999, 3, common.CnCloneMetaUnitCnt-3)
+	node.failCmd["blkdiscard --offset 0 --length 8388608 "+loop] =
+		"blkdiscard: " + loop + ": BLKDISCARD ioctl failed: " +
+			"Operation not supported"
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, tds: twoTds(),
+		clones: []*pb.Clone{first, second}}))
+	if err != nil {
+		t.Fatalf("two clones: %v", err)
+	}
+	info := reply.GetCntlrInfo()
+	assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+		"Operation not supported", "first clone meta")
+	if _, ok := node.dms[firstDm]; ok {
+		t.Fatalf("the case is vacuous: the first wrapper was not removed")
+	}
+	assertOk(t, info.GetCloneIdToMeta()[testClone2], "second clone meta")
+	assertOk(t, info.GetCloneIdToDmClone()[testClone2], "second dm-clone")
+	if got, want := node.dms[cloneMetaName(srv, testClone2)].table,
+		wrapperTable(node, loop, 0); got != want {
+		t.Fatalf("the second wrapper table is %q, want %q", got, want)
+	}
+}
+
+// TestCloneMetaRunTakenAfterThePreCheck is the window the room check cannot
+// close: it reads the pass's enumeration, and the allocation re-enumerates
+// under cloneMetaMu only after the park and the old dm-clone's removal, so
+// another cntlr of the node can take the run in between. The pass then finds
+// no free run in ensureCloneMeta and reports what the room check would have:
+// the waiting pair and the slow retry, never the ERROR of a failed
+// allocation — and it creates nothing and leaves the mismatched wrapper as
+// it is, while the td stays parked with its row OK.
+func TestCloneMetaRunTakenAfterThePreCheck(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	loopDev(t, srv, node)
+	metaDm := cloneMetaName(srv, testClone)
+	clone := cloneName(srv, testClone)
+	nsDev := nsDevName(srv, testNs)
+	stale := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+	node.dms[metaDm].table = fmt.Sprintf("0 %d linear %s 0",
+		2*cnCloneMetaUnitSectors, stale)
+
+	park := "cmd dmsetup reload " + nsDev
+	gate := make(chan struct{})
+	var release sync.Once
+	open := func() { release.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	node.mu.Lock()
+	node.gate[park] = gate
+	node.mu.Unlock()
+	node.Reset()
+	done := make(chan *pb.SyncupCntlrReply, 1)
+	go func() {
+		reply, err := srv.SyncupCntlr(context.Background(),
+			cntlrReq(reqOpts{revision: 3, primary: true,
+				clones: []*pb.Clone{cloneOf()}}))
+		if err != nil {
+			t.Errorf("the raced pass: %v", err)
+		}
+		done <- reply
+	}()
+	// The pass found room and is parking: another cntlr's clone takes every
+	// unit of the arena now.
+	waitFor(t, func() bool { return node.hasCall(park) })
+	plantWrapper(t, srv, node, 0x999, 0, common.CnCloneMetaUnitCnt)
+	open()
+	var reply *pb.SyncupCntlrReply
+	select {
+	case reply = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the raced pass never completed")
+	}
+	info := reply.GetCntlrInfo()
+	assertProvisioningDetails(t, info.GetCloneIdToMeta()[testClone],
+		waitingForTwoUnits, "clone meta")
+	assertProvisioningDetails(t, info.GetCloneIdToDmClone()[testClone],
+		waitingForTwoUnits, "dm-clone")
+	assertOrder(t, node, park, "cmd dmsetup remove "+clone)
+	for _, call := range []string{"cmd dmsetup remove " + metaDm,
+		"cmd blkdiscard", "cmd dmsetup create"} {
+		assertNoCall(t, node, call)
+	}
+	assertParked(t, srv, node, testNs, testTd, "the raced pass")
+	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+	if !metaRetrying(t, srv) {
+		t.Fatalf("the raced pass registered no clone-metadata retry")
+	}
+	if retrying(t, srv) {
+		t.Fatalf("the raced pass registered the CN10 retry")
+	}
+	probed := checkRound(t, srv, 3)
+	assertSameCloneRows(t, info, probed)
+	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+}
+
+// TestCloneMetaLaterCloneReadsTheNewestEnumeration: the room check of a later
+// clone of the pass reads the newest enumeration the pass has made, not its
+// first. Two clones serve through their dm-clones over wrappers that no
+// longer match, as after a tmpfs remount, and the pass's first enumeration
+// finds room for each. While the first clone's td is being parked, another
+// cntlr of the node takes a run, and the first clone's allocation, which
+// enumerates again under cloneMetaMu, sees it. Read against the pass's first
+// enumeration, the second clone's room check would find a run that is gone
+// and park its serving td and remove its dm-clone for a run that will not
+// come (architecture.md, Clone crash recovery). Against the newest one it
+// parks and removes nothing: the second clone reads the waiting pair, keeps
+// serving, waits for CN18's slow retry, and the check round reports the same
+// rows. The first clone waits the same way when the other cntlr took the
+// only run, and is rebuilt in the run left to it when there is one.
+func TestCloneMetaLaterCloneReadsTheNewestEnumeration(t *testing.T) {
+	const secondNs = uint64(0x1b)
+	for _, tc := range []struct {
+		name string
+		// fillFrom is the first unit of the run another sp holds from the
+		// start, to the end of the arena; the units below it are free.
+		fillFrom uint64
+		// takenAt is the first unit of the two-unit run another cntlr takes
+		// while the first clone's td is being parked.
+		takenAt uint64
+		// firstBuilt: the first clone finds a run left to it.
+		firstBuilt bool
+	}{
+		{name: "no run for either", fillFrom: 2, takenAt: 0},
+		{name: "a run for the first only", fillFrom: 4, takenAt: 2,
+			firstBuilt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			srv.metaRetryInterval = time.Hour
+			subsys := defaultSubsys(false)
+			subsys[testNqn].NsList = append(subsys[testNqn].NsList,
+				&pb.Namespace{
+					NsId:     secondNs,
+					NsIdx:    2,
+					TdId:     testSnapTd,
+					DevUuid:  "22222222-2222-4222-8222-222222222222",
+					DevNguid: "22222222222242228222222222222222",
+				})
+			opts := reqOpts{revision: 2, primary: true, tds: twoTds(),
+				subsys: subsys, clones: []*pb.Clone{cloneOf(),
+					cloneOfTd(testClone2, testSrcNqn2, testSnapTd)}}
+			syncupBoth(t, srv, opts)
+			loop := loopDev(t, srv, node)
+			firstNsDev := nsDevName(srv, testNs)
+			firstClone := cloneName(srv, testClone)
+			secondNsDev := nsDevName(srv, secondNs)
+			secondClone := cloneName(srv, testClone2)
+			onSecond := agent.LinearTable(testTdSize/512,
+				node.devNo["/dev/mapper/"+secondClone], 0)
+			if node.dms[secondNsDev].table != onSecond {
+				t.Fatalf("the case is vacuous: the second ns-dev %q does "+
+					"not serve through its dm-clone",
+					node.dms[secondNsDev].table)
+			}
+			// Both wrappers go stale: backed by a device that is not the
+			// arena's loop device, they claim no unit of it.
+			stale := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+			for i, cloneId := range []uint64{testClone, testClone2} {
+				node.dms[cloneMetaName(srv, cloneId)].table = fmt.Sprintf(
+					"0 %d linear %s %d", 2*cnCloneMetaUnitSectors, stale,
+					uint64(i)*2*cnCloneMetaUnitSectors)
+			}
+			plantWrapper(t, srv, node, 0x999, tc.fillFrom,
+				common.CnCloneMetaUnitCnt-tc.fillFrom)
+
+			park := "cmd dmsetup reload " + firstNsDev
+			gate := make(chan struct{})
+			var release sync.Once
+			open := func() { release.Do(func() { close(gate) }) }
+			t.Cleanup(open)
+			node.mu.Lock()
+			node.gate[park] = gate
+			node.mu.Unlock()
+			node.Reset()
+			done := make(chan *pb.SyncupCntlrReply, 1)
+			go func() {
+				raced := opts
+				raced.revision = 3
+				reply, err := srv.SyncupCntlr(context.Background(),
+					cntlrReq(raced))
+				if err != nil {
+					t.Errorf("the raced pass: %v", err)
+				}
+				done <- reply
+			}()
+			// The pass's first enumeration found room for both clones, and
+			// the first is parking: another cntlr's clone takes a run now.
+			waitFor(t, func() bool { return node.hasCall(park) })
+			plantWrapper(t, srv, node, 0x998, tc.takenAt, 2)
+			open()
+			var reply *pb.SyncupCntlrReply
+			select {
+			case reply = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("the raced pass never completed")
+			}
+			info := reply.GetCntlrInfo()
+
+			for _, call := range []string{
+				"cmd dmsetup reload " + secondNsDev,
+				"cmd dmsetup remove " + secondClone,
+				"cmd dmsetup remove " + cloneMetaName(srv, testClone2),
+			} {
+				assertNoCall(t, node, call)
+			}
+			if got := node.dms[secondNsDev].table; got != onSecond {
+				t.Fatalf("the second ns-dev table is %q, want the serving "+
+					"dm-clone %q", got, onSecond)
+			}
+			assertProvisioningDetails(t,
+				info.GetCloneIdToMeta()[testClone2], waitingForTwoUnits,
+				"second clone meta")
+			assertProvisioningDetails(t,
+				info.GetCloneIdToDmClone()[testClone2], waitingForTwoUnits,
+				"second dm-clone")
+			assertOk(t, info.GetNsIdToDmLinear()[secondNs], "second ns-dev")
+			if tc.firstBuilt {
+				assertOk(t, info.GetCloneIdToMeta()[testClone],
+					"first clone meta")
+				assertOk(t, info.GetCloneIdToDmClone()[testClone],
+					"first dm-clone")
+				if got, want := node.dms[cloneMetaName(srv, testClone)].table,
+					wrapperTable(node, loop, 0); got != want {
+					t.Fatalf("the first wrapper table is %q, want %q",
+						got, want)
+				}
+				if got, want := node.dms[firstNsDev].table,
+					agent.LinearTable(testTdSize/512,
+						node.devNo["/dev/mapper/"+firstClone], 0); got != want {
+					t.Fatalf("the first ns-dev table is %q, want the new "+
+						"dm-clone %q", got, want)
+				}
+			} else {
+				assertProvisioningDetails(t,
+					info.GetCloneIdToMeta()[testClone], waitingForTwoUnits,
+					"first clone meta")
+				assertProvisioningDetails(t,
+					info.GetCloneIdToDmClone()[testClone], waitingForTwoUnits,
+					"first dm-clone")
+				assertOrder(t, node, park, "cmd dmsetup remove "+firstClone)
+				assertParked(t, srv, node, testNs, testTd, "the first clone")
+			}
+			if !metaRetrying(t, srv) {
+				t.Fatalf("the waiting clone registered no clone-metadata " +
+					"retry")
+			}
+			if retrying(t, srv) {
+				t.Fatalf("the raced pass registered the CN10 retry")
+			}
+
+			node.Reset()
+			probed := checkRound(t, srv, 3)
+			for _, row := range []struct {
+				label string
+				rows  func(*pb.CntlrInfo) map[uint64]*pb.ResInfo
+			}{
+				{"clone_id_to_meta", (*pb.CntlrInfo).GetCloneIdToMeta},
+				{"clone_id_to_dm_clone", (*pb.CntlrInfo).GetCloneIdToDmClone},
+			} {
+				want := row.rows(info)[testClone2]
+				if got := row.rows(probed)[testClone2]; !proto.Equal(got, want) {
+					t.Fatalf("the check round reports the second clone's %s "+
+						"as %v, the converge as %v", row.label, got, want)
+				}
+			}
+			if tc.firstBuilt {
+				assertOk(t, probed.GetCloneIdToMeta()[testClone],
+					"probed first clone meta")
+				assertOk(t, probed.GetCloneIdToDmClone()[testClone],
+					"probed first dm-clone")
+			} else {
+				assertSameCloneRows(t, info, probed)
+			}
+			for _, call := range node.Mutations() {
+				t.Fatalf("the check round mutated: %q", call)
+			}
+		})
+	}
+}
+
+// TestCloneMetaOtherAllocFailureRetries: of the failures of CN18 step 2's
+// allocation, only the arena's "no free run" waits for room. A hole punch the
+// loop device refuses is a failure of the node: clone_id_to_meta reads
+// RES_STATUS_ERROR with the command's own text, the dm row "metadata wrapper
+// missing", and the pass registers the CN10 retry, never the clone-metadata
+// one (CN18). The retry is what runs the build again: the check round after
+// the failure cannot tell the absent wrapper from one not built yet, so it
+// reads both of the clone's rows MISSING and the parked ns-dev OK, rows that
+// set no health epoch. The retry's next attempt builds the clone, moves the
+// ns-dev onto the dm-clone and ends the retry.
+func TestCloneMetaOtherAllocFailureRetries(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	loop := loopDev(t, srv, node)
+	metaDm := cloneMetaName(srv, testClone)
+	clone := cloneName(srv, testClone)
+	nsDev := nsDevName(srv, testNs)
+	node.failCmd["blkdiscard --offset 0 --length 8388608 "+loop] =
+		"blkdiscard: " + loop + ": BLKDISCARD ioctl failed: " +
+			"Operation not supported"
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("refused hole punch: %v", err)
+	}
+	info := reply.GetCntlrInfo()
+	assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+		"Operation not supported", "clone meta")
+	if dm := info.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		dm.GetDetails() != detailsCloneMetaMissing {
+		t.Fatalf("dm-clone: %v/%q, want ERROR/%q", dm.GetStatus(),
+			dm.GetDetails(), detailsCloneMetaMissing)
+	}
+	assertNoCall(t, node, "cmd dmsetup create "+metaDm)
+	assertNoCall(t, node, "cmd dmsetup create "+clone)
+	if !retrying(t, srv) {
+		t.Fatalf("a refused hole punch registered no CN10 retry")
+	}
+	if metaRetrying(t, srv) {
+		t.Fatalf("a refused hole punch registered the clone-metadata retry")
+	}
+	assertParked(t, srv, node, testNs, testTd, "the failed build's td")
+	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+
+	// What the retry makes up for: the check round finds nothing broken.
+	node.Reset()
+	probed := checkRound(t, srv, 3)
+	assertMissing(t, probed.GetCloneIdToMeta()[testClone], "probed clone meta")
+	assertMissing(t, probed.GetCloneIdToDmClone()[testClone],
+		"probed dm-clone")
+	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+
+	// The hole punch takes this time: the retry's attempt builds the clone,
+	// moves the ns-dev onto it and ends the retry.
+	node.Reset()
+	retryAttempt(t, srv)
+	assertOrder(t, node,
+		"cmd blkdiscard --offset 0 --length 8388608 "+loop,
+		"cmd dmsetup create "+metaDm,
+		"cmd dmsetup create "+clone,
+		"cmd dmsetup message "+clone+" 0 enable_hydration",
+		"cmd dmsetup reload "+nsDev)
+	if got, want := node.dms[nsDev].table, agent.LinearTable(testTdSize/512,
+		node.devNo["/dev/mapper/"+clone], 0); got != want {
+		t.Fatalf("the ns-dev table is %q, want the dm-clone %q", got, want)
+	}
+	built := probedCntlrInfo(t, srv)
+	assertOk(t, built.GetCloneIdToMeta()[testClone], "built clone meta")
+	assertOk(t, built.GetCloneIdToDmClone()[testClone], "built dm-clone")
+	if retrying(t, srv) || metaRetrying(t, srv) {
+		t.Fatalf("a retry outlived the build")
+	}
+}
+
+// TestCloneMetaRunLargerThanTheArenaIsAnError: a clone whose metadata needs
+// more units than the whole arena holds can never be built, however many
+// clones leave the node, so it does not wait: both channels report the ERROR
+// pair with the allocator's own text, nothing is allocated, and neither
+// background retry is registered. A 1 PiB td at a 1 MiB block needs 257
+// units of the 256-unit arena.
+func TestCloneMetaRunLargerThanTheArenaIsAnError(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	tds := []*pb.ThinDevice{{TdId: testTd, DevId: 1, Size: 1 << 50}}
+	if units := common.CloneMetaUnits(1<<50, testBlockSize); units <=
+		common.CnCloneMetaUnitCnt {
+		t.Fatalf("the case is vacuous: %d units fit the arena", units)
+	}
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})
+	loop := loopDev(t, srv, node)
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, tds: tds,
+		clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("oversized clone: %v", err)
+	}
+	info := reply.GetCntlrInfo()
+	assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+		"a run of 257 clone-metadata units is larger than the 256-unit "+
+			"arena", "clone meta")
+	if dm := info.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		dm.GetDetails() != detailsCloneMetaMissing {
+		t.Fatalf("dm-clone: %v/%q, want ERROR/%q", dm.GetStatus(),
+			dm.GetDetails(), detailsCloneMetaMissing)
+	}
+	assertNoCall(t, node, "cmd blkdiscard --offset 0 --length")
+	assertNoCall(t, node, "cmd dmsetup create "+cloneMetaName(srv, testClone))
+	if retrying(t, srv) || metaRetrying(t, srv) {
+		t.Fatalf("a clone that can never fit registered a retry")
+	}
+	if !node.hasCall("cmd losetup --associated") || loop == "" {
+		t.Fatalf("the case is vacuous: the arena was never read")
+	}
+
+	node.Reset()
+	probed := checkRound(t, srv, 3)
+	assertSameCloneRows(t, info, probed)
 	for _, call := range node.Mutations() {
 		t.Fatalf("the check round mutated: %q", call)
 	}
 }
 
+// TestNsDevParksOverAMissingDmClone is CN16 rule 5 for a dm-clone that is not
+// there. Its status read fails, and a `dmsetup info` that confirms the device
+// is gone makes that read "no hydration": the ns-dev parks on the td's
+// dm-error and its row reads OK, in the converge and the check round alike —
+// here after a recovery whose dm-clone create the node refuses. Absence is
+// confirmed, never assumed: when that `dmsetup info` does not answer, the
+// read stays an error, the ns-dev keeps the table it has and its row reads
+// ERROR.
+func TestNsDevParksOverAMissingDmClone(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		unconfirmed bool
+	}{
+		{name: "a dm-clone confirmed absent parks the ns-dev"},
+		{name: "an absence the info did not confirm keeps the table",
+			unconfirmed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			srv.metaRetryInterval = time.Hour
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}})
+			clone := cloneName(srv, testClone)
+			nsDev := nsDevName(srv, testNs)
+			onOldClone := node.dms[nsDev].table
+			removeCloneDevice(node, srv)
+			node.failCmdAlways["dmsetup create "+clone+" "] =
+				"device-mapper: reload ioctl on " + clone +
+					" failed: Invalid argument"
+			if tc.unconfirmed {
+				node.killCmdAlways["dmsetup info --columns --noheadings "+
+					"-o attr "+clone] = true
+			}
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					clones: []*pb.Clone{cloneOf()}}))
+			if err != nil {
+				t.Fatalf("the pass without a dm-clone: %v", err)
+			}
+			if _, ok := node.dms[clone]; ok {
+				t.Fatalf("the case is vacuous: the dm-clone is there")
+			}
+			converged := reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs]
+			node.Reset()
+			probed := checkRound(t, srv, 3).GetNsIdToDmLinear()[testNs]
+			for _, call := range node.Mutations() {
+				t.Fatalf("the check round mutated: %q", call)
+			}
+			if tc.unconfirmed {
+				want := "dmsetup status " + clone
+				assertErrorDetails(t, converged, want, "ns-dev")
+				assertErrorDetails(t, probed, want, "probed ns-dev")
+				if got := node.dms[nsDev].table; got != onOldClone {
+					t.Fatalf("an unconfirmed absence moved the ns-dev to %q",
+						got)
+				}
+				return
+			}
+			assertParked(t, srv, node, testNs, testTd, "the pass")
+			assertOk(t, converged, "ns-dev")
+			assertOk(t, probed, "probed ns-dev")
+		})
+	}
+}
+
+// TestCloneMetaRetryLifecycle pins CN18's clone-metadata retry from its
+// registration to every way it ends. A pass whose clone waits for room
+// registers it at the CnCloneMetaRetryInterval pace; the first pass that
+// leaves no clone waiting ends it — the clone left clone_list, the level or a
+// demotion suppresses it, or a pass built it — and so do SP_LEVEL_DISABLE
+// and the cntlr's drop by SyncupCn (CN7). Ending it cancels its loop, not
+// only its flag. The last case lets the loop itself run: an attempt that
+// still finds no room keeps it, and the one that finds room builds the clone
+// and ends it.
+func TestCloneMetaRetryLifecycle(t *testing.T) {
+	if got, want := newCnServer(newFakeNode()).metaRetryInterval,
+		common.CnCloneMetaRetryInterval*time.Second; got != want {
+		t.Fatalf("the clone-metadata retry runs every %v, want %v", got, want)
+	}
+	resync := func(t *testing.T, srv *CnAgentServer, o reqOpts) {
+		t.Helper()
+		o.revision = 4
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if code := reply.GetAgentReply().GetCode(); code != 0 &&
+			code != common.ReplyCodeLeftover {
+			t.Fatalf("SyncupCntlr rejected: %v", reply.GetAgentReply())
+		}
+	}
+	clones := []*pb.Clone{cloneOf()}
+	for _, tc := range []struct {
+		name string
+		// loop lets the loop fire on its own, on a short interval.
+		loop bool
+		end  func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+			filler string)
+	}{
+		{
+			name: "the clone leaves clone_list",
+			end: func(t *testing.T, srv *CnAgentServer, _ *fakeNode,
+				_ string) {
+				resync(t, srv, reqOpts{primary: true})
+			},
+		},
+		{
+			name: "SP_LEVEL_NO_CLONE",
+			end: func(t *testing.T, srv *CnAgentServer, _ *fakeNode,
+				_ string) {
+				resync(t, srv, reqOpts{primary: true, clones: clones,
+					level: pb.SpLevel_SP_LEVEL_NO_CLONE})
+			},
+		},
+		{
+			name: "a demotion",
+			end: func(t *testing.T, srv *CnAgentServer, _ *fakeNode,
+				_ string) {
+				resync(t, srv, reqOpts{clones: clones})
+			},
+		},
+		{
+			name: "SP_LEVEL_DISABLE",
+			end: func(t *testing.T, srv *CnAgentServer, _ *fakeNode,
+				_ string) {
+				resync(t, srv, reqOpts{primary: true, clones: clones,
+					level: pb.SpLevel_SP_LEVEL_DISABLE})
+			},
+		},
+		{
+			name: "SyncupCn drops the cntlr",
+			end: func(t *testing.T, srv *CnAgentServer, _ *fakeNode,
+				_ string) {
+				// The drop's own leg and source disconnects run off the
+				// pass, so the reply may name them as leftovers (CN10).
+				reply, err := srv.SyncupCn(context.Background(),
+					cnReq(4, false))
+				if err != nil {
+					t.Fatalf("SyncupCn: %v", err)
+				}
+				if code := reply.GetAgentReply().GetCode(); code != 0 &&
+					code != common.ReplyCodeLeftover {
+					t.Fatalf("SyncupCn rejected: %v", reply.GetAgentReply())
+				}
+				if srv.getCntlr(cntlrKey(testCluster, testCn, testSp,
+					testCntlr)) != nil {
+					t.Fatalf("the cntlr was not dropped")
+				}
+			},
+		},
+		{
+			name: "a pass builds the clone",
+			end: func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+				filler string) {
+				dropWrapper(node, filler)
+				retryAttempt(t, srv)
+				assertOk(t, probedCntlrInfo(t, srv).
+					GetCloneIdToDmClone()[testClone], "built dm-clone")
+			},
+		},
+		{
+			name: "the loop's own attempt builds the clone",
+			loop: true,
+			end: func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+				filler string) {
+				st := srv.getCntlr(
+					cntlrKey(testCluster, testCn, testSp, testCntlr))
+				// Attempts that still find no room keep the retry.
+				waitFor(t, func() bool {
+					return len(node.callsMatching(
+						"cmd losetup --associated")) >= 2
+				})
+				if !metaRetryingOf(srv, st) {
+					t.Fatalf("an attempt that found no room ended the retry")
+				}
+				dropWrapper(node, filler)
+				waitFor(t, func() bool { return !metaRetryingOf(srv, st) })
+				node.mu.Lock()
+				_, built := node.dms[cloneName(srv, testClone)]
+				node.mu.Unlock()
+				if !built {
+					t.Fatalf("the retry ended without building the clone")
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			srv.metaRetryInterval = time.Hour
+			if tc.loop {
+				srv.metaRetryInterval = 20 * time.Millisecond
+			}
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			filler := plantWrapper(t, srv, node, 0x999, 0,
+				common.CnCloneMetaUnitCnt)
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					clones: clones}))
+			if err != nil {
+				t.Fatalf("full arena: %v", err)
+			}
+			assertProvisioningDetails(t,
+				reply.GetCntlrInfo().GetCloneIdToMeta()[testClone],
+				waitingForTwoUnits, "clone meta")
+			st := srv.getCntlr(
+				cntlrKey(testCluster, testCn, testSp, testCntlr))
+			cancelled := make(chan struct{})
+			srv.mu.Lock()
+			registered := st.metaRetrying
+			if cancel := st.metaCancel; cancel != nil {
+				st.metaCancel = func() {
+					close(cancelled)
+					cancel()
+				}
+			}
+			srv.mu.Unlock()
+			if !registered {
+				t.Fatalf("a clone waiting for room registered no " +
+					"clone-metadata retry")
+			}
+
+			node.Reset()
+			tc.end(t, srv, node, filler)
+			if metaRetryingOf(srv, st) {
+				t.Fatalf("the clone-metadata retry outlived %s", tc.name)
+			}
+			// stopCloneMetaRetry clears the registration first and cancels
+			// after it, so a loop that stopped itself may cancel a moment
+			// after the flag reads false.
+			select {
+			case <-cancelled:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s cleared the registration without cancelling "+
+					"its loop", tc.name)
+			}
+		})
+	}
+}
+
+// TestCloneMetaUnitsFromCommon: the cn agent sizes a clone's run with the one
+// formula the gateway charges by (common.CloneMetaUnits; architecture.md,
+// Metadata units), from the destination td and the pool's block size — never
+// from the clone record's meta_units, the control plane's count.
+func TestCloneMetaUnitsFromCommon(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tdSize uint64
+		want   uint64
+	}{
+		{name: "the fixture's 64 MiB td", tdSize: testTdSize, want: 2},
+		{name: "a td of one block", tdSize: testBlockSize, want: 2},
+		{name: "a td smaller than one block", tdSize: testBlockSize / 2,
+			want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clone := cloneOf()
+			// A record that says otherwise budgets the same.
+			clone.MetaUnits = 77
+			plan := newCntlrPlan(common.NewNameFmt(
+				common.DefaultLocalStorPrefix), cntlrReq(reqOpts{
+				revision: 2, primary: true,
+				tds: []*pb.ThinDevice{
+					{TdId: testTd, DevId: 1, Size: tc.tdSize}},
+				clones: []*pb.Clone{clone}}))
+			cp := plan.cloneById[testClone]
+			if cp.metaUnits != tc.want ||
+				cp.metaUnits != common.CloneMetaUnits(
+					tc.tdSize, testBlockSize) {
+				t.Fatalf("%d units, want %d", cp.metaUnits, tc.want)
+			}
+			if cp.metaSectors != cp.metaUnits*cnCloneMetaUnitSectors {
+				t.Fatalf("%d sectors for %d units", cp.metaSectors,
+					cp.metaUnits)
+			}
+		})
+	}
+}
+
 // TestCloneMetaAbsentWrapperWithRoomProbesMissing is the other side of the
-// exhaustion pair, and the bound on it: a wrapper that is merely not built yet
+// waiting pair, and the bound on it: a wrapper that is merely not built yet
 // — here the crash-recovery case (architecture.md, Clone crash recovery), the
 // volatile wrapper and the dm-clone that mapped it both lost — is a truthful
-// RES_STATUS_MISSING while the arena still has room,
-// not the CN18 step 2 refusal. The converge agrees: its next pass allocates the
-// slot and rebuilds (TestCloneRecovery), which is the opposite of reporting
-// that the arena could not supply it.
+// RES_STATUS_MISSING while the arena still has room, not CN18 step 2's
+// verdict. The converge agrees: its next pass allocates the slot and rebuilds
+// (TestCloneRecovery), which is the opposite of waiting for room.
 func TestCloneMetaAbsentWrapperWithRoomProbesMissing(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -1157,30 +2263,25 @@ func TestCloneMetaAbsentWrapperWithRoomProbesMissing(t *testing.T) {
 }
 
 // TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing pins the step
-// 1 gate in front of the refusal pair, in the direction the two tests above
+// 1 gate in front of step 2's verdict, in the direction the two tests above
 // cannot reach. A converge whose source connection fails stops at CN18 step 1
 // and reports `clone_id_to_dm_clone` MISSING "source not connected" with the
 // meta row left to cloneMetaInfo, which reads the enumeration for the wrapper's
 // own row but never asks whether the arena could supply a slot — however full
-// the arena happens to be. A probe that asked anyway would invent an
-// ERROR/ERROR pair against that, and this one flips *both* rows, the meta row
-// MISSING→ERROR, which is what the worker's health pass keys on.
+// the arena happens to be. A probe that asked anyway would invent the waiting
+// pair against that and flip *both* rows, MISSING→PROVISIONING, against the
+// converge's on every round.
 func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
 	t *testing.T,
 ) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-	loop := loopDev(t, srv, node)
 
-	// The same filler as TestCloneMetaArenaExhaustion: one kind-`cb` wrapper
-	// claiming every unit, so the arena genuinely has no run left.
-	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
-	node.dms[filler] = &fakeDm{
-		table: fmt.Sprintf("0 %d linear %s 0",
-			cnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
-		thinIds: map[uint32]bool{},
-	}
-	node.devNo["/dev/mapper/"+filler] = "253:200"
+	// Another cntlr's wrapper claiming every unit, so the arena genuinely has
+	// no run left. It is another sp's (plantWrapper): one of testSp would be
+	// removed by the sweep of the converge below, which names no such clone,
+	// and the arena would have room again before either channel asks.
+	filler := plantWrapper(t, srv, node, 0x999, 0, common.CnCloneMetaUnitCnt)
 	// ...and the source refuses the connect, so step 1 never completes.
 	node.failCmdAlways["nvme connect"] = "nvme connect: Connection refused"
 
@@ -1189,6 +2290,10 @@ func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
 		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
 	if err != nil {
 		t.Fatalf("disconnected source: %v", err)
+	}
+	if _, ok := node.dms[filler]; !ok {
+		t.Fatalf("the case is vacuous: the converge removed the filler, " +
+			"so the arena has room")
 	}
 	dm := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
 	if dm.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
@@ -1232,16 +2337,20 @@ func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
 	}
 }
 
-// TestCloneMetaUnprobeableArenaProbesTheConvergePair is the other half of CN18
-// step 2's refusal that a read-only pass can establish: an arena that does not
+// TestCloneMetaUnprobeableArenaProbesTheConvergePair is the other verdict of
+// CN18 step 2 that a read-only pass can establish: an arena that does not
 // answer at all. The converge treats that as step 2 failing — `clone_id_to_meta`
 // ERROR with planArena's message and `clone_id_to_dm_clone` ERROR "metadata
-// wrapper missing" (clone.go's planArena branch) — so the check round must say
-// the same, even though the dm-clone below is still up and would otherwise
-// probe OK. That last part is what makes this case distinct from exhaustion:
-// there the dm row flipped ERROR→MISSING, here it would flip ERROR→OK.
+// wrapper missing" (clone.go's planArena branch) — and registers the CN10
+// retry, never the clone-metadata one: an arena that did not answer is not
+// one with no room. The check round must say the same, even though the
+// dm-clone below is still up and would otherwise probe OK. That last part is
+// what makes this case distinct from a full arena: there the dm row would
+// flip PROVISIONING→MISSING, here it would flip ERROR→OK.
 func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
 	filePath := srv.nf.CnTmpFilePath(testCluster, testCn)
@@ -1271,6 +2380,13 @@ func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 			"ERROR/\"metadata wrapper missing\"",
 			dm.GetStatus(), dm.GetDetails())
 	}
+	if !retrying(t, srv) {
+		t.Fatalf("an arena that did not answer registered no CN10 retry")
+	}
+	if metaRetrying(t, srv) {
+		t.Fatalf("an arena that did not answer registered the " +
+			"clone-metadata retry")
+	}
 
 	node.Reset()
 	_, probed := srv.checkCntlrRound(context.Background(),
@@ -1278,6 +2394,7 @@ func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 			ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr(), Revision: 3,
 		}, nil)
+	assertSameCloneRows(t, reply.GetCntlrInfo(), probed)
 	probedMeta := probed.GetCloneIdToMeta()[testClone]
 	if probedMeta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
 		probedMeta.GetDetails() != meta.GetDetails() {
@@ -1303,17 +2420,13 @@ func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 	}
 }
 
-// TestCloneMetaPresentWrapperInFullArenaProbesOk pins the absence check the
-// refusal branch opens with. cloneMetaCanSupply asks the allocator's own
-// question — is there a free run for this clone's wrapper? — and a wrapper that
-// already exists holds its own units in the taken set, so for a converged clone
-// in an arena with nothing free beside it the answer is "no contiguous run
-// left", which is no verdict on that clone at all. probeCloneArenaCannotSupply
-// therefore refuses nothing for a wrapper the enumeration found, and the check
-// round reports the OK pair the converge reported. Without that short-circuit
-// this fixture — a clone the converge is perfectly happy with — would probe
-// ERROR/ERROR and feed err_epoch every round, which is the very flip the branch
-// exists to prevent.
+// TestCloneMetaPresentWrapperInFullArenaProbesOk: a clone whose wrapper
+// matches reads OK on both rows however full the arena is beside it — the
+// converge reuses such a wrapper as it is, and cloneMetaVerdict decides
+// nothing for it — so the check round reports the OK pair the converge
+// reported. The control is the same footprint with the wrapper lost and its
+// run taken by another clone: then the verdict is this clone's, and both rows
+// read PROVISIONING waiting for room.
 func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -1331,7 +2444,7 @@ func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
 	node.dms[filler] = &fakeDm{
 		table: fmt.Sprintf("0 %d linear %s %d",
-			(cnCloneMetaUnitCnt-2)*cnCloneMetaUnitSectors, node.devNo[loop],
+			(common.CnCloneMetaUnitCnt-2)*cnCloneMetaUnitSectors, node.devNo[loop],
 			2*cnCloneMetaUnitSectors),
 		thinIds: map[uint32]bool{},
 	}
@@ -1349,11 +2462,11 @@ func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 		t.Fatalf("the check round mutated: %q", call)
 	}
 
-	// The control, without which the pair above could be passing for a probe
-	// that never reached the branch: hand the wrapper's own run to a second
+	// The control, without which the pair above could be passing for an
+	// arena that was not full: hand the wrapper's own run to a second
 	// stranger and lose the wrapper (and the dm-clone that mapped it) the way a
 	// CN reboot does. The arena's footprint is unchanged — every unit claimed —
-	// and now the refusal really is this clone's verdict.
+	// and now the waiting pair really is this clone's verdict.
 	removeCloneDevice(node, srv)
 	delete(node.dms, metaDm)
 	delete(node.devNo, "/dev/mapper/"+metaDm)
@@ -1366,27 +2479,11 @@ func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 	node.devNo["/dev/mapper/"+squatter] = "253:201"
 
 	node.Reset()
-	_, refused := srv.checkCntlrRound(context.Background(),
-		&pb.CheckCntlrRequest{
-			ClusterId: testCluster, CnId: testCn,
-			CntlrPointer: cntlrPtr(), Revision: 2,
-		}, nil)
-	refusedMeta := refused.GetCloneIdToMeta()[testClone]
-	if refusedMeta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		!strings.Contains(refusedMeta.GetDetails(),
-			"no contiguous run of 2 clone-metadata units") {
-		t.Fatalf("with the wrapper gone clone_id_to_meta is %v/%q, want the "+
-			"allocator's refusal — the arena was not full, so the OK pair "+
-			"above proves nothing", refusedMeta.GetStatus(),
-			refusedMeta.GetDetails())
-	}
-	refusedDm := refused.GetCloneIdToDmClone()[testClone]
-	if refusedDm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		refusedDm.GetDetails() != "metadata wrapper missing" {
-		t.Fatalf("with the wrapper gone clone_id_to_dm_clone is %v/%q, want "+
-			"ERROR/\"metadata wrapper missing\"",
-			refusedDm.GetStatus(), refusedDm.GetDetails())
-	}
+	waiting := checkRound(t, srv, 2)
+	assertProvisioningDetails(t, waiting.GetCloneIdToMeta()[testClone],
+		waitingForTwoUnits, "clone_id_to_meta with the wrapper gone")
+	assertProvisioningDetails(t, waiting.GetCloneIdToDmClone()[testClone],
+		waitingForTwoUnits, "clone_id_to_dm_clone with the wrapper gone")
 }
 
 // TestCloneMetaOrphanWrapperSwept is the CN2 reconcile bullet: a kind-`cb`

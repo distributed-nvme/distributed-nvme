@@ -117,12 +117,12 @@ func (s *CnAgentServer) convergeCntlr(
 	st *cntlrState,
 ) (*pb.CntlrInfo, *agent.SweepResult) {
 	// The same refusal (architecture.md, Common validation) as syncupCntlr's,
-	// for the two entrances that do not
-	// come through it: the startup Reconcile, which converges from a file
-	// that may hold zeros, and the background connect
-	// retry, which re-enters with the request it already holds. Refusing
-	// before newCntlrPlan touches nothing at all: the sweep is name-driven
-	// and needs no plan of this cntlr to find its objects later.
+	// for the entrances that do not come through it: the startup Reconcile,
+	// which converges from a file that may hold zeros, and the two background
+	// retries, the connect retry and CN18's clone-metadata retry, which
+	// re-enter with the request they already hold. Refusing before
+	// newCntlrPlan touches nothing at all: the sweep is name-driven and needs
+	// no plan of this cntlr to find its objects later.
 	req := st.loadReq()
 	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
 		ptr := req.GetCntlrPointer()
@@ -159,9 +159,10 @@ func (s *CnAgentServer) convergeCntlr(
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
 		// in-memory desired state stay (CN19). What the sweep cannot do is
-		// stop the background connect retry or forget the resource
-		// histories, because neither is an object on the node.
+		// stop the background retries or forget the resource histories,
+		// because none of them is an object on the node.
 		s.stopConnectRetry(st)
+		s.stopCloneMetaRetry(st)
 		s.dropAllResKeys(st, plan)
 	}
 	s.build(ctx, st, plan, info, budget)
@@ -237,6 +238,9 @@ func (s *CnAgentServer) build(
 	budget *agent.WaitBudget,
 ) {
 	retryNeeded := false
+	// metaWait: a clone of this pass waits for a free run in the arena, the
+	// one cause of CN18's clone-metadata retry (startCloneMetaRetry).
+	metaWait := false
 
 	// Legs (CN10).
 	var available map[uint64]bool
@@ -424,8 +428,13 @@ func (s *CnAgentServer) build(
 	// Clones (CN18), then transfers (CN17).
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			if s.ensureClone(ctx, st, plan, cp, info, budget) {
+			connectRetry, waitRoom := s.ensureClone(
+				ctx, st, plan, cp, info, budget)
+			if connectRetry {
 				retryNeeded = true
+			}
+			if waitRoom {
+				metaWait = true
 			}
 		}
 	} else if plan.primary {
@@ -537,6 +546,13 @@ func (s *CnAgentServer) build(
 
 	if !retryNeeded {
 		s.stopConnectRetry(st)
+	}
+	// The pass that leaves no clone waiting for room ends CN18's
+	// clone-metadata retry: the clone was built, left clone_list, or is
+	// suppressed by the level or a demotion, and a request that undoes any
+	// of those comes with a SyncupCntlr of its own.
+	if !metaWait {
+		s.stopCloneMetaRetry(st)
 	}
 }
 

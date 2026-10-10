@@ -63,10 +63,14 @@ const (
 )
 
 // ReasonCandidateChanged is the one reason string MD5 pins: a pick whose
-// capacity key is no longer the one the scan saw, or, for ReplaceCntlr, a
-// pick scanned against a plan the SP has moved past — a surviving cntlr the
-// plan did not hold. The caller rescans and retries the scan + STM as one
-// unit (architecture.md, Storage pools, CreateStoragePool step 2).
+// capacity key is no longer the one the scan saw, or a pick scanned against a
+// plan the SP has moved past — for ReplaceCntlr a surviving cntlr the plan did
+// not hold, for CreateSpareLeg a DN the group gained since the plan. For
+// CreateSpareLeg it also covers a pick that has gone stale in any other way
+// since the scan: its DnConf deleted, the DN no longer allocatable — disabled,
+// say — or short of free extents (checkDnPick's vanishedIsChanged). The
+// caller rescans and retries the scan + STM as one unit (architecture.md,
+// Storage pools, CreateStoragePool step 2).
 //
 // It is exported for the same reason ReasonStaleRevision is: the gateway calls
 // GrowSlice and CreateSpareLeg from inside its own candidate unit (gateway.md
@@ -664,9 +668,16 @@ func firstCntlidSlot(conf *pb.SpConf, op string) (uint32, error) {
 // checkDnPick re-validates one allocator pick inside the caller's STM (MD5):
 // the DnConf still exists and is allocatable, it still has room for extCnt
 // extents, and — the exact test — the capacity key the scan saw is still
-// there. That key embeds free_ext_cnt, so its presence proves the DN has not
-// been touched since the scan; its absence is `candidate changed` and the
-// caller rescans.
+// there. That key embeds free_ext_cnt, so its presence proves the DN's free
+// extents have not moved since the scan (a write that changes only its used
+// metadata units leaves the key where it is; architecture.md, Metadata
+// units); its absence is `candidate changed` and the caller rescans.
+//
+// vanishedIsChanged makes every one of those refusals `candidate changed`: a
+// DN deleted, disabled or otherwise taken out of allocation since the scan, or
+// one short of extCnt, is a pick gone stale, which a rescan replaces.
+// CreateSpareLeg passes true, so its caller plans again (architecture.md,
+// Spare legs). GrowSlice passes false and keeps the three named refusals.
 func checkDnPick(
 	s etcdutil.STM,
 	op string,
@@ -674,16 +685,23 @@ func checkDnPick(
 	cc *pb.ClusterConf,
 	cand Cand,
 	extCnt uint64,
+	vanishedIsChanged bool,
 ) (*pb.DnConf, error) {
+	stale := func(reason string) error {
+		if vanishedIsChanged {
+			return fail(op, ReasonCandidateChanged)
+		}
+		return fail(op, reason)
+	}
 	dn := &pb.DnConf{}
 	if !s.Get(DnConfKey(cid, cand.AddrPort), dn) {
-		return nil, fail(op, "dn not found")
+		return nil, stale("dn not found")
 	}
 	if !DnAllocatable(dn, cc.GetDnBinConf()) {
-		return nil, fail(op, "dn not allocatable")
+		return nil, stale("dn not allocatable")
 	}
 	if dn.GetFreeExtCnt() < extCnt {
-		return nil, fail(op, "dn free_ext_cnt too low")
+		return nil, stale("dn free_ext_cnt too low")
 	}
 	capKey := DnCapacityKey(cid, cand.BinIdx, cand.FreeExt, cand.AddrPort)
 	if !s.Get(capKey, &pb.DnCapacity{}) {
@@ -743,6 +761,33 @@ func spFootprint(
 				total += grp.GetExtCnt()
 			}
 		}
+	}
+	return total, nil
+}
+
+// spCloneMetaUnits is the Σ meta_units over EVERY clone the SP lists in
+// clone_name_list, latched ones included: the units the CN of each cntlr of
+// the SP holds for the SP's clones in its metadata area (architecture.md,
+// Metadata units). A latched clone counts until FinishCloneDelete gives its
+// units back, which it does on the CNs of the cntlrs the SP has at that
+// moment, so a sum that left it out would strand its units on a CN the SP
+// has left and release them later from one that never held them. Clones are
+// read through the caller's STM; a listed clone that does not exist is a
+// precondition failure, for spFootprint's reason: a sum computed from a
+// partial clone list would move fewer units than were charged.
+func spCloneMetaUnits(
+	s etcdutil.STM,
+	op string,
+	cid uint64,
+	conf *pb.SpConf,
+) (uint64, error) {
+	total := uint64(0)
+	for _, cloneName := range conf.GetCloneNameList() {
+		clone := &pb.Clone{}
+		if !s.Get(CloneKey(cid, conf.GetSpId(), cloneName), clone) {
+			return 0, fail(op, "clone not found")
+		}
+		total += clone.GetMetaUnits()
 	}
 	return total, nil
 }
@@ -1293,8 +1338,7 @@ func Failover(
 // makes the AR6 pending rule a precondition of the transaction: the caller has
 // already found the grow not pending against its own snapshot, and this
 // re-runs the same rule against the slice as it is NOW. Without it AR6's
-// second attempt could not fail, contrary to AR2 (whose one exception is a
-// spare create that lands after RW18's flip, CreateSpareLeg): during an
+// second attempt could not fail, contrary to AR2: during an
 // accepted shard-handoff overlap (VW7) two owners evaluating the same
 // pre-grow snapshot both find the grow not pending, and the second would
 // append a second group for one breach — twice the DN extents and twice the CN
@@ -1402,7 +1446,9 @@ func GrowSlice(
 			DataBlocks: dataBlocks,
 		}
 		for legIdx, cand := range legs {
-			dn, err := checkDnPick(s, opGrowSlice, cid, cc, cand, extCnt)
+			dn, err := checkDnPick(
+				s, opGrowSlice, cid, cc, cand, extCnt, false,
+			)
 			if err != nil {
 				return err
 			}
@@ -1658,15 +1704,29 @@ func chargeSpCns(
 // CreateCntlr checks it: a cntlr that has left since frees room the scan did
 // not count on.
 //
+// The CN of every cntlr is charged the metadata units of every clone of the SP
+// (architecture.md, Metadata units), so the replacement moves the SP's clone
+// units — spCloneMetaUnits, latched clones included, and a listed clone whose
+// key is missing fails the op — from the old CN to the new one. The new CN is
+// charged with no room check, even past common.CnCloneMetaUnitCnt: this is
+// the one charge allowed to pass the ceiling. A replacement restores the
+// whole SP, and refusing it for the clones would stop every volume of the SP
+// to keep a few copies waiting; the clones that find no room on the new CN
+// wait there as provisioning instead (cnagent.md CN18). The pick's room is
+// therefore no precondition here, and AR7's scan asks for no units.
+//
 // Effects: the old Cntlr key is deleted and, if its CN record still exists,
-// that CN gets its pointer removed, the SP footprint back, its capacity key
+// that CN gets its pointer removed, the SP footprint back, the SP's clone
+// units back (stopping at zero, ReleaseMetaUnits), its capacity key
 // maintained and its CnRev bumped; the new Cntlr is written with
 // cntlr_id = SpConf.next_id++ and settling iff asPrimary, and its CN charged
-// the same way; every CdcEntry of the SP that exists is rewritten by the
-// listing rule (architecture.md [D18]), which drops the old cntlr and lists
-// the new one, and a missing one stays missing — unlike the gateway's
-// DeleteCntlr and CreateCntlr, which rebuild it (see rewriteCdcEntries);
-// SpConf is rewritten and SpRev bumped once.
+// the same way, footprint and clone units; every CdcEntry of the SP that
+// exists is rewritten by the listing rule (architecture.md [D18]), which
+// drops the old cntlr and lists the new one, and a missing one stays missing
+// — unlike the gateway's DeleteCntlr and CreateCntlr, which rebuild it (see
+// rewriteCdcEntries); SpConf is rewritten and SpRev bumped once. Each CN's
+// one CnRev bump covers its units too: they move in the same write as its
+// pointer and its extents.
 func ReplaceCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1749,6 +1809,10 @@ func ReplaceCntlr(
 		if err != nil {
 			return err
 		}
+		metaUnits, err := spCloneMetaUnits(s, opReplaceCntlr, cid, conf)
+		if err != nil {
+			return err
+		}
 		cn := &pb.CnConf{}
 		if !s.Get(CnConfKey(cid, newCn.AddrPort), cn) {
 			return fail(opReplaceCntlr, "cn not found")
@@ -1767,7 +1831,7 @@ func ReplaceCntlr(
 		s.Del(oldKey)
 		err = releaseCn(
 			s, opReplaceCntlr, cid, spId, oldId,
-			old.GetAddrPort(), footprint,
+			old.GetAddrPort(), footprint, metaUnits,
 		)
 		if err != nil {
 			return err
@@ -1791,6 +1855,10 @@ func ReplaceCntlr(
 			&pb.CntlrPointer{SpId: spId, CntlrId: newId},
 		)
 		newCnConf.FreeExtCnt -= footprint
+		// No room check, by design (above): the count may pass the ceiling,
+		// and the value MaintainCnCapacity writes then reads zero free
+		// units; the units neither move the key nor decide its presence.
+		newCnConf.UsedMetaUnits += metaUnits
 		s.Put(CnConfKey(cid, newCn.AddrPort), newCnConf)
 		MaintainCnCapacity(s, cid, newCn.AddrPort, cn, newCnConf)
 		if err := BumpCnRev(s, opReplaceCntlr, cid, newCnConf); err != nil {
@@ -1812,12 +1880,15 @@ func ReplaceCntlr(
 }
 
 // releaseCn returns one cntlr's reservation to its CN: the pointer comes out
-// of cntlr_ptr_list, the footprint goes back to free_ext_cnt, the capacity key
-// follows architecture.md, Capacity index keys, and CnRev is bumped once
-// (architecture.md, Cntlrs, DeleteCntlr).
+// of cntlr_ptr_list, the footprint goes back to free_ext_cnt, the SP's clone
+// units (metaUnits) leave used_meta_units, stopping at zero
+// (ReleaseMetaUnits; architecture.md, Metadata units), the capacity key
+// follows architecture.md, Capacity index keys, with its value, and CnRev is
+// bumped once (architecture.md, Cntlrs, DeleteCntlr).
 //
 // A CN record that does not exist any more is not an error: the cntlr key is
-// deleted either way, and there is nothing left to give the extents back to.
+// deleted either way, and there is nothing left to give the extents or the
+// units back to.
 func releaseCn(
 	s etcdutil.STM,
 	op string,
@@ -1826,6 +1897,7 @@ func releaseCn(
 	cntlrId uint64,
 	addrPort string,
 	footprint uint64,
+	metaUnits uint64,
 ) error {
 	key := CnConfKey(cid, addrPort)
 	cn := &pb.CnConf{}
@@ -1835,6 +1907,7 @@ func releaseCn(
 	newCn := proto.Clone(cn).(*pb.CnConf)
 	newCn.CntlrPtrList = removeCntlrPtr(newCn.GetCntlrPtrList(), spId, cntlrId)
 	newCn.FreeExtCnt += footprint
+	newCn.UsedMetaUnits = ReleaseMetaUnits(newCn.GetUsedMetaUnits(), metaUnits)
 	s.Put(key, newCn)
 	MaintainCnCapacity(s, cid, addrPort, cn, newCn)
 	return BumpCnRev(s, op, cid, newCn)
@@ -1995,29 +2068,56 @@ func spConfById(
 //
 // The group is addressed by grp_id across BOTH the meta and the data list of
 // the slice, and it must be a RedundMdRaid1 group — a RedundNone group has no
-// redundancy to repair (AR8). The DN must not already carry a leg or a spare
-// of this group: that in-STM check is ADDRESS-based on purpose (grpHostsAddr
-// below), and it is not the failure-domain rule. A domain is excluded before
-// this op is ever called, by tier 1 of architecture.md, Per-operation
-// allocation, in the caller's pre-STM scan —
-// which tier 2 relaxes when the cluster has no second domain to offer, so a
-// legitimate spare can land in an occupied domain and this check must still
-// accept it. Re-checking the location here would buy nothing anyway: location
-// is immutable (architecture.md, Disk nodes), so what the scan read
-// cannot have gone stale. No geometry (architecture.md, Group on-leg layout:
-// meta region, data region, health block) is computed: the spare joins an
-// existing Group
-// and inherits its ext_cnt, meta_blocks and data_blocks unchanged.
+// redundancy to repair (AR8). No geometry (architecture.md, Group on-leg
+// layout: meta region, data region, health block) is computed: the spare
+// joins an existing Group and inherits its ext_cnt, meta_blocks and
+// data_blocks unchanged.
+//
+// grpDnAddrs is the plan the pick was scanned against: the DN of every side
+// of every leg and every spare of the group as the caller's snapshot held
+// them, which the caller black-listed and whose locations it excluded as
+// tier 1 of architecture.md, Per-operation allocation. A DN of the group
+// outside that list joined the group after the snapshot — a spare, or a
+// migration's destination — so the pick may sit in its failure domain or be
+// that very DN, and the op fails with ReasonCandidateChanged: the caller
+// plans again from a snapshot that holds it. A location never goes stale
+// (architecture.md, Disk nodes), but the group's list of DNs does, and that
+// list is what the scan's exclusions were built from. Only a gain is checked,
+// as ReplaceCntlr checks it: a DN that has left the group since frees room
+// the scan did not count on.
+//
+// The gain check runs ahead of the ADDRESS-based refusal of a DN that already
+// carries a leg or a spare of the group (grpHostsAddr), so that refusal fires
+// only for a pick inside the caller's own plan — a DN its scan black-listed —
+// and stays a hard error for a caller that hands one. Neither check is the
+// failure-domain rule: tier 2 relaxes that rule when the cluster has no
+// second domain to offer, so a legitimate spare can land in an occupied
+// domain and this op must still accept it. The pick itself is re-validated
+// with checkDnPick's vanishedIsChanged: a DN deleted, disabled or short of
+// extents since the scan answers ReasonCandidateChanged, as a moved capacity
+// key does, so the caller plans again instead of failing.
 //
 // No spare of the group may still have an unprovisioned side
-// (UnprovisionedSpare). That re-validation is what gives two owners
-// overlapping on one SP (AR2) one spare for one repair rather than two: both
-// plan the create from one snapshot, and the second STM finds the first one's
-// new spare still unprovisioned. It holds only while that spare's side is:
-// a group may keep MaxSpareLegPerGrp spares of standby capacity, and nothing
-// records which repair a spare was made for, so a second create that lands
-// after RW18's flip still commits — unless the first one filled the list or
-// the second picked the same DN.
+// (UnprovisionedSpare). The full-list check, that re-validation and the gain
+// check give two owners overlapping on one SP (AR2) one spare for one repair
+// rather than two when both planned the create from snapshots that held the
+// same DNs in the group, and the second STM fails on whichever of them comes
+// first. When the first owner's new spare filled the spare list, it fails
+// with "spare list full". Otherwise, while that spare is still
+// unprovisioned, it fails with ReasonSpareUnprovisioned, and once RW18 has
+// flipped it, it finds the group holding a DN the plan did not — the first
+// owner's spare's — and fails with ReasonCandidateChanged. In each case the
+// second owner's next plan holds that spare, which AR8 switches in or waits
+// for (steps 1 and 2). The gain check compares DNs, not sides, so it misses
+// the first owner's spare when the second owner's snapshot holds a DN that
+// is out of the group when the first owner's create commits and that spare
+// lands on that DN: the DN leaves the group, through an operator's
+// FinishMigration, CancelMigration or DeleteSpareLeg, before the first
+// owner plans, or joins it after and leaves the same way before that
+// create. The second create can then commit a spare no failure asked for:
+// the gap AR2 and dnv-worker.md, Known limits, accept. A group still keeps
+// up to MaxSpareLegPerGrp spares of standby capacity: a create planned from
+// a snapshot that holds every spare of the group commits.
 func CreateSpareLeg(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -2029,8 +2129,13 @@ func CreateSpareLeg(
 	sliceId uint64,
 	grpId uint64,
 	dn Cand,
+	grpDnAddrs []string,
 	cc *pb.ClusterConf,
 ) (uint64, error) {
+	planned := make(map[string]struct{}, len(grpDnAddrs))
+	for _, addrPort := range grpDnAddrs {
+		planned[addrPort] = struct{}{}
+	}
 	legId := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		legId = 0
@@ -2061,6 +2166,12 @@ func CreateSpareLeg(
 		if UnprovisionedSpare(grp) != nil {
 			return fail(opCreateSpareLeg, ReasonSpareUnprovisioned)
 		}
+		// The plan first: a DN the group gained since the snapshot is a
+		// stale plan, which the caller re-plans, not a refusal — even when
+		// it is the pick's own DN.
+		if grpGainedDn(grp, planned) {
+			return fail(opCreateSpareLeg, ReasonCandidateChanged)
+		}
 		if grpHostsAddr(grp, dn.AddrPort) {
 			return fail(opCreateSpareLeg, "dn already in the group")
 		}
@@ -2072,7 +2183,9 @@ func CreateSpareLeg(
 		if extCnt == 0 {
 			return fail(opCreateSpareLeg, "group is empty")
 		}
-		dnConf, err := checkDnPick(s, opCreateSpareLeg, cid, cc, dn, extCnt)
+		dnConf, err := checkDnPick(
+			s, opCreateSpareLeg, cid, cc, dn, extCnt, true,
+		)
 		if err != nil {
 			return err
 		}
@@ -2139,6 +2252,23 @@ func grpHostsAddr(grp *pb.Group, addrPort string) bool {
 		for _, leg := range legList {
 			for _, side := range leg.GetSideList() {
 				if side.GetAddrPort() == addrPort {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// grpGainedDn reports whether the group has a leg or a spare with a side on a
+// DN that planned does not hold: CreateSpareLeg's gain check, over the same
+// sides grpHostsAddr walks.
+func grpGainedDn(grp *pb.Group, planned map[string]struct{}) bool {
+	legLists := [][]*pb.Leg{grp.GetLegList(), grp.GetSpareLegList()}
+	for _, legList := range legLists {
+		for _, leg := range legList {
+			for _, side := range leg.GetSideList() {
+				if _, ok := planned[side.GetAddrPort()]; !ok {
 					return true
 				}
 			}

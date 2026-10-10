@@ -333,6 +333,42 @@ func TestDrainSpCntlrsBumpsASharedCnOnce(t *testing.T) {
 	}
 }
 
+// TestDrainSpCntlrsLeavesMetaUnits pins that D1 moves no metadata units
+// (architecture.md, Metadata units): a latched SP lists no clone, so its
+// cntlrs' CNs hold none of its units, and the counts other SPs charged there
+// stay as they were — in the record D1 rewrites and in the capacity value of
+// the key it moves.
+func TestDrainSpCntlrsLeavesMetaUnits(t *testing.T) {
+	env := newOpsEnv(t)
+	env.chargeFixture()
+	env.setCnUsed(opsCnA, 7)
+	env.setDeleting()
+
+	if _, err := DrainSpCntlrs(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+	); err != nil {
+		t.Fatalf("DrainSpCntlrs: %v", err)
+	}
+	cn := env.cn(opsCnA)
+	if cn.GetFreeExtCnt() != opsCnFree {
+		t.Fatalf("cn-a: free_ext_cnt %d, want the footprint back (%d)",
+			cn.GetFreeExtCnt(), opsCnFree)
+	}
+	if got := cn.GetUsedMetaUnits(); got != 7 {
+		t.Errorf("cn-a used_meta_units: got %d, want another SP's 7 kept",
+			got)
+	}
+	value := &pb.CnCapacity{}
+	env.get(CnCapacityKey(env.cid, opsCnFree, opsCnA), value)
+	if value.GetUsedMetaUnits() != 7 || value.GetLocation() != opsCnA {
+		t.Errorf("cn-a capacity value: got %v, want location %s and 7 used",
+			value, opsCnA)
+	}
+	if got := env.cn(opsCnB).GetUsedMetaUnits(); got != 0 {
+		t.Errorf("cn-b used_meta_units: got %d, want 0", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // D2 — DrainSpSlice (SPD10, SPD11)
 // ---------------------------------------------------------------------------

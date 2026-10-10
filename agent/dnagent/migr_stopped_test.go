@@ -708,11 +708,15 @@ func TestMigrationDestinationStepFiveIsRetried(t *testing.T) {
 	})
 }
 
-// A destination whose slot the metadata area cannot supply says so on both
-// channels in the same rows — the converge's reply and the check round's
-// probe — so the side stays unhealthy for as long as it is starved instead of
-// trading the rows, and the epoch on them, every round; and it builds with no
-// further RPC once the units are free.
+// A destination whose slot the metadata area has no free run for waits:
+// both migr_dst_info rows read PROVISIONING with the area's text, so no
+// health epoch is set (DN13). It says so on both channels in the same rows —
+// the converge's reply and the check round's probe — instead of trading the
+// rows, and the epoch on them, every round; and it builds with no further RPC
+// once the units are free. A destination normally takes its run before it
+// zeroes (TestMigrationDestinationWaitsForRoomBeforeZeroing); this one
+// provisions as a plain side, so DN13 step (2) is where it meets the full
+// area.
 func TestMigrationDestinationExhaustionIsReportedAndRetried(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.migrRetryInterval = 5 * time.Millisecond
@@ -723,7 +727,7 @@ func TestMigrationDestinationExhaustionIsReportedAndRetried(t *testing.T) {
 	// Another sp's migration holds the whole area.
 	const otherSp, otherMigr = testSp + 1, testMigrId + 1
 	if _, err := srv.meta.AllocCloneMeta(ctx, otherSp, otherMigr,
-		common.DnCloneMetaSize); err != nil {
+		common.DnCloneMetaUnitCnt); err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
 
@@ -736,17 +740,21 @@ func TestMigrationDestinationExhaustionIsReportedAndRetried(t *testing.T) {
 		t.Fatalf("SyncupSide code %d, want 0", got)
 	}
 	synced := reply.GetSideInfo().GetMigrDstInfo()
-	if got := synced.GetTargetInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_MISSING ||
-		got.GetDetails() != detailsCloneMetaMissing {
-		t.Errorf("target_info = %v/%q, want MISSING/%q", got.GetStatus(),
-			got.GetDetails(), detailsCloneMetaMissing)
-	}
-	if got := synced.GetDmCloneInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_ERROR ||
-		!strings.Contains(got.GetDetails(), "no contiguous run") {
-		t.Errorf("dm_clone_info = %v/%q, want ERROR with the allocator's "+
-			"refusal", got.GetStatus(), got.GetDetails())
+	for _, row := range []struct {
+		name string
+		info *pb.ResInfo
+	}{
+		{"target_info", synced.GetTargetInfo()},
+		{"dm_clone_info", synced.GetDmCloneInfo()},
+	} {
+		if got := row.info; got.GetStatus() !=
+			pb.ResStatus_RES_STATUS_PROVISIONING ||
+			!strings.HasPrefix(got.GetDetails(), tagMetaRoomWait+": ") ||
+			!strings.Contains(got.GetDetails(), "no contiguous run") {
+			t.Errorf("%s = %v/%q, want PROVISIONING with %q and the "+
+				"allocator's refusal", row.name, got.GetStatus(),
+				got.GetDetails(), tagMetaRoomWait)
+		}
 	}
 	if !migrRetrying(srv) {
 		t.Error("no background retry was registered")

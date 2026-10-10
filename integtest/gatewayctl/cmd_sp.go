@@ -67,8 +67,11 @@ func spSelectorFlags(fs *flag.FlagSet, prefix string) func() *pb.NodeSelector {
 //
 // --stripe-size and --block-size fill bdev_conf.dm_raid0_conf.stripe_size
 // and bdev_conf.dm_pool_conf.data_block_size, each sent only when non-zero.
-// The gateway suite passes neither flag. The gateway judges both sizes
-// against their bounds and the geometry rules (validateBdevConf), and its
+// The gateway suite never passes --stripe-size, and passes --block-size only
+// in its ceiling case, whose pools take the smallest block the gateway
+// accepts because a copy there costs the most metadata units
+// (architecture.md, Metadata units). The gateway judges both sizes against
+// their bounds and the geometry rules (validateBdevConf), and its
 // TestValidateBdevConf and TestBdevConfGeometryRules pin those refusals.
 // --feature-junk appends one empty BdevFeature purely so the case C
 // validation battery (its stage 1; gateway.md GW4) can watch the
@@ -339,10 +342,12 @@ func setupGrowSlice(fs *flag.FlagSet) job {
 
 // setupCreateCntlr drives CreateCntlr (gateway.md, Cntlrs and inspects).
 // --slot is the cntlid_slot the new controller takes; it must be in the SP's
-// cntlid_slot_list and unused, else the gateway refuses the request. The
-// gateway suite's one create-cntlr takes a free slot, and
-// TestCreateCntlrRefusals pins both refusals as INVALID_ARGUMENT. --cn-black
-// and --cn-white fill cn_selector; the gateway suite passes neither.
+// cntlid_slot_list and unused, else the gateway refuses the request. Every
+// create-cntlr of the gateway suite takes a free slot, and
+// TestCreateCntlrRefusals pins both refusals as INVALID_ARGUMENT; the suite's
+// ceiling case also sends one whose only candidate CN lacks the metadata room
+// for the pool's clones (architecture.md, Metadata units). --cn-black and
+// --cn-white fill cn_selector; the gateway suite passes neither.
 func setupCreateCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint

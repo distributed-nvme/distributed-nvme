@@ -2070,8 +2070,10 @@ migr_declare_dst() { # m revision sp_level
 # migr_provision_dst is the dst half of the migration provisioning rule
 # (architecture.md, Migration, Phase 0): the destination side provisions
 # FIRST, under the ordinary side provisioning (architecture.md,
-# Side provisioning protocol) — the dm-linear and the zeroing goroutine only,
-# no per-CN stacks, no connect and no dm-clone. The request is byte-for-byte
+# Side provisioning protocol) — the dm-linear, the migration's run in the
+# clone-metadata area (its record alone, taken before any zeroing) and the
+# zeroing goroutine only, no per-CN stacks, no metadata wrapper, no connect
+# and no dm-clone. The request is byte-for-byte
 # migr_declare_dst's gated one except --provisioned=false, which is what makes
 # the gate provable.
 migr_provision_dst() { # m revision

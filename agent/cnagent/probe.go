@@ -256,24 +256,27 @@ func (s *CnAgentServer) probeCntlr(
 		}
 		dmKey := resKeyOf(resKeyCloneDmFmt, cp.cloneId)
 		metaKey := resKeyOf(resKeyCloneMetaFmt, cp.cloneId)
-		// CN18 step 2's refusal pair, for the same reason the dstTd == nil
-		// branch above answers with the converge's error: an arena that cannot
-		// supply this clone's slot leaves the wrapper and the dm-clone over it
-		// not two independently absent devices — they are one refusal, which
-		// the converge reports as ERROR on both rows (ensureClone). The step 1
-		// gate is what makes that comparison honest: a converge whose source
-		// connection fails never reaches step 2 — it reports
-		// `clone_id_to_dm_clone` MISSING "source not connected" ("source
-		// unknown: …" when the walk did not answer) and leaves the
-		// meta row to cloneMetaInfo, the very helper this loop falls through
-		// to below, so that row already agrees without this branch.
+		// CN18 step 2's verdict (cloneMetaVerdict), for the same reason the
+		// dstTd == nil branch above answers with the converge's error: when
+		// the arena did not answer, has no free run for this clone's wrapper,
+		// or can never fit its run, the wrapper and the dm-clone over it are
+		// not two independently absent devices — they are one verdict, which
+		// the converge reports on both rows (ensureClone): PROVISIONING
+		// waiting for room, or the ERROR pair. The step 1 gate is what makes
+		// that comparison honest: a converge whose source connection fails
+		// never reaches step 2 — it reports `clone_id_to_dm_clone` MISSING
+		// "source not connected" ("source unknown: …" when the walk did not
+		// answer) and leaves the meta row to cloneMetaInfo, the very helper
+		// this loop falls through to below, so that row already agrees
+		// without this branch.
 		if s.cloneSourceConnected(view, cp) {
-			if details, refused := s.probeCloneArenaCannotSupply(
-				ctx, plan, cp); refused {
-				info.CloneIdToMeta[cp.cloneId] = t.Err(
-					metaKey, cp.metaDmName, details)
-				info.CloneIdToDmClone[cp.cloneId] = t.Err(
-					dmKey, cp.finalName, detailsCloneMetaMissing)
+			if status, details, decided := s.cloneMetaVerdict(
+				ctx, plan, cp); decided {
+				if status == pb.ResStatus_RES_STATUS_PROVISIONING {
+					s.reportCloneNoRoom(st, cp, info, details)
+				} else {
+					s.reportCloneMetaErr(st, cp, info, details)
+				}
 				continue
 			}
 		}

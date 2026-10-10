@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -146,6 +147,14 @@ func TestCntlrSettleWritesThroughModel(t *testing.T) {
 // of them — and in a two-rack cluster where only the survivor's rack has room,
 // the one-tier scan would leave AR7 skipping with "no candidate" on every pass
 // instead of replacing.
+//
+// The adapter also asks for no metadata units (architecture.md, Metadata
+// units): model.ReplaceCntlr charges the pick the SP's clone units even past
+// its ceiling, so a CN whose metadata area is full is still a replacement.
+// Both CNs the scans below must find carry a capacity value that reads no
+// free unit — one at the ceiling, one past it — and a scan of the same index
+// that asks for one unit finds neither, so it is the adapter's zero that
+// keeps them.
 func TestReactionCnScanThroughModel(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
@@ -160,14 +169,15 @@ func TestReactionCnScanThroughModel(t *testing.T) {
 		addr     string
 		free     uint64
 		location string
+		used     uint64
 	}{
-		{cnSurvivor, 50, "rack0"},
-		{cnOld, 45, "rack1"},
-		{cnRackMate, 40, "rack0"},
-		{cnOther, 30, "rack1"},
+		{cnSurvivor, 50, "rack0", 0},
+		{cnOld, 45, "rack1", 0},
+		{cnRackMate, 40, "rack0", common.CnCloneMetaUnitCnt + 9},
+		{cnOther, 30, "rack1", common.CnCloneMetaUnitCnt},
 	} {
 		err := cli.Put(ctx, model.CnCapacityKey(cid, cn.free, cn.addr),
-			&pb.CnCapacity{Location: cn.location})
+			&pb.CnCapacity{Location: cn.location, UsedMetaUnits: cn.used})
 		if err != nil {
 			t.Fatalf("seed %s: %v", cn.addr, err)
 		}
@@ -200,6 +210,180 @@ func TestReactionCnScanThroughModel(t *testing.T) {
 	got := scan([]string{cnSurvivor, cnOther}, []string{"rack0", "rack1"})
 	if len(got) != 1 || got[0] != cnRackMate {
 		t.Errorf("tier 2 = %v, want [%s]", got, cnRackMate)
+	}
+	// The control: asked for one unit, the same index offers neither full
+	// CN, in either tier.
+	cands, _, err := model.FindCnCandidatesAntiAffine(
+		ctx, cli, cid, 20, 1, 10, []string{cnOld}, nil,
+		[]string{cnSurvivor}, []string{"rack0"},
+	)
+	if err != nil {
+		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("a scan asking for a unit = %v, want no full CN", cands)
+	}
+}
+
+// TestReactionDnScanThroughModel checks that the DN scan of AR6's grow and
+// AR8's spare asks for no metadata units below the reactionOps seam: a grown
+// group's sides and a spare's side hold none of a DN's metadata area, which
+// only a migration's destination uses (architecture.md, Metadata units), so a
+// DN whose area is full is still a candidate. The same index scanned for one
+// unit offers only the DN with room, so it is the adapter's zero that keeps
+// the full one.
+func TestReactionDnScanThroughModel(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testClusterId()
+	cc := testClusterConf()
+	const (
+		dnFull = "fdn0:9520" // its metadata area full
+		dnRoom = "fdn1:9520"
+	)
+	for _, dn := range []struct {
+		addr string
+		free uint64
+		used uint64
+	}{
+		{dnFull, 100, common.DnCloneMetaUnitCnt},
+		{dnRoom, 90, 0},
+	} {
+		binIdx, ok := model.DnBinIdx(dn.free, cc.GetDnBinConf())
+		if !ok {
+			t.Fatalf("no bin for %d free extents", dn.free)
+		}
+		err := cli.Put(ctx, model.DnCapacityKey(cid, binIdx, dn.free, dn.addr),
+			&pb.DnCapacity{Location: dn.addr, UsedMetaUnits: dn.used})
+		if err != nil {
+			t.Fatalf("seed %s: %v", dn.addr, err)
+		}
+	}
+	ops := &modelReactionOps{cli: cli}
+	cands, err := ops.findDnCandidates(ctx, cid, cc, 10, 10, 1, nil, nil)
+	if err != nil {
+		t.Fatalf("findDnCandidates: %v", err)
+	}
+	offered := map[string]bool{}
+	for _, cand := range cands {
+		offered[cand.AddrPort] = true
+	}
+	if len(cands) != 2 || !offered[dnFull] || !offered[dnRoom] {
+		t.Errorf("worker scan = %v, want both DNs, the full one included",
+			cands)
+	}
+	// The control: asked for one unit, the same index offers the DN with
+	// room alone.
+	cands, _, err = model.FindDnCandidatesAntiAffine(
+		ctx, cli, cid, cc, 10, 1, 10, 1, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("FindDnCandidatesAntiAffine: %v", err)
+	}
+	if len(cands) != 1 || cands[0].AddrPort != dnRoom {
+		t.Errorf("a scan asking for a unit = %v, want [%s] alone",
+			cands, dnRoom)
+	}
+}
+
+// TestReactionSpareCreateThroughModel checks AR8 step 3's op below the
+// reactionOps seam, against real etcd: the production adapter hands
+// model.CreateSpareLeg the plan createSpare gave it, the group's DNs its scan
+// black-listed (MD6). The fake of the reaction tests only records the
+// argument, so an adapter that dropped the plan — every create then refused,
+// since the group's own DNs are outside an empty plan — or one that read the
+// group afresh in its place — every gain then missed — would pass all of
+// them. Both directions are checked: a plan missing a DN the group holds is
+// `candidate changed`, and the group's own DNs commit.
+func TestReactionSpareCreateThroughModel(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testClusterId()
+	cc := testClusterConf()
+	const (
+		shard   = uint32(5)
+		spId    = uint64(0x200)
+		spName  = "spare-pool"
+		sliceId = uint64(31)
+		grpId   = uint64(41)
+		dnA     = "sdn0:9520"
+		dnB     = "sdn1:9520"
+		dnC     = "sdn2:9520" // the pick
+		dnFree  = uint64(100)
+	)
+	put := func(key string, msg proto.Message) {
+		t.Helper()
+		if err := cli.Put(ctx, key, msg); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+	}
+	put(model.SpConfKey(cid, spName), &pb.SpConf{
+		SpId:           spId,
+		ShardCode:      shard,
+		NextId:         1000,
+		BdevConf:       testBdevConf(),
+		CntlidSlotList: []uint32{0},
+		SpLevel:        pb.SpLevel_SP_LEVEL_READWRITE,
+		SliceIdList:    []uint64{sliceId},
+	})
+	put(model.SpRevKey(shard, cid, spId),
+		&pb.SpRev{SpName: spName, Revision: 1})
+	grp := &pb.Group{GrpId: grpId, ExtCnt: 1, MetaBlocks: 3, DataBlocks: 253}
+	for idx, addrPort := range []string{dnA, dnB} {
+		grp.LegList = append(grp.LegList, &pb.Leg{
+			LegId:  uint64(50 + idx),
+			LegIdx: uint32(idx),
+			SideList: []*pb.Side{{
+				SideId: uint64(60 + idx), AddrPort: addrPort, Provisioned: true,
+			}},
+		})
+	}
+	put(model.SliceKey(cid, spId, sliceId), &pb.Slice{
+		DataGrpList: []*pb.Group{grp},
+	})
+	binIdx, ok := model.DnBinIdx(dnFree, cc.GetDnBinConf())
+	if !ok {
+		t.Fatalf("no bin for %d free extents", dnFree)
+	}
+	put(model.DnConfKey(cid, dnC), &pb.DnConf{
+		DnId:        70,
+		ShardCode:   shard,
+		Location:    dnC,
+		TotalExtCnt: 1000,
+		FreeExtCnt:  dnFree,
+	})
+	put(model.DnRevKey(shard, cid, 70), &pb.DnRev{AddrPort: dnC, Revision: 1})
+	put(model.DnCapacityKey(cid, binIdx, dnFree, dnC),
+		&pb.DnCapacity{Location: dnC})
+	pick := model.Cand{
+		AddrPort: dnC, Location: dnC, FreeExt: dnFree, BinIdx: binIdx,
+	}
+	ops := &modelReactionOps{cli: cli}
+
+	_, err := ops.createSpareLeg(
+		ctx, cid, shard, spId, spName, sliceId, grpId, pick,
+		[]string{dnA}, cc,
+	)
+	var pre *model.ErrPrecondition
+	if !errors.As(err, &pre) || pre.Reason != model.ReasonCandidateChanged {
+		t.Fatalf("a plan missing %s: err = %v, want %q", dnB, err,
+			model.ReasonCandidateChanged)
+	}
+	legId, err := ops.createSpareLeg(
+		ctx, cid, shard, spId, spName, sliceId, grpId, pick,
+		[]string{dnA, dnB}, cc,
+	)
+	if err != nil {
+		t.Fatalf("createSpareLeg with the group's own plan: %v", err)
+	}
+	slice := &pb.Slice{}
+	if _, err := cli.Get(ctx, model.SliceKey(cid, spId, sliceId), slice); err != nil {
+		t.Fatalf("get slice: %v", err)
+	}
+	spares := slice.GetDataGrpList()[0].GetSpareLegList()
+	if len(spares) != 1 || spares[0].GetLegId() != legId ||
+		spares[0].GetSideList()[0].GetAddrPort() != dnC {
+		t.Fatalf("spares = %v, want leg %d on %s", spares, legId, dnC)
 	}
 }
 

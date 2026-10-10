@@ -18,6 +18,13 @@ import (
 // changed"} when that key is gone — which is how a scan outside the
 // transaction is made safe (architecture.md, Storage pools, CreateStoragePool
 // step 2).
+//
+// The key proves only that the node's free extents have not moved since the
+// scan. A write that changes only a node's used metadata units rewrites the
+// value under the same key, so a pick that needs units is re-checked against
+// the free units of the record its transaction reads (DnFreeMetaUnits,
+// CnFreeMetaUnits; architecture.md, Metadata units). Cand itself carries no
+// units.
 type Cand struct {
 	AddrPort string
 	Location string
@@ -57,8 +64,8 @@ func excluded(
 }
 
 // FindDnCandidates walks the DN capacity index for candCnt DNs with at least
-// candExt free extents each (MD5; architecture.md, Finding DN candidates,
-// verbatim).
+// candExt free extents and candUnits free metadata units each (MD5;
+// architecture.md, Finding DN candidates, verbatim).
 //
 // The walk starts at the smallest bin whose range can still hold candExt —
 // bins with level_{b+1} <= candExt are skipped, since every DN in them is too
@@ -79,6 +86,14 @@ func excluded(
 // node that fails any of them has no capacity key at all (architecture.md,
 // Capacity index keys).
 //
+// Metadata room is the second filter the key's value decides, beside the
+// location (architecture.md, Metadata units): a DN whose value leaves it
+// fewer than candUnits free units (DnCapacityFreeMetaUnits) is skipped. It
+// is a continue and never a break, because the key order says nothing about
+// units, and it comes before the location is recorded, so a full DN never
+// takes its failure domain from a DN of the same location that has room. A
+// candUnits of zero skips nothing.
+//
 // The scans are plain Ranges OUTSIDE any STM (MD5): a transaction cannot
 // range, and holding one across a full index walk would serialize every
 // allocation in the cluster. Each bin is read whole rather than in pages —
@@ -90,6 +105,7 @@ func FindDnCandidates(
 	cid uint64,
 	cc *pb.ClusterConf,
 	candExt uint64,
+	candUnits uint64,
 	candCnt int,
 	black []string,
 	white []string,
@@ -142,6 +158,12 @@ func FindDnCandidates(
 			if err := cli.Decode(ctx, kv, capacity); err != nil {
 				return nil, err
 			}
+			if DnCapacityFreeMetaUnits(capacity) < candUnits {
+				// Never a break: the next DN of the bin may have room.
+				// Before the location is recorded, so this DN does not
+				// shut a same-location DN with room out.
+				continue
+			}
 			location := capacity.GetLocation()
 			if _, ok := locSet[location]; ok {
 				continue
@@ -180,9 +202,10 @@ func FindDnCandidates(
 // DNs, so a plain replace can drop a distinct-domain candidate tier 1 DID
 // find. Tier 1's entries therefore stay at the head and only tier-2 entries
 // with an addr_port not already present are appended, so no caller ever sees
-// one DN twice. The black and white lists apply to both tiers: tier 2 relaxes
-// the failure domain and nothing else. An empty excludeLocs makes tier 1 the
-// plain scan, and tier 2 — which would repeat it exactly — is skipped.
+// one DN twice. The black and white lists and candUnits apply to both tiers:
+// tier 2 relaxes the failure domain and nothing else. An empty excludeLocs
+// makes tier 1 the plain scan, and tier 2 — which would repeat it exactly — is
+// skipped.
 //
 // In a default deployment location defaults to addr_port (architecture.md,
 // Disk nodes), so a group's
@@ -198,6 +221,7 @@ func FindDnCandidatesAntiAffine(
 	cid uint64,
 	cc *pb.ClusterConf,
 	candExt uint64,
+	candUnits uint64,
 	candCnt int,
 	requiredCnt int,
 	black []string,
@@ -205,7 +229,8 @@ func FindDnCandidatesAntiAffine(
 	excludeLocs []string,
 ) ([]Cand, bool, error) {
 	cands, err := FindDnCandidates(
-		ctx, cli, cid, cc, candExt, candCnt, black, white, excludeLocs,
+		ctx, cli, cid, cc, candExt, candUnits, candCnt,
+		black, white, excludeLocs,
 	)
 	if err != nil {
 		return nil, false, err
@@ -218,7 +243,7 @@ func FindDnCandidatesAntiAffine(
 	// placement is visible in the stored
 	// topology and is not logged separately.
 	relaxed, err := FindDnCandidates(
-		ctx, cli, cid, cc, candExt, candCnt, black, white, nil,
+		ctx, cli, cid, cc, candExt, candUnits, candCnt, black, white, nil,
 	)
 	if err != nil {
 		return nil, false, err
@@ -241,25 +266,27 @@ func FindDnCandidatesAntiAffine(
 }
 
 // FindCnCandidates walks the CN capacity index for candCnt CNs with at least
-// candExt free extents each (MD5; architecture.md, Finding CN candidates,
-// verbatim).
+// candExt free extents and candUnits free metadata units each (MD5;
+// architecture.md, Finding CN candidates, verbatim).
 //
 // It is the DN walk (architecture.md, Finding DN candidates) without bins —
-// one descending range over the single cn_capacity
-// prefix — plus one extra filter: spCnAddrs names the CNs that already host a
-// cntlr of the SP being served, and a second cntlr of one SP never lands on
-// the same CN. excludeLocs seeds the location set before the walk exactly as
-// in FindDnCandidates; for a cntlr pick it is the failure domains of the SP's
-// other cntlrs — for a replacement, the surviving ones (tier 1 of
-// architecture.md, Per-operation allocation). The
-// returned Cand.BinIdx is always 0: CN capacity keys carry no bin field, and a
-// caller re-validating a pick rebuilds CnCapacityKey(cid, FreeExt, AddrPort)
-// from the other two fields.
+// one descending range over the single cn_capacity prefix, with the same
+// metadata-room skip (CnCapacityFreeMetaUnits), a continue placed before the
+// location is recorded — plus one extra filter: spCnAddrs names the CNs that
+// already host a cntlr of the SP being served, and a second cntlr of one SP
+// never lands on the same CN. excludeLocs seeds the location set before the
+// walk exactly as in FindDnCandidates; for a cntlr pick it is the failure
+// domains of the SP's other cntlrs — for a replacement, the surviving ones
+// (tier 1 of architecture.md, Per-operation allocation). The returned
+// Cand.BinIdx is always 0: CN capacity keys carry no bin field, and a caller
+// re-validating a pick rebuilds CnCapacityKey(cid, FreeExt, AddrPort) from
+// the other two fields.
 func FindCnCandidates(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	cid uint64,
 	candExt uint64,
+	candUnits uint64,
 	candCnt int,
 	black []string,
 	white []string,
@@ -302,6 +329,11 @@ func FindCnCandidates(
 		if err := cli.Decode(ctx, kv, capacity); err != nil {
 			return nil, err
 		}
+		if CnCapacityFreeMetaUnits(capacity) < candUnits {
+			// As in FindDnCandidates: never a break, and before the
+			// location is recorded.
+			continue
+		}
 		location := capacity.GetLocation()
 		if _, ok := locSet[location]; ok {
 			continue
@@ -327,10 +359,11 @@ func FindCnCandidates(
 //
 // It is FindDnCandidatesAntiAffine with requiredCnt fixed at one — every
 // cntlr pick places exactly one CN — so "short" means "empty", and tier 2 has
-// no tier-1 entry to merge behind. The black and white lists and spCnAddrs
-// apply to both tiers: tier 2 relaxes the failure domain and nothing else, so
-// two cntlrs of one SP still never share a CN. An empty excludeLocs makes tier
-// 1 the plain scan, and tier 2 — which would repeat it exactly — is skipped.
+// no tier-1 entry to merge behind. The black and white lists, spCnAddrs and
+// candUnits apply to both tiers: tier 2 relaxes the failure domain and nothing
+// else, so two cntlrs of one SP still never share a CN. An empty excludeLocs
+// makes tier 1 the plain scan, and tier 2 — which would repeat it exactly — is
+// skipped.
 //
 // In a default deployment location defaults to addr_port (architecture.md,
 // Controller nodes), so the SP's
@@ -342,6 +375,7 @@ func FindCnCandidatesAntiAffine(
 	cli *etcdutil.Client,
 	cid uint64,
 	candExt uint64,
+	candUnits uint64,
 	candCnt int,
 	black []string,
 	white []string,
@@ -349,7 +383,8 @@ func FindCnCandidatesAntiAffine(
 	excludeLocs []string,
 ) ([]Cand, bool, error) {
 	cands, err := FindCnCandidates(
-		ctx, cli, cid, candExt, candCnt, black, white, spCnAddrs, excludeLocs,
+		ctx, cli, cid, candExt, candUnits, candCnt,
+		black, white, spCnAddrs, excludeLocs,
 	)
 	if err != nil {
 		return nil, false, err
@@ -362,7 +397,8 @@ func FindCnCandidatesAntiAffine(
 	// allocation). The same-domain placement
 	// is visible in the stored topology and is not logged separately.
 	cands, err = FindCnCandidates(
-		ctx, cli, cid, candExt, candCnt, black, white, spCnAddrs, nil,
+		ctx, cli, cid, candExt, candUnits, candCnt,
+		black, white, spCnAddrs, nil,
 	)
 	if err != nil {
 		return nil, false, err

@@ -11,12 +11,20 @@
 // facts no etcd record keeps.
 // Two owners overlapping on one SP therefore cannot apply an action twice — every
 // action is a model op that re-validates its own preconditions inside its STM
-// (MD6/MD7), and the loser gets model.ErrPrecondition back. The one exception
-// is a spare create: model.CreateSpareLeg refuses it while a spare of the
-// group is still unprovisioned, but a loser whose STM lands after RW18 has
-// flipped the winner's spare can create a second one — when the group held
-// no spare before (else the winner's create filled the list) and the two
-// picked different DNs (AR2).
+// (MD6/MD7), and the loser gets model.ErrPrecondition back — save in one
+// narrow case of a spare create (AR2). A group may hold several spares, so
+// its full list alone does not keep two creates apart; the loser of a spare
+// create is refused by whichever of model.CreateSpareLeg's checks comes
+// first: "spare list full" when the winner's spare filled the list;
+// otherwise spare_unprovisioned while that spare is still unprovisioned,
+// and once RW18 has flipped it, `candidate changed`, when the loser's plan
+// — the group's DNs its scan black-listed — does not hold the DN of the
+// winner's spare. It does hold it when the loser's snapshot holds a DN that
+// is out of the group when the winner's create commits and the winner's
+// spare lands on that DN: the DN leaves the group, through an operator's
+// call, before the winner plans, or joins after and leaves the same way
+// before the winner's create. The loser's create can then commit a second
+// spare for one repair (dnv-worker.md, Known limits).
 //
 // Which skips end the pass and which move the scan on is AR2's list, and AR8
 // takes the smallest leg_id first. One order the doc leaves to the code: AR7
@@ -207,7 +215,11 @@ type reactionOps interface {
 		asPrimary bool,
 		now uint64,
 	) (uint64, error)
-	// createSpareLeg is AR8 step 3; it returns the new leg_id.
+	// createSpareLeg is AR8 step 3; it returns the new leg_id. grpDnAddrs is
+	// the plan the scan that found dn ran against — the group's DNs, its
+	// black list — which the op holds the group's current DNs against inside
+	// its STM: a DN the group gained since answers `candidate changed`, and
+	// the next pass plans again.
 	createSpareLeg(
 		ctx context.Context,
 		cid uint64,
@@ -217,6 +229,7 @@ type reactionOps interface {
 		sliceId uint64,
 		grpId uint64,
 		dn model.Cand,
+		grpDnAddrs []string,
 		cc *pb.ClusterConf,
 	) (uint64, error)
 	// switchSpareLeg is AR8 step 1.
@@ -275,7 +288,9 @@ type reactionOps interface {
 		chunks []model.BmChunk,
 	) (int, error)
 	// finishCloneDelete is the clone drain's final STM (CLD9): the Clone key
-	// and its clone_name_list entry, together.
+	// and its clone_name_list entry, together, and the clone's metadata units
+	// given back on the CN of every cntlr of the SP (architecture.md,
+	// Metadata units).
 	finishCloneDelete(
 		ctx context.Context,
 		cid uint64,
@@ -304,9 +319,12 @@ func (o *modelReactionOps) findDnCandidates(
 ) ([]model.Cand, error) {
 	// The tier bool is dropped: a tier-2 placement is visible in the stored
 	// topology and the records of dnv-worker.md, Log records, gain none for it.
-	// An empty excludeLocs — the AR6 grow — makes this the plain scan.
+	// An empty excludeLocs — the AR6 grow — makes this the plain scan. It
+	// asks for no metadata units: a grown group's sides and a spare's side
+	// hold none of a DN's metadata area, which only a migration's destination
+	// uses (architecture.md, Metadata units).
 	cands, _, err := model.FindDnCandidatesAntiAffine(
-		ctx, o.cli, cid, cc, candExt, candCnt, requiredCnt,
+		ctx, o.cli, cid, cc, candExt, 0, candCnt, requiredCnt,
 		black, nil, excludeLocs,
 	)
 	return cands, err
@@ -321,9 +339,14 @@ func (o *modelReactionOps) findCnCandidates(
 	spCnAddrs []string,
 	excludeLocs []string,
 ) ([]model.Cand, error) {
-	// The tier bool is dropped, as in findDnCandidates.
+	// The tier bool is dropped, as in findDnCandidates. AR7's scan asks for
+	// no metadata units on purpose: model.ReplaceCntlr charges the new CN the
+	// SP's clone units even past its ceiling, so a CN whose area is full is
+	// still a replacement, and its clones wait there as provisioning
+	// (architecture.md, Metadata units; cnagent.md CN18).
 	cands, _, err := model.FindCnCandidatesAntiAffine(
-		ctx, o.cli, cid, candExt, candCnt, black, nil, spCnAddrs, excludeLocs,
+		ctx, o.cli, cid, candExt, 0, candCnt,
+		black, nil, spCnAddrs, excludeLocs,
 	)
 	return cands, err
 }
@@ -391,10 +414,12 @@ func (o *modelReactionOps) createSpareLeg(
 	sliceId uint64,
 	grpId uint64,
 	dn model.Cand,
+	grpDnAddrs []string,
 	cc *pb.ClusterConf,
 ) (uint64, error) {
 	return model.CreateSpareLeg(
-		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, grpId, dn, cc,
+		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, grpId, dn,
+		grpDnAddrs, cc,
 	)
 }
 
@@ -1453,7 +1478,10 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	// The footprint is what one cntlr's CN reserves for the whole SP
 	// (architecture.md, Cntlrs), and it is what model.ReplaceCntlr re-computes
 	// inside its STM: the scan has to ask for the same number or the pick would
-	// fail there.
+	// fail there. The SP's clone units are deliberately not asked for: the op
+	// moves them onto the pick even past its metadata area's ceiling
+	// (architecture.md, Metadata units), so a full area does not stop a
+	// replacement of the whole SP.
 	footprint := spFootprint(p.state)
 	batch := int(p.cc.GetAllocConf().GetCnBatchSize())
 	// AR7: the old CN is black-listed even when the node itself is healthy —
@@ -1935,6 +1963,14 @@ func (w *spWorker) switchSpare(
 // rescan without the location exclusion when tier 1 yields fewer than the ONE
 // DN this step places — is what still repairs a group in a cluster with no
 // second domain to offer.
+//
+// The black list is also the plan the op is handed: model.CreateSpareLeg
+// refuses the pick as `candidate changed` when the group holds a DN outside
+// it — one that joined after this pass's snapshot, whose domain the scan
+// could not exclude — or when the pick itself is gone, disabled or short of
+// extents since the scan (MD6). Like every ErrPrecondition, that ends the pass
+// with `reaction skipped` (AR2), and the next pass plans from a snapshot that
+// holds what changed.
 func (w *spWorker) createSpare(
 	ctx context.Context,
 	p *spPass,
@@ -1942,9 +1978,10 @@ func (w *spWorker) createSpare(
 	ids []slog.Attr,
 ) bool {
 	batch := int(p.cc.GetAllocConf().GetDnBatchSize())
+	plan := grpAddrs(target.grp)
 	cands, err := w.reactor().ops.findDnCandidates(
 		ctx, w.cid, p.cc, target.grp.GetExtCnt(), batch, 1,
-		grpAddrs(target.grp), grpLocations(p.state, target.grp),
+		plan, grpLocations(p.state, target.grp),
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionSpareCreate, err, ids...)
@@ -1957,7 +1994,7 @@ func (w *spWorker) createSpare(
 	}
 	legId, err := w.reactor().ops.createSpareLeg(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		target.sliceId, target.grp.GetGrpId(), picks[0], p.cc,
+		target.sliceId, target.grp.GetGrpId(), picks[0], plan, p.cc,
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionSpareCreate, err, ids...)
@@ -1993,7 +2030,8 @@ func grpLocations(state *model.SpState, grp *pb.Group) []string {
 }
 
 // grpAddrs is AR8's black list: the DN of every side of every leg and every
-// spare of the group.
+// spare of the group. It is also the plan createSpare hands
+// model.CreateSpareLeg, which walks the same sides of the group it reads.
 func grpAddrs(grp *pb.Group) []string {
 	var addrs []string
 	for _, legList := range [][]*pb.Leg{

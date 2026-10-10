@@ -51,7 +51,8 @@ func TestCreateSpareLegNeverMintsIdZero(t *testing.T) {
 
 	legId, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnC), env.cc,
+		opsSliceId, opsDataGrpId, env.dnCand(opsDnC),
+		env.grpDnAddrs(opsDataGrpId), env.cc,
 	)
 	if err != nil {
 		t.Fatalf("CreateSpareLeg: %v", err)

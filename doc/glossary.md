@@ -44,9 +44,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **candidate** — A disk node or controller node a capacity scan offers for an allocation (`Cand`); the caller picks randomly among the candidates and re-reads each pick's capacity key inside its deciding transaction.
 
-**candidate unit** — One scan-outside-plus-transaction round of an allocating RPC. A pick whose capacity key moved, or a plan the stored state has outgrown since the scan, fails the unit as "candidate changed" and the handler runs it again.
+**candidate unit** — One scan-outside-plus-transaction round of an allocating RPC. A pick whose capacity key moved, a pick whose node no longer has the metadata units the round needs, or a plan the stored state has outgrown since the scan, fails the unit as "candidate changed" and the handler runs it again, for at most `MaxCandidateRoundCnt` rounds: past them, or once the request's deadline has passed, it answers that the allocation did not settle (see `gateway.md` GW9).
 
-**capacity key** — The index key a node holds exactly while it is allocatable, ordered by free extents (`DnCapacity`, `CnCapacity`). Every transaction that changes an input of the presence rule rewrites it, and the allocator scans nothing else.
+**capacity key** — The index key a node holds exactly while it is allocatable, ordered by free extents (`DnCapacity`, `CnCapacity`). Its value carries copies of the node's location and of its used metadata units, from which a scan reads the free units without another read. Every transaction that changes an input of the presence rule rewrites it, every one that changes only the used units rewrites its value where it is, and the allocator scans nothing else (see `architecture.md`, Capacity index keys).
 
 **case** — One scenario of an integration suite, run in a fixed order with the run stopping at the first failure. Each case is isolated: in the agent suites by pool ids of its own and a teardown, elsewhere by a wiped store and restarted processes before it starts.
 
@@ -68,13 +68,15 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **clone** — The destination side of a copy: a pull of an external NVMe-oF namespace into a local thin device through a dm-clone on the primary cntlr (`Clone`, `CnCloneFinalName`). The destination thin device must be empty when the clone is created.
 
-**clone crash recovery** — The primary's rebuild of a clone whose dm-clone metadata is missing or unusable, whose dm-clone device is absent, or whose dm-clone does not show hydration enabled: park the destination's ns-devs, rebuild the dm-clone with hydration disabled, mark every region the destination pools already map as hydrated from their bitmaps, then enable hydration.
+**clone crash recovery** — The primary's rebuild of a clone whose dm-clone metadata is missing or unusable, whose dm-clone device is absent, or whose dm-clone does not show hydration enabled: park the destination's ns-devs, rebuild the dm-clone with hydration disabled, mark every region the destination pools already map as hydrated from their bitmaps, then enable hydration. A rebuild that needs a fresh metadata run first asks the arena for room, counting the clone's own stale run as free; when the arena has no free run for it, it parks nothing and reports the clone provisioning while it waits, and for a run larger than the whole arena it parks nothing either and reports an error (see `architecture.md`, Clone crash recovery).
 
-**clone drain** — The sp worker's asynchronous teardown of a clone that `DeleteClone` latched: the chunk keys go in bounded batches, then the clone record together with its name-list entry. The clone's exclusion from every cntlr's request is what tears the devices down.
+**clone drain** — The sp worker's asynchronous teardown of a clone that `DeleteClone` latched: the chunk keys go in bounded batches, then the clone record together with its name-list entry, in the transaction that also gives the clone's metadata units back to the controller node of every cntlr of its pool. The clone's exclusion from every cntlr's request is what tears the devices down.
 
-**clone-metadata arena** — The controller node's sparse tmpfs-backed file on one loop device, carved into units from which each clone's dm-clone metadata slot is allocated first-fit (`CnCloneMetaAreaSize`, `CnCloneMetaUnit`). The kind-`cb` wrapper tables are its allocation registry, and it is volatile together with the kernel's dm state.
+**clone-metadata arena** — The controller node's metadata area: a sparse tmpfs-backed file on one loop device, carved into units from which each clone's dm-clone metadata slot is allocated first-fit (`CnCloneMetaAreaSize`, `CnCloneMetaUnit`). The kind-`cb` wrapper tables are its allocation registry, and it is volatile together with the kernel's dm state. The control plane counts its units, charging every clone of a pool to the arena of the node of each cntlr of the pool; an arena that still has no free run for a clone makes the clone's rows read provisioning (see `architecture.md`, Metadata units).
 
-**clone-metadata slot, clone-metadata wrapper** — A contiguous run of units holding one dm-clone's metadata, in the disk node's clone-metadata area for a migration destination and in the controller node's arena for a clone, presented as a device by a wrapper dm-linear because dm-clone reads its superblock from sector zero (`DnMigrMetaDmName`, `CnCloneMetaDmName`).
+**clone-metadata retry** — The cn agent's slow background re-converge of a cntlr one of whose clones found the arena with no free run: every `CnCloneMetaRetryInterval`, under the same locks as any converge of the cntlr, until a pass leaves no clone of the cntlr waiting for room. It is apart from the connect retry because each attempt is a whole converge under the lock the cntlr's check rounds need (see `cnagent.md` CN18).
+
+**clone-metadata slot, clone-metadata wrapper** — A contiguous run of units holding one dm-clone's metadata, in the disk node's clone-metadata area for a migration destination and in the controller node's arena for a clone, presented as a device by a wrapper dm-linear because dm-clone reads its superblock from sector zero (`DnMigrMetaDmName`, `CnCloneMetaDmName`). Its size in units is the one formula of `architecture.md`, Metadata units, and a migration destination takes its slot before its side zeroes.
 
 **cluster** — The namespace for everything else, identified by its name and by an id derived from the name and the creation epoch stamped when it is created (`ClusterConf`, `cluster_id`, `creation_epoch`). A cluster deleted and recreated under the same name is a different cluster: every key but its name-keyed conf, and every node-local name but the md superblock name, is new.
 
@@ -82,7 +84,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **cntlr** — One instance of a storage pool on one controller node (`Cntlr`); exactly one cntlr of a pool is primary and the others are standby. A cntlr carries its cntlid slot, its disabled flag, its health epoch and its settling flag.
 
-**cntlr replacement** — The sp worker's reaction that deletes a cntlr unhealthy past its threshold and creates one on a fresh controller node with the same cntlid slot, primary only when the old one was primary and had no failover candidate.
+**cntlr replacement** — The sp worker's reaction that deletes a cntlr unhealthy past its threshold and creates one on a fresh controller node with the same cntlid slot, primary only when the old one was primary and had no failover candidate. It moves the pool's clone metadata units to the new node even past that node's ceiling, the one charge that may pass it (see `architecture.md`, Metadata units).
 
 **command timeouts, soft timeout, hard timeout** — The two bounds on every OS command an agent runs (`CmdSoftTimeout`, `CmdHardTimeout`): SIGTERM at the soft timeout and SIGKILL at the hard one, after which the command did not answer. Neither bounds a child in an uninterruptible kernel wait, which returns only when the kernel does (see `architecture.md`, Common validation).
 
@@ -90,11 +92,11 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **conf gate** — An agent's refusal of a request whose conf carries a value the control plane cannot have written, such as a zero geometry member, or a side's length to zero outside its bounds: a length of zero, one not a multiple of `DnZeroAlign`, or one longer than the side (`ReplyCodeInvalidConf`). It runs after the revision gate and before the request becomes desired state, so nothing converges and nothing is persisted.
 
-**connect retry** — An agent's background re-converge of an object whose last pass left a reason to try again: on the dn, a migration destination whose build stopped short, at the connect to its source or at another step (see `dnagent.md` DN13); on the cn, a leg or clone source that failed to converge, a failed clone step, a group member that is not yet available, or an ns-dev the build held off its raid0 (see `cnagent.md` CN10). Each attempt is a whole converge that decides afresh whether a reason to retry remains.
+**connect retry** — An agent's background re-converge of an object whose last pass left a reason to try again: on the dn, a migration destination whose build stopped short, at the connect to its source or at another step, or that waits for its run in the clone-metadata area before it zeroes (see `dnagent.md` DN13); on the cn, a leg or clone source that failed to converge, a failed clone step, a group member that is not yet available, or an ns-dev the build held off its raid0 (see `cnagent.md` CN10) — a clone that waits for a free run in the arena has the slower clone-metadata retry instead, and one whose run is larger than the whole arena has none. Each attempt is a whole converge that decides afresh whether a reason to retry remains.
 
 **control plane, data plane** — The control plane is etcd plus the stateless processes on the control-plane servers, gateway, worker and cdc; the data plane is the disk nodes, the controller nodes and the NVMe-oF paths between them and the hosts.
 
-**controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage, only a tmpfs for clone metadata, and offers a capacity budget in extents from which every cntlr's footprint is debited (`--capacity`). It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
+**controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage, only a tmpfs for clone metadata, whose units the control plane counts, and offers a capacity budget in extents from which every cntlr's footprint is debited (`--capacity`). It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
 
 **converge** — An agent's one pass that brings its node's state for an object to the request it holds: probe-first, bottom-up build, top-down removal by sweep, with every failure captured in a row rather than aborting the pass. A converge is idempotent and crash-restartable.
 
@@ -248,7 +250,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **leaf package** — `common`, the package every dnv binary imports and which imports no other dnv package, nor the etcd client nor viper, so it stays the leaf of the dependency rules (see `layout.md`, Dependency rules).
 
-**ledger** — The node-budget bookkeeping of a transaction: the gateway's DN and CN ledgers (`dnLedger`, `cnLedger`) read each node a transaction touches once, write it once, maintain its capacity key once and bump its revision once. A drain returns budget to the node records, the receiving ledger, in the transaction that shrinks the record describing it.
+**ledger** — The node-budget bookkeeping of a transaction: the gateway's DN and CN ledgers (`dnLedger`, `cnLedger`) read each node a transaction touches once, write it once, maintain its capacity key once and bump its revision at most once — once when a side or a cntlr was charged to it or released from it, and not at all when only its used metadata units changed (`chargeUnits`, `releaseUnits`). A drain returns budget to the node records, the receiving ledger, in the transaction that shrinks the record describing it.
 
 **leftover** — An object a node holds that its desired state does not want and a sweep has not yet removed, reported as `ReplyCodeLeftover` with its name in the reply's details: the request is accepted and stored, and the worker re-issues the syncup every round until the verdict is clean. The same code carries an enumeration that did not answer and the conditions only a syncup cures.
 
@@ -283,6 +285,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **member reconciliation** — The primary's comparison of an md array's live members with the group's leg list on every converge: a listed leg that is missing is added once available, a member that is not listed is failed and removed, and a spare is never a member until it is switched in; a deferred group runs none of it.
 
 **meta region, data region** — The two parts of every leg: the meta region at the head, holding the md superblock and write-intent bitmap of a redundant leg and the health block of every leg, and the data region behind it, which is the only part the pool sees.
+
+**metadata area, metadata unit** — The fixed space where dm-clone keeps the metadata of a copy, handed out in units of one size: on a controller node the clone-metadata arena, for clones, and on a disk node the clone-metadata area of the dnv disk format, for migration destinations. A copy holds one contiguous run of units, sized by one formula (`CloneMetaUnits`). The control plane counts each node's used units in its record (`used_meta_units`), charging a clone to the node of every cntlr of its pool and a migration to its destination, keeps each copy's own units on its record (`meta_units`), and copies a node's count into its capacity value so that a scan can pass over a node without room; a refused copy is created nowhere. A node that still finds no free run reports the copy's rows provisioning while it waits for room (see `architecture.md`, Metadata units). The dn agent's `DnInfo.meta_info` row reports the units actually free on its disk, which can differ from the count: the count changes in the transaction that creates or ends a copy, the disk when the agent takes or frees the run.
 
 **migration** — `Migration`, the live move of one side of a leg to another disk node: once the destination side is provisioned the source side fences its per-CN paths and exports its side device to the destination disk node, whose dm-clone serves the leg while it pulls the bytes, and the finish removes the source side. While it runs the leg has a source side and a destination side, each side's syncup request carrying its role (`migr_src_conf`, `migr_dst_conf`).
 
@@ -340,7 +344,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **placement bound** — The e2e suite's default count of dn agents per disk-node guest: the least count per guest that rules out, by counting, a pick starving for disk nodes in distinct locations, sized by the ops case (see `e2e_integtest.md` E2E3).
 
-**planning snapshot** — A read-only etcd snapshot (`Snapshot`) an RPC plans from before its deciding STM: `DeleteThinDevice` walks its thin devices in one, and `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` read the cluster conf in theirs rather than in their deciding STM (see `gateway.md` GW5).
+**planning snapshot** — A read-only etcd snapshot (`Snapshot`) an RPC plans from before its deciding STM: `DeleteThinDevice` walks its thin devices in one, and `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` read the cluster conf in theirs rather than in their deciding STM, `CreateSpareLeg` in a fresh one each round (see `gateway.md` GW5).
 
 **plays the worker** — What the gateway suite does when it writes a worker-owned flip or runs a worker-owned drain through `workerctl`, so a gateway precondition can be exercised without a running worker.
 
@@ -354,7 +358,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **preflight** — A suite's checks before any case runs: the tools and kernel features each guest needs, the freshness of the binaries, the lab wiring, and the absence of residue from an earlier run.
 
-**presence rule** — The rule that a node holds a capacity key exactly while it is allocatable: its pointer list under its cap, no health epoch set, not disabled, and its free extents not below the floor (`DnAllocatable`, `CnAllocatable`). Whichever transaction changes one of those inputs deletes or rewrites the key in the same transaction, so the allocator never filters by health or flags (see `architecture.md`, Capacity index keys).
+**presence rule** — The rule that a node holds a capacity key exactly while it is allocatable: its pointer list under its cap, no health epoch set, not disabled, and its free extents not below the floor (`DnAllocatable`, `CnAllocatable`). Whichever transaction changes one of those inputs deletes or rewrites the key in the same transaction, so the allocator never filters by health or flags (see `architecture.md`, Capacity index keys). Metadata units are no input: a node whose metadata area is full keeps its key.
 
 **primary** — The cntlr that runs a pool's full stack: it connects every leg, assembles the groups, activates the thin pools, raid0s, clones and transfers, and exports the namespaces optimized. Only the sp worker changes which cntlr is primary.
 
@@ -362,7 +366,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
-**provisioned, zeroing** — The side flag the sp worker sets once the disk node reports the side's zeroing complete (`provisioned`). Zeroing writes zeros from the start of a new side over the length the sp worker sends, the whole leg span for a side of a meta group and the meta region and first data block for a side of a data group, as batched zero-out writes through the side device in the dn agent's background, tracked in the volume table as a count of bytes zeroed; a leg none of whose sides has the flag is deferred on the controller node. A migration destination carries its own flag that gates the source export and the clone (see `architecture.md`, Side provisioning protocol).
+**provisioned, zeroing** — The side flag the sp worker sets once the disk node reports the side's zeroing complete (`provisioned`). Zeroing writes zeros from the start of a new side over the length the sp worker sends, the whole leg span for a side of a meta group and the meta region and first data block for a side of a data group, as batched zero-out writes through the side device in the dn agent's background, tracked in the volume table as a count of bytes zeroed; a leg none of whose sides has the flag is deferred on the controller node. A migration destination carries its own flag that gates the source export and the clone, and takes its clone-metadata slot before it zeroes, zeroing nothing while it has none (see `architecture.md`, Side provisioning protocol).
 
 **QoS** — The cluster-wide ratio of size-proportional IO limits (`qos_ratio`) that every controller-node syncup carries; the cn agent persists it and enforces nothing.
 
@@ -406,9 +410,11 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **revision worker** — The worker goroutine per revision key that pushes each revision of its object to the agent and runs its check stream and health rounds; for the sp role it is the coordinator with a child per side and per cntlr.
 
-**rootCtx** — The agent's lifetime context (`rootCtx`) that background tasks run on, so the end of a request never cancels a connect retry, a zeroing goroutine, a fence timer or a background disconnect. Process exit cancels it and waits only for the dn agent's zeroing workers and connect retries (see `dnagent.md` SH27).
+**rootCtx** — The agent's lifetime context (`rootCtx`) that background tasks run on, so the end of a request never cancels a connect retry, a clone-metadata retry, a zeroing goroutine, a fence timer or a background disconnect. Process exit cancels it and waits only for the dn agent's zeroing workers and connect retries (see `dnagent.md` SH27).
 
 **rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: disable it, delete it, then create a cntlr with a free slot (`UpdateCntlrEnabled`, `DeleteCntlr`, `CreateCntlr`).
+
+**row** — One line of an agent's report about one device, with a status and a text: one `ResInfo` of an info (see ResInfo).
 
 **seed, registration** — Each worker process mints a fresh seed per incarnation and keeps one registration per role under it (`WorkerReg`), re-put every vote interval with no etcd lease: observers judge it by their own clock and delete the key of one they commit dead (see `dnv-worker.md` VW2, VW6). The seed enters the worker's tickets, and a worker that fences itself rejoins under a new one.
 

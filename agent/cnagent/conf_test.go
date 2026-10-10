@@ -248,7 +248,8 @@ func TestRedundNoneNeedsNoBitmapChunkCount(t *testing.T) {
 }
 
 // TestConvergeCntlrRefusesAZeroConfMember covers convergeCntlr's own gate —
-// the two entrances that do not come through syncupCntlr.
+// the entrances that do not come through syncupCntlr: the startup Reconcile,
+// and reconvergeCntlr, which both background retries re-enter through.
 func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 	// The startup Reconcile: the persisted file holds the zero, and the
 	// converge must skip it exactly as syncupCntlr would.

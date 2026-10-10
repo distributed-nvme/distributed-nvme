@@ -73,14 +73,14 @@ func (s *DnAgentServer) probeSide(
 	}
 	plan := newSidePlan(s.nf, req, extentSize)
 	info := &pb.SideInfo{}
-	state := s.probeSideDev(ctx, st, plan, info)
+	state, metaWait := s.probeSideDev(ctx, st, plan, info)
 	if !plan.wantDm {
 		return info
 	}
 	// The same gate the converge uses (DN9), so a probe can never
 	// claim a stack the converge deliberately did not build.
 	if state != sideDevReady {
-		s.reportAboveSideDeferred(st, plan, info)
+		s.reportAboveSideDeferred(st, plan, info, metaWait)
 		return info
 	}
 	s.probeAboveSideDev(ctx, st, plan, info)
@@ -97,13 +97,17 @@ func (s *DnAgentServer) probeSide(
 // zeroing goroutine (DN16, SH25). That is why "record absent at
 // provisioned = false" reports MISSING with empty details rather than the
 // matrix's "zeroing 0/n MiB": with no record the only available length is
-// the request's, and the etcd flag is a gate, never evidence (DN9).
+// the request's, and the etcd flag is a gate, never evidence (DN9). Nor does
+// it take a migration destination's run in the clone-metadata area: it reads
+// the area's refusal of the run (migrMetaRefusal), and reports a destination
+// the area has no free run for as the converge does, PROVISIONING with the
+// area's text, returning that refusal as ensureSideDev returns it.
 func (s *DnAgentServer) probeSideDev(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
-) sideDevState {
+) (sideDevState, error) {
 	t := st.tracker
 	name := plan.sideDevName
 	info.ZeroBytes = plan.conf.GetZeroBytes()
@@ -111,7 +115,7 @@ func (s *DnAgentServer) probeSideDev(
 	if err != nil {
 		// An unreadable or corrupt disk is an error, never "absent".
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-		return sideDevFailed
+		return sideDevFailed, nil
 	}
 	if !ok {
 		if plan.provisioned {
@@ -119,7 +123,7 @@ func (s *DnAgentServer) probeSideDev(
 		} else {
 			info.SideDevInfo = t.Missing(resKeySideDev, name, "")
 		}
-		return sideDevFailed
+		return sideDevFailed, nil
 	}
 	// The counters are filled on every round, whatever the outcome below is:
 	// they are what the worker's provisioned-flip rule reads
@@ -139,7 +143,22 @@ func (s *DnAgentServer) probeSideDev(
 		if status, details := s.probeSideDm(ctx, plan, rec); status !=
 			pb.ResStatus_RES_STATUS_OK {
 			info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
-			return sideDevFailed
+			return sideDevFailed, nil
+		}
+		// A migration destination that has not provisioned zeroes only once
+		// it holds its run (DN13): the converge's refusal of the run, as far
+		// as the loaded table shows it, is this row's verdict.
+		if !plan.provisioned && plan.migrDst != nil {
+			if refusal := s.migrMetaRefusal(ctx, plan); refusal != nil {
+				if isNoFreeRun(refusal) {
+					info.SideDevInfo = t.Provisioning(resKeySideDev, name,
+						metaRoomDetails(refusal))
+					return sideDevProvisioning, refusal
+				}
+				info.SideDevInfo = t.Err(
+					resKeySideDev, name, refusal.Error())
+				return sideDevFailed, nil
+			}
 		}
 		// zeroErr is bound ONCE and then used: the zeroing loop clears it from
 		// outside both DN1 locks (zeroing.go's success path runs after
@@ -152,7 +171,7 @@ func (s *DnAgentServer) probeSideDev(
 		case plan.provisioned:
 			// The agent trusts its own count over the flag.
 			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
-			return sideDevFailed
+			return sideDevFailed, nil
 		case zeroErr != nil:
 			info.SideDevInfo = t.Err(resKeySideDev, name, zeroErr.Error())
 		default:
@@ -162,17 +181,17 @@ func (s *DnAgentServer) probeSideDev(
 			info.SideDevInfo = t.Provisioning(resKeySideDev, name,
 				zeroingDetails(zeroed, zero))
 		}
-		return sideDevProvisioning
+		return sideDevProvisioning, nil
 	}
 	status, details := s.probeSideDm(ctx, plan, rec)
 	info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
 	switch {
 	case status != pb.ResStatus_RES_STATUS_OK:
-		return sideDevFailed
+		return sideDevFailed, nil
 	case !plan.provisioned:
-		return sideDevProvisioning
+		return sideDevProvisioning, nil
 	default:
-		return sideDevReady
+		return sideDevReady, nil
 	}
 }
 
@@ -333,12 +352,23 @@ func (s *DnAgentServer) probeAboveSideDev(
 		// DN13 step 2's refusal, with the rows the converge reports for it
 		// (ensureMigrDst): a metadata area that cannot supply this
 		// migration's slot is one refusal, not an absent target beside an
-		// absent dm-clone. Answering the plain MISSING pair here would trade
-		// the rows, and the epoch on them, with the converge on every round —
-		// and ERROR is the status the worker's health pass keys on. Read-only
-		// (DN16, SH25): the refusal is computed from the loaded table.
+		// absent dm-clone. An area with no free run for it is a wait, both
+		// rows PROVISIONING with the area's text; any other refusal is the
+		// MISSING/ERROR pair. Answering the plain MISSING pair here would
+		// trade the rows, and the epoch on them, with the converge on every
+		// round — and ERROR is the status the worker's health pass keys on.
+		// Read-only (DN16, SH25): the refusal is computed from the loaded
+		// table.
 		if !cloneLive {
 			if refusal := s.migrMetaRefusal(ctx, plan); refusal != nil {
+				if isNoFreeRun(refusal) {
+					details := metaRoomDetails(refusal)
+					dstInfo.TargetInfo = t.Provisioning(
+						resKeyMigrDstTarget, nqn, details)
+					dstInfo.DmCloneInfo = t.Provisioning(resKeyMigrDstClone,
+						plan.migrFinalName(), details)
+					return
+				}
 				dstInfo.TargetInfo = t.Missing(
 					resKeyMigrDstTarget, nqn, detailsCloneMetaMissing)
 				dstInfo.DmCloneInfo = t.Err(resKeyMigrDstClone,

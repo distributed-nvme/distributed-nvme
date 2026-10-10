@@ -344,6 +344,22 @@ func TestCloneRecoveryFailsClosed(t *testing.T) {
 	if !strings.Contains(table, "linear "+errNo) {
 		t.Fatalf("the ns-dev is not parked: %q", table)
 	}
+	// That park is where CN16 wants an ns-dev whose dm-clone does not exist
+	// (rule 5: absence shows no hydration), so its row reads OK in the
+	// converge and in the check round alike; the failure is the dm-clone
+	// row's.
+	assertOk(t, reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs], "ns-dev")
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 3,
+		}, nil)
+	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+	if dm := probed.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
+		pb.ResStatus_RES_STATUS_MISSING {
+		t.Fatalf("the probed dm-clone row is %v/%q, want MISSING",
+			dm.GetStatus(), dm.GetDetails())
+	}
 }
 
 // cnagent.md CN12 puts a single available member in case 2 (assemble, and

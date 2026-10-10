@@ -12,30 +12,6 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// migrMetaBaseSize covers the dm-clone superblock and rounding; the bitmap
-// itself needs one bit per region, so budgeting one byte per region on top is
-// a generous bound. AllocCloneMeta rounds the result up to whole
-// DnCloneMetaUnit slots.
-//
-// The area is **per DN**, not per SP: DnCloneMetaSize is one 48-unit region of
-// the disk shared by every destination role the node hosts, across every SP on
-// it, so the capacity is sum(migrMetaSize(migr)) <= 48 units node-wide and
-// MaxMigrCntPerSp = 4 says nothing about it. Because the base alone is exactly
-// one unit, every migration costs >= 2 units, so 24 *minimum-cost* destination
-// roles is the node-wide ceiling — and fewer for large sides at a small
-// region size, where the one-byte-per-region term dominates (a 1 TiB side at
-// 1 MiB regions costs 2 units, at 64 KiB regions 5). This is the dn twin of
-// the cn arena ceiling (clonemeta.go's cloneMetaUnits). Nothing gates the
-// destination count against this ceiling; the converge that meets exhaustion
-// reports it on the migr_dst_info rows (DN13: target_info RES_STATUS_MISSING,
-// dm_clone_info RES_STATUS_ERROR with the allocator's message), and growing
-// DnCloneMetaSize would be a format-version bump.
-const migrMetaBaseSize = 4 * 1024 * 1024
-
-func migrMetaSize(regions uint64) uint64 {
-	return uint64(migrMetaBaseSize) + regions
-}
-
 // ---------------------------------------------------------------------------
 // Migration source (DN12) — steps 1 and 2 happen in convergeSide/ensureCnDm;
 // this is step 3.
@@ -114,7 +90,9 @@ const (
 // whether all of those steps held. Step (5), the primary's stack onto the
 // dm-clone, is convergeSide's, and so is the retry of a pass whose steps
 // here all held (settleMigrRetry); every other exit registers the retry
-// here (startMigrRetry).
+// here (startMigrRetry). The slot of step (2) is normally the run the side
+// has held since it provisioned (holdMigrMeta), so step (2) finds its record
+// and builds the wrapper over it.
 //
 // A step that stops for a reason of its own takes the serving path neither
 // onto the dm-clone nor off it: the answer is read from where the per-CN
@@ -143,12 +121,24 @@ func (s *DnAgentServer) ensureMigrDst(
 		s.dropChunks(ctx, st)
 	}
 
-	// (2) the dm-clone metadata slot and its wrapper device.
+	// (2) the dm-clone metadata slot and its wrapper device. An area with no
+	// free run for a slot not yet held is a wait, not a fault: both rows read
+	// provisioning with the area's text, as the side's own row does while it
+	// waits before zeroing (ensureSideDev), and the retry takes the run once
+	// units come free. Any other failure is the MISSING/ERROR pair.
 	if err := s.ensureMigrMeta(ctx, plan); err != nil {
-		dstInfo.TargetInfo = t.Missing(resKeyMigrDstTarget, nqn,
-			detailsCloneMetaMissing)
-		dstInfo.DmCloneInfo = t.Err(
-			resKeyMigrDstClone, cloneName, err.Error())
+		if isNoFreeRun(err) {
+			details := metaRoomDetails(err)
+			dstInfo.TargetInfo = t.Provisioning(
+				resKeyMigrDstTarget, nqn, details)
+			dstInfo.DmCloneInfo = t.Provisioning(
+				resKeyMigrDstClone, cloneName, details)
+		} else {
+			dstInfo.TargetInfo = t.Missing(resKeyMigrDstTarget, nqn,
+				detailsCloneMetaMissing)
+			dstInfo.DmCloneInfo = t.Err(
+				resKeyMigrDstClone, cloneName, err.Error())
+		}
 		return s.migrDstStopped(ctx, st, plan), false
 	}
 
@@ -249,10 +239,11 @@ func (s *DnAgentServer) ensureMigrDst(
 }
 
 // detailsCloneMetaMissing is what `migr_dst_info.target_info` reports when
-// DN13 step 2, the slot or its wrapper, fails: no connect is attempted
-// without them. The converge (ensureMigrDst) reports it for every such
-// failure, the probe (probeAboveSideDev) only for the allocator's refusal,
-// the one a read-only pass can establish (migrMetaRefusal).
+// DN13 step 2, the slot or its wrapper, fails for any reason but an area with
+// no free run, which reads provisioning instead (metaRoomDetails): no connect
+// is attempted without them. The converge (ensureMigrDst) reports it for
+// every such failure, the probe (probeAboveSideDev) only for the area's other
+// refusals, the ones a read-only pass can establish (migrMetaRefusal).
 const detailsCloneMetaMissing = "clone metadata missing"
 
 // migrDstStopped is the exit of every destination step that stopped for a
@@ -342,20 +333,43 @@ func (s *DnAgentServer) migrCloneMapped(
 	return answer
 }
 
-// migrMetaRefusal is DN13 step 2's refusal as a read-only pass can establish
-// it: the clone-metadata area's refusal of this migration's slot, as
-// CloneMetaRefusal reads it, and nil for a request with no region size,
-// which ensureMigrMeta refuses on its own.
+// migrMetaUnits is the size of this migration's run in the node's
+// clone-metadata area, in DnCloneMetaUnit units: the shared formula,
+// common.CloneMetaUnits, over the moved side's bytes — ext_cnt extents of the
+// DN's extent size — and the pool's block size, migr_dst_conf.block_size
+// (architecture.md, Metadata units). The control plane charges the node by
+// the same inputs when it creates the migration, so the units it counts and
+// the runs on the disk agree.
+//
+// The area is **per DN**, not per SP: DnCloneMetaSize is one region of the
+// disk shared by every destination role the node hosts, across every SP on
+// it, so DnCloneMetaUnitCnt bounds the sum of their runs node-wide and
+// MaxMigrCntPerSp says nothing about it (DN13). A block size under one sector
+// is refused, as the dm-clone refuses it for its region size (ensureDmClone).
+func migrMetaUnits(plan *sidePlan) (uint64, error) {
+	blockSize := plan.migrDst.GetBlockSize()
+	if blockSize/agent.SectorSize == 0 {
+		return 0, fmt.Errorf("migr_dst_conf.block_size is 0")
+	}
+	return common.CloneMetaUnits(
+		plan.conf.GetExtCnt()*plan.extentSize, blockSize), nil
+}
+
+// migrMetaRefusal is the refusal of this migration's run as a read-only pass
+// can establish it: the size error of migrMetaUnits, else the clone-metadata
+// area's refusal of the run, as CloneMetaRefusal reads it. The probe reports
+// what the converge reports from holdMigrMeta and DN13 step 2 for the same
+// refusal, so the rows of the two channels agree.
 func (s *DnAgentServer) migrMetaRefusal(
 	ctx context.Context,
 	plan *sidePlan,
 ) error {
-	regionSectors := plan.migrDst.GetBlockSize() / agent.SectorSize
-	if regionSectors == 0 {
-		return nil
+	units, err := migrMetaUnits(plan)
+	if err != nil {
+		return err
 	}
-	return s.meta.CloneMetaRefusal(ctx, plan.spId, plan.migrDst.GetMigrId(),
-		migrMetaSize(plan.sectors/regionSectors))
+	return s.meta.CloneMetaRefusal(
+		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
 }
 
 // awaitMigrSrcNs re-reads the migration source's subsystem after a connect
@@ -384,8 +398,37 @@ func (s *DnAgentServer) awaitMigrSrcNs(
 	}
 }
 
+// holdMigrMeta takes this migration's run in the node's clone-metadata area
+// before the destination side zeroes (DN13): the record alone, its head
+// zeroed before it is written (AllocCloneMeta), and nothing above it — the
+// wrapper, the source connection and the dm-clone wait for DN13 step (2) and
+// the open provisioning gate. It runs at every level, as the record's claim
+// carries no level gate (claimedMigrs), and a level that suppresses the role
+// still wants no wrapper (DN11). A record already held is handed back with
+// nothing written.
+//
+// The run comes first because a destination that zeroes is flipped
+// provisioned once it is done, and the source then cuts its own paths: one
+// that found no room only after that would leave the leg in the migration
+// gap until units came free (architecture.md, Migration). While it holds no
+// run it zeroes nothing, so it is not flipped and the source keeps serving.
+func (s *DnAgentServer) holdMigrMeta(
+	ctx context.Context,
+	plan *sidePlan,
+) error {
+	units, err := migrMetaUnits(plan)
+	if err != nil {
+		return err
+	}
+	_, err = s.meta.AllocCloneMeta(
+		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
+	return err
+}
+
 // ensureMigrMeta reserves this migration's dm-clone metadata slot and builds
-// the wrapper dm-linear over it. The wrapper exists because the dm-clone
+// the wrapper dm-linear over it. The slot is normally held already, taken
+// before the side zeroed (holdMigrMeta), and AllocCloneMeta then hands its
+// record back with nothing written. The wrapper exists because the dm-clone
 // target reads its metadata device from sector 0 and takes no offset
 // argument (DN13); AllocCloneMeta zeroes a freshly chosen slot's first 8 KiB
 // before its record is persisted, so stale bytes in that slot can never be
@@ -394,13 +437,12 @@ func (s *DnAgentServer) ensureMigrMeta(
 	ctx context.Context,
 	plan *sidePlan,
 ) error {
-	regionSectors := plan.migrDst.GetBlockSize() / agent.SectorSize
-	if regionSectors == 0 {
-		return fmt.Errorf("migr_dst_conf.block_size is 0")
+	units, err := migrMetaUnits(plan)
+	if err != nil {
+		return err
 	}
 	migrId := plan.migrDst.GetMigrId()
-	rec, err := s.meta.AllocCloneMeta(ctx, plan.spId, migrId,
-		migrMetaSize(plan.sectors/regionSectors))
+	rec, err := s.meta.AllocCloneMeta(ctx, plan.spId, migrId, units)
 	if err != nil {
 		return err
 	}
@@ -569,14 +611,19 @@ func (s *DnAgentServer) ensureHydration(
 // whole sequence: the connect failed or the source's namespace did not
 // appear, another step stopped for a reason of its own (migrDstStopped),
 // hydration would not converge (a knob or the enable), or the primary's stack
-// did not converge onto the dm-clone (DN13 step (5), settleMigrRetry). A
-// goroutine re-runs the destination converge every
+// did not converge onto the dm-clone (DN13 step (5), settleMigrRetry). It
+// also registers a destination that has not provisioned and could not take
+// its run in the clone-metadata area before zeroing (holdMigrMeta, in
+// ensureSideDev). A goroutine re-runs the destination converge every
 // DnMigrConnectRetryInterval seconds under the DN1 locks, until a pass runs
-// the whole sequence, the primary's stack included; a pass whose sweep lists
-// the node's dm devices finds the destination role no longer wanted
-// (sidePreSteps); or the side is dropped (dropSideState). The RPC itself
-// never retries a connect: it waits only for the namespace of one that
-// succeeded, pausing DnMigrDstNsWait at most (awaitMigrSrcNs).
+// the whole sequence, the primary's stack included, or, for a destination
+// that has not provisioned, takes its run; a pass whose sweep lists the
+// node's dm devices finds the destination role no longer wanted
+// (sidePreSteps), though a destination that has not provisioned keeps its
+// retry at a level that suppresses the role, until it takes its run; or the
+// side is dropped (dropSideState). The RPC itself never retries a connect:
+// it waits only for the namespace of one that succeeded, pausing
+// DnMigrDstNsWait at most (awaitMigrSrcNs).
 //
 // The loop is enrolled in the server's WaitGroup so WaitBackground covers the
 // connect retries too, not just zeroing (SH27). Like startZeroing it
@@ -658,16 +705,22 @@ func (s *DnAgentServer) migrRetryLoop(
 		// The attempt runs on rootCtx, never on this loop's ctx. That ctx is
 		// what stopMigrRetry cancels, and a pass of this very loop can be
 		// the one that calls it: settleMigrRetry, the last act of a pass
-		// whose build held, or the sweep's pre-step near the start of a pass
-		// (sidePreSteps), for a destination role no longer wanted — which a
-		// pass of the loop meets when the SyncupSide that ended the role
-		// could not list the node's dm devices, since its sweep then skipped
-		// the pre-steps. An attempt on the loop's ctx would fail every OS
-		// call that follows the deregistration in its pass on the dead
-		// context, with `retrying` already false and nothing ticking again,
-		// so where a deregistration falls in a pass would decide whether the
-		// rest of the pass runs. On rootCtx it never does, as for the fence
-		// timer, which reconverges on rootCtx too.
+		// whose build held; ensureSideDev's run step in the middle of a
+		// pass, on a destination that has not provisioned, once it takes or
+		// finds its run (holdMigrMeta), after which the pass goes on to
+		// start zeroing; or the sweep's pre-step near the start of a pass
+		// (sidePreSteps), for a destination role no longer wanted — a role
+		// that is gone, or one a level suppresses on a destination that has
+		// provisioned, since one that has not keeps its retry until it takes
+		// its run — which a pass of the loop meets when the SyncupSide that
+		// ended the role could not list the node's dm devices, since its
+		// sweep then skipped the pre-steps. An attempt on the loop's ctx
+		// would fail every OS call that follows the deregistration in its
+		// pass on the dead context, with `retrying` already false and
+		// nothing ticking again, so where a deregistration falls in a pass
+		// would decide whether the rest of the pass runs. On rootCtx it
+		// never does, as for the fence timer, which reconverges on rootCtx
+		// too.
 		//
 		// Cancelling therefore ends the LOOP, not the attempt: the ctx.Err()
 		// check below is what reads it, one tick late at worst. Shutdown is

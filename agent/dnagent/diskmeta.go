@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"math/bits"
@@ -1015,25 +1016,32 @@ func (d *DiskMeta) FreeSide(
 }
 
 // AllocCloneMeta reserves a contiguous run of DnCloneMetaUnit units for one
-// migration's dm-clone metadata. The first 8 KiB of a freshly chosen slot is
-// zeroed **before** the record is persisted (DN13): without it stale bytes in
-// those units would be misparsed as a valid dm-clone superblock. A
-// crash after the zeroing but before the record leaves the units free and
-// re-zeroed next time; a crash after the record means the slot is already
-// clean.
+// migration's dm-clone metadata, as many units as the caller asks: the
+// migration's count by the shared formula (migrMetaUnits; architecture.md,
+// Metadata units). The first 8 KiB of a freshly chosen slot is zeroed
+// **before** the record is persisted (DN13): without it stale bytes in those
+// units would be misparsed as a valid dm-clone superblock. A crash after the
+// zeroing but before the record leaves the units free and re-zeroed next
+// time; a crash after the record means the slot is already clean.
+//
+// An area with no free run long enough for the request answers with a
+// wrapped noFreeRunError (isNoFreeRun): the units are held by other
+// migrations, or free only in runs too short, which is a wait the caller
+// reports as provisioning and retries (DN13). Every other refusal is a plain
+// error.
 //
 // An existing record passes the same identity gate as a new one, exactly as
 // AllocSide's does (confirmedLocked): its slot is this node's only if its
 // table is. Gated differently from the side record, it could be refused in
-// a converge that got past the side device: that pass would stop at DN13
-// step 2 with the refusal on its migr_dst_info rows, and a destination whose
-// dm-clone is not built yet could not build while the refusal lasts. A
-// dm-clone that serves keeps serving either way (migrDstStopped).
+// a converge that got past the side record: that pass would stop at its run,
+// before the side zeroes or at DN13 step 2, and a destination whose dm-clone
+// is not built yet could not build while the refusal lasts. A dm-clone that
+// serves keeps serving either way (migrDstStopped).
 func (d *DiskMeta) AllocCloneMeta(
 	ctx context.Context,
 	spId uint64,
 	migrId uint64,
-	bytes uint64,
+	units uint64,
 ) (*pb.DnDiskTable_CloneMetaRecord, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1043,10 +1051,9 @@ func (d *DiskMeta) AllocCloneMeta(
 	if err := d.confirmedLocked(); err != nil {
 		return nil, err
 	}
-	if bytes == 0 {
-		return nil, fmt.Errorf("clone metadata size is 0")
+	if units == 0 {
+		return nil, fmt.Errorf("clone metadata size is 0 units")
 	}
-	units := (bytes + common.DnCloneMetaUnit - 1) / common.DnCloneMetaUnit
 	have, start, err := d.planCloneMetaLocked(spId, migrId, units)
 	if err != nil || have != nil {
 		return have, err
@@ -1071,7 +1078,10 @@ func (d *DiskMeta) AllocCloneMeta(
 // planCloneMetaLocked is the decision half of AllocCloneMeta, with nothing
 // written: the record when the slot is already there and big enough, the
 // start of the run a new one would take, or the refusal. AllocCloneMeta and
-// CloneMetaRefusal share it so that both report one refusal in one text.
+// CloneMetaRefusal share it so that both report one refusal in one text. Of
+// its refusals only the area's "no free run" is typed (noFreeRunError, kept
+// through the wrap): a record smaller than the request, and a request larger
+// than the whole area, can never be met by waiting.
 func (d *DiskMeta) planCloneMetaLocked(
 	spId uint64,
 	migrId uint64,
@@ -1088,7 +1098,8 @@ func (d *DiskMeta) planCloneMetaLocked(
 		}
 		return rec, 0, nil
 	}
-	start, err := allocContiguous(d.freeUnitMap(), dnCloneMetaUnitCnt, units)
+	start, err := allocContiguous(
+		d.freeUnitMap(), common.DnCloneMetaUnitCnt, units)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"allocating %d clone-metadata units: %w", units, err)
@@ -1098,23 +1109,24 @@ func (d *DiskMeta) planCloneMetaLocked(
 
 // CloneMetaRefusal is AllocCloneMeta's refusal by the clone-metadata area,
 // computed without allocating, zeroing or saving anything: the error
-// planCloneMetaLocked gives for this slot — a record smaller than the
-// request, or no free run that fits it — and nil when the area would supply
-// one. Nothing else AllocCloneMeta refuses is checked: not the identity gate
-// it applies first (confirmedLocked), and a table that cannot be read, an
-// unformatted disk and a zero size (no caller passes one) read as nil.
+// planCloneMetaLocked gives for this slot of units units — a record smaller
+// than the request, a request larger than the whole area, or no free run that
+// fits it, the one typed refusal (isNoFreeRun) — and nil when the area would
+// supply one. Nothing else AllocCloneMeta refuses is checked: not the
+// identity gate it applies first (confirmedLocked), and a table that cannot
+// be read, an unformatted disk and a zero count (no caller passes one) read
+// as nil.
 func (d *DiskMeta) CloneMetaRefusal(
 	ctx context.Context,
 	spId uint64,
 	migrId uint64,
-	bytes uint64,
+	units uint64,
 ) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if err := d.load(ctx); err != nil || !d.formatted || bytes == 0 {
+	if err := d.load(ctx); err != nil || !d.formatted || units == 0 {
 		return nil
 	}
-	units := (bytes + common.DnCloneMetaUnit - 1) / common.DnCloneMetaUnit
 	_, _, err := d.planCloneMetaLocked(spId, migrId, units)
 	return err
 }
@@ -1162,8 +1174,6 @@ func (d *DiskMeta) FreeCloneMeta(
 	return d.save(ctx, next)
 }
 
-const dnCloneMetaUnitCnt = common.DnCloneMetaSize / common.DnCloneMetaUnit
-
 // freeExtentMap marks every extent index the table already hands out.
 func (d *DiskMeta) freeExtentMap() map[uint64]struct{} {
 	used := make(map[uint64]struct{})
@@ -1197,7 +1207,7 @@ func (d *DiskMeta) freeExtCnt() uint64 {
 }
 
 func (d *DiskMeta) freeUnitCnt() uint64 {
-	return dnCloneMetaUnitCnt - uint64(len(d.freeUnitMap()))
+	return common.DnCloneMetaUnitCnt - uint64(len(d.freeUnitMap()))
 }
 
 // allocRuns is the deterministic side allocator: first fit one contiguous run
@@ -1253,19 +1263,49 @@ func allocRuns(
 }
 
 // allocContiguous is the clone-metadata allocator: first fit, contiguous
-// only — the wrapper dm device is a single linear line.
+// only — the wrapper dm device is a single linear line. A request the area
+// could hold but no free run fits is noFreeRunError, a wait; one larger than
+// the whole area can never fit, and is a plain error.
 func allocContiguous(
 	used map[uint64]struct{},
 	total uint64,
 	want uint64,
 ) (uint64, error) {
+	if want > total {
+		return 0, fmt.Errorf(
+			"a run of %d units exceeds the whole %d-unit area", want, total)
+	}
 	for _, run := range freeRuns(used, total) {
 		if run.count >= want {
 			return run.start, nil
 		}
 	}
-	return 0, fmt.Errorf(
-		"no contiguous run of %d units in the %d-unit area", want, total)
+	return 0, &noFreeRunError{want: want, total: total}
+}
+
+// noFreeRunError is the clone-metadata area's answer when no free run is long
+// enough for a request the area could hold: other migrations hold the units,
+// or the free ones lie in runs too short, since a run is never split
+// (architecture.md, Metadata units). The control plane's count of the node's
+// units makes it rare, and it is a wait, not a fault: units come free as
+// other migrations end. A migration destination that meets it reports
+// provisioning and is retried (DN13). It has a type of its own so that a
+// caller tells it from every other refusal without reading its text, which
+// stays the allocator's.
+type noFreeRunError struct {
+	want  uint64
+	total uint64
+}
+
+func (e *noFreeRunError) Error() string {
+	return fmt.Sprintf(
+		"no contiguous run of %d units in the %d-unit area", e.want, e.total)
+}
+
+// isNoFreeRun reports whether err is, or wraps, the area's noFreeRunError.
+func isNoFreeRun(err error) bool {
+	var noRun *noFreeRunError
+	return errors.As(err, &noRun)
 }
 
 type extentRun struct {

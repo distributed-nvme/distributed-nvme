@@ -19,13 +19,14 @@
 // architecture.md, Revision keys and the sync fan-out; SpConf.next_id past
 // every id the script assigned.
 //
-// `constants` and `geometry` are the exceptions: they open no client and read
-// no key, so a suite runs them on the DRIVER, on the binary it has just built
-// and before it ships anything. They are how a shell suite reads a Go constant,
-// the group geometry formula (architecture.md, Group on-leg layout: meta
-// region, data region, health block) and a side's length to zero
-// (architecture.md, Side provisioning protocol) instead of hand-copying any of
-// them.
+// `constants`, `geometry` and `meta-units` are the exceptions: they open no
+// client and read no key, so a suite runs them on the DRIVER, on the binary it
+// has just built and before it ships anything. They are how a shell suite
+// reads a Go constant, the group geometry formula (architecture.md, Group
+// on-leg layout: meta region, data region, health block), a side's length to
+// zero (architecture.md, Side provisioning protocol) and the units a metadata
+// area gives a copy (architecture.md, Metadata units) instead of hand-copying
+// any of them.
 //
 // Conventions the script relies on:
 //
@@ -874,10 +875,11 @@ func (g *globals) open() (context.Context, func(), *etcdutil.Client) {
 // clusterId reads ClusterConf and derives the cluster_id from it, exactly as
 // the gateway must (architecture.md, cluster_id derivation): cluster_id is not
 // computable from a name alone, so a subcommand that BUILDS a cluster-scoped
-// key comes through here first. Six subcommands never do: put-cluster (it
+// key comes through here first. Seven subcommands never do: put-cluster (it
 // writes the very ClusterConf this reads), get (it is handed a whole key and
 // needs no id), list-workers (the worker registry is keyed by role and seed,
-// not by cluster), ping, and the two etcd-free ones, constants and geometry.
+// not by cluster), ping, and the three etcd-free ones, constants, geometry and
+// meta-units.
 // list-keys is the single CONDITIONAL caller: it reads the ClusterConf when it
 // was given a cluster-scoped kind name and a --cluster, and not when it was
 // given a raw `dnv `-prefixed prefix. Every other subcommand reads it
@@ -1094,6 +1096,7 @@ var commands = []command{
 	{"ping", cmdPing},
 	{"constants", cmdConstants},
 	{"geometry", cmdGeometry},
+	{"meta-units", cmdMetaUnits},
 	{"put-cluster", cmdPutCluster},
 	{"put-dn", cmdPutDn},
 	{"put-cn", cmdPutCn},
@@ -1224,26 +1227,31 @@ func cmdPing(g *globals, args []string) {
 }
 
 // ---------------------------------------------------------------------------
-// constants, geometry — the two subcommands that touch no etcd
+// constants, geometry, meta-units — the three subcommands that touch no etcd
 // ---------------------------------------------------------------------------
 
 // cmdConstants prints, as one JSON object, the common package's constants a
 // shell suite reads instead of typing: transaction budgets and their factors,
-// the slice ceiling and the health timers. It exists because a shell suite
-// cannot import common: every shell suite that starts an etcd has to launch
-// it with --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test
-// plan, Topology), and reads the number here instead of typing it.
+// the slice ceiling, the health timers and the two metadata areas. It exists
+// because a shell suite cannot import common: every shell suite that starts
+// an etcd has to launch it with --max-txn-ops=common.EtcdMaxTxnOps
+// (dnv-worker.md, Integration test plan, Topology), and reads the number here
+// instead of typing it.
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
 // that reads it. Four more are the factors of the SPD13/CLD11 budgets a suite
 // may want to size a case against, and MaxSliceCntPerSp is the slice ceiling —
 // CreateClone's src_slice_cnt bound — that the gateway suite creates a clone
-// at, which is why that suite must read it rather than type it. The last
+// at, which is why that suite must read it rather than type it. The next
 // three are the timers a suite sizes its health and failover waits by: the
 // default check interval a cluster created without one stores, the default
 // primary threshold a pool created without one reads, and the demotion
-// hold's wait (dnv-worker.md RW22).
+// hold's wait (dnv-worker.md RW22). The last four are the metadata areas
+// (architecture.md, Metadata units): the ceiling of a CN's and of a DN's
+// used units, and the unit of each area. The gateway suite's ceiling case
+// fills both areas to those ceilings and sizes its copies in that unit, which
+// it requires to be one size for both areas.
 //
 // It dials nothing and needs no --cluster, so a suite runs it on the DRIVER
 // against the binary it has just built, before any host is contacted.
@@ -1262,6 +1270,11 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultHealthCheckInterval": common.DefaultHealthCheckInterval,
 		"DefaultPrimaryUnhealthy":    common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":        common.DemotionHoldTimeout,
+
+		"CnCloneMetaUnitCnt": common.CnCloneMetaUnitCnt,
+		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
+		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
+		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
 	})
 }
 
@@ -1352,6 +1365,51 @@ func cmdGeometry(g *globals, args []string) {
 		"meta_zero_bytes": metaZeroBytes,
 		"data_zero_bytes": dataZeroBytes,
 	})
+}
+
+// cmdMetaUnits prints the units a metadata area gives one copy
+// (architecture.md, Metadata units) — what CreateClone charges a clone of a
+// thin device of --bytes and CreateMigration a destination of a side of
+// --bytes, in a pool whose block size is --block-size — by calling
+// common.CloneMetaUnits, the one implementation of the formula. A suite sizes
+// its copies by it and checks the units the gateway stored against it, rather
+// than re-deriving either.
+//
+// --bytes is a thin device's size for a clone and the moved group's ext_cnt ×
+// extent_size for a migration. --block-size is the pool's data_block_size and
+// defaults to common.DefaultDmPoolDataBlockSize, as geometry's does. Zero is
+// refused for both: no copy is empty and no stored pool has a zero block
+// size, so a zero is a script that read nothing.
+//
+// Like constants, it touches no etcd and runs on the driver.
+func cmdMetaUnits(g *globals, args []string) {
+	fs := newFlagSet("meta-units", g)
+	copyBytes := fs.Uint64("bytes", 0, "the bytes of the copy (required)")
+	blockSize := fs.Uint64("block-size", common.DefaultDmPoolDataBlockSize,
+		"bdev_conf.dm_pool_conf.data_block_size of the copy's pool")
+	fs.Parse(args)
+
+	units, err := metaUnitsOf(*copyBytes, *blockSize)
+	if err != nil {
+		die("meta-units: %v", err)
+	}
+	emit(map[string]any{
+		"bytes":      *copyBytes,
+		"block_size": *blockSize,
+		"units":      units,
+	})
+}
+
+// metaUnitsOf is meta-units' arithmetic and its two refusals, apart from the
+// flags so that a test can see a refusal without the process exiting.
+func metaUnitsOf(copyBytes uint64, blockSize uint64) (uint64, error) {
+	if copyBytes == 0 {
+		return 0, fmt.Errorf("--bytes is required and must not be 0")
+	}
+	if blockSize == 0 {
+		return 0, fmt.Errorf("--block-size must not be 0")
+	}
+	return common.CloneMetaUnits(copyBytes, blockSize), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2800,6 +2858,17 @@ func cmdPutSs(g *globals, args []string) {
 // cmdPutClone writes one Clone and its SpConf.clone_name_list entry
 // (architecture.md, Clones), then bumps SpRev once. --dst-td accepts either a
 // td name or a td_id.
+//
+// It charges the clone's metadata units as CreateClone does (architecture.md,
+// Metadata units): common.CloneMetaUnits of the destination td's size at the
+// pool's block size, stored on the Clone record and charged to the CN of every
+// cntlr of the pool (chargeCloneCns). The clone drain's last step,
+// model.FinishCloneDelete, gives exactly those charges back, so a planted
+// clone that drains leaves its nodes' counts where it found them. Unlike
+// CreateClone it never refuses a CN past its area: the driver plants whatever
+// shape a case needs, and the worker's cntlr replacement can leave a CN past
+// its ceiling anyway. A --dst-td id that no td of the pool carries is planted
+// with no units, as there is no size to charge for.
 func cmdPutClone(g *globals, args []string) {
 	fs := newFlagSet("put-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2831,7 +2900,10 @@ func cmdPutClone(g *globals, args []string) {
 
 	dstTdId := uint64(0)
 	spRev := uint64(0)
+	units := uint64(0)
+	var charged map[string]uint64
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		dstTdId, units, charged = 0, 0, nil
 		conf, err := getSpConf(s, cid, target)
 		if err != nil {
 			return err
@@ -2839,19 +2911,22 @@ func cmdPutClone(g *globals, args []string) {
 		if containsName(conf.GetCloneNameList(), *name) {
 			return fmt.Errorf("clone %q already exists", *name)
 		}
-		td := &pb.ThinDevice{}
-		if s.Get(model.ThinDeviceKey(cid, target.spId, *dstTd), td) {
-			dstTdId = td.GetTdId()
-		} else {
-			parsed, perr := parseId(*dstTd)
-			if perr != nil {
-				return fmt.Errorf("--dst-td %q: no such td", *dstTd)
-			}
-			dstTdId = parsed
+		var td *pb.ThinDevice
+		dstTdId, td, err = plantedCloneTd(s, cid, conf, *dstTd)
+		if err != nil {
+			return err
+		}
+		units, err = plantedCloneUnits(conf, td)
+		if err != nil {
+			return fmt.Errorf("storage pool %q: %w", target.name, err)
 		}
 		key := model.CloneKey(cid, target.spId, *name)
 		if s.Get(key, &pb.Clone{}) {
 			return fmt.Errorf("%q already exists", key)
+		}
+		charged, err = chargeCloneCns(s, cid, conf, units)
+		if err != nil {
+			return err
 		}
 		s.Put(key, &pb.Clone{
 			CloneId:       uint64(id),
@@ -2861,6 +2936,7 @@ func cmdPutClone(g *globals, args []string) {
 			SrcStripeSize: *srcStripe,
 			SrcBlockSize:  *srcBlock,
 			DstTdId:       dstTdId,
+			MetaUnits:     units,
 		})
 		conf.CloneNameList = append(conf.CloneNameList, *name)
 		advanceNextId(conf, uint64(id))
@@ -2872,12 +2948,112 @@ func cmdPutClone(g *globals, args []string) {
 		die("put-clone: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":    target.name,
-		"clone_name": *name,
-		"clone_id":   idHex(uint64(id)),
-		"dst_td_id":  idHex(dstTdId),
-		"sp_rev":     spRev,
+		"sp_name":     target.name,
+		"clone_name":  *name,
+		"clone_id":    idHex(uint64(id)),
+		"dst_td_id":   idHex(dstTdId),
+		"meta_units":  units,
+		"charged_cns": charged,
+		"sp_rev":      spRev,
 	})
+}
+
+// plantedCloneTd resolves put-clone's --dst-td inside its STM: a td name
+// first, else a td_id, which is looked up among the pool's tds so the clone
+// can be sized. A td_id that no td of the pool carries resolves to itself
+// with a nil td, and put-clone plants that clone with no units.
+func plantedCloneTd(
+	s etcdutil.STM,
+	cid uint64,
+	conf *pb.SpConf,
+	dstTd string,
+) (uint64, *pb.ThinDevice, error) {
+	td := &pb.ThinDevice{}
+	if s.Get(model.ThinDeviceKey(cid, conf.GetSpId(), dstTd), td) {
+		return td.GetTdId(), td, nil
+	}
+	tdId, err := parseId(dstTd)
+	if err != nil {
+		return 0, nil, fmt.Errorf("--dst-td %q: no such td", dstTd)
+	}
+	for _, tdName := range conf.GetTdNameList() {
+		candidate := &pb.ThinDevice{}
+		if !s.Get(model.ThinDeviceKey(cid, conf.GetSpId(), tdName), candidate) {
+			continue
+		}
+		if candidate.GetTdId() == tdId {
+			return tdId, candidate, nil
+		}
+	}
+	return tdId, nil, nil
+}
+
+// plantedCloneUnits is the units CreateClone stores on a clone of td
+// (architecture.md, Metadata units): common.CloneMetaUnits of the td's size
+// at the pool's block size, behind the ValidateBdevConf gate that every
+// model.PoolBlockSize caller sits behind. A nil td has no size and gets no
+// units.
+func plantedCloneUnits(conf *pb.SpConf, td *pb.ThinDevice) (uint64, error) {
+	if td == nil {
+		return 0, nil
+	}
+	bdev := conf.GetBdevConf()
+	if err := model.ValidateBdevConf(bdev); err != nil {
+		return 0, err
+	}
+	return common.CloneMetaUnits(td.GetSize(), model.PoolBlockSize(bdev)), nil
+}
+
+// chargeCloneCns charges a planted clone's units, inside put-clone's STM, to
+// the CN of every cntlr of the pool, as CreateClone charges them
+// (architecture.md, Metadata units): once per cntlr, summed per CN, so each
+// CN is written once, in the order the cntlrs first name it, and a CN that
+// hosts two cntlrs of the pool is charged twice in that one write — exactly
+// what model.FinishCloneDelete later gives back. The capacity value follows
+// the record (model.MaintainCnCapacity) and no CnRev is bumped, since a write
+// that changes only units raises no revision. Nothing is refused for room.
+//
+// Every Cntlr is read before any write, and a listed one that is missing
+// refuses: the record is what names the CN to charge. A CnConf that is gone
+// is skipped, as the release skips it, since there is nothing to charge. Zero
+// units read nothing. The result maps each CN it writes to the units it
+// charges that CN.
+func chargeCloneCns(
+	s etcdutil.STM,
+	cid uint64,
+	conf *pb.SpConf,
+	units uint64,
+) (map[string]uint64, error) {
+	charged := make(map[string]uint64)
+	if units == 0 {
+		return charged, nil
+	}
+	var order []string
+	perCn := make(map[string]uint64)
+	for _, cntlrId := range conf.GetCntlrIdList() {
+		cntlr := &pb.Cntlr{}
+		if !s.Get(model.CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
+			return nil, fmt.Errorf("cntlr %#x not found", cntlrId)
+		}
+		addrPort := cntlr.GetAddrPort()
+		if _, seen := perCn[addrPort]; !seen {
+			order = append(order, addrPort)
+		}
+		perCn[addrPort] += units
+	}
+	for _, addrPort := range order {
+		key := model.CnConfKey(cid, addrPort)
+		cn := &pb.CnConf{}
+		if !s.Get(key, cn) {
+			continue
+		}
+		newCn := proto.Clone(cn).(*pb.CnConf)
+		newCn.UsedMetaUnits += perCn[addrPort]
+		s.Put(key, newCn)
+		model.MaintainCnCapacity(s, cid, addrPort, cn, newCn)
+		charged[addrPort] = perCn[addrPort]
+	}
+	return charged, nil
 }
 
 // cmdPutXfer writes one Transfer and its SpConf.xfer_name_list entry
@@ -2946,10 +3122,15 @@ func cmdPutXfer(g *globals, args []string) {
 // (architecture.md, Migrations) AND appends the destination Side to the
 // SOURCE side's leg, which is what makes the leg carry two sides — the shape
 // RW15 keys migr_src_conf/migr_dst_conf off and the precondition AR8 reads as
-// "a leg with two sides is left alone". The destination DN gets the full
-// CreateStoragePool treatment (architecture.md, Storage pools): the side
-// pointer, the group's ext_cnt off its budget, its capacity key maintained and
-// its DnRev bumped once.
+// "a leg with two sides is left alone". The destination DN gets the
+// CreateMigration treatment (architecture.md, Migrations; Metadata units): the
+// side pointer, the group's ext_cnt off its budget, the migration's metadata
+// units (plantedMigrUnits) on its used count, its capacity key maintained and
+// its DnRev bumped once (chargeMigrDst). The units are stored on the
+// Migration record too, which is where FinishMigration and CancelMigration
+// read what to give back. It refuses a DN short of extents, whose count would
+// wrap below zero, but never one past its metadata area: a used count only
+// grows, and the driver plants whatever shape a case needs.
 func cmdPutMigr(g *globals, args []string) {
 	fs := newFlagSet("put-migr", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2976,9 +3157,9 @@ func cmdPutMigr(g *globals, args []string) {
 	target := resolveSp(ctx, cli, cid, *sp)
 	dstAddr := findNodeAddr(ctx, cli, cid, "dn_conf", uint64(dstDn))
 
-	var legId, grpId, sliceId, extCnt, dnRev, spRev uint64
+	var legId, grpId, sliceId, extCnt, units, dnRev, spRev uint64
 	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		legId, grpId, sliceId, extCnt = 0, 0, 0, 0
+		legId, grpId, sliceId, extCnt, units = 0, 0, 0, 0, 0
 		conf, err := getSpConf(s, cid, target)
 		if err != nil {
 			return err
@@ -3039,6 +3220,11 @@ func cmdPutMigr(g *globals, args []string) {
 				)
 			}
 		}
+		units, err = plantedMigrUnits(
+			conf, extCnt, cc.GetDnBinConf().GetExtentSize())
+		if err != nil {
+			return fmt.Errorf("storage pool %q: %w", target.name, err)
+		}
 		leg.SideList = append(leg.SideList, &pb.Side{
 			SideId:      spec.dstSide,
 			AddrPort:    dstAddr,
@@ -3053,28 +3239,17 @@ func cmdPutMigr(g *globals, args []string) {
 			SrcSideId: spec.srcSide,
 			DstSideId: spec.dstSide,
 			BmCnt:     0,
+			MetaUnits: units,
 		})
 		conf.MigrNameList = append(conf.MigrNameList, spec.name)
 		advanceNextId(conf, spec.migrId, spec.dstSide)
 		s.Put(model.SpConfKey(cid, target.name), conf)
-		// The destination DN's bookkeeping (architecture.md, Storage pools;
-		// Capacity index keys; Revision keys and the sync fan-out).
-		if dn.GetFreeExtCnt() < extCnt {
-			return fmt.Errorf(
-				"dn %#x at %q has free_ext_cnt %d, needs %d",
-				dn.GetDnId(), dstAddr, dn.GetFreeExtCnt(), extCnt,
-			)
-		}
-		newDn := proto.Clone(dn).(*pb.DnConf)
-		newDn.SidePtrList = append(newDn.SidePtrList, &pb.SidePointer{
+		dnRev, err = chargeMigrDst(s, cid, cc, dstAddr, dn, &pb.SidePointer{
 			SpId:   target.spId,
 			LegId:  legId,
 			SideId: spec.dstSide,
-		})
-		newDn.FreeExtCnt -= extCnt
-		s.Put(model.DnConfKey(cid, dstAddr), newDn)
-		model.MaintainDnCapacity(s, cid, dstAddr, cc, dn, newDn)
-		if dnRev, err = bumpDnRev(s, cid, newDn); err != nil {
+		}, extCnt, units)
+		if err != nil {
 			return err
 		}
 		spRev, err = bumpSpRev(s, cid, conf)
@@ -3095,9 +3270,64 @@ func cmdPutMigr(g *globals, args []string) {
 		"dn_id":       idHex(uint64(dstDn)),
 		"addr_port":   dstAddr,
 		"ext_cnt":     extCnt,
+		"meta_units":  units,
 		"dn_revision": dnRev,
 		"sp_rev":      spRev,
 	})
+}
+
+// plantedMigrUnits is the units CreateMigration stores on a migration and
+// charges its destination DN (architecture.md, Metadata units):
+// common.CloneMetaUnits of the moved group's ext_cnt × extent_size at the
+// pool's block size, behind the ValidateBdevConf gate that every
+// model.PoolBlockSize caller sits behind.
+func plantedMigrUnits(
+	conf *pb.SpConf,
+	extCnt uint64,
+	extentSize uint64,
+) (uint64, error) {
+	bdev := conf.GetBdevConf()
+	if err := model.ValidateBdevConf(bdev); err != nil {
+		return 0, err
+	}
+	return common.CloneMetaUnits(
+		extCnt*extentSize, model.PoolBlockSize(bdev)), nil
+}
+
+// chargeMigrDst is put-migr's bookkeeping of its destination DN, inside
+// put-migr's STM, as CreateMigration does it (architecture.md, Storage pools;
+// Capacity index keys; Metadata units; Revision keys and the sync fan-out):
+// the side pointer in, extCnt off free_ext_cnt and the migration's units on
+// used_meta_units, all in the one write of the record, the capacity key
+// following the record (model.MaintainDnCapacity) and the DN's revision
+// bumped once — the units FinishMigration and CancelMigration give back. dn
+// is the record as read in the same STM, which MaintainDnCapacity needs to
+// find the key it replaces. It refuses a DN short of extents, whose count
+// would wrap below zero, and writes nothing then, but never refuses one past
+// its metadata area. It returns the DN's new revision.
+func chargeMigrDst(
+	s etcdutil.STM,
+	cid uint64,
+	cc *pb.ClusterConf,
+	addrPort string,
+	dn *pb.DnConf,
+	ptr *pb.SidePointer,
+	extCnt uint64,
+	units uint64,
+) (uint64, error) {
+	if dn.GetFreeExtCnt() < extCnt {
+		return 0, fmt.Errorf(
+			"dn %#x at %q has free_ext_cnt %d, needs %d",
+			dn.GetDnId(), addrPort, dn.GetFreeExtCnt(), extCnt,
+		)
+	}
+	newDn := proto.Clone(dn).(*pb.DnConf)
+	newDn.SidePtrList = append(newDn.SidePtrList, ptr)
+	newDn.FreeExtCnt -= extCnt
+	newDn.UsedMetaUnits += units
+	s.Put(model.DnConfKey(cid, addrPort), newDn)
+	model.MaintainDnCapacity(s, cid, addrPort, cc, dn, newDn)
+	return bumpDnRev(s, cid, newDn)
 }
 
 // cmdPutBitmap writes one chunk of a clone's or a migration's bitmap
@@ -3723,6 +3953,12 @@ func cmdSetProvisioned(g *globals, args []string) {
 // suite (dnv-worker.md, Integration test plan, The driver) plants whatever
 // shape a case needs, and re-implementing a public precondition in a test
 // driver is how the two drift apart.
+//
+// That precondition is also what lets the sp drain give back no metadata
+// units (architecture.md, Metadata units): a pool that still has a clone or a
+// migration cannot be deleted. A pool latched here while it still holds a
+// planted clone or migration therefore leaves their units charged on its
+// nodes once it has drained.
 func cmdSetDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3936,6 +4172,13 @@ func cmdSetCloneDeleting(g *globals, args []string) {
 // draining. The worker suite drives exactly ONE batch through it, with
 // --max-steps 1, to BUILD case G's restart fixture; the drain that finishes
 // that clone, and every step of the clone before it, is the real coordinator's.
+//
+// Its last step, model.FinishCloneDelete, gives the clone's metadata units
+// back on the CN of every cntlr of the pool (architecture.md, Metadata
+// units). Each of those CNs holds them: CreateClone and put-clone charge the
+// CNs of the cntlrs the pool has at the time, and CreateCntlr, like the
+// worker's cntlr replacement, charges the CN it places a later cntlr on the
+// pool's whole clone sum. Both suites read that release after a drain.
 func cmdDrainClone(g *globals, args []string) {
 	fs := newFlagSet("drain-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")

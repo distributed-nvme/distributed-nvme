@@ -57,9 +57,12 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	ctx := context.Background()
 	// A migration destination is a freshly allocated side: its very first
 	// SyncupSide already carries migr_dst_conf. Under [D15] that side provisions
-	// first — linear and zeroing only, no metadata slot, no connect, no
-	// dm-clone — and only then does the worker flip its flag (architecture.md,
-	// Migration).
+	// first — its run in the clone-metadata area, linear and zeroing only, no
+	// wrapper, no connect, no dm-clone — and only then does the worker flip
+	// its flag (architecture.md, Migration), which
+	// TestMigrationDestinationProvisionsFirst covers. This side provisions
+	// with a plain request instead, so step (2) below is where its run is
+	// taken, its head zeroed before its record.
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
@@ -214,8 +217,9 @@ func TestMigrationDestinationFinishRepointsBeforeRemovingTheClone(t *testing.T) 
 }
 
 // architecture.md, Migration, under [D15]: a migration destination provisions
-// before it does anything else — the aggregate dm-linear and the zeroing, and
-// nothing above it: no clone-metadata slot, no connect, no dm-clone. Below
+// before it does anything else — its run in the clone-metadata area, taken
+// before it zeroes, the aggregate dm-linear and the zeroing, and nothing
+// above them: no wrapper over the run, no connect, no dm-clone. Below
 // SP_LEVEL_NO_MIGRATION its migr_dst_info rows report PROVISIONING throughout
 // (DN13).
 func TestMigrationDestinationProvisionsFirst(t *testing.T) {
@@ -268,12 +272,27 @@ func TestMigrationDestinationProvisionsFirst(t *testing.T) {
 	if node.hasCall("cmd nvme connect") {
 		t.Error("a provisioning destination connected to its source")
 	}
-	if _, ok, _ := srv.meta.LookupCloneMeta(ctx, testSp, testMigrId); ok {
-		t.Error("a provisioning destination reserved a clone-metadata slot")
+	// The run is held, sized by the shared formula, and its head is zeroed
+	// before anything zeroes the side.
+	rec, ok, err := srv.meta.LookupCloneMeta(ctx, testSp, testMigrId)
+	if err != nil || !ok {
+		t.Fatalf("a provisioning destination holds no clone-metadata run: "+
+			"%v/%v", ok, err)
+	}
+	if want := common.CloneMetaUnits(testExtCnt*testExtentSize,
+		testBlockSize); rec.GetUnitCount() != want {
+		t.Errorf("the run is %d units, want %d", rec.GetUnitCount(), want)
+	}
+	waitZeroed(t, srv, testSide)
+	head := node.indexOfCall(fmt.Sprintf("writeblock %s off=%d len=8192",
+		testDisk, common.DnCloneMetaOffset))
+	zeroout := node.indexOfCall("cmd blkdiscard --zeroout")
+	if head < 0 || zeroout < 0 || head > zeroout {
+		t.Errorf("the run's head was zeroed at call %d and the side's first "+
+			"batch ran at call %d; want the head first", head, zeroout)
 	}
 
 	// After the flip the ordinary DN13 sequence runs.
-	waitZeroed(t, srv, testSide)
 	if _, err := srv.SyncupSide(ctx,
 		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 		t.Fatalf("SyncupSide: %v", err)

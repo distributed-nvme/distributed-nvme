@@ -526,6 +526,75 @@ func (e *opsEnv) addSpare(provisioned bool) {
 	mustPut(e.t, e.cli, SliceKey(e.cid, opsSpId, opsSliceId), slice)
 }
 
+// grpDnAddrs is the plan a caller of CreateSpareLeg scans against, read now:
+// the DN of every side of every leg and every spare of the group, as the
+// worker's grpAddrs and the gateway's grpDnAddrs build it. A group the slice
+// does not hold has none.
+func (e *opsEnv) grpDnAddrs(grpId uint64) []string {
+	e.t.Helper()
+	grp := findGroup(e.slice(), grpId)
+	var addrs []string
+	for _, legList := range [][]*pb.Leg{
+		grp.GetLegList(), grp.GetSpareLegList(),
+	} {
+		for _, leg := range legList {
+			for _, side := range leg.GetSideList() {
+				addrs = append(addrs, side.GetAddrPort())
+			}
+		}
+	}
+	return addrs
+}
+
+// putMetaClone plants one clone of the fixture SP holding units metadata
+// units, latched or not, and lists its name in clone_name_list. No node is
+// charged: the tests that need the charge put it with setCnUsed.
+func (e *opsEnv) putMetaClone(
+	name string,
+	cloneId uint64,
+	units uint64,
+	deleting bool,
+) {
+	e.t.Helper()
+	conf := e.spConf()
+	if !slices.Contains(conf.GetCloneNameList(), name) {
+		conf.CloneNameList = append(conf.GetCloneNameList(), name)
+		mustPut(e.t, e.cli, SpConfKey(e.cid, opsSpName), conf)
+	}
+	mustPut(e.t, e.cli, CloneKey(e.cid, opsSpId, name), &pb.Clone{
+		CloneId:   cloneId,
+		SrcNqn:    "nqn.2024-01.io.dnv:src",
+		DstTdId:   601,
+		Deleting:  deleting,
+		MetaUnits: units,
+	})
+}
+
+// setCnUsed sets a CN's used metadata units, in its record and in its
+// capacity value alike, as the charges and releases of architecture.md,
+// Metadata units, leave the two.
+func (e *opsEnv) setCnUsed(addrPort string, used uint64) {
+	e.t.Helper()
+	cn := e.cn(addrPort)
+	cn.UsedMetaUnits = used
+	mustPut(e.t, e.cli, CnConfKey(e.cid, addrPort), cn)
+	if CnAllocatable(cn) {
+		mustPut(e.t, e.cli,
+			CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
+			CnCapacityValue(cn))
+	}
+}
+
+// cnCapValue is the value of the capacity key a CN's record implies, which
+// must be there.
+func (e *opsEnv) cnCapValue(addrPort string) *pb.CnCapacity {
+	e.t.Helper()
+	cn := e.cn(addrPort)
+	value := &pb.CnCapacity{}
+	e.get(CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort), value)
+	return value
+}
+
 // wantPrecondition asserts that err is an *ErrPrecondition raised by op. It
 // also asserts the EU4 contract: the error wraps etcdutil.ErrNoCommit, which
 // is what aborts the transaction without commit and without retry.
@@ -2384,6 +2453,9 @@ func TestGrowSlicePreconditions(t *testing.T) {
 			reason: "dn free_ext_cnt too low",
 		},
 		{
+			// GrowSlice keeps checkDnPick's named refusals: unlike
+			// CreateSpareLeg it does not read a vanished pick as a stale
+			// plan.
 			name: "dn not allocatable",
 			setup: func(env *opsEnv) []Cand {
 				legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
@@ -2393,6 +2465,15 @@ func TestGrowSlicePreconditions(t *testing.T) {
 				return legs
 			},
 			reason: "dn not allocatable",
+		},
+		{
+			name: "dn not found",
+			setup: func(env *opsEnv) []Cand {
+				legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
+				env.delKey(DnConfKey(env.cid, opsDnD))
+				return legs
+			},
+			reason: "dn not found",
 		},
 		{
 			name: "cn free_ext_cnt too low",
@@ -2856,6 +2937,23 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			now:    now,
 			reason: "sp deleting",
 		},
+		{
+			// A listed clone with no key: the units it holds cannot be
+			// moved exactly, for spFootprint's reason.
+			name: "clone not found",
+			setup: func(env *opsEnv) Cand {
+				env.setCntlrErr(opsCntlrB, 1000)
+				env.putMetaClone("c0", 901, 3, false)
+				env.setCnUsed(opsCnB, 3)
+				conf := env.spConf()
+				conf.CloneNameList = append(conf.GetCloneNameList(), "lost")
+				mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+				return env.cnCand(opsCnC)
+			},
+			oldId:  opsCntlrB,
+			now:    now,
+			reason: "clone not found",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newOpsEnv(t)
@@ -2865,6 +2963,7 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			cand := tc.setup(env)
 			revBefore := env.spRev()
 			nextBefore := env.spConf().GetNextId()
+			cnB, cnC := env.cn(opsCnB), env.cn(opsCnC)
 			_, err := ReplaceCntlr(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
 				tc.oldId, cand, plan, tc.asPrimary, tc.now,
@@ -2884,6 +2983,13 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			}
 			if got := env.spRev(); got != revBefore {
 				t.Errorf("SpRev: got %d, want %d", got, revBefore)
+			}
+			// Neither CN moved: not the extents, not the units.
+			if got := env.cn(opsCnB); !proto.Equal(got, cnB) {
+				t.Errorf("cn-b moved on a refusal: %v", got)
+			}
+			if got := env.cn(opsCnC); !proto.Equal(got, cnC) {
+				t.Errorf("cn-c moved on a refusal: %v", got)
 			}
 		})
 	}
@@ -2911,6 +3017,287 @@ func TestReplaceCntlrChecksOnlyAGain(t *testing.T) {
 	}
 }
 
+// replaceStandbyB replaces the fixture's standby cntlr B, unhealthy for
+// cntlr_unhealthy, by a cntlr on cn-c, planned against cn-a's surviving
+// cntlr, and returns the new cntlr's id.
+func replaceStandbyB(t *testing.T, env *opsEnv) uint64 {
+	t.Helper()
+	env.setCntlrErr(opsCntlrB, 1000)
+	now := uint64(1000 + common.DefaultCntlrUnhealthy)
+	newId, err := ReplaceCntlr(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		opsCntlrB, env.cnCand(opsCnC), []string{opsCnA}, false, now,
+	)
+	if err != nil {
+		t.Fatalf("ReplaceCntlr: %v", err)
+	}
+	return newId
+}
+
+// TestReplaceCntlrMovesCloneMetaUnits pins the units half of ReplaceCntlr
+// (architecture.md, Metadata units). The CN of every cntlr is charged every
+// clone of the SP, so the replacement moves the SP's clone sum off the old CN
+// and onto the new one, in the same writes as the footprint. A latched clone
+// counts: FinishCloneDelete gives its units back on the CNs of the cntlrs
+// the SP has when it runs, which after this op is the new CN. Counts other
+// SPs charged stay where they are, the capacity values follow the records,
+// the clones themselves are not rewritten, and each CN still gets exactly one
+// CnRev bump, the surviving cntlr's CN none.
+func TestReplaceCntlrMovesCloneMetaUnits(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putMetaClone("c0", 901, 3, false)
+	env.putMetaClone("c1", 902, 5, true) // latched, still charged
+	const sum = 3 + 5
+	// Every CN also holds units of another SP, which no step here touches.
+	env.setCnUsed(opsCnA, sum+2)
+	env.setCnUsed(opsCnB, sum+4)
+	env.setCnUsed(opsCnC, 6)
+	before := struct {
+		cnA                    *pb.CnConf
+		c0, c1                 *pb.Clone
+		cnARev, cnBRev, cnCRev uint64
+	}{
+		env.cn(opsCnA), env.clone("c0"), env.clone("c1"),
+		env.cnRev(opsCnA), env.cnRev(opsCnB), env.cnRev(opsCnC),
+	}
+
+	replaceStandbyB(t, env)
+
+	if got := env.cn(opsCnB).GetUsedMetaUnits(); got != 4 {
+		t.Errorf("cn-b used_meta_units: got %d, want 4 (the SP's %d gone)",
+			got, sum)
+	}
+	if got := env.cn(opsCnC).GetUsedMetaUnits(); got != 6+sum {
+		t.Errorf("cn-c used_meta_units: got %d, want %d (6 plus the SP's "+
+			"%d)", got, 6+sum, sum)
+	}
+	for _, tc := range []struct {
+		addrPort string
+		used     uint64
+	}{{opsCnB, 4}, {opsCnC, 6 + sum}} {
+		value := env.cnCapValue(tc.addrPort)
+		if value.GetUsedMetaUnits() != tc.used ||
+			value.GetLocation() != tc.addrPort {
+			t.Errorf("%s capacity value: got %v, want location %s and "+
+				"%d used", tc.addrPort, value, tc.addrPort, tc.used)
+		}
+	}
+	if got := env.cn(opsCnA); !proto.Equal(got, before.cnA) {
+		t.Errorf("cn-a, the surviving cntlr's CN, moved: %v", got)
+	}
+	if got := env.clone("c0"); !proto.Equal(got, before.c0) {
+		t.Errorf("clone c0 rewritten: %v", got)
+	}
+	if got := env.clone("c1"); !proto.Equal(got, before.c1) {
+		t.Errorf("clone c1 rewritten: %v", got)
+	}
+	for _, tc := range []struct {
+		addrPort string
+		rev      uint64
+	}{
+		{opsCnA, before.cnARev},
+		{opsCnB, before.cnBRev + 1},
+		{opsCnC, before.cnCRev + 1},
+	} {
+		if got := env.cnRev(tc.addrPort); got != tc.rev {
+			t.Errorf("%s rev: got %d, want %d", tc.addrPort, got, tc.rev)
+		}
+	}
+}
+
+// TestReplaceCntlrChargesPastTheCeiling is the one charge allowed to pass a
+// CN's ceiling (architecture.md, Metadata units): a replacement restores the
+// whole SP, so the pick's room is no precondition. cn-c starts one unit below
+// common.CnCloneMetaUnitCnt and ends past it, and keeps its capacity key —
+// units never decide the key's presence — with a value that reads no free
+// unit, so a scan that asks for units skips it from now on.
+func TestReplaceCntlrChargesPastTheCeiling(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putMetaClone("c0", 901, 5, false)
+	env.setCnUsed(opsCnB, 5)
+	env.setCnUsed(opsCnC, common.CnCloneMetaUnitCnt-1)
+
+	replaceStandbyB(t, env)
+
+	cn := env.cn(opsCnC)
+	if want := uint64(common.CnCloneMetaUnitCnt - 1 + 5); cn.GetUsedMetaUnits() !=
+		want {
+		t.Errorf("cn-c used_meta_units: got %d, want %d",
+			cn.GetUsedMetaUnits(), want)
+	}
+	if got := CnFreeMetaUnits(cn); got != 0 {
+		t.Errorf("cn-c free units: got %d, want 0 past the ceiling", got)
+	}
+	if !env.exists(CnCapacityKey(env.cid, opsCnFree-opsFootprint, opsCnC)) {
+		t.Fatalf("cn-c lost its capacity key: units must not decide it")
+	}
+	value := env.cnCapValue(opsCnC)
+	if value.GetUsedMetaUnits() != cn.GetUsedMetaUnits() {
+		t.Errorf("cn-c capacity value: got %d used, want the record's %d",
+			value.GetUsedMetaUnits(), cn.GetUsedMetaUnits())
+	}
+	if got := CnCapacityFreeMetaUnits(value); got != 0 {
+		t.Errorf("cn-c capacity value: %d free units, want 0", got)
+	}
+}
+
+// TestReplaceCntlrReleaseStopsAtZero pins the release's floor (architecture.md,
+// Metadata units): an old CN holding fewer units than the SP's sum ends at
+// zero, never at a count wrapped around to one that would refuse every later
+// charge, and the new CN is still charged the whole sum.
+func TestReplaceCntlrReleaseStopsAtZero(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putMetaClone("c0", 901, 5, false)
+	env.setCnUsed(opsCnB, 2)
+
+	replaceStandbyB(t, env)
+
+	if got := env.cn(opsCnB).GetUsedMetaUnits(); got != 0 {
+		t.Errorf("cn-b used_meta_units: got %d, want 0", got)
+	}
+	if got := env.cnCapValue(opsCnB).GetUsedMetaUnits(); got != 0 {
+		t.Errorf("cn-b capacity value: got %d used, want 0", got)
+	}
+	if got := env.cn(opsCnC).GetUsedMetaUnits(); got != 5 {
+		t.Errorf("cn-c used_meta_units: got %d, want the SP's 5", got)
+	}
+}
+
+// TestReplaceCntlrAtTheCeiling commits one maximum-shape ReplaceCntlr against
+// the real etcd this package runs with --max-txn-ops=common.EtcdMaxTxnOps:
+// MaxCntlrCntPerSp cntlrs on as many CNs, MaxSliceCntPerSp slices for the
+// footprint, MaxSsCntPerSp subsystems whose CdcEntry the listing rule
+// rewrites, and MaxCloneCntPerSp clones, each read once for the units the op
+// moves. That shape is past etcd's own default limit (the EtcdMaxTxnOps
+// comment counts it), so this is where a read added to the op, or a change
+// in how etcdutil builds the txn, would show up as "too many operations in
+// txn request" once it passes the requirement. Every key the op writes
+// carries one mod_revision: it is one transaction.
+func TestReplaceCntlrAtTheCeiling(t *testing.T) {
+	env := newOpsEnv(t)
+	const newCnAddr = "ceil-cn-new:9000"
+	conf := env.spConf()
+
+	// The cntlrs: the fixture's A (primary, cn-a) and B (cn-b), and one
+	// more on a CN of its own up to the ceiling, each listed by the rule.
+	cntlrAddrs := []string{opsCnA, opsCnB}
+	for idx := len(conf.GetCntlrIdList()); idx < common.MaxCntlrCntPerSp; idx++ {
+		addrPort := fmt.Sprintf("ceil-cn-%d:9000", idx)
+		cntlrId := opsCntlrB + uint64(idx)
+		env.putCn(addrPort, uint64(810+idx), uint32(idx), opsCnFree)
+		mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, cntlrId), &pb.Cntlr{
+			AddrPort:   addrPort,
+			NvmeTrConf: opsTrConf(addrPort),
+			CntlidSlot: uint32(idx),
+		})
+		conf.CntlrIdList = append(conf.CntlrIdList, cntlrId)
+		cntlrAddrs = append(cntlrAddrs, addrPort)
+	}
+	env.putCn(newCnAddr, 899, 9, 4*opsCnFree)
+
+	// The slices: one extent each on top of the fixture's.
+	for idx := len(conf.GetSliceIdList()); idx < common.MaxSliceCntPerSp; idx++ {
+		sliceId := uint64(3000 + idx)
+		mustPut(t, env.cli, SliceKey(env.cid, opsSpId, sliceId), &pb.Slice{
+			SliceIdx:    uint32(idx),
+			DataGrpList: []*pb.Group{{GrpId: uint64(30000 + idx), ExtCnt: 1}},
+		})
+		conf.SliceIdList = append(conf.SliceIdList, sliceId)
+	}
+	footprint := opsFootprint + uint64(common.MaxSliceCntPerSp-1)
+
+	// The subsystems, every CdcEntry listing all four cntlrs: whatever it
+	// lists, the rewrite to a list with the new cntlr changes every one.
+	var trConfs []*pb.NvmeTrConf
+	for _, addrPort := range cntlrAddrs {
+		trConfs = append(trConfs, opsTrConf(addrPort))
+	}
+	var cdcKeys []string
+	for idx := 0; idx < common.MaxSsCntPerSp; idx++ {
+		nqn, ssId := opsNqn, opsSsId
+		if idx > 0 {
+			nqn = fmt.Sprintf("nqn.2024-01.io.dnv:ceil-%d", idx)
+			ssId = opsSsId + uint64(idx)
+			mustPut(t, env.cli, SubsystemKey(env.cid, opsSpId, nqn),
+				&pb.Subsystem{SsId: ssId})
+			conf.NqnList = append(conf.NqnList, nqn)
+		}
+		key := CdcEntryKey(env.cid, opsShard, opsSpId, ssId)
+		mustPut(t, env.cli, key, &pb.CdcEntry{Nqn: nqn, NvmeTrConfList: trConfs})
+		cdcKeys = append(cdcKeys, key)
+	}
+
+	// The clones, every third one latched.
+	sum := uint64(0)
+	for idx := 0; idx < common.MaxCloneCntPerSp; idx++ {
+		name := fmt.Sprintf("ceil-clone-%02d", idx)
+		units := uint64(1 + idx%3)
+		mustPut(t, env.cli, CloneKey(env.cid, opsSpId, name), &pb.Clone{
+			CloneId:   uint64(9000 + idx),
+			DstTdId:   601,
+			Deleting:  idx%3 == 0,
+			MetaUnits: units,
+		})
+		conf.CloneNameList = append(conf.CloneNameList, name)
+		sum += units
+	}
+	mustPut(t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+	env.setCnUsed(opsCnB, sum)
+
+	env.setCntlrErr(opsCntlrB, 1000)
+	now := uint64(1000 + common.DefaultCntlrUnhealthy)
+	newId, err := ReplaceCntlr(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		opsCntlrB, env.cnCand(newCnAddr), env.otherCntlrAddrs(opsCntlrB),
+		false, now,
+	)
+	if err != nil {
+		t.Fatalf("a maximum-shape ReplaceCntlr (%d cntlrs, %d slices, %d "+
+			"subsystems, %d clones) did not commit: %v (a \"too many "+
+			"operations in txn request\" here means common.EtcdMaxTxnOps no "+
+			"longer covers it)", common.MaxCntlrCntPerSp,
+			common.MaxSliceCntPerSp, common.MaxSsCntPerSp,
+			common.MaxCloneCntPerSp, err)
+	}
+
+	if got := len(env.spConf().GetCntlrIdList()); got != common.MaxCntlrCntPerSp {
+		t.Errorf("cntlr_id_list: %d cntlrs, want %d", got,
+			common.MaxCntlrCntPerSp)
+	}
+	oldCn, newCn := env.cn(opsCnB), env.cn(newCnAddr)
+	if oldCn.GetUsedMetaUnits() != 0 || newCn.GetUsedMetaUnits() != sum {
+		t.Errorf("used_meta_units: cn-b %d, new cn %d, want 0 and the "+
+			"sum %d over every clone", oldCn.GetUsedMetaUnits(),
+			newCn.GetUsedMetaUnits(), sum)
+	}
+	if newCn.GetFreeExtCnt() != 4*opsCnFree-footprint {
+		t.Errorf("new cn free_ext_cnt: got %d, want %d",
+			newCn.GetFreeExtCnt(), 4*opsCnFree-footprint)
+	}
+	// One transaction, one revision: the new cntlr, both CNs, the SpConf
+	// and every CdcEntry, each rewritten to list the new cntlr.
+	rev := env.modRev(CntlrKey(env.cid, opsSpId, newId))
+	written := append([]string{
+		CnConfKey(env.cid, opsCnB),
+		CnConfKey(env.cid, newCnAddr),
+		SpConfKey(env.cid, opsSpName),
+	}, cdcKeys...)
+	for _, key := range written {
+		if got := env.modRev(key); got != rev {
+			t.Errorf("%s: mod_revision %d, want the op's %d", key, got, rev)
+		}
+	}
+	for _, key := range cdcKeys {
+		entry := &pb.CdcEntry{}
+		env.get(key, entry)
+		list := entry.GetNvmeTrConfList()
+		if len(list) == 0 ||
+			!proto.Equal(list[len(list)-1], opsTrConf(newCnAddr)) {
+			t.Errorf("%s: %v, want the new cntlr listed last", key, list)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Spare legs
 // ---------------------------------------------------------------------------
@@ -2920,7 +3307,8 @@ func TestCreateSpareLeg(t *testing.T) {
 	before := struct{ spRev, dnCRev uint64 }{env.spRev(), env.dnRev(opsDnC)}
 	legId, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnC), env.cc,
+		opsSliceId, opsDataGrpId, env.dnCand(opsDnC),
+		env.grpDnAddrs(opsDataGrpId), env.cc,
 	)
 	if err != nil {
 		t.Fatalf("CreateSpareLeg: %v", err)
@@ -2977,7 +3365,8 @@ func TestCreateSpareLeg(t *testing.T) {
 	}
 	// A second spare on a different DN fills the list once the first one's
 	// side is provisioned (an unprovisioned spare holds the next create
-	// back); a third is refused.
+	// back); a third is refused. Each create is planned after the one
+	// before it, so its plan holds every spare the group has.
 	if _, err := FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId,
 		[]SideRef{{
@@ -2988,14 +3377,16 @@ func TestCreateSpareLeg(t *testing.T) {
 	}
 	if _, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand(opsDnD), env.cc,
+		opsSliceId, opsDataGrpId, env.dnCand(opsDnD),
+		env.grpDnAddrs(opsDataGrpId), env.cc,
 	); err != nil {
 		t.Fatalf("CreateSpareLeg second: %v", err)
 	}
 	env.putDn("dn-e:9000", 704, 4, opsDnFree)
 	_, err = CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, env.dnCand("dn-e:9000"), env.cc,
+		opsSliceId, opsDataGrpId, env.dnCand("dn-e:9000"),
+		env.grpDnAddrs(opsDataGrpId), env.cc,
 	)
 	precondition := wantPrecondition(t, err, opCreateSpareLeg)
 	if precondition.Reason != "spare list full" {
@@ -3003,83 +3394,176 @@ func TestCreateSpareLeg(t *testing.T) {
 	}
 }
 
-// TestCreateSpareLegRefusesWhileASpareIsPending pins AR8 step 3's guard inside
-// the STM (AR2): two owners overlapping on one SP plan a spare for the same
-// repair from ONE snapshot, in which the group has none, and each picks a DN of
-// its own. The first create commits; the second must fail its precondition
-// while the first spare's side is still unprovisioned, and write nothing,
-// rather than add a second spare no failure asked for. The refusal lifts once
-// that side is provisioned — a group may hold MaxSpareLegPerGrp spares of
-// standby capacity — so the same pick then commits.
-func TestCreateSpareLegRefusesWhileASpareIsPending(t *testing.T) {
-	env := newOpsEnv(t)
+// overlapSpareCreate is AR2's spare-create overlap up to the first commit:
+// two owners overlapping on one SP plan a spare for the same repair from ONE
+// snapshot, in which the group has none — one plan, the group's DNs — and
+// each picks a DN of its own. Owner A's create commits. It returns the plan,
+// owner B's pick and owner A's new spare.
+func overlapSpareCreate(t *testing.T, env *opsEnv) ([]string, Cand, *pb.Leg) {
+	t.Helper()
+	plan := env.grpDnAddrs(opsDataGrpId)
 	ownerA := env.dnCand(opsDnC)
 	ownerB := env.dnCand(opsDnD)
 	legId, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, ownerA, env.cc,
+		opsSliceId, opsDataGrpId, ownerA, plan, env.cc,
 	)
 	if err != nil {
 		t.Fatalf("CreateSpareLeg (owner A): %v", err)
 	}
-	spRev := env.spRev()
-	conf := env.spConf()
-	dnD := env.dn(opsDnD)
-	dnDRev := env.dnRev(opsDnD)
-	_, err = CreateSpareLeg(
+	spare := findLeg(env.slice(), legId)
+	if spare == nil {
+		t.Fatalf("owner A's spare %d is not in the slice", legId)
+	}
+	return plan, ownerB, spare
+}
+
+// spareRefusal is what a refused CreateSpareLeg must leave as it found it:
+// the SP's revision and conf, the picked DN's record and revision, and the
+// group's spare list.
+type spareRefusal struct {
+	addrPort string
+	spRev    uint64
+	conf     *pb.SpConf
+	dn       *pb.DnConf
+	dnRev    uint64
+	spares   []*pb.Leg
+}
+
+// witnessSpareRefusal records the state a refused create on addrPort must
+// not move.
+func (e *opsEnv) witnessSpareRefusal(addrPort string) spareRefusal {
+	e.t.Helper()
+	return spareRefusal{
+		addrPort: addrPort,
+		spRev:    e.spRev(),
+		conf:     e.spConf(),
+		dn:       e.dn(addrPort),
+		dnRev:    e.dnRev(addrPort),
+		spares:   findGroup(e.slice(), opsDataGrpId).GetSpareLegList(),
+	}
+}
+
+// check asserts that nothing the witness recorded moved.
+func (w spareRefusal) check(t *testing.T, env *opsEnv) {
+	t.Helper()
+	if got := env.spRev(); got != w.spRev {
+		t.Errorf("SpRev: got %d, want %d", got, w.spRev)
+	}
+	if got := env.spConf(); !proto.Equal(got, w.conf) {
+		t.Errorf("SpConf moved on a refusal: %v", got)
+	}
+	if got := env.dn(w.addrPort); !proto.Equal(got, w.dn) {
+		t.Errorf("%s moved on a refusal: %v", w.addrPort, got)
+	}
+	if got := env.dnRev(w.addrPort); got != w.dnRev {
+		t.Errorf("%s rev: got %d, want %d", w.addrPort, got, w.dnRev)
+	}
+	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
+	if len(spares) != len(w.spares) {
+		t.Fatalf("spares: got %d, want %d", len(spares), len(w.spares))
+	}
+	for idx := range spares {
+		if !proto.Equal(spares[idx], w.spares[idx]) {
+			t.Errorf("spare %d moved on a refusal: %v", idx, spares[idx])
+		}
+	}
+}
+
+// TestCreateSpareLegRefusesWhileASpareIsPending pins AR8 step 3's hold inside
+// the STM (AR2): of two owners that planned one repair from one snapshot,
+// the second must fail its precondition while the first one's spare is still
+// unprovisioned, and write nothing, rather than add a second spare no failure
+// asked for.
+func TestCreateSpareLegRefusesWhileASpareIsPending(t *testing.T) {
+	env := newOpsEnv(t)
+	plan, ownerB, spare := overlapSpareCreate(t, env)
+	witness := env.witnessSpareRefusal(opsDnD)
+	_, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, ownerB, env.cc,
+		opsSliceId, opsDataGrpId, ownerB, plan, env.cc,
 	)
 	precondition := wantPrecondition(t, err, opCreateSpareLeg)
 	if precondition.Reason != ReasonSpareUnprovisioned {
 		t.Errorf("Reason: got %q, want %q",
 			precondition.Reason, ReasonSpareUnprovisioned)
 	}
+	witness.check(t, env)
 	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
-	if len(spares) != 1 || spares[0].GetLegId() != legId {
-		t.Fatalf("spares: got %v, want owner A's leg %d alone", spares, legId)
+	if len(spares) != 1 || spares[0].GetLegId() != spare.GetLegId() {
+		t.Fatalf("spares: got %v, want owner A's leg %d alone",
+			spares, spare.GetLegId())
 	}
-	if got := env.spRev(); got != spRev {
-		t.Errorf("SpRev: got %d, want %d", got, spRev)
-	}
-	if got := env.spConf(); !proto.Equal(got, conf) {
-		t.Errorf("SpConf moved on a refusal: %v", got)
-	}
-	if got := env.dn(opsDnD); !proto.Equal(got, dnD) {
-		t.Errorf("dn-d moved on a refusal: %v", got)
-	}
-	if got := env.dnRev(opsDnD); got != dnDRev {
-		t.Errorf("dn-d rev: got %d, want %d", got, dnDRev)
-	}
-	// RW18's flip of the spare's side is what lifts the refusal.
+}
+
+// TestCreateSpareLegRefusesASecondOwnerAfterTheFlip is the same overlap once
+// RW18 has flipped the first owner's spare, which lifts the hold above: a
+// group may keep MaxSpareLegPerGrp spares of standby capacity, and nothing
+// records which repair a spare was made for. The gain check closes that gap
+// for two plans read from one snapshot, as here; AR2 names the one case it
+// leaves open. The second owner's plan, read before the first create, does
+// not hold the first spare's DN, so its STM finds the group has gained a DN
+// and fails with ReasonCandidateChanged, writing nothing; its next pass
+// plans from a snapshot that holds the spare, which AR8 switches in or
+// waits for. A create planned after the flip, from a plan that holds the
+// spare, still commits.
+func TestCreateSpareLegRefusesASecondOwnerAfterTheFlip(t *testing.T) {
+	env := newOpsEnv(t)
+	plan, ownerB, spare := overlapSpareCreate(t, env)
 	if _, err := FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId,
 		[]SideRef{{
 			SliceId: opsSliceId,
-			LegId:   legId,
-			SideId:  spares[0].GetSideList()[0].GetSideId(),
+			LegId:   spare.GetLegId(),
+			SideId:  spare.GetSideList()[0].GetSideId(),
 		}},
 	); err != nil {
 		t.Fatalf("FlipProvisioned: %v", err)
 	}
+	witness := env.witnessSpareRefusal(opsDnD)
+	_, err := CreateSpareLeg(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, opsDataGrpId, ownerB, plan, env.cc,
+	)
+	precondition := wantPrecondition(t, err, opCreateSpareLeg)
+	if precondition.Reason != ReasonCandidateChanged {
+		t.Errorf("Reason: got %q, want %q",
+			precondition.Reason, ReasonCandidateChanged)
+	}
+	witness.check(t, env)
+	// Planned again, from the group as it is now, the same DN commits.
 	if _, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, opsDataGrpId, ownerB, env.cc,
+		opsSliceId, opsDataGrpId, env.dnCand(opsDnD),
+		env.grpDnAddrs(opsDataGrpId), env.cc,
 	); err != nil {
-		t.Fatalf("CreateSpareLeg (owner B) after the flip: %v", err)
+		t.Fatalf("CreateSpareLeg from a fresh plan: %v", err)
 	}
-	spares = findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
+	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
 	if len(spares) != 2 {
-		t.Errorf("spares after the flip: got %d, want 2", len(spares))
+		t.Errorf("spares after the fresh plan: got %d, want 2", len(spares))
 	}
 }
 
+// TestCreateSpareLegPreconditions is the op's refusals, each writing nothing.
+// The plan a row hands the op is read after its setup unless planBefore is
+// set: a plan read before the setup is the snapshot a caller planned from
+// when the setup's change landed between its scan and its STM.
+//
+// The rows split three ways. A DN the group gained since the plan, even the
+// pick's own, and a pick gone stale since the scan — its capacity key moved,
+// its DnConf deleted, the DN disabled or short of extents — are all
+// ReasonCandidateChanged, on which the caller plans again. A pick inside
+// the caller's own plan stays the hard "dn already in the group": no caller
+// that black-lists its plan can hand one. The rest are the op's own
+// refusals.
 func TestCreateSpareLegPreconditions(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		grpId  uint64
-		setup  func(env *opsEnv) Cand
-		reason string
+		name       string
+		grpId      uint64
+		planBefore bool
+		setup      func(env *opsEnv) Cand
+		reason     string
 	}{
 		{
 			name:   "group not found",
@@ -3095,7 +3579,7 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 		},
 		{
 			// Provisioned, or the unprovisioned-spare refusal would answer
-			// first.
+			// first. The plan holds the spare, so this is a pick inside it.
 			name:  "dn already a spare of the group",
 			grpId: opsDataGrpId,
 			setup: func(env *opsEnv) Cand {
@@ -3103,6 +3587,74 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 				return env.dnCand(opsDnC)
 			},
 			reason: "dn already in the group",
+		},
+		{
+			// A spare committed after the plan, on a DN of its own: the
+			// pick may share its failure domain, which only the plan can
+			// tell.
+			name:       "a spare the plan did not hold",
+			grpId:      opsDataGrpId,
+			planBefore: true,
+			setup: func(env *opsEnv) Cand {
+				env.addSpare(true)
+				return env.dnCand(opsDnD)
+			},
+			reason: ReasonCandidateChanged,
+		},
+		{
+			// A migration's destination, the second side of an active leg,
+			// is a gain too, and the unprovisioned-spare hold, which reads
+			// spares only, does not see it.
+			name:       "a migration destination the plan did not hold",
+			grpId:      opsDataGrpId,
+			planBefore: true,
+			setup: func(env *opsEnv) Cand {
+				slice := env.slice()
+				leg := findLeg(slice, opsDataLegB)
+				leg.SideList = append(leg.SideList,
+					opsSide(opsDataSideB+100, opsDnD, false))
+				mustPut(env.t, env.cli,
+					SliceKey(env.cid, opsSpId, opsSliceId), slice)
+				return env.dnCand(opsDnC)
+			},
+			reason: ReasonCandidateChanged,
+		},
+		{
+			// The gain on the pick's own DN is a stale plan as well, and
+			// the gain check comes before "dn already in the group", so the
+			// caller plans again instead of reading a refusal.
+			name:       "a gain the plan did not hold on the pick's dn",
+			grpId:      opsDataGrpId,
+			planBefore: true,
+			setup: func(env *opsEnv) Cand {
+				env.addSpare(true)
+				return env.dnCand(opsDnC)
+			},
+			reason: ReasonCandidateChanged,
+		},
+		{
+			name:       "the pick's dn_conf deleted",
+			grpId:      opsDataGrpId,
+			planBefore: true,
+			setup: func(env *opsEnv) Cand {
+				cand := env.dnCand(opsDnC)
+				env.delKey(DnConfKey(env.cid, opsDnC))
+				return cand
+			},
+			reason: ReasonCandidateChanged,
+		},
+		{
+			name:       "the pick disabled",
+			grpId:      opsDataGrpId,
+			planBefore: true,
+			setup: func(env *opsEnv) Cand {
+				cand := env.dnCand(opsDnC)
+				dn := env.dn(opsDnC)
+				dn.Disabled = true
+				mustPut(env.t, env.cli, DnConfKey(env.cid, opsDnC), dn)
+				return cand
+			},
+			reason: ReasonCandidateChanged,
 		},
 		{
 			// A migration off a spare gives it a second side, unprovisioned
@@ -3153,13 +3705,16 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 			reason: ReasonCandidateChanged,
 		},
 		{
-			name:  "dn free_ext_cnt too low",
+			// A pick whose key still matches but whose free count is below
+			// the group's ext_cnt is stale all the same: a rescan never
+			// offers it.
+			name:  "the pick short of extents",
 			grpId: opsDataGrpId,
 			setup: func(env *opsEnv) Cand {
 				env.putDn(opsDnC, 702, 2, 2)
 				return env.dnCand(opsDnC)
 			},
-			reason: "dn free_ext_cnt too low",
+			reason: ReasonCandidateChanged,
 		},
 		{
 			name:  "sp level suppresses reactions",
@@ -3174,14 +3729,22 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newOpsEnv(t)
+			var plan []string
+			if tc.planBefore {
+				plan = env.grpDnAddrs(tc.grpId)
+			}
 			cand := tc.setup(env)
+			if !tc.planBefore {
+				plan = env.grpDnAddrs(tc.grpId)
+			}
 			revBefore := env.spRev()
+			nextBefore := env.spConf().GetNextId()
 			spareBefore := len(
 				findGroup(env.slice(), opsDataGrpId).GetSpareLegList(),
 			)
 			_, err := CreateSpareLeg(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-				opsSliceId, tc.grpId, cand, env.cc,
+				opsSliceId, tc.grpId, cand, plan, env.cc,
 			)
 			precondition := wantPrecondition(t, err, opCreateSpareLeg)
 			if precondition.Reason != tc.reason {
@@ -3196,11 +3759,46 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 			if spareAfter != spareBefore {
 				t.Errorf("the spare list must be untouched")
 			}
+			if got := env.spConf().GetNextId(); got != nextBefore {
+				t.Errorf("next_id: got %d, want %d", got, nextBefore)
+			}
 			if got := env.spRev(); got != revBefore {
 				t.Errorf("SpRev: got %d, want %d", got, revBefore)
 			}
 		})
 	}
+}
+
+// TestCreateSpareLegChecksOnlyAGain is the other half of the gain check, as
+// TestReplaceCntlrChecksOnlyAGain is ReplaceCntlr's: a DN the plan held that
+// has left the group since is no reason to plan again. The pick is still off
+// every DN and out of every location the group's sides hold, which were all
+// in the plan, and the room the departure freed is a candidate the scan did
+// not count on, like a DN that joins after it.
+func TestCreateSpareLegChecksOnlyAGain(t *testing.T) {
+	env := newOpsEnv(t)
+	// The plan names dn-d, which no side of the group holds any more.
+	plan := append(env.grpDnAddrs(opsDataGrpId), opsDnD)
+	legId, err := CreateSpareLeg(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, opsDataGrpId, env.dnCand(opsDnC), plan, env.cc,
+	)
+	if err != nil {
+		t.Fatalf("CreateSpareLeg: %v", err)
+	}
+	spare := findLeg(env.slice(), legId)
+	if spare == nil || singleSideAddr(spare) != opsDnC {
+		t.Errorf("spare: got %v, want leg %d on %s", spare, legId, opsDnC)
+	}
+}
+
+// singleSideAddr is the DN of a leg's one side, or "" when it has not
+// exactly one.
+func singleSideAddr(leg *pb.Leg) string {
+	if len(leg.GetSideList()) != 1 {
+		return ""
+	}
+	return leg.GetSideList()[0].GetAddrPort()
 }
 
 func TestSwitchSpareLeg(t *testing.T) {

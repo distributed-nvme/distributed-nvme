@@ -442,6 +442,7 @@ func (s *CnAgentServer) dropCntlrState(
 	st *cntlrState,
 ) {
 	s.stopConnectRetry(st)
+	s.stopCloneMetaRetry(st)
 	s.stopLegProbers(st, nil)
 	req := st.loadReq()
 	ptr := req.GetCntlrPointer()

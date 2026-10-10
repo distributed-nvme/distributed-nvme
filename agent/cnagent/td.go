@@ -104,10 +104,14 @@ func nsDevTable(np *nsPlan, devNo string) string {
 // whose dm-clone's live status does
 // not show hydration on — a build or a recovery that has not finished,
 // whatever stopped it — gets the td's dm-error instead: the table of rule
-// 1's park, live and never under dm-flakey, though with no ANA move.
-// Nothing is remembered: the status is read on every call. A read that
-// fails or does not answer is an error, which licenses neither the move onto
-// the dm-clone nor a park — the ns-dev keeps the table it has.
+// 1's park, live and never under dm-flakey, though with no ANA move. A
+// dm-clone that does not exist shows no hydration either, so its td's ns-devs
+// park with their rows OK — whether a failed build removed it, its build has
+// not got that far, or its clone waits for room in the arena (CN18 step 2).
+// Nothing is remembered: the status is read on every call. A read that fails
+// or does not answer, of a dm-clone that is there or whose absence is not
+// confirmed (cloneHydrating), is an error, which licenses neither the move
+// onto the dm-clone nor a park — the ns-dev keeps the table it has.
 func (s *CnAgentServer) nsDevNow(
 	ctx context.Context,
 	np *nsPlan,

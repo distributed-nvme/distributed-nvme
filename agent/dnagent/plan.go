@@ -45,7 +45,20 @@ const (
 	// side_dev_info, instead of multiplying err_epoch churn across every
 	// per-CN stack.
 	tagProvisioningWait = "side provisioning"
+	// tagMetaRoomWait leads the RES_STATUS_PROVISIONING detail of a migration
+	// destination that waits for a free run in the node's clone-metadata
+	// area (DN13); metaRoomDetails puts the area's own text after it.
+	tagMetaRoomWait = "waiting for metadata room"
 )
+
+// metaRoomDetails is the detail of every row that waits for a free run in
+// the clone-metadata area (DN13): side_dev_info before the side zeroes, and
+// the two migr_dst_info rows where the level emits them. It is
+// tagMetaRoomWait followed by the allocator's own text, the same detail the
+// cn agent gives a clone that waits for room in its arena (cnagent.md CN18).
+func metaRoomDetails(err error) string {
+	return tagMetaRoomWait + ": " + err.Error()
+}
 
 // zeroingDetails renders zeroingDetailsFmt: zeroed of zero bytes, k first, so
 // an operator never reads a side that has zeroed little as nearly done. The

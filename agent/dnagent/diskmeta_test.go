@@ -187,7 +187,7 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 			t.Errorf("%s: AllocSide succeeded", tc.name)
 		}
 		if _, err := meta.AllocCloneMeta(
-			ctx, testSp, testMigrId, 1<<20); err == nil {
+			ctx, testSp, testMigrId, 1); err == nil {
 			t.Errorf("%s: AllocCloneMeta succeeded", tc.name)
 		}
 		if err := meta.SetSideZeroed(
@@ -233,7 +233,7 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 		ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
-	if _, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 1<<20); err != nil {
+	if _, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 1); err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
 	header := fmt.Sprintf("readblock %s off=%d len=%d",
@@ -273,7 +273,7 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 			"converge said whose disk this is")
 	}
 	if _, err := unasked.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err == nil {
+		ctx, testSp, testMigrId, 1); err == nil {
 		t.Error("an existing clone-metadata record was handed out before " +
 			"any DN converge said whose disk this is")
 	}
@@ -312,7 +312,7 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 			"= %v/%v, want absent", ok, err)
 	}
 	if _, err := foreign.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err == nil ||
+		ctx, testSp, testMigrId, 1); err == nil ||
 		!strings.Contains(err.Error(), "foreign disk") {
 		t.Errorf("existing clone-metadata record on a foreign disk: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 		t.Errorf("an existing side record was refused: %v", err)
 	}
 	if _, err := ours.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err != nil {
+		ctx, testSp, testMigrId, 1); err != nil {
 		t.Errorf("an existing clone-metadata record was refused: %v", err)
 	}
 	if _, _, ok := ours.Identity(); !ok {
@@ -413,7 +413,7 @@ func TestDiskMetaRefusesAVersion1Header(t *testing.T) {
 		t.Error("SetSideZeroed succeeded on a version-1 header")
 	}
 	if _, err := meta.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err == nil {
+		ctx, testSp, testMigrId, 1); err == nil {
 		t.Error("AllocCloneMeta succeeded on a version-1 header")
 	}
 	if _, err := meta.ProbeHeader(
@@ -958,15 +958,158 @@ func TestDiskMetaExhaustion(t *testing.T) {
 		t.Error("AllocSide succeeded on a full disk")
 	}
 
-	// The clone-metadata area exhausts independently.
-	units := uint64(common.DnCloneMetaSize / common.DnCloneMetaUnit)
+	// The clone-metadata area exhausts independently, and a full area's
+	// refusal is the typed "no free run": a wait, not a fault (DN13).
 	if _, err := meta.AllocCloneMeta(ctx, testSp, testMigrId,
-		units*common.DnCloneMetaUnit); err != nil {
+		common.DnCloneMetaUnitCnt); err != nil {
 		t.Fatalf("whole-area AllocCloneMeta: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(
 		ctx, testSp, testMigrId+1, 1); err == nil {
 		t.Error("AllocCloneMeta succeeded on a full area")
+	} else if !isNoFreeRun(err) {
+		t.Errorf("a full area's refusal %q is not the typed no-free-run "+
+			"error", err)
+	}
+}
+
+// The clone-metadata area's refusals are told apart by type, never by text
+// (DN13). No free run long enough for a request the area could hold — a full
+// area, or one whose free units lie in runs too short, since a run is never
+// split — is the typed noFreeRunError, a wait, from AllocCloneMeta and
+// CloneMetaRefusal alike, and it keeps the allocator's text. A record smaller
+// than the request, a request larger than the whole area and a disk this
+// node may not use are plain errors: no wait meets them.
+func TestDiskMetaNoFreeRunIsTyped(t *testing.T) {
+	ctx := context.Background()
+	const total = uint64(common.DnCloneMetaUnitCnt)
+	refusal := func(t *testing.T, what string, err error, typed bool) {
+		t.Helper()
+		switch {
+		case err == nil:
+			t.Errorf("%s: no refusal", what)
+		case isNoFreeRun(err) != typed:
+			t.Errorf("%s: %q reads typed = %v, want %v", what, err,
+				isNoFreeRun(err), typed)
+		}
+	}
+	noRunText := func(units uint64) string {
+		return fmt.Sprintf("allocating %d clone-metadata units: no "+
+			"contiguous run of %d units in the %d-unit area",
+			units, units, total)
+	}
+
+	t.Run("full area", func(t *testing.T) {
+		meta, node := formatted(t)
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId, total); err != nil {
+			t.Fatalf("whole-area AllocCloneMeta: %v", err)
+		}
+		node.Reset()
+		_, err := meta.AllocCloneMeta(ctx, testSp, testMigrId+1, 1)
+		refusal(t, "AllocCloneMeta", err, true)
+		if err != nil && err.Error() != noRunText(1) {
+			t.Errorf("AllocCloneMeta refused with %q, want the "+
+				"allocator's text %q", err, noRunText(1))
+		}
+		err = meta.CloneMetaRefusal(ctx, testSp, testMigrId+1, 1)
+		refusal(t, "CloneMetaRefusal", err, true)
+		if err != nil && err.Error() != noRunText(1) {
+			t.Errorf("CloneMetaRefusal refused with %q, want %q", err,
+				noRunText(1))
+		}
+		assertNoWrite(t, node, "a refused run")
+	})
+
+	t.Run("fragmented area", func(t *testing.T) {
+		meta, node := formatted(t)
+		// Every unit held by a migration of its own, then every other one
+		// freed: half the area is free and no two free units touch.
+		for i := uint64(0); i < total; i++ {
+			if _, err := meta.AllocCloneMeta(
+				ctx, testSp, 0x100+i, 1); err != nil {
+				t.Fatalf("AllocCloneMeta %d: %v", i, err)
+			}
+		}
+		for i := uint64(0); i < total; i += 2 {
+			if err := meta.FreeCloneMeta(ctx, testSp, 0x100+i); err != nil {
+				t.Fatalf("FreeCloneMeta %d: %v", i, err)
+			}
+		}
+		if got, want := meta.Describe(), fmt.Sprintf(
+			"free_meta_units=%d", total/2); !strings.Contains(got, want) {
+			t.Fatalf("fixture is wrong: Describe = %q, want %s", got, want)
+		}
+		node.Reset()
+		_, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2)
+		refusal(t, "AllocCloneMeta", err, true)
+		refusal(t, "CloneMetaRefusal",
+			meta.CloneMetaRefusal(ctx, testSp, testMigrId, 2), true)
+		assertNoWrite(t, node, "a refused run")
+		// A run of one unit still fits.
+		if err := meta.CloneMetaRefusal(
+			ctx, testSp, testMigrId, 1); err != nil {
+			t.Errorf("CloneMetaRefusal of one unit = %v, want nil", err)
+		}
+	})
+
+	t.Run("larger than the area", func(t *testing.T) {
+		meta, node := formatted(t)
+		_, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, total+1)
+		refusal(t, "AllocCloneMeta", err, false)
+		refusal(t, "CloneMetaRefusal",
+			meta.CloneMetaRefusal(ctx, testSp, testMigrId, total+1), false)
+		assertNoWrite(t, node, "a run larger than the area")
+		// The whole area is a request it can hold.
+		if err := meta.CloneMetaRefusal(
+			ctx, testSp, testMigrId, total); err != nil {
+			t.Errorf("CloneMetaRefusal of the whole area = %v, want nil",
+				err)
+		}
+	})
+
+	t.Run("record smaller than the request", func(t *testing.T) {
+		meta, _ := formatted(t)
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId, 1); err != nil {
+			t.Fatalf("AllocCloneMeta: %v", err)
+		}
+		const want = "allocated 1 clone-metadata units, want 2"
+		_, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2)
+		refusal(t, "AllocCloneMeta", err, false)
+		if err != nil && err.Error() != want {
+			t.Errorf("AllocCloneMeta refused with %q, want %q", err, want)
+		}
+		refusal(t, "CloneMetaRefusal",
+			meta.CloneMetaRefusal(ctx, testSp, testMigrId, 2), false)
+	})
+
+	t.Run("disk this node may not use", func(t *testing.T) {
+		meta, node := formatted(t)
+		// The area is full, so only the gate stands between these calls and
+		// the typed refusal.
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId, total); err != nil {
+			t.Fatalf("whole-area AllocCloneMeta: %v", err)
+		}
+		_, err := reopen(node).AllocCloneMeta(ctx, testSp, testMigrId+1, 1)
+		refusal(t, "unconfirmed disk", err, false)
+		foreign := reopen(node)
+		if err := foreign.EnsureFormatted(ctx, testCluster, testDn+1,
+			metaExtentSize, mayFormat); err == nil {
+			t.Fatal("EnsureFormatted accepted another node's disk")
+		}
+		_, err = foreign.AllocCloneMeta(ctx, testSp, testMigrId+1, 1)
+		refusal(t, "foreign disk", err, false)
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId+1, 0); err == nil || isNoFreeRun(err) {
+			t.Errorf("AllocCloneMeta of no units = %v, want a plain error",
+				err)
+		}
+	})
+
+	if isNoFreeRun(nil) || isNoFreeRun(fmt.Errorf("no contiguous run")) {
+		t.Error("isNoFreeRun read an error of another type by its text")
 	}
 }
 
@@ -985,7 +1128,7 @@ func TestDiskMetaCloneMetaZeroedBeforeRecord(t *testing.T) {
 	node.corruptBlock(metaDisk, common.DnCloneMetaOffset, stale)
 
 	node.Reset()
-	rec, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 5<<20)
+	rec, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2)
 	if err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
@@ -1009,7 +1152,7 @@ func TestDiskMetaCloneMetaZeroedBeforeRecord(t *testing.T) {
 
 	// Re-calling returns the same record and re-zeroes nothing.
 	node.Reset()
-	again, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 5<<20)
+	again, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2)
 	if err != nil {
 		t.Fatalf("re-AllocCloneMeta: %v", err)
 	}
@@ -1023,7 +1166,7 @@ func TestDiskMetaCloneMetaZeroedBeforeRecord(t *testing.T) {
 	}
 
 	// A second migration lands after the first, contiguously.
-	next, err := meta.AllocCloneMeta(ctx, testSp, testMigrId+1, 1<<20)
+	next, err := meta.AllocCloneMeta(ctx, testSp, testMigrId+1, 1)
 	if err != nil {
 		t.Fatalf("second AllocCloneMeta: %v", err)
 	}
@@ -1044,7 +1187,7 @@ func TestDiskMetaFreeIsIdempotent(t *testing.T) {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err != nil {
+		ctx, testSp, testMigrId, 1); err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
 	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
@@ -1377,7 +1520,7 @@ func TestDiskMetaRecordSnapshots(t *testing.T) {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err != nil {
+		ctx, testSp, testMigrId, 1); err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
 	if got := mustSideRecords(t, meta, ctx); len(got) != 2 {
@@ -1640,7 +1783,7 @@ func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(
-		ctx, testSp, testMigrId, 1<<20); err != nil {
+		ctx, testSp, testMigrId, 1); err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
 	if _, err := meta.ProbeHeader(

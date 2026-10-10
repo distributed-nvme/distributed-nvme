@@ -1215,8 +1215,12 @@ func (s *DnAgentServer) sidePreSteps(
 	actual *dnActual,
 	wanted *dnWanted,
 ) {
-	// The destination role this side no longer plays keeps no retry loop.
-	if !plan.wantMigr {
+	// The destination role this side no longer plays keeps no retry loop. A
+	// destination that has not provisioned keeps it at every level: it takes
+	// its run in the clone-metadata area before it zeroes, whatever the
+	// level, and that step registers and deregisters the retry itself
+	// (ensureSideDev, DN13).
+	if plan.migrDst == nil || (plan.provisioned && !plan.wantMigr) {
 		s.stopMigrRetry(st)
 	}
 	if plan.migrSrc == nil {
@@ -1604,6 +1608,19 @@ func (s *DnAgentServer) sideVerdict(
 // sits on a disk this node has not confirmed, adds nothing: a converge could
 // not start the goroutine either, the next round reads it again, and the
 // DN's own verdict reports an unconfirmed disk.
+//
+// A migration destination that has not provisioned, that the
+// clone-metadata area has no free run for, and whose DN8 retry is registered
+// adds nothing either: it zeroes nothing until it holds its run (DN13), and
+// that retry takes the run once units come free, so a re-sent SyncupSide
+// every round would only repeat the wait. The retry is read from the
+// registry and the area's answer from the table, fresh like the two halves
+// above, so a destination whose run the area can supply, or that no retry
+// covers, and that still zeroes nothing is re-driven like any other side.
+// Only the run's own step registers the retry while the side has not
+// provisioned (ensureSideDev), so none covers a destination whose passes all
+// stopped before that step — at the record or the side device, the startup
+// reconcile's included — and the verdict re-drives it until one gets there.
 func (s *DnAgentServer) zeroingVerdict(
 	ctx context.Context,
 	st *sideState,
@@ -1615,9 +1632,13 @@ func (s *DnAgentServer) zeroingVerdict(
 		return
 	}
 	s.mu.Lock()
-	running := st.zeroing
+	running, retrying := st.zeroing, st.retrying
 	s.mu.Unlock()
 	if running {
+		return
+	}
+	if retrying && !plan.provisioned && plan.migrDst != nil &&
+		isNoFreeRun(s.migrMetaRefusal(ctx, plan)) {
 		return
 	}
 	res.Fail(zeroingDetails(sideZeroedBytes(rec), sideZeroBytes(rec)),

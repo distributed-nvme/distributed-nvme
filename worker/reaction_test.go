@@ -230,6 +230,9 @@ type reactionCall struct {
 	cloneId   uint64
 	// The plan a replacement was scanned against (AR7's spCnAddrs).
 	spCn []string
+	// The plan a spare create was scanned against (AR8 step 3's black
+	// list), which the op holds the group's DNs against.
+	grpDn []string
 }
 
 // candQuery is one allocator scan a pass ran.
@@ -404,11 +407,12 @@ func (o *fakeReactionOps) createSpareLeg(
 	sliceId uint64,
 	grpId uint64,
 	dn model.Cand,
+	grpDnAddrs []string,
 	cc *pb.ClusterConf,
 ) (uint64, error) {
 	err := o.record(reactionCall{
 		op: "create_spare", sliceId: sliceId, grpId: grpId,
-		legs: []model.Cand{dn},
+		legs: []model.Cand{dn}, grpDn: grpDnAddrs,
 	})
 	return 888, err
 }
@@ -3425,6 +3429,14 @@ func TestReactionSpareCreateExcludesGroupLocations(t *testing.T) {
 		if queries[0].requiredCnt != 1 {
 			t.Errorf("required_cnt = %d, want 1", queries[0].requiredCnt)
 		}
+		// The op is handed the very black list the scan ran against: the
+		// plan it holds the group's DNs to (MD6).
+		calls := h.rops.allCalls()
+		if len(calls) != 1 ||
+			fmt.Sprint(calls[0].grpDn) != fmt.Sprint(queries[0].black) {
+			t.Errorf("create_spare plan = %v, want the scan's black list %v",
+				calls, queries[0].black)
+		}
 	}
 
 	t.Run("two named locations", func(t *testing.T) {
@@ -3463,6 +3475,111 @@ func TestReactionSpareCreateNoCandidate(t *testing.T) {
 	h.pass()
 	h.wantOps()
 	h.wantSkipped(reactionSpareCreate, reasonNoCandidate)
+}
+
+// TestReactionSpareCreateHandsItsPlan pins AR8 step 3's plan (MD6): the op is
+// handed the black list its scan ran against — the DN of every leg and every
+// spare of the group, a dead spare's included — so model.CreateSpareLeg can
+// refuse a group that gained a DN since, whose domain the scan could not
+// exclude.
+func TestReactionSpareCreateHandsItsPlan(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	// A parked leg, dead by its leg_unhealthy: neither ready nor pending, so
+	// the group gets a spare, and the plan names the parked leg's DN too.
+	h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
+		LegId:    700,
+		LegIdx:   2,
+		ErrEpoch: h.ago(9000),
+		SideList: []*pb.Side{{
+			SideId: 800, AddrPort: reactDnC, Provisioned: true,
+		}},
+	})
+	h.dnCands(reactDnD)
+	h.pass()
+	calls := h.wantOps("create_spare")
+	query := h.rops.allQueries()[0]
+	want := []string{reactDnA, reactDnB, reactDnC}
+	if fmt.Sprint(query.black) != fmt.Sprint(want) {
+		t.Fatalf("black = %v, want %v", query.black, want)
+	}
+	if fmt.Sprint(calls[0].grpDn) != fmt.Sprint(query.black) {
+		t.Fatalf("create_spare plan = %v, want the scan's black list %v",
+			calls[0].grpDn, query.black)
+	}
+	h.wantApplied(reactionSpareCreate)
+}
+
+// TestReactionSpareCreateCandidateChanged pins how a pass meets
+// model.CreateSpareLeg's `candidate changed` (MD6, AR2): the group gained a
+// DN since the pass's snapshot — another owner's spare, a migration's
+// destination — or the pick was deleted, disabled or left short of extents
+// since the scan.
+// Like every ErrPrecondition it is a `reaction skipped` carrying the op's
+// reason that ends the pass, so no other group is tried; the next pass plans
+// again from its own snapshot.
+func TestReactionSpareCreateCandidateChanged(t *testing.T) {
+	changed := &model.ErrPrecondition{
+		Op: "CreateSpareLeg", Reason: model.ReasonCandidateChanged,
+	}
+
+	t.Run("the next pass retries", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dnCands(reactDnC)
+		h.rops.opErr = changed
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactMetaGrp {
+			t.Fatalf("create_spare = %+v, want the meta group", calls[0])
+		}
+		h.wantApplied()
+		h.wantSkipped(reactionSpareCreate, model.ReasonCandidateChanged)
+
+		h.rops.opErr = nil
+		h.pass()
+		calls = h.wantOps("create_spare", "create_spare")
+		if calls[1].grpId != reactMetaGrp {
+			t.Fatalf("retry = %+v, want the meta group again", calls[1])
+		}
+		// A fresh scan, whose black list is the plan the retry hands over.
+		queries := h.rops.allQueries()
+		if len(queries) != 2 {
+			t.Fatalf("scans = %d, want one per pass", len(queries))
+		}
+		if fmt.Sprint(calls[1].grpDn) != fmt.Sprint(queries[1].black) {
+			t.Fatalf("retry plan = %v, want its own scan's %v",
+				calls[1].grpDn, queries[1].black)
+		}
+		h.wantApplied(reactionSpareCreate)
+	})
+
+	// The overlap AR2 names: the other owner's spare committed and flipped
+	// after this pass's snapshot. The next pass's snapshot holds it, so the
+	// repair waits for that spare instead of creating a second one.
+	t.Run("the next pass waits for the spare the group gained", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+		h.dnCands(reactDnC)
+		h.rops.opErr = changed
+		h.pass()
+		h.wantOps("create_spare")
+		h.wantSkipped(reactionSpareCreate, model.ReasonCandidateChanged)
+
+		h.rops.opErr = nil
+		h.metaGrp().SpareLegList = append(h.metaGrp().SpareLegList, &pb.Leg{
+			LegId:  700,
+			LegIdx: 2,
+			SideList: []*pb.Side{{
+				SideId: 800, AddrPort: reactDnD, Provisioned: true,
+			}},
+		})
+		h.pass()
+		h.wantOps("create_spare")
+		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+		h.wantApplied()
+	})
 }
 
 // ---------------------------------------------------------------------------

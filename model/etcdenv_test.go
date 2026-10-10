@@ -109,7 +109,9 @@ func startEtcd(bin string) (string, func(), error) {
 		// maximum-shape sp-drain batch (SPD13) reach — and THIS package
 		// commits that batch, in TestDrainSpSliceAtTheCeiling (SPD14), as it
 		// commits the created flip's transactions (RW19) in
-		// TestFlipCreatedAtTheTdCeiling.
+		// TestFlipCreatedAtTheTdCeiling and a maximum-shape ReplaceCntlr,
+		// which reads every clone of the SP (dnv-worker.md MD6), in
+		// TestReplaceCntlrAtTheCeiling.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

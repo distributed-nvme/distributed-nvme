@@ -315,4 +315,5 @@ short of a cntlr teardown, leaving the park before its removal (`cnagent.md`
 CN21's park before every layer and its nvmet layer L1) to the unit tests;
 cntlid-slot exhaustion; the cdc; TLS and authentication; performance; faults
 beyond the partition, the pin and the writer; provisioning deferral
-(`cnagent.md` CN9); and arena exhaustion (CN18).
+(`cnagent.md` CN9); and an arena with no free run for a clone, whose
+provisioning rows and slow retry the unit tests cover (CN18).

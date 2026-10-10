@@ -943,8 +943,18 @@ func TestMaintainDnCapacity(t *testing.T) {
 		dn.FreeExtCnt = free
 		return dn
 	}
+	withUsed := func(free uint64, used uint64) *pb.DnConf {
+		dn := withFree(free)
+		dn.UsedMetaUnits = used
+		return dn
+	}
 	disabled := withFree(10)
 	disabled.Disabled = true
+	// A node whose area holds units goes unhealthy and comes back: the key
+	// returns with the count the record holds then (architecture.md,
+	// Metadata units), with nothing kept aside for it.
+	unhealthyUsed := withUsed(10, 9)
+	unhealthyUsed.ErrEpoch = 1756000000
 
 	cases := []struct {
 		name     string
@@ -1009,6 +1019,34 @@ func TestMaintainDnCapacity(t *testing.T) {
 			nil,
 			nil,
 		},
+		{
+			"used units alone moved: one put of the same key",
+			withUsed(10, 3),
+			withUsed(10, 7),
+			nil,
+			[]string{key10},
+		},
+		{
+			"charged past the ceiling: the key stays",
+			withUsed(10, 0),
+			withUsed(10, common.DnCloneMetaUnitCnt+5),
+			nil,
+			[]string{key10},
+		},
+		{
+			"unhealthy with units held",
+			withUsed(10, 9),
+			unhealthyUsed,
+			[]string{key10},
+			nil,
+		},
+		{
+			"healthy again: the key comes back with the count",
+			unhealthyUsed,
+			withUsed(10, 9),
+			nil,
+			[]string{key10},
+		},
 	}
 	for _, tc := range cases {
 		s := newFakeStm()
@@ -1019,12 +1057,16 @@ func TestMaintainDnCapacity(t *testing.T) {
 		if !equalStrings(s.puts, tc.wantPuts) {
 			t.Errorf("%s: puts = %v, want %v", tc.name, s.puts, tc.wantPuts)
 		}
+		// The value is the record's location and used units, as of the new
+		// record (architecture.md, Capacity index keys; Metadata units).
 		for _, key := range s.puts {
 			value, ok := s.vals[key].(*pb.DnCapacity)
-			if !ok || value.GetLocation() != "rack0" {
+			if !ok || value.GetLocation() != "rack0" ||
+				value.GetUsedMetaUnits() != tc.new.GetUsedMetaUnits() {
 				t.Errorf(
-					"%s: value of %q = %v, want the DN's location",
-					tc.name, key, s.vals[key],
+					"%s: value of %q = %v, want the DN's location and "+
+						"%d used units", tc.name, key, s.vals[key],
+					tc.new.GetUsedMetaUnits(),
 				)
 			}
 		}
@@ -1065,6 +1107,139 @@ func TestMaintainCnCapacity(t *testing.T) {
 	MaintainCnCapacity(s, cid, addrPort, withFree(5), withFree(0))
 	if !equalStrings(s.dels, []string{key5}) || len(s.puts) != 0 {
 		t.Errorf("exhausted: puts = %v, dels = %v", s.puts, s.dels)
+	}
+
+	// Used units are no input of the presence rule: a change of them alone
+	// is one put of the same key, whose value carries the new count, and a
+	// node charged past its ceiling, as ReplaceCntlr may charge it, keeps
+	// its key (architecture.md, Metadata units).
+	withUsed := func(free uint64, used uint64) *pb.CnConf {
+		cn := withFree(free)
+		cn.UsedMetaUnits = used
+		return cn
+	}
+	for _, used := range []uint64{
+		7, common.CnCloneMetaUnitCnt, common.CnCloneMetaUnitCnt + 10,
+	} {
+		s = newFakeStm()
+		MaintainCnCapacity(s, cid, addrPort, withUsed(5, 3), withUsed(5, used))
+		if len(s.dels) != 0 || !equalStrings(s.puts, []string{key5}) {
+			t.Errorf("used %d: puts = %v, dels = %v", used, s.puts, s.dels)
+			continue
+		}
+		want := &pb.CnCapacity{Location: "rack1", UsedMetaUnits: used}
+		if !proto.Equal(s.vals[key5], want) {
+			t.Errorf("used %d: value = %v, want %v", used, s.vals[key5], want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Metadata units (architecture.md, Metadata units)
+// ---------------------------------------------------------------------------
+
+// TestFreeMetaUnits pins the free units of both node kinds, read from the
+// record and from the capacity value alike: the ceiling less the used
+// count, and zero, never a count wrapped around, once the count reaches or
+// passes the ceiling. A value with no used_meta_units reads as a whole free
+// area.
+func TestFreeMetaUnits(t *testing.T) {
+	const dnCeiling = common.DnCloneMetaUnitCnt
+	const cnCeiling = common.CnCloneMetaUnitCnt
+	cases := []struct {
+		name string
+		dn   bool
+		used uint64
+		want uint64
+	}{
+		{"dn nothing used", true, 0, dnCeiling},
+		{"dn some used", true, 5, dnCeiling - 5},
+		{"dn one unit left", true, dnCeiling - 1, 1},
+		{"dn at the ceiling", true, dnCeiling, 0},
+		{"dn past the ceiling", true, dnCeiling + 3, 0},
+		{"cn nothing used", false, 0, cnCeiling},
+		{"cn some used", false, 5, cnCeiling - 5},
+		{"cn one unit left", false, cnCeiling - 1, 1},
+		{"cn at the ceiling", false, cnCeiling, 0},
+		{"cn past the ceiling", false, cnCeiling + 40, 0},
+	}
+	for _, tc := range cases {
+		var record, value uint64
+		if tc.dn {
+			record = DnFreeMetaUnits(&pb.DnConf{UsedMetaUnits: tc.used})
+			value = DnCapacityFreeMetaUnits(
+				&pb.DnCapacity{UsedMetaUnits: tc.used},
+			)
+		} else {
+			record = CnFreeMetaUnits(&pb.CnConf{UsedMetaUnits: tc.used})
+			value = CnCapacityFreeMetaUnits(
+				&pb.CnCapacity{UsedMetaUnits: tc.used},
+			)
+		}
+		if record != tc.want || value != tc.want {
+			t.Errorf("%s: record %d, value %d, want %d",
+				tc.name, record, value, tc.want)
+		}
+	}
+	if got := DnCapacityFreeMetaUnits(&pb.DnCapacity{Location: "r0"}); got !=
+		common.DnCloneMetaUnitCnt {
+		t.Errorf("a DN value with no count = %d free, want %d",
+			got, common.DnCloneMetaUnitCnt)
+	}
+	if got := CnCapacityFreeMetaUnits(&pb.CnCapacity{Location: "r0"}); got !=
+		common.CnCloneMetaUnitCnt {
+		t.Errorf("a CN value with no count = %d free, want %d",
+			got, common.CnCloneMetaUnitCnt)
+	}
+}
+
+// TestReleaseMetaUnits pins that a release stops at zero (architecture.md,
+// Metadata units): it never wraps the count around.
+func TestReleaseMetaUnits(t *testing.T) {
+	cases := []struct {
+		used  uint64
+		units uint64
+		want  uint64
+	}{
+		{10, 3, 7},
+		{10, 0, 10},
+		{10, 10, 0},
+		{3, 10, 0},
+		{0, 5, 0},
+		{0, 0, 0},
+	}
+	for _, tc := range cases {
+		if got := ReleaseMetaUnits(tc.used, tc.units); got != tc.want {
+			t.Errorf("ReleaseMetaUnits(%d, %d) = %d, want %d",
+				tc.used, tc.units, got, tc.want)
+		}
+	}
+}
+
+// TestCapacityValues pins the value builders MaintainDnCapacity and
+// MaintainCnCapacity write: the record's location and its used units, and
+// nothing else of it (architecture.md, Capacity index keys; Metadata units).
+func TestCapacityValues(t *testing.T) {
+	dn := healthyDn()
+	dn.UsedMetaUnits = 12
+	wantDn := &pb.DnCapacity{Location: "rack0", UsedMetaUnits: 12}
+	if got := DnCapacityValue(dn); !proto.Equal(got, wantDn) {
+		t.Errorf("DnCapacityValue = %v, want %v", got, wantDn)
+	}
+	cn := &pb.CnConf{
+		CnId: 2, Location: "rack1", FreeExtCnt: 5, UsedMetaUnits: 300,
+	}
+	wantCn := &pb.CnCapacity{Location: "rack1", UsedMetaUnits: 300}
+	if got := CnCapacityValue(cn); !proto.Equal(got, wantCn) {
+		t.Errorf("CnCapacityValue = %v, want %v", got, wantCn)
+	}
+	// A record that holds no units builds a value equal to one that carries
+	// the location alone.
+	dn.UsedMetaUnits = 0
+	if got := DnCapacityValue(dn); !proto.Equal(
+		got, &pb.DnCapacity{Location: "rack0"},
+	) {
+		t.Errorf("DnCapacityValue with no units = %v", got)
 	}
 }
 

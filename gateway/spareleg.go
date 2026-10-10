@@ -21,10 +21,11 @@ import (
 // handler must first find the slice that holds the group. CreateSpareLeg and
 // SwitchSpareLeg locate it in a plain snapshot (gateway.md, Spare legs) that
 // plans but does not decide — everything it read is read again inside the
-// model op's own STM; DeleteSpareLeg has no snapshot at all — its locate runs
-// directly inside the gateway's one deciding transaction. Either way a group
-// that moved, a token that went stale or a spare list that filled up between
-// plan and decision is caught where it matters.
+// model op's own STM, and CreateSpareLeg takes a fresh snapshot in every round
+// of its candidate unit; DeleteSpareLeg has no snapshot at all — its locate
+// runs directly inside the gateway's one deciding transaction. Either way a
+// group that moved, a token that went stale or a spare list that filled up
+// between plan and decision is caught where it matters.
 //
 // Two of the three are model ops the sp-worker's leg repair (dnv-worker.md
 // AR8) already drives (gateway.md, Scope and placement:
@@ -153,20 +154,28 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 // yields rather than refuse the spare altogether).
 //
 // It is a GW9 candidate unit around model.CreateSpareLeg (gateway.md, Scope
-// and placement): the DN scan is a range query and therefore runs outside
-// every transaction, and the pick is re-validated against its exact capacity
-// key inside the op's STM. A pick whose key moved comes back as
-// errCandidateChanged through mapModelErr and
-// re-runs the whole unit, scan included — re-running only the op would
-// re-validate the same dead pick for ever.
+// and placement), each round of which plans, scans and decides, as
+// CreateMigration's does. The plan — the group as a fresh snapshot reads it,
+// its DNs as the black list and their locations as tier 1 — is read again in
+// every round: the op's STM refuses a round whose group gained a DN since the
+// plan, and a plan read once for the whole unit would be refused that way in
+// every round until the unit gave up. The DN scan is a range query and
+// therefore runs outside every transaction, and the pick is re-validated
+// inside the op's STM. The op answers ReasonCandidateChanged for a pick whose
+// capacity key moved, for a pick deleted, disabled or otherwise no longer
+// allocatable, or short of extents, since the scan, and for a group that
+// gained a DN outside the plan, which it receives as grpDnAddrs; each comes
+// back as errCandidateChanged through
+// mapModelErr and re-runs the whole unit, plan and scan included —
+// re-running only the op would re-validate the same dead pick for ever.
 //
-// The three refusals below are checked twice on purpose: the model op applies
-// them again inside its STM, where they are authoritative, but a group that
-// is RedundNone or already full would otherwise pay for a candidate scan
-// whose result the op can only throw away. The pre-check is also what gives
-// them the codes of architecture.md, Spare legs — INVALID_ARGUMENT and
-// RESOURCE_EXHAUSTED — since model raises every one of its own preconditions
-// as FAILED_PRECONDITION.
+// The two refusals below the snapshot are checked twice on purpose: the model
+// op applies them again inside its STM, where they are authoritative, but a
+// group that is RedundNone or already full would otherwise pay for a
+// candidate scan whose result the op can only throw away. The pre-check is
+// also what gives them the codes of architecture.md, Spare legs —
+// INVALID_ARGUMENT and RESOURCE_EXHAUSTED — since model raises every one of
+// its own preconditions as FAILED_PRECONDITION.
 func (s *Server) CreateSpareLeg(
 	ctx context.Context,
 	req *pb.CreateSpareLegRequest,
@@ -184,51 +193,53 @@ func (s *Server) CreateSpareLeg(
 	); err != nil {
 		return nil, err
 	}
-	sc, loc, err := s.snapshotGrpForSpareLeg(
-		ctx, req.GetClusterName(), req.GetSpName(),
-		req.GetSpRev(), req.GetGrpId(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	// Redundancy is an SP-wide property the group only inherits
-	// (architecture.md, Storage pools), so the test is the SP's STORED
-	// bdev_conf — the merge CreateStoragePool
-	// wrote, never a re-resolution against ClusterConf, whose redund_conf may
-	// have been meant for a different SP.
-	if !isMdRaid1(spBdevConf(sc.Conf)) {
-		return nil, errInvalid(
-			"group %d is RedundNone: there is no redundancy to repair",
-			req.GetGrpId())
-	}
-	if len(loc.Grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
-		return nil, errExhausted(
-			"group %d has %d spare legs, the maximum is %d",
-			req.GetGrpId(), len(loc.Grp.GetSpareLegList()),
-			common.MaxSpareLegPerGrp)
-	}
-	// The spare joins an existing Group and inherits its geometry unchanged
-	// (architecture.md, Spare legs: no on-leg layout — architecture.md, Group
-	// on-leg layout: meta region, data region, health block — is computed), so
-	// the candidate must have room for exactly one more copy of the group's
-	// ext_cnt.
-	extCnt := loc.Grp.GetExtCnt()
 	what := fmt.Sprintf("spare leg for group %d", req.GetGrpId())
-	// Tier 1 of architecture.md, Per-operation allocation: the group's failure
-	// DOMAINS, not merely its DNs. Read once for the whole candidate unit,
-	// outside every transaction, because a location is immutable
-	// (architecture.md, Disk nodes).
-	excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, loc.Grp)
-	if err != nil {
-		return nil, err
-	}
 	var legId uint64
-	err = candidateUnit(ctx, func() error {
+	err := candidateUnit(ctx, func() error {
 		legId = 0
+		sc, loc, err := s.snapshotGrpForSpareLeg(
+			ctx, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev(), req.GetGrpId(),
+		)
+		if err != nil {
+			return err
+		}
+		// Redundancy is an SP-wide property the group only inherits
+		// (architecture.md, Storage pools), so the test is the SP's STORED
+		// bdev_conf — the merge CreateStoragePool
+		// wrote, never a re-resolution against ClusterConf, whose
+		// redund_conf may have been meant for a different SP.
+		if !isMdRaid1(spBdevConf(sc.Conf)) {
+			return errInvalid(
+				"group %d is RedundNone: there is no redundancy to repair",
+				req.GetGrpId())
+		}
+		if len(loc.Grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
+			return errExhausted(
+				"group %d has %d spare legs, the maximum is %d",
+				req.GetGrpId(), len(loc.Grp.GetSpareLegList()),
+				common.MaxSpareLegPerGrp)
+		}
+		// The spare joins an existing Group and inherits its geometry
+		// unchanged (architecture.md, Spare legs: no on-leg layout —
+		// architecture.md, Group on-leg layout: meta region, data region,
+		// health block — is computed), so the candidate must have room for
+		// exactly one more copy of the group's ext_cnt.
+		extCnt := loc.Grp.GetExtCnt()
+		// The plan: every DN the group occupies, which the scan black-lists
+		// and the op checks the group against, and their failure DOMAINS,
+		// tier 1 of architecture.md, Per-operation allocation, read outside
+		// every transaction because a location is immutable
+		// (architecture.md, Disk nodes).
+		planBlack := grpDnAddrs(loc.Grp)
+		excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, loc.Grp)
+		if err != nil {
+			return err
+		}
 		picks, err := pickDns(
 			ctx, s.cli, sc.Cid, sc.Cc,
 			dnPickPlan{ExtCnt: extCnt, Legs: 1, ExcludeLocs: excludeLocs},
-			req.GetDnSelector(), grpDnAddrs(loc.Grp), what,
+			req.GetDnSelector(), planBlack, what,
 		)
 		if err != nil {
 			return err
@@ -240,7 +251,7 @@ func (s *Server) CreateSpareLeg(
 		newId, err := model.CreateSpareLeg(
 			ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
 			req.GetSpRev().GetRevision(), loc.SliceId, req.GetGrpId(),
-			picks[0], sc.Cc,
+			picks[0], planBlack, sc.Cc,
 		)
 		if err != nil {
 			return mapModelErr(err)

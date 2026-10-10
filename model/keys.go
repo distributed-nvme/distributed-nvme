@@ -622,8 +622,9 @@ func ParseCloneBmKey(
 
 // ParseDnCapacityKey turns one scanned dn_capacity key back into the candidate
 // it describes (MD2, MD5): the DN candidate walk (architecture.md, Finding DN
-// candidates) reads free_ext_cnt and addr_port out of the key itself and only
-// decodes the value for the location, so a scan needs no extra point reads
+// candidates) reads free_ext_cnt and addr_port out of the key itself and
+// decodes the value only for the location and the used metadata units
+// (architecture.md, Metadata units), so a scan needs no extra point reads
 // (architecture.md, Capacity index keys). The cluster id is validated but not
 // returned — the caller built the prefix from it.
 func ParseDnCapacityKey(key string) (uint32, uint64, string, bool) {

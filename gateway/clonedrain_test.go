@@ -171,6 +171,39 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 	}
 }
 
+// TestCloneDrainGivesTheUnitsBack pins where a clone's metadata units come
+// back (architecture.md, Metadata units): CreateClone charged them to the CN
+// of every cntlr of the pool, the latch leaves them there — the clone is
+// still a clone of the pool until the drain's final step, and a cntlr created
+// meanwhile is charged them too — and model.FinishCloneDelete gives them back
+// on every cntlr's CN in the step that removes the record. Another clone's
+// units stay, the capacity values follow the counts, and no CN revision moves
+// at any point, since only units change.
+func TestCloneDrainGivesTheUnitsBack(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst-a", 900, 7, 0, true)
+	env.putTd("dst-b", 901, 8, 0, true)
+	volCreateClone(env, "clone-a", "dst-a")
+	volCreateClone(env, "clone-b", "dst-b")
+	both := 2 * volCloneUnits
+	for _, addrPort := range []string{volCnA, volCnB} {
+		volWantCnUnits(t, env, addrPort, both, 1)
+	}
+
+	volLatchClone(env, "clone-a")
+	for _, addrPort := range []string{volCnA, volCnB} {
+		volWantCnUnits(t, env, addrPort, both, 1)
+	}
+
+	volDrainClone(env, "clone-a")
+	if env.exists(model.CloneKey(env.cid, volSpId, "clone-a"), &pb.Clone{}) {
+		t.Fatalf("the clone key survived the drain")
+	}
+	for _, addrPort := range []string{volCnA, volCnB} {
+		volWantCnUnits(t, env, addrPort, volCloneUnits, 1)
+	}
+}
+
 // volAppendBm appends one byte to a clone's chunk (s, b).
 func volAppendBm(env *volEnv, name string, sliceIdx uint32, bmIdx uint32) {
 	env.t.Helper()

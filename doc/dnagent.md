@@ -117,13 +117,15 @@ The constants this document relies on, whose values and comments
   leftover by definition has no row — nothing wanted names it. An agent also
   reports a few conditions this way so that the worker re-sends the
   `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
-  sweep): on a dn a disk identity not yet confirmed or a side with bytes
-  still to zero and nothing zeroing it, on a cn a piece of the node's base
-  state that a `CheckCn` round's or `GetCnInfo`'s probe read absent, or an
-  ANA group it read in a state other than its fixed one on a port whose
-  transport attributes match. It is not a rejection: the worker evaluates
-  the reply's rows exactly as for code zero and re-issues the `Syncup*`
-  every round (`dnv-worker.md` RW12, no backoff) until the code changes.
+  sweep): on a dn a disk identity not yet confirmed, or a side with bytes
+  still to zero and nothing zeroing it that is not a migration destination
+  waiting for a free run in the clone-metadata area (DN16); on a cn a piece
+  of the node's base state that a `CheckCn` round's or `GetCnInfo`'s probe
+  read absent, or an ANA group it read in a state other than its fixed one
+  on a port whose transport attributes match. It is not a rejection: the
+  worker evaluates the reply's rows exactly as for code zero and re-issues
+  the `Syncup*` every round (`dnv-worker.md` RW12, no backoff) until the
+  code changes.
   "Pending" is never stored anywhere; the code is recomputed by enumerating
   the node on every `Syncup*` and every `Check*`. Any non-zero code in a
   `Check*` reply makes the worker issue a `Syncup*` (`dnv-worker.md` RW4),
@@ -132,8 +134,9 @@ The constants this document relies on, whose values and comments
   record and otherwise serves details and tests.
 * `DnMigrConnectRetryInterval`, the pace of the background retries of a
   migration destination whose build stopped short, at its `nvme connect`
-  or at another step (DN13; the loop is SH27's "DN8 retry", so nicknamed
-  for the DN8-gated converge it re-runs).
+  or at another step, and of one that waits for a free run in the
+  clone-metadata area before it zeroes (DN13; the loop is SH27's "DN8
+  retry", so nicknamed for the DN8-gated converge it re-runs).
 * `DnMigrDstNsWait` and `DnMigrDstNsPause`, the migration destination's
   wait for the source namespace after a connect that succeeded (DN13):
   re-read, pausing the latter between reads and the former in all. Not a
@@ -172,7 +175,11 @@ The constants this document relies on, whose values and comments
   volume-table slots), `DnCloneMetaOffset`, `DnCloneMetaSize` and
   `DnCloneMetaUnit` (the dm-clone metadata slot area and its allocation
   granularity) and `DnDataOffset`, where the extent area starts — fixed for
-  the life of the format.
+  the life of the format. `DnCloneMetaUnitCnt`, the slot area in units, is
+  derived from them and is no part of the format: it is the ceiling of the
+  units the control plane charges a DN, and a destination's run is
+  `CloneMetaUnits` units, the formula the control plane charges by
+  (`architecture.md`, Metadata units).
 
 `DnNsIdentity`, a package-level function of `common/name_fmt.go`, derives
 the deterministic namespace identity both sides of a leg MUST present
@@ -200,8 +207,9 @@ are append-only — SH1 to SH26 are cited from code comments and must not
 shift.) A role server MAY run goroutines outside any RPC: the DN8 retry of
 a migration destination (so nicknamed for the DN8-gated converge it re-runs;
 the retry loop itself is specified in DN13), the DN12 fence timer, the DN9
-side-zeroing workers, the cn's connect retry, the CN11 leg probers and the
-cn sweep's background `nvme disconnect` (`cnagent.md` CN10). Every one of
+side-zeroing workers, the cn's connect retry and clone-metadata retry,
+the CN11 leg probers and the cn sweep's background `nvme disconnect`
+(`cnagent.md` CN10, CN18). Every one of
 them derives its ctx from the server's **`rootCtx`** — the process-lifetime
 ctx captured at `Reconcile`, which `Serve` derives from its own ctx and
 cancels before returning — and, the background disconnect aside, mints a
@@ -213,8 +221,8 @@ takes no SH11 lock at all.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
-retry's, the DN12 fence timer's, the cn connect retry's), and the cn sweep's
-background `nvme disconnect` is one. Such a child must not outlive the
+retry's, the DN12 fence timer's, the cn connect retry's and clone-metadata
+retry's), and the cn sweep's background `nvme disconnect` is one. Such a child must not outlive the
 agent — the cn sweep's background `nvme disconnect` (below) is allowed to
 — so the dn server registers every goroutine that owns one in a wait group
 before it starts and exposes a `WaitBackground` that waits for them;
@@ -233,11 +241,11 @@ shutdown forever — cancelling is the whole contract there. Nor is the child
 of the cn sweep's background `nvme disconnect` joined (`cnagent.md` CN10):
 it holds nothing a restarted agent needs, a delete already in the kernel
 finishes whether or not anybody waits for it, and a join could hold shutdown
-for the kernel's whole admin timeout. Nor is the cn's connect retry
-(`cnagent.md` CN10): its attempt runs the bounded commands of an ordinary
-pass, which the cancellation of `rootCtx` ends, and nothing waits for
-them. Object-scoped tasks that hold a device
-open are additionally cancelled **and waited for** at teardown, before the
+for the kernel's whole admin timeout. Nor are the cn's connect retry and
+clone-metadata retry (`cnagent.md` CN10, CN18): an attempt of either runs
+the bounded commands of an ordinary pass, which the cancellation of
+`rootCtx` ends, and nothing waits for them. Object-scoped tasks that hold a
+device open are additionally cancelled **and waited for** at teardown, before the
 resources they hold are removed (DN6, DN9): a live child keeps an fd on the
 dm device and `dmsetup remove` would fail EBUSY.
 
@@ -390,9 +398,9 @@ SH11. Node **read** lock + the object's lock: every object-scoped RPC
 (`SyncupSide`/`SyncupCntlr`, `Push*Bitmap`, `GetSideInfo`/`GetCntlrInfo`,
 one `CheckSide`/`CheckCntlr` round) and every background converge attempt
 (the dn's connect retry — DN13; DN1's and SH27's "DN8 retry" — and DN12
-fence timer, which share `reconvergeSide`, and the cn's connect retry,
-`reconvergeCntlr` — the SH27 background tasks that converge; `cnagent.md`
-CN1).
+fence timer, which share `reconvergeSide`, and the cn's connect retry and
+clone-metadata retry, which share `reconvergeCntlr` — the SH27 background
+tasks that converge; `cnagent.md` CN1).
 
 SH12. Node **read** lock only: node-scoped reads (`GetDnInfo`/`GetCnInfo`,
 one `CheckDn`/`CheckCn` round). `GetDnSize`/`GetCnSize` take no lock.
@@ -929,10 +937,14 @@ each usable DN's node-level sweep removes what those sides left behind by
 name, then the remaining `side-*` files re-run the `SyncupSide` converge
 (DN8 to DN14) from the stored request — a converge that finds bytes of the
 side still to zero (re)starts that side's DN9 zeroing goroutine, which is
-how provisioning resumes after a restart, and one whose stored length to
-zero DN8's side conf gate refuses converges and sweeps nothing of that
-side. Then every chunk that was kept is re-applied (SH21 to SH23); that
-step deletes nothing. A chunk whose side is not loaded is no orphan while a
+how provisioning resumes after a restart (on a migration destination that
+has not provisioned, only once it holds its run in the clone-metadata
+area: a converge refused the run registers the DN8 retry instead, and
+whichever later pass takes the run starts the goroutine, DN13), and one
+whose stored length to zero DN8's side conf gate refuses converges and
+sweeps nothing of that side. Then every chunk that was kept is re-applied
+(SH21 to SH23); that step deletes nothing. A chunk whose side is not
+loaded is no orphan while a
 `side-*` file does not load and the chunk's loaded DN still names its side:
 that file names no side, so it may be this side's, and the chunk is
 skipped like the files of a DN that did not load — neither loaded nor
@@ -1305,8 +1317,9 @@ retry the removal.
 The claim on a clone-metadata slot, which the record rule below reads, is
 not a claim on a kernel object and carries no level gate: a held side
 claims the slot for as long as its stored request carries that migration's
-`migr_dst_conf`, at every level. The slot holds the dm-clone's persistent
-metadata and belongs to the migration, not to the role a level suppresses:
+`migr_dst_conf`, at every level, from before the side zeroes, since the
+destination takes its run first (DN13). The slot holds the dm-clone's
+persistent metadata and belongs to the migration, not to the role a level suppresses:
 a level at or above `SP_LEVEL_NO_MIGRATION` takes the dm-clone, its
 wrapper and its source connection and keeps the slot. Freed, the slot
 would lose the hydration state: the slot allocated again when the level
@@ -1573,12 +1586,14 @@ pool left there is `architecture.md`, [D15]:
 1. the extent runs are allocated and the record persisted with its
    `zero_bytes` and a `zeroed_bytes` of zero (above);
 2. `DnSideName` is built (above);
-3. a **background zeroing goroutine** (the registry below) zeroes from
-   `zeroed_bytes` up to `zero_bytes`, one batch at a time, **through the
-   dm-linear** — the side is contiguous in that device's address space, so
-   one command covers a whole batch whatever the physical fragmentation:
-   one `blkdiscard --zeroout` at byte offset `zeroed_bytes`, for the
-   batch's length, on the `DnSideName` path (`Dm.BlkZeroout`). After each
+3. a **background zeroing goroutine** (the registry below) — on a
+   migration destination only once it holds its clone-metadata run (DN13)
+   — zeroes from `zeroed_bytes` up to `zero_bytes`, one batch at a time,
+   **through the dm-linear** — the side is contiguous in that device's
+   address space, so one command covers a whole batch whatever the
+   physical fragmentation: one `blkdiscard --zeroout` at byte offset
+   `zeroed_bytes`, for the batch's length, on the `DnSideName` path
+   (`Dm.BlkZeroout`). After each
    successful batch the advanced count is persisted in the volume table
    (`SetSideZeroed`, which writes nothing for a batch the count already
    covers and refuses one that would leave a gap after the count or run
@@ -1617,8 +1632,14 @@ the build would ensure were the gate open (DN6).
 
 Partial means the record's `zeroed_bytes` is short of its `zero_bytes`,
 complete that the two are equal; k and n are those two counts in MiB,
-written exactly, so a length below one MiB reads as a fraction. Every row
-above is a *converge* outcome. A read-only round (DN16, SH25) allocates
+written exactly, so a length below one MiB reads as a fraction. A
+migration destination adds one step to the first two rows: after the
+linear and before the goroutine it takes its run in the clone-metadata
+area (DN13). While the area has no free run for it, no goroutine starts
+and `side_dev_info` reads `RES_STATUS_PROVISIONING` with the details
+"waiting for metadata room: " followed by the area's own message; any
+other refusal of the run reads `RES_STATUS_ERROR` with the refusal. Every
+row above is a *converge* outcome. A read-only round (DN16, SH25) allocates
 nothing, so "no record" at `provisioned` false reads `RES_STATUS_MISSING`
 there — the converge that would allocate has not run yet, and `n` must
 never be taken from the request.
@@ -1627,7 +1648,9 @@ never be taken from the request.
 
 * keyed by the side tuple `(cluster_id, dn_id, sp_id, side_id)`,
   single-flight per side, created on demand by any converge — the startup
-  reconcile included (DN2) — that finds zeroing still needed. Sides zero
+  reconcile included (DN2) — that finds zeroing still needed, and, for a
+  migration destination that has not provisioned, holds its run in the
+  clone-metadata area (DN13). Sides zero
   in **parallel**, but at most `DnZeroConcurrency` batches run at once per
   agent: N concurrent batches split the disk's zeroing rate N ways, and
   enough of them would have every batch killed at the soft timeout and
@@ -1731,7 +1754,7 @@ applied-by-file throughout (SH21).
 | at or above `SP_LEVEL_READONLY` | nothing — the level has no DN-side behavior; read-only is enforced on the CN's user-facing namespaces only (`architecture.md`, [D11]) |
 | at or above `SP_LEVEL_NO_MIGRATION` | no migration dm-clone: no `DnMigrFinalName`, no `nvme connect`, no `DnMigrMetaDmName`; a destination side keeps its per-CN exports on dm-error, all namespaces `AnaGrpIdInaccessible` |
 | at or above `SP_LEVEL_NO_SIDE` | no nvmet exports at all (side subsystems and migration-source subsystem removed); dm devices remain |
-| at or above `SP_LEVEL_DISABLE` | only the side device and its allocation record remain; the DN9 zeroing goroutine keeps running at this level too — provisioning sits *below* the level ladder |
+| at or above `SP_LEVEL_DISABLE` | only the side device and its allocation record remain, and a migration destination's clone-metadata record; the DN9 zeroing goroutine keeps running at this level too, and a destination takes the run its zeroing waits for (DN13) — provisioning sits *below* the level ladder |
 
 The CN-only intermediate levels (`SP_LEVEL_NO_CLONE`,
 `SP_LEVEL_NO_THINPOOL`, `SP_LEVEL_NO_REDUND`) have no DN-side behavior
@@ -1836,9 +1859,11 @@ Four rules keep the suspension bounded, which is what makes it safe:
   timer nils itself before converging, the only other unfences are the two
   above and neither applies while the role, the side and its exports are
   still wanted, the agent's one periodic converge — DN8's connect retry,
-  armed only while a destination role's build has stopped short (DN13) —
-  would take this same gate, and a `CheckSide` round neither converges nor
-  bumps a revision. One transient probe failure would otherwise leave the
+  armed only while a destination role's build has stopped short, or while
+  a destination that has not provisioned has not taken its run in the
+  clone-metadata area (DN13) — would take this same gate, and a
+  `CheckSide` round neither converges nor bumps a revision. One transient
+  probe failure would otherwise leave the
   linears suspended, queueing bios with no timeout, until the worker next
   happened to re-sync the side. Running phase 2 under that gate is safe: it
   only puts each per-CN dm-linear on its dm-error, building either device
@@ -1871,14 +1896,20 @@ DN13. **Migration destination** (`migr_dst_conf` set).
 
 **Provisioning first.** The destination zeroes like any side of its
 group: its request carries the group's length to zero (`dnv-worker.md`
-RW15), and DN9 zeroes that length before anything is copied. While the
-destination side's own `side_conf.provisioned` is false, or its record's
+RW15), and DN9 zeroes that length before anything is copied. Before it
+zeroes, at every level, it takes its run in the clone-metadata area
+(`holdMigrMeta`): the record alone, through `AllocCloneMeta`, with the
+run's head zeroed before the record is persisted as for step (2), and
+nothing above it — the ordering and its reason are `architecture.md`,
+Migration, Phase 0. While the destination
+side's own `side_conf.provisioned` is false, or its record's
 `zeroed_bytes` is short of its `zero_bytes`, **none** of steps (1) to (5)
 run. The converge goes no further than the DN9 shape — the extent record,
-`DnSideName` and the zeroing goroutine — and sets up none of the per-CN
-stacks, the metadata slot, the source connection or the dm-clone. Nor does
-the gate remove any of them: neither the flag nor the record's counts enter
-the wanted set the sweep removes against (DN6). Below
+`DnSideName`, the run's record and the zeroing goroutine — and sets up
+none of the per-CN stacks, the metadata wrapper, the source connection or
+the dm-clone. Nor does the gate remove any of them: neither the flag nor
+the record's counts enter the wanted set the sweep removes against (DN6).
+Below
 `SP_LEVEL_NO_MIGRATION`, `migr_dst_info.target_info` and `.dm_clone_info`
 report `RES_STATUS_PROVISIONING` with details "side provisioning" — at or
 above it the level comes first and no `migr_dst_info` row is emitted at all
@@ -1889,13 +1920,40 @@ they come from). Cancelling the migration inside this window is the DN9
 cancel-and-wait path: the goroutine is stopped and waited for before
 `DnSideName` is removed.
 
+**No room is a wait.** When the area answers that it has no free run for
+the destination's run — the allocator's refusal, an error of its own type,
+so the caller does not read the text to decide — the side zeroes nothing:
+no goroutine starts, so its zeroing stays incomplete, the worker never
+flips it, and the source keeps serving as if no migration had started.
+`side_dev_info` reads `RES_STATUS_PROVISIONING` with the details "waiting
+for metadata room: " followed by the area's own message, and the two
+`migr_dst_info` rows, where the level emits them, read the same in place
+of "side provisioning". The DN8 retry below is registered and takes the
+run once units come free — when a destination role of the node ends and
+its run is freed (DN6) —, and the pass that takes the run deregisters it:
+the dn agent's existing retry covers the wait. Only the run's step
+registers the retry while the side has not provisioned, so a destination
+whose passes all stopped before that step — at the record or the side
+device, the startup reconcile's included — has none, and the side's
+verdict, which leaves out a waiting destination only while its retry is
+registered, re-drives it like any other side (DN16). Any other refusal of
+the run — a record of this migration smaller than the request, a run
+larger than the whole area, a zero `migr_dst_conf.block_size` — reads
+`RES_STATUS_ERROR` on `side_dev_info` with the refusal, the rows above it
+staying "side provisioning", and registers the retry the same way.
+
 With the gate open, the five dst steps of `architecture.md`, Migration,
-numbered as there. What the dn adds to them: the slot of step (2) is
-contiguous `DnCloneMetaUnit` units of the [D13] clone-metadata area, sized
-for the side's region count, and its head is zeroed **before** its record
-is persisted so that bytes an earlier migration left in those units cannot
-be misparsed as a dm-clone superblock; the connect of step (3) carries the
-hostnqn `DnHostNqn` of this cluster and dn (SH20), the one field by which
+numbered as there. What the dn adds to them: the slot of step (2) is the
+run taken before zeroing (above), contiguous `DnCloneMetaUnit` units of
+the [D13] clone-metadata area, `CloneMetaUnits` of the side's `ext_cnt`
+extents and `migr_dst_conf.block_size` (`migrMetaUnits`; `architecture.md`,
+Metadata units), whose head is zeroed **before** its record is persisted
+so that bytes an earlier migration left in those units cannot be
+misparsed as a dm-clone superblock; step (2) finds that record and builds
+the wrapper over it, and refuses as the run's own step does — no free run
+reads both `migr_dst_info` rows `RES_STATUS_PROVISIONING` with the wait's
+details, any other refusal the pair DN18 names; the connect of step (3)
+carries the hostnqn `DnHostNqn` of this cluster and dn (SH20), the one field by which
 the connection is later attributed to this agent (DN6); the dm-clone of step
 (4) carries the features **no_hydration and no_discard_passdown** — both
 are mandatory on **every** dnv dm-clone, dn and cn alike (`cnagent.md`
@@ -1954,8 +2012,9 @@ or the namespace has still not appeared, the
 pass records `target_info` as `RES_STATUS_ERROR` and registers the side in
 a background retry registry that re-runs the destination converge every
 `DnMigrConnectRetryInterval` under the DN1 locks. Every other step that
-stops registers it too — the slot or its wrapper, a walk of the source
-connection that did not answer, the dm-clone, the status read — and so do
+stops registers it too — the run refused before the side zeroes (above),
+the slot or its wrapper, a walk of the source connection that did not
+answer, the dm-clone, the status read — and so do
 hydration that will not converge (a knob or the enable) and a step (5)
 that leaves the primary's dm-linear or its export unconverged (the linear
 onto the dm-clone, the namespace in `AnaGrpIdOptimized`). The worker
@@ -1966,12 +2025,16 @@ the SP's next revision; with the source having handed IO over by then
 leg with no serving path for that long, and one whose hydration is off
 would copy nothing in the background. The side is deregistered as the
 last act of a pass whose steps up to the status read held and whose step
-(5) converged the primary's dm-linear and export (`settleMigrRetry`); by
+(5) converged the primary's dm-linear and export (`settleMigrRetry`);
+while the side has not provisioned, by the pass that takes its run; by
 the sweep's pre-step in the first converge that finds the destination
 role no longer wanted and lists the node's dm devices (DN6), which is the
-`SyncupSide` that ends the role unless its `dmsetup ls` did not answer;
-and by the drop of a side whose pointer has left the list (DN6) — always
-by the state, never by remembering that it was once registered.
+`SyncupSide` that ends the role unless its `dmsetup ls` did not answer —
+though a destination that has not provisioned keeps the retry at a level
+that suppresses the role, since it takes its run at every level and that
+step registers and deregisters the retry itself; and by the drop of a
+side whose pointer has left the list (DN6) — always by the state, never
+by remembering that it was once registered.
 
 **Short of the source connection's own answer, a step that stops takes the
 serving path neither onto the dm-clone nor off it.** Where the per-CN
@@ -2010,7 +2073,10 @@ source this pass found, and the primary's stack goes onto it.
 that is the sharp edge.** Registering creates a cancellable context and
 deregistering cancels it, and a pass of the loop can be the one that
 deregisters: as its last act, when its whole sequence held
-(`settleMigrRetry`), or in its sweep's pre-step, when it is the first
+(`settleMigrRetry`); in the middle of the pass, on a destination that has
+not provisioned, when its side-device step takes or finds its run in the
+clone-metadata area and goes on to start zeroing (`ensureSideDev`,
+`holdMigrMeta`); or in its sweep's pre-step, when it is the first
 converge to find the destination role no longer wanted and list the
 node's dm devices (above). An attempt run on that context would fail
 every OS call that follows the deregistration in its pass, with the
@@ -2074,17 +2140,15 @@ role this node hosts, across every SP on it. A migration costs the units
 its dm-clone metadata needs — a fixed base plus one byte per region, rounded
 up to whole `DnCloneMetaUnit`s — so the area bounds the concurrent
 destination roles per DN, and bounds them tighter for large sides at small
-block sizes. `MaxMigrCntPerSp` bounds none of this and the control plane
-does not gate against it (`architecture.md`, Migrations): the converge
-that meets exhaustion reports it on the `migr_dst_info` rows —
-`target_info` `RES_STATUS_MISSING`, its details naming the missing clone
-metadata, since no connect is attempted without a slot, and
-`dm_clone_info` `RES_STATUS_ERROR` with the allocator's message — the dn
-twin of the cn arena ceiling in `cnagent.md` CN18. The check rounds report
-the same pair (DN18), so the side stays unhealthy for as long as it is
-starved, and the retry above, which re-runs the build every
-`DnMigrConnectRetryInterval` meanwhile, builds the destination with no
-further request once the units are free.
+block sizes. `MaxMigrCntPerSp` bounds none of this; the control plane
+counts the area's units and creates no migration whose destination lacks
+the room (`architecture.md`, Metadata units), so this agent meets an area
+with no free run only where the free units lie in runs too short, or a
+run the count gave back has not been freed yet. That wait is the one
+above: the side zeroes nothing, its rows read `RES_STATUS_PROVISIONING`
+with the area's text, no health epoch is set, the source keeps serving,
+and the retry takes the run with no further request once one comes free —
+the dn twin of the cn arena's wait in `cnagent.md` CN18.
 
 DN14. Persist (SH5); reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
@@ -2141,7 +2205,17 @@ starts that goroutine, and one that could not — the startup reconcile's,
 while no read of the disk answered — would otherwise leave the side
 reporting the same progress every round with nothing to re-send its
 `SyncupSide`; the registry and the record are both read fresh, so nothing
-about the failed converge is remembered. Both reply zero otherwise.
+about the failed converge is remembered. A migration destination that has
+not provisioned, that the clone-metadata area has no free run for, and
+whose DN8 retry is registered adds nothing to the verdict: it zeroes
+nothing until it holds its run (DN13), that retry takes the run once one
+comes free, and a `SyncupSide` sent every round would only repeat the
+wait. The area's answer is read fresh from the loaded table, and the retry
+from its registry, like the rest, so a destination whose run the area
+could supply, or that no retry covers — one whose passes all stopped
+before the run's step (DN13) —, and that still zeroes nothing is named
+like any other side.
+Both reply zero otherwise.
 `GetDnInfo` and a `CheckDn` round probe before they take the verdict: the
 probe's read of the disk can be the first to answer, which is what
 confirms the identity (DN5). A DN's verdict covers the node-level scope
@@ -2188,8 +2262,9 @@ of a converge they re-run for a reason of their own.
 DN18. Probe map (all via SH17 conventions; a `res_name` and a probe per
 resource). `RES_STATUS_PROVISIONING` rows are **healthy**: the resource is
 deliberately not created yet, being prepared (the side device while it
-zeroes at `provisioned` false, DN9), or kept unprobed behind DN9's gate
-after it closed again (DN9), no action is needed, and the worker never
+zeroes at `provisioned` false, DN9), kept unprobed behind DN9's gate
+after it closed again (DN9), or waiting for a free run in the
+clone-metadata area (DN13), no action is needed, and the worker never
 turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 `RES_STATUS_ERROR` keeps meaning *needs intervention*.
 
@@ -2229,7 +2304,15 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's
   output, followed by the kill streak and the batch size the side backed off
   to once DN9's backoff holds; a live table that does not match the record's
-  extent runs ⇒ `RES_STATUS_ERROR`. The same read fills
+  extent runs ⇒ `RES_STATUS_ERROR`. On a migration destination at
+  `provisioned` false whose live table matches and whose record still has
+  bytes to zero, the row next reads the area's refusal of the
+  destination's run, computed from the loaded volume table with nothing
+  allocated (`CloneMetaRefusal`): no free
+  run ⇒ `RES_STATUS_PROVISIONING` with the converge's wait details (DN13),
+  any other refusal it establishes ⇒ `RES_STATUS_ERROR` with the refusal; a
+  failed write of the run, which only the converge meets, does not show
+  here. The same read fills
   `SideInfo.zeroed_bytes`/`zero_bytes` every round. A side whose stored
   request DN8's side conf gate refuses is not probed at all: the probe
   writes that gate's Error record and answers an empty `SideInfo`.
@@ -2260,25 +2343,32 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 * `migr_dst_info.target_info`, named by the `MigrSrcNqn`: the SH20 **sysfs
   walk** (the subsystem matched by "subsysnqn", the controllers' "state"
   — never `nvme list-subsys`) shows a live controller for it (liveness
-  only, SH20); `RES_STATUS_PROVISIONING`, details "side provisioning",
-  while DN9's gate is closed on the destination side (DN13).
+  only, SH20); `RES_STATUS_PROVISIONING` while DN9's gate is closed on the
+  destination side, details "side provisioning", or the wait details of
+  DN13 while the area has no free run for the destination's run.
 * `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: `dmsetup
   status`; the details carry the raw status line (`architecture.md`,
-  Live-state reporting — hydration progress); `RES_STATUS_PROVISIONING`,
-  details "side provisioning", while DN9's gate is closed on the
-  destination side (DN13). The `DnMigrMetaDmName` wrapper has no `ResInfo`
-  of its own: its health folds into this one. While the dm-clone is absent
+  Live-state reporting — hydration progress); `RES_STATUS_PROVISIONING`
+  while DN9's gate is closed on the destination side, details "side
+  provisioning", or the wait details of DN13 while the area has no free
+  run for the destination's run. The `DnMigrMetaDmName` wrapper has no
+  `ResInfo` of its own: its health folds into this one. While the dm-clone is absent
   and the clone-metadata area cannot supply this migration's slot, the
-  probe reports the converge's own pair instead — `target_info`
-  `RES_STATUS_MISSING` naming the missing clone metadata and this row
-  `RES_STATUS_ERROR` with the allocator's message (DN13) — computed from
-  the loaded volume table with nothing allocated (`CloneMetaRefusal`), so
-  the two channels do not trade the rows every round.
+  probe reports the converge's own pair instead, computed from the loaded
+  volume table with nothing allocated (`CloneMetaRefusal`), so the two
+  channels do not trade the rows every round: for an area with no free run,
+  both rows `RES_STATUS_PROVISIONING` with the wait details of DN13; for
+  any other refusal, `target_info` `RES_STATUS_MISSING` naming the missing
+  clone metadata and this row `RES_STATUS_ERROR` with the allocator's
+  message.
 
 The level comes first for both `migr_dst_info` rows: at a level that does
 not want the destination role (`SP_LEVEL_NO_MIGRATION` and above, DN11)
-neither row is emitted, whether or not DN9's gate is open; below it, a
-destination behind the closed gate reports both `RES_STATUS_PROVISIONING`.
+neither row is emitted, whether or not DN9's gate is open, and only
+`side_dev_info` shows a destination that waits for its run; below it, a
+destination behind the closed gate reports both `RES_STATUS_PROVISIONING`,
+with the wait details of DN13 while the area has no free run for its run,
+and "side provisioning" otherwise.
 
 DN19. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in
@@ -2301,8 +2391,9 @@ and the error, for each such listing (`LeftoverReply`). Two dn checks that
 are not listings are folded into the same outcome, in that same form, so
 that they drive the same re-send: DN6's record step on a disk whose
 identity is not confirmed, and — in the read-only verdict only — a side
-with bytes still to zero and no zeroing goroutine (DN16). The full list
-goes to the agent log as the "sweep leftover" record (`log.md`,
+with bytes still to zero and no zeroing goroutine, other than a migration
+destination waiting for a free run in the clone-metadata area (DN16). The
+full list goes to the agent log as the "sweep leftover" record (`log.md`,
 Leftovers), so a lingering leftover is visible every round rather than
 once.
 
@@ -2422,3 +2513,15 @@ is still a protocol-level refusal.
   the reply is not clean and the worker re-drives the pass, but it stops
   nothing — the layer that removes exports or the one that disconnects
   source connections finds nothing to remove, and the layers below run on.
+* A migration destination that waits for a free run in the clone-metadata
+  area re-runs its side's converge every `DnMigrConnectRetryInterval` under
+  the DN1 locks for as long as it waits (DN13), so the side's Check rounds
+  wait behind each attempt, and the wait lasts until another destination
+  role of the node ends and its run is freed. A run whose write fails —
+  the area has the room but the volume table cannot be saved — reads
+  `RES_STATUS_ERROR` on the converge's `side_dev_info` and not on a Check
+  round's, which reads the area's answer without writing (DN18) and reports
+  the side's zeroing progress instead: the two channels trade that row
+  while the write keeps failing, and the round's verdict names the side as
+  one nothing zeroes, so the worker re-sends its `SyncupSide` every round
+  (DN16).

@@ -258,8 +258,10 @@ only reported, a guest's own not being the suite's to fail on.
 ## Out of scope
 
 Error paths beyond the stale probe, the provisioning error rows among them
-(`dnagent.md` DN9); the cn role; fault injection under a live stack, the
-teardown case removing a real remote instead; performance; TLS and
+(`dnagent.md` DN9); a migration destination that waits for a free run in
+the clone-metadata area, whose rows the unit tests cover (DN13); the cn
+role; fault injection under a live stack, the teardown case removing a real
+remote instead; performance; TLS and
 authentication; levels other than read-write and no-migration
 (`dnagent.md` DN11); lock contention on one agent; the source half of a
 cancelled migration; a zeroing batch cancelled mid-flight.

@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -195,37 +196,55 @@ func firstNonEmpty(values ...string) string {
 // The clone-metadata slot allocator
 // ---------------------------------------------------------------------------
 
-// cnCloneMetaUnitCnt is the arena in allocation units: 1 GiB / 4 MiB = 256.
-const cnCloneMetaUnitCnt = common.CnCloneMetaAreaSize / common.CnCloneMetaUnit
-
 // cnCloneMetaUnitSectors is one unit in dm sectors: 8192.
 const cnCloneMetaUnitSectors = common.CnCloneMetaUnit / agent.SectorSize
 
-// cloneMetaUnits budgets one clone's metadata (CN18 step 2, the cn twin of the
-// dn agent's migrMetaSize): the dm-clone superblock plus one byte per region
-// is a generous bound, rounded up to whole CnCloneMetaUnit units.
-// region_cnt = td.size / block_size.
-//
 // The arena is **per CN**, not per SP: CnTmpFilePath and CnCloneMetaDmPrefix
-// are keyed by (cluster, cn), so its 256 units are shared by every clone of
-// every cntlr on the node — up to MaxCntlrCntPerCn cntlrs, one per SP. The
-// real capacity is therefore sum(metaUnits(clone)) <= 256 across the whole CN,
-// and MaxCloneCntPerSp says nothing about it. Because the 4 MiB base term is
-// exactly one unit, every real clone costs >= 2 units, so 128 *minimum-cost*
-// clones is the CN-wide ceiling — and far fewer for large tds at a small
-// data_block_size, where region_cnt dominates (a 1 TiB td at the 64 KiB
-// minimum block size costs 5 units). Nothing gates the clone count against
-// this; exhaustion is reported as RES_STATUS_ERROR on the clone's rows
-// (CN18), and a clone that leaves every stored request frees its run again.
-func cloneMetaUnits(regionCnt uint64) uint64 {
-	bytes := uint64(4*1024*1024) + regionCnt
-	return (bytes + common.CnCloneMetaUnit - 1) / common.CnCloneMetaUnit
+// are keyed by (cluster, cn), so its common.CnCloneMetaUnitCnt units are
+// shared by every clone of every cntlr on the node, and a clone's run is
+// common.CloneMetaUnits of its destination td (plan.go buildClones;
+// architecture.md, Metadata units). The gateway counts each CN's used units
+// against that ceiling, which keeps a full arena rare; a node a cntlr
+// replacement charged past the ceiling, or an arena whose free units are
+// split into runs too short, can still have no free run for a clone. A clone
+// that leaves every stored request frees its run again (CN18).
+
+// cloneMetaNoRunError is the allocator's "no free run": the arena answered,
+// and no contiguous run of want free units is left in it. It is the one
+// allocation failure that waits rather than fails: its clone's two rows read
+// RES_STATUS_PROVISIONING with this text, and the cntlr registers CN18's slow
+// retry (startCloneMetaRetry), because the run can come back when another
+// clone leaves the node. The type is what tells it from every other failure
+// of the allocation, so no caller reads the text to decide; the text is what
+// the rows carry after their prefix (detailsWaitingForRoom).
+type cloneMetaNoRunError struct {
+	want  uint64
+	total uint64
+}
+
+func (e *cloneMetaNoRunError) Error() string {
+	return fmt.Sprintf(
+		"no contiguous run of %d clone-metadata units in the %d-unit arena",
+		e.want, e.total)
+}
+
+// isCloneMetaNoRun reports whether err is the allocator's typed "no free run".
+func isCloneMetaNoRun(err error) bool {
+	var noRun *cloneMetaNoRunError
+	return errors.As(err, &noRun)
+}
+
+// detailsWaitingForRoom is the details text of both rows of a clone the arena
+// has no free run for: a fixed prefix, then the allocator's own message
+// (architecture.md, Metadata units; CN18 step 2).
+func detailsWaitingForRoom(err error) string {
+	return "waiting for metadata room: " + err.Error()
 }
 
 // cloneMetaSlot is one kind-`cb` wrapper as read back out of its own dm table —
 // the allocator's registry record. unitCount == 0 marks a wrapper whose table
 // is not a single linear target over the arena: it holds its name but claims
-// no units, and its clone reports RES_STATUS_ERROR.
+// no units, and cloneMetaSlotStatus reads it as a mismatch.
 //
 // sectors is the table's length exactly as the kernel prints it, and it is
 // what the CN28 probe compares; unitCount is the *footprint* that length
@@ -345,8 +364,9 @@ func (c *CloneMeta) Alloc(
 	used map[string]cloneMetaSlot,
 	want uint64,
 ) (cloneMetaSlot, error) {
-	taken := cloneMetaTakenUnits(used, loopDevNo)
-	start, err := cloneMetaAllocContiguous(taken, cnCloneMetaUnitCnt, want)
+	taken := cloneMetaTakenUnits(used, loopDevNo, "")
+	start, err := cloneMetaAllocContiguous(
+		taken, common.CnCloneMetaUnitCnt, want)
 	if err != nil {
 		return cloneMetaSlot{}, err
 	}
@@ -372,19 +392,24 @@ func (c *CloneMeta) Alloc(
 }
 
 // cloneMetaTakenUnits is the used-unit footprint one enumeration claims on one
-// loop device: the map Alloc's first fit searches around. It is pure — it reads
-// the slots it is handed and touches neither the kernel nor the arena — which
-// is what lets the read-only CN28 probe ask the allocator's own question
-// through cloneMetaCanSupply without allocating anything.
+// loop device: the map Alloc's first fit searches around. The wrapper named
+// except claims nothing, which is how cloneMetaCanSupply counts the run of a
+// wrapper about to be replaced as free; Alloc passes "", because its caller
+// has already removed that wrapper and dropped it from the map. It is pure —
+// it reads the slots it is handed and touches neither the kernel nor the
+// arena — which is what lets the read-only CN28 probe ask the allocator's own
+// question through cloneMetaCanSupply without allocating anything.
 func cloneMetaTakenUnits(
 	used map[string]cloneMetaSlot,
 	loopDevNo string,
+	except string,
 ) map[uint64]struct{} {
 	taken := make(map[uint64]struct{})
 	for _, slot := range used {
 		// A wrapper on another device claims nothing here — after a tmpfs
 		// remount it is stale, and the converge rebuilds it.
-		if slot.devNo != loopDevNo || slot.unitCount == 0 {
+		if slot.devNo != loopDevNo || slot.unitCount == 0 ||
+			slot.name == except {
 			continue
 		}
 		for i := uint64(0); i < slot.unitCount; i++ {
@@ -394,46 +419,58 @@ func cloneMetaTakenUnits(
 	return taken
 }
 
-// cloneMetaCanSupply answers Alloc's first question — is there a contiguous run
-// of cp.metaUnits units left? — over an enumeration the caller already holds,
-// and hands back the allocator's own message when there is not. It allocates
-// nothing: no hole punch, no `dmsetup create`, no change to the cached arena.
+// cloneMetaCanSupply answers, over an enumeration the caller already holds,
+// the question ensureCloneMeta's Alloc will ask for a clone whose wrapper is
+// absent or does not match: is there a contiguous run of cp.metaUnits units
+// for a fresh wrapper? It returns nil when there is, and the allocator's own
+// error when there is not — the typed cloneMetaNoRunError when the arena has
+// no such free run, a plain error when the run is larger than the whole
+// arena and can never fit. It allocates nothing: no hole punch, no `dmsetup
+// create`, no change to the arena it is handed.
 //
-// It answers the question ensureCloneMeta would ask only for a clone whose
-// wrapper is **absent** from the enumeration. A present wrapper's own units are
-// in the taken set, so asking for a free run beside them is a different
-// question; probeCloneArenaCannotSupply, the one caller, checks absence first.
+// The clone's own wrapper claims nothing here, whichever loop device it is
+// on: a wrapper that does not match is removed before the allocation
+// (ensureCloneMeta), so its run is free by the time Alloc looks, and a
+// mismatched wrapper whose own units are the only free ones must not read as
+// a full arena (architecture.md, Clone crash recovery). A wrapper that
+// matches is never asked about: it is reused as it is.
 func cloneMetaCanSupply(
 	arena *cloneMetaArena,
 	cp *clonePlan,
-) (bool, string) {
-	taken := cloneMetaTakenUnits(arena.slots, arena.loopDevNo)
-	if _, err := cloneMetaAllocContiguous(
-		taken, cnCloneMetaUnitCnt, cp.metaUnits); err != nil {
-		return false, err.Error()
-	}
-	return true, ""
+) error {
+	taken := cloneMetaTakenUnits(arena.slots, arena.loopDevNo, cp.metaDmName)
+	_, err := cloneMetaAllocContiguous(
+		taken, common.CnCloneMetaUnitCnt, cp.metaUnits)
+	return err
 }
 
 // cloneMetaAllocContiguous is first fit, contiguous only — the wrapper is a
 // single linear target, so its units must be one run. It and cloneMetaFreeRuns
 // are deliberate local twins of the dn allocator's freeRuns/allocContiguous
-// (agent/dnagent/diskmeta.go): the two arenas share only their arithmetic, and
-// promoting the pair would widen this change into the dn package for no
-// runtime gain.
+// (agent/dnagent/diskmeta.go): the two arenas share the unit formula
+// (common.CloneMetaUnits) and nothing else, and promoting the pair into a
+// package both agents import would gain nothing at run time.
+//
+// A run larger than the whole arena can never be supplied, however many
+// clones leave the node, so it is a plain error and its clone's rows read
+// RES_STATUS_ERROR; only a run that would fit an emptier arena is the typed
+// cloneMetaNoRunError, whose rows read RES_STATUS_PROVISIONING (CN18 step 2).
 func cloneMetaAllocContiguous(
 	used map[uint64]struct{},
 	total uint64,
 	want uint64,
 ) (uint64, error) {
+	if want > total {
+		return 0, fmt.Errorf(
+			"a run of %d clone-metadata units is larger than the %d-unit arena",
+			want, total)
+	}
 	for _, run := range cloneMetaFreeRuns(used, total) {
 		if run.count >= want {
 			return run.start, nil
 		}
 	}
-	return 0, fmt.Errorf(
-		"no contiguous run of %d clone-metadata units in the %d-unit arena",
-		want, total)
+	return 0, &cloneMetaNoRunError{want: want, total: total}
 }
 
 type cloneMetaRun struct {
@@ -508,9 +545,11 @@ func (s *CnAgentServer) cloneMetaArena(
 // planArena resolves the arena once per converge or probe pass and caches it
 // on the plan, so a cntlr with N clones still issues one `losetup` and one
 // `dmsetup ls` (CN18: the loop device is re-learned every pass and
-// the probe compares against the *currently probed* one). The cache lives
-// exactly as long as the pass: each pass builds its plan afresh
-// (newCntlrPlan), and nothing keeps a plan between passes.
+// the probe compares against the *currently probed* one). A converge that
+// allocates enumerates once more under cloneMetaMu, and that enumeration
+// replaces the cache (ensureCloneMeta). The cache lives exactly as long as
+// the pass: each pass builds its plan afresh (newCntlrPlan), and nothing
+// keeps a plan between passes.
 func (s *CnAgentServer) planArena(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -530,10 +569,11 @@ func (s *CnAgentServer) planArena(
 // agent is the interesting one — is an error whose repair is the clone
 // rebuild of architecture.md, Clone crash recovery.
 //
-// It is not the only source of the CN28 `clone_id_to_meta` row: when the arena
-// cannot supply this clone's slot the probe answers that row from
-// probeCloneArenaCannotSupply instead, which short-circuits before this
-// function is ever called.
+// It is not the only source of the CN28 `clone_id_to_meta` row:
+// cloneMetaVerdict answers first for a clone whose source is connected, and
+// the row is its verdict whenever the arena did not answer, whatever the
+// wrapper, or cannot supply a fresh run for a wrapper that is absent or does
+// not match.
 func cloneMetaSlotStatus(
 	arena *cloneMetaArena,
 	cp *clonePlan,
@@ -591,6 +631,13 @@ func (s *CnAgentServer) cloneMetaConverged(
 // same free run and, because their wrappers have different names, neither
 // `dmsetup create` would fail.
 //
+// The room comes first: before anything is removed, the fresh enumeration
+// must be able to supply the run (cloneMetaCanSupply), and when it cannot the
+// allocator's error comes back unwrapped — the typed cloneMetaNoRunError for
+// an arena with no free run, which the caller reports as provisioning — and
+// the wrapper is left as it is, so nothing is removed for a run that will
+// not come.
+//
 // A present-but-mismatched wrapper is removed and reallocated. That is safe
 // only in the CN18 order: the caller has already tried to remove the
 // dm-clone, so nothing maps the wrapper once that removal succeeded; when it
@@ -605,14 +652,24 @@ func (s *CnAgentServer) ensureCloneMeta(
 	defer s.cloneMetaMu.Unlock()
 
 	// Fresh inside the lock: a cached view from earlier in this pass could
-	// already be behind another cntlr's allocation.
+	// already be behind another cntlr's allocation. The fresh enumeration
+	// replaces this pass's cached one at once, whatever becomes of this
+	// clone, so a later clone's room check (cloneMetaVerdict) reads the
+	// newest enumeration the pass has made: a run another cntlr took, which
+	// this one shows, must not read as free there, or that check would park
+	// a serving namespace for a run the pass already knows is gone. An
+	// enumeration that failed replaces nothing.
 	arena, err := s.cloneMetaArena(ctx, plan.clusterId, plan.cnId)
 	if err != nil {
 		return err
 	}
+	plan.arena, plan.arenaErr, plan.arenaDone = arena, nil, true
 	if status, _ := cloneMetaSlotStatus(arena, cp); status ==
 		pb.ResStatus_RES_STATUS_OK {
 		return nil
+	}
+	if err := cloneMetaCanSupply(arena, cp); err != nil {
+		return err
 	}
 	if _, exists := arena.slots[cp.metaDmName]; exists {
 		if !s.removeDm(ctx, cp.metaDmName) {
@@ -620,6 +677,9 @@ func (s *CnAgentServer) ensureCloneMeta(
 				"the mismatched metadata wrapper %s could not be removed",
 				cp.metaDmName)
 		}
+		// The cached view follows the removal, so a later clone's room check
+		// does not count the freed run as taken, whatever becomes of the
+		// allocation below.
 		delete(arena.slots, cp.metaDmName)
 	}
 	slot, err := s.cmeta.Alloc(ctx, cp.metaDmName, arena.loopDev,
@@ -627,18 +687,15 @@ func (s *CnAgentServer) ensureCloneMeta(
 	if err != nil {
 		return err
 	}
-	// Keep this pass's cached view in step with the kernel, so a second clone
-	// of the same cntlr does not read the run back as free.
-	if plan.arena != nil {
-		plan.arena.slots[slot.name] = slot
-	}
+	// ...and the allocation, in step with the kernel, so a second clone of
+	// the same cntlr does not read the run back as free.
+	arena.slots[slot.name] = slot
 	return nil
 }
 
 // probeCloneMeta is the ordinary read-only CN28 row of clone_id_to_meta, read
-// from the wrapper's own dm table. The
-// row for a clone whose slot the arena cannot supply comes from
-// probeCloneArenaCannotSupply instead, which probeCntlr consults first.
+// from the wrapper's own dm table. The row for a clone cloneMetaVerdict
+// decides comes from that verdict instead, which probeCntlr consults first.
 func (s *CnAgentServer) probeCloneMeta(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -651,59 +708,68 @@ func (s *CnAgentServer) probeCloneMeta(
 	return cloneMetaSlotStatus(arena, cp)
 }
 
-// probeCloneArenaCannotSupply is the read-only half of CN18 step 2's refusal
-// pair. It covers the two states a read-only pass can actually establish, and
-// reports for each the message the converge reports:
+// cloneMetaVerdict is CN18 step 2's verdict on one clone's metadata, read
+// from this pass's enumeration of the arena, and the one function the
+// converge (ensureClone, before it parks or removes anything) and the CN28
+// probe (probeCntlr) both decide by, so the two channels report the same two
+// rows for the same node. decided is false, with no status or details, when
+// step 2 goes on to build: the clone's wrapper matches, or the arena can
+// supply a fresh run for it. When decided is true the clone gets no further
+// in step 2, and status and details are the clone_id_to_meta row:
 //
-//   - the arena did not answer at all (planArena failed) — its own error,
-//     which is byte for byte what probeCloneMeta returns for that state, so
-//     only the dm row changes shape here (ensureClone's planArena branch);
-//   - the arena answered, this clone's wrapper is absent from it, and there is
-//     no contiguous run left to build one in — the allocator's own message
-//     (ensureClone's ensureCloneMeta branch, through Alloc).
+//   - RES_STATUS_ERROR with planArena's own error when the arena did not
+//     answer — the converge also registers the CN10 retry for that;
+//   - RES_STATUS_PROVISIONING with detailsWaitingForRoom when the arena
+//     answered and has no free run for a fresh wrapper (cloneMetaNoRunError):
+//     clone_id_to_dm_clone then reads the same (reportCloneNoRoom), and the
+//     converge registers CN18's slow retry;
+//   - RES_STATUS_ERROR with the allocator's message when the run is larger
+//     than the whole arena and can never fit.
 //
-// Both are states whose converge reply is `clone_id_to_meta` ERROR with exactly
-// that message and `clone_id_to_dm_clone` ERROR detailsCloneMetaMissing, and
-// ResTracker.Set overwrites, so a probe that answered the plain "no wrapper, no
-// dm-clone" MISSING pair — or, on an unprobeable arena above a dm-clone that is
-// still up, OK — would replace that verdict, and the two channels would trade
-// the rows, and the `epoch` on them, on every round. ERROR is also the status
-// the worker's health pass keys on, so the flip is not cosmetic.
+// For both ERROR verdicts clone_id_to_dm_clone reads ERROR
+// detailsCloneMetaMissing (reportCloneMetaErr). ResTracker.Set overwrites, so
+// a probe that answered anything else for these states — the plain "no
+// wrapper, no dm-clone" MISSING pair, or OK over a dm-clone that is still up
+// — would replace the converge's verdict, and the two channels would trade
+// the rows, and the `epoch` on them, on every round.
 //
-// An absent wrapper in an arena with room left is deliberately left to the
-// ordinary probes: MISSING is truthful there, because the converge is simply
-// going to build it.
-//
-// Step 2 has other ways to fail, and they are left uncovered because a
+// A wrapper that is absent or does not match, in an arena that can supply a
+// fresh run, is left to the ordinary probes: MISSING, or the mismatch's
+// ERROR, is truthful there, because the converge is going to rebuild it.
+// Step 2 has other ways to fail, and the verdict cannot see them because a
 // read-only pass cannot tell them from that ordinary "not built yet" — a hole
-// punch or a `dmsetup create` that failed inside Alloc leaves an absent wrapper
-// in an arena with room, for instance, and a mismatched wrapper ensureCloneMeta
-// could not remove leaves a present one. The converge reported the ERROR pair
-// for those too, and the following check round does not reproduce it; that
-// residue is known and is not what this function claims to fix.
+// punch or a `dmsetup create` that failed inside Alloc leaves an absent
+// wrapper in an arena with room, for instance, and a mismatched wrapper
+// ensureCloneMeta could not remove leaves a present one. The converge reports
+// the ERROR pair for those, which the following check round does not
+// reproduce, and registers the CN10 retry, which runs the pass again
+// (ensureClone).
 //
 // Read-only throughout (CN23, SH25): planArena is this pass's cached
 // enumeration and cloneMetaCanSupply is pure, so nothing here takes
 // cloneMetaMu, calls Alloc or changes what the arena holds. The one thing
-// written is planArena's cache, which the first call of a pass fills — on a
-// probe pass that is usually this one, because the clone loop consults this
-// branch before probeCloneMeta.
-func (s *CnAgentServer) probeCloneArenaCannotSupply(
+// written is planArena's cache, which the first call of a pass fills.
+func (s *CnAgentServer) cloneMetaVerdict(
 	ctx context.Context,
 	plan *cntlrPlan,
 	cp *clonePlan,
-) (string, bool) {
+) (status pb.ResStatus, details string, decided bool) {
 	arena, err := s.planArena(ctx, plan)
 	if err != nil {
-		return err.Error(), true
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), true
 	}
-	if _, exists := arena.slots[cp.metaDmName]; exists {
-		return "", false
+	if slotStatus, _ := cloneMetaSlotStatus(arena, cp); slotStatus ==
+		pb.ResStatus_RES_STATUS_OK {
+		return 0, "", false
 	}
-	if fits, details := cloneMetaCanSupply(arena, cp); !fits {
-		return details, true
+	if err := cloneMetaCanSupply(arena, cp); err != nil {
+		if isCloneMetaNoRun(err) {
+			return pb.ResStatus_RES_STATUS_PROVISIONING,
+				detailsWaitingForRoom(err), true
+		}
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), true
 	}
-	return "", false
+	return 0, "", false
 }
 
 // reconcileCloneMeta removes the kind-`cb` wrappers of one CN whose clone is in

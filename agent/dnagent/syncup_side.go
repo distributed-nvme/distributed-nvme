@@ -165,13 +165,14 @@ func (s *DnAgentServer) convergeSide(
 	// the node actually holds, never from memory of a past converge.
 	sweep := s.sweepSide(ctx, st, plan, true)
 
-	state := s.ensureSideDev(ctx, st, plan, info)
+	state, metaWait := s.ensureSideDev(ctx, st, plan, info)
 	if !plan.wantDm {
 		// SP_LEVEL_DISABLE: only the side device, its allocation record and —
 		// because zeroing is bottom-layer provisioning, below the level
 		// ladder — its zeroing goroutine remain (DN11; architecture.md,
-		// Side provisioning protocol). The sweep above has already removed
-		// everything else, dm-clone included: at
+		// Side provisioning protocol), and, on a migration destination, its
+		// run's record in the clone-metadata area (DN13). The sweep above has
+		// already removed everything else, dm-clone included: at
 		// this level nothing is wanted but the side device, so the per-CN
 		// linears went first and stopped holding the clone open.
 		return info, sweep
@@ -196,7 +197,7 @@ func (s *DnAgentServer) convergeSide(
 		// extent size is unusable reaches it with no extent size, so phase 2
 		// builds nothing (dnagent.md, Known limits).
 		s.settleFence(ctx, st, plan)
-		s.reportAboveSideDeferred(st, plan, info)
+		s.reportAboveSideDeferred(st, plan, info, metaWait)
 		return info, sweep
 	}
 
@@ -297,6 +298,13 @@ const (
 //	true  / partial  refuse the exports, keep the goroutine (it self-heals)
 //	true  / absent   never allocate; the data is gone
 //
+// A migration destination adds one step to the first two rows: it takes its
+// run in the node's clone-metadata area before the goroutine starts
+// (holdMigrMeta, DN13). While the area has no free run for it, the side
+// starts no goroutine and reports PROVISIONING with the area's text, and the
+// DN8 retry takes the run once units come free; any other refusal of the run
+// is ERROR, retried the same way.
+//
 // Allocation is permitted **only** at provisioned = false. At true a missing
 // record means the data is gone (a lost or foreign disk); silently
 // re-allocating would present a fresh impostor as the data-bearing leg, so it
@@ -305,12 +313,16 @@ const (
 // The table, not the local store, is authoritative for placement ([D13]): the
 // lookup-or-allocate below is what makes a node that lost --local-store but
 // kept its disk rebuild exactly the same device.
+//
+// The error it returns is the area's refusal while the destination waits for
+// its run, and nil otherwise: the rows above the side device carry its text
+// on the destination's migr_dst_info (reportAboveSideDeferred).
 func (s *DnAgentServer) ensureSideDev(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
-) sideDevState {
+) (sideDevState, error) {
 	t := st.tracker
 	name := plan.sideDevName
 	// zero_bytes is never omitted (DN9). Until a record exists the only
@@ -322,13 +334,13 @@ func (s *DnAgentServer) ensureSideDev(
 	if err != nil {
 		// An unreadable or corrupt disk is an error, never "absent".
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-		return sideDevFailed
+		return sideDevFailed, nil
 	}
 	if !ok && plan.provisioned {
 		// Row 6. The detail string is byte-exact on purpose: runbooks and the
 		// integ suites grep it.
 		info.SideDevInfo = t.Err(resKeySideDev, name, tagRecordMissing)
-		return sideDevFailed
+		return sideDevFailed, nil
 	}
 	if ok {
 		// The record exists, so it — not the request — is what the counters
@@ -352,34 +364,55 @@ func (s *DnAgentServer) ensureSideDev(
 		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes())
 	if err != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-		return sideDevFailed
+		return sideDevFailed, nil
 	}
 	zeroed, zero := sideZeroedBytes(rec), sideZeroBytes(rec)
 	info.ZeroedBytes, info.ZeroBytes = zeroed, zero
 
 	if err := s.ensureSideDm(ctx, plan, rec); err != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-		return sideDevFailed
+		return sideDevFailed, nil
 	}
 	if !sideFullyZeroed(rec) {
+		if !plan.provisioned && plan.migrDst != nil {
+			// A migration destination takes its run in the clone-metadata
+			// area before it zeroes, at every level (holdMigrMeta, DN13).
+			// Without the run nothing zeroes, so the worker does not flip the
+			// side and the source keeps serving. The retry re-runs this
+			// converge, and this step owns it while the side has not
+			// provisioned: registered while the run is refused, deregistered
+			// by the pass that takes it. That pass may be the retry's own,
+			// which is safe: its attempts run on rootCtx (migrRetryLoop).
+			if err := s.holdMigrMeta(ctx, plan); err != nil {
+				s.startMigrRetry(st, plan)
+				if isNoFreeRun(err) {
+					info.SideDevInfo = t.Provisioning(resKeySideDev, name,
+						metaRoomDetails(err))
+					return sideDevProvisioning, err
+				}
+				info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
+				return sideDevFailed, nil
+			}
+			s.stopMigrRetry(st)
+		}
 		// Rows 2 and 5. The goroutine runs on both sides of the gate: at
 		// provisioned = true it is what self-heals a side whose count was lost
 		// or never finished.
 		s.startZeroing(st, plan)
 		if plan.provisioned {
 			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
-			return sideDevFailed
+			return sideDevFailed, nil
 		}
 		if zeroErr := s.zeroingErr(st); zeroErr != nil {
 			// A batch that failed or was killed reports its output, and ERROR
 			// wins while that failure is outstanding; the next successful
 			// batch puts the row back to PROVISIONING (DN9).
 			info.SideDevInfo = t.Err(resKeySideDev, name, zeroErr.Error())
-			return sideDevProvisioning
+			return sideDevProvisioning, nil
 		}
 		info.SideDevInfo = t.Provisioning(resKeySideDev, name,
 			zeroingDetails(zeroed, zero))
-		return sideDevProvisioning
+		return sideDevProvisioning, nil
 	}
 
 	// Rows 3 and 4: the length to zero is zeroed. Cancel-and-wait rather
@@ -390,12 +423,12 @@ func (s *DnAgentServer) ensureSideDev(
 	info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
 	switch {
 	case status != pb.ResStatus_RES_STATUS_OK:
-		return sideDevFailed
+		return sideDevFailed, nil
 	case !plan.provisioned:
 		// Row 3: the side is ready, but the CP has not released it yet.
-		return sideDevProvisioning
+		return sideDevProvisioning, nil
 	default:
-		return sideDevReady
+		return sideDevReady, nil
 	}
 }
 
@@ -812,10 +845,16 @@ func (s *DnAgentServer) moveCnAnaGroups(
 //
 // It fills exactly the keys probeAboveSideDev fills, so a side that becomes
 // exportable later replaces them one for one.
+//
+// metaWait is the clone-metadata area's refusal while a migration destination
+// waits for its run before zeroing (ensureSideDev, probeSideDev), and nil
+// otherwise: its two migr_dst_info rows then carry the area's text in place
+// of tagProvisioningWait, the same wait side_dev_info reports.
 func (s *DnAgentServer) reportAboveSideDeferred(
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
+	metaWait error,
 ) {
 	t := st.tracker
 	info.CnIdToDmError = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
@@ -841,19 +880,24 @@ func (s *DnAgentServer) reportAboveSideDeferred(
 	}
 	if plan.wantMigr {
 		// The destination provisions first, under this same protocol
-		// (architecture.md, Migration): behind the closed gate no metadata
-		// slot, source connection or dm-clone is built for it. A gate that
-		// closes again removes none of them that a pass built while it was
-		// open (the sweep's wanted set ignores the gate, DN13), and these two
-		// rows do not probe them, so PROVISIONING here does not mean that no
-		// dm-clone exists.
+		// (architecture.md, Migration): before it zeroes it takes only its
+		// run's record in the clone-metadata area (holdMigrMeta), and behind
+		// the closed gate no wrapper, source connection or dm-clone is built
+		// for it. A gate that closes again removes none of them that a pass
+		// built while it was open (the sweep's wanted set ignores the gate,
+		// DN13), and these two rows do not probe them, so PROVISIONING here
+		// does not mean that no dm-clone exists.
+		details := tagProvisioningWait
+		if metaWait != nil {
+			details = metaRoomDetails(metaWait)
+		}
 		dstInfo := &pb.SideInfo_MigrDstInfo{}
 		info.MigrDstInfo = dstInfo
 		nqn := plan.srcNqnOfDst()
 		dstInfo.TargetInfo = t.Provisioning(
-			resKeyMigrDstTarget, nqn, tagProvisioningWait)
+			resKeyMigrDstTarget, nqn, details)
 		dstInfo.DmCloneInfo = t.Provisioning(
-			resKeyMigrDstClone, plan.migrFinalName(), tagProvisioningWait)
+			resKeyMigrDstClone, plan.migrFinalName(), details)
 	}
 }
 

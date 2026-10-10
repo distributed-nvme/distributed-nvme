@@ -315,7 +315,8 @@ func newVolEnv(t *testing.T) *volEnv {
 
 // putDn writes one DnConf, the capacity key the presence rule of
 // architecture.md, Capacity index keys, implies for it and its DnRev, all
-// consistently.
+// consistently. The key's value is model.DnCapacityValue's, what every
+// writer of the key puts there.
 func (e *volEnv) putDn(
 	addrPort string,
 	dnId uint64,
@@ -340,15 +341,18 @@ func (e *volEnv) putDn(
 	mustPut(
 		e.t, e.cli,
 		e.dnCapKey(addrPort, volDnFree),
-		&pb.DnCapacity{Location: addrPort},
+		model.DnCapacityValue(dn),
 	)
 }
 
 // putCn writes one CnConf, its capacity key and its CnRev. No RPC of this file
-// charges a CN — a thin device, a subsystem, a clone, a transfer, a migration
-// destination and a spare leg all leave every cntlr's footprint unchanged
-// (architecture.md, Storage pools, Cntlrs and Spare legs) — so these records
-// exist only to be asserted UNTOUCHED.
+// charges a CN extents — a thin device, a subsystem, a clone, a transfer, a
+// migration destination and a spare leg all leave every cntlr's footprint
+// unchanged (architecture.md, Storage pools, Cntlrs and Spare legs). A clone
+// does take metadata units on the CN of every cntlr, which CreateClone charges
+// and the clone drain gives back without bumping the CN (architecture.md,
+// Metadata units); every other record of these exists only to be asserted
+// UNTOUCHED.
 func (e *volEnv) putCn(addrPort string, cnId uint64, shard uint32) {
 	e.t.Helper()
 	cn := &pb.CnConf{
@@ -367,7 +371,7 @@ func (e *volEnv) putCn(addrPort string, cnId uint64, shard uint32) {
 	mustPut(
 		e.t, e.cli,
 		model.CnCapacityKey(e.cid, volCnFree, addrPort),
-		&pb.CnCapacity{Location: addrPort},
+		model.CnCapacityValue(cn),
 	)
 }
 
@@ -502,11 +506,71 @@ func (e *volEnv) dnRev(addrPort string) uint64 {
 
 func (e *volEnv) cnRev(addrPort string) uint64 {
 	e.t.Helper()
-	cn := &pb.CnConf{}
-	e.get(model.CnConfKey(e.cid, addrPort), cn)
+	cn := e.cn(addrPort)
 	rev := &pb.CnRev{}
 	e.get(model.CnRevKey(cn.GetShardCode(), e.cid, cn.GetCnId()), rev)
 	return rev.GetRevision()
+}
+
+func (e *volEnv) cn(addrPort string) *pb.CnConf {
+	e.t.Helper()
+	cn := &pb.CnConf{}
+	e.get(model.CnConfKey(e.cid, addrPort), cn)
+	return cn
+}
+
+// dnCapValue is the value of the capacity key one DN's record implies, which
+// a test reads the DN's used metadata units back from as the scans do
+// (architecture.md, Metadata units).
+func (e *volEnv) dnCapValue(addrPort string) *pb.DnCapacity {
+	e.t.Helper()
+	value := &pb.DnCapacity{}
+	e.get(e.dnCapKey(addrPort, e.dn(addrPort).GetFreeExtCnt()), value)
+	return value
+}
+
+// cnCapValue is dnCapValue for a CN.
+func (e *volEnv) cnCapValue(addrPort string) *pb.CnCapacity {
+	e.t.Helper()
+	value := &pb.CnCapacity{}
+	key := model.CnCapacityKey(
+		e.cid, e.cn(addrPort).GetFreeExtCnt(), addrPort)
+	e.get(key, value)
+	return value
+}
+
+// setDnUsed sets one DN's used_meta_units as a write that changes only the
+// count leaves the store (architecture.md, Metadata units): the record and
+// its capacity value carry the new count, the key stays where the free count
+// puts it, and no revision moves. It is how a test fills a DN's metadata area
+// without the migrations that would.
+func (e *volEnv) setDnUsed(addrPort string, used uint64) {
+	e.t.Helper()
+	dn := e.dn(addrPort)
+	dn.UsedMetaUnits = used
+	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), dn)
+	mustPut(e.t, e.cli, e.dnCapKey(addrPort, dn.GetFreeExtCnt()),
+		model.DnCapacityValue(dn))
+}
+
+// setCnUsed is setDnUsed for a CN.
+func (e *volEnv) setCnUsed(addrPort string, used uint64) {
+	e.t.Helper()
+	cn := e.cn(addrPort)
+	cn.UsedMetaUnits = used
+	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
+	mustPut(e.t, e.cli,
+		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
+		model.CnCapacityValue(cn))
+}
+
+// setDnBatchSize stores a dn_batch_size in the cluster's conf. At 1 every DN
+// scan returns only the first eligible DN of the index, the fullest, so every
+// pick is forced.
+func (e *volEnv) setDnBatchSize(size uint32) {
+	e.t.Helper()
+	e.cc.AllocConf.DnBatchSize = size
+	mustPut(e.t, e.cli, model.ClusterConfKey(e.cluster), e.cc)
 }
 
 // putTd writes one ThinDevice row and adds it to td_name_list, the shape every
@@ -669,7 +733,7 @@ func (e *volEnv) relocateDn(addrPort string, location string) {
 	dn.Location = location
 	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), dn)
 	mustPut(e.t, e.cli, e.dnCapKey(addrPort, dn.GetFreeExtCnt()),
-		&pb.DnCapacity{Location: location})
+		model.DnCapacityValue(dn))
 }
 
 // setDnFree rewrites one DN's free_ext_cnt and moves its capacity key with it
@@ -687,7 +751,7 @@ func (e *volEnv) setDnFree(addrPort string, freeExt uint64) {
 		e.t.Fatalf("Delete %s: %v", oldKey, err)
 	}
 	mustPut(e.t, e.cli, e.dnCapKey(addrPort, freeExt),
-		&pb.DnCapacity{Location: dn.GetLocation()})
+		model.DnCapacityValue(dn))
 }
 
 // dropDn leaves the cluster without that DN as an allocator sees it: no
@@ -1528,6 +1592,56 @@ func TestDeleteThinDeviceReplansAfterAPoolRecreate(t *testing.T) {
 					"must not bump)", rev.GetRevision(), planRev)
 			}
 		})
+	}
+}
+
+// TestDeleteThinDeviceStopsAtTheRoundCap pins the round cap of GW9 on the
+// candidate unit that allocates nothing: a token-less delete whose pool
+// revision moves between every plan and its deciding STM answers candidate
+// changed in every round, and the unit gives up after
+// common.MaxCandidateRoundCnt of them, ABORTED "did not settle", instead of
+// planning for as long as the churn lasts. The request carries no deadline,
+// so the cap is the only bound. The td keeps its row: a unit that gave up
+// committed nothing.
+func TestDeleteThinDeviceStopsAtTheRoundCap(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("vol", 900, 7, 0, true)
+	rounds := 0
+	setTdDeletePlanned(t, func() {
+		rounds++
+		// The churn: another writer's bump of the pool revision, landing
+		// after the plan read it and before the deciding STM compares it.
+		mustPut(t, env.cli, model.SpRevKey(volShard, env.cid, volSpId),
+			&pb.SpRev{SpName: volSpName, Revision: env.spRev() + 1})
+	})
+	before := env.spConf()
+
+	_, err := env.srv.DeleteThinDevice(env.ctx, &pb.DeleteThinDeviceRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		TdName:      "vol",
+	})
+	msg := volWantCode(t, err, codes.Aborted)
+	want := fmt.Sprintf("candidate allocation did not settle in %d rounds",
+		common.MaxCandidateRoundCnt)
+	if msg != want {
+		t.Errorf("message: got %q, want %q", msg, want)
+	}
+	if rounds != common.MaxCandidateRoundCnt {
+		t.Errorf("plan rounds: got %d, want %d", rounds,
+			common.MaxCandidateRoundCnt)
+	}
+	if !env.exists(
+		model.ThinDeviceKey(env.cid, volSpId, "vol"), &pb.ThinDevice{},
+	) {
+		t.Errorf("the td row must survive a unit that never settled")
+	}
+	if got := env.spConf(); !proto.Equal(got, before) {
+		t.Errorf("sp_conf moved:\n got %v\nwant %v", got, before)
+	}
+	if got := env.spRev(); got != 1+uint64(common.MaxCandidateRoundCnt) {
+		t.Errorf("sp_rev: got %d, want %d (the churn's bumps alone)", got,
+			1+common.MaxCandidateRoundCnt)
 	}
 }
 
@@ -2940,14 +3054,15 @@ func TestGetAndUpdateTransferHosts(t *testing.T) {
 // the pair apart from one built from either index alone.
 const volCloneSrcSliceCnt = uint32(8)
 
-// volCreateClone creates one clone over dstTdName and returns the reply.
-func volCreateClone(
+// volCloneRequest is the CreateCloneRequest the clone tests send: one clone
+// over dstTdName, carrying the SP's current token.
+func volCloneRequest(
 	env *volEnv,
 	name string,
 	dstTdName string,
-) *pb.CreateCloneReply {
+) *pb.CreateCloneRequest {
 	env.t.Helper()
-	reply, err := env.srv.CreateClone(env.ctx, &pb.CreateCloneRequest{
+	return &pb.CreateCloneRequest{
 		ClusterName:   env.cluster,
 		SpName:        volSpName,
 		SpRev:         env.token(),
@@ -2961,11 +3076,51 @@ func volCreateClone(
 		DstTdName:     dstTdName,
 		DmCloneConf:   &pb.DmCloneConf{HydrationThreshold: 2},
 		AutoResume:    true,
-	})
+	}
+}
+
+// volCreateClone creates one clone over dstTdName and returns the reply.
+func volCreateClone(
+	env *volEnv,
+	name string,
+	dstTdName string,
+) *pb.CreateCloneReply {
+	env.t.Helper()
+	reply, err := env.srv.CreateClone(
+		env.ctx, volCloneRequest(env, name, dstTdName))
 	if err != nil {
 		env.t.Fatalf("CreateClone %s: %v", name, err)
 	}
 	return reply
+}
+
+// volCloneUnits is what a clone onto a volTdSize thin device takes in a
+// metadata area (architecture.md, Metadata units): 1 GiB over 2 MiB pool
+// blocks is 512 regions, so one unit for the superblock budget and one for
+// the regions' bytes. volMigrUnits is a migration destination of the
+// fixture's data group: 4 extents of 4 GiB over the same blocks is 8192
+// regions, two units as well. Both are pinned against the formula by
+// TestVolFixtureUnits.
+const (
+	volCloneUnits = uint64(2)
+	volMigrUnits  = uint64(2)
+)
+
+// TestVolFixtureUnits pins volCloneUnits and volMigrUnits against
+// common.CloneMetaUnits, so a change of the formula fails here by name rather
+// than as a count off by one in every test that charges units.
+func TestVolFixtureUnits(t *testing.T) {
+	if got := common.CloneMetaUnits(volTdSize, volPoolBlock); got !=
+		volCloneUnits {
+		t.Errorf("a clone onto a volTdSize td: %d units, want %d", got,
+			volCloneUnits)
+	}
+	if got := common.CloneMetaUnits(
+		volDataExtCnt*volExtSize, volPoolBlock,
+	); got != volMigrUnits {
+		t.Errorf("a migration of the data group: %d units, want %d", got,
+			volMigrUnits)
+	}
 }
 
 // TestCreateCloneWritesRecord pins the write set of architecture.md, Clones: the
@@ -2973,7 +3128,9 @@ func volCreateClone(
 // resolved to its td_id, so a renamed or recreated device can never silently
 // become the destination (an id is never reused). The record carries no chunk
 // count — the source bitmap is a pure optimization that may arrive later, and
-// what a clone holds is the set of its chunk keys.
+// what a clone holds is the set of its chunk keys. It does carry its metadata
+// units, which every later charge and release reads (architecture.md,
+// Metadata units).
 func TestCreateCloneWritesRecord(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -2993,6 +3150,7 @@ func TestCreateCloneWritesRecord(t *testing.T) {
 		DstTdId:       900,
 		DmCloneConf:   &pb.DmCloneConf{HydrationThreshold: 2},
 		AutoResume:    true,
+		MetaUnits:     volCloneUnits,
 	}
 	if got := env.clone("clone-a"); !proto.Equal(got, want) {
 		t.Errorf("clone: got %v, want %v", got, want)
@@ -3467,7 +3625,9 @@ func volCreateMigration(env *volEnv, name string) *pb.CreateMigrationReply {
 // the first cntlid slot that differs from the source's (GW18; architecture.md,
 // cntlid slots), and the DN's ledger entry moves by exactly the group's ext_cnt
 // — record, capacity key and revision bump included (architecture.md,
-// Revision keys and the sync fan-out, and Capacity index keys). Nothing else in
+// Revision keys and the sync fan-out, and Capacity index keys) — and by the
+// destination's metadata units, which the capacity value carries and the
+// Migration records (architecture.md, Metadata units). Nothing else in
 // the SP is touched: a migration destination changes no group's ext_cnt, so no
 // cntlr's CN is charged (architecture.md, Storage pools and Cntlrs).
 func TestCreateMigrationChargesDestination(t *testing.T) {
@@ -3484,6 +3644,7 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 		DstSideId:   dstSideId,
 		DmCloneConf: &pb.DmCloneConf{HydrationThreshold: 2},
 		BmCnt:       0,
+		MetaUnits:   volMigrUnits,
 	}
 	if got := env.migration("migr-a"); !proto.Equal(got, wantMigr) {
 		t.Errorf("migration: got %v, want %v", got, wantMigr)
@@ -3533,6 +3694,15 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 	if got := env.dnRev(volDnC); got != 2 {
 		t.Errorf("dn-c rev: got %d, want 2", got)
 	}
+	if got := dn.GetUsedMetaUnits(); got != volMigrUnits {
+		t.Errorf("dn-c used_meta_units: got %d, want %d", got, volMigrUnits)
+	}
+	if got := env.dnCapValue(volDnC); !proto.Equal(
+		got, model.DnCapacityValue(dn),
+	) || got.GetUsedMetaUnits() != volMigrUnits {
+		t.Errorf("dn-c capacity value: got %v, want the record's %d used "+
+			"units", got, volMigrUnits)
+	}
 	for _, addrPort := range []string{volDnA, volDnB, volDnD} {
 		if got := env.dnRev(addrPort); got != 1 {
 			t.Errorf("%s rev: got %d, want 1 (untouched)", addrPort, got)
@@ -3541,11 +3711,18 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 			t.Errorf("%s free_ext_cnt: got %d, want %d",
 				addrPort, got, volDnFree)
 		}
+		if got := env.dn(addrPort).GetUsedMetaUnits(); got != 0 {
+			t.Errorf("%s used_meta_units: got %d, want 0", addrPort, got)
+		}
 	}
 	for _, addrPort := range []string{volCnA, volCnB} {
 		if got := env.cnRev(addrPort); got != 1 {
 			t.Errorf("%s rev: got %d, want 1 (no CN is charged)",
 				addrPort, got)
+		}
+		if got := env.cn(addrPort).GetUsedMetaUnits(); got != 0 {
+			t.Errorf("%s used_meta_units: got %d, want 0 (a migration's "+
+				"run is on its destination DN)", addrPort, got)
 		}
 	}
 	conf := env.spConf()
@@ -3698,9 +3875,10 @@ func volRaceMigrationA(t *testing.T, env *volEnv, actor func() error) string {
 	}
 	slog.SetDefault(slog.New(hook))
 	defer slog.SetDefault(prev)
-	// Bounded, so that a unit which never settles — every round refused
-	// against a plan read only once for the whole unit — fails as ABORTED
-	// instead of hanging the package: GW9 retries until ctx ends.
+	// Bounded twice over, so that a unit which never settles — every round
+	// refused against a plan read only once for the whole unit — fails as
+	// ABORTED instead of hanging the package: GW9 retries until the round
+	// cap or the ctx's end, whichever comes first.
 	ctx, cancel := context.WithTimeout(
 		context.WithValue(env.ctx, volReadHookKey{}, true), 30*time.Second)
 	defer cancel()
@@ -3928,6 +4106,12 @@ func TestCancelMigrationIsTheExactMirror(t *testing.T) {
 	if !env.exists(env.dnCapKey(volDnC, volDnFree), &pb.DnCapacity{}) {
 		t.Errorf("dn-c's original capacity key must be back")
 	}
+	if got := env.dnCapValue(volDnC); !proto.Equal(
+		got, model.DnCapacityValue(dnBefore),
+	) {
+		t.Errorf("dn-c's capacity value did not roll back: got %v, want %v",
+			got, model.DnCapacityValue(dnBefore))
+	}
 	if env.exists(
 		env.dnCapKey(volDnC, volDnFree-volDataExtCnt), &pb.DnCapacity{},
 	) {
@@ -3966,10 +4150,21 @@ func TestCancelMigrationIsTheExactMirror(t *testing.T) {
 // go back to its DN, which is what makes the source agent tear the side down
 // on its next syncup. force = true skips the hydration proof, the only part of
 // the RPC that leaves etcd (agentpath_test.go covers that path).
+//
+// The destination's DN keeps the side and its extents, and gets back the
+// metadata units its dm-clone run held (architecture.md, Metadata units). That
+// is the DN's only change, so its record and capacity value are rewritten and
+// its revision does not move.
 func TestFinishMigrationReleasesSource(t *testing.T) {
 	env := newVolEnv(t)
 	created := volCreateMigration(env, "migr-a")
 	dstSideId := created.GetMigrId() + 1
+	dnCCreated := env.dn(volDnC)
+	if dnCCreated.GetUsedMetaUnits() != volMigrUnits {
+		t.Fatalf("dn-c used_meta_units after the create: got %d, want %d",
+			dnCCreated.GetUsedMetaUnits(), volMigrUnits)
+	}
+	dnCRev := env.dnRev(volDnC)
 	reply, err := env.srv.FinishMigration(
 		env.ctx, &pb.FinishMigrationRequest{
 			ClusterName: env.cluster,
@@ -4014,6 +4209,23 @@ func TestFinishMigrationReleasesSource(t *testing.T) {
 	}
 	if got := env.dnRev(volDnA); got != 2 {
 		t.Errorf("dn-a rev: got %d, want 2", got)
+	}
+	dnC := env.dn(volDnC)
+	wantDnC := proto.Clone(dnCCreated).(*pb.DnConf)
+	wantDnC.UsedMetaUnits = 0
+	if !proto.Equal(dnC, wantDnC) {
+		t.Errorf("dn-c: got %v, want the created record with its units "+
+			"given back, %v", dnC, wantDnC)
+	}
+	if got := env.dnCapValue(volDnC); !proto.Equal(
+		got, model.DnCapacityValue(wantDnC),
+	) {
+		t.Errorf("dn-c capacity value: got %v, want %v", got,
+			model.DnCapacityValue(wantDnC))
+	}
+	if got := env.dnRev(volDnC); got != dnCRev {
+		t.Errorf("dn-c rev: got %d, want %d (a units-only change bumps "+
+			"nothing)", got, dnCRev)
 	}
 	if env.exists(
 		model.MigrationKey(env.cid, volSpId, "migr-a"), &pb.Migration{},
@@ -4409,6 +4621,10 @@ func TestCreateSpareLegAppendsStandbyCapacity(t *testing.T) {
 	}
 	if got := env.dnRev(volDnC); got != 2 {
 		t.Errorf("dn-c rev: got %d, want 2", got)
+	}
+	if got := dn.GetUsedMetaUnits(); got != 0 {
+		t.Errorf("dn-c used_meta_units: got %d, want 0 (a spare holds no "+
+			"dm-clone run)", got)
 	}
 	for _, addrPort := range []string{volCnA, volCnB} {
 		if got := env.cnRev(addrPort); got != 1 {

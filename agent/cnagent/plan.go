@@ -177,7 +177,8 @@ type cntlrPlan struct {
 	// --associated` once per converge or probe pass and never persisted, so a
 	// cntlr with N clones still issues one enumeration. They and the sweep
 	// fact below are the only fields here that are not a pure function of
-	// the request; these three are filled lazily by planArena.
+	// the request; these three are filled lazily by planArena, and an
+	// allocation's own enumeration replaces them (ensureCloneMeta).
 	arena     *cloneMetaArena
 	arenaErr  error
 	arenaDone bool
@@ -409,8 +410,7 @@ type clonePlan struct {
 	// deferred means the destination td's backing chain is
 	// provisioning-deferred ([D15]): its raid0 does not exist, so the clone
 	// allocates no metadata slot, builds no dm-clone and connects to no
-	// source — the cn mirror of the dn's "no metadata slot, no dm-clone" for a
-	// still-zeroing migration destination.
+	// source, and its rows read provisioning (reportCloneDeferred).
 	deferred bool
 }
 
@@ -816,8 +816,13 @@ func (p *cntlrPlan) buildClones() {
 			// The CN18 step 2 budget exists only for a clone that has a
 			// destination: region_cnt = 0 would fabricate a one-unit budget
 			// out of nothing, and the probe would then report a size mismatch
-			// against it that describes no resource on the node.
-			cp.metaUnits = cloneMetaUnits(cp.regionCnt)
+			// against it that describes no resource on the node. It is the
+			// formula the gateway charges the node by (architecture.md,
+			// Metadata units), computed here from the td and the pool; the
+			// clone record's meta_units is the control plane's count and is
+			// never read here.
+			cp.metaUnits = common.CloneMetaUnits(
+				cp.dstTd.td.GetSize(), p.blockSize)
 			cp.metaSectors = cp.metaUnits * cnCloneMetaUnitSectors
 		}
 		p.clones = append(p.clones, cp)

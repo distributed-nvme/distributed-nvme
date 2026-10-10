@@ -38,6 +38,11 @@ const (
 	opAppendMigrationBitmap = "AppendMigrationBitmap"
 )
 
+// whatMigrDst leads CreateMigration's capacity refusals, the scan's (pickDns)
+// and the deciding charge's (dnLedger.chargeUnits) alike, so both name the
+// object that found no room the same way.
+const whatMigrDst = "migration destination"
+
 // migrMaxLegSideCnt is how many sides one leg may own: its own, plus the
 // destination of at most ONE migration (architecture.md, Migrations). A leg
 // already at this count is mid-migration, so CreateMigration refuses it — two
@@ -146,6 +151,34 @@ func migrSrcLocation(
 	return loc, nil
 }
 
+// migrMetaUnitsOf is the metadata units a migration destination's dm-clone
+// run takes in its disk node's metadata area (architecture.md, Metadata
+// units): common.CloneMetaUnits of the moved side's bytes — the group's
+// ext_cnt times the cluster's extent_size — and the SP's stored
+// data_block_size, the inputs the dn agent sizes the run by. Both stored
+// confs are validated first and refused ABORTED (GW11): a zero extent size or
+// block size read back out of the store would size the run at one unit.
+// CreateMigration charges the count to the destination and stores it on the
+// Migration, where FinishMigration and CancelMigration read what to give
+// back, so a release returns exactly what the create charged.
+func migrMetaUnitsOf(
+	cc *pb.ClusterConf,
+	conf *pb.SpConf,
+	grp *pb.Group,
+) (uint64, error) {
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return 0, errAborted("%v", err)
+	}
+	bdev := spBdevConf(conf)
+	if err := model.ValidateBdevConf(bdev); err != nil {
+		return 0, errAborted("%v", err)
+	}
+	return common.CloneMetaUnits(
+		grp.GetExtCnt()*cc.GetDnBinConf().GetExtentSize(),
+		model.PoolBlockSize(bdev),
+	), nil
+}
+
 // errMigrRunning is the FAILED_PRECONDITION for a leg that owns more than its
 // own side: a migration is running on it (architecture.md, Migrations).
 // CreateMigration raises it for a source leg that cannot take a second
@@ -195,11 +228,21 @@ func getMigration(
 //
 // Shape (gateway.md, Migrations): the GW9 candidate unit, each round of which
 // plans from plain pre-reads, scans and decides. The plan — the group's
-// ext_cnt and the black list — is read through a read-only snapshot so the
-// SpConf and the slices it indexes are coherent; nothing from it is trusted,
-// since the deciding STM re-locates the side and re-verifies both the pick's
-// capacity key and the plan the pick was scanned against: the group, as that
-// STM reads it, must occupy no DN the plan's read of it did not.
+// ext_cnt, the destination's metadata units and the black list — is read
+// through a read-only snapshot so the SpConf and the slices it indexes are
+// coherent; nothing from it is trusted, since the deciding STM re-locates the
+// side and re-verifies both the pick's capacity key and the plan the pick was
+// scanned against: the group, as that STM reads it, must occupy no DN the
+// plan's read of it did not.
+//
+// The destination's dm-clone run takes room in its DN's metadata area
+// (migrMetaUnitsOf; architecture.md, Metadata units). The scan skips every DN
+// without that room, and a round with no DN left for that reason is refused
+// RESOURCE_EXHAUSTED with "metadata room" in its message (pickDns). The
+// deciding STM re-checks the room on the pick's record (dnLedger.verifyPick)
+// — a DN that filled up after the scan sends the round back as candidate
+// changed — and then charges the units with the extents, under the DN's one
+// DnRev bump, and stores them on the Migration.
 func (s *Server) CreateMigration(
 	ctx context.Context,
 	req *pb.CreateMigrationRequest,
@@ -227,8 +270,9 @@ func (s *Server) CreateMigration(
 	}
 	var migrId uint64
 	err := candidateUnit(ctx, func() error {
-		// The plan: which cluster to scan, how big the destination must be,
-		// and which disk nodes — and failure domains — it must avoid.
+		// The plan: which cluster to scan, how big the destination must be
+		// in extents and in metadata units, and which disk nodes — and
+		// failure domains — it must avoid.
 		// grpDnAddrs names every DN the group already occupies through an
 		// active or a spare leg and seeds the black list; grpDnLocations
 		// turns the same set into the tier-1 exclusion of architecture.md,
@@ -238,12 +282,13 @@ func (s *Server) CreateMigration(
 		// tier 2 rather than refusing. It is read afresh every round, never
 		// once for the unit: the deciding STM refuses a round whose group
 		// has gained a DN since this read, and a plan read only once would
-		// be refused that way every round until ctx ends.
+		// be refused that way every round until the unit gave up.
 		var (
-			planCid uint64
-			planCc  *pb.ClusterConf
-			planExt uint64
-			planGrp *pb.Group
+			planCid   uint64
+			planCc    *pb.ClusterConf
+			planExt   uint64
+			planUnits uint64
+			planGrp   *pb.Group
 		)
 		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 			// openSp, not openSpRead: this is a MUTATOR's planning read, so
@@ -267,9 +312,14 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
+			units, err := migrMetaUnitsOf(sc.Cc, sc.Conf, loc.Grp)
+			if err != nil {
+				return err
+			}
 			planCid = sc.Cid
 			planCc = sc.Cc
 			planExt = loc.Grp.GetExtCnt()
+			planUnits = units
 			planGrp = loc.Grp
 			return nil
 		})
@@ -285,8 +335,13 @@ func (s *Server) CreateMigration(
 		}
 		picks, err := pickDns(
 			ctx, s.cli, planCid, planCc,
-			dnPickPlan{ExtCnt: planExt, Legs: 1, ExcludeLocs: planLocs},
-			req.GetDnSelector(), planBlack, "migration destination",
+			dnPickPlan{
+				ExtCnt:      planExt,
+				Legs:        1,
+				ExcludeLocs: planLocs,
+				MetaUnits:   planUnits,
+			},
+			req.GetDnSelector(), planBlack, whatMigrDst,
 		)
 		if err != nil {
 			return err
@@ -334,9 +389,14 @@ func (s *Server) CreateMigration(
 			}
 			// The size charged is the one this transaction read, not the one
 			// the scan was run for: it is what the destination must actually
-			// hold, and a pick too small for it fails the verify below.
+			// hold, and a pick too small for it fails the verify below. The
+			// metadata units likewise.
 			extCnt := loc.Grp.GetExtCnt()
 			ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
+			if err != nil {
+				return err
+			}
+			units, err := migrMetaUnitsOf(sc.Cc, sc.Conf, loc.Grp)
 			if err != nil {
 				return err
 			}
@@ -364,7 +424,7 @@ func (s *Server) CreateMigration(
 					return errCandidateChanged
 				}
 			}
-			dn, err := ledger.verifyPick(cand, extCnt)
+			dn, err := ledger.verifyPick(cand, extCnt, units)
 			if err != nil {
 				return err
 			}
@@ -390,6 +450,13 @@ func (s *Server) CreateMigration(
 			); err != nil {
 				return err
 			}
+			// Defensive, as charge's own check is: verifyPick has already
+			// answered a DN short of the units as a changed candidate.
+			if err := ledger.chargeUnits(
+				cand.AddrPort, units, whatMigrDst,
+			); err != nil {
+				return err
+			}
 			if err := ledger.flush(opCreateMigration); err != nil {
 				return err
 			}
@@ -402,6 +469,7 @@ func (s *Server) CreateMigration(
 					DstSideId:   dstSideId,
 					DmCloneConf: req.GetDmCloneConf(),
 					BmCnt:       0,
+					MetaUnits:   units,
 				},
 			)
 			sc.Conf.MigrNameList = append(
@@ -419,7 +487,9 @@ func (s *Server) CreateMigration(
 }
 
 // FinishMigration is the FinishMigration of architecture.md, Migrations: the
-// destination side becomes the leg's only side and the source is released.
+// destination side becomes the leg's only side and the source is released,
+// and the destination's DN gets back the metadata units its dm-clone run held
+// (architecture.md, Metadata units).
 //
 // It is two-phase (AG4) for the same reason DeleteClone is: `force == false`
 // must PROVE the dm-clone has finished hydrating before the source disappears,
@@ -564,7 +634,8 @@ func (s *Server) FinishMigration(
 				"migration %q source side %d is in no leg",
 				req.GetMigrName(), migr.GetSrcSideId())
 		}
-		if migrSideIdx(loc.Leg, migr.GetDstSideId()) < 0 {
+		dstIdx := migrSideIdx(loc.Leg, migr.GetDstSideId())
+		if dstIdx < 0 {
 			// The two sides must share one leg: they export the same NQN and
 			// the CN aggregates them as the paths of one namespace. If they
 			// do not, the leg is not in the shape architecture.md, Migrations,
@@ -573,11 +644,18 @@ func (s *Server) FinishMigration(
 				"migration %q sides %d and %d are not in one leg",
 				req.GetMigrName(), migr.GetSrcSideId(), migr.GetDstSideId())
 		}
+		// Read before the source is dropped, which shifts the side list.
+		dstAddr := loc.Leg.GetSideList()[dstIdx].GetAddrPort()
 		// The source's extents go back to its DN and its pointer disappears,
 		// which is what makes the src agent tear the side down on its next
-		// syncup. One flush = one DnConf write, one capacity key, one DnRev
-		// bump (architecture.md, Revision keys and the sync fan-out;
-		// architecture.md, Capacity index keys).
+		// syncup: one DnConf write, one capacity key, one DnRev bump for that
+		// DN (architecture.md, Revision keys and the sync fan-out;
+		// architecture.md, Capacity index keys). The destination becomes the
+		// leg's only side and stays on its DN, whose dm-clone run is done
+		// with: the units CreateMigration charged there, as the Migration
+		// records them, come back in the same flush (architecture.md,
+		// Metadata units). That DN's only change is its used units, so it is
+		// written and re-indexed but not bumped.
 		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
 		if err != nil {
 			return err
@@ -585,6 +663,11 @@ func (s *Server) FinishMigration(
 		if err := ledger.release(
 			loc.Side.GetAddrPort(), sc.SpId(), loc.Side.GetSideId(),
 			loc.Grp.GetExtCnt(),
+		); err != nil {
+			return err
+		}
+		if err := ledger.releaseUnits(
+			dstAddr, migr.GetMetaUnits(),
 		); err != nil {
 			return err
 		}
@@ -651,9 +734,12 @@ func (s *Server) CancelMigration(
 				"migration %q destination side %d is in no leg",
 				req.GetMigrName(), migr.GetDstSideId())
 		}
-		// The destination's extents return to its DN and its pointer goes,
-		// which is the whole rollback: the source side was never touched, so
-		// it needs nothing done to it here (architecture.md, Migrations).
+		// The destination's extents and its metadata units return to its DN
+		// and its pointer goes, which is the whole rollback: the source side
+		// was never touched, so it needs nothing done to it here
+		// (architecture.md, Migrations; Metadata units). The units are the
+		// ones the Migration records, and the DN's one DnRev bump covers
+		// them with its extents.
 		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
 		if err != nil {
 			return err
@@ -661,6 +747,11 @@ func (s *Server) CancelMigration(
 		if err := ledger.release(
 			loc.Side.GetAddrPort(), sc.SpId(), loc.Side.GetSideId(),
 			loc.Grp.GetExtCnt(),
+		); err != nil {
+			return err
+		}
+		if err := ledger.releaseUnits(
+			loc.Side.GetAddrPort(), migr.GetMetaUnits(),
 		); err != nil {
 			return err
 		}

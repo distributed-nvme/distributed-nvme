@@ -97,21 +97,22 @@ func TestCloneDrainBatchBudget(t *testing.T) {
 			cloneDrainWritesFixed, common.EtcdMaxTxnOps)
 	}
 	// Prose, not a requirement (CLD11): the batch also fits etcd's DEFAULT
-	// cap, so no clone transaction in the system needs the raised flag. The
+	// cap, and so does the drain's final step (TestFinishCloneDeleteTxnBudget
+	// below), so no clone drain transaction needs the raised flag. The
 	// deployment requirement stays EtcdMaxTxnOps for the sake of the
 	// transactions that do exceed the default — among them CreateStoragePool's
 	// maximum shape, which is the one the number is SIZED by
 	// (TestCreateStoragePoolBudget below), the SP drain's D2 batch
-	// (TestSpDrainBatchBudget below) and the created flip's transaction
-	// (TestFlipCreatedTxnBudget below) — and this assertion is what would
-	// notice if the clone half stopped being free of it.
-	const etcdDefaultMaxTxnOps = 128
-	if budget > etcdDefaultMaxTxnOps {
+	// (TestSpDrainBatchBudget below), the created flip's transaction
+	// (TestFlipCreatedTxnBudget below) and ReplaceCntlr
+	// (TestReplaceCntlrTxnBudget below) — and this assertion is what would
+	// notice if the clone drain's batches stopped being free of it.
+	if budget > etcdDefaultTxnOps {
 		t.Errorf("one clone drain batch is %d compares, over etcd's own default "+
 			"cap of %d: the clone path is no longer free of the deployment "+
 			"flag, and the note in gateway.md, Constants this "+
 			"document owns, must change with it",
-			budget, etcdDefaultMaxTxnOps)
+			budget, etcdDefaultTxnOps)
 	}
 }
 
@@ -658,4 +659,259 @@ func TestFlipCreatedTxnBudget(t *testing.T) {
 			budget, flipCreatedReadsFixed+flipCreatedWritesFixed, perTd,
 			common.MaxFlipCreatedPerTxn, common.EtcdMaxTxnOps)
 	}
+}
+
+// etcdDefaultTxnOps is etcd's own default cap on the operations of one
+// transaction: one past it commits only under the raised cap the deployment
+// requirement EtcdMaxTxnOps sets.
+const etcdDefaultTxnOps = 128
+
+// txnTerm is one per-item factor of a transaction's compare count: what one
+// item costs in compares — its reads plus its writes — and how many items the
+// ceilings allow, read live from common and pinned beside it.
+type txnTerm struct {
+	item    string
+	perItem int
+	live    int
+	pinned  int
+}
+
+// txnShape is one transaction's arithmetic tripwire at the ceilings, in the
+// form of the tests above: its factors TRANSCRIBED BY HAND from its STM, with
+// the same caveat — nothing here reads that STM, so a key added to or taken
+// out of it is invisible until a factor is re-derived. Where a test commits
+// the shape against a real etcd, the shape's own comment names it.
+//
+//	compares = fixedReads + fixedWrites + Σ perItem x items
+//
+// check asserts four things, each failing with its own message: every
+// ceiling still has its pinned value; the factors at the pinned values still
+// give maxCompares, the count common/constants.go's EtcdMaxTxnOps comment
+// quotes for the transactions over etcd's default; the count at the live
+// ceilings fits EtcdMaxTxnOps; and it is no wider than the widest
+// CreateStoragePool, which is what EtcdMaxTxnOps is sized by. overDefault
+// says on which side of etcd's default the count falls, which decides
+// whether that comment lists the transaction among the ones that need the
+// raised flag.
+type txnShape struct {
+	name        string
+	stm         string
+	fixedReads  int
+	fixedWrites int
+	terms       []txnTerm
+	maxCompares int
+	overDefault bool
+}
+
+// compares is the shape's count with every term at its live or its pinned
+// item count.
+func (shape txnShape) compares(live bool) int {
+	total := shape.fixedReads + shape.fixedWrites
+	for _, term := range shape.terms {
+		items := term.pinned
+		if live {
+			items = term.live
+		}
+		total += term.perItem * items
+	}
+	return total
+}
+
+func (shape txnShape) check(t *testing.T) {
+	t.Helper()
+	budget := shape.compares(true)
+	create := spCreateCompares(common.MaxSliceCntPerSp)
+	t.Logf("the widest %s: %d compares; the widest CreateStoragePool %d; "+
+		"etcd's default %d; EtcdMaxTxnOps %d", shape.name, budget, create,
+		etcdDefaultTxnOps, common.EtcdMaxTxnOps)
+	for _, term := range shape.terms {
+		if term.live != term.pinned {
+			t.Errorf("a %s ceiling moved: %d %ss at the ceilings, want "+
+				"the pinned %d. Re-pin the term and maxCompares together, "+
+				"and with them the count common/constants.go's "+
+				"EtcdMaxTxnOps comment quotes", shape.name, term.live,
+				term.item, term.pinned)
+		}
+	}
+	if got := shape.compares(false); got != shape.maxCompares {
+		t.Errorf("the %s factors no longer add up: %d compares at the "+
+			"pinned ceilings, want the pinned %d. Re-read %s against the "+
+			"factors and re-pin maxCompares once the one that moved is the "+
+			"one you meant to move", shape.name, got, shape.maxCompares,
+			shape.stm)
+	}
+	if budget > common.EtcdMaxTxnOps {
+		t.Errorf("the widest %s is %d compares, over the %d dnv requires "+
+			"etcd to allow: lower a ceiling it is counted by, or raise "+
+			"EtcdMaxTxnOps and the --max-txn-ops of every etcd that serves "+
+			"dnv", shape.name, budget, common.EtcdMaxTxnOps)
+	}
+	if over := budget > etcdDefaultTxnOps; over != shape.overDefault {
+		t.Errorf("the widest %s is %d compares, which moved it across "+
+			"etcd's default cap of %d: the list of transactions over that "+
+			"default in common/constants.go's EtcdMaxTxnOps comment, and "+
+			"in gateway.md, Constants this document owns, must change "+
+			"with it", shape.name, budget, etcdDefaultTxnOps)
+	}
+	if budget > create {
+		t.Errorf("the widest %s is %d compares, wider than the widest "+
+			"CreateStoragePool's %d: EtcdMaxTxnOps is no longer sized by "+
+			"the create, and every carrier that says it is — `grep -rn "+
+			"'SIZED by'` — is wrong", shape.name, budget, create)
+	}
+}
+
+// TestCreateCloneTxnBudget is CreateClone's tripwire: its STM reads every
+// other clone of the pool for the one-destination rule and charges the
+// clone's metadata units to the CN of every cntlr (architecture.md, Metadata
+// units). The charge changes only units, so the capacity key stays where it
+// is — one put, no delete — and no CnRev is read or written.
+func TestCreateCloneTxnBudget(t *testing.T) {
+	txnShape{
+		name: "CreateClone",
+		stm:  "clone.go's CreateClone and cnLedger.chargeUnits",
+		// ClusterConf, SpConf, SpRev, the new Clone key (absent, which still
+		// costs a compare) and the destination td.
+		fixedReads: 5,
+		// The Clone, SpConf and SpRev puts.
+		fixedWrites: 3,
+		terms: []txnTerm{
+			// The one-destination walk: every clone the pool already has,
+			// one short of the ceiling the create refuses at.
+			{"other clone", 1, common.MaxCloneCntPerSp - 1, 63},
+			// The Cntlr and its CnConf read, the CnConf and cn_capacity put.
+			{"cntlr", 4, common.MaxCntlrCntPerSp, 4},
+		},
+		maxCompares: 87,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestCreateCntlrTxnBudget is CreateCntlr's tripwire: besides the pick and the
+// pool's slices, cntlrs and subsystems, its STM reads every clone of the pool
+// for the units the new CN is charged (architecture.md, Metadata units). At
+// the ceilings it stays four compares under etcd's default.
+func TestCreateCntlrTxnBudget(t *testing.T) {
+	txnShape{
+		name: "CreateCntlr",
+		stm:  "cntlr.go's CreateCntlr, cnLedger and syncCdcEntries",
+		// ClusterConf, SpConf, SpRev, the pick's CnConf, the scan's
+		// cn_capacity key, and the CnRev the bump reads.
+		fixedReads: 6,
+		// The Cntlr, CnConf, cn_capacity delete and put, CnRev, SpConf and
+		// SpRev.
+		fixedWrites: 7,
+		terms: []txnTerm{
+			// The cntlrs the pool already has, one short of the ceiling the
+			// create refuses at.
+			{"other cntlr", 1, common.MaxCntlrCntPerSp - 1, 3},
+			{"slice", 1, common.MaxSliceCntPerSp, 32},
+			// The Subsystem and its CdcEntry read, the CdcEntry put.
+			{"subsystem", 3, common.MaxSsCntPerSp, 4},
+			{"clone", 1, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 124,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestDeleteCntlrTxnBudget is DeleteCntlr's tripwire, CreateCntlr's mirror:
+// it reads every clone of the pool for the units the old CN gives back.
+func TestDeleteCntlrTxnBudget(t *testing.T) {
+	txnShape{
+		name: "DeleteCntlr",
+		stm:  "cntlr.go's DeleteCntlr, cnLedger and syncCdcEntries",
+		// ClusterConf, SpConf, SpRev, the target Cntlr, its CN's CnConf and
+		// the CnRev the bump reads.
+		fixedReads: 6,
+		// The Cntlr delete, CnConf, cn_capacity delete and put, CnRev,
+		// SpConf and SpRev.
+		fixedWrites: 7,
+		terms: []txnTerm{
+			// The cntlrs the CdcEntry rewrite reads, the target's left out.
+			{"other cntlr", 1, common.MaxCntlrCntPerSp - 1, 3},
+			{"slice", 1, common.MaxSliceCntPerSp, 32},
+			{"subsystem", 3, common.MaxSsCntPerSp, 4},
+			{"clone", 1, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 124,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestFinishMigrationTxnBudget is FinishMigration's tripwire for its deciding
+// STM: besides the source DN it releases, it reads and writes the destination
+// DN, which gets back the migration's metadata units — a units-only change,
+// so one capacity put, no delete and no DnRev.
+func TestFinishMigrationTxnBudget(t *testing.T) {
+	txnShape{
+		name: "FinishMigration",
+		stm:  "migration.go's FinishMigration and dnLedger",
+		// ClusterConf, SpConf, SpRev, the Migration, the source DnConf and
+		// DnRev, and the destination DnConf.
+		fixedReads: 7,
+		// The source DnConf, dn_capacity delete and put and DnRev; the
+		// destination DnConf and dn_capacity put; the Migration delete and
+		// the Slice, SpConf and SpRev puts.
+		fixedWrites: 10,
+		terms: []txnTerm{
+			{"slice", 1, common.MaxSliceCntPerSp, 32},
+			// One delete per bitmap chunk.
+			{"bitmap chunk", 1, common.MaxMigrBmCnt, 4},
+		},
+		maxCompares: 53,
+		overDefault: false,
+	}.check(t)
+}
+
+// TestReplaceCntlrTxnBudget is the tripwire of model.ReplaceCntlr (dnv-worker.md
+// MD6): its STM reads every clone of the pool to move the clones' metadata
+// units from the old CN to the new one (architecture.md, Metadata units),
+// which takes it past etcd's default cap — one of the transactions the
+// deployment flag exists for. model/ops_test.go's
+// TestReplaceCntlrAtTheCeiling commits this shape against a real etcd.
+func TestReplaceCntlrTxnBudget(t *testing.T) {
+	txnShape{
+		name: "ReplaceCntlr",
+		stm:  "model.ReplaceCntlr's STM and releaseCn",
+		// SpConf, the new CN's CnConf, the scan's cn_capacity key, the old
+		// CN's CnConf, both CnRevs and SpRev.
+		fixedReads: 7,
+		// The old Cntlr delete; the old CN's CnConf, cn_capacity delete and
+		// put and CnRev; the new Cntlr; the new CN's CnConf, cn_capacity
+		// delete and put and CnRev; SpConf; SpRev.
+		fixedWrites: 12,
+		terms: []txnTerm{
+			// Every listed Cntlr, the old one's included, read once.
+			{"cntlr", 1, common.MaxCntlrCntPerSp, 4},
+			{"slice", 1, common.MaxSliceCntPerSp, 32},
+			{"subsystem", 3, common.MaxSsCntPerSp, 4},
+			{"clone", 1, common.MaxCloneCntPerSp, 64},
+		},
+		maxCompares: 131,
+		overDefault: true,
+	}.check(t)
+}
+
+// TestFinishCloneDeleteTxnBudget is the tripwire of model.FinishCloneDelete,
+// the clone drain's final step (dnv-worker.md CLD9): it gives the clone's
+// metadata units back on the CN of every cntlr of the pool, a units-only
+// change, so one capacity put and no CnRev per CN. model/clonedrain_test.go's
+// TestFinishCloneDeleteAtTheCntlrCeiling commits this shape against a real
+// etcd.
+func TestFinishCloneDeleteTxnBudget(t *testing.T) {
+	txnShape{
+		name: "FinishCloneDelete",
+		stm:  "model.FinishCloneDelete's STM and releaseCloneMetaUnits",
+		// SpConf, the Clone and SpRev.
+		fixedReads: 3,
+		// The Clone delete and the SpConf and SpRev puts.
+		fixedWrites: 3,
+		terms: []txnTerm{
+			// The Cntlr and its CnConf read, the CnConf and cn_capacity put.
+			{"cntlr", 4, common.MaxCntlrCntPerSp, 4},
+		},
+		maxCompares: 22,
+		overDefault: false,
+	}.check(t)
 }
