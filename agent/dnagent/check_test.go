@@ -304,8 +304,8 @@ func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 	}
 }
 
-// A Check round never mutates (DN16/SH25) — including the [D13] metadata:
-// writeblock is not in readOnlyPrefixes, so Mutations() covers it.
+// A Check round issues no mutating command (DN16/SH25) — including the [D13]
+// metadata: writeblock is not in readOnlyPrefixes, so Mutations() covers it.
 func TestCheckRoundsNeverMutate(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, 1, testSide)

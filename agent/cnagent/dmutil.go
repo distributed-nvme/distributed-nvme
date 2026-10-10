@@ -262,7 +262,7 @@ func concatMatches(targets []agent.DmTarget, want []concatTarget) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Probes (read-only — CN23/CN29: a probe never mutates)
+// Probes (CN23/CN29: a probe changes no object of the node)
 // ---------------------------------------------------------------------------
 
 func (s *CnAgentServer) probeDmTarget(

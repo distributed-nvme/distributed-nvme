@@ -582,16 +582,23 @@ converged object issues no mutating command. This is what makes re-applies
 safe: gratuitous re-writes of live objects are not no-ops (re-linking a
 live port-to-subsystem link or reloading a live dm table stalls host IO).
 
-SH17. Probing follows these conventions: read-only commands — the dn's are
-`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`, `lsblk`,
-`stat` and `ls`; the cn's are `cnagent.md` CN28's, and CN12's
+SH17. Probing follows these conventions: the probe commands — the dn's are
+`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`,
+`lsblk`, `stat` and `ls`; the cn's are `cnagent.md` CN28's, and CN12's
 `mdadm --examine` and `lsblk` of the array node — the walk of
 "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact
 — the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
 of the disk header for the DN's [D13] metadata. No LVM report is probed
-anywhere ([D14]). Probe reads MUST tolerate padded or normalized read-back;
-compare canonically, never byte-wise:
+anywhere ([D14]). These commands create, change and remove nothing, but one
+read is not free of writes: on a `dmsetup status` of a thin pool or a
+dm-clone the kernel first commits that target's metadata unless the device
+is suspended, because dnv reads status without the flag that skips the
+commit, and once its metadata has changed since the pool device was set up,
+a thin pool's commit also flushes its data device first. A probe that reads
+such a status waits on that IO (`architecture.md`, Known limits). Probe
+reads MUST tolerate padded or normalized read-back; compare canonically,
+never byte-wise:
 
 * "attr_serial" reads back space-padded — compare trimmed.
 * "device_uuid" and "device_nguid" read back **dash-separated and
@@ -2148,7 +2155,9 @@ neither has a side whose DN is unknown or in that state, since its own
 geometry comes from the DN, nor a side whose stored request DN8's side conf
 gate refuses, which converges and sweeps nothing for the same reason.
 
-Never mutates the node — in particular a `Get*Info` or `Check*` round never
+Never creates, changes or removes an object of the node, though a round that
+reads a migration destination's dm-clone status makes the kernel commit the
+clone's metadata (SH17). In particular a `Get*Info` or `Check*` round never
 allocates a record and never registers a DN9 zeroing goroutine
 (registration happens only on a converge path), and it reports
 `RES_STATUS_MISSING` for a side whose record the converge has not written

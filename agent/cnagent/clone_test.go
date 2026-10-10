@@ -690,7 +690,8 @@ func TestCloneRecoveryNeverServesAnUnfinishedDmClone(t *testing.T) {
 			}
 
 			// The Check round agrees with the converge: the park is what
-			// CN16 wants while hydration is off, and a probe never mutates.
+			// CN16 wants while hydration is off, and a probe issues no
+			// mutating command.
 			node.Reset()
 			_, probed := srv.checkCntlrRound(context.Background(),
 				&pb.CheckCntlrRequest{

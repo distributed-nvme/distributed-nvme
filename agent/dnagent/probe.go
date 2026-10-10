@@ -10,9 +10,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The probe map of DN18. Every function here is read-only on the node:
-// Get*Info and the Check* streams must never mutate it (DN16, SH25). What a
-// probe can change is the agent's own view of the disk (probeDn).
+// The probe map of DN18. No function here creates, changes or removes an
+// object of the node, as Get*Info and the Check* streams must not (DN16,
+// SH25); reading a migration destination's dm-clone status still makes the
+// kernel commit the clone's metadata (SH17). What a probe can change is the
+// agent's own view of the disk (probeDn).
 
 func (s *DnAgentServer) probeDn(
 	ctx context.Context,

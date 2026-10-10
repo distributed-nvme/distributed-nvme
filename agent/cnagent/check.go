@@ -16,8 +16,8 @@ import (
 // unsolicited send. The info rides along when show_info is set, on the first
 // reply of the stream, and whenever the freshly probed info differs from the
 // last one actually sent. One round takes the CN1 locks of the corresponding
-// Get*Info, never mutates, and runs under the trace id its own request
-// carries (agent.CheckRoundCtx).
+// Get*Info, changes no object of the node (CN23), and runs under the trace id
+// its own request carries (agent.CheckRoundCtx).
 
 // streamEnded reports whether a Recv error is the normal end of a stream.
 func streamEnded(ctx context.Context, err error) bool {

@@ -2436,7 +2436,9 @@ holds no request for, as when none was ever accepted, or when the startup
 reload could not load or skipped its file (CN2) and none has been
 accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision`. For a
 known object the `agent_reply` is the read-only verdict of CN30. Never
-mutates.
+creates, changes or removes an object of the node, though a cntlr's call
+makes the kernel commit the metadata of each thin pool and dm-clone whose
+status it reads (`dnagent.md` SH17).
 
 ### `CheckCn` / `CheckCntlr`
 
@@ -2688,10 +2690,12 @@ its `res_name` and what its probe checks:
 CN29. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output
 in its details and the converge pass continues with the remaining
-resources. Probes never mutate — the metadata-snapshot reserve runs only
-inside `dumpThinMetadata` (the CN25 bitmap reads, the CN14 activation
-sweep and the destination-bitmap read of CN18 step 4), never from
-`probe.go`. `RES_STATUS_PROVISIONING` is never produced by this path: it
+resources. Probes create, change and remove nothing — the
+metadata-snapshot reserve runs only inside `dumpThinMetadata` (the CN25
+bitmap reads, the CN14 activation sweep and the destination-bitmap read of
+CN18 step 4), never from `probe.go` — though a status read of a thin pool
+or a dm-clone makes the kernel commit that target's metadata (`dnagent.md`
+SH17). `RES_STATUS_PROVISIONING` is never produced by this path: it
 is assigned by the CN9 gate, not by a failed command; and
 `RES_STATUS_PENDING` is produced by the CN11 registry alone, never by a
 failed command. The group row's probe opens no md member device: it is
@@ -2727,7 +2731,7 @@ CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply
 `ReplyCodeLeftover` iff their scope's verdict is not clean. The verdict
 is the CN21 sweep with the removals left out: the same enumeration, the
 same attribution, the same comparison against the same wanted set, and
-nothing touched (CN23 — a probe never mutates). Details and log record
+nothing removed or built (CN23). Details and log record
 are CN20's.
 
 The node-level verdict of a `CheckCn` round and of a `GetCnInfo` also

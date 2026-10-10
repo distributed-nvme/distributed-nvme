@@ -9,8 +9,10 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The probe map of CN28. Every function here is read-only: Get*Info and the
-// Check* streams must never mutate (CN23, SH25). In particular
+// The probe map of CN28. No function here creates, changes or removes an
+// object of the node, as Get*Info and the Check* streams must not (CN23,
+// SH25); a `dmsetup status` of a thin pool or a dm-clone still makes the
+// kernel commit that target's metadata (dnagent.md SH17). In particular
 // `reserve_metadata_snap` runs only inside `dumpThinMetadata` — the CN25
 // bitmap reads, the CN14 activation sweep and the dst-bitmap read of
 // architecture.md, Clone crash recovery — never from here (CN29).

@@ -108,8 +108,9 @@ func (s *DnAgentServer) fenceStarted(st *sideState) bool {
 }
 
 // inFence reports whether a window is currently running, without starting
-// one. The probe path uses it: a Check round must never mutate, and starting
-// the clock is a mutation of the side's state.
+// one. The probe path uses it: a Check round changes no state of the agent
+// but its own account of what it observed (DN16), and starting the clock is a
+// change of the side's state.
 func (s *DnAgentServer) inFence(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

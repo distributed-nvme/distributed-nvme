@@ -167,7 +167,8 @@ func TestParseNqnRoundTrip(t *testing.T) {
 }
 
 // A host-facing subsystem NQN is user-chosen; "not dnv-format" is the signal
-// the sweep attributes it by its namespaces' backing device instead ([D15]).
+// the sweep attributes it by its namespaces' backing device instead
+// (cnagent.md CN21).
 func TestParseNqnRejects(t *testing.T) {
 	bad := []string{
 		"",

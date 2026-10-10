@@ -705,9 +705,9 @@ func (n *Nvmet) SubsysMtime(
 
 // NsDevicePath reads one namespace's backing device path. It is how a sweep
 // attributes a host-facing subsystem, whose NQN is chosen by the user and
-// carries no ids of ours ([D15]) — so it reads through the strict probe: an
-// unreadable device_path must be an error, never an absence that would make
-// the subsystem look unowned and get it removed.
+// carries no ids of ours (cnagent.md CN21) — so it reads through the strict
+// probe: an unreadable device_path must be an error, never an absence that
+// would make the subsystem look unowned and get it removed.
 func (n *Nvmet) NsDevicePath(
 	ctx context.Context,
 	nqn string,

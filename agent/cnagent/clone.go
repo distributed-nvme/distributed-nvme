@@ -500,8 +500,9 @@ func (s *CnAgentServer) parkTdNsDevs(
 	}
 }
 
-// probeCloneDm is the read-only view of a dm-clone: the raw status line rides
-// into details (architecture.md, Live-state reporting).
+// probeCloneDm is the CN28 probe of a dm-clone: the raw status line rides
+// into details (architecture.md, Live-state reporting). Reading that status
+// makes the kernel commit the clone's metadata (dnagent.md SH17).
 func (s *CnAgentServer) probeCloneDm(
 	ctx context.Context,
 	cp *clonePlan,
