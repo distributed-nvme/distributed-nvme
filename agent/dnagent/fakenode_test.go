@@ -1082,16 +1082,6 @@ func (f *fakeNode) cmdLsblk(args []string) (string, int) {
 		}
 		return fmt.Sprintf("%d\n", size), 0
 	}
-	if contains(args, "KNAME") {
-		// The kernel name Dm.WriteZeroesMaxBytes turns into a
-		// /sys/class/block entry (the DN5 check of
-		// architecture.md, Side provisioning protocol). The fake's devices are
-		// already plain /dev paths, so the basename is the kernel name.
-		if _, ok := f.devNo[path]; !ok {
-			return "", 32
-		}
-		return path[strings.LastIndexByte(path, '/')+1:] + "\n", 0
-	}
 	devNo, ok := f.devNo[path]
 	if !ok {
 		return "", 32

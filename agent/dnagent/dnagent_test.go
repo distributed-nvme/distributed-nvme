@@ -1504,68 +1504,6 @@ func TestZeroBytesMismatchIsAnErrorRow(t *testing.T) {
 	}
 }
 
-// The DN5 fail-fast (architecture.md, Side provisioning protocol): a disk whose
-// write_zeroes_max_bytes reads 0 cannot
-// meet the fast-Write-Zeroes assumption, so meta_info is an error that feeds
-// err_epoch. An absent attribute is not a verdict.
-func TestWriteZeroesFailFast(t *testing.T) {
-	srv, node := newTestServer(t)
-	ctx := context.Background()
-	wzPath := "/sys/class/block/fake-disk/queue/write_zeroes_max_bytes"
-
-	// Absent: not a verdict (the fake has no sysfs tree by default).
-	reply, err := srv.SyncupDn(ctx, dnReq(1))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	if got := reply.GetDnInfo().GetMetaInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_OK {
-		t.Errorf("absent attribute = %v/%q, want OK",
-			got.GetStatus(), got.GetDetails())
-	}
-
-	// A present 0 is.
-	node.mu.Lock()
-	node.files[wzPath] = "0\n"
-	node.mu.Unlock()
-	reply, err = srv.SyncupDn(ctx, dnReq(2))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	got := reply.GetDnInfo().GetMetaInfo()
-	if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		got.GetDetails() != tagNoWriteZeroes {
-		t.Fatalf("meta_info = %v/%q, want ERROR/%q",
-			got.GetStatus(), got.GetDetails(), tagNoWriteZeroes)
-	}
-	// It reports, it does not gate: an already-populated DN keeps converging.
-	infoReply, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-		ClusterId: testCluster, DnId: testDn,
-	})
-	if err != nil {
-		t.Fatalf("GetDnInfo: %v", err)
-	}
-	if got := infoReply.GetDnInfo().GetMetaInfo(); got.GetDetails() !=
-		tagNoWriteZeroes {
-		t.Errorf("the probe missed the fail-fast: %v/%q",
-			got.GetStatus(), got.GetDetails())
-	}
-
-	// A non-zero value clears it again.
-	node.mu.Lock()
-	node.files[wzPath] = "2097152\n"
-	node.mu.Unlock()
-	reply, err = srv.SyncupDn(ctx, dnReq(3))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	if got := reply.GetDnInfo().GetMetaInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_OK {
-		t.Errorf("fast Write Zeroes = %v/%q, want OK",
-			got.GetStatus(), got.GetDetails())
-	}
-}
-
 // A failed batch publishes the killed command's output on side_dev_info and is
 // retried no sooner than zeroRetryInterval later — never a hot loop.
 func TestZeroingRetryIsPaced(t *testing.T) {

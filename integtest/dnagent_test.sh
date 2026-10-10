@@ -1362,25 +1362,13 @@ start_agent() { # <idx>
 setup() {
 	CASE=setup
 	stage vms "creating the backing store and launching both agents"
-	local idx out wz
+	local idx out
 	for idx in 1 2; do
 		# --local-store must pre-exist: startup reconcile fails without it.
 		sshv "$idx" "mkdir -p $WORK/store && chmod 0777 $WORK && chmod 0755 $WORK/store"
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
-		# The fast-Write-Zeroes preflight item (dnagent_integtest.md,
-		# Assumptions and preflight checks), deferred to here because
-		# the device only exists now (preflight_vms runs before setup). The
-		# zeroing assumes fast Write Zeroes (the standing hardware assumption
-		# of architecture.md, Side provisioning protocol); a loop device maps
-		# REQ_OP_WRITE_ZEROES onto fallocate, so a 0 here means the kernel
-		# would write zero pages at bulk speed and the agent's DN5 fail-fast
-		# would refuse the disk outright. Read from /sys/class/block, the same
-		# directory agent.Dm.WriteZeroesMaxBytes uses.
-		wz=$(sshv "$idx" "cat /sys/class/block/\$(basename ${LOOP[$idx]})/queue/write_zeroes_max_bytes")
-		[ "$wz" -gt 0 ] ||
-			die "vm$idx: ${LOOP[$idx]} reports write_zeroes_max_bytes=0"
 		log "[vm$idx] scp dnv-agent"
 		scp -q "${SSH_OPTS[@]}" "$AGENT_BIN" "${VM[$idx]}:$WORK/dnv-agent"
 		sshv "$idx" "chmod 0755 $WORK/dnv-agent"

@@ -533,9 +533,7 @@ func accepted(code uint32) bool {
 
 // dnObservation applies the HL1 table to one CheckDn/SyncupDn reply (HL5:
 // info is the LATEST KNOWN DnInfo, not necessarily this reply's). The ERROR
-// sources are disk_info, meta_info and port_info — including meta_info's
-// "disk lacks Write Zeroes" (architecture.md, Side provisioning protocol),
-// which is a plain ERROR.
+// sources are disk_info, meta_info and port_info.
 func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""

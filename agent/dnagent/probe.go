@@ -35,19 +35,7 @@ func (s *DnAgentServer) probeDn(
 	// drops that table, so the next call re-reads the disk (DN18).
 	details, err := s.meta.ProbeHeader(ctx, req.GetClusterId(),
 		req.GetDnId(), req.GetExtentSize())
-	switch {
-	case err != nil:
-		info.MetaInfo = t.Err(resKeyMeta, s.disk, err.Error())
-	default:
-		// The DN5 fail-fast (architecture.md, Side provisioning protocol) is
-		// re-checked every round, so a disk whose
-		// queue limits changed under the agent surfaces without a re-sync.
-		if wzDetails, ok := s.checkWriteZeroes(ctx); !ok {
-			info.MetaInfo = t.Err(resKeyMeta, s.disk, wzDetails)
-		} else {
-			info.MetaInfo = t.Ok(resKeyMeta, s.disk, details)
-		}
-	}
+	info.MetaInfo = t.FromErr(resKeyMeta, s.disk, details, err)
 
 	portName := fmt.Sprintf("%d", s.port.PortId)
 	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)

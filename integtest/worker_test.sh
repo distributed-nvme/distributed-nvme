@@ -1868,7 +1868,7 @@ EOF
 	stage 7 "a plain ERROR meta row sets err_epoch"
 	set_behavior dn0 <<'EOF'
 {"objects": {"dn": {"rows": {"meta_info": {"status": "ERROR",
-  "details": "disk lacks Write Zeroes"}}}}}
+  "details": "corrupt header: crc mismatch"}}}}}
 EOF
 	wait_until "$WAIT_SHORT" "dn 1 err_epoch set by the meta row" dn_err_epoch_set 1
 	clear_behavior dn0

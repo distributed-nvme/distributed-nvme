@@ -332,18 +332,19 @@ const (
 	// dm-linear, at most DnZeroBatchMaxBytes per `blkdiscard --zeroout`
 	// command, and persists the count of bytes zeroed from the side's start
 	// after each success. A bound in bytes keeps a command's length, and so
-	// its time under CmdSoftTimeout, independent of the extent size. A
-	// failed or timed-out batch is retried no sooner than
-	// DnZeroRetryInterval seconds later — the zeroing twin of
-	// DnMigrConnectRetryInterval, never a hot loop.
+	// its run time, independent of the extent size. A failed or timed-out
+	// batch is retried no sooner than DnZeroRetryInterval seconds later —
+	// the zeroing twin of DnMigrConnectRetryInterval, never a hot loop.
 	DnZeroBatchMaxBytes = 64 * 1024 * 1024
 	DnZeroRetryInterval = 5
 	// DnZeroBatchMinBytes is the floor a side's batch backs off to. A batch
 	// the soft timeout killed halves the side's next one, rounded down to a
 	// whole DnZeroBatchMinBytes and never below it; a success doubles it
 	// again up to DnZeroBatchMaxBytes; DnZeroKillBackoff kills in a row drop
-	// it straight to the floor. Both bounds are whole multiples of
-	// DnZeroAlign, so a batch starts and ends on one.
+	// it straight to the floor. So the floor, not DnZeroBatchMaxBytes,
+	// decides whether zeroing makes progress on a slow or busy disk
+	// (architecture.md, Side provisioning protocol). Both bounds are whole
+	// multiples of DnZeroAlign, so a batch starts and ends on one.
 	DnZeroBatchMinBytes = 1 * 1024 * 1024
 	// DnZeroAlign is the unit a side's length to zero comes in: the side conf
 	// gate refuses a side_conf.zero_bytes that is not a whole multiple of it

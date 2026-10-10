@@ -442,11 +442,7 @@ VOTE_GRACE=6
 # written — a host's writes through dm-thin, which writes every block it
 # provisions whole, md's rebuild onto a spare, a migration's copy — and a
 # fresh file also carries the backing pattern below. The E2E5 caps count all
-# of it. A write_zeroes_max_bytes of 0 would not change
-# that allocation: the kernel would write real zero pages over the same
-# ranges instead, at bulk speed. checkWriteZeroes
-# (agent/dnagent/syncup_dn.go) only TAGS such a disk; it does not refuse it,
-# so preflight must die on that itself, before the first sp create.
+# of it.
 BACKING_SIZE=2G
 
 # common.DnDataOffset — where the extent area begins on a dn agent's disk:
@@ -2490,8 +2486,8 @@ dn_pid_file() { printf '%s/pid' "$(dn_dir "$1")"; }
 cn_pid_file() { printf '%s/pid' "$(cn_dir)"; }
 
 # DN_LOOP[<v>:<k>] is the loop device dn_up attached over that instance's
-# backing file. Filled by start_dn_instance, read by anything that needs the
-# --disk an agent was given (the space guard, diagnostics, a restart).
+# backing file, the --disk the agent was given. Filled by start_dn_instance,
+# asserted complete at the end of setup step 3 and listed by diagnostics.
 declare -A DN_LOOP=()
 
 dn_key() { printf '%s:%s' "$1" "$2"; }
@@ -3489,23 +3485,6 @@ losetup_list() {
 	losetup -a 2>/dev/null || true
 	return 0
 }
-
-# write_zeroes prints one device's write_zeroes_max_bytes, from the same sysfs
-# file agent.Dm reads. A 0 is fatal to this suite and not to the agent:
-# checkWriteZeroes (agent/dnagent/syncup_dn.go) only TAGS such a disk, so the
-# zeroing would fall back to writing real zero pages over every side it
-# provisions — the same ranges the loop device's Write Zeroes allocates, but
-# written in full, at bulk speed.
-write_zeroes() { # <device>
-	local n
-	n=$(cat "/sys/class/block/${1##*/}/queue/write_zeroes_max_bytes" \
-		2>/dev/null) || n=""
-	case "$n" in
-	'' | *[!0-9]*) printf '0' ;;
-	*) printf '%s' "$n" ;;
-	esac
-	return 0
-}
 HELPER_NODE_EOF
 }
 
@@ -3536,7 +3515,7 @@ dn_up() {
 	local dir=$1 backing=$2 store=$3 log=$4 size=$5
 	local ip=$6 gport=$7 svcid=$8 portid=$9
 	local pfile=${10} pmib1=${11} pmib2=${12}
-	local dev wz pid pat udev
+	local dev pid pat udev
 
 	mkdir -p "$dir" "$store" || {
 		echo "dn_up: mkdir $dir / $store failed" >&2
@@ -3579,13 +3558,6 @@ dn_up() {
 			return 1
 		}
 	fi
-	wz=$(write_zeroes "$dev")
-	if [ "$wz" = 0 ]; then
-		echo "dn_up: $dev reports write_zeroes_max_bytes=0;" \
-			"side zeroing would write real zero pages over every" \
-			"side on it, at bulk speed" >&2
-		return 1
-	fi
 
 	# One agent per gRPC endpoint. The pattern's first character is bracketed
 	# so it cannot match this helper's own argv, which carries the ip and the
@@ -3615,9 +3587,9 @@ dn_up() {
 		fi
 	fi
 	echo "$pid" >"$dir/pid"
-	# start_dn_instance reads loop=, wz= and pid= and ignores any other word,
-	# so udev= is a report and nothing asserts on it.
-	printf 'loop=%s wz=%s pid=%s udev=%s\n' "$dev" "$wz" "$pid" "$udev"
+	# start_dn_instance reads loop= and pid= and ignores any other word, so
+	# udev= is a report and nothing asserts on it.
+	printf 'loop=%s pid=%s udev=%s\n' "$dev" "$pid" "$udev"
 	return 0
 }
 
@@ -5279,14 +5251,8 @@ stop_cp_daemons() {
 # through the side export, that the stock rule would assemble (rule 7). It is
 # per guest, so every later instance on a VM finds it already right and does
 # nothing.
-#
-# The write_zeroes gate is dn_up's, not this function's — it must refuse
-# BEFORE the agent is launched, since an agent over a disk with no fast Write
-# Zeroes would zero every side it provisions by writing real zero pages, at
-# bulk speed, and the dn agent itself only TAGS that case (checkWriteZeroes,
-# agent/dnagent/syncup_dn.go).
 start_dn_instance() { # <v> <k>
-	local v=$1 k=$2 out kv dev="" wz="" pid=""
+	local v=$1 k=$2 out kv dev="" pid=""
 	out=$(helper_dn "$v" dn_up \
 		"$(dn_dir "$k")" "$(dn_backing "$k")" "$(dn_store "$k")" \
 		"$(dn_log "$k")" "$BACKING_SIZE" "${DN_IP[$v]}" \
@@ -5296,7 +5262,6 @@ start_dn_instance() { # <v> <k>
 	for kv in $out; do
 		case "$kv" in
 		loop=*) dev=${kv#loop=} ;;
-		wz=*) wz=${kv#wz=} ;;
 		pid=*) pid=${kv#pid=} ;;
 		esac
 	done
@@ -5304,15 +5269,6 @@ start_dn_instance() { # <v> <k>
 	/dev/loop*) ;;
 	*) die "dn$v instance $k: dn_up named no loop device, said '$out'" ;;
 	esac
-	case "$wz" in
-	'' | *[!0-9]*)
-		die "dn$v instance $k: write_zeroes_max_bytes is '$wz', not a number"
-		;;
-	esac
-	# dn_up already refuses a 0; this is the driver-side echo of that gate, so
-	# an edited helper cannot quietly reintroduce it.
-	[ "$wz" -gt 0 ] ||
-		die "dn$v instance $k: $dev reports write_zeroes_max_bytes=0"
 	case "$pid" in
 	'' | *[!0-9]*)
 		die "dn$v instance $k: no agent pid, said '$out';" \
@@ -5516,9 +5472,9 @@ DIAG_MAX_DN_LOGS=6
 # will actually inherit.
 #
 # lsblk and blkdiscard are in the SHARED list because both roles really run
-# them: agent/dm.go's DevNo, WriteZeroesMaxBytes and DiskSize are `lsblk`,
-# and blkdiscard runs on both — agent/dnagent/zeroing.go (BlkZeroout, side
-# provisioning: dnagent.md DN9),
+# them: agent/dm.go's DevNo and DiskSize are `lsblk`, and blkdiscard runs on
+# both — agent/dnagent/zeroing.go (BlkZeroout, side provisioning:
+# dnagent.md DN9),
 # agent/cnagent/clonemeta.go (BlkDiscardRange, the
 # clone-metadata arena), and ApplySkipRanges (agent/bitmap.go), which marks
 # regions of a dm-clone hydrated on either role.
@@ -6176,71 +6132,6 @@ preflight_guests() {
 	assert_ne "${HOST_NQN[0]}" "${HOST_NQN[1]}" "the two hosts' hostnqn"
 
 	log "preflight (guests) ok"
-}
-
-# preflight_loop_devices is preflight's last item (E2E5), deferred because the
-# devices only exist once the agents have been started: every loop device this
-# run attached must report a non-zero write_zeroes_max_bytes.
-#
-# It is the THIRD gate on that number, on purpose. dn_up refuses to launch an
-# agent over a 0 (it is the only one that can, since the agent must not exist
-# yet), start_dn_instance re-asserts what dn_up reported, and this one re-reads
-# every device from the driver's own DN_LOOP record. What it adds is that the
-# record is COMPLETE — DN_TOTAL devices, one per (v, k) — so a setup that
-# silently started fewer agents than DNS_PER_VM cannot reach `sp create` and
-# fail there as RESOURCE_EXHAUSTED.
-#
-# A 0 is fatal to this suite and not to the agent: agent/dnagent/syncup_dn.go's
-# disk syncup only TAGS such a disk, so side zeroing would fall back to writing
-# real zero pages over every side it provisions, at bulk speed. (The space
-# those sides take would be the same either way: the loop device's Write
-# Zeroes allocates the zeroed range too — see BACKING_SIZE.)
-#
-# WHY EARLY AND NOT MERELY EVENTUALLY. ensureDiskMeta does return
-# `t.Err(resKeyMeta, s.disk, details)` for a tagged disk
-# (agent/dnagent/syncup_dn.go), so dn_node_ready's meta_info row would
-# never reach RES_STATUS_OK and setup WOULD fail at its own wait — after
-# WAIT_PROVISION per disk, with a message about a header rather than
-# about a kernel attribute, and with the agent free to have been writing real
-# zero pages the whole time (checkWriteZeroes "never gates converging", its own
-# comment). This check turns that into one named line.
-preflight_loop_devices() {
-	local v k key dev devs out kv n
-	assert_eq "${#DN_LOOP[@]}" "$DN_TOTAL" \
-		"loop devices recorded by start_dn_instance"
-	for v in "${!DN[@]}"; do
-		devs=""
-		for ((k = 0; k < DNS_PER_VM; k++)); do
-			key=$(dn_key "$v" "$k")
-			dev=${DN_LOOP[$key]:-}
-			[ -n "$dev" ] ||
-				die "dn$v instance $k: no loop device recorded;" \
-					"start_dn_vm $v did not run"
-			devs="$devs $dev"
-		done
-		# One read-only ssh per VM, not one per device: 45 devices x 4 VMs
-		# would be 180 round trips for a gate that is already held twice.
-		out=$(ssh_dn "$v" "for d in $devs; do" \
-			"printf '%s=%s\\n' \"\$d\"" \
-			"\"\$(cat /sys/class/block/\${d##*/}/queue/write_zeroes_max_bytes" \
-			"2>/dev/null)\"; done") ||
-			die "dn$v: reading write_zeroes_max_bytes failed"
-		for kv in $out; do
-			dev=${kv%%=*}
-			n=${kv#*=}
-			case "$n" in
-			'' | *[!0-9]*)
-				die "dn$v: $dev reports write_zeroes_max_bytes='$n';" \
-					"the device is gone or sysfs cannot be read"
-				;;
-			esac
-			[ "$n" -gt 0 ] ||
-				die "dn$v: $dev reports write_zeroes_max_bytes=0, so side" \
-					"zeroing would write real zero pages over every side" \
-					"on it, at bulk speed"
-		done
-	done
-	log "  write_zeroes_max_bytes > 0 on all $DN_TOTAL loop devices"
 }
 
 # ---------------------------------------------------------------------------
@@ -6960,8 +6851,8 @@ diagnostics() {
 # lifetimes:
 #
 #   setup_infra   steps 1-3.  The PROCESSES and the files under them: $WORK,
-#                 the binaries, the four cp daemons, DN_TOTAL dn agents,
-#                 CN_CNT cn agents, and the deferred loop-device gate.
+#                 the binaries, the four cp daemons, DN_TOTAL dn agents and
+#                 CN_CNT cn agents, with every dn agent's loop device on record.
 #                 Idempotent, and it runs once per BUILD, not once per run —
 #                 it is also the rebuild half of setup_between_cases.
 #   setup_case    steps 4-12. Everything that lives in ETCD or on the host,
@@ -7388,11 +7279,7 @@ ctl_create_try() { # <args…>
 # different thing, as probeDn (agent/dnagent/probe.go) builds them:
 #   disk_info  the agent can measure --disk at all
 #   meta_info  ProbeHeader accepted the 4 KiB header for THIS cluster_id,
-#              dn_id and extent_size, and checkWriteZeroes did not find a
-#              PRESENT write_zeroes_max_bytes reading 0 (an absent attribute
-#              or a failed read pass, checkWriteZeroes in
-#              agent/dnagent/syncup_dn.go —
-#              which is why preflight_loop_devices gates the number itself)
+#              dn_id and extent_size
 #   port_info  ProbePort found ports/<--nvmet-port-id> carrying the four
 #              addr_* attributes this agent was launched with AND the three
 #              fixed ANA groups in their fixed states (probePort (agent/nvmet.go))
@@ -8037,13 +7924,20 @@ setup_infra() {
 	for v in "${!CN[@]}"; do
 		start_cn_agent "$v"
 	done
-	# Preflight's deferred item (E2E5), and it must run BEFORE the first
-	# `sp create`: a loop device with write_zeroes_max_bytes = 0 is only TAGGED
-	# by the agent
-	# (checkWriteZeroes in agent/dnagent/syncup_dn.go, whose own comment says
-	# it "never gates converging"), so side zeroing would fall back to
-	# writing real zero pages over every side it provisions, at bulk speed.
-	preflight_loop_devices
+	# Every agent's loop device is on record, one per (v, k), and nothing
+	# else is: a setup that started fewer agents than DNS_PER_VM stops here,
+	# naming the instance, and not in setup step 5's wait on an agent that
+	# never started.
+	local k
+	for v in "${!DN[@]}"; do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			[ -n "${DN_LOOP[$(dn_key "$v" "$k")]:-}" ] ||
+				die "dn$v instance $k: no loop device recorded;" \
+					"start_dn_vm $v did not run"
+		done
+	done
+	assert_eq "${#DN_LOOP[@]}" "$DN_TOTAL" \
+		"loop devices recorded by start_dn_instance"
 }
 
 # ---------------------------------------------------------------------------
@@ -9505,11 +9399,7 @@ read_space() { # <helper wrapper> <index|""> <label>
 #                 effect, how many extents' worth one DN has zeroed or had
 #                 written through its sides since its backing file was created
 #                 (a fresh one per case): four of them, the pattern and the
-#                 agent's own on-disk metadata are already over it. Nor can
-#                 it see a write_zeroes_max_bytes of 0, whose zero-page
-#                 fallback allocates the same ranges; that is for the three
-#                 write_zeroes gates (dn_up, start_dn_instance,
-#                 preflight_loop_devices) to catch.
+#                 agent's own on-disk metadata are already over it.
 #   RUN_CAP_BYTES everything this run wrote on all ten guests, $WORK plus
 #                 $TMPFS_DIR. The tmpfs is counted separately because it is NOT
 #                 under $WORK: CnTmpfsPath is fixed at common.DefaultTmpfsPrefix

@@ -59,10 +59,10 @@ func TestHealthDnTable(t *testing.T) {
 			wantRes: "disk",
 		},
 		{
-			name: "meta error: disk lacks Write Zeroes is a plain ERROR",
+			name: "meta error",
 			info: &pb.DnInfo{
 				DiskInfo: resOk("disk"),
-				MetaInfo: resErr("meta", "disk lacks Write Zeroes"),
+				MetaInfo: resErr("meta", "corrupt header: crc mismatch"),
 			},
 			want:    healthErrorRow,
 			wantRes: "meta",

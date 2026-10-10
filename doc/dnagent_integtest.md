@@ -48,10 +48,8 @@ what the suite and the agent need and the agent does not check itself:
 passwordless ssh and sudo, the tools (no LVM: the dn agent runs none,
 `architecture.md`, [D13]), nvmet configfs present, native multipath on, which
 the standby assertions and the migration merge need, the work directory's
-free space and punch-hole support, and the agent ports free; and, once each
-loop device exists, its Write Zeroes, whose absence the agent's fail-fast
-(`dnagent.md` DN5) would report less legibly. The suite rests on these lab
-facts:
+free space and punch-hole support, and the agent ports free. The suite rests
+on these lab facts:
 
 * The VMs' uutils dd silently mishandles direct IO, with false failures and
   dropped writes, so the suite never passes dd an input or output flag at all:
@@ -259,9 +257,9 @@ only reported, a guest's own not being the suite's to fail on.
 
 ## Out of scope
 
-Error paths beyond the stale probe, the provisioning error rows and the Write
-Zeroes verdict among them (`dnagent.md` DN5, DN9); the cn role; fault
-injection under a live stack, the teardown case removing a real remote
-instead; performance; TLS and authentication; levels other than read-write and
-no-migration (`dnagent.md` DN11); lock contention on one agent; the source
-half of a cancelled migration; a zeroing batch cancelled mid-flight.
+Error paths beyond the stale probe, the provisioning error rows among them
+(`dnagent.md` DN9); the cn role; fault injection under a live stack, the
+teardown case removing a real remote instead; performance; TLS and
+authentication; levels other than read-write and no-migration
+(`dnagent.md` DN11); lock contention on one agent; the source half of a
+cancelled migration; a zeroing batch cancelled mid-flight.

@@ -1514,9 +1514,7 @@ the node's own stream; written through `model.SetDnErrEpoch` and
   dead, `architecture.md`, Live-state reporting — never written to etcd);
 * any `RES_STATUS_ERROR` row in `DnInfo` (`disk_info`, `meta_info`,
   `port_info`) or `CnInfo` (`port_info`, `tmpfs_info`, `tmp_file_info`,
-  `loop_dev_info`): set to now if zero — including a `meta_info` that reads
-  "disk lacks Write Zeroes" (`architecture.md`, Side provisioning protocol),
-  which is a plain `ERROR`;
+  `loop_dev_info`): set to now if zero;
 * a clean round — a reply in time, an accepted code (zero or
   `ReplyCodeLeftover`), no `ERROR` row in the latest known info: cleared to
   zero;

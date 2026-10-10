@@ -1955,9 +1955,10 @@ The SP does **not** serve immediately: every side it just created is
 `provisioned` false, so the DN agents build the side devices and zero the
 part of each that must read as zeros (Side provisioning protocol) while
 the CN stacks stay deferred and report `RES_STATUS_PROVISIONING` —
-healthy, not ready, no action needed. On the standing fast-Write-Zeroes
-hardware assumption ([D15], Side provisioning protocol) this is seconds,
-not minutes. Progress is visible through `InspectSide`
+healthy, not ready, no action needed. How long the SP waits depends on
+the disks' zeroing rate and on how much the DN agents zero: the whole leg
+span of a meta group's side, and only the meta region and first data block
+of a data group's side. Progress is visible through `InspectSide`
 (`SideInfo.zeroed_bytes` and `zero_bytes`) and through `GetStoragePool`
 (each `Side.provisioned`); the sp worker flips the flags and the normal
 watch fan-out brings the SP up (sp role).
@@ -3067,20 +3068,21 @@ the count of bytes zeroed from the side's start (`zero_bytes`,
 `zeroed_bytes`); the zeroing is complete when the two are equal and the
 length is above zero.
 
-**Standing hardware assumption.** DN disks support **fast Write
-Zeroes**: a batch of `DnZeroBatchMaxBytes` zeroes inside
-`CmdSoftTimeout` for each of the at most `DnZeroConcurrency` batches a DN
-agent runs at once. Zeroing commands run under the ordinary command
-timeouts (Common validation); there is no special zeroing timeout. A
-slower or busier disk costs kills rather than stopping zeroing: a batch the
+**Batches and timeouts.** Zeroing commands run under the ordinary command
+timeouts (Common validation); there is no special zeroing timeout. A disk
+needs no Write Zeroes support: where it has none, the kernel answers
+`blkdiscard --zeroout` by writing zero pages, which is slower. A batch is
+bounded in bytes, at most `DnZeroBatchMaxBytes`, so how long it takes
+depends on the disk's zeroing rate, not on the extent size. A slower or
+busier disk costs kills rather than stopping zeroing: a batch the soft
 timeout kills halves the side's next batch, down to `DnZeroBatchMinBytes`
-(`dnagent.md` DN9), so zeroing stalls only where that floor cannot zero
-inside `CmdSoftTimeout` at the disk's rate split `DnZeroConcurrency` ways.
-A batch is bounded in bytes, so how long it takes does not depend on the
-extent size. Zeroing has no tuning of its own: tuning describes hardware,
-so it would be per-node agent configuration, while `ClusterConf` is
-write-once and cluster-wide; and raising the global timeouts stretches
-every command's bound, not just zeroing's.
+(`dnagent.md` DN9), so zeroing stalls only where the zeroing rate left to
+this agent, which is what host IO and any other dn agent on the same
+physical disk leave it, split `DnZeroConcurrency` ways, cannot zero that
+floor inside `CmdSoftTimeout`. Zeroing has no tuning of its own: tuning
+describes hardware, so it would be per-node agent configuration, while
+`ClusterConf` is write-once and cluster-wide; and raising the global
+timeouts stretches every command's bound, not just zeroing's.
 
 **Protocol and gate.** The dn agent allocates the side's extent runs and
 persists their record with the request's length to zero and a zeroed
@@ -3110,15 +3112,6 @@ rule reads (sp role). Zeroing runs at **every** `sp_level`,
 batch sizing; `dnagent.md` DN18 holds the rows of the read-only probes
 (`GetSideInfo`, `CheckSide`), which never allocate and never start or
 stop the goroutine (`dnagent.md` DN16).
-
-**Fail-fast hardware check.** The DN base state checks that the `--disk`
-device's Write Zeroes is offloaded: a "write_zeroes_max_bytes" of the
-device's sysfs queue reading zero means the kernel would fall back to
-writing zero pages at bulk speed and the assumption cannot hold, so the
-DN reports `meta_info` as `RES_STATUS_ERROR` naming the missing Write
-Zeroes, which flows into `err_epoch` and the capacity-key removal (Capacity
-index keys, dn / cn roles) and takes the unsuitable DN out of allocation. An
-absent or unreadable attribute is **not** a verdict (`dnagent.md` DN5).
 
 ### Live-state reporting
 
@@ -3906,9 +3899,8 @@ carries `side_conf.provisioned` true on the destination and
 `migr_src_conf.dst_provisioned` true on the source, and both roles run the
 sequences below unchanged; the destination's connect retry of step 3
 absorbs any cross-side ordering. The cost is added **migration-start
-latency** — the destination's zeroing pass, short under the
-fast-Write-Zeroes assumption of Side provisioning protocol, before any
-data moves.
+latency** — the destination's zeroing pass (Side provisioning protocol),
+before any data moves.
 `CancelMigration` during the zeroing window cancels the zeroing goroutine
 and waits for it before the dm devices are removed (Side provisioning
 protocol).
@@ -4629,9 +4621,8 @@ document and the component documents cite it by its id.
   record at `provisioned` true (data loss on a lost or foreign disk) stays
   `ERROR` and feeds Automatic reactions rather than looking transitional.
   The zeroing runs in the background, off the agent's locks and under the
-  ordinary command timeouts (Common validation; `dnagent.md` DN9), on the
-  standing assumption that DN disks have fast Write Zeroes, which the dn
-  agent checks (`dnagent.md` DN5); a synchronous zeroing inside one
+  ordinary command timeouts (Common validation; Side provisioning
+  protocol; `dnagent.md` DN9); a synchronous zeroing inside one
   `SyncupSide` is not an option, because a meta group's side is zeroed
   over its whole leg span and a node-read holder plus one queued
   `SyncupDn` writer would freeze the whole DN agent. The meta-region

@@ -18,16 +18,6 @@ const (
 	resKeyPort = "port"
 )
 
-// tagNoWriteZeroes is the DN5 fail-fast detail of the standing hardware
-// assumption of architecture.md, Side provisioning protocol: a disk whose
-// write_zeroes_max_bytes is 0 would make the kernel
-// fall back to writing zero pages at bulk speed, so a zeroing batch
-// could not finish inside CmdSoftTimeout and side provisioning would crawl in
-// backed-off batches (DN9), if it converged at all. Reporting it on meta_info
-// is what flows into err_epoch → capacity-key removal, taking the unsuitable
-// DN out of allocation.
-const tagNoWriteZeroes = "disk lacks Write Zeroes"
-
 // Reconcile is the SH1 startup pass (DN2): load the local store — while a
 // dn-* file does not load, no side or chunk whose DN is not loaded is loaded
 // or deleted, and while a side-* file does not load, neither is a chunk whose
@@ -642,9 +632,6 @@ func (s *DnAgentServer) ensureDiskMeta(
 		req.GetDnId(), req.GetExtentSize(), s.diskUnmapped); err != nil {
 		return t.Err(resKeyMeta, s.disk, err.Error())
 	}
-	if details, ok := s.checkWriteZeroes(ctx); !ok {
-		return t.Err(resKeyMeta, s.disk, details)
-	}
 	return t.Ok(resKeyMeta, s.disk, s.meta.Describe())
 }
 
@@ -707,31 +694,6 @@ func tableMaps(targets []agent.DmTarget, devNo string) bool {
 		}
 	}
 	return false
-}
-
-// checkWriteZeroes is the DN5 fail-fast
-// (architecture.md, Side provisioning protocol). It returns
-// (tagNoWriteZeroes, false) **only** when the sysfs attribute is present and
-// reads 0. An absent or unreadable attribute is not a verdict — an older
-// kernel simply may not publish it, and failing a healthy DN for that would
-// take it out of allocation for a reason the spec never states (DN5).
-//
-// A failure reports meta_info but never gates converging (DN5): an
-// already-populated DN keeps serving the sides it hosts, and DN5's identity
-// check and its blank-disk format gate (diskUnmapped) stay the only write
-// gates.
-func (s *DnAgentServer) checkWriteZeroes(ctx context.Context) (string, bool) {
-	value, present, err := s.dm.WriteZeroesMaxBytes(ctx, s.disk)
-	if err != nil {
-		slog.WarnContext(ctx, "reading write_zeroes_max_bytes failed",
-			slog.String("disk", s.disk),
-			slog.String("error", err.Error()))
-		return "", true
-	}
-	if !present || value != 0 {
-		return "", true
-	}
-	return tagNoWriteZeroes, false
 }
 
 // ensurePort converges this agent's single nvmet port — s.port.PortId, the

@@ -45,11 +45,10 @@ cleanup, since free agent ports mean something only once a crashed run's agents
 are gone. It loads the kernel modules and mounts configfs, neither of which the
 agent does, then checks each module loaded or built in; the tools, no LVM one
 among them (`architecture.md`, [D13], [D14]); nvmet configfs, md support,
-native multipath and the udev rule the md mask needs; the free space and
-punch-hole support of the work directory's filesystem and the free memory; and,
-once each loop device exists, its Write Zeroes (`dnagent.md` DN5). iptables is
-left to the partition stages, so a VM without it fails in the stage that
-needs it rather than a run that might never reach one.
+native multipath and the udev rule the md mask needs; and the free space and
+punch-hole support of the work directory's filesystem and the free memory.
+iptables is left to the partition stages, so a VM without it fails in the
+stage that needs it rather than a run that might never reach one.
 
 ## Lab facts
 

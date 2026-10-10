@@ -149,9 +149,7 @@ The constants this document relies on, whose values and comments
   `DnZeroBatchMaxBytes` per `blkdiscard --zeroout` command, through the
   side's dm-linear, and persists the count of bytes zeroed from the side's
   start after each success. A bound in bytes keeps a command's length, and
-  so its time under the soft timeout, independent of the extent size. The
-  batch size assumes fast hardware Write Zeroes: a batch should zero inside
-  `CmdSoftTimeout` at the disk's rate split `DnZeroConcurrency` ways. A
+  so its time under the soft timeout, independent of the extent size. A
   failed or timed-out batch is retried no sooner than `DnZeroRetryInterval`
   later — the zeroing twin of `DnMigrConnectRetryInterval`, never a hot
   loop. At most `DnZeroConcurrency` zeroing batches run at once per agent; a
@@ -159,9 +157,11 @@ The constants this document relies on, whose values and comments
   `DnZeroBatchMinBytes`, a success doubles it again up to
   `DnZeroBatchMaxBytes`, and `DnZeroKillBackoff` kills in a row drop the
   side straight to `DnZeroBatchMinBytes` — rate control in the side's
-  goroutine only, never a record of what is zeroed. `DnZeroAlign` is the
-  unit a side's length to zero comes in (DN8's side conf gate), so every
-  batch starts and ends on a logical block of the disk.
+  goroutine only, never a record of what is zeroed. What
+  `DnZeroBatchMinBytes` asks of a disk is in `architecture.md`, Side
+  provisioning protocol. `DnZeroAlign` is the unit a side's length to zero
+  comes in (DN8's side conf gate), so every batch starts and ends on a
+  logical block of the disk.
 * `SuspendSeconds`, the source-cutover grace window of `architecture.md`,
   Migration: a migration source's per-CN dm-linears stay suspended at least
   this long before they are reloaded onto their dm-errors — sooner where an
@@ -1051,26 +1051,6 @@ probe-first (SH16), building `DnInfo` as it goes:
   holds, anyway.
 * `EnsurePort` (SH19: the agent's `--nvmet-port-id` port, default
   `NvmetPortId`, from the `--tr-*` flags + the three fixed ANA groups).
-* **the Write Zeroes fail-fast.** DN9 zeroes with `blkdiscard --zeroout`
-  under the ordinary SH15 timeouts, on the fast-Write-Zeroes assumption of
-  `architecture.md`, Side provisioning protocol, which a kernel that has to
-  emulate Write Zeroes, writing zero pages at bulk speed, does not meet.
-  Resolve the disk's kernel name with `lsblk` (the flag is documented as a
-  by-uuid symlink, whose basename is not a sysfs node) and read the block
-  queue's "write_zeroes_max_bytes" attribute under "/sys/class/block"
-  (`WriteZeroesMaxBytes`). A **present zero** is the verdict: `meta_info`
-  of `RES_STATUS_ERROR` with details "disk lacks Write Zeroes", which flows
-  into the worker's `err_epoch` and the capacity-key removal
-  (`architecture.md`, Live-state reporting and dn / cn roles) and takes
-  the unsuitable DN out of allocation. An absent or unreadable attribute is
-  **not** a verdict — the attribute read reports both as *not present*,
-  silently, and the converge continues (only a failed `lsblk`, an empty
-  kernel name or an unparsable value is logged, as a warning, and the
-  converge continues just the same), because failing every kernel that
-  simply does not publish the attribute would remove healthy DNs for a
-  reason nothing measured. Unlike the identity check this is a **health**
-  signal, never a write gate (DN19): a DN already carrying sides must keep
-  serving them.
 
 DN6. **Removal is a sweep of actual minus desired, never a memory.**
 `side_pointer_list` is authoritative (full sync, `architecture.md`, Common
@@ -2214,12 +2194,11 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   next call re-reads the disk and nothing is handed out or written from
   the old one, and a blank disk is then formatted only as DN5 allows —
   until then every side's lookup finds no record (the `side_dev_info` row
-  below); a read that did not answer changes nothing — **plus the DN5
-  Write-Zeroes check**. The details when OK are `DiskMeta.Describe`'s
-  summary (the table sequence, the side and clone-metadata record counts,
-  the free extents and units, and the count of sides whose zeroing is not
-  done, DN9); on failure the error text instead, "disk lacks Write Zeroes"
-  for the Write Zeroes case.
+  below); a read that did not answer changes nothing. The details when OK
+  are `DiskMeta.Describe`'s summary (the table sequence, the side and
+  clone-metadata record counts, the free extents and units, and the count
+  of sides whose zeroing is not done, DN9); on failure the error text
+  instead.
 * `DnInfo.port_info`, named by the agent's port id as a decimal — so on a
   node running several agents the rows differ: the configfs address
   attributes match the `--tr-*` flags and the three [D4] groups are

@@ -310,7 +310,8 @@ func (d *Dm) BlkDiscardRange(
 // BlkDiscardRange (a metadata-only "mark hydrated" hint) this is a
 // *guaranteed* zero write: discard-reads-zeros is not a hardware guarantee
 // (the kernel dropped discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is
-// optional).
+// optional). It needs no zeroing support in the disk: where the disk has
+// none, the kernel writes the zeros itself.
 //
 // It must never be pointed at the CN clone-metadata arena: that arena is a
 // sparse tmpfs file and --zeroout would materialize it in RAM, which is why
@@ -339,55 +340,6 @@ func (d *Dm) BlkZeroout(
 			cmdError("blkdiscard", args, stdout, stderr, err)
 	}
 	return true, nil
-}
-
-// sysfsBlockDir is where the kernel publishes every block device's queue
-// limits. Unlike /sys/block it covers partitions and dm/nvme namespaces too.
-const sysfsBlockDir = "/sys/class/block"
-
-// WriteZeroesMaxBytes reads
-// /sys/class/block/{kname}/queue/write_zeroes_max_bytes for dev — the DN5
-// fail-fast check behind the fast-Write-Zeroes assumption of architecture.md,
-// Side provisioning protocol. A 0 there means
-// the kernel would fall back to writing zero pages at bulk speed, so the
-// assumption cannot hold and the DN must be taken out of allocation.
-//
-// dev's kernel name is resolved with `lsblk --nodeps --noheadings --output
-// KNAME` first: the agent's --disk is documented as a /dev/disk/by-uuid
-// symlink, whose basename is not a sysfs node (DN5).
-//
-// ok is false when the attribute does not exist — that is NOT a verdict (an
-// older kernel simply may not publish it); only a present 0 is.
-func (d *Dm) WriteZeroesMaxBytes(
-	ctx context.Context,
-	dev string,
-) (value uint64, ok bool, err error) {
-	stdout, stderr, _, err := d.run(ctx, "lsblk",
-		"--nodeps", "--noheadings", "--output", "KNAME", dev)
-	if err != nil {
-		return 0, false, cmdError("lsblk", []string{dev}, stdout, stderr, err)
-	}
-	kname := strings.TrimSpace(stdout)
-	if idx := strings.IndexByte(kname, '\n'); idx >= 0 {
-		kname = strings.TrimSpace(kname[:idx])
-	}
-	if kname == "" {
-		return 0, false, fmt.Errorf("lsblk %s: empty KNAME", dev)
-	}
-	raw, present, err := d.readAttr(ctx,
-		sysfsBlockDir+"/"+kname+"/queue/write_zeroes_max_bytes")
-	if err != nil {
-		return 0, false, err
-	}
-	if !present {
-		return 0, false, nil
-	}
-	parsed, parseErr := strconv.ParseUint(raw, 10, 64)
-	if parseErr != nil {
-		return 0, false, fmt.Errorf(
-			"%s: unparsable write_zeroes_max_bytes %q", dev, raw)
-	}
-	return parsed, true, nil
 }
 
 // ---------------------------------------------------------------------------

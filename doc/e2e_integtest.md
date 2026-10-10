@@ -171,21 +171,17 @@ node, would collide on one kernel (`architecture.md`, NQNs); so those
 placements, a leg repair's included, are asserted guest-distinct only when
 there are more disk-node guests than legs per group, the skip logged otherwise.
 
-E2E5. **Sparse backing files, a Write Zeroes gate, and allocation caps.**
+E2E5. **Sparse backing files and allocation caps.**
 Backing files are created sparse but for the backing pattern, one random
 pattern for the whole run, written before the agent starts at two places of
 the first extent: where a data group's side placed there has its first data
-block, and at the end of the extent. A loop device without Write Zeroes is
-refused before its agent starts and again before the first pool create, which
-also requires every agent's device on record: the dn agent only tags such a
-disk (`dnagent.md` DN5), and side zeroing would write zero pages at bulk speed.
-The gate guards speed, not space, as a loop device allocates what it zeroes
-either way (`dnagent_integtest.md`, Assumptions and preflight checks). A meta
-group's side is zeroed whole and a data group's side only over its first
-blocks (`architecture.md`, Side provisioning protocol), so what a host or md
-writes into a data group's side allocates too. The allocation caps, one per
-backing file and one for the whole run at what the pool's own sides zero plus
-slack, count both and the pattern, and are asserted after every case.
+block, and at the end of the extent. A loop device allocates what it zeroes
+(`dnagent_integtest.md`, Assumptions and preflight checks). A meta group's
+side is zeroed whole and a data group's side only over its first blocks
+(`architecture.md`, Side provisioning protocol), so what a host or md writes
+into a data group's side allocates too. The allocation caps, one per backing
+file and one for the whole run at what the pool's own sides zero plus slack,
+count both and the pattern, and are asserted after every case.
 
 E2E6. **Cleanup runs unconditionally at the start, and only on success at the
 end.** `cleanup_all` runs before anything is built, between cases, at the end
@@ -489,8 +485,7 @@ installed, both its units known to systemd, as a 1.x one would fail later and
 silently, never connecting, nvme-stas being a package the suite never
 installs; and that the control-plane guest has its tools, its ports free and
 the free-space floor the space guard holds it to, and needs no sudo: the
-closing trim is the one root command tried there and may be refused. The loop
-devices are checked once the agents have made them (E2E5).
+closing trim is the one root command tried there and may be refused.
 The tool check covers only the sweeps after it: the start sweep runs before it
 and a cleanup-only run skips it, so on a guest missing mdadm or udevadm their
 md stop can silently leave dnv arrays standing.
