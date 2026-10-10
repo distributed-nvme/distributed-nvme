@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -91,11 +92,12 @@ func captureLogs(t *testing.T) *logCapture {
 
 // assertRefusalRecord is the one Error record
 // architecture.md, Common validation, asks for: msg
-// msgInvalidStoredConf carrying the validator's own text and the ids that
-// name what an operator has to go look at.
+// msgInvalidStoredConf carrying the validator's own text, wantErr, and the
+// ids that name what an operator has to go look at.
 func assertRefusalRecord(
 	t *testing.T,
 	capture *logCapture,
+	wantErr string,
 	wantKeys ...string,
 ) {
 	t.Helper()
@@ -104,8 +106,8 @@ func assertRefusalRecord(
 		t.Fatalf("%d %q records, want 1", len(recs), msgInvalidStoredConf)
 	}
 	rec := recs[0]
-	if rec["error"] != msgNoExtentSize {
-		t.Errorf("record error %v, want %q", rec["error"], msgNoExtentSize)
+	if rec["error"] != wantErr {
+		t.Errorf("record error %v, want %q", rec["error"], wantErr)
 	}
 	if rec["level"] != "ERROR" {
 		t.Errorf("record level %v, want ERROR", rec["level"])
@@ -216,7 +218,7 @@ func TestSyncupDnRefusesAZeroExtentSize(t *testing.T) {
 		t.Errorf("the refused request became desired state: revision %d, "+
 			"extent_size %d", req.GetRevision(), req.GetExtentSize())
 	}
-	assertRefusalRecord(t, capture, "cluster_id", "dn_id")
+	assertRefusalRecord(t, capture, msgNoExtentSize, "cluster_id", "dn_id")
 }
 
 // TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown is the startup
@@ -291,7 +293,7 @@ func TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown(
 		t.Errorf("the side state was dropped by a conf refusal")
 	}
 	// Exactly one record, from convergeDn — not one per loop that notices.
-	assertRefusalRecord(t, capture, "cluster_id", "dn_id")
+	assertRefusalRecord(t, capture, msgNoExtentSize, "cluster_id", "dn_id")
 	if _, ok := node.protos[nf.LocalDnPath(testCluster, testDn)]; !ok {
 		t.Errorf("the refused dn state file was removed")
 	}
@@ -329,6 +331,516 @@ func TestSyncupDnAcceptsAConcreteExtentSize(t *testing.T) {
 		t.Errorf("persisted extent_size %d, want %d", stored.GetExtentSize(),
 			testExtentSize)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// A side's length to zero the sp worker cannot have derived is refused (DN8)
+// ---------------------------------------------------------------------------
+//
+// side_conf.zero_bytes is the length to zero the sp worker derives from the
+// side's stored group and the pool's block size, so a length of zero, one
+// that is no whole multiple of common.DnZeroAlign, or one longer than the
+// side can only come from a bad stored conf. The side conf gate refuses it
+// the way DN4 refuses a zero extent size: after the revision gate and before
+// the request becomes desired state, with the refusal code, the stored
+// revision and one Error record; and a stored file that carries one is
+// loaded and refused inside the converge, never skipped. Unlike DN4's, this
+// rule copies none of model's: the texts are asserted here only.
+
+const msgZeroBytesZero = "invalid stored conf: side_conf.zero_bytes is zero"
+
+// TestValidateZeroBytes pins each refusal text, the boundaries that pass, and
+// the cases where the length bound has nothing to measure against: an extent
+// size that is itself unusable (the DN's own refusal reports it) and a side
+// whose byte size overflows, which no length can exceed.
+func TestValidateZeroBytes(t *testing.T) {
+	const side = testExtCnt * testExtentSize
+	for _, tc := range []struct {
+		name       string
+		zeroBytes  uint64
+		extCnt     uint64
+		extentSize uint64
+		want       string
+	}{
+		{"zero", 0, testExtCnt, testExtentSize, msgZeroBytesZero},
+		{"half a unit", 2048, testExtCnt, testExtentSize,
+			"invalid stored conf: side_conf.zero_bytes 2048 is not a " +
+				"multiple of 4096"},
+		{"one byte past a unit", 4097, testExtCnt, testExtentSize,
+			"invalid stored conf: side_conf.zero_bytes 4097 is not a " +
+				"multiple of 4096"},
+		{"one unit past the side", side + 4096, testExtCnt, testExtentSize,
+			fmt.Sprintf("invalid stored conf: side_conf.zero_bytes %d "+
+				"exceeds the side's %d bytes", side+4096, side)},
+		{"one unit", 4096, testExtCnt, testExtentSize, ""},
+		{"a data group's length", testDataZeroBytes, testExtCnt,
+			testExtentSize, ""},
+		{"the whole side", side, testExtCnt, testExtentSize, ""},
+		{"no extent size", side + 4096, testExtCnt, 0, ""},
+		{"zero, no extent size", 0, testExtCnt, 0, msgZeroBytesZero},
+		{"an overflowing side", 1 << 62, 1 << 40, 1 << 30, ""},
+		{"no extents", 4096, 0, testExtentSize,
+			"invalid stored conf: side_conf.zero_bytes 4096 exceeds the " +
+				"side's 0 bytes"},
+	} {
+		err := validateZeroBytes(&pb.SyncupSideRequest_SideConf{
+			ExtCnt: tc.extCnt, ZeroBytes: tc.zeroBytes,
+		}, tc.extentSize)
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: refused: %v", tc.name, err)
+		case tc.want != "" && (err == nil || err.Error() != tc.want):
+			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// zeroBytesRefusals holds one length to zero per refusal text of the side
+// conf gate (DN8), for a side of sideReq's size, each with its text. Only the
+// last refusal depends on the extent size the gate is handed, so it is the
+// case that fails when a call site hands the gate an unusable one.
+var zeroBytesRefusals = []struct {
+	name      string
+	zeroBytes uint64
+	want      string
+}{
+	{"zero", 0, msgZeroBytesZero},
+	{"not a multiple of the unit", testZeroBytes - common.DnZeroAlign/2,
+		fmt.Sprintf("invalid stored conf: side_conf.zero_bytes %d is not "+
+			"a multiple of %d", testZeroBytes-common.DnZeroAlign/2,
+			common.DnZeroAlign)},
+	{"longer than the side", testZeroBytes + common.DnZeroAlign,
+		fmt.Sprintf("invalid stored conf: side_conf.zero_bytes %d exceeds "+
+			"the side's %d bytes", testZeroBytes+common.DnZeroAlign,
+			testZeroBytes)},
+}
+
+// TestSyncupSideRefusesAnInvalidZeroBytes drives the gate from the RPC
+// entrance: a side converged at revision 2, then a revision-3 request whose
+// length to zero the gate refuses. Nothing runs on the node, nothing is
+// stored, and the side keeps revision 2's request.
+func TestSyncupSideRefusesAnInvalidZeroBytes(t *testing.T) {
+	for _, tc := range zeroBytesRefusals {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 2, testSide)
+			waitZeroed(t, srv, testSide)
+			imageBefore := diskImage(node, testDisk)
+			path := srv.nf.LocalSidePath(
+				testCluster, testDn, testSp, testSide)
+			node.mu.Lock()
+			storedBefore := append([]byte(nil), node.protos[path]...)
+			node.mu.Unlock()
+			capture := captureLogs(t)
+			node.Reset()
+
+			req := sideReq(3, testSide, testCn0, []uint64{testCn1},
+				pb.SpLevel_SP_LEVEL_READWRITE)
+			req.SideConf.ZeroBytes = tc.zeroBytes
+			reply, err := srv.SyncupSide(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+
+			// The reply: the refusal code, the validator's own text, and the
+			// STORED revision — the request's 3 was never accepted.
+			if got := reply.GetAgentReply().GetCode(); got !=
+				common.ReplyCodeInvalidConf {
+				t.Fatalf("code %d, want %d", got, common.ReplyCodeInvalidConf)
+			}
+			if got := reply.GetAgentReply().GetDetails(); got != tc.want {
+				t.Errorf("details %q, want %q", got, tc.want)
+			}
+			if reply.GetRevision() != 2 {
+				t.Errorf("reply revision %d, want the stored 2",
+					reply.GetRevision())
+			}
+			if reply.GetSideInfo() != nil {
+				t.Errorf("a refused request reported converge info")
+			}
+			// The node: nothing ran at all, not even a probe.
+			if calls := node.Calls(); len(calls) != 0 {
+				t.Errorf("a refused SyncupSide touched the node:\n%s",
+					strings.Join(calls, "\n"))
+			}
+			if got := diskImage(node, testDisk); got != imageBefore {
+				t.Errorf("the disk image changed")
+			}
+			// The agent and its store: revision 2's request is still the
+			// desired state, and nothing was persisted for the next
+			// Reconcile to converge.
+			node.mu.Lock()
+			storedAfter := node.protos[path]
+			node.mu.Unlock()
+			if !bytes.Equal(storedAfter, storedBefore) {
+				t.Errorf("the side state file was rewritten")
+			}
+			st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+			if st == nil {
+				t.Fatalf("the side state vanished")
+			}
+			if held := st.req.Load(); held.GetRevision() != 2 ||
+				held.GetSideConf().GetZeroBytes() != testZeroBytes {
+				t.Errorf("the refused request became desired state: "+
+					"revision %d, zero_bytes %d", held.GetRevision(),
+					held.GetSideConf().GetZeroBytes())
+			}
+			assertRefusalRecord(t, capture, tc.want,
+				"cluster_id", "dn_id", "sp_id", "side_id")
+		})
+	}
+
+	// A side the agent has never held is refused the same way, and the
+	// refusal creates nothing for it: no state, no file, and the revision it
+	// echoes is the zero it holds.
+	t.Run("a side never held", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		capture := captureLogs(t)
+		node.Reset()
+		req := unprovisionedSideReq(1, testSide, testCn0, nil,
+			pb.SpLevel_SP_LEVEL_READWRITE)
+		req.SideConf.ZeroBytes = 0
+		reply, err := srv.SyncupSide(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if got := reply.GetAgentReply(); got.GetCode() !=
+			common.ReplyCodeInvalidConf ||
+			got.GetDetails() != msgZeroBytesZero {
+			t.Errorf("reply %v, want code %d with %q", got,
+				common.ReplyCodeInvalidConf, msgZeroBytesZero)
+		}
+		if reply.GetRevision() != 0 {
+			t.Errorf("reply revision %d, want 0", reply.GetRevision())
+		}
+		if srv.getSide(sideKey(testCluster, testDn, testSp, testSide)) != nil {
+			t.Error("a refused request created side state")
+		}
+		path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide)
+		node.mu.Lock()
+		_, stored := node.protos[path]
+		node.mu.Unlock()
+		if stored {
+			t.Error("a refused request was persisted")
+		}
+		if calls := node.Calls(); len(calls) != 0 {
+			t.Errorf("a refused SyncupSide touched the node:\n%s",
+				strings.Join(calls, "\n"))
+		}
+		assertRefusalRecord(t, capture, msgZeroBytesZero,
+			"cluster_id", "dn_id", "sp_id", "side_id")
+	})
+
+	// The revision gate runs before the side conf gate (DN8): a request
+	// older than the one the side holds is answered as stale whatever its
+	// length to zero, and the side conf gate writes no record for it.
+	t.Run("a stale revision", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		syncupBoth(t, srv, 2, testSide)
+		capture := captureLogs(t)
+		node.Reset()
+		req := sideReq(1, testSide, testCn0, []uint64{testCn1},
+			pb.SpLevel_SP_LEVEL_READWRITE)
+		req.SideConf.ZeroBytes = 0
+		reply, err := srv.SyncupSide(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if got := reply.GetAgentReply(); got.GetCode() !=
+			common.ReplyCodeStaleRevision {
+			t.Errorf("reply %v, want code %d", got,
+				common.ReplyCodeStaleRevision)
+		}
+		if reply.GetRevision() != 2 {
+			t.Errorf("reply revision %d, want the stored 2",
+				reply.GetRevision())
+		}
+		if recs := capture.msgRecords(t, msgInvalidStoredConf); len(recs) !=
+			0 {
+			t.Errorf("a stale request wrote %d %q records", len(recs),
+				msgInvalidStoredConf)
+		}
+		if calls := node.Calls(); len(calls) != 0 {
+			t.Errorf("a stale SyncupSide touched the node:\n%s",
+				strings.Join(calls, "\n"))
+		}
+	})
+}
+
+// The accept side of the same gate, so the refusal above cannot pass by
+// refusing everything: one DnZeroAlign unit, a data group's length and the
+// whole side — the boundary — are each accepted, converged and written into
+// the side's record.
+func TestSyncupSideAcceptsAValidZeroBytes(t *testing.T) {
+	for _, zeroBytes := range []uint64{
+		common.DnZeroAlign, testDataZeroBytes, testZeroBytes,
+	} {
+		t.Run(fmt.Sprint(zeroBytes), func(t *testing.T) {
+			srv, _ := newTestServer(t)
+			ctx := context.Background()
+			if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			req := unprovisionedSideReq(1, testSide, testCn0, nil,
+				pb.SpLevel_SP_LEVEL_READWRITE)
+			req.SideConf.ZeroBytes = zeroBytes
+			reply, err := srv.SyncupSide(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if got := reply.GetAgentReply(); got.GetCode() != 0 ||
+				reply.GetRevision() != 1 {
+				t.Fatalf("a valid length was refused: %v at revision %d",
+					got, reply.GetRevision())
+			}
+			waitZeroed(t, srv, testSide)
+			rec, ok, err := srv.meta.LookupSide(ctx, testSp, testSide)
+			if err != nil || !ok {
+				t.Fatalf("no record: %v %v", ok, err)
+			}
+			if sideZeroBytes(rec) != zeroBytes {
+				t.Errorf("record zero_bytes %d, want %d", sideZeroBytes(rec),
+					zeroBytes)
+			}
+		})
+	}
+}
+
+// TestReconcileRefusesAStoredInvalidZeroBytes is the startup half of the side
+// conf gate (DN8; architecture.md, Common agent rules), once per refusal
+// text. A side file whose length to zero the gate refuses — one no accepted
+// request could have left — is LOADED, and convergeSide refuses it before
+// its sweep, so the converge builds and sweeps nothing: the side keeps its
+// state, its file and every device it built. The stored request leaves
+// testCn1 off the standby list, so a sweep run from it would remove
+// testCn1's stack; the same request at a valid length is accepted at the end
+// and does remove it, which shows that the restart keeps the stack only by
+// refusing. The read-only round refuses the request too: it reports an empty
+// SideInfo and names no leftover.
+func TestReconcileRefusesAStoredInvalidZeroBytes(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sidePath := nf.LocalSidePath(testCluster, testDn, testSp, testSide)
+	objs := objectsOf(sidePtr(testSide))
+	for _, tc := range zeroBytesRefusals {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			objs.assertAllPresent(t, node)
+			stopTestServer(t, srv)
+
+			narrower := sideReq(1, testSide, testCn0, nil,
+				pb.SpLevel_SP_LEVEL_READWRITE)
+			narrower.SideConf.ZeroBytes = tc.zeroBytes
+			if err := node.writeProto(ctx, sidePath, narrower); err != nil {
+				t.Fatalf("seeding the side state file: %v", err)
+			}
+			node.mu.Lock()
+			seeded := append([]byte(nil), node.protos[sidePath]...)
+			node.mu.Unlock()
+			node.Reset()
+			capture := captureLogs(t)
+
+			restarted := startTestServer(t, node)
+
+			st := restarted.getSide(
+				sideKey(testCluster, testDn, testSp, testSide))
+			if st == nil {
+				t.Fatal("the side state was dropped by a conf refusal")
+			}
+			if got := st.req.Load().GetSideConf().GetZeroBytes(); got !=
+				tc.zeroBytes {
+				t.Errorf("zero_bytes %d, want the stored %d kept as read",
+					got, tc.zeroBytes)
+			}
+			if mutations := node.Mutations(); len(mutations) != 0 {
+				t.Fatalf("a refused side state file still mutated the "+
+					"node:\n%s", strings.Join(mutations, "\n"))
+			}
+			node.mu.Lock()
+			kept := node.protos[sidePath]
+			node.mu.Unlock()
+			if !bytes.Equal(kept, seeded) {
+				t.Error("the refused side state file was removed or " +
+					"rewritten")
+			}
+			// testCn1's stack included, which the stored request does not
+			// want.
+			objs.assertAllKept(t, node)
+			// Exactly one record, from convergeSide.
+			assertRefusalRecord(t, capture, tc.want,
+				"cluster_id", "dn_id", "sp_id", "side_id")
+
+			// The read-only round: no verdict and nothing provable to
+			// report.
+			node.Reset()
+			round, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+				ClusterId: testCluster, DnId: testDn,
+				SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
+			}, nil)
+			if got := round.GetAgentReply(); got.GetCode() != 0 {
+				t.Errorf("CheckSide of a refused side = %v, want no verdict",
+					got)
+			}
+			if info := round.GetSideInfo(); !proto.Equal(
+				info, &pb.SideInfo{}) {
+				t.Errorf("CheckSide of a refused side reported %v", info)
+			}
+			if mutations := node.Mutations(); len(mutations) != 0 {
+				t.Errorf("a check round mutated the node:\n%s",
+					strings.Join(mutations, "\n"))
+			}
+
+			// The same request at a valid length is accepted: the side
+			// comes back from its record, zeroing nothing, and the converge
+			// removes testCn1's stack.
+			node.Reset()
+			reply, err := restarted.SyncupSide(ctx, sideReq(2, testSide,
+				testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if got := reply.GetAgentReply(); got.GetCode() != 0 {
+				t.Fatalf("the re-sent request was refused: %v", got)
+			}
+			if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Errorf("side_dev after the re-send = %v/%q, want OK",
+					got.GetStatus(), got.GetDetails())
+			}
+			if calls := node.callsMatching("blkdiscard"); len(calls) != 0 {
+				t.Errorf("the re-sent request zeroed the side again: %v",
+					calls)
+			}
+			if dmPresent(node, nf.DnLinearName(testCluster, testDn, testSp,
+				testSide, testCn1)) || subsysPresent(node, nf.SideToCnNqn(
+				testCluster, testSp, testLeg, testCn1)) {
+				t.Error("an accepted request without testCn1 kept its " +
+					"stack, so the restart above shows nothing")
+			}
+		})
+	}
+}
+
+// TestAStoredInvalidZeroBytesHasNoVerdict: a refused side converges nothing,
+// so the restart starts no zeroing for it even though its record still has
+// bytes to zero, and its verdict does not name the zeroing nothing runs —
+// re-driving a SyncupSide over a stored request the gate refuses would only
+// be refused again (DN8, DN16). The worker's next request carries a valid
+// length, and zeroing resumes at the stored count.
+func TestAStoredInvalidZeroBytesHasNoVerdict(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	batches := zerooutBatches(nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide)), testZeroBytes)
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// The first batch lands and the second fails until the process stops.
+	setFailAlways(node, batches[1], "stalled")
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide,
+		testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		rec, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide)
+		return ok && sideZeroedBytes(rec) == testZeroBatchMax
+	}) {
+		t.Fatal("the first batch never landed")
+	}
+	stopTestServer(t, srv)
+	clearFailAlways(node, batches[1])
+
+	bad := unprovisionedSideReq(1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	bad.SideConf.ZeroBytes = 0
+	if err := node.writeProto(ctx, nf.LocalSidePath(
+		testCluster, testDn, testSp, testSide), bad); err != nil {
+		t.Fatalf("seeding the side state file: %v", err)
+	}
+	node.Reset()
+
+	restarted := startTestServer(t, node)
+
+	if restarted.getSide(sideKey(testCluster, testDn, testSp, testSide)) ==
+		nil {
+		t.Fatal("the side state was dropped by a conf refusal")
+	}
+	if calls := node.callsMatching("blkdiscard"); len(calls) != 0 {
+		t.Errorf("a refused side was zeroed: %v", calls)
+	}
+	round, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn,
+		SidePointer: sidePtr(testSide), Revision: 1,
+	}, nil)
+	if got := round.GetAgentReply(); got.GetCode() != 0 {
+		t.Errorf("CheckSide of a refused side = %v, want no verdict", got)
+	}
+
+	node.Reset()
+	reply, err := restarted.SyncupSide(ctx, unprovisionedSideReq(2, testSide,
+		testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := reply.GetAgentReply(); got.GetCode() != 0 {
+		t.Fatalf("the re-sent request was refused: %v", got)
+	}
+	waitZeroed(t, restarted, testSide)
+	assertZeroouts(t, node, batches[1:])
+}
+
+// TestAStoredInvalidZeroBytesAllocatesNothing: with no record behind the
+// side, the converge refusal is all that keeps a length that is no multiple
+// of common.DnZeroAlign off the disk, because AllocSide's own length checks
+// refuse only a length of zero or one longer than the side. A restart over
+// such a side file allocates no record, builds no side device and starts no
+// zeroing.
+func TestAStoredInvalidZeroBytesAllocatesNothing(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	stopTestServer(t, srv)
+
+	zeroBytes := testDataZeroBytes + common.DnZeroAlign/2
+	bad := unprovisionedSideReq(1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	bad.SideConf.ZeroBytes = zeroBytes
+	if err := node.writeProto(ctx, nf.LocalSidePath(
+		testCluster, testDn, testSp, testSide), bad); err != nil {
+		t.Fatalf("seeding the side state file: %v", err)
+	}
+	node.Reset()
+	capture := captureLogs(t)
+
+	restarted := startTestServer(t, node)
+
+	if restarted.getSide(sideKey(testCluster, testDn, testSp, testSide)) ==
+		nil {
+		t.Fatal("the side state was dropped by a conf refusal")
+	}
+	if mutations := node.Mutations(); len(mutations) != 0 {
+		t.Fatalf("a refused side state file mutated the node:\n%s",
+			strings.Join(mutations, "\n"))
+	}
+	if _, ok, err := restarted.meta.LookupSide(
+		ctx, testSp, testSide); err != nil || ok {
+		t.Errorf("a refused side state file left a record: %v %v", ok, err)
+	}
+	assertRefusalRecord(t, capture, fmt.Sprintf(
+		"invalid stored conf: side_conf.zero_bytes %d is not a multiple "+
+			"of %d", zeroBytes, common.DnZeroAlign),
+		"cluster_id", "dn_id", "sp_id", "side_id")
 }
 
 // ---------------------------------------------------------------------------

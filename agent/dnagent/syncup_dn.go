@@ -21,7 +21,7 @@ const (
 // tagNoWriteZeroes is the DN5 fail-fast detail of the standing hardware
 // assumption of architecture.md, Side provisioning protocol: a disk whose
 // write_zeroes_max_bytes is 0 would make the kernel
-// fall back to writing zero pages at bulk speed, so a DnZeroBatchExtCnt batch
+// fall back to writing zero pages at bulk speed, so a zeroing batch
 // could not finish inside CmdSoftTimeout and side provisioning would crawl in
 // backed-off batches (DN9), if it converged at all. Reporting it on meta_info
 // is what flows into err_epoch → capacity-key removal, taking the unsuitable
@@ -115,7 +115,11 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// known limit, and so is a side this loop never gets here with — its
 		// file missing or unreadable, or skipped above with its dn file — or
 		// one the pointer-absent branch below drops, mark and all, for want
-		// of a loaded DN. Nothing adopts its fence later (beginFence).
+		// of a loaded DN. Nothing adopts its fence later (beginFence). Nor
+		// does DN12 retire it at once when a conf gate refuses the side's
+		// stored request (DN8's side conf gate) or its DN's (an unusable
+		// extent size: the side converge loop below skips every side of that
+		// DN); dnagent.md, Known limits, says how long it stays suspended.
 		s.adoptFence(ctx, st)
 		s.putSide(key, st)
 	}
@@ -651,13 +655,13 @@ func (s *DnAgentServer) ensureDiskMeta(
 // on the disk itself. A header can go blank under live side devices (one
 // mistaken `dd` over its first 4 KiB is enough), and formatting it then would
 // write a fresh, empty table whose next allocation hands their extents to
-// another side, which zeroes them and serves them as its own. A listing or a
-// table read that did not answer refuses too: it proves nothing about what
-// maps the disk. The refusal is the meta row's error, and the disk stays
-// blank until every such device is gone — this dn's sweep removes its own
-// once nothing wants them; a device of another cluster or dn stays until an
-// operator removes it — after which a converge whose reads all answer formats
-// it.
+// another side, which zeroes its length to zero over them and serves them as
+// its own. A listing or a table read that did not answer refuses too: it
+// proves nothing about what maps the disk. The refusal is the meta row's
+// error, and the disk stays blank until every such device is gone — this
+// dn's sweep removes its own once nothing wants them; a device of another
+// cluster or dn stays until an operator removes it — after which a converge
+// whose reads all answer formats it.
 func (s *DnAgentServer) diskUnmapped(ctx context.Context) error {
 	const refusing = "blank disk header; refusing to format"
 	devNo, err := s.dm.DevNo(ctx, s.disk)

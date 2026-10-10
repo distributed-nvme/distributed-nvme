@@ -3,6 +3,7 @@ package dnagent
 import (
 	"fmt"
 	"sort"
+	"strconv"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -21,21 +22,23 @@ const (
 	resKeyMigrDstClone  = "migr_dst_clone"
 )
 
-// details strings of dnagent.md DN9. The bits
+// details strings of dnagent.md DN9. The counts
 // themselves live in the side's on-disk allocation record ([D13]); these are
 // only what a side reports about them.
 const (
 	// zeroingDetailsFmt is the RES_STATUS_PROVISIONING progress detail: k of
-	// n logical extents zeroed. PROVISIONING means healthy / not ready / no
-	// action, and never feeds err_epoch.
-	zeroingDetailsFmt = "zeroing %d/%d"
+	// the side's n MiB to zero are zeroed, each rendered by mibText.
+	// PROVISIONING means healthy / not ready / no action, and never feeds
+	// err_epoch.
+	zeroingDetailsFmt = "zeroing %s/%s MiB"
 	// tagNotZeroed is the RES_STATUS_ERROR detail for a request that claims
-	// provisioned = true over a side whose bits are incomplete: the agent
-	// trusts its own bits over the flag and refuses the exports.
+	// provisioned = true over a side whose zeroed count is short of its
+	// length to zero: the agent trusts its own count over the flag and
+	// refuses the exports.
 	tagNotZeroed = "not zeroed"
 	// tagRecordMissing is the RES_STATUS_ERROR detail for provisioned = true
 	// with no allocation record: the data is gone (lost or foreign disk), and
-	// re-allocating would present a zeroed impostor as the data-bearing leg.
+	// re-allocating would present a fresh impostor as the data-bearing leg.
 	tagRecordMissing = "record missing"
 	// tagProvisioningWait is what the rows above the side device report while
 	// the side itself is still provisioning: one cause is reported once, on
@@ -43,6 +46,22 @@ const (
 	// per-CN stack.
 	tagProvisioningWait = "side provisioning"
 )
+
+// zeroingDetails renders zeroingDetailsFmt: zeroed of zero bytes, k first, so
+// an operator never reads a side that has zeroed little as nearly done. The
+// converge, the probe and the side verdict all report through it.
+func zeroingDetails(zeroed uint64, zero uint64) string {
+	return fmt.Sprintf(zeroingDetailsFmt, mibText(zeroed), mibText(zero))
+}
+
+// mibText is a byte count in MiB as the shortest exact decimal: "3", "64",
+// "0.0625", "24.99609375". A length to zero is a whole multiple of
+// common.DnZeroAlign, so the fraction never runs past eight digits, and a
+// length below one MiB — a data side's at a small block size — never reads
+// as zero of zero.
+func mibText(b uint64) string {
+	return strconv.FormatFloat(float64(b)/(1<<20), 'f', -1, 64)
+}
 
 // nsModel is the attr_model every DN side export presents (architecture.md,
 // Disk node).
@@ -71,7 +90,7 @@ type sidePlan struct {
 
 	// provisioned is side_conf.provisioned: the CP's gate on exporting this
 	// side. It is a gate, never evidence — the agent always trusts its own
-	// zeroed_bits over the flag, because the disk is authoritative ([D13]).
+	// zeroed count over the flag, because the disk is authoritative ([D13]).
 	provisioned bool
 	// migrSrcRaw is migr_src_conf exactly as received, and migrSrcDeferred
 	// says the destination has not provisioned yet. In that case migrSrc above

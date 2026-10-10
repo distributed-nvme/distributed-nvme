@@ -119,8 +119,8 @@ func spareDeleteCmd() *cobra.Command {
 // Naming both sides explicitly rather than inferring the direction is what
 // lets a caller assert the reply's curr_active_leg_id / curr_spare_leg_id pair
 // afterwards. The gateway refuses a spare whose side is not yet `provisioned`
-// (an unzeroed spare must never become an md member); dnvctl forwards the
-// request and lets that FAILED_PRECONDITION answer (CT8).
+// (architecture.md, Spare legs); dnvctl forwards the request and lets that
+// FAILED_PRECONDITION answer (CT8).
 func spareSwitchCmd() *cobra.Command {
 	cmd := leaf(
 		"switch",

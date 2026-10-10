@@ -4675,11 +4675,11 @@ func TestDeleteSpareLegNeverTouchesAnActiveLeg(t *testing.T) {
 }
 
 // TestSwitchSpareLegRefusesAnUnprovisionedSpare pins the precondition of
-// architecture.md, Side provisioning protocol, the
-// one a caller meets in practice: a side that has not finished zeroing would
-// put an unwritten member into the md array, so the switch is
-// FAILED_PRECONDITION until the sp-worker has flipped `provisioned` — and it
-// leaves the group exactly as it was.
+// architecture.md, Spare legs, the one a caller meets in practice: a spare
+// whose side has not finished zeroing (architecture.md, Side provisioning
+// protocol) never becomes an md member, so the switch is FAILED_PRECONDITION
+// until the sp-worker has flipped `provisioned` — and it leaves the group
+// exactly as it was.
 func TestSwitchSpareLegRefusesAnUnprovisionedSpare(t *testing.T) {
 	env := newVolEnv(t)
 	legId := volCreateSpareLeg(env)

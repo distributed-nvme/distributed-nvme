@@ -299,6 +299,75 @@ func GroupBlocks(
 	return metaBlocks, totalBlocks - metaBlocks, nil
 }
 
+// SideZeroBytes is the length to zero of every side of grp: the bytes from a
+// side's start that its dn agent zeroes before the side may be provisioned
+// (architecture.md, Side provisioning protocol). isMeta says which of its
+// slice's two lists holds grp, and blockSize is the pool's stored data block
+// size (PoolBlockSize).
+//
+//	meta group: (meta_blocks + data_blocks) × block_size
+//	data group: (meta_blocks + 1) × block_size
+//
+// A side of a meta group holds the thin pool's metadata, which dm-thin formats
+// fresh only when its first block reads zero, so the side is zeroed over all
+// the leg addresses (architecture.md, Group on-leg layout: meta region, data
+// region, health block). A side of a data group is zeroed over its meta
+// region, where a stale md superblock would be found, and over the first
+// block of its data region, which is the first block of the md array or,
+// without md-raid1, of the group device, and for the first group of a
+// slice's data list also the first block of the pool's data device; the rest
+// of it is never zeroed. No extent size enters: a leg ends where its block
+// counts end.
+//
+// Like GroupBlocks it resolves nothing (architecture.md, Common validation):
+// both counts are the group's STORED ones, never recomputed, and every input
+// is concrete since the op that made the group or the pool wrote it. So a
+// zero count or block size, a length that overflows, or one that is not a
+// whole multiple of common.DnZeroAlign — which the dn agent's side conf gate
+// refuses (dnagent.md DN8) — is an error, never a length of zero: an
+// invalidConf, the error the sp worker refuses a fan-out and a reaction pass
+// with (dnv-worker.md RW14, AR1).
+func SideZeroBytes(
+	grp *pb.Group,
+	isMeta bool,
+	blockSize uint64,
+) (uint64, error) {
+	grpId := grp.GetGrpId()
+	if blockSize == 0 {
+		return 0, invalidConf("bdev_conf.dm_pool_conf.data_block_size is zero")
+	}
+	metaBlocks := grp.GetMetaBlocks()
+	if metaBlocks == 0 {
+		return 0, invalidConf("group %d meta_blocks is zero", grpId)
+	}
+	dataBlocks := grp.GetDataBlocks()
+	if dataBlocks == 0 {
+		return 0, invalidConf("group %d data_blocks is zero", grpId)
+	}
+	// The data region's share: all of it for a meta side, its first block
+	// for a data side.
+	dataShare := uint64(1)
+	if isMeta {
+		dataShare = dataBlocks
+	}
+	if metaBlocks > math.MaxUint64-dataShare ||
+		metaBlocks+dataShare > math.MaxUint64/blockSize {
+		return 0, invalidConf(
+			"group %d meta_blocks %d and data_blocks %d overflow "+
+				"the length to zero at data_block_size %d",
+			grpId, metaBlocks, dataBlocks, blockSize,
+		)
+	}
+	zeroBytes := (metaBlocks + dataShare) * blockSize
+	if zeroBytes%common.DnZeroAlign != 0 {
+		return 0, invalidConf(
+			"group %d length to zero %d is not a multiple of %d",
+			grpId, zeroBytes, common.DnZeroAlign,
+		)
+	}
+	return zeroBytes, nil
+}
+
 // MetaLadderExtCnt is the meta ladder of architecture.md, GrowSlice: the
 // ext_cnt of the meta group a
 // meta GrowSlice would append to a slice whose meta groups currently total

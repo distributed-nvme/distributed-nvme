@@ -172,13 +172,20 @@ placements, a leg repair's included, are asserted guest-distinct only when
 there are more disk-node guests than legs per group, the skip logged otherwise.
 
 E2E5. **Sparse backing files, a Write Zeroes gate, and allocation caps.**
-Backing files are created sparse. A loop device without Write Zeroes is refused
-before its agent starts and again before the first pool create, which also
-requires every agent's device on record: the dn agent only tags such a disk
-(`dnagent.md` DN5), and side zeroing would write zero pages at bulk speed. The
-gate guards speed, not space, as a loop device allocates what it zeroes either
-way (`dnagent_integtest.md`, Assumptions and preflight checks). The allocation
-caps are asserted after every case.
+Backing files are created sparse but for the backing pattern, one random
+pattern for the whole run, written before the agent starts at two places of
+the first extent: where a data group's side placed there has its first data
+block, and at the end of the extent. A loop device without Write Zeroes is
+refused before its agent starts and again before the first pool create, which
+also requires every agent's device on record: the dn agent only tags such a
+disk (`dnagent.md` DN5), and side zeroing would write zero pages at bulk speed.
+The gate guards speed, not space, as a loop device allocates what it zeroes
+either way (`dnagent_integtest.md`, Assumptions and preflight checks). A meta
+group's side is zeroed whole and a data group's side only over its first
+blocks (`architecture.md`, Side provisioning protocol), so what a host or md
+writes into a data group's side allocates too. The allocation caps, one per
+backing file and one for the whole run at what the pool's own sides zero plus
+slack, count both and the pattern, and are asserted after every case.
 
 E2E6. **Cleanup runs unconditionally at the start, and only on success at the
 end.** `cleanup_all` runs before anything is built, between cases, at the end
@@ -271,7 +278,9 @@ hand-copy; `MaxAllocLegPerGrp`, cross-checked against the leg count;
 stores, from which the cutoff set's primary threshold is derived and against
 which every set's primary threshold is checked; and `DefaultPrimaryUnhealthy`
 and `DemotionHoldTimeout`, which the run only prints, the second beside the
-cutoff case's timings.
+cutoff case's timings. The meta region of the create's data groups, which the
+tree computes rather than names, is mirrored the same way and checked against
+the stored pool once it is created.
 
 ## The cases
 
@@ -299,8 +308,17 @@ reported; a thin device with its raid0 (`dnv-worker.md` RW19; `cnagent.md`
 CN15); and a namespace over it, under a subsystem admitting both hosts, that
 host0 reaches through the cdc, the export gate and the connect verdict and
 sees optimized through the primary and inaccessible through the standby
-(`cnagent.md` CN16). The random pattern written through it gives the digest
-every later step compares.
+(`cnagent.md` CN16). Before any host writes to the pool, host0 reads the thin
+device whole as zeros, which dm-thin returns for every block no host has
+written (`architecture.md` [D15]), while each side read through its device on
+its disk node shows how far its zeroing went: a data group's side reads zero
+at its first data block and still holds the backing pattern at the end of its
+extent, and a meta group's side reads zero there (`architecture.md`, Side
+provisioning protocol; `dnagent.md` DN9). After a build whose reactions
+changed its legs, which leaves a spare leg or a side count other than the
+create's, a leg's side may not be the one the create placed over the pattern,
+so the disk-node half is skipped and logged. The random pattern written
+through the namespace then gives the digest every later step compares.
 
 **smoke** has setup as its subject: the widest pool comes up whole, and
 deleting it gives every extent back and leaves nothing behind, the two
@@ -340,9 +358,10 @@ source left to read through, holds what hydration copied (`architecture.md`,
 Transfer + clone = cross-SP live migration, [D3]); a source on the primary's
 own kernel that fails routes to a second pool on another controller node
 (Known limits). A migration moves
-a side to a disk node outside its group, on a distinct cntlid slot, and
-finishes under the same leg id with an optimized path before any read
-(`architecture.md`, Migration; `dnagent.md` DN12, DN13); a cancelled one
+a side to a disk node outside its group, on a distinct cntlid slot, its leg
+bitmap read and pushed only once the primary reaches the leg through the new
+side, and finishes under the same leg id with an optimized path before any
+read (`architecture.md`, Migration; `dnagent.md` DN12, DN13); a cancelled one
 leaves its source untouched, the case relying on leg repair leaving a
 two-sided leg alone (`dnv-worker.md` AR8). A spare leg (raid1 only) is
 connected by both cntlrs and switched in, the replaced leg parked and then
@@ -430,10 +449,10 @@ end showing only as `NOT_FOUND` (`dnv-worker.md`, The sp drain); every disk
 node then has its free extents equal its total with an empty side pointer
 list; no node guest holds a dnv dm device, nvmet subsystem or md array, the
 last proving on a disk node that its mask held; and the space guard holds —
-each backing file's allocation, which bounds the extents its disk node zeroed,
-since zeroing allocates, the run's allocation at the pool's own extents plus
-slack, and every node's and the control-plane guest's free space at
-preflight's floors.
+each backing file's allocation, which bounds what its disk node zeroes and
+what is written into its sides, since both allocate, the run's allocation at
+what the pool's own sides zero and the backing pattern plus slack, and every
+node's and the control-plane guest's free space at preflight's floors.
 
 **What a pass means.** Exit status zero and PASS mean that every assertion of
 every case held in a run that stops at its first failure, and that the end
@@ -442,7 +461,9 @@ left standing. Data is checked against a pattern the system never sees,
 removals by the nodes' own listings and `NOT_FOUND`, reactions by the records
 they write. A pass may have taken the clone fallback, whose branch is logged,
 and a skipped check — a raid1-only step without redundancy, a
-guest-distinctness check without headroom — is a logged line, not a proof.
+guest-distinctness check without headroom, setup's disk-node look at side
+zeroing after a build whose reactions changed its legs — is a logged line, not
+a proof.
 
 ## Preflight
 

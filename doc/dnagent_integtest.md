@@ -17,7 +17,7 @@ exercising every `DiskNodeAgent` RPC and reading the kernel state itself
 beside the agent's report. It proves the happy path: error paths are out of
 scope but for the restart case's stale probe, and a leftover reply is no
 exception, being an accepted request with residue (`dnagent.md` SH9, DN19).
-The cases run in a fixed order, fail-fast — smoke, sides, migr_full,
+The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
 migr_bitmap, teardown, restart — each under storage-pool ids of its own, and
 each ends with neither node holding anything of its pool.
 
@@ -94,11 +94,13 @@ script never derives itself.
   SH8, SH16). A side's pointer precedes its `SyncupSide` (DN8).
 * **The provisioned flip.** No worker runs, so the suite plays its flip
   (`architecture.md`, Side provisioning protocol): a new side is synced
-  unprovisioned, waited on until its zeroed and total extent counts both equal
-  the count it asked for, and re-sent at a higher revision with `provisioned`
-  set, which later requests keep (`dnagent.md` DN9); the flip's reply must
-  show the same equality, except a migration destination's, whose flip is its
-  gated declaration. Before the flip every per-CN row must read provisioning
+  unprovisioned, waited on until it reports the length to zero it asked for,
+  all of it zeroed, and re-sent at a higher revision with `provisioned` set,
+  which later requests keep (`dnagent.md` DN9); the flip's reply must report
+  the same, except a migration destination's, whose flip is its gated
+  declaration. Every request for a side asks for the length a worker derives
+  from the side's group, a data group's for every side but the zeroing case's
+  meta-group side. Before the flip every per-CN row must read provisioning
   and the node hold no export, dm-error or dm-linear of the side (DN10): the
   kernel check, scoped to the side as a sibling's export is live, catches what
   the agent's own report would hide.
@@ -138,6 +140,17 @@ its path live and optimized, a data round trip, clean check rounds, and the
 side torn down by an empty side list (`dnagent.md` DN6 to DN10, L1, L2, L5,
 L7).
 
+**zeroing** proves that a side zeroes the length its request asks for and not
+a byte past it (`architecture.md`, Side provisioning protocol; `dnagent.md`
+DN9). Only the agent knows where a side's extents lie, so a random pattern
+first covers the whole extent area of one node, which holds no side between
+cases, the same block in every extent. A side of a meta group, which asks to
+zero all of it, and a side of a data group, which asks to zero its meta region
+and first data block, then provision through the flip. Read through their side
+devices after a cache drop, the first reads zero throughout, and the second
+reads zero over the length it asked for and holds the pattern from there to
+its end.
+
 **sides** exports sides on both nodes to two controller nodes whose roles
 cross: primary paths are optimized and carry data, standby paths are
 non-optimized and fail a read, being backed by their dm-errors, and every
@@ -162,16 +175,17 @@ through the destination path, which also takes a write.
 
 **migr_full** pushes no bitmap: the applied set is empty, the whole device
 matches the source, and no discard reaches any clone. **migr_bitmap** pushes
-skip-bitmap chunks to the gated destination, with no revision (`dnagent.md`
-DN15), over the same random source, so every difference is the bitmap's: the
-applied set lists exactly the chunks (SH21, DN14), the must-copy head matches
-the source, the skipped regions read zero, which provisioning guarantees
-(`architecture.md`, [D15]), the enabling converge's own hydration sample
-counts every skipped region, and the log holds one discard on the clone, at
-the range the meta-region shift implies (`dnagent.md` SH22, SH23;
-`architecture.md`, Bitmap push protocol). The discard checks read the agent's
-JSON log by design: if its layout drifts, the reader is adjusted, never the
-assertion.
+skip-bitmap chunks of its own making, not a bitmap read from a pool, to the
+gated destination, with no revision (`dnagent.md` DN15), over the same random
+source, so every difference is the bitmap's: the applied set lists exactly
+the chunks (SH21, DN14), the must-copy head matches the source, the skipped
+regions differ from the source's fresh random data, keeping what the
+destination's extents held before (`architecture.md`, Side provisioning
+protocol), the enabling converge's own hydration sample counts every skipped
+region, and the log holds one discard on the clone, at the range the
+meta-region shift implies (`dnagent.md` SH22, SH23; `architecture.md`, Bitmap
+push protocol). The discard checks read the agent's JSON log by design: if its
+layout drifts, the reader is adjusted, never the assertion.
 
 **teardown** proves `architecture.md`, Teardown by sweep: what cannot go yet
 is reported and finished later, never forgotten (`dnagent.md` DN6, DN7, DN16,
@@ -193,20 +207,20 @@ finishes.
 SH4 to SH6, DN2): with a connected side on one node and a gated destination
 holding a chunk on the other, both agents restart over untouched kernel state
 while the host keeps reading. The reloaded infos, revisions included, equal
-the snapshots but for the status epochs (SH14), the zeroed counts with them
-(`architecture.md`, [D13]); the chunk is still applied (SH21); unchanged
+the snapshots but for the status epochs (SH14), the zeroing's byte counts with
+them (`architecture.md`, [D13]); the chunk is still applied (SH21); unchanged
 re-sends leave the new log free of any mutating command or block or configfs
 write (SH16, SH17, DN5, DN9); and a revision below the one those re-sends
 stored is refused as stale in a normal reply (SH8, SH9, DN4).
 
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern
-file the agent never sees, removals proved by the node's own listings. The
-observed windows are only logged, so a pass need not have caught a source
-mid-cutover, a read mid-hydration or a clone removal blocking on its dead
-source. The restart case prints, not asserts, whether each old agent stopped;
-one that survives keeps its endpoint and answers the later steps, so that pass
-is as good as that line.
+file the agent never sees or against zeros, removals proved by the node's own
+listings. The observed windows are only logged, so a pass need not have caught
+a source mid-cutover, a read mid-hydration or a clone removal blocking on its
+dead source. The restart case prints, not asserts, whether each old agent
+stopped; one that survives keeps its endpoint and answers the later steps, so
+that pass is as good as that line.
 
 ## Teardown and cleanup
 

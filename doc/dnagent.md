@@ -105,7 +105,8 @@ The constants this document relies on, whose values and comments
   request was not applied, so the worker reads no verdict from the reply's
   rows. `ReplyCodeInvalidConf` refuses a request whose conf carries a value
   the control plane cannot have written — a proto3 zero where
-  `architecture.md`, Common validation, requires a concrete geometry; the
+  `architecture.md`, Common validation, requires a concrete geometry, or a
+  side's length to zero outside the bounds of DN8's side conf gate; the
   object is known and the revision is current, it is the conf that is
   unusable, which is why it is neither of the other two.
   `ReplyCodeLeftover` reports an **accepted** request with residue: the
@@ -116,10 +117,10 @@ The constants this document relies on, whose values and comments
   leftover by definition has no row — nothing wanted names it. An agent also
   reports a few conditions this way so that the worker re-sends the
   `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
-  sweep): on a dn a disk identity not yet confirmed or a side with extents
-  to zero and nothing zeroing it, on a cn a piece of the node's base state
-  that a `CheckCn` round's or `GetCnInfo`'s probe read absent, or an ANA
-  group it read in a state other than its fixed one on a port whose
+  sweep): on a dn a disk identity not yet confirmed or a side with bytes
+  still to zero and nothing zeroing it, on a cn a piece of the node's base
+  state that a `CheckCn` round's or `GetCnInfo`'s probe read absent, or an
+  ANA group it read in a state other than its fixed one on a port whose
   transport attributes match. It is not a rejection: the worker evaluates
   the reply's rows exactly as for code zero and re-issues the `Syncup*`
   every round (`dnv-worker.md` RW12, no backoff) until the code changes.
@@ -141,21 +142,26 @@ The constants this document relies on, whose values and comments
   port but the agent's own must exceed before a sweep removes it (DN6):
   until then it may be a sibling agent's build in flight. The age is the
   subsystem directory's mtime, read from the node.
-* `DnZeroBatchExtCnt`, `DnZeroRetryInterval`, `DnZeroConcurrency` and
-  `DnZeroKillBackoff`, the side provisioning knobs ([D15], DN9): the
-  background zeroing goroutine zeroes at most `DnZeroBatchExtCnt` logical
-  extents per `blkdiscard --zeroout` command, through the side's dm-linear,
-  and persists that batch's `zeroed_bits` after each success. The batch size
-  assumes fast hardware Write Zeroes: a batch should zero inside
+* `DnZeroBatchMaxBytes`, `DnZeroBatchMinBytes`, `DnZeroAlign`,
+  `DnZeroRetryInterval`, `DnZeroConcurrency` and `DnZeroKillBackoff`, the
+  side provisioning knobs ([D15], DN9): the background zeroing goroutine
+  zeroes the first `zero_bytes` bytes of a side, at most
+  `DnZeroBatchMaxBytes` per `blkdiscard --zeroout` command, through the
+  side's dm-linear, and persists the count of bytes zeroed from the side's
+  start after each success. A bound in bytes keeps a command's length, and
+  so its time under the soft timeout, independent of the extent size. The
+  batch size assumes fast hardware Write Zeroes: a batch should zero inside
   `CmdSoftTimeout` at the disk's rate split `DnZeroConcurrency` ways. A
-  failed or timed-out batch is retried no sooner than
-  `DnZeroRetryInterval` later — the zeroing twin of
-  `DnMigrConnectRetryInterval`, never a hot loop. At most
-  `DnZeroConcurrency` zeroing batches run at once per agent; a batch the
-  soft timeout killed halves the side's next batch, a success doubles it
-  again up to `DnZeroBatchExtCnt`, and `DnZeroKillBackoff` kills in a row
-  drop the side to one extent per batch — rate control in the side's
-  goroutine only, never a record of what is zeroed.
+  failed or timed-out batch is retried no sooner than `DnZeroRetryInterval`
+  later — the zeroing twin of `DnMigrConnectRetryInterval`, never a hot
+  loop. At most `DnZeroConcurrency` zeroing batches run at once per agent; a
+  batch the soft timeout killed halves the side's next batch, never below
+  `DnZeroBatchMinBytes`, a success doubles it again up to
+  `DnZeroBatchMaxBytes`, and `DnZeroKillBackoff` kills in a row drop the
+  side straight to `DnZeroBatchMinBytes` — rate control in the side's
+  goroutine only, never a record of what is zeroed. `DnZeroAlign` is the
+  unit a side's length to zero comes in (DN8's side conf gate), so every
+  batch starts and ends on a logical block of the disk.
 * `SuspendSeconds`, the source-cutover grace window of `architecture.md`,
   Migration: a migration source's per-CN dm-linears stay suspended at least
   this long before they are reloaded onto their dm-errors — sooner where an
@@ -353,16 +359,16 @@ SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a
 `details` string naming the missing pointer or id. A request whose conf
 carries a value the control plane cannot have written is rejected with
 `ReplyCodeInvalidConf` and the validator's message of Files (DN4,
-`cnagent.md` CN8): the object is known and the revision is current, so it is
-neither of the other two, and `details` names the proto field rather than
-an id. All three rejection kinds return a normal gRPC reply
-(`AgentReply.code` non-zero), never a gRPC error status — only
-`GetDnSize`/`GetCnSize` and `Get*Bm` report failure through the status
-(`architecture.md`, Common agent rules). A rejected request is never
-persisted (SH5), whichever kind it is. `ReplyCodeLeftover` is **not** one
-of these: it reports an accepted request whose node still holds unwanted
-objects (DN19), so it is the one non-zero code that leaves the request
-stored and its rows worth reading.
+`cnagent.md` CN8), or the message of DN8's side conf gate: the object is
+known and the revision is current, so it is neither of the other two, and
+`details` names the proto field rather than an id. All three rejection
+kinds return a normal gRPC reply (`AgentReply.code` non-zero), never a
+gRPC error status — only `GetDnSize`/`GetCnSize` and `Get*Bm` report
+failure through the status (`architecture.md`, Common agent rules). A
+rejected request is never persisted (SH5), whichever kind it is.
+`ReplyCodeLeftover` is **not** one of these: it reports an accepted
+request whose node still holds unwanted objects (DN19), so it is the one
+non-zero code that leaves the request stored and its rows worth reading.
 
 ### Concurrency — `locks.go`
 
@@ -914,16 +920,18 @@ no longer matches that side's stored `migr_dst_conf`; then every side whose
 pointer is absent from its DN's stored `side_pointer_list` is dropped, then
 each usable DN's node-level sweep removes what those sides left behind by
 name, then the remaining `side-*` files re-run the `SyncupSide` converge
-(DN8 to DN14) from the stored request — a converge that finds
-not-yet-zeroed extents (re)starts that side's DN9 zeroing goroutine, which
-is how provisioning resumes after a restart. Then every chunk that was kept
-is re-applied (SH21 to SH23); that step deletes nothing. A chunk whose side
-is not loaded is no orphan while a `side-*` file does not load and the chunk's
-loaded DN still names its side: that file names no side, so it may be this
-side's, and the chunk is skipped like the files of a DN that did not load —
-neither loaded nor deleted. The chunk's side is then where a lost
-`--local-store` leaves one, as above, until its `SyncupSide` rewrites its
-file and the worker pushes the chunk again. A chunk whose loaded DN no
+(DN8 to DN14) from the stored request — a converge that finds bytes of the
+side still to zero (re)starts that side's DN9 zeroing goroutine, which is
+how provisioning resumes after a restart, and one whose stored length to
+zero DN8's side conf gate refuses converges and sweeps nothing of that
+side. Then every chunk that was kept is re-applied (SH21 to SH23); that
+step deletes nothing. A chunk whose side is not loaded is no orphan while a
+`side-*` file does not load and the chunk's loaded DN still names its side:
+that file names no side, so it may be this side's, and the chunk is
+skipped like the files of a DN that did not load — neither loaded nor
+deleted. The chunk's side is then where a lost `--local-store` leaves
+one, as above, until its `SyncupSide` rewrites its file and the worker
+pushes the chunk again. A chunk whose loaded DN no
 longer names its side is an orphan whatever `side-*` file failed to decode:
 the side has left the list, and its chunks go with it (SH7). Every other
 deletion — with the side that owns them (DN6, SH7), on a destination's
@@ -987,11 +995,11 @@ probe-first (SH16), building `DnInfo` as it goes:
   compared against the disk's device number. A header can go blank under
   live side devices (one mistaken write over its header block is enough),
   and a fresh, empty table would hand their extents to the next side, which
-  zeroes them and serves them as its own. So while one of them maps the
-  disk, or while any of those reads does not answer, the converge writes
-  nothing to the disk and `meta_info` is `RES_STATUS_ERROR` with details
-  "blank disk header; refusing to format" and the cause. This dn's DN6
-  sweep removes its own such devices once nothing wants them. A device
+  zeroes the part it must and serves them as its own. So while one of them
+  maps the disk, or while any of those reads does not answer, the converge
+  writes nothing to the disk and `meta_info` is `RES_STATUS_ERROR` with
+  details "blank disk header; refusing to format" and the cause. This dn's
+  DN6 sweep removes its own such devices once nothing wants them. A device
   named for another cluster or dn is not its to remove: while one maps the
   disk, the disk stays blank, `meta_info` names the first device that maps
   it and every round's verdict replies `ReplyCodeLeftover` (DN6's record
@@ -1005,22 +1013,23 @@ probe-first (SH16), building `DnInfo` as it goes:
   node's) — slot-A-before-header is what lets a load read a valid header
   with no valid slot as corruption, since a crash between the two writes
   leaves an inert slot rather than a header with no table. Magic present
-  but version or CRC wrong ⇒ **error**, and
-  every later operation errors too — a corrupt header is never formatted
-  over. Magic present and valid ⇒ verify `cluster_id`, `dn_id` and
-  `extent_size` match; a mismatch is a "foreign disk" error naming both
-  identities, and the disk is **never** overwritten. `extent_size` is
-  therefore immutable for the life of a format. A re-call on an
-  already-converged disk issues **zero** writes (SH16).
+  but version or CRC wrong ⇒ **error**, and every later operation errors
+  too — a corrupt header is never formatted over, and neither is one
+  written under another version of the format: such a disk is refused
+  until it is re-created. Magic present and valid ⇒ verify `cluster_id`,
+  `dn_id` and `extent_size` match; a mismatch is a "foreign disk" error
+  naming both identities, and the disk is **never** overwritten.
+  `extent_size` is therefore immutable for the life of a format. A re-call
+  on an already-converged disk issues **zero** writes (SH16).
 
   The identity check is what makes the volume table this node's to build on
   and to change: handing out a record it already holds (`AllocSide`,
   `AllocCloneMeta` — an existing record's extents are this node's only if
-  its table is) and every mutation (allocate, free, the DN9 zeroed-bit
+  its table is) and every mutation (allocate, free, the DN9 zeroed-count
   updates, the DN6 record step) refuse on a disk whose identity this node
   has not confirmed, and so does DN9's re-read of the record before each
   zeroing batch (`LookupConfirmedSide`), so no batch is computed from
-  another node's bits. Confirming needs no read of its own: this converge
+  another node's record. Confirming needs no read of its own: this converge
   hands `DiskMeta` the identity it asks for **before** it reads anything,
   and each of those operations compares the header the table in memory was
   loaded under with it. So one header read that did not answer — this
@@ -1032,7 +1041,7 @@ probe-first (SH16), building `DnInfo` as it goes:
   converge. Lookups that only report do not pass the check — the side
   converge's first look at the record, which fills the counters, and the
   DN18 side probe (`LookupSide`) — so on another node's disk a record whose
-  ids collide still fills `zeroed_ext_cnt`/`total_ext_cnt`, in a side
+  ids collide still fills `zeroed_bytes`/`zero_bytes`, in a side
   converge's reply beside its foreign-disk refusal and in every probe of
   the side. The guard has to live at that layer rather than in the caller,
   because a failed DN converge does not stop the side converges that follow
@@ -1042,16 +1051,13 @@ probe-first (SH16), building `DnInfo` as it goes:
   holds, anyway.
 * `EnsurePort` (SH19: the agent's `--nvmet-port-id` port, default
   `NvmetPortId`, from the `--tr-*` flags + the three fixed ANA groups).
-* **the Write Zeroes fail-fast.** DN9 zeroes whole sides with
-  `blkdiscard --zeroout` under the ordinary SH15 timeouts, which only holds
-  on hardware whose Write Zeroes is offloaded; a kernel that has to emulate
-  it writes zero pages at bulk speed, so the fast-Write-Zeroes assumption
-  of `architecture.md`, Side provisioning protocol, cannot hold:
-  `DnZeroBatchExtCnt` batches would overrun the soft timeout and the side
-  would crawl in DN9's backed-off batches, if it converged at all. Resolve
-  the disk's kernel name with `lsblk` (the flag is documented as a by-uuid
-  symlink, whose basename is not a sysfs node) and read the block queue's
-  "write_zeroes_max_bytes" attribute under "/sys/class/block"
+* **the Write Zeroes fail-fast.** DN9 zeroes with `blkdiscard --zeroout`
+  under the ordinary SH15 timeouts, on the fast-Write-Zeroes assumption of
+  `architecture.md`, Side provisioning protocol, which a kernel that has to
+  emulate Write Zeroes, writing zero pages at bulk speed, does not meet.
+  Resolve the disk's kernel name with `lsblk` (the flag is documented as a
+  by-uuid symlink, whose basename is not a sysfs node) and read the block
+  queue's "write_zeroes_max_bytes" attribute under "/sys/class/block"
   (`WriteZeroesMaxBytes`). A **present zero** is the verdict: `meta_info`
   of `RES_STATUS_ERROR` with details "disk lacks Write Zeroes", which flows
   into the worker's `err_epoch` and the capacity-key removal
@@ -1422,10 +1428,10 @@ still own the slot, and freeing it would strand an in-flight migration
 whose hydration is supposed to resume from disk (`architecture.md`,
 Migration). Freeing a record while its device still maps those extents is
 not a leak but a corruption path: the next allocation hands the same
-extents to another side, which zeroes them and serves them as its own. In
-this agent that is where reading a killed `dmsetup info` as "the device is
-gone" destroys data rather than leaking a device, and it is why SH15's rule
-is a rule.
+extents to another side, which zeroes the part it must and serves them as
+its own. In this agent that is where reading a killed `dmsetup info` as
+"the device is gone" destroys data rather than leaking a device, and it is
+why SH15's rule is a rule.
 
 **The record step.** The same proof, run over the volume table itself
 rather than over the devices the enumeration found, closes the crash window
@@ -1494,6 +1500,37 @@ DiskNodeAgent`). Then the SH8 revision gate against the `SyncupSideRequest`
 this process holds — zero while it holds none, as for a side whose file
 DN2's reload did not load, whatever revision that file carries.
 
+Then, last and still with **zero** side effects, the **side conf gate**:
+`side_conf.zero_bytes`, the length to zero that DN9 records when it
+allocates the side, must be above zero, a whole multiple of `DnZeroAlign`
+and no longer than the side, `side_conf.ext_cnt` times the DN's stored
+`extent_size`. The sp worker derives the length from stored values alone,
+the group's block counts and the pool's block size (`dnv-worker.md` RW15),
+so a length outside these bounds means a stored conf is wrong, and a record
+allocated with it would keep it for the side's life. The refusal is
+`ReplyCodeInvalidConf` (SH9) with details that name `side_conf.zero_bytes`
+under the "invalid stored conf" prefix every conf refusal shares, and the
+reply echoes the **stored** revision, so the worker sees the request was
+not accepted; one Error record (msg "invalid stored conf") names the
+cluster, the dn, the sp and the side. Placement is DN4's: the gate sits
+before the request becomes the side's desired state, so nothing is swept,
+allocated, built or persisted. While the DN's stored `extent_size` is
+unusable (DN2) the side has no size to bound the length by, and only the
+first two bounds are checked.
+
+The same check runs inside the converge, for the entrances that do not
+come through this RPC: DN2's startup reconcile, DN13's connect retry and
+the DN12 fence timer, which converge from a request stored earlier. There
+it writes the same Error record and returns an empty `SideInfo` before
+the converge touches anything — a conf fault must not destroy resources
+(`architecture.md`, Common agent rules) — so it converges and sweeps
+nothing of the side and settles no DN12 fence either (Known limits).
+DN2's re-apply of the side's kept migration chunks at a restart still
+runs for such a side, and so does the apply of a pushed chunk (DN15);
+neither deletes anything, since no dnv dm-clone passes a discard down
+(DN13). Such a side has no verdict either (DN16), and a probe of it
+refuses it the same way (DN18).
+
 After a lost `--local-store`, the first `SyncupSide` of each listed side
 meets no stored request: there is no revision to gate it against, and its
 converge adopts, probe-first, what the node still holds for it — all but a
@@ -1514,17 +1551,20 @@ migrating side's own request is back.
 DN9. **Side device and the side provisioning protocol** (`architecture.md`,
 Side provisioning protocol). Look up `(sp_id, side_id)` in the volume
 table. An existing record whose extent total disagrees with
-`side_conf.ext_cnt` is an error (resize is out of scope).
+`side_conf.ext_cnt`, or whose `zero_bytes` disagrees with
+`side_conf.zero_bytes`, is an error: resize is out of scope, and a side's
+length to zero is fixed when the side is allocated.
 
 **Allocation is permitted only while `side_conf.provisioned` is false.** At
 false with no record: allocate `side_conf.ext_cnt` extents — first fit one
 contiguous run, else free runs largest-first — and persist the record with
-`zeroed_bits` all zero (an unset field: proto3 omits an empty `bytes`, and
-an absent bit reads as zero). An allocation failure is reported as it is,
-never swallowed: the three converge outcomes below must stay
+`zero_bytes` from `side_conf.zero_bytes` and a `zeroed_bytes` of zero. The
+allocation refuses a length of zero or one longer than the side, as DN8's
+gate does, so no record holds one. An allocation failure is reported as it
+is, never swallowed: the three converge outcomes below must stay
 distinguishable. At true with no record the agent **never** allocates: the
 data is gone (a lost or foreign disk), and silently re-allocating would
-present a zeroed impostor as the data-bearing leg. That is the hard
+present a fresh impostor as the data-bearing leg. That is the hard
 resource error `side_dev_info` of `RES_STATUS_ERROR` with details "record
 missing", which feeds `err_epoch` and the replacement flows (the
 spare-switch of `architecture.md`, Automatic reactions, for raid1 —
@@ -1536,69 +1576,65 @@ runs, each run mapping to the disk at `DnDataOffset` plus the run's start
 times `extent_size`, for the run's count times `extent_size` bytes (both in
 sectors for the table).
 
-Then the protocol — **whole-side zeroing behind a `provisioned` gate**
-([D15]: a discard is not a zero guarantee — the kernel does not promise
-that a discarded region reads as zeros, and NVMe read-zeroes after
-deallocate is optional — so a trim funds neither dnv's promise about the
-data of a storage pool (`architecture.md`, System overview) nor the places
-the design assumes zeros: a recycled extent can hold a previous SP's valid
-thin-pool superblock, or a stale md superblock that flips `cnagent.md` CN12
-into the wrong assembly case):
+Then the protocol — **a zeroed prefix behind a `provisioned` gate**. The
+agent zeroes the first `zero_bytes` bytes of `DnSideName` and nothing else;
+the sp worker computes that length from the side's group (`dnv-worker.md`
+RW15). Which part of a side that is, and why, is `architecture.md`, Side
+provisioning protocol; why the rest of a side may keep what an earlier
+pool left there is `architecture.md`, [D15]:
 
-1. the extent runs are allocated and the record persisted with
-   `zeroed_bits` all zero (above);
+1. the extent runs are allocated and the record persisted with its
+   `zero_bytes` and a `zeroed_bytes` of zero (above);
 2. `DnSideName` is built (above);
-3. a **background zeroing goroutine** (the registry below) zeroes the
-   not-yet-zeroed extents in batches of at most `DnZeroBatchExtCnt`,
-   **through the dm-linear** — the side is contiguous in that device's
-   address space, so one command covers a whole batch whatever the
-   physical fragmentation. Each batch starts at the **first extent whose
-   bit is still unset** and covers the run of unset bits from there,
-   capped at the batch size (a first-unset walk, never a count of set
-   bits: the bitmap is deliberately more general than a watermark): one
-   `blkdiscard --zeroout` at the batch's byte offset and length on the
-   `DnSideName` path (`Dm.BlkZeroout`). After each successful batch that
-   batch's bits are persisted in the volume table (`SetSideZeroed`, a
-   half-open range setter);
+3. a **background zeroing goroutine** (the registry below) zeroes from
+   `zeroed_bytes` up to `zero_bytes`, one batch at a time, **through the
+   dm-linear** — the side is contiguous in that device's address space, so
+   one command covers a whole batch whatever the physical fragmentation:
+   one `blkdiscard --zeroout` at byte offset `zeroed_bytes`, for the
+   batch's length, on the `DnSideName` path (`Dm.BlkZeroout`). After each
+   successful batch the advanced count is persisted in the volume table
+   (`SetSideZeroed`, which writes nothing for a batch the count already
+   covers and refuses one that would leave a gap after the count or run
+   past `zero_bytes`);
 4. the per-CN export stacks (DN10) and the migration roles (DN12, DN13)
-   converge **only** when the request says `provisioned` true **and**
-   every bit is set. The agent always trusts its own bits over the flag:
-   the disk is authoritative ([D13]); the etcd flag is a gate, never
-   evidence.
+   converge **only** when the request says `provisioned` true **and** the
+   record's `zeroed_bytes` equals its `zero_bytes`. The agent always trusts
+   its own record over the flag: the disk is authoritative ([D13]); the
+   etcd flag is a gate, never evidence.
 
-**Logical extent *i*** is the *i*-th extent of the concatenation of the
-record's `run_list`, i.e. the *i*-th `extent_size` bytes of the
-`DnSideName` device; `zeroed_bits` is LSB-first within each byte
-(`agent/bitmap.go`) with trailing pad bits zero, and every count is taken
-over the record's own extent total — never over the bitmap's byte length
-times eight, which would round a side up to the next byte and declare it
-done early. **Zeroed is a property of the side's allocation, not of the
-disk extent**: extents freed and reallocated to a new side start
-all-not-zeroed again, whatever happened to them before, because `AllocSide`
-is the only constructor of a record and `FreeSide` deletes records whole.
+`zeroed_bytes` counts the bytes zeroed from the side's start, so what is
+zeroed is always one prefix of the side, and the count alone says where
+the next batch starts. It belongs to the side's allocation, not to the
+disk extents (`architecture.md`, Side provisioning protocol): `AllocSide`
+is the only constructor of a record and `FreeSide` deletes records whole,
+so a new record starts with nothing zeroed, whatever its extents held and
+whatever an earlier side zeroed there.
 
 `provisioned` only ever flips false to true (the flip rule of
-`architecture.md`, sp role) and the agent only ever sets bits, yet the gate
-can close again on a side that already exports: a row 5 or row 6 outcome
-below, or any fault of the side device (DN12). Closing it removes nothing,
-because the sweep's wanted set is what the build would ensure were the gate
-open (DN6).
+`architecture.md`, sp role) and the agent only ever advances
+`zeroed_bytes`, yet the gate can close again on a side that already
+exports: a row 5 or row 6 outcome below, or any fault of the side device
+(DN12). Closing it removes nothing, because the sweep's wanted set is what
+the build would ensure were the gate open (DN6).
 
 **Converge matrix** (`side_conf.provisioned` × local state):
 
-| `provisioned` | record | bits | behavior | `side_dev_info` |
+| `provisioned` | record | zeroed | behavior | `side_dev_info` |
 |---|---|---|---|---|
-| false | absent | — | allocate (bits zero), build the linear, ensure the goroutine | `RES_STATUS_PROVISIONING`, "zeroing 0/n" |
-| false | present | partial | ensure the linear + the goroutine | `RES_STATUS_PROVISIONING`, "zeroing k/n" |
+| false | absent | — | allocate (nothing zeroed), build the linear, ensure the goroutine | `RES_STATUS_PROVISIONING`, "zeroing 0/n MiB" |
+| false | present | partial | ensure the linear + the goroutine | `RES_STATUS_PROVISIONING`, "zeroing k/n MiB" |
 | false | present | complete | linear ensured; no goroutine; **no exports** | `RES_STATUS_OK` (the per-CN rows the level emits report `RES_STATUS_PROVISIONING`, "side provisioning", DN18) |
 | true | present | complete | full DN10 export converge | normal |
 | true | present | partial | **refuse exports**; keep the goroutine (it self-heals) | `RES_STATUS_ERROR`, "not zeroed" |
 | true | absent | — | **never allocate**; no linear, nothing converges | `RES_STATUS_ERROR`, "record missing" |
 
-Every row above is a *converge* outcome. A read-only round (DN16, SH25)
-allocates nothing, so "no record" at `provisioned` false reads
-`RES_STATUS_MISSING` there — the converge that would allocate has not run
-yet, and `n` must never be taken from the request.
+Partial means the record's `zeroed_bytes` is short of its `zero_bytes`,
+complete that the two are equal; k and n are those two counts in MiB,
+written exactly, so a length below one MiB reads as a fraction. Every row
+above is a *converge* outcome. A read-only round (DN16, SH25) allocates
+nothing, so "no record" at `provisioned` false reads `RES_STATUS_MISSING`
+there — the converge that would allocate has not run yet, and `n` must
+never be taken from the request.
 
 **The zeroing registry** (the dn twin of the DN8 retry registry):
 
@@ -1606,8 +1642,8 @@ yet, and `n` must never be taken from the request.
   single-flight per side, created on demand by any converge — the startup
   reconcile included (DN2) — that finds zeroing still needed. Sides zero
   in **parallel**, but at most `DnZeroConcurrency` batches run at once per
-  agent: N concurrent batches split the disk's Write Zeroes rate N ways,
-  and enough of them would have every batch killed at the soft timeout and
+  agent: N concurrent batches split the disk's zeroing rate N ways, and
+  enough of them would have every batch killed at the soft timeout and
   redone for ever. Only the `blkdiscard` holds a slot; waiting for one
   publishes no error, holds no lock, and a cancel reaches it at once.
 * each batch mints a fresh trace id (SH2's `common.NewTraceId`); the
@@ -1629,24 +1665,27 @@ yet, and `n` must never be taken from the request.
   `DnZeroRetryInterval` later — never a hot loop. While such a failure is
   outstanding `RES_STATUS_ERROR` wins over the matrix's
   `RES_STATUS_PROVISIONING`; the next successful batch clears it. Partial
-  zeros are harmless: the batch's bits stay unset and its extents are
-  redone, so a restart simply resumes at the first unset bit.
+  zeros are harmless: `zeroed_bytes` advances only after a batch succeeds,
+  so a failed or interrupted batch is zeroed again from the stored count,
+  which is also where a restart resumes.
 * **the batch size follows the kills.** A batch the SH15 soft timeout
   killed — the tool did not answer (`agent.Reported`) — makes the side's
-  next batch half the killed one (rounded down, at least one extent); a
-  success doubles it again, up to `DnZeroBatchExtCnt`; `DnZeroKillBackoff`
-  kills in a row drop it straight to one extent per batch, and while that
-  kill is outstanding the bullet above's `RES_STATUS_ERROR` — shown only on
-  a side still at `provisioned` false; at true the row reads "not zeroed",
-  per the matrix — has details of the command output followed by the kill
-  streak and the one-extent rate. A batch the tool refused (it ran and
-  answered no) keeps the size and ends the streak. The size and the streak
-  are the goroutine's own memory — rate control derived from the kills it
-  saw, never a record: the size caps the next command and the streak also
-  words the details above, and they decide nothing else (which extents to
-  zero, and whether the side is done, only the bits decide). Every new
+  next batch half the killed one, rounded down to a whole multiple of
+  `DnZeroBatchMinBytes` and never below it; a success doubles it again, up
+  to `DnZeroBatchMaxBytes`; `DnZeroKillBackoff` kills in a row drop it
+  straight to `DnZeroBatchMinBytes`, and while that kill is outstanding the
+  bullet above's `RES_STATUS_ERROR` — shown only on a side still at
+  `provisioned` false; at true the row reads "not zeroed", per the matrix —
+  has details of the command output followed by the kill streak and the
+  batch size the side backed off to. A batch the tool refused (it ran and
+  answered no) keeps the size and ends the streak. No batch runs past
+  `zero_bytes`: the last one is what is left. The size and the streak are
+  the goroutine's own memory — rate control derived from the kills it saw,
+  never a record: the size caps the next command and the streak also words
+  the details above, and they decide nothing else (where a batch starts,
+  and whether the side is done, only the record decides). Every new
   goroutine for the side, a restart's included, starts again at
-  `DnZeroBatchExtCnt` with no kills counted.
+  `DnZeroBatchMaxBytes` with no kills counted.
 * zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE` included
   (DN11): it is bottom-layer provisioning.
 * cancellation: the drop of a side whose pointer left the list (DN6, which
@@ -1656,19 +1695,20 @@ yet, and `n` must never be taken from the request.
   running child holds `DnSideName` open and `dmsetup remove` would fail
   EBUSY. Process exit is SH27's `WaitBackground`, so no orphan
   `blkdiscard` ever outlives the agent.
-* `SideInfo.zeroed_ext_cnt` / `total_ext_cnt` are filled on every reply
-  and every Check round (DN14, DN16, DN18). `total_ext_cnt` is never
-  omitted: it comes from the record, or from `side_conf.ext_cnt` when there
-  is no record yet — so "no record" reads zero of `ext_cnt`, never equal
-  counts. Equality is what the worker's flip rule watches, guarded by a
-  non-zero total, which also keeps the degenerate zero-of-zero of a
-  zero-`ext_cnt` request from reading as done.
+* `SideInfo.zeroed_bytes` / `zero_bytes` are filled on every reply and
+  every Check round (DN14, DN16, DN18) of a side DN8's gate admits.
+  `zero_bytes` comes from the record, or from `side_conf.zero_bytes` while
+  there is no record yet — so "no record" reads zero of the request's
+  length, never equal counts. Equality is what the worker's flip rule
+  watches (`dnv-worker.md` RW18), guarded by a non-zero length, which also
+  keeps the empty `SideInfo` of a side DN8's gate refuses from reading as
+  done.
 
 DN10. **Per-CN export stacks.** They converge **only** with DN9's gate open
-— `side_conf.provisioned` true and every `zeroed_bits` bit set. While it is
-closed the whole per-CN stack is skipped (dm-error, dm-linear, nvmet
-subsystem, namespace), but never a migration source's fence (DN12), and
-nothing is torn down either (DN9); each
+— `side_conf.provisioned` true and the record's `zeroed_bytes` equal to its
+`zero_bytes`. While it is closed the whole per-CN stack is skipped
+(dm-error, dm-linear, nvmet subsystem, namespace), but never a migration
+source's fence (DN12), and nothing is torn down either (DN9); each
 `cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` entry
 reports `RES_STATUS_PROVISIONING` with details "side provisioning" (the
 export row only below `SP_LEVEL_NO_SIDE`; DN18).
@@ -1756,12 +1796,14 @@ Four rules keep the suspension bounded, which is what makes it safe:
 
 * A side whose linears are suspended but whose window start is unknown — an
   agent restart mid-window — is treated as **elapsed** once the restarted
-  agent finds them so (`adoptFence`), and phase 2 runs on the first
-  converge, so a restart that finds them suspended opens no second window.
-  The window's start, and the mark rule 3 leaves when a level ends a
-  window early, live only in memory; what a restart that does not find the
-  linears suspended, or that holds no state for the side, does with the
-  window is a known limit (Known limits).
+  agent finds them so (`adoptFence`), and phase 2 runs on the side's first
+  converge at a usable extent size that gets past DN8's side conf gate, so
+  a restart that finds them suspended opens no second window. The window's
+  start, and the mark rule 3 leaves when a level ends a window early, live
+  only in memory; what a restart that does not find the linears suspended,
+  or that holds no state for the side, does with the window is a known
+  limit, and so is how long they stay suspended when a conf gate refuses
+  the restart's stored request (Known limits).
 * The role ending clears the window and returns the linears to their
   normal targets, resumed. The condition is a **state**, not an event:
   every converge of a side whose *effective* `migr_src_conf` is absent —
@@ -1840,21 +1882,25 @@ if `migr_src_conf` were absent" true of the removal half as well.
 
 DN13. **Migration destination** (`migr_dst_conf` set).
 
-**Provisioning first.** While the destination side's own
-`side_conf.provisioned` is false, or any of its `zeroed_bits` is unset,
-**none** of steps (1) to (5) run. The converge goes no further than the
-DN9 shape — the extent record, `DnSideName` and the zeroing goroutine —
-and sets up none of the per-CN stacks, the metadata slot, the source
-connection or the dm-clone. Nor does the gate remove any of them: neither
-the flag nor the bits enter the wanted set the sweep removes against
-(DN6). Below `SP_LEVEL_NO_MIGRATION`, `migr_dst_info.target_info` and
-`.dm_clone_info` report `RES_STATUS_PROVISIONING` with details "side
-provisioning" — at or above it the level comes first and no
-`migr_dst_info` row is emitted at all (DN18). Bitmap chunks
-pushed meanwhile are still persisted and counted as applied (DN15) and are
-applied when the dm-clone is finally created. Cancelling the migration
-inside this window is the DN9 cancel-and-wait path: the goroutine is
-stopped and waited for before `DnSideName` is removed.
+**Provisioning first.** The destination zeroes like any side of its
+group: its request carries the group's length to zero (`dnv-worker.md`
+RW15), and DN9 zeroes that length before anything is copied. While the
+destination side's own `side_conf.provisioned` is false, or its record's
+`zeroed_bytes` is short of its `zero_bytes`, **none** of steps (1) to (5)
+run. The converge goes no further than the DN9 shape — the extent record,
+`DnSideName` and the zeroing goroutine — and sets up none of the per-CN
+stacks, the metadata slot, the source connection or the dm-clone. Nor does
+the gate remove any of them: neither the flag nor the record's counts enter
+the wanted set the sweep removes against (DN6). Below
+`SP_LEVEL_NO_MIGRATION`, `migr_dst_info.target_info` and `.dm_clone_info`
+report `RES_STATUS_PROVISIONING` with details "side provisioning" — at or
+above it the level comes first and no `migr_dst_info` row is emitted at all
+(DN18). Bitmap chunks pushed meanwhile are still persisted and counted as
+applied (DN15) and are applied when the dm-clone is finally created
+(`architecture.md`, Migration, says when a caller may read the leg bitmap
+they come from). Cancelling the migration inside this window is the DN9
+cancel-and-wait path: the goroutine is stopped and waited for before
+`DnSideName` is removed.
 
 With the gate open, the five dst steps of `architecture.md`, Migration,
 numbered as there. What the dn adds to them: the slot of step (2) is
@@ -2031,8 +2077,9 @@ converge whose `migr_id` differs drops them — files included — before step
 (2); a push naming another `migr_id` never gets that far (DN15). Migration
 ids are never reused, so a mismatch is proof the chunks describe a
 different copy, and applying them would `blkdiscard` regions this migration
-never copied, leaving the destination serving its own zeroed extents where
-the source's data should be.
+never copied, leaving the destination serving whatever its own extents
+hold, which may be an earlier side's bytes (`architecture.md`, [D15]),
+where the source's data should be.
 
 **The clone-metadata area is per DN, and it is a real ceiling.**
 `DnCloneMetaSize` is one region of the disk shared by every destination
@@ -2054,7 +2101,7 @@ further request once the units are free.
 
 DN14. Persist (SH5); reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
-`zeroed_ext_cnt`/`total_ext_cnt`, filled on every reply (DN9) — and
+`zeroed_bytes`/`zero_bytes`, filled on every reply (DN9) — and
 `bm_info` (the applied set, SH21).
 
 ### `PushMigrBitmap`
@@ -2101,24 +2148,25 @@ clone-metadata wrapper, and the worker re-sends `SyncupDn` each time), and
 `GetSideInfo` while that side holds leftovers, while one of its listings
 does not answer, and — the one comparison a side's verdict makes beyond its
 sweep's — while its record, read from a table this node has confirmed
-(DN5), still has extents to zero and no DN9 zeroing goroutine is running
-for it ("zeroing k/n: nothing is zeroing the side"). Only a converge starts
-that goroutine, and one that could not — the startup reconcile's, while no
-read of the disk answered — would otherwise leave the side reporting the
-same progress every round with nothing to re-send its `SyncupSide`; the
-registry and the record are both read fresh, so nothing about the failed
-converge is remembered. Both reply zero otherwise. `GetDnInfo` and a
-`CheckDn` round probe before they take the verdict: the probe's read of
-the disk can be the first to answer, which is what confirms the identity
-(DN5). A DN's verdict covers the node-level scope only and a side's covers
-its own side; each drives its own `Syncup*`. The verdict is recomputed on
-every call and stored nowhere, so a leftover that has since gone stops
-being reported without anyone clearing a flag. A DN whose stored
-`extent_size` is unusable has **no** verdict — the conf gate says it
-converges nothing and sweeps nothing, so naming leftovers there would
-report objects this agent has deliberately refused to touch — and neither
-has a side whose DN is unknown or in that state, since its own geometry
-comes from the DN.
+(DN5), still has bytes to zero and no DN9 zeroing goroutine is running
+for it ("zeroing k/n MiB: nothing is zeroing the side"). Only a converge
+starts that goroutine, and one that could not — the startup reconcile's,
+while no read of the disk answered — would otherwise leave the side
+reporting the same progress every round with nothing to re-send its
+`SyncupSide`; the registry and the record are both read fresh, so nothing
+about the failed converge is remembered. Both reply zero otherwise.
+`GetDnInfo` and a `CheckDn` round probe before they take the verdict: the
+probe's read of the disk can be the first to answer, which is what
+confirms the identity (DN5). A DN's verdict covers the node-level scope
+only and a side's covers its own side; each drives its own `Syncup*`. The
+verdict is recomputed on every call and stored nowhere, so a leftover that
+has since gone stops being reported without anyone clearing a flag. A DN
+whose stored `extent_size` is unusable has **no** verdict — the conf gate
+says it converges nothing and sweeps nothing, so naming leftovers there
+would report objects this agent has deliberately refused to touch — and
+neither has a side whose DN is unknown or in that state, since its own
+geometry comes from the DN, nor a side whose stored request DN8's side conf
+gate refuses, which converges and sweeps nothing for the same reason.
 
 Never mutates the node — in particular a `Get*Info` or `Check*` round never
 allocates a record and never registers a DN9 zeroing goroutine
@@ -2169,32 +2217,34 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   below); a read that did not answer changes nothing — **plus the DN5
   Write-Zeroes check**. The details when OK are `DiskMeta.Describe`'s
   summary (the table sequence, the side and clone-metadata record counts,
-  the free extents and units, and the sides whose `zeroed_bits` are still
-  incomplete, DN9); on failure the error text instead, "disk lacks Write
-  Zeroes" for the Write Zeroes case.
+  the free extents and units, and the count of sides whose zeroing is not
+  done, DN9); on failure the error text instead, "disk lacks Write Zeroes"
+  for the Write Zeroes case.
 * `DnInfo.port_info`, named by the agent's port id as a decimal — so on a
   node running several agents the rows differ: the configfs address
   attributes match the `--tr-*` flags and the three [D4] groups are
   present with their fixed states (`Nvmet.ProbePort`).
-* `SideInfo.side_dev_info`, named `DnSideName`: the volume-table record +
-  its `zeroed_bits` + the live table, judged by the DN9 matrix: no record
-  ⇒ `RES_STATUS_MISSING` at `provisioned` false (no converge has allocated
-  one yet, or the header has gone blank under the side: a blank header
-  reads as an unformatted disk with no records, and the meta row's probe
-  drops a table loaded before the header went blank — the side's device is
-  still there all the same, and its DN9 goroutine, if one is running, ends
-  at its next re-read of the record) and `RES_STATUS_ERROR`, details
-  "record missing", at `provisioned` true (a lost or foreign disk, or that
-  same blank header, under which the side's devices keep serving its data:
-  nothing removes a device the side still wants, and DN5 will not format
-  while they map the disk); bits incomplete ⇒ `RES_STATUS_PROVISIONING`,
-  details "zeroing k/n", at false and `RES_STATUS_ERROR`, details "not
-  zeroed", at true; at false, an outstanding batch failure ⇒
-  `RES_STATUS_ERROR` with the killed command's output, followed by the
-  kill streak and the one-extent rate once DN9's backoff holds; a live
-  table that does not match the record's extent runs ⇒ `RES_STATUS_ERROR`.
-  The same read fills `SideInfo.zeroed_ext_cnt`/`total_ext_cnt` every
-  round.
+* `SideInfo.side_dev_info`, named `DnSideName`: the volume-table record —
+  its runs, `zero_bytes` and `zeroed_bytes` — and the live table, judged by
+  the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned` false
+  (no converge has allocated one yet, or the header has gone blank under
+  the side: a blank header reads as an unformatted disk with no records,
+  and the meta row's probe drops a table loaded before the header went
+  blank — the side's device is still there all the same, and its DN9
+  goroutine, if one is running, ends at its next re-read of the record) and
+  `RES_STATUS_ERROR`, details "record missing", at `provisioned` true (a
+  lost or foreign disk, or that same blank header, under which the side's
+  devices keep serving its data: nothing removes a device the side still
+  wants, and DN5 will not format while they map the disk); zeroing not done
+  ⇒ `RES_STATUS_PROVISIONING`, details "zeroing k/n MiB", at false and
+  `RES_STATUS_ERROR`, details "not zeroed", at true; at false, an
+  outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's
+  output, followed by the kill streak and the batch size the side backed off
+  to once DN9's backoff holds; a live table that does not match the record's
+  extent runs ⇒ `RES_STATUS_ERROR`. The same read fills
+  `SideInfo.zeroed_bytes`/`zero_bytes` every round. A side whose stored
+  request DN8's side conf gate refuses is not probed at all: the probe
+  writes that gate's Error record and answers an empty `SideInfo`.
 * `cn_id_to_dm_error` and `cn_id_to_dm_linear` per cn, named `DnErrorName`
   and `DnLinearName`: `dmsetup info` plus `dmsetup table` (`probeDmTarget`;
   the linear's target — side device, dm-error or dm-clone — must match the
@@ -2263,7 +2313,7 @@ and the error, for each such listing (`LeftoverReply`). Two dn checks that
 are not listings are folded into the same outcome, in that same form, so
 that they drive the same re-send: DN6's record step on a disk whose
 identity is not confirmed, and — in the read-only verdict only — a side
-with extents still to zero and no zeroing goroutine (DN16). The full list
+with bytes still to zero and no zeroing goroutine (DN16). The full list
 goes to the agent log as the "sweep leftover" record (`log.md`,
 Leftovers), so a lingering leftover is visible every round rather than
 once.
@@ -2321,6 +2371,34 @@ is still a protocol-level refusal.
   and reports the primary's linear `RES_STATUS_ERROR`; a side the restart
   does not hold has no probe, and answers its Check rounds
   `ReplyCodeUnknownObject` until that `SyncupSide` arrives.
+* A restart inside the window whose stored conf a conf gate refuses
+  settles no fence. When DN8's side conf gate refuses a migration
+  source's stored request, the restart finds the side's per-CN linears
+  suspended and marks the window elapsed (DN12 rule 1), but its converge
+  of the side stops at that gate (DN8): no pass runs phase 2 and no timer
+  is armed. The linears stay suspended on their pre-fence tables, and the
+  side's Check rounds answer code zero at the stored revision, so the
+  worker re-sends nothing while that is the SP's revision
+  (`dnv-worker.md` RW4). They stay so until a `SyncupSide` the gate
+  accepts arrives; the restart's mark is still on the side's state, so
+  that converge ends the window (DN12). A `SyncupDn` that drops the side
+  ends it too: its node-level sweep puts the linears on their dm-errors
+  before it removes them (DN12 rule 3). When DN2 refuses the stored
+  extent size of the side's DN instead, the restart marks the window
+  elapsed the same way but converges none of that DN's sides (DN2), and a
+  `SyncupSide` that keeps the role at an exporting level does not end the
+  window. DN8 then checks only its first two bounds and accepts a request
+  that passes them. Its converge cannot size the side without an extent
+  size, so phase 2 reloads nothing. The side's and the DN's Check rounds
+  both answer code zero at their stored revisions, so the worker re-sends
+  nothing while those are the SP's and the DN's revisions. The linears
+  stay so until a `SyncupDn` that DN4 accepts: if it drops the side, its
+  node-level sweep ends the window as above; if not, the side's first
+  converge after it that gets past DN8's side conf gate ends it. Before
+  that, a `SyncupSide` that ends the role (DN12 rule 2) or takes the
+  side's exports away (DN12 rule 3) still ends it, since neither needs the
+  extent size. Only a corrupt store file, or an in-place upgrade, which is
+  not supported (DN2), produces such a request.
 * A side export whose build was abandoned between its namespace `mkdir` and
   its "device_path" write holds a namespace that names nobody. Every
   agent's attribution (DN6) reads that export as foreign, so no sweep

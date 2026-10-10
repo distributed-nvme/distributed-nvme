@@ -42,10 +42,12 @@ import (
 // ([D13]), so the exposure is external tooling during the window. Keeping the
 // window bounded, and never letting a device outlive it, is what makes the
 // trade acceptable. The bound does not hold across DN12 rule 1's known limit
-// (beginFence), nor past a command that fails: a phase-2 reload whose load
-// fails leaves the linear suspended rather than resume it onto its pre-fence
-// table and replay the window's IO onto the side's data (a reload fails
-// closed: dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
+// (beginFence), nor for a side whose stored request, or its DN's, a conf gate
+// refuses after a restart (dnagent.md, Known limits), nor past a command that
+// fails: a phase-2 reload whose load fails leaves the linear suspended rather
+// than resume it onto its pre-fence table and replay the window's IO onto the
+// side's data (a reload fails closed: dnagent.md, OS wrappers — `dm.go`,
+// `nvmet.go`, `nvmehost.go`).
 
 // beginFence reports whether this side is still inside the cutover window, and
 // starts the clock the first time it is asked. The caller holds the side's
@@ -72,7 +74,8 @@ import (
 // (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), so the linear
 // stays suspended on its pre-fence table
 // until a later converge's reload of it succeeds or the role's end resumes
-// it (unfenceLinears).
+// it (unfenceLinears). So does an adopted window on a side whose stored
+// request, or its DN's, a conf gate refuses (dnagent.md, Known limits).
 func (s *DnAgentServer) beginFence(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,11 +97,10 @@ func (s *DnAgentServer) beginFence(st *sideState) bool {
 // settleFence needs: beginFence would *start* one, which a converge that
 // builds nothing must never do.
 //
-// The adopted arm is what makes DN12's "treated as elapsed, and phase 2 runs
-// on the first converge" hold under the DN9 gate too: a restart-adopted fence
-// has no fenceAt, so reading that field alone would let an agent restart plus
-// one unreadable side device leave the per-CN linears suspended past [D12]'s
-// bound.
+// The adopted arm is what lets DN12 rule 1's adopted window end on a converge
+// that stops at the DN9 gate too: a restart-adopted fence has no fenceAt, so
+// reading that field alone would let an agent restart plus one unreadable
+// side device leave the per-CN linears suspended past [D12]'s bound.
 func (s *DnAgentServer) fenceStarted(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

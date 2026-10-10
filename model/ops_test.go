@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -731,6 +732,167 @@ func TestGroupBlocksRefusesAZero(t *testing.T) {
 		_, _, err := GroupBlocks(1024, tc.extentSize, tc.conf)
 		if err == nil || err.Error() != tc.wantErr {
 			t.Errorf("%s: got %v, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestSideZeroBytes pins the length to zero of a side (architecture.md, Side
+// provisioning protocol) on groups the group geometry really produces, at the
+// fixture's 1 GiB extents and 1 MiB blocks: a side of a meta group is zeroed
+// over its whole leg, which is the whole side whenever the extent size is a
+// multiple of the block size, and a side of a data group over its meta region
+// and its first data block — md superblock, bitmap and health block with
+// md-raid1, the health block alone without.
+func TestSideZeroBytes(t *testing.T) {
+	groupOf := func(extentSize uint64, conf *pb.BdevConf) *pb.Group {
+		t.Helper()
+		metaBlocks, dataBlocks, err := GroupBlocks(1, extentSize, conf)
+		if err != nil {
+			t.Fatalf("GroupBlocks: %v", err)
+		}
+		return &pb.Group{
+			GrpId:      7,
+			ExtCnt:     1,
+			MetaBlocks: metaBlocks,
+			DataBlocks: dataBlocks,
+		}
+	}
+	raid1 := groupOf(opsExtSize, testRaid1BdevConf(opsBlockSize, 128))
+	none := groupOf(opsExtSize, testBdevConf(opsBlockSize))
+	// An extent size that is not a multiple of the block size: the leg ends
+	// at its last whole block, and the tail behind it is addressed by no
+	// node, so it is not zeroed either.
+	ragged := groupOf(
+		opsExtSize+64*1024, testRaid1BdevConf(opsBlockSize, 128))
+	cases := []struct {
+		name   string
+		grp    *pb.Group
+		isMeta bool
+		want   uint64
+	}{
+		{"meta side: the whole side", raid1, true, opsExtSize},
+		{"md-raid1 data side: three meta blocks and one data block",
+			raid1, false, 4 * opsBlockSize},
+		{"redund_none data side: the health block and one data block",
+			none, false, 2 * opsBlockSize},
+		{"redund_none meta side: the whole side", none, true, opsExtSize},
+		{"meta side of a ragged extent: the leg, short of the side",
+			ragged, true, opsExtSize},
+		// The counts are the group's STORED ones, never recomputed: these
+		// two match no geometry at all.
+		{"stored counts, meta side",
+			&pb.Group{MetaBlocks: 5, DataBlocks: 9}, true, 14 * opsBlockSize},
+		{"stored counts, data side",
+			&pb.Group{MetaBlocks: 5, DataBlocks: 9}, false, 6 * opsBlockSize},
+	}
+	for _, tc := range cases {
+		got, err := SideZeroBytes(tc.grp, tc.isMeta, opsBlockSize)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %d (%v), want %d", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+// TestSideZeroBytesRefuses pins that SideZeroBytes, like GroupBlocks, resolves
+// nothing (architecture.md, Common validation): a zero among its stored
+// inputs, a length that overflows, or one the dn agent's side conf gate would
+// refuse as not a whole multiple of common.DnZeroAlign (dnagent.md DN8) is an
+// invalid stored conf naming the group, and never a length of zero the sp
+// worker could send.
+func TestSideZeroBytesRefuses(t *testing.T) {
+	grp := func(metaBlocks uint64, dataBlocks uint64) *pb.Group {
+		return &pb.Group{
+			GrpId:      7,
+			ExtCnt:     1,
+			MetaBlocks: metaBlocks,
+			DataBlocks: dataBlocks,
+		}
+	}
+	cases := []struct {
+		name      string
+		grp       *pb.Group
+		isMeta    bool
+		blockSize uint64
+		wantErr   string
+	}{
+		{
+			name:      "data_block_size zero",
+			grp:       grp(3, 1021),
+			isMeta:    true,
+			blockSize: 0,
+			wantErr: "invalid stored conf: " +
+				"bdev_conf.dm_pool_conf.data_block_size is zero",
+		},
+		{
+			name:      "meta_blocks zero",
+			grp:       grp(0, 1021),
+			isMeta:    false,
+			blockSize: opsBlockSize,
+			wantErr:   "invalid stored conf: group 7 meta_blocks is zero",
+		},
+		{
+			// A data side's length takes one data block whatever the
+			// count, but a stored zero is corruption all the same.
+			name:      "data_blocks zero",
+			grp:       grp(3, 0),
+			isMeta:    false,
+			blockSize: opsBlockSize,
+			wantErr:   "invalid stored conf: group 7 data_blocks is zero",
+		},
+		{
+			name:      "the block counts overflow",
+			grp:       grp(math.MaxUint64, 1),
+			isMeta:    true,
+			blockSize: opsBlockSize,
+			wantErr: fmt.Sprintf("invalid stored conf: group 7 "+
+				"meta_blocks %d and data_blocks 1 overflow the length to "+
+				"zero at data_block_size %d",
+				uint64(math.MaxUint64), opsBlockSize),
+		},
+		{
+			name:      "the bytes overflow, meta side",
+			grp:       grp(1<<43, 1<<43),
+			isMeta:    true,
+			blockSize: opsBlockSize,
+			wantErr: fmt.Sprintf("invalid stored conf: group 7 "+
+				"meta_blocks %d and data_blocks %d overflow the length to "+
+				"zero at data_block_size %d",
+				uint64(1<<43), uint64(1<<43), opsBlockSize),
+		},
+		{
+			name:      "the bytes overflow, data side",
+			grp:       grp(1<<44, 1),
+			isMeta:    false,
+			blockSize: opsBlockSize,
+			wantErr: fmt.Sprintf("invalid stored conf: group 7 "+
+				"meta_blocks %d and data_blocks 1 overflow the length to "+
+				"zero at data_block_size %d",
+				uint64(1<<44), opsBlockSize),
+		},
+		{
+			name:      "not a whole multiple, data side",
+			grp:       grp(3, 1021),
+			isMeta:    false,
+			blockSize: 512,
+			wantErr: "invalid stored conf: group 7 length to zero 2048 " +
+				"is not a multiple of 4096",
+		},
+		{
+			name:      "not a whole multiple, meta side",
+			grp:       grp(3, 5),
+			isMeta:    true,
+			blockSize: 1000,
+			wantErr: "invalid stored conf: group 7 length to zero 8000 " +
+				"is not a multiple of 4096",
+		},
+	}
+	for _, tc := range cases {
+		got, err := SideZeroBytes(tc.grp, tc.isMeta, tc.blockSize)
+		if err == nil || err.Error() != tc.wantErr {
+			t.Errorf("%s: got %v, want %q", tc.name, err, tc.wantErr)
+		}
+		if got != 0 {
+			t.Errorf("%s: a refusal returned the length %d", tc.name, got)
 		}
 	}
 }

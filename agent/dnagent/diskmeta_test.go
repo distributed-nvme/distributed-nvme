@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -180,7 +182,8 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 		}},
 	} {
 		meta := tc.build()
-		if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err == nil {
+		if _, err := meta.AllocSide(
+			ctx, testSp, testSide, 1, metaExtentSize); err == nil {
 			t.Errorf("%s: AllocSide succeeded", tc.name)
 		}
 		if _, err := meta.AllocCloneMeta(
@@ -188,7 +191,7 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 			t.Errorf("%s: AllocCloneMeta succeeded", tc.name)
 		}
 		if err := meta.SetSideZeroed(
-			ctx, testSp, testSide, 0, 1); err == nil {
+			ctx, testSp, testSide, 0, common.DnZeroAlign); err == nil {
 			t.Errorf("%s: SetSideZeroed succeeded", tc.name)
 		}
 		if _, _, ok := meta.Identity(); ok {
@@ -226,7 +229,8 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 1<<20); err != nil {
@@ -263,7 +267,8 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 
 	// Nothing has said whose disk this is: nothing is handed out.
 	unasked := reopen(node)
-	if _, err := unasked.AllocSide(ctx, testSp, testSide, 1); err == nil {
+	if _, err := unasked.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err == nil {
 		t.Error("an existing side record was handed out before any DN " +
 			"converge said whose disk this is")
 	}
@@ -283,7 +288,8 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 	// answer: the allocator's own read is the first to see the header, and
 	// the comparison refuses the records it holds.
 	foreign := restarted(testDn + 1)
-	if _, err := foreign.AllocSide(ctx, testSp, testSide, 1); err == nil ||
+	if _, err := foreign.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err == nil ||
 		!strings.Contains(err.Error(), "foreign disk") {
 		t.Errorf("existing side record on a foreign disk: %v", err)
 	}
@@ -319,7 +325,8 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 	// answers — the allocator's own — confirms it, and the existing records
 	// are handed out without a write.
 	ours := restarted(testDn)
-	if _, err := ours.AllocSide(ctx, testSp, testSide, 1); err != nil {
+	if _, err := ours.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 		t.Errorf("an existing side record was refused: %v", err)
 	}
 	if _, err := ours.AllocCloneMeta(
@@ -336,7 +343,8 @@ func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
 	}
 	noWrites("ours")
 	// A new record is the same comparison, and it goes through.
-	if _, err := ours.AllocSide(ctx, testSp, testSide2, 1); err != nil {
+	if _, err := ours.AllocSide(
+		ctx, testSp, testSide2, 1, metaExtentSize); err != nil {
 		t.Errorf("a new side record on a confirmed disk: %v", err)
 	}
 }
@@ -355,7 +363,8 @@ func TestDiskMetaCorruptHeaderRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "corrupt header") {
 		t.Fatalf("EnsureFormatted on a corrupt header = %v", err)
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err == nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err == nil {
 		t.Error("AllocSide succeeded on a corrupt header")
 	}
 	if _, err := meta.ProbeHeader(
@@ -367,6 +376,56 @@ func TestDiskMetaCorruptHeaderRefused(t *testing.T) {
 			t.Errorf("a corrupt-header disk was written: %s", call)
 		}
 	}
+}
+
+// A disk whose header carries another version of the format, under a valid
+// magic and a valid CRC, is refused by every call and never formatted over:
+// it is re-created to take this format.
+func TestDiskMetaRefusesAVersion1Header(t *testing.T) {
+	_, node := formatted(t)
+	ctx := context.Background()
+	raw, err := node.readBlock(
+		ctx, metaDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	if err != nil {
+		t.Fatalf("readBlock: %v", err)
+	}
+	v1 := append([]byte(nil), raw...)
+	binary.LittleEndian.PutUint32(v1[8:12], 1)
+	binary.LittleEndian.PutUint32(v1[dnHeaderCrcOff:],
+		crc32.ChecksumIEEE(v1[:dnHeaderCrcOff]))
+	node.corruptBlock(metaDisk, common.DnHeaderOffset, v1)
+	node.Reset()
+
+	const want = "unsupported disk header: version is 1, want 2"
+	meta := reopen(node)
+	if err := meta.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err == nil ||
+		err.Error() != want {
+		t.Fatalf("EnsureFormatted on a version-1 header = %v, want %q",
+			err, want)
+	}
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err == nil {
+		t.Error("AllocSide succeeded on a version-1 header")
+	}
+	if err := meta.SetSideZeroed(
+		ctx, testSp, testSide, 0, common.DnZeroAlign); err == nil {
+		t.Error("SetSideZeroed succeeded on a version-1 header")
+	}
+	if _, err := meta.AllocCloneMeta(
+		ctx, testSp, testMigrId, 1<<20); err == nil {
+		t.Error("AllocCloneMeta succeeded on a version-1 header")
+	}
+	if _, err := meta.ProbeHeader(
+		ctx, testCluster, testDn, metaExtentSize); err == nil ||
+		!strings.Contains(err.Error(), want) {
+		t.Errorf("ProbeHeader on a version-1 header = %v, want %q", err,
+			want)
+	}
+	if _, _, ok := meta.Identity(); ok {
+		t.Error("Identity reported a version-1 disk as usable")
+	}
+	assertNoWrite(t, node, "a version-1 disk")
 }
 
 func TestDiskMetaProbeHeader(t *testing.T) {
@@ -454,7 +513,8 @@ func TestDiskMetaProbeDropsATableTheDiskNoLongerHolds(t *testing.T) {
 		}},
 	} {
 		meta, node := formatted(t)
-		if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+		if _, err := meta.AllocSide(
+			ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 			t.Fatalf("%s: AllocSide: %v", tc.name, err)
 		}
 		tc.change(t, meta, node)
@@ -500,7 +560,7 @@ func TestDiskMetaSlotsAlternate(t *testing.T) {
 	for i, offset := range want {
 		node.Reset()
 		if _, err := meta.AllocSide(
-			ctx, testSp, testSide+uint64(i), 1); err != nil {
+			ctx, testSp, testSide+uint64(i), 1, metaExtentSize); err != nil {
 			t.Fatalf("AllocSide #%d: %v", i, err)
 		}
 		wantCall := fmt.Sprintf("writeblock %s off=%d", metaDisk, offset)
@@ -526,10 +586,12 @@ func TestDiskMetaTornNewestSlotFallsBack(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
 
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 4); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 4, 4*metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err) // → slot B, seq 2
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide2, 4); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide2, 4, 4*metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err) // → slot A, seq 3 (the newest)
 	}
 	// Tear slot A's proto body — the CRC covers exactly those bytes.
@@ -555,7 +617,7 @@ func TestDiskMetaStaleSlotRejectedAfterReformat(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 4; i++ {
 		if _, err := meta.AllocSide(
-			ctx, testSp, testSide+uint64(i), 1); err != nil {
+			ctx, testSp, testSide+uint64(i), 1, metaExtentSize); err != nil {
 			t.Fatalf("AllocSide: %v", err)
 		}
 	}
@@ -592,7 +654,8 @@ func TestDiskMetaStaleSlotRejectedAfterReformat(t *testing.T) {
 func TestDiskMetaBothSlotsInvalidIsCorruption(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 4); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 4, 4*metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	node.corruptBlock(metaDisk, common.DnTableSlotAOffset, make([]byte, 64))
@@ -608,7 +671,8 @@ func TestDiskMetaBothSlotsInvalidIsCorruption(t *testing.T) {
 	if !strings.Contains(err.Error(), "corrupt volume table") {
 		t.Errorf("error = %v, want a corrupt-volume-table error", err)
 	}
-	if _, err := back.AllocSide(ctx, testSp, testSide2, 1); err == nil {
+	if _, err := back.AllocSide(
+		ctx, testSp, testSide2, 1, metaExtentSize); err == nil {
 		t.Error("AllocSide handed out extents from a corrupt table")
 	}
 	for _, call := range node.Calls() {
@@ -624,10 +688,12 @@ func TestDiskMetaBothSlotsInvalidIsCorruption(t *testing.T) {
 func TestDiskMetaSlotEnvelopeIsChecksummed(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 4); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 4, 4*metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err) // slot B, seq 2
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide2, 4); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide2, 4, 4*metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err) // slot A, seq 3 — the live one
 	}
 
@@ -680,7 +746,8 @@ func TestDiskMetaFormatSlotWriteFailure(t *testing.T) {
 		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 		t.Fatalf("AllocSide after the retry: %v", err)
 	}
 	back := reopen(node)
@@ -698,7 +765,8 @@ func TestDiskMetaSaveFailureDoesNotCommit(t *testing.T) {
 	size := node.devSize[metaDisk]
 	delete(node.devSize, metaDisk)
 
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 2); err == nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 2, 2*metaExtentSize); err == nil {
 		t.Fatal("AllocSide succeeded with a failing device")
 	}
 	node.devSize[metaDisk] = size
@@ -709,7 +777,8 @@ func TestDiskMetaSaveFailureDoesNotCommit(t *testing.T) {
 		t.Errorf("Describe = %q, want the pre-save table", got)
 	}
 	// The retry succeeds and lands on the same slot the failed one targeted.
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 2); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 2, 2*metaExtentSize); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if _, ok, _ := meta.LookupSide(ctx, testSp, testSide); !ok {
@@ -722,10 +791,10 @@ func TestDiskMetaSaveFailureDoesNotCommit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDiskMetaAllocSideContiguous(t *testing.T) {
-	meta, _ := formatted(t)
+	meta, node := formatted(t)
 	ctx := context.Background()
 
-	first, err := meta.AllocSide(ctx, testSp, testSide, 4)
+	first, err := meta.AllocSide(ctx, testSp, testSide, 4, 4*metaExtentSize)
 	if err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
@@ -733,16 +802,16 @@ func TestDiskMetaAllocSideContiguous(t *testing.T) {
 		first.GetRunList()[0].GetCount() != 4 {
 		t.Fatalf("first allocation = %v, want one run 0+4", first.GetRunList())
 	}
-	if sideZeroedCnt(first) != 0 || sideExtCnt(first) != 4 {
-		t.Errorf("a fresh record must start not-zeroed (DN9): %d/%d",
-			sideZeroedCnt(first), sideExtCnt(first))
-	}
-	if len(first.GetZeroedBits()) != 0 {
-		t.Errorf("a fresh record carries a bitmap: %v",
-			first.GetZeroedBits())
+	// The record carries the length to zero from the start, and nothing of
+	// it zeroed (DN9).
+	if sideZeroBytes(first) != 4*metaExtentSize || sideZeroedBytes(first) != 0 {
+		t.Errorf("a fresh record must start with nothing zeroed (DN9): "+
+			"zeroed/zero bytes = %d/%d, want 0/%d", sideZeroedBytes(first),
+			sideZeroBytes(first), 4*metaExtentSize)
 	}
 
-	second, err := meta.AllocSide(ctx, testSp, testSide2, 3)
+	second, err := meta.AllocSide(
+		ctx, testSp, testSide2, 3, 3*metaExtentSize)
 	if err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
@@ -751,19 +820,67 @@ func TestDiskMetaAllocSideContiguous(t *testing.T) {
 			second.GetRunList())
 	}
 
-	// Re-calling with the same size returns the same record and writes
-	// nothing; a different size is an error (resize is out of scope).
-	again, err := meta.AllocSide(ctx, testSp, testSide, 4)
+	// Re-calling with the same size and length returns the same record and
+	// writes nothing; a different size is an error (resize is out of scope),
+	// and so is a different length to zero, which is fixed at allocation. The
+	// extent check comes first.
+	node.Reset()
+	again, err := meta.AllocSide(ctx, testSp, testSide, 4, 4*metaExtentSize)
 	if err != nil {
 		t.Fatalf("re-AllocSide: %v", err)
 	}
 	if again.GetRunList()[0].GetStart() != 0 {
 		t.Errorf("re-AllocSide moved the record: %v", again.GetRunList())
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 5); err == nil {
-		t.Error("AllocSide accepted a resize")
-	} else if !strings.Contains(err.Error(), "allocated 4 extents, want 5") {
-		t.Errorf("resize error = %v", err)
+	for _, tc := range []struct {
+		extCnt, zeroBytes uint64
+		want              string
+	}{
+		{5, 5 * metaExtentSize, "allocated 4 extents, want 5"},
+		{5, metaExtentSize, "allocated 4 extents, want 5"},
+		{4, metaExtentSize, fmt.Sprintf(
+			"allocated with zero_bytes %d, want %d",
+			4*metaExtentSize, metaExtentSize)},
+	} {
+		_, err := meta.AllocSide(ctx, testSp, testSide, tc.extCnt, tc.zeroBytes)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("AllocSide(%d, %d) on an existing record = %v, want %q",
+				tc.extCnt, tc.zeroBytes, err, tc.want)
+		}
+	}
+	assertNoWrite(t, node, "a re-call or a refused mismatch")
+}
+
+// A new record must be one that can finish: a length to zero of zero would
+// never read as done, and one past the side's own extents would zero bytes
+// the side does not own. Both are refused before anything is allocated or
+// written, whatever the caller checked (DN8's gate refuses both first).
+func TestDiskMetaAllocSideRefusesAnUnusableLength(t *testing.T) {
+	meta, node := formatted(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		zeroBytes uint64
+		want      string
+	}{
+		{0, "zero_bytes is 0"},
+		{4*metaExtentSize + common.DnZeroAlign, fmt.Sprintf(
+			"zero_bytes %d exceeds the side's %d bytes",
+			4*metaExtentSize+common.DnZeroAlign, 4*metaExtentSize)},
+	} {
+		_, err := meta.AllocSide(ctx, testSp, testSide, 4, tc.zeroBytes)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("AllocSide(4, %d) = %v, want %q", tc.zeroBytes, err,
+				tc.want)
+		}
+	}
+	assertNoWrite(t, node, "a refused allocation")
+	if _, ok, _ := meta.LookupSide(ctx, testSp, testSide); ok {
+		t.Error("a refused allocation left a record")
+	}
+	// The whole side, a meta group's length, is the boundary that passes.
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 4, 4*metaExtentSize); err != nil {
+		t.Errorf("AllocSide of the whole side: %v", err)
 	}
 }
 
@@ -776,11 +893,13 @@ func TestDiskMetaAllocSideFragmentationFallback(t *testing.T) {
 	// Fill the disk with 1-extent sides, then free every other one: the
 	// largest free run is 1, so a 3-extent side must be stitched.
 	for i := uint64(0); i < metaExtCnt; i++ {
-		if _, err := meta.AllocSide(ctx, testSp, i, 1); err != nil {
+		if _, err := meta.AllocSide(
+			ctx, testSp, i, 1, metaExtentSize); err != nil {
 			t.Fatalf("filling: %v", err)
 		}
 	}
-	if _, err := meta.AllocSide(ctx, testSp, metaExtCnt, 1); err == nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, metaExtCnt, 1, metaExtentSize); err == nil {
 		t.Error("the allocator handed out an extent past the end")
 	}
 	for i := uint64(1); i < metaExtCnt; i += 2 {
@@ -789,7 +908,7 @@ func TestDiskMetaAllocSideFragmentationFallback(t *testing.T) {
 		}
 	}
 
-	rec, err := meta.AllocSide(ctx, testSp, 0xf00d, 3)
+	rec, err := meta.AllocSide(ctx, testSp, 0xf00d, 3, 3*metaExtentSize)
 	if err != nil {
 		t.Fatalf("fragmented AllocSide: %v", err)
 	}
@@ -826,13 +945,16 @@ func TestDiskMetaExhaustion(t *testing.T) {
 	meta, _ := formatted(t)
 	ctx := context.Background()
 
-	if _, err := meta.AllocSide(ctx, testSp, testSide, metaExtCnt+1); err == nil {
+	if _, err := meta.AllocSide(ctx, testSp, testSide, metaExtCnt+1,
+		(metaExtCnt+1)*metaExtentSize); err == nil {
 		t.Error("AllocSide handed out more extents than exist")
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide, metaExtCnt); err != nil {
+	if _, err := meta.AllocSide(ctx, testSp, testSide, metaExtCnt,
+		metaExtCnt*metaExtentSize); err != nil {
 		t.Fatalf("whole-disk AllocSide: %v", err)
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide2, 1); err == nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide2, 1, metaExtentSize); err == nil {
 		t.Error("AllocSide succeeded on a full disk")
 	}
 
@@ -911,13 +1033,14 @@ func TestDiskMetaCloneMetaZeroedBeforeRecord(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Rule 5 — free is idempotent; the zeroed bits; the sweep snapshots
+// Rule 5 — free is idempotent; the zeroed count; the sweep snapshots
 // ---------------------------------------------------------------------------
 
 func TestDiskMetaFreeIsIdempotent(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 2); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 2, 2*metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(
@@ -956,26 +1079,28 @@ func TestDiskMetaFreeIsIdempotent(t *testing.T) {
 	}
 }
 
-// The DN9 batch setter: half-open ranges, an idempotent re-set that writes
-// nothing, and progress that survives the A/B slot round trip.
+// The DN9 batch setter in bytes: it advances the zeroed count as a prefix,
+// a replay at or below the count writes nothing, and progress survives the
+// A/B slot round trip.
 func TestDiskMetaSetSideZeroed(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 4); err != nil {
+	const mib = metaExtentSize
+	if _, err := meta.AllocSide(ctx, testSp, testSide, 4, 4*mib); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
-	if sideZeroedCnt(rec) != 0 || sideFullyZeroed(rec) {
+	if sideZeroedBytes(rec) != 0 || sideFullyZeroed(rec) {
 		t.Fatalf("a fresh record is already zeroed: %d/%d",
-			sideZeroedCnt(rec), sideExtCnt(rec))
+			sideZeroedBytes(rec), sideZeroBytes(rec))
 	}
-	if from, count, ok := sideNextZeroBatch(rec, 10); !ok ||
-		from != 0 || count != 4 {
-		t.Fatalf("first batch = (%d,%d,%v), want (0,4,true)",
-			from, count, ok)
+	if from, count, ok := sideNextZeroBatch(rec, 10*mib); !ok ||
+		from != 0 || count != 4*mib {
+		t.Fatalf("first batch = (%d,%d,%v), want (0,%d,true)",
+			from, count, ok, 4*mib)
 	}
 	// meta_info carries the same fact per node: provisioning= counts the sides
-	// whose bits are INCOMPLETE, not the sides (DN18). An
+	// whose length to zero is not yet zeroed, not the sides (DN18). An
 	// operator reading it on a fully provisioned DN must see 0.
 	if got := meta.Describe(); !strings.Contains(got, "provisioning=1") {
 		t.Errorf("Describe() = %q, want provisioning=1 while the side is "+
@@ -984,157 +1109,208 @@ func TestDiskMetaSetSideZeroed(t *testing.T) {
 
 	// An empty range is a no-op, not an error, and writes nothing.
 	node.Reset()
-	if err := meta.SetSideZeroed(ctx, testSp, testSide, 2, 2); err != nil {
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, mib, mib); err != nil {
 		t.Fatalf("empty SetSideZeroed: %v", err)
 	}
 	assertNoWrite(t, node, "an empty zeroed range")
 
-	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 2); err != nil {
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, mib); err != nil {
 		t.Fatalf("SetSideZeroed: %v", err)
 	}
 	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
-	if sideZeroedCnt(rec) != 2 || sideFullyZeroed(rec) {
-		t.Errorf("after [0,2): %d/%d zeroed, fully=%v",
-			sideZeroedCnt(rec), sideExtCnt(rec), sideFullyZeroed(rec))
+	if sideZeroedBytes(rec) != mib || sideFullyZeroed(rec) {
+		t.Errorf("after [0,1 MiB): %d/%d zeroed, done=%v",
+			sideZeroedBytes(rec), sideZeroBytes(rec), sideFullyZeroed(rec))
 	}
-	if from, count, ok := sideNextZeroBatch(rec, 10); !ok ||
-		from != 2 || count != 2 {
-		t.Errorf("second batch = (%d,%d,%v), want (2,2,true)",
-			from, count, ok)
+	if from, count, ok := sideNextZeroBatch(rec, 10*mib); !ok ||
+		from != mib || count != 3*mib {
+		t.Errorf("second batch = (%d,%d,%v), want (%d,%d,true)",
+			from, count, ok, mib, 3*mib)
 	}
 
-	// Re-setting a range whose bits are already set issues no write: that is
-	// what makes a restart's replay free (SH16).
+	// A batch at or below the count issues no write: that is what makes a
+	// restart's replay free (SH16).
 	node.Reset()
-	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 2); err != nil {
-		t.Fatalf("re-SetSideZeroed: %v", err)
+	for _, tc := range []struct{ from, to uint64 }{
+		{0, mib}, {0, mib / 2}, {mib / 2, mib},
+	} {
+		if err := meta.SetSideZeroed(
+			ctx, testSp, testSide, tc.from, tc.to); err != nil {
+			t.Fatalf("replayed SetSideZeroed [%d,%d): %v", tc.from, tc.to, err)
+		}
 	}
 	assertNoWrite(t, node, "re-zeroing an already-zeroed range")
 
-	if err := meta.SetSideZeroed(ctx, testSp, testSide, 2, 4); err != nil {
+	// A batch that starts above the count would mark bytes no batch zeroed:
+	// refused, before any write.
+	node.Reset()
+	if err := meta.SetSideZeroed(
+		ctx, testSp, testSide, 2*mib, 3*mib); err == nil ||
+		err.Error() != fmt.Sprintf("zeroed range [%d,%d) leaves a gap "+
+			"after the %d bytes already zeroed", 2*mib, 3*mib, mib) {
+		t.Errorf("a gap = %v, want the gap refusal", err)
+	}
+	assertNoWrite(t, node, "a zeroed range past a gap")
+
+	// A batch that starts inside the count and ends past it advances it.
+	if err := meta.SetSideZeroed(
+		ctx, testSp, testSide, mib/2, 4*mib); err != nil {
 		t.Fatalf("SetSideZeroed: %v", err)
 	}
 	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
-	if !sideFullyZeroed(rec) {
-		t.Errorf("after [2,4) the side is not fully zeroed: %d/%d",
-			sideZeroedCnt(rec), sideExtCnt(rec))
+	if !sideFullyZeroed(rec) || sideZeroedBytes(rec) != 4*mib {
+		t.Errorf("after [0.5,4 MiB) the side is not done: %d/%d",
+			sideZeroedBytes(rec), sideZeroBytes(rec))
 	}
-	if _, _, ok := sideNextZeroBatch(rec, 10); ok {
-		t.Error("a fully zeroed side still offers a batch")
+	if _, _, ok := sideNextZeroBatch(rec, 10*mib); ok {
+		t.Error("a zeroed side still offers a batch")
 	}
 	if got := meta.Describe(); !strings.Contains(got, "sides=1") ||
 		!strings.Contains(got, "provisioning=0") {
 		t.Errorf("Describe() = %q, want sides=1 with provisioning=0 once "+
-			"every bit is set", got)
+			"the length is zeroed", got)
 	}
 
 	// Out of range and inverted ranges are refused, and refused before any
-	// write: the record's own extent total is the bit count, so a batch
-	// computed against a stale record can never set a pad bit.
+	// write: the record's own length to zero bounds the count, so a batch
+	// computed against a stale record can never mark bytes past it.
 	node.Reset()
-	for _, tc := range []struct{ from, to uint64 }{{0, 5}, {3, 1}, {4, 9}} {
+	for _, tc := range []struct{ from, to uint64 }{
+		{0, 4*mib + common.DnZeroAlign}, {3 * mib, mib}, {4 * mib, 8 * mib},
+	} {
 		err := meta.SetSideZeroed(ctx, testSp, testSide, tc.from, tc.to)
 		if err == nil {
 			t.Errorf("SetSideZeroed accepted [%d,%d)", tc.from, tc.to)
 			continue
 		}
-		if !strings.Contains(err.Error(), fmt.Sprintf(
-			"zeroed range [%d,%d) is outside the side's 4 extents",
-			tc.from, tc.to)) {
+		if err.Error() != fmt.Sprintf(
+			"zeroed range [%d,%d) is outside the side's %d bytes to zero",
+			tc.from, tc.to, 4*mib) {
 			t.Errorf("range error = %v", err)
 		}
 	}
 	assertNoWrite(t, node, "an out-of-range zeroed range")
 
-	if err := meta.SetSideZeroed(ctx, testSp, 0xdead, 0, 1); err == nil {
+	if err := meta.SetSideZeroed(
+		ctx, testSp, 0xdead, 0, common.DnZeroAlign); err == nil {
 		t.Error("SetSideZeroed accepted an unknown side")
 	}
 
-	// The bits survive a reload — the disk, not the local store, is
+	// The count survives a reload — the disk, not the local store, is
 	// authoritative ([D13]), and every batch went through the alternating
 	// A/B slots.
 	back := reopen(node)
 	rec, ok, _ := back.LookupSide(ctx, testSp, testSide)
 	if !ok || !sideFullyZeroed(rec) {
-		t.Error("the zeroed bits did not survive a reload")
+		t.Error("the zeroed count did not survive a reload")
 	}
 
 	// The [D15] invariant: zeroed is a property of the side's ALLOCATION, not of
 	// the disk extent. Freeing and re-allocating the same ids hands back the
-	// same extents with a record that starts all-not-zeroed again.
+	// same extents with a record that starts with nothing zeroed again.
 	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
 		t.Fatalf("FreeSide: %v", err)
 	}
-	again, err := meta.AllocSide(ctx, testSp, testSide, 4)
+	again, err := meta.AllocSide(ctx, testSp, testSide, 4, 4*mib)
 	if err != nil {
 		t.Fatalf("re-AllocSide: %v", err)
 	}
 	if again.GetRunList()[0].GetStart() != 0 {
 		t.Fatalf("the re-allocation moved: %v", again.GetRunList())
 	}
-	if sideZeroedCnt(again) != 0 || sideFullyZeroed(again) {
-		t.Errorf("a re-allocated side inherited zeroed bits: %d/%d",
-			sideZeroedCnt(again), sideExtCnt(again))
+	if sideZeroedBytes(again) != 0 || sideFullyZeroed(again) {
+		t.Errorf("a re-allocated side inherited a zeroed count: %d/%d",
+			sideZeroedBytes(again), sideZeroBytes(again))
 	}
 }
 
-// The on-disk encoding of zeroed_bits: LSB-first, trailing pad bits 0, and a
-// bit count that is the side's extent total rather than len(bits)*8 — a
-// 10-extent side must never look 16-extent .
-func TestDiskMetaZeroedBitsEncoding(t *testing.T) {
-	meta, _ := formatted(t)
+// The record's two byte fields round-trip through the A/B slots: AllocSide
+// writes the length to zero, SetSideZeroed the count, and a second DiskMeta
+// over the same disk reads both back, through LookupSide and the sweep's
+// snapshot alike. The field numbers the record reserves stay reserved and
+// name no field.
+func TestDiskMetaSideRecordBytes(t *testing.T) {
+	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 10); err != nil {
+	const zero = 2<<20 + 8<<10
+	if _, err := meta.AllocSide(ctx, testSp, testSide, 4, zero); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
-
-	// A batch that crosses a byte boundary sets exactly its own bits.
-	if err := meta.SetSideZeroed(ctx, testSp, testSide, 6, 9); err != nil {
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 1<<20); err != nil {
 		t.Fatalf("SetSideZeroed: %v", err)
 	}
-	rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
-	if got := rec.GetZeroedBits(); len(got) != 2 ||
-		got[0] != 0xc0 || got[1] != 0x01 {
-		t.Fatalf("zeroed_bits after [6,9) = %#v, want [0xc0 0x01]", got)
+	back := reopen(node)
+	if err := back.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
+		t.Fatalf("EnsureFormatted: %v", err)
 	}
-	if got := sideZeroedCnt(rec); got != 3 {
-		t.Errorf("zeroed count = %d, want 3", got)
+	rec, ok, err := back.LookupSide(ctx, testSp, testSide)
+	if err != nil || !ok {
+		t.Fatalf("LookupSide after a reload: %v %v", ok, err)
+	}
+	if sideZeroBytes(rec) != zero || sideZeroedBytes(rec) != 1<<20 {
+		t.Errorf("reloaded zeroed/zero bytes = %d/%d, want %d/%d",
+			sideZeroedBytes(rec), sideZeroBytes(rec), 1<<20, zero)
+	}
+	recs := mustSideRecords(t, back, ctx)
+	if len(recs) != 1 || sideZeroBytes(recs[0]) != zero ||
+		sideZeroedBytes(recs[0]) != 1<<20 {
+		t.Errorf("SideRecords after a reload = %v", recs)
+	}
+	// The count resumes where the reload found it.
+	if from, count, ok := sideNextZeroBatch(rec, 64<<20); !ok ||
+		from != 1<<20 || count != zero-1<<20 {
+		t.Errorf("next batch after a reload = (%d,%d,%v), want (%d,%d,true)",
+			from, count, ok, 1<<20, zero-1<<20)
 	}
 
-	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 10); err != nil {
-		t.Fatalf("SetSideZeroed: %v", err)
-	}
-	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
-	if got := rec.GetZeroedBits(); len(got) != 2 ||
-		got[0] != 0xff || got[1] != 0x03 {
-		t.Fatalf("zeroed_bits after [0,10) = %#v, want [0xff 0x03]", got)
-	}
-	// The pad bits of the last byte stay 0, and the count is 10 — not the 16
-	// a len(bits)*8 bit count would report.
-	if got := sideZeroedCnt(rec); got != 10 {
-		t.Errorf("zeroed count = %d, want 10", got)
-	}
-	if !sideFullyZeroed(rec) {
-		t.Error("10 of 10 extents zeroed is not fully zeroed")
+	assertReservedNumbers(t,
+		(&pb.DnDiskTable_SideRecord{}).ProtoReflect().Descriptor(), 3, 5)
+}
+
+// assertReservedNumbers checks that a message reserves each number and has
+// no field at it. It reads the descriptor and decodes nothing: protobuf
+// decodes a value whose wire type does not match its field into unknown
+// fields with no error, so a check by decoding can pass whether or not a
+// field has taken the number.
+func assertReservedNumbers(
+	t *testing.T,
+	md protoreflect.MessageDescriptor,
+	numbers ...protoreflect.FieldNumber,
+) {
+	t.Helper()
+	for _, n := range numbers {
+		if !md.ReservedRanges().Has(n) {
+			t.Errorf("%s does not reserve field number %d", md.FullName(), n)
+		}
+		if fd := md.Fields().ByNumber(n); fd != nil {
+			t.Errorf("%s has field %s at the reserved number %d",
+				md.FullName(), fd.Name(), n)
+		}
 	}
 }
 
-// sideNextZeroBatch walks a side in DnZeroBatchExtCnt-sized steps and stops
-// exactly at the side's extent total, which is not a multiple of 8 (nor of the
-// batch size) — the case where a pad-bit-counting cursor would run off the end
-// of the side.
+// sideNextZeroBatch walks a side in batch-sized steps and stops exactly at
+// the record's length to zero, which here is no whole number of batches nor
+// of extents: the last batch is cut short at the length, byte for byte. A
+// count set from outside — a restart's stored one — is where the walk
+// resumes, not the next batch boundary.
 func TestDiskMetaNextZeroBatchSteps(t *testing.T) {
 	meta, _ := formatted(t)
 	ctx := context.Background()
-	const extCnt = 21
-	if _, err := meta.AllocSide(ctx, testSp, testSide, extCnt); err != nil {
+	const extCnt = 22
+	const zero = 21<<20 + 8<<10
+	const batch = 10 << 20
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, extCnt, zero); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 
-	want := [][2]uint64{{0, 10}, {10, 10}, {20, 1}}
+	want := [][2]uint64{{0, 10 << 20}, {10 << 20, 10 << 20},
+		{20 << 20, 1<<20 + 8<<10}}
 	for _, step := range want {
 		rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
-		from, count, ok := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt)
+		from, count, ok := sideNextZeroBatch(rec, batch)
 		if !ok || from != step[0] || count != step[1] {
 			t.Fatalf("batch = (%d,%d,%v), want (%d,%d,true)",
 				from, count, ok, step[0], step[1])
@@ -1145,30 +1321,37 @@ func TestDiskMetaNextZeroBatchSteps(t *testing.T) {
 		}
 	}
 	rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
-	if _, _, ok := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt); ok {
-		t.Error("the walk did not stop at the side's last extent")
+	if _, _, ok := sideNextZeroBatch(rec, batch); ok {
+		t.Error("the walk did not stop at the side's length to zero")
 	}
-	if got := sideZeroedCnt(rec); got != extCnt {
-		t.Errorf("zeroed count = %d, want %d", got, extCnt)
+	if got := sideZeroedBytes(rec); got != zero {
+		t.Errorf("zeroed count = %d, want %d", got, zero)
 	}
 
-	// A hole left behind by a failed batch is picked up again from
-	// first-unset, not from a count-derived offset (DN9).
+	// A count stored mid-batch is where the next batch starts.
 	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
 		t.Fatalf("FreeSide: %v", err)
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide, extCnt); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, extCnt, zero); err != nil {
 		t.Fatalf("re-AllocSide: %v", err)
 	}
 	if err := meta.SetSideZeroed(
-		ctx, testSp, testSide, 3, extCnt); err != nil {
+		ctx, testSp, testSide, 0, 3<<20+4<<10); err != nil {
 		t.Fatalf("SetSideZeroed: %v", err)
 	}
 	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
-	from, count, ok := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt)
-	if !ok || from != 0 || count != 3 {
-		t.Errorf("batch over a hole = (%d,%d,%v), want (0,3,true)",
-			from, count, ok)
+	from, count, ok := sideNextZeroBatch(rec, batch)
+	if !ok || from != 3<<20+4<<10 || count != batch {
+		t.Errorf("batch from a stored count = (%d,%d,%v), want (%d,%d,true)",
+			from, count, ok, 3<<20+4<<10, batch)
+	}
+	// A record with no length to zero offers nothing, and is never done.
+	empty := &pb.DnDiskTable_SideRecord{}
+	if _, _, ok := sideNextZeroBatch(empty, batch); ok ||
+		sideFullyZeroed(empty) {
+		t.Error("a record with a length of zero offered a batch or read " +
+			"as done")
 	}
 }
 
@@ -1185,10 +1368,12 @@ func assertNoWrite(t *testing.T, node *fakeNode, what string) {
 func TestDiskMetaRecordSnapshots(t *testing.T) {
 	meta, _ := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide2, 1); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide2, 1, metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(
@@ -1226,8 +1411,8 @@ func TestDiskMetaEnvelopeLayout(t *testing.T) {
 	if string(hdr[0:8]) != "DNVDISK1" {
 		t.Errorf("header magic = %q", hdr[0:8])
 	}
-	if got := binary.LittleEndian.Uint32(hdr[8:12]); got != 1 {
-		t.Errorf("header version = %d, want 1", got)
+	if got := binary.LittleEndian.Uint32(hdr[8:12]); got != 2 {
+		t.Errorf("header version = %d, want 2", got)
 	}
 
 	slot, err := node.readBlock(ctx, metaDisk, common.DnTableSlotAOffset, 4096)
@@ -1299,8 +1484,8 @@ func TestDiskMetaMultiBlockSlot(t *testing.T) {
 	// One extent each, ids wide enough that the serialized records are not
 	// varint-tiny: 256 of them run the table well past one block.
 	for i := uint64(0); i < metaExtCnt; i++ {
-		if _, err := meta.AllocSide(ctx,
-			0xdeadbeefcafe0000+i, 0xfeedfacefeed0000+i, 1); err != nil {
+		if _, err := meta.AllocSide(ctx, 0xdeadbeefcafe0000+i,
+			0xfeedfacefeed0000+i, 1, metaExtentSize); err != nil {
 			t.Fatalf("AllocSide %d: %v", i, err)
 		}
 	}
@@ -1339,6 +1524,11 @@ func TestDiskMetaMultiBlockSlot(t *testing.T) {
 		if runTotal(rec) != 1 {
 			t.Fatalf("record %d has %d extents, want 1", i, runTotal(rec))
 		}
+		if sideZeroBytes(rec) != metaExtentSize || sideZeroedBytes(rec) != 0 {
+			t.Fatalf("record %d zeroed/zero bytes = %d/%d after reload, "+
+				"want 0/%d", i, sideZeroedBytes(rec), sideZeroBytes(rec),
+				metaExtentSize)
+		}
 		idx := rec.GetRunList()[0].GetStart()
 		if seen[idx] {
 			t.Fatalf("extent %d handed out twice", idx)
@@ -1365,7 +1555,8 @@ func TestDiskMetaAllocIsDeterministic(t *testing.T) {
 	layout := func() string {
 		meta, _ := formatted(t)
 		for i := uint64(0); i < metaExtCnt; i++ {
-			if _, err := meta.AllocSide(ctx, 1, i, 1); err != nil {
+			if _, err := meta.AllocSide(
+				ctx, 1, i, 1, metaExtentSize); err != nil {
 				t.Fatalf("alloc %d: %v", i, err)
 			}
 		}
@@ -1374,7 +1565,7 @@ func TestDiskMetaAllocIsDeterministic(t *testing.T) {
 				t.Fatalf("free %d: %v", i, err)
 			}
 		}
-		rec, err := meta.AllocSide(ctx, 3, 99, 7)
+		rec, err := meta.AllocSide(ctx, 3, 99, 7, 7*metaExtentSize)
 		if err != nil {
 			t.Fatalf("fragmented alloc: %v", err)
 		}
@@ -1444,7 +1635,8 @@ func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("EnsureFormatted: %v", err)
 	}
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 1, metaExtentSize); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	if _, err := meta.AllocCloneMeta(

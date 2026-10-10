@@ -26,6 +26,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **auto_suspend** — A transfer attribute that parks the origin namespace on every cntlr for as long as the transfer exists, so the transfer is the only reader and writer of the bytes; an auto-resume clone on the same thin device overrides it.
 
+**backing pattern** — The e2e suite's one random pattern per run, written into every new backing file before its dn agent starts, at two places of the first extent: where a data group's side placed there has its first data block, and at the end of that extent, so that setup can read through the side devices how far each side's zeroing reached (see `e2e_integtest.md` E2E5).
+
 **base state** — The once-per-node state a node syncup ensures before any object and no sweep removes: on a disk node the dnv disk format and the agent's nvmet port, on a controller node the tmpfs, the sparse arena file, its single loop device and the port (see `cnagent.md` CN5). A check round that reads a piece of the controller node's base state absent names it in its verdict, so the worker re-sends the node syncup.
 
 **behavior file** — The JSON file a fake agent or fake gateway re-reads whenever it changes to decide what to report or reply (`behavior.json`): statuses, rows, hangs, dropped streams and forced reply codes. A malformed file leaves the behavior in force unchanged.
@@ -35,6 +37,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **bitmap chunk** — One stored piece of a skip bitmap. A migration chunk is an immutable append in sequence (`MigrBitmap`, `bm_idx`); a clone chunk is addressed by the pair of source slice and chunk index, self-positioned at a fixed quantum, and may grow in place (`CloneBitmap`, `src_slice_idx`, `bm_idx`).
 
 **bitmap push** — The unary delivery of one chunk to the agent that runs the dm-clone: `PushMigrBitmap` to the destination side's disk node, `PushCloneBitmap` to the primary cntlr's controller node. A push carries no revision and passes no revision gate, refused only for a migration or clone the agent does not know or a clone chunk addressed outside the clone's geometry; the worker keeps one in flight per migration or clone, in ascending address order.
+
+**block zeroing** — dm-thin's write of a whole block when it provisions the block for a thin device: zeros around a write that covers only part of the block, or the write alone when it covers all of it, so that a host never reads what the block held before. dnv's thin pools never skip it (dm-thin's "skip_block_zeroing" feature), which is what keeps one pool's data unreadable from another (see `architecture.md`, [D15]).
 
 **build phase, sweep phase** — The two halves of a cntlr converge: the sweep phase removes, top-down, what the node holds of the pool that the wanted set does not name, and the build phase then ensures, bottom-up, legs, groups, pools, thin volumes, raid0s, clones, transfers and namespaces, moving namespaces to optimized last.
 
@@ -84,7 +88,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **concat** — The multi-target dm-linear that joins a slice's group devices end to end in list order, one over its meta groups (`CnPoolMetaName`) and one over its data groups (`CnPoolDataName`), on which the slice's thin pool sits: a grow appends a target and reloads the pool, and the provisioning deferral truncates a concat to its list's longest leading run of effective groups, never dropping a group out of the middle (see `cnagent.md` CN9, CN13).
 
-**conf gate** — An agent's refusal of a request whose conf carries a value the control plane cannot have written, such as a zero geometry member (`ReplyCodeInvalidConf`). It runs after the revision gate and before the request becomes desired state, so nothing converges and nothing is persisted.
+**conf gate** — An agent's refusal of a request whose conf carries a value the control plane cannot have written, such as a zero geometry member, or a side's length to zero outside its bounds: a length of zero, one not a multiple of `DnZeroAlign`, or one longer than the side (`ReplyCodeInvalidConf`). It runs after the revision gate and before the request becomes desired state, so nothing converges and nothing is persisted.
 
 **connect retry** — An agent's background re-converge of an object whose last pass left a reason to try again: on the dn, a migration destination whose build stopped short, at the connect to its source or at another step (see `dnagent.md` DN13); on the cn, a leg or clone source that failed to converge, a failed clone step, a group member that is not yet available, or an ns-dev the build held off its raid0 (see `cnagent.md` CN10). Each attempt is a whole converge that decides afresh whether a reason to retry remains.
 
@@ -256,6 +260,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **leg repair** — The sp worker's reaction for a leg unhealthy past its threshold: switch in a ready spare of the group, or wait for a pending one, or create a spare leg on a fresh disk node and switch it in when it is ready. The replaced leg is parked.
 
+**leg span** — The meta region and the data region of a side together: every whole block of the pool's block size its extents hold, which is what the leg device covers. It is the whole side whenever the extent size is a multiple of the block size, and in any case all of it but a tail shorter than one block; a side of a meta group is zeroed over its leg span (see `architecture.md`, Group on-leg layout: meta region, data region, health block).
+
 **level, sp level** — A pool's degradation ladder (`SpLevel`), from read-write through read-only, no clone, no thin pool, no redundancy, no migration and no side, to disabled; each step suppresses the resources above it so an operator can take a damaged pool apart in stages, and read-only is enforced on the controller node by failing writes.
 
 **listing rule, discovery listing rule** — The rule that decides which cntlrs' addresses a pool's discovery records carry: a cntlr is listed while it is enabled and either is the primary or has a zero health epoch, which names the primary and every standby a failover may elect (`CdcListed`, `CdcTrConfList`; see `architecture.md` [D18]). Every writer of a `CdcEntry` applies it.
@@ -279,6 +285,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **meta region, data region** — The two parts of every leg: the meta region at the head, holding the md superblock and write-intent bitmap of a redundant leg and the health block of every leg, and the data region behind it, which is the only part the pool sees.
 
 **migration** — `Migration`, the live move of one side of a leg to another disk node: once the destination side is provisioned the source side fences its per-CN paths and exports its side device to the destination disk node, whose dm-clone serves the leg while it pulls the bytes, and the finish removes the source side. While it runs the leg has a source side and a destination side, each side's syncup request carrying its role (`migr_src_conf`, `migr_dst_conf`).
+
+**migration gap** — The time in which the primary has no usable path to a migrating leg: from the source side's first step, which moves its per-CN namespaces to inaccessible, until the primary's path to the destination side is live and optimized (see `architecture.md`, Known limits, for what it blocks on the primary).
 
 **migration source export** — The nvmet subsystem a source side adds for its destination (`DnMigrSrcName`, `MigrSrcNqn`), admitting the destination disk node's host NQN only, and built only once the destination side is provisioned.
 
@@ -354,7 +362,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
-**provisioned, zeroing** — The side flag the sp worker sets once the disk node reports every extent of the side zeroed (`provisioned`): zeroing runs in the dn agent's background as batched zero-out writes through the side device, tracked in the volume table's zeroed bits, and a leg none of whose sides has the flag is deferred on the controller node. A migration destination carries its own flag that gates the source export and the clone.
+**provisioned, zeroing** — The side flag the sp worker sets once the disk node reports the side's zeroing complete (`provisioned`). Zeroing writes zeros from the start of a new side over the length the sp worker sends, the whole leg span for a side of a meta group and the meta region and first data block for a side of a data group, as batched zero-out writes through the side device in the dn agent's background, tracked in the volume table as a count of bytes zeroed; a leg none of whose sides has the flag is deferred on the controller node. A migration destination carries its own flag that gates the source export and the clone (see `architecture.md`, Side provisioning protocol).
 
 **QoS** — The cluster-wide ratio of size-proportional IO limits (`qos_ratio`) that every controller-node syncup carries; the cn agent persists it and enforces nothing.
 
@@ -424,13 +432,13 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **sides first, sides-first hold** — The second wait of the hold, which every fan-out of a pool goes through: the cntlrs' syncups wait until every running side child has reported the revision applied or one cntlr interval has passed since that wait began, a timer release being logged (see hold; `dnv-worker.md` RW14). It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
 
-**skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying.
+**skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying; `architecture.md`, Migration, says when a caller may read a migration's.
 
 **slice** — `Slice`, a vertical shard of a storage pool: one thin pool on the primary, built from the slice's own meta and data groups; every thin device of the pool is striped across all slices.
 
 **source connection** — The nvme host connection a dm-clone reads its source through: a migration destination's connection to the source side's export, or a clone's connection to its external source, the clone-source connection, which belongs to no pool. A sweep removes it only after the dm-clone above it.
 
-**space guard** — The e2e suite's allocation caps, asserted after every case: one per backing file, which bounds how many extents its disk node zeroed, and one for the whole run at the pool's own extents plus slack (see `e2e_integtest.md` E2E5).
+**space guard** — The e2e suite's allocation caps, asserted after every case: one per backing file, which bounds everything written into it, and one for everything the run allocated on every guest, at what the pool's zeroing and the suite's patterns write plus slack (see `e2e_integtest.md` E2E5).
 
 **spare leg** — A leg in a group's `spare_leg_list`, connected and probed but not an md member: created by an operator or by leg repair, or parked there by a switch, and switched into the array in place of a failed leg only once its side is provisioned.
 
@@ -454,7 +462,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **sysfs walk** — An agent's reading of its nvme host connections from sysfs rather than nvme list-subsys: the subsystem entry whose NQN matches, the namespace entry that names the multipath head, and the controller entries, each path read through its address, state and ANA state (see `cnagent.md` CN10).
 
-**tenant** — A user of a multi-tenant block storage system that runs dnv as its data plane, for example behind Kubernetes or OpenStack Cinder. dnv knows no tenants: it authenticates no user, which the layer above does, and admits a host by its NQN alone (see allowed hosts). What it promises that layer is that the data of one storage pool is never readable from another storage pool unless that layer exports it there itself, for example with a transfer; the zeroing of every new side serves that promise (see `architecture.md`, System overview, and [D15]).
+**tenant** — A user of a multi-tenant block storage system that runs dnv as its data plane, for example behind Kubernetes or OpenStack Cinder. dnv knows no tenants: it authenticates no user, which the layer above does, and admits a host by its NQN alone (see allowed hosts). What it promises that layer is that the data of one storage pool is never readable from another storage pool unless that layer exports it there itself, for example with a transfer; dm-thin keeps that promise, since a thin device reads a block it has not provisioned as zeros and dnv's thin pools never skip block zeroing (see `architecture.md`, System overview, and [D15]).
 
 **thin device, td** — `ThinDevice`, a pool volume: one thin volume per slice under the same thin id (`CnThinDevName`, created or snapshotted by a pool message and deleted by one), joined by a raid0 on the primary. It may be an origin, a snapshot or both, and carries the created flag.
 
@@ -482,13 +490,13 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **view registry** — The cdc's in-memory state of its active hosts, their host states and views, fed by the watcher and serialized under one mutex so that no served state is mutated concurrently.
 
-**volume table** — The on-disk record in the dnv disk format of which extent runs each side holds and which of them are zeroed (`zeroed_bits`), written to alternating checksummed slots; it is the authority for extent placement, not the local store.
+**volume table** — The on-disk record in the dnv disk format of which extent runs each side holds and, for each side, the length to zero from its start and the bytes zeroed so far (`zero_bytes`, `zeroed_bytes`), written to alternating checksummed slots; it is the authority for extent placement and zeroing progress, not the local store.
 
 **vote interval** — The period at which a worker re-puts each of its registrations (`--vote-interval`, defaulting to `DefaultVoteWorkerInterval`); the dead threshold is twice it.
 
 **vote worker** — The per-process layer that registers the worker's seed, watches every worker's registration, commits a membership after the grace window, computes shard ownership and starts and stops shard workers.
 
-**wanted set** — The names a converge computes from its request's plan: every dm device, md array, export, connection and record the object should hold at the plan's level and role. The sweep removes what is held and not wanted, and the build ensures what is wanted; on the cn a resource the provisioning gate defers stays wanted, and on the dn so does everything above the side device of a side not yet zeroed and provisioned (see `dnagent.md` DN6), so the sweep does not remove what the build is about to create.
+**wanted set** — The names a converge computes from its request's plan: every dm device, md array, export, connection and record the object should hold at the plan's level and role. The sweep removes what is held and not wanted, and the build ensures what is wanted; on the cn a resource the provisioning gate defers stays wanted, and on the dn so does everything above the side device of a side whose zeroing is not complete or whose flag is not yet set (see `dnagent.md` DN6), so the sweep does not remove what the build is about to create.
 
 **watcher** — The cdc's reader of the entry keys: one scan to fill the registry, then a watch that applies each event, and a wholesale rescan when the watch breaks; until the first scan completes it serves no host.
 

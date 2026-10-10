@@ -72,6 +72,15 @@ func (s *DnAgentServer) probeSide(
 		dnKey(req.GetClusterId(), req.GetDnId())); dn != nil {
 		extentSize = dn.req.Load().GetExtentSize()
 	}
+	// The same refusal convergeSide makes (DN8), because this reads the SAME
+	// stored request: a side whose length to zero is refused converges
+	// nothing, so there is nothing provable to report about it. Read-only
+	// either way (DN16, SH25): an empty SideInfo is what such a side looks
+	// like.
+	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
+		logInvalidSideConf(ctx, req, err)
+		return &pb.SideInfo{}
+	}
 	plan := newSidePlan(s.nf, req, extentSize)
 	info := &pb.SideInfo{}
 	state := s.probeSideDev(ctx, st, plan, info)
@@ -97,7 +106,7 @@ func (s *DnAgentServer) probeSide(
 // Unlike ensureSideDev it never allocates and never starts or stops the
 // zeroing goroutine (DN16, SH25). That is why "record absent at
 // provisioned = false" reports MISSING with empty details rather than the
-// matrix's "zeroing 0/n": with no record the only available extent count is
+// matrix's "zeroing 0/n MiB": with no record the only available length is
 // the request's, and the etcd flag is a gate, never evidence (DN9).
 func (s *DnAgentServer) probeSideDev(
 	ctx context.Context,
@@ -107,7 +116,7 @@ func (s *DnAgentServer) probeSideDev(
 ) sideDevState {
 	t := st.tracker
 	name := plan.sideDevName
-	info.TotalExtCnt = plan.conf.GetExtCnt()
+	info.ZeroBytes = plan.conf.GetZeroBytes()
 	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
 	if err != nil {
 		// An unreadable or corrupt disk is an error, never "absent".
@@ -126,13 +135,13 @@ func (s *DnAgentServer) probeSideDev(
 	// they are what the worker's provisioned-flip rule reads
 	// (architecture.md, sp role). They come from the record, never from the
 	// request — the disk is authoritative ([D13]).
-	zeroed, total := sideZeroedCnt(rec), sideExtCnt(rec)
-	info.ZeroedExtCnt, info.TotalExtCnt = zeroed, total
-	if zeroed < total {
+	zeroed, zero := sideZeroedBytes(rec), sideZeroBytes(rec)
+	info.ZeroedBytes, info.ZeroBytes = zeroed, zero
+	if !sideFullyZeroed(rec) {
 		// The device is judged on every round, provisioning or not: DN18 reads
-		// this row off "the volume-table record + its zeroed_bits +
-		// `dmsetup table`", and a non-OK device wins. Skipping the check while
-		// the bits are incomplete would let a side whose dm-linear could not be
+		// this row off the volume-table record, its zeroed count and
+		// `dmsetup table`, and a non-OK device wins. Skipping the check while
+		// the count is short would let a side whose dm-linear could not be
 		// built report healthy PROVISIONING for ever — and PROVISIONING never
 		// feeds err_epoch (architecture.md, Live-state reporting), so nothing
 		// would ever bump a revision and re-send the SyncupSide that is the
@@ -151,16 +160,17 @@ func (s *DnAgentServer) probeSideDev(
 		zeroErr := s.zeroingErr(st)
 		switch {
 		case plan.provisioned:
-			// The agent trusts its own bits over the flag.
+			// The agent trusts its own count over the flag.
 			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
 			return sideDevFailed
 		case zeroErr != nil:
 			info.SideDevInfo = t.Err(resKeySideDev, name, zeroErr.Error())
 		default:
-			// Healthy, not ready: nothing is exported until the last extent is
-			// zeroed, and PROVISIONING says so without feeding err_epoch.
+			// Healthy, not ready: nothing is exported until the last byte to
+			// zero is zeroed, and PROVISIONING says so without feeding
+			// err_epoch.
 			info.SideDevInfo = t.Provisioning(resKeySideDev, name,
-				fmt.Sprintf(zeroingDetailsFmt, zeroed, total))
+				zeroingDetails(zeroed, zero))
 		}
 		return sideDevProvisioning
 	}

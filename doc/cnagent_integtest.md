@@ -117,10 +117,13 @@ names (`CnMdDevName`) and a host NQN's host id.
 * **Sides first.** The suite plays the provisioned flip, a side's per-CN rows
   reading provisioning until then (`dnagent.md` DN9, DN10), and converges sides
   before cntlrs, so no leg is provisioning-deferred (`cnagent.md` CN9) and legs
-  are optimized when a primary assembles. A failover demotes, flips the sides,
-  waits for the new primary's paths to read optimized, then promotes
-  (`architecture.md`, Failover), host IO quiesced across the window with no
-  serving path (Lab facts); only the late flip promotes first.
+  are optimized when a primary assembles. Each side asks to zero the length a
+  worker derives from its group (`architecture.md`, Side provisioning
+  protocol), which a fresh thin pool and a fresh array rely on. A failover
+  demotes, flips the sides, waits for the new primary's paths to read
+  optimized, then promotes (`architecture.md`, Failover), host IO quiesced
+  across the window with no serving path (Lab facts); only the late flip
+  promotes first.
 * **Negatives are exact.** Provisioning and pending are healthy statuses, so an
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details. A failed read taken for an absence passes every
@@ -169,14 +172,16 @@ and a teardown by an empty pointer list, re-sent while it replies leftover
 host-facing subsystem and a clean `GetCnInfo` (CN30).
 
 **redund** builds md-raid1 groups across both DNs under a primary and a
-standby. The primary creates both with `--assume-clean` over zeroed legs
-(`cnagent.md` CN12's create case; `architecture.md`, [D15]); the standby keeps
-every leg connected and non-optimized, assembles no two-member array, and
-backs its ns-dev with the td's dm-error, the namespace inaccessible (CN10,
-CN11, CN16's standby rule); each CN's subsystem admits exactly the host's NQN
-(CN16). The demote moves ANA before the park (CN9's ANA pre-step before its
-park pre-step), stops the arrays and keeps the legs; the promote assembles both
-(CN12's assembly case), the data surviving. With the primary's legs into one
+standby. The primary creates both with `--assume-clean`: provisioning zeroed
+every leg's meta region, so none carries a superblock, and no read reaches a
+data block the pool has not written (`cnagent.md` CN12's create case;
+`architecture.md`, [D15]); the standby keeps every leg connected and
+non-optimized, assembles no two-member array, and backs its ns-dev with the
+td's dm-error, the namespace inaccessible (CN10, CN11, CN16's standby rule);
+each CN's subsystem admits exactly the host's NQN (CN16). The demote moves
+ANA before the park (CN9's ANA pre-step before its park pre-step), stops the
+arrays and keeps the legs; the promote assembles both (CN12's assembly case),
+the data surviving. With the primary's legs into one
 DN cut under a host write, every check round reads both md rows OK until the
 data row reports degraded and the dead legs' rows error, and no mdadm runs
 (CN12, CN28, CN29); the write completes on the surviving leg and reads back,

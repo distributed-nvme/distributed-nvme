@@ -836,14 +836,20 @@ func (s *CnAgentServer) assembleGroup(
 	}
 	if len(withSuperblock) == 0 {
 		// Case 1: --assume-clean is correct only when **every** member was
-		// probed. A side is never exported before the whole-side zeroing of
-		// architecture.md, Side provisioning protocol, has written zeros over
-		// all of it and its `provisioned` gate has
-		// opened ([D15]), the effective desired state defers any group whose
-		// legs are still provisioning ([D15]), and ids are never reused — so a
-		// superblock-free leg can only be a freshly zeroed side — short of a
-		// read that failed after the path's failfast, which mdadm answers the
-		// same way (HasSuperblock). But that argument covers the legs
+		// probed. A side is never exported before the provisioning protocol
+		// (architecture.md, Side provisioning protocol) has zeroed its meta
+		// region, where the md superblock sits, and its first data block,
+		// and its `provisioned` gate has opened ([D15]); the effective
+		// desired state defers any group whose legs are still provisioning
+		// ([D15]); and ids are never reused — so a superblock-free leg can
+		// only be a freshly provisioned side — short of a read that failed
+		// after the path's failfast, which mdadm answers the same way
+		// (HasSuperblock). Only a meta group's members are zeroed whole; a
+		// data group's are zeroed no further than their first data block,
+		// and the rest may differ between them, which a clean create does not
+		// resync: nothing dnv stacks on the array reads such a block before
+		// writing it through the array, because dm-thin writes a block whole
+		// before anything reads it ([D15]). But that argument covers the legs
 		// actually examined. An unavailable member may be the one carrying
 		// the group's data (its DN rebooting, its path mid-ANA-move), and
 		// creating over the survivors would resync the data away. cnagent.md

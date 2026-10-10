@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/bits"
 	"strconv"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -36,6 +37,23 @@ func (s *DnAgentServer) syncupSide(
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupSideReply{AgentReply: reject, Revision: stored}
 	}
+	// DN8's side conf gate: a length to zero the sp worker cannot have derived
+	// from a stored group. The DN request cannot change under this RPC —
+	// SyncupDn replaces it under the node write lock, and this holds the read
+	// lock — so the gate and the converge below see one extent size. This is
+	// the last point with literally zero side effects: refusing here skips
+	// the desired-state promotion below, the whole converge and the
+	// local-store Save, so a bad request cannot be replayed by the next
+	// Reconcile either. The stored revision is echoed back, not the
+	// request's, so the worker sees the request was not accepted.
+	extentSize := dn.req.Load().GetExtentSize()
+	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
+		logInvalidSideConf(ctx, req, err)
+		return &pb.SyncupSideReply{
+			AgentReply: agent.InvalidConfReply("%v", err),
+			Revision:   stored,
+		}
+	}
 	// Stored before the converge builds anything, so no claim of this
 	// request can be missing from another side's pass that sees what the
 	// converge builds (collectClaims). The store is atomic because those
@@ -46,7 +64,7 @@ func (s *DnAgentServer) syncupSide(
 	st.req.Store(req)
 	s.putSide(key, st)
 
-	info, sweep := s.convergeSide(ctx, st, dn.req.Load().GetExtentSize())
+	info, sweep := s.convergeSide(ctx, st, extentSize)
 
 	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
@@ -63,6 +81,61 @@ func (s *DnAgentServer) syncupSide(
 	}
 }
 
+// validateZeroBytes is DN8's side conf gate. side_conf.zero_bytes is the
+// length to zero the sp worker derives from the side's stored group and the
+// pool's block size (architecture.md, Side provisioning protocol), so a
+// length of zero, one that is not a whole multiple of common.DnZeroAlign, or
+// one longer than the side's ext_cnt extents of extentSize bytes can only
+// come from a bad stored conf. Its texts carry the "invalid stored conf"
+// prefix of every other conf refusal, so one grep finds them all. The length
+// bound is skipped where extentSize is itself unusable, which is the DN's own
+// refusal to report, or where the side's byte size overflows, which no
+// length can exceed.
+//
+// It lives here and not in agent/conf.go: those validators are copies of
+// model's stored-conf rules, and this one has no model twin.
+func validateZeroBytes(
+	conf *pb.SyncupSideRequest_SideConf,
+	extentSize uint64,
+) error {
+	zeroBytes := conf.GetZeroBytes()
+	if zeroBytes == 0 {
+		return fmt.Errorf("%s: side_conf.zero_bytes is zero",
+			msgInvalidStoredConf)
+	}
+	if zeroBytes%common.DnZeroAlign != 0 {
+		return fmt.Errorf("%s: side_conf.zero_bytes %d is not a multiple of %d",
+			msgInvalidStoredConf, zeroBytes, common.DnZeroAlign)
+	}
+	if agent.ValidateExtentSize(extentSize) != nil {
+		return nil
+	}
+	if hi, sideBytes := bits.Mul64(
+		conf.GetExtCnt(), extentSize); hi == 0 && zeroBytes > sideBytes {
+		return fmt.Errorf(
+			"%s: side_conf.zero_bytes %d exceeds the side's %d bytes",
+			msgInvalidStoredConf, zeroBytes, sideBytes)
+	}
+	return nil
+}
+
+// logInvalidSideConf is the one Error record a refusal by validateZeroBytes
+// writes (architecture.md, Common validation), naming what an operator has to
+// go look at — the RPC gate, the converge and the probe all write it alike.
+func logInvalidSideConf(
+	ctx context.Context,
+	req *pb.SyncupSideRequest,
+	err error,
+) {
+	ptr := req.GetSidePointer()
+	slog.ErrorContext(ctx, msgInvalidStoredConf,
+		slog.Uint64("cluster_id", req.GetClusterId()),
+		slog.Uint64("dn_id", req.GetDnId()),
+		slog.Uint64("sp_id", ptr.GetSpId()),
+		slog.Uint64("side_id", ptr.GetSideId()),
+		slog.String("error", err.Error()))
+}
+
 // convergeSide brings one side to its desired state: sweep away everything
 // the desired state does not want, top-down, then build what it does want
 // bottom-up — side device, dm, nvmet — probing first at every step (SH16).
@@ -73,7 +146,19 @@ func (s *DnAgentServer) convergeSide(
 	st *sideState,
 	extentSize uint64,
 ) (*pb.SideInfo, *agent.SweepResult) {
-	plan := newSidePlan(s.nf, st.req.Load(), extentSize)
+	// The same refusal as syncupSide's (DN8), for the entrances that do not
+	// come through it: the startup Reconcile, which converges from a stored
+	// file, and reconvergeSide — the DN13 retry and the DN12 fence timer —
+	// which re-enter with the request the side already holds. Refusing
+	// before the sweep touches nothing at all: a conf fault must not destroy
+	// resources (architecture.md, Common agent rules), and nothing was
+	// converged or enumerated, so the pass has no verdict to give either.
+	req := st.req.Load()
+	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
+		logInvalidSideConf(ctx, req, err)
+		return &pb.SideInfo{}, &agent.SweepResult{}
+	}
+	plan := newSidePlan(s.nf, req, extentSize)
 	info := &pb.SideInfo{}
 
 	// What to remove is derived by subtracting the desired state from what
@@ -94,8 +179,9 @@ func (s *DnAgentServer) convergeSide(
 	if state != sideDevReady {
 		// The whole per-CN stack is gated together (DN9 step 4): dm-error,
 		// dm-linear, nvmet, migr-src and migr-dst. A side that is still
-		// provisioning has nothing above it by design, and a side whose bits
-		// are incomplete must not export a zeroed impostor of the data.
+		// provisioning has nothing above it by design, and a side whose
+		// zeroed count is short of its length must not export a fresh
+		// impostor of the data.
 		//
 		// The DN12 fence is the one thing the gate may not skip: a window
 		// opened by an earlier pass is a suspension already in place, and
@@ -105,7 +191,10 @@ func (s *DnAgentServer) convergeSide(
 		// fails closed, dnagent.md,
 		// OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`); DN12 rule 1's
 		// known limit is a suspension it knows nothing of, which settleFence
-		// cannot settle.
+		// cannot settle; a side whose stored request DN8's side conf gate
+		// refuses never reaches this point, and a side of a DN whose stored
+		// extent size is unusable reaches it with no extent size, so phase 2
+		// builds nothing (dnagent.md, Known limits).
 		s.settleFence(ctx, st, plan)
 		s.reportAboveSideDeferred(st, plan, info)
 		return info, sweep
@@ -170,8 +259,8 @@ type sideDevState int
 const (
 	// sideDevFailed is a real fault: an unreadable disk, a table that will not
 	// converge, or a request claiming provisioned = true over a side whose
-	// data is missing or not fully zeroed. ERROR is reported and feeds
-	// err_epoch.
+	// record is missing or whose zeroed count is short of its length to zero.
+	// ERROR is reported and feeds err_epoch.
 	sideDevFailed sideDevState = iota
 	// sideDevProvisioning is healthy but not exportable yet: the side is being
 	// zeroed, or it is zeroed and the CP has not flipped its flag. No
@@ -185,19 +274,23 @@ const (
 // ensureSideDev implements architecture.md, Side provisioning protocol (DN9):
 // allocate the side's extents in the on-disk volume table, build the aggregate
 // dm-linear that concatenates them, and keep the background zeroing goroutine
-// running until every logical extent is zeroed.
+// running until the side's length to zero is zeroed.
 //
-// Zeroing is whole-side and mandatory: a new side must never expose a
-// previous pool's bytes (architecture.md, System overview) and
-// discard-reads-zeros is not a hardware guarantee, so `blkdiscard --zeroout`
-// is what actually funds "a fresh side reads as zeros" ([D15]). The bits live
+// That length is side_conf.zero_bytes, which the sp worker derives from the
+// side's group: the whole leg for a side of a meta group, which holds the thin
+// pool's metadata, and the meta region plus the first data block for a side
+// of a data group. Those are the parts of a side that must read as zeros
+// (architecture.md, Side provisioning protocol), and discard-reads-zeros is
+// not a hardware guarantee, so `blkdiscard --zeroout` is what actually puts
+// the zeros there; the rest of a data side is never zeroed, because dm-thin
+// never lets a host read a block it has not written ([D15]). The counts live
 // in the record because zeroed is a property of the side's *allocation*, not
 // of the disk extent.
 //
 // The six rows of the converge matrix of dnagent.md DN9 (request provisioned
 // × local state):
 //
-//	false / absent   allocate (bits 0), build the linear, start the goroutine
+//	false / absent   allocate (count 0), build the linear, start the goroutine
 //	false / partial  ensure the linear, keep the goroutine
 //	false / complete linear ensured, goroutine stopped, still no exports
 //	true  / complete the full DN10 export converge
@@ -206,7 +299,7 @@ const (
 //
 // Allocation is permitted **only** at provisioned = false. At true a missing
 // record means the data is gone (a lost or foreign disk); silently
-// re-allocating would present a zeroed impostor as the data-bearing leg, so it
+// re-allocating would present a fresh impostor as the data-bearing leg, so it
 // is a hard resource error that feeds err_epoch and the replacement flows.
 //
 // The table, not the local store, is authoritative for placement ([D13]): the
@@ -220,10 +313,10 @@ func (s *DnAgentServer) ensureSideDev(
 ) sideDevState {
 	t := st.tracker
 	name := plan.sideDevName
-	// total_ext_cnt is never omitted (DN9). Until a record exists the
-	// only number available is the request's, which is why it is seeded here
-	// and overwritten from the record below — the record always wins.
-	info.TotalExtCnt = plan.conf.GetExtCnt()
+	// zero_bytes is never omitted (DN9). Until a record exists the only
+	// length available is the request's, which is why it is seeded here and
+	// overwritten from the record below — the record always wins.
+	info.ZeroBytes = plan.conf.GetZeroBytes()
 
 	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
 	if err != nil {
@@ -240,34 +333,37 @@ func (s *DnAgentServer) ensureSideDev(
 	if ok {
 		// The record exists, so it — not the request — is what the counters
 		// report from here on, including on the failure paths below: AllocSide
-		// can still refuse (a DN9 ext-count mismatch, or a disk this agent may
-		// not mutate) and those replies must carry the disk's numbers, not a
-		// request value the agent can prove wrong (DN9). They are overwritten
-		// with the identical values once AllocSide hands the record back.
-		info.ZeroedExtCnt, info.TotalExtCnt = sideZeroedCnt(rec), sideExtCnt(rec)
+		// can still refuse (a DN9 mismatch of the extent count or of the
+		// length to zero, or a disk this agent may not mutate) and those
+		// replies must carry the disk's numbers, not a request value the agent
+		// can prove wrong (DN9). They are overwritten with the identical
+		// values once AllocSide hands the record back.
+		info.ZeroedBytes = sideZeroedBytes(rec)
+		info.ZeroBytes = sideZeroBytes(rec)
 	}
 	// Rows 1-5 all go through AllocSide: it returns the existing record —
-	// re-checking DN9's ext-count invariant, which a resize would violate —
-	// and allocates only when there is none, a case row 6 has already taken
-	// off the table. Its error is reported rather than discarded, because the
-	// matrix needs "could not allocate" to be distinguishable from "allocated"
-	// and from "must not allocate" (DN9).
-	rec, err = s.meta.AllocSide(
-		ctx, plan.spId, plan.sideId, plan.conf.GetExtCnt())
+	// re-checking DN9's invariants that its extent count and its length to
+	// zero, both fixed at allocation, match the request — and allocates only
+	// when there is none, a case row 6 has already taken off the table. Its
+	// error is reported rather than discarded, because the matrix needs
+	// "could not allocate" to be distinguishable from "allocated" and from
+	// "must not allocate" (DN9).
+	rec, err = s.meta.AllocSide(ctx, plan.spId, plan.sideId,
+		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes())
 	if err != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed
 	}
-	zeroed, total := sideZeroedCnt(rec), sideExtCnt(rec)
-	info.ZeroedExtCnt, info.TotalExtCnt = zeroed, total
+	zeroed, zero := sideZeroedBytes(rec), sideZeroBytes(rec)
+	info.ZeroedBytes, info.ZeroBytes = zeroed, zero
 
 	if err := s.ensureSideDm(ctx, plan, rec); err != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed
 	}
-	if zeroed < total {
+	if !sideFullyZeroed(rec) {
 		// Rows 2 and 5. The goroutine runs on both sides of the gate: at
-		// provisioned = true it is what self-heals a side whose bits were lost
+		// provisioned = true it is what self-heals a side whose count was lost
 		// or never finished.
 		s.startZeroing(st, plan)
 		if plan.provisioned {
@@ -282,13 +378,13 @@ func (s *DnAgentServer) ensureSideDev(
 			return sideDevProvisioning
 		}
 		info.SideDevInfo = t.Provisioning(resKeySideDev, name,
-			fmt.Sprintf(zeroingDetailsFmt, zeroed, total))
+			zeroingDetails(zeroed, zero))
 		return sideDevProvisioning
 	}
 
-	// Rows 3 and 4: fully zeroed. Cancel-and-wait rather than a bare cancel —
-	// a straggler batch's child would otherwise still hold the side device
-	// open (DN9).
+	// Rows 3 and 4: the length to zero is zeroed. Cancel-and-wait rather
+	// than a bare cancel — a straggler batch's child would otherwise still
+	// hold the side device open (DN9).
 	s.stopZeroing(st)
 	status, details := s.probeSideDm(ctx, plan, rec)
 	info.SideDevInfo = t.Set(resKeySideDev, name, status, details)

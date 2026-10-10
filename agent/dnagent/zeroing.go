@@ -12,23 +12,29 @@ import (
 // connect-retry registry (migr.go) and of the cn leg probers
 // (cnagent/healthcheck.go).
 //
-// A new side must never expose a previous pool's bytes (architecture.md,
-// System overview). discard is not a zero guarantee (the kernel dropped
-// discard_zeroes_data in 4.12 and NVMe DLFEAT read-zeroes is optional), so
-// every side is fully zeroed with `blkdiscard --zeroout` before its first
-// export, tracked per logical extent in the side's on-disk allocation record
-// and gated by the CP-visible `provisioned` flag ([D15]).
+// A new side zeroes the part of itself that must read as zeros before its
+// first export (architecture.md, Side provisioning protocol): its first
+// side_conf.zero_bytes bytes, which the sp worker derives from the side's
+// group — the whole leg of a meta group, whose thin-pool metadata dm-thin
+// formats fresh only over a first block that reads zero, and the meta region
+// plus the first data block of a data group, where a stale md superblock or
+// an earlier pool's volume head would otherwise be read. discard is not a
+// zero guarantee (the kernel dropped discard_zeroes_data in 4.12 and NVMe
+// DLFEAT read-zeroes is optional), so the prefix is zeroed with
+// `blkdiscard --zeroout`, tracked as a byte count in the side's on-disk
+// allocation record and gated by the CP-visible `provisioned` flag ([D15]).
 //
-// The work is a goroutine rather than part of the RPC because a whole side is
-// minutes of IO: a node-read holder plus one queued SyncupDn writer would
-// freeze the entire DN agent (RWMutex writer preference) and block the side's
-// Check rounds. The registry is keyed by the side tuple, single-flight per
-// side, created on demand by any converge — the startup reconcile included —
-// that finds zeroing still needed, and sides zero in parallel, at most
+// The work is a goroutine rather than part of the RPC because a meta group's
+// side is zeroed whole, which can take far longer than an RPC may hold its
+// locks: a node-read holder plus one queued SyncupDn writer would freeze the
+// entire DN agent (RWMutex writer preference) and block the side's Check
+// rounds. The registry is keyed by the side tuple, single-flight per side,
+// created on demand by any converge — the startup reconcile included — that
+// finds zeroing still needed, and sides zero in parallel, at most
 // common.DnZeroConcurrency batches at a time per agent: N concurrent batches
-// split the disk's Write Zeroes rate N ways, and with no cap a busy DN would
-// have every batch killed at the soft timeout and redone for ever. Each side
-// sizes its own batches from the kills it sees (zeroLoop).
+// split the disk's zeroing rate N ways, and with no cap a busy DN would have
+// every batch killed at the soft timeout and redone for ever. Each side sizes
+// its own batches from the kills it sees (zeroLoop).
 
 // zeroLockPoll is how often the loop retries a lock it could not take. The
 // loop must NEVER block on a lock: dropSideState and the DN6 record sweep
@@ -39,21 +45,20 @@ const zeroLockPoll = 20 * time.Millisecond
 
 // zeroBackoffFmt follows the killed command's output in the error the loop
 // publishes for side_dev_info once DnZeroKillBackoff or more kills in a row
-// have backed the side off (DN9): the streak, and the rate the side now zeroes
-// at.
-const zeroBackoffFmt = "%w (%d batches killed in a row: backed off to 1 " +
-	"extent per batch)"
+// have backed the side off (DN9): the streak, and the batch the side now
+// zeroes in, the floor in mibText's MiB.
+const zeroBackoffFmt = "%w (%d batches killed in a row: backed off to %s " +
+	"MiB per batch)"
 
-// zeroJob is the geometry one zeroing loop works from. It is captured once, at
+// zeroJob is what one zeroing loop works on. It is captured once, at
 // registration, rather than read from a *sidePlan on every batch: the loop
-// outlives the converge pass that started it, and a plan is a per-pass value
-// (collectClaims even builds one with extentSize 0, to read names and gates
-// out of a request without an extent size to hand).
+// outlives the converge pass that started it, and a plan is a per-pass value.
+// Where to zero comes from the record, re-read every batch, in bytes of the
+// side device, so the loop needs no extent size.
 type zeroJob struct {
-	spId       uint64
-	sideId     uint64
-	devPath    string
-	extentSize uint64
+	spId    uint64
+	sideId  uint64
+	devPath string
 }
 
 // startZeroing registers the side's zeroing loop if it is not running already.
@@ -66,10 +71,9 @@ type zeroJob struct {
 func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	job := zeroJob{
-		spId:       plan.spId,
-		sideId:     plan.sideId,
-		devPath:    plan.sideDevPath,
-		extentSize: plan.extentSize,
+		spId:    plan.spId,
+		sideId:  plan.sideId,
+		devPath: plan.sideDevPath,
 	}
 	s.mu.Lock()
 	if st.zeroing || s.rootCtx.Err() != nil {
@@ -134,8 +138,9 @@ func (s *DnAgentServer) deregisterZeroing(st *sideState, done chan struct{}) {
 	}
 }
 
-// zeroLoop zeroes the side's not-yet-zeroed extents, at most
-// DnZeroBatchExtCnt at a time, until every bit is set or the ctx is done.
+// zeroLoop zeroes the side from the record's zeroed count up to its length to
+// zero, at most s.zeroBatchMax bytes at a time, until the two meet or the ctx
+// is done.
 //
 // Each batch is one traceable operation (SH2). The `blkdiscard --zeroout` runs
 // **lock-free** under the ordinary SH15 timeouts — unlike the probers' block
@@ -147,31 +152,39 @@ func (s *DnAgentServer) deregisterZeroing(st *sideState, done chan struct{}) {
 // holds one of the agent's zeroing slots (zeroSlot); the record read, the
 // table update and the retry pace hold none.
 //
-// Persisting the bits *after* the command returned is what makes an
-// interrupted batch free: its bits stay 0, so the next pass simply redoes it.
-// Partial zeros are harmless — zeroing a range twice is idempotent.
+// Persisting the count *after* the command returned is what makes an
+// interrupted batch free: the count stays where it was, so the next pass
+// simply redoes the batch. Partial zeros are harmless — zeroing a range twice
+// is idempotent.
 //
 // batch and kills are the side's rate control (DN9): a batch the soft timeout
-// killed makes the next one half its size, a success doubles it again up to
-// DnZeroBatchExtCnt, and DnZeroKillBackoff kills in a row drop it to one
-// extent, which the published error then carries after the killed command's
-// output for as long as that kill is outstanding. side_dev_info shows that
-// error only on a side still at provisioned = false; at true the row reads
-// "not zeroed" (the DN9 matrix), whatever this loop saw.
+// killed makes the next one half its size, rounded down to a whole
+// s.zeroBatchMin and never below it (zeroBatchAfterKill), a success doubles it
+// again up to s.zeroBatchMax, and DnZeroKillBackoff kills in a row drop it to
+// s.zeroBatchMin, which the published error then carries after the killed
+// command's output for as long as that kill is outstanding. side_dev_info
+// shows that error only on a side still at provisioned = false; at true the
+// row reads "not zeroed" (the DN9 matrix), whatever this loop saw.
 // A batch the tool refused says nothing about the rate: it leaves the size
 // alone and only ends the streak. Both are this goroutine's locals: the size
 // caps the next command, the streak also words the published error, and they
-// decide nothing else — which extents to zero, and whether the side is done,
-// the bits alone decide. Being locals, they reset with every new goroutine
-// for the side, a restart's included: the size to DnZeroBatchExtCnt, the
-// streak to no kills.
+// decide nothing else — where to zero, and whether the side is done, the
+// record's count alone decides. Being locals, they reset with every new
+// goroutine for the side, a restart's included: the size to s.zeroBatchMax,
+// the streak to no kills.
+//
+// Every batch starts and ends on a common.DnZeroAlign boundary, which
+// `blkdiscard` needs on a disk of 4 KiB logical blocks: the length to zero is
+// a whole multiple of it (DN8's gate), every batch size is a whole multiple of
+// s.zeroBatchMin, which is one of it, and a batch is cut short only where the
+// length ends.
 func (s *DnAgentServer) zeroLoop(
 	ctx context.Context,
 	key string,
 	st *sideState,
 	job zeroJob,
 ) {
-	batch := uint64(common.DnZeroBatchExtCnt)
+	batch := s.zeroBatchMax
 	kills := 0
 	for {
 		if ctx.Err() != nil {
@@ -185,12 +198,12 @@ func (s *DnAgentServer) zeroLoop(
 		attemptCtx := common.WithTraceId(ctx, common.NewTraceId())
 
 		// The record is re-read every batch: a returned record pointer goes
-		// stale after the next write, and a cached one's bits would never
+		// stale after the next write, and a cached one's count would never
 		// advance — the same range would be zeroed forever. It is read as
 		// this node's only (DN5): a record in a table whose header names
 		// another node — one that turned into another node's under the
 		// loop, say — is refused here, before a batch is computed from its
-		// bits, and the loop paces until a read of the disk confirms it.
+		// count, and the loop paces until a read of the disk confirms it.
 		rec, ok, err := s.meta.LookupConfirmedSide(
 			attemptCtx, job.spId, job.sideId)
 		if err != nil {
@@ -214,8 +227,7 @@ func (s *DnAgentServer) zeroLoop(
 			// Shutdown or teardown while every slot was in use.
 			return
 		}
-		answered, err := s.dm.BlkZeroout(attemptCtx, job.devPath,
-			from*job.extentSize, count*job.extentSize)
+		answered, err := s.dm.BlkZeroout(attemptCtx, job.devPath, from, count)
 		freeSlot()
 		if err != nil {
 			if answered {
@@ -225,9 +237,10 @@ func (s *DnAgentServer) zeroLoop(
 				// streak reports the rate it backs off to with the output,
 				// so ERROR reads as a slow disk, not a broken one.
 				kills++
-				batch = zeroBatchAfterKill(count, kills)
+				batch = zeroBatchAfterKill(count, kills, s.zeroBatchMin)
 				if kills >= common.DnZeroKillBackoff {
-					err = fmt.Errorf(zeroBackoffFmt, err, kills)
+					err = fmt.Errorf(zeroBackoffFmt, err, kills,
+						mibText(s.zeroBatchMin))
 				}
 			}
 			// The killed command's output is what side_dev_info reports, and
@@ -240,11 +253,11 @@ func (s *DnAgentServer) zeroLoop(
 			continue
 		}
 		kills = 0
-		batch = min(2*batch, common.DnZeroBatchExtCnt)
+		batch = min(2*batch, s.zeroBatchMax)
 		release, ok := s.zeroAcquire(ctx, key)
 		if !ok {
-			// Shutdown or teardown; the batch's bits stay unset and the next
-			// process redoes it.
+			// Shutdown or teardown; the count stays where it was and the next
+			// process redoes the batch.
 			return
 		}
 		err = s.meta.SetSideZeroed(
@@ -264,16 +277,20 @@ func (s *DnAgentServer) zeroLoop(
 }
 
 // zeroBatchAfterKill is a side's next batch size after the soft timeout killed
-// a batch of count extents, the kills-th kill in a row (DN9): half the killed
-// batch, rounded down but never below one extent, and one extent once
-// DnZeroKillBackoff kills in a row say that halving is not keeping up. Never
-// zero: a zero-extent batch zeroes nothing and doubles to zero, so the side
-// would never finish.
-func zeroBatchAfterKill(count uint64, kills int) uint64 {
+// a batch of killed bytes, the kills-th kill in a row (DN9): half the killed
+// batch, rounded down to a whole floor but never below it, and the floor once
+// DnZeroKillBackoff kills in a row say that halving is not keeping up. The
+// rounding keeps every batch a whole multiple of the floor, so on a disk of
+// 4 KiB logical blocks a halved batch never ends inside a block, which
+// `blkdiscard` would refuse for ever at the same size. Never zero: a
+// zero-byte batch zeroes nothing and doubles to zero, so the side would never
+// finish. The floor is s.zeroBatchMin, never zero itself.
+func zeroBatchAfterKill(killed uint64, kills int, floor uint64) uint64 {
 	if kills >= common.DnZeroKillBackoff {
-		return 1
+		return floor
 	}
-	return max(count/2, 1)
+	half := killed / 2
+	return max(half-half%floor, floor)
 }
 
 // zeroSlot takes one of the agent's DnZeroConcurrency zeroing slots, waiting

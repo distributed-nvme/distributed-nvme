@@ -530,6 +530,76 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 	}
 }
 
+// TestGeometryEmitsWhatTheSuitesRead pins `geometry`, through which the worker
+// suite reads a group's block counts and its sides' lengths to zero
+// (architecture.md, Side provisioning protocol; dnv-worker.md RW15) instead of
+// hand-copying either formula: a meta group's side is zeroed over the whole
+// leg, which at an extent size that is a multiple of the block size is the
+// whole side, and a data group's over its meta region and first data block.
+func TestGeometryEmitsWhatTheSuitesRead(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want map[string]uint64
+	}{
+		{
+			// md superblock, one bitmap block and the health block.
+			name: "md-raid1",
+			args: []string{"--raid1", "--ext-cnt", "2",
+				"--extent-size", "67108864", "--block-size", "1048576",
+				"--chunk-blocks", "128"},
+			want: map[string]uint64{
+				"ext_cnt":         2,
+				"meta_blocks":     3,
+				"data_blocks":     125,
+				"meta_zero_bytes": 128 << 20,
+				"data_zero_bytes": 4 << 20,
+			},
+		},
+		{
+			// The health block alone.
+			name: "redund_none",
+			args: []string{"--ext-cnt", "1",
+				"--extent-size", "67108864", "--block-size", "1048576"},
+			want: map[string]uint64{
+				"ext_cnt":         1,
+				"meta_blocks":     1,
+				"data_blocks":     63,
+				"meta_zero_bytes": 64 << 20,
+				"data_zero_bytes": 2 << 20,
+			},
+		},
+	}
+	for _, tc := range cases {
+		read, write, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		saved := os.Stdout
+		os.Stdout = write
+		g := newGlobals()
+		cmdGeometry(&g, tc.args)
+		os.Stdout = saved
+		write.Close()
+		out, err := io.ReadAll(read)
+		if err != nil {
+			t.Fatalf("%s: reading the geometry output: %v", tc.name, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("%s: geometry printed %q, not one JSON object: %v",
+				tc.name, out, err)
+		}
+		for key, value := range tc.want {
+			have, ok := got[key].(float64)
+			if !ok || uint64(have) != value {
+				t.Errorf("%s: geometry %s = %v, want %d",
+					tc.name, key, got[key], value)
+			}
+		}
+	}
+}
+
 func TestNvmeTrConfOf(t *testing.T) {
 	conf := nvmeTrConfOf("192.168.10.20:29600")
 	if conf.GetTrAddr() != "192.168.10.20" {

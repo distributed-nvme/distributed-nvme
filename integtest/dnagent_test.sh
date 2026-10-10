@@ -7,7 +7,7 @@
 #   bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
 #       [--wipe] user1@ip1 user2@ip2
 #
-# Cases: smoke, sides, migr_full, migr_bitmap, teardown, restart
+# Cases: smoke, zeroing, sides, migr_full, migr_bitmap, teardown, restart
 # (dnagent_integtest.md, Cases; for `teardown`, also architecture.md,
 # Teardown by sweep). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
@@ -43,6 +43,11 @@ EXTENT_SIZE=67108864 # common.MinDnExtSize; the proto field is raw bytes
 # subtraction (architecture.md, Size → extents). 2 GiB backing file:
 # 2147483648 - 268435456 = 1879048192.
 DATA_SIZE=1879048192 # the exact GetDnSize the setup asserts
+# Where the extent area starts on the disk (common.DnDataOffset): the 2 GiB
+# backing file less DATA_SIZE, so the setup's GetDnSize assertion catches a
+# drift before the zeroing case's fill could write into the header, the
+# volume-table slots or the clone-metadata area in front of it.
+DATA_OFFSET=$((2147483648 - DATA_SIZE))
 
 # Migration knobs, mirroring the CP defaults.
 BLOCK_SIZE=1048576
@@ -50,14 +55,24 @@ META_BLOCKS=3
 HYDR_THRESHOLD=1
 HYDR_BATCH=1
 
+# The length a worker asks a data group's side to zero (side_conf.zero_bytes,
+# architecture.md, Side provisioning protocol): its meta region and its first
+# data block, in the pool's blocks (model.SideZeroBytes), which the knobs
+# above make a RAID1 data group's at the default block size. Every side this
+# suite builds serves a data group but the zeroing case's meta-group side, and
+# every request for one side carries the same length: one that disagrees with
+# the length its record holds is an error row (dnagent.md DN9).
+DATA_ZERO_BYTES=$(((META_BLOCKS + 1) * BLOCK_SIZE))
+
 # Per-RPC deadline for the converge RPCs (see ctl).
 SYNCUP_TIMEOUT=60
 
 # Polling budget of `dnagentctl wait-zeroed` (architecture.md,
-# Side provisioning protocol). With 64 MiB
-# extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
-# so a 1-2 extent side finishes in well under a second; the budget only has to
-# cover a stalled retry loop (DnZeroRetryInterval = 5 s).
+# Side provisioning protocol). On a loop device the kernel maps
+# REQ_OP_WRITE_ZEROES onto fallocate, so even the longest length this suite
+# zeroes, the zeroing case's two-extent meta-group side, finishes in well
+# under a second; the budget only has to cover a stalled retry loop
+# (DnZeroRetryInterval = 5 s).
 ZERO_TIMEOUT=120
 
 NQN_PREFIX=nqn.2024-01.io.dnv
@@ -91,7 +106,7 @@ TRACE="it-setup"
 STAGE="(startup)"
 SETUP_DONE=0
 
-CASES=(smoke sides migr_full migr_bitmap teardown restart)
+CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -155,10 +170,10 @@ assert_gated() {
 # assert_provisioning_or_ok accepts the two statuses a side may legally hold at
 # provisioned = false (the converge matrix's zeroing and zeroed rows with a
 # record present, dnagent.md DN9):
-# PROVISIONING while the background goroutine still has extents to zero, and OK
-# once every bit is set. Zeroing 64-128 MiB on a loop device is a `fallocate`,
-# so which of the two a phase-1 reply carries is a genuine race — do not pick
-# one.
+# PROVISIONING while the background goroutine still has bytes to zero, and OK
+# once its zeroed count reaches the length the request asks for. Zeroing a few
+# MiB, or at most 128 MiB, on a loop device is a `fallocate`, so which of the
+# two a phase-1 reply carries is a genuine race — do not pick one.
 assert_provisioning_or_ok() {
 	local got
 	got=$(jq_of "$1" "$2 // \"ABSENT\"")
@@ -506,6 +521,22 @@ wait_gone() { # <path> <secs>
 	return 1
 }
 
+# fill_extents <dev> <pattern> <fromMiB> <extMiB> <cnt> — the pattern file,
+# <extMiB> long, into <cnt> consecutive extent slots from <fromMiB> on, each
+# write synced (the zeroing case, dnagent_integtest.md, Cases). It writes the
+# loop device, never the backing file, which a dd with seek= and no
+# conv=notrunc would cut short at the end of the write, and it passes dd no
+# input or output flag (dnagent_integtest.md, Assumptions and preflight
+# checks).
+fill_extents() {
+	local i
+	for ((i = 0; i < $5; i++)); do
+		dd if="$2" of="$1" bs=1M seek=$(($3 + i * $4)) count="$4" \
+			conv=fsync status=none || return 1
+	done
+	echo filled
+}
+
 # read_probe <dev> — prints ok or eio; the caller asserts which. A standby
 # export is deliberately backed by dm-error, so its reads must fail.
 read_probe() {
@@ -570,8 +601,8 @@ residue() {
 # has on this node: the dm-error (kind d0, DnErrorName) and the dm-linear
 # (kind d1, DnLinearName), which are the only two dm kinds that exist per CN.
 # It is the kernel-side half of the provisioning gate of architecture.md,
-# Side provisioning protocol — nothing is exported
-# before the side is fully zeroed — so it deliberately does NOT match kind d4
+# Side provisioning protocol — nothing is exported before the side's
+# zeroing is complete — so it deliberately does NOT match kind d4
 # (DnSideName): the side device is exactly what phase (a) is supposed to
 # build, and `residue` would report it. See common/name_fmt.go for the kind
 # constants (every dn kind is the role letter `d` and one hex digit)
@@ -1456,25 +1487,25 @@ dn_drop_until_clean() { # dnidx secs
 }
 
 # wait_zeroed blocks until a side's background zeroing goroutine has zeroed
-# every logical extent (architecture.md, Side provisioning protocol). `ctl`
-# adds no --timeout for this subcommand, so the one below is wait-zeroed's own
-# polling budget, not an RPC deadline.
+# the length its request asks for (architecture.md, Side provisioning
+# protocol). `ctl` adds no --timeout for this subcommand, so the one below is
+# wait-zeroed's own polling budget, not an RPC deadline.
 #
-# The optional fifth argument is the ext_cnt the request asked for, and turns
-# the wait into the exact zeroed = total = N equality of dnagent_integtest.md,
-# Conventions, The provisioned flip: the driver's own
-# loop exits on `total != 0 && zeroed >= total`, which a side allocated with
-# the wrong number of extents also satisfies. Callers that have no --ext-cnt to
-# compare against omit it and keep the driver's weaker guard.
-wait_zeroed() { # dnidx sp leg side [ext_cnt]
-	local idx=$1 want=${5:-} out zdone ztotal
+# The fifth argument is the --zero-bytes the request asked for, and turns the
+# wait into the exact zeroed = required = N equality of dnagent_integtest.md,
+# Conventions, The provisioned flip: the driver's own loop exits on
+# `required != 0 && zeroed >= required`, which a side that recorded a length
+# other than the request's also satisfies once it has zeroed all of it. Both
+# counts are read through $(( )), which takes a JSON number and a decimal
+# string alike.
+wait_zeroed() { # dnidx sp leg side zero_bytes
+	local idx=$1 want=$5 out zdone ztotal
 	out=$(ctl "$idx" wait-zeroed --sp "$2" --leg "$3" --side "$4" \
 		--interval 0.5 --timeout "$ZERO_TIMEOUT")
-	[ -n "$want" ] || return 0
-	zdone=$(jq_of "$out" '.zeroed // 0')
-	ztotal=$(jq_of "$out" '.total // 0')
-	assert_eq "$zdone/$ztotal" "$((want))/$((want))" \
-		"side $2/$3/$4 zeroed/total extents after wait-zeroed"
+	zdone=$(jq_of "$out" '.zeroed_bytes // 0')
+	ztotal=$(jq_of "$out" '.zero_bytes // 0')
+	assert_eq "$((zdone))/$((ztotal))" "$((want))/$((want))" \
+		"side $2/$3/$4 zeroed/required bytes after wait-zeroed"
 }
 
 # sync_side_cns lists every CN id one syncup-side request names — the primary
@@ -1499,14 +1530,15 @@ sync_side_cns() { # syncup-side flags…
 	done
 }
 
-# sync_side_ext_cnt prints the --ext-cnt one syncup-side request asks for, by
-# the same flag scan as sync_side_cns (both spellings). It is what makes the
-# exact equality of dnagent_integtest.md, Conventions, The provisioned flip,
-# checkable from the helper: the expected extent count is the caller's own
-# flag, not a constant this file could drift from.
-# Nothing is printed when the request carries no --ext-cnt, and every check
-# built on it degrades to the driver's own guard rather than failing.
-sync_side_ext_cnt() { # syncup-side flags…
+# sync_side_zero_bytes prints the --zero-bytes one syncup-side request asks
+# for, by the same flag scan as sync_side_cns (both spellings). It is what
+# makes the exact equality of dnagent_integtest.md, Conventions, The
+# provisioned flip, checkable from the helper: the expected length is the
+# caller's own flag, not a constant this file could drift from. Nothing is
+# printed when the request carries no --zero-bytes, which sync_side_2phase
+# refuses: the agent's side conf gate refuses a length of zero (dnagent.md
+# DN8), so such a request could never provision.
+sync_side_zero_bytes() { # syncup-side flags…
 	local arg want=""
 	for arg in "$@"; do
 		if [ -n "$want" ]; then
@@ -1514,8 +1546,8 @@ sync_side_ext_cnt() { # syncup-side flags…
 			return 0
 		fi
 		case "$arg" in
-		--ext-cnt) want=ext ;;
-		--ext-cnt=*)
+		--zero-bytes) want=zb ;;
+		--zero-bytes=*)
 			printf '%s\n' "${arg#*=}"
 			return 0
 			;;
@@ -1527,10 +1559,10 @@ sync_side_ext_cnt() { # syncup-side flags…
 # performs in production (architecture.md, Side provisioning protocol).
 # Phase 1 syncs the side with
 # --provisioned=false: allocate the extent runs, build DnSideName, start the
-# zeroing goroutine — and export nothing. wait_zeroed then blocks until every
-# extent is zeroed, and phase 2 re-sends the identical request at a fresh
-# revision with --provisioned=true, which is the worker's flip rule played by
-# the script.
+# zeroing goroutine — and export nothing. wait_zeroed then blocks until the
+# side has zeroed the length its request asks for, and phase 2 re-sends the
+# identical request at a fresh revision with --provisioned=true, which is the
+# worker's flip rule played by the script.
 #
 # Both revisions are minted by the caller in the parent shell
 # (dnagent_integtest.md, Conventions, Revisions), so this is
@@ -1540,8 +1572,17 @@ sync_side_ext_cnt() { # syncup-side flags…
 SYNC_SIDE_REPLY=""
 sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	local idx=$1 rev1=$2 rev2=$3 sp=$4 leg=$5 side=$6 out
-	local cns cn key field left ext sample zdone ztotal
+	local cns cn key field left zlen sample zdone ztotal
 	shift 6
+	# The exact equality zeroed_bytes == zero_bytes == the request's
+	# --zero-bytes (dnagent_integtest.md, Conventions, The provisioned flip),
+	# asserted on both the wait's last sample and the flip's reply: a side
+	# that recorded a length other than the request's zeroes all of that
+	# length and would satisfy every `zeroed >= required` check on the way.
+	# Hard, not tolerant.
+	zlen=$(sync_side_zero_bytes "$@")
+	[ -n "$zlen" ] ||
+		die "provisioning $sp/$leg/$side: the request carries no --zero-bytes"
 	out=$(ctl "$idx" syncup-side --revision "$rev1" \
 		--sp "$sp" --leg "$leg" --side "$side" --provisioned=false "$@")
 	assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
@@ -1574,41 +1615,34 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	left=$(helper "$idx" "export_dms $(hex16 "$sp") $(hex16 "$side")")
 	[ -z "$left" ] ||
 		die "provisioning $sp/$leg/$side: export dm devices exist at provisioned=false: $left"
-	# The exact equality zeroed == total == ext_cnt (dnagent_integtest.md,
-	# Conventions, The provisioned flip), asserted
-	# on both the wait's last sample and the flip's reply: a side allocated
-	# with the wrong number of extents zeroes all of them and would satisfy
-	# every `zeroed >= total` check on the way. Hard, not tolerant.
-	ext=$(sync_side_ext_cnt "$@")
 	# The provisioning-window sample (dnagent_integtest.md, Conventions): one
 	# get-side-info before the wait, to
 	# record whether this run ever observed the side mid-zeroing. Purely an
-	# observation and never an assertion — with 64 MiB extents a batch is
-	# 640 MiB and loop maps Write Zeroes onto `fallocate`, so the window is
-	# normally already closed by the time this samples, exactly like the
-	# migration cases' grace-window and read-through probes (the same
-	# convention). A failed call degrades to a miss
+	# observation and never an assertion — a side here zeroes its length in
+	# one or two batches and loop maps Write Zeroes onto `fallocate`, so the
+	# window is normally already closed by the time this samples, exactly
+	# like the migration cases' grace-window and read-through probes (the
+	# same convention). A failed call degrades to a miss
 	# for the same reason: this must not be able to fail the suite (the next
-	# line's wait-zeroed is where a real problem surfaces).
+	# line's wait-zeroed is where a real problem surfaces). The reply is
+	# protojson, which prints a uint64 as a decimal string and omits a zero.
 	sample=$(ctl "$idx" get-side-info --sp "$sp" --leg "$leg" --side "$side" ||
 		true)
 	[ -n "$sample" ] || sample="{}"
-	zdone=$(jq_of "$sample" '.side_info.zeroed_ext_cnt // "0"')
-	ztotal=$(jq_of "$sample" '.side_info.total_ext_cnt // "0"')
+	zdone=$(jq_of "$sample" '.side_info.zeroed_bytes // "0"')
+	ztotal=$(jq_of "$sample" '.side_info.zero_bytes // "0"')
 	if [ "$ztotal" -gt 0 ] && [ "$zdone" -lt "$ztotal" ]; then
-		log "provisioning $sp/$leg/$side: provisioning window HIT ($zdone/$ztotal zeroed)"
+		log "provisioning $sp/$leg/$side: provisioning window HIT ($zdone/$ztotal bytes zeroed)"
 	else
-		log "provisioning $sp/$leg/$side: WARNING provisioning window missed ($zdone/$ztotal zeroed)"
+		log "provisioning $sp/$leg/$side: WARNING provisioning window missed ($zdone/$ztotal bytes zeroed)"
 	fi
-	wait_zeroed "$idx" "$sp" "$leg" "$side" "$ext"
+	wait_zeroed "$idx" "$sp" "$leg" "$side" "$zlen"
 	SYNC_SIDE_REPLY=$(ctl "$idx" syncup-side --revision "$rev2" \
 		--sp "$sp" --leg "$leg" --side "$side" --provisioned=true "$@")
-	if [ -n "$ext" ]; then
-		zdone=$(jq_of "$SYNC_SIDE_REPLY" '.side_info.zeroed_ext_cnt // "0"')
-		ztotal=$(jq_of "$SYNC_SIDE_REPLY" '.side_info.total_ext_cnt // "0"')
-		assert_eq "$zdone/$ztotal" "$((ext))/$((ext))" \
-			"provisioning $sp/$leg/$side: zeroed/total extents at provisioned=true"
-	fi
+	zdone=$(jq_of "$SYNC_SIDE_REPLY" '.side_info.zeroed_bytes // "0"')
+	ztotal=$(jq_of "$SYNC_SIDE_REPLY" '.side_info.zero_bytes // "0"')
+	assert_eq "$((zdone))/$((ztotal))" "$((zlen))/$((zlen))" \
+		"provisioning $sp/$leg/$side: zeroed/required bytes at provisioned=true"
 }
 
 # ---------------------------------------------------------------------------
@@ -1632,7 +1666,8 @@ case_smoke() {
 	bump_rev "$dn"
 	siderev=${REV[$dn]}
 	sync_side_2phase "$dn" "$provrev" "$siderev" "$sp" "$leg" "$side" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
 	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "smoke side_dev"
 	assert_cn_ok "$out" cn_id_to_dm_error "$cn" smoke
@@ -1671,6 +1706,101 @@ case_smoke() {
 	sshv_ok "$cnvm" "rm -f $WORK/pattern-smoke.bin"
 	nqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "$leg" "$cn")
 	log "smoke: $nqn is gone"
+}
+
+# ---------------------------------------------------------------------------
+# Case Z — zeroing (dnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+#
+# The length a side zeroes is the length its request asks for, and not one
+# byte past it (architecture.md, Side provisioning protocol; dnagent.md DN9).
+# Only the agent knows where a side's extents lie, so the fill covers the
+# node's whole extent area, which holds no side between cases, with one random
+# block an extent long written into every extent slot: whatever extents a side
+# is given, its byte at offset x then holds the block's byte at x modulo the
+# extent size unless zeroing reached it. Every length here is whole MiB and
+# the reads are MiB ranges on either side of where it ends, so a byte zeroed
+# too many or too few changes a hash.
+
+case_zeroing() {
+	CASE=zeroing
+	local dn=1 sp=0x91 mleg=0x1 mside=0x11 dleg=0x2 dside=0x12 cn=0x21
+	local ext_mib=$((EXTENT_SIZE / 1048576))
+	local zero_mib=$((DATA_ZERO_BYTES / 1048576))
+	# A meta group's side zeroes its leg span, its meta and data blocks
+	# together (model.SideZeroBytes); with whole 1 MiB blocks in 64 MiB
+	# extents that is the whole two-extent side.
+	local mzero=$((2 * EXTENT_SIZE))
+	local out got provrev siderev mdev ddev zero
+
+	stage fill "a random pattern over dn$dn's whole extent area, which holds no side"
+	got=$(helper "$dn" "dm_kind_names d4")
+	[ -z "$got" ] ||
+		die "zeroing: dn$dn holds side devices the fill would overwrite: $got"
+	sshv "$dn" "dd if=/dev/urandom of=$WORK/fill.bin bs=1M count=$ext_mib conv=fsync status=none"
+	helper "$dn" "fill_extents '${LOOP[$dn]}' '$WORK/fill.bin' \
+$((DATA_OFFSET / 1048576)) $ext_mib $((DATA_SIZE / EXTENT_SIZE))" >/dev/null ||
+		die "zeroing: the fill of dn$dn's extent area failed"
+
+	stage dn "SyncupDn introduces both side pointers"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" \
+		--side "$sp:$mleg:$mside" --side "$sp:$dleg:$dside")
+	assert_dn_info_ok "$out" "zeroing syncup-dn"
+
+	stage meta "a meta group's side asks to zero its whole leg span"
+	diag_add_side "$dn" "$sp" "$mleg" "$mside"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
+	bump_rev "$dn"
+	siderev=${REV[$dn]}
+	sync_side_2phase "$dn" "$provrev" "$siderev" "$sp" "$mleg" "$mside" \
+		--ext-cnt 2 --zero-bytes "$mzero" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	assert_ok "$SYNC_SIDE_REPLY" ".side_info.side_dev_info.status" \
+		"zeroing meta side_dev"
+
+	stage data "a data group's side asks to zero its meta region and first data block"
+	diag_add_side "$dn" "$sp" "$dleg" "$dside"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
+	bump_rev "$dn"
+	siderev=${REV[$dn]}
+	sync_side_2phase "$dn" "$provrev" "$siderev" "$sp" "$dleg" "$dside" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	assert_ok "$SYNC_SIDE_REPLY" ".side_info.side_dev_info.status" \
+		"zeroing data side_dev"
+
+	stage read "each side device reads zero over its length and the pattern past it"
+	mdev=/dev/mapper/$(dn_side_name "$CLUSTER" "${DNID[$dn]}" "$sp" "$mside")
+	ddev=/dev/mapper/$(dn_side_name "$CLUSTER" "${DNID[$dn]}" "$sp" "$dside")
+	drop_caches "$dn"
+	zero=$(sha_range "$dn" /dev/zero $((2 * ext_mib)))
+	assert_eq "$(sha_range "$dn" "$mdev" $((2 * ext_mib)))" "$zero" \
+		"zeroing: the meta group's side reads zero throughout"
+	assert_eq "$(sha_range "$dn" "$ddev" "$zero_mib")" \
+		"$(sha_range "$dn" /dev/zero "$zero_mib")" \
+		"zeroing: the data group's side reads zero over its length"
+	assert_eq "$(sha_range "$dn" "$ddev" $((ext_mib - zero_mib)) "$zero_mib")" \
+		"$(sha_range "$dn" "$WORK/fill.bin" $((ext_mib - zero_mib)) "$zero_mib")" \
+		"zeroing: the data group's side holds the pattern past its length"
+	assert_eq "$(sha_range "$dn" "$ddev" "$ext_mib" "$ext_mib")" \
+		"$(sha_range "$dn" "$WORK/fill.bin" "$ext_mib")" \
+		"zeroing: the data group's side holds the pattern to its end"
+
+	stage teardown "an empty side list tears both sides down"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE")
+	assert_dn_info_ok "$out" "zeroing teardown syncup-dn"
+	assert_no_residue "$sp"
+	# The records went with their devices: an orphaned one would make the
+	# read-only verdict a leftover, which ctl's default expected code fails.
+	ctl "$dn" get-dn-info >/dev/null
+	sshv_ok "$dn" "rm -f $WORK/fill.bin"
+	DIAG_SIDES=()
 }
 
 # ---------------------------------------------------------------------------
@@ -1713,7 +1843,8 @@ case_sides() {
 		siderev[i]=${REV[$dn]}
 		sync_side_2phase "$dn" "$provrev" "${siderev[$i]}" \
 			"$sp" "${A_LEG[$i]}" "${A_SIDE[$i]}" \
-			--ext-cnt 1 --cntlid-slot 0 \
+			--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+			--cntlid-slot 0 \
 			--primary-cn "${A_PRIMARY[$i]}" --standby-cn "${A_STANDBY[$i]}" \
 			--sp-level readwrite
 		out=$SYNC_SIDE_REPLY
@@ -1834,7 +1965,8 @@ migr_src_side() { # m provrev revision
 	local m=$1 provrev=$2 rev=$3 out
 	sync_side_2phase "${MSRCDN[$m]}" "$provrev" "$rev" \
 		"$SP" "${MLEG[$m]}" "${MSRCSIDE[$m]}" \
-		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite
 	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "migr $m src side_dev"
@@ -1877,7 +2009,8 @@ migr_declare_dst() { # m revision sp_level
 	local m=$1 rev=$2 level=$3 out
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "${MCN[$m]}" \
 		--sp-level "$level" --provisioned=true \
 		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
@@ -1957,7 +2090,8 @@ migr_provision_dst() { # m revision
 	local m=$1 rev=$2 out field left nqn
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "${MCN[$m]}" \
 		--sp-level no_migration --provisioned=false \
 		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
@@ -1986,10 +2120,11 @@ migr_provision_dst() { # m revision
 		"export_dms $(hex16 "$SP") $(hex16 "${MDSTSIDE[$m]}")")
 	[ -z "$left" ] ||
 		die "migr $m dst has export dm devices before it is provisioned: $left"
-	# Zeroed 2/2 (dnagent_integtest.md, Conventions, The provisioned flip):
-	# the exact equality against the --ext-cnt 2 this request asked for, not
-	# merely "every extent it happened to allocate".
-	wait_zeroed "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}" 2
+	# Zeroed (dnagent_integtest.md, Conventions, The provisioned flip): the
+	# exact equality against the --zero-bytes this request asked for, not
+	# merely "whatever length its record happens to hold".
+	wait_zeroed "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}" \
+		"$DATA_ZERO_BYTES"
 }
 
 migr_connect_dst() { # m
@@ -2023,7 +2158,8 @@ migr_gate_src() { # m revision
 	local m=$1 rev=$2 out nqn susp dev
 	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
-		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite --provisioned=true \
 		--migr-src "${MID[$m]}:${MDSTSIDE[$m]}:${DNID[${MDSTDN[$m]}]}" \
 		--dst-provisioned=false)
@@ -2062,7 +2198,8 @@ migr_cutover_src() { # m revision
 	local m=$1 rev=$2 out
 	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
-		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite --provisioned=true \
 		--migr-src "${MID[$m]}:${MDSTSIDE[$m]}:${DNID[${MDSTDN[$m]}]}" \
 		--dst-provisioned=true)
@@ -2143,7 +2280,8 @@ migr_finish_dst() { # m revision
 	local m=$1 rev=$2 out
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite --provisioned=true)
 	# The request drops --migr-dst, so the whole migr_dst_info block goes away
 	# with the clone (dnagent_integtest.md, Conventions, Negatives are exact:
@@ -2509,21 +2647,22 @@ case_migr_bitmap() {
 
 	verify_data() {
 		local m=$1
-		local vm=${MCNVM[$m]} dev got discards want
+		local vm=${MCNVM[$m]} dev got discards want srctail
 		dev=$(ns_by_id "$SP" "${MLEG[$m]}")
 		# Layer 1a: the meta region and every must-copy region came across.
 		got=$(sha_range "$vm" "$dev" 64)
 		assert_eq "$got" "${PAT_SHA_HEAD[$m]}" "migr $m first 64 MiB"
-		# Layer 1b: the skipped half reads zero even though the source holds
-		# random data there — the agent skipped it, it did not copy it.
-		# Those zeros are *guaranteed* by the destination's
-		# `blkdiscard --zeroout` provisioning (architecture.md,
-		# Side provisioning protocol) rather than hoped for from
-		# discard-reads-zeros, which no hardware guarantees ([D15]).
-		sshv "$vm" "dd if=$dev of=$WORK/tail-$m.bin bs=1M skip=64 count=64 status=none"
-		got=$(sshv "$vm" "dd if=/dev/zero bs=1M count=64 status=none > $WORK/zero-$m.bin; cmp -s $WORK/tail-$m.bin $WORK/zero-$m.bin && echo zeros || echo data")
-		assert_eq "$got" zeros "migr $m second 64 MiB must be zeros"
-		sshv_ok "$vm" "rm -f $WORK/tail-$m.bin $WORK/zero-$m.bin"
+		# Layer 1b: the skipped half differs from the source's, which holds
+		# this case's fresh random data there — the agent skipped it, it did
+		# not copy it. What the destination reads there is whatever its
+		# extents held before, as provisioning zeroes a data group's side
+		# only up to the end of its first data block (architecture.md, Side
+		# provisioning protocol), so the proof is the difference and never a
+		# content.
+		got=$(sha_range "$vm" "$dev" 64 64)
+		srctail=$(sha_range "$vm" "$WORK/pattern-$m.bin" 64 64)
+		[ "$got" != "$srctail" ] ||
+			die "migr $m: the skipped second 64 MiB holds the source's data"
 		# Layer 4: the meta_blocks arithmetic, read straight off the log.
 		# First skip bit 61 -> region 3+61 = 64 -> offset 64 MiB; a run of 64
 		# bits -> length 64 MiB. A wrong meta_blocks shifts the offset.
@@ -2761,7 +2900,8 @@ teardown_pinned_side() {
 	bump_rev "$dn"
 	siderev=${REV[$dn]}
 	sync_side_2phase "$dn" "$provrev" "$siderev" "$sp" "$leg" "$side" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
 	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "teardown pinned side_dev"
 	# No CN connects: a removal that fails on a held fd needs no remote at
@@ -2830,7 +2970,8 @@ case_restart() {
 	provrev=${REV[1]}
 	bump_rev 1
 	sync_side_2phase 1 "$provrev" "${REV[1]}" "$sp" "$leg" "$srcside" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
 	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart src side_dev"
 	assert_cn_ok "$out" cn_id_to_nvmeof "$cn" "restart src"
@@ -2839,7 +2980,8 @@ case_restart() {
 	provrev=${REV[2]}
 	bump_rev 2
 	sync_side_2phase 2 "$provrev" "${REV[2]}" "$sp" "$leg" "$dstside" \
-		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
@@ -2873,7 +3015,8 @@ case_restart() {
 		>"$snap/side2.pre.raw"
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
-		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
 		--provisioned=true \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
@@ -2925,7 +3068,8 @@ case_restart() {
 	stage bmreload "the persisted chunk survived"
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
-		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
 		--provisioned=true \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
@@ -2949,12 +3093,14 @@ case_restart() {
 	assert_dn_info_ok "$out" "restart re-apply dn2"
 	out=$(ctl 1 syncup-side --revision "${REV[1]}" \
 		--sp "$sp" --leg "$leg" --side "$srcside" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite \
 		--provisioned=true)
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side1"
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
-		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
 		--provisioned=true \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
@@ -2965,7 +3111,8 @@ case_restart() {
 	# The post-restart log covers the startup reconcile and these re-applies.
 	# This is also the resume-at-k net (dnagent.md DN9): `blkdiscard` is in
 	# mutations()' verb list, so a reconcile that re-zeroes an already-complete
-	# side — the resume logic reading its bits wrong — fails the case here.
+	# side — the resume logic reading its stored count wrong — fails the case
+	# here.
 	for idx in 1 2; do
 		local muts
 		muts=$(helper "$idx" mutations)

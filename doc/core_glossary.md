@@ -110,7 +110,7 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 ## Creating, moving and deleting
 
-**provisioned, zeroing** — A disk node fills a new side with zeros before it exports the side; this is zeroing. When it is complete, the worker marks the side provisioned. The controller nodes do not use a leg before a side of it is provisioned.
+**provisioned, zeroing** — A disk node zeroes the part of a new side that must read as zeros before it exports the side; this is zeroing. For a side of a data group that is the leg's first blocks: the ones that hold the md superblock and its write-intent bitmap, and the first block of data. For a side of a meta group it is the whole side, which holds the thin pool's metadata. When it is complete, the worker marks the side provisioned. The controller nodes do not use a leg before a side of it is provisioned. The rest of a data leg is never zeroed: a thin device shows a host only zeros for a block it has not yet written, so the bytes of a previous pool stay unreadable.
 
 **migration** — The move of one leg from one disk node to another while the leg stays in use. An operator starts it: a new side is created on the other disk node and pulls the data from the old side. The operator finishes it when the copy is complete, and the old side is removed.
 

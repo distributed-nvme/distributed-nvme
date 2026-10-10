@@ -3705,14 +3705,17 @@ func TestReactionPassNeedsClusterConf(t *testing.T) {
 	h.wantApplied()
 }
 
-// TestReactionPassRefusesAnInvalidConf checks the pass gate (architecture.md,
-// Common validation). Both stored confs are needed and both are checked before
-// the pass is built: every allocating reaction computes with the cluster's
-// extent_size and batch sizes, and AR6 reads low_water_mark_pct and
-// data_block_size straight off the SP's own bdev_conf. Either one unusable
-// makes the pass a complete no-op — no candidate scan, no model op, no
-// `reaction applied` and no `reaction skipped` — with one Error record naming
-// the field.
+// TestReactionPassRefusesAnInvalidConf checks the pass's gates (AR1;
+// architecture.md, Common validation). Both stored confs are needed and both
+// are checked before the reactions are evaluated: every allocating reaction
+// computes with the cluster's extent_size and batch sizes, and AR6 reads
+// low_water_mark_pct and data_block_size straight off the SP's own bdev_conf.
+// Every group's length to zero (RW15) is checked too: the fan-out builds no
+// request for an SP with a group whose stored counts give its sides none
+// (RW14), so a reaction committed past it could not be delivered. Any one of
+// them unusable makes the pass a complete no-op — no candidate scan, no model
+// op, no `reaction applied` and no `reaction skipped` — with one Error record
+// naming the field.
 //
 // The fixture is set up to WANT a reaction (an unhealthy primary, a breached
 // pool), so a pass that did nothing because there was nothing to do could not
@@ -3738,6 +3741,13 @@ func TestReactionPassRefusesAnInvalidConf(t *testing.T) {
 				h.state.Conf.BdevConf.DmPoolConf.DataBlockSize = 0
 			},
 			field: "data_block_size",
+		},
+		{
+			name: "a group with no length to zero",
+			corrupt: func(h *reactHarness) {
+				h.dataGrp().MetaBlocks = 0
+			},
+			field: fmt.Sprintf("group %d meta_blocks is zero", reactDataGrp),
 		},
 	}
 	for _, tc := range cases {
@@ -3777,6 +3787,29 @@ func TestReactionPassRefusesAnInvalidConf(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReactionPassRefusesAGroupWithNoLength checks AR1's group gate on the
+// reaction it stops: while a group's stored counts give its sides no length
+// to zero (RW15), the failover the fixture wants is not committed, because
+// the fan-out could not deliver it (RW14), and the first pass after the group
+// is repaired commits it.
+func TestReactionPassRefusesAGroupWithNoLength(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+	metaBlocks := h.dataGrp().GetMetaBlocks()
+	h.dataGrp().MetaBlocks = 0
+	h.pass()
+	h.wantOps()
+	h.wantApplied()
+
+	h.dataGrp().MetaBlocks = metaBlocks
+	h.pass()
+	calls := h.wantOps("failover")
+	if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrB {
+		t.Fatalf("failover %d -> %d", calls[0].oldId, calls[0].newId)
+	}
+	h.wantApplied(reactionFailover)
 }
 
 // TestReactionPassLoadFailure checks the two load outcomes of AR1: a deleted

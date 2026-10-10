@@ -795,12 +795,14 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// suppression, because a doomed SP must drain at any level. drain.go
 		// owns the rest.
 		//
-		// It also runs ahead of the SP's OWN bdev_conf gate below, deliberately:
-		// the drain reads no geometry at all — no block size, no stripe, no
-		// chunk count — and an SP whose stored bdev_conf cannot be read is
-		// exactly the one an operator most wants to be able to delete. Gating
-		// the drain on it would make such an SP permanently undeletable, since
-		// the latch is one-way (SPD5) and nothing else ever removes the keys.
+		// It also runs ahead of the SP's OWN two gates below, its bdev_conf
+		// and its groups' lengths to zero, deliberately: the drain reads no
+		// geometry at all — no block size, no stripe, no chunk count, no
+		// group's block counts — and an SP whose stored geometry cannot be
+		// read is exactly the one an operator most wants to be able to
+		// delete. Gating the drain on it would make such an SP permanently
+		// undeletable, since the latch is one-way (SPD5) and nothing else
+		// ever removes the keys.
 		w.confRefusal.cc = ""
 		w.drainStep(ctx, p)
 		return
@@ -808,6 +810,19 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// The SP's own stored geometry, for the reactions: tryGrow reads
 	// low_water_mark_pct and data_block_size straight off it.
 	if err := model.ValidateBdevConf(state.Conf.GetBdevConf()); err != nil {
+		w.refuseReactionConf(ctx, err)
+		return
+	}
+	// RW14's group gate as well: while a group's stored counts give its sides
+	// no length to zero (RW15), the fan-out builds no request, so the pass
+	// must not commit a reaction the fan-out cannot deliver (AR1). A
+	// failover would rewrite the SP's discovery records (architecture.md
+	// [D18]) while neither cntlr is sent its new role, a replacement would
+	// release the old cntlr from its CN while the new one is never built,
+	// and a grow or a spare would take DN capacity for sides no request
+	// reaches. The refusal comes before the memo is cleared, so a steady bad
+	// group costs one record.
+	if err := checkSideZeroBytes(state); err != nil {
 		w.refuseReactionConf(ctx, err)
 		return
 	}
@@ -827,8 +842,9 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 
 // refuseReactionConf records the pass gate's refusal, once per distinct error.
 // It shares the coordinator's memo with the fan-out's refusal but keeps its
-// own half, so an SP whose bdev_conf is bad reports both the fan-out it did
-// not build and the pass it did not run — once each, not once per tick.
+// own half, so an SP whose bdev_conf is bad, or whose group gives its sides
+// no length to zero, reports both the fan-out it did not build and the pass
+// it did not run — once each, not once per tick.
 func (w *spWorker) refuseReactionConf(ctx context.Context, err error) {
 	if w.confRefusal.cc == err.Error() {
 		return

@@ -226,8 +226,9 @@ message SideInfo {
     map<uint64, ResInfo> cn_id_to_nvmeof = 4;
     MigrSrcInfo migr_src_info = 5;
     MigrDstInfo migr_dst_info = 6;
-    uint64 zeroed_ext_cnt = 7;
-    uint64 total_ext_cnt = 8;  // always filled; equal => fully zeroed
+    reserved 7, 8;  // retired, never reused: a renumbered field decodes silently
+    uint64 zeroed_bytes = 9;
+    uint64 zero_bytes = 10;  // always filled; equal and above zero => zeroed
 }
 
 message CntlrInfo {
@@ -1321,6 +1322,7 @@ message SyncupSideRequest {
         repeated uint64 standby_id_list = 4;
         SpLevel sp_level = 5;
         bool provisioned = 6;
+        uint64 zero_bytes = 7;  // the prefix of the side to zero, from the group
     }
     message MigrSrcConf {
         uint64 migr_id = 1;
@@ -1612,10 +1614,10 @@ message DnDiskTable {
     message SideRecord {
         uint64 sp_id = 1;
         uint64 side_id = 2;
-        reserved 3;                       // retired, never reused: a renumbered field decodes silently
+        reserved 3, 5;                    // retired, never reused: a renumbered field decodes silently
         repeated ExtentRun run_list = 4;  // ordered; concat = side device
-        bytes zeroed_bits = 5;            // bit i = logical extent i zeroed;
-                                          // LSB-first per agent/bitmap.go
+        uint64 zero_bytes = 6;            // the prefix to zero, set at allocation
+        uint64 zeroed_bytes = 7;          // bytes zeroed from the side's start
     }
     message CloneMetaRecord {
         uint64 sp_id = 1;

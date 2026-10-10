@@ -1610,8 +1610,8 @@ type SideInfo struct {
 	CnIdToNvmeof   map[uint64]*ResInfo    `protobuf:"bytes,4,rep,name=cn_id_to_nvmeof,json=cnIdToNvmeof,proto3" json:"cn_id_to_nvmeof,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	MigrSrcInfo    *SideInfo_MigrSrcInfo  `protobuf:"bytes,5,opt,name=migr_src_info,json=migrSrcInfo,proto3" json:"migr_src_info,omitempty"`
 	MigrDstInfo    *SideInfo_MigrDstInfo  `protobuf:"bytes,6,opt,name=migr_dst_info,json=migrDstInfo,proto3" json:"migr_dst_info,omitempty"`
-	ZeroedExtCnt   uint64                 `protobuf:"varint,7,opt,name=zeroed_ext_cnt,json=zeroedExtCnt,proto3" json:"zeroed_ext_cnt,omitempty"`
-	TotalExtCnt    uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"` // always filled; equal => fully zeroed
+	ZeroedBytes    uint64                 `protobuf:"varint,9,opt,name=zeroed_bytes,json=zeroedBytes,proto3" json:"zeroed_bytes,omitempty"`
+	ZeroBytes      uint64                 `protobuf:"varint,10,opt,name=zero_bytes,json=zeroBytes,proto3" json:"zero_bytes,omitempty"` // always filled; equal and above zero => zeroed
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1688,16 +1688,16 @@ func (x *SideInfo) GetMigrDstInfo() *SideInfo_MigrDstInfo {
 	return nil
 }
 
-func (x *SideInfo) GetZeroedExtCnt() uint64 {
+func (x *SideInfo) GetZeroedBytes() uint64 {
 	if x != nil {
-		return x.ZeroedExtCnt
+		return x.ZeroedBytes
 	}
 	return 0
 }
 
-func (x *SideInfo) GetTotalExtCnt() uint64 {
+func (x *SideInfo) GetZeroBytes() uint64 {
 	if x != nil {
-		return x.TotalExtCnt
+		return x.ZeroBytes
 	}
 	return 0
 }
@@ -3294,7 +3294,7 @@ type ThinDevice struct {
 	Size  uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
 	// created is set exactly once by the sp-worker, when a cntlr has
 	// reported this td's thin volume RES_STATUS_OK in every slice of the SP
-	// (architecture.md, sp role); it is never cleared. It gates snapshot
+	// (dnv-worker.md RW19); it is never cleared. It gates snapshot
 	// creation and origin deletion (architecture.md, Thin devices) and tells
 	// the cn agent that the ids exist in every slice pool, so no
 	// create_thin/create_snap is ever sent for this td again (CN14; the
@@ -3459,9 +3459,9 @@ type Clone struct {
 	DstTdId       uint64                 `protobuf:"varint,8,opt,name=dst_td_id,json=dstTdId,proto3" json:"dst_td_id,omitempty"`
 	DmCloneConf   *DmCloneConf           `protobuf:"bytes,9,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
 	AutoResume    bool                   `protobuf:"varint,10,opt,name=auto_resume,json=autoResume,proto3" json:"auto_resume,omitempty"`
-	// Reserving the NUMBER is what keeps a future varint
-	// field from decoding an old record's counter as
-	// itself; the name goes with it.
+	// field renumbered onto 11 would decode a stored
+	// record's counter as itself, silently; the name
+	// goes with it.
 	// The clone-delete latch (architecture.md, Clones, DeleteClone;
 	// dnv-worker.md, The clone drain): DeleteClone sets it and returns, and
 	// the sp coordinator drains the chunk keys. Appended, never renumbered —
@@ -13640,6 +13640,7 @@ type SyncupSideRequest_SideConf struct {
 	StandbyIdList []uint64               `protobuf:"varint,4,rep,packed,name=standby_id_list,json=standbyIdList,proto3" json:"standby_id_list,omitempty"`
 	SpLevel       SpLevel                `protobuf:"varint,5,opt,name=sp_level,json=spLevel,proto3,enum=SpLevel" json:"sp_level,omitempty"`
 	Provisioned   bool                   `protobuf:"varint,6,opt,name=provisioned,proto3" json:"provisioned,omitempty"`
+	ZeroBytes     uint64                 `protobuf:"varint,7,opt,name=zero_bytes,json=zeroBytes,proto3" json:"zero_bytes,omitempty"` // the prefix of the side to zero, from the group
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13714,6 +13715,13 @@ func (x *SyncupSideRequest_SideConf) GetProvisioned() bool {
 		return x.Provisioned
 	}
 	return false
+}
+
+func (x *SyncupSideRequest_SideConf) GetZeroBytes() uint64 {
+	if x != nil {
+		return x.ZeroBytes
+	}
+	return 0
 }
 
 type SyncupSideRequest_MigrSrcConf struct {
@@ -13940,8 +13948,9 @@ type DnDiskTable_SideRecord struct {
 	state         protoimpl.MessageState   `protogen:"open.v1"`
 	SpId          uint64                   `protobuf:"varint,1,opt,name=sp_id,json=spId,proto3" json:"sp_id,omitempty"`
 	SideId        uint64                   `protobuf:"varint,2,opt,name=side_id,json=sideId,proto3" json:"side_id,omitempty"`
-	RunList       []*DnDiskTable_ExtentRun `protobuf:"bytes,4,rep,name=run_list,json=runList,proto3" json:"run_list,omitempty"`          // ordered; concat = side device
-	ZeroedBits    []byte                   `protobuf:"bytes,5,opt,name=zeroed_bits,json=zeroedBits,proto3" json:"zeroed_bits,omitempty"` // bit i = logical extent i zeroed;
+	RunList       []*DnDiskTable_ExtentRun `protobuf:"bytes,4,rep,name=run_list,json=runList,proto3" json:"run_list,omitempty"`              // ordered; concat = side device
+	ZeroBytes     uint64                   `protobuf:"varint,6,opt,name=zero_bytes,json=zeroBytes,proto3" json:"zero_bytes,omitempty"`       // the prefix to zero, set at allocation
+	ZeroedBytes   uint64                   `protobuf:"varint,7,opt,name=zeroed_bytes,json=zeroedBytes,proto3" json:"zeroed_bytes,omitempty"` // bytes zeroed from the side's start
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13997,11 +14006,18 @@ func (x *DnDiskTable_SideRecord) GetRunList() []*DnDiskTable_ExtentRun {
 	return nil
 }
 
-func (x *DnDiskTable_SideRecord) GetZeroedBits() []byte {
+func (x *DnDiskTable_SideRecord) GetZeroBytes() uint64 {
 	if x != nil {
-		return x.ZeroedBits
+		return x.ZeroBytes
 	}
-	return nil
+	return 0
+}
+
+func (x *DnDiskTable_SideRecord) GetZeroedBytes() uint64 {
+	if x != nil {
+		return x.ZeroedBytes
+	}
+	return 0
 }
 
 type DnDiskTable_CloneMetaRecord struct {
@@ -14184,16 +14200,18 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\n" +
 	"tmpfs_info\x18\x02 \x01(\v2\b.ResInfoR\ttmpfsInfo\x12,\n" +
 	"\rtmp_file_info\x18\x03 \x01(\v2\b.ResInfoR\vtmpFileInfo\x12,\n" +
-	"\rloop_dev_info\x18\x04 \x01(\v2\b.ResInfoR\vloopDevInfoJ\x04\b\x05\x10\x06\"\x85\a\n" +
+	"\rloop_dev_info\x18\x04 \x01(\v2\b.ResInfoR\vloopDevInfoJ\x04\b\x05\x10\x06\"\x89\a\n" +
 	"\bSideInfo\x12,\n" +
 	"\rside_dev_info\x18\x01 \x01(\v2\b.ResInfoR\vsideDevInfo\x12F\n" +
 	"\x11cn_id_to_dm_error\x18\x02 \x03(\v2\x1c.SideInfo.CnIdToDmErrorEntryR\rcnIdToDmError\x12I\n" +
 	"\x12cn_id_to_dm_linear\x18\x03 \x03(\v2\x1d.SideInfo.CnIdToDmLinearEntryR\x0ecnIdToDmLinear\x12B\n" +
 	"\x0fcn_id_to_nvmeof\x18\x04 \x03(\v2\x1b.SideInfo.CnIdToNvmeofEntryR\fcnIdToNvmeof\x129\n" +
 	"\rmigr_src_info\x18\x05 \x01(\v2\x15.SideInfo.MigrSrcInfoR\vmigrSrcInfo\x129\n" +
-	"\rmigr_dst_info\x18\x06 \x01(\v2\x15.SideInfo.MigrDstInfoR\vmigrDstInfo\x12$\n" +
-	"\x0ezeroed_ext_cnt\x18\a \x01(\x04R\fzeroedExtCnt\x12\"\n" +
-	"\rtotal_ext_cnt\x18\b \x01(\x04R\vtotalExtCnt\x1ah\n" +
+	"\rmigr_dst_info\x18\x06 \x01(\v2\x15.SideInfo.MigrDstInfoR\vmigrDstInfo\x12!\n" +
+	"\fzeroed_bytes\x18\t \x01(\x04R\vzeroedBytes\x12\x1d\n" +
+	"\n" +
+	"zero_bytes\x18\n" +
+	" \x01(\x04R\tzeroBytes\x1ah\n" +
 	"\vMigrSrcInfo\x12.\n" +
 	"\x0edm_linear_info\x18\x01 \x01(\v2\b.ResInfoR\fdmLinearInfo\x12)\n" +
 	"\vnvmeof_info\x18\x02 \x01(\v2\b.ResInfoR\n" +
@@ -14210,7 +14228,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aI\n" +
 	"\x11CnIdToNvmeofEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
-	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\"\xf0\x15\n" +
+	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xf0\x15\n" +
 	"\tCntlrInfo\x12L\n" +
 	"\x12ss_id_to_subsystem\x18\x01 \x03(\v2\x1f.CntlrInfo.SsIdToSubsystemEntryR\x0fssIdToSubsystem\x12L\n" +
 	"\x12ns_id_to_namespace\x18\x02 \x03(\v2\x1f.CntlrInfo.NsIdToNamespaceEntryR\x0fnsIdToNamespace\x12J\n" +
@@ -15003,7 +15021,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12 \n" +
-	"\adn_info\x18\x03 \x01(\v2\a.DnInfoR\x06dnInfo\"\xe2\a\n" +
+	"\adn_info\x18\x03 \x01(\v2\a.DnInfoR\x06dnInfo\"\x81\b\n" +
 	"\x11SyncupSideRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
@@ -15012,7 +15030,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\brevision\x18\x04 \x01(\x04R\brevision\x128\n" +
 	"\tside_conf\x18\x05 \x01(\v2\x1b.SyncupSideRequest.SideConfR\bsideConf\x12B\n" +
 	"\rmigr_src_conf\x18\x06 \x01(\v2\x1e.SyncupSideRequest.MigrSrcConfR\vmigrSrcConf\x12B\n" +
-	"\rmigr_dst_conf\x18\a \x01(\v2\x1e.SyncupSideRequest.MigrDstConfR\vmigrDstConf\x1a\xd7\x01\n" +
+	"\rmigr_dst_conf\x18\a \x01(\v2\x1e.SyncupSideRequest.MigrDstConfR\vmigrDstConf\x1a\xf6\x01\n" +
 	"\bSideConf\x12\x17\n" +
 	"\aext_cnt\x18\x01 \x01(\x04R\x06extCnt\x12\x1f\n" +
 	"\vcntlid_slot\x18\x02 \x01(\rR\n" +
@@ -15020,7 +15038,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rprimary_cn_id\x18\x03 \x01(\x04R\vprimaryCnId\x12&\n" +
 	"\x0fstandby_id_list\x18\x04 \x03(\x04R\rstandbyIdList\x12#\n" +
 	"\bsp_level\x18\x05 \x01(\x0e2\b.SpLevelR\aspLevel\x12 \n" +
-	"\vprovisioned\x18\x06 \x01(\bR\vprovisioned\x1a\x8b\x01\n" +
+	"\vprovisioned\x18\x06 \x01(\bR\vprovisioned\x12\x1d\n" +
+	"\n" +
+	"zero_bytes\x18\a \x01(\x04R\tzeroBytes\x1a\x8b\x01\n" +
 	"\vMigrSrcConf\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\x12\x1e\n" +
 	"\vdst_side_id\x18\x02 \x01(\x04R\tdstSideId\x12\x1a\n" +
@@ -15246,20 +15266,21 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vdata_offset\x18\x05 \x01(\x04R\n" +
 	"dataOffset\x12*\n" +
 	"\x11clone_meta_offset\x18\x06 \x01(\x04R\x0fcloneMetaOffset\x12&\n" +
-	"\x0fclone_meta_size\x18\a \x01(\x04R\rcloneMetaSize\"\xd8\x03\n" +
+	"\x0fclone_meta_size\x18\a \x01(\x04R\rcloneMetaSize\"\xff\x03\n" +
 	"\vDnDiskTable\x124\n" +
 	"\tside_list\x18\x01 \x03(\v2\x17.DnDiskTable.SideRecordR\bsideList\x12D\n" +
 	"\x0fclone_meta_list\x18\x02 \x03(\v2\x1c.DnDiskTable.CloneMetaRecordR\rcloneMetaList\x1a7\n" +
 	"\tExtentRun\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x04R\x05start\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x04R\x05count\x1a\x94\x01\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\x1a\xbb\x01\n" +
 	"\n" +
 	"SideRecord\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x17\n" +
 	"\aside_id\x18\x02 \x01(\x04R\x06sideId\x121\n" +
-	"\brun_list\x18\x04 \x03(\v2\x16.DnDiskTable.ExtentRunR\arunList\x12\x1f\n" +
-	"\vzeroed_bits\x18\x05 \x01(\fR\n" +
-	"zeroedBitsJ\x04\b\x03\x10\x04\x1a}\n" +
+	"\brun_list\x18\x04 \x03(\v2\x16.DnDiskTable.ExtentRunR\arunList\x12\x1d\n" +
+	"\n" +
+	"zero_bytes\x18\x06 \x01(\x04R\tzeroBytes\x12!\n" +
+	"\fzeroed_bytes\x18\a \x01(\x04R\vzeroedBytesJ\x04\b\x03\x10\x04J\x04\b\x05\x10\x06\x1a}\n" +
 	"\x0fCloneMetaRecord\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x17\n" +
 	"\amigr_id\x18\x02 \x01(\x04R\x06migrId\x12\x1d\n" +

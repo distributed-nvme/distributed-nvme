@@ -60,7 +60,7 @@ const (
 	// the sides
 	// under it have provisioned = false, so nothing is exported yet and
 	// nothing is wrong (the CN9 provisioning gate). It carries no progress counter on
-	// purpose — the dn's "zeroing k/n" advances, and a details string that
+	// purpose — the dn's zeroing progress advances, and a details string that
 	// changed every round would defeat the proto.Equal suppression of the CN24
 	// check stream.
 	detailsProvisioning = "provisioning"

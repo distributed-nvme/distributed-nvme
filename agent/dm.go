@@ -306,12 +306,11 @@ func (d *Dm) BlkDiscardRange(
 
 // BlkZeroout writes zeros over one byte range of a device — the side
 // provisioning primitive (architecture.md, Side provisioning protocol;
-// [D15]). Unlike BlkDiscardRange (a
-// metadata-only "mark hydrated" hint) this is a *guaranteed* zero write:
-// discard-reads-zeros is not a hardware guarantee (the kernel dropped
-// discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is optional) and a new
-// side must never expose a previous pool's bytes (architecture.md, System
-// overview).
+// [D15]), which zeroes the part of a new side that must read as zeros. Unlike
+// BlkDiscardRange (a metadata-only "mark hydrated" hint) this is a
+// *guaranteed* zero write: discard-reads-zeros is not a hardware guarantee
+// (the kernel dropped discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is
+// optional).
 //
 // It must never be pointed at the CN clone-metadata arena: that arena is a
 // sparse tmpfs file and --zeroout would materialize it in RAM, which is why

@@ -47,6 +47,15 @@ type DnAgentServer struct {
 	// reason as fenceWait: no unit test can wait out the production value.
 	zeroRetryInterval time.Duration
 
+	// zeroBatchMax and zeroBatchMin bound a side's DN9 zeroing batch: its
+	// first size and the ceiling a success doubles it back to
+	// (common.DnZeroBatchMaxBytes), and the floor a kill halves it down to
+	// (common.DnZeroBatchMinBytes). Fields for the same reason as
+	// zeroRetryInterval: a unit-test side is a few MiB, which the production
+	// first batch would zero in one command, hiding every multi-batch path.
+	zeroBatchMax uint64
+	zeroBatchMin uint64
+
 	// zeroSlots holds one token per zeroing batch in flight, so at most
 	// common.DnZeroConcurrency of them run at once on this agent however many
 	// of its sides are zeroing (DN9).
@@ -202,6 +211,8 @@ func NewDnAgentServer(
 		disk:              disk,
 		fenceWait:         common.SuspendSeconds * time.Second,
 		zeroRetryInterval: common.DnZeroRetryInterval * time.Second,
+		zeroBatchMax:      common.DnZeroBatchMaxBytes,
+		zeroBatchMin:      common.DnZeroBatchMinBytes,
 		zeroSlots:         make(chan struct{}, common.DnZeroConcurrency),
 		migrRetryInterval: common.DnMigrConnectRetryInterval * time.Second,
 		now:               time.Now,

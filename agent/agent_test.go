@@ -219,7 +219,7 @@ func TestResTrackerEpoch(t *testing.T) {
 	}
 	// A status change does.
 	now = 300
-	changed := tracker.Err("lv", "side-lv", "zeroing 0/4")
+	changed := tracker.Err("lv", "side-lv", "zeroing 0/4 MiB")
 	if changed.GetEpoch() != 300 {
 		t.Errorf("epoch = %d, want 300", changed.GetEpoch())
 	}
@@ -248,17 +248,17 @@ func TestResTrackerEpoch(t *testing.T) {
 	// the *worker* never turns it into err_epoch (architecture.md,
 	// Live-state reporting).
 	now = 500
-	provisioning := tracker.Provisioning("p", "side-dev", "zeroing 3/10")
+	provisioning := tracker.Provisioning("p", "side-dev", "zeroing 3/10 MiB")
 	if provisioning.GetStatus() !=
 		pb.ResStatus_RES_STATUS_PROVISIONING {
 		t.Errorf("status = %v, want PROVISIONING", provisioning.GetStatus())
 	}
 	if provisioning.GetEpoch() != 500 ||
-		provisioning.GetDetails() != "zeroing 3/10" {
+		provisioning.GetDetails() != "zeroing 3/10 MiB" {
 		t.Errorf("provisioning info = %+v", provisioning)
 	}
 	now = 600
-	if got := tracker.Provisioning("p", "side-dev", "zeroing 7/10"); got.
+	if got := tracker.Provisioning("p", "side-dev", "zeroing 7/10 MiB"); got.
 		GetEpoch() != 500 {
 		t.Errorf("a progress-only change bumped the epoch to %d",
 			got.GetEpoch())

@@ -54,11 +54,12 @@ const (
 // (CLD7's cadence half).
 //
 // It is called on every reaction pass of a live SP, ahead of the reactions and
-// outside both of their gates, because neither applies to it: a doomed clone
+// of every gate of the pass (CLD7), because none applies to it: a doomed clone
 // drains at any `sp_level` (SPD6's rule scoped down to the clone), and the
-// drain reads no geometry, so the SP's own `bdev_conf` gate — which exists for
-// tryGrow's block size — must not be able to strand a clone the way it could
-// have stranded a latched SP.
+// drain reads no cluster conf and no geometry, neither a block size nor a
+// group's block counts, so neither of the SP's own gates, its `bdev_conf` and
+// its groups' lengths to zero (AR1), must be able to strand a clone the way
+// they could have stranded a latched SP.
 //
 // One step per clone per pass, bounded by MaxCloneCntPerSp. Clones are taken in
 // `clone_name_list` order, which both owners of an accepted overlap load from

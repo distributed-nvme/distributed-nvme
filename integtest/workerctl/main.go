@@ -21,9 +21,11 @@
 //
 // `constants` and `geometry` are the exceptions: they open no client and read
 // no key, so a suite runs them on the DRIVER, on the binary it has just built
-// and before it ships anything. They are how a shell suite reads a Go constant
-// and the group geometry formula (architecture.md, Group on-leg layout: meta
-// region, data region, health block) instead of hand-copying either.
+// and before it ships anything. They are how a shell suite reads a Go constant,
+// the group geometry formula (architecture.md, Group on-leg layout: meta
+// region, data region, health block) and a side's length to zero
+// (architecture.md, Side provisioning protocol) instead of hand-copying any of
+// them.
 //
 // Conventions the script relies on:
 //
@@ -1271,6 +1273,11 @@ func cmdConstants(g *globals, args []string) {
 // geometry with the same call on a BdevConf assembled the same way, so the two
 // cannot disagree.
 //
+// It prints the length to zero (architecture.md, Side provisioning protocol)
+// of a side of that group too, by calling model.SideZeroBytes, which the sp
+// worker's side requests carry (dnv-worker.md RW15): meta_zero_bytes for a
+// group of the slice's meta list, data_zero_bytes for one of its data list.
+//
 // The flag defaults are put-cluster's, because the conf this builds is the one
 // put-cluster would store and put-sp would inherit: --block-size and
 // --chunk-blocks are the cluster's bdev_conf, --extent-size its
@@ -1322,11 +1329,28 @@ func cmdGeometry(g *globals, args []string) {
 	if err != nil {
 		die("geometry: %v", err)
 	}
+	grp := &pb.Group{
+		ExtCnt:     *extCnt,
+		MetaBlocks: metaBlocks,
+		DataBlocks: dataBlocks,
+	}
+	metaZeroBytes, err := model.SideZeroBytes(
+		grp, true, model.PoolBlockSize(bdev))
+	if err != nil {
+		die("geometry: %v", err)
+	}
+	dataZeroBytes, err := model.SideZeroBytes(
+		grp, false, model.PoolBlockSize(bdev))
+	if err != nil {
+		die("geometry: %v", err)
+	}
 	emit(map[string]any{
-		"ext_cnt":     *extCnt,
-		"raid1":       *raid1,
-		"meta_blocks": metaBlocks,
-		"data_blocks": dataBlocks,
+		"ext_cnt":         *extCnt,
+		"raid1":           *raid1,
+		"meta_blocks":     metaBlocks,
+		"data_blocks":     dataBlocks,
+		"meta_zero_bytes": metaZeroBytes,
+		"data_zero_bytes": dataZeroBytes,
 	})
 }
 
@@ -3652,7 +3676,7 @@ func cmdSetCreated(g *globals, args []string) {
 
 // cmdSetProvisioned flips one Side.provisioned through model.FlipProvisioned:
 // the provisioning completion (architecture.md, Side provisioning protocol)
-// the sp-worker records once the dn agent reports the side fully zeroed. The
+// the sp-worker records once the dn agent reports the side's zeroing done. The
 // suite pulls it exactly where a gateway precondition demands it —
 // SwitchSpareLeg refuses an unprovisioned spare (architecture.md, Spare legs).
 func cmdSetProvisioned(g *globals, args []string) {

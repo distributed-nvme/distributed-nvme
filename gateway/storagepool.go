@@ -623,9 +623,9 @@ func (s *Server) CreateStoragePool(
 								NvmeTrConf: dn.GetNvmeTrConf(),
 								ErrEpoch:   0,
 								// [D15]: the sp-worker flips it once the DN
-								// agent has zeroed the side (architecture.md,
-								// Side provisioning protocol; architecture.md,
-								// sp role).
+								// agent reports the side's zeroing done
+								// (architecture.md, Side provisioning
+								// protocol; architecture.md, sp role).
 								Provisioned: false,
 							}},
 						})
@@ -677,7 +677,7 @@ func (s *Server) CreateStoragePool(
 					// settling, so AR5 judges it by primary_unhealthy alone
 					// only once it has reported its stack built and clean
 					// as primary; its first replies, which read its pools
-					// PROVISIONING until the sides are zeroed, do not.
+					// PROVISIONING until the sides' zeroing is done, do not.
 					Settling: idx == 0,
 				})
 			}

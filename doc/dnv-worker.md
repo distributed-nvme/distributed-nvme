@@ -995,14 +995,20 @@ parent syncup has not landed yet — an sp worker's `SyncupSide` reaching the
 DN before the dn worker's `SyncupDn` listed the side, say, which is normal
 since the roles are independent (VW10) — and stale revision means the agent
 holds a revision newer than etcd's, which only an etcd restore can cause
-and is logged at Error. Invalid conf means the agent found a proto3 zero
-where `architecture.md`, Common validation, requires a concrete value and
-converged nothing (`dnagent.md`, Names and constants in `common`). Only `SyncupDn` and
-`SyncupCntlr` can return it, and the same members are checked on this side
-first — `extent_size` by RW9's gate, the SP's `bdev_conf` by RW14's — so a
-request this worker sends should never provoke it; a `ReplyCodeInvalidConf`
-from a live agent means the agent's copy of those rules and `model`'s have
-drifted apart (`dnagent.md`, Shared mechanism — package `agent`).
+and is logged at Error. Invalid conf means the agent found a value the
+control plane cannot have written — a proto3 zero where `architecture.md`,
+Common validation, requires a concrete value, or a side's length to zero
+outside the bounds of the dn agent's side conf gate (`dnagent.md` DN8) —
+and converged nothing (`dnagent.md`, Names and constants in `common`).
+`SyncupDn`, `SyncupSide` and `SyncupCntlr` can return it, and the same
+values are checked on this side first — `extent_size` by RW9's gate, the
+SP's `bdev_conf` and every group's length to zero by RW14's — so a request
+this worker sends should never provoke it. From a live agent, a
+`ReplyCodeInvalidConf` to `SyncupDn` or `SyncupCntlr` means the agent's
+copy of those rules and `model`'s have drifted apart (`dnagent.md`, Shared
+mechanism — package `agent`); one to `SyncupSide` means a stored group
+whose block counts claim more than its extents hold, the one bound the dn
+agent checks and RW14 does not, since checking it needs the extent size.
 
 `ReplyCodeLeftover` is the one non-zero code that is **not** a rejection:
 the request was applied — the desired state is stored and every wanted
@@ -1288,17 +1294,21 @@ deadline at the default `cntlr_interval`.
 
 Between the load and the plan the fan-out validates the SP's stored
 `bdev_conf` with `model.ValidateBdevConf` (`architecture.md`, Common
-validation). That geometry is what RW16's request carries verbatim and what
-RW15's migration destination takes its `block_size` from — a plain side
-request carries none of it. `dm_raid0_conf.stripe_size` is used as a value
-by no worker computation, and `redund_md_raid1.bitmap_chunk_block_cnt` only
-inside `model.GrowSlice`'s geometry (MD6), which AR6 drives; this gate only
-checks both for zero, and otherwise both travel verbatim inside `bdev_conf`
-to the cn agent, so this is the one place the worker can refuse to hand that
-agent a geometry nobody chose. A
-refusal emits one `invalid stored conf` record (Log records, once per
-distinct error) and builds no request, starts no child and updates no
-running one — `buildPlan` and the child diff are simply not reached. It
+validation), and then every group's length to zero (RW15): a group from
+whose stored block counts `model.SideZeroBytes` derives no length is
+refused the same way, because its sides would otherwise be sent a length
+the dn agent refuses (`dnagent.md` DN8). That geometry is what RW16's
+request carries verbatim and what RW15's side request derives values from
+— every side's `zero_bytes` and the migration destination's `block_size`.
+`dm_raid0_conf.stripe_size` is used as a value by no worker
+computation, and `redund_md_raid1.bitmap_chunk_block_cnt` only inside
+`model.GrowSlice`'s geometry (MD6), which AR6 drives; this gate only checks
+both for zero, and otherwise both travel verbatim inside `bdev_conf` to
+the cn agent, so this is the one place the worker can refuse to hand that
+agent a geometry nobody chose. A refusal of either emits one
+`invalid stored conf` record (Log records, once per distinct error) and
+builds no request, starts no child and updates no running one —
+`buildPlan` and the child diff are simply not reached. It
 arms the same fan-out retry a failed `LoadSp` arms, because the tick
 re-enters the fan-out only when a retry is armed and the child diff — the
 other thing that arms one, through the idle count — was not reached. What
@@ -1384,13 +1394,23 @@ the sides go whether the old primary reported or not.
 RW15. **Side request.** A `SyncupSideRequest` carrying `cluster_id`,
 `dn_id`, the `side_pointer` (sp id, leg id, side id), `revision` (the
 `SpRev` revision) and a `side_conf` with `ext_cnt` from the group,
-`cntlid_slot` from the side, `primary_cn_id` the `cn_id` of the cntlr with
-`primary` set (zero when cntlrs exist but none is primary; an SP with NO
-cntlr gets no side request at all, its side children staying idle — SPD7),
-`standby_id_list` the `cn_id`s of every other cntlr — disabled ones
-included, a disabled cntlr keeps its standby shape (`cnagent.md` CN9) —,
-`sp_level` from the `SpConf` and `provisioned` from the side. If the side's
-leg has two sides and a `Migration` of the SP names this side as
+`zero_bytes` the group's length to zero (below), `cntlid_slot` from the
+side, `primary_cn_id` the `cn_id` of the cntlr with `primary` set (zero
+when cntlrs exist but none is primary; an SP with NO cntlr gets no side
+request at all, its side children staying idle — SPD7), `standby_id_list`
+the `cn_id`s of every other cntlr — disabled ones included, a disabled
+cntlr keeps its standby shape (`cnagent.md` CN9) —, `sp_level` from the
+`SpConf` and `provisioned` from the side. The length to zero is the part
+of each side of the group that `architecture.md`, Side provisioning
+protocol, says to zero: for a group of the meta list its leg span, the
+group's `meta_blocks` plus its `data_blocks`, and for a group of the data
+list its meta region and first data block, its `meta_blocks` plus one,
+each block of the pool's `bdev_conf.dm_pool_conf.data_block_size`
+(`model.SideZeroBytes`). It is computed once per group from stored values
+alone — no extent size and no cluster conf — and every side of the group
+carries it: an active leg's and a spare's, a migration's source and
+destination, provisioned or not. If the side's leg has two sides and a
+`Migration` of the SP names this side as
 `src_side_id`: a `migr_src_conf` with `migr_id`, `dst_side_id`, `dst_dn_id`
 and `dst_provisioned` (the destination side's `provisioned`); as
 `dst_side_id`: a `migr_dst_conf` with `migr_id`, `src_side_id`, `src_dn_id`,
@@ -1401,7 +1421,8 @@ migration's `dm_clone_conf` is the one conf still filled in here (a zero
 `hydration_threshold` or `hydration_batch_size` takes its default of
 `architecture.md`, Common validation, on a copy — the loaded state is
 shared with every child). `block_size` and everything else is sent as
-stored; a zero in the SP's geometry was refused by RW14's gate instead.
+stored; a zero in the SP's geometry, or a group whose block counts give no
+length to zero, was refused by RW14's gate instead.
 
 RW16. **Cntlr request.** A `SyncupCntlrRequest` carrying `cluster_id`,
 `cn_id`, the `cntlr_pointer` (sp id, cntlr id), the revision, `bdev_conf`
@@ -1421,8 +1442,8 @@ RW18. **Provisioned flip.** On an ACCEPTED
 gate RW19 defers to, HL1 the reason) for a side whose driven request
 (`provisioned` moves only from false to true, so the request being driven
 and the last one the agent acknowledged cannot disagree here) carried
-`provisioned` false and whose `side_info` reports `zeroed_ext_cnt` equal
-to a non-zero `total_ext_cnt`, the child reports the side to the
+`provisioned` false and whose `side_info` reports `zeroed_bytes` equal
+to a non-zero `zero_bytes`, the child reports the side to the
 coordinator, which runs `model.FlipProvisioned` (several sides reported
 within one round MAY share one STM). The bump re-fans the SP (RW14) and the
 re-synced sides carry `provisioned` true. Nothing is remembered across a
@@ -1656,9 +1677,9 @@ it clears. Three kinds of row are left out of that test, each for one reason.
 Leg rows: a spare still zeroing reads `PROVISIONING` there for as long as it
 zeroes. Group rows: a grow appends its new groups to their lists, and while
 their sides zero they stay out of the live concat, so their group rows alone
-read `PROVISIONING` beside a serving pool, for minutes — and nothing else
-needs them, since a group of a new SP that is still provisioning defers its
-whole slice, whose pool rows say so, and a group a converge could not
+read `PROVISIONING` beside a serving pool while those sides zero — and nothing
+else needs them, since a group of a new SP that is still provisioning defers
+its whole slice, whose pool rows say so, and a group a converge could not
 assemble leaves the pool rows over it `ERROR` or `MISSING`. Rows the
 `sp_level` suppresses: they read `MISSING` with `ResDetailsSpLevel`
 (`cnagent.md` CN19) and hold nothing, so a primary does not wait for a layer
@@ -1893,16 +1914,23 @@ because this pass takes its own fresh snapshot of the SP rather than
 reusing the fan-out's: AR6 reads `low_water_mark_pct` and `data_block_size`
 straight off it and sizes a meta grow with the cluster's `extent_size`,
 while the DN scans of AR6 and AR8 walk the bin ladder and every allocating
-reaction takes its oversampling batch from `alloc_conf`. A failure refuses
-the pass with one `invalid stored conf` record (Log records, once per
-distinct error) and no reaction runs: no candidate scan, no reaction
-`model` op, no `reaction applied` and no `reaction skipped`. Neither drain
-sits behind both gates: the clone drain's steps (CLD7) run first of all,
-ahead of the cluster-conf lookup and of both validations, and a latched
-SP's drain step (SPD6) runs behind the cluster-conf gate — its D2 batch
-maintains DN capacity keys off the ladder — but ahead of the `bdev_conf`
-one, so a refusal of the SP's own geometry still lets that SP drain. The
-ticker keeps running — the pass cadence falls back to
+reaction takes its oversampling batch from `alloc_conf`. A third gate
+follows the `bdev_conf` one: every group must give a length to zero
+(`model.SideZeroBytes`), the check RW14's fan-out makes. No reaction
+reads a length to zero, but the pass must not commit a reaction the fan-out
+cannot deliver, and the fan-out builds no request for an SP with a group
+that gives none: a failover, say, would take the old primary out of the
+discovery records at its commit, while the new one's promotion waits on
+the refused fan-out. A failure of any gate refuses the pass with one
+`invalid stored conf` record (Log records, once per distinct error) and
+no reaction runs: no candidate scan, no reaction `model` op, no
+`reaction applied` and no `reaction skipped`. Neither drain sits behind
+every gate: the clone drain's steps (CLD7) run first of all, ahead of the
+cluster-conf lookup and of every validation, and a latched SP's drain
+step (SPD6) runs behind the cluster-conf gate — its D2 batch maintains DN
+capacity keys off the ladder — but ahead of the SP's own two, so a
+refusal of the SP's geometry or of a group's length still lets that SP
+drain. The ticker keeps running — the pass cadence falls back to
 `DefaultHealthCheckInterval` on an unusable conf and logs nothing of its
 own, because a coordinator that stopped ticking would stop retrying the
 fan-out and the pass forever, and those two are where the refusal is
@@ -1960,7 +1988,8 @@ pass and no reaction at all, at ANY `sp_level`, because a doomed SP must
 drain whatever level an operator left it at — "at most", because the AR1
 gates that sit ahead of the branch still apply: a pass whose `LoadSp`
 failed, or whose cluster conf is missing or unusable, runs no step at all
-(the SP's own `bdev_conf` gate sits *behind* it, deliberately — SPD6). A
+(the SP's own `bdev_conf` and group-length gates sit *behind* it,
+deliberately — SPD6). A
 **disabled** cntlr is never a candidate, replaced or repaired — but a
 disabled *primary* is itself the AR5 failover trigger (`architecture.md`,
 Cntlrs). Disabling is the operator's hands-off signal, and the "skipping
@@ -2416,9 +2445,10 @@ true runs at most ONE drain step and no reaction, regardless of `sp_level`
 suppression — "at most", because the gates ahead of the branch still
 apply: a pass whose `LoadSp` failed, or whose cluster conf is missing or
 unusable, runs nothing at all and retries on the next tick. (The SP's OWN
-`bdev_conf` gate is deliberately NOT one of them: the drain reads no
-geometry, and gating it there would make an SP whose stored `bdev_conf`
-cannot be read permanently undeletable, the latch being one-way.) The
+gates, its `bdev_conf` and its groups' lengths (AR1), are deliberately NOT
+among them: the drain reads no geometry, and gating it there would make an
+SP whose stored geometry cannot be read permanently undeletable, the latch
+being one-way.) The
 FIRST step comes from the ordinary `cntlr_interval` pass — the latch's
 `SpRev` bump reaches the coordinator as a desired change, which drives the
 fan-out, not the pass. After that a committed step ends in `BumpSpRev`
@@ -2612,8 +2642,9 @@ SPD6, whose latched SP runs only drain steps: here the SP is healthy and
 its other children must keep converging. Each pass runs at most one step
 per deleting clone, bounded by `MaxCloneCntPerSp`, in `clone_name_list`
 order; the steps run ahead of EVERY gate of the pass — the cluster-conf
-cache lookup, `ValidateClusterConf`, the SP's own `bdev_conf` gate and
-AR3's suppression — because none of them applies. A doomed clone drains at
+cache lookup, `ValidateClusterConf`, the SP's own `bdev_conf` and
+group-length gates (AR1) and AR3's suppression — because none of them
+applies. A doomed clone drains at
 any `sp_level`; the drain reads no geometry and no cluster conf (unlike the
 sp drain's D2, which maintains DN capacity keys and therefore stays behind
 the ladder's gate); and a gate that could stop it would strand a latched

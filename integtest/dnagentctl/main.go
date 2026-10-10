@@ -395,6 +395,17 @@ func cmdSyncupSide(args []string) {
 	dstProvisioned := fs.Bool("dst-provisioned", false,
 		"migr_src_conf.dst_provisioned — false makes the source behave "+
 			"exactly as if migr_src_conf were absent")
+	// The length to zero (architecture.md, Side provisioning protocol), in
+	// decimal bytes. It has no default the agent accepts: its side conf gate
+	// refuses 0, a length that is not a whole multiple of common.DnZeroAlign
+	// and one longer than the side (dnagent.md DN8), so every call site must
+	// pass it, and every request for one side must repeat the same value — a
+	// length that disagrees with the side's record is an error row
+	// (dnagent.md DN9).
+	zeroBytes := fs.Uint64("zero-bytes", 0,
+		"side_conf.zero_bytes — the bytes from the side's start zeroed "+
+			"before its gate opens: the whole leg for a side of a meta "+
+			"group, the meta region and first data block for a data group's")
 	fs.Var(&revision, "revision", "request revision")
 	fs.Var(&extCnt, "ext-cnt", "side size in DN VG extents")
 	fs.Var(&primaryCn, "primary-cn", "primary CN id")
@@ -417,6 +428,7 @@ func cmdSyncupSide(args []string) {
 			StandbyIdList: standbys,
 			SpLevel:       level,
 			Provisioned:   *provisioned,
+			ZeroBytes:     *zeroBytes,
 		},
 	}
 	if *migrSrc != "" {
@@ -559,9 +571,9 @@ func cmdGetSideInfo(args []string) {
 	// The provisioning counters (architecture.md, Side provisioning protocol)
 	// as one human line on **stderr**: stdout stays exactly one protojson line,
 	// because case D diffs it and every caller parses it with jq.
-	fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d\n",
-		reply.GetSideInfo().GetZeroedExtCnt(),
-		reply.GetSideInfo().GetTotalExtCnt())
+	fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d bytes\n",
+		reply.GetSideInfo().GetZeroedBytes(),
+		reply.GetSideInfo().GetZeroBytes())
 	g.checkReply(reply.GetAgentReply())
 }
 
@@ -733,26 +745,35 @@ func cmdWaitHydrated(args []string) {
 	}
 }
 
-// cmdWaitZeroed polls GetSideInfo until the side reports every logical extent
-// zeroed (architecture.md, Side provisioning protocol). It is the script's
-// stand-in for the sp-worker's flip rule: once it returns, the caller re-sends
-// the same SyncupSide at a fresh revision with --provisioned=true.
+// cmdWaitZeroed polls GetSideInfo until the side reports its whole length to
+// zero zeroed — zeroed_bytes up to zero_bytes (architecture.md, Side
+// provisioning protocol). It is the script's stand-in for the sp-worker's
+// flip rule: once it returns, the caller re-sends the same SyncupSide at a
+// fresh revision with --provisioned=true.
 //
-// Two guards make it a real assertion rather than a sleep. total != 0, because
-// a reply whose counters are both zero — nothing sized yet — would satisfy a
-// bare `zeroed >= total` and report a side that does not exist as complete.
-// And a fail-fast on side_dev_info = RES_STATUS_ERROR, because "record
-// missing", "not zeroed" and a failing batch are terminal or paced — waiting
-// out the whole budget for them only hides the reason. MISSING is deliberately
-// NOT terminal: a read-only probe reports it while the allocation record is
-// still being written, which is exactly what this call is waiting through.
+// Two guards make it a real assertion rather than a sleep. zero_bytes != 0,
+// because a reply whose counters are both zero — no length known yet — would
+// satisfy a bare `zeroed >= zero` and report a side that does not exist as
+// complete. And a fail-fast on side_dev_info = RES_STATUS_ERROR, because
+// "record missing", "not zeroed" and a failing batch are terminal or paced —
+// waiting out the whole budget for them only hides the reason. MISSING is
+// deliberately NOT terminal: a read-only probe reports it while the
+// allocation record is still being written, which is exactly what this call
+// is waiting through.
+//
+// A length that disagrees with the side's record never shows here: the probe
+// never compares the request's length with the record's and reports the
+// record's own counts (dnagent.md DN18), so only the SyncupSide that sent that
+// length carries the error row (dnagent.md DN9). A caller that needs the
+// exact length compares the printed zero_bytes with the one it sent, as the
+// dn suite's wait_zeroed does.
 func cmdWaitZeroed(args []string) {
 	var g globals
 	fs := flag.NewFlagSet("wait-zeroed", flag.ExitOnError)
 	g.bind(fs, false)
 	sp, leg, side := sidePointerFlags(fs)
 	interval := fs.Float64("interval", 0.5, "seconds between samples")
-	limit := fs.Float64("timeout", 120, "seconds to wait for full zeroing")
+	limit := fs.Float64("timeout", 120, "seconds to wait for the side's zeroing")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -768,7 +789,7 @@ func cmdWaitZeroed(args []string) {
 	}
 	deadline := time.Now().Add(time.Duration(*limit * float64(time.Second)))
 	samples := 0
-	var zeroed, total uint64
+	var zeroedBytes, zeroBytes uint64
 	for {
 		ctx, cancel := g.rpcCtx()
 		reply, err := client.GetSideInfo(ctx, req)
@@ -783,24 +804,25 @@ func cmdWaitZeroed(args []string) {
 		}
 		info := reply.GetSideInfo()
 		samples++
-		zeroed, total = info.GetZeroedExtCnt(), info.GetTotalExtCnt()
-		fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d\n", zeroed, total)
+		zeroedBytes, zeroBytes = info.GetZeroedBytes(), info.GetZeroBytes()
+		fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d bytes\n",
+			zeroedBytes, zeroBytes)
 		if dev := info.GetSideDevInfo(); dev.GetStatus() ==
 			pb.ResStatus_RES_STATUS_ERROR {
 			die("side_dev_info is ERROR (%s)", dev.GetDetails())
 		}
-		if total != 0 && zeroed >= total {
+		if zeroBytes != 0 && zeroedBytes >= zeroBytes {
 			out, _ := json.Marshal(map[string]any{
-				"zeroed":  zeroed,
-				"total":   total,
-				"samples": samples,
+				"zeroed_bytes": zeroedBytes,
+				"zero_bytes":   zeroBytes,
+				"samples":      samples,
 			})
 			fmt.Println(string(out))
 			return
 		}
 		if time.Now().After(deadline) {
-			die("zeroing did not finish within %gs (last %d/%d)",
-				*limit, zeroed, total)
+			die("zeroing did not finish within %gs (last %d/%d bytes)",
+				*limit, zeroedBytes, zeroBytes)
 		}
 		time.Sleep(time.Duration(*interval * float64(time.Second)))
 	}

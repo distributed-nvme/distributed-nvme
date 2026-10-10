@@ -168,10 +168,10 @@ func TestCloneDrainRunsAlongsideTheReactions(t *testing.T) {
 	h.wantOps("drain_clone_bm", "failover")
 }
 
-// TestCloneDrainIgnoresEveryPassGate pins all FOUR gates CLD7 puts the clone
-// drain in front of. Each one, left in front of the drain, would strand a
-// latched clone for as long as it held — permanently, the latch being one-way
-// and nothing else ever removing those keys.
+// TestCloneDrainIgnoresEveryPassGate pins every gate of the pass that CLD7
+// puts the clone drain in front of. Each one, left in front of the drain,
+// would strand a latched clone for as long as it held — permanently, the latch
+// being one-way and nothing else ever removing those keys.
 //
 //   - the RW21 cluster-conf cache MISS: the drain reads no cluster conf, and
 //     a cluster absent from a watch-populated cache is an ordinary startup
@@ -182,6 +182,8 @@ func TestCloneDrainRunsAlongsideTheReactions(t *testing.T) {
 //     batch still runs.
 //   - the SP's own bdev_conf: the drain reads no geometry, so a stored conf
 //     that cannot be read must not be able to strand a clone.
+//   - a group whose stored counts give its sides no length to zero (AR1): the
+//     drain reads no group's block counts either.
 func TestCloneDrainIgnoresEveryPassGate(t *testing.T) {
 	// The two CLUSTER-level gates. Both are reachable in production — the RW21
 	// cache is watch-populated, so a cluster can be absent at startup or after
@@ -239,6 +241,22 @@ func TestCloneDrainIgnoresEveryPassGate(t *testing.T) {
 		h.withClone("c0", 700, [][2]uint32{{0, 0}})
 		h.latchClone("c0")
 		h.state.Conf.BdevConf.DmRaid0Conf.StripeSize = 0
+		h.pass()
+		h.wantOps("drain_clone_bm")
+		if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 1 {
+			t.Errorf("%q records = %d, want 1 (the REACTIONS still refuse)",
+				msgInvalidStoredConf, got)
+		}
+	})
+
+	t.Run("with a group with no length to zero", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.withClone("c0", 700, [][2]uint32{{0, 0}})
+		h.latchClone("c0")
+		h.dataGrp().MetaBlocks = 0
+		// AR5's trigger as well: the failover it would run is what shows
+		// that the reactions still refuse.
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
 		h.pass()
 		h.wantOps("drain_clone_bm")
 		if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 1 {

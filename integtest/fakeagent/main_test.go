@@ -145,7 +145,7 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 	    "cn": {"status": "RES_STATUS_MISSING",
 	           "rows": {"port_info": {"status": "res_status_error",
 	                                  "details": "boom"}}},
-	    "side 1:3:5": {"zeroed_ext_cnt": 0, "total_ext_cnt": 2},
+	    "side 1:3:5": {"zeroed_bytes": 0, "zero_bytes": 4194304},
 	    "cntlr 1:1": {"thin_ok": true, "thin_missing_slices": [1, 2],
 	                  "bm_idx_list": [0, 1],
 	                  "chunk_id_list": ["2:1", "0:3"], "hang": false,
@@ -176,11 +176,11 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 		t.Errorf("cn port_info status = %v", got)
 	}
 	side := parsed.Objects["side 1:3:5"]
-	if side.ZeroedExtCnt == nil || *side.ZeroedExtCnt != 0 {
-		t.Errorf("side zeroed_ext_cnt = %v", side.ZeroedExtCnt)
+	if side.ZeroedBytes == nil || *side.ZeroedBytes != 0 {
+		t.Errorf("side zeroed_bytes = %v", side.ZeroedBytes)
 	}
-	if side.TotalExtCnt == nil || *side.TotalExtCnt != 2 {
-		t.Errorf("side total_ext_cnt = %v", side.TotalExtCnt)
+	if side.ZeroBytes == nil || *side.ZeroBytes != 4<<20 {
+		t.Errorf("side zero_bytes = %v", side.ZeroBytes)
 	}
 	cntlr := parsed.Objects["cntlr 1:1"]
 	if !cntlr.ThinOk || cntlr.Hang || !cntlr.DropStream ||
@@ -343,6 +343,11 @@ func syncupDn(
 	return reply
 }
 
+// testZeroBytes is the side_conf.zero_bytes syncupSide sends: a data side's
+// length to zero, its meta region and first data block, at three meta blocks
+// of 1 MiB (architecture.md, Side provisioning protocol).
+const testZeroBytes = uint64(4) << 20
+
 func syncupSide(
 	t *testing.T, client pb.DiskNodeAgentClient,
 	ptr *pb.SidePointer, revision uint64, migrId uint64,
@@ -357,6 +362,7 @@ func syncupSide(
 			ExtCnt:        2,
 			PrimaryCnId:   1,
 			StandbyIdList: []uint64{2, 3},
+			ZeroBytes:     testZeroBytes,
 		},
 	}
 	if migrId != 0 {
@@ -995,7 +1001,7 @@ func TestCntlrInfoThinRows(t *testing.T) {
 // TestSideInfoDerivation asserts the fake's SideInfo shape: one row per
 // per-CN export stack, the migration roles only when their conf rode along,
 // and the provisioning counters of architecture.md, Side provisioning protocol
-// (total = ext_cnt, zeroed = total by default).
+// (zero_bytes = side_conf.zero_bytes, zeroed_bytes = zero_bytes by default).
 func TestSideInfoDerivation(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -1013,9 +1019,11 @@ func TestSideInfoDerivation(t *testing.T) {
 		t.Errorf("migr info = %v/%v without a conf",
 			info.GetMigrSrcInfo(), info.GetMigrDstInfo())
 	}
-	if info.GetTotalExtCnt() != 2 || info.GetZeroedExtCnt() != 2 {
-		t.Errorf("counters = %d/%d, want the instant-zeroing default 2/2",
-			info.GetZeroedExtCnt(), info.GetTotalExtCnt())
+	if info.GetZeroBytes() != testZeroBytes ||
+		info.GetZeroedBytes() != testZeroBytes {
+		t.Errorf("counters = %d/%d, want the instant-zeroing default %d/%d",
+			info.GetZeroedBytes(), info.GetZeroBytes(),
+			testZeroBytes, testZeroBytes)
 	}
 	if got := info.GetSideDevInfo().GetResName(); got != "side_dev_info" {
 		t.Errorf("side_dev_info res_name = %q", got)
@@ -1024,7 +1032,7 @@ func TestSideInfoDerivation(t *testing.T) {
 	// The destination role and a partial-zeroing override (worker_test.sh case
 	// F step 2 holds a side unprovisioned exactly this way).
 	writeFile(t, agent, behaviorFileName, `{
-	  "objects": {"side 1:3:5": {"zeroed_ext_cnt": 0,
+	  "objects": {"side 1:3:5": {"zeroed_bytes": 0,
 	    "rows": {"side_dev_info": {"status": "PROVISIONING"}}}}
 	}`)
 	info = syncupSide(t, dnClient, ptr, 1, 30).GetSideInfo()
@@ -1033,13 +1041,24 @@ func TestSideInfoDerivation(t *testing.T) {
 		t.Errorf("migr_dst_info = %v, want both rows",
 			info.GetMigrDstInfo())
 	}
-	if info.GetZeroedExtCnt() != 0 || info.GetTotalExtCnt() != 2 {
-		t.Errorf("counters = %d/%d, want 0/2",
-			info.GetZeroedExtCnt(), info.GetTotalExtCnt())
+	if info.GetZeroedBytes() != 0 || info.GetZeroBytes() != testZeroBytes {
+		t.Errorf("counters = %d/%d, want 0/%d",
+			info.GetZeroedBytes(), info.GetZeroBytes(), testZeroBytes)
 	}
 	if got := info.GetSideDevInfo().GetStatus(); got !=
 		pb.ResStatus_RES_STATUS_PROVISIONING {
 		t.Errorf("side_dev_info status = %v, want PROVISIONING", got)
+	}
+
+	// A zero_bytes override alone: zeroed_bytes follows it, as it follows
+	// the request's length by default.
+	writeFile(t, agent, behaviorFileName, `{
+	  "objects": {"side 1:3:5": {"zero_bytes": 8388608}}
+	}`)
+	info = syncupSide(t, dnClient, ptr, 1, 0).GetSideInfo()
+	if info.GetZeroedBytes() != 8<<20 || info.GetZeroBytes() != 8<<20 {
+		t.Errorf("counters = %d/%d, want the override %d/%d",
+			info.GetZeroedBytes(), info.GetZeroBytes(), 8<<20, 8<<20)
 	}
 }
 

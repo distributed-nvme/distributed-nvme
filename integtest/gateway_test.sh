@@ -2426,8 +2426,8 @@ EOF
 	assert_ne "$dstSide" "$srcSide" "migration dst_side_id differs from the source"
 	assert_field "$(smoke_jq "$(sp_json sp0)" '.migrs.m0 | @json')" '.bm_cnt' \
 		"0" "migration bm_cnt at creation"
-	# [D15]: only the sp-worker flips provisioned, after the dn agent has
-	# zeroed the side — so a fresh destination is always false.
+	# [D15]: only the sp-worker flips provisioned, once the dn agent reports
+	# the side's zeroing done — so a fresh destination is always false.
 	assert_eq "$(smoke_side_field sp0 "$dstSide" provisioned)" "false" \
 		"the destination side is unprovisioned"
 	dstAddr=$(smoke_side_field sp0 "$dstSide" addr_port)
@@ -2577,17 +2577,17 @@ EOF
 		--arg g "$dataGrp" --arg l "$targetLeg")
 	targetAddr=$(smoke_side_field sp0 \
 		"$(smoke_leg_side_ids sp0 "$targetLeg")" addr_port)
-	# Switching to a side that has not finished zeroing would put an unwritten
-	# member into the md array (architecture.md, Side provisioning protocol),
-	# so the refusal must write nothing.
+	# A spare whose side is not yet provisioned must never become an md member
+	# (architecture.md, Spare legs), so the switch is refused, and the refusal
+	# must write nothing.
 	assert_no_write "switch-spare with an unprovisioned spare" \
 		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --spare "$spareLeg" --target "$targetLeg"
 	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "SpRev after the refused switch"
 	# Playing the worker again (Integration test plan,
 	# The etcd verification, `workerctl`): FlipProvisioned is the same model op
-	# the sp-worker calls once the dn agent reports the side zeroed, and it
-	# bumps SpRev, so the cached token has to be refreshed.
+	# the sp-worker calls once the dn agent reports the side's zeroing done,
+	# and it bumps SpRev, so the cached token has to be refreshed.
 	out=$(wctl set-provisioned --sp sp0 --slice "$slice" --leg "$spareLeg" \
 		--side "$spareSide")
 	assert_field "$out" '.flipped' "true" "set-provisioned flipped the spare's side"
@@ -2666,6 +2666,11 @@ EOF
 EOF
 	sideDir=$(smoke_dn_dir "$metaAddr")
 	sideDnId=$(dn_id_of "$metaAddr")
+	# The side's length to zero, as the sp worker would send it
+	# (architecture.md, Side provisioning protocol): a meta side's leg span,
+	# which at this cluster's 1 GiB extent_size and 1 MiB data_block_size is
+	# the whole one-extent side.
+	local metaZeroBytes=1073741824
 	set_state "$sideDir" <<EOF
 {"objects":{
   "dn":{"revision":7,"request":{"cluster_id":"$CID","dn_id":"$sideDnId",
@@ -2676,7 +2681,8 @@ EOF
         "side_pointer":{"sp_id":"$spId","leg_id":"$metaLeg",
                         "side_id":"$metaSide"},
         "revision":"7",
-        "side_conf":{"ext_cnt":"1","primary_cn_id":"$primaryCnId"}}}}}
+        "side_conf":{"ext_cnt":"1","zero_bytes":"$metaZeroBytes",
+                     "primary_cn_id":"$primaryCnId"}}}}}
 EOF
 	# architecture.md, Cntlrs: the reply's applied_revision is the revision of
 	# the last request the agent accepted for the object, passed through with
@@ -2694,8 +2700,11 @@ EOF
 	assert_ne "$(jq_of "$out" '.side_info')" "null" "inspect-side side_info"
 	assert_field "$out" '.side_info.side_dev_info.status' "RES_STATUS_OK" \
 		"inspect-side side_dev_info status"
-	assert_field "$out" '.side_info.total_ext_cnt' "1" \
-		"inspect-side total_ext_cnt is the seeded side_conf.ext_cnt"
+	# The fake reports the seeded length as both counts, zeroing at once.
+	assert_field "$out" '.side_info.zero_bytes' "$metaZeroBytes" \
+		"inspect-side zero_bytes is the seeded side_conf.zero_bytes"
+	assert_field "$out" '.side_info.zeroed_bytes' "$metaZeroBytes" \
+		"inspect-side zeroed_bytes is the seeded side_conf.zero_bytes"
 
 	# -------------------------------------------------------------------
 	stage 17 "reverse teardown down to an empty store"
@@ -4609,8 +4618,8 @@ case_faults() {
 		gwx FAILED_PRECONDITION create-migr --sp sp0 --rev "$SP_REV" \
 		--name m1 --src-side "$srcSide"
 
-	# Switching in a side that has not finished zeroing would put an unwritten
-	# member into the md array (architecture.md, Side provisioning protocol).
+	# A spare whose side is not yet provisioned must never become an md member
+	# (architecture.md, Spare legs).
 	assert_no_write "switch-spare with an unprovisioned spare" \
 		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"

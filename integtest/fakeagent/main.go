@@ -187,8 +187,8 @@ type objectBehavior struct {
 	Status            *string                 `json:"status,omitempty"`
 	Details           *string                 `json:"details,omitempty"`
 	Rows              map[string]*rowBehavior `json:"rows,omitempty"`
-	ZeroedExtCnt      *uint64                 `json:"zeroed_ext_cnt,omitempty"`
-	TotalExtCnt       *uint64                 `json:"total_ext_cnt,omitempty"`
+	ZeroedBytes       *uint64                 `json:"zeroed_bytes,omitempty"`
+	ZeroBytes         *uint64                 `json:"zero_bytes,omitempty"`
 	ThinOk            bool                    `json:"thin_ok,omitempty"`
 	ThinMissingSlices []uint64                `json:"thin_missing_slices,omitempty"`
 	BmIdxList         *[]uint32               `json:"bm_idx_list,omitempty"`
@@ -821,9 +821,10 @@ func (a *fakeAgent) cnInfoLocked() *pb.CnInfo {
 // sideInfoLocked derives SideInfo from the side's last accepted request: one
 // row per per-CN export stack (primary_cn_id when non-zero plus every
 // standby_id_list entry), the migration roles only when the request carried
-// their conf, and the provisioning counters — total = ext_cnt and
-// zeroed = total by default (instant provisioning), either overridable per
-// object in behavior.json (architecture.md, Side provisioning protocol).
+// their conf, and the provisioning counters — zero_bytes = the request's
+// side_conf.zero_bytes and zeroed_bytes = zero_bytes by default (instant
+// provisioning), either overridable per object in behavior.json
+// (architecture.md, Side provisioning protocol).
 func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
 	if req == nil {
@@ -861,17 +862,17 @@ func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 			DmCloneInfo: a.resolveRow(key, "migr_dst_info.dm_clone_info"),
 		}
 	}
-	total := conf.GetExtCnt()
+	zeroBytes := conf.GetZeroBytes()
 	ob := a.objBehaviorLocked(key)
-	if ob != nil && ob.TotalExtCnt != nil {
-		total = *ob.TotalExtCnt
+	if ob != nil && ob.ZeroBytes != nil {
+		zeroBytes = *ob.ZeroBytes
 	}
-	zeroed := total
-	if ob != nil && ob.ZeroedExtCnt != nil {
-		zeroed = *ob.ZeroedExtCnt
+	zeroedBytes := zeroBytes
+	if ob != nil && ob.ZeroedBytes != nil {
+		zeroedBytes = *ob.ZeroedBytes
 	}
-	info.TotalExtCnt = total
-	info.ZeroedExtCnt = zeroed
+	info.ZeroBytes = zeroBytes
+	info.ZeroedBytes = zeroedBytes
 	return info
 }
 

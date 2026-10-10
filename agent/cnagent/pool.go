@@ -87,14 +87,19 @@ func (s *CnAgentServer) ensureSlice(
 	return true
 }
 
-// poolArgs is the dm thin-pool table's leading arguments. A fresh pool needs
-// its metadata to read zero, and it provably does: the protocol of
-// architecture.md, Side provisioning protocol, writes
-// zeros over the whole side before its first export and opens the
-// `provisioned` gate only when the last extent's bit is set ([D15]) — the same
-// guarantee that funds CN12's `--assume-clean`, and the reason a recycled
-// meta-group extent cannot hand a fresh pool a previous SP's valid
-// thin-metadata superblock.
+// poolArgs is the dm thin-pool table's arguments: these four, and nothing
+// after them. With no feature arguments dm-thin writes every block it
+// provisions whole before a host can read any of it — a partial first write
+// zeroes the rest of the block — and that is what keeps the old bytes the
+// provisioning protocol leaves in a data group's data region from ever
+// reaching a host of this pool. So the table never asks dm-thin to skip block
+// zeroing ([D15]; cnagent.md CN13).
+//
+// A fresh pool also needs its metadata to read zero, and it does: a meta
+// group's sides are zeroed over the whole leg before their first export, and
+// their `provisioned` gate opens only once that is done (architecture.md,
+// Side provisioning protocol) — the reason a recycled meta-group extent
+// cannot hand a fresh pool a previous SP's valid thin-metadata superblock.
 func (s *CnAgentServer) poolArgs(
 	ctx context.Context,
 	plan *cntlrPlan,

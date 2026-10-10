@@ -243,7 +243,7 @@ thing.
   one of the `LeftoverKind*` labels of `agent/sweep.go`) and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
-  the dn, a disk whose identity is not confirmed or a side with extents
+  the dn, a disk whose identity is not confirmed or a side with bytes
   still to zero and no zeroing goroutine, or, on the cn, a piece of the
   node's base state a `CheckCn` round's or `GetCnInfo`'s probe read absent,
   or an ANA group it read in a state other than its fixed one on a port

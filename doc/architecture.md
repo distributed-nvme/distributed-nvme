@@ -32,10 +32,13 @@ which storage pools, subsystems and hosts serve each of them. What dnv
 promises that layer is that the data of one storage pool is never readable
 from another storage pool, unless that layer exports it there itself, for
 example with a transfer (Transfers). The extents a pool frees can go to the
-sides of
-any other pool, so every side is zeroed before its first export ([D15]).
-The promise is about stored data, not about the network: the fabric under
-dnv is trusted (Known limits).
+sides of any other pool with the bytes they hold, and dm-thin keeps those
+bytes from every host ([D15]): a host reads a pool only through its thin
+devices, a thin device reads a block it has not provisioned as zeros, and
+dnv's thin pools write a block whole before a host can read any of it. The
+promise is about what a host can read, not about the network or the nodes:
+the fabric under dnv and the root user of every node are trusted (Known
+limits).
 
 ```mermaid
 flowchart LR
@@ -375,8 +378,9 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
    before the header, so a valid header implies a valid slot, and a valid
    header with no valid slot is a hard error, never a silently empty table.
    A header that names another cluster, dn or extent size is a foreign
-   disk, which is never overwritten, and a corrupt header is never formatted
-   over either (`dnagent.md` DN5 is the procedure).
+   disk, which is never overwritten, and a corrupt header, or one written
+   under another format version, is never formatted over either
+   (`dnagent.md` DN5 is the procedure).
 
    The on-disk table — not the agent's local store — is authoritative for
    extent placement, so a node that loses `--local-store` but keeps its disk
@@ -412,12 +416,14 @@ Per **side** (one per hosted leg replica):
   whose targets concatenate the extent runs the volume table allocated to
   (`sp_id`, `side_id`), `ext_cnt` extents of the `Group` in total.
   Provisioning must follow the Side provisioning protocol: the record is
-  created with `zeroed_bits` all clear, the assembled device is zeroed batch
-  by batch with `blkdiscard --zeroout` through the dm-linear, each batch's
-  bits are persisted as it completes, and no per-CN export stack is
-  converged until the side's `provisioned` flag is true **and** every bit is
-  set ([D15]). Everything above the side device — the per-CN stacks, the
-  migration endpoints — sees one ordinary single-device backing reference.
+  created with the request's length to zero and a zeroed count of zero,
+  the assembled device is zeroed from its start up to that length, batch
+  by batch, with `blkdiscard --zeroout` through the dm-linear, the count is
+  persisted after each batch, and no per-CN export stack is converged
+  until the side's `provisioned` flag is true **and** the count has
+  reached the length ([D15]). Everything above the side device — the
+  per-CN stacks, the migration endpoints — sees one ordinary single-device
+  backing reference.
 * Per cntlr of the SP, primary and standbys (the side learns their CN ids
   from `side_conf.primary_cn_id` and `standby_id_list` of the
   `SyncupSideRequest`): a dm-error device `DnErrorName`, a dm-linear device
@@ -685,7 +691,8 @@ available"):
    refuses the whole `SyncupCntlr` rather than defaulting it itself (Common
    agent rules). Above one hundred percent the agent passes a zero
    low-water mark — no dm events — as the value only means "auto-grow off"
-   (Automatic reactions; `cnagent.md` CN13).
+   (Automatic reactions; `cnagent.md` CN13). The pool table carries no
+   feature argument, so the pool never skips block zeroing ([D15]).
 4. **Per thin device and slice**: a dm-thin volume `CnThinDevName`, created
    with the pool message "create_thin" of `dev_id` or "create_snap" of
    `dev_id` and `ori_id` — sent only while `ThinDevice.created` is false; a
@@ -858,8 +865,12 @@ Every leg's side device of a group is split into a **meta region**
 (`meta_blocks` blocks of `block_size`) followed by the **data region**
 (`data_blocks` blocks). Both counts are computed automatically — never
 configured — and stored in the `Group`; `model/ops.go` holds the
-arithmetic. The group spans `ext_cnt` extents of `extent_size` bytes. A
-`RedundMdRaid1` group's meta region is one block for the md superblock, the
+arithmetic. The group spans `ext_cnt` extents of `extent_size` bytes. The
+two regions together are the side's **leg span**, every whole block its
+extents hold, which a controller node's leg device covers (Primary
+cntlr): the whole side whenever `extent_size` is a multiple of
+`block_size`, and in any case all of it but a tail shorter than one block.
+A `RedundMdRaid1` group's meta region is one block for the md superblock, the
 blocks that hold the internal write-intent bitmap — the md bitmap superblock
 plus one bit per bitmap chunk of the group, a chunk being
 `RedundMdRaid1.bitmap_chunk_block_cnt` blocks, rounded up to whole blocks —
@@ -912,10 +923,11 @@ not cleaned up. The one cluster-free name is the mdadm superblock name
 `CnMdArrayName` (md names): it folds in only `sp_id`, which restarts at one
 in every cluster, so a recreated cluster can reproduce a superblock name
 byte for byte. The exposure is bounded — every create and assemble names its
-member devices explicitly ("Make sure all groups are available") and a
-reused side is zeroed ([D15]) before it re-enters an array — but a stale
-array of a previous incarnation on an uncleaned node is not distinguishable
-by its superblock name alone.
+member devices explicitly ("Make sure all groups are available") and every
+new side has its meta region, where an md superblock sits, zeroed before
+it enters an array (Side provisioning protocol) — but a stale array of a
+previous incarnation on an uncleaned node is not distinguishable by its
+superblock name alone.
 
 ### dm-device kinds
 
@@ -1940,14 +1952,15 @@ plus its writes, every factor of its widest shape is a ceiling constant,
 and tests pin the budget (`gateway.md`, Constants this document owns).
 
 The SP does **not** serve immediately: every side it just created is
-`provisioned` false, so the DN agents build the side devices and zero them
-(Side provisioning protocol) while the CN stacks stay deferred and report
-`RES_STATUS_PROVISIONING` — healthy, not ready, no action needed. On the
-standing fast-Write-Zeroes hardware assumption ([D15], Side provisioning
-protocol) this is seconds, not minutes. Progress is visible through
-`InspectSide` (`SideInfo.zeroed_ext_cnt` and `total_ext_cnt`) and through
-`GetStoragePool` (each `Side.provisioned`); the sp worker flips the flags
-and the normal watch fan-out brings the SP up (sp role).
+`provisioned` false, so the DN agents build the side devices and zero the
+part of each that must read as zeros (Side provisioning protocol) while
+the CN stacks stay deferred and report `RES_STATUS_PROVISIONING` —
+healthy, not ready, no action needed. On the standing fast-Write-Zeroes
+hardware assumption ([D15], Side provisioning protocol) this is seconds,
+not minutes. Progress is visible through `InspectSide`
+(`SideInfo.zeroed_bytes` and `zero_bytes`) and through `GetStoragePool`
+(each `Side.provisioned`); the sp worker flips the flags and the normal
+watch fan-out brings the SP up (sp role).
 
 **DeleteStoragePool** — the RPC latches the SP, and the sp worker's drain
 takes it apart (`dnv-worker.md`, The sp drain).
@@ -2728,8 +2741,9 @@ back, bump `SpRev`. Reply `leg_id`.
 **SwitchSpareLeg** — the only way a spare becomes active; users invoke it,
 and so does the sp worker's leg repair (Automatic reactions; `dnv-worker.md`
 AR8). Errors: `NOT_FOUND` for ids not in the group's lists;
-`FAILED_PRECONDITION` when the spare's side is not yet `provisioned` (an
-unzeroed spare must never become an md member, [D15]), when either leg has
+`FAILED_PRECONDITION` when the spare's side is not yet `provisioned` (a
+spare must never become an md member before its meta region, where md
+looks for a superblock, is zeroed, [D15]), when either leg has
 two sides (a migration is running on it and holds the leg until
 `FinishMigration` or `CancelMigration` ends it, so a migrating leg is
 neither promoted nor parked), or at an `sp_level` at or above
@@ -2768,7 +2782,8 @@ same path through the agent's `GetLegBm`: the agent walks the pool
 metadata of the owning slice and translates pool-data blocks through the
 pool-data linear concat and the group geometry down to this leg's **data
 region** (`cnagent.md` CN27), returning bit k as **1 iff no pool block maps
-there**. Callers feed `AppendMigrationBitmap`.
+there**. Callers feed `AppendMigrationBitmap`, and Migration says when a
+caller may read the bitmap.
 
 **Wire convention.** Every bitmap RPC — `GetThinDeviceBitmap`,
 `GetLegBitmap`, `Append*Bitmap`, `Push*Bitmap` — uses **1 = unwritten,
@@ -2833,21 +2848,24 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   validation): a geometry an agent invented is one the rest of the
   cluster does not share, and dm, md and the on-disk headers would be
   built against it. A request carrying a value the control plane cannot
-  have written — `SyncupDn`'s `extent_size` zero, or a zero among the
-  three always present defaultable members of `SyncupCntlr`'s `bdev_conf`
-  plus the `bitmap_chunk_block_cnt` that exists only under an md-raid1
-  `redund_conf` — is refused with its own `AgentReply.code`
-  (`ReplyCodeInvalidConf`, `dnagent.md` SH9) **after** the revision gate
-  and **before** the request becomes the desired state, so nothing
-  converges, nothing is persisted, and the restart reconcile cannot
-  replay it; the reply echoes the revision the agent still holds, so the
-  worker sees the request was not accepted. A persisted file carrying such
-  a value never becomes live either, and both roles get there the same
-  way: the file is **loaded**, never skipped, and refused inside the
-  converge, which then converges and sweeps nothing of that DN and its
-  sides, or of that cntlr, and leaves the node as it found it — a conf
-  fault must not destroy resources (`dnagent.md` DN2 says why skipping
-  the file instead would; `cnagent.md` CN8).
+  have written — `SyncupDn`'s `extent_size` zero; a zero among the three
+  always present defaultable members of `SyncupCntlr`'s `bdev_conf` plus
+  the `bitmap_chunk_block_cnt` that exists only under an md-raid1
+  `redund_conf`; or `SyncupSide`'s `side_conf.zero_bytes` zero, not a
+  multiple of `DnZeroAlign`, or longer than the side's `ext_cnt` extents
+  (Side provisioning protocol; `dnagent.md` DN8) — is refused with its
+  own `AgentReply.code` (`ReplyCodeInvalidConf`, `dnagent.md` SH9)
+  **after** the revision gate and **before** the request becomes the
+  desired state, so nothing converges, nothing is persisted, and the
+  restart reconcile cannot replay it; the reply echoes the revision the
+  agent still holds, so the worker sees the request was not accepted. A
+  persisted file carrying such a value never becomes live either, and
+  both roles get there the same way: the file is **loaded**, never
+  skipped, and refused inside the converge, which then converges and
+  sweeps nothing of that DN and its sides, of that side, or of that
+  cntlr — a conf fault must not destroy resources (`dnagent.md` DN2 says
+  why skipping the file instead would, and DN8 what still runs for a
+  refused side; `cnagent.md` CN8).
 * **Full sync.** Every `Syncup*` request carries the complete desired
   state of its object — there is no partial mode.
   `SyncupDn.side_pointer_list` and `SyncupCn.cntlr_pointer_list` are
@@ -2912,19 +2930,19 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   `agent_reply`, `revision`, `dn_info`.
 * `SyncupSide` carries one `side_pointer`, `revision`, `side_conf`
   (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`,
-  `sp_level`, `provisioned`) and — only when this side is a migration
-  endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`,
-  `dst_provisioned`: the source role, Migration) and/or `migr_dst_conf`
-  (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`,
-  `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination
-  role). It is rejected if the pointer is unknown (`SyncupDn` must
-  introduce it first). It converges the per-side stack of Disk node: the
-  side device of `ext_cnt` extents and its zeroing state (Side
-  provisioning protocol), the per-CN dm-error, dm-linear and nvmet
-  subsystem, the primary versus standby table targets and ANA states, and
-  the migration source and destination roles (Migration). Reply
-  `agent_reply`, `revision`, `side_info` (which always reports
-  `zeroed_ext_cnt` and `total_ext_cnt`, Side provisioning protocol) and
+  `sp_level`, `provisioned`, `zero_bytes`) and — only when this side is a
+  migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`,
+  `dst_dn_id`, `dst_provisioned`: the source role, Migration) and/or
+  `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`,
+  `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`,
+  `bm_cnt`: the destination role). It is rejected if the pointer is
+  unknown (`SyncupDn` must introduce it first). It converges the per-side
+  stack of Disk node: the side device of `ext_cnt` extents and its
+  zeroing state (Side provisioning protocol), the per-CN dm-error,
+  dm-linear and nvmet subsystem, the primary versus standby table targets
+  and ANA states, and the migration source and destination roles
+  (Migration). Reply `agent_reply`, `revision`, `side_info` (which always
+  reports `zeroed_bytes` and `zero_bytes`, Side provisioning protocol) and
   `bm_info` (the applied migration-bitmap indexes, Bitmap push protocol).
 * `PushMigrBitmap` delivers one `MigrBitmap` chunk (`side_pointer`,
   `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per
@@ -2983,69 +3001,115 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
 ### Side provisioning protocol
 
 A new side is built from extents that an earlier side, of any pool, may
-have written, and it must never expose a previous pool's bytes (System
-overview). A discard cannot give that guarantee: discard-reads-zeros is
+have written, and those bytes stay on the extents until something
+overwrites them. No host reads them: a host reads a pool only through the
+pool's thin devices, which read a block they have not provisioned as
+zeros and write a block whole before a host can read any of it ([D15]). The
+nodes, though, read metadata at fixed places of a side, and where this
+design *assumes* zeros there, stale bytes break correctness (What is
+zeroed, below). A discard cannot give those zeros: discard-reads-zeros is
 not a hardware property — the kernel does not promise that a discarded
 region reads as zeros, and NVMe read-zeroes after deallocate is
-optional. Stale bytes also break
-correctness where this design *assumes* zeros: a recycled meta-group
-extent can hold a previous SP's valid thin-metadata superblock (a fresh
-pool would adopt stale metadata), and a stale md superblock flips "Make
-sure all groups are available" into the wrong assembly case with no
-`--zero-superblock` escape. Therefore **every side is fully zeroed before
-its first export**, tracked per extent on disk, gated by a CP-visible
-`provisioned` flag ([D15]).
+optional. Therefore **every side has the prefix its group needs zeroed
+before its first export**, tracked on disk as a byte count, gated by a
+CP-visible `provisioned` flag ([D15]). This holds for every new side:
+made with the pool, by a grow or an auto-grow, as a spare leg, or as a
+migration destination.
+
+**What is zeroed.** Every side of a group has the same length zeroed from
+its start (Group on-leg layout: meta region, data region, health block):
+
+* A side of a **meta group** is zeroed over its whole leg span. The group
+  holds the thin pool's metadata, and dm-thin formats a fresh pool only
+  when the first block of its metadata device reads zero: a recycled
+  extent can hold a previous SP's valid thin-metadata superblock, which a
+  fresh pool would adopt.
+* A side of a **data group** has its meta region and its first data block
+  zeroed, `meta_blocks` blocks and one more, with RAID1 or without. With
+  RAID1, a stale md superblock in the meta region would put the group
+  assembly, which creates the array clean over legs that carry no
+  superblock, in the wrong case ("Make sure all groups are available"),
+  with no `--zero-superblock` escape. Without RAID1 the meta region is the
+  health block alone, but a node's udev and md tools look for a
+  superblock there all the same, and one rule for every data side costs
+  one block. The first data block is the first block of the md array or,
+  without RAID1, of the group device, and for a slice's first data group
+  the first block of the pool's data device. Extents are reused
+  lowest-first, so a new array would often start on an earlier pool's
+  volume head — a partition table, an LVM label, a file system — if that
+  block were not zeroed, and the controller node's udev, partition scan
+  and LVM activation read it when the array appears.
+
+The rest of a data side is never zeroed, nor is any tail; [D15] says why
+no pool reads those bytes and what a recycled tail can still cause.
+
+**Length.** The disk node knows nothing of groups. The sp worker computes
+the length to zero when it builds a side's request, from the group it
+holds and the pool's `block_size`, and sends it as `side_conf.zero_bytes`
+(sp role; `dnv-worker.md` RW15). A meta side's length is its leg span
+rather than its `ext_cnt` extents: the span is whole blocks, which are
+multiples of `DnZeroAlign`, while `extent_size` need not be a multiple of
+it (Common validation), and the span needs no extent size, so the sp
+worker reads no cluster conf for it. The gateway stores nothing for the
+length, and no agent carries a second copy of the leg layout rule. A
+stored group whose block counts give no length is refused like an invalid
+stored geometry: the sp worker builds no request for its pool and runs no
+reaction for it (`dnv-worker.md` RW14, AR1). The dn agent records the
+length when it allocates the side, and its conf gate refuses a length of
+zero, one that is not a multiple of `DnZeroAlign`, and one longer than
+the side (Common agent rules).
 
 **Key invariant.** *Zeroed is a property of the side's allocation, not of
 the disk extent* — extents freed and reallocated to a new side start
-all-not-zeroed again, whatever happened to them before. "Logical extent
-*i*" is the *i*-th extent in the concatenation of the record's `run_list`,
-i.e. the *i*-th `extent_size` bytes of the `DnSideName` device.
+unzeroed again, whatever happened to them before. A side's volume-table
+record holds the length to zero, written when the side is allocated, and
+the count of bytes zeroed from the side's start (`zero_bytes`,
+`zeroed_bytes`); the zeroing is complete when the two are equal and the
+length is above zero.
 
 **Standing hardware assumption.** DN disks support **fast Write
-Zeroes**: a batch of `DnZeroBatchExtCnt` extents at the default
-`extent_size` zeroes inside `CmdSoftTimeout` for each of the at most
-`DnZeroConcurrency` batches a DN agent runs at once. Zeroing commands run
-under the ordinary command timeouts (Common validation); there is no special
-zeroing timeout. A slower or busier disk costs kills rather than stopping
-zeroing: a batch the timeout kills makes the side's next batch smaller, down
-to one extent (`dnagent.md` DN9), so zeroing stalls only where one extent
-cannot zero inside `CmdSoftTimeout` at the disk's rate split
-`DnZeroConcurrency` ways. Operators must therefore keep `extent_size` within
-what the disk's Write Zeroes rate, split `DnZeroConcurrency` ways, zeroes
-inside `CmdSoftTimeout`, and a batch whose byte length exceeds that bound
-can cost a kill and a retry interval each time a side tries it. Zeroing has
-no tuning of its own: tuning describes hardware, so it would be per-node
-agent configuration, while `ClusterConf` is write-once and cluster-wide; and
-raising the global timeouts stretches every command's bound, not just
-zeroing's.
+Zeroes**: a batch of `DnZeroBatchMaxBytes` zeroes inside
+`CmdSoftTimeout` for each of the at most `DnZeroConcurrency` batches a DN
+agent runs at once. Zeroing commands run under the ordinary command
+timeouts (Common validation); there is no special zeroing timeout. A
+slower or busier disk costs kills rather than stopping zeroing: a batch the
+timeout kills halves the side's next batch, down to `DnZeroBatchMinBytes`
+(`dnagent.md` DN9), so zeroing stalls only where that floor cannot zero
+inside `CmdSoftTimeout` at the disk's rate split `DnZeroConcurrency` ways.
+A batch is bounded in bytes, so how long it takes does not depend on the
+extent size. Zeroing has no tuning of its own: tuning describes hardware,
+so it would be per-node agent configuration, while `ClusterConf` is
+write-once and cluster-wide; and raising the global timeouts stretches
+every command's bound, not just zeroing's.
 
 **Protocol and gate.** The dn agent allocates the side's extent runs and
-persists their record with every zeroed bit clear, builds `DnSideName`
-over the runs, zeroes the not-yet-zeroed extents in the background through
-that device — persisting each batch's bits as it goes, so the protocol is
-restart-safe at every point — and converges the per-CN export stacks
-**only** when the request says `provisioned` true **and** every bit is
-set. Allocation is permitted **only** at `provisioned` false: at true a
+persists their record with the request's length to zero and a zeroed
+count of zero, builds `DnSideName` over the runs, zeroes from the stored
+count up to the length in the background through that device —
+persisting the count after each batch, so the protocol is restart-safe at
+every point — and converges the per-CN export stacks **only** when the
+request says `provisioned` true **and** the count has reached the length.
+Allocation is permitted **only** at `provisioned` false: at true a
 missing record means the data is gone (a lost or foreign disk), and
-silently re-allocating would present a zeroed impostor as the data-bearing
+silently re-allocating would present a fresh impostor as the data-bearing
 leg, so it is a hard resource error on `side_dev_info` that feeds
 `err_epoch` and the replacement flows (raid1: the spare switch, which
 Automatic reactions performs after `leg_unhealthy`; `RedundNone`:
-effectively delete-SP). **The agent always trusts its own bits over the
-flag** — the disk is authoritative ([D13]); the etcd flag is a gate, never
-evidence. A record whose extent total disagrees with `ext_cnt` is an
-error. While the gate is closed every resource above the side device
-reports `RES_STATUS_PROVISIONING`, and `RES_STATUS_ERROR` stays confined
-to `side_dev_info`. `SideInfo.zeroed_ext_cnt` and `total_ext_cnt` are
-filled on every reply and every Check round; equal counts, with the total
-above zero, mean fully zeroed, which is what the sp worker's flip rule
-reads (sp role). Zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE`
-included (SpLevel): it is bottom-layer provisioning. `dnagent.md` DN9
-holds the converge matrix, the zeroing goroutine and its batch sizing;
-`dnagent.md` DN18 holds the rows of the read-only probes (`GetSideInfo`,
-`CheckSide`), which never allocate and never start or stop the goroutine
-(`dnagent.md` DN16).
+effectively delete-SP). **The agent always trusts its own count over the
+flag** — the disk is authoritative ([D13]); the etcd flag is a gate,
+never evidence. A record whose extent total disagrees with `ext_cnt`, or
+whose length to zero disagrees with the request's, is an error. While the
+gate is closed every resource above the side device reports
+`RES_STATUS_PROVISIONING`, and `RES_STATUS_ERROR` stays confined to
+`side_dev_info`. `SideInfo.zeroed_bytes` and `zero_bytes` are filled on
+every reply and every Check round; equal values, with the length above
+zero, mean the zeroing is complete, which is what the sp worker's flip
+rule reads (sp role). Zeroing runs at **every** `sp_level`,
+`SP_LEVEL_DISABLE` included (SpLevel): it is bottom-layer provisioning.
+`dnagent.md` DN9 holds the converge matrix, the zeroing goroutine and its
+batch sizing; `dnagent.md` DN18 holds the rows of the read-only probes
+(`GetSideInfo`, `CheckSide`), which never allocate and never start or
+stop the goroutine (`dnagent.md` DN16).
 
 **Fail-fast hardware check.** The DN base state checks that the `--disk`
 device's Write Zeroes is offloaded: a "write_zeroes_max_bytes" of the
@@ -3104,8 +3168,8 @@ those carry it — a
 serving thin pool keeps reporting `RES_STATUS_OK` with its raw `dmsetup
 status` details even while a grow is deferred, so the thin-pool auto-grow
 of Automatic reactions keeps parsing them. `SideInfo` additionally
-reports `zeroed_ext_cnt` and `total_ext_cnt` on every reply and every
-Check round, which the sp worker's flip rule reads (sp role).
+reports `zeroed_bytes` and `zero_bytes` on every reply and every Check
+round, which the sp worker's flip rule reads (sp role).
 
 ### Bitmap push protocol
 
@@ -3259,7 +3323,7 @@ can watch an object's live state cheaply instead of polling `Get*Info`:
   * `show_info` false ⇒ the `*Info` is filled on the first reply of the
     stream and whenever the freshly probed `*Info` differs from the last
     one sent on this stream — protobuf equality, so any changed row,
-    `details` or `epoch` counts, a side's advancing `zeroed_ext_cnt`
+    `details` or `epoch` counts, a side's advancing `zeroed_bytes`
     included, which the sp worker's flip rule reads (sp role) — and is
     left unset otherwise (`dnagent.md` SH26).
 * **Revision check, and the re-sync it drives.** The worker re-issues the
@@ -3527,13 +3591,15 @@ three ([D15], Live-state reporting), and a `RES_STATUS_PENDING` leg row
 neither sets nor clears `Leg.err_epoch` (Live-state reporting).
 
 **Provisioning gate** ([D15], Side provisioning protocol). The sp role
-fills `SideConf.provisioned` from the etcd `Side.provisioned`, and
-`MigrSrcConf.dst_provisioned` from the migration's **destination** side's
-flag, and flips `Side.provisioned` true, bumping `SpRev`, when an accepted
-reply reports the side fully zeroed (`dnv-worker.md` RW18). The normal
-fan-out then re-syncs the sides, now exporting (`dnagent.md` DN10), and
-the cntlrs, now connecting (`cnagent.md` CN10); there are no long gRPC
-deadlines and no Check-round exemptions — every RPC stays short.
+fills `SideConf.provisioned` from the etcd `Side.provisioned`,
+`SideConf.zero_bytes` from the side's group and the pool's `block_size`
+(Side provisioning protocol), and `MigrSrcConf.dst_provisioned` from the
+migration's **destination** side's flag, and flips `Side.provisioned`
+true, bumping `SpRev`, when an accepted reply reports the side's zeroing
+complete (`dnv-worker.md` RW18). The normal fan-out then re-syncs the
+sides, now exporting (`dnagent.md` DN10), and the cntlrs, now connecting
+(`cnagent.md` CN10); there are no long gRPC deadlines and no Check-round
+exemptions — every RPC stays short.
 
 **Materialization flip.** A reply from **any** cntlr of the SP may complete
 a td: thin rows are only ever filled by a cntlr acting as primary, and the
@@ -3738,22 +3804,22 @@ accepted.
 
 The primary builds each `RedundMdRaid1` group from the legs that are
 available to it: it creates the array only when every leg of the group is
-available and none carries an md superblock — which, after the zeroing of
-Side provisioning protocol, is exactly a freshly provisioned group, the
-superblock check being the evidence the CN actually has ([D15]) — and
-otherwise assembles the array from the legs that carry a superblock,
-adding an available leg the array left out once the array runs. The
-assemble leaves the degraded start to mdadm: a lone survivor whose
-superblock still counts a clean full array is refused, and the group is
-then not available this pass. That refusal is the cross-leg half of
-failover safety ([D16]) — a stale leg cannot be started alone, and once
-both legs are back the event counts pick the newer one. The cases, the
-guards around the create, the sysfs read of the members and what makes a
-leg available are `cnagent.md` CN12. The health block (Group on-leg
-layout: meta region, data region, health block) is the ongoing liveness
-probe on top of this: an available leg whose probe IO fails is reported
-unhealthy and feeds the automatic reactions (Automatic reactions). Spare
-legs never participate in assembly (Spare legs).
+available and none carries an md superblock — a leg without one can only
+be a freshly provisioned side, whose meta region Side provisioning
+protocol has zeroed, the superblock check being the evidence the CN
+actually has ([D15]) — and otherwise assembles the array from the legs
+that carry a superblock, adding an available leg the array left out once
+the array runs. The assemble leaves the degraded start to mdadm: a lone
+survivor whose superblock still counts a clean full array is refused, and
+the group is then not available this pass. That refusal is the cross-leg
+half of failover safety ([D16]) — a stale leg cannot be started alone,
+and once both legs are back the event counts pick the newer one. The
+cases, the guards around the create, the sysfs read of the members and
+what makes a leg available are `cnagent.md` CN12. The health block (Group
+on-leg layout: meta region, data region, health block) is the ongoing
+liveness probe on top of this: an available leg whose probe IO fails is
+reported unhealthy and feeds the automatic reactions (Automatic
+reactions). Spare legs never participate in assembly (Spare legs).
 
 ### Migration
 
@@ -3822,10 +3888,10 @@ sides.
 **Phase 0 — the destination provisions first.** `CreateMigration` writes
 the destination `Side` with `provisioned` false (Migrations), so the
 destination DN runs only the Side provisioning protocol: allocate the runs,
-build `DnSideName`, zero it batch by batch. No per-CN stacks, no metadata
-slot, no `nvme connect`, no dm-clone; what the destination's
-`migr_dst_info` rows report meanwhile, and at which levels, is
-`dnagent.md` DN13.
+build `DnSideName`, zero the prefix its group needs batch by batch, as for
+any side of the group. No per-CN stacks, no metadata slot, no
+`nvme connect`, no dm-clone; what the destination's `migr_dst_info` rows
+report meanwhile, and at which levels, is `dnagent.md` DN13.
 
 For the **src** side, `migr_src_conf.dst_provisioned` false is normative
 and means: **behave exactly as if `migr_src_conf` were absent** — keep
@@ -3840,8 +3906,9 @@ carries `side_conf.provisioned` true on the destination and
 `migr_src_conf.dst_provisioned` true on the source, and both roles run the
 sequences below unchanged; the destination's connect retry of step 3
 absorbs any cross-side ordering. The cost is added **migration-start
-latency** — one whole-side zeroing pass, short under the fast-Write-Zeroes
-assumption of Side provisioning protocol, before any data moves.
+latency** — the destination's zeroing pass, short under the
+fast-Write-Zeroes assumption of Side provisioning protocol, before any
+data moves.
 `CancelMigration` during the zeroing window cancels the zeroing goroutine
 and waits for it before the dm devices are removed (Side provisioning
 protocol).
@@ -3912,6 +3979,22 @@ fast-path: `GetLegBitmap` (paged) → `AppendMigrationBitmap` → the worker's
 `PushMigrBitmap` (Bitmap push protocol) → the destination agent persists
 each chunk at `LocalMigrBmPath` and `blkdiscard`s never-written regions so
 that they are never copied (Migrations, Bitmap reads, raid0 bitmap math).
+A skipped region keeps what the destination's recycled extents held, which
+the pool never reads, since no pool block maps there ([D15]) — provided
+the bitmap is read late enough. **A caller reads the leg bitmap only once
+the primary reaches the leg through the destination**: the primary's path
+to the destination is live and optimized, and the destination makes that
+path optimized only over its live dm-clone (dst steps 4 and 5). The source
+takes no more writes by then (src steps 1 and 2), and every block the pool
+maps afterwards is written whole through the dm-clone ([D15]), so no skip
+can lose it. A data leg's read also needs a usable path to the leg, and
+from src step 1 on that path is the destination's: the primary's cn
+agent reads the bitmap from a thin metadata snapshot of the slice's pool
+(`cnagent.md` CN25, CN27), the snapshot's reservation commits the pool,
+and dm-thin flushes the pool's data device, this leg included, before the
+commit. Known limits says what a read before that point does, what else
+the migration gap blocks on the primary, and why a read after that point
+can still block.
 `FinishMigration` and `CancelMigration` are specified under Migrations.
 
 ### Transfer + clone = cross-SP live migration
@@ -4463,8 +4546,9 @@ document and the component documents cite it by its id.
   volume), and that refusal is enforced at the metadata layer: an
   unconfirmed disk rejects every mutation, because a failed `SyncupDn`
   does not stop the `SyncupSide` calls that follow it (Common agent rules;
-  `dnagent.md` DN5). Changing any layout constant is a header-version bump,
-  not a tweak.
+  `dnagent.md` DN5). Changing any layout constant, or what a volume-table
+  record holds, is a header-version bump, not a tweak: a disk written
+  under another version is refused, never formatted over (Disk node).
 * **[D14] The CN uses no LVM either; the clone-metadata arena is a slot
   allocator.** A clone volume group would bring onto the CN exactly the
   failure class [D13](a) keeps off the DN: a bare vgs or lvs label scan
@@ -4500,35 +4584,62 @@ document and the component documents cite it by its id.
   wrapper whose length or backing loop path does not match the currently
   probed loop device is `RES_STATUS_ERROR` and is repaired by the clone
   rebuild (Clone crash recovery).
-* **[D15] Whole-side zeroing behind a `provisioned` gate;
-  `RES_STATUS_PROVISIONING`.** A new side must never expose a previous
-  pool's bytes (System overview). A trim cannot deliver that:
-  `blkdiscard` does not imply zeros (the kernel does not promise that a
-  discarded region reads as zeros, and NVMe's read-zeroes after deallocate
-  is optional). Nor is a trim enough for correctness: a recycled
-  meta-group extent can carry a valid thin-pool metadata superblock a fresh
-  pool would adopt, and a stale md superblock puts the primary's group
-  assembly ("Make sure all groups are available"; `cnagent.md` CN12) in
-  the wrong case with no `--zero-superblock` escape. Every side is
-  therefore fully zeroed with `blkdiscard --zeroout` before its first
-  export, with per-extent progress in `zeroed_bits` on the authoritative
-  volume table ([D13]), gated by the control-plane-visible
-  `Side.provisioned` flag that the sp worker flips once the agent reports
-  the side fully zeroed (Side provisioning protocol; `dnv-worker.md` RW18).
-  Resources deferred while a side underneath them zeroes report
-  `RES_STATUS_PROVISIONING` — *healthy, not ready, no action needed* —
-  which **never** sets `err_epoch`; `ERROR` means *needs intervention*,
-  which is why a missing record at `provisioned` true (data loss on a lost
-  or foreign disk) stays `ERROR` and feeds Automatic reactions rather than
-  looking transitional. The zeroing runs in the background, off the agent's
-  locks and under the ordinary command timeouts (Common validation;
-  `dnagent.md` DN9), on the standing assumption that DN disks have fast
-  Write Zeroes, which the dn agent checks (`dnagent.md` DN5); a synchronous
-  whole-side zeroing inside one `SyncupSide` is not an option, because a
-  node-read holder plus one queued `SyncupDn` writer would freeze the whole
-  DN agent. The zeroing is also what funds the `--assume-clean` of the
-  group assembly (`cnagent.md` CN12) and the fresh-thin-pool metadata
-  assumption (`cnagent.md` CN13).
+* **[D15] The tenant promise rests on dm-thin; a new side is zeroed where
+  the design assumes zeros, behind a `provisioned` gate;
+  `RES_STATUS_PROVISIONING`.** A host reads a pool's data only through the
+  pool's thin devices, and dm-thin is what keeps another pool's bytes from
+  it (System overview): a thin device returns zeros for a block it has not
+  provisioned, and dm-thin writes a block it provisions whole — zeros
+  around a write that covers only part of it — before a host can read any
+  of it. dnv's thin pools therefore never skip block zeroing: the pool
+  table carries no feature arguments, "skip_block_zeroing" among them, so
+  dm-thin's default holds (`cnagent.md` CN13 builds the table), and a pool
+  that skipped it would hand a host whatever a recycled extent holds
+  around a partial write.
+  What a recycled extent holds stays in a leg's data region, where no pool
+  reads it, as long as every copy below the pool carries each block the
+  pool has written: a migration skips only regions no pool block maps,
+  which is why Migration says when a caller may read its leg bitmap. Root
+  on a node can read those bytes from the raw leg, as it can read anything
+  on its node, and the promise does not cover that (Known limits). Zeroing
+  serves only the places where the design assumes zeros: a meta group's
+  side is zeroed over its whole leg span, and a data group's side over its
+  meta region and first data block (Side provisioning protocol says why),
+  with `blkdiscard --zeroout` before its first export. A trim cannot
+  deliver those zeros: `blkdiscard`
+  does not imply zeros (the kernel does not promise that a discarded
+  region reads as zeros, and NVMe's read-zeroes after deallocate is
+  optional). The progress is a byte count on the authoritative volume
+  table ([D13]), gated by the control-plane-visible `Side.provisioned`
+  flag that the sp worker flips once the agent reports the zeroing
+  complete (Side provisioning protocol; `dnv-worker.md` RW18). The rest of
+  a data group's side is never zeroed: no pool reads a block of it before
+  writing the block whole, and zeroing it would write every extent of
+  every new side. Nor is a tail: old md formats and some partition and
+  file-system signatures sit at the end of a device, and a recycled extent
+  at the end of a new side may hold one that a host wrote into a thin
+  device of an earlier pool. An md superblock there makes mdadm refuse the
+  leg as a foreign member, and the group reports an error (Known limits).
+  That failure is rare and loud, a host of a running pool can cause the
+  same at any time, so zeroing a tail would close only half of it, and one
+  zeroed prefix per side keeps the tracking simple. Resources deferred
+  while a side underneath them zeroes report `RES_STATUS_PROVISIONING` —
+  *healthy, not ready, no action needed* — which **never** sets
+  `err_epoch`; `ERROR` means *needs intervention*, which is why a missing
+  record at `provisioned` true (data loss on a lost or foreign disk) stays
+  `ERROR` and feeds Automatic reactions rather than looking transitional.
+  The zeroing runs in the background, off the agent's locks and under the
+  ordinary command timeouts (Common validation; `dnagent.md` DN9), on the
+  standing assumption that DN disks have fast Write Zeroes, which the dn
+  agent checks (`dnagent.md` DN5); a synchronous zeroing inside one
+  `SyncupSide` is not an option, because a meta group's side is zeroed
+  over its whole leg span and a node-read holder plus one queued
+  `SyncupDn` writer would freeze the whole DN agent. The meta-region
+  zeroing is also what lets the group assembly take a leg without a
+  superblock for a fresh side, and dm-thin's whole-block writes are what
+  let it create that array clean over data regions that differ
+  (`cnagent.md` CN12); a meta group's whole zeroing is what gives a fresh
+  pool a metadata device that reads zero (`cnagent.md` CN13).
 * **[D16] Failover fencing has no epoch; safety = per-side atomic flip + md
   arbitration.** Among the nodes a failover moves — the cntlrs and the
   sides — the only coordination is the revisioned fan-out of sp role,
@@ -4717,9 +4828,64 @@ that component's document and only pointed to here.
   the deployment configures, and data-plane access control is host-NQN
   allow-lists — a spoofable identifier. dnv has no NVMe in-band
   authentication and no TLS; the layer above authenticates its users
-  (System overview). The [D15] guarantee is that a new side never exposes
-  a previous pool's bytes; it does not defend against an attacker on the
-  storage network. Deploy on an isolated, trusted fabric.
+  (System overview). The [D15] guarantee is that a host never reads,
+  through a pool's thin devices, bytes another pool wrote; it does not
+  defend against an attacker on the storage network, nor against root on
+  a node, which can read the old bytes of a recycled extent from the raw
+  leg or disk. Deploy on an isolated, trusted fabric.
+* **A pool commit in a migration gap can wedge the primary.** A migration
+  gap is the time in which the primary has no usable path to a migrating
+  leg: from src step 1, which moves the source's per-CN namespaces to
+  inaccessible, until the primary's path to the destination is live and
+  optimized (Migration). In that gap anything that commits the thin pool on
+  that leg can block. A commit flushes the pool's data device and writes its
+  metadata device, which between them reach every working leg the pool sits
+  on, and the leg with no usable path holds that IO: nvme queues the IO of a
+  namespace that has a live controller but no usable path. A leg that md has
+  failed out of its md-raid1 group gets none of this IO; md fails such a leg
+  when an IO it sends failfast (`cnagent.md` CN12) reaches the source after
+  src step 1, before the primary has read the ANA change, and the array
+  stays degraded afterwards (`cnagent.md`, Known limits). The primary's
+  check rounds and converges read the pool's status (`cnagent.md` CN28), and
+  that read commits the pool; so do a thin device's create or delete
+  (`cnagent.md` CN14), every read through a thin metadata snapshot, the
+  bitmap reads of a thin device and of a data leg among them (`cnagent.md`
+  CN25), and dm-thin's own commit once host writes have mapped new blocks.
+  While a commit waits, the rest of that pool's IO waits too. A check round,
+  a converge or a bitmap read that waits holds the cntlr's lock and the node
+  read lock meanwhile (`cnagent.md` CN1). If the primary has not connected
+  the destination yet, the converge that would connect it (`cnagent.md`
+  CN10) needs that cntlr lock, so the cntlr can stay blocked until the
+  migration ends. A cancel gives the primary back its path to the source,
+  which lets the commit finish. A finish removes the source's exports, which
+  fails the IO that waits on the leg: an md-raid1 group that keeps another
+  working member absorbs that error, as md completes the array's flush and
+  charges a failed write to the leg, so the commit goes on; a `RedundNone`
+  group passes it up, so the waiting commit fails, and dm-thin drops the
+  block mappings made since the last commit and leaves the pool read-only
+  with its needs_check flag set, which nothing clears (No thin-metadata
+  repair path is specified, above), while the pool's row still reads OK
+  (`cnagent.md` CN28). On such a group only a cancel ends the block with the
+  pool intact. Meanwhile a node write queued behind the blocked call, a
+  `SyncupCn`, holds up every later call of that agent that takes the node
+  lock (the head-of-line blocking above). Migration's read rule does not
+  keep a bitmap read out of a gap: a data leg's bitmap read that keeps the
+  rule for its own leg can still block in the gap of another leg the same
+  pool sits on, and a thin device's bitmap read can block in the gap of any
+  leg the pool it reads sits on.
+* **A leg bitmap read too early can hand a pool another pool's bytes.**
+  Nothing in the gateway orders a `GetLegBitmap` read against the
+  migration it feeds; the caller keeps the order (Migration). Read while
+  the source still takes writes, the bitmap marks as never written every
+  block the pool maps through the source afterwards; the destination skips
+  those blocks, and the pool later reads there what the destination's
+  recycled extents hold, which may be another pool's bytes ([D15]). A data
+  leg's read in the migration gap can block instead (above).
+* **A recycled tail can fail a fresh leg.** No tail of a new side is
+  zeroed ([D15]): an md superblock of a format that sits at the end of a
+  device, which a host of an earlier pool wrote there, can make a fresh
+  leg read as carrying one, and mdadm then refuses the foreign member, so
+  the group reports an error (`cnagent.md` CN12).
 * **QoS is not enforced** (Controller node, common): agents accept and persist
   `qos_ratio` and enforce nothing (`cnagent.md` CN6).
 * **Snapshot creation is not atomic across a primary crash.** With the
@@ -4749,6 +4915,12 @@ that component's document and only pointed to here.
   survivor whose superblock still counts a clean full array; no suite in
   the tree asserts that refusal, so nothing in the tree detects a change
   in the deployed mdadm's behaviour.
+* **An md check of a RAID1 data group counts mismatches.** The legs of a
+  data group are never zeroed past their first data block, so they may
+  differ wherever the pool has not written ([D15]), and an md "check" of
+  the array, such as a distribution's periodic scrub, reports mismatches
+  there. They are harmless, since the pool never reads those blocks, and
+  dnv runs no check of its own.
 * **A stale discovery view keeps a withdrawn path.** A cdc twin that has
   lost etcd keeps serving its last known records (dnv-cdc; `cdc.md` DS10),
   a failed-over primary's address among them, and nvme-stas keeps a path

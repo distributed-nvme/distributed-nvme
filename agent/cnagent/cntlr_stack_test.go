@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -401,6 +402,76 @@ func TestGrowSliceReloadsThePool(t *testing.T) {
 		"cmd dmsetup reload "+metaName,
 		"cmd dmsetup reload "+poolName(srv),
 	)
+}
+
+// TestPoolTableNeverSkipsBlockZeroing pins the thin-pool table at both of its
+// writers, the create and the reload a grow forces: the four arguments of
+// poolArgs — the metadata and data devices, the block size in sectors and the
+// low-water mark — and nothing after them, not even a feature count. dm-thin
+// then keeps its default of writing a block it provisions whole before a host
+// can read any of it, which is what keeps the old bytes of a data group's
+// recycled extents from every host ([D15]; cnagent.md CN13). The converge
+// and the probe compare only the four leading arguments, since dm-thin
+// appends its features to the table it reports, so no other check would
+// notice a feature argument slipping in.
+func TestPoolTableNeverSkipsBlockZeroing(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	wantPoolTable(t, srv, node)
+
+	// A meta grow: the pool's table is reloaded unchanged (CN13).
+	grown := cntlrReq(reqOpts{revision: 3, primary: true})
+	slice := grown.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
+	slice.MetaGrpList = append(slice.MetaGrpList, &pb.Group{
+		GrpId:      testMetaGrp + 0x100,
+		ExtCnt:     1,
+		MetaBlocks: 1,
+		DataBlocks: 63,
+		LegList: []*pb.Leg{legOf(testMetaLeg+0x100,
+			sideOf(testMetaSide+0x200, testIp2, testSvcId2))},
+	})
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), grown); err != nil {
+		t.Fatalf("grow: %v", err)
+	}
+	assertOrder(t, node, "cmd dmsetup reload "+poolName(srv))
+	wantPoolTable(t, srv, node)
+}
+
+// wantPoolTable checks the slice's live thin-pool table against poolArgs'
+// four arguments, with nothing after them.
+func wantPoolTable(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+	t.Helper()
+	dm := node.dms[poolName(srv)]
+	if dm == nil {
+		t.Fatalf("no thin-pool device %s", poolName(srv))
+	}
+	if strings.Contains(dm.table, "skip_block_zeroing") {
+		t.Fatalf("pool table %q skips block zeroing", dm.table)
+	}
+	fields := strings.Fields(dm.table)
+	if len(fields) != 7 {
+		t.Fatalf("pool table %q has %d fields, want start, length, "+
+			"target and exactly four arguments", dm.table, len(fields))
+	}
+	metaNo := node.devNo[srv.nf.DmPath(srv.nf.CnPoolMetaName(
+		testCluster, testCn, testSp, testSlice))]
+	dataNo := node.devNo[srv.nf.DmPath(srv.nf.CnPoolDataName(
+		testCluster, testCn, testSp, testSlice))]
+	want := []string{
+		"0", fields[1], "thin-pool", metaNo, dataNo,
+		strconv.FormatUint(testBlockSize/agent.SectorSize, 10),
+	}
+	for i, field := range want {
+		if field == "" || fields[i] != field {
+			t.Fatalf("pool table %q: field %d is %q, want %q",
+				dm.table, i, fields[i], field)
+		}
+	}
+	if _, err := strconv.ParseUint(fields[6], 10, 64); err != nil {
+		t.Fatalf("pool table %q: the low-water mark %q is not a block "+
+			"count", dm.table, fields[6])
+	}
 }
 
 // ---------------------------------------------------------------------------

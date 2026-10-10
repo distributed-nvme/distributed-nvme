@@ -79,15 +79,27 @@ RAID1_META_BLOCKS=3
 RAID1_EXT1_DATA=61
 RAID1_EXT2_DATA=125
 
+# The length a worker asks each side to zero (side_conf.zero_bytes,
+# architecture.md, Side provisioning protocol), from the same geometry and
+# the pool's block size (model.SideZeroBytes): a meta group's side its leg
+# span, meta and data blocks together, which is the whole one-extent side
+# here; a data group's side its meta region and its first data block. Every
+# request for one side carries the same length, so dn_side takes it from its
+# caller, which knows the kind of group the side serves.
+NONE_MGRP_ZERO_BYTES=$(((NONE_META_BLOCKS + NONE_EXT1_DATA) * BLOCK_SIZE))
+NONE_DGRP_ZERO_BYTES=$(((NONE_META_BLOCKS + 1) * BLOCK_SIZE))
+RAID1_MGRP_ZERO_BYTES=$(((RAID1_META_BLOCKS + RAID1_EXT1_DATA) * BLOCK_SIZE))
+RAID1_DGRP_ZERO_BYTES=$(((RAID1_META_BLOCKS + 1) * BLOCK_SIZE))
+
 # Per-RPC deadlines for the converge RPCs (see dnctl/cnctl).
 DN_SYNCUP_TIMEOUT=60
 CN_SYNCUP_TIMEOUT=180
 
 # Polling budget of `dnagentctl wait-zeroed` (architecture.md,
-# Side provisioning protocol). With 64 MiB
-# extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
-# so a 1-2 extent side finishes in well under a second; the budget only has to
-# cover a stalled retry loop (DnZeroRetryInterval = 5 s).
+# Side provisioning protocol). On a loop device the kernel maps
+# REQ_OP_WRITE_ZEROES onto fallocate, so even a meta group's side, zeroed
+# over its whole extent, finishes in well under a second; the budget only
+# has to cover a stalled retry loop (DnZeroRetryInterval = 5 s).
 ZERO_TIMEOUT=120
 
 NQN_PREFIX=nqn.2024-01.io.dnv
@@ -252,8 +264,9 @@ assert_not_ok() {
 # assert_provisioning_or_ok accepts the two statuses a DN side may legally hold
 # at provisioned = false (the converge matrix's zeroing and zeroed rows with a
 # record present, dnagent.md DN9):
-# PROVISIONING while the background zeroing goroutine still has extents to go,
-# and OK once every bit is set. Zeroing 64-128 MiB on a loop device is a
+# PROVISIONING while the background zeroing goroutine still has bytes to go,
+# and OK once its zeroed count reaches the length the request asks for.
+# Zeroing a few MiB, or a whole 64 MiB extent, on a loop device is a
 # `fallocate`, so which of the two a phase-1 reply carries is a genuine race —
 # do not pick one.
 assert_provisioning_or_ok() { # json path label
@@ -2682,17 +2695,21 @@ declare -A SIDE_PROVISIONED=()
 # flip rule (architecture.md, sp role, Provisioning gate): sync it
 # unprovisioned — which allocates the
 # extent runs, builds DnSideName and starts the background zeroing goroutine,
-# and exports nothing — wait for every logical extent to be zeroed, then re-sync
-# it provisioned at a fresh revision. Every later converge of the same side goes
-# straight to phase 2.
-dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
+# and exports nothing — wait until it has zeroed the length its request asks
+# for, then re-sync it provisioned at a fresh revision. Every later converge of
+# the same side goes straight to phase 2. zero_bytes is the length for the
+# kind of group the side serves, one of the *_ZERO_BYTES constants, the same
+# on every call for one side: one that disagrees with the length the side's
+# record holds is an error row (dnagent.md DN9).
+dn_side() { # dnidx sp leg side ext_cnt zero_bytes primary_cn [standby_cn]
 	local idx=$1 out extra=() key="$1:$2:$3:$4" cn field zeroed total
-	[ -z "${7:-}" ] || extra=(--standby-cn "$7")
+	[ -z "${8:-}" ] || extra=(--standby-cn "$8")
 	if [ -z "${SIDE_PROVISIONED[$key]:-}" ]; then
 		bump_dn_rev "$idx"
 		out=$(dnctl "$idx" syncup-side --revision "${DNREV[$idx]}" \
-			--sp "$2" --leg "$3" --side "$4" --ext-cnt "$5" --cntlid-slot 0 \
-			--primary-cn "$6" --sp-level readwrite --provisioned=false \
+			--sp "$2" --leg "$3" --side "$4" --ext-cnt "$5" \
+			--zero-bytes "$6" --cntlid-slot 0 \
+			--primary-cn "$7" --sp-level readwrite --provisioned=false \
 			"${extra[@]}")
 		assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
 			"dn$idx sp $2 leg $3 phase 1"
@@ -2703,7 +2720,7 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 		# sides of the failover pair a standby, so checking one map of one CN
 		# would leave one of the two per-CN export stacks unexamined exactly
 		# while it is supposed to be gated.
-		for cn in "$6" ${7:+"$7"}; do
+		for cn in "$7" ${8:+"$8"}; do
 			for field in cn_id_to_dm_error cn_id_to_dm_linear cn_id_to_nvmeof; do
 				assert_provisioning "$out" \
 					".side_info.$field[\"$(d16 "$cn")\"].status" \
@@ -2717,25 +2734,26 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 		# goroutine, so a sample taken here normally still catches the side
 		# mid-flight, which is what makes the gate assertions above a reading
 		# of a genuinely closed gate rather than of an already-finished one.
-		# With 64 MiB extents on a loop device the kernel maps Write Zeroes
-		# onto fallocate, so a whole side can also finish before this line
-		# runs: a miss is timing, not a fault, and the hard proof stays the
-		# wait-zeroed below plus the phase-2 OK statuses. A failed call
+		# On a loop device the kernel maps Write Zeroes onto fallocate, so a
+		# side's zeroing can also finish before this line runs: a miss is
+		# timing, not a fault, and the hard proof stays the wait-zeroed below
+		# plus the phase-2 OK statuses. A failed call
 		# degrades to a miss for the same reason — under `set -euo pipefail`
 		# an unguarded one-shot RPC would turn a transient dial error into a
 		# suite abort, and this helper runs on every first converge of every
 		# side. get-side-info prints the reply before it checks the reply
 		# code, so only a call that never reached the agent leaves nothing to
-		# read.
+		# read. The reply is protojson, which prints a uint64 as a decimal
+		# string and omits a zero.
 		out=$(dnctl "$idx" get-side-info --sp "$2" --leg "$3" --side "$4" ||
 			true)
 		[ -n "$out" ] || out="{}"
-		zeroed=$(jq_of "$out" '.side_info.zeroed_ext_cnt // "0"')
-		total=$(jq_of "$out" '.side_info.total_ext_cnt // "0"')
+		zeroed=$(jq_of "$out" '.side_info.zeroed_bytes // "0"')
+		total=$(jq_of "$out" '.side_info.zero_bytes // "0"')
 		if [ "$total" -gt 0 ] && [ "$zeroed" -lt "$total" ]; then
-			log "dn$idx sp $2 leg $3: provisioning window HIT ($zeroed/$total zeroed)"
+			log "dn$idx sp $2 leg $3: provisioning window HIT ($zeroed/$total bytes zeroed)"
 		else
-			log "dn$idx sp $2 leg $3: WARNING provisioning window missed ($zeroed/$total)"
+			log "dn$idx sp $2 leg $3: WARNING provisioning window missed ($zeroed/$total bytes zeroed)"
 		fi
 		dnctl "$idx" wait-zeroed --sp "$2" --leg "$3" --side "$4" \
 			--interval 0.5 --timeout "$ZERO_TIMEOUT" >/dev/null
@@ -2743,8 +2761,9 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 	fi
 	bump_dn_rev "$idx"
 	out=$(dnctl "$idx" syncup-side --revision "${DNREV[$idx]}" \
-		--sp "$2" --leg "$3" --side "$4" --ext-cnt "$5" --cntlid-slot 0 \
-		--primary-cn "$6" --sp-level readwrite --provisioned=true \
+		--sp "$2" --leg "$3" --side "$4" --ext-cnt "$5" \
+		--zero-bytes "$6" --cntlid-slot 0 \
+		--primary-cn "$7" --sp-level readwrite --provisioned=true \
 		"${extra[@]}")
 	assert_ok "$out" ".side_info.side_dev_info.status" \
 		"dn$idx sp $2 leg $3 side_dev"
@@ -2752,7 +2771,7 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 	# primary and any standby alike — phase 1's loop with the status turned
 	# round. Reading the primary's export alone left the standby's stack, the
 	# one a failover promotes onto, unexamined.
-	for cn in "$6" ${7:+"$7"}; do
+	for cn in "$7" ${8:+"$8"}; do
 		for field in cn_id_to_dm_error cn_id_to_dm_linear cn_id_to_nvmeof; do
 			assert_ok "$out" ".side_info.$field[\"$(d16 "$cn")\"].status" \
 				"dn$idx sp $2 leg $3 export to cn $cn: $field[$cn]"
@@ -2984,8 +3003,10 @@ case_smoke() {
 
 	stage dn "DN1 exports the meta and data sides of the S-shaped SP"
 	dn_pointers "$dn" "$sp:$S_MLEG:$S_MSIDE" "$sp:$S_DLEG:$S_DSIDE"
-	dn_side "$dn" "$sp" "$S_MLEG" "$S_MSIDE" 1 "${CNID[$cn]}"
-	dn_side "$dn" "$sp" "$S_DLEG" "$S_DSIDE" 2 "${CNID[$cn]}"
+	dn_side "$dn" "$sp" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_side "$dn" "$sp" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
 
 	stage cn "SyncupCn introduces the pointer, SyncupCntlr builds the stack"
 	bump_cn_sync "$cn"
@@ -3128,10 +3149,14 @@ case_redund() {
 	stage dn "4 sides, one per leg, primary CN1 with CN2 as the standby"
 	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
 	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
-	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
 
 	stage cn "the same request to both CNs, primary on CN1"
 	local cntrace=$TRACE
@@ -3162,10 +3187,15 @@ case_redund() {
 	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund standby"
 
 	stage assert "primary md state, standby shape, host isolation"
-	# CN12 case 1: neither member carries an md superblock — which after the
-	# whole-side zeroing (architecture.md, Side provisioning protocol; [D15])
-	# is exactly the freshly-provisioned case — so the arrays are created,
-	# never assembled.
+	# CN12 case 1: neither member carries an md superblock — a fresh side's
+	# zeroing covers its leg's meta region, where the superblock sits
+	# (architecture.md, Side provisioning protocol), so this is exactly the
+	# freshly-provisioned case — and the arrays are created clean, never
+	# assembled. A meta group's legs are zeroed over their whole leg span, a
+	# data group's over their meta region and first data block; past that
+	# block the data legs may differ, but nothing dnv stacks on the array
+	# reads a block there before writing it through the array (cnagent.md,
+	# CN12; architecture.md, [D15]).
 	seq=$(helper 1 "cn_events $cntrace")
 	assert_eq "$(event_cnt "$seq" '^mdadm --create .*--run .*--assume-clean')" 2 \
 		"redund: mdadm --create --run --assume-clean for both groups"
@@ -3238,10 +3268,14 @@ case_redund() {
 		"redund demote: a standby keeps its legs connected"
 
 	stage flip "failover step 2: every side moves its primary to CN2"
-	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "${CNID[2]}" "${CNID[1]}"
-	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[2]}" "${CNID[1]}"
-	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[2]}" "${CNID[1]}"
-	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[2]}" "${CNID[1]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
 	# The promote may only run once the legs are optimized on CN2
 	# (cnagent_integtest.md, Conventions, Sides first).
 	for i in 1 2; do
@@ -3474,10 +3508,14 @@ case_redund() {
 	seq=$(helper 1 "cn_events $TRACE")
 	assert_eq "$(event_cnt "$seq" '^mdadm --(assemble|create) ')" 0 \
 		"redund lateflip: the promotion assembled nothing"
-	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
 	for i in 1 2; do
 		leg_wait_ana 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i" optimized 20
 		leg_wait_ana 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i" optimized 20
@@ -3633,10 +3671,14 @@ teardown_shape() { # sp nqn uuid req1 req2 hostvm
 	local sp=$1 nqn=$2 uuid=$3 req1=$4 req2=$5 hv=$6 out dev
 	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
 	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
-	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
 	bump_cn_sync 1
 	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --cntlr "$sp:$T_C1")
 	assert_cn_info_ok "$out" "$STAGE syncup-cn 1"
@@ -4090,8 +4132,10 @@ case_thinbm() {
 
 	stage dn "the S-shaped SP again, on DN1"
 	dn_pointers "$dn" "$sp:$S_MLEG:$S_MSIDE" "$sp:$S_DLEG:$S_DSIDE"
-	dn_side "$dn" "$sp" "$S_MLEG" "$S_MSIDE" 1 "${CNID[$cn]}"
-	dn_side "$dn" "$sp" "$S_DLEG" "$S_DSIDE" 2 "${CNID[$cn]}"
+	dn_side "$dn" "$sp" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_side "$dn" "$sp" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
 
 	stage cn "CN1 builds the primary stack"
 	bump_cn_sync "$cn"
@@ -4333,8 +4377,10 @@ case_clone_xfer() {
 
 	stage sp1 "stage 0: sp1 comes up on DN1/CN1 and takes the data"
 	dn_pointers 1 "$sp1:$S_MLEG:$S_MSIDE" "$sp1:$S_DLEG:$S_DSIDE"
-	dn_side 1 "$sp1" "$S_MLEG" "$S_MSIDE" 1 "${CNID[1]}"
-	dn_side 1 "$sp1" "$S_DLEG" "$S_DSIDE" 2 "${CNID[1]}"
+	dn_side 1 "$sp1" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[1]}"
+	dn_side 1 "$sp1" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[1]}"
 	bump_cn_sync 1
 	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --cntlr "$sp1:$cntlr")
 	assert_cn_info_ok "$out" "clone_xfer syncup-cn 1"
@@ -4358,8 +4404,10 @@ case_clone_xfer() {
 
 	stage sp2 "stage 1: sp2 comes up with the identical namespace, suspended"
 	dn_pointers 2 "$sp2:$S_MLEG:$S_MSIDE" "$sp2:$S_DLEG:$S_DSIDE"
-	dn_side 2 "$sp2" "$S_MLEG" "$S_MSIDE" 1 "${CNID[2]}"
-	dn_side 2 "$sp2" "$S_DLEG" "$S_DSIDE" 2 "${CNID[2]}"
+	dn_side 2 "$sp2" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[2]}"
+	dn_side 2 "$sp2" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[2]}"
 	bump_cn_sync 2
 	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp2:$cntlr")
 	assert_cn_info_ok "$out" "clone_xfer syncup-cn 2"
@@ -4854,10 +4902,14 @@ case_restart() {
 	stage build "the A-shaped SP with a primary on CN1 and a standby on CN2"
 	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
 	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
-	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[1]}" "${CNID[2]}"
-	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[1]}" "${CNID[2]}"
 	bump_cn_sync 1
 	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --cntlr "$sp:$c1")
 	assert_cn_info_ok "$out" "restart syncup-cn 1"

@@ -271,9 +271,10 @@ const (
 	ReplyCodeUnknownObject = 2
 	// ReplyCodeInvalidConf refuses a request whose conf carries a value the
 	// control plane cannot have written — a proto3 zero where architecture.md,
-	// Common validation, requires a concrete geometry. The object is known and
-	// the revision is current; it is the conf that is unusable, which is why it
-	// is neither of the two above.
+	// Common validation, requires a concrete geometry, or a side's length to
+	// zero the sp worker cannot have derived from it (dnagent.md DN8). The
+	// object is known and the revision is current; it is the conf that is
+	// unusable, which is why it is neither of the two above.
 	ReplyCodeInvalidConf = 3
 	// ReplyCodeLeftover reports an ACCEPTED request with residue: the
 	// desired state is stored and every wanted object was converged, but the
@@ -283,10 +284,10 @@ const (
 	// leftover by definition has no row — nothing wanted names it. An agent
 	// also reports a few conditions this way so that the worker re-sends the
 	// Syncup* whose converge acts on them (architecture.md, Teardown by sweep):
-	// on a dn a disk identity not yet confirmed or a side with extents to zero and
-	// nothing zeroing it, on a cn a piece of the node's base state that a
-	// CheckCn round's or GetCnInfo's probe read absent, or an ANA group it
-	// read in a state other than its fixed one on a port whose transport
+	// on a dn a disk identity not yet confirmed or a side with bytes left to
+	// zero and nothing zeroing it, on a cn a piece of the node's base state
+	// that a CheckCn round's or GetCnInfo's probe read absent, or an ANA group
+	// it read in a state other than its fixed one on a port whose transport
 	// attributes match.
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
@@ -326,27 +327,37 @@ const (
 	DnExportOrphanGrace = 30 * time.Second
 
 	// Side provisioning ([D15], architecture.md, Side provisioning protocol,
-	// dnagent.md DN9): the background zeroing goroutine zeroes at most
-	// DnZeroBatchExtCnt logical extents per `blkdiscard --zeroout`
-	// command, through the side's dm-linear, and persists that batch's
-	// `zeroed_bits` after each success. The batch size assumes fast
-	// hardware Write Zeroes: batch × ext_size should zero inside
-	// CmdSoftTimeout at the disk's rate split DnZeroConcurrency ways. A
+	// dnagent.md DN9): the background zeroing goroutine zeroes the prefix of
+	// the side that side_conf.zero_bytes names, through the side's
+	// dm-linear, at most DnZeroBatchMaxBytes per `blkdiscard --zeroout`
+	// command, and persists the count of bytes zeroed from the side's start
+	// after each success. A bound in bytes keeps a command's length, and so
+	// its time under CmdSoftTimeout, independent of the extent size. A
 	// failed or timed-out batch is retried no sooner than
 	// DnZeroRetryInterval seconds later — the zeroing twin of
 	// DnMigrConnectRetryInterval, never a hot loop.
-	DnZeroBatchExtCnt   = 10
+	DnZeroBatchMaxBytes = 64 * 1024 * 1024
 	DnZeroRetryInterval = 5
+	// DnZeroBatchMinBytes is the floor a side's batch backs off to. A batch
+	// the soft timeout killed halves the side's next one, rounded down to a
+	// whole DnZeroBatchMinBytes and never below it; a success doubles it
+	// again up to DnZeroBatchMaxBytes; DnZeroKillBackoff kills in a row drop
+	// it straight to the floor. Both bounds are whole multiples of
+	// DnZeroAlign, so a batch starts and ends on one.
+	DnZeroBatchMinBytes = 1 * 1024 * 1024
+	// DnZeroAlign is the unit a side's length to zero comes in: the side conf
+	// gate refuses a side_conf.zero_bytes that is not a whole multiple of it
+	// (dnagent.md DN8), since a `blkdiscard --zeroout` must start and end on
+	// the disk's logical block. The sp worker's lengths are whole pool
+	// blocks, which are multiples of it.
+	DnZeroAlign = 4096
 	// DnZeroConcurrency caps the zeroing batches one agent runs at once,
-	// however many of its sides are zeroing: N concurrent batches split
-	// the disk's Write Zeroes rate N ways, so with no cap a busy DN would
-	// have every batch killed at CmdSoftTimeout and redone for ever. A batch
-	// the soft timeout killed halves the side's next batch, a success
-	// doubles it again up to DnZeroBatchExtCnt, and DnZeroKillBackoff
-	// kills in a row drop the side to one extent per batch. That rate
-	// control lives in the side's goroutine only — a restart begins again
-	// at DnZeroBatchExtCnt — and never decides what is zeroed: the bits
-	// do.
+	// however many of its sides are zeroing: N concurrent batches split the
+	// disk's zeroing rate N ways, so with no cap a busy DN would have every
+	// batch killed at CmdSoftTimeout and redone for ever. The batch size is
+	// rate control that lives in the side's goroutine only — a restart
+	// begins again at DnZeroBatchMaxBytes — and never decides what is
+	// zeroed: the record's zeroed count does.
 	DnZeroConcurrency = 2
 	DnZeroKillBackoff = 2
 

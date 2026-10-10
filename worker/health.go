@@ -903,7 +903,7 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // there for as long as it zeroes. So are group rows, for a grow: its new
 // groups are appended to their lists and stay out of the live concat while
 // their sides zero (CN9's prefix cut), so their group rows alone read
-// PROVISIONING, beside a serving pool, for minutes.
+// PROVISIONING, beside a serving pool, for as long as those sides zero.
 // Nothing else needs them: a new SP has one group per list (the gateway's
 // planSpGroups), so a group of its that is still provisioning defers its
 // whole slice, whose pool rows say so, and a group a converge could not

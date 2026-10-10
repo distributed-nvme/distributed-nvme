@@ -1113,8 +1113,29 @@ func (f *fakeNode) newDevNo() string {
 	return fmt.Sprintf("253:%d", f.nextMinor)
 }
 
+// fakeLogicalBlock is the logical block size the fake's devices have: a disk
+// of 4 KiB logical blocks, the strictest the agent must zero on.
+const fakeLogicalBlock = 4096
+
 func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	dev := args[len(args)-1]
+	// The real tool refuses a range that does not start and end on the
+	// device's logical block, in these words, so a byte batch the agent's
+	// arithmetic leaves misaligned fails here rather than only on a lab disk
+	// of 4 KiB blocks.
+	for _, flag := range []string{"--offset", "--length"} {
+		value := flagValue(args, flag)
+		if value == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || n%fakeLogicalBlock != 0 {
+			f.dispatchStderr = fmt.Sprintf(
+				"blkdiscard: %s: %s %s is not aligned to sector size %d",
+				dev, strings.TrimPrefix(flag, "--"), value, fakeLogicalBlock)
+			return "", 1
+		}
+	}
 	name := strings.TrimPrefix(dev, "/dev/mapper/")
 	dm, ok := f.dms[name]
 	if !ok {

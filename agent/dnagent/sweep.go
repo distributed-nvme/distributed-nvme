@@ -1567,7 +1567,10 @@ func (s *DnAgentServer) dnVerdict(
 
 // sideVerdict is the side-level comparison the CheckSide rounds and
 // GetSideInfo take. The side's extent size comes from its DN, and a side
-// whose DN is unknown or unusable has nothing to compare against.
+// whose DN is unknown or unusable has nothing to compare against. Nor has a
+// side whose stored length to zero DN8's gate refuses: it converges nothing
+// and sweeps nothing, so naming leftovers for it would report objects it is
+// not allowed to remove.
 func (s *DnAgentServer) sideVerdict(
 	ctx context.Context,
 	st *sideState,
@@ -1581,13 +1584,16 @@ func (s *DnAgentServer) sideVerdict(
 	if agent.ValidateExtentSize(extentSize) != nil {
 		return &agent.SweepResult{}
 	}
+	if validateZeroBytes(req.GetSideConf(), extentSize) != nil {
+		return &agent.SweepResult{}
+	}
 	plan := newSidePlan(s.nf, req, extentSize)
 	return s.sweepSide(ctx, st, plan, false)
 }
 
 // zeroingVerdict is the one comparison a side's verdict makes beyond the
 // sweep's: zeroing that should be running and is not. A record this node's
-// confirmed table holds with extents still unzeroed wants its DN9 goroutine,
+// confirmed table holds with bytes still to zero wants its DN9 goroutine,
 // at every level and on both sides of the provisioned gate, and only a
 // converge starts one. A converge that could not — the startup reconcile's
 // while no read of the disk answered, say — left nothing zeroing the side,
@@ -1614,6 +1620,6 @@ func (s *DnAgentServer) zeroingVerdict(
 	if running {
 		return
 	}
-	res.Fail(fmt.Sprintf(zeroingDetailsFmt, sideZeroedCnt(rec),
-		sideExtCnt(rec)), fmt.Errorf("nothing is zeroing the side"))
+	res.Fail(zeroingDetails(sideZeroedBytes(rec), sideZeroBytes(rec)),
+		fmt.Errorf("nothing is zeroing the side"))
 }

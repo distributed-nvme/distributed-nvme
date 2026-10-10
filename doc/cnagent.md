@@ -632,8 +632,8 @@ effective one reports `RES_STATUS_PROVISIONING` with details
 progress counter on purpose: a value that changed every round would
 defeat the `proto.Equal` suppression of the Check stream (`dnagent.md` SH26) and
 re-send `CntlrInfo` on every tick; the dn's zeroing counter is affordable
-only because it advances slowly and its stream is per-side. The
-exclusions:
+only because it changes just while its side zeroes and its stream is
+per-side. The exclusions:
 
 * a leg is provisioning iff its `side_list` is non-empty and every side
   in it has `provisioned` false. Mid-migration a provisioned source plus
@@ -1063,13 +1063,19 @@ CN12. Groups (`md.go`; primary only — a standby has none,
      had an array to leave. `--assume-clean` is always correct here,
      short of the failed-read answer below (a member whose read failed
      answers as superblock-free without being so): a side is never
-     exported before the provisioning protocol has zeroed it whole
-     (`blkdiscard --zeroout` per batch of extents, tracked in the volume
-     table's `zeroed_bits` and gated by the side's `provisioned` flag),
-     and ids are never reused — so a superblock-free leg can only be a
-     freshly provisioned side, and both members are all-zero because
-     zeros were written, not because a discard was assumed to read back
-     as zeros (`architecture.md`, [D15]).
+     exported before the provisioning protocol has written zeros over at
+     least its meta region and its first data block and the side's
+     `provisioned` flag has opened the gate (`architecture.md`, Side
+     provisioning protocol), and ids are never reused — so a
+     superblock-free leg can only be a freshly provisioned side (though a
+     fresh leg can still carry an md superblock at its end,
+     `architecture.md`, Known limits). The rest of a data leg's data
+     region is never zeroed, and the members need not agree there:
+     dm-thin writes a block whole before a host can read any of it
+     (`architecture.md`, [D15]; CN13), so nothing dnv builds on the array
+     reads a block of it before writing it through the array, and the
+     first data block, which the node's udev, partition scan and LVM
+     activation read when the array appears, is zeroed on every member.
   2. Some have one ⇒ `mdadm --assemble` with those; then the sysfs read
      of the array (below) and `--add --failfast` any available member the
      array left out (freshly provisioned additions and stale-metadata
@@ -1329,16 +1335,19 @@ device's blocks and `low_water_mark_pct` as `architecture.md`, Primary
 cntlr, states — a zero percentage never reaches that arithmetic, since
 CN8's conf gate refuses the request before any planning runs; above one
 hundred passes a zero mark; nothing is clamped in either direction. A
-fresh pool needs its metadata to read zero, and it
-does: the side provisioning protocol writes zeros over every extent of
-every side (`blkdiscard --zeroout`) before the side is ever exported —
-the same guarantee that funds CN12's `--assume-clean`, an actual write of
-zeros rather than a discard whose read-back is hardware-optional
-(`architecture.md`, [D15]).
+fresh pool needs its metadata to read zero, and it does: a side of a meta
+group is zeroed over its whole leg span before it is ever exported, with
+an actual write of zeros rather than a discard whose read-back is
+hardware-optional (`architecture.md`, Side provisioning protocol).
 
 The pool table carries no feature arguments, so dm-thin's defaults
-apply: a pool out of data space queues writes and then fails them when
-its own timeout runs out (`architecture.md`, Known limits).
+apply. dm-thin then writes every block the pool provisions whole before a
+host can read any of it, because the table never asks it to skip block
+zeroing (the "skip_block_zeroing" feature, which `architecture.md`, [D15],
+rules out): that is what keeps the never-zeroed part of a data leg
+unreadable, and what CN12's `--assume-clean` rests on. A pool out of data
+space queues writes and then fails them when its own timeout runs out
+(`architecture.md`, Known limits).
 
 `GrowSlice` arrives as longer group lists: the converge reloads the
 concats with the appended targets and reloads the pool table with the

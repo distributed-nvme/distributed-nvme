@@ -27,9 +27,8 @@ const bitsPerByte = 8
 // It is for **wire chunks only**, where every bit of every byte is meaningful
 // by construction (chunks are byte-aligned; architecture.md,
 // raid0 bitmap math). It must never be used as
-// the bit count of a bitmap whose logical length is not a multiple of 8 — a
-// side's zeroed_bits, say: there it would count the trailing pad bits and
-// report a 10-extent side as 16-extent.
+// the bit count of a bitmap whose logical length is not a multiple of 8:
+// there it would count the trailing pad bits as real ones.
 func BitmapBitCount(bitmap []byte) uint64 {
 	return uint64(len(bitmap)) * bitsPerByte
 }
@@ -41,97 +40,6 @@ func BitmapBit(bitmap []byte, idx uint64) bool {
 		return false
 	}
 	return bitmap[byteIdx]&(1<<(idx%bitsPerByte)) != 0
-}
-
-// ---------------------------------------------------------------------------
-// Explicit-bit-count helpers (dnagent.md DN9).
-//
-// The side-provisioning bitmap (DnDiskTable.SideRecord.zeroed_bits, bit i
-// = logical extent i is zeroed) uses the same LSB-first encoding as the wire
-// chunks above, but its logical length — the side's extent count — is rarely a
-// multiple of 8. Every helper below therefore takes that count explicitly and
-// ignores the trailing pad bits; none of them may be replaced by
-// BitmapBitCount, which would count the pad and declare a partially zeroed
-// side complete.
-// ---------------------------------------------------------------------------
-
-// BitmapByteLen is the byte length that holds exactly bits bits, LSB-first
-// with the trailing pad bits zero.
-func BitmapByteLen(bits uint64) int {
-	return int((bits + bitsPerByte - 1) / bitsPerByte)
-}
-
-// BitmapSetRange sets bits [from, to) of bitmap, growing it to
-// BitmapByteLen(to) bytes when needed, and returns the (possibly new) slice.
-// An empty range is a no-op that grows nothing. Only the bits the caller asks
-// for are set, so the pad bits above its logical count stay 0.
-func BitmapSetRange(bitmap []byte, from uint64, to uint64) []byte {
-	if from >= to {
-		return bitmap
-	}
-	if need := BitmapByteLen(to); len(bitmap) < need {
-		grown := make([]byte, need)
-		copy(grown, bitmap)
-		bitmap = grown
-	}
-	for idx := from; idx < to; idx++ {
-		bitmap[idx/bitsPerByte] |= 1 << (idx % bitsPerByte)
-	}
-	return bitmap
-}
-
-// BitmapCountSet counts the set bits among the first bits bits. Bits past the
-// slice read as 0 (an absent proto3 bytes field means "nothing set"); bits
-// past bits are ignored, so a padded byte can never inflate the count.
-func BitmapCountSet(bitmap []byte, bits uint64) uint64 {
-	cnt := uint64(0)
-	for idx := uint64(0); idx < bits; idx++ {
-		if BitmapBit(bitmap, idx) {
-			cnt++
-		}
-	}
-	return cnt
-}
-
-// BitmapAllSet reports whether every one of the first bits bits is set.
-// BitmapAllSet(anything, 0) is true.
-func BitmapAllSet(bitmap []byte, bits uint64) bool {
-	_, unset := BitmapFirstUnset(bitmap, bits)
-	return !unset
-}
-
-// BitmapFirstUnset returns the lowest index < bits whose bit is 0, and false
-// when every one of the first bits bits is set. It is the batch cursor of the
-// zeroing loop (dnagent.md DN9): the first not-yet-zeroed extent, which is
-// correct even when the set bits are not a contiguous prefix.
-func BitmapFirstUnset(bitmap []byte, bits uint64) (uint64, bool) {
-	for idx := uint64(0); idx < bits; idx++ {
-		if !BitmapBit(bitmap, idx) {
-			return idx, true
-		}
-	}
-	return 0, false
-}
-
-// BitmapUnsetRunFrom returns the length of the run of 0 bits starting at from,
-// capped at max and at bits. Together with BitmapFirstUnset it turns "the
-// first not-yet-zeroed extent" into "one blkdiscard --zeroout covering at most
-// DnZeroBatchExtCnt consecutive extents". It returns 0 when the bit at from is
-// already set or from is at/past bits.
-func BitmapUnsetRunFrom(
-	bitmap []byte,
-	from uint64,
-	bits uint64,
-	max uint64,
-) uint64 {
-	run := uint64(0)
-	for idx := from; idx < bits && run < max; idx++ {
-		if BitmapBit(bitmap, idx) {
-			break
-		}
-		run++
-	}
-	return run
 }
 
 // ChunkSet holds the migration bitmap chunks of one migration that the agent

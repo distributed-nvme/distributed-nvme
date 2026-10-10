@@ -118,6 +118,48 @@ func TestDrainRunsAtEverySpLevel(t *testing.T) {
 	}
 }
 
+// TestDrainRunsAheadOfTheSpGates is AR1's order for a latched SP: its drain
+// step runs ahead of the SP's own two gates, its bdev_conf and its groups'
+// lengths to zero, because the drain reads no geometry, and either gate in
+// front of it would leave an SP whose stored geometry cannot be read
+// undeletable, the latch being one-way (SPD5). The step runs and nothing is
+// refused; an unhealthy primary shows that the pass did not fall through to
+// the reactions either.
+func TestDrainRunsAheadOfTheSpGates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		corrupt func(h *reactHarness)
+	}{
+		{
+			name: "an unreadable bdev_conf",
+			corrupt: func(h *reactHarness) {
+				h.state.Conf.BdevConf.DmRaid0Conf.StripeSize = 0
+			},
+		},
+		{
+			name: "a group with no length to zero",
+			corrupt: func(h *reactHarness) {
+				h.dataGrp().MetaBlocks = 0
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.latch()
+			h.rops.drainCntlrCnt = 2
+			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+			tc.corrupt(h)
+			h.pass()
+			h.wantOps("drain_cntlrs")
+			h.wantApplied()
+			if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 0 {
+				t.Errorf("%q records = %d, want 0: the drain reads no "+
+					"geometry", msgInvalidStoredConf, got)
+			}
+		})
+	}
+}
+
 // TestDrainFailedStepIsLogged is SPD6 and its record (dnv-worker.md, Log
 // records): a failed step commits nothing, logs `sp drain failed` with the
 // phase and the cause, and is simply retried on the next tick. There is no

@@ -67,9 +67,12 @@ func ValidateExtentSize(extentSize uint64) error {
 	return nil
 }
 
-// InvalidConfReply builds the refusal the two validators above feed. It is the
-// revision gate's sibling: the request is not applied, nothing is converged,
-// and the worker retries with whatever the control plane stores next round.
+// InvalidConfReply builds the refusal the two validators above feed, and the
+// dn agent's side conf gate on side_conf.zero_bytes too (dnagent.md DN8),
+// whose validator lives in package dnagent because it copies no model rule.
+// It is the revision gate's sibling: the request is not applied, nothing is
+// converged, and the worker retries with whatever the control plane stores
+// next round.
 func InvalidConfReply(format string, args ...any) *pb.AgentReply {
 	return &pb.AgentReply{
 		Code:    common.ReplyCodeInvalidConf,

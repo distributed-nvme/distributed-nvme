@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -146,9 +147,10 @@ func spFixture() *model.SpState {
 		// The groups' meta_blocks / data_blocks are hand-chosen numbers, NOT
 		// what model.GroupBlocks computes for this SP's stored geometry: the
 		// worker only ever forwards a group's stored counts (sprole.go reads
-		// grp.GetMetaBlocks()) and model.GrowSlice recomputes its own inside
-		// its STM, so a fixture whose numbers a recomputation would reproduce
-		// could not tell the two apart.
+		// grp.GetMetaBlocks()) or computes its sides' lengths to zero from
+		// them (model.SideZeroBytes), and model.GrowSlice recomputes its own
+		// inside its STM, so a fixture whose numbers a recomputation would
+		// reproduce could not tell the two apart.
 		Slices: map[uint64]*pb.Slice{
 			spSliceA: {
 				SliceIdx: 0,
@@ -286,13 +288,24 @@ func spTestWorker(d *deps) *spWorker {
 // RW15 / RW16 golden requests
 // ---------------------------------------------------------------------------
 
+// spMetaZeroBytes and spDataZeroBytes are the lengths to zero RW15 gives the
+// fixture's sides (model.SideZeroBytes; architecture.md, Side provisioning
+// protocol), from the groups' STORED counts at the SP's stored block size: a
+// meta group's sides over the whole leg, meta_blocks + data_blocks, and a data
+// group's over the meta region and the first data block, meta_blocks + 1.
+// Neither is what an extent size or the default block size would give.
+const (
+	spMetaZeroBytes = (3 + 1021) * testBlockSize
+	spDataZeroBytes = (5 + 1) * testBlockSize
+)
+
 // TestSpSideRequestGolden pins RW15: one request per side — spare legs
-// included — with the owning group's ext_cnt, the primary's cn_id, the
-// standby list in cntlr_id_list order WITH the disabled cntlr present, and the
-// migration source / destination confs of the two-sided leg. The destination's
-// block_size is the SP's STORED data_block_size, forwarded (architecture.md,
-// Common validation); only the dm-clone hydration knobs are still resolved
-// here, because they are a policy timer rather than geometry.
+// included — with the owning group's ext_cnt and length to zero, the primary's
+// cn_id, the standby list in cntlr_id_list order WITH the disabled cntlr
+// present, and the migration source / destination confs of the two-sided leg.
+// The destination's block_size is the SP's STORED data_block_size, forwarded
+// (architecture.md, Common validation); only the dm-clone hydration knobs are
+// still resolved here, because they are a policy timer rather than geometry.
 func TestSpSideRequestGolden(t *testing.T) {
 	captureLogs(t)
 	w := spTestWorker(nil)
@@ -323,6 +336,7 @@ func TestSpSideRequestGolden(t *testing.T) {
 			StandbyIdList: standby,
 			SpLevel:       pb.SpLevel_SP_LEVEL_READWRITE,
 			Provisioned:   true,
+			ZeroBytes:     spMetaZeroBytes,
 		},
 	}
 	if !proto.Equal(meta.req, want) {
@@ -346,6 +360,7 @@ func TestSpSideRequestGolden(t *testing.T) {
 			StandbyIdList: standby,
 			SpLevel:       pb.SpLevel_SP_LEVEL_READWRITE,
 			Provisioned:   true,
+			ZeroBytes:     spDataZeroBytes,
 		},
 		MigrSrcConf: &pb.SyncupSideRequest_MigrSrcConf{
 			MigrId:         spMigrId,
@@ -377,6 +392,9 @@ func TestSpSideRequestGolden(t *testing.T) {
 			PrimaryCnId:   spCnIdA,
 			StandbyIdList: standby,
 			SpLevel:       pb.SpLevel_SP_LEVEL_READWRITE,
+			// An unprovisioned destination zeroes like any side of its
+			// group, so it is sent its group's length too.
+			ZeroBytes: spDataZeroBytes,
 		},
 		MigrDstConf: &pb.SyncupSideRequest_MigrDstConf{
 			MigrId:        spMigrId,
@@ -416,6 +434,10 @@ func TestSpSideRequestGolden(t *testing.T) {
 		t.Fatalf("spare ext_cnt = %d, want the group's 8",
 			spare.req.GetSideConf().GetExtCnt())
 	}
+	if got := spare.req.GetSideConf().GetZeroBytes(); got != spDataZeroBytes {
+		t.Fatalf("spare zero_bytes = %d, want the group's %d",
+			got, spDataZeroBytes)
+	}
 
 	// The two sides of one DN are two children, and every leg — spares
 	// included — is mapped to its slice for the HL2 leg rows.
@@ -450,6 +472,94 @@ func TestSpSideRequestNoPrimary(t *testing.T) {
 		if conf.GetStandbyIdList()[i] != cnId {
 			t.Fatalf("standby list = %v, want %v",
 				conf.GetStandbyIdList(), want)
+		}
+	}
+}
+
+// TestSpSideZeroBytes pins RW15's length to zero (model.SideZeroBytes) on every
+// kind of side the sp role drives: a meta group's side gets its whole leg and
+// a data group's side its meta region and first data block, the same for the
+// active leg, the spare and both sides of a migration, provisioned or not,
+// with md-raid1 and without. A group whose stored counts give no length gets
+// no request at all, never one carrying a length of zero.
+func TestSpSideZeroBytes(t *testing.T) {
+	captureLogs(t)
+	t.Run("md-raid1", func(t *testing.T) {
+		plan := spTestWorker(nil).buildPlan(
+			context.Background(), spFixture())
+		wantZeroBytes(t, plan, map[sideKey]uint64{
+			{legId: spLegMeta, sideId: spSideMeta}:   spMetaZeroBytes,
+			{legId: spLegMigr, sideId: spSideSrc}:    spDataZeroBytes,
+			{legId: spLegMigr, sideId: spSideDst}:    spDataZeroBytes,
+			{legId: spLegSpare, sideId: spSideSpare}: spDataZeroBytes,
+			{legId: spLegB, sideId: spSideB}:         spDataZeroBytes,
+		})
+	})
+	t.Run("redund_none", func(t *testing.T) {
+		state := spFixture()
+		state.Conf.BdevConf.RedundConf = &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundNone{
+				RedundNone: &pb.RedundNone{},
+			},
+		}
+		// model.GroupBlocks stores one meta block, the health block, for
+		// every group of a redund_none pool, and such a group has no spare
+		// (architecture.md, Spare legs).
+		for _, slice := range state.Slices {
+			for _, list := range grpListsOf(slice) {
+				for _, grp := range list.grps {
+					grp.MetaBlocks = 1
+					grp.SpareLegList = nil
+				}
+			}
+		}
+		plan := spTestWorker(nil).buildPlan(context.Background(), state)
+		wantZeroBytes(t, plan, map[sideKey]uint64{
+			{legId: spLegMeta, sideId: spSideMeta}: (1 + 1021) * testBlockSize,
+			{legId: spLegMigr, sideId: spSideSrc}:  2 * testBlockSize,
+			{legId: spLegMigr, sideId: spSideDst}:  2 * testBlockSize,
+			{legId: spLegB, sideId: spSideB}:       2 * testBlockSize,
+		})
+	})
+	t.Run("a group with no length", func(t *testing.T) {
+		// fanOut refuses such a plan before it is built (checkSideZeroBytes);
+		// built anyway, it drives none of the group's sides, while their
+		// legs keep their slice for the HL2 leg rows and nothing is counted
+		// for re-resolution, which cannot repair a stored count.
+		state := spFixture()
+		noMetaBlocks(state)
+		plan := spTestWorker(nil).buildPlan(context.Background(), state)
+		wantZeroBytes(t, plan, map[sideKey]uint64{
+			{legId: spLegMeta, sideId: spSideMeta}: spMetaZeroBytes,
+			{legId: spLegB, sideId: spSideB}:       spDataZeroBytes,
+		})
+		for _, legId := range []uint64{spLegMigr, spLegSpare} {
+			if plan.legSlice[legId] != spSliceA {
+				t.Errorf("leg %d maps to slice %d", legId,
+					plan.legSlice[legId])
+			}
+		}
+		if plan.unresolved != 0 {
+			t.Errorf("unresolved = %d, want 0", plan.unresolved)
+		}
+	})
+}
+
+// wantZeroBytes checks that a plan drives exactly the given sides, each with
+// the given side_conf.zero_bytes.
+func wantZeroBytes(t *testing.T, plan *spPlan, want map[sideKey]uint64) {
+	t.Helper()
+	if len(plan.sides) != len(want) {
+		t.Fatalf("%d side plans, want %d", len(plan.sides), len(want))
+	}
+	for key, zeroBytes := range want {
+		side := plan.sides[key]
+		if side == nil {
+			t.Fatalf("no plan for side %+v", key)
+		}
+		if got := side.req.GetSideConf().GetZeroBytes(); got != zeroBytes {
+			t.Errorf("side %+v: zero_bytes = %d, want %d",
+				key, got, zeroBytes)
 		}
 	}
 }
@@ -2001,22 +2111,26 @@ func TestSpFanOutStartsOneChildPerObject(t *testing.T) {
 	}
 }
 
-// spRefusedFanOut starts a coordinator on an SP whose STORED bdev_conf is one
-// CreateStoragePool could not have written, and returns once the gate in front
-// of RW14 (architecture.md, Common validation) has refused it and the refusal
-// has been shown to reach nothing: no child started, no Syncup* sent to any
-// endpoint.
+// spRefusedFanOut starts a coordinator on the fixture SP once corrupt has put
+// into its stored state a value no create RPC could have written, and returns
+// once a gate in front of RW14 (architecture.md, Common validation) has
+// refused it with one Error record whose error contains field, and the
+// refusal has been shown to reach nothing: no child started, no Syncup* sent
+// to any endpoint.
 //
 // It has to go through the coordinator's real start path — buildPlan alone
-// would happily build requests from the bad conf, because the check sits ahead
+// would happily build requests from a bad conf, because the check sits ahead
 // of it.
-func spRefusedFanOut(t *testing.T) (*spHarness, *spWorker) {
+func spRefusedFanOut(
+	t *testing.T,
+	corrupt func(state *model.SpState),
+	field string,
+) (*spHarness, *spWorker) {
 	t.Helper()
 	h := newSpHarness(t)
 	h.addFixtureAgents()
-	// A stripe size of 0: legal protobuf, impossible from CreateStoragePool.
 	bad := spFixture()
-	bad.Conf.BdevConf.DmRaid0Conf.StripeSize = 0
+	corrupt(bad)
 	h.ops.setState(bad)
 	w := h.start()
 
@@ -2027,7 +2141,7 @@ func spRefusedFanOut(t *testing.T) (*spHarness, *spWorker) {
 	if rec["level"] != "ERROR" {
 		t.Fatalf("refusal logged at %v, want ERROR", rec["level"])
 	}
-	if err, _ := rec["error"].(string); !strings.Contains(err, "stripe_size") {
+	if err, _ := rec["error"].(string); !strings.Contains(err, field) {
 		t.Fatalf("error = %q, want the offending field named", err)
 	}
 	for _, addr := range []string{spDnA, spDnB, spDnC, spDnD} {
@@ -2072,7 +2186,7 @@ func spRefusedFanOut(t *testing.T) (*spHarness, *spWorker) {
 // nothing else.
 func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
 	t.Run("recovers on a desired change", func(t *testing.T) {
-		h, w := spRefusedFanOut(t)
+		h, w := spRefusedFanOut(t, zeroStripeSize, "stripe_size")
 		// The next fan-out — here the one a desired change drives (RW3) —
 		// picks up a repaired conf and starts the children it owed.
 		h.ops.setState(spFixture())
@@ -2084,7 +2198,7 @@ func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
 	})
 
 	t.Run("recovers on the ticker", inBubble(func(t *testing.T) {
-		h, _ := spRefusedFanOut(t)
+		h, _ := spRefusedFanOut(t, zeroStripeSize, "stripe_size")
 		// Ticks under the STILL-bad conf. The coordinator's two gates
 		// (architecture.md, Common validation) refuse it once each — the
 		// fan-out's and the reaction pass's, which keep separate halves of one
@@ -2112,6 +2226,163 @@ func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
 					len(h.cntlrs[spCnA].syncups()) > 0
 			})
 	}))
+}
+
+// zeroStripeSize stores a stripe size of 0: legal protobuf, impossible from
+// CreateStoragePool.
+func zeroStripeSize(state *model.SpState) {
+	state.Conf.BdevConf.DmRaid0Conf.StripeSize = 0
+}
+
+// noMetaBlocks stores a data group with meta_blocks 0, which model.GroupBlocks
+// never gives: its sides have no length to zero (RW15).
+func noMetaBlocks(state *model.SpState) {
+	state.Slices[spSliceA].DataGrpList[0].MetaBlocks = 0
+}
+
+// spNoLengthCases each corrupt the stored SP so that one group gives its sides
+// no length to zero (RW15, model.SideZeroBytes), one per place the group gate
+// must look: the first slice's data list and its meta list, the second slice,
+// a group behind the first of its list — the shape a grow leaves — and a
+// block size at which a data group's length is no whole number of
+// common.DnZeroAlign units. field is what the refusal's error names.
+var spNoLengthCases = []struct {
+	name    string
+	corrupt func(state *model.SpState)
+	field   string
+}{
+	{
+		name:    "a data group",
+		corrupt: noMetaBlocks,
+		field:   "group 101 meta_blocks is zero",
+	},
+	{
+		name: "a meta group",
+		corrupt: func(state *model.SpState) {
+			state.Slices[spSliceA].MetaGrpList[0].DataBlocks = 0
+		},
+		field: "group 100 data_blocks is zero",
+	},
+	{
+		name: "a group of the second slice",
+		corrupt: func(state *model.SpState) {
+			state.Slices[spSliceB].DataGrpList[0].MetaBlocks = 0
+		},
+		field: "group 110 meta_blocks is zero",
+	},
+	{
+		name: "a group a grow appended",
+		corrupt: func(state *model.SpState) {
+			slice := state.Slices[spSliceA]
+			slice.DataGrpList = append(slice.DataGrpList, &pb.Group{
+				GrpId: 102, ExtCnt: 8, DataBlocks: 8187,
+			})
+		},
+		field: "group 102 meta_blocks is zero",
+	},
+	{
+		// The meta group's length is still a whole number of units here, so
+		// the first group refused is the data group of meta_blocks + 1
+		// blocks.
+		name: "a block size off the zeroing unit",
+		corrupt: func(state *model.SpState) {
+			state.Conf.BdevConf.DmPoolConf.DataBlockSize = 512
+		},
+		field: fmt.Sprintf("group 101 length to zero %d is not a multiple "+
+			"of %d", (5+1)*512, common.DnZeroAlign),
+	},
+}
+
+// TestCheckSideZeroBytes pins the walk of the group gate that both fanOut
+// (RW14) and the reaction pass (AR1) run: the fixture passes it, and every
+// case of spNoLengthCases is refused with an error naming its group, so the
+// gate skips no list, no slice and no group behind the first of a list.
+func TestCheckSideZeroBytes(t *testing.T) {
+	if err := checkSideZeroBytes(spFixture()); err != nil {
+		t.Fatalf("the fixture is refused: %v", err)
+	}
+	for _, tc := range spNoLengthCases {
+		state := spFixture()
+		tc.corrupt(state)
+		err := checkSideZeroBytes(state)
+		if err == nil || !strings.Contains(err.Error(), tc.field) {
+			t.Errorf("%s: error = %v, want %q named", tc.name, err, tc.field)
+		}
+	}
+}
+
+// TestSpFanOutRefusesAGroupWithNoLength checks the second gate in front of
+// RW14: every side request carries its group's length to zero (RW15), and a
+// group whose stored counts give none (model.SideZeroBytes) refuses the whole
+// plan exactly as an invalid bdev_conf does — one record naming the group,
+// nothing built, no child started — rather than send its sides a length of
+// zero the dn agent's side conf gate would refuse (dnagent.md DN8). It runs
+// for every case of spNoLengthCases.
+//
+// The reaction pass refuses the same group (AR1), so the ticker adds that
+// pass's one record to the fan-out's, and it is the ticker's re-entry into
+// fanOut that picks up a group repaired with no desired change.
+func TestSpFanOutRefusesAGroupWithNoLength(t *testing.T) {
+	for _, tc := range spNoLengthCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("recovers on a desired change", func(t *testing.T) {
+				h, w := spRefusedFanOut(t, tc.corrupt, tc.field)
+				h.ops.setState(spFixture())
+				w.update(desiredState{
+					revision: testSpRev + 1, handle: testSpName,
+				})
+				waitFor(t, "fan-out after the group is repaired",
+					func() bool {
+						return len(h.sides[spDnA].syncups()) > 0 &&
+							len(h.cntlrs[spCnA].syncups()) > 0
+					})
+			})
+
+			t.Run("recovers on the ticker", inBubble(func(t *testing.T) {
+				h, _ := spRefusedFanOut(t, tc.corrupt, tc.field)
+				// Ticks under the STILL-bad group: the reaction pass refuses
+				// it once too, in its own half of the memo, and then both
+				// stay quiet however many ticks follow.
+				h.advanceUntil("the reaction pass to refuse the same group",
+					roundInterval, func() bool {
+						return len(h.logs.withMsg(msgInvalidStoredConf)) == 2
+					})
+				for i := 0; i < 3; i++ {
+					h.clk.advance(roundInterval)
+					time.Sleep(5 * time.Millisecond)
+				}
+				recs := h.logs.withMsg(msgInvalidStoredConf)
+				if len(recs) != 2 {
+					t.Fatalf("%d refusal records, want one from the "+
+						"fan-out and one from the reaction pass", len(recs))
+				}
+				if err, _ := recs[1]["error"].(string); !strings.Contains(
+					err, tc.field,
+				) {
+					t.Fatalf("the pass's error = %q, want %q named",
+						err, tc.field)
+				}
+				for _, addr := range []string{spDnA, spDnB, spDnC, spDnD} {
+					if got := len(h.sides[addr].syncups()); got != 0 {
+						t.Fatalf("%d side syncups to %s while the group "+
+							"has no length", got, addr)
+					}
+				}
+				for _, addr := range []string{spCnA, spCnB, spCnC} {
+					if got := len(h.cntlrs[addr].syncups()); got != 0 {
+						t.Fatalf("%d cntlr syncups to %s while the group "+
+							"has no length", got, addr)
+					}
+				}
+				h.ops.setState(spFixture())
+				h.advanceUntil("fan-out after the group is repaired",
+					roundInterval, func() bool {
+						return len(h.sides[spDnA].syncups()) > 0 &&
+							len(h.cntlrs[spCnA].syncups()) > 0
+					})
+			}))
+		})
+	}
 }
 
 // TestSpChildRestartedOnEndpointChange checks RW14: a child whose endpoint
@@ -3923,52 +4194,140 @@ func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
 }
 
 // TestSpProvisionedFlipReported checks RW18 end to end: a side whose request
-// carried provisioned == false and whose agent reports zeroed == total > 0 is
-// reported to the coordinator, which runs the flip; a provisioned side and a
-// still-zeroing one are not.
+// carried provisioned == false and whose agent reports zeroed_bytes equal to a
+// non-zero zero_bytes is reported to the coordinator, which runs the flip; a
+// provisioned side reporting the same, a side still zeroing and a side whose
+// agent reports a length of zero are not.
 func TestSpProvisionedFlipReported(t *testing.T) {
+	synctest.Test(t, testSpProvisionedFlipReported)
+}
+
+func testSpProvisionedFlipReported(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
-	// The destination side is fully zeroed; the spare is still zeroing.
-	h.sides[spDnC].checkReply = func(
-		req *pb.CheckSideRequest,
-	) *pb.CheckSideReply {
+	// Slice B's side is unprovisioned here as well.
+	state := spFixture()
+	state.Slices[spSliceB].DataGrpList[0].LegList[0].SideList[0].
+		Provisioned = false
+	h.ops.setState(state)
+	infos := map[uint64]func() *pb.SideInfo{
+		// The destination side's zeroing is done.
+		spSideDst: func() *pb.SideInfo {
+			return &pb.SideInfo{
+				ZeroedBytes: spDataZeroBytes, ZeroBytes: spDataZeroBytes,
+			}
+		},
+		// The spare is still zeroing.
+		spSideSpare: func() *pb.SideInfo {
+			return &pb.SideInfo{
+				ZeroedBytes: 4 << 20, ZeroBytes: spDataZeroBytes,
+			}
+		},
+		// A provisioned side reporting its zeroing done is not reported.
+		spSideMeta: func() *pb.SideInfo {
+			return &pb.SideInfo{
+				ZeroedBytes: spMetaZeroBytes, ZeroBytes: spMetaZeroBytes,
+			}
+		},
+		// A length of zero names nothing to zero, so it is never done.
+		spSideB: func() *pb.SideInfo { return &pb.SideInfo{} },
+	}
+	var mu sync.Mutex
+	rounds := make(map[uint64]int)
+	reply := func(req *pb.CheckSideRequest) *pb.CheckSideReply {
+		sideId := req.GetSidePointer().GetSideId()
+		mu.Lock()
+		rounds[sideId]++
+		mu.Unlock()
 		return &pb.CheckSideReply{
 			Revision: req.GetRevision(),
-			SideInfo: &pb.SideInfo{ZeroedExtCnt: 8, TotalExtCnt: 8},
+			SideInfo: infos[sideId](),
 		}
 	}
-	h.sides[spDnD].checkReply = func(
-		req *pb.CheckSideRequest,
-	) *pb.CheckSideReply {
-		return &pb.CheckSideReply{
-			Revision: req.GetRevision(),
-			SideInfo: &pb.SideInfo{ZeroedExtCnt: 3, TotalExtCnt: 8},
-		}
-	}
-	// A provisioned side reporting the same counters must not be reported.
-	h.sides[spDnA].checkReply = func(
-		req *pb.CheckSideRequest,
-	) *pb.CheckSideReply {
-		return &pb.CheckSideReply{
-			Revision: req.GetRevision(),
-			SideInfo: &pb.SideInfo{ZeroedExtCnt: 1, TotalExtCnt: 1},
-		}
+	for _, addr := range []string{spDnA, spDnC, spDnD} {
+		h.sides[addr].checkReply = reply
 	}
 	h.start()
 
-	// No clock advance: the first round of every child delivers its reply, so
-	// nothing here can be mistaken for a round timeout.
-	waitFor(t, "provisioned flip", func() bool {
-		return len(h.ops.provisionedCalls()) > 0
-	})
+	// The negatives are gated on a SECOND round of each of their sides: the
+	// round loop issues the next request only after it has observed the
+	// previous reply (RW4), so a second round is the evidence that the first
+	// reply was judged. The first round needs no clock advance; the second
+	// needs the round timer.
+	h.advanceUntil("the flip and a second round of every other side",
+		roundInterval, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(h.ops.provisionedCalls()) > 0 &&
+				rounds[spSideSpare] > 1 && rounds[spSideMeta] > 1 &&
+				rounds[spSideB] > 1
+		})
 	for _, call := range h.ops.provisionedCalls() {
 		for _, ref := range call {
 			if ref.SideId != spSideDst {
-				t.Fatalf("flipped %+v, want only the zeroed side", ref)
+				t.Fatalf("flipped %+v, want only the side whose zeroing "+
+					"is done", ref)
 			}
 			if ref.SliceId != spSliceA || ref.LegId != spLegMigr {
 				t.Fatalf("flip ref = %+v", ref)
+			}
+		}
+	}
+}
+
+// TestReportProvisionedReadsTheBytes pins RW18's condition on one side child:
+// the side is reported only on an accepted reply, while its request still
+// carries provisioned == false, and when the agent reports zeroed_bytes equal
+// to its zero_bytes with zero_bytes above zero.
+func TestReportProvisionedReadsTheBytes(t *testing.T) {
+	ref := model.SideRef{
+		SliceId: spSliceA, LegId: spLegMigr, SideId: spSideDst,
+	}
+	done := &pb.SideInfo{
+		ZeroedBytes: spDataZeroBytes, ZeroBytes: spDataZeroBytes,
+	}
+	cases := []struct {
+		name        string
+		code        uint32
+		provisioned bool
+		info        *pb.SideInfo
+		want        bool
+	}{
+		{"done", 0, false, done, true},
+		{"done, with leftovers", common.ReplyCodeLeftover, false, done, true},
+		{"still zeroing", 0, false, &pb.SideInfo{
+			ZeroedBytes: spDataZeroBytes - testBlockSize,
+			ZeroBytes:   spDataZeroBytes,
+		}, false},
+		{"a length of zero", 0, false, &pb.SideInfo{}, false},
+		{"no info yet", 0, false, nil, false},
+		{"already provisioned", 0, true, done, false},
+		{"a rejected reply", common.ReplyCodeStaleRevision, false, done,
+			false},
+	}
+	for _, tc := range cases {
+		d := &sideDriver{report: make(chan spReport, 1)}
+		d.storeInfo(tc.info)
+		plan := &sidePlan{
+			ref: ref,
+			req: &pb.SyncupSideRequest{
+				SideConf: &pb.SyncupSideRequest_SideConf{
+					Provisioned: tc.provisioned,
+					ZeroBytes:   spDataZeroBytes,
+				},
+			},
+		}
+		d.reportProvisioned(
+			context.Background(), &replyState{code: tc.code}, plan)
+		if got := len(d.report) == 1; got != tc.want {
+			t.Errorf("%s: reported %v, want %v", tc.name, got, tc.want)
+			continue
+		}
+		if tc.want {
+			rep := <-d.report
+			if rep.provisioned == nil || *rep.provisioned != ref {
+				t.Errorf("%s: report = %+v, want the side %+v",
+					tc.name, rep.provisioned, ref)
 			}
 		}
 	}

@@ -89,8 +89,12 @@ const (
 // Error record instead of one per tick, keyed on the error text so a conf that
 // changes from one invalid value to another still reports.
 type spConfRefusal struct {
-	bdev string
-	cc   string
+	// fanOut is the fan-out's half (refuseSpConf): the SP's bdev_conf, or a
+	// group whose stored counts give its sides no length to zero (RW14).
+	fanOut string
+	// cc is the reaction pass's half (refuseReactionConf): the cluster's
+	// conf, the SP's bdev_conf, or such a group (AR1).
+	cc string
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +277,7 @@ type legRow struct {
 // round MAY share one STM).
 type spReport struct {
 	// provisioned names a side whose request carried provisioned == false and
-	// that the agent reports fully zeroed (RW18).
+	// whose agent reports its zeroing done (RW18).
 	provisioned *model.SideRef
 	// createdTdIds are the td_ids one cntlr reply completed (RW19
 	// conditions 1-4); the coordinator keeps those its loaded state still
@@ -607,17 +611,31 @@ func (w *spWorker) fanOut() {
 		w.refuseSpConf(ctx, err)
 		return
 	}
-	w.confRefusal.bdev = ""
+	if err := checkSideZeroBytes(state); err != nil {
+		// RW15: every side request carries the length its dn agent zeroes,
+		// computed from the side's group (model.SideZeroBytes). A group whose
+		// stored counts give no length is corruption, not an omission —
+		// CreateStoragePool and GrowSlice store model.GroupBlocks' counts,
+		// which always give one — and its sides may not be sent a length of
+		// zero instead: the dn agent's side conf gate refuses a length
+		// nobody chose (dnagent.md DN8). So the whole plan is refused exactly
+		// as above — nothing built, the running children kept on their last
+		// plan, the retry armed — under the same memo.
+		w.fanWanted = true
+		w.refuseSpConf(ctx, err)
+		return
+	}
+	w.confRefusal.fanOut = ""
 	plan := w.buildPlan(ctx, state)
 	w.applyPlan(ctx, plan)
 }
 
 // refuseSpConf records fanOut's refusal, once per distinct error.
 func (w *spWorker) refuseSpConf(ctx context.Context, err error) {
-	if w.confRefusal.bdev == err.Error() {
+	if w.confRefusal.fanOut == err.Error() {
 		return
 	}
-	w.confRefusal.bdev = err.Error()
+	w.confRefusal.fanOut = err.Error()
 	slog.ErrorContext(ctx, msgInvalidStoredConf,
 		slog.Uint64("cluster_id", w.cid),
 		slog.Uint64("sp_id", w.spId),
@@ -753,6 +771,44 @@ func (w *spWorker) buildPlan(
 	return plan
 }
 
+// grpList is one of a slice's two group lists. Which one a group is in decides
+// its sides' length to zero (RW15, model.SideZeroBytes).
+type grpList struct {
+	isMeta bool
+	grps   []*pb.Group
+}
+
+// grpListsOf is a slice's group lists, the meta list first.
+func grpListsOf(slice *pb.Slice) []grpList {
+	return []grpList{
+		{isMeta: true, grps: slice.GetMetaGrpList()},
+		{isMeta: false, grps: slice.GetDataGrpList()},
+	}
+}
+
+// checkSideZeroBytes is the gate on RW15's length to zero that fanOut runs
+// (RW14) and the reaction pass runs as well (AR1): the error of the first
+// group, in the order buildSidePlans walks them, whose stored counts give its
+// sides no length (model.SideZeroBytes), or nil.
+func checkSideZeroBytes(state *model.SpState) error {
+	blockSize := dataBlockSize(state.Conf.GetBdevConf())
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		slice, ok := state.Slices[sliceId]
+		if !ok {
+			continue
+		}
+		for _, list := range grpListsOf(slice) {
+			for _, grp := range list.grps {
+				_, err := model.SideZeroBytes(grp, list.isMeta, blockSize)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // buildSidePlans walks every side of the SP — both groups of every slice, both
 // the active legs and the SPARE legs (RW14; architecture.md, Spare legs) — and
 // builds its request.
@@ -770,17 +826,21 @@ func (w *spWorker) buildSidePlans(
 ) {
 	conf := state.Conf
 	spId := conf.GetSpId()
+	blockSize := dataBlockSize(conf.GetBdevConf())
 	for _, sliceId := range conf.GetSliceIdList() {
 		slice, ok := state.Slices[sliceId]
 		if !ok {
 			continue
 		}
-		grpLists := [][]*pb.Group{
-			slice.GetMetaGrpList(),
-			slice.GetDataGrpList(),
-		}
-		for _, grpList := range grpLists {
-			for _, grp := range grpList {
+		for _, list := range grpListsOf(slice) {
+			for _, grp := range list.grps {
+				// RW15: one length to zero per group, shared by every side
+				// of it — a spare's and a migration's two included. fanOut's
+				// gate (checkSideZeroBytes) refuses the plan of an SP with a
+				// group that has none, so an error here drives no side of
+				// the group rather than send it a length of zero.
+				zeroBytes, zeroErr := model.SideZeroBytes(
+					grp, list.isMeta, blockSize)
 				legLists := [][]*pb.Leg{
 					grp.GetLegList(),
 					grp.GetSpareLegList(),
@@ -788,13 +848,13 @@ func (w *spWorker) buildSidePlans(
 				for _, legList := range legLists {
 					for _, leg := range legList {
 						plan.legSlice[leg.GetLegId()] = sliceId
-						if !withRequests {
+						if !withRequests || zeroErr != nil {
 							continue
 						}
 						for _, side := range leg.GetSideList() {
 							w.buildSidePlan(
 								ctx, plan, state, sliceId, grp, leg, side,
-								primaryCnId, standby, spId,
+								primaryCnId, standby, spId, zeroBytes,
 							)
 						}
 					}
@@ -804,7 +864,7 @@ func (w *spWorker) buildSidePlans(
 	}
 }
 
-// buildSidePlan is RW15 for one side.
+// buildSidePlan is RW15 for one side. zeroBytes is its group's length to zero.
 func (w *spWorker) buildSidePlan(
 	ctx context.Context,
 	plan *spPlan,
@@ -816,6 +876,7 @@ func (w *spWorker) buildSidePlan(
 	primaryCnId uint64,
 	standby []uint64,
 	spId uint64,
+	zeroBytes uint64,
 ) {
 	key := sideKey{legId: leg.GetLegId(), sideId: side.GetSideId()}
 	dn, ok := state.DnByAddr[side.GetAddrPort()]
@@ -843,6 +904,7 @@ func (w *spWorker) buildSidePlan(
 			StandbyIdList: append([]uint64(nil), standby...),
 			SpLevel:       state.Conf.GetSpLevel(),
 			Provisioned:   side.GetProvisioned(),
+			ZeroBytes:     zeroBytes,
 		},
 	}
 	out := &sidePlan{
@@ -2071,15 +2133,16 @@ func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 }
 
 // reportProvisioned is RW18: a side whose request carried provisioned == false
-// and that the agent reports fully zeroed is handed to the coordinator, which
-// runs the flip.
+// and whose agent reports its zeroing done — zeroed_bytes equal to a non-zero
+// zero_bytes — is handed to the coordinator, which runs the flip. A zero_bytes
+// of zero names no length at all, so it is never a side that is done.
 //
 // The condition reads the request this child is driving rather than a
 // remembered "synced" one. The two can never disagree in a way that matters:
 // provisioned only ever goes false -> true, so a synced false with a desired
 // true means the flip already happened. Reading the current request is also
 // what makes RW18's handoff rule work — a new owner has synced nothing yet and
-// must still flip whatever its first round finds zeroed.
+// must still flip whatever its first round finds done.
 func (d *sideDriver) reportProvisioned(
 	ctx context.Context,
 	r *replyState,
@@ -2089,8 +2152,8 @@ func (d *sideDriver) reportProvisioned(
 		return
 	}
 	info := d.info()
-	total := info.GetTotalExtCnt()
-	if total == 0 || info.GetZeroedExtCnt() != total {
+	zeroBytes := info.GetZeroBytes()
+	if zeroBytes == 0 || info.GetZeroedBytes() != zeroBytes {
 		return
 	}
 	ref := plan.ref
@@ -2804,12 +2867,12 @@ func sideOfLeg(leg *pb.Leg, sideId uint64) *pb.Side {
 }
 
 // dataBlockSize is the pool's STORED data block size: what a migration
-// destination's dm-clone uses as its region size (RW15) and what AR6 converts
-// a meta group's data region with. It substitutes nothing — CreateStoragePool
-// made the value concrete (architecture.md, Common validation) and both callers
-// sit behind a ValidateBdevConf gate. It stays a one-line delegation to model
-// so this pre-check and the GrowSlice STM cannot end up meaning different
-// fields.
+// destination's dm-clone uses as its region size and every side's length to
+// zero is counted in (RW15), and what AR6 converts a meta group's data region
+// with. It substitutes nothing — CreateStoragePool made the value concrete
+// (architecture.md, Common validation) and every caller sits behind a
+// ValidateBdevConf gate. It stays a one-line delegation to model so this
+// pre-check and the GrowSlice STM cannot end up meaning different fields.
 func dataBlockSize(bdevConf *pb.BdevConf) uint64 {
 	return model.PoolBlockSize(bdevConf)
 }

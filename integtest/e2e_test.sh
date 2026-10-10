@@ -263,7 +263,10 @@ SLICE_CNT_DEFAULT=32
 
 # common.MinDnExtSize — 64 MiB, the smallest extent validateDnBinConf
 # (gateway/validate.go) accepts. Small extents are what keep the run's
-# real allocation inside the E2E5 caps: a group costs one extent per leg.
+# real allocation inside the E2E5 caps: every group here is one extent per
+# leg, which a meta group's zeroing allocates whole and a data group's only
+# as far as its meta region and first data block, the rest as it is written
+# (see BACKING_SIZE).
 # Cluster-scoped and WRITE-ONCE (no UpdateCluster RPC), so it is only ever
 # applied by `cluster create --extent-size` against an EMPTY etcd.
 EXTENT_SIZE=67108864
@@ -432,22 +435,53 @@ VOTE_GRACE=6
 # Write Zeroes without unmap, and the loop driver turns that into an fallocate
 # on the backing file that allocates the range without writing data — NOT a
 # hole punch (measured on the lab's 7.0 guests: `stat %b` grows by
-# the zeroed length). So every extent a disk node zeroes for a side costs
-# EXTENT_SIZE in its backing file whether or not anything writes it, and the
-# E2E5 caps below count it. A write_zeroes_max_bytes of 0 would not change
+# the zeroed length). So a side costs its backing file what its disk node
+# zeroes whether or not anything writes it: a meta side all of its extents,
+# a data side its meta region and first data block (architecture.md, Side
+# provisioning protocol). The rest of a data side allocates only as it is
+# written — a host's writes through dm-thin, which writes every block it
+# provisions whole, md's rebuild onto a spare, a migration's copy — and a
+# fresh file also carries the backing pattern below. The E2E5 caps count all
+# of it. A write_zeroes_max_bytes of 0 would not change
 # that allocation: the kernel would write real zero pages over the same
 # ranges instead, at bulk speed. checkWriteZeroes
 # (agent/dnagent/syncup_dn.go) only TAGS such a disk; it does not refuse it,
 # so preflight must die on that itself, before the first sp create.
 BACKING_SIZE=2G
 
+# common.DnDataOffset — where the extent area begins on a dn agent's disk:
+# extent 0 of a backing file starts this many bytes in, and with it every
+# side the create builds (setup step 11 says why).
+DN_DATA_OFFSET=268435456
+
+# common.DefaultDmPoolDataBlockSize — the pool's block size, the unit of a
+# group's meta and data regions. `sp create` passes none, so the gateway
+# stores this default, and setup_create_sp asserts it.
+DATA_BLOCK_SIZE=1048576
+
+# The backing pattern (E2E5): one MiB of random bytes that preflight_driver
+# makes once per run and ship_binaries ships to every DN VM. dn_up writes it
+# into every fresh backing file at two MiBs of extent 0 before the agent
+# starts: where a data side there has its first data block (DN_PAT_DATA0_MIB)
+# and at the extent's last MiB (DN_PAT_LAST_MIB), so DN_PAT_BYTES per file.
+# Setup step 11 reads both back through the side devices. One pattern for the
+# whole run, so every digest a side must show is one known value:
+# preflight_driver fills DN_PAT_SHA, and ZERO_MIB_SHA, the digest of one MiB
+# of zeros.
+DN_PAT_LOCAL="$BIN_DIR/e2e-dn-pattern"
+DN_PAT_GUEST="$WORK/bin/e2e-dn-pattern"
+DN_PAT_BYTES=$((2 << 20))
+DN_PAT_SHA=""
+ZERO_MIB_SHA=""
+
 # Space guard (E2E5), asserted after every case: allocated bytes of one
 # backing file, and allocated bytes of everything this run wrote on all guests.
 #
-# RUN_CAP_BYTES is DERIVED in derive_params, not set here. The sp's own sides
-# are LEGS x GRP_CNT x INIT_EXT_CNT x EXTENT_SIZE, which at the default shape
-# is 2 x 64 x 1 x 64 MiB = 8 GiB EXACTLY, so a flat 8 GiB cap equals the floor
-# and can never pass.
+# RUN_CAP_BYTES is DERIVED in derive_params, not set here. Its floor is what
+# the create's own sides zero — one extent per meta side, DATA_ZERO_BYTES per
+# data side, LEGS x SLICE_CNT of each — plus the backing pattern of every
+# backing file, and that floor moves with the shape: a flat cap with room at
+# the widest pool would be no cap at all at one slice.
 DN_CAP_BYTES=$((256 << 20))
 RUN_CAP_BYTES=0
 
@@ -503,8 +537,9 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 # THE LINE BETWEEN THE TWO BIG BUDGETS IS "FROM NOTHING" vs "AN INCREMENT", not
 # "a cntlr stack" vs "everything else". WAIT_BUILD is a WHOLE cntlr stack built
 # from nothing — and setup's sides wait, which is the other from-nothing
-# convergence in the file: all 128 sides, each zeroed whole before it can be
-# exported, all at once. How long that one takes is not timed on its own, so
+# convergence in the file: all 128 sides, each zeroed before it can be
+# exported — a meta side whole, a data side its meta region and first data
+# block — all at once. How long that one takes is not timed on its own, so
 # it carries the same generous budget rather than a number nobody has.
 # WAIT_PROVISION is an
 # INCREMENTAL convergence on something that already exists, the sides a grow
@@ -594,8 +629,14 @@ DN_TOTAL=0
 TD_UNIT=0
 CN_CNT=0
 DN_VM_CNT=0
-SP_DATA_BYTES=0
+SP_ZERO_BYTES=0
 RUN_SLACK_BYTES=0
+DATA_META_BLOCKS=0
+DATA_ZERO_BYTES=0
+SIDE_DATA0_MIB=0
+SIDE_LAST_MIB=0
+DN_PAT_DATA0_MIB=0
+DN_PAT_LAST_MIB=0
 
 JQ=jq
 ONLY=""
@@ -1431,31 +1472,38 @@ derive_params() {
 	# planSpGroups (gateway/storagepool.go), and LEGS sides per group.
 	GRP_CNT=$((2 * SLICE_CNT))
 
-	# The space guard's run cap, derived from the shape rather than a
-	# flat 8 GiB (see RUN_CAP_BYTES's comment for why that could never pass).
-	#
-	# SP_DATA_BYTES is the floor: every one of the LEGS*GRP_CNT sides is
-	# INIT_EXT_CNT extents of EXTENT_SIZE, and its disk node zeroes each side
-	# whole before exporting it, which ALLOCATES those extents in the backing
-	# file however sparse it started (the zeroing is not a hole punch — see
-	# BACKING_SIZE). That is not waste and not a leak — it is the storage pool.
-	# Every side a case adds after the create (a grow, a spare leg, a
-	# migration destination) costs its full extents the same way, out of the
-	# slack below.
-	#
-	# RUN_SLACK_BYTES is everything else on the ten guests: the cp's etcd and
-	# four daemon logs, 183 agent logs and the agents' local stores, each dn
-	# agent's own on-disk metadata in its backing file, the host pattern
-	# files, the CN tmpfs arenas, and the sides a case adds after the create.
-	# The CN thin metadata, the md bitmaps and every host or hydration write
-	# into the sp cost nothing here: they land in side extents the zeroing has
-	# already allocated. The cp's etcd and logs are the heaviest contributors
-	# after a smoke case; 4 GiB
-	# leaves room for the copy and react cases, which write more, while still
-	# being a number a real leak would cross.
-	SP_DATA_BYTES=$((LEGS * GRP_CNT * INIT_EXT_CNT * EXTENT_SIZE))
-	RUN_SLACK_BYTES=$((4 << 30))
-	RUN_CAP_BYTES=$((SP_DATA_BYTES + RUN_SLACK_BYTES))
+	# The create's data groups as model.GroupBlocks lays out INIT_EXT_CNT x
+	# EXTENT_SIZE at DATA_BLOCK_SIZE (architecture.md, Group on-leg layout:
+	# meta region, data region, health block). Under md-raid1 the meta region
+	# is the md superblock's block, one block of write-intent bitmap — its
+	# superblock and a bit per chunk of common.DefaultChunkBlockCnt blocks, far
+	# less than a block for a group this small — and the health block; without
+	# redundancy it is the health block alone. setup_create_sp asserts it
+	# against every data group the create stored.
+	case "$REDUND" in
+	raid1) DATA_META_BLOCKS=3 ;;
+	none) DATA_META_BLOCKS=1 ;;
+	esac
+	# What a data side zeroes before it is exported: its meta region and its
+	# first data block (architecture.md, Side provisioning protocol). A meta
+	# side of the create is one extent, planSpGroups' first rung, and its
+	# zeroing covers it whole.
+	DATA_ZERO_BYTES=$(((DATA_META_BLOCKS + 1) * DATA_BLOCK_SIZE))
+	# The two MiBs of a create-time side that setup step 11 reads, counted from
+	# the side's start — where a data side's first data block begins, and the
+	# last MiB of the side's one extent — and the same two MiBs of a backing
+	# file's extent 0, where every side the create builds lies, which dn_up
+	# fills with the backing pattern.
+	SIDE_DATA0_MIB=$((DATA_META_BLOCKS * DATA_BLOCK_SIZE / 1048576))
+	SIDE_LAST_MIB=$((EXTENT_SIZE / 1048576 - 1))
+	DN_PAT_DATA0_MIB=$((DN_DATA_OFFSET / 1048576 + SIDE_DATA0_MIB))
+	DN_PAT_LAST_MIB=$((DN_DATA_OFFSET / 1048576 + SIDE_LAST_MIB))
+	# A data side's zeroing must stop short of its last MiB, or setup step 11
+	# could not tell where it stopped, and the pattern's two MiBs would meet.
+	[ "$DATA_ZERO_BYTES" -le "$((EXTENT_SIZE - 1048576))" ] ||
+		die "a data side zeroes $DATA_ZERO_BYTES bytes, which reaches the last" \
+			"MiB of its $EXTENT_SIZE-byte extent: setup step 11 would have no" \
+			"byte left to show where its zeroing stopped"
 
 	# Every one of the CREATE's LEGS*GRP_CNT sides lands on a DISTINCT disk node:
 	# the create's black list starts as the request's and grows with every pick
@@ -1608,6 +1656,36 @@ derive_params() {
 	fi
 
 	DN_TOTAL=$((DN_VM_CNT * DNS_PER_VM))
+
+	# The space guard's run cap, derived from the shape rather than a flat
+	# number (see RUN_CAP_BYTES's comment for why).
+	#
+	# SP_ZERO_BYTES is the floor: what the create's sides zero before they are
+	# exported, which ALLOCATES those bytes in the backing files however sparse
+	# they started (the zeroing is not a hole punch — see BACKING_SIZE). Per
+	# slice that is LEGS meta sides of one extent, zeroed whole, and LEGS data
+	# sides of DATA_ZERO_BYTES. Every backing file adds the backing pattern,
+	# DN_PAT_BYTES, which a meta side's zeroing covers again and a data side's
+	# only in part. None of it is waste or a leak — it is the storage pool, and
+	# what setup step 11 reads.
+	#
+	# RUN_SLACK_BYTES is everything else on the ten guests: the cp's etcd and
+	# four daemon logs, 183 agent logs and the agents' local stores, each dn
+	# agent's own on-disk metadata in its backing file, the shipped binaries
+	# and pattern, the host pattern files, the CN tmpfs arenas, the sides a
+	# case adds after the create (a grow, a spare leg, a migration
+	# destination, each zeroed as any side of its group), and every byte
+	# written into a data region: a host's writes, for which dm-thin writes
+	# whole blocks, md's rebuild onto a spare, a migration's copy, a clone's
+	# hydration. The CN thin metadata, the md superblocks and bitmaps and the
+	# health blocks cost nothing more here: they land in bytes the zeroing has
+	# already allocated, a meta side whole and a data side's meta region. The
+	# cp's etcd and logs are the heaviest contributors after a smoke case;
+	# 4 GiB leaves room for the copy and react cases, which write more, while
+	# still being a number a real leak would cross.
+	SP_ZERO_BYTES=$((LEGS * SLICE_CNT * (EXTENT_SIZE + DATA_ZERO_BYTES)))
+	RUN_SLACK_BYTES=$((4 << 30))
+	RUN_CAP_BYTES=$((SP_ZERO_BYTES + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
 
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
 	# multiple of slice_cnt x stripe_size, computed from the SP's stored
@@ -2277,7 +2355,7 @@ host_drop_caches() { # <h>
 }
 
 # host_make_pattern writes <countMiB> of /dev/urandom to a FILE on the host.
-# That file is the reference the suite writes and re-compares; setup step 11's
+# That file is the reference the suite writes and re-compares; setup step 12's
 # SHA0 is its digest.
 host_make_pattern() { # <h> <path> <countMiB>
 	ssh_host "$1" \
@@ -2659,10 +2737,10 @@ mkwork() { # <subdir…>
 
 # alloc prints "<allocated bytes> <path>" per argument — ALLOCATED, not
 # apparent: a backing file is sparse and costs only what is allocated in it —
-# chiefly the extents its disk node has zeroed for sides, which the zeroing
-# allocates in full (it is not a hole punch; see BACKING_SIZE in the driver)
-# — while an apparent size would report 2 GiB for every one of them. stat's
-# %b is in %B-sized units.
+# chiefly what its disk node zeroed for its sides, which the zeroing
+# allocates (it is not a hole punch), what was written into them, and the
+# backing pattern (see BACKING_SIZE in the driver) — while an apparent size
+# would report 2 GiB for every one of them. stat's %b is in %B-sized units.
 alloc() { # <path…>
 	local p out b bs
 	for p in "$@"; do
@@ -3438,8 +3516,10 @@ helper_dn_source() {
 # dn_up provisions and starts ONE dn agent, and is idempotent: run twice it
 # reuses the backing file, the loop device and a live process. Every path and
 # every number is an ARGUMENT — the driver computes them with dn_dir /
-# dn_backing / dn_store / dn_log / dn_grpc_port / dn_trsvcid / dn_port_id, so
-# the layout lives in exactly one place and this side never recomputes it.
+# dn_backing / dn_store / dn_log / dn_grpc_port / dn_trsvcid / dn_port_id, and
+# the backing pattern's file and MiBs are its DN_PAT_GUEST, DN_PAT_DATA0_MIB
+# and DN_PAT_LAST_MIB, so the layout lives in exactly one place and this side
+# never recomputes it.
 #
 # It prints one line of key=value pairs and returns non-zero on anything the
 # driver must die on. Never run two dn_up concurrently ON ONE GUEST:
@@ -3451,9 +3531,11 @@ helper_dn_source() {
 # back. The mask is per GUEST, not per instance — install_udev_rule is a no-op
 # once the file is right, so every later call on this VM costs one compare.
 # <dir> <backing> <store> <log> <size> <ip> <grpc_port> <trsvcid> <port_id>
+# <pattern file> <pattern MiB> <pattern MiB>
 dn_up() {
 	local dir=$1 backing=$2 store=$3 log=$4 size=$5
 	local ip=$6 gport=$7 svcid=$8 portid=$9
+	local pfile=${10} pmib1=${11} pmib2=${12}
 	local dev wz pid pat udev
 
 	mkdir -p "$dir" "$store" || {
@@ -3469,12 +3551,27 @@ dn_up() {
 	}
 
 	# truncate, NEVER fallocate -l (E2E5): the file must START sparse, so that
-	# it costs only what the agent allocates in it — chiefly the side extents
-	# it zeroes — and fallocate would allocate all 2 GiB up front.
-	[ -f "$backing" ] || truncate -s "$size" "$backing" || {
-		echo "dn_up: truncate -s $size $backing failed" >&2
-		return 1
-	}
+	# it costs only what the agent zeroes in it and what is written through
+	# it, and fallocate would allocate all 2 GiB up front. A NEW file first
+	# gets the run's backing pattern at its two MiBs (E2E5; the driver's setup
+	# step 11 reads them back), before any agent can see the file. Both writes
+	# carry conv=notrunc, as a dd without it sets the file's length to its seek
+	# and could cut what an earlier write put there; truncate then sets the
+	# size, and the file stays sparse everywhere else. A file this verb could
+	# not finish is removed, so a later call never adopts a half-made disk.
+	# conv=fsync and no oflag=, per rule 1.
+	if [ ! -f "$backing" ]; then
+		{ dd if="$pfile" of="$backing" bs=1M seek="$pmib1" count=1 \
+			conv=notrunc,fsync status=none &&
+			dd if="$pfile" of="$backing" bs=1M seek="$pmib2" count=1 \
+				conv=notrunc,fsync status=none &&
+			truncate -s "$size" "$backing"; } || {
+			rm -f "$backing"
+			echo "dn_up: writing the backing pattern $pfile into $backing" \
+				"or truncating it to $size failed" >&2
+			return 1
+		}
+	fi
 	dev=$(losetup -j "$backing" 2>/dev/null | cut -d: -f1 | head -n 1)
 	if [ -z "$dev" ]; then
 		dev=$(losetup --find --show "$backing") || {
@@ -3521,6 +3618,45 @@ dn_up() {
 	# start_dn_instance reads loop=, wz= and pid= and ignores any other word,
 	# so udev= is a report and nothing asserts on it.
 	printf 'loop=%s wz=%s pid=%s udev=%s\n' "$dev" "$wz" "$pid" "$udev"
+	return 0
+}
+
+# side_sha digests one MiB of side devices of one sp, for the driver's setup
+# step 11, its look at where side zeroing stopped (e2e_integtest.md, The
+# cases, Setup). Each argument after the sp is <side hex16>:<MiB from the
+# side's start> and prints one line, "<side hex16>:<MiB> <sha256>" — or, in
+# place of the digest, "missing:<n>" when not exactly one side device carries
+# that side (DnSideName is dnv-<cluster>-<dn>-d4-<sp>-<side>, so the sp and
+# the side are fields 5 and 6 under -F-, compared as strings: awk would
+# compare two all-digit ids as numbers, and some hex ids read as one), or
+# "ioerror" when the read failed. The comparison is the driver's.
+#
+# The caches go first, once: a side device's own page cache can still hold
+# what udev's probe read from it before the side was zeroed, and the read
+# must reach the disk (E2E7). Nothing writes a side device through that
+# cache, so the drop loses nothing. A side device is a plain dm-linear over
+# the loop device, which nothing suspends while setup runs, so the read
+# cannot block. No iflag= (rule 1).
+side_sha() { # <sp hex16> <side hex16>:<MiB>…
+	local sp=$1 arg side mib names n sha
+	shift
+	sync
+	echo 3 >/proc/sys/vm/drop_caches
+	for arg in "$@"; do
+		side=${arg%%:*}
+		mib=${arg#*:}
+		names=$(dm_kind_names d4 |
+			awk -F- -v sp="$sp" -v s="$side" \
+				'("" $5) == ("" sp) && ("" $6) == ("" s)')
+		n=$(printf '%s\n' "$names" | grep -c . || true)
+		if [ "$n" != 1 ]; then
+			printf '%s missing:%s\n' "$arg" "$n"
+			continue
+		fi
+		sha=$(dd if="/dev/mapper/$names" bs=1M skip="$mib" count=1 \
+			status=none | sha256sum | cut -d' ' -f1) || sha=ioerror
+		printf '%s %s\n' "$arg" "$sha"
+	done
 	return 0
 }
 
@@ -4829,8 +4965,9 @@ preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
 	local tool
-	# timeout is ssh_host_watched's, the watchdog over host IO.
-	for tool in go ssh scp curl tar sha256sum awk sed mktemp timeout; do
+	# timeout is ssh_host_watched's, the watchdog over host IO. head makes the
+	# backing pattern below.
+	for tool in go ssh scp curl tar sha256sum awk sed mktemp timeout head; do
 		need_local "$tool"
 	done
 	resolve_jq
@@ -4851,6 +4988,24 @@ preflight_driver() {
 		die "building cnagentctl failed"
 	read_constants
 	fetch_etcd
+
+	# The backing pattern (E2E5), one per run, in the gitignored integtest/bin
+	# that fetch_etcd has just made sure of: dn_up writes it into every fresh
+	# backing file, and setup step 11 compares side reads against its digest
+	# and against that of one MiB of zeros. head -c and not dd: a dd may take
+	# a short read from /dev/urandom, and the flag that would stop it is an
+	# iflag=, which rule 1 keeps out of this file.
+	head -c 1048576 /dev/urandom >"$DN_PAT_LOCAL" ||
+		die "writing the backing pattern $DN_PAT_LOCAL failed"
+	DN_PAT_SHA=$(sha256_of "$DN_PAT_LOCAL") ||
+		die "digesting the backing pattern $DN_PAT_LOCAL failed"
+	ZERO_MIB_SHA=$(head -c 1048576 /dev/zero | sha256sum | cut -d' ' -f1) ||
+		die "digesting one MiB of /dev/zero failed"
+	assert_eq "${#DN_PAT_SHA}" 64 "the backing pattern's digest is 64 hex digits"
+	assert_eq "${#ZERO_MIB_SHA}" 64 "a zero MiB's digest is 64 hex digits"
+	assert_ne "$DN_PAT_SHA" "$ZERO_MIB_SHA" \
+		"the backing pattern's digest differs from a zero MiB's (it is urandom)"
+	log "  backing pattern $DN_PAT_LOCAL: one MiB, sha256 $DN_PAT_SHA"
 	log "preflight (driver) ok"
 }
 
@@ -4905,7 +5060,8 @@ basename_list() {
 #             only — every control-plane call of this suite is dnvctl (E2E2),
 #             and a direct etcd write would be a rule violation, not a
 #             shortcut.
-#   dn VMs    dnv-agent (one binary, DNS_PER_VM processes).
+#   dn VMs    dnv-agent (one binary, DNS_PER_VM processes), and the backing
+#             pattern dn_up writes into every fresh backing file (E2E5).
 #   cn VMs    dnv-agent.
 #   hosts     nothing: they run the kernel's nvme stack and nvme-cli, no dnv
 #             binary at all (e2e_integtest.md, Topology and parameters).
@@ -4918,7 +5074,7 @@ ship_binaries() {
 		"$CACHE_DIR/$ETCD_DIST/etcd" "$CACHE_DIR/$ETCD_DIST/etcdctl" \
 		"$GATEWAY_BIN" "$WORKER_BIN" "$CDC_BIN" "$DNVCTL_BIN"
 	for v in "${!DN[@]}"; do
-		ship_one "${DN[$v]}" "dn$v" "$AGENT_BIN"
+		ship_one "${DN[$v]}" "dn$v" "$AGENT_BIN" "$DN_PAT_LOCAL"
 	done
 	for v in "${!CN[@]}"; do
 		ship_one "${CN[$v]}" "cn$v" "$AGENT_BIN"
@@ -5114,7 +5270,9 @@ stop_cp_daemons() {
 
 # start_dn_instance provisions and starts agent (v, k) and records its loop
 # device. It is idempotent: dn_up reuses the backing file, the loop device and
-# a live process, so it is also the restart after a react case killed one.
+# a live process, so it is also the restart after a react case killed one. A
+# backing file dn_up has to create gets the backing pattern first (E2E5); a
+# reused one keeps what it holds.
 #
 # dn_up also installs the 63-dnv-md.rules mask, as cn_up does and before the
 # agent for the same reason — on a DN it is the CN's leg superblocks, arriving
@@ -5132,7 +5290,8 @@ start_dn_instance() { # <v> <k>
 	out=$(helper_dn "$v" dn_up \
 		"$(dn_dir "$k")" "$(dn_backing "$k")" "$(dn_store "$k")" \
 		"$(dn_log "$k")" "$BACKING_SIZE" "${DN_IP[$v]}" \
-		"$(dn_grpc_port "$k")" "$(dn_trsvcid "$k")" "$(dn_port_id "$k")") ||
+		"$(dn_grpc_port "$k")" "$(dn_trsvcid "$k")" "$(dn_port_id "$k")" \
+		"$DN_PAT_GUEST" "$DN_PAT_DATA0_MIB" "$DN_PAT_LAST_MIB") ||
 		die "dn$v instance $k: dn_up failed (its message is above)"
 	for kv in $out; do
 		case "$kv" in
@@ -5259,11 +5418,12 @@ MEM_MIN_BYTES=$((2 << 30))
 # This is a FLOOR, not a bound on what the run may write: E2E5's per-file cap
 # is DN_CAP_BYTES (256 MiB) x DNS_PER_VM, which at the default shape is 11 GiB
 # if every backing file ran to its cap. The lab's guests hold 56-67 GiB free,
-# and the real figure is far below the cap because a DN holds few sides, not
-# because they stay sparse: the agent's `blkdiscard --zeroout` allocates every
-# extent it zeroes for a side (see BACKING_SIZE), so a backing file costs
-# about EXTENT_SIZE per extent its DN has zeroed, and the create puts at most
-# one side of the sp on any DN.
+# and the real figure is far below the cap because a DN holds few sides: a
+# backing file costs the backing pattern, what the agent's
+# `blkdiscard --zeroout` allocates for its sides — a meta side's whole
+# extent, a data side's meta region and first data block — and what is
+# written into them (see BACKING_SIZE), and the create puts at most one side
+# of the sp on any DN.
 FREE_MIN_NODE=$((4 << 30))
 FREE_PER_DN=$((64 << 20))
 FREE_MIN_CP=$((2 << 30))
@@ -5373,8 +5533,10 @@ DIAG_MAX_DN_LOGS=6
 NODE_TOOLS="dmsetup nvme losetup lsblk blkdiscard stat du df"
 # tail: logtail, which the failure dump calls on every role.
 NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
-# truncate: dn_up's sparse backing file (E2E5). wipefs and dd: loop_teardown,
-# which is the only place either is used and runs on DN VMs alone.
+# truncate: dn_up's sparse backing file (E2E5). wipefs: loop_teardown, which
+# is the only place it is used and runs on DN VMs alone. dd: loop_teardown,
+# dn_up's backing pattern and side_sha's reads, all on DN VMs alone.
+# sha256sum: side_sha's digests, which the driver compares (setup step 11).
 #
 # mdadm and udevadm are on a DN for the same verbs they are on a CN for, and
 # they are NOT decoration. md_stop_all takes the
@@ -5400,7 +5562,7 @@ NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 # already starting, and not unloaded for ever. (The mask's own IMPORT program
 # is mdadm as well, though by the absolute path udev rules use; `command -v` is
 # the proxy for it here, exactly as it is on a CN.)
-DN_TOOLS="$NODE_TOOLS truncate wipefs dd mdadm udevadm"
+DN_TOOLS="$NODE_TOOLS truncate wipefs dd sha256sum mdadm udevadm"
 # mdadm: the cn agent's Md (agent/cnagent/md.go), md_stop_all, md_names and the
 # cn diag. udevadm: md_stop_all's and md_names' name reads, and the reloads of
 # install_udev_rule and remove_udev_rule. findmnt: the cn diag's tmpfs listing.
@@ -6788,7 +6950,7 @@ diagnostics() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup, steps 1-11 (e2e_integtest.md, The cases, Setup)
+# Setup, steps 1-12 (e2e_integtest.md, The cases, Setup)
 # ---------------------------------------------------------------------------
 #
 # Step 1 — the unconditional start cleanup and the guest preflight — is
@@ -6802,10 +6964,11 @@ diagnostics() {
 #                 CN_CNT cn agents, and the deferred loop-device gate.
 #                 Idempotent, and it runs once per BUILD, not once per run —
 #                 it is also the rebuild half of setup_between_cases.
-#   setup_case    steps 4-11. Everything that lives in ETCD or on the host,
+#   setup_case    steps 4-12. Everything that lives in ETCD or on the host,
 #                 built from an EMPTY etcd (E2E11): the cluster, every node
 #                 record, the sp, the td, the subsystem, the namespace,
-#                 host0's connection and the SHA0 baseline. Once per case.
+#                 host0's connection, the look at what side zeroing reached
+#                 and the SHA0 baseline. Once per case.
 #   setup         setup_infra + setup_case — what main calls before the first
 #                 case.
 #   setup_between_cases
@@ -6934,7 +7097,7 @@ TD0_ID=""
 TD0_SIZE=""
 NS1_ID=""
 
-# The baseline (setup step 11). SHA0 is the digest every later stage compares
+# The baseline (setup step 12). SHA0 is the digest every later stage compares
 # against; PATTERN0 is the file on host0 that produced it, so a case can
 # re-write the same bytes without regenerating them.
 BASELINE_MIB=4
@@ -7259,9 +7422,9 @@ cn_node_ready() { # <v>
 }
 
 # sp_sides_provisioned is setup step 7's first wait. It reports progress when
-# the count moves: 128 sides zeroing over 128 nvme connections is minutes of
-# silence otherwise, and a wait that never changes its number is the symptom
-# worth seeing early. Reset SIDES_LEFT to -1 before each use.
+# the count moves: 128 sides to zero and to flip are a long silence
+# otherwise, and a wait that never changes its number is the symptom worth
+# seeing early. Reset SIDES_LEFT to -1 before each use.
 sp_sides_provisioned() {
 	local left total
 	if ! ctl_try sp get; then
@@ -8200,6 +8363,25 @@ setup_create_sp() {
 	# k x (slice_cnt x 1 MiB) lands in slice 0.
 	assert_field "$SP_JSON" '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size' \
 		"$STRIPE_SIZE" "the sp's dm-striped chunk"
+	# The geometry the space guard and setup step 11 mirror rather than read
+	# (DATA_BLOCK_SIZE, DATA_META_BLOCKS; derive_params), held to what the
+	# create stored, so a change in the tree fails here by name and not as a
+	# wrong cap or a wrong MiB read: the pool's block size, every data group's
+	# meta region, and every meta group's leg spanning its whole extent, which
+	# is what makes a meta side's zeroing cover all of it (architecture.md,
+	# Side provisioning protocol).
+	assert_field "$SP_JSON" '.sp_conf.bdev_conf.dm_pool_conf.data_block_size' \
+		"$DATA_BLOCK_SIZE" \
+		"the pool's data_block_size (sp create passes none, so the default is stored)"
+	assert_jq "$SP_JSON" \
+		"[.slice_list[] | .data_grp_list[]
+		  | select(.meta_blocks != \"$DATA_META_BLOCKS\")] | length == 0" \
+		"every data group's meta region is DATA_META_BLOCKS = $DATA_META_BLOCKS blocks"
+	assert_jq "$SP_JSON" \
+		"[.slice_list[] | .meta_grp_list[]
+		  | select(((.meta_blocks | tonumber) + (.data_blocks | tonumber))
+		           * $DATA_BLOCK_SIZE != $EXTENT_SIZE)] | length == 0" \
+		"every meta group's meta and data blocks span its one extent"
 	case "$REDUND" in
 	raid1)
 		assert_jq "$SP_JSON" \
@@ -8309,10 +8491,12 @@ setup_assert_standby() { # <the standby's cntlr inspect reply>
 setup_wait_stack() {
 	stage 07 "wait: $((GRP_CNT * LEGS)) sides, then the primary's stack"
 
-	# [D15]: a side is exported only after the DN agent has zeroed it whole
-	# (blkdiscard --zeroout per batch), and the sp-worker then flips
-	# Side.provisioned. Until then the CN skips the side entirely (CN10), so
-	# nothing above it can build.
+	# [D15]: a side is exported only after the DN agent has zeroed what must
+	# read as zeros, a meta side whole and a data side its meta region and
+	# first data block (blkdiscard --zeroout per batch; architecture.md, Side
+	# provisioning protocol), and the sp-worker then flips Side.provisioned.
+	# Until then the CN skips the side entirely (CN10), so nothing above it can
+	# build.
 	SIDES_LEFT=-1
 	wait_until "$WAIT_BUILD" \
 		"every one of the $((GRP_CNT * LEGS)) sides of $SP to be provisioned" \
@@ -8652,11 +8836,135 @@ setup_connect_host0() {
 }
 
 # ---------------------------------------------------------------------------
-# Setup step 11 — the IO baseline every later stage compares against
+# Setup step 11 — what side zeroing reached
+# ---------------------------------------------------------------------------
+
+# setup_zeroing_scope looks at what side zeroing left behind, after host0
+# connects and before any host writes into the pool (e2e_integtest.md, The
+# cases, Setup; architecture.md, Side provisioning protocol).
+#
+# THE HOST HALF. host0 reads the whole of $TD0 and must see only zeros. No
+# host has written it, so no block of it is provisioned, and a thin device
+# answers zeros for such a block whatever the data legs under it hold
+# (architecture.md, [D15]) — and they do hold other bytes, as the disk-node
+# half shows.
+#
+# THE DISK-NODE HALF. dn_up wrote the backing pattern into every fresh
+# backing file at two MiBs of extent 0 (E2E5). The create puts at most one
+# side of the sp on any disk node, and a fresh disk hands out its extents
+# first-fit from extent 0, so every side setup built lies exactly there, and
+# those two MiBs are its MiB SIDE_DATA0_MIB and its MiB SIDE_LAST_MIB. Read
+# through each side device on its disk node (side_sha):
+#   a data side  reads zero at its first data block, which its zeroing
+#                covers, and still holds the pattern at its last MiB, which
+#                its zeroing never reaches: a data side zeroes its meta region
+#                and its first data block and nothing more
+#   a meta side  reads zero at its last MiB, as its zeroing covers its whole
+#                leg. Its first data block is not read: dm-thin writes the
+#                pool's superblock there.
+# Nothing has written a data region by now: md creates each array clean over
+# legs that carry no superblock (cnagent.md CN12) and copies nothing, the
+# thin pools keep their metadata on the meta groups, and host0 has only read.
+#
+# A build that reacted may hold a leg whose side the create did not build —
+# a spare's, placed anywhere and rebuilt by md — so when the pool holds a
+# spare leg, or a side count other than the create's, the disk-node half is
+# skipped with a log line. Only the reacting thresholds let a build repair a
+# leg.
+setup_zeroing_scope() {
+	stage 11 "what side zeroing reached: $TD0 reads zero, data legs keep the backing pattern"
+	local dev mib zero got v ip kind ids id hx sphex args out key g
+	local data_cnt=0 meta_cnt=0
+	local -A want=() what=() digest=()
+
+	dev=$(host_dev "$UUID1")
+	mib=$((TD0_SIZE / 1048576))
+	zero=$(host_sha_range 0 /dev/zero "$mib") ||
+		die "host0: digesting $mib MiB of /dev/zero failed"
+	assert_eq "${#zero}" 64 "the all-zero reference digest is 64 hex digits"
+	host_drop_caches 0
+	got=$(host_sha_range 0 "$dev" "$mib") ||
+		die "host0: reading $dev failed"
+	assert_eq "$got" "$zero" \
+		"host0's read of all $mib MiB of the fresh $TD0 (zeros: no block of it is provisioned)"
+	log "  host0 read all $mib MiB of $TD0 as zeros"
+
+	sp_refresh
+	sp_totals
+	if [ "$SP_SPARE_TOTAL" != 0 ] ||
+		[ "$SP_SIDE_TOTAL" != "$((GRP_CNT * LEGS))" ]; then
+		log "  the disk-node half SKIPPED: $SP holds $SP_SIDE_TOTAL side(s) and" \
+			"$SP_SPARE_TOTAL spare leg(s), not the create's $((GRP_CNT * LEGS))" \
+			"and none, so its build reacted, and a leg's side may not be one the" \
+			"create placed at extent 0"
+		return 0
+	fi
+	sphex=$(hex16 "$SP_ID") || die "sp_id '$SP_ID' is not a decimal id"
+	for v in "${!DN[@]}"; do
+		ip=${DN_IP[$v]}
+		args=""
+		for kind in data meta; do
+			ids=$(sp_field "[.slice_list[] | .${kind}_grp_list[] | .leg_list[]
+				| .side_list[] | select(($SP_SIDE_VM) == \"$ip\")
+				| .side_id] | join(\" \")")
+			for id in $ids; do
+				hx=$(hex16 "$id") || die "side id '$id' of $SP is not a decimal id"
+				if [ "$kind" = data ]; then
+					key=$hx:$SIDE_DATA0_MIB
+					want[$key]=$ZERO_MIB_SHA
+					what[$key]="dn$v data side $id at MiB $SIDE_DATA0_MIB, its first data block (zeroed)"
+					args="$args $key"
+					key=$hx:$SIDE_LAST_MIB
+					want[$key]=$DN_PAT_SHA
+					what[$key]="dn$v data side $id at MiB $SIDE_LAST_MIB (the backing pattern: its zeroing stops after its first data block)"
+					args="$args $key"
+					data_cnt=$((data_cnt + 1))
+				else
+					key=$hx:$SIDE_LAST_MIB
+					want[$key]=$ZERO_MIB_SHA
+					what[$key]="dn$v meta side $id at MiB $SIDE_LAST_MIB (zeroed: a meta side is zeroed over its whole leg)"
+					args="$args $key"
+					meta_cnt=$((meta_cnt + 1))
+				fi
+			done
+		done
+		[ -n "$args" ] || continue
+		# Unquoted on purpose: side_sha takes one <side>:<MiB> per argument, and
+		# none of them holds a space.
+		# shellcheck disable=SC2086
+		out=$(helper_dn "$v" side_sha "$sphex" $args) ||
+			die "dn$v: the side_sha verb failed"
+		while read -r key g; do
+			[ -n "$key" ] || continue
+			digest[$key]=$g
+		done < <(printf '%s\n' "$out")
+		for key in $args; do
+			g=${digest[$key]:-}
+			case "$g" in
+			'' | missing:* | ioerror)
+				die "${what[$key]}: side_sha answered '${g:-nothing}' (missing:<n>" \
+					"is a side that does not name exactly one side device on dn$v," \
+					"ioerror a read that failed)"
+				;;
+			esac
+			assert_eq "$g" "${want[$key]}" "${what[$key]}"
+		done
+	done
+	assert_eq "$data_cnt" "$((SLICE_CNT * LEGS))" \
+		"data sides read on the disk nodes (every one the create built)"
+	assert_eq "$meta_cnt" "$((SLICE_CNT * LEGS))" \
+		"meta sides read on the disk nodes (every one the create built)"
+	log "  $data_cnt data side(s) read zero at MiB $SIDE_DATA0_MIB and the" \
+		"backing pattern at MiB $SIDE_LAST_MIB; $meta_cnt meta side(s) read" \
+		"zero at MiB $SIDE_LAST_MIB"
+}
+
+# ---------------------------------------------------------------------------
+# Setup step 12 — the IO baseline every later stage compares against
 # ---------------------------------------------------------------------------
 
 setup_io_baseline() {
-	stage 11 "host0 IO baseline: $BASELINE_MIB MiB written and read back as SHA0"
+	stage 12 "host0 IO baseline: $BASELINE_MIB MiB written and read back as SHA0"
 	local got dev
 	dev=$(host_dev "$UUID1")
 	PATTERN0="$WORK/pattern0"
@@ -8690,7 +8998,7 @@ setup_io_baseline() {
 # The phases
 # ---------------------------------------------------------------------------
 
-# setup_case is setup steps 4-11: everything that lives in etcd, built from an
+# setup_case is setup steps 4-12: everything that lives in etcd, built from an
 # EMPTY one (E2E11).
 #
 # Every id below is minted by THIS build, so the identity globals are cleared
@@ -8730,6 +9038,7 @@ setup_case() {
 	setup_create_td
 	setup_export_ns
 	setup_connect_host0
+	setup_zeroing_scope
 	setup_io_baseline
 	log ""
 	log "=== setup complete: $SLICE_CNT slices, $GRP_CNT groups," \
@@ -9183,15 +9492,19 @@ read_space() { # <helper wrapper> <index|""> <label>
 # Two caps, and they measure different things:
 #
 #   DN_CAP_BYTES  ALLOCATED bytes of ONE backing file. A `truncate`d file
-#                 starts sparse, and side zeroing does NOT keep it so: the
-#                 loop device turns the agent's `blkdiscard --zeroout` into an
-#                 allocating fallocate (see BACKING_SIZE), so every extent a
-#                 DN zeroes for a side costs EXTENT_SIZE whether or not
-#                 anything writes it, and nothing in the dn agent discards a
-#                 freed side's extents. The cap — four 64 MiB extents — thus
-#                 bounds, in effect, how many distinct extents one DN has
-#                 zeroed since its backing file was created (a fresh one per
-#                 case), not what the case wrote: four of them and the
+#                 starts sparse but for the backing pattern's two MiBs, and
+#                 side zeroing does NOT keep it so: the loop device turns the
+#                 agent's `blkdiscard --zeroout` into an allocating fallocate
+#                 (see BACKING_SIZE), so what a DN zeroes for a side costs
+#                 its file whether or not anything writes it — a meta side
+#                 its whole extent, a data side its meta region and first data
+#                 block — and every byte written into a data side allocates
+#                 too, which a spare's full rebuild takes to the side's whole
+#                 extent. Nothing in the dn agent discards a freed side's
+#                 extents. The cap — four 64 MiB extents — thus bounds, in
+#                 effect, how many extents' worth one DN has zeroed or had
+#                 written through its sides since its backing file was created
+#                 (a fresh one per case): four of them, the pattern and the
 #                 agent's own on-disk metadata are already over it. Nor can
 #                 it see a write_zeroes_max_bytes of 0, whose zero-page
 #                 fallback allocates the same ranges; that is for the three
@@ -9234,7 +9547,7 @@ case_space_guard() {
 				;;
 			esac
 			assert_le "$bytes" "$DN_CAP_BYTES" \
-				"dn$v: allocated bytes of $path (its zeroed extents plus metadata)"
+				"dn$v: allocated bytes of $path (what its DN zeroed and had written through its sides, the backing pattern and metadata)"
 			[ "$bytes" -le "$worst" ] || worst=$bytes
 		done < <(printf '%s\n' "$out")
 		log "  dn$v: largest backing file allocates $worst bytes (cap $DN_CAP_BYTES)"
@@ -9281,7 +9594,7 @@ case_finish() {
 # Case: smoke (e2e_integtest.md, The cases, smoke)
 # ---------------------------------------------------------------------------
 #
-# "setup 1-11, then teardown … then the residue assertions." Setup has already
+# "setup 1-12, then teardown … then the residue assertions." Setup has already
 # run when this is called — main builds the sp before the case loop — so smoke
 # adds no operation of its own. What it is FOR is the pair of statements the
 # other cases each assume and none of them proves on its own: that the
@@ -10249,14 +10562,42 @@ ops_slots() {
 # also run during setup: InspectSide reaches the DN that hosts one side,
 # InspectDiskNode that same DN's node-wide state, InspectControllerNode the
 # primary's CN, and InspectCntlr the primary cntlr itself.
+#
+# InspectSide runs twice, on slice 0's first meta side and on its first data
+# side, as the two kinds are zeroed over different lengths (architecture.md,
+# Side provisioning protocol): what the dn agent reports there is the length
+# the sp worker derived from the group's stored blocks and sent, which this
+# step holds to the same blocks read back from `sp get`.
+
+# ops_side_zeroed asserts the zeroing's two byte counts in the InspectSide
+# reply in $CTL_OUT (SideInfo.zero_bytes (pb/schema.proto)): zero_bytes, the
+# length the side was asked to zero from its start, must be <want>, and
+# zeroed_bytes, how much of it is zeroed, must equal it. A side is exported
+# only once the two are equal, which is what Side.provisioned then records.
+# dnvctl renders both uint64s as decimal strings; an empty length, or a
+# length of zero, is a die of its own, as two of either would compare equal.
+ops_side_zeroed() { # <side id> <want bytes> <what the length is>
+	local zeroed total
+	zeroed=$(jq_of "$CTL_OUT" '.side_info.zeroed_bytes')
+	total=$(jq_of "$CTL_OUT" '.side_info.zero_bytes')
+	case "$total" in
+	'' | *[!0-9]* | 0) die "side $1 reports zero_bytes '$total'" ;;
+	esac
+	assert_eq "$total" "$2" "side $1's zero_bytes: $3"
+	assert_eq "$zeroed" "$total" \
+		"side $1 has zeroed all it was asked to (zeroed_bytes == zero_bytes)"
+}
+
 ops_inspect() {
 	stage 04 "sp inspect-side, dn inspect, cn inspect, cntlr inspect"
-	local sid saddr zeroed total v k
+	local mgrp='.slice_list[0].meta_grp_list[0]'
+	local dgrp='.slice_list[0].data_grp_list[0]'
+	local sid saddr dsid dsaddr bs mb db v k
 
-	sid=$(sp_field "[$SP_SIDE_PATH] | .[0].side_id")
-	saddr=$(sp_field "[$SP_SIDE_PATH] | .[0].addr_port")
+	sid=$(sp_field "$mgrp.leg_list[0].side_list[0].side_id")
+	saddr=$(sp_field "$mgrp.leg_list[0].side_list[0].addr_port")
 	case "$sid" in
-	'' | *[!0-9]* | 0) die "the first side of $SP has side_id '$sid'" ;;
+	'' | *[!0-9]* | 0) die "slice 0's first meta side has side_id '$sid'" ;;
 	esac
 	v=$(dn_vm_of_addr "$saddr")
 	k=$(dn_inst_of_addr "$saddr")
@@ -10264,22 +10605,40 @@ ops_inspect() {
 	assert_ne "$k" none "side $sid's addr_port $saddr names a dn instance index"
 	# Tell the failure dump which DN this step is about.
 	diag_note_dn "$v" "$k"
+	bs=$(sp_field '.sp_conf.bdev_conf.dm_pool_conf.data_block_size')
+	mb=$(sp_field "$mgrp.meta_blocks")
+	db=$(sp_field "$mgrp.data_blocks")
+	case "$bs$mb$db" in
+	'' | *[!0-9]*)
+		die "sp get carried a non-decimal block size or block count" \
+			"('$bs', '$mb', '$db')"
+		;;
+	esac
 
 	ctl_ok sp inspect-side --id "$sid"
 	assert_field "$CTL_OUT" '.side_info.side_dev_info.status' RES_STATUS_OK \
 		"side $sid's data device on dn$v instance $k"
-	zeroed=$(jq_of "$CTL_OUT" '.side_info.zeroed_ext_cnt')
-	total=$(jq_of "$CTL_OUT" '.side_info.total_ext_cnt')
-	case "$total" in
-	'' | *[!0-9]* | 0) die "side $sid reports total_ext_cnt '$total'" ;;
-	esac
-	# SideInfo.total_ext_cnt (pb/schema.proto) says it in its own comment:
-	# "always filled; equal => fully zeroed". A side is exported only once it
-	# is, which is what Side.provisioned then records.
-	assert_eq "$zeroed" "$total" \
-		"side $sid is fully zeroed (zeroed_ext_cnt == total_ext_cnt)"
+	ops_side_zeroed "$sid" "$(((mb + db) * bs))" \
+		"a meta side's whole leg, (meta_blocks + data_blocks) x data_block_size"
 	assert_ge "$(jq_of "$CTL_OUT" '.applied_revision')" 1 \
 		"the DN agent has accepted at least one SyncupSide revision"
+
+	dsid=$(sp_field "$dgrp.leg_list[0].side_list[0].side_id")
+	dsaddr=$(sp_field "$dgrp.leg_list[0].side_list[0].addr_port")
+	case "$dsid" in
+	'' | *[!0-9]* | 0) die "slice 0's first data side has side_id '$dsid'" ;;
+	esac
+	mb=$(sp_field "$dgrp.meta_blocks")
+	case "$mb" in
+	'' | *[!0-9]*) die "sp get carried meta_blocks '$mb' for slice 0's data group" ;;
+	esac
+	ctl_ok sp inspect-side --id "$dsid"
+	assert_field "$CTL_OUT" '.side_info.side_dev_info.status' RES_STATUS_OK \
+		"side $dsid's data device on $dsaddr"
+	assert_eq "$(((mb + 1) * bs))" "$DATA_ZERO_BYTES" \
+		"slice 0's data group's (meta_blocks + 1) x data_block_size vs DATA_ZERO_BYTES"
+	ops_side_zeroed "$dsid" "$DATA_ZERO_BYTES" \
+		"a data side's meta region and first data block, (meta_blocks + 1) x data_block_size"
 
 	ctl_ok dn inspect --addr "$saddr"
 	assert_field "$CTL_OUT" '.dn_info.disk_info.status' RES_STATUS_OK \
@@ -11215,11 +11574,12 @@ COPY_HYD_SIG=""
 COPY_HYD_MARK=0
 COPY_SRC_START=0
 
-# The two migrations, and the "last observation" scratch of the three
-# predicates below. Each of those is logged from inside its predicate when the
-# value CHANGES and is never interpolated into a wait_until label: a label is
-# expanded once, at the call, so it can only carry what was there before the
-# first poll.
+# The two migrations, and the "last observation" scratch of the predicates
+# below (migr_dst_serving, leg_bm_read and side_hydrated share MIGR_HYD_LAST,
+# as no two of their waits overlap). Each of those is logged from inside its
+# predicate when the value CHANGES and is never interpolated into a
+# wait_until label: a label is expanded once, at the call, so it can only
+# carry what was there before the first poll.
 MIGR0_ID=""
 MIGR1_ID=""
 MIGR_HYD_LAST=""
@@ -11414,6 +11774,54 @@ side_hydrated() { # <side id>
 	fi
 	[ "$st" = RES_STATUS_OK ] || return 1
 	hyd_complete "$frac"
+}
+
+# migr_dst_serving is "the migration's destination serves through its
+# dm-clone": the dm-clone is up, which InspectSide reports in the same row
+# side_hydrated reads, migr_dst_info.dm_clone_info — RES_STATUS_OK once
+# `dmsetup status` answers for the device, RES_STATUS_PROVISIONING while
+# DN9's gate is closed on the side, another status while its converge has
+# not built the device (dnagent.md, DN18). It is the first of the two waits
+# in front of the copy case's leg bitmap read; the second is the primary's
+# own path to the destination reading optimized (architecture.md,
+# Migration; copy_migration says why).
+migr_dst_serving() { # <side id>
+	local st sig
+	if ! ctl_try sp inspect-side --id "$1"; then
+		return 1
+	fi
+	st=$(jq_of "$CTL_OUT" \
+		'.side_info.migr_dst_info.dm_clone_info.status // "absent"')
+	sig="dm_clone=$st"
+	if [ "$sig" != "$MIGR_HYD_LAST" ]; then
+		MIGR_HYD_LAST=$sig
+		log "  migration destination side $1: $sig"
+	fi
+	[ "$st" = RES_STATUS_OK ]
+}
+
+# leg_bm_read is the copy case's leg bitmap read as a poll. The primary's cn
+# agent serves GetLegBm under the cntlr's lock (cnagent.md, CN25), so the
+# read waits while a converge or a check round holds that lock. The gateway
+# bounds its call to the agent by DefaultGatewayAgentTimeout
+# (common/constants.go), which a longer dnvctl --timeout does not extend, and
+# answers ABORTED when the call fails. If a read the gateway gave up on leaves
+# a metadata snapshot held, which only a reserve killed after its message ran
+# does, the next read's reserve finds it held, releases it and tries once more
+# (cnagent.md, CN25), so the next poll simply asks again. The reply of the
+# read that answers stays in CTL_OUT, and a failure is logged when its message
+# changes.
+leg_bm_read() { # <leg id>
+	local sig
+	if ctl_try td get-leg-bm --leg "$1" --start 0 --cnt 0; then
+		return 0
+	fi
+	sig=${CTL_ERR:-"dnvctl exit code $CTL_RC"}
+	if [ "$sig" != "$MIGR_HYD_LAST" ]; then
+		MIGR_HYD_LAST=$sig
+		log "  td get-leg-bm of leg $1 failed: $sig"
+	fi
+	return 1
 }
 
 # grp_md_clean is "md has finished rebuilding onto the promoted spare".
@@ -12342,7 +12750,7 @@ copy_xfer_delete() {
 copy_migration() {
 	stage 04 "migr create, append-bm, finish — then a second one, cancelled"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
-	local hex v k legnqn straddr strsvcid
+	local hex v k legnqn straddr strsvcid dsttraddr dsttrsvcid
 
 	sp_refresh
 	sp_read_roles
@@ -12370,23 +12778,6 @@ copy_migration() {
 		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
 	log "  migrating side $sideid of leg $legid (group $gid) off dn$v" \
 		"instance $k ($saddr); the group holds $before_addrs on VMs $before_vms"
-
-	# THE LEG BITMAP IS READ BEFORE THE MIGRATION EXISTS, and that is not a
-	# stylistic ordering. Once the destination is provisioned the SOURCE side
-	# goes ANA-inaccessible — anaGrpId (agent/dnagent/plan.go), `migrSrc != nil` =>
-	# AnaGrpIdInaccessible — and the DESTINATION stays inaccessible until it
-	# has a dm-clone to serve through (`migrDst != nil && !cloneLive`, where
-	# cloneLive comes from ensureMigrDst, agent/dnagent/migr.go). So from then
-	# until the destination serves, this leg has no usable path on any CN.
-	# GetLegBm goes to the PRIMARY CN and walks the slice's thin-pool METADATA,
-	# which lives on the slice's META groups and not on this DATA group, so it
-	# would very likely be safe inside that window — reading it before the
-	# window opens costs nothing and removes the question. The value is still
-	# the right one when it is appended: nothing writes the leg in between.
-	ctl_ok td get-leg-bm --leg "$legid" --start 0 --cnt 0
-	assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-		"td get-leg-bm renders the same CT4 hex map"
-	hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
 
 	ctl_ok migr create --name "$MIGR0" --src-side "$sideid"
 	MIGR0_ID=$(jq_of "$CTL_OUT" '.migr_id')
@@ -12453,6 +12844,78 @@ copy_migration() {
 	assert_field "$CTL_OUT" '.migr.bm_cnt' 0 \
 		"a fresh migration holds no bitmap chunks (uint32, a bare number)"
 
+	# THE LEG BITMAP IS READ ONLY ONCE THE PRIMARY REACHES THE LEG THROUGH THE
+	# DESTINATION, and that is a rule, not a stylistic ordering
+	# (architecture.md, Migration). An earlier read can go wrong in two ways
+	# (architecture.md, Known limits).
+	#
+	# It can miss writes. The bitmap tells the destination which blocks it
+	# need not copy, so a read taken while the source still takes writes marks
+	# a block the pool writes in between as never written; the destination
+	# does not copy it, and the pool later reads there whatever the
+	# destination's extent held before — maybe another pool's bytes, as
+	# zeroing covers only a data side's meta region and first data block.
+	#
+	# Or it can wedge the primary's cntlr. To read the mappings, GetLegBm
+	# reserves a metadata snapshot of the slice's thin pool, which commits the
+	# pool, and the commit flushes the pool's data device, this leg included.
+	# From the source's first step (dnagent.md, DN12) until the primary's path
+	# to the destination is live and optimized, the primary holds a live
+	# controller to the leg but no usable path, so nvme multipath requeues the
+	# flush, and GetLegBm waits for it holding the cntlr's lock. If the
+	# primary has not connected the destination yet, the SyncupCntlr that
+	# would connect it (cnagent.md, CN10) needs that very lock, so the cntlr
+	# can stay blocked until the migration ends
+	# (architecture.md, Known limits).
+	#
+	# So the read waits for the destination's dm-clone (migr_dst_serving), and
+	# then for the primary's own path to the destination to read optimized
+	# (cn_wait_ana). The dn agent puts the primary's namespace on the
+	# destination in the optimized group only while that dm-clone is live
+	# (anaGrpId (agent/dnagent/plan.go)), and from then on the source takes no
+	# write and every write reaches the destination through its dm-clone. The
+	# second wait takes WAIT_PROVISION rather than cn_wait_ana's default, as it
+	# can span the worker's sides-first hold (dnv-worker.md, RW14) and the
+	# primary's converge up to its connect of the destination. The primary's
+	# check rounds can block the same way while it has no usable path to the
+	# leg (architecture.md, Known limits), and one that blocks before that
+	# connect makes this wait time out. The wait ends as soon as the path
+	# reads optimized, which can be in the middle of the converge that
+	# connected it. The read then waits for the rest of that converge, so it
+	# is a poll under WAIT_PROVISION too (leg_bm_read says why). The push may
+	# come at any time: the dn agent applies a chunk to a live dm-clone too,
+	# marking its regions hydrated without copying them (dnagent.md, DN13,
+	# DN15).
+	legnqn=$(side_to_cn_nqn "$SP_ID" "$legid" "$PRIMARY_CN_ID")
+	case "$legnqn" in
+	*notanid-*) die "side_to_cn_nqn produced '$legnqn'" ;;
+	esac
+	dsttraddr=$(sp_field \
+		"$COPY_GRP0.leg_list[0] | [.side_list[] | select(.side_id == \"$dstside\")] | .[0].nvme_tr_conf.tr_addr")
+	dsttrsvcid=$(sp_field \
+		"$COPY_GRP0.leg_list[0] | [.side_list[] | select(.side_id == \"$dstside\")] | .[0].nvme_tr_conf.tr_svc_id")
+	case "$dsttraddr" in
+	'' | null) die "the destination side $dstside carries no nvme_tr_conf.tr_addr" ;;
+	esac
+	case "$dsttrsvcid" in
+	'' | null) die "the destination side $dstside carries no nvme_tr_conf.tr_svc_id" ;;
+	esac
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the migration's destination side $dstside to zero and serve through its dm-clone" \
+		migr_dst_serving "$dstside"
+	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" optimized \
+		"$WAIT_PROVISION"
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary to answer td get-leg-bm for leg $legid" \
+		leg_bm_read "$legid"
+	assert_eq "$CTL_ERR" "" "stderr of: dnvctl td get-leg-bm must be empty"
+	assert_parses "$CTL_OUT" "dnvctl td get-leg-bm"
+	assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
+		"td get-leg-bm renders the same CT4 hex map"
+	hex=$(jq_of "$CTL_OUT" '.bitmap_hex')
+
 	# One skip-bitmap chunk, from the reading taken above. A migration's chunks
 	# are a sequence, not a rectangle: `migr append-bm` has no slice index and
 	# stores at bm_idx = bm_cnt (ctl/migr.go's file header). The bitmap is the
@@ -12476,7 +12939,7 @@ copy_migration() {
 	# measurement the RPC will make.
 	MIGR_HYD_LAST=""
 	wait_until "$WAIT_PROVISION" \
-		"the migration's destination side $dstside to zero and hydrate" \
+		"the migration's destination side $dstside to hydrate" \
 		side_hydrated "$dstside"
 
 	ctl_ok migr finish --name "$MIGR0"
@@ -12504,10 +12967,6 @@ copy_migration() {
 	# read and not a gamble.
 	straddr=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_addr")
 	strsvcid=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_svc_id")
-	legnqn=$(side_to_cn_nqn "$SP_ID" "$legid" "$PRIMARY_CN_ID")
-	case "$legnqn" in
-	*notanid-*) die "side_to_cn_nqn produced '$legnqn'" ;;
-	esac
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
 	check_sha0 "after a migration committed onto a new disk node"
 
@@ -12641,7 +13100,9 @@ copy_spare() {
 		"on $before_addrs"
 
 	# A spare's side is created provisioned = false and only the sp-worker
-	# flips it, after the DN has zeroed the whole side ([D15]) — which is
+	# flips it, after the DN has zeroed what a side of its group must read as
+	# zeros — here, a data group's, its meta region and first data block
+	# (architecture.md, Side provisioning protocol; [D15]) — which is
 	# exactly why model.SwitchSpareLeg (model/ops.go) refuses an unprovisioned
 	# spare ("spare side is not provisioned"). So the wait is a
 	# precondition of the next call, not a nicety — and it is the reason
@@ -13035,9 +13496,11 @@ REACT_GRP1=""
 # the low-water mark would take more than 128 strided writes; it bounds the
 # write's length, and with it the write's watchdog (WAIT_HOST plus a second
 # per chunk, react_chunk_write). It does NOT guard the E2E5 per-file cap
-# ($DN_CAP_BYTES): the chunks land in side extents their disk nodes zeroed,
-# and so allocated in full, before the sides were exported (see
-# BACKING_SIZE), so a chunk adds nothing to any backing file's allocation.
+# ($DN_CAP_BYTES), and need not: each chunk is one whole thin block of slice
+# 0's pool, which dm-thin writes whole and so allocates in the backing file of
+# every leg under it (see BACKING_SIZE), but all of it inside those data
+# sides' own extents, and a side's allocation never passes its own extent,
+# which is what the per-file cap is sized in.
 REACT_MAX_CHUNKS=128
 
 # ---------------------------------------------------------------------------
@@ -15775,6 +16238,8 @@ log_topology() {
 		"$DNS_PER_VM_BOUND), $DN_TOTAL disk nodes on $DN_VM_CNT DN VM(s)"
 	log "  sizes:     extent $EXTENT_SIZE, stripe $STRIPE_SIZE," \
 		"td unit $TD_UNIT, backing $BACKING_SIZE per disk node"
+	log "  zeroing:   a meta side whole, a data side $DATA_ZERO_BYTES bytes" \
+		"(its meta region and first data block); run cap $RUN_CAP_BYTES bytes"
 	log "  cases:     ${ONLY:-${CASES[*]}}"
 	log "  cp:        $CP  etcd $ETCD_CLIENT_PORT/$ETCD_PEER_PORT," \
 		"gateway $GW_PORT, cdc $CDC_PORT (all as the login user)"
@@ -15893,7 +16358,7 @@ main() {
 
 	preflight_guests
 
-	# Setup steps 1-11, built for the FIRST case that will run. setup_infra raises
+	# Setup steps 1-12, built for the FIRST case that will run. setup_infra raises
 	# SETUP_DONE the moment it writes anything, which is what switches on_exit
 	# from "clean up" to "dump".
 	sp_thresholds "${RUN_CASES[0]}"

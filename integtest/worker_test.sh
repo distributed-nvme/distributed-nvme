@@ -140,6 +140,24 @@ DATA_GRP_DATA_BLOCKS=  # ext_cnt 2
 META_GRP_DATA_BLOCKS=  # ext_cnt 1
 META_BLOCKS_PER_GRP=   # META_GRP_DATA_BLOCKS * BLOCK_SIZE / THIN_META_BLOCK_SIZE
 
+# The length to zero of a side (architecture.md, Side provisioning protocol),
+# filled by read_geometry() from the same two `workerctl geometry` replies,
+# which compute it with model.SideZeroBytes — the one implementation of that
+# rule — from the group's meta_blocks and data_blocks above. The sp worker
+# sends it in every SyncupSide as side_conf.zero_bytes (dnv-worker.md RW15),
+# and case S asserts it on each side request of its sp0, whose two groups have
+# case D's shape. As EXPLANATION only:
+#
+#   meta side = (meta_blocks + data_blocks) * block_size     (the leg span)
+#   data side = (meta_blocks + 1) * block_size  (the meta region and the first
+#                                                data block)
+#
+# At (64 MiB, 1 MiB, 128 blocks) that is 64 MiB for a side of the meta group
+# (ext_cnt 1), the whole side, and 4 MiB for a side of the data group
+# (ext_cnt 2).
+META_SIDE_ZERO_BYTES=  # meta group, ext_cnt 1
+DATA_SIDE_ZERO_BYTES=  # data group, ext_cnt 2
+
 # Sub-object ids the script assigns. workerctl advances SpConf.next_id
 # past all of them, so a worker reaction allocates ids ABOVE these.
 TD_ID=0x10
@@ -1070,10 +1088,27 @@ read_geometry() {
 	done
 	META_BLOCKS_PER_GRP=$((META_GRP_DATA_BLOCKS * BLOCK_SIZE /
 		THIN_META_BLOCK_SIZE))
+	# Each reply carries the length to zero of a side of either kind of group
+	# at its ext_cnt: the meta side's is read at ext_cnt 1 and the data side's
+	# at ext_cnt 2, the group shapes case S's sp0 is built with. Zero is
+	# refused as well: model.SideZeroBytes never gives it, and the dn agent
+	# refuses it (dnagent.md DN8).
+	META_SIDE_ZERO_BYTES=$(jq_of "$meta" .meta_zero_bytes)
+	DATA_SIDE_ZERO_BYTES=$(jq_of "$data" .data_zero_bytes)
+	for value in "$META_SIDE_ZERO_BYTES" "$DATA_SIDE_ZERO_BYTES"; do
+		case "$value" in
+		'' | 0 | *[!0-9]*)
+			die "workerctl geometry: '$value' is not a length to zero" \
+				"(data $data, meta $meta)"
+			;;
+		esac
+	done
 	log "  group geometry: meta_blocks $GRP_META_BLOCKS," \
 		"data_blocks $DATA_GRP_DATA_BLOCKS (data, ext_cnt 2) /" \
 		"$META_GRP_DATA_BLOCKS (meta, ext_cnt 1);" \
-		"meta blocks per meta group $META_BLOCKS_PER_GRP"
+		"meta blocks per meta group $META_BLOCKS_PER_GRP;" \
+		"length to zero $META_SIDE_ZERO_BYTES bytes (meta side, ext_cnt 1) /" \
+		"$DATA_SIDE_ZERO_BYTES bytes (data side, ext_cnt 2)"
 }
 
 preflight_driver() {
@@ -1463,23 +1498,36 @@ case_smoke() {
 		req_ge 1 dn1 SyncupDn \
 		'(.revision | tostring) == "2" and ((.side_pointer_list // []) | length) == 2'
 	# S1/S3 live on dn 1 (fake dn0), S2/S4 on dn 2 (fake dn1). ext_cnt is 1
-	# for the meta group's sides and 2 for the data group's. Earlier replies
-	# with code 2 (a side reaching the DN before its SyncupDn listed it) are
-	# tolerated by construction: only the final state is asserted.
+	# for the meta group's sides and 2 for the data group's, and zero_bytes,
+	# the length to zero (RW15), is the meta side's leg span and the data
+	# side's meta region plus its first data block, both read from workerctl
+	# geometry at preflight; `tostring` takes the logged number and a
+	# protojson string alike. Earlier replies with code 2 (a side reaching the
+	# DN before its SyncupDn listed it) are tolerated by construction: only
+	# the final state is asserted.
 	local side_filter='(.side_pointer.side_id | tostring) == $sid
 		and ((.side_conf.provisioned // false) == false)
 		and (.side_conf.primary_cn_id | tostring) == "1"
 		and ((.side_conf.standby_id_list // []) | map(tostring)) == ["2"]
 		and (.side_conf.ext_cnt | tostring) == $ext
+		and (.side_conf.zero_bytes | tostring) == $zero
 		and ((.side_conf.sp_level // "SP_LEVEL_READWRITE") == "SP_LEVEL_READWRITE")'
-	wait_until "$WAIT_SYNCUP" "dn0: SyncupSide S1 (meta, ext 1)" \
-		req_ge 1 dn0 SyncupSide "$side_filter" --arg sid 1 --arg ext 1
-	wait_until "$WAIT_SYNCUP" "dn1: SyncupSide S2 (meta, ext 1)" \
-		req_ge 1 dn1 SyncupSide "$side_filter" --arg sid 2 --arg ext 1
-	wait_until "$WAIT_SYNCUP" "dn0: SyncupSide S3 (data, ext 2)" \
-		req_ge 1 dn0 SyncupSide "$side_filter" --arg sid 3 --arg ext 2
-	wait_until "$WAIT_SYNCUP" "dn1: SyncupSide S4 (data, ext 2)" \
-		req_ge 1 dn1 SyncupSide "$side_filter" --arg sid 4 --arg ext 2
+	wait_until "$WAIT_SYNCUP" \
+		"dn0: SyncupSide S1 (meta, ext 1, zero_bytes $META_SIDE_ZERO_BYTES)" \
+		req_ge 1 dn0 SyncupSide "$side_filter" --arg sid 1 --arg ext 1 \
+		--arg zero "$META_SIDE_ZERO_BYTES"
+	wait_until "$WAIT_SYNCUP" \
+		"dn1: SyncupSide S2 (meta, ext 1, zero_bytes $META_SIDE_ZERO_BYTES)" \
+		req_ge 1 dn1 SyncupSide "$side_filter" --arg sid 2 --arg ext 1 \
+		--arg zero "$META_SIDE_ZERO_BYTES"
+	wait_until "$WAIT_SYNCUP" \
+		"dn0: SyncupSide S3 (data, ext 2, zero_bytes $DATA_SIDE_ZERO_BYTES)" \
+		req_ge 1 dn0 SyncupSide "$side_filter" --arg sid 3 --arg ext 2 \
+		--arg zero "$DATA_SIDE_ZERO_BYTES"
+	wait_until "$WAIT_SYNCUP" \
+		"dn1: SyncupSide S4 (data, ext 2, zero_bytes $DATA_SIDE_ZERO_BYTES)" \
+		req_ge 1 dn1 SyncupSide "$side_filter" --arg sid 4 --arg ext 2 \
+		--arg zero "$DATA_SIDE_ZERO_BYTES"
 	local cntlr_filter='(.id_to_slice | has("0000000000000001"))
 		and ((.td_list[0].td_id | tostring) == "16")
 		and (.nqn_to_subsystem | has($nqn))'
@@ -4689,10 +4737,10 @@ case_handoff() {
 	put_cn 1 64
 	# Neither side ever finishes provisioning while the override is in place.
 	set_behavior dn0 <<'EOF'
-{"objects": {"side 1:1:1": {"zeroed_ext_cnt": 0}}}
+{"objects": {"side 1:1:1": {"zeroed_bytes": 0}}}
 EOF
 	set_behavior dn1 <<'EOF'
-{"objects": {"side 1:2:2": {"zeroed_ext_cnt": 0}}}
+{"objects": {"side 1:2:2": {"zeroed_bytes": 0}}}
 EOF
 	ctl put-sp --name sp0 --id 1 --shard 00 --slots 0,1 --level 0 \
 		--thresholds "$THRESHOLDS" --lwm "$LWM" \
@@ -4772,10 +4820,10 @@ EOF
 	#
 	# A second SP is needed because a provisioned side never goes back.
 	set_behavior dn0 <<'EOF'
-{"objects": {"side 2:1:1": {"zeroed_ext_cnt": 0}}}
+{"objects": {"side 2:1:1": {"zeroed_bytes": 0}}}
 EOF
 	set_behavior dn1 <<'EOF'
-{"objects": {"side 2:2:2": {"zeroed_ext_cnt": 0}}}
+{"objects": {"side 2:2:2": {"zeroed_bytes": 0}}}
 EOF
 	ctl put-sp --name sp1 --id 2 --shard 00 --slots 0,1 --level 0 \
 		--thresholds "$THRESHOLDS" --lwm "$LWM" \
@@ -4795,8 +4843,9 @@ EOF
 	sp1_rev=$(sp_rev 2)
 	sp1_flips=$(flip_records 2 | wc -l | tr -d ' ')
 	assert_eq "$sp1_flips" 0 "sp1: flips before the release"
-	# Back-to-back writes, so both sides report zeroed == total in the round
-	# that follows — whether the coordinator batches them is its choice.
+	# Back-to-back writes, so both sides report zeroed_bytes equal to
+	# zero_bytes in the round that follows — whether the coordinator batches
+	# them is its choice.
 	clear_behavior dn0
 	clear_behavior dn1
 	wait_until "$WAIT_SHORT" "sp1's side 1 provisioned" side_provisioned sp1 1 1

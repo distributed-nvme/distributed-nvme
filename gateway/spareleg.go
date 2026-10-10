@@ -234,9 +234,9 @@ func (s *Server) CreateSpareLeg(
 			return err
 		}
 		// The Side the op writes is provisioned = false ([D15]); only the
-		// sp-worker flips it, after the dn agent has zeroed the whole side
-		// (architecture.md, Side provisioning protocol), which is why a fresh
-		// spare cannot be switched in at once.
+		// sp-worker flips it, once the dn agent reports the side's zeroing
+		// done (architecture.md, Side provisioning protocol), which is why a
+		// fresh spare cannot be switched in at once.
 		newId, err := model.CreateSpareLeg(
 			ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
 			req.GetSpRev().GetRevision(), loc.SliceId, req.GetGrpId(),
@@ -345,11 +345,11 @@ func (s *Server) DeleteSpareLeg(
 // The swap is model.SwitchSpareLeg, the same op the sp-worker's leg repair
 // (dnv-worker.md AR8) calls (gateway.md, Scope and
 // placement), and its preconditions are this RPC's. The one that a caller
-// meets in practice is that of architecture.md, Side provisioning protocol:
-// the spare's side must be `provisioned`, because switching to a side that has
-// not finished zeroing would put an unwritten member into the array. It
-// surfaces as FAILED_PRECONDITION, which is the code the faults case of
-// gateway.md, Integration test plan, expects (GW7).
+// meets in practice is that of architecture.md, Spare legs: the spare's side
+// must be `provisioned`, so a side still zeroing never becomes an md member
+// (architecture.md, Side provisioning protocol). It surfaces as
+// FAILED_PRECONDITION, which is the code the faults case of gateway.md,
+// Integration test plan, expects (GW7).
 //
 // The pre-read checks the two leg ids for membership as well as the group, so
 // an id that is in neither list is the NOT_FOUND of architecture.md, Spare
