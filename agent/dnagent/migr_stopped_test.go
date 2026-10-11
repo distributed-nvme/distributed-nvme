@@ -2,6 +2,7 @@ package dnagent
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -803,6 +804,590 @@ func TestMigrationDestinationExhaustionIsReportedAndRetried(t *testing.T) {
 	waitUntil(t, "the starved destination to build and serve", func() bool {
 		return servesThroughClone(t, srv, node, names) && !migrRetrying(srv)
 	})
+}
+
+// destinationRows is every row of info the destination rule decides (DN13):
+// the destination's two rows, and the dm-linear and the export of each CN,
+// which are judged by where the rule says the stacks serve from.
+func destinationRows(info *pb.SideInfo) map[string]*pb.ResInfo {
+	rows := map[string]*pb.ResInfo{
+		"target_info":   info.GetMigrDstInfo().GetTargetInfo(),
+		"dm_clone_info": info.GetMigrDstInfo().GetDmCloneInfo(),
+	}
+	for _, cnId := range []uint64{testCn0, testCn1} {
+		rows[fmt.Sprintf("cn %d dm_linear", cnId)] =
+			info.GetCnIdToDmLinear()[cnId]
+		rows[fmt.Sprintf("cn %d nvmeof", cnId)] = info.GetCnIdToNvmeof()[cnId]
+	}
+	return rows
+}
+
+// checkRoundInfo runs one CheckSide round of the test side at revision and
+// returns the info it carries.
+func checkRoundInfo(
+	t *testing.T,
+	srv *DnAgentServer,
+	revision uint64,
+) *pb.SideInfo {
+	t.Helper()
+	reply, _ := srv.checkSideRound(context.Background(),
+		&pb.CheckSideRequest{
+			ClusterId: testCluster, DnId: testDn,
+			SidePointer: sidePtr(testSide), Revision: revision,
+			ShowInfo: true,
+		}, nil)
+	if got := reply.GetAgentReply().GetCode(); got ==
+		common.ReplyCodeUnknownObject {
+		t.Fatalf("CheckSide does not know the side: %v",
+			reply.GetAgentReply())
+	}
+	return reply.GetSideInfo()
+}
+
+// One rule decides a migration destination's rows on both channels (DN13):
+// for the same state, a CheckSide round reports the status a converge does
+// for the destination's two rows, and judges every CN's dm-linear and export
+// by the same answer to where the stacks serve from, so no row, and no epoch
+// on it, changes between the two. Each case pins the statuses too, so a rule
+// both channels got wrong alike fails as well. The status line rides in
+// dm_clone_info whenever the round read it — whenever the dm-clone is there,
+// whatever the row's status — and parses there.
+func TestADestinationReadsTheSameOnBothChannels(t *testing.T) {
+	names := newMigrDstNames()
+	const (
+		ok      = pb.ResStatus_RES_STATUS_OK
+		errored = pb.ResStatus_RES_STATUS_ERROR
+		missing = pb.ResStatus_RES_STATUS_MISSING
+	)
+	// serving builds the destination and leaves it serving through its
+	// dm-clone at revision 2; the case's converge comes at revision 3.
+	serving := func(t *testing.T, srv *DnAgentServer, node *fakeNode) {
+		t.Helper()
+		syncupBoth(t, srv, 1, testSide)
+		if _, err := srv.SyncupSide(context.Background(),
+			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if !servesThroughClone(t, srv, node, names) {
+			t.Fatal("fixture is wrong: the destination does not serve " +
+				"through its dm-clone")
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// fixture brings the node to the case's state and returns the
+		// revision of the converge that reads it.
+		fixture func(t *testing.T, srv *DnAgentServer,
+			node *fakeNode) uint64
+		target, clone pb.ResStatus
+		// cloneThere says whether the dm-clone exists, so the round reads
+		// its status line.
+		cloneThere bool
+		// rows pins a per-CN row to a status other than OK, by its name in
+		// destinationRows.
+		rows map[string]pb.ResStatus
+	}{
+		{"all up", func(t *testing.T, srv *DnAgentServer,
+			node *fakeNode) uint64 {
+			serving(t, srv, node)
+			return 3
+		}, ok, ok, true, nil},
+		// The walk finds no controller and the connect is refused: the
+		// target reads ERROR on both channels, not MISSING on a round.
+		{"never connected", func(t *testing.T, srv *DnAgentServer,
+			node *fakeNode) uint64 {
+			syncupBoth(t, srv, 1, testSide)
+			setFailAlways(node, "nvme connect", "connect refused")
+			return 2
+		}, errored, missing, false, nil},
+		// The source's controllers go under a serving dm-clone and the
+		// reconnect is refused: the stacks go to their dm-errors, and a
+		// round judges them there, not by the dm-clone that is still there.
+		{"the source lost its controllers", func(t *testing.T,
+			srv *DnAgentServer, node *fakeNode) uint64 {
+			serveThenDropSourceCtrls(t, srv, node, names, false)
+			setFailAlways(node, "nvme connect",
+				"Connect Invalid Data Parameter")
+			return 3
+		}, errored, missing, true, nil},
+		// A controller whose namespace never comes: no source to read from.
+		{"a controller with no namespace", func(t *testing.T,
+			srv *DnAgentServer, node *fakeNode) uint64 {
+			syncupBoth(t, srv, 1, testSide)
+			withDnClock(srv, node)
+			node.mu.Lock()
+			node.nsMisses[srv.nf.MigrSrcNqn(
+				testCluster, testSrcDn, testSp, testMigrId)] = 1000
+			node.mu.Unlock()
+			return 2
+		}, errored, missing, false, nil},
+		// The source answers but is reconnecting: not live.
+		{"a source reconnecting", func(t *testing.T, srv *DnAgentServer,
+			node *fakeNode) uint64 {
+			serving(t, srv, node)
+			node.setConnState(srv.nf.MigrSrcNqn(
+				testCluster, testSrcDn, testSp, testMigrId), "connecting")
+			return 3
+		}, errored, ok, true, nil},
+		// Hydration turned off behind the agent's back, and the enable
+		// refused: the status line shows it on both channels.
+		{"hydration off", func(t *testing.T, srv *DnAgentServer,
+			node *fakeNode) uint64 {
+			serving(t, srv, node)
+			node.mu.Lock()
+			node.dms[names.clone].noHydration = true
+			node.failCmdAlways["dmsetup message "+names.clone] =
+				"device busy"
+			node.mu.Unlock()
+			return 3
+		}, ok, errored, true, nil},
+		// DN13 step (2) does not hold under a serving dm-clone: the
+		// wrapper's table read is killed on both channels.
+		{"the slot's wrapper not read", func(t *testing.T,
+			srv *DnAgentServer, node *fakeNode) uint64 {
+			serving(t, srv, node)
+			setHook(node, node.killCmdNoEffectAlways,
+				"dmsetup table "+names.meta)
+			return 3
+		}, missing, errored, true, nil},
+		// DN13 step (4) does not hold: the dm-clone's table read is killed.
+		{"the dm-clone's table not read", func(t *testing.T,
+			srv *DnAgentServer, node *fakeNode) uint64 {
+			serving(t, srv, node)
+			setHook(node, node.killCmdNoEffectAlways,
+				"dmsetup table "+names.clone)
+			return 3
+		}, ok, errored, true, nil},
+		// A stopped step after a pass took the stacks off a dm-clone that
+		// is still there: they stay on their dm-errors, and a round judges
+		// them there, not by the dm-clone's presence.
+		{"a stopped step after the stacks left the dm-clone", func(
+			t *testing.T, srv *DnAgentServer, node *fakeNode) uint64 {
+			serveThenDropSourceCtrls(t, srv, node, names, false)
+			setFailAlways(node, "nvme connect",
+				"Connect Invalid Data Parameter")
+			if _, err := srv.SyncupSide(context.Background(),
+				migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if !sitsOnDmError(t, srv, node, names) ||
+				!dmPresent(node, names.clone) {
+				t.Fatal("fixture is wrong: the stacks are not on their " +
+					"dm-errors beside the dm-clone")
+			}
+			setHook(node, node.killCmdNoEffectAlways,
+				"dmsetup table "+names.meta)
+			return 4
+		}, missing, errored, true, nil},
+		// A stopped step whose read of where the stacks are does not
+		// answer, over a dm-clone they serve through: they stay on it, and
+		// both channels judge them there. The primary's own group read is
+		// the one that does not answer, so its export reads ERROR on both.
+		{"a stopped step that cannot read where the stacks are", func(
+			t *testing.T, srv *DnAgentServer, node *fakeNode) uint64 {
+			serving(t, srv, node)
+			setHook(node, node.killCmdNoEffectAlways,
+				"dmsetup table "+names.meta)
+			setHook(node, node.killReadAlways,
+				srv.nvmet.NsPath(names.nqn, sideNsid)+"/ana_grpid")
+			return 3
+		}, missing, errored, true, map[string]pb.ResStatus{
+			fmt.Sprintf("cn %d nvmeof", testCn0): errored,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			// Every pass here is the test's: no retry runs between them.
+			srv.migrRetryInterval = time.Hour
+			revision := tc.fixture(t, srv, node)
+			reply, err := srv.SyncupSide(context.Background(),
+				migrDstReq(revision, pb.SpLevel_SP_LEVEL_READWRITE))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			converged := destinationRows(reply.GetSideInfo())
+			checked := destinationRows(checkRoundInfo(t, srv, revision))
+			for name, conv := range converged {
+				want := ok
+				switch name {
+				case "target_info":
+					want = tc.target
+				case "dm_clone_info":
+					want = tc.clone
+				}
+				if pinned, found := tc.rows[name]; found {
+					want = pinned
+				}
+				round := checked[name]
+				if conv.GetStatus() != want {
+					t.Errorf("%s: the converge reports %v/%q, want %v",
+						name, conv.GetStatus(), conv.GetDetails(), want)
+				}
+				if round.GetStatus() != conv.GetStatus() ||
+					round.GetEpoch() != conv.GetEpoch() {
+					t.Errorf("%s: the round reports %v/%q at epoch %d, "+
+						"the converge %v/%q at epoch %d", name,
+						round.GetStatus(), round.GetDetails(),
+						round.GetEpoch(), conv.GetStatus(),
+						conv.GetDetails(), conv.GetEpoch())
+				}
+			}
+			details := checked["dm_clone_info"].GetDetails()
+			if _, parsed := agent.ParseCloneStatus(
+				details); parsed != tc.cloneThere {
+				t.Errorf("the round's dm_clone_info details %q: a status "+
+					"line parses = %v, want %v", details, parsed,
+					tc.cloneThere)
+			}
+		})
+	}
+}
+
+// TestMigrDstRowRule pins the destination rule itself (DN13), on readings
+// built by hand: which step's fault each row reports, in step order, the
+// status line kept in dm_clone_info whenever the pass read it, whatever the
+// status, whether the pass held, and where the stacks serve from. A
+// destination whose dm-clone probe does not answer tells the rule's own
+// answers from the one read from the stacks (migrDstStopped), which is
+// unread there.
+func TestMigrDstRowRule(t *testing.T) {
+	srv, node := newTestServer(t)
+	names := newMigrDstNames()
+	setHook(node, node.killCmdNoEffectAlways, "-o attr "+names.clone)
+	plan := newSidePlan(srv.nf,
+		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE), testExtentSize)
+	// raw is the line of a dm-clone hydrating with the knobs migrDstReq
+	// sets; unhydrated lacks the enable, and otherThreshold and otherBatch
+	// each show one knob other than the conf's.
+	const (
+		raw = "0 51200 clone 8 1/1024 2048 0/25 0 1 no_discard_passdown " +
+			"4 hydration_threshold 1 hydration_batch_size 1"
+		unhydrated = "0 51200 clone 8 1/1024 2048 0/25 0 2 no_hydration " +
+			"no_discard_passdown 4 hydration_threshold 1 " +
+			"hydration_batch_size 1"
+		otherThreshold = "0 51200 clone 8 1/1024 2048 0/25 0 1 " +
+			"no_discard_passdown 4 hydration_threshold 5 " +
+			"hydration_batch_size 1"
+		otherBatch = "0 51200 clone 8 1/1024 2048 0/25 0 1 " +
+			"no_discard_passdown 4 hydration_threshold 1 " +
+			"hydration_batch_size 3"
+	)
+	lines := map[string]bool{
+		raw: true, unhydrated: true, otherThreshold: true, otherBatch: true}
+	live := &agent.SubsysState{
+		Found: true, Live: true, States: []string{"live"},
+		DevicePath: "/dev/nvme9n1",
+		Paths:      []agent.PathState{{Name: "nvme9", State: "live"}},
+	}
+	noNs := &agent.SubsysState{
+		Found: true, Live: true, States: []string{"live"},
+		Paths: []agent.PathState{{Name: "nvme9", State: "live"}},
+	}
+	connecting := &agent.SubsysState{
+		Found: true, States: []string{"connecting"},
+		DevicePath: "/dev/nvme9n1",
+		Paths:      []agent.PathState{{Name: "nvme9", State: "connecting"}},
+	}
+	noRun := fmt.Errorf("allocating 2 clone-metadata units: %w",
+		&noFreeRunError{want: 2, total: 1})
+	walk := fmt.Errorf("walk killed")
+	const (
+		ok          = pb.ResStatus_RES_STATUS_OK
+		errored     = pb.ResStatus_RES_STATUS_ERROR
+		missing     = pb.ResStatus_RES_STATUS_MISSING
+		provisioned = pb.ResStatus_RES_STATUS_PROVISIONING
+	)
+	for _, tc := range []struct {
+		name          string
+		seen          migrDstSeen
+		target        pb.ResStatus
+		targetDetails string
+		clone         pb.ResStatus
+		cloneDetails  string
+		held          bool
+		serving       migrCloneState
+	}{
+		{"no free run", migrDstSeen{metaErr: noRun},
+			provisioned, metaRoomDetails(noRun),
+			provisioned, metaRoomDetails(noRun), false, migrCloneUnread},
+		{"no free run with the status read", migrDstSeen{metaErr: noRun,
+			raw: raw, statusRead: true},
+			provisioned, metaRoomDetails(noRun),
+			provisioned, metaRoomDetails(noRun) + "\n" + raw, false,
+			migrCloneUnread},
+		{"the slot refused", migrDstSeen{
+			metaErr: fmt.Errorf("wrapper killed"), raw: raw,
+			statusRead: true},
+			missing, detailsCloneMetaMissing,
+			errored, "wrapper killed\n" + raw, false, migrCloneUnread},
+		{"the walk unread", migrDstSeen{connErr: walk, connUnread: true},
+			errored, "walk killed",
+			errored, detailsTargetNotRead + "walk killed", false,
+			migrCloneUnread},
+		{"the connect refused", migrDstSeen{conn: &agent.SubsysState{},
+			connErr: fmt.Errorf("refused")},
+			errored, "refused",
+			missing, detailsTargetNotConnected, false, migrCloneDown},
+		{"no controller", migrDstSeen{conn: &agent.SubsysState{},
+			raw: raw, statusRead: true},
+			errored, detailsNoCtrl,
+			missing, detailsTargetNotConnected + "\n" + raw, false,
+			migrCloneDown},
+		{"no namespace", migrDstSeen{conn: noNs},
+			errored, detailsNoNs,
+			missing, detailsTargetNotConnected, false, migrCloneDown},
+		{"the dm-clone refused", migrDstSeen{conn: live,
+			cloneErr: fmt.Errorf("table killed"), raw: raw,
+			statusRead: true},
+			ok, "paths: live",
+			errored, "table killed\n" + raw, false, migrCloneUnread},
+		{"the status unread", migrDstSeen{conn: live,
+			statusErr: fmt.Errorf("status killed")},
+			ok, "paths: live",
+			errored, "status killed", false, migrCloneUnread},
+		{"hydration off", migrDstSeen{conn: live, raw: unhydrated,
+			statusRead: true},
+			ok, "paths: live",
+			errored, "hydration not converged: enable_hydration\n" +
+				unhydrated, false, migrCloneUp},
+		{"another hydration threshold", migrDstSeen{conn: live,
+			raw: otherThreshold, statusRead: true},
+			ok, "paths: live",
+			errored, "hydration not converged: hydration_threshold 1\n" +
+				otherThreshold, false, migrCloneUp},
+		{"another hydration batch size", migrDstSeen{conn: live,
+			raw: otherBatch, statusRead: true},
+			ok, "paths: live",
+			errored, "hydration not converged: hydration_batch_size 1\n" +
+				otherBatch, false, migrCloneUp},
+		{"the enable refused", migrDstSeen{conn: live, raw: unhydrated,
+			statusRead: true, hydrationErr: fmt.Errorf("busy")},
+			ok, "paths: live",
+			errored, "busy\n" + unhydrated, false, migrCloneUp},
+		{"a refused message the line shows applied", migrDstSeen{
+			conn: live, raw: raw, statusRead: true,
+			hydrationErr: fmt.Errorf("busy")},
+			ok, "paths: live",
+			ok, raw, false, migrCloneUp},
+		{"an unparsable line", migrDstSeen{conn: live, raw: "0 8 linear",
+			statusRead: true},
+			ok, "paths: live",
+			errored, `unparsable dm-clone status "0 8 linear"` +
+				"\n0 8 linear", false, migrCloneUp},
+		{"a source reconnecting", migrDstSeen{conn: connecting, raw: raw,
+			statusRead: true},
+			errored, "paths: connecting",
+			ok, raw, true, migrCloneUp},
+		{"all held", migrDstSeen{conn: live, raw: raw, statusRead: true},
+			ok, "paths: live",
+			ok, raw, true, migrCloneUp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := tc.seen
+			if status, details := seen.targetRow(); status != tc.target ||
+				details != tc.targetDetails {
+				t.Errorf("target_info = %v/%q, want %v/%q", status, details,
+					tc.target, tc.targetDetails)
+			}
+			status, details := seen.cloneRow(plan)
+			if status != tc.clone || details != tc.cloneDetails {
+				t.Errorf("dm_clone_info = %v/%q, want %v/%q", status,
+					details, tc.clone, tc.cloneDetails)
+			}
+			wantLine := seen.statusRead && lines[seen.raw]
+			if _, parsed := agent.ParseCloneStatus(
+				details); parsed != wantLine {
+				t.Errorf("dm_clone_info %q: a status line parses = %v, "+
+					"want %v", details, parsed, wantLine)
+			}
+			if got := seen.held(plan); got != tc.held {
+				t.Errorf("held = %v, want %v", got, tc.held)
+			}
+			if got := srv.migrDstServing(context.Background(), plan,
+				&seen); got.state != tc.serving {
+				t.Errorf("serving = %v, want %v", got.state, tc.serving)
+			}
+		})
+	}
+}
+
+// A dm-clone whose hydration knob differs from what its conf sets — after
+// the worker's default for a knob left at zero changed, or a message sent
+// outside the agent — reads dm_clone_info ERROR on a check round (DN13), and
+// the converge sends that knob's message, after which both channels read
+// the row OK.
+func TestADestinationConvergesItsHydrationKnobs(t *testing.T) {
+	names := newMigrDstNames()
+	for _, tc := range []struct {
+		name string
+		// drift sets the knob on the fake's dm-clone.
+		drift func(dm *fakeDm)
+		msg   string
+	}{
+		{"the hydration threshold",
+			func(dm *fakeDm) { dm.threshold = 5 }, "hydration_threshold 1"},
+		{"the hydration batch size",
+			func(dm *fakeDm) { dm.batchSize = 3 }, "hydration_batch_size 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.migrRetryInterval = time.Hour
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			if _, err := srv.SyncupSide(ctx,
+				migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if !servesThroughClone(t, srv, node, names) {
+				t.Fatal("fixture: the side does not serve through the " +
+					"dm-clone")
+			}
+			node.mu.Lock()
+			tc.drift(node.dms[names.clone])
+			node.mu.Unlock()
+
+			row := checkRoundInfo(t, srv, 2).GetMigrDstInfo().
+				GetDmCloneInfo()
+			if want := "hydration not converged: " + tc.msg; row.GetStatus() !=
+				pb.ResStatus_RES_STATUS_ERROR ||
+				!strings.HasPrefix(row.GetDetails(), want+"\n") {
+				t.Errorf("check round: dm_clone_info = %v/%q, want ERROR "+
+					"led by %q", row.GetStatus(), row.GetDetails(), want)
+			}
+
+			node.Reset()
+			reply, err := srv.SyncupSide(ctx,
+				migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if msg := "cmd dmsetup message " + names.clone + " 0 " +
+				tc.msg; !node.hasCall(msg) {
+				t.Errorf("the converge never sent %q; messages: %q", msg,
+					node.callsMatching("dmsetup message"))
+			}
+			for label, info := range map[string]*pb.SideInfo{
+				"converge": reply.GetSideInfo(), "check round": checkRoundInfo(
+					t, srv, 3)} {
+				row := info.GetMigrDstInfo().GetDmCloneInfo()
+				if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+					t.Errorf("%s after the message: dm_clone_info = %v/%q, "+
+						"want OK", label, row.GetStatus(), row.GetDetails())
+				}
+			}
+		})
+	}
+}
+
+// A check round reads DN13 steps (2) and (4) as the converge's steps leave
+// them (migrMetaRead, migrCloneRead): each read holds exactly where its step
+// holds with nothing to do. Over each fault below the read refuses and the
+// step changes the node; once the step has run, the read holds and the step
+// changes nothing.
+func TestAStepReadHoldsWhereItsStepHasNothingToDo(t *testing.T) {
+	names := newMigrDstNames()
+	// shiftArg moves the numeric table argument at index i of a single-line
+	// table by delta.
+	shiftArg := func(table string, i int, delta uint64) string {
+		fields := strings.Fields(table)
+		value, err := strconv.ParseUint(fields[i], 10, 64)
+		if err != nil {
+			panic(err)
+		}
+		fields[i] = strconv.FormatUint(value+delta, 10)
+		return strings.Join(fields, " ")
+	}
+	for _, tc := range []struct {
+		name string
+		dev  string
+		// fault changes the device, under the fake's lock; a nil one
+		// removes it.
+		fault func(dm *fakeDm)
+		// cloneStep says the fault is step (4)'s, the dm-clone's.
+		cloneStep bool
+	}{
+		{"the wrapper suspended", names.meta,
+			func(dm *fakeDm) { dm.suspended = true }, false},
+		{"the wrapper read-only", names.meta,
+			func(dm *fakeDm) { dm.readOnly = true }, false},
+		{"the wrapper off its run", names.meta, func(dm *fakeDm) {
+			// 0 <sectors> linear <disk> <offset>
+			dm.table = shiftArg(dm.table, 4, 8)
+		}, false},
+		{"the wrapper gone", names.meta, nil, false},
+		{"the dm-clone suspended", names.clone,
+			func(dm *fakeDm) { dm.suspended = true }, true},
+		{"the dm-clone on another region size", names.clone,
+			func(dm *fakeDm) {
+				// 0 <sectors> clone <meta> <dest> <source> <region> ...
+				dm.table = shiftArg(dm.table, 6, 8)
+			}, true},
+		{"the dm-clone gone", names.clone, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.migrRetryInterval = time.Hour
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			req := migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+			if _, err := srv.SyncupSide(ctx, req); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			plan := newSidePlan(srv.nf, req, testExtentSize)
+			src, err := srv.host.ListSubsys(ctx, plan.srcNqnOfDst())
+			if err != nil || src.DevicePath == "" {
+				t.Fatalf("fixture is wrong: the source reads %v, %v",
+					src, err)
+			}
+			read := func() error {
+				if tc.cloneStep {
+					return srv.migrCloneRead(ctx, plan, src.DevicePath)
+				}
+				return srv.migrMetaRead(ctx, plan)
+			}
+			step := func() error {
+				if tc.cloneStep {
+					_, err := srv.ensureDmClone(ctx, plan, src.DevicePath)
+					return err
+				}
+				return srv.ensureMigrMeta(ctx, plan)
+			}
+			holds := func(what string) {
+				t.Helper()
+				if err := read(); err != nil {
+					t.Errorf("%s: the read refuses: %v", what, err)
+				}
+				node.Reset()
+				if err := step(); err != nil {
+					t.Errorf("%s: the step fails: %v", what, err)
+				}
+				if got := node.Mutations(); len(got) != 0 {
+					t.Errorf("%s: the step changed the node: %v", what, got)
+				}
+			}
+
+			holds("built")
+			node.mu.Lock()
+			if tc.fault == nil {
+				delete(node.dms, tc.dev)
+			} else {
+				tc.fault(node.dms[tc.dev])
+			}
+			node.mu.Unlock()
+			if err := read(); err == nil {
+				t.Errorf("the read holds over %s", tc.name)
+			}
+			node.Reset()
+			if err := step(); err != nil {
+				t.Fatalf("the step fails over %s: %v", tc.name, err)
+			}
+			if len(node.Mutations()) == 0 {
+				t.Fatalf("fixture is wrong: the step had nothing to do "+
+					"over %s", tc.name)
+			}
+			holds("converged")
+		})
+	}
 }
 
 // A pass that takes the stacks off a dm-clone whose source is gone can have

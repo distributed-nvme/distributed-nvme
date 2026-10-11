@@ -1053,3 +1053,150 @@ func TestAConvergeDoesNotRaceAnotherCntlrsReads(t *testing.T) {
 		<-finished
 	}
 }
+
+// TestARefusedCallLeavesNoLockEntry: a call refused for a cntlr the agent
+// does not hold creates no lock entry for it (dnagent.md, SH11): only the
+// teardown of a held cntlr drops an entry, so one a refusal created would
+// stay for the life of the process. Each call is checked twice: the set holds
+// as many entries after it as before, and the call does not wait for an
+// entry another call holds. The admitted SyncupCntlr at the end creates its
+// cntlr's entry, which is what the count can see.
+func TestARefusedCallLeavesNoLockEntry(t *testing.T) {
+	ctx := context.Background()
+	key := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	for _, tc := range []struct {
+		name string
+		// listed says whether the CN's list names the cntlr.
+		listed bool
+		call   func(srv *CnAgentServer) uint32
+		want   uint32
+		// entries is how many entries the call adds.
+		entries int
+	}{
+		{"a SyncupCntlr for a pointer the cn does not list", false,
+			func(srv *CnAgentServer) uint32 {
+				reply, _ := srv.SyncupCntlr(ctx,
+					cntlrReq(reqOpts{revision: 2, primary: true}))
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"a SyncupCntlr whose conf CN8 refuses, for a cntlr never held",
+			true, func(srv *CnAgentServer) uint32 {
+				reply, _ := srv.SyncupCntlr(ctx, zeroConfReq(
+					reqOpts{revision: 2, primary: true},
+					func(conf *pb.BdevConf) {
+						conf.DmPoolConf.DataBlockSize = 0
+					}))
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeInvalidConf, 0},
+		{"a PushCloneBitmap for a cntlr never held", true,
+			func(srv *CnAgentServer) uint32 {
+				reply, _ := srv.PushCloneBitmap(ctx,
+					&pb.PushCloneBitmapRequest{
+						ClusterId: testCluster, CnId: testCn,
+						CntlrPointer: cntlrPtr(), CloneId: testClone,
+						Bitmap: []byte{0xff},
+					})
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"a GetCntlrInfo for a cntlr never held", true,
+			func(srv *CnAgentServer) uint32 {
+				reply, _ := srv.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+					ClusterId: testCluster, CnId: testCn,
+					CntlrPointer: cntlrPtr(),
+				})
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"a CheckCntlr round for a cntlr never held", true,
+			func(srv *CnAgentServer) uint32 {
+				reply, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+					ClusterId: testCluster, CnId: testCn,
+					CntlrPointer: cntlrPtr(), Revision: 2, ShowInfo: true,
+				}, nil)
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"an admitted SyncupCntlr", true, func(srv *CnAgentServer) uint32 {
+			reply, _ := srv.SyncupCntlr(ctx,
+				cntlrReq(reqOpts{revision: 2, primary: false}))
+			return reply.GetAgentReply().GetCode()
+		}, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newServer := func() *CnAgentServer {
+				srv, _ := newTestServer(t)
+				cnSyncup(t, srv, 1, tc.listed)
+				return srv
+			}
+
+			srv := newServer()
+			before := srv.locks.ObjCount()
+			if code := tc.call(srv); code != tc.want {
+				t.Fatalf("code %d, want %d", code, tc.want)
+			}
+			if got := srv.locks.ObjCount(); got != before+tc.entries {
+				t.Errorf("%d lock entries after the call, want %d",
+					got, before+tc.entries)
+			}
+			if tc.entries != 0 {
+				return
+			}
+
+			srv = newServer()
+			lock := srv.locks.Obj(key)
+			lock.Lock()
+			defer lock.Unlock()
+			got := make(chan uint32, 1)
+			go func() { got <- tc.call(srv) }()
+			select {
+			case code := <-got:
+				if code != tc.want {
+					t.Errorf("code %d, want %d", code, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the refusal waited for the cntlr's object lock")
+			}
+		})
+	}
+}
+
+// TestABackgroundAttemptOnADroppedCntlrLeavesNoLockEntry: a background
+// attempt scheduled for a cntlr that a drop takes away before the attempt
+// gets the node read lock — a connect retry or a clone-metadata retry racing
+// the cntlr's pointer leaving its CN's list — creates no lock entry: the
+// attempt checks the cntlr under the node read lock, which the drop's write
+// lock excludes, before it takes the object lock (reconvergeCntlr).
+func TestABackgroundAttemptOnADroppedCntlrLeavesNoLockEntry(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: false})
+	key := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	st := srv.getCntlr(key)
+	if st == nil {
+		t.Fatal("the fixture converge left no cntlr state")
+	}
+
+	srv.locks.Node().Lock()
+	started, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		srv.reconvergeCntlr(ctx, key, st)
+		close(done)
+	}()
+	<-started
+	// The attempt reaches the node lock and waits behind the write lock.
+	time.Sleep(50 * time.Millisecond)
+	srv.dropCntlrState(ctx, key, st)
+	before := srv.locks.ObjCount()
+	node.Reset()
+	srv.locks.Node().Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attempt never returned")
+	}
+	if got := srv.locks.ObjCount(); got != before {
+		t.Errorf("%d lock entries after the attempt, want %d", got, before)
+	}
+	if calls := node.Calls(); len(calls) != 0 {
+		t.Errorf("the attempt on a dropped cntlr ran %q", calls)
+	}
+}

@@ -69,6 +69,28 @@ func TestRunCommandStreams(t *testing.T) {
 	}
 }
 
+// A command runs in the C locale whatever the caller's (osclient.md,
+// RunCommand), so its error words are the ones its callers read; the rest of
+// the caller's environment reaches it as it is.
+func TestRunCommandRunsInTheCLocale(t *testing.T) {
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	t.Setenv("DNV_OSCLIENT_TEST", "kept")
+	client := NewLimitedOsClient(0)
+
+	stdout, _, _, err := client.RunCommand(context.Background(), "sh",
+		[]string{"-c", `printf '%s|%s|%s' "$LC_ALL" "$LANG" ` +
+			`"$DNV_OSCLIENT_TEST"`}, "")
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if want := "C|de_DE.UTF-8|kept"; stdout != want {
+		t.Errorf("the command saw LC_ALL|LANG|DNV_OSCLIENT_TEST = %q, "+
+			"want %q", stdout, want)
+	}
+}
+
 // The caller owns the deadline (osclient.md, RunCommand): the ctx
 // firing SIGTERMs the process.
 func TestRunCommandSoftTimeoutSigterm(t *testing.T) {

@@ -225,9 +225,13 @@ retry's, the DN12 fence timer's, the cn connect retry's and clone-metadata
 retry's), and the cn sweep's background `nvme disconnect` is one. Such a child must not outlive the
 agent — the cn sweep's background `nvme disconnect` (below) is allowed to
 — so the dn server registers every goroutine that owns one in a wait group
-before it starts and exposes a `WaitBackground` that waits for them;
-`Serve` takes it as its `waitBackground` parameter, cancels the task
-ctx after the graceful stop and then waits. Cancellation kills the in-flight
+before it starts and exposes a `WaitBackground` that waits for them; a
+registration and the start of that wait take one lock, so the join waits
+for every task that registered before it and none registers once it has
+begun — a task that would start then is refused, and the next process's
+reconcile starts its work again (DN2). `Serve` takes it as its
+`waitBackground` parameter, cancels the task ctx after the graceful stop
+and then waits. Cancellation kills the in-flight
 child through the SH15 soft/hard timeout machinery (`osclient.md`,
 RunCommand, sends SIGTERM then SIGKILL), so the wait is bounded by
 `CmdHardTimeout` per in-flight command — unless the child sits in an
@@ -251,11 +255,15 @@ dm device and `dmsetup remove` would fail EBUSY.
 
 One deliberate carve-out from "every goroutine that owns one": the DN12
 fence timer's callback — which runs a full side converge and so can spawn
-children — is **not** enrolled, because the timer can fire after
-`WaitBackground` has returned and a wait-group add after its wait panics
-(the enrollment sites record this). It is benign: the callback derives from
-`rootCtx`, which `Serve` cancels before the join, so a post-join firing
-finds every OS call refused by a dead ctx and spawns nothing.
+children — is **not** enrolled. The join stops every armed fence timer
+before it waits, and no timer is armed once it has begun; a callback a
+timer started before that is not waited for. It is benign: the callback
+derives from `rootCtx`, which `Serve` cancels before the join, so every OS
+call it makes from then on is refused and spawns nothing, and only a
+command it had already started can outlive the join.
+The suspension a stopped timer would have ended is the next process's to
+end: its restart finds the linears suspended and treats the window as
+elapsed (DN12 rule 1), save the restarts Known limits names.
 
 `Serve` in `agent/agent.go` is the shared lifecycle: it mints the startup
 trace id, derives the run ctx the role servers capture as `rootCtx`, runs
@@ -387,7 +395,17 @@ objects MAY hit the agent concurrently, and `Check*` streams run alongside
 agent therefore serializes with a **two-level hierarchy**, `LockSet`: a
 node-level read-write lock (`Node`) and one mutex per object (`Obj`),
 created on first use and dropped (`DropObj`) only during teardown while the
-node write lock is held. Lock order is always node before object.
+node write lock is held. First use is a call that has found, under the
+node read lock, that the agent holds the object, or a `SyncupSide` or
+`SyncupCntlr` of an object it does not hold whose gates (DN8,
+`cnagent.md` CN8) admit the request: a request refused as unknown, or
+refused by those gates before the agent holds the object, leaves no
+entry, and a background converge attempt checks its object under the
+node read lock before it takes its lock. Lock order is always node before
+object. Reason: only the teardown of an
+object the agent holds drops an entry, so an entry a refused request
+created would stay for the life of the process, and refused requests
+would grow the set without bound.
 
 SH10. Node **write** lock: the startup reconcile and the node-level syncup
 (`SyncupDn`/`SyncupCn` — they diff the pointer list and run the node-level
@@ -400,7 +418,10 @@ one `CheckSide`/`CheckCntlr` round) and every background converge attempt
 (the dn's connect retry — DN13; DN1's and SH27's "DN8 retry" — and DN12
 fence timer, which share `reconvergeSide`, and the cn's connect retry and
 clone-metadata retry, which share `reconvergeCntlr` — the SH27 background
-tasks that converge; `cnagent.md` CN1).
+tasks that converge; `cnagent.md` CN1). Each takes the object's lock only
+once it has found the object, or its gates have admitted the request,
+under the node read lock (Concurrency — `locks.go`): a call refused for
+an object the agent does not hold takes the read lock alone.
 
 SH12. Node **read** lock only: node-scoped reads (`GetDnInfo`/`GetCnInfo`,
 one `CheckDn`/`CheckCn` round). `GetDnSize`/`GetCnSize` take no lock.
@@ -418,9 +439,10 @@ returns only when the kernel does.
 ### `ResInfo` tracking — `resinfo.go`
 
 SH14. A per-object in-memory tracker (`ResTracker`) turns probe outcomes
-into a `pb.ResInfo` of `res_name`, `status`, `details` and `epoch` per
-`architecture.md`, Live-state reporting: `epoch` is the unix seconds of the
-last **status** change (a `details` change alone does not bump it); the
+into a `pb.ResInfo` of `res_name`, `status`, `details`, `reason` and
+`epoch` per `architecture.md`, Live-state reporting: `epoch` is the unix
+seconds of the last **status** change (a change of `details` or of
+`reason` alone does not bump it); the
 agent emits `RES_STATUS_MISSING`, `RES_STATUS_ERROR`, `RES_STATUS_OK` and
 `RES_STATUS_PROVISIONING`, the cn agent also `RES_STATUS_PENDING` on a
 primary's leg rows (`cnagent.md` CN11), and never `RES_STATUS_UNKNOWN`
@@ -479,6 +501,24 @@ of either role, the ones that fence nothing — a grow, a repoint — included,
 and [D12]'s bound on a suspension holds only as far as the reloads succeed;
 what the rule-2 resume costs when a flip's reload failed its load is a
 known limit (Known limits).
+
+**A refusal a caller decides by is typed.** A command that fails comes
+back as an error of its own type (`CmdError`): its text is the command
+line and the tool's own output, word for word, for the rows' details and
+the logs, and it also carries the exit status and, for a dmsetup refusal,
+the errno the output names. That errno is read from the output in one
+place, the wrapper's own table of the tool's words in the C locale, the
+one every command runs in (`osclient.md`, RunCommand), and a caller asks
+the type (`IsNoData`, `IsExists`, `IsBusy`), never the text: ENODATA, with
+which dm-thin refuses a thin table whose id its pool does not hold
+(`cnagent.md` CN14); EEXIST, with which a thin create or snapshot message
+meets an id the pool holds already (`cnagent.md` CN14); and EBUSY, with
+which a metadata-snapshot reserve meets a reservation already held
+(`cnagent.md` CN25). A run that never reported — killed, or never
+started — refused nothing and carries no errno, whatever it printed
+first. No caller reads a refusal's text to decide. Reason: a tool's
+wording is no contract; one wrapper maps it, and a change of it is fixed
+there, while a decision built on the text goes wrong silently.
 
 SH15. Every wrapper call wraps its ctx with a deadline of `CmdSoftTimeout`
 before calling the `OsClient` (the soft/hard timeout contract of
@@ -548,9 +588,11 @@ rebuild, or — `dirMtime`'s — with a clean verdict:
   and every clone on the CN is rebuilt — and the "stat" of the arena file,
   whose "absent" is answered with a `truncate` of it to
   `CnCloneMetaAreaSize`: a no-op on the live arena file, which the converge
-  only ever creates at that size, but a resize of one of any other size —
-  on a shrink, the loss of its tail — where the converge otherwise reports
-  an error and leaves the file alone).
+  only ever creates at that size, but a resize in place of one of any
+  other size — on a shrink, the loss of its tail — where the converge
+  otherwise leaves a file of another size alone while anything uses it,
+  and replaces it whole, with a new loop device, only while nothing
+  does).
 
 `CloneMeta.LoopDevices` (`cnagent.md` CN5) honours it without the split:
 `losetup --associated` answers "none attached" with exit zero and no output,
@@ -849,8 +891,11 @@ the `LockSet` (object key = the `LocalSidePath` id tuple), the `--disk`
 path, the port conf (`--tr-*` plus `--nvmet-port-id` as one `PortConf`),
 the per-object `ResInfo` trackers, the DN8 retry registry (DN13), the
 per-side zeroing registry and its zeroing slots (DN9), and the SH27
-background-task bookkeeping: the `rootCtx` captured at `Reconcile` plus the
-wait group that `WaitBackground` waits on.
+background-task bookkeeping: the `rootCtx` captured at `Reconcile`, the
+wait group that `WaitBackground` waits on, and the mark that wait sets
+when it begins, under the lock every registration and every fence-timer
+arming takes, and never clears: from then on no task registers and no
+fence timer is armed (SH27).
 
 DN1. Lock mapping (instantiates SH10 to SH13): `SyncupDn` and the startup
 reconcile — node write; `SyncupSide`, `PushMigrBitmap`, `GetSideInfo`, one
@@ -1874,10 +1919,12 @@ Four rules keep the suspension bounded, which is what makes it safe:
 While the window is open the per-CN `dm_linear_info` is `RES_STATUS_OK`
 with details "suspended (migration cutover grace window)", unless DN9's
 gate is closed, when it reads `RES_STATUS_PROVISIONING` unprobed (DN18):
-it is an expected, time-bounded state, and the probe expects the
-**pre-fence** table there rather than the dm-error, so a healthy cutover
-reports no table mismatch — except in the second window of Known limits,
-opened over tables phase 2 has already swapped.
+it is an expected, time-bounded state. A check round reads the linear by
+the test phase 1 converges it to — there and suspended, on whatever table
+it carries — so the two channels report the same status for the same
+state, a healthy cutover reports no table mismatch, the second window of
+Known limits included, and a linear found absent inside the window reads
+`RES_STATUS_MISSING`, one found resumed `RES_STATUS_ERROR`.
 
 **Ending the role removes nothing directly.** `DnMigrSrcName` and its
 `MigrSrcNqn` export simply stop being wanted, and the sweep takes them (DN6
@@ -1952,8 +1999,9 @@ so that bytes an earlier migration left in those units cannot be
 misparsed as a dm-clone superblock; step (2) finds that record and builds
 the wrapper over it, and refuses as the run's own step does — no free run
 reads both `migr_dst_info` rows `RES_STATUS_PROVISIONING` with the wait's
-details, any other refusal the pair DN18 names; the connect of step (3)
-carries the hostnqn `DnHostNqn` of this cluster and dn (SH20), the one field by which
+details, any other refusal the pair the shared rule below gives; the
+connect of step (3) carries the hostnqn `DnHostNqn` of this cluster and dn
+(SH20), the one field by which
 the connection is later attributed to this agent (DN6); the dm-clone of step
 (4) carries the features **no_hydration and no_discard_passdown** — both
 are mandatory on **every** dnv dm-clone, dn and cn alike (`cnagent.md`
@@ -2015,7 +2063,8 @@ a background retry registry that re-runs the destination converge every
 stops registers it too — the run refused before the side zeroes (above),
 the slot or its wrapper, a walk of the source connection that did not
 answer, the dm-clone, the status read — and so do
-hydration that will not converge (a knob or the enable) and a step (5)
+hydration that will not converge (a knob or the enable), as the status
+line read after the messages shows it, and a step (5)
 that leaves the primary's dm-linear or its export unconverged (the linear
 onto the dm-clone, the namespace in `AnaGrpIdOptimized`). The worker
 re-sends a `SyncupSide` on a revision or a reply code, never on a row
@@ -2068,6 +2117,52 @@ dm-clone in place. Hydration that will not converge (a knob or the
 enable), with the status read after it answering, is decided like the
 whole sequence: steps (2) to (4) held, the dm-clone reads through to the
 source this pass found, and the primary's stack goes onto it.
+
+**One rule decides the destination's rows on both channels.** A converge
+and a check round decide the status of `migr_dst_info.target_info` and
+`migr_dst_info.dm_clone_info`, and where the per-CN rows are judged to
+serve from, by one rule, from what each reads of the destination in the
+order of its steps: step (2), the run behind the area's own gates and its
+wrapper; step (3), the walk of the source connection; step (4), the
+dm-clone on the table the step builds; and the dm-clone's status line.
+The round only reads. The converge reads what its own steps left, and a
+step whose command fails reads as not held, the command's error in the
+details of the row it concerns. So for the same state the two report the
+same statuses, and a row's epoch moves only when the state does, except
+after a command that took effect in the kernel and still failed, as a
+killed one can (SH15): that converge reads as not held a step the node
+holds, so its statuses, and the side's health epoch with them, can differ
+from a round's until the next converge, the DN8 retry's at the latest,
+finds the step held. The rule:
+
+* `target_info` reads step (2)'s refusal first — `RES_STATUS_PROVISIONING`
+  for an area with no free run (above), `RES_STATUS_MISSING` for any
+  other — then the source connection: `RES_STATUS_ERROR` when the walk
+  did not answer or a converge's connect failed, when the walk finds no
+  controller, when the controllers have no namespace device, or when none
+  of them is live, and `RES_STATUS_OK` otherwise;
+* `dm_clone_info` reads the first step that stopped —
+  `RES_STATUS_PROVISIONING` for an area with no free run,
+  `RES_STATUS_MISSING` "target not connected" when the source connection
+  answers that there is nothing to read from, and `RES_STATUS_ERROR` for
+  any other refusal of step (2), a walk that did not answer, step (4)'s
+  dm-clone and its status read — and past them `RES_STATUS_ERROR` while
+  the status line does not show the knobs the conf sets and hydration on,
+  or does not parse, and `RES_STATUS_OK` once it does;
+* the per-CN rows are judged where the rule puts the stacks (above), and,
+  where the stopped pass cannot read where they are, by the dm-clone's
+  presence.
+
+`dm_clone_info` carries the raw status line whenever the pass read it,
+whatever the row's status, because `FinishMigration` judges hydration
+from it (`architecture.md`, Migrations): a round reads the line whenever
+the dm-clone is there, a converge only once its steps through step (4)
+have held, so the two channels' details can differ where their statuses
+agree. What a pass serves from stays the steps' above. Reason: two
+readings of one device cannot both be right, and rows that differ between
+the channels flip their status, and the side's health epoch with it,
+every round, while a command that took effect and still failed makes them
+differ once, until the next converge.
 
 **A deregistration can fall inside a pass of the very loop it ends, and
 that is the sharp edge.** Registering creates a cancellable context and
@@ -2216,10 +2311,12 @@ could supply, or that no retry covers — one whose passes all stopped
 before the run's step (DN13) —, and that still zeroes nothing is named
 like any other side.
 Both reply zero otherwise.
-`GetDnInfo` and a `CheckDn` round probe before they take the verdict: the
-probe's read of the disk can be the first to answer, which is what
-confirms the identity (DN5). A DN's verdict covers the node-level scope
-only and a side's covers its own side; each drives its own `Syncup*`. The
+`GetDnInfo`, `GetSideInfo` and every `CheckDn` and `CheckSide` round probe
+before they take the verdict: the probe's read of the disk can be the
+first to answer, which is what confirms the identity (DN5) and loads the
+volume table a side's verdict reads its record from, so a call answers
+what a round in the same state would. A DN's verdict covers the
+node-level scope only and a side's covers its own side; each drives its own `Syncup*`. The
 verdict is recomputed on every call and stored nowhere, so a leftover that
 has since gone stops being reported without anyone clearing a flag. A DN
 whose stored `extent_size` is unusable has **no** verdict — the conf gate
@@ -2319,17 +2416,21 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 * `cn_id_to_dm_error` and `cn_id_to_dm_linear` per cn, named `DnErrorName`
   and `DnLinearName`: `dmsetup info` plus `dmsetup table` (`probeDmTarget`;
   the linear's target — side device, dm-error or dm-clone — must match the
-  desired role). Inside the cutover window of `architecture.md`, Migration,
-  the expected target is the **pre-fence** one and the details are
-  "suspended (migration cutover grace window)"; the probe never starts a
-  window (DN16). While DN9's gate is closed neither device is probed and,
-  below `SP_LEVEL_DISABLE` (at it neither row is emitted, DN11), both
+  desired role; on a migration destination, the backing DN13's shared rule
+  gives, not the dm-clone's mere presence). Inside the cutover window of
+  `architecture.md`, Migration, the linear is read by phase 1's test
+  (DN12): there and suspended, on whatever table it carries, with the
+  details "suspended (migration cutover grace window)"; the probe never
+  starts a window (DN16). While DN9's gate is closed neither device is
+  probed and, below `SP_LEVEL_DISABLE` (at it neither row is emitted,
+  DN11), both
   report `RES_STATUS_PROVISIONING`, details "side provisioning", whether
   or not they exist: a gate that closes again on a side that
   already exports removes nothing (DN9).
 * `cn_id_to_nvmeof` per cn, named by the `SideToCnNqn`: configfs —
   subsystem present with its attributes, namespace enabled over the right
-  "device_path" and in the desired "ana_grpid", linked to the port
+  "device_path" and in the desired "ana_grpid" (on a migration
+  destination, the group DN13's shared rule gives), linked to the port
   (`probeExport`). `RES_STATUS_PROVISIONING`, details "side provisioning",
   while DN9's gate is closed (the row only below `SP_LEVEL_NO_SIDE`).
 * `migr_src_info.dm_linear_info` and `.nvmeof_info`, named `DnMigrSrcName`
@@ -2342,25 +2443,20 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   not the objects exist (DN9).
 * `migr_dst_info.target_info`, named by the `MigrSrcNqn`: the SH20 **sysfs
   walk** (the subsystem matched by "subsysnqn", the controllers' "state"
-  — never `nvme list-subsys`) shows a live controller for it (liveness
-  only, SH20); `RES_STATUS_PROVISIONING` while DN9's gate is closed on the
-  destination side, details "side provisioning", or the wait details of
-  DN13 while the area has no free run for the destination's run.
-* `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: `dmsetup
-  status`; the details carry the raw status line (`architecture.md`,
-  Live-state reporting — hydration progress); `RES_STATUS_PROVISIONING`
-  while DN9's gate is closed on the destination side, details "side
-  provisioning", or the wait details of DN13 while the area has no free
-  run for the destination's run. The `DnMigrMetaDmName` wrapper has no
-  `ResInfo` of its own: its health folds into this one. While the dm-clone is absent
-  and the clone-metadata area cannot supply this migration's slot, the
-  probe reports the converge's own pair instead, computed from the loaded
-  volume table with nothing allocated (`CloneMetaRefusal`), so the two
-  channels do not trade the rows every round: for an area with no free run,
-  both rows `RES_STATUS_PROVISIONING` with the wait details of DN13; for
-  any other refusal, `target_info` `RES_STATUS_MISSING` naming the missing
-  clone metadata and this row `RES_STATUS_ERROR` with the allocator's
-  message.
+  and the namespace device — never `nvme list-subsys`), behind step (2)'s
+  read; its status, on a converge and a round alike, is DN13's shared
+  rule's. `RES_STATUS_PROVISIONING` while DN9's gate is closed on the
+  destination side, details "side provisioning".
+* `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: step (2)'s and
+  step (4)'s reads, then `dmsetup status`; its status is DN13's shared
+  rule's, and the details carry the raw status line whenever it was read,
+  whatever the row's status (`architecture.md`, Live-state reporting —
+  hydration progress); `RES_STATUS_PROVISIONING` while DN9's gate is
+  closed on the destination side, details "side provisioning". The
+  `DnMigrMetaDmName` wrapper has no `ResInfo` of its own: its health
+  folds into this one, through step (2)'s read, which a round takes from
+  the loaded volume table with nothing allocated, behind the gates the
+  converge's allocation applies, in their order and texts.
 
 The level comes first for both `migr_dst_info` rows: at a level that does
 not want the destination role (`SP_LEVEL_NO_MIGRATION` and above, DN11)
@@ -2377,7 +2473,10 @@ command marks that resource `RES_STATUS_ERROR` with the command output in
 back on purpose, which the pass reports instead: the per-CN stacks and the
 migration roles above a side device short of ready (DN9, DN10), and the
 per-CN stacks of a migration destination whose stopped pass could not
-read where they are (DN13).
+read where they are (DN13). The rows of a migration destination take
+their status from DN13's shared rule, a failed step reading as not held
+with the command's output in their details, and a migration source's
+per-CN dm-linears inside the cutover window from phase 1's test (DN12).
 
 **Leftovers are the one non-protocol outcome that travels in
 `agent_reply`**, and the reason is structural: the `*Info` rows are keyed
@@ -2422,9 +2521,7 @@ is still a protocol-level refusal.
   export layer has marked the window over again before it. Nothing that
   window absorbs can reach the side's data — the table that holds it is
   already the dm-error — but the linears sit suspended for another
-  `SuspendSeconds`, and the probe, which inside a window expects the
-  pre-fence table, reports the primary's linear `RES_STATUS_ERROR` until
-  phase 2 runs again.
+  `SuspendSeconds`.
 * A restart inside the window whose probes of the linears all go
   unanswered does not find them suspended either, and one that ends up
   holding no state for the side keeps nothing of what it found: after a
@@ -2497,9 +2594,25 @@ is still a protocol-level refusal.
   the target refuses a reconnect with DNR — no connect follows until the
   side's next converge: a `SyncupSide` that the SP's next revision or a
   non-zero reply code brings (`dnv-worker.md` RW4), or DN2's re-run after
-  a restart. Until then the probe reports `migr_dst_info.target_info`
-  `RES_STATUS_ERROR`, and the dm-clone has no source for the regions it
-  has not hydrated.
+  a restart. Until then a check round reads the destination by DN13's
+  shared rule — `migr_dst_info.target_info` `RES_STATUS_ERROR` and
+  `dm_clone_info` `RES_STATUS_MISSING` — and judges the per-CN stacks
+  where the source connection's answer puts them, on their dm-errors with
+  every namespace inaccessible, so the primary's dm-linear, still on the
+  dm-clone, and every namespace still in another group read
+  `RES_STATUS_ERROR` too: the side's health epoch is set, and the dm-clone
+  has no source for the regions it has not hydrated.
+* A fault DN13's shared rule reads holds the destination side's health
+  epoch for as long as it lasts, a check round reading it as a converge
+  does: a source connection with no controller, or with controllers and
+  no namespace device, a dm-clone whose hydration is off or short of the
+  knobs its conf sets, a status line that does not parse, as the kernel's
+  fail mode prints, and a fault of step (2) or step (4) under a live
+  dm-clone each read `RES_STATUS_ERROR` in one of the destination's rows,
+  so the side's `err_epoch` stays set (`dnv-worker.md` HL2), and a fan-out
+  that loads it does not wait for the side (`dnv-worker.md` RW14). The rule rests on a dm-clone keeping
+  hydration enabled once it has hydrated in full; one that turned it off
+  would read every finished destination `RES_STATUS_ERROR`.
 * The drop of a side whose pointer left the list (DN6) cancels its DN9
   zeroing goroutine and joins it under the node write lock
   (`dropSideState`), and the join lasts as long as the in-flight

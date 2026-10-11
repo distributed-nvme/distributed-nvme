@@ -1045,16 +1045,7 @@ func (d *DiskMeta) AllocCloneMeta(
 ) (*pb.DnDiskTable_CloneMetaRecord, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if err := d.load(ctx); err != nil {
-		return nil, err
-	}
-	if err := d.confirmedLocked(); err != nil {
-		return nil, err
-	}
-	if units == 0 {
-		return nil, fmt.Errorf("clone metadata size is 0 units")
-	}
-	have, start, err := d.planCloneMetaLocked(spId, migrId, units)
+	have, start, err := d.gateCloneMetaLocked(ctx, spId, migrId, units)
 	if err != nil || have != nil {
 		return have, err
 	}
@@ -1075,10 +1066,57 @@ func (d *DiskMeta) AllocCloneMeta(
 	return findCloneMeta(d.table, spId, migrId), nil
 }
 
+// HeldCloneMeta is AllocCloneMeta with nothing allocated, zeroed or saved:
+// the record AllocCloneMeta hands back, behind the gates it applies first, in
+// their order and texts (gateCloneMetaLocked), and, where it would take a new
+// run, an error saying that no run is held for this migration. A read-only
+// pass reads DN13 step (2) through it (migrMetaRead), so it refuses where the
+// converge's step refuses.
+func (d *DiskMeta) HeldCloneMeta(
+	ctx context.Context,
+	spId uint64,
+	migrId uint64,
+	units uint64,
+) (*pb.DnDiskTable_CloneMetaRecord, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	have, _, err := d.gateCloneMetaLocked(ctx, spId, migrId, units)
+	switch {
+	case err != nil:
+		return nil, err
+	case have == nil:
+		return nil, fmt.Errorf(
+			"no clone-metadata run is held for migration %d", migrId)
+	}
+	return have, nil
+}
+
+// gateCloneMetaLocked is every decision AllocCloneMeta takes before it
+// writes, in its order: the table loaded, the identity gate
+// (confirmedLocked), a count above zero, then the plan (planCloneMetaLocked).
+func (d *DiskMeta) gateCloneMetaLocked(
+	ctx context.Context,
+	spId uint64,
+	migrId uint64,
+	units uint64,
+) (*pb.DnDiskTable_CloneMetaRecord, uint64, error) {
+	if err := d.load(ctx); err != nil {
+		return nil, 0, err
+	}
+	if err := d.confirmedLocked(); err != nil {
+		return nil, 0, err
+	}
+	if units == 0 {
+		return nil, 0, fmt.Errorf("clone metadata size is 0 units")
+	}
+	return d.planCloneMetaLocked(spId, migrId, units)
+}
+
 // planCloneMetaLocked is the decision half of AllocCloneMeta, with nothing
 // written: the record when the slot is already there and big enough, the
-// start of the run a new one would take, or the refusal. AllocCloneMeta and
-// CloneMetaRefusal share it so that both report one refusal in one text. Of
+// start of the run a new one would take, or the refusal. AllocCloneMeta,
+// HeldCloneMeta and CloneMetaRefusal share it so that all three report one
+// refusal in one text. Of
 // its refusals only the area's "no free run" is typed (noFreeRunError, kept
 // through the wrap): a record smaller than the request, and a request larger
 // than the whole area, can never be met by waiting.

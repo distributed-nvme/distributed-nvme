@@ -2617,3 +2617,213 @@ func TestADeletedSourceControllerHoldsNothing(t *testing.T) {
 			reply.GetAgentReply().GetDetails())
 	}
 }
+
+// TestALingeringCloneHoldsOnlyItsTd pins the scope of the hold of
+// TestALeftDmCloneKeepsTheNsDevOffItsRaid0 (CN18): a dm-clone the plan no
+// longer wants keeps off its raid0 only the ns-devs of the thin device it
+// writes into, read from its live table's destination through the pass's dm
+// listing; every other td's ns-devs converge on the same pass. Two tds: the
+// clone writes into testTd's raid0, which testNs is served from through it,
+// and the namespace of testSnapTd, parked by its suspension, is resumed by
+// the revision that drops the clone. When the dm-clone's remove is
+// killed, or a listing other than the dm one stops the sweep, only testNs is
+// held; when the dm listing does not answer, or the dm-clone's table does
+// not answer and the info after it finds the device still there or does not
+// answer either, or its table is not one dm-clone target or names a device
+// the listing does not hold, nothing says which raid0 it writes into, and
+// every ns-dev of the cntlr is held, both here. A remove that took effect
+// though its check did not answer leaves the dm-clone counted as lingering;
+// its table read then fails, an info finds it gone, and it holds nothing:
+// both ns-devs converge. A held ns-dev keeps its live table, a parked one
+// going inaccessible and a serving one keeping its group, and its row reads
+// ERROR on both channels; the converged one reads OK on both.
+func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
+	const snapNs = uint64(0x1b)
+	subsysAt := func(snapSuspended bool) map[string]*pb.Subsystem {
+		subsys := defaultSubsys(false)
+		subsys[testNqn].NsList = append(subsys[testNqn].NsList,
+			&pb.Namespace{
+				NsId:      snapNs,
+				NsIdx:     2,
+				TdId:      testSnapTd,
+				DevUuid:   "22222222-2222-4222-8222-222222222222",
+				DevNguid:  "22222222222242228222222222222222",
+				Suspended: snapSuspended,
+			})
+		return subsys
+	}
+	// nsWant is where the pass leaves one namespace: the device its ns-dev
+	// maps ("clone", "error" or "raid0", of its own td), its ana_grpid, and
+	// whether it is held (its row ERROR detailsNsDevNotDesired) or converged
+	// (OK).
+	type nsWant struct {
+		on   string
+		ana  string
+		held bool
+	}
+	for _, route := range []struct {
+		name string
+		// fault arms the route's fault on the node.
+		fault func(srv *CnAgentServer, node *fakeNode)
+		// stopped: a listing stops the sweep, and the pass reports it.
+		stopped bool
+		// gone: the dm-clone is gone after the pass, which holds nothing.
+		gone       bool
+		ns, snapNs nsWant
+	}{
+		{"the dm-clone's remove is killed before it acts",
+			func(srv *CnAgentServer, node *fakeNode) {
+				node.killCmdNoEffectAlways["dmsetup remove "+
+					cloneName(srv, testClone)] = true
+			}, false, false,
+			nsWant{"error", "3", true}, nsWant{"raid0", "1", false}},
+		{"the dm listing is killed",
+			func(_ *CnAgentServer, node *fakeNode) {
+				node.killCmd["dmsetup ls"] = true
+			}, true, false,
+			nsWant{"clone", "1", true}, nsWant{"error", "3", true}},
+		{"the md listing is killed",
+			func(_ *CnAgentServer, node *fakeNode) {
+				node.killCmd["ls -1 "+sysfsBlockDir] = true
+			}, true, false,
+			nsWant{"clone", "1", true}, nsWant{"raid0", "1", false}},
+		{"the dm-clone's table does not answer and its remove is killed",
+			func(srv *CnAgentServer, node *fakeNode) {
+				clone := cloneName(srv, testClone)
+				node.killCmdNoEffectAlways["dmsetup remove "+clone] = true
+				node.failCmdAlways["dmsetup table "+clone] =
+					"device-mapper: table ioctl on " + clone +
+						" failed: Invalid argument"
+			}, false, false,
+			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
+		{"the dm-clone writes into a device the listing does not hold",
+			func(srv *CnAgentServer, node *fakeNode) {
+				clone := cloneName(srv, testClone)
+				node.killCmdNoEffectAlways["dmsetup remove "+clone] = true
+				dm := node.dms[clone]
+				fields := strings.Fields(dm.table)
+				fields[4] = "253:999" // the destination, CloneTable's second
+				dm.table = strings.Join(fields, " ")
+			}, false, false,
+			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
+		{"the dm-clone's table and the info after it do not answer",
+			func(srv *CnAgentServer, node *fakeNode) {
+				clone := cloneName(srv, testClone)
+				node.failCmdAlways["dmsetup table "+clone] =
+					"device-mapper: table ioctl on " + clone +
+						" failed: Invalid argument"
+				node.killCmdAlways["dmsetup info --columns --noheadings "+
+					"-o attr "+clone] = true
+			}, false, false,
+			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
+		{"the dm-clone's name carries a table that is not a dm-clone's",
+			func(srv *CnAgentServer, node *fakeNode) {
+				clone := cloneName(srv, testClone)
+				node.killCmdNoEffectAlways["dmsetup remove "+clone] = true
+				node.dms[clone].table = agent.LinearTable(testTdSize/512,
+					node.devNo["/dev/mapper/"+raid0Name(srv, testTd)], 0)
+			}, false, false,
+			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
+		// L3's second info of the dm-clone is the one that checks its
+		// remove.
+		{"the dm-clone's remove takes effect and its check does not answer",
+			func(srv *CnAgentServer, node *fakeNode) {
+				node.killCmdNth["dmsetup info --columns --noheadings -o attr "+
+					cloneName(srv, testClone)] = 2
+			}, false, true,
+			nsWant{"raid0", "1", false}, nsWant{"raid0", "1", false}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				tds: twoTds(), subsys: subsysAt(true),
+				clones: []*pb.Clone{cloneOf()}})
+			clone := cloneName(srv, testClone)
+			if dm := node.dms[clone]; dm == nil || dm.noHydration {
+				t.Fatalf("fixture: no dm-clone with its hydration on")
+			}
+			devNoOf := func(name string) string {
+				return node.devNo["/dev/mapper/"+name]
+			}
+			linear := func(devNo string) string {
+				return agent.LinearTable(testTdSize/512, devNo, 0)
+			}
+			tableOf := func(where string, tdId uint64) string {
+				switch where {
+				case "clone":
+					return linear(devNoOf(clone))
+				case "error":
+					return linear(devNoOf(errorName(srv, tdId)))
+				}
+				return linear(devNoOf(raid0Name(srv, tdId)))
+			}
+			if got, want := node.dms[nsDevName(srv, snapNs)].table,
+				tableOf("error", testSnapTd); got != want {
+				t.Fatalf("fixture: the suspended namespace's ns-dev is %q, "+
+					"want it parked %q", got, want)
+			}
+
+			node.Reset()
+			route.fault(srv, node)
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+				revision: 3, primary: true, tds: twoTds(),
+				subsys: subsysAt(false)}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass the dm-clone outlives")
+			if route.stopped {
+				cnSweepAssertDetails(t, reply.GetAgentReply(),
+					"enumeration failed: ", "the stopped pass")
+			} else {
+				cnSweepAssertDetails(t, reply.GetAgentReply(),
+					agent.LeftoverKindDm+":"+clone, "the leftover")
+			}
+			switch dm := node.dms[clone]; {
+			case route.gone && dm != nil:
+				t.Fatalf("the route is vacuous: the dm-clone is still there")
+			case !route.gone && (dm == nil || dm.noHydration):
+				t.Fatalf("the route is vacuous: the dm-clone is gone or "+
+					"not hydrating (%v)", dm)
+			}
+			probed := checkRound(t, srv, 3)
+			for _, ns := range []struct {
+				nsId  uint64
+				nsIdx int
+				tdId  uint64
+				want  nsWant
+			}{
+				{testNs, 1, testTd, route.ns},
+				{snapNs, 2, testSnapTd, route.snapNs},
+			} {
+				dev := node.dms[nsDevName(srv, ns.nsId)]
+				if want := tableOf(ns.want.on, ns.tdId); dev == nil ||
+					dev.table != want || dev.suspended {
+					t.Fatalf("ns %#x's ns-dev is %+v, want it live on the "+
+						"%s: %q", ns.nsId, dev, ns.want.on, want)
+				}
+				if got := node.files[anaPath(testNqn, ns.nsIdx)]; got !=
+					ns.want.ana {
+					t.Fatalf("nsid %d's ana_grpid is %q, want %q",
+						ns.nsIdx, got, ns.want.ana)
+				}
+				for label, info := range map[string]*pb.CntlrInfo{
+					"converged": reply.GetCntlrInfo(), "probed": probed} {
+					row := info.GetNsIdToDmLinear()[ns.nsId]
+					if ns.want.held {
+						assertErrorDetails(t, row, detailsNsDevNotDesired,
+							label+" held ns-dev row")
+					} else {
+						assertOk(t, row, label+" ns-dev row")
+					}
+				}
+			}
+			if !route.gone && !retrying(t, srv) {
+				t.Fatalf("a pass that held an ns-dev registered no retry")
+			}
+		})
+	}
+}

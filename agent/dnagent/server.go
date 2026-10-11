@@ -79,13 +79,20 @@ type DnAgentServer struct {
 
 	// bg tracks every background goroutine that owns a child process, so
 	// agent.Serve can join them after GracefulStop and no orphan
-	// `blkdiscard --zeroout` ever outlives the agent (DN9, SH27).
+	// `blkdiscard --zeroout` ever outlives the agent (DN9, SH27). A task
+	// enrolls under mu (enrollLocked), and only while bgClosed is unset.
 	bg sync.WaitGroup
+	// bgClosed is set under mu when the join begins (WaitBackground) and
+	// never cleared: from then on no task enrolls in bg and no DN12 fence
+	// timer is armed (bgClosedLocked).
+	bgClosed bool
 
 	// mu guards the in-memory mirrors of the local store below: which DNs
 	// and sides this agent holds. The request each of them holds is an
-	// atomic pointer of its own (dnState.req, sideState.req). It is a leaf
-	// lock: never held across an OS call.
+	// atomic pointer of its own (dnState.req, sideState.req). It also guards
+	// bgClosed and each side's retry, zeroing and fence fields, so a task's
+	// start and the join's mark are ordered by it. It is a leaf lock: never
+	// held across an OS call.
 	mu    sync.Mutex
 	dns   map[string]*dnState
 	sides map[string]*sideState
@@ -97,13 +104,59 @@ type DnAgentServer struct {
 }
 
 // WaitBackground joins the dn background goroutines enrolled in bg — the DN9
-// zeroing loops and the DN8 connect retries. The DN12 fence timer is the
-// deliberate carve-out (SH27); rootCtx cancellation is what stops that one.
-// cmd/dnv-agent passes it to agent.Serve, which cancels rootCtx and calls it
-// after GracefulStop has drained the last RPC (SH27).
+// zeroing loops and the DN8 connect retries — after it stops every armed DN12
+// fence timer (SH27). It first marks the server closed (bgClosed) under mu,
+// the lock every enrollment and every arming takes, so a task either enrolled
+// before the join began and is waited for, or is refused, and no timer is
+// armed once it has begun. The mark is never cleared: a joined server starts
+// no background work again. A fence callback already running is the
+// deliberate carve-out: it is not enrolled and not waited for, and its
+// converge runs on rootCtx, which agent.Serve cancels before the join, so it
+// starts no command and no task. cmd/dnv-agent passes it to agent.Serve,
+// which cancels rootCtx and calls it after GracefulStop has drained the last
+// RPC (SH27).
 func (s *DnAgentServer) WaitBackground() {
+	s.mu.Lock()
+	s.bgClosed = true
+	var timers []*time.Timer
+	for _, st := range s.sides {
+		if st.fenceTimer != nil {
+			timers = append(timers, st.fenceTimer)
+			st.fenceTimer = nil
+		}
+	}
+	s.mu.Unlock()
+	for _, timer := range timers {
+		timer.Stop()
+	}
 	s.bg.Wait()
 }
+
+// bgClosedLocked reports whether no background work may start: the join has
+// begun (bgClosed), or rootCtx is done and a task would only end. The caller
+// holds mu, the lock the join marks the server closed under, and enrolls a
+// task in bg (enrollLocked), or arms a fence timer, before it lets go of it
+// (SH27).
+func (s *DnAgentServer) bgClosedLocked() bool {
+	return s.bgClosed || s.rootCtx.Err() != nil
+}
+
+// enrollLocked enrolls one background task in bg, the only way a task
+// enrolls. The caller holds mu and has found the server open under it
+// (bgClosedLocked); the join marks the server closed under mu before its
+// bg.Wait, so the task is enrolled before that mark, and waited for, and no
+// bg.Add can follow the Wait (SH27).
+func (s *DnAgentServer) enrollLocked() {
+	bgEnrolling(&s.mu)
+	s.bg.Add(1)
+}
+
+// bgEnrolling runs at every enrollment in bg, given the lock the enrolling
+// call must hold, and does nothing in production. It is the seam a test
+// checks that lock through: an enrollment made after its start let go of mu
+// goes wrong only when the join lands between the two, which the race
+// detector sees only when it happens.
+var bgEnrolling = func(*sync.Mutex) {}
 
 // dnState is one synced DN: its last accepted request as this process holds it
 // (SH8) — a SyncupDn stores it once it has passed the revision and conf gates,
@@ -326,6 +379,12 @@ func (s *DnAgentServer) SyncupDn(
 	return s.syncupDn(ctx, req), nil
 }
 
+// SyncupSide takes the side's object lock only for a side this process holds
+// or a request DN8's gates admit: a request they refuse for a side it does
+// not hold is answered under the node read lock alone, so it leaves no lock
+// entry behind (dnagent.md, Concurrency — `locks.go`). The DN request the
+// gates read cannot change under that lock, and syncupSide runs every gate
+// again under the object lock.
 func (s *DnAgentServer) SyncupSide(
 	ctx context.Context,
 	req *pb.SyncupSideRequest,
@@ -334,12 +393,21 @@ func (s *DnAgentServer) SyncupSide(
 	defer s.locks.Node().RUnlock()
 	key := sideKey(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
+	if s.getSide(key) == nil {
+		if reply, _ := s.gateSide(ctx, req, 0); reply != nil {
+			return reply, nil
+		}
+	}
 	objLock := s.locks.Obj(key)
 	objLock.Lock()
 	defer objLock.Unlock()
 	return s.syncupSide(ctx, key, req), nil
 }
 
+// PushMigrBitmap refuses a push for a side this process does not hold under
+// the node read lock alone, as GetSideInfo does, so the refusal leaves no
+// lock entry behind (dnagent.md, Concurrency — `locks.go`); pushMigrBitmap
+// checks the side again under its object lock.
 func (s *DnAgentServer) PushMigrBitmap(
 	ctx context.Context,
 	req *pb.PushMigrBitmapRequest,
@@ -348,6 +416,12 @@ func (s *DnAgentServer) PushMigrBitmap(
 	defer s.locks.Node().RUnlock()
 	key := sideKey(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
+	if s.getSide(key) == nil {
+		return &pb.PushMigrBitmapReply{
+			AgentReply: agent.UnknownObjectReply(
+				"unknown side %s", sidePointerText(req.GetSidePointer())),
+		}, nil
+	}
 	objLock := s.locks.Obj(key)
 	objLock.Lock()
 	defer objLock.Unlock()
@@ -404,10 +478,15 @@ func (s *DnAgentServer) GetSideInfo(
 	if st == nil {
 		return unknown, nil
 	}
+	// The probe runs first, as in checkSideRound and GetDnInfo: what it reads
+	// can move the agent's own view the verdict reads — a read of the disk
+	// that answers loads the volume table the side's record is read from
+	// (DN16) — and in one order the call reads as a check round does.
+	info := s.probeSide(ctx, st)
 	return &pb.GetSideInfoReply{
 		AgentReply: s.sideVerdict(ctx, st).Reply(),
 		Revision:   st.req.Load().GetRevision(),
-		SideInfo:   s.probeSide(ctx, st),
+		SideInfo:   info,
 	}, nil
 }
 

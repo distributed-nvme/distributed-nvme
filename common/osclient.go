@@ -107,6 +107,10 @@ type OsClient interface {
 	WriteProto(ctx context.Context, path string, msg proto.Message) (err error)
 }
 
+// commandLocale is the locale setting RunCommand adds to every command's
+// environment (osclient.md, RunCommand).
+const commandLocale = "LC_ALL=C"
+
 // LimitedOsClient is the concrete OsClient. It caps the total number of
 // in-flight operations (all methods combined) at the limit given to
 // NewLimitedOsClient, and logs every operation per log.md / osclient.md.
@@ -144,6 +148,10 @@ func (c *LimitedOsClient) RunCommand(
 	defer c.sem.Release(1)
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	// osclient.md, RunCommand: the C locale, whatever the caller's, so a
+	// tool's output reads in the words its callers parse. The last value of
+	// a repeated key is the one the command gets.
+	cmd.Env = append(os.Environ(), commandLocale)
 	if stdinInput != "" {
 		cmd.Stdin = strings.NewReader(stdinInput)
 	}

@@ -1222,18 +1222,19 @@ func sharedStateFixture(t *testing.T) *model.SpState {
 }
 
 // lostStackInfo is the primary's report once the pool has lost reactLostTd's
-// thin id. With converge it is the converge's: the thin row names the id
-// missing — the ENODATA of the `dmsetup create` of its thin table — and every
-// other row of the td's stack fails with it: its raid0 and dm-error, its
-// namespace's ns-dev and nvmet namespace, the transfer out of that namespace
-// and the clone onto the td. Otherwise it is a Check round's probe, which
-// reads the absent volume MISSING and names no id. Everything else is OK.
+// thin id. With converge it is the converge's: the thin row carries the
+// reason thin id lost — the `dmsetup create` of its thin table failed with
+// ENODATA — and every other row of the td's stack fails with it: its raid0
+// and dm-error, its namespace's ns-dev and nvmet namespace, the transfer out
+// of that namespace and the clone onto the td. Otherwise it is a Check
+// round's probe, which reads the absent volume MISSING and carries no reason.
+// Everything else is OK.
 func lostStackInfo(converge bool) *pb.CntlrInfo {
 	thin := &pb.ResInfo{
 		ResName: "thin", Status: pb.ResStatus_RES_STATUS_MISSING,
 	}
 	if converge {
-		thin = resErr("thin", "dmsetup create thin --table 0 262144 thin "+
+		thin = resLostId("thin", "dmsetup create thin --table 0 262144 thin "+
 			"253:7 1: device-mapper: reload ioctl on thin  failed: "+
 			"No data available")
 	}
@@ -1285,15 +1286,17 @@ func lostStackInfo(converge bool) *pb.CntlrInfo {
 // row classes): an unhealthy primary whose report fails only in the stack of
 // a created td whose thin id the pool no longer holds is not failed over —
 // every cntlr that takes the role reads the same rows from the same pool —
-// and the pass records why and goes on. The refusal is judged ahead of the
-// candidate, so a primary with none logs it rather than `no candidate`, and
-// after the threshold, so a primary short of it logs nothing. Each other case
-// fails it over: an ERROR row of anything else beside the stack — another
-// td's raid0, namespace, thin row, transfer or clone among them — a thin row
-// failing for any other reason, an uncreated td, a probe's report, which
-// names no id, a primary read unreachable after the converge's report, its
-// rows UNKNOWN with their details kept, and a disabled primary, whose trigger
-// is the operator's.
+// and the pass records why and goes on. The lost id is the thin row's reason,
+// whatever its details say. The refusal is judged ahead of the candidate, so
+// a primary with none logs it rather than `no candidate`, and after the
+// threshold, so a primary short of it logs nothing. Each other case fails it
+// over: an ERROR row of anything else beside the stack — another td's raid0,
+// namespace, thin row, transfer or clone among them — a thin row failing for
+// any other reason, the lost id's text in a row with no reason, the reason on
+// a row that does not read ERROR, an uncreated td, a probe's report, which
+// carries no reason, a primary read unreachable after the converge's report,
+// its rows UNKNOWN with their details and reason kept, and a disabled
+// primary, whose trigger is the operator's.
 func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 	// armGrow arms AR6 so that the pass going on is observable.
 	armGrow := func(t *testing.T, h *reactHarness) {
@@ -1355,6 +1358,21 @@ func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 		}
 	})
 
+	// The class reads the row's reason and nothing in its details: the
+	// reason with any text is the lost id, the case below without it is not.
+	t.Run("the reason with other details", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultPrimaryUnhealthy)
+		info := lostStackInfo(true)
+		info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId] =
+			resLostId("thin", "x")
+		h.setPrimaryInfo(reactCntlrA, info)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionFailover, "shared_state")
+	})
+
 	for _, tc := range []struct {
 		name   string
 		mutate func(h *reactHarness, info *pb.CntlrInfo)
@@ -1386,6 +1404,20 @@ func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 			info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId] =
 				resErr("thin", "dmsetup info thin: signal: killed")
 		}},
+		{"the lost id's text with no reason", func(
+			_ *reactHarness, info *pb.CntlrInfo,
+		) {
+			// The converge's own row, ENODATA text and all, without the
+			// field: the class never parses details.
+			info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId].
+				Reason = pb.ResReason_RES_REASON_NONE
+		}},
+		{"the reason on a row that is not ERROR", func(
+			_ *reactHarness, info *pb.CntlrInfo,
+		) {
+			info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId].
+				Status = pb.ResStatus_RES_STATUS_MISSING
+		}},
 		{"an uncreated td", func(h *reactHarness, _ *pb.CntlrInfo) {
 			h.state.Tds[0].Created = false
 		}},
@@ -1395,8 +1427,9 @@ func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 					SliceIdToDmThin[reactSliceId]
 		}},
 		{"an unreachable primary", func(_ *reactHarness, info *pb.CntlrInfo) {
-			// The stream died after the converge named the id: every row
-			// reads UNKNOWN and keeps its details (markCntlrUnknown).
+			// The stream died after the converge's report carried the
+			// reason: every row reads UNKNOWN and keeps its details and its
+			// reason (markCntlrUnknown).
 			markCntlrUnknown(info)
 		}},
 		{"a disabled primary", func(h *reactHarness, _ *pb.CntlrInfo) {
@@ -1422,14 +1455,15 @@ func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 
 // TestReactionRoleNotHandedBackOverTheSameError pins AR5's second refusal: a
 // failover on a probe's report of the lost td — no refusal of the first kind,
-// the report naming no id — hands the role to a peer that fails on the same
-// rows, and the role is not handed back to the cntlr that lost it while the
-// primary fails only on rows that cntlr failed on, from an error set within
-// cntlr_unhealthy of that failover: the error is presumed to have followed
-// the role. The role moves on anything else — rows the old primary did not
-// fail on, beside its rows or instead of them, a report with no ERROR row, a
-// later error — and to another candidate, and at once when the primary is
-// disabled; a hand-back over rows of the primary's own records them in turn.
+// the report carrying no reason — hands the role to a peer that fails on the
+// same rows, and the role is not handed back to the cntlr that lost it while
+// the primary fails only on rows that cntlr failed on, from an error set
+// within cntlr_unhealthy of that failover: the error is presumed to have
+// followed the role. The role moves on anything else — rows the old primary
+// did not fail on, beside its rows or instead of them, a report with no ERROR
+// row, a later error — and to another candidate, and at once when the
+// primary is disabled; a hand-back over rows of the primary's own records
+// them in turn.
 func TestReactionRoleNotHandedBackOverTheSameError(t *testing.T) {
 	// failedOver runs the pass that fails A over to B and commits it the way
 	// model.Failover does: A a clean standby, B primary and settling, B's
@@ -2325,8 +2359,9 @@ func TestReactionReplaceSolePrimary(t *testing.T) {
 // alone, nor for a disabled primary, which is never AR7's target. The report
 // judged is the one the pass holds, the primary's latest (AR1), so each other
 // case gets the primary replaced: an own row beside the stack, a probe's
-// report, which names no id, a primary read unreachable after the converge's
-// report, and a primary whose child has reported nothing.
+// report, which carries no reason, the converge's thin row with the lost id's
+// text and no reason, a primary read unreachable after the converge's report,
+// and a primary whose child has reported nothing.
 func TestReactionSharedStateErrorIsNotReplaced(t *testing.T) {
 	// sole is sharedStateFixture with the standby disabled, so AR5 has no
 	// candidate, and the primary unhealthy for cntlr_unhealthy.
@@ -2460,6 +2495,12 @@ func TestReactionSharedStateErrorIsNotReplaced(t *testing.T) {
 		{"a probe's report", func() *pb.CntlrInfo {
 			return lostStackInfo(false)
 		}},
+		{"the lost id's text with no reason", func() *pb.CntlrInfo {
+			info := lostStackInfo(true)
+			info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId].
+				Reason = pb.ResReason_RES_REASON_NONE
+			return info
+		}},
 		{"an unreachable primary", func() *pb.CntlrInfo {
 			info := lostStackInfo(true)
 			markCntlrUnknown(info)
@@ -2492,18 +2533,18 @@ const (
 // TestReactionReplacementNotReplacedOverTheSameError pins AR7's second
 // refusal. The sole primary of an SP with no failover candidate is replaced
 // over a probe's report of the lost td — no refusal of the first kind, the
-// report naming no id — and the replacement reads the same rows from the same
-// pool: it is not replaced while every ERROR row of its report is one the
-// primary it replaced failed on, from an error set within cntlr_unhealthy of
-// that replacement. The error is presumed to have followed the replacement.
-// Each pass records why, and the scan goes on, to a standby due for
-// replacement, whose replacement leaves the record as it was. The replacement
-// is replaced on anything else: a row of its own beside those rows — after
-// which that replacement's record holds the next one — a report with no ERROR
-// row, an error set cntlr_unhealthy after the replacement, and a coordinator
-// that holds no record, as after a restart or a shard handoff. The record
-// names that replacement alone: another primary failing on the same rows is
-// replaced.
+// report carrying no reason — and the replacement reads the same rows from
+// the same pool: it is not replaced while every ERROR row of its report is
+// one the primary it replaced failed on, from an error set within
+// cntlr_unhealthy of that replacement. The error is presumed to have
+// followed the replacement. Each pass records why, and the scan goes on, to
+// a standby due for replacement, whose replacement leaves the record as it
+// was. The replacement is replaced on anything else: a row of its own beside
+// those rows — after which that replacement's record holds the next one — a
+// report with no ERROR row, an error set cntlr_unhealthy after the
+// replacement, and a coordinator that holds no record, as after a restart or
+// a shard handoff. The record names that replacement alone: another primary
+// failing on the same rows is replaced.
 func TestReactionReplacementNotReplacedOverTheSameError(t *testing.T) {
 	// commit applies what model.ReplaceCntlr commits for a primary: oldId
 	// leaves, fresh takes the role, settling, on a CN of its own, and its

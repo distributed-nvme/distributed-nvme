@@ -329,8 +329,12 @@ func TestCloneRecoveryFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
+	// The dm-clone is gone, so its row reads MISSING, as the check round
+	// reads it, and the failure rides in its details (CN18, CN29).
 	info := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
-	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		!strings.Contains(info.GetDetails(),
+			"destination bitmaps not applied: ") {
 		t.Fatalf("a failed destination-bitmap read reported %v/%q",
 			info.GetStatus(), info.GetDetails())
 	}

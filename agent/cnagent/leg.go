@@ -769,7 +769,7 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 // destination bitmaps were not applied or another later step of a clone
 // failed (CN18 says which), a group's leg_list holds a member that is not
 // available (CN12), or the build held an ns-dev off its td's raid0 while a
-// dm-clone the plan does not want may still be live (CN18). A goroutine
+// dm-clone the plan does not want may still write into it (CN18). A goroutine
 // re-runs the whole converge every CnConnectRetryInterval seconds under the
 // CN1 locks until a pass registers none of these (build's stopConnectRetry)
 // or the cntlr is torn down. The RPC itself retries a connect, or waits for
@@ -888,22 +888,27 @@ func (s *CnAgentServer) connectRetryLoop(
 
 // reconvergeCntlr re-runs one cntlr's converge from a background goroutine
 // under the CN1 locks. Every attempt is its own traceable operation (SH2/CN2).
+//
+// The cntlr is checked under the node read lock and before its object lock
+// is taken: a cntlr dropped since the attempt was scheduled — the drop runs
+// under the node write lock and forgets the cntlr's lock entry
+// (dropCntlrState) — gets no new entry from an attempt that converges
+// nothing (dnagent.md, SH11). Nothing that drops or replaces a held cntlr
+// runs under the read lock — a SyncupCntlr makes a new state only for a key
+// that has none — so the state the check finds stays for the attempt.
 func (s *CnAgentServer) reconvergeCntlr(
 	ctx context.Context,
 	key string,
 	st *cntlrState,
 ) {
-	if s.getCntlr(key) != st {
-		return
-	}
 	attemptCtx := common.WithTraceId(ctx, common.NewTraceId())
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
-	objLock := s.locks.Obj(key)
-	objLock.Lock()
-	defer objLock.Unlock()
 	if s.getCntlr(key) != st {
 		return
 	}
+	objLock := s.locks.Obj(key)
+	objLock.Lock()
+	defer objLock.Unlock()
 	s.convergeCntlr(attemptCtx, st)
 }

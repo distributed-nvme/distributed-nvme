@@ -274,11 +274,11 @@ func TestSweepFailureRetries(t *testing.T) {
 	}
 }
 
-// TestSweepSurvivesDeleteFailure is why the activation sweep does not reuse
-// deleteThinIdByName: that path, CN21's L7 delete, swallows the message error
-// by design (CN14 leaves a failed delete message to the pool's next rebuild),
-// and a swallowed error here would disarm the slice with the stray still in
-// the pool — a leak nothing would look at again before that rebuild.
+// TestSweepSurvivesDeleteFailure is why the activation sweep sends its own
+// delete messages and does not go through deleteThinIdByName, CN21's L7
+// delete: the sweep must see each failure, and one it did not see would
+// disarm the slice with the stray still in the pool — a leak no pass aims at
+// again.
 func TestSweepSurvivesDeleteFailure(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)
@@ -419,10 +419,10 @@ func TestStartupReconcileDefersSweep(t *testing.T) {
 // The cost of getting it wrong is unrecoverable rather than merely late. Once
 // the device really goes and the level comes back up, ensurePool finds no
 // device and re-arms — but if the device is still there, the next converge
-// takes the probe-match path, which arms nothing, and sweepThinIds never runs
-// again for that pool: every thin id deleted meanwhile keeps its data blocks
-// for the life of the pool. Keeping an arming too long costs one idempotent
-// sweep.
+// takes the probe-match path, which arms nothing, and the activation sweep
+// never runs for that pool: every thin id deleted meanwhile can keep its
+// data blocks for the life of the pool. Keeping an arming too long costs one
+// idempotent sweep.
 func TestUnverifiedPoolRemovalKeepsArming(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)
@@ -466,5 +466,474 @@ func TestUnverifiedPoolRemovalKeepsArming(t *testing.T) {
 	if !sweepPending(srv, testSlice) {
 		t.Error("the arming was dropped although the pool removal was never " +
 			"verified: the thin-id sweep is now owed by nobody")
+	}
+}
+
+// sweepFailDevId is the third td's dev_id in the failed-delete fixture.
+const sweepFailDevId = uint32(3)
+
+// failedDeleteFixture converges three created tds — dev_ids 1, 2 and 3, the
+// namespace on the first — over one slice, or two, whose pools hold the
+// three ids, and returns the tds and the third one's id. Each dump is the
+// one the fake reads off the pool's ids, so a sweep's dump lists what the
+// pool holds at that moment. The pools' activation sweeps find no stray.
+func failedDeleteFixture(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+	twoSlices bool,
+) ([]*pb.ThinDevice, uint64) {
+	t.Helper()
+	const thirdTd = uint64(0x5c)
+	slices := []uint64{testSlice}
+	if twoSlices {
+		slices = append(slices, testSlice2)
+	}
+	for _, sliceId := range slices {
+		node.holdThinIds(poolNameOf(srv, sliceId),
+			sweepLiveDevId, sweepLiveDevId2, sweepFailDevId)
+	}
+	tds := []*pb.ThinDevice{
+		createdTd(testTd, sweepLiveDevId),
+		createdTd(testSnapTd, sweepLiveDevId2),
+		createdTd(thirdTd, sweepFailDevId),
+	}
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+		twoSlices: twoSlices, tds: tds})
+	if n := callCnt(node, " 0 delete "); n != 0 {
+		t.Fatalf("fixture: the activation sweep deleted %d ids", n)
+	}
+	return tds, thirdTd
+}
+
+// TestAFailedThinDeleteSweepsThePool is CN14's sweep after a failed delete. A
+// td leaves td_list; L7 removes its thin volume and the delete message of its
+// id fails. No later pass lists that volume again, so the same pass sweeps
+// the pool's ids — under an RPC-delivered request only, as the activation
+// sweep — and deletes the id there. It never deletes an id a thin volume the
+// pass still lists maps, and such a volume keeps its id in its own pool's
+// sweep only, when two pools are swept in one pass too. A pool sweeps once in
+// the pass however many of its deletes failed, and once the read of the
+// listed volumes' ids has failed no pool is dumped any more. It remembers
+// nothing: a startup reconcile's failed delete is not swept, by it or by the
+// next pass, and a pass with no failed delete sweeps nothing. A sweep that
+// gets through ends a pending activation sweep of its slice.
+func TestAFailedThinDeleteSweepsThePool(t *testing.T) {
+	failDelete := func(node *fakeNode, devId uint32) {
+		node.failCmd[fmt.Sprintf("0 delete %d", devId)] =
+			msgIoctlFailed("pool", "Operation not permitted")
+	}
+
+	t.Run("the same pass sweeps the id", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		pool := poolName(srv)
+		tds, _ := failedDeleteFixture(t, srv, node, false)
+
+		node.Reset()
+		failDelete(node, sweepLiveDevId2)
+		keep := []*pb.ThinDevice{tds[0], tds[2]}
+		syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true, tds: keep})
+
+		if n := callCnt(node, deleteMsg(pool, sweepLiveDevId2)); n != 2 {
+			t.Fatalf("%d deletes of the dropped td's id, want 2: L7's "+
+				"failed one and the sweep's\ncalls:\n%s", n,
+				strings.Join(node.Calls(), "\n"))
+		}
+		assertOrder(t, node,
+			"cmd dmsetup remove "+thinName(srv, testSnapTd),
+			deleteMsg(pool, sweepLiveDevId2),
+			"cmd dmsetup message "+pool+" 0 reserve_metadata_snap",
+			"cmd thin_dump --metadata-snap ",
+			"cmd dmsetup message "+pool+" 0 release_metadata_snap",
+			deleteMsg(pool, sweepLiveDevId2))
+		if n := callCnt(node, "cmd thin_dump"); n != 1 {
+			t.Errorf("%d thin_dump calls, want 1", n)
+		}
+		for _, devId := range []uint32{sweepLiveDevId, sweepFailDevId} {
+			if n := callCnt(node, deleteMsg(pool, devId)); n != 0 {
+				t.Errorf("the sweep deleted the live id %d", devId)
+			}
+		}
+		if node.thinPools[pool][sweepLiveDevId2] {
+			t.Errorf("the dropped td's id is still in the pool metadata")
+		}
+
+		// Nothing is remembered: a re-send has no failed delete, and sweeps
+		// nothing.
+		node.Reset()
+		syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true, tds: keep})
+		if n := callCnt(node, "cmd thin_dump"); n != 0 {
+			t.Errorf("the re-send ran %d thin_dump calls, want none", n)
+		}
+	})
+
+	t.Run("a volume the pass still lists keeps its id", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		pool := poolName(srv)
+		tds, thirdTd := failedDeleteFixture(t, srv, node, false)
+
+		node.Reset()
+		failDelete(node, sweepLiveDevId2)
+		node.failCmdAlways["dmsetup remove "+thinName(srv, thirdTd)] =
+			"device-mapper: remove ioctl on " + thinName(srv, thirdTd) +
+				"  failed: Device or resource busy"
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+			reqOpts{revision: 3, primary: true, tds: tds[:1]}))
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if got := reply.GetAgentReply().GetCode(); got !=
+			common.ReplyCodeLeftover {
+			t.Fatalf("code %d, want %d: the third volume stays",
+				got, common.ReplyCodeLeftover)
+		}
+		if n := callCnt(node, "cmd thin_dump"); n != 1 {
+			t.Fatalf("%d thin_dump calls, want 1", n)
+		}
+		if n := callCnt(node, deleteMsg(pool, sweepFailDevId)); n != 0 {
+			t.Errorf("the sweep deleted id %d from under its live volume",
+				sweepFailDevId)
+		}
+		if !node.thinPools[pool][sweepFailDevId] {
+			t.Errorf("the live volume's id left the pool metadata")
+		}
+		if node.thinPools[pool][sweepLiveDevId2] {
+			t.Errorf("the dropped td's id is still in the pool metadata")
+		}
+	})
+
+	t.Run("a volume of another pool keeps no id here", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		pool, pool2 := poolNameOf(srv, testSlice), poolNameOf(srv, testSlice2)
+		tds, _ := failedDeleteFixture(t, srv, node, true)
+
+		node.Reset()
+		node.failCmd["message "+pool+" 0 delete 2"] =
+			msgIoctlFailed(pool, "Operation not permitted")
+		node.failCmdAlways["dmsetup remove "+
+			thinNameOf(srv, testSnapTd, testSlice2)] =
+			"device-mapper: remove ioctl failed: Device or resource busy"
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+			reqOpts{revision: 3, primary: true, twoSlices: true,
+				tds: []*pb.ThinDevice{tds[0], tds[2]}})); err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		// The second slice's volume of the dropped td is still there, and
+		// it maps id 2 in its own pool: the first pool's id 2 is a stray.
+		if n := callCnt(node, deleteMsg(pool, sweepLiveDevId2)); n != 2 {
+			t.Fatalf("%d deletes of id 2 in the first pool, want 2\n"+
+				"calls:\n%s", n, strings.Join(node.Calls(), "\n"))
+		}
+		if node.thinPools[pool][sweepLiveDevId2] {
+			t.Errorf("the first pool still holds the dropped td's id")
+		}
+		if n := callCnt(node, deleteMsg(pool2, sweepLiveDevId2)); n != 0 {
+			t.Errorf("the second pool's id 2 was deleted from under its "+
+				"live volume (%d messages)", n)
+		}
+		if !node.thinPools[pool2][sweepLiveDevId2] {
+			t.Errorf("the second pool lost the live volume's id")
+		}
+	})
+
+	t.Run("two swept pools keep only their own volumes' ids",
+		func(t *testing.T) {
+			srv, node := newTestServer(t)
+			pool, pool2 := poolNameOf(srv, testSlice),
+				poolNameOf(srv, testSlice2)
+			tds, _ := failedDeleteFixture(t, srv, node, true)
+
+			node.Reset()
+			node.failCmd["message "+pool+" 0 delete 2"] =
+				msgIoctlFailed(pool, "Operation not permitted")
+			node.failCmdAlways["dmsetup remove "+
+				thinNameOf(srv, testSnapTd, testSlice2)] =
+				"device-mapper: remove ioctl failed: Device or resource busy"
+			node.failCmd["message "+pool2+" 0 delete 3"] =
+				msgIoctlFailed(pool2, "Operation not permitted")
+			if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+				reqOpts{revision: 3, primary: true, twoSlices: true,
+					tds: tds[:1]})); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if n := callCnt(node, "cmd thin_dump"); n != 2 {
+				t.Fatalf("%d thin_dump calls, want 2: both pools swept\n"+
+					"calls:\n%s", n, strings.Join(node.Calls(), "\n"))
+			}
+			// The second slice's volume of the dropped td 2 is still there
+			// and maps id 2 in its own pool only: the first pool's id 2 is
+			// a stray, though the second pool is swept in the same pass.
+			if node.thinPools[pool][sweepLiveDevId2] {
+				t.Errorf("the first pool still holds the dropped td's id 2")
+			}
+			if !node.thinPools[pool2][sweepLiveDevId2] {
+				t.Errorf("the second pool lost the live volume's id 2")
+			}
+			for _, p := range []string{pool, pool2} {
+				if node.thinPools[p][sweepFailDevId] {
+					t.Errorf("%s still holds the dropped td's id 3", p)
+				}
+				if !node.thinPools[p][sweepLiveDevId] {
+					t.Errorf("%s lost the kept td's id 1", p)
+				}
+			}
+		})
+
+	t.Run("a pool whose deletes fail twice sweeps once", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		pool := poolName(srv)
+		tds, _ := failedDeleteFixture(t, srv, node, false)
+
+		node.Reset()
+		failDelete(node, sweepLiveDevId2)
+		failDelete(node, sweepFailDevId)
+		syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true,
+			tds: tds[:1]})
+		for _, call := range []string{
+			"cmd dmsetup message " + pool + " 0 reserve_metadata_snap",
+			"cmd thin_dump",
+		} {
+			if n := callCnt(node, call); n != 1 {
+				t.Errorf("%d calls of %q, want 1: the pool swept once "+
+					"for each failed delete\ncalls:\n%s", n, call,
+					strings.Join(node.Calls(), "\n"))
+			}
+		}
+		for _, devId := range []uint32{sweepLiveDevId2, sweepFailDevId} {
+			if node.thinPools[pool][devId] {
+				t.Errorf("the dropped td's id %d is still in the pool "+
+					"metadata", devId)
+			}
+		}
+		if !node.thinPools[pool][sweepLiveDevId] {
+			t.Errorf("the kept td's id left the pool metadata")
+		}
+	})
+
+	t.Run("a failed read of the listed ids stops every pool's dump",
+		func(t *testing.T) {
+			srv, node := newTestServer(t)
+			pools := []string{
+				poolNameOf(srv, testSlice), poolNameOf(srv, testSlice2)}
+			tds, _ := failedDeleteFixture(t, srv, node, true)
+
+			node.Reset()
+			for _, pool := range pools {
+				node.failCmd["message "+pool+" 0 delete 2"] =
+					msgIoctlFailed(pool, "Operation not permitted")
+			}
+			node.killCmdNoEffectAlways["dmsetup table "+
+				thinNameOf(srv, testTd, testSlice)] = true
+			if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+				reqOpts{revision: 3, primary: true, twoSlices: true,
+					tds: []*pb.ThinDevice{tds[0], tds[2]}})); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			// The first pool's dump comes before the read that fails; the
+			// second pool is not dumped after it.
+			for _, call := range []string{
+				" 0 reserve_metadata_snap", "cmd thin_dump",
+			} {
+				if n := callCnt(node, call); n != 1 {
+					t.Errorf("%d calls of %q, want 1: a pool was dumped "+
+						"after the read failed\ncalls:\n%s", n, call,
+						strings.Join(node.Calls(), "\n"))
+				}
+			}
+			for _, pool := range pools {
+				if !node.thinPools[pool][sweepLiveDevId2] {
+					t.Errorf("%s lost the dropped td's id without a sweep",
+						pool)
+				}
+			}
+		})
+
+	t.Run("a volume whose pool is unknown keeps its id", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		pool := poolName(srv)
+		tds, _ := failedDeleteFixture(t, srv, node, false)
+		// A thin volume of this sp whose table names a device the dm
+		// listing does not hold, and whose removal fails: its id may be in
+		// any pool.
+		const strangeDevId = uint32(4)
+		strange := thinNameOf(srv, 0x6c, testSlice)
+		node.holdThinIds(pool, strangeDevId)
+		node.mu.Lock()
+		node.dms[strange] = &fakeDm{
+			table: fmt.Sprintf("0 %d thin 7:99 %d",
+				testTdSize/512, strangeDevId),
+			thinIds: map[uint32]bool{},
+		}
+		node.devNo["/dev/mapper/"+strange] = node.newDevNo()
+		node.mu.Unlock()
+
+		node.Reset()
+		failDelete(node, sweepLiveDevId2)
+		node.failCmdAlways["dmsetup remove "+strange] =
+			"device-mapper: remove ioctl failed: Device or resource busy"
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+			reqOpts{revision: 3, primary: true,
+				tds: []*pb.ThinDevice{tds[0], tds[2]}})); err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if n := callCnt(node, "cmd thin_dump"); n != 1 {
+			t.Fatalf("%d thin_dump calls, want 1", n)
+		}
+		if n := callCnt(node, deleteMsg(pool, strangeDevId)); n != 0 {
+			t.Errorf("the sweep deleted id %d, which a listed volume may "+
+				"map", strangeDevId)
+		}
+		if node.thinPools[pool][sweepLiveDevId2] {
+			t.Errorf("the dropped td's id is still in the pool metadata")
+		}
+	})
+
+	t.Run("a listed volume whose id cannot be read stops it",
+		func(t *testing.T) {
+			srv, node := newTestServer(t)
+			pool := poolName(srv)
+			tds, _ := failedDeleteFixture(t, srv, node, false)
+
+			node.Reset()
+			failDelete(node, sweepLiveDevId2)
+			node.killCmdNoEffectAlways["dmsetup table "+
+				thinName(srv, testTd)] = true
+			if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+				reqOpts{revision: 3, primary: true,
+					tds: []*pb.ThinDevice{tds[0], tds[2]}})); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			// The dump comes first, and the read of the tables after it
+			// stops the sweep before any delete of its own.
+			if n := callCnt(node, "cmd thin_dump"); n != 1 {
+				t.Errorf("%d thin_dump calls, want 1", n)
+			}
+			if n := callCnt(node, deleteMsg(pool, sweepLiveDevId2)); n != 1 {
+				t.Errorf("%d deletes of the dropped td's id, want L7's "+
+					"failed one: a volume's id is unknown", n)
+			}
+			if !node.thinPools[pool][sweepLiveDevId2] {
+				t.Errorf("the dropped td's id went without a sweep")
+			}
+		})
+
+	t.Run("it ends a pending activation sweep", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		tds, _ := failedDeleteFixture(t, srv, node, false)
+		st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
+		st.pendingSweep[testSlice] = true
+
+		node.Reset()
+		failDelete(node, sweepLiveDevId2)
+		syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true,
+			tds: []*pb.ThinDevice{tds[0], tds[2]}})
+		if n := callCnt(node, "cmd thin_dump"); n != 1 {
+			t.Errorf("%d thin_dump calls, want 1: the sweep after the "+
+				"failed delete, and no activation sweep after it", n)
+		}
+		if sweepPending(srv, testSlice) {
+			t.Errorf("the sweep left the slice armed")
+		}
+	})
+
+	t.Run("a startup reconcile does not sweep", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		pool := poolName(srv)
+		ctx := context.Background()
+		tds, _ := failedDeleteFixture(t, srv, node, false)
+		keep := []*pb.ThinDevice{tds[0], tds[2]}
+		if err := node.writeProto(ctx,
+			srv.nf.LocalCntlrPath(testCluster, testCn, testSp, testCntlr),
+			cntlrReq(reqOpts{revision: 3, primary: true,
+				tds: keep})); err != nil {
+			t.Fatalf("seeding the cntlr file: %v", err)
+		}
+
+		node.Reset()
+		failDelete(node, sweepLiveDevId2)
+		fresh := newCnServer(node)
+		reconcileForTest(t, fresh)
+		if n := callCnt(node, deleteMsg(pool, sweepLiveDevId2)); n != 1 {
+			t.Fatalf("%d deletes in the reconcile, want L7's one", n)
+		}
+		if n := callCnt(node, "cmd thin_dump"); n != 0 {
+			t.Errorf("the reconcile ran %d thin_dump calls, want none", n)
+		}
+
+		// The first RPC pass has no failed delete of its own: the volume is
+		// gone, so nothing sends the delete again.
+		node.Reset()
+		syncupCntlrAt(t, fresh, reqOpts{revision: 3, primary: true,
+			tds: keep})
+		if n := callCnt(node, "cmd thin_dump"); n != 0 {
+			t.Errorf("the next pass ran %d thin_dump calls, want none", n)
+		}
+		if !node.thinPools[pool][sweepLiveDevId2] {
+			t.Errorf("the id left the pool metadata without a sweep")
+		}
+	})
+}
+
+// TestASweepAfterFailedDeletesReadsTheTablesOnce counts the thin volumes'
+// table reads of CN14's sweep after a failed delete. The pass reads every
+// listed volume's table once, for all the pools whose delete failed, so a
+// pass whose deletes failed in two pools reads no more tables than one whose
+// delete failed in one; and it reads them only once a pool's dump is in, so
+// a pass whose pools refuse every message, the reserve included, as a pool
+// in read-only or fail mode does, reads none for the sweep. Each pass drops
+// one td of three from a fresh fixture of two slices, so the rest of the
+// pass reads the same tables in all three.
+func TestASweepAfterFailedDeletesReadsTheTablesOnce(t *testing.T) {
+	tableReads := func(refuse func(node *fakeNode, pools []string)) int {
+		t.Helper()
+		srv, node := newTestServer(t)
+		tds, thirdTd := failedDeleteFixture(t, srv, node, true)
+		pools := []string{
+			poolNameOf(srv, testSlice), poolNameOf(srv, testSlice2)}
+		node.Reset()
+		refuse(node, pools)
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+			reqOpts{revision: 3, primary: true, twoSlices: true,
+				tds: []*pb.ThinDevice{tds[0], tds[2]}})); err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		reads := 0
+		for _, tdId := range []uint64{testTd, testSnapTd, thirdTd} {
+			for _, sliceId := range []uint64{testSlice, testSlice2} {
+				reads += callCnt(node,
+					"cmd dmsetup table "+thinNameOf(srv, tdId, sliceId))
+			}
+		}
+		return reads
+	}
+	refuseDelete := func(node *fakeNode, pool string) {
+		node.failCmd[fmt.Sprintf("message %s 0 delete %d",
+			pool, sweepLiveDevId2)] =
+			msgIoctlFailed(pool, "Operation not permitted")
+	}
+
+	onePool := tableReads(func(node *fakeNode, pools []string) {
+		refuseDelete(node, pools[0])
+	})
+	twoPools := tableReads(func(node *fakeNode, pools []string) {
+		refuseDelete(node, pools[0])
+		refuseDelete(node, pools[1])
+	})
+	sick := tableReads(func(node *fakeNode, pools []string) {
+		for _, pool := range pools {
+			node.failCmdAlways["message "+pool+" 0 "] =
+				msgIoctlFailed(pool, "Operation not supported")
+		}
+	})
+	if twoPools != onePool {
+		t.Errorf("%d table reads with two pools' deletes failed, %d with "+
+			"one: the sweep read the tables once for each pool",
+			twoPools, onePool)
+	}
+	// The sweep's one read covers the six volumes the pass's snapshot
+	// listed, the two L7 removed included.
+	if onePool-sick != 6 {
+		t.Errorf("%d table reads with the pools refusing every message, %d "+
+			"with one delete failed: want the sweep's 6 fewer", sick, onePool)
 	}
 }

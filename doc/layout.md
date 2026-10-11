@@ -43,7 +43,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), and vet and test over the whole module |
 | `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, `glossary.md`, the project vocabulary, and `core_glossary.md`, its core words in plain language |
 | `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and in `integtest/bin/` the built drivers, the etcd download cache and the gojq fallback a suite installs when the machine running it has no jq |
-| `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation) |
+| `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation), beside tests that read the schema's descriptors |
 | `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and both agents share (`architecture.md`, Metadata units), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |
 | `etcdutil/` | the one door to etcd: typed reads, writes, scans and watches and the STM runners over one client, with the protobuf (un)marshaling and the etcd log records inside (`dnv-worker.md`, EU1 to EU7) |
 | `model/` | the etcd data model as Go, shared by the gateway, the worker and dnv-cdc: key formats and their parsers, the `cluster_id` derivation, the typed SP snapshot loader, capacity-key maintenance, the allocator's candidate scans, the mutations the gateway and the worker share, and the worker's sp-drain and clone-drain steps (`dnv-worker.md`, MD1 to MD9) |
@@ -90,7 +90,7 @@ proves is its document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
 
 | package | may import (internal) | external notes |
 |---|---|---|
-| `pb` | — | generated code only; imports the gRPC and protobuf runtimes |
+| `pb` | — | generated code only, its tests aside; imports the gRPC and protobuf runtimes |
 | `common` | — | the standard library, `golang.org/x/sync`, protobuf and gRPC. MUST NOT import `pb`, the etcd client or viper: it stays the leaf. `PbToLogValue`, the `OsClient` and the interceptors all operate on the generic `proto.Message`; `_test.go` files in `common` MAY import `pb` for fixtures. |
 | `etcdutil` | `common` | the etcd client, its `concurrency` package included, and the two modules that arrive with it (`dependencies.md`, Direct dependencies). Takes `proto.Message` parameters and MUST NOT import `pb`; its `_test.go` files MAY import `pb` for fixtures, as in `common`, because the tests of `dnv-worker.md` EU7 need a concrete `proto.Message`. |
 | `model` | `common`, `pb`, `etcdutil` | the etcd data model as Go (`dnv-worker.md`, MD1 to MD9): key formats, `cluster_id`, capacity keys, the allocator, the shared mutations. No gRPC; never dials an agent; MUST NOT import `gateway`, `worker`, `agent`, `cdc` or `ctl`. |

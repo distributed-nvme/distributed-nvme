@@ -417,10 +417,13 @@ RPCs; this worker's reaction path passes zero.
   exist: every listed side still `provisioned` false is set true; `SpRev` is
   bumped once iff any was written. It returns the sides actually flipped, so
   the `flip applied` record can name each (RW18; Log records).
-* `FlipCreated` takes a list of `TdRef`s (name and td id) and commits them
+* `FlipCreated` takes a list of `TdRef`s (name, td id and the torn mark the
+  reports carried) and commits them
   `MaxFlipCreatedPerTxn` at a time in list order, one STM each (RW19): it
   skips a candidate whose key is absent, whose `td_id` differs, or that is
-  already `created`; sets the rest; each STM bumps once iff it wrote; it
+  already `created`; sets the rest — `created`, and `torn` as the ref
+  carries it, in the same put, so the mark is written once and a mark that
+  comes after the flip changes nothing; each STM bumps once iff it wrote; it
   returns the tds actually flipped, as above — on an error, those of the STMs
   that committed before the failing one, which the sp worker does not log
   (RW19).
@@ -1116,9 +1119,9 @@ agent answers with the complete `*Info` again (`architecture.md`, Check
 streams). An abandoned round carries **no** health verdict: nothing was
 observed about the agent, the round was only overtaken. The sp coordinator
 is the one parent that hands a change on late, and on purpose: its cntlr
-children receive a fan-out once every running side child has reported it
-applied, and at the latest one `cntlr_interval` after the sides were handed
-it (RW14's sides first); a fan-out that demotes a primary reaches the
+children receive a fan-out once every side child RW14's sides-first hold
+waits for has reported it applied, and at the latest one `cntlr_interval`
+after the sides were handed it; a fan-out that demotes a primary reaches the
 demoted cntlr at once and the sides only when RW22's demotion hold ends;
 from each hand-over on, this rule applies unchanged.
 
@@ -1178,11 +1181,11 @@ has stopped, and logs neither `revision worker started` nor
 worker on a delete or a rescan (SW3, SW4), the sp coordinator on its child
 diff (RW14) — runs such a stop on a goroutine of its own and does not wait
 for it, so no other object it drives waits out that call, save the cntlr
-half of an sp fan-out that restarted a side: RW14's sides-first hold waits
-for that side's report, which its new child can send only once the old
-child's stop has returned (RW1), so those cntlrs can wait out the call up
-to the hold's one-`cntlr_interval` bound. A parent that stops joins its
-children, those stops included, with a wait group (SW5).
+half of an sp fan-out that restarted a side the sides-first hold waits for
+(RW14): the hold waits for that side's report, which its new child can send
+only once the old child's stop has returned (RW1), so those cntlrs can wait
+out the call up to the hold's one-`cntlr_interval` bound. A parent that
+stops joins its children, those stops included, with a wait group (SW5).
 
 RW12. **No backoff anywhere.** The round is the retry cadence for
 everything the loop could not finish — an unreachable agent, a rejected
@@ -1224,7 +1227,9 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
 (an `SpRev` put: `revision` plus `sp_name`) it loads the SP with
 `model.LoadSp` (MD3), resolves every side's `dn_id` (through `DnByAddr` by
 the side's `addr_port`) and every cntlr's `cn_id`, builds every
-`SyncupSideRequest` and `SyncupCntlrRequest` once (RW15, RW16), and diffs
+`SyncupSideRequest` and `SyncupCntlrRequest` once (RW15, RW16), keeping
+with each side's plan the side's `err_epoch` as that same load read it, for
+the sides-first hold (below), and diffs
 its **children**: one per side — the sp id, leg id and side id, spare legs'
 sides included — and one per cntlr. New: start; gone: stop (RW11), without
 waiting for the stop; a child whose endpoint changed is restarted at the
@@ -1260,16 +1265,30 @@ their slice (HL2).
 **Sides first.** The side half of the diff is applied at once, unless a
 demotion hold keeps it back (RW22). The cntlr half — every running cntlr
 child's new request, and every cntlr child to start — is HELD until every
-running side child has reported the fan-out's revision (or a newer one)
-applied, or until one `cntlr_interval` has passed since the hold began —
-when the sides were handed the fan-out — whichever comes first. A side left
-idle (above) is not waited for, and with every side idle the cntlrs go at
-once. A side
-child the diff restarts — at a new endpoint, or on a changed request — is
-waited for like any other, though its new child reports nothing until the
-old child's stop has returned (RW1; the cost is below). A cntlr child the
-diff stops is stopped at once, beside the sides', and one it restarts is
-started with the release. A side child reports each accepted reply (RW5)
+side the hold waits for has reported the fan-out's revision (or a newer
+one) applied, or until one `cntlr_interval` has passed since the hold
+began — when the sides were handed the fan-out — whichever comes first.
+The hold waits for a set of sides: the running side children whose `Side`
+record carried no `err_epoch` in the load the set is taken from. A hold
+takes the set from its fan-out's load when it begins, and from a bump's
+load when the bump — a fan-out of a newer revision — replaces the held
+plans (below); nothing else changes it. A re-fan at the held revision,
+such as a re-resolution tick's, keeps the set and adds none of the side
+children it starts; a side child of the set that the diff stops is not
+waited for, and one the diff restarts is. Until a bump takes the set
+again, a side that turns unhealthy during the wait stays in it, so one
+whose agent stops answering can hold the cntlrs for the whole interval,
+and one whose epoch clears meanwhile is not added. A side the load found
+unhealthy is left out because the hold only narrows races (below):
+waiting for a side that does not answer — on a dead disk node, or the side
+of the leg AR8 parks there (AR8 step 1) — would make every change of the
+pool wait the whole interval and let a failover fire inside the wait. A
+side left idle (above) is not waited for either, and a hold that waits for
+no side lets the cntlrs go at once. A side child the diff restarts — at a new
+endpoint, or on a changed request — reports nothing until the old child's
+stop has returned (RW1; the cost is below). A cntlr child the diff stops
+is stopped at once, beside the sides', and one it restarts is started with
+the release. A side child reports each accepted reply (RW5)
 whose revision is newer than the last one it reported, and a `CheckSide`
 reply counts as much as a `SyncupSide` one, because a side whose agent
 already holds the revision — after a handoff, say — is sent no `Syncup*` at
@@ -1277,8 +1296,9 @@ all (RW4 step 5). The hold lives on the coordinator's loop, released by
 those reports or by a timer on the same loop, and never blocks it: reports,
 ticks and the next desired change are served while it waits, and every
 child keeps its rounds. A fan-out that finds a hold pending replaces what
-is held and keeps the deadline, so a stream of bumps cannot hold the cntlrs
-past one interval, and the superseded requests are never sent (RW3); one
+is held — a bump takes the sides to wait for afresh, from its own load —
+and keeps the deadline, so a stream of bumps cannot hold the cntlrs past
+one interval, and the superseded requests are never sent (RW3); one
 that demotes a primary ends the hold instead, and its demotion hold keeps
 the newest plans (RW22). A release by the timer logs `sp sides unsynced`
 (Log records). Nothing of the hold is persisted: a new owner, or a
@@ -1314,20 +1334,23 @@ old primary does not answer — every failover of one that cannot be
 reached, since the worker judges no reachability — holds its sides and its
 promotion for the whole demotion hold, and the sides-first hold begins only
 after it. Only an accepted reply reports,
-so a side whose agent does not accept the fan-out's revision costs that
-fan-out up to one `cntlr_interval` of cntlr latency and an
-`sp sides unsynced` record, a failover's promotion included, and RW9 lets
-that interval be as long as `MaxHealthCheckInterval` allows. That is paid on every fan-out of a pool with a side on a dead disk
-node, and AR8's repair does not end it: the leg AR8 replaces is parked in
-`spare_leg_list` with its side (AR8 step 1), and a parked leg's side is a
-side child like any other. Until that disk node returns or an operator's
-`DeleteSpareLeg` removes the parked leg, every hold of that SP runs the
-whole interval and logs `sp sides unsynced`, a disable of its primary is
-failed over inside its own hold whenever AR5 has a candidate, the
-failover's demotion hold ending that sides-first hold (RW22), and after a
-restart or a
-handoff its cntlr children start — and begin their `CheckCntlr` rounds —
-one whole interval late. It is also paid in normal
+so a side the hold waits for whose agent does not accept the fan-out's
+revision costs that fan-out up to one `cntlr_interval` of cntlr latency and
+an `sp sides unsynced` record, a failover's promotion included, and RW9
+lets that interval be as long as `MaxHealthCheckInterval` allows. A side on
+a dead disk node costs that only in a hold that waits for it: one whose
+fan-out loaded the pool before the side's child had stamped its
+`err_epoch` (HL2), or one during which the disk node dies. A disable of the
+primary is failed over inside such a hold whenever AR5 has a candidate, the
+failover's demotion hold ending that sides-first hold (RW22). Every hold
+that takes its set from a load made once the epoch is stamped — its
+fan-out's when it begins, a bump's that replaces its plans, or, when it
+begins as a demotion hold ends, that of the newest plans the demotion hold
+kept (RW22) — leaves the side out, and the leg AR8 parks on that disk node
+(AR8 step 1) keeps its side's epoch, so a parked leg costs no hold. The
+price of leaving a side out is the narrowing itself: a side the load found
+unhealthy that answers after all is not waited for, and the three races
+above stay open for it. The cost is also paid in normal
 operation: a new side — of a new SP, a grow, a spare, a migration destination
 — whose first `CheckSide` and `SyncupSide` reach its disk node before the dn
 role's `SyncupDn` has introduced its pointer is refused
@@ -1390,10 +1413,11 @@ has reported its demotion's revision, or a newer one, applied, or until
 reports as a side child does (RW14): each accepted reply (RW5), a
 `CheckCntlr` one as much as a `SyncupCntlr` one, whose revision is newer
 than the last one it reported. Then the sides are handed the fan-out, and
-the other cntlrs follow under the sides-first hold, whose bound of one
-`cntlr_interval` runs from that moment. The demotion hold waits for the
-demoted cntlrs alone, so it holds the other cntlrs even when every side is
-idle.
+the other cntlrs follow under the sides-first hold, which takes the sides
+it waits for (RW14) from the side plans the demotion hold kept, the
+newest, and whose bound of one `cntlr_interval` runs from that moment.
+The demotion hold waits for the demoted cntlrs alone, so it holds the
+other cntlrs even when every side is idle.
 Like the sides-first hold, it lives on the coordinator's loop and never
 blocks it, and a demotion hold its timer ends logs `sp demotion unsynced`
 (Log records).
@@ -1476,8 +1500,8 @@ RW16. **Cntlr request.** A `SyncupCntlrRequest` carrying `cluster_id`,
 `cn_id`, the `cntlr_pointer` (sp id, cntlr id), the revision, `bdev_conf`
 from the `SpConf`, `sp_level`, `cntlr` (the `Cntlr` record), `id_to_slice`
 keyed by the slice id rendered with `IdKeyFmt` — the key the cn agent reads
-—, `td_list` in `td_name_list` order, `nqn_to_subsystem`, `clone_list`,
-`xfer_list` and `migr_list`. Every cntlr of the SP receives the full state
+—, `td_list` in `td_name_list` order, `nqn_to_subsystem`, `clone_list`
+and `xfer_list`. Every cntlr of the SP receives the full state
 (`architecture.md`, sp role) — less any clone whose `deleting` is set, which
 is absent from every cntlr's `clone_list` (CLD5).
 
@@ -1503,7 +1527,17 @@ and `CheckCntlrReply` with an accepted code (RW18: code zero or
 `ReplyCodeLeftover`) is scanned: a td of the loaded state with `created` false
 is a candidate when `cntlr_info.td_id_to_thin_info` holds its `td_id`, that
 entry's `slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and
-every row is `RES_STATUS_OK`. Candidates go to `model.FlipCreated`; a reply
+every row is `RES_STATUS_OK`. The entry's `torn` mark, the cn agent's report
+that the snapshot is torn (`cnagent.md` CN14), travels with the candidate,
+and `model.FlipCreated` writes it into the record's `torn` in the put that
+sets `created` (MD6; `architecture.md`, Thin devices). A reply's mark counts
+only for a td that reply completes; when the replies one drain folds into
+the call complete a td more than once, the td is flipped torn if any of
+them marks it. A `SyncupCntlrReply` and a `CheckCntlrReply` carry the mark
+alike, so the flip records it whichever reply completes the td. Reason: the
+mark lives only in the agent's memory until the flip, and the thin device
+record is the one place an operator reads it from (`ListThinDevices`).
+Candidates go to `model.FlipCreated`; a reply
 that completes none causes no etcd traffic. The call commits them
 `MaxFlipCreatedPerTxn` at a time, in list order, one STM each, and each STM
 that wrote bumps `SpRev` once: the coordinator folds every td one drain of its
@@ -1638,7 +1672,8 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
   be opened, breaks or misses a round, or `side_dev_info` or any
   `cn_id_to_dm_error`, `cn_id_to_dm_linear` or `cn_id_to_nvmeof` row is
   `RES_STATUS_ERROR`, or a `migr_src_info` or `migr_dst_info` row is `ERROR`;
-  it is cleared when its next round is clean.
+  it is cleared when its next round is clean. A sides-first hold whose
+  fan-out loads the epoch set does not wait for the side (RW14).
 
 `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any of
 the three, and `Leg.err_epoch` clears on the primary's `RES_STATUS_OK`
@@ -1665,28 +1700,30 @@ standby's.
 **Row classes.** The `ERROR` rows a cntlr is judged by — every map but
 `leg_id_to_leg` — are of two classes. A **shared-state** row belongs to the
 stack of a td whose `created` is set and whose thin row, in some slice,
-reads `ERROR` with details that name the missing thin id (`thinIdMissing`):
-the ENODATA with which dm-thin refuses the bare dmsetup create of a created
-td's thin table once the slice's pool no longer holds its id, as dmsetup
-prints it (`cnagent.md` CN14). The stack is the td's own rows — its thin rows,
-its raid0 and its dm-error — and every row of an object that exists for it
-alone: the ns-dev and the nvmet namespace of each of its namespaces, the
-three rows of a transfer out of one of them, the three of a clone onto it.
-The pool lives on the SP's legs, so whichever cntlr holds the primary role
-reads the same rows, and no failover brings the td back: an operator does
-(`architecture.md`, Known limits). Every other `ERROR`
-row is the cntlr's **own**. Both classes set `Cntlr.err_epoch` as the
-rules above say — the row stays visible and the epoch set — and the class
-steers AR5 and AR7 alone: a report whose `ERROR` rows are all shared-state
-is no failover trigger, nor a replacement one for a primary with no
-failover candidate. Only a converge's report names the id. A Check round's
-probe finds the volume absent and reads it `MISSING` with empty details,
-while the raid0 over it still reads `ERROR`, so its report of the same loss
-holds own rows only. It is the second refusals that bound what those rows
-cost: AR5's keeps the role from moving back and forth over them, and AR7's,
-once a primary with no failover candidate has been replaced over them,
-keeps its replacement, which reads the same rows, from being replaced in
-turn (Known limits).
+reads `ERROR` with the reason `RES_REASON_THIN_ID_LOST` (`architecture.md`,
+Live-state reporting): the cn agent sets it when dm-thin refuses a created
+td's thin table with ENODATA because the slice's pool has lost its id
+(`cnagent.md` CN14). The class reads that field, never a row's details:
+a control-plane decision does not parse a tool's English. The stack is the
+td's own rows — its thin rows, its raid0 and its dm-error — and every row
+of an object that exists for it alone: the ns-dev and the nvmet namespace
+of each of its namespaces, the three rows of a transfer out of one of
+them, the three of a clone onto it. The pool lives on the SP's legs, so
+whichever cntlr holds the primary role reads the same rows, and no
+failover brings the td back: an operator does (`architecture.md`, Known
+limits). Every other `ERROR` row is the cntlr's **own**. Both classes set
+`Cntlr.err_epoch` as the rules above say — the row stays visible and the
+epoch set — and the class steers AR5 and AR7 alone: a report whose
+`ERROR` rows are all shared-state is no failover trigger, nor a
+replacement one for a primary with no failover candidate. Only a
+converge's report carries the reason. A Check round's probe finds the
+volume absent and reads it `MISSING` with empty details and no reason,
+while the raid0 over it still reads `ERROR`, so its report of the same
+loss holds own rows only. It is the second refusals that bound what those
+rows cost: AR5's keeps the role from moving back and forth over them, and
+AR7's, once a primary with no failover candidate has been replaced over
+them, keeps its replacement, which reads the same rows, from being
+replaced in turn (Known limits).
 
 **The settle.** `Cntlr.settling` is set by the op that makes the cntlr primary
 (`Failover`, a primary `ReplaceCntlr`, MD6; the gateway's `CreateStoragePool`
@@ -1716,8 +1753,9 @@ reads is clean and no proof of the build that follows, and settling on it
 would leave that build to `primary_unhealthy`. Which rows read `PROVISIONING`,
 `MISSING` or `ERROR` in which state — a slice deferred by its first zeroing, a
 member a converge found unavailable and left to the connect retry, a device a
-Check round probes absent, a clone whose source is not connected or could not
-be read, a clone that waits for room in its CN's metadata area, whose two
+Check round probes absent, a clone whose source is not connected, has an
+endpoint with no live controller or no namespace, or could not be read, a
+clone that waits for room in its CN's metadata area, whose two
 rows read `PROVISIONING` (`architecture.md`, Metadata units) — is the cn
 agent's (`cnagent.md` CN9, CN10, CN16, CN17, CN18); a
 primary showing such a row stays settling, held to the longer threshold, until
@@ -2130,13 +2168,13 @@ The `disabled` trigger waits out no threshold and needs no verdict:
 disabling is explicit operator intent, and the disabled primary has
 normally stopped serving by then (`architecture.md`, Cntlrs) — its disable
 request reaches it one sides-first hold after the bump (RW14). A pass runs
-inside that hold whenever a side of the SP does not report and the hold
-lasts a whole `cntlr_interval` — at every disable, while the SP keeps a
-leg AR8 parked on a dead disk node (RW14) — and fails the primary over
-first: the failover's demotion hold ends that sides-first hold, so the held
-disable
-request is never sent, and the primary is handed its demotion ahead of the
-sides, which wait for its report or for `DemotionHoldTimeout` (RW22). The
+inside that hold whenever a side the hold waits for does not report and
+the hold lasts a whole `cntlr_interval` — a side on a disk node that died
+too recently for its epoch to be in the fan-out's load, or during the hold
+(RW14) — and fails the primary over first: the failover's demotion hold
+ends that sides-first hold, so the held disable request is never sent, and
+the primary is handed its demotion ahead of the sides, which wait for its
+report or for `DemotionHoldTimeout` (RW22). The
 candidate-skip bookkeeping is unchanged by that trigger, so it is
 deliberately **not** edge-triggered: a `disabled` primary with no eligible
 candidate re-emits `reaction skipped` / `no candidate` once per pass, for
@@ -2196,11 +2234,11 @@ limits):
   settles and sooner once it has. A report with any other `ERROR` row is
   taken for a fault of the primary's own, and the role moves as for any;
   that failover records the report's rows in turn. So an error the classes
-  do not name — a lost thin id a Check round reports, whose probe names no
-  id, among them (HL2) — does not send the role back to the cntlr it last
-  left while the new primary fails no row the old one did not: in an SP of
-  two cntlrs it moves the role once, and in a larger one it can first move
-  it on to a cntlr that has not held it. An `err_epoch` set later is a new
+  do not name — a lost thin id a Check round reports, whose probe carries
+  no reason, among them (HL2) — does not send the role back to the
+  cntlr it last left while the new primary fails no row the old one did
+  not: in an SP of two cntlrs it moves the role once, and in a larger one
+  it can first move it on to a cntlr that has not held it. An `err_epoch` set later is a new
   error, judged as any, and a report with no `ERROR` row — a primary read
   unreachable, whose rows the worker marks `UNKNOWN` — is refused nothing.
 
@@ -2315,8 +2353,8 @@ due for replacement is still replaced, and with none the pass goes on
   shared-state class alone is not replaced — `reaction skipped`
   (`shared_state`, with its `old_cntlr_id` and the smallest such `td_id`).
   The replacement would read the same rows from the same pool. The report
-  names the lost id only while it is a converge's (HL2). A Check reply
-  carries an info when the probe's view changed since its stream last sent
+  carries the lost-id reason only while it is a converge's (HL2). A Check
+  reply carries an info when the probe's view changed since its stream last sent
   one, and always on a fresh stream's first probe (HL5; `architecture.md`,
   Check streams), so a converge's report stays the one held only until that
   view changes or the stream is replaced, as by a round timeout, a broken
@@ -2334,9 +2372,10 @@ due for replacement is still replaced, and with none the pass goes on
   `reaction skipped` (`same_error`, with its `old_cntlr_id`; the kind,
   `replace_cntlr`, tells the record from AR5's). The rule presumes the
   error followed the replacement, as AR5's presumes it followed the role: a
-  Check round's report of a lost thin id names no id, so the first refusal
-  lets the primary be replaced on it, and the replacement, which reads the
-  same rows from the same pool, would otherwise be replaced in turn once
+  Check round's report of a lost thin id carries no reason, so the first
+  refusal lets the primary be replaced on it, and the replacement, which
+  reads the same rows from the same pool, would otherwise be replaced in
+  turn once
   per `cntlr_unhealthy` for as long as the td stayed lost — in an SP of one
   cntlr, each time moving its whole stack to another CN. It compares rows,
   not causes: a replacement whose own fault fails only rows the old primary
@@ -2862,10 +2901,11 @@ provisioned or created flip, naming the new `SpRev` (RW18, RW19);
 `sp sides unsynced` the release of RW14's sides-first hold by its timer, one
 record per hold and never per round, and expected in normal operation too:
 for a new side whose first `SyncupSide` its disk node refused
-(`dnagent.md` DN8), at every hold of an SP with a side on a dead disk node,
-that of a leg AR8 parked there included, and at a hold whose fan-out
-restarted a side while its old child was inside a `Syncup*` that outlasts
-the hold (RW1, RW14); `sp demotion unsynced` the end of RW22's demotion
+(`dnagent.md` DN8), at a hold that waits for a side on a disk node that died
+too recently for its epoch to be in the hold's load, or during the hold,
+and at a hold whose fan-out restarted a side while its old child was inside
+a `Syncup*` that outlasts the hold (RW1, RW14); `sp demotion unsynced` the
+end of RW22's demotion
 hold by its timer, one record per demotion hold and never per round, and expected
 at every failover whose old primary does not report its demotion applied
 within the wait — always for an old primary on a dead CN, or one cut off
@@ -2916,11 +2956,16 @@ listening on the server's own address, so that every stored `addr_port` looks
 like a production one and the worker dials a real interface, and `workerctl`,
 run on the server against etcd. The vote timers are shortened through the CM1
 flags, so every membership change completes in seconds. Every case but the
-failover case shortens its intervals, and the thresholds it means to reach,
-through its cluster's and pool's stored conf, so every reaction completes in
-seconds. The failover case keeps the shipped default intervals and thresholds
-instead, since it proves the timing those defaults give; its cntlr, side and
-leg thresholds are long enough that only failovers move a role in it. The
+failover and hold cases shortens its intervals, and the thresholds it means
+to reach, through its cluster's and pool's stored conf, so every reaction
+completes in seconds. The failover case keeps the shipped default intervals
+and thresholds instead, since it proves the timing those defaults give; its
+cntlr, side and leg thresholds are long enough that only failovers move a
+role in it. The hold case shortens every interval but `cntlr_interval`, the
+bound of the sides-first hold (RW14), which it lengthens so that a hold that
+runs to its bound and one its sides end lie seconds apart in the fakes'
+records, which carry the server's clock; its thresholds are long enough
+that nothing reacts on health. The
 driver reads every worker and fake log over ssh and asserts on it; a fake's
 gRPC records carry each request's trace id, whose seed prefix names the
 worker that sent it (RW10).
@@ -2962,6 +3007,13 @@ revision gate being per object and not per cluster.
   failover on its threshold waits for the coordinator's own verdicts, two of
   its rounds in a row, so after a handoff a stale epoch fires nothing before
   the new owner's own, and a verdict counts whether or not it writes;
+* hold — the sides the sides-first hold waits for: a side with no health
+  epoch that never answers its syncup holds the cntlrs for the whole
+  interval, while one whose epoch the fan-out's load holds is not waited
+  for and the cntlrs follow the healthy side's answer; a bump inside a hold
+  takes the sides again from its own load; and after a failover's demotion
+  hold the wait leaves out a side that the load of the plans the demotion
+  hold kept found unhealthy;
 * drain — the sp drain takes an SP apart in bounded steps and restores every
   ledger, the clone drain removes a clone's chunks in batches, reaches the
   CN as an exclusion and in its last step gives the clone's metadata units
@@ -2981,7 +3033,9 @@ the attribution of the vote and handoff cases; RW13 to RW21 by the smoke
 case's request builders, the revision case's moved endpoint, the bitmap case's
 migration confs and the reaction case's grow and spare confs; RW22, its demotion hold
 ended once by the demoted cntlr's report and once by its timer, with the
-sides-first hold of RW14 behind it, by the failover case; HL1 to HL6 by the
+sides-first hold of RW14 behind it, by the failover case; RW14's choice of
+the sides its hold waits for, at a hold's start, at a bump and after a
+demotion hold, by the hold case; HL1 to HL6 by the
 health case and HL2's settle by the reaction case; the rewrite of the
 discovery records by the listing rule (`architecture.md`, [D18]) in a cntlr's
 health write (HL2) and in a failover on either trigger (MD6) by the failover
@@ -3001,8 +3055,11 @@ let alone failed; AR5's and AR7's refusals (HL2's row classes, and the rows of
 the last failover or primary replacement), since the reaction case only keeps
 clear of AR5's second refusal and fails its sole primary on a row of its own;
 a bump or a cntlr replacement during RW22's demotion hold, HL2's rule that a standby's
-clean reply below the revision its child drives is no verdict, and AR10
-holding back a cntlr replacement or a leg repair, all of which no case stages;
+clean reply below the revision its child drives is no verdict, AR10
+holding back a cntlr replacement or a leg repair, and RW14's hold still
+waiting, with no bump, for a side that turns unhealthy during the wait and
+keeping its sides at a re-fan of the held revision, all of which no case
+stages;
 AR7's charge of a new CN past its metadata ceiling, since the reaction case's
 pools hold no clone, and the `candidate changed` refusal of AR8 step 3's
 create — a group that gained a DN after the pass's snapshot, or a stale
@@ -3083,7 +3140,9 @@ as many of the next rounds as it counts, so that a case misses exactly the
 rounds it means to whatever its own polls cost, `delay_rounds_ms` answers
 every round late, as a busy agent does, and `hang_syncup` leaves the
 object's `Syncup*` unanswered while it is set, as a stopped cn agent leaves
-its demotion (RW22). It computes no sweep verdict, so it never answers
+its demotion (RW22), or as a side whose agent answers its rounds but never
+its syncup holds a sides-first hold to its bound (RW14). It computes no
+sweep verdict, so it never answers
 `ReplyCodeLeftover` on its own.
 
 ## Known limits
@@ -3160,8 +3219,9 @@ its demotion (RW22). It computes no sweep verdict, so it never answers
   migration destination that `FinishMigration` forced before its RW18 flip and
   that never finishes zeroing while it is the only side of a leg in the first
   group of its list, which keeps that slice's pools and every td
-  `PROVISIONING` the same way, a clone whose source stays unconnected,
-  which keeps its target row `MISSING` (HL2), or a clone that waits for room
+  `PROVISIONING` the same way, a clone whose source stays unconnected, or
+  keeps an endpoint with no live controller or no namespace, which keeps
+  its target row `MISSING` (HL2), or a clone that waits for room
   in its CN's metadata area, which keeps its two rows `PROVISIONING`
   (`cnagent.md` CN18; accepted, since the gateway's count of the units makes
   that wait rare, `architecture.md`, Metadata units) — keeps the SP on it that long
@@ -3187,18 +3247,25 @@ its demotion (RW22). It computes no sweep verdict, so it never answers
   `err_epoch` therefore has no verdict on the leg, and AR8 waits (AR10)
   until something makes the primary converge: a revision bump of the SP.
 * **The hold delays the cntlr requests, and at a failover the sides too**
-  (RW14, RW22): a side that does not report — a dead disk node, a new side
-  its disk node refuses until the dn role's `SyncupDn` has introduced it
-  (`dnagent.md` DN8), or a side the fan-out restarted whose old child is
-  still inside a `Syncup*` (RW1) — delays every cntlr request of its SP's
-  fan-out but a demotion by up to one `cntlr_interval`, which RW9 lets be as
-  long as `MaxHealthCheckInterval`, a failover's promotion included; and a
-  failover whose old primary does not report its demotion applied holds its
-  sides and its promotion for the whole `DemotionHoldTimeout` first. A dead
-  disk node's share of it outlives AR8's repair, because the leg AR8 parks
-  there keeps its side in `spare_leg_list` and that side is waited for like
-  any other, until the disk node returns or `DeleteSpareLeg` removes the
-  leg. A failed-over primary is fenced before it has applied its demotion
+  (RW14, RW22): a side the hold waits for that does not report — one on a
+  disk node that died too recently for its epoch to be in the fan-out's
+  load, or during the hold, a new side its disk node refuses until the dn
+  role's `SyncupDn` has introduced it (`dnagent.md` DN8), or a side the
+  fan-out restarted whose old child is still inside a `Syncup*` (RW1) —
+  delays every cntlr request of its SP's fan-out but a demotion by up to
+  one `cntlr_interval`, which RW9 lets be as long as
+  `MaxHealthCheckInterval`, a failover's promotion included; and a failover
+  whose old primary does not report its demotion applied holds its sides
+  and its promotion for the whole `DemotionHoldTimeout` first. A side whose
+  `err_epoch` the fan-out's load holds is not waited for, so a dead disk
+  node delays its pool's fan-outs only until its sides' epochs are stamped
+  and loaded, and the leg AR8 parks there delays none; a side so found that
+  answers after all is not waited for either, and the races the hold
+  narrows stay open for it (RW14). Nor does `sp sides unsynced` count such
+  a side, so an alert on that record does not see a dead disk node's sides
+  once their epochs are stamped and loaded: their own `err_epoch` reports
+  them (HL2).
+  A failed-over primary is fenced before it has applied its demotion
   only when it does not apply it within that wait, or when a coordinator
   fans its failover out with no running child of it last handed a primary
   plan (below). Hosts that follow the discovery log have dropped the path
@@ -3233,9 +3300,10 @@ its demotion (RW22). It computes no sweep verdict, so it never answers
   follows the discovery log may drop only after the fence
   (`architecture.md`, Known limits).
 * **A lost thin id costs a failover or a replacement, and the second refusals
-  that bound them are a memory.** A report names a created td's lost thin id
-  only when it is a converge's; a Check round's probe reads the absent volume
-  `MISSING` and names no id (HL2), so a primary whose latest report is a
+  that bound them are a memory.** A report marks a created td's lost thin
+  id, with its thin row's reason, only when it is a converge's; a Check
+  round's probe reads the absent volume `MISSING` with no reason (HL2), so
+  a primary whose latest report is a
   probe's is failed over, and the second refusal then keeps the role from
   going back to it for as long as the new primary fails only on rows it failed
   on (AR5) — in an SP of two cntlrs, one failover in all, and one more each
@@ -3250,7 +3318,7 @@ its demotion (RW22). It computes no sweep verdict, so it never answers
   moves the role, every pass logging why. AR7's sole-primary variant takes the
   twins of both refusals, judged on the same report (AR7). The first holds the
   primary of an SP with no failover candidate only while the report the
-  coordinator holds for it is a converge's that names the lost id, which lasts
+  coordinator holds for it is a converge's that carries the reason, which lasts
   until a Check reply carries an info — as one does as soon as the probe's
   view differs from the last one its stream sent, and on a fresh stream's
   first probe (HL5; `architecture.md`, Check streams) — or a dead stream marks
@@ -3261,7 +3329,7 @@ its demotion (RW22). It computes no sweep verdict, so it never answers
   or shard handoff, whose new child holds no report until a reply carries one.
   It does not break the replacement loop on its own: a replacement's first
   probe after its converge goes out on a stream that has sent no info yet, so
-  the report held for it is a probe's, which names no id. The second does:
+  the report held for it is a probe's, which carries no reason. The second does:
   once a primary whose held report is a probe's has been replaced at
   `cntlr_unhealthy`, by a cntlr that reads the same rows, that replacement is
   not replaced while it fails only on rows the primary it replaced failed on,
@@ -3286,6 +3354,27 @@ its demotion (RW22). It computes no sweep verdict, so it never answers
   exceptions aside. It compares rows, not causes: a replacement whose own
   fault fails only rows the old primary failed on is held as well, for as long
   as that fault lasts, every pass logging why.
+* **A dm-clone left with hydration off moves the role of the clone's
+  pool.** Its row reads `ERROR` on every report, a check round's as much as
+  a converge's (`cnagent.md` CN18, CN28). That is a row of the primary's
+  own (HL2), so its `err_epoch` stays set, and AR5 fails it over at its
+  threshold, or AR7 replaces it where there is no failover candidate; the
+  new primary rebuilds the clone by its crash recovery (`cnagent.md`
+  CN18). A fault of the clone's source does not itself move the role
+  (`cnagent.md` CN18): a source with no live controller at an endpoint, or
+  with no namespace, reads `MISSING`, which sets no `err_epoch` (HL2), so
+  neither AR5 nor AR7 acts on that row, and a fault in the primary's own
+  path to the source reads the same; the operator can move the role by
+  disabling the primary cntlr (AR5). The cn agent's retry of a source it
+  cannot connect, or that has no namespace, can still make the primary's
+  rounds miss (`cnagent.md`, Known limits), and missed rounds can fail it
+  over, as they can a primary that is only busy (above). A role that moves
+  while a fault at the source lasts can take even a clone that has
+  hydrated in full out of service: a new primary that cannot connect the
+  source, or finds no source namespace, cannot build the clone's dm-clone
+  while the fault lasts, so the clone's destination namespace answers IO
+  errors until the source comes back or the clone is deleted with `force`.
+  What else those rows cost on the cn agent is `cnagent.md`, Known limits.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and the
   migration that could have moved a readable-but-sick side is an operator's
   tool (`CreateMigration`), not a reaction (Automatic reactions).

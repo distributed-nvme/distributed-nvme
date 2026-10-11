@@ -897,7 +897,9 @@ origin's size; a fresh device asking for a zero `size` is
   from the list, `BumpSpRev`. Reply `td_id`.
 * **ListThinDevices** — one STM: the `SpConf` and every listed td (missing
   is `ABORTED`) into `name_to_td`. This is the documented client wait
-  primitive for `created`; a client snapshotting a clone's destination also
+  primitive for `created`, and the record's `torn` marks a snapshot to
+  delete and re-create (`architecture.md`, Thin devices); a client
+  snapshotting a clone's destination also
   waits until the clone is deleted and drained, `GetClone` answering
   `NOT_FOUND`. Neither RPC returns a revision, while the flip bumps `SpRev`
   and so do a clone's latch and drain, so a client whose snapshot request

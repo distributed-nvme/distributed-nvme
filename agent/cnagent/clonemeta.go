@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,8 +94,9 @@ func (c *CloneMeta) MountTmpfs(
 // exist. A `stat` that did not answer is an error, never "absent" (SH15):
 // ensureTmpFile answers "absent" with a `truncate --size
 // CnCloneMetaAreaSize`, which leaves a live arena file of that size as it is
-// but resizes one of any other size — cutting off its tail on a shrink —
-// where the converge otherwise reports an error and leaves the file alone.
+// but resizes one of any other size in place — cutting off its tail on a
+// shrink — where the converge otherwise leaves a file of another size alone
+// while anything uses it (arenaFileInUse).
 func (c *CloneMeta) FileSize(
 	ctx context.Context,
 	path string,
@@ -132,9 +134,10 @@ func (c *CloneMeta) Truncate(
 // exits 0 with no output when nothing is attached, so the only meaning left
 // for a non-zero exit is "the question was not answered". Reporting that as
 // "no loop" would make ensureLoopDev attach a second loop to the arena file,
-// which nothing ever detaches — every later pass then fails with "2 loop
-// devices …, want 1" and no clone metadata can be allocated or probed on this
-// CN (CN5: a *single* loop device; [D14] rejects loop sprawl).
+// which no converge of a file of the right size detaches — every later pass
+// then fails with "2 loop devices …, want 1" and no clone metadata can be
+// allocated or probed on this CN (CN5: a *single* loop device; [D14] rejects
+// loop sprawl).
 func (c *CloneMeta) LoopDevices(
 	ctx context.Context,
 	path string,
@@ -181,6 +184,32 @@ func (c *CloneMeta) LoopAttach(
 		return "", fmt.Errorf("losetup --find --show %s: no device", path)
 	}
 	return dev, nil
+}
+
+// LoopDetach detaches one loop device from its backing file. The kernel
+// detaches a loop device something still has open only when the last user
+// closes it, and the device stays attached meanwhile, so a caller that needs
+// it gone lists the file's loop devices again (recreateArenaFile).
+func (c *CloneMeta) LoopDetach(ctx context.Context, dev string) error {
+	return c.cmd.RunOk(ctx, "losetup", "--detach", dev)
+}
+
+// LoopHolders lists the devices that hold a loop device open from above —
+// a dm table or an md array that maps it — from its sysfs holders
+// directory. A device whose sysfs directory is gone has no holder; a listing
+// that did not answer is an error, never "no holder".
+func (c *CloneMeta) LoopHolders(
+	ctx context.Context,
+	dev string,
+) ([]string, error) {
+	holders, _, err := c.cmd.ListDir(ctx,
+		sysfsBlockDir+"/"+filepath.Base(dev)+"/holders")
+	return holders, err
+}
+
+// RemoveFile removes a plain file; an absent one is no error.
+func (c *CloneMeta) RemoveFile(ctx context.Context, path string) error {
+	return c.cmd.RunOk(ctx, "rm", "-f", path)
 }
 
 func firstNonEmpty(values ...string) string {
@@ -570,10 +599,10 @@ func (s *CnAgentServer) planArena(
 // rebuild of architecture.md, Clone crash recovery.
 //
 // It is not the only source of the CN28 `clone_id_to_meta` row:
-// cloneMetaVerdict answers first for a clone whose source is connected, and
-// the row is its verdict whenever the arena did not answer, whatever the
-// wrapper, or cannot supply a fresh run for a wrapper that is absent or does
-// not match.
+// cloneMetaVerdict answers first for a clone whose source is ready
+// (cloneRows), and the row is its verdict whenever the arena did not answer,
+// whatever the wrapper, or cannot supply a fresh run for a wrapper that is
+// absent or does not match.
 func cloneMetaSlotStatus(
 	arena *cloneMetaArena,
 	cp *clonePlan,
@@ -694,8 +723,9 @@ func (s *CnAgentServer) ensureCloneMeta(
 }
 
 // probeCloneMeta is the ordinary read-only CN28 row of clone_id_to_meta, read
-// from the wrapper's own dm table. The row for a clone cloneMetaVerdict
-// decides comes from that verdict instead, which probeCntlr consults first.
+// from the wrapper's own dm table in this pass's enumeration. The row for a
+// clone cloneMetaVerdict decides comes from that verdict instead, which
+// cloneRows consults first.
 func (s *CnAgentServer) probeCloneMeta(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -709,9 +739,9 @@ func (s *CnAgentServer) probeCloneMeta(
 }
 
 // cloneMetaVerdict is CN18 step 2's verdict on one clone's metadata, read
-// from this pass's enumeration of the arena, and the one function the
-// converge (ensureClone, before it parks or removes anything) and the CN28
-// probe (probeCntlr) both decide by, so the two channels report the same two
+// from this pass's enumeration of the arena: what the converge asks before it
+// parks or removes anything (ensureClone), and what the clone's rows take for
+// a source that is ready (cloneRows), so the two channels report the same two
 // rows for the same node. decided is false, with no status or details, when
 // step 2 goes on to build: the clone's wrapper matches, or the arena can
 // supply a fresh run for it. When decided is true the clone gets no further
@@ -727,11 +757,10 @@ func (s *CnAgentServer) probeCloneMeta(
 //     than the whole arena and can never fit.
 //
 // For both ERROR verdicts clone_id_to_dm_clone reads ERROR
-// detailsCloneMetaMissing (reportCloneMetaErr). ResTracker.Set overwrites, so
-// a probe that answered anything else for these states — the plain "no
-// wrapper, no dm-clone" MISSING pair, or OK over a dm-clone that is still up
-// — would replace the converge's verdict, and the two channels would trade
-// the rows, and the `epoch` on them, on every round.
+// detailsCloneMetaMissing (reportCloneMetaErr). The plain "no wrapper, no
+// dm-clone" MISSING pair, or a dm-clone's own row, would not say that no slot
+// can come; a dm-clone that is still up keeps its status line in the row all
+// the same.
 //
 // A wrapper that is absent or does not match, in an arena that can supply a
 // fresh run, is left to the ordinary probes: MISSING, or the mismatch's
@@ -740,10 +769,9 @@ func (s *CnAgentServer) probeCloneMeta(
 // read-only pass cannot tell them from that ordinary "not built yet" — a hole
 // punch or a `dmsetup create` that failed inside Alloc leaves an absent
 // wrapper in an arena with room, for instance, and a mismatched wrapper
-// ensureCloneMeta could not remove leaves a present one. The converge reports
-// the ERROR pair for those, which the following check round does not
-// reproduce, and registers the CN10 retry, which runs the pass again
-// (ensureClone).
+// ensureCloneMeta could not remove leaves a present one. The converge's rows
+// read the node as the check round's do, with the failure in their details,
+// and it registers the CN10 retry, which runs the pass again (ensureClone).
 //
 // Read-only throughout (CN23, SH25): planArena is this pass's cached
 // enumeration and cloneMetaCanSupply is pure, so nothing here takes

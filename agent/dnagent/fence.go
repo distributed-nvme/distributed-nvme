@@ -122,11 +122,16 @@ func (s *DnAgentServer) inFence(st *sideState) bool {
 
 // armFenceTimer schedules the converge that ends the window. It is a single
 // shot at the deadline, not a ticker: converging early would only re-enter
-// phase 1.
+// phase 1. It arms nothing once the join has begun or rootCtx is done
+// (bgClosedLocked): the join stops the timers it finds armed, and one armed
+// after it would fire a converge the join never waits for (SH27). The
+// suspension it would have ended is the next process's to end: its restart
+// finds the linears suspended and treats the window as elapsed (adoptFence,
+// DN12).
 func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	s.mu.Lock()
-	if st.fenceTimer != nil {
+	if st.fenceTimer != nil || s.bgClosedLocked() {
 		s.mu.Unlock()
 		return
 	}
@@ -225,10 +230,10 @@ func (s *DnAgentServer) clearFence(st *sideState) {
 // the export off it. The window stays ended until the source role does
 // (clearFence) — neither cleared nor left running, since either would let a
 // later converge at an exporting level, the level coming back down, suspend
-// the linears again over the dm-errors phase 2 left them on, and a probe
-// would then expect the pre-fence table there. The mark is in memory, like
-// fenceAt, so an agent restart forgets it — DN12's known limit, the same one
-// a window phase 2 has already closed runs into.
+// the linears again over the dm-errors phase 2 left them on, holding them
+// suspended for a second window with nothing left to absorb. The mark is in
+// memory, like fenceAt, so an agent restart forgets it — DN12's known limit,
+// the same one a window phase 2 has already closed runs into.
 func (s *DnAgentServer) endFence(st *sideState) {
 	s.mu.Lock()
 	timer := st.fenceTimer

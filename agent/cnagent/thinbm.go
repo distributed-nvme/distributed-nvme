@@ -267,9 +267,12 @@ func (s *CnAgentServer) reserveMetadataSnap(
 	if err == nil {
 		return nil
 	}
-	// EBUSY: a reservation is already held — release it and try once more.
-	if !strings.Contains(strings.ToLower(err.Error()), "busy") &&
-		!strings.Contains(err.Error(), "already exists") {
+	// A reservation is already held: dm-thin refuses a second one with
+	// EBUSY, and EEXIST is the errno of an output that words that refusal
+	// "already exists". Either is released and tried once more. The errno
+	// comes from the refusal's type, never from its words (CN29); any other
+	// refusal is the caller's error.
+	if !agent.IsBusy(err) && !agent.IsExists(err) {
 		return err
 	}
 	s.releaseMetadataSnap(ctx, sp)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -676,16 +678,28 @@ func (s *CnAgentServer) removeExportVerified(
 	return !exists
 }
 
+// chainOutcome is what runChain tells its caller beside the leftovers it adds
+// to the pass's result.
+type chainOutcome struct {
+	// lingeringClones are the chain's dm-clones that may still be live after
+	// the pass: every one of them when L3 did not run, because the descent
+	// stopped above it, and the ones whose removal L3 did not verify
+	// otherwise. A cntlr's build holds the ns-devs of their destination
+	// raid0s off those raid0s (lingeringCloneHold, CN18).
+	lingeringClones []string
+	// failedDeletes are the pools, in the order L7 met them and each once,
+	// that refused or did not answer a delete message of L7 this pass. A
+	// cntlr's converge sweeps their ids in the same pass
+	// (sweepAfterFailedDeletes, CN14).
+	failedDeletes []string
+}
+
 // runChain removes one sp's unwanted objects top-down and reports what is
 // left in res. The layers are CN21's order; the `stuck` check between them is
 // the stop rule: a layer that left anything behind ends the descent, and the
 // layers below report their objects as leftovers WITHOUT touching them.
 // Removing a leg out from under a live array would strand a migration's md
 // superblocks, and a pass that simply re-runs next round costs nothing.
-//
-// It returns whether a dm-clone of the chain may still be live: L3 did not
-// run, because the descent stopped above it, or it left one. That is what a
-// cntlr's build phase holds its ns-devs off their raid0 for (CN18).
 func (s *CnAgentServer) runChain(
 	ctx context.Context,
 	st *cntlrState,
@@ -693,7 +707,8 @@ func (s *CnAgentServer) runChain(
 	actual *cnActual,
 	wanted *cnWanted,
 	res *agent.SweepResult,
-) (clonesMayLinger bool) {
+) chainOutcome {
+	var out chainOutcome
 	// P0, before every layer: an unwanted ns-dev is reloaded onto an error
 	// table of its own size. Two things need that. Disabling the nvmet
 	// namespace above it in L1 closes its backing device, which does not
@@ -710,9 +725,9 @@ func (s *CnAgentServer) runChain(
 		s.parkByTable(ctx, name, actual)
 	}
 	stuck := false
-	// clonesGone is set by L3 alone, and only when it verified every
-	// dm-clone of the chain gone.
-	clonesGone := false
+	// cloneLayerRan is set by L3 alone: before it runs, every dm-clone of
+	// the chain may still be live.
+	cloneLayerRan := false
 	// Every layer's own leftovers are collected here, so a stuck layer can
 	// report the layers below it untouched.
 	layers := []struct {
@@ -767,9 +782,15 @@ func (s *CnAgentServer) runChain(
 		{ // L3 — dm-clones, before their source connections die: dm-clone
 			// flushes through the source on removal.
 			run: func() bool {
-				left := s.removeDms(ctx, res, chain.clones)
-				clonesGone = !left
-				return left
+				cloneLayerRan = true
+				for _, name := range chain.clones {
+					if !s.removeDmVerified(ctx, name) {
+						res.Add(agent.LeftoverKindDm, name)
+						out.lingeringClones = append(
+							out.lingeringClones, name)
+					}
+				}
+				return len(out.lingeringClones) > 0
 			},
 			report: func() { s.reportDms(res, chain.clones) },
 		},
@@ -811,7 +832,9 @@ func (s *CnAgentServer) runChain(
 			report: func() { s.reportDms(res, chain.raid0s, chain.tdErrors) },
 		},
 		{ // L7 — thin volumes, and the pool-side `delete` of their ids.
-			run:    func() bool { return s.removeThins(ctx, chain, actual, wanted, res) },
+			run: func() bool {
+				return s.removeThins(ctx, chain, actual, wanted, res, &out)
+			},
 			report: func() { s.reportDms(res, chain.thins) },
 		},
 		{ // L8 — thin-pools, then the concats under them.
@@ -831,9 +854,9 @@ func (s *CnAgentServer) runChain(
 				// re-probe could not confirm the pool is gone, and dropping
 				// the arming there would forget a live pool's pending thin-id
 				// sweep: the next converge finds the device present, takes
-				// ensurePool's probe-match path, and arms nothing — so
-				// sweepThinIds never runs and every id deleted meanwhile
-				// holds its data blocks for the life of the pool. Keeping an
+				// ensurePool's probe-match path, and arms nothing — so the
+				// activation sweep never runs, and every id deleted meanwhile
+				// can hold its data blocks for the life of the pool. Keeping an
 				// arming too long costs one idempotent sweep; dropping one
 				// too early cannot be repaired. This is the layer stop rule
 				// applied to a STATE mutation rather than to a device: a
@@ -913,7 +936,73 @@ func (s *CnAgentServer) runChain(
 			stuck = true
 		}
 	}
-	return len(chain.clones) > 0 && !clonesGone
+	if !cloneLayerRan {
+		out.lingeringClones = chain.clones
+	}
+	return out
+}
+
+// cloneHold is what a converge's build may not put an ns-dev onto (CN18): the
+// raid0s a dm-clone the plan does not want may still write into after this
+// pass's sweep. That dm-clone goes on hydrating into its destination until
+// L3 removes it, and a region it has not copied yet would overwrite a write
+// a host made to the raid0 directly. all holds every raid0 of the cntlr, for
+// a pass that cannot say which ones such a dm-clone writes into.
+type cloneHold struct {
+	all bool
+	// dests are the dm names of the raid0s a lingering dm-clone writes into.
+	dests map[string]struct{}
+}
+
+// holds reports whether the build may not put an ns-dev onto raid0Name.
+func (h cloneHold) holds(raid0Name string) bool {
+	if h.all {
+		return true
+	}
+	_, ok := h.dests[raid0Name]
+	return ok
+}
+
+// lingeringCloneHold reads which raid0s the named unwanted dm-clones write
+// into, each from its live table's destination device (CloneTable's second
+// argument), resolved to a dm name through the pass's dm listing. Only what
+// it can read narrows the hold. When the dm listing did not answer, nothing
+// rules out a dm-clone the listing would have named, and when a dm-clone's
+// table does not answer, is not one dm-clone target, or names a device the
+// listing does not hold, its destination is unknown: the hold is then the
+// whole cntlr's, as one dm-clone cannot be told from another. A dm-clone
+// whose table read fails and which a `dmsetup info` then confirms gone holds
+// nothing. It reads only, and only what the converge already found
+// unwanted, so a pass with no lingering dm-clone reads nothing here.
+func (s *CnAgentServer) lingeringCloneHold(
+	ctx context.Context,
+	names []string,
+	actual *cnActual,
+) cloneHold {
+	if !actual.dmListed {
+		return cloneHold{all: true}
+	}
+	hold := cloneHold{dests: make(map[string]struct{}, len(names))}
+	for _, name := range names {
+		targets, err := s.dm.Table(ctx, name)
+		if err != nil {
+			if dev, infoErr := s.dm.Info(
+				ctx, name); infoErr == nil && dev == nil {
+				continue
+			}
+			return cloneHold{all: true}
+		}
+		if len(targets) != 1 || targets[0].Type != "clone" ||
+			len(targets[0].Args) < 2 {
+			return cloneHold{all: true}
+		}
+		dest, ok := actual.byDevNo[targets[0].Args[1]]
+		if !ok {
+			return cloneHold{all: true}
+		}
+		hold.dests[dest] = struct{}{}
+	}
+	return hold
 }
 
 // parkByTable stops an UNWANTED ns-dev serving, deriving everything it needs
@@ -1034,13 +1123,16 @@ func (s *CnAgentServer) reportDms(res *agent.SweepResult, groups ...[]string) {
 // `delete` message against a pool that is itself going away is both pointless
 // and unsendable. The dev_id comes from the live table — `0 N thin <pool
 // devno> <dev_id>` — never from the request, because the table is what the
-// kernel will act on.
+// kernel will act on. It records in out the pools whose delete message
+// failed, for the sweep that follows a failed delete
+// (sweepAfterFailedDeletes).
 func (s *CnAgentServer) removeThins(
 	ctx context.Context,
 	chain *cnChain,
 	actual *cnActual,
 	wanted *cnWanted,
 	res *agent.SweepResult,
+	out *chainOutcome,
 ) bool {
 	left := false
 	for _, name := range chain.thins {
@@ -1056,7 +1148,10 @@ func (s *CnAgentServer) removeThins(
 		if _, poolWanted := wanted.dms[poolName]; !poolWanted {
 			continue
 		}
-		s.deleteThinIdByName(ctx, poolName, devId)
+		if s.deleteThinIdByName(ctx, poolName, devId) != nil &&
+			!slices.Contains(out.failedDeletes, poolName) {
+			out.failedDeletes = append(out.failedDeletes, poolName)
+		}
 	}
 	return left
 }
@@ -1078,22 +1173,139 @@ func (s *CnAgentServer) thinIdentity(
 }
 
 // deleteThinIdByName is the CN14 deletion message addressed by name. The pool
-// is probed first, so a pool that has meanwhile gone is silent.
+// is probed first, so a pool that has meanwhile gone, or whose probe does not
+// answer, is silent: no message was sent, and nil comes back. A message that
+// fails, refused or unanswered, is logged and its error returned.
 func (s *CnAgentServer) deleteThinIdByName(
 	ctx context.Context,
 	poolName string,
 	devId string,
-) {
+) error {
 	pool, err := s.dm.Info(ctx, poolName)
 	if err != nil || pool == nil {
-		return
+		return nil
 	}
 	if err := s.dm.Message(
 		ctx, poolName, 0, "delete "+devId); err != nil {
 		slog.ErrorContext(ctx, "thin-pool delete message failed",
 			slog.String("pool", poolName),
 			slog.String("error", err.Error()))
+		return err
 	}
+	return nil
+}
+
+// sweepAfterFailedDeletes is CN14's sweep after a failed delete: each pool
+// that refused, or did not answer, an L7 delete message of this pass has its
+// thin ids swept in the same pass (sweepThinIds), under an RPC-delivered
+// request only, as the activation sweep is (the caller's reqFromRpc gate). A
+// delete that fails after its volume is gone is otherwise never sent again:
+// no later pass lists the volume, and only a sweep of the pool's ids finds an
+// id that has no dm device. The sweep deletes no id that a thin volume of
+// this sp still maps: every one the pass's snapshot listed that is still
+// there keeps the id its live table names in its pool (listedThinIds). Those
+// tables are read once in the pass, for every such pool at once, and only
+// once a pool's dump is in (sweepThinIds runs keep after its dump), so a pool
+// that refuses its reserve — one in read-only or fail mode refuses every
+// message — costs no table read. A table read that fails while its volume is
+// still there stops every one of these sweeps, since that volume may map an
+// id in any of the pools. Nothing is remembered: a sweep that fails too
+// leaves the id to the next sweep of that pool's ids that gets through, and a
+// sweep that succeeds also ends a pending activation sweep of its slice.
+func (s *CnAgentServer) sweepAfterFailedDeletes(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	actual *cnActual,
+	out chainOutcome,
+) {
+	var (
+		listed  bool
+		keeps   map[string]map[uint32]struct{}
+		keepErr error
+	)
+	for _, poolName := range out.failedDeletes {
+		var sp *slicePlan
+		for _, candidate := range plan.slices {
+			if candidate.poolFinalName == poolName {
+				sp = candidate
+				break
+			}
+		}
+		if sp == nil {
+			// removeThins messages only a pool the plan wants, so a slice
+			// of the plan names it.
+			continue
+		}
+		if keepErr != nil {
+			slog.ErrorContext(ctx, msgThinSweepFailed,
+				slog.String("pool", poolName),
+				slog.String("error", keepErr.Error()))
+			continue
+		}
+		s.sweepThinIds(ctx, st, plan, sp,
+			func() (map[uint32]struct{}, error) {
+				if !listed {
+					listed = true
+					keeps, keepErr = s.listedThinIds(
+						ctx, plan, actual, out.failedDeletes)
+				}
+				return keeps[poolName], keepErr
+			})
+	}
+}
+
+// listedThinIds is, for each pool of pools, the set of thin ids in that pool
+// that the thin volumes of this sp still map: every one the pass's snapshot
+// listed, read once from its live table, keeps its id in the set of the pool
+// its table's device resolves to through the snapshot's dm listing. A volume
+// whose table names a device the listing does not resolve keeps its id in
+// every set, since its pool is unknown; one that is not one thin target maps
+// no id. A volume whose table read fails is skipped only when a probe then
+// finds it gone, as one L7 removed is; otherwise its id is unknown, and the
+// error stops every pool's sweep.
+func (s *CnAgentServer) listedThinIds(
+	ctx context.Context,
+	plan *cntlrPlan,
+	actual *cnActual,
+	pools []string,
+) (map[string]map[uint32]struct{}, error) {
+	keeps := make(map[string]map[uint32]struct{}, len(pools))
+	for _, pool := range pools {
+		keeps[pool] = make(map[uint32]struct{})
+	}
+	ofSp := func(dn common.DmName) bool { return dn.SpId() == plan.spId }
+	for _, name := range actual.dmsOfKind(common.DmKindCnThinDev, ofSp) {
+		targets, err := s.dm.Table(ctx, name)
+		if err != nil {
+			if dev, infoErr := s.dm.Info(
+				ctx, name); infoErr == nil && dev == nil {
+				continue
+			}
+			return nil, fmt.Errorf("reading the thin id of %s: %w", name, err)
+		}
+		if len(targets) != 1 || targets[0].Type != "thin" ||
+			len(targets[0].Args) < 2 {
+			continue
+		}
+		pool, known := actual.byDevNo[targets[0].Args[0]]
+		if _, swept := keeps[pool]; known && !swept {
+			continue
+		}
+		devId, err := strconv.ParseUint(targets[0].Args[1], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("%s maps the thin id %q: %w",
+				name, targets[0].Args[1], err)
+		}
+		if known {
+			keeps[pool][uint32(devId)] = struct{}{}
+			continue
+		}
+		for _, keep := range keeps {
+			keep[uint32(devId)] = struct{}{}
+		}
+	}
+	return keeps, nil
 }
 
 // stopArrayVerified stops one array and verifies it from sysfs. The node it
@@ -1452,20 +1664,29 @@ func (s *CnAgentServer) sweepCntlr(
 	// is live, it may be hydrating into its destination raid0, and a host
 	// writing that raid0 directly could have its write overwritten by a
 	// region the clone had not copied yet, so the build puts no ns-dev onto
-	// a raid0 it is not already on (ensureNsDev). On a pass that removes,
-	// the chain says whether one may be left: L3 did not run, or it left
-	// one. On a stopped sweep no L3 runs: one is left certainly when the dm
-	// listing names one, possibly when that listing did not answer. The
-	// fact is this pass's, read off this snapshot and this chain; the next
-	// pass learns its own.
+	// such a raid0 it is not already on (ensureNsDev, CN18). On a pass that
+	// removes, the chain says which dm-clones may be left: all of them when
+	// L3 did not run, the ones it did not verify gone otherwise. On a
+	// stopped sweep no L3 runs: every one the dm listing names is left, and
+	// when that listing did not answer, any may be. lingeringCloneHold
+	// turns them into the raid0s they write into. The fact is this pass's,
+	// read off this snapshot and this chain; the next pass learns its own.
 	if remove {
 		s.cntlrPreSteps(ctx, plan, actual, wanted)
-		plan.cloneMayLinger = s.runChain(ctx, st, chain, actual, wanted, res)
+		out := s.runChain(ctx, st, chain, actual, wanted, res)
+		plan.cloneHold = s.lingeringCloneHold(
+			ctx, out.lingeringClones, actual)
+		// CN14: a delete message that failed is not sent again by any later
+		// pass, so this one sweeps that pool's ids, under the activation
+		// sweep's own gate, and remembers nothing.
+		if st.reqFromRpc && len(out.failedDeletes) > 0 {
+			s.sweepAfterFailedDeletes(ctx, st, plan, actual, out)
+		}
 	} else {
 		s.reportChain(chain, res)
 	}
 	if converge && !remove {
-		plan.cloneMayLinger = !actual.dmListed || len(chain.clones) > 0
+		plan.cloneHold = s.lingeringCloneHold(ctx, chain.clones, actual)
 	}
 	// The local store follows the same rule as the devices: a clone's chunk
 	// files go when the clone leaves the request, and stay while it is only

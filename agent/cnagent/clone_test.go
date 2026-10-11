@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -569,15 +570,15 @@ func TestCloneRecoveryNeverServesAnUnfinishedDmClone(t *testing.T) {
 			pass: func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
 				clone string) {
 				// Step 2 decided nothing: no park-and-rebuild, no bitmap
-				// read, no enable, and both rows carry the read's failure.
+				// read, no enable. The dm row carries the read's failure,
+				// and the meta row reads the wrapper, which matches.
 				assertNoCall(t, node, "cmd dmsetup remove "+clone)
 				assertNoCall(t, node, "cmd dmsetup create "+clone)
 				assertNoCall(t, node, "cmd thin_dump")
 				assertNoCall(t, node, enableOf(clone))
 				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
 					"signal: killed", "dm-clone")
-				assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
-					"signal: killed", "clone meta")
+				assertOk(t, info.GetCloneIdToMeta()[testClone], "clone meta")
 			},
 		},
 		{
@@ -596,8 +597,7 @@ func TestCloneRecoveryNeverServesAnUnfinishedDmClone(t *testing.T) {
 				assertNoCall(t, node, enableOf(clone))
 				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
 					"signal: killed", "dm-clone")
-				assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
-					"signal: killed", "clone meta")
+				assertOk(t, info.GetCloneIdToMeta()[testClone], "clone meta")
 			},
 			nsErr: "signal: killed",
 		},
@@ -1115,10 +1115,86 @@ func assertSameCloneRows(
 	}
 }
 
+// assertSameStatusAndEpoch holds the check round to the converge on all three
+// of the clone's rows by status and epoch, the part of a row the worker acts
+// on: the details may differ, since a converge's failure rides in its own
+// rows only (CN29).
+func assertSameStatusAndEpoch(
+	t *testing.T,
+	converged *pb.CntlrInfo,
+	probed *pb.CntlrInfo,
+) {
+	t.Helper()
+	for _, row := range cloneRowMaps {
+		want := row.rows(converged)[testClone]
+		got := row.rows(probed)[testClone]
+		if want == nil || got == nil {
+			t.Fatalf("%s: converged %v, probed %v", row.label, want, got)
+		}
+		if got.GetStatus() != want.GetStatus() ||
+			got.GetEpoch() != want.GetEpoch() {
+			t.Fatalf("the check round reports %s as %v (epoch %d, %q), the "+
+				"converge as %v (epoch %d, %q)", row.label, got.GetStatus(),
+				got.GetEpoch(), got.GetDetails(), want.GetStatus(),
+				want.GetEpoch(), want.GetDetails())
+		}
+	}
+}
+
+// cloneRowMaps are the three CntlrInfo maps a clone's rows sit in.
+var cloneRowMaps = []struct {
+	label string
+	rows  func(*pb.CntlrInfo) map[uint64]*pb.ResInfo
+}{
+	{"clone_id_to_target", (*pb.CntlrInfo).GetCloneIdToTarget},
+	{"clone_id_to_dm_clone", (*pb.CntlrInfo).GetCloneIdToDmClone},
+	{"clone_id_to_meta", (*pb.CntlrInfo).GetCloneIdToMeta},
+}
+
 // waitingForTwoUnits is the details text of both rows of the fixture's clone
 // while the arena has no free run for its two units.
 const waitingForTwoUnits = "waiting for metadata room: no contiguous run " +
 	"of 2 clone-metadata units in the 256-unit arena"
+
+// assertNoteAndStatusLine pins a dm-clone row that keeps the raw status line
+// of a dm-clone that is up beside a status the line does not decide: the
+// row's status, its text, and then, on a line of its own, a line
+// agent.ParseCloneStatus reads, as the gateway's hydration checks do (CN18).
+func assertNoteAndStatusLine(
+	t *testing.T,
+	info *pb.ResInfo,
+	status pb.ResStatus,
+	note string,
+	label string,
+) {
+	t.Helper()
+	details := info.GetDetails()
+	line, ok := strings.CutPrefix(details, note+"\n")
+	if info.GetStatus() != status || !ok {
+		t.Fatalf("%s: status %v, details %q, want %v/%q and a status line",
+			label, info.GetStatus(), details, status, note)
+	}
+	if _, parsed := agent.ParseCloneStatus(line); !parsed ||
+		strings.Contains(line, "\n") {
+		t.Fatalf("%s: %q after the text is not one dm-clone status line",
+			label, line)
+	}
+}
+
+// assertMissingDetails is assertErrorDetails for a MISSING row.
+func assertMissingDetails(
+	t *testing.T,
+	info *pb.ResInfo,
+	want string,
+	label string,
+) {
+	t.Helper()
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		!strings.Contains(info.GetDetails(), want) {
+		t.Fatalf("%s: status %v, details %q, want MISSING containing %q",
+			label, info.GetStatus(), info.GetDetails(), want)
+	}
+}
 
 // TestCloneMetaNoRunIsProvisioning: an arena that answered and has no free
 // run for a clone's metadata does not fail the clone, it makes it wait (CN18
@@ -1387,8 +1463,10 @@ func TestCloneRecoveryWithoutRoomParksNothing(t *testing.T) {
 	info := reply.GetCntlrInfo()
 	assertProvisioningDetails(t, info.GetCloneIdToMeta()[testClone],
 		waitingForTwoUnits, "clone meta")
-	assertProvisioningDetails(t, info.GetCloneIdToDmClone()[testClone],
-		waitingForTwoUnits, "dm-clone")
+	// The dm-clone serves on, so its row keeps its status line after the
+	// wait (CN18).
+	assertNoteAndStatusLine(t, info.GetCloneIdToDmClone()[testClone],
+		pb.ResStatus_RES_STATUS_PROVISIONING, waitingForTwoUnits, "dm-clone")
 	for _, call := range []string{"cmd dmsetup reload " + nsDev,
 		"cmd dmsetup remove " + clone, "cmd dmsetup remove " + metaDm,
 		"cmd blkdiscard", "cmd thin_dump"} {
@@ -1528,7 +1606,7 @@ func TestCloneMetaRemovedWrapperFreesItsRunInThePass(t *testing.T) {
 		t.Fatalf("two clones: %v", err)
 	}
 	info := reply.GetCntlrInfo()
-	assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+	assertMissingDetails(t, info.GetCloneIdToMeta()[testClone],
 		"Operation not supported", "first clone meta")
 	if _, ok := node.dms[firstDm]; ok {
 		t.Fatalf("the case is vacuous: the first wrapper was not removed")
@@ -1734,8 +1812,9 @@ func TestCloneMetaLaterCloneReadsTheNewestEnumeration(t *testing.T) {
 			assertProvisioningDetails(t,
 				info.GetCloneIdToMeta()[testClone2], waitingForTwoUnits,
 				"second clone meta")
-			assertProvisioningDetails(t,
-				info.GetCloneIdToDmClone()[testClone2], waitingForTwoUnits,
+			assertNoteAndStatusLine(t,
+				info.GetCloneIdToDmClone()[testClone2],
+				pb.ResStatus_RES_STATUS_PROVISIONING, waitingForTwoUnits,
 				"second dm-clone")
 			assertOk(t, info.GetNsIdToDmLinear()[secondNs], "second ns-dev")
 			if tc.firstBuilt {
@@ -1804,14 +1883,16 @@ func TestCloneMetaLaterCloneReadsTheNewestEnumeration(t *testing.T) {
 
 // TestCloneMetaOtherAllocFailureRetries: of the failures of CN18 step 2's
 // allocation, only the arena's "no free run" waits for room. A hole punch the
-// loop device refuses is a failure of the node: clone_id_to_meta reads
-// RES_STATUS_ERROR with the command's own text, the dm row "metadata wrapper
-// missing", and the pass registers the CN10 retry, never the clone-metadata
-// one (CN18). The retry is what runs the build again: the check round after
-// the failure cannot tell the absent wrapper from one not built yet, so it
-// reads both of the clone's rows MISSING and the parked ns-dev OK, rows that
-// set no health epoch. The retry's next attempt builds the clone, moves the
-// ns-dev onto the dm-clone and ends the retry.
+// loop device refuses is a failure of the node, and the pass registers the
+// CN10 retry, never the clone-metadata one (CN18). The rows are what the pass
+// then reads of the node, with the command's own text in their details: no
+// wrapper and no dm-clone, both MISSING, the rows the check round after it
+// reads too, with the same statuses and epochs (CN18's shared reading). The
+// retry is what runs the build again: the check round cannot tell the absent
+// wrapper from one not built yet, so it reads both of the clone's rows
+// MISSING and the parked ns-dev OK, rows that set no health epoch. The
+// retry's next attempt builds the clone, moves the ns-dev onto the dm-clone
+// and ends the retry.
 func TestCloneMetaOtherAllocFailureRetries(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -1832,14 +1913,10 @@ func TestCloneMetaOtherAllocFailureRetries(t *testing.T) {
 		t.Fatalf("refused hole punch: %v", err)
 	}
 	info := reply.GetCntlrInfo()
-	assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+	assertMissingDetails(t, info.GetCloneIdToMeta()[testClone],
 		"Operation not supported", "clone meta")
-	if dm := info.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
-		pb.ResStatus_RES_STATUS_ERROR ||
-		dm.GetDetails() != detailsCloneMetaMissing {
-		t.Fatalf("dm-clone: %v/%q, want ERROR/%q", dm.GetStatus(),
-			dm.GetDetails(), detailsCloneMetaMissing)
-	}
+	assertMissingDetails(t, info.GetCloneIdToDmClone()[testClone],
+		"Operation not supported", "dm-clone")
 	assertNoCall(t, node, "cmd dmsetup create "+metaDm)
 	assertNoCall(t, node, "cmd dmsetup create "+clone)
 	if !retrying(t, srv) {
@@ -1851,13 +1928,15 @@ func TestCloneMetaOtherAllocFailureRetries(t *testing.T) {
 	assertParked(t, srv, node, testNs, testTd, "the failed build's td")
 	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
 
-	// What the retry makes up for: the check round finds nothing broken.
+	// What the retry makes up for: the check round finds nothing broken, and
+	// reads what the converge read.
 	node.Reset()
 	probed := checkRound(t, srv, 3)
 	assertMissing(t, probed.GetCloneIdToMeta()[testClone], "probed clone meta")
 	assertMissing(t, probed.GetCloneIdToDmClone()[testClone],
 		"probed dm-clone")
 	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+	assertSameStatusAndEpoch(t, info, probed)
 	for _, call := range node.Mutations() {
 		t.Fatalf("the check round mutated: %q", call)
 	}
@@ -2002,6 +2081,222 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 			assertOk(t, probed, "probed ns-dev")
 		})
 	}
+}
+
+// TestADmCloneGoneMidReadReadsAbsent pins the read of the dm-clone that
+// decides CN18 step 2 and the clone's rows (probeCloneDm): a dm-clone that
+// its `dmsetup info` finds and that is gone by its status read fails that
+// read, and a second `dmsetup info` that confirms it gone makes the read an
+// absence. A check round then reads the dm row MISSING, as for any absent
+// dm-clone, and a converge runs the recovery in the same pass: the dm-clone
+// is built again, its row reads OK and no retry is registered. Read as an
+// error, the round would report ERROR and the converge would end its pass
+// and wait for the retry.
+func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
+	// goneMidRead runs pass with the dm-clone's first status read held,
+	// removes the device while that read waits, then lets it fail. The held
+	// read must be the one that follows a `dmsetup info` of the dm-clone,
+	// which is how probeCloneDm reads.
+	goneMidRead := func(
+		t *testing.T,
+		srv *CnAgentServer,
+		node *fakeNode,
+		pass func(),
+	) {
+		t.Helper()
+		clone := cloneName(srv, testClone)
+		status := "cmd dmsetup status " + clone
+		info := "cmd dmsetup info --columns --noheadings -o attr " + clone
+		node.blockCmd("dmsetup status " + clone)
+		t.Cleanup(func() { node.releaseCmd("dmsetup status " + clone) })
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			pass()
+		}()
+		waitFor(t, func() bool { return node.hasCall(status) })
+		node.mu.Lock()
+		removeCloneDevice(node, srv)
+		node.mu.Unlock()
+		node.releaseCmd("dmsetup status " + clone)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the pass never returned")
+		}
+		first := node.indexOfCall(status)
+		if calls := node.Calls(); first < 1 || calls[first-1] != info {
+			t.Fatalf("fixture: the held status read is not the one that "+
+				"follows an info of the dm-clone\ncalls:\n%s",
+				strings.Join(calls, "\n"))
+		}
+	}
+
+	t.Run("a check round", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		srv.retryInterval = time.Hour
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			clones: []*pb.Clone{cloneOf()}})
+		node.Reset()
+		var probed *pb.CntlrInfo
+		goneMidRead(t, srv, node, func() {
+			_, probed = srv.checkCntlrRound(context.Background(),
+				&pb.CheckCntlrRequest{
+					ClusterId: testCluster, CnId: testCn,
+					CntlrPointer: cntlrPtr(), Revision: 2,
+				}, nil)
+		})
+		if probed == nil {
+			t.Fatal("the check round carried no CntlrInfo")
+		}
+		assertMissing(t, probed.GetCloneIdToDmClone()[testClone],
+			"the dm row of a dm-clone gone mid-read")
+	})
+
+	t.Run("a converge", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		srv.retryInterval = time.Hour
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			clones: []*pb.Clone{cloneOf()}})
+		clone := cloneName(srv, testClone)
+		node.Reset()
+		var (
+			reply *pb.SyncupCntlrReply
+			err   error
+		)
+		goneMidRead(t, srv, node, func() {
+			reply, err = srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					clones: []*pb.Clone{cloneOf()}}))
+		})
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if !node.hasCall("cmd dmsetup create " + clone + " ") {
+			t.Error("the pass did not build the dm-clone again")
+		}
+		if !node.hasCall("cmd dmsetup message " + clone +
+			" 0 enable_hydration") {
+			t.Error("the pass did not enable hydration")
+		}
+		assertOk(t, reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone],
+			"the dm row of the rebuilt dm-clone")
+		if retrying(t, srv) {
+			t.Error("the pass that rebuilt the dm-clone registered the retry")
+		}
+	})
+}
+
+// TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError pins the other half of
+// probeCloneDm's rule: a dm-clone that is there, whose status read fails and
+// whose `dmsetup info` after that read does not answer, keeps the read an
+// error. A check round reads the dm row ERROR, not MISSING, and a converge
+// stops CN18 step 2 there: it parks, removes and builds nothing, the ns-dev
+// keeps serving through the dm-clone, the dm row reads ERROR with the failed
+// read's error and the retry is registered. Read as an absence, the converge
+// would park the td and rebuild a dm-clone that serves.
+func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
+	const readErr = "Input/output error"
+	// unconfirmed runs pass with the dm-clone's first status read refused
+	// and its second `dmsetup info` killed. It then checks that both faults
+	// fired, and that the dm-clone's reads went info, the refused status,
+	// then the killed info, as probeCloneDm reads.
+	unconfirmed := func(
+		t *testing.T,
+		srv *CnAgentServer,
+		node *fakeNode,
+		pass func(),
+	) {
+		t.Helper()
+		clone := cloneName(srv, testClone)
+		status := "dmsetup status " + clone
+		info := "dmsetup info --columns --noheadings -o attr " + clone
+		node.mu.Lock()
+		node.failCmd[status] = "device-mapper: status ioctl on " + clone +
+			" failed: " + readErr
+		node.killCmdNth[info] = 2
+		node.mu.Unlock()
+		pass()
+		node.mu.Lock()
+		_, failLeft := node.failCmd[status]
+		_, killLeft := node.killCmdNth[info]
+		node.mu.Unlock()
+		if failLeft || killLeft {
+			t.Fatalf("fixture: a fault did not fire (status %v, info %v)",
+				failLeft, killLeft)
+		}
+		var reads []string
+		for _, call := range node.Calls() {
+			if call == "cmd "+status || call == "cmd "+info {
+				reads = append(reads, call)
+			}
+		}
+		want := []string{"cmd " + info, "cmd " + status, "cmd " + info}
+		if len(reads) < len(want) || !slices.Equal(reads[:len(want)], want) {
+			t.Fatalf("fixture: the dm-clone's first reads are not an "+
+				"info, the refused status and the killed info\nreads:\n%s",
+				strings.Join(reads, "\n"))
+		}
+	}
+
+	t.Run("a check round", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		srv.retryInterval = time.Hour
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			clones: []*pb.Clone{cloneOf()}})
+		node.Reset()
+		var probed *pb.CntlrInfo
+		unconfirmed(t, srv, node, func() { probed = checkRound(t, srv, 2) })
+		for _, call := range node.Mutations() {
+			t.Fatalf("the check round mutated: %q", call)
+		}
+		assertErrorDetails(t, probed.GetCloneIdToDmClone()[testClone],
+			readErr, "the dm row of a dm-clone whose absence is unconfirmed")
+	})
+
+	t.Run("a converge", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		srv.retryInterval = time.Hour
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			clones: []*pb.Clone{cloneOf()}})
+		clone := cloneName(srv, testClone)
+		nsDev := nsDevName(srv, testNs)
+		if dm := node.dms[clone]; dm == nil || dm.noHydration {
+			t.Fatalf("fixture: no dm-clone with hydration on is up (%v)", dm)
+		}
+		onClone := agent.LinearTable(testTdSize/512,
+			node.devNo["/dev/mapper/"+clone], 0)
+		if got := node.dms[nsDev].table; got != onClone {
+			t.Fatalf("fixture: the ns-dev %q does not serve through the "+
+				"dm-clone", got)
+		}
+		node.Reset()
+		var (
+			reply *pb.SyncupCntlrReply
+			err   error
+		)
+		unconfirmed(t, srv, node, func() {
+			reply, err = srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					clones: []*pb.Clone{cloneOf()}}))
+		})
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		assertNoCall(t, node, "cmd dmsetup remove "+clone)
+		assertNoCall(t, node, "cmd dmsetup create "+clone)
+		assertNoCall(t, node, "cmd dmsetup message "+clone)
+		assertNoCall(t, node, "cmd dmsetup reload "+nsDev)
+		if got := node.dms[nsDev].table; got != onClone {
+			t.Fatalf("the ns-dev moved off the dm-clone to %q", got)
+		}
+		assertErrorDetails(t,
+			reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone], readErr,
+			"the dm row of a dm-clone whose absence is unconfirmed")
+		if !retrying(t, srv) {
+			t.Error("the pass that step 2 stopped registered no retry")
+		}
+	})
 }
 
 // TestCloneMetaRetryLifecycle pins CN18's clone-metadata retry from its
@@ -2266,11 +2561,12 @@ func TestCloneMetaAbsentWrapperWithRoomProbesMissing(t *testing.T) {
 // 1 gate in front of step 2's verdict, in the direction the two tests above
 // cannot reach. A converge whose source connection fails stops at CN18 step 1
 // and reports `clone_id_to_dm_clone` MISSING "source not connected" with the
-// meta row left to cloneMetaInfo, which reads the enumeration for the wrapper's
-// own row but never asks whether the arena could supply a slot — however full
-// the arena happens to be. A probe that asked anyway would invent the waiting
-// pair against that and flip *both* rows, MISSING→PROVISIONING, against the
-// converge's on every round.
+// meta row the wrapper's own (probeCloneMeta), which reads the enumeration
+// for the wrapper's row but never asks whether the arena could supply a slot
+// — however full the arena happens to be. The check round reads the same
+// rows by the same function (cloneRows), so neither channel invents the
+// waiting pair for a source that is not ready; one that did would flip
+// *both* rows, MISSING→PROVISIONING, against the other on every round.
 func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
 	t *testing.T,
 ) {
@@ -2373,13 +2669,11 @@ func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 		t.Fatalf("converged clone_id_to_meta is %v/%q, want the arena error",
 			meta.GetStatus(), meta.GetDetails())
 	}
-	dm := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
-	if dm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		dm.GetDetails() != "metadata wrapper missing" {
-		t.Fatalf("converged clone_id_to_dm_clone is %v/%q, want "+
-			"ERROR/\"metadata wrapper missing\"",
-			dm.GetStatus(), dm.GetDetails())
-	}
+	// The dm-clone is still up, so its status line follows the verdict's
+	// text (CN18).
+	converged := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
+	assertNoteAndStatusLine(t, converged, pb.ResStatus_RES_STATUS_ERROR,
+		detailsCloneMetaMissing, "converged clone_id_to_dm_clone")
 	if !retrying(t, srv) {
 		t.Fatalf("an arena that did not answer registered no CN10 retry")
 	}
@@ -2402,13 +2696,9 @@ func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 			"converge's ERROR/%q",
 			probedMeta.GetStatus(), probedMeta.GetDetails(), meta.GetDetails())
 	}
-	probedDm := probed.GetCloneIdToDmClone()[testClone]
-	if probedDm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		probedDm.GetDetails() != "metadata wrapper missing" {
-		t.Fatalf("the check round flipped clone_id_to_dm_clone to %v/%q, want "+
-			"the converge's ERROR/%q", probedDm.GetStatus(),
-			probedDm.GetDetails(), "metadata wrapper missing")
-	}
+	assertNoteAndStatusLine(t, probed.GetCloneIdToDmClone()[testClone],
+		pb.ResStatus_RES_STATUS_ERROR, detailsCloneMetaMissing,
+		"probed clone_id_to_dm_clone")
 	// The dm-clone is still there: the ERROR above is the arena's, not a
 	// device that happens to be gone.
 	if _, ok := node.dms[cloneName(srv, testClone)]; !ok {
@@ -2989,4 +3279,482 @@ func TestMisSizedWrapperClaimsItsPartialUnit(t *testing.T) {
 		t.Fatalf("the hole punch hit a unit the live wrapper maps:\n%s",
 			strings.Join(node.Calls(), "\n"))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// CN18's shared reading of a clone's rows, for the converge and the check
+// round (CN28)
+// ---------------------------------------------------------------------------
+
+// TestCloneRowsAgreeBetweenConvergeAndCheck holds the two channels to one
+// reading of a clone (cloneRows). For each state of the node, a converge and
+// the check round after it report the clone's three rows with the same
+// status and the same epoch, and the very same rows where no failure of the
+// converge rides in them. The states are the ones the channels read apart
+// when each decided the rows by its own rule: a source without its
+// namespace, a source path that is not live, a walk that did not answer, a
+// dm-clone up with hydration off, and a clone that waits for room while its
+// dm-clone serves. A fault of the source — no namespace, or an endpoint
+// whose controller is not live or is gone — reads MISSING on both channels
+// beside a dm-clone with hydration on that serves on, so no row of the clone
+// reads ERROR, and none sets a health epoch (CN18). A dm-clone that is up
+// keeps its raw status line in its row whatever the row's status, which is
+// what the gateway's hydration checks read. What serves a namespace does not
+// follow the rows: a hydrating dm-clone serves on, one with hydration off
+// stays parked (nsDevNow).
+func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
+	const (
+		ok      = pb.ResStatus_RES_STATUS_OK
+		missing = pb.ResStatus_RES_STATUS_MISSING
+		errored = pb.ResStatus_RES_STATUS_ERROR
+		waiting = pb.ResStatus_RES_STATUS_PROVISIONING
+	)
+	noNs := fmt.Sprintf("no namespace 1 on %s", testSrcNqn)
+	for _, tc := range []struct {
+		name string
+		// killed starts from the node a build killed before CN18 step 5
+		// leaves (seedKilledCloneBuild); otherwise the clone is built and
+		// serving.
+		killed  bool
+		arrange func(t *testing.T, srv *CnAgentServer, node *fakeNode)
+		// target, dm and meta are the rows' statuses, on both channels.
+		target, dm, meta pb.ResStatus
+		// targetHas and dmHas are texts the converge's rows carry.
+		targetHas, dmHas string
+		// same: the check round's rows are the converge's, details and all.
+		same bool
+		// serving: the namespace is served through the dm-clone, and parked
+		// on its td's dm-error otherwise.
+		serving bool
+		// noDm: no dm-clone is up after the converge, so no row carries a
+		// status line.
+		noDm bool
+	}{
+		{
+			name:    "all up",
+			arrange: func(*testing.T, *CnAgentServer, *fakeNode) {},
+			target:  ok, dm: ok, meta: ok, targetHas: "paths: live",
+			same: true, serving: true,
+		},
+		{
+			name: "the source has no namespace",
+			arrange: func(_ *testing.T, _ *CnAgentServer, node *fakeNode) {
+				node.dropNsHead(testSrcNqn)
+			},
+			target: missing, dm: ok, meta: ok, targetHas: noNs,
+			same: true, serving: true,
+		},
+		{
+			name: "a source path is not live",
+			arrange: func(_ *testing.T, _ *CnAgentServer, node *fakeNode) {
+				node.setCtrlState(testSrcNqn, testIp2, testSvcId2,
+					"connecting")
+			},
+			target: missing, dm: ok, meta: ok,
+			targetHas: "paths: connecting", same: true, serving: true,
+		},
+		{
+			// The source's controller is deleted while its subsystem keeps
+			// listing it and the namespace head the dm-clone holds open,
+			// and every connect of the endpoint is refused: the endpoint
+			// has no controller at all. The refused connect leads the
+			// converge's details only.
+			name: "the source's controller gone, its reconnect refused",
+			arrange: func(_ *testing.T, _ *CnAgentServer, node *fakeNode) {
+				node.deleteCtrlDevice(testSrcNqn, testIp2, testSvcId2)
+				failConnects(node, testSrcNqn, testIp2, testSvcId2, 1000)
+			},
+			target: missing, dm: ok, meta: ok,
+			targetHas: "connection refused\npaths: ", serving: true,
+		},
+		{
+			name: "the source's walk does not answer",
+			arrange: func(t *testing.T, _ *CnAgentServer, node *fakeNode) {
+				path := subsysnqnPath(t, node, testSrcNqn)
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.killReadAlways[path] = true
+			},
+			target: errored, dm: ok, meta: ok,
+			targetHas: errSubsysUnknown.Error(), same: true, serving: true,
+		},
+		{
+			name: "a sweep's disconnect of the source in flight",
+			arrange: func(_ *testing.T, srv *CnAgentServer, _ *fakeNode) {
+				srv.mu.Lock()
+				defer srv.mu.Unlock()
+				srv.disconnecting[testSrcNqn] = struct{}{}
+			},
+			target: errored, dm: ok, meta: ok,
+			targetHas: detailsDisconnectInFlight(testSrcNqn), same: true,
+			serving: true,
+		},
+		{
+			// The source's controller is lost, and the converge's connect
+			// is killed after the kernel made the new one: the step fails,
+			// and its rows read what that connect left, as the check round
+			// does.
+			name: "a connect killed after it made the controller",
+			arrange: func(_ *testing.T, _ *CnAgentServer, node *fakeNode) {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.nvmeDisconnect([]string{"disconnect", "--nqn",
+					testSrcNqn})
+				node.killCmd["nvme connect --transport tcp --traddr "+
+					testIp2] = true
+			},
+			target: ok, dm: ok, meta: ok, targetHas: "paths: live",
+			same: true, serving: true,
+		},
+		{
+			name:   "hydration off, the enable refused",
+			killed: true,
+			arrange: func(_ *testing.T, srv *CnAgentServer, node *fakeNode) {
+				clone := cloneName(srv, testClone)
+				node.failCmdAlways["dmsetup message "+clone+
+					" 0 enable_hydration"] = "device-mapper: message " +
+					"ioctl on " + clone + " failed: Invalid argument"
+			},
+			target: ok, dm: errored, meta: ok, targetHas: "paths: live",
+			dmHas: "Invalid argument",
+		},
+		{
+			// The recovery removes the unfinished dm-clone and its
+			// re-create is refused: the rows read the device gone.
+			name:   "hydration off, the re-create refused",
+			killed: true,
+			arrange: func(_ *testing.T, srv *CnAgentServer, node *fakeNode) {
+				clone := cloneName(srv, testClone)
+				node.failCmdAlways["dmsetup create "+clone+" "] =
+					"device-mapper: reload ioctl on " + clone +
+						" failed: Invalid argument"
+			},
+			target: ok, dm: missing, meta: ok, targetHas: "paths: live",
+			dmHas: "Invalid argument", noDm: true,
+		},
+		{
+			// The wrapper and the dm-clone are lost, and the wrapper's
+			// create is killed after it made the wrapper: the rows read the
+			// arena afresh and find it.
+			name: "the wrapper's create killed after it made the wrapper",
+			arrange: func(_ *testing.T, srv *CnAgentServer, node *fakeNode) {
+				metaDm := cloneMetaName(srv, testClone)
+				removeCloneDevice(node, srv)
+				dropWrapper(node, metaDm)
+				node.killCmd["dmsetup create "+metaDm+" "] = true
+			},
+			target: ok, dm: missing, meta: ok, targetHas: "paths: live",
+			dmHas: "signal: killed", noDm: true,
+		},
+		{
+			name:   "hydration off, the source has no namespace",
+			killed: true,
+			arrange: func(_ *testing.T, _ *CnAgentServer, node *fakeNode) {
+				node.dropNsHead(testSrcNqn)
+			},
+			target: missing, dm: errored, meta: ok, targetHas: noNs,
+			dmHas: detailsCloneNotHydrating, same: true,
+		},
+		{
+			name: "waiting for room, the dm-clone serving",
+			arrange: func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				stale := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+				node.dms[cloneMetaName(srv, testClone)].table = fmt.Sprintf(
+					"0 %d linear %s 0", 2*cnCloneMetaUnitSectors, stale)
+				plantWrapper(t, srv, node, 0x999, 0,
+					common.CnCloneMetaUnitCnt)
+			},
+			target: ok, dm: waiting, meta: waiting, targetHas: "paths: live",
+			dmHas: waitingForTwoUnits, same: true, serving: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			srv.metaRetryInterval = time.Hour
+			if tc.killed {
+				seedKilledCloneBuild(t, srv, node)
+			} else {
+				syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+					clones: []*pb.Clone{cloneOf()}})
+			}
+			tc.arrange(t, srv, node)
+
+			// An equal-revision re-send converges the state as it is.
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 2, primary: true,
+					clones: []*pb.Clone{cloneOf()}}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			converged := reply.GetCntlrInfo()
+			node.Reset()
+			probed := checkRound(t, srv, 2)
+			for _, call := range node.Mutations() {
+				t.Fatalf("the check round mutated: %q", call)
+			}
+
+			for _, row := range []struct {
+				label string
+				rows  func(*pb.CntlrInfo) map[uint64]*pb.ResInfo
+				want  pb.ResStatus
+				has   string
+			}{
+				{"clone_id_to_target", (*pb.CntlrInfo).GetCloneIdToTarget,
+					tc.target, tc.targetHas},
+				{"clone_id_to_dm_clone", (*pb.CntlrInfo).GetCloneIdToDmClone,
+					tc.dm, tc.dmHas},
+				{"clone_id_to_meta", (*pb.CntlrInfo).GetCloneIdToMeta,
+					tc.meta, ""},
+			} {
+				got := row.rows(converged)[testClone]
+				if got.GetStatus() != row.want ||
+					!strings.Contains(got.GetDetails(), row.has) {
+					t.Fatalf("converged %s is %v/%q, want %v containing %q",
+						row.label, got.GetStatus(), got.GetDetails(),
+						row.want, row.has)
+				}
+				if checked := row.rows(probed)[testClone]; checked.GetStatus() !=
+					row.want {
+					t.Fatalf("checked %s is %v/%q, want %v", row.label,
+						checked.GetStatus(), checked.GetDetails(), row.want)
+				}
+				if tc.same && !proto.Equal(row.rows(probed)[testClone], got) {
+					t.Fatalf("the check round reports %s as %v, the "+
+						"converge as %v", row.label,
+						row.rows(probed)[testClone], got)
+				}
+			}
+			assertSameStatusAndEpoch(t, converged, probed)
+			// A dm-clone that is up has its status line in its row on both
+			// channels.
+			clone := cloneName(srv, testClone)
+			if _, up := node.dms[clone]; up == tc.noDm {
+				t.Fatalf("the case is vacuous: the dm-clone is up %v", up)
+			}
+			for label, info := range map[string]*pb.CntlrInfo{
+				"converged": converged, "probed": probed} {
+				details := info.GetCloneIdToDmClone()[testClone].GetDetails()
+				if _, parsed := agent.ParseCloneStatus(details); parsed ==
+					tc.noDm {
+					t.Fatalf("the %s dm row %q: a status line %v, want %v",
+						label, details, parsed, !tc.noDm)
+				}
+			}
+
+			// What serves the namespace is CN16's, and the rows' agreement
+			// does not move it.
+			if tc.serving {
+				want := agent.LinearTable(testTdSize/512,
+					node.devNo["/dev/mapper/"+clone], 0)
+				if got := node.dms[nsDevName(srv, testNs)].table; got !=
+					want {
+					t.Fatalf("the ns-dev is %q, want it serving through "+
+						"the dm-clone %q", got, want)
+				}
+			} else {
+				assertParked(t, srv, node, testNs, testTd, tc.name)
+			}
+			assertOk(t, converged.GetNsIdToDmLinear()[testNs], "ns-dev")
+			assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+		})
+	}
+}
+
+// TestCloneTargetRowRule pins clone_id_to_target's one rule (cloneTargetRow),
+// a branch per case: what the source read says decides the status, and a
+// failed connect of the converge's only leads the details of a row that is
+// not OK. Only this node's own reading reads ERROR, a disconnect in flight or
+// a walk that did not answer. A source with no subsystem entry reads
+// MISSING, and so does a fault of the source, an endpoint with no live
+// controller or no namespace, which then sets no health epoch (CN18).
+func TestCloneTargetRowRule(t *testing.T) {
+	cp := testClonePlan(t)
+	live := ctrlView{name: "nvme5", trAddr: testIp2, trSvcId: testSvcId2,
+		state: "live", anaState: "optimized"}
+	connecting := live
+	connecting.state = "connecting"
+	refused := errors.New("connect refused")
+	unknown := fmt.Errorf("subsystem %s %w: killed", testSrcNqn,
+		errSubsysUnknown)
+	withNs := func(ctrls ...ctrlView) *subsysView {
+		return &subsysView{found: true, nsDev: "/dev/nvme5n1", ctrls: ctrls}
+	}
+	noNs := &subsysView{found: true, ctrls: []ctrlView{live}}
+	for _, tc := range []struct {
+		name    string
+		src     cloneSource
+		status  pb.ResStatus
+		details string
+	}{
+		{"a disconnect in flight", cloneSource{inFlight: true},
+			pb.ResStatus_RES_STATUS_ERROR,
+			detailsDisconnectInFlight(testSrcNqn)},
+		{"the walk unanswered", cloneSource{readErr: unknown},
+			pb.ResStatus_RES_STATUS_ERROR, unknown.Error()},
+		{"the walk unanswered after a refused connect",
+			cloneSource{readErr: unknown, stepErr: refused},
+			pb.ResStatus_RES_STATUS_ERROR,
+			refused.Error() + "\n" + unknown.Error()},
+		{"no read", cloneSource{},
+			pb.ResStatus_RES_STATUS_MISSING, ""},
+		{"no subsystem", cloneSource{view: &subsysView{}},
+			pb.ResStatus_RES_STATUS_MISSING, ""},
+		{"no subsystem after a refused connect",
+			cloneSource{view: &subsysView{}, stepErr: refused},
+			pb.ResStatus_RES_STATUS_MISSING, refused.Error()},
+		{"no controller for the endpoint",
+			cloneSource{view: &subsysView{found: true, nsDev: "/dev/x"}},
+			pb.ResStatus_RES_STATUS_MISSING, "paths: "},
+		{"no controller for the endpoint after a refused connect",
+			cloneSource{view: &subsysView{found: true, nsDev: "/dev/x"},
+				stepErr: refused},
+			pb.ResStatus_RES_STATUS_MISSING,
+			refused.Error() + "\npaths: "},
+		{"a path not live", cloneSource{view: withNs(connecting)},
+			pb.ResStatus_RES_STATUS_MISSING, "paths: connecting"},
+		{"a path not live after a refused connect",
+			cloneSource{view: withNs(connecting), stepErr: refused},
+			pb.ResStatus_RES_STATUS_MISSING,
+			refused.Error() + "\npaths: connecting"},
+		{"no namespace", cloneSource{view: noNs},
+			pb.ResStatus_RES_STATUS_MISSING,
+			fmt.Sprintf("no namespace 1 on %s", testSrcNqn)},
+		{"no namespace after a refused connect",
+			cloneSource{view: noNs, stepErr: refused},
+			pb.ResStatus_RES_STATUS_MISSING,
+			refused.Error() + fmt.Sprintf("\nno namespace 1 on %s",
+				testSrcNqn)},
+		{"live with its namespace", cloneSource{view: withNs(live)},
+			pb.ResStatus_RES_STATUS_OK, "paths: live"},
+		{"live after a refused connect, the note dropped",
+			cloneSource{view: withNs(live), stepErr: refused},
+			pb.ResStatus_RES_STATUS_OK, "paths: live"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, details := cloneTargetRow(cp, tc.src)
+			if status != tc.status || details != tc.details {
+				t.Fatalf("%v/%q, want %v/%q", status, details, tc.status,
+					tc.details)
+			}
+		})
+	}
+}
+
+// TestCloneDmRowRule pins clone_id_to_dm_clone's one rule (cloneDmRow), a
+// branch per case: the read of the dm-clone decides the status, the source
+// only says why a dm-clone that is not there is not, and the raw status line
+// rides along whenever the read took it.
+func TestCloneDmRowRule(t *testing.T) {
+	cp := testClonePlan(t)
+	ready := cloneSource{view: &subsysView{found: true, nsDev: "/dev/nvme5n1",
+		ctrls: []ctrlView{{name: "nvme5", trAddr: testIp2,
+			trSvcId: testSvcId2, state: "live"}}}}
+	unknown := fmt.Errorf("subsystem %s %w: killed", testSrcNqn,
+		errSubsysUnknown)
+	const raw = "0 131072 clone 8 1/1024 2048 0/64 0 1 no_hydration 0"
+	killed := errors.New("signal: killed")
+	for _, tc := range []struct {
+		name    string
+		src     cloneSource
+		dm      cloneDmRead
+		status  pb.ResStatus
+		details string
+	}{
+		{"the read did not answer", ready, cloneDmRead{err: killed},
+			pb.ResStatus_RES_STATUS_ERROR, killed.Error()},
+		{"absent beside a ready source", ready, cloneDmRead{},
+			pb.ResStatus_RES_STATUS_MISSING, ""},
+		{"absent beside an unconnected source",
+			cloneSource{view: &subsysView{}}, cloneDmRead{},
+			pb.ResStatus_RES_STATUS_MISSING, "source not connected"},
+		{"absent beside a disconnect in flight",
+			cloneSource{inFlight: true}, cloneDmRead{},
+			pb.ResStatus_RES_STATUS_MISSING, "source not connected"},
+		{"absent beside a walk unanswered", cloneSource{readErr: unknown},
+			cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
+			"source unknown: " + unknown.Error()},
+		{"absent beside an endpoint with no controller",
+			cloneSource{view: &subsysView{found: true,
+				nsDev: "/dev/nvme5n1"}},
+			cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
+			"source not connected"},
+		{"hydrating", ready,
+			cloneDmRead{present: true, raw: raw, hydrating: true},
+			pb.ResStatus_RES_STATUS_OK, raw},
+		{"hydrating beside an unconnected source",
+			cloneSource{view: &subsysView{}},
+			cloneDmRead{present: true, raw: raw, hydrating: true},
+			pb.ResStatus_RES_STATUS_OK, raw},
+		{"hydration off", ready, cloneDmRead{present: true, raw: raw},
+			pb.ResStatus_RES_STATUS_ERROR,
+			detailsCloneNotHydrating + "\n" + raw},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, details := cloneDmRow(cp, tc.src, tc.dm)
+			if status != tc.status || details != tc.details {
+				t.Fatalf("%v/%q, want %v/%q", status, details, tc.status,
+					tc.details)
+			}
+		})
+	}
+}
+
+// TestCloneSourceReadyRule pins CN18 step 1's test on one read of the source
+// (cloneSource.ready), which gates step 2's verdict on both channels: every
+// configured endpoint has a controller, in whatever state, and the source
+// namespace is there.
+func TestCloneSourceReadyRule(t *testing.T) {
+	cp := testClonePlan(t)
+	ctrl := func(state string) ctrlView {
+		return ctrlView{name: "nvme5", trAddr: testIp2, trSvcId: testSvcId2,
+			state: state}
+	}
+	other := ctrlView{name: "nvme6", trAddr: testIp, trSvcId: testSvcId,
+		state: "live"}
+	view := func(nsDev string, ctrls ...ctrlView) *subsysView {
+		return &subsysView{found: true, nsDev: nsDev, ctrls: ctrls}
+	}
+	for _, tc := range []struct {
+		name  string
+		src   cloneSource
+		ready bool
+	}{
+		{"a disconnect in flight", cloneSource{inFlight: true,
+			view: view("/dev/nvme5n1", ctrl("live"))}, false},
+		{"the walk unanswered", cloneSource{readErr: errSubsysUnknown},
+			false},
+		{"no read", cloneSource{}, false},
+		{"no subsystem", cloneSource{view: &subsysView{}}, false},
+		{"no namespace", cloneSource{view: view("", ctrl("live"))}, false},
+		{"another endpoint's controller only",
+			cloneSource{view: view("/dev/nvme5n1", other)}, false},
+		{"a controller connecting", cloneSource{
+			view: view("/dev/nvme5n1", ctrl("connecting"))}, true},
+		{"a failed connect beside a ready read", cloneSource{
+			view:    view("/dev/nvme5n1", ctrl("live")),
+			stepErr: errors.New("refused")}, true},
+		{"live", cloneSource{view: view("/dev/nvme5n1", ctrl("live"))},
+			true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.src.ready(cp); got != tc.ready {
+				t.Fatalf("ready is %v, want %v", got, tc.ready)
+			}
+		})
+	}
+}
+
+// testClonePlan is the fixture clone's plan, as a primary's converge builds
+// it.
+func testClonePlan(t *testing.T) *clonePlan {
+	t.Helper()
+	plan := newCntlrPlan(common.NewNameFmt(common.DefaultLocalStorPrefix),
+		cntlrReq(reqOpts{revision: 2, primary: true,
+			clones: []*pb.Clone{cloneOf()}}))
+	cp := plan.cloneById[testClone]
+	if cp == nil {
+		t.Fatalf("the fixture plan has no clone %d", testClone)
+	}
+	return cp
 }

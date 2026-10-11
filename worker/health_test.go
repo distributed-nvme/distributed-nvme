@@ -1413,7 +1413,8 @@ type cntlrRowField struct {
 // cntlrRowFields walks CntlrInfo's descriptor rather than a hand-kept list,
 // so a map added to the proto is covered by the tests below the day it
 // lands: every field must be a uint64-keyed map of ResInfo, or of a message
-// whose every field is one.
+// whose every field is one, td_id_to_thin_info's torn mark aside, which is
+// no row (RW19 copies it; HL2 never judges it).
 func cntlrRowFields(t *testing.T) []cntlrRowField {
 	t.Helper()
 	resInfo := (&pb.ResInfo{}).ProtoReflect().Descriptor().FullName()
@@ -1452,6 +1453,10 @@ func cntlrRowFields(t *testing.T) []cntlrRowField {
 		nested := fd.MapValue().Message().Fields()
 		for j := 0; j < nested.Len(); j++ {
 			nfd := nested.Get(j)
+			if fd.Name() == "td_id_to_thin_info" && nfd.Name() == "torn" &&
+				nfd.Kind() == protoreflect.BoolKind {
+				continue
+			}
 			if !rowMap(nfd) {
 				t.Fatalf("CntlrInfo.%s.%s is not a map of rows: teach this "+
 					"test", fd.Name(), nfd.Name())
@@ -1545,6 +1550,26 @@ func TestHealthCntlrFirstErrorOrder(t *testing.T) {
 			t.Fatalf("round %d: obs = %v (%q) with every row cleared", round,
 				obs, res)
 		}
+	}
+}
+
+// TestHealthCntlrTornMarkIsNoRow pins that the torn mark of a thin info,
+// which RW19's flip copies, is no row HL2 judges: a report whose every row
+// is OK reads clean with the mark set, and shows a primary's stack built.
+func TestHealthCntlrTornMarkIsNoRow(t *testing.T) {
+	info := &pb.CntlrInfo{
+		TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+			7: {
+				SliceIdToDmThin: map[uint64]*pb.ResInfo{1: resOk("thin")},
+				Torn:            true,
+			},
+		},
+	}
+	if obs, res := cntlrObservation(0, info); obs != healthClean {
+		t.Fatalf("obs = %v (%q), want clean", obs, res)
+	}
+	if !primaryShapeBuilt(info) {
+		t.Fatalf("a torn mark kept the primary's shape unbuilt")
 	}
 }
 

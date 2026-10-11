@@ -1552,15 +1552,26 @@ func TestMigrationSourceFence(t *testing.T) {
 		t.Errorf("dm_linear details = %q, want the cutover grace window note",
 			info.GetDetails())
 	}
-	// A probe agrees, and does not mutate (DN16/SH25).
+	// A probe agrees, row for row, and does not mutate (DN16/SH25).
 	node.Reset()
-	if _, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("GetSideInfo: %v", err)
 	}
 	if got := node.Mutations(); len(got) != 0 {
 		t.Errorf("a probe inside the window mutated: %v", got)
+	}
+	for _, cnId := range []uint64{testCn0, testCn1} {
+		conv := reply.GetSideInfo().GetCnIdToDmLinear()[cnId]
+		got := probe.GetSideInfo().GetCnIdToDmLinear()[cnId]
+		if got.GetStatus() != conv.GetStatus() ||
+			got.GetDetails() != conv.GetDetails() {
+			t.Errorf("cn %d dm_linear: the probe reads %v/%q, the "+
+				"converge %v/%q", cnId, got.GetStatus(), got.GetDetails(),
+				conv.GetStatus(), conv.GetDetails())
+		}
 	}
 	// An extra converge inside the window is idempotent.
 	node.Reset()
@@ -1596,6 +1607,101 @@ func TestMigrationSourceFence(t *testing.T) {
 	if got := srv.getSide(sideKey(testCluster, testDn, testSp, testSide)).
 		req.Load(); got.GetMigrSrcConf() == nil {
 		t.Error("the source role vanished")
+	}
+}
+
+// A check round reads a fenced dm-linear by the test phase 1 converges it to
+// (DN12, DN18): there and suspended, on whatever table it carries. So the two
+// channels agree in every window — the first, over the pre-fence table, and
+// DN12 rule 1's known-limit second one, which a restart opens over the
+// dm-error phase 2 had already installed, where a round that expected the
+// pre-fence table would read the primary's linear as broken for the whole
+// window. A linear found resumed inside the window reads ERROR until the
+// converge suspends it again.
+func TestAFencedLinearReadsTheSameOnBothChannels(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	cnIds := []uint64{testCn0, testCn1}
+	linOf := func(cnId uint64) string {
+		return nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
+	}
+	// agree syncs revision and compares every per-CN row of the reply with a
+	// check round's, status and epoch, and the fenced linears' details.
+	agree := func(what string, revision uint64) {
+		t.Helper()
+		reply, err := srv.SyncupSide(ctx, migrSrcReq(revision))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		round := checkRoundInfo(t, srv, revision)
+		for _, cnId := range cnIds {
+			for _, row := range []struct {
+				name        string
+				conv, check *pb.ResInfo
+			}{
+				{"dm_error", reply.GetSideInfo().GetCnIdToDmError()[cnId],
+					round.GetCnIdToDmError()[cnId]},
+				{"dm_linear", reply.GetSideInfo().GetCnIdToDmLinear()[cnId],
+					round.GetCnIdToDmLinear()[cnId]},
+				{"nvmeof", reply.GetSideInfo().GetCnIdToNvmeof()[cnId],
+					round.GetCnIdToNvmeof()[cnId]},
+			} {
+				if row.conv.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+					row.check.GetStatus() != row.conv.GetStatus() ||
+					row.check.GetEpoch() != row.conv.GetEpoch() {
+					t.Errorf("%s: cn %d %s: the converge %v/%q at epoch %d, "+
+						"the round %v/%q at epoch %d; want both OK", what,
+						cnId, row.name, row.conv.GetStatus(),
+						row.conv.GetDetails(), row.conv.GetEpoch(),
+						row.check.GetStatus(), row.check.GetDetails(),
+						row.check.GetEpoch())
+				}
+			}
+			if got := round.GetCnIdToDmLinear()[cnId].
+				GetDetails(); got != fenceSuspendedDetails {
+				t.Errorf("%s: cn %d dm_linear details %q on the round, "+
+					"want %q", what, cnId, got, fenceSuspendedDetails)
+			}
+		}
+	}
+
+	srv.fenceWait = time.Hour
+	agree("the window", 2)
+
+	// The second window: the primary's linear sits on its dm-error,
+	// suspended, as a restart that opens a window over phase 2's tables
+	// leaves it.
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
+	node.mu.Lock()
+	fields := strings.Fields(node.dms[linOf(testCn0)].table)
+	fields[3] = errNo
+	node.dms[linOf(testCn0)].table = strings.Join(fields, " ")
+	node.mu.Unlock()
+	if !linearMapsDm(node, linOf(testCn0), nf.DnErrorName(
+		testCluster, testDn, testSp, testSide, testCn0)) ||
+		!dmSuspended(node, linOf(testCn0)) {
+		t.Fatal("fixture is wrong: the primary's linear is not suspended " +
+			"on its dm-error")
+	}
+	agree("the second window", 3)
+
+	// A linear resumed behind the agent's back is no fence.
+	node.mu.Lock()
+	node.dms[linOf(testCn1)].suspended = false
+	node.mu.Unlock()
+	got := checkRoundInfo(t, srv, 3).GetCnIdToDmLinear()[testCn1]
+	if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(got.GetDetails(), "not suspended") {
+		t.Errorf("a resumed linear inside the window reads %v/%q, want "+
+			"ERROR naming it not suspended", got.GetStatus(),
+			got.GetDetails())
+	}
+	agree("the window resumed and fenced again", 4)
+	if !dmSuspended(node, linOf(testCn1)) {
+		t.Error("the converge did not suspend the resumed linear again")
 	}
 }
 
@@ -2018,8 +2124,9 @@ func TestNoSideInsideTheFenceWindow(t *testing.T) {
 	}
 
 	// The pass completes, and the rows are the ones the level demands: the
-	// dm layer serving, no export layer. A probe agrees — one still expecting
-	// the pre-fence table would report the primary's linear as broken.
+	// dm layer serving, no export layer. A probe agrees — one that still
+	// read the window as running would report the resumed linears as
+	// broken.
 	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
@@ -2293,8 +2400,8 @@ func TestNoSideProbeFailureHoldsTheExports(t *testing.T) {
 // Lowering the level again, with the source role still standing, must not
 // reopen a window the level ended. The exports come back over linears phase 2
 // has already put on their dm-errors; a second window would suspend them there
-// again, and a probe — which inside a window expects the pre-fence table —
-// would report the primary's linear as broken for the whole of it.
+// again, holding every path of the side suspended for a whole window with
+// nothing left to absorb.
 func TestNoSideThenLevelDownOpensNoSecondWindow(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -2722,10 +2829,9 @@ func TestFenceRestartThatHoldsNoSideOpensAWholeWindow(t *testing.T) {
 				t.Fatal("the cutover did not suspend the primary's dm-linear")
 			}
 
-			// The process exits inside the window, its timer with it; the
-			// kernel state survives, the side's state does not.
+			// The process exits inside the window, and its join stops the
+			// timer; the kernel state survives, the side's state does not.
 			stopTestServer(t, srv)
-			srv.clearFence(srv.getSide(key))
 			node.mu.Lock()
 			tc.lose(node, nf)
 			node.mu.Unlock()

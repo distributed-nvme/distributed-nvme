@@ -1301,14 +1301,14 @@ case_behavior() {
 		"--redund none must not also carry the raid1 arm"
 
 	# -------------------------------------------------------------------
-	stage 5 'td list renders "created" for both values (EmitUnpopulated)'
+	stage 5 'td list renders "created" and "torn" for both values (EmitUnpopulated)'
 	# -------------------------------------------------------------------
 	# ListThinDevicesReply carries a map<string, ThinDevice> named
 	# name_to_td (pb/schema.proto), so the injected reply and the assertion
 	# below address the tds by name.
 	set_behavior <<'EOF'
 {"methods":{"ListThinDevices":{"reply":{"name_to_td":{
-  "t0":{"td_id":"7","dev_id":1,"size":"67108864","created":true},
+  "t0":{"td_id":"7","dev_id":1,"size":"67108864","created":true,"torn":true},
   "t1":{"td_id":"8","dev_id":2,"size":"67108864","created":false}}}}}}
 EOF
 	ctl_ok td list
@@ -1321,6 +1321,15 @@ EOF
 	assert_jq "$CTL_OUT" '(.name_to_td.t1 | has("created"))' \
 		"a created:false td still renders the key (EmitUnpopulated)"
 	assert_jq "$CTL_OUT" '.name_to_td.t1.created == false' \
+		"and it renders as false"
+	# The torn mark of a snapshot to delete and re-create (architecture.md,
+	# Thin devices) renders the same way: true where the record holds it,
+	# and the key, false, on every other thin device.
+	assert_jq "$CTL_OUT" '.name_to_td.t0.torn == true' \
+		"the injected torn:true td renders true"
+	assert_jq "$CTL_OUT" '(.name_to_td.t1 | has("torn"))' \
+		"a td that is not torn still renders the key (EmitUnpopulated)"
+	assert_jq "$CTL_OUT" '.name_to_td.t1.torn == false' \
 		"and it renders as false"
 	clear_behavior
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -728,17 +727,6 @@ func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 	return healthClean, ""
 }
 
-// thinIdMissing is how a created td's thin row names the thin id missing from
-// its slice's pool, the mark of HL2's shared-state rows (sharedStateTds). The
-// cn agent attaches a created td's volume with a bare `dmsetup create` of its
-// thin table and never messages the id back into existence (cnagent.md CN14);
-// dm-thin refuses the table of a dev_id the pool's metadata does not hold with
-// ENODATA, which dmsetup prints as this, and the agent carries the output in
-// the row's details (cnagent.md CN29 error capture).
-// Only a converge's report names it: a Check round's probe finds the volume
-// absent and reads it MISSING.
-const thinIdMissing = "No data available"
-
 // cntlrRowId names one row of a map HL2 judges a cntlr by: the map's label,
 // the td of a per-td thin map (0 for any other map) and the row's key.
 type cntlrRowId struct {
@@ -773,14 +761,19 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 
 // sharedStateTds applies HL2's two row classes to one CntlrInfo. A row is of
 // the shared-state class when it belongs to the stack of a created td (state)
-// whose thin row, in some slice, reads RES_STATUS_ERROR naming the thin id
-// missing (thinIdMissing): the td's own rows — its thin rows, its raid0 and
-// its dm-error — and every row of an object that exists for it alone — the
-// ns-dev and the nvmet namespace of each of its namespaces, the three rows of
-// a transfer out of one of them, the three of a clone onto it. The pool lives
-// on the SP's legs, so whichever cntlr holds the primary role reads the same
-// rows, and no failover or replacement brings the td, or anything over it,
-// back: an operator does (architecture.md, Known limits).
+// whose thin row, in some slice, reads RES_STATUS_ERROR with the reason
+// RES_REASON_THIN_ID_LOST (architecture.md, Live-state reporting): the cn
+// agent's build of a created td's thin volume found the id gone from its
+// slice's pool (cnagent.md CN14). The reason is a field of the row, never a
+// text in its details, and only a converge's report carries it: a Check
+// round's probe finds the volume absent and reads it MISSING. The class holds
+// the td's own rows — its thin rows, its raid0 and its dm-error — and every
+// row of an object that exists for it alone — the ns-dev and the nvmet
+// namespace of each of its namespaces, the three rows of a transfer out of
+// one of them, the three of a clone onto it. The pool lives on the SP's legs,
+// so whichever cntlr holds the primary role reads the same rows, and no
+// failover or replacement brings the td, or anything over it, back: an
+// operator does (architecture.md, Known limits).
 // Every other ERROR row is the cntlr's own.
 // It returns those tds, ascending, when the info carries ERROR rows and every
 // one of them is of the shared-state class, and nil when one is the cntlr's
@@ -795,7 +788,7 @@ func sharedStateTds(info *pb.CntlrInfo, state *model.SpState) []uint64 {
 		thin := info.GetTdIdToThinInfo()[td.GetTdId()]
 		for _, res := range thin.GetSliceIdToDmThin() {
 			if res.GetStatus() == pb.ResStatus_RES_STATUS_ERROR &&
-				strings.Contains(res.GetDetails(), thinIdMissing) {
+				res.GetReason() == pb.ResReason_RES_REASON_THIN_ID_LOST {
 				lost[td.GetTdId()] = true
 			}
 		}
@@ -894,9 +887,10 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // td's raid0 row reads ERROR while its thins are absent; a leg row reads the
 // CN11 prober, which fails on a path still non-optimized). Every other MISSING
 // the cn agent reports is likewise a device not built, or a clone whose
-// source is not connected or could not be read this pass (CN18), so a
-// primary showing one stays settling, held to cntlr_unhealthy, until it
-// clears — for as long as a clone's source stays unconnected or unread. A
+// source is not connected, has a fault (an endpoint with no live controller,
+// or no namespace) or could not be read this pass (CN18), so a primary
+// showing one stays settling, held to cntlr_unhealthy, until it clears — for
+// as long as a clone's source stays unconnected, faulty or unread. A
 // clone the cn agent finds no free run for in its CN's metadata area reads
 // PROVISIONING on clone_id_to_meta and clone_id_to_dm_clone (CN18;
 // architecture.md, Metadata units) and holds its primary settling the same

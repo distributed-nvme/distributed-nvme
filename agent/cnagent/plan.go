@@ -177,22 +177,26 @@ type cntlrPlan struct {
 	// --associated` once per converge or probe pass and never persisted, so a
 	// cntlr with N clones still issues one enumeration. They and the sweep
 	// fact below are the only fields here that are not a pure function of
-	// the request; these three are filled lazily by planArena, and an
-	// allocation's own enumeration replaces them (ensureCloneMeta).
+	// the request; these three are filled lazily by planArena, an
+	// allocation's own enumeration replaces them (ensureCloneMeta), and a
+	// failed allocation clears arenaDone so the clone's rows read the arena
+	// afresh (ensureClone).
 	arena     *cloneMetaArena
 	arenaErr  error
 	arenaDone bool
 
-	// cloneMayLinger is what this pass's sweep tells the build phase that
-	// follows it (CN21). sweepCntlr sets it on a converge and nothing else
-	// does; the plan is built afresh for every pass, so it never outlives
-	// the pass that learned it. Set, it says that a dm-clone the plan does
-	// not want may still be live after the sweep — on a pass that removes,
-	// because L3 did not run (the descent stopped above it) or left one; on
-	// one an unanswered listing stopped, because the dm listing did not
-	// answer or named one — and one whose hydration is on goes on copying
-	// into its destination raid0 until L3 removes it.
-	cloneMayLinger bool
+	// cloneHold is what this pass's sweep tells the build phase that
+	// follows it (CN18, CN21): the raid0s a dm-clone the plan does not want
+	// may still write into after the sweep — on a pass that removes,
+	// because L3 did not run (the descent stopped above it) or did not
+	// verify it gone; on one an unanswered listing stopped, because the dm
+	// listing named it — or every raid0 of the cntlr, when the dm listing
+	// did not answer or such a dm-clone's destination could not be read
+	// (lingeringCloneHold). A dm-clone whose hydration is on goes on copying
+	// into its destination raid0 until L3 removes it. sweepCntlr sets it on
+	// a converge and nothing else does; the plan is built afresh for every
+	// pass, so it never outlives the pass that learned it.
+	cloneHold cloneHold
 }
 
 // slicePlan is one slice of the SP: the two pool concats and the thin-pool

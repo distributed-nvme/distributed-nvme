@@ -98,7 +98,7 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 **fence** — The step where a disk node cuts the old primary's path to a side by reloading it onto an error target, so that the old primary can no longer read or write the leg. A failover fences the old primary on every side of the pool.
 
-**hold** — The worker's wait before it sends a pool's syncups to the cntlrs: first until the old primary reports its demotion applied, then until the sides report the new revision applied, each bounded in time.
+**hold** — The worker's wait before it sends a pool's syncups to the cntlrs: first until the old primary reports its demotion applied, then until the sides that were healthy when this wait began report the new revision applied, each bounded in time.
 
 **cntlr replacement** — The reaction that deletes a cntlr that has been unhealthy for too long and creates a new one on another controller node.
 

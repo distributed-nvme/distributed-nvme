@@ -173,7 +173,9 @@ enum SpLevel {
 enum ResStatus {
     // UNKNOWN means can't get response from dn/cn
     RES_STATUS_UNKNOWN = 0;
-    // MISSING means dn/cn doesn't create it
+    // MISSING means dn/cn has not created it or, on a clone's
+    // clone_id_to_target row, that the clone's source has a fault
+    // (architecture.md, Live-state reporting)
     RES_STATUS_MISSING = 1;
     // ERROR means dn/cn tried to create it but failed
     RES_STATUS_ERROR = 2;
@@ -190,11 +192,30 @@ enum ResStatus {
     RES_STATUS_PENDING = 5;
 }
 
+// Why a row reads as it does, where a control-plane decision needs the cause
+// and not only the status: the decision reads this field, never an English
+// sentence in details (architecture.md, Live-state reporting). Appended
+// values only, never renumbered.
+enum ResReason {
+    // No reason given: every row but the ones a value below names.
+    RES_REASON_NONE = 0;
+    // The thin volume build of a created thin device failed because its
+    // slice's pool no longer holds the thin id: dm-thin refused the thin
+    // table with ENODATA (cnagent.md CN14, CN29). Only a converge's report
+    // sets it, on that RES_STATUS_ERROR thin row; a check round's probe
+    // never does.
+    RES_REASON_THIN_ID_LOST = 1;
+}
+
 message ResInfo {
     string res_name = 1;
     ResStatus status = 2;
     string details = 3;
     uint64 epoch = 4;
+    // RES_REASON_NONE on every row but the ones ResReason names. A change of
+    // the reason alone does not move epoch, as a change of details alone
+    // does not (dnagent.md SH14). Appended, never renumbered.
+    ResReason reason = 5;
 }
 
 message DnInfo {
@@ -234,6 +255,14 @@ message SideInfo {
 message CntlrInfo {
     message ThinInfo {
         map<uint64, ResInfo> slice_id_to_dm_thin = 1;
+        // The primary's torn mark for this thin device (cnagent.md CN14): in
+        // one run of the snapshot pre-pass a slice's message made a new thin
+        // id while another slice already had its id. The cn agent keeps it
+        // in memory until the request shows the td created or drops it, the
+        // converge's report and the check round's carry it alike, and the
+        // created flip copies it into ThinDevice.torn (dnv-worker.md RW19).
+        // Appended, never renumbered.
+        bool torn = 2;
     }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;
@@ -471,6 +500,13 @@ message ThinDevice {
     // create_thin/create_snap is ever sent for this td again (CN14; the
     // delete sent when the td leaves td_list stays ungated).
     bool created = 5;
+    // torn is written once, in the put that sets created, from the torn mark
+    // the reports that completed the td carried (CntlrInfo.ThinInfo.torn;
+    // dnv-worker.md RW19), and never changed after it. Best effort: false
+    // proves nothing when the cn agent restarted, or the primary role moved,
+    // between the snapshot messages and the flip (architecture.md, Known
+    // limits). Appended, never renumbered.
+    bool torn = 6;
 }
 
 // {dnv_prefix} subsystem {cluster_id} {sp_id} {nqn}
@@ -1522,7 +1558,11 @@ message SyncupCntlrRequest {
     map<string, Subsystem> nqn_to_subsystem = 10;
     repeated Clone clone_list = 11;
     repeated Transfer xfer_list = 12;
-    repeated Migration migr_list = 13;
+    reserved 13;
+    reserved "migr_list";  // never reused: a length-delimited field
+                           // renumbered onto 13 would decode a stored
+                           // request's migrations as its own value,
+                           // silently; the name goes with it.
 }
 
 message SyncupCntlrReply {

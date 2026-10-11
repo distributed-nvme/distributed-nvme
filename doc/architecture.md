@@ -174,9 +174,10 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **thin device (td)** — A user volume: one dm-thin volume per slice plus
   one raid0 (dm striped) across the per-slice thin volumes on the primary.
   Snapshots are thin devices with `ori_id` set. `created` marks a td whose
-  thin volume the primary has reported `OK` in every slice (sp role); only
-  a created td can be snapshotted, and an origin cannot be deleted while a
-  snapshot of it is uncreated (Thin devices).
+  thin volume the primary has reported `OK` in every slice (sp role), and
+  `torn` a snapshot whose slices the cn agent saw taken at two different
+  moments; only a created td can be snapshotted, and an origin cannot be
+  deleted while a snapshot of it is uncreated (Thin devices).
 * **subsystem (ss), namespace (ns)** — The host-facing NVMe-oF objects. A
   namespace binds an `ns_idx` (NSID) of a subsystem to a thin device. Fig.
   `060VirtualVolume` (Host view).
@@ -2360,23 +2361,38 @@ snapshot is crash-consistent only if all `slice_cnt` `create_snap`
 messages capture one instant. The primary therefore quiesces the origin
 td's raid0 (`CnRaid0Name`) around the whole per-slice sequence, so that no
 host write lands between two slices' messages; `cnagent.md` CN14 is the
-agent-side spec, bounds of the suspension included ([D12]). A primary
-crash *between* two slices' messages still yields a torn snapshot (the
-per-slice snapshots date from different instants); a snapshot whose
-creation raced a primary crash should be deleted and re-created (Known
-limits).
+agent-side spec, bounds of the suspension included ([D12]). A snapshot
+whose messages one pass did not all send — the primary stopped between two
+of them, or the pass skipped a slice or a slice's message failed — is
+finished by a later pass and is **torn**: its slices date from different
+instants. The cn agent marks it torn in its report when one pass makes a
+slice's thin id while another slice's id already exists (`cnagent.md`
+CN14), and the created flip writes the mark into `ThinDevice.torn` in the
+put that sets `created` (sp role; `dnv-worker.md` RW19), so `torn` is
+written once and never changed, and `ListThinDevices` returns it. The one
+remedy is to delete and re-create the snapshot. The mark is best effort:
+the agent keeps it in memory until the flip, so in between an agent
+restart can lose it, and so can a failover or a cntlr replacement that
+moves the primary role off the cntlr holding it; the snapshot then flips
+with `torn` false (Known limits). Reason: nothing else tells the operator
+which snapshot needs the remedy.
 
 **Materialization.** `ThinDevice.created` is written false here and set
 true exactly once by the sp worker, when a cntlr has reported that td's
-thin volume `RES_STATUS_OK` in **every** slice of the SP (sp role). It is
-never cleared: a pool holds a thin id until a delete message of its
-`dev_id` reaches it — sent by the td's own deletion or, when that fan-out
-also demoted the applying cntlr (or suppressed its pool) so that CN14's
-pool-presence gate skipped the message, by the CN14 **activation sweep**
-at the next re-creation of the pool device (`cnagent.md` CN14). Either way
-a later bad row is a health event (`err_epoch`), not evidence the id is
-gone. A td deleted and re-created under the same name is a different td —
-new `td_id`, new `dev_id`, `created` false — and `dev_id`s are never
+thin volume `RES_STATUS_OK` in **every** slice of the SP (sp role);
+`ThinDevice.torn` is written false here too and set, if at all, only by
+that flip. `created` is never cleared: a pool holds a thin id until a
+delete message of its `dev_id` reaches it — sent by the td's own deletion
+or, when that fan-out also demoted the applying cntlr (or suppressed its
+pool) so that CN14's pool-presence gate skipped the message, by the CN14
+**activation sweep** at the next re-creation of the pool device
+(`cnagent.md` CN14) — so a later bad row is a health event (`err_epoch`),
+not evidence the id is gone. A delete message that fails is followed in
+the same pass, under a request the revision-gated syncup delivered, by a
+sweep of that pool's ids, and an id that sweep does not reach waits for
+the next sweep of that pool's ids that gets through (`cnagent.md` CN14).
+A td deleted and re-created under the same name is a different td — new
+`td_id`, new `dev_id`, `created` false — and `dev_id`s are never
 reused, so an old snapshot's `ori_id` can never resolve to it. The
 refusal's details (`msgOriginNotCreated`) tell the caller to wait for
 `ListThinDevices` to report `created` true, and nothing is written — no
@@ -2420,8 +2436,8 @@ fan-out — the `SpRev` bump of `CreateThinDevice` sends `SyncupCntlr` to the
 primary, whose reply already reports every slice `OK` in the common case,
 so the flip lands in the same round; the worst case is one
 `health_check_conf.cntlr_interval` later through `CheckCntlr` (Check
-streams), and up to one more while a side of the SP has not accepted the
-bump (sp role, sides first).
+streams), and up to one more while a side `dnv-worker.md` RW14 waits for
+has not accepted the bump (sp role, sides first).
 
 **Interaction with `SpLevel` and provisioning.** At an `sp_level` that
 suppresses pools the thin rows read `RES_STATUS_MISSING` with details
@@ -2478,8 +2494,10 @@ Reply `td_id`.
 
 **ListThinDevices** — one STM reads `SpConf` and every td in
 `td_name_list` into `name_to_td`; a missing listed key is `ABORTED`.
-`name_to_td` carries `created`; it is the client's wait primitive before
-snapshotting (with `GetClone` for a clone's destination).
+`name_to_td` carries `created` and `torn`: `created` is the client's wait
+primitive before snapshotting (with `GetClone` for a clone's destination),
+and a snapshot that reads `torn` is one to delete and re-create (Snapshot
+point-in-time, above).
 
 ### Subsystems, namespaces
 
@@ -3109,11 +3127,16 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   the previous call returned.
 * **Error capture.** Shell execution uses the command timeouts (Common
   validation); failures are captured into the affected resource's
-  `ResInfo` as `RES_STATUS_ERROR` with the reason in `details` rather than
+  `ResInfo` as `RES_STATUS_ERROR` with what failed in `details` rather than
   crashing the reconcile — the agent always converges as much as it can
-  and reports the rest. A metadata area that has no free run for a copy is
-  no failure: it is a wait, reported `RES_STATUS_PROVISIONING` (Metadata
-  units).
+  and reports the rest. `cnagent.md` CN29 says when a row also carries a
+  `reason` (Live-state reporting). A metadata area that has no free run
+  for a copy is no failure: it is a wait, reported
+  `RES_STATUS_PROVISIONING` (Metadata units). The rows of a clone and of a
+  migration destination take their status otherwise: one rule decides it,
+  on a converge and a check round alike, from what each reads, with what
+  failed in their details (`cnagent.md` CN18; `dnagent.md` DN13, which
+  says when a destination's two channels differ).
 * **Bitmap durability.** Received `Push*Bitmap` chunks are persisted per
   chunk under `LocalMigrBmPath` or `LocalCloneBmPath`; the applied sets
   reported through `bm_info.bm_idx_list` and `bm_info_list`'s
@@ -3185,8 +3208,8 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
 * `SyncupCntlr` carries one `cntlr_pointer`, `revision`, `bdev_conf`
   (`dm_pool_conf.low_water_mark_pct` included, Primary cntlr),
   `sp_level`, `cntlr`, `id_to_slice` (keyed by the `slice_id` rendered
-  with `IdKeyFmt`), `td_list`, `nqn_to_subsystem`, `clone_list`,
-  `xfer_list` and `migr_list`. It converges Primary cntlr or Standby
+  with `IdKeyFmt`), `td_list`, `nqn_to_subsystem`, `clone_list` and
+  `xfer_list`. It converges Primary cntlr or Standby
   cntlr; a primary-to-standby or standby-to-primary flip follows Failover
   exactly, and a clone rebuild follows Clone crash recovery. Reply
   `agent_reply`, `revision`, `cntlr_info` and `bm_info_list` (the applied
@@ -3330,12 +3353,14 @@ stop the goroutine (`dnagent.md` DN16).
 
 ### Live-state reporting
 
-`ResInfo` carries `res_name`, `status`, `details` and `epoch`, with
-`ResStatus`:
+`ResInfo` carries `res_name`, `status`, `details`, `reason` and `epoch`,
+with `ResStatus`:
 
 * `RES_STATUS_UNKNOWN` — no answer from the node; set by *workers*, never
   by the agent itself.
-* `RES_STATUS_MISSING` — the agent has not created it.
+* `RES_STATUS_MISSING` — the agent has not created it; a clone's
+  `clone_id_to_target` row also reads it for a fault of the clone's source
+  (`cnagent.md` CN18).
 * `RES_STATUS_ERROR` — tried and failed; `details` says why, or carries
   the command output — *needs intervention*.
 * `RES_STATUS_OK`.
@@ -3347,7 +3372,8 @@ stop the goroutine (`dnagent.md` DN16).
   completed a round, or none is registered yet: **no verdict, no action
   needed**. Only the primary's leg report produces it (`cnagent.md` CN11).
 
-`epoch` is the unix seconds of the last status change. The `revision`
+`epoch` is the unix seconds of the last status change; a change of
+`details` or of `reason` alone does not move it. The `revision`
 returned next to an `*Info` (`Syncup*`, `Check*` and `Get*Info` replies)
 is that of the request the agent holds for the object — the last one it
 accepted (`dnagent.md` SH8, SH25) — whatever the outcome of its converge.
@@ -3355,9 +3381,19 @@ Map keys in `SideInfo` and `CntlrInfo` are the obvious owner ids —
 `cn_id` for a side's per-CN export stack; the td, slice, group, leg,
 namespace, subsystem, clone and transfer ids in `CntlrInfo`, with
 `td_id_to_thin_info[td].slice_id_to_dm_thin` for the per-td × slice thin
-volumes; the sp worker's `created` flip reads exactly these rows (sp
-role). dm-clone `details` strings carry the raw `dmsetup status` line, so
-hydration progress is visible through `Inspect*`.
+volumes; the sp worker's `created` flip reads exactly these rows, and each
+td's `torn` mark beside them (sp role; Thin devices). A dm-clone row's
+`details` carry the raw `dmsetup status` line, on a line of its own after
+any text of the row's, whenever the agent read it, whatever the row's
+status, so hydration progress is visible through `Inspect*` and the
+hydration checks of `DeleteClone` and `FinishMigration` read it (Clones,
+Migrations).
+
+`reason` (`ResReason`) is the cause of a row's status that a control-plane
+decision reads: `RES_REASON_NONE` on a row no rule gives a reason, and
+`RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets and
+`dnv-worker.md` HL2 reads; `cnagent.md` CN29 says how an agent sets a
+reason.
 
 `CntlrInfo.leg_id_to_leg` reflects the health check of Group on-leg
 layout: meta region, data region, health block — the block-probe IO on the
@@ -3769,12 +3805,12 @@ dependency ([D16]):
   its demotion within the bound is ANA inaccessible before any side fences
   it, and the bound lets the hosts of an unreachable one drop the path the
   failover withdrew (Failover, [D16]).
-* **Sides first.** The cntlrs' requests are then held until the sides the
-  worker drives have reported the new revision applied, or for one
-  `cntlr_interval` at most, counted from the end of the demotion hold when
-  the fan-out had one. The order mitigates three races; `dnv-worker.md`
-  RW14 says which sides are waited for, when the hold releases and what it
-  costs.
+* **Sides first.** The cntlrs' requests are then held until the sides
+  `dnv-worker.md` RW14 waits for have reported the new revision applied,
+  or for one `cntlr_interval` at most, counted from the end of the
+  demotion hold when the fan-out had one. The order mitigates three races;
+  `dnv-worker.md` RW14 says which sides are waited for, when the hold
+  releases and what it costs.
 
 A cntlr replacement is no demotion: it deletes the old cntlr, whose stack
 goes with its CN's `SyncupCn` (dn / cn roles), so the sp role has no
@@ -3818,14 +3854,16 @@ exemptions — every RPC stays short.
 a td: thin rows are only ever filled by a cntlr acting as primary, and the
 ids live in the shared pool metadata on the DN legs. When an accepted
 reply's thin rows for a td cover exactly the SP's slices, every row
-`RES_STATUS_OK`, the worker sets `ThinDevice.created` and bumps `SpRev`
-(`dnv-worker.md` RW19, MD6); the bump re-fans the SP, which is how
-`created` reaches the cn agent (`cnagent.md` CN14). It cannot loop: the
-re-sync's reply, reporting the same rows `OK`, finds no candidate. The
-flip is idempotent and observation-driven, so a worker restart or a
-shard-ownership change (Membership and shard ownership) needs no recovery
-step: the new owner's first reply on a fresh Check stream carries the
-complete `*Info` and flips whatever is complete and still false.
+`RES_STATUS_OK`, the worker sets `ThinDevice.created`, writes the reply's
+torn mark for the td into `ThinDevice.torn` in the same put (Thin
+devices), and bumps `SpRev` (`dnv-worker.md` RW19, MD6); the bump re-fans
+the SP, which is how `created` reaches the cn agent (`cnagent.md` CN14).
+It cannot loop: the re-sync's reply, reporting the same rows `OK`, finds
+no candidate. The flip is idempotent and observation-driven, so a worker
+restart or a shard-ownership change (Membership and shard ownership) needs
+no recovery step: the new owner's first reply on a fresh Check stream
+carries the complete `*Info`, any torn mark the agent still holds
+included, and flips whatever is complete and still false.
 
 ### Automatic reactions
 
@@ -3891,10 +3929,11 @@ trigger is only ever an etcd change (Automatic reactions, or
 `UpdateCntlrEnabled`), delivered by revision-ordered syncups in the two
 waits of sp role's hold: the demotion of **old_primary** first; the **sides** once
 old_primary has reported its demotion applied or `DemotionHoldTimeout` has
-passed (`dnv-worker.md` RW22); and **new_primary** once the sides have
-reported the revision applied or one `cntlr_interval` has passed
-(`dnv-worker.md` RW14). The two waits narrow what hosts see, and safety rests
-on the sides' flips and md's arbitration below, not on them ([D16]).
+passed (`dnv-worker.md` RW22); and **new_primary** once the sides
+`dnv-worker.md` RW14 waits for have reported the revision applied or one
+`cntlr_interval` has passed. The two waits narrow what hosts see, and
+safety rests on the sides' flips and md's arbitration below, not on them
+([D16]).
 
 **old_primary** — on a `SyncupCntlr` saying it is not primary (a revision
 higher than everything it has seen):
@@ -4900,12 +4939,17 @@ document and the component documents cite it by its id.
   The worker judges no reachability: an old primary that answers ends the
   demotion hold early, and one that never answers uses up the bound its hosts
   need. The
-  sides-first hold then keeps back the cntlrs' requests until every side the
-  worker drives has reported the revision applied, for one
-  `cntlr_interval` at most (`dnv-worker.md` RW14), which mitigates three
-  races: a promotion outrunning the sides' ANA flips, a cntlr's connect
-  outrunning a new side's export, and a leg removal's disconnect on a CN
-  overlapping the disk node's unlink of that side's export. Neither wait
+  sides-first hold then keeps back the cntlrs' requests until every side
+  it waits for has reported the revision applied — every side the worker
+  drives but those the fan-out's load of the pool found unhealthy — for
+  one `cntlr_interval` at most (`dnv-worker.md` RW14), which mitigates
+  three races: a promotion outrunning the sides' ANA flips, a cntlr's
+  connect outrunning a new side's export, and a leg removal's disconnect on
+  a CN overlapping the disk node's unlink of that side's export. It leaves
+  out a side found unhealthy because waiting for one that does not answer
+  would hold every change of the pool for the whole bound and let a
+  failover fire inside the wait, while the wait only narrows; a side so
+  found that answers after all loses only that narrowing. Neither wait
   is a correctness dependency: at each bound the next requests go whether
   the awaited reports came or not, and nothing below relies on them.
   Correctness rests on two things (Failover, "Make sure all groups are
@@ -5132,12 +5176,20 @@ that component's document and only pointed to here.
   the group reports an error (`cnagent.md` CN12).
 * **QoS is not enforced** (Controller node, common): agents accept and persist
   `qos_ratio` and enforce nothing (`cnagent.md` CN6).
-* **Snapshot creation is not atomic across a primary crash.** With the
-  origin quiesce of Thin devices a snapshot is point-in-time against live
-  IO, but a crash between two slices' `create_snap` messages still leaves a
-  torn snapshot; delete and re-create it. `ThinDevice.created` certifies
-  materialization, not point-in-time consistency: a torn snapshot still
-  flips to `created` once every slice's volume exists.
+* **Snapshot creation is not atomic across a primary crash, and the torn
+  mark is best effort.** With the origin quiesce of Thin devices a
+  snapshot is point-in-time against live IO, but a crash between two
+  slices' `create_snap` messages, or a slice a pass skipped or whose
+  message failed, still leaves a torn snapshot; delete and re-create it.
+  The cn agent that finishes such a snapshot reports it, and the created
+  flip records it in `ThinDevice.torn` (Thin devices). The agent holds the
+  mark in memory until the flip, so in between an agent restart can lose
+  it, and so can a failover or a cntlr replacement that moves the primary
+  role off the cntlr holding it; the snapshot then flips with `torn` false
+  (`cnagent.md`, Known limits): a snapshot that reads `torn` false is not
+  proven whole. `ThinDevice.created` certifies materialization, not
+  point-in-time consistency: a torn snapshot still flips to `created` once
+  every slice's volume exists.
 * **A snapshot accepted before a clone targets its origin can hold part of
   the copy.** `CreateThinDevice` refuses a snapshot of a clone's destination
   while the `Clone` key exists (Thin devices), but `CreateClone` does not
@@ -5150,7 +5202,9 @@ that component's document and only pointed to here.
   can come after hydration has begun. That slice of the snapshot then holds
   whatever the copy has written into the destination by then, while the
   slices messaged in time hold the empty td, and the snapshot still flips to
-  `created`. [D3]'s destination is empty, so the exposure is a snapshot of
+  `created`, marked torn when the agent that sent the late message saw it
+  make that slice's id while the others already existed (Thin devices).
+  [D3]'s destination is empty, so the exposure is a snapshot of
   an empty td, and only a snapshot not yet created by the time a clone into
   that td is created.
 * **md's degraded-start refusal is an unpinned external dependency.** The
@@ -5235,11 +5289,24 @@ that component's document and only pointed to here.
   `low_water_mark_pct` above a hundred percent switches auto-grow off
   (Common validation).
 * **A created td is never re-created by message** (`cnagent.md` CN14): a
-  pool that has lost a created td's thin id reads `RES_STATUS_ERROR` on
-  every converge, which belongs next to the missing thin-metadata repair
+  pool that has lost a created td's thin id reads `RES_STATUS_ERROR` with
+  the lost-id reason (Live-state reporting) on every converge, which
+  belongs next to the missing thin-metadata repair
   path above — pool-metadata loss is an operator-intervention event — and
   what a lost id costs in failovers and replacements is `dnv-worker.md`,
   Known limits.
+* **A fault of a clone's source does not itself move the role**
+  (`cnagent.md`, Known limits; `dnv-worker.md`, Known limits): the clone's
+  `clone_id_to_target` row reads `RES_STATUS_MISSING`, which sets no
+  health epoch, so through that row neither a fault at the source nor one
+  in the primary's own path to it fails the primary over or replaces it
+  while the copy waits. The cn agent's retry of a source it cannot
+  connect, or that has no namespace, can still make the primary's check
+  rounds miss, and missed rounds can move the role. A build of the clone's
+  dm-clone that cannot connect the source, or finds no source namespace,
+  while the fault lasts — after a role move or a CN reboot, among others —
+  takes even a clone that has hydrated in full out of service until the
+  source comes back or the clone is deleted with `force`.
 * **Worker membership tolerates, but does not repair, a partitioned
   observer** ([D17]; `dnv-worker.md`, Known limits).
 * **Undriven windows are part of the membership design** (`dnv-worker.md`,

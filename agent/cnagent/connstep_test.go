@@ -421,7 +421,9 @@ func TestCloneSourceConnectStep(t *testing.T) {
 // TestCloneSourceSharesThePassBudget pins that the clone source draws on the
 // budget the legs drew on, not on one of its own: with the meta leg having
 // spent it, the source's refused connect is not retried and the clone reports
-// its step-1 failure, as before the retry existed.
+// its step-1 failure, as before the retry existed. The target row reads what
+// the refused connect left, no subsystem, MISSING as a check round reads it,
+// with the connect's error in its details (CN18).
 func TestCloneSourceSharesThePassBudget(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -436,7 +438,7 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 			"the pass's one budget", got)
 	}
 	info := reply.GetCntlrInfo()
-	assertErrorDetails(t, info.GetCloneIdToTarget()[testClone],
+	assertMissingDetails(t, info.GetCloneIdToTarget()[testClone],
 		"connection refused", "clone target")
 	if dm := info.GetCloneIdToDmClone()[testClone]; dm.GetStatus() !=
 		pb.ResStatus_RES_STATUS_MISSING ||

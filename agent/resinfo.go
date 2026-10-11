@@ -4,12 +4,17 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 // ResTracker turns probe outcomes into pb.ResInfo values per
 // architecture.md, Live-state reporting / dnagent.md SH14: epoch is the unix
-// second of the last *status* change — a details-only change does not bump it.
+// second of the last *status* change — a change of the details or of the
+// reason alone does not bump it. The reason is RES_REASON_NONE unless the
+// caller names one through ErrReason.
+//
 // The agent emits MISSING/ERROR/OK/PROVISIONING, the cn agent also PENDING on a
 // primary's leg rows (cnagent.md CN11), and never UNKNOWN (that one is
 // worker-only).
@@ -33,12 +38,26 @@ func NewResTracker() *ResTracker {
 // Set records an outcome for the resource identified by key (a stable
 // logical key, e.g. "dm_linear/{cn_id}") and returns the ResInfo to embed in
 // the reply. resName is the user-visible name of the resource (a device
-// name, an NQN, a path).
+// name, an NQN, a path). The row's reason is RES_REASON_NONE.
 func (t *ResTracker) Set(
 	key string,
 	resName string,
 	status pb.ResStatus,
 	details string,
+) *pb.ResInfo {
+	return t.set(key, resName, status, details,
+		pb.ResReason_RES_REASON_NONE)
+}
+
+// set is Set with a reason. The epoch moves only when the status changes,
+// whatever the details and the reason do, and the caller gets a copy of the
+// whole stored row, every field of it, so no caller can reach the state.
+func (t *ResTracker) set(
+	key string,
+	resName string,
+	status pb.ResStatus,
+	details string,
+	reason pb.ResReason,
 ) *pb.ResInfo {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -52,14 +71,10 @@ func (t *ResTracker) Set(
 		Status:  status,
 		Details: details,
 		Epoch:   epoch,
+		Reason:  reason,
 	}
 	t.state[key] = cur
-	return &pb.ResInfo{
-		ResName: cur.ResName,
-		Status:  cur.Status,
-		Details: cur.Details,
-		Epoch:   cur.Epoch,
-	}
+	return proto.Clone(cur).(*pb.ResInfo)
 }
 
 // Ok / Missing / Err / Provisioning are the four outcomes every agent may
@@ -75,6 +90,17 @@ func (t *ResTracker) Missing(key, resName, details string) *pb.ResInfo {
 
 func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_ERROR, details)
+}
+
+// ErrReason is Err with a reason, for a row whose cause a control-plane
+// decision reads in place of its details (architecture.md, Live-state
+// reporting); every other helper gives RES_REASON_NONE. A row that keeps its
+// status keeps its epoch when only its reason changes.
+func (t *ResTracker) ErrReason(
+	key, resName, details string,
+	reason pb.ResReason,
+) *pb.ResInfo {
+	return t.set(key, resName, pb.ResStatus_RES_STATUS_ERROR, details, reason)
 }
 
 // Provisioning is the [D15] outcome (architecture.md, Live-state reporting):

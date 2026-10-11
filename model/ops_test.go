@@ -1515,6 +1515,57 @@ func TestFlipCreated(t *testing.T) {
 	}
 }
 
+// TestFlipCreatedWritesTheTornMark pins RW19's copy of the torn mark: the put
+// that sets created writes each candidate's mark, true or false, into
+// ThinDevice.torn, every other field kept, and the refs it returns carry the
+// marks. A candidate the STM skips writes nothing, so a later mark cannot
+// change the record of a td already created, nor clear its mark.
+func TestFlipCreatedWritesTheTornMark(t *testing.T) {
+	env := newOpsEnv(t)
+	cands := []TdRef{
+		{Name: "td0", TdId: 601, Torn: true},
+		{Name: "td1", TdId: 602},
+	}
+	created, err := FlipCreated(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, cands,
+	)
+	if err != nil {
+		t.Fatalf("FlipCreated: %v", err)
+	}
+	if !equalTdRefs(created, cands) {
+		t.Fatalf("created: got %v, want %v", created, cands)
+	}
+	for name, want := range map[string]*pb.ThinDevice{
+		"td0": {TdId: 601, DevId: 1, Size: 1 << 30, Created: true, Torn: true},
+		"td1": {TdId: 602, DevId: 2, Size: 1 << 30, Created: true},
+	} {
+		if got := env.td(name); !proto.Equal(got, want) {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
+	}
+	revBefore := env.spRev()
+	created, err = FlipCreated(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		[]TdRef{
+			{Name: "td0", TdId: 601},
+			{Name: "td1", TdId: 602, Torn: true},
+		},
+	)
+	if err != nil {
+		t.Fatalf("FlipCreated again: %v", err)
+	}
+	if len(created) != 0 {
+		t.Errorf("created: got %v, want none", created)
+	}
+	if !env.td("td0").GetTorn() || env.td("td1").GetTorn() {
+		t.Errorf("a skipped candidate rewrote a torn mark: td0 %v, td1 %v",
+			env.td("td0").GetTorn(), env.td("td1").GetTorn())
+	}
+	if got := env.spRev(); got != revBefore {
+		t.Errorf("SpRev must not move: got %d, want %d", got, revBefore)
+	}
+}
+
 // TestFlipCreatedAtTheTdCeiling is RW19's transaction bound, committed against
 // the real etcd this package runs with --max-txn-ops=common.EtcdMaxTxnOps. The
 // sp worker folds every td one drain of its reports completed into ONE

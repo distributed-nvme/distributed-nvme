@@ -3,8 +3,11 @@ package agent
 import "sync"
 
 // LockSet is the node/object lock hierarchy (dnagent.md SH10-SH13). Lock order
-// is always node before object; object locks are created on first use and
-// dropped only during teardown while the node write lock is held.
+// is always node before object. Obj creates an object's lock, and a caller
+// asks for it only once it has found, under the node read lock, that the agent
+// holds the object, or once the object's gates have admitted its syncup, so a
+// refused call leaves no entry (dnagent.md, Concurrency — `locks.go`). An
+// entry is dropped only during teardown while the node write lock is held.
 //
 // Node write lock: the startup reconcile and the node-level syncup (SH10).
 // Node read lock + the object lock: every object-scoped RPC and every
@@ -27,7 +30,9 @@ func (l *LockSet) Node() *sync.RWMutex {
 	return &l.node
 }
 
-// Obj returns the lock of one object, creating it on first use.
+// Obj returns the lock of one object, creating it when the set holds none. A
+// lock it creates stays in the set until DropObj, so callers ask only for an
+// object the agent holds or whose gates have admitted the request (SH11).
 func (l *LockSet) Obj(key string) *sync.Mutex {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -45,4 +50,14 @@ func (l *LockSet) DropObj(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.objs, key)
+}
+
+// ObjCount is the number of object locks the set holds: the entries Obj
+// created that DropObj has not forgotten. The role packages' tests read it
+// before and after a refused call, to show that a call refused for an
+// unknown object leaves no entry behind (SH11).
+func (l *LockSet) ObjCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.objs)
 }

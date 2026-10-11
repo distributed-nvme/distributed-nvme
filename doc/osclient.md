@@ -99,6 +99,14 @@ the method set is exactly the following, each taking the caller's ctx:
 * The command runs through `exec.CommandContext`; the stdin payload is
   attached only when it is non-empty; stdout and stderr are captured into
   separate buffers.
+* The command runs in the C locale: it gets the process's own environment
+  with `LC_ALL` set to the C locale on top, which overrides whatever locale
+  the process was started with. Reason: callers read the tools' output,
+  and the one place that turns a dmsetup refusal into an errno matches
+  strerror's English words (`dnagent.md`, OS wrappers — `dm.go`,
+  `nvmet.go`, `nvmehost.go`); under a translated locale those words
+  change, nothing matches, and a decision built on the match goes wrong
+  silently.
 * Timeout and kill semantics (implements the command timeouts of
   `architecture.md`, Common validation): the **caller** owns the deadline —
   agents wrap the ctx with the `CmdSoftTimeout` deadline (`agent.CmdCtx`;

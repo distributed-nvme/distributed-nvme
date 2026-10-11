@@ -108,7 +108,9 @@ type ResStatus int32
 const (
 	// UNKNOWN means can't get response from dn/cn
 	ResStatus_RES_STATUS_UNKNOWN ResStatus = 0
-	// MISSING means dn/cn doesn't create it
+	// MISSING means dn/cn has not created it or, on a clone's
+	// clone_id_to_target row, that the clone's source has a fault
+	// (architecture.md, Live-state reporting)
 	ResStatus_RES_STATUS_MISSING ResStatus = 1
 	// ERROR means dn/cn tried to create it but failed
 	ResStatus_RES_STATUS_ERROR ResStatus = 2
@@ -170,6 +172,62 @@ func (x ResStatus) Number() protoreflect.EnumNumber {
 // Deprecated: Use ResStatus.Descriptor instead.
 func (ResStatus) EnumDescriptor() ([]byte, []int) {
 	return file_pb_schema_proto_rawDescGZIP(), []int{1}
+}
+
+// Why a row reads as it does, where a control-plane decision needs the cause
+// and not only the status: the decision reads this field, never an English
+// sentence in details (architecture.md, Live-state reporting). Appended
+// values only, never renumbered.
+type ResReason int32
+
+const (
+	// No reason given: every row but the ones a value below names.
+	ResReason_RES_REASON_NONE ResReason = 0
+	// The thin volume build of a created thin device failed because its
+	// slice's pool no longer holds the thin id: dm-thin refused the thin
+	// table with ENODATA (cnagent.md CN14, CN29). Only a converge's report
+	// sets it, on that RES_STATUS_ERROR thin row; a check round's probe
+	// never does.
+	ResReason_RES_REASON_THIN_ID_LOST ResReason = 1
+)
+
+// Enum value maps for ResReason.
+var (
+	ResReason_name = map[int32]string{
+		0: "RES_REASON_NONE",
+		1: "RES_REASON_THIN_ID_LOST",
+	}
+	ResReason_value = map[string]int32{
+		"RES_REASON_NONE":         0,
+		"RES_REASON_THIN_ID_LOST": 1,
+	}
+)
+
+func (x ResReason) Enum() *ResReason {
+	p := new(ResReason)
+	*p = x
+	return p
+}
+
+func (x ResReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ResReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_pb_schema_proto_enumTypes[2].Descriptor()
+}
+
+func (ResReason) Type() protoreflect.EnumType {
+	return &file_pb_schema_proto_enumTypes[2]
+}
+
+func (x ResReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ResReason.Descriptor instead.
+func (ResReason) EnumDescriptor() ([]byte, []int) {
+	return file_pb_schema_proto_rawDescGZIP(), []int{2}
 }
 
 type AgentReply struct {
@@ -1407,11 +1465,15 @@ func (x *Namespace) GetSuspended() bool {
 }
 
 type ResInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ResName       string                 `protobuf:"bytes,1,opt,name=res_name,json=resName,proto3" json:"res_name,omitempty"`
-	Status        ResStatus              `protobuf:"varint,2,opt,name=status,proto3,enum=ResStatus" json:"status,omitempty"`
-	Details       string                 `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
-	Epoch         uint64                 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ResName string                 `protobuf:"bytes,1,opt,name=res_name,json=resName,proto3" json:"res_name,omitempty"`
+	Status  ResStatus              `protobuf:"varint,2,opt,name=status,proto3,enum=ResStatus" json:"status,omitempty"`
+	Details string                 `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
+	Epoch   uint64                 `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// RES_REASON_NONE on every row but the ones ResReason names. A change of
+	// the reason alone does not move epoch, as a change of details alone
+	// does not (dnagent.md SH14). Appended, never renumbered.
+	Reason        ResReason `protobuf:"varint,5,opt,name=reason,proto3,enum=ResReason" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1472,6 +1534,13 @@ func (x *ResInfo) GetEpoch() uint64 {
 		return x.Epoch
 	}
 	return 0
+}
+
+func (x *ResInfo) GetReason() ResReason {
+	if x != nil {
+		return x.Reason
+	}
+	return ResReason_RES_REASON_NONE
 }
 
 type DnInfo struct {
@@ -3360,7 +3429,14 @@ type ThinDevice struct {
 	// the cn agent that the ids exist in every slice pool, so no
 	// create_thin/create_snap is ever sent for this td again (CN14; the
 	// delete sent when the td leaves td_list stays ungated).
-	Created       bool `protobuf:"varint,5,opt,name=created,proto3" json:"created,omitempty"`
+	Created bool `protobuf:"varint,5,opt,name=created,proto3" json:"created,omitempty"`
+	// torn is written once, in the put that sets created, from the torn mark
+	// the reports that completed the td carried (CntlrInfo.ThinInfo.torn;
+	// dnv-worker.md RW19), and never changed after it. Best effort: false
+	// proves nothing when the cn agent restarted, or the primary role moved,
+	// between the snapshot messages and the flip (architecture.md, Known
+	// limits). Appended, never renumbered.
+	Torn          bool `protobuf:"varint,6,opt,name=torn,proto3" json:"torn,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3426,6 +3502,13 @@ func (x *ThinDevice) GetSize() uint64 {
 func (x *ThinDevice) GetCreated() bool {
 	if x != nil {
 		return x.Created
+	}
+	return false
+}
+
+func (x *ThinDevice) GetTorn() bool {
+	if x != nil {
+		return x.Torn
 	}
 	return false
 }
@@ -12306,7 +12389,6 @@ type SyncupCntlrRequest struct {
 	NqnToSubsystem map[string]*Subsystem  `protobuf:"bytes,10,rep,name=nqn_to_subsystem,json=nqnToSubsystem,proto3" json:"nqn_to_subsystem,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	CloneList      []*Clone               `protobuf:"bytes,11,rep,name=clone_list,json=cloneList,proto3" json:"clone_list,omitempty"`
 	XferList       []*Transfer            `protobuf:"bytes,12,rep,name=xfer_list,json=xferList,proto3" json:"xfer_list,omitempty"`
-	MigrList       []*Migration           `protobuf:"bytes,13,rep,name=migr_list,json=migrList,proto3" json:"migr_list,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -12421,13 +12503,6 @@ func (x *SyncupCntlrRequest) GetCloneList() []*Clone {
 func (x *SyncupCntlrRequest) GetXferList() []*Transfer {
 	if x != nil {
 		return x.XferList
-	}
-	return nil
-}
-
-func (x *SyncupCntlrRequest) GetMigrList() []*Migration {
-	if x != nil {
-		return x.MigrList
 	}
 	return nil
 }
@@ -13681,8 +13756,16 @@ func (x *SideInfo_MigrDstInfo) GetDmCloneInfo() *ResInfo {
 type CntlrInfo_ThinInfo struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	SliceIdToDmThin map[uint64]*ResInfo    `protobuf:"bytes,1,rep,name=slice_id_to_dm_thin,json=sliceIdToDmThin,proto3" json:"slice_id_to_dm_thin,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The primary's torn mark for this thin device (cnagent.md CN14): in
+	// one run of the snapshot pre-pass a slice's message made a new thin
+	// id while another slice already had its id. The cn agent keeps it
+	// in memory until the request shows the td created or drops it, the
+	// converge's report and the check round's carry it alike, and the
+	// created flip copies it into ThinDevice.torn (dnv-worker.md RW19).
+	// Appended, never renumbered.
+	Torn          bool `protobuf:"varint,2,opt,name=torn,proto3" json:"torn,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CntlrInfo_ThinInfo) Reset() {
@@ -13720,6 +13803,13 @@ func (x *CntlrInfo_ThinInfo) GetSliceIdToDmThin() map[uint64]*ResInfo {
 		return x.SliceIdToDmThin
 	}
 	return nil
+}
+
+func (x *CntlrInfo_ThinInfo) GetTorn() bool {
+	if x != nil {
+		return x.Torn
+	}
+	return false
 }
 
 type SyncupSideRequest_SideConf struct {
@@ -14274,13 +14364,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05td_id\x18\x03 \x01(\x04R\x04tdId\x12\x19\n" +
 	"\bdev_uuid\x18\x04 \x01(\tR\adevUuid\x12\x1b\n" +
 	"\tdev_nguid\x18\x05 \x01(\tR\bdevNguid\x12\x1c\n" +
-	"\tsuspended\x18\x06 \x01(\bR\tsuspended\"x\n" +
+	"\tsuspended\x18\x06 \x01(\bR\tsuspended\"\x9c\x01\n" +
 	"\aResInfo\x12\x19\n" +
 	"\bres_name\x18\x01 \x01(\tR\aresName\x12\"\n" +
 	"\x06status\x18\x02 \x01(\x0e2\n" +
 	".ResStatusR\x06status\x12\x18\n" +
 	"\adetails\x18\x03 \x01(\tR\adetails\x12\x14\n" +
-	"\x05epoch\x18\x04 \x01(\x04R\x05epoch\"}\n" +
+	"\x05epoch\x18\x04 \x01(\x04R\x05epoch\x12\"\n" +
+	"\x06reason\x18\x05 \x01(\x0e2\n" +
+	".ResReasonR\x06reason\"}\n" +
 	"\x06DnInfo\x12%\n" +
 	"\tdisk_info\x18\x01 \x01(\v2\b.ResInfoR\bdiskInfo\x12%\n" +
 	"\tmeta_info\x18\x02 \x01(\v2\b.ResInfoR\bmetaInfo\x12%\n" +
@@ -14318,7 +14410,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aI\n" +
 	"\x11CnIdToNvmeofEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
-	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\xf0\x15\n" +
+	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01J\x04\b\a\x10\bJ\x04\b\b\x10\t\"\x84\x16\n" +
 	"\tCntlrInfo\x12L\n" +
 	"\x12ss_id_to_subsystem\x18\x01 \x03(\v2\x1f.CntlrInfo.SsIdToSubsystemEntryR\x0fssIdToSubsystem\x12L\n" +
 	"\x12ns_id_to_namespace\x18\x02 \x03(\v2\x1f.CntlrInfo.NsIdToNamespaceEntryR\x0fnsIdToNamespace\x12J\n" +
@@ -14338,9 +14430,10 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x14xfer_id_to_namespace\x18\x0e \x03(\v2!.CntlrInfo.XferIdToNamespaceEntryR\x11xferIdToNamespace\x12L\n" +
 	"\x12clone_id_to_target\x18\x0f \x03(\v2\x1f.CntlrInfo.CloneIdToTargetEntryR\x0fcloneIdToTarget\x12P\n" +
 	"\x14clone_id_to_dm_clone\x18\x10 \x03(\v2 .CntlrInfo.CloneIdToDmCloneEntryR\x10cloneIdToDmClone\x12F\n" +
-	"\x10clone_id_to_meta\x18\x11 \x03(\v2\x1d.CntlrInfo.CloneIdToMetaEntryR\rcloneIdToMeta\x1a\xb0\x01\n" +
+	"\x10clone_id_to_meta\x18\x11 \x03(\v2\x1d.CntlrInfo.CloneIdToMetaEntryR\rcloneIdToMeta\x1a\xc4\x01\n" +
 	"\bThinInfo\x12V\n" +
-	"\x13slice_id_to_dm_thin\x18\x01 \x03(\v2(.CntlrInfo.ThinInfo.SliceIdToDmThinEntryR\x0fsliceIdToDmThin\x1aL\n" +
+	"\x13slice_id_to_dm_thin\x18\x01 \x03(\v2(.CntlrInfo.ThinInfo.SliceIdToDmThinEntryR\x0fsliceIdToDmThin\x12\x12\n" +
+	"\x04torn\x18\x02 \x01(\bR\x04torn\x1aL\n" +
 	"\x14SliceIdToDmThinEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x1e\n" +
 	"\x05value\x18\x02 \x01(\v2\b.ResInfoR\x05value:\x028\x01\x1aL\n" +
@@ -14528,14 +14621,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05Slice\x12\x1b\n" +
 	"\tslice_idx\x18\x01 \x01(\rR\bsliceIdx\x12*\n" +
 	"\rmeta_grp_list\x18\x02 \x03(\v2\x06.GroupR\vmetaGrpList\x12*\n" +
-	"\rdata_grp_list\x18\x03 \x03(\v2\x06.GroupR\vdataGrpList\"}\n" +
+	"\rdata_grp_list\x18\x03 \x03(\v2\x06.GroupR\vdataGrpList\"\x91\x01\n" +
 	"\n" +
 	"ThinDevice\x12\x13\n" +
 	"\x05td_id\x18\x01 \x01(\x04R\x04tdId\x12\x15\n" +
 	"\x06dev_id\x18\x02 \x01(\rR\x05devId\x12\x15\n" +
 	"\x06ori_id\x18\x03 \x01(\rR\x05oriId\x12\x12\n" +
 	"\x04size\x18\x04 \x01(\x04R\x04size\x12\x18\n" +
-	"\acreated\x18\x05 \x01(\bR\acreated\"\x98\x01\n" +
+	"\acreated\x18\x05 \x01(\bR\acreated\x12\x12\n" +
+	"\x04torn\x18\x06 \x01(\bR\x04torn\"\x98\x01\n" +
 	"\tSubsystem\x12\x13\n" +
 	"\x05ss_id\x18\x01 \x01(\x04R\x04ssId\x12\x16\n" +
 	"\x06serial\x18\x02 \x01(\tR\x06serial\x12\x14\n" +
@@ -15235,7 +15329,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12 \n" +
-	"\acn_info\x18\x03 \x01(\v2\a.CnInfoR\x06cnInfo\"\xcd\x05\n" +
+	"\acn_info\x18\x03 \x01(\v2\a.CnInfoR\x06cnInfo\"\xb5\x05\n" +
 	"\x12SyncupCntlrRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
@@ -15251,16 +15345,14 @@ const file_pb_schema_proto_rawDesc = "" +
 	" \x03(\v2'.SyncupCntlrRequest.NqnToSubsystemEntryR\x0enqnToSubsystem\x12%\n" +
 	"\n" +
 	"clone_list\x18\v \x03(\v2\x06.CloneR\tcloneList\x12&\n" +
-	"\txfer_list\x18\f \x03(\v2\t.TransferR\bxferList\x12'\n" +
-	"\tmigr_list\x18\r \x03(\v2\n" +
-	".MigrationR\bmigrList\x1aD\n" +
+	"\txfer_list\x18\f \x03(\v2\t.TransferR\bxferList\x1aD\n" +
 	"\x0eIdToSliceEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1c\n" +
 	"\x05value\x18\x02 \x01(\v2\x06.SliceR\x05value:\x028\x01\x1aM\n" +
 	"\x13NqnToSubsystemEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12 \n" +
 	"\x05value\x18\x02 \x01(\v2\n" +
-	".SubsystemR\x05value:\x028\x01\"\xb6\x01\n" +
+	".SubsystemR\x05value:\x028\x01J\x04\b\r\x10\x0eR\tmigr_list\"\xb6\x01\n" +
 	"\x10SyncupCntlrReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
@@ -15403,7 +15495,10 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x052\xee \n" +
+	"\x12RES_STATUS_PENDING\x10\x05*=\n" +
+	"\tResReason\x12\x13\n" +
+	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
+	"\x17RES_REASON_THIN_ID_LOST\x10\x012\xee \n" +
 	"\aGateway\x12=\n" +
 	"\rCreateCluster\x12\x15.CreateClusterRequest\x1a\x13.CreateClusterReply\"\x00\x12=\n" +
 	"\rDeleteCluster\x12\x15.DeleteClusterRequest\x1a\x13.DeleteClusterReply\"\x00\x124\n" +
@@ -15500,638 +15595,639 @@ func file_pb_schema_proto_rawDescGZIP() []byte {
 	return file_pb_schema_proto_rawDescData
 }
 
-var file_pb_schema_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_pb_schema_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_pb_schema_proto_msgTypes = make([]protoimpl.MessageInfo, 245)
 var file_pb_schema_proto_goTypes = []any{
 	(SpLevel)(0),                                   // 0: SpLevel
 	(ResStatus)(0),                                 // 1: ResStatus
-	(*AgentReply)(nil),                             // 2: AgentReply
-	(*NodeSelector)(nil),                           // 3: NodeSelector
-	(*NvmeTrConf)(nil),                             // 4: NvmeTrConf
-	(*QosRatio)(nil),                               // 5: QosRatio
-	(*DmCloneConf)(nil),                            // 6: DmCloneConf
-	(*DmPoolConf)(nil),                             // 7: DmPoolConf
-	(*RedundNone)(nil),                             // 8: RedundNone
-	(*RedundMdRaid1)(nil),                          // 9: RedundMdRaid1
-	(*RedundConf)(nil),                             // 10: RedundConf
-	(*BdevFeatureNone)(nil),                        // 11: BdevFeatureNone
-	(*BdevFeature)(nil),                            // 12: BdevFeature
-	(*DmRaid0Conf)(nil),                            // 13: DmRaid0Conf
-	(*BdevConf)(nil),                               // 14: BdevConf
-	(*EventThreshold)(nil),                         // 15: EventThreshold
-	(*SidePointer)(nil),                            // 16: SidePointer
-	(*CntlrPointer)(nil),                           // 17: CntlrPointer
-	(*Side)(nil),                                   // 18: Side
-	(*Leg)(nil),                                    // 19: Leg
-	(*Group)(nil),                                  // 20: Group
-	(*Namespace)(nil),                              // 21: Namespace
-	(*ResInfo)(nil),                                // 22: ResInfo
-	(*DnInfo)(nil),                                 // 23: DnInfo
-	(*CnInfo)(nil),                                 // 24: CnInfo
-	(*SideInfo)(nil),                               // 25: SideInfo
-	(*CntlrInfo)(nil),                              // 26: CntlrInfo
-	(*BmChunkId)(nil),                              // 27: BmChunkId
-	(*BitmapInfo)(nil),                             // 28: BitmapInfo
-	(*DnBinConf)(nil),                              // 29: DnBinConf
-	(*AllocConf)(nil),                              // 30: AllocConf
-	(*HealthCheckConf)(nil),                        // 31: HealthCheckConf
-	(*ClusterConf)(nil),                            // 32: ClusterConf
-	(*DnGlobal)(nil),                               // 33: DnGlobal
-	(*CnGlobal)(nil),                               // 34: CnGlobal
-	(*SpGlobal)(nil),                               // 35: SpGlobal
-	(*DnRev)(nil),                                  // 36: DnRev
-	(*CnRev)(nil),                                  // 37: CnRev
-	(*SpRev)(nil),                                  // 38: SpRev
-	(*DnConf)(nil),                                 // 39: DnConf
-	(*CnConf)(nil),                                 // 40: CnConf
-	(*DnCapacity)(nil),                             // 41: DnCapacity
-	(*CnCapacity)(nil),                             // 42: CnCapacity
-	(*CdcEntry)(nil),                               // 43: CdcEntry
-	(*SpConf)(nil),                                 // 44: SpConf
-	(*Cntlr)(nil),                                  // 45: Cntlr
-	(*Slice)(nil),                                  // 46: Slice
-	(*ThinDevice)(nil),                             // 47: ThinDevice
-	(*Subsystem)(nil),                              // 48: Subsystem
-	(*Clone)(nil),                                  // 49: Clone
-	(*CloneBitmap)(nil),                            // 50: CloneBitmap
-	(*Transfer)(nil),                               // 51: Transfer
-	(*Migration)(nil),                              // 52: Migration
-	(*MigrBitmap)(nil),                             // 53: MigrBitmap
-	(*SpName)(nil),                                 // 54: SpName
-	(*WorkerReg)(nil),                              // 55: WorkerReg
-	(*CreateClusterRequest)(nil),                   // 56: CreateClusterRequest
-	(*CreateClusterReply)(nil),                     // 57: CreateClusterReply
-	(*DeleteClusterRequest)(nil),                   // 58: DeleteClusterRequest
-	(*DeleteClusterReply)(nil),                     // 59: DeleteClusterReply
-	(*GetClusterRequest)(nil),                      // 60: GetClusterRequest
-	(*GetClusterReply)(nil),                        // 61: GetClusterReply
-	(*ListClustersRequest)(nil),                    // 62: ListClustersRequest
-	(*ListClustersReply)(nil),                      // 63: ListClustersReply
-	(*CreateDiskNodeRequest)(nil),                  // 64: CreateDiskNodeRequest
-	(*CreateDiskNodeReply)(nil),                    // 65: CreateDiskNodeReply
-	(*DeleteDiskNodeRequest)(nil),                  // 66: DeleteDiskNodeRequest
-	(*DeleteDiskNodeReply)(nil),                    // 67: DeleteDiskNodeReply
-	(*GetDiskNodeRequest)(nil),                     // 68: GetDiskNodeRequest
-	(*GetDiskNodeReply)(nil),                       // 69: GetDiskNodeReply
-	(*ListDiskNodesRequest)(nil),                   // 70: ListDiskNodesRequest
-	(*ListDiskNodesReply)(nil),                     // 71: ListDiskNodesReply
-	(*UpdateDiskNodeDisabledRequest)(nil),          // 72: UpdateDiskNodeDisabledRequest
-	(*UpdateDiskNodeDisabledReply)(nil),            // 73: UpdateDiskNodeDisabledReply
-	(*InspectDiskNodeRequest)(nil),                 // 74: InspectDiskNodeRequest
-	(*InspectDiskNodeReply)(nil),                   // 75: InspectDiskNodeReply
-	(*CreateControllerNodeRequest)(nil),            // 76: CreateControllerNodeRequest
-	(*CreateControllerNodeReply)(nil),              // 77: CreateControllerNodeReply
-	(*DeleteControllerNodeRequest)(nil),            // 78: DeleteControllerNodeRequest
-	(*DeleteControllerNodeReply)(nil),              // 79: DeleteControllerNodeReply
-	(*GetControllerNodeRequest)(nil),               // 80: GetControllerNodeRequest
-	(*GetControllerNodeReply)(nil),                 // 81: GetControllerNodeReply
-	(*ListControllerNodesRequest)(nil),             // 82: ListControllerNodesRequest
-	(*ListControllerNodesReply)(nil),               // 83: ListControllerNodesReply
-	(*UpdateControllerNodeDisabledRequest)(nil),    // 84: UpdateControllerNodeDisabledRequest
-	(*UpdateControllerNodeDisabledReply)(nil),      // 85: UpdateControllerNodeDisabledReply
-	(*InspectControllerNodeRequest)(nil),           // 86: InspectControllerNodeRequest
-	(*InspectControllerNodeReply)(nil),             // 87: InspectControllerNodeReply
-	(*CreateStoragePoolRequest)(nil),               // 88: CreateStoragePoolRequest
-	(*CreateStoragePoolReply)(nil),                 // 89: CreateStoragePoolReply
-	(*DeleteStoragePoolRequest)(nil),               // 90: DeleteStoragePoolRequest
-	(*DeleteStoragePoolReply)(nil),                 // 91: DeleteStoragePoolReply
-	(*GetStoragePoolRequest)(nil),                  // 92: GetStoragePoolRequest
-	(*GetStoragePoolReply)(nil),                    // 93: GetStoragePoolReply
-	(*ListStoragePoolsRequest)(nil),                // 94: ListStoragePoolsRequest
-	(*ListStoragePoolsReply)(nil),                  // 95: ListStoragePoolsReply
-	(*UpdateStoragePoolCntlidSlotListRequest)(nil), // 96: UpdateStoragePoolCntlidSlotListRequest
-	(*UpdateStoragePoolCntlidSlotListReply)(nil),   // 97: UpdateStoragePoolCntlidSlotListReply
-	(*UpdateStoragePoolLevelRequest)(nil),          // 98: UpdateStoragePoolLevelRequest
-	(*UpdateStoragePoolLevelReply)(nil),            // 99: UpdateStoragePoolLevelReply
-	(*FindStoragePoolNamesRequest)(nil),            // 100: FindStoragePoolNamesRequest
-	(*FindStoragePoolNamesReply)(nil),              // 101: FindStoragePoolNamesReply
-	(*GrowSliceRequest)(nil),                       // 102: GrowSliceRequest
-	(*GrowSliceReply)(nil),                         // 103: GrowSliceReply
-	(*CreateCntlrRequest)(nil),                     // 104: CreateCntlrRequest
-	(*CreateCntlrReply)(nil),                       // 105: CreateCntlrReply
-	(*DeleteCntlrRequest)(nil),                     // 106: DeleteCntlrRequest
-	(*DeleteCntlrReply)(nil),                       // 107: DeleteCntlrReply
-	(*UpdateCntlrEnabledRequest)(nil),              // 108: UpdateCntlrEnabledRequest
-	(*UpdateCntlrEnabledReply)(nil),                // 109: UpdateCntlrEnabledReply
-	(*InspectCntlrRequest)(nil),                    // 110: InspectCntlrRequest
-	(*InspectCntlrReply)(nil),                      // 111: InspectCntlrReply
-	(*InspectSideRequest)(nil),                     // 112: InspectSideRequest
-	(*InspectSideReply)(nil),                       // 113: InspectSideReply
-	(*CreateThinDeviceRequest)(nil),                // 114: CreateThinDeviceRequest
-	(*CreateThinDeviceReply)(nil),                  // 115: CreateThinDeviceReply
-	(*DeleteThinDeviceRequest)(nil),                // 116: DeleteThinDeviceRequest
-	(*DeleteThinDeviceReply)(nil),                  // 117: DeleteThinDeviceReply
-	(*ListThinDevicesRequest)(nil),                 // 118: ListThinDevicesRequest
-	(*ListThinDevicesReply)(nil),                   // 119: ListThinDevicesReply
-	(*CreateSubsystemRequest)(nil),                 // 120: CreateSubsystemRequest
-	(*CreateSubsystemReply)(nil),                   // 121: CreateSubsystemReply
-	(*DeleteSubsystemRequest)(nil),                 // 122: DeleteSubsystemRequest
-	(*DeleteSubsystemReply)(nil),                   // 123: DeleteSubsystemReply
-	(*ListSubsystemsRequest)(nil),                  // 124: ListSubsystemsRequest
-	(*ListSubsystemsReply)(nil),                    // 125: ListSubsystemsReply
-	(*UpdateSubsystemHostsRequest)(nil),            // 126: UpdateSubsystemHostsRequest
-	(*UpdateSubsystemHostsReply)(nil),              // 127: UpdateSubsystemHostsReply
-	(*CreateNamespaceRequest)(nil),                 // 128: CreateNamespaceRequest
-	(*CreateNamespaceReply)(nil),                   // 129: CreateNamespaceReply
-	(*DeleteNamespaceRequest)(nil),                 // 130: DeleteNamespaceRequest
-	(*DeleteNamespaceReply)(nil),                   // 131: DeleteNamespaceReply
-	(*UpdateNamespaceDevRequest)(nil),              // 132: UpdateNamespaceDevRequest
-	(*UpdateNamespaceDevReply)(nil),                // 133: UpdateNamespaceDevReply
-	(*UpdateNamespaceSuspendedRequest)(nil),        // 134: UpdateNamespaceSuspendedRequest
-	(*UpdateNamespaceSuspendedReply)(nil),          // 135: UpdateNamespaceSuspendedReply
-	(*CreateCloneRequest)(nil),                     // 136: CreateCloneRequest
-	(*CreateCloneReply)(nil),                       // 137: CreateCloneReply
-	(*DeleteCloneRequest)(nil),                     // 138: DeleteCloneRequest
-	(*DeleteCloneReply)(nil),                       // 139: DeleteCloneReply
-	(*GetCloneRequest)(nil),                        // 140: GetCloneRequest
-	(*GetCloneReply)(nil),                          // 141: GetCloneReply
-	(*UpdateCloneTrConfRequest)(nil),               // 142: UpdateCloneTrConfRequest
-	(*UpdateCloneTrConfReply)(nil),                 // 143: UpdateCloneTrConfReply
-	(*AppendCloneBitmapRequest)(nil),               // 144: AppendCloneBitmapRequest
-	(*AppendCloneBitmapReply)(nil),                 // 145: AppendCloneBitmapReply
-	(*CreateTransferRequest)(nil),                  // 146: CreateTransferRequest
-	(*CreateTransferReply)(nil),                    // 147: CreateTransferReply
-	(*DeleteTransferRequest)(nil),                  // 148: DeleteTransferRequest
-	(*DeleteTransferReply)(nil),                    // 149: DeleteTransferReply
-	(*GetTransferRequest)(nil),                     // 150: GetTransferRequest
-	(*GetTransferReply)(nil),                       // 151: GetTransferReply
-	(*UpdateTransferHostsRequest)(nil),             // 152: UpdateTransferHostsRequest
-	(*UpdateTransferHostsReply)(nil),               // 153: UpdateTransferHostsReply
-	(*CreateMigrationRequest)(nil),                 // 154: CreateMigrationRequest
-	(*CreateMigrationReply)(nil),                   // 155: CreateMigrationReply
-	(*FinishMigrationRequest)(nil),                 // 156: FinishMigrationRequest
-	(*FinishMigrationReply)(nil),                   // 157: FinishMigrationReply
-	(*CancelMigrationRequest)(nil),                 // 158: CancelMigrationRequest
-	(*CancelMigrationReply)(nil),                   // 159: CancelMigrationReply
-	(*GetMigrationRequest)(nil),                    // 160: GetMigrationRequest
-	(*GetMigrationReply)(nil),                      // 161: GetMigrationReply
-	(*AppendMigrationBitmapRequest)(nil),           // 162: AppendMigrationBitmapRequest
-	(*AppendMigrationBitmapReply)(nil),             // 163: AppendMigrationBitmapReply
-	(*CreateSpareLegRequest)(nil),                  // 164: CreateSpareLegRequest
-	(*CreateSpareLegReply)(nil),                    // 165: CreateSpareLegReply
-	(*DeleteSpareLegRequest)(nil),                  // 166: DeleteSpareLegRequest
-	(*DeleteSpareLegReply)(nil),                    // 167: DeleteSpareLegReply
-	(*SwitchSpareLegRequest)(nil),                  // 168: SwitchSpareLegRequest
-	(*SwitchSpareLegReply)(nil),                    // 169: SwitchSpareLegReply
-	(*GetThinDeviceBitmapRequest)(nil),             // 170: GetThinDeviceBitmapRequest
-	(*GetThinDeviceBitmapReply)(nil),               // 171: GetThinDeviceBitmapReply
-	(*GetLegBitmapRequest)(nil),                    // 172: GetLegBitmapRequest
-	(*GetLegBitmapReply)(nil),                      // 173: GetLegBitmapReply
-	(*GetDnSizeRequest)(nil),                       // 174: GetDnSizeRequest
-	(*GetDnSizeReply)(nil),                         // 175: GetDnSizeReply
-	(*SyncupDnRequest)(nil),                        // 176: SyncupDnRequest
-	(*SyncupDnReply)(nil),                          // 177: SyncupDnReply
-	(*SyncupSideRequest)(nil),                      // 178: SyncupSideRequest
-	(*SyncupSideReply)(nil),                        // 179: SyncupSideReply
-	(*PushMigrBitmapRequest)(nil),                  // 180: PushMigrBitmapRequest
-	(*PushMigrBitmapReply)(nil),                    // 181: PushMigrBitmapReply
-	(*GetDnInfoRequest)(nil),                       // 182: GetDnInfoRequest
-	(*GetDnInfoReply)(nil),                         // 183: GetDnInfoReply
-	(*GetSideInfoRequest)(nil),                     // 184: GetSideInfoRequest
-	(*GetSideInfoReply)(nil),                       // 185: GetSideInfoReply
-	(*CheckDnRequest)(nil),                         // 186: CheckDnRequest
-	(*CheckDnReply)(nil),                           // 187: CheckDnReply
-	(*CheckSideRequest)(nil),                       // 188: CheckSideRequest
-	(*CheckSideReply)(nil),                         // 189: CheckSideReply
-	(*GetCnSizeRequest)(nil),                       // 190: GetCnSizeRequest
-	(*GetCnSizeReply)(nil),                         // 191: GetCnSizeReply
-	(*SyncupCnRequest)(nil),                        // 192: SyncupCnRequest
-	(*SyncupCnReply)(nil),                          // 193: SyncupCnReply
-	(*SyncupCntlrRequest)(nil),                     // 194: SyncupCntlrRequest
-	(*SyncupCntlrReply)(nil),                       // 195: SyncupCntlrReply
-	(*PushCloneBitmapRequest)(nil),                 // 196: PushCloneBitmapRequest
-	(*PushCloneBitmapReply)(nil),                   // 197: PushCloneBitmapReply
-	(*GetCnInfoRequest)(nil),                       // 198: GetCnInfoRequest
-	(*GetCnInfoReply)(nil),                         // 199: GetCnInfoReply
-	(*GetCntlrInfoRequest)(nil),                    // 200: GetCntlrInfoRequest
-	(*GetCntlrInfoReply)(nil),                      // 201: GetCntlrInfoReply
-	(*GetThinDeviceBmRequest)(nil),                 // 202: GetThinDeviceBmRequest
-	(*GetThinDeviceBmReply)(nil),                   // 203: GetThinDeviceBmReply
-	(*GetLegBmRequest)(nil),                        // 204: GetLegBmRequest
-	(*GetLegBmReply)(nil),                          // 205: GetLegBmReply
-	(*CheckCnRequest)(nil),                         // 206: CheckCnRequest
-	(*CheckCnReply)(nil),                           // 207: CheckCnReply
-	(*CheckCntlrRequest)(nil),                      // 208: CheckCntlrRequest
-	(*CheckCntlrReply)(nil),                        // 209: CheckCntlrReply
-	(*DnDiskHeader)(nil),                           // 210: DnDiskHeader
-	(*DnDiskTable)(nil),                            // 211: DnDiskTable
-	(*SideInfo_MigrSrcInfo)(nil),                   // 212: SideInfo.MigrSrcInfo
-	(*SideInfo_MigrDstInfo)(nil),                   // 213: SideInfo.MigrDstInfo
-	nil,                                            // 214: SideInfo.CnIdToDmErrorEntry
-	nil,                                            // 215: SideInfo.CnIdToDmLinearEntry
-	nil,                                            // 216: SideInfo.CnIdToNvmeofEntry
-	(*CntlrInfo_ThinInfo)(nil),                     // 217: CntlrInfo.ThinInfo
-	nil,                                            // 218: CntlrInfo.SsIdToSubsystemEntry
-	nil,                                            // 219: CntlrInfo.NsIdToNamespaceEntry
-	nil,                                            // 220: CntlrInfo.NsIdToDmLinearEntry
-	nil,                                            // 221: CntlrInfo.TdIdToRaid0Entry
-	nil,                                            // 222: CntlrInfo.TdIdToDmErrorEntry
-	nil,                                            // 223: CntlrInfo.TdIdToThinInfoEntry
-	nil,                                            // 224: CntlrInfo.SliceIdToDmPoolEntry
-	nil,                                            // 225: CntlrInfo.SliceIdToMetaEntry
-	nil,                                            // 226: CntlrInfo.SliceIdToDataEntry
-	nil,                                            // 227: CntlrInfo.GrpIdToMdRaidEntry
-	nil,                                            // 228: CntlrInfo.LegIdToLegEntry
-	nil,                                            // 229: CntlrInfo.XferIdToDmLinearEntry
-	nil,                                            // 230: CntlrInfo.XferIdToSubsystemEntry
-	nil,                                            // 231: CntlrInfo.XferIdToNamespaceEntry
-	nil,                                            // 232: CntlrInfo.CloneIdToTargetEntry
-	nil,                                            // 233: CntlrInfo.CloneIdToDmCloneEntry
-	nil,                                            // 234: CntlrInfo.CloneIdToMetaEntry
-	nil,                                            // 235: CntlrInfo.ThinInfo.SliceIdToDmThinEntry
-	nil,                                            // 236: FindStoragePoolNamesReply.SpIdToNameEntry
-	nil,                                            // 237: ListThinDevicesReply.NameToTdEntry
-	nil,                                            // 238: ListSubsystemsReply.NqnToSubsystemEntry
-	(*SyncupSideRequest_SideConf)(nil),             // 239: SyncupSideRequest.SideConf
-	(*SyncupSideRequest_MigrSrcConf)(nil),          // 240: SyncupSideRequest.MigrSrcConf
-	(*SyncupSideRequest_MigrDstConf)(nil),          // 241: SyncupSideRequest.MigrDstConf
-	nil,                                            // 242: SyncupCntlrRequest.IdToSliceEntry
-	nil,                                            // 243: SyncupCntlrRequest.NqnToSubsystemEntry
-	(*DnDiskTable_ExtentRun)(nil),                  // 244: DnDiskTable.ExtentRun
-	(*DnDiskTable_SideRecord)(nil),                 // 245: DnDiskTable.SideRecord
-	(*DnDiskTable_CloneMetaRecord)(nil),            // 246: DnDiskTable.CloneMetaRecord
+	(ResReason)(0),                                 // 2: ResReason
+	(*AgentReply)(nil),                             // 3: AgentReply
+	(*NodeSelector)(nil),                           // 4: NodeSelector
+	(*NvmeTrConf)(nil),                             // 5: NvmeTrConf
+	(*QosRatio)(nil),                               // 6: QosRatio
+	(*DmCloneConf)(nil),                            // 7: DmCloneConf
+	(*DmPoolConf)(nil),                             // 8: DmPoolConf
+	(*RedundNone)(nil),                             // 9: RedundNone
+	(*RedundMdRaid1)(nil),                          // 10: RedundMdRaid1
+	(*RedundConf)(nil),                             // 11: RedundConf
+	(*BdevFeatureNone)(nil),                        // 12: BdevFeatureNone
+	(*BdevFeature)(nil),                            // 13: BdevFeature
+	(*DmRaid0Conf)(nil),                            // 14: DmRaid0Conf
+	(*BdevConf)(nil),                               // 15: BdevConf
+	(*EventThreshold)(nil),                         // 16: EventThreshold
+	(*SidePointer)(nil),                            // 17: SidePointer
+	(*CntlrPointer)(nil),                           // 18: CntlrPointer
+	(*Side)(nil),                                   // 19: Side
+	(*Leg)(nil),                                    // 20: Leg
+	(*Group)(nil),                                  // 21: Group
+	(*Namespace)(nil),                              // 22: Namespace
+	(*ResInfo)(nil),                                // 23: ResInfo
+	(*DnInfo)(nil),                                 // 24: DnInfo
+	(*CnInfo)(nil),                                 // 25: CnInfo
+	(*SideInfo)(nil),                               // 26: SideInfo
+	(*CntlrInfo)(nil),                              // 27: CntlrInfo
+	(*BmChunkId)(nil),                              // 28: BmChunkId
+	(*BitmapInfo)(nil),                             // 29: BitmapInfo
+	(*DnBinConf)(nil),                              // 30: DnBinConf
+	(*AllocConf)(nil),                              // 31: AllocConf
+	(*HealthCheckConf)(nil),                        // 32: HealthCheckConf
+	(*ClusterConf)(nil),                            // 33: ClusterConf
+	(*DnGlobal)(nil),                               // 34: DnGlobal
+	(*CnGlobal)(nil),                               // 35: CnGlobal
+	(*SpGlobal)(nil),                               // 36: SpGlobal
+	(*DnRev)(nil),                                  // 37: DnRev
+	(*CnRev)(nil),                                  // 38: CnRev
+	(*SpRev)(nil),                                  // 39: SpRev
+	(*DnConf)(nil),                                 // 40: DnConf
+	(*CnConf)(nil),                                 // 41: CnConf
+	(*DnCapacity)(nil),                             // 42: DnCapacity
+	(*CnCapacity)(nil),                             // 43: CnCapacity
+	(*CdcEntry)(nil),                               // 44: CdcEntry
+	(*SpConf)(nil),                                 // 45: SpConf
+	(*Cntlr)(nil),                                  // 46: Cntlr
+	(*Slice)(nil),                                  // 47: Slice
+	(*ThinDevice)(nil),                             // 48: ThinDevice
+	(*Subsystem)(nil),                              // 49: Subsystem
+	(*Clone)(nil),                                  // 50: Clone
+	(*CloneBitmap)(nil),                            // 51: CloneBitmap
+	(*Transfer)(nil),                               // 52: Transfer
+	(*Migration)(nil),                              // 53: Migration
+	(*MigrBitmap)(nil),                             // 54: MigrBitmap
+	(*SpName)(nil),                                 // 55: SpName
+	(*WorkerReg)(nil),                              // 56: WorkerReg
+	(*CreateClusterRequest)(nil),                   // 57: CreateClusterRequest
+	(*CreateClusterReply)(nil),                     // 58: CreateClusterReply
+	(*DeleteClusterRequest)(nil),                   // 59: DeleteClusterRequest
+	(*DeleteClusterReply)(nil),                     // 60: DeleteClusterReply
+	(*GetClusterRequest)(nil),                      // 61: GetClusterRequest
+	(*GetClusterReply)(nil),                        // 62: GetClusterReply
+	(*ListClustersRequest)(nil),                    // 63: ListClustersRequest
+	(*ListClustersReply)(nil),                      // 64: ListClustersReply
+	(*CreateDiskNodeRequest)(nil),                  // 65: CreateDiskNodeRequest
+	(*CreateDiskNodeReply)(nil),                    // 66: CreateDiskNodeReply
+	(*DeleteDiskNodeRequest)(nil),                  // 67: DeleteDiskNodeRequest
+	(*DeleteDiskNodeReply)(nil),                    // 68: DeleteDiskNodeReply
+	(*GetDiskNodeRequest)(nil),                     // 69: GetDiskNodeRequest
+	(*GetDiskNodeReply)(nil),                       // 70: GetDiskNodeReply
+	(*ListDiskNodesRequest)(nil),                   // 71: ListDiskNodesRequest
+	(*ListDiskNodesReply)(nil),                     // 72: ListDiskNodesReply
+	(*UpdateDiskNodeDisabledRequest)(nil),          // 73: UpdateDiskNodeDisabledRequest
+	(*UpdateDiskNodeDisabledReply)(nil),            // 74: UpdateDiskNodeDisabledReply
+	(*InspectDiskNodeRequest)(nil),                 // 75: InspectDiskNodeRequest
+	(*InspectDiskNodeReply)(nil),                   // 76: InspectDiskNodeReply
+	(*CreateControllerNodeRequest)(nil),            // 77: CreateControllerNodeRequest
+	(*CreateControllerNodeReply)(nil),              // 78: CreateControllerNodeReply
+	(*DeleteControllerNodeRequest)(nil),            // 79: DeleteControllerNodeRequest
+	(*DeleteControllerNodeReply)(nil),              // 80: DeleteControllerNodeReply
+	(*GetControllerNodeRequest)(nil),               // 81: GetControllerNodeRequest
+	(*GetControllerNodeReply)(nil),                 // 82: GetControllerNodeReply
+	(*ListControllerNodesRequest)(nil),             // 83: ListControllerNodesRequest
+	(*ListControllerNodesReply)(nil),               // 84: ListControllerNodesReply
+	(*UpdateControllerNodeDisabledRequest)(nil),    // 85: UpdateControllerNodeDisabledRequest
+	(*UpdateControllerNodeDisabledReply)(nil),      // 86: UpdateControllerNodeDisabledReply
+	(*InspectControllerNodeRequest)(nil),           // 87: InspectControllerNodeRequest
+	(*InspectControllerNodeReply)(nil),             // 88: InspectControllerNodeReply
+	(*CreateStoragePoolRequest)(nil),               // 89: CreateStoragePoolRequest
+	(*CreateStoragePoolReply)(nil),                 // 90: CreateStoragePoolReply
+	(*DeleteStoragePoolRequest)(nil),               // 91: DeleteStoragePoolRequest
+	(*DeleteStoragePoolReply)(nil),                 // 92: DeleteStoragePoolReply
+	(*GetStoragePoolRequest)(nil),                  // 93: GetStoragePoolRequest
+	(*GetStoragePoolReply)(nil),                    // 94: GetStoragePoolReply
+	(*ListStoragePoolsRequest)(nil),                // 95: ListStoragePoolsRequest
+	(*ListStoragePoolsReply)(nil),                  // 96: ListStoragePoolsReply
+	(*UpdateStoragePoolCntlidSlotListRequest)(nil), // 97: UpdateStoragePoolCntlidSlotListRequest
+	(*UpdateStoragePoolCntlidSlotListReply)(nil),   // 98: UpdateStoragePoolCntlidSlotListReply
+	(*UpdateStoragePoolLevelRequest)(nil),          // 99: UpdateStoragePoolLevelRequest
+	(*UpdateStoragePoolLevelReply)(nil),            // 100: UpdateStoragePoolLevelReply
+	(*FindStoragePoolNamesRequest)(nil),            // 101: FindStoragePoolNamesRequest
+	(*FindStoragePoolNamesReply)(nil),              // 102: FindStoragePoolNamesReply
+	(*GrowSliceRequest)(nil),                       // 103: GrowSliceRequest
+	(*GrowSliceReply)(nil),                         // 104: GrowSliceReply
+	(*CreateCntlrRequest)(nil),                     // 105: CreateCntlrRequest
+	(*CreateCntlrReply)(nil),                       // 106: CreateCntlrReply
+	(*DeleteCntlrRequest)(nil),                     // 107: DeleteCntlrRequest
+	(*DeleteCntlrReply)(nil),                       // 108: DeleteCntlrReply
+	(*UpdateCntlrEnabledRequest)(nil),              // 109: UpdateCntlrEnabledRequest
+	(*UpdateCntlrEnabledReply)(nil),                // 110: UpdateCntlrEnabledReply
+	(*InspectCntlrRequest)(nil),                    // 111: InspectCntlrRequest
+	(*InspectCntlrReply)(nil),                      // 112: InspectCntlrReply
+	(*InspectSideRequest)(nil),                     // 113: InspectSideRequest
+	(*InspectSideReply)(nil),                       // 114: InspectSideReply
+	(*CreateThinDeviceRequest)(nil),                // 115: CreateThinDeviceRequest
+	(*CreateThinDeviceReply)(nil),                  // 116: CreateThinDeviceReply
+	(*DeleteThinDeviceRequest)(nil),                // 117: DeleteThinDeviceRequest
+	(*DeleteThinDeviceReply)(nil),                  // 118: DeleteThinDeviceReply
+	(*ListThinDevicesRequest)(nil),                 // 119: ListThinDevicesRequest
+	(*ListThinDevicesReply)(nil),                   // 120: ListThinDevicesReply
+	(*CreateSubsystemRequest)(nil),                 // 121: CreateSubsystemRequest
+	(*CreateSubsystemReply)(nil),                   // 122: CreateSubsystemReply
+	(*DeleteSubsystemRequest)(nil),                 // 123: DeleteSubsystemRequest
+	(*DeleteSubsystemReply)(nil),                   // 124: DeleteSubsystemReply
+	(*ListSubsystemsRequest)(nil),                  // 125: ListSubsystemsRequest
+	(*ListSubsystemsReply)(nil),                    // 126: ListSubsystemsReply
+	(*UpdateSubsystemHostsRequest)(nil),            // 127: UpdateSubsystemHostsRequest
+	(*UpdateSubsystemHostsReply)(nil),              // 128: UpdateSubsystemHostsReply
+	(*CreateNamespaceRequest)(nil),                 // 129: CreateNamespaceRequest
+	(*CreateNamespaceReply)(nil),                   // 130: CreateNamespaceReply
+	(*DeleteNamespaceRequest)(nil),                 // 131: DeleteNamespaceRequest
+	(*DeleteNamespaceReply)(nil),                   // 132: DeleteNamespaceReply
+	(*UpdateNamespaceDevRequest)(nil),              // 133: UpdateNamespaceDevRequest
+	(*UpdateNamespaceDevReply)(nil),                // 134: UpdateNamespaceDevReply
+	(*UpdateNamespaceSuspendedRequest)(nil),        // 135: UpdateNamespaceSuspendedRequest
+	(*UpdateNamespaceSuspendedReply)(nil),          // 136: UpdateNamespaceSuspendedReply
+	(*CreateCloneRequest)(nil),                     // 137: CreateCloneRequest
+	(*CreateCloneReply)(nil),                       // 138: CreateCloneReply
+	(*DeleteCloneRequest)(nil),                     // 139: DeleteCloneRequest
+	(*DeleteCloneReply)(nil),                       // 140: DeleteCloneReply
+	(*GetCloneRequest)(nil),                        // 141: GetCloneRequest
+	(*GetCloneReply)(nil),                          // 142: GetCloneReply
+	(*UpdateCloneTrConfRequest)(nil),               // 143: UpdateCloneTrConfRequest
+	(*UpdateCloneTrConfReply)(nil),                 // 144: UpdateCloneTrConfReply
+	(*AppendCloneBitmapRequest)(nil),               // 145: AppendCloneBitmapRequest
+	(*AppendCloneBitmapReply)(nil),                 // 146: AppendCloneBitmapReply
+	(*CreateTransferRequest)(nil),                  // 147: CreateTransferRequest
+	(*CreateTransferReply)(nil),                    // 148: CreateTransferReply
+	(*DeleteTransferRequest)(nil),                  // 149: DeleteTransferRequest
+	(*DeleteTransferReply)(nil),                    // 150: DeleteTransferReply
+	(*GetTransferRequest)(nil),                     // 151: GetTransferRequest
+	(*GetTransferReply)(nil),                       // 152: GetTransferReply
+	(*UpdateTransferHostsRequest)(nil),             // 153: UpdateTransferHostsRequest
+	(*UpdateTransferHostsReply)(nil),               // 154: UpdateTransferHostsReply
+	(*CreateMigrationRequest)(nil),                 // 155: CreateMigrationRequest
+	(*CreateMigrationReply)(nil),                   // 156: CreateMigrationReply
+	(*FinishMigrationRequest)(nil),                 // 157: FinishMigrationRequest
+	(*FinishMigrationReply)(nil),                   // 158: FinishMigrationReply
+	(*CancelMigrationRequest)(nil),                 // 159: CancelMigrationRequest
+	(*CancelMigrationReply)(nil),                   // 160: CancelMigrationReply
+	(*GetMigrationRequest)(nil),                    // 161: GetMigrationRequest
+	(*GetMigrationReply)(nil),                      // 162: GetMigrationReply
+	(*AppendMigrationBitmapRequest)(nil),           // 163: AppendMigrationBitmapRequest
+	(*AppendMigrationBitmapReply)(nil),             // 164: AppendMigrationBitmapReply
+	(*CreateSpareLegRequest)(nil),                  // 165: CreateSpareLegRequest
+	(*CreateSpareLegReply)(nil),                    // 166: CreateSpareLegReply
+	(*DeleteSpareLegRequest)(nil),                  // 167: DeleteSpareLegRequest
+	(*DeleteSpareLegReply)(nil),                    // 168: DeleteSpareLegReply
+	(*SwitchSpareLegRequest)(nil),                  // 169: SwitchSpareLegRequest
+	(*SwitchSpareLegReply)(nil),                    // 170: SwitchSpareLegReply
+	(*GetThinDeviceBitmapRequest)(nil),             // 171: GetThinDeviceBitmapRequest
+	(*GetThinDeviceBitmapReply)(nil),               // 172: GetThinDeviceBitmapReply
+	(*GetLegBitmapRequest)(nil),                    // 173: GetLegBitmapRequest
+	(*GetLegBitmapReply)(nil),                      // 174: GetLegBitmapReply
+	(*GetDnSizeRequest)(nil),                       // 175: GetDnSizeRequest
+	(*GetDnSizeReply)(nil),                         // 176: GetDnSizeReply
+	(*SyncupDnRequest)(nil),                        // 177: SyncupDnRequest
+	(*SyncupDnReply)(nil),                          // 178: SyncupDnReply
+	(*SyncupSideRequest)(nil),                      // 179: SyncupSideRequest
+	(*SyncupSideReply)(nil),                        // 180: SyncupSideReply
+	(*PushMigrBitmapRequest)(nil),                  // 181: PushMigrBitmapRequest
+	(*PushMigrBitmapReply)(nil),                    // 182: PushMigrBitmapReply
+	(*GetDnInfoRequest)(nil),                       // 183: GetDnInfoRequest
+	(*GetDnInfoReply)(nil),                         // 184: GetDnInfoReply
+	(*GetSideInfoRequest)(nil),                     // 185: GetSideInfoRequest
+	(*GetSideInfoReply)(nil),                       // 186: GetSideInfoReply
+	(*CheckDnRequest)(nil),                         // 187: CheckDnRequest
+	(*CheckDnReply)(nil),                           // 188: CheckDnReply
+	(*CheckSideRequest)(nil),                       // 189: CheckSideRequest
+	(*CheckSideReply)(nil),                         // 190: CheckSideReply
+	(*GetCnSizeRequest)(nil),                       // 191: GetCnSizeRequest
+	(*GetCnSizeReply)(nil),                         // 192: GetCnSizeReply
+	(*SyncupCnRequest)(nil),                        // 193: SyncupCnRequest
+	(*SyncupCnReply)(nil),                          // 194: SyncupCnReply
+	(*SyncupCntlrRequest)(nil),                     // 195: SyncupCntlrRequest
+	(*SyncupCntlrReply)(nil),                       // 196: SyncupCntlrReply
+	(*PushCloneBitmapRequest)(nil),                 // 197: PushCloneBitmapRequest
+	(*PushCloneBitmapReply)(nil),                   // 198: PushCloneBitmapReply
+	(*GetCnInfoRequest)(nil),                       // 199: GetCnInfoRequest
+	(*GetCnInfoReply)(nil),                         // 200: GetCnInfoReply
+	(*GetCntlrInfoRequest)(nil),                    // 201: GetCntlrInfoRequest
+	(*GetCntlrInfoReply)(nil),                      // 202: GetCntlrInfoReply
+	(*GetThinDeviceBmRequest)(nil),                 // 203: GetThinDeviceBmRequest
+	(*GetThinDeviceBmReply)(nil),                   // 204: GetThinDeviceBmReply
+	(*GetLegBmRequest)(nil),                        // 205: GetLegBmRequest
+	(*GetLegBmReply)(nil),                          // 206: GetLegBmReply
+	(*CheckCnRequest)(nil),                         // 207: CheckCnRequest
+	(*CheckCnReply)(nil),                           // 208: CheckCnReply
+	(*CheckCntlrRequest)(nil),                      // 209: CheckCntlrRequest
+	(*CheckCntlrReply)(nil),                        // 210: CheckCntlrReply
+	(*DnDiskHeader)(nil),                           // 211: DnDiskHeader
+	(*DnDiskTable)(nil),                            // 212: DnDiskTable
+	(*SideInfo_MigrSrcInfo)(nil),                   // 213: SideInfo.MigrSrcInfo
+	(*SideInfo_MigrDstInfo)(nil),                   // 214: SideInfo.MigrDstInfo
+	nil,                                            // 215: SideInfo.CnIdToDmErrorEntry
+	nil,                                            // 216: SideInfo.CnIdToDmLinearEntry
+	nil,                                            // 217: SideInfo.CnIdToNvmeofEntry
+	(*CntlrInfo_ThinInfo)(nil),                     // 218: CntlrInfo.ThinInfo
+	nil,                                            // 219: CntlrInfo.SsIdToSubsystemEntry
+	nil,                                            // 220: CntlrInfo.NsIdToNamespaceEntry
+	nil,                                            // 221: CntlrInfo.NsIdToDmLinearEntry
+	nil,                                            // 222: CntlrInfo.TdIdToRaid0Entry
+	nil,                                            // 223: CntlrInfo.TdIdToDmErrorEntry
+	nil,                                            // 224: CntlrInfo.TdIdToThinInfoEntry
+	nil,                                            // 225: CntlrInfo.SliceIdToDmPoolEntry
+	nil,                                            // 226: CntlrInfo.SliceIdToMetaEntry
+	nil,                                            // 227: CntlrInfo.SliceIdToDataEntry
+	nil,                                            // 228: CntlrInfo.GrpIdToMdRaidEntry
+	nil,                                            // 229: CntlrInfo.LegIdToLegEntry
+	nil,                                            // 230: CntlrInfo.XferIdToDmLinearEntry
+	nil,                                            // 231: CntlrInfo.XferIdToSubsystemEntry
+	nil,                                            // 232: CntlrInfo.XferIdToNamespaceEntry
+	nil,                                            // 233: CntlrInfo.CloneIdToTargetEntry
+	nil,                                            // 234: CntlrInfo.CloneIdToDmCloneEntry
+	nil,                                            // 235: CntlrInfo.CloneIdToMetaEntry
+	nil,                                            // 236: CntlrInfo.ThinInfo.SliceIdToDmThinEntry
+	nil,                                            // 237: FindStoragePoolNamesReply.SpIdToNameEntry
+	nil,                                            // 238: ListThinDevicesReply.NameToTdEntry
+	nil,                                            // 239: ListSubsystemsReply.NqnToSubsystemEntry
+	(*SyncupSideRequest_SideConf)(nil),             // 240: SyncupSideRequest.SideConf
+	(*SyncupSideRequest_MigrSrcConf)(nil),          // 241: SyncupSideRequest.MigrSrcConf
+	(*SyncupSideRequest_MigrDstConf)(nil),          // 242: SyncupSideRequest.MigrDstConf
+	nil,                                            // 243: SyncupCntlrRequest.IdToSliceEntry
+	nil,                                            // 244: SyncupCntlrRequest.NqnToSubsystemEntry
+	(*DnDiskTable_ExtentRun)(nil),                  // 245: DnDiskTable.ExtentRun
+	(*DnDiskTable_SideRecord)(nil),                 // 246: DnDiskTable.SideRecord
+	(*DnDiskTable_CloneMetaRecord)(nil),            // 247: DnDiskTable.CloneMetaRecord
 }
 var file_pb_schema_proto_depIdxs = []int32{
-	8,   // 0: RedundConf.redund_none:type_name -> RedundNone
-	9,   // 1: RedundConf.redund_md_raid1:type_name -> RedundMdRaid1
-	11,  // 2: BdevFeature.bdev_feature_none:type_name -> BdevFeatureNone
-	7,   // 3: BdevConf.dm_pool_conf:type_name -> DmPoolConf
-	13,  // 4: BdevConf.dm_raid0_conf:type_name -> DmRaid0Conf
-	10,  // 5: BdevConf.redund_conf:type_name -> RedundConf
-	12,  // 6: BdevConf.bdev_feature_list:type_name -> BdevFeature
-	4,   // 7: Side.nvme_tr_conf:type_name -> NvmeTrConf
-	18,  // 8: Leg.side_list:type_name -> Side
-	19,  // 9: Group.leg_list:type_name -> Leg
-	19,  // 10: Group.spare_leg_list:type_name -> Leg
+	9,   // 0: RedundConf.redund_none:type_name -> RedundNone
+	10,  // 1: RedundConf.redund_md_raid1:type_name -> RedundMdRaid1
+	12,  // 2: BdevFeature.bdev_feature_none:type_name -> BdevFeatureNone
+	8,   // 3: BdevConf.dm_pool_conf:type_name -> DmPoolConf
+	14,  // 4: BdevConf.dm_raid0_conf:type_name -> DmRaid0Conf
+	11,  // 5: BdevConf.redund_conf:type_name -> RedundConf
+	13,  // 6: BdevConf.bdev_feature_list:type_name -> BdevFeature
+	5,   // 7: Side.nvme_tr_conf:type_name -> NvmeTrConf
+	19,  // 8: Leg.side_list:type_name -> Side
+	20,  // 9: Group.leg_list:type_name -> Leg
+	20,  // 10: Group.spare_leg_list:type_name -> Leg
 	1,   // 11: ResInfo.status:type_name -> ResStatus
-	22,  // 12: DnInfo.disk_info:type_name -> ResInfo
-	22,  // 13: DnInfo.meta_info:type_name -> ResInfo
-	22,  // 14: DnInfo.port_info:type_name -> ResInfo
-	22,  // 15: CnInfo.port_info:type_name -> ResInfo
-	22,  // 16: CnInfo.tmpfs_info:type_name -> ResInfo
-	22,  // 17: CnInfo.tmp_file_info:type_name -> ResInfo
-	22,  // 18: CnInfo.loop_dev_info:type_name -> ResInfo
-	22,  // 19: SideInfo.side_dev_info:type_name -> ResInfo
-	214, // 20: SideInfo.cn_id_to_dm_error:type_name -> SideInfo.CnIdToDmErrorEntry
-	215, // 21: SideInfo.cn_id_to_dm_linear:type_name -> SideInfo.CnIdToDmLinearEntry
-	216, // 22: SideInfo.cn_id_to_nvmeof:type_name -> SideInfo.CnIdToNvmeofEntry
-	212, // 23: SideInfo.migr_src_info:type_name -> SideInfo.MigrSrcInfo
-	213, // 24: SideInfo.migr_dst_info:type_name -> SideInfo.MigrDstInfo
-	218, // 25: CntlrInfo.ss_id_to_subsystem:type_name -> CntlrInfo.SsIdToSubsystemEntry
-	219, // 26: CntlrInfo.ns_id_to_namespace:type_name -> CntlrInfo.NsIdToNamespaceEntry
-	220, // 27: CntlrInfo.ns_id_to_dm_linear:type_name -> CntlrInfo.NsIdToDmLinearEntry
-	221, // 28: CntlrInfo.td_id_to_raid0:type_name -> CntlrInfo.TdIdToRaid0Entry
-	222, // 29: CntlrInfo.td_id_to_dm_error:type_name -> CntlrInfo.TdIdToDmErrorEntry
-	223, // 30: CntlrInfo.td_id_to_thin_info:type_name -> CntlrInfo.TdIdToThinInfoEntry
-	224, // 31: CntlrInfo.slice_id_to_dm_pool:type_name -> CntlrInfo.SliceIdToDmPoolEntry
-	225, // 32: CntlrInfo.slice_id_to_meta:type_name -> CntlrInfo.SliceIdToMetaEntry
-	226, // 33: CntlrInfo.slice_id_to_data:type_name -> CntlrInfo.SliceIdToDataEntry
-	227, // 34: CntlrInfo.grp_id_to_md_raid:type_name -> CntlrInfo.GrpIdToMdRaidEntry
-	228, // 35: CntlrInfo.leg_id_to_leg:type_name -> CntlrInfo.LegIdToLegEntry
-	229, // 36: CntlrInfo.xfer_id_to_dm_linear:type_name -> CntlrInfo.XferIdToDmLinearEntry
-	230, // 37: CntlrInfo.xfer_id_to_subsystem:type_name -> CntlrInfo.XferIdToSubsystemEntry
-	231, // 38: CntlrInfo.xfer_id_to_namespace:type_name -> CntlrInfo.XferIdToNamespaceEntry
-	232, // 39: CntlrInfo.clone_id_to_target:type_name -> CntlrInfo.CloneIdToTargetEntry
-	233, // 40: CntlrInfo.clone_id_to_dm_clone:type_name -> CntlrInfo.CloneIdToDmCloneEntry
-	234, // 41: CntlrInfo.clone_id_to_meta:type_name -> CntlrInfo.CloneIdToMetaEntry
-	27,  // 42: BitmapInfo.chunk_id_list:type_name -> BmChunkId
-	5,   // 43: ClusterConf.qos_ratio:type_name -> QosRatio
-	14,  // 44: ClusterConf.bdev_conf:type_name -> BdevConf
-	29,  // 45: ClusterConf.dn_bin_conf:type_name -> DnBinConf
-	30,  // 46: ClusterConf.alloc_conf:type_name -> AllocConf
-	31,  // 47: ClusterConf.health_check_conf:type_name -> HealthCheckConf
-	4,   // 48: DnConf.nvme_tr_conf:type_name -> NvmeTrConf
-	16,  // 49: DnConf.side_ptr_list:type_name -> SidePointer
-	4,   // 50: CnConf.nvme_tr_conf:type_name -> NvmeTrConf
-	17,  // 51: CnConf.cntlr_ptr_list:type_name -> CntlrPointer
-	4,   // 52: CdcEntry.nvme_tr_conf_list:type_name -> NvmeTrConf
-	14,  // 53: SpConf.bdev_conf:type_name -> BdevConf
-	15,  // 54: SpConf.event_threshold:type_name -> EventThreshold
-	0,   // 55: SpConf.sp_level:type_name -> SpLevel
-	4,   // 56: Cntlr.nvme_tr_conf:type_name -> NvmeTrConf
-	20,  // 57: Slice.meta_grp_list:type_name -> Group
-	20,  // 58: Slice.data_grp_list:type_name -> Group
-	21,  // 59: Subsystem.ns_list:type_name -> Namespace
-	4,   // 60: Clone.src_tr_conf_list:type_name -> NvmeTrConf
-	6,   // 61: Clone.dm_clone_conf:type_name -> DmCloneConf
-	6,   // 62: Migration.dm_clone_conf:type_name -> DmCloneConf
-	5,   // 63: CreateClusterRequest.qos_ratio:type_name -> QosRatio
-	14,  // 64: CreateClusterRequest.bdev_conf:type_name -> BdevConf
-	29,  // 65: CreateClusterRequest.dn_bin_conf:type_name -> DnBinConf
-	30,  // 66: CreateClusterRequest.alloc_conf:type_name -> AllocConf
-	31,  // 67: CreateClusterRequest.health_check_conf:type_name -> HealthCheckConf
-	32,  // 68: GetClusterReply.cluster_conf:type_name -> ClusterConf
-	33,  // 69: GetClusterReply.dn_global:type_name -> DnGlobal
-	34,  // 70: GetClusterReply.cn_global:type_name -> CnGlobal
-	35,  // 71: GetClusterReply.sp_global:type_name -> SpGlobal
-	4,   // 72: CreateDiskNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
-	36,  // 73: DeleteDiskNodeRequest.dn_rev:type_name -> DnRev
-	39,  // 74: GetDiskNodeReply.dn_conf:type_name -> DnConf
-	36,  // 75: GetDiskNodeReply.dn_rev:type_name -> DnRev
-	36,  // 76: UpdateDiskNodeDisabledRequest.dn_rev:type_name -> DnRev
-	23,  // 77: InspectDiskNodeReply.dn_info:type_name -> DnInfo
-	4,   // 78: CreateControllerNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
-	37,  // 79: DeleteControllerNodeRequest.cn_rev:type_name -> CnRev
-	40,  // 80: GetControllerNodeReply.cn_conf:type_name -> CnConf
-	37,  // 81: GetControllerNodeReply.cn_rev:type_name -> CnRev
-	37,  // 82: UpdateControllerNodeDisabledRequest.cn_rev:type_name -> CnRev
-	24,  // 83: InspectControllerNodeReply.cn_info:type_name -> CnInfo
-	14,  // 84: CreateStoragePoolRequest.bdev_conf:type_name -> BdevConf
-	15,  // 85: CreateStoragePoolRequest.event_threshold:type_name -> EventThreshold
-	3,   // 86: CreateStoragePoolRequest.cn_selector:type_name -> NodeSelector
-	3,   // 87: CreateStoragePoolRequest.dn_selector:type_name -> NodeSelector
-	38,  // 88: DeleteStoragePoolRequest.sp_rev:type_name -> SpRev
-	44,  // 89: GetStoragePoolReply.sp_conf:type_name -> SpConf
-	38,  // 90: GetStoragePoolReply.sp_rev:type_name -> SpRev
-	45,  // 91: GetStoragePoolReply.cntlr_list:type_name -> Cntlr
-	46,  // 92: GetStoragePoolReply.slice_list:type_name -> Slice
-	38,  // 93: UpdateStoragePoolCntlidSlotListRequest.sp_rev:type_name -> SpRev
-	38,  // 94: UpdateStoragePoolLevelRequest.sp_rev:type_name -> SpRev
-	0,   // 95: UpdateStoragePoolLevelRequest.sp_level:type_name -> SpLevel
-	236, // 96: FindStoragePoolNamesReply.sp_id_to_name:type_name -> FindStoragePoolNamesReply.SpIdToNameEntry
-	38,  // 97: GrowSliceRequest.sp_rev:type_name -> SpRev
-	3,   // 98: GrowSliceRequest.dn_selector:type_name -> NodeSelector
-	38,  // 99: CreateCntlrRequest.sp_rev:type_name -> SpRev
-	3,   // 100: CreateCntlrRequest.cn_selector:type_name -> NodeSelector
-	38,  // 101: DeleteCntlrRequest.sp_rev:type_name -> SpRev
-	38,  // 102: UpdateCntlrEnabledRequest.sp_rev:type_name -> SpRev
-	26,  // 103: InspectCntlrReply.cntlr_info:type_name -> CntlrInfo
-	25,  // 104: InspectSideReply.side_info:type_name -> SideInfo
-	38,  // 105: CreateThinDeviceRequest.sp_rev:type_name -> SpRev
-	38,  // 106: DeleteThinDeviceRequest.sp_rev:type_name -> SpRev
-	237, // 107: ListThinDevicesReply.name_to_td:type_name -> ListThinDevicesReply.NameToTdEntry
-	38,  // 108: CreateSubsystemRequest.sp_rev:type_name -> SpRev
-	38,  // 109: DeleteSubsystemRequest.sp_rev:type_name -> SpRev
-	238, // 110: ListSubsystemsReply.nqn_to_subsystem:type_name -> ListSubsystemsReply.NqnToSubsystemEntry
-	38,  // 111: UpdateSubsystemHostsRequest.sp_rev:type_name -> SpRev
-	38,  // 112: CreateNamespaceRequest.sp_rev:type_name -> SpRev
-	38,  // 113: DeleteNamespaceRequest.sp_rev:type_name -> SpRev
-	38,  // 114: UpdateNamespaceDevRequest.sp_rev:type_name -> SpRev
-	38,  // 115: UpdateNamespaceSuspendedRequest.sp_rev:type_name -> SpRev
-	38,  // 116: CreateCloneRequest.sp_rev:type_name -> SpRev
-	4,   // 117: CreateCloneRequest.src_tr_conf:type_name -> NvmeTrConf
-	6,   // 118: CreateCloneRequest.dm_clone_conf:type_name -> DmCloneConf
-	38,  // 119: DeleteCloneRequest.sp_rev:type_name -> SpRev
-	49,  // 120: GetCloneReply.clone:type_name -> Clone
-	38,  // 121: UpdateCloneTrConfRequest.sp_rev:type_name -> SpRev
-	4,   // 122: UpdateCloneTrConfRequest.src_tr_conf:type_name -> NvmeTrConf
-	38,  // 123: AppendCloneBitmapRequest.sp_rev:type_name -> SpRev
-	38,  // 124: CreateTransferRequest.sp_rev:type_name -> SpRev
-	38,  // 125: DeleteTransferRequest.sp_rev:type_name -> SpRev
-	51,  // 126: GetTransferReply.xfer:type_name -> Transfer
-	38,  // 127: UpdateTransferHostsRequest.sp_rev:type_name -> SpRev
-	38,  // 128: CreateMigrationRequest.sp_rev:type_name -> SpRev
-	3,   // 129: CreateMigrationRequest.dn_selector:type_name -> NodeSelector
-	6,   // 130: CreateMigrationRequest.dm_clone_conf:type_name -> DmCloneConf
-	38,  // 131: FinishMigrationRequest.sp_rev:type_name -> SpRev
-	38,  // 132: CancelMigrationRequest.sp_rev:type_name -> SpRev
-	52,  // 133: GetMigrationReply.migr:type_name -> Migration
-	38,  // 134: AppendMigrationBitmapRequest.sp_rev:type_name -> SpRev
-	38,  // 135: CreateSpareLegRequest.sp_rev:type_name -> SpRev
-	3,   // 136: CreateSpareLegRequest.dn_selector:type_name -> NodeSelector
-	38,  // 137: DeleteSpareLegRequest.sp_rev:type_name -> SpRev
-	38,  // 138: SwitchSpareLegRequest.sp_rev:type_name -> SpRev
-	16,  // 139: SyncupDnRequest.side_pointer_list:type_name -> SidePointer
-	2,   // 140: SyncupDnReply.agent_reply:type_name -> AgentReply
-	23,  // 141: SyncupDnReply.dn_info:type_name -> DnInfo
-	16,  // 142: SyncupSideRequest.side_pointer:type_name -> SidePointer
-	239, // 143: SyncupSideRequest.side_conf:type_name -> SyncupSideRequest.SideConf
-	240, // 144: SyncupSideRequest.migr_src_conf:type_name -> SyncupSideRequest.MigrSrcConf
-	241, // 145: SyncupSideRequest.migr_dst_conf:type_name -> SyncupSideRequest.MigrDstConf
-	2,   // 146: SyncupSideReply.agent_reply:type_name -> AgentReply
-	25,  // 147: SyncupSideReply.side_info:type_name -> SideInfo
-	28,  // 148: SyncupSideReply.bm_info:type_name -> BitmapInfo
-	16,  // 149: PushMigrBitmapRequest.side_pointer:type_name -> SidePointer
-	2,   // 150: PushMigrBitmapReply.agent_reply:type_name -> AgentReply
-	2,   // 151: GetDnInfoReply.agent_reply:type_name -> AgentReply
-	23,  // 152: GetDnInfoReply.dn_info:type_name -> DnInfo
-	16,  // 153: GetSideInfoRequest.side_pointer:type_name -> SidePointer
-	2,   // 154: GetSideInfoReply.agent_reply:type_name -> AgentReply
-	25,  // 155: GetSideInfoReply.side_info:type_name -> SideInfo
-	2,   // 156: CheckDnReply.agent_reply:type_name -> AgentReply
-	23,  // 157: CheckDnReply.dn_info:type_name -> DnInfo
-	16,  // 158: CheckSideRequest.side_pointer:type_name -> SidePointer
-	2,   // 159: CheckSideReply.agent_reply:type_name -> AgentReply
-	25,  // 160: CheckSideReply.side_info:type_name -> SideInfo
-	17,  // 161: SyncupCnRequest.cntlr_pointer_list:type_name -> CntlrPointer
-	5,   // 162: SyncupCnRequest.qos_ratio:type_name -> QosRatio
-	2,   // 163: SyncupCnReply.agent_reply:type_name -> AgentReply
-	24,  // 164: SyncupCnReply.cn_info:type_name -> CnInfo
-	17,  // 165: SyncupCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
-	14,  // 166: SyncupCntlrRequest.bdev_conf:type_name -> BdevConf
-	0,   // 167: SyncupCntlrRequest.sp_level:type_name -> SpLevel
-	45,  // 168: SyncupCntlrRequest.cntlr:type_name -> Cntlr
-	242, // 169: SyncupCntlrRequest.id_to_slice:type_name -> SyncupCntlrRequest.IdToSliceEntry
-	47,  // 170: SyncupCntlrRequest.td_list:type_name -> ThinDevice
-	243, // 171: SyncupCntlrRequest.nqn_to_subsystem:type_name -> SyncupCntlrRequest.NqnToSubsystemEntry
-	49,  // 172: SyncupCntlrRequest.clone_list:type_name -> Clone
-	51,  // 173: SyncupCntlrRequest.xfer_list:type_name -> Transfer
-	52,  // 174: SyncupCntlrRequest.migr_list:type_name -> Migration
-	2,   // 175: SyncupCntlrReply.agent_reply:type_name -> AgentReply
-	26,  // 176: SyncupCntlrReply.cntlr_info:type_name -> CntlrInfo
-	28,  // 177: SyncupCntlrReply.bm_info_list:type_name -> BitmapInfo
-	17,  // 178: PushCloneBitmapRequest.cntlr_pointer:type_name -> CntlrPointer
-	2,   // 179: PushCloneBitmapReply.agent_reply:type_name -> AgentReply
-	2,   // 180: GetCnInfoReply.agent_reply:type_name -> AgentReply
-	24,  // 181: GetCnInfoReply.cn_info:type_name -> CnInfo
-	17,  // 182: GetCntlrInfoRequest.cntlr_pointer:type_name -> CntlrPointer
-	2,   // 183: GetCntlrInfoReply.agent_reply:type_name -> AgentReply
-	26,  // 184: GetCntlrInfoReply.cntlr_info:type_name -> CntlrInfo
-	2,   // 185: CheckCnReply.agent_reply:type_name -> AgentReply
-	24,  // 186: CheckCnReply.cn_info:type_name -> CnInfo
-	17,  // 187: CheckCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
-	2,   // 188: CheckCntlrReply.agent_reply:type_name -> AgentReply
-	26,  // 189: CheckCntlrReply.cntlr_info:type_name -> CntlrInfo
-	245, // 190: DnDiskTable.side_list:type_name -> DnDiskTable.SideRecord
-	246, // 191: DnDiskTable.clone_meta_list:type_name -> DnDiskTable.CloneMetaRecord
-	22,  // 192: SideInfo.MigrSrcInfo.dm_linear_info:type_name -> ResInfo
-	22,  // 193: SideInfo.MigrSrcInfo.nvmeof_info:type_name -> ResInfo
-	22,  // 194: SideInfo.MigrDstInfo.target_info:type_name -> ResInfo
-	22,  // 195: SideInfo.MigrDstInfo.dm_clone_info:type_name -> ResInfo
-	22,  // 196: SideInfo.CnIdToDmErrorEntry.value:type_name -> ResInfo
-	22,  // 197: SideInfo.CnIdToDmLinearEntry.value:type_name -> ResInfo
-	22,  // 198: SideInfo.CnIdToNvmeofEntry.value:type_name -> ResInfo
-	235, // 199: CntlrInfo.ThinInfo.slice_id_to_dm_thin:type_name -> CntlrInfo.ThinInfo.SliceIdToDmThinEntry
-	22,  // 200: CntlrInfo.SsIdToSubsystemEntry.value:type_name -> ResInfo
-	22,  // 201: CntlrInfo.NsIdToNamespaceEntry.value:type_name -> ResInfo
-	22,  // 202: CntlrInfo.NsIdToDmLinearEntry.value:type_name -> ResInfo
-	22,  // 203: CntlrInfo.TdIdToRaid0Entry.value:type_name -> ResInfo
-	22,  // 204: CntlrInfo.TdIdToDmErrorEntry.value:type_name -> ResInfo
-	217, // 205: CntlrInfo.TdIdToThinInfoEntry.value:type_name -> CntlrInfo.ThinInfo
-	22,  // 206: CntlrInfo.SliceIdToDmPoolEntry.value:type_name -> ResInfo
-	22,  // 207: CntlrInfo.SliceIdToMetaEntry.value:type_name -> ResInfo
-	22,  // 208: CntlrInfo.SliceIdToDataEntry.value:type_name -> ResInfo
-	22,  // 209: CntlrInfo.GrpIdToMdRaidEntry.value:type_name -> ResInfo
-	22,  // 210: CntlrInfo.LegIdToLegEntry.value:type_name -> ResInfo
-	22,  // 211: CntlrInfo.XferIdToDmLinearEntry.value:type_name -> ResInfo
-	22,  // 212: CntlrInfo.XferIdToSubsystemEntry.value:type_name -> ResInfo
-	22,  // 213: CntlrInfo.XferIdToNamespaceEntry.value:type_name -> ResInfo
-	22,  // 214: CntlrInfo.CloneIdToTargetEntry.value:type_name -> ResInfo
-	22,  // 215: CntlrInfo.CloneIdToDmCloneEntry.value:type_name -> ResInfo
-	22,  // 216: CntlrInfo.CloneIdToMetaEntry.value:type_name -> ResInfo
-	22,  // 217: CntlrInfo.ThinInfo.SliceIdToDmThinEntry.value:type_name -> ResInfo
-	47,  // 218: ListThinDevicesReply.NameToTdEntry.value:type_name -> ThinDevice
-	48,  // 219: ListSubsystemsReply.NqnToSubsystemEntry.value:type_name -> Subsystem
+	2,   // 12: ResInfo.reason:type_name -> ResReason
+	23,  // 13: DnInfo.disk_info:type_name -> ResInfo
+	23,  // 14: DnInfo.meta_info:type_name -> ResInfo
+	23,  // 15: DnInfo.port_info:type_name -> ResInfo
+	23,  // 16: CnInfo.port_info:type_name -> ResInfo
+	23,  // 17: CnInfo.tmpfs_info:type_name -> ResInfo
+	23,  // 18: CnInfo.tmp_file_info:type_name -> ResInfo
+	23,  // 19: CnInfo.loop_dev_info:type_name -> ResInfo
+	23,  // 20: SideInfo.side_dev_info:type_name -> ResInfo
+	215, // 21: SideInfo.cn_id_to_dm_error:type_name -> SideInfo.CnIdToDmErrorEntry
+	216, // 22: SideInfo.cn_id_to_dm_linear:type_name -> SideInfo.CnIdToDmLinearEntry
+	217, // 23: SideInfo.cn_id_to_nvmeof:type_name -> SideInfo.CnIdToNvmeofEntry
+	213, // 24: SideInfo.migr_src_info:type_name -> SideInfo.MigrSrcInfo
+	214, // 25: SideInfo.migr_dst_info:type_name -> SideInfo.MigrDstInfo
+	219, // 26: CntlrInfo.ss_id_to_subsystem:type_name -> CntlrInfo.SsIdToSubsystemEntry
+	220, // 27: CntlrInfo.ns_id_to_namespace:type_name -> CntlrInfo.NsIdToNamespaceEntry
+	221, // 28: CntlrInfo.ns_id_to_dm_linear:type_name -> CntlrInfo.NsIdToDmLinearEntry
+	222, // 29: CntlrInfo.td_id_to_raid0:type_name -> CntlrInfo.TdIdToRaid0Entry
+	223, // 30: CntlrInfo.td_id_to_dm_error:type_name -> CntlrInfo.TdIdToDmErrorEntry
+	224, // 31: CntlrInfo.td_id_to_thin_info:type_name -> CntlrInfo.TdIdToThinInfoEntry
+	225, // 32: CntlrInfo.slice_id_to_dm_pool:type_name -> CntlrInfo.SliceIdToDmPoolEntry
+	226, // 33: CntlrInfo.slice_id_to_meta:type_name -> CntlrInfo.SliceIdToMetaEntry
+	227, // 34: CntlrInfo.slice_id_to_data:type_name -> CntlrInfo.SliceIdToDataEntry
+	228, // 35: CntlrInfo.grp_id_to_md_raid:type_name -> CntlrInfo.GrpIdToMdRaidEntry
+	229, // 36: CntlrInfo.leg_id_to_leg:type_name -> CntlrInfo.LegIdToLegEntry
+	230, // 37: CntlrInfo.xfer_id_to_dm_linear:type_name -> CntlrInfo.XferIdToDmLinearEntry
+	231, // 38: CntlrInfo.xfer_id_to_subsystem:type_name -> CntlrInfo.XferIdToSubsystemEntry
+	232, // 39: CntlrInfo.xfer_id_to_namespace:type_name -> CntlrInfo.XferIdToNamespaceEntry
+	233, // 40: CntlrInfo.clone_id_to_target:type_name -> CntlrInfo.CloneIdToTargetEntry
+	234, // 41: CntlrInfo.clone_id_to_dm_clone:type_name -> CntlrInfo.CloneIdToDmCloneEntry
+	235, // 42: CntlrInfo.clone_id_to_meta:type_name -> CntlrInfo.CloneIdToMetaEntry
+	28,  // 43: BitmapInfo.chunk_id_list:type_name -> BmChunkId
+	6,   // 44: ClusterConf.qos_ratio:type_name -> QosRatio
+	15,  // 45: ClusterConf.bdev_conf:type_name -> BdevConf
+	30,  // 46: ClusterConf.dn_bin_conf:type_name -> DnBinConf
+	31,  // 47: ClusterConf.alloc_conf:type_name -> AllocConf
+	32,  // 48: ClusterConf.health_check_conf:type_name -> HealthCheckConf
+	5,   // 49: DnConf.nvme_tr_conf:type_name -> NvmeTrConf
+	17,  // 50: DnConf.side_ptr_list:type_name -> SidePointer
+	5,   // 51: CnConf.nvme_tr_conf:type_name -> NvmeTrConf
+	18,  // 52: CnConf.cntlr_ptr_list:type_name -> CntlrPointer
+	5,   // 53: CdcEntry.nvme_tr_conf_list:type_name -> NvmeTrConf
+	15,  // 54: SpConf.bdev_conf:type_name -> BdevConf
+	16,  // 55: SpConf.event_threshold:type_name -> EventThreshold
+	0,   // 56: SpConf.sp_level:type_name -> SpLevel
+	5,   // 57: Cntlr.nvme_tr_conf:type_name -> NvmeTrConf
+	21,  // 58: Slice.meta_grp_list:type_name -> Group
+	21,  // 59: Slice.data_grp_list:type_name -> Group
+	22,  // 60: Subsystem.ns_list:type_name -> Namespace
+	5,   // 61: Clone.src_tr_conf_list:type_name -> NvmeTrConf
+	7,   // 62: Clone.dm_clone_conf:type_name -> DmCloneConf
+	7,   // 63: Migration.dm_clone_conf:type_name -> DmCloneConf
+	6,   // 64: CreateClusterRequest.qos_ratio:type_name -> QosRatio
+	15,  // 65: CreateClusterRequest.bdev_conf:type_name -> BdevConf
+	30,  // 66: CreateClusterRequest.dn_bin_conf:type_name -> DnBinConf
+	31,  // 67: CreateClusterRequest.alloc_conf:type_name -> AllocConf
+	32,  // 68: CreateClusterRequest.health_check_conf:type_name -> HealthCheckConf
+	33,  // 69: GetClusterReply.cluster_conf:type_name -> ClusterConf
+	34,  // 70: GetClusterReply.dn_global:type_name -> DnGlobal
+	35,  // 71: GetClusterReply.cn_global:type_name -> CnGlobal
+	36,  // 72: GetClusterReply.sp_global:type_name -> SpGlobal
+	5,   // 73: CreateDiskNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
+	37,  // 74: DeleteDiskNodeRequest.dn_rev:type_name -> DnRev
+	40,  // 75: GetDiskNodeReply.dn_conf:type_name -> DnConf
+	37,  // 76: GetDiskNodeReply.dn_rev:type_name -> DnRev
+	37,  // 77: UpdateDiskNodeDisabledRequest.dn_rev:type_name -> DnRev
+	24,  // 78: InspectDiskNodeReply.dn_info:type_name -> DnInfo
+	5,   // 79: CreateControllerNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
+	38,  // 80: DeleteControllerNodeRequest.cn_rev:type_name -> CnRev
+	41,  // 81: GetControllerNodeReply.cn_conf:type_name -> CnConf
+	38,  // 82: GetControllerNodeReply.cn_rev:type_name -> CnRev
+	38,  // 83: UpdateControllerNodeDisabledRequest.cn_rev:type_name -> CnRev
+	25,  // 84: InspectControllerNodeReply.cn_info:type_name -> CnInfo
+	15,  // 85: CreateStoragePoolRequest.bdev_conf:type_name -> BdevConf
+	16,  // 86: CreateStoragePoolRequest.event_threshold:type_name -> EventThreshold
+	4,   // 87: CreateStoragePoolRequest.cn_selector:type_name -> NodeSelector
+	4,   // 88: CreateStoragePoolRequest.dn_selector:type_name -> NodeSelector
+	39,  // 89: DeleteStoragePoolRequest.sp_rev:type_name -> SpRev
+	45,  // 90: GetStoragePoolReply.sp_conf:type_name -> SpConf
+	39,  // 91: GetStoragePoolReply.sp_rev:type_name -> SpRev
+	46,  // 92: GetStoragePoolReply.cntlr_list:type_name -> Cntlr
+	47,  // 93: GetStoragePoolReply.slice_list:type_name -> Slice
+	39,  // 94: UpdateStoragePoolCntlidSlotListRequest.sp_rev:type_name -> SpRev
+	39,  // 95: UpdateStoragePoolLevelRequest.sp_rev:type_name -> SpRev
+	0,   // 96: UpdateStoragePoolLevelRequest.sp_level:type_name -> SpLevel
+	237, // 97: FindStoragePoolNamesReply.sp_id_to_name:type_name -> FindStoragePoolNamesReply.SpIdToNameEntry
+	39,  // 98: GrowSliceRequest.sp_rev:type_name -> SpRev
+	4,   // 99: GrowSliceRequest.dn_selector:type_name -> NodeSelector
+	39,  // 100: CreateCntlrRequest.sp_rev:type_name -> SpRev
+	4,   // 101: CreateCntlrRequest.cn_selector:type_name -> NodeSelector
+	39,  // 102: DeleteCntlrRequest.sp_rev:type_name -> SpRev
+	39,  // 103: UpdateCntlrEnabledRequest.sp_rev:type_name -> SpRev
+	27,  // 104: InspectCntlrReply.cntlr_info:type_name -> CntlrInfo
+	26,  // 105: InspectSideReply.side_info:type_name -> SideInfo
+	39,  // 106: CreateThinDeviceRequest.sp_rev:type_name -> SpRev
+	39,  // 107: DeleteThinDeviceRequest.sp_rev:type_name -> SpRev
+	238, // 108: ListThinDevicesReply.name_to_td:type_name -> ListThinDevicesReply.NameToTdEntry
+	39,  // 109: CreateSubsystemRequest.sp_rev:type_name -> SpRev
+	39,  // 110: DeleteSubsystemRequest.sp_rev:type_name -> SpRev
+	239, // 111: ListSubsystemsReply.nqn_to_subsystem:type_name -> ListSubsystemsReply.NqnToSubsystemEntry
+	39,  // 112: UpdateSubsystemHostsRequest.sp_rev:type_name -> SpRev
+	39,  // 113: CreateNamespaceRequest.sp_rev:type_name -> SpRev
+	39,  // 114: DeleteNamespaceRequest.sp_rev:type_name -> SpRev
+	39,  // 115: UpdateNamespaceDevRequest.sp_rev:type_name -> SpRev
+	39,  // 116: UpdateNamespaceSuspendedRequest.sp_rev:type_name -> SpRev
+	39,  // 117: CreateCloneRequest.sp_rev:type_name -> SpRev
+	5,   // 118: CreateCloneRequest.src_tr_conf:type_name -> NvmeTrConf
+	7,   // 119: CreateCloneRequest.dm_clone_conf:type_name -> DmCloneConf
+	39,  // 120: DeleteCloneRequest.sp_rev:type_name -> SpRev
+	50,  // 121: GetCloneReply.clone:type_name -> Clone
+	39,  // 122: UpdateCloneTrConfRequest.sp_rev:type_name -> SpRev
+	5,   // 123: UpdateCloneTrConfRequest.src_tr_conf:type_name -> NvmeTrConf
+	39,  // 124: AppendCloneBitmapRequest.sp_rev:type_name -> SpRev
+	39,  // 125: CreateTransferRequest.sp_rev:type_name -> SpRev
+	39,  // 126: DeleteTransferRequest.sp_rev:type_name -> SpRev
+	52,  // 127: GetTransferReply.xfer:type_name -> Transfer
+	39,  // 128: UpdateTransferHostsRequest.sp_rev:type_name -> SpRev
+	39,  // 129: CreateMigrationRequest.sp_rev:type_name -> SpRev
+	4,   // 130: CreateMigrationRequest.dn_selector:type_name -> NodeSelector
+	7,   // 131: CreateMigrationRequest.dm_clone_conf:type_name -> DmCloneConf
+	39,  // 132: FinishMigrationRequest.sp_rev:type_name -> SpRev
+	39,  // 133: CancelMigrationRequest.sp_rev:type_name -> SpRev
+	53,  // 134: GetMigrationReply.migr:type_name -> Migration
+	39,  // 135: AppendMigrationBitmapRequest.sp_rev:type_name -> SpRev
+	39,  // 136: CreateSpareLegRequest.sp_rev:type_name -> SpRev
+	4,   // 137: CreateSpareLegRequest.dn_selector:type_name -> NodeSelector
+	39,  // 138: DeleteSpareLegRequest.sp_rev:type_name -> SpRev
+	39,  // 139: SwitchSpareLegRequest.sp_rev:type_name -> SpRev
+	17,  // 140: SyncupDnRequest.side_pointer_list:type_name -> SidePointer
+	3,   // 141: SyncupDnReply.agent_reply:type_name -> AgentReply
+	24,  // 142: SyncupDnReply.dn_info:type_name -> DnInfo
+	17,  // 143: SyncupSideRequest.side_pointer:type_name -> SidePointer
+	240, // 144: SyncupSideRequest.side_conf:type_name -> SyncupSideRequest.SideConf
+	241, // 145: SyncupSideRequest.migr_src_conf:type_name -> SyncupSideRequest.MigrSrcConf
+	242, // 146: SyncupSideRequest.migr_dst_conf:type_name -> SyncupSideRequest.MigrDstConf
+	3,   // 147: SyncupSideReply.agent_reply:type_name -> AgentReply
+	26,  // 148: SyncupSideReply.side_info:type_name -> SideInfo
+	29,  // 149: SyncupSideReply.bm_info:type_name -> BitmapInfo
+	17,  // 150: PushMigrBitmapRequest.side_pointer:type_name -> SidePointer
+	3,   // 151: PushMigrBitmapReply.agent_reply:type_name -> AgentReply
+	3,   // 152: GetDnInfoReply.agent_reply:type_name -> AgentReply
+	24,  // 153: GetDnInfoReply.dn_info:type_name -> DnInfo
+	17,  // 154: GetSideInfoRequest.side_pointer:type_name -> SidePointer
+	3,   // 155: GetSideInfoReply.agent_reply:type_name -> AgentReply
+	26,  // 156: GetSideInfoReply.side_info:type_name -> SideInfo
+	3,   // 157: CheckDnReply.agent_reply:type_name -> AgentReply
+	24,  // 158: CheckDnReply.dn_info:type_name -> DnInfo
+	17,  // 159: CheckSideRequest.side_pointer:type_name -> SidePointer
+	3,   // 160: CheckSideReply.agent_reply:type_name -> AgentReply
+	26,  // 161: CheckSideReply.side_info:type_name -> SideInfo
+	18,  // 162: SyncupCnRequest.cntlr_pointer_list:type_name -> CntlrPointer
+	6,   // 163: SyncupCnRequest.qos_ratio:type_name -> QosRatio
+	3,   // 164: SyncupCnReply.agent_reply:type_name -> AgentReply
+	25,  // 165: SyncupCnReply.cn_info:type_name -> CnInfo
+	18,  // 166: SyncupCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
+	15,  // 167: SyncupCntlrRequest.bdev_conf:type_name -> BdevConf
+	0,   // 168: SyncupCntlrRequest.sp_level:type_name -> SpLevel
+	46,  // 169: SyncupCntlrRequest.cntlr:type_name -> Cntlr
+	243, // 170: SyncupCntlrRequest.id_to_slice:type_name -> SyncupCntlrRequest.IdToSliceEntry
+	48,  // 171: SyncupCntlrRequest.td_list:type_name -> ThinDevice
+	244, // 172: SyncupCntlrRequest.nqn_to_subsystem:type_name -> SyncupCntlrRequest.NqnToSubsystemEntry
+	50,  // 173: SyncupCntlrRequest.clone_list:type_name -> Clone
+	52,  // 174: SyncupCntlrRequest.xfer_list:type_name -> Transfer
+	3,   // 175: SyncupCntlrReply.agent_reply:type_name -> AgentReply
+	27,  // 176: SyncupCntlrReply.cntlr_info:type_name -> CntlrInfo
+	29,  // 177: SyncupCntlrReply.bm_info_list:type_name -> BitmapInfo
+	18,  // 178: PushCloneBitmapRequest.cntlr_pointer:type_name -> CntlrPointer
+	3,   // 179: PushCloneBitmapReply.agent_reply:type_name -> AgentReply
+	3,   // 180: GetCnInfoReply.agent_reply:type_name -> AgentReply
+	25,  // 181: GetCnInfoReply.cn_info:type_name -> CnInfo
+	18,  // 182: GetCntlrInfoRequest.cntlr_pointer:type_name -> CntlrPointer
+	3,   // 183: GetCntlrInfoReply.agent_reply:type_name -> AgentReply
+	27,  // 184: GetCntlrInfoReply.cntlr_info:type_name -> CntlrInfo
+	3,   // 185: CheckCnReply.agent_reply:type_name -> AgentReply
+	25,  // 186: CheckCnReply.cn_info:type_name -> CnInfo
+	18,  // 187: CheckCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
+	3,   // 188: CheckCntlrReply.agent_reply:type_name -> AgentReply
+	27,  // 189: CheckCntlrReply.cntlr_info:type_name -> CntlrInfo
+	246, // 190: DnDiskTable.side_list:type_name -> DnDiskTable.SideRecord
+	247, // 191: DnDiskTable.clone_meta_list:type_name -> DnDiskTable.CloneMetaRecord
+	23,  // 192: SideInfo.MigrSrcInfo.dm_linear_info:type_name -> ResInfo
+	23,  // 193: SideInfo.MigrSrcInfo.nvmeof_info:type_name -> ResInfo
+	23,  // 194: SideInfo.MigrDstInfo.target_info:type_name -> ResInfo
+	23,  // 195: SideInfo.MigrDstInfo.dm_clone_info:type_name -> ResInfo
+	23,  // 196: SideInfo.CnIdToDmErrorEntry.value:type_name -> ResInfo
+	23,  // 197: SideInfo.CnIdToDmLinearEntry.value:type_name -> ResInfo
+	23,  // 198: SideInfo.CnIdToNvmeofEntry.value:type_name -> ResInfo
+	236, // 199: CntlrInfo.ThinInfo.slice_id_to_dm_thin:type_name -> CntlrInfo.ThinInfo.SliceIdToDmThinEntry
+	23,  // 200: CntlrInfo.SsIdToSubsystemEntry.value:type_name -> ResInfo
+	23,  // 201: CntlrInfo.NsIdToNamespaceEntry.value:type_name -> ResInfo
+	23,  // 202: CntlrInfo.NsIdToDmLinearEntry.value:type_name -> ResInfo
+	23,  // 203: CntlrInfo.TdIdToRaid0Entry.value:type_name -> ResInfo
+	23,  // 204: CntlrInfo.TdIdToDmErrorEntry.value:type_name -> ResInfo
+	218, // 205: CntlrInfo.TdIdToThinInfoEntry.value:type_name -> CntlrInfo.ThinInfo
+	23,  // 206: CntlrInfo.SliceIdToDmPoolEntry.value:type_name -> ResInfo
+	23,  // 207: CntlrInfo.SliceIdToMetaEntry.value:type_name -> ResInfo
+	23,  // 208: CntlrInfo.SliceIdToDataEntry.value:type_name -> ResInfo
+	23,  // 209: CntlrInfo.GrpIdToMdRaidEntry.value:type_name -> ResInfo
+	23,  // 210: CntlrInfo.LegIdToLegEntry.value:type_name -> ResInfo
+	23,  // 211: CntlrInfo.XferIdToDmLinearEntry.value:type_name -> ResInfo
+	23,  // 212: CntlrInfo.XferIdToSubsystemEntry.value:type_name -> ResInfo
+	23,  // 213: CntlrInfo.XferIdToNamespaceEntry.value:type_name -> ResInfo
+	23,  // 214: CntlrInfo.CloneIdToTargetEntry.value:type_name -> ResInfo
+	23,  // 215: CntlrInfo.CloneIdToDmCloneEntry.value:type_name -> ResInfo
+	23,  // 216: CntlrInfo.CloneIdToMetaEntry.value:type_name -> ResInfo
+	23,  // 217: CntlrInfo.ThinInfo.SliceIdToDmThinEntry.value:type_name -> ResInfo
+	48,  // 218: ListThinDevicesReply.NameToTdEntry.value:type_name -> ThinDevice
+	49,  // 219: ListSubsystemsReply.NqnToSubsystemEntry.value:type_name -> Subsystem
 	0,   // 220: SyncupSideRequest.SideConf.sp_level:type_name -> SpLevel
-	4,   // 221: SyncupSideRequest.MigrDstConf.src_nvme_tr_conf:type_name -> NvmeTrConf
-	6,   // 222: SyncupSideRequest.MigrDstConf.dm_clone_conf:type_name -> DmCloneConf
-	46,  // 223: SyncupCntlrRequest.IdToSliceEntry.value:type_name -> Slice
-	48,  // 224: SyncupCntlrRequest.NqnToSubsystemEntry.value:type_name -> Subsystem
-	244, // 225: DnDiskTable.SideRecord.run_list:type_name -> DnDiskTable.ExtentRun
-	56,  // 226: Gateway.CreateCluster:input_type -> CreateClusterRequest
-	58,  // 227: Gateway.DeleteCluster:input_type -> DeleteClusterRequest
-	60,  // 228: Gateway.GetCluster:input_type -> GetClusterRequest
-	62,  // 229: Gateway.ListClusters:input_type -> ListClustersRequest
-	64,  // 230: Gateway.CreateDiskNode:input_type -> CreateDiskNodeRequest
-	66,  // 231: Gateway.DeleteDiskNode:input_type -> DeleteDiskNodeRequest
-	68,  // 232: Gateway.GetDiskNode:input_type -> GetDiskNodeRequest
-	70,  // 233: Gateway.ListDiskNodes:input_type -> ListDiskNodesRequest
-	72,  // 234: Gateway.UpdateDiskNodeDisabled:input_type -> UpdateDiskNodeDisabledRequest
-	74,  // 235: Gateway.InspectDiskNode:input_type -> InspectDiskNodeRequest
-	76,  // 236: Gateway.CreateControllerNode:input_type -> CreateControllerNodeRequest
-	78,  // 237: Gateway.DeleteControllerNode:input_type -> DeleteControllerNodeRequest
-	80,  // 238: Gateway.GetControllerNode:input_type -> GetControllerNodeRequest
-	82,  // 239: Gateway.ListControllerNodes:input_type -> ListControllerNodesRequest
-	84,  // 240: Gateway.UpdateControllerNodeDisabled:input_type -> UpdateControllerNodeDisabledRequest
-	86,  // 241: Gateway.InspectControllerNode:input_type -> InspectControllerNodeRequest
-	88,  // 242: Gateway.CreateStoragePool:input_type -> CreateStoragePoolRequest
-	90,  // 243: Gateway.DeleteStoragePool:input_type -> DeleteStoragePoolRequest
-	92,  // 244: Gateway.GetStoragePool:input_type -> GetStoragePoolRequest
-	94,  // 245: Gateway.ListStoragePools:input_type -> ListStoragePoolsRequest
-	96,  // 246: Gateway.UpdateStoragePoolCntlidSlotList:input_type -> UpdateStoragePoolCntlidSlotListRequest
-	98,  // 247: Gateway.UpdateStoragePoolLevel:input_type -> UpdateStoragePoolLevelRequest
-	100, // 248: Gateway.FindStoragePoolNames:input_type -> FindStoragePoolNamesRequest
-	102, // 249: Gateway.GrowSlice:input_type -> GrowSliceRequest
-	104, // 250: Gateway.CreateCntlr:input_type -> CreateCntlrRequest
-	106, // 251: Gateway.DeleteCntlr:input_type -> DeleteCntlrRequest
-	108, // 252: Gateway.UpdateCntlrEnabled:input_type -> UpdateCntlrEnabledRequest
-	110, // 253: Gateway.InspectCntlr:input_type -> InspectCntlrRequest
-	112, // 254: Gateway.InspectSide:input_type -> InspectSideRequest
-	114, // 255: Gateway.CreateThinDevice:input_type -> CreateThinDeviceRequest
-	116, // 256: Gateway.DeleteThinDevice:input_type -> DeleteThinDeviceRequest
-	118, // 257: Gateway.ListThinDevices:input_type -> ListThinDevicesRequest
-	120, // 258: Gateway.CreateSubsystem:input_type -> CreateSubsystemRequest
-	122, // 259: Gateway.DeleteSubsystem:input_type -> DeleteSubsystemRequest
-	124, // 260: Gateway.ListSubsystems:input_type -> ListSubsystemsRequest
-	126, // 261: Gateway.UpdateSubsystemHosts:input_type -> UpdateSubsystemHostsRequest
-	128, // 262: Gateway.CreateNamespace:input_type -> CreateNamespaceRequest
-	130, // 263: Gateway.DeleteNamespace:input_type -> DeleteNamespaceRequest
-	132, // 264: Gateway.UpdateNamespaceDev:input_type -> UpdateNamespaceDevRequest
-	134, // 265: Gateway.UpdateNamespaceSuspended:input_type -> UpdateNamespaceSuspendedRequest
-	136, // 266: Gateway.CreateClone:input_type -> CreateCloneRequest
-	138, // 267: Gateway.DeleteClone:input_type -> DeleteCloneRequest
-	140, // 268: Gateway.GetClone:input_type -> GetCloneRequest
-	142, // 269: Gateway.UpdateCloneTrConf:input_type -> UpdateCloneTrConfRequest
-	144, // 270: Gateway.AppendCloneBitmap:input_type -> AppendCloneBitmapRequest
-	146, // 271: Gateway.CreateTransfer:input_type -> CreateTransferRequest
-	148, // 272: Gateway.DeleteTransfer:input_type -> DeleteTransferRequest
-	150, // 273: Gateway.GetTransfer:input_type -> GetTransferRequest
-	152, // 274: Gateway.UpdateTransferHosts:input_type -> UpdateTransferHostsRequest
-	154, // 275: Gateway.CreateMigration:input_type -> CreateMigrationRequest
-	156, // 276: Gateway.FinishMigration:input_type -> FinishMigrationRequest
-	158, // 277: Gateway.CancelMigration:input_type -> CancelMigrationRequest
-	160, // 278: Gateway.GetMigration:input_type -> GetMigrationRequest
-	162, // 279: Gateway.AppendMigrationBitmap:input_type -> AppendMigrationBitmapRequest
-	164, // 280: Gateway.CreateSpareLeg:input_type -> CreateSpareLegRequest
-	166, // 281: Gateway.DeleteSpareLeg:input_type -> DeleteSpareLegRequest
-	168, // 282: Gateway.SwitchSpareLeg:input_type -> SwitchSpareLegRequest
-	170, // 283: Gateway.GetThinDeviceBitmap:input_type -> GetThinDeviceBitmapRequest
-	172, // 284: Gateway.GetLegBitmap:input_type -> GetLegBitmapRequest
-	174, // 285: DiskNodeAgent.GetDnSize:input_type -> GetDnSizeRequest
-	176, // 286: DiskNodeAgent.SyncupDn:input_type -> SyncupDnRequest
-	178, // 287: DiskNodeAgent.SyncupSide:input_type -> SyncupSideRequest
-	180, // 288: DiskNodeAgent.PushMigrBitmap:input_type -> PushMigrBitmapRequest
-	182, // 289: DiskNodeAgent.GetDnInfo:input_type -> GetDnInfoRequest
-	184, // 290: DiskNodeAgent.GetSideInfo:input_type -> GetSideInfoRequest
-	186, // 291: DiskNodeAgent.CheckDn:input_type -> CheckDnRequest
-	188, // 292: DiskNodeAgent.CheckSide:input_type -> CheckSideRequest
-	190, // 293: ControllerNodeAgent.GetCnSize:input_type -> GetCnSizeRequest
-	192, // 294: ControllerNodeAgent.SyncupCn:input_type -> SyncupCnRequest
-	194, // 295: ControllerNodeAgent.SyncupCntlr:input_type -> SyncupCntlrRequest
-	196, // 296: ControllerNodeAgent.PushCloneBitmap:input_type -> PushCloneBitmapRequest
-	198, // 297: ControllerNodeAgent.GetCnInfo:input_type -> GetCnInfoRequest
-	200, // 298: ControllerNodeAgent.GetCntlrInfo:input_type -> GetCntlrInfoRequest
-	202, // 299: ControllerNodeAgent.GetThinDeviceBm:input_type -> GetThinDeviceBmRequest
-	204, // 300: ControllerNodeAgent.GetLegBm:input_type -> GetLegBmRequest
-	206, // 301: ControllerNodeAgent.CheckCn:input_type -> CheckCnRequest
-	208, // 302: ControllerNodeAgent.CheckCntlr:input_type -> CheckCntlrRequest
-	57,  // 303: Gateway.CreateCluster:output_type -> CreateClusterReply
-	59,  // 304: Gateway.DeleteCluster:output_type -> DeleteClusterReply
-	61,  // 305: Gateway.GetCluster:output_type -> GetClusterReply
-	63,  // 306: Gateway.ListClusters:output_type -> ListClustersReply
-	65,  // 307: Gateway.CreateDiskNode:output_type -> CreateDiskNodeReply
-	67,  // 308: Gateway.DeleteDiskNode:output_type -> DeleteDiskNodeReply
-	69,  // 309: Gateway.GetDiskNode:output_type -> GetDiskNodeReply
-	71,  // 310: Gateway.ListDiskNodes:output_type -> ListDiskNodesReply
-	73,  // 311: Gateway.UpdateDiskNodeDisabled:output_type -> UpdateDiskNodeDisabledReply
-	75,  // 312: Gateway.InspectDiskNode:output_type -> InspectDiskNodeReply
-	77,  // 313: Gateway.CreateControllerNode:output_type -> CreateControllerNodeReply
-	79,  // 314: Gateway.DeleteControllerNode:output_type -> DeleteControllerNodeReply
-	81,  // 315: Gateway.GetControllerNode:output_type -> GetControllerNodeReply
-	83,  // 316: Gateway.ListControllerNodes:output_type -> ListControllerNodesReply
-	85,  // 317: Gateway.UpdateControllerNodeDisabled:output_type -> UpdateControllerNodeDisabledReply
-	87,  // 318: Gateway.InspectControllerNode:output_type -> InspectControllerNodeReply
-	89,  // 319: Gateway.CreateStoragePool:output_type -> CreateStoragePoolReply
-	91,  // 320: Gateway.DeleteStoragePool:output_type -> DeleteStoragePoolReply
-	93,  // 321: Gateway.GetStoragePool:output_type -> GetStoragePoolReply
-	95,  // 322: Gateway.ListStoragePools:output_type -> ListStoragePoolsReply
-	97,  // 323: Gateway.UpdateStoragePoolCntlidSlotList:output_type -> UpdateStoragePoolCntlidSlotListReply
-	99,  // 324: Gateway.UpdateStoragePoolLevel:output_type -> UpdateStoragePoolLevelReply
-	101, // 325: Gateway.FindStoragePoolNames:output_type -> FindStoragePoolNamesReply
-	103, // 326: Gateway.GrowSlice:output_type -> GrowSliceReply
-	105, // 327: Gateway.CreateCntlr:output_type -> CreateCntlrReply
-	107, // 328: Gateway.DeleteCntlr:output_type -> DeleteCntlrReply
-	109, // 329: Gateway.UpdateCntlrEnabled:output_type -> UpdateCntlrEnabledReply
-	111, // 330: Gateway.InspectCntlr:output_type -> InspectCntlrReply
-	113, // 331: Gateway.InspectSide:output_type -> InspectSideReply
-	115, // 332: Gateway.CreateThinDevice:output_type -> CreateThinDeviceReply
-	117, // 333: Gateway.DeleteThinDevice:output_type -> DeleteThinDeviceReply
-	119, // 334: Gateway.ListThinDevices:output_type -> ListThinDevicesReply
-	121, // 335: Gateway.CreateSubsystem:output_type -> CreateSubsystemReply
-	123, // 336: Gateway.DeleteSubsystem:output_type -> DeleteSubsystemReply
-	125, // 337: Gateway.ListSubsystems:output_type -> ListSubsystemsReply
-	127, // 338: Gateway.UpdateSubsystemHosts:output_type -> UpdateSubsystemHostsReply
-	129, // 339: Gateway.CreateNamespace:output_type -> CreateNamespaceReply
-	131, // 340: Gateway.DeleteNamespace:output_type -> DeleteNamespaceReply
-	133, // 341: Gateway.UpdateNamespaceDev:output_type -> UpdateNamespaceDevReply
-	135, // 342: Gateway.UpdateNamespaceSuspended:output_type -> UpdateNamespaceSuspendedReply
-	137, // 343: Gateway.CreateClone:output_type -> CreateCloneReply
-	139, // 344: Gateway.DeleteClone:output_type -> DeleteCloneReply
-	141, // 345: Gateway.GetClone:output_type -> GetCloneReply
-	143, // 346: Gateway.UpdateCloneTrConf:output_type -> UpdateCloneTrConfReply
-	145, // 347: Gateway.AppendCloneBitmap:output_type -> AppendCloneBitmapReply
-	147, // 348: Gateway.CreateTransfer:output_type -> CreateTransferReply
-	149, // 349: Gateway.DeleteTransfer:output_type -> DeleteTransferReply
-	151, // 350: Gateway.GetTransfer:output_type -> GetTransferReply
-	153, // 351: Gateway.UpdateTransferHosts:output_type -> UpdateTransferHostsReply
-	155, // 352: Gateway.CreateMigration:output_type -> CreateMigrationReply
-	157, // 353: Gateway.FinishMigration:output_type -> FinishMigrationReply
-	159, // 354: Gateway.CancelMigration:output_type -> CancelMigrationReply
-	161, // 355: Gateway.GetMigration:output_type -> GetMigrationReply
-	163, // 356: Gateway.AppendMigrationBitmap:output_type -> AppendMigrationBitmapReply
-	165, // 357: Gateway.CreateSpareLeg:output_type -> CreateSpareLegReply
-	167, // 358: Gateway.DeleteSpareLeg:output_type -> DeleteSpareLegReply
-	169, // 359: Gateway.SwitchSpareLeg:output_type -> SwitchSpareLegReply
-	171, // 360: Gateway.GetThinDeviceBitmap:output_type -> GetThinDeviceBitmapReply
-	173, // 361: Gateway.GetLegBitmap:output_type -> GetLegBitmapReply
-	175, // 362: DiskNodeAgent.GetDnSize:output_type -> GetDnSizeReply
-	177, // 363: DiskNodeAgent.SyncupDn:output_type -> SyncupDnReply
-	179, // 364: DiskNodeAgent.SyncupSide:output_type -> SyncupSideReply
-	181, // 365: DiskNodeAgent.PushMigrBitmap:output_type -> PushMigrBitmapReply
-	183, // 366: DiskNodeAgent.GetDnInfo:output_type -> GetDnInfoReply
-	185, // 367: DiskNodeAgent.GetSideInfo:output_type -> GetSideInfoReply
-	187, // 368: DiskNodeAgent.CheckDn:output_type -> CheckDnReply
-	189, // 369: DiskNodeAgent.CheckSide:output_type -> CheckSideReply
-	191, // 370: ControllerNodeAgent.GetCnSize:output_type -> GetCnSizeReply
-	193, // 371: ControllerNodeAgent.SyncupCn:output_type -> SyncupCnReply
-	195, // 372: ControllerNodeAgent.SyncupCntlr:output_type -> SyncupCntlrReply
-	197, // 373: ControllerNodeAgent.PushCloneBitmap:output_type -> PushCloneBitmapReply
-	199, // 374: ControllerNodeAgent.GetCnInfo:output_type -> GetCnInfoReply
-	201, // 375: ControllerNodeAgent.GetCntlrInfo:output_type -> GetCntlrInfoReply
-	203, // 376: ControllerNodeAgent.GetThinDeviceBm:output_type -> GetThinDeviceBmReply
-	205, // 377: ControllerNodeAgent.GetLegBm:output_type -> GetLegBmReply
-	207, // 378: ControllerNodeAgent.CheckCn:output_type -> CheckCnReply
-	209, // 379: ControllerNodeAgent.CheckCntlr:output_type -> CheckCntlrReply
+	5,   // 221: SyncupSideRequest.MigrDstConf.src_nvme_tr_conf:type_name -> NvmeTrConf
+	7,   // 222: SyncupSideRequest.MigrDstConf.dm_clone_conf:type_name -> DmCloneConf
+	47,  // 223: SyncupCntlrRequest.IdToSliceEntry.value:type_name -> Slice
+	49,  // 224: SyncupCntlrRequest.NqnToSubsystemEntry.value:type_name -> Subsystem
+	245, // 225: DnDiskTable.SideRecord.run_list:type_name -> DnDiskTable.ExtentRun
+	57,  // 226: Gateway.CreateCluster:input_type -> CreateClusterRequest
+	59,  // 227: Gateway.DeleteCluster:input_type -> DeleteClusterRequest
+	61,  // 228: Gateway.GetCluster:input_type -> GetClusterRequest
+	63,  // 229: Gateway.ListClusters:input_type -> ListClustersRequest
+	65,  // 230: Gateway.CreateDiskNode:input_type -> CreateDiskNodeRequest
+	67,  // 231: Gateway.DeleteDiskNode:input_type -> DeleteDiskNodeRequest
+	69,  // 232: Gateway.GetDiskNode:input_type -> GetDiskNodeRequest
+	71,  // 233: Gateway.ListDiskNodes:input_type -> ListDiskNodesRequest
+	73,  // 234: Gateway.UpdateDiskNodeDisabled:input_type -> UpdateDiskNodeDisabledRequest
+	75,  // 235: Gateway.InspectDiskNode:input_type -> InspectDiskNodeRequest
+	77,  // 236: Gateway.CreateControllerNode:input_type -> CreateControllerNodeRequest
+	79,  // 237: Gateway.DeleteControllerNode:input_type -> DeleteControllerNodeRequest
+	81,  // 238: Gateway.GetControllerNode:input_type -> GetControllerNodeRequest
+	83,  // 239: Gateway.ListControllerNodes:input_type -> ListControllerNodesRequest
+	85,  // 240: Gateway.UpdateControllerNodeDisabled:input_type -> UpdateControllerNodeDisabledRequest
+	87,  // 241: Gateway.InspectControllerNode:input_type -> InspectControllerNodeRequest
+	89,  // 242: Gateway.CreateStoragePool:input_type -> CreateStoragePoolRequest
+	91,  // 243: Gateway.DeleteStoragePool:input_type -> DeleteStoragePoolRequest
+	93,  // 244: Gateway.GetStoragePool:input_type -> GetStoragePoolRequest
+	95,  // 245: Gateway.ListStoragePools:input_type -> ListStoragePoolsRequest
+	97,  // 246: Gateway.UpdateStoragePoolCntlidSlotList:input_type -> UpdateStoragePoolCntlidSlotListRequest
+	99,  // 247: Gateway.UpdateStoragePoolLevel:input_type -> UpdateStoragePoolLevelRequest
+	101, // 248: Gateway.FindStoragePoolNames:input_type -> FindStoragePoolNamesRequest
+	103, // 249: Gateway.GrowSlice:input_type -> GrowSliceRequest
+	105, // 250: Gateway.CreateCntlr:input_type -> CreateCntlrRequest
+	107, // 251: Gateway.DeleteCntlr:input_type -> DeleteCntlrRequest
+	109, // 252: Gateway.UpdateCntlrEnabled:input_type -> UpdateCntlrEnabledRequest
+	111, // 253: Gateway.InspectCntlr:input_type -> InspectCntlrRequest
+	113, // 254: Gateway.InspectSide:input_type -> InspectSideRequest
+	115, // 255: Gateway.CreateThinDevice:input_type -> CreateThinDeviceRequest
+	117, // 256: Gateway.DeleteThinDevice:input_type -> DeleteThinDeviceRequest
+	119, // 257: Gateway.ListThinDevices:input_type -> ListThinDevicesRequest
+	121, // 258: Gateway.CreateSubsystem:input_type -> CreateSubsystemRequest
+	123, // 259: Gateway.DeleteSubsystem:input_type -> DeleteSubsystemRequest
+	125, // 260: Gateway.ListSubsystems:input_type -> ListSubsystemsRequest
+	127, // 261: Gateway.UpdateSubsystemHosts:input_type -> UpdateSubsystemHostsRequest
+	129, // 262: Gateway.CreateNamespace:input_type -> CreateNamespaceRequest
+	131, // 263: Gateway.DeleteNamespace:input_type -> DeleteNamespaceRequest
+	133, // 264: Gateway.UpdateNamespaceDev:input_type -> UpdateNamespaceDevRequest
+	135, // 265: Gateway.UpdateNamespaceSuspended:input_type -> UpdateNamespaceSuspendedRequest
+	137, // 266: Gateway.CreateClone:input_type -> CreateCloneRequest
+	139, // 267: Gateway.DeleteClone:input_type -> DeleteCloneRequest
+	141, // 268: Gateway.GetClone:input_type -> GetCloneRequest
+	143, // 269: Gateway.UpdateCloneTrConf:input_type -> UpdateCloneTrConfRequest
+	145, // 270: Gateway.AppendCloneBitmap:input_type -> AppendCloneBitmapRequest
+	147, // 271: Gateway.CreateTransfer:input_type -> CreateTransferRequest
+	149, // 272: Gateway.DeleteTransfer:input_type -> DeleteTransferRequest
+	151, // 273: Gateway.GetTransfer:input_type -> GetTransferRequest
+	153, // 274: Gateway.UpdateTransferHosts:input_type -> UpdateTransferHostsRequest
+	155, // 275: Gateway.CreateMigration:input_type -> CreateMigrationRequest
+	157, // 276: Gateway.FinishMigration:input_type -> FinishMigrationRequest
+	159, // 277: Gateway.CancelMigration:input_type -> CancelMigrationRequest
+	161, // 278: Gateway.GetMigration:input_type -> GetMigrationRequest
+	163, // 279: Gateway.AppendMigrationBitmap:input_type -> AppendMigrationBitmapRequest
+	165, // 280: Gateway.CreateSpareLeg:input_type -> CreateSpareLegRequest
+	167, // 281: Gateway.DeleteSpareLeg:input_type -> DeleteSpareLegRequest
+	169, // 282: Gateway.SwitchSpareLeg:input_type -> SwitchSpareLegRequest
+	171, // 283: Gateway.GetThinDeviceBitmap:input_type -> GetThinDeviceBitmapRequest
+	173, // 284: Gateway.GetLegBitmap:input_type -> GetLegBitmapRequest
+	175, // 285: DiskNodeAgent.GetDnSize:input_type -> GetDnSizeRequest
+	177, // 286: DiskNodeAgent.SyncupDn:input_type -> SyncupDnRequest
+	179, // 287: DiskNodeAgent.SyncupSide:input_type -> SyncupSideRequest
+	181, // 288: DiskNodeAgent.PushMigrBitmap:input_type -> PushMigrBitmapRequest
+	183, // 289: DiskNodeAgent.GetDnInfo:input_type -> GetDnInfoRequest
+	185, // 290: DiskNodeAgent.GetSideInfo:input_type -> GetSideInfoRequest
+	187, // 291: DiskNodeAgent.CheckDn:input_type -> CheckDnRequest
+	189, // 292: DiskNodeAgent.CheckSide:input_type -> CheckSideRequest
+	191, // 293: ControllerNodeAgent.GetCnSize:input_type -> GetCnSizeRequest
+	193, // 294: ControllerNodeAgent.SyncupCn:input_type -> SyncupCnRequest
+	195, // 295: ControllerNodeAgent.SyncupCntlr:input_type -> SyncupCntlrRequest
+	197, // 296: ControllerNodeAgent.PushCloneBitmap:input_type -> PushCloneBitmapRequest
+	199, // 297: ControllerNodeAgent.GetCnInfo:input_type -> GetCnInfoRequest
+	201, // 298: ControllerNodeAgent.GetCntlrInfo:input_type -> GetCntlrInfoRequest
+	203, // 299: ControllerNodeAgent.GetThinDeviceBm:input_type -> GetThinDeviceBmRequest
+	205, // 300: ControllerNodeAgent.GetLegBm:input_type -> GetLegBmRequest
+	207, // 301: ControllerNodeAgent.CheckCn:input_type -> CheckCnRequest
+	209, // 302: ControllerNodeAgent.CheckCntlr:input_type -> CheckCntlrRequest
+	58,  // 303: Gateway.CreateCluster:output_type -> CreateClusterReply
+	60,  // 304: Gateway.DeleteCluster:output_type -> DeleteClusterReply
+	62,  // 305: Gateway.GetCluster:output_type -> GetClusterReply
+	64,  // 306: Gateway.ListClusters:output_type -> ListClustersReply
+	66,  // 307: Gateway.CreateDiskNode:output_type -> CreateDiskNodeReply
+	68,  // 308: Gateway.DeleteDiskNode:output_type -> DeleteDiskNodeReply
+	70,  // 309: Gateway.GetDiskNode:output_type -> GetDiskNodeReply
+	72,  // 310: Gateway.ListDiskNodes:output_type -> ListDiskNodesReply
+	74,  // 311: Gateway.UpdateDiskNodeDisabled:output_type -> UpdateDiskNodeDisabledReply
+	76,  // 312: Gateway.InspectDiskNode:output_type -> InspectDiskNodeReply
+	78,  // 313: Gateway.CreateControllerNode:output_type -> CreateControllerNodeReply
+	80,  // 314: Gateway.DeleteControllerNode:output_type -> DeleteControllerNodeReply
+	82,  // 315: Gateway.GetControllerNode:output_type -> GetControllerNodeReply
+	84,  // 316: Gateway.ListControllerNodes:output_type -> ListControllerNodesReply
+	86,  // 317: Gateway.UpdateControllerNodeDisabled:output_type -> UpdateControllerNodeDisabledReply
+	88,  // 318: Gateway.InspectControllerNode:output_type -> InspectControllerNodeReply
+	90,  // 319: Gateway.CreateStoragePool:output_type -> CreateStoragePoolReply
+	92,  // 320: Gateway.DeleteStoragePool:output_type -> DeleteStoragePoolReply
+	94,  // 321: Gateway.GetStoragePool:output_type -> GetStoragePoolReply
+	96,  // 322: Gateway.ListStoragePools:output_type -> ListStoragePoolsReply
+	98,  // 323: Gateway.UpdateStoragePoolCntlidSlotList:output_type -> UpdateStoragePoolCntlidSlotListReply
+	100, // 324: Gateway.UpdateStoragePoolLevel:output_type -> UpdateStoragePoolLevelReply
+	102, // 325: Gateway.FindStoragePoolNames:output_type -> FindStoragePoolNamesReply
+	104, // 326: Gateway.GrowSlice:output_type -> GrowSliceReply
+	106, // 327: Gateway.CreateCntlr:output_type -> CreateCntlrReply
+	108, // 328: Gateway.DeleteCntlr:output_type -> DeleteCntlrReply
+	110, // 329: Gateway.UpdateCntlrEnabled:output_type -> UpdateCntlrEnabledReply
+	112, // 330: Gateway.InspectCntlr:output_type -> InspectCntlrReply
+	114, // 331: Gateway.InspectSide:output_type -> InspectSideReply
+	116, // 332: Gateway.CreateThinDevice:output_type -> CreateThinDeviceReply
+	118, // 333: Gateway.DeleteThinDevice:output_type -> DeleteThinDeviceReply
+	120, // 334: Gateway.ListThinDevices:output_type -> ListThinDevicesReply
+	122, // 335: Gateway.CreateSubsystem:output_type -> CreateSubsystemReply
+	124, // 336: Gateway.DeleteSubsystem:output_type -> DeleteSubsystemReply
+	126, // 337: Gateway.ListSubsystems:output_type -> ListSubsystemsReply
+	128, // 338: Gateway.UpdateSubsystemHosts:output_type -> UpdateSubsystemHostsReply
+	130, // 339: Gateway.CreateNamespace:output_type -> CreateNamespaceReply
+	132, // 340: Gateway.DeleteNamespace:output_type -> DeleteNamespaceReply
+	134, // 341: Gateway.UpdateNamespaceDev:output_type -> UpdateNamespaceDevReply
+	136, // 342: Gateway.UpdateNamespaceSuspended:output_type -> UpdateNamespaceSuspendedReply
+	138, // 343: Gateway.CreateClone:output_type -> CreateCloneReply
+	140, // 344: Gateway.DeleteClone:output_type -> DeleteCloneReply
+	142, // 345: Gateway.GetClone:output_type -> GetCloneReply
+	144, // 346: Gateway.UpdateCloneTrConf:output_type -> UpdateCloneTrConfReply
+	146, // 347: Gateway.AppendCloneBitmap:output_type -> AppendCloneBitmapReply
+	148, // 348: Gateway.CreateTransfer:output_type -> CreateTransferReply
+	150, // 349: Gateway.DeleteTransfer:output_type -> DeleteTransferReply
+	152, // 350: Gateway.GetTransfer:output_type -> GetTransferReply
+	154, // 351: Gateway.UpdateTransferHosts:output_type -> UpdateTransferHostsReply
+	156, // 352: Gateway.CreateMigration:output_type -> CreateMigrationReply
+	158, // 353: Gateway.FinishMigration:output_type -> FinishMigrationReply
+	160, // 354: Gateway.CancelMigration:output_type -> CancelMigrationReply
+	162, // 355: Gateway.GetMigration:output_type -> GetMigrationReply
+	164, // 356: Gateway.AppendMigrationBitmap:output_type -> AppendMigrationBitmapReply
+	166, // 357: Gateway.CreateSpareLeg:output_type -> CreateSpareLegReply
+	168, // 358: Gateway.DeleteSpareLeg:output_type -> DeleteSpareLegReply
+	170, // 359: Gateway.SwitchSpareLeg:output_type -> SwitchSpareLegReply
+	172, // 360: Gateway.GetThinDeviceBitmap:output_type -> GetThinDeviceBitmapReply
+	174, // 361: Gateway.GetLegBitmap:output_type -> GetLegBitmapReply
+	176, // 362: DiskNodeAgent.GetDnSize:output_type -> GetDnSizeReply
+	178, // 363: DiskNodeAgent.SyncupDn:output_type -> SyncupDnReply
+	180, // 364: DiskNodeAgent.SyncupSide:output_type -> SyncupSideReply
+	182, // 365: DiskNodeAgent.PushMigrBitmap:output_type -> PushMigrBitmapReply
+	184, // 366: DiskNodeAgent.GetDnInfo:output_type -> GetDnInfoReply
+	186, // 367: DiskNodeAgent.GetSideInfo:output_type -> GetSideInfoReply
+	188, // 368: DiskNodeAgent.CheckDn:output_type -> CheckDnReply
+	190, // 369: DiskNodeAgent.CheckSide:output_type -> CheckSideReply
+	192, // 370: ControllerNodeAgent.GetCnSize:output_type -> GetCnSizeReply
+	194, // 371: ControllerNodeAgent.SyncupCn:output_type -> SyncupCnReply
+	196, // 372: ControllerNodeAgent.SyncupCntlr:output_type -> SyncupCntlrReply
+	198, // 373: ControllerNodeAgent.PushCloneBitmap:output_type -> PushCloneBitmapReply
+	200, // 374: ControllerNodeAgent.GetCnInfo:output_type -> GetCnInfoReply
+	202, // 375: ControllerNodeAgent.GetCntlrInfo:output_type -> GetCntlrInfoReply
+	204, // 376: ControllerNodeAgent.GetThinDeviceBm:output_type -> GetThinDeviceBmReply
+	206, // 377: ControllerNodeAgent.GetLegBm:output_type -> GetLegBmReply
+	208, // 378: ControllerNodeAgent.CheckCn:output_type -> CheckCnReply
+	210, // 379: ControllerNodeAgent.CheckCntlr:output_type -> CheckCntlrReply
 	303, // [303:380] is the sub-list for method output_type
 	226, // [226:303] is the sub-list for method input_type
 	226, // [226:226] is the sub-list for extension type_name
@@ -16156,7 +16252,7 @@ func file_pb_schema_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pb_schema_proto_rawDesc), len(file_pb_schema_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   245,
 			NumExtensions: 0,
 			NumServices:   3,

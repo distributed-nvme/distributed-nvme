@@ -10602,15 +10602,16 @@ ops_inspect() {
 # the expected table, so every row stays OK. A wait on the statuses alone
 # therefore returns on its first poll, and that poll can come before the
 # primary has even received the level: the worker holds a cntlr's request
-# back until every side of the pool has reported the new revision applied,
-# or for one cntlr_interval (RW14's sides-first hold). So every rung also
-# waits for the primary's applied_revision to reach the SpRev the set-level
-# produced. InspectCntlr reads the agent's GetCntlrInfo, which takes the same
-# per-cntlr lock SyncupCntlr holds across its whole converge, so a reply at
-# that revision comes after the converge that applied the level, and its rows
-# are judged against the plan of that level: at READONLY an OK ns-dev row is
-# the flakey table. What that cannot see is a plan that never asked for
-# flakey at all, so the rung still asserts what the HOST sees.
+# back until the sides RW14 waits for have reported the new revision
+# applied, or for one cntlr_interval (RW14's sides-first hold). So every
+# rung also waits for the primary's applied_revision to reach the SpRev the
+# set-level produced. InspectCntlr reads the agent's GetCntlrInfo, which
+# takes the same per-cntlr lock SyncupCntlr holds across its whole converge,
+# so a reply at that revision comes after the converge that applied the
+# level, and its rows are judged against the plan of that level: at READONLY
+# an OK ns-dev row is the flakey table. What that cannot see is a plan that
+# never asked for flakey at all, so the rung still asserts what the HOST
+# sees.
 #
 # Two consequences of the DISABLE rung that the steps below depend on:
 #  - the host-facing subsystem goes with everything else, on BOTH cntlrs:
@@ -11310,17 +11311,22 @@ case_ops() {
 # from the agent's OWN report rather than inferred by the suite:
 #
 #   1. the connect never came up. `clone_id_to_target` is the CN's verdict on
-#      the source subsystem: Ok with the path states when a live controller is
-#      there, Missing when the subsystem is not, Err with the connect error
-#      otherwise (probeCntlr (agent/cnagent/probe.go) and
-#      ensureClone (agent/cnagent/clone.go)).
+#      the source subsystem, by one rule on a converge and a Check round
+#      alike: Ok with the path states when every source endpoint has a live
+#      controller and the source namespace is there, Err while a sweep's
+#      disconnect of the source is in flight or the walk did not answer,
+#      and Missing for no subsystem, an endpoint with no live controller,
+#      or no namespace; a converge's failed connect leads the details of a
+#      row that is not Ok
+#      (cloneTargetRow (agent/cnagent/clone.go)).
 #      A row that is still not RES_STATUS_OK $WAIT_SRC_CONNECT seconds after
 #      the clone was created is the "connect refused" case.
-#   2. hydration froze. The dm-clone's `details` is the raw `dmsetup status`
-#      line (ensureClone and probeCloneDm (agent/cnagent/clone.go)), whose
-#      seventh field is `<hydrated>/<total>` — the same field the gateway
-#      parses in hydrationComplete (gateway/common.go). A same-kernel loopback
-#      that deadlocks under writeback pressure HANGS rather than failing, so a
+#   2. hydration froze. The dm-clone's `details` carries the raw `dmsetup
+#      status` line, on a line of its own (cloneDmRow and
+#      probeCloneDm (agent/cnagent/clone.go)), whose seventh field is
+#      `<hydrated>/<total>` — the same field the gateway parses in
+#      hydrationComplete (gateway/common.go). A same-kernel loopback that
+#      deadlocks under writeback pressure HANGS rather than failing, so a
 #      status line that has not moved for $WAIT_HYDRATE_STALL seconds while
 #      the device itself is RES_STATUS_OK is the second trigger. Without it
 #      the case would burn its whole budget and never reach the fallback.
@@ -11490,18 +11496,20 @@ COPY_GRP0='.slice_list[0].data_grp_list[0]'
 #   <start> <len> clone <meta block size> <used>/<total> <region size>
 #   <hydrated>/<total> <hydrating> <#feature args> …
 #
-# and the agents put that line verbatim into a ResInfo's details
-# (architecture.md, Live-state reporting) — the CN for a clone (ensureClone
-# and probeCloneDm (agent/cnagent/clone.go)), the DN for a migration's
-# destination side. The gateway reads field 7 of it, counting from <start> as
-# field 1, in hydrationComplete (gateway/common.go), and refuses both
-# `clone delete` and `migr finish` unless it parses and says done >= total.
-# These two helpers read the same field, so a wait that succeeds here is a
-# wait after which those two RPCs cannot answer FAILED_PRECONDITION for the
-# reason this case cares about.
+# and the agents put that line into a ResInfo's details, on a line of its own
+# after any text of the row's (architecture.md, Live-state reporting) — the CN
+# for a clone (cloneDmRow and probeCloneDm (agent/cnagent/clone.go)), the DN
+# for a migration's destination side (migrDstSeen (agent/dnagent/migr.go)).
+# The gateway reads field 7 of it, counting from <start> as field 1, in
+# hydrationComplete (gateway/common.go), and refuses both `clone delete` and
+# `migr finish` unless it parses and says done >= total. These two helpers
+# read the same field, so a wait that succeeds here is a wait after which
+# those two RPCs cannot answer FAILED_PRECONDITION for the reason this case
+# cares about.
 #
-# awk and not `set --`: the details of a multi-target device is several lines,
-# and the gateway walks them all looking for the `clone` one.
+# awk and not `set --`: the details can be several lines, a multi-target
+# device's or a row's own text ahead of the status line, and the gateway walks
+# them all looking for the `clone` one.
 
 hyd_fraction() { # <raw dmsetup status details> → "<hydrated>/<total>" | none
 	local out
@@ -11585,15 +11593,17 @@ copy_xfer_host_linked() { # <cn v> <hostnqn>
 #   returns 1                                keep polling
 #
 # Reading the two rows separately is deliberate. `clone_id_to_target` is the
-# SOURCE CONNECTION's row and `clone_id_to_dm_clone` the DEVICE's, and CN18's
-# step-1 failure branch (ensureClone (agent/cnagent/clone.go)) sets the first
-# to Err and the second to MISSING "source not connected" — so a source fault
-# and a device fault are distinguishable, and only the first one routes to the
-# fallback. The stall test is additionally gated on the device being
-# RES_STATUS_OK: a dm-clone that was never built is somebody else's problem
-# (the metadata arena, a missing raid0), and building a second storage pool
-# would not fix it. That case simply runs out $WAIT_HYDRATE and dies with the
-# last signature in the transcript.
+# SOURCE CONNECTION's row and `clone_id_to_dm_clone` the DEVICE's: a source
+# that CN18's step 1 cannot use reads not OK in the first and, while no
+# dm-clone is up, MISSING in the second with the reason, "source not
+# connected" or "source unknown" (cloneTargetRow and cloneDmRow
+# (agent/cnagent/clone.go))
+# — so a source fault and a device fault are distinguishable, and only the
+# first one routes to the fallback. The stall test is additionally gated on
+# the device being RES_STATUS_OK: a dm-clone that was never built is somebody
+# else's problem (the metadata arena, a missing raid0), and building a second
+# storage pool would not fix it. That case simply runs out $WAIT_HYDRATE and
+# dies with the last signature in the transcript.
 copy_clone_progress() { # <cntlr id> <clone id>
 	local tgt tgtdet dm det frac sig
 	COPY_SRC_FAULT=""
@@ -11668,10 +11678,12 @@ side_hydrated() { # <side id>
 
 # migr_dst_serving is "the migration's destination serves through its
 # dm-clone": the dm-clone is up, which InspectSide reports in the same row
-# side_hydrated reads, migr_dst_info.dm_clone_info — RES_STATUS_OK once
-# `dmsetup status` answers for the device, RES_STATUS_PROVISIONING while
-# DN9's gate is closed on the side, another status while its converge has
-# not built the device (dnagent.md, DN18). It is the first of the two waits
+# side_hydrated reads, migr_dst_info.dm_clone_info — RES_STATUS_OK once every
+# step of the destination holds over a source that serves and the device's
+# status line shows the hydration its conf asks for, RES_STATUS_PROVISIONING
+# while DN9's gate is closed on the side or its node's metadata area has no
+# room for it, another status otherwise (dnagent.md, DN13, DN18), by one rule
+# on a converge and a Check round alike. It is the first of the two waits
 # in front of the copy case's leg bitmap read; the second is the primary's
 # own path to the destination reading optimized (architecture.md,
 # Migration; copy_migration says why).

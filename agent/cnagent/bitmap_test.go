@@ -364,6 +364,52 @@ func TestReserveRetriesOnceWhenHeld(t *testing.T) {
 	)
 }
 
+// TestReserveRetryReadsTheErrno bounds the retry by the refusal's errno, read
+// from its type and never its words (CN25, CN29): a reserve refused with
+// EBUSY, or in words that name it "already exists", is released and taken
+// once more; one refused for any other cause — even with "busy" in its
+// words, as in a device named so — is the read's error after one try.
+func TestReserveRetryReadsTheErrno(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stderr   string
+		reserves int
+		ok       bool
+	}{
+		{"already exists", "device-mapper: message ioctl on pool  " +
+			"failed: Pool metadata snapshot already exists", 2, true},
+		{"another refusal", "device-mapper: message ioctl on busy-pool  " +
+			"failed: Invalid argument", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			scriptDump(srv, node, caseBDump)
+			pool := poolName(srv)
+
+			node.Reset()
+			node.failCmd["0 reserve_metadata_snap"] = tc.stderr
+			_, err := srv.GetThinDeviceBm(context.Background(),
+				&pb.GetThinDeviceBmRequest{
+					ClusterId: testCluster, CnId: testCn, SpId: testSp,
+					CntlrId: testCntlr, TdId: testTd, SliceIdx: 0,
+				})
+			if (err == nil) != tc.ok {
+				t.Fatalf("GetThinDeviceBm: %v, want ok %v", err, tc.ok)
+			}
+			reserve := "cmd dmsetup message " + pool +
+				" 0 reserve_metadata_snap"
+			if n := callCnt(node, reserve); n != tc.reserves {
+				t.Fatalf("%d reserves, want %d\ncalls:\n%s", n,
+					tc.reserves, strings.Join(node.Calls(), "\n"))
+			}
+			if !tc.ok {
+				assertNoCall(t, node, "cmd thin_dump")
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The raid0 fold of architecture.md, raid0 bitmap math (CN22)
 // ---------------------------------------------------------------------------

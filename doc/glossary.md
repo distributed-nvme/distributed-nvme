@@ -2,7 +2,7 @@
 
 The vocabulary of dnv in alphabetical order, one entry per term, with synonyms sharing an entry and a code identifier named in backticks where it differs from the prose term.
 
-**activation sweep** — The pass that lists the thin ids a slice's pool holds through a thin-metadata snapshot and deletes every id no thin device of the cntlr's request owns: creating the pool device arms it, and the first converge whose request came through the revision-gated syncup runs it (see `cnagent.md` CN14). It heals the ids a delete message never reached, as when a demotion, a level change or a failover raced the delete.
+**activation sweep** — The pass that lists the thin ids a slice's pool holds through a thin-metadata snapshot and deletes every id no thin device of the cntlr's request owns: creating the pool device arms it, and the first converge whose request came through the revision-gated syncup runs it (see `cnagent.md` CN14). It heals the ids a delete message never reached, as when a demotion, a level change or a failover raced the delete. A delete message that fails is followed in the same pass, under the same condition, by the same sweep of its pool, which spares every id that a thin volume the pass lists still maps in that pool and, when it gets through, also ends that pool's pending activation sweep (see `cnagent.md` CN14).
 
 **AEN, discovery-log-change AEN** — The asynchronous event the cdc completes on a host's armed asynchronous event request when that host's rendered discovery log changes. A change that moves a host's view marks it dirty and sets a pending bit on each of the host's connections; several impacts before delivery coalesce into one event.
 
@@ -180,7 +180,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **fence-first window** — The time from the sides' fence of an old primary's legs until its agent applies its demotion, in which that primary answers host IO on its still-optimized path with target-internal errors (see `architecture.md`, Failover; `dnv-worker.md` RW14, RW22).
 
-**flip** — A worker-owned, one-way write of a readiness flag once the agents report it earned: the provisioned flip on a side whose zeroing is complete (`FlipProvisioned`) and the created flip on a thin device whose volume is OK in every slice (`FlipCreated`). Each flip bumps the pool's revision so the next syncup carries the flag.
+**flip** — A worker-owned, one-way write of a readiness flag once the agents report it earned: the provisioned flip on a side whose zeroing is complete (`FlipProvisioned`) and the created flip on a thin device whose volume is OK in every slice (`FlipCreated`), which also writes the torn mark the report carries (see torn snapshot). Each flip bumps the pool's revision so the next syncup carries the flag.
 
 **footprint** — The controller-node budget a cntlr reserves, the sum of the extents of every group of its pool: it is debited from the node's free extents when the cntlr is created and by each group a grow appends, and returned in the transaction that removes the cntlr.
 
@@ -208,7 +208,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **health verdict** — The worker's judgment of one answer about an object's health: unhealthy or clean, while an answer that neither sets nor clears its health epoch gives none (see `dnv-worker.md` HL1, HL2). The dn and cn roles judge DNs and CNs, and the coordinator a pool's cntlrs, legs and sides; the own-verdict rule counts only the coordinator's own. A check round's reply, a round with no reply in time and a `Syncup*`'s reply each give one; a cntlr's run of unhealthy verdicts, which must reach two for a failover on its threshold, counts rounds only, each by its own report (see own-verdict rule). Distinct from a sweep's verdict.
 
-**hold** — The coordinator's wait before it hands on the later part of a fan-out, in two waits, the demotion hold and the sides-first hold, each ended by the reports it waits for or at the latest by its timer, a timer's end being logged. The demotion hold comes only with a fan-out that demotes a primary, which in production only a failover's does: that cntlr is handed its demotion at once, and the sides' and the other cntlrs' syncups wait until it reports its demotion applied or `DemotionHoldTimeout` has passed (see `dnv-worker.md` RW22). The sides-first hold, every fan-out's, follows: the cntlrs' syncups wait until every running side child reports the revision applied or one `cntlr_interval` has passed since that wait began (see `dnv-worker.md` RW14). The worker judges no reachability, so an old primary that never answers uses up the first wait, and neither wait is a correctness dependency (see `architecture.md` [D16]). The settling hold of a new primary (see settling) and leg repair's wait for a pending spare are other waits.
+**hold** — The coordinator's wait before it hands on the later part of a fan-out, in two waits, the demotion hold and the sides-first hold, each ended by the reports it waits for or at the latest by its timer, a timer's end being logged. The demotion hold comes only with a fan-out that demotes a primary, which in production only a failover's does: that cntlr is handed its demotion at once, and the sides' and the other cntlrs' syncups wait until it reports its demotion applied or `DemotionHoldTimeout` has passed (see `dnv-worker.md` RW22). The sides-first hold, every fan-out's, follows: the cntlrs' syncups wait until every running side child whose side had no health epoch in the load the wait took its sides from, at its start and again at a bump, reports the revision applied, or one `cntlr_interval` has passed since that wait began (see `dnv-worker.md` RW14). The worker judges no reachability, so an old primary that never answers uses up the first wait, and neither wait is a correctness dependency (see `architecture.md` [D16]). The settling hold of a new primary (see settling) and leg repair's wait for a pending spare are other waits.
 
 **hole punch** — The discard the cn agent issues through the arena's loop device over a newly chosen clone-metadata range before it creates the slot's wrapper: on the tmpfs-backed arena file it zeroes the range by file semantics and frees its pages, so a recycled unit never shows a previous clone's dm-clone superblock. A wrapper that already exists and matches is never re-punched, since that would wipe a live superblock (see `cnagent.md` CN18).
 
@@ -272,7 +272,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **location** — The failure-domain string a node registers (`location`), defaulting to its address: the allocator never places two legs in one location within one allocation round, and keeps a pool's new cntlrs, a spare leg and a migration destination out of occupied locations at its first tier only.
 
-**lock hierarchy** — The agent's lock set (`LockSet`): the node write lock for a node syncup or the startup reconcile, the node read lock plus the object's own lock for every object-scoped call, check rounds and background converges included, and the node read lock alone for node-scoped reads and rounds; the size reads, the leg health probers and the background disconnects take none (see `dnagent.md` SH10 to SH13).
+**lock hierarchy** — The agent's lock set (`LockSet`): the node write lock for a node syncup or the startup reconcile, the node read lock plus the object's own lock, created only once the call has found the object held or its gates have admitted the request, for every object-scoped call, check rounds and background converges included, and the node read lock alone for node-scoped reads and rounds; the size reads, the leg health probers and the background disconnects take none (see `dnagent.md` SH10 to SH13).
 
 **log record** — One JSON line on stderr per operation, written on completion with its outcome and the trace id, by every dnv binary through the one shared handler chain; stdout stays the result channel. Record names and attributes are normative, since the suites match them.
 
@@ -372,7 +372,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **quarantined** — Stored migration bitmap chunks whose recorded migration id is not the one of the destination role the side now holds: they are never applied, and the destination converge that finds them drops them, files included, ahead of the steps that would apply them, because a migration id is never reused and such chunks describe a different copy (see `dnagent.md` DN13).
 
-**quiesce, snapshot pre-pass** — The primary's suspension of a thin device's raid0 around the pool messages that create its snapshot in every slice, so the snapshot is consistent across slices.
+**quiesce, snapshot pre-pass** — The primary's suspension of a thin device's raid0 around the pool messages that create its snapshot in every slice, so the slices of a snapshot one pass creates whole are consistent with each other; a snapshot a later pass finishes is torn (see torn snapshot).
 
 **quiet set, reacting set, cutoff set** — The event thresholds the e2e suite builds each case's pool under: the quiet set, longer than any wait, so that no reaction fires mid-case; the short reacting set under which the react case waits out cntlr replacement and leg repair; and the cutoff set of the cutoff case, whose primary threshold is the shortest the gateway accepts on the suite's cluster while the other three are long, so that its failover comes fast and no other threshold reaction fires within the case.
 
@@ -392,7 +392,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **residue** — What a sweep or a cleanup leaves behind; an agent reports it as leftover, and a suite reports it and never passes it silently.
 
-**ResInfo** — One resource's row in an agent's info (`ResInfo`): the resource's name, its status (see ResStatus), its details and the epoch of its last status change, which a details change alone does not move. The agent's per-object tracker (`ResTracker`) keeps the history behind each row and drops it when the resource leaves the desired state, so the next object built with the same id inherits nothing (see `dnagent.md` SH14; `architecture.md`, Live-state reporting).
+**ResInfo** — One resource's row in an agent's info (`ResInfo`): the resource's name, its status (see ResStatus), its details, its reason and the epoch of its last status change, which a change of the details or of the reason alone does not move. The reason is none on every row but a created thin device's thin row whose pool has lost its thin id, which a converge marks thin id lost, so that the worker decides by a field and never by the text (see `cnagent.md` CN14; `architecture.md`, Live-state reporting; `dnv-worker.md` HL2). The agent's per-object tracker (`ResTracker`) keeps the history behind each row and drops it when the resource leaves the desired state, so the next object built with the same id inherits nothing (see `dnagent.md` SH14; `architecture.md`, Live-state reporting).
 
 **resolution** — The in-STM reads that turn a request's cluster name and pool name into the cluster id and the pool's conf (see `gateway.md` GW5); filling the conf members a caller omitted is the separate resolve-at-write.
 
@@ -410,7 +410,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **revision worker** — The worker goroutine per revision key that pushes each revision of its object to the agent and runs its check stream and health rounds; for the sp role it is the coordinator with a child per side and per cntlr.
 
-**rootCtx** — The agent's lifetime context (`rootCtx`) that background tasks run on, so the end of a request never cancels a connect retry, a clone-metadata retry, a zeroing goroutine, a fence timer or a background disconnect. Process exit cancels it and waits only for the dn agent's zeroing workers and connect retries (see `dnagent.md` SH27).
+**rootCtx** — The agent's lifetime context (`rootCtx`) that background tasks run on, so the end of a request never cancels a connect retry, a clone-metadata retry, a zeroing goroutine, a fence timer or a background disconnect. Process exit cancels it, stops the dn agent's armed fence timers and waits only for the dn agent's zeroing workers and connect retries (see `dnagent.md` SH27).
 
 **rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: disable it, delete it, then create a cntlr with a free slot (`UpdateCntlrEnabled`, `DeleteCntlr`, `CreateCntlr`).
 
@@ -430,13 +430,13 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **shard worker** — The per-role, per-shard worker that scans and watches one revision prefix and keeps one revision worker per key, started and stopped by the vote worker as ownership moves.
 
-**shared-state row** — An error row a cntlr reports for the stack of a created thin device whose pool does not hold its thin id, which every cntlr in the primary role reads alike; it sets the cntlr's health epoch, but a report whose error rows are all of this class triggers neither a failover nor the replacement of a primary with no failover candidate (see `dnv-worker.md` HL2).
+**shared-state row** — An error row a cntlr reports for the stack of a created thin device whose thin row carries the thin id lost reason because its pool does not hold its thin id, which every cntlr in the primary role reads alike; it sets the cntlr's health epoch, but a report whose error rows are all of this class triggers neither a failover nor the replacement of a primary with no failover candidate (see `dnv-worker.md` HL2).
 
 **sibling agent** — Another dnv agent on the same kernel: the dn agent beside a cn agent, or one of several dn agents each with a disk, port id and transport address of its own (see `architecture.md`, Disk node). Its dm devices, nvmet objects and host connections appear in this agent's enumerations too, so attribution tells them from this agent's own and a sweep leaves a sibling's build that is in flight alone (see `architecture.md`, Teardown by sweep).
 
 **side** — `Side`, the disk-node resident part of a leg: runs of extents in the node's volume table, the side device over them (`DnSideName`, the dm-linear that zeroing writes through and the primary's per-CN linear maps), and one export stack per cntlr of the pool. It carries the provisioned flag and, while the leg migrates, a source or destination role.
 
-**sides first, sides-first hold** — The second wait of the hold, which every fan-out of a pool goes through: the cntlrs' syncups wait until every running side child has reported the revision applied or one cntlr interval has passed since that wait began, a timer release being logged (see hold; `dnv-worker.md` RW14). It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
+**sides first, sides-first hold** — The second wait of the hold, which every fan-out of a pool goes through: the cntlrs' syncups wait until every running side child whose side had no health epoch in the load the wait took its sides from has reported the revision applied, or one cntlr interval has passed since that wait began, a timer release being logged (see hold; `dnv-worker.md` RW14). The wait takes its sides when it begins and again at a bump, a fan-out of a newer revision; a side that turns unhealthy in between is still waited for, so one whose agent stops answering can hold the cntlrs for the whole interval. It narrows the races of a cntlr outrunning its sides' exports and ANA flips, and is no correctness dependency.
 
 **skip bitmap** — The chunked bitmap of a clone's or a migration's source that the worker pushes, a set bit marking a source block as never written: the agent folds the chunks it holds through raid0 bitmap math and discards on the dm-clone every region all of whose source bits are set, so a missing chunk only costs extra copying; `architecture.md`, Migration, says when a caller may read a migration's.
 
@@ -472,15 +472,17 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **thin device, td** — `ThinDevice`, a pool volume: one thin volume per slice under the same thin id (`CnThinDevName`, created or snapshotted by a pool message and deleted by one), joined by a raid0 on the primary. It may be an origin, a snapshot or both, and carries the created flag.
 
-**thin id** — The id of a thin device's volume inside every slice's thin pool (`dev_id`), minted by the gateway and shared across the slices; the activation sweep deletes ids no stored thin device owns.
+**thin id** — The id of a thin device's volume inside every slice's thin pool (`dev_id`), minted by the gateway and shared across the slices; the activation sweep, and the sweep after a failed delete, delete ids no stored thin device owns (see activation sweep).
 
-**thin metadata snapshot** — The way an agent reads a live thin pool's mappings without stopping it: reserve the pool's metadata snapshot, dump it, release it. The activation sweep, the thin-device and leg bitmap reads and clone crash recovery read pools this way.
+**thin metadata snapshot** — The way an agent reads a live thin pool's mappings without stopping it: reserve the pool's metadata snapshot, dump it, release it. The activation sweep, the sweep after a failed delete, the thin-device and leg bitmap reads and clone crash recovery read pools this way.
 
 **thin pool** — The dm-thin pool each slice activates on the primary (`CnPoolFinalName`) over a concat of the slice's meta groups and a concat of its data groups (`CnPoolMetaName`, `CnPoolDataName`); appending a group grows the concat and reloads the pool.
 
 **token carrier** — A dnvctl leaf command whose request has a revision token field, the only kind that takes `--rev`; a `--rev` typed on any other leaf is a usage error (see `dnvctl.md` CT1, CT3).
 
 **token check** — The gateway's comparison of a mutator's revision token with the stored revision, made right after resolution and before any other state check, and only when the token message is present (see `gateway.md` GW6).
+
+**torn snapshot** — A snapshot whose slices were taken at two different moments, because its slices' snapshot messages ran in two passes, the primary having stopped between them or a slice having been skipped or refused, and a later pass finished the rest. The cn agent reports it, the thin device record keeps it, and the only remedy is to delete and re-create the snapshot.
 
 **trace id** — The identifier that joins the log records of one operation across processes (`trace_id`): minted at an entry point, carried in the context, moved between context and gRPC metadata by the interceptors, and sent in the request of every check round, which runs under an id of its own.
 

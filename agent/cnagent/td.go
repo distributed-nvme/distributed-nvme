@@ -144,22 +144,25 @@ func (s *CnAgentServer) nsDevNow(
 // converge, one whose sweep an unanswered listing stopped included (CN21).
 //
 // The hold is the one case in which it does not converge: while a dm-clone
-// the plan does not want may still be live (cloneMayLinger, CN18) — the
-// sweep's L3 did not run, or it left one — an ns-dev goes onto its td's
-// raid0 only if it is on it already. That dm-clone goes on hydrating into the
-// raid0 until L3 removes it, and a region it has not copied yet would
-// overwrite a write a host made to the raid0 directly. An existing ns-dev
-// keeps its live table — one over the dm-clone serves on through it
-// (nsDevHeldServing), a parked one stays parked (nsDevHeldParked) — and a
-// new one starts parked on the td's dm-error. The caller reports a held
-// ns-dev's row ERROR, registers the CN10 retry, keeps a serving namespace in
-// the ANA group it has and moves a parked one inaccessible; the first pass
-// that leaves no such dm-clone live — its listing names none, or its L3
-// removed it, parking first an ns-dev still over it — reloads it.
+// the plan does not want may still write into its td's raid0 (lingering,
+// the pass's cloneHold, CN18) — the sweep's L3 did not run, or did not
+// verify that dm-clone gone, or the pass cannot say which raid0s such a
+// dm-clone writes into — an ns-dev goes onto that raid0 only if it is on it
+// already. That dm-clone goes on hydrating into the raid0 until L3 removes
+// it, and a region it has not copied yet would overwrite a write a host made
+// to the raid0 directly. An existing ns-dev keeps its live table — one over
+// the dm-clone serves on through it (nsDevHeldServing), a parked one stays
+// parked (nsDevHeldParked) — and a new one starts parked on the td's
+// dm-error. The caller reports a held ns-dev's row ERROR, registers the
+// CN10 retry, keeps a serving namespace in the ANA group it has and moves a
+// parked one inaccessible; the first pass that leaves no such dm-clone live
+// — its listing names none, or its L3 removed it, parking first an ns-dev
+// still over it — reloads it. The ns-devs of a td whose raid0 no such
+// dm-clone writes into converge as usual.
 func (s *CnAgentServer) ensureNsDev(
 	ctx context.Context,
 	np *nsPlan,
-	cloneMayLinger bool,
+	lingering cloneHold,
 ) (held nsDevHold, err error) {
 	if np.backingName == "" {
 		return nsDevConverged, fmt.Errorf("namespace has no thin device")
@@ -174,8 +177,8 @@ func (s *CnAgentServer) ensureNsDev(
 	if err != nil {
 		return nsDevConverged, err
 	}
-	hold := cloneMayLinger && np.td != nil &&
-		np.backingName == np.td.raid0Name
+	hold := np.td != nil && np.backingName == np.td.raid0Name &&
+		lingering.holds(np.td.raid0Name)
 	// The td's dm-error is ensured again here, probe-first: the build's td
 	// loop ensures it earlier in the pass (CN15), and this retries it on a
 	// pass in which that step failed.

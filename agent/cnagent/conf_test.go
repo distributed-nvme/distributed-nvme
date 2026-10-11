@@ -202,6 +202,54 @@ func TestSyncupCntlrRefusesAZeroConfMember(t *testing.T) {
 	}
 }
 
+// TestSyncupCntlrRefusesAZeroConfForACntlrNeverHeld is the same refusal for a
+// cntlr this agent holds no state for, which SyncupCntlr gives before it
+// takes the cntlr's object lock (gateCntlr, dnagent.md SH11): the same
+// reply, with the stored revision 0, the one refusal record, nothing touched
+// on the node, and no cntlr state and no lock entry left behind.
+func TestSyncupCntlrRefusesAZeroConfForACntlrNeverHeld(t *testing.T) {
+	for _, tc := range zeroConfCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			cnSyncup(t, srv, 1, true)
+			capture := captureLogs(t)
+			entries := srv.locks.ObjCount()
+			node.Reset()
+
+			reply, err := srv.SyncupCntlr(context.Background(), zeroConfReq(
+				reqOpts{revision: 2, primary: true, raid1: tc.raid1},
+				tc.zero))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() !=
+				common.ReplyCodeInvalidConf ||
+				reply.GetAgentReply().GetDetails() != tc.want {
+				t.Fatalf("reply %v, want code %d with %q",
+					reply.GetAgentReply(), common.ReplyCodeInvalidConf,
+					tc.want)
+			}
+			if reply.GetRevision() != 0 || reply.GetCntlrInfo() != nil {
+				t.Errorf("reply revision %d, info %v: want the stored 0 "+
+					"and no info", reply.GetRevision(), reply.GetCntlrInfo())
+			}
+			if calls := node.Calls(); len(calls) != 0 {
+				t.Errorf("a refused SyncupCntlr touched the node:\n%s",
+					strings.Join(calls, "\n"))
+			}
+			if st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp,
+				testCntlr)); st != nil {
+				t.Errorf("the refused request left a cntlr state")
+			}
+			if got := srv.locks.ObjCount(); got != entries {
+				t.Errorf("%d lock entries after the refusal, want %d",
+					got, entries)
+			}
+			assertRefusalRecord(t, capture, tc.want)
+		})
+	}
+}
+
 // storedProto decodes one local-store file, so a test can compare what is on
 // disk rather than the bytes' identity alone.
 func storedProto(

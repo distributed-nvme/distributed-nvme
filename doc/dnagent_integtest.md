@@ -15,8 +15,9 @@ format on a block device, nvmet configfs, nvme-tcp — behaves as `dnagent.md`
 specifies on two lab VMs driven over gRPC from the developer machine,
 exercising every `DiskNodeAgent` RPC and reading the kernel state itself
 beside the agent's report. It proves the happy path: error paths are out of
-scope but for the restart case's stale probe, and a leftover reply is no
-exception, being an accepted request with residue (`dnagent.md` SH9, DN19).
+scope but for the restart case's stale probe and migr_full's lost source,
+and a leftover reply is no exception, being an accepted request with
+residue (`dnagent.md` SH9, DN19).
 The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
 migr_bitmap, teardown, restart — each under storage-pool ids of its own, and
 each ends with neither node holding anything of its pool.
@@ -71,6 +72,12 @@ on these lab facts:
   keeps the subsystem's directory after its last controller, with no
   controller and no namespace node in it: "disconnected" means no controller
   (`dnagent.md` DN6).
+* A namespace removed from an export under a live connection leaves the
+  host's controller live, which the stage that removes one checks before
+  it compares anything. That the namespace node goes too while a dm table
+  holds it open is not taken for granted: where the node stays, the stage
+  removes the whole export instead, with the effect the item above gives
+  (Cases, migr_full).
 * A dm-clone's table reprints its creation arguments, keeping no-hydration
   after hydration is enabled; only its status shows the live flags.
 
@@ -172,10 +179,18 @@ to L4, L6), which the teardown's residue check proves; and the data verifies
 through the destination path, which also takes a write.
 
 **migr_full** pushes no bitmap: the applied set is empty, the whole device
-matches the source, and no discard reaches any clone. **migr_bitmap** pushes
-skip-bitmap chunks of its own making, not a bitmap read from a pool, to the
-gated destination, with no revision (`dnagent.md` DN15), over the same random
-source, so every difference is the bitmap's: the applied set lists exactly
+matches the source, and no discard reaches any clone. Its first migration,
+once hydrated, also loses its source's namespace behind both agents' backs,
+the export and the destination's controller of it staying: the
+destination's rows — its side device, its migration rows and its per-CN
+rows — then read one status, with one epoch, on a converge and on the
+read-only channels alike (`dnagent.md` DN13, DN18); the converge takes the primary's stack off the dm-clone, whose
+status line the read-only channel still carries, so the hydration the
+gateway reads stays provable. The state compared is measured, never
+assumed, and one that moves before the comparison ends fails the stage.
+**migr_bitmap** pushes skip-bitmap chunks of its own making, not a bitmap
+read from a pool, to the gated destination, with no revision (`dnagent.md`
+DN15), over the same random source, so every difference is the bitmap's: the applied set lists exactly
 the chunks (SH21, DN14), the must-copy head matches the source, the skipped
 regions differ from the source's fresh random data, keeping what the
 destination's extents held before (`architecture.md`, Side provisioning
@@ -257,11 +272,15 @@ only reported, a guest's own not being the suite's to fail on.
 
 ## Out of scope
 
-Error paths beyond the stale probe, the provisioning error rows among them
-(`dnagent.md` DN9); a migration destination that waits for a free run in
-the clone-metadata area, whose rows the unit tests cover (DN13); the cn
-role; fault injection under a live stack, the teardown case removing a real
-remote instead; performance; TLS and
-authentication; levels other than read-write and no-migration
-(`dnagent.md` DN11); lock contention on one agent; the source half of a
-cancelled migration; a zeroing batch cancelled mid-flight.
+Error paths beyond the stale probe and migr_full's lost source, the
+provisioning error rows among them (`dnagent.md` DN9); a migration
+destination that waits for a free run in the clone-metadata area, and the
+other states of the destination's shared row rule, whose rows the unit
+tests cover (DN13); the cn role; fault injection under a live stack beyond
+that lost source, the teardown case removing a real remote instead; a
+shutdown that meets a background task starting or a fence timer armed
+(`dnagent.md` SH27), and the lock entry a refused request must not leave
+(`dnagent.md`, Concurrency — `locks.go`), both left to the unit tests;
+performance; TLS and authentication; levels other than read-write and
+no-migration (`dnagent.md` DN11); lock contention on one agent; the source
+half of a cancelled migration; a zeroing batch cancelled mid-flight.

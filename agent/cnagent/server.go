@@ -155,11 +155,22 @@ type cntlrState struct {
 
 	// pendingSweep marks slices whose pool device THIS incarnation created
 	// but has not yet successfully swept for orphan thin ids (CN14's
-	// activation sweep). Keyed by slice_id; in-memory only —
-	// a crash in the window leaves a stray for the pool's next rebuild. The
-	// startup Reconcile's Create branch arms it too; running additionally
-	// requires reqFromRpc.
+	// activation sweep). Keyed by slice_id; in-memory only — a crash in the
+	// window leaves a stray for the next sweep of the pool's ids that gets
+	// through. The startup Reconcile's Create branch arms it too; running
+	// additionally requires reqFromRpc.
 	pendingSweep map[uint64]bool
+	// tornTds marks the snapshot tds this incarnation tore (CN14): one run
+	// of the snapshot pre-pass made the td's id in one slice while another
+	// slice already held it (snapshotPrePass). Keyed by td_id; in-memory
+	// only, so an agent restart loses a mark the worker has not read yet. A
+	// pre-pass sets a mark and nothing but the request clears it: every
+	// converge drops the marks of tds its request no longer lists or lists
+	// created (keepTornMarks), the created flip having recorded the mark by
+	// then (dnv-worker.md RW19). Both channels report a mark in the td's thin
+	// info (tornMark). It is read and written under this cntlr's object lock
+	// or the node write lock, as pendingSweep is.
+	tornTds map[uint64]bool
 	// reqFromRpc is true once req was delivered by a revision-gated
 	// SyncupCntlr in THIS incarnation. The startup Reconcile converges from
 	// the persisted copy, which converge-then-persist (syncupCntlr saves
@@ -323,6 +334,7 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		tracker:      agent.NewResTracker(),
 		chunks:       make(map[uint64]*agent.CloneChunkSet),
 		pendingSweep: make(map[uint64]bool),
+		tornTds:      make(map[uint64]bool),
 		probers:      make(map[uint64]*legProber),
 	}
 	st.storeReq(req)
@@ -386,6 +398,12 @@ func (s *CnAgentServer) SyncupCn(
 	return s.syncupCn(ctx, req), nil
 }
 
+// SyncupCntlr takes the cntlr's object lock only for a cntlr this process
+// holds or a request CN8's gates admit: a request they refuse for a cntlr it
+// does not hold is answered under the node read lock alone, so it leaves no
+// lock entry behind (dnagent.md, SH11) — only the teardown of a held cntlr
+// drops one (dropCntlrState). syncupCntlr runs every gate again under the
+// object lock.
 func (s *CnAgentServer) SyncupCntlr(
 	ctx context.Context,
 	req *pb.SyncupCntlrRequest,
@@ -394,12 +412,21 @@ func (s *CnAgentServer) SyncupCntlr(
 	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
+	if s.getCntlr(key) == nil {
+		if reply := s.gateCntlr(ctx, req, 0); reply != nil {
+			return reply, nil
+		}
+	}
 	objLock := s.locks.Obj(key)
 	objLock.Lock()
 	defer objLock.Unlock()
 	return s.syncupCntlr(ctx, key, req), nil
 }
 
+// PushCloneBitmap refuses a push for a cntlr this process does not hold under
+// the node read lock alone, as GetCntlrInfo does, so the refusal leaves no
+// lock entry behind (dnagent.md, SH11); pushCloneBitmap checks the cntlr
+// again under its object lock.
 func (s *CnAgentServer) PushCloneBitmap(
 	ctx context.Context,
 	req *pb.PushCloneBitmapRequest,
@@ -408,6 +435,9 @@ func (s *CnAgentServer) PushCloneBitmap(
 	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
+	if s.getCntlr(key) == nil {
+		return unknownCntlrPush(req), nil
+	}
 	objLock := s.locks.Obj(key)
 	objLock.Lock()
 	defer objLock.Unlock()
@@ -460,9 +490,13 @@ func (s *CnAgentServer) GetCntlrInfo(
 	if st == nil {
 		return unknown, nil
 	}
+	// The probe first and the verdict after it, as in a check round
+	// (checkCntlrRound, CN23, CN24), so a read answers what a round in the
+	// same state would.
+	info := s.probeCntlr(ctx, st)
 	return &pb.GetCntlrInfoReply{
 		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
 		Revision:   st.loadReq().GetRevision(),
-		CntlrInfo:  s.probeCntlr(ctx, st),
+		CntlrInfo:  info,
 	}, nil
 }

@@ -15,8 +15,9 @@ lab VMs driven over gRPC from the developer machine, with real `dnv-agent dn`
 instances behind the sides, the dn role having its own suite. It exercises
 every `ControllerNodeAgent` RPC and reads the kernel state beside the agent's
 report. It proves the happy path; error paths are out of scope but for the
-stale probe, the dead leg, the promotion that outruns the sides' flip, and the
-leftover, an accepted request reporting residue (`cnagent.md` CN20). The cases
+stale probe, the dead leg, the promotion that outruns the sides' flip, the
+clone's lost source, and the leftover, an accepted request reporting residue
+(`cnagent.md` CN20). The cases
 run in a fixed order, fail-fast — smoke, redund, teardown, thinbm, clone_xfer,
 restart — each under pool ids of its own and each leaving nothing of its pools,
 a teardown per case and per stage that also keeps the run inside a DN's data
@@ -55,8 +56,9 @@ stage that needs it rather than a run that might never reach one.
 The suite rests on the dn suite's lab facts (`dnagent_integtest.md`,
 Assumptions and preflight checks) on dd, a synced write being also how one that
 must fail reports it; on loop zero-out; on IO with no serving path; on DNR
-under a port that keeps listening and on a port that stops listening; and on
-the dm-clone table. This suite adds:
+under a port that keeps listening and on a port that stops listening; on a
+namespace removed under a live connection, which clone_xfer's lost source
+measures as the dn suite's does; and on the dm-clone table. This suite adds:
 
 * Each VM's port keeps listening while the other role's subsystems sit on it,
   so a side removed under a CN draws the refusal that deletes the CN's leg
@@ -245,9 +247,20 @@ read-through if need be. The startup reconcile alone rebuilds a wiped
 destination CN, bitmaps first, the destination's own discard from offset zero
 included when the wipe-time sample shows a region copied (CN2, CN18), its dead
 host path replaced by device as the pools share the NQN, and hydration runs to
-completion. The finalize takes the clone down in layer order, the clone, its
-wrapper, then its source connection (`cnagent.md` L3 to L5), leftover while
-the source's disconnect runs or clean if its controller was already gone. The
+completion. The hydrated clone's source then loses its namespace behind both
+agents' backs, the transfer's export and the destination CN's controller of
+it staying: the clone's three rows and its destination namespace's two read
+one status, with one epoch, on a converge and on the read-only channels
+alike (`cnagent.md` CN18, CN28), the source's row missing, which sets no
+health epoch, and the other four ok, while the namespace serves on, optimized,
+through the hydrated dm-clone (CN16's clone rule) and the dm-clone's row
+still carries the status line the gateway's hydration check reads. The state
+compared is measured as the dn suite's lost source measures it
+(`dnagent_integtest.md`, Cases), and a reading that moves before the
+comparison ends fails the stage. The finalize takes the clone down in layer
+order, the clone, its wrapper, then its source connection (`cnagent.md` L3
+to L5), leftover while the source's disconnect runs or clean if its
+controller was already gone. The
 half the source wrote reads back intact through the destination, which then
 takes a write, while the half it never wrote stays unmapped and zero there, the
 destination starting empty (`architecture.md`, [D3]); and at teardown both CNs
@@ -306,7 +319,7 @@ any dm or nvmet residue fails it, since reporting it is not success.
 
 ## Out of scope
 
-Error paths beyond the four above; QoS, not enforced (`cnagent.md` CN6);
+Error paths beyond the five above; QoS, not enforced (`cnagent.md` CN6);
 `GrowSlice`; spare legs; a leg gaining or losing a second side, which the dn
 suite's migrations prove; levels but read-write, read-only and the no-clone
 gate; more than one slice; several namespaces per subsystem; snapshots of
@@ -314,6 +327,11 @@ snapshots; `UpdateNamespaceDev`; a host-facing namespace or subsystem dropped
 short of a cntlr teardown, leaving the park before its removal (`cnagent.md`
 CN21's park before every layer and its nvmet layer L1) to the unit tests;
 cntlid-slot exhaustion; the cdc; TLS and authentication; performance; faults
-beyond the partition, the pin and the writer; provisioning deferral
-(`cnagent.md` CN9); and an arena with no free run for a clone, whose
-provisioning rows and slow retry the unit tests cover (CN18).
+beyond the partition, the pin, the writer and the lost source; provisioning deferral
+(`cnagent.md` CN9); an arena with no free run for a clone, whose
+provisioning rows and slow retry the unit tests cover (CN18); a torn
+snapshot, which needs two slices, whose mark the unit tests cover (CN14);
+the lingering-clone hold's scope per thin device and the replacement of an
+arena file of another size, both left to the unit tests (CN18, CN5); the
+other states of the clone's shared row rule (CN18); and the lock entry a
+refused request must not leave (`dnagent.md`, Concurrency — `locks.go`).

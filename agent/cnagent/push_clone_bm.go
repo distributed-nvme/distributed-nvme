@@ -10,6 +10,16 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
+// unknownCntlrPush is the SH9 refusal of a push for a cntlr this process
+// does not hold, the same before the object lock (PushCloneBitmap) and
+// under it.
+func unknownCntlrPush(req *pb.PushCloneBitmapRequest) *pb.PushCloneBitmapReply {
+	return &pb.PushCloneBitmapReply{
+		AgentReply: agent.UnknownObjectReply(
+			"unknown cntlr %s", cntlrPointerText(req.GetCntlrPointer())),
+	}
+}
+
 // pushCloneBitmap implements CN22: gate, persist, then apply. The node read
 // lock and this cntlr's object lock are held by the caller.
 func (s *CnAgentServer) pushCloneBitmap(
@@ -19,11 +29,7 @@ func (s *CnAgentServer) pushCloneBitmap(
 ) *pb.PushCloneBitmapReply {
 	st := s.getCntlr(key)
 	if st == nil {
-		return &pb.PushCloneBitmapReply{
-			AgentReply: agent.UnknownObjectReply(
-				"unknown cntlr %s",
-				cntlrPointerText(req.GetCntlrPointer())),
-		}
+		return unknownCntlrPush(req)
 	}
 	current := st.loadReq()
 	clone := findClone(current, req.GetCloneId())

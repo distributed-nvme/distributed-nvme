@@ -596,7 +596,6 @@ func TestSpCntlrRequestGolden(t *testing.T) {
 		NqnToSubsystem: state.Subsystems,
 		CloneList:      []*pb.Clone{state.Clones[spCloneNm]},
 		XferList:       []*pb.Transfer{state.Xfers[spXferName]},
-		MigrList:       []*pb.Migration{state.Migrs[spMigrName]},
 	}
 	if !proto.Equal(primary.req, want) {
 		t.Fatalf("primary cntlr request =\n%v\nwant\n%v", primary.req, want)
@@ -666,6 +665,48 @@ func TestSpCntlrPlanCarriesSettling(t *testing.T) {
 			t.Fatalf("cntlr %d plan settling = %v, want %v",
 				cntlrId, got, want)
 		}
+	}
+}
+
+// TestSpSidePlanCarriesTheErrEpoch pins what RW14's sides-first barrier reads
+// a side's health from: each side plan carries its own side record's
+// err_epoch as the fan-out's load read it, and awaitedSides leaves out the
+// side whose record has one and keeps every other planned side. A leg's
+// err_epoch is the leg's (HL2) and leaves its side waited for.
+func TestSpSidePlanCarriesTheErrEpoch(t *testing.T) {
+	captureLogs(t)
+	const epoch = uint64(1_700_000_000)
+	state := spFixture()
+	*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+	*sliceEpochField(state.Slices[spSliceA], spLegMeta, 0) = epoch + 1
+	plan := spTestWorker(nil).buildPlan(context.Background(), state)
+	if len(plan.sides) != 5 {
+		t.Fatalf("%d side plans, want 5", len(plan.sides))
+	}
+	spare := sideKey{legId: spLegSpare, sideId: spSideSpare}
+	for key, p := range plan.sides {
+		want := uint64(0)
+		if key == spare {
+			want = epoch
+		}
+		if p.errEpoch != want {
+			t.Fatalf("side %d plan errEpoch = %d, want %d", key.sideId,
+				p.errEpoch, want)
+		}
+	}
+	awaited := awaitedSides(plan.sides)
+	if len(awaited) != 4 || awaited[spare] {
+		t.Fatalf("awaited = %v, want the four sides other than the spare's",
+			awaited)
+	}
+	for key := range plan.sides {
+		if key != spare && !awaited[key] {
+			t.Fatalf("side %d with no err_epoch is not waited for",
+				key.sideId)
+		}
+	}
+	if got := awaitedSides(nil); len(got) != 0 {
+		t.Fatalf("awaitedSides(nil) = %v, want empty", got)
 	}
 }
 
@@ -1502,6 +1543,177 @@ func TestSpCompletedTds(t *testing.T) {
 				if got[i] != tdId {
 					t.Fatalf("completed = %v, want %v", got, tc.want)
 				}
+			}
+		})
+	}
+}
+
+// TestSpTornTds pins which of the tds a reply completes carry the torn mark
+// RW19's flip copies (tornTds): those whose thin info has it, in the order
+// they were given. A mark on a td the caller did not pass is not read.
+func TestSpTornTds(t *testing.T) {
+	thin := func(torn bool) *pb.CntlrInfo_ThinInfo {
+		return &pb.CntlrInfo_ThinInfo{
+			SliceIdToDmThin: map[uint64]*pb.ResInfo{spSliceA: resOk("thin")},
+			Torn:            torn,
+		}
+	}
+	info := &pb.CntlrInfo{
+		TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+			1: thin(true), 2: thin(false), 3: thin(true), 4: thin(true),
+		},
+	}
+	got := tornTds(info, []uint64{3, 2, 1, 9})
+	if want := []uint64{3, 1}; !slices.Equal(got, want) {
+		t.Fatalf("torn = %v, want %v", got, want)
+	}
+	for _, tc := range []struct {
+		name  string
+		info  *pb.CntlrInfo
+		tdIds []uint64
+	}{
+		{"no td passed", info, nil},
+		{"no thin info", &pb.CntlrInfo{}, []uint64{1}},
+		{"no info", nil, []uint64{1}},
+	} {
+		if got := tornTds(tc.info, tc.tdIds); len(got) != 0 {
+			t.Fatalf("%s: torn = %v, want none", tc.name, got)
+		}
+	}
+}
+
+// TestSpCreatedFlipCarriesTheTornMark pins RW19's copy of the torn mark into
+// the flip's candidates: a report that completes a td and marks it hands
+// FlipCreated the td with Torn set, one that does not hands it unset, and
+// when several reports of one drain complete a td it is torn if any of them
+// marks it, whichever comes first. The plan's own refs keep no mark.
+func TestSpCreatedFlipCarriesTheTornMark(t *testing.T) {
+	const otherTd = spTdOpen + 100
+	marked := func(tdIds ...uint64) spReport {
+		return spReport{createdTdIds: tdIds, tornTdIds: tdIds}
+	}
+	unmarked := func(tdIds ...uint64) spReport {
+		return spReport{createdTdIds: tdIds}
+	}
+	for _, tc := range []struct {
+		name    string
+		reports []spReport
+		want    map[uint64]bool
+	}{
+		{"a marked report", []spReport{marked(spTdOpen)},
+			map[uint64]bool{spTdOpen: true}},
+		{"an unmarked report", []spReport{unmarked(spTdOpen)},
+			map[uint64]bool{spTdOpen: false}},
+		{"a mark on the other td of the report", []spReport{{
+			createdTdIds: []uint64{spTdOpen, otherTd},
+			tornTdIds:    []uint64{otherTd},
+		}}, map[uint64]bool{spTdOpen: false, otherTd: true}},
+		{"the marked report second in the drain",
+			[]spReport{unmarked(spTdOpen), marked(spTdOpen)},
+			map[uint64]bool{spTdOpen: true}},
+		{"the marked report first in the drain",
+			[]spReport{marked(spTdOpen), unmarked(spTdOpen)},
+			map[uint64]bool{spTdOpen: true}},
+		{"two unmarked reports", []spReport{
+			unmarked(spTdOpen), unmarked(otherTd, spTdOpen),
+		}, map[uint64]bool{spTdOpen: false, otherTd: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSpHarness(t)
+			w := spTestWorker(h.deps)
+			w.ops = h.ops
+			w.tdRefs = map[uint64]model.TdRef{
+				spTdOpen: {Name: "td0", TdId: spTdOpen},
+				otherTd:  {Name: "td2", TdId: otherTd},
+			}
+			for _, rep := range tc.reports[1:] {
+				w.reportCh <- rep
+			}
+			w.handleReports(tc.reports[0])
+			calls := h.ops.createdCalls()
+			if len(calls) != 1 || len(calls[0]) != len(tc.want) {
+				t.Fatalf("FlipCreated calls = %v, want one of %d tds",
+					calls, len(tc.want))
+			}
+			for _, ref := range calls[0] {
+				torn, ok := tc.want[ref.TdId]
+				if !ok || ref.Torn != torn {
+					t.Fatalf("candidates = %+v, want torn %v", calls[0],
+						tc.want)
+				}
+			}
+			for tdId, ref := range w.tdRefs {
+				if ref.Torn {
+					t.Fatalf("the plan's ref of td %d took the mark", tdId)
+				}
+			}
+		})
+	}
+}
+
+// TestSpCreatedFlipFromATornReport pins where the coordinator reads the torn
+// mark (observe): the thin info of the reply that completes the td, a Check
+// round's or a SyncupCntlr's alike, since the cn agent reports the mark on
+// both channels until the flip (cnagent.md CN14). An unmarked reply flips
+// the td with no mark.
+func TestSpCreatedFlipFromATornReport(t *testing.T) {
+	report := func(torn bool) *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+				spTdOpen: {
+					SliceIdToDmThin: map[uint64]*pb.ResInfo{
+						spSliceA: resOk("thin-a"),
+						spSliceB: resOk("thin-b"),
+					},
+					Torn: torn,
+				},
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		torn  bool
+		round bool
+	}{
+		{"a marked Check round", true, true},
+		{"an unmarked Check round", false, true},
+		{"a marked SyncupCntlr", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSpHarness(t)
+			h.addFixtureAgents()
+			stub := h.cntlrs[spCnA]
+			if tc.round {
+				stub.checkReply = func(
+					req *pb.CheckCntlrRequest,
+				) *pb.CheckCntlrReply {
+					return &pb.CheckCntlrReply{
+						Revision:  req.GetRevision(),
+						CntlrInfo: report(tc.torn),
+					}
+				}
+			} else {
+				// The Check rounds answer revision 0 with no info, which
+				// re-syncs (RW4 step 5): the SyncupCntlr's reply alone
+				// reports the td.
+				stub.syncupReply = func(
+					req *pb.SyncupCntlrRequest,
+				) *pb.SyncupCntlrReply {
+					return &pb.SyncupCntlrReply{
+						Revision:  req.GetRevision(),
+						CntlrInfo: report(tc.torn),
+					}
+				}
+			}
+			h.start()
+			waitFor(t, "the created flip", func() bool {
+				return len(h.ops.createdCalls()) > 0
+			})
+			calls := h.ops.createdCalls()
+			if len(calls[0]) != 1 || calls[0][0].TdId != spTdOpen ||
+				calls[0][0].Torn != tc.torn {
+				t.Fatalf("flip batch = %+v, want td %d torn %v", calls[0],
+					spTdOpen, tc.torn)
 			}
 		})
 	}
@@ -4060,10 +4272,12 @@ func TestSpLegRowsFollowTheLatestPlan(t *testing.T) {
 						spCntlrPrimary: testSpRev + 1,
 					}
 				}
-				// A side short of the held revision keeps the hold pending
-				// through handleReports' own release check.
+				// A side the barrier waits for, short of the held revision,
+				// keeps the hold pending through handleReports' own release
+				// check.
 				key := sideKey{legId: spLegMeta, sideId: spSideMeta}
 				w.sides[key] = &sideChild{synced: testSpRev}
+				w.held.awaited = map[sideKey]bool{key: true}
 			}
 			w.handleReports(spReport{
 				cntlrId: spCntlrPrimary,
@@ -4086,12 +4300,13 @@ func TestSpLegRowsFollowTheLatestPlan(t *testing.T) {
 	}
 }
 
-// TestSidesFirstIdleSidesHoldNothing checks RW14's "a side left idle is not
-// waited for, and with every side idle the cntlrs go at once": a standby whose
-// CnConf is absent leaves every side idle (RW15), and the resolved cntlrs are
-// driven with the fake clock never moving, so the barrier's timer cannot be
-// what releases them. No child exists yet to report, so only the fan-out's own
-// release can: the case fails without it.
+// TestSidesFirstIdleSidesHoldNothing checks RW14's "a side left idle (above)
+// is not waited for either, and a hold that waits for no side lets the cntlrs
+// go at once" with every side idle: a standby whose CnConf is absent leaves
+// every side idle (RW15), and the resolved cntlrs are driven with the fake
+// clock never moving, so the barrier's timer cannot be what releases them. No
+// child exists yet to report, so only the fan-out's own release can: the case
+// fails without it.
 func TestSidesFirstIdleSidesHoldNothing(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
@@ -4111,6 +4326,653 @@ func TestSidesFirstIdleSidesHoldNothing(t *testing.T) {
 	}
 	if recs := h.logs.withMsg(msgSpSidesUnsynced); len(recs) != 0 {
 		t.Fatalf("%d %q records, want none", len(recs), msgSpSidesUnsynced)
+	}
+}
+
+// TestSidesFirstHoldWithEverySideUnhealthyHoldsNothing checks RW14's "a hold
+// that waits for no side lets the cntlrs go at once" for a fan-out whose load
+// reads every side's record with an err_epoch, as for a pool whose disk
+// nodes are all dead: the barrier waits for none of them. No DN answers and
+// the fake clock never moves, so neither a side's report nor the barrier's
+// timer can release the cntlrs: only the fan-out's own release can, and a
+// barrier that waited for every side when none is healthy would hold them
+// for good.
+func TestSidesFirstHoldWithEverySideUnhealthyHoldsNothing(t *testing.T) {
+	h := newSpHarness(t)
+	// No DN answers: no side stub at all.
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	epoch := h.clk.nowUnix()
+	state := spFixture()
+	sides := 0
+	for _, slice := range state.Slices {
+		for _, grp := range allGroups(slice) {
+			for _, list := range [][]*pb.Leg{
+				grp.GetLegList(),
+				grp.GetSpareLegList(),
+			} {
+				for _, leg := range list {
+					for _, side := range leg.GetSideList() {
+						side.ErrEpoch = epoch
+						sides++
+					}
+				}
+			}
+		}
+	}
+	if sides == 0 {
+		t.Fatalf("fixture: no side to give an err_epoch")
+	}
+	h.ops.setState(state)
+	stamps := stampCntlrs(h)
+	h.start()
+	waitFor(t, "every cntlr sent N with every side unhealthy", func() bool {
+		return len(stamps.at(testSpRev)) == 3
+	})
+	if recs := h.logs.withMsg(msgSpSidesUnsynced); len(recs) != 0 {
+		t.Fatalf("%d %q records, want none: no timer released anything",
+			len(recs), msgSpSidesUnsynced)
+	}
+}
+
+// TestSidesFirstHoldTakesItsSetAtItsStartAndAtABump pins when RW14's barrier
+// takes its set of sides (holdCntlrs): when it begins, from the fan-out's
+// side plans, leaving out each one whose record had an err_epoch in that
+// fan-out's load, and again at a fan-out of a newer revision, from that
+// fan-out's plans. A re-fan at the held revision replaces the held plans and
+// keeps the set as it is: a side it read healthy stays waited for though its
+// record has an err_epoch since, and a side the re-fan starts is not added.
+// No fan-out moves the deadline. A load that reads every side unhealthy
+// leaves the set empty, at a bump as at the barrier's start: an empty set is
+// never filled with every side.
+func TestSidesFirstHoldTakesItsSetAtItsStartAndAtABump(t *testing.T) {
+	captureLogs(t)
+	w := spTestWorker(newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	))
+	a := sideKey{legId: 1, sideId: 11}
+	b := sideKey{legId: 2, sideId: 12}
+	c := sideKey{legId: 3, sideId: 13}
+	fanOut := func(revision uint64, epochs map[sideKey]uint64) *spPlan {
+		plan := &spPlan{
+			sides:  make(map[sideKey]*sidePlan),
+			cntlrs: map[uint64]*cntlrPlan{revision: {cntlrId: revision}},
+		}
+		for key, epoch := range epochs {
+			plan.sides[key] = &sidePlan{errEpoch: epoch}
+		}
+		w.desired.revision = revision
+		w.holdCntlrs(plan)
+		return plan
+	}
+	want := func(step string, plan *spPlan, revision uint64,
+		keys ...sideKey) {
+		t.Helper()
+		if w.held.revision != revision || w.held.plans[revision] == nil ||
+			len(w.held.plans) != len(plan.cntlrs) {
+			t.Fatalf("%s: held revision %d plans %v, want the fan-out's "+
+				"at %d", step, w.held.revision, w.held.plans, revision)
+		}
+		if len(w.held.awaited) != len(keys) {
+			t.Fatalf("%s: awaited = %v, want %v", step, w.held.awaited, keys)
+		}
+		for _, key := range keys {
+			if !w.held.awaited[key] {
+				t.Fatalf("%s: awaited = %v, want %v", step, w.held.awaited,
+					keys)
+			}
+		}
+	}
+
+	plan := fanOut(10, map[sideKey]uint64{a: 0, b: 7})
+	want("the barrier begins", plan, 10, a)
+	timer := w.held.timer
+	plan = fanOut(10, map[sideKey]uint64{a: 9, b: 7, c: 0})
+	want("a re-fan at the held revision", plan, 10, a)
+	plan = fanOut(11, map[sideKey]uint64{a: 9, b: 0, c: 0})
+	want("a bump", plan, 11, b, c)
+	plan = fanOut(11, map[sideKey]uint64{a: 0, b: 5, c: 5})
+	want("a re-fan at the bump's revision", plan, 11, b, c)
+	plan = fanOut(12, map[sideKey]uint64{a: 9, b: 5, c: 5})
+	want("a bump whose load reads every side unhealthy", plan, 12)
+	if w.held.timer != timer {
+		t.Fatalf("a fan-out replaced the barrier's timer: its deadline moved")
+	}
+
+	// A new barrier, from a load that reads every side unhealthy.
+	w.held.timer.stop()
+	w.held = nil
+	plan = fanOut(13, map[sideKey]uint64{a: 9, b: 5, c: 5})
+	want("a barrier that begins with every side unhealthy", plan, 13)
+}
+
+// TestSidesFirstHoldCountsOnlyTheSidesItWaitsFor pins what RW14's barrier
+// counts, for its release (releaseSynced) and for the side_cnt of the record
+// its timer logs (expireHold): the side children of its set that have not
+// reported the held revision. A side child outside the set, however far
+// behind, holds nothing and is not counted, and a side of the set whose
+// child the diff has stopped is not waited for.
+func TestSidesFirstHoldCountsOnlyTheSidesItWaitsFor(t *testing.T) {
+	logs := captureLogs(t)
+	clk := newFakeClock()
+	w := spTestWorker(newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), clk,
+	))
+	const held = testSpRev + 1
+	behind := sideKey{legId: 1, sideId: 11}
+	unhealthy := sideKey{legId: 2, sideId: 12}
+	stopped := sideKey{legId: 3, sideId: 13}
+	w.held = &cntlrHold{
+		revision: held,
+		plans:    map[uint64]*cntlrPlan{},
+		timer:    clk.newTimer(roundInterval),
+		awaited:  map[sideKey]bool{behind: true, stopped: true},
+	}
+	w.sides[behind] = &sideChild{synced: testSpRev}
+	w.sides[unhealthy] = &sideChild{}
+	if got := w.unsyncedSides(); got != 1 {
+		t.Fatalf("unsynced sides = %d, want the one of the set behind", got)
+	}
+	w.releaseSynced()
+	if w.held == nil {
+		t.Fatalf("released while a side the barrier waits for is behind")
+	}
+	w.expireHold(context.Background())
+	recs := logs.withMsg(msgSpSidesUnsynced)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want one", len(recs), msgSpSidesUnsynced)
+	}
+	if cnt, _ := recs[0]["side_cnt"].(float64); cnt != 1 {
+		t.Fatalf("side_cnt = %v, want 1: the side of the set behind, not "+
+			"the one left out", recs[0]["side_cnt"])
+	}
+	if w.held != nil {
+		t.Fatalf("the barrier's bound released nothing")
+	}
+
+	// Once the side of the set reports, the barrier releases, the side left
+	// out still at nothing.
+	w.held = &cntlrHold{
+		revision: held,
+		plans:    map[uint64]*cntlrPlan{},
+		timer:    clk.newTimer(roundInterval),
+		awaited:  map[sideKey]bool{behind: true, stopped: true},
+	}
+	w.sides[behind].synced = held
+	w.releaseSynced()
+	if w.held != nil {
+		t.Fatalf("not released with every side of the set synced")
+	}
+}
+
+// cntlrStamp is one SyncupCntlr as a cntlr stub received it: its revision and
+// the fake time since the stamps began.
+type cntlrStamp struct {
+	revision uint64
+	after    time.Duration
+}
+
+// cntlrStamps records every SyncupCntlr the harness's cntlr stubs are sent,
+// per cntlr_id, and answers each one applied.
+type cntlrStamps struct {
+	mu    sync.Mutex
+	clk   *fakeClock
+	start time.Time
+	sent  map[uint64][]cntlrStamp
+}
+
+// stampCntlrs installs the stamps on every cntlr stub the harness has; its
+// fake time starts now.
+func stampCntlrs(h *spHarness) *cntlrStamps {
+	s := &cntlrStamps{
+		clk:   h.clk,
+		start: h.clk.now(),
+		sent:  make(map[uint64][]cntlrStamp),
+	}
+	for _, stub := range h.cntlrs {
+		stub.syncupReply = func(
+			req *pb.SyncupCntlrRequest,
+		) *pb.SyncupCntlrReply {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			id := req.GetCntlrPointer().GetCntlrId()
+			s.sent[id] = append(s.sent[id], cntlrStamp{
+				revision: req.GetRevision(),
+				after:    s.clk.now().Sub(s.start),
+			})
+			return &pb.SyncupCntlrReply{Revision: req.GetRevision()}
+		}
+	}
+	return s
+}
+
+// at maps each cntlr_id to the fake times its SyncupCntlr at revision arrived.
+func (s *cntlrStamps) at(revision uint64) map[uint64][]time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[uint64][]time.Duration)
+	for id, stamps := range s.sent {
+		for _, stamp := range stamps {
+			if stamp.revision == revision {
+				out[id] = append(out[id], stamp.after)
+			}
+		}
+	}
+	return out
+}
+
+// sideIdsSentAt reports whether the harness's side stubs were sent a
+// SyncupSide at revision for each of sideIds.
+func sideIdsSentAt(h *spHarness, revision uint64, sideIds ...uint64) bool {
+	sent := make(map[uint64]bool)
+	for _, stub := range h.sides {
+		for _, req := range stub.syncups() {
+			if req.GetRevision() == revision {
+				sent[req.GetSidePointer().GetSideId()] = true
+			}
+		}
+	}
+	for _, sideId := range sideIds {
+		if !sent[sideId] {
+			return false
+		}
+	}
+	return true
+}
+
+// holdSyncupAt makes a side stub hold its answer to every SyncupSide at
+// revision until the returned release is called. The test registers the
+// release with t.Cleanup after it starts the coordinator, so it runs before
+// the coordinator's stop, which would otherwise wait for the held call to
+// time out.
+func holdSyncupAt(stub *stubSideAgent, revision uint64) func() {
+	gate := make(chan struct{})
+	stub.syncupReply = func(req *pb.SyncupSideRequest) *pb.SyncupSideReply {
+		if req.GetRevision() == revision {
+			<-gate
+		}
+		return &pb.SyncupSideReply{Revision: req.GetRevision()}
+	}
+	return sync.OnceFunc(func() { close(gate) })
+}
+
+// noCntlrSentAt fails the test if a cntlr is sent a SyncupCntlr at revision
+// within a short real-time window: a release the barrier must not make needs
+// real time to reach a stub.
+func noCntlrSentAt(t *testing.T, stamps *cntlrStamps, revision uint64,
+	why string) {
+	t.Helper()
+	settle := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(settle) && len(stamps.at(revision)) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if sent := stamps.at(revision); len(sent) != 0 {
+		t.Fatalf("cntlrs were sent %d at fake times %v %s", revision, sent,
+			why)
+	}
+}
+
+// TestSidesFirstHoldLeavesOutAnUnhealthySide checks RW14's set of sides end
+// to end: the barrier waits for the sides whose record the fan-out's load
+// read with no err_epoch, and for no other. The spare's side has one and its
+// DN never answers, and the fake clock never moves, so no timer releases
+// anything: the cntlrs are sent N without waiting for the spare's side, and
+// at the bump, while dn1 holds its answer, none is sent N+1 until that
+// answer comes.
+func TestSidesFirstHoldLeavesOutAnUnhealthySide(t *testing.T) {
+	h := newSpHarness(t)
+	// The spare's DN is down: nothing answers at spDnD.
+	for _, addr := range []string{spDnA, spDnB, spDnC} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	const bump = testSpRev + 1
+	epoch := h.clk.nowUnix()
+	load := func(revision uint64) *model.SpState {
+		state := spFixture()
+		state.SpRevision = revision
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+		return state
+	}
+	h.ops.setState(load(testSpRev))
+	release := holdSyncupAt(h.sides[spDnB], bump)
+	stamps := stampCntlrs(h)
+	w := h.start()
+	t.Cleanup(release)
+
+	waitFor(t, "every cntlr sent N without the spare's side", func() bool {
+		return len(stamps.at(testSpRev)) == 3
+	})
+	h.ops.setState(load(bump))
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "the live sides sent N+1", func() bool {
+		return sideIdsSentAt(h, bump,
+			spSideMeta, spSideSrc, spSideDst, spSideB)
+	})
+	noCntlrSentAt(t, stamps, bump,
+		"while dn1 held the answer of a side the barrier waits for")
+	release()
+	waitFor(t, "every cntlr sent N+1", func() bool {
+		return len(stamps.at(bump)) == 3
+	})
+	if recs := h.logs.withMsg(msgSpSidesUnsynced); len(recs) != 0 {
+		t.Fatalf("%d %q records, want none: no timer released anything",
+			len(recs), msgSpSidesUnsynced)
+	}
+}
+
+// TestSidesFirstHoldRetakesItsSetAtABump checks that a fan-out of a newer
+// revision takes RW14's set of sides again, from its own load. The spare's DN
+// never answers, and the start's load reads its side healthy, so the barrier
+// the start's fan-out begins waits for it. Half an interval in, a bump whose
+// load gives that side an err_epoch replaces the held plans: the barrier
+// waits only for the live sides from then on, so the cntlrs are sent the
+// bump, and only the bump, at that fake instant, as soon as those answer it.
+func TestSidesFirstHoldRetakesItsSetAtABump(t *testing.T) {
+	h := newSpHarness(t)
+	for _, addr := range []string{spDnA, spDnB, spDnC} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	const bump = testSpRev + 1
+	stamps := stampCntlrs(h)
+	w := h.start()
+	h.reactWith(w, &fakeReactionOps{})
+	waitFor(t, "the live sides sent N", func() bool {
+		return sideIdsSentAt(h, testSpRev,
+			spSideMeta, spSideSrc, spSideDst, spSideB)
+	})
+
+	half := roundInterval / 2
+	h.clk.advance(half)
+	next := spFixture()
+	next.SpRevision = bump
+	*sliceEpochField(next.Slices[spSliceA], 0, spSideSpare) = h.clk.nowUnix()
+	h.ops.setState(next)
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "every cntlr sent N+1", func() bool {
+		return len(stamps.at(bump)) == 3
+	})
+	if sent := stamps.at(testSpRev); len(sent) != 0 {
+		t.Fatalf("cntlrs were sent the superseded N at %v", sent)
+	}
+	for cntlrId, after := range stamps.at(bump) {
+		if len(after) != 1 || after[0] != half {
+			t.Fatalf("cntlr %d was sent N+1 at fake times %v, want once, "+
+				"at the bump (%v)", cntlrId, after, half)
+		}
+	}
+	if recs := h.logs.withMsg(msgSpSidesUnsynced); len(recs) != 0 {
+		t.Fatalf("%d %q records, want none: the bump's own set released "+
+			"the cntlrs", len(recs), msgSpSidesUnsynced)
+	}
+}
+
+// TestSidesFirstHoldKeepsItsSetAtAReFan checks that a re-fan at the held
+// revision keeps RW14's set of sides. The spare's DN has no DnConf, so its
+// side is idle and every tick re-fans at the same revision (RW14); the
+// destination's side has an err_epoch throughout and its DN never answers,
+// so it is never waited for. At the bump, half an interval after the start,
+// dn1 holds the answer of the source side, and before the next tick the
+// stored state gives that side an err_epoch too: the tick's re-fan and pass
+// read it, and the barrier still waits for the side. The cntlrs go at the
+// barrier's bound, one cntlr_interval after the bump, and the record counts
+// that one side, not the destination's, which it never waited for.
+func TestSidesFirstHoldKeepsItsSetAtAReFan(t *testing.T) {
+	h := newSpHarness(t)
+	// dn2, the destination's DN, never answers.
+	for _, addr := range []string{spDnA, spDnB} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	const bump = testSpRev + 1
+	epoch := h.clk.nowUnix()
+	load := func(revision uint64) *model.SpState {
+		state := spFixture()
+		state.SpRevision = revision
+		delete(state.DnByAddr, spDnD)
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideDst) = epoch
+		return state
+	}
+	h.ops.setState(load(testSpRev))
+	release := holdSyncupAt(h.sides[spDnB], bump)
+	stamps := stampCntlrs(h)
+	w := h.start()
+	t.Cleanup(release)
+	h.reactWith(w, &fakeReactionOps{})
+	waitFor(t, "every cntlr sent N", func() bool {
+		return len(stamps.at(testSpRev)) == 3
+	})
+
+	half := roundInterval / 2
+	h.clk.advance(half)
+	h.ops.setState(load(bump))
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "the live sides sent N+1", func() bool {
+		return sideIdsSentAt(h, bump, spSideMeta, spSideSrc, spSideB)
+	})
+	h.ops.putSliceErrEpoch(spSliceA, 0, spSideSrc, h.clk.nowUnix())
+	loads := h.ops.loadCnt()
+	// The tick, one cntlr_interval after the start: a re-fan at the held
+	// revision, then a pass.
+	h.clk.advance(roundInterval - half)
+	waitFor(t, "the tick's re-fan and pass", func() bool {
+		return h.ops.loadCnt() >= loads+2
+	})
+	noCntlrSentAt(t, stamps, bump,
+		"after a re-fan at the held revision read the source side unhealthy")
+	h.clk.advance(half)
+	waitFor(t, "every cntlr sent N+1", func() bool {
+		return len(stamps.at(bump)) == 3
+	})
+	for cntlrId, after := range stamps.at(bump) {
+		if after[0] != half+roundInterval {
+			t.Fatalf("cntlr %d was first sent N+1 at fake time %v, want "+
+				"at the barrier's bound (%v)", cntlrId, after[0],
+				half+roundInterval)
+		}
+	}
+	recs := h.logs.withMsg(msgSpSidesUnsynced)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want the one release by the timer",
+			len(recs), msgSpSidesUnsynced)
+	}
+	if rev, _ := recs[0]["revision"].(float64); uint64(rev) != bump {
+		t.Fatalf("released at revision %v, want %d", recs[0]["revision"], bump)
+	}
+	if cnt, _ := recs[0]["side_cnt"].(float64); cnt != 1 {
+		t.Fatalf("side_cnt = %v, want 1: the source side the barrier "+
+			"waited for, not the destination's it left out",
+			recs[0]["side_cnt"])
+	}
+}
+
+// TestSidesFirstHoldKeepsASideThatTurnsUnhealthy checks that a side RW14's
+// barrier waits for stays waited for once its own missed round has set its
+// err_epoch: the set is taken when the barrier begins, from the fan-out's
+// load, and no verdict or record read during the wait changes it. The
+// spare's DN never answers, so the cntlrs go at the barrier's bound, one
+// cntlr_interval after the start's fan-out, and not before.
+func TestSidesFirstHoldKeepsASideThatTurnsUnhealthy(t *testing.T) {
+	h := newSpHarness(t)
+	// The spare's DN is down: nothing answers at spDnD.
+	for _, addr := range []string{spDnA, spDnB, spDnC} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
+	stamps := stampCntlrs(h)
+	w := h.start()
+	h.reactWith(w, &fakeReactionOps{})
+	waitFor(t, "the spare's side err_epoch set by its missed round",
+		func() bool {
+			return h.ops.sliceErrEpoch(spSliceA, 0, spSideSpare) != 0
+		})
+	waitFor(t, "the live sides sent N", func() bool {
+		return sideIdsSentAt(h, testSpRev,
+			spSideMeta, spSideSrc, spSideDst, spSideB)
+	})
+	early := 250 * time.Millisecond
+	h.clk.advance(roundInterval - early)
+	noCntlrSentAt(t, stamps, testSpRev,
+		"before the barrier's bound, the spare's side never having answered")
+	h.clk.advance(early)
+	waitFor(t, "every cntlr sent N", func() bool {
+		return len(stamps.at(testSpRev)) == 3
+	})
+	for cntlrId, after := range stamps.at(testSpRev) {
+		if after[0] != roundInterval {
+			t.Fatalf("cntlr %d was first sent N at fake time %v, want at "+
+				"the barrier's bound (%v)", cntlrId, after[0], roundInterval)
+		}
+	}
+	recs := h.logs.withMsg(msgSpSidesUnsynced)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want the one release by the timer",
+			len(recs), msgSpSidesUnsynced)
+	}
+	if cnt, _ := recs[0]["side_cnt"].(float64); cnt < 1 {
+		t.Fatalf("side_cnt = %v, want at least the spare's side",
+			recs[0]["side_cnt"])
+	}
+}
+
+// TestSidesFirstHoldAfterADemotionLeavesOutAnUnhealthySide checks the set
+// of sides of the barrier RW22's demotion hold hands on: the spare's side,
+// whose record has an err_epoch in every load and whose DN never answers, is
+// left out (TestSidesFirstHoldAfterADemotionTakesTheNewestPlans pins which of
+// the held plans the set comes from). The old primary answers its demotion
+// at once and the fake clock never moves, so no timer releases anything: the
+// other cntlrs are sent the failover once dn1, whose side is waited for,
+// answers it, and not before.
+func TestSidesFirstHoldAfterADemotionLeavesOutAnUnhealthySide(t *testing.T) {
+	h := newSpHarness(t)
+	for _, addr := range []string{spDnA, spDnB, spDnC} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	const bump = testSpRev + 1
+	epoch := h.clk.nowUnix()
+	unhealthySpare := func(state *model.SpState) *model.SpState {
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+		return state
+	}
+	h.ops.setState(unhealthySpare(spFixture()))
+	release := holdSyncupAt(h.sides[spDnB], bump)
+	stamps := stampCntlrs(h)
+	w := h.start()
+	t.Cleanup(release)
+	waitFor(t, "every cntlr sent N", func() bool {
+		return len(stamps.at(testSpRev)) == 3
+	})
+
+	h.ops.setState(unhealthySpare(failoverFixture(bump)))
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "the old primary sent its demotion", func() bool {
+		_, ok := stamps.at(bump)[spCntlrPrimary]
+		return ok
+	})
+	waitFor(t, "the live sides sent the failover", func() bool {
+		return sideIdsSentAt(h, bump,
+			spSideMeta, spSideSrc, spSideDst, spSideB)
+	})
+	settle := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(settle) && len(stamps.at(bump)) == 1 {
+		time.Sleep(time.Millisecond)
+	}
+	if sent := stamps.at(bump); len(sent) != 1 {
+		t.Fatalf("cntlrs sent the failover = %v, want the demoted one "+
+			"alone while dn1 held the answer of a side the barrier waits "+
+			"for", sent)
+	}
+	release()
+	waitFor(t, "the other cntlrs sent the failover", func() bool {
+		return len(stamps.at(bump)) == 3
+	})
+	for _, msg := range []string{msgSpSidesUnsynced, msgSpDemotionUnsynced} {
+		if recs := h.logs.withMsg(msg); len(recs) != 0 {
+			t.Fatalf("%d %q records, want none: no timer released "+
+				"anything", len(recs), msg)
+		}
+	}
+}
+
+// TestSidesFirstHoldAfterADemotionTakesTheNewestPlans checks that the barrier
+// RW22's demotion hold hands on takes its set of sides from the newest side
+// plans the demotion hold kept (endDemotion), not from the failover's own
+// fan-out. The spare's DN never answers. The start's load reads its side
+// unhealthy, so the first barrier does not wait for it; the failover's load
+// reads it healthy, and a bump inside the demotion hold reads it unhealthy
+// again. The old primary refuses its demotion, and a refusal reports
+// nothing, so the demotion hold lasts until its accepted reply to the bump;
+// the fake clock never moves, so no timer releases anything: the other
+// cntlrs are sent the bump once the live sides answer it, without waiting
+// for the spare's side, and never the failover it superseded.
+func TestSidesFirstHoldAfterADemotionTakesTheNewestPlans(t *testing.T) {
+	h := newSpHarness(t)
+	// The spare's DN is down: nothing answers at spDnD.
+	for _, addr := range []string{spDnA, spDnB, spDnC} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	const (
+		bump  = testSpRev + 1
+		bump2 = testSpRev + 2
+	)
+	epoch := h.clk.nowUnix()
+	unhealthySpare := func(state *model.SpState) *model.SpState {
+		*sliceEpochField(state.Slices[spSliceA], 0, spSideSpare) = epoch
+		return state
+	}
+	h.ops.setState(unhealthySpare(spFixture()))
+	stamps := stampCntlrs(h)
+	stamp := h.cntlrs[spCnA].syncupReply
+	h.cntlrs[spCnA].syncupReply = func(
+		req *pb.SyncupCntlrRequest,
+	) *pb.SyncupCntlrReply {
+		if req.GetRevision() == bump {
+			return &pb.SyncupCntlrReply{AgentReply: &pb.AgentReply{
+				Code: common.ReplyCodeUnknownObject,
+			}}
+		}
+		return stamp(req)
+	}
+	w := h.start()
+	waitFor(t, "every cntlr sent N", func() bool {
+		return len(stamps.at(testSpRev)) == 3
+	})
+
+	h.ops.setState(failoverFixture(bump))
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "the old primary sent its demotion", func() bool {
+		return cntlrSentAt(h.cntlrs[spCnA], bump)
+	})
+	h.ops.setState(unhealthySpare(failoverFixture(bump2)))
+	w.update(desiredState{revision: bump2, handle: testSpName})
+	waitFor(t, "every cntlr sent N+2 without the spare's side", func() bool {
+		return len(stamps.at(bump2)) == 3
+	})
+	if sent := stamps.at(bump); len(sent) != 0 {
+		t.Fatalf("cntlrs were sent the superseded N+1 at %v", sent)
+	}
+	for _, msg := range []string{msgSpSidesUnsynced, msgSpDemotionUnsynced} {
+		if recs := h.logs.withMsg(msg); len(recs) != 0 {
+			t.Fatalf("%d %q records, want none: no timer released "+
+				"anything", len(recs), msg)
+		}
 	}
 }
 
@@ -4717,6 +5579,19 @@ func sliceEpochField(slice *pb.Slice, legId uint64, sideId uint64) *uint64 {
 	return nil
 }
 
+// commitBump bumps the stored state's SpRev and nothing else, copy-on-write
+// as putCntlrErrEpoch does, and returns the new revision. Handed to the
+// coordinator, it hands every child its plan again (RW6): each cntlr
+// converges once more.
+func (o *fakeSpOps) commitBump() uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	next := *o.state
+	next.SpRevision++
+	o.state = &next
+	return next.SpRevision
+}
+
 // commitFailover applies what model.Failover commits to the stored state,
 // copy-on-write as putCntlrErrEpoch does: the role moves from oldId to newId,
 // the new primary is settling and the old one no longer (HL2), and SpRev
@@ -5158,18 +6033,18 @@ const (
 // once the pool of spSliceB no longer holds the created td's thin id
 // (cnagent.md CN14): with converge, its converge's report, which the
 // SyncupCntlr reply carries, and otherwise a Check round's probe. The
-// converge's `dmsetup create` of the thin table fails with ENODATA, and the
-// raid0 over the td's volumes cannot be built, nor the ns-dev of its namespace
-// over the raid0. The probe finds the volume absent — MISSING, naming no id —
-// and the raid0 and the ns-dev failing as before. A standby builds none of it
-// (CN9).
+// converge's `dmsetup create` of the thin table fails with ENODATA, so its
+// thin row carries the reason thin id lost, and the raid0 over the td's
+// volumes cannot be built, nor the ns-dev of its namespace over the raid0.
+// The probe finds the volume absent — MISSING, with no reason — and the raid0
+// and the ns-dev failing as before. A standby builds none of it (CN9).
 func lostThinInfo(converge bool) *pb.CntlrInfo {
 	thin := &pb.ResInfo{
 		ResName: "thin-b",
 		Status:  pb.ResStatus_RES_STATUS_MISSING,
 	}
 	if converge {
-		thin = resErr("thin-b", "dmsetup create thin-b --table 0 262144 "+
+		thin = resLostId("thin-b", "dmsetup create thin-b --table 0 262144 "+
 			"thin 253:7 2: device-mapper: reload ioctl on thin-b  failed: "+
 			"No data available\nCommand failed.")
 	}
@@ -5205,17 +6080,24 @@ func lostThinInfo(converge bool) *pb.CntlrInfo {
 // on a live coordinator with the fake clock. The pool of one slice has lost a
 // created td's thin id, so whichever cntlr is primary reports the td's
 // volume, its raid0 and the ns-dev of its namespace failing — its converge's
-// SyncupCntlr reply naming the id missing, every Check round after it reading
-// the volume MISSING — and a standby reports none of it. A report whose ERROR
-// rows are all the lost td's is no trigger (HL2's shared-state rows), and a
-// probe's, which names no id, fails the primary over once, after which the
-// role is not handed back while the new primary fails only on rows the old one
-// failed on; without the two refusals the promoted primary, never settling,
-// would hand the role back once per cntlr_unhealthy to the peer whose standby
-// report had cleared its err_epoch, and host paths would move every window for
-// as long as the td stayed lost.
-// Across three windows there is at most that one failover, the primary's
-// err_epoch stays set, and a pass past its threshold says why nothing moves.
+// SyncupCntlr reply carrying the lost-id reason on the volume's row, every
+// Check round after it reading the volume MISSING with no reason — and a
+// standby reports none of it. The cn agents leave a probe's info out of a
+// Check reply when the stream last sent the same (omitUnchangedInfo). A
+// probe's report, held at the primary's threshold, fails the primary over
+// once, and the role is not handed back while the new primary fails only on
+// rows the old one failed on (the second refusal). Then a bump re-syncs the
+// new primary: its converge's report is held from then on, the probes after
+// it being unchanged, and its thin row is no row the old primary failed on,
+// so only HL2's shared-state class, which reads the row's reason, keeps the
+// role where it is (the first refusal). Without the two refusals the
+// promoted primary, never settling, would hand the role back once per
+// cntlr_unhealthy to the peer whose standby report had cleared its
+// err_epoch, and host paths would move every window for as long as the td
+// stayed lost. Across three windows there is that one failover, the
+// primary's err_epoch stays set, and the passes past its threshold say why
+// nothing moves, by the second refusal before the bump and by the first
+// after it.
 func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	synctest.Test(t, testASharedErrorDoesNotPingPongTheRole)
 }
@@ -5238,14 +6120,16 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
 	// Both cntlrs that can hold the role answer as the cn agent does: the
 	// converge's report on a SyncupCntlr, the probe's on a Check round at the
-	// revision of the last request accepted, the lost td's rows only while the
-	// request says primary and enabled. A Check before any SyncupCntlr answers
-	// revision 0, which re-syncs (RW4 step 5).
+	// revision of the last request accepted, left out when unchanged since
+	// the stream last sent it, the lost td's rows only while the request says
+	// primary and enabled. A Check before any SyncupCntlr answers revision 0,
+	// which re-syncs (RW4 step 5).
 	actsPrimary := func(req *pb.SyncupCntlrRequest) bool {
 		return req.GetCntlr().GetPrimary() && !req.GetCntlr().GetDisabled()
 	}
 	for _, addr := range []string{spCnA, spCnB} {
 		stub := h.cntlrs[addr]
+		stub.omitUnchangedInfo = true
 		stub.syncupReply = func(
 			req *pb.SyncupCntlrRequest,
 		) *pb.SyncupCntlrReply {
@@ -5292,6 +6176,16 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 		}
 		return out
 	}
+	// refusals counts the passes' records of one of AR5's refusals.
+	refusals := func(reason string) int {
+		n := 0
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionFailover && rec["reason"] == reason {
+				n++
+			}
+		}
+		return n
+	}
 
 	// The primary's first converge reports the lost id and stamps it.
 	waitFor(t, "the primary's report", func() bool {
@@ -5299,11 +6193,27 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	})
 	end := h.clk.nowUnix() + 3*pingPongCntlrUnhealthy + pingPongInterval
 	moved := 0
+	// sharedBefore is the count of shared_state refusals at the moment the
+	// bump is handed over; -1 before it.
+	sharedBefore := -1
 	for h.clk.nowUnix() < end {
-		h.advanceUntil("a failover or three windows of cntlr_unhealthy",
-			5*time.Second, func() bool {
-				return len(failovers()) != moved || h.clk.nowUnix() >= end
+		h.advanceUntil("a failover, the bump's moment or three windows of "+
+			"cntlr_unhealthy", 5*time.Second, func() bool {
+			return len(failovers()) != moved ||
+				(sharedBefore < 0 && refusals("same_error") > 0) ||
+				h.clk.nowUnix() >= end
+		})
+		if sharedBefore < 0 && refusals("same_error") > 0 {
+			// The second refusal holds the role on the new primary's probe:
+			// a bump re-syncs it, and its converge's report is held from
+			// then on.
+			sharedBefore = refusals("shared_state")
+			w.update(desiredState{
+				revision: h.ops.commitBump(),
+				handle:   testSpName,
 			})
+			continue
+		}
 		calls := failovers()
 		if len(calls) == moved {
 			continue
@@ -5320,31 +6230,24 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	}
 
 	calls := failovers()
-	if len(calls) > 1 {
+	if len(calls) != 1 {
 		t.Fatalf("%d failovers in three windows of cntlr_unhealthy, want "+
-			"at most one: %+v", len(calls), calls)
+			"the one over the probe's report: %+v", len(calls), calls)
 	}
 	if other := rops.allCalls(); len(other) != len(calls) {
 		t.Fatalf("reaction ops = %+v, want the failovers alone", other)
 	}
-	primary := spCntlrPrimary
-	if len(calls) == 1 {
-		primary = calls[0].newId
-	}
-	if h.ops.cntlrErrEpoch(primary) == 0 {
+	if h.ops.cntlrErrEpoch(calls[0].newId) == 0 {
 		t.Fatalf("the primary's err_epoch was cleared: the lost td is still " +
 			"reported")
 	}
-	refused := 0
-	for _, rec := range h.logs.withMsg(msgReactionSkipped) {
-		if rec["kind"] == reactionFailover &&
-			(rec["reason"] == "shared_state" || rec["reason"] == "same_error") {
-			refused++
-		}
-	}
-	if refused == 0 {
-		t.Fatalf("no pass said why the primary past its threshold stayed: %v",
+	if sharedBefore < 0 {
+		t.Fatalf("no pass refused to hand the role back (same_error): %v",
 			h.logs.withMsg(msgReactionSkipped))
+	}
+	if refusals("shared_state") == sharedBefore {
+		t.Fatalf("no pass after the bump held the role on the converge's "+
+			"report (shared_state): %v", h.logs.withMsg(msgReactionSkipped))
 	}
 }
 
@@ -5354,18 +6257,19 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 // fixture's standby is disabled too — so AR7 is what would act on it. Without
 // the refusal it would be replaced once its err_epoch is cntlr_unhealthy old,
 // and again on every pass after, though a replacement reads the same rows from
-// the same pool. The refusal reads the held report, the primary's
-// latest (AR1), which names the id only when it is a converge's: here the cn
-// agent answers as it does once its stream has already sent the probe's view
-// — its first Check, one revision behind as after an agent restart while the
-// SP moved on, reads the volume MISSING, the re-sync's converge names the id,
-// and every later probe, unchanged, carries no CntlrInfo (omitUnchangedInfo)
-// — so the converge's report stays the one held. Across three windows of
-// cntlr_unhealthy the primary is not replaced, its err_epoch stays set, and
-// a pass says why. An own row beside the lost td's still gets it replaced, at
-// cntlr_unhealthy and not before; so does a probe's report held instead
-// (TestReactionSharedStateErrorIsNotReplaced), after which AR7's second
-// refusal holds the replacement (TestASharedErrorDoesNotReplaceTheReplacement).
+// the same pool. The refusal reads the held report, the primary's latest
+// (AR1), which carries the lost-id reason only when it is a converge's: here
+// the cn agent answers as it does once its stream has already sent the
+// probe's view — its first Check, one revision behind as after an agent
+// restart while the SP moved on, reads the volume MISSING, the re-sync's
+// converge carries the reason, and every later probe, unchanged, carries no
+// CntlrInfo (omitUnchangedInfo) — so the converge's report stays the one
+// held. Across three windows of cntlr_unhealthy the primary is not replaced,
+// its err_epoch stays set, and a pass says why. An own row beside the lost
+// td's still gets it replaced, at cntlr_unhealthy and not before; so does a
+// probe's report held instead (TestReactionSharedStateErrorIsNotReplaced),
+// after which AR7's second refusal holds the replacement
+// (TestASharedErrorDoesNotReplaceTheReplacement).
 func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 	// run drives the SP for windows of cntlr_unhealthy past the primary's
 	// first error and returns the harness, the recorded reaction ops and the
@@ -5531,11 +6435,12 @@ const (
 // agent does once the pool of spSliceB no longer holds the created td's thin
 // id (lostThinInfo): a Check for a cntlr it has had no SyncupCntlr for is
 // refused as an unknown object, with no info (checkCntlrRound); a SyncupCntlr
-// is answered with the converge's report, which names the id; and every Check
-// after it with the probe's, which reads the volume MISSING and names none,
-// left out when unchanged since the stream last sent it (omitUnchangedInfo).
-// The lost td's rows are reported only while the cntlr's last request says
-// primary and enabled. With own, the cntlr also fails a row of its own.
+// is answered with the converge's report, which carries the lost-id reason;
+// and every Check after it with the probe's, which reads the volume MISSING
+// and carries none, left out when unchanged since the stream last sent it
+// (omitUnchangedInfo). The lost td's rows are reported only while the
+// cntlr's last request says primary and enabled. With own, the cntlr also
+// fails a row of its own.
 func answerLostThinId(stub *stubCntlrAgent, own bool) {
 	report := func(req *pb.SyncupCntlrRequest, converge bool) *pb.CntlrInfo {
 		if !req.GetCntlr().GetPrimary() || req.GetCntlr().GetDisabled() {
@@ -5578,27 +6483,46 @@ func answerLostThinId(stub *stubCntlrAgent, own bool) {
 // TestASharedErrorDoesNotReplaceTheCntlr leaves. The SP has one cntlr, so AR7
 // is what acts on its primary, and the pool of one slice has lost a created
 // td's thin id. Every cntlr of the SP answers as the cn agent does
-// (answerLostThinId): its converge names the id, and the Check round after it
-// already carries the probe's report, which names none, so at
-// cntlr_unhealthy the report the coordinator holds is the probe's and AR7's
-// first refusal cannot hold it. The primary is replaced, and the replacement
-// builds over the same pool and reads the same rows. The coordinator keeps
-// the rows of the primary it replaced, so the replacement is not replaced in
-// turn once per cntlr_unhealthy for as long as the td stays lost: across
-// three windows of cntlr_unhealthy there is that one replacement, the
-// replacement's err_epoch stays set, and a pass says why it stays. A
+// (answerLostThinId): its converge carries the lost-id reason, and the Check
+// round after it already carries the probe's report, which carries none, so
+// at cntlr_unhealthy the report the coordinator holds is the probe's and
+// AR7's first refusal cannot hold it. The primary is replaced, and the
+// replacement builds over the same pool and reads the same rows. The
+// coordinator keeps the rows of the primary it replaced, so the replacement
+// is not replaced in turn once per cntlr_unhealthy for as long as the td
+// stays lost: across three windows of cntlr_unhealthy there is that one
+// replacement, the replacement's err_epoch stays set, and a pass says why it
+// stays. Once a pass has, a bump re-syncs the replacement, and its converge's
+// report is held from then on, the probes after it being unchanged: its thin
+// row is no row of the replaced primary's report, so AR7's first refusal,
+// which reads the row's reason, is what keeps the replacement from then on. A
 // replacement that fails on a row of its own beside the lost td's is still
 // replaced, not before cntlr_unhealthy, and its own replacement, failing on
 // the lost td's rows alone, is held by that second replacement's record.
 func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
+	// refusals are the passes' records of one of AR7's refusals of cntlrId.
+	refusals := func(h *spHarness, reason string, cntlrId uint64) int {
+		n := 0
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			id, _ := rec["old_cntlr_id"].(float64)
+			if rec["kind"] == reactionReplaceCntlr &&
+				rec["reason"] == reason && uint64(id) == cntlrId {
+				n++
+			}
+		}
+		return n
+	}
 	// run drives a one-cntlr SP for three windows of cntlr_unhealthy past its
 	// primary's first error, and returns the harness, the replacements the
 	// passes applied and that error's err_epoch. A replacement lands on the
 	// first of replCnA and replCnB its scan does not black-list, and the
-	// cntlr on ownOn also fails a row of its own ("" for none).
+	// cntlr on ownOn also fails a row of its own ("" for none). A nonzero
+	// bumpOn is a cntlr the run bumps the SP for once a pass has refused to
+	// replace it as same_error.
 	run := func(
 		t *testing.T,
 		ownOn string,
+		bumpOn uint64,
 	) (*spHarness, []reactionCall, uint64) {
 		t.Helper()
 		h := newSpHarness(t)
@@ -5649,6 +6573,22 @@ func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 		})
 		epoch := h.ops.cntlrErrEpoch(spCntlrPrimary)
 		end := epoch + 3*pingPongCntlrUnhealthy + pingPongInterval
+		if bumpOn != 0 {
+			h.advanceUntil("AR7's second refusal", 5*time.Second,
+				func() bool {
+					return refusals(h, "same_error", bumpOn) > 0 ||
+						h.clk.nowUnix() >= end
+				})
+			if refusals(h, "same_error", bumpOn) == 0 {
+				t.Fatalf("no pass refused to replace cntlr %d as "+
+					"same_error: %v", bumpOn,
+					h.logs.withMsg(msgReactionSkipped))
+			}
+			w.update(desiredState{
+				revision: h.ops.commitBump(),
+				handle:   testSpName,
+			})
+		}
 		h.advanceUntil("three windows of cntlr_unhealthy", 5*time.Second,
 			func() bool { return h.clk.nowUnix() >= end })
 		var replaces []reactionCall
@@ -5666,21 +6606,9 @@ func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 		}
 		return h, replaces, epoch
 	}
-	// refusals are the passes' records of AR7's second refusal of cntlrId.
-	refusals := func(h *spHarness, cntlrId uint64) int {
-		n := 0
-		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
-			id, _ := rec["old_cntlr_id"].(float64)
-			if rec["kind"] == reactionReplaceCntlr &&
-				rec["reason"] == "same_error" && uint64(id) == cntlrId {
-				n++
-			}
-		}
-		return n
-	}
 
 	t.Run("the lost td's stack alone", inBubble(func(t *testing.T) {
-		h, replaces, _ := run(t, "")
+		h, replaces, _ := run(t, "", replFirstId)
 		if len(replaces) != 1 {
 			t.Fatalf("%d cntlr replacements in three windows of "+
 				"cntlr_unhealthy, want the first primary's alone: %+v",
@@ -5690,14 +6618,15 @@ func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 			t.Fatalf("the replacement's err_epoch was cleared: the lost td " +
 				"is still reported")
 		}
-		if refusals(h, replFirstId) == 0 {
-			t.Fatalf("no pass said why the replacement past cntlr_unhealthy "+
-				"stayed: %v", h.logs.withMsg(msgReactionSkipped))
+		if refusals(h, "shared_state", replFirstId) == 0 {
+			t.Fatalf("no pass after the bump said the replacement stays on "+
+				"its converge's report (shared_state): %v",
+				h.logs.withMsg(msgReactionSkipped))
 		}
 	}))
 
 	t.Run("a row of the replacement's own", inBubble(func(t *testing.T) {
-		h, replaces, _ := run(t, replCnA)
+		h, replaces, _ := run(t, replCnA, 0)
 		if len(replaces) != 2 {
 			t.Fatalf("%d cntlr replacements in three windows of "+
 				"cntlr_unhealthy, want the first primary's and its "+
@@ -5713,11 +6642,11 @@ func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 				"cntlr_unhealthy past its own replacement at %d",
 				second.now, first.now)
 		}
-		if n := refusals(h, replFirstId); n != 0 {
+		if n := refusals(h, "same_error", replFirstId); n != 0 {
 			t.Fatalf("%d same_error skips of the replacement failing on a "+
 				"row of its own, want none", n)
 		}
-		if refusals(h, replFirstId+1) == 0 {
+		if refusals(h, "same_error", replFirstId+1) == 0 {
 			t.Fatalf("no pass said why the second replacement past "+
 				"cntlr_unhealthy stayed: %v",
 				h.logs.withMsg(msgReactionSkipped))

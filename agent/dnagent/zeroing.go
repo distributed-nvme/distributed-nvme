@@ -69,9 +69,10 @@ type zeroJob struct {
 // a migration destination that has not provisioned, the caller has taken the
 // destination's run in the clone-metadata area first (holdMigrMeta, DN13).
 //
-// It refuses once rootCtx is done (SH27): an armed DN12 fence timer
-// is not enrolled in the WaitGroup and can still reach a converge after
-// WaitBackground returned, and a bg.Add after bg.Wait panics.
+// The refusal and the enrollment in bg sit under s.mu, the lock the join
+// marks the server closed under (SH27): the loop is refused once the join has
+// begun or rootCtx is done (bgClosedLocked), and no bg.Add can follow the
+// join's bg.Wait.
 func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	job := zeroJob{
@@ -80,7 +81,7 @@ func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 		devPath: plan.sideDevPath,
 	}
 	s.mu.Lock()
-	if st.zeroing || s.rootCtx.Err() != nil {
+	if st.zeroing || s.bgClosedLocked() {
 		s.mu.Unlock()
 		return
 	}
@@ -89,9 +90,9 @@ func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 	st.zeroing = true
 	st.zeroCancel = cancel
 	st.zeroDone = done
+	s.enrollLocked()
 	s.mu.Unlock()
 
-	s.bg.Add(1)
 	go func() {
 		defer s.bg.Done()
 		defer close(done)
@@ -258,7 +259,7 @@ func (s *DnAgentServer) zeroLoop(
 		}
 		kills = 0
 		batch = min(2*batch, s.zeroBatchMax)
-		release, ok := s.zeroAcquire(ctx, key)
+		release, ok := s.zeroAcquire(ctx, key, st)
 		if !ok {
 			// Shutdown or teardown; the count stays where it was and the next
 			// process redoes the batch.
@@ -318,16 +319,24 @@ func (s *DnAgentServer) zeroSlot(
 
 // zeroAcquire takes the node read lock and the side's object lock without ever
 // blocking, and reports false as soon as ctx is done. See zeroLockPoll for why
-// this is mandatory rather than an optimization.
+// this is mandatory rather than an optimization. It also reports false when,
+// under the node read lock, the agent no longer holds st under key: the
+// side's lock entry is asked for only for a side the agent holds
+// (dnagent.md, Concurrency — `locks.go`).
 func (s *DnAgentServer) zeroAcquire(
 	ctx context.Context,
 	key string,
+	st *sideState,
 ) (release func(), ok bool) {
 	for {
 		if ctx.Err() != nil {
 			return nil, false
 		}
 		if s.locks.Node().TryRLock() {
+			if s.getSide(key) != st {
+				s.locks.Node().RUnlock()
+				return nil, false
+			}
 			objLock := s.locks.Obj(key)
 			if objLock.TryLock() {
 				return func() {

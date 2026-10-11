@@ -90,6 +90,15 @@ type fakeNode struct {
 	loops    map[string][]string // backing file → loop devices
 	plain    map[string]uint64   // plain files → size
 	nextLoop int
+	// loopHolders are holders of a loop device, keyed by its /dev path, that
+	// its sysfs holders directory shows beside the dm devices whose tables
+	// map it: an md array, or a dm device the fake does not model.
+	loopHolders map[string][]string
+	// loopOpen marks a loop device that something holds open without
+	// stacking on it (a process with an fd): no holder shows, and a detach
+	// only marks it to go when the last user closes it, so it stays
+	// attached and listed.
+	loopOpen map[string]bool
 
 	// configfs / sysfs / directories
 	dirs  map[string]bool
@@ -312,6 +321,8 @@ func newFakeNode() *fakeNode {
 		mounts:        make(map[string]string),
 		loops:         make(map[string][]string),
 		plain:         make(map[string]uint64),
+		loopHolders:   make(map[string][]string),
+		loopOpen:      make(map[string]bool),
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
 		links:         make(map[string]string),
@@ -1023,6 +1034,13 @@ func childOf(dir, entry string) (string, bool) {
 
 func (f *fakeNode) cmdLs(args []string) (string, int) {
 	path := args[len(args)-1]
+	if dev, ok := f.loopOfHoldersDir(path); ok {
+		holders := f.holdersOfLoop(dev)
+		if len(holders) == 0 {
+			return "", 0
+		}
+		return strings.Join(holders, "\n") + "\n", 0
+	}
 	if !f.dirs[path] {
 		return "", 2
 	}
@@ -1044,6 +1062,7 @@ func (f *fakeNode) cmdRm(args []string) (string, int) {
 		delete(f.files, path)
 		delete(f.links, path)
 		delete(f.protos, path)
+		delete(f.plain, path)
 	}
 	return "", 0
 }
@@ -1541,6 +1560,7 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 	case strings.HasPrefix(message, "create_thin "):
 		devId, _ := strconv.ParseUint(fields[1], 10, 32)
 		if dm.thinIds[uint32(devId)] {
+			f.dispatchStderr = msgIoctlFailed(args[1], "File exists")
 			return "", 1
 		}
 		dm.thinIds[uint32(devId)] = true
@@ -1550,12 +1570,19 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 		}
 		devId, _ := strconv.ParseUint(fields[1], 10, 32)
 		oriId, _ := strconv.ParseUint(fields[2], 10, 32)
-		// dm-thin rejects a create_snap whose origin the pool does not hold.
-		// That is the failure mode of CN14's "A violated precondition is left
-		// to dm-thin": the gateway's job is to keep
-		// the origin materialized, and an agent that meets a violated
-		// precondition simply reports the error and retries.
-		if dm.thinIds[uint32(devId)] || !dm.thinIds[uint32(oriId)] {
+		// dm-thin refuses a create_snap of an id the pool already holds with
+		// EEXIST — what CN14's torn mark reads as "the slice already had
+		// it" — and one whose origin the pool does not hold with ENODATA.
+		// The second is the failure mode of CN14's "A violated precondition
+		// is left to dm-thin": the gateway's job is to keep the origin
+		// materialized, and an agent that meets a violated precondition
+		// simply reports the error and retries.
+		if dm.thinIds[uint32(devId)] {
+			f.dispatchStderr = msgIoctlFailed(args[1], "File exists")
+			return "", 1
+		}
+		if !dm.thinIds[uint32(oriId)] {
+			f.dispatchStderr = msgIoctlFailed(args[1], "No data available")
 			return "", 1
 		}
 		dm.thinIds[uint32(devId)] = true
@@ -1565,8 +1592,8 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 		delete(dm.thinIds, uint32(devId))
 	case message == "reserve_metadata_snap":
 		if dm.heldRoot {
-			f.dispatchStderr = "device-mapper: message ioctl on " +
-				args[1] + " failed: Device or resource busy"
+			f.dispatchStderr = msgIoctlFailed(args[1],
+				"Device or resource busy")
 			return "", 1
 		}
 		dm.heldRoot = true
@@ -1578,6 +1605,12 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 		dm.heldRoot = false
 	}
 	return "", 0
+}
+
+// msgIoctlFailed is dmsetup's stderr for a message the kernel refused: the
+// ioctl, the device, and the errno in strerror's words.
+func msgIoctlFailed(name, strerror string) string {
+	return "device-mapper: message ioctl on " + name + "  failed: " + strerror
 }
 
 func (f *fakeNode) dmStatus(name string) (string, int) {
@@ -2229,7 +2262,76 @@ func (f *fakeNode) cmdLosetup(args []string) (string, int) {
 		f.devSize[dev] = f.plain[path]
 		return dev + "\n", 0
 	}
+	if contains(args, "--detach") {
+		dev := args[len(args)-1]
+		file := f.fileOfLoop(dev)
+		if file == "" {
+			f.dispatchStderr = "losetup: " + dev +
+				": detach failed: No such device or address"
+			return "", 1
+		}
+		// The kernel detaches a loop device in use only when its last user
+		// closes it: the detach succeeds and the device stays attached.
+		if f.loopOpen[dev] || len(f.holdersOfLoop(dev)) > 0 {
+			return "", 0
+		}
+		devs := f.loops[file]
+		for i, attached := range devs {
+			if attached == dev {
+				f.loops[file] = append(devs[:i:i], devs[i+1:]...)
+				break
+			}
+		}
+		delete(f.devNo, dev)
+		delete(f.devSize, dev)
+		return "", 0
+	}
 	return "", 1
+}
+
+// fileOfLoop is the backing file of an attached loop device, "" for none.
+func (f *fakeNode) fileOfLoop(dev string) string {
+	for file, devs := range f.loops {
+		if contains(devs, dev) {
+			return file
+		}
+	}
+	return ""
+}
+
+// loopOfHoldersDir resolves a sysfs holders directory,
+// /sys/block/{name}/holders, to the attached loop device it belongs to.
+func (f *fakeNode) loopOfHoldersDir(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, sysfsBlockDir+"/")
+	if !ok {
+		return "", false
+	}
+	name, ok := strings.CutSuffix(rest, "/holders")
+	if !ok || strings.Contains(name, "/") {
+		return "", false
+	}
+	dev := "/dev/" + name
+	return dev, f.fileOfLoop(dev) != ""
+}
+
+// holdersOfLoop is what a loop device's sysfs holders directory lists, sorted:
+// every dm device whose live table maps it, and its loopHolders entries.
+func (f *fakeNode) holdersOfLoop(dev string) []string {
+	devNo := f.devNo[dev]
+	var out []string
+	for name, dm := range f.dms {
+		for _, line := range dmTargets(dm.table) {
+			fields := strings.Fields(line)
+			if len(fields) > 3 && devNo != "" &&
+				contains(fields[3:], devNo) {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	out = append(out, f.loopHolders[dev]...)
+	sort.Strings(out)
+	return out
 }
 
 // cmdThinDump answers with the scripted document, or a synthesized one. With

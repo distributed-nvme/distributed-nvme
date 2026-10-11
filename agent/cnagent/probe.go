@@ -14,8 +14,9 @@ import (
 // SH25); a `dmsetup status` of a thin pool or a dm-clone still makes the
 // kernel commit that target's metadata (dnagent.md SH17). In particular
 // `reserve_metadata_snap` runs only inside `dumpThinMetadata` — the CN25
-// bitmap reads, the CN14 activation sweep and the dst-bitmap read of
-// architecture.md, Clone crash recovery — never from here (CN29).
+// bitmap reads, CN14's thin id sweeps (the activation sweep and the sweep
+// after a failed delete) and the dst-bitmap read of architecture.md, Clone
+// crash recovery — never from here (CN29).
 
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
@@ -132,8 +133,11 @@ func (s *CnAgentServer) probeCntlr(
 		if !plan.primary {
 			continue
 		}
+		// The torn mark is the converge's (tornMark, CN14); the rows carry
+		// no reason (CN29): only a converge names a lost thin id.
 		thinInfo := &pb.CntlrInfo_ThinInfo{
 			SliceIdToDmThin: make(map[uint64]*pb.ResInfo, len(plan.slices)),
+			Torn:            tornMark(st, tp),
 		}
 		for _, sp := range plan.slices {
 			key := thinResKey(tp.tdId, sp.sliceId)
@@ -195,7 +199,9 @@ func (s *CnAgentServer) probeCntlr(
 		}
 	}
 
-	// Clones.
+	// Clones: the rows of CN18's shared reading (cloneRows), from this
+	// round's read of the source and of the dm-clone, so a check round
+	// reports what the converge reports for the same node.
 	for _, cp := range plan.clones {
 		if !plan.wantClone {
 			if plan.primary {
@@ -203,24 +209,12 @@ func (s *CnAgentServer) probeCntlr(
 			}
 			continue
 		}
-		tgtKey := resKeyOf(resKeyCloneTgtFmt, cp.cloneId)
 		if cp.dstTd == nil {
-			// The same CN18 error the converge reports (ensureClone):
+			// The same CN18 error the converge reports (reportCloneNoDst):
 			// there is nothing to clone onto, so the surviving stack is not
 			// probed and no metadata budget is invented from a zero region
-			// count. Set overwrites the stored ResInfo, so a probe that
-			// answered anything else would replace the converge's verdict
-			// rather than preserve it — and the two channels would flip the
-			// rows, and their epochs, against each other every round.
-			details := fmt.Sprintf("destination td %d not found",
-				cp.clone.GetDstTdId())
-			info.CloneIdToTarget[cp.cloneId] = t.Err(
-				tgtKey, cp.clone.GetSrcNqn(), details)
-			info.CloneIdToDmClone[cp.cloneId] = t.Err(
-				resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName, details)
-			info.CloneIdToMeta[cp.cloneId] = t.Err(
-				resKeyOf(resKeyCloneMetaFmt, cp.cloneId), cp.metaDmName,
-				details)
+			// count.
+			s.reportCloneNoDst(st, cp, info)
 			continue
 		}
 		// A clone whose dst is merely still provisioning is deferred and
@@ -229,62 +223,8 @@ func (s *CnAgentServer) probeCntlr(
 			s.reportCloneDeferred(st, cp, info)
 			continue
 		}
-		// A live controller per src_tr_conf_list entry (CN28): the source's
-		// own ANA picks the serving path, so only liveness matters here.
-		view, err := s.readSubsys(
-			ctx, cp.clone.GetSrcNqn(), cp.clone.GetSrcNsIdx())
-		switch {
-		case s.disconnectInFlight(cp.clone.GetSrcNqn()):
-			// ensureCloneSource's registry gate (CN10): the converge
-			// reports this row ERROR naming the disconnect, whatever the
-			// dying controller still shows.
-			info.CloneIdToTarget[cp.cloneId] = t.Err(
-				tgtKey, cp.clone.GetSrcNqn(),
-				detailsDisconnectInFlight(cp.clone.GetSrcNqn()))
-		case err != nil:
-			info.CloneIdToTarget[cp.cloneId] = t.Err(
-				tgtKey, cp.clone.GetSrcNqn(), err.Error())
-		case !view.found:
-			info.CloneIdToTarget[cp.cloneId] = t.Missing(
-				tgtKey, cp.clone.GetSrcNqn(), "")
-		case !cloneSourceLive(view, cp):
-			info.CloneIdToTarget[cp.cloneId] = t.Err(
-				tgtKey, cp.clone.GetSrcNqn(), pathStates(view))
-		default:
-			info.CloneIdToTarget[cp.cloneId] = t.Ok(
-				tgtKey, cp.clone.GetSrcNqn(), pathStates(view))
-		}
-		dmKey := resKeyOf(resKeyCloneDmFmt, cp.cloneId)
-		metaKey := resKeyOf(resKeyCloneMetaFmt, cp.cloneId)
-		// CN18 step 2's verdict (cloneMetaVerdict), for the same reason the
-		// dstTd == nil branch above answers with the converge's error: when
-		// the arena did not answer, has no free run for this clone's wrapper,
-		// or can never fit its run, the wrapper and the dm-clone over it are
-		// not two independently absent devices — they are one verdict, which
-		// the converge reports on both rows (ensureClone): PROVISIONING
-		// waiting for room, or the ERROR pair. The step 1 gate is what makes
-		// that comparison honest: a converge whose source connection fails
-		// never reaches step 2 — it reports `clone_id_to_dm_clone` MISSING
-		// "source not connected" ("source unknown: …" when the walk did not
-		// answer) and leaves the meta row to cloneMetaInfo, the very helper
-		// this loop falls through to below, so that row already agrees
-		// without this branch.
-		if s.cloneSourceConnected(view, cp) {
-			if status, details, decided := s.cloneMetaVerdict(
-				ctx, plan, cp); decided {
-				if status == pb.ResStatus_RES_STATUS_PROVISIONING {
-					s.reportCloneNoRoom(st, cp, info, details)
-				} else {
-					s.reportCloneMetaErr(st, cp, info, details)
-				}
-				continue
-			}
-		}
-		status, details := s.probeCloneDm(ctx, cp)
-		info.CloneIdToDmClone[cp.cloneId] = t.Set(
-			dmKey, cp.finalName, status, details)
-		info.CloneIdToMeta[cp.cloneId] = s.cloneMetaInfo(
-			ctx, st, plan, cp, metaKey)
+		s.cloneRows(ctx, st, plan, cp, info, s.readCloneSource(ctx, cp),
+			func() cloneDmRead { return s.probeCloneDm(ctx, cp) }, "")
 	}
 
 	if !plan.wantAny {
@@ -349,42 +289,12 @@ func (s *CnAgentServer) probeCntlr(
 }
 
 // cloneSourceLive reports whether every configured source endpoint has a live
-// controller — the CN28 clone_id_to_target rule.
+// controller, the liveness half of the CN28 clone_id_to_target row
+// (cloneTargetRow).
 func cloneSourceLive(view *subsysView, cp *clonePlan) bool {
 	for _, tr := range cp.clone.GetSrcTrConfList() {
 		ctrl := view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId())
 		if ctrl == nil || ctrl.state != "live" {
-			return false
-		}
-	}
-	return true
-}
-
-// cloneSourceConnected reports whether ensureCloneSource would get past CN18
-// step 1 on this view **without connecting anything**: no sweep's disconnect
-// of the source is in flight (disconnectInFlight, which stops that step
-// whatever the view shows), every configured endpoint already has a
-// controller — whatever its state, since the converge only connects the ones
-// that are missing — and the source namespace device is there. It is
-// deliberately not cloneSourceLive: that one answers the
-// clone_id_to_target row, this one answers "did the converge reach step 2",
-// which is what makes a step 2 verdict comparable between the two channels at
-// all. A view that still needs a connect is not connected here, because whether
-// that connect would succeed is exactly what a read-only probe may not find out
-// (CN23) — and a converge whose connect fails stops at step 1 and reports that
-// on these rows instead.
-func (s *CnAgentServer) cloneSourceConnected(
-	view *subsysView,
-	cp *clonePlan,
-) bool {
-	if view == nil || !view.found || view.nsDev == "" {
-		return false
-	}
-	if s.disconnectInFlight(cp.clone.GetSrcNqn()) {
-		return false
-	}
-	for _, tr := range cp.clone.GetSrcTrConfList() {
-		if view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) == nil {
 			return false
 		}
 	}

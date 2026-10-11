@@ -323,3 +323,55 @@ func TestCheckRoundsNeverMutate(t *testing.T) {
 		t.Errorf("a Check round mutated: %v", got)
 	}
 }
+
+// GetSideInfo probes first and takes the verdict second, as a check round
+// does (DN16), so it runs a check round's calls in a check round's order:
+// what the probe reads can move the agent's own view the verdict reads.
+func TestGetSideInfoReadsAsACheckRound(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, srv *DnAgentServer)
+	}{
+		{"a side", func(t *testing.T, srv *DnAgentServer) {
+			syncupBoth(t, srv, 1, testSide)
+		}},
+		{"a migration destination", func(t *testing.T, srv *DnAgentServer) {
+			syncupBoth(t, srv, 1, testSide)
+			if _, err := srv.SyncupSide(context.Background(), migrDstReq(2,
+				pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			tc.setup(t, srv)
+			node.Reset()
+			srv.checkSideRound(ctx, &pb.CheckSideRequest{
+				ClusterId: testCluster, DnId: testDn,
+				SidePointer: sidePtr(testSide), ShowInfo: true,
+			}, nil)
+			round := node.Calls()
+			node.Reset()
+			if _, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+				ClusterId: testCluster, DnId: testDn,
+				SidePointer: sidePtr(testSide),
+			}); err != nil {
+				t.Fatalf("GetSideInfo: %v", err)
+			}
+			get := node.Calls()
+			if len(round) == 0 {
+				t.Fatal("fixture is wrong: the round ran nothing")
+			}
+			for i := range max(len(get), len(round)) {
+				if i >= len(get) || i >= len(round) || get[i] != round[i] {
+					t.Fatalf("GetSideInfo ran %d calls, a round %d; the "+
+						"first difference at %d:\n%q\n%q", len(get),
+						len(round), i, get[min(i, len(get)-1)],
+						round[min(i, len(round)-1)])
+				}
+			}
+		})
+	}
+}

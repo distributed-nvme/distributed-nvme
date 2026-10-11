@@ -195,6 +195,37 @@ func TestLockSetConcurrentObjCreation(t *testing.T) {
 	}
 }
 
+// TestLockSetObjCount pins the count the role packages' tests read around a
+// refused call (SH11): it is the number of entries Obj created and DropObj
+// has not forgotten, so a call that asks for an object's lock moves it and a
+// call that never does leaves it where it was.
+func TestLockSetObjCount(t *testing.T) {
+	locks := NewLockSet()
+	if got := locks.ObjCount(); got != 0 {
+		t.Fatalf("a new set counts %d entries", got)
+	}
+	locks.Obj("a")
+	if got := locks.ObjCount(); got != 1 {
+		t.Errorf("one entry counts %d", got)
+	}
+	locks.Obj("a")
+	if got := locks.ObjCount(); got != 1 {
+		t.Errorf("asking for the same lock again counts %d", got)
+	}
+	locks.Obj("b")
+	if got := locks.ObjCount(); got != 2 {
+		t.Errorf("two entries count %d", got)
+	}
+	locks.DropObj("a")
+	if got := locks.ObjCount(); got != 1 {
+		t.Errorf("a dropped entry still counts: %d", got)
+	}
+	locks.DropObj("never-created")
+	if got := locks.ObjCount(); got != 1 {
+		t.Errorf("dropping an unknown key counts %d", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ResInfo tracking (SH14)
 // ---------------------------------------------------------------------------
@@ -262,6 +293,90 @@ func TestResTrackerEpoch(t *testing.T) {
 		GetEpoch() != 500 {
 		t.Errorf("a progress-only change bumped the epoch to %d",
 			got.GetEpoch())
+	}
+}
+
+// TestResTrackerReason pins the reason beside the epoch rule (architecture.md,
+// Live-state reporting): only ErrReason names one, every other helper gives
+// RES_REASON_NONE, the tracker keeps the reason of the latest outcome, and
+// the reason never moves the epoch — only a status change does. The returned
+// row is a copy of the whole stored row, the reason included.
+func TestResTrackerReason(t *testing.T) {
+	const lost = pb.ResReason_RES_REASON_THIN_ID_LOST
+	const none = pb.ResReason_RES_REASON_NONE
+	tracker := NewResTracker()
+	now := int64(100)
+	tracker.now = func() int64 { return now }
+
+	plain := tracker.Err("thin", "dnv-thin", "dmsetup create: Invalid argument")
+	if plain.GetReason() != none || plain.GetEpoch() != 100 {
+		t.Fatalf("Err row = %v, want no reason at epoch 100", plain)
+	}
+	// The reason alone changes: the status stays ERROR, so the epoch stays.
+	now = 200
+	withReason := tracker.ErrReason("thin", "dnv-thin",
+		"dmsetup create: No data available", lost)
+	want := &pb.ResInfo{
+		ResName: "dnv-thin",
+		Status:  pb.ResStatus_RES_STATUS_ERROR,
+		Details: "dmsetup create: No data available",
+		Epoch:   100,
+		Reason:  lost,
+	}
+	if !proto.Equal(withReason, want) {
+		t.Fatalf("ErrReason row = %v, want %v", withReason, want)
+	}
+	// The tracker stores the whole row, the reason included.
+	if stored := tracker.state["thin"]; !proto.Equal(stored, want) {
+		t.Errorf("stored row = %v, want %v", stored, want)
+	}
+	// The returned row is a copy: changing it reaches no stored field.
+	withReason.Reason = none
+	withReason.Details = "mutated"
+	withReason.Epoch = 1
+	now = 300
+	if again := tracker.ErrReason("thin", "dnv-thin",
+		"dmsetup create: No data available", lost); !proto.Equal(again, want) {
+		t.Errorf("the stored row was aliased: %v, want %v", again, want)
+	}
+	// The tracker keeps the latest outcome's reason, not the first one's: a
+	// plain Err clears it, still at the same epoch.
+	now = 400
+	cleared := tracker.Err("thin", "dnv-thin", "dmsetup create: failed")
+	if cleared.GetReason() != none || cleared.GetEpoch() != 100 {
+		t.Errorf("Err after ErrReason = %v, want no reason at epoch 100",
+			cleared)
+	}
+	// And a reason that comes back keeps the epoch too.
+	now = 500
+	if back := tracker.ErrReason("thin", "dnv-thin", "x", lost); back.
+		GetReason() != lost || back.GetEpoch() != 100 {
+		t.Errorf("a reason set again = %v, want it at epoch 100", back)
+	}
+	// A status change moves the epoch, and the new status has no reason.
+	now = 600
+	healthy := tracker.Ok("thin", "dnv-thin", "")
+	if healthy.GetReason() != none || healthy.GetEpoch() != 600 {
+		t.Errorf("OK after ErrReason = %v, want no reason at epoch 600",
+			healthy)
+	}
+	// Back to ERROR with a reason is a status change like any other.
+	now = 700
+	if again := tracker.ErrReason("thin", "dnv-thin", "y", lost); again.
+		GetEpoch() != 700 || again.GetReason() != lost {
+		t.Errorf("ERROR again = %v, want the reason at epoch 700", again)
+	}
+	// The other helpers give no reason.
+	for name, row := range map[string]*pb.ResInfo{
+		"Ok":           tracker.Ok("a", "n", ""),
+		"Missing":      tracker.Missing("b", "n", ""),
+		"Provisioning": tracker.Provisioning("c", "n", ""),
+		"FromErr":      tracker.FromErr("d", "n", "", errors.New("e")),
+		"Set":          tracker.Set("e", "n", pb.ResStatus_RES_STATUS_PENDING, ""),
+	} {
+		if row.GetReason() != none {
+			t.Errorf("%s gave the reason %v", name, row.GetReason())
+		}
 	}
 }
 
@@ -756,6 +871,41 @@ func TestParseDmLinesAndCloneStatus(t *testing.T) {
 	}
 	if _, ok := ParseCloneStatus("0 2048 linear 253:3 0"); ok {
 		t.Error("a linear status parsed as a clone")
+	}
+}
+
+// TestCloneStatusDetails pins the details text both agents give a dm-clone
+// row whose pass read the status: the note first, then the raw status line
+// on a line of its own, which a reader that scans the details line by line,
+// as the gateway's hydration checks do, still finds whole.
+func TestCloneStatusDetails(t *testing.T) {
+	const raw = "0 20480 clone 8 1/1024 2048 10/10 0 1 no_hydration 0"
+	const note = "hydration not enabled"
+	for _, tc := range []struct {
+		note, raw, want string
+	}{
+		{note, raw, note + "\n" + raw},
+		{"", raw, raw},
+		{note, "", note},
+		{"", "", ""},
+	} {
+		if got := CloneStatusDetails(tc.note, tc.raw); got != tc.want {
+			t.Errorf("CloneStatusDetails(%q, %q) = %q, want %q",
+				tc.note, tc.raw, got, tc.want)
+		}
+	}
+	details := CloneStatusDetails(note, raw)
+	lines := strings.Split(details, "\n")
+	status, ok := ParseCloneStatus(lines[len(lines)-1])
+	if !ok || status.HydratedRegions != 10 || status.TotalRegions != 10 {
+		t.Errorf("the status line did not survive the note: %+v", status)
+	}
+	// A reader that parses the whole details, note and all, still finds
+	// the one dm-clone line in it.
+	whole, ok := ParseCloneStatus(details)
+	if !ok || whole.HydratedRegions != 10 || whole.TotalRegions != 10 ||
+		whole.HydrationEnabled {
+		t.Errorf("the whole details did not parse: %+v", whole)
 	}
 }
 

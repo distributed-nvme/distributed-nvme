@@ -92,7 +92,7 @@ var renderCases = []renderCase{
 			},
 		},
 		want: `{"name_to_td":{"t0":{"created":false,"dev_id":3,` +
-			`"ori_id":0,"size":"67108864","td_id":"7"}}}` + "\n",
+			`"ori_id":0,"size":"67108864","td_id":"7","torn":false}}}` + "\n",
 	},
 	{
 		name: "td list, created true",
@@ -104,7 +104,22 @@ var renderCases = []renderCase{
 			},
 		},
 		want: `{"name_to_td":{"t1":{"created":true,"dev_id":0,"ori_id":0,` +
-			`"size":"0","td_id":"8"}}}` + "\n",
+			`"size":"0","td_id":"8","torn":false}}}` + "\n",
+	},
+	{
+		// The torn mark of a snapshot (architecture.md, Thin devices) renders
+		// as `created` does: false on every thin device above, and true where
+		// the record holds it, which it does from the created flip on.
+		name: "td list, a torn snapshot",
+		rpc:  "ListThinDevices",
+		argv: []string{"td", "list"},
+		reply: &pb.ListThinDevicesReply{
+			NameToTd: map[string]*pb.ThinDevice{
+				"s1": {TdId: 9, DevId: 4, OriId: 3, Created: true, Torn: true},
+			},
+		},
+		want: `{"name_to_td":{"s1":{"created":true,"dev_id":4,"ori_id":3,` +
+			`"size":"0","td_id":"9","torn":true}}}` + "\n",
 	},
 	{
 		// A uint64 MAP KEY is quoted too, and the re-marshal sorts the map's

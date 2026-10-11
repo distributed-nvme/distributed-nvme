@@ -10,8 +10,8 @@
 #
 # The plan's cases, in order, each in its own cluster `it-<case>` and each
 # after a fleet restart: smoke, revision, health, bitmap, reaction, failover,
-# drain, vote, handoff. Cleanup runs unconditionally at the start and, on
-# success only, at the end: a failing run leaves etcd's data, every log and
+# hold, drain, vote, handoff. Cleanup runs unconditionally at the start and,
+# on success only, at the end: a failing run leaves etcd's data, every log and
 # every behavior file in place and dumps the diagnostics.
 #
 # NO SUDO anywhere: nothing in this suite needs root. Everything the script
@@ -109,6 +109,12 @@ THIN_META_BLOCK_SIZE=4096
 WAIT_SHORT=5
 WAIT_MEMBERSHIP=20
 WAIT_SYNCUP=65
+# The hold case's cntlr_interval, the bound of RW14's sides-first hold
+# (spWorker.tickPeriod). It is long beside HEALTH_INTERVAL, which the case
+# keeps for every other interval, so that a hold that runs to its bound and
+# one that ends once the sides it waits for have answered lie seconds apart in
+# the fakes' records.
+HOLD_CNTLR_INTERVAL=10
 
 # The group geometry (architecture.md, Group on-leg layout: meta region, data
 # region, health block), filled by read_geometry() at preflight from `workerctl
@@ -169,7 +175,7 @@ CLONE_ID=0x30
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it
 
-CASES=(smoke revision health bitmap reaction failover drain vote handoff)
+CASES=(smoke revision health bitmap reaction failover hold drain vote handoff)
 
 DN_DIRS=(dn0 dn1 dn2 dn3)
 CN_DIRS=(cn0 cn1 cn2)
@@ -3903,6 +3909,291 @@ EOF
 	wait_until "$WAIT_SHORT" "the CdcEntry to list C1 and C3" \
 		cdc_is "$cdc_key" 1 3
 	log "  leaving one worker killed; the next fleet restart returns to w1 w2 w3"
+}
+
+# ---------------------------------------------------------------------------
+# Case I — hold (dnv-worker.md, Integration test plan, Cases): the sides
+# RW14's sides-first hold waits for
+# ---------------------------------------------------------------------------
+#
+# Its own cluster, whose cntlr_interval, the hold's bound, is
+# HOLD_CNTLR_INTERVAL while every other interval stays at HEALTH_INTERVAL: a
+# side's err_epoch is then set and cleared in seconds, and a hold that runs to
+# its bound stands seconds apart from one that ends once its sides have
+# answered. Every such interval is read off the fakes' request and reply
+# records, which carry the server's clock. The thresholds are long enough
+# that nothing reacts on health; stage 5's failover is a disable's, which
+# waits out no threshold (AR5).
+#
+# Two levers do the work. hang_syncup leaves a side's syncup unanswered while
+# its rounds are answered, so its record keeps no err_epoch and the hold waits
+# for it; hang beside it leaves the rounds unanswered too, so its record is
+# stamped unhealthy before the bump whose load reads it.
+
+# sides_unsynced_cnt counts the `sp sides unsynced` records (dnv-worker.md,
+# Log records) of one SP at one revision, RW14's hold released by its bound,
+# and, given a count, only those whose side_cnt is that count.
+sides_unsynced_cnt() { # <sp id> <revision> [side_cnt]
+	wcount 'select(.msg == "sp sides unsynced")
+		| select((.sp_id | tostring) == $sp and (.revision | tostring) == $r)
+		| select($n == "*" or ((.side_cnt // 0) | tostring) == $n)' \
+		--arg sp "$1" --arg r "$2" --arg n "${3-*}"
+}
+
+# side_reply_cnt counts one fake's replies to the SyncupSide of one trace id,
+# which a unary request and its reply share, and fails on a failed read. A
+# negative rests on it, which reply_for, failing while there is no reply,
+# cannot carry.
+side_reply_cnt() { # <agent> <trace_id>
+	count_recs "$(apath "$1")" 'select(.msg == "grpc server reply")
+		| select((.method | split("/") | last) == "SyncupSide")
+		| select(.trace_id == $t) | select(has("data"))' --arg t "$2"
+}
+
+case_hold() {
+	CASE=hold
+	local ci=$HOLD_CNTLR_INTERVAL hc=$HEALTH_INTERVAL
+	local at_rev='(.revision | tostring) == $r'
+	local promotes="$at_rev and (.cntlr.primary // false)"
+	local demotes="$at_rev and ((.cntlr.primary // false) | not)"
+	local member rev epoch s1 s2 c1 c2 first_side first_cntlr gap
+	local reva revb sa cb planted bump_at late failovers dis_rev dem pro
+
+	stage 1 "the fixture: sp0 with a primary and a standby, and one side on each DN"
+	new_cluster hold --cntlr-interval "$ci"
+	assert_eq "$(stored_interval cntlr_interval)" "$ci" \
+		"health_check_conf.cntlr_interval stored"
+	for member in dn_interval cn_interval side_interval; do
+		assert_eq "$(stored_interval "$member")" "$hc" \
+			"health_check_conf.$member stored"
+	done
+	put_dn 1 8
+	put_dn 2 8
+	put_cn 1 64
+	put_cn 2 64
+	# S1 is leg 1's side on DN 1 (fake dn0) and S2 leg 2's on DN 2 (fake
+	# dn1); C1 is the primary on CN 1 (fake cn0) and C2 the standby on CN 2
+	# (fake cn1).
+	ctl put-sp --name sp0 --id 1 --shard 00 --slots 0,1 --level 0 \
+		--thresholds 3600,3600,3600,3600 --lwm "$LWM" \
+		--cntlr 1:1:0:true --cntlr 2:2:1:false \
+		--slice 1:0 \
+		--group 1:1:data:2:raid1 \
+		--leg 1:1:0 --leg 1:2:1 \
+		--side 1:1:1:0 --side 2:2:2:0
+	wait_until "$WAIT_SYNCUP" "every side of slice 1 provisioned" \
+		all_provisioned sp0 1
+	# Settled before anything is timed: the fan-out of the last provisioned
+	# flip has reached both cntlrs, so no hold of the fixture's is pending.
+	rev=$(sp_rev 1)
+	want_number "$rev" "sp0's SpRev once every side is provisioned"
+	wait_until $((ci + WAIT_SHORT)) "cn0: a SyncupCntlr at revision $rev" \
+		req_ge 1 cn0 SyncupCntlr "$at_rev" --arg r "$rev"
+	wait_until $((ci + WAIT_SHORT)) "cn1: a SyncupCntlr at revision $rev" \
+		req_ge 1 cn1 SyncupCntlr "$at_rev" --arg r "$rev"
+	assert_eq "$(nonzero_epochs "$(slice_json sp0 1)")" 0 \
+		"slice 1: non-zero err_epochs before the stages"
+
+	stage 2 "a side the hold waits for that never answers holds the cntlrs for the whole interval"
+	# The positive control of stage 3. S1's fake answers its rounds but takes
+	# its syncup and never answers it: the record has no err_epoch in the
+	# fan-out's load, so the hold waits for S1, and while its syncup is held
+	# its child runs no round that could stamp one.
+	set_behavior dn0 <<'EOF'
+{"objects": {"side 1:1:1": {"hang_syncup": true}}}
+EOF
+	assert_eq "$(side_epoch sp0 1 1)" 0 "S1's err_epoch before the bump"
+	rev=$(jq_of "$(ctl bump-rev sp --id 1 --shard 00)" .revision)
+	want_number "$rev" "the bump's SpRev"
+	wait_until $((ci + WAIT_SHORT)) "cn0: a SyncupCntlr at revision $rev" \
+		req_ge 1 cn0 SyncupCntlr "$at_rev" --arg r "$rev"
+	s1=$(req_first dn0 SyncupSide "$at_rev" --arg r "$rev") ||
+		die "dn0 received no SyncupSide at revision $rev"
+	s2=$(req_first dn1 SyncupSide "$at_rev" --arg r "$rev") ||
+		die "dn1 received no SyncupSide at revision $rev"
+	c1=$(req_first cn0 SyncupCntlr "$at_rev" --arg r "$rev") ||
+		die "cn0 received no SyncupCntlr at revision $rev"
+	first_side=$(epoch_min "${s1%% *}" "${s2%% *}")
+	gap=$(epoch_delta "${c1%% *}" "$first_side")
+	log "  the sides were told revision $rev at $first_side, C1 $gap s later"
+	# The bound is armed a moment before the sides are told, and C1's request
+	# leaves when it fires; the upper bound allows a busy coordinator.
+	awk -v g="$gap" -v h="$ci" 'BEGIN { exit !(g >= h - 1 && g <= h + 3) }' ||
+		die "C1 was told revision $rev $gap s after the sides, want the" \
+			"hold's bound, one cntlr_interval (${ci}s)"
+	assert_eq "$(side_reply_cnt dn0 "${s1##* }")" 0 \
+		"dn0's replies to S1's held SyncupSide"
+	replied_before dn1 SyncupSide "$s2" "${c1%% *}" \
+		"S2 answered before C1 was told"
+	assert_eq "$(sides_unsynced_cnt 1 "$rev")" 1 \
+		"sp sides unsynced records at revision $rev"
+	assert_eq "$(sides_unsynced_cnt 1 "$rev" 1)" 1 \
+		"sp sides unsynced records at revision $rev counting one side"
+	clear_behavior dn0
+	wait_until "$WAIT_SHORT" "dn0 to answer S1's held SyncupSide" \
+		count_ge 1 side_reply_cnt dn0 "${s1##* }"
+
+	stage 3 "a side unhealthy in the fan-out's load is not waited for: the cntlrs follow the healthy side"
+	wait_until $((2 * hc + WAIT_SHORT)) "S1 err_epoch clear" \
+		side_epoch_clear sp0 1 1
+	# From here S1's rounds go unanswered as well, so a missed one stamps its
+	# record unhealthy before the bump, and its syncup is held as in stage 2.
+	set_behavior dn0 <<'EOF'
+{"objects": {"side 1:1:1": {"hang": true, "hang_syncup": true}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "S1 err_epoch set by its missed rounds" \
+		side_epoch_set sp0 1 1
+	# Read, not side_epoch_set: that predicate takes a failed read for "set".
+	epoch=$(side_epoch sp0 1 1)
+	want_number "$epoch" "S1's err_epoch"
+	rev=$(jq_of "$(ctl bump-rev sp --id 1 --shard 00)" .revision)
+	want_number "$rev" "the bump's SpRev"
+	wait_until $((ci + WAIT_SHORT)) "cn0: a SyncupCntlr at revision $rev" \
+		req_ge 1 cn0 SyncupCntlr "$at_rev" --arg r "$rev"
+	wait_until "$WAIT_SHORT" "cn1: a SyncupCntlr at revision $rev" \
+		req_ge 1 cn1 SyncupCntlr "$at_rev" --arg r "$rev"
+	wait_until "$WAIT_SHORT" "dn0: S1's SyncupSide at revision $rev" \
+		req_ge 1 dn0 SyncupSide "$at_rev" --arg r "$rev"
+	s1=$(req_first dn0 SyncupSide "$at_rev" --arg r "$rev") ||
+		die "dn0 received no SyncupSide at revision $rev"
+	s2=$(req_first dn1 SyncupSide "$at_rev" --arg r "$rev") ||
+		die "dn1 received no SyncupSide at revision $rev"
+	c1=$(req_first cn0 SyncupCntlr "$at_rev" --arg r "$rev") ||
+		die "cn0 received no SyncupCntlr at revision $rev"
+	c2=$(req_first cn1 SyncupCntlr "$at_rev" --arg r "$rev") ||
+		die "cn1 received no SyncupCntlr at revision $rev"
+	first_side=$(epoch_min "${s1%% *}" "${s2%% *}")
+	first_cntlr=$(epoch_min "${c1%% *}" "${c2%% *}")
+	gap=$(epoch_delta "$first_cntlr" "$first_side")
+	log "  the sides were told revision $rev at $first_side," \
+		"the first cntlr $gap s later"
+	awk -v g="$gap" -v h="$ci" 'BEGIN { exit !(g < h / 2) }' ||
+		die "the cntlrs were told revision $rev $gap s after the sides, want" \
+			"well under the hold's bound (${ci}s): the unhealthy S1 was" \
+			"waited for"
+	# Still a hold: the cntlrs wait for the side it does wait for.
+	replied_before dn1 SyncupSide "$s2" "$first_cntlr" \
+		"S2 answered before the first cntlr was told"
+	assert_none_for $((ci + 2)) "an sp sides unsynced record at revision $rev" \
+		count_gt 0 sides_unsynced_cnt 1 "$rev"
+	# Not vacuous: S1 has not answered the revision a whole bound later.
+	assert_eq "$(side_reply_cnt dn0 "${s1##* }")" 0 \
+		"dn0's replies to S1's held SyncupSide"
+	clear_behavior dn0
+	wait_until "$WAIT_SHORT" "dn0 to answer S1's held SyncupSide" \
+		count_ge 1 side_reply_cnt dn0 "${s1##* }"
+	wait_until $((2 * hc + WAIT_SHORT)) "S1 err_epoch cleared" \
+		side_epoch_clear sp0 1 1
+
+	stage 4 "a bump during the wait takes the waited sides again, from its own load"
+	# The bump reva begins a hold that waits for S1, clean in reva's load,
+	# whose syncup is held. S1's record then gains an err_epoch, planted the
+	# way another observer's verdict would leave it and raw, so no revision
+	# moves; the bump revb replaces the held plans, its load holds the epoch,
+	# and the hold lets the cntlrs go once S2 has answered revb, long before
+	# the bound reva set.
+	set_behavior dn0 <<'EOF'
+{"objects": {"side 1:1:1": {"hang_syncup": true}}}
+EOF
+	reva=$(jq_of "$(ctl bump-rev sp --id 1 --shard 00)" .revision)
+	want_number "$reva" "the first bump's SpRev"
+	wait_until "$WAIT_SHORT" "dn0: S1's SyncupSide at revision $reva" \
+		req_ge 1 dn0 SyncupSide "$at_rev" --arg r "$reva"
+	sa=$(req_first dn0 SyncupSide "$at_rev" --arg r "$reva") ||
+		die "dn0 received no SyncupSide at revision $reva"
+	planted=$(ctl set-epoch side --sp sp0 --slice 1 --id 1 --age 0 |
+		"$JQ" -r .err_epoch)
+	want_number "$planted" "S1's planted err_epoch"
+	# The second bump must land well inside the hold reva began, or that hold
+	# reaches its bound first and the stage shows nothing: a slow driver, not
+	# a worker fault.
+	bump_at=$(server_now)
+	late=$(epoch_delta "$(ts_epoch "$bump_at")" "${sa%% *}")
+	awk -v l="$late" -v h="$ci" 'BEGIN { exit !(l < h - 3) }' ||
+		die "the driver reached the second bump $late s into the hold of" \
+			"revision $reva, too near its bound (${ci}s)"
+	revb=$(jq_of "$(ctl bump-rev sp --id 1 --shard 00)" .revision)
+	want_number "$revb" "the second bump's SpRev"
+	wait_until $((ci + WAIT_SHORT)) "cn0: a SyncupCntlr at revision $revb" \
+		req_ge 1 cn0 SyncupCntlr "$at_rev" --arg r "$revb"
+	cb=$(req_first cn0 SyncupCntlr "$at_rev" --arg r "$revb") ||
+		die "cn0 received no SyncupCntlr at revision $revb"
+	gap=$(epoch_delta "${cb%% *}" "${sa%% *}")
+	log "  S1 was told revision $reva at ${sa%% *}," \
+		"C1 revision $revb $gap s later"
+	awk -v g="$gap" -v h="$ci" 'BEGIN { exit !(g < h - 1) }' ||
+		die "C1 was told revision $revb $gap s after the hold began, want" \
+			"well before its bound (${ci}s): revb's load did not take the" \
+			"waited sides again"
+	assert_eq "$(reqs cn0 SyncupCntlr "$at_rev" --arg r "$reva")" 0 \
+		"cn0's SyncupCntlr requests at the superseded revision $reva"
+	assert_eq "$(reqs cn1 SyncupCntlr "$at_rev" --arg r "$reva")" 0 \
+		"cn1's SyncupCntlr requests at the superseded revision $reva"
+	assert_none_for $((ci + 2)) "an sp sides unsynced record at revision $revb" \
+		count_gt 0 sides_unsynced_cnt 1 "$revb"
+	assert_eq "$(sides_unsynced_cnt 1 "$reva")" 0 \
+		"sp sides unsynced records at revision $reva"
+	assert_eq "$(side_reply_cnt dn0 "${sa##* }")" 0 \
+		"dn0's replies to S1's held SyncupSide"
+	clear_behavior dn0
+	wait_until "$WAIT_SHORT" "dn0 to answer S1's held SyncupSide" \
+		count_ge 1 side_reply_cnt dn0 "${sa##* }"
+	ctl set-epoch side --sp sp0 --slice 1 --id 1 --clear >/dev/null
+	wait_until $((2 * hc + WAIT_SHORT)) "dn0: S1's reply at revision $revb" \
+		reply_ge 1 dn0 SyncupSide "$at_rev" --arg r "$revb"
+	wait_until $((2 * hc + WAIT_SHORT)) "S1 err_epoch cleared" \
+		side_epoch_clear sp0 1 1
+
+	stage 5 "after a demotion hold, the wait leaves out a side unhealthy in its load"
+	# S1 is stamped unhealthy as in stage 3, then C1 is disabled: the next
+	# pass fails it over to C2 (AR5), and the failover's fan-out hands C1 its
+	# demotion first (RW22). C1 answers at once, and the wait that follows,
+	# its sides taken from the plans the demotion hold kept, waits for S2
+	# alone (RW14).
+	set_behavior dn0 <<'EOF'
+{"objects": {"side 1:1:1": {"hang": true, "hang_syncup": true}}}
+EOF
+	wait_until $((2 * hc + WAIT_SHORT)) "S1 err_epoch set by its missed rounds" \
+		side_epoch_set sp0 1 1
+	epoch=$(side_epoch sp0 1 1)
+	want_number "$epoch" "S1's err_epoch"
+	failovers=$(reaction_cnt failover)
+	dis_rev=$(ctl set-cntlr --sp sp0 --id 1 --disabled=true | "$JQ" -r .sp_rev)
+	want_number "$dis_rev" "the disable's SpRev"
+	wait_until $((2 * ci + WAIT_SHORT)) \
+		"reaction applied kind=failover (C1 disabled)" \
+		reaction_ge $((failovers + 1)) failover
+	rev=$(reaction_revision failover $((failovers + 1))) ||
+		die "failover $((failovers + 1)) of the case has no revision:" \
+			"a worker log could not be read, or it holds no such record"
+	want_number "$rev" "the failover record's revision"
+	[ "$rev" -gt "$dis_rev" ] ||
+		die "the failover's revision $rev is not past the disable's $dis_rev"
+	wait_until $((DEMOTION_HOLD + ci + WAIT_SHORT)) \
+		"cn1: the SyncupCntlr promoting C2 at revision $rev" \
+		req_ge 1 cn1 SyncupCntlr "$promotes" --arg r "$rev"
+	dem=$(req_first cn0 SyncupCntlr "$demotes" --arg r "$rev") ||
+		die "cn0 received no demotion of C1 at revision $rev"
+	s2=$(req_first dn1 SyncupSide "$at_rev" --arg r "$rev") ||
+		die "dn1 received no SyncupSide at revision $rev"
+	pro=$(req_first cn1 SyncupCntlr "$promotes" --arg r "$rev") ||
+		die "cn1 received no promotion of C2 at revision $rev"
+	replied_before cn0 SyncupCntlr "$dem" "${s2%% *}" \
+		"C1's demotion answered before S2 was told"
+	replied_before dn1 SyncupSide "$s2" "${pro%% *}" \
+		"S2 answered before C2's promotion"
+	gap=$(epoch_delta "${pro%% *}" "${s2%% *}")
+	log "  S2 was told revision $rev at ${s2%% *}, C2 promoted $gap s later"
+	awk -v g="$gap" -v h="$ci" 'BEGIN { exit !(g < h / 2) }' ||
+		die "C2 was promoted $gap s after S2 was told, want well under the" \
+			"hold's bound (${ci}s): the unhealthy S1 was waited for"
+	assert_eq "$(demotion_unsynced_cnt 1 "$rev")" 0 \
+		"sp demotion unsynced records at revision $rev"
+	assert_none_for $((ci + 2)) "an sp sides unsynced record at revision $rev" \
+		count_gt 0 sides_unsynced_cnt 1 "$rev"
+	clear_behavior dn0
+	wait_until $((2 * hc + WAIT_SHORT)) "S1 err_epoch cleared" \
+		side_epoch_clear sp0 1 1
 }
 
 # ---------------------------------------------------------------------------

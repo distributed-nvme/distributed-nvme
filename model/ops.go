@@ -1002,6 +1002,10 @@ type SideRef struct {
 type TdRef struct {
 	Name string
 	TdId uint64
+	// Torn is the torn mark the reports that completed the td carried
+	// (CntlrInfo.ThinInfo.torn; cnagent.md CN14): FlipCreated writes it into
+	// ThinDevice.torn in the put that sets created (RW19).
+	Torn bool
 }
 
 // FlipProvisioned sets Side.provisioned on every listed side that is still
@@ -1088,7 +1092,8 @@ func containsId(ids []uint64, id uint64) bool {
 }
 
 // FlipCreated sets ThinDevice.created on every listed candidate that still
-// needs it (MD6, RW19). It returns the
+// needs it, and ThinDevice.torn to the candidate's torn mark in the same put
+// (MD6, RW19). It returns the
 // candidates it ACTUALLY wrote, in the order they were listed; the MD6 count
 // is len() of that slice.
 //
@@ -1102,7 +1107,8 @@ func containsId(ids []uint64, id uint64) bool {
 // deleted meanwhile), when its td_id differs (deleted and re-created under the
 // same name), or when created is already true (another worker or a concurrent
 // reply got there first). Nothing written ⇒ no bump, and a call whose whole
-// batch is skipped leaves etcd untouched.
+// batch is skipped leaves etcd untouched. So torn is written once, with
+// created, and a mark that arrives after the flip changes nothing.
 //
 // The list is committed common.MaxFlipCreatedPerTxn candidates at a time, in
 // list order, one STM each, and each STM that wrote bumps SpRev once. The list
@@ -1158,6 +1164,7 @@ func flipCreatedTxn(
 				continue
 			}
 			td.Created = true
+			td.Torn = cand.Torn
 			s.Put(key, td)
 			created = append(created, cand)
 		}

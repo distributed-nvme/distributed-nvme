@@ -100,7 +100,8 @@ and comments `common/constants.go` holds:
 * `ResDetailsSpLevel`, the details of a `CntlrInfo` row the `sp_level`
   suppresses (CN19): `RES_STATUS_MISSING` that says the resource must not
   exist, where every other `MISSING` the cn agent reports says it does not
-  exist yet. The cn agent writes it and the worker's settle reads it
+  exist yet or, on a clone's `clone_id_to_target`, that the clone's source
+  has a fault (CN18). The cn agent writes it and the worker's settle reads it
   (`dnv-worker.md` HL2), so the two take it from one constant; a value
   that drifted on one side would keep every primary whose level suppresses
   a row the settle reads settling for as long as that level stands.
@@ -236,7 +237,8 @@ and the ns-dev backing and ANA state machines of CN16; `syncup_cn.go` and
 and wrappers; `healthcheck.go` the CN11 probers and their `LegProbeIO`
 (direct syscalls, never the `OsClient`); `md.go` the mdadm wrapper, the
 sysfs reads of the arrays and the assembly cases (CN12); `clonemeta.go`
-the base-state wrappers (the tmpfs mount, `truncate`, `losetup`) and the
+the base-state wrappers (the tmpfs mount, `truncate` and `rm` of the arena
+file, `losetup` and the loop devices' sysfs holders) and the
 CN18 clone-metadata slot allocator — unit accounting over the single loop
 device, its room check and verdict for a clone whose wrapper is absent or
 does not match, the `blkdiscard` recycle guard, the clone-metadata wrapper
@@ -270,14 +272,13 @@ and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and four
 registries that mirror nothing: in each cntlr's state the connect-retry,
 clone-metadata-retry and prober registries, and the CN10 disconnect
-registry, in memory only, never persisted. Two more in-memory-only fields
-of a cntlr's state sit outside that mutex, touched only under the cntlr's
-object lock or the
-node write lock: the marks of CN14's activation sweep (`pendingSweep`)
-and `reqFromRpc`, which says whether the request this process holds
-arrived by the revision-gated RPC (CN14). Each state's request is an
-atomic pointer,
-stored and loaded without that mutex: other cntlrs' passes and the
+registry, in memory only, never persisted. Three more in-memory-only
+fields of a cntlr's state sit outside that mutex, touched only under the
+cntlr's object lock or the node write lock: the marks of CN14's
+activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`) and
+`reqFromRpc`, which says whether the request this process holds arrived
+by the revision-gated RPC (CN14). Each state's request is an atomic
+pointer, stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
 lock, and a request is never modified once stored. The tracker has its
 own lock; the chunk sets are touched only under the cntlr's object lock,
@@ -510,7 +511,22 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   does not answer either, `tmp_file_info` is an `ERROR` naming it and
   nothing is truncated — a file that really is absent then waits, as the
   tmpfs does, for a check round that reads it absent and names it (CN30),
-  and the `SyncupCn` that round makes the worker re-send.
+  and the `SyncupCn` that round makes the worker re-send. A file of another
+  size is replaced while nothing uses it, on a tmpfs this pass found or
+  mounted (`tmpfs_info` `OK`): no clone-metadata wrapper of the CN maps
+  one of the file's loop devices, every wrapper's table is a run of the
+  arena, no loop device of the file has a holder in sysfs, and every read
+  that tells answered. The converge detaches every loop device of the
+  file, confirms from a fresh listing that none is left — a loop device
+  something still has open stays attached until it is closed — removes the
+  file and truncates it afresh, and the loop device step below attaches a
+  new one. While something uses the file, or a read that would tell does
+  not answer, `tmp_file_info` reads `ERROR` and the file stays as it is:
+  replacing it would take the metadata of every clone on the CN with it.
+  Reason: a file nothing uses holds no clone's metadata, so replacing it
+  loses nothing, while left as it is its `ERROR` row keeps the CN's health
+  epoch set, and the CN out of allocation, for as long as it stays
+  (`dnv-worker.md` HL1; `architecture.md`, Capacity index keys).
 * **loop device**: probe with `losetup` for the loop devices attached to
   `CnTmpFilePath` (the loop path is re-learned from this probe on every
   converge and every probe pass — it is kernel-assigned state, never
@@ -803,8 +819,8 @@ none of them. See CN21's P0.
 
 A primary-to-standby flip is therefore nothing but "the desired set
 shrank to the standby shape"; standby-to-primary is "it grew".
-`migr_list` is carried in the request and read by nothing: the CN's whole
-part in a migration is a leg's two-sided `side_list` (CN10).
+The CN's whole part in a migration is a leg's two-sided `side_list`
+(CN10): the cntlr request names no migration.
 
 CN10. Legs (`leg.go`; every leg of every group of every slice in
 `id_to_slice`, `spare_leg_list` included, both roles). Per side in the
@@ -894,8 +910,9 @@ ANA flips have reached this CN's sysfs would otherwise leave its md groups
 unassembled — and a `RedundNone` SP's pools unbuilt — until the next
 revision bump, because nothing else re-runs that converge), an ns-dev
 the build held off its td's raid0 while a dm-clone the plan does not want
-may still be live (CN18), and a clone destination's ns-dev whose converge
-fails in a pass whose CN18 finished the clone's build (CN16 rule 5). Every
+may still write into it (CN18), and a clone destination's ns-dev whose
+converge fails in a pass whose CN18 finished the clone's build (CN16 rule
+5). Every
 attempt mints its own trace id (CN2) and
 is a whole converge, which decides afresh whether any of them still
 holds; the first converge that finds none stops the retry.
@@ -1421,7 +1438,10 @@ Three cases, decided per td by two request fields:
    the origin's raid0 is live; then the thin loop's `dmsetup create`. A
    failed message is logged and tolerated, because the `dmsetup create`
    that follows decides the outcome: the pool may already hold the id
-   after a crashed earlier pass.
+   after a crashed earlier pass, which the message's refusal says with
+   EEXIST, an errno the command wrapper hands back in the error's type
+   (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`) and
+   the torn rule below reads.
 
 Both clauses are re-derivable from the request alone, which is why
 `ensureThin` never messages a td with a non-zero `ori_id` whatever the
@@ -1430,12 +1450,22 @@ pre-pass did, and why no handoff between the two is needed.
 A created td is never messaged on any pass — fresh primary after a
 failover, startup reconcile from the local store (`dnagent.md` SH1 to SH3), a device
 removed by hand, ever. `ensureThin` reads the device's info and, when the
-device is absent, runs `dmsetup create` directly. If that fails because
-the pool does not hold the id, the row reads `RES_STATUS_ERROR` with the
-dmsetup output in its details, the worker records `err_epoch`, and no
+device is absent, runs `dmsetup create` directly. If dm-thin refuses the
+thin table — that create, or the reload of a volume whose table differs —
+because the pool does not hold the id, with ENODATA, which the command
+wrapper hands back in the error's type (`dnagent.md`, OS wrappers —
+`dm.go`, `nvmet.go`, `nvmehost.go`), the row reads `RES_STATUS_ERROR` with
+the dmsetup output in its details and the reason `RES_REASON_THIN_ID_LOST`
+(`architecture.md`, Live-state reporting), which the worker's shared-state
+class reads (`dnv-worker.md` HL2); the worker records `err_epoch`, and no
 later converge sends a message either: pool-metadata loss surfaces as an
 event for an operator instead of an empty volume under a live `dev_id`,
-which is what an unconditional thin create would produce. Standby cntlrs
+which is what an unconditional thin create would produce. This build is
+the one place the reason is set, and only for a created td: an uncreated
+snapshot's table meets the same refusal until its message has made the id,
+and its row carries no reason, and a check round's probe finds a created
+td's absent volume `MISSING` with no reason (CN28). Reason: the worker
+decides by the field, and a tool's wording is no contract. Standby cntlrs
 build no thin volumes and are unaffected. The delete message a td leaving
 `td_list` triggers is not gated on `created` (below).
 
@@ -1485,14 +1515,34 @@ and its snapshot is not a state the gateway can produce.
 `ori_id` the pool does not hold fails at the message; the `dmsetup
 create` behind it fails; the row reads `RES_STATUS_ERROR` with the
 dmsetup output; the td stays uncreated, so every converge retries. No
-detection, no distinct status — the origin guarantee is the gateway's
-contract to keep, not the agent's to re-check.
+detection, no distinct status and no reason — the origin guarantee is the
+gateway's contract to keep, not the agent's to re-check.
 
-A primary crash between two slices' messages still tears the snapshot —
-delete and re-create a snapshot whose creation raced a crash
-(`architecture.md`, Thin devices). `created` certifies materialization,
-not point-in-time consistency: the next primary sends the remaining
-messages, every row goes `OK`, and the flag flips.
+**A torn snapshot is reported.** A primary that stops between two slices'
+messages, or a slice the pre-pass skips or whose message fails, leaves a
+snapshot that a later pass finishes from another instant: a torn snapshot
+(`architecture.md`, Thin devices). The pre-pass marks the td torn when one
+run of it makes a new thin id in one slice while another slice of the
+snapshot already has its id: that slice's snapshot thin device exists, or
+its message is refused with EEXIST, read from the error's type, never from
+its text; the device of every slice that is not deferred is read,
+whether or not its pool is ready this pass. A slice whose device read
+fails, one with no device whose pool is not ready, and one whose message
+fails otherwise count as neither, and a run that makes every slice's id,
+or none, marks nothing. The agent keeps the mark in memory (`tornTds`)
+from that run until a request carries the td `created` or the td leaves
+`td_list`, and every report carries it in the td's entry of
+`td_id_to_thin_info` while the td is uncreated, a converge's and a check
+round's alike (CN28), so the created flip, which either reply can bring,
+writes it into the thin device record
+(`dnv-worker.md` RW19). The mark is best effort: between the run that saw
+the tear and the flip, an agent restart can lose it, and so can a failover
+or a cntlr replacement that moves the primary role off this cntlr (Known
+limits). `created` certifies materialization, not point-in-time
+consistency: a later pass sends the remaining messages, every row goes
+`OK`, and the flag flips, torn only when the mark has lasted until then.
+Reason: the one remedy is to delete and re-create the snapshot, and
+nothing else tells the operator which one.
 
 The persisted `SyncupCntlrRequest` carries `created` too (`dnagent.md`
 SH5). Between a td's materialization and the flip's re-sync the stored
@@ -1536,8 +1586,23 @@ only logged), and deleting against a lagging `td_list` would destroy a
 live td — the first revision-gated `SyncupCntlr` after boot runs the
 sweep instead. A sweep failure is logged and retried on later converges
 until it succeeds once; a stray surviving a crash between creation and
-sweep, or a failed delete message, is collected at the pool's next
-rebuild.
+sweep waits for the next sweep of the pool's ids that gets through. A
+delete message that fails, refused or unanswered, runs the same sweep of
+that pool in the same pass, on the same condition — the request the pass
+converges came by the revision-gated RPC — and that sweep spares every id
+that a thin volume of the sp the pass lists still maps in that pool, read
+from the volume's live table, since such an id is no stray; a volume
+whose table names a device the pass's listing does not resolve keeps its
+id in every pool swept, and one whose table cannot be read while it is
+still there stops every such sweep of the pass. A sweep that gets through
+also ends a pending activation sweep of its slice. Nothing of the failure
+is remembered: a sweep that fails too, or a failed delete in a pass whose
+request did not come by the RPC, leaves the id to the next sweep of that
+pool's ids that gets through — the one after a later failed delete in
+that pool, or an activation sweep — and no pass aims at it. Reason: only
+a sweep of a pool's ids finds an id that has no dm device, so without the
+one after a failed delete, the id's blocks can stay allocated for the
+life of the pool device.
 
 A whole sp leaving this CN — the pointer removed, or `SP_LEVEL_DISABLE` —
 instead only deactivates: the pool is unwanted too, so by the rule above
@@ -1596,8 +1661,8 @@ backing state machine, evaluated in this order (first match wins;
    run larger than the whole arena registers none), and so does any
    failure to converge
    this ns-dev, this read and its reload onto the dm-clone among them, in
-   a pass whose CN18 finished the build (the clone's
-   `clone_id_to_dm_clone` row `OK`): the worker re-syncs on a revision or
+   a pass whose CN18 finished the build, reading the dm-clone hydrating
+   after step 5: the worker re-syncs on a revision or
    a reply code, never on a row, so without it the park a recovery left
    would stay until the cntlr's next converge for another reason;
 6. otherwise ⇒ → `CnRaid0Name` (via dm-flakey when rule 7 applies);
@@ -1643,11 +1708,11 @@ on a pass whose sweep an unanswered listing stopped (CN21) pre-step 2
 does not run and `ensureNsDev` makes the same reload itself, still after
 pre-step 1. Unparking: the reload onto the backing the remaining rules
 select first, then ANA per the rule below — except onto the td's raid0
-while a dm-clone the plan does not want may still be live (the pass's L3
-did not run, or left one): the namespace then stays parked and
-inaccessible, its ns-dev row `ERROR`, until a pass that leaves no such
-dm-clone live (CN18). No path of a pass leaves a CN device suspended
-unless a `dmsetup` command on it fails, and one such failure leaves it so
+while a dm-clone the plan does not want may still write into that td
+(CN18's hold): the namespace then stays parked and inaccessible, its
+ns-dev row `ERROR`, until a pass that leaves no such dm-clone live (CN18).
+No path of a pass leaves a CN device suspended unless a `dmsetup` command
+on it fails, and one such failure leaves it so
 on purpose: a reload fails closed (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`). A reload
 whose load fails returns the error with the device still suspended on
 its old table — any reload, since the rule is `Dm.Reload`'s own: for a
@@ -1662,7 +1727,7 @@ until a reload or a resume of it succeeds. An unwanted one that no path
 of a pass meets — below a layer the chain stopped at, or anywhere on a
 pass whose sweep an unanswered listing stopped (CN21) — is met by the
 first pass whose chain reaches it. `ensureNsDev` bare-resumes a device
-whose table already matches, and one it holds off the raid0 (CN18) as
+whose table already matches, and one it holds off its raid0 (CN18) as
 well. `parkNsDev` — CN9's pre-step 2,
 the park of an ns-dev of the plan, which has a plan to reload from —
 reloads one whose table does not match, and one whose table does match
@@ -1787,9 +1852,10 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    "/sys/class/nvme-subsystem" or a "subsysnqn" read that did not
    answer, with no other entry naming `src_nqn`, or a failed listing of
    the matching entry's own directory, fails step 1 naming the read, and
-   nothing is connected on it; `clone_id_to_dm_clone` then reads
-   `MISSING` "source unknown: …" naming the read, where step 1's other
-   failures read "source not connected". A source whose disconnect a
+   nothing is connected on it; `clone_id_to_dm_clone` then reads, while no
+   dm-clone of the clone is up, `MISSING` "source unknown: …" naming the
+   read, where step 1's other failures read "source not connected" (the
+   shared rule below). A source whose disconnect a
    sweep has set going is neither adopted nor connected while that
    disconnect runs: step 1 fails naming it, and the retry reads the
    source afresh once the disconnect has returned (CN10's disconnect
@@ -1811,9 +1877,12 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    has not been freed yet (`architecture.md`, Metadata units).
 
    **No room is a wait.** Before step 2 reads the dm-clone, parks or
-   removes anything, a clone whose source is connected meets one verdict
+   removes anything, a clone whose source step 1 reads as connected — no
+   disconnect of it in flight, a controller at every endpoint, whatever its
+   state, and the source namespace there — meets one verdict
    (`cloneMetaVerdict`) that the converge and the CN28 probe both decide
-   by, so the two channels report the same rows. An arena whose listing
+   by, so the two channels report the same rows: part of the one rule that
+   decides all three of the clone's rows (below). An arena whose listing
    did not answer comes first, whatever the clone's wrapper, since the
    agent cannot tell then whether the wrapper matches: `clone_id_to_meta`
    `RES_STATUS_ERROR` with the listing's error and `clone_id_to_dm_clone`
@@ -1837,6 +1906,11 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
      `clone_id_to_dm_clone` `RES_STATUS_ERROR` "metadata wrapper missing",
      and no retry;
    * otherwise step 2 goes on.
+
+   Under each verdict that stops step 2, a dm-clone still up from an
+   earlier pass keeps its status line in `clone_id_to_dm_clone`, after the
+   verdict's text, because the gateway's hydration checks read it
+   (`architecture.md`, Live-state reporting).
 
    `ensureCloneMeta` asks the same question once more on its own
    enumeration before it removes a mismatched wrapper, and answers no room
@@ -1904,11 +1978,13 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    `dmsetup status` read that decides the third case is step 2's own; a
    dm-clone that a `dmsetup info` after a failed read confirms gone reads
    as not hydrating, and the recovery runs; otherwise, when it fails or
-   does not answer, step 2 fails exactly as on a failed
-   `dmsetup info` of the dm-clone — `clone_id_to_meta` and
-   `clone_id_to_dm_clone` `RES_STATUS_ERROR` (CN29) — the pass recovers,
-   removes and enables nothing for that clone, and it registers the CN10
-   retry. CN16 reads the status again itself and moves no ns-dev onto a
+   does not answer, step 2 stops there, as on a failed `dmsetup info` of
+   the dm-clone: the pass recovers, removes and enables nothing for that
+   clone and registers the CN10 retry, and the clone's rows are what the
+   shared rule (below) reads of the node: the dm-clone's row reads
+   `RES_STATUS_ERROR` with the failed read's error, which no other row
+   carries. CN16 reads the status again itself
+   and moves no ns-dev onto a
    dm-clone that does not show hydration enabled (rule 5), so a td a
    killed build left parked stays parked until a pass that can read the
    status has recovered the clone.
@@ -1956,12 +2032,12 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    `blkdiscard` every mapped region. Mapped means already copied because
    the destination td started empty (`architecture.md`, [D3]).
    Destination bitmaps not applied in full — a read or a `blkdiscard`
-   that fails — fail the clone closed: the dm-clone is removed,
-   `clone_id_to_dm_clone` reads `RES_STATUS_ERROR` "destination bitmaps
-   not applied: …", and the CN10 retry is registered; a dm-clone whose
+   that fails — fail the clone closed: the dm-clone is removed, its row
+   reads `RES_STATUS_MISSING` with "destination bitmaps not applied: …"
+   leading its details, and the CN10 retry is registered; a dm-clone whose
    removal fails there — as it may when step 2 could not remove it either
    — stays up with hydration off, which CN16 does not serve through (rule
-   5).
+   5), and its row reads `RES_STATUS_ERROR` (the shared rule below).
 5. The `enable_hydration` message to the dm-clone (`dmsetup message`) — only after step 4, so a
    recovered clone can never re-fetch a region the destination already
    owns (the staleness hazard of `architecture.md`, Clone crash
@@ -1974,33 +2050,94 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    the namespaces stay effectively suspended until
    `UpdateNamespaceSuspended`.
 
+**One rule decides the clone's rows.** For a clone whose destination td
+resolves and is not deferred, the converge, wherever its pass ends, and
+the CN28 probe decide the status of each of its three rows by one rule,
+from what each reads of the node: the walk of the source, step 2's
+verdict for a source step 1 reads as connected (above), and the
+dm-clone's presence and status line. The converge reads after its own
+steps and the round only reads, so for the same state the two report the
+same status, and a row's epoch moves only when the state does:
+
+* `clone_id_to_target`: `RES_STATUS_ERROR` while a sweep's disconnect of
+  the source is in flight or the walk did not answer, both this node's
+  own reading; `RES_STATUS_MISSING` with no subsystem entry, and for a
+  fault of the source, which is an endpoint with no live controller, its
+  details the path states, or no source namespace; and `RES_STATUS_OK`
+  with the path states otherwise;
+* `clone_id_to_dm_clone`, where step 2's verdict does not decide it:
+  `RES_STATUS_ERROR` when the dm-clone's read did not answer,
+  `RES_STATUS_MISSING` when the dm-clone is absent, its details saying why
+  while step 1 does not read the source as connected ("source not
+  connected", or "source unknown: …" when the walk did not answer),
+  `RES_STATUS_OK` with the raw status line while that line shows
+  hydration on, and `RES_STATUS_ERROR` "hydration not enabled", followed
+  by the line, when it does not;
+* `clone_id_to_meta`, where step 2's verdict does not decide it: the
+  wrapper's own table in the pass's enumeration of the arena (CN28).
+
+A step that fails in a converge decides no status: the error of a failed
+connect leads the details of the source's row, and the error of a failed
+wrapper allocation or replacement, step 3's converge of the dm-clone,
+step 4's destination bitmaps or the enable leads those of the dm-clone's
+and the wrapper's rows, each when the row is not `OK`. The arena listing
+and the read of the dm-clone that the rows are written from are
+readings, not such steps, and the rows take them by the rule above:
+when one does not answer, the listing's error is the wrapper row's own
+details, and the read's error the dm-clone row's where step 2's verdict
+does not decide that row; neither leads another row.
+`clone_id_to_dm_clone` carries the raw status line whenever the pass read
+it, whatever its status, because `DeleteClone`'s hydration check reads it
+(`architecture.md`, Clones). Where the namespaces serve from does not
+follow the rows: CN16 rule 5 reads the dm-clone's status itself. A
+dm-clone up with hydration off therefore reads `RES_STATUS_ERROR` on every
+check round as on every converge, and a fault of the source reads
+`RES_STATUS_MISSING` on both, while a dm-clone with hydration on serves on
+(Known limits). Reason: two readings of one device cannot both be right,
+and rows that differ between the channels flip their status, and the
+health epoch with it, every round.
+
+**A fault of the source does not itself move the role.** It reads
+`RES_STATUS_MISSING`, not `ERROR`, and a missing row sets no health epoch
+(`dnv-worker.md` HL2), so the row leads to no failover and no cntlr
+replacement. Reason: moving the primary cannot repair the source, and the
+worker cannot tell a fault in the primary's own path to the source from
+one at the source; the operator can move the role by disabling the
+primary cntlr (`dnv-worker.md` AR5). A fault that fails step 1 still
+keeps the CN10 retry running, whose attempts can make the primary's check
+rounds miss, and missed rounds can move the role (Known limits). A
+dm-clone up with hydration off is this node's own fault and reads
+`ERROR`: the primary that takes the role rebuilds the clone by its crash
+recovery (`architecture.md`, Clone crash recovery).
+
 Any failure of step 1 registers the CN10 retry, and so do these later
 ones, each of which stops the build before step 5 has enabled hydration:
 the arena listing, step 2's `dmsetup info` or `dmsetup status` of the
 dm-clone, step 2's wrapper allocation or replacement (`ensureCloneMeta`),
 anything step 3's converge of the dm-clone fails on, step 4's
 destination bitmaps, and the enable (its own status read included). So
-does a failed `dmsetup status` read after the enable, whose line the
-dm-clone row carries (`architecture.md`, Live-state reporting). A failed
-allocation or replacement of the wrapper reads `clone_id_to_meta`
-`RES_STATUS_ERROR` with the failure's text and `clone_id_to_dm_clone`
-`RES_STATUS_ERROR` "metadata wrapper missing" in its own pass, and needs
-the retry all the same: a Check round cannot tell an absent wrapper in an
-arena with room from one the build has not reached, so with the dm-clone
-gone, as the recovery leaves it before it allocates, the round reads the
-clone's rows `RES_STATUS_MISSING` and the parked ns-dev `OK`
-(CN16 rule 5), which set no health epoch, and nothing but the retry runs
-the build again. Two outcomes of step 2 register no CN10 retry: an arena
-with no free run for the clone, whether the verdict or `ensureCloneMeta`'s
-own enumeration finds it, registers the clone-metadata retry instead, and
-a run larger than the whole arena registers nothing and is left to its
-rows, the same `ERROR` pair, which the Check round reports too (CN28).
+does a read after the enable that fails or does not show hydration on,
+whose line the dm-clone row carries (`architecture.md`, Live-state
+reporting). A failed allocation or replacement of the wrapper reads as
+the shared rule reads what it left: with the wrapper absent in an arena
+with room — and on a recovery the dm-clone too, which the recovery
+removes before it allocates — the clone's dm-clone and wrapper rows read
+`RES_STATUS_MISSING`, the failure leading their details on the pass that
+met it, and the parked ns-dev reads `OK` (CN16 rule 5). None of that sets
+a health epoch, and a Check round cannot tell that state from one the
+build has not reached, so nothing but the retry runs the build again, and
+the retry is registered all the same. Two outcomes of step 2 register no
+CN10 retry: an arena with no free run for the clone, whether the verdict or
+`ensureCloneMeta`'s own enumeration finds it, registers the clone-metadata
+retry instead, and a run larger than the whole arena registers nothing and
+is left to its rows, the same `ERROR` pair, which the Check round reports
+too (CN28).
 Some failures stop nothing and are only logged: step 2's failed removal
 of an old dm-clone (which is then kept, above), a failed knob message of
 step 3 (the knob keeps the value it had) and a failed source-chunk
 `blkdiscard` of step 4 (it costs an extra copy). Step 6 is CN16's: in a
-pass that finished steps 1 to 5 and the read after them (the dm-clone row
-`OK`), a failure to converge a rule-5 ns-dev of the td registers the
+pass that finished steps 1 to 5 and whose read after them found hydration
+on, a failure to converge a rule-5 ns-dev of the td registers the
 retry too (CN16 rule 5). Whatever stopped
 a pass, CN16 puts the td's ns-devs on the dm-clone only while its status
 shows hydration enabled (rule 5), which no dm-clone shows before step 5
@@ -2051,20 +2188,30 @@ still in that list.
   leave it loaded too: L3's remove fails or is killed — behind an ns-dev
   whose park failed its load, say, which stays suspended over the
   dm-clone (CN16) — or the descent stops above L3. So while a dm-clone
-  the plan does not want may still be live — L3 did not run or left one;
-  on a stopped pass, the dm listing did not answer or names one — the
-  build puts no ns-dev onto a td's raid0 it is not on already. One over
-  the dm-clone stays there and serves on through it, in the ANA group it
-  has. One parked stays parked and goes inaccessible: pre-step 2 may
-  have parked it on this very pass while it was optimized, and its hosts
-  should queue rather than take IO errors. A new one is created parked.
-  None of them is moved to optimized on that pass; each reports its
-  ns-dev row `ERROR` in the probe's words ("table is not the desired
-  namespace backing"), and the hold registers the CN10 retry, because a
-  hold that an unanswered `dmsetup ls` alone caused leaves nothing for
-  the Check verdict to name once the listing answers again. The first
-  pass whose L3 removes the dm-clone takes the order above — the park of
-  one still over the dm-clone, L3, then the reload.
+  the plan does not want may still be live — L3 did not run, or did not
+  verify it gone; on a pass an unanswered listing stopped, the dm listing
+  names it — the build puts no ns-dev onto the raid0 of a td that
+  dm-clone may write into, unless the ns-dev is on that raid0 already. A
+  lingering dm-clone writes into the td whose raid0 its live table names
+  as the destination device: the pass reads that table, resolves the
+  device's major:minor to a name through its dm listing and holds only
+  that td's namespaces. When the dm listing did not answer, or a
+  lingering dm-clone's table read fails while the device is still there,
+  is not one dm-clone target or names a device the listing does not hold,
+  nothing is known of what it writes, and every namespace of the cntlr is
+  held. One held over the dm-clone stays there and serves on through it,
+  in the ANA group it has. One parked stays parked and goes inaccessible:
+  pre-step 2 may have parked it on this very pass while it was optimized,
+  and its hosts should queue rather than take IO errors. A new one is
+  created parked. None of them is moved to optimized on that pass; each
+  reports its ns-dev row `ERROR` in the probe's words ("table is not the
+  desired namespace backing"), and the hold registers the CN10 retry,
+  because a hold that an unanswered `dmsetup ls` alone caused leaves
+  nothing for the Check verdict to name once the listing answers again.
+  The first pass whose L3 removes the dm-clone takes the order above — the
+  park of one still over the dm-clone, L3, then the reload. Reason: a
+  lingering dm-clone writes into one td, and holding every namespace of
+  the cntlr for it would park every other volume of the pool for nothing.
 * L3 removes the dm-clone, before its source connection dies — dm-clone
   flushes through the source on removal and blocks without it.
 * L4 removes the metadata wrapper `CnCloneMetaDmName` under
@@ -2260,9 +2407,12 @@ The third, ahead of the sweep, is the trim of the CN11 probers (below),
 which decides from the plan alone and removes nothing from the node. The
 build phase of such a converge in turn holds back the one thing that is
 safe only after a step the stopped sweep skipped: while a dm-clone the
-plan does not want may still be live it puts no ns-dev onto a td's raid0
-it is not on already — that waits for L3 to remove the dm-clone (CN18),
-as it does after a chain whose L3 did not run or left one. A namespace
+plan does not want may still be live it puts no ns-dev onto the raid0 of
+a td that dm-clone may write into — the one its table names, or every td
+of the cntlr when the dm listing is what did not answer or that
+destination cannot be read (CN18) — unless the ns-dev is on it already;
+that waits for L3 to remove the dm-clone, as it does after a chain whose
+L3 did not run or did not verify one gone. A namespace
 that has left `ns_list` it never touches, stopped sweep or not: that is
 L1's alone (below), after P0 (CN16). The snapshot is thrown away at the
 end of the pass: it decides only what to attempt, and every removal
@@ -2360,7 +2510,8 @@ L6. per-td raid0s and dm-errors.
 
 L7. each thin volume removed and then, only if its pool is one the
 desired state still wants, the pool-side delete of its id under CN14's
-rule.
+rule; a delete that fails has that pool's ids swept later in the same
+pass when the pass's request came by the revision-gated RPC (CN14).
 
 L8. thin pools, then the concats under them. An arming of CN14's
 activation sweep ends with its pool's life, but the layer drops its
@@ -2369,8 +2520,8 @@ is verified; while any is unverified the layer keeps them all, and each
 unverified pool is reported as a leftover. An unverified pool may have
 survived, and the next converge that wants it again finds the device
 present and arms nothing (`ensurePool` arms only a pool it creates), so
-dropping the arming there would lose the thin-id sweep for good: every
-id deleted meanwhile would keep its data blocks for the life of the
+dropping the arming there would lose its activation sweep for good:
+every id deleted meanwhile could keep its data blocks for the life of the
 pool. Keeping an arming too long costs one idempotent sweep; dropping one
 too early cannot be repaired.
 
@@ -2529,7 +2680,9 @@ CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
 holds no request for, as when none was ever accepted, or when the startup
 reload could not load or skipped its file (CN2) and none has been
 accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision`. For a
-known object the `agent_reply` is the read-only verdict of CN30. Never
+known object the `agent_reply` is the read-only verdict of CN30. The probe
+runs first and the verdict second, as in a round (CN24), so a call
+answers what a round in the same state would. Never
 creates, changes or removes an object of the node, though a cntlr's call
 makes the kernel commit the metadata of each thin pool and dm-clone whose
 status it reads (`dnagent.md` SH17).
@@ -2541,9 +2694,10 @@ error capture — `probe.go`; one round takes the CN1 locks of the
 corresponding `Get*Info`, and its `agent_reply` is the same read-only
 verdict (CN30) — which is what drives the worker's re-sync while a
 leftover is still there, and, on `CheckCn`, while a piece of the base
-state that a `SyncupCn` would build reads absent or an ANA group that it
-would rewrite reads in the wrong state. Like every `dnagent.md` SH24 round it runs
-under its request's `trace_id` (the stream's id when that is empty).
+state that a `SyncupCn` would build reads absent, an ANA group that it
+would rewrite reads in the wrong state, or an arena file that it would
+replace reads of another size (CN30). Like every `dnagent.md` SH24 round it
+runs under its request's `trace_id` (the stream's id when that is empty).
 
 ### `GetThinDeviceBm` / `GetLegBm`
 
@@ -2567,7 +2721,10 @@ would take the release with it and leave the reservation held until some
 later reserve on that pool met it. A reserve refused because a metadata
 snapshot is already held — one an earlier reserve made and nothing
 released, such as one whose reserve was killed after its message ran — is
-retried once after a release. The XML goes to a file, never to stdout: the OS
+retried once after a release; that refusal is read from the error's type,
+EBUSY, or EEXIST for an output that words it "already exists", never from
+its text (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
+The XML goes to a file, never to stdout: the OS
 command record logs a command's stdout in full (`log.md`, OS commands
 and file IO), and a dump is one element per mapped run — large on a
 fragmented slice, once per slice per read — while the record of reading
@@ -2590,9 +2747,9 @@ because nothing repairs an entry that fails the check: `mkdir -p` leaves
 an existing directory's owner and mode as they are. A local user who
 created the name first in a world-writable directory would then fail
 every dump on the node until an operator removed it — the bitmap reads,
-the CN14 activation sweep, and CN18 step 4's recovery, which fails
-closed. In the runtime directory only root can have made such an entry.
-That directory is a tmpfs, so until its `rm` the file holds as much
+CN14's sweeps of a pool's thin ids, and CN18 step 4's recovery, which
+fails closed. In the runtime directory only root can have made such an
+entry. That directory is a tmpfs, so until its `rm` the file holds as much
 memory as the document, which the command timeouts bound. The file is
 read back under the soft timeout, and once `thin_dump` has run an
 `rm -f` of it follows whatever the outcome, before the release and, like
@@ -2606,11 +2763,13 @@ clears the runtime directory. The command timeouts of
 `architecture.md`, Common validation, bound the dump; a pool whose
 metadata outgrows what `thin_dump` emits inside `CmdSoftTimeout` fails
 the RPC, and the caller falls back to a full copy — bitmaps are an
-optimization, never a correctness input (`architecture.md`, Clones). The
-activation sweep of CN14 shares this reservation machinery and its
-`CmdSoftTimeout` bound — metadata too large to dump inside the bound
-fails the sweep the same way it fails a bitmap read, and the sweep
-retries on later converges.
+optimization, never a correctness input (`architecture.md`, Clones).
+CN14's sweeps of a pool's thin ids — the activation sweep and the sweep
+after a failed delete — share this reservation machinery and its
+`CmdSoftTimeout` bound: metadata too large to dump inside the bound fails
+a sweep the same way it fails a bitmap read; an armed activation sweep
+retries on later converges, and the sweep after a failed delete does not
+(CN14).
 
 CN26. `GetThinDeviceBm`: from the `slice_idx` pool's dump, the mapping
 bitmap of the td's thin volume (its `dev_id` looked up in the stored
@@ -2702,7 +2861,10 @@ step 2). The rows, each with its `res_name` and what its probe checks:
 * `td_id_to_raid0` and `td_id_to_dm_error`, named by the `CnRaid0Name`
   and the `CnErrorName`: `dmsetup table`.
 * `td_id_to_thin_info` with its `slice_id_to_dm_thin`, named by the
-  `CnThinDevName`: `dmsetup table` (pool and `dev_id`).
+  `CnThinDevName`: `dmsetup table` (pool and `dev_id`); a created td's
+  volume a round reads absent is `RES_STATUS_MISSING` with no reason
+  (CN14). The td's entry also carries its torn mark, which a round reports
+  from the agent's memory as the converge does (CN14).
 * `slice_id_to_dm_pool`, named by the `CnPoolFinalName`:
   `dmsetup status`; the details are the raw status line — the worker
   parses data and metadata used and total out of it for the auto-grow of
@@ -2763,45 +2925,57 @@ step 2). The rows, each with its `res_name` and what its probe checks:
   configfs, per CN17; a deferred transfer's three rows are
   `RES_STATUS_PROVISIONING`.
 * `clone_id_to_target`, named by the clone's `src_nqn`: the sysfs walk of
-  CN10 shows a live controller per `src_tr_conf_list` entry (the
-  subsystem whose "subsysnqn" is `src_nqn`, then each controller's
-  "state") — not nvme list-subsys. While a sweep's disconnect of
-  `src_nqn` is in flight (CN10's disconnect registry) it is
-  `RES_STATUS_ERROR` with the converge's own details, whatever the walk
-  shows; otherwise a walk that did not answer (CN10) makes it
-  `RES_STATUS_ERROR` naming the read, never `MISSING`.
+  CN10 — the subsystem whose "subsysnqn" is `src_nqn`, each controller's
+  "state" and the source namespace's device — not nvme list-subsys; its
+  status is CN18's shared rule's, `OK` with a live controller per
+  `src_tr_conf_list` entry and the source namespace there, and
+  `RES_STATUS_MISSING` with no subsystem entry or for a fault of the
+  source. While a sweep's disconnect of `src_nqn` is in flight (CN10's
+  disconnect registry) it is `RES_STATUS_ERROR` with the converge's own
+  details, whatever the walk shows; otherwise a walk that did not answer
+  (CN10) makes it `RES_STATUS_ERROR` naming the read, never `MISSING`.
 * `clone_id_to_dm_clone`, named by the `CnCloneFinalName`:
-  `dmsetup status`; the details carry the raw status line
+  `dmsetup info`, then `dmsetup status` of a dm-clone that is there; its
+  status is CN18's shared rule's, and the details carry the raw status
+  line whenever it was read, whatever the row's status
   (`architecture.md`, Live-state reporting — hydration progress;
-  `DeleteClone`'s force check reads it). For a clone whose source is
-  connected, CN18 step 2's verdict comes first: while the arena does not
-  answer, whatever the wrapper, `RES_STATUS_ERROR` "metadata wrapper
-  missing"; otherwise, only for a wrapper that is absent or does not
-  match, `RES_STATUS_PROVISIONING` "waiting for metadata room: " with the
-  allocator's message when the arena has no free run for a fresh wrapper —
-  the details then carry no status line, so a `DeleteClone` without
-  `force` finds no hydration to prove while the clone waits —, and
-  `RES_STATUS_ERROR` "metadata wrapper missing" when the run is larger
-  than the whole arena.
+  `DeleteClone`'s hydration check, which `force` skips, reads it). For a
+  clone whose source step 1 reads as connected, CN18 step 2's verdict
+  comes first: while the arena does not answer, whatever the wrapper,
+  `RES_STATUS_ERROR` "metadata wrapper missing"; otherwise, only for a
+  wrapper that is absent or does not match, `RES_STATUS_PROVISIONING`
+  "waiting for metadata room: " with the allocator's message when the
+  arena has no free run for a fresh wrapper, and `RES_STATUS_ERROR`
+  "metadata wrapper missing" when the run is larger than the whole arena
+  — each followed by the status line of a dm-clone still up.
 * `clone_id_to_meta`, named by the `CnCloneMetaDmName`: `dmsetup table`
   of the clone-metadata wrapper: present, length = the CN18-computed unit count
   times `CnCloneMetaUnit`, in sectors, and the table's backing device equals the currently probed
   loop path; any mismatch (such as a tmpfs remounted under a live agent)
   ⇒ `RES_STATUS_ERROR`, whose repair path is the clone rebuild of CN18
-  step 2. The verdict of that step comes first here too, read-only from
-  the pass's enumeration: an arena that did not answer reads
-  `RES_STATUS_ERROR` with the listing's error, whatever the wrapper; an
-  absent or mismatched wrapper in an arena with no free run for a fresh
-  one, the clone's own run counted free, reads
+  step 2; its status is CN18's shared rule's. The verdict of that step
+  comes first here too, read-only from the pass's enumeration: an arena
+  that did not answer reads `RES_STATUS_ERROR` with the listing's error,
+  whatever the wrapper; an absent or mismatched wrapper in an arena with
+  no free run for a fresh one, the clone's own run counted free, reads
   `RES_STATUS_PROVISIONING` with the same details, and one the verdict
   refuses otherwise reads `RES_STATUS_ERROR` with its message.
 
 CN29. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output
 in its details and the converge pass continues with the remaining
-resources. Probes create, change and remove nothing — the
+resources. Two things qualify that. The details are for people: where
+the worker must tell one failure from another, the row says so in its
+reason (`architecture.md`, Live-state reporting), set from the command
+wrapper's typed error, never from the text (`dnagent.md`, OS wrappers —
+`dm.go`, `nvmet.go`, `nvmehost.go`); the one reason the cn agent sets is
+CN14's lost thin id. And a clone's three rows take their status from
+CN18's shared rule, from the live state, on a converge and a round
+alike, a failed command's output joining their details. Probes create,
+change and remove nothing — the
 metadata-snapshot reserve runs only inside `dumpThinMetadata` (the CN25
-bitmap reads, the CN14 activation sweep and the destination-bitmap read of
+bitmap reads, CN14's sweeps of a pool's thin ids — the activation sweep
+and the sweep after a failed delete — and the destination-bitmap read of
 CN18 step 4), never from `probe.go` — though a status read of a thin pool
 or a dm-clone makes the kernel commit that target's metadata (`dnagent.md`
 SH17). `RES_STATUS_PROVISIONING` is never produced by this path: it
@@ -2834,7 +3008,9 @@ names it too (CN30), because the worker re-syncs on a reply's code and
 never on its rows. So does an ANA group that the round reads in a state
 other than its fixed one while the port's transport attributes match,
 which a `SyncupCn` would rewrite: the port row reads `ERROR` with the
-probe's words, and the verdict names it.
+probe's words, and the verdict names it. And so does an arena file of
+another size that a `SyncupCn` would replace (CN5): `tmp_file_info`
+reads `ERROR`, and the verdict names the file.
 
 ### The read-only verdict
 
@@ -2851,23 +3027,28 @@ way a `SyncupCn` would cure (CN5). That is each piece it read absent: an
 absent tmpfs; an absent arena file or loop device, while the same probe
 read the tmpfs there or absent, since the converge creates them only on
 a tmpfs it found or mounted; and a missing port directory or ANA group.
-And it is an ANA group whose "ana_state" the probe read as other than
+It is an arena file of another size on a tmpfs the probe read there,
+while the file's loop listing answers and nothing uses the file by CN5's
+test, which the converge replaces. And it is an ANA group whose
+"ana_state" the probe read as other than
 the group's fixed one on a port whose transport attributes all match:
 nvmet takes an "ana_state" write whatever is linked to the port, and
 `EnsurePort` rewrites a state that differs. Each is rendered the way
 CN20 renders an enumeration that did not answer — "enumeration failed"
 naming the piece as absent, the port's with the probe's own words after
-it, and a group's state as differing from the wanted one — and the log
-record lists it among its failures. Nothing else re-drives them — the
+it, a group's state as differing from the wanted one, and the arena
+file as one of another size — and the log record lists it among its
+failures. Nothing else re-drives them — the
 worker re-syncs on a reply's code, never on a row — and a check round
 cannot build or rewrite them itself (CN23). A probe that did not answer
 names nothing, and the next round asks again. Nor does anything else
 that is there but not as wanted, which its row alone reports: a
 filesystem of another type at the arena's path — and with it an absent
 arena file or loop device, which the converge would not create on it —
-an arena file of another size and more than one loop device, all of
-which the converge reports and leaves as they are, so a re-sent
-`SyncupCn` could not cure them; and a port transport attribute that
+an arena file of another size that something uses, or whose use a read
+did not answer, and more than one loop device, all of which the
+converge reports and leaves as they are, so a re-sent `SyncupCn` could
+not cure them; and a port transport attribute that
 differs: nvmet refuses every transport-attribute write while a subsystem
 is linked to the port (EACCES), so while one is every re-send would fail
 on that attribute the same way, and `EnsurePort` stops at it, before the
@@ -3074,52 +3255,84 @@ report no `Syncup*` could ever clear.
   (`architecture.md`, Failover). An ANA conjunct in the style of
   `architecture.md`, [D15] — optimized only once the ns-dev is on the
   backing it wants — is not done here.
-* A clone build that keeps failing with its dm-clone up shows only in
-  its Syncup rows: CN16 keeps a clone's td parked while its dm-clone
-  does not show hydration enabled (rule 5). A failed CN18 step that
-  stopped the build before step 5 enabled hydration registers the CN10
-  retry (all but two outcomes of step 2: an arena with no free run for
-  the metadata wrapper registers the slower clone-metadata retry, the
-  clone's two rows reading `PROVISIONING`, and a run larger than the
-  whole arena registers none, its two rows reading `RES_STATUS_ERROR` in
-  the Check rounds too), which re-runs the converge every
+* A clone build that keeps failing reads the same on every report, and
+  only some ways of failing set a health epoch: CN16 keeps a clone's td
+  parked while its dm-clone does not show hydration enabled (rule 5). A
+  failed CN18 step that stopped the build before step 5 enabled
+  hydration registers the CN10 retry (all but two outcomes of step 2: an
+  arena with no free run for the metadata wrapper registers the slower
+  clone-metadata retry, the clone's two rows reading `PROVISIONING`, and
+  a run larger than the whole arena registers none, its two rows reading
+  `RES_STATUS_ERROR`), which re-runs the converge every
   `CnConnectRetryInterval` until the build finishes. What keeps failing
   may leave the dm-clone up with hydration off: among others a refused
-  enable, a `dmsetup create` killed after
-  its ioctl ran, or a stale dm-clone that will not go while a later step
-  fails, such as the read of its destination bitmaps. A Check round in
-  between that can read the node and finds the source's paths live then
-  reads the parked ns-dev as the table CN16 wants and the clone's rows
-  `OK` (the dm-clone row's raw status carries "no_hydration"), so the
-  worker's health pass sees a clean primary while a host takes IO errors
-  on the namespace, which stays optimized: the recovery's own IO-error
-  window (CN18 step 4), drawn out for as long as the build keeps
-  failing. Other ways of failing show in the Check rows, though not all of
-  them set a health epoch: with the dm-clone gone between attempts (step
-  4's fail-closed removal, a refused create, a failed allocation of the
-  metadata wrapper once the recovery has removed the dm-clone),
-  `clone_id_to_dm_clone` reads `RES_STATUS_MISSING`, which sets none, and
-  `ns_id_to_dm_linear` reads `OK` over the park, because a dm-clone
-  confirmed absent reads as not
-  hydrating (CN16 rule 5, `nsDevNow`), so a rebuild that keeps failing
-  that way sets no health epoch through the namespace row while a host
-  takes IO errors on the namespace; an arena listing or a status read
-  that keeps not answering leaves its rows `RES_STATUS_ERROR`; and a
-  source whose controllers are gone or not live reads
-  `RES_STATUS_MISSING` or `RES_STATUS_ERROR` in `clone_id_to_target`.
-  Nothing but the retry re-runs the build unless the cntlr is converged
-  for another reason (a revision bump, a non-zero reply code, an agent
-  restart).
+  enable, a `dmsetup create` killed after its ioctl ran, or a stale
+  dm-clone that will not go while a later step fails, such as the read of
+  its destination bitmaps. Its row then reads `RES_STATUS_ERROR`
+  "hydration not enabled" on every converge and every check round (CN18's
+  shared rule), so the primary's health epoch stays set — what that costs
+  in failovers is `dnv-worker.md`, Known limits — while a host takes IO
+  errors on the namespace, which stays optimized: the recovery's own
+  IO-error window (CN18 step 4), drawn out for as long as the build keeps
+  failing. With the dm-clone gone between attempts (step 4's fail-closed
+  removal, a refused create, a failed allocation of the metadata wrapper
+  once the recovery has removed the dm-clone), `clone_id_to_dm_clone`
+  reads `RES_STATUS_MISSING`, which sets none, and `ns_id_to_dm_linear`
+  reads `OK` over the park, because a dm-clone confirmed absent reads as
+  not hydrating (CN16 rule 5, `nsDevNow`), so a rebuild that keeps failing
+  that way sets no health epoch while a host takes IO errors on the
+  namespace; an arena listing or a status read that keeps not answering
+  leaves its rows `RES_STATUS_ERROR`; and a source fault reads
+  `RES_STATUS_MISSING` in `clone_id_to_target`, which sets no health epoch
+  (the next item). Nothing but the retry re-runs the build unless the
+  cntlr is converged for another reason (a revision bump, a non-zero reply
+  code, an agent restart).
+* A fault of a clone's source does not itself move the role: a source
+  with no live controller at one of its endpoints, or with no namespace,
+  reads `clone_id_to_target` `RES_STATUS_MISSING` on every converge and
+  every check round alike (CN18's shared rule), as a source with no
+  subsystem entry does, and a missing row sets no health epoch, so the row
+  neither fails the primary over nor replaces it. The copy waits until the
+  source answers, and a host's read of a block not yet copied waits for
+  the source or fails. A fault in the primary's own path to the source
+  reads the same, though a new primary would not meet it: the operator can
+  move the role by disabling the primary cntlr (`dnv-worker.md` AR5), and
+  the new primary builds the clone again by its crash recovery (CN18). A
+  fault that fails step 1 — no source namespace, or an endpoint with no
+  controller at all that step 1 then fails to connect — keeps the CN10
+  retry running for as long as it lasts (CN18), with the profile of the
+  late-member retry above: check rounds that wait behind its attempts can
+  miss, and missed rounds can fail the primary over. A source whose every
+  endpoint has a controller, live or not, and whose namespace is there
+  passes step 1, so its fault registers no retry. A clone that has
+  hydrated in full serves on through its dm-clone, its namespace
+  optimized, since serving follows the dm-clone's own status and not the
+  rows (CN16 rule 5); that rests on a dm-clone keeping hydration enabled
+  once it has hydrated in full, and one that turned it off would read
+  `RES_STATUS_ERROR` on every finished clone and park its namespaces. A
+  dm-clone up with hydration off, by contrast, reads `RES_STATUS_ERROR`
+  (above) and moves the role at the primary's threshold, and the new
+  primary rebuilds the clone by its crash recovery. The clone goes out of
+  service, even one that has hydrated in full, when its dm-clone must be
+  built again while a fault at the source lasts and that build fails
+  step 1 (CN18). A role move, a CN reboot, which takes the dm-clone and
+  the source's controllers together, and a level that suppresses the
+  clone, raised and lowered again (CN19), each need that build; it fails
+  on a CN with no controller at an endpoint that it then cannot connect,
+  and on any CN while the source has no namespace. CN16 rule 5 then parks
+  every ns-dev of the destination td on its `CnErrorName`, and a host
+  takes IO errors on the namespace, which stays optimized, until the
+  source comes back or the clone is deleted with `force`. Without `force`
+  the delete is refused: its hydration check reads the primary's
+  `clone_id_to_dm_clone`, which carries no status line (`architecture.md`,
+  Clones).
 * A clone that waits for room in the arena costs a whole converge of its
   cntlr every `CnCloneMetaRetryInterval`, under the object lock its Check
   rounds take (CN1), for as long as it waits: the clone-metadata retry
   (CN18) has the profile of the late-member retry above at a slower pace,
   and the wait can last as long as the node holds the units — on a CN a
   cntlr replacement charged past its ceiling, until clones of the node
-  drain (`architecture.md`, Metadata units). A clone that waits with an
-  old dm-clone still up reports no status line on its dm-clone row, so a
-  `DeleteClone` without `force` is refused for unproven hydration until
-  the wait ends (CN28).
+  drain (`architecture.md`, Metadata units).
 * A controller delete whose target vanishes mid-delete waits out the
   kernel's admin timeout: when a disk node removes a side's export while
   this CN's `nvme disconnect` of the leg is mid-delete — the two ends of
@@ -3167,14 +3380,15 @@ report no `Syncup*` could ever clear.
   underneath. Reads of regions not yet hydrated then fail until a later
   converge of that cntlr connects the source afresh and reloads the
   table. The window runs from that read to the registration.
-* A thin `delete` message that fails after its volume's removal is not
-  re-driven: L7 sends the pool-side delete of a volume's id only once the
-  volume is verified gone (CN21), a `dmsetup message` that fails is
-  logged and nothing more, and no later pass can enumerate a pool id that
-  has no dm device — the only id enumeration is CN14's activation sweep,
-  which the pool device's creation alone arms — so the id's blocks stay
-  allocated for the life of the pool device on this primary, until a
-  rebuild of the pool runs the activation sweep.
+* A thin `delete` message that fails after its volume's removal is
+  re-driven only once, by the sweep of that pool's ids its own pass runs
+  under an RPC-delivered request (CN14), and nothing of it is remembered.
+  When that sweep fails too, or the pass's request did not come by the
+  RPC, no pass aims at the id again: only the next sweep of that pool's
+  ids that gets through deletes it — the sweep after a later failed
+  delete in that pool, or an activation sweep, which the pool device's
+  creation alone arms — and until then its blocks stay allocated, for the
+  life of the pool device on this primary if no such sweep comes.
 * A base state that cannot be built is re-sent every round: a check
   round that reads absent a piece of the CN's base state that a
   `SyncupCn` would build, or an ANA group in a state other than its fixed
@@ -3186,10 +3400,16 @@ report no `Syncup*` could ever clear.
   refused command or write is logged as it fails — as for a disk node
   whose disk identity stays unconfirmed. Until the arena is built CN18
   has no loop device to allocate clone metadata from, so no clone on the
-  CN can be built. The verdict does not re-drive the rest of what is
+  CN can be built. A file of another size whose loop device a process
+  holds open through a plain file handle, which sysfs shows as no holder,
+  is named all the same (CN5, CN30): the converge's detach leaves that
+  device attached until the handle closes, so the replacement stops
+  there, and the worker re-sends the `SyncupCn` every round until it
+  does. The verdict does not re-drive the rest of what is
   there but not as wanted (CN30): its row reads `ERROR`. The arena's — a
-  filesystem of another type at its path, a file of another size or a
-  second loop device — wait for an operator, since the converge leaves
+  filesystem of another type at its path, a file of another size that a
+  clone-metadata wrapper maps or a holder holds, or a second loop device
+  — wait for an operator, since the converge leaves
   them as they are, and so does a port transport attribute that differs
   while a subsystem is linked to the port, since nvmet refuses every
   transport-attribute write then; one that differs while none is linked,
@@ -3198,3 +3418,12 @@ report no `Syncup*` could ever clear.
   next start. Each re-sent `SyncupCn` holds the node write lock for its
   converge and its removing node-level sweep (CN1), so every cntlr's
   Check round and converge on the CN waits it out once a round.
+* A torn snapshot's mark is best effort. CN14 keeps it in memory from the
+  pre-pass run that saw the tear until a request carries the td `created`,
+  and the created flip records it from a reply that completes the td
+  (`dnv-worker.md` RW19). An agent restart in between can lose it, and so
+  can a failover or a cntlr replacement that moves the primary role off
+  the cntlr holding it (`dnv-worker.md` AR5, AR7): a primary whose run
+  finds every slice's id made already sees no tear, and a demoted primary
+  reports no thin rows. The snapshot then flips with `torn` false
+  (`architecture.md`, Known limits).

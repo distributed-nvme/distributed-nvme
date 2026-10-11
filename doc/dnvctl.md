@@ -467,8 +467,9 @@ checks none of them (CT8).
 is legal only then, the snapshot inheriting its origin's size;
 dnvctl does not enforce the pairing (CT8). `td list` is the `created` poll,
 the client's wait primitive of `architecture.md`, Thin devices: CT4's
-rendering shows `created` on every thin device, false included, and that
-same place says when a token read before the poll is stale.
+rendering shows `created` and `torn` on every thin device, false included,
+and that same place says when a token read before the poll is stale and
+that a `torn` snapshot is one to delete and re-create.
 `td get-bm` and `td get-leg-bm` print the hex map of CT4; `td get-bm` names
 its device with the group's `--name`, where gatewayctl spells it `--td`.
 

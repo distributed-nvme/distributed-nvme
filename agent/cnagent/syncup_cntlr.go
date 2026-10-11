@@ -23,47 +23,13 @@ func (s *CnAgentServer) syncupCntlr(
 	key string,
 	req *pb.SyncupCntlrRequest,
 ) *pb.SyncupCntlrReply {
-	// CN8 gating: SyncupCn introduces the pointer first (architecture.md,
-	// Common agent rules).
-	cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
-	if cn == nil || !pointerKnown(cn.loadReq(), req.GetCntlrPointer()) {
-		return &pb.SyncupCntlrReply{
-			AgentReply: agent.UnknownObjectReply(
-				"cntlr pointer %s not in the cn's list",
-				cntlrPointerText(req.GetCntlrPointer())),
-		}
-	}
 	st := s.getCntlr(key)
 	var stored uint64
 	if st != nil {
 		stored = st.loadReq().GetRevision()
 	}
-	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
-		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}
-	}
-	// architecture.md, Common validation: the control plane stores concrete
-	// geometry, so a zero member here
-	// is a conf this agent must not build against — data_block_size and
-	// stripe_size become the dm thin-pool's and raid0's own arguments, and
-	// bitmap_chunk_block_cnt the md bitmap's. This is the last point with
-	// literally zero side effects: refusing here skips the desired-state
-	// promotion below, the whole converge (whose sweep alone rewrites ANA
-	// states, reloads ns-dev linears and removes dm devices) and the
-	// local-store Save, so a bad request cannot even be replayed by the next
-	// Reconcile. The stored revision is echoed back, not the request's, so
-	// the worker sees the request was not accepted.
-	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
-		ptr := req.GetCntlrPointer()
-		slog.ErrorContext(ctx, msgInvalidStoredConf,
-			slog.Uint64("cluster_id", req.GetClusterId()),
-			slog.Uint64("cn_id", req.GetCnId()),
-			slog.Uint64("sp_id", ptr.GetSpId()),
-			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
-			slog.String("error", err.Error()))
-		return &pb.SyncupCntlrReply{
-			AgentReply: agent.InvalidConfReply("%v", err),
-			Revision:   stored,
-		}
+	if reply := s.gateCntlr(ctx, req, stored); reply != nil {
+		return reply
 	}
 	if st == nil {
 		st = newCntlrState(req)
@@ -74,9 +40,9 @@ func (s *CnAgentServer) syncupCntlr(
 	st.storeReq(req)
 	// This request came through the revision gate, so GateRevision makes
 	// it the newest desired state this cntlr has ever accepted and its
-	// td_list is authoritative — the one copy the activation sweep may
-	// delete against (CN14). Only this cntlr's converges read it, each under
-	// the object lock held here or the node write lock.
+	// td_list is authoritative — the one copy CN14's thin id sweeps may
+	// delete against. Only this cntlr's converges read it, each under the
+	// object lock held here or the node write lock.
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
@@ -98,6 +64,61 @@ func (s *CnAgentServer) syncupCntlr(
 	}
 }
 
+// gateCntlr is CN8's gating of a SyncupCntlr against stored, the revision of
+// the request this process holds for the cntlr, zero for a cntlr it does not
+// hold: the pointer, then the revision, then the conf. It returns the
+// refusal, or nil for a request the converge may take. It writes nothing but
+// the conf refusal's Error record, so SyncupCntlr runs it under the node read
+// lock before it takes the object lock of a cntlr this process does not
+// hold, and a refused request leaves no lock entry behind (dnagent.md, SH11);
+// syncupCntlr runs it again under that lock. The CN request the pointer gate
+// reads cannot change under the node read lock, since SyncupCn replaces it
+// under the write lock.
+func (s *CnAgentServer) gateCntlr(
+	ctx context.Context,
+	req *pb.SyncupCntlrRequest,
+	stored uint64,
+) *pb.SyncupCntlrReply {
+	// CN8 gating: SyncupCn introduces the pointer first (architecture.md,
+	// Common agent rules).
+	cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
+	if cn == nil || !pointerKnown(cn.loadReq(), req.GetCntlrPointer()) {
+		return &pb.SyncupCntlrReply{
+			AgentReply: agent.UnknownObjectReply(
+				"cntlr pointer %s not in the cn's list",
+				cntlrPointerText(req.GetCntlrPointer())),
+		}
+	}
+	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
+		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}
+	}
+	// architecture.md, Common validation: the control plane stores concrete
+	// geometry, so a zero member here
+	// is a conf this agent must not build against — data_block_size and
+	// stripe_size become the dm thin-pool's and raid0's own arguments, and
+	// bitmap_chunk_block_cnt the md bitmap's. This is the last point with
+	// literally zero side effects: refusing here skips the desired-state
+	// promotion, the whole converge (whose sweep alone rewrites ANA states,
+	// reloads ns-dev linears and removes dm devices) and the local-store
+	// Save (syncupCntlr), so a bad request cannot even be replayed by the
+	// next Reconcile. The stored revision is echoed back, not the request's,
+	// so the worker sees the request was not accepted.
+	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+		ptr := req.GetCntlrPointer()
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("cn_id", req.GetCnId()),
+			slog.Uint64("sp_id", ptr.GetSpId()),
+			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
+			slog.String("error", err.Error()))
+		return &pb.SyncupCntlrReply{
+			AgentReply: agent.InvalidConfReply("%v", err),
+			Revision:   stored,
+		}
+	}
+	return nil
+}
+
 // convergeCntlr is the CN9 converge pass: one sweep top-down, then one build
 // phase bottom-up. That phase order is what implements architecture.md,
 // Failover, without special
@@ -109,9 +130,8 @@ func (s *CnAgentServer) syncupCntlr(
 // change, a spare switch or a finished migration the remote end is dead and
 // a removal DOES fail — is simply found again next pass.
 //
-// `migr_list` is carried in the request and read by nothing: the CN's whole
-// part in a migration is that a leg's side_list temporarily holds two sides
-// (CN10).
+// The CN's whole part in a migration is that a leg's side_list temporarily
+// holds two sides (CN10).
 func (s *CnAgentServer) convergeCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -138,6 +158,8 @@ func (s *CnAgentServer) convergeCntlr(
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
+	// CN14: the torn marks follow the request alone, on every converge.
+	keepTornMarks(st, plan)
 	info := newCntlrInfo()
 	// CN10: the pass's one wait budget, made here and nowhere else, so every
 	// entrance — the RPC, the startup reconcile, a background retry attempt
@@ -329,7 +351,7 @@ func (s *CnAgentServer) build(
 				continue
 			}
 			if st.reqFromRpc && st.pendingSweep[sp.sliceId] {
-				s.sweepThinIds(ctx, st, plan, sp)
+				s.sweepThinIds(ctx, st, plan, sp, nil)
 			}
 		}
 	} else if plan.primary {
@@ -362,7 +384,18 @@ func (s *CnAgentServer) build(
 			if tp.td.GetOriId() == 0 || tp.td.GetCreated() {
 				continue
 			}
-			s.snapshotPrePass(ctx, plan, tp, poolReady)
+			if !s.snapshotPrePass(ctx, plan, tp, poolReady) {
+				continue
+			}
+			// CN14's torn mark: the run that tore the snapshot sets it, and
+			// only the request clears it (keepTornMarks).
+			if !st.tornTds[tp.tdId] {
+				slog.WarnContext(ctx, msgSnapshotTorn, append(
+					s.cntlrIdAttrs(plan),
+					slog.Uint64("td_id", tp.tdId),
+					slog.Uint64("dev_id", uint64(tp.td.GetDevId())))...)
+			}
+			st.tornTds[tp.tdId] = true
 		}
 	}
 	for _, tp := range plan.tds {
@@ -371,6 +404,7 @@ func (s *CnAgentServer) build(
 		}
 		thinInfo := &pb.CntlrInfo_ThinInfo{
 			SliceIdToDmThin: make(map[uint64]*pb.ResInfo, len(plan.slices)),
+			Torn:            tornMark(st, tp),
 		}
 		for _, sp := range plan.slices {
 			key := thinResKey(tp.tdId, sp.sliceId)
@@ -388,8 +422,8 @@ func (s *CnAgentServer) build(
 					key, name, "thin pool missing")
 			default:
 				err := s.ensureThin(ctx, plan, tp, sp)
-				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.FromErr(
-					key, name, "", err)
+				thinInfo.SliceIdToDmThin[sp.sliceId] = thinRowOf(
+					st, tp, key, name, err)
 			}
 		}
 		info.TdIdToThinInfo[tp.tdId] = thinInfo
@@ -425,10 +459,12 @@ func (s *CnAgentServer) build(
 		}
 	}
 
-	// Clones (CN18), then transfers (CN17).
+	// Clones (CN18), then transfers (CN17). finished: the clones whose
+	// dm-clone this pass read hydrating after CN18 step 5.
+	finished := make(map[uint64]bool, len(plan.clones))
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			connectRetry, waitRoom := s.ensureClone(
+			connectRetry, waitRoom, done := s.ensureClone(
 				ctx, st, plan, cp, info, budget)
 			if connectRetry {
 				retryNeeded = true
@@ -436,6 +472,7 @@ func (s *CnAgentServer) build(
 			if waitRoom {
 				metaWait = true
 			}
+			finished[cp.cloneId] = done
 		}
 	} else if plan.primary {
 		for _, cp := range plan.clones {
@@ -451,10 +488,11 @@ func (s *CnAgentServer) build(
 	// ns-devs and the host-facing nvmet objects (CN16).
 	if plan.wantAny {
 		// held: the namespaces whose ns-dev ensureNsDev kept off a raid0 a
-		// dm-clone the plan does not want may still be hydrating into.
+		// dm-clone the plan does not want may still be hydrating into
+		// (plan.cloneHold).
 		held := make(map[uint64]nsDevHold)
 		for _, np := range plan.namespaces {
-			nsHeld, err := s.ensureNsDev(ctx, np, plan.cloneMayLinger)
+			nsHeld, err := s.ensureNsDev(ctx, np, plan.cloneHold)
 			if nsHeld != nsDevConverged {
 				held[np.nsId] = nsHeld
 				// A held ns-dev is not where its plan wants it, and nothing
@@ -468,7 +506,7 @@ func (s *CnAgentServer) build(
 				s.startConnectRetry(st, plan)
 				retryNeeded = true
 			}
-			if err != nil && cloneBuiltThisPass(info, np) {
+			if err != nil && np.clone != nil && finished[np.clone.cloneId] {
 				// Rule 5 after a build this pass finished: hydration is on,
 				// so whatever still keeps the td's hosts off the dm-clone is
 				// this ns-dev — left on a recovery's park (CN18 step 2),
@@ -570,25 +608,36 @@ func (s *CnAgentServer) build(
 // driven by the same `created == false`. A failed message is tolerated: the
 // pool may already hold the dev_id after a crashed earlier pass, and the
 // `dmsetup create` that follows decides the outcome.
+//
+// It reports whether this run tore the snapshot (CN14's torn mark): whether
+// one slice's message made the id while another slice already held it — its
+// snapshot device is there, or its message was refused with EEXIST
+// (agent.IsExists), the id being in its pool already. The slices of the two
+// kinds then date from different instants, since the ones already held were
+// made by an earlier run, in another quiesce or in none. The snapshot device
+// of every slice that is not deferred is read, one whose pool is not ready
+// this pass included, since a device there holds its id whatever the state
+// of its pool; only a ready pool is sent a message. A slice the run cannot
+// read, or whose message fails otherwise, counts as neither; so does one
+// with no device whose pool is not ready. A run that makes every id, or
+// none, tears nothing.
 func (s *CnAgentServer) snapshotPrePass(
 	ctx context.Context,
 	plan *cntlrPlan,
 	tp *tdPlan,
 	poolReady map[uint64]bool,
-) {
+) bool {
 	var need []*slicePlan
+	// had: a slice holds the id from before this run.
+	had := false
 	for _, sp := range plan.slices {
-		// poolReady only ever holds an entry for a non-deferred slice under
-		// plan.wantPool, so it already subsumes the deferred and
-		// pool-missing arms of the thin loop's switch. It is deliberately
-		// NOT tp.deferred: that flag is plan-global (anySliceDeferred), and
-		// gating the messages on it would drop create_snap for every ready
-		// slice whenever one sibling slice is still provisioning.
-		if !poolReady[sp.sliceId] {
+		// [D15]: a deferred slice has no pool, so no snapshot device.
+		if sp.deferred {
 			continue
 		}
 		// The same trigger ensureThin uses. An Info error means "skip":
-		// ensureThin fails that slice with the same error anyway.
+		// ensureThin fails that slice with the same error anyway, or the
+		// thin loop reports its pool missing.
 		//
 		// CN14: there is no second filter on the origin's own thin device.
 		// The gateway refuses a snapshot of an origin that is not materialized
@@ -597,7 +646,22 @@ func (s *CnAgentServer) snapshotPrePass(
 		// *this* CN has built the origin's dm device is irrelevant to a message
 		// the pool metadata answers.
 		dev, err := s.dm.Info(ctx, plan.thinName(tp.tdId, sp.sliceId))
-		if err != nil || dev != nil {
+		if err != nil {
+			continue
+		}
+		if dev != nil {
+			// The snapshot device attaches the id, so its pool holds it,
+			// ready this pass or not: the id was made by an earlier run.
+			had = true
+			continue
+		}
+		// poolReady only ever holds an entry for a non-deferred slice under
+		// plan.wantPool, so it also subsumes the pool-missing arm of the
+		// thin loop's switch. It is deliberately NOT tp.deferred: that flag
+		// is plan-global (anySliceDeferred), and gating the messages on it
+		// would drop create_snap for every ready slice whenever one sibling
+		// slice is still provisioning.
+		if !poolReady[sp.sliceId] {
 			continue
 		}
 		need = append(need, sp)
@@ -605,7 +669,7 @@ func (s *CnAgentServer) snapshotPrePass(
 	if len(need) == 0 {
 		// SH16: an equal-revision re-apply must not suspend anything. Every
 		// converge round would otherwise stall the origin's host IO.
-		return
+		return false
 	}
 	// ori_id is the origin's **dev_id**, not its td_id. An origin absent from
 	// the plan means there is nothing to quiesce — not that the messages are
@@ -634,12 +698,50 @@ func (s *CnAgentServer) snapshotPrePass(
 			}()
 		}
 	}
+	// made: a message of this run made the id in its slice's pool.
+	made := false
 	for _, sp := range need {
-		if err := s.createSnapId(ctx, plan, tp, sp); err != nil {
-			slog.ErrorContext(ctx, "thin-pool create message failed",
-				slog.String("pool", sp.poolFinalName),
-				slog.String("thin", plan.thinName(tp.tdId, sp.sliceId)),
-				slog.String("error", err.Error()))
+		err := s.createSnapId(ctx, plan, tp, sp)
+		if err == nil {
+			made = true
+			continue
+		}
+		if agent.IsExists(err) {
+			had = true
+		}
+		slog.ErrorContext(ctx, "thin-pool create message failed",
+			slog.String("pool", sp.poolFinalName),
+			slog.String("thin", plan.thinName(tp.tdId, sp.sliceId)),
+			slog.String("error", err.Error()))
+	}
+	return made && had
+}
+
+// msgSnapshotTorn is the Warn record of the converge whose snapshot pre-pass
+// tore a snapshot and set its torn mark (CN14). The mark is reported until
+// the created flip records it; the only remedy is to delete and re-create
+// the snapshot (architecture.md, Thin devices).
+const msgSnapshotTorn = "snapshot torn"
+
+// tornMark is the torn mark a cntlr's report carries in one td's thin info,
+// the same on the converge and the check round (CN14, CN28): set while the
+// cntlr holds a mark for the td and its request does not list it created
+// yet. A created td reads false here even before a converge has dropped its
+// mark (keepTornMarks), so a check round never reports one either.
+func tornMark(st *cntlrState, tp *tdPlan) bool {
+	return !tp.td.GetCreated() && st.tornTds[tp.tdId]
+}
+
+// keepTornMarks drops the torn marks of the tds the request no longer lists,
+// or lists created: the created flip has recorded the mark in the thin device
+// record by then (dnv-worker.md RW19), and a td that left td_list has nothing
+// to mark. Every converge runs it, from the request alone; a pass that makes
+// no id clears nothing else, so the mark stays reported through any number
+// of re-applies until the flip.
+func keepTornMarks(st *cntlrState, plan *cntlrPlan) {
+	for tdId := range st.tornTds {
+		if tp := plan.tdById[tdId]; tp == nil || tp.td.GetCreated() {
+			delete(st.tornTds, tdId)
 		}
 	}
 }

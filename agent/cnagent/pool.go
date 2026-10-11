@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -131,15 +132,19 @@ func (s *CnAgentServer) poolArgs(
 // suspend/resume. Without it an operator's metadata grow reports success while
 // the pool keeps running on the old size (CN13).
 //
-// The Create branch — and **only** it — arms CN14's activation sweep:
-// every leak path that skipped a `delete` ends the
-// pool device's life on the cntlr that skipped it, so a stray can only be met
-// where the device comes back, and within one device lifetime this agent is
-// the pool's only writer. The Reload and probe-matched branches arm nothing,
-// which is the whole restart-safety argument: a re-converge on a converged
-// node — case D of the cn suite, CN2/SH16 — must issue zero mutating calls,
-// and a surviving pool device can have grown no strays while its only writer
-// was down.
+// The Create branch — and **only** it — arms CN14's activation sweep. The
+// fan-outs that skip a `delete` on every cntlr (a demote and a delete
+// coalesced into one revision, a delete at a pool-suppressing sp_level, a
+// failover and delete race) end the pool device's life on the cntlr that
+// skipped it, so their strays are met where the device comes back. A stray
+// left in a live pool device arms nothing: it waits for the next sweep of
+// that pool's ids that gets through — the one after a later failed delete in
+// that pool, or an activation sweep (CN14). Within one device lifetime this
+// agent is the pool's only writer. The Reload and probe-matched branches arm
+// nothing, which is the whole restart-safety argument: a re-converge on a
+// converged node — case D of the cn suite, CN2/SH16 — must issue zero
+// mutating calls, and a surviving pool device can have grown no strays while
+// its only writer was down.
 func (s *CnAgentServer) ensurePool(
 	ctx context.Context,
 	st *cntlrState,
@@ -191,9 +196,10 @@ func (s *CnAgentServer) ensurePool(
 // slice (dnv-worker.md RW19), so the id exists in every slice pool and a
 // bare `dmsetup
 // create` attaches it. When that fails because a pool no longer holds the
-// id, the row reads RES_STATUS_ERROR and no later converge messages either
-// (CN14): pool-metadata loss surfaces as an intervention event instead of a
-// fresh, empty volume silently taking over a live dev_id.
+// id, the row reads RES_STATUS_ERROR with the reason RES_REASON_THIN_ID_LOST
+// (thinRowOf) and no later converge messages either (CN14): pool-metadata
+// loss surfaces as an intervention event instead of a fresh, empty volume
+// silently taking over a live dev_id.
 //
 // For an uncreated plain td the rule is: a message for an id the
 // pool already holds fails harmlessly and the `dmsetup create` that follows
@@ -229,6 +235,32 @@ func (s *CnAgentServer) ensureThin(
 		len(args))
 }
 
+// thinRowOf is the converge's row for one slice's thin volume of a td, from
+// what ensureThin returned. It is FromErr's row, except for a created td
+// whose thin table the kernel refused with ENODATA: dm-thin answers so when
+// the slice's pool does not hold the id, and for a created td that is the
+// lost id of CN14, so the row reads RES_STATUS_ERROR with the dmsetup output
+// in its details and the reason RES_REASON_THIN_ID_LOST. The worker's class
+// for a lost id reads the reason and never the details (CN29;
+// dnv-worker.md HL2). The errno comes from the refusal's type
+// (agent.IsNoData). An uncreated td's ENODATA is no lost id — a snapshot
+// whose create_snap has not made its id yet reads the same — and keeps no
+// reason. Only a converge names a lost id: a check round reads the absent
+// volume RES_STATUS_MISSING (probeThin).
+func thinRowOf(
+	st *cntlrState,
+	tp *tdPlan,
+	key string,
+	name string,
+	err error,
+) *pb.ResInfo {
+	if err != nil && tp.td.GetCreated() && agent.IsNoData(err) {
+		return st.tracker.ErrReason(key, name, err.Error(),
+			pb.ResReason_RES_REASON_THIN_ID_LOST)
+	}
+	return st.tracker.FromErr(key, name, "", err)
+}
+
 // createThinId sends one slice's `create_thin`. Its only caller is ensureThin
 // and only for an uncreated plain td: an uncreated snapshot's `create_snap`
 // belongs to the build() pre-pass, which is the only caller of createSnapId
@@ -249,7 +281,10 @@ func (s *CnAgentServer) createThinId(
 // second deliberate, bounded suspension beyond [D12]'s window, held only for
 // the duration of one `dmsetup message` short of a dmsetup command on the
 // origin that fails (cnagent.md CN16), and it stays nested *inside* the
-// origin raid0 quiesce (CN14) wraps around the whole per-slice sequence.
+// origin raid0 quiesce (CN14) wraps around the whole per-slice sequence. The
+// message's refusal carries its errno in its type (agent.CmdError): EEXIST
+// says the slice's pool holds the id already, which the pre-pass reads for
+// CN14's torn mark (snapshotPrePass).
 func (s *CnAgentServer) createSnapId(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -285,20 +320,27 @@ func (s *CnAgentServer) createSnapId(
 	return messageErr
 }
 
-// The activation sweep's two log records (CN14). They are named
-// once here because the sweep writes one of them at each of its three exits,
-// and an operator greps for the pair — "did the sweep run, and did it get
-// through" — after every pool re-creation.
+// The thin id sweep's two log records (CN14). They are named once here
+// because every exit of the sweep writes one of them, and an operator greps
+// for the pair — "did the sweep run, and did it get through" — after every
+// pool re-creation and every failed delete message.
 const (
 	msgThinSweep       = "thin id sweep"
 	msgThinSweepFailed = "thin id sweep failed"
 )
 
-// sweepThinIds is CN14's activation sweep: enumerate the
-// armed pool's device ids and delete every id no td of td_list owns. Runs at
-// most once per pool-device creation, only under an RPC-delivered request
-// (the call site's reqFromRpc gate); a failure leaves pendingSweep set so a
-// later converge retries.
+// sweepThinIds is CN14's thin id sweep: enumerate one pool's device ids and
+// delete every id that no td of td_list owns and keep does not name. Two runs
+// use it, each only under an RPC-delivered request (the call sites'
+// reqFromRpc gates): the activation sweep, at most once per pool-device
+// creation, which passes no keep; and the sweep after an L7 delete message
+// failed (sweepAfterFailedDeletes), whose keep reads the ids the pass's thin
+// volumes still map. keep runs only once the dump is in, so a pool whose
+// dump fails costs none of its reads, and an error keep returns stops the
+// sweep.
+// Either one that gets through ends the slice's pending activation sweep; a
+// failure leaves pendingSweep as it is, so a pending one is retried by a
+// later converge.
 //
 // It is correct to delete against this td_list and no other: GateRevision
 // makes an RPC-delivered request the newest desired state this cntlr has ever
@@ -307,18 +349,15 @@ const (
 // leaves no other writer, so a pool id absent from it can only belong to a td
 // deleted at or before that revision.
 //
-// The sweep's own per-td deletion (deleteThinIdByName, sweep.go L7) is
-// deliberately not reused here: it only logs a failed message. There the
-// thin volume's dm removal is re-driven by the next pass's enumeration, but
-// a `delete` that fails after its device is gone is never re-driven, and the
-// id leaks until the pool device is next created and this sweep enumerates
-// the pool's ids; this sweep, by contrast, must SEE a failure to keep its
-// arming alive.
+// Its deletions are its own messages, not L7's (deleteThinIdByName,
+// sweep.go): it must see each failure, to keep its arming alive, and it
+// stops at the first.
 func (s *CnAgentServer) sweepThinIds(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	sp *slicePlan,
+	keep func() (map[uint32]struct{}, error),
 ) {
 	// CN25's machinery: reserve_metadata_snap → thin_dump --metadata-snap →
 	// release_metadata_snap, releasing on every path.
@@ -329,8 +368,20 @@ func (s *CnAgentServer) sweepThinIds(
 			slog.String("error", err.Error()))
 		return
 	}
+	var keepIds map[uint32]struct{}
+	if keep != nil {
+		if keepIds, err = keep(); err != nil {
+			slog.ErrorContext(ctx, msgThinSweepFailed,
+				slog.String("pool", sp.poolFinalName),
+				slog.String("error", err.Error()))
+			return
+		}
+	}
 	var strays []uint32
 	for _, dev := range sb.Devices {
+		if _, kept := keepIds[dev.DevId]; kept {
+			continue
+		}
 		if plan.tdByDevId[dev.DevId] == nil {
 			strays = append(strays, dev.DevId)
 		}

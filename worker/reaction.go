@@ -1570,14 +1570,14 @@ func (w *spWorker) replaceTarget(
 		// The first is AR5's first (sharedStateTds): a primary whose every
 		// ERROR row belongs to the stack of a created td whose thin id the
 		// pool no longer holds is not replaced. The replacement would read
-		// the same rows from the same pool. The report names the id only
-		// while it is a converge's (dnv-worker.md, Known limits).
+		// the same rows from the same pool. The report carries the lost-id
+		// reason only while it is a converge's (dnv-worker.md, Known limits).
 		//
 		// The second is AR5's second, for a replacement
 		// (errorFollowedReplacement): a Check round's report of the same loss
-		// names no id, so the first lets the primary be replaced on it, and
-		// the replacement, reading the same rows, would be replaced in turn
-		// once per cntlr_unhealthy, for as long as the td stayed lost.
+		// carries no reason, so the first lets the primary be replaced on it,
+		// and the replacement, reading the same rows, would be replaced in
+		// turn once per cntlr_unhealthy, for as long as the td stayed lost.
 		if cntlrId == p.primaryId {
 			if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
 				w.reactionSkipped(ctx, reactionReplaceCntlr, reasonSharedState,

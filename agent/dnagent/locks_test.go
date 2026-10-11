@@ -218,3 +218,176 @@ func TestAnotherSidesPassReadsARequestBeingReplaced(t *testing.T) {
 			got, 1+rounds)
 	}
 }
+
+// A request refused for a side the agent does not hold creates no lock entry
+// for it (dnagent.md, Concurrency — `locks.go`): only the teardown of a held
+// object drops an entry, so one a refusal created would stay for the life of
+// the process. Each call is checked twice: the set holds as many entries
+// after it as before, and the call does not wait for an entry another call
+// holds. The admitted request at the end creates its side's entry, which is
+// what the count can see.
+func TestARefusedRequestLeavesNoLockEntry(t *testing.T) {
+	ctx := context.Background()
+	key := sideKey(testCluster, testDn, testSp, testSide)
+	for _, tc := range []struct {
+		name string
+		// listed says whether the DN's list names the side.
+		listed bool
+		call   func(srv *DnAgentServer) uint32
+		want   uint32
+		// entries is how many entries the call adds.
+		entries int
+	}{
+		{"a SyncupSide for a pointer the dn does not list", false,
+			func(srv *DnAgentServer) uint32 {
+				reply, _ := srv.SyncupSide(ctx, sideReq(1, testSide, testCn0,
+					nil, pb.SpLevel_SP_LEVEL_READWRITE))
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"a SyncupSide whose side conf DN8 refuses, for a side never held",
+			true, func(srv *DnAgentServer) uint32 {
+				req := unprovisionedSideReq(1, testSide, testCn0, nil,
+					pb.SpLevel_SP_LEVEL_READWRITE)
+				req.SideConf.ZeroBytes = 0
+				reply, _ := srv.SyncupSide(ctx, req)
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeInvalidConf, 0},
+		{"a PushMigrBitmap for a side never held", true,
+			func(srv *DnAgentServer) uint32 {
+				reply, _ := srv.PushMigrBitmap(ctx,
+					pushReq(0, testMigrId, []byte{0xff}))
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"a GetSideInfo for a side never held", true,
+			func(srv *DnAgentServer) uint32 {
+				reply, _ := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+					ClusterId: testCluster, DnId: testDn,
+					SidePointer: sidePtr(testSide),
+				})
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"a CheckSide round for a side never held", true,
+			func(srv *DnAgentServer) uint32 {
+				reply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+					ClusterId: testCluster, DnId: testDn,
+					SidePointer: sidePtr(testSide), ShowInfo: true,
+				}, nil)
+				return reply.GetAgentReply().GetCode()
+			}, common.ReplyCodeUnknownObject, 0},
+		{"an admitted SyncupSide", true, func(srv *DnAgentServer) uint32 {
+			reply, _ := srv.SyncupSide(ctx, unprovisionedSideReq(1,
+				testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+			return reply.GetAgentReply().GetCode()
+		}, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newServer := func() *DnAgentServer {
+				srv, _ := newTestServer(t)
+				dn := dnReq(1)
+				if tc.listed {
+					dn = dnReq(1, testSide)
+				}
+				if _, err := srv.SyncupDn(ctx, dn); err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+				return srv
+			}
+
+			srv := newServer()
+			before := srv.locks.ObjCount()
+			if code := tc.call(srv); code != tc.want {
+				t.Fatalf("code %d, want %d", code, tc.want)
+			}
+			if got := srv.locks.ObjCount(); got != before+tc.entries {
+				t.Errorf("%d lock entries after the call, want %d",
+					got, before+tc.entries)
+			}
+			if tc.entries != 0 {
+				return
+			}
+
+			srv = newServer()
+			lock := srv.locks.Obj(key)
+			lock.Lock()
+			defer lock.Unlock()
+			got := make(chan uint32, 1)
+			go func() { got <- tc.call(srv) }()
+			select {
+			case code := <-got:
+				if code != tc.want {
+					t.Errorf("code %d, want %d", code, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the refusal waited for the side's object lock")
+			}
+		})
+	}
+}
+
+// A background attempt scheduled for a side that a drop takes away before
+// the attempt gets the node read lock — a fence callback or a retry pass
+// racing the side's pointer leaving its DN's list — creates no lock entry:
+// the attempt checks the side under the node read lock, which the drop's
+// write lock excludes, before it takes the object lock (reconvergeSide).
+func TestABackgroundAttemptOnADroppedSideLeavesNoLockEntry(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	key := sideKey(testCluster, testDn, testSp, testSide)
+	st := srv.getSide(key)
+
+	srv.locks.Node().Lock()
+	started, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		srv.reconvergeSide(ctx, key, st)
+		close(done)
+	}()
+	<-started
+	// The attempt reaches the node lock and waits behind the write lock.
+	time.Sleep(50 * time.Millisecond)
+	srv.dropSideState(ctx, key, st)
+	before := srv.locks.ObjCount()
+	srv.locks.Node().Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the attempt never returned")
+	}
+	if got := srv.locks.ObjCount(); got != before {
+		t.Errorf("%d lock entries after the attempt, want %d", got, before)
+	}
+}
+
+// A zeroing batch takes its side's lock entry only for a side the agent
+// holds, which it checks under the node read lock (dnagent.md, Concurrency —
+// `locks.go`): a take for a side state the agent does not hold, or has
+// replaced, reports false and creates no entry, and a take for the held side
+// gets both locks.
+func TestAZeroingLockTakeLeavesNoEntryForASideNotHeld(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	key := sideKey(testCluster, testDn, testSp, testSide)
+
+	before := srv.locks.ObjCount()
+	if release, ok := srv.zeroAcquire(ctx, key, &sideState{}); ok {
+		release()
+		t.Fatal("the take succeeded for a side the agent does not hold")
+	}
+	if got := srv.locks.ObjCount(); got != before {
+		t.Errorf("%d lock entries after the take, want %d", got, before)
+	}
+
+	syncupBoth(t, srv, 1, testSide)
+	st := srv.getSide(key)
+	if release, ok := srv.zeroAcquire(
+		ctx, key, newSideState(st.req.Load())); ok {
+		release()
+		t.Error("the take succeeded for a side state the agent does not hold")
+	}
+	release, ok := srv.zeroAcquire(ctx, key, st)
+	if !ok {
+		t.Fatal("the take failed for the held side")
+	}
+	release()
+}

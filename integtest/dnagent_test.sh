@@ -75,6 +75,12 @@ SYNCUP_TIMEOUT=60
 # (DnZeroRetryInterval = 5 s).
 ZERO_TIMEOUT=120
 
+# Polling budget for the end of a migration source's cutover grace window
+# (architecture.md, Migration, src step 2), which migr_full's lost source
+# waits for: common.SuspendSeconds from the cutover, and the converge that
+# ends the window.
+FENCE_TIMEOUT=90
+
 NQN_PREFIX=nqn.2024-01.io.dnv
 
 # Per-VM state, 1-indexed so "vm1"/"vm2" read directly.
@@ -206,6 +212,46 @@ assert_dn_info_ok() {
 	for field in disk_info meta_info port_info; do
 		assert_ok "$json" ".dn_info.$field.status" "$label"
 	done
+}
+
+# row_sig prints "<status> <epoch>" of one ResInfo of a reply, ABSENT for a
+# row the reply does not carry. A row's epoch moves only when its status does
+# (dnagent.md SH14): readings that agree on both, a second or more apart, show
+# that the row kept its status between them, but for a change undone within
+# one second.
+row_sig() { # <json> <jq path of a ResInfo>
+	jq_of "$1" "($2) as \$r | \"\(\$r.status // \"ABSENT\") \(\$r.epoch // \"0\")\""
+}
+
+# assert_rows_agree holds the rows named to one reading: each reads one status
+# with one epoch in every reply given, the first of which must carry it.
+assert_rows_agree() { # <label> <newline-separated jq paths> <json>…
+	local label=$1 paths=$2 path ref got json n
+	shift 2
+	while IFS= read -r path; do
+		[ -n "$path" ] || continue
+		ref=$(row_sig "$1" "$path")
+		case "$ref" in
+		ABSENT\ *) die "$label: the first reply carries no $path" ;;
+		esac
+		n=1
+		for json in "${@:2}"; do
+			n=$((n + 1))
+			got=$(row_sig "$json" "$path")
+			[ "$got" = "$ref" ] ||
+				die "$label: $path reads '$got' in reply $n, '$ref' in reply 1"
+		done
+	done <<<"$paths"
+}
+
+# no_ctrl_shape reports whether a subsys_shape reading holds no controller of
+# the subsystem, which the agents read as no connection: no entry at all, or
+# the one the kernel keeps while a dm table holds the multipath head open.
+no_ctrl_shape() {
+	case "$1" in
+	absent | "0 "*) return 0 ;;
+	esac
+	return 1
 }
 
 on_exit() {
@@ -572,6 +618,128 @@ host_subsys_present() {
 	if [ "${n:-0}" -gt 0 ]; then echo yes; else echo no; fi
 }
 
+# --- the lost source (dnagent_integtest.md, Cases, migr_full) ---------------
+#
+# drop_namespaces and drop_subsystem take from a migration source, behind
+# both agents' backs, what its destination reads from; subsys_shape,
+# shape_after and wait_no_ctrl read what the destination's node then holds.
+# Unlike the teardown helpers these are strict: each fails when a step or a
+# read it rests on fails, since a stage that waits for one shape must not
+# read a tool that did not answer as another shape.
+
+# drop_namespaces <nqn> — disables and removes every namespace of one
+# exported subsystem, and nothing else: the subsystem, its allowed hosts and
+# its port links stay, so a host's controller of it stays live with nothing
+# to read. A namespace is disabled before it is removed.
+drop_namespaces() {
+	local ns
+	[ -d "$NVMET/subsystems/$1" ] || {
+		echo "drop_namespaces: this node exports no $1" >&2
+		return 1
+	}
+	for ns in "$NVMET/subsystems/$1"/namespaces/*; do
+		[ -d "$ns" ] || continue
+		echo 0 >"$ns/enable" || return 1
+		rmdir "$ns" || return 1
+	done
+	echo dropped
+}
+
+# drop_subsystem <nqn> — removes one exported subsystem whole: off every
+# port first, which costs a host's controller of it its connection, the
+# reconnect then finding the subsystem gone on a port that keeps listening
+# (dnagent_integtest.md, Assumptions and preflight checks), then its
+# namespaces, its allowed hosts and the subsystem itself. drop_subsystems
+# does the same, best-effort, for every subsystem of one kind.
+drop_subsystem() {
+	local subsys=$NVMET/subsystems/$1 link ns host
+	[ -d "$subsys" ] || {
+		echo "drop_subsystem: this node exports no $1" >&2
+		return 1
+	}
+	for link in "$NVMET"/ports/*/subsystems/"$1"; do
+		[ -L "$link" ] || continue
+		rm -f "$link" || return 1
+	done
+	for ns in "$subsys"/namespaces/*; do
+		[ -d "$ns" ] || continue
+		echo 0 >"$ns/enable" || return 1
+		rmdir "$ns" || return 1
+	done
+	for host in "$subsys"/allowed_hosts/*; do
+		[ -L "$host" ] || continue
+		rm -f "$host" || return 1
+	done
+	rmdir "$subsys" || return 1
+	echo dropped
+}
+
+# subsys_shape <nqn> — "<controllers> <live> <namespace nodes>" of the
+# subsystem this host holds under one NQN, read from the sysfs directory the
+# agent walks (ListSubsys (agent/nvmehost.go)): a controller counts when its
+# state reads anything, as the agent counts one, and is live when it reads
+# live. It prints "absent" when the host holds no entry for the NQN, and, like
+# the absence helpers (see residue), fails when a read it rests on fails, but
+# for a subsystem that goes away between the listing and its read.
+subsys_shape() {
+	local d e nqn state ctrls=0 live=0 ns=0
+	for d in /sys/class/nvme-subsystem/nvme-subsys*; do
+		[ -e "$d" ] || continue
+		nqn=$(cat "$d/subsysnqn" 2>/dev/null) || {
+			[ -e "$d" ] && return 1
+			continue
+		}
+		[ "$nqn" = "$1" ] || continue
+		for e in "$d"/nvme*; do
+			[ -e "$e" ] || continue
+			e=${e##*/}
+			if [[ $e =~ ^nvme[0-9]+n[0-9]+$ ]]; then
+				ns=$((ns + 1))
+			elif [[ $e =~ ^nvme[0-9]+$ ]]; then
+				state=$(cat "/sys/class/nvme/$e/state" 2>/dev/null) || state=
+				[ -n "$state" ] || continue
+				ctrls=$((ctrls + 1))
+				if [ "$state" = live ]; then live=$((live + 1)); fi
+			fi
+		done
+		echo "$ctrls $live $ns"
+		return 0
+	done
+	echo absent
+}
+
+# shape_after <nqn> <shape> <secs> — polls subsys_shape until it reads
+# anything but <shape>, or for <secs> at most, and prints the last reading,
+# "unread" for one that failed.
+shape_after() {
+	local got=unread i
+	for ((i = 0; i < $3 * 2; i++)); do
+		got=$(subsys_shape "$1") || got=unread
+		[ "$got" = "$2" ] || break
+		sleep 0.5
+	done
+	echo "$got"
+}
+
+# wait_no_ctrl <nqn> <secs> — polls subsys_shape until this host holds no
+# controller of the subsystem, which the agent reads as not connected
+# (dnagent.md DN6), and prints the shape it found; it fails after <secs>.
+wait_no_ctrl() {
+	local got=unread i
+	for ((i = 0; i < $2 * 2; i++)); do
+		got=$(subsys_shape "$1") || got=unread
+		case "$got" in
+		absent | "0 "*)
+			echo "$got"
+			return 0
+			;;
+		esac
+		sleep 0.5
+	done
+	echo "a controller of $1 is still here after $2s (shape $got)" >&2
+	return 1
+}
+
 # residue <sp16> — everything still on this node for one storage pool; the
 # teardown assertions require empty output.
 # The dm-name pattern covers the side device too (dm kind d4).
@@ -620,11 +788,12 @@ export_dms() { # sp16 side16
 			'($4 == "d0" || $4 == "d1") && $5 == sp && $6 == side'
 }
 
-# fenced_linears <sp16> — the per-CN dm-linears of one storage pool that are
-# currently suspended, i.e. inside the cutover grace window (architecture.md,
-# Migration, src side step 2). The attr
-# column is four positions (live, inactive, suspended, ro/rw), so a suspended
-# device matches ':.-s' — name, then '.', '-', 's'.
+# fenced_linears <sp16>[-<side16>] — the per-CN dm-linears of one storage
+# pool, or of one side of it, that are currently suspended, i.e. inside the
+# cutover grace window (architecture.md, Migration, src side step 2): the side
+# is the field after the pool in the name (dn_side_name gives the order). The
+# attr column is four positions (live, inactive, suspended, ro/rw), so a
+# suspended device matches ':.-s' — name, then '.', '-', 's'.
 fenced_linears() {
 	local rows
 	rows=$(dmsetup info -c --noheadings -o name,attr) || return 1
@@ -1982,6 +2151,23 @@ migr_prep_data() { # m
 		"migr $m baseline migr_dst_info"
 }
 
+# migr_dst_syncup sends migration m's destination its declaring request at one
+# revision and sp_level, and prints the reply: the request migr_declare_dst
+# sends, and migr_src_ns_gone re-sends at the enabling revision.
+migr_dst_syncup() { # m revision sp_level
+	local m=$1
+	ctl "${MDSTDN[$m]}" syncup-side --revision "$2" \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 1 --primary-cn "${MCN[$m]}" \
+		--sp-level "$3" --provisioned=true \
+		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
+		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
+		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
+		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
+		--bm-cnt "$BM_CNT"
+}
+
 # migr_declare_dst declares the destination and later enables it
 # (dnagent_integtest.md, Cases, migr_full and migr_bitmap): the same request
 # twice, first gated with sp_level no_migration (so bitmap chunks land before
@@ -1995,16 +2181,7 @@ migr_prep_data() { # m
 # migration destination (dnagent.md DN10, DN13) and tears nothing down (DN10).
 migr_declare_dst() { # m revision sp_level
 	local m=$1 rev=$2 level=$3 out
-	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
-		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
-		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
-		--cntlid-slot 1 --primary-cn "${MCN[$m]}" \
-		--sp-level "$level" --provisioned=true \
-		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
-		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
-		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
-		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt "$BM_CNT")
+	out=$(migr_dst_syncup "$m" "$rev" "$level")
 	printf '%s' "$out" >"$REPLY_DIR/dst-$m.json"
 	assert_ok "$out" ".side_info.side_dev_info.status" "migr $m dst side_dev"
 	assert_cn_ok "$out" cn_id_to_dm_error "${MCN[$m]}" "migr $m dst"
@@ -2282,6 +2459,148 @@ migr_finish_dst() { # m revision
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m finished dst"
 }
 
+# migr_src_ns_gone is migr_full's lost source (dnagent_integtest.md, Cases,
+# migr_full). Once migration m's destination has hydrated, its source's export
+# loses its namespace behind both agents' backs, the export and the
+# destination's controller of it staying, and one rule judges the destination
+# on both channels (dnagent.md DN13, DN18): its migration rows and its per-CN
+# rows read one status, with one epoch, on a converge, a CheckSide round, a
+# GetSideInfo and a second converge. What serves is not the rows' to decide:
+# the converge takes the primary's per-CN stack off the dm-clone, as for any
+# source with nothing to read from, and the read-only channel still proves the
+# hydration the gateway's checks read.
+#
+# The state compared is measured, never assumed. The destination's node must
+# read the source subsystem with a live controller and no namespace node,
+# which the agent's walk reads as a source with nothing to read from. Should
+# the namespace node the dm-clone holds open outlive its namespace instead,
+# both agents would read a source that serves, so the stage drops the whole
+# export and compares the rows once the destination's controller of it is
+# gone, which the agent reads as no connection; the log says which of the two
+# it compared. Any other reading fails the stage, and so does a reading that
+# moved by the end of the comparison.
+migr_src_ns_gone() { # m
+	local m=$1
+	local src=${MSRCDN[$m]} dst=${MDSTDN[$m]} vm=${MCNVM[$m]}
+	local rev=${REV[${MDSTDN[$m]}]} key=$((MCN[m]))
+	local srcnqn srcside susp deadline shape now rows c1 k g c2
+	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[$src]}" "$SP" "${MID[$m]}")
+	srcside="$(hex16 "$SP")-$(hex16 "${MSRCSIDE[$m]}")"
+
+	stage stage3gone "migration $m's source loses its namespace: the destination's rows read one status on every channel"
+	# The source's cutover grace window must be over, and the converge its
+	# timer runs done (dnagent.md DN12), before the export loses anything:
+	# that converge runs the source's whole build again, the export's
+	# namespace included. The window ends with the source's per-CN dm-linears
+	# resumed onto their dm-errors, inside that converge, and a GetSideInfo of
+	# the source side takes the side's lock behind it.
+	deadline=$((SECONDS + FENCE_TIMEOUT))
+	while :; do
+		susp=$(helper "$src" "fenced_linears '$srcside'")
+		[ -n "$susp" ] || break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "migr $m: the source's per-CN dm-linears are still" \
+				"suspended after ${FENCE_TIMEOUT}s: $susp"
+		sleep 2
+	done
+	ctl "$src" get-side-info --sp "$SP" --leg "${MLEG[$m]}" \
+		--side "${MSRCSIDE[$m]}" >/dev/null
+	# The positive control of the reading below: one live controller and its
+	# namespace node.
+	assert_eq "$(helper "$dst" "subsys_shape '$srcnqn'")" "1 1 1" \
+		"migr $m: controllers, live ones and namespace nodes of the source on dn$dst"
+	assert_eq "$(helper "$src" "drop_namespaces '$srcnqn'")" dropped \
+		"migr $m: the source export's namespaces dropped"
+	assert_eq "$(helper "$src" "subsys_present '$srcnqn'")" yes \
+		"migr $m: the source export once its namespace is gone"
+	shape=$(helper "$dst" "shape_after '$srcnqn' '1 1 1' 10")
+	case "$shape" in
+	"1 1 0")
+		log "migr $m: dn$dst holds a live controller of its source and no" \
+			"namespace node"
+		;;
+	"1 1 1")
+		log "migr $m: WARNING the source's namespace node outlived its" \
+			"namespace while the dm-clone held it; dropping the whole export"
+		assert_eq "$(helper "$src" "drop_subsystem '$srcnqn'")" dropped \
+			"migr $m: the source export dropped"
+		shape=$(helper "$dst" "wait_no_ctrl '$srcnqn' 30") ||
+			die "migr $m: dn$dst still holds a controller of its source" \
+				"30 s after the export was dropped"
+		log "migr $m: dn$dst holds no controller of its source (shape" \
+			"'$shape')"
+		;;
+	*)
+		die "migr $m: dn$dst reads its source subsystem as '$shape' after" \
+			"the namespace drop, want '1 1 0' (controllers, live ones," \
+			"namespace nodes)"
+		;;
+	esac
+
+	# The enabling converge's request again, at its own revision.
+	c1=$(migr_dst_syncup "$m" "$rev" readwrite)
+	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" inaccessible 30
+	sleep 1.1
+	k=$(ctl "$dst" check-side --revision "$rev" --show-info \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev" \
+		"migr $m check-side revision"
+	g=$(ctl "$dst" get-side-info \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+	sleep 1.1
+	c2=$(migr_dst_syncup "$m" "$rev" readwrite)
+	# The reading compared held through all four replies.
+	now=$(helper "$dst" "subsys_shape '$srcnqn'")
+	if [ "$shape" = "1 1 0" ]; then
+		assert_eq "$now" "1 1 0" \
+			"migr $m: the source subsystem on dn$dst after the comparison"
+	else
+		no_ctrl_shape "$now" ||
+			die "migr $m: dn$dst reads its source subsystem as '$now' after" \
+				"the comparison, want no controller"
+	fi
+	# The converge's statuses (dnagent.md DN18): the source's row ERROR, the
+	# dm-clone's MISSING, and every other row OK, the per-CN stack sitting on
+	# its dm-error. Over a live controller the source's row names the missing
+	# namespace, the same thing subsys_shape read.
+	assert_eq "$(jq_of "$c1" \
+		'.side_info.migr_dst_info.target_info.status // "ABSENT"')" \
+		RES_STATUS_ERROR "migr $m target_info with no source namespace"
+	if [ "$shape" = "1 1 0" ]; then
+		case "$(jq_of "$c1" \
+			'.side_info.migr_dst_info.target_info.details // ""')" in
+		*"no namespace"*) ;;
+		*) die "migr $m: target_info does not name the source's missing" \
+			"namespace: $(jq_of "$c1" '.side_info.migr_dst_info.target_info')" ;;
+		esac
+	fi
+	assert_eq "$(jq_of "$c1" \
+		'.side_info.migr_dst_info.dm_clone_info.status // "ABSENT"')" \
+		RES_STATUS_MISSING "migr $m dm_clone_info with no source namespace"
+	assert_ok "$c1" ".side_info.side_dev_info.status" \
+		"migr $m side_dev with no source namespace"
+	assert_cn_ok "$c1" cn_id_to_dm_error "${MCN[$m]}" \
+		"migr $m with no source namespace"
+	assert_cn_ok "$c1" cn_id_to_dm_linear "${MCN[$m]}" \
+		"migr $m with no source namespace"
+	assert_cn_ok "$c1" cn_id_to_nvmeof "${MCN[$m]}" \
+		"migr $m with no source namespace"
+	rows=$(printf '%s\n' \
+		'.side_info.side_dev_info' \
+		'.side_info.migr_dst_info.target_info' \
+		'.side_info.migr_dst_info.dm_clone_info' \
+		".side_info.cn_id_to_dm_error[\"$key\"]" \
+		".side_info.cn_id_to_dm_linear[\"$key\"]" \
+		".side_info.cn_id_to_nvmeof[\"$key\"]")
+	assert_rows_agree "migr $m with no source namespace" "$rows" \
+		"$c1" "$k" "$g" "$c2"
+	# A GetSideInfo reads the dm-clone's status line whenever the device is
+	# there, whatever its row's status, so it still proves the hydration
+	# hydrationComplete (gateway/common.go) reads.
+	ctl "$dst" wait-hydrated --sp "$SP" --leg "${MLEG[$m]}" \
+		--side "${MDSTSIDE[$m]}" --interval 0.5 --timeout 10 >/dev/null
+}
+
 # migr_drop_src drops the source side and the dead source path
 # (dnagent_integtest.md, Cases, migr_full and migr_bitmap; dnagent.md SH20):
 # the source side leaves its DN's pointer list, which kills the CN's source
@@ -2321,8 +2640,8 @@ migr_write_probe() { # m
 
 # run_migration_cases is the migration body shared by cases B and C
 # (dnagent_integtest.md, Cases). $SP, $MID, $BM_CNT and the case name are set
-# by the callers; the per-case differences are the two hooks push_bitmaps and
-# verify_data.
+# by the callers; the per-case differences are the three hooks push_bitmaps,
+# after_hydration and verify_data.
 declare -a PAT_SHA=("" "" "")
 declare -a PAT_SHA_HEAD=("" "" "")
 REPLY_DIR=""
@@ -2492,6 +2811,9 @@ run_migration_cases() {
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
+	# The case's own stage on hydrated destinations: migr_full's lost source.
+	after_hydration
+
 	stage stage4dst "finish the destinations first: clone flushed and removed"
 	bump_rev "${MDSTDN[1]}"
 	rev1=${REV[${MDSTDN[1]}]}
@@ -2574,6 +2896,11 @@ case_migr_full() {
 		done
 	}
 
+	# The first migration's source loses its namespace once hydrated
+	# (dnagent_integtest.md, Cases, migr_full); the second runs to its finish
+	# untouched.
+	after_hydration() { migr_src_ns_gone 1; }
+
 	verify_data() {
 		local m=$1 got
 		got=$(sha_range "${MCNVM[$m]}" "$(ns_by_id "$SP" "${MLEG[$m]}")" 128)
@@ -2634,6 +2961,9 @@ case_migr_bitmap() {
 				"migr $m bm_info.bm_idx_list"
 		done
 	}
+
+	# No source is lost here: migr_full's stage covers it.
+	after_hydration() { :; }
 
 	verify_data() {
 		local m=$1

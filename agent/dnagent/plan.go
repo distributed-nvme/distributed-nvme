@@ -297,11 +297,10 @@ func (p *sidePlan) linearBacking(cnId uint64, cloneLive bool) string {
 // of architecture.md, Migration, src step 2: still exactly where it sat before
 // the migration started,
 // because the fence suspends the device in place and only swaps the table at
-// the end of the window. Computing it as "linearBacking with no migr_src"
+// the end of the window. Phase 1 builds a linear it finds absent there
+// (ensureDmLinearSuspended). Computing it as "linearBacking with no migr_src"
 // keeps the two definitions from drifting, and stays correct for a side that
-// is somehow both a source and a destination. The one window it misdescribes
-// is DN12 rule 1's known-limit second one, which a restart opens over the
-// dm-error phase 2 had already installed.
+// is somehow both a source and a destination.
 func (p *sidePlan) preFenceBacking(cnId uint64, cloneLive bool) string {
 	unfenced := *p
 	unfenced.migrSrc = nil

@@ -93,9 +93,10 @@ var dmLsDevNoPattern = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
 // dropping it would hide from the sweep exactly the objects a concurrent
 // teardown is in the middle of.
 func (d *Dm) List(ctx context.Context) (map[string]string, error) {
-	stdout, stderr, _, err := d.run(ctx, "dmsetup", "ls")
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", "ls")
 	if err != nil {
-		return nil, cmdError("dmsetup", []string{"ls"}, stdout, stderr, err)
+		return nil, cmdError("dmsetup", []string{"ls"},
+			stdout, stderr, exitCode, err)
 	}
 	out := make(map[string]string)
 	for _, line := range strings.Split(stdout, "\n") {
@@ -118,10 +119,10 @@ func (d *Dm) List(ctx context.Context) (map[string]string, error) {
 
 // Table returns the parsed live table of a dm device.
 func (d *Dm) Table(ctx context.Context, name string) ([]DmTarget, error) {
-	stdout, stderr, _, err := d.run(ctx, "dmsetup", "table", name)
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", "table", name)
 	if err != nil {
 		return nil, cmdError("dmsetup", []string{"table", name},
-			stdout, stderr, err)
+			stdout, stderr, exitCode, err)
 	}
 	return ParseDmLines(stdout), nil
 }
@@ -130,10 +131,10 @@ func (d *Dm) Table(ctx context.Context, name string) ([]DmTarget, error) {
 // line rides into ResInfo.details verbatim; architecture.md,
 // Live-state reporting).
 func (d *Dm) Status(ctx context.Context, name string) (string, error) {
-	stdout, stderr, _, err := d.run(ctx, "dmsetup", "status", name)
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", "status", name)
 	if err != nil {
 		return "", cmdError("dmsetup", []string{"status", name},
-			stdout, stderr, err)
+			stdout, stderr, exitCode, err)
 	}
 	return strings.TrimSpace(stdout), nil
 }
@@ -260,6 +261,10 @@ func (d *Dm) Remove(ctx context.Context, name string) error {
 	return d.runOk(ctx, "dmsetup", "remove", name)
 }
 
+// Message sends a target message. A refusal is a CmdError whose errno the
+// caller reads through IsExists, IsNoData or IsBusy: a create_thin or
+// create_snap of an id the pool holds, a create_snap of an origin it lacks,
+// a second reserve_metadata_snap.
 func (d *Dm) Message(
 	ctx context.Context,
 	name string,
@@ -274,10 +279,11 @@ func (d *Dm) Message(
 // freshly built table string is directly comparable with `dmsetup table`
 // output (which always prints device numbers).
 func (d *Dm) DevNo(ctx context.Context, path string) (string, error) {
-	stdout, stderr, _, err := d.run(ctx, "lsblk",
+	stdout, stderr, exitCode, err := d.run(ctx, "lsblk",
 		"--nodeps", "--noheadings", "--output", "MAJ:MIN", path)
 	if err != nil {
-		return "", cmdError("lsblk", []string{path}, stdout, stderr, err)
+		return "", cmdError("lsblk", []string{path},
+			stdout, stderr, exitCode, err)
 	}
 	devNo := strings.TrimSpace(stdout)
 	if idx := strings.IndexByte(devNo, '\n'); idx >= 0 {
@@ -337,7 +343,7 @@ func (d *Dm) BlkZeroout(
 	stdout, stderr, exitCode, err := d.run(ctx, "blkdiscard", args...)
 	if err != nil {
 		return reported(exitCode, err),
-			cmdError("blkdiscard", args, stdout, stderr, err)
+			cmdError("blkdiscard", args, stdout, stderr, exitCode, err)
 	}
 	return true, nil
 }
@@ -397,10 +403,11 @@ func LinearRunsTable(runs []ExtentRunSectors, devNo string) string {
 // DiskSize returns the byte size of a block device
 // (`lsblk --bytes --nodeps`, the GetDnSize probe).
 func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
-	stdout, stderr, _, err := d.run(ctx, "lsblk",
+	stdout, stderr, exitCode, err := d.run(ctx, "lsblk",
 		"--bytes", "--nodeps", "--noheadings", "--output", "SIZE", dev)
 	if err != nil {
-		return 0, cmdError("lsblk", []string{dev}, stdout, stderr, err)
+		return 0, cmdError("lsblk", []string{dev},
+			stdout, stderr, exitCode, err)
 	}
 	text := strings.TrimSpace(stdout)
 	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
@@ -538,4 +545,21 @@ func ParseCloneStatus(raw string) (*CloneStatus, bool) {
 		}
 	}
 	return st, true
+}
+
+// CloneStatusDetails is the details text of a dm-clone row whose pass read the
+// device's status: the row's note, then the raw status line on a line of its
+// own; the raw line alone when there is no note, and the note alone when
+// there is no line. Both agents build every such row with it, so the raw
+// line survives whatever note the row carries for every reader that scans
+// the details line by line, the gateway's hydration checks among them
+// (architecture.md, Live-state reporting).
+func CloneStatusDetails(note, raw string) string {
+	switch {
+	case raw == "":
+		return note
+	case note == "":
+		return raw
+	}
+	return note + "\n" + raw
 }

@@ -1113,6 +1113,116 @@ func TestDiskMetaNoFreeRunIsTyped(t *testing.T) {
 	}
 }
 
+// HeldCloneMeta reads DN13 step (2) as AllocCloneMeta decides it, with
+// nothing written: the record AllocCloneMeta hands back, and each refusal
+// AllocCloneMeta makes before it would write, in its text — a record smaller
+// than the request, an area with no free run, typed as the wait it is, a
+// disk whose identity nothing confirmed, another node's disk — so a check
+// round refuses where the converge's step refuses. Another node's disk is
+// refused for its identity even where its area has no free run, as
+// AllocCloneMeta refuses it, never read as a wait. Where AllocCloneMeta would
+// take a new run, HeldCloneMeta refuses with no run held, not as a wait.
+func TestHeldCloneMetaDecidesAsAllocCloneMeta(t *testing.T) {
+	ctx := context.Background()
+	const total = uint64(common.DnCloneMetaUnitCnt)
+	// same checks that both calls refused with one text and one type.
+	same := func(t *testing.T, held, alloc error) {
+		t.Helper()
+		if held == nil || alloc == nil || held.Error() != alloc.Error() ||
+			isNoFreeRun(held) != isNoFreeRun(alloc) {
+			t.Errorf("HeldCloneMeta refused with %v, AllocCloneMeta with %v",
+				held, alloc)
+		}
+	}
+
+	t.Run("a held record", func(t *testing.T) {
+		meta, node := formatted(t)
+		want, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2)
+		if err != nil {
+			t.Fatalf("AllocCloneMeta: %v", err)
+		}
+		node.Reset()
+		got, err := meta.HeldCloneMeta(ctx, testSp, testMigrId, 2)
+		if err != nil || got.GetUnitStart() != want.GetUnitStart() ||
+			got.GetUnitCount() != want.GetUnitCount() {
+			t.Errorf("HeldCloneMeta = %v/%v, want %v", got, err, want)
+		}
+		assertNoWrite(t, node, "a held record")
+	})
+
+	t.Run("a record smaller than the request", func(t *testing.T) {
+		meta, _ := formatted(t)
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId, 1); err != nil {
+			t.Fatalf("AllocCloneMeta: %v", err)
+		}
+		_, held := meta.HeldCloneMeta(ctx, testSp, testMigrId, 2)
+		_, alloc := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2)
+		same(t, held, alloc)
+	})
+
+	t.Run("no run held", func(t *testing.T) {
+		meta, node := formatted(t)
+		_, err := meta.HeldCloneMeta(ctx, testSp, testMigrId, 1)
+		if err == nil || isNoFreeRun(err) ||
+			!strings.Contains(err.Error(), "no clone-metadata run is held") {
+			t.Errorf("HeldCloneMeta of a run not held = %v, want the "+
+				"refusal of a run not held", err)
+		}
+		assertNoWrite(t, node, "a run not held")
+		if got, err := meta.CloneMetaRecords(ctx); err != nil ||
+			len(got) != 0 {
+			t.Errorf("records after HeldCloneMeta = %v/%v, want none",
+				got, err)
+		}
+	})
+
+	t.Run("an area with no free run", func(t *testing.T) {
+		meta, node := formatted(t)
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId+1, total); err != nil {
+			t.Fatalf("whole-area AllocCloneMeta: %v", err)
+		}
+		node.Reset()
+		_, held := meta.HeldCloneMeta(ctx, testSp, testMigrId, 1)
+		if !isNoFreeRun(held) {
+			t.Errorf("HeldCloneMeta in a full area = %v, want the typed "+
+				"wait", held)
+		}
+		_, alloc := meta.AllocCloneMeta(ctx, testSp, testMigrId, 1)
+		same(t, held, alloc)
+		assertNoWrite(t, node, "a full area")
+	})
+
+	t.Run("a disk this node may not use", func(t *testing.T) {
+		meta, node := formatted(t)
+		// The area is full, so only the gate stands between the calls and
+		// the typed wait.
+		if _, err := meta.AllocCloneMeta(
+			ctx, testSp, testMigrId+1, total); err != nil {
+			t.Fatalf("whole-area AllocCloneMeta: %v", err)
+		}
+		unconfirmed := reopen(node)
+		_, held := unconfirmed.HeldCloneMeta(ctx, testSp, testMigrId, 1)
+		_, alloc := unconfirmed.AllocCloneMeta(ctx, testSp, testMigrId, 1)
+		same(t, held, alloc)
+		foreign := reopen(node)
+		if err := foreign.EnsureFormatted(ctx, testCluster, testDn+1,
+			metaExtentSize, mayFormat); err == nil {
+			t.Fatal("EnsureFormatted accepted another node's disk")
+		}
+		node.Reset()
+		_, held = foreign.HeldCloneMeta(ctx, testSp, testMigrId, 1)
+		if held == nil || isNoFreeRun(held) {
+			t.Errorf("HeldCloneMeta on another node's full disk = %v, "+
+				"want its identity refused", held)
+		}
+		_, alloc = foreign.AllocCloneMeta(ctx, testSp, testMigrId, 1)
+		same(t, held, alloc)
+		assertNoWrite(t, node, "another node's disk")
+	})
+}
+
 // DN13: the chosen slot's first 8 KiB is zeroed *before* the record is
 // persisted, so a crash can never leave a stale dm-clone superblock behind a
 // live record.

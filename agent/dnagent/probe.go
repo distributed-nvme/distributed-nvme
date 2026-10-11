@@ -3,7 +3,6 @@ package dnagent
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -14,7 +13,9 @@ import (
 // object of the node, as Get*Info and the Check* streams must not (DN16,
 // SH25); reading a migration destination's dm-clone status still makes the
 // kernel commit the clone's metadata (SH17). What a probe can change is the
-// agent's own view of the disk (probeDn).
+// agent's own view of the disk (probeDn). A migration destination's two rows,
+// and where its per-CN rows are judged to serve from, come from the rule its
+// converge applies to what it reads (migrDstSeen, DN13).
 
 func (s *DnAgentServer) probeDn(
 	ctx context.Context,
@@ -230,23 +231,98 @@ func (s *DnAgentServer) probeSideDm(
 }
 
 // probeAboveSideDev probes everything the side's desired state puts on top of
-// the side device. It is shared by GetSideInfo/CheckSide and by a converge
-// pass whose migration destination could not read where its per-CN stacks
-// are (convergeSide's migrCloneUnread branch), which reports those rows
-// instead of converging them.
+// the side device (GetSideInfo/CheckSide): a migration destination's two rows
+// first, by the rule its converge applies (probeMigrDst, reportMigrDst), whose
+// answer to where the per-CN stacks serve from the per-CN rows are judged by,
+// and then the per-CN stacks and the migration source's rows (probeStacks).
 func (s *DnAgentServer) probeAboveSideDev(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
 ) {
-	t := st.tracker
 	cloneLive := false
 	if plan.wantMigr {
-		dev, err := s.dm.Info(ctx, plan.migrFinalName())
-		cloneLive = err == nil && dev != nil
+		seen := s.probeMigrDst(ctx, plan)
+		s.reportMigrDst(st, plan, info, seen)
+		cloneLive = s.migrDstServing(ctx, plan, seen).cloneLive()
 	}
+	s.probeStacks(ctx, st, plan, info, cloneLive)
+}
 
+// probeMigrDst reads a migration destination as DN13's steps would find it,
+// in their order, with nothing built: step (2) (migrMetaRead), then, only
+// where it holds, the walk of the source connection, then, only over a source
+// that serves, step (4) (migrCloneRead). The dm-clone's status line is read
+// whenever the dm-clone is there, whatever stopped before it, because its
+// row carries the line for the gateway's hydration checks (architecture.md,
+// Live-state reporting).
+func (s *DnAgentServer) probeMigrDst(
+	ctx context.Context,
+	plan *sidePlan,
+) *migrDstSeen {
+	seen := &migrDstSeen{}
+	name := plan.migrFinalName()
+	// present: step (4)'s read found the dm-clone as the step leaves it, so
+	// the status read needs no probe of its own. Short of that a step
+	// stopped, and its stop decides both rows, so a dm-clone whose probe
+	// does not answer only goes without its status line.
+	present := false
+	if seen.metaErr = s.migrMetaRead(ctx, plan); seen.metaErr == nil {
+		state, err := s.host.ListSubsys(ctx, plan.srcNqnOfDst())
+		seen.conn, seen.connErr, seen.connUnread = state, err, err != nil
+		if seen.srcServes() {
+			seen.cloneErr = s.migrCloneRead(ctx, plan, state.DevicePath)
+			present = seen.cloneErr == nil
+		}
+	}
+	if !present {
+		if dev, err := s.dm.Info(ctx, name); err != nil || dev == nil {
+			return seen
+		}
+	}
+	seen.raw, seen.statusErr = s.dm.Status(ctx, name)
+	seen.statusRead = seen.statusErr == nil
+	return seen
+}
+
+// probeFencedLinear checks a per-CN dm-linear of a migration source inside
+// the cutover grace window (architecture.md, Migration, src step 2) by the
+// test phase 1 converges it to (ensureDmLinearSuspended): the device there
+// and suspended, on whatever table it carries — its pre-fence one, or the
+// dm-error of DN12 rule 1's known-limit second window — so a check round
+// reads every window as the converge that holds it reports it.
+func (s *DnAgentServer) probeFencedLinear(
+	ctx context.Context,
+	name string,
+) (pb.ResStatus, string) {
+	dev, err := s.dm.Info(ctx, name)
+	switch {
+	case err != nil:
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+	case dev == nil:
+		return pb.ResStatus_RES_STATUS_MISSING, ""
+	case !dev.Suspended:
+		return pb.ResStatus_RES_STATUS_ERROR,
+			"not suspended inside the migration cutover grace window"
+	}
+	return pb.ResStatus_RES_STATUS_OK, fenceSuspendedDetails
+}
+
+// probeStacks probes the per-CN stacks and the migration source's rows. It is
+// shared by probeAboveSideDev and by a converge pass whose migration
+// destination could not read where its per-CN stacks are (convergeSide's
+// migrCloneUnread branch), which reports those rows instead of converging
+// them. cloneLive is the destination rule's reading of the dm-clone
+// (migrServing.cloneLive), false on a side that is no destination.
+func (s *DnAgentServer) probeStacks(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+	cloneLive bool,
+) {
+	t := st.tracker
 	// A read-only probe must not start the window (DN16/SH25), so it asks
 	// whether one is already running rather than going through beginFence.
 	fencing := plan.migrSrc != nil && s.inFence(st)
@@ -261,23 +337,15 @@ func (s *DnAgentServer) probeAboveSideDev(
 			resKeyOf(resKeyDmErrorFmt, cnId), errName, status, details)
 
 		linName := plan.linearName(cnId)
-		// Inside the cutover grace window (architecture.md, Migration,
-		// src step 2) the linear is still on its pre-fence
-		// target and suspended on purpose, so that — not dm-error — is what
-		// the probe must expect; reporting the window as a table mismatch
-		// would make a healthy cutover look broken for a minute. The one
-		// window this misreads is DN12 rule 1's known-limit second one,
-		// which a restart opens over the dm-error phase 2 had already
-		// installed: there the primary's linear reads as a mismatch until
-		// phase 2 runs again.
-		backing := plan.linearBacking(cnId, cloneLive)
+		// Inside the cutover grace window the linear is suspended on purpose,
+		// on whatever table it carries, so the test is phase 1's: reporting
+		// the window as a table mismatch would make a healthy cutover look
+		// broken for a minute.
 		if fencing {
-			backing = plan.preFenceBacking(cnId, cloneLive)
-		}
-		status, details = s.probeDmTarget(ctx, linName, "linear",
-			plan.sectors, backing)
-		if fencing && status == pb.ResStatus_RES_STATUS_OK {
-			details = fenceSuspendedDetails
+			status, details = s.probeFencedLinear(ctx, linName)
+		} else {
+			status, details = s.probeDmTarget(ctx, linName, "linear",
+				plan.sectors, plan.linearBacking(cnId, cloneLive))
 		}
 		info.CnIdToDmLinear[cnId] = t.Set(
 			resKeyOf(resKeyDmLinearFmt, cnId), linName, status, details)
@@ -342,62 +410,6 @@ func (s *DnAgentServer) probeAboveSideDev(
 				})
 			srcInfo.NvmeofInfo = t.Set(
 				resKeyMigrSrcNvmeof, nqn, status, details)
-		}
-	}
-
-	if plan.wantMigr {
-		dstInfo := &pb.SideInfo_MigrDstInfo{}
-		info.MigrDstInfo = dstInfo
-		nqn := plan.srcNqnOfDst()
-		// DN13 step 2's refusal, with the rows the converge reports for it
-		// (ensureMigrDst): a metadata area that cannot supply this
-		// migration's slot is one refusal, not an absent target beside an
-		// absent dm-clone. An area with no free run for it is a wait, both
-		// rows PROVISIONING with the area's text; any other refusal is the
-		// MISSING/ERROR pair. Answering the plain MISSING pair here would
-		// trade the rows, and the epoch on them, with the converge on every
-		// round — and ERROR is the status the worker's health pass keys on.
-		// Read-only (DN16, SH25): the refusal is computed from the loaded
-		// table.
-		if !cloneLive {
-			if refusal := s.migrMetaRefusal(ctx, plan); refusal != nil {
-				if isNoFreeRun(refusal) {
-					details := metaRoomDetails(refusal)
-					dstInfo.TargetInfo = t.Provisioning(
-						resKeyMigrDstTarget, nqn, details)
-					dstInfo.DmCloneInfo = t.Provisioning(resKeyMigrDstClone,
-						plan.migrFinalName(), details)
-					return
-				}
-				dstInfo.TargetInfo = t.Missing(
-					resKeyMigrDstTarget, nqn, detailsCloneMetaMissing)
-				dstInfo.DmCloneInfo = t.Err(resKeyMigrDstClone,
-					plan.migrFinalName(), refusal.Error())
-				return
-			}
-		}
-		state, err := s.host.ListSubsys(ctx, nqn)
-		switch {
-		case err != nil:
-			dstInfo.TargetInfo = t.Err(resKeyMigrDstTarget, nqn, err.Error())
-		case !state.Found:
-			dstInfo.TargetInfo = t.Missing(resKeyMigrDstTarget, nqn, "")
-		case !state.Live:
-			dstInfo.TargetInfo = t.Err(resKeyMigrDstTarget, nqn,
-				"paths: "+strings.Join(state.States, ","))
-		default:
-			dstInfo.TargetInfo = t.Ok(resKeyMigrDstTarget, nqn,
-				"paths: "+strings.Join(state.States, ","))
-		}
-		cloneName := plan.migrFinalName()
-		if !cloneLive {
-			dstInfo.DmCloneInfo = t.Missing(
-				resKeyMigrDstClone, cloneName, "")
-		} else if raw, err := s.dm.Status(ctx, cloneName); err != nil {
-			dstInfo.DmCloneInfo = t.Err(
-				resKeyMigrDstClone, cloneName, err.Error())
-		} else {
-			dstInfo.DmCloneInfo = t.Ok(resKeyMigrDstClone, cloneName, raw)
 		}
 	}
 }

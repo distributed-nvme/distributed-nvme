@@ -66,6 +66,27 @@ func syncupSnapshot(
 	return reply
 }
 
+// syncupSnapshotHeld is syncupSnapshot with the snapshot's id, dev_id 2,
+// already in the pools of the given slices when the snapshot joins td_list:
+// what a crashed or refused earlier run leaves. The ids go in after the
+// origin's converge, whose activation sweep would delete them as strays
+// (CN14).
+func syncupSnapshotHeld(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+	o reqOpts,
+	heldIn ...uint64,
+) *pb.SyncupCntlrReply {
+	t.Helper()
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
+	for _, sliceId := range heldIn {
+		node.holdThinIds(poolNameOf(srv, sliceId), 2)
+	}
+	node.Reset()
+	return syncupCntlrAt(t, srv, o)
+}
+
 // TestSnapshotQuiescesOriginRaid0 pins CN14's quiesce: the origin's raid0 is
 // suspended across *every* slice's create_snap, each of which keeps its own
 // nested per-slice origin-thin suspend, and the snap thin devices are created
@@ -119,6 +140,8 @@ func TestSnapshotQuiescesOriginRaid0(t *testing.T) {
 	assertOk(t, info.GetTdIdToThinInfo()[testSnapTd].
 		GetSliceIdToDmThin()[testSlice2], "snap thin slice 1")
 	assertOk(t, info.GetTdIdToRaid0()[testSnapTd], "snap raid0")
+	// One run made every slice's id: the snapshot is whole (CN14).
+	assertTorn(t, info, testSnapTd, false, "a run that made every id")
 }
 
 // TestSnapshotResumesRaid0AfterAFailedMessage pins CN14's resume ([D12]): a
@@ -165,12 +188,16 @@ func TestSnapshotReapplySuspendsNothing(t *testing.T) {
 	syncupSnapshot(t, srv, node, o)
 
 	node.Reset()
-	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(o)); err != nil {
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
+	if err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
 	assertNoCall(t, node, "cmd dmsetup suspend")
 	assertNoCall(t, node, "create_snap")
 	assertOnlyPersisted(t, node)
+	// A run that makes no id tears nothing (CN14).
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+		"a re-apply that made no id")
 }
 
 // TestPlainThinNeverQuiescesARaid0 is CN14's case 2: an ordinary td is
@@ -357,6 +384,12 @@ func TestCreatedSnapshotIsNeverMessaged(t *testing.T) {
 // message — a `create_thin` would hand the live dev_id a fresh, empty volume
 // — so the failing `dmsetup create` is reported as it happened and left
 // there. No converge, at any revision, self-heals it.
+//
+// The row names the cause in its reason, RES_REASON_THIN_ID_LOST, read from
+// the refusal's errno (CN29), so the worker's class for a lost id reads a
+// field and not the dmsetup words (dnv-worker.md HL2). Only a converge names
+// it: a check round reads the absent volume MISSING with no reason. Once an
+// operator restores the id, the row reads OK and the reason is gone.
 func TestCreatedTdWithAMissingIdIsAnError(t *testing.T) {
 	srv, node := newTestServer(t)
 	o := reqOpts{revision: 2, primary: true, tds: []*pb.ThinDevice{
@@ -364,8 +397,10 @@ func TestCreatedTdWithAMissingIdIsAnError(t *testing.T) {
 	reply := syncupBoth(t, srv, o)
 
 	assertNoCall(t, node, "0 create_thin ")
-	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
-		GetSliceIdToDmThin()[testSlice], "No data available", "lost thin id")
+	row := reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertErrorDetails(t, row, "No data available", "lost thin id")
+	assertReason(t, row, pb.ResReason_RES_REASON_THIN_ID_LOST, "lost thin id")
 
 	node.Reset()
 	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
@@ -373,9 +408,48 @@ func TestCreatedTdWithAMissingIdIsAnError(t *testing.T) {
 		t.Fatalf("re-apply: %v", err)
 	}
 	assertNoCall(t, node, "0 create_thin ")
-	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
-		GetSliceIdToDmThin()[testSlice], "No data available",
+	row = reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertErrorDetails(t, row, "No data available",
 		"lost thin id, second converge")
+	assertReason(t, row, pb.ResReason_RES_REASON_THIN_ID_LOST,
+		"lost thin id, second converge")
+
+	probed := checkRound(t, srv, 2).GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertMissing(t, probed, "lost thin id, check round")
+	assertReason(t, probed, pb.ResReason_RES_REASON_NONE,
+		"lost thin id, check round")
+
+	node.holdThinIds(poolName(srv), 1)
+	reply, err = srv.SyncupCntlr(context.Background(), cntlrReq(o))
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	row = reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertOk(t, row, "restored thin id")
+	assertReason(t, row, pb.ResReason_RES_REASON_NONE, "restored thin id")
+}
+
+// TestCreatedTdOtherErrorHasNoReason bounds the reason to the errno that
+// names it (CN29): a created td whose thin table the kernel refuses for any
+// other cause reads ERROR with the dmsetup output in its details and no
+// reason, so the worker treats it as this cntlr's own error.
+func TestCreatedTdOtherErrorHasNoReason(t *testing.T) {
+	srv, node := newTestServer(t)
+	node.holdThinIds(poolName(srv), 1)
+	node.failCmdAlways["dmsetup create "+thinName(srv, testTd)] =
+		"device-mapper: reload ioctl on " + thinName(srv, testTd) +
+			"  failed: Invalid argument"
+	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+		tds: []*pb.ThinDevice{
+			{TdId: testTd, DevId: 1, Size: testTdSize, Created: true}}})
+
+	row := reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertErrorDetails(t, row, "Invalid argument", "refused thin table")
+	assertReason(t, row, pb.ResReason_RES_REASON_NONE, "refused thin table")
 }
 
 // TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing is CN14's "A violated
@@ -397,8 +471,11 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 	if n := len(node.callsMatching(message)); n != 1 {
 		t.Fatalf("%d create_snap calls, want exactly 1", n)
 	}
-	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
-		GetSliceIdToDmThin()[testSlice], "No data available", "orphan snap")
+	row := reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertErrorDetails(t, row, "No data available", "orphan snap")
+	// An uncreated td's id has not been made yet: no lost id (CN14).
+	assertReason(t, row, pb.ResReason_RES_REASON_NONE, "orphan snap")
 
 	node.Reset()
 	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
@@ -408,8 +485,11 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 	if n := len(node.callsMatching(message)); n != 1 {
 		t.Fatalf("the retry sent %d create_snap calls, want exactly 1", n)
 	}
-	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
-		GetSliceIdToDmThin()[testSlice], "No data available",
+	row = reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
+		GetSliceIdToDmThin()[testSlice]
+	assertErrorDetails(t, row, "No data available",
+		"orphan snap, second converge")
+	assertReason(t, row, pb.ResReason_RES_REASON_NONE,
 		"orphan snap, second converge")
 }
 
@@ -475,4 +555,276 @@ func TestSnapshotClaimsASliceEvenWhenItsMessageFailed(t *testing.T) {
 				"resume at %d", sliceId, at, resume)
 		}
 	}
+}
+
+// assertReason checks the reason a row names (architecture.md, Live-state
+// reporting; CN29).
+func assertReason(
+	t *testing.T,
+	info *pb.ResInfo,
+	want pb.ResReason,
+	label string,
+) {
+	t.Helper()
+	if got := info.GetReason(); got != want {
+		t.Fatalf("%s: reason %v, want %v (status %v, details %q)",
+			label, got, want, info.GetStatus(), info.GetDetails())
+	}
+}
+
+// assertTorn checks the torn mark one td's thin info carries (CN14).
+func assertTorn(
+	t *testing.T,
+	info *pb.CntlrInfo,
+	tdId uint64,
+	want bool,
+	label string,
+) {
+	t.Helper()
+	thinInfo := info.GetTdIdToThinInfo()[tdId]
+	if thinInfo == nil {
+		t.Fatalf("%s: no thin info for td %#x", label, tdId)
+	}
+	if got := thinInfo.GetTorn(); got != want {
+		t.Fatalf("%s: td %#x torn = %v, want %v", label, tdId, got, want)
+	}
+}
+
+// tornMarks is the fixture cntlr's in-memory torn marks (CN14).
+func tornMarks(t *testing.T, srv *CnAgentServer) map[uint64]bool {
+	t.Helper()
+	st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
+	if st == nil {
+		t.Fatalf("the fixture cntlr has no state")
+	}
+	return st.tornTds
+}
+
+// TestSnapshotTornWhenASliceAlreadyHoldsItsId is CN14's torn mark from a
+// message: slice 0's create_snap makes the snapshot's id while slice 1's pool
+// already holds it — its message is refused with EEXIST — so the two slices'
+// snapshots date from different instants. Both rows read OK, as the volumes
+// are there; the torn mark says what the rows cannot, on the converge and on
+// the check round alike.
+func TestSnapshotTornWhenASliceAlreadyHoldsItsId(t *testing.T) {
+	srv, node := newTestServer(t)
+	reply := syncupSnapshotHeld(t, srv, node, reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()},
+		testSlice2)
+
+	info := reply.GetCntlrInfo()
+	for _, sliceId := range []uint64{testSlice, testSlice2} {
+		assertOk(t, info.GetTdIdToThinInfo()[testSnapTd].
+			GetSliceIdToDmThin()[sliceId],
+			fmt.Sprintf("snap thin slice %#x", sliceId))
+	}
+	assertTorn(t, info, testSnapTd, true, "converge")
+	assertTorn(t, info, testTd, false, "the origin, converge")
+	probed := checkRound(t, srv, 3)
+	assertTorn(t, probed, testSnapTd, true, "check round")
+	assertTorn(t, probed, testTd, false, "the origin, check round")
+}
+
+// TestSnapshotTornWhenASliceHasItsDevice is CN14's torn mark from a device: a
+// run whose slice-0 message is refused for another cause counts that slice
+// as neither made nor held, so it tears nothing; the next run finds slice 1's
+// snapshot device there — its id from the earlier run — and makes slice 0's,
+// which tears the snapshot.
+func TestSnapshotTornWhenASliceHasItsDevice(t *testing.T) {
+	srv, node := newTestServer(t)
+	node.failCmd["message "+poolNameOf(srv, testSlice)+" 0 create_snap"] =
+		msgIoctlFailed(poolNameOf(srv, testSlice), "Invalid argument")
+	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
+	reply := syncupSnapshot(t, srv, node, o)
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+		"a run that made one id and failed the other")
+	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
+		GetSliceIdToDmThin()[testSlice], "No data available",
+		"the slice whose message failed")
+
+	node.Reset()
+	reply = syncupCntlrAt(t, srv, o)
+	if n := len(node.callsMatching(snapMessage(srv, testSlice))); n != 1 {
+		t.Fatalf("the re-apply sent %d create_snap calls to slice 0, want 1",
+			n)
+	}
+	assertNoCall(t, node, snapMessage(srv, testSlice2))
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true,
+		"a run that made slice 0's id beside slice 1's device")
+}
+
+// TestSnapshotTornBesideAPoolNotReady is CN14's torn mark from a device
+// whose pool is not ready: a slice's snapshot device holds its id whatever
+// its pool's state this pass. The first run makes slice 0's id while slice
+// 1's pool is not ready, and the pass builds slice 0's device; the second
+// makes slice 1's id while slice 0's pool is not ready, beside that device,
+// which tears the snapshot. Both channels report the mark, and so does the
+// pass that then finds every device there.
+func TestSnapshotTornBesideAPoolNotReady(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
+	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
+	// notReadyRun runs one pass with the pool of slice off not ready, and
+	// checks the pass messaged only slice on.
+	notReadyRun := func(off, on uint64) *pb.CntlrInfo {
+		t.Helper()
+		node.Reset()
+		node.failCmd["dmsetup status "+poolNameOf(srv, off)] =
+			"device-mapper: status ioctl on " + poolNameOf(srv, off) +
+				"  failed: Input/output error"
+		info := syncupCntlrAt(t, srv, o).GetCntlrInfo()
+		assertMissingDetails(t, info.GetTdIdToThinInfo()[testSnapTd].
+			GetSliceIdToDmThin()[off], "thin pool missing",
+			fmt.Sprintf("snap thin slice %#x, its pool not ready", off))
+		assertNoCall(t, node, snapMessage(srv, off))
+		if n := len(node.callsMatching(snapMessage(srv, on))); n != 1 {
+			t.Fatalf("slice %#x: %d create_snap calls, want 1", on, n)
+		}
+		return info
+	}
+
+	assertTorn(t, notReadyRun(testSlice2, testSlice), testSnapTd, false,
+		"a run that made slice 0's id while slice 1's pool was not ready")
+	if _, ok := node.dms[thinNameOf(srv, testSnapTd, testSlice)]; !ok {
+		t.Fatal("fixture: the first run built no snapshot device in slice 0")
+	}
+	assertTorn(t, notReadyRun(testSlice, testSlice2), testSnapTd, true,
+		"a run that made slice 1's id beside slice 0's device")
+	assertTorn(t, checkRound(t, srv, 3), testSnapTd, true, "check round")
+
+	node.Reset()
+	reply := syncupCntlrAt(t, srv, o)
+	assertNoCall(t, node, "create_snap")
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true,
+		"the pass that finds every device there")
+}
+
+// TestSnapshotNotTornBesideAnUnreadSlice bounds the mark (CN14): a slice
+// whose snapshot device the run cannot read counts as neither made nor held,
+// so a run that makes the other slice's id beside it tears nothing.
+func TestSnapshotNotTornBesideAnUnreadSlice(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
+	node.Reset()
+	node.killCmdNoEffectAlways["dmsetup info --columns --noheadings -o attr "+
+		thinNameOf(srv, testSnapTd, testSlice2)] = true
+	reply := syncupCntlrAt(t, srv, reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+
+	if n := len(node.callsMatching(snapMessage(srv, testSlice))); n != 1 {
+		t.Fatalf("slice 0: %d create_snap calls, want 1", n)
+	}
+	assertNoCall(t, node, snapMessage(srv, testSlice2))
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+		"a run that made one id beside a slice it could not read")
+}
+
+// TestSnapshotNotTornWhenNoIdIsMade bounds the mark (CN14): a run in which
+// every slice already holds the id — each message refused with EEXIST — made
+// nothing, so it tore nothing, and the volumes attach the ids that are there.
+func TestSnapshotNotTornWhenNoIdIsMade(t *testing.T) {
+	srv, node := newTestServer(t)
+	reply := syncupSnapshotHeld(t, srv, node, reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()},
+		testSlice, testSlice2)
+
+	for _, sliceId := range []uint64{testSlice, testSlice2} {
+		if n := len(node.callsMatching(snapMessage(srv, sliceId))); n != 1 {
+			t.Fatalf("slice %#x: %d create_snap calls, want 1", sliceId, n)
+		}
+		assertOk(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
+			GetSliceIdToDmThin()[sliceId],
+			fmt.Sprintf("snap thin slice %#x", sliceId))
+	}
+	if !node.dms[poolNameOf(srv, testSlice)].thinIds[2] ||
+		node.dms[poolNameOf(srv, testSlice)].snapshot {
+		t.Fatalf("fixture: slice 0's message made the id after all")
+	}
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+		"a run whose every message was refused with EEXIST")
+}
+
+// TestTornMarkLastsUntilTheCreatedFlip pins the mark's life (CN14): a run
+// sets it, a later run that makes no id — every snapshot device is there, so
+// it sends no message and suspends nothing — leaves it set, and both
+// channels report it until the request lists the td created, which is when
+// the created flip has recorded it (dnv-worker.md RW19), or drops the td.
+func TestTornMarkLastsUntilTheCreatedFlip(t *testing.T) {
+	tornSnapshot := func(t *testing.T) (*CnAgentServer, *fakeNode) {
+		t.Helper()
+		srv, node := newTestServer(t)
+		reply := syncupSnapshotHeld(t, srv, node, reqOpts{
+			revision: 3, primary: true, twoSlices: true, tds: snapTds()},
+			testSlice2)
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true, "the torn run")
+		return srv, node
+	}
+
+	t.Run("a re-apply keeps it", func(t *testing.T) {
+		srv, node := tornSnapshot(t)
+		node.Reset()
+		reply := syncupCntlrAt(t, srv, reqOpts{
+			revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+		assertNoCall(t, node, "create_snap")
+		assertNoCall(t, node, "cmd dmsetup suspend")
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true, "re-apply")
+		assertTorn(t, checkRound(t, srv, 3), testSnapTd, true,
+			"check round after the re-apply")
+	})
+
+	t.Run("the created flip clears it", func(t *testing.T) {
+		srv, _ := tornSnapshot(t)
+		tds := snapTds()
+		tds[1].Created = true
+		tds[1].Torn = true
+		reply := syncupCntlrAt(t, srv, reqOpts{
+			revision: 4, primary: true, twoSlices: true, tds: tds})
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+			"converge of the created td")
+		assertTorn(t, checkRound(t, srv, 4), testSnapTd, false,
+			"check round of the created td")
+		if marks := tornMarks(t, srv); len(marks) != 0 {
+			t.Fatalf("torn marks %v outlive the created flip", marks)
+		}
+	})
+
+	t.Run("a check round reads created before a converge drops it",
+		func(t *testing.T) {
+			srv, _ := tornSnapshot(t)
+			tds := snapTds()
+			tds[1].Created = true
+			st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp,
+				testCntlr))
+			st.storeReq(cntlrReq(reqOpts{
+				revision: 3, primary: true, twoSlices: true, tds: tds}))
+			assertTorn(t, checkRound(t, srv, 3), testSnapTd, false,
+				"check round of a td the request lists created")
+		})
+
+	t.Run("dropping the td clears it", func(t *testing.T) {
+		srv, _ := tornSnapshot(t)
+		syncupCntlrAt(t, srv, reqOpts{
+			revision: 4, primary: true, twoSlices: true,
+			tds: snapTds()[:1]})
+		if marks := tornMarks(t, srv); len(marks) != 0 {
+			t.Fatalf("torn marks %v outlive the td", marks)
+		}
+	})
+}
+
+// TestTornMarkIsLostOnRestart is the mark's best-effort limit (CN14;
+// architecture.md, Known limits): it lives in the agent's memory only, and
+// the restarted agent's runs make no id — every snapshot device is there —
+// so nothing sets it again.
+func TestTornMarkIsLostOnRestart(t *testing.T) {
+	srv, node := newTestServer(t)
+	reply := syncupSnapshotHeld(t, srv, node, reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()},
+		testSlice2)
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true, "the torn run")
+
+	fresh := newCnServer(node)
+	reconcileForTest(t, fresh)
+	assertTorn(t, checkRound(t, fresh, 3), testSnapTd, false,
+		"check round after a restart")
 }

@@ -19,40 +19,14 @@ func (s *DnAgentServer) syncupSide(
 	key string,
 	req *pb.SyncupSideRequest,
 ) *pb.SyncupSideReply {
-	// DN8 gating: SyncupDn introduces the pointer first (architecture.md,
-	// `service DiskNodeAgent`).
-	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
-	if dn == nil || !pointerKnown(dn.req.Load(), req.GetSidePointer()) {
-		return &pb.SyncupSideReply{
-			AgentReply: agent.UnknownObjectReply(
-				"side pointer %s not in the dn's list",
-				sidePointerText(req.GetSidePointer())),
-		}
-	}
 	st := s.getSide(key)
 	var stored uint64
 	if st != nil {
 		stored = st.req.Load().GetRevision()
 	}
-	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
-		return &pb.SyncupSideReply{AgentReply: reject, Revision: stored}
-	}
-	// DN8's side conf gate: a length to zero the sp worker cannot have derived
-	// from a stored group. The DN request cannot change under this RPC —
-	// SyncupDn replaces it under the node write lock, and this holds the read
-	// lock — so the gate and the converge below see one extent size. This is
-	// the last point with literally zero side effects: refusing here skips
-	// the desired-state promotion below, the whole converge and the
-	// local-store Save, so a bad request cannot be replayed by the next
-	// Reconcile either. The stored revision is echoed back, not the
-	// request's, so the worker sees the request was not accepted.
-	extentSize := dn.req.Load().GetExtentSize()
-	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
-		logInvalidSideConf(ctx, req, err)
-		return &pb.SyncupSideReply{
-			AgentReply: agent.InvalidConfReply("%v", err),
-			Revision:   stored,
-		}
+	reply, extentSize := s.gateSide(ctx, req, stored)
+	if reply != nil {
+		return reply
 	}
 	// Stored before the converge builds anything, so no claim of this
 	// request can be missing from another side's pass that sees what the
@@ -79,6 +53,51 @@ func (s *DnAgentServer) syncupSide(
 		SideInfo:   info,
 		BmInfo:     s.bitmapInfo(st),
 	}
+}
+
+// gateSide is DN8's gating of a SyncupSide against stored, the revision of
+// the request this process holds for the side, zero for a side it does not
+// hold: the pointer, then the revision, then the side conf. It returns the
+// refusal, or nil and the extent size of the DN the side is sized by. It
+// writes nothing but the side conf gate's Error record, so SyncupSide can run
+// it under the node read lock before it takes the object lock of a side the
+// process does not hold, and syncupSide runs it again under that lock.
+func (s *DnAgentServer) gateSide(
+	ctx context.Context,
+	req *pb.SyncupSideRequest,
+	stored uint64,
+) (*pb.SyncupSideReply, uint64) {
+	// DN8 gating: SyncupDn introduces the pointer first (architecture.md,
+	// `service DiskNodeAgent`).
+	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
+	if dn == nil || !pointerKnown(dn.req.Load(), req.GetSidePointer()) {
+		return &pb.SyncupSideReply{
+			AgentReply: agent.UnknownObjectReply(
+				"side pointer %s not in the dn's list",
+				sidePointerText(req.GetSidePointer())),
+		}, 0
+	}
+	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
+		return &pb.SyncupSideReply{AgentReply: reject, Revision: stored}, 0
+	}
+	// DN8's side conf gate: a length to zero the sp worker cannot have derived
+	// from a stored group. The DN request cannot change under this RPC —
+	// SyncupDn replaces it under the node write lock, and this holds the read
+	// lock — so the gate and the converge see one extent size. This is the
+	// last point with literally zero side effects: refusing here skips the
+	// desired-state promotion, the whole converge and the local-store Save
+	// (syncupSide), so a bad request cannot be replayed by the next Reconcile
+	// either. The stored revision is echoed back, not the request's, so the
+	// worker sees the request was not accepted.
+	extentSize := dn.req.Load().GetExtentSize()
+	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
+		logInvalidSideConf(ctx, req, err)
+		return &pb.SyncupSideReply{
+			AgentReply: agent.InvalidConfReply("%v", err),
+			Revision:   stored,
+		}, 0
+	}
+	return nil, extentSize
 }
 
 // validateZeroBytes is DN8's side conf gate. side_conf.zero_bytes is the
@@ -209,21 +228,21 @@ func (s *DnAgentServer) convergeSide(
 
 	cloneLive, dstHeld := false, false
 	if plan.wantMigr {
-		var clone migrCloneState
-		clone, dstHeld = s.ensureMigrDst(ctx, st, plan, info)
-		switch clone {
+		var serving migrServing
+		serving, dstHeld = s.ensureMigrDst(ctx, st, plan, info)
+		switch serving.state {
 		case migrCloneUp:
 			cloneLive = true
 		case migrCloneUnread:
 			// Nothing decides the per-CN stacks this pass, so they stay
-			// where they are and are only reported, as a check round would
-			// report them; the retry the destination registered converges
-			// them. The fence is settled as under the DN9 gate above, for
-			// the same reason: [D12]'s bound does not wait for a probe.
+			// where they are and are only reported, judged by the
+			// dm-clone's presence as a check round judges them in the same
+			// state (probeStacks); the retry the destination registered
+			// converges them. The fence is settled as under the DN9 gate
+			// above, for the same reason: [D12]'s bound does not wait for a
+			// probe.
 			s.settleFence(ctx, st, plan)
-			dstInfo := info.MigrDstInfo
-			s.probeAboveSideDev(ctx, st, plan, info)
-			info.MigrDstInfo = dstInfo
+			s.probeStacks(ctx, st, plan, info, serving.cloneLive())
 			return info, sweep
 		}
 	}

@@ -376,6 +376,46 @@ assert_all_ok() { # json path label
 	[ -z "$bad" ] || die "$3: not-OK resources: $bad"
 }
 
+# row_sig prints "<status> <epoch>" of one ResInfo of a reply, ABSENT for a
+# row the reply does not carry. A row's epoch moves only when its status does
+# (dnagent.md SH14): readings that agree on both, a second or more apart, show
+# that the row kept its status between them, but for a change undone within
+# one second.
+row_sig() { # <json> <jq path of a ResInfo>
+	jq_of "$1" "($2) as \$r | \"\(\$r.status // \"ABSENT\") \(\$r.epoch // \"0\")\""
+}
+
+# assert_rows_agree holds the rows named to one reading: each reads one status
+# with one epoch in every reply given, the first of which must carry it.
+assert_rows_agree() { # <label> <newline-separated jq paths> <json>…
+	local label=$1 paths=$2 path ref got json n
+	shift 2
+	while IFS= read -r path; do
+		[ -n "$path" ] || continue
+		ref=$(row_sig "$1" "$path")
+		case "$ref" in
+		ABSENT\ *) die "$label: the first reply carries no $path" ;;
+		esac
+		n=1
+		for json in "${@:2}"; do
+			n=$((n + 1))
+			got=$(row_sig "$json" "$path")
+			[ "$got" = "$ref" ] ||
+				die "$label: $path reads '$got' in reply $n, '$ref' in reply 1"
+		done
+	done <<<"$paths"
+}
+
+# no_ctrl_shape reports whether a subsys_shape reading holds no controller of
+# the subsystem, which the agents read as no connection: no entry at all, or
+# the one the kernel keeps while a dm table holds the multipath head open.
+no_ctrl_shape() {
+	case "$1" in
+	absent | "0 "*) return 0 ;;
+	esac
+	return 1
+}
+
 on_exit() {
 	local rc=$?
 	trap - EXIT
@@ -1184,6 +1224,127 @@ mdstat() { cat /proc/mdstat 2>/dev/null || true; }
 # path can be disconnected by device instead of by NQN (cnagent_integtest.md,
 # Cases, clone_xfer).
 ctrl_of() { path_field "$1" "$2" Name; }
+
+# --- the lost clone source (cnagent_integtest.md, Cases, clone_xfer) --------
+#
+# drop_namespaces and drop_subsystem take from a clone's source, behind both
+# agents' backs, what its destination CN reads from; subsys_shape,
+# shape_after and wait_no_ctrl read what the destination's node then holds.
+# Unlike the cleanup helpers these are not best-effort: each fails when a
+# step or a read it rests on fails, since a stage that waits for one shape
+# must not read a tool that did not answer as another shape.
+
+# drop_namespaces <nqn> — disables and removes every namespace of one
+# exported subsystem, and nothing else: the subsystem, its allowed hosts and
+# its port links stay, so a host's controller of it stays live with nothing
+# to read. A namespace is disabled before it is removed.
+drop_namespaces() {
+	local ns
+	[ -d "$NVMET/subsystems/$1" ] || {
+		echo "drop_namespaces: this node exports no $1" >&2
+		return 1
+	}
+	for ns in "$NVMET/subsystems/$1"/namespaces/*; do
+		[ -d "$ns" ] || continue
+		echo 0 >"$ns/enable" || return 1
+		rmdir "$ns" || return 1
+	done
+	echo dropped
+}
+
+# drop_subsystem <nqn> — removes one exported subsystem whole: off every
+# port first, which costs a host's controller of it its connection, the
+# reconnect then refused on a port that keeps listening (cnagent_integtest.md,
+# Lab facts), then its namespaces, its allowed hosts and the subsystem
+# itself.
+drop_subsystem() {
+	local subsys=$NVMET/subsystems/$1 link ns host
+	[ -d "$subsys" ] || {
+		echo "drop_subsystem: this node exports no $1" >&2
+		return 1
+	}
+	for link in "$NVMET"/ports/*/subsystems/"$1"; do
+		[ -L "$link" ] || continue
+		rm -f "$link" || return 1
+	done
+	for ns in "$subsys"/namespaces/*; do
+		[ -d "$ns" ] || continue
+		echo 0 >"$ns/enable" || return 1
+		rmdir "$ns" || return 1
+	done
+	for host in "$subsys"/allowed_hosts/*; do
+		[ -L "$host" ] || continue
+		rm -f "$host" || return 1
+	done
+	rmdir "$subsys" || return 1
+	echo dropped
+}
+
+# subsys_shape <nqn> — "<controllers> <live> <namespace nodes>" of the
+# subsystem this host holds under one NQN, read from the sysfs directory the
+# agent walks (ListSubsys (agent/nvmehost.go)): a controller counts when its
+# state reads anything, as the agent counts one, and is live when it reads
+# live. It prints "absent" when the host holds no entry for the NQN, and
+# fails when a read it rests on fails, but for a subsystem that goes away
+# between the listing and its read.
+subsys_shape() {
+	local d e nqn state ctrls=0 live=0 ns=0
+	for d in /sys/class/nvme-subsystem/nvme-subsys*; do
+		[ -e "$d" ] || continue
+		nqn=$(cat "$d/subsysnqn" 2>/dev/null) || {
+			[ -e "$d" ] && return 1
+			continue
+		}
+		[ "$nqn" = "$1" ] || continue
+		for e in "$d"/nvme*; do
+			[ -e "$e" ] || continue
+			e=${e##*/}
+			if [[ $e =~ ^nvme[0-9]+n[0-9]+$ ]]; then
+				ns=$((ns + 1))
+			elif [[ $e =~ ^nvme[0-9]+$ ]]; then
+				state=$(cat "/sys/class/nvme/$e/state" 2>/dev/null) || state=
+				[ -n "$state" ] || continue
+				ctrls=$((ctrls + 1))
+				if [ "$state" = live ]; then live=$((live + 1)); fi
+			fi
+		done
+		echo "$ctrls $live $ns"
+		return 0
+	done
+	echo absent
+}
+
+# shape_after <nqn> <shape> <secs> — polls subsys_shape until it reads
+# anything but <shape>, or for <secs> at most, and prints the last reading,
+# "unread" for one that failed.
+shape_after() {
+	local got=unread i
+	for ((i = 0; i < $3 * 2; i++)); do
+		got=$(subsys_shape "$1") || got=unread
+		[ "$got" = "$2" ] || break
+		sleep 0.5
+	done
+	echo "$got"
+}
+
+# wait_no_ctrl <nqn> <secs> — polls subsys_shape until this host holds no
+# controller of the subsystem, which the agent reads as not connected
+# (cnagent.md CN10), and prints the shape it found; it fails after <secs>.
+wait_no_ctrl() {
+	local got=unread i
+	for ((i = 0; i < $2 * 2; i++)); do
+		got=$(subsys_shape "$1") || got=unread
+		case "$got" in
+		absent | "0 "*)
+			echo "$got"
+			return 0
+			;;
+		esac
+		sleep 0.5
+	done
+	echo "a controller of $1 is still here after $2s (shape $got)" >&2
+	return 1
+}
 
 # --- fault injection (case T; the partition also case A's degrade) -----------
 #
@@ -4342,7 +4503,7 @@ case_clone_xfer() {
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
 	local idx bmargs bmfiles nsdev2 err1 err2 hyd dump at upto from rsv rel deadline
-	local code details
+	local code details shape now tgt rows c1 k g c2
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -4732,6 +4893,130 @@ case_clone_xfer() {
 	cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" --clone "$C_CLONE" \
 		--interval 0.5 --timeout 120 >/dev/null
 
+	stage srcgone "stage 7b: the source loses its namespace; the clone's rows read one status on every channel"
+	# CN1's export of the transfer loses its namespace behind both agents'
+	# backs, the export and CN2's controller of it staying, and one rule
+	# judges the clone on both channels (cnagent.md CN18, CN28): its three
+	# rows and its destination namespace's two read one status, with one
+	# epoch, on a converge, a CheckCntlr round, a GetCntlrInfo and a second
+	# converge. The source's row reads MISSING, which sets no health epoch,
+	# and the other four OK. What serves is not the rows' to decide (CN16):
+	# the namespace keeps serving through the hydrated dm-clone, and the
+	# read-only channel still proves the hydration the gateway's checks
+	# read.
+	#
+	# The state compared is measured, never assumed, as the dn suite's lost
+	# source is (dnagent_integtest.md, Cases, migr_full): CN2's node must read
+	# the source with a live controller and no namespace node. Should the
+	# namespace node the dm-clone holds open outlive its namespace instead,
+	# both agents would read a source that serves, so the stage drops the
+	# whole export and compares the rows once CN2's controller of it is gone;
+	# the log says which of the two it compared, and the finalize below then
+	# finds no controller to disconnect. Any other reading fails the stage,
+	# and so does a reading that moved by the end of the comparison.
+	assert_eq "$(helper 2 "subsys_shape '$xnqn'")" "1 1 1" \
+		"clone_xfer: controllers, live ones and namespace nodes of the source on cn2"
+	assert_eq "$(helper 1 "drop_namespaces '$xnqn'")" dropped \
+		"clone_xfer: the transfer's namespace dropped"
+	assert_eq "$(helper 1 "port_linked '$xnqn'")" linked \
+		"clone_xfer: the transfer's export once its namespace is gone"
+	shape=$(helper 2 "shape_after '$xnqn' '1 1 1' 10")
+	case "$shape" in
+	"1 1 0")
+		log "clone_xfer: cn2 holds a live controller of the source and no" \
+			"namespace node"
+		;;
+	"1 1 1")
+		log "clone_xfer: WARNING the source's namespace node outlived its" \
+			"namespace while the dm-clone held it; dropping the whole export"
+		assert_eq "$(helper 1 "drop_subsystem '$xnqn'")" dropped \
+			"clone_xfer: the transfer's export dropped"
+		shape=$(helper 2 "wait_no_ctrl '$xnqn' 30") ||
+			die "clone_xfer: cn2 still holds a controller of the source" \
+				"30 s after the export was dropped"
+		log "clone_xfer: cn2 holds no controller of the source (shape" \
+			"'$shape')"
+		;;
+	*)
+		die "clone_xfer: cn2 reads the source subsystem as '$shape' after" \
+			"the namespace drop, want '1 1 0' (controllers, live ones," \
+			"namespace nodes)"
+		;;
+	esac
+	# The stored request again, at its own revision.
+	c1=$(cn_syncup_cntlr 2 "$req2")
+	assert_eq "$(helper 2 "dm_backing $nsdev2")" \
+		"$(helper 2 "dm_devno $clonedm")" \
+		"clone_xfer: the ns-dev still serves through the dm-clone"
+	assert_eq "$(host_ana "$hv" "$nqn" 2)" optimized \
+		"clone_xfer: the host's path to cn2 stays optimized"
+	sleep 1.1
+	k=$(cnctl 2 check-cntlr --revision "$rev2" --show-info \
+		--sp "$sp2" --cntlr "$cntlr")
+	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev2" \
+		"clone_xfer srcgone check-cntlr revision"
+	g=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
+	sleep 1.1
+	c2=$(cn_syncup_cntlr 2 "$req2")
+	# The reading compared held through all four replies.
+	now=$(helper 2 "subsys_shape '$xnqn'")
+	if [ "$shape" = "1 1 0" ]; then
+		assert_eq "$now" "1 1 0" \
+			"clone_xfer: the source subsystem on cn2 after the comparison"
+	else
+		no_ctrl_shape "$now" ||
+			die "clone_xfer: cn2 reads the source subsystem as '$now' after" \
+				"the comparison, want no controller"
+	fi
+	# The converge's statuses (cnagent.md CN18, CN28). The source's row
+	# follows what the walk read, the same thing subsys_shape read, and reads
+	# MISSING for each reading here: naming the missing namespace, for a
+	# subsystem entry the kernel keeps with no controller, and for no entry
+	# at all. The dm-clone's, its wrapper's and the namespace's rows read OK.
+	case "$shape" in
+	"1 1 0")
+		assert_map_status "$c1" clone_id_to_target "$C_CLONE" \
+			RES_STATUS_MISSING "no namespace" "clone_xfer with no source namespace"
+		;;
+	absent)
+		assert_map_status "$c1" clone_id_to_target "$C_CLONE" \
+			RES_STATUS_MISSING "" "clone_xfer with no source subsystem"
+		;;
+	*)
+		tgt=$(jq_of "$c1" \
+			".cntlr_info.clone_id_to_target[\"$(d16 "$C_CLONE")\"].status // \"ABSENT\"")
+		assert_eq "$tgt" RES_STATUS_MISSING \
+			"clone_xfer with no source controller clone_id_to_target[$C_CLONE]"
+		;;
+	esac
+	assert_map_ok "$c1" clone_id_to_dm_clone "$C_CLONE" \
+		"clone_xfer with no source namespace"
+	assert_map_ok "$c1" clone_id_to_meta "$C_CLONE" \
+		"clone_xfer with no source namespace"
+	assert_map_ok "$c1" ns_id_to_dm_linear "$S_NS" \
+		"clone_xfer with no source namespace"
+	assert_map_ok "$c1" ns_id_to_namespace "$S_NS" \
+		"clone_xfer with no source namespace"
+	rows=$(printf '%s\n' \
+		".cntlr_info.clone_id_to_target[\"$(d16 "$C_CLONE")\"]" \
+		".cntlr_info.clone_id_to_dm_clone[\"$(d16 "$C_CLONE")\"]" \
+		".cntlr_info.clone_id_to_meta[\"$(d16 "$C_CLONE")\"]" \
+		".cntlr_info.ns_id_to_dm_linear[\"$(d16 "$S_NS")\"]" \
+		".cntlr_info.ns_id_to_namespace[\"$(d16 "$S_NS")\"]")
+	assert_rows_agree "clone_xfer with no source namespace" "$rows" \
+		"$c1" "$k" "$g" "$c2"
+	# The dm-clone's row carries its status line whenever the device is
+	# there, so a GetCntlrInfo still proves the hydration checkCloneHydrated
+	# (gateway/clone.go) reads.
+	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
+		--clone "$C_CLONE" --sample-only)
+	case "$sample" in
+	[0-9]*/[1-9]*) ;;
+	*) die "clone_xfer: no hydration sample with no source namespace: '$sample'" ;;
+	esac
+	assert_eq "${sample%%/*}" "${sample##*/}" \
+		"clone_xfer: hydrated regions with no source namespace"
+
 	stage finalize "stage 8: DeleteTransfer, then DeleteClone (CN18 order)"
 	req_set "$req1" ".xfer_list = []
 		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = true"
@@ -4758,9 +5043,10 @@ case_clone_xfer() {
 	# is refused with DNR and deletes the controller (cnagent_integtest.md,
 	# Lab facts), about 11 s
 	# after that unlink. A pass that lands later finds no controller, issues
-	# no disconnect and replies 0. Both endings are CN21's, and the stage
-	# takes whichever the timing gives it: --expect-code 4 names the usual
-	# one, and `|| true` keeps the printed reply of the other.
+	# no disconnect and replies 0, and so does every pass after stage 7b
+	# dropped the whole export. Both endings are CN21's, and the stage takes
+	# whichever the timing gives it: --expect-code 4 names the usual one, and
+	# `|| true` keeps the printed reply of the other.
 	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 || true)
 	[ -n "$out" ] ||
 		die "clone_xfer: the finalize printed no reply — the call never reached the agent"
@@ -4782,9 +5068,10 @@ case_clone_xfer() {
 		done
 		;;
 	0)
-		log "clone_xfer: cn2's :4: controller was already gone — CN1's unlink" \
-			"dropped it and its reconnect was refused with DNR — so the" \
-			"finalize had no disconnect to issue"
+		log "clone_xfer: cn2's :4: controller was already gone — the export" \
+			"left CN1's port, by CN1's unlink or stage 7b's drop, and the" \
+			"reconnect was refused with DNR — so the finalize had no" \
+			"disconnect to issue"
 		;;
 	*) die "clone_xfer: the finalize replied code $code ($details), want 0 or 4" ;;
 	esac

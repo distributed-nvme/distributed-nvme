@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -80,7 +81,8 @@ func (b *osBase) runProbe(
 	stdout, stderr, exitCode, err := b.run(ctx, name, args...)
 	if err != nil {
 		if !reported(exitCode, err) {
-			return "", false, cmdError(name, args, stdout, stderr, err)
+			return "", false,
+				cmdError(name, args, stdout, stderr, exitCode, err)
 		}
 		return "", false, nil
 	}
@@ -108,23 +110,23 @@ func (b *osBase) runStdinOk(
 	name string,
 	args ...string,
 ) error {
-	stdout, stderr, _, err := b.runStdin(ctx, stdin, name, args...)
+	stdout, stderr, exitCode, err := b.runStdin(ctx, stdin, name, args...)
 	if err != nil {
-		return cmdError(name, args, stdout, stderr, err)
+		return cmdError(name, args, stdout, stderr, exitCode, err)
 	}
 	return nil
 }
 
-// runOk executes one command and folds a non-zero exit into an error whose
+// runOk executes one command and folds a non-zero exit into a CmdError whose
 // text is the command output (DN19 error capture).
 func (b *osBase) runOk(
 	ctx context.Context,
 	name string,
 	args ...string,
 ) error {
-	stdout, stderr, _, err := b.run(ctx, name, args...)
+	stdout, stderr, exitCode, err := b.run(ctx, name, args...)
 	if err != nil {
-		return cmdError(name, args, stdout, stderr, err)
+		return cmdError(name, args, stdout, stderr, exitCode, err)
 	}
 	return nil
 }
@@ -190,11 +192,81 @@ func (c *Cmd) RunOk(ctx context.Context, name string, args ...string) error {
 	return c.runOk(ctx, name, args...)
 }
 
+// CmdError is the error of a command that failed (DN19 error capture): its
+// text is the command line and the tool's own output, word for word, so the
+// details of an ERROR row read what the tool said. It also carries the exit
+// status and, for dmsetup, the errno the output names, so a caller branches
+// on IsNoData, IsExists or IsBusy and never on the text.
+type CmdError struct {
+	// Name and Args are the command line.
+	Name string
+	Args []string
+	// Output is the tool's trimmed stderr, else its trimmed stdout, else the
+	// run's own error when the tool printed nothing.
+	Output string
+	// ExitCode is the tool's exit status, or -1 when it never reported
+	// (Reported).
+	ExitCode int
+	// Errno is the errno a dmsetup refusal's output names (dmErrnoTexts). It
+	// is 0 for any other tool, for an output that names none of them, and
+	// for a run that never reported, which refused nothing.
+	Errno syscall.Errno
+}
+
+// Error is the command line and the output: the text every caller logs and
+// a failed row carries in its details.
+func (e *CmdError) Error() string {
+	return fmt.Sprintf("%s %s: %s",
+		e.Name, strings.Join(e.Args, " "), e.Output)
+}
+
+// Unwrap gives the errno alone, so errors.Is with a syscall errno holds as
+// well; the run's own error is not in the chain.
+func (e *CmdError) Unwrap() error {
+	if e.Errno == 0 {
+		return nil
+	}
+	return e.Errno
+}
+
+// dmErrnoTexts is the one place that turns a tool's error words into an
+// errno. A dmsetup refusal names, in strerror's words, the errno its ioctl
+// returned, as in "device-mapper: message ioctl on <name>  failed: File
+// exists": the C locale's words, the locale every command runs in
+// (osclient.md, RunCommand). The match is a case-insensitive substring of the
+// output, never of the command line, and the first row that matches names the
+// errno. "already exists" reads as EEXIST too, for an output that words the
+// refusal that way and not in strerror's words.
+var dmErrnoTexts = []struct {
+	text  string
+	errno syscall.Errno
+}{
+	{"no data available", syscall.ENODATA},
+	{"file exists", syscall.EEXIST},
+	{"already exists", syscall.EEXIST},
+	{"device or resource busy", syscall.EBUSY},
+}
+
+// dmErrno is the errno a dmsetup output names, 0 when it names none.
+func dmErrno(output string) syscall.Errno {
+	lower := strings.ToLower(output)
+	for _, row := range dmErrnoTexts {
+		if strings.Contains(lower, row.text) {
+			return row.errno
+		}
+	}
+	return 0
+}
+
+// cmdError builds the CmdError of a failed run. Only a dmsetup run that
+// reported gets an errno: a run that was killed or never started refused
+// nothing, whatever it printed first.
 func cmdError(
 	name string,
 	args []string,
 	stdout string,
 	stderr string,
+	exitCode int,
 	err error,
 ) error {
 	out := strings.TrimSpace(stderr)
@@ -204,7 +276,45 @@ func cmdError(
 	if out == "" {
 		out = err.Error()
 	}
-	return fmt.Errorf("%s %s: %s", name, strings.Join(args, " "), out)
+	cmdErr := &CmdError{
+		Name:     name,
+		Args:     append([]string(nil), args...),
+		Output:   out,
+		ExitCode: exitCode,
+	}
+	if name == "dmsetup" && reported(exitCode, err) {
+		cmdErr.Errno = dmErrno(out)
+	}
+	return cmdErr
+}
+
+// IsNoData says whether err holds a dmsetup refusal with ENODATA: a thin
+// table, or a create_snap, that names a thin id its pool does not hold.
+func IsNoData(err error) bool {
+	return cmdErrno(err) == syscall.ENODATA
+}
+
+// IsExists says whether err holds a dmsetup refusal with EEXIST: a
+// create_thin or a create_snap of a thin id its pool already holds.
+func IsExists(err error) bool {
+	return cmdErrno(err) == syscall.EEXIST
+}
+
+// IsBusy says whether err holds a dmsetup refusal with EBUSY: a device that
+// is still open, or a reserve_metadata_snap while the pool already holds a
+// metadata snapshot.
+func IsBusy(err error) bool {
+	return cmdErrno(err) == syscall.EBUSY
+}
+
+// cmdErrno is the errno of the first CmdError in err's chain, 0 when the
+// chain holds none.
+func cmdErrno(err error) syscall.Errno {
+	var cmdErr *CmdError
+	if !errors.As(err, &cmdErr) {
+		return 0
+	}
+	return cmdErr.Errno
 }
 
 // readAttr reads a virtual-filesystem attribute and reports whether it

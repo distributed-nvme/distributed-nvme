@@ -55,9 +55,9 @@ func (s *DnAgentServer) ensureMigrSrc(
 // Migration destination (DN13)
 // ---------------------------------------------------------------------------
 
-// migrCloneState is what one destination pass established about the
-// dm-clone — the three answers the per-CN layer has to tell apart, which a
-// bool cannot.
+// migrCloneState is where a migration destination's per-CN stacks serve from
+// under the destination rule (migrDstServing) — the three answers the per-CN
+// layer has to tell apart, which a bool cannot.
 type migrCloneState int
 
 const (
@@ -67,79 +67,306 @@ const (
 	// of them serving through it. The per-CN stacks sit on their dm-errors
 	// with every namespace inaccessible (DN13 step (1)).
 	migrCloneDown migrCloneState = iota
-	// migrCloneUp: the dm-clone serves — this pass converged it onto the
-	// source's namespace device, or a step stopped while a per-CN stack
-	// served through it (migrCloneMapped). The primary's stack is put on it
-	// (DN13 step (5)).
+	// migrCloneUp: the dm-clone serves — every step up to its status read
+	// held over the source's namespace device, or a step stopped while a
+	// per-CN stack served through it (migrCloneMapped). The primary's stack
+	// is put on it (DN13 step (5)).
 	migrCloneUp
 	// migrCloneUnread: a step stopped and where the per-CN stacks are could
 	// not be read — the dm-clone's probe did not answer; or it is there and
 	// its device number did not answer; or a per-CN dm-linear's probe or
 	// table read, or a namespace's group read, did not answer and no other
 	// per-CN stack was found serving through it.
-	// Nothing decides the per-CN stacks, so this pass leaves them exactly
-	// where they are.
+	// Nothing decides the per-CN stacks, so a converge leaves them exactly
+	// where they are, and both channels judge their rows by the dm-clone's
+	// presence (migrServing.cloneLive).
 	migrCloneUnread
 )
 
+// The details of the destination's two rows that more than one reading
+// reports (DN18).
+const (
+	// detailsCloneMetaMissing is target_info's when DN13 step (2), the slot
+	// or its wrapper, refuses for any reason but an area with no free run,
+	// which reads provisioning instead (metaRoomDetails): no connect is
+	// attempted without them.
+	detailsCloneMetaMissing = "clone metadata missing"
+	// detailsNoCtrl and detailsNoNs are target_info's when the walk of the
+	// source connection finds no controller, or a controller with no
+	// namespace device: the source connection's own answer that there is
+	// nothing to read from.
+	detailsNoCtrl = "no controller for the subsystem"
+	detailsNoNs   = "controller has no namespace"
+	// detailsTargetNotRead leads dm_clone_info's, before the walk's error,
+	// when the walk of the source connection did not answer.
+	detailsTargetNotRead = "target not read: "
+	// detailsTargetNotConnected is dm_clone_info's when the source
+	// connection answered that there is nothing to read from.
+	detailsTargetNotConnected = "target not connected"
+)
+
+// migrDstSeen is what one pass read of a migration destination, in the order
+// of DN13's steps: step (2), the slot and its wrapper; step (3), the walk of
+// the source connection; step (4), the dm-clone; and the dm-clone's status
+// line. A converge records what its own steps left behind, a failed step as
+// its error (runMigrDst), a check round what it reads (probeMigrDst), and one
+// rule turns either reading into the destination's two rows (targetRow,
+// cloneRow) and into where the per-CN stacks serve from (migrDstServing), so
+// the two channels give the same statuses for the same state (DN13), save
+// after a command that took effect and still failed: that converge reads its
+// step as not held though the node holds it, until the next converge reads
+// the step again. Their details may differ: a converge reports the error of a
+// command that changed something, a check round what it read.
+type migrDstSeen struct {
+	// metaErr is step (2)'s refusal: the area's, the record's or the
+	// wrapper's. Nothing of the later steps is read past it.
+	metaErr error
+	// conn is the walk of the source connection and connErr its error — on a
+	// converge also the error of the connect the pass made. connUnread marks
+	// a walk that did not answer, which says nothing about whether the
+	// connection is there. Step (4) is read only over a connection that has
+	// a controller and a namespace device (srcServes).
+	conn       *agent.SubsysState
+	connErr    error
+	connUnread bool
+	// cloneErr is step (4)'s failure: the dm-clone absent, not on the table
+	// the step builds, or suspended, or one of that table's devices not
+	// read.
+	cloneErr error
+	// raw is the dm-clone's status line, set when statusRead is, and
+	// statusErr the error of a read of it that did not answer.
+	raw        string
+	statusRead bool
+	statusErr  error
+	// hydrationErr is the error of a converge's hydration messages; a check
+	// round sends none.
+	hydrationErr error
+}
+
+// srcServes reports whether the walk answered with a source to read from: a
+// controller, and its namespace device.
+func (m *migrDstSeen) srcServes() bool {
+	return m.connErr == nil && m.conn.HasCtrl() && m.conn.DevicePath != ""
+}
+
+// targetRow is migr_dst_info.target_info's status and details (DN18). Step
+// (2)'s refusal comes first: an area with no free run for a slot not yet held
+// is a wait, not a fault, so the row reads provisioning with the area's text,
+// as the side's own row does while it waits before zeroing (ensureSideDev),
+// and the retry takes the run once units come free; any other refusal reads
+// the slot missing. Past it the row is the walk of the source connection,
+// with the error of the connect a converge made.
+func (m *migrDstSeen) targetRow() (pb.ResStatus, string) {
+	switch {
+	case m.metaErr != nil && isNoFreeRun(m.metaErr):
+		return pb.ResStatus_RES_STATUS_PROVISIONING,
+			metaRoomDetails(m.metaErr)
+	case m.metaErr != nil:
+		return pb.ResStatus_RES_STATUS_MISSING, detailsCloneMetaMissing
+	case m.connErr != nil:
+		return pb.ResStatus_RES_STATUS_ERROR, m.connErr.Error()
+	case !m.conn.HasCtrl():
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNoCtrl
+	case m.conn.DevicePath == "":
+		return pb.ResStatus_RES_STATUS_ERROR, detailsNoNs
+	}
+	paths := "paths: " + strings.Join(m.conn.States, ",")
+	if !m.conn.Live {
+		return pb.ResStatus_RES_STATUS_ERROR, paths
+	}
+	return pb.ResStatus_RES_STATUS_OK, paths
+}
+
+// cloneRow is migr_dst_info.dm_clone_info's status and details (DN18): the
+// first step that stopped, else the hydration the status line shows
+// (hydrationGap), under the error of the message that would not apply when a
+// converge's message failed. The raw status line follows the row's own text
+// on a line of its own whenever the pass read it, whatever the status: the
+// gateway's hydration checks read the progress from it (architecture.md,
+// Live-state reporting).
+func (m *migrDstSeen) cloneRow(plan *sidePlan) (pb.ResStatus, string) {
+	status, note := pb.ResStatus_RES_STATUS_OK, ""
+	switch {
+	case m.metaErr != nil && isNoFreeRun(m.metaErr):
+		status, note = pb.ResStatus_RES_STATUS_PROVISIONING,
+			metaRoomDetails(m.metaErr)
+	case m.metaErr != nil:
+		status, note = pb.ResStatus_RES_STATUS_ERROR, m.metaErr.Error()
+	case m.connUnread:
+		status, note = pb.ResStatus_RES_STATUS_ERROR,
+			detailsTargetNotRead+m.connErr.Error()
+	case !m.srcServes():
+		status, note = pb.ResStatus_RES_STATUS_MISSING,
+			detailsTargetNotConnected
+	case m.cloneErr != nil:
+		status, note = pb.ResStatus_RES_STATUS_ERROR, m.cloneErr.Error()
+	case m.statusErr != nil:
+		status, note = pb.ResStatus_RES_STATUS_ERROR, m.statusErr.Error()
+	default:
+		if gap := hydrationGap(plan, m.raw); gap != nil {
+			status, note = pb.ResStatus_RES_STATUS_ERROR, gap.Error()
+			if m.hydrationErr != nil {
+				note = m.hydrationErr.Error()
+			}
+		}
+	}
+	if m.statusRead {
+		return status, agent.CloneStatusDetails(note, m.raw)
+	}
+	return status, note
+}
+
+// held reports whether every step of the pass held, hydration included, as
+// the status line read after the messages shows it: a converge whose steps
+// all held leaves the retry to settleMigrRetry, after step (5).
+func (m *migrDstSeen) held(plan *sidePlan) bool {
+	return m.metaErr == nil && !m.connUnread && m.srcServes() &&
+		m.cloneErr == nil && m.statusRead && m.statusErr == nil &&
+		m.hydrationErr == nil && hydrationGap(plan, m.raw) == nil
+}
+
+// reportMigrDst sets the destination's two rows from what the pass read, the
+// one place either channel sets them (DN13, DN18).
+func (s *DnAgentServer) reportMigrDst(
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+	seen *migrDstSeen,
+) {
+	t := st.tracker
+	dstInfo := &pb.SideInfo_MigrDstInfo{}
+	info.MigrDstInfo = dstInfo
+	status, details := seen.targetRow()
+	dstInfo.TargetInfo = t.Set(
+		resKeyMigrDstTarget, plan.srcNqnOfDst(), status, details)
+	status, details = seen.cloneRow(plan)
+	dstInfo.DmCloneInfo = t.Set(
+		resKeyMigrDstClone, plan.migrFinalName(), status, details)
+}
+
+// migrServing is where the destination rule puts the per-CN stacks
+// (migrDstServing), and whether the reading found the dm-clone there.
+type migrServing struct {
+	state   migrCloneState
+	present bool
+}
+
+// cloneLive is the reading of the dm-clone the per-CN rows are judged by
+// (sidePlan.linearBacking, sidePlan.anaGrpId): serving where the rule puts
+// the stacks on it, and, where the rule cannot read where they are, wherever
+// it is present — what a converge that leaves the stacks alone and a check
+// round both judge them by.
+func (m migrServing) cloneLive() bool {
+	return m.state == migrCloneUp ||
+		(m.state == migrCloneUnread && m.present)
+}
+
+// migrDstServing is DN13's answer to where a destination's per-CN stacks
+// serve from, for a converge and a check round alike. Up when every step up
+// to the status read held over the source's namespace device. Down when the
+// source connection's own answer is that there is no namespace device to
+// read from — no controller and a connect that failed or brought none, or a
+// controller without one — whatever the dm-linears show, as a level that
+// suppresses the role does (DN11): the dm-clone has lost the device it reads
+// unhydrated regions from. Otherwise a step stopped for a reason of its own,
+// and the answer is read from where the stacks are (migrDstStopped).
+//
+// Hydration that will not converge (a knob or the enable) does not enter it:
+// the dm-clone is converged onto the source the pass found and reads through
+// to it, so demoting the primary's dm-linear back onto its dm-error over it
+// would turn a healthy side into an erroring one.
+func (s *DnAgentServer) migrDstServing(
+	ctx context.Context,
+	plan *sidePlan,
+	seen *migrDstSeen,
+) migrServing {
+	switch {
+	case seen.metaErr != nil, seen.connUnread:
+		return s.migrDstStopped(ctx, plan)
+	case !seen.srcServes():
+		return migrServing{state: migrCloneDown}
+	case seen.cloneErr != nil, seen.statusErr != nil:
+		return s.migrDstStopped(ctx, plan)
+	}
+	return migrServing{state: migrCloneUp, present: true}
+}
+
+// migrDstStopped reads where the per-CN stacks serve from when a destination
+// step stopped for a reason of its own — the slot or its wrapper, a walk of
+// the source connection that did not answer, the dm-clone, its status read —
+// so a stopped step takes the serving path neither onto the dm-clone nor off
+// it. Off it, one unanswered command would cut the leg's only serving path
+// until a later pass finished the build. Onto it, a stopped pass would serve
+// a dm-clone that an earlier pass took the stacks off when the source
+// connection answered without a namespace ("target not connected"): that pass
+// leaves the dm-clone in place, still mapping the source device that is gone.
+// It only reads, so a check round reads the stacks through it as a converge
+// does.
+func (s *DnAgentServer) migrDstStopped(
+	ctx context.Context,
+	plan *sidePlan,
+) migrServing {
+	dev, err := s.dm.Info(ctx, plan.migrFinalName())
+	switch {
+	case err != nil:
+		return migrServing{state: migrCloneUnread}
+	case dev == nil:
+		return migrServing{state: migrCloneDown}
+	}
+	return migrServing{state: s.migrCloneMapped(ctx, plan), present: true}
+}
+
 // ensureMigrDst runs DN13 steps (2) to (4) of the destination sequence of
 // architecture.md, Migration — the slot and its wrapper, the source
-// connection, the dm-clone with hydration on — and the dm-clone's status
-// read. It reports what the pass established about the dm-clone, which
-// decides the per-CN dm-linear targets and ANA groups for this pass, and
-// whether all of those steps held. Step (5), the primary's stack onto the
-// dm-clone, is convergeSide's, and so is the retry of a pass whose steps
-// here all held (settleMigrRetry); every other exit registers the retry
-// here (startMigrRetry). The slot of step (2) is normally the run the side
-// has held since it provisioned (holdMigrMeta), so step (2) finds its record
-// and builds the wrapper over it.
-//
-// A step that stops for a reason of its own takes the serving path neither
-// onto the dm-clone nor off it: the answer is read from where the per-CN
-// stacks are now (migrDstStopped). Only the source connection's own answer —
-// no controller and a connect that failed, or no namespace — takes a
-// destination off its dm-clone. Hydration that will not converge (a knob or
-// the enable), with the status read after it answering, is decided like the
-// whole sequence: the dm-clone is converged onto the source this pass found,
-// so the answer is up.
+// connection, the dm-clone with hydration on — and the dm-clone's status read
+// (runMigrDst), then reports the destination's two rows and decides where the
+// per-CN stacks serve from by the rule a check round applies to what it reads
+// (reportMigrDst, migrDstServing). It returns that decision, which sets the
+// per-CN dm-linear targets and ANA groups for this pass, and whether every
+// step held (migrDstSeen.held). Step (5), the primary's stack onto the
+// dm-clone, is convergeSide's, and so is the retry of a pass whose steps here
+// all held (settleMigrRetry): the retry is not deregistered here, because
+// step (5) has not run yet. Every other pass registers it here
+// (startMigrRetry). The slot of step (2) is normally the run the side has
+// held since it provisioned (holdMigrMeta), so step (2) finds its record and
+// builds the wrapper over it.
 func (s *DnAgentServer) ensureMigrDst(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
-) (migrCloneState, bool) {
-	t := st.tracker
-	dstInfo := &pb.SideInfo_MigrDstInfo{}
-	info.MigrDstInfo = dstInfo
-	nqn := plan.srcNqnOfDst()
-	cloneName := plan.migrFinalName()
-
+) (migrServing, bool) {
 	// Chunks left over from a previous migration on this side are never
 	// applied to a new one.
 	if st.chunks.Len() > 0 &&
 		st.chunkMigrId != plan.migrDst.GetMigrId() {
 		s.dropChunks(ctx, st)
 	}
+	seen := s.runMigrDst(ctx, st, plan)
+	s.reportMigrDst(st, plan, info, seen)
+	serving := s.migrDstServing(ctx, plan, seen)
+	held := seen.held(plan)
+	if !held {
+		s.startMigrRetry(st, plan)
+	}
+	return serving, held
+}
 
-	// (2) the dm-clone metadata slot and its wrapper device. An area with no
-	// free run for a slot not yet held is a wait, not a fault: both rows read
-	// provisioning with the area's text, as the side's own row does while it
-	// waits before zeroing (ensureSideDev), and the retry takes the run once
-	// units come free. Any other failure is the MISSING/ERROR pair.
-	if err := s.ensureMigrMeta(ctx, plan); err != nil {
-		if isNoFreeRun(err) {
-			details := metaRoomDetails(err)
-			dstInfo.TargetInfo = t.Provisioning(
-				resKeyMigrDstTarget, nqn, details)
-			dstInfo.DmCloneInfo = t.Provisioning(
-				resKeyMigrDstClone, cloneName, details)
-		} else {
-			dstInfo.TargetInfo = t.Missing(resKeyMigrDstTarget, nqn,
-				detailsCloneMetaMissing)
-			dstInfo.DmCloneInfo = t.Err(
-				resKeyMigrDstClone, cloneName, err.Error())
-		}
-		return s.migrDstStopped(ctx, st, plan), false
+// runMigrDst runs the destination's steps (2) to (4), the hydration messages
+// and the status read, and records what each left behind: the converge's
+// reading of the destination. A step that fails ends the run there, and its
+// error is its reading, whatever its command did in the kernel (DN13).
+func (s *DnAgentServer) runMigrDst(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+) *migrDstSeen {
+	seen := &migrDstSeen{}
+	nqn := plan.srcNqnOfDst()
+
+	// (2) the dm-clone metadata slot and its wrapper device.
+	if seen.metaErr = s.ensureMigrMeta(ctx, plan); seen.metaErr != nil {
+		return seen
 	}
 
 	// (3) one connect attempt per pass, never retried inside the RPC:
@@ -172,105 +399,27 @@ func (s *DnAgentServer) ensureMigrDst(
 			unread = err != nil
 		}
 	}
-	switch {
-	case err != nil:
-		dstInfo.TargetInfo = t.Err(resKeyMigrDstTarget, nqn, err.Error())
-	case !state.HasCtrl():
-		dstInfo.TargetInfo = t.Err(
-			resKeyMigrDstTarget, nqn, "no controller for the subsystem")
-	case state.DevicePath == "":
-		dstInfo.TargetInfo = t.Err(
-			resKeyMigrDstTarget, nqn, "controller has no namespace")
-	case !state.Live:
-		dstInfo.TargetInfo = t.Err(resKeyMigrDstTarget, nqn,
-			"paths: "+strings.Join(state.States, ","))
-	default:
-		dstInfo.TargetInfo = t.Ok(resKeyMigrDstTarget, nqn,
-			"paths: "+strings.Join(state.States, ","))
-	}
-	if unread {
-		dstInfo.DmCloneInfo = t.Err(
-			resKeyMigrDstClone, cloneName, "target not read: "+err.Error())
-		return s.migrDstStopped(ctx, st, plan), false
-	}
-	if err != nil || !state.HasCtrl() || state.DevicePath == "" {
-		dstInfo.DmCloneInfo = t.Missing(
-			resKeyMigrDstClone, cloneName, "target not connected")
-		s.startMigrRetry(st, plan)
-		return migrCloneDown, false
+	seen.conn, seen.connErr, seen.connUnread = state, err, unread
+	if unread || !seen.srcServes() {
+		return seen
 	}
 
 	// (4) the dm-clone itself, created with hydration off so the bitmap
 	// chunks land before any region is copied.
 	created, err := s.ensureDmClone(ctx, plan, state.DevicePath)
 	if err != nil {
-		dstInfo.DmCloneInfo = t.Err(
-			resKeyMigrDstClone, cloneName, err.Error())
-		return s.migrDstStopped(ctx, st, plan), false
+		seen.cloneErr = err
+		return seen
 	}
 	if created {
 		// Re-apply every chunk of the applied set whenever the dm-clone is
 		// (re)created (dnagent.md DN15).
 		s.applyChunks(ctx, st, plan)
 	}
-	// A hydration knob that would not apply is worth reporting, but it must
-	// not cost the side its serving path: the dm-clone exists and reads
-	// through to the source, so demoting the primary's dm-linear back onto
-	// dm-error over it would turn a healthy side into an erroring one.
-	hydrationErr := s.ensureHydration(ctx, plan)
-	raw, err := s.dm.Status(ctx, cloneName)
-	if err != nil {
-		dstInfo.DmCloneInfo = t.Err(
-			resKeyMigrDstClone, cloneName, err.Error())
-		return s.migrDstStopped(ctx, st, plan), false
-	}
-	if hydrationErr != nil {
-		dstInfo.DmCloneInfo = t.Err(
-			resKeyMigrDstClone, cloneName, hydrationErr.Error())
-		s.startMigrRetry(st, plan)
-		return migrCloneUp, false
-	}
-	// architecture.md, Live-state reporting: the raw dmsetup status line
-	// carries hydration progress.
-	dstInfo.DmCloneInfo = t.Ok(resKeyMigrDstClone, cloneName, raw)
-	// Every step here held. The retry is not deregistered here: step (5)
-	// has not run yet (settleMigrRetry).
-	return migrCloneUp, true
-}
-
-// detailsCloneMetaMissing is what `migr_dst_info.target_info` reports when
-// DN13 step 2, the slot or its wrapper, fails for any reason but an area with
-// no free run, which reads provisioning instead (metaRoomDetails): no connect
-// is attempted without them. The converge (ensureMigrDst) reports it for
-// every such failure, the probe (probeAboveSideDev) only for the area's other
-// refusals, the ones a read-only pass can establish (migrMetaRefusal).
-const detailsCloneMetaMissing = "clone metadata missing"
-
-// migrDstStopped is the exit of every destination step that stopped for a
-// reason of its own — the slot or its wrapper, a walk of the source
-// connection that did not answer, the dm-clone, its status read. The pass
-// is retried in the background, and the per-CN layer is told where the
-// stacks are now, so a stopped step takes the serving path neither onto the
-// dm-clone nor off it. Off it, one unanswered command would cut the leg's
-// only serving path until a later pass finished the build. Onto it, a
-// stopped pass would serve a dm-clone that an earlier pass took the stacks
-// off when the source connection answered without a namespace ("target not
-// connected"): that pass leaves the dm-clone in place, still mapping the
-// source device that is gone.
-func (s *DnAgentServer) migrDstStopped(
-	ctx context.Context,
-	st *sideState,
-	plan *sidePlan,
-) migrCloneState {
-	s.startMigrRetry(st, plan)
-	dev, err := s.dm.Info(ctx, plan.migrFinalName())
-	switch {
-	case err != nil:
-		return migrCloneUnread
-	case dev == nil:
-		return migrCloneDown
-	}
-	return s.migrCloneMapped(ctx, plan)
+	seen.hydrationErr = s.ensureHydration(ctx, plan)
+	seen.raw, seen.statusErr = s.dm.Status(ctx, plan.migrFinalName())
+	seen.statusRead = seen.statusErr == nil
+	return seen
 }
 
 // migrCloneMapped reads whether the per-CN stacks serve through the dm-clone,
@@ -292,7 +441,8 @@ func (s *DnAgentServer) migrDstStopped(
 // old primary's stack still serving through the dm-clone. Only plan.cnIds
 // are read, so when a flip also drops the old primary, whose stack the
 // pass's sweep removes, the read finds none on the dm-clone and the new
-// primary waits on its dm-error for the retry.
+// primary waits on its dm-error for the retry. It only reads: a check round
+// reads the stacks through it as a converge does (migrDstStopped).
 func (s *DnAgentServer) migrCloneMapped(
 	ctx context.Context,
 	plan *sidePlan,
@@ -357,9 +507,11 @@ func migrMetaUnits(plan *sidePlan) (uint64, error) {
 
 // migrMetaRefusal is the refusal of this migration's run as a read-only pass
 // can establish it: the size error of migrMetaUnits, else the clone-metadata
-// area's refusal of the run, as CloneMetaRefusal reads it. The probe reports
-// what the converge reports from holdMigrMeta and DN13 step 2 for the same
-// refusal, so the rows of the two channels agree.
+// area's refusal of the run, as CloneMetaRefusal reads it. The probe of a
+// destination that has not provisioned reports what the converge reports
+// from holdMigrMeta for the same refusal (probeSideDev), so the side's rows
+// of the two channels agree, and the side's verdict reads it
+// (zeroingVerdict).
 func (s *DnAgentServer) migrMetaRefusal(
 	ctx context.Context,
 	plan *sidePlan,
@@ -370,6 +522,52 @@ func (s *DnAgentServer) migrMetaRefusal(
 	}
 	return s.meta.CloneMetaRefusal(
 		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
+}
+
+// migrMetaRead is DN13 step (2) as a read-only pass reads it, and nil when
+// the step would hold with nothing to do: the run the area hands back behind
+// the gates AllocCloneMeta applies, in its texts (HeldCloneMeta), and its
+// wrapper there, on the table ensureMigrMeta builds, writable and resumed —
+// what that step leaves behind when it holds.
+func (s *DnAgentServer) migrMetaRead(
+	ctx context.Context,
+	plan *sidePlan,
+) error {
+	units, err := migrMetaUnits(plan)
+	if err != nil {
+		return err
+	}
+	rec, err := s.meta.HeldCloneMeta(
+		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
+	if err != nil {
+		return err
+	}
+	devNo, err := s.dm.DevNo(ctx, s.disk)
+	if err != nil {
+		return err
+	}
+	name := plan.migrMetaDmName()
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		return err
+	}
+	if dev == nil {
+		return fmt.Errorf("%s is missing", name)
+	}
+	targets, err := s.dm.Table(ctx, name)
+	if err != nil {
+		return err
+	}
+	sectors, offsetSectors := metaWrapperGeometry(rec)
+	switch {
+	case !metaWrapperMaps(targets, sectors, devNo, offsetSectors):
+		return fmt.Errorf("%s does not map its clone-metadata run", name)
+	case dev.ReadOnly:
+		return fmt.Errorf("%s is read-only", name)
+	case dev.Suspended:
+		return fmt.Errorf("%s is suspended", name)
+	}
+	return nil
 }
 
 // awaitMigrSrcNs re-reads the migration source's subsystem after a connect
@@ -451,9 +649,7 @@ func (s *DnAgentServer) ensureMigrMeta(
 		return err
 	}
 	name := plan.migrMetaDmName()
-	sectors := rec.GetUnitCount() * common.DnCloneMetaUnit / agent.SectorSize
-	offsetSectors := (common.DnCloneMetaOffset +
-		rec.GetUnitStart()*common.DnCloneMetaUnit) / agent.SectorSize
+	sectors, offsetSectors := metaWrapperGeometry(rec)
 	table := agent.LinearTable(sectors, devNo, offsetSectors)
 
 	dev, err := s.dm.Info(ctx, name)
@@ -467,17 +663,40 @@ func (s *DnAgentServer) ensureMigrMeta(
 	if err != nil {
 		return err
 	}
-	converged := len(targets) == 1 && targets[0].Type == "linear" &&
-		targets[0].Length == sectors && len(targets[0].Args) == 2 &&
-		targets[0].Args[0] == devNo &&
-		targets[0].Args[1] == strconv.FormatUint(offsetSectors, 10)
-	if !converged || dev.ReadOnly {
+	if !metaWrapperMaps(targets, sectors, devNo, offsetSectors) ||
+		dev.ReadOnly {
 		return s.dm.Reload(ctx, name, table)
 	}
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}
 	return nil
+}
+
+// metaWrapperGeometry is where the wrapper of a clone-metadata run maps on
+// the disk: the run's length and its first sector, both in sectors.
+func metaWrapperGeometry(
+	rec *pb.DnDiskTable_CloneMetaRecord,
+) (sectors uint64, offsetSectors uint64) {
+	sectors = rec.GetUnitCount() * common.DnCloneMetaUnit / agent.SectorSize
+	offsetSectors = (common.DnCloneMetaOffset +
+		rec.GetUnitStart()*common.DnCloneMetaUnit) / agent.SectorSize
+	return sectors, offsetSectors
+}
+
+// metaWrapperMaps reports whether a live table is the one ensureMigrMeta
+// builds over the disk devNo: a single "linear" target of the run's sectors
+// from its first sector, offsetSectors.
+func metaWrapperMaps(
+	targets []agent.DmTarget,
+	sectors uint64,
+	devNo string,
+	offsetSectors uint64,
+) bool {
+	return len(targets) == 1 && targets[0].Type == "linear" &&
+		targets[0].Length == sectors && len(targets[0].Args) == 2 &&
+		targets[0].Args[0] == devNo &&
+		targets[0].Args[1] == strconv.FormatUint(offsetSectors, 10)
 }
 
 // ensureDmClone converges the dm-clone and reports whether this pass created
@@ -545,11 +764,8 @@ func (s *DnAgentServer) ensureDmClone(
 	if err != nil {
 		return false, err
 	}
-	if len(targets) == 1 && targets[0].Type == "clone" &&
-		targets[0].Length == plan.sectors && len(targets[0].Args) >= 4 &&
-		targets[0].Args[0] == metaNo && targets[0].Args[1] == destNo &&
-		targets[0].Args[2] == srcNo &&
-		targets[0].Args[3] == fmt.Sprintf("%d", regionSectors) {
+	if cloneTableMaps(targets, plan.sectors, metaNo, destNo, srcNo,
+		regionSectors) {
 		// Suspended on the table it wants — an interrupted reload, or a
 		// failed one whose old table is wanted again, since a reload fails
 		// closed (dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`)
@@ -565,10 +781,80 @@ func (s *DnAgentServer) ensureDmClone(
 	return false, nil
 }
 
+// cloneTableMaps reports whether a live table is the dm-clone ensureDmClone
+// builds: a single "clone" target of the side's sectors over the metadata
+// wrapper metaNo, the side device destNo and the source's namespace device
+// srcNo, in regions of regionSectors.
+func cloneTableMaps(
+	targets []agent.DmTarget,
+	sectors uint64,
+	metaNo, destNo, srcNo string,
+	regionSectors uint64,
+) bool {
+	return len(targets) == 1 && targets[0].Type == "clone" &&
+		targets[0].Length == sectors && len(targets[0].Args) >= 4 &&
+		targets[0].Args[0] == metaNo && targets[0].Args[1] == destNo &&
+		targets[0].Args[2] == srcNo &&
+		targets[0].Args[3] == strconv.FormatUint(regionSectors, 10)
+}
+
+// migrCloneRead is DN13 step (4) as a read-only pass reads it over the
+// source's namespace device srcDevPath, and nil when the step would hold
+// with nothing to do: the dm-clone there, on the table ensureDmClone builds
+// over the wrapper, the side device and that device, and resumed — what that
+// step leaves behind when it holds.
+func (s *DnAgentServer) migrCloneRead(
+	ctx context.Context,
+	plan *sidePlan,
+	srcDevPath string,
+) error {
+	name := plan.migrFinalName()
+	regionSectors := plan.migrDst.GetBlockSize() / agent.SectorSize
+	if regionSectors == 0 {
+		return fmt.Errorf("migr_dst_conf.block_size is 0")
+	}
+	if plan.sectors == 0 {
+		return fmt.Errorf("side size is 0 (extent_size or ext_cnt unset)")
+	}
+	metaNo, err := s.dm.DevNo(ctx, plan.migrMetaDmPath())
+	if err != nil {
+		return err
+	}
+	destNo, err := s.dm.DevNo(ctx, plan.sideDevPath)
+	if err != nil {
+		return err
+	}
+	srcNo, err := s.dm.DevNo(ctx, srcDevPath)
+	if err != nil {
+		return err
+	}
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		return err
+	}
+	if dev == nil {
+		return fmt.Errorf("%s is missing", name)
+	}
+	targets, err := s.dm.Table(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !cloneTableMaps(targets, plan.sectors, metaNo, destNo, srcNo,
+		regionSectors) {
+		return fmt.Errorf("%s does not map the clone-metadata wrapper, "+
+			"the side device and %s", name, srcDevPath)
+	}
+	if dev.Suspended {
+		return fmt.Errorf("%s is suspended", name)
+	}
+	return nil
+}
+
 // ensureHydration applies the desired hydration state and knobs through
-// dmsetup messages — probe-first, so a converged dm-clone is left alone.
-// Hydration is infrastructure IO, not user IO, so no sp_level ever pauses
-// it: this function only ever enables it ([D11]).
+// dmsetup messages — probe-first, so a converged dm-clone is left alone: it
+// sends what hydrationWants lists for the status it reads. Hydration is
+// infrastructure IO, not user IO, so no sp_level ever pauses it: this
+// function only ever enables it ([D11]).
 func (s *DnAgentServer) ensureHydration(
 	ctx context.Context,
 	plan *sidePlan,
@@ -582,25 +868,50 @@ func (s *DnAgentServer) ensureHydration(
 	if !ok {
 		return fmt.Errorf("unparsable dm-clone status %q", raw)
 	}
-	conf := plan.migrDst.GetDmCloneConf()
-	if threshold := conf.GetHydrationThreshold(); threshold != 0 &&
-		status.Threshold != threshold {
-		if err := s.dm.Message(ctx, name, 0,
-			fmt.Sprintf("hydration_threshold %d", threshold)); err != nil {
+	for _, msg := range hydrationWants(
+		plan.migrDst.GetDmCloneConf(), status) {
+		if err := s.dm.Message(ctx, name, 0, msg); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// hydrationWants lists the messages that bring a dm-clone whose status reads
+// st to the hydration conf asks for, in the order ensureHydration sends them:
+// each knob conf sets that st does not show, then the enable while hydration
+// is off.
+func hydrationWants(conf *pb.DmCloneConf, st *agent.CloneStatus) []string {
+	var wants []string
+	if threshold := conf.GetHydrationThreshold(); threshold != 0 &&
+		st.Threshold != threshold {
+		wants = append(wants,
+			fmt.Sprintf("hydration_threshold %d", threshold))
 	}
 	if batch := conf.GetHydrationBatchSize(); batch != 0 &&
-		status.BatchSize != batch {
-		if err := s.dm.Message(ctx, name, 0,
-			fmt.Sprintf("hydration_batch_size %d", batch)); err != nil {
-			return err
-		}
+		st.BatchSize != batch {
+		wants = append(wants, fmt.Sprintf("hydration_batch_size %d", batch))
 	}
-	if status.HydrationEnabled {
-		return nil
+	if !st.HydrationEnabled {
+		wants = append(wants, "enable_hydration")
 	}
-	return s.dm.Message(ctx, name, 0, "enable_hydration")
+	return wants
+}
+
+// hydrationGap is the destination rule's test of hydration (DN13): nil when
+// the status line raw shows the knobs the plan sets and hydration on, else
+// what it still lacks, or that it does not parse.
+func hydrationGap(plan *sidePlan, raw string) error {
+	status, ok := agent.ParseCloneStatus(raw)
+	if !ok {
+		return fmt.Errorf("unparsable dm-clone status %q", raw)
+	}
+	if wants := hydrationWants(
+		plan.migrDst.GetDmCloneConf(), status); len(wants) > 0 {
+		return fmt.Errorf("hydration not converged: %s",
+			strings.Join(wants, ", "))
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -610,8 +921,9 @@ func (s *DnAgentServer) ensureHydration(
 // startMigrRetry registers a side whose destination pass did not run the
 // whole sequence: the connect failed or the source's namespace did not
 // appear, another step stopped for a reason of its own (migrDstStopped),
-// hydration would not converge (a knob or the enable), or the primary's stack
-// did not converge onto the dm-clone (DN13 step (5), settleMigrRetry). It
+// hydration would not converge (a knob or the enable) as the status line read
+// after the messages shows it (hydrationGap), or the primary's stack did not
+// converge onto the dm-clone (DN13 step (5), settleMigrRetry). It
 // also registers a destination that has not provisioned and could not take
 // its run in the clone-metadata area before zeroing (holdMigrMeta, in
 // ensureSideDev). A goroutine re-runs the destination converge every
@@ -626,22 +938,22 @@ func (s *DnAgentServer) ensureHydration(
 // DnMigrDstNsWait at most (awaitMigrSrcNs).
 //
 // The loop is enrolled in the server's WaitGroup so WaitBackground covers the
-// connect retries too, not just zeroing (SH27). Like startZeroing it
-// therefore refuses once rootCtx is done: an armed DN12 fence timer is not
-// enrolled and can still reach a converge after the join returned, and a
-// bg.Add after bg.Wait panics.
+// connect retries too, not just zeroing (SH27). As in startZeroing, the
+// refusal and the enrollment sit under s.mu, the lock the join marks the
+// server closed under: a retry is refused once the join has begun or rootCtx
+// is done (bgClosedLocked), and no bg.Add can follow the join's bg.Wait.
 func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	s.mu.Lock()
-	if st.retrying || s.rootCtx.Err() != nil {
+	if st.retrying || s.bgClosedLocked() {
 		s.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(s.rootCtx)
 	st.retrying = true
 	st.cancel = cancel
+	s.enrollLocked()
 	s.mu.Unlock()
-	s.bg.Add(1)
 	go func() {
 		defer s.bg.Done()
 		s.migrRetryLoop(ctx, key, st)
@@ -736,24 +1048,28 @@ func (s *DnAgentServer) migrRetryLoop(
 // reconvergeSide re-runs one side's converge from a background goroutine
 // under the DN1 locks. It backs both the DN8 connect retry and the DN12
 // fence timer — anything that has to happen later without blocking an RPC.
+//
+// The side is checked under the node read lock and before its object lock is
+// taken: a side dropped since the attempt was scheduled — the drop runs under
+// the node write lock and forgets the side's lock entry (dropSideState) —
+// gets no new entry from an attempt that converges nothing (dnagent.md,
+// Concurrency — `locks.go`). Nothing that drops or replaces a held side runs
+// under the read lock, so the side the check finds stays for the attempt.
 func (s *DnAgentServer) reconvergeSide(
 	ctx context.Context,
 	key string,
 	st *sideState,
 ) {
-	if s.getSide(key) != st {
-		return
-	}
 	// Every background attempt is its own traceable operation (SH2).
 	attemptCtx := common.WithTraceId(ctx, common.NewTraceId())
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
-	objLock := s.locks.Obj(key)
-	objLock.Lock()
-	defer objLock.Unlock()
 	if s.getSide(key) != st {
 		return
 	}
+	objLock := s.locks.Obj(key)
+	objLock.Lock()
+	defer objLock.Unlock()
 	req := st.req.Load()
 	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 	if dn == nil {
