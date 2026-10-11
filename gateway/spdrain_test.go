@@ -31,7 +31,7 @@ const sptDrainSteps = 64
 
 // sptDrain runs the drain of one latched SP to completion.
 //
-// It is SPD8's derivation in a loop, with no pass and no timer: read the
+// It is SPD8's derivation in a loop, with no pass and no wake-up: read the
 // SpConf, take the first matching phase, commit it, repeat until the SpConf is
 // gone. Every step is one of the three model ops the worker calls, so what this
 // asserts about the END state is what the worker produces.

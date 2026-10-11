@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -27,7 +27,7 @@ const argCmpAny = -1
 // verbatim; dm-thin and dm-clone append status-derived arguments of their own,
 // so comparing all of them would report a converged device as drifted.
 func dmTableMatches(
-	targets []agent.DmTarget,
+	targets []common.DmTarget,
 	targetType string,
 	sectors uint64,
 	args []string,
@@ -229,7 +229,7 @@ func (s *CnAgentServer) buildConcat(
 // liveConcatSectors / wantConcatSectors are the total length of a concat, live
 // and desired. They exist for the one comparison ensureDmMulti makes before a
 // reload: a concat may grow, never shrink.
-func liveConcatSectors(targets []agent.DmTarget) uint64 {
+func liveConcatSectors(targets []common.DmTarget) uint64 {
 	var total uint64
 	for _, target := range targets {
 		total += target.Length
@@ -245,7 +245,7 @@ func wantConcatSectors(want []concatTarget) uint64 {
 	return total
 }
 
-func concatMatches(targets []agent.DmTarget, want []concatTarget) bool {
+func concatMatches(targets []common.DmTarget, want []concatTarget) bool {
 	if len(targets) != len(want) {
 		return false
 	}

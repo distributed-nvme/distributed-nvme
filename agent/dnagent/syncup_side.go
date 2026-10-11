@@ -515,7 +515,7 @@ func sideRunSectors(
 }
 
 func sideDmConverged(
-	targets []agent.DmTarget,
+	targets []common.DmTarget,
 	runs []agent.ExtentRunSectors,
 	devNo string,
 ) bool {
@@ -758,7 +758,7 @@ func (s *DnAgentServer) ensureDmLinear(
 // linearMaps reports whether a live table is the one ensureDmLinear builds
 // over devNo: a single "linear" target of the side's whole size, from
 // sector 0 of the device.
-func linearMaps(targets []agent.DmTarget, sectors uint64, devNo string) bool {
+func linearMaps(targets []common.DmTarget, sectors uint64, devNo string) bool {
 	return len(targets) == 1 && targets[0].Type == "linear" &&
 		targets[0].Length == sectors && len(targets[0].Args) == 2 &&
 		targets[0].Args[0] == devNo && targets[0].Args[1] == "0"

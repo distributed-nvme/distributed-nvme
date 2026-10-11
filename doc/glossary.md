@@ -50,7 +50,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **case** — One scenario of an integration suite, run in a fixed order with the run stopping at the first failure. Each case is isolated: in the agent suites by pool ids of its own and a teardown, elsewhere by a wiped store and restarted processes before it starts.
 
-**cdc, central discovery controller** — `dnv-cdc`, the control-plane process that serves the well-known NVMe-oF discovery subsystem over NVMe/TCP from the `CdcEntry` keys it watches, keeps one filtered view per connected host, sends AENs to the hosts a change impacts, and closes a connection that sends no command within its keep-alive timeout. It registers nothing and never writes etcd.
+**cdc, central discovery controller** — `dnv-cdc`, the control-plane process that serves the well-known NVMe-oF discovery subsystem over NVMe/TCP from the `CdcEntry` keys it watches, keeps one filtered view per connected host, sends AENs to the hosts a change impacts, holds a bounded number of pending connections, and closes a connection that does not connect by its pre-Connect deadline or, once connected, sends no command within its keep-alive timeout. It registers nothing and never writes etcd.
 
 **CdcEntry, discovery records** — The etcd record per subsystem that the cdc serves, a pool's entries being its discovery records: the subsystem NQN, the transports of the controller nodes of the cntlrs the listing rule lists, and the allowed hosts. Every writer sets the whole transport list by that rule from the cntlrs its transaction reads: the gateway's subsystem and cntlr calls, which put back an entry they find missing, and the worker's health write for a cntlr, its failover and its cntlr replacement, which rewrite only an entry that exists (see `architecture.md` [D18]).
 
@@ -102,6 +102,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **coordinator** — The sp role's revision worker for one storage pool: it loads the pool, builds every side and cntlr request, keeps one child goroutine per side and per cntlr, runs the flips and the reaction pass, and hands each fan-out on through the hold. Its own health verdicts on the pool's cntlrs, legs and sides are the ones the own-verdict rule counts, from its start to its stop, so a restart or a shard handoff begins with none.
 
+**count compare** — The dn role's check of a disk node's own free extents, from its disk counts, against the record's free count: it runs on a check round's accepted reply, only while the counts say the side records match the side pointers and the counts, the reply and the record's read share one revision; a disagreement that two compares in a row find is logged once, until a compare agrees, and nothing is written for it (see `dnv-worker.md` RW13).
+
 **created, materialization** — The thin-device flag the sp worker sets once the primary has reported the device's thin volume OK in every slice, and never clears (`ThinDevice.created`). Only a created thin device can be snapshotted, an origin is not deleted while a snapshot of it is uncreated, and no converge sends a created thin device a create or snapshot message again, though one that leaves `td_list` is still sent the delete message (see `cnagent.md` CN14).
 
 **cross-SP live migration** — Moving a volume between storage pools, even across clusters: the destination pool serves a subsystem and namespace identical to the source's, so hosts aggregate both pools' exports into one device and follow the ANA flip, while a transfer exports the source volume over a subsystem of its own and a clone in the destination pool pulls it.
@@ -127,6 +129,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **disconnect registry** — The cn agent's in-memory set of subsystems whose `nvme disconnect` a sweep has set going off its locks. A later pass issues no second disconnect, and no converge adopts or connects such a subsystem until the disconnect has returned.
 
 **discovery log, GENCTR** — The log page the cdc renders for a host from the owned entries visible to it, one record per entry per transport, with a generation counter kept per instance and connected host that advances only when that host's rendered log changes.
+
+**disk counts** — The numbers a disk node's info carries beside its rows (`disk_counts`): the disk's total and free extents, the side records of its volume table, its free metadata units, and whether those records name exactly the side pointers of the request the agent holds, the one whose revision the reply carries. The agent sends them only while it knows its volume table, as this disk node's, and its disk size, so a count not known never reads as zero. They are no row and set no health epoch: the dn role's count compare reads their free extents, and nothing writes them to etcd (see `architecture.md`, Live-state reporting; `dnagent.md` DN18; `dnv-worker.md` RW13).
 
 **disk node, DN** — A machine contributing one raw block device formatted with the dnv disk format, from whose data area extents are handed to sides. It runs a dn agent and exports its sides over that agent's nvmet port.
 
@@ -230,7 +234,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **incarnation** — One lifetime under a name, told from the next by a fresh identity. A worker's incarnation is one seed's: a process start, and every rejoin after a self-fence, mints a new seed and drives nothing for one grace window (see `dnv-worker.md` VW1, VW7). A cluster's incarnation is one creation under its name, told apart by the creation epoch folded into its id, so a recreated cluster's keys and node-local names, the md superblock name apart, never collide with a leftover of the old one (see `architecture.md`, Naming, and [D9]).
 
-**info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, each with a status and details, built by the converge as it runs for a syncup reply and from probes alone for a check round or an info read.
+**info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, each with a status and details, built by the converge as it runs for a syncup reply and from probes alone for a check round or an info read. A disk node's info also carries its disk counts, beside the rows (see disk counts).
 
 **inspect** — The gateway's live read of an object's info and of the revision of the last request its agent accepted for it (`InspectDiskNode`, `InspectControllerNode`, `InspectSide`, `InspectCntlr`; `applied_revision`), answered from the info read of the agent that hosts the object rather than from etcd.
 
@@ -336,6 +340,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **pending bit** — The per-connection flag an impact sets: an armed asynchronous event request completes as soon as it is set and delivery clears it, so impacts while none is armed coalesce into one AEN (see `cdc.md` NP11).
 
+**pending connection** — A TCP connection the cdc has accepted on which the host has not yet completed Connect; a refused Connect leaves it pending. The cdc holds at most `CdcMaxPendingConnCnt` of them and accepts nothing more until one connects or ends, and each ends at its pre-Connect deadline, a fixed time after its accept that nothing restarts (see `cdc.md` NP1, NP10).
+
 **pending spare, ready spare** — A ready spare has one side, provisioned, and the primary's latest row of it reads OK, so leg repair switches it in; a pending spare is not ready yet and not dead, so leg repair waits for it rather than creating another (see `dnv-worker.md` AR8).
 
 **per-CN export stack** — What a side builds for each cntlr of its pool: a dm-error, a dm-linear over the side device for the primary or over the dm-error for a standby, and an nvmet subsystem with one namespace over the linear (`DnErrorName`, `DnLinearName`, `SideToCnNqn`).
@@ -382,7 +388,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **reaction** — One of the sp worker's automatic reactions: failover, auto-grow, cntlr replacement and leg repair. A pass applies at most one and logs it as applied or skipped with its reason.
 
-**reaction pass** — The coordinator's periodic evaluation of a pool from a fresh snapshot against the event thresholds and the pool's level: it applies at most one reaction per pass, so that each reaction's effect is seen before the next decision, and it also runs the drain steps of a latched pool or clone (see `dnv-worker.md` AR1, AR2). A threshold reaction fires only under the own-verdict rule.
+**reaction pass** — The coordinator's periodic evaluation of a pool from a fresh snapshot against the event thresholds and the pool's level: it applies at most one reaction per pass, so that each reaction's effect is seen before the next decision, and it also runs the drain steps of a latched pool or clone (see `dnv-worker.md` AR1, AR2); a committed drain step's wake-up runs the next drain step without a pass (see `dnv-worker.md` SPD6, CLD7). A threshold reaction fires only under the own-verdict rule.
 
 **reconcile** — An agent's startup pass: load the stored requests, converge each object once under the node write lock, then serve. A file that does not load is skipped, and with it every file of a node whose own file did not load; a skipped object is neither converged nor swept and answers unknown until its syncup comes again.
 
@@ -418,7 +424,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **seed, registration** — Each worker process mints a fresh seed per incarnation and keeps one registration per role under it (`WorkerReg`), re-put every vote interval with no etcd lease: observers judge it by their own clock and delete the key of one they commit dead (see `dnv-worker.md` VW2, VW6). The seed enters the worker's tickets, and a worker that fences itself rejoins under a new one.
 
-**self-fence** — A worker's exit when its heartbeat has not fully reached etcd, or its own puts have not been echoed by its watch, for the dead threshold plus one vote interval, when a peer deletes its key, or when its own observer would commit its own key nonmember: it stops every shard worker at once, deletes its registrations and rejoins under a fresh seed, driving nothing for one grace window (see `dnv-worker.md` VW5, VW8).
+**self-fence** — A worker's exit when its heartbeat has not fully reached etcd, or the watch of one of its roles has echoed none of its own puts, for the dead threshold plus one vote interval, when a peer deletes its key, or when its own observer would commit its own key nonmember: it stops every shard worker at once, deletes its registrations and rejoins under a fresh seed, driving nothing for one grace window (see `dnv-worker.md` VW5, VW8).
 
 **sentinel, start gate** — The e2e cleanup's check of its own completion: every cleanup verb prints a sentinel line when it finishes, and after the start and between-cases sweeps the start gate (`cleanup_start_gate`) stops the run when a verb never printed it (see `e2e_integtest.md` E2E6).
 

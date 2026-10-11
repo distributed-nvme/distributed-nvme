@@ -12,8 +12,9 @@ import (
 )
 
 // This file is the NP1 listener: one TCP socket, one goroutine per accepted
-// connection, and the two pieces of state a connection needs from the
-// instance — the round-robin CNTLID counter and the Identify data.
+// connection, and the three pieces of state a connection needs from the
+// instance — the pending slots, the round-robin CNTLID counter and the
+// Identify data.
 
 // acceptRetryDelay is how long the accept loop pauses after an error that is
 // not the listener closing, so a transient failure (a file descriptor
@@ -29,6 +30,11 @@ type server struct {
 	// serial is Identify's SN, derived from the listen endpoint so that two
 	// twins are distinguishable in a host's `nvme list-subsys` output (NP7).
 	serial string
+	// pendingSlots holds one token per pending connection — accepted, with
+	// no successful Connect yet — and one for the Accept the loop waits in,
+	// which becomes the next connection's (NP1). Its capacity,
+	// common.CdcMaxPendingConnCnt, is the cap.
+	pendingSlots chan struct{}
 
 	mu    sync.Mutex
 	conns map[*conn]struct{}
@@ -46,12 +52,13 @@ func newServer(ctx context.Context, d *deps, reg *registry) (*server, error) {
 		return nil, err
 	}
 	return &server{
-		deps:   d,
-		reg:    reg,
-		ln:     ln,
-		ctx:    ctx,
-		serial: endpointSerial(d.cfg.TrAddr, d.cfg.TrSvcId),
-		conns:  make(map[*conn]struct{}),
+		deps:         d,
+		reg:          reg,
+		ln:           ln,
+		ctx:          ctx,
+		serial:       endpointSerial(d.cfg.TrAddr, d.cfg.TrSvcId),
+		pendingSlots: make(chan struct{}, common.CdcMaxPendingConnCnt),
+		conns:        make(map[*conn]struct{}),
 	}, nil
 }
 
@@ -63,7 +70,9 @@ func (s *server) addr() net.Addr {
 
 // run is the accept loop. It returns once ctx has ended and every connection
 // has been closed and joined (NP1: stop accepting, close every connection,
-// stop).
+// stop). It takes a pending slot before each Accept, so at the cap it waits
+// rather than accepting, and the connections it does not take wait in the
+// kernel's listen backlog (NP1).
 func (s *server) run(ctx context.Context) {
 	var wg sync.WaitGroup
 	stopped := make(chan struct{})
@@ -74,9 +83,12 @@ func (s *server) run(ctx context.Context) {
 		case <-stopped:
 		}
 	}()
-	for {
+	for s.acquirePending(ctx) {
 		nc, err := s.ln.Accept()
 		if err != nil {
+			// No connection took the slot. It goes back before the pause,
+			// so a failing Accept never holds one.
+			s.releasePending()
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				break
 			}
@@ -100,13 +112,38 @@ func (s *server) run(ctx context.Context) {
 		}()
 	}
 	close(stopped)
-	// Unconditionally, not only on the ctx path: the loop can also leave on
-	// an accept error observed in the same instant ctx ended, and the
-	// closer goroutine would then take its `stopped` branch instead.
-	// Closing twice is harmless.
+	// Unconditionally, not only on the ctx path: the loop can also leave from
+	// the slot wait, or on an accept error observed in the same instant ctx
+	// ended, and the closer goroutine would then take its `stopped` branch
+	// instead. Closing twice is harmless.
 	_ = s.ln.Close()
 	s.shutdownConns()
 	wg.Wait()
+}
+
+// acquirePending takes a pending slot before an Accept, waiting while the cap
+// is reached; it reports false when ctx ended first (NP1).
+func (s *server) acquirePending(ctx context.Context) bool {
+	select {
+	case s.pendingSlots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// releasePending gives a slot back: at a successful Connect, at the end of a
+// connection that never connected, and after a failed Accept (NP1, NP13).
+// Every slot taken is given back exactly once, so it never blocks.
+func (s *server) releasePending() {
+	<-s.pendingSlots
+}
+
+// pendingCount is how many slots are taken, for the unit tests: one per
+// pending connection, plus the one the accept loop holds while it waits in
+// Accept, which becomes the next connection's.
+func (s *server) pendingCount() int {
+	return len(s.pendingSlots)
 }
 
 // shutdownConns closes every live connection with the shutdown reason of

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -965,40 +964,15 @@ func spSliceCnt(conf *pb.SpConf) int {
 // ---------------------------------------------------------------------------
 
 // hydrationComplete decides whether a dm-clone has finished copying, from the
-// raw `dmsetup status` line the agent puts in a ResInfo's details
-// (architecture.md, Live-state reporting).
-//
-// The line is
-//
-//	<start> <len> clone <meta block size> <used>/<total> <region size>
-//	<hydrated>/<total> <hydrating> <#feature args> …
-//
-// so the fourth argument after the target type carries the progress. Anything
-// that does not parse as a clone status, and a total of zero, is "not
-// complete": DeleteClone and FinishMigration refuse unless they can PROVE the
-// copy is done, and an unreadable status is not proof (architecture.md,
-// Clones).
-//
-// The gateway parses this itself rather than importing agent.ParseCloneStatus:
-// gateway may import only common, pb, etcdutil and model (layout.md,
-// Dependency rules), and only the one number is needed here.
+// details of its row, which carry the raw `dmsetup status` line
+// (architecture.md, Live-state reporting), read with common.ParseCloneStatus,
+// the parser the agents use. Details that do not parse and a total of zero
+// regions are "not complete": DeleteClone and FinishMigration refuse unless
+// they can PROVE the copy is done, and an unreadable status is not proof
+// (architecture.md, Clones). The zero rule is the gateway's own; the parser
+// reads a count that does not parse, one past 64 bits included, as zero.
 func hydrationComplete(details string) bool {
-	for _, line := range strings.Split(details, "\n") {
-		fields := strings.Fields(line)
-		// <start> <len> clone then at least four target arguments.
-		if len(fields) < 7 || fields[2] != "clone" {
-			continue
-		}
-		hydrated, total, ok := strings.Cut(fields[6], "/")
-		if !ok {
-			continue
-		}
-		done, err1 := strconv.ParseUint(hydrated, 10, 64)
-		want, err2 := strconv.ParseUint(total, 10, 64)
-		if err1 != nil || err2 != nil || want == 0 {
-			continue
-		}
-		return done >= want
-	}
-	return false
+	status, ok := common.ParseCloneStatus(details)
+	return ok && status.TotalRegions != 0 &&
+		status.HydratedRegions >= status.TotalRegions
 }

@@ -38,14 +38,6 @@ const (
 	dmAttrReadOnlyIdx  = 3
 )
 
-// DmTarget is one parsed line of a dm table or status.
-type DmTarget struct {
-	Start  uint64
-	Length uint64
-	Type   string
-	Args   []string
-}
-
 // Info returns the live state of a dm device, nil when it does not exist, and
 // an error when `dmsetup info` did not answer. The third case is never folded
 // into the second: a killed probe read as "gone" would free the extent record
@@ -118,13 +110,16 @@ func (d *Dm) List(ctx context.Context) (map[string]string, error) {
 }
 
 // Table returns the parsed live table of a dm device.
-func (d *Dm) Table(ctx context.Context, name string) ([]DmTarget, error) {
+func (d *Dm) Table(
+	ctx context.Context,
+	name string,
+) ([]common.DmTarget, error) {
 	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", "table", name)
 	if err != nil {
 		return nil, cmdError("dmsetup", []string{"table", name},
 			stdout, stderr, exitCode, err)
 	}
-	return ParseDmLines(stdout), nil
+	return common.ParseDmLines(stdout), nil
 }
 
 // Status returns the raw `dmsetup status` output (the dm-clone hydration
@@ -137,29 +132,6 @@ func (d *Dm) Status(ctx context.Context, name string) (string, error) {
 			stdout, stderr, exitCode, err)
 	}
 	return strings.TrimSpace(stdout), nil
-}
-
-// ParseDmLines parses `dmsetup table`/`dmsetup status` output.
-func ParseDmLines(out string) []DmTarget {
-	var targets []DmTarget
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		start, err1 := strconv.ParseUint(fields[0], 10, 64)
-		length, err2 := strconv.ParseUint(fields[1], 10, 64)
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		targets = append(targets, DmTarget{
-			Start:  start,
-			Length: length,
-			Type:   fields[2],
-			Args:   fields[3:],
-		})
-	}
-	return targets
 }
 
 // Create builds a device from a single-target table. dnv never passes
@@ -484,75 +456,13 @@ func CloneTable(
 	return sb.String()
 }
 
-// CloneStatus is the parsed `dmsetup status` of a dm-clone device.
-type CloneStatus struct {
-	Raw              string
-	RegionSectors    uint64
-	HydratedRegions  uint64
-	TotalRegions     uint64
-	HydrationEnabled bool
-	Threshold        uint32
-	BatchSize        uint32
-}
-
-// ParseCloneStatus reads the dm-clone status line:
-//
-//	<meta block size> <used>/<total> <region size> <hydrated>/<total>
-//	<hydrating> <#feature args> <feature args>* <#core args> <core args>*
-func ParseCloneStatus(raw string) (*CloneStatus, bool) {
-	targets := ParseDmLines(raw)
-	if len(targets) != 1 || targets[0].Type != "clone" {
-		return nil, false
-	}
-	args := targets[0].Args
-	if len(args) < 6 {
-		return nil, false
-	}
-	st := &CloneStatus{Raw: strings.TrimSpace(raw), HydrationEnabled: true}
-	st.RegionSectors, _ = strconv.ParseUint(args[2], 10, 64)
-	if hydrated, total, ok := strings.Cut(args[3], "/"); ok {
-		st.HydratedRegions, _ = strconv.ParseUint(hydrated, 10, 64)
-		st.TotalRegions, _ = strconv.ParseUint(total, 10, 64)
-	}
-	featureCnt, err := strconv.Atoi(args[5])
-	if err != nil || featureCnt < 0 || 6+featureCnt > len(args) {
-		return st, true
-	}
-	for _, feature := range args[6 : 6+featureCnt] {
-		if feature == "no_hydration" {
-			st.HydrationEnabled = false
-		}
-	}
-	rest := args[6+featureCnt:]
-	if len(rest) == 0 {
-		return st, true
-	}
-	coreCnt, err := strconv.Atoi(rest[0])
-	if err != nil || coreCnt < 0 || 1+coreCnt > len(rest) {
-		return st, true
-	}
-	core := rest[1 : 1+coreCnt]
-	for i := 0; i+1 < len(core); i += 2 {
-		value, convErr := strconv.ParseUint(core[i+1], 10, 32)
-		if convErr != nil {
-			continue
-		}
-		switch core[i] {
-		case "hydration_threshold":
-			st.Threshold = uint32(value)
-		case "hydration_batch_size":
-			st.BatchSize = uint32(value)
-		}
-	}
-	return st, true
-}
-
 // CloneStatusDetails is the details text of a dm-clone row whose pass read the
 // device's status: the row's note, then the raw status line on a line of its
 // own; the raw line alone when there is no note, and the note alone when
 // there is no line. Both agents build every such row with it, so the raw
-// line survives whatever note the row carries for every reader that scans
-// the details line by line, the gateway's hydration checks among them
+// line survives the note for every reader that scans the details line by
+// line: common.ParseCloneStatus, which the gateway's hydration checks use,
+// skips a note that holds no dm line and reads the status line
 // (architecture.md, Live-state reporting).
 func CloneStatusDetails(note, raw string) string {
 	switch {

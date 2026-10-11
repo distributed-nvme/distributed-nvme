@@ -219,9 +219,35 @@ message ResInfo {
 }
 
 message DnInfo {
+    // The disk node's counts of its own volume table (dnagent.md DN18):
+    // numbers beside the rows, and no row themselves, so they carry no
+    // status and no epoch and neither set nor clear an err_epoch
+    // (dnv-worker.md HL1). The agent sends them only beside an OK meta row,
+    // from a table it has confirmed as this dn's and a disk size a read has
+    // answered; otherwise the field is absent, so an unknown count never
+    // reads as zero. The dn role compares free_ext_cnt with the record's
+    // DnConf.free_ext_cnt (dnv-worker.md RW13). The names of the two extent
+    // counts are DnConf's, so the agent's numbers and the record's print
+    // under one key.
+    message DiskCounts {
+        // The extents of the data area: the disk's size past the fixed
+        // prefix, divided by the header's extent_size.
+        uint64 total_ext_cnt = 1;
+        // The extents of the data area no side record holds.
+        uint64 free_ext_cnt = 2;
+        // The side records the table holds.
+        uint64 side_rec_cnt = 3;
+        // The units of the clone-metadata area no record holds.
+        uint64 free_meta_units = 4;
+        // Whether the side records name exactly the sides of the request's
+        // side_pointer_list, matched by sp_id and side_id.
+        bool side_recs_match = 5;
+    }
     ResInfo disk_info = 1;
     ResInfo meta_info = 2;
     ResInfo port_info = 3;
+    // Appended, never renumbered.
+    DiskCounts disk_counts = 4;
 }
 
 message CnInfo {

@@ -103,7 +103,7 @@ bitmaps as hex; a call fails on a gRPC error or a code other than the expected
 one, zero unless the stage names another. It sends the stage's trace id as
 metadata and in `Check*` requests (`grpc.md`, Drivers and fakes), takes a
 cntlr's request whole from a file, and holds what the script must not
-re-derive: the hydration poller (`agent.ParseCloneStatus`), a group's hashed md
+re-derive: the hydration poller (`common.ParseCloneStatus`), a group's hashed md
 names (`CnMdDevName`) and a host NQN's host id.
 
 ## Conventions

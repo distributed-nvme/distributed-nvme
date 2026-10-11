@@ -688,7 +688,7 @@ func metaWrapperGeometry(
 // builds over the disk devNo: a single "linear" target of the run's sectors
 // from its first sector, offsetSectors.
 func metaWrapperMaps(
-	targets []agent.DmTarget,
+	targets []common.DmTarget,
 	sectors uint64,
 	devNo string,
 	offsetSectors uint64,
@@ -786,7 +786,7 @@ func (s *DnAgentServer) ensureDmClone(
 // wrapper metaNo, the side device destNo and the source's namespace device
 // srcNo, in regions of regionSectors.
 func cloneTableMaps(
-	targets []agent.DmTarget,
+	targets []common.DmTarget,
 	sectors uint64,
 	metaNo, destNo, srcNo string,
 	regionSectors uint64,
@@ -864,7 +864,7 @@ func (s *DnAgentServer) ensureHydration(
 	if err != nil {
 		return err
 	}
-	status, ok := agent.ParseCloneStatus(raw)
+	status, ok := common.ParseCloneStatus(raw)
 	if !ok {
 		return fmt.Errorf("unparsable dm-clone status %q", raw)
 	}
@@ -881,7 +881,7 @@ func (s *DnAgentServer) ensureHydration(
 // st to the hydration conf asks for, in the order ensureHydration sends them:
 // each knob conf sets that st does not show, then the enable while hydration
 // is off.
-func hydrationWants(conf *pb.DmCloneConf, st *agent.CloneStatus) []string {
+func hydrationWants(conf *pb.DmCloneConf, st *common.CloneStatus) []string {
 	var wants []string
 	if threshold := conf.GetHydrationThreshold(); threshold != 0 &&
 		st.Threshold != threshold {
@@ -902,7 +902,7 @@ func hydrationWants(conf *pb.DmCloneConf, st *agent.CloneStatus) []string {
 // the status line raw shows the knobs the plan sets and hydration on, else
 // what it still lacks, or that it does not parse.
 func hydrationGap(plan *sidePlan, raw string) error {
-	status, ok := agent.ParseCloneStatus(raw)
+	status, ok := common.ParseCloneStatus(raw)
 	if !ok {
 		return fmt.Errorf("unparsable dm-clone status %q", raw)
 	}

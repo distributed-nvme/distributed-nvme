@@ -178,8 +178,13 @@ retries on conflict until the ctx ends or the transaction's EU5 budget is
 exhausted — in the ordinary case the earlier of the two, a worker's ctx
 living as long as the worker does; and `Snapshot`, read-only, whose reads
 are all served at one store revision and whose commit is a no-op. It serves
-a multi-key load that has no use for the revision itself; a load that does
-need it — every one in the worker (MD3, AR1) — goes through `SnapshotRev`.
+a multi-key load that has no use for the revision itself, such as the
+gateway's. Every multi-key load in the worker goes through `SnapshotRev`
+instead: MD3's and AR1's because they need the revision, and the dn role's
+read of a `DnConf` with its `DnRev` (RW13) because `SnapshotRev` serves a
+later read linearizable at the pinned revision, while `Snapshot` serves it
+from whichever member the client picks and fails on one that has not
+applied that revision yet.
 
 A third runner, `SnapshotRev`, is `Snapshot` that also **reports** the store
 revision its reads were served at: the client's STM pins that revision at
@@ -561,11 +566,11 @@ RPCs; this worker's reaction path passes zero.
   unchanged, `Clone` exists, `clone_id` unchanged, `deleting` true) and at
   most `MaxDelBmPerTxn` chunks. It deletes each named `CloneBitmap` key —
   nothing else, and nothing the caller did not name; the `Clone` record is NOT
-  rewritten; a `SpRev` bump. Its return is the SIZE of the batch it was
-  handed, never a count of keys that were still there — a delete is an
-  idempotent pop, so the loser of an accepted two-owner overlap reports a full
-  batch and removes nothing. An empty batch is a no-op that writes and bumps
-  nothing.
+  rewritten, and `SpRev` is neither read nor bumped (CLD8). Its return is the
+  SIZE of the batch it was handed, never a count of keys that were still
+  there — a delete is an idempotent pop, so the loser of an accepted
+  two-owner overlap reports a full batch and removes nothing. An empty batch
+  is a no-op that writes nothing.
 * `FinishCloneDelete` requires the clone drain checks, and, when the clone
   holds metadata units, every `Cntlr` the `SpConf` lists to exist ("cntlr
   not found" otherwise, read before anything is written). It deletes the
@@ -632,16 +637,19 @@ is unreachable: the vote layer stays fenced (VW8) and retries every
 interval, logging each failure. Only configuration errors make the process
 exit non-zero at start.
 
-CM5. **Shutdown.** SIGINT and SIGTERM cancel the ctx; `Run` then, in order:
-stops the heartbeat loop; **deletes its own registrations** (best effort,
+CM5. **Shutdown.** SIGINT and SIGTERM cancel the ctx; `Run` then leaves the
+fleet in the order a fence leaves it, and for the same reasons (VW8), but
+mints no new seed and does not rejoin: it stops the heartbeat loop and
+joins it; tells every shard worker to stop, gracefully and in parallel (SW5
+then RW11 — an in-flight `Syncup*` or `Push*` is allowed to finish),
+without waiting for them; **deletes its own registrations** (best effort,
 one `Delete` per role under `DefaultEtcdOpTimeout`, so peers start their
-grace windows now rather than after the dead threshold); stops every shard
-worker gracefully and in parallel (SW5 then RW11 — an in-flight `Syncup*`
-or `Push*` is allowed to finish, so this can take up to
-`DefaultWorkerSyncupTimeout`); closes the cache watch and the client;
-returns nil. A second signal during that window exits immediately with
-status 1. Deleting before draining means the successor can start while a
-last syncup finishes — the accepted overlap of an ownership change (VW7).
+grace windows now rather than after the dead threshold); joins the shard
+workers, which can take up to `DefaultWorkerSyncupTimeout`; closes the cache
+watch and the client; returns nil. A second signal during that window exits
+immediately with status 1. Both ways out share this one order. A last
+`Syncup*` or `Push*` can still finish after the deletes, possibly after a
+peer has taken its shard: the overlap an ownership change accepts (VW7).
 
 CM6. **Logging.** JSON on stderr, Info level by default (`log.md`, R2 and R6).
 The `worker starting` record carries `roles`, `seed`, `endpoints`,
@@ -811,14 +819,17 @@ every heartbeat tick and on every own-key watch event:
   while its puts fail promptly, and possibly later still while they hang,
   and the time between its self-fence and its peers' commit of it shrinks
   by as much (CM3). Its `reason` is `heartbeat_stalled`.
-* (b) its own put is not echoed by its own watch: the dead threshold plus
-  one vote interval has passed since the latest observed put event for its
-  own key (any role) while puts report success — the watch is broken and
-  its view of the peers is stale. It waits as long as (a) because a missed
-  put is also a missed echo: on the very tick (a) rides out, checks that run
-  before that tick's own echo arrives find the last echo about the dead
-  threshold old, so a wait of only the dead threshold could fence there. Its
-  `reason` is `watch_stalled`.
+* (b) in some role, its own put is not echoed by that role's watch: the
+  dead threshold plus one vote interval has passed since the latest put
+  event for its own key of that role that the role's watch delivered, or
+  since the incarnation started while it has delivered none, while puts
+  report success — that watch is broken and its view of the role's peers is
+  stale. The time of the last echo is kept per role, because each role has
+  its own watch (VW10) and an echo on one says nothing of another's. It
+  waits as long as (a) because a missed put is also a missed echo: on the
+  very tick (a) rides out, checks that run before that tick's own echo
+  arrives find the last echo about the dead threshold old, so a wait of only
+  the dead threshold could fence there. Its `reason` is `watch_stalled`.
 * (c) a delete event for its own key that this process did not issue — a
   peer committed it dead (VW6). Its `reason` is `key_deleted`.
 * (d) its own observer commits its own registration nonmember (VW5, VW6):
@@ -827,21 +838,16 @@ every heartbeat tick and on every own-key watch event:
   the disappear has then held for the grace time; by the first path that
   is one dead threshold plus one grace time after the last own put this
   observer saw. The commit takes the fence exit instead of the collection,
-  because the key's owner is alive and still heartbeating (VW5). It is the
-  one check that sees a single
-  role's silent watch: (b) counts an echo of any role, so a worker of
-  several roles whose puts all land while one role's watch has gone silent
-  is fenced by nothing else. Its `reason` names the cause where the signals
-  of (a) and (b) can tell it, judged against the dead threshold — by which
-  this observer found its own key dead — rather than against the threshold
-  of (a) and (b), which neither may have reached yet: a fence a failed seed
-  mint deferred keeps its own reason; else `heartbeat_stalled` when
-  `lastOkPut` is the dead threshold old; else `watch_stalled` when the last
-  own echo is; else `key_deleted`, the fallback when neither signal is
-  stale — the key gone from the registry without this process deleting it,
-  (c)'s fact learned from a rescan rather than from a delete event, or,
-  with several roles, a stall that (b) cannot see, some roles' watches
-  having stopped echoing while another's has not. After a stop
+  because the key's owner is alive and still heartbeating (VW5). Its
+  `reason` names the cause where the signals of (a) and (b) can tell it,
+  judged against the dead threshold — by which this observer found its own
+  key dead — rather than against the threshold of (a) and (b), which
+  neither may have reached yet: a fence a failed seed mint deferred keeps
+  its own reason; else `heartbeat_stalled` when `lastOkPut` is the dead
+  threshold old; else `watch_stalled` when the last own echo of that role
+  is; else `key_deleted`, the fallback when neither signal is stale — the
+  key gone from the registry without this process deleting it, (c)'s fact
+  learned from a rescan rather than from a delete event. After a stop
   longer than the threshold of (a), the fence is logged `heartbeat_stalled`
   whichever check the loop reaches first — (a) on the tick, (a) ahead of (c)
   on the own-key delete a peer may have issued meanwhile, or (d) through a
@@ -856,26 +862,27 @@ delete; start the graceful stop of every shard worker of every role, in
 parallel (SW5), and go on without waiting for it — every shard worker is
 told at once, also in a role that is still waiting for the stop of a shard
 it no longer owns (VW9); best-effort `Delete` the old registrations (they
-may already be gone). Like CM5's delete ahead of its drain, and with CM5's
-accepted overlap, this lets the peers observe a delete that lands as a
-disappear and start their grace windows at once, rather than when the drain
-ends — which can take `DefaultWorkerSyncupTimeout` (RW11) — or the dead
-threshold passes, whichever comes first. The drain is started before the
-deletes because a delete that cannot land — a VW8 (a) fence is usually cut
-off from etcd — takes up to `DefaultEtcdOpTimeout` per role, and shard
-workers not yet told to stop would go on driving rounds and `Syncup*` calls
-behind it. Then join the drain; discard every tracking entry, timer and
-effective set; and restart VW2 to VW7 from scratch under the new seed;
-VW7 applies to the new incarnation: nothing is driven until one full grace
-window after the new seed's first successful put. There is no "resume with
-the old seed" path — a worker that lost etcd for the dead threshold plus
-one vote interval is a new worker, exactly like a restart; one code path
-serves every "the fleet gave up on me" case. A fence whose new seed cannot
-be minted (VW1) tears nothing down and is instead **remembered** and
-retried on every following heartbeat tick, ahead of the checks above: (a)
-and (b) are conditions that would fire again by themselves, but (c) and (d)
-are events — a delete, a commit — already consumed, so a fence dropped
-there would be lost for good.
+may already be gone). Deleting before the drain is joined lets the peers
+observe a delete that lands as a disappear and start their grace windows at
+once, rather than when the drain ends — which can take
+`DefaultWorkerSyncupTimeout` (RW11) — or the dead threshold passes,
+whichever comes first; a last syncup can then finish after a peer took its
+shard, the accepted overlap of an ownership change (VW7). The drain is
+started before the deletes because a delete that cannot land — a VW8 (a)
+fence is usually cut off from etcd — takes up to `DefaultEtcdOpTimeout` per
+role, and shard workers not yet told to stop would go on driving rounds and
+`Syncup*` calls behind it. Then join the drain; discard every tracking
+entry, timer and effective set; and restart VW2 to VW7 from scratch under
+the new seed; VW7 applies to the new incarnation: nothing is driven until
+one full grace window after the new seed's first successful put. There is
+no "resume with the old seed" path — a worker that lost etcd for the dead
+threshold plus one vote interval is a new worker, exactly like a restart;
+one code path serves every "the fleet gave up on me" case. A fence whose
+new seed cannot be minted (VW1) tears nothing down and is instead
+**remembered** and retried on every following heartbeat tick, ahead of the
+checks above: (a) and (b) are conditions that would fire again by
+themselves, but (c) and (d) are events — a delete, a commit — already
+consumed, so a fence dropped there would be lost for good.
 
 ### Tickets and ownership
 
@@ -893,9 +900,10 @@ leaves or a new member outranks it, so a membership change among n members
 moves about one n-th of the shards and never reshuffles the rest.
 
 VW10. **Roles are independent**: each role has its own registry prefix,
-watch, tracking entries, timers, effective set, shard workers and log
-records, and ownership of a role considers only the registrations under
-that role's prefix. Fencing (VW8) is process-wide because the seed is.
+watch, last own echo (VW8 (b)), tracking entries, timers, effective set,
+shard workers and log records, and ownership of a role considers only the
+registrations under that role's prefix. Fencing (VW8) is process-wide
+because the seed is.
 
 VW11. An empty effective membership owns nothing. The worker never drives a
 shard from the raw observed set.
@@ -974,8 +982,9 @@ its record's `err_epoch` after it, which only the child's own goroutine
 folds into the memo, before its next verdict (HL3).
 
 RW2. **State**: the desired revision plus the inputs the request is built
-from, the stream, `lastInfo` (the last `*Info` received), the health state
-(Health bookkeeping), and the round timer. No round's outcome is kept as
+from, the stream, `lastInfo` (the last `*Info` received, on a dn loop with
+the revision of the reply that carried it, RW13), the health state (Health
+bookkeeping), and the round timer. No round's outcome is kept as
 WORK STILL OWED: no last-acknowledged revision decides a re-sync, and no
 "re-sync wanted" flag exists anywhere in the loop. RW4 step 5 recomputes
 the whole re-sync condition from the reply in hand — its own `revision`
@@ -995,7 +1004,11 @@ in etcd). BM5's mod-revision memo survives rounds too, but it belongs to
 the pusher, and AR10's memo of the verdicts the rounds reach belongs to the
 sp coordinator: it holds observations, the objects the coordinator last
 judged unhealthy and each cntlr's run of unhealthy verdicts from rounds,
-and no work owed. The memos of what was LOGGED — RW9's
+and no work owed. A dn loop's count compare (RW13) keeps a cache of the
+record as well — its free and total extents with the `DnRev` revision read
+with them, replaced by every read of the record that answers — and two
+memos of observations that owe nothing: its run of disagreeing compares,
+and whether that run was logged. The memos of what was LOGGED — RW9's
 two, plus, on a cntlr child, the last standby leg row logged per leg, so
 HL2's standing row does not repeat every round — never record what is
 owed, and neither does a side or cntlr child's memo of what it REPORTED:
@@ -1198,25 +1211,58 @@ some other reason, from the agent's own acknowledged set (BM2).
 ### dn role — `worker/dnrole.go`
 
 RW13. Inputs: `cluster_id` and `dn_id` from the key, `addr_port` and
-`revision` from the value. Per syncup the loop reads the `DnConf` at
-`DnConfKey` of the cluster and endpoint with a plain `Get` (missing: log,
-skip, retry next round) and the cluster conf from the cache, and sends a
-`SyncupDnRequest` carrying `cluster_id`, `dn_id`, the revision,
-`side_pointer_list` from the record's `side_ptr_list` and `extent_size`
-from the cluster's `dn_bin_conf` to the endpoint. Rounds send a
+`revision` from the value. Per syncup the loop reads the cluster conf from
+the cache and, at one store revision (EU4), the `DnConf` at `DnConfKey` of
+the cluster and endpoint together with the `DnRev` of the DN that record
+names, so that the record comes with the revision it belongs to (a missing
+`DnConf`: log, skip, retry next round); it sends a `SyncupDnRequest`
+carrying `cluster_id`, `dn_id`, the revision, `side_pointer_list` from the
+record's `side_ptr_list` and `extent_size` from the cluster's
+`dn_bin_conf` to the endpoint. Rounds send a
 `CheckDnRequest` carrying `cluster_id`, `dn_id`, the revision, `show_info`
 and `trace_id`. Health per HL1, judged against a cache of the record's
 `err_epoch` that the syncup's read re-seeds and that the health monitor
-re-reads itself, with the same `Get`, before a verdict once
+re-reads itself, with the same read, before a verdict once
 `nodeRecordMaxAge` has passed without its reading or writing the record
 (HL3). A put whose only change is `addr_port` re-syncs the node at its new
 endpoint: the loop drops its stream and connection reference and continues
 at the new address; no delete ever reaches the agent (`architecture.md`,
 dn / cn roles, [D10]).
 
+A round's accepted reply (code zero or `ReplyCodeLeftover`, RW5) is also a
+**count compare** when three things hold: the last read of the record — a
+syncup's, or HL3's re-read — found this DN's record with its `DnRev`; the
+disk counts in the latest known `DnInfo` (HL5; `dnagent.md` DN18) are
+present and say that the disk's side records name exactly the side
+pointers of the request the agent holds; and the revision of the reply that
+carried those counts, the round reply's own and the `DnRev` revision read
+with the record are one. A compare sets the counts' free extents beside the
+record's `free_ext_cnt`. At one revision a DN has one side pointer list and
+one free count: every change of its free count also changes that list and
+bumps its `DnRev` (`architecture.md`, Per-operation allocation). An
+agreeing compare ends the run of disagreeing ones, and the second
+disagreeing compare in a row logs `dn free count disagrees` (Log records),
+once until a compare agrees. Nothing else extends or ends the run: not a
+`SyncupDn`'s reply, a rejected round, a missed one, nor a round whose
+counts are absent or do not match or whose revisions differ. Two in a row,
+because one compare can disagree with no fault: while two owners overlap
+(VW7), the other owner's `SyncupDn` can hand the agent the revision of this
+loop's record with a side pointer list read after it, until either owner's
+watch delivers the newer revision; and only rounds count, so that the two
+compares lie a round apart. Free metadata units are not compared: the dn
+agent takes a migration destination's run of units in that side's
+converge, after the create charged the record, and holds none while the
+side waits for room (`dnagent.md` DN13), so the two counts can differ on a
+healthy disk node. Nothing is written for a disagreement, neither the
+agent's count nor an `err_epoch` (HL1). Reason: the record's count and the
+disk's volume table are kept by different programs, and nothing else
+compares them; the dn role writes the record only on a health change (HL3),
+so storing the agent's count would need a new kind of write.
+
 ### cn role — `worker/cnrole.go`
 
-The mirror image: the `CnConf` at `CnConfKey`, a `SyncupCnRequest` carrying
+The mirror image, without RW13's count compare: the `CnConf` at
+`CnConfKey`, read alone with a plain `Get`, a `SyncupCnRequest` carrying
 `cluster_id`, `cn_id`, the revision, `cntlr_pointer_list` from the record's
 `cntlr_ptr_list` and `qos_ratio` from the `ClusterConf`, a `CheckCnRequest`,
 and health per HL1.
@@ -1617,6 +1663,11 @@ the node's own stream; written through `model.SetDnErrEpoch` and
   rejection would freeze health — and the pushes of Bitmap pushes, and the
   RW18 and RW19 flips — for as long as one leftover survived.
 
+The disk counts a `DnInfo` carries beside its rows (`dnagent.md` DN18) are
+no row: whatever they say, they neither set nor clear `DnConf.err_epoch`,
+and the marking of a dead stream's info drops them rather than marking
+them, so RW13's count compare waits for counts a live stream reports.
+
 The **DN** write needs a usable `ClusterConf` and re-reads it from the cache
 per write rather than capturing it: MD4 derives the capacity key's bin
 index from `dn_bin_conf`, so a conf that is missing from the cache, or that
@@ -1807,11 +1858,12 @@ keeps itself; the dn and cn roles re-seed from the `DnConf` or `CnConf`
 every syncup reads (RW13), and since a node whose revision stays put and
 whose agent answers code zero never syncs, a dn or cn monitor also
 re-reads the record itself before a verdict once `nodeRecordMaxAge` has
-passed without its reading or writing it — one `Get` per `nodeRecordMaxAge`
-for a node that neither syncs nor changes health, and one at each verdict
-while that `Get` fails. A monitor that has written nothing yet — a child
-just started, a new owner after a handoff — starts empty and writes its
-first verdict whatever the record holds. So a record that says unhealthy
+passed without its reading or writing it — one read per `nodeRecordMaxAge`
+for a node that neither syncs nor changes health, a DN's taking its `DnRev`
+with it (RW13), and one at each verdict while that read fails. A monitor
+that has written nothing yet — a child just started, a new owner after a
+handoff — starts empty and writes its first verdict whatever the record
+holds. So a record that says unhealthy
 while the observation is clean is a transition and clears, and one that
 says healthy while the observation is not sets a new epoch: an `err_epoch`
 another observer wrote or cleared — the other owner of an overlap (VW7), a
@@ -2040,9 +2092,10 @@ STM (MD6, MD7); success logs `reaction applied` and the resulting `SpRev`
 bump re-fans the SP (RW14), so the next pass sees the new state. The
 invariant is **at most one applied action per SP per pass**; the clone
 drain's steps are not actions in this sense and commit alongside one — a
-pass over a live SP can bump `SpRev` once per deleting clone (CLD7, CLD12)
-and once more for its reaction. A `reaction skipped` that means "not
-applicable here, keep looking" does not end the pass. The pass continues
+pass over a live SP can bump `SpRev` once per deleting clone whose final
+STM it commits (CLD9, CLD12), a batch bumping nothing (CLD8), and once more
+for its reaction. A `reaction skipped` that means "not applicable here,
+keep looking" does not end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, which can hold for as long as the error does — an
@@ -2564,18 +2617,23 @@ unusable, runs nothing at all and retries on the next tick. (The SP's OWN
 gates, its `bdev_conf` and its groups' lengths (AR1), are deliberately NOT
 among them: the drain reads no geometry, and gating it there would make an
 SP whose stored geometry cannot be read permanently undeletable, the latch
-being one-way.) The
-FIRST step comes from the ordinary `cntlr_interval` pass — the latch's
-`SpRev` bump reaches the coordinator as a desired change, which drives the
-fan-out, not the pass. After that a committed step ends in `BumpSpRev`
-(except the last) and schedules the next pass from its own commit, so the
-drain is its own tick; a step that removed nothing does not schedule one,
-and is picked up by the tick instead. A FAILED step commits nothing, bumps
-nothing and is retried on the next tick, forever (RW12, no backoff): there
-is no terminal-failure state, because a delete that gave up would only
-strand garbage. Progress is already visible through `GetStoragePool` —
-`deleting` true and a shrinking inventory — so no status field and no
-progress key is added.
+being one-way.) The FIRST step comes from the ordinary `cntlr_interval`
+pass — the latch's `SpRev` bump reaches the coordinator as a desired
+change, which drives the fan-out, not the pass. After that a committed step
+ends in `BumpSpRev` (except the last) and, from its own commit, wakes the
+coordinator for the next step at once, so the drain is its own tick. That
+wake-up loads the SP afresh and runs the drain step alone, behind the same
+gates as the pass's drain branch: a failed load, or a cluster conf missing
+or unusable, runs nothing and leaves the drain to the next pass. It
+evaluates no reaction and re-seeds no health memo, because a drain step
+calls no agent (SPD13) and both stay the `cntlr_interval` pass's (AR1,
+HL3). A step that removed nothing does not wake it, and is picked up by the
+next pass instead. A FAILED step commits nothing, bumps nothing and is
+retried on the next tick, forever (RW12, no backoff): there is no
+terminal-failure state, because a delete that gave up would only strand
+garbage. Progress is already visible through `GetStoragePool` — `deleting`
+true and a shrinking inventory — so no status field and no progress key is
+added.
 
 SPD7. **Fan-out tolerance.** The drain's first step leaves an SP with NO
 cntlr, a shape `CreateStoragePool` can never produce. `buildCntlrPlans`
@@ -2749,11 +2807,11 @@ clone is submitted once the exclusion has reached the primary's child, which
 is when the RW14 sides-first hold the latch's fan-out lands in releases the
 cntlrs. Until then that child drives the pre-latch plan, whose clones still
 carry the clone's chunks, and a `SyncupCntlr` reply can submit a push from
-it (a leftover reply re-syncs every round, RW4 step 5), while a pass inside
-the hold may already run CLD8 batches; a push already submitted also runs on
-after the hand-over. Such a push can find a chunk key a batch deleted and
-end with `bitmap push failed` (BM6), which is harmless: the clone is going
-away.
+it (a leftover reply re-syncs every round, RW4 step 5), while a pass, or
+the drain's wake-up (CLD7), inside the hold may already run CLD8 batches; a
+push already submitted also runs on after the hand-over. Such a push can
+find a chunk key a batch deleted and end with `bitmap push failed` (BM6),
+which is harmless: the clone is going away.
 
 CLD7. **Cadence and step selection.** The drain runs ALONGSIDE the normal
 reaction pass, not instead of it — this is the deliberate deviation from
@@ -2763,28 +2821,42 @@ per deleting clone, bounded by `MaxCloneCntPerSp`, in `clone_name_list`
 order; the steps run ahead of EVERY gate of the pass — the cluster-conf
 cache lookup, `ValidateClusterConf`, the SP's own `bdev_conf` and
 group-length gates (AR1) and AR3's suppression — because none of them
-applies. A doomed clone drains at
-any `sp_level`; the drain reads no geometry and no cluster conf (unlike the
-sp drain's D2, which maintains DN capacity keys and therefore stays behind
-the ladder's gate — the final STM rewrites only CN capacity values, which
-carry no bin); and a gate that could stop it would strand a latched
-clone permanently, the latch being one-way. The derivation, from the pass's
-snapshot alone: surviving chunk keys in the state's `CloneBmIdx` mean one
-batch on the LOWEST `MaxDelBmPerTxn` of them in `(src_slice_idx, bm_idx)`
-order; none means the final STM. No other state is consulted — not the
-`Clone` record, not the rectangle, not a progress key — so crash, restart
-and handoff all resume through it. Ascending order is free to choose (chunk
-keys are independent and self-positioning, unlike the sp drain's tail-pop)
-and is picked for determinism.
+applies. A committed batch also wakes the coordinator at once (CLD12), and
+that wake-up runs these steps alone: it loads the SP afresh and runs at
+most one step per deleting clone, in the same order and with no gate in
+front of them, and it evaluates no reaction and re-seeds no health memo,
+because a batch calls no agent (CLD10) and a pass would evaluate every
+reaction again for each batch; the reactions and the health memos keep
+their `cntlr_interval` pass (AR1, HL3). A doomed clone drains at any
+`sp_level`; the drain reads no geometry and no cluster conf (unlike the sp
+drain's D2, which maintains DN capacity keys and therefore stays behind the
+ladder's gate — the final STM rewrites only CN capacity values, which carry
+no bin); and a gate that could stop it would strand a latched clone
+permanently, the latch being one-way. The derivation, from the snapshot of
+the pass or of the wake-up's load alone: surviving chunk keys in the
+state's `CloneBmIdx` mean one batch on the LOWEST `MaxDelBmPerTxn` of them
+in `(src_slice_idx, bm_idx)` order; none means the final STM. No other
+state is consulted — not the `Clone` record, not the rectangle, not a
+progress key — so crash, restart and handoff all resume through it.
+Ascending order is free to choose (chunk keys are independent and
+self-positioning, unlike the sp drain's tail-pop) and is picked for
+determinism.
 
 CLD8. **The batch.** Deletes ONLY keys named by the caller's keys-only
 snapshot scan, at most `MaxDelBmPerTxn` of them, each delete an idempotent
 pop; refuses a larger batch, so a caller that handed over its whole scan
 could not silently rebuild the unbounded sweep. It MUST NOT rewrite the
-`Clone` record and ends in `BumpSpRev`. Physical effect: none. The CN drops
-its local chunk files in the sweep that follows the exclusion (CLD5),
-agents never read etcd, and a push of the clone that reads a chunk key a
-batch deleted ends there, harmlessly (CLD5).
+`Clone` record, and it neither reads nor bumps `SpRev`. No bump, because
+the keys belong to a clone the latch already took out of every cntlr's
+request (CLD5): a bump would re-send the SP's whole desired state to every
+side and cntlr for deletes no agent reads. No read, because CLD2's load of
+the `SpConf` already refuses an SP that is gone, the sp drain's final step
+deleting the `SpConf` and the `SpRev` in one transaction (SPD12). The
+batch's commit, not a bump, wakes the drain for its next step (CLD7,
+CLD12). Physical effect: none. The CN drops its local chunk files in the
+sweep that follows the exclusion (CLD5), agents never read etcd, and a push
+of the clone that reads a chunk key a batch deleted ends there, harmlessly
+(CLD5).
 
 CLD9. **The final STM.** Delete the `Clone` key, put the `SpConf` with the
 name removed from `clone_name_list`, give the clone's metadata units back on
@@ -2815,32 +2887,33 @@ two user-visible states — `deleting` true, then `NOT_FOUND` — accepted
 deliberately, since even a maximum-shape drain is a handful of sub-second
 transactions after the latch: its batches and the final STM (CLD12).
 
-CLD12. **Termination and the revision contract.** The latch, every batch
-and the final STM each end in `BumpSpRev` with their own op tag; a repeat
-delete and a failed step bump nothing. Termination is structural: no
-committed batch can ever ADD a chunk key (CLD1 closed the only writer), the
-set is finite, the final STM removes the clone, and a pass that finds no
-deleting clone runs no drain step, so the drain commits and bumps nothing
-(that pass's own reactions are unaffected, CLD7) — under one owner, one
-bump for the latch, one per batch and one for the final STM per deleted
-clone. Note the shrink is a property of the SET, not of each batch: the
-loser of an accepted two-owner overlap commits a batch of keys the winner
-already popped, so ITS batch shrinks nothing — and still terminates,
-because its next pass re-scans, sees the winner's deletes and moves on.
-That is also why the coordinator arms after every committed batch rather
-than on progress, which is the sp drain's rule (SPD6: "a step that removed
-nothing does not schedule one") and would be dead code here: a batch
-reports the size it was handed, never a count of keys it found. A bump
-invalidates a client's stale `gateway.md` GW6 token exactly as
-`ReplaceCntlr` does: correct, and not new.
+CLD12. **Termination and the revision contract.** The latch and the final
+STM each end in `BumpSpRev` with their own op tag; a batch bumps nothing
+(CLD8), and neither does a repeat delete or a failed step. Termination is
+structural: no committed batch can ever ADD a chunk key (CLD1 closed the
+only writer), the set is finite, the final STM removes the clone, and a
+pass or a wake-up that finds no deleting clone runs no drain step, so the
+drain commits and bumps nothing (that pass's own reactions are unaffected,
+CLD7) — under one owner, one bump for the latch and one for the final STM
+per deleted clone, whatever its batch count. Note the shrink is a property
+of the SET, not of each batch: the loser of an accepted two-owner overlap
+commits a batch of keys the winner already popped, so ITS batch shrinks
+nothing — and still terminates, because its next step re-scans, sees the
+winner's deletes and moves on. That is also why every committed batch wakes
+the drain (CLD7) whatever it removed, where the sp drain wakes only on
+progress (SPD6): that guard would be dead code here, a batch reporting the
+size it was handed, never a count of keys it found. The two bumps
+invalidate a client's stale `gateway.md` GW6 token exactly as
+`ReplaceCntlr` does: correct, and not new; a batch leaves a token as valid
+as it found it.
 
 CLD11. **Transaction budget, and its tripwire pair.** The batches are
 ledger-free, so one line per batch. etcd caps a transaction at the largest of
 its compare, success and failure counts, and `etcdutil`'s
 serializable-snapshot STM compares every key it READ *and* every key it
 WROTE, so a batch costs `MaxDelBmPerTxn` compares plus a constant few for the
-`SpConf`, the `Clone` and the `SpRev` — the bound, and independent of every
-ceiling constant. The final STM is a constant few plus, for a clone that
+`SpConf` and the `Clone` — the bound, and independent of every ceiling
+constant. The final STM is a constant few plus, for a clone that
 holds metadata units, a few per cntlr — the `Cntlr`, its CN's record and
 that record's capacity key — so `MaxCntlrCntPerSp` bounds it; the latch is
 strictly smaller than a sweep of the whole rectangle in one transaction. A
@@ -2885,10 +2958,13 @@ compaction and is reopened with a rescan (SW4);
 watch (RW21); `cluster conf missing` the idle of a loop whose cluster is
 absent from the cache, once per idle period (RW9); `invalid stored conf`, at
 Error, a stored conf one of the three conf gates refused — a revision
-worker's (RW9), the sp fan-out's (RW14) or the pass's (AR1) — once per
-distinct error and never once per round; `syncup result` every `Syncup*`
-reply or failure, and `syncup rejected` a rejecting code, at Error for a
-stale revision (RW5).
+worker's (RW9), the sp fan-out's (RW14) or the pass's (AR1), whose
+cluster-conf gate a latched SP's drain wake-up applies too (SPD6) — once
+per distinct error and never once per round; `syncup result` every
+`Syncup*` reply or failure, and `syncup rejected` a rejecting code, at
+Error for a stale revision (RW5); `dn free count disagrees`, at Error, the
+second round compare in a row that found a disk node's own free count other
+than its record's, once until a compare agrees (RW13).
 
 **Health and the sp role.** `health changed` every HL1 or HL2 transition,
 judged against the memo HL3 re-seeds from the record — the correction of an
@@ -3015,10 +3091,12 @@ revision gate being per object and not per cluster.
   hold the wait leaves out a side that the load of the plans the demotion
   hold kept found unhealthy;
 * drain — the sp drain takes an SP apart in bounded steps and restores every
-  ledger, the clone drain removes a clone's chunks in batches, reaches the
-  CN as an exclusion and in its last step gives the clone's metadata units
-  back on every cntlr's CN, record and capacity value alike, and both resume
-  from etcd alone after a restart of the fleet;
+  ledger, the clone drain removes a clone's chunks in batches that bump no
+  `SpRev`, so the pool's revision moves once for the latch and once for the
+  last step (CLD12), reaches the CN as an exclusion and in its last step
+  gives the clone's metadata units back on every cntlr's CN, record and
+  capacity value alike, and both resume from etcd alone after a restart of
+  the fleet;
 * vote — every shard has exactly one owner through a join, a crash, a
   graceful stop and a self-fence, and every request names its sender;
 * handoff — a killed owner's shards are re-driven at the same revision with
@@ -3029,13 +3107,14 @@ revision gate being per object and not per cluster.
 to VW11, the vote case VW8 (a), and every case's fleet restart VW7, RW11
 and CM5; SW1 to SW3, SW5 and SW6 are exercised by the smoke, revision and
 handoff cases; RW1 to RW12 by the smoke, revision and health cases, RW10 by
-the attribution of the vote and handoff cases; RW13 to RW21 by the smoke
-case's request builders, the revision case's moved endpoint, the bitmap case's
-migration confs and the reaction case's grow and spare confs; RW22, its demotion hold
-ended once by the demoted cntlr's report and once by its timer, with the
-sides-first hold of RW14 behind it, by the failover case; RW14's choice of
-the sides its hold waits for, at a hold's start, at a bump and after a
-demotion hold, by the hold case; HL1 to HL6 by the
+the attribution of the vote and handoff cases; RW13 to RW21 (save RW13's
+count compare, below) by the smoke case's request builders, the revision
+case's moved endpoint, the bitmap case's migration confs and the reaction
+case's grow and spare confs; RW22, its demotion hold ended once by the
+demoted cntlr's report and once by its timer, with the sides-first hold of
+RW14 behind it, by the failover case; RW14's choice of the sides its hold
+waits for, at a hold's start, at a bump and after a demotion hold, by the
+hold case; HL1 to HL6 (save HL1's rule for the disk counts, below) by the
 health case and HL2's settle by the reaction case; the rewrite of the
 discovery records by the listing rule (`architecture.md`, [D18]) in a cntlr's
 health write (HL2) and in a failover on either trigger (MD6) by the failover
@@ -3043,16 +3122,23 @@ case, which finds each in its writer's own transaction, and in a cntlr
 replacement (MD6) by the reaction case; BM1 to BM5 by the bitmap case; AR1
 to AR9 by the reaction case, and AR10 on the failover's threshold trigger,
 with AR5 at the default primary threshold (`architecture.md`, Common
-validation), by the failover case; SPD6 to SPD13, CLD5 and CLD7 to CLD12 by
-the drain case, whose `workerctl` latches only stand in for the
-gateway's SPD3, SPD4, CLD1, CLD3 and CLD4; MD2 to MD6, EU1 to EU6 and CM1
-to CM6 by every case, every launch and the driver; and the log records by
-every assertion. Left to the unit tests: VW8 (b), (c) and (d), because a
-broken watch with live puts cannot be induced from outside the process; SW4,
-compaction; BM6, because the one lever the suite has over a reply code, a
-forced code, rejects the object's `Syncup*` itself, so no push is attempted,
-let alone failed; AR5's and AR7's refusals (HL2's row classes, and the rows of
-the last failover or primary replacement), since the reaction case only keeps
+validation), by the failover case; SPD6 to SPD13, CLD5 and CLD7 to CLD12
+(save what the drain's wake-up leaves out, below) by the drain case, whose
+`workerctl` latches only stand in for the gateway's SPD3, SPD4, CLD1, CLD3
+and CLD4; MD2 to MD6, EU1 to EU6 and CM1 to CM6 by every case, every launch
+and the driver; and the log records by every assertion. Left to the unit
+tests: VW8 (b), (c) and (d), because a broken watch with live puts cannot
+be induced from outside the process; that the drain's wake-up runs no
+reaction and re-seeds no health memo (SPD6, CLD7), because a pass with no
+reaction due and no epoch to correct leaves no record, so no case can tell
+the wake-up from a pass; RW13's count compare and HL1's rule for the disk
+counts, since no fake reports a disk node's counts, the end-to-end suite
+holding real disk nodes to the compare (`e2e_integtest.md`, The cases);
+SW4, compaction; BM6, because the one lever the suite has over a reply
+code, a forced code, rejects the object's `Syncup*` itself, so no push is
+attempted, let alone failed; AR5's and AR7's refusals (HL2's row classes,
+and the rows of the last failover or primary replacement), since the
+reaction case only keeps
 clear of AR5's second refusal and fails its sole primary on a row of its own;
 a bump or a cntlr replacement during RW22's demotion hold, HL2's rule that a standby's
 clean reply below the revision its child drives is no verdict, AR10
@@ -3067,13 +3153,14 @@ pick — with the next pass's retry; the tripwires of SPD1 and SPD14 and the
 guards of SPD2; and the guards of CLD2 and the gateway halves of CLD1 and
 CLD3, the gateway suite owning the clone latch.
 The suite never produces `invalid stored conf`, because its driver resolves
-every conf it writes, and the three conf gates are unit-tested instead. Five
+every conf it writes, and the three conf gates are unit-tested instead. Six
 records no case stages: `sp drain failed` and `clone drain failed`, which the
 drain case asserts at zero after every drain; `cluster conf missing`, which
 every case avoids by writing its cluster conf before any rev key and no case
 asserts either way; `syncup leftover`, which no fake produces on its own,
-since no fake computes a sweep verdict and no case forces that code; and
-`bitmap push failed`, which the forced-code lever cannot stage either.
+since no fake computes a sweep verdict and no case forces that code;
+`bitmap push failed`, which the forced-code lever cannot stage either; and
+`dn free count disagrees`, since no fake reports a disk node's counts.
 
 Out of scope: real agents, and real hosts, whose drop of a path the discovery
 records withdraw is the e2e suite's to show (`e2e_integtest.md`, The cases);
@@ -3142,16 +3229,18 @@ every round late, as a busy agent does, and `hang_syncup` leaves the
 object's `Syncup*` unanswered while it is set, as a stopped cn agent leaves
 its demotion (RW22), or as a side whose agent answers its rounds but never
 its syncup holds a sides-first hold to its bound (RW14). It computes no
-sweep verdict, so it never answers
-`ReplyCodeLeftover` on its own.
+sweep verdict, so it never answers `ReplyCodeLeftover` on its own, and it
+reports no disk counts (`dnagent.md` DN18), so no case runs RW13's count
+compare.
 
 ## Known limits
 
 * **A partitioned observer is tolerated, not repaired.** An observer whose
-  watch is broken while its puts succeed is caught by VW8 (b) only if its own
-  echoes stop too; a watch that delivers its own echoes but drops a peer's is
-  not distinguishable from that peer dying. The wrong commit deletes the
-  peer's key; the peer sees it (VW8 (c)), fences and rejoins as a fresh
+  watch of a role is broken while its puts succeed is caught by VW8 (b) only
+  if that watch stops echoing its own puts too; a watch that delivers its
+  own echoes but drops a peer's is not distinguishable from that peer
+  dying. The wrong commit deletes the peer's key; the peer sees it
+  (VW8 (c)), fences and rejoins as a fresh
   identity; in between, both drive the same shards — bounded by the grace
   window plus one round, harmless to agents (idempotent syncups), but not
   prevented. In etcd every reaction is STM-guarded — save a second driver's
@@ -3394,12 +3483,21 @@ sweep verdict, so it never answers
   its threshold until its verdicts on two of the primary's rounds in a row
   do, but the clock then runs from that stamp, which is the very record the op re-validates against
   (the partitioned-observer limit above, HL3).
+* **A disk node's own free count is compared, never reconciled** (RW13): a
+  disagreement that two compares in a row see is logged, once until a
+  compare agrees, and nothing corrects the record or the disk's volume
+  table; an operator sets `dnvctl dn inspect`, the agent's counts, beside
+  `dnvctl dn get`, the record's. A disk node whose side records never come
+  to name exactly its side pointer list — a side its sweep cannot remove,
+  or a listed side the disk never allocates — is never compared, and no
+  record says that the compare is not running.
 * **Log volume**: every round logs a client send and receive record pair per
   object (`grpc.md`, L6) and every heartbeat an `etcd put`; with thousands of
   objects this is the dominant log stream of the control plane, as it is for
-  the agents. A DN or CN that neither syncs nor changes health adds an
-  `etcd get` per `nodeRecordMaxAge`, HL3's re-read of its record, and one at
-  each verdict while that read fails. The worker's own per-object records are
+  the agents. A DN or CN that neither syncs nor changes health adds HL3's
+  re-read of its record per `nodeRecordMaxAge` — an `etcd get`, and for a DN
+  a second one of its `DnRev` (RW13) — and that re-read again at each
+  verdict while it fails. The worker's own per-object records are
   mostly event-driven: health transitions (`health changed`, the `unreachable`
   reason included — the `RES_STATUS_UNKNOWN` marking itself is in-memory and
   logs nothing, HL1), a `syncup result` per `Syncup*`, and a cntlr's

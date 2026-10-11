@@ -902,9 +902,9 @@ origin's size; a fresh device asking for a zero `size` is
   snapshotting a clone's destination also
   waits until the clone is deleted and drained, `GetClone` answering
   `NOT_FOUND`. Neither RPC returns a revision, while the flip bumps `SpRev`
-  and so do a clone's latch and drain, so a client whose snapshot request
-  carries a token re-reads it from `GetStoragePool` after its last poll
-  (`architecture.md`, Thin devices).
+  and so do a clone's latch and the last step of its drain, so a client
+  whose snapshot request carries a token re-reads it from
+  `GetStoragePool` after its last poll (`architecture.md`, Thin devices).
 
 ### Subsystems and namespaces
 
@@ -1516,16 +1516,17 @@ worker-role ones, the suite playing the worker: the flips `set-created`
 and `set-provisioned`, at exactly the stages where a gateway precondition
 waits on the worker, and the drains `drain-sp` and `drain-clone`, standing
 in for the sp coordinator after a latch the gateway committed
-(`dnv-worker.md`, The sp drain and The clone drain). Every flip
-and every drain step bumps `SpRev` as the worker's own would, except the sp
-drain's last step, which deletes the key, so the script's token bookkeeping
-counts them. Any other `workerctl` write would test `workerctl` rather than
-the gateway and is forbidden here; the store wipe between cases and the
-store-revision probe of the refusal brackets go through `etcdctl`. The
-drain stand-ins run `model`'s own drain ops in a loop with no pass and no
-timer, and a step bound lets the worker suite build a partly drained pool
-instead of racing one. The latch stand-ins, `set-deleting` and
-`set-clone-deleting`, are the worker suite's, and `set-clone-deleting`
-deliberately does not resume the destination namespaces the way
-`DeleteClone` does: that write is the gateway's, and a driver that
-re-implemented it would drift from it.
+(`dnv-worker.md`, The sp drain and The clone drain). Every flip and every
+drain step moves `SpRev` as the worker's own would: each bumps it, except
+the sp drain's last step, which deletes the key, and a clone drain's
+batch, which leaves it alone (`dnv-worker.md` CLD8); the script's token
+bookkeeping counts them. Any other `workerctl` write would test
+`workerctl` rather than the gateway and is forbidden here; the store wipe
+between cases and the store-revision probe of the refusal brackets go
+through `etcdctl`. The drain stand-ins run `model`'s own drain ops in a
+loop with no pass and no wake-up, and a step bound lets the worker suite
+build a partly drained pool instead of racing one. The latch stand-ins,
+`set-deleting` and `set-clone-deleting`, are the worker suite's, and
+`set-clone-deleting` deliberately does not resume the destination
+namespaces the way `DeleteClone` does: that write is the gateway's, and a
+driver that re-implemented it would drift from it.

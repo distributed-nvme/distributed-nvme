@@ -304,9 +304,11 @@ gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
 # etcd state, read back by a binary that is NOT the code under test. Its only
 # writes in this suite are the worker-role stand-ins named there —
 # set-created, set-provisioned, drain-sp and drain-clone; the drains finish the
-# teardowns the latching `delete-sp` and `delete-clone` start. Every drain step
-# but the sp drain's last, which deletes the SpRev key, bumps SpRev, so a case
-# that holds a token must `refresh_rev` after one, exactly as after a mutator.
+# teardowns the latching `delete-sp` and `delete-clone` start. Every sp drain
+# step but the last, which deletes the SpRev key, bumps SpRev, and so does a
+# clone drain's final step, its batches bumping nothing (dnv-worker.md, CLD8,
+# CLD12); a case that holds a token must `refresh_rev` after a drain, exactly
+# as after a mutator.
 wctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -2537,6 +2539,10 @@ EOF
 	assert_eq "$(jq_of "$out" '.chunk_cnt')" "3" \
 		"the drain removed all three chunk keys"
 	refresh_rev sp0
+	# Exact, because this suite runs no worker: nothing but the drain moved
+	# the revision since the latch.
+	assert_eq "$SP_REV" "$((latchRev + 1))" \
+		"SpRev after the drain: its final STM's one bump; its one batch bumped none (dnv-worker.md, CLD8, CLD12)"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones | keys | length')" "0" \
 		"the clone record is gone"
 	assert_eq "$(key_count clone)" "0" "clone keys after the drain"
@@ -4916,8 +4922,9 @@ case_faults() {
 	assert_field "$(sp_json sp0)" '.clones.cl0.deleting' "true" \
 		"cl0: the proven delete latched it"
 	wctl drain-clone --sp sp0 --name cl0 >/dev/null
-	# Every drain step bumps SpRev (CLD12), so the cached token has to follow
-	# it exactly as it follows a mutator's.
+	# cl0 has no chunk keys, so its drain is the final STM alone, which bumps
+	# SpRev once (dnv-worker.md, CLD12): the cached token has to follow it
+	# exactly as it follows a mutator's.
 	refresh_rev sp0
 	out=$(sp_json sp0)
 	assert_field "$out" '.clones | length' "0" "cl0: the Clone key is gone"

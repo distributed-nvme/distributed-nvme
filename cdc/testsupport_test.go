@@ -12,6 +12,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,10 +40,10 @@ func TestMain(m *testing.M) {
 // Fake clock
 // ---------------------------------------------------------------------------
 
-// fakeClock is the test implementation of the package clock. Every keep-alive
-// deadline (NP10), every rescan retry (WV5) and the one-minute timer of CM4's
-// first-scan wait go through it, so advancing this drives them without a
-// single real sleep.
+// fakeClock is the test implementation of the package clock. Every pre-Connect
+// and keep-alive deadline (NP10), every rescan retry (WV5) and the one-minute
+// timer of CM4's first-scan wait go through it, so advancing this drives them
+// without a single real sleep.
 type fakeClock struct {
 	mu      sync.Mutex
 	current time.Time
@@ -482,27 +483,56 @@ type testServer struct {
 
 // countingListener counts Accept calls, including one made on a listener
 // that is already closed, so a test proves the accept loop never ran instead
-// of hoping to catch a connection it accepted.
+// of hoping to catch a connection it accepted. Its first fails calls fail
+// with errAcceptTransient instead of accepting.
 type countingListener struct {
 	net.Listener
+	fails   int32
 	accepts atomic.Int32
 }
 
+// errAcceptTransient is an Accept error that is not the listener closing:
+// what a file descriptor shortage returns (NP1).
+var errAcceptTransient = &net.OpError{
+	Op:  "accept",
+	Net: "tcp",
+	Err: os.NewSyscallError("accept4", syscall.EMFILE),
+}
+
 func (l *countingListener) Accept() (net.Conn, error) {
-	l.accepts.Add(1)
+	if l.accepts.Add(1) <= l.fails {
+		return nil, errAcceptTransient
+	}
 	return l.Listener.Accept()
 }
 
 // stop cancels the instance and waits for its accept loop to return: what a
-// SIGTERM does in production (NP1, CM5).
+// SIGTERM does in production (NP1, CM5). The wait is bounded, so an instance
+// that never stops fails the test instead of hanging the package.
 func (ts *testServer) stop() {
+	ts.t.Helper()
 	ts.cancel()
-	<-ts.done
+	select {
+	case <-ts.done:
+	case <-time.After(5 * time.Second):
+		ts.t.Fatal("the instance did not stop")
+	}
 }
 
 // startServer starts a listener-only instance: no watcher, so the tests drive
-// the registry directly. ranges is used only to build the deps.
+// the registry directly. ranges is used only to build the deps. Like
+// startInstance's, its cleanup waits a bounded time.
 func startServer(t *testing.T) *testServer {
+	t.Helper()
+	return startServerOn(t, nil)
+}
+
+// startServerOn is startServer with the instance's listener wrapped by wrap,
+// when wrap is not nil, before the accept loop starts.
+func startServerOn(
+	t *testing.T,
+	wrap func(net.Listener) net.Listener,
+) *testServer {
 	t.Helper()
 	clk := newFakeClock()
 	store := newFakeStore()
@@ -524,6 +554,9 @@ func startServer(t *testing.T) *testServer {
 		cancel()
 		t.Fatalf("newServer: %v", err)
 	}
+	if wrap != nil {
+		srv.ln = wrap(srv.ln)
+	}
 	ts := &testServer{
 		t:      t,
 		srv:    srv,
@@ -540,7 +573,11 @@ func startServer(t *testing.T) *testServer {
 	}()
 	t.Cleanup(func() {
 		cancel()
-		<-ts.done
+		select {
+		case <-ts.done:
+		case <-time.After(5 * time.Second):
+			t.Error("the instance did not stop")
+		}
 	})
 	return ts
 }
@@ -773,6 +810,12 @@ func (h *fakeHost) allocCid() uint16 {
 // send writes one CapsuleCmd, with in-capsule data when data is non-empty.
 func (h *fakeHost) send(s []byte, data []byte) {
 	h.t.Helper()
+	h.write(capsuleFrame(s, data))
+}
+
+// capsuleFrame frames one CapsuleCmd PDU around an SQE, with in-capsule data
+// when data is non-empty.
+func capsuleFrame(s []byte, data []byte) []byte {
 	plen := capsuleCmdHdrLen + len(data)
 	buf := make([]byte, plen)
 	buf[0] = pduCapsuleCmd
@@ -783,7 +826,7 @@ func (h *fakeHost) send(s []byte, data []byte) {
 	binary.LittleEndian.PutUint32(buf[4:8], uint32(plen))
 	copy(buf[pduCommonHdrLen:], s)
 	copy(buf[capsuleCmdHdrLen:], data)
-	h.write(buf)
+	return buf
 }
 
 // await reads PDUs until the completion of cid arrives, stashing anything

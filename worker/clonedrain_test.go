@@ -11,9 +11,10 @@ import (
 
 // The worker half of the clone drain (dnv-worker.md, The clone drain).
 //
-// Everything routed through the REAL reactionPass, as for the sp drain: CLD7's
-// "alongside, not instead of" is a property of that pass, and a test that
-// called drainClones directly would keep passing if the pass stopped calling
+// Everything routed through the REAL reactionPass or the REAL drainTick, as
+// for the sp drain: CLD7's "alongside, not instead of" is a property of the
+// pass, and the wake-up's "alone" a property of drainTick, so a test that
+// called drainClones directly would keep passing if either stopped calling
 // it.
 
 // latchClone marks one clone of the fixture as being deleted.
@@ -354,18 +355,19 @@ func TestCloneDrainFailedStepIsLogged(t *testing.T) {
 }
 
 // TestCloneDrainArmsAfterACommittedBatch is CLD12's termination argument at the
-// coordinator: a COMMITTED batch schedules the next pass from its own commit,
-// and nothing else arms.
+// coordinator: a COMMITTED batch posts the drain's wake-up from its own
+// commit, and nothing else arms.
 //
 // Deliberately not "only on progress", the sp drain's rule (worker/drain.go's
 // `removed > 0`): this op reports the batch it was handed, not keys it found,
 // so a progress guard here would be dead code. The overlap loser commits a
 // full-looking batch that removed nothing and arms — and still terminates,
-// because its next pass re-scans, finds the winner's deletes and moves on.
+// because its next step re-scans, finds the winner's deletes and moves on.
 //
 // A step that did NOT commit does not arm: it changed nothing, and a retry
 // comes with the next tick anyway. The final STM never arms either — there is
-// no next step for that clone, and its SpRev bump re-fans the SP without it.
+// no next step for that clone. Every row runs through the pass and through
+// the wake-up, which is the path every step after a drain's first takes.
 func TestCloneDrainArmsAfterACommittedBatch(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -380,22 +382,24 @@ func TestCloneDrainArmsAfterACommittedBatch(t *testing.T) {
 			[]string{"drain_clone_bm"}},
 		{"the final STM", nil, false, false, []string{"finish_clone"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newReactHarness(t, reactFixture(t))
-			h.w.drainCh = make(chan struct{}, 1)
-			h.withClone("c0", 700, tc.pairs)
-			h.latchClone("c0")
-			if tc.failed {
-				h.rops.cloneDrainErr = &model.ErrPrecondition{
-					Op: "DrainCloneBm", Reason: "clone not found",
+		for _, via := range drainPaths {
+			t.Run(tc.name+"/"+via.name, func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.w.drainCh = make(chan struct{}, 1)
+				h.withClone("c0", 700, tc.pairs)
+				h.latchClone("c0")
+				if tc.failed {
+					h.rops.cloneDrainErr = &model.ErrPrecondition{
+						Op: "DrainCloneBm", Reason: "clone not found",
+					}
 				}
-			}
-			h.pass()
-			h.wantOps(tc.wantOps...)
-			if armed := len(h.w.drainCh) == 1; armed != tc.armed {
-				t.Errorf("armed = %v, want %v", armed, tc.armed)
-			}
-		})
+				via.run(h)
+				h.wantOps(tc.wantOps...)
+				if armed := len(h.w.drainCh) == 1; armed != tc.armed {
+					t.Errorf("armed = %v, want %v", armed, tc.armed)
+				}
+			})
+		}
 	}
 }
 

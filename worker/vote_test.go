@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -23,16 +24,19 @@ import (
 
 // voteHookStore wraps the in-memory fakeStore with the two hooks the VW8 cases
 // need and nothing else: a one-shot gate that holds one Put until the test
-// lets it through — a heartbeat frozen mid-tick, the SIGSTOP case of VW8(a) —
-// and a callback that runs inside Delete, so a test can act while the vote
-// loop is in the middle of the fence's own-registration cleanup. Disarmed it
-// behaves exactly like the fakeStore it embeds.
+// lets it through — a heartbeat frozen mid-tick, the SIGSTOP case of VW8(a),
+// or a put already sent to etcd (holdPut) — and a callback that runs inside
+// Delete, so a test can act while the vote loop is in the middle of the
+// fence's own-registration cleanup. Disarmed it behaves exactly like the
+// fakeStore it embeds.
 type voteHookStore struct {
 	*fakeStore
 
 	mu        sync.Mutex
 	gateKey   string
 	gateArmed bool
+	// gateHolds makes the armed gate ignore the put's context (holdPut).
+	gateHolds bool
 	released  bool
 	release   chan struct{}
 	entered   chan struct{}
@@ -50,10 +54,27 @@ func newVoteHookStore() *voteHookStore {
 // when the fence cancels it. entered closes when the put arrives at the gate,
 // left when it returns.
 func (s *voteHookStore) gatePut(key string) (entered, left <-chan struct{}) {
+	return s.armGate(key, false)
+}
+
+// holdPut arms the same gate for a put already sent to etcd, which a cancel
+// cannot take back: the next Put of key blocks until releasePut whatever its
+// context does, and then lands. entered closes when the put arrives at the
+// gate.
+func (s *voteHookStore) holdPut(key string) (entered <-chan struct{}) {
+	entered, _ = s.armGate(key, true)
+	return entered
+}
+
+func (s *voteHookStore) armGate(
+	key string,
+	holds bool,
+) (entered, left <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gateKey = key
 	s.gateArmed = true
+	s.gateHolds = holds
 	s.released = false
 	s.release = make(chan struct{})
 	s.entered = make(chan struct{})
@@ -75,14 +96,14 @@ func (s *voteHookStore) releasePut() {
 // gateFor takes the armed gate for key; only the first put of it waits.
 func (s *voteHookStore) gateFor(
 	key string,
-) (release chan struct{}, entered, left chan struct{}) {
+) (release chan struct{}, entered, left chan struct{}, holds bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.gateArmed || s.gateKey != key {
-		return nil, nil, nil
+		return nil, nil, nil, false
 	}
 	s.gateArmed = false
-	return s.release, s.entered, s.left
+	return s.release, s.entered, s.left, s.gateHolds
 }
 
 // setOnDelete installs a callback that runs on the caller's goroutine right
@@ -103,6 +124,16 @@ func (s *voteHookStore) seedRaw(key string, value []byte) {
 	s.fakeStore.modRevs[key] = s.fakeStore.rev
 }
 
+// dropRaw removes a key without emitting a watch event, the way a delete the
+// worker's watch missed leaves the registry.
+func (s *voteHookStore) dropRaw(key string) {
+	s.fakeStore.mu.Lock()
+	defer s.fakeStore.mu.Unlock()
+	s.fakeStore.rev++
+	delete(s.fakeStore.kvs, key)
+	delete(s.fakeStore.modRevs, key)
+}
+
 // opLog returns the successful writes in the order they happened.
 func (s *voteHookStore) opLog() []string {
 	s.mu.Lock()
@@ -119,15 +150,20 @@ func (s *voteHookStore) record(op string) {
 func (s *voteHookStore) Put(
 	ctx context.Context, key string, msg proto.Message,
 ) error {
-	if release, entered, left := s.gateFor(key); release != nil {
+	if release, entered, left, holds := s.gateFor(key); release != nil {
 		close(entered)
 		defer close(left)
-		select {
-		case <-release:
-		case <-ctx.Done():
-			// The heartbeat context was cancelled while the put was in
-			// flight, so nothing reaches etcd (VW8, CM5).
-			return ctx.Err()
+		if holds {
+			// Already sent: it lands once released, cancelled or not.
+			<-release
+		} else {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				// The heartbeat context was cancelled while the put was in
+				// flight, so nothing reaches etcd (VW8, CM5).
+				return ctx.Err()
+			}
 		}
 	}
 	if err := s.fakeStore.Put(ctx, key, msg); err != nil {
@@ -1223,6 +1259,115 @@ func testVoteFenceWatchStalled(t *testing.T) {
 	}
 }
 
+// TestVoteFenceOneRoleWatchStalled is VW8 (b) with several roles: each role is
+// judged by its own last echo, because each role has its own watch (VW10), so
+// one role's silent watch fences the worker as watch_stalled at
+// fenceThreshold although the other role's watch still echoes every put. At
+// the dead threshold the worker still rides it out. The fence covers the
+// whole process: both roles leave under the old seed and rejoin under the new
+// one.
+func TestVoteFenceOneRoleWatchStalled(t *testing.T) {
+	synctest.Test(t, testVoteFenceOneRoleWatchStalled)
+}
+
+func testVoteFenceOneRoleWatchStalled(t *testing.T) {
+	h := newVoteHarness(t, common.WorkerRoleDn, common.WorkerRoleCn)
+	old := h.vote.currentSeed()
+	cnPrefix := model.WorkerRegPrefix(common.WorkerRoleCn)
+	// The cn watch stops delivering; the dn watch goes on echoing.
+	h.store.setMutePrefix(cnPrefix, true)
+	h.advance(h.deps.cfg.deadThreshold())
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times at the dead threshold", got)
+	}
+	h.advance(h.deps.cfg.fenceThreshold() - h.deps.cfg.deadThreshold())
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	rec := fenceRecord(t, h)
+	if rec["reason"] != fenceWatchStalled {
+		t.Fatalf("reason = %v, want %s", rec["reason"], fenceWatchStalled)
+	}
+	if rec["old_seed"] != old {
+		t.Fatalf("old_seed = %v, want %s", rec["old_seed"], old)
+	}
+	newSeedStr, _ := rec["new_seed"].(string)
+	if newSeedStr == "" || newSeedStr == old {
+		t.Fatalf("new_seed = %q, want a fresh seed", newSeedStr)
+	}
+	h.store.setMutePrefix(cnPrefix, false)
+	for _, role := range []string{common.WorkerRoleDn, common.WorkerRoleCn} {
+		key := workerRegKey(role, newSeedStr)
+		waitFor(t, "the new incarnation to register "+role, func() bool {
+			return h.store.has(key)
+		})
+		if h.store.has(workerRegKey(role, old)) {
+			t.Fatalf("the fenced seed is still registered in role %s", role)
+		}
+	}
+}
+
+// TestVoteCheckFenceJudgesEveryRole pins VW8 (b)'s walk over the roles: an
+// echo fenceThreshold old in ANY one role fences as watch_stalled, whichever
+// role it is and in whatever order the roles are visited, while fresh echoes
+// in every role fence nothing. The roles sit in a map, whose order is random,
+// so each role's case runs many times: a check that judged only the first
+// role it met would pass some of them by chance, and the harness case above
+// checks only a few times at its threshold.
+//
+// Every call below runs on this goroutine, exactly where the vote loop would
+// run it, so the incarnation is touched by nobody else.
+func TestVoteCheckFenceJudgesEveryRole(t *testing.T) {
+	logs := captureLogs(t)
+	clk := newFakeClock()
+	store := newVoteHookStore()
+	cfg := testConfig(common.WorkerRoleDn, common.WorkerRoleCn)
+	d := newTestDeps(cfg, store.fakeStore, clk)
+	d.store = store
+	v := newVoteWorker(d, seedOf(1))
+	v.startIncarnation(seedOf(1))
+	t.Cleanup(func() {
+		if v.inc != nil {
+			v.leave(context.Background(), v.inc)
+		}
+	})
+
+	if v.checkFence(v.inc, clk.now()) {
+		t.Fatalf("fenced an incarnation whose roles echo")
+	}
+	stale := clk.now().Add(-cfg.fenceThreshold())
+	const rounds = 16
+	fenced := 0
+	for _, role := range cfg.Roles {
+		for i := 0; i < rounds; i++ {
+			inc := v.inc
+			inc.roles[role].lastOwnEcho = stale
+			if !v.checkFence(inc, clk.now()) {
+				t.Fatalf("role %s, round %d: an echo fenceThreshold old "+
+					"fenced nothing", role, i)
+			}
+			fenced++
+			recs := logs.withMsg(msgWorkerFenced)
+			if len(recs) != fenced {
+				t.Fatalf("%d fence records after %d fences", len(recs), fenced)
+			}
+			if rec := recs[fenced-1]; rec["reason"] != fenceWatchStalled ||
+				rec["old_seed"] != inc.seed {
+				t.Fatalf("role %s, round %d: fenced %v, want reason %s "+
+					"of seed %s", role, i, rec, fenceWatchStalled, inc.seed)
+			}
+			if v.inc == nil || v.inc == inc {
+				t.Fatalf("role %s, round %d: the fence did not start a new "+
+					"incarnation", role, i)
+			}
+			if v.checkFence(v.inc, clk.now()) {
+				t.Fatalf("role %s, round %d: the new incarnation fenced "+
+					"at once", role, i)
+			}
+		}
+	}
+}
+
 // TestVoteFenceKeyDeleted is VW8 (c): a peer committed this worker dead and
 // deleted its key. The worker's own shutdown and fence deletes must NOT
 // trigger it, and cannot: both discard the incarnation before the watch loop
@@ -1292,9 +1437,9 @@ func staleOwnKey(t *testing.T) (*voteHarness, string) {
 		return len(h.logs.withMsg(msgShardOwned)) == common.ShardBucketSize
 	})
 	// Push the last own-key ECHO off the tick grid: the t=10 tick's put is
-	// held and lands at t=15, so lastSeen = lastOwnEcho = 15 and the own key's
-	// deadline (35) falls strictly before the first tick that can trip VW8(b)
-	// (50).
+	// held and lands at t=15, so lastSeen and the dn role's lastOwnEcho are 15
+	// and the own key's deadline (35) falls strictly before the first tick
+	// that can trip VW8(b) (50).
 	entered, left := store.gatePut(key)
 	h.advance(9 * time.Second)
 	waitClosed(t, "the held put to reach the store", entered)
@@ -1413,6 +1558,93 @@ func testVoteOwnKeyCommitNamesTheHeartbeatStall(t *testing.T) {
 	}
 }
 
+// TestVoteOwnKeyCommitNamesTheSilentRole is fenceSelfStale's reason with
+// several roles (VW8 (d)): the commit of the own key of the role whose watch
+// went silent judges that role's own echo, so the fence names the stalled
+// watch, not key_deleted, although the other role's watch still echoes every
+// put. With a grace shorter than one vote interval the commit comes before
+// the tick at fenceThreshold that would fence through VW8 (b).
+func TestVoteOwnKeyCommitNamesTheSilentRole(t *testing.T) {
+	synctest.Test(t, testVoteOwnKeyCommitNamesTheSilentRole)
+}
+
+func testVoteOwnKeyCommitNamesTheSilentRole(t *testing.T) {
+	cfg := staleOwnKeyConfig()
+	cfg.Roles = []string{common.WorkerRoleDn, common.WorkerRoleCn}
+	h := newVoteHarnessCfg(t, cfg, newVoteHookStore())
+	own := h.vote.currentSeed()
+	// The cn watch stops delivering; the dn watch goes on echoing.
+	h.store.setMutePrefix(model.WorkerRegPrefix(common.WorkerRoleCn), true)
+	// t=20: the cn own key's deadline fires; its grace window opens.
+	h.advance(h.deps.cfg.deadThreshold())
+	if got := len(h.logs.withMsg(msgWorkerFenced)); got != 0 {
+		t.Fatalf("fenced %d times before the own key's commit", got)
+	}
+	// t=21: the grace window closes on a nonmember target, and the commit
+	// takes VW8's exit instead (fenceSelfStale).
+	h.advance(cfg.GraceTime)
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	rec := fenceRecord(t, h)
+	if rec["reason"] != fenceWatchStalled {
+		t.Fatalf("reason = %v, want %s", rec["reason"], fenceWatchStalled)
+	}
+	if rec["old_seed"] != own {
+		t.Fatalf("old_seed = %v, want %s", rec["old_seed"], own)
+	}
+	for _, role := range cfg.Roles {
+		for _, c := range h.committed(role, own) {
+			if c["state"] == stateNonmember {
+				t.Fatalf("the worker committed ITSELF nonmember: %v", c)
+			}
+		}
+	}
+}
+
+// TestVoteOwnKeyCommitJudgesItsOwnRole is the other side of that choice: the
+// own-key commit judges the echo of the role it commits, not another role's.
+// The dn watch is silent, while the cn own key leaves the registry with no
+// event and a cn rescan finds it absent; the commit of cn names key_deleted,
+// (c)'s fact learned from a rescan, although the dn role's last echo is the
+// dead threshold old by then.
+func TestVoteOwnKeyCommitJudgesItsOwnRole(t *testing.T) {
+	synctest.Test(t, testVoteOwnKeyCommitJudgesItsOwnRole)
+}
+
+func testVoteOwnKeyCommitJudgesItsOwnRole(t *testing.T) {
+	cfg := staleOwnKeyConfig()
+	cfg.Roles = []string{common.WorkerRoleDn, common.WorkerRoleCn}
+	cfg.GraceTime = 5 * time.Second
+	store := newVoteHookStore()
+	h := newVoteHarnessCfg(t, cfg, store)
+	own := h.vote.currentSeed()
+	cnKey := workerRegKey(common.WorkerRoleCn, own)
+	h.store.setMutePrefix(model.WorkerRegPrefix(common.WorkerRoleDn), true)
+	h.advance(10 * time.Second) // t=10: a tick; only the cn put is echoed
+	h.clk.advance(5 * time.Second)
+	h.settle() // t=15
+	// The cn own key leaves the registry with no event, and a rescan finds
+	// it absent: cn observes its own key dead, with its grace ending at t=20.
+	store.dropRaw(cnKey)
+	h.store.breakWatches(errors.New("mvcc: required revision has been compacted"))
+	h.settle()
+	// The t=20 tick's cn put is held, so no put re-creates the key before
+	// the commit.
+	store.gatePut(cnKey)
+	h.clk.advance(5 * time.Second) // t=20
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	rec := fenceRecord(t, h)
+	if rec["reason"] != fenceKeyDeleted {
+		t.Fatalf("reason = %v, want %s", rec["reason"], fenceKeyDeleted)
+	}
+	if rec["old_seed"] != own {
+		t.Fatalf("old_seed = %v, want %s", rec["old_seed"], own)
+	}
+}
+
 // TestVoteOwnKeyDeleteAlwaysFences is VW8(c) with nothing left that could
 // swallow it. A worker that has itself deleted one of its own registrations
 // earlier must still fence when a PEER deletes the key it is running under:
@@ -1459,9 +1691,9 @@ func testVoteOwnKeyDeleteAlwaysFences(t *testing.T) {
 // TestVoteDeferredFenceIsRetried is VW8's recovery when a fence cannot be
 // applied because minting the new seed failed (VW1). Re-testing VW8's
 // conditions only brings (a) and (b) back — checkFence reads lastOkPut and
-// lastOwnEcho, never "a peer deleted my key" — and the caller that raised (c)
-// has already consumed the delete event that carried it, so a dropped (c)
-// fence would be lost for good.
+// every role's lastOwnEcho, never "a peer deleted my key" — and the caller
+// that raised (c) has already consumed the delete event that carried it, so a
+// dropped (c) fence would be lost for good.
 //
 // crypto/rand.Read cannot be made to fail here, so the deferral is driven
 // directly.
@@ -1618,6 +1850,13 @@ func testVoteFenceReleasesShardsBeforeRejoin(t *testing.T) {
 // BEFORE its registrations are deleted. Otherwise a tick that is still in
 // flight re-creates a key the fence has just deleted, and the peers see an
 // appear for a seed that no longer exists.
+//
+// The tick is held inside its dn put the way a put already sent to etcd is
+// (holdPut): the fence's cancel cannot take it back, it lands once released,
+// and the tick's cn put follows it. The hold lasts an hour on the package
+// clock and on the bubble's. A fence that only cancelled the heartbeat,
+// stopped it after the deletes, or waited for it with a time limit on either
+// clock deletes its dn key while that tick is still in flight.
 func TestVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 	synctest.Test(t, testVoteFenceStopsHeartbeatBeforeDeletingRegs)
 }
@@ -1625,63 +1864,61 @@ func TestVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 func testVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 	store := newVoteHookStore()
 	h := newVoteHarnessOn(t, store, common.WorkerRoleDn, common.WorkerRoleCn)
+	// Registered after the harness's cleanup, so it runs first: a failed
+	// case never leaves the vote loop waiting on the held put.
+	t.Cleanup(store.releasePut)
 	old := h.vote.currentSeed()
 	dnKey := workerRegKey(common.WorkerRoleDn, old)
 	cnKey := workerRegKey(common.WorkerRoleCn, old)
 
 	// A heartbeat tick is in flight, held inside its dn put.
-	entered, left := store.gatePut(dnKey)
+	entered := store.holdPut(dnKey)
 	h.clk.advance(h.deps.cfg.VoteInterval)
 	waitClosed(t, "the heartbeat put to reach the store", entered)
 
-	// When the fence deletes the dn registration, let that put through and
-	// wait for it. With VW8's order the put was abandoned the moment the
-	// heartbeat was cancelled, so nothing is written; without it, it lands
-	// after the delete and resurrects the key.
-	var once sync.Once
-	store.setOnDelete(func(key string) {
-		if key != dnKey {
-			return
-		}
-		once.Do(func() {
-			store.releasePut()
-			select {
-			case <-left:
-			case <-time.After(5 * time.Second):
-			}
-		})
-	})
-
-	// A peer deletes the CN key: VW8(c) fences. The DN key is untouched, so
-	// the hook above only ever runs for the fence's own cleanup.
+	// A peer deletes the CN key: VW8(c) fences. With VW8's order the fence
+	// waits for the held tick to end before it deletes a key of its own.
 	if err := h.store.Delete(context.Background(), cnKey); err != nil {
 		t.Fatalf("peer delete: %v", err)
 	}
 	waitFor(t, "fence", func() bool {
 		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
 	})
+	h.settle()
+	// An hour passes on both clocks while the put is held, so a wait with a
+	// time limit on either has run out by now.
+	h.clk.advance(time.Hour)
+	time.Sleep(time.Hour)
+	h.settle()
+	for _, op := range store.opLog() {
+		if op == "delete "+dnKey {
+			t.Fatalf("the fence deleted %s while a heartbeat put was still "+
+				"in flight: %v", dnKey, store.opLog())
+		}
+	}
+	store.releasePut()
 	newSeedStr, _ := fenceRecord(t, h)["new_seed"].(string)
 	waitFor(t, "the new incarnation to register", func() bool {
 		return h.store.has(workerRegKey(common.WorkerRoleDn, newSeedStr))
 	})
 
-	if h.store.has(dnKey) {
-		t.Fatalf("%s was re-created after the fence deleted it", dnKey)
-	}
-	deleted := false
-	for _, op := range store.opLog() {
-		switch op {
-		case "delete " + dnKey:
-			deleted = true
-		case "put " + dnKey:
-			if deleted {
-				t.Fatalf("the old heartbeat put %s after the fence "+
-					"deleted it: %v", dnKey, store.opLog())
+	// The fence's delete is each old key's last write: the held tick's puts,
+	// the cn one re-creating the key the peer deleted, all land before it.
+	for _, key := range []string{dnKey, cnKey} {
+		last := ""
+		for _, op := range store.opLog() {
+			if op == "put "+key || op == "delete "+key {
+				last = op
 			}
 		}
-	}
-	if !deleted {
-		t.Fatalf("the fence never deleted %s: %v", dnKey, store.opLog())
+		if last != "delete "+key {
+			t.Fatalf("the last write of %s is %q, want the fence's delete: "+
+				"%v", key, last, store.opLog())
+		}
+		if h.store.has(key) {
+			t.Fatalf("%s was re-created after the fence deleted it: %v",
+				key, store.opLog())
+		}
 	}
 }
 
@@ -1939,6 +2176,166 @@ func testVoteShutdownDeletesOwnRegistrations(t *testing.T) {
 		key := workerRegKey(role, seed)
 		if h.store.has(key) {
 			t.Fatalf("%s still registered after shutdown", key)
+		}
+	}
+}
+
+// TestVoteShutdownStopsShardsBeforeDeletingRegs is CM5's order, which is the
+// fence's (VW8): the shutdown tells every shard worker to stop BEFORE it
+// deletes its own registrations, and joins them only AFTER the deletes. A
+// delete that cannot land takes DefaultEtcdOpTimeout per role, and shard
+// workers not yet told to stop would go on driving behind it; a join ahead of
+// the deletes would let the peers see this seed go only when the join ends
+// (RW11).
+func TestVoteShutdownStopsShardsBeforeDeletingRegs(t *testing.T) {
+	synctest.Test(t, testVoteShutdownStopsShardsBeforeDeletingRegs)
+}
+
+func testVoteShutdownStopsShardsBeforeDeletingRegs(t *testing.T) {
+	rec := newRevRecorder()
+	store := newVoteHookStore()
+	// One DnRev key, on a shard this worker will own, driven by a recording
+	// revision worker whose stop the test holds.
+	store.seed(t, model.DnRevKey(testShard, testCid, 10),
+		&pb.DnRev{AddrPort: "dn0:9520", Revision: 1})
+	h := newVoteHarnessDeps(t, testConfig(common.WorkerRoleDn), store,
+		func(d *deps) {
+			d.kinds = func(role string) (revKind, bool) {
+				if role != common.WorkerRoleDn {
+					return kindFor(role)
+				}
+				return recordingDnKind(rec), true
+			}
+		})
+	seed := h.vote.currentSeed()
+	key := workerRegKey(common.WorkerRoleDn, seed)
+	h.advance(h.deps.cfg.GraceTime)
+	waitFor(t, "the revision worker", func() bool {
+		return rec.startCount() == 1
+	})
+	worker := rec.get(testCid, 10)
+	held := worker.holdStop()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held)
+		}
+	})
+
+	// The registration's delete holds the shutdown until the revision worker
+	// has been told to stop, as a delete to an etcd out of reach would: that
+	// happens only if the stop was started ahead of it.
+	stopAhead := make(chan bool, 1)
+	h.store.setOnDelete(func(deleted string) {
+		if deleted != key {
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, stopped := worker.snapshot(); stopped == 1 {
+				stopAhead <- true
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		stopAhead <- false
+	})
+
+	h.cancel()
+	select {
+	case ahead := <-stopAhead:
+		if !ahead {
+			t.Fatalf("the shard workers were not told to stop before " +
+				"the registration's delete")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for the registration's delete: the " +
+			"shutdown joined the shard workers ahead of it")
+	}
+	waitFor(t, "the registration's delete while a revision worker is "+
+		"still stopping", func() bool { return !h.store.has(key) })
+	// The delete is in the store before the hook runs, so the wait above
+	// gives the vote loop no time. Settle first: with the join, the loop
+	// waits on the revision worker's held stop; a shutdown without the join
+	// has closed h.done by now.
+	h.settle()
+	select {
+	case <-h.done:
+		t.Fatalf("the shutdown returned before the shard workers stopped")
+	default:
+	}
+	released = true
+	close(held)
+	waitClosed(t, "the shutdown", h.done)
+}
+
+// TestVoteShutdownStopsHeartbeatBeforeDeletingRegs is the first step of that
+// order: the heartbeat is stopped and joined before the shutdown deletes the
+// registrations, so a tick still in flight cannot re-create a key the
+// shutdown has just deleted (CM5, VW8).
+//
+// The tick is held inside its dn put the way a put already sent to etcd is
+// (holdPut): the cancel cannot take it back, it lands once released, and the
+// tick's cn put follows it. The hold lasts an hour on the package clock and
+// on the bubble's. A shutdown that only cancelled the heartbeat, stopped it
+// after the deletes, or waited for it with a time limit on either clock
+// deletes the registrations while that tick is still in flight.
+func TestVoteShutdownStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
+	synctest.Test(t, testVoteShutdownStopsHeartbeatBeforeDeletingRegs)
+}
+
+func testVoteShutdownStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
+	store := newVoteHookStore()
+	h := newVoteHarnessOn(t, store, common.WorkerRoleDn, common.WorkerRoleCn)
+	// Registered after the harness's cleanup, so it runs first: a failed
+	// case never leaves the shutdown waiting on the held put.
+	t.Cleanup(store.releasePut)
+	seed := h.vote.currentSeed()
+	keys := []string{
+		workerRegKey(common.WorkerRoleDn, seed),
+		workerRegKey(common.WorkerRoleCn, seed),
+	}
+
+	// A heartbeat tick is in flight, held inside its dn put.
+	entered := store.holdPut(keys[0])
+	h.clk.advance(h.deps.cfg.VoteInterval)
+	waitClosed(t, "the heartbeat put to reach the store", entered)
+
+	// With CM5's order the shutdown waits for the held tick to end before it
+	// deletes anything. An hour passes on both clocks while the put is held,
+	// so a wait with a time limit on either has run out by now.
+	h.cancel()
+	h.settle()
+	h.clk.advance(time.Hour)
+	time.Sleep(time.Hour)
+	h.settle()
+	for _, op := range store.opLog() {
+		if strings.HasPrefix(op, "delete ") {
+			t.Fatalf("the shutdown deleted a registration while a heartbeat "+
+				"put was still in flight: %v", store.opLog())
+		}
+	}
+	store.releasePut()
+	waitClosed(t, "the shutdown", h.done)
+	for _, key := range keys {
+		if h.store.has(key) {
+			t.Fatalf("%s was re-created after the shutdown deleted it: %v",
+				key, store.opLog())
+		}
+		deleted := false
+		for _, op := range store.opLog() {
+			switch op {
+			case "delete " + key:
+				deleted = true
+			case "put " + key:
+				if deleted {
+					t.Fatalf("the heartbeat put %s after the shutdown "+
+						"deleted it: %v", key, store.opLog())
+				}
+			}
+		}
+		if !deleted {
+			t.Fatalf("the shutdown never deleted %s: %v", key, store.opLog())
 		}
 	}
 }

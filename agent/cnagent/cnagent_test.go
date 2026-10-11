@@ -4876,7 +4876,7 @@ func TestUnansweredSubsystemWalkKeepsTheConnections(t *testing.T) {
 				dmRow := info.GetCloneIdToDmClone()[testClone]
 				assertOk(t, dmRow, "clone dm row, its source's walk "+
 					"unanswered")
-				if _, ok := agent.ParseCloneStatus(
+				if _, ok := common.ParseCloneStatus(
 					dmRow.GetDetails()); !ok {
 					t.Fatalf("clone dm row details %q are not the "+
 						"dm-clone's status line", dmRow.GetDetails())

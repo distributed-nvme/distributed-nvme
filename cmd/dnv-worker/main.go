@@ -266,11 +266,12 @@ func run(cmd *cobra.Command, args []string) error {
 }
 
 // watchSignals implements CM5: the first SIGINT/SIGTERM cancels ctx, which
-// starts worker.Run's ordered drain (stop the heartbeat, delete this worker's
-// registrations, stop every shard worker, close the cache and the client); a
-// second signal during that window gives up on the drain and exits
-// immediately with status 1, because an in-flight Syncup*/Push* may hold the
-// process for up to common.DefaultWorkerSyncupTimeout.
+// starts worker.Run's ordered drain (stop the heartbeat, tell every shard
+// worker to stop, delete this worker's registrations, join the shard workers,
+// close the cache and the client); a second signal during that window gives up
+// on the drain and exits immediately with status 1, because an in-flight
+// Syncup*/Push* may hold the process for up to
+// common.DefaultWorkerSyncupTimeout.
 //
 // exit is a parameter so the unit tests can observe the second-signal path
 // without terminating the test binary.

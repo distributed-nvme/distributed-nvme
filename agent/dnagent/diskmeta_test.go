@@ -1913,3 +1913,205 @@ func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 			unbounded)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The disk counts (DN18)
+// ---------------------------------------------------------------------------
+
+// TestDiskMetaCountsNeedAKnownConfirmedTable pins the gates of the disk
+// counts: they come only from a table loaded under a header this node has
+// confirmed for exactly the asking dn (confirmedLocked), and only once a read
+// of the disk's size has answered. Without either, the extent counts would
+// read as zero rather than as unknown, so there are no counts at all.
+func TestDiskMetaCountsNeedAKnownConfirmedTable(t *testing.T) {
+	ctx := context.Background()
+	present := func(meta *DiskMeta) bool {
+		return meta.Counts(testCluster, testDn, nil) != nil
+	}
+
+	// The control: a formatted, confirmed table on a disk of known size.
+	meta, node := formatted(t)
+	if !present(meta) {
+		t.Fatal("a confirmed table on a disk of known size gave no counts")
+	}
+	// Asked for by another dn, or by the same dn id of another cluster.
+	if meta.Counts(testCluster, testDn+1, nil) != nil {
+		t.Error("another dn got this dn's counts")
+	}
+	if meta.Counts(testCluster+1, testDn, nil) != nil {
+		t.Error("another cluster's dn got this dn's counts")
+	}
+
+	// A blank disk, before any converge and after one refused to format it.
+	blank, _ := newTestMeta(t)
+	if present(blank) {
+		t.Error("a disk no converge has seen gave counts")
+	}
+	refuse := func(context.Context) error {
+		return fmt.Errorf("a live device maps the disk")
+	}
+	if err := blank.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, refuse); err == nil {
+		t.Fatal("EnsureFormatted formatted past its gate")
+	}
+	if present(blank) {
+		t.Error("an unformatted disk gave counts")
+	}
+
+	// A confirmed table on a disk whose size no read has answered, until
+	// one has.
+	sizeless := NewDiskMeta(node.osClient(), metaDisk)
+	if err := sizeless.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
+		t.Fatalf("EnsureFormatted: %v", err)
+	}
+	if present(sizeless) {
+		t.Error("a disk of unknown size gave counts")
+	}
+	sizeless.SetDiskSize(metaDiskSize)
+	if !present(sizeless) {
+		t.Error("the size read answered, and still no counts")
+	}
+
+	// A table a probe loaded, which no converge has confirmed.
+	probed := reopen(node)
+	if _, err := probed.ProbeHeader(
+		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		t.Fatalf("ProbeHeader: %v", err)
+	}
+	if present(probed) {
+		t.Error("a table no converge confirmed gave counts")
+	}
+
+	// A foreign disk: the converge asked for another dn than the header's.
+	foreign := reopen(node)
+	if err := foreign.EnsureFormatted(
+		ctx, testCluster, testDn+1, metaExtentSize, mayFormat); err == nil {
+		t.Fatal("EnsureFormatted accepted a foreign disk")
+	}
+	for _, dn := range []uint64{testDn, testDn + 1} {
+		if foreign.Counts(testCluster, dn, nil) != nil {
+			t.Errorf("a foreign disk gave counts to dn %d", dn)
+		}
+	}
+
+	// A table a probe dropped once the header was wiped.
+	node.corruptBlock(metaDisk, common.DnHeaderOffset,
+		make([]byte, common.DnHeaderSize))
+	if _, err := meta.ProbeHeader(
+		ctx, testCluster, testDn, metaExtentSize); err == nil {
+		t.Fatal("ProbeHeader accepted a wiped header")
+	}
+	if present(meta) {
+		t.Error("a dropped table gave counts")
+	}
+}
+
+// TestDiskMetaCountsValues checks the numbers against the allocations behind
+// them, and against the meta row's text, which reads them through the same
+// computation (countsLocked).
+func TestDiskMetaCountsValues(t *testing.T) {
+	meta, _ := formatted(t)
+	ctx := context.Background()
+	check := func(what string, free, sides, units uint64) {
+		t.Helper()
+		got := meta.Counts(testCluster, testDn, nil)
+		if got.GetTotalExtCnt() != metaExtCnt ||
+			got.GetFreeExtCnt() != free ||
+			got.GetSideRecCnt() != sides ||
+			got.GetFreeMetaUnits() != units {
+			t.Errorf("%s: counts = %v, want %d extents, %d free, "+
+				"%d side records, %d free units",
+				what, got, metaExtCnt, free, sides, units)
+		}
+		desc := meta.Describe()
+		for _, want := range []string{
+			fmt.Sprintf(" sides=%d ", sides),
+			fmt.Sprintf(" free_ext=%d ", free),
+			fmt.Sprintf(" free_meta_units=%d ", units),
+		} {
+			if !strings.Contains(desc, want) {
+				t.Errorf("%s: the meta row reads %q, without %q",
+					what, desc, strings.TrimSpace(want))
+			}
+		}
+	}
+	all := uint64(common.DnCloneMetaUnitCnt)
+
+	check("a fresh table", metaExtCnt, 0, all)
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide, 4, 4*metaExtentSize); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+	if _, err := meta.AllocSide(
+		ctx, testSp, testSide2, 3, 3*metaExtentSize); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+	check("two sides", metaExtCnt-7, 2, all)
+	if _, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 2); err != nil {
+		t.Fatalf("AllocCloneMeta: %v", err)
+	}
+	check("a clone-metadata run", metaExtCnt-7, 2, all-2)
+	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
+		t.Fatalf("FreeSide: %v", err)
+	}
+	check("a side freed", metaExtCnt-3, 1, all-2)
+}
+
+// TestDiskMetaCountsMatchTheSideList pins side_recs_match: the side records
+// name exactly the sides of the request's list, by sp id and side id, the leg
+// id and the order aside.
+func TestDiskMetaCountsMatchTheSideList(t *testing.T) {
+	meta, _ := formatted(t)
+	ctx := context.Background()
+	ptr := func(sp, leg, side uint64) *pb.SidePointer {
+		return &pb.SidePointer{SpId: sp, LegId: leg, SideId: side}
+	}
+	match := func(ptrs ...*pb.SidePointer) bool {
+		return meta.Counts(testCluster, testDn, ptrs).GetSideRecsMatch()
+	}
+	if !match() {
+		t.Error("no record and an empty list do not match")
+	}
+	if match(ptr(testSp, testLeg, testSide)) {
+		t.Error("no record matches a list naming a side")
+	}
+	for _, side := range []uint64{testSide, testSide2} {
+		if _, err := meta.AllocSide(
+			ctx, testSp, side, 1, metaExtentSize); err != nil {
+			t.Fatalf("AllocSide: %v", err)
+		}
+	}
+	const other = uint64(0x99)
+	for _, tc := range []struct {
+		name string
+		ptrs []*pb.SidePointer
+		want bool
+	}{
+		{"the two sides", []*pb.SidePointer{
+			ptr(testSp, testLeg, testSide), ptr(testSp, testLeg, testSide2),
+		}, true},
+		{"the two in another order, under other legs", []*pb.SidePointer{
+			ptr(testSp, other, testSide2), ptr(testSp, other+1, testSide),
+		}, true},
+		{"one of the two", []*pb.SidePointer{
+			ptr(testSp, testLeg, testSide),
+		}, false},
+		{"the two and a third", []*pb.SidePointer{
+			ptr(testSp, testLeg, testSide), ptr(testSp, testLeg, testSide2),
+			ptr(testSp, testLeg, other),
+		}, false},
+		{"one of the two and another", []*pb.SidePointer{
+			ptr(testSp, testLeg, testSide), ptr(testSp, testLeg, other),
+		}, false},
+		{"the two side ids in another sp", []*pb.SidePointer{
+			ptr(testSp+1, testLeg, testSide), ptr(testSp+1, testLeg, testSide2),
+		}, false},
+		{"no side", nil, false},
+	} {
+		if got := match(tc.ptrs...); got != tc.want {
+			t.Errorf("%s: side_recs_match = %v, want %v",
+				tc.name, got, tc.want)
+		}
+	}
+}

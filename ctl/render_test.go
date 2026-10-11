@@ -122,6 +122,44 @@ var renderCases = []renderCase{
 			`"size":"0","td_id":"9","torn":true}}}` + "\n",
 	},
 	{
+		// A disk node's own counts (dnagent.md DN18) ride in dn_info beside
+		// its rows, under the key names of `dn get`'s record: the uint64
+		// counts as strings, and side_recs_match a bool that is visible while
+		// false. The rows the reply leaves out render as null.
+		name: "dn inspect, the disk node's counts",
+		rpc:  "InspectDiskNode",
+		argv: []string{"dn", "inspect", "--addr", "dn0:9520"},
+		reply: &pb.InspectDiskNodeReply{
+			AppliedRevision: 7,
+			DnInfo: &pb.DnInfo{
+				DiskCounts: &pb.DnInfo_DiskCounts{
+					TotalExtCnt:   256,
+					FreeExtCnt:    231,
+					SideRecCnt:    1,
+					FreeMetaUnits: 64,
+				},
+			},
+		},
+		want: `{"applied_revision":"7","dn_info":{"disk_counts":` +
+			`{"free_ext_cnt":"231","free_meta_units":"64",` +
+			`"side_rec_cnt":"1","side_recs_match":false,` +
+			`"total_ext_cnt":"256"},"disk_info":null,"meta_info":null,` +
+			`"port_info":null}}` + "\n",
+	},
+	{
+		// Counts the agent could not take are absent, never zeros: the
+		// field renders as null.
+		name: "dn inspect, no counts",
+		rpc:  "InspectDiskNode",
+		argv: []string{"dn", "inspect", "--addr", "dn0:9520"},
+		reply: &pb.InspectDiskNodeReply{
+			AppliedRevision: 7,
+			DnInfo:          &pb.DnInfo{},
+		},
+		want: `{"applied_revision":"7","dn_info":{"disk_counts":null,` +
+			`"disk_info":null,"meta_info":null,"port_info":null}}` + "\n",
+	},
+	{
 		// A uint64 MAP KEY is quoted too, and the re-marshal sorts the map's
 		// keys the same way it sorts a message's fields.
 		name: "sp find-names, uint64 map keys",

@@ -89,9 +89,13 @@ The shared constants of `dnv-cdc` are one region of the constant block in
   (DS9);
 * `CdcCntlIdMax`, the top of the dynamic CNTLID range that Connect assigns
   round-robin (NP5);
-* `DefaultCdcKeepAliveGraceMs`, the grace past its KATO before a connection
-  expires, and `DefaultCdcZeroKatoTmoMs`, the idle cutoff of a connection
-  whose KATO is zero (NP10);
+* `CdcMaxPendingConnCnt`, the most pending connections an instance holds,
+  at which its accept loop stops accepting (NP1);
+* `DefaultCdcPendingTmoMs`, a pending connection's pre-Connect deadline,
+  counted from accept and never restarted (NP10);
+* `DefaultCdcKeepAliveGraceMs`, the grace past its KATO before a connected
+  connection expires, and `DefaultCdcZeroKatoTmoMs`, the idle cutoff of a
+  connected connection whose KATO is zero (NP10);
 * `DefaultCdcRescanInterval`, the seconds between retries of a failed etcd
   scan (WV5).
 
@@ -299,19 +303,32 @@ three goroutines of its own — the reader, which runs the NP3 handshake and
 every command and writes every response but an AEN; the AEN writer, the
 only goroutine that completes an AER with an AEN (NP11), so an impact just
 sets the pending bit (taking that lock) and wakes it, and the watcher never
-writes to a socket (DS6); and the NP10 keep-alive reaper, armed at accept
-on the zero-KATO budget until Connect names a KATO. A second lock
-serializes socket writes, so an AEN never interleaves with a response
-inside one PDU. There is no connection cap: the keep-alive and idle reaping
-of NP10 bounds leakage. An `Accept` error that is not the shutdown logs
-`cdc accept failed` and pauses for `acceptRetryDelay` before accepting
-again, so a transient failure (a file-descriptor shortage, say) costs a
-pause rather than a spin that fills the log and the CPU. SIGTERM: stop
-accepting, close every connection, stop. The listener is open from
-startup, but nothing is accepted before the watcher's first scan has landed
-(CM4): until then a connecting host's TCP handshake completes into the
-kernel's listen backlog (while it has room) and nothing answers its ICReq.
-A SIGTERM in that window closes the listener, which resets those
+writes to a socket (DS6); and the NP10 reaper, armed at accept on the
+pre-Connect deadline. A second lock serializes socket writes, so an AEN
+never interleaves with a response inside one PDU.
+
+A connection is **pending** from its accept until a Connect succeeds on
+it; a refused Connect leaves it pending. At most `CdcMaxPendingConnCnt`
+connections are pending at once: at that cap the accept loop accepts
+nothing until a pending connection connects or ends, so a new connection
+waits in the kernel's listen backlog (while it has room), its ICReq
+unanswered, as it does before the first scan (CM4). A pending connection
+names no host yet and still holds a read buffer and three goroutines, so
+without a cap any number of them could pile up; the cap delays rather
+than refuses, because a refusal at accept would turn the burst of
+reconnects that follows a cdc restart (DS11) into failed connects. A
+connected connection counts against no cap: its keep-alive bounds it
+(NP10).
+
+An `Accept` error that is not the shutdown logs `cdc accept failed` and
+pauses for `acceptRetryDelay` before accepting again, so a transient
+failure (a file-descriptor shortage, say) costs a pause rather than a spin
+that fills the log and the CPU. SIGTERM: stop accepting — a loop waiting
+at the cap stops too — close every connection, stop. The listener is open
+from startup, but nothing is accepted before the watcher's first scan has
+landed (CM4): until then a connecting host's TCP handshake completes into
+the kernel's listen backlog (while it has room) and nothing answers its
+ICReq. A SIGTERM in that window closes the listener, which resets those
 connections unanswered.
 
 NP2. **PDU subset.** Implemented: ICReq, ICResp, H2CTermReq, C2HTermReq,
@@ -406,12 +423,22 @@ it because Identify's OAES advertises it (NP7). Set and Get of the Keep
 Alive Timer SHOULD update the connection's KATO. Any other FID: invalid
 field, DNR.
 
-NP10. **Keep Alive.** Every received command restarts the timer (the nvmet
-rule). A non-zero KATO expires at KATO plus `DefaultCdcKeepAliveGraceMs`; a
-zero KATO expires after `DefaultCdcZeroKatoTmoMs` idle, because zero does
-not mean immortal: such connections, a one-shot "nvme discover" among them,
-get a fixed idle cutoff, mirroring nvmet's discovery default. Expiry closes
-the socket with `host disconnected`, reason `keep_alive`.
+NP10. **Keep Alive.** A pending connection (NP1) has no keep-alive yet: it
+ends at its pre-Connect deadline, `DefaultCdcPendingTmoMs` after its
+accept, and nothing moves that deadline — not the ICReq, not a Connect the
+controller refused. A host's kernel sends its ICReq at its TCP connect and
+its Connect within moments of the ICResp, which the controller sends as
+soon as it accepts, so a deadline counted from the accept costs a real
+host nothing, while one that a refused Connect moved would let a client
+that never connects keep its place under the cap for as long as it keeps
+sending Connects the controller refuses. From a successful Connect on,
+every received command restarts the timer (the nvmet rule). A
+non-zero KATO expires at KATO plus `DefaultCdcKeepAliveGraceMs`; a zero
+KATO expires after `DefaultCdcZeroKatoTmoMs` idle, because zero does not
+mean immortal: such connections, a one-shot "nvme discover" among them,
+get a fixed idle cutoff, mirroring nvmet's discovery default. Expiry
+closes the socket; a connected connection then logs `host disconnected`,
+reason `keep_alive`, and a pending one logs nothing (NP13).
 
 NP11. **AER.** Up to `CdcAerl` + 1 outstanding per connection; one more is
 refused with the AER-limit-exceeded status. An armed AER completes
@@ -427,22 +454,27 @@ NP12. **Everything else.** Unknown admin opcodes: invalid command opcode,
 DNR — which is what a TP-8010 Discovery Information Management command
 gets, since nothing registers into this controller, in-capsule payload and
 all (NP2). Unknown fabrics command types: invalid field, DNR. `dnv-cdc`
-never fails a well-formed supported command for load reasons; NP8's
-transfer bound is a buffer limit stated up front, not a load decision.
+never fails a well-formed supported command for load reasons: NP8's
+transfer bound is a buffer limit stated up front, not a load decision, and
+NP1's pending cap, which delays accepting a connection, fails no command
+and refuses no connection.
 
 NP13. **Teardown.** On a socket close or error, a keep-alive expiry, a
-terminal PDU error, or a write that does not complete within
-`socketWriteTimeout` — set on every PDU write, because a host that has
-stopped reading is gone and the controller must not hold a goroutine and a
-socket on it forever: cancel the timers, discard the outstanding AERs,
-unregister from the host state (DS7: the last connection drops the state),
-and log `host disconnected` with the reason. A write that hits the deadline
+pending connection's pre-Connect deadline (NP10), a terminal PDU error,
+or a write that does not complete within `socketWriteTimeout` — set on
+every PDU write, because a host that has stopped reading is gone and the
+controller must not hold a goroutine and a socket on it forever: cancel
+the timers, discard the outstanding AERs, unregister from the host state
+(DS7: the last connection drops the state) or, for a connection that
+never completed Connect, give its place under the cap back (NP1), and log
+`host disconnected` with the reason. A write that hits its write deadline
 has no reason of its own: like any other socket error it ends the
 connection as `closed`, the same value a host that simply went away
 produces, since the record's reasons have nothing finer (Log records). A
 connection that never completed Connect has no hostnqn and no CNTLID and
 belongs to no host state, so it logs nothing here — a port scan is not a
-host; what went wrong with it is already in its `pdu error` record.
+host, and neither is a flood of connections that never connect; what went
+wrong with one, if anything, is already in its `pdu error` record.
 
 NP14. **The mirror rule.** Field values and statuses this section does not
 pin — identify field values, status codes, property behavior — follow the
@@ -530,14 +562,16 @@ fleet — the real `cdc`, `model` and `etcdutil` packages over a real
 single-node etcd — against real kernel NVMe hosts and real nvmet targets:
 range sharding and twin equality, per-host filtering, the per-host AEN and
 GENCTR semantics of DS6 and DS7, automatic connect, re-point and disconnect
-end to end through nvme-stas, and the high availability of twins and of
-restarts. nvme-stas is the production host stack, and the service serves
-plain nvme-cli equally: the AEN path is stock kernel — the host kernel
-publishes the discovery-change AEN as an "NVME_AEN" uevent — and nvme-stas
-adds the automatic connect, re-point and disconnect on top, which is the
-host's part of the failover contract (`architecture.md`, Host view). The
-suite tests the two layers separately, so that an nvme-stas configuration
-problem cannot be mistaken for a cdc bug. It does not prove what the
+end to end through nvme-stas, the high availability of twins and of
+restarts, and that a flood of connections that never connect leaves a
+connected host served (NP1, NP10). nvme-stas is the production host
+stack, and the service serves plain nvme-cli equally: the AEN path is
+stock kernel — the host kernel publishes the discovery-change AEN as an
+"NVME_AEN" uevent — and nvme-stas adds the automatic connect, re-point and
+disconnect on top, which is the host's part of the failover contract
+(`architecture.md`, Host view). The suite tests the two layers
+separately, so that an nvme-stas configuration problem cannot be mistaken
+for a cdc bug. It does not prove what the
 gateway and the worker write into `CdcEntry`: the gateway suite reads back
 the entry the gateway's subsystem and cntlr RPCs write (`gateway.md`,
 Integration test plan), and the worker suite asserts the worker's rewrites
@@ -571,10 +605,20 @@ launch (CM1 to CM3), the watcher's scan, events and recovery of identical
 served state from etcd alone (WV1, WV3), the discovery service model on
 real kernels (DS1 to DS8 and DS11, an entry with an empty `allowed_hosts`
 included), the connection records and keep-alive of NP5, NP10 and NP13,
-the AER path (NP11), and NP2 and NP12 on the in-capsule Discovery
-Information Management command nvme-stas sends to every discovery
-controller. Left to the unit tests, never forced on hardware: log paging
-past one page, keep-alive expiry and AER-limit exhaustion.
+the pending cap and the pre-Connect deadline of NP1 and NP10, the AER
+path (NP11), and NP2 and NP12 on the in-capsule Discovery Information
+Management command nvme-stas sends to every discovery controller. The
+pending cap and the deadline meet a flood of idle connections from the
+second host: a persistent discovery connection made before the flood
+keeps reading the log and receiving its AEN while the flood's connections
+past the cap wait in the listen backlog, the flood's connections end at
+their deadline, and a new discover is answered once they are gone; the
+flood and its waits are sized by `CdcMaxPendingConnCnt` and
+`DefaultCdcPendingTmoMs`, read from the same `workerctl`. Left to the
+unit tests, never forced on hardware: log paging past one page,
+keep-alive expiry, AER-limit exhaustion, a refused Connect that keeps its
+connection pending, and the exact instant a pre-Connect deadline ends a
+connection.
 
 Out of scope: etcd quorum loss and compaction races; TLS and in-band
 authentication; non-TCP transports; digests; scale — every shard code,
@@ -594,25 +638,29 @@ whose format varies by version. Every wait is a bounded poll; and
 the wait, not at two point samples, which would pass a connection that
 dropped and came back between them. The cdc records are matched by their
 exact names (Log records), read through a filter that drops a line torn by
-a concurrent append.
+a concurrent append. The flood case judges accepting by kernel socket
+state — the listener's accept queue on the first server and the flooding
+host's sockets the instance has closed — never by a record, since a
+pending connection logs none (NP13), and never by a timing window.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run, and
 at the end only on success: a failing run leaves etcd's data, every cdc
 log, the nvmet and dm state and the host connections in place and prints
 its diagnostics — the failing stage and its trace id, the tail of every
 cdc log, the entries in etcd, the target's configfs tree and dm tables,
-and the hosts' subsystems, uevent captures and nvme-stas journals — so the
-debris is what the developer reads. Order matters, and every step tolerates
-absence: the hosts first, with nvme-stas stopped so that its reconnect loops
-die before their targets vanish; then the target, its port links first,
-which is safe because the hosts are already disconnected: a port unlinked
-under a live connection kills the host's controller and the host never
+and the hosts' subsystems, uevent captures, flood sockets and nvme-stas
+journals — so the debris is what the developer reads. Order matters, and
+every step tolerates absence: the hosts first, with the flood's idle
+connections closed and nvme-stas stopped so that its reconnect loops die
+before their targets vanish; then the target, its port links first, which
+is safe because the hosts are already disconnected: a port unlinked under
+a live connection kills the host's controller and the host never
 reconnects by itself; then the first server's processes. Cleanup touches
 only what is the suite's — the test subsystems and the discovery
-controllers that point at the fleet, never every subsystem of a host — and
-leaves nvme-stas installed and the kernel modules loaded; the end-of-run
-cleanup also removes the work directories and unmasks the kernel's
-autoconnect unit.
+controllers that point at the fleet, never every subsystem of a host —
+and leaves nvme-stas installed and the kernel modules loaded; the
+end-of-run cleanup also removes the work directories and unmasks the
+kernel's autoconnect unit.
 
 **The driver, `cdcctl`.** `cdcctl` is the etcd driver that plays the
 gateway and the worker for `CdcEntry` keys only: it formats the keys
@@ -648,10 +696,11 @@ took over once their entry vanishes — and restores the original afterwards;
 the masking of the kernel's autoconnect unit, which would otherwise connect on
 the very AEN the lowlevel case measures, so it is masked for every case and
 setup checks the mask rather than trusting it; the uevent capture of the
-lowlevel case; and the scoped wipes. The wipes disconnect only the test
-subsystems and the discovery controllers that point at the fleet; while
-nvme-stas runs, the reset leaves the discovery controllers to it, because
-one taken down behind its back is treated as gone for good and never
-re-created. Both helpers are generated by `cdc_test.sh`, shipped to their
-servers and run under sudo, so that everything the suite is lives in the
-script and the driver.
+lowlevel and flood cases; the flood case's idle connections, held by one
+process that the wipes end; and the scoped wipes. The wipes disconnect
+only the test subsystems and the discovery controllers that point at the
+fleet; while nvme-stas runs, the reset leaves the discovery controllers to
+it, because one taken down behind its back is treated as gone for good and
+never re-created. Both helpers are generated by `cdc_test.sh`, shipped to
+their servers and run under sudo, so that everything the suite is lives in
+the script and the driver.

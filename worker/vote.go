@@ -209,7 +209,8 @@ func ownerOf(members []*regEntry, role string, shard uint32) string {
 }
 
 // roleState is one role's independent vote state (VW10): its own registry
-// prefix, watch, tracking entries, timers, effective set and shard workers.
+// prefix, watch, last own echo, tracking entries, timers, effective set and
+// shard workers.
 type roleState struct {
 	role    string
 	entries map[string]*regEntry
@@ -220,6 +221,18 @@ type roleState struct {
 
 	scanPending bool
 	rescan      *pendingTimer
+
+	// lastOwnEcho is the monotonic time of the last put EVENT for this
+	// worker's own key of this role that this role's registry watch
+	// delivered (VW8 (b)). It starts at the incarnation's start, and each
+	// role keeps its own, because each role has its own watch (VW10): an
+	// echo on one role's watch says nothing about another's. A Range result
+	// is NOT a watch event and never refreshes it: (b) exists precisely to
+	// catch a watch that has stopped delivering while everything else still
+	// looks healthy, and a rescan is driven by this worker, not by the watch
+	// it distrusts. Refreshing it from a scan would hide exactly the case
+	// (b) is the backstop for.
+	lastOwnEcho time.Time
 }
 
 // entryFor returns the tracking entry of a seed, creating it on first sight.
@@ -276,14 +289,6 @@ type incarnation struct {
 	// lastOkPut is the monotonic time of the last tick at which EVERY role's
 	// put succeeded (VW8a).
 	lastOkPut time.Time
-	// lastOwnEcho is the monotonic time of the last own-key put EVENT this
-	// observer saw come back on its own registry watch (VW8b). A Range result
-	// is NOT a watch event and never refreshes it: (b) exists precisely to
-	// catch a watch that has stopped delivering while everything else still
-	// looks healthy, and a rescan is driven by this worker, not by the watch
-	// it distrusts. Refreshing it from a scan would hide exactly the case
-	// (b) is the backstop for.
-	lastOwnEcho time.Time
 
 	// pendingFence is the reason of a fence VW8 demanded that could NOT be
 	// applied, because minting the new seed failed (VW1). checkFence retries it
@@ -375,9 +380,10 @@ func (v *voteWorker) setSeed(seed string) {
 	v.mu.Unlock()
 }
 
-// run drives the vote layer until ctx ends, then performs CM5's first three
-// steps in order: stop the heartbeat loop, delete this worker's own
-// registrations, stop every shard worker gracefully and in parallel.
+// run drives the vote layer until ctx ends, then leaves it in CM5's order,
+// which is the fence's (leave): stop the heartbeat loop, tell every shard
+// worker to stop, delete this worker's own registrations, join the shard
+// workers.
 func (v *voteWorker) run(ctx context.Context) {
 	defer close(v.stopped)
 	v.startIncarnation(v.currentSeed())
@@ -408,17 +414,16 @@ func (v *voteWorker) startIncarnation(seed string) {
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	now := v.deps.clk.now()
 	inc := &incarnation{
-		seed:        seed,
-		gen:         v.nextGen,
-		ctx:         ctx,
-		cancel:      cancel,
-		hbCtx:       hbCtx,
-		hbCancel:    hbCancel,
-		hbDone:      make(chan struct{}),
-		roles:       make(map[string]*roleState, len(v.roles)),
-		lastOkPut:   now,
-		lastOwnEcho: now,
-		registered:  make(map[string]bool),
+		seed:       seed,
+		gen:        v.nextGen,
+		ctx:        ctx,
+		cancel:     cancel,
+		hbCtx:      hbCtx,
+		hbCancel:   hbCancel,
+		hbDone:     make(chan struct{}),
+		roles:      make(map[string]*roleState, len(v.roles)),
+		lastOkPut:  now,
+		registered: make(map[string]bool),
 	}
 	for _, role := range v.roles {
 		kind, ok := v.deps.kinds(role)
@@ -429,9 +434,10 @@ func (v *voteWorker) startIncarnation(seed string) {
 			continue
 		}
 		inc.roles[role] = &roleState{
-			role:    role,
-			entries: make(map[string]*regEntry),
-			mgr:     startShardManager(v.deps, kind, seed),
+			role:        role,
+			entries:     make(map[string]*regEntry),
+			mgr:         startShardManager(v.deps, kind, seed),
+			lastOwnEcho: now,
 		}
 	}
 	v.inc = inc
@@ -735,7 +741,7 @@ func (v *voteWorker) onWatch(msg watchMsg) {
 		entry.lastSeen = now
 		entry.modRev = msg.event.Rev
 		if own {
-			inc.lastOwnEcho = now
+			rs.lastOwnEcho = now
 		}
 		if !entry.live {
 			entry.live = true
@@ -918,7 +924,7 @@ func (v *voteWorker) commit(
 	entry *regEntry,
 ) bool {
 	if entry.seed == inc.seed && !entry.graceTarget {
-		return v.fenceSelfStale(inc, v.deps.clk.now())
+		return v.fenceSelfStale(inc, rs, v.deps.clk.now())
 	}
 	changed := entry.effective != entry.graceTarget
 	entry.effective = entry.graceTarget
@@ -951,7 +957,7 @@ func (v *voteWorker) commit(
 
 // fenceSelfStale is VW8 (d): the exit for the one commit VW6's garbage
 // collection must never perform, a nonmember target for this worker's OWN
-// registration.
+// registration in the role rs.
 //
 // VW6 defines the collection as removing "a key whose owner died", and VW8 says
 // a worker the fleet considers dead is a NEW worker that mints a fresh seed.
@@ -963,36 +969,41 @@ func (v *voteWorker) commit(
 // dnv-worker.md, Log records, where "worker fenced" is what an operator greps
 // to see a worker leave. So the commit is abandoned and VW8's single "the fleet
 // gave up on me" path runs instead. It is reachable whenever that commit comes
-// before a VW8 check has fenced the worker. The own key goes dead the dead
-// threshold after this observer last saw it put (VW3) and is committed one
-// grace window later, while VW8 waits one vote interval longer than the dead
-// threshold — (a) from the start of the last tick whose puts all landed, (b)
-// from the last echo — and a tick runs its checks only after its puts
-// returned. So for a worker of one role whose own key has gone dead at its
-// deadline, while puts return promptly, the commit comes first with a grace
-// window shorter than one to two vote intervals when the puts land and only
-// the watch is silent, depending on where the last echo fell between two
+// before a VW8 check has fenced the worker. A role's own key goes dead the
+// dead threshold after this observer last saw it put (VW3) and is committed
+// one grace window later, while VW8 waits one vote interval longer than the
+// dead threshold — (a) from the start of the last tick whose puts all landed,
+// (b) from that role's last echo — and a tick runs its checks only after its
+// puts returned. So for a role whose own key has gone dead at its deadline,
+// while puts return promptly, the commit comes first with a grace window
+// shorter than one to two vote intervals when the puts land and only that
+// role's watch is silent, depending on where its last echo fell between two
 // ticks, and with one shorter than one interval less the echo's lag behind its
 // tick when the puts fail; a tick's puts that block on an unreachable etcd
-// allow a longer one. With several roles it can come at any grace, the
-// defaults included: VW8 (b) counts an echo of any role, so while every put
-// lands and only some roles' watches have stopped echoing them, no VW8 check
-// fences the worker and this commit does.
+// allow a longer one.
 //
 // The reason names the CAUSE, not the consequence, wherever VW8 can tell them
 // apart. A fence a failed seed mint had deferred is retried first, under that
 // fence's own reason. With no such fence pending, the signals of VW8 (a) and
-// (b) are tested, in that order, against the dead threshold, by which this
-// observer judged its own key dead, and not against fenceThreshold, which
-// neither may have reached yet: this observer stopped seeing its own key
-// because its heartbeat stopped reaching etcd, or because its watch stopped
+// (b) — (b) on rs's own echo time, the watch that let this key go dead — are
+// tested, in that order, against the dead threshold, by which this observer
+// judged its own key dead, and not against fenceThreshold, which neither may
+// have reached yet: this observer stopped seeing its own key because its
+// heartbeat stopped reaching etcd, or because the role's watch stopped
 // echoing its puts. That is also what keeps the vote case (VW8 (a)) true: a
 // resumed SIGSTOPped worker fences as heartbeat_stalled whichever of its
 // expired timers the loop drains first.
 // Otherwise the reason is key_deleted, the fallback when neither signal is
-// stale (VW8 (d)): with several roles, a stall (b) cannot see, some roles'
-// watches having stopped echoing while another's has not.
-func (v *voteWorker) fenceSelfStale(inc *incarnation, now time.Time) bool {
+// stale (VW8 (d)): the own key absent from a rescan without this process
+// deleting it, (c)'s fact learned from a rescan rather than from a delete
+// event. A key that went dead at its deadline never falls back there: this
+// observer last saw it put no earlier than the role's last echo, so that echo
+// is at least the dead threshold old by the commit.
+func (v *voteWorker) fenceSelfStale(
+	inc *incarnation,
+	rs *roleState,
+	now time.Time,
+) bool {
 	dead := v.deps.cfg.deadThreshold()
 	reason := fenceKeyDeleted
 	switch {
@@ -1000,7 +1011,7 @@ func (v *voteWorker) fenceSelfStale(inc *incarnation, now time.Time) bool {
 		reason = inc.pendingFence
 	case now.Sub(inc.lastOkPut) >= dead:
 		reason = fenceHeartbeatStalled
-	case now.Sub(inc.lastOwnEcho) >= dead:
+	case now.Sub(rs.lastOwnEcho) >= dead:
 		reason = fenceWatchStalled
 	}
 	v.fence(inc, reason)
@@ -1084,16 +1095,20 @@ func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 	if v.checkHeartbeatStall(inc, now) {
 		return true
 	}
-	// (b) the worker's own put is not echoed by its own watch while puts
-	// report success — the "while puts report success" half is implied here,
-	// because (a) has just established that a put landed recently. It waits as
-	// long as (a): a missed put is also a missed echo, and on the very tick (a)
-	// rides out, checks that run before that tick's own echo arrives find the
-	// last echo about the dead threshold old, so a wait of only the dead
-	// threshold could fence there.
-	if now.Sub(inc.lastOwnEcho) >= v.deps.cfg.fenceThreshold() {
-		v.fence(inc, fenceWatchStalled)
-		return true
+	// (b) in some role, the worker's own put is not echoed by that role's own
+	// watch while puts report success — the "while puts report success" half
+	// is implied here, because (a) has just established that a put landed
+	// recently. Each role is judged by its own echo time: each role has its
+	// own watch (VW10), and an echo on one says nothing about another's. It
+	// waits as long as (a): a missed put is also a missed echo, and on the
+	// very tick (a) rides out, checks that run before that tick's own echo
+	// arrives find the last echo about the dead threshold old, so a wait of
+	// only the dead threshold could fence there.
+	for _, rs := range inc.roles {
+		if now.Sub(rs.lastOwnEcho) >= v.deps.cfg.fenceThreshold() {
+			v.fence(inc, fenceWatchStalled)
+			return true
+		}
 	}
 	return false
 }
@@ -1110,11 +1125,10 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 	if err != nil {
 		// Nothing is torn down, and the fence is REMEMBERED. Re-testing the
 		// VW8 conditions would only bring (a) and (b) back: checkFence looks at
-		// lastOkPut and lastOwnEcho, never at "a peer deleted my key" or at
-		// the own-key commit — those are events the caller has already
-		// consumed — so a (c) or (d) fence dropped here would be lost for
-		// good. Every following heartbeat
-		// tick now retries it (checkFence).
+		// lastOkPut and every role's lastOwnEcho, never at "a peer deleted my
+		// key" or at the own-key commit — those are events the caller has
+		// already consumed — so a (c) or (d) fence dropped here would be lost
+		// for good. Every following heartbeat tick retries it (checkFence).
 		inc.deferFence(reason)
 		slog.ErrorContext(inc.ctx, "worker fence deferred",
 			slog.String("reason", reason),
@@ -1127,50 +1141,54 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 		slog.String("old_seed", inc.seed),
 		slog.String("new_seed", seed),
 	)
-	// The old heartbeat goes FIRST, exactly as on CM5's shutdown path: it is
-	// still re-putting this seed's registrations, and a tick that lands
-	// during or after deleteOwnRegs would resurrect a key the fleet has
-	// already given up on — peers would then observe an appear for a seed
-	// that no longer exists.
-	v.stopHeartbeat(inc)
-	// The shard workers' graceful stop starts next, and the fence does not
-	// wait for it before the deletes: the drain waits out their in-flight
-	// calls (RW11), which can take common.DefaultWorkerSyncupTimeout, and a
-	// delete issued only after that would let the peers see this seed go
-	// only when the drain ends or its deadline passes, whichever comes first
-	// — the old shards undriven that much longer than the grace window. Nor
-	// do the deletes wait before the drain starts: one that cannot land — a
-	// fence of VW8(a) is usually cut off from etcd — takes
-	// common.DefaultEtcdOpTimeout per role, and shard workers left running
-	// behind it would go on starting rounds, syncups and reaction passes for
-	// a worker that has already given up its membership. The overlap this
-	// allows, a last syncup finishing after a peer took the shard, is the one
-	// CM5 accepts.
-	v.cancelManagers(inc)
-	v.deleteOwnRegs(inc.ctx, inc)
-	v.stopManagers(inc)
-	v.discard(inc)
-	v.inc = nil
+	v.leave(inc.ctx, inc)
 	// VW7 applies to the new incarnation: nothing is driven until one full
 	// grace window after its first successful put.
 	v.startIncarnation(seed)
 }
 
-// shutdown performs CM5's first three steps, in order.
+// leave takes an incarnation out of the vote layer in the one order both ways
+// out share, the fence (VW8) and the shutdown (CM5):
+//
+//  1. The heartbeat loop is stopped and joined first. It is still re-putting
+//     this seed's registrations, and a tick that lands during or after the
+//     deletes would resurrect a key the fleet has already given up on —
+//     peers would then observe an appear for a seed that no longer exists.
+//  2. Every shard worker is told to stop before the deletes, without waiting
+//     for it: a delete that cannot land — a fence of VW8 (a) is usually cut
+//     off from etcd — takes common.DefaultEtcdOpTimeout per role, and shard
+//     workers left running behind it would go on starting rounds, syncups
+//     and reaction passes for a worker that has already given up its
+//     membership.
+//  3. The deletes come before the join: the join waits out the shard
+//     workers' in-flight calls (RW11, the revision worker's graceful stop),
+//     which can take common.DefaultWorkerSyncupTimeout, and a delete issued
+//     only after it would let the peers see this seed go only when the join
+//     ends or the dead threshold passes, whichever comes first — the old
+//     shards undriven that much longer than the grace window.
+//  4. The join runs last, so every "shard released" of this seed is logged
+//     before the caller goes on.
+//
+// The overlap this allows, a last syncup finishing after a peer took the
+// shard, is the one VW7 accepts.
+func (v *voteWorker) leave(parent context.Context, inc *incarnation) {
+	v.stopHeartbeat(inc)
+	v.cancelManagers(inc)
+	v.deleteOwnRegs(parent, inc)
+	v.stopManagers(inc)
+	v.discard(inc)
+	v.inc = nil
+}
+
+// shutdown is CM5's exit from the vote layer: the fence's order (leave), with
+// no new seed and no rejoin. Its deletes run under fresh contexts
+// (deleteOwnRegs), because ctx is already cancelled.
 func (v *voteWorker) shutdown(ctx context.Context) {
 	inc := v.inc
 	if inc == nil {
 		return
 	}
-	// 1. Stop the heartbeat loop.
-	v.stopHeartbeat(inc)
-	// 2. Delete this worker's own registrations, best effort, so peers start
-	//    their grace windows now rather than after the dead threshold.
-	v.deleteOwnRegs(ctx, inc)
-	// 3. Stop every shard worker gracefully and in parallel (SW5 -> RW11).
-	v.stopManagers(inc)
-	v.discard(inc)
-	v.inc = nil
+	v.leave(ctx, inc)
 }
 
 // stopHeartbeat cancels the incarnation's heartbeat loop and JOINS it, so no
@@ -1188,12 +1206,13 @@ func (v *voteWorker) stopHeartbeat(inc *incarnation) {
 // common.DefaultEtcdOpTimeout: on the shutdown path the parent ctx is already
 // cancelled, so a plain child would be dead on arrival.
 //
-// This is the ONLY place that deletes an own registration, and both callers —
-// the fence and the shutdown — run it on the loop goroutine and discard the
-// incarnation before that goroutine selects again (the shard workers' drain
-// sits in between on both paths), so the delete events it produces are never
-// processed. That is what lets VW8(c) fence on every own-key delete event
-// it sees without tracking which deletes this process issued (onWatch).
+// This is the ONLY place that deletes an own registration, and its one caller,
+// leave — the fence's and the shutdown's way out — runs it on the loop
+// goroutine and discards the incarnation before that goroutine selects again
+// (the join of the shard workers sits in between), so the delete events it
+// produces are never processed. That is what lets VW8(c) fence on every
+// own-key delete event it sees without tracking which deletes this process
+// issued (onWatch).
 func (v *voteWorker) deleteOwnRegs(parent context.Context, inc *incarnation) {
 	for _, role := range v.roles {
 		key := workerRegKey(role, inc.seed)
@@ -1204,7 +1223,7 @@ func (v *voteWorker) deleteOwnRegs(parent context.Context, inc *incarnation) {
 }
 
 // cancelManagers starts the graceful stop of every role's shard workers
-// without waiting for it (VW8), and stopManagers joins them. Every shard
+// without waiting for it (VW8, CM5), and stopManagers joins them. Every shard
 // worker runs under a child of its manager's ctx (startShardWorker), so the
 // cancel reaches all of them at once — also those of a manager that is still
 // joining the stop of a shard it no longer owns (VW9), and would see its own

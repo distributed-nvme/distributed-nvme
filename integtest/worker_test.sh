@@ -1271,6 +1271,18 @@ sp_rev() { # <sp id>
 	ctl get-rev sp --id "$1" --shard 00 | "$JQ" -r .revision
 }
 
+# sp_rev_num is sp_rev for arithmetic: it DIES on a read that failed or is not
+# a number, since a count built on an empty baseline means nothing — sp_rev's
+# empty output would make $((rev + 2)) a quiet 2.
+sp_rev_num() { # <sp id>
+	local rev
+	rev=$(sp_rev "$1") || die "sp $1: reading its SpRev failed"
+	case "$rev" in
+	'' | *[!0-9]*) die "sp $1: its SpRev read back as '$rev'" ;;
+	esac
+	printf '%s' "$rev"
+}
+
 dn_rev() { ctl get-rev dn --id "$1" --shard 00 | "$JQ" -r .revision; }
 cn_rev() { ctl get-rev cn --id "$1" --shard 00 | "$JQ" -r .revision; }
 dn_free() { ctl get-dn --id "$1" | "$JQ" -r .free_ext_cnt; }
@@ -4409,8 +4421,9 @@ case_drain() {
 	local latched
 	latched=$(ctl set-deleting --sp sp0)
 	assert_field "$latched" '.latched' "true" "set-deleting latched sp0"
-	# AR3 splits (SPD6): a latched SP runs the drain instead of nothing at
-	# all, and its own SpRev bumps carry it from step to step with no timer.
+	# AR3 splits (SPD6): a latched SP runs a drain step instead of its
+	# reactions, and a committed step posts the drain's own wake-up, which
+	# runs only the next drain step, behind the cluster-conf gate.
 	wait_until "$WAIT_SYNCUP" "sp0 to drain away" drain_finished
 	assert_eq "$(key_cnt sp_rev)" "0" "sp_rev keys after the drain"
 	assert_eq "$(key_cnt sp_id_to_name)" "0" "sp_id_to_name keys after the drain"
@@ -4505,7 +4518,9 @@ case_drain() {
 	# because they share the coordinator and the fixture machinery. 65 chunks
 	# is one more than MaxDelBmPerTxn, so the drain provably needs TWO batches:
 	# the bound is what makes a batch's size independent of the clone's shape,
-	# and a single-batch fixture could not tell the two apart.
+	# and a single-batch fixture could not tell the two apart. The SpRev count
+	# around it is CLD12's revision contract: one bump for the latch, one for
+	# the final STM, none for a batch (CLD8).
 	drain_put_sp sp3 4
 	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 10737418240 >/dev/null
 	drain_assert_units 0 "before c0"
@@ -4529,6 +4544,19 @@ case_drain() {
 	assert_eq "$(key_cnt clone_bitmap)" "65" "the clone's chunk keys"
 	wait_until "$WAIT_SYNCUP" "cn0: SyncupCntlr carrying the clone" \
 		req_ge 1 cn0 SyncupCntlr '((.clone_list // []) | length) == 1'
+	# CLD12's revision contract, counted (dnv-worker.md, CLD8, CLD12). The
+	# baseline must be quiet: each provisioned flip of sp3's sides bumps SpRev
+	# too (RW18), so it is taken once every side is provisioned and nothing
+	# has moved it for a while. Stage 6 counts the batch again with the fleet
+	# stopped, where no other writer exists.
+	wait_until "$WAIT_SYNCUP" "sp3: every side of slice 1 provisioned" \
+		all_provisioned sp3 1
+	wait_until "$WAIT_SYNCUP" "sp3: every side of slice 2 provisioned" \
+		all_provisioned sp3 2
+	local rev_quiet
+	rev_quiet=$(sp_rev_num 4)
+	assert_none_for 3 "an SpRev bump of sp3 with nothing left to flip" \
+		sp_rev_changed 4 "$rev_quiet"
 	local clone_steps_before excluded_before
 	clone_steps_before=$(clone_drain_step_records)
 	# BASELINED, because every SyncupCntlr this SP sent BEFORE the clone
@@ -4536,7 +4564,10 @@ case_drain() {
 	# exclusion assertion below is satisfied by a request from stage 5's first
 	# line and proves nothing at all.
 	excluded_before=$(reqs cn0 SyncupCntlr '((.clone_list // []) | length) == 0')
-	ctl set-clone-deleting --sp sp3 --name c0 >/dev/null
+	latched=$(ctl set-clone-deleting --sp sp3 --name c0)
+	assert_field "$latched" '.latched' "true" "set-clone-deleting latched c0"
+	assert_field "$latched" '.sp_rev' "$((rev_quiet + 1))" \
+		"the latch bumped SpRev once (CLD4)"
 	wait_until "$WAIT_SYNCUP" "c0 to drain away" clone_gone
 	assert_eq "$(key_cnt clone_bitmap)" "0" "chunk keys after the clone drain"
 	assert_eq "$(key_cnt clone)" "0" "clone keys after the clone drain"
@@ -4545,6 +4576,8 @@ case_drain() {
 		"the name left clone_name_list with the key, in one STM"
 	assert_eq "$((  $(clone_drain_step_records) - clone_steps_before ))" "2" \
 		"65 chunks take exactly two batches"
+	assert_eq "$(sp_rev_num 4)" "$((rev_quiet + 2))" \
+		"SpRev after the clone drain: one bump for the latch, one for the final STM, none for its two batches (CLD8, CLD12)"
 	assert_eq "$(wcount 'select(.msg == "clone drained")')" "1" \
 		"exactly one \`clone drained\` record"
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
@@ -4584,7 +4617,11 @@ case_drain() {
 		"> /dev/null; done; done"
 	assert_eq "$(key_cnt clone_bitmap)" "65" "c1's chunk keys"
 	for w in w1 w2 w3; do stop_worker "$w"; done
-	ctl set-clone-deleting --sp sp3 --name c1 >/dev/null
+	local rev_latch
+	latched=$(ctl set-clone-deleting --sp sp3 --name c1)
+	assert_field "$latched" '.latched' "true" "set-clone-deleting latched c1"
+	rev_latch=$(jq_of "$latched" '.sp_rev')
+	want_number "$rev_latch" "c1's latch SpRev"
 	local partial
 	partial=$(ctl drain-clone --sp sp3 --name c1 --max-steps 1)
 	assert_field "$partial" '.clone_deleted' "false" \
@@ -4593,6 +4630,10 @@ case_drain() {
 		"the one batch spent the whole MaxDelBmPerTxn budget"
 	assert_eq "$(key_cnt clone_bitmap)" "1" "one chunk key survives the batch"
 	assert_eq "$(key_cnt clone)" "1" "the clone key survives the batch"
+	# No worker runs, so nothing else can move SpRev: this is the batch's own
+	# count, and it is none (CLD8).
+	assert_eq "$(sp_rev_num 4)" "$rev_latch" \
+		"SpRev after one batch with the fleet stopped"
 	# A batch removes chunk keys only: the units stay charged until the
 	# final STM.
 	drain_assert_units "$cloneUnits" "after the partial batch"
@@ -4610,6 +4651,8 @@ case_drain() {
 	# surviving keys.
 	assert_eq "$((  $(clone_drain_step_records) - clone_steps_before ))" "1" \
 		"the resumed drain took one batch, for the one chunk that was left"
+	assert_eq "$(sp_rev_num 4)" "$((rev_latch + 1))" \
+		"SpRev after the resumed drain: its batch bumped nothing, its final STM once (CLD8, CLD12)"
 	assert_eq "$(wcount 'select(.msg == "clone drained")')" "2" \
 		"c1 committed its own final STM"
 	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \

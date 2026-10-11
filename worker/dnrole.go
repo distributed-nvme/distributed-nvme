@@ -9,9 +9,24 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
+
+// msgDnFreeCountDisagrees is the dn role's count record (dnv-worker.md, Log
+// records; RW13). The string is normative, so it is a constant and never
+// formatted.
+const msgDnFreeCountDisagrees = "dn free count disagrees"
+
+// dnCountsRun is how many round compares in a row must find a disk node's own
+// free count other than its record's before the role logs it (RW13), a
+// sibling of AR10's failoverRun. One compare can disagree with no fault
+// anywhere: while two owners overlap (VW7), the other one's syncup can hand
+// the agent this revision with a side pointer list read after this role's
+// own read of the record, until the DnRev watch brings the newer revision.
+const dnCountsRun = 2
 
 // dnDriver is the dn role's half of the per-object loop (RW13). One
 // per DN: cluster_id and dn_id come from the DnRev key, addr_port and
@@ -24,8 +39,10 @@ type dnDriver struct {
 	addr     string
 	revision uint64
 
-	// mu guards lastInfo, the latest DnInfo the agent reported (RW2). Health
-	// is evaluated on it, not only on the info a given reply carried (HL5).
+	// mu guards lastInfo, the latest DnInfo the agent reported (RW2), and
+	// infoRev, the revision of the reply that carried it. Health is
+	// evaluated on lastInfo, not only on the info a given reply carried
+	// (HL5).
 	//
 	// A CheckDn reply is decoded by fold on the STREAM'S PUMP goroutine
 	// (dnCheckStream.recv) and a SyncupDn reply by fold on the LOOP's, while
@@ -37,15 +54,40 @@ type dnDriver struct {
 	// sets err_epoch.
 	mu       sync.Mutex
 	lastInfo *pb.DnInfo
+	infoRev  uint64
 
 	health *healthMonitor
+
+	// The count compare of RW13, owned by the loop goroutine (RW1) like the
+	// health monitor that feeds it. rec is a cache of the record: its extent
+	// counts and the DnRev revision read with them, as the last read of the
+	// pair found them (noteRecord), nil while that read found no record of
+	// this dn. disagree is the run of round compares in a row that found the
+	// agent's free count other than the record's, and logged whether that
+	// run has been logged; both are memos of observations (RW2).
+	rec      *dnRecordCounts
+	disagree int
+	logged   bool
 }
 
-// storeInfo remembers the latest DnInfo (HL5); info returns it. See the mu
-// comment above for why the pointer is guarded.
-func (d *dnDriver) storeInfo(info *pb.DnInfo) {
+// dnRecordCounts is a DnConf's extent counts with the revision of the DnRev
+// read in the same snapshot (readDnRecord). Every transaction that changes a
+// DN's free_ext_cnt also changes its side_ptr_list and bumps its DnRev
+// (architecture.md, Per-operation allocation), so one revision of a DN has
+// one free count.
+type dnRecordCounts struct {
+	free     uint64
+	total    uint64
+	revision uint64
+}
+
+// storeInfo remembers the latest DnInfo (HL5) and the revision of the reply
+// that carried it; info and infoAt return them. See the mu comment above for
+// why they are guarded.
+func (d *dnDriver) storeInfo(info *pb.DnInfo, revision uint64) {
 	d.mu.Lock()
 	d.lastInfo = info
+	d.infoRev = revision
 	d.mu.Unlock()
 }
 
@@ -53,6 +95,12 @@ func (d *dnDriver) info() *pb.DnInfo {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.lastInfo
+}
+
+func (d *dnDriver) infoAt() (*pb.DnInfo, uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastInfo, d.infoRev
 }
 
 // markInfoUnknown is the "no answer from the node" of architecture.md,
@@ -75,7 +123,7 @@ func newDnDriver(p revWorkerParams, host *revWorker) objDriver {
 		addr:     p.desired.handle,
 		revision: p.desired.revision,
 	}
-	d.health = newDnMonitor(p.deps, p.cid, p.id, d.addrPort)
+	d.health = newDnMonitor(p.deps, p.cid, p.id, d.addrPort, d.noteRecord)
 	return d
 }
 
@@ -127,26 +175,28 @@ func (d *dnDriver) openStream(
 }
 
 // syncup issues one SyncupDn (RW5, RW13). Per syncup it reads the DN's
-// DnConf at DnConfKey(cluster_id, addr_port) with a plain Get; a missing
-// record is logged and skipped, and the next round retries. The read is a load
-// of the DN's record, so it re-seeds the health memo (HL3): an err_epoch
-// another observer wrote, or cleared, since this monitor's last write makes
-// the verdict on this syncup's reply a transition when the two disagree. A
-// quiet DN never syncs; its monitor's refresh reads the record instead.
+// DnConf at DnConfKey(cluster_id, addr_port) together with its DnRev, both at
+// one store revision (readDnRecord); a missing record is logged and skipped,
+// and the next round retries. The read is a load of the DN's record, so it
+// re-seeds the health memo (HL3): an err_epoch another observer wrote, or
+// cleared, since this monitor's last write makes the verdict on this
+// syncup's reply a transition when the two disagree. It also replaces the
+// record the count compare holds (noteRecord). A quiet DN never syncs; its
+// monitor's refresh reads the record instead.
 func (d *dnDriver) syncup(
 	ctx context.Context,
 	conn *grpc.ClientConn,
 	cc *pb.ClusterConf,
 ) (*replyState, error) {
-	dnConf := &pb.DnConf{}
-	found, err := d.deps.store.Get(
-		ctx, model.DnConfKey(d.cid, d.addr), dnConf,
+	dnConf, revision, found, revFound, err := readDnRecord(
+		ctx, d.deps.store, d.cid, d.addr,
 	)
 	if err != nil {
 		// The "etcd get" record carries the error; no SyncupDn was issued, so
 		// there is no syncup result to report. Retried next round (RW12).
 		return nil, nil
 	}
+	d.noteRecord(dnConf, revision, found, revFound)
 	if !found {
 		slog.InfoContext(ctx, "dn conf missing",
 			slog.Uint64("cluster_id", d.cid),
@@ -167,10 +217,110 @@ func (d *dnDriver) syncup(
 	), nil
 }
 
-// observe folds one CheckDn/SyncupDn reply into the DN's health (HL1, HL4).
+// observe folds one CheckDn/SyncupDn reply into the DN's health (HL1, HL4),
+// then into the count compare (RW13). The compare comes second because the
+// health verdict can re-read the record first (refresh), and a re-read
+// replaces the record the compare holds.
 func (d *dnDriver) observe(ctx context.Context, r *replyState) {
 	obs, res := dnObservation(r.code, d.info())
 	d.health.observe(ctx, obs, res)
+	d.compareCounts(ctx, r)
+}
+
+// readDnRecord reads the DnConf at DnConfKey(cid, addrPort) and, when there
+// is one, the DnRev of the dn it names, in one snapshot, so the revision
+// belongs to the record (RW13). found says whether the DnConf exists and
+// revFound whether its DnRev does. Both the syncup's read and the health
+// monitor's refresh of a DN go through it.
+func readDnRecord(
+	ctx context.Context,
+	store etcdStore,
+	cid uint64,
+	addrPort string,
+) (conf *pb.DnConf, revision uint64, found bool, revFound bool, err error) {
+	_, err = store.SnapshotRev(ctx, func(s etcdutil.STM) error {
+		conf, revision, found, revFound = &pb.DnConf{}, 0, false, false
+		found = s.Get(model.DnConfKey(cid, addrPort), conf)
+		if !found {
+			return nil
+		}
+		rev := &pb.DnRev{}
+		revFound = s.Get(
+			model.DnRevKey(conf.GetShardCode(), cid, conf.GetDnId()), rev,
+		)
+		revision = rev.GetRevision()
+		return nil
+	})
+	if err != nil {
+		return nil, 0, false, false, err
+	}
+	return conf, revision, found, revFound, nil
+}
+
+// noteRecord replaces the record the count compare holds with what one read
+// of the DnConf and its DnRev found (readDnRecord): its counts, or nil when
+// the read found no DnConf of this dn or no DnRev with it. Only a read that
+// answered gets here, so a failed read leaves the cache as it is. It runs on
+// the loop goroutine, from the syncup and from the health monitor's refresh.
+func (d *dnDriver) noteRecord(
+	conf *pb.DnConf,
+	revision uint64,
+	found bool,
+	revFound bool,
+) {
+	if !found || !revFound || conf.GetDnId() != d.dnId {
+		d.rec = nil
+		return
+	}
+	d.rec = &dnRecordCounts{
+		free:     conf.GetFreeExtCnt(),
+		total:    conf.GetTotalExtCnt(),
+		revision: revision,
+	}
+}
+
+// compareCounts is RW13's count compare, run on a round's accepted reply:
+// the free extents of the disk counts in the latest known info (HL5) against
+// the record's free_ext_cnt. It compares only when the counts are present and
+// say the side records match the side pointer list, and when the revision of
+// the reply that carried them, this round's reply revision and the revision
+// read with the record are one: at one revision a DN has one list and one
+// free count (dnRecordCounts). Any other reply neither counts nor resets the
+// run. A compare that agrees ends the run; the dnCountsRun-th disagreement in
+// a row is logged once, until a compare agrees. Nothing is written.
+func (d *dnDriver) compareCounts(ctx context.Context, r *replyState) {
+	if !r.fromRound || !accepted(r.code) {
+		return
+	}
+	info, infoRev := d.infoAt()
+	counts := info.GetDiskCounts()
+	rec := d.rec
+	if counts == nil || !counts.GetSideRecsMatch() || rec == nil ||
+		infoRev != rec.revision || r.revision != rec.revision {
+		return
+	}
+	if counts.GetFreeExtCnt() == rec.free {
+		d.disagree = 0
+		d.logged = false
+		return
+	}
+	d.disagree++
+	if d.disagree < dnCountsRun || d.logged {
+		return
+	}
+	d.logged = true
+	slog.ErrorContext(ctx, msgDnFreeCountDisagrees,
+		slog.String("role", common.WorkerRoleDn),
+		slog.Uint64("cluster_id", d.cid),
+		slog.Uint64("dn_id", d.dnId),
+		slog.String("addr_port", d.addr),
+		slog.Uint64("revision", rec.revision),
+		slog.Uint64("free_ext_cnt", rec.free),
+		slog.Uint64("agent_free_ext_cnt", counts.GetFreeExtCnt()),
+		slog.Uint64("total_ext_cnt", rec.total),
+		slog.Uint64("agent_total_ext_cnt", counts.GetTotalExtCnt()),
+		slog.Uint64("side_rec_cnt", counts.GetSideRecCnt()),
+	)
 }
 
 // unreachable folds a broken stream or a missed reply into the DN's health
@@ -183,14 +333,15 @@ func (d *dnDriver) unreachable(ctx context.Context) {
 }
 
 // fold turns one reply into a replyState, remembering the DnInfo it carried
-// (HL5: a show_info = false reply carries one only when something changed).
+// with the reply's revision (HL5: a show_info = false reply carries one only
+// when something changed; RW13 pairs the counts with that revision).
 func (d *dnDriver) fold(
 	agentReply *pb.AgentReply,
 	revision uint64,
 	info *pb.DnInfo,
 ) *replyState {
 	if info != nil {
-		d.storeInfo(info)
+		d.storeInfo(info, revision)
 	}
 	return &replyState{
 		revision:    revision,

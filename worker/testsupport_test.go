@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -163,6 +164,10 @@ type fakeStore struct {
 	// muteEvents drops every watch event without touching the store, the way
 	// a broken watch that still looks open does (VW8b).
 	muteEvents bool
+	// mutedPrefixes drops the watch events of the keys under these prefixes
+	// only, the way one role's broken watch does while the others still
+	// deliver (VW8 (b), VW10).
+	mutedPrefixes map[string]bool
 
 	puts    []string
 	deletes []string
@@ -314,6 +319,84 @@ func (s *fakeStore) Decode(
 	return proto.Unmarshal(kv.Value, msg)
 }
 
+// SnapshotRev runs f once over a read-only view of the store as it stands
+// when the call begins, the one store revision every read of the view is
+// served at, and returns that revision (EU4). As in the production view, a
+// read fails while getErr is set, and a Put or a Del inside f is a misuse:
+// the first failure ends the snapshot with its error, ahead of whatever f
+// returns, and every read after it finds nothing.
+func (s *fakeStore) SnapshotRev(
+	ctx context.Context,
+	f func(stm etcdutil.STM) error,
+) (int64, error) {
+	s.mu.Lock()
+	view := &fakeSnapshot{
+		kvs:     maps.Clone(s.kvs),
+		modRevs: maps.Clone(s.modRevs),
+		getErr:  s.getErr,
+	}
+	rev := s.rev
+	s.mu.Unlock()
+	callbackErr := f(view)
+	if view.err != nil {
+		return rev, fmt.Errorf("etcd snapshot: %w", view.err)
+	}
+	return rev, callbackErr
+}
+
+// fakeSnapshot is the read-only STM view of fakeStore.SnapshotRev.
+type fakeSnapshot struct {
+	kvs     map[string][]byte
+	modRevs map[string]int64
+	getErr  error
+	// err is the first failure or misuse of the snapshot.
+	err error
+}
+
+func (v *fakeSnapshot) fail(err error) {
+	if v.err == nil {
+		v.err = err
+	}
+}
+
+func (v *fakeSnapshot) Get(key string, msg proto.Message) bool {
+	switch {
+	case v.err != nil:
+		return false
+	case v.getErr != nil:
+		v.fail(fmt.Errorf("snapshot get %s: %w", key, v.getErr))
+		return false
+	}
+	data, ok := v.kvs[key]
+	if !ok {
+		return false
+	}
+	if err := proto.Unmarshal(data, msg); err != nil {
+		v.fail(fmt.Errorf("snapshot get %s: unmarshal: %w", key, err))
+		return false
+	}
+	return true
+}
+
+func (v *fakeSnapshot) Put(key string, msg proto.Message) {
+	v.fail(fmt.Errorf("snapshot put %s: the snapshot is read-only", key))
+}
+
+func (v *fakeSnapshot) Del(key string) {
+	v.fail(fmt.Errorf("snapshot delete %s: the snapshot is read-only", key))
+}
+
+func (v *fakeSnapshot) Rev(key string) int64 {
+	switch {
+	case v.err != nil:
+		return 0
+	case v.getErr != nil:
+		v.fail(fmt.Errorf("snapshot rev %s: %w", key, v.getErr))
+		return 0
+	}
+	return v.modRevs[key]
+}
+
 func (s *fakeStore) WatchTyped(
 	ctx context.Context,
 	prefix string,
@@ -342,6 +425,11 @@ func (s *fakeStore) WatchTyped(
 func (s *fakeStore) matching(key string) []*fakeWatch {
 	if s.muteEvents {
 		return nil
+	}
+	for prefix := range s.mutedPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return nil
+		}
 	}
 	var out []*fakeWatch
 	for _, w := range s.watchers {
@@ -425,10 +513,31 @@ func (s *fakeStore) setMuteEvents(mute bool) {
 	s.mu.Unlock()
 }
 
+// setMutePrefix mutes or unmutes the watch events of the keys under one
+// prefix.
+func (s *fakeStore) setMutePrefix(prefix string, mute bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mutedPrefixes == nil {
+		s.mutedPrefixes = make(map[string]bool)
+	}
+	if mute {
+		s.mutedPrefixes[prefix] = true
+	} else {
+		delete(s.mutedPrefixes, prefix)
+	}
+}
+
 func (s *fakeStore) setRangeErr(err error) {
 	s.mu.Lock()
 	s.rangeErr = err
 	s.mu.Unlock()
+}
+
+func (s *fakeStore) putKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.puts...)
 }
 
 func (s *fakeStore) deletedKeys() []string {

@@ -88,7 +88,7 @@ reflection: one subcommand per `DiskNodeAgent` RPC, each reply printed as
 protojson, and a failure on a gRPC error or an unexpected reply code. It sends
 the stage's trace id as metadata and in `Check*` requests (`grpc.md`, Drivers
 and fakes), runs the polling loops until a side is zeroed or a destination
-hydrated, the latter through `agent.ParseCloneStatus`, and prints a leg's
+hydrated, the latter through `common.ParseCloneStatus`, and prints a leg's
 namespace identity (`common.DnNsIdentity`) and a host NQN's host id, which the
 script never derives itself.
 
@@ -154,7 +154,9 @@ zero all of it, and a side of a data group, which asks to zero its meta region
 and first data block, then provision through the flip. Read through their side
 devices after a cache drop, the first reads zero throughout, and the second
 reads zero over the length it asked for and holds the pattern from there to
-its end.
+its end. While the two sides exist, the node's disk counts (`dnagent.md`
+DN18) count their extents as taken, with side records that match the side
+pointers; once the sides are gone, they count the whole data area free.
 
 **sides** exports sides on both nodes to two controller nodes whose roles
 cross: primary paths are optimized and carry data, standby paths are

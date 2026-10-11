@@ -613,6 +613,10 @@ func (s *DnAgentServer) convergeDn(
 	}
 
 	info.MetaInfo = s.ensureDiskMeta(ctx, t, req)
+	// The counts are taken here, before syncupDn's pointer diff and sweep
+	// (DN6), so the reply to a SyncupDn that removes a pointer still counts
+	// that side's record and says the records do not match the new list.
+	s.addDiskCounts(info, req)
 
 	info.PortInfo = s.ensurePort(ctx, t)
 	return info
@@ -685,7 +689,7 @@ func (s *DnAgentServer) diskUnmapped(ctx context.Context) error {
 
 // tableMaps reports whether any target of a live dm table names devNo, the
 // "major:minor" form `dmsetup table` prints every device in.
-func tableMaps(targets []agent.DmTarget, devNo string) bool {
+func tableMaps(targets []common.DmTarget, devNo string) bool {
 	for _, target := range targets {
 		for _, arg := range target.Args {
 			if arg == devNo {

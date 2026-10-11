@@ -1033,7 +1033,7 @@ func TestADestinationReadsTheSameOnBothChannels(t *testing.T) {
 				}
 			}
 			details := checked["dm_clone_info"].GetDetails()
-			if _, parsed := agent.ParseCloneStatus(
+			if _, parsed := common.ParseCloneStatus(
 				details); parsed != tc.cloneThere {
 				t.Errorf("the round's dm_clone_info details %q: a status "+
 					"line parses = %v, want %v", details, parsed,
@@ -1195,7 +1195,7 @@ func TestMigrDstRowRule(t *testing.T) {
 					details, tc.clone, tc.cloneDetails)
 			}
 			wantLine := seen.statusRead && lines[seen.raw]
-			if _, parsed := agent.ParseCloneStatus(
+			if _, parsed := common.ParseCloneStatus(
 				details); parsed != wantLine {
 				t.Errorf("dm_clone_info %q: a status line parses = %v, "+
 					"want %v", details, parsed, wantLine)

@@ -50,7 +50,7 @@ func volChunks(env *volEnv, cloneName string) []model.BmChunk {
 }
 
 // volDrainClone runs one latched clone's drain to completion: CLD7's
-// derivation in a loop, with no pass and no timer.
+// derivation in a loop, with no pass and no wake-up.
 func volDrainClone(env *volEnv, cloneName string) {
 	env.t.Helper()
 	for step := 0; step < volDrainCloneSteps; step++ {
@@ -75,7 +75,7 @@ func volDrainClone(env *volEnv, cloneName string) {
 				batch = batch[:common.MaxDelBmPerTxn]
 			}
 			_, err = model.DrainCloneBm(
-				env.ctx, env.cli, env.cid, volShard, volSpId, volSpName,
+				env.ctx, env.cli, env.cid, volSpId, volSpName,
 				cloneName, clone.GetCloneId(), batch)
 		}
 		if err != nil {
@@ -586,6 +586,11 @@ func TestCloneDrainConsequences(t *testing.T) {
 // What it proves is the property the arithmetic cannot: with N the
 // rectangle's key count, the keys leave in ceil(N / MaxDelBmPerTxn)
 // transactions of a constant size, not in one whose size is the rectangle.
+//
+// It also counts the pool's revision across the widest drain there is
+// (CLD12): its batches, every one of them, move it not at all (CLD8), and the
+// final STM moves it once, so a client's token outlives every batch and only
+// the drain's end invalidates it.
 func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -618,6 +623,7 @@ func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 		t.Fatalf("%d chunk keys planted, want %d", n, total)
 	}
 	volLatchClone(env, "clone-max")
+	latchRev := env.spRev()
 
 	// The batches, counted: the rectangle leaves in exactly
 	// ceil(total / MaxDelBmPerTxn) of them, each one MaxDelBmPerTxn deletes
@@ -631,7 +637,7 @@ func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 			want = common.MaxDelBmPerTxn
 		}
 		removed, err := model.DrainCloneBm(
-			env.ctx, env.cli, env.cid, volShard, volSpId, volSpName,
+			env.ctx, env.cli, env.cid, volSpId, volSpName,
 			"clone-max", clone.GetCloneId(), chunks[:want])
 		if err != nil {
 			t.Fatalf("batch %d: %v (a \"too many operations in txn request\" "+
@@ -658,6 +664,11 @@ func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 	if got := env.clone("clone-max"); !proto.Equal(got, clone) {
 		t.Errorf("a batch rewrote the Clone: got %v, want %v", got, clone)
 	}
+	// Every batch left the pool's revision where the latch put it (CLD8).
+	if got := env.spRev(); got != latchRev {
+		t.Errorf("sp_rev after %d batches: got %d, want the latch's %d "+
+			"(a batch bumps nothing)", batches, got, latchRev)
+	}
 	if err := model.FinishCloneDelete(
 		env.ctx, env.cli, env.cid, volShard, volSpId, volSpName,
 		"clone-max", clone.GetCloneId(),
@@ -666,5 +677,10 @@ func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 	}
 	if env.exists(model.CloneKey(env.cid, volSpId, "clone-max"), &pb.Clone{}) {
 		t.Errorf("the clone key survived")
+	}
+	// The final STM is the drain's one bump after the latch's (CLD12).
+	if got := env.spRev(); got != latchRev+1 {
+		t.Errorf("sp_rev after the final STM: got %d, want %d (one bump)",
+			got, latchRev+1)
 	}
 }

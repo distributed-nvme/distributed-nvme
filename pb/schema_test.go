@@ -78,3 +78,46 @@ func TestRowReasonAndTornMarkNumbers(t *testing.T) {
 		}
 	}
 }
+
+// TestDnInfoDiskCountsNumbers pins the numbers and kinds of the disk node's
+// counts: the field DnInfo carries them in, and the five fields of the nested
+// message. Each is appended; a renumbered field decodes an old value into the
+// wrong field, or into unknown fields, with no error.
+func TestDnInfoDiskCountsNumbers(t *testing.T) {
+	info := (&pb.DnInfo{}).ProtoReflect().Descriptor()
+	counts := (&pb.DnInfo_DiskCounts{}).ProtoReflect().Descriptor()
+	if counts.Parent() != info {
+		t.Errorf("%s is not nested in %s", counts.FullName(), info.FullName())
+	}
+	for _, tc := range []struct {
+		md     protoreflect.MessageDescriptor
+		name   protoreflect.Name
+		number protoreflect.FieldNumber
+		kind   protoreflect.Kind
+	}{
+		{info, "disk_counts", 4, protoreflect.MessageKind},
+		{counts, "total_ext_cnt", 1, protoreflect.Uint64Kind},
+		{counts, "free_ext_cnt", 2, protoreflect.Uint64Kind},
+		{counts, "side_rec_cnt", 3, protoreflect.Uint64Kind},
+		{counts, "free_meta_units", 4, protoreflect.Uint64Kind},
+		{counts, "side_recs_match", 5, protoreflect.BoolKind},
+	} {
+		fd := tc.md.Fields().ByName(tc.name)
+		if fd == nil {
+			t.Errorf("%s has no field %s", tc.md.FullName(), tc.name)
+			continue
+		}
+		if fd.Number() != tc.number || fd.Kind() != tc.kind {
+			t.Errorf("%s.%s is %v at %d, want %v at %d", tc.md.FullName(),
+				tc.name, fd.Kind(), fd.Number(), tc.kind, tc.number)
+		}
+	}
+	if fd := info.Fields().ByName("disk_counts"); fd != nil &&
+		fd.Message() != counts {
+		t.Errorf("DnInfo.disk_counts is a %v, want %s",
+			fd.Message(), counts.FullName())
+	}
+	if got := counts.Fields().Len(); got != 5 {
+		t.Errorf("%s has %d fields, want 5", counts.FullName(), got)
+	}
+}

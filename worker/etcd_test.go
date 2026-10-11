@@ -42,9 +42,9 @@ func TestHealthWritesThroughModel(t *testing.T) {
 	d.health = &modelHealthWriter{cli: cli}
 	d.conf.entries[cid] = testClusterConf()
 
-	owner := newDnMonitor(d, cid, 11, func() string { return addr })
+	owner := newDnMonitor(d, cid, 11, func() string { return addr }, nil)
 	// A second owner of the same DN, the accepted overlap of VW7.
-	peer := newDnMonitor(d, cid, 11, func() string { return addr })
+	peer := newDnMonitor(d, cid, 11, func() string { return addr }, nil)
 
 	owner.observe(ctx, healthUnreachable, "")
 	stored := &pb.DnConf{}

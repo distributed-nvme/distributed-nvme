@@ -95,7 +95,8 @@ func loadSpConfForDrain(
 // per distinct CN the full ledger release — CnConf put with the pointer gone and
 // the SP footprint back, its capacity key maintained (architecture.md,
 // Capacity index keys) and one CnRev bump;
-// finally one SpRev bump, whose watch event schedules the next drain step.
+// finally one SpRev bump, which re-fans the SP; the coordinator's own wake-up
+// runs the next drain step (SPD6).
 //
 // It deliberately skips DeleteCntlr's disabled-first and non-primary
 // preconditions: those exist to protect host IO and discovery, and a deletable

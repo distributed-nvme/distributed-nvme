@@ -45,10 +45,12 @@ no leg repair:
   writes run again once the new primary has built its stack; continued, the
   old primary returns as a standby and is listed again.
 * **The lab is left as it was found.** After every case every disk node has all
-  its extents back, no node guest holds a dnv dm device, md array or nvmet
-  subsystem, and allocation stays under a per-file and a whole-run cap; the
-  cutoff case also stops nvme-stas on host0 and puts host0's own configuration
-  of it back byte for byte.
+  its extents back, the free count of its own disk counts agreeing with its
+  record's and the worker having logged no disagreement between the two
+  (`dnv-worker.md` RW13), no node guest holds a dnv dm device, md array or
+  nvmet subsystem, and allocation stays under a per-file and a whole-run
+  cap; the cutoff case also stops nvme-stas on host0 and puts host0's own
+  configuration of it back byte for byte.
 
 **What it does not prove.** The RPCs it never issues, the deletions and
 listings of clusters, disk nodes and controller nodes: the gateway suite covers
@@ -106,14 +108,15 @@ allocation, Finding DN candidates), so a group's legs come from distinct guests
 and a pick fails once fewer guests than a group has legs hold an unpicked node;
 hence many agents per guest. The bound is the least count per guest that rules
 starvation out by counting, sized by the ops case rather than the create: after
-the create and its own two grows, whose scans hand each guest its emptiest disk
-node first and so take side-less nodes first (`architecture.md`, Finding DN
-candidates), ops needs a side-less disk node on as many guests as a group has
-legs, and guaranteeing that guarantees the create. The guarantee is sufficient,
-not necessary: below the bound the proof is lost, not the run. Its headroom
-also keeps the allocator's second tier out of reach (E2E4), and as one more
-guest does not always lower the bound, a shape above the per-kernel cap is told
-how many disk-node guests it needs.
+the create and its own two grows, whose scans hand each guest one of its
+emptiest disk nodes first and so take side-less nodes first
+(`architecture.md`, Finding DN candidates), ops needs a side-less disk
+node on as many guests as a group has legs, and guaranteeing that
+guarantees the create. The guarantee is sufficient, not necessary: below
+the bound the proof is lost, not the run. Its headroom also keeps the
+allocator's second tier out of reach (E2E4), and as one more guest does
+not always lower the bound, a shape above the per-kernel cap is told how
+many disk-node guests it needs.
 
 **Event thresholds.** Only a pool's create sets its thresholds, so each case's
 set is chosen just before its pool is built, and a case without one dies rather
@@ -443,12 +446,17 @@ carries another subsystem, and left retrying when that subsystem was the
 port's last, as here (Known limits); the pool's delete latches, the drain's
 end showing only as `NOT_FOUND` (`dnv-worker.md`, The sp drain); every disk
 node then has its free extents equal its total with an empty side pointer
-list; no node guest holds a dnv dm device, nvmet subsystem or md array, the
-last proving on a disk node that its mask held; and the space guard holds —
-each backing file's allocation, which bounds what its disk node zeroes and
-what is written into its sides, since both allocate, the run's allocation at
-what the pool's own sides zero and the backing pattern plus slack, and every
-node's and the control-plane guest's free space at preflight's floors.
+list, and its agent comes to hold its record's revision with no side record
+left, its disk counts then giving the same free extents (`architecture.md`,
+Live-state reporting); the worker's log of the case holds no disagreement
+between a disk node's own free count and its record (`dnv-worker.md`
+RW13); no node guest holds a dnv dm device, nvmet subsystem or md array,
+the last proving on a disk node that its mask held; and the space guard
+holds — each backing file's allocation, which bounds what its disk node
+zeroes and what is written into its sides, since both allocate, the run's
+allocation at what the pool's own sides zero and the backing pattern plus
+slack, and every node's and the control-plane guest's free space at
+preflight's floors.
 
 **What a pass means.** Exit status zero and PASS mean that every assertion of
 every case held in a run that stops at its first failure, and that the end

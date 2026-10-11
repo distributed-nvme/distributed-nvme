@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -776,19 +777,19 @@ func (s *CnAgentServer) cloneHydrating(
 		}
 		return false, err
 	}
-	status, ok := agent.ParseCloneStatus(raw)
+	status, ok := common.ParseCloneStatus(raw)
 	return ok && status.HydrationEnabled, nil
 }
 
 func (s *CnAgentServer) cloneStatus(
 	ctx context.Context,
 	cp *clonePlan,
-) (*agent.CloneStatus, error) {
+) (*common.CloneStatus, error) {
 	raw, err := s.dm.Status(ctx, cp.finalName)
 	if err != nil {
 		return nil, err
 	}
-	status, ok := agent.ParseCloneStatus(raw)
+	status, ok := common.ParseCloneStatus(raw)
 	if !ok {
 		return nil, fmt.Errorf("unparsable dm-clone status %q", raw)
 	}
@@ -863,7 +864,7 @@ func (s *CnAgentServer) probeCloneDm(
 		}
 		return cloneDmRead{err: err}
 	}
-	status, ok := agent.ParseCloneStatus(raw)
+	status, ok := common.ParseCloneStatus(raw)
 	return cloneDmRead{
 		present:   true,
 		raw:       raw,

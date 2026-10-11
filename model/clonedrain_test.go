@@ -92,13 +92,20 @@ func (e *opsEnv) drainCloneChunkCnt() int {
 }
 
 // TestDrainCloneBm is CLD8: the batch deletes exactly the chunks it was handed,
-// leaves the Clone record alone, and bumps SpRev once.
+// leaves the Clone record alone, and leaves SpRev alone too — no bump, and no
+// rewrite of the same value.
 //
 // "Exactly the chunks it was handed" is the load-bearing half. An STM cannot
 // range, so the set a batch may touch has to come in from the caller's snapshot
 // scan; a batch that derived the set itself — from the rectangle the record's
 // geometry implies, as a sweep over the rectangle would — would be back to a
 // transaction whose size is the clone's shape.
+//
+// The SpRev half is the batch's other contract: a batch changes nothing a side
+// or a cntlr is sent, the clone having left every request with the latch
+// (CLD5), so a bump would re-send the SP's whole desired state once per batch
+// for deletes no agent reads. The key's mod_revision is compared as well as
+// its value, so a put of the same revision fails here too.
 func TestDrainCloneBm(t *testing.T) {
 	env := newOpsEnv(t)
 	chunks := env.putDrainClone(true, [][2]uint32{
@@ -106,8 +113,9 @@ func TestDrainCloneBm(t *testing.T) {
 	})
 	before := env.clone(drainCloneName)
 	revBefore := env.spRev()
+	modBefore := env.modRev(SpRevKey(opsShard, env.cid, opsSpId))
 
-	removed, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	removed, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, chunks[:2])
 	if err != nil {
 		t.Fatalf("DrainCloneBm: %v", err)
@@ -130,14 +138,19 @@ func TestDrainCloneBm(t *testing.T) {
 		}
 	}
 	// CLD8: the record is untouched. proto.Equal against the pre-batch record
-	// is the whole statement — the drain reads nothing out of the record and
-	// must write nothing into it (CLD7), including a field added later.
+	// is the whole statement — the drain reads nothing out of the record
+	// (CLD7) and must write nothing into it (CLD8), including a field added
+	// later.
 	if got := env.clone(drainCloneName); !proto.Equal(got, before) {
 		t.Errorf("the batch rewrote the Clone: got %v, want %v", got, before)
 	}
-	if got := env.spRev(); got != revBefore+1 {
-		t.Errorf("SpRev: got %d, want %d (exactly one bump)",
-			got, revBefore+1)
+	if got := env.spRev(); got != revBefore {
+		t.Errorf("SpRev: got %d, want %d (a batch bumps nothing)",
+			got, revBefore)
+	}
+	if got := env.modRev(SpRevKey(opsShard, env.cid, opsSpId)); got != modBefore {
+		t.Errorf("SpRev mod_revision: got %d, want %d (a batch writes no "+
+			"SpRev, not even its own value)", got, modBefore)
 	}
 	// The clone is still listed: only the final STM removes the name.
 	if got := env.spConf().GetCloneNameList(); len(got) != 1 {
@@ -162,7 +175,7 @@ func TestDrainCloneBmRefusesAnOversizedBatch(t *testing.T) {
 	chunks := env.putDrainClone(true, pairs)
 	revBefore := env.spRev()
 
-	_, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	_, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, chunks)
 	precondition := wantPrecondition(t, err, opDrainCloneBm)
 	if precondition.Reason != "batch too large" {
@@ -178,7 +191,7 @@ func TestDrainCloneBmRefusesAnOversizedBatch(t *testing.T) {
 	}
 	// Exactly at the bound it commits: the refusal is the bound and not an
 	// off-by-one around it.
-	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId,
 		chunks[:common.MaxDelBmPerTxn]); err != nil {
 		t.Fatalf("a batch of exactly MaxDelBmPerTxn must commit: %v", err)
@@ -186,19 +199,25 @@ func TestDrainCloneBmRefusesAnOversizedBatch(t *testing.T) {
 }
 
 // TestDrainCloneBmIsIdempotent is the accepted two-owner overlap: a Del of a
-// key another driver already removed is harmless, and an empty batch is a
-// no-op that writes and bumps nothing rather than a refusal.
+// key another driver already removed is harmless, neither batch bumps SpRev
+// (CLD8), and an empty batch is a no-op that writes nothing rather than a
+// refusal.
 func TestDrainCloneBmIsIdempotent(t *testing.T) {
 	env := newOpsEnv(t)
 	chunks := env.putDrainClone(true, [][2]uint32{{0, 0}, {1, 1}})
-	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	revStart := env.spRev()
+	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, chunks); err != nil {
 		t.Fatalf("DrainCloneBm: %v", err)
 	}
 	revAfter := env.spRev()
+	if revAfter != revStart {
+		t.Errorf("SpRev after the winner's batch: got %d, want %d (a batch "+
+			"bumps nothing)", revAfter, revStart)
+	}
 
 	// The loser of the race, handed the same batch its own snapshot found.
-	removed, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	removed, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, chunks)
 	if err != nil {
 		t.Fatalf("the loser's batch must not fail: %v", err)
@@ -209,13 +228,14 @@ func TestDrainCloneBmIsIdempotent(t *testing.T) {
 	if removed != len(chunks) {
 		t.Errorf("removed %d, want %d", removed, len(chunks))
 	}
-	if got := env.spRev(); got != revAfter+1 {
-		t.Errorf("SpRev: got %d, want %d", got, revAfter+1)
+	if got := env.spRev(); got != revAfter {
+		t.Errorf("SpRev after the loser's batch: got %d, want %d", got,
+			revAfter)
 	}
 
 	// An EMPTY batch writes nothing at all.
 	revBefore := env.spRev()
-	removed, err = DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	removed, err = DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, nil)
 	if err != nil {
 		t.Fatalf("an empty batch must not fail: %v", err)
@@ -228,6 +248,82 @@ func TestDrainCloneBmIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestDrainCloneBmReadsNoRevision is CLD8's other half: a batch does not read
+// the pool's revision key, because the SpConf it loads already refuses a pool
+// that is gone (CLD2) — the sp drain deletes the SpConf and the SpRev key in
+// one transaction (SPD12), so no committed state holds the one without the
+// other.
+//
+// Every step runs against a store that breaks that pairing on purpose. With
+// the SpRev key gone and the SpConf kept, the batch commits and leaves the key
+// absent: a batch that refused on the missing key, as BumpSpRev does, fails
+// here, and so does one that wrote the key back. With the key holding bytes
+// no SpRev decodes from, the batch commits and leaves the key's mod_revision
+// alone: a Get of the key into a SpRev fails the batch on the decode, and
+// any write moves the mod_revision. With the SpConf gone as well, the batch
+// refuses with "sp not found" and deletes nothing: the guard a revision read
+// would only have repeated still holds. The one read no step sees is a bare
+// Rev of the key, which decodes no value and refuses nothing.
+func TestDrainCloneBmReadsNoRevision(t *testing.T) {
+	env := newOpsEnv(t)
+	chunks := env.putDrainClone(true, [][2]uint32{{0, 0}, {1, 1}, {2, 2}})
+	revKey := SpRevKey(opsShard, env.cid, opsSpId)
+	env.delKey(revKey)
+
+	removed, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
+		opsSpName, drainCloneName, drainCloneId, chunks[:1])
+	if err != nil {
+		t.Fatalf("a batch with the SpRev key gone: %v (a batch must not "+
+			"read the key)", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed %d chunks, want 1", removed)
+	}
+	if env.exists(CloneBitmapKey(env.cid, opsSpId, drainCloneName,
+		chunks[0].SliceIdx, chunks[0].Idx)) {
+		t.Errorf("chunk (%d, %d) survived the batch",
+			chunks[0].SliceIdx, chunks[0].Idx)
+	}
+	if env.exists(revKey) {
+		t.Errorf("the batch wrote the SpRev key back")
+	}
+
+	// Field 1 of a SpRev is the string sp_name, and these bytes are not
+	// UTF-8, so a Get of the key into a SpRev fails on the decode.
+	mustPut(t, env.cli, revKey, &pb.CloneBitmap{Bitmap: []byte{0xff, 0xfe}})
+	modBefore := env.modRev(revKey)
+	removed, err = DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
+		opsSpName, drainCloneName, drainCloneId, chunks[1:2])
+	if err != nil {
+		t.Fatalf("a batch with an undecodable SpRev value: %v (a batch "+
+			"must not read the key)", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed %d chunks, want 1", removed)
+	}
+	if env.exists(CloneBitmapKey(env.cid, opsSpId, drainCloneName,
+		chunks[1].SliceIdx, chunks[1].Idx)) {
+		t.Errorf("chunk (%d, %d) survived the batch",
+			chunks[1].SliceIdx, chunks[1].Idx)
+	}
+	if got := env.modRev(revKey); got != modBefore {
+		t.Errorf("SpRev mod_revision: got %d, want %d (the batch wrote "+
+			"the key)", got, modBefore)
+	}
+
+	env.delKey(SpConfKey(env.cid, opsSpName))
+	_, err = DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
+		opsSpName, drainCloneName, drainCloneId, chunks[2:3])
+	precondition := wantPrecondition(t, err, opDrainCloneBm)
+	if precondition.Reason != "sp not found" {
+		t.Errorf("Reason: got %q, want %q", precondition.Reason,
+			"sp not found")
+	}
+	if got := env.drainCloneChunkCnt(); got != 1 {
+		t.Errorf("%d chunk keys after the refused batch, want 1", got)
+	}
+}
+
 // TestCloneDrainConcurrentDriversConverge is the design's "two concurrent
 // drivers converge without error amplification" — CLD12's overlap-loser case
 // and CLD8's idempotent pop — run for real: two goroutines drive the
@@ -235,7 +331,9 @@ func TestDrainCloneBmIsIdempotent(t *testing.T) {
 // gone with neither reporting a failure that is not one of the named benign
 // races. The clone's metadata units come back exactly once: the loser of the
 // final STM finds the clone gone, so a second release, which would take
-// other units off each CN, never happens.
+// other units off each CN, never happens. And the pool's revision moves exactly
+// once over the whole drain, for the final STM (CLD12): ten or more batches
+// from two drivers bump nothing (CLD8).
 //
 // The races are named rather than blanket-tolerated. A batch whose keys another
 // driver already removed is an idempotent pop; a final STM that runs while the
@@ -255,6 +353,7 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 	env.setCloneMetaUnits(drainCloneName, 3)
 	env.setCnUsed(opsCnA, 3+5)
 	env.setCnUsed(opsCnB, 3+5)
+	revBefore := env.spRev()
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for driver := 0; driver < 2; driver++ {
@@ -297,7 +396,7 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 						opsShard, opsSpId, opsSpName, drainCloneName,
 						drainCloneId)
 				} else {
-					_, err = DrainCloneBm(env.ctx, env.cli, env.cid, opsShard,
+					_, err = DrainCloneBm(env.ctx, env.cli, env.cid,
 						opsSpId, opsSpName, drainCloneName, drainCloneId,
 						chunks)
 				}
@@ -329,6 +428,11 @@ func TestCloneDrainConcurrentDriversConverge(t *testing.T) {
 	}
 	if got := env.spConf().GetCloneNameList(); len(got) != 0 {
 		t.Errorf("clone_name_list: got %v, want empty", got)
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d (one bump, the final STM's, "+
+			"however many batches the two drivers committed)",
+			got, revBefore+1)
 	}
 	// The SP is intact: two drivers rewriting one SpConf is the shape most
 	// likely to lose an unrelated list.
@@ -664,7 +768,7 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 		run  func(env *opsEnv) error
 	}{
 		{"DrainCloneBm", opDrainCloneBm, func(env *opsEnv) error {
-			_, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard,
+			_, err := DrainCloneBm(env.ctx, env.cli, env.cid,
 				opsSpId, opsSpName, drainCloneName, drainCloneId,
 				[]BmChunk{{SliceIdx: 0, Idx: 0}})
 			return err
@@ -742,14 +846,15 @@ func TestCloneDrainOpsRefuseALiveClone(t *testing.T) {
 }
 
 // TestCloneDrainLeavesTheSpAlone pins what the drain must NOT touch. Its
-// batches are ledger-free — clone chunks are not budgeted to any node, which
-// is what makes a batch a constant 68 ops whatever the ceilings become — and
-// its final STM moves one count only, the clone's metadata units on its
-// cntlrs' CNs (TestFinishCloneDeleteReleasesMetaUnits). So no DN key moves,
-// no CN's free extents or revision move, and the SP's own inventory is
-// untouched but for the one name the final STM removes. The run behind the
-// metadata wrapper is agent-local, freed by the cn agent's sweep (cnagent.md
-// CN21).
+// batches are ledger-free — clone chunks are not budgeted to any node, and a
+// batch bumps no SpRev, which is what makes it MaxDelBmPerTxn plus two
+// compares whatever the ceilings become — and its final STM moves one count
+// only, the clone's metadata units on its cntlrs' CNs
+// (TestFinishCloneDeleteReleasesMetaUnits). So no DN key moves, no CN's free
+// extents or revision move, the SP's own inventory is untouched but for the
+// one name the final STM removes, and its revision moves once, for that
+// final STM (CLD12). The run behind the metadata wrapper is agent-local,
+// freed by the cn agent's sweep (cnagent.md CN21).
 func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()
@@ -767,8 +872,9 @@ func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 		env.cn(opsCnA).GetFreeExtCnt(),
 		env.dnRev(opsDnA), env.cnRev(opsCnA), env.slice(),
 	}
+	revBefore := env.spRev()
 
-	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+	if _, err := DrainCloneBm(env.ctx, env.cli, env.cid, opsSpId,
 		opsSpName, drainCloneName, drainCloneId, chunks); err != nil {
 		t.Fatalf("DrainCloneBm: %v", err)
 	}
@@ -805,5 +911,9 @@ func TestCloneDrainLeavesTheSpAlone(t *testing.T) {
 	if len(conf.GetCloneNameList()) != 0 {
 		t.Errorf("clone_name_list: got %v, want empty",
 			conf.GetCloneNameList())
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d (the batch bumps nothing, the "+
+			"final STM once)", got, revBefore+1)
 	}
 }

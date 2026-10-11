@@ -44,7 +44,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, `glossary.md`, the project vocabulary, and `core_glossary.md`, its core words in plain language |
 | `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and in `integtest/bin/` the built drivers, the etcd download cache and the gojq fallback a suite installs when the machine running it has no jq |
 | `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation), beside tests that read the schema's descriptors |
-| `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and both agents share (`architecture.md`, Metadata units), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |
+| `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and both agents share (`architecture.md`, Metadata units), the dm line parser and the dm-clone status parser the gateway, both agents and the two agent drivers share (`architecture.md`, Live-state reporting), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |
 | `etcdutil/` | the one door to etcd: typed reads, writes, scans and watches and the STM runners over one client, with the protobuf (un)marshaling and the etcd log records inside (`dnv-worker.md`, EU1 to EU7) |
 | `model/` | the etcd data model as Go, shared by the gateway, the worker and dnv-cdc: key formats and their parsers, the `cluster_id` derivation, the typed SP snapshot loader, capacity-key maintenance, the allocator's candidate scans, the mutations the gateway and the worker share, and the worker's sp-drain and clone-drain steps (`dnv-worker.md`, MD1 to MD9) |
 | `gateway/` | dnv-gateway, the stateless server of the `Gateway` gRPC service: serving and the trace-id mint, the shared handler helpers, the handlers in one file per resource group, allocation and request validation (`gateway.md`) |
@@ -100,14 +100,17 @@ proves is its document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | gRPC client of the gateway; cobra, pflag and viper, because the dnvctl command tree and its viper binding (`dnvctl.md` CT9) live here, not in `cmd/dnvctl` (`dnvctl.md`, Files); no etcd |
 | each `cmd/` package | the matching top-level package and `common`. `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes. `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: its main builds the role servers and their `NvmeTrConf` and registers each through `agent.Serve`. `cmd/dnvctl` imports only `common` and `ctl`. | cobra and viper live here, for the flag, config and environment parsing and the subcommand trees (`architecture.md`, Components: invocation reference; `dnagent.md` CM1), except for dnvctl, whose tree is `ctl`'s and whose main imports neither |
-| each `integtest/` driver | `common`, `pb`; `agent` for the two agent drivers (`ParseCloneStatus`) and `fakeagent` (`CheckRoundCtx`, `dnagent.md` SH24); `model` and `etcdutil` for `workerctl`, which plays the gateway, and `cdcctl`, which plays the gateway and the worker for the `CdcEntry` keys | test drivers only, never linked into a `cmd/` binary |
+| each `integtest/` driver | `common`, `pb`; `agent` for `fakeagent` (`CheckRoundCtx`, `dnagent.md` SH24); `model` and `etcdutil` for `workerctl`, which plays the gateway, and `cdcctl`, which plays the gateway and the worker for the `CdcEntry` keys | test drivers only, never linked into a `cmd/` binary |
 | `doclint` | — | test-only; reads the documents and the sources as files |
 
 Consequences worth stating: the agent and dnvctl binaries do not link the
 etcd client, and there are no import cycles because `common` and `pb` import
 nothing internal. The central etcd helpers are a package of their own,
 `etcdutil`, rather than part of `common`, so that the etcd client is linked
-only into the binaries that use it.
+only into the binaries that use it. The dm line parser and the dm-clone
+status parser live in `common`, not `agent`, because the gateway, which
+may not import `agent`, proves a copy finished from the same status line
+the agents read, and two readers of one kernel format drift.
 
 ## Protobuf generation
 

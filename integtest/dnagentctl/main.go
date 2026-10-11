@@ -26,7 +26,6 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -709,7 +708,7 @@ func cmdWaitHydrated(args []string) {
 		}
 		raw := reply.GetSideInfo().GetMigrDstInfo().
 			GetDmCloneInfo().GetDetails()
-		status, ok := agent.ParseCloneStatus(raw)
+		status, ok := common.ParseCloneStatus(raw)
 		if ok {
 			samples++
 			if !haveFirst {

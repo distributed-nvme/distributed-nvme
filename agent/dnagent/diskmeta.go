@@ -544,11 +544,87 @@ func (d *DiskMeta) describeLocked() string {
 	if !d.formatted {
 		return "unformatted"
 	}
+	counts := d.countsLocked()
 	return fmt.Sprintf(
 		"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d"+
 			" provisioning=%d",
-		d.seq, len(d.table.GetSideList()), len(d.table.GetCloneMetaList()),
-		d.freeExtCnt(), d.freeUnitCnt(), d.provisioningSideCntLocked())
+		d.seq, counts.sideRecs, len(d.table.GetCloneMetaList()),
+		counts.freeExt, counts.freeUnits, d.provisioningSideCntLocked())
+}
+
+// tableCounts is the numbers of the table in memory. The meta row's text
+// (describeLocked) and the disk counts (Counts) both read them through
+// countsLocked, so the text and the numbers are one computation.
+type tableCounts struct {
+	// totalExt is the data area's extents (extentCntLocked).
+	totalExt uint64
+	// freeExt is the extents of the data area no side record holds.
+	freeExt uint64
+	// sideRecs is the side records the table holds.
+	sideRecs uint64
+	// freeUnits is the clone-metadata units no record holds.
+	freeUnits uint64
+}
+
+func (d *DiskMeta) countsLocked() tableCounts {
+	return tableCounts{
+		totalExt:  d.extentCntLocked(),
+		freeExt:   d.freeExtCnt(),
+		sideRecs:  uint64(len(d.table.GetSideList())),
+		freeUnits: d.freeUnitCnt(),
+	}
+}
+
+// Counts is the disk counts (DN18) of the dn (clusterId, dnId) whose request
+// names ptrs, read from memory: nil unless the table in memory was loaded
+// under a header this node has confirmed for exactly that dn (confirmedLocked)
+// and a read of the disk's size has answered (SetDiskSize). Without the
+// confirmation the numbers would not be this dn's, and without the size the
+// extent counts would read as zero rather than as unknown. side_recs_match
+// compares the side records with ptrs by sp and side id (sideRecsMatch). It
+// reads nothing: the caller sends the counts beside the meta row of the read
+// it has just made.
+func (d *DiskMeta) Counts(
+	clusterId uint64,
+	dnId uint64,
+	ptrs []*pb.SidePointer,
+) *pb.DnInfo_DiskCounts {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.confirmedLocked() != nil || d.diskSize == 0 ||
+		d.hdr.GetClusterId() != clusterId || d.hdr.GetDnId() != dnId {
+		return nil
+	}
+	counts := d.countsLocked()
+	return &pb.DnInfo_DiskCounts{
+		TotalExtCnt:   counts.totalExt,
+		FreeExtCnt:    counts.freeExt,
+		SideRecCnt:    counts.sideRecs,
+		FreeMetaUnits: counts.freeUnits,
+		SideRecsMatch: sideRecsMatch(d.table.GetSideList(), ptrs),
+	}
+}
+
+// sideRecsMatch reports whether the side records name exactly the sides ptrs
+// names, keyed as the sweep keys a side (knownSides): by sp id and side id,
+// whatever the leg id.
+func sideRecsMatch(
+	recs []*pb.DnDiskTable_SideRecord,
+	ptrs []*pb.SidePointer,
+) bool {
+	want := make(map[[2]uint64]struct{}, len(ptrs))
+	for _, ptr := range ptrs {
+		want[[2]uint64{ptr.GetSpId(), ptr.GetSideId()}] = struct{}{}
+	}
+	have := make(map[[2]uint64]struct{}, len(recs))
+	for _, rec := range recs {
+		key := [2]uint64{rec.GetSpId(), rec.GetSideId()}
+		if _, ok := want[key]; !ok {
+			return false
+		}
+		have[key] = struct{}{}
+	}
+	return len(have) == len(want)
 }
 
 // provisioningSideCntLocked counts the sides whose DN9 zeroing has not

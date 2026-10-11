@@ -1889,6 +1889,11 @@ case_zeroing() {
 	# extents that is the whole two-extent side.
 	local mzero=$((2 * EXTENT_SIZE))
 	local out got provrev siderev mdev ddev zero
+	# The disk counts (dnagent.md DN18) as "<total> <free> <side records>
+	# <match>": dnagentctl leaves a field out at its zero value, hence the
+	# defaults. The data area holds DATA_SIZE / EXTENT_SIZE extents.
+	local counts='.dn_info.disk_counts | "\(.total_ext_cnt // "0") \(.free_ext_cnt // "0") \(.side_rec_cnt // "0") \(.side_recs_match // false)"'
+	local area=$((DATA_SIZE / EXTENT_SIZE))
 
 	stage fill "a random pattern over dn$dn's whole extent area, which holds no side"
 	got=$(helper "$dn" "dm_kind_names d4")
@@ -1929,6 +1934,11 @@ $((DATA_OFFSET / 1048576)) $ext_mib $((DATA_SIZE / EXTENT_SIZE))" >/dev/null ||
 		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
 	assert_ok "$SYNC_SIDE_REPLY" ".side_info.side_dev_info.status" \
 		"zeroing data side_dev"
+	# The real disk counts both sides' records, two extents each, and they
+	# match the two pointers.
+	out=$(ctl "$dn" get-dn-info)
+	assert_eq "$(jq_of "$out" "$counts")" "$area $((area - 4)) 2 true" \
+		"zeroing: dn$dn's counts (total, free, side records, match) with both sides built"
 
 	stage read "each side device reads zero over its length and the pattern past it"
 	mdev=/dev/mapper/$(dn_side_name "$CLUSTER" "${DNID[$dn]}" "$sp" "$mside")
@@ -1955,7 +1965,10 @@ $((DATA_OFFSET / 1048576)) $ext_mib $((DATA_SIZE / EXTENT_SIZE))" >/dev/null ||
 	assert_no_residue "$sp"
 	# The records went with their devices: an orphaned one would make the
 	# read-only verdict a leftover, which ctl's default expected code fails.
-	ctl "$dn" get-dn-info >/dev/null
+	# The counts say so too: the whole data area is free again.
+	out=$(ctl "$dn" get-dn-info)
+	assert_eq "$(jq_of "$out" "$counts")" "$area $area 0 true" \
+		"zeroing: dn$dn's counts (total, free, side records, match) after the teardown"
 	sshv_ok "$dn" "rm -f $WORK/fill.bin"
 	DIAG_SIDES=()
 }

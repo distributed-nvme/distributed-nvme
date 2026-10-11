@@ -15,8 +15,8 @@ import (
 )
 
 // The NP1/NP5/NP13 tests of the listener itself: the controller ids it hands
-// out, the host states its connections create and drop, and what a context
-// cancellation does to a fleet of live hosts.
+// out, the host states its connections create and drop, the cap on pending
+// connections, and what a context cancellation does to a fleet of live hosts.
 
 // srvDialFails asserts that nothing is listening on addr any more (NP1: a
 // stopped instance stops accepting).
@@ -552,6 +552,11 @@ func TestServeUnconnectedSocketIsReapedNotLogged(t *testing.T) {
 	if n := ts.srv.connCount(); n != 0 {
 		t.Errorf("%d live connections, want 0", n)
 	}
+	// Its pending slot went back at the teardown, and the accept loop gave
+	// back the one it held for its last Accept (NP1).
+	if n := ts.srv.pendingCount(); n != 0 {
+		t.Errorf("%d pending slots taken after the stop, want 0", n)
+	}
 	if n := logs.count(msgHostDisconnected); n != 0 {
 		t.Errorf("%d `host disconnected` records for a socket that never "+
 			"connected, want 0", n)
@@ -559,4 +564,263 @@ func TestServeUnconnectedSocketIsReapedNotLogged(t *testing.T) {
 	if n := ts.reg.hostCount(); n != 0 {
 		t.Errorf("registry tracks %d hosts, want 0", n)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The pending cap (NP1, NP10)
+// ---------------------------------------------------------------------------
+
+// srvWaitConns waits until the instance holds exactly n live connections.
+func srvWaitConns(t *testing.T, ts *testServer, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ts.srv.connCount() == n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%d live connections, want %d", ts.srv.connCount(), n)
+}
+
+// srvWaitPending waits until exactly n pending slots are taken. Below the cap
+// that is one more than the pending connections: the accept loop holds the
+// slot of the Accept it is waiting in.
+func srvWaitPending(t *testing.T, ts *testServer, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ts.srv.pendingCount() == n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%d pending slots taken, want %d", ts.srv.pendingCount(), n)
+}
+
+// srvFillPending opens n idle sockets — accepted, never sent a byte, so
+// pending until they end — and waits until the instance holds want live
+// connections in all, so every one of them has been accepted.
+func srvFillPending(t *testing.T, ts *testServer, n int, want int) []*fakeHost {
+	t.Helper()
+	idle := make([]*fakeHost, 0, n)
+	for i := 0; i < n; i++ {
+		idle = append(idle, ts.dial())
+	}
+	srvWaitConns(t, ts, want)
+	return idle
+}
+
+// srvQueueLate opens one more connection and sends its ICReq while the cap is
+// reached, and asserts that nothing answers it: the instance has not accepted
+// it, and it waits in the kernel's listen backlog (NP1).
+func srvQueueLate(t *testing.T, ts *testServer, why string) *fakeHost {
+	t.Helper()
+	late := ts.dial()
+	late.write(buildICReqFor(0, 0, 0))
+	if p := srvAnswerWithin(t, late, srvSilence); p != nil {
+		t.Fatalf("pdu type %#x %s, want nothing: the pending cap must keep "+
+			"the next connection waiting", p.typ, why)
+	}
+	return late
+}
+
+// srvAnswered follows a connection that waited past the cap: once a slot is
+// free it is accepted, and the ICReq it sent while it waited is answered.
+func srvAnswered(t *testing.T, late *fakeHost, why string) {
+	t.Helper()
+	p, err := late.recv()
+	if err != nil {
+		t.Fatalf("no ICResp %s: %v", why, err)
+	}
+	if p.typ != pduICResp {
+		t.Fatalf("pdu type %#x %s, want the ICResp", p.typ, why)
+	}
+}
+
+// srvAnsweredAndConnects is srvAnswered, then a Connect that must succeed.
+func srvAnsweredAndConnects(t *testing.T, late *fakeHost, why string) {
+	t.Helper()
+	srvAnswered(t, late, why)
+	connStatus(t, connSend(late, connDefaults(connHostB)), statusSuccess,
+		"connect "+why)
+}
+
+// TestAcceptStopsAtThePendingCap proves NP1's cap. With
+// common.CdcMaxPendingConnCnt connections pending, the accept loop calls no
+// Accept at all, so the next connection waits in the kernel's listen backlog,
+// its ICReq unanswered; a connected host holds no slot and is served
+// throughout, its AEN and its log page included; and once one pending
+// connection ends, the one that waited is accepted and served.
+func TestAcceptStopsAtThePendingCap(t *testing.T) {
+	const subNqn = "nqn.2016-06.io.dnv:ss0"
+	store := newFakeStore()
+	ts := startInstance(t, store)
+	fw := store.nextWatch(t)
+	host := ts.dial()
+	host.connectOk(connHostA)
+	host.enableAen()
+
+	pendingCap := common.CdcMaxPendingConnCnt
+	idle := srvFillPending(t, ts, pendingCap, pendingCap+1)
+	late := srvQueueLate(t, ts, "past the pending cap")
+	if n := ts.accepts.Load(); n != int32(pendingCap+1) {
+		t.Fatalf("Accept called %d times for one connected host and %d "+
+			"pending connections, want %d: at the cap the loop takes a slot "+
+			"before it accepts, and calls no Accept", n, pendingCap,
+			pendingCap+1)
+	}
+	if n := ts.srv.pendingCount(); n != pendingCap {
+		t.Fatalf("%d pending slots taken at the cap, want %d: the connected "+
+			"host holds none", n, pendingCap)
+	}
+
+	// The connected host is served at the cap: an impact completes its armed
+	// AER, and its log page holds the entry. A completed Keep Alive proves
+	// the AER is armed, as in TestAerArmedThenImpacted.
+	aer := host.armAer()
+	connStatus(t, host.keepAlive(), statusSuccess, "keep alive at the cap")
+	fw.put(testKey(0x01, 0x1, 0xa), connEntry(subNqn, "10.0.0.1", "4420",
+		connHostA))
+	c := host.await(aer)
+	connStatus(t, c, statusSuccess, "aen at the cap")
+	if c.dw0 != aenDiscLogChanged {
+		t.Fatalf("aen dword0 %#08x, want %#08x", c.dw0, aenDiscLogChanged)
+	}
+	c, data := connGetLog(host, lidDiscovery, false, 4096, 0)
+	connStatus(t, c, statusSuccess, "get log page at the cap")
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
+		t.Fatalf("numrec %d at the cap, want 1", numRec)
+	}
+
+	// One pending connection ends, and the one that waited takes its slot:
+	// one more Accept, and the loop is back at the cap until late connects.
+	idle[0].close()
+	srvAnswered(t, late, "once a pending connection ended")
+	if n := ts.accepts.Load(); n != int32(pendingCap+2) {
+		t.Errorf("Accept called %d times after one slot freed, want %d", n,
+			pendingCap+2)
+	}
+	connStatus(t, connSend(late, connDefaults(connHostB)), statusSuccess,
+		"connect once a pending connection ended")
+}
+
+// TestPendingSlotFreedByConnectNotByARefusal proves where a connection stops
+// being pending (NP1): a refused Connect leaves it pending, its slot held,
+// and a successful Connect on the same connection, which NP5 still allows,
+// gives the slot back at once.
+func TestPendingSlotFreedByConnectNotByARefusal(t *testing.T) {
+	ts := startServer(t)
+	pendingCap := common.CdcMaxPendingConnCnt
+	hs := srvFillPending(t, ts, pendingCap, pendingCap)
+	late := srvQueueLate(t, ts, "past the pending cap")
+
+	hs[0].handshake()
+	connStatus(t, connSend(hs[0], connRefused(connHostA)), statusConnectParam,
+		"connect naming another subsystem")
+	if p := srvAnswerWithin(t, late, srvSilence); p != nil {
+		t.Fatalf("pdu type %#x after a refused Connect, want nothing: a "+
+			"refusal keeps the connection pending", p.typ)
+	}
+	if n := ts.srv.connCount(); n != pendingCap {
+		t.Fatalf("%d live connections after a refused Connect, want %d", n,
+			pendingCap)
+	}
+
+	connStatus(t, connSend(hs[0], connDefaults(connHostA)), statusSuccess,
+		"connect after a refusal")
+	srvAnsweredAndConnects(t, late, "once a pending connection connected")
+}
+
+// TestPendingDeadlineFreesTheCap proves NP1 and NP10 together, on the fake
+// clock: connections that never connect hold the cap only until their
+// pre-Connect deadline, which closes each of them and logs nothing (NP13),
+// and the slots it frees let the waiting connection in.
+func TestPendingDeadlineFreesTheCap(t *testing.T) {
+	logs := captureLogs(t)
+	ts := startServer(t)
+	pendingCap := common.CdcMaxPendingConnCnt
+	idle := srvFillPending(t, ts, pendingCap, pendingCap)
+	// One pre-Connect timer per pending connection, all due at the same
+	// instant, since the clock has not moved since they were accepted.
+	ts.clk.waitWaiters(t, pendingCap)
+	late := srvQueueLate(t, ts, "past the pending cap")
+
+	ts.clk.advance(common.DefaultCdcPendingTmoMs * time.Millisecond)
+	for _, h := range idle {
+		connSocketClosed(t, h)
+	}
+	srvAnsweredAndConnects(t, late, "once the pre-Connect deadline passed")
+	srvWaitConns(t, ts, 1)
+	for _, msg := range []string{msgHostDisconnected, msgPduError} {
+		if n := logs.count(msg); n != 0 {
+			t.Errorf("%d %q records for connections that never connected, "+
+				"want 0", n, msg)
+		}
+	}
+}
+
+// TestShutdownWhileWaitingAtThePendingCap proves NP1's SIGTERM path from the
+// slot wait: an accept loop waiting at the pending cap still stops. The
+// listener closes, which resets the connection waiting in its backlog, every
+// pending connection is closed, and every slot is given back.
+func TestShutdownWhileWaitingAtThePendingCap(t *testing.T) {
+	ts := startInstance(t, newFakeStore())
+	pendingCap := common.CdcMaxPendingConnCnt
+	idle := srvFillPending(t, ts, pendingCap, pendingCap)
+	late := srvQueueLate(t, ts, "past the pending cap")
+
+	ts.cancel()
+	select {
+	case <-ts.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an instance waiting at the pending cap did not stop")
+	}
+	srvDialFails(t, ts.addr)
+	connSocketClosed(t, late)
+	connSocketClosed(t, idle[0])
+	if n := ts.srv.connCount(); n != 0 {
+		t.Errorf("%d live connections after the stop, want 0", n)
+	}
+	if n := ts.srv.pendingCount(); n != 0 {
+		t.Errorf("%d pending slots taken after the stop, want 0", n)
+	}
+}
+
+// TestFailedAcceptGivesItsSlotBack proves NP1's transient Accept failure: an
+// Accept that fails with an error other than the listener closing, as a
+// file descriptor shortage does, is logged and gives back the slot the loop
+// took for it, and the loop then accepts again. A slot kept by each failure
+// would be lost for the instance's whole life, and after
+// common.CdcMaxPendingConnCnt failures the loop would wait at the cap for
+// good with no connection pending.
+func TestFailedAcceptGivesItsSlotBack(t *testing.T) {
+	const fails = 3
+	logs := captureLogs(t)
+	cl := &countingListener{fails: fails}
+	ts := startServerOn(t, func(ln net.Listener) net.Listener {
+		cl.Listener = ln
+		return cl
+	})
+	// The loop takes a call's slot before the call is counted, so once the
+	// call after the failures has begun, the slots taken are final: the one
+	// that call holds. Polling the slot count instead could read 1 while a
+	// loop that kept every slot was still in its first pause.
+	deadline := time.Now().Add(5 * time.Second)
+	for cl.accepts.Load() <= fails {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d Accept calls, want %d: the loop did not accept "+
+				"again after a failed Accept", cl.accepts.Load(), fails+1)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := ts.srv.pendingCount(); n != 1 {
+		t.Fatalf("%d pending slots taken after %d failed Accepts, want 1",
+			n, fails)
+	}
+	if n := logs.count("cdc accept failed"); n != fails {
+		t.Errorf("%d `cdc accept failed` records, want %d", n, fails)
+	}
+	host := ts.dial()
+	host.connectOk(connHostA)
 }

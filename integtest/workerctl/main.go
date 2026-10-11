@@ -1232,11 +1232,11 @@ func cmdPing(g *globals, args []string) {
 
 // cmdConstants prints, as one JSON object, the common package's constants a
 // shell suite reads instead of typing: transaction budgets and their factors,
-// the slice ceiling, the health timers and the two metadata areas. It exists
-// because a shell suite cannot import common: every shell suite that starts
-// an etcd has to launch it with --max-txn-ops=common.EtcdMaxTxnOps
-// (dnv-worker.md, Integration test plan, Topology), and reads the number here
-// instead of typing it.
+// the slice ceiling, the health timers, the two metadata areas and the cdc's
+// pending cap and pre-Connect deadline. It exists because a shell suite
+// cannot import common: every shell suite that starts an etcd has to launch
+// it with --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test
+// plan, Topology), and reads the number here instead of typing it.
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
@@ -1247,11 +1247,13 @@ func cmdPing(g *globals, args []string) {
 // three are the timers a suite sizes its health and failover waits by: the
 // default check interval a cluster created without one stores, the default
 // primary threshold a pool created without one reads, and the demotion
-// hold's wait (dnv-worker.md RW22). The last four are the metadata areas
+// hold's wait (dnv-worker.md RW22). The next four are the metadata areas
 // (architecture.md, Metadata units): the ceiling of a CN's and of a DN's
 // used units, and the unit of each area. The gateway suite's ceiling case
 // fills both areas to those ceilings and sizes its copies in that unit, which
-// it requires to be one size for both areas.
+// it requires to be one size for both areas. The last two are the cdc's
+// pending cap and pre-Connect deadline (cdc.md NP1, NP10), which the cdc
+// suite's flood case fills and waits by (cdc.md, Integration test plan).
 //
 // It dials nothing and needs no --cluster, so a suite runs it on the DRIVER
 // against the binary it has just built, before any host is contacted.
@@ -1275,6 +1277,9 @@ func cmdConstants(g *globals, args []string) {
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
+
+		"CdcMaxPendingConnCnt":   common.CdcMaxPendingConnCnt,
+		"DefaultCdcPendingTmoMs": common.DefaultCdcPendingTmoMs,
 	})
 }
 
@@ -4002,7 +4007,7 @@ func cmdSetDeleting(g *globals, args []string) {
 
 // cmdDrainSp runs a latched SP's drain to completion: SPD8's derivation in a
 // loop over the three model ops the sp coordinator calls, with no pass and no
-// timer.
+// wake-up.
 //
 // It is the gateway suite's stand-in for the sp coordinator, which that suite
 // does not run — the same kind of worker-role write as `set-provisioned` and
@@ -4164,7 +4169,7 @@ func cmdSetCloneDeleting(g *globals, args []string) {
 
 // cmdDrainClone runs a latched clone's drain to completion: CLD7's derivation
 // in a loop over model.DrainCloneBm and model.FinishCloneDelete, with no pass
-// and no timer.
+// and no wake-up.
 //
 // It is the GATEWAY suite's stand-in for the sp coordinator, which that suite
 // does not run — the clone twin of drain-sp, and there for the same reason: the
@@ -4229,7 +4234,7 @@ func cmdDrainClone(g *globals, args []string) {
 			}
 			deleted = true
 		} else {
-			removed, err := model.DrainCloneBm(ctx, cli, cid, target.shard,
+			removed, err := model.DrainCloneBm(ctx, cli, cid,
 				target.spId, target.name, *name, clone.GetCloneId(), batch)
 			if err != nil {
 				die("drain-clone: batch: %v", err)

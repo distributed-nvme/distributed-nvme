@@ -1047,10 +1047,11 @@ size, which is a disk fact, not a conf fact.)
 DN5. Converge the once-per-DN base state of `architecture.md`, Disk node,
 probe-first (SH16), building `DnInfo` as it goes:
 
-* read the `--disk` device's size with `lsblk` — both to report `disk_info`
-  and to hand the allocator the raw size, the one input the disk format
-  itself does not carry (the extent count is that size minus
-  `DnDataOffset`, divided by the **header's** `extent_size`).
+* read the `--disk` device's size with `lsblk` — to report `disk_info`, to
+  give the disk counts of DN18 their total, and to hand the allocator the
+  raw size, the one input the disk format itself does not carry (the
+  extent count is that size minus `DnDataOffset`, divided by the
+  **header's** `extent_size`).
 * **the [D13] disk format.** Read the header block. Magic absent ⇒ the disk
   is blank, and it is formatted only when no side device or clone-metadata
   wrapper maps it — the only devices dnv builds on the disk itself: a
@@ -1113,6 +1114,10 @@ probe-first (SH16), building `DnInfo` as it goes:
   `meta_info` as `RES_STATUS_ERROR` and then allocate extents in that
   disk's volume table, or build its devices over the records that table
   holds, anyway.
+* the disk counts of DN18, beside an OK meta row and before DN6's pointer
+  diff and sweep, so the reply to a `SyncupDn` that drops a pointer still
+  counts that side's record and says the side records do not match the
+  new list.
 * `EnsurePort` (SH19: the agent's `--nvmet-port-id` port, default
   `NvmetPortId`, from the `--tr-*` flags + the three fixed ANA groups).
 
@@ -2380,6 +2385,19 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
   clone-metadata record counts, the free extents and units, and the count
   of sides whose zeroing is not done, DN9); on failure the error text
   instead.
+* `DnInfo.disk_counts`, no row: the disk counts (`architecture.md`,
+  Live-state reporting), read from memory (`DiskMeta.Counts`) — the data
+  area's extents, by the size the last answered size read gave and the
+  header's `extent_size`; the volume table's free extents, side records
+  and free clone-metadata units, the figures the meta row's details
+  summarize; and whether those side records name exactly the sides of the
+  stored request's `side_pointer_list`, by sp id and side id, the request
+  whose revision the reply carries. They are sent only beside an OK meta
+  row, from a volume table this node has confirmed for the request's
+  cluster and dn (DN5), and once a read of the disk's size has answered;
+  otherwise the part is left out, never filled with zeros, so a count not
+  known never reads as zero. They are part of the info SH26 compares, so a
+  change of the counts alone, a match that flips included, is sent.
 * `DnInfo.port_info`, named by the agent's port id as a decimal — so on a
   node running several agents the rows differ: the configfs address
   attributes match the `--tr-*` flags and the three [D4] groups are

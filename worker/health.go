@@ -206,8 +206,10 @@ type healthMonitor struct {
 	write func(ctx context.Context, epoch uint64, settle bool) error
 	// load reads the object's record for a dn or cn monitor (refresh). Its
 	// only other load is the syncup's read, and a node whose revision stays
-	// put and whose agent keeps answering code 0 never syncs. nil for the sp
-	// kinds, which the sp coordinator's passes re-seed.
+	// put and whose agent keeps answering code 0 never syncs. A dn monitor's
+	// read takes the DnRev with the DnConf and also feeds the dn driver's
+	// count compare (newDnMonitor). nil for the sp kinds, which the sp
+	// coordinator's passes re-seed.
 	load func(ctx context.Context) (errEpoch uint64, found bool, err error)
 	// verdict is told every verdict the monitor reaches — true for
 	// unhealthy, false for clean — whether or not it writes: the sp
@@ -448,12 +450,15 @@ var errNoClusterConf = errors.New("cluster conf missing")
 // COVERED by one: the gate checked the conf the round was built from, while
 // this closure uses a conf re-read from the cache per write, which the watch
 // goroutine may have replaced in between. Its refresh reads the DnConf the
-// syncup reads (RW13).
+// syncup reads, with its DnRev at one store revision (readDnRecord, RW13),
+// and hands what a read that answered found to onRecord, the dn driver's
+// count compare (noteRecord); nil hands it to nothing.
 func newDnMonitor(
 	d *deps,
 	cid uint64,
 	dnId uint64,
 	addrPort func() string,
+	onRecord func(conf *pb.DnConf, revision uint64, found, revFound bool),
 ) *healthMonitor {
 	return &healthMonitor{
 		deps:   d,
@@ -476,11 +481,16 @@ func newDnMonitor(
 			return d.health.setDnErrEpoch(ctx, cid, addrPort(), epoch, cc)
 		},
 		load: func(ctx context.Context) (uint64, bool, error) {
-			conf := &pb.DnConf{}
-			found, err := d.store.Get(
-				ctx, model.DnConfKey(cid, addrPort()), conf,
+			conf, revision, found, revFound, err := readDnRecord(
+				ctx, d.store, cid, addrPort(),
 			)
-			return conf.GetErrEpoch(), found, err
+			if err != nil {
+				return 0, false, err
+			}
+			if onRecord != nil {
+				onRecord(conf, revision, found, revFound)
+			}
+			return conf.GetErrEpoch(), found, nil
 		},
 	}
 }
@@ -568,12 +578,15 @@ func cnObservation(code uint32, info *pb.CnInfo) (healthObs, string) {
 // stream is dead (HL1; architecture.md, Live-state reporting). It is never
 // written to etcd; it exists so that the ERROR rows of a stale info do not
 // outlive the stream that reported them — the first reply on a fresh stream
-// carries the full info again (architecture.md, Check streams).
+// carries the full info again (architecture.md, Check streams). The disk
+// counts are no row and have no status to mark: they are dropped, so the
+// count compare (RW13) waits for counts a live stream reports.
 func markDnUnknown(info *pb.DnInfo) {
 	if info == nil {
 		return
 	}
 	markUnknown(info.GetDiskInfo(), info.GetMetaInfo(), info.GetPortInfo())
+	info.DiskCounts = nil
 }
 
 // markCnUnknown is markDnUnknown for a CN (HL1; architecture.md, Live-state

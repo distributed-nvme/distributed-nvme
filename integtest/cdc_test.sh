@@ -11,10 +11,10 @@
 #
 # Cases (Integration test plan, Cases), in order, each in its own cluster ids
 # and each after a fleet restart and a `cdcctl wipe`: smoke, matrix, lowlevel,
-# stas, ha. Cleanup runs unconditionally at the start and, on success only, at
-# the end: a failing run leaves etcd's data, every cdc log, the nvmet/dm state
-# and the host connections in place and dumps the diagnostics (Integration
-# test plan, Cleanup).
+# flood, stas, ha. Cleanup runs unconditionally at the start and, on success
+# only, at the end: a failing run leaves etcd's data, every cdc log, the
+# nvmet/dm state and the host connections in place and dumps the diagnostics
+# (Integration test plan, Cleanup).
 #
 # SUDO: s1 needs none — etcd, the cdc fleet and cdcctl are plain user
 # processes. s2 and both hosts need passwordless sudo: nvmet configfs, device
@@ -85,6 +85,12 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # launchers of etcdutil, model, worker and gateway — gets the flag from the
 # same constant.
 ETCD_MAX_TXN_OPS=
+# common.CdcMaxPendingConnCnt and common.DefaultCdcPendingTmoMs, the pending
+# cap and the pre-Connect deadline of cdc.md NP1 and NP10, read the same way:
+# the flood case sizes its flood by the cap and its waits by the deadline,
+# rounded up to whole seconds here.
+CDC_PENDING_CAP=
+CDC_PENDING_TMO_S=
 
 WORK=/var/tmp/dnv-cdc-integtest
 
@@ -113,6 +119,11 @@ WAIT_CONN=20
 WAIT_STAS=30
 # How long a "nothing must happen" assertion settles for before it is checked.
 SETTLE=3
+# The flood case opens twice the pending cap and FLOOD_EXTRA more: the
+# connections past the first wave wait in cdc0's listen backlog from the
+# start, and FLOOD_EXTRA of them still wait there once the second wave holds
+# the cap.
+FLOOD_EXTRA=16
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it:cdc
 # The ghost identity (Integration test plan, Topology), used only through an
@@ -151,9 +162,11 @@ declare -A E_SS=(
 # (M -> 0x1cdc2).
 declare -A CASE_CID=(
 	[smoke]=0xcdc1 [matrix]=0xcdc2 [lowlevel]=0xcdc3 [stas]=0xcdc4 [ha]=0xcdc5
+	[flood]=0xcdc6
 )
 
-CASES=(smoke matrix lowlevel stas ha)
+# flood runs before stas: like lowlevel, it needs the stas daemons stopped.
+CASES=(smoke matrix lowlevel flood stas ha)
 
 # The uevent property the discovery-log-change AEN reaches a host as (header
 # item 1).
@@ -1149,13 +1162,21 @@ write_host_helper() { # <path>
 # h1/h2 under sudo. Verbs:
 #
 #   wipe <cdc-ip>          disconnect every dnv-it subsystem and every
-#                          discovery controller pointing at the cdc fleet
+#                          discovery controller pointing at the cdc fleet,
+#                          and close a flood left over
 #   wipe_data              disconnect every dnv-it subsystem only, leaving
-#                          the discovery controllers to stafd
+#                          the discovery controllers to stafd, and close a
+#                          flood left over
 #   mask / unmask          neutralise the kernel's own nvmf autoconnect
 #   stas_start <ip> <work> <p0> <p1> <p2> <p3>
 #   stas_stop <work>
 #   uev_start <work> / uev_stop
+#   flood_start <ip> <port> <n> <work>
+#                          open n idle TCP connections to one cdc instance,
+#                          held by one process, and print n once all are open
+#   flood_stop             close them
+#   flood_count <work> <tcp state>
+#                          how many of the flood's sockets are in that state
 #
 # It never uses `nvme disconnect-all`: that would take down subsystems this
 # suite has nothing to do with.
@@ -1196,6 +1217,73 @@ disconnect_discovery() {
 uev_stop() {
 	pkill -f 'udevadm monitor --kernel --property --subsystem-match=nvme' \
 		>/dev/null 2>&1 || true
+}
+
+# The flood case's idle connections (cdc.md, Integration test plan). One
+# process holds every socket through bash's /dev/tcp, so the flood needs no
+# netcat of any flavour. The subshell ignores HUP like nohup, then execs a
+# bash named dnv-cdc-flood under its own pid. That bash opens the sockets and
+# then waits, for ten minutes at most, in a read on a FIFO it holds both ends
+# of, so no other process ever shares a socket. It never execs sleep under its
+# name: uutils coreutils can be one binary that picks the utility by the name
+# it is run under. The flood never reads a socket and never closes one, so a
+# socket the instance has closed stays in CLOSE-WAIT, which is how the suite
+# counts the connections the instance ended.
+flood_start() { # <ip> <port> <n> <work>
+	local ip=$1 port=$2 n=$3 work=$4 i pid
+	flood_stop
+	mkdir -p "$work"
+	rm -f "$work/flood.pid" "$work/flood.opened" "$work/flood.fifo"
+	mkfifo "$work/flood.fifo" || {
+		echo "cdc_host.sh: mkfifo $work/flood.fifo failed" >&2
+		exit 1
+	}
+	(
+		trap '' HUP
+		exec -a dnv-cdc-flood bash -c '
+			ulimit -n $(($3 + 64)) 2>/dev/null || true
+			for ((i = 0; i < $3; i++)); do
+				exec {fd}<>"/dev/tcp/$1/$2" || exit 1
+			done
+			exec {hold}<>"$4/flood.fifo" || exit 1
+			echo "$3" > "$4/flood.opened"
+			read -r -t 600 -u "$hold" _ || true' flood "$ip" "$port" "$n" "$work"
+	) > /dev/null 2>&1 < /dev/null &
+	pid=$!
+	echo "$pid" > "$work/flood.pid"
+	for i in $(seq 1 100); do
+		if [ -s "$work/flood.opened" ]; then
+			cat "$work/flood.opened"
+			return 0
+		fi
+		kill -0 "$pid" 2>/dev/null || break
+		sleep 0.1
+	done
+	flood_stop
+	echo "cdc_host.sh: the flood did not open its $n connections" >&2
+	exit 1
+}
+
+# flood_stop's pattern is anchored and bracketed, so it can match neither the
+# pkill nor the shell that runs this script.
+flood_stop() {
+	pkill -KILL -f '^[d]nv-cdc-flood' >/dev/null 2>&1 || true
+}
+
+# flood_count counts the flood's sockets in one TCP state, by the flood's pid
+# (ss shows the process by its comm, bash, not by the name it runs under). No
+# flood started is a count of 0; a failed ss is an error, never a count.
+flood_count() { # <work> <tcp state>
+	local pid out
+	pid=$(cat "$1/flood.pid" 2>/dev/null) || {
+		echo 0
+		return 0
+	}
+	out=$(ss -tnpH state "$2") || {
+		echo "cdc_host.sh: ss -tnpH state $2 failed" >&2
+		exit 1
+	}
+	printf '%s\n' "$out" | grep -c "pid=$pid," || true
 }
 
 # The kernel ships /usr/lib/udev/rules.d/70-nvmf-autoconnect.rules, which
@@ -1334,6 +1422,7 @@ stas_stop() { # <work>
 case "${1-}" in
 wipe)
 	uev_stop
+	flood_stop
 	disconnect_test_subsystems
 	disconnect_discovery "${2-}"
 	echo "cdc_host.sh: wiped"
@@ -1344,6 +1433,7 @@ wipe_data)
 	# for good and does not re-create it, so the host silently stops
 	# receiving AENs for the rest of the run.
 	uev_stop
+	flood_stop
 	disconnect_test_subsystems
 	echo "cdc_host.sh: data connections wiped"
 	;;
@@ -1367,10 +1457,17 @@ stas_start)
 	stas_start "$@"
 	;;
 stas_stop) stas_stop "${2-}" ;;
+flood_start) flood_start "${2-}" "${3-}" "${4-}" "${5-}" ;;
+flood_stop)
+	flood_stop
+	echo "cdc_host.sh: flood stopped"
+	;;
+flood_count) flood_count "${2-}" "${3-}" ;;
 *)
 	echo "usage: cdc_host.sh wipe <ip> | wipe_data | mask | unmask |" \
 		"uev_start <work> | uev_stop | stas_start <ip> <work> <p…> |" \
-		"stas_stop <work>" >&2
+		"stas_stop <work> | flood_start <ip> <port> <n> <work> |" \
+		"flood_stop | flood_count <work> <tcp state>" >&2
 	exit 2
 	;;
 esac
@@ -1508,6 +1605,11 @@ diagnostics() {
 		banner "$hostsel: uevent capture (last 120 lines)"
 		ok_or_true rlog "$(host_target "$hostsel")" "$WORK/uevents.log" |
 			tail -n 120 >&2 || true
+		banner "$hostsel: the flood's sockets (established, close-wait)"
+		ok_or_true h "$hostsel" \
+			"$WORK/cdc_host.sh flood_count $WORK established" >&2
+		ok_or_true h "$hostsel" \
+			"$WORK/cdc_host.sh flood_count $WORK close-wait" >&2
 		banner "$hostsel: journalctl -u stafd -u stacd"
 		ok_or_true h "$hostsel" \
 			"journalctl -u stafd -u stacd --since '$RUN_START' --no-pager |" \
@@ -1588,18 +1690,31 @@ fetch_etcd() {
 # GOARCH=amd64 (see preflight_driver) and will not exec on a driver that is not
 # a linux/amd64 host.
 read_constants() {
-	local json
+	local json tmo_ms
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps from it and must not guess it"
-	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
-	case "$ETCD_MAX_TXN_OPS" in
+			"common.EtcdMaxTxnOps, common.CdcMaxPendingConnCnt and" \
+			"common.DefaultCdcPendingTmoMs from it and must not guess them"
+	ETCD_MAX_TXN_OPS=$(constant_of "$json" EtcdMaxTxnOps)
+	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	CDC_PENDING_CAP=$(constant_of "$json" CdcMaxPendingConnCnt)
+	tmo_ms=$(constant_of "$json" DefaultCdcPendingTmoMs)
+	CDC_PENDING_TMO_S=$(((tmo_ms + 999) / 1000))
+	log "  flood case: common.CdcMaxPendingConnCnt = $CDC_PENDING_CAP," \
+		"common.DefaultCdcPendingTmoMs = $tmo_ms ms (${CDC_PENDING_TMO_S}s)"
+}
+
+# constant_of prints one value of `workerctl constants` and dies unless it
+# is a number.
+constant_of() { # <json> <Go identifier>
+	local value
+	value=$(jq_of "$1" ".$2")
+	case "$value" in
 	'' | *[!0-9]*)
-		die "workerctl constants: EtcdMaxTxnOps is" \
-			"'$ETCD_MAX_TXN_OPS' in $json"
+		die "workerctl constants: $2 is '$value' in $1"
 		;;
 	esac
-	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	printf '%s' "$value"
 }
 
 preflight_driver() {
@@ -1675,7 +1790,8 @@ preflight_servers() {
 		die "no dm-zero target on s2"
 	ports_free "$S2" "${S2_PORTS[@]}"
 
-	# 4. h1/h2: nvme-tcp, nvme-cli, the host identity files, udevadm.
+	# 4. h1/h2: nvme-tcp, nvme-cli, the host identity files, udevadm, and the
+	#    ss the flood case counts its sockets with.
 	local hostsel version unit state
 	for hostsel in h1 h2; do
 		h "$hostsel" "modprobe nvme-tcp" ||
@@ -1685,6 +1801,8 @@ preflight_servers() {
 		log "  $hostsel nvme-cli: $version"
 		hu "$hostsel" "command -v udevadm >/dev/null" ||
 			die "udevadm is missing on $hostsel"
+		hu "$hostsel" "command -v ss >/dev/null" ||
+			die "ss is missing on $hostsel"
 		h "$hostsel" "mkdir -p /etc/nvme;" \
 			"test -s /etc/nvme/hostnqn || nvme gen-hostnqn > /etc/nvme/hostnqn;" \
 			"test -s /etc/nvme/hostid || uuidgen > /etc/nvme/hostid" ||
@@ -2178,6 +2296,182 @@ closed_ge() { # <dir> <n>
 	[ "$(count_recs "$1" \
 		'select(.msg == "host disconnected" and .reason == "closed")')" \
 		-ge "$2" ]
+}
+
+# ---------------------------------------------------------------------------
+# Case F — flood (Integration test plan, Cases), stas stopped
+# ---------------------------------------------------------------------------
+
+# flood_start opens the flood's idle connections from one host to one
+# instance, and dies unless the host helper reports every one of them open.
+flood_start() { # <h1|h2> <instance> <n>
+	local out
+	out=$(h "$1" "$WORK/cdc_host.sh flood_start $IP1 $(cdc_port "$2") $3" \
+		"$WORK") || die "$1: opening $3 idle connections to cdc$2 failed"
+	assert_eq "$out" "$3" "$1: idle connections the flood opened to cdc$2"
+	log "  ok: $1 holds $3 idle connections to cdc$2"
+}
+
+flood_stop() { # <h1|h2>
+	ok_or_true h "$1" "$WORK/cdc_host.sh flood_stop" >/dev/null
+}
+
+# flood_count is how many of one host's flood sockets are in one TCP state:
+# `established` while the instance has not closed them, accepted or still in
+# its accept queue, and `close-wait` once it has. A read that fails or prints
+# no number dies, because 0 is an answer this case asserts.
+flood_count() { # <h1|h2> <tcp state>
+	local out
+	out=$(h "$1" "$WORK/cdc_host.sh flood_count $WORK $2") ||
+		die "$1: counting the flood's $2 sockets failed"
+	case "$out" in
+	'' | *[!0-9]*) die "$1: the flood's $2 count reads '$out'" ;;
+	esac
+	printf '%s' "$out"
+}
+
+flood_count_is() { # <h1|h2> <tcp state> <n>
+	local got
+	got=$(flood_count "$1" "$2") ||
+		die "$1: counting the flood's $2 sockets failed"
+	[ "$got" = "$3" ]
+}
+
+# listen_queue prints one instance's listening socket on s1 as "<queued>
+# <backlog>". For a LISTEN socket, ss's Recv-Q is the accept queue — the
+# connections the kernel has completed and the instance has not accepted —
+# and its Send-Q is the backlog that queue may grow to. Both are read from the
+# end of the line, which works with a State column and without one. A read
+# that fails, or finds no listener, dies.
+listen_queue() { # <instance>
+	local out
+	out=$(s1 "ss -ltnH 'sport = :$(cdc_port "$1")'" |
+		awk '{ print $(NF-3), $(NF-2) }') ||
+		die "reading cdc$1's listening socket on s1 failed"
+	[[ "$out" =~ ^[0-9]+\ [0-9]+$ ]] ||
+		die "cdc$1's listening socket reads '$out', want '<queued> <backlog>'"
+	printf '%s' "$out"
+}
+
+accept_queue_is() { # <instance> <n>
+	local q
+	q=$(listen_queue "$1") || die "reading cdc$1's accept queue failed"
+	[ "${q%% *}" = "$2" ]
+}
+
+disconnected_ge() { # <dir> <hostnqn> <n>
+	local n
+	n=$(count_recs "$1" \
+		'select(.msg == "host disconnected" and .hostnqn == $h)' \
+		--arg h "$2") || die "reading $1's cdc log failed"
+	[ "$n" -ge "$3" ]
+}
+
+# case_flood is the pending cap and the pre-Connect deadline of cdc.md NP1
+# and NP10 against real kernels. h2 opens twice the cap and FLOOD_EXTRA more
+# idle connections to cdc0, which never send a byte, while h1 holds a
+# persistent discovery connection made before them. The case judges accepting
+# by kernel socket state — cdc0's accept queue on s1 and the flood's sockets
+# that cdc0 has closed, in CLOSE-WAIT on h2 — never by a cdc record, since a
+# pending connection logs none (NP13), and never by a timing window. It does
+# not discover during the flood: such a discover waits behind the flood in
+# the accept queue, and whether it fails is the host kernel's own ICResp
+# timeout, not the service.
+case_flood() {
+	[ "$STAS_RUNNING" = 0 ] ||
+		die "case flood needs the stas daemons stopped"
+	local total=$((2 * CDC_PENDING_CAP + FLOOD_EXTRA))
+	local queued=$((total - CDC_PENDING_CAP))
+
+	stage put "put ssB (H1, port2) and ssX (H2, port4)"
+	put_entry ssb "2" "$H1NQN"
+	put_entry ssx "4" "$H2NQN"
+	wait_until "$WAIT_SHORT" "cdc0 to apply both entries" cdc_applied_ge cdc0 2
+
+	stage persist "open h1's persistent discovery connection to cdc0"
+	h h1 "nvme discover -t tcp -a $IP1 -s $(cdc_port 0)" \
+		"--persistent --keep-alive-tmo 5 -o json" >/dev/null ||
+		die "h1: persistent discover failed"
+	local devx
+	devx=$(disc_ctrl_name h1 0)
+	[ -n "$devx" ] || die "h1 has no persistent discovery controller to cdc0"
+	log "  h1 -> $devx"
+	assert_dev_disc h1 "$devx" "h1 before the flood" ssb:2
+	uevents_start h1 >/dev/null
+
+	stage flood "h2 opens $total idle connections to cdc0"
+	local q
+	q=$(listen_queue 0)
+	[ "${q##* }" -ge "$queued" ] ||
+		die "cdc0's listen backlog is ${q##* }, below the $queued" \
+			"connections the flood leaves in it (net.core.somaxconn on s1)"
+	flood_start h2 0 "$total"
+	# Exactly total - cap: the cap's value, and the connections past it
+	# waiting in the kernel rather than refused or accepted.
+	wait_until "$WAIT_SHORT" "cdc0's accept queue to hold exactly $queued" \
+		accept_queue_is 0 "$queued"
+	assert_eq "$(flood_count h2 established)" "$total" \
+		"h2: flood sockets open once cdc0 reached the cap"
+	assert_eq "$(flood_count h2 close-wait)" 0 \
+		"h2: flood sockets cdc0 closed before any deadline"
+	log "  ok: cdc0 holds $CDC_PENDING_CAP pending connections, $queued wait" \
+		"in its accept queue"
+
+	stage served "at the cap, h1's persistent connection reads and gets its AEN"
+	assert_dev_disc h1 "$devx" "h1 re-reads the log during the flood" ssb:2
+	put_entry sse "3" "$H1NQN"
+	wait_aen h1 "$devx" 1
+	assert_dev_disc h1 "$devx" "h1 after gaining ssE during the flood" \
+		ssb:2 sse:3
+	# The cap was held for the whole stage only if connections still wait.
+	q=$(listen_queue 0)
+	[ "${q%% *}" -gt 0 ] ||
+		die "cdc0's accept queue emptied before the served stage ended," \
+			"so the stage did not run at the cap"
+
+	stage deadline "the first wave ends at its deadline, the second takes the cap"
+	wait_until "$((CDC_PENDING_TMO_S + WAIT_SHORT))" \
+		"cdc0's accept queue down to $FLOOD_EXTRA" \
+		accept_queue_is 0 "$FLOOD_EXTRA"
+	wait_until "$WAIT_SHORT" "$CDC_PENDING_CAP flood sockets closed by cdc0" \
+		flood_count_is h2 close-wait "$CDC_PENDING_CAP"
+	# Still FLOOD_EXTRA queued: the count above is the first wave alone, the
+	# second still holding the cap.
+	accept_queue_is 0 "$FLOOD_EXTRA" ||
+		die "cdc0's accept queue left $FLOOD_EXTRA before the second wave's" \
+			"deadline"
+	log "  ok: the first $CDC_PENDING_CAP ended and cdc0 accepted the next" \
+		"$CDC_PENDING_CAP"
+
+	stage drained "every flood connection ends at its deadline, h1 still live"
+	wait_until "$((2 * CDC_PENDING_TMO_S + WAIT_SHORT))" \
+		"all $total flood sockets closed by cdc0" \
+		flood_count_is h2 close-wait "$total"
+	accept_queue_is 0 0 ||
+		die "cdc0's accept queue is not empty with every flood socket closed"
+	ctrl_live h1 "$devx" || die "h1: $devx died during the flood"
+	log "  ok: all $total ended; $devx is live"
+
+	stage discover "a new discover from h2 is answered once the flood is gone"
+	assert_disc h2 0 "" "cdc0 / H2 after the flood" ssx:4
+
+	stage records "h1 never reconnected; no keep-alive expiry, no pdu error"
+	assert_eq "$(count_recs cdc0 \
+		'select(.msg == "host connected" and .hostnqn == $h)' \
+		--arg h "$H1NQN")" 1 "cdc0 host connected records for h1"
+	assert_eq "$(count_recs cdc0 \
+		'select(.msg == "host disconnected" and .reason == "keep_alive")')" \
+		0 "cdc0 keep-alive expiries"
+	assert_eq "$(cdc_msg_count cdc0 "pdu error")" 0 "cdc0 pdu error records"
+
+	stage teardown "close the flood and drop h1's persistent controller"
+	flood_stop h2
+	uevents_stop h1
+	h h1 "nvme disconnect -d $devx" >/dev/null || true
+	# Waited by h1's hostnqn, not by a count of `closed` records: the record
+	# of h2's one-shot discover above may still be on its way.
+	wait_until "$WAIT_SHORT" "cdc0 to log h1's disconnect" \
+		disconnected_ge cdc0 "$H1NQN" 1
 }
 
 # ---------------------------------------------------------------------------

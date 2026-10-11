@@ -1,9 +1,11 @@
 package cdc
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"runtime"
 	"sync"
 	"testing"
@@ -15,8 +17,9 @@ import (
 // The liveness and concurrency properties of
 // cdc.md, The NVMe/TCP discovery service, that the deterministic unit tests
 // cannot express: "an AEN is never lost" (NP11), "a host that has stopped
-// reading cannot stall the watcher" (DS6 -> NP11), and "every goroutine and
-// every host state dies with its connection" (NP13, DS7).
+// reading cannot stall the watcher" (DS6 -> NP11), "every goroutine and
+// every host state dies with its connection" (NP13, DS7), and "every pending
+// slot taken is given back exactly once" (NP1).
 //
 // These are the one place in the package that uses REAL time on purpose. They
 // are not measuring a timer — they are running the real goroutines against
@@ -337,4 +340,95 @@ func TestConnectChurnLeaksNothing(t *testing.T) {
 	if n := ts.srv.connCount(); n != 0 {
 		t.Errorf("conns leaked: %d", n)
 	}
+}
+
+// churnConn runs one connection of the pending-slot churn to its close: kind
+// 0 sends nothing, kind 1 sends the ICReq and a Connect that is refused, and
+// kind 2 connects. It runs off the test goroutine, so it reports a failure
+// rather than ending the test.
+func churnConn(addr string, kind int, hostNqn string) error {
+	nc, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+	if kind == 0 {
+		return nil
+	}
+	if err := nc.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	br := bufio.NewReaderSize(nc, maxPduLen)
+	if _, err := nc.Write(buildICReqFor(0, 0, 0)); err != nil {
+		return err
+	}
+	p, err := readCtrlPdu(br)
+	if err != nil {
+		return fmt.Errorf("icresp: %w", err)
+	}
+	if p.typ != pduICResp {
+		return fmt.Errorf("pdu type %#x, want the icresp", p.typ)
+	}
+	a, want := connDefaults(hostNqn), statusSuccess
+	if kind == 1 {
+		a, want = connRefused(hostNqn), statusConnectParam
+	}
+	if _, err := nc.Write(capsuleFrame(connCmd(1, a))); err != nil {
+		return err
+	}
+	if p, err = readCtrlPdu(br); err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	if p.typ != pduCapsuleResp {
+		return fmt.Errorf("pdu type %#x, want the connect completion", p.typ)
+	}
+	if c := parseCapsuleResp(p); c.status != want {
+		return fmt.Errorf("connect status %#x, want %#x", c.status, want)
+	}
+	return nil
+}
+
+// TestPendingSlotsBalanceUnderChurn proves NP1's slot accounting under load:
+// every connection gives its slot back exactly once, whether it ends idle,
+// ends after a refused Connect, or connects and then ends. Once the churn is
+// over, no connection holds a slot and the cap still admits exactly
+// common.CdcMaxPendingConnCnt pending connections: a slot given back twice
+// would let one more in, or block the teardown that gave it, and a slot
+// never given back would let one fewer in.
+func TestPendingSlotsBalanceUnderChurn(t *testing.T) {
+	ts := startServer(t)
+	const workers = 16
+	const connsPerWorker = 50
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for n := 0; n < connsPerWorker; n++ {
+				if err := churnConn(ts.addr, (w+n)%3, connHostA); err != nil {
+					errs <- fmt.Errorf("worker %d, connection %d: %w", w, n,
+						err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	srvWaitConns(t, ts, 0)
+	// The one slot left is the accept loop's, for the Accept it waits in.
+	srvWaitPending(t, ts, 1)
+
+	pendingCap := common.CdcMaxPendingConnCnt
+	idle := srvFillPending(t, ts, pendingCap, pendingCap)
+	late := srvQueueLate(t, ts, "past the pending cap after the churn")
+	idle[0].close()
+	srvAnswered(t, late, "once a pending connection ended after the churn")
 }

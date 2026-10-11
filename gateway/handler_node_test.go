@@ -1425,12 +1425,21 @@ func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateDiskNode: %v", err)
 	}
+	// The disk node's own counts (dnagent.md DN18) pass through whole, beside
+	// the rows: the reply shows the agent's numbers, GetDiskNode the record's.
 	info := &pb.DnInfo{
 		DiskInfo: &pb.ResInfo{
 			ResName: "disk",
 			Status:  pb.ResStatus_RES_STATUS_OK,
 			Details: "1 extent",
 			Epoch:   3,
+		},
+		DiskCounts: &pb.DnInfo_DiskCounts{
+			TotalExtCnt:   256,
+			FreeExtCnt:    231,
+			SideRecCnt:    1,
+			FreeMetaUnits: 64,
+			SideRecsMatch: true,
 		},
 	}
 	agent.setInfo(info, nil, nil, nil)

@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -26,7 +27,8 @@ import (
 // TestHealthDnTable walks the HL1 table for a DN: an ERROR row in disk_info,
 // meta_info or port_info sets; a clean reply clears; PROVISIONING and MISSING
 // never set, and a reply with them and no ERROR row is a clean one; a
-// rejection code neither sets nor clears.
+// rejection code neither sets nor clears. The disk counts are no row:
+// whatever they say, the rows alone decide.
 func TestHealthDnTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -98,6 +100,24 @@ func TestHealthDnTable(t *testing.T) {
 			code: common.ReplyCodeUnknownObject,
 			info: &pb.DnInfo{DiskInfo: resErr("disk", "io error")},
 			want: healthNone,
+		},
+		{
+			// Counts that say the side records do not match the pointers,
+			// as a SyncupDn reply that adds a side pointer reports until
+			// that side's own SyncupSide, set nothing.
+			name: "disk counts are no row: beside clean rows, a clean round",
+			info: countsInfo(80, 100, false),
+			want: healthClean,
+		},
+		{
+			name: "disk counts are no row: an ERROR row beside them still sets",
+			info: func() *pb.DnInfo {
+				info := countsInfo(90, 100, true)
+				info.PortInfo = resErr("port", "nvmet")
+				return info
+			}(),
+			want:    healthErrorRow,
+			wantRes: "port",
 		},
 	}
 	for _, tc := range cases {
@@ -375,7 +395,7 @@ func TestHealthTransitionsOnly(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)
 	seedClusterConf(d, 7)
-	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" })
+	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" }, nil)
 	ctx := context.Background()
 
 	// Unhealthy once.
@@ -559,7 +579,9 @@ func TestHealthOfferPredatingOwnWriteIsDropped(t *testing.T) {
 
 // recordReads counts the reads of one node's record through the store the
 // loop and its monitor use — the syncup's and the monitor's refresh alike
-// (HL3) — with the fake time of each.
+// (HL3) — with the fake time of each: a plain Get of the key, which a CN's
+// reads are, and a Get of it inside a snapshot, which a DN's are (RW13). A
+// read that fails counts too.
 type recordReads struct {
 	etcdStore
 	clk *fakeClock
@@ -569,17 +591,41 @@ type recordReads struct {
 	times []time.Time
 }
 
-func (s *recordReads) Get(
-	ctx context.Context,
-	key string,
-	msg proto.Message,
-) (bool, error) {
+func (s *recordReads) note(key string) {
 	if key == s.key {
 		s.mu.Lock()
 		s.times = append(s.times, s.clk.now())
 		s.mu.Unlock()
 	}
+}
+
+func (s *recordReads) Get(
+	ctx context.Context,
+	key string,
+	msg proto.Message,
+) (bool, error) {
+	s.note(key)
 	return s.etcdStore.Get(ctx, key, msg)
+}
+
+func (s *recordReads) SnapshotRev(
+	ctx context.Context,
+	f func(stm etcdutil.STM) error,
+) (int64, error) {
+	return s.etcdStore.SnapshotRev(ctx, func(stm etcdutil.STM) error {
+		return f(&recordReadsView{STM: stm, reads: s})
+	})
+}
+
+// recordReadsView is the view recordReads hands a snapshot's callback.
+type recordReadsView struct {
+	etcdutil.STM
+	reads *recordReads
+}
+
+func (v *recordReadsView) Get(key string, msg proto.Message) bool {
+	v.reads.note(key)
+	return v.STM.Get(key, msg)
 }
 
 func (s *recordReads) all() []time.Time {
@@ -694,7 +740,7 @@ func TestHealthNodeRecordRefresh(t *testing.T) {
 	stamp(0)
 	monitor := newDnMonitor(d, testCid, testDnId, func() string {
 		return testAddr
-	})
+	}, nil)
 	check := func(what string, wantReads int, wantWrites []uint64) {
 		t.Helper()
 		if got := len(reads.all()); got != wantReads {
@@ -1054,7 +1100,7 @@ func TestHealthWriteFailureIsRetried(t *testing.T) {
 	d, writer := healthTestDeps(t)
 	seedClusterConf(d, 1)
 	writer.err = errors.New("etcd down")
-	monitor := newDnMonitor(d, 1, 2, func() string { return "dn0:9520" })
+	monitor := newDnMonitor(d, 1, 2, func() string { return "dn0:9520" }, nil)
 	monitor.observe(context.Background(), healthUnreachable, "")
 	writer.err = nil
 	monitor.observe(context.Background(), healthUnreachable, "")
@@ -1222,7 +1268,7 @@ func TestHealthSettle(t *testing.T) {
 func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)
-	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" })
+	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" }, nil)
 	ctx := context.Background()
 
 	monitor.observe(ctx, healthErrorRow, "disk")
@@ -1257,10 +1303,11 @@ func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 //
 // This is not the only worker STM write that takes a ClusterConf — the sp
 // role's model.GrowSlice, model.CreateSpareLeg and model.DrainSpSlice take one
-// too (reaction.go, drain.go) — but each of those is handed the p.cc the
-// reaction pass validated before it built the pass, and GrowSlice (both confs)
-// and DrainSpSlice (the cluster one) re-check at the top of their own STMs
-// besides. The monitor's write re-reads the conf from the RW21 cache per
+// too (reaction.go, drain.go) — but each of those is handed the conf the
+// pass's cluster-conf gate validated (passClusterConf), in the reaction pass
+// or, for DrainSpSlice, in the drain's wake-up too, and GrowSlice (both
+// confs) and DrainSpSlice (the cluster one) re-check at the top of their own
+// STMs besides. The monitor's write re-reads the conf from the RW21 cache per
 // write instead of using the snapshot the revision loop validated, so the
 // loop's gate does not cover the value this write uses; that, not uniqueness,
 // is why it validates again (health.go).
@@ -1273,7 +1320,7 @@ func TestHealthDnWriteRefusesAnInvalidConf(t *testing.T) {
 	setCachedConf(d, 7, testClusterConf(func(cc *pb.ClusterConf) {
 		cc.DnBinConf = nil
 	}))
-	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" })
+	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" }, nil)
 	ctx := context.Background()
 
 	monitor.observe(ctx, healthErrorRow, "disk")
@@ -1387,7 +1434,7 @@ func TestHealthMarkUnknownClearsStaleErrors(t *testing.T) {
 // Log records) the integration suite greps.
 func TestHealthMonitorAttrsAreStable(t *testing.T) {
 	d, _ := healthTestDeps(t)
-	monitor := newDnMonitor(d, 1, 2, func() string { return "dn0:9520" })
+	monitor := newDnMonitor(d, 1, 2, func() string { return "dn0:9520" }, nil)
 	want := []string{"dn_id"}
 	if len(monitor.attrs) != len(want) {
 		t.Fatalf("attrs = %v", monitor.attrs)

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -254,7 +255,8 @@ func TestFindDnCandidatesLists(t *testing.T) {
 // group's own DN (dn-a) and a second DN in its failure domain (dn-b), plus one
 // DN in another domain (dn-c). It is the shape tier 1 of architecture.md,
 // Per-operation allocation, exists for — a
-// black list of addr_ports alone leaves dn-b eligible.
+// black list of addr_ports alone leaves dn-b eligible. No two of its DNs tie
+// on free count, so no scan of it draws, and two scans of it compare equal.
 func antiAffineFixture(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	t.Helper()
 	putDnCap(t, cli, cid, 1, 40, "dn-a:9000", "rack0")
@@ -428,7 +430,7 @@ func TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt(t *testing.T) {
 // walks free-count-descending and stops at candCnt, and the excluded domains
 // usually hold the fullest DNs — so a tier 2 that REPLACED tier 1 could drop a
 // distinct-domain DN tier 1 had found. Tier 1's entries stay at the head and
-// tier 2 only appends what is not already there.
+// tier 2 only appends DNs of locations not already there.
 func TestFindDnCandidatesAntiAffineMergesTier1(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
@@ -804,6 +806,197 @@ func TestScansTakeCandExtBeforeCandUnits(t *testing.T) {
 		ctx, cli, cid, units, ext, 10, nil, nil, nil, nil,
 	)
 	check("swapped FindCnCandidates", cands, err, "cn-b:9000")
+}
+
+// tieDraws is how many scans a test of the draw among equals runs against one
+// fixture. A walk that offers a DN it must not with chance one half per scan
+// passes every scan with chance 2^-64, and a right walk leaves one of two
+// equals unseen with about the same chance.
+const tieDraws = 64
+
+// TestFindDnCandidatesDrawsAmongEquals pins the draw of architecture.md,
+// Finding DN candidates: the DNs of one location that tie on the free count
+// of the first DN the walk would take there, and that the lists and the unit
+// floor let through, are drawn among uniformly; the location is taken at the
+// end of their run, and the candidates keep the order the walk met their
+// locations. In bin 1 at free 40, in key order, rack1 has dn-y (no free
+// unit), dn-x (black-listed) and dn-c, then rack0 has dn-b, then rack1 has
+// dn-a; dn-d (bin 1, free 30) and dn-e (bin 2) are rack1 DNs of other free
+// counts.
+func TestFindDnCandidatesDrawsAmongEquals(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	putDnCapUsed(t, cli, cid, 1, 40, "dn-y:9000", "rack1",
+		common.DnCloneMetaUnitCnt)
+	putDnCap(t, cli, cid, 1, 40, "dn-x:9000", "rack1")
+	putDnCap(t, cli, cid, 1, 40, "dn-c:9000", "rack1")
+	putDnCap(t, cli, cid, 1, 40, "dn-b:9000", "rack0")
+	putDnCap(t, cli, cid, 1, 40, "dn-a:9000", "rack1")
+	putDnCap(t, cli, cid, 1, 30, "dn-d:9000", "rack1")
+	putDnCap(t, cli, cid, 2, 300, "dn-e:9000", "rack1")
+	cc := testClusterConf()
+	equals := []string{"dn-a:9000", "dn-c:9000"}
+	second := Cand{
+		AddrPort: "dn-b:9000", Location: "rack0", FreeExt: 40, BinIdx: 1,
+	}
+
+	seen := map[string]int{}
+	for i := 0; i < tieDraws; i++ {
+		cands, err := FindDnCandidates(
+			ctx, cli, cid, cc, 20, 1, 10, []string{"dn-x:9000"}, nil, nil,
+		)
+		if err != nil {
+			t.Fatalf("FindDnCandidates: %v", err)
+		}
+		if len(cands) != 2 {
+			t.Fatalf("scan %d: candidates = %v, want one rack1 DN and "+
+				"dn-b", i, addrsOf(cands))
+		}
+		first := cands[0]
+		if !slices.Contains(equals, first.AddrPort) ||
+			first.Location != "rack1" ||
+			first.FreeExt != 40 || first.BinIdx != 1 {
+			t.Fatalf("scan %d: first candidate = %+v, want dn-a or dn-c, "+
+				"rack1's equals at 40 in bin 1", i, first)
+		}
+		if cands[1] != second {
+			t.Fatalf("scan %d: second candidate = %+v, want %+v",
+				i, cands[1], second)
+		}
+		seen[first.AddrPort]++
+	}
+	if len(seen) != len(equals) {
+		t.Errorf("%d scans offered only %v of rack1's equals %v",
+			tieDraws, seen, equals)
+	}
+}
+
+// TestFindDnCandidatesDrawEndsWithTheRun pins where a run ends and is drawn
+// (architecture.md, Finding DN candidates): at the first key below candExt,
+// whose break must not lose the run before it; at the end of a bin; and at
+// candCnt, which is counted only when the run that reaches it ends, so a
+// candCnt of one still draws among the first location's equals.
+func TestFindDnCandidatesDrawEndsWithTheRun(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cc := testClusterConf()
+	cases := []struct {
+		name    string
+		put     func(cid uint64)
+		candCnt int
+		// equals heads every answer and each of them heads some answer;
+		// rest follows it in every answer.
+		equals []string
+		rest   []string
+	}{
+		{"the break ends the run", func(cid uint64) {
+			putDnCap(t, cli, cid, 1, 25, "dn-q:9000", "rack0")
+			putDnCap(t, cli, cid, 1, 25, "dn-p:9000", "rack0")
+			putDnCap(t, cli, cid, 1, 18, "dn-r:9000", "rack1")
+		}, 10, []string{"dn-p:9000", "dn-q:9000"}, nil},
+		{"the end of a bin ends the run", func(cid uint64) {
+			putDnCap(t, cli, cid, 1, 25, "dn-q:9000", "rack0")
+			putDnCap(t, cli, cid, 1, 25, "dn-p:9000", "rack0")
+			putDnCap(t, cli, cid, 2, 300, "dn-s:9000", "rack1")
+		}, 10, []string{"dn-p:9000", "dn-q:9000"}, []string{"dn-s:9000"}},
+		{"candCnt waits for the end of the run", func(cid uint64) {
+			putDnCap(t, cli, cid, 1, 40, "dn-c:9000", "rack0")
+			putDnCap(t, cli, cid, 1, 40, "dn-b:9000", "rack1")
+			putDnCap(t, cli, cid, 1, 40, "dn-a:9000", "rack0")
+		}, 1, []string{"dn-a:9000", "dn-c:9000"}, nil},
+	}
+	for _, tc := range cases {
+		cid := testCid(t)
+		tc.put(cid)
+		seen := map[string]int{}
+		for i := 0; i < tieDraws; i++ {
+			cands, err := FindDnCandidates(
+				ctx, cli, cid, cc, 20, 0, tc.candCnt, nil, nil, nil,
+			)
+			if err != nil {
+				t.Fatalf("%s: FindDnCandidates: %v", tc.name, err)
+			}
+			if len(cands) != 1+len(tc.rest) ||
+				!slices.Contains(tc.equals, cands[0].AddrPort) ||
+				!equalStrings(addrsOf(cands[1:]), tc.rest) {
+				t.Fatalf("%s: scan %d: candidates = %v, want one of %v "+
+					"and then %v", tc.name, i, addrsOf(cands), tc.equals,
+					tc.rest)
+			}
+			seen[cands[0].AddrPort]++
+		}
+		if len(seen) != len(tc.equals) {
+			t.Errorf("%s: %d scans offered only %v of the equals %v",
+				tc.name, tieDraws, seen, tc.equals)
+		}
+	}
+}
+
+// TestFindDnCandidatesAntiAffineMergesOnePerLocation pins the merge of
+// architecture.md, Per-operation allocation, under the draw: tier 1 and
+// tier 2 each draw among rack1's equals on their own, so the merge leaves
+// out a tier-2 DN whose location tier 1 offers, and the list keeps one DN
+// per location whichever DN each tier drew.
+func TestFindDnCandidatesAntiAffineMergesOnePerLocation(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	putDnCap(t, cli, cid, 1, 50, "dn-r:9000", "rack0")
+	putDnCap(t, cli, cid, 1, 40, "dn-q:9000", "rack1")
+	putDnCap(t, cli, cid, 1, 40, "dn-p:9000", "rack1")
+	cc := testClusterConf()
+	equals := []string{"dn-p:9000", "dn-q:9000"}
+
+	seen := map[string]int{}
+	for i := 0; i < tieDraws; i++ {
+		cands, tier2, err := FindDnCandidatesAntiAffine(
+			ctx, cli, cid, cc, 20, 0, 10, 2, nil, nil, []string{"rack0"},
+		)
+		if err != nil {
+			t.Fatalf("FindDnCandidatesAntiAffine: %v", err)
+		}
+		if !tier2 {
+			t.Fatalf("scan %d: tier 2 did not run: %v", i, addrsOf(cands))
+		}
+		if len(cands) != 2 || !slices.Contains(equals, cands[0].AddrPort) ||
+			cands[1].AddrPort != "dn-r:9000" {
+			t.Fatalf("scan %d: merged = %v, want tier 1's rack1 DN and "+
+				"then dn-r, one DN per location", i, addrsOf(cands))
+		}
+		seen[cands[0].AddrPort]++
+	}
+	if len(seen) != len(equals) {
+		t.Errorf("%d scans put only %v of rack1's equals %v at the head",
+			tieDraws, seen, equals)
+	}
+}
+
+// TestFindCnCandidatesKeepsKeyOrderAmongEquals pins that the CN walk does not
+// draw (architecture.md, Finding CN candidates): of two CNs of one location
+// at one free count it always takes the first it meets, cn-c, and never
+// cn-a.
+func TestFindCnCandidatesKeepsKeyOrderAmongEquals(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	putCnCap(t, cli, cid, 40, "cn-c:9000", "rack0")
+	putCnCap(t, cli, cid, 40, "cn-b:9000", "rack1")
+	putCnCap(t, cli, cid, 40, "cn-a:9000", "rack0")
+	want := []string{"cn-c:9000", "cn-b:9000"}
+
+	for i := 0; i < tieDraws; i++ {
+		cands, err := FindCnCandidates(
+			ctx, cli, cid, 20, 0, 10, nil, nil, nil, nil,
+		)
+		if err != nil {
+			t.Fatalf("FindCnCandidates: %v", err)
+		}
+		if !equalStrings(addrsOf(cands), want) {
+			t.Fatalf("scan %d: candidates = %v, want %v",
+				i, addrsOf(cands), want)
+		}
+	}
 }
 
 // TestPickRandom checks the pick of architecture.md, Per-operation allocation:

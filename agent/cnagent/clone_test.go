@@ -1159,7 +1159,7 @@ const waitingForTwoUnits = "waiting for metadata room: no contiguous run " +
 // assertNoteAndStatusLine pins a dm-clone row that keeps the raw status line
 // of a dm-clone that is up beside a status the line does not decide: the
 // row's status, its text, and then, on a line of its own, a line
-// agent.ParseCloneStatus reads, as the gateway's hydration checks do (CN18).
+// common.ParseCloneStatus reads, as the gateway's hydration checks do (CN18).
 func assertNoteAndStatusLine(
 	t *testing.T,
 	info *pb.ResInfo,
@@ -1174,7 +1174,7 @@ func assertNoteAndStatusLine(
 		t.Fatalf("%s: status %v, details %q, want %v/%q and a status line",
 			label, info.GetStatus(), details, status, note)
 	}
-	if _, parsed := agent.ParseCloneStatus(line); !parsed ||
+	if _, parsed := common.ParseCloneStatus(line); !parsed ||
 		strings.Contains(line, "\n") {
 		t.Fatalf("%s: %q after the text is not one dm-clone status line",
 			label, line)
@@ -3535,7 +3535,7 @@ func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
 			for label, info := range map[string]*pb.CntlrInfo{
 				"converged": converged, "probed": probed} {
 				details := info.GetCloneIdToDmClone()[testClone].GetDetails()
-				if _, parsed := agent.ParseCloneStatus(details); parsed ==
+				if _, parsed := common.ParseCloneStatus(details); parsed ==
 					tc.noDm {
 					t.Fatalf("the %s dm row %q: a status line %v, want %v",
 						label, details, parsed, !tc.noDm)

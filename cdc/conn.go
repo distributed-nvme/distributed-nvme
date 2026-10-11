@@ -19,10 +19,10 @@ import (
 
 // This file is the per-connection admin-queue state machine of
 // cdc.md, The NVMe/TCP discovery service: one goroutine reads PDUs, a second
-// delivers AENs and a third reaps the connection when its keep-alive
-// expires. Every field of the connection state is behind mu; every socket
-// write is behind wmu, so an AEN and a command response can never interleave
-// inside one PDU.
+// delivers AENs and a third reaps the connection when its pre-Connect
+// deadline passes or, once connected, its keep-alive expires. Every field of
+// the connection state is behind mu; every socket write is behind wmu, so an
+// AEN and a command response can never interleave inside one PDU.
 
 // ---------------------------------------------------------------------------
 // Values this controller reports (NP6, NP7, NP14)
@@ -104,8 +104,9 @@ type conn struct {
 	// (NP11).
 	wake chan struct{}
 	// kick makes the keep-alive loop recompute its deadline, which it must
-	// whenever the idle budget SHRANK under the timer it is already sleeping
-	// on (NP10).
+	// whenever the deadline may have moved EARLIER than the timer it is
+	// already sleeping on: at Connect, where the deadline changes rule, and
+	// when Set Features 0Fh lowers the KATO (NP10).
 	kick chan struct{}
 
 	// wmu serializes socket writes so that two whole PDUs never interleave.
@@ -132,7 +133,12 @@ type conn struct {
 	pendingGenCtr uint64
 	// aers are the command ids of the outstanding Asynchronous Event
 	// Requests, oldest first (NP11).
-	aers    []uint16
+	aers []uint16
+	// acceptedAt is when the connection was accepted. The pre-Connect
+	// deadline counts from it, and nothing moves it (NP10).
+	acceptedAt time.Time
+	// lastAct is when the last command arrived once connected; Connect sets
+	// it, and the KATO's idle budget counts from it (NP10).
 	lastAct time.Time
 	// closeReason is the `host disconnected` reason (cdc.md, Log records), set
 	// by whoever ends the connection first.
@@ -143,17 +149,19 @@ type conn struct {
 // newConn wraps one accepted socket.
 func newConn(s *server, nc net.Conn) *conn {
 	ctx := common.WithTraceId(s.ctx, common.NewTraceId())
+	now := s.deps.clk.now()
 	return &conn{
-		srv:     s,
-		deps:    s.deps,
-		reg:     s.reg,
-		nc:      nc,
-		remote:  nc.RemoteAddr().String(),
-		ctx:     ctx,
-		done:    make(chan struct{}),
-		wake:    make(chan struct{}, 1),
-		kick:    make(chan struct{}, 1),
-		lastAct: s.deps.clk.now(),
+		srv:        s,
+		deps:       s.deps,
+		reg:        s.reg,
+		nc:         nc,
+		remote:     nc.RemoteAddr().String(),
+		ctx:        ctx,
+		done:       make(chan struct{}),
+		wake:       make(chan struct{}, 1),
+		kick:       make(chan struct{}, 1),
+		acceptedAt: now,
+		lastAct:    now,
 	}
 }
 
@@ -162,8 +170,8 @@ func newConn(s *server, nc net.Conn) *conn {
 // ---------------------------------------------------------------------------
 
 // serve runs the connection to its end (NP1): the NP3 handshake, then one
-// admin command per capsule until the socket, the host or the keep-alive
-// timer ends it.
+// admin command per capsule until the socket, the host, the pre-Connect
+// deadline or the keep-alive timer ends it.
 func (c *conn) serve() {
 	defer c.finish()
 	go c.keepAliveLoop()
@@ -223,8 +231,14 @@ func (c *conn) shutdown(reason string) {
 }
 
 // finish is NP13: stop the helper goroutines, unregister from the host state
-// (whose last connection takes it with them, DS7) and log
+// (whose last connection takes it with them, DS7), give back the pending
+// slot of a connection that never connected (NP1) and log
 // `host disconnected`. Outstanding AERs die with the socket, unanswered.
+//
+// finish and handleConnect both run on the reader goroutine, so a
+// connection's slot goes back exactly once: at Connect, or here. It goes back
+// before forget, so a test that sees the connection gone also sees its slot
+// free.
 func (c *conn) finish() {
 	c.shutdown(reasonClosed)
 	close(c.done)
@@ -236,6 +250,8 @@ func (c *conn) finish() {
 	c.mu.Unlock()
 	if connected {
 		c.reg.detach(hostNqn, c)
+	} else {
+		c.srv.releasePending()
 	}
 	c.srv.forget(c)
 	if connected {
@@ -247,21 +263,24 @@ func (c *conn) finish() {
 	}
 }
 
-// keepAliveLoop is NP10: a connection that has said nothing for its timeout is
-// reaped. KATO > 0 expires at KATO + common.DefaultCdcKeepAliveGraceMs;
-// KATO = 0 — a one-shot `nvme discover` — expires after
-// common.DefaultCdcZeroKatoTmoMs idle (NP10).
+// keepAliveLoop is NP10. A pending connection is reaped at its pre-Connect
+// deadline, common.DefaultCdcPendingTmoMs after accept. A connected one is
+// reaped when it has said nothing for its timeout: KATO > 0 expires at KATO +
+// common.DefaultCdcKeepAliveGraceMs; KATO = 0 — a one-shot `nvme discover` —
+// expires after common.DefaultCdcZeroKatoTmoMs idle. Either way the socket
+// closes under reasonKeepAlive, which finish logs only for a connection that
+// connected: a pending one ends silently (NP13).
 //
 // The deadline is recomputed at every wake-up, so a command that arrives late
-// in a window simply pushes the next one out. A budget that SHRANK cannot
-// wait for the armed timer, though — Connect naming a KATO below the
-// zero-KATO cutoff, or a Set Features 0Fh that lowers it (NP9), would
-// otherwise be reaped up to two minutes late — so those two paths call
-// rearmKeepAlive and this select recomputes on the kick.
+// in a window simply pushes the next one out. The two paths that change how
+// the deadline is computed — Connect, which moves the connection from the
+// pre-Connect deadline to its KATO's, and a Set Features 0Fh that lowers the
+// KATO (NP9) — call rearmKeepAlive, and this select recomputes on the kick: a
+// deadline that moved EARLIER cannot wait for the timer armed for the old one.
 func (c *conn) keepAliveLoop() {
 	for {
 		c.mu.Lock()
-		deadline := c.lastAct.Add(c.timeoutLocked())
+		deadline := c.deadlineLocked()
 		c.mu.Unlock()
 		wait := deadline.Sub(c.deps.clk.now())
 		if wait <= 0 {
@@ -277,11 +296,10 @@ func (c *conn) keepAliveLoop() {
 	}
 }
 
-// rearmKeepAlive makes the loop recompute its deadline now. A timeout that
-// GREW needs no kick — the armed timer fires early and the loop re-arms — but
-// one that shrank does: without it a connection that raised the question by
-// arriving with a short KATO would still be reaped on the zero-KATO budget the
-// timer was armed with before Connect (NP10).
+// rearmKeepAlive makes the loop recompute its deadline now. A deadline that
+// moved later needs no kick — the armed timer fires early and the loop
+// re-arms — but one that moved earlier does: without it the connection would
+// be reaped only when the timer armed for the old deadline fires (NP10).
 func (c *conn) rearmKeepAlive() {
 	select {
 	case c.kick <- struct{}{}:
@@ -289,7 +307,20 @@ func (c *conn) rearmKeepAlive() {
 	}
 }
 
-// timeoutLocked is the idle budget of the connection's current KATO.
+// deadlineLocked is when the connection expires: before Connect succeeds,
+// common.DefaultCdcPendingTmoMs after accept, which neither the ICReq nor a
+// refused Connect moves; from Connect on, the last command plus its KATO's
+// idle budget (NP10).
+func (c *conn) deadlineLocked() time.Time {
+	if !c.connected {
+		return c.acceptedAt.Add(
+			common.DefaultCdcPendingTmoMs * time.Millisecond,
+		)
+	}
+	return c.lastAct.Add(c.timeoutLocked())
+}
+
+// timeoutLocked is the idle budget of a connected connection's current KATO.
 func (c *conn) timeoutLocked() time.Duration {
 	if c.kato > 0 {
 		return c.kato +
@@ -298,8 +329,8 @@ func (c *conn) timeoutLocked() time.Duration {
 	return common.DefaultCdcZeroKatoTmoMs * time.Millisecond
 }
 
-// touch restarts the keep-alive timer, which every received command does (the
-// nvmet rule, NP10).
+// touch restarts the keep-alive timer, which every command received once
+// connected does (the nvmet rule, NP10).
 func (c *conn) touch() {
 	now := c.deps.clk.now()
 	c.mu.Lock()
@@ -384,7 +415,8 @@ func (c *conn) handshake(reader *bufio.Reader) error {
 	if _, err := parseICReq(p); err != nil {
 		return err
 	}
-	c.touch()
+	// The ICReq moves no deadline: the pre-Connect one counts from accept
+	// (NP10).
 	return c.writePdu(buildICResp())
 }
 
@@ -422,19 +454,22 @@ func (c *conn) dispatch(p *pdu) error {
 func (c *conn) handleCapsule(p *pdu) error {
 	s := sqe(p.hdr[pduCommonHdrLen : pduCommonHdrLen+sqeLen])
 	isConnect := s.opc() == opcFabrics && s.fctype() == fctypeConnect
-	// NP10: every received command restarts the keep-alive timer.
-	c.touch()
 
 	c.mu.Lock()
 	connected := c.connected
 	c.mu.Unlock()
 	if !connected {
+		// Nothing here moves the pre-Connect deadline: a refused Connect
+		// leaves it where accept put it, and a successful one sets lastAct
+		// itself (NP10).
 		if !isConnect {
 			return newPduError(fesPduSequenceErr, 0,
 				"opcode %#x before fabrics connect", s.opc())
 		}
 		return c.handleConnect(s, p.data)
 	}
+	// NP10: from Connect on, every received command restarts the timer.
+	c.touch()
 	if isConnect {
 		return newPduError(fesPduSequenceErr, 0,
 			"a second fabrics connect on one connection")
@@ -523,9 +558,12 @@ func (c *conn) handleConnect(s sqe, data []byte) error {
 	c.sqFlowOff = s.connectCattr()&connectDisableSqflow != 0
 	c.lastAct = c.deps.clk.now()
 	c.mu.Unlock()
-	// The keep-alive timer was armed on the zero-KATO budget before Connect
-	// arrived; a KATO shorter than that only takes effect once the loop has
-	// been told to recompute (NP10).
+	// The connection is no longer pending: its slot goes back now, so the
+	// accept loop can take the next connection (NP1). A refused Connect
+	// above returns before this and keeps its slot.
+	c.srv.releasePending()
+	// The keep-alive loop is sleeping on the pre-Connect deadline; the kick
+	// moves it to the KATO's deadline now (NP10).
 	c.rearmKeepAlive()
 
 	// The host state must exist before the response: the host may issue Get

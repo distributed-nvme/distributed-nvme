@@ -496,7 +496,6 @@ func (o *fakeReactionOps) finishSpDelete(
 func (o *fakeReactionOps) drainCloneBm(
 	ctx context.Context,
 	cid uint64,
-	shard uint32,
 	spId uint64,
 	spName string,
 	cloneName string,

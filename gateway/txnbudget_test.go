@@ -8,8 +8,8 @@ import (
 
 // The factors of one clone-drain batch, TRANSCRIBED BY HAND from what
 // model.DrainCloneBm's STM does: loadCloneForOp reads SpConf and the Clone,
-// BumpSpRev reads SpRev, and the writes are one Del per chunk plus the SpRev
-// put.
+// and the writes are one Del per chunk and nothing else — the batch neither
+// reads nor bumps SpRev (dnv-worker.md CLD8).
 //
 // Transcribed is the operative word, and it bounds what any assertion in this
 // file can be worth: the file imports nothing but testing and common, so a key
@@ -25,14 +25,14 @@ import (
 // for the sp batch below, only once the true count passes EtcdMaxTxnOps, and
 // cloneDrainMaxCompares leaves slack that neither test will notice.
 const (
-	cloneDrainReads       = 3 // SpConf, Clone, SpRev
-	cloneDrainWritesFixed = 1 // the SpRev put; the dels are the batch itself
+	cloneDrainReads       = 2 // SpConf, Clone
+	cloneDrainWritesFixed = 0 // none; the dels are the batch itself
 	// cloneDrainMaxDels is the ceiling and cloneDrainMaxCompares the
 	// worst-case compare count the factors above produce at it. They are
 	// asserted separately so that a ceiling change and a retyped factor fail
 	// with different messages.
 	cloneDrainMaxDels     = 64
-	cloneDrainMaxCompares = 68
+	cloneDrainMaxCompares = 66
 )
 
 // TestCloneDrainBatchBudget is CLD11's arithmetic tripwire: DeleteClone

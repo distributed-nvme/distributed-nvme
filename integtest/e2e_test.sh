@@ -9007,13 +9007,16 @@ setup_between_cases() {
 #
 # Each of the five cases ends the same way: delete what the case built, delete
 # the sp, wait for the sp-worker's drain to make `sp get` answer NOT_FOUND,
-# assert that nothing of the sp survives on any guest, and assert the two E2E5
-# allocation caps. smoke IS that ending — its whole content is setup plus this —
-# and ops, copy, react and cutoff put their own steps in front of it. The three
-# pieces are `case_teardown`, `case_residue` and `case_space_guard`, and
-# `case_finish` is the three in order.
+# assert that nothing of the sp survives on any guest, assert the two E2E5
+# allocation caps, and assert that every disk node's agent counts its whole
+# data area free, as its record does, and that the worker logged no
+# disagreement between an agent's count and its record's. smoke IS that
+# ending — its whole content is setup plus this — and ops, copy, react and
+# cutoff put their own steps in front of it. The four pieces are
+# `case_teardown`, `case_residue`, `case_space_guard` and `case_dn_counts`,
+# and `case_finish` is the four in order.
 #
-# THREE ORDERING FACTS:
+# FOUR ORDERING FACTS:
 #
 #  a. The NAMESPACE goes first and the SUBSYSTEM only after the hosts have
 #     disconnected. `ns delete` removes an nvmet namespace under a live
@@ -9040,6 +9043,12 @@ setup_between_cases() {
 #     worker takes it apart in bounded steps, so NOT_FOUND from `sp get` is the
 #     only completion signal there is — "an observer polls GetStoragePool until
 #     NOT_FOUND" is the handler's own wording.
+#  d. The counts come after the residue, and in the same case. An agent's
+#     counts can be held to its record only once its side records match its
+#     revision's side pointer list, which is empty by then, and the agent
+#     frees a side's record only in a sweep that finds the side's device
+#     gone. And setup_between_cases removes $WORK on cp, the worker's log
+#     with it, so each case reads its own log before it ends.
 # ---------------------------------------------------------------------------
 
 # The digest the last host_sha_is read, kept for the failure message the way
@@ -9474,10 +9483,79 @@ case_space_guard() {
 	log "  total allocated on every guest: $total bytes (cap $RUN_CAP_BYTES)"
 }
 
+# The disk nodes' own counts (dnagent.md DN18), which `dn inspect` shows while
+# `dn get` shows the record's, and the dn role's compare of the two
+# (dnv-worker.md RW13). DN_COUNTS_LAST is the last reading dn_counts_agree
+# logged, kept for the reason RESIDUE_LAST is.
+DN_COUNTS_LAST=""
+
+# dn_counts_agree holds once a disk node's agent holds its record's revision
+# and reports counts whose side records match that revision's side pointer
+# list and number none. It is false while the counts are absent, the agent
+# holds another revision, or a side record is left. Once it would hold, the
+# agent's free count must be its record's free count and total, or the run
+# dies naming both: by then neither can move.
+dn_counts_agree() { # <v> <k>
+	local addr rec ins counts rrev arev match sides afree atotal rfree rtotal sig
+	addr=$(dn_addr "$1" "$2")
+	ctl_try dn get --addr "$addr" || return 1
+	rec=$CTL_OUT
+	ctl_try dn inspect --addr "$addr" || return 1
+	ins=$CTL_OUT
+	counts=$(jq_of "$ins" '.dn_info.disk_counts | type')
+	rrev=$(jq_of "$rec" '.dn_rev.revision')
+	arev=$(jq_of "$ins" '.applied_revision')
+	match=$(jq_of "$ins" '.dn_info.disk_counts.side_recs_match // false')
+	sides=$(jq_of "$ins" '.dn_info.disk_counts.side_rec_cnt // "none"')
+	sig="counts $counts, revision $arev of $rrev, side records $sides, matching $match"
+	if [ "$sig" != "$DN_COUNTS_LAST" ]; then
+		DN_COUNTS_LAST=$sig
+		log "  dn$1 instance $2: $sig"
+	fi
+	if [ "$counts" != object ] || [ "$arev" != "$rrev" ] ||
+		[ "$match" != true ] || [ "$sides" != 0 ]; then
+		return 1
+	fi
+	afree=$(jq_of "$ins" '.dn_info.disk_counts.free_ext_cnt')
+	atotal=$(jq_of "$ins" '.dn_info.disk_counts.total_ext_cnt')
+	rfree=$(jq_of "$rec" '.dn_conf.free_ext_cnt')
+	rtotal=$(jq_of "$rec" '.dn_conf.total_ext_cnt')
+	if [ "$afree" != "$rfree" ] || [ "$afree" != "$rtotal" ]; then
+		diag_note_dn "$1" "$2"
+		die "dn$1 instance $2 ($addr) at revision $rrev, no side record" \
+			"left: its agent counts $afree free extents of $atotal," \
+			"its record $rfree of $rtotal"
+	fi
+}
+
+# case_dn_counts is the counts' end of the ending. The positive half first:
+# it holds each agent's own counts to its record at the end of the case, so
+# an agent that sends no counts, or whose sweep never frees a side's record,
+# times out here. The zero that follows shows only that the worker found no
+# disagreement twice in a row during the case: a compare that agrees logs
+# nothing, so the stage cannot show that the dn role compared at all, which
+# is left to the unit tests (dnv-worker.md, Integration test plan).
+case_dn_counts() {
+	stage 93 "disk node counts: each agent counts its whole data area free, as its record does, and the worker logged no disagreement"
+	local v k
+	DN_COUNTS_LAST=""
+	for v in "${!DN[@]}"; do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			wait_until "$WAIT_DELETE" \
+				"dn$v instance $k ($(dn_addr "$v" "$k")) to report counts its record can be held to" \
+				dn_counts_agree "$v" "$k"
+		done
+		log "  dn$v: all $DNS_PER_VM agents count their whole data area free, as their records do"
+	done
+	assert_eq "$(worker_msg_cnt "dn free count disagrees")" 0 \
+		"the worker's 'dn free count disagrees' records of this case (dnv-worker.md, Log records)"
+}
+
 case_finish() {
 	case_teardown
 	case_residue
 	case_space_guard
+	case_dn_counts
 }
 
 # ---------------------------------------------------------------------------
@@ -11507,14 +11585,22 @@ COPY_GRP0='.slice_list[0].data_grp_list[0]'
 # those two RPCs cannot answer FAILED_PRECONDITION for the reason this case
 # cares about.
 #
-# awk and not `set --`: the details can be several lines, a multi-target
-# device's or a row's own text ahead of the status line, and the gateway walks
-# them all looking for the `clone` one.
+# awk and not `set --`: the details can be several lines, a row's own text
+# ahead of the status line. The gateway reads them with
+# common.ParseCloneStatus, which skips every line that is no dm line (fewer
+# than three fields, or a first or second field that is not a number) and
+# parses only details holding exactly one dm line, a dm-clone's with at least
+# six arguments, so nine fields; the awk counts and reads the lines by that
+# same rule.
 
 hyd_fraction() { # <raw dmsetup status details> → "<hydrated>/<total>" | none
 	local out
 	out=$(printf '%s\n' "$1" |
-		awk '$3 == "clone" && NF >= 7 { print $7; exit }')
+		awk 'NF >= 3 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+			dm++
+			if ($3 == "clone" && NF >= 9) f = $7
+		}
+		END { if (dm == 1 && f != "") print f }')
 	printf '%s' "${out:-none}"
 }
 
@@ -13654,6 +13740,25 @@ worker_failover_cnt() {
 		die "cannot count the failovers in $WORK/worker/worker.log on $CP_IP"
 	case "$n" in
 	'' | *[!0-9]*) die "the worker log's failover count read '$n'" ;;
+	esac
+	echo "$n"
+}
+
+# worker_msg_cnt prints how many records of the worker's log carry <msg>, the
+# msg string of a record of dnv-worker.md, Log records, matched whole and as a
+# fixed string. Fatal on a log it cannot read, as worker_failover_cnt is: a
+# zero read that way would pass a caller that wants none without having read
+# the log. A msg holding a quote or a backslash is refused: the log escapes
+# them, and the quoting below could not carry them.
+worker_msg_cnt() { # <msg>
+	local n
+	case "$1" in
+	'' | *[\'\"\\]*) die "worker_msg_cnt cannot match the msg '$1'" ;;
+	esac
+	n=$(ssh_cp "grep -cF '\"msg\":\"$1\"' $WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot count the '$1' records in $WORK/worker/worker.log on $CP_IP"
+	case "$n" in
+	'' | *[!0-9]*) die "the worker log's '$1' count read '$n'" ;;
 	esac
 	echo "$n"
 }

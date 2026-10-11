@@ -406,7 +406,9 @@ write-once — no RPC updates it (`architecture.md`, Clusters) —
 `dn create` reaches the agent: the gateway calls the DN agent's `GetDnSize`
 inline (`gateway.md`, Agent calls), so the invocation's trace id chains
 through to the agent's records (`grpc.md` T3). `dn inspect` is the group's
-live read, the DN agent's `GetDnInfo` rather than etcd.
+live read, the DN agent's `GetDnInfo` rather than etcd, so its disk counts
+are the agent's own, to set beside the record's counts that `dn get` shows
+(`architecture.md`, Live-state reporting).
 
 ### `cn` — `ctl/cn.go`
 

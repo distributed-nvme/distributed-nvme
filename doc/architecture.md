@@ -1377,12 +1377,16 @@ already enforced by key presence (Capacity index keys).
    first; for each DN, stop this bin when its free count is below
    `candExt`; skip the DN when the lists filter it out, when its capacity
    value leaves it fewer free units than `candUnits`, or when its
-   `location` is already taken; else take it as a candidate and its
-   `location` as taken; return as soon as `candCnt` candidates are
+   `location` is already taken; else it joins its `location`'s equals at
+   its free count. The DNs of one free count lie next to each other in the
+   bin, a run: where the run ends — at the next free count or at the end
+   of the bin — take each `location` that has equals in the run, in the
+   order the scan met them, as taken, and one of its equals, drawn at
+   random, as a candidate; return as soon as `candCnt` candidates are
    collected. The skip for want of units passes over one DN and never ends
    the bin, because the key order says nothing about units, and it comes
-   before the location is taken, so a DN without room does not shut a DN
-   of its location that has room out of the scan.
+   before the DN joins its location's equals, so a DN without room neither
+   shuts a DN of its location that has room out of the scan nor is drawn.
 3. After bin 3, return whatever was collected; the caller decides whether
    it is enough.
 
@@ -1393,16 +1397,25 @@ allocation extends the same rule across rounds — a black list of
 `addr_port`s excludes DNs and not their domains — and **tier 2** is this
 scan with `excludeLocs` empty.
 
+The draw among a location's equals keeps the key order from choosing among
+them: equal free counts sort by `addr_port`, so the scan would always take
+one location's DNs in one fixed order, and a machine that runs a dn agent
+per disk would give its disks new sides in that order. The draw is only
+among DNs that tie on free count, so it never trades free space for spread,
+and the candidates keep the order in which the scan meets their locations.
+
 ### Finding CN candidates
 
-The same as Finding DN candidates but without bins: one descending scan
+The same as Finding DN candidates but without bins and without the draw, a
+location's first CN in key order being its candidate: one descending scan
 over the cluster's `CnCapacity` keys, with the taken locations seeded from
 `excludeLocs` (which every CN pick of Per-operation allocation fills, at
 tier 1, with the `location`s of the SP's other cntlrs); it skips
 black-listed, non-white-listed and duplicate-location CNs, CNs that
 already host a cntlr of the same SP and, given a `candUnits` floor, CNs
-whose capacity value leaves fewer free units in their arena, with the same
-placement of that skip as for DNs.
+whose capacity value leaves fewer free units in their arena, a skip placed
+before the location is taken, as for DNs. The draw spreads a machine's
+disks, and a controller node has none.
 
 ### Per-operation allocation
 
@@ -1452,8 +1465,12 @@ placement of that skip as for DNs.
   few domains places the destination instead of refusing. Tier 2's
   candidates are **merged behind** tier 1's rather than replacing them, so a
   distinct-domain DN tier 1 did find is never dropped by a tier-2 scan that
-  fills `candCnt` out of the excluded domains. The resulting same-domain
-  placement is visible in the stored topology; it is not logged separately.
+  fills `candCnt` out of the excluded domains. A tier-2 candidate whose
+  `location` tier 1 already offers is left out: each scan makes its own
+  draw among a location's equals (Finding DN candidates), and the merged
+  list keeps one DN per location, as each scan's does. The resulting
+  same-domain placement is visible in the stored topology; it is not
+  logged separately.
   The locations are read before the STM, which is sound because `location`
   is immutable (Disk nodes) and because the STM drops the pick when the
   group, as the STM reads it, has gained a DN since the read the scan was
@@ -1500,6 +1517,15 @@ loses the group's `ext_cnt` from its `free_ext_cnt`, and each cntlr's CN
 the sum of `ext_cnt` over all the SP's groups; the capacity keys are
 maintained per Capacity index keys; a delete reverses both. The metadata
 units are booked the same way, in the transactions Metadata units names.
+
+A DN's `free_ext_cnt` moves only with its side pointers: the transaction
+that takes a side's extents from the DN adds the side's pointer to its
+`side_ptr_list`, the one that gives them back removes it, and either one
+bumps the DN's `DnRev` (Revision keys and the sync fan-out);
+`CreateDiskNode` starts the count at the total, with an empty list and the
+first revision. One revision of a DN therefore has one free count, which
+is what the dn role's compare of a disk node's own count with its record
+rests on (`dnv-worker.md` RW13).
 
 ### Metadata units
 
@@ -2426,8 +2452,8 @@ which only `DeleteClone` starts (refused until the copy is proven
 complete, unless forced); the client then polls `GetClone` until
 `NOT_FOUND` (Clones). A client whose snapshot request carries a token
 re-reads it from `GetStoragePool` after its last poll: the flip bumps
-`SpRev` (sp role), and so do the clone's latch and every drain
-transaction (Clones, `dnv-worker.md` CLD12), while neither
+`SpRev` (sp role), and so do the clone's latch and the last transaction
+of its drain (Clones, `dnv-worker.md` CLD12), while neither
 `ListThinDevices` nor `GetClone` returns a revision, so a request carrying
 a token read before the last of those writes is refused `ABORTED` ("stale
 revision", Revision keys and the sync fan-out). `CreateThinDevice` never
@@ -3420,6 +3446,21 @@ of Automatic reactions keeps parsing them. `SideInfo` additionally
 reports `zeroed_bytes` and `zero_bytes` on every reply and every Check
 round, which the sp worker's flip rule reads (sp role).
 
+`DnInfo` also carries the disk node's own **disk counts**, a part beside
+its rows that holds numbers and no status: the disk's total extents, its
+free extents, the number of side records its volume table holds, its free
+metadata units (Metadata units), and whether those side records name
+exactly the side pointers of the request the agent holds, the one whose
+revision the reply carries. The agent sends the part only while it knows
+its volume table, as this disk node's, and its disk size, and leaves it
+out otherwise, so a reader tells a count not known from a zero
+(`dnagent.md` DN18). The counts are no row and set no `err_epoch`
+(`dnv-worker.md` HL1): the dn role compares their free extents with the
+record's `free_ext_cnt` (dn / cn roles; `dnv-worker.md` RW13), nothing
+writes them to etcd, and `InspectDiskNode` returns them as the agent
+reports them, to set beside the record `GetDiskNode` returns (Disk
+nodes).
+
 ### Bitmap push protocol
 
 The skip bitmaps of Clones and Migrations reach the data plane exclusively
@@ -3756,8 +3797,8 @@ membership change moves only the shards whose winner changed
 (`dnv-worker.md` VW9). A worker acts only on the shards it owns, and it
 **fences** itself — stops driving everything and rejoins as a fresh
 identity — when its own heartbeat stops reaching etcd or stops being
-echoed by its watch, or when a peer, or its own observer, has committed it
-dead (`dnv-worker.md` VW5, VW8).
+echoed by the watch of one of its roles, or when a peer, or its own
+observer, has committed it dead (`dnv-worker.md` VW5, VW8).
 
 ### dn / cn roles
 
@@ -3777,10 +3818,13 @@ and from its rounds and the syncup replies it maintains `DnConf.err_epoch`
 or `CnConf.err_epoch` and the node's capacity key (Capacity index keys) in
 STMs that bump no revision: unhealthy sets the epoch and deletes the key,
 recovered clears the epoch and recreates the key (`dnv-worker.md` HL1,
-MD4). A `revision` mismatch or a non-zero reply code re-issues the
-`Syncup*` (`dnv-worker.md` RW4). `RES_STATUS_PROVISIONING` is **not** a bad
-status and never sets `err_epoch` or removes a capacity key ([D15],
-Live-state reporting).
+MD4). From a disk node's disk counts (Live-state reporting) the dn-role
+worker also compares the node's own free extents with the record's and
+logs a disagreement that two compares in a row find; it writes nothing for
+it (`dnv-worker.md` RW13). A `revision` mismatch or a non-zero reply code
+re-issues the `Syncup*` (`dnv-worker.md` RW4). `RES_STATUS_PROVISIONING` is
+**not** a bad status and never sets `err_epoch` or removes a capacity key
+([D15], Live-state reporting).
 
 ### sp role
 
@@ -4998,9 +5042,10 @@ document and the component documents cite it by its id.
   for the grace time before it changes the observer's effective membership;
   ownership is the largest sha256 ticket of seed, role and shard among
   effective members; and a worker whose own heartbeat stops reaching etcd
-  or stops being echoed by its watch, or whose key a peer has deleted, or
-  whose own observer commits it dead, fences itself and rejoins as a fresh
-  identity (`dnv-worker.md` VW3, VW5, VW8, VW9). Why not a lease: a lease expiry is a single server-side event
+  or stops being echoed by the watch of one of its roles, or whose key a
+  peer has deleted, or whose own observer commits it dead, fences itself
+  and rejoins as a fresh identity (`dnv-worker.md` VW3, VW5, VW8, VW9).
+  Why not a lease: a lease expiry is a single server-side event
   with no notion of "stable" — a worker flapping at the keep-alive boundary
   reshuffles ownership on every flap, and a newly started worker takes its
   shards instantly while the old owners still hold them. The explicit

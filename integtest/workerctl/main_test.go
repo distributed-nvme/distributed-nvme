@@ -483,19 +483,21 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). The suites read ten of its keys at
+// the others, for computed values). The suites read twelve of its keys at
 // preflight, and stop there when one is missing: every suite that starts an
 // etcd launches it with EtcdMaxTxnOps, e2e cross-checks MaxAllocLegPerGrp,
 // the gateway suite creates its stage-13 clone at MaxSliceCntPerSp and checks
 // the health intervals a new cluster stores against
 // DefaultHealthCheckInterval, the worker and e2e suites read that interval,
 // DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases,
-// and the gateway suite's ceiling case fills the metadata areas to
+// the gateway suite's ceiling case fills the metadata areas to
 // CnCloneMetaUnitCnt and DnCloneMetaUnitCnt in units of CnCloneMetaUnit,
-// which it requires DnCloneMetaUnit to equal. One of those ten dropped or
-// renamed here would otherwise surface only when a suite is run, at its
-// preflight. The other three keys are pinned as well, because a case may size
-// itself against them.
+// which it requires DnCloneMetaUnit to equal, and the cdc suite's flood case
+// fills the pending cap, CdcMaxPendingConnCnt, and waits by the pre-Connect
+// deadline, DefaultCdcPendingTmoMs. One of those twelve dropped or renamed
+// here would otherwise surface only when a suite is run, at its preflight.
+// The other three keys are pinned as well, because a case may size itself
+// against them.
 func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 	read, write, err := os.Pipe()
 	if err != nil {
@@ -531,6 +533,9 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
+
+		"CdcMaxPendingConnCnt":   common.CdcMaxPendingConnCnt,
+		"DefaultCdcPendingTmoMs": common.DefaultCdcPendingTmoMs,
 	}
 	for key, value := range want {
 		if have, ok := got[key]; !ok || have != value {

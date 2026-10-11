@@ -274,13 +274,13 @@ type reactionOps interface {
 		spName string,
 	) error
 	// drainCloneBm is one clone-drain batch (CLD8): at most
-	// MaxDelBmPerTxn chunk keys, named by the caller's snapshot scan. It
-	// returns the SIZE of that batch, not a count of keys that were still
-	// there — a Del is an idempotent pop and the op never reads them.
+	// MaxDelBmPerTxn chunk keys, named by the caller's snapshot scan, and no
+	// SpRev read or bump. It returns the SIZE of that batch, not a count of
+	// keys that were still there — a Del is an idempotent pop and the op
+	// never reads them.
 	drainCloneBm(
 		ctx context.Context,
 		cid uint64,
-		shard uint32,
 		spId uint64,
 		spName string,
 		cloneName string,
@@ -477,7 +477,6 @@ func (o *modelReactionOps) finishSpDelete(
 func (o *modelReactionOps) drainCloneBm(
 	ctx context.Context,
 	cid uint64,
-	shard uint32,
 	spId uint64,
 	spName string,
 	cloneName string,
@@ -485,7 +484,7 @@ func (o *modelReactionOps) drainCloneBm(
 	chunks []model.BmChunk,
 ) (int, error) {
 	return model.DrainCloneBm(
-		ctx, o.cli, cid, shard, spId, spName, cloneName, cloneId, chunks,
+		ctx, o.cli, cid, spId, spName, cloneName, cloneId, chunks,
 	)
 }
 
@@ -761,20 +760,16 @@ type spPass struct {
 // The snapshot is taken fresh here rather than reused from the fan-out: a pass
 // must see the err_epochs this same worker wrote since (HL3), and model.LoadSp
 // is one Snapshot (EU4) even though it loads more than a pass reads.
+//
+// A committed drain step's wake-up runs the drain half of this pass alone, in
+// the same order and behind the same gates (drainTick): the load, the clone
+// drain, and for a latched SP the cluster-conf gate and the sp drain's step.
+// The load and the gate are the helpers both call (loadPassState,
+// passClusterConf).
 func (w *spWorker) reactionPass(ctx context.Context) {
 	seqs := w.healthSeqs()
-	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
-	if err != nil {
-		if !errors.Is(err, model.ErrNotFound) {
-			// RW14 logs the load failure of a fan-out the same way; the pass
-			// simply runs again on the next tick.
-			slog.InfoContext(ctx, msgSpLoadFailed,
-				slog.Uint64("cluster_id", w.cid),
-				slog.Uint64("sp_id", w.spId),
-				slog.String("sp_name", w.desired.handle),
-				slog.String("error", err.Error()),
-			)
-		}
+	state, ok := w.loadPassState(ctx)
+	if !ok {
 		return
 	}
 	// HL3: the health memos are a cache of the records this load read. A
@@ -797,20 +792,8 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// the living children keep converging, which they do, and what matters for
 	// the drain is that nothing can skip it.)
 	w.drainClones(ctx, state)
-	cc, ok := w.deps.conf.get(w.cid)
+	cc, ok := w.passClusterConf(ctx)
 	if !ok {
-		// RW9: a cluster missing from the cache drives nothing. Every
-		// allocating reaction needs its extent_size and batch sizes, and the
-		// children already log `cluster conf missing` for the idle period.
-		return
-	}
-	// architecture.md, Common validation: the CLUSTER's stored conf is checked
-	// before the pass is built, so an unusable ladder produces no candidate
-	// scan and no model op. The drain needs it too — every D2 batch maintains a
-	// DN capacity key, whose bin index comes from that ladder — so this gate
-	// sits ahead of both branches.
-	if err := model.ValidateClusterConf(cc); err != nil {
-		w.refuseReactionConf(ctx, err)
 		return
 	}
 	p := w.newPass(state, cc)
@@ -829,7 +812,7 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// undeletable, since the latch is one-way (SPD5) and nothing else
 		// ever removes the keys.
 		w.confRefusal.cc = ""
-		w.drainStep(ctx, p)
+		w.drainStep(ctx, state, cc)
 		return
 	}
 	// The SP's own stored geometry, for the reactions: tryGrow reads
@@ -863,6 +846,58 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	default:
 		w.tryLegRepair(ctx, p)
 	}
+}
+
+// loadPassState is the load of a pass (AR1) and of a drain's wake-up
+// (drainTick): one fresh snapshot of the SP, or false when there is nothing
+// to act on. An SP that is gone (model.ErrNotFound) is silent here: the
+// fan-out records it (RW14), and the SpRev delete that follows stops this
+// coordinator (SW3). Any other failure is recorded as RW14 records a
+// fan-out's, and the pass simply runs again on the next tick (RW12).
+func (w *spWorker) loadPassState(ctx context.Context) (*model.SpState, bool) {
+	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			slog.InfoContext(ctx, msgSpLoadFailed,
+				slog.Uint64("cluster_id", w.cid),
+				slog.Uint64("sp_id", w.spId),
+				slog.String("sp_name", w.desired.handle),
+				slog.String("error", err.Error()),
+			)
+		}
+		return nil, false
+	}
+	return state, true
+}
+
+// passClusterConf is the cluster-conf gate of a pass, and of a latched SP's
+// drain wake-up (drainTick): the cluster's stored conf, or false when there is
+// none the pass may use.
+//
+// A cluster missing from the cache drives nothing (RW9): every allocating
+// reaction needs its extent_size and batch sizes, and the children already
+// log `cluster conf missing` for the idle period, so the miss is silent here.
+//
+// The CLUSTER's stored conf is checked before the pass is built
+// (architecture.md, Common validation), so an unusable ladder produces no
+// candidate scan and no model op. The sp drain needs it too — every D2 batch
+// maintains a DN capacity key, whose bin index comes from that ladder — so
+// the gate sits ahead of both of the pass's branches. A conf that does not
+// validate is refused through refuseReactionConf. The callers clear that
+// refusal's memo once every gate of theirs has passed, and this gate never
+// does: a usable cluster conf clearing it would wipe a live SP's memo of its
+// own bdev_conf or group refusal, and that refusal would then be logged on
+// every pass instead of once.
+func (w *spWorker) passClusterConf(ctx context.Context) (*pb.ClusterConf, bool) {
+	cc, ok := w.deps.conf.get(w.cid)
+	if !ok {
+		return nil, false
+	}
+	if err := model.ValidateClusterConf(cc); err != nil {
+		w.refuseReactionConf(ctx, err)
+		return nil, false
+	}
+	return cc, true
 }
 
 // refuseReactionConf records the pass gate's refusal, once per distinct error.

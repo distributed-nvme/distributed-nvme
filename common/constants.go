@@ -122,12 +122,13 @@ const (
 	// deletes — so the arithmetic is one line. etcd caps a transaction at
 	// max(len(Compare), len(Success), len(Failure)), and etcdutil's
 	// serializable-snapshot STM compares every key it READ and every key it
-	// WROTE, so the COMPARE count binds: 3 reads (SpConf, Clone, SpRev) plus
-	// MaxDelBmPerTxn + 1 writes = MaxDelBmPerTxn + 4 = 68, against 65 success
-	// ops. It is independent of every ceiling constant. Growing MaxCloneBmCnt or
-	// MaxSliceCntPerSp therefore grows the batch COUNT and never the
-	// transaction's legality; at the ceilings a maximum-shape drain is
-	// ceil(MaxSliceCntPerSp x MaxCloneBmCnt / MaxDelBmPerTxn) batches. 68 also
+	// WROTE, so the COMPARE count binds: 2 reads (SpConf, Clone) plus
+	// MaxDelBmPerTxn writes = MaxDelBmPerTxn + 2 = 66, against 64 success
+	// ops — a batch neither reads nor writes SpRev (CLD8), so it has no fixed
+	// write. It is independent of every ceiling constant. Growing
+	// MaxCloneBmCnt or MaxSliceCntPerSp therefore grows the batch COUNT and
+	// never the transaction's legality; at the ceilings a maximum-shape drain is
+	// ceil(MaxSliceCntPerSp x MaxCloneBmCnt / MaxDelBmPerTxn) batches. 66 also
 	// fits etcd's DEFAULT --max-txn-ops of 128 — prose, not a tripwire: the
 	// deployment requirement stays EtcdMaxTxnOps for the transactions that do
 	// NOT fit 128, such as
@@ -551,7 +552,7 @@ const (
 	// delete in a pool of MaxTdCntPerSp tds. A walk inside the STM would cost
 	// one compare per td and put a delete from a full pool past the budget.
 	//
-	// The clone drain's batches, MaxDelBmPerTxn + 4 ops each, fit the default
+	// The clone drain's batches, MaxDelBmPerTxn + 2 ops each, fit the default
 	// (dnv-worker.md CLD11).
 	//
 	// The Go test etcd launchers pass it from here; the shell suites that
@@ -652,12 +653,24 @@ const (
 	// assigned round-robin at Connect (NP5). 0xffff is the "dynamic
 	// controller" wildcard and 0xfff0…0xfffe are reserved.
 	CdcCntlIdMax = 0xffef
+	// CdcMaxPendingConnCnt is the most pending connections an instance
+	// holds: accepted, with no successful Connect yet, a refused Connect
+	// included (NP1). At it the accept loop stops accepting until one
+	// connects or ends, so new connections wait in the kernel's listen
+	// backlog as they do before the first scan (CM4).
+	CdcMaxPendingConnCnt = 256
+	// DefaultCdcPendingTmoMs is a pending connection's pre-Connect deadline,
+	// counted from accept and moved by nothing: not the ICReq, not a refused
+	// Connect (NP10). A host's kernel sends its ICReq at its TCP connect and
+	// its Connect within moments of the ICResp, which the controller sends as
+	// soon as it accepts.
+	DefaultCdcPendingTmoMs = 10000
 	// DefaultCdcKeepAliveGraceMs is added to a connection's KATO before it
 	// is reaped (NP10), mirroring nvmet's grace.
 	DefaultCdcKeepAliveGraceMs = 10000
-	// DefaultCdcZeroKatoTmoMs is the idle cutoff of a KATO = 0 connection
-	// (NP10) — a one-shot `nvme discover` is not immortal. It mirrors
-	// nvmet's NVMET_DISC_KATO_MS.
+	// DefaultCdcZeroKatoTmoMs is the idle cutoff of a connected connection
+	// whose KATO is zero (NP10) — a one-shot `nvme discover` is not
+	// immortal. It mirrors nvmet's NVMET_DISC_KATO_MS.
 	DefaultCdcZeroKatoTmoMs = 120000
 	// DefaultCdcRescanInterval is the seconds between retries of a failed
 	// etcd scan (WV5). The server keeps answering from the held state

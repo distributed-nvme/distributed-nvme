@@ -63,7 +63,14 @@ func connSend(h *fakeHost, a connArgs) completion {
 func connSendCmd(h *fakeHost, a connArgs) uint16 {
 	h.t.Helper()
 	cid := h.allocCid()
-	s := newSqe(opcFabrics, cid)
+	h.send(connCmd(cid, a))
+	return cid
+}
+
+// connCmd renders one Connect: its SQE, under command id cid, and its 1024
+// byte connect data.
+func connCmd(cid uint16, a connArgs) (s []byte, data []byte) {
+	s = newSqe(opcFabrics, cid)
 	s[4] = fctypeConnect
 	setSgl(s, connectDataLen)
 	s[39] = 0x5<<4 | 0x1 // in-capsule data
@@ -72,15 +79,22 @@ func connSendCmd(h *fakeHost, a connArgs) uint16 {
 	binary.LittleEndian.PutUint16(s[44:46], a.sqSize)
 	s[46] = a.cattr
 	binary.LittleEndian.PutUint32(s[48:52], a.katoMs)
-	data := make([]byte, connectDataLen)
+	data = make([]byte, connectDataLen)
 	copy(data[connectDataSubNqnOff:], a.subNqn)
 	if len(a.hostNqnRaw) > 0 {
 		copy(data[connectDataHostNqnOff:], a.hostNqnRaw)
 	} else {
 		copy(data[connectDataHostNqnOff:], a.hostNqn)
 	}
-	h.send(s, data)
-	return cid
+	return s, data
+}
+
+// connRefused is a Connect that NP5 refuses with a status and no PDU error:
+// it names some other subsystem than the discovery NQN.
+func connRefused(hostNqn string) connArgs {
+	a := connDefaults(hostNqn)
+	a.subNqn = "nqn.2016-06.io.dnv:ss0"
+	return a
 }
 
 // connTermReq reads the C2HTermReq a protocol error is answered with (NP2) and
@@ -1248,8 +1262,9 @@ func connConnectWithKato(
 	args := connDefaults(connHostA)
 	args.katoMs = katoMs
 	connStatus(t, connSend(h, args), statusSuccess, "connect")
-	// Two timers: the one armed before Connect on the zero-KATO budget, and
-	// the one the connection re-armed once it knew its KATO.
+	// Two timers: the one armed at accept on the pre-Connect deadline, and
+	// the one the connection re-armed once Connect named its KATO. The first
+	// stays armed in the fake clock, unread, until an advance passes it.
 	ts.clk.waitWaiters(t, 2)
 }
 
@@ -1297,10 +1312,12 @@ func TestKeepAliveRestartedByEveryCommand(t *testing.T) {
 	connStatus(t, c, statusSuccess, "property get")
 
 	// Past the original deadline the timer fires, recomputes against the
-	// command above and arms itself again rather than reaping. Waiting for
-	// that re-arm is what makes the assertion below race-free.
+	// command above and arms itself again rather than reaping. The
+	// pre-Connect timer already fired in the first advance, so the re-armed
+	// one is the only timer, and waiting for it is what makes the assertion
+	// below race-free.
 	ts.clk.advance(connKatoExpiry / 2)
-	ts.clk.waitWaiters(t, 2)
+	ts.clk.waitWaiters(t, 1)
 	if n := logs.count(msgHostDisconnected); n != 0 {
 		t.Fatalf("reaped despite a command inside the budget (%d records)", n)
 	}
@@ -1361,6 +1378,76 @@ func TestZeroKatoIdleCutoff(t *testing.T) {
 		t.Fatalf("reason %v, want %v", rec["reason"], reasonKeepAlive)
 	}
 	connSocketClosed(t, h)
+}
+
+// TestPendingDeadlineCountsFromAccept proves NP10's pre-Connect deadline: a
+// connection that has not connected ends common.DefaultCdcPendingTmoMs after
+// accept, whatever it sends meanwhile. Neither the ICReq nor a refused
+// Connect moves the deadline, so a client that keeps sending refused Connects
+// cannot keep its slot (NP1). It is answered up to the last instant, and its
+// end is logged nowhere (NP13).
+func TestPendingDeadlineCountsFromAccept(t *testing.T) {
+	logs := captureLogs(t)
+	ts := startServer(t)
+	tmo := common.DefaultCdcPendingTmoMs * time.Millisecond
+	h := ts.dial()
+	ts.clk.waitWaiters(t, 1)
+
+	ts.clk.advance(tmo / 2)
+	h.handshake()
+	ts.clk.advance(tmo / 4)
+	connStatus(t, connSend(h, connRefused(connHostA)), statusConnectParam,
+		"a refused connect")
+	ts.clk.advance(tmo/4 - time.Millisecond)
+	connStatus(t, connSend(h, connRefused(connHostA)), statusConnectParam,
+		"a refused connect a millisecond before the deadline")
+
+	ts.clk.advance(time.Millisecond)
+	connSocketClosed(t, h)
+	srvWaitConns(t, ts, 0)
+	// Its slot went back: what is left is the one the accept loop holds for
+	// the Accept it waits in.
+	srvWaitPending(t, ts, 1)
+	for _, msg := range []string{msgHostDisconnected, msgPduError} {
+		if n := logs.count(msg); n != 0 {
+			t.Errorf("%d %q records for a connection that never connected, "+
+				"want 0", n, msg)
+		}
+	}
+}
+
+// TestConnectBeforeThePendingDeadlineKeepsTheConnection proves the switch of
+// NP10 at Connect: a Connect a millisecond before the pre-Connect deadline
+// moves the connection to its KATO's deadline, so the pre-Connect one passing
+// reaps nothing.
+func TestConnectBeforeThePendingDeadlineKeepsTheConnection(t *testing.T) {
+	logs := captureLogs(t)
+	ts := startServer(t)
+	tmo := common.DefaultCdcPendingTmoMs * time.Millisecond
+	h := ts.dial()
+	ts.clk.waitWaiters(t, 1)
+	h.handshake()
+	ts.clk.advance(tmo - time.Millisecond)
+	connStatus(t, connSend(h, connDefaults(connHostA)), statusSuccess,
+		"connect a millisecond before the pre-Connect deadline")
+	// The second timer is the one Connect's kick armed on the zero-KATO
+	// deadline; the pre-Connect timer stays armed in the fake clock, unread.
+	ts.clk.waitWaiters(t, 2)
+
+	ts.clk.advance(time.Millisecond)
+	// The advance passed the pre-Connect timer only. A loop still bound to
+	// the pre-Connect deadline would have armed its second timer for that
+	// same instant, and both would have fired.
+	if n := ts.clk.waiterCount(); n != 1 {
+		t.Fatalf("%d timers armed past the pre-Connect deadline, want 1: "+
+			"the KATO's", n)
+	}
+	connStatus(t, h.keepAlive(), statusSuccess,
+		"keep alive past the pre-Connect deadline")
+	if n := logs.count(msgHostDisconnected); n != 0 {
+		t.Fatalf("%d `host disconnected` records past the pre-Connect "+
+			"deadline of a connected connection, want 0", n)
+	}
 }
 
 // ---------------------------------------------------------------------------

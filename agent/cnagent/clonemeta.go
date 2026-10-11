@@ -353,7 +353,7 @@ func (c *CloneMeta) Wrappers(
 
 // parseCloneMetaSlot reads one wrapper's allocation back out of its table.
 // Anything but a single `0 {len} linear {maj:min} {off}` line claims no units.
-func parseCloneMetaSlot(name string, targets []agent.DmTarget) cloneMetaSlot {
+func parseCloneMetaSlot(name string, targets []common.DmTarget) cloneMetaSlot {
 	slot := cloneMetaSlot{name: name}
 	if len(targets) != 1 || targets[0].Type != "linear" ||
 		targets[0].Start != 0 || len(targets[0].Args) != 2 {

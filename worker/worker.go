@@ -80,13 +80,13 @@ func (c Config) deadThreshold() time.Duration {
 	return 2 * c.VoteInterval
 }
 
-// fenceThreshold is the dead threshold plus one vote interval: a worker whose
-// own heartbeat has not fully reached etcd, or whose own watch has echoed none
-// of its puts, for this long fences itself (VW8 (a) and (b)). The extra
-// interval lets it ride out one tick whose puts fail, as long as its puts
-// return, and are echoed, within the interval: its observers, its own
-// included, see that at most as a flap, which a grace window longer than the
-// flap absorbs (VW5).
+// fenceThreshold is the dead threshold plus one vote interval: a worker fences
+// itself once its own heartbeat has not fully reached etcd for this long, or
+// once the watch of one of its roles has echoed none of its puts for this long
+// (VW8 (a) and (b)). The extra interval lets it ride out one tick whose puts
+// fail, as long as its puts return, and are echoed, within the interval: its
+// observers, its own included, see that at most as a flap, which a grace
+// window longer than the flap absorbs (VW5).
 func (c Config) fenceThreshold() time.Duration {
 	return c.deadThreshold() + c.VoteInterval
 }
@@ -154,11 +154,17 @@ func (realClock) after(d time.Duration) <-chan time.Time {
 // Shared dependencies
 // ---------------------------------------------------------------------------
 
-// etcdStore is the etcd surface worker/ uses (EU2, EU3). *etcdutil.Client
+// etcdStore is the etcd surface worker/ uses (EU2, EU3, EU4). *etcdutil.Client
 // implements it as-is; the unit tests substitute in-memory fakes for the vote
 // registry, the rev prefixes and the ClusterConf prefix. Everything else in
 // the package that touches etcd does so through model, which takes the
 // concrete client (deps.cli).
+//
+// SnapshotRev serves the dn role's read of a DnConf together with its DnRev
+// (readDnRecord, RW13). Every read of it after the first is linearizable at
+// the pinned revision, while Snapshot's are served by whichever member the
+// client picks and fail on one that has not applied that revision yet
+// (snapshotView (etcdutil/etcdutil.go)).
 type etcdStore interface {
 	Get(ctx context.Context, key string, msg proto.Message) (bool, error)
 	Put(ctx context.Context, key string, msg proto.Message) error
@@ -171,6 +177,10 @@ type etcdStore interface {
 		fromRev int64,
 		newMsg func() proto.Message,
 	) (<-chan etcdutil.Event, <-chan error)
+	SnapshotRev(
+		ctx context.Context,
+		f func(s etcdutil.STM) error,
+	) (int64, error)
 }
 
 // deps is what every layer of the worker shares: one etcd client, one
@@ -234,12 +244,13 @@ func newTraceCtx(ctx context.Context, seed string) context.Context {
 // Run mints the incarnation seed, starts the process-wide ClusterConf cache
 // (RW21) and the vote worker (VW1-VW11), and blocks until ctx ends (CM4).
 //
-// On shutdown it performs CM5 in order: stop the heartbeat loop; delete this
-// worker's own registrations best-effort so peers start their grace windows
-// now rather than after the dead threshold; stop every shard worker
-// gracefully and in parallel (SW5 -> RW11, which may take up to
-// common.DefaultWorkerSyncupTimeout); close the cache watch; close the etcd
-// client. It returns nil: nothing about a shutdown is an error.
+// On shutdown it performs CM5 in order: stop the heartbeat loop; tell every
+// shard worker to stop, gracefully and in parallel (SW5 -> RW11), without
+// waiting; delete this worker's own registrations best-effort so peers start
+// their grace windows now rather than after the dead threshold; join the shard
+// workers, which may take up to common.DefaultWorkerSyncupTimeout; close the
+// cache watch; close the etcd client. It returns nil: nothing about a shutdown
+// is an error.
 func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	seed, err := newSeed()
 	if err != nil {
@@ -276,7 +287,8 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	}()
 
 	vote := newVoteWorker(d, seed)
-	// run returns only after CM5's first three steps are done.
+	// run returns only after CM5's vote-layer steps are done: every shard
+	// worker has stopped and the deletes have returned.
 	vote.run(ctx)
 
 	stopSeed := vote.currentSeed()

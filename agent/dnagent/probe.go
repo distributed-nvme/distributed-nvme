@@ -39,6 +39,9 @@ func (s *DnAgentServer) probeDn(
 	details, err := s.meta.ProbeHeader(ctx, req.GetClusterId(),
 		req.GetDnId(), req.GetExtentSize())
 	info.MetaInfo = t.FromErr(resKeyMeta, s.disk, details, err)
+	// The counts go after both reads, so they describe the table and the
+	// size as this probe leaves them.
+	s.addDiskCounts(info, req)
 
 	portName := fmt.Sprintf("%d", s.port.PortId)
 	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
@@ -51,6 +54,23 @@ func (s *DnAgentServer) probeDn(
 		info.PortInfo = t.Ok(resKeyPort, portName, "")
 	}
 	return info
+}
+
+// addDiskCounts puts the disk counts (DN18) into info beside an OK meta row,
+// and only there: a meta row that is not OK says that this pass's read could
+// not vouch for the table in memory, though the table may still be this dn's,
+// and DiskMeta.Counts applies the gates of its own. The DN converge
+// (convergeDn) and the probe (probeDn) both call it right after they set the
+// meta row.
+func (s *DnAgentServer) addDiskCounts(
+	info *pb.DnInfo,
+	req *pb.SyncupDnRequest,
+) {
+	if info.GetMetaInfo().GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return
+	}
+	info.DiskCounts = s.meta.Counts(
+		req.GetClusterId(), req.GetDnId(), req.GetSidePointerList())
 }
 
 func (s *DnAgentServer) probeSide(

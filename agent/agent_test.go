@@ -837,43 +837,6 @@ func TestTableBuilders(t *testing.T) {
 	}
 }
 
-func TestParseDmLinesAndCloneStatus(t *testing.T) {
-	targets := ParseDmLines("0 2048 linear 253:3 0\n")
-	if len(targets) != 1 || targets[0].Type != "linear" ||
-		targets[0].Length != 2048 || targets[0].Args[0] != "253:3" {
-		t.Fatalf("parsed %v", targets)
-	}
-	if got := ParseDmLines("garbage\n"); len(got) != 0 {
-		t.Errorf("garbage parsed as %v", got)
-	}
-
-	raw := "0 20480 clone 8 1/1024 2048 4/10 0 1 no_hydration 4 " +
-		"hydration_threshold 3 hydration_batch_size 5"
-	status, ok := ParseCloneStatus(raw)
-	if !ok {
-		t.Fatal("clone status did not parse")
-	}
-	if status.RegionSectors != 2048 || status.HydratedRegions != 4 ||
-		status.TotalRegions != 10 {
-		t.Errorf("status = %+v", status)
-	}
-	if status.HydrationEnabled {
-		t.Error("no_hydration was not detected")
-	}
-	if status.Threshold != 3 || status.BatchSize != 5 {
-		t.Errorf("knobs = %d/%d", status.Threshold, status.BatchSize)
-	}
-	enabled, ok := ParseCloneStatus(
-		"0 20480 clone 8 1/1024 2048 4/10 0 0 4 " +
-			"hydration_threshold 1 hydration_batch_size 1")
-	if !ok || !enabled.HydrationEnabled {
-		t.Errorf("hydration state = %+v", enabled)
-	}
-	if _, ok := ParseCloneStatus("0 2048 linear 253:3 0"); ok {
-		t.Error("a linear status parsed as a clone")
-	}
-}
-
 // TestCloneStatusDetails pins the details text both agents give a dm-clone
 // row whose pass read the status: the note first, then the raw status line
 // on a line of its own, which a reader that scans the details line by line,
@@ -896,13 +859,13 @@ func TestCloneStatusDetails(t *testing.T) {
 	}
 	details := CloneStatusDetails(note, raw)
 	lines := strings.Split(details, "\n")
-	status, ok := ParseCloneStatus(lines[len(lines)-1])
+	status, ok := common.ParseCloneStatus(lines[len(lines)-1])
 	if !ok || status.HydratedRegions != 10 || status.TotalRegions != 10 {
 		t.Errorf("the status line did not survive the note: %+v", status)
 	}
 	// A reader that parses the whole details, note and all, still finds
 	// the one dm-clone line in it.
-	whole, ok := ParseCloneStatus(details)
+	whole, ok := common.ParseCloneStatus(details)
 	if !ok || whole.HydratedRegions != 10 || whole.TotalRegions != 10 ||
 		whole.HydrationEnabled {
 		t.Errorf("the whole details did not parse: %+v", whole)

@@ -82,6 +82,18 @@ func excluded(
 // whether that is enough (RESOURCE_EXHAUSTED otherwise, architecture.md,
 // Per-operation allocation).
 //
+// Among DNs that tie on free count the walk draws. The keys of one free count
+// lie next to each other in a bin, a run (freeRun), ordered by addr_port, so
+// taking the first DN of a location the walk meets would take a machine's
+// disk nodes, which share its location, in one fixed order. The walk instead
+// collects the whole run — per location not taken before the run, the DNs
+// the lists and the unit floor let through — and at its end, in the order
+// the walk met the locations, takes each location and appends one of its DNs
+// drawn uniformly. The break and candCnt can only fall where a run ends, so
+// the locations offered, their order and their free counts are those of a
+// walk without the draw; only which of a location's equals is offered
+// changes, and the draw never trades free space for spread.
+//
 // Health, flags, fullness and the side-count cap need no filtering here: a
 // node that fails any of them has no capacity key at all (architecture.md,
 // Capacity index keys).
@@ -90,9 +102,9 @@ func excluded(
 // location (architecture.md, Metadata units): a DN whose value leaves it
 // fewer than candUnits free units (DnCapacityFreeMetaUnits) is skipped. It
 // is a continue and never a break, because the key order says nothing about
-// units, and it comes before the location is recorded, so a full DN never
-// takes its failure domain from a DN of the same location that has room. A
-// candUnits of zero skips nothing.
+// units, and a DN it skips never joins a run, so a full DN neither takes its
+// failure domain from a DN of the same location that has room nor is drawn.
+// A candUnits of zero skips nothing.
 //
 // The scans are plain Ranges OUTSIDE any STM (MD5): a transaction cannot
 // range, and holding one across a full index walk would serialize every
@@ -138,12 +150,23 @@ func FindDnCandidates(
 		if err != nil {
 			return nil, err
 		}
+		var run freeRun
 		for _, kv := range kvs {
 			keyBin, freeExt, addrPort, ok := ParseDnCapacityKey(kv.Key)
 			if !ok {
 				// A key nothing in dnv writes. Skipping it keeps one
 				// corrupt index entry from failing every allocation.
 				continue
+			}
+			if freeExt != run.freeExt {
+				// A new free count ends the run before it, which is
+				// drawn first: the break below falls only on such a
+				// boundary, so no run is cut short.
+				cands = run.take(cands, locSet, candCnt)
+				if len(cands) >= candCnt {
+					return cands, nil
+				}
+				run.freeExt = freeExt
 			}
 			if freeExt < candExt {
 				// Descending key order is descending free order inside one
@@ -160,27 +183,75 @@ func FindDnCandidates(
 			}
 			if DnCapacityFreeMetaUnits(capacity) < candUnits {
 				// Never a break: the next DN of the bin may have room.
-				// Before the location is recorded, so this DN does not
-				// shut a same-location DN with room out.
+				// It joins no run, so this DN neither shuts a
+				// same-location DN with room out nor is drawn.
 				continue
 			}
 			location := capacity.GetLocation()
 			if _, ok := locSet[location]; ok {
+				// Taken before this run: by excludeLocs or by an
+				// earlier run's draw.
 				continue
 			}
-			locSet[location] = struct{}{}
-			cands = append(cands, Cand{
+			run.add(Cand{
 				AddrPort: addrPort,
 				Location: location,
 				FreeExt:  freeExt,
 				BinIdx:   keyBin,
 			})
-			if len(cands) >= candCnt {
-				return cands, nil
-			}
+		}
+		// The bin's last run; after the break it is already empty.
+		cands = run.take(cands, locSet, candCnt)
+		if len(cands) >= candCnt {
+			return cands, nil
 		}
 	}
 	return cands, nil
+}
+
+// freeRun is one run of FindDnCandidates' walk: the keys of one bin that carry
+// one free count, which lie next to each other in the bin's descending order
+// (architecture.md, Finding DN candidates). Per location not taken before the
+// run it holds the DNs of that count the lists and the unit floor let
+// through, and it keeps the locations in the order the walk met them.
+type freeRun struct {
+	freeExt uint64
+	locs    []string
+	byLoc   map[string][]Cand
+}
+
+// add puts a DN that passed every filter into the run, under its location.
+func (r *freeRun) add(cand Cand) {
+	if r.byLoc == nil {
+		r.byLoc = make(map[string][]Cand)
+	}
+	if _, ok := r.byLoc[cand.Location]; !ok {
+		r.locs = append(r.locs, cand.Location)
+	}
+	r.byLoc[cand.Location] = append(r.byLoc[cand.Location], cand)
+}
+
+// take ends the run into cands: per location, in the order met, it marks the
+// location taken and appends one of the location's DNs, drawn uniformly, and
+// it stops once cands holds candCnt. The run is empty on return. Marking a
+// location only here, never when the walk meets it, is what lets every DN of
+// the run's count in that location into the draw.
+func (r *freeRun) take(
+	cands []Cand,
+	locSet map[string]struct{},
+	candCnt int,
+) []Cand {
+	locs, byLoc := r.locs, r.byLoc
+	r.locs, r.byLoc = nil, nil
+	for _, location := range locs {
+		if len(cands) >= candCnt {
+			break
+		}
+		equals := byLoc[location]
+		locSet[location] = struct{}{}
+		cands = append(cands, equals[rand.IntN(len(equals))])
+	}
+	return cands
 }
 
 // FindDnCandidatesAntiAffine is FindDnCandidates with the two-tier
@@ -201,11 +272,14 @@ func FindDnCandidates(
 // at candCnt, and the caller's own (excluded) domains usually hold the fullest
 // DNs, so a plain replace can drop a distinct-domain candidate tier 1 DID
 // find. Tier 1's entries therefore stay at the head and only tier-2 entries
-// with an addr_port not already present are appended, so no caller ever sees
-// one DN twice. The black and white lists and candUnits apply to both tiers:
-// tier 2 relaxes the failure domain and nothing else. An empty excludeLocs
-// makes tier 1 the plain scan, and tier 2 — which would repeat it exactly — is
-// skipped.
+// whose location tier 1 does not already offer are appended: each scan makes
+// its own draw among a location's equals (FindDnCandidates), so tier 2 can
+// offer another DN of a location tier 1 offers, and the merged list keeps one
+// DN per location, as each scan's does. An addr_port has one location, so no
+// caller ever sees one DN twice either. The black and white lists and
+// candUnits apply to both tiers: tier 2 relaxes the failure domain and
+// nothing else. An empty excludeLocs makes tier 1 the plain scan, and tier 2
+// — which would offer the same locations again — is skipped.
 //
 // In a default deployment location defaults to addr_port (architecture.md,
 // Disk nodes), so a group's
@@ -250,16 +324,16 @@ func FindDnCandidatesAntiAffine(
 	}
 	seen := make(map[string]struct{}, len(cands))
 	for _, cand := range cands {
-		seen[cand.AddrPort] = struct{}{}
+		seen[cand.Location] = struct{}{}
 	}
 	for _, cand := range relaxed {
 		if len(cands) >= candCnt {
 			break
 		}
-		if _, ok := seen[cand.AddrPort]; ok {
+		if _, ok := seen[cand.Location]; ok {
 			continue
 		}
-		seen[cand.AddrPort] = struct{}{}
+		seen[cand.Location] = struct{}{}
 		cands = append(cands, cand)
 	}
 	return cands, true, nil
@@ -269,18 +343,20 @@ func FindDnCandidatesAntiAffine(
 // candExt free extents and candUnits free metadata units each (MD5;
 // architecture.md, Finding CN candidates, verbatim).
 //
-// It is the DN walk (architecture.md, Finding DN candidates) without bins —
-// one descending range over the single cn_capacity prefix, with the same
-// metadata-room skip (CnCapacityFreeMetaUnits), a continue placed before the
-// location is recorded — plus one extra filter: spCnAddrs names the CNs that
-// already host a cntlr of the SP being served, and a second cntlr of one SP
-// never lands on the same CN. excludeLocs seeds the location set before the
-// walk exactly as in FindDnCandidates; for a cntlr pick it is the failure
-// domains of the SP's other cntlrs — for a replacement, the surviving ones
-// (tier 1 of architecture.md, Per-operation allocation). The returned
-// Cand.BinIdx is always 0: CN capacity keys carry no bin field, and a caller
-// re-validating a pick rebuilds CnCapacityKey(cid, FreeExt, AddrPort) from
-// the other two fields.
+// It is the DN walk (architecture.md, Finding DN candidates) without bins and
+// without the draw among equals: one descending range over the single
+// cn_capacity prefix that takes the first CN it meets in each location. The
+// draw spreads a machine's disks, and a controller node has none. The walk
+// keeps the same metadata-room skip (CnCapacityFreeMetaUnits), a continue
+// placed before the location is recorded, and adds one filter: spCnAddrs
+// names the CNs that already host a cntlr of the SP being served, and a
+// second cntlr of one SP never lands on the same CN. excludeLocs seeds the
+// location set before the walk exactly as in FindDnCandidates; for a cntlr
+// pick it is the failure domains of the SP's other cntlrs — for a
+// replacement, the surviving ones (tier 1 of architecture.md, Per-operation
+// allocation). The returned Cand.BinIdx is always 0: CN capacity keys carry
+// no bin field, and a caller re-validating a pick rebuilds
+// CnCapacityKey(cid, FreeExt, AddrPort) from the other two fields.
 func FindCnCandidates(
 	ctx context.Context,
 	cli *etcdutil.Client,

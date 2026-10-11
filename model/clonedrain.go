@@ -15,12 +15,15 @@ import (
 //
 // It is the sp drain's sibling (dnv-worker.md, The sp drain) and reuses its
 // shapes on purpose — the same load-and-refuse guard, the same "derive the
-// position from surviving state, never from a checkpoint", the same
-// one-step-per-pass cadence. Three things differ, and each for a reason:
+// position from surviving state, never from a checkpoint", the same cadence of
+// one step per pass or per wake-up of the drain. Three things differ, and each
+// for a reason:
 //
 //   - Its batches are LEDGER-FREE. Clone chunks are not budgeted to any node,
-//     so a batch touches no `dn_*` or `cn_*` key, and that is what makes it a
-//     constant 68 compares whatever the ceilings become. The final STM moves
+//     so a batch touches no `dn_*` or `cn_*` key, and it neither reads nor
+//     bumps the `sp_rev` key (CLD8): it reads the SpConf and the Clone and
+//     deletes its chunks, which is what makes it a constant MaxDelBmPerTxn
+//     plus two compares whatever the ceilings become. The final STM moves
 //     one count and nothing else: the clone's metadata units go back on the
 //     CN of every cntlr of the SP (architecture.md, Metadata units), at most
 //     four compares per cntlr — its Cntlr and its CN's record read, that
@@ -32,7 +35,9 @@ import (
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than
 //     instead of it (CLD7): the SP is healthy, and its other children must keep
-//     converging while one of its clones goes away.
+//     converging while one of its clones goes away. The wake-up a committed
+//     batch sets off runs the next drain steps alone, at most one per deleting
+//     clone, and the reactions keep their cntlr_interval pass.
 //
 // A single deciding STM sweeping the whole MaxSliceCntPerSp x MaxCloneBmCnt
 // rectangle of chunk keys would grow with both ceilings; incremental deletion
@@ -104,10 +109,19 @@ func loadCloneForOp(
 // exactly is what keeps a batch from removing a chunk an append wrote after the
 // scan.
 //
-// It MUST NOT rewrite the Clone record (CLD7). The record carries no chunk
+// It MUST NOT rewrite the Clone record (CLD8). The record carries no chunk
 // count to maintain — the set of a clone's chunks IS the set of its chunk keys,
 // which is what this drain derives its position from — and rewriting the record
 // would both cost an op and invent a second copy of the truth.
+//
+// It neither reads nor bumps SpRev (CLD8). A batch changes nothing a side or a
+// cntlr is sent — the clone left every request with the latch (CLD5) — so a
+// bump would only re-send the SP's whole desired state to every side and cntlr
+// once per batch. Nor does the pool's existence need a revision read: the
+// SpConf load refuses a pool that is gone (CLD2), and the sp drain deletes the
+// SpConf and the SpRev key in one transaction (SPD12). The pool's revision
+// therefore moves once for the latch and once for the final STM, whatever the
+// batch count (CLD12).
 //
 // Physical effect: none (CLD8). The CN drops its local chunk files in its sweep
 // (cnagent.md CN21) once the clone has left the cntlr's request, which the
@@ -118,7 +132,6 @@ func DrainCloneBm(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	cid uint64,
-	shard uint32,
 	spId uint64,
 	spName string,
 	cloneName string,
@@ -154,7 +167,7 @@ func DrainCloneBm(
 				cid, spId, cloneName, chunk.SliceIdx, chunk.Idx))
 		}
 		removed = len(chunks)
-		return BumpSpRev(s, opDrainCloneBm, shard, cid, spId)
+		return nil
 	})
 	if err != nil {
 		return 0, err
@@ -180,8 +193,9 @@ func DrainCloneBm(
 //
 // Unlike the sp drain's D3 this bumps SpRev: the SP outlives the clone, so the
 // bump is every mutator's normal epilogue rather than a stop-signal deletion.
-// After the commit the name is reusable and `DeleteStoragePool`'s clone
-// precondition no longer sees it.
+// It is the drain's one bump after the latch's, its batches bumping none
+// (CLD12). After the commit the name is reusable and `DeleteStoragePool`'s
+// clone precondition no longer sees it.
 //
 // The same STM gives the clone's metadata units back (architecture.md,
 // Metadata units; releaseCloneMetaUnits): its meta_units leave the

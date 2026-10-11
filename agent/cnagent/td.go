@@ -63,7 +63,7 @@ func (s *CnAgentServer) ensureRaid0(
 // argument list — a probe that reported drift here would reload a live,
 // correct table on every pass.
 func nsDevTableMatches(
-	targets []agent.DmTarget,
+	targets []common.DmTarget,
 	np *nsPlan,
 	devNo string,
 ) bool {
@@ -271,7 +271,7 @@ const (
 func (s *CnAgentServer) heldNsDev(
 	ctx context.Context,
 	np *nsPlan,
-	targets []agent.DmTarget,
+	targets []common.DmTarget,
 ) nsDevHold {
 	if len(targets) == 1 && targets[0].Type == "error" {
 		return nsDevHeldParked
@@ -286,7 +286,7 @@ func (s *CnAgentServer) heldNsDev(
 // onDevice reports whether a live ns-dev table is a single target over one
 // device: a dm-linear, or the [D11] dm-flakey wrapper, whose first argument
 // is that device either way.
-func onDevice(targets []agent.DmTarget, devNo string) bool {
+func onDevice(targets []common.DmTarget, devNo string) bool {
 	return len(targets) == 1 && len(targets[0].Args) > 0 &&
 		targets[0].Args[0] == devNo
 }

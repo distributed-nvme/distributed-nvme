@@ -4,7 +4,8 @@
 // DeleteClone LATCHES the clone (CLD4) —
 // `deleting = true`, the destination namespaces resumed, one SpRev bump — and
 // the sp coordinator removes the chunk keys in batches of a constant size and
-// then the clone itself.
+// then the clone itself. The batches bump nothing (CLD8); the final step bumps
+// SpRev once (CLD12).
 //
 // It is the sp drain's sibling (drain.go) and deliberately shares its shapes,
 // with three differences that are each a decision:
@@ -12,7 +13,8 @@
 //   - It runs ALONGSIDE the normal pass, not instead of it (CLD7). The sp drain
 //     owns a doomed SP, so its pass does nothing else; here the SP is healthy
 //     and every other child of it must keep converging while one clone goes
-//     away.
+//     away. A committed batch's wake-up (drainTick) runs the next steps
+//     alone, as the sp drain's does, and leaves the reactions to the pass.
 //   - The teardown comes from EXCLUSION rather than from a step (CLD5). From
 //     the first post-latch fan-out the deleting clone is absent from every
 //     cntlr's plan and from the primary's chunk-push plans, and the cn
@@ -59,11 +61,12 @@ const (
 // drain reads no cluster conf and no geometry, neither a block size nor a
 // group's block counts, so neither of the SP's own gates, its `bdev_conf` and
 // its groups' lengths to zero (AR1), must be able to strand a clone the way
-// they could have stranded a latched SP.
+// they could have stranded a latched SP. The drain's wake-up (drainTick)
+// calls it as well, alone and with no gate in front of it either.
 //
-// One step per clone per pass, bounded by MaxCloneCntPerSp. Clones are taken in
-// `clone_name_list` order, which both owners of an accepted overlap load from
-// the same key, so the order is the same on both.
+// One step per clone per pass or wake-up, bounded by MaxCloneCntPerSp. Clones
+// are taken in `clone_name_list` order, which both owners of an accepted
+// overlap load from the same key, so the order is the same on both.
 func (w *spWorker) drainClones(ctx context.Context, state *model.SpState) {
 	if state.Conf.GetDeleting() {
 		// An SP being drained has no clones by precondition (its
@@ -81,9 +84,9 @@ func (w *spWorker) drainClones(ctx context.Context, state *model.SpState) {
 	}
 }
 
-// drainCloneStep is CLD7's derivation half, from the pass's snapshot alone:
-// surviving chunk keys ⇒ one batch on the lowest MaxDelBmPerTxn of them;
-// none ⇒ the final STM.
+// drainCloneStep is CLD7's derivation half, from the snapshot of the pass or
+// of the wake-up alone: surviving chunk keys ⇒ one batch on the lowest
+// MaxDelBmPerTxn of them; none ⇒ the final STM.
 //
 // No other state is consulted — not the Clone record, not the rectangle, not a
 // progress key — so crash, restart and ownership handoff all resume through this same
@@ -119,10 +122,10 @@ func (w *spWorker) drainCloneStep(
 			slog.String("clone_name", name),
 			slog.Uint64("clone_id", clone.GetCloneId()),
 		)
-		// The final STM bumps SpRev like every other mutator, and that bump
-		// is what re-fans the SP without this clone. Nothing is armed: there
-		// is no next step for this clone, and a sibling still draining armed
-		// its own.
+		// The final STM bumps SpRev like every other mutator (CLD9), the
+		// drain's one bump after the latch's. Nothing is armed: there is no
+		// next step for this clone, and a sibling still draining armed its
+		// own.
 		return
 	}
 	batch := chunks
@@ -130,7 +133,7 @@ func (w *spWorker) drainCloneStep(
 		batch = batch[:common.MaxDelBmPerTxn]
 	}
 	removed, err := ops.drainCloneBm(
-		ctx, w.cid, w.shard, w.spId, w.desired.handle,
+		ctx, w.cid, w.spId, w.desired.handle,
 		name, clone.GetCloneId(), batch,
 	)
 	if err != nil {
@@ -151,10 +154,10 @@ func (w *spWorker) drainCloneStep(
 	slog.InfoContext(ctx, msgCloneDrainStep, attrs...)
 	// CLD12: arming unconditionally here terminates, and there is deliberately
 	// no `removed > 0` guard of the sp drain's kind — it would be dead code. A
-	// batch is issued ONLY when this pass's scan found chunks, and `removed`
+	// batch is issued ONLY when this step's scan found chunks, and `removed`
 	// is then the batch size, so the guard could never be false. What the sp
 	// drain guards against cannot arise either: the loser of a two-owner
-	// overlap deletes keys that are already gone, but its NEXT pass re-scans,
+	// overlap deletes keys that are already gone, but its NEXT step re-scans,
 	// finds none, and goes to the final STM, so the loop still shrinks.
 	w.armDrain()
 }

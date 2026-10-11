@@ -334,10 +334,11 @@ type spWorker struct {
 	desiredCh chan desiredState
 	// reportCh carries the children's flip and leg-row reports.
 	reportCh chan spReport
-	// drainCh is the two drains' own tick (drain.go, clonedrain.go): a
+	// drainCh is the two drains' wake-up (drain.go, clonedrain.go): a
 	// committed drain step that left work behind posts one token here, so the
-	// next step runs at once instead of at the next cntlr_interval. Capacity
-	// one, never blocking — a burst of steps cannot queue passes up.
+	// next step runs at once and alone (drainTick) instead of at the next
+	// cntlr_interval. Capacity one, never blocking — a burst of steps cannot
+	// queue wake-ups up.
 	drainCh chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -439,7 +440,8 @@ func (w *spWorker) stop() {
 // children's reports — a demoted cntlr's ends RW22's demotion hold, and the
 // sides' release the cntlr half a fan-out holds back, as does each wait's
 // own timer — and ticks once per cntlr_interval for the idle-child
-// re-resolution and the reaction pass (AR1).
+// re-resolution and the reaction pass (AR1). A committed drain step's token
+// wakes it for the drain steps alone (drainTick; SPD6, CLD7).
 func (w *spWorker) run() {
 	defer close(w.done)
 	if !awaitPredecessor(w.ctx, w.after) {
@@ -483,10 +485,11 @@ func (w *spWorker) run() {
 			// for the sides that have not reported.
 			w.expireHold(newTraceCtx(w.ctx, w.seed))
 		case <-w.drainCh:
-			// The drains' self-tick (SPD6, CLD12): one more pass, which
-			// re-derives the next step from what the last one left (SPD8 for
-			// the SP, CLD7 for a clone).
-			w.reactionPass(newTraceCtx(w.ctx, w.seed))
+			// The drains' wake-up (SPD6, CLD7): the next drain steps run at
+			// once and alone, re-derived from what the last one left (SPD8
+			// for the SP, CLD7 for a clone). No reaction runs and no health
+			// memo is re-seeded: both keep the cntlr_interval pass.
+			w.drainTick(newTraceCtx(w.ctx, w.seed))
 		case <-ticker.C:
 			w.tick()
 			if next := w.tickPeriod(); next != period {

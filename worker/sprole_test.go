@@ -5665,8 +5665,9 @@ func (o *fakeSpOps) commitReplace(
 // reactWith gives a running coordinator a reactor over a recording model
 // surface: the production one holds the harness's nil etcd client, which any
 // reaction would dereference. It is safe until the clock first advances — a
-// pass runs only on a tick, or on the drain token only a pass arms, and the
-// tick's channel send orders this write before the pass reads it.
+// pass runs only on a tick, and a drain wake-up only on the token a drain
+// step arms or a test posts afterwards, and the channel send orders this
+// write before the pass or the wake-up reads it.
 func (h *spHarness) reactWith(w *spWorker, rops *fakeReactionOps) {
 	w.react = newReactor(rops)
 }

@@ -117,10 +117,10 @@ func (c Config) rangeStrings() []string {
 // ---------------------------------------------------------------------------
 
 // clock is the package's source of time for every timer the unit tests drive:
-// the keep-alive deadlines of NP10, the rescan cadence of WV5 and the
-// one-minute timer of CM4's first-scan wait all go through it, so those tests
-// drive them without sleeping. NP1's acceptRetryDelay pause and NP13's
-// socketWriteTimeout deadline call time directly (NP1, NP13).
+// the pre-Connect and keep-alive deadlines of NP10, the rescan cadence of WV5
+// and the one-minute timer of CM4's first-scan wait all go through it, so
+// those tests drive them without sleeping. NP1's acceptRetryDelay pause and
+// NP13's socketWriteTimeout deadline call time directly (NP1, NP13).
 type clock interface {
 	now() time.Time
 	after(d time.Duration) <-chan time.Time
