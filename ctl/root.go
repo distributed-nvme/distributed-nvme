@@ -1,4 +1,4 @@
-// Package ctl is the dnv operator CLI (dnvctl.md). It exposes exactly the 59
+// Package ctl is the dnv operator CLI (dnvctl.md). It exposes exactly the 60
 // RPCs of `service Gateway`, one command per RPC, grouped by noun:
 //
 //	dnvctl <group> <verb> [flags]
@@ -68,7 +68,7 @@ const envPrefix = "DNVCTL"
 const defaultTimeout = 10.0
 
 // job is one RPC invocation. It returns whatever should be rendered on
-// stdout: a reply message for 57 of the 59 commands, and a plain
+// stdout: a reply message for 58 of the 60 commands, and a plain
 // map[string]any for the two bitmap reads (CT4).
 type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 
@@ -152,7 +152,7 @@ func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "dnvctl",
 		Short: "dnv operator CLI",
-		Long: "dnvctl issues the 59 RPCs of the dnv Gateway service, one " +
+		Long: "dnvctl issues the 60 RPCs of the dnv Gateway service, one " +
 			"command per RPC. It prints one canonical JSON document per " +
 			"invocation on stdout and never issues an RPC the operator did " +
 			"not type.",
@@ -256,8 +256,10 @@ type dialFunc func(ctx context.Context, address string) (
 	pb.GatewayClient, func() error, error)
 
 // dial is the production dialFunc: the mandatory client block of grpc.md,
-// Wiring. Both chains are installed even though all 59 RPCs are unary,
-// because grpc.md, Wiring, says both chains on every dnv connection.
+// Wiring. Both chains are installed even though all 60 RPCs are unary,
+// because grpc.md, Wiring, says both chains on every dnv connection. The
+// message limit is installed too: it lets the GetStoragePool reply of a pool
+// at the cardinality limits through.
 func dial(_ context.Context, address string) (
 	pb.GatewayClient, func() error, error,
 ) {
@@ -266,6 +268,7 @@ func dial(_ context.Context, address string) (
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(common.GrpcUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(common.GrpcStreamClientInterceptor()),
+		common.GrpcClientMsgOption(),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -334,7 +337,7 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 	return emit(result)
 }
 
-// leaf builds one RPC command. Every one of the 59 RPC leaves has this shape:
+// leaf builds one RPC command. Every one of the 60 RPC leaves has this shape:
 // a Use line, a one-line Short, no positional arguments, and a RunE that
 // defers to run.
 func leaf(use, short string, build func() (job, error)) *cobra.Command {
@@ -496,7 +499,7 @@ var invoked *pflag.FlagSet
 
 // revRead records that the command being run read its token: revToken sets
 // it and run clears it before each build. The 34 token carriers read --rev
-// in build, and the 25 commands whose request has no token field never do,
+// in build, and the 26 commands whose request has no token field never do,
 // so a typed --rev left unread is how run knows it has nowhere to go (CT3).
 var revRead bool
 
@@ -623,8 +626,8 @@ func hexBytesOf(name string) ([]byte, error) {
 // The two scope global flags (dnvctl.md, Conventions)
 // ---------------------------------------------------------------------------
 
-// clusterOf fills `cluster_name`. It is the global --cluster for 55 of the 58
-// requests that carry the field; only the `cluster` group's own three
+// clusterOf fills `cluster_name`. It is the global --cluster for 55 of the 59
+// requests that carry the field; only the `cluster` group's own four
 // commands override it, through clusterNameOf. Like spOf it reads an
 // env-backed global flag, so it reads viper, where bindViper put the flag's
 // carriers (CT9).
@@ -656,7 +659,7 @@ func spOf() string { return viper.GetString("sp") }
 //	--rev N          => ok=true  => the message is present with revision = N
 //	--rev 0          => ok=true  => present with revision 0, which is the
 //	                               deliberate always-stale probe: a stored
-//	                               revision starts at 1 and only grows
+//	                               revision starts at 1 and never goes below it
 //
 // "Given" is pflag's Changed bit — the flag was typed on this command line —
 // never a value from some other carrier: --rev has none (CT9), so an

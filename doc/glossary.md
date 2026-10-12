@@ -224,6 +224,10 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **hydration** — dm-clone's background copy, from the source to the destination, of every region not yet hydrated, which its "enable_hydration" message starts; a region the skip bitmap lets the agent discard needs no copy. An unforced `DeleteClone` or `FinishMigration` first proves through the agent that hydration is complete.
 
+**id counters** — The values a cluster's new ids are drawn from: the next id of each of its globals, and each pool's next id and next thin id. An etcd restore takes them back to values the cluster has already handed out, and the id step then moves them far forward (see id step; `architecture.md`, Globals: id allocation + shard buckets).
+
+**id step** — The call that moves every id counter of one cluster far forward after an etcd restore, so that no id handed out after the backup is handed out again, unless a counter handed out more ids since the backup than the step moves it by, as a pool's thin ids can (`AdvanceClusterIds`, `dnvctl cluster advance-ids`; see `architecture.md`, Clusters, and etcd backup and restore).
+
 **identity flag** — A dnvctl flag that names the object a leaf command acts on, such as `--name`, `--addr` for a node or `--nqn` for a subsystem; a pool is named by the global `--sp`.
 
 **idle** — A revision worker's state while its cluster is absent from the conf cache: no stream and no syncup, one record that the cluster conf is missing, and a retry every `DefaultHealthCheckInterval` until the cache holds the conf (see `dnv-worker.md` RW9).
@@ -277,6 +281,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **location** — The failure-domain string a node registers (`location`), defaulting to its address: the allocator never places two legs in one location within one allocation round, and keeps a pool's new cntlrs, a spare leg and a migration destination out of occupied locations at its first tier only.
 
 **lock hierarchy** — The agent's lock set (`LockSet`): the node write lock for a node syncup or the startup reconcile, the node read lock plus the object's own lock, created only once the call has found the object held or its gates have admitted the request, for every object-scoped call, check rounds and background converges included, and the node read lock alone for node-scoped reads and rounds; the size reads, the leg health probers and the background disconnects take none (see `dnagent.md` SH10 to SH13).
+
+**lockstep** — The way dnv is upgraded: every dnv program of an etcd installation, the agents of every cluster it holds included, stops and every binary is replaced before any program starts again, so no two builds ever run in one etcd installation at once (see `architecture.md`, Upgrade in lockstep).
 
 **log record** — One JSON line on stderr per operation, written on completion with its outcome and the trace id, by every dnv binary through the one shared handler chain; stdout stays the result channel. Record names and attributes are normative, since the suites match them.
 
@@ -406,7 +412,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **ResStatus** — The status of one info row (`ResStatus`): missing, error, ok, provisioning for a healthy resource that is not ready, pending for a leg no probe round has completed, and unknown, which only the worker assigns to an object it cannot reach.
 
-**revision** — The monotonic counter per disk node, controller node and storage pool (`DnRev`, `CnRev`, `SpRev`) that every transaction changing agent-visible desired state bumps once; the worker syncs an object when its revision moves, and the agent keeps the revision of the last request it accepted for the object (see `dnagent.md` SH8).
+**revision** — The counter per disk node, controller node and storage pool (`DnRev`, `CnRev`, `SpRev`) that every transaction changing agent-visible desired state bumps once, and that only an etcd restore takes back (see `architecture.md`, etcd backup and restore); the worker syncs an object when its revision moves, and the agent keeps the revision of the last request it accepted for the object (see `dnagent.md` SH8).
 
 **revision gate** — An agent's check of a syncup's revision against its stored request's (`GateRevision`): a lower one is refused as stale (`ReplyCodeStaleRevision`) and an equal one re-applies idempotently, before the request becomes desired state. An object the node does not hold is refused beside it as unknown (`ReplyCodeUnknownObject`).
 
@@ -421,6 +427,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: disable it, delete it, then create a cntlr with a free slot (`UpdateCntlrEnabled`, `DeleteCntlr`, `CreateCntlr`).
 
 **row** — One line of an agent's report about one device, with a status and a text: one `ResInfo` of an info (see ResInfo).
+
+**runner** — The script that runs the suites one after another from one configuration file listing each run of a suite with its arguments (`integtest/runner.sh`), runs a failed suite's cleanup-only run before it goes on, and ends with a summary of every run (see `layout.md`, Directory tree). The STM runners of `etcdutil` (see `dnv-worker.md` EU4) and gatewayctl's barrier runner are other things.
 
 **seed, registration** — Each worker process mints a fresh seed per incarnation and keeps one registration per role under it (`WorkerReg`), re-put every vote interval with no etcd lease: observers judge it by their own clock and delete the key of one they commit dead (see `dnv-worker.md` VW2, VW6). The seed enters the worker's tickets, and a worker that fences itself rejoins under a new one.
 
@@ -493,6 +501,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **trace id** — The identifier that joins the log records of one operation across processes (`trace_id`): minted at an entry point, carried in the context, moved between context and gRPC metadata by the interceptors, and sent in the request of every check round, which runs under an id of its own.
 
 **transfer, xfer** — `Transfer`, the source side of a copy: the primary exports the raid0 of a local namespace's thin device over a transfer subsystem (`XferNqn`) admitting the hosts its record lists, the destination cntlrs' host NQNs, while auto-suspend parks the origin namespace; a finalizing delete leaves it parked.
+
+**transport conf** — `NvmeTrConf`, the transport type, address family, address and service id of an NVMe-oF port. The one a node is created with is the address other nodes and hosts dial to reach that node's port, and it may differ from the transport flags its agent builds the port from (see `architecture.md`, Components: invocation reference).
 
 **transport probe** — A standby's reading of a leg's health from the kernel alone, by the liveness and ANA state of each path, since no probe IO runs there.
 

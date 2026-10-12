@@ -53,7 +53,7 @@ func (s *CnAgentServer) xferSubsysConf(
 	return agent.SubsysConf{
 		Nqn:          xp.nqn,
 		Serial:       fmt.Sprintf(common.IdKeyFmt, xp.xferId),
-		Model:        xferModel,
+		Model:        common.NvmeModel,
 		CntlidMin:    cntlidMin,
 		CntlidMax:    cntlidMax,
 		AllowedHosts: xp.xfer.GetAllowedHosts(),

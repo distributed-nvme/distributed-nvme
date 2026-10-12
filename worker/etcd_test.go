@@ -14,8 +14,7 @@ import (
 )
 
 // The etcd-backed half of the unit tests (EU7, MD9): everything here goes
-// through the real etcdutil client and the real model ops, and skips cleanly
-// when no etcd binary is available.
+// through the real etcdutil client and the real model ops.
 
 // TestHealthWritesThroughModel checks HL1/HL3 against real etcd: the monitor
 // writes only on a transition, model.SetDnErrEpoch never restarts the

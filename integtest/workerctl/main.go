@@ -1231,27 +1231,34 @@ func cmdPing(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdConstants prints, as one JSON object, the common package's constants a
-// shell suite reads instead of typing: transaction budgets and their factors,
-// the slice ceiling, the health timers, the two metadata areas and the cdc's
-// pending cap and pre-Connect deadline. It exists because a shell suite
-// cannot import common: every shell suite that starts an etcd has to launch
-// it with --max-txn-ops=common.EtcdMaxTxnOps (dnv-worker.md, Integration test
-// plan, Topology), and reads the number here instead of typing it.
+// shell suite reads instead of typing: the request size every etcd serving
+// dnv is started with, transaction budgets and their factors, the slice
+// ceiling, the health timers, the two metadata areas, the strides of the id
+// step and the cdc's pending cap and pre-Connect deadline. It exists because
+// a shell suite cannot import common: every shell suite that starts an etcd
+// has to launch it with --max-txn-ops=common.EtcdMaxTxnOps and
+// --max-request-bytes=common.EtcdMaxRequestBytes (dnv-worker.md, Integration
+// test plan, Topology), and reads the two numbers here instead of typing
+// them.
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
-// that reads it. Four more are the factors of the SPD13/CLD11 budgets a suite
-// may want to size a case against, and MaxSliceCntPerSp is the slice ceiling —
-// CreateClone's src_slice_cnt bound — that the gateway suite creates a clone
-// at, which is why that suite must read it rather than type it. The next
-// three are the timers a suite sizes its health and failover waits by: the
-// default check interval a cluster created without one stores, the default
-// primary threshold a pool created without one reads, and the demotion
-// hold's wait (dnv-worker.md RW22). The next four are the metadata areas
-// (architecture.md, Metadata units): the ceiling of a CN's and of a DN's
-// used units, and the unit of each area. The gateway suite's ceiling case
-// fills both areas to those ceilings and sizes its copies in that unit, which
-// it requires to be one size for both areas. The last two are the cdc's
+// that reads it. The table opens with the two etcd request caps,
+// EtcdMaxTxnOps and EtcdMaxRequestBytes. Four more are the factors of the
+// SPD13/CLD11 budgets a suite may want to size a case against, and
+// MaxSliceCntPerSp is the slice ceiling — CreateClone's src_slice_cnt bound —
+// that the gateway suite creates a clone at, which is why that suite must
+// read it rather than type it. The next three are the timers a suite sizes
+// its health and failover waits by: the default check interval a cluster
+// created without one stores, the default primary threshold a pool created
+// without one reads, and the demotion hold's wait (dnv-worker.md RW22). The
+// next four are the metadata areas (architecture.md, Metadata units): the
+// ceiling of a CN's and of a DN's used units, and the unit of each area. The
+// gateway suite's ceiling case fills both areas to those ceilings and sizes
+// its copies in that unit, which it requires to be one size for both areas.
+// The next two, IdStepStride and ThinIdStepStride, are the strides of the id
+// step (architecture.md, Clusters), which the gateway suite's smoke case
+// checks every counter the step moves against. The last two are the cdc's
 // pending cap and pre-Connect deadline (cdc.md NP1, NP10), which the cdc
 // suite's flood case fills and waits by (cdc.md, Integration test plan).
 //
@@ -1262,7 +1269,9 @@ func cmdConstants(g *globals, args []string) {
 	fs.Parse(args)
 
 	emit(map[string]any{
-		"EtcdMaxTxnOps":     common.EtcdMaxTxnOps,
+		"EtcdMaxTxnOps":       common.EtcdMaxTxnOps,
+		"EtcdMaxRequestBytes": common.EtcdMaxRequestBytes,
+
 		"MaxDelGrpPerTxn":   common.MaxDelGrpPerTxn,
 		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
 		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
@@ -1277,6 +1286,9 @@ func cmdConstants(g *globals, args []string) {
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
+
+		"IdStepStride":     common.IdStepStride,
+		"ThinIdStepStride": common.ThinIdStepStride,
 
 		"CdcMaxPendingConnCnt":   common.CdcMaxPendingConnCnt,
 		"DefaultCdcPendingTmoMs": common.DefaultCdcPendingTmoMs,

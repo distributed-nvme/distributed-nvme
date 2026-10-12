@@ -13,7 +13,7 @@ facts the suites driving real agents share.
 One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
-six statements; a smaller shape proves no ceiling, and one without redundancy
+seven statements; a smaller shape proves no ceiling, and one without redundancy
 no leg repair:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
@@ -22,11 +22,11 @@ no leg repair:
   transaction `EtcdMaxTxnOps` is sized by, at two cntlrs rather than the widest
   shape's cntlr ceiling: a pool no other suite builds on real agents.
 * **The operator surface works against a real control plane.** Every `Gateway`
-  RPC but the cluster and node deletions and listings is issued by the
-  shipped `dnvctl` against a real gateway, etcd and agents, and no echoed id
-  is the whole of an assertion: a mutation is read back from its record and,
-  where the device is the point, from its agent, or, for a few, proved by its
-  effect, which is what the suite observes.
+  RPC but the cluster and node deletions and listings and the id step is
+  issued by the shipped `dnvctl` against a real gateway, etcd and agents, and
+  no echoed id is the whole of an assertion: a mutation is read back from its
+  record and, where the device is the point, from its agent, or, for a few,
+  proved by its effect, which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
   slice grows and the level ladder, failovers, a leg repair and all between.
@@ -44,6 +44,12 @@ no leg repair:
   drops host0's path to it before the fence, so not one write fails, and the
   writes run again once the new primary has built its stack; continued, the
   old primary returns as a standby and is listed again.
+* **The data plane runs on without the control plane** (`architecture.md`,
+  Running without the control plane). With host0's writes running, etcd is
+  stopped until the worker has fenced itself and then started again: not
+  one write fails, the cdc serves its last records meanwhile, the stored
+  state reads the same before and after, and the worker rejoins and drives
+  the pool again.
 * **The lab is left as it was found.** After every case every disk node has all
   its extents back, the free count of its own disk counts agreeing with its
   record's and the worker having logged no disagreement between the two
@@ -53,11 +59,13 @@ no leg repair:
   configuration of it back byte for byte.
 
 **What it does not prove.** The RPCs it never issues, the deletions and
-listings of clusters, disk nodes and controller nodes: the gateway suite covers
-the node deletions, and this run discards the whole cluster between cases.
-Error paths, beyond the few refusals the ops case asserts on purpose and the
-`NOT_FOUND` reads after the copy case's deletions; validation and CLI semantics
-are the gateway and dnvctl suites'. Concurrency: one dnvctl call and one case
+listings of clusters, disk nodes and controller nodes and the id step
+(`architecture.md`, Clusters): the gateway suite covers the node deletions and
+the id step, and this run discards the whole cluster between cases.
+Error paths, beyond the few refusals the ops case asserts on purpose, the
+`NOT_FOUND` reads after the copy case's deletions and the read the cutoff case
+sees refused while etcd is down; validation and CLI semantics are the gateway
+and dnvctl suites'. Concurrency: one dnvctl call and one case
 at a time, and never a revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
 two usable controllers (Known limits). A failover of a primary that still
@@ -80,11 +88,12 @@ nvme-stas on host0 inside the cutoff case (E2E10).
 
 The control plane has a guest of its own, as in a deployment
 (`architecture.md`, System overview): it holds no kernel state and runs without
-root, the react and cutoff cases' faults never reach the processes that must
-observe and repair them, and its address, an IP literal as the cdc requires, is
-what the hosts discover against. Every daemon log lives under a work directory
-the between-cases rebuild removes, so each case's logs replace the last and a
-passing run leaves none. Every node guest carries the suite's md assembly mask
+root, the faults the react and cutoff cases put on node guests never reach the
+processes that must observe and repair them, and its address, an IP literal as
+the cdc requires, is what the hosts discover against. Every daemon log lives
+under a work directory the between-cases rebuild removes, so each case's logs
+replace the last and a passing run leaves none. Every node guest carries the
+suite's md assembly mask
 while its agents run, installed before an agent starts: on a controller node
 the stock udev rule would otherwise race the agent for an array it is creating,
 and on a disk node it would assemble the superblocks the controller node writes
@@ -220,10 +229,12 @@ starts, etcd included, records its pid: the control-plane daemons are stopped
 by theirs, the react case stops each agent it kills by that agent's pid file,
 and the cutoff case stops and continues the agent it cuts off by its pid file,
 with SIGSTOP and then SIGCONT, reading the process state back, as a signal is
-delivered asynchronously. Every stop of an agent, by pid or by pattern, sends
-SIGCONT before SIGTERM, so that an agent a failed cutoff run left stopped acts
-on its termination. The cleanup's pattern sweeps, which also reach a crashed
-run's processes whose pid files are gone, sit in helper files on the guest
+delivered asynchronously, and stops etcd by its pid file, waiting for it to
+exit, before it starts it again on the same data. Every stop of an agent, by
+pid or by pattern, sends SIGCONT before SIGTERM, so that an agent a failed
+cutoff run left stopped acts on its termination. The cleanup's pattern
+sweeps, which also reach a crashed run's processes whose pid files are gone,
+sit in helper files on the guest
 behind helper verbs, bracketed so they never match the ssh command's own shell,
 and qualified by the suite's work directory or its etcd name so they never
 touch another suite's processes.
@@ -268,14 +279,15 @@ infrastructure and the whole of setup, which clears every id the last case
 read; that rebuild is also where the next case's thresholds take effect.
 
 E2E12. **The shell literals mirror named constants and say so.** Every number a
-Go constant owns is repeated beside a comment naming the constant, except five
-read from `workerctl constants` at the driver's preflight: `EtcdMaxTxnOps`,
-which etcd must be started with and which this suite, committing the
-transaction it is sized by at two cntlrs, short of the widest shape, must not
-hand-copy; `MaxAllocLegPerGrp`, cross-checked against the leg count;
-`DefaultHealthCheckInterval`, the check interval every cluster of the suite
-stores, from which the cutoff set's primary threshold is derived and against
-which every set's primary threshold is checked; and `DefaultPrimaryUnhealthy`
+Go constant owns is repeated beside a comment naming the constant, except six
+read from `workerctl constants` at the driver's preflight: `EtcdMaxTxnOps` and
+`EtcdMaxRequestBytes`, which etcd must be started with and which this suite,
+committing the transaction the first is sized by at two cntlrs, short of the
+widest shape, must not hand-copy; `MaxAllocLegPerGrp`, cross-checked against
+the leg count; `DefaultHealthCheckInterval`, the check interval every cluster
+of the suite stores, from which the cutoff set's primary threshold is derived
+and against which every set's primary threshold is checked; and
+`DefaultPrimaryUnhealthy`
 and `DemotionHoldTimeout`, which the run only prints, the second beside the
 cutoff case's timings. The meta region of the create's data groups, which the
 tree computes rather than names, is mirrored the same way and checked against
@@ -391,14 +403,16 @@ meanwhile, proved by an unchanged count of the worker's failover records.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,
-Failover; `architecture.md`, Host view). Its pool's primary must first have
-settled, as a settling primary is held to the long cntlr threshold
-(`dnv-worker.md` AR5, HL2), and both cntlrs must be listed, as nvme-stas
-connects only what the log lists and the standby's path is the one that
-carries host0 through the stall. host0 is then handed to nvme-stas (E2E10),
-which must connect both cntlrs, and once a marker is written into host0's
-kernel log a detached loop of small synced writes runs on a scratch namespace
-(E2E7). The primary's cn agent is stopped, not killed (E2E8): it answers no
+Failover; `architecture.md`, Host view), and then that the data plane runs on
+while etcd is down (`architecture.md`, Running without the control plane). Its
+pool's primary must first have settled, as a settling primary is held to the
+long cntlr threshold (`dnv-worker.md` AR5, HL2), and both cntlrs must be
+listed, as nvme-stas connects only what the log lists and the standby's path
+is the one that carries host0 through the stall. host0 is then handed to
+nvme-stas (E2E10), which must connect both cntlrs, and once a marker is
+written into host0's kernel log a detached loop of small synced writes runs on
+a scratch namespace (E2E7). The primary's cn agent is stopped, not killed
+(E2E8): it answers no
 check round while every kernel object it built goes on serving host0, one of
 the two cases the demotion hold serves and the one its wait is sized for
 (`dnv-worker.md` RW22). Unlike in react, host0 is not disconnected by hand, as
@@ -429,9 +443,33 @@ records.
 
 Continued, the old primary must converge to a standby, its health epoch clear
 (`dnv-worker.md` HL2), its address return to the records and nvme-stas
-reconnect it as an inaccessible path, with still one failover in all. Then the
-loop stops and its range reads back as its pattern, nvme-stas stops and
-host0's own configuration of it is back byte for byte, host0 reconnects
+reconnect it as an inaccessible path, with still one failover in all.
+
+With the loop still writing, etcd is then taken away. The stored state — the
+cluster, the pool, its thin devices and subsystems, every controller node and
+every disk node of the pool — is read through `dnvctl` until two readings in
+a row agree, and etcd is stopped by its pid file and must exit (E2E8). While
+it is down a `dnvctl` read is refused (`gateway.md` GW7); the worker must log
+its self-fence, naming a stalled heartbeat and the seed it ran under
+(`dnv-worker.md` VW8); the loop must go on finishing writes; and host1 must
+read the same discovery records from the cdc (`cdc.md` DS10). etcd is then
+started again on its data, and the worker must rejoin under the seed its
+self-fence minted, with a registration, a commit of itself as a member and an
+owned shard in each of its roles (`dnv-worker.md` VW7, VW9). The gateway must
+answer again, every reading must equal the one taken before the stop, host0
+must hold the same controllers, the scratch namespace still optimized through
+the new primary and inaccessible through the old, and a new thin device must
+become created, which only a worker driving the pool again does
+(`dnv-worker.md` RW19), before the case deletes it. No write may fail, by the
+loop's records and by the kernel log after the marker, no failover may
+happen, and the worker fences itself once, or twice when the incarnation the
+first fence minted fences once more before it reaches etcd, which
+`architecture.md`, Running without the control plane, allows; the worker
+then rejoins under the seed the second fence minted. Each of these waits is
+on a record or a reading, never on a time.
+
+Then the loop stops and its range reads back as its pattern, nvme-stas stops
+and host0's own configuration of it is back byte for byte, host0 reconnects
 through the cdc, and the case deletes its scratch namespace and thin device.
 So the ending finds only setup's subsystem, namespace and thin device, and
 only the suite's own paths on host0, while the primary role stays on the cntlr
@@ -643,6 +681,17 @@ the connect attempted.
   primary has built the whole stack and turned its namespaces optimized, which
   at the widest shape takes minutes; the case bounds that wait only by the
   build's own and logs how long the write took.
+* **The outage takes etcd away, nothing else, and only once.** The gateway,
+  the worker and the cdc run through it, so a program that starts while etcd
+  is down (`cdc.md` CM4) is not exercised, nor a fault that waits for a
+  reaction meanwhile, nor the cdc's recovery once etcd is back (`cdc.md`
+  DS10), since no discovery record moves across the outage; and how long
+  the worker takes to fence itself and to rejoin is bounded by the waits
+  and logged as the polls see it, not asserted. etcd is started again once
+  the checks made while it is down are done; whether the incarnation the
+  first fence minted fences once more depends on how long that takes, so
+  the case takes one more fence and fails on a third, whose message names
+  it and how long etcd stayed away after the first was seen.
 * **nvme-stas keeps its connections when it stops.** nvme-stas 2.4.1, the
   lab's version, keeps the kernel connections it made when it stops, its
   connector always and its discovery daemon under persistent connections, so

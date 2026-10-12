@@ -27,11 +27,11 @@ migration procedure, the levels, the cntlid slots and the decisions [D4],
 | `main` | `cmd/dnv-agent/` | cobra `dn`/`cn` dispatch, viper flags, dependency construction | `agent`, `agent/dnagent`, `agent/cnagent`, `common`, `pb` |
 
 Agents never talk to etcd (`layout.md`, Dependency rules). The gRPC server
-carries the **server** interceptors of `grpc.md`, Wiring, and no client
-interceptors — the agent's only outbound connections are `nvme connect`s,
-not gRPC. The split rule for new code: anything both roles need verbatim is
-mechanism and belongs in `agent`; anything that knows *which* resource to
-build is policy and belongs in `dnagent` or `cnagent`.
+carries the **server** interceptors and the message limit of `grpc.md`,
+Wiring, and no client interceptors — the agent's only outbound connections
+are `nvme connect`s, not gRPC. The split rule for new code: anything both
+roles need verbatim is mechanism and belongs in `agent`; anything that knows
+*which* resource to build is policy and belongs in `dnagent` or `cnagent`.
 
 ## Shared mechanism — package `agent`
 
@@ -267,9 +267,10 @@ elapsed (DN12 rule 1), save the restarts Known limits names.
 
 `Serve` in `agent/agent.go` is the shared lifecycle: it mints the startup
 trace id, derives the run ctx the role servers capture as `rootCtx`, runs
-the role's reconcile, listens, builds the gRPC server with the two server
-interceptors, registers the role's service and serves until its own ctx is
-cancelled (SIGTERM or SIGINT, CM4), when the graceful stop drains every RPC.
+the role's reconcile, listens, builds the gRPC server with the message limit
+and the two server interceptors, registers the role's service and serves
+until its own ctx is cancelled (SIGTERM or SIGINT, CM4), when the graceful
+stop drains every RPC.
 The cancel-then-join pair is deferred, so **every** return path takes it,
 not just the one through serving: the reconcile has already armed the
 background goroutines (and forked their children) by the time a reconcile
@@ -802,7 +803,9 @@ take `--grpc-network` (the listen network) and `--grpc-address` (the gRPC
 endpoint, required; the control plane stores it as the `addr_port` of
 `DnConf`/`CnConf`); the four transport flags `--tr-type`, `--adr-fam`,
 `--tr-addr` and `--tr-svc-id` of this agent's single nvmet port (its
-`NvmeTrConf`, required, mirrored into `DnConf`/`CnConf` at creation);
+`NvmeTrConf`, required; the transport conf the node is created with is the
+operator's own input and may differ from these flags, `architecture.md`,
+Components: invocation reference);
 `--nvmet-port-id`, the configfs id of the nvmet port this agent converges
 (several agents on one node's kernel take distinct ids, `architecture.md`,
 Disk node; a value below one is refused, CM3); `--local-store`, the
@@ -1510,7 +1513,8 @@ converge checks the disk again — every round, for as long as the disk stays
 unreadable, corrupt, another node's, or blank under a live side device or
 clone-metadata wrapper (DN16).
 
-Ids are never reused, so a swept side never comes back.
+Ids are never reused, so a swept side never comes back, an etcd restore
+aside (`architecture.md`, etcd backup and restore).
 
 **Finishing a migration is not a teardown of the side.** When a
 `SyncupSide` drops `migr_dst_conf` while the side keeps exporting (the
@@ -1785,7 +1789,7 @@ and one namespace, `sideNsid`, "device_path" = the CN's dm-linear, identity
 from `common.DnNsIdentity` of the cluster, sp and leg ids (Names and
 constants in `common` — both sides of a migrating leg MUST match),
 "attr_serial" = the
-leg id in `IdKeyFmt`, "attr_model" = `nsModel`. ANA: the primary CN's
+leg id in `IdKeyFmt`, "attr_model" = `NvmeModel`. ANA: the primary CN's
 namespace joins `AnaGrpIdOptimized`, standbys join `AnaGrpIdNonOptimized`
 ([D4]; overridden by the migration phases below and by `sp_level`). A
 `primary_cn_id` change reloads the dm-linear tables and rewrites the two
@@ -2591,8 +2595,8 @@ is still a protocol-level refusal.
   converge after it that gets past DN8's side conf gate ends it. Before
   that, a `SyncupSide` that ends the role (DN12 rule 2) or takes the
   side's exports away (DN12 rule 3) still ends it, since neither needs the
-  extent size. Only a corrupt store file, or an in-place upgrade, which is
-  not supported (DN2), produces such a request.
+  extent size. Only a corrupt store file produces such a request; an
+  upgrade does not (`architecture.md`, Upgrade in lockstep).
 * A side export whose build was abandoned between its namespace `mkdir` and
   its "device_path" write holds a namespace that names nobody. Every
   agent's attribution (DN6) reads that export as foreign, so no sweep

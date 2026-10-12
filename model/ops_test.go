@@ -180,7 +180,7 @@ func opsSlice() *pb.Slice {
 }
 
 // newOpsEnv writes the whole fixture and returns the environment the tests
-// mutate. It skips when no etcd binary is available (EU7).
+// mutate.
 func newOpsEnv(t *testing.T) *opsEnv {
 	t.Helper()
 	cli := newTestClient(t)

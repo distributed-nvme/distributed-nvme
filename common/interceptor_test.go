@@ -78,14 +78,27 @@ func checkDnEcho(stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnRe
 
 // startStub brings up the stub agent behind the server interceptors of
 // grpc.md, Wiring, and returns a client dialed with its client interceptors.
+// Neither end carries the message limit; startStubWithMsgLimit's do.
 func startStub(t *testing.T, stub *stubDnAgent) pb.DiskNodeAgentClient {
+	t.Helper()
+	return startStubOpts(t, stub, nil, nil)
+}
+
+// startStubOpts is startStub with extra server options and extra dial
+// options, each placed ahead of the interceptor chains.
+func startStubOpts(
+	t *testing.T,
+	stub *stubDnAgent,
+	serverOpts []grpc.ServerOption,
+	dialOpts []grpc.DialOption,
+) pb.DiskNodeAgentClient {
 	t.Helper()
 
 	lis := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer(
+	server := grpc.NewServer(append(serverOpts,
 		grpc.ChainUnaryInterceptor(GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(GrpcStreamServerInterceptor()),
-	)
+	)...)
 	pb.RegisterDiskNodeAgentServer(server, stub)
 	go func() {
 		if err := server.Serve(lis); err != nil {
@@ -95,12 +108,14 @@ func startStub(t *testing.T, stub *stubDnAgent) pb.DiskNodeAgentClient {
 
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return lis.DialContext(ctx)
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(GrpcUnaryClientInterceptor()),
-		grpc.WithChainStreamInterceptor(GrpcStreamClientInterceptor()),
+		append(dialOpts,
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				return lis.DialContext(ctx)
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithChainUnaryInterceptor(GrpcUnaryClientInterceptor()),
+			grpc.WithChainStreamInterceptor(GrpcStreamClientInterceptor()),
+		)...,
 	)
 	if err != nil {
 		t.Fatalf("dial: %v", err)

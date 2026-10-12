@@ -60,13 +60,20 @@ const msgSnapshotNotCreated = "snapshot %s of %s is not created yet"
 // geometry and on the origin, so it is state-dependent and runs inside the
 // transaction (gateway.md, Thin devices).
 //
-// The two snapshot refusals — an origin with `created == false`, and an origin
-// that is the destination of a clone — are the places in this file that must
-// write literally nothing: architecture.md, Thin devices, requires no key, no
-// next_id / next_dev_id consumption and no SpRev bump, so both checks sit
-// before the minter is ever created and return straight out of the closure,
-// which leaves the whole transaction uncommitted (EU4). Consuming an id there
-// would be visible forever — ids are never reused — for a request that failed.
+// architecture.md, Thin devices, names three refusals of this RPC that must
+// write literally nothing: the two snapshot refusals — an origin with
+// `created == false`, and an origin that is the destination of a clone — and
+// the refusal of a pool with no thin id left. Nothing means no key, no next_id
+// or next_dev_id consumed and no SpRev bump, so all three checks sit before
+// the minter is ever created and return straight out of the closure, which
+// leaves the whole transaction uncommitted (EU4). Consuming an id there would
+// be visible forever — ids are never reused — for a request that failed.
+//
+// The thin-id refusal is the last of the three, right before the minter is
+// created. dm-thin takes no thin id above common.MaxThinDevId, and starting
+// next_dev_id over would hand out the pool's ids again, so a pool whose
+// next_dev_id has passed that top creates no more thin devices: the request
+// is FAILED_PRECONDITION (architecture.md, Thin devices).
 //
 // The RPC never blocks on materialization (architecture.md, STM discipline,
 // keeps every RPC short); a client that wants to snapshot polls
@@ -193,6 +200,16 @@ func (s *Server) CreateThinDevice(
 				"size %d must be a positive multiple of %d "+
 					"(slice_cnt %d x stripe_size %d)",
 				size, unit, sliceCnt, stripe)
+		}
+		// next_dev_id is the next thin id the pool hands out: dm-thin takes
+		// none above MaxThinDevId, and starting the counter over would hand
+		// out the pool's ids again, so a pool past that top has no thin id
+		// left to give.
+		if next := sc.Conf.GetNextDevId(); next > common.MaxThinDevId {
+			return errPrecondition(
+				"storage pool %q has no thin id left: its next_dev_id %d "+
+					"is above %d, the largest thin id dm-thin takes",
+				req.GetSpName(), next, common.MaxThinDevId)
 		}
 		minter := newSpIdMinter(sc.Conf)
 		tdId = minter.mint()

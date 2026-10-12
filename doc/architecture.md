@@ -195,15 +195,15 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **shard code** — A uint32 below `ShardBucketSize`, formatted with
   `ShardCodeFmt`. Every DN, CN and SP gets one at creation; workers and the
   cdc split ownership by shard code.
-* **revision** — A monotonic uint64 per DN, CN and SP, stored in `DnRev`,
-  `CnRev` and `SpRev`. It is bumped whenever the agent-visible desired
-  state changes and drives the worker-to-agent sync (Agent services and
-  agent behavior, Workers). It is also the optimistic-concurrency token
-  carried in mutating requests. The rev keys are id-keyed (`dn_id`,
-  `cn_id`, `sp_id`) and carry the node's `addr_port`, or the SP's
-  `sp_name`, in the **value**, so one watch event gives a worker both the
-  revision and the handle it needs to act (Revision keys and the sync
-  fan-out).
+* **revision** — A uint64 per DN, CN and SP, stored in `DnRev`, `CnRev` and
+  `SpRev`, that only grows, an etcd restore aside (etcd backup and restore).
+  It is bumped whenever the agent-visible desired state changes and drives
+  the worker-to-agent sync (Agent services and agent behavior, Workers). It
+  is also the optimistic-concurrency token carried in mutating requests. The
+  rev keys are id-keyed (`dn_id`, `cn_id`, `sp_id`) and carry the node's
+  `addr_port`, or the SP's `sp_name`, in the **value**, so one watch event
+  gives a worker both the revision and the handle it needs to act (Revision
+  keys and the sync fan-out).
 * **location** — A free-form failure-domain string per node (rack, zone),
   stored in `DnConf` and `CnConf`; a copy rides in the capacity-key value
   for scan efficiency ([D5]). Allocation uses it for anti-affinity
@@ -282,17 +282,25 @@ their values:
   dnv must be started with, sized by the widest shape of
   `CreateStoragePool` (Storage pools, Components: invocation reference;
   `gateway.md`, Constants this document owns) and pinned by a test;
+  `EtcdMaxRequestBytes` is the `--max-request-bytes` every etcd serving
+  dnv must be started with, sized by the widest provisioned flip and
+  pinned by a test (`dnv-worker.md`, Constants this document owns);
   the sp drain's batch, the created flip's transaction and the cntlr
-  replacement's are bounded transactions over etcd's default limit too
-  (`gateway.md`, Constants this document owns; `dnv-worker.md` SPD13, RW19,
-  MD6). `MaxDelGrpPerTxn` is the groups one sp drain batch removes
-  (`dnv-worker.md` SPD10), `MaxDelBmPerTxn` the clone bitmap chunk keys
-  one clone drain batch deletes (`dnv-worker.md` CLD8), and
-  `MaxFlipCreatedPerTxn` the tds one created-flip transaction carries
+  replacement's are bounded transactions over etcd's default
+  `--max-txn-ops` too (`gateway.md`, Constants this document owns;
+  `dnv-worker.md` SPD13, RW19, MD6). `MaxDelGrpPerTxn` is the groups one sp
+  drain batch removes (`dnv-worker.md` SPD10), `MaxDelBmPerTxn` the clone
+  bitmap chunk keys one clone drain batch deletes (`dnv-worker.md` CLD8),
+  and `MaxFlipCreatedPerTxn` the tds one created-flip transaction carries
   (sp role, `dnv-worker.md` RW19);
+* messages: `GrpcMaxMsgSize` is the largest message every dnv gRPC server
+  and client sends or takes (`grpc.md`, Wiring);
 * cntlid slots: `CnCntlidSlotCnt` and `DnCntlidSlotCnt`, the slots of the
   cntlid partition (cntlid slots); the gateway refuses a `cntlid_slot` or
   `cntlid_slot_list` value at or above `CnCntlidSlotCnt`;
+* ids: `MaxThinDevId`, the largest thin id dm-thin takes, and
+  `IdStepStride` and `ThinIdStepStride`, how far the id step moves the id
+  counters (Clusters);
 * conf bounds: `MinChunkBlockCnt`, `MaxChunkBlockCnt` and
   `DefaultChunkBlockCnt` for `redund_md_raid1.bitmap_chunk_block_cnt`
   (Common validation); `MinAllocDnBatchSize`, `MaxAllocDnBatchSize` and
@@ -390,12 +398,13 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
    extent placement, so a node that loses `--local-store` but keeps its disk
    rebuilds exactly the same devices.
 2. Exactly **one** nvmet port, built from the agent's `--tr-type`,
-   `--adr-fam`, `--tr-addr` and `--tr-svc-id` flags. `DnConf.nvme_tr_conf`
-   is the operator's copy of those flags, given to `CreateDiskNode`, and is
-   what the control plane hands to the nodes that dial this DN: it is
-   copied into `Side.nvme_tr_conf` (Storage pools), which a CN dials to
-   reach that DN's sides (Primary cntlr, step 1) and a migration
-   destination dials to reach its source (Migration). Every subsystem this
+   `--adr-fam`, `--tr-addr` and `--tr-svc-id` flags. `DnConf.nvme_tr_conf`,
+   given to `CreateDiskNode`, is the address other nodes dial to reach this
+   port, and it may differ from those flags (Components: invocation
+   reference): the control plane copies it into `Side.nvme_tr_conf`
+   (Storage pools), which a CN dials to reach that DN's sides (Primary
+   cntlr, step 1) and a migration destination dials to reach its source
+   (Migration). Every subsystem this
    DN ever exports — all side subsystems and all migration-source
    subsystems — attaches to this single port. The port is one per
    **agent**, not one per kernel: it lives at the configfs id
@@ -596,10 +605,11 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    destination td, so no clone state needs to survive the CN.
 3. Exactly **one** nvmet port, built from the same four flags as a disk
    node's. `CnConf.nvme_tr_conf`, given to `CreateControllerNode`, is the
-   operator's copy of them; the control plane copies it into the
-   `Cntlr.nvme_tr_conf` of every cntlr this CN hosts and serves it to hosts
-   in the discovery log while the SP's discovery records list that cntlr
-   ([D18]; dnv-cdc). Every host-facing subsystem and every
+   address hosts dial to reach this port, and it may differ from those
+   flags (Components: invocation reference): the control plane copies it
+   into the `Cntlr.nvme_tr_conf` of every cntlr this CN hosts and serves it
+   to hosts in the discovery log while the SP's discovery records list that
+   cntlr ([D18]; dnv-cdc). Every host-facing subsystem and every
    transfer subsystem of every cntlr on this CN attaches to the port. As on
    a disk node the port is one per **agent**, at the configfs id
    `NvmetPortId` unless `--nvmet-port-id` says otherwise
@@ -1173,7 +1183,10 @@ creation. Creating a DN, CN or SP inside the STM:
 
 1. The id is `next_id`, and `next_id` advances by one. Ids are never reused
    ("all ids in a cluster are incremental"), which lets agents assume a
-   deleted object never comes back.
+   deleted object never comes back. An etcd restore breaks both halves: it
+   takes the id counters (below) back to values the cluster has handed out
+   since the backup, and it brings back an object deleted since (etcd
+   backup and restore).
 2. The `shard_code` is the index of the **smallest** bucket value, the first
    index on ties, and that bucket is incremented.
 3. The sum of `shard_bucket` is the live object count, so the
@@ -1185,7 +1198,15 @@ creation. Creating a DN, CN or SP inside the STM:
 `clone_id`, `xfer_id`, `migr_id`) all come from the single `SpConf.next_id`
 counter, which starts at `SpFirstId`. Thin-device `dev_id`s come from
 `SpConf.next_dev_id`, which starts at one (an `ori_id` of zero means "no
-origin"), and are never reused.
+origin"), and are never reused, an etcd restore aside (below). A `dev_id`
+is also dm-thin's device id, whose width dm-thin limits: no pool hands out
+one above `MaxThinDevId` (Thin devices).
+
+The three globals' `next_id` and each pool's `next_id` and `next_dev_id`
+are the cluster's **id counters**. After a restore the id step,
+`AdvanceClusterIds`, moves each of them far forward, past every id handed
+out since the backup unless a counter handed out more than the step moves
+it by, as a pool's thin ids can (Clusters).
 
 ### Revision keys and the sync fan-out
 
@@ -1215,15 +1236,16 @@ suffix) and `SpRev.sp_name` (the `SpConf` key suffix) [D10]. Rules:
   assertion and the mutation proceeds ungated: a client omits the token
   precisely to opt out, per request, and the residual is the lost update it
   accepts by omitting it. Presence, not value, selects the two modes: a
-  stored revision starts at one and only grows, so a message present with a
-  zero `revision` is a real token that can never match and is always
-  refused. Only `revision` participates — the `addr_port` or `sp_name` a
-  client echoes back from `Get*` inside that message is **ignored** on the
-  request path (it is never a way to rename or relocate anything), so a
-  message carrying only that echo is a present zero token, refused like any
-  other; the RPC still names its target by `addr_port` or `sp_name` in its
-  own top-level field. `Get*` returns the current token. `gateway.md` GW6
-  carries the check out.
+  stored revision starts at one and never goes below it, an etcd restore
+  taking it back only to a value it held before (etcd backup and restore),
+  so a message present with a zero `revision` is a real token that can never
+  match and is always refused. Only `revision` participates — the
+  `addr_port` or `sp_name` a client echoes back from `Get*` inside that
+  message is **ignored** on the request path (it is never a way to rename or
+  relocate anything), so a message carrying only that echo is a present zero
+  token, refused like any other; the RPC still names its target by
+  `addr_port` or `sp_name` in its own top-level field. `Get*` returns the
+  current token. `gateway.md` GW6 carries the check out.
 * The handle in the value is a copy of the authoritative one (`DnConf` and
   `CnConf` are keyed by `addr_port`, `SpConf` by `sp_name`). No RPC changes
   a node's `addr_port` or an SP's `sp_name`; any path that does must rewrite
@@ -1301,7 +1323,9 @@ there. Doing it in-STM also makes the transaction fail correctly when the
 cluster is concurrently deleted or recreated. `GrowSlice`, `CreateSpareLeg`
 and `SwitchSpareLeg` are the exceptions: they make that read in a planning
 snapshot, `CreateSpareLeg` in a fresh one each round of its candidate unit
-(`gateway.md` GW5, GW9). Network calls to agents (`GetDnSize` and
+(`gateway.md` GW5, GW9). `AdvanceClusterIds` commits one transaction for
+its cluster and then one per pool, which take the cluster id the first one
+derived (Clusters). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*` and behind the `force` false
 hydration checks of Clones and Migrations, the bitmap reads) must happen
 **outside** the STM, before or after it; when such a call needs
@@ -1703,6 +1727,9 @@ it parks a namespace (Clone crash recovery).
   this is the only path that accepts such an NQN: every other RPC that
   names such a subsystem refuses it with `INVALID_ARGUMENT`.
 * `addr_port` is the gRPC endpoint of the node's agent, a host and a port.
+* A clone's `src_tr_conf` holds at most `MaxCntlrCntPerSp` entries, the most
+  cntlrs a source pool has, since every cntlr syncup of the destination pool
+  carries it.
 * **Bounded numeric parameters.** These bounds are checked on the
   **request**: a non-zero value outside its bounds is rejected, while a
   proto3 zero is always accepted — it means "unset" and asks for the
@@ -1808,9 +1835,14 @@ it parks a namespace (Clone crash recovery).
   `DefaultHealthCheckInterval`, so an SP on a cluster whose
   `cntlr_interval` is longer than its default must set `primary_unhealthy`
   itself.
-* `QosRatio.bytes_per_iops` and `bytes_per_bps` are **not** range-checked:
-  nothing enforces them (Controller node, common), and any value is stored
-  as sent.
+* `qos_ratio` must be all zero: a `QosRatio` with `strict` set or a
+  non-zero `bytes_per_iops` or `bytes_per_bps` is `INVALID_ARGUMENT`, and
+  an absent or all-zero one is stored as sent. Nothing enforces QoS
+  (Controller node, common), so a stored non-zero ratio would only mislead
+  whoever reads it back. The rule judges the request alone: no reader
+  refuses a stored ratio, whatever it holds, since a worker that refused a
+  cluster's stored conf would send no syncup to any node or pool of that
+  cluster (`dnv-worker.md` RW9).
 * `bdev_feature_list` must be empty (`INVALID_ARGUMENT`
   otherwise); `RedundConf` accepts only `redund_none` and
   `redund_md_raid1`.
@@ -1893,9 +1925,10 @@ any of the `DnGlobal`, `CnGlobal` and `SpGlobal` of the `cluster_id`
 exists (the hash-collision guard), checked inside the STM;
 `INVALID_ARGUMENT` when `dn_bin_conf`'s shifts are set to anything that is
 not a ladder (DN bins — all four zero asks for the default and is
-accepted), or when the resolved `bdev_conf` breaks a geometry rule of
+accepted), when the resolved `bdev_conf` breaks a geometry rule of
 Common validation (a member the request omitted is judged as its
-constant, and the message says the defaults were filled in).
+constant, and the message says the defaults were filled in), or when
+`qos_ratio` is not all zero (Common validation).
 Defaults: the defaults of Common validation for every `ClusterConf`
 member, applied **here** and stored concrete — `ClusterConf` is
 write-once, so this is the only chance its members ever get to be
@@ -1951,6 +1984,35 @@ cluster names plus the next token (page_token; `gateway.md` GW10). This is
 the one list that needs no `cluster_id`, because `ClusterConf` is the only
 name-keyed message; `GetCluster` turns a listed name into its
 `cluster_id`.
+
+**AdvanceClusterIds** — the id step of etcd backup and restore: it moves
+every id counter of the cluster (Globals: id allocation + shard buckets)
+far forward, so that no id the cluster handed out after a backup is handed
+out again once that backup is restored, as long as no counter handed out
+more ids after the backup than the step moves it by. `IdStepStride` is far
+more ids than a cluster hands out between a backup and its restore, while a
+pool that creates and deletes thin devices can hand out more thin ids than
+`ThinIdStepStride` (Known limits). On a cluster that was not restored it
+only skips ids. It carries no token.
+Errors: `NOT_FOUND` cluster; `ABORTED` if a global key is missing;
+`FAILED_PRECONDITION` when a `next_id` cannot move by `IdStepStride`
+without wrapping, the message naming the counter.
+Action: one STM reads `ClusterConf`, derives `cluster_id`, and moves the
+`next_id` of `DnGlobal`, `CnGlobal` and `SpGlobal` by `IdStepStride`. Then
+a keys-only range of the cluster's `sp_conf` prefix, outside any STM,
+lists its pools, and one STM per pool moves the pool's `next_id` by
+`IdStepStride` and its `next_dev_id` by `ThinIdStepStride`, never past the
+first thin id above `MaxThinDevId` and never backward; a pool deleted
+since the range is skipped. A counter that holds zero moves from its first
+value. The globals move first, so that a pool created while the step runs
+draws an `sp_id` above every old one and needs no step of its own. One
+transaction per pool keeps every transaction small whatever the pool
+count: one transaction over every pool of a cluster of
+`MaxSpCntPerCluster` pools would pass `EtcdMaxTxnOps` (Cardinality
+limits). No revision moves, since no agent reads a counter (Revision keys
+and the sync fan-out). A call that fails part-way leaves what it moved
+moved and is run again, which moves every counter once more. Reply the
+`cluster_id` and the number of pools moved.
 
 ### Disk nodes
 
@@ -2352,7 +2414,11 @@ Inspect RPCs are the way to watch clone and migration hydration before
 ### Thin devices
 
 **CreateThinDevice** — Errors: `ALREADY_EXISTS` td key; `RESOURCE_EXHAUSTED`
-when `td_name_list` holds `MaxTdCntPerSp` tds or more; `NOT_FOUND`
+when `td_name_list` holds `MaxTdCntPerSp` tds or more;
+`FAILED_PRECONDITION` when the pool's `next_dev_id` is above
+`MaxThinDevId`: the pool has spent every thin id dm-thin takes (Globals: id
+allocation + shard buckets), and a new thin device needs another pool, a
+refusal checked before anything is minted and writing nothing; `NOT_FOUND`
 `ori_name` set but absent; `FAILED_PRECONDITION` `ori_name` set and the
 origin's `created` false (checked after `NOT_FOUND`); `FAILED_PRECONDITION`
 `ori_name` set and the origin is the destination of a clone (any
@@ -2533,7 +2599,7 @@ dnv-namespace one included; `ALREADY_EXISTS` subsystem key;
 `allowed_hosts` holds more than `MaxHostCntPerSs` entries or any entry
 fails the host-NQN rules. Action: STM: `ss_id` from `next_id`; the serial
 is the `ss_id` rendered with `IdKeyFmt` and the model is
-`subsystemModel` ([D2]); write the `Subsystem` with an empty `ns_list`,
+`NvmeModel` ([D2]); write the `Subsystem` with an empty `ns_list`,
 append to `nqn_list`, write the `CdcEntry` — the NQN, the transport confs
 of the cntlrs the listing rule of [D18] lists as `nvme_tr_conf_list`, and
 `allowed_hosts` —, bump `SpRev`. Reply `ss_id`.
@@ -2637,8 +2703,9 @@ one included, lacks room in its arena for the clone's metadata units — the
 message names that CN (Metadata units); `NOT_FOUND` `dst_td_name`;
 `FAILED_PRECONDITION` the
 destination td already targeted by another clone; `INVALID_ARGUMENT` when
-`src_tr_conf` is empty, `src_nqn` is invalid, `src_slice_cnt` is outside
-one to `MaxSliceCntPerSp` (unlike `CreateStoragePool`'s own `slice_cnt`, a
+`src_tr_conf` is empty or longer than `MaxCntlrCntPerSp`, `src_nqn` is
+invalid, `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
+`CreateStoragePool`'s own `slice_cnt`, a
 `src_slice_cnt` of zero is refused, not defaulted — it describes a source
 that already exists), `src_stripe_size` is not a positive multiple of
 `MinDmRaid0StripeSize` at most `MaxDmRaid0StripeSize`, `src_block_size` is
@@ -3126,8 +3193,9 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   `SyncupDn.side_pointer_list` and `SyncupCn.cntlr_pointer_list` are
   authoritative: pointers in the request but not local ⇒ add; local but
   not in the request ⇒ drop the object's state and let the sweep (Teardown
-  by sweep) remove its resources by name (ids are never reused, so a
-  deleted side or cntlr never comes back). There is no to-be-deleted list:
+  by sweep) remove its resources by name. Ids are never reused, so a
+  deleted side or cntlr never comes back, an etcd restore aside (etcd
+  backup and restore). There is no to-be-deleted list:
   a list of removals still owed is memory of a failure, and the agent
   keeps none — what has to go is recomputed from the live node on every
   pass. The embedded object lists inside `SyncupSide` and `SyncupCntlr`
@@ -3496,8 +3564,9 @@ short chunk's missing tail reads as written — always the safe direction, a
 region copied instead of discarded.
 
 C is sized so that a grown chunk value plus the rev-bump put stays inside
-etcd's default request-size cap and every `PushCloneBitmap`
-message inside gRPC's default message size; `MaxCloneBmCnt` chunks bound
+etcd's default request-size cap, so a clone append asks nothing of
+`EtcdMaxRequestBytes`, and every `PushCloneBitmap` message far inside
+`GrpcMaxMsgSize`; `MaxCloneBmCnt` chunks bound
 the bitmap of one slice, and `MaxSliceCntPerSp` slices of them bound one
 clone's bitmaps, measured against etcd's default storage quota. With the
 defaults the bitmaps are far smaller: the chunking exists for the
@@ -3588,9 +3657,10 @@ can watch an object's live state cheaply instead of polling `Get*Info`:
 * **One stream per object.** The owning worker keeps one `CheckDn` per
   DN, one `CheckSide` per side, one `CheckCn` per CN and one `CheckCntlr`
   per cntlr open for as long as it owns the object (Membership and shard
-  ownership). Rounds are **worker-initiated**: one request per health
-  round, exactly one reply per request, never an unsolicited agent
-  message. The round interval is the object kind's field of
+  ownership). A worker's open streams therefore grow with the objects its
+  shards hold (Known limits). Rounds are **worker-initiated**: one request
+  per health round, exactly one reply per request, never an unsolicited
+  agent message. The round interval is the object kind's field of
   `ClusterConf.health_check_conf` (`dn_interval`, `cn_interval`,
   `side_interval`, `cntlr_interval`, in seconds; a request's zero becomes
   `DefaultHealthCheckInterval` at `CreateCluster`, within
@@ -4061,7 +4131,7 @@ claims a clean full array is not started degraded on its own ("Make sure
 all groups are available"), and once both legs are reachable the event
 counts pick the newer one and resync overwrites the stale leg. dnv adds no
 fencing epoch of its own, so (b) is an explicit dependency on mdadm's
-behaviour, and no suite in the tree pins that behaviour (Known limits).
+behaviour ([D16]).
 
 **What hosts see at a failover ([D16]).** The common failover — a dead CN
 — is clean from the host's side once the new primary's stack is built:
@@ -4564,6 +4634,204 @@ agent writes "attr_cntlid_max" first when the live one reads below the new
 "attr_cntlid_min", and "attr_cntlid_min" first otherwise
 (`EnsureSubsystem`).
 
+### Running without the control plane
+
+Every program of the control plane keeps its state in etcd (System
+overview), so while etcd is unreachable the control plane changes nothing,
+and the data plane goes on serving what it last applied:
+
+* **Agents** keep serving from their stores. An agent needs no call to keep
+  what it has built, and one that restarts meanwhile rebuilds from its store
+  before it serves (Common agent rules).
+* **Hosts** keep the paths they have, and their IO goes on through them: no
+  discovery record changes, so nothing that follows the discovery log drops
+  a path (Host view).
+* **The cdc** keeps serving its last known state (`cdc.md` DS10). An
+  instance that starts meanwhile answers no host until its first scan has
+  landed (`cdc.md` CM4), so it never tells a host that it has no subsystem.
+* **The gateway** completes no call that needs etcd: a call waits for etcd
+  for at most its etcd budget (`dnv-worker.md` EU5) and then fails
+  `ABORTED` (UNEXPECTED_ERROR → `ABORTED`), unless its caller's deadline
+  ends it first; a call still waiting when the gateway's etcd client has
+  reconnected is served. A write that fails this way can still have
+  landed, since etcd can have applied a commit already sent when the
+  connection broke or the budget ended.
+* **A worker** fences itself once its heartbeat has not reached etcd for as
+  long as `dnv-worker.md` VW8 tolerates, and then drives nothing until one
+  grace window after its first put lands again (`dnv-worker.md` VW7); a
+  worker whose heartbeat lands again sooner, such as over a leader
+  election, does not fence. No health epoch, flip, reaction or drain step
+  can commit meanwhile, so a fault meets no reaction: a primary that fails
+  is failed over only once a worker drives its pool again and has judged it
+  unhealthy itself (Automatic reactions), and a pool that fills gets no
+  auto-grow while etcd is away, so IO that needs a new block queues, and
+  fails if dm-thin's wait for free space ends before a grow lands (Known
+  limits).
+
+When etcd answers again, each program comes back by itself once its own etcd
+client has reconnected, on that client's own schedule, and no operator step
+is needed. The gateway answers its next call. The cdc resumes its watch, or
+rescans and sends an AEN to every host whose view moved (`cdc.md` DS10). A
+worker that fenced drives again no sooner than one grace window after its
+new seed's first successful put (`dnv-worker.md` VW7), and an incarnation
+that started while etcd was away can fence once more first
+(`dnv-worker.md` VW8). Once it drives, it opens every check stream afresh
+and re-syncs only an object whose agent reports another revision or a
+non-zero code (`dnv-worker.md` RW4); its flips and drains resume, and a
+reaction fires only once the worker's own verdicts call for it
+(`dnv-worker.md` AR10).
+Nothing is replayed and nothing is lost: the revision keys are durable, so
+what was committed and not yet driven converges then (`dnv-worker.md`,
+Known limits).
+
+### etcd backup and restore
+
+A backup is etcd's own snapshot of its data, and a restore is etcd's
+restore tool run on one; dnv adds nothing to either. A restore needs an
+order, because the restored desired state is older than the nodes: the
+agents' stores, the disks and the kernels hold what was built after the
+backup, and the id counters (Globals: id allocation + shard buckets) are
+back at values the cluster has handed out since.
+
+Before the restore every worker, every cdc and every gateway stops, and the
+agents keep serving their nodes: a worker would hand out ids from the
+restored counters, since a grow, a leg repair and a cntlr replacement all
+take new ids. Then, in this order:
+
+1. Restore etcd and start it as every etcd serving dnv is deployed
+   (Components: invocation reference), then start the gateways.
+2. Run the id step, `AdvanceClusterIds` (Clusters), for every cluster
+   before any other call but `ListClusters`, which names the clusters. It
+   moves every id counter far forward, so no id handed out after the backup
+   is handed out again, unless a counter handed out more since the backup
+   than the step moves it by, which a pool's thin ids can (Clusters; Known
+   limits). Without it a new object could take the ids of one made after
+   the backup while a node still holds that object's remains — a side
+   record on a disk, a thin id in a pool, a device or an export — and the
+   node would take those remains, data included, for the new object's.
+3. For each agent: stop it, delete the files of its local store (Agent
+   local-store paths), start it. A kept store refuses every syncup until
+   etcd's revision reaches the agent's (`dnv-worker.md` RW5); a cleared one
+   accepts the restored revision, and the agent rebuilds from the restored
+   desired state (`dnagent.md` DN2; `cnagent.md` CN2).
+4. Start the workers and the cdc, let clients call the gateways again, and
+   take a new backup: a later restore of a backup from before this id step
+   would take the counters back below the ids handed out since, and its own
+   step would hand those out again.
+
+A restore loses or breaks what changed after the backup:
+
+* Unless its agent refuses its disk as a foreign one (below), a disk node
+  frees every side the restored state does not name, so what was created
+  after the backup is lost with its data.
+* A pool that gained groups after the backup by auto-grow, or whose legs a
+  migration or a leg repair moved, goes back to its old layout and breaks.
+* An object deleted after the backup comes back. One whose parts a node
+  has freed reads as an error until it is deleted again: a side as "record
+  missing" (`dnagent.md` DN9), a thin device as a lost thin id
+  (`cnagent.md` CN14). One whose parts are still there comes back working:
+  a namespace or a subsystem over a thin device that still exists is
+  exported to its hosts again. The operator deletes each such object
+  again.
+* A side the restored state names with another extent count or another
+  length to zero than its disk node's record shows an error row on its
+  side device (`dnagent.md` DN9): the conflict. To resolve it, empty that
+  node of every side the restored state puts on it: a migration moves its
+  other sides away, and the conflicting side itself goes with its pool's
+  delete or by a leg repair followed by a delete of the spare the replaced
+  leg becomes, since a migration of it never copies, its roles converging
+  only behind the gate that refuses it (`dnagent.md` DN9). Then delete the
+  disk node, which is refused while it holds a side; stop its agent; zero
+  the disk's header block by hand, since the agent formats only a disk
+  whose header carries no magic (`dnagent.md` DN5); delete the agent's
+  local store, start it, and add the node again. An agent started with its
+  old store formats the blank disk under the old node's identity
+  (`dnagent.md` DN2). A controller node holds no disk, so the conflict
+  never arises on one.
+* A node added after the backup is not in the restored state, and what it
+  built stays on it until removed by hand. Added again it takes a new id,
+  so a disk node's agent refuses its disk, whose header names the old id,
+  as a foreign one until the header block is zeroed by hand (`dnagent.md`
+  DN5).
+* A node deleted after the backup comes back in the restored state: it reads
+  unhealthy while no agent answers for it, and healthy, taking new sides or
+  cntlrs, while its agent still runs; either way it stays until it is
+  deleted again. A disk node whose disk was formatted again since the
+  backup, under the new id of a node added again at its address, is the
+  exception: its agent refuses the disk as a foreign one (`dnagent.md` DN5),
+  so the node reads unhealthy and its agent frees and builds nothing on the
+  disk. It is resolved as the conflict above is, every side on it going the
+  way the conflicting side goes there, since its agent serves none, and what
+  the node added again built on the disk is removed by hand before the
+  header block is zeroed, since the agent formats no disk that a side device
+  or a clone-metadata wrapper maps (`dnagent.md` DN5).
+* A revision token taken before the restore can match a restored `SpRev`,
+  `DnRev` or `CnRev` once that revision climbs back to the same number, and
+  the token check compares numbers only (`gateway.md` GW6), so every client
+  discards the tokens it holds and reads again.
+
+Reason: the order and the id step close the one hazard that could show a
+pool another pool's data; the others follow from restoring an older
+desired state over newer nodes, and are stated so that an operator can
+weigh a restore against them.
+
+### Upgrade in lockstep
+
+dnv upgrades in **lockstep**: every dnv program of an etcd installation
+stops — its gateways, workers and cdc instances, and the agents of every
+cluster it holds — every binary is replaced by the one of the new build,
+`dnvctl` included, and only then does any program start again. The
+installation is the unit, not a cluster, because its gateways, workers and
+cdc instances serve every cluster it holds (`dnv-worker.md` SW6; `cdc.md`
+DS1). etcd is no dnv program and keeps its data, and before any program of
+the new build starts, it runs as that build requires (Components: invocation
+reference). There is no rolling upgrade, and no two builds ever run in one
+etcd installation at once. Reason: no message carries a build version and
+nothing checks one, so two builds that differ in a message would misread
+each other with no error — a field one of them lacks is ignored when it
+arrives and read as zero when it is missing; with one build at a time, only
+what the nodes and etcd hold crosses from one build to the next, and the
+rules below keep it readable.
+
+Every worker stops before any agent does, and the workers start last, once
+the agents serve again (`dnagent.md` SH1); the gateways and the cdc
+instances stop and start in any order. Reason: to a running worker a
+stopped agent is a failed node, and its reactions would fail over
+primaries, replace cntlrs and repair legs that only wait for their agent
+(Automatic reactions; `dnv-worker.md` AR10).
+
+Every agent keeps its local store across the upgrade and, at start,
+rebuilds from it what its node should hold, probe-first, as after any
+restart (`dnagent.md` DN2, `cnagent.md` CN2). Reason: the store is the
+desired state an agent rebuilds from before it serves (Common agent rules).
+So a build takes over whatever an older build left as it is: it finds what
+the nodes hold and etcd's records by the names of Naming and the keys of
+etcd data model, which it keeps; it reads every message the older build
+stored, in etcd or in a local store; and neither its conf gates nor its
+readers refuse a value the older build stored (Common validation). It
+changes a stored message only by adding fields and removing them, never by
+renumbering a field or an enum value or giving a new one the number of a
+removed one: a stored value would then decode silently into the wrong
+field, or into none. A field it adds reads zero in what an older build
+wrote, so it adds only a field whose zero is right there: a count it adds
+starts at zero. A clone or a migration whose record carries no
+`meta_units` thus counts as zero units and adds nothing to any charge or
+release, while the node that builds it still takes a run for it: until
+such copies are gone, a node's count reads below what its area holds, and
+a copy the count admits may wait as provisioning for room (Metadata units).
+A node record or a capacity value with no `used_meta_units` counts nothing
+used. A `ClusterConf` is write-once, so a cluster keeps a `qos_ratio` an
+older build stored even where it is not all zero, which `CreateCluster`
+refuses (Common validation): the worker copies it into every
+controller-node syncup and nothing enforces it (Controller node, common).
+
+The dnv disk format is the one exception, the one stored layout with a
+version of its own: any change to it is a new version ([D13]), a dn agent
+reads only the version of its build, and a disk of another version is
+refused and never formatted over, until it is re-created
+(`dnagent.md` DN5). A build with a new format version therefore takes
+over no disk an older build formatted.
+
 ## dnv-cdc
 
 `dnv-cdc` serves the NVMe-oF Central Discovery Controller, the well-known
@@ -4617,16 +4885,21 @@ processes run co-located on any number of control-plane servers (fig.
   cobra root command with exactly those two subcommands (`dnagent.md` CM1);
   the dn agent runs on every DN and the cn agent on every CN. An agent
   serves its gRPC service to the workers and the gateway, converges one
-  nvmet port on the node's kernel from its transport configuration — which
-  is mirrored into `DnConf` or `CnConf` when the node is created, so that a
-  CN dials a DN's sides and a host a CN's namespaces there — and keeps its
-  local store (Agent local-store paths). It never talks to etcd. The dn
-  agent also takes the raw disk it formats ([D13]); the cn agent takes the
-  capacity budget `GetCnSize` replies, the per-node input of the CN extent
-  count (Size → extents; `cnagent.md`, `cmd/dnv-agent cn`). A node may run
-  a dn agent and a cn agent side by side: the pair co-owns one nvmet port
-  at the default port id, with identical transport values, and both use the
-  default local-store prefix, since the two roles' store kinds are disjoint
+  nvmet port on the node's kernel from its four transport flags, and keeps
+  its local store (Agent local-store paths). It never talks to etcd. The
+  node's transport conf, the `nvme_tr_conf` the operator gives
+  `CreateDiskNode` or `CreateControllerNode`, is the address other nodes
+  and hosts dial to reach that port (Disk node; Controller node, common).
+  It may differ from the agent's own flags when a proxy that forwards sits
+  in between; the operator keeps the two consistent, and nothing in dnv
+  checks that they are. The dn agent also takes the raw disk it formats
+  ([D13]); the cn agent takes the capacity budget `GetCnSize` replies, the
+  per-node input
+  of the CN extent count (Size → extents; `cnagent.md`,
+  `cmd/dnv-agent cn`). A node may run a dn agent and a cn agent side by
+  side: the pair co-owns one nvmet port at the default port id, with
+  identical transport flags, and both use the default local-store prefix,
+  since the two roles' store kinds are disjoint
   (Disk node; Controller node, common; `dnagent.md` CM2). Several agents on
   one kernel need more than distinct port ids (`dnagent.md` CM2), and two
   cn agents on one kernel are never safe (Controller node, common).
@@ -4637,9 +4910,17 @@ processes run co-located on any number of control-plane servers (fig.
   `service Gateway` RPC, sent to one gateway (`dnvctl.md` CT1).
 
 **etcd.** etcd holds all desired state. It is deployed with `--max-txn-ops`
-at `EtcdMaxTxnOps` or higher, a server flag dnv cannot set from the client
-side; `gateway.md`, Constants this document owns, states the requirement
-and the transactions that size the number.
+at `EtcdMaxTxnOps` or higher and `--max-request-bytes` at
+`EtcdMaxRequestBytes` or higher, server flags dnv cannot set from the
+client side; `gateway.md`, Constants this document owns, states the first
+and the transactions that size it, `dnv-worker.md`, Constants this document
+owns, the second and the transaction that sizes it. etcd also runs with
+automatic compaction of its history (`--auto-compaction-retention`):
+nothing in dnv compacts it, every write keeps the old value in etcd's
+history, and etcd refuses writes once its database reaches its storage
+quota. What runs while etcd does not answer, how it is backed up and
+restored, and how dnv is upgraded are Running without the control plane,
+etcd backup and restore and Upgrade in lockstep.
 
 **md assembly.** Only the agent assembles dnv arrays, so every node that
 runs a dnv agent masks udev's incremental assembly of them — a DN too, the
@@ -4650,7 +4931,8 @@ runs its own import, so a bare name match in an earlier rule never fires —
 and sets "SYSTEMD_READY" to zero for a device whose array name carries the
 fixed dnv prefix of `CnMdArrayName` (md names), in the bare form and in the
 "homehost:name" form; the cn agent creates its arrays with `--homehost any`,
-which keeps the stored name bare. The mask works because the stock rule
+and the deployed mdadm stores such an array's name in the "homehost:name"
+form, "any:" before the dnv name. The mask works because the stock rule
 skips a device whose "SYSTEMD_READY" is zero, which the deployed mdadm's
 rules must do. On dedicated CN hosts two blunter means need no name
 matching: an mdadm.conf "AUTO -all", under which only arrays with explicit
@@ -4680,7 +4962,11 @@ document and the component documents cite it by its id.
   device names).
 * **[D2] Subsystem identity.** A subsystem's serial is its `ss_id` rendered
   with `IdKeyFmt`, and its model is the one fixed dnv model string
-  (`subsystemModel`) — both stable across cntlrs, so hosts see one device.
+  (`NvmeModel`) — both stable across cntlrs, so hosts see one device. The
+  same constant is the model of every side export and every transfer
+  subsystem the agents build, and the MN of the cdc's Identify
+  (`dnagent.md` DN10; `cnagent.md` CN17; `cdc.md` NP7), so the value cannot
+  drift between them.
 * **[D3] Empty destination td.** Clone correctness (the precondition of
   Clones) and crash recovery (Clone crash recovery) both assume the
   destination td was never written before the clone; "mapped ⇒ copied"
@@ -5005,7 +5291,11 @@ document and the component documents cite it by its id.
   superblock claims a clean full array will not start degraded alone, and
   event counts plus resync direction repair divergence once both legs
   return. md's assembly behaviour is therefore a load-bearing external
-  dependency, and no suite in the tree pins it (Known limits). For a host
+  dependency, which the cn suite's redund case asserts on the lab's mdadm
+  (`cnagent_integtest.md`, Cases): mdadm refuses to start an array from one
+  leg whose superblock still counts a clean full array, and once both legs
+  are back a block only the newer leg holds reads as that leg's; nothing
+  checks the mdadm a deployed node runs (Known limits). For a host
   that follows the discovery log, the two waits and the withdrawal close
   both edges of a failover: an old primary that applies its demotion within
   the demotion hold is inaccessible before the fence, and one the worker
@@ -5134,6 +5424,30 @@ that component's document and only pointed to here.
   of the SP instead of one; batching the flip keeps bulk creation at one
   extra fan-out per reply, or per `MaxFlipCreatedPerTxn` tds for a reply
   that completes more.
+* **Each count of a pool grows something.** The worker holds one check
+  stream per object it owns (Check streams). A controller node holds one
+  NVMe/TCP controller per leg path of each cntlr it hosts and, on a
+  primary, one per transport of each clone's source, and a disk node one
+  per migration it is the destination of. Per cntlr a controller node
+  builds one nvmet subsystem per subsystem, one nvmet namespace per
+  namespace, and an nvmet subsystem with its namespace per transfer; per
+  side a disk node builds one dm device, and one dm-error, one dm-linear
+  and one nvmet subsystem per cntlr of the side's pool, and a migration
+  adds a dm-linear and an nvmet subsystem on its source side's disk node
+  and a dm-clone and its metadata wrapper on its destination's (Disk
+  node). The cntlr syncup and the pool get reply grow with the pool's
+  groups and legs, and the cntlr report with them and with the thin
+  devices times the slices; every dnv gRPC server and client takes messages
+  up to `GrpcMaxMsgSize` (`grpc.md`, Wiring), and unit tests hold the three
+  under it at the limits of Cardinality limits and Common validation. Three
+  parts have no such limit: a row's text, which a failed command fills with
+  its output; a bitmap read's reply, which grows with the blocks it asks
+  for, so a caller pages through a large volume (Bitmap reads); and an
+  `AppendMigrationBitmap` chunk, which has no byte cap and fails once its
+  transaction passes `EtcdMaxRequestBytes`.
+  One etcd request grows with the slices it writes, the widest a
+  provisioned flip over every slice, which sizes `EtcdMaxRequestBytes`
+  (`dnv-worker.md`, Constants this document owns).
 * **The agent node lock has head-of-line blocking.** A pending node write
   (`SyncupDn`/`SyncupCn`) blocks every new node-read acquisition behind the
   slowest in-flight object converge. Converges are bounded per command
@@ -5219,8 +5533,10 @@ that component's document and only pointed to here.
   device, which a host of an earlier pool wrote there, can make a fresh
   leg read as carrying one, and mdadm then refuses the foreign member, so
   the group reports an error (`cnagent.md` CN12).
-* **QoS is not enforced** (Controller node, common): agents accept and persist
-  `qos_ratio` and enforce nothing (`cnagent.md` CN6).
+* **QoS is not enforced** (Controller node, common): `CreateCluster`
+  refuses a `qos_ratio` that is not all zero (Common validation), and the
+  cn agent persists the ratio its syncup carries and enforces nothing
+  (`cnagent.md` CN6).
 * **Snapshot creation is not atomic across a primary crash, and the torn
   mark is best effort.** With the origin quiesce of Thin devices a
   snapshot is point-in-time against live IO, but a crash between two
@@ -5252,12 +5568,15 @@ that component's document and only pointed to here.
   [D3]'s destination is empty, so the exposure is a snapshot of
   an empty td, and only a snapshot not yet created by the time a clone into
   that td is created.
-* **md's degraded-start refusal is an unpinned external dependency.** The
-  cross-leg half of failover safety ([D16], "Make sure all groups are
-  available") rests on mdadm refusing to start an array from a lone
-  survivor whose superblock still counts a clean full array; no suite in
-  the tree asserts that refusal, so nothing in the tree detects a change
-  in the deployed mdadm's behaviour.
+* **md's assembly behaviour is pinned in the lab only.** The cross-leg
+  half of failover safety ([D16], "Make sure all groups are available")
+  rests on mdadm refusing to start an array from a lone survivor whose
+  superblock still counts a clean full array, and, once both legs are
+  back, on the event counts picking the newer leg and a resync overwriting
+  the stale one; on the lab's mdadm the cn suite asserts the refusal and
+  that a block only the newer leg holds reads as that leg's
+  (`cnagent_integtest.md`, Cases), and nothing checks the mdadm a deployed
+  node runs.
 * **An md check of a RAID1 data group counts mismatches.** The legs of a
   data group are never zeroed past their first data block, so they may
   differ wherever the pool has not written ([D15]), and an md "check" of
@@ -5333,6 +5652,24 @@ that component's document and only pointed to here.
   fails with EIO, while already-provisioned blocks keep serving. A
   `low_water_mark_pct` above a hundred percent switches auto-grow off
   (Common validation).
+* **A pool's thin ids run out.** dm-thin takes no thin id above
+  `MaxThinDevId`, and a pool hands out each thin id once, the restore of the
+  next bullet aside, so a pool creates a bounded number of thin devices over
+  its life, and each id step spends up to `ThinIdStepStride` of them
+  (Clusters); past that bound the pool refuses new thin devices (Thin
+  devices), which need another pool.
+* **A restore can hand out a pool's thin ids again.** The id step moves a
+  pool's `next_dev_id` by `ThinIdStepStride` (Clusters), so a pool that
+  handed out more thin ids than that between a backup and its restore hands
+  some of them out again after the restore. A new thin device that takes
+  such an id while its pool still holds it serves that id's blocks, data
+  included (`cnagent.md` CN14). On a cntlr that holds the pool
+  (`cnagent.md` CN14), the cn agent deletes the thin id of each thin volume
+  the restored state does not name, but only once the sweep that removes
+  the volume gets through (`cnagent.md` CN21); on any other cntlr, such as
+  one the restored state makes a standby or does not name, that sweep only
+  removes the volume. An id that no thin volume maps stays in the pool
+  until a sweep of the pool's ids deletes it (`cnagent.md` CN14).
 * **A created td is never re-created by message** (`cnagent.md` CN14): a
   pool that has lost a created td's thin id reads `RES_STATUS_ERROR` with
   the lost-id reason (Live-state reporting) on every converge, which

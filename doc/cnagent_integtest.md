@@ -14,10 +14,13 @@ dm-clone, dm-flakey, nvmet configfs — behaves as `cnagent.md` specifies on two
 lab VMs driven over gRPC from the developer machine, with real `dnv-agent dn`
 instances behind the sides, the dn role having its own suite. It exercises
 every `ControllerNodeAgent` RPC and reads the kernel state beside the agent's
-report. It proves the happy path; error paths are out of scope but for the
-stale probe, the dead leg, the promotion that outruns the sides' flip, the
-clone's lost source, and the leftover, an accepted request reporting residue
-(`cnagent.md` CN20). The cases
+report. It also pins the md assembly rules the cross-leg half of failover
+safety rests on, the refusal before redund builds its pool and the kick in
+its late flip (`architecture.md`, [D16]). It proves the happy path; error
+paths are out of scope but for the stale probe, the dead leg, the promotion
+that outruns the sides' flip, md's refusal to start an array from one clean
+leg, the clone's lost source, and the leftover, an accepted request reporting
+residue (`cnagent.md` CN20). The cases
 run in a fixed order, fail-fast — smoke, redund, teardown, thinbm, clone_xfer,
 restart — each under pool ids of its own and each leaving nothing of its pools,
 a teardown per case and per stage that also keeps the run inside a DN's data
@@ -80,8 +83,8 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   member md failed in the dead-leg stage is kicked as stale while the other,
   whose array state excludes it, starts the array; and a lone member whose
   superblock still counts both is refused, leaving no inactive array for
-  `ensureGroup` to hold in error. Re-verify both when mdadm changes
-  (`architecture.md`, [D16]).
+  `ensureGroup` to hold in error. redund asserts the refusal before it builds
+  its pool and the kick in its late flip (Cases).
 * The dead-leg stage cuts each array's first member, the one mdadm's detail
   read would block on, under a host write, since md learns of a dead member
   only from an IO to it (`cnagent.md` CN12, CN29); a failfast member write
@@ -129,20 +132,26 @@ names (`CnMdDevName`) and a host NQN's host id.
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details. A failed read taken for an absence passes every
   negative on it (`cnagent.md` CN21): a residue check's failed dm or nvmet
-  listing prints a failing line, a status-less check reply fails, the long-dead
-  stage counts a path absent only once the same read saw it live, an admission
-  refusal needs nvmet's own refusal record behind a fresh mark, and the park's
-  open check and the dead-leg "no mdadm" carry positive controls. Other
-  negatives pass on a read that failed, and so prove less: the partition
-  stages' waits for a path to leave live and the finalize's check for a source
-  controller accept the "none" a failed listing returns; so do the no-path
-  check after an admission refusal and the check that a subsystem lists no
-  host, both backed by the refusal record; the mutation, event and command
-  readers print nothing for a log they cannot read, so restart's
-  zero-mutation and mdadm checks and the late flip's "assembled nothing" have
-  no positive control; and the reads of
-  /proc/mdstat, the standby's no-array check and the md part of the residue
-  check take a failure for no array.
+  listing prints a failing line, a status-less check reply fails, the
+  agent-log readers fail their stage on a log that is missing or cannot be
+  read, thinbm's and the finalize's checks that a converge ran no such
+  command fail when that converge logged nothing at all, the long-dead stage
+  counts a path absent only once the same read saw it live, an admission
+  refusal needs nvmet's own refusal record behind a fresh mark, the park's
+  open check and the dead-leg "no mdadm" carry positive controls, and in
+  redund's md-refusal stage the checks that no array holds a leg and that no
+  loop device is left fail on a read that fails and have the running array
+  and the listed loops as their positive controls. Other negatives pass on a
+  read that failed, and so prove less: the partition stages' waits for a path
+  to leave live and the finalize's check for a source controller accept the
+  "none" a failed listing returns; so do the no-path check after an admission
+  refusal and the check that a subsystem lists no host, both backed by the
+  refusal record; and the array counts redund's later stages and the teardown
+  case read from /proc/mdstat, the standby's no-array check and the md part
+  of the residue check take a failure for no array. A log that was read can
+  still hold none of a stage's records, so restart's zero-mutation and mdadm
+  checks, the late flip's "assembled nothing" and the gated clone's
+  "no source connection" have no positive control.
 * **Steady state.** One `CheckCn` and one `CheckCntlr` round per CN reply code
   zero, the revision that RPC stored and every row OK (`cnagent.md` CN24,
   CN30), the cntlr round first waiting out a fresh primary's pending legs
@@ -172,17 +181,31 @@ and a teardown by an empty pointer list, re-sent while it replies leftover
 (CN7, CN21), leaving the CN no dm device, clone-metadata wrapper (CN18) or
 host-facing subsystem and a clean `GetCnInfo` (CN30).
 
-**redund** builds md-raid1 groups across both DNs under a primary and a
-standby. The primary creates both with `--assume-clean`: provisioning zeroed
-every leg's meta region, so none carries a superblock, and no read reaches a
-data block the pool has not written (`cnagent.md` CN12's create case;
-`architecture.md`, [D15]); the standby keeps every leg connected and
+**redund** first pins, with no agent and no NVMe-oF path, the refusal the
+cross-leg half of failover safety rests on (`architecture.md`, [D16]): on one
+VM, a clean two-leg array over two loop devices, built and stopped with the
+agent's create and stop commands under a dnv name the md udev mask matches
+(Lab facts), so that both superblocks still count both legs at one event
+count. Started from one leg with the agent's assemble command (`cnagent.md`
+CN12's assembly case), mdadm refuses, its own message saying it needs every
+member to start the array, writes nothing to that leg's superblock and leaves
+no array holding either leg; started from both legs, the array runs clean,
+both members in sync, with nothing to rebuild. The command is the agent's:
+the promotion below holds each assemble command the agent runs from both
+legs to the arguments the same rule builds for that group, and the unit
+tests hold the agent's start from one leg to the same rule. It then builds
+md-raid1 groups across both DNs under a primary and a standby. The primary
+creates both with `--assume-clean`: provisioning zeroed every leg's meta
+region, so none carries a superblock, and no read reaches a data block the
+pool has not written (`cnagent.md` CN12's create case; `architecture.md`,
+[D15]); the standby keeps every leg connected and
 non-optimized, assembles no two-member array, and backs its ns-dev with the
 td's dm-error, the namespace inaccessible (CN10, CN11, CN16's standby rule);
 each CN's subsystem admits exactly the host's NQN (CN16). The demote moves
 ANA before the park (CN9's ANA pre-step before its park pre-step), stops the
 arrays and keeps the legs; the promote assembles both (CN12's assembly case),
-the data surviving. With the primary's legs into one
+each with the arguments the first stage's rule builds for its own group, the
+data surviving. With the primary's legs into one
 DN cut under a host write, every check round reads both md rows OK until the
 data row reports degraded and the dead legs' rows error, and no mdadm runs
 (CN12, CN28, CN29); the write completes on the surviving leg and reads back,
@@ -192,7 +215,8 @@ limits). Read-only fails writes through dm-flakey (CN16's read-only rule,
 CN19; `architecture.md`, [D11]). The late flip promotes before any side flips:
 both md rows read "no available leg" until the late members' connect retry
 assembles them under its own trace ids, with no second `SyncupCntlr`, then
-stops (CN10, CN12; `architecture.md`, [D16]).
+stops, and a block only the newer leg holds reads as that leg's, the stale
+member kicked (CN10, CN12; `architecture.md`, [D16]).
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,
@@ -287,8 +311,9 @@ just whether the recovery's discard from offset zero is checked.
 Cleanup runs unconditionally at the start of every run and at its end only on
 success; a failing run leaves its debris and dumps the agents' logs, both VMs'
 dm, md, nvmet and host state, each read bounded, and the failing stage's trace
-id. It takes every `dnv-agent` and every dnv dm device, md array and nvmet
-subsystem on the node, of either role, which is why one dnv suite runs at a
+id. A cleanup-only run does the scrub alone. It takes every `dnv-agent` and
+every dnv dm device, md array and nvmet subsystem on the node, of either
+role, which is why one dnv suite runs at a
 time in the lab (`layout.md`, Directory tree) — but for two blind spots the
 wipe exists for: its dm steps see only names with a role-lettered kind, and its
 md stop skips an inactive array over unreadable members, which neither udev nor
@@ -308,7 +333,9 @@ suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
 (`architecture.md`, [D12]). md arrays are named through udev, else by mdadm's
 export, never by its scan, which prints no name on these guests; only a
-dnv-named one is stopped.
+dnv-named one is stopped, but for an array over the loop devices of redund's
+md-refusal stage, which is found by what holds those devices, whatever its
+name or state, and stopped before they are detached.
 
 The wipe is a separate flag that runs no case. Kind-blind, it takes every
 dnv-named dm device, every dnv nvmet subsystem and md array, an array named
@@ -319,7 +346,7 @@ any dm or nvmet residue fails it, since reporting it is not success.
 
 ## Out of scope
 
-Error paths beyond the five above; QoS, not enforced (`cnagent.md` CN6);
+Error paths beyond the six above; QoS, not enforced (`cnagent.md` CN6);
 `GrowSlice`; spare legs; a leg gaining or losing a second side, which the dn
 suite's migrations prove; levels but read-write, read-only and the no-clone
 gate; more than one slice; several namespaces per subsystem; snapshots of

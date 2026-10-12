@@ -45,8 +45,8 @@ anywhere in dnv (`architecture.md`, [D14]): the clone-metadata arena is a
 slot allocator over one loop device whose registry is the clone-metadata
 wrapper linears of Names and constants in `common`. Agents never talk to etcd
 (`layout.md`, Dependency rules). The gRPC server carries the server
-interceptors of `grpc.md`, Wiring; the cn agent's outbound connections are
-only `nvme connect`s, never gRPC.
+interceptors and the message limit of `grpc.md`, Wiring; the cn agent's
+outbound connections are only `nvme connect`s, never gRPC.
 
 ## The cn's part of the shared packages
 
@@ -328,11 +328,10 @@ constants in `common`), but only as an address — nothing here parses it.
 A file that
 does not decode is logged and skipped; a skipped file is deliberately not
 an orphan and is not deleted — a decode failure says nothing about who
-owns it, so nothing here may conclude the owner is gone. A chunk file
-written under another layout of the message is tolerated nowhere, by
-design — binaries upgrade in lockstep — and the operational answer to
-such a change is to clear the CN's `--local-store`. Loading the chunks
-after the converges would lose none of them — a chunk in memory is
+owns it, so nothing here may conclude the owner is gone. The reload
+reads a store file an older build wrote as it reads any other, since an
+upgrade keeps the store (`architecture.md`, Upgrade in lockstep). Loading
+the chunks after the converges would lose none of them — a chunk in memory is
 advertised as applied by the next reply's `chunk_id_list` (CN20), so the
 worker's diff (`dnv-worker.md` BM2) would not push it again — but their `blkdiscard`s would
 then wait for the next event that re-applies the whole set: a create of
@@ -400,7 +399,8 @@ That split is the point: a teardown that deletes the same state after a
 best-effort removal pass whose every step only logs its failure forgets a
 cntlr whose array would not stop with its devices still live, and nothing
 ever enumerates them again (`architecture.md`, Teardown by sweep). Ids
-are never reused, so a dropped cntlr never comes back. Every other
+are never reused, so a dropped cntlr never comes back, an etcd restore
+aside (`architecture.md`, etcd backup and restore). Every other
 cntlr request: re-run the `SyncupCntlr` converge from the stored
 request — which, per CN18 step 4, runs the clone crash recovery for a
 clone whose dm-clone metadata is missing or unusable, whose dm-clone
@@ -1576,9 +1576,10 @@ arrived by the revision-gated RPC then enumerates the pool's device ids
 through the CN25 reserve, `thin_dump` and release machinery and deletes
 every id not among `td_list`'s `dev_id`s — correct because the RPC
 request is the newest accepted desired state, `dev_id`s are never reused
-and thin ids belong to tds alone. An agent restart under a surviving pool
-device does not sweep (nothing else writes the pool, and the CN2
-zero-mutation reconcile stays intact), and a startup reconcile that
+(`architecture.md`, Known limits, names the etcd restore that can break
+that) and thin ids belong to tds alone. An agent restart under a
+surviving pool device does not sweep (nothing else writes the pool, and
+the CN2 zero-mutation reconcile stays intact), and a startup reconcile that
 re-creates the device (a node reboot) arms but does not run it: it
 converges from the persisted request, which may lag the pool's true
 contents (the converge runs before the persist and a failed persist is
@@ -1782,8 +1783,8 @@ resources report `RES_STATUS_ERROR` and the pass continues, CN29).
 `CnXferFinalName`: on the primary a dm-linear over the origin td's raid0
 (→ dm-error at `sp_level` at or above `SP_LEVEL_NO_THINPOOL`); on a
 standby a plain dm-error table of the same size. Subsystem `XferNqn` on
-the node port: "attr_serial" from the transfer id and "attr_model" the
-fixed dnv model (the rule of `architecture.md`, [D2], applied to the
+the node port: "attr_serial" from the transfer id and "attr_model"
+`NvmeModel` (the rule of `architecture.md`, [D2], applied to the
 transfer — every cntlr exports the same identity so the destination clone
 sees one multipath device), "attr_cntlid_min" and "attr_cntlid_max" from
 `Cntlr.cntlid_slot`, `allowed_hosts` from the record; one namespace whose

@@ -71,11 +71,6 @@ const (
 	detailsNsDevNotDesired = "table is not the desired namespace backing"
 )
 
-// xferModel is the attr_model every transfer subsystem presents: the [D2]
-// rule applied to the xfer, so a destination clone connecting through several
-// cntlrs sees one device (CN17).
-const xferModel = "dnv"
-
 func resKeyOf(format string, id uint64) string {
 	return fmt.Sprintf(format, id)
 }

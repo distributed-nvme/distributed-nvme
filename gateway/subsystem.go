@@ -37,12 +37,6 @@ const (
 	opUpdateNamespaceSuspended = "UpdateNamespaceSuspended"
 )
 
-// subsystemModel is the `model` string every Subsystem carries [D2]. It is a
-// constant and not derived from anything per-SP on purpose: hosts identify one
-// device by (serial, model), so the model must stay identical across cntlrs
-// and across the whole cluster.
-const subsystemModel = "dnv"
-
 // subsystemByNqn reads one subsystem of the resolved SP, which is what every
 // RPC of this file but CreateSubsystem starts from. An absent key is
 // NOT_FOUND (GW7's "named object absent"): unlike eachCdcEntry's walk, the NQN
@@ -189,11 +183,12 @@ func (s *Server) CreateSubsystem(
 		ssId = minter.mint()
 		stm.Put(ssKey, &pb.Subsystem{
 			SsId: ssId,
-			// serial = %016x(ss_id) and model = "dnv" [D2]: the pair is what
-			// a host sees as the device identity, so it is derived from the
-			// id that outlives every cntlr rather than from a cntlr.
+			// serial = %016x(ss_id) and model = common.NvmeModel [D2]: the
+			// pair is what a host sees as the device identity, so it is
+			// derived from the id that outlives every cntlr rather than from
+			// a cntlr.
 			Serial:       fmt.Sprintf(common.IdKeyFmt, ssId),
-			Model:        subsystemModel,
+			Model:        common.NvmeModel,
 			AllowedHosts: req.GetAllowedHosts(),
 		})
 		conf.NqnList = append(conf.NqnList, req.GetNqn())

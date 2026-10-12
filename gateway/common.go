@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -24,11 +25,12 @@ import (
 // ---------------------------------------------------------------------------
 //
 // GW7 is the single error table of the component, and these are its only
-// constructors. Handlers return them straight out of their STM closure:
-// etcdutil.RunSTM hands an error returned by the callback back to the caller
-// unchanged and without committing (EU4), so a status error raised deep inside
-// a transaction reaches the client exactly as written and nothing is written
-// to etcd.
+// constructors. Handlers return them straight out of their STM closure,
+// never wrapped: etcdutil.RunSTM hands an error returned by the callback back
+// to the caller unchanged and without committing (EU4), so a status error
+// raised deep inside a transaction reaches the client exactly as written and
+// nothing is written to etcd, while mapStmErr passes on a status only when it
+// is the error itself (isStatusErr).
 
 // errInvalid is a violation of architecture.md, Common validation, a malformed
 // page_token or a bad enum/oneof.
@@ -87,17 +89,23 @@ func errStale() error {
 	return status.Error(codes.Aborted, msgStaleRevision)
 }
 
-// isStatusErr reports whether err already carries a gRPC status, i.e. whether
-// it is one of the constructors above rather than an etcd/proto failure.
+// isStatusErr reports whether err is itself a gRPC status, i.e. one of the
+// constructors above as a closure returned it, rather than an etcd or proto
+// failure. It looks at err alone, never at what err wraps: etcdutil wraps
+// every failure of the etcd client (dnv-worker.md EU6), and that client fails
+// a request in flight when its connection to etcd breaks with a status of its
+// own, UNAVAILABLE, which is an etcd connection error like any other and no
+// code the gateway chose.
 func isStatusErr(err error) bool {
-	var grpcErr interface{ GRPCStatus() *status.Status }
-	return errors.As(err, &grpcErr)
+	_, ok := err.(interface{ GRPCStatus() *status.Status })
+	return ok
 }
 
 // mapStmErr is what every handler wraps its RunSTM / Snapshot call in. A
 // status error the closure raised passes through untouched; everything else —
-// the STM client, the conflict budget, etcd itself, a (de)serialization
-// failure — is an ABORTED (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
+// the STM client, the conflict budget, etcd itself, a status the etcd client
+// gave its own failure included, a (de)serialization failure — is an ABORTED
+// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
 func mapStmErr(err error) error {
 	if err == nil {
 		return nil
@@ -217,7 +225,9 @@ func clusterNameOf(name string) string {
 // resolveCluster is the first read of every STM but CreateCluster's and
 // ListClusters' (GW5; architecture.md, STM discipline), save the later
 // transactions of GrowSlice, CreateSpareLeg and SwitchSpareLeg, which reuse
-// the cid their planning snapshot resolved here. ClusterConf is the only
+// the cid their planning snapshot resolved here, and the pool transactions of
+// AdvanceClusterIds (GW19), which reuse the cid its first transaction
+// resolved here. ClusterConf is the only
 // name-keyed message, and cluster_id = fnv64a(name ‖ creation_epoch) is the
 // prefix of every other key the RPC will touch. Reading it INSIDE the
 // transaction is what makes an RPC fail correctly when the cluster is
@@ -349,9 +359,9 @@ func openSpFlags(
 // concurrent DELETE of the object than a checked one.
 //
 // Presence, not value, is what selects the two modes: a message that is
-// present but carries revision 0 (or carries only the echoed
-// addr_port / sp_name) is a REAL token that can never match a stored revision
-// — those seed at 1 and only grow — and is therefore always ABORTED. The
+// present but carries revision 0 (or carries only the echoed addr_port /
+// sp_name) is a REAL token that can never match a stored revision — those seed
+// at 1 and never go below it — and is therefore always ABORTED. The
 // addr_port / sp_name a client echoes back inside the message stays ignored:
 // only `revision` participates.
 
@@ -581,6 +591,37 @@ func nextDevId(conf *pb.SpConf) uint32 {
 	return devId
 }
 
+// advanceNextId is the id step's move of one uint64 counter (GW19): the next
+// id the counter hands out, a reserved 0 read as 1, plus common.IdStepStride.
+// A counter that cannot move that far without wrapping is refused, the
+// message naming it by what, and never wrapped: a wrapped counter would hand
+// out the lowest ids again.
+func advanceNextId(nextId uint64, what string) (uint64, error) {
+	if nextId == 0 {
+		nextId = 1
+	}
+	if nextId > math.MaxUint64-common.IdStepStride {
+		return 0, errPrecondition(
+			"%s next_id %d cannot move %d further without wrapping",
+			what, nextId, uint64(common.IdStepStride))
+	}
+	return nextId + common.IdStepStride, nil
+}
+
+// advanceDevId is the id step's move of a pool's next thin id (GW19): a
+// reserved 0 read as 1, then common.ThinIdStepStride forward, but never past
+// the first id above common.MaxThinDevId, and never backward.
+func advanceDevId(nextDevId uint32) uint32 {
+	if nextDevId == 0 {
+		nextDevId = 1
+	}
+	const top = common.MaxThinDevId + 1
+	if nextDevId >= top-common.ThinIdStepStride {
+		return max(nextDevId, top)
+	}
+	return nextDevId + common.ThinIdStepStride
+}
+
 // ---------------------------------------------------------------------------
 // Pagination (GW10; architecture.md, page_token)
 // ---------------------------------------------------------------------------
@@ -695,11 +736,13 @@ func pageNames(
 // withAgentConn dials one agent, runs f against it and closes the connection
 // (AG2): dial per call, no cache.
 //
-// Both interceptor chains are mandatory on every dnv connection (grpc.md,
-// Wiring); they are what forwards the request's trace id to the agent (T3),
-// which is how the integration suite ties a script stage to an agent log
-// record. The whole dial+call is bounded by common.DefaultGatewayAgentTimeout,
-// so a hung agent bounds an RPC exactly as a hung etcd does.
+// Both interceptor chains and the message limit are mandatory on every dnv
+// connection (grpc.md, Wiring); the chains are what forwards the request's
+// trace id to the agent (T3), which is how the integration suite ties a
+// script stage to an agent log record, and the limit is what lets a reply as
+// wide as a cntlr report at the cardinality limits through. The whole
+// dial+call is bounded by common.DefaultGatewayAgentTimeout, so a hung agent
+// bounds an RPC exactly as a hung etcd does.
 //
 // grpc.NewClient does not block, so a dead endpoint surfaces as f's error,
 // never here.
@@ -719,6 +762,7 @@ func withAgentConn(
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(common.GrpcUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(common.GrpcStreamClientInterceptor()),
+		common.GrpcClientMsgOption(),
 	)
 	if err != nil {
 		return fmt.Errorf("grpc client %s: %w", addrPort, err)

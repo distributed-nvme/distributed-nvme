@@ -1,5 +1,5 @@
 // Package gateway is dnv-gateway's control-plane API server (gateway.md): the
-// 59 RPCs of `service Gateway`, implemented directly on etcd through
+// 60 RPCs of `service Gateway`, implemented directly on etcd through
 // etcdutil's STM machinery, plus the ten agent calls of gateway.md, Agent
 // calls, that reach a dn or cn agent for a size, an *Info or a bitmap.
 //
@@ -56,7 +56,7 @@ type Config struct {
 //
 // pb.UnimplementedGatewayServer is embedded because the generated code
 // requires it (mustEmbedUnimplementedGatewayServer); it is an empty struct and
-// carries no state. Every one of the 59 methods is overridden below, so it
+// carries no state. Every one of the 60 methods is overridden below, so it
 // never actually answers a request.
 type Server struct {
 	pb.UnimplementedGatewayServer
@@ -72,7 +72,8 @@ func NewServer(cli *etcdutil.Client) *Server {
 
 // serverOptions is the option set Run's grpc.Server is built from, factored
 // out so a test can build a server with exactly the production chain
-// (gateway.md GW2, GW3).
+// (gateway.md GW2, GW3). It carries the message limit of grpc.md, Wiring, and
+// the two interceptor chains.
 //
 // The trace-id mint is FIRST in both chains, upstream of the shared chain of
 // grpc.md, Wiring, and that order is the whole mechanism: it injects the id
@@ -82,23 +83,23 @@ func NewServer(cli *etcdutil.Client) *Server {
 // instead would leave those two records, and everything the shared chain
 // logs, id-less.
 func serverOptions() []grpc.ServerOption {
-	return []grpc.ServerOption{
+	return append(common.GrpcServerMsgOptions(),
 		grpc.ChainUnaryInterceptor(
 			ensureTraceIdUnary(), common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(
 			ensureTraceIdStream(), common.GrpcStreamServerInterceptor()),
-	}
+	)
 }
 
 // Run serves the Gateway service until ctx is canceled (GW2, GW3).
 //
 // It mirrors agent/agent.go Serve: one listener, one grpc.Server carrying
-// serverOptions' two interceptor chains (grpc.md, Wiring, behind the trace-id
-// mint), a goroutine that turns ctx cancellation into GracefulStop, and
-// Serve. Shutdown is GracefulStop and nothing else: in-flight handlers
-// finish (each bounded by its client deadline and the 10 s per-STM budget of
-// EU5), new requests are refused, and there is nothing to drain — no
-// registry key to delete, no background loop to stop (GW3).
+// serverOptions' message limit and two interceptor chains (grpc.md, Wiring,
+// behind the trace-id mint), a goroutine that turns ctx cancellation into
+// GracefulStop, and Serve. Shutdown is GracefulStop and nothing else:
+// in-flight handlers finish (each bounded by its client deadline and the
+// 10 s per-STM budget of EU5), new requests are refused, and there is nothing
+// to drain — no registry key to delete, no background loop to stop (GW3).
 //
 // Run closes cli as the last step of its drain, so cmd/dnv-gateway does not
 // (CM3). Startup never fails because etcd is unreachable: etcdutil.New dials

@@ -696,8 +696,8 @@ func TestIdentifyController(t *testing.T) {
 		t.Errorf("subnqn %q, want %q", subNqn, common.NvmeDiscoveryNqn)
 	}
 	model := string(bytes.TrimRight(data[idcOffModel:idcOffModel+40], " "))
-	if model != "dnv" {
-		t.Errorf("mn %q, want %q", model, "dnv")
+	if model != common.NvmeModel {
+		t.Errorf("mn %q, want %q", model, common.NvmeModel)
 	}
 
 	// The other live connection is told its own id by the same instance.

@@ -49,7 +49,6 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN_DIR="$REPO_ROOT/integtest/bin"
-CACHE_DIR="$BIN_DIR/cache"
 CDC_BIN="$REPO_ROOT/bin/dnv-cdc"
 CDCCTL_BIN="$BIN_DIR/cdcctl"
 # workerctl is the worker suite's etcd driver and is never shipped anywhere by
@@ -57,14 +56,11 @@ CDCCTL_BIN="$BIN_DIR/cdcctl"
 # the common package's constants as JSON on the driver (see read_constants).
 WORKERCTL_BIN="$BIN_DIR/workerctl"
 
-# The pinned etcd release, shared with the worker suite: same version, same
-# digest, same integtest/bin/cache. A tarball already verified there is never
-# re-downloaded.
-ETCD_VERSION=v3.6.14
-ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
-ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
-ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
-ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# The pinned etcd release, its place in integtest/bin/cache (ETCD_DIST under
+# ETCD_CACHE_DIR) and its download-and-verify path come from one file, which
+# every suite that starts an etcd shares with `make fetch-etcd`:
+# fetch_etcd (integtest/fetch_etcd.sh).
+. "$REPO_ROOT/integtest/fetch_etcd.sh"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement of every etcd serving dnv,
 # not a knob of this suite. The value is NOT typed here: read_constants() fills
 # it at preflight from `workerctl constants`, which prints the Go constants as
@@ -85,6 +81,13 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # launchers of etcdutil, model, worker and gateway — gets the flag from the
 # same constant.
 ETCD_MAX_TXN_OPS=
+# common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
+# MUST run with (dnv-worker.md, Constants this document owns), read by
+# read_constants() like ETCD_MAX_TXN_OPS. The request that SIZES it, the
+# provisioned flip over every slice of a pool at the widest shape, never
+# happens here, so this flag too changes nothing the suite observes and is
+# passed for the same reason.
+ETCD_MAX_REQUEST_BYTES=
 # common.CdcMaxPendingConnCnt and common.DefaultCdcPendingTmoMs, the pending
 # cap and the pre-Connect deadline of cdc.md NP1 and NP10, read the same way:
 # the flood case sizes its flood by the cap and its waits by the deadline,
@@ -257,8 +260,8 @@ on_exit() {
 # Remote execution (Integration test plan, Topology)
 # ---------------------------------------------------------------------------
 
-# ssh_to runs a command on one server. QUIET is raised while wait_until and
-# assert_none poll, so a twenty second poll does not bury the transcript.
+# ssh_to runs a command on one server. QUIET is raised while wait_until
+# polls, so a twenty second poll does not bury the transcript.
 ssh_to() { # <target> <cmd…>
 	local target=$1
 	shift
@@ -284,22 +287,6 @@ host_target() { # <h1|h2>
 	case "$1" in
 	h1) printf '%s' "$H1" ;;
 	h2) printf '%s' "$H2" ;;
-	*) die "unknown host $1" ;;
-	esac
-}
-
-host_ip() { # <h1|h2>
-	case "$1" in
-	h1) printf '%s' "$IPH1" ;;
-	h2) printf '%s' "$IPH2" ;;
-	*) die "unknown host $1" ;;
-	esac
-}
-
-host_nqn() { # <h1|h2>
-	case "$1" in
-	h1) printf '%s' "$H1NQN" ;;
-	h2) printf '%s' "$H2NQN" ;;
 	*) die "unknown host $1" ;;
 	esac
 }
@@ -364,18 +351,6 @@ count_recs() { # <cdc dir> <filter> [jq args…]
 	printf '%s' "$out"
 }
 
-# ccount counts matching records over every cdc log of the fleet.
-ccount() { # <filter> [jq args…]
-	local filter=$1
-	shift
-	local d total=0 n
-	for d in "${CDC_DIRS[@]}"; do
-		n=$(count_recs "$d" "$filter" "$@")
-		total=$((total + n))
-	done
-	printf '%s' "$total"
-}
-
 # ---------------------------------------------------------------------------
 # Polling (Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
@@ -397,23 +372,6 @@ wait_until() { # <secs> <label> <cmd…>
 		fi
 		sleep 1
 	done
-}
-
-# assert_none is wait_until's negative twin: settle, then require the command
-# to exit NON-zero.
-assert_none() { # <secs> <label> <cmd…>
-	local secs=$1 label=$2
-	shift 2
-	log "  (nothing must happen for ${secs}s: $label)"
-	sleep "$secs"
-	local saved=$QUIET
-	QUIET=1
-	if "$@"; then
-		QUIET=$saved
-		die "$label: it happened, want nothing"
-	fi
-	QUIET=$saved
-	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -627,10 +585,6 @@ recs_of() {
 # disc_set is the assertion form: it dies if the discover did not answer.
 disc_set() { # <h1|h2> <instance> [ghost]
 	disc_json "$@" | recs_of
-}
-
-disc_genctr() { # <h1|h2> <instance> [ghost]
-	disc_json "$@" | "$JQ" -r '.genctr // empty'
 }
 
 # rec renders one expected triple: a subsystem seen through one nvmet port.
@@ -903,20 +857,10 @@ stas_start() { # <h1|h2>
 		"$(cdc_port 0) $(cdc_port 1) $(cdc_port 2) $(cdc_port 3)"
 }
 
-stas_stop() { # <h1|h2>
-	ok_or_true h "$1" "$WORK/cdc_host.sh stas_stop $WORK"
-}
-
 stas_start_both() {
 	local hostsel
 	for hostsel in h1 h2; do stas_start "$hostsel"; done
 	STAS_RUNNING=1
-}
-
-stas_stop_both() {
-	local hostsel
-	for hostsel in h1 h2; do stas_stop "$hostsel"; done
-	STAS_RUNNING=0
 }
 
 disc_ctrls_ge() { # <h1|h2> <n>
@@ -1652,34 +1596,6 @@ resolve_jq() {
 	log "driver json parser: $JQ (no system jq)"
 }
 
-sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-
-# fetch_etcd is the download-and-verify path, shared with the worker
-# suite: a cached tarball whose sha256 already matches the pin is never
-# re-downloaded, so a repeat run costs nothing and a fresh checkout still works.
-fetch_etcd() {
-	mkdir -p "$CACHE_DIR"
-	if [ -f "$ETCD_TAR" ] && [ "$(sha256_of "$ETCD_TAR")" = "$ETCD_SHA256" ]; then
-		log "  etcd $ETCD_VERSION tarball cached and verified"
-	else
-		log "  downloading $ETCD_URL"
-		curl -fsSL -o "$ETCD_TAR.part" "$ETCD_URL" ||
-			die "downloading the etcd tarball failed"
-		mv -f "$ETCD_TAR.part" "$ETCD_TAR"
-		local got
-		got=$(sha256_of "$ETCD_TAR")
-		[ "$got" = "$ETCD_SHA256" ] ||
-			die "etcd tarball sha256 is $got, want $ETCD_SHA256"
-	fi
-	if [ ! -x "$CACHE_DIR/$ETCD_DIST/etcd" ] ||
-		[ ! -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ]; then
-		tar -xzf "$ETCD_TAR" -C "$CACHE_DIR" ||
-			die "extracting the etcd tarball failed"
-	fi
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcd" ] || die "no etcd binary after extraction"
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
-}
-
 # read_constants is how this shell reads a Go value instead of copying it. It
 # runs workerctl LOCALLY, on the binary preflight_driver has just built:
 # `constants` opens no etcd client and reads no key, so it wants no server, no
@@ -1693,10 +1609,14 @@ read_constants() {
 	local json tmo_ms
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps, common.CdcMaxPendingConnCnt and" \
+			"common.EtcdMaxTxnOps, common.EtcdMaxRequestBytes," \
+			"common.CdcMaxPendingConnCnt and" \
 			"common.DefaultCdcPendingTmoMs from it and must not guess them"
 	ETCD_MAX_TXN_OPS=$(constant_of "$json" EtcdMaxTxnOps)
 	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	ETCD_MAX_REQUEST_BYTES=$(constant_of "$json" EtcdMaxRequestBytes)
+	log "  --max-request-bytes = common.EtcdMaxRequestBytes =" \
+		"$ETCD_MAX_REQUEST_BYTES"
 	CDC_PENDING_CAP=$(constant_of "$json" CdcMaxPendingConnCnt)
 	tmo_ms=$(constant_of "$json" DefaultCdcPendingTmoMs)
 	CDC_PENDING_TMO_S=$(((tmo_ms + 999) / 1000))
@@ -1870,7 +1790,7 @@ setup() {
 	SETUP_DONE=1
 	log "[s1] scp etcd etcdctl dnv-cdc cdcctl -> $WORK/bin"
 	scp -q "${SSH_OPTS[@]}" \
-		"$CACHE_DIR/$ETCD_DIST/etcd" "$CACHE_DIR/$ETCD_DIST/etcdctl" \
+		"$ETCD_CACHE_DIR/$ETCD_DIST/etcd" "$ETCD_CACHE_DIR/$ETCD_DIST/etcdctl" \
 		"$CDC_BIN" "$CDCCTL_BIN" "$S1:$WORK/bin/" ||
 		die "scp of the s1 binaries failed"
 	s1 "chmod 0755 $WORK/bin/*"
@@ -1886,6 +1806,7 @@ setup() {
 		"--initial-cluster dnv-cdc-it=http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster-token dnv-cdc-it" \
 		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
+		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES" \
 		">> $WORK/etcd/etcd.log 2>&1 < /dev/null &" \
 		"echo \$! > $WORK/etcd/pid; cat $WORK/etcd/pid")
 	[ -n "$pid" ] || die "starting etcd produced no pid"

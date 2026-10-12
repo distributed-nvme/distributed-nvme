@@ -76,10 +76,6 @@ func mibText(b uint64) string {
 	return strconv.FormatFloat(float64(b)/(1<<20), 'f', -1, 64)
 }
 
-// nsModel is the attr_model every DN side export presents (architecture.md,
-// Disk node).
-const nsModel = "dnv"
-
 // sideNsid is the single namespace id both sides of a leg export
 // (architecture.md, Disk node).
 const sideNsid = 1

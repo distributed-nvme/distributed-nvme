@@ -340,9 +340,13 @@ func (e *sptEnv) cdcEntry(
 	return entry
 }
 
-// dump is every key of THIS cluster with its raw value. Cluster-scoped keys
-// all carry the cluster_id as one field (architecture.md, Key table), so the
-// id's rendering is an exact filter on a store several tests share.
+// dump is every key that carries THIS cluster's cluster_id, with its raw
+// value. Every cluster-scoped key but the ClusterConf carries the cluster_id
+// as one field (architecture.md, Key table), so the id's rendering is an exact
+// filter on a store several tests share. The ClusterConf, keyed by the
+// cluster's name, is not in the dump: a test that rewrites it between two
+// dumps, as TestCreateStoragePoolJudgesThePrimaryThreshold does when it
+// raises the interval under the scan, sees no change there. dumpAll adds it.
 func (e *sptEnv) dump() map[string][]byte {
 	e.t.Helper()
 	kvs, _, err := e.cli.Range(e.ctx, common.DnvPrefix)
@@ -356,6 +360,31 @@ func (e *sptEnv) dump() map[string][]byte {
 			continue
 		}
 		out[kv.Key] = kv.Value
+	}
+	return out
+}
+
+// dumpAll is every key of the fixture's cluster with its raw value: every
+// key that carries the cluster_id, as dump holds them, and the cluster's
+// ClusterConf, the one cluster-scoped key that is keyed by the cluster's name
+// (architecture.md, Key table). A diff of it also shows a write of the
+// ClusterConf, which AdvanceClusterIds, CreateThinDevice and
+// DeleteStoragePool read and must not write.
+func (e *sptEnv) dumpAll() map[string][]byte {
+	e.t.Helper()
+	out := e.dump()
+	key := model.ClusterConfKey(e.name)
+	kvs, _, err := e.cli.Range(e.ctx, key)
+	if err != nil {
+		e.t.Fatalf("Range %s: %v", key, err)
+	}
+	for _, kv := range kvs {
+		if kv.Key == key {
+			out[kv.Key] = kv.Value
+		}
+	}
+	if _, ok := out[key]; !ok {
+		e.t.Fatalf("the dump holds no %s", key)
 	}
 	return out
 }
@@ -979,7 +1008,8 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 		RedundConf:  raid1(1),
 	})
 	ctx := context.Background()
-	// dump is every key of this cluster, read the way sptEnv.dump reads it.
+	// dump is every key that carries this cluster's cluster_id, read the way
+	// sptEnv.dump reads it; the name-keyed ClusterConf is not among them.
 	dump := func(t *testing.T) map[string][]byte {
 		t.Helper()
 		kvs, _, err := env.srv.cli.Range(ctx, common.DnvPrefix)
@@ -1907,7 +1937,7 @@ func sptUnmarshal(t *testing.T, raw []byte, msg proto.Message) {
 // sptIsRevKey reports whether a key is a DnRev or a CnRev key. Both are
 // bumped by an allocation and are therefore the one class of key a full
 // teardown does NOT restore (architecture.md, Revision keys and the sync
-// fan-out: a revision only ever grows).
+// fan-out: a bump only ever raises a revision).
 func sptIsRevKey(key string) bool {
 	if _, _, _, ok := model.ParseDnRevKey(key); ok {
 		return true
@@ -2164,12 +2194,12 @@ func (e *sptEnv) reserveCn(
 // match the stored revision is refused before any of them is even looked at
 // (GW6). Every refusal writes nothing.
 //
-// GW6 is presence-based, so "does not match" covers more than an
-// outdated revision. The last two rows are the discriminators that say so: a
-// message that is present but carries revision 0 — what &pb.SpRev{} gives, and
-// what a client that filled in only the echoed sp_name gives — is a real token
-// and is compared like any other, and it can never match, because an SpRev is
-// created at 1 and only grows. It is the MESSAGE's presence that selects the
+// GW6 is presence-based, so "does not match" covers more than an outdated
+// revision. The last two rows are the discriminators that say so: a message
+// that is present but carries revision 0 — what &pb.SpRev{} gives, and what a
+// client that filled in only the echoed sp_name gives — is a real token and is
+// compared like any other, and it can never match, because an SpRev is created
+// at 1 and never goes below it. It is the MESSAGE's presence that selects the
 // comparison, never the value 0.
 //
 // A request that sends no message at all is not refused here at all: that is
@@ -3201,12 +3231,12 @@ func TestGrowSliceGroupListFull(t *testing.T) {
 // it has not read.
 //
 // Every row here SENDS a token, because that is the only thing GW6 compares.
-// The last two are its discriminators: a message carrying revision 0,
-// and one carrying only the echoed sp_name, are both present and are both
-// compared, and neither can match an SpRev that was created at 1 and only
-// grows — 0 is a value the check refuses, not a way to switch the check off.
-// The request that switches it off carries no message at all and is let
-// through: TestGrowSliceWithoutAToken.
+// The last two are its discriminators: a message carrying revision 0, and one
+// carrying only the echoed sp_name, are both present and are both compared,
+// and neither can match an SpRev that was created at 1 and never goes below it
+// — 0 is a value the check refuses, not a way to switch the check off. The
+// request that switches it off carries no message at all and is let through:
+// TestGrowSliceWithoutAToken.
 //
 // One SP serves the whole table, which is sound only because every row is a
 // refusal that leaves sp_rev exactly where it found it — the assertion each
@@ -3506,10 +3536,10 @@ func TestCreateCntlr(t *testing.T) {
 // reports the ceiling.
 //
 // The three token rows all SEND one, which is the only case GW6 compares. Two
-// of them are the discriminators for that: a message carrying
-// revision 0, and one carrying only the echoed sp_name, are present and are
-// therefore compared, and they match no SpRev, since those are created at 1
-// and only grow. Sending nothing is the case that is NOT compared, and it is
+// of them are the discriminators for that: a message carrying revision 0, and
+// one carrying only the echoed sp_name, are present and are therefore
+// compared, and they match no SpRev, since those are created at 1 and never go
+// below it. Sending nothing is the case that is NOT compared, and it is
 // asserted for what it goes on to do in TestCreateCntlrWithoutAToken.
 func TestCreateCntlrRefusals(t *testing.T) {
 	t.Run("slot rules and token", func(t *testing.T) {

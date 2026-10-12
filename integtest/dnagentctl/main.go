@@ -166,12 +166,16 @@ func (g *globals) bind(fs *flag.FlagSet, withTimeout bool) {
 		"the AgentReply.code the call must return")
 }
 
+// dial opens one connection to a dn agent, with no interceptors but with the
+// message limit (grpc.md, Drivers and fakes), so the driver takes any reply
+// the agent sends.
 func (g *globals) dial() (*grpc.ClientConn, pb.DiskNodeAgentClient, error) {
 	if g.addr == "" {
 		return nil, nil, fmt.Errorf("--addr is required")
 	}
 	conn, err := grpc.NewClient(g.addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		common.GrpcClientMsgOption())
 	if err != nil {
 		return nil, nil, err
 	}

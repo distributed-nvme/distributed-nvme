@@ -345,7 +345,9 @@ func (s *CnAgentServer) build(
 		// arms nothing — and sweeps with the fresh, revision-gated td_list.
 		// Sweeping here, before the pre-pass and the thin loop below, also
 		// frees the strays' blocks before anything allocates, and a stray can
-		// never collide with a new id (dev_ids are never reused).
+		// never collide with a new id (dev_ids are never reused;
+		// architecture.md, Known limits, names the etcd restore that can
+		// break that).
 		for _, sp := range plan.slices {
 			if !poolReady[sp.sliceId] {
 				continue

@@ -538,8 +538,8 @@ func FinishSpDelete(
 		s.Del(SpNameKey(cid, spId))
 		s.Del(revKey)
 		// GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
-		// never come back, so agents may assume it never does (architecture.md,
-		// Globals: id allocation + shard buckets).
+		// never come back, so agents may assume, an etcd restore aside, that it
+		// never does (architecture.md, Globals: id allocation + shard buckets).
 		global.ShardBucket = ReleaseShard(global.GetShardBucket(), shard)
 		s.Put(globalKey, global)
 		return nil

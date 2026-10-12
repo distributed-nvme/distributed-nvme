@@ -3991,6 +3991,14 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	nqn2 := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg2, testCn)
 	node.setAnaState(nqn2, testIp2, testSvcId2, "non-optimized")
 	start := "mdadm --assemble " + mdDev + " "
+	// The start from one member is exactly the node path, the array name and
+	// that member, as from both members: nothing such as --run, --force or
+	// --scan rides along to override mdadm's own gate. The cn suite's
+	// md-refusal stage builds the same command over devices of its own with
+	// md_assemble_args (integtest/cnagent_test.sh).
+	lone := "cmd " + start + "--name " +
+		srv.nf.CnMdArrayName(testSp, 0, 0, false) + " " + leg1
+	both := lone + " " + leg2
 	node.mu.Lock()
 	node.failCmdAlways[start] = "mdadm: " + mdDev + " assembled from 1 " +
 		"drive - need 2 to start (use --run to insist)."
@@ -4006,10 +4014,9 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testMetaGrp],
 		"grp meta")
 	started := node.callsMatching("cmd " + start)
-	if len(started) != 1 || !strings.Contains(started[0], leg1) ||
-		strings.Contains(started[0], leg2) {
+	if len(started) != 1 || started[0] != lone {
 		t.Fatalf("want one start of the data array from leg 1 alone, "+
-			"got %q", started)
+			"exactly %q, got %q", lone, started)
 	}
 	assertNoCall(t, node, "cmd mdadm --create")
 	if !retrying(t, srv) {
@@ -4021,9 +4028,10 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	// and keeps the retry.
 	node.Reset()
 	retryAttempt(t, srv)
-	if got := len(node.callsMatching("cmd " + start)); got != 1 {
-		t.Fatalf("an attempt before the flip ran %d starts of the data "+
-			"array, want 1", got)
+	if got := node.callsMatching("cmd " + start); len(got) != 1 ||
+		got[0] != lone {
+		t.Fatalf("an attempt before the flip ran the starts %q of the data "+
+			"array, want exactly %q", got, lone)
 	}
 	assertNoCall(t, node, "cmd mdadm --create")
 	if !retrying(t, srv) {
@@ -4038,10 +4046,10 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	node.Reset()
 	retryAttempt(t, srv)
 	started = node.callsMatching("cmd " + start)
-	if len(started) != 1 || !strings.Contains(started[0], leg1) ||
-		!strings.Contains(started[0], leg2) {
+	if len(started) != 1 || started[0] != both {
 		t.Fatalf("want one assembly of the data array from both legs, "+
-			"got %q:\n%s", started, strings.Join(node.Calls(), "\n"))
+			"exactly %q, got %q:\n%s", both, started,
+			strings.Join(node.Calls(), "\n"))
 	}
 	assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
 	if got := node.arrays[mdDev].members; !slices.Equal(got,
@@ -5341,6 +5349,12 @@ func TestTransferAutoSuspendRetiresOrigin(t *testing.T) {
 	if got := node.files[agent.NvmetRoot+"/subsystems/"+xferNqn+
 		"/attr_serial"]; got != fmt.Sprintf(common.IdKeyFmt, testXfer) {
 		t.Fatalf("xfer attr_serial is %q", got)
+	}
+	// [D2] applied to the xfer (CN17): every cntlr presents the one model, so
+	// a destination clone connecting through several of them sees one device.
+	if got := node.files[agent.NvmetRoot+"/subsystems/"+xferNqn+
+		"/attr_model"]; got != common.NvmeModel {
+		t.Fatalf("xfer attr_model is %q, want %q", got, common.NvmeModel)
 	}
 	// The xfer namespace carries the origin's identity, on the primary in
 	// the optimized group.

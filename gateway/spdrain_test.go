@@ -123,22 +123,23 @@ func sptChangedKeys(before map[string][]byte, after map[string][]byte) []string 
 
 // TestDeleteStoragePoolLatchesOnly is the whole write set of DeleteStoragePool
 // (architecture.md, Storage pools): SpConf with `deleting = true` and one
-// SpRev bump, and NOTHING else.
+// SpRev bump, and NOTHING else among the cluster's keys.
 //
 // It is asserted as a key-set difference rather than as a list of things that
 // are still there, because the failure this guards against is a half-done
 // teardown inside the delete — a cntlr key deleted, a DN credited, a bucket
-// slot released — and only a whole-cluster diff sees all of those at once.
+// slot released — and only a diff of every key of the cluster, the
+// ClusterConf included (dumpAll), sees all of those at once.
 func TestDeleteStoragePoolLatchesOnly(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
 	conf := env.spConf(sptSpName)
-	before := env.dump()
+	before := env.dumpAll()
 
 	if got := sptDelete(env, sptSpName, 1); got != spId {
 		t.Errorf("sp_id: got %d, want %d", got, spId)
 	}
-	after := env.dump()
+	after := env.dumpAll()
 
 	want := map[string]bool{
 		model.SpConfKey(env.cid, sptSpName):                true,
@@ -176,9 +177,10 @@ func TestDeleteStoragePoolLatchesOnly(t *testing.T) {
 // One direction alone passes a broken implementation. A latch that bumped on
 // every call would pass an assertion that only checked the first bump, and one
 // that never bumped at all would pass an assertion that only checked the
-// repeat; the pair is what makes either failure visible. The whole-store diff
-// on the repeat is the third witness — a no-op must write nothing anywhere,
-// not merely leave the revision alone.
+// repeat; the pair is what makes either failure visible. The diff of every key
+// of the cluster on the repeat, the ClusterConf included (dumpAll), is the
+// third witness — a no-op must write nothing, not merely leave the revision
+// alone.
 func TestDeleteStoragePoolRepeatIsANoOp(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptSmallSpec(sptSpName))
@@ -188,7 +190,7 @@ func TestDeleteStoragePoolRepeatIsANoOp(t *testing.T) {
 	if got := env.spRev(shard, spId); got != 2 {
 		t.Fatalf("the first delete must bump: sp_rev %d, want 2", got)
 	}
-	before := env.dump()
+	before := env.dumpAll()
 	// The token is the one the latch produced: a repeat delete is an ordinary
 	// request that passes GW6 and then finds the flag already set.
 	if got := sptDelete(env, sptSpName, 2); got != spId {
@@ -197,7 +199,7 @@ func TestDeleteStoragePoolRepeatIsANoOp(t *testing.T) {
 	if got := env.spRev(shard, spId); got != 2 {
 		t.Errorf("a repeat delete bumped sp_rev to %d, want 2", got)
 	}
-	if changed := sptChangedKeys(before, env.dump()); len(changed) != 0 {
+	if changed := sptChangedKeys(before, env.dumpAll()); len(changed) != 0 {
 		t.Errorf("a repeat delete wrote %v", changed)
 	}
 	// A repeat delete with no token at all is the same no-op: GW6 is

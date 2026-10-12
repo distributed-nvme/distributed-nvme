@@ -1537,11 +1537,6 @@ func growExtCnt(
 	return extCnt, nil
 }
 
-// thinMetaBlockSize is dm-thin's FIXED metadata block size (AR6): a thin
-// pool's metadata used/total counts are in these 4 KiB blocks, never in the
-// pool's data_block_size.
-const thinMetaBlockSize = uint64(4096)
-
 // PoolBlockSize is a pool's stored data block size: the unit the thin pool's
 // DATA counts are expressed in, and the one that converts a meta group's data
 // region into dm-thin metadata blocks (AR6; architecture.md, Group on-leg
@@ -1559,8 +1554,8 @@ func PoolBlockSize(bdevConf *pb.BdevConf) uint64 {
 // implied by the slice's groups of that kind excluding the newest one.
 //
 //	data: total_data ≤ Σ data_blocks over all data groups but the last
-//	meta: total_meta ≤ Σ data_blocks × block_size / 4096 over all meta groups
-//	      but the last
+//	meta: total_meta ≤ Σ data_blocks × block_size / ThinMetaBlockSize
+//	      over all meta groups but the last
 //
 // It is a memo reconstructed from facts (AR6), so a worker restart or a
 // shard handoff cannot issue a second grow, and a grow deferred on the CN
@@ -1592,8 +1587,9 @@ func GrowPending(
 		blocks := grp.GetDataBlocks()
 		if isMeta {
 			// The pool's metadata device is the concat of the meta groups'
-			// DATA regions, addressed in 4 KiB metadata blocks.
-			blocks = blocks * blockSize / thinMetaBlockSize
+			// DATA regions, addressed in dm-thin's metadata blocks
+			// (common.ThinMetaBlockSize).
+			blocks = blocks * blockSize / common.ThinMetaBlockSize
 		}
 		total += blocks
 	}

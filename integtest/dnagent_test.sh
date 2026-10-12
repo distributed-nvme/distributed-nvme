@@ -141,25 +141,19 @@ assert_eq() { [ "$1" = "$2" ] || die "$3: got '$1', want '$2'"; }
 
 jq_of() { printf '%s' "$1" | "$JQ" -r "$2"; }
 
-# assert_ok/assert_not_ok read a ResInfo.status out of a reply. An absent
-# message renders as ABSENT — which is exactly what "missing/gated" looks like
-# over protojson, where unset fields are omitted.
+# assert_ok reads a ResInfo.status out of a reply. An absent message renders
+# as ABSENT — which is exactly what "missing/gated" looks like over protojson,
+# where unset fields are omitted.
 assert_ok() {
 	local got
 	got=$(jq_of "$1" "$2 // \"ABSENT\"")
 	[ "$got" = "RES_STATUS_OK" ] || die "$3: status is $got, want RES_STATUS_OK"
 }
 
-assert_not_ok() {
-	local got
-	got=$(jq_of "$1" "$2 // \"ABSENT\"")
-	[ "$got" != "RES_STATUS_OK" ] || die "$3: status is OK, want not OK"
-}
-
-# assert_gated is assert_not_ok's strict twin (dnagent_integtest.md,
+# assert_gated is the strict form of a not-OK check (dnagent_integtest.md,
 # Conventions, Negatives are exact).
 # RES_STATUS_PROVISIONING is a *healthy* status, so it
-# satisfies a bare assert_not_ok: every "this must not be built" check would
+# satisfies a bare not-OK check: every "this must not be built" check would
 # silently start accepting a side that never provisioned. Where the expectation
 # is "deliberately not created", name the two statuses that mean it — the field
 # omitted entirely (ABSENT, which is what a converge that never reaches the
@@ -554,16 +548,6 @@ wait_dev() { # <path> <secs>
 		sleep 0.5
 	done
 	echo "device $1 did not appear within $2s" >&2
-	return 1
-}
-
-wait_gone() { # <path> <secs>
-	local i
-	for ((i = 0; i < $2 * 2; i++)); do
-		[ -e "$1" ] || { echo gone; return 0; }
-		sleep 0.5
-	done
-	echo "$1 still present after $2s" >&2
 	return 1
 }
 
@@ -2203,7 +2187,7 @@ migr_declare_dst() { # m revision sp_level
 	if [ "$level" = no_migration ]; then
 		# DN11 suppression: wantMigr needs `level < SP_LEVEL_NO_MIGRATION`, so
 		# at this level migr_dst_info is not emitted at all. assert_gated, not
-		# assert_not_ok, so a PROVISIONING dst cannot satisfy it
+		# a bare not-OK check, so a PROVISIONING dst cannot satisfy it
 		# (dnagent_integtest.md, Conventions, Negatives are exact).
 		assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m gated clone"
@@ -2898,12 +2882,20 @@ case_migr_full() {
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
 		# No chunks at all (dnagent_integtest.md, Cases): the equal-revision
-		# re-send of the gated request only proves the reply's applied set is
-		# empty.
+		# re-send of the gated request proves the reply carries bitmap info
+		# naming its migration (architecture.md, Bitmap push protocol;
+		# dnagent.md DN14), and that its applied set is empty. Presence comes
+		# first: an absent info reads as an empty set, and the worker pushes a
+		# destination's chunks only from a reply whose info names the migration
+		# (dnv-worker.md BM2).
 		local revs=("" "$1" "$2") m out
 		for m in 1 2; do
 			migr_declare_dst "$m" "${revs[$m]}" no_migration
 			out=$(cat "$REPLY_DIR/dst-$m.json")
+			assert_eq "$(jq_of "$out" '.bm_info | type')" object \
+				"migr $m bm_info present"
+			assert_eq "$(jq_of "$out" '.bm_info.res_id')" "$((MID[m]))" \
+				"migr $m bm_info.res_id"
 			assert_eq "$(jq_of "$out" '(.bm_info.bm_idx_list // []) | length')" \
 				0 "migr $m bm_idx_list must be empty"
 		done

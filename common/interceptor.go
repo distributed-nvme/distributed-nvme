@@ -261,3 +261,25 @@ func (s *loggingServerStream) SendMsg(m any) error {
 	)
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Message limits
+// ---------------------------------------------------------------------------
+
+// GrpcServerMsgOptions are the message limits every dnv gRPC server carries
+// (grpc.md, Wiring): it takes and sends messages up to GrpcMaxMsgSize.
+func GrpcServerMsgOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(GrpcMaxMsgSize),
+		grpc.MaxSendMsgSize(GrpcMaxMsgSize),
+	}
+}
+
+// GrpcClientMsgOption is the same pair for a dnv client connection, as the
+// default of every call made on it (grpc.md, Wiring).
+func GrpcClientMsgOption() grpc.DialOption {
+	return grpc.WithDefaultCallOptions(
+		grpc.MaxCallRecvMsgSize(GrpcMaxMsgSize),
+		grpc.MaxCallSendMsgSize(GrpcMaxMsgSize),
+	)
+}

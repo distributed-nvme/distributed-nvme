@@ -267,9 +267,9 @@ func (s *Server) DeleteDiskNode(
 		// (architecture.md, Capacity index keys).
 		model.MaintainDnCapacity(stm, cid, req.GetAddrPort(), cc, dn, nil)
 		// Only the bucket is decremented; next_id keeps growing, because ids
-		// are never reused and an agent may assume a deleted node never comes
-		// back under the same id (architecture.md, Globals: id allocation +
-		// shard buckets).
+		// are never reused and an agent may assume, an etcd restore aside,
+		// that a deleted node never comes back under the same id
+		// (architecture.md, Globals: id allocation + shard buckets).
 		global.ShardBucket = releaseShard(
 			global.GetShardBucket(), dn.GetShardCode())
 		stm.Put(globalKey, global)

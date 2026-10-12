@@ -1,9 +1,9 @@
 // The cluster subcommands of dnvctl
-// (dnvctl.md, `cluster` — `ctl/cluster.go`): the four RPCs that address a
+// (dnvctl.md, `cluster` — `ctl/cluster.go`): the five RPCs that address a
 // cluster as a whole. This is the one group whose commands do not simply
-// take the global --cluster: each of `create`, `delete` and `get` declares
-// its own --name, which WINS when non-empty and falls back to the global
-// flag when empty (the field→flag rule of dnvctl.md, Conventions;
+// take the global --cluster: `create`, `delete`, `get` and `advance-ids`
+// declare their own --name, which WINS when non-empty and falls back to the
+// global flag when empty (the field→flag rule of dnvctl.md, Conventions;
 // gatewayctl's clusterNameOf).
 // root.go's clusterNameOf implements that fallback; the flag itself is
 // declared here because only this group has it.
@@ -42,11 +42,12 @@ func registerCluster(root *cobra.Command) {
 		clusterDeleteCmd(),
 		clusterGetCmd(),
 		clusterListCmd(),
+		clusterAdvanceIdsCmd(),
 	))
 }
 
 // clusterNameFlag declares the group's own identity flag. It is shared by the
-// three commands that carry cluster_name, and is named with this file's group
+// four commands that carry cluster_name, and is named with this file's group
 // prefix so it cannot collide with a sibling group file (dnvctl.md, Files).
 //
 // The default is empty rather than anything cluster-like precisely so that
@@ -176,5 +177,29 @@ func clusterListCmd() *cobra.Command {
 			}, nil
 		})
 	pageFlags(cmd.Flags())
+	return cmd
+}
+
+// clusterAdvanceIdsCmd drives AdvanceClusterIds, the id step of
+// architecture.md, etcd backup and restore. Like `cluster delete` it carries
+// no revision token — the CT3 trio covers DNs, CNs and SPs only — so a typed
+// --rev is a usage error here, and --name is its only flag. Its RPC commits
+// one transaction per pool of the cluster, so a cluster of many pools needs a
+// --timeout that covers them all (dnvctl.md, `cluster` — `ctl/cluster.go`).
+func clusterAdvanceIdsCmd() *cobra.Command {
+	cmd := leaf("advance-ids",
+		"move a cluster's id counters far forward after an etcd restore "+
+			"(AdvanceClusterIds)",
+		func() (job, error) {
+			req := &pb.AdvanceClusterIdsRequest{
+				ClusterName: clusterNameOf(),
+			}
+			return func(
+				ctx context.Context, client pb.GatewayClient,
+			) (any, error) {
+				return client.AdvanceClusterIds(ctx, req)
+			}, nil
+		})
+	clusterNameFlag(cmd)
 	return cmd
 }

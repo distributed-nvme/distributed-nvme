@@ -52,10 +52,13 @@ func (h *revHarness) startCn(addrPort string, revision uint64) *revWorker {
 
 // TestCnSyncupRequestGolden pins the SyncupCn request (dnv-worker.md, cn role —
 // `worker/cnrole.go`): the CnConf's cntlr pointer list verbatim and the
-// cluster's qos_ratio. qos_ratio is not defaultable at all — CreateCluster
-// stores whatever it was given, including nothing (architecture.md, Common
-// validation) — so an absent one stays absent here rather than becoming an
-// empty message.
+// cluster's qos_ratio as stored. qos_ratio has no default — CreateCluster
+// stores the ratio it accepts as sent, an absent one included
+// (architecture.md, Common validation) — so an absent one stays absent here
+// rather than becoming an empty message. The golden's ratio is not all zero,
+// which CreateCluster refuses, on purpose: the worker copies whatever ratio
+// the cluster stores and filters nothing (architecture.md, Controller node,
+// common).
 func TestCnSyncupRequestGolden(t *testing.T) {
 	conf := cnTestConf()
 	qos := &pb.QosRatio{Strict: true, BytesPerIops: 8192, BytesPerBps: 16}
@@ -94,7 +97,9 @@ func TestCnCheckRequestGolden(t *testing.T) {
 }
 
 // TestCnRoleSyncupReadsCnConf checks the cn role (dnv-worker.md, cn role —
-// `worker/cnrole.go`) end to end.
+// `worker/cnrole.go`) end to end. Its stored ratio is not all zero: the loop
+// validates the stored conf before every round (model.ValidateClusterConf),
+// and a validator that refused such a ratio would send this node no syncup.
 func TestCnRoleSyncupReadsCnConf(t *testing.T) {
 	h := newRevHarness(t)
 	qos := &pb.QosRatio{Strict: true, BytesPerIops: 8192}

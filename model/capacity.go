@@ -310,7 +310,10 @@ func ValidateBdevConf(conf *pb.BdevConf) error {
 // ranges and anything outside therefore cannot have come from a write.
 // bdev_conf is validated when present; a cluster never reads its own
 // bdev_conf for geometry (each SP carries its own snapshot), so its absence is
-// not by itself fatal.
+// not by itself fatal. qos_ratio is not judged at all: CreateCluster refuses
+// one that is not all zero, but no reader refuses a stored ratio, whatever it
+// holds (architecture.md, Common validation), since a refusal here would stop
+// every pass of that cluster's nodes and pools (dnv-worker.md RW9).
 func ValidateClusterConf(cc *pb.ClusterConf) error {
 	bin := cc.GetDnBinConf()
 	if bin.GetExtentSize() == 0 {

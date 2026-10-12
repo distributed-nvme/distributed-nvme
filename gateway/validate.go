@@ -203,11 +203,17 @@ func trConfEmpty(conf *pb.NvmeTrConf) bool {
 		conf.GetTrAddr() == "" && conf.GetTrSvcId() == ""
 }
 
-// validateTrConfList checks a whole transport list, refusing an empty one:
-// both users (CreateClone, UpdateCloneTrConf) require at least one entry.
+// validateTrConfList checks a whole transport list. Both users (CreateClone,
+// UpdateCloneTrConf) require at least one entry and at most MaxCntlrCntPerSp,
+// the most cntlrs a source pool has, since every cntlr syncup of the
+// destination pool carries the list (architecture.md, Common validation).
 func validateTrConfList(field string, list []*pb.NvmeTrConf) error {
 	if len(list) == 0 {
 		return errInvalid("%s must not be empty", field)
+	}
+	if len(list) > common.MaxCntlrCntPerSp {
+		return errInvalid("%s has %d entries, the maximum is %d",
+			field, len(list), common.MaxCntlrCntPerSp)
 	}
 	for _, conf := range list {
 		if err := validateTrConf(field, conf); err != nil {
@@ -287,6 +293,35 @@ func validateHealthCheckConf(conf *pb.HealthCheckConf) error {
 		); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateQosRatio refuses a qos_ratio that is not all zero: strict set, or a
+// non-zero bytes_per_iops or bytes_per_bps (architecture.md, Common
+// validation). Nothing enforces QoS (architecture.md, Controller node,
+// common), so a stored non-zero ratio would only mislead whoever reads it
+// back. An absent ratio and an all-zero one pass, and CreateCluster stores
+// them as sent.
+//
+// model.ValidateClusterConf does not repeat the rule on the read side: the
+// worker copies whatever ratio a cluster stores into every SyncupCn, and a
+// stored conf that validator refuses stops every pass of that cluster's
+// nodes and pools.
+func validateQosRatio(ratio *pb.QosRatio) error {
+	if ratio.GetStrict() {
+		return errInvalid(
+			"qos_ratio.strict must be false: QoS is not enforced")
+	}
+	if v := ratio.GetBytesPerIops(); v != 0 {
+		return errInvalid(
+			"qos_ratio.bytes_per_iops %d must be zero: QoS is not "+
+				"enforced", v)
+	}
+	if v := ratio.GetBytesPerBps(); v != 0 {
+		return errInvalid(
+			"qos_ratio.bytes_per_bps %d must be zero: QoS is not "+
+				"enforced", v)
 	}
 	return nil
 }
@@ -501,7 +536,10 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 	if err := validateAllocConf(req.GetAllocConf()); err != nil {
 		return err
 	}
-	return validateHealthCheckConf(req.GetHealthCheckConf())
+	if err := validateHealthCheckConf(req.GetHealthCheckConf()); err != nil {
+		return err
+	}
+	return validateQosRatio(req.GetQosRatio())
 }
 
 // validateCntlidSlotList checks a cntlid_slot_list (architecture.md, Storage

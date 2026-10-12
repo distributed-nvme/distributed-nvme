@@ -735,7 +735,8 @@ func (s *DnAgentServer) ensurePort(
 // stopped, its state file and bitmap chunks deleted, its memory entry and
 // object lock dropped. Nothing is removed from the node here; the node-level
 // sweep that runs next finds every one of its resources by name. Ids are
-// never reused, so a dropped side never comes back.
+// never reused, so a dropped side never comes back, an etcd restore aside
+// (architecture.md, etcd backup and restore).
 func (s *DnAgentServer) dropRemovedSides(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,

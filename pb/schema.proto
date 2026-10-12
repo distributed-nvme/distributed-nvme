@@ -669,6 +669,15 @@ message ListClustersReply {
     string page_token = 2;
 }
 
+message AdvanceClusterIdsRequest {
+    string cluster_name = 1;
+}
+
+message AdvanceClusterIdsReply {
+    uint64 cluster_id = 1;
+    uint32 sp_cnt = 2;
+}
+
 message CreateDiskNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
@@ -1330,6 +1339,7 @@ service Gateway {
     rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterReply) {}
     rpc GetCluster(GetClusterRequest) returns (GetClusterReply) {}
     rpc ListClusters(ListClustersRequest) returns (ListClustersReply) {}
+    rpc AdvanceClusterIds(AdvanceClusterIdsRequest) returns (AdvanceClusterIdsReply) {}
 
     rpc CreateDiskNode(CreateDiskNodeRequest) returns (CreateDiskNodeReply) {}
     rpc DeleteDiskNode(DeleteDiskNodeRequest) returns (DeleteDiskNodeReply) {}

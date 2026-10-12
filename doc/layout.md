@@ -1,13 +1,13 @@
 # layout.md — Repository Layout
 
 This document owns the layout of the repository: the module identity, the
-directory tree with the role of every Go package directory, the dependency
-rules between the packages, protobuf generation, and the rules every
-binary's `main` follows, so that the documents and the imports agree on every
-package path. It leans on `dependencies.md` for the module's direct
-dependencies, on `architecture.md` for the system the packages implement, and
-on the component documents for what each package holds and which of its files
-holds what.
+directory tree with the role of every Go package directory, how the
+integration suites are run, the dependency rules between the packages,
+protobuf generation, and the rules every binary's `main` follows, so that
+the documents and the imports agree on every package path. It leans on
+`dependencies.md` for the module's direct dependencies, on `architecture.md`
+for the system the packages implement, and on the component documents for
+what each package holds and which of its files holds what.
 
 ## Module identity
 
@@ -40,11 +40,11 @@ Unit tests are colocated `_test.go` files inside each package.
 | path | role |
 |---|---|
 | `go.mod`, `go.sum` | the module (Module identity) and its requirements (`dependencies.md`, Direct dependencies) |
-| `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), and vet and test over the whole module |
+| `Makefile` | the build entry points: protobuf generation and formatting (Protobuf generation), the binaries (`cmd/` wiring), vet and test over the whole module, and the fetch of the etcd release the integration suites pin (`dnv-worker.md` EU7) |
 | `doc/` | the design documents the code follows: `architecture.md` for the system as a whole, one document per component and per shared piece, the repository-level documents (this one and `dependencies.md`), the documents of the on-hardware suites, `glossary.md`, the project vocabulary, and `core_glossary.md`, its core words in plain language |
-| `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and in `integtest/bin/` the built drivers, the etcd download cache and the gojq fallback a suite installs when the machine running it has no jq |
+| `bin/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, and in `integtest/bin/` the built drivers, the etcd download cache the suites and the unit tests share (`dnv-worker.md` EU7), the gojq fallback a suite installs when the machine running it has no jq, and the runner's output, one directory for each time it runs |
 | `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation), beside tests that read the schema's descriptors |
-| `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and both agents share (`architecture.md`, Metadata units), the dm line parser and the dm-clone status parser the gateway, both agents and the two agent drivers share (`architecture.md`, Live-state reporting), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors (`grpc.md`) |
+| `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats and the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and both agents share (`architecture.md`, Metadata units), the dm line parser and the dm-clone status parser the gateway, both agents and the two agent drivers share (`architecture.md`, Live-state reporting), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors and the message-limit options (`grpc.md`) |
 | `etcdutil/` | the one door to etcd: typed reads, writes, scans and watches and the STM runners over one client, with the protobuf (un)marshaling and the etcd log records inside (`dnv-worker.md`, EU1 to EU7) |
 | `model/` | the etcd data model as Go, shared by the gateway, the worker and dnv-cdc: key formats and their parsers, the `cluster_id` derivation, the typed SP snapshot loader, capacity-key maintenance, the allocator's candidate scans, the mutations the gateway and the worker share, and the worker's sp-drain and clone-drain steps (`dnv-worker.md`, MD1 to MD9) |
 | `gateway/` | dnv-gateway, the stateless server of the `Gateway` gRPC service: serving and the trace-id mint, the shared handler helpers, the handlers in one file per resource group, allocation and request validation (`gateway.md`) |
@@ -54,7 +54,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `agent/cnagent/` | the cn role's policy, the `ControllerNodeAgent` service: which leg connections, md arrays, thin pools, dm and nvmet objects a controller node builds, and when, with the wrappers of the tools only the cn runs (`cnagent.md`) |
 | `cdc/` | dnv-cdc: the etcd watcher of the `CdcEntry` keys, the per-host view registry, the discovery-log rendering and the NVMe/TCP discovery controller (`cdc.md`) |
 | `ctl/` | dnvctl: the cobra command tree, one file per noun group, and in `ctl/root.go` what the groups share — the viper binding, the dial, the result rendering and the exit codes (`dnvctl.md`) |
-| `integtest/` | the integration suites, one shell script per suite, beside their drivers and fakes (below) |
+| `integtest/` | the integration suites, one shell script per suite, the runner `integtest/runner.sh` with its configuration file `integtest/runner.conf`, and the script that fetches the etcd release the suites pin, `integtest/fetch_etcd.sh`, beside the suites' drivers and fakes (below) |
 | `integtest/dnagentctl/` | the gRPC driver of a real dn agent, which both agent suites use |
 | `integtest/cnagentctl/` | the gRPC driver of the cn agent suite; the end-to-end suite runs it only as a host-id printer |
 | `integtest/fakeagent/` | fake dn and cn agents driven by a behavior file, which the worker and gateway suites run in place of real agents |
@@ -83,6 +83,26 @@ cn agents use the tmpfs path the cn agent suite owns. What each suite
 proves is its document's: `dnagent_integtest.md`, `cnagent_integtest.md`,
 `e2e_integtest.md`, and the Integration test plan of `dnv-worker.md`,
 `cdc.md`, `gateway.md` and `dnvctl.md`.
+
+**The runner.** `integtest/runner.sh` runs the suites one after another,
+never two at once, in the order its configuration file lists the runs, each
+run a suite and its arguments; the end-to-end suite has one run for each
+slice count it is run at. Each suite still stops at its first failure. The
+runner judges a run by the suite's exit status alone and takes the failing
+stage and its trace id from the failure report every suite prints. After a
+failed run, a usage error included, it keeps the run's output and runs the
+same suite with the same arguments as a cleanup-only run, so that the next
+run finds the guests clean; then it goes on with the next run. Before that
+cleanup it copies the logs the suite left in its work directory on each of
+the run's guests next to the kept output. The runner ends with a summary of
+every run, naming the failing stage of each failed run and whether its
+cleanup finished, and exits non-zero when any run failed. It names the
+commit the tree is on and whether the tree holds changes when it starts,
+and its summary names both as read at the start and at the end, since every
+suite builds the programs from the working tree; a git call that fails
+reads as unknown, never as clean. An interrupted runner starts no further
+copy, no cleanup-only run and no later run, and stops once the running suite
+or copy has ended.
 
 ## Dependency rules
 
@@ -162,7 +182,8 @@ env-backed global flags that way, in `ctl/` (`dnvctl.md` CT9). Specifics:
   the vote worker and the `ClusterConf` cache, `gateway.Run` serves the
   `Gateway` service, and `cdc.Run` owns the watcher, the per-host view
   registry and the NVMe/TCP listener.
-* Interceptor wiring per binary follows `grpc.md`, Wiring.
+* Interceptor wiring and the message limit per binary follow `grpc.md`,
+  Wiring.
 * The `build` target of the `Makefile` compiles every `cmd/` directory that
   holds Go sources into a binary of the same name under `bin/`, which
   `.gitignore` keeps out of the repository.

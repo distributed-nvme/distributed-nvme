@@ -3,7 +3,7 @@
 This document owns the `dnv-gateway` binary: package `gateway`, the
 stateless server of the `Gateway` gRPC service, with its serving and
 lifecycle (GW1 to GW3), the handler pattern every RPC follows (GW4 to GW12
-and GW14), the mechanism of each handler by resource group (GW15 to GW18
+and GW14), the mechanism of each handler by resource group (GW15 to GW19
 among them), the agent calls
 (AG1 to AG4), the `cmd/dnv-gateway` command (CM1 to CM3), its log records
 (LG1 to LG3) and the intent of the gateway integration suite. It owns how the
@@ -66,10 +66,11 @@ watch or convergence logic, which is the worker's job.
 The gateway's surface is `service Gateway` in `pb/schema.proto`. It adds no
 etcd key kind: it writes only kinds of `architecture.md`, Key table, and
 nothing that describes itself (GW1). The `model` exports it rests on are
-stated beside the rules that call them — `SpNextId` (GW12), the revision
-bump helpers and the expected revision of the three shared mutations (GW6),
-the list-range prefixes (GW10), and the conf resolvers and stored-conf
-validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to MD9).
+stated beside the rules that call them — `SpNextId` (GW12, GW19), the
+revision bump helpers and the expected revision of the three shared
+mutations (GW6), the list-range prefixes (GW10), and the conf resolvers and
+stored-conf validators (GW11); `model` itself is `dnv-worker.md`'s (MD1 to
+MD9).
 
 ### Constants this document owns
 
@@ -86,9 +87,10 @@ agent and a hung etcd bound an RPC alike.
 `CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk and the
 quantum that positions it; the chunk rule it sizes is `architecture.md`,
 Bitmap push protocol. Its size keeps a grown chunk value plus the rev-bump
-put of one `AppendCloneBitmap` inside etcd's default request cap, and every
-`PushCloneBitmap` message inside gRPC's default message cap. It is a clone
-positioning quantum only — migration appends carry no byte cap.
+put of one `AppendCloneBitmap` inside etcd's default request cap, so a clone
+append asks nothing of `EtcdMaxRequestBytes`, and every `PushCloneBitmap`
+message far inside `GrpcMaxMsgSize`. It is a clone positioning quantum only
+— migration appends carry no byte cap.
 
 `EtcdMaxTxnOps` is a deployment requirement, not a client setting: every
 etcd serving dnv runs with `--max-txn-ops` at this value or higher, well
@@ -134,11 +136,13 @@ also as the md-raid1 leg count of `legCntOf`; `DefaultSliceCntPerSp`,
 the count substituted for a zero `slice_cnt`, is carried by
 `architecture.md`, Storage pools (Storage pools and GrowSlice only names
 where the handler substitutes it); `DefaultClusterName`,
-`ShardBucketSize`, the `Max*CntPerCluster` ceilings, `MaxCloneBmCnt`,
+`ShardBucketSize`, the `Max*CntPerCluster` ceilings, the id step's
+`IdStepStride`, `ThinIdStepStride` and `MaxThinDevId`, `MaxCloneBmCnt`,
 `MaxMigrBmCnt` and the bounds of `architecture.md`, Common validation, are
 `architecture.md`'s, and so are the metadata ceilings `CnCloneMetaUnitCnt`
 and `DnCloneMetaUnitCnt` and the unit formula `CloneMetaUnits` the gateway
-charges by (`architecture.md`, Metadata units).
+charges by (`architecture.md`, Metadata units). `EtcdMaxRequestBytes` is
+`dnv-worker.md`'s and `GrpcMaxMsgSize` is `grpc.md`'s.
 
 ## Serving and lifecycle
 
@@ -160,9 +164,10 @@ emits `gateway starting` as its first record and
 `gateway stopping` on the way out, closes the client as the last step of its
 drain (so `main` does not, CM3), and serves exactly as `Serve` in
 `agent/agent.go` does: it listens on the configured network and address;
-builds the gRPC server from `serverOptions`, which chains the gateway's
-entry-point trace-id mint, `ensureTraceIdUnary` and `ensureTraceIdStream`,
-FIRST and the shared pair, `common.GrpcUnaryServerInterceptor` and
+builds the gRPC server from `serverOptions`, which carries the message limit
+of `grpc.md`, Wiring, and chains the gateway's entry-point trace-id mint,
+`ensureTraceIdUnary` and `ensureTraceIdStream`, FIRST and the shared pair,
+`common.GrpcUnaryServerInterceptor` and
 `common.GrpcStreamServerInterceptor`, behind it; registers the `Gateway`
 service; starts a goroutine that turns the end of the ctx into
 `GracefulStop`; emits `gateway serving`; then serves. The gateway mints a
@@ -193,15 +198,16 @@ GW4. **Request validation first.** `validate.go` implements the table of
 sizes and patterns, the NQN rules, bounded numerics — a zero passes as
 "give me the default", and for every member that ends up in a stored conf
 substituting that default is GW11's job on the write path, never this one's
-— an empty `bdev_feature_list`, and the `bdev_conf` geometry rules, which
-`CreateCluster` judges once more on its resolved conf, still before any read
-(Clusters). The list `count` is the one bounded numeric GW11 does not cover,
-because it reaches no stored message at all: `pageLimit` refuses a value
-above `MaxListCnt` (`INVALID_ARGUMENT`, never a silent cap) and turns a zero
-into `DefaultListCnt` per request, and `validatePageArgs` runs it — with the
-token decode — before the three cluster-scoped List handlers' `ClusterConf`
-read; `ListClusters` reaches the same two checks through `pageNames` before
-its range (GW10). Violations are `INVALID_ARGUMENT` before any etcd read.
+— an empty `bdev_feature_list`, an all-zero `qos_ratio`, and the `bdev_conf`
+geometry rules, which `CreateCluster` judges once more on its resolved conf,
+still before any read (Clusters). The list `count` is the one bounded
+numeric GW11 does not cover, because it reaches no stored message at all:
+`pageLimit` refuses a value above `MaxListCnt` (`INVALID_ARGUMENT`, never a
+silent cap) and turns a zero into `DefaultListCnt` per request, and
+`validatePageArgs` runs it — with the token decode — before the three
+cluster-scoped List handlers' `ClusterConf` read; `ListClusters` reaches the
+same two checks through `pageNames` before its range (GW10). Violations are
+`INVALID_ARGUMENT` before any etcd read.
 State-dependent validation (a slot in use, an `ns_idx` taken, the geometry
 rules on the `bdev_conf` `CreateStoragePool` merges over the cluster's, the
 primary threshold judged against the cluster's `cntlr_interval`
@@ -221,8 +227,9 @@ RPCs that make the `ClusterConf` read in a planning snapshot — is
 discipline. GW11's resolution of conf defaults is a different operation,
 and the text says which it means. `resolveCluster` makes the first read of
 every handler's STM and planning snapshot, except `CreateCluster`'s and
-`ListClusters`' — the two RPCs that resolve no cluster — and the later
-transactions of the three RPCs named below: `model.ClusterConfKey` of the
+`ListClusters`' — the two RPCs that resolve no cluster — the pool
+transactions of `AdvanceClusterIds` (GW19), and the later transactions of
+the three RPCs named below: `model.ClusterConfKey` of the
 `cluster_name`, defaulted to `common.DefaultClusterName`, yielding the
 `ClusterConf` and the cluster id, `model.ClusterId` of the name and the
 stored creation epoch, which prefixes every further key. `resolveSp` then
@@ -305,8 +312,10 @@ recreate. The `Update*Disabled` RPCs and the capacity and `err_epoch`
 maintenance never bump (`architecture.md`, Revision keys and the sync
 fan-out), and neither does a write that changes only a node's
 `used_meta_units`: the ledgers write such a node and rewrite its capacity
-value, and bump no revision for it (`architecture.md`, Metadata units). A
-flag update that asks for the state the record already holds —
+value, and bump no revision for it (`architecture.md`, Metadata units).
+`AdvanceClusterIds`, the id step, bumps nothing either: no agent reads a
+counter (`architecture.md`, Clusters). A flag update that asks for the
+state the record already holds —
 `UpdateDiskNodeDisabled`, `UpdateControllerNodeDisabled`,
 `UpdateCntlrEnabled` — writes nothing, bumps nothing and replies OK, a token
 the request carried still being checked first: a no-op that bumped would
@@ -325,8 +334,10 @@ uncommitted (`dnv-worker.md` EU4).
   global) present.
 * `FAILED_PRECONDITION`: a documented public precondition fails, a
   `model.ErrPrecondition` with any reason but the two below included — the
-  meta ladder cap among them, and `GrowSlice`'s `MaxGrpCntPerSlice` group
-  ceiling (`architecture.md`, GrowSlice).
+  meta ladder cap among them, `GrowSlice`'s `MaxGrpCntPerSlice` group
+  ceiling (`architecture.md`, GrowSlice), a counter the id step cannot move
+  without wrapping (GW19), and a pool that has spent every thin id
+  (`architecture.md`, Thin devices).
 * `RESOURCE_EXHAUSTED`: a global's `shard_bucket` sum at `Max*CntPerCluster`;
   the per-SP and per-group count ceilings — `cntlr_id_list` at
   `MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at
@@ -400,7 +411,8 @@ in one `RunSTM`. The closure MUST be a pure function of what it reads
 through the STM (it is re-run on conflict); minted values that escape (ids,
 generated uuids) are written to closure-captured variables that the closure
 itself (re)assigns. The deciding STM is the one that commits the mutation;
-for a two-phase RPC (AG4) it is the second one.
+for a two-phase RPC (AG4) it is the second one. `AdvanceClusterIds` is the
+one RPC that commits in several: the globals' STM, then one per pool (GW19).
 
 GW9. **Candidate unit retry.** Allocating RPCs (`CreateStoragePool`,
 `GrowSlice`, `CreateCntlr`, `CreateMigration`, `CreateSpareLeg`) loop over a
@@ -526,7 +538,8 @@ to `SpFirstId` and mutates nothing, so every caller advances and persists
 STM closure on the `SpConf` being written and committed back into it once,
 so a retried attempt mints the same ids; the `model` ops advance it
 themselves. A thin device's `dev_id` comes from `SpConf.next_dev_id`
-through `nextDevId`, advanced once per device.
+through `nextDevId`, advanced once per device. The id step moves the
+counters this rule draws from (GW19).
 
 GW14. **Bitmaps are opaque.** Bitmap bytes cross the gateway VERBATIM
 in both directions: `AppendCloneBitmap` and `AppendMigrationBitmap` store
@@ -579,6 +592,23 @@ and field-level rules stay in the cited section of `architecture.md`,
   the two RPCs that resolve no cluster, GW5); a paged
   plain range over `ClusterConfPrefix` (GW10); the names are the key
   suffixes.
+* **AdvanceClusterIds** — validate the name (GW4); GW19's transactions.
+  Reply the cluster id and the count of pools whose `SpConf` it moved.
+
+GW19. **The id step.** `AdvanceClusterIds` runs the transactions of
+`architecture.md`, Clusters, which owns their order and their reasons. One
+STM resolves the cluster and moves the three globals' `next_id` with
+`advanceNextId`. A keys-only range of `SpConfPrefix` of the cluster id,
+outside any STM, then lists the pools, and one STM per listed pool reads its
+`SpConf`, moves its `next_id` with `advanceNextId` over `model.SpNextId` and
+its `next_dev_id` with `advanceDevId`, and puts it back. A pool whose
+`SpConf` is gone is skipped and nothing is put for it; a pool latched for
+deletion moves like any other. `advanceNextId` refuses a counter it cannot
+move by its stride without wrapping (`architecture.md`, Clusters, has the
+error), and that transaction puts nothing. The pool transactions read no
+`ClusterConf`: the first transaction's cluster id names their keys, and a
+pool of a recreated cluster lives under another id. No transaction reads or
+bumps a rev key. An error in any transaction ends the RPC there.
 
 ### Disk nodes
 
@@ -869,10 +899,12 @@ position, and a re-run of the STM closure on the same picks and reads
   `Clone.dst_td_id` (walk `clone_name_list` as `DeleteThinDevice` does, a
   draining clone included) is `FAILED_PRECONDITION` naming the clone, also
   writing nothing: while a clone hydrates, a snapshot of its destination
-  would capture only the regions hydrated so far; mint `td_id`
-  (`SpNextId`), the `dev_id` from `next_dev_id`, and `ori_id` as the
-  origin's `dev_id` or zero; put the `ThinDevice` with `created` false;
-  append to `td_name_list`; `BumpSpRev`. Reply `td_id` and `dev_id`.
+  would capture only the regions hydrated so far; a `next_dev_id` above
+  `MaxThinDevId` is `FAILED_PRECONDITION`, writing nothing
+  (`architecture.md`, Thin devices); mint `td_id` (`SpNextId`), the
+  `dev_id` from `next_dev_id`, and `ori_id` as the origin's `dev_id` or
+  zero; put the `ThinDevice` with `created` false; append to
+  `td_name_list`; `BumpSpRev`. Reply `td_id` and `dev_id`.
 
 GW17. **A snapshot inherits its size.** `CreateThinDevice` accepts a `size`
 of zero exactly when `ori_name` is set, and the snapshot then takes its
@@ -914,7 +946,7 @@ are those of `architecture.md`, Subsystems, namespaces.
 * **CreateSubsystem** — the NQN valid (`architecture.md`, Common
   validation, the dnv-namespace rule included; the discovery NQN can never
   validate) and absent; mint `ss_id`; the serial is
-  `ss_id` rendered with `IdKeyFmt` and the model is `subsystemModel`
+  `ss_id` rendered with `IdKeyFmt` and the model is `NvmeModel`
   (`architecture.md`, [D2]); put the `Subsystem` with an empty `ns_list`
   and the `allowed_hosts`, append to `nqn_list`, and put the `CdcEntry` —
   the NQN, the transport confs of the cntlrs the listing rule lists
@@ -1205,8 +1237,9 @@ AG2. **Connection.** Per call (`withAgentConn`): a ctx derived from the
 request's with `DefaultGatewayAgentTimeout` as its timeout, one plaintext
 gRPC client connection to the agent's `addr_port` with
 `common.GrpcUnaryClientInterceptor` and `common.GrpcStreamClientInterceptor`
-chained, closed when the call returns. The interceptors are mandatory on
-every dnv connection (`grpc.md`, Wiring) and forward the request's trace id
+chained and the message limit set, closed when the call returns. The
+interceptors and the limit are mandatory on every dnv connection
+(`grpc.md`, Wiring), and the interceptors forward the request's trace id
 (`grpc.md` T3). The gateway dials per call and closes after the call: it
 keeps no connection cache like the worker's (`dnv-worker.md` RW7).
 
@@ -1321,15 +1354,18 @@ root.
 **Topology.** The developer machine builds the binaries and drives one
 Linux server over ssh, with no sudo anywhere. Everything runs on that
 server and listens on its loopback, on a port block disjoint from every
-other suite: one etcd, configured the way every etcd serving dnv must be
-(its transaction-op cap at `EtcdMaxTxnOps`, which the suite reads from the
-`workerctl` it has just built instead of copying the number, as it reads
+other suite: one etcd, configured with the request caps every etcd serving
+dnv must have (its transaction-op cap at `EtcdMaxTxnOps` and its
+request-size cap at `EtcdMaxRequestBytes`, which the suite reads from the
+`workerctl` it has just built instead of copying the numbers, as it reads
 `MaxSliceCntPerSp` for the clone it creates at that ceiling,
 `DefaultHealthCheckInterval` for the health intervals the smoke case
-expects in the stored `ClusterConf`, and the two metadata ceilings
+expects in the stored `ClusterConf`, the two metadata ceilings
 `CnCloneMetaUnitCnt` and `DnCloneMetaUnitCnt` with the unit sizes
 `CnCloneMetaUnit` and `DnCloneMetaUnit`, which it requires to be equal,
-for the areas the ceiling case fills); three gateway instances on one launch
+for the areas the ceiling case fills, and the id step's strides
+`IdStepStride` and `ThinIdStepStride`, which its smoke case checks the
+moved counters against); three gateway instances on one launch
 line that differs only in the gRPC address; four fake DNs and three fake
 CNs, in distinct locations because the CN scan dedupes locations too, served
 by `fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test
@@ -1366,7 +1402,11 @@ gateway, never through `workerctl`.
   record and its capacity value alike, a units-only write moving no
   revision; and the sp latch with the refusals it brings, then its drain,
   after which every extent, metadata unit and capacity key is back and no
-  dnv key is left.
+  dnv key is left. Before the case tears its pool down, the id step runs on
+  the live pool: every counter moves by its stride, in one store revision
+  for the globals and one for the pool, no rev key moves, and a thin device
+  created after it draws its ids from the moved counters, above every old
+  one.
 * parallel (three gateways, disjoint resources) — waves of concurrent
   creates and deletes across all three instances all succeed, the minted
   ids forming the expected sets and the accounting exact: every free count
@@ -1415,7 +1455,7 @@ gateway, never through `workerctl`.
   the node's record and its capacity value alike, a units-only one with no
   revision moved.
 
-**Rules exercised.** The smoke case exercises GW4 to GW12 and GW14 across
+**Rules exercised.** The smoke case exercises GW4 to GW12, GW14 and GW19 across
 every resource group, GW5's `deleting` gate on a latched pool, GW10's
 paging, GW11's write-time resolution, AG1 and AG3 on the inspects and the
 bitmap reads, the trace-id chain of GW2 and AG2, and the listing rule of
@@ -1446,12 +1486,15 @@ its default, and where `CreateStoragePool` judges it, before its
 candidate scans and again in its STM; GW9's round cap and the in-STM
 re-check of a pick that filled up after its scan, which no stage can time
 between a scan and its commit; `CreateSpareLeg`'s candidate-changed
-refusals of a group that gained a DN or a pick that went stale; and a
-release that stops at zero.
+refusals of a group that gained a DN or a pick that went stale; a release
+that stops at zero; and GW19's refusal of a counter that would wrap, its
+skip of a pool deleted under its range and its transaction per pool at more
+pools than one transaction holds.
 
 Out of scope: performance, latency and soak; real agents, `dnv-worker`,
-`dnv-cdc` and `dnvctl`; a multi-member etcd; etcd outages (unit level only);
-TLS and authentication, which dnv does not have. The real drains that
+`dnv-cdc` and `dnvctl`; a multi-member etcd; etcd outages (unit level, and
+the one the end-to-end suite's cutoff case stages: `e2e_integtest.md`, The
+cases); TLS and authentication, which dnv does not have. The real drains that
 consume the two latches belong to the worker suite (`dnv-worker.md`,
 Integration test plan).
 
@@ -1478,7 +1521,8 @@ before the server preflight, so a crashed earlier run cannot fail it — and
 at the end only on success: a failing run leaves etcd's data, every log and
 every behavior file in place and prints its diagnostics — the failing stage
 and its trace id, the tail of every process log, a full dump of the dnv
-keys and the listening ports — so the debris is what the developer reads.
+keys and the listening ports — so the debris is what the developer reads;
+a cleanup-only run does the cleanup alone.
 Cleanup signals every daemon the suite started — etcd, the gateways and the
 fake agents — by its recorded pid with a pattern kill as a safety net, and
 removes the suite's work directory; nothing outside that directory is

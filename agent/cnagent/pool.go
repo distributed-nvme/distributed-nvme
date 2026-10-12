@@ -344,7 +344,8 @@ const (
 //
 // It is correct to delete against this td_list and no other: GateRevision
 // makes an RPC-delivered request the newest desired state this cntlr has ever
-// accepted, dev_ids are never reused (SpConf.next_dev_id), thin ids belong
+// accepted, dev_ids are never reused (SpConf.next_dev_id; architecture.md,
+// Known limits, names the etcd restore that can break that), thin ids belong
 // exclusively to tds — clones and transfers own none — and DN-side fencing
 // leaves no other writer, so a pool id absent from it can only belong to a td
 // deleted at or before that revision.

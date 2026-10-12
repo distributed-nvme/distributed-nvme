@@ -180,8 +180,10 @@ the per-CN linear repointed and the source side dropped (`dnagent.md` DN6, L1
 to L4, L6), which the teardown's residue check proves; and the data verifies
 through the destination path, which also takes a write.
 
-**migr_full** pushes no bitmap: the applied set is empty, the whole device
-matches the source, and no discard reaches any clone. Its first migration,
+**migr_full** pushes no bitmap: the destination's reply reports an applied
+set for its own migration, and the set is empty (`architecture.md`, Bitmap
+push protocol; `dnagent.md` DN14), the whole device matches the source, and
+no discard reaches any clone. Its first migration,
 once hydrated, also loses its source's namespace behind both agents' backs,
 the export and the destination's controller of it staying: the
 destination's rows — its side device, its migration rows and its per-CN

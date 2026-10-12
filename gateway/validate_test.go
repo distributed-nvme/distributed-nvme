@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"math/bits"
 	"strings"
 	"testing"
@@ -14,8 +15,7 @@ import (
 
 // This file pins gateway.md GW4: every row of architecture.md, Common
 // validation, as a table-driven case against the pure validators of
-// validate.go. It does no I/O at all — no etcd, no clock, no agent — so it runs
-// (and must keep running) even when TestMain found no etcd binary.
+// validate.go. It does no I/O at all: no etcd, no clock, no agent.
 //
 // Every case asserts the gRPC CODE, never merely "an error came back".
 // Violations of Common validation are GW7's INVALID_ARGUMENT and nothing else,
@@ -751,16 +751,28 @@ func TestValidateTrConfEmpty(t *testing.T) {
 
 // TestValidateTrConfList pins the list form CreateClone and UpdateCloneTrConf
 // take: every non-empty member a valid name (architecture.md, Common
-// validation), at least one entry, and no entry empty. A clone with no source
-// address could never connect, so an empty list is refused and not defaulted:
-// CreateClone answers an empty src_tr_conf INVALID_ARGUMENT (architecture.md,
-// Clones), and UpdateCloneTrConf shares the check.
+// validation), at least one entry, no entry empty, and at most
+// MaxCntlrCntPerSp entries, the most cntlrs a source pool has. A clone with
+// no source address could never connect, so an empty list is refused and not
+// defaulted: CreateClone answers an empty src_tr_conf INVALID_ARGUMENT
+// (architecture.md, Clones), and UpdateCloneTrConf shares the check. A longer
+// list is refused INVALID_ARGUMENT, the message naming the field and the
+// bound, because every cntlr syncup of the destination pool carries it.
 func TestValidateTrConfList(t *testing.T) {
 	good := &pb.NvmeTrConf{
 		TrType:  "tcp",
 		AdrFam:  "ipv4",
 		TrAddr:  "192.168.0.17",
 		TrSvcId: "4420",
+	}
+	full := make([]*pb.NvmeTrConf, 0, common.MaxCntlrCntPerSp+1)
+	for idx := 0; idx <= common.MaxCntlrCntPerSp; idx++ {
+		full = append(full, &pb.NvmeTrConf{
+			TrType:  "tcp",
+			AdrFam:  "ipv4",
+			TrAddr:  fmt.Sprintf("192.168.0.%d", 17+idx),
+			TrSvcId: "4420",
+		})
 	}
 	cases := []struct {
 		name string
@@ -771,6 +783,12 @@ func TestValidateTrConfList(t *testing.T) {
 		{"empty", []*pb.NvmeTrConf{}, codes.InvalidArgument},
 		{"one entry", []*pb.NvmeTrConf{good}, codes.OK},
 		{"two entries", []*pb.NvmeTrConf{good, good}, codes.OK},
+		{
+			"at MaxCntlrCntPerSp",
+			full[:common.MaxCntlrCntPerSp],
+			codes.OK,
+		},
+		{"one over MaxCntlrCntPerSp", full, codes.InvalidArgument},
 		{
 			"an empty entry",
 			[]*pb.NvmeTrConf{good, {}},
@@ -793,6 +811,10 @@ func TestValidateTrConfList(t *testing.T) {
 				validateTrConfList("src_tr_conf", item.list), item.want)
 		})
 	}
+	err := validateTrConfList("src_tr_conf", full)
+	validateWantMsg(t, "one over MaxCntlrCntPerSp", err, "src_tr_conf")
+	validateWantMsg(t, "one over MaxCntlrCntPerSp", err,
+		fmt.Sprintf("the maximum is %d", common.MaxCntlrCntPerSp))
 }
 
 // ---------------------------------------------------------------------------
@@ -1535,20 +1557,79 @@ func TestValidateClusterConfInput(t *testing.T) {
 			codes.InvalidArgument,
 		},
 		{
-			"qos_ratio is deliberately not range-checked",
-			&pb.CreateClusterRequest{
-				QosRatio: &pb.QosRatio{
-					BytesPerIops: ^uint64(0),
-					BytesPerBps:  ^uint64(0),
-				},
-			},
+			"an all-zero qos_ratio",
+			&pb.CreateClusterRequest{QosRatio: &pb.QosRatio{}},
 			codes.OK,
+		},
+		{
+			"qos_ratio.strict alone",
+			&pb.CreateClusterRequest{QosRatio: &pb.QosRatio{Strict: true}},
+			codes.InvalidArgument,
+		},
+		{
+			"qos_ratio.bytes_per_iops alone",
+			&pb.CreateClusterRequest{
+				QosRatio: &pb.QosRatio{BytesPerIops: 4096},
+			},
+			codes.InvalidArgument,
+		},
+		{
+			"qos_ratio.bytes_per_bps alone",
+			&pb.CreateClusterRequest{
+				QosRatio: &pb.QosRatio{BytesPerBps: 4096},
+			},
+			codes.InvalidArgument,
 		},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			validateWantCode(t, "validateClusterConfInput",
 				validateClusterConfInput(item.req), item.want)
+		})
+	}
+}
+
+// TestValidateQosRatio pins the QoS rule of architecture.md, Common
+// validation: a ratio that is not all zero is refused, one member at a time,
+// because nothing enforces QoS (architecture.md, Controller node, common) and
+// a stored non-zero ratio would only mislead; an absent ratio and an all-zero
+// one pass. Each refusal names its field, and a value of one is the smallest
+// non-zero one, so a check that let a small value through fails here.
+func TestValidateQosRatio(t *testing.T) {
+	cases := []struct {
+		name  string
+		ratio *pb.QosRatio
+		field string
+	}{
+		{"absent", nil, ""},
+		{"all zero", &pb.QosRatio{}, ""},
+		{"strict", &pb.QosRatio{Strict: true}, "qos_ratio.strict"},
+		{
+			"bytes_per_iops one",
+			&pb.QosRatio{BytesPerIops: 1}, "qos_ratio.bytes_per_iops",
+		},
+		{
+			"bytes_per_iops at the maximum",
+			&pb.QosRatio{BytesPerIops: ^uint64(0)}, "qos_ratio.bytes_per_iops",
+		},
+		{
+			"bytes_per_bps one",
+			&pb.QosRatio{BytesPerBps: 1}, "qos_ratio.bytes_per_bps",
+		},
+		{
+			"bytes_per_bps at the maximum",
+			&pb.QosRatio{BytesPerBps: ^uint64(0)}, "qos_ratio.bytes_per_bps",
+		},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			err := validateQosRatio(item.ratio)
+			if item.field == "" {
+				validateWantCode(t, "validateQosRatio", err, codes.OK)
+				return
+			}
+			validateWantCode(t, "validateQosRatio", err, codes.InvalidArgument)
+			validateWantMsg(t, "validateQosRatio", err, item.field)
 		})
 	}
 }

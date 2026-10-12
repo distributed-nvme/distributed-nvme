@@ -578,6 +578,47 @@ clone_meta_dm() { # cnidx sp clone
 host_dev() { printf '/dev/disk/by-id/nvme-uuid.%s' "$1"; }
 
 # ---------------------------------------------------------------------------
+# mdadm arguments — the bash mirror of Md.Create and Md.Assemble
+# ---------------------------------------------------------------------------
+
+# md_assemble_args prints the arguments Md.Assemble (agent/cnagent/md.go) gives
+# mdadm to start one group: the group's node path and array name, then the
+# available members that carry a superblock, in ascending leg_idx order (the
+# order the agent sorts leg_list into), and nothing else. No --run, --force or
+# --scan among them is what leaves a degraded start to mdadm's own gate
+# (cnagent.md CN12). redund's md-refusal stage runs commands this rule builds
+# over a node path, an array name and members of its own, from one member and
+# then from both. They are the agent's because the agent's starts are held to
+# the rule in both forms: redund's promote stage holds its assemble records
+# from both members to it, and TestLateMemberRefusedStartIsAssembledByTheRetry
+# (agent/cnagent/cnagent_test.go) its start from one member, the form whose
+# refusal the stage pins, and from both.
+md_assemble_args() { # devpath arrayname member…
+	local dev=$1 name=$2
+	shift 2
+	printf -- '--assemble %s --name %s' "$dev" "$name"
+	printf ' %s' "$@"
+	printf '\n'
+}
+
+# md_create_args prints the arguments Md.Create (agent/cnagent/md.go) gives
+# mdadm for CN12's create case, every leg_list member available and none
+# carrying a superblock: the bitmap chunk and the data offset in KiB, as the
+# agent computes them from the block size, bitmap_chunk_block_cnt and
+# meta_blocks.
+md_create_args() { # devpath arrayname chunkKiB offsetKiB member…
+	local dev=$1 name=$2 chunk=$3 off=$4
+	shift 4
+	printf -- '--create %s --name %s --level 1 --raid-devices %s' \
+		"$dev" "$name" "$#"
+	printf -- ' --bitmap internal --bitmap-chunk %sK --data-offset %sK' \
+		"$chunk" "$off"
+	printf -- ' --homehost any --run --assume-clean --failfast'
+	printf ' %s' "$@"
+	printf '\n'
+}
+
+# ---------------------------------------------------------------------------
 # Host emulation (cnagent_integtest.md, Topology): the host role is plain
 # nvme-tcp with one fixed hostnqn,
 # cross-connected from whichever VM the case names.
@@ -920,8 +961,12 @@ cn_syncup_cntlr() { # cnidx file [cnagentctl args...]
 vm_helper_source() {
 	cat <<'HELPER_EOF'
 #!/usr/bin/env bash
-# Shipped by integtest/cnagent_test.sh. Every function is best-effort by
-# design: cleanup must survive a crashed prior run.
+# Shipped by integtest/cnagent_test.sh. Most functions are best-effort by
+# design, the cleanup above all, which must survive a crashed prior run.
+# Several whose answer a stage asserts on are not, so that a read that did not
+# answer never passes for a node with nothing to report: among them the log
+# readers, the lost clone source's verbs, the md-refusal stage's reads and
+# case T's writer reads, whose comments say what each does when a read fails.
 WORK=/var/tmp/dnv-cn-integtest
 DN_LOG=$WORK/dn-agent.log
 CN_LOG=$WORK/cn-agent.log
@@ -1063,28 +1108,6 @@ wait_dev() { # <path> <secs>
 	done
 	echo "device $1 did not appear within $2s" >&2
 	return 1
-}
-
-wait_gone() { # <path> <secs>
-	local i
-	for ((i = 0; i < $2 * 2; i++)); do
-		[ -e "$1" ] || {
-			echo gone
-			return 0
-		}
-		sleep 0.5
-	done
-	echo "$1 still present after $2s" >&2
-	return 1
-}
-
-# read_probe <dev> — prints ok or eio; the caller asserts which.
-read_probe() {
-	if dd if="$1" of=/dev/null bs=1M count=1 status=none 2>/dev/null; then
-		echo ok
-	else
-		echo eio
-	fi
 }
 
 # write_probe <dev> <seekMiB> — prints ok or eio. The [D11] readonly table
@@ -1344,6 +1367,161 @@ wait_no_ctrl() {
 	done
 	echo "a controller of $1 is still here after $2s (shape $got)" >&2
 	return 1
+}
+
+# --- redund's md-refusal stage (cnagent_integtest.md, Cases) -----------------
+#
+# The stage's array lives on two loop devices over files of its own under
+# $WORK. No agent stops it: an array with a member that is no dm device is
+# never the cn agent's, by arrayOwner (agent/cnagent/sweep.go), and the dn
+# agent runs no mdadm. Like the lost clone source's verbs, mdr_legs, mdr_held,
+# mdr_md, mdr_examine and mdr_loops fail when a step or a read they rest on
+# fails, each as its comment says, so the stage never reads a read that did
+# not answer as no array. mdr_run reports mdadm's status and always exits 0,
+# the status being the stage's to judge; mdr_teardown and mdr_diag are
+# best-effort, for cleanup and the failure dump.
+MDR_IMG=$WORK/mdrefuse
+
+# mdr_legs <MiB> — two files of <MiB> MiB, each on a loop device of its own;
+# prints the two devices, one per line. Each file is removed first and then
+# allocated anew, so it reads zeros: no leg carries a superblock before the
+# stage's create. It fails when a file cannot be removed or allocated or a
+# loop device cannot be set up over it.
+mdr_legs() {
+	local i dev
+	for i in 0 1; do
+		rm -f "$MDR_IMG-$i.img" || return 1
+		fallocate -l "$1M" "$MDR_IMG-$i.img" || return 1
+		dev=$(losetup --find --show "$MDR_IMG-$i.img") || return 1
+		echo "$dev"
+	done
+}
+
+# mdr_run <mdadm argument>… — runs mdadm once, bounded at 60 s, waits for
+# udev to settle, and prints mdadm's output and then "rc=<its status>". It
+# always exits 0: the status is the stage's to judge.
+mdr_run() {
+	local out rc=0
+	out=$(timeout 60 mdadm "$@" 2>&1) || rc=$?
+	udevadm settle -t 10 >/dev/null 2>&1
+	printf '%s\nrc=%s\n' "$out" "$rc"
+}
+
+# mdr_held <loop>… — one line per md array that holds any of the loop
+# devices: "<mdN> <array_state> <routes> <members>". An array is found by any
+# of three routes: a loop's holders/md* link (holder), the array's
+# md/dev-<loop> member directory (member) and a /proc/mdstat line naming the
+# loop (mdstat). <routes> lists the routes that found it and <members> its
+# dev-* entries, each sorted and comma-joined; array_state reads "gone" for an
+# array that went between the listing and the read. Empty output means no
+# array holds any of the loops, whatever its state. It fails when
+# /proc/mdstat cannot be read or a loop is no block device of this node.
+mdr_held() {
+	local loop k h d line mdstat md st members
+	local -A routes=()
+	if ! mdstat=$(cat /proc/mdstat); then
+		echo "mdr_held: /proc/mdstat cannot be read" >&2
+		return 1
+	fi
+	for loop in "$@"; do
+		k=${loop#/dev/}
+		if [ -z "$k" ] || [ ! -d "/sys/block/$k" ]; then
+			echo "mdr_held: '$loop' is not a block device on this node" >&2
+			return 1
+		fi
+		for h in "/sys/block/$k"/holders/md*; do
+			[ -e "$h" ] && routes[${h##*/}]+=" holder"
+		done
+		for d in /sys/block/md*/md/dev-"$k"; do
+			[ -e "$d" ] || continue
+			d=${d#/sys/block/}
+			routes[${d%%/*}]+=" member"
+		done
+		while IFS= read -r line; do
+			case " $line " in
+			*" $k["*) routes[${line%% *}]+=" mdstat" ;;
+			esac
+		done <<<"$mdstat"
+	done
+	for md in $(printf '%s\n' "${!routes[@]}" | LC_ALL=C sort); do
+		st=$(cat "/sys/block/$md/md/array_state" 2>/dev/null) || st=gone
+		members=""
+		for d in "/sys/block/$md"/md/dev-*; do
+			[ -e "$d" ] && members="$members ${d##*/}"
+		done
+		members=$(printf '%s\n' $members | LC_ALL=C sort | paste -sd, -)
+		echo "$md $st $(printf '%s\n' ${routes[$md]} | LC_ALL=C sort -u |
+			paste -sd, -) ${members:-none}"
+	done
+	return 0
+}
+
+# mdr_md <mdN> — "array_state=… degraded=… sync_action=… members=<dev-x:state;…>"
+# of one array, read from its md/ directory. It fails when that directory is
+# gone, and prints an attribute it cannot read as empty, which no check the
+# stage makes of that attribute accepts.
+mdr_md() {
+	local dir=/sys/block/$1/md d states=""
+	[ -d "$dir" ] || {
+		echo "mdr_md: no $1" >&2
+		return 1
+	}
+	for d in "$dir"/dev-*; do
+		[ -e "$d" ] || continue
+		states="$states${states:+;}${d##*/}:$(cat "$d/state" 2>/dev/null)"
+	done
+	echo "array_state=$(cat "$dir/array_state" 2>/dev/null)" \
+		"degraded=$(cat "$dir/degraded" 2>/dev/null)" \
+		"sync_action=$(cat "$dir/sync_action" 2>/dev/null)" \
+		"members=$states"
+}
+
+# mdr_examine <dev> — one leg's superblock, twice: `mdadm --examine --export`,
+# then `mdadm --examine`, for the array state the export lacks. It fails when
+# the leg carries no superblock.
+mdr_examine() {
+	mdadm --examine --export "$1" || return 1
+	mdadm --examine "$1" || return 1
+}
+
+# mdr_loops — the loop devices whose backing file is one of the stage's,
+# sorted. It fails when `losetup -a` fails, so an empty answer means none.
+mdr_loops() {
+	local all
+	if ! all=$(losetup -a); then
+		echo "mdr_loops: losetup -a failed" >&2
+		return 1
+	fi
+	printf '%s\n' "$all" | grep -F "$MDR_IMG-" | cut -d: -f1 | LC_ALL=C sort
+	return 0
+}
+
+# mdr_teardown — for each of the stage's loop devices, stops every md array
+# that holds it, found by its holder link whatever its name or state, then
+# detaches the loop device; then removes the files.
+mdr_teardown() {
+	local dev h
+	for dev in $(mdr_loops 2>/dev/null); do
+		for h in "/sys/block/${dev#/dev/}"/holders/md*; do
+			[ -e "$h" ] || continue
+			timeout 15 mdadm --stop "/dev/${h##*/}" >/dev/null 2>&1
+		done
+		timeout 15 losetup -d "$dev" >/dev/null 2>&1
+	done
+	rm -f "$MDR_IMG"-*.img
+	echo mdr_cleaned
+}
+
+# mdr_diag — for the failure dump: each of the stage's loop devices, what
+# holds it and its superblock.
+mdr_diag() {
+	local dev
+	for dev in $(mdr_loops 2>/dev/null); do
+		echo "$dev held by: $(ls "/sys/block/${dev#/dev/}/holders" 2>/dev/null |
+			tr '\n' ' ')"
+		mdadm --examine "$dev" 2>&1
+	done
+	return 0
 }
 
 # --- fault injection (case T; the partition also case A's degrade) -----------
@@ -1750,17 +1928,37 @@ wait_writer_gone() {
 # it, so an ordered event stream of one converge is exactly one trace id. The
 # startup reconcile and the CN11 probers mint their own ids, which is why the
 # recovery and restart assertions read a freshly rotated log with no filter.
+#
+# Every reader below feeds an assertion on what it prints, most of them that a
+# record is absent, so each one FAILS — a line on stderr and a non-zero status
+# — when the log is missing or cannot be read: printing nothing instead would
+# pass every such assertion on a log nobody read (cnagent_integtest.md,
+# Conventions, Negatives are exact). Each filter runs as ONE jq evaluation
+# (`-n` and `inputs`), so an error on any record fails the call, where one
+# evaluation per record leaves the status to the last record alone; `-R`,
+# `fromjson?` and `objects` drop a line the agent is still appending, the one
+# record a read may tear, and any line of the log that is not a record.
+
+# log_readable <log> — fails, saying so, unless <log> is a file this helper
+# can read.
+log_readable() {
+	[ -f "$1" ] && [ -r "$1" ] && return 0
+	echo "agent log $1 is missing or unreadable" >&2
+	return 1
+}
 
 # events <log> [trace] — os commands as "cmd args…" and configfs attribute
 # writes as "write <path> <data>", in log order.
 events() {
-	jq -r --arg t "${2:-}" '
-	    select($t == "" or .trace_id == $t)
+	log_readable "$1" || return 1
+	jq -rnR --arg t "${2:-}" '
+	    inputs | fromjson? // empty | objects
+	    | select($t == "" or .trace_id == $t)
 	    | if .msg == "os command" then
 	        .cmd + " " + ((.args // []) | join(" "))
 	      elif .msg == "os write file direct" then
 	        "write " + .path + " " + (.data // "")
-	      else empty end' "$1" 2>/dev/null || true
+	      else empty end' "$1" || return 1
 }
 
 cn_events() { events "$CN_LOG" "${1:-}"; }
@@ -1771,34 +1969,46 @@ cn_events() { events "$CN_LOG" "${1:-}"; }
 # mints a fresh trace id per attempt (CN2), which no stage knows in advance.
 cn_log_lines() {
 	local n
-	n=$({ wc -l <"$CN_LOG"; } 2>/dev/null) || n=0
+	log_readable "$CN_LOG" || return 1
+	n=$(wc -l <"$CN_LOG") || return 1
 	echo $((n))
+}
+
+# cn_log_since <mark> — the cn log's lines after line <mark>, for the two
+# readers below; it fails as log_readable does.
+cn_log_since() {
+	log_readable "$CN_LOG" || return 1
+	tail -n "+$(($1 + 1))" "$CN_LOG"
 }
 
 # cn_cmds_since <mark> <prefix> — the os command records after line <mark>
 # whose "cmd args…" starts with <prefix> (empty: every one), each printed as
 # "<trace_id> cmd args…", in log order.
 cn_cmds_since() {
-	tail -n "+$(($1 + 1))" "$CN_LOG" 2>/dev/null | jq -r --arg p "$2" '
-	    select(.msg == "os command")
+	local recs
+	recs=$(cn_log_since "$1") || return 1
+	printf '%s\n' "$recs" | jq -rnR --arg p "$2" '
+	    inputs | fromjson? // empty | objects
+	    | select(.msg == "os command")
 	    | (.cmd + " " + ((.args // []) | join(" "))) as $e
 	    | select($e | startswith($p))
-	    | .trace_id + " " + $e' 2>/dev/null || true
+	    | .trace_id + " " + $e' || return 1
 }
 
 # cn_requests_since <mark> <method> <sp> <cntlr> — how many `grpc server
 # request` records of one unary method for one cntlr follow line <mark>. The
 # ids are decimal, as the log renders a request's uint64 fields.
 cn_requests_since() {
-	local n
-	n=$(tail -n "+$(($1 + 1))" "$CN_LOG" 2>/dev/null | jq -r --arg m "$2" \
+	local recs
+	recs=$(cn_log_since "$1") || return 1
+	printf '%s\n' "$recs" | jq -rnR --arg m "$2" \
 	    --argjson sp "$3" --argjson c "$4" '
-	    select(.msg == "grpc server request")
+	    [inputs | fromjson? // empty | objects
+	    | select(.msg == "grpc server request")
 	    | select((.method | split("/") | last) == $m)
 	    | select(.data.cntlr_pointer.sp_id == $sp
-	        and .data.cntlr_pointer.cntlr_id == $c)
-	    | .trace_id' 2>/dev/null | wc -l)
-	echo $((n))
+	        and .data.cntlr_pointer.cntlr_id == $c)]
+	    | length' || return 1
 }
 
 # mutations [trace] [log] — every mutating operation in a cn agent log
@@ -1821,14 +2031,17 @@ cn_requests_since() {
 # never runs `mdadm --detail`, which is a read too.
 mutations() {
 	local trace=${1:-} log=${2:-$CN_LOG}
-	jq -r --arg t "$trace" '
-	    select($t == "" or .trace_id == $t)
+	log_readable "$log" || return 1
+	jq -rnR --arg t "$trace" '
+	    inputs | fromjson? // empty | objects
+	    | select($t == "" or .trace_id == $t)
 	    | select(.msg == "os write file direct")
-	      | "write file direct " + .path' "$log" 2>/dev/null || true
+	      | "write file direct " + .path' "$log" || return 1
 	# The verb tests bind .args first: a `[…] | index(.cmd)` would evaluate
 	# .cmd against the literal array, not the record.
-	jq -r --arg t "$trace" '
-	    select($t == "" or .trace_id == $t)
+	jq -rnR --arg t "$trace" '
+	    inputs | fromjson? // empty | objects
+	    | select($t == "" or .trace_id == $t)
 	    | select(.msg == "os command")
 	    | (.args // []) as $a
 	    | select(
@@ -1841,11 +2054,12 @@ mutations() {
 	        or (.cmd | IN("blkdiscard","mount","umount","truncate",
 	              "mkdir","rmdir","ln","rm"))
 	      )
-	    | .cmd + " " + ($a | join(" "))' "$log" 2>/dev/null || true
-	jq -r --arg t "$trace" '
-	    select($t == "" or .trace_id == $t)
+	    | .cmd + " " + ($a | join(" "))' "$log" || return 1
+	jq -rnR --arg t "$trace" '
+	    inputs | fromjson? // empty | objects
+	    | select($t == "" or .trace_id == $t)
 	    | select(.msg == "os write block")
-	    | .msg + " " + .path' "$log" 2>/dev/null || true
+	    | .msg + " " + .path' "$log" || return 1
 }
 
 # --- residue -----------------------------------------------------------------
@@ -2279,6 +2493,12 @@ cleanup_phase2() { # <cn16> <dn16>
 		dm_remove_kind "$kind" "$cn16"
 	done
 	md_stop_all
+	# redund's md-refusal stage builds its array over loop devices:
+	# mdr_teardown finds it by what holds them, so an inactive one that
+	# neither udev nor mdadm's export names goes too, and stops it before it
+	# detaches them: a `losetup -d` of a held loop device, the loop pass's
+	# below included, only defers the detach until the holder lets go.
+	mdr_teardown >/dev/null
 	dm_remove_kind ca "$cn16"
 	dm_remove_kind c9 "$cn16"
 	# The clone-metadata wrappers, after their dm-clones went in phase 1: a
@@ -2453,7 +2673,7 @@ lab_wipe() {
 	done
 
 	# The residue is the report AND the exit status, although this verb is
-	# best-effort like every other one here: the driver runs both VMs
+	# best-effort like the other cleanup verbs here: the driver runs both VMs
 	# concurrently and their output interleaves, so a wipe that only printed
 	# its report could leave one VM full of debris behind the other VM's
 	# clean report, and the run would say PASS. A cleanup that cannot fail is
@@ -2533,6 +2753,8 @@ diag() {
 	diag_cmd bash "$0" clone_meta_wrappers
 	echo "--- losetup -a ---"
 	diag_cmd losetup -a
+	echo "--- the md-refusal stage's loop devices ---"
+	diag_cmd bash "$0" mdr_diag
 	echo "--- tmpfs mounts ---"
 	diag_cmd bash -c 'findmnt | grep dnv-tmpfs'
 	echo "--- nvmet configfs ---"
@@ -3115,6 +3337,11 @@ event_cnt() { # stream regex
 	printf '%s\n' "$1" | grep -cE -- "$2" || true
 }
 
+# event_exact_cnt counts the events equal to one whole line, compared as text.
+event_exact_cnt() { # stream line
+	printf '%s\n' "$1" | grep -cxF -- "$2" || true
+}
+
 assert_before() { # stream regex_first regex_second label
 	local first second
 	first=$(event_line "$1" "$2")
@@ -3128,9 +3355,13 @@ assert_before() { # stream regex_first regex_second label
 # assert_absent is assert_before's negative twin: the event must not occur
 # anywhere in the stream. It is how a stage proves an omission — a converge
 # that sends *no* pool message (cnagent_integtest.md, Cases, thinbm) leaves
-# nothing behind for an ordering assertion to anchor on.
+# nothing behind for an ordering assertion to anchor on. An empty stream
+# fails: a stream that holds no event of the converge cannot show one absent
+# (cnagent_integtest.md, Conventions, Negatives are exact).
 assert_absent() { # stream regex label
 	local at
+	[ -n "$1" ] ||
+		die "$3: the event stream is empty, so it cannot show '$2' absent"
 	at=$(event_line "$1" "$2")
 	[ -z "$at" ] || die "$3: unexpected event matching '$2' at $at"
 }
@@ -3276,9 +3507,183 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case A — redund (cnagent_integtest.md, Cases): raid1, failover, dead leg,
-# readonly, late flip
+# Case A — redund (cnagent_integtest.md, Cases): the md refusal, raid1,
+# failover, dead leg, readonly, late flip
 # ---------------------------------------------------------------------------
+
+# mdr_members prints the member list mdr_held reports for an array holding
+# exactly these loop devices: their dev-* names, sorted, comma-joined.
+mdr_members() { printf 'dev-%s\n' "${@#/dev/}" | LC_ALL=C sort | paste -sd, -; }
+
+# mdr_rc reads the status line mdr_run ends its output with.
+mdr_rc() { printf '%s\n' "$1" | sed -n 's/^rc=//p' | tail -1; }
+
+# mdr_wait_held polls one VM's mdr_held every half second until its reading
+# matches the glob <want> ("" waits for no array at all) or <secs> pass, and
+# prints the last reading. It returns 0 on a match, 1 when the time runs out,
+# and 2, printing which read it was, when a read does not answer: a read that
+# did not answer is never "no array". Its callers read it through $( ), where
+# a die would end only that subshell, so it returns a status and mdr_held_ok
+# dies in the caller's shell.
+mdr_wait_held() { # vm want secs loop…
+	local vm=$1 want=$2 deadline=$((SECONDS + $3)) got
+	shift 3
+	while :; do
+		got=$(helper "$vm" "mdr_held $*") || {
+			printf 'the md reads of vm%s did not answer for %s\n' "$vm" "$*"
+			return 2
+		}
+		# shellcheck disable=SC2053 # want is a glob on purpose
+		if [[ $got == $want ]]; then
+			printf '%s\n' "$got"
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			printf '%s\n' "$got"
+			return 1
+		fi
+		sleep 0.5
+	done
+}
+
+# mdr_held_ok <status> <output> <label> — dies with <label>, what the stage
+# waited for, unless mdr_wait_held returned 0: with the last reading when the
+# time ran out, and with the read that did not answer when one did not.
+mdr_held_ok() {
+	case "$1" in
+	0) ;;
+	1) die "$3: the reading is still '$2'" ;;
+	*) die "$3: $2" ;;
+	esac
+}
+
+# mdr_field <examine output> <name> — one value of mdr_examine's output:
+# MD_NAME, MD_EVENTS or MD_UUID from the export half, or "Array State" or
+# "State" from the human-readable half, its first word.
+mdr_field() {
+	case "$2" in
+	MD_*) printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1 ;;
+	*) printf '%s\n' "$1" | awk -F' : ' -v k="$2" '
+		{ key = $1; sub(/^ +/, "", key) }
+		key == k { split($2, w, " "); print w[1]; exit }' ;;
+	esac
+}
+
+# redund_md_refusal is redund's md-refusal stage, run before redund builds
+# its pool: it pins the refusal the cross-leg half of failover safety rests
+# on (architecture.md, [D16]), with no agent and no NVMe-oF path. On vm1 it
+# builds a clean two-leg array over two loop devices with the agent's create
+# and stop commands, in the geometry of redund's meta group: the bitmap
+# chunk, the data offset and one extent per leg. The array takes the array
+# name and the node path vm1's cn agent gives the first meta group of pool
+# 0x401, a pool no case builds: the name is a dnv one, which the md udev mask
+# matches, so udev never assembles the array, and a residue report naming the
+# pool names this stage. Started from one leg with the agent's assemble
+# command, mdadm must refuse, since that leg's superblock still counts a
+# clean full array: in its own words for the gate, with the leg's superblock
+# left as it was and no array left holding a leg. Started from both, the
+# array must run clean with both members in sync. Each label starts with the
+# step it checks: build, lone, both or teardown.
+redund_md_refusal() {
+	local vm=1 sp=0x401 names dev name legs leg0 leg1 out got rc pre post
+	local ex0 ex1 md st running
+	local chunk=$((BM_CHUNK_BLOCKS * BLOCK_SIZE / 1024))
+	local off=$((RAID1_META_BLOCKS * BLOCK_SIZE / 1024))
+	local mib=$((EXTENT_SIZE / 1048576))
+
+	stage mdrefuse "md refuses one clean leg and starts both (architecture.md, [D16])"
+	names=$(cnctl "$vm" md-name --sp "$sp" --slice-idx 0 --grp-idx 0 --meta)
+	dev=$(jq_of "$names" .dev_path)
+	name=$(jq_of "$names" .array_name)
+	legs=$(helper "$vm" "mdr_legs $mib") || die "build: the two loop devices"
+	leg0=$(printf '%s\n' "$legs" | sed -n 1p)
+	leg1=$(printf '%s\n' "$legs" | sed -n 2p)
+	case "$leg0 $leg1" in
+	/dev/loop*" "/dev/loop*) ;;
+	*) die "build: mdr_legs printed '$legs', want two loop devices" ;;
+	esac
+	# The positive control of the teardown's "no loop device left".
+	got=$(helper "$vm" mdr_loops) || die "build: losetup -a did not answer"
+	assert_eq "$got" "$(printf '%s\n' "$leg0" "$leg1" | LC_ALL=C sort)" \
+		"build: the stage's loop devices"
+	out=$(helper "$vm" "mdr_run $(md_create_args "$dev" "$name" "$chunk" \
+		"$off" "$leg0" "$leg1")")
+	assert_eq "$(mdr_rc "$out")" 0 "build: mdadm --create ($out)"
+	helper "$vm" "wait_dev '$dev' 20" >/dev/null ||
+		die "build: no md node $dev on vm$vm"
+	# The positive control of every "no array" reading below: the same reads
+	# see this array while it runs, by its holder links, its member
+	# directories and its /proc/mdstat line, its array_state exactly clean.
+	running="md* clean holder,mdstat,member $(mdr_members "$leg0" "$leg1")"
+	rc=0
+	got=$(mdr_wait_held "$vm" "$running" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" \
+		"build: vm$vm's md reads show the running array by all three routes"
+	out=$(helper "$vm" "mdr_run --stop '$dev'")
+	assert_eq "$(mdr_rc "$out")" 0 "build: mdadm --stop ($out)"
+	rc=0
+	got=$(mdr_wait_held "$vm" "" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" "build: no array holds a leg after the stop"
+	# The premise: each leg's superblock carries the dnv name the md udev
+	# mask matches, in either form, and records a clean array of both legs
+	# at one event count.
+	ex0=$(helper "$vm" "mdr_examine $leg0") || die "build: examine $leg0"
+	ex1=$(helper "$vm" "mdr_examine $leg1") || die "build: examine $leg1"
+	for got in "$ex0" "$ex1"; do
+		case "$(mdr_field "$got" MD_NAME)" in
+		"$name" | *":$name") ;;
+		*) die "build: a leg's superblock name is" \
+			"'$(mdr_field "$got" MD_NAME)', want $name or <homehost>:$name" ;;
+		esac
+		assert_eq "$(mdr_field "$got" "Array State")" AA \
+			"build: a leg's array state"
+		assert_eq "$(mdr_field "$got" State)" clean "build: a leg's state"
+	done
+	assert_eq "$(mdr_field "$ex0" MD_EVENTS)" "$(mdr_field "$ex1" MD_EVENTS)" \
+		"build: the two legs' event counts"
+	assert_eq "$(mdr_field "$ex0" MD_UUID)" "$(mdr_field "$ex1" MD_UUID)" \
+		"build: the two legs' array uuid"
+
+	pre=$ex0
+	out=$(helper "$vm" "mdr_run $(md_assemble_args "$dev" "$name" "$leg0")")
+	assert_eq "$(mdr_rc "$out")" 1 "lone: mdadm --assemble from one leg ($out)"
+	# The refusal by its cause, mdadm's own words for the gate, not by the
+	# status alone: a wrong name or a busy leg also exits 1.
+	case "$out" in
+	*"need all 2 to start it"*"use --run to insist"*) ;;
+	*) die "lone: mdadm did not refuse for the gate: $out" ;;
+	esac
+	rc=0
+	got=$(mdr_wait_held "$vm" "" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" "lone: no array holds a leg after the refused start"
+	post=$(helper "$vm" "mdr_examine $leg0") || die "lone: examine $leg0"
+	assert_eq "$post" "$pre" "lone: the refused start changed the leg's superblock"
+
+	out=$(helper "$vm" "mdr_run $(md_assemble_args "$dev" "$name" \
+		"$leg0" "$leg1")")
+	assert_eq "$(mdr_rc "$out")" 0 "both: mdadm --assemble from both legs ($out)"
+	helper "$vm" "wait_dev '$dev' 20" >/dev/null ||
+		die "both: no md node $dev on vm$vm"
+	rc=0
+	got=$(mdr_wait_held "$vm" "$running" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" "both: the array runs clean on both legs"
+	md=${got%% *}
+	st=$(helper "$vm" "mdr_md $md") || die "both: the md attributes of $md"
+	case "$st" in
+	*" degraded=0 sync_action=idle members=dev-"*":in_sync"*";dev-"*":in_sync"*) ;;
+	*) die "both: $md reads '$st', want degraded 0, idle, both members in_sync" ;;
+	esac
+
+	out=$(helper "$vm" "mdr_run --stop '$dev'")
+	assert_eq "$(mdr_rc "$out")" 0 "teardown: mdadm --stop ($out)"
+	rc=0
+	got=$(mdr_wait_held "$vm" "" 10 "$leg0" "$leg1") || rc=$?
+	mdr_held_ok "$rc" "$got" "teardown: no array holds a leg after the stop"
+	helper "$vm" mdr_teardown >/dev/null
+	got=$(helper "$vm" mdr_loops) || die "teardown: losetup -a did not answer"
+	assert_eq "$got" "" "teardown: the stage's loop devices"
+	assert_no_residue "$sp"
+}
 
 case_redund() {
 	CASE=redund
@@ -3290,10 +3695,13 @@ case_redund() {
 	local req1="$WORK/req-redund-cn1.json" req2="$WORK/req-redund-cn2.json"
 	local out dev want got seq rev1 rev2 i nsdev
 	local writer deadline mkey dkey lkey mst dst ldet n rules mark cmds name
+	local grp md2 la lb
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
 	nsdev=$(cn_dm_name c6 2 "$sp" "$A_NS")
+
+	redund_md_refusal
 
 	stage dn "4 sides, one per leg, primary CN1 with CN2 as the standby"
 	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
@@ -3446,6 +3854,28 @@ case_redund() {
 		"redund promote: mdadm --assemble for both groups"
 	assert_eq "$(event_cnt "$seq" '^mdadm --create ')" 0 \
 		"redund promote: no --create over existing superblocks"
+	# Each start is md_assemble_args of its group, once: the group's node path
+	# and array name, then both leg wrappers in ascending leg_idx order. The
+	# md-refusal stage builds its commands by the same rule over a node path,
+	# an array name and loop devices of its own; this check holds the agent's
+	# start from both members to the rule, and
+	# TestLateMemberRefusedStartIsAssembledByTheRetry
+	# (agent/cnagent/cnagent_test.go) its start from one member, the form
+	# whose refusal that stage pins.
+	for grp in meta data; do
+		if [ "$grp" = meta ]; then
+			md2=$(cnctl 2 md-name --sp "$sp" --slice-idx 0 --grp-idx 0 --meta)
+			la=${A_MLEG[1]} lb=${A_MLEG[2]}
+		else
+			md2=$(cnctl 2 md-name --sp "$sp" --slice-idx 0 --grp-idx 0)
+			la=${A_DLEG[1]} lb=${A_DLEG[2]}
+		fi
+		assert_eq "$(event_exact_cnt "$seq" "mdadm $(md_assemble_args \
+			"$(jq_of "$md2" .dev_path)" "$(jq_of "$md2" .array_name)" \
+			"/dev/mapper/$(cn_dm_name c9 2 "$sp" "$la")" \
+			"/dev/mapper/$(cn_dm_name c9 2 "$sp" "$lb")")")" 1 \
+			"redund promote: the $grp array's start is md_assemble_args"
+	done
 
 	stage failover "the data crossed the failover through md"
 	host_wait_ana "$hv" "$nqn" 2 optimized 30
@@ -3705,8 +4135,9 @@ case_redund() {
 		[ "$(event_cnt "$cmds" " --name $name ")" != 0 ] ||
 			die "lateflip: no retry attempt assembled array $name: $cmds"
 	done
-	assert_eq "$(helper 1 "cn_requests_since $mark SyncupCntlr $(d16 "$sp") $(d16 "$c1")")" \
-		1 "lateflip: SyncupCntlr requests for cntlr $c1 on cn1 since the demote"
+	n=$(helper 1 "cn_requests_since $mark SyncupCntlr $(d16 "$sp") $(d16 "$c1")")
+	assert_eq "$n" 1 \
+		"lateflip: SyncupCntlr requests for cntlr $c1 on cn1 since the demote"
 	# The retry stops once no member is late (and no connect fails): after
 	# the attempt that is still due, if any, CN1 runs no command under any
 	# trace id but this stage's own for a whole retry interval.
@@ -3714,7 +4145,8 @@ case_redund() {
 	while :; do
 		mark=$(helper 1 cn_log_lines)
 		sleep 7
-		cmds=$(helper 1 "cn_cmds_since $mark ''" | grep -v "^$TRACE " || true)
+		cmds=$(helper 1 "cn_cmds_since $mark ''")
+		cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
 		[ -z "$cmds" ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "lateflip: cn1 still runs converges of its own: $cmds"
@@ -3724,6 +4156,18 @@ case_redund() {
 		"redund lateflip demoted primary path"
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" "redund lateflip readback"
+	# Once both legs are back, a block only the newer leg holds reads as that
+	# leg's ([D16]). For MiB 9 of the device only DN2's data leg holds zeros,
+	# from the readonly stage's write, which reached DN2's leg alone because
+	# md had failed DN1's member in the degrade stage; DN1's stale leg holds
+	# the failover stage's pattern, and that stage's write allocated MiB 9 in
+	# the thin pool, so zeros here come from a leg, never from an unwritten
+	# block. However CN1's attempts started the data array (above), it must
+	# run from DN2's leg, so the block reads as zeros; an array started from
+	# the stale leg reads that pattern here. The cache drop before the
+	# readback covers this read too: the host has not written MiB 9 since.
+	assert_eq "$(helper "$hv" "zero_probe '$dev' 9 1")" zeros \
+		"redund lateflip: MiB 9 reads as the newer leg's"
 	make_pattern "$hv" "$WORK/probe-redund.bin" 1
 	got=$(sha_range "$hv" "$WORK/probe-redund.bin" 1)
 	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9
@@ -5168,7 +5612,7 @@ case_restart() {
 	local nqn="$NQN_IT_PREFIX:d:vol1"
 	local uuid=66666666-6666-4666-8666-666666666666
 	local req1="$WORK/req-restart-cn1.json" req2="$WORK/req-restart-cn2.json"
-	local out dev want got rev1 rev2 snap idx name when muts
+	local out dev want got rev1 rev2 snap idx name when muts seq
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
@@ -5272,7 +5716,8 @@ case_restart() {
 	# /sys/block (CN12), so a `--detail` here is as wrong as a
 	# mutation and is not excluded.
 	for idx in 1 2; do
-		got=$(helper "$idx" cn_events | grep -E '^mdadm ' |
+		seq=$(helper "$idx" cn_events)
+		got=$(printf '%s\n' "$seq" | grep -E '^mdadm ' |
 			grep -Ev -- '--examine' || true)
 		[ -z "$got" ] ||
 			die "restart: cn$idx ran an mdadm other than --examine:"$'\n'"$got"

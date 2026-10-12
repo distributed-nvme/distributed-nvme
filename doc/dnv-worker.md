@@ -81,6 +81,16 @@ slice batch (SPD13, SPD14), the created flip's transaction (RW19) and the
 cntlr replacement's (MD6, AR7) are the other bounded transactions it has to
 cover, and the clone drain's batch and final transaction (CLD11) are checked
 against it but fit etcd's default cap;
+`EtcdMaxRequestBytes`, the `--max-request-bytes` requirement on every etcd
+serving dnv and the etcd client's send limit (EU1), sized by the provisioned
+flip (RW18) whose sides span every slice of a pool at the widest shape —
+`MaxGrpCntPerSlice` groups in each list, `MaxAllocLegPerGrp` legs and
+`MaxSpareLegPerGrp` spares per group, `MaxMigrCntPerSp` legs with a
+migration's second side, every string at its bound of `architecture.md`,
+Common validation, every id at its widest — since the flip writes each slice
+it touches once, in one transaction; it is above etcd's default and above
+the request size etcd recommends, which etcd notes when it starts, and a
+unit test commits that flip against a real etcd started with it;
 `MaxFlipCreatedPerTxn`, the most candidates one created-flip transaction
 carries (RW19); and the three role names `WorkerRoleDn`, `WorkerRoleCn` and
 `WorkerRoleSp`.
@@ -131,10 +141,14 @@ watcher) use it too, within what is specified here.
 EU1. **Client.** `New` wraps one etcd v3 client built from the endpoints and
 the dial timeout it is given. No dnv gRPC interceptor is attached to it
 (`grpc.md`, Placement — etcd logging is done by these helpers, not by
-message interceptors). `Close` releases it. A failure to reach any endpoint
-at construction is **not** fatal to the caller by itself: the client retries
-in the background; the worker's vote layer stays fenced until its first
-successful put (VW8).
+message interceptors). Its send limit is `EtcdMaxRequestBytes` (Constants
+this document owns): the client's own default is below the largest
+transactions dnv commits, and the client refuses a larger request before
+etcd sees it. Its receive limit stays the client's own default, since a set
+one would cap every range reply too, which no dnv constant sizes. `Close`
+releases it. A failure to reach any endpoint at construction is **not**
+fatal to the caller by itself: the client retries in the background; the
+worker's vote layer stays fenced until its first successful put (VW8).
 
 EU2. **Typed plain operations.** All take a ctx, log the record of their kind
 with `slog.InfoContext` as `log.md`, Record obligations by subsystem,
@@ -230,11 +244,21 @@ of EU4 is the client's, not ours). The caller decides — the worker always
 retries on its own cadence (the next heartbeat, the next round, the next
 pass) and never crashes on an etcd error.
 
-EU7. **Tests.** The package's tests run against a real etcd binary found on
-the PATH or named by `ETCD_BIN`, started on a free localhost port with a
-temporary data directory, and are skipped otherwise — there is no dependency
-on the etcd *server* module. The same contract serves `model`'s and the
-worker's etcd-backed tests (MD9).
+EU7. **Tests.** The package's tests run against a real etcd binary, the one
+`ETCD_BIN` names or else the one on the PATH, started on a free localhost
+port with a temporary data directory; there is no dependency on the etcd
+*server* module. With no binary, or an `ETCD_BIN` that names no file, the
+package's test binary exits with failure before any test runs — naming the
+`ETCD_BIN` it cannot use, or, with no binary, saying where one comes from —
+because a run that skipped the etcd-backed tests would report success while
+testing nothing. The `test` target of the `Makefile` passes an `ETCD_BIN`
+that is not empty on to the tests unchecked, so a test binary refuses one
+that names no file as above; with `ETCD_BIN` empty or unset it hands the
+tests the etcd on the PATH, else the one in `integtest/bin/cache`, where
+the `fetch-etcd` target fetches the etcd release the integration suites
+pin, and with neither it fails before any test runs and names the
+`fetch-etcd` target. The same contract serves the etcd-backed tests of
+`model` (MD9), the worker and the gateway.
 
 ## Package `model`
 
@@ -599,7 +623,7 @@ adds those on top of `model` rather than duplicating the bodies.
 
 MD9. **Tests.** `model`'s unit tests are colocated; the etcd-backed ones —
 the allocator's walks and every MD6 op's transaction — run against the real
-etcd binary of EU7 and are skipped without one.
+etcd binary of EU7, and without one the package's tests fail as EU7 says.
 
 ## `cmd/dnv-worker`
 
@@ -1058,9 +1082,10 @@ parent syncup has not landed yet — an sp worker's `SyncupSide` reaching the
 DN before the dn worker's `SyncupDn` listed the side, say, which is normal
 since the roles are independent (VW10) — and stale revision means the agent
 holds a revision newer than etcd's, which only an etcd restore can cause
-and is logged at Error. Invalid conf means the agent found a value the
-control plane cannot have written — a proto3 zero where `architecture.md`,
-Common validation, requires a concrete value, or a side's length to zero
+(`architecture.md`, etcd backup and restore) and is logged at Error. Invalid
+conf means the agent found a value the control plane cannot have written —
+a proto3 zero where `architecture.md`, Common validation, requires a
+concrete value, or a side's length to zero
 outside the bounds of the dn agent's side conf gate (`dnagent.md` DN8) —
 and converged nothing (`dnagent.md`, Names and constants in `common`).
 `SyncupDn`, `SyncupSide` and `SyncupCntlr` can return it, and the same
@@ -1139,12 +1164,12 @@ demoted cntlr at once and the sides only when RW22's demotion hold ends;
 from each hand-over on, this rule applies unchanged.
 
 RW7. **Connections.** A process-wide cache from `addr_port` to one client
-connection (`grpc.NewClient` with insecure transport credentials and both
-client interceptors — `grpc.md`, Wiring), reference-counted by the objects
-using an endpoint and closed when the last one stops. Every stream and
-unary call to one agent multiplexes over that connection. A stream is
-opened lazily on the first round and after every failure, and closed with
-`CloseSend` plus ctx cancellation on stop (RW11).
+connection (`grpc.NewClient` with insecure transport credentials, both
+client interceptors and the message limit — `grpc.md`, Wiring),
+reference-counted by the objects using an endpoint and closed when the last
+one stops. Every stream and unary call to one agent multiplexes over that
+connection. A stream is opened lazily on the first round and after every
+failure, and closed with `CloseSend` plus ctx cancellation on stop (RW11).
 
 RW8. **Round timeout** is the object kind's interval: a reply arriving
 later is a missed reply (`architecture.md`, Check streams). The timer is
@@ -2312,7 +2337,7 @@ which MUST be `RES_STATUS_OK` (an `ERROR`, `PROVISIONING` or absent pool is
 never grown). Its `details` is the raw "dmsetup status" line of the thin
 pool; after the "thin-pool" token come the transaction id, the used and
 total metadata blocks and the used and total data blocks — metadata counts
-in dm-thin's fixed metadata block size (`thinMetaBlockSize`), data counts
+in dm-thin's fixed metadata block size (`ThinMetaBlockSize`), data counts
 in the pool's `data_block_size`. An unparsable line is skipped and logged
 once per change. With the mark `dm_pool_conf.low_water_mark_pct` **as
 stored** (a mark above a hundred percent switches auto-grow off, the one
@@ -2334,7 +2359,7 @@ total is no larger than the total implied by the slice's groups of that kind
 **excluding the newest one**: for data, the total data is at most the sum of
 `data_blocks` over all data groups but the last; for metadata, the total
 metadata is at most the sum over all meta groups but the last of `data_blocks`
-times the block size divided by `thinMetaBlockSize`. While pending, no grow of
+times the block size divided by `ThinMetaBlockSize`. While pending, no grow of
 that kind starts — this is the "one grow per pool at a time" of
 `architecture.md`, Automatic reactions, reconstructed from etcd and the status
 line on every pass as a memo built from facts, so a worker restart or a
@@ -3024,12 +3049,14 @@ agents driven by a behavior file, etcd driven by a fake-gateway CLI, and
 assertions over the JSON logs.
 
 **Topology.** The developer machine drives one Linux server over ssh, as a
-plain user with no sudo. The server runs one etcd on localhost, configured the
-way every etcd serving dnv must be (its transaction-op cap at `EtcdMaxTxnOps`,
-which the suite reads from the driver it has just built instead of copying the
-number), several workers carrying every role, fake disk and controller nodes
-listening on the server's own address, so that every stored `addr_port` looks
-like a production one and the worker dials a real interface, and `workerctl`,
+plain user with no sudo. The server runs one etcd on localhost, configured
+with the request caps every etcd serving dnv must have (its transaction-op cap
+at `EtcdMaxTxnOps` and its request-size cap at `EtcdMaxRequestBytes`, which
+the suite reads from the driver it has just built instead of copying the
+numbers), several workers carrying every role, fake disk and controller
+nodes listening on the server's
+own address, so that every stored `addr_port` looks like a production one and
+the worker dials a real interface, and `workerctl`,
 run on the server against etcd. The vote timers are shortened through the CM1
 flags, so every membership change completes in seconds. Every case but the
 failover and hold cases shortens its intervals, and the thresholds it means
@@ -3189,11 +3216,12 @@ would pass every negative built on it.
 success: a failing run leaves etcd's data, every log and every behavior file
 in place and prints its diagnostics — the failing stage and its trace id,
 the registrations, the ownership table, the tail of every log and the dnv
-keys — so the debris is what the developer reads. Cleanup signals every
-process the suite started, continuing a stopped worker first so that it
-acts on its termination, and removes the suite's work directory; nothing
-outside that directory is touched, and the suite leaves no kernel state, no
-packages and no users behind.
+keys — so the debris is what the developer reads; a cleanup-only run does
+the cleanup alone. Cleanup signals every process the suite started,
+continuing a stopped worker first so that it acts on its termination, and
+removes the suite's work directory; nothing outside that directory is
+touched, and the suite leaves no kernel state, no packages and no users
+behind.
 
 **The driver, `workerctl`.** `workerctl` is the etcd driver that plays the
 gateway: it writes through `model` as a gateway's STM would, resolves the

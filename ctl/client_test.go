@@ -1,14 +1,14 @@
 // client_test.go is the other half of the argv → request tests'
-// recordingClient: one method per RPC of `service Gateway`, all 59 of them,
+// recordingClient: one method per RPC of `service Gateway`, all 60 of them,
 // each a single call into rpcCall.
 //
 // They are uniform on purpose. A method that did anything of its own would be
 // a place for a test to accidentally assert against the stub instead of
 // against dnvctl, and the whole value of the recorder is that it records and
 // nothing else. The list is also a second, independent census of the service:
-// if pb ever grows a 60th RPC, this type stops satisfying pb.GatewayClient
+// if pb ever grows a 61st RPC, this type stops satisfying pb.GatewayClient
 // through its own methods and falls through to the embedded nil — which
-// the CT1 test's len(Methods) == 59 pin catches first, at the same commit.
+// the CT1 test's len(Methods) == 60 pin catches first, at the same commit.
 package ctl
 
 import (
@@ -57,6 +57,16 @@ func (c *recordingClient) ListClusters(
 	return rpcCall(
 		c, "ListClusters", in,
 		&pb.ListClustersReply{})
+}
+
+func (c *recordingClient) AdvanceClusterIds(
+	_ context.Context,
+	in *pb.AdvanceClusterIdsRequest,
+	_ ...grpc.CallOption,
+) (*pb.AdvanceClusterIdsReply, error) {
+	return rpcCall(
+		c, "AdvanceClusterIds", in,
+		&pb.AdvanceClusterIdsReply{})
 }
 
 func (c *recordingClient) CreateDiskNode(

@@ -45,6 +45,12 @@ const (
 	MaxDmRaid0StripeSize       = 1 * 1024 * 1024
 	MinDmRaid0StripeSize       = 4 * 1024
 	DefaultDmRaid0StripeSize   = 64 * 1024
+	// ThinMetaBlockSize is dm-thin's fixed metadata block size: a thin pool
+	// counts its metadata used and total in these blocks, never in its
+	// data_block_size, and a meta group's data region holds data_blocks x
+	// block size / ThinMetaBlockSize of them (dnv-worker.md AR6;
+	// model.GrowPending).
+	ThinMetaBlockSize = 4096
 
 	// MinChunkBlockCnt, MaxChunkBlockCnt and DefaultChunkBlockCnt are the
 	// bounds and the default of redund_md_raid1.bitmap_chunk_block_cnt, the
@@ -137,6 +143,27 @@ const (
 	// (see EtcdMaxTxnOps and MaxFlipCreatedPerTxn below).
 	MaxDelBmPerTxn = 64
 
+	// IdStepStride is how far the id step, AdvanceClusterIds, moves each
+	// uint64 id counter of a cluster: the next_id of its three globals and
+	// of each of its pools (architecture.md, etcd backup and restore;
+	// Clusters). 2^40 is far more ids than a cluster hands out between a
+	// backup and its restore, and it leaves a counter room for about 2^24
+	// steps; the step refuses one that would wrap.
+	IdStepStride = 1 << 40
+	// ThinIdStepStride is how far the id step moves each pool's next_dev_id,
+	// one sixteenth of dm-thin's id range; the step never moves one past
+	// MaxThinDevId + 1, nor backward (architecture.md, Clusters). Unlike
+	// IdStepStride it is not far more than a pool can hand out between a
+	// backup and its restore: a pool that handed out more thin ids than this
+	// since the backup hands some of them out again after the step
+	// (architecture.md, Known limits).
+	ThinIdStepStride = 1 << 20
+	// MaxThinDevId is the largest thin id dm-thin takes: its device ids are
+	// 24 bits wide. CreateThinDevice refuses a pool whose next_dev_id has
+	// passed it, so no thin id above it is handed out (architecture.md, Thin
+	// devices).
+	MaxThinDevId = 1<<24 - 1
+
 	CnCntlidSlotBase = 10000
 	CnCntlidSlotStep = 5000
 	CnCntlidSlotCnt  = 8
@@ -155,6 +182,15 @@ const (
 	DnvPrefix = "dnv"
 	DmPrefix  = "dnv"
 	NqnPrefix = "nqn.2024-01.io.dnv"
+	// NvmeModel is the NVMe model number dnv sets (architecture.md [D2]): the
+	// attr_model of every side export (dnagent.md DN10) and transfer subsystem
+	// (cnagent.md CN17), the model the gateway stamps on every Subsystem, which
+	// the cn agent writes verbatim (cnagent.md CN16), and the MN of dnv-cdc's
+	// Identify (cdc.md NP7); a migration source export carries none. Hosts see
+	// one device only while every cntlr presents the same serial and model, so
+	// it never moves with a build; it shares the prefixes' spelling, not their
+	// role.
+	NvmeModel = "dnv"
 
 	DefaultTmpfsPrefix = "/tmp/dnv-tmpfs"
 
@@ -233,9 +269,10 @@ const (
 	// the quantum that positions it: chunk (s, b) holds bytes
 	// [b*CloneBmChunkBytes, b*CloneBmChunkBytes+len) of source slice s's
 	// bitmap. 1 MiB keeps a grown chunk value plus the rev-bump put inside
-	// etcd's default ~1.5 MiB request cap, and every
-	// PushCloneBitmap message inside gRPC's default 4 MiB. It is a clone
-	// positioning quantum only — migration appends have no byte cap.
+	// etcd's default ~1.5 MiB request cap, so a clone append asks nothing of
+	// EtcdMaxRequestBytes, and every PushCloneBitmap message far inside
+	// GrpcMaxMsgSize. It is a clone positioning quantum only — migration
+	// appends have no byte cap.
 	CloneBmChunkBytes = 1 << 20
 
 	DefaultMigrThreshold = 1
@@ -257,6 +294,16 @@ const (
 	// Maximum number of characters of string file data included in a log
 	// record (see log.md R11).
 	LogStrDataLimit = 128
+
+	// GrpcMaxMsgSize is the largest message, in bytes, every dnv gRPC server
+	// and client sends and takes (grpc.md, Wiring). gRPC's own receive
+	// default is below the widest cntlr syncup, cntlr report and pool get
+	// reply (architecture.md, Known limits); model's
+	// TestWidestMessagesFitGrpcMaxMsgSize holds each under it. It is at least
+	// EtcdMaxRequestBytes, so a value etcd took, a migration bitmap chunk
+	// among them, also fits a message that carries it alone, such as the push
+	// that hands that chunk to its agent.
+	GrpcMaxMsgSize = 64 * 1024 * 1024
 
 	// The DEFAULT configfs id of the nvmet port an agent converges
 	// (architecture.md, Disk node; Controller node, common: exactly one port
@@ -559,6 +606,19 @@ const (
 	// start an etcd cannot import common, so they read it at preflight from
 	// workerctl's constants subcommand.
 	EtcdMaxTxnOps = 1024
+	// EtcdMaxRequestBytes is a DEPLOYMENT REQUIREMENT like EtcdMaxTxnOps:
+	// every etcd serving dnv MUST run with --max-request-bytes at this value
+	// or higher (etcd's default is 1.5 MiB; above its recommended 10 MiB it
+	// logs a warning at start), and etcdutil.New sets the client's send limit
+	// to it (the client default is 2 MiB).
+	//
+	// It is SIZED by the provisioned flip (dnv-worker.md RW18) over every
+	// slice of a pool at the widest shape: FlipProvisioned writes each slice
+	// it touches once, in one transaction, and MaxSliceCntPerSp widest slices
+	// are about 25.5 MiB. model's TestFlipProvisionedAtTheSliceCeiling commits
+	// it; the Go test launchers pass it, and the shell suites read it from
+	// `workerctl constants`.
+	EtcdMaxRequestBytes = 32 * 1024 * 1024
 	// MaxFlipCreatedPerTxn is the most candidates ONE created-flip
 	// transaction carries (dnv-worker.md RW19). model.FlipCreated
 	// commits its list this many at a time, in list order, one STM each, and

@@ -776,7 +776,7 @@ const (
 func buildIdentify(cntlId uint16, serial string) []byte {
 	buf := make([]byte, identifyLen)
 	putAscii(buf[idOffSerial:idOffSerial+idLenSerial], serial)
-	putAscii(buf[idOffModel:idOffModel+idLenModel], "dnv")
+	putAscii(buf[idOffModel:idOffModel+idLenModel], common.NvmeModel)
 	putAscii(buf[idOffFirmware:idOffFirmware+idLenFirmware], runtime.Version())
 	buf[idOffMdts] = 0
 	binary.LittleEndian.PutUint16(buf[idOffCntlId:idOffCntlId+2], cntlId)

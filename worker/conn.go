@@ -40,10 +40,12 @@ func newConnCache() *connCache {
 	}
 }
 
-// dialAgent opens one agent connection with the chain options every dnv
-// client connection MUST carry (grpc.md, Wiring): insecure transport plus the
-// unary and stream client interceptors, which propagate the RW10 trace id and
-// log every message.
+// dialAgent opens one agent connection with the options every dnv client
+// connection MUST carry (grpc.md, Wiring): insecure transport, the unary and
+// stream client interceptors, which propagate the RW10 trace id and log every
+// message, and the message limit, which lets the cntlr report of a pool at
+// the cardinality limits back in; the agent's own limit lets that pool's
+// cntlr syncup in.
 //
 // grpc.NewClient does not block, so this never fails because the agent is
 // down; the first round's stream or syncup reports that instead.
@@ -53,6 +55,7 @@ func dialAgent(addrPort string) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(common.GrpcUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(common.GrpcStreamClientInterceptor()),
+		common.GrpcClientMsgOption(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("grpc client %s: %w", addrPort, err)

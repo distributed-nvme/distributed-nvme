@@ -144,6 +144,20 @@ func setupListClusters(fs *flag.FlagSet) job {
 	}
 }
 
+// setupAdvanceClusterIds drives AdvanceClusterIds, the id step
+// (architecture.md, Clusters): case S checks every counter it moves against
+// the strides `workerctl constants` prints.
+func setupAdvanceClusterIds(fs *flag.FlagSet) job {
+	name := clusterNameFlag(fs)
+	return func(
+		ctx context.Context, client pb.GatewayClient, g *globals,
+	) (any, error) {
+		return client.AdvanceClusterIds(ctx, &pb.AdvanceClusterIdsRequest{
+			ClusterName: clusterNameOf(g, *name),
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // disk node (architecture.md, Disk nodes)
 // ---------------------------------------------------------------------------

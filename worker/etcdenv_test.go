@@ -1,7 +1,9 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,25 +32,40 @@ import (
 // worker and etcdutil for no gain. Everything goes through etcdutil, so
 // worker's tests import no etcd client either (layout.md, Dependency rules).
 
-// testEndpoint is the client URL of the etcd started by TestMain, empty when
-// no etcd binary was found.
+// testEndpoint is the client address of the etcd TestMain starts before any
+// test runs.
 var testEndpoint string
 
-// findEtcdBin returns the etcd binary named by ETCD_BIN, else the one on
-// PATH, else "" (EU7).
+// findEtcdBin returns the etcd binary ETCD_BIN names, or the one on PATH when
+// ETCD_BIN is empty or unset. When ETCD_BIN names no readable file, or is
+// empty with no etcd on PATH, it exits the test binary with failure before any
+// test runs: a run that skipped the etcd-backed tests would print ok while
+// testing nothing (dnv-worker.md EU7).
 func findEtcdBin() string {
 	if bin := os.Getenv("ETCD_BIN"); bin != "" {
-		if info, err := os.Stat(bin); err == nil && !info.IsDir() {
-			return bin
+		info, err := os.Stat(bin)
+		if err != nil || info.IsDir() {
+			fmt.Fprintf(
+				os.Stderr,
+				"ETCD_BIN=%q is not a readable file\n",
+				bin,
+			)
+			os.Exit(1)
 		}
-		return ""
+		return bin
 	}
 	bin, err := exec.LookPath("etcd")
 	if err != nil {
-		return ""
+		fmt.Fprintln(os.Stderr, noEtcdMsg)
+		os.Exit(1)
 	}
 	return bin
 }
+
+// noEtcdMsg is what a test binary prints when it finds no etcd binary.
+const noEtcdMsg = "no etcd binary: set ETCD_BIN or put etcd on PATH; " +
+	"`make test` also finds the one `make fetch-etcd` fetches into " +
+	"integtest/bin/cache"
 
 // freePort returns a currently free localhost port.
 func freePort() (int, error) {
@@ -100,6 +118,12 @@ func startEtcd(bin string) (string, func(), error) {
 		// transaction (RW19, MaxFlipCreatedPerTxn) and ReplaceCntlr at the
 		// ceilings, which reads every clone of the SP (MD6).
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
+		// dnv also requires --max-request-bytes=EtcdMaxRequestBytes
+		// (dnv-worker.md, Constants this document owns): the server's own
+		// default is below the provisioned flip (RW18) over every slice of a
+		// pool at the widest shape, which model's
+		// TestFlipProvisionedAtTheSliceCeiling commits.
+		"--max-request-bytes", strconv.Itoa(common.EtcdMaxRequestBytes),
 		"--log-level", "error",
 		"--log-outputs", "stderr",
 	)
@@ -145,36 +169,20 @@ func TestMain(m *testing.M) {
 	// Tests that assert on records install their own capture handler; the
 	// rest of the package's log volume goes nowhere.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	if bin := findEtcdBin(); bin != "" {
-		endpoint, stop, err := startEtcd(bin)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "cannot start etcd: %v\n", err)
-			os.Exit(1)
-		}
-		testEndpoint = endpoint
-		code := m.Run()
-		stop()
-		os.Exit(code)
+	endpoint, stop, err := startEtcd(findEtcdBin())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot start etcd: %v\n", err)
+		os.Exit(1)
 	}
-	// Loud, not silent: without a binary every etcd-backed test t.Skip()s and
-	// the package still prints "ok", so a regression in the STM helpers, the
-	// MD6 ops or the allocator would sail through a plain `go test ./...`.
-	// This banner is the only thing that distinguishes that run from a real
-	// one (EU7/MD9 allow the skip; they do not allow it to be invisible).
-	fmt.Fprintln(
-		os.Stderr,
-		"SKIPPING every etcd-backed test: no etcd binary "+
-			"(set ETCD_BIN or put etcd on PATH)",
-	)
-	os.Exit(m.Run())
+	testEndpoint = endpoint
+	code := m.Run()
+	stop()
+	os.Exit(code)
 }
 
-// newTestClient returns a Client against the shared etcd, or skips (EU7).
+// newTestClient returns a Client against the shared etcd (EU7).
 func newTestClient(t *testing.T) *etcdutil.Client {
 	t.Helper()
-	if testEndpoint == "" {
-		t.Skip("no etcd binary (set ETCD_BIN or put etcd on PATH)")
-	}
 	cli, err := etcdutil.New(
 		context.Background(), []string{testEndpoint}, time.Second,
 	)
@@ -195,4 +203,53 @@ var nextTestCid atomic.Uint64
 
 func testClusterId() uint64 {
 	return 0x7000000000000000 | nextTestCid.Add(1)
+}
+
+// TestNoEtcdFailsTheRun pins dnv-worker.md EU7's rule for a missing binary:
+// the test binary, run again with no ETCD_BIN and a PATH that holds no etcd,
+// or with an ETCD_BIN that names no file, exits with failure before any test
+// runs and says why, instead of skipping the etcd-backed tests and printing
+// ok. The child runs no test (-test.run=^$), so a TestMain that went on
+// without an etcd would end it with exit status 0.
+func TestNoEtcdFailsTheRun(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "etcd")
+	dir := t.TempDir()
+	unusable := func(bin string) string {
+		return fmt.Sprintf("ETCD_BIN=%q is not a readable file", bin)
+	}
+	for _, tt := range []struct {
+		name    string
+		etcdBin string
+		want    string
+	}{
+		{"no binary", "", noEtcdMsg},
+		{"ETCD_BIN names no file", missing, unusable(missing)},
+		{"ETCD_BIN names a directory", dir, unusable(dir)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := []string{"PATH=" + t.TempDir()}
+			for _, kv := range os.Environ() {
+				if !strings.HasPrefix(kv, "PATH=") &&
+					!strings.HasPrefix(kv, "ETCD_BIN=") {
+					env = append(env, kv)
+				}
+			}
+			if tt.etcdBin != "" {
+				env = append(env, "ETCD_BIN="+tt.etcdBin)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^$")
+			cmd.Env = env
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("a run without etcd ended with %v, want exit "+
+					"status 1 (stderr %q)", err, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("stderr %q does not say %q", stderr.String(), tt.want)
+			}
+		})
+	}
 }

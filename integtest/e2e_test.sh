@@ -52,7 +52,8 @@
 #     starts records its pid: the control-plane daemons are stopped by theirs,
 #     the react case stops each agent it kills by that agent's pid file, and
 #     the cutoff case stops and continues the agent it cuts off by its pid
-#     file too (SIGSTOP, then SIGCONT).
+#     file too (SIGSTOP, then SIGCONT), and stops etcd by its pid file before
+#     it starts it again on the same data.
 #     The cleanup's pkill sweeps run whether or not a pid file exists, so they
 #     also reach a crashed run's processes whose pid files are gone, and each
 #     pattern is qualified by $WORK or by the etcd name, so it never touches
@@ -108,7 +109,6 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN_DIR="$REPO_ROOT/integtest/bin"
-CACHE_DIR="$BIN_DIR/cache"
 
 # The five shipped binaries `make build` produces (Makefile CMDS = cmd/*).
 AGENT_BIN="$REPO_ROOT/bin/dnv-agent"
@@ -125,21 +125,19 @@ DNVCTL_BIN="$REPO_ROOT/bin/dnvctl"
 CNAGENTCTL_BIN="$BIN_DIR/cnagentctl"
 WORKERCTL_BIN="$BIN_DIR/workerctl"
 
-# The pinned etcd release, shared with the worker, gateway and cdc suites:
-# same version, same digest, same integtest/bin/cache. A tarball already
-# verified there is never re-downloaded, so this suite needs no network.
-ETCD_VERSION=v3.6.14
-ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
-ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
-ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
-ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# The pinned etcd release, its place in integtest/bin/cache (ETCD_DIST under
+# ETCD_CACHE_DIR) and its download-and-verify path come from one file, which
+# every suite that starts an etcd shares with `make fetch-etcd`:
+# fetch_etcd (integtest/fetch_etcd.sh).
+. "$REPO_ROOT/integtest/fetch_etcd.sh"
 
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement of every etcd serving dnv,
-# not a knob of this suite, and the one constant this suite MUST NOT type out:
-# read_constants() fills it at preflight from `workerctl constants`, exactly as
-# read_constants (worker_test.sh), gateway_test.sh and cdc_test.sh do. The
-# other suites carry no literal, and a hand-copied one is precisely what
-# cmdConstants (integtest/workerctl/main.go) is there to end.
+# not a knob of this suite, and, with EtcdMaxRequestBytes below, one of the
+# two constants this suite MUST NOT type out: read_constants() fills it at
+# preflight from `workerctl constants`, exactly as read_constants
+# (worker_test.sh), gateway_test.sh and cdc_test.sh do. The other suites carry
+# no literal, and a hand-copied one is precisely what cmdConstants
+# (integtest/workerctl/main.go) is there to end.
 #
 # It matters here more than in any other suite: THIS suite is the one that
 # actually issues CreateStoragePool at its widest shape, whose compare count is
@@ -149,6 +147,15 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # etcd started below that fails the create with "too many operations in txn
 # request".
 ETCD_MAX_TXN_OPS=
+# common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
+# MUST run with (dnv-worker.md, Constants this document owns), the other
+# constant this suite MUST NOT type out, read by read_constants() with
+# ETCD_MAX_TXN_OPS. The request that SIZES it is the provisioned flip over
+# every slice of a pool at the widest shape, which model's
+# TestFlipProvisionedAtTheSliceCeiling commits. No request of this suite comes
+# near etcd's default; the flag is passed so that every etcd this tree starts
+# gets it from the same constant.
+ETCD_MAX_REQUEST_BYTES=
 # common.MaxAllocLegPerGrp, from the same JSON: the legs per group the
 # allocator actually uses for md-raid1 (legCntOf (gateway/alloc.go) returns it, or 1
 # for redund_none). read_constants cross-checks LEGS against it, because every
@@ -246,11 +253,11 @@ TRSVCID_MAX=$((DN_TRSVCID_BASE + MAX_DNS_PER_VM - 1))
 # Constants: the shape of the run (E2E12)
 #
 # A shell suite cannot import package common, so every number a Go constant
-# owns is repeated here WITH the constant it mirrors. Five of them are not
-# repeated at all but read from `workerctl constants` above: two because they
-# are deployment requirements rather than choices (EtcdMaxTxnOps,
-# MaxAllocLegPerGrp), and the three health timers, which the cutoff case
-# reads (DefaultHealthCheckInterval, DefaultPrimaryUnhealthy,
+# owns is repeated here WITH the constant it mirrors. Six of them are not
+# repeated at all but read from `workerctl constants` above: three because
+# they are deployment requirements rather than choices (EtcdMaxTxnOps,
+# EtcdMaxRequestBytes, MaxAllocLegPerGrp), and the three health timers, which
+# the cutoff case reads (DefaultHealthCheckInterval, DefaultPrimaryUnhealthy,
 # DemotionHoldTimeout).
 # ---------------------------------------------------------------------------
 
@@ -424,9 +431,15 @@ THR_LEG=$THR_QUIET_LEG
 THR=$THR_QUIET
 
 # dnv-worker's vote loop. The worker's reactions cannot fire faster than
-# its vote interval, which is why every react bound is threshold + intervals.
+# its vote interval, which is why every react bound is threshold + intervals,
+# and the cutoff case's outage stage sizes its wait for the worker's
+# self-fence and rejoin from both (CUT_FENCE_WAIT, CUT_REJOIN_WAIT).
 VOTE_INTERVAL=2
 VOTE_GRACE=6
+
+# The roles the one worker carries (start_worker): the outage stage wants the
+# rejoin records of each (worker_rejoined).
+WORKER_ROLES="dn cn sp"
 
 # Backing files (E2E5): sparse, `truncate -s`, NEVER `fallocate -l` — a file
 # costs only what is allocated in it, and `fallocate -l` would allocate all of
@@ -875,7 +888,8 @@ ssh_cp_ok() { ssh_to "$CP" "$@" || true; }
 # the one guest this suite can drive as a plain user — so a caller must
 # tolerate its failure (ssh_cp_sudo_ok), not die on it. NO STEP OF THIS SUITE
 # CALLS THE DYING FORM, and that is worth saying rather than leaving to be
-# discovered: it is kept only so the pair reads like the four families below.
+# discovered: it is kept only so the pair reads like the ssh_dn, ssh_cn and
+# ssh_host pairs below.
 ssh_cp_sudo() { ssh_sudo "$CP" "$@"; }
 ssh_cp_sudo_ok() { ssh_sudo "$CP" "$@" || true; }
 
@@ -912,30 +926,26 @@ ssh_host_user() { # <h> <cmd…>
 # these (rule 3). The helper is shipped to $HELPER on each guest by the setup
 # section; a guest has exactly one role, so one path suffices.
 #
-# Of the four `_ok` twins only helper_cp_ok has a caller; the cleanup
-# path reaches the dn, cn and host helpers through cleanup_verb instead, which
-# adds the `timeout` those wrappers cannot express. The other three are kept
-# for symmetry, and saying so beats leaving it to be discovered.
+# Only cp's helper has an `_ok` twin: the cleanup path reaches the dn, cn and
+# host helpers through cleanup_verb, which adds the `timeout` those wrappers
+# cannot express.
 helper_dn() { # <v> <verb> [args…]
 	local v=$1
 	shift
 	ssh_dn "$v" "bash $HELPER $*"
 }
-helper_dn_ok() { helper_dn "$@" || true; }
 
 helper_cn() { # <v> <verb> [args…]
 	local v=$1
 	shift
 	ssh_cn "$v" "bash $HELPER $*"
 }
-helper_cn_ok() { helper_cn "$@" || true; }
 
 helper_host() { # <h> <verb> [args…]
 	local h=$1
 	shift
 	ssh_host "$h" "bash $HELPER $*"
 }
-helper_host_ok() { helper_host "$@" || true; }
 
 helper_cp() { # <verb> [args…]
 	ssh_cp "bash $HELPER $*"
@@ -1167,12 +1177,20 @@ read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps from it and must not guess it"
+			"common.EtcdMaxTxnOps and common.EtcdMaxRequestBytes from it" \
+			"and must not guess them"
 	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
 	case "$ETCD_MAX_TXN_OPS" in
 	'' | *[!0-9]*)
 		die "workerctl constants: EtcdMaxTxnOps is" \
 			"'$ETCD_MAX_TXN_OPS' in $json"
+		;;
+	esac
+	ETCD_MAX_REQUEST_BYTES=$(jq_of "$json" .EtcdMaxRequestBytes)
+	case "$ETCD_MAX_REQUEST_BYTES" in
+	'' | *[!0-9]*)
+		die "workerctl constants: EtcdMaxRequestBytes is" \
+			"'$ETCD_MAX_REQUEST_BYTES' in $json"
 		;;
 	esac
 	MAX_ALLOC_LEG_PER_GRP=$(jq_of "$json" .MaxAllocLegPerGrp)
@@ -1225,6 +1243,8 @@ read_constants() {
 				"\`sp create\` (architecture.md, Common validation)"
 	done
 	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	log "  --max-request-bytes = common.EtcdMaxRequestBytes =" \
+		"$ETCD_MAX_REQUEST_BYTES"
 	log "  health timers: common.DefaultHealthCheckInterval" \
 		"$DEFAULT_HC_INTERVAL s, common.DefaultPrimaryUnhealthy" \
 		"$DEFAULT_PRIMARY_UNHEALTHY s, common.DemotionHoldTimeout" \
@@ -2946,17 +2966,6 @@ dm_names() {
 # role letter plus a hex digit (c0…cb on a CN, d0…d5 on a DN).
 dm_kind_names() { # <kind, e.g. c9 or d4>
 	dm_names | awk -F- -v k="$1" '$4 == k'
-	return 0
-}
-
-# NOTHING IN THIS SUITE INVOKES THIS VERB: the residue checks go through
-# dn_residue / cn_residue, which list the NAMES, and the driver's
-# dn_residue_empty / cn_residue_empty test that list for emptiness — because a
-# count of 0 and a list of what is left are the same answer only when the
-# answer is 0. It is kept as the cheap form for a caller that needs only "how
-# many".
-dm_cnt() {
-	dm_names | grep -c . || true
 	return 0
 }
 
@@ -4894,39 +4903,12 @@ ship_helpers() {
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
-# fetch_etcd is fetch_etcd (worker_test.sh) verbatim, byte for byte (only this
-# comment differs): the download-and-verify path of the pinned release. It is
-# idempotent — a cached tarball whose sha256 already matches the pin is never
-# re-downloaded — so this suite needs no network on any repeat run, while a
-# fresh checkout still works.
-fetch_etcd() {
-	mkdir -p "$CACHE_DIR"
-	if [ -f "$ETCD_TAR" ] && [ "$(sha256_of "$ETCD_TAR")" = "$ETCD_SHA256" ]; then
-		log "  etcd $ETCD_VERSION tarball cached and verified"
-	else
-		log "  downloading $ETCD_URL"
-		curl -fsSL -o "$ETCD_TAR.part" "$ETCD_URL" ||
-			die "downloading the etcd tarball failed"
-		mv -f "$ETCD_TAR.part" "$ETCD_TAR"
-		local got
-		got=$(sha256_of "$ETCD_TAR")
-		[ "$got" = "$ETCD_SHA256" ] ||
-			die "etcd tarball sha256 is $got, want $ETCD_SHA256"
-	fi
-	if [ ! -x "$CACHE_DIR/$ETCD_DIST/etcd" ] ||
-		[ ! -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ]; then
-		tar -xzf "$ETCD_TAR" -C "$CACHE_DIR" ||
-			die "extracting the etcd tarball failed"
-	fi
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcd" ] || die "no etcd binary after extraction"
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
-}
-
 # preflight_driver is everything that must hold on THIS machine before a guest
 # is touched. The order is fixed by two dependencies: read_constants runs the
 # workerctl this function builds, and it parses its JSON with the jq
-# resolve_jq picks — and ETCD_MAX_TXN_OPS stays empty until it has run, which
-# would make start_etcd pass `--max-txn-ops=` and etcd refuse to start.
+# resolve_jq picks — and ETCD_MAX_TXN_OPS and ETCD_MAX_REQUEST_BYTES stay
+# empty until it has run, which would make start_etcd pass `--max-txn-ops=`
+# and `--max-request-bytes=` and etcd refuse to start.
 #
 # cnagentctl and workerctl run on the DRIVER and are built for exactly one
 # subcommand each (`host-id --hostnqn`, `constants`). They are cross-built
@@ -5043,7 +5025,7 @@ basename_list() {
 ship_binaries() {
 	local v
 	ship_one "$CP" cp \
-		"$CACHE_DIR/$ETCD_DIST/etcd" "$CACHE_DIR/$ETCD_DIST/etcdctl" \
+		"$ETCD_CACHE_DIR/$ETCD_DIST/etcd" "$ETCD_CACHE_DIR/$ETCD_DIST/etcdctl" \
 		"$GATEWAY_BIN" "$WORKER_BIN" "$CDC_BIN" "$DNVCTL_BIN"
 	for v in "${!DN[@]}"; do
 		ship_one "${DN[$v]}" "dn$v" "$AGENT_BIN" "$DN_PAT_LOCAL"
@@ -5096,11 +5078,10 @@ proc_gone() { # <target> <dir>
 	! ssh_to "$1" "kill -0 \$(cat $WORK/$2/pid) 2>/dev/null"
 }
 
-# NO STEP OF THIS SUITE CALLS IT. Every place a cp daemon is stopped is either
-# a teardown or a restart, and both use stop_proc below, which escalates
-# instead of dying. wait_gone is kept because it is the form a FUTURE case
-# would want — one that signals a daemon and must fail if it does not exit —
-# and because stop_proc's comment reads against it.
+# The cutoff case's outage stage calls it for etcd, a daemon it signals that
+# must exit or the run stops there. Every other place a cp daemon is stopped
+# is a teardown or a restart, and both use stop_proc below, which escalates
+# instead of dying.
 wait_gone() { # <target> <dir> <secs>
 	wait_until "$3" "$2 on ${1##*@} to exit" proc_gone "$1" "$2"
 	unset "RUNNING[$2]"
@@ -5147,10 +5128,16 @@ stop_proc() { # <target> <dir> [secs]
 # etcd below that fails the create with "too many operations in txn request".
 # The value is common.EtcdMaxTxnOps, read from `workerctl constants` by
 # read_constants — which must therefore have run, or the flag arrives empty
-# and etcd refuses to start at all.
+# and etcd refuses to start at all. --max-request-bytes is the other request
+# cap every etcd serving dnv must have, common.EtcdMaxRequestBytes, read and
+# guarded the same way. The cutoff case's outage stage calls it once more on
+# the same data directory: a member already initialized there ignores the
+# --initial-* flags and starts again as itself, with its data.
 start_etcd() {
 	[ -n "$ETCD_MAX_TXN_OPS" ] ||
 		die "start_etcd before read_constants: --max-txn-ops would be empty"
+	[ -n "$ETCD_MAX_REQUEST_BYTES" ] ||
+		die "start_etcd before read_constants: --max-request-bytes would be empty"
 	remote_start "$CP" etcd etcd.log \
 		"$WORK/bin/etcd --name $ETCD_NAME --data-dir $WORK/etcd" \
 		"--listen-client-urls http://127.0.0.1:$ETCD_CLIENT_PORT" \
@@ -5158,7 +5145,8 @@ start_etcd() {
 		"--listen-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster $ETCD_NAME=http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--max-txn-ops=$ETCD_MAX_TXN_OPS"
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
+		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES"
 }
 
 # The three dnv daemons all reach etcd over the loopback, because all four run
@@ -5179,7 +5167,7 @@ start_gateway() {
 start_worker() {
 	remote_start "$CP" worker worker.log \
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--roles dn,cn,sp" \
+		"--roles ${WORKER_ROLES// /,}" \
 		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE"
 }
 
@@ -6718,10 +6706,12 @@ diagnostics() {
 		"$WORK/cdc/cdc.log"
 
 	# (b) the control-plane reads. Only worth attempting once setup
-	# has built something and the gateway is still the process this suite
-	# started; otherwise every call is a connection refused with a 30 s
-	# timeout attached.
-	if [ "$SETUP_DONE" = 1 ] && [ "${RUNNING[gateway]:-0}" = 1 ]; then
+	# has built something, the gateway is still the process this suite
+	# started and etcd is running; otherwise every call is a connection
+	# refused with a 30 s timeout attached, or, once the cutoff case's outage
+	# stage has seen etcd exit, a wait of the gateway's whole etcd budget.
+	if [ "$SETUP_DONE" = 1 ] && [ "${RUNNING[gateway]:-0}" = 1 ] &&
+		[ "${RUNNING[etcd]:-0}" = 1 ]; then
 		diag_banner "control plane (dnvctl reads)"
 		diag_ctl cluster get
 		# `sp get` is read through diag_ctl_out because the dump also parses
@@ -6761,7 +6751,8 @@ diagnostics() {
 	else
 		diag_banner "control plane (dnvctl reads)"
 		log "  skipped: setup_done=$SETUP_DONE," \
-			"gateway running=${RUNNING[gateway]:-0}"
+			"gateway running=${RUNNING[gateway]:-0}," \
+			"etcd running=${RUNNING[etcd]:-0}"
 	fi
 
 	# (c) the hosts. Their diag carries the controllers, every namespace's
@@ -8137,7 +8128,9 @@ setup_create_sp() {
 	# index with one proto decode per DN (FindDnCandidates (model/alloc.go)),
 	# and then commits a transaction whose compare list is
 	# 7 + slice_cnt + 7 x sides + 8 x cntlr_cnt — 951 at the default shape,
-	# which is why etcd runs with --max-txn-ops=$ETCD_MAX_TXN_OPS.
+	# which is why etcd runs with --max-txn-ops=$ETCD_MAX_TXN_OPS. Its bytes
+	# stay far under --max-request-bytes=$ETCD_MAX_REQUEST_BYTES, which the
+	# provisioned flip over every slice of a widest pool sizes, not the create.
 	#
 	# $THR is UNQUOTED so it splits into its eight words. That is deliberate,
 	# and it is why the four thresholds also exist as separate variables: the
@@ -15261,6 +15254,13 @@ case_react() {
 #    shape is in place, so it does not show that the clear waits for a reply
 #    of the revision the worker drives; the unit test
 #    TestStandbyCleanReplyBelowItsRevisionClearsNothing does.
+#  * With the loop still writing, etcd alone is stopped by its pid file until
+#    the worker has fenced itself, and started again on its data
+#    (architecture.md, Running without the control plane): a read is refused
+#    meanwhile, the loop writes on and the cdc serves what it held; the worker
+#    rejoins under the seed its fence minted, the stored state reads as it did,
+#    host0 keeps its controllers, no write fails, and a new thin device becomes
+#    created before the case deletes it.
 #
 # THE HOST-SIDE EXCEPTIONS, both inside this case alone. host0 runs nvme-stas,
 # where E2E10 wants it inactive: stafd and stacd on the cdc suite's settings
@@ -15315,18 +15315,52 @@ CUT_WARMUP=20
 # plus wait_until's half second, and the stop is timed when its ssh returns.
 CUT_SLACK=15
 
+# The outage stage's two waits on the worker (architecture.md, Running
+# without the control plane). With etcd stopped every heartbeat put waits out
+# its whole etcd budget, so the self-fence comes from the worker's own
+# observer (dnv-worker.md VW8): its own key goes dead one dead threshold, two
+# vote intervals, after the last echo, which is at most one interval old at
+# the stop, and the commit of that one grace window later takes the fence
+# exit. The rejoin waits for the etcd client's own reconnect once etcd listens
+# again, which the client's connect backoff can hold back for several seconds
+# (WAIT_SHORT), then one grace window from the new seed's first put (VW7).
+# That backoff grows with the time etcd stays away: the stage starts etcd
+# again within seconds of the fence, and an etcd that comes back later can
+# hold the reconnect back longer than WAIT_SHORT, and long enough for the new
+# seed to fence once more (VW8), which fails the stage (cut_rejoined).
+# CUT_SLACK covers the driver's polling in both.
+CUT_FENCE_WAIT=$((3 * VOTE_INTERVAL + VOTE_GRACE + CUT_SLACK))
+CUT_REJOIN_WAIT=$((WAIT_SHORT + VOTE_GRACE + CUT_SLACK))
+
 # The loop's self-stop, in seconds: the bounds of every wait from its start in
-# stage 03 to its stop in stage 07, summed, and one WAIT_BUILD more for the
+# stage 03 to its stop in stage 08, summed, and one WAIT_BUILD more for the
 # time the polls and the readings between the waits take themselves. The sum
 # is the new primary's build and the old primary's teardown (WAIT_BUILD each);
-# the listed check before the stop, the new primary's raid0 and level rows and
-# the old primary's err_epoch (WAIT_PROVISION each); the failover
-# (WAIT_REACT) and its record (WAIT_SHORT); and fourteen host waits
-# (WAIT_HOST: eight polls, five ANA waits, one read-back). So it outlives a
-# passing run however slow its waits, and still ends a failed one left in
-# place. A wait added between those two stages adds its bound here.
-CUT_LOOP_MAX=$((2 * WAIT_BUILD + 4 * WAIT_PROVISION + WAIT_REACT + WAIT_SHORT +
-	14 * WAIT_HOST + WAIT_BUILD))
+# the listed checks before the cut and before the outage, the new primary's
+# raid0 and level rows, the old primary's err_epoch, the outage's still
+# reading and its thin device's created flip (WAIT_PROVISION each); the
+# failover (WAIT_REACT); its record, etcd's exit and etcd listening again
+# (WAIT_SHORT each); the read refused while etcd is down (CTL_TIMEOUT_DEFAULT);
+# the self-fence (CUT_FENCE_WAIT); the rejoin and the gateway's answer
+# (CUT_REJOIN_WAIT each); and eighteen host waits (WAIT_HOST: ten polls, seven
+# ANA waits, one read-back). So it outlives a passing run however slow its
+# waits, and still ends a failed one left in place. A wait added between those
+# two stages adds its bound here.
+CUT_LOOP_MAX=$((2 * WAIT_BUILD + 7 * WAIT_PROVISION + WAIT_REACT +
+	3 * WAIT_SHORT + CTL_TIMEOUT_DEFAULT + CUT_FENCE_WAIT +
+	2 * CUT_REJOIN_WAIT + 18 * WAIT_HOST + WAIT_BUILD))
+
+# o0 is the thin device the outage stage creates once etcd is back, the
+# worker's created flip being the proof that it drives the pool again, and
+# deletes at once; CUT_OUT_TD_ID is its id.
+TD_OUTAGE=o0
+CUT_OUT_TD_ID=""
+
+# The outage stage's readings of the stored state (cut_reading): the last
+# one taken, the one before it, and the one the stage compares against.
+CUT_READ=""
+CUT_READ_LAST=""
+CUT_READ_BEFORE=""
 
 # The kernel-log marker the loop's witness counts from, minted per run.
 CUT_KMSG_TAG=""
@@ -15930,13 +15964,304 @@ cut_cont_primary() {
 	cut_kmsg_clean "after the old primary returned as a standby"
 }
 
-# --- step 7: nvme-stas stopped, host0 handed back ---------------------------
+# worker_fenced_since is true once the worker's log holds more self-fences
+# than <n>: its `worker fenced` records (dnv-worker.md, Log records), as
+# worker_msg_cnt counts them.
+worker_fenced_since() { # <n>
+	[ "$(worker_msg_cnt "worker fenced")" -gt "$1" ]
+}
+
+# worker_last_fence prints the LAST fence record as "<reason> <old_seed>
+# <new_seed>", or nothing when there is none; `fromjson?` drops a line torn
+# by a write still in progress.
+worker_last_fence() {
+	local line
+	line=$(ssh_cp "grep -F '\"msg\":\"worker fenced\"' \
+		$WORK/worker/worker.log | tail -n 1") ||
+		die "cannot read the fence records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$line" ] || return 0
+	printf '%s\n' "$line" | "$JQ" -R -r \
+		'fromjson? // empty | "\(.reason) \(.old_seed) \(.new_seed)"'
+}
+
+# worker_seed prints the seed of the worker's running incarnation: the seed of
+# its last `worker registered` record, which an incarnation logs at the first
+# successful put of each of its roles (dnv-worker.md VW2).
+worker_seed() {
+	local line
+	line=$(ssh_cp "grep -F '\"msg\":\"worker registered\"' \
+		$WORK/worker/worker.log | tail -n 1") ||
+		die "cannot read the registration records in $WORK/worker/worker.log on $CP_IP"
+	printf '%s\n' "$line" | "$JQ" -R -r 'fromjson? // empty | .seed'
+}
+
+# worker_rejoined is true once the log holds, for every role the worker
+# carries (WORKER_ROLES), a registration of <seed>, its commit as a member and
+# a shard it owns (dnv-worker.md VW2, VW6, VW9): the incarnation a self-fence
+# minted is effective again and drives (VW7). Fatal on a log it cannot read.
+worker_rejoined() { # <seed>
+	local lines got
+	lines=$(ssh_cp "grep -F '\"seed\":\"$1\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read the records of seed $1 in $WORK/worker/worker.log on $CP_IP"
+	got=$(printf '%s\n' "$lines" | "$JQ" -R -s -r --arg roles "$WORKER_ROLES" '
+		[split("\n")[] | fromjson? // empty] as $r
+		| [$roles | split(" ")[] as $role
+		   | ([$r[] | select(.role == $role and .msg == "worker registered")]
+		      | length > 0)
+		     and ([$r[] | select(.role == $role and .state == "member"
+		                         and .msg == "membership committed")]
+		          | length > 0)
+		     and ([$r[] | select(.role == $role and .msg == "shard owned")]
+		          | length > 0)]
+		| all')
+	[ "$got" = true ]
+}
+
+# cut_rejoined is the outage stage's rejoin poll: worker_rejoined of the seed
+# the worker's last fence minted, which it leaves in CUT_REJOIN_SEED. <first>
+# is the seed the stage's first fence minted, <n> the fence count before the
+# stop, <secs> how long etcd stayed away after the first fence was seen. The
+# incarnation the first fence minted starts while etcd is away and can fence
+# once more before its etcd client has reconnected (architecture.md, Running
+# without the control plane): such a second fence must name a stalled
+# heartbeat or watch (dnv-worker.md VW8) and the seed the first one minted,
+# and the poll then waits for the seed it minted. A third fence is fatal at
+# once, naming the record and <secs>.
+cut_rejoined() { # <first> <n> <secs>
+	local fence reason old new
+	CUT_REJOIN_SEED=$1
+	if worker_fenced_since "$(($2 + 2))"; then
+		fence=$(worker_last_fence)
+		die "the worker fenced itself a third time while the stage waited" \
+			"for it to rejoin (last fence, as reason, old seed and new seed:" \
+			"'$fence'); etcd was started again $3s after the first fence" \
+			"was seen, and the design allows one more fence only" \
+			"(architecture.md, Running without the control plane)"
+	fi
+	if worker_fenced_since "$(($2 + 1))"; then
+		fence=$(worker_last_fence)
+		# A record still being written reads as nothing: poll again.
+		[ -n "$fence" ] || return 1
+		read -r reason old new <<<"$fence"
+		case "$reason" in
+		heartbeat_stalled | watch_stalled) ;;
+		*)
+			die "the worker's second self-fence names reason '$reason'," \
+				"not a stalled heartbeat or watch (dnv-worker.md VW8):" \
+				"'$fence'"
+			;;
+		esac
+		[ "$old" = "$1" ] ||
+			die "the worker's second self-fence names old seed '$old', not" \
+				"the seed '$1' the first fence minted: '$fence'"
+		case "$new" in
+		'' | "$1") die "the worker's second self-fence names no new seed: '$fence'" ;;
+		esac
+		CUT_REJOIN_SEED=$new
+	fi
+	worker_rejoined "$CUT_REJOIN_SEED"
+}
+
+# cut_reading reads into CUT_READ, through dnvctl and one "<what> <reply>" line
+# per read, what the outage must leave as it was: the cluster with its globals,
+# the pool with its cntlrs, groups, legs and sides and their health epochs, its
+# thin devices and subsystems, every controller node, and every disk node that
+# holds a side of the pool. dnvctl re-encodes each reply with its keys sorted
+# (emit (ctl/root.go)), so equal records read as equal strings. It answers
+# false on any refused read, which a poll takes as one more poll.
+cut_reading() {
+	local sp addrs addr v
+	CUT_READ=""
+	ctl_try cluster get --name "$CLUSTER" || return 1
+	CUT_READ+="cluster $CTL_OUT"$'\n'
+	ctl_try sp get || return 1
+	sp=$CTL_OUT
+	CUT_READ+="sp $sp"$'\n'
+	ctl_try td list || return 1
+	CUT_READ+="td $CTL_OUT"$'\n'
+	ctl_try ss list || return 1
+	CUT_READ+="ss $CTL_OUT"$'\n'
+	for v in "${!CN[@]}"; do
+		ctl_try cn get --addr "$(cn_addr "$v")" || return 1
+		CUT_READ+="cn$v $CTL_OUT"$'\n'
+	done
+	addrs=$(jq_of "$sp" "[$SP_ANY_SIDE_PATH | .addr_port] | unique | .[]")
+	[ -n "$addrs" ] || return 1
+	for addr in $addrs; do
+		ctl_try dn get --addr "$addr" || return 1
+		CUT_READ+="dn $addr $CTL_OUT"$'\n'
+	done
+}
+
+# cut_reading_diff prints, for every read whose reply moved, its reply before
+# the outage and after it.
+cut_reading_diff() {
+	awk 'function key(l,  f) { split(l, f, " "); return f[1] == "dn" ? f[1] " " f[2] : f[1] }
+		NR == FNR { before[key($0)] = $0; next }
+		{ k = key($0); if (before[k] != $0) { print "before: " before[k]; print "after:  " $0 } }' \
+		<(printf '%s\n' "$CUT_READ_BEFORE") <(printf '%s\n' "$CUT_READ") >&2
+}
+
+# cut_reading_still is the polling form: true once a reading equals the one
+# before it, so the state the stage compares against is not still moving.
+cut_reading_still() {
+	cut_reading || return 1
+	if [ "$CUT_READ" = "$CUT_READ_LAST" ]; then
+		return 0
+	fi
+	CUT_READ_LAST=$CUT_READ
+	return 1
+}
+
+# --- step 7: etcd taken away under the loop ---------------------------------
+#
+# architecture.md, Running without the control plane. etcd alone is stopped,
+# by its pid file (E2E8), while host0's loop writes through stacd's two paths,
+# and started again on its data once the worker has fenced itself; the
+# gateway, the worker and the cdc run through it. The stage sees the gateway
+# and the worker without etcd and then back, and the cdc only while etcd is
+# down: no discovery record moves across the outage, so no read after it can
+# tell a cdc that reads etcd again from one that does not. The stage sits in
+# the one case whose host IO runs across stages, once its failover is over
+# and before stage 08 stops the loop, whose read-back then covers the
+# outage's writes too; a case of its own would rebuild the pool first. Every
+# wait is on a record or a reading, never on a time.
+cut_etcd_outage() {
+	stage 07 "etcd stopped under the loop: the worker fences itself and rejoins, nothing moves"
+	local ctrls seed fence fence_before reason old new ok_fence t_stop t_up
+	local t_fence down fences
+
+	# The state the outage must leave alone, read once it holds still.
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records before etcd stops"
+	assert_eq "$PRIMARY_CNTLR_ID" "$CUT_NEW_ID" \
+		"the primary is still the cntlr the failover elected"
+	disc_want_of_sp "$SS0"
+	CUT_READ_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"two readings of the stored state in a row to agree before etcd stops" \
+		cut_reading_still
+	CUT_READ_BEFORE=$CUT_READ
+	ctrls=$(helper_host 0 report_ctrls "$SS0") ||
+		die "host0: the report_ctrls verb failed"
+	seed=$(worker_seed)
+	[ -n "$seed" ] || die "the worker log names no registered seed before etcd stops"
+	fence_before=$(worker_msg_cnt "worker fenced")
+	cut_loop_check "before etcd stops"
+
+	# The stop. The refused read waits out the gateway's whole etcd budget,
+	# which CTL_TIMEOUT outlasts, so the code is the gateway's own (gateway.md
+	# GW7); etcd, whose graceful stop waits for its open watch streams, exits
+	# meanwhile.
+	sig_dir "$CP" etcd TERM >/dev/null ||
+		die "cp: signalling etcd by its pid file failed"
+	t_stop=$SECONDS
+	ctl_fail ABORTED cluster get --name "$CLUSTER"
+	wait_gone "$CP" etcd "$WAIT_SHORT"
+
+	# The self-fence, of the incarnation that ran before the stop.
+	wait_until "$CUT_FENCE_WAIT" \
+		"the worker to log its self-fence with etcd down (dnv-worker.md VW8)" \
+		worker_fenced_since "$fence_before"
+	t_fence=$SECONDS
+	fence=$(worker_last_fence)
+	read -r reason old new <<<"$fence"
+	# fenceHeartbeatStalled (worker/vote.go): the reason VW8 (a), and the
+	# fence exit of VW8 (d), give a heartbeat that stopped reaching etcd.
+	assert_eq "$reason" heartbeat_stalled "the self-fence's reason"
+	assert_eq "$old" "$seed" \
+		"the self-fence names the incarnation that ran before etcd stopped"
+	case "$new" in
+	'' | "$seed") die "the self-fence names no new seed: '$fence'" ;;
+	esac
+	log "  the worker fenced itself $((SECONDS - t_stop))s after etcd was" \
+		"signalled, as these polls see it"
+
+	# The data plane without the control plane: the loop writes on after the
+	# fence, and the cdc serves the records it held (cdc.md DS10), read
+	# through host1.
+	cut_loop_check "when the self-fence was seen"
+	ok_fence=$CUT_OK
+	wait_until "$WAIT_HOST" \
+		"host0's write loop to finish $CUT_WARMUP more writes with etcd down" \
+		cut_loop_ok_reaches "$((ok_fence + CUT_WARMUP))" "with etcd down"
+	cut_kmsg_clean "with etcd down"
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to serve the records of $SS0 it held, with etcd down (host1's view)" \
+		host_disc_is 1
+
+	# etcd back on its data, as soon as the checks above are done, then the
+	# rejoin. The incarnation the fence minted starts while etcd is away, so
+	# it can fence once more before it reaches etcd (cut_rejoined), the more
+	# likely the longer etcd stays away after the first fence: the time is
+	# logged, the rejoin wait leaves room for that one more fence, and the
+	# rejoin is that of the seed the last fence minted.
+	down=$((SECONDS - t_fence))
+	log "  etcd starts again ${down}s after the self-fence was seen"
+	start_etcd
+	wait_until "$WAIT_SHORT" "etcd to listen on $ETCD_CLIENT_PORT again" \
+		cp_port_up "$ETCD_CLIENT_PORT"
+	t_up=$SECONDS
+	wait_until "$((CUT_FENCE_WAIT + CUT_REJOIN_WAIT))" \
+		"the worker to rejoin, under seed $new or the seed of the one more fence it may take, in every role (dnv-worker.md VW7)" \
+		cut_rejoined "$new" "$fence_before" "$down"
+	if [ "$CUT_REJOIN_SEED" != "$new" ]; then
+		log "  the incarnation the fence minted fenced itself once more;" \
+			"the worker rejoined under seed $CUT_REJOIN_SEED"
+	fi
+	log "  the worker drives again $((SECONDS - t_up))s after etcd listened"
+	wait_until "$CUT_REJOIN_WAIT" "the gateway to answer again" \
+		ctl_try cluster get --name "$CLUSTER"
+
+	# Nothing moved.
+	cut_reading ||
+		die "the stored state could not be read once the gateway answered again"
+	if [ "$CUT_READ" != "$CUT_READ_BEFORE" ]; then
+		cut_reading_diff
+		die "the stored state reads otherwise after etcd's return (the lines" \
+			"that differ are above): an outage writes no record"
+	fi
+	assert_eq "$(helper_host 0 report_ctrls "$SS0")" "$ctrls" \
+		"host0 holds the controllers of $SS0 it held before etcd stopped"
+	host_wait_ana 0 "$SS0" "$CUT_NEW_TRADDR" "$UUID2" optimized
+	host_wait_ana 0 "$SS0" "$CUT_OLD_TRADDR" "$UUID2" inaccessible
+	cut_loop_check "after etcd returned"
+	cut_kmsg_clean "after etcd returned"
+
+	# The worker drives the pool again: a new thin device becomes created,
+	# which only its created flip does (dnv-worker.md RW19).
+	ctl_ok td create --name "$TD_OUTAGE" --size "$((4 * TD_UNIT))"
+	CUT_OUT_TD_ID=$(jq_of "$CTL_OUT" '.td_id')
+	case "$CUT_OUT_TD_ID" in
+	'' | *[!0-9]* | 0) die "td create returned td_id '$CUT_OUT_TD_ID'" ;;
+	esac
+	wait_until "$WAIT_PROVISION" "$TD_OUTAGE to report created" \
+		td_created "$TD_OUTAGE"
+	ctl_ok td delete --name "$TD_OUTAGE"
+	assert_field "$CTL_OUT" '.td_id' "$CUT_OUT_TD_ID" "DeleteThinDeviceReply.td_id"
+	ctl_ok td list
+	assert_field "$CTL_OUT" '.name_to_td | length' 2 \
+		"only $TD0 and $TD_CUT are left"
+
+	# One fence, and the one more the rejoin wait took, if it took one: a
+	# fence after the rejoin is none the design allows.
+	fences=1
+	[ "$CUT_REJOIN_SEED" = "$new" ] || fences=2
+	assert_eq "$(worker_msg_cnt "worker fenced")" "$((fence_before + fences))" \
+		"the worker's self-fences across the outage"
+	assert_eq "$(worker_failover_cnt)" "$((CUT_FO_BEFORE + 1))" \
+		"still one failover: the outage moved no role"
+}
+
+# --- step 8: nvme-stas stopped, host0 handed back ---------------------------
 #
 # stacd and stafd both keep their kernel connections when they stop, so the
 # paths stacd made and the discovery controller stafd held are dropped by
 # hand, and host0 connects through the cdc as setup does.
 cut_stas_down() {
-	stage 07 "the loop and nvme-stas stopped, host0 handed back to the suite"
+	stage 08 "the loop and nvme-stas stopped, host0 handed back to the suite"
 	local out dev
 
 	out=$(helper_host 0 wloop_stop) || die "host0: the wloop_stop verb failed"
@@ -16000,9 +16325,9 @@ cut_stas_down() {
 		"the worker applied one failover in the whole case"
 }
 
-# --- step 8 -----------------------------------------------------------------
+# --- step 9 -----------------------------------------------------------------
 cut_drop_target() {
-	stage 08 "delete ns idx 2 and $TD_CUT, leaving $SS0 ns 1 and $TD0"
+	stage 09 "delete ns idx 2 and $TD_CUT, leaving $SS0 ns 1 and $TD0"
 	ctl_ok ns delete --nqn "$SS0" --idx 2
 	assert_field "$CTL_OUT" '.ns_id' "$CUT_NS2_ID" "DeleteNamespaceReply.ns_id"
 	# A real removal, so the head disk goes (react_drop_target says why that
@@ -16026,6 +16351,7 @@ case_cutoff() {
 	cut_stop_primary
 	cut_resume
 	cut_cont_primary
+	cut_etcd_outage
 	cut_stas_down
 	cut_drop_target
 	case_finish
@@ -16327,8 +16653,9 @@ main() {
 	fi
 
 	# The driver: the tools, the jq, `make build`, the two integtest binaries,
-	# `workerctl constants` (which fills ETCD_MAX_TXN_OPS — etcd will not start
-	# without it) and the pinned etcd tarball.
+	# `workerctl constants` (which fills ETCD_MAX_TXN_OPS and
+	# ETCD_MAX_REQUEST_BYTES — etcd will not start without them) and the
+	# pinned etcd tarball.
 	preflight_driver
 	ship_helpers
 

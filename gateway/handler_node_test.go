@@ -236,11 +236,9 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 	name := hnodeName("cluster")
 	req := &pb.CreateClusterRequest{
 		ClusterName: name,
-		QosRatio: &pb.QosRatio{
-			Strict:       true,
-			BytesPerIops: 4096,
-			BytesPerBps:  8192,
-		},
+		// All zero: the one qos_ratio a create accepts besides an absent one
+		// (architecture.md, Common validation).
+		QosRatio: &pb.QosRatio{},
 		BdevConf: &pb.BdevConf{
 			DmPoolConf:  &pb.DmPoolConf{DataBlockSize: 2 * 1024 * 1024},
 			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 128 * 1024},
@@ -270,8 +268,8 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 	}
 	hnodeWantProto(t, cc, &pb.ClusterConf{
 		CreationEpoch: epoch,
-		// Neither member of qos_ratio is defaultable, so it is the one
-		// sub-message resolution passes straight through.
+		// qos_ratio has no default, so resolution passes the accepted
+		// message straight through: stored present and empty, not dropped.
 		QosRatio: req.GetQosRatio(),
 		BdevConf: &pb.BdevConf{
 			DmPoolConf: &pb.DmPoolConf{
@@ -461,8 +459,8 @@ func TestCreateClusterNameCollisionWritesNothing(t *testing.T) {
 	globalRev := hnodeModRev(t, s, model.DnGlobalKey(cid))
 
 	_, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
-		ClusterName: name,
-		QosRatio:    &pb.QosRatio{Strict: true},
+		ClusterName:     name,
+		HealthCheckConf: &pb.HealthCheckConf{DnInterval: 9},
 	})
 	wantCode(t, err, codes.AlreadyExists, "CreateCluster of an existing name")
 	hnodeWantMsg(t, err, "already exists", "CreateCluster of an existing name")
@@ -475,8 +473,39 @@ func TestCreateClusterNameCollisionWritesNothing(t *testing.T) {
 	}
 	cc := &pb.ClusterConf{}
 	hnodeGet(t, s, confKey, cc)
-	if cc.GetQosRatio().GetStrict() {
-		t.Errorf("the refused request's qos_ratio reached the store")
+	if cc.GetHealthCheckConf().GetDnInterval() == 9 {
+		t.Errorf("the refused request's health_check_conf reached the store")
+	}
+}
+
+// TestCreateClusterRefusesANonZeroQosRatio pins the QoS rule of
+// architecture.md, Common validation, at the RPC: a qos_ratio that is not all
+// zero, one member at a time, is INVALID_ARGUMENT naming that member, and
+// nothing is written. The all-zero ratio is accepted and stored as sent, which
+// TestCreateClusterWritesConfAndThreeGlobals pins.
+func TestCreateClusterRefusesANonZeroQosRatio(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		field string
+		ratio *pb.QosRatio
+	}{
+		{"qos_ratio.strict", &pb.QosRatio{Strict: true}},
+		{"qos_ratio.bytes_per_iops", &pb.QosRatio{BytesPerIops: 4096}},
+		{"qos_ratio.bytes_per_bps", &pb.QosRatio{BytesPerBps: 8192}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			name := hnodeName("qos")
+			_, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+				ClusterName: name,
+				QosRatio:    tc.ratio,
+			})
+			wantCode(t, err, codes.InvalidArgument, "CreateCluster")
+			hnodeWantMsg(t, err, tc.field, "CreateCluster")
+			if hnodeExists(t, s, model.ClusterConfKey(name)) {
+				t.Errorf("a refused CreateCluster left a cluster_conf behind")
+			}
+		})
 	}
 }
 
@@ -1952,13 +1981,14 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 //
 //   - "a token from the future" is the ordinary stale client, holding a
 //     revision the store has not reached.
-//   - "an empty token message" is the sharpest discriminator in the file. It is
-//     the message that differs from no message at all only by BEING THERE: no
-//     addr_port, no revision, so the comparison runs against 0. A stored
-//     revision seeds at 1 and only grows, so 0 can never match and the row is
-//     ABORTED. Were the check keyed on the value 0 rather than on presence,
-//     this row would sail through, and so would the half-filled token below:
-//     a client bug would buy a silent unguarded write instead of a refusal.
+//   - "an empty token message" is the sharpest discriminator in the file. It
+//     is the message that differs from no message at all only by BEING THERE:
+//     no addr_port, no revision, so the comparison runs against 0. A stored
+//     revision seeds at 1 and never goes below it, so 0 can never match and
+//     the row is ABORTED. Were the check keyed on the value 0 rather than on
+//     presence, this row would sail through, and so would the half-filled
+//     token below: a client bug would buy a silent unguarded write instead of
+//     a refusal.
 //   - "a token message with no revision" is the same discriminator wearing the
 //     shape a real client would send by accident: it echoes the addr_port back
 //     and leaves `revision` unset. The echoed addr_port does not save it,

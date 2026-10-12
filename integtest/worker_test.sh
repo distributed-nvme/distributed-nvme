@@ -34,20 +34,15 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN_DIR="$REPO_ROOT/integtest/bin"
-CACHE_DIR="$BIN_DIR/cache"
 WORKER_BIN="$REPO_ROOT/bin/dnv-worker"
 WORKERCTL_BIN="$BIN_DIR/workerctl"
 FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 
-# The pinned etcd release. The tarball is downloaded once into
-# integtest/bin/cache and verified against this digest; a cached tarball whose
-# digest already matches is not re-downloaded, so a fresh checkout works and a
-# repeat run costs nothing.
-ETCD_VERSION=v3.6.14
-ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
-ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
-ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
-ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# The pinned etcd release, its place in integtest/bin/cache (ETCD_DIST under
+# ETCD_CACHE_DIR) and its download-and-verify path come from one file, which
+# every suite that starts an etcd shares with `make fetch-etcd`:
+# fetch_etcd (integtest/fetch_etcd.sh).
+. "$REPO_ROOT/integtest/fetch_etcd.sh"
 # Every etcd serving dnv MUST run with --max-txn-ops at least
 # common.EtcdMaxTxnOps (dnv-worker.md, Integration test plan, Topology). The
 # value is NOT typed here — read_constants() fills it at preflight from
@@ -71,6 +66,14 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # Its created flips carry one td each: no pool here holds a second. Its cntlr
 # replacements act on pools that hold no clone, so they read none.
 ETCD_MAX_TXN_OPS=
+# common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
+# MUST run with (dnv-worker.md, Constants this document owns), read by
+# read_constants() like ETCD_MAX_TXN_OPS. The request that SIZES it is the
+# provisioned flip over every slice of a pool at the widest shape, which
+# model's TestFlipProvisionedAtTheSliceCeiling commits. No request of this
+# suite comes near etcd's default; the flag is passed so that every etcd this
+# tree starts gets it from the same constant.
+ETCD_MAX_REQUEST_BYTES=
 
 # The timers case H runs at, read the same way by read_constants(): the
 # check interval a cluster created without one stores, the primary threshold
@@ -102,9 +105,10 @@ LWM=50                # low_water_mark_pct
 EXTENT_SIZE=67108864  # common.MinDnExtSize
 BLOCK_SIZE=1048576    # 1 MiB, the dm-thin data block
 CHUNK_BLOCKS=128      # bitmap_chunk_block_cnt
-# dm-thin's metadata block size, fixed by the kernel at 4 KiB: the FIRST
-# fraction of a thin-pool status line (`<used_meta>/<total_meta>`, see
-# thin_pool_line) counts THESE; the SECOND fraction is in BLOCK_SIZE blocks.
+# dm-thin's metadata block size, common.ThinMetaBlockSize, fixed by the
+# kernel at 4 KiB: the FIRST fraction of a thin-pool status line
+# (`<used_meta>/<total_meta>`, see thin_pool_line) counts THESE; the SECOND
+# fraction is in BLOCK_SIZE blocks.
 THIN_META_BLOCK_SIZE=4096
 WAIT_SHORT=5
 WAIT_MEMBERSHIP=20
@@ -995,35 +999,6 @@ resolve_jq() {
 	log "driver json parser: $JQ (no system jq)"
 }
 
-sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-
-# fetch_etcd implements the download-and-verify path. It is
-# idempotent: a cached tarball whose sha256 already matches the pin is never
-# re-downloaded, so the server needs no internet and a repeat run costs
-# nothing, while a fresh checkout still works.
-fetch_etcd() {
-	mkdir -p "$CACHE_DIR"
-	if [ -f "$ETCD_TAR" ] && [ "$(sha256_of "$ETCD_TAR")" = "$ETCD_SHA256" ]; then
-		log "  etcd $ETCD_VERSION tarball cached and verified"
-	else
-		log "  downloading $ETCD_URL"
-		curl -fsSL -o "$ETCD_TAR.part" "$ETCD_URL" ||
-			die "downloading the etcd tarball failed"
-		mv -f "$ETCD_TAR.part" "$ETCD_TAR"
-		local got
-		got=$(sha256_of "$ETCD_TAR")
-		[ "$got" = "$ETCD_SHA256" ] ||
-			die "etcd tarball sha256 is $got, want $ETCD_SHA256"
-	fi
-	if [ ! -x "$CACHE_DIR/$ETCD_DIST/etcd" ] ||
-		[ ! -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ]; then
-		tar -xzf "$ETCD_TAR" -C "$CACHE_DIR" ||
-			die "extracting the etcd tarball failed"
-	fi
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcd" ] || die "no etcd binary after extraction"
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
-}
-
 # read_constants, read_geometry and meta_units are how this shell reads a Go
 # value instead of copying it. All three run workerctl LOCALLY, on the binary
 # preflight_driver has just built: `constants`, `geometry` and `meta-units`
@@ -1037,9 +1012,13 @@ read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps from it and must not guess it"
+			"common.EtcdMaxTxnOps and common.EtcdMaxRequestBytes from it" \
+			"and must not guess them"
 	ETCD_MAX_TXN_OPS=$(constant_of "$json" EtcdMaxTxnOps)
 	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	ETCD_MAX_REQUEST_BYTES=$(constant_of "$json" EtcdMaxRequestBytes)
+	log "  --max-request-bytes = common.EtcdMaxRequestBytes =" \
+		"$ETCD_MAX_REQUEST_BYTES"
 	DEFAULT_HC_INTERVAL=$(constant_of "$json" DefaultHealthCheckInterval)
 	DEFAULT_PRIMARY_UNHEALTHY=$(constant_of "$json" DefaultPrimaryUnhealthy)
 	DEMOTION_HOLD=$(constant_of "$json" DemotionHoldTimeout)
@@ -1208,7 +1187,7 @@ setup() {
 	SETUP_DONE=1
 	log "[server] scp etcd etcdctl dnv-worker fakeagent workerctl -> $WORK/bin"
 	scp -q "${SSH_OPTS[@]}" \
-		"$CACHE_DIR/$ETCD_DIST/etcd" "$CACHE_DIR/$ETCD_DIST/etcdctl" \
+		"$ETCD_CACHE_DIR/$ETCD_DIST/etcd" "$ETCD_CACHE_DIR/$ETCD_DIST/etcdctl" \
 		"$WORKER_BIN" "$FAKEAGENT_BIN" "$WORKERCTL_BIN" \
 		"$TARGET:$WORK/bin/" || die "scp of the binaries failed"
 	sshw "chmod 0755 $WORK/bin/*"
@@ -1221,7 +1200,8 @@ setup() {
 		"--listen-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster dnv-it=http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--max-txn-ops=$ETCD_MAX_TXN_OPS"
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
+		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES"
 	wait_until "$WAIT_SHORT" "etcd to answer a workerctl ping" etcd_reachable
 
 	stage fakes "start four fake DNs and three fake CNs with an empty behavior"

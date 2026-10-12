@@ -303,9 +303,9 @@ func (s *Server) DeleteControllerNode(
 		// (architecture.md, Capacity index keys).
 		model.MaintainCnCapacity(stm, cid, req.GetAddrPort(), cn, nil)
 		// Only the bucket is decremented; next_id keeps growing, because ids
-		// are never reused and an agent may assume a deleted node never comes
-		// back under the same id (architecture.md, Globals: id allocation +
-		// shard buckets).
+		// are never reused and an agent may assume, an etcd restore aside,
+		// that a deleted node never comes back under the same id
+		// (architecture.md, Globals: id allocation + shard buckets).
 		global.ShardBucket = releaseShard(
 			global.GetShardBucket(), cn.GetShardCode())
 		stm.Put(globalKey, global)

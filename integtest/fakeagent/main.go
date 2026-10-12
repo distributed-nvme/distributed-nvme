@@ -1926,11 +1926,12 @@ func main() {
 	// The server interceptors are not optional: agent.log is the suite's
 	// only record of what the worker sent and which worker sent it
 	// (doc/grpc.md, Wiring; dnv-worker.md,
-	// Integration test plan, The fake agent).
-	server := grpc.NewServer(
+	// Integration test plan, The fake agent). The message limit of the same
+	// rule comes first, so the fake takes any request an agent takes.
+	server := grpc.NewServer(append(common.GrpcServerMsgOptions(),
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)
+	)...)
 	if mode == "dn" {
 		pb.RegisterDiskNodeAgentServer(server, agent)
 	} else {

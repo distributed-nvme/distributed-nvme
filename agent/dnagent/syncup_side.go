@@ -785,7 +785,7 @@ func (s *DnAgentServer) ensureCnExports(
 			agent.SubsysConf{
 				Nqn:          nqn,
 				Serial:       fmt.Sprintf(common.IdKeyFmt, plan.legId),
-				Model:        nsModel,
+				Model:        common.NvmeModel,
 				CntlidMin:    cntlidMin,
 				CntlidMax:    cntlidMax,
 				AllowedHosts: []string{plan.cnHostNqn(cnId)},

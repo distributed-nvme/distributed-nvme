@@ -250,7 +250,7 @@ type volEnv struct {
 }
 
 // newVolEnv writes the whole fixture and returns the environment the tests
-// drive. It skips when no etcd binary is available (EU7).
+// drive.
 //
 // The cluster is name-keyed and its id is derived
 // (architecture.md, cluster_id derivation), so a unique name and
@@ -603,7 +603,7 @@ func (e *volEnv) putSubsystem(
 		&pb.Subsystem{
 			SsId:   ssId,
 			Serial: fmt.Sprintf(common.IdKeyFmt, ssId),
-			Model:  subsystemModel,
+			Model:  common.NvmeModel,
 			NsList: nsList,
 		})
 	mustPut(e.t, e.cli, model.CdcEntryKey(e.cid, volShard, volSpId, ssId),
@@ -679,6 +679,46 @@ func (e *volEnv) wantUntouched(before *pb.SpConf, beforeRev uint64) {
 	if got := e.spConf(); !proto.Equal(got, before) {
 		e.t.Errorf("sp_conf moved on a refusal:\n got %v\nwant %v",
 			got, before)
+	}
+}
+
+// dump is every key of this test's cluster with its raw value: every key that
+// carries the cluster_id as one field, found the way sptEnv.dump finds them,
+// and the cluster's ClusterConf, the one cluster-scoped key that is keyed by
+// the cluster's name and carries no cluster_id (architecture.md, Key table).
+func (e *volEnv) dump() map[string][]byte {
+	e.t.Helper()
+	kvs, _, err := e.cli.Range(e.ctx, common.DnvPrefix)
+	if err != nil {
+		e.t.Fatalf("Range: %v", err)
+	}
+	tag := fmt.Sprintf(common.IdKeyFmt, e.cid)
+	conf := model.ClusterConfKey(e.cluster)
+	out := make(map[string][]byte, len(kvs))
+	for _, kv := range kvs {
+		if kv.Key == conf || strings.Contains(kv.Key, tag) {
+			out[kv.Key] = kv.Value
+		}
+	}
+	return out
+}
+
+// wantNoWrite fails the test for every key of the cluster that differs from
+// before, a dump taken just ahead of a refusal: a key written, added or
+// deleted anywhere in the cluster, not only in the pool's SpConf and SpRev
+// that wantUntouched reads.
+func (e *volEnv) wantNoWrite(what string, before map[string][]byte) {
+	e.t.Helper()
+	after := e.dump()
+	for key, value := range after {
+		if old, ok := before[key]; !ok || string(old) != string(value) {
+			e.t.Errorf("%s wrote %s", what, key)
+		}
+	}
+	for key := range before {
+		if _, ok := after[key]; !ok {
+			e.t.Errorf("%s deleted %s", what, key)
+		}
 	}
 }
 
@@ -1754,10 +1794,10 @@ func TestListThinDevicesReadsWholeMap(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestCreateSubsystemWritesEntryAndCdc pins the three-key write set of
-// architecture.md, Subsystems, namespaces: the
-// Subsystem with serial = %016x(ss_id) and model = "dnv" [D2], the CdcEntry
-// dnv-cdc serves the discovery log from, and the SpConf whose nqn_list gained
-// the NQN and whose next_id advanced — all under one SpRev bump.
+// architecture.md, Subsystems, namespaces: the Subsystem with serial =
+// %016x(ss_id) and model = common.NvmeModel [D2], the CdcEntry dnv-cdc serves
+// the discovery log from, and the SpConf whose nqn_list gained the NQN and
+// whose next_id advanced — all under one SpRev bump.
 func TestCreateSubsystemWritesEntryAndCdc(t *testing.T) {
 	env := newVolEnv(t)
 	reply, err := env.srv.CreateSubsystem(env.ctx, &pb.CreateSubsystemRequest{
@@ -1776,7 +1816,7 @@ func TestCreateSubsystemWritesEntryAndCdc(t *testing.T) {
 	wantSs := &pb.Subsystem{
 		SsId:         volNextId,
 		Serial:       fmt.Sprintf(common.IdKeyFmt, volNextId),
-		Model:        subsystemModel,
+		Model:        common.NvmeModel,
 		AllowedHosts: []string{volHostA, volHostB},
 	}
 	if got := env.subsystem(volNqn); !proto.Equal(got, wantSs) {
@@ -3594,6 +3634,99 @@ func TestGetAndUpdateCloneTrConf(t *testing.T) {
 		t.Errorf("clone_id: got %d, want %d",
 			reply.GetClone().GetCloneId(), created.GetCloneId())
 	}
+}
+
+// volSrcAddrs is n distinct addresses of a source pool's cntlrs, as the
+// entries of a src_tr_conf name them.
+func volSrcAddrs(n int) []string {
+	addrs := make([]string, 0, n)
+	for idx := 0; idx < n; idx++ {
+		addrs = append(addrs, fmt.Sprintf("cn-src-%d:9000", idx))
+	}
+	return addrs
+}
+
+// volTrConfsOf is the volTrConf of each of addrs, in that order.
+func volTrConfsOf(addrs ...string) []*pb.NvmeTrConf {
+	list := make([]*pb.NvmeTrConf, 0, len(addrs))
+	for _, addr := range addrs {
+		list = append(list, volTrConf(addr))
+	}
+	return list
+}
+
+// volWantSrcTrConfBound asserts the refusal of a src_tr_conf longer than
+// MaxCntlrCntPerSp: INVALID_ARGUMENT, the message naming the field and the
+// bound (architecture.md, Common validation).
+func volWantSrcTrConfBound(t *testing.T, err error) {
+	t.Helper()
+	msg := volWantCode(t, err, codes.InvalidArgument)
+	for _, want := range []string{
+		"src_tr_conf",
+		fmt.Sprintf("the maximum is %d", common.MaxCntlrCntPerSp),
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not name %q", msg, want)
+		}
+	}
+}
+
+// TestCreateCloneBoundsSrcTrConf pins the bound of architecture.md, Common
+// validation, on a clone's source transports: every cntlr syncup of the
+// destination pool carries the list, so CreateClone refuses one longer than
+// MaxCntlrCntPerSp, the most cntlrs a source pool has, and writes nothing.
+// The same request one entry shorter creates the clone with every entry, so
+// the length is all the refusal judged.
+func TestCreateCloneBoundsSrcTrConf(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	addrs := volSrcAddrs(common.MaxCntlrCntPerSp + 1)
+	req := volCloneRequest(env, "clone-a", "dst")
+	req.SrcTrConf = volTrConfsOf(addrs...)
+	before := env.dump()
+	_, err := env.srv.CreateClone(env.ctx, req)
+	volWantSrcTrConfBound(t, err)
+	env.wantNoWrite("the refused CreateClone", before)
+
+	req.SrcTrConf = volTrConfsOf(addrs[:common.MaxCntlrCntPerSp]...)
+	if _, err := env.srv.CreateClone(env.ctx, req); err != nil {
+		t.Fatalf("CreateClone with %d source transports: %v",
+			common.MaxCntlrCntPerSp, err)
+	}
+	volWantTrConfs(t, "clone-a src_tr_conf_list",
+		env.clone("clone-a").GetSrcTrConfList(),
+		addrs[:common.MaxCntlrCntPerSp]...)
+}
+
+// TestUpdateCloneTrConfBoundsSrcTrConf is the same bound on the replacement
+// list: UpdateCloneTrConf refuses a src_tr_conf longer than MaxCntlrCntPerSp
+// and writes nothing, and the same request one entry shorter replaces the
+// clone's list with every entry.
+func TestUpdateCloneTrConfBoundsSrcTrConf(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	volCreateClone(env, "clone-a", "dst")
+	addrs := volSrcAddrs(common.MaxCntlrCntPerSp + 1)
+	req := &pb.UpdateCloneTrConfRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       env.token(),
+		CloneName:   "clone-a",
+		SrcTrConf:   volTrConfsOf(addrs...),
+	}
+	before := env.dump()
+	_, err := env.srv.UpdateCloneTrConf(env.ctx, req)
+	volWantSrcTrConfBound(t, err)
+	env.wantNoWrite("the refused UpdateCloneTrConf", before)
+
+	req.SrcTrConf = volTrConfsOf(addrs[:common.MaxCntlrCntPerSp]...)
+	if _, err := env.srv.UpdateCloneTrConf(env.ctx, req); err != nil {
+		t.Fatalf("UpdateCloneTrConf with %d source transports: %v",
+			common.MaxCntlrCntPerSp, err)
+	}
+	volWantTrConfs(t, "clone-a src_tr_conf_list",
+		env.clone("clone-a").GetSrcTrConfList(),
+		addrs[:common.MaxCntlrCntPerSp]...)
 }
 
 // ---------------------------------------------------------------------------
@@ -5419,12 +5552,12 @@ func volTokenCases() []volTokenCase {
 // the proto zero value, and a message that echoes only the sp_name handle —
 // is the same ABORTED "stale revision".
 //
-// The last two rows are the discriminators. Stored revisions seed at 1 and only
-// grow, so 0 can never match; they are here to prove that what GW6 keys on is
-// the PRESENCE of the message and not the value 0, because they travel the same
-// zero revision as the absent-token requests of the test below and are refused
-// where those are let through. The second of them also pins that the echoed
-// sp_name does not participate: only `revision` is compared.
+// The last two rows are the discriminators. Stored revisions seed at 1 and
+// never go below it, so 0 can never match; they are here to prove that what
+// GW6 keys on is the PRESENCE of the message and not the value 0, because they
+// travel the same zero revision as the absent-token requests of the test below
+// and are refused where those are let through. The second of them also pins
+// that the echoed sp_name does not participate: only `revision` is compared.
 //
 // The check runs immediately after resolution and before every other state
 // check, so none of these cases may see a NOT_FOUND or a FAILED_PRECONDITION

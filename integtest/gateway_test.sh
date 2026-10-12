@@ -23,7 +23,7 @@
 # creates lives under $WORK on the server, and cleanup removes exactly that.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 59 RPCs maintains exactly the etcd schema (architecture.md,
+# of the 60 RPCs maintains exactly the etcd schema (architecture.md,
 # etcd data model), verified against ground truth that never goes through the
 # code under test; (b) parallel gRPCs across instances are correct — disjoint
 # work all succeeds, contended work has exactly one winner and no partial
@@ -34,7 +34,7 @@
 #
 # Log reading: every gateway/agent log is one JSON object per line, and a log
 # being appended to while we `cat` it can end in a torn line, so every read
-# goes through `jq -R 'fromjson? // empty'` (recs/recsr below) — a partial last
+# goes through `jq -R 'fromjson? // empty'` (recs below) — a partial last
 # line is dropped, never fails an assertion.
 #
 # Signals: the three gateways share one command line apart from their port, so
@@ -52,19 +52,16 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN_DIR="$REPO_ROOT/integtest/bin"
-CACHE_DIR="$BIN_DIR/cache"
 GATEWAY_BIN="$REPO_ROOT/bin/dnv-gateway"
 GATEWAYCTL_BIN="$BIN_DIR/gatewayctl"
 WORKERCTL_BIN="$BIN_DIR/workerctl"
 FAKEAGENT_BIN="$BIN_DIR/fakeagent"
 
-# The pinned etcd release — the same block, the same cache and the same digest
-# as every other suite that starts an etcd, so they all share one download.
-ETCD_VERSION=v3.6.14
-ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
-ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
-ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
-ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# The pinned etcd release, its place in integtest/bin/cache (ETCD_DIST under
+# ETCD_CACHE_DIR) and its download-and-verify path come from one file, which
+# every suite that starts an etcd shares with `make fetch-etcd`:
+# fetch_etcd (integtest/fetch_etcd.sh).
+. "$REPO_ROOT/integtest/fetch_etcd.sh"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob
 # (Integration test plan, Topology).
 # The value is NOT typed here: read_constants() fills it at preflight from
@@ -89,6 +86,14 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # MaxDelBmPerTxn and fits etcd's default anyway. So do its created flips:
 # `wctl set-created` flips one td per call.
 ETCD_MAX_TXN_OPS=
+# common.EtcdMaxRequestBytes — the --max-request-bytes every etcd serving dnv
+# MUST run with (dnv-worker.md, Constants this document owns), read by
+# read_constants() like ETCD_MAX_TXN_OPS. The request that SIZES it is the
+# provisioned flip over every slice of a pool at the widest shape, which
+# model's TestFlipProvisionedAtTheSliceCeiling commits. No request of this
+# suite comes near etcd's default; the flag is passed so that every etcd this
+# tree starts gets it from the same constant.
+ETCD_MAX_REQUEST_BYTES=
 
 WORK=/var/tmp/dnv-gateway-integtest
 
@@ -133,6 +138,16 @@ DEFAULT_HEALTH_INTERVAL=
 CN_META_UNITS=
 DN_META_UNITS=
 META_UNIT=
+
+# The id step's strides (architecture.md, Clusters): ID_STEP_STRIDE is
+# common.IdStepStride, how far AdvanceClusterIds moves each next_id, and
+# THIN_ID_STEP_STRIDE is common.ThinIdStepStride, how far it moves a pool's
+# next_dev_id. The smoke case's id-step stage checks every counter the step
+# moves against them, and its teardown's "never rewinds" checks count them
+# in, so they are NOT typed here either: read_constants() fills them from
+# `workerctl constants`.
+ID_STEP_STRIDE=
+THIN_ID_STEP_STRIDE=
 
 # Identity plan.
 CLUSTER=itgw
@@ -293,12 +308,6 @@ gwx() { # <UPPER_SNAKE code> <args…>
 	gw --expect "$code" "$@"
 }
 
-gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
-	local endpoint=$1 code=$2
-	shift 2
-	gw_at "$endpoint" --expect "$code" "$@"
-}
-
 # wctl is the ground-truth reader
 # (Integration test plan, The etcd verification, `workerctl`): the raw decoded
 # etcd state, read back by a binary that is NOT the code under test. Its only
@@ -345,12 +354,6 @@ recs() { # <path> <filter> [jq args…]
 	rlog "$path" | "$JQ" -cR "$@" "fromjson? // empty | $filter"
 }
 
-recsr() { # <path> <filter> [jq args…]  — raw output
-	local path=$1 filter=$2
-	shift 2
-	rlog "$path" | "$JQ" -rR "$@" "fromjson? // empty | $filter"
-}
-
 count_recs() { recs "$@" | wc -l | tr -d ' \n'; }
 
 # ---------------------------------------------------------------------------
@@ -387,7 +390,6 @@ gw_dir() { printf 'gw%d' "$1"; }   # 0-based
 dn_addr() { printf '127.0.0.1:%d' $((DN_PORT_BASE + $1)); }
 cn_addr() { printf '127.0.0.1:%d' $((CN_PORT_BASE + $1)); }
 gw_addr() { printf '127.0.0.1:%d' $((GW_PORT_BASE + $1)); }
-dn_port() { printf '%d' $((DN_PORT_BASE + $1)); }
 cn_port() { printf '%d' $((CN_PORT_BASE + $1)); }
 # Fake transport service ids: tcp/ipv4/127.0.0.1/44<n>.
 dn_svcid() { printf '442%d' "$1"; }
@@ -434,7 +436,7 @@ assert_no_write() { # <label> <cmd…>
 }
 
 # key_count counts the keys under a prefix — the non-SP-scoped form of the
-# refusal bracket, and the "nothing left" audit of case S stage 17. A bare
+# refusal bracket, and the "nothing left" audit of case S stage 18. A bare
 # kind of architecture.md, Key table, is scoped to $CLUSTER by workerctl (all
 # but cluster_conf, worker and the three *_rev kinds, which are never scoped),
 # so a scoped read FAILS once the cluster is gone (`cluster "itgw" does not
@@ -748,16 +750,6 @@ sp_primary_cntlr() { # <sp>
 		| "\(.[0]) \(.[1].addr_port)"'
 }
 
-# sp_side_dn_addrs lists every distinct DN addr_port an SP occupies, one per
-# line — the accounting the free-count assertions of cases S and A walk.
-sp_side_dn_addrs() { # <sp>
-	jq_of "$(sp_json "$1")" '
-		[ .slices[]
-		  | (.meta_grp_list[]?, .data_grp_list[]?)
-		  | (.leg_list[]?, .spare_leg_list[]?)
-		  | .side_list[]? | .addr_port ] | unique[]'
-}
-
 # verify_sp is the write-set verifier (gateway.md, Storage pools and GrowSlice)
 # of a freshly created standard SP (the test-time shape). Case S step 6 asserts
 # it in full, and cases A and D reuse it for every SP they create, which is
@@ -929,33 +921,6 @@ resolve_jq() {
 	log "driver json parser: $JQ (no system jq)"
 }
 
-sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-
-# fetch_etcd is worker_test.sh's block verbatim, sharing the same cache: a
-# cached tarball whose sha256 already matches the pin is never re-downloaded.
-fetch_etcd() {
-	mkdir -p "$CACHE_DIR"
-	if [ -f "$ETCD_TAR" ] && [ "$(sha256_of "$ETCD_TAR")" = "$ETCD_SHA256" ]; then
-		log "  etcd $ETCD_VERSION tarball cached and verified"
-	else
-		log "  downloading $ETCD_URL"
-		curl -fsSL -o "$ETCD_TAR.part" "$ETCD_URL" ||
-			die "downloading the etcd tarball failed"
-		mv -f "$ETCD_TAR.part" "$ETCD_TAR"
-		local got
-		got=$(sha256_of "$ETCD_TAR")
-		[ "$got" = "$ETCD_SHA256" ] ||
-			die "etcd tarball sha256 is $got, want $ETCD_SHA256"
-	fi
-	if [ ! -x "$CACHE_DIR/$ETCD_DIST/etcd" ] ||
-		[ ! -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ]; then
-		tar -xzf "$ETCD_TAR" -C "$CACHE_DIR" ||
-			die "extracting the etcd tarball failed"
-	fi
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcd" ] || die "no etcd binary after extraction"
-	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
-}
-
 # read_constants is how this shell reads a Go value instead of copying it. It
 # runs workerctl LOCALLY, on the binary preflight_driver has just built:
 # `constants` opens no etcd client and reads no key, so it wants no server, no
@@ -968,11 +933,13 @@ read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps, common.MaxSliceCntPerSp," \
+			"common.EtcdMaxTxnOps, common.EtcdMaxRequestBytes," \
+			"common.MaxSliceCntPerSp," \
 			"common.DefaultHealthCheckInterval and the metadata areas'" \
 			"common.CnCloneMetaUnitCnt, common.DnCloneMetaUnitCnt," \
-			"common.CnCloneMetaUnit and common.DnCloneMetaUnit from it and" \
-			"must not guess them"
+			"common.CnCloneMetaUnit and common.DnCloneMetaUnit and the id" \
+			"step's common.IdStepStride and common.ThinIdStepStride from it" \
+			"and must not guess them"
 	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
 	case "$ETCD_MAX_TXN_OPS" in
 	'' | *[!0-9]*)
@@ -981,6 +948,15 @@ read_constants() {
 		;;
 	esac
 	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	ETCD_MAX_REQUEST_BYTES=$(jq_of "$json" .EtcdMaxRequestBytes)
+	case "$ETCD_MAX_REQUEST_BYTES" in
+	'' | *[!0-9]*)
+		die "workerctl constants: EtcdMaxRequestBytes is" \
+			"'$ETCD_MAX_REQUEST_BYTES' in $json"
+		;;
+	esac
+	log "  --max-request-bytes = common.EtcdMaxRequestBytes =" \
+		"$ETCD_MAX_REQUEST_BYTES"
 	MAX_SLICE_CNT=$(jq_of "$json" .MaxSliceCntPerSp)
 	case "$MAX_SLICE_CNT" in
 	'' | *[!0-9]*)
@@ -1026,6 +1002,22 @@ read_constants() {
 	log "  the ceiling case's areas: common.CnCloneMetaUnitCnt" \
 		"$CN_META_UNITS and common.DnCloneMetaUnitCnt $DN_META_UNITS" \
 		"units of common.CnCloneMetaUnit = $META_UNIT bytes"
+	# The id step's strides (architecture.md, Clusters). Zero is refused as
+	# well: a step that moves nothing proves nothing.
+	for key in IdStepStride ThinIdStepStride; do
+		val=$(jq_of "$json" ".$key")
+		case "$val" in
+		'' | 0 | *[!0-9]*)
+			die "workerctl constants: $key is '$val' in $json"
+			;;
+		esac
+		case "$key" in
+		IdStepStride) ID_STEP_STRIDE=$val ;;
+		ThinIdStepStride) THIN_ID_STEP_STRIDE=$val ;;
+		esac
+	done
+	log "  the id step's strides: common.IdStepStride = $ID_STEP_STRIDE," \
+		"common.ThinIdStepStride = $THIN_ID_STEP_STRIDE"
 }
 
 preflight_driver() {
@@ -1102,7 +1094,7 @@ setup() {
 	SETUP_DONE=1
 	log "[server] scp etcd etcdctl dnv-gateway gatewayctl workerctl fakeagent -> $WORK/bin"
 	scp -q "${SSH_OPTS[@]}" \
-		"$CACHE_DIR/$ETCD_DIST/etcd" "$CACHE_DIR/$ETCD_DIST/etcdctl" \
+		"$ETCD_CACHE_DIR/$ETCD_DIST/etcd" "$ETCD_CACHE_DIR/$ETCD_DIST/etcdctl" \
 		"$GATEWAY_BIN" "$GATEWAYCTL_BIN" "$WORKERCTL_BIN" "$FAKEAGENT_BIN" \
 		"$TARGET:$WORK/bin/" || die "scp of the binaries failed"
 	sshw "chmod 0755 $WORK/bin/*"
@@ -1115,7 +1107,8 @@ setup() {
 		"--listen-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster dnv-gw-it=http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--max-txn-ops=$ETCD_MAX_TXN_OPS"
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
+		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES"
 	wait_until "$WAIT_SHORT" "etcd to answer a workerctl ping" etcd_reachable
 
 	stage fakes "start four fake DNs and three fake CNs with an empty behavior"
@@ -1459,7 +1452,7 @@ smoke_listed_svcids() { # <sp>
 }
 
 # smoke_dn_free_sum is Σ free_ext_cnt over the four DNs — the aggregate the
-# teardown of step 17 must restore exactly, and the cross-check that no
+# teardown of step 18 must restore exactly, and the cross-check that no
 # per-DN assertion above quietly agreed with a wrong topology.
 smoke_dn_free_sum() {
 	local i total=0
@@ -2125,6 +2118,8 @@ EOF
 	# serial is derived from the ss_id that outlives every cntlr.
 	assert_field "$ss" '.serial' "$(printf '%016x' "$ssId")" \
 		"subsystem serial is %016x(ss_id)"
+	# The model is common.NvmeModel, typed out because a host sees it: a
+	# build that changes the constant fails here.
 	assert_field "$ss" '.model' "dnv" "subsystem model"
 	assert_eq "$(smoke_jq "$ss" '.ns_list | length')" "0" "subsystem ns_list"
 	assert_eq "$(smoke_jq "$ss" '.allowed_hosts | @json')" "[\"$host0\"]" \
@@ -2900,7 +2895,67 @@ EOF
 		"inspect-side zeroed_bytes is the seeded side_conf.zero_bytes"
 
 	# -------------------------------------------------------------------
-	stage 17 "reverse teardown down to an empty store"
+	stage 17 "advance-ids: every counter moves, no revision, new ids above"
+	# -------------------------------------------------------------------
+	# The id step (architecture.md, Clusters; gateway.md GW19): one
+	# transaction moves the three globals' next_id by IdStepStride, then one
+	# per pool moves its next_id by IdStepStride and its next_dev_id by
+	# ThinIdStepStride, and no revision moves. sp0 is the cluster's one pool,
+	# so the step is exactly two store revisions.
+	local dnNext cnNext spNext poolNext poolDev storeBefore revIdx
+	local -a nodeRevs=()
+	dnNext=$(jq_of "$(raw_key "$DNV_PREFIX dn_global $cidHex")" '.next_id')
+	cnNext=$(jq_of "$(raw_key "$DNV_PREFIX cn_global $cidHex")" '.next_id')
+	spNext=$(jq_of "$(raw_key "$DNV_PREFIX sp_global $cidHex")" '.next_id')
+	poolNext=$(smoke_jq "$(sp_json sp0)" '.sp_conf.next_id')
+	poolDev=$(smoke_jq "$(sp_json sp0)" '.sp_conf.next_dev_id')
+	for i in 0 1 2 3; do nodeRevs+=("$(dn_rev_of "$(dn_addr "$i")")"); done
+	for i in 0 1 2; do nodeRevs+=("$(cn_rev_of "$(cn_addr "$i")")"); done
+	storeBefore=$(store_rev)
+	out=$(gw advance-cluster-ids)
+	assert_field "$out" '.cluster_id' "$CID" "advance-cluster-ids cluster_id"
+	assert_field "$out" '.sp_cnt' "1" "advance-cluster-ids moved sp0 alone"
+	assert_eq "$(store_rev)" "$((storeBefore + 2))" \
+		"one store revision for the globals and one for sp0 (GW19)"
+	assert_field "$(raw_key "$DNV_PREFIX dn_global $cidHex")" '.next_id' \
+		"$((dnNext + ID_STEP_STRIDE))" "DnGlobal next_id moved by the stride"
+	assert_field "$(raw_key "$DNV_PREFIX cn_global $cidHex")" '.next_id' \
+		"$((cnNext + ID_STEP_STRIDE))" "CnGlobal next_id moved by the stride"
+	assert_field "$(raw_key "$DNV_PREFIX sp_global $cidHex")" '.next_id' \
+		"$((spNext + ID_STEP_STRIDE))" "SpGlobal next_id moved by the stride"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.next_id')" \
+		"$((poolNext + ID_STEP_STRIDE))" "sp0 next_id moved by the stride"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.next_dev_id')" \
+		"$((poolDev + THIN_ID_STEP_STRIDE))" \
+		"sp0 next_dev_id moved by the thin stride"
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" "advance-cluster-ids bumps no SpRev"
+	revIdx=0
+	for i in 0 1 2 3; do
+		assert_eq "$(dn_rev_of "$(dn_addr "$i")")" "${nodeRevs[$revIdx]}" \
+			"advance-cluster-ids bumps no DnRev of dn$i"
+		revIdx=$((revIdx + 1))
+	done
+	for i in 0 1 2; do
+		assert_eq "$(cn_rev_of "$(cn_addr "$i")")" "${nodeRevs[$revIdx]}" \
+			"advance-cluster-ids bumps no CnRev of cn$i"
+		revIdx=$((revIdx + 1))
+	done
+	# A thin device created after the step draws both its ids from the moved
+	# counters, above every id the pool handed out, and goes again before the
+	# teardown counts the pool's thin devices.
+	out=$(gw create-td --sp sp0 --rev "$SP_REV" --name t9 --size "$TD_SIZE")
+	refresh_rev sp0
+	assert_field "$out" '.td_id' "$((poolNext + ID_STEP_STRIDE))" \
+		"create-td t9 td_id is the moved next_id"
+	assert_field "$out" '.dev_id' "$((poolDev + THIN_ID_STEP_STRIDE))" \
+		"create-td t9 dev_id is the moved next_dev_id"
+	out=$(gw delete-td --sp sp0 --rev "$SP_REV" --name t9)
+	refresh_rev sp0
+	assert_field "$out" '.td_id' "$((poolNext + ID_STEP_STRIDE))" \
+		"delete-td t9 reply td_id"
+
+	# -------------------------------------------------------------------
+	stage 18 "reverse teardown down to an empty store"
 	# -------------------------------------------------------------------
 	out=$(gw delete-ns --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1)
 	refresh_rev sp0
@@ -2991,8 +3046,9 @@ EOF
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" \
 		"SpGlobal Σbucket after the drain"
 	# GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
-	# never come back.
-	assert_field "$global" '.next_id' "2" "SpGlobal next_id never rewinds"
+	# never come back. It stands where stage 17's id step moved it.
+	assert_field "$global" '.next_id' "$((2 + ID_STEP_STRIDE))" \
+		"SpGlobal next_id never rewinds"
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS))" \
 		"Σ DN free fully restored"
 	# Every metadata unit is back as well: the clone's drain and the
@@ -3033,7 +3089,8 @@ EOF
 	assert_eq "$(key_count dn_rev)" "0" "dn_rev keys after the teardown"
 	global=$(raw_key "$DNV_PREFIX dn_global $cidHex")
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" "DnGlobal Σbucket"
-	assert_field "$global" '.next_id' "5" "DnGlobal next_id never rewinds"
+	assert_field "$global" '.next_id' "$((5 + ID_STEP_STRIDE))" \
+		"DnGlobal next_id never rewinds"
 	for i in 0 1 2; do
 		addr=$(cn_addr "$i")
 		rev=$(cn_rev_of "$addr")
@@ -3045,7 +3102,8 @@ EOF
 	assert_eq "$(key_count cn_rev)" "0" "cn_rev keys after the teardown"
 	global=$(raw_key "$DNV_PREFIX cn_global $cidHex")
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" "CnGlobal Σbucket"
-	assert_field "$global" '.next_id' "4" "CnGlobal next_id never rewinds"
+	assert_field "$global" '.next_id' "$((4 + ID_STEP_STRIDE))" \
+		"CnGlobal next_id never rewinds"
 	# The emptiness gate is Σbucket == 0 on all three globals (architecture.md,
 	# Clusters), and the four keys the cluster is made of go together.
 	out=$(gw delete-cluster)
@@ -4711,7 +4769,7 @@ case_faults() {
 	# is accepted, and the threshold is stored exactly as sent — the three
 	# members the request left at zero stay zero, resolved only when read
 	# (architecture.md, Common validation). The extra pool is then latched
-	# and drained, the way case S stage 17 tears sp0 down, and must give
+	# and drained, the way case S stage 18 tears sp0 down, and must give
 	# every node back exactly what its create took, so no later count of the
 	# case moves.
 	local nodesBefore nodesAfter thrRev
@@ -4833,7 +4891,7 @@ case_faults() {
 	# The thirteenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
 	# sets the flag
-	# (gateway.md, Storage pools and GrowSlice), and step 17 of case S drives
+	# (gateway.md, Storage pools and GrowSlice), and step 18 of case S drives
 	# the gate for real. It cannot be driven here, because this stage's sp0
 	# must stay live for the rest of the battery and the latch is one-way.
 

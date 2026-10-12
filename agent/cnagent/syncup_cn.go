@@ -533,7 +533,8 @@ func (s *CnAgentServer) ensurePort(
 // AFTER a best-effort removal pass whose every step only logged its failure
 // would forget a cntlr whose array would not stop with its devices still
 // live, and nothing would enumerate them again. Ids are never reused, so a
-// dropped cntlr never comes back.
+// dropped cntlr never comes back, an etcd restore aside (architecture.md, etcd
+// backup and restore).
 //
 // The base state itself is never torn down — like the DN port it outlives
 // every cntlr, and only lab cleanup removes it.

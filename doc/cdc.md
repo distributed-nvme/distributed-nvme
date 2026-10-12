@@ -400,8 +400,8 @@ discovery controller, DCTYPE Direct Discovery Controller, MDTS reporting no
 limit, KAS its keep-alive granularity, AERL `CdcAerl`, OAES with the
 Discovery Log Page Change bit set, LPA advertising the extended NUMD and
 LPO, SGLS advertising SGLs with in-capsule data, SUBNQN `NvmeDiscoveryNqn`,
-MN "dnv", SN derived from the listen endpoint and FR from the build; every
-unlisted field per NP14. Any other CNS: invalid field, DNR.
+MN `NvmeModel`, SN derived from the listen endpoint and FR from the build;
+every unlisted field per NP14. Any other CNS: invalid field, DNR.
 
 NP8. **Get Log Page.** The discovery log page only (anything else: invalid
 field, DNR — nvmet's discovery parser does the same). NUMDL and NUMDU, LPOL
@@ -582,9 +582,10 @@ data-path correctness beyond one read (the agent suites) or etcd failures.
 **Topology.** The developer machine builds the binaries and drives four lab
 servers over ssh; the suite occupies all four, so no other suite may run in
 the lab while it does. The first server runs, as a plain user with no sudo,
-one etcd, configured the way every etcd serving dnv must be (its
-transaction-op cap at `EtcdMaxTxnOps`, which the suite reads from the
-`workerctl` it builds instead of copying the number), four `dnv-cdc`
+one etcd, configured with the request caps every etcd serving dnv must have
+(its transaction-op cap at `EtcdMaxTxnOps` and its request-size cap at
+`EtcdMaxRequestBytes`, which the suite reads from the `workerctl` it builds
+instead of copying the numbers), four `dnv-cdc`
 instances — two twins of the low half of the shard-code space and two of
 the high half — and `cdcctl`. The second server, with passwordless sudo, is
 the nvmet target that stands in for the controller nodes: a handful of
@@ -649,7 +650,8 @@ log, the nvmet and dm state and the host connections in place and prints
 its diagnostics — the failing stage and its trace id, the tail of every
 cdc log, the entries in etcd, the target's configfs tree and dm tables,
 and the hosts' subsystems, uevent captures, flood sockets and nvme-stas
-journals — so the debris is what the developer reads. Order matters, and
+journals — so the debris is what the developer reads; a cleanup-only run
+does the end-of-run cleanup alone. Order matters, and
 every step tolerates absence: the hosts first, with the flood's idle
 connections closed and nvme-stas stopped so that its reconnect loops die
 before their targets vanish; then the target, its port links first, which

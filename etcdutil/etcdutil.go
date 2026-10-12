@@ -49,6 +49,15 @@ type Client struct {
 // caller: clientv3 dials lazily and reconnects in the background, and the
 // worker's vote layer stays fenced until its first successful put (VW8).
 //
+// The client sends requests up to common.EtcdMaxRequestBytes, the
+// --max-request-bytes every etcd serving dnv runs with (dnv-worker.md,
+// Constants this document owns): clientv3's own send limit is below the
+// transactions dnv commits, and it refuses a larger request before etcd sees
+// it, whatever the server allows. Its receive limit stays clientv3's default
+// of math.MaxInt32 bytes: a lower one would cap every range reply too, such
+// as the cdc's scan of every CdcEntry, which no dnv constant sizes, and
+// clientv3 refuses one below the send limit.
+//
 // ctx bounds the construction only. It is deliberately not installed as the
 // client's own lifetime context, so that a short-lived startup ctx cannot
 // silently kill a long-lived client; Close releases it instead.
@@ -68,7 +77,8 @@ func New(
 		DialTimeout: dialTimeout,
 		// Silence the etcd client's own zap logger: stderr carries one JSON
 		// record per line (log.md R2) and the integration suite parses it.
-		Logger: zap.NewNop(),
+		Logger:             zap.NewNop(),
+		MaxCallSendMsgSize: common.EtcdMaxRequestBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("etcd client: %w", err)

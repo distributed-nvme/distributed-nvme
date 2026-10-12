@@ -236,7 +236,8 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 	rpcToCmd := map[string]string{
 		"CreateCluster": "create-cluster", "DeleteCluster": "delete-cluster",
 		"GetCluster": "get-cluster", "ListClusters": "list-clusters",
-		"CreateDiskNode": "create-dn", "DeleteDiskNode": "delete-dn",
+		"AdvanceClusterIds": "advance-cluster-ids",
+		"CreateDiskNode":    "create-dn", "DeleteDiskNode": "delete-dn",
 		"GetDiskNode": "get-dn", "ListDiskNodes": "list-dns",
 		"UpdateDiskNodeDisabled":          "set-dn-disabled",
 		"InspectDiskNode":                 "inspect-dn",
@@ -290,8 +291,8 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"GetThinDeviceBitmap":             "get-td-bm",
 		"GetLegBitmap":                    "get-leg-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 59 {
-		t.Fatalf("service Gateway has %d methods, want 59",
+	if len(pb.Gateway_ServiceDesc.Methods) != 60 {
+		t.Fatalf("service Gateway has %d methods, want 60",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {

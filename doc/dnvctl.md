@@ -137,10 +137,11 @@ global flag (CT8).
 CT2. **The mandatory client block.** dnvctl is a real dnv component, not an
 integtest driver, so it dials the gateway with the mandatory client block of
 `grpc.md`, Wiring: `grpc.NewClient` under plaintext transport credentials,
-with both client interceptor chains. One connection per invocation, closed
-on exit. Every RPC runs under a deadline of `--timeout` seconds. Every RPC
-of `service Gateway` is unary; the stream chain is installed anyway, because
-the wiring rule puts both chains on every dnv connection.
+with both client interceptor chains and the message limit. One connection
+per invocation, closed on exit. Every RPC runs under a deadline of
+`--timeout` seconds. Every RPC of `service Gateway` is unary; the stream
+chain is installed anyway, because the wiring rule puts both chains on every
+dnv connection.
 
 ### Trace ids
 
@@ -233,11 +234,11 @@ was typed:
   `--rev` fed an unset shell variable is a usage error (exit 2), not an
   ungated write.
 * On every other command — the reads, and the writes that carry no token
-  either, `cluster create`, `cluster delete`, `dn create`, `cn create` and
-  `sp create` — a typed `--rev` is a usage error (exit 2, no RPC issued),
-  whatever its value. No field could carry it, so sending the request anyway
-  would drop it unseen: a `cluster delete` typed with `--rev` would delete
-  ungated while looking gated.
+  either, `cluster create`, `cluster delete`, `cluster advance-ids`,
+  `dn create`, `cn create` and `sp create` — a typed `--rev` is a usage
+  error (exit 2, no RPC issued), whatever its value. No field could carry
+  it, so sending the request anyway would drop it unseen: a `cluster delete`
+  typed with `--rev` would delete ungated while looking gated.
 
 The check itself — made only when the token message is present — is
 `gateway.md` GW6; a token-less mutator therefore succeeds ungated.
@@ -270,8 +271,8 @@ the leaf is safe to script. An inspect RPC is an `inspect` leaf
 (`sp inspect-side` for a side), a live read the gateway answers from the
 agent that hosts the object, not from etcd. The bitmap RPCs are `get-bm`,
 `get-leg-bm` and `append-bm`; every other leaf keeps its RPC's verb
-(`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
-`spare switch`).
+(`cluster advance-ids`, `sp find-names`, `sp grow-slice`, `migr finish`,
+`migr cancel`, `spare switch`).
 
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:
@@ -400,6 +401,12 @@ Common validation). `creation_epoch`, the remaining `ClusterConf` member, is
 no request field: the gateway stamps it. And because `ClusterConf` is
 write-once — no RPC updates it (`architecture.md`, Clusters) —
 `--extent-size` is the only chance a cluster's extent size gets to be set.
+
+`cluster advance-ids` is the id step of `architecture.md`, etcd backup and
+restore. It names its cluster with `--name`, as `cluster create`,
+`cluster delete` and `cluster get` do, and carries no token. Its RPC runs
+one transaction per pool of the cluster (`architecture.md`, Clusters), so on
+a cluster of many pools it needs a `--timeout` that covers them all.
 
 ### `dn` — `ctl/dn.go`
 

@@ -483,21 +483,24 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). The suites read twelve of its keys at
-// preflight, and stop there when one is missing: every suite that starts an
-// etcd launches it with EtcdMaxTxnOps, e2e cross-checks MaxAllocLegPerGrp,
-// the gateway suite creates its stage-13 clone at MaxSliceCntPerSp and checks
-// the health intervals a new cluster stores against
-// DefaultHealthCheckInterval, the worker and e2e suites read that interval,
-// DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases,
-// the gateway suite's ceiling case fills the metadata areas to
-// CnCloneMetaUnitCnt and DnCloneMetaUnitCnt in units of CnCloneMetaUnit,
-// which it requires DnCloneMetaUnit to equal, and the cdc suite's flood case
-// fills the pending cap, CdcMaxPendingConnCnt, and waits by the pre-Connect
-// deadline, DefaultCdcPendingTmoMs. One of those twelve dropped or renamed
-// here would otherwise surface only when a suite is run, at its preflight.
-// The other three keys are pinned as well, because a case may size itself
-// against them.
+// the others, for computed values). It prints eighteen keys, and the suites
+// read fifteen of them at preflight and stop there when one is missing.
+// Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
+// launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
+// cross-checks MaxAllocLegPerGrp. The gateway suite creates its stage-13
+// clone at MaxSliceCntPerSp, checks the health intervals a new cluster stores
+// against DefaultHealthCheckInterval, fills the metadata areas in its ceiling
+// case to CnCloneMetaUnitCnt and DnCloneMetaUnitCnt in units of
+// CnCloneMetaUnit, which it requires DnCloneMetaUnit to equal, and checks the
+// counters the id step moves against IdStepStride and ThinIdStepStride. The
+// worker and e2e suites read DefaultHealthCheckInterval,
+// DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases.
+// The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
+// waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
+// fifteen dropped or renamed here would otherwise surface only when a suite
+// is run, at its preflight. No suite reads the other three, MaxDelGrpPerTxn,
+// MaxSpareLegPerGrp and MaxDelBmPerTxn; they are pinned as well, because a
+// case may size itself against them.
 func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 	read, write, err := os.Pipe()
 	if err != nil {
@@ -518,7 +521,9 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		t.Fatalf("constants printed %q, not one JSON object: %v", out, err)
 	}
 	want := map[string]uint64{
-		"EtcdMaxTxnOps":     common.EtcdMaxTxnOps,
+		"EtcdMaxTxnOps":       common.EtcdMaxTxnOps,
+		"EtcdMaxRequestBytes": common.EtcdMaxRequestBytes,
+
 		"MaxDelGrpPerTxn":   common.MaxDelGrpPerTxn,
 		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
 		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
@@ -533,6 +538,9 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"CnCloneMetaUnit":    common.CnCloneMetaUnit,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,
+
+		"IdStepStride":     common.IdStepStride,
+		"ThinIdStepStride": common.ThinIdStepStride,
 
 		"CdcMaxPendingConnCnt":   common.CdcMaxPendingConnCnt,
 		"DefaultCdcPendingTmoMs": common.DefaultCdcPendingTmoMs,

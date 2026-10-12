@@ -74,10 +74,11 @@ func Serve(
 	if err != nil {
 		return err
 	}
-	grpcServer := grpc.NewServer(
+	// The message limit and both server chains (grpc.md, Wiring).
+	grpcServer := grpc.NewServer(append(common.GrpcServerMsgOptions(),
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)
+	)...)
 	register(grpcServer)
 	go func() {
 		<-ctx.Done()

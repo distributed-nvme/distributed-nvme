@@ -23,6 +23,7 @@ const (
 	Gateway_DeleteCluster_FullMethodName                   = "/Gateway/DeleteCluster"
 	Gateway_GetCluster_FullMethodName                      = "/Gateway/GetCluster"
 	Gateway_ListClusters_FullMethodName                    = "/Gateway/ListClusters"
+	Gateway_AdvanceClusterIds_FullMethodName               = "/Gateway/AdvanceClusterIds"
 	Gateway_CreateDiskNode_FullMethodName                  = "/Gateway/CreateDiskNode"
 	Gateway_DeleteDiskNode_FullMethodName                  = "/Gateway/DeleteDiskNode"
 	Gateway_GetDiskNode_FullMethodName                     = "/Gateway/GetDiskNode"
@@ -88,6 +89,7 @@ type GatewayClient interface {
 	DeleteCluster(ctx context.Context, in *DeleteClusterRequest, opts ...grpc.CallOption) (*DeleteClusterReply, error)
 	GetCluster(ctx context.Context, in *GetClusterRequest, opts ...grpc.CallOption) (*GetClusterReply, error)
 	ListClusters(ctx context.Context, in *ListClustersRequest, opts ...grpc.CallOption) (*ListClustersReply, error)
+	AdvanceClusterIds(ctx context.Context, in *AdvanceClusterIdsRequest, opts ...grpc.CallOption) (*AdvanceClusterIdsReply, error)
 	CreateDiskNode(ctx context.Context, in *CreateDiskNodeRequest, opts ...grpc.CallOption) (*CreateDiskNodeReply, error)
 	DeleteDiskNode(ctx context.Context, in *DeleteDiskNodeRequest, opts ...grpc.CallOption) (*DeleteDiskNodeReply, error)
 	GetDiskNode(ctx context.Context, in *GetDiskNodeRequest, opts ...grpc.CallOption) (*GetDiskNodeReply, error)
@@ -187,6 +189,16 @@ func (c *gatewayClient) ListClusters(ctx context.Context, in *ListClustersReques
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListClustersReply)
 	err := c.cc.Invoke(ctx, Gateway_ListClusters_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) AdvanceClusterIds(ctx context.Context, in *AdvanceClusterIdsRequest, opts ...grpc.CallOption) (*AdvanceClusterIdsReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdvanceClusterIdsReply)
+	err := c.cc.Invoke(ctx, Gateway_AdvanceClusterIds_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -751,6 +763,7 @@ type GatewayServer interface {
 	DeleteCluster(context.Context, *DeleteClusterRequest) (*DeleteClusterReply, error)
 	GetCluster(context.Context, *GetClusterRequest) (*GetClusterReply, error)
 	ListClusters(context.Context, *ListClustersRequest) (*ListClustersReply, error)
+	AdvanceClusterIds(context.Context, *AdvanceClusterIdsRequest) (*AdvanceClusterIdsReply, error)
 	CreateDiskNode(context.Context, *CreateDiskNodeRequest) (*CreateDiskNodeReply, error)
 	DeleteDiskNode(context.Context, *DeleteDiskNodeRequest) (*DeleteDiskNodeReply, error)
 	GetDiskNode(context.Context, *GetDiskNodeRequest) (*GetDiskNodeReply, error)
@@ -827,6 +840,9 @@ func (UnimplementedGatewayServer) GetCluster(context.Context, *GetClusterRequest
 }
 func (UnimplementedGatewayServer) ListClusters(context.Context, *ListClustersRequest) (*ListClustersReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListClusters not implemented")
+}
+func (UnimplementedGatewayServer) AdvanceClusterIds(context.Context, *AdvanceClusterIdsRequest) (*AdvanceClusterIdsReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdvanceClusterIds not implemented")
 }
 func (UnimplementedGatewayServer) CreateDiskNode(context.Context, *CreateDiskNodeRequest) (*CreateDiskNodeReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateDiskNode not implemented")
@@ -1082,6 +1098,24 @@ func _Gateway_ListClusters_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayServer).ListClusters(ctx, req.(*ListClustersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_AdvanceClusterIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdvanceClusterIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).AdvanceClusterIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_AdvanceClusterIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).AdvanceClusterIds(ctx, req.(*AdvanceClusterIdsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2098,6 +2132,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListClusters",
 			Handler:    _Gateway_ListClusters_Handler,
+		},
+		{
+			MethodName: "AdvanceClusterIds",
+			Handler:    _Gateway_AdvanceClusterIds_Handler,
 		},
 		{
 			MethodName: "CreateDiskNode",

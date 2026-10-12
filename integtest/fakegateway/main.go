@@ -760,6 +760,12 @@ func (g *fakeGateway) ListClusters(
 	return serve[*pb.ListClustersReply](g, ctx, "ListClusters", req)
 }
 
+func (g *fakeGateway) AdvanceClusterIds(
+	ctx context.Context, req *pb.AdvanceClusterIdsRequest,
+) (*pb.AdvanceClusterIdsReply, error) {
+	return serve[*pb.AdvanceClusterIdsReply](g, ctx, "AdvanceClusterIds", req)
+}
+
 func (g *fakeGateway) CreateDiskNode(
 	ctx context.Context, req *pb.CreateDiskNodeRequest,
 ) (*pb.CreateDiskNodeReply, error) {
@@ -1128,11 +1134,13 @@ func main() {
 	// trace-id evidence there; request EQUALITY it asserts against
 	// state.json's last_request. The stream twin is installed even though
 	// every Gateway RPC is unary — the Wiring chain is one rule, and a fake
-	// that half-applies it is a fake that stops being evidence.
-	server := grpc.NewServer(
+	// that half-applies it is a fake that stops being evidence. The message
+	// limit of the same rule comes first, so the fake takes any request the
+	// gateway takes.
+	server := grpc.NewServer(append(common.GrpcServerMsgOptions(),
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)
+	)...)
 	pb.RegisterGatewayServer(server, fake)
 	slog.InfoContext(ctx, "fakegateway started",
 		slog.String("grpc_address", *addr),

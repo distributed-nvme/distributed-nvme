@@ -1,13 +1,15 @@
 # grpc.md — gRPC interceptors
 
 This document owns the four gRPC interceptors every dnv connection and server
-chains: the trace-id propagation between context and gRPC metadata, the
-logging of every request and reply message with its record names and
-ordering, the wiring rule that puts both chains on every dnv client
+chains, and the message limit every such connection and server sets: the
+trace-id propagation between context and gRPC metadata, the logging of
+every request and reply message with its record names and ordering, the
+wiring rule that puts both chains and the limit on every dnv client
 connection and server, and the conventions the integration-test drivers and
-fakes follow instead. It leans on `log.md` for the helpers it reuses
-(`WithTraceId`, `TraceIdFromCtx`, `TraceIdMetadataKey`, `PbToLogValue`) and
-for its rules on Info records and typed attributes, on `schema.proto` for the
+fakes follow instead. It leans
+on `log.md` for the helpers it reuses (`WithTraceId`, `TraceIdFromCtx`,
+`TraceIdMetadataKey`, `PbToLogValue`) and for its rules on Info records and
+typed attributes, on `schema.proto` for the
 three services (`Gateway`, `DiskNodeAgent`, `ControllerNodeAgent`), and on
 `architecture.md`, System overview, for who calls whom.
 
@@ -148,6 +150,16 @@ options, `grpc.ChainUnaryInterceptor` with `GrpcUnaryServerInterceptor` and
 `grpc.ChainStreamInterceptor` with `GrpcStreamServerInterceptor`; the gateway
 chains its trace-id mint ahead of them (T4).
 
+Every dnv server and client connection also carries the message limit,
+`GrpcMaxMsgSize`, for receiving and for sending: a server takes
+`common.GrpcServerMsgOptions`, a client connection
+`common.GrpcClientMsgOption`, the default of every call made on it. gRPC's
+own receive default is below the widest messages dnv builds — the cntlr
+syncup, the cntlr report and the pool get reply of a pool at the cardinality
+limits (`architecture.md`, Known limits) — and one limit on both ends means
+that what one end may send the other takes. `GrpcMaxMsgSize` is this
+document's constant; `common/constants.go` is authoritative for its comment.
+
 Who is a server or a client of whom:
 
 | binary | server interceptors on | client interceptors on |
@@ -186,6 +198,12 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   selects `grpc server request` records by `trace_id` and `method`; the
   request payloads it asserts come from the fake's `state.json`
   (`dnvctl.md`, Integration test plan).
+* The message limit is no part of that scoping out: `gatewayctl`,
+  `cnagentctl`, `dnagentctl` and both fakes set it as Wiring says, so a
+  driver takes any reply the daemon it calls sends, and a fake any request
+  the daemon it stands in for would take. `workerctl` and `cdcctl` dial no
+  dnv service: they reach only etcd, whose client is not dnv-internal gRPC
+  (Placement).
 * No driver installs a logger of its own: each inherits `common`'s
   default chain, which is what keeps its stdout the result channel
   the suites parse (`log.md` R3). The only log records reaching a driver's

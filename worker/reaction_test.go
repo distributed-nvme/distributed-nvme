@@ -154,11 +154,12 @@ func reactDataBlocks(t *testing.T, extCnt uint64) uint64 {
 	return dataBlocks
 }
 
-// reactMetaBlocks is the number of 4 KiB dm-thin METADATA blocks a meta group
-// of extCnt extents contributes to the pool's metadata device.
+// reactMetaBlocks is the number of dm-thin METADATA blocks, each
+// common.ThinMetaBlockSize bytes, a meta group of extCnt extents contributes
+// to the pool's metadata device.
 func reactMetaBlocks(t *testing.T, extCnt uint64) uint64 {
 	t.Helper()
-	return reactDataBlocks(t, extCnt) * reactBlockSize / thinMetaBlockSize
+	return reactDataBlocks(t, extCnt) * reactBlockSize / common.ThinMetaBlockSize
 }
 
 // reactFixture is the SP every reaction test starts from: two cntlrs (one

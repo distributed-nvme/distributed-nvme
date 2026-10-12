@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -9,7 +11,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md, Clusters / gateway.md, Clusters: the four
+// This file is architecture.md, Clusters / gateway.md, Clusters: the five
 // cluster RPCs.
 //
 // The cluster is the one resource whose identity is derived rather than
@@ -25,7 +27,8 @@ import (
 // that do not exist yet at `CreateCluster` and can no longer exist at
 // `DeleteCluster` (its emptiness gate is exactly the statement that none do),
 // so the fan-out of architecture.md, Revision keys and the sync fan-out, has
-// nothing to reach and no op name is cited.
+// nothing to reach and no op name is cited; and `AdvanceClusterIds` writes
+// only id counters, which no agent reads (GW19).
 
 // CreateCluster is the CreateCluster of architecture.md, Clusters: the one RPC
 // that computes cluster_id without reading ClusterConf first, because it is
@@ -45,7 +48,8 @@ import (
 // means "give me the default" and a non-zero value outside its range is
 // refused, and then judges the geometry rules of architecture.md, Common
 // validation, once more on a resolved copy of
-// its bdev_conf — and model.ResolveClusterConf then turns the accepted request
+// its bdev_conf, and refuses a qos_ratio that is not all zero — and
+// model.ResolveClusterConf then turns the accepted request
 // into the concrete message that is stored. The order is load-bearing:
 // resolving first would replace every omitted
 // member with a constant and make the bound checks tautologies.
@@ -269,4 +273,122 @@ func (s *Server) ListClusters(
 		ClusterName: names,
 		PageToken:   nextToken,
 	}, nil
+}
+
+// idStepRanged runs in AdvanceClusterIds between the range that lists the
+// pools and the first pool transaction, and does nothing in production. It is
+// the seam a test deletes and creates pools through, in exactly the window
+// the range opens.
+var idStepRanged = func() {}
+
+// AdvanceClusterIds is the AdvanceClusterIds of architecture.md, Clusters:
+// the id step (GW19), run after an etcd restore (architecture.md, etcd backup
+// and restore).
+//
+// One STM resolves the cluster and moves the next_id of its three globals
+// with advanceNextId. A keys-only range of the cluster's SpConf prefix then
+// lists the pools, outside any STM, and one STM per listed pool moves the
+// pool's next_id with advanceNextId and its next_dev_id with advanceDevId. A
+// pool whose SpConf is gone by its transaction is skipped: nothing is put for
+// it and the reply's sp_cnt does not count it. A pool latched for deletion
+// moves like any other.
+//
+// The globals go first, so a pool created while the step runs draws an sp_id
+// above every old one and needs no step of its own. The pool transactions
+// read no ClusterConf: the first transaction's cluster id names their keys,
+// and a pool of a recreated cluster lives under another id. One transaction
+// per pool keeps each to one SpConf whatever the pool count, where one over
+// every pool of a cluster at MaxSpCntPerCluster would pass EtcdMaxTxnOps. No
+// transaction reads or bumps a rev key: no agent reads a counter. An error in
+// any transaction ends the RPC there, the pools before it moved.
+func (s *Server) AdvanceClusterIds(
+	ctx context.Context,
+	req *pb.AdvanceClusterIdsRequest,
+) (*pb.AdvanceClusterIdsReply, error) {
+	if err := validateOptionalName(
+		"cluster_name", req.GetClusterName(),
+	); err != nil {
+		return nil, err
+	}
+	name := clusterNameOf(req.GetClusterName())
+	var cid uint64
+	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+		cid = 0
+		resolved, _, err := resolveCluster(stm, name)
+		if err != nil {
+			return err
+		}
+		dnKey := model.DnGlobalKey(resolved)
+		dnGlobal := &pb.DnGlobal{}
+		if !stm.Get(dnKey, dnGlobal) {
+			return errAborted("dn_global key %q is missing", dnKey)
+		}
+		cnKey := model.CnGlobalKey(resolved)
+		cnGlobal := &pb.CnGlobal{}
+		if !stm.Get(cnKey, cnGlobal) {
+			return errAborted("cn_global key %q is missing", cnKey)
+		}
+		spKey := model.SpGlobalKey(resolved)
+		spGlobal := &pb.SpGlobal{}
+		if !stm.Get(spKey, spGlobal) {
+			return errAborted("sp_global key %q is missing", spKey)
+		}
+		if dnGlobal.NextId, err = advanceNextId(
+			dnGlobal.GetNextId(), "dn_global"); err != nil {
+			return err
+		}
+		if cnGlobal.NextId, err = advanceNextId(
+			cnGlobal.GetNextId(), "cn_global"); err != nil {
+			return err
+		}
+		if spGlobal.NextId, err = advanceNextId(
+			spGlobal.GetNextId(), "sp_global"); err != nil {
+			return err
+		}
+		stm.Put(dnKey, dnGlobal)
+		stm.Put(cnKey, cnGlobal)
+		stm.Put(spKey, spGlobal)
+		cid = resolved
+		return nil
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	prefix := model.SpConfPrefix(cid)
+	keys, _, err := s.cli.RangeKeys(ctx, prefix)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	idStepRanged()
+	spCnt := uint32(0)
+	for _, entry := range keys {
+		spName := strings.TrimPrefix(entry.Key, prefix)
+		stepped := false
+		err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+			stepped = false
+			key := model.SpConfKey(cid, spName)
+			conf := &pb.SpConf{}
+			if !stm.Get(key, conf) {
+				// Deleted since the range: it hands out nothing more.
+				return nil
+			}
+			next, err := advanceNextId(model.SpNextId(conf),
+				fmt.Sprintf("storage pool %q", spName))
+			if err != nil {
+				return err
+			}
+			conf.NextId = next
+			conf.NextDevId = advanceDevId(conf.GetNextDevId())
+			stm.Put(key, conf)
+			stepped = true
+			return nil
+		})
+		if err != nil {
+			return nil, mapStmErr(err)
+		}
+		if stepped {
+			spCnt++
+		}
+	}
+	return &pb.AdvanceClusterIdsReply{ClusterId: cid, SpCnt: spCnt}, nil
 }

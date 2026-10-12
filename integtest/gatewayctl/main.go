@@ -327,13 +327,16 @@ func (g *globals) bind(fs *flag.FlagSet) {
 // dial opens one connection to a gateway. The interceptors are deliberately
 // NOT installed: this is a test driver, not a dnv component, and its own
 // request/reply logging would only duplicate what the gateway already logs.
-// The trace id travels as plain outgoing metadata instead (rpcCtx).
+// The trace id travels as plain outgoing metadata instead (rpcCtx). The
+// message limit IS installed (grpc.md, Drivers and fakes), so the driver
+// takes any reply the gateway sends.
 func dial(addr string) (*grpc.ClientConn, pb.GatewayClient, error) {
 	if addr == "" {
 		return nil, nil, fmt.Errorf("--gateway is required")
 	}
 	conn, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		common.GrpcClientMsgOption())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -433,6 +436,7 @@ var commands = []command{
 	{"delete-cluster", setupDeleteCluster},
 	{"get-cluster", setupGetCluster},
 	{"list-clusters", setupListClusters},
+	{"advance-cluster-ids", setupAdvanceClusterIds},
 	// dn
 	{"create-dn", setupCreateDn},
 	{"delete-dn", setupDeleteDn},

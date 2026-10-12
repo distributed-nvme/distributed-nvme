@@ -1498,9 +1498,6 @@ func TestServingBufconnStatusCodesCrossTheWire(t *testing.T) {
 // error the test would then have to ignore.
 func servingOwnClient(t *testing.T) *etcdutil.Client {
 	t.Helper()
-	if testEndpoint == "" {
-		t.Skip("no etcd binary (set ETCD_BIN or put etcd on PATH)")
-	}
 	cli, err := etcdutil.New(
 		context.Background(),
 		[]string{testEndpoint},

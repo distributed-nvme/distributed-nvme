@@ -50,7 +50,18 @@ var renderCases = []renderCase{
 			`"cn_global":null,"dn_global":null,"sp_global":null}` + "\n",
 	},
 	{
-		// The sweep golden for step 19: a revision on the wire is a uint64,
+		// The id step's reply: the uint64 cluster id renders as a string
+		// beside the uint32 pool count, which stays a number.
+		name: "cluster advance-ids, the reply",
+		rpc:  "AdvanceClusterIds",
+		argv: []string{"cluster", "advance-ids"},
+		reply: &pb.AdvanceClusterIdsReply{
+			ClusterId: 18446744073709551615, SpCnt: 3,
+		},
+		want: `{"cluster_id":"18446744073709551615","sp_cnt":3}` + "\n",
+	},
+	{
+		// The sweep golden for step 20: a revision on the wire is a uint64,
 		// and protojson renders it as a quoted string so that a value above
 		// 2^53 survives a JavaScript or jq consumer intact. This is the
 		// number an operator copies back into --rev.
@@ -182,7 +193,7 @@ var renderCases = []renderCase{
 	{
 		// CT4's one deviation: protojson would render `bitmap` as base64, so
 		// the two bitmap reads print a hex map instead. This is the sweep
-		// golden for step 33.
+		// golden for step 34.
 		name: "td get-bm, the hex map",
 		rpc:  "GetThinDeviceBitmap",
 		argv: []string{"td", "get-bm", "--name", "t0"},

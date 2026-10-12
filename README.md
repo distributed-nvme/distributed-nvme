@@ -40,7 +40,7 @@ each own a part:
 - [`doc/cdc.md`](doc/cdc.md) — `dnv-cdc`: the discovery service and its etcd watcher.
 - [`doc/dnvctl.md`](doc/dnvctl.md) — `dnvctl`: invocation, the command tree, output and errors.
 - [`doc/log.md`](doc/log.md) — the JSON logging and the trace id every binary shares.
-- [`doc/grpc.md`](doc/grpc.md) — the gRPC interceptors every dnv connection and server chains.
+- [`doc/grpc.md`](doc/grpc.md) — the gRPC interceptors every dnv connection and server chains, and the message limit every one sets.
 - [`doc/osclient.md`](doc/osclient.md) — the `OsClient`, the one path to the operating system.
 - [`doc/layout.md`](doc/layout.md) — the directory tree, the dependency rules, protobuf generation.
 - [`doc/dependencies.md`](doc/dependencies.md) — the direct module dependencies and why each is allowed.
@@ -57,14 +57,21 @@ its document's:
 - `integtest/cdc_test.sh` — [`doc/cdc.md`, Integration test plan](doc/cdc.md#integration-test-plan)
 - `integtest/dnvctl_test.sh` — [`doc/dnvctl.md`, Integration test plan](doc/dnvctl.md#integration-test-plan)
 
+`integtest/runner.sh` runs the suites one after another, as listed in
+`integtest/runner.conf`, and ends with a summary of every run (`layout.md`,
+Directory tree).
+
 ## Build
 
 The build entry points are `Makefile` targets, run as "make build" and so on:
 
 - `build` compiles every binary under `cmd/` into `bin/` (`layout.md`, `cmd/` wiring).
 - `vet` runs go vet over the whole module.
-- `test` runs go test over the whole module. The etcd-backed tests skip unless an
-  etcd binary is on the PATH or named by `ETCD_BIN` (`dnv-worker.md` EU7).
+- `test` runs go test over the whole module. Its etcd-backed tests need an
+  etcd binary, found as `dnv-worker.md` EU7 says, and the target fails
+  without one.
+- `fetch-etcd` fetches the etcd release the integration suites pin into
+  `integtest/bin/cache`, where `test` finds it.
 - `fmt` formats the Go sources with gofmt and `pb/schema.proto` with
   clang-format, which must be installed.
 - `gen` regenerates `pb/schema.pb.go` and `pb/schema_grpc.pb.go`; it needs

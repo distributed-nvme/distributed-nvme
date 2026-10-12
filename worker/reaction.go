@@ -132,11 +132,6 @@ const (
 	msgPoolStatusUnparsable = "pool status unparsable"
 )
 
-// thinMetaBlockSize is dm-thin's FIXED metadata block size (AR6): a thin
-// pool's metadata used/total counts are in these 4 KiB blocks, never in the
-// pool's data_block_size.
-const thinMetaBlockSize = uint64(4096)
-
 // ---------------------------------------------------------------------------
 // The model surface (MD5, MD6)
 // ---------------------------------------------------------------------------
@@ -1202,8 +1197,8 @@ func rowSet(rows []cntlrRowId) map[cntlrRowId]bool {
 // ---------------------------------------------------------------------------
 
 // poolUsage is one thin pool's used/total counts as `dmsetup status` reports
-// them (AR6): the metadata pair in dm-thin's fixed 4 KiB metadata blocks, the
-// data pair in the pool's data_block_size.
+// them (AR6): the metadata pair in dm-thin's fixed metadata blocks
+// (common.ThinMetaBlockSize), the data pair in the pool's data_block_size.
 type poolUsage struct {
 	usedMeta  uint64
 	totalMeta uint64
