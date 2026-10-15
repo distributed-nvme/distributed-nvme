@@ -109,8 +109,11 @@ func (s *CnAgentServer) ensureXfer(
 
 	var err error
 	if plan.xferServed(xp) {
-		err = s.ensureDmLinear(ctx, xp.finalName, xp.sectors,
-			s.nf.DmPath(xp.ori.td.raid0Name), 0)
+		var raid0No string
+		raid0No, err = s.dmDevNo(ctx, nil, xp.ori.td.raid0Name)
+		if err == nil {
+			err = s.ensureDmLinear(ctx, xp.finalName, xp.sectors, raid0No, 0)
+		}
 	} else {
 		err = s.ensureDmError(ctx, xp.finalName, xp.sectors)
 	}
@@ -175,8 +178,9 @@ func (s *CnAgentServer) probeXferDm(
 	xp *xferPlan,
 ) (pb.ResStatus, string) {
 	if plan.xferServed(xp) {
-		return s.probeDmTarget(ctx, xp.finalName, "linear", xp.sectors,
-			s.nf.DmPath(xp.ori.td.raid0Name), 0)
+		return s.probeDmTarget(ctx, plan.rd, xp.finalName, "linear",
+			xp.sectors, xp.ori.td.raid0Name, 0)
 	}
-	return s.probeDmArgs(ctx, xp.finalName, "error", xp.sectors, nil, 0)
+	return s.probeDmArgs(
+		ctx, plan.rd, xp.finalName, "error", xp.sectors, nil, 0)
 }

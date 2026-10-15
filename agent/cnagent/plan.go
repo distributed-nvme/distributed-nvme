@@ -168,14 +168,14 @@ type cntlrPlan struct {
 	anyDeferred bool
 
 	// arena / arenaErr / arenaDone cache this pass's clone-metadata arena
-	// view ([D14], CN18 step 2): the loop device is re-learned from `losetup
-	// --associated` once per converge or probe pass and never persisted, so a
-	// cntlr with N clones still issues one enumeration. They and the sweep
-	// fact below are the only fields here that are not a pure function of
-	// the request; these three are filled lazily by planArena, an
-	// allocation's own enumeration replaces them (ensureCloneMeta), and a
-	// failed allocation clears arenaDone so the clone's rows read the arena
-	// afresh (ensureClone).
+	// view ([D14], CN18 step 2), so a cntlr with N clones still issues one
+	// enumeration: the loop device is re-learned from `losetup --associated`
+	// in every converge, check round or info read and never persisted. They,
+	// the sweep fact below and the reading and walks after it are the only
+	// fields here that are not a pure function of the request; these three
+	// are filled lazily by planArena, an allocation's own enumeration
+	// replaces them (ensureCloneMeta), and a failed allocation clears
+	// arenaDone so the clone's rows read the arena afresh (ensureClone).
 	arena     *cloneMetaArena
 	arenaErr  error
 	arenaDone bool
@@ -192,6 +192,27 @@ type cntlrPlan struct {
 	// a converge and nothing else does; the plan is built afresh for every
 	// pass, so it never outlives the pass that learned it.
 	cloneHold cloneHold
+
+	// rd is the reading a check round or an info read took (CN28,
+	// readCntlr): the shared helpers read dm facts and numbers from it
+	// (dmInfo, dmTable, dmDevNo), and the verdict its listings. It is nil
+	// in a converge and in every other plan builder, and the helpers then
+	// read each device on its own.
+	rd *cnReading
+	// walk is the pass's NVMe walk (CN10), shared by every lookup of the
+	// pass and by its sweep's or its verdict's list of connections: the
+	// reading's in a check round and an info read, and in a converge the
+	// one convergeCntlr takes right before its sweep. No other plan builder
+	// looks a subsystem up, and their plans leave it nil: a lookup with no
+	// walk fails (lookupSubsys).
+	walk *passWalk
+	// mdWalks is the pass's md walk, shared by every group row and every
+	// concat row of the pass, so a group's row and its concat rows read one
+	// array (mdDevNo): in a converge taken at the first group that needs it
+	// (build), in a check round and an info read the walk view of the
+	// reading's md walk (cnReading.mdWalks). No other plan builder reads an
+	// md array, and their plans leave it nil.
+	mdWalks *mdWalkOnce
 }
 
 // slicePlan is one slice of the SP: the two pool concats and the thin-pool
@@ -251,8 +272,10 @@ type grpPlan struct {
 	deferred bool
 
 	// dmName is set for RedundNone only; mdDevName/mdArrayName for
-	// RedundMdRaid1 only. devPath is the group device either way — what the
-	// pool concats consume.
+	// RedundMdRaid1 only. devPath is the group device either way, the path
+	// the mdadm commands name an md group's array by. A pool concat maps
+	// the group by its number, which buildConcat reads: an md array's from
+	// /sys/block (mdDevNo), never through the udev link at devPath.
 	dmName      string
 	mdDevName   string
 	mdArrayName string
@@ -398,7 +421,6 @@ type clonePlan struct {
 	dstTd      *tdPlan
 	finalName  string
 	metaDmName string
-	metaDmPath string
 
 	sectors       uint64
 	regionSectors uint64
@@ -801,7 +823,6 @@ func (p *cntlrPlan) buildClones() {
 			metaDmName: p.nf.CnCloneMetaDmName(
 				p.clusterId, p.cnId, p.spId, clone.GetCloneId()),
 		}
-		cp.metaDmPath = p.nf.DmPath(cp.metaDmName)
 		// [D15]: a clone whose destination td is missing entirely stays the CN18
 		// error below; one whose destination is merely still provisioning is
 		// deferred.
@@ -1020,7 +1041,7 @@ func (p *cntlrPlan) hostNqn() string {
 // sit behind an agent.ValidateBdevConf gate. poolArgs is this method's only
 // caller, and poolArgs runs only from ensurePool (the converge, gated in
 // syncupCntlr and convergeCntlr) and from probePool (the probe, gated in
-// probeCntlr). The other plan builders — PushCloneBitmap and the CN25 bitmap
+// readCntlr). The other plan builders — PushCloneBitmap and the CN25 bitmap
 // reads — compute no mark at all. This agent has no default of
 // its own to apply, which is the point: a mark it invented would be one the
 // pool was not sized for.

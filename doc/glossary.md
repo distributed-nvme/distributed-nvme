@@ -122,7 +122,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **desired state** — What etcd records a node or a pool should look like, carried whole in every syncup request. Agents converge to it, and removal is derived from the difference between it and what the node holds.
 
-**did not answer, unanswered** — The outcome of a probe that told the caller nothing: a command killed at a command timeout, never started, cancelled or refused an OS client slot, or a sysfs or configfs read that failed with any error but ENOENT. It is never "absent": an unanswered probe reads as unknown and counts as still present (`Reported`; see `osclient.md`, RunCommand).
+**did not answer, unanswered** — The outcome of a probe that told the caller nothing: a command killed at a command timeout, never started, cancelled or refused an OS client slot; a sysfs or configfs read, or a directory listing in the agent's own process, that failed with any error but ENOENT; or a whole-node device-mapper listing whose command never reported, or that printed nothing the agent can read. A whole-node listing that exits non-zero after printing lines that parse is partial and counts as an answer. An unanswered probe is never "absent": it reads as unknown and counts as still present (`Reported`; see `osclient.md`, RunCommand).
 
 **disabled** — A flag on a node or a cntlr. A disabled node only leaves allocation, losing its capacity key while its sides or cntlrs keep running, and no agent learns of it; a disabled cntlr leaves primary eligibility and the cdc entries, its agent moves its namespaces inaccessible, and it is neither replaced nor repaired, though a disabled primary fails over at once.
 
@@ -238,7 +238,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **incarnation** — One lifetime under a name, told from the next by a fresh identity. A worker's incarnation is one seed's: a process start, and every rejoin after a self-fence, mints a new seed and drives nothing for one grace window (see `dnv-worker.md` VW1, VW7). A cluster's incarnation is one creation under its name, told apart by the creation epoch folded into its id, so a recreated cluster's keys and node-local names, the md superblock name apart, never collide with a leftover of the old one (see `architecture.md`, Naming, and [D9]).
 
-**info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, each with a status and details, built by the converge as it runs for a syncup reply and from probes alone for a check round or an info read. A disk node's info also carries its disk counts, beside the rows (see disk counts).
+**info** — The live-state report an agent builds per object (`DnInfo`, `SideInfo`, `CnInfo`, `CntlrInfo`): one row per resource the desired state calls for, each with a status and details, built by the converge as it runs for a syncup reply, and for a check round or an info read from probes alone, which on a cntlr take most of their facts from the node reading (see reading). A disk node's info also carries its disk counts, beside the rows (see disk counts).
 
 **inspect** — The gateway's live read of an object's info and of the revision of the last request its agent accepted for it (`InspectDiskNode`, `InspectControllerNode`, `InspectSide`, `InspectCntlr`; `applied_revision`), answered from the info read of the agent that hosts the object rather than from etcd.
 
@@ -290,6 +290,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **md assembly mask, md udev mask** — The udev rule every node running a dnv agent carries so that only the agent assembles dnv md arrays: ordered before the stock incremental-assembly rule, it marks a device whose array name carries the dnv prefix not ready, and the stock rule skips it (see `architecture.md`, Components: invocation reference). The cn and end-to-end suites install it for their run.
 
+**md walk** — The cn agent's read of the node's md arrays from "/sys/block": every array node, each array's "md" directory and the dm name of each member, never a member device itself, so it cannot block on a dead leg. One serves all the groups of a converge, a check round or an info read; a check round's or an info read's is part of its reading and serves its verdict too (see `cnagent.md` CN12).
+
 **mechanism, policy** — The split of the agent code: what both roles need verbatim is mechanism and lives in `agent`, and what knows which resource to build is policy and lives in `dnagent` or `cnagent`.
 
 **member reconciliation** — The primary's comparison of an md array's live members with the group's leg list on every converge: a listed leg that is missing is added once available, a member that is not listed is failed and removed, and a spare is never a member until it is switched in; a deferred group runs none of it.
@@ -332,7 +334,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **origin, snapshot** — A snapshot is a thin device created from another, its origin, by a pool snapshot message in every slice (`ori_id`); the origin must be created first and is not deleted while an uncreated snapshot of it exists.
 
-**OS client** — The one door through which agents run OS commands and do file, block and protobuf IO (`OsClient`, implemented by `LimitedOsClient` and faked by `FakeOsClient`): it bounds concurrency with a semaphore, answers the caller's deadline with SIGTERM and then SIGKILL at the hard timeout, and logs each operation; the leg health probers' direct IO is its one sanctioned bypass.
+**OS client** — The one door through which agents run OS commands, list directories and do file, block and protobuf IO (`OsClient`, implemented by `LimitedOsClient` and faked by `FakeOsClient`): it bounds concurrency with a semaphore, answers the caller's deadline with SIGTERM and then SIGKILL at the hard timeout, and logs each operation; the leg health probers' direct IO is its one sanctioned bypass.
 
 **own-verdict rule, own verdict** — The rule that a threshold reaction fires only for an object whose latest health verdict by this coordinator is unhealthy: the primary for a failover, the cntlr for a cntlr replacement, and for a leg repair the leg and, when the side's threshold triggers it, that side as well (see `dnv-worker.md` AR10). A failover on its threshold needs more: two unhealthy health verdicts in a row from the primary's check rounds, each judged by the round's own report, a syncup's reply adding nothing to that run and any clean answer ending it. The clock still runs from the stored health epoch, a verdict counts whether or not it writes the record, and the disabled trigger of a failover needs no verdict. A coordinator starts with no verdict, so a health epoch an earlier owner left, or another observer wrote, fires nothing before this coordinator has judged the object unhealthy itself.
 
@@ -374,7 +376,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **primary** — The cntlr that runs a pool's full stack: it connects every leg, assembles the groups, activates the thin pools, raid0s, clones and transfers, and exports the namespaces optimized. Only the sp worker changes which cntlr is primary.
 
-**probe** — A reading of live state through the OS client, per object, that creates, changes and removes nothing; a status read of a thin pool or a dm-clone still makes the kernel commit that target's metadata (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a check round's info is built from probes alone.
+**probe** — A read of live state through the OS client that creates, changes and removes nothing, made per object, except for what a cntlr's check round or info read takes from the node reading (see reading); a status read of a thin pool or a dm-clone still makes the kernel commit that target's metadata (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a check round's info is built from probes alone.
 
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
@@ -395,6 +397,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **reaction** — One of the sp worker's automatic reactions: failover, auto-grow, cntlr replacement and leg repair. A pass applies at most one and logs it as applied or skipped with its reason.
 
 **reaction pass** — The coordinator's periodic evaluation of a pool from a fresh snapshot against the event thresholds and the pool's level: it applies at most one reaction per pass, so that each reaction's effect is seen before the next decision, and it also runs the drain steps of a latched pool or clone (see `dnv-worker.md` AR1, AR2); a committed drain step's wake-up runs the next drain step without a pass (see `dnv-worker.md` SPD6, CLD7). A threshold reaction fires only under the own-verdict rule.
+
+**reading, node reading** — What a check round or an info read of a cntlr takes of its controller node first, under the call's locks: one `dmsetup info` listing and one `dmsetup table` listing of every device-mapper device of the node, the sysfs walk and the md walk. The rows and the verdict of that call take from it which device-mapper devices, nvme subsystems and md arrays the node holds, and each device-mapper device's attr flags, number and table; their other reads stay outside it, the status reads of thin pools and dm-clones among them. It is taken afresh for every call and shared with nothing (see `cnagent.md` CN28).
 
 **reconcile** — An agent's startup pass: load the stored requests, converge each object once under the node write lock, then serve. A file that does not load is skipped, and with it every file of a node whose own file did not load; a skipped object is neither converged nor swept and answers unknown until its syncup comes again.
 
@@ -480,7 +484,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **syncup** — The unary delivery of an object's desired state to its agent (`SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`): gated by revision and conf, converged, persisted when accepted, and answered with a reply code and details.
 
-**sysfs walk** — An agent's reading of its nvme host connections from sysfs rather than nvme list-subsys: the subsystem entry whose NQN matches, the namespace entry that names the multipath head, and the controller entries, each path read through its address, state and ANA state (see `cnagent.md` CN10).
+**sysfs walk** — An agent's read of its nvme host connections from sysfs rather than nvme list-subsys. The walk lists "/sys/class/nvme-subsystem" and reads each entry's NQN; a lookup reads one entry a walk found: its namespace entry, which names the multipath head, and of its controller entries what its caller needs, for a leg or a clone source each path's address, state and ANA state. On a cn agent, a check round or an info read of a cntlr makes every lookup in the one walk of its reading. A converge of a cntlr takes one walk for its sweep's list of connections and for its leg and clone-source lookups, and walks again only where `cnagent.md` CN10 and CN18 say. A cn agent's leg or clone-source lookup reads the entry's NQN again first (see `cnagent.md` CN10). Both agents read through one code, and what a lookup reads for each caller is `dnagent.md` SH20's.
 
 **tenant** — A user of a multi-tenant block storage system that runs dnv as its data plane, for example behind Kubernetes or OpenStack Cinder. dnv knows no tenants: it authenticates no user, which the layer above does, and admits a host by its NQN alone (see allowed hosts). What it promises that layer is that the data of one storage pool is never readable from another storage pool unless that layer exports it there itself, for example with a transfer; dm-thin keeps that promise, since a thin device reads a block it has not provisioned as zeros and dnv's thin pools never skip block zeroing (see `architecture.md`, System overview, and [D15]).
 
@@ -504,7 +508,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **transport conf** — `NvmeTrConf`, the transport type, address family, address and service id of an NVMe-oF port. The one a node is created with is the address other nodes and hosts dial to reach that node's port, and it may differ from the transport flags its agent builds the port from (see `architecture.md`, Components: invocation reference).
 
-**transport probe** — A standby's reading of a leg's health from the kernel alone, by the liveness and ANA state of each path, since no probe IO runs there.
+**transport probe** — A standby's read of a leg's health from the kernel alone, by the liveness and ANA state of each path, since no probe IO runs there.
 
 **two-phase RPC** — A gateway RPC that must ask an agent between its reads and its commit: a read-only first phase resolves the objects, the agent call runs outside any transaction, and the deciding second phase re-runs the full resolution and the token check, trusting the first phase's facts only as hints, so a token-carrying request sees any interleaved mutation as stale (see `gateway.md` AG4).
 

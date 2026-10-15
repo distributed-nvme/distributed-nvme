@@ -1947,8 +1947,9 @@ log_readable() {
 	return 1
 }
 
-# events <log> [trace] — os commands as "cmd args…" and configfs attribute
-# writes as "write <path> <data>", in log order.
+# events <log> [trace] — os commands as "cmd args…", configfs attribute
+# writes as "write <path> <data>" and the directory listings the agent makes
+# in its own process (`os read dir` records) as "list <path>", in log order.
 events() {
 	log_readable "$1" || return 1
 	jq -rnR --arg t "${2:-}" '
@@ -1958,6 +1959,8 @@ events() {
 	        .cmd + " " + ((.args // []) | join(" "))
 	      elif .msg == "os write file direct" then
 	        "write " + .path + " " + (.data // "")
+	      elif .msg == "os read dir" then
+	        "list " + .path
 	      else empty end' "$1" || return 1
 }
 
@@ -2025,10 +2028,12 @@ cn_requests_since() {
 # block record, `os read block`, is a read and not in the list; the cn agent
 # issues neither, and the probers' `ReadBlockDirectAt` logs nothing
 # (osclient.md, Exported raw helpers and the probe-IO carve-out).
-# Probe commands (lsblk, dmsetup info|table|status|ls, ls, findmnt, stat,
-# losetup --associated, mdadm --examine, nvme list-subsys) are expected and
-# deliberately not in the list; the cn agent reads md state from sysfs and
-# never runs `mdadm --detail`, which is a read too.
+# Probe commands (lsblk, dmsetup info|table|status|ls, the `ls` of configfs,
+# findmnt, stat, losetup --associated, mdadm --examine, nvme list-subsys) are
+# expected and deliberately not in the list. Every other directory listing,
+# of sysfs or of the local store, is an `os read dir` record, a read and never
+# a mutation. The cn agent reads md state from sysfs and never runs
+# `mdadm --detail`, which is a read too.
 mutations() {
 	local trace=${1:-} log=${2:-$CN_LOG}
 	log_readable "$log" || return 1
@@ -3979,11 +3984,12 @@ case_redund() {
 	done
 	wait "$writer" || die "degrade: the host write through DN2's leg failed"
 	# No md probe of this stage ran mdadm — not `--detail`, not anything:
-	# the check rounds read /sys/block. The listing is the positive control
-	# that the rounds' commands are under this trace at all.
+	# the check rounds read /sys/block. The listing record of /sys/block is the
+	# positive control that the rounds' reads are under this trace at all.
 	seq=$(helper 2 "cn_events $TRACE")
-	[ "$(event_cnt "$seq" '^ls -1 /sys/block$')" != 0 ] ||
-		die "degrade: no sysfs walk of the check rounds is under this trace"
+	[ "$(event_cnt "$seq" '^list /sys/block$')" != 0 ] ||
+		die "degrade: no listing of /sys/block by the check rounds is" \
+			"under this trace"
 	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
 		"degrade: a check round ran mdadm (the md row must come from sysfs)"
 	# Restored before the readonly stage, which needs every leg serving.

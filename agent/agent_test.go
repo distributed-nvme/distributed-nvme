@@ -7,8 +7,11 @@ import (
 	// Aliased: the fakeSysfs methods below bind `fs` to their receiver.
 	iofs "io/fs"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -392,14 +395,18 @@ func TestStoreListFiltersByKind(t *testing.T) {
 		"cn-0000000000000001-0000000000000005",
 		"unrelated",
 	}
+	var listed []string
 	oc := &common.FakeOsClient{
+		ReadDirFn: func(ctx context.Context, path string) ([]string, error) {
+			listed = append(listed, path)
+			return names, nil
+		},
+		// No leftover, so no rm either: the listing is the one call.
 		RunCommandFn: func(
 			ctx context.Context, name string, args []string, stdin string,
 		) (string, string, int, error) {
-			if name != "ls" || args[1] != "/store" {
-				t.Errorf("unexpected command %s %v", name, args)
-			}
-			return strings.Join(names, "\n") + "\n", "", 0, nil
+			t.Errorf("unexpected command %s %v", name, args)
+			return "", "", 127, errors.New("unexpected command")
 		},
 	}
 	store := NewStore(oc, "/store")
@@ -407,6 +414,9 @@ func TestStoreListFiltersByKind(t *testing.T) {
 		StoreKindDn, StoreKindSide, StoreKindMigrBm)
 	if err != nil {
 		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 || listed[0] != "/store" {
+		t.Fatalf("listings = %q, want the prefix once", listed)
 	}
 	if got := files[StoreKindDn]; len(got) != 1 ||
 		got[0] != "/store/"+names[0] {
@@ -424,32 +434,83 @@ func TestStoreListFiltersByKind(t *testing.T) {
 	}
 }
 
+// TestStoreListUnreadablePrefixIsFatal: every failure of the prefix's listing
+// is SH3's fatal case, naming the prefix — a missing prefix included, which
+// the agent never creates (SH1), and a prefix that is a plain file. None of
+// them is an empty store: the startup reload would go on as though the agent
+// had accepted nothing.
 func TestStoreListUnreadablePrefixIsFatal(t *testing.T) {
-	oc := &common.FakeOsClient{
-		RunCommandFn: func(
-			ctx context.Context, name string, args []string, stdin string,
-		) (string, string, int, error) {
-			return "", "No such file or directory", 2,
-				context.DeadlineExceeded
-		},
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the listing is cut off at the soft timeout",
+			context.DeadlineExceeded},
+		{"the prefix is missing", &iofs.PathError{
+			Op: "open", Path: "/nope", Err: syscall.ENOENT}},
+		{"the prefix is a plain file", &iofs.PathError{
+			Op: "open", Path: "/nope", Err: syscall.ENOTDIR}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var listed []string
+			oc := &common.FakeOsClient{
+				ReadDirFn: func(
+					ctx context.Context, path string,
+				) ([]string, error) {
+					listed = append(listed, path)
+					return nil, tc.err
+				},
+			}
+			files, err := NewStore(oc, "/nope").List(
+				context.Background(), StoreKindDn)
+			if len(listed) != 1 || listed[0] != "/nope" {
+				t.Fatalf("listings = %q, want the prefix once", listed)
+			}
+			if err == nil {
+				t.Fatalf("an unreadable store prefix was not reported: %v",
+					files)
+			}
+			if !strings.Contains(err.Error(), "/nope") {
+				t.Errorf("error %q does not name the prefix", err)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("error %q does not carry the listing's own %v",
+					err, tc.err)
+			}
+		})
 	}
-	_, err := NewStore(oc, "/nope").List(context.Background(), StoreKindDn)
+}
+
+// TestStoreListRefusesAPlainFilePrefix runs the listing over a real file and
+// the production OsClient: a --local-store that names a plain file is no
+// store, and the listing of it fails with ENOTDIR, which is SH3's fatal case
+// like any other failure of it, never an empty store.
+func TestStoreListRefusesAPlainFilePrefix(t *testing.T) {
+	prefix := t.TempDir() + "/store"
+	if err := os.WriteFile(prefix, []byte("not a store"), 0o644); err != nil {
+		t.Fatalf("planting %s: %v", prefix, err)
+	}
+	files, err := NewStore(common.NewLimitedOsClient(0), prefix).List(
+		context.Background(), StoreKindDn, StoreKindSide)
 	if err == nil {
-		t.Fatal("an unreadable store prefix was not reported")
+		t.Fatalf("a plain-file prefix listed as a store: %v", files)
 	}
-	if !strings.Contains(err.Error(), "/nope") {
+	if !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("error %q is not the ENOTDIR of the listing", err)
+	}
+	if !strings.Contains(err.Error(), prefix) {
 		t.Errorf("error %q does not name the prefix", err)
 	}
 }
 
-// TestStoreCallsCarryTheSoftTimeout: every call the store makes — SH6's `ls`,
-// SH7's `rm` and SH4's proto read and write — reaches the OsClient on a ctx
-// carrying the soft timeout (architecture.md, Common validation; SH15). The
-// caller owns that deadline and the LimitedOsClient adds none (osclient.md,
-// RunCommand), so without the wrap a wedged `ls` would hold the startup
-// reconcile, node lock and all, for ever, a wedged `rm` the pass that drops
-// an object, and a save waiting for an OsClient slot the node lock of the RPC
-// it runs in.
+// TestStoreCallsCarryTheSoftTimeout: every call the store makes — SH6's
+// listing, SH7's `rm` and SH4's proto read and write — reaches the OsClient
+// on a ctx carrying the soft timeout (architecture.md, Common validation;
+// SH15). The caller owns that deadline and the LimitedOsClient adds none
+// (osclient.md, RunCommand), so without the wrap a listing waiting for an
+// OsClient slot would hold the startup reconcile, node lock and all, until
+// one frees, a wedged `rm` the pass that drops an object, and a save waiting
+// for a slot the node lock of the RPC it runs in.
 func TestStoreCallsCarryTheSoftTimeout(t *testing.T) {
 	var cmds, unbounded []string
 	bounded := func(ctx context.Context, name string) {
@@ -472,15 +533,16 @@ func TestStoreCallsCarryTheSoftTimeout(t *testing.T) {
 			bounded(ctx, "writeproto")
 			return nil
 		},
+		// An interrupted write, so the listing's own rm (SH6) is bounded
+		// here too.
+		ReadDirFn: func(ctx context.Context, path string) ([]string, error) {
+			bounded(ctx, "readdir")
+			return []string{"dn-1" + common.AtomicWriteTmpInfix + "7"}, nil
+		},
 		RunCommandFn: func(
 			ctx context.Context, name string, args []string, stdin string,
 		) (string, string, int, error) {
 			bounded(ctx, name)
-			// An interrupted write, so the listing's own rm (SH6) is
-			// bounded here too.
-			if name == "ls" {
-				return "dn-1" + common.AtomicWriteTmpInfix + "7\n", "", 0, nil
-			}
 			return "", "", 0, nil
 		},
 	}
@@ -502,8 +564,8 @@ func TestStoreCallsCarryTheSoftTimeout(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if got := strings.Join(cmds, " "); got !=
-		"ls rm rm writeproto readproto" {
-		t.Fatalf("calls = %q, want exactly one ls and the listing's rm, "+
+		"readdir rm rm writeproto readproto" {
+		t.Fatalf("calls = %q, want exactly one listing and its rm, "+
 			"the Remove's rm, then the Save and the Load", got)
 	}
 	if len(unbounded) != 0 {
@@ -598,13 +660,13 @@ func TestStoreListRetriesAFailedLeftoverRemoval(t *testing.T) {
 	leftover := committed + common.AtomicWriteTmpInfix + "1234567890"
 	var rms []string
 	oc := &common.FakeOsClient{
+		ReadDirFn: func(ctx context.Context, path string) ([]string, error) {
+			return []string{committed, leftover}, nil
+		},
 		RunCommandFn: func(
 			ctx context.Context, name string, args []string, stdin string,
 		) (string, string, int, error) {
-			switch name {
-			case "ls":
-				return committed + "\n" + leftover + "\n", "", 0, nil
-			case "rm":
+			if name == "rm" {
 				rms = append(rms, strings.Join(args, " "))
 				return "", "rm: cannot remove: Read-only file system", 1,
 					errors.New("exit status 1")
@@ -891,28 +953,38 @@ func TestAnaStateOf(t *testing.T) {
 // ListSubsys reads sysfs (SH20)
 // ---------------------------------------------------------------------------
 
-// fakeSysfs is a tiny read-only tree: `ls -1 <dir>` lists the direct children
-// of a registered directory, ReadFile serves a registered file. It also pins
-// the rule that every read of the SH20 walk must arrive with an SH15
-// deadline on its ctx, so a stalled /sys/class/nvme* read can never hold a
-// converge — and through the node lock, a whole node's RPC surface — open.
+// fakeSysfs is a tiny read-only tree: ReadDir lists the direct children of a
+// registered directory in byte order, as the production client does, and
+// `ls -1 <dir>`, which the nvmet configfs tree alone is listed with (SH18),
+// lists them in the order they were registered; ReadFile serves a registered
+// file. It also pins the rule that every read and listing of the SH20 walk
+// must arrive with an SH15 deadline on its ctx, so a stalled /sys/class/nvme*
+// read can never hold a converge — and through the node lock, a whole node's
+// RPC surface — open.
 type fakeSysfs struct {
 	dirs  map[string][]string
 	files map[string]string
-	// killLs makes `ls -1 <dir>` answer the way a child killed at the SH15
-	// soft timeout does — exit -1 with a non-nil error — instead of the exit
-	// status a tool that ran and looked gives. No arrangement of the tree's
-	// contents can express that outcome, and telling it apart from an exit
-	// status is exactly what the enumerators of a sweep turn on.
+	// killLs makes a listing of a directory answer the way one the SH15
+	// soft timeout cut off does: `ls -1 <dir>` exits -1 with a non-nil error,
+	// as a killed child does, instead of the exit status a tool that ran and
+	// looked gives, and ReadDir fails with context.DeadlineExceeded instead
+	// of the not-exist error of a missing directory. No arrangement of the
+	// tree's contents can express that outcome, and telling it apart from an
+	// absence is exactly what the enumerators of a sweep turn on.
 	killLs map[string]bool
 	// readErr answers one path with an error that is NOT fs.ErrNotExist: an
 	// attribute that could not be read at all, as opposed to one that is not
 	// there. It must never reach a caller as an absence.
 	readErr map[string]error
-	// read is every path ReadFile served, and noDeadline the subset that
-	// arrived on a ctx carrying no deadline.
+	// read is every path ReadFile served, and noDeadline every path read or
+	// listed on a ctx carrying no deadline.
 	read       []string
 	noDeadline []string
+	// readDirCalls is every path ReadDir is asked to list, so a test that
+	// expects a listing to fail, or its directory to be missing, can check
+	// that the listing reached this tree: an OsClient that never reached it
+	// answers an empty listing (common.FakeOsClient).
+	readDirCalls []string
 }
 
 func (fs *fakeSysfs) osClient() *common.FakeOsClient {
@@ -932,6 +1004,26 @@ func (fs *fakeSysfs) osClient() *common.FakeOsClient {
 				return "", "", 2, fmt.Errorf("no such directory")
 			}
 			return strings.Join(entries, "\n") + "\n", "", 0, nil
+		},
+		ReadDirFn: func(ctx context.Context, path string) ([]string, error) {
+			fs.readDirCalls = append(fs.readDirCalls, path)
+			if _, ok := ctx.Deadline(); !ok {
+				fs.noDeadline = append(fs.noDeadline, path)
+			}
+			if fs.killLs[path] {
+				return nil, context.DeadlineExceeded
+			}
+			entries, ok := fs.dirs[path]
+			if !ok {
+				// A missing directory wraps fs.ErrNotExist, as the
+				// production client's does: the one thing a caller tells
+				// "absent" from "did not answer" by.
+				return nil, fmt.Errorf("no such directory: %s: %w", path,
+					iofs.ErrNotExist)
+			}
+			names := append([]string(nil), entries...)
+			sort.Strings(names)
+			return names, nil
 		},
 		ReadFileFn: func(ctx context.Context, path string) (string, error) {
 			fs.read = append(fs.read, path)
@@ -1025,12 +1117,16 @@ func TestListSubsysReadsSysfs(t *testing.T) {
 	if state.Found {
 		t.Error("an empty sysfs reported the subsystem as present")
 	}
+	if !slices.Contains(empty.readDirCalls, sysfsNvmeSubsysDir) {
+		t.Errorf("the walk never listed %s: its absence was not read",
+			sysfsNvmeSubsysDir)
+	}
 
-	// Every sysfs read of the walk is SH15-bounded, exactly
+	// Every sysfs read and listing of the walk is SH15-bounded, exactly
 	// like every command and every configfs attribute: readTrimmed bounds
-	// each read, and an unbounded read fails here. The per-suffix guard keeps
-	// the assertion from going vacuous if a later fixture stops exercising
-	// one attribute.
+	// each read and readDir each listing, and an unbounded one fails here.
+	// The per-suffix and per-directory guards keep the assertion from going
+	// vacuous if a later fixture stops exercising one of them.
 	for _, suffix := range []string{
 		"/subsysnqn", "/address", "/transport", "/state", "/ana_state"} {
 		if !anySuffix(fs.read, suffix) {
@@ -1038,8 +1134,18 @@ func TestListSubsysReadsSysfs(t *testing.T) {
 				suffix)
 		}
 	}
+	for _, dir := range []string{
+		"/sys/class/nvme-subsystem",
+		"/sys/class/nvme-subsystem/nvme-subsys0",
+		"/sys/class/nvme/nvme3",
+	} {
+		if !slices.Contains(fs.readDirCalls, dir) {
+			t.Fatalf("no listing of %s: the deadline check is vacuous", dir)
+		}
+	}
 	if len(fs.noDeadline) != 0 {
-		t.Errorf("sysfs reads without an SH15 deadline: %v", fs.noDeadline)
+		t.Errorf("sysfs reads or listings without an SH15 deadline: %v",
+			fs.noDeadline)
 	}
 }
 

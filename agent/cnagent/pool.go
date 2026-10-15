@@ -17,7 +17,8 @@ import (
 // poolSegments is the concat under one of a slice's two pool devices: one
 // dm-linear target per group device, in list order. A RedundNone group device
 // already starts at its leg's data region and an md array starts at its
-// data-offset, so every segment sits at offset 0 of its group device.
+// data-offset, so every segment sits at offset 0 of its group device. A
+// segment carries its group, by which buildConcat reads the device's number.
 //
 // Callers pass the slice's **effective** group list ([D15]): a group whose legs
 // are still provisioning has no device, so it is not a target yet and the
@@ -26,7 +27,7 @@ func poolSegments(grps []*grpPlan) []dmSegment {
 	segments := make([]dmSegment, 0, len(grps))
 	for _, gp := range grps {
 		segments = append(segments, dmSegment{
-			path:    gp.devPath,
+			grp:     gp,
 			sectors: gp.dataSectors,
 		})
 	}
@@ -53,11 +54,11 @@ func (s *CnAgentServer) ensureSlice(
 	info *pb.CntlrInfo,
 ) bool {
 	metaChanged, metaErr := s.ensureDmMulti(
-		ctx, sp.poolMetaName, poolSegments(sp.effMetaGrps))
+		ctx, plan, sp.poolMetaName, poolSegments(sp.effMetaGrps))
 	info.SliceIdToMeta[sp.sliceId] = st.tracker.FromErr(
 		resKeyOf(resKeyPoolMetaFmt, sp.sliceId), sp.poolMetaName, "", metaErr)
 	dataChanged, dataErr := s.ensureDmMulti(
-		ctx, sp.poolDataName, poolSegments(sp.effDataGrps))
+		ctx, plan, sp.poolDataName, poolSegments(sp.effDataGrps))
 	info.SliceIdToData[sp.sliceId] = st.tracker.FromErr(
 		resKeyOf(resKeyPoolDataFmt, sp.sliceId), sp.poolDataName, "", dataErr)
 
@@ -106,11 +107,11 @@ func (s *CnAgentServer) poolArgs(
 	plan *cntlrPlan,
 	sp *slicePlan,
 ) ([]string, error) {
-	metaNo, err := s.dm.DevNo(ctx, s.nf.DmPath(sp.poolMetaName))
+	metaNo, err := s.dmDevNo(ctx, plan.rd, sp.poolMetaName)
 	if err != nil {
 		return nil, err
 	}
-	dataNo, err := s.dm.DevNo(ctx, s.nf.DmPath(sp.poolDataName))
+	dataNo, err := s.dmDevNo(ctx, plan.rd, sp.poolDataName)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +225,7 @@ func (s *CnAgentServer) ensureThin(
 				slog.String("error", err.Error()))
 		}
 	}
-	poolNo, err := s.dm.DevNo(ctx, s.nf.DmPath(sp.poolFinalName))
+	poolNo, err := s.dmDevNo(ctx, nil, sp.poolFinalName)
 	if err != nil {
 		return err
 	}
@@ -414,7 +415,7 @@ func (s *CnAgentServer) probePool(
 	plan *cntlrPlan,
 	sp *slicePlan,
 ) (pb.ResStatus, string) {
-	dev, err := s.dm.Info(ctx, sp.poolFinalName)
+	dev, err := s.dmInfo(ctx, plan.rd, sp.poolFinalName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
@@ -425,7 +426,7 @@ func (s *CnAgentServer) probePool(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
-	targets, err := s.dm.Table(ctx, sp.poolFinalName)
+	targets, err := s.dmTable(ctx, plan.rd, sp.poolFinalName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
@@ -447,17 +448,18 @@ func (s *CnAgentServer) probeThin(
 	sp *slicePlan,
 ) (pb.ResStatus, string) {
 	name := plan.thinName(tp.tdId, sp.sliceId)
-	dev, err := s.dm.Info(ctx, name)
+	dev, err := s.dmInfo(ctx, plan.rd, name)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	if dev == nil {
 		return pb.ResStatus_RES_STATUS_MISSING, ""
 	}
-	poolNo, err := s.dm.DevNo(ctx, s.nf.DmPath(sp.poolFinalName))
+	poolNo, err := s.dmDevNo(ctx, plan.rd, sp.poolFinalName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	args := []string{poolNo, strconv.FormatUint(uint64(tp.td.GetDevId()), 10)}
-	return s.probeDmArgs(ctx, name, "thin", tp.thinSectors, args, len(args))
+	return s.probeDmArgs(
+		ctx, plan.rd, name, "thin", tp.thinSectors, args, len(args))
 }

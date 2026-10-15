@@ -3,45 +3,36 @@ package cnagent
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
-	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The probe map of CN28. No function here creates, changes or removes an
-// object of the node, as Get*Info and the Check* streams must not (CN23,
-// SH25); a `dmsetup status` of a thin pool or a dm-clone still makes the
-// kernel commit that target's metadata (dnagent.md SH17). In particular
-// `reserve_metadata_snap` runs only inside `dumpThinMetadata` — the CN25
-// bitmap reads, CN14's thin id sweeps (the activation sweep and the sweep
-// after a failed delete) and the dst-bitmap read of architecture.md, Clone
-// crash recovery — never from here (CN29).
+// The probe map of CN28: the rows of a check round and an info read, read
+// from the node's reading (readCntlr, takeReading) and from the reads that
+// stay outside it: the status of each thin pool and dm-clone; the configfs
+// of the exports; the clone metadata area's loop device and its number; the
+// attributes of the array the md walk matched to a group (Md.Detail) and
+// that array's number (mdDevNo); the entry of each NVMe subsystem a lookup
+// uses — its NQN once more, its namespace and its controllers
+// (lookupSubsys); the own read of a dm name that a partial info listing, or
+// the table listing, lacks (cnReading); and the fresh `dmsetup info` that
+// confirms a device gone after its own status or table read failed. No
+// function here creates, changes or removes an object of the node, as
+// Get*Info and the Check* streams must not (CN23, SH25); a `dmsetup status`
+// of a thin pool or a dm-clone still makes the kernel commit that target's
+// metadata (dnagent.md SH17). In particular `reserve_metadata_snap` runs
+// only inside `dumpThinMetadata` — the CN25 bitmap reads, CN14's thin id
+// sweeps (the activation sweep and the sweep after a failed delete) and the
+// dst-bitmap read of architecture.md, Clone crash recovery — never from here
+// (CN29).
 
+// probeCntlr writes the rows of one check round or info read from plan, whose
+// reading readCntlr took (plan.rd, plan.walk, plan.mdWalks).
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
+	plan *cntlrPlan,
 ) *pb.CntlrInfo {
-	// architecture.md, Common validation: the same refusal convergeCntlr
-	// makes, because this reads the SAME
-	// stored request and every table it would compare against is built from
-	// it — plan.lowWaterMark, plan.blockSectors and plan.stripeSectors are
-	// the pool's and the raid0's own arguments. Probing with a zero would
-	// report a correctly-built pool as needing a reload, which is a worse
-	// answer than refusing. Read-only either way (CN23, SH25): an empty
-	// CntlrInfo is what a cntlr with nothing provable looks like.
-	req := st.loadReq()
-	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
-		ptr := req.GetCntlrPointer()
-		slog.ErrorContext(ctx, msgInvalidStoredConf,
-			slog.Uint64("cluster_id", req.GetClusterId()),
-			slog.Uint64("cn_id", req.GetCnId()),
-			slog.Uint64("sp_id", ptr.GetSpId()),
-			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
-			slog.String("error", err.Error()))
-		return newCntlrInfo()
-	}
-	plan := newCntlrPlan(s.nf, req)
 	t := st.tracker
 	info := newCntlrInfo()
 
@@ -74,8 +65,8 @@ func (s *CnAgentServer) probeCntlr(
 		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, nil)
 	}
 
-	// Groups — one /sys/block walk for all of them (Md.Walk).
-	walks := &mdWalkOnce{md: s.md}
+	// Groups — the reading's md walk serves all of them and the concat rows
+	// below (Md.Detail, mdDevNo).
 	for _, gp := range plan.grps {
 		key := resKeyOf(resKeyGrpFmt, gp.grpId)
 		switch {
@@ -83,7 +74,7 @@ func (s *CnAgentServer) probeCntlr(
 			info.GrpIdToMdRaid[gp.grpId] = t.Provisioning(
 				key, gp.resName, detailsProvisioning)
 		case plan.wantGrp:
-			status, details := s.probeGroup(ctx, gp, walks)
+			status, details := s.probeGroup(ctx, plan, gp)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
 		case plan.primary:
@@ -116,11 +107,11 @@ func (s *CnAgentServer) probeCntlr(
 		// a pool that has not grown into a still-provisioning group is OK at
 		// its current size, not a mismatch.
 		status, details := s.probeDmConcat(
-			ctx, sp.poolMetaName, poolSegments(sp.effMetaGrps))
+			ctx, plan, sp.poolMetaName, poolSegments(sp.effMetaGrps))
 		info.SliceIdToMeta[sp.sliceId] = t.Set(
 			metaKey, sp.poolMetaName, status, details)
 		status, details = s.probeDmConcat(
-			ctx, sp.poolDataName, poolSegments(sp.effDataGrps))
+			ctx, plan, sp.poolDataName, poolSegments(sp.effDataGrps))
 		info.SliceIdToData[sp.sliceId] = t.Set(
 			dataKey, sp.poolDataName, status, details)
 		status, details = s.probePool(ctx, plan, sp)
@@ -163,7 +154,7 @@ func (s *CnAgentServer) probeCntlr(
 	for _, tp := range plan.tds {
 		if plan.wantAny {
 			status, details := s.probeDmArgs(
-				ctx, tp.errorName, "error", tp.sectors, nil, 0)
+				ctx, plan.rd, tp.errorName, "error", tp.sectors, nil, 0)
 			info.TdIdToDmError[tp.tdId] = t.Set(
 				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName,
 				status, details)
@@ -190,7 +181,7 @@ func (s *CnAgentServer) probeCntlr(
 				break
 			}
 			status, details := s.probeDmArgs(
-				ctx, tp.raid0Name, "striped", tp.sectors, args, 0)
+				ctx, plan.rd, tp.raid0Name, "striped", tp.sectors, args, 0)
 			info.TdIdToRaid0[tp.tdId] = t.Set(
 				raid0Key, tp.raid0Name, status, details)
 		case plan.primary:
@@ -223,8 +214,9 @@ func (s *CnAgentServer) probeCntlr(
 			s.reportCloneDeferred(st, cp, info)
 			continue
 		}
-		s.cloneRows(ctx, st, plan, cp, info, s.readCloneSource(ctx, cp),
-			func() cloneDmRead { return s.probeCloneDm(ctx, cp) }, "")
+		s.cloneRows(ctx, st, plan, cp, info,
+			s.readCloneSource(ctx, plan, cp),
+			func() cloneDmRead { return s.probeCloneDm(ctx, plan.rd, cp) }, "")
 	}
 
 	if !plan.wantAny {
@@ -266,7 +258,7 @@ func (s *CnAgentServer) probeCntlr(
 
 	// Namespace devices, then the host-facing nvmet objects.
 	for _, np := range plan.namespaces {
-		status, details := s.probeNsDev(ctx, np)
+		status, details := s.probeNsDev(ctx, plan.rd, np)
 		info.NsIdToDmLinear[np.nsId] = deferredSet(t, np.deferred,
 			resKeyOf(resKeyNsDevFmt, np.nsId), np.devName, status, details)
 	}

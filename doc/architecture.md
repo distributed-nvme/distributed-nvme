@@ -3818,11 +3818,12 @@ device is there, the next enumeration finds it.
   CN21.
 * **The verdict is recomputed every time and stored nowhere.** "Something
   is left" is the result of one comparison, never a flag. The read-only
-  paths run the same enumeration and the same comparison with nothing
+  paths read the node afresh and run the same comparison with nothing
   touched, so every `Check*` round and every `Get*Info` answers a verdict
-  as current as the sweep's own while still removing nothing. A leftover
-  that has since gone therefore stops being reported by itself, and one
-  that is still there keeps being reported without anything having
+  as current as the sweep's own while still removing nothing; which
+  listings a cntlr's check round and info read take is `cnagent.md` CN30's.
+  A leftover that has since gone therefore stops being reported by itself,
+  and one that is still there keeps being reported without anything having
   remembered it.
 * **A leftover travels as `ReplyCodeLeftover`.** It is the one
   per-resource outcome that cannot ride in the `*Info` rows of Live-state

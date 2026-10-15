@@ -200,16 +200,31 @@ func TestConnectRetriedWithinThePass(t *testing.T) {
 // TestNsHeadAwaitedAfterConnect pins the head wait: the kernel
 // returns from `nvme connect` before its namespace scan has added the
 // multipath head, so the pass re-reads until the head is there instead of
-// failing the leg on one read with "no multipath namespace".
+// failing the leg on one read with "no multipath namespace". The first
+// re-read after a connect step walks the node again, and each later one reads
+// the new entry alone (CN10): the converge walks at its start and once after
+// each connect step, however many re-reads the head takes.
 func TestNsHeadAwaitedAfterConnect(t *testing.T) {
+	walks := func(node *fakeNode) int {
+		return countCalls(node, "list "+sysfsNvmeSubsysDir)
+	}
 	for _, n := range []int{2, 3} {
 		t.Run(fmt.Sprintf("standby, head on read %d", n), func(t *testing.T) {
 			srv, node := newTestServer(t)
 			srv.retryInterval = time.Hour
 			clock := withPassClock(srv, node)
 			deferNsHead(node, legNqn(srv, testDataLeg), n)
+			cnSyncup(t, srv, 2, true)
+			node.Reset()
 			start := clock.Now()
-			reply := syncupBoth(t, srv, reqOpts{revision: 2})
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 2}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() != 0 {
+				t.Fatalf("SyncupCntlr rejected: %v", reply.GetAgentReply())
+			}
 
 			assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
 				"standby leg data")
@@ -220,6 +235,12 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 			if got := clock.Now().Sub(start); got != want {
 				t.Fatalf("the pass waited %v, want %d scan pause(s), %v",
 					got, n-1, want)
+			}
+			// The first build connects the meta leg, then the data leg.
+			if got := walks(node); got != 3 {
+				t.Fatalf("the first build listed %s %d times, want 3: at "+
+					"its start and after each of its two connect steps",
+					sysfsNvmeSubsysDir, got)
 			}
 		})
 	}
@@ -238,6 +259,10 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 		assertOk(t, info.GetSliceIdToDmPool()[testSlice], "pool")
 		if retrying(t, srv) {
 			t.Fatalf("the grow registered the retry")
+		}
+		if got := walks(node); got != 2 {
+			t.Fatalf("the grow listed %s %d times, want 2: at its start and "+
+				"after its one connect step", sysfsNvmeSubsysDir, got)
 		}
 	})
 }
@@ -341,7 +366,7 @@ func TestNoHeadWaitWithoutAConnect(t *testing.T) {
 	listings := func() int {
 		n := 0
 		for _, call := range node.Calls() {
-			if call == "cmd ls -1 "+dir {
+			if call == "list "+dir {
 				n++
 			}
 		}
@@ -413,6 +438,252 @@ func TestCloneSourceConnectStep(t *testing.T) {
 			assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
 			if retrying(t, srv) {
 				t.Fatalf("a source the pass connected registered the retry")
+			}
+		})
+	}
+}
+
+// TestAConvergeWalksAgainAfterAConnect pins the walk after a connect step
+// (CN10): a converge walks the node once, and a connect step that ran a
+// connect marks that walk stale, so the lookup after it walks again — the
+// subsystem the connect made may have taken the number of an entry freed
+// since the walk. The leg's second side lost its controller's device while
+// its subsystem entry stays and keeps its number, so a lookup in the old
+// walk would find the entry all the same: only the count of walks tells the
+// two apart. The walk after the connect serves every later lookup of the
+// pass: when the meta leg, the first in plan order, is the one connected
+// again, the data leg's lookup after it does not walk once more. A converge
+// that connects nothing walks once.
+func TestAConvergeWalksAgainAfterAConnect(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		leg  uint64
+	}{
+		{"the data leg, the last in plan order", testDataLeg},
+		{"the meta leg, before the data leg", testMetaLeg},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			opts := reqOpts{revision: 2, extraSide: true}
+			syncupBoth(t, srv, opts)
+			walks := func() int {
+				return countCalls(node, "list "+sysfsNvmeSubsysDir)
+			}
+
+			node.Reset()
+			if _, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(opts)); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			assertNoCall(t, node, "cmd nvme connect")
+			if got := walks(); got != 1 {
+				t.Fatalf("a converge that connects nothing listed %s %d "+
+					"times, want 1", sysfsNvmeSubsysDir, got)
+			}
+
+			nqn := legNqn(srv, tc.leg)
+			if node.deleteCtrlDevice(nqn, testIp2, testSvcId2) == "" {
+				t.Fatalf("the leg has no controller for its second side")
+			}
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if got := connectsTo(node, nqn, testIp2, testSvcId2); got != 1 ||
+				callCnt(node, "cmd nvme connect ") != 1 {
+				t.Fatalf("the converge made %q, want one connect of the "+
+					"leg's second side", node.callsMatching("cmd nvme connect"))
+			}
+			if got := walks(); got != 2 {
+				t.Fatalf("a converge that connected a side listed %s %d "+
+					"times, want 2: at its start and after the connect step",
+					sysfsNvmeSubsysDir, got)
+			}
+			info := reply.GetCntlrInfo()
+			assertOk(t, info.GetLegIdToLeg()[tc.leg],
+				"the leg, its second side connected again")
+			assertOk(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
+			assertOk(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
+		})
+	}
+}
+
+// TestTheHeadWaitWalksAgainWhenItsEntryGoes pins the head wait's own walk
+// (CN10): after a connect the wait reads the new entry alone, while the entry
+// it found stands, and walks again once a lookup finds no entry, or finds an
+// entry that fails the subsysnqn check. In both cases the data leg's new
+// subsystem goes and comes back at another number. Gone right after the
+// class listing of the walk that follows its connect, it is gone to that
+// walk itself: the wait's first lookup finds no entry, and the one after the
+// scan pause walks again and finds the new entry with its head. Gone after
+// the wait's first lookup read the entry without its head, with another
+// subsystem taking its number, it fails the next lookup's check, and the
+// lookup after that walks again. Read in the old walk, the wait would look
+// at the gone entry until the budget ran out and fail the leg with no
+// multipath namespace.
+func TestTheHeadWaitWalksAgainWhenItsEntryGoes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// headAfter defers the head of the leg's first entry (deferNsHead).
+		headAfter int
+		// arm runs under the fake's lock while the data leg's connect runs,
+		// and arms the change; it returns the listing whose hook makes it.
+		arm func(srv *CnAgentServer, node *fakeNode, nqn string) string
+		// pauses is how many scan pauses the wait takes.
+		pauses int
+	}{
+		{"gone to the walk after the connect", 0,
+			func(srv *CnAgentServer, node *fakeNode, nqn string) string {
+				node.afterList[sysfsNvmeSubsysDir] = func() {
+					dropSubsysLocked(node, nqn)
+					node.plantSubsys(node.nextSubsys, nqn,
+						endpoint{testIp, testSvcId})
+				}
+				return sysfsNvmeSubsysDir
+			}, 1},
+		{"its number taken after the first lookup", 2,
+			func(srv *CnAgentServer, node *fakeNode, nqn string) string {
+				other := names(srv).SideToCnNqn(
+					testCluster, testSp+1, 0x97, testCn)
+				idx := node.subsystems[nqn].idx
+				dir := fmt.Sprintf("%s/nvme-subsys%d", sysfsNvmeSubsysDir, idx)
+				node.afterList[dir] = func() {
+					dropSubsysLocked(node, nqn)
+					node.plantSubsys(idx, other,
+						endpoint{testIp2, testSvcId2})
+					node.plantSubsys(node.nextSubsys, nqn,
+						endpoint{testIp, testSvcId})
+				}
+				return dir
+			}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			clock := withPassClock(srv, node)
+			nqn := legNqn(srv, testDataLeg)
+			if tc.headAfter > 0 {
+				deferNsHead(node, nqn, tc.headAfter)
+			}
+			listing := ""
+			node.mu.Lock()
+			node.duringConnect[connectKey(nqn, testIp, testSvcId)] = func() {
+				listing = tc.arm(srv, node, nqn)
+			}
+			node.mu.Unlock()
+			start := clock.Now()
+			reply := syncupBoth(t, srv, reqOpts{revision: 2})
+
+			assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
+				"leg data, its entry moved during the head wait")
+			if got, want := clock.Now().Sub(start),
+				time.Duration(tc.pauses)*common.CnNsScanPause; got != want {
+				t.Fatalf("the pass waited %v, want %d scan pause(s), %v",
+					got, tc.pauses, want)
+			}
+			node.mu.Lock()
+			_, armed := node.afterList[listing]
+			node.mu.Unlock()
+			if listing == "" || armed {
+				t.Fatalf("the change after the connect never ran (%q)",
+					listing)
+			}
+			if retrying(t, srv) {
+				t.Fatalf("a leg the pass connected registered the retry")
+			}
+		})
+	}
+}
+
+// TestACloneSourceConnectedAfterTheWalkIsAdopted pins the walk again before
+// a clone source's connect (CN18, its first step). Every cntlr of the node
+// may connect a source, so a source that another cntlr connects after the
+// converge's walk is no entry in it, or, when the source left and came back
+// at another number meanwhile, an entry the kernel gave to another
+// subsystem, which fails the lookup's subsysnqn check. In either case,
+// before the converge connects the source, it walks once more, finds the
+// source with a controller at every endpoint and adopts it: no connect of
+// the source, which the host would refuse as a duplicate, and the clone
+// builds. A converge of the built clone, whose source its walk holds, walks
+// once.
+func TestACloneSourceConnectedAfterTheWalkIsAdopted(t *testing.T) {
+	var eps []endpoint
+	for _, tr := range cloneOf().GetSrcTrConfList() {
+		eps = append(eps, endpoint{tr.GetTrAddr(), tr.GetTrSvcId()})
+	}
+	for _, tc := range []struct {
+		name string
+		// arm, called with the fake's lock held, makes another cntlr
+		// connect the source while the converge walks.
+		arm func(srv *CnAgentServer, node *fakeNode)
+	}{
+		{"no entry in the walk", func(srv *CnAgentServer, node *fakeNode) {
+			node.afterList[sysfsNvmeSubsysDir] = func() {
+				node.plantSubsys(node.nextSubsys, testSrcNqn, eps...)
+			}
+		}},
+		{"its entry fails the check", func(srv *CnAgentServer,
+			node *fakeNode) {
+			other := names(srv).SideToCnNqn(
+				testCluster, testSp+1, 0x99, testCn)
+			node.plantSubsys(node.nextSubsys, testSrcNqn, eps...)
+			idx := node.subsystems[testSrcNqn].idx
+			path := fmt.Sprintf("%s/nvme-subsys%d/subsysnqn",
+				sysfsNvmeSubsysDir, idx)
+			node.afterRead[path] = func() {
+				dropSubsysLocked(node, testSrcNqn)
+				node.plantSubsys(idx, other, endpoint{testIp, testSvcId})
+				node.plantSubsys(node.nextSubsys, testSrcNqn, eps...)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			withPassClock(srv, node)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			node.mu.Lock()
+			tc.arm(srv, node)
+			node.mu.Unlock()
+
+			opts := reqOpts{revision: 3, primary: true,
+				clones: []*pb.Clone{cloneOf()}}
+			for _, pass := range []struct {
+				name  string
+				walks int
+			}{
+				{"the converge that adopts the source", 2},
+				{"a converge of the built clone", 1},
+			} {
+				node.Reset()
+				reply, err := srv.SyncupCntlr(context.Background(),
+					cntlrReq(opts))
+				if err != nil {
+					t.Fatalf("%s: SyncupCntlr: %v", pass.name, err)
+				}
+				if reply.GetAgentReply().GetCode() != 0 {
+					t.Fatalf("%s: rejected: %v", pass.name,
+						reply.GetAgentReply())
+				}
+				if got := callCnt(node, "--nqn "+testSrcNqn+" "); got != 0 {
+					t.Fatalf("%s connected a source another cntlr had "+
+						"connected: %q", pass.name,
+						node.callsMatching("cmd nvme connect"))
+				}
+				if got := countCalls(node,
+					"list "+sysfsNvmeSubsysDir); got != pass.walks {
+					t.Fatalf("%s listed %s %d times, want %d: its walk, "+
+						"and a walk again only before a source's connect",
+						pass.name, sysfsNvmeSubsysDir, got, pass.walks)
+				}
+				info := reply.GetCntlrInfo()
+				assertOk(t, info.GetCloneIdToTarget()[testClone],
+					pass.name+": clone target")
+				assertOk(t, info.GetCloneIdToDmClone()[testClone],
+					pass.name+": dm-clone")
 			}
 		})
 	}

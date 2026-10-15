@@ -30,7 +30,8 @@ no leg repair:
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, through
   slice grows and the level ladder, failovers, a leg repair and all between.
-* **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8): a
+* **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8), on
+  a pool of at most `REACT_SLICE_CAP` slices (Topology and parameters): a
   killed cn agent moves the primary role and then loses its cntlr, a killed dn
   agent with its nvmet port removed loses its leg to a spare, and strided
   writes that push a thin pool past its low water mark gain its slice a data
@@ -68,10 +69,14 @@ sees refused while etcd is down; validation and CLI semantics are the gateway
 and dnvctl suites'. Concurrency: one dnvctl call and one case
 at a time, and never a revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
-two usable controllers (Known limits). A failover of a primary that still
-answers: the two failovers the cases cause lose an agent that answers nothing,
-one killed and one stopped, so neither shows a demotion hold that the old
-primary's report ends early (`dnv-worker.md` RW22).
+two usable controllers (Known limits). Auto-grow, cntlr replacement, leg
+repair and a failover after the primary's cn agent is killed, on a pool at
+the ceiling (`dnv-worker.md` AR5 to AR8), as react's pool has at most
+`REACT_SLICE_CAP` slices (Known limits); the cutoff case's failover, after
+that agent is stopped, runs at the run's slice count. A failover of a primary
+that still answers: the two failovers the cases cause lose an agent that
+answers nothing, one killed and one stopped, so neither shows a demotion hold
+that the old primary's report ends early (`dnv-worker.md` RW22).
 
 ## Topology and parameters
 
@@ -109,7 +114,13 @@ md-raid1 or none, which sets the legs per group; the dn agents per disk-node
 guest, by default the placement bound (E2E3); one case to run alone; and a
 cleanup-only run that sweeps every guest and stops. Every other number derives
 from these before a guest is touched, and a slice count `CreateStoragePool`
-would refuse is refused at parse time.
+would refuse is refused at parse time. The react case builds its pool at the
+slice count but at most `REACT_SLICE_CAP`, a constant of the suite: a
+primary's build at the ceiling holds its cntlr's lock (`cnagent.md` CN1) for
+longer than react's primary and cntlr thresholds, and the suite cannot
+shorten that hold (Known limits). The numbers that follow from the slice count
+are worked out for react beside the run's, and the dn agents per disk-node
+guest stay the run's.
 
 **The placement bound.** A create puts every side on a disk node of its own and
 a scan keeps one disk node per location (`architecture.md`, Per-operation
@@ -379,10 +390,12 @@ connected by both cntlrs and switched in, the replaced leg parked and then
 deleted, md's rebuild onto it judged by the array's state words rather than
 its OK status (`architecture.md`, Spare legs; `cnagent.md` CN10, CN12, CN28).
 
-**react** proves the four reactions on real faults, each by the record it
-writes, one action per pass making every wait a threshold plus a few passes
-(`dnv-worker.md` AR2); its own build may have reacted, so each reaction is
-judged by a delta from readings taken just before the trigger. Strided writes
+**react** proves the four reactions on real faults, on a pool of the run's
+slice count but at most `REACT_SLICE_CAP` slices (Topology and parameters),
+each by the record it writes, one action per pass making every wait a
+threshold plus a few passes (`dnv-worker.md` AR2); its own build may have
+reacted, so each reaction is judged by a delta from values read just
+before the trigger. Strided writes
 sized from the primary's own pool usage push slice 0's thin pool past its
 mark, and the worker must add exactly one data group and the pool grow on the
 device (`dnv-worker.md` AR6); a primary that moves meanwhile stops the run.
@@ -636,16 +649,19 @@ the connect attempted.
 * **A blocked probe, abandoned host IO, or the write the cutoff case's loop had
   queued when it was stopped leaves an unkillable dd or sync behind** (E2E7)
   until its device or path serves IO again.
-* **react's build may react.** At the widest shape a building primary cannot
-  answer a health check within a short primary threshold, the default
-  included, so the role can move and move back; a settling primary is
-  therefore held to the cntlr threshold (`dnv-worker.md` AR5, HL2); the
-  reacting set's cntlr threshold is still shorter than that build, so react's
-  build can fail over and mint spares repeatedly, and whether it converges at
-  that shape is not established.
+* **react is capped below the ceiling.** At the widest shape a building
+  primary cannot answer a health check within a short primary threshold, the
+  default included, so the role can move and move back; a settling primary is
+  therefore held to the cntlr threshold (`dnv-worker.md` AR5, HL2), but the
+  reacting set's cntlr threshold is still shorter than a build at the ceiling,
+  so there react's build can fail over and mint spares repeatedly. Hence
+  react builds at most `REACT_SLICE_CAP` slices (Topology and parameters), and
+  its reactions are not exercised at the ceiling, though the cutoff case's
+  failover is. Below the cap its build may react too, which each reaction's
+  delta from values read just before its trigger absorbs (The cases).
 * **The widest build is bounded by the primary's process spawning, not its
-  memory**: fewer slices, or no redundancy, shorten it; whether more cores
-  would is untested.
+  memory**: fewer slices, no redundancy or more cores on the controller nodes
+  shorten it.
 * **The grow race is absorbed, not removed.** The worker's sides-first hold
   (`dnv-worker.md` RW14) and the cn agent's in-pass connect retry (`cnagent.md`
   CN10) absorb a connect that reaches a grown group's side before its export

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -118,12 +119,12 @@ func withNote(note, details string) string {
 // 2's verdict (ready).
 type cloneSource struct {
 	// inFlight: a sweep's disconnect of the source NQN is in flight
-	// (disconnectInFlight), and the walk does not run.
+	// (disconnectInFlight), and the lookup does not run.
 	inFlight bool
-	// view is the subsystem walk's last answer; nil when the walk did not
-	// answer or did not run.
+	// view is the lookup's last answer (lookupSubsys); nil when the lookup
+	// did not answer or did not run.
 	view *subsysView
-	// readErr is the walk that did not answer (errSubsysUnknown).
+	// readErr is the lookup that did not answer (errSubsysUnknown).
 	readErr error
 	// stepErr is a connect of the converge's CN18 step 1 that failed. The
 	// probe connects nothing and never has one.
@@ -131,22 +132,23 @@ type cloneSource struct {
 }
 
 // readCloneSource reads the source the way ensureCloneSource starts: the CN10
-// disconnect registry first, and the subsystem walk only when no sweep's
-// disconnect of the source is in flight.
+// disconnect registry first, and the lookup in the pass's walk only when no
+// sweep's disconnect of the source is in flight.
 func (s *CnAgentServer) readCloneSource(
 	ctx context.Context,
+	plan *cntlrPlan,
 	cp *clonePlan,
 ) cloneSource {
 	if s.disconnectInFlight(cp.clone.GetSrcNqn()) {
 		return cloneSource{inFlight: true}
 	}
-	view, err := s.readSubsys(ctx, cp.clone.GetSrcNqn(),
+	view, err := s.lookupSubsys(ctx, plan.walk, cp.clone.GetSrcNqn(),
 		cp.clone.GetSrcNsIdx())
 	return cloneSource{view: view, readErr: err}
 }
 
 // ready reports whether CN18 step 1 holds on this read: no sweep's disconnect
-// of the source is in flight, the walk answered, every configured endpoint
+// of the source is in flight, the lookup answered, every configured endpoint
 // has a controller, whatever its state, since the converge connects only the
 // ones that are missing, and the source namespace device is there. It is not
 // cloneSourceLive, which answers the target row; this answers "did the
@@ -170,7 +172,7 @@ func (src cloneSource) ready(cp *clonePlan) bool {
 }
 
 // unready is the text of clone_id_to_dm_clone MISSING beside a source that is
-// not ready: unknown when the walk did not answer (CN10), since the pass does
+// not ready: unknown when the lookup did not answer (CN10), since the pass does
 // not know whether the source is connected, and not connected otherwise.
 func (src cloneSource) unready() string {
 	if errors.Is(src.readErr, errSubsysUnknown) {
@@ -181,18 +183,19 @@ func (src cloneSource) unready() string {
 
 // cloneTargetRow is the clone_id_to_target row of one read of the source
 // (CN28), the same for the converge and the probe. It reads ERROR only for
-// this node's own reading: while a sweep's disconnect of the source is in
-// flight, or when the walk did not answer. A fault of the source reads
-// MISSING, as a source with no subsystem entry does: a configured endpoint
-// with no live controller, its details the path states, or no source
-// namespace. A MISSING row sets no health epoch, so the row does not move
-// the role: moving the primary cannot repair the source, and the worker
-// cannot tell a fault in this node's own path to the source from one at the
-// source (CN18). A fault that fails CN18 step 1 still keeps the CN10 retry
-// running, whose attempts can make check rounds miss (cnagent.md, Known
-// limits). The row reads OK, with the path states, while every endpoint has
-// a live controller and the namespace is there. A failed connect of the
-// converge's decides nothing and leads the details of a row that is not OK.
+// this node's own side: while a sweep's disconnect of the source is in
+// flight, or when the walk or the lookup did not answer. A fault of the
+// source reads MISSING, as a source with no subsystem entry does: a
+// configured endpoint with no live controller, its details the path states,
+// or no source namespace. A MISSING row sets no health epoch, so the row
+// does not move the role: moving the primary cannot repair the source, and
+// the worker cannot tell a fault in this node's own path to the source from
+// one at the source (CN18). A fault that fails CN18 step 1 still keeps the
+// CN10 retry running, whose attempts can make check rounds miss (cnagent.md,
+// Known limits). The row reads OK, with the path states, while every
+// endpoint has a live controller and the namespace is there. A failed
+// connect of the converge's decides nothing and leads the details of a row
+// that is not OK.
 func cloneTargetRow(cp *clonePlan, src cloneSource) (pb.ResStatus, string) {
 	nqn := cp.clone.GetSrcNqn()
 	note := ""
@@ -253,7 +256,7 @@ func cloneDmRow(
 // converge (ensureClone, wherever its pass ends) and the probe (probeCntlr)
 // decide those rows by, so the two channels report the same status for the
 // same node, and the rows' epochs do not move between them (CN18, CN28): two
-// readings of one device cannot both be right.
+// reads of one device that disagree cannot both be right.
 //
 // The target row is cloneTargetRow's. For a source that is ready, CN18 step
 // 2's verdict (cloneMetaVerdict) comes first: when it decides, the meta row
@@ -270,9 +273,9 @@ func cloneDmRow(
 // enable, each with the listings and reads it makes itself. It decides no
 // status, and it leads the details of the dm row and the meta row whenever
 // they are not OK (CN29). Every other call passes "": the probe's, and a
-// converge's that step 1, the verdict or a reading ended. A failed connect
+// converge's that step 1, the verdict or a read ended. A failed connect
 // rides in src instead (cloneTargetRow), and the pass's arena listing
-// (planArena) or a readDm that does not answer is a reading the rows take
+// (planArena) or a readDm that does not answer is a read the rows take
 // themselves: the listing's error is the meta row's own details, and the
 // read's error the dm row's where the verdict does not decide that row
 // (cloneDmRow). What backs a namespace's ns-dev is not decided here
@@ -344,8 +347,8 @@ func (s *CnAgentServer) cloneRows(
 // writes them from what it then reads of the node, the function the check
 // round writes them by too, and the failure of a step that ended the pass
 // only rides in their details (CN29). The pass's arena listing (planArena),
-// step 2's read of the dm-clone and the read after step 5 are readings, not
-// steps: when one of them ends the pass, the rows take that reading
+// step 2's read of the dm-clone and the read after step 5 are reads, not
+// steps: when one of them ends the pass, the rows take that read
 // themselves, and no note rides with it. A listing or a read inside
 // ensureCloneMeta, ensureDmClone, applyDstBitmaps or enableHydration is part
 // of that step, and its error rides as the step's note. budget is the pass's
@@ -371,7 +374,7 @@ func (s *CnAgentServer) ensureClone(
 	}
 	// fresh reads the dm-clone for the rows of a pass a step ends, after
 	// whatever that step did to the device.
-	fresh := func() cloneDmRead { return s.probeCloneDm(ctx, cp) }
+	fresh := func() cloneDmRead { return s.probeCloneDm(ctx, nil, cp) }
 
 	// (1) the source connection: one controller per source cntlr, all in one
 	// subsystem, so the source's own ANA picks the serving path. A source
@@ -439,7 +442,7 @@ func (s *CnAgentServer) ensureClone(
 			return false, false, false
 		}
 	}
-	dm := s.probeCloneDm(ctx, cp)
+	dm := s.probeCloneDm(ctx, nil, cp)
 	if dm.err != nil {
 		s.cloneRows(ctx, st, plan, cp, info, src,
 			func() cloneDmRead { return dm }, "")
@@ -558,7 +561,7 @@ func (s *CnAgentServer) ensureClone(
 	// what DeleteClone's force check reads). One that does not show
 	// hydration on — it did not answer, the device went, or the enable did
 	// not take — leaves the build unfinished and registers the retry.
-	dm = s.probeCloneDm(ctx, cp)
+	dm = s.probeCloneDm(ctx, nil, cp)
 	s.cloneRows(ctx, st, plan, cp, info, src,
 		func() cloneDmRead { return dm }, "")
 	if dm.err != nil || !dm.present || !dm.hydrating {
@@ -577,13 +580,19 @@ func (s *CnAgentServer) ensureClone(
 // the read is ready and no connect of the step failed. Its connect step is
 // CN10's, on the same pass budget the legs drew on (CN18): a failed connect
 // is tried again while the budget covers the pause, and after a connect this
-// pass made the subsystem is re-read until the source namespace is there. A
-// connect that fails ends the step, and the subsystem is read once more, so
-// the rows say what that connect left behind. CN10's unknown-controller
-// guard is not applied: a source controller whose address did not answer
-// matches no entry, so an entry it alone serves is connected again — a
-// duplicate the host refuses while that controller lives — and nothing is
-// disconnected, since this step retires no path.
+// pass made the subsystem is looked up again until the source namespace is
+// there. A connect that fails ends the step, and the subsystem is looked up
+// once more, on a fresh walk, so the rows say what that connect left behind.
+// CN10's unknown-controller guard is not applied: a source controller whose
+// address did not answer matches no entry, so an entry it alone serves is
+// connected again — a duplicate the host refuses while that controller lives
+// — and nothing is disconnected, since this step retires no path.
+//
+// Every cntlr of the node may connect a source, and another may have
+// connected this one since the pass's walk. So a source the walk holds no
+// entry for, or whose entry fails the lookup's subsysnqn check, is looked up
+// once more on a fresh walk before the step connects it (CN18), and a source
+// that walk finds connected is adopted.
 //
 // A source a sweep is still disconnecting is neither read, adopted nor
 // connected (disconnectInFlight): a dm-clone built on it would lose its
@@ -597,15 +606,23 @@ func (s *CnAgentServer) ensureCloneSource(
 ) (string, cloneSource, bool) {
 	nqn := cp.clone.GetSrcNqn()
 	nsIdx := cp.clone.GetSrcNsIdx()
-	src := s.readCloneSource(ctx, cp)
+	src := s.readCloneSource(ctx, plan, cp)
 	if src.inFlight || src.readErr != nil {
 		return "", src, false
+	}
+	if !src.view.found {
+		plan.walk.stale = true
+		src = s.readCloneSource(ctx, plan, cp)
+		if src.inFlight || src.readErr != nil {
+			return "", src, false
+		}
 	}
 	connected := false
 	for _, tr := range cp.clone.GetSrcTrConfList() {
 		if src.view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
 			continue
 		}
+		plan.walk.stale = true
 		if err := s.connectWithin(ctx, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
@@ -619,10 +636,11 @@ func (s *CnAgentServer) ensureCloneSource(
 	}
 	switch {
 	case src.stepErr != nil:
-		src.view, src.readErr = s.readSubsys(ctx, nqn, nsIdx)
+		src.view, src.readErr = s.lookupSubsys(ctx, plan.walk, nqn, nsIdx)
 		return "", src, false
 	case connected:
-		src.view, src.readErr = s.awaitNsHead(ctx, budget, nqn, nsIdx)
+		src.view, src.readErr = s.awaitNsHead(
+			ctx, budget, plan.walk, nqn, nsIdx)
 	}
 	if !src.ready(cp) {
 		return "", src, false
@@ -656,15 +674,15 @@ func (s *CnAgentServer) ensureDmClone(
 	if cp.regionSectors == 0 || cp.sectors == 0 {
 		return false, fmt.Errorf("clone geometry is 0")
 	}
-	metaNo, err := s.dm.DevNo(ctx, cp.metaDmPath)
+	metaNo, err := s.dmDevNo(ctx, nil, cp.metaDmName)
 	if err != nil {
 		return false, err
 	}
-	destNo, err := s.dm.DevNo(ctx, s.nf.DmPath(cp.dstTd.raid0Name))
+	destNo, err := s.dmDevNo(ctx, nil, cp.dstTd.raid0Name)
 	if err != nil {
 		return false, err
 	}
-	srcNo, err := s.dm.DevNo(ctx, srcDev)
+	srcNo, err := s.blockDevNo(ctx, path.Base(srcDev))
 	if err != nil {
 		return false, err
 	}
@@ -838,18 +856,22 @@ func (dm cloneDmRead) rawLine() string {
 
 // probeCloneDm reads a clone's dm-clone, for CN18 step 2's test of an
 // unfinished build and for the clone's rows (cloneRows): `dmsetup info`, then
-// `dmsetup status` of a device that is there. The raw status line rides into
-// the dm row's details (architecture.md, Live-state reporting), and a status
-// that does not parse as a dm-clone's shows no hydration. Absence is
-// confirmed, never assumed, by cloneHydrating's rule: after a status read
-// that fails, a `dmsetup info` that finds the device gone makes the read an
-// absence, and anything else keeps it an error. Reading the status makes the
+// `dmsetup status` of a device that is there. The info comes from rd, the
+// reading of a check round or an info read, and from one `dmsetup info` of
+// the device in a converge, which passes nil. The status is always the
+// device's own. The raw status line rides into the dm row's details
+// (architecture.md, Live-state reporting), and a status that does not parse
+// as a dm-clone's shows no hydration. Absence is confirmed, never assumed, by
+// cloneHydrating's rule: after a status read that fails, a fresh `dmsetup
+// info` of the device, never the reading's, that finds it gone makes the read
+// an absence, and anything else keeps it an error. Reading the status makes the
 // kernel commit the clone's metadata (dnagent.md SH17).
 func (s *CnAgentServer) probeCloneDm(
 	ctx context.Context,
+	rd *cnReading,
 	cp *clonePlan,
 ) cloneDmRead {
-	dev, err := s.dm.Info(ctx, cp.finalName)
+	dev, err := s.dmInfo(ctx, rd, cp.finalName)
 	if err != nil {
 		return cloneDmRead{err: err}
 	}

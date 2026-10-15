@@ -40,9 +40,11 @@ func NewStore(oc common.OsClient, localStorPrefix string) *Store {
 	return &Store{oc: oc, prefix: localStorPrefix}
 }
 
-// List enumerates the store and returns, per requested kind prefix, the full
-// paths of the matching files in ascending name order (SH6). A failure to
-// read the prefix is the one fatal startup condition of SH3.
+// List enumerates the store with one listing of the prefix in the agent's own
+// process (OsClient.ReadDir) and returns, per requested kind prefix, the full
+// paths of the matching files in ascending name order (SH6). Any failure of
+// that listing — a prefix that is missing or is not a directory, a listing
+// that did not answer — is the one fatal startup condition of SH3.
 //
 // The committed file is the only truth. A name of a requested kind that
 // carries common.AtomicWriteTmpInfix is the temp file of a Save that did not
@@ -71,19 +73,16 @@ func (s *Store) List(
 ) (map[string][]string, error) {
 	cctx, cancel := cmdCtx(ctx)
 	defer cancel()
-	stdout, stderr, _, err := s.oc.RunCommand(
-		cctx, "ls", []string{"-1", s.prefix}, "")
+	names, err := s.oc.ReadDir(cctx, s.prefix)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"local store %s unreadable: %w: %s", s.prefix, err, stderr)
+		return nil, fmt.Errorf("local store %s unreadable: %w", s.prefix, err)
 	}
 	out := make(map[string][]string, len(kinds))
 	for _, kind := range kinds {
 		out[kind] = nil
 	}
 	var leftovers []string
-	for _, line := range strings.Split(stdout, "\n") {
-		name := strings.TrimSpace(line)
+	for _, name := range names {
 		if name == "" {
 			continue
 		}

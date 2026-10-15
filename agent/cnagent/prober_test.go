@@ -925,8 +925,9 @@ func TestLegUnavailableWhenNotOptimized(t *testing.T) {
 		t.Fatalf("a group with no available leg reports %v", info.GetStatus())
 	}
 	// SH15: the whole walk this test drives — subsysnqn, nsid,
-	// address, state, ana_state — runs under the SH15 soft timeout. Reverting
-	// the agent.CmdCtx in leg.go's readSysfs fails here.
+	// address, state, ana_state — runs under the SH15 soft timeout, which the
+	// shared walk's reads and listings take from cmdCtx (agent/oswrap.go).
+	// Dropping it there fails here.
 	assertSysfsDeadlines(t, node)
 }
 

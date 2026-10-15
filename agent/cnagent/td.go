@@ -29,8 +29,8 @@ func (s *CnAgentServer) raid0Args(
 		strconv.FormatUint(plan.stripeSectors(), 10),
 	}
 	for _, sp := range plan.slices {
-		devNo, err := s.dm.DevNo(
-			ctx, s.nf.DmPath(plan.thinName(tp.tdId, sp.sliceId)))
+		devNo, err := s.dmDevNo(
+			ctx, plan.rd, plan.thinName(tp.tdId, sp.sliceId))
 		if err != nil {
 			return nil, err
 		}
@@ -188,7 +188,7 @@ func (s *CnAgentServer) ensureNsDev(
 			return nsDevConverged, err
 		}
 	}
-	devNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.backingName))
+	devNo, err := s.dmDevNo(ctx, nil, np.backingName)
 	if err != nil {
 		return nsDevConverged, err
 	}
@@ -204,7 +204,7 @@ func (s *CnAgentServer) ensureNsDev(
 				ctx, np.td.errorName, np.td.sectors); err != nil {
 				return nsDevConverged, err
 			}
-			errNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.td.errorName))
+			errNo, err := s.dmDevNo(ctx, nil, np.td.errorName)
 			if err != nil {
 				return nsDevConverged, err
 			}
@@ -276,7 +276,7 @@ func (s *CnAgentServer) heldNsDev(
 	if len(targets) == 1 && targets[0].Type == "error" {
 		return nsDevHeldParked
 	}
-	errNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.td.errorName))
+	errNo, err := s.dmDevNo(ctx, nil, np.td.errorName)
 	if err != nil || onDevice(targets, errNo) {
 		return nsDevHeldParked
 	}
@@ -315,7 +315,7 @@ func (s *CnAgentServer) parkNsDev(
 	if err := s.ensureDmError(ctx, np.td.errorName, np.td.sectors); err != nil {
 		return err
 	}
-	devNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.td.errorName))
+	devNo, err := s.dmDevNo(ctx, nil, np.td.errorName)
 	if err != nil {
 		return err
 	}
@@ -449,9 +449,10 @@ func (s *CnAgentServer) setAna(
 
 func (s *CnAgentServer) probeNsDev(
 	ctx context.Context,
+	rd *cnReading,
 	np *nsPlan,
 ) (pb.ResStatus, string) {
-	dev, err := s.dm.Info(ctx, np.devName)
+	dev, err := s.dmInfo(ctx, rd, np.devName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
@@ -468,11 +469,11 @@ func (s *CnAgentServer) probeNsDev(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
-	devNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.backingName))
+	devNo, err := s.dmDevNo(ctx, rd, np.backingName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
-	targets, err := s.dm.Table(ctx, np.devName)
+	targets, err := s.dmTable(ctx, rd, np.devName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}

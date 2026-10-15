@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -18,15 +19,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// OsClient defines high-level primitives for executing OS commands,
-// performing disk file I/O, and handling Protobuf binary serialization with
-// context support.
+// OsClient defines high-level primitives for executing OS commands, listing
+// directories, performing disk file I/O, and handling Protobuf binary
+// serialization with context support.
 //
-// All OS command execution and disk file I/O in the codebase goes through an
-// OsClient; os/exec and os.ReadFile/os.WriteFile are never called directly
-// outside this file (osclient.md, Scope and placement). That is what makes
-// the logging rules of log.md R8.1/R8.2 enforceable, and every consumer
-// unit-testable through FakeOsClient.
+// All OS command execution, directory listing and disk file I/O in production
+// code goes through an OsClient; os/exec and os.ReadFile/os.WriteFile are never
+// called, and no directory is read, directly outside this file (osclient.md,
+// Scope and placement). That is what makes the logging rules of log.md R8.1,
+// R8.2 and R8.5 enforceable, and every consumer unit-testable through
+// FakeOsClient.
 //
 // One carve-out is recorded (osclient.md, Exported raw helpers and the
 // probe-IO carve-out): the CN11
@@ -67,6 +69,15 @@ type OsClient interface {
 	//   - err: nil on success, non-nil error if context is canceled, file is
 	//     missing, or I/O fails.
 	ReadFile(ctx context.Context, path string) (data string, err error)
+
+	// ReadDir lists the directory at path in the caller's own process: every
+	// name in it but "." and "..", sorted in byte order (the order `ls` prints
+	// in the C locale), untrimmed, names that start with a dot included. It
+	// opens no entry. A missing directory is an error wrapping
+	// fs.ErrNotExist. Any other failure — a path that is not a directory, a
+	// read that fails part-way through — is an error, and no names come back
+	// with it.
+	ReadDir(ctx context.Context, path string) (names []string, err error)
 
 	// WriteFile creates or overwrites a file at the specified path with
 	// string data using default file permissions. The replacement is atomic:
@@ -211,6 +222,61 @@ func (c *LimitedOsClient) ReadFile(
 	slog.InfoContext(ctx, "os read file", appendErr(attrs, err)...)
 
 	return data, err
+}
+
+func (c *LimitedOsClient) ReadDir(
+	ctx context.Context,
+	path string,
+) ([]string, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	names, err := readDirNames(path)
+
+	// log.md R8: every name, never truncated, and an array even when the
+	// listing returned none.
+	logged := names
+	if logged == nil {
+		logged = []string{}
+	}
+	attrs := []any{
+		slog.String("path", path),
+		slog.Int("count", len(names)),
+		slog.Any("names", logged),
+	}
+	slog.InfoContext(ctx, "os read dir", appendErr(attrs, err)...)
+
+	return names, err
+}
+
+// dirNames is the read of every name behind readDirNames. It is package
+// state so a test can make a read fail part-way; production never touches it.
+var dirNames = func(f *os.File) ([]string, error) { return f.Readdirnames(-1) }
+
+// readDirNames lists the directory at path (osclient.md, ReadDir). The open
+// takes O_DIRECTORY, so a path that is not a directory fails there with
+// ENOTDIR — a FIFO among them, whose plain open would wait for a writer —
+// and a missing one with ENOENT, which keeps fs.ErrNotExist in the error's
+// chain. The read takes the names alone: it opens and stats no entry. A read
+// that fails part-way returns no names, because a part of a listing read as
+// the whole would make a present entry read as absent.
+func readDirNames(path string) ([]string, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := dirNames(f)
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func (c *LimitedOsClient) WriteFile(

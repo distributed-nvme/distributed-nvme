@@ -2,8 +2,11 @@ package cnagent
 
 import (
 	"context"
+	"io/fs"
+	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -142,8 +145,8 @@ func TestMdDetailFromSysfsOnly(t *testing.T) {
 	// The md/ and dm-name kills match every array, so no array answers
 	// and matches; the rest are reads of the matched array itself.
 	for _, kill := range []func(){
-		func() { node.killCmdAlways["ls -1 "+sysfsBlockDir] = true },
-		func() { node.killCmdAlways["ls -1 "+sysfsBlockDir+"/md"] = true },
+		func() { node.killCmdAlways["list "+sysfsBlockDir] = true },
+		func() { node.killCmdAlways["list "+sysfsBlockDir+"/md"] = true },
 		func() { node.killReadAlways["/block/dm/name"] = true },
 		func() { node.killReadAlways["/md/array_state"] = true },
 		func() { node.killReadAlways["/md/degraded"] = true },
@@ -302,7 +305,7 @@ func TestMdWalkRefresh(t *testing.T) {
 	if err != nil || !detail.Exists {
 		t.Fatalf("a new array read (%+v, %v) after Refresh", detail, err)
 	}
-	unchanged := "cmd ls -1 " + sysfsBlockDir + strings.TrimPrefix(taken, "/dev")
+	unchanged := "list " + sysfsBlockDir + strings.TrimPrefix(taken, "/dev")
 	if got := node.callsMatching(unchanged); len(got) != 0 {
 		t.Errorf("Refresh listed an unchanged array again: %v", got)
 	}
@@ -385,7 +388,7 @@ func TestMdWalkUnansweredArray(t *testing.T) {
 				"/block/dm/name"] = true
 		}},
 		{"md listing", func(node *fakeNode) {
-			node.killCmdAlways["ls -1 "+sysfsBlockDir+strings.TrimPrefix(
+			node.killCmdAlways["list "+sysfsBlockDir+strings.TrimPrefix(
 				node.mdNode("/dev/md/theirs"), "/dev")+"/md"] = true
 		}},
 	} {
@@ -502,7 +505,7 @@ func TestMdWalkRefreshUnanswered(t *testing.T) {
 	const legA = "/dev/mapper/dnv-leg-a"
 	const legB = "/dev/mapper/dnv-leg-b"
 	mdListing := func(node *fakeNode, dev string) string {
-		return "ls -1 " + sysfsBlockDir +
+		return "list " + sysfsBlockDir +
 			strings.TrimPrefix(node.mdNode(dev), "/dev") + "/md"
 	}
 
@@ -798,8 +801,8 @@ func TestMdHasSuperblockKilledIsAnError(t *testing.T) {
 // guard. NameInUse asks whether an array already runs under /dev/md/<name>,
 // and its "no" is what lets assembleGroup go on to `mdadm --create
 // --assume-clean`: a create beside a running array puts a second array under
-// the name the pool's concat resolves. So an lsblk that did not answer is an
-// error, never a "no" — here it hides a "yes". The converge half is in
+// the name mdadm gives the group's array. So an lsblk that did not answer is
+// an error, never a "no" — here it hides a "yes". The converge half is in
 // TestGroupNeverCreatesBesideARunningArray.
 func TestMdNameInUseKilledIsAnError(t *testing.T) {
 	ctx := context.Background()
@@ -909,7 +912,7 @@ func TestMdListArraysFromSysfsOnly(t *testing.T) {
 	// A listing that did not answer is an error, never "this node runs no
 	// arrays" — the answer that would let a sweep walk past every array it
 	// should have stopped.
-	node.killCmdAlways["ls -1 "+sysfsBlockDir] = true
+	node.killCmdAlways["list "+sysfsBlockDir] = true
 	if arrays, err = NewMd(node.osClient()).ListArrays(ctx); err == nil {
 		t.Fatalf("a killed listing reported %+v and no error", arrays)
 	}
@@ -928,7 +931,7 @@ func TestMdListArraysFromSysfsOnly(t *testing.T) {
 		walk bool // Md.Walk reads it too, and records the array unanswered
 	}{
 		{"md listing", func() {
-			node.killCmdAlways["ls -1 "+sysfsBlockDir+"/"+oursNode+"/md"] =
+			node.killCmdAlways["list "+sysfsBlockDir+"/"+oursNode+"/md"] =
 				true
 		}, true},
 		{"member dm name", func() {
@@ -1027,9 +1030,9 @@ func TestMdNamedKernelNode(t *testing.T) {
 // md_dnv-<sp>-<slice>-<grp>, with a `_N` suffix after a name conflict; an
 // array on our legs the sweep never lists is never stopped. Everything else
 // there — dm-N, nvmeXnY and its hidden nvmeXcYnZ paths, sdX, loopN — must
-// stay out: the walk lists every matching entry's md/ with an `ls` each, a
-// process under the agent's shared OsClient semaphore, and a listing that
-// does not answer can refuse an assembly (TestGroupProbeWalksOnce and
+// stay out: the walk lists every matching entry's md/, each listing taking a
+// slot of the agent's shared OsClient semaphore, and a listing that does not
+// answer can refuse an assembly (TestGroupProbeWalksOnce and
 // TestGroupConvergeWalksOnce pin that neither reader touches one). A
 // partition of a partitionable array, md_d0p1, is no top-level entry:
 // /sys/block links whole disks only, and the partition lives under its disk.
@@ -1179,4 +1182,163 @@ func TestMdGoneOnlyForClearOrAbsent(t *testing.T) {
 	if gone, err = md.Gone(ctx, mdDev); err == nil {
 		t.Fatalf("a stalled array_state read as gone=%v and no error", gone)
 	}
+}
+
+// TestMdScanKeepsBothRules pins the md walk of a check round and an info
+// read (Md.Scan, CN12, CN21): one listing of /sys/block and one read of each
+// array serve both md rules, each as its own reader would read the same
+// node. Walk() is Md.Walk's view — the arrays and the nodes recorded as
+// unanswered — and Arrays() is ListArrays' — the same arrays, or the same
+// first error in the same order of reads. The trees cover each way a read
+// of an array can end: answered, an array_state that reads EBUSY while md
+// stops the array, a killed md/ listing, a member dm name that fails, a
+// member that is no dm device, a member md has unbound, an md/ gone, an
+// array_state gone, and two faults on two arrays, in either order. An
+// array_state that fails never reaches the walk view: a group row must not
+// turn ERROR for another pool's array being stopped.
+func TestMdScanKeepsBothRules(t *testing.T) {
+	ctx := context.Background()
+	const ours = "/dev/mapper/dnv-leg-a"
+	const ours2 = "/dev/mapper/dnv-leg-b"
+	const theirs = "/dev/mapper/dnv-leg-x"
+	ebusy := func(node *fakeNode, dev string) {
+		state := sysfsBlockDir + "/" + node.arrays[dev].node +
+			"/md/array_state"
+		node.errFiles[state] = &fs.PathError{Op: "read", Path: state,
+			Err: syscall.EBUSY}
+	}
+	killMd := func(node *fakeNode, dev string) {
+		node.killCmdAlways["list "+sysfsBlockDir+"/"+node.arrays[dev].node+
+			"/md"] = true
+	}
+	for _, tc := range []struct {
+		name string
+		// arm changes the tree after both arrays are seeded, with the
+		// fake's lock held where it says so.
+		arm func(node *fakeNode)
+		// unanswered is how many nodes Md.Walk records as unanswered, and
+		// listErr whether ListArrays fails: what makes the case real.
+		unanswered int
+		listErr    bool
+	}{
+		{"every array answers", func(*fakeNode) {}, 0, false},
+		{"an array_state that reads EBUSY", func(node *fakeNode) {
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			ebusy(node, "/dev/md/theirs")
+		}, 0, true},
+		{"a killed md/ listing", func(node *fakeNode) {
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			killMd(node, "/dev/md/theirs")
+		}, 1, true},
+		{"a member dm name that fails", func(node *fakeNode) {
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			node.failReadAlways["/dev-"+node.kernelName(theirs)+
+				"/block/dm/name"] = true
+		}, 1, true},
+		{"a member that is no dm device", func(node *fakeNode) {
+			node.seedArray("/dev/md/foreign", "foreign", "/dev/sdb1")
+		}, 0, false},
+		{"a member md has unbound", func(node *fakeNode) {
+			node.unbindMember("/dev/md/theirs", theirs)
+		}, 0, false},
+		{"an md/ gone", func(node *fakeNode) {
+			node.dropMdDir("/dev/md/theirs")
+		}, 0, false},
+		{"an array_state gone", func(node *fakeNode) {
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			delete(node.files, sysfsBlockDir+"/"+
+				node.arrays["/dev/md/theirs"].node+"/md/array_state")
+		}, 0, false},
+		{"a killed md/ listing before an EBUSY array_state",
+			func(node *fakeNode) {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				killMd(node, "/dev/md/ours")
+				ebusy(node, "/dev/md/theirs")
+			}, 1, true},
+		{"an EBUSY array_state before a killed md/ listing",
+			func(node *fakeNode) {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				ebusy(node, "/dev/md/ours")
+				killMd(node, "/dev/md/theirs")
+			}, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newFakeNode()
+			md := NewMd(node.osClient())
+			node.seedArray("/dev/md/ours", "ours", ours, ours2)
+			node.seedArray("/dev/md/theirs", "theirs", theirs)
+			tc.arm(node)
+
+			walk, err := md.Walk(ctx)
+			if err != nil {
+				t.Fatalf("Md.Walk: %v", err)
+			}
+			if len(walk.unanswered) != tc.unanswered {
+				t.Fatalf("fixture: Md.Walk recorded %v as unanswered, want "+
+					"%d nodes", walk.unanswered, tc.unanswered)
+			}
+			arrays, listErr := md.ListArrays(ctx)
+			if (listErr != nil) != tc.listErr {
+				t.Fatalf("fixture: ListArrays read (%+v, %v), want an "+
+					"error %v", arrays, listErr, tc.listErr)
+			}
+
+			node.Reset()
+			scan, err := md.Scan(ctx)
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			nodes := 0
+			for _, entry := range node.children(sysfsBlockDir) {
+				if mdBlockEntryPattern.MatchString(entry) {
+					nodes++
+				}
+			}
+			if got := countCalls(node, "list "+sysfsBlockDir); got != 1 {
+				t.Errorf("the scan listed %s %d times, want 1",
+					sysfsBlockDir, got)
+			}
+			if got := len(node.callsMatching("list " + sysfsBlockDir +
+				"/")); got != nodes {
+				t.Errorf("the scan listed %d md/ directories, want one per "+
+					"array node (%d)", got, nodes)
+			}
+
+			view := scan.Walk()
+			if !reflect.DeepEqual(view.arrays, walk.arrays) {
+				t.Errorf("Walk() holds %+v, Md.Walk %+v", view.arrays,
+					walk.arrays)
+			}
+			if got, want := errTexts(view.unanswered),
+				errTexts(walk.unanswered); !reflect.DeepEqual(got, want) {
+				t.Errorf("Walk() recorded %v as unanswered, Md.Walk %v",
+					got, want)
+			}
+			scanned, scanErr := scan.Arrays()
+			if !reflect.DeepEqual(scanned, arrays) {
+				t.Errorf("Arrays() read %+v, ListArrays %+v", scanned,
+					arrays)
+			}
+			if (scanErr == nil) != (listErr == nil) || (scanErr != nil &&
+				scanErr.Error() != listErr.Error()) {
+				t.Errorf("Arrays() failed with %v, ListArrays with %v",
+					scanErr, listErr)
+			}
+		})
+	}
+}
+
+// errTexts is an unanswered record's errors as their texts.
+func errTexts(unanswered map[string]error) map[string]string {
+	out := make(map[string]string, len(unanswered))
+	for node, err := range unanswered {
+		out[node] = err.Error()
+	}
+	return out
 }

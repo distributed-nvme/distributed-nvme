@@ -3,8 +3,11 @@ package common
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -194,6 +197,17 @@ func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
 	if _, err := client.ReadFile(ctx, "/etc/hostname"); err != context.Canceled {
 		t.Errorf("ReadFile err = %v, want context.Canceled", err)
 	}
+	if names, err := client.ReadDir(ctx, t.TempDir()); err != context.Canceled || names != nil {
+		t.Errorf("ReadDir = (%q, %v), want (nil, context.Canceled)", names, err)
+	}
+	// A listing waits for a slot like every other call: with the only slot
+	// held, it gives up at its deadline and lists nothing.
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if names, err := client.ReadDir(short, t.TempDir()); err != context.DeadlineExceeded || names != nil {
+		t.Errorf("ReadDir with the only slot held = (%q, %v), "+
+			"want (nil, context.DeadlineExceeded)", names, err)
+	}
 	if err := client.WriteFile(ctx, filepath.Join(t.TempDir(), "f"), "x"); err != context.Canceled {
 		t.Errorf("WriteFile err = %v, want context.Canceled", err)
 	}
@@ -201,6 +215,58 @@ func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
 	// A semaphore-acquire failure logs nothing: the operation never happened.
 	if recs := capture.records(t); len(recs) != 0 {
 		t.Errorf("blocked calls logged %d records: %s", len(recs), capture.buf.String())
+	}
+}
+
+// TestReadDirHoldsItsSlotUntilItReturns: a listing holds its slot for the
+// whole read, so listings count against the limit like every other call, and
+// gives it back when it returns, after a listing that failed as well. A
+// listing that keeps its slot leaves an agent, after as many listings as it
+// has slots, with every call waiting for a slot that never comes.
+func TestReadDirHoldsItsSlotUntilItReturns(t *testing.T) {
+	client := NewLimitedOsClient(1)
+	dir := t.TempDir()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	prev := dirNames
+	t.Cleanup(func() { dirNames = prev })
+	dirNames = func(f *os.File) ([]string, error) {
+		close(entered)
+		<-release
+		return prev(f)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.ReadDir(context.Background(), dir)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("ReadDir returned %v without reading the directory", err)
+	}
+	// The listing reads: the only slot is its own.
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if _, err := client.ReadFile(short, filepath.Join(dir, "x")); err != context.DeadlineExceeded {
+		t.Errorf("a call made while a listing reads = %v, want "+
+			"context.DeadlineExceeded: the listing holds the only slot", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	dirNames = prev
+
+	for _, path := range []string{dir, filepath.Join(dir, "missing"), dir} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := client.ReadDir(ctx, path)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ReadDir(%s) found no free slot: an earlier listing "+
+				"kept it", path)
+		}
 	}
 }
 
@@ -372,6 +438,226 @@ func TestProtoRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ReadDir (osclient.md, ReadDir)
+// ---------------------------------------------------------------------------
+
+// TestReadDirSortsAndKeepsEveryName: a listing returns every name of the
+// directory as it is, of any kind of entry, dot names and spaces at either end
+// included, in byte order, the order `ls` prints in the C locale: upper case
+// before lower case, "nvme-subsys10" before "nvme-subsys2". The entries are
+// created in another order. A FIFO and a link that leads nowhere sit among
+// them: a listing that opened its entries would wait on the one, and one that
+// stat'ed them would fail on the other. A symlink to the directory, the shape
+// of a sysfs class entry, lists the directory.
+func TestReadDirSortsAndKeepsEveryName(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	for _, name := range []string{
+		"nvme-subsys2", "trail ", ".hidden", "a b", "Zed", "md127", "B",
+		"_under", "10", "a", " lead", "a.b", "b2", "..dots",
+		"nvme-subsys1", "é", "9", "nvme-subsys10", "A", "b10",
+	} {
+		path := filepath.Join(dir, name)
+		var err error
+		switch name {
+		case "md127":
+			err = os.Mkdir(path, 0o755)
+		case "nvme-subsys2":
+			err = os.Symlink(filepath.Join(dir, "gone"), path)
+		case "9":
+			err = syscall.Mkfifo(path, 0o600)
+		default:
+			err = os.WriteFile(path, nil, 0o644)
+		}
+		if err != nil {
+			t.Fatalf("create %q: %v", name, err)
+		}
+	}
+	want := []string{
+		" lead", "..dots", ".hidden", "10", "9", "A", "B", "Zed", "_under",
+		"a", "a b", "a.b", "b10", "b2", "md127", "nvme-subsys1",
+		"nvme-subsys10", "nvme-subsys2", "trail ", "é",
+	}
+
+	names, err := client.ReadDir(ctx, dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if !slices.Equal(names, want) {
+		t.Errorf("ReadDir = %q\nwant      %q", names, want)
+	}
+
+	link := filepath.Join(t.TempDir(), "nvme-subsys0")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if names, err := client.ReadDir(ctx, link); err != nil ||
+		!slices.Equal(names, want) {
+		t.Errorf("ReadDir through a symlink to the directory = (%q, %v), "+
+			"want the directory's names", names, err)
+	}
+}
+
+// TestReadDirMissingIsNotExist: a missing directory is the one failure a
+// caller reads as absent, so its error keeps fs.ErrNotExist in the chain —
+// whether the directory, its parent or the target of a link to it is
+// missing — and no names come with it.
+func TestReadDirMissingIsNotExist(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, "missing"),
+		filepath.Join(dir, "missing", "below"),
+		dangling,
+	} {
+		names, err := client.ReadDir(ctx, path)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ReadDir(%s) err = %v, want one wrapping fs.ErrNotExist",
+				path, err)
+		}
+		if names != nil {
+			t.Errorf("ReadDir(%s) returned %q with its error", path, names)
+		}
+	}
+}
+
+// TestReadDirRefusesANonDirectory: a path that is not a directory, or that
+// runs through one that is not, is an error other than fs.ErrNotExist, so no
+// caller reads it as absent, and it comes back at once. A FIFO is the case
+// that could block: a plain open of one waits until a writer comes, and a
+// listing never waits on what sits at its path.
+func TestReadDirRefusesANonDirectory(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	type result struct {
+		names []string
+		err   error
+	}
+	for _, path := range []string{file, filepath.Join(file, "below"), fifo} {
+		done := make(chan result, 1)
+		go func() {
+			names, err := client.ReadDir(ctx, path)
+			done <- result{names: names, err: err}
+		}()
+		var got result
+		select {
+		case got = <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("ReadDir(%s) has not returned after 2s", path)
+			// A writer ends a blocked open of a FIFO, so the call returns
+			// inside the test.
+			if w, err := os.OpenFile(
+				path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				w.Close()
+			}
+			select {
+			case got = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("ReadDir(%s) has not returned after a writer came", path)
+			}
+		}
+		if got.err == nil || errors.Is(got.err, fs.ErrNotExist) {
+			t.Errorf("ReadDir(%s) err = %v, want an error that is not "+
+				"fs.ErrNotExist", path, got.err)
+		}
+		if got.names != nil {
+			t.Errorf("ReadDir(%s) returned %q with its error", path, got.names)
+		}
+	}
+}
+
+// TestReadDirPartWayFailureReturnsNothing: a read that fails after some names
+// returns none of them, only the error. Part of a listing taken for the whole
+// would make a present entry read as absent.
+func TestReadDirPartWayFailureReturnsNothing(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+	for _, name := range []string{"md125", "md126", "md127"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+	injected := errors.New("injected read failure")
+	prev := dirNames
+	t.Cleanup(func() { dirNames = prev })
+	dirNames = func(f *os.File) ([]string, error) {
+		names, err := prev(f)
+		if err != nil {
+			return names, err
+		}
+		// What a read that fails part-way returns: the names read before
+		// the failure, and the error.
+		return names[:2], injected
+	}
+
+	names, err := client.ReadDir(ctx, dir)
+	if !errors.Is(err, injected) {
+		t.Errorf("ReadDir err = %v, want the failed read's error", err)
+	}
+	if names != nil {
+		t.Errorf("a listing that failed part-way returned %q", names)
+	}
+}
+
+// TestReadDirClosesTheDirectory: a listing closes the directory it opened
+// before it returns, one that fails part-way included. A directory left open
+// holds its descriptor until a garbage collection closes it, and an agent
+// lists many directories in one check round.
+func TestReadDirClosesTheDirectory(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	var opened *os.File
+	var failWith error
+	prev := dirNames
+	t.Cleanup(func() { dirNames = prev })
+	dirNames = func(f *os.File) ([]string, error) {
+		opened = f
+		names, err := prev(f)
+		if failWith != nil {
+			return names, failWith
+		}
+		return names, err
+	}
+
+	for _, fail := range []error{nil, errors.New("injected read failure")} {
+		opened, failWith = nil, fail
+		if _, err := client.ReadDir(ctx, dir); !errors.Is(err, fail) {
+			t.Fatalf("ReadDir err = %v, want %v", err, fail)
+		}
+		if opened == nil {
+			t.Fatal("ReadDir read no directory")
+		}
+		// A second close fails with os.ErrClosed; a close that succeeds
+		// here closes what the listing left open.
+		if err := opened.Close(); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("the directory of a listing (read failure: %v) is "+
+				"still open after ReadDir returned", fail)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Logging (osclient.md, Logging)
 // ---------------------------------------------------------------------------
 
@@ -504,6 +790,82 @@ func TestOsClientLogRecords(t *testing.T) {
 	if failRead["size"] != float64(0) {
 		t.Errorf("failed read size = %v, want 0", failRead["size"])
 	}
+
+	// 6. directory listings: every name, never truncated, as an array; an
+	// empty listing logs an empty array, and a failed one its error
+	listed := filepath.Join(dir, "listed")
+	empty := filepath.Join(dir, "empty")
+	for _, d := range []string{listed, empty} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	// More names, and a longer one, than TruncForLog keeps; byte order puts
+	// the long name first.
+	names := []string{strings.Repeat("l", LogStrDataLimit+50)}
+	for i := 0; i < 40; i++ {
+		names = append(names, fmt.Sprintf("md%03d", i))
+	}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(listed, name), nil, 0o644); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+	if _, err := client.ReadDir(ctx, listed); err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if _, err := client.ReadDir(ctx, empty); err != nil {
+		t.Fatalf("ReadDir of an empty directory: %v", err)
+	}
+	missing := filepath.Join(dir, "missing")
+	if _, err := client.ReadDir(ctx, missing); err == nil {
+		t.Fatal("listing a missing directory succeeded")
+	}
+	dirRecs := capture.withMsg(t, "os read dir")
+	if len(dirRecs) != 3 {
+		t.Fatalf("%d os read dir records for 3 listings\n%s", len(dirRecs),
+			capture.buf.String())
+	}
+	for i, want := range []struct {
+		path   string
+		names  []string
+		failed bool
+	}{
+		{path: listed, names: names},
+		{path: empty},
+		{path: missing, failed: true},
+	} {
+		rec := dirRecs[i]
+		hasAttrs(t, rec, "path", "count", "names", TraceIdLogKey)
+		if rec["path"] != want.path {
+			t.Errorf("os read dir: path = %v, want %s", rec["path"], want.path)
+		}
+		if rec["count"] != float64(len(want.names)) {
+			t.Errorf("os read dir %s: count = %v, want %d", want.path,
+				rec["count"], len(want.names))
+		}
+		got, ok := rec["names"].([]any)
+		if !ok {
+			t.Errorf("os read dir %s: names = %v, want an array", want.path,
+				rec["names"])
+		} else if !slices.Equal(got, toAny(want.names)) {
+			t.Errorf("os read dir %s: names = %q, want every name %q",
+				want.path, got, want.names)
+		}
+		if _, has := rec["error"]; has != want.failed {
+			t.Errorf("os read dir %s: error attr present = %v, want %v: %v",
+				want.path, has, want.failed, rec)
+		}
+	}
+}
+
+// toAny is a []string as a decoded JSON array holds it.
+func toAny(ss []string) []any {
+	out := make([]any, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, s)
+	}
+	return out
 }
 
 func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
@@ -516,6 +878,10 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	}
 	if data, err := fake.ReadFile(ctx, "/x"); data != "" || err != nil {
 		t.Errorf("unset ReadFileFn = (%q, %v)", data, err)
+	}
+	// An unset ReadDirFn is an empty listing, never a missing directory.
+	if names, err := fake.ReadDir(ctx, "/x"); names != nil || err != nil {
+		t.Errorf("unset ReadDirFn = (%q, %v)", names, err)
 	}
 	if err := fake.WriteFile(ctx, "/x", "d"); err != nil {
 		t.Errorf("unset WriteFileFn = %v", err)
@@ -553,6 +919,26 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	target := &pb.SidePointer{}
 	if err := fake.ReadProto(ctx, "/x", target); err != nil || target.GetSpId() != 7 {
 		t.Errorf("stubbed ReadProto → (%v, %v)", target, err)
+	}
+
+	var gotPath string
+	fake.ReadDirFn = func(_ context.Context, path string) ([]string, error) {
+		gotPath = path
+		return []string{"md127"}, nil
+	}
+	if names, err := fake.ReadDir(ctx, "/sys/block"); err != nil ||
+		!slices.Equal(names, []string{"md127"}) || gotPath != "/sys/block" {
+		t.Errorf("stubbed ReadDir → (%q, %v), stub saw %q", names, err, gotPath)
+	}
+	// A stubbed failure reaches the caller as the stub returns it, so a
+	// missing directory stays one.
+	fake.ReadDirFn = func(_ context.Context, path string) ([]string, error) {
+		return nil, fmt.Errorf("list %s: %w", path, fs.ErrNotExist)
+	}
+	if names, err := fake.ReadDir(ctx, "/sys/block"); !errors.Is(err, fs.ErrNotExist) ||
+		names != nil {
+		t.Errorf("stubbed missing directory → (%q, %v), want (nil, an error "+
+			"wrapping fs.ErrNotExist)", names, err)
 	}
 
 	var blockOff uint64

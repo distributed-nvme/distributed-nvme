@@ -15,7 +15,14 @@ import (
 // (leg.go, md.go, pool.go, td.go, clone.go, clonemeta.go and xfer.go), by
 // probe.go and by syncup_cntlr.go. Every Ensure* here is probe-first (SH16):
 // it reads the live table and mutates only a real difference, because
-// reloading a live dm table is not a no-op — it stalls host IO.
+// reloading a live dm table is not a no-op — it stalls host IO. The probes
+// read a device's attrs and table through dmInfo and dmTable (reading.go),
+// from the pass's reading when it took one; the Ensure* helpers read their
+// own device directly (Dm.Info, Dm.Table). A backing dm device's number
+// comes from dmDevNo, from the pass's reading when it took one, and an md
+// group's from the array the pass's md walk matches (mdDevNo): buildConcat
+// takes a concat's segment numbers so in a probe and in a converge alike,
+// and ensureDmLinear takes its backing's number from its caller.
 
 // argCmpAny tells dmTableMatches to check only the target type and size —
 // what the leg wrapper's probe wants, where the backing device number is
@@ -113,18 +120,18 @@ func (s *CnAgentServer) ensureDmError(
 	return s.ensureDmSingle(ctx, name, "error", sectors, nil, 0)
 }
 
+// ensureDmLinear converges a dm-linear over the device whose number is
+// backingNo. The caller reads that number first, from where its device
+// keeps it: an NVMe multipath head's from /sys/block (blockDevNo), a dm
+// device's from dmsetup info (dmDevNo).
 func (s *CnAgentServer) ensureDmLinear(
 	ctx context.Context,
 	name string,
 	sectors uint64,
-	backingPath string,
+	backingNo string,
 	offsetSectors uint64,
 ) error {
-	devNo, err := s.dm.DevNo(ctx, backingPath)
-	if err != nil {
-		return err
-	}
-	args := []string{devNo, strconv.FormatUint(offsetSectors, 10)}
+	args := []string{backingNo, strconv.FormatUint(offsetSectors, 10)}
 	return s.ensureDmSingle(ctx, name, "linear", sectors, args, 0)
 }
 
@@ -135,13 +142,14 @@ func (s *CnAgentServer) ensureDmLinear(
 // ever notice a GrowSlice that appended only meta groups (CN13).
 func (s *CnAgentServer) ensureDmMulti(
 	ctx context.Context,
+	plan *cntlrPlan,
 	name string,
 	segments []dmSegment,
 ) (bool, error) {
 	if len(segments) == 0 {
 		return false, fmt.Errorf("concat has no segments")
 	}
-	lines, want, err := s.buildConcat(ctx, segments)
+	lines, want, err := s.buildConcat(ctx, plan, segments)
 	if err != nil {
 		return false, err
 	}
@@ -182,10 +190,10 @@ func (s *CnAgentServer) ensureDmMulti(
 	return false, nil
 }
 
-// dmSegment is one target of a concat: a backing device and how much of it,
+// dmSegment is one target of a concat: a group's device and how much of it,
 // starting at offsetSectors.
 type dmSegment struct {
-	path          string
+	grp           *grpPlan
 	sectors       uint64
 	offsetSectors uint64
 }
@@ -197,8 +205,14 @@ type concatTarget struct {
 	offsetSectors uint64
 }
 
+// buildConcat is a concat's table and its targets, each group's device
+// named by its number: an md group's array's from /sys/block, of the array
+// the pass's md walk matches by the group's legs (mdDevNo), so the concat
+// rows and the group's row read one array; a RedundNone group's dm-linear's
+// from dmsetup info, with the pass's reading (dmDevNo).
 func (s *CnAgentServer) buildConcat(
 	ctx context.Context,
+	plan *cntlrPlan,
 	segments []dmSegment,
 ) (string, []concatTarget, error) {
 	var sb strings.Builder
@@ -207,9 +221,15 @@ func (s *CnAgentServer) buildConcat(
 	for _, seg := range segments {
 		if seg.sectors == 0 {
 			return "", nil, fmt.Errorf("concat segment %s has size 0",
-				seg.path)
+				seg.grp.resName)
 		}
-		devNo, err := s.dm.DevNo(ctx, seg.path)
+		var devNo string
+		var err error
+		if seg.grp.raid1 {
+			devNo, err = s.mdDevNo(ctx, plan, seg.grp)
+		} else {
+			devNo, err = s.dmDevNo(ctx, plan.rd, seg.grp.dmName)
+		}
 		if err != nil {
 			return "", nil, err
 		}
@@ -265,42 +285,47 @@ func concatMatches(targets []common.DmTarget, want []concatTarget) bool {
 // Probes (CN23/CN29: a probe changes no object of the node)
 // ---------------------------------------------------------------------------
 
+// probeDmTarget probes a single-target device over the dm device backingDm,
+// at offsetSectors of it: the backing's number first (dmDevNo), then the
+// device. With no backingDm only the target type and size are compared.
 func (s *CnAgentServer) probeDmTarget(
 	ctx context.Context,
+	rd *cnReading,
 	name string,
 	targetType string,
 	sectors uint64,
-	backingPath string,
+	backingDm string,
 	offsetSectors uint64,
 ) (pb.ResStatus, string) {
-	if backingPath == "" {
+	if backingDm == "" {
 		return s.probeDmArgs(
-			ctx, name, targetType, sectors, nil, argCmpAny)
+			ctx, rd, name, targetType, sectors, nil, argCmpAny)
 	}
-	devNo, err := s.dm.DevNo(ctx, backingPath)
+	devNo, err := s.dmDevNo(ctx, rd, backingDm)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	args := []string{devNo, strconv.FormatUint(offsetSectors, 10)}
-	return s.probeDmArgs(ctx, name, targetType, sectors, args, 0)
+	return s.probeDmArgs(ctx, rd, name, targetType, sectors, args, 0)
 }
 
 func (s *CnAgentServer) probeDmArgs(
 	ctx context.Context,
+	rd *cnReading,
 	name string,
 	targetType string,
 	sectors uint64,
 	args []string,
 	argCmp int,
 ) (pb.ResStatus, string) {
-	dev, err := s.dm.Info(ctx, name)
+	dev, err := s.dmInfo(ctx, rd, name)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	if dev == nil {
 		return pb.ResStatus_RES_STATUS_MISSING, ""
 	}
-	targets, err := s.dm.Table(ctx, name)
+	targets, err := s.dmTable(ctx, rd, name)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
@@ -316,21 +341,22 @@ func (s *CnAgentServer) probeDmArgs(
 
 func (s *CnAgentServer) probeDmConcat(
 	ctx context.Context,
+	plan *cntlrPlan,
 	name string,
 	segments []dmSegment,
 ) (pb.ResStatus, string) {
-	dev, err := s.dm.Info(ctx, name)
+	dev, err := s.dmInfo(ctx, plan.rd, name)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	if dev == nil {
 		return pb.ResStatus_RES_STATUS_MISSING, ""
 	}
-	_, want, err := s.buildConcat(ctx, segments)
+	_, want, err := s.buildConcat(ctx, plan, segments)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
-	targets, err := s.dm.Table(ctx, name)
+	targets, err := s.dmTable(ctx, plan.rd, name)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}

@@ -31,7 +31,8 @@
 #
 # The default shape is the widest storage pool this tree can build: 32 slices
 # (common.MaxSliceCntPerSp), md-raid1, so 2 x 32 x 2 = 128 sides on 128
-# DISTINCT disk nodes and 64 md arrays plus 32 thin pools on one CN.
+# DISTINCT disk nodes and 64 md arrays plus 32 thin pools on one CN. The react
+# case alone builds at most REACT_SLICE_CAP slices; that constant says why.
 #
 # ---------------------------------------------------------------------------
 # ABSOLUTE RULES. Every one of these guards a failure mode of this lab; none
@@ -268,6 +269,14 @@ TRSVCID_MAX=$((DN_TRSVCID_BASE + MAX_DNS_PER_VM - 1))
 # the ceiling.
 SLICE_CNT_DEFAULT=32
 
+# The most slices the react case builds: its pool has min(--slice-cnt,
+# REACT_SLICE_CAP) of them (derive_params, sp_shape), every other case's the
+# whole --slice-cnt. react's primary and cntlr thresholds are shorter than the
+# time a primary's build at the ceiling holds its cntlr's lock, so at the
+# ceiling its own build can fail over again and again (e2e_integtest.md,
+# Topology and parameters). A choice of this suite; it mirrors no Go constant.
+REACT_SLICE_CAP=8
+
 # common.MinDnExtSize — 64 MiB, the smallest extent validateDnBinConf
 # (gateway/validate.go) accepts. Small extents are what keep the run's
 # real allocation inside the E2E5 caps: every group here is one extent per
@@ -327,9 +336,9 @@ SLOTS=0,1
 #
 # THE LOAD OF A DEFAULT-SHAPE BUILD. A default-shape build — 32 slices, raid1,
 # 64 md arrays over 128 legs, 32 thin pools — keeps the primary CN spawning a
-# few hundred processes a second on a 2-vCPU guest for minutes on end (the
-# whole build window, restarts included — see WAIT_BUILD). Under that load the
-# primary cannot answer a health check inside one check round — the round's
+# few hundred processes a second on a controller-node guest for minutes on end
+# (the whole build window, restarts included — see WAIT_BUILD). Under that load
+# the primary cannot answer a health check inside one check round — the round's
 # timeout is the cluster's cntlr_interval, which here is always
 # common.DefaultHealthCheckInterval, as `cluster create` has no flag for it —
 # the worker sets its err_epoch, and AR5 moves the role. The new primary then
@@ -490,7 +499,8 @@ ZERO_MIB_SHA=""
 # the create's own sides zero — one extent per meta side, DATA_ZERO_BYTES per
 # data side, LEGS x SLICE_CNT of each — plus the backing pattern of every
 # backing file, and that floor moves with the shape: a flat cap with room at
-# the widest pool would be no cap at all at one slice.
+# the widest pool would be no cap at all at one slice. So it is the active
+# case's cap, like SLICE_CNT: react's own while the react case runs (sp_shape).
 DN_CAP_BYTES=$((256 << 20))
 RUN_CAP_BYTES=0
 
@@ -529,7 +539,7 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 # THE BIG ONES ARE SIZED AGAINST THE LAB'S BUILD WINDOW, NOT AN ESTIMATE. A
 # few minutes per build is optimistic for this shape: a default-shape build
 # keeps the primary CN's agent spawning a few hundred processes a second on a
-# 2-vCPU guest for minutes on end.
+# controller-node guest for minutes on end.
 #
 # READ THE WINDOW FOR WHAT IT IS. It is the longest build WINDOW the lab
 # produces, and not the cost of one uninterrupted build: failovers can fire
@@ -539,9 +549,9 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 # teardown, its legs. Every margin below is a ratio against that window,
 # which is the only number there is to size from.
 #
-# The constraint is the process-spawn rate of a 2-vCPU guest; it is NOT memory
-# (the CN guests keep most of their memory free through a build, with load
-# averages under 1).
+# The constraint is the process-spawn rate of a controller-node guest; it is
+# NOT memory (the CN guests keep most of their memory free through a build,
+# with load averages under 1).
 #
 # THE LINE BETWEEN THE TWO BIG BUDGETS IS "FROM NOTHING" vs "AN INCREMENT", not
 # "a cntlr stack" vs "everything else". WAIT_BUILD is a WHOLE cntlr stack built
@@ -571,7 +581,7 @@ WAIT_PROVISION=600     # an incremental convergence on something that already
                        # group's md + pool reload, a td's thin volumes and
                        # raid0, one leg reconnecting
 WAIT_DELETE=900        # `sp delete` to drain to NOT_FOUND. The drain is the
-                       # build run backwards on the same 2-vCPU CN — 32 pools,
+                       # build run backwards on the same CN — 32 pools,
                        # 64 arrays and 128 legs torn down and every side
                        # retired on its DN — so it is sized against the build
                        # window, not against an incremental one
@@ -601,7 +611,8 @@ CASES=(smoke ops copy react cutoff)
 # The cases this run will actually execute, in CASES order with --only applied.
 # main fills it BEFORE the guest preflight, which checks nvme-stas on host0
 # only when the cutoff case is in it, and so before setup too, which builds
-# the FIRST case's sp — sp_thresholds has to know whose sp that is.
+# the FIRST case's sp — sp_thresholds and sp_shape have to know whose sp that
+# is.
 RUN_CASES=()
 
 # ---------------------------------------------------------------------------
@@ -646,6 +657,23 @@ SIDE_DATA0_MIB=0
 SIDE_LAST_MIB=0
 DN_PAT_DATA0_MIB=0
 DN_PAT_LAST_MIB=0
+
+# The two shape sets derive_params works out: the run's, at --slice-cnt, and
+# react's, at min(--slice-cnt, REACT_SLICE_CAP). SLICE_CNT, GRP_CNT,
+# SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT above are the ACTIVE case's shape,
+# which sp_shape copies from one of them before each case's sp is built, and
+# which every step of a case reads. The dn agents per DN VM (DNS_PER_VM,
+# DN_TOTAL) are the run's in every case.
+RUN_SLICE_CNT=0
+RUN_GRP_CNT=0
+RUN_SP_ZERO_BYTES=0
+RUN_SHAPE_CAP_BYTES=0
+RUN_TD_UNIT=0
+REACT_SLICE_CNT=0
+REACT_GRP_CNT=0
+REACT_SP_ZERO_BYTES=0
+REACT_RUN_CAP_BYTES=0
+REACT_TD_UNIT=0
 
 JQ=jq
 ONLY=""
@@ -1275,7 +1303,8 @@ roles (repeatable flags; nothing is positional, nothing is hardcoded):
 
 parameters:
   --slice-cnt N       slices per sp (default $SLICE_CNT_DEFAULT =
-                      common.MaxSliceCntPerSp; 1..$SLICE_CNT_DEFAULT)
+                      common.MaxSliceCntPerSp; 1..$SLICE_CNT_DEFAULT); the
+                      react case builds at most $REACT_SLICE_CAP
   --redund raid1|none redundancy of every group (default raid1)
   --dns-per-vm N      dnagents per DN VM; the default is the placement bound
                       floor(min(legs, d) x (2 x slice_cnt + 2) / d) + 1 over
@@ -1485,7 +1514,9 @@ parse_args() {
 # touches a guest.
 derive_params() {
 	# Two groups per slice — one meta, one data — for every slice, from
-	# planSpGroups (gateway/storagepool.go), and LEGS sides per group.
+	# planSpGroups (gateway/storagepool.go), and LEGS sides per group. The
+	# placement bound below reads it, so it is set first; its react twin is
+	# REACT_GRP_CNT, at the end.
 	GRP_CNT=$((2 * SLICE_CNT))
 
 	# The create's data groups as model.GroupBlocks lays out INIT_EXT_CNT x
@@ -1699,6 +1730,9 @@ derive_params() {
 	# cp's etcd and logs are the heaviest contributors after a smoke case;
 	# 4 GiB leaves room for the copy and react cases, which write more, while
 	# still being a number a real leak would cross.
+	#
+	# The react twins of the first and the third, REACT_SP_ZERO_BYTES and
+	# REACT_RUN_CAP_BYTES, are at the end; RUN_SLACK_BYTES serves both.
 	SP_ZERO_BYTES=$((LEGS * SLICE_CNT * (EXTENT_SIZE + DATA_ZERO_BYTES)))
 	RUN_SLACK_BYTES=$((4 << 30))
 	RUN_CAP_BYTES=$((SP_ZERO_BYTES + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
@@ -1706,7 +1740,34 @@ derive_params() {
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
 	# multiple of slice_cnt x stripe_size, computed from the SP's stored
 	# values. Every `td create --size` in this suite is a multiple of TD_UNIT.
+	# Its react twin is REACT_TD_UNIT, at the end.
 	TD_UNIT=$((SLICE_CNT * STRIPE_SIZE))
+
+	# The run's shape, and react's beside it (e2e_integtest.md, Topology and
+	# parameters): react builds min(SLICE_CNT, REACT_SLICE_CAP) slices on the
+	# run's disk nodes, so the dn agents per disk-node guest stay the run's.
+	# sp_shape copies one set into the active SLICE_CNT, GRP_CNT,
+	# SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT. React's four numbers repeat
+	# the run's formulas above at its own slice count.
+	RUN_SLICE_CNT=$SLICE_CNT
+	RUN_GRP_CNT=$GRP_CNT
+	RUN_SP_ZERO_BYTES=$SP_ZERO_BYTES
+	RUN_SHAPE_CAP_BYTES=$RUN_CAP_BYTES
+	RUN_TD_UNIT=$TD_UNIT
+	REACT_SLICE_CNT=$((SLICE_CNT < REACT_SLICE_CAP ? SLICE_CNT : REACT_SLICE_CAP))
+	REACT_GRP_CNT=$((2 * REACT_SLICE_CNT))
+	REACT_SP_ZERO_BYTES=$((LEGS * REACT_SLICE_CNT * (EXTENT_SIZE + DATA_ZERO_BYTES)))
+	REACT_RUN_CAP_BYTES=$((REACT_SP_ZERO_BYTES + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
+	REACT_TD_UNIT=$((REACT_SLICE_CNT * STRIPE_SIZE))
+	# The two copies of the formulas must agree, and at a slice count no
+	# larger than the cap they can be compared: react's set is then the run's.
+	local run_set="$RUN_GRP_CNT/$RUN_SP_ZERO_BYTES/$RUN_SHAPE_CAP_BYTES/$RUN_TD_UNIT"
+	local react_set="$REACT_GRP_CNT/$REACT_SP_ZERO_BYTES/$REACT_RUN_CAP_BYTES/$REACT_TD_UNIT"
+	if [ "$REACT_SLICE_CNT" -eq "$SLICE_CNT" ] && [ "$react_set" != "$run_set" ]; then
+		die "at $SLICE_CNT slices react's shape (groups/zeroed bytes/run" \
+			"cap/td unit) is $react_set and the run's is $run_set:" \
+			"derive_params' two copies of the shape formulas disagree"
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -5460,7 +5521,9 @@ DIAG_MAX_DN_LOGS=6
 # will actually inherit.
 #
 # lsblk and blkdiscard are in the SHARED list because both roles really run
-# them: agent/dm.go's DevNo and DiskSize are `lsblk`, and blkdiscard runs on
+# them: the dn agent's DevNo and DiskSize (agent/dm.go) are `lsblk`, and so is
+# the cn agent's check before an md create that no array runs under the
+# group's name, NameInUse (agent/cnagent/md.go); blkdiscard runs on
 # both — agent/dnagent/zeroing.go (BlkZeroout, side provisioning:
 # dnagent.md DN9),
 # agent/cnagent/clonemeta.go (BlkDiscardRange, the
@@ -6664,6 +6727,8 @@ diagnostics() {
 	else
 		log "  last path:  (none read)"
 	fi
+	# The active shape (sp_shape): the failing case's, the run's before the
+	# first case's sp is chosen.
 	log "  shape:      slice_cnt=$SLICE_CNT redund=$REDUND legs=$LEGS" \
 		"groups=$GRP_CNT dns_per_vm=$DNS_PER_VM dn_total=$DN_TOTAL"
 	log "  cluster_id: ${CLUSTER_ID:-(not read yet)}"
@@ -8068,10 +8133,11 @@ setup_register_nodes() {
 
 # sp_thresholds selects the event_threshold set the NEXT `sp create` will carry
 # (the sets of e2e_integtest.md, Topology and parameters, Event thresholds,
-# and the measurements behind them). main calls it once before setup and once
-# before each setup_between_cases, so the sp a case works in is always built
-# with that case's set — the only moment the choice can be made, because no
-# RPC changes a threshold afterwards.
+# and the measurements behind them); sp_shape, below it, selects the slice
+# count that create builds. main calls both, in that order, once before setup
+# and once before each setup_between_cases, so the sp a case works in is
+# always built with that case's set and shape — the only moment the choice can
+# be made, because no RPC changes a threshold or a slice count afterwards.
 #
 # An unknown name DIES rather than defaulting: a case added to $CASES is a
 # decision about whether it may tolerate a reaction mid-run, and silently giving
@@ -8115,6 +8181,36 @@ sp_thresholds() { # <case name>
 	esac
 	log ""
 	log "=== thresholds for the $1 case's sp: the $THR_SET set, $THR"
+}
+
+# sp_shape selects the shape the NEXT `sp create` builds: react's set for the
+# react case, the run's for every other (derive_params works out both before a
+# guest is touched; e2e_integtest.md, Topology and parameters). It computes
+# nothing: it copies one set into the active SLICE_CNT, GRP_CNT,
+# SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT, which the case reads from its
+# create's assertions to its space guard. main calls it right after each
+# sp_thresholds call.
+sp_shape() { # <case name>
+	case "$1" in
+	react)
+		SLICE_CNT=$REACT_SLICE_CNT
+		GRP_CNT=$REACT_GRP_CNT
+		SP_ZERO_BYTES=$REACT_SP_ZERO_BYTES
+		RUN_CAP_BYTES=$REACT_RUN_CAP_BYTES
+		TD_UNIT=$REACT_TD_UNIT
+		if [ "$REACT_SLICE_CNT" != "$RUN_SLICE_CNT" ]; then
+			log "  react builds $REACT_SLICE_CNT slices, its cap" \
+				"REACT_SLICE_CAP, not the run's $RUN_SLICE_CNT"
+		fi
+		;;
+	*)
+		SLICE_CNT=$RUN_SLICE_CNT
+		GRP_CNT=$RUN_GRP_CNT
+		SP_ZERO_BYTES=$RUN_SP_ZERO_BYTES
+		RUN_CAP_BYTES=$RUN_SHAPE_CAP_BYTES
+		TD_UNIT=$RUN_TD_UNIT
+		;;
+	esac
 }
 
 setup_create_sp() {
@@ -11472,7 +11568,7 @@ UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 #   the two can be argued about separately: a hydration is bounded by the
 #   nvme-tcp path and by dm-clone's own copy threads, not by the dmsetup/mdadm
 #   spawn rate that decides a build. It follows WAIT_PROVISION's size because
-#   the copy runs on the SAME 2-vCPU CN and competes with the same work.
+#   the copy runs on the SAME CN and competes with the same work.
 # WAIT_SRC_CONNECT — how long the CN may take to bring the source connection
 #   up before "it never will" is the honest reading. The CN retries a failed
 #   source connect from its own registry (ensureClone (agent/cnagent/clone.go)
@@ -13302,10 +13398,10 @@ case_copy() {
 #
 # The consequence is real, not hypothetical. Building this shape keeps the
 # primary CN spawning dmsetup, mdadm and lsblk processes for minutes on end
-# on a 2-vCPU guest — the whole window, restarts included, see WAIT_BUILD —
-# and under that load it cannot answer a health check inside one check round. A
-# build under this set can record, all inside setup, a `failover`, a
-# `spare_create` and a `failover` back.
+# on a controller-node guest — the whole window, restarts included, see
+# WAIT_BUILD — and under that load it cannot answer a health check inside one
+# check round. A build under this set can record, all inside setup, a
+# `failover`, a `spare_create` and a `failover` back.
 #
 # So when this case starts, the sp MAY already hold a spare leg it did not ask
 # for, and the primary MAY be a different controller than the one the create
@@ -13322,13 +13418,14 @@ case_copy() {
 #
 # The one thing a snapshot cannot rescue is a build that never converges: if the
 # failover loop keeps handing the role back and forth, each new primary starts
-# the whole build again. That is a real risk of running this case at 32 slices
-# and it is bounded, not hidden — setup_wait_stack follows the role through both
-# of its waits and re-runs the pair when the role moves under them, up to
-# SETUP_STACK_ROUNDS times, and then dies saying the sp is not converging rather
-# than timing out on a target that has moved. It shouts when a build did not
-# produce the fresh-sp shape, and the shape-poll shouts when the shape moves
-# under a wait.
+# the whole build again. That is a real risk of running this case at the
+# ceiling, which is why it builds at most REACT_SLICE_CAP slices (sp_shape),
+# and at any size it is bounded, not hidden — setup_wait_stack follows the role
+# through both of its waits and re-runs the pair when the role moves under
+# them, up to SETUP_STACK_ROUNDS times, and then dies saying the sp is not
+# converging rather than timing out on a target that has moved. It shouts when
+# a build did not produce the fresh-sp shape, and the shape-poll shouts when
+# the shape moves under a wait.
 # ---------------------------------------------------------------------------
 
 # --- the objects this case creates ------------------------------------------
@@ -13876,7 +13973,7 @@ react_new_primary_ready() { # <the cntlr AR5 elected>
 			"(or, once it had settled, the ${THR_PRIMARY}s primary_unhealthy)" \
 			"of the $THR_SET set ($THR). But step 4 is written about cntlr $1," \
 			"so this case cannot judge AR7 after it. Re-run react; if it" \
-			"repeats, the 2-vCPU CN cannot build this shape inside" \
+			"repeats, the CN cannot build this shape inside" \
 			"cntlr_unhealthy at all."
 	fi
 	[ "$rc" = 0 ] || return 1
@@ -14021,13 +14118,15 @@ react_snapshot() {
 
 # --- step 1 -----------------------------------------------------------------
 #
-# Setup, plus `td create --name a0 --size $((64*TD_UNIT))` (2 GiB)
-# and `ns create … --idx 2 --td a0 --uuid $UUID2` on host0, plus the four
-# geometry facts the next step's arithmetic rests on — every one of them read
-# back from the sp and asserted, not assumed.
+# Setup, plus `td create --name a0 --size $((64*TD_UNIT))` (64 MiB per slice
+# of react's own pool) and `ns create … --idx 2 --td a0 --uuid $UUID2` on
+# host0, plus the four geometry facts the next step's arithmetic rests on —
+# every one of them read back from the sp and asserted, not assumed.
 
 react_target() {
-	stage 01 "td create $TD_REACT (2 GiB, the AR6 target) and ns idx 2 for host0"
+	# a0's size first, for the stage line; TD_UNIT is react's (sp_shape).
+	REACT_TD_SIZE=$((64 * TD_UNIT))
+	stage 01 "td create $TD_REACT ($((REACT_TD_SIZE / 1048576)) MiB, the AR6 target) and ns idx 2 for host0"
 	local stripe block slicemib msg
 
 	sp_refresh
@@ -14102,10 +14201,9 @@ react_target() {
 	msg="$msg anything above 100 switches AR6 off (tryGrow (worker/reaction.go))"
 	assert_between "$REACT_LWM" 1 100 "$msg"
 
-	# a0 is 2 GiB = 64 x TD_UNIT, so each slice's thin volume is
-	# TD_REACT_SIZE / slice_cnt — 64 MiB at the default shape, which is the
-	# ceiling on how many 1 MiB chunks the next step may write into slice 0.
-	REACT_TD_SIZE=$((64 * TD_UNIT))
+	# a0 is 64 x TD_UNIT, so each slice's thin volume is REACT_TD_SIZE /
+	# slice_cnt — 64 MiB at every slice count, the stripe being 1 MiB, which is
+	# the ceiling on how many 1 MiB chunks the next step may write into slice 0.
 	slicemib=$((REACT_TD_SIZE / SLICE_CNT / 1048576))
 	assert_ge "$slicemib" 1 \
 		"$TD_REACT's per-slice thin volume must hold at least one 1 MiB chunk"
@@ -16440,8 +16538,9 @@ space_note_case() { # <case name>
 
 	[ "$total" -le "$SPACE_RUN_MAX_TOTAL" ] || SPACE_RUN_MAX_TOTAL=$total
 	[ "$worst" -le "$SPACE_RUN_MAX_BACKING" ] || SPACE_RUN_MAX_BACKING=$worst
-	row=$(printf '  %-8s allocated %14s bytes on all guests, largest backing file %11s bytes' \
-		"$name" "$total" "$worst")
+	# The cap is the case's own, as react's pool may be narrower (sp_shape).
+	row=$(printf '  %-8s allocated %14s bytes on all guests, largest backing file %11s bytes, run cap %s' \
+		"$name" "$total" "$worst" "$RUN_CAP_BYTES")
 	SPACE_CASE_ROWS+=("$row")
 	log "  space after $name: $total bytes under \$WORK + \$TMPFS_DIR on all" \
 		"guests, largest backing file $worst bytes"
@@ -16461,7 +16560,7 @@ space_summary() {
 		log "$row"
 	done
 	log "  peak:    $SPACE_RUN_MAX_TOTAL bytes on all guests" \
-		"(cap $RUN_CAP_BYTES), largest backing file" \
+		"(cap $RUN_SHAPE_CAP_BYTES at the run's shape), largest backing file" \
 		"$SPACE_RUN_MAX_BACKING bytes (cap $DN_CAP_BYTES per file)"
 	log "  the caps themselves are asserted by case_space_guard, per case;" \
 		"these are the readings, taken again afterwards"
@@ -16551,10 +16650,13 @@ log_topology() {
 	local v last
 	log ""
 	log "=== integtest/e2e_test.sh"
-	log "  shape:     slice_cnt $SLICE_CNT, redund $REDUND," \
-		"legs/group $LEGS, groups $GRP_CNT (meta + data per slice),"
-	log "             sides $((GRP_CNT * LEGS)), cntlrs $CNTLR_CNT," \
+	log "  shape:     slice_cnt $RUN_SLICE_CNT, redund $REDUND," \
+		"legs/group $LEGS, groups $RUN_GRP_CNT (meta + data per slice),"
+	log "             sides $((RUN_GRP_CNT * LEGS)), cntlrs $CNTLR_CNT," \
 		"cntlid slots $SLOTS"
+	# react's own slice count, which sp_shape gives its pool.
+	log "             react: slice_cnt $REACT_SLICE_CNT, at most" \
+		"REACT_SLICE_CAP $REACT_SLICE_CAP"
 	# Both threshold sets, because the choice is per case and is made at the one
 	# moment it can be made — `sp create` (sp_thresholds; e2e_integtest.md,
 	# Topology and parameters, Event thresholds).
@@ -16570,9 +16672,9 @@ log_topology() {
 	log "  placement: $DNS_PER_VM dnagent(s) per DN VM (E2E3 bound" \
 		"$DNS_PER_VM_BOUND), $DN_TOTAL disk nodes on $DN_VM_CNT DN VM(s)"
 	log "  sizes:     extent $EXTENT_SIZE, stripe $STRIPE_SIZE," \
-		"td unit $TD_UNIT, backing $BACKING_SIZE per disk node"
+		"td unit $RUN_TD_UNIT, backing $BACKING_SIZE per disk node"
 	log "  zeroing:   a meta side whole, a data side $DATA_ZERO_BYTES bytes" \
-		"(its meta region and first data block); run cap $RUN_CAP_BYTES bytes"
+		"(its meta region and first data block); run cap $RUN_SHAPE_CAP_BYTES bytes"
 	log "  cases:     ${ONLY:-${CASES[*]}}"
 	log "  cp:        $CP  etcd $ETCD_CLIENT_PORT/$ETCD_PEER_PORT," \
 		"gateway $GW_PORT, cdc $CDC_PORT (all as the login user)"
@@ -16610,8 +16712,10 @@ run_summary() { # <the case names that ran, as one word list>
 	STAGE="run summary"
 	log ""
 	log "=== run summary"
-	log "  shape:   slice_cnt $SLICE_CNT, redund $REDUND, $GRP_CNT groups," \
-		"$((GRP_CNT * LEGS)) sides on $DN_TOTAL disk nodes, $CNTLR_CNT cntlrs"
+	# The RUN_* set: SLICE_CNT and GRP_CNT are the last case's by now.
+	log "  shape:   slice_cnt $RUN_SLICE_CNT, redund $REDUND, $RUN_GRP_CNT groups," \
+		"$((RUN_GRP_CNT * LEGS)) sides on $DN_TOTAL disk nodes, $CNTLR_CNT cntlrs"
+	log "           react: slice_cnt $REACT_SLICE_CNT, $REACT_GRP_CNT groups"
 	log "  cases:   ${1:-(none)}"
 	log "  elapsed: $((SECONDS / 60))m $((SECONDS % 60))s"
 	space_summary
@@ -16674,8 +16778,9 @@ main() {
 	# THE RUN LIST IS COMPUTED BEFORE THE GUEST PREFLIGHT AND BEFORE ANYTHING
 	# IS BUILT. The preflight checks nvme-stas on host0 only when the cutoff
 	# case will run (preflight_stas), and `setup` builds the FIRST case's sp,
-	# so sp_thresholds has to know whose sp that is: the event_threshold set is
-	# chosen at `sp create` and no RPC changes it afterwards. parse_args has
+	# so sp_thresholds and sp_shape have to know whose sp that is: the
+	# event_threshold set and the slice count are chosen at `sp create` and no
+	# RPC changes them afterwards. parse_args has
 	# already refused an --only that names no case, so this list cannot come
 	# out empty; it is checked anyway, because an empty list would otherwise
 	# index an empty array under `set -u`.
@@ -16696,6 +16801,7 @@ main() {
 	# SETUP_DONE the moment it writes anything, which is what switches on_exit
 	# from "clean up" to "dump".
 	sp_thresholds "${RUN_CASES[0]}"
+	sp_shape "${RUN_CASES[0]}"
 	setup
 
 	# E2E11. Every case starts from an EMPTY etcd and a freshly
@@ -16705,12 +16811,14 @@ main() {
 	# that, and why the sp has to be rebuilt and not merely re-read.
 	# setup_between_cases never runs after the LAST case; on_exit owns the end.
 	#
-	# sp_thresholds comes BEFORE setup_between_cases for the same reason it
-	# comes before setup: the rebuild inside it is what runs `sp create`.
+	# sp_thresholds and sp_shape come BEFORE setup_between_cases for the same
+	# reason they come before setup: the rebuild inside it is what runs
+	# `sp create`, with the case's thresholds and slice count.
 	for i in "${!RUN_CASES[@]}"; do
 		name=${RUN_CASES[$i]}
 		if [ "$i" -gt 0 ]; then
 			sp_thresholds "$name"
+			sp_shape "$name"
 			setup_between_cases
 		fi
 		# run_case, never `case_$name` directly: it is the case plus its E2E5

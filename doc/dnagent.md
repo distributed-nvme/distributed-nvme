@@ -42,8 +42,8 @@ local store, `revision.go` the revision gate and the reply builders,
 `conf.go` the stored-conf validators (the rejection they build is SH9),
 `locks.go` the lock hierarchy, `resinfo.go` the `ResInfo` tracker,
 `oswrap.go`, `dm.go`, `nvmet.go` and `nvmehost.go` the OS wrappers
-(`oswrap.go` is the shared command and configfs plumbing the other three sit
-on), `bitmap.go` the bitmap-chunk store, `sweep.go` the part of DN6's sweep
+(`oswrap.go` is the shared command, listing and configfs plumbing the other
+three sit on), `bitmap.go` the bitmap-chunk store, `sweep.go` the part of DN6's sweep
 both roles share (the leftover kinds, the result value a pass accumulates,
 its log record and the `AgentReply` it becomes) and `waitbudget.go` the
 `WaitBudget`, the bounded wait one converge pass may spend on the node
@@ -290,8 +290,8 @@ Agent local-store paths, prescribe: the last accepted `Syncup*Request` per
 object, persisted at the point SH5 gives, and one file per received
 `Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
 replace) at the `Local*Path` locations and read back via `ReadProto`. Both
-run on a ctx carrying the SH15 soft timeout, as the store's `ls` and `rm` do
-(SH6, SH7): the calls are in-process, so the bound ends only a wait for an
+run on a ctx carrying the SH15 soft timeout, as the store's listing and `rm`
+do (SH6, SH7): the calls are in-process, so the bound ends only a wait for an
 `OsClient` slot. A save takes its slot under the locks its RPC holds
 (SH10, SH11), and without the bound a save that finds every slot held could
 wait until the RPC's deadline. A save the bound cuts off fails like any
@@ -318,10 +318,12 @@ drives repair (equal-revision re-syncs re-apply idempotently). Protocol
 rejections — stale revision, unknown pointer, invalid stored conf (SH9) —
 never reach persistence.
 
-SH6. Enumeration on startup: one `ls` of the prefix, run through
-`RunCommand` on a ctx carrying the SH15 soft timeout (the store calls the
-`OsClient` directly, so it applies that bound itself), filtering by the
-role's `Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide` and
+SH6. Enumeration on startup: one listing of the prefix through
+`OsClient.ReadDir`, in the agent's own process, on a ctx carrying the SH15
+soft timeout (the store calls the `OsClient` directly, so it applies that
+bound itself); a prefix that is missing, is not a directory or whose listing
+fails in any other way is SH3's fatal case. It filters by the role's
+`Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide` and
 `StoreKindMigrBm` for the dn; `StoreKindCn`, `StoreKindCntlr` and
 `StoreKindCloneBm` for the cn). File names are used only for discovery; the
 ids come from the decoded protos. The committed file is the only truth
@@ -338,7 +340,7 @@ whatever that lacks. It sorts right after the file it was meant to replace,
 so a reload that decoded it would let it win — and, left on disk, win again
 at every later restart, long after later saves had overtaken it. So the
 enumeration also deletes every such file of the role's kinds, before
-anything is loaded, in one `rm -f` under the same bound as the `ls`. A
+anything is loaded, in one `rm -f` under the same bound as the listing. A
 delete that fails is logged and never fails the reconcile; the next
 startup's enumeration finds the file again. The other role's kinds are left
 alone: a dn and a cn agent may share one prefix (CM2), and the other agent's
@@ -349,7 +351,7 @@ agents of one role must not share a prefix (CM2).
 SH7. When an object's pointer leaves its parent's list, its state is dropped
 **at that moment** and nothing of it is removed from the node yet: its
 request file and its bitmap-chunk files are deleted with one `rm -f` under
-the same bound as SH6's `ls`, its memory entry and object lock go, and its
+the same bound as SH6's listing, its memory entry and object lock go, and its
 goroutines are stopped. The resources are found afterwards **by name**, by
 the sweep that runs later in the same pass (DN6), so no file has to be kept
 as a to-be-deleted list. Keeping the file until the resources are gone would
@@ -432,10 +434,11 @@ under a lock is acceptable: every OS command is bounded by
 `CmdSoftTimeout`/`CmdHardTimeout` (SH15) except a child in an
 uninterruptible kernel wait (SH15) — which is why the cn sweep's
 `nvme disconnect` runs off the locks (`cnagent.md` CN10) — and an
-in-process `OsClient` file or block call is bounded only up to its syscall:
-its ctx is checked once, before it (`osclient.md`, ReadFile / WriteFile /
-WriteFileDirect), so a sysfs, configfs or device access the kernel holds
-returns only when the kernel does.
+in-process `OsClient` listing, file or block call is bounded only up to its
+syscall: its ctx is checked once, before it (`osclient.md`, ReadFile /
+WriteFile / WriteFileDirect; for a listing, `osclient.md`, ReadDir), so a
+sysfs, configfs or device access the kernel holds returns only when the
+kernel does.
 
 ### `ResInfo` tracking — `resinfo.go`
 
@@ -471,6 +474,14 @@ Thin, mechanism-only wrappers over the process's single
 `common.NewLimitedOsClient` instance. They issue the commands the device
 stacks of `architecture.md`, Data-plane device stacks, need; policy (which
 device, which table) stays in the role packages.
+
+`Dm.ListInfo` and `Dm.ListTables` are the cn agent's whole-node readers,
+which a cntlr's check round and info read take (`cnagent.md` CN28): each lists
+every dm device of the node in one `dmsetup` run, the first with each
+device's number and attr flags, the second with each device's live table.
+`Dm.InfoDevNo` is its per-device read with the number: one device read the
+way `Dm.ListInfo` reads each. Their answer rule is in `osclient.md`,
+RunCommand.
 
 **A reload fails closed.** `Dm.Reload` and `Dm.ReloadMulti` swap a live
 device's table in three commands — `dmsetup suspend`, `dmsetup reload` (the
@@ -525,21 +536,20 @@ SH15. Every wrapper call wraps its ctx with a deadline of `CmdSoftTimeout`
 before calling the `OsClient` (the soft/hard timeout contract of
 `architecture.md`, Common validation; `osclient.md`, RunCommand, handles
 SIGTERM and SIGKILL). A role package that calls the `OsClient` directly
-instead of through a wrapper — the `cnagent.md` CN10 sysfs leg walk
-(`readSysfs`), CN25's read of the `thin_dump` file, and the dn's
-raw-device `ReadBlock`/`WriteBlock` calls of the [D13] disk metadata
-(`DiskMeta`) — takes the same bound from the exported `agent.CmdCtx`. The
-bound holds in full only for a
-child the signals end. An in-process `OsClient` call — a file, proto or
-block read or write — is bounded only until its syscall starts: its ctx is
+instead of through a wrapper — `cnagent.md` CN25's read of the `thin_dump`
+file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
+disk metadata (`DiskMeta`) — takes the same bound from the exported
+`agent.CmdCtx`. The bound holds in full only for a child the signals end.
+An in-process `OsClient` call — a directory listing, a file, proto or block
+read or write — is bounded only until its syscall starts: its ctx is
 checked once, before it (`osclient.md`, ReadFile / WriteFile /
-WriteFileDirect). A child blocked in an uninterruptible kernel wait is not
-bounded at all: both signals are delivered, and the call returns, and gives
-back its `OsClient` slot, only when the kernel does (an `nvme disconnect`
-whose target vanishes mid-delete waits out the kernel's admin timeout;
-`cnagent.md` CN10 runs the cn sweep's off the locks, while the cn build's
-dead-path disconnect and the dn sweep's source-connection disconnect still
-run under them — Known limits).
+WriteFileDirect; for a listing, `osclient.md`, ReadDir). A child blocked in
+an uninterruptible kernel wait is not bounded at all: both signals are
+delivered, and the call returns, and gives back its `OsClient` slot, only
+when the kernel does (an `nvme disconnect` whose target vanishes mid-delete
+waits out the kernel's admin timeout; `cnagent.md` CN10 runs the cn sweep's
+off the locks, while the cn build's dead-path disconnect and the dn sweep's
+source-connection disconnect still run under them — Known limits).
 
 **A command that was killed did not answer, and "did not answer" is not
 "absent".** `OsClient.RunCommand` returns an exit code of -1 with a non-nil
@@ -547,14 +557,16 @@ error when the process never reported — killed at the soft timeout, killed
 at the hard timeout, failed to start, ctx cancelled, semaphore refused — and
 an exit code above zero when the tool ran and answered "no".
 `agent.Reported` (a nil error, or an exit code above zero) is the single
-test, and `osBase.runProbe` is the one probe wrapper that applies it: a
+test, and `osBase.runProbe` is the one probe wrapper that applies it to a
+probe whose non-zero exit means "not there" (the cn's whole-node dm
+listings apply it under their own rule, `osclient.md`, RunCommand): a
 probe that did not answer returns an **error**, never a "not there". The
 distinction is not cosmetic. A killed command may still have completed in
 the kernel — the ioctl finishes regardless of the signal — so the only thing
 a caller learns from a kill is that it must probe again; and a caller that
 reads a kill as "absent" skips the removal, forgets the object and never
 enumerates it again, which is the leak the sweep exists to end (DN6).
-`agent.Reported`'s one other caller, `Dm.BlkZeroout`, is not a probe: it
+`Dm.BlkZeroout` applies `agent.Reported` as well and is not a probe: it
 hands the verdict back as `answered`, so DN9's zeroing loop can tell a batch
 the soft timeout killed from one the tool refused.
 
@@ -565,15 +577,16 @@ rebuild, or — `dirMtime`'s — with a clean verdict:
 
 * `Dm.Info`, whose "absent" answer gates `FreeSide` and `FreeCloneMeta`
   (DN6's record rule);
-* `osBase.listDir` and the `dirExists` above it, which
-  `Nvmet.RemoveSubsystem` and `RemovePortLink` walk their children through;
+* `osBase.listDir` and the `dirExists` above it, the `ls` of the nvmet
+  configfs tree (SH18), which `Nvmet.RemoveSubsystem` and `RemovePortLink`
+  walk their children through;
 * `osBase.dirMtime` beside them, the "stat" behind `Nvmet.SubsysMtime`,
   DN6's orphan-export age: a subsystem directory that reads absent is passed
   over and is no leftover, so a "stat" that did not answer is named as a
   failed enumeration instead, and the verdict is not clean;
-* `Md.Detail`, a lookup in an `Md.Walk` of "/sys/block" through `listDir`
-  and `readAttrStrict` (`cnagent.md` CN12), whose "absent" sends
-  `ensureGroup` into an assembly;
+* `Md.Detail`, a lookup in an `Md.Walk` of "/sys/block" through
+  `Cmd.ListDir` and `readAttrStrict` (`cnagent.md` CN12), whose "absent"
+  sends `ensureGroup` into an assembly;
 * `Md.HasSuperblock` (`cnagent.md` CN12: `mdadm --examine` opens the member
   device, so on a leg whose DN side is gone it blocks past the soft timeout
   and gets killed — and a killed examine read as "no superblock" would make
@@ -603,9 +616,12 @@ follows the same rule from the other side of the fence: it reads sysfs
 rather than running a tool, so **only** a not-exist error is "absent" and
 every other read failure is an error — the nvme class directories under
 "/sys/class" can stall while a controller is mid-reset, and a stalled read
-taken as absence would report a live subsystem as not connected (SH20). The
-read under it, `osBase.readAttrStrict`, carries the rule for every other
-strict read besides `Md.Detail`'s above: `Nvmet.NsDevicePath` (a
+taken as absence would report a live subsystem as not connected (SH20); in
+the cn's lookups, a subsystem whose "subsysnqn" read failed, passed over as
+another NQN's, would send the connect step after sides whose controllers
+are live (`cnagent.md` CN10). The read under it, `osBase.readAttrStrict`,
+carries the rule for every other strict read besides `Md.Detail`'s above:
+`Nvmet.NsDevicePath` (a
 namespace's "device_path", by which the cn sweep attributes a host-facing
 subsystem no stored request claims — one with no attributable namespace is
 unowned, and the node-level sweep removes it, `cnagent.md` CN21 — and by
@@ -622,10 +638,13 @@ kernel still has enabled), the attribute reads of `Nvmet.ProbePortState`
 absent, would make a `CheckCn` verdict re-send a `SyncupCn` for a port that
 is there) and, through `Cmd.ReadAttr`, the md sysfs reads of `Md.ListArrays`
 and `Md.Gone` (`cnagent.md` CN12: an array read as absent, or as gone, would
-let the sweep disconnect a leg under a live array) and the cn leg walk's
-"subsysnqn" read (`cnagent.md` CN10: a subsystem whose read failed, passed
-over as another NQN's, would send the connect step after sides whose
-controllers are live).
+let the sweep disconnect a leg under a live array).
+
+The listings the agent makes in its own process honour the file-read half
+of the same rule (`osclient.md`, RunCommand): `Cmd.ListDir`, through which
+the md walk (`cnagent.md` CN12) and `CloneMeta.LoopHolders` list sysfs, and
+`NvmeHost`'s listings of the nvme class directories, which its walk makes
+beside the `NvmeHost.readTrimmed` reads.
 
 SH16. **Convergence is probe-first.** Every `Ensure*` helper reads current
 state and mutates only differences; an equal-revision re-apply on a live,
@@ -635,8 +654,10 @@ live port-to-subsystem link or reloading a live dm table stalls host IO).
 
 SH17. Probing follows these conventions: the probe commands — the dn's are
 `dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`,
-`lsblk`, `stat` and `ls`; the cn's are `cnagent.md` CN28's, and CN12's
-`mdadm --examine` and `lsblk` of the array node — the walk of
+`lsblk`, `stat`, and `ls` of the nvmet configfs tree alone (SH18), since it
+lists sysfs and its local store in its own process (`OsClient.ReadDir`);
+the cn's are `cnagent.md` CN28's, and CN12's `mdadm --examine` and `lsblk`
+of the array node — the walk of
 "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact
 — the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
@@ -666,8 +687,17 @@ never byte-wise:
 SH18. nvmet configfs access: attribute writes go through
 `OsClient.WriteFileDirect` (the atomic replace of `WriteFile` cannot work on
 configfs); directory and link operations go through `RunCommand` (`mkdir`,
-`rmdir`, `ln -s`, `rm`); probing through `ReadFile`. `WriteFile` MUST NOT be
-used on paths under "/sys/kernel/config".
+`rmdir`, `ln -s`, `rm`); attribute reads through `ReadFile`; and directory
+listings through `RunCommand` as well (`ls`), never in the agent's own
+process (`OsClient.ReadDir`). Reason: a converge or a check round lists
+only a few configfs directories, and their number does not grow with the
+slice count, so the process each `ls` starts costs little; the listings
+that grow with it are the sysfs ones (`osclient.md`, ReadDir). The time
+limit bounds a configfs listing in neither form: opening and closing a
+configfs directory wait for the directory's lock, which a `mkdir` or
+`rmdir` in it holds for its whole run, and no signal ends that wait, so a
+killed `ls` exits only once the `mkdir` or `rmdir` returns (SH13).
+`WriteFile` MUST NOT be used on paths under "/sys/kernel/config".
 
 SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
 
@@ -708,20 +738,43 @@ caller's hostnqn, and `--hostid` set to `common.NvmeHostId` of that hostnqn
 hostnqn-to-hostid rule turns into an EINVAL the moment anything else on the
 node holds it. The
 underscores in `--fast_io_fail_tmo` are nvme-cli's own spelling and must
-not be "fixed" to dashes. `Disconnect` is `nvme disconnect --nqn`;
-`ListSubsys` reads **sysfs** ("/sys/class/nvme-subsystem",
-"/sys/class/nvme") for the subsystem's namespace device, controller
-liveness and per-path ANA state — `nvme list-subsys` carries none of the
-three, listing no namespaces at all and no ANA state without a namespace
-block device argument (`cnagent.md` CN12 and CN28, which reads the same
-tree for legs). Every read of that walk carries the SH15 soft timeout:
-unlike most of sysfs, the nvme class directories can
-stall while a controller is mid-reset or being torn down, which is exactly
-when these probes run, and no converge — nor, through the DN1 and CN1
-locks, a whole node's RPC surface — may be held on one. The bound is on the
-read's own scheduling, not a magic abort of a read already blocked inside
-the kernel. `DisconnectDevice` is `nvme disconnect --device` for retiring
-**one** controller of an NQN whose other paths must live — the two sides of
+not be "fixed" to dashes. `Disconnect` is `nvme disconnect --nqn`. The
+connections the host holds are read from **sysfs**
+("/sys/class/nvme-subsystem", "/sys/class/nvme") — a subsystem's namespace
+device, controller liveness and per-path ANA state — because
+`nvme list-subsys` carries none of the three, listing no namespaces at all
+and no ANA state without a namespace block device argument (`cnagent.md`
+CN12 and CN28).
+
+Both agents read them through one code, the sysfs walk. The walk lists
+"/sys/class/nvme-subsystem" and reads each entry's "subsysnqn", recording
+each read that failed apart from one that found nothing. A lookup reads one
+entry's directory: its namespace node, picked by "nsid" when the caller
+names a namespace, and of its controllers what its caller reads — address,
+state and ANA state, with the transport where `ListSubsys` reads it; for
+`HeldWithHostNqn` each controller's "hostnqn" alone, up to the first that
+matches; for `SubsysDevicePath` nothing. `ListAllSubsys`, `ListSubsys`,
+`HeldWithHostNqn` and `SubsysDevicePath` each fail on a listing they make
+that failed, and each has its own rule for the reads past it:
+`ListAllSubsys` fails on any failed "subsysnqn" read; `ListSubsys` walks
+for each call, stops at the first match, and fails on a failed "subsysnqn"
+read of an entry before the match and on any failed read inside the match;
+`HeldWithHostNqn` fails on a failed "hostnqn" read before a match;
+`SubsysDevicePath` reads nothing past its listing. A read that found
+nothing fails none of the four. The cn's lookups record each failed read
+and read on, under `cnagent.md` CN10's rule. The dn agent's lookups by NQN
+are `ListSubsys` calls, each of which walks afresh. Reason: two codes that
+read one entry's layout drift apart, and a change to one is easily missed
+in the other.
+
+Every read and listing of the walk carries the SH15 soft timeout: unlike
+most of sysfs, the nvme class directories can stall while a controller is
+mid-reset or being torn down, which is exactly when these probes run, and
+no converge — nor, through the DN1 and CN1 locks, a whole node's RPC
+surface — may be held on one. The bound is on the read's own scheduling,
+not a magic abort of a read already blocked inside the kernel.
+`DisconnectDevice` is `nvme disconnect --device` for retiring **one**
+controller of an NQN whose other paths must live — the two sides of
 a migrating leg share a subsystem NQN (`architecture.md`, [D1]), so the cn
 agent cannot use `--nqn` to drop a dead side; which controller it selects,
 and by which reads, is the cn role's rule (`cnagent.md`,
@@ -2109,7 +2162,7 @@ the per-CN stacks exactly as they are and reports them as a check round
 would. One unanswered command must not reload the leg's only serving path
 onto its dm-error, and a stopped pass must not put the stacks back on a
 dm-clone the source connection's answer took them off. The namespace's
-group is the half of the reading that records that answer: the pass that
+group is the half of that read that records the answer: the pass that
 takes the stacks off moves the namespaces out of `AnaGrpIdOptimized` even
 when its reload of a dm-linear is refused, and that dm-linear stays on the
 dm-clone (a reload fails closed, and a later pass's pre-step resumes it
@@ -2168,7 +2221,7 @@ from it (`architecture.md`, Migrations): a round reads the line whenever
 the dm-clone is there, a converge only once its steps through step (4)
 have held, so the two channels' details can differ where their statuses
 agree. What a pass serves from stays the steps' above. Reason: two
-readings of one device cannot both be right, and rows that differ between
+reports of one device cannot both be right, and rows that differ between
 the channels flip their status, and the side's health epoch with it,
 every round, while a command that took effect and still failed makes them
 differ once, until the next converge.

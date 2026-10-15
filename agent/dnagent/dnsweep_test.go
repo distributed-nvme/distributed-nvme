@@ -735,19 +735,24 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // device_path is read directly and the namespaces are listed only when there
 // is no namespace 1. The test runs both passes — a Check round's verdict and a
 // SyncupDn — over four sibling agents of one sp holding one export each, then
-// eight each, then thirty-two agents holding one each, and counts the execs:
-// the count may not move. The third run holds the number of exports of the
-// second and changes only the number of agents, each on its own port: a cost
-// per sibling AGENT (a port listing, say) is as quadratic on the node as one
-// per export, and the first two runs hold the agent count still. Each pass
-// also reads each sibling export's namespace 1 exactly once, which is what
-// makes a cache of the attribution pointless within a pass.
+// eight each, then thirty-two agents holding one each, and counts the execs
+// and the listings the agent makes in its own process (sysfs and the local
+// store): neither count may move. The third run holds the number of exports
+// of the second and changes only the number of agents, each on its own port:
+// a cost per sibling AGENT (a port listing, say) is as quadratic on the node
+// as one per export, and the first two runs hold the agent count still. Each
+// pass also reads each sibling export's namespace 1 exactly once, which is
+// what makes a cache of the attribution pointless within a pass.
 func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 
 	// execs seeds `per` exports for each of `siblings` sibling agents, runs
-	// the two passes and returns the `ls` and the total exec count of each.
-	type cost struct{ verdictLs, verdictCmds, syncLs, syncCmds int }
+	// the two passes and returns the `ls`, the total exec and the in-process
+	// listing count of each.
+	type cost struct {
+		verdictLs, verdictCmds, verdictLists int
+		syncLs, syncCmds, syncLists          int
+	}
 	execs := func(t *testing.T, siblings, per int) cost {
 		srv, node := newTestServer(t)
 		ctx := context.Background()
@@ -800,6 +805,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		}
 		c.verdictLs = len(node.callsMatching("cmd ls "))
 		c.verdictCmds = len(node.callsMatching("cmd "))
+		c.verdictLists = len(node.callsMatching("list "))
 		readsOnce("CheckDn verdict")
 
 		node.Reset()
@@ -813,6 +819,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		}
 		c.syncLs = len(node.callsMatching("cmd ls "))
 		c.syncCmds = len(node.callsMatching("cmd "))
+		c.syncLists = len(node.callsMatching("list "))
 		readsOnce("SyncupDn")
 
 		// Cheaper is only worth having if it is still right: every
@@ -837,8 +844,9 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		"agents holding one each: %+v",
 		siblings, few, siblings*8, many, siblings*8, agents)
 	if agents != few {
-		t.Errorf("execs grew with the number of sibling agents: %+v with "+
-			"%d of them, %+v with %d", few, siblings, agents, siblings*8)
+		t.Errorf("execs or listings grew with the number of sibling "+
+			"agents: %+v with %d of them, %+v with %d", few, siblings,
+			agents, siblings*8)
 	}
 	if many.verdictLs != few.verdictLs || many.syncLs != few.syncLs {
 		t.Errorf("`ls` execs grew with the siblings' exports: the verdict "+
@@ -851,6 +859,17 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 			"%d with %d of them and %d with %d, the SyncupDn %d and %d",
 			few.verdictCmds, siblings, many.verdictCmds, siblings*8,
 			few.syncCmds, many.syncCmds)
+	}
+	if few.verdictLists == 0 || few.syncLists == 0 {
+		t.Fatalf("a pass listed nothing in its own process (%+v): the "+
+			"listing count pins nothing", few)
+	}
+	if many.verdictLists != few.verdictLists ||
+		many.syncLists != few.syncLists {
+		t.Errorf("listings grew with the siblings' exports: the verdict "+
+			"made %d with %d of them and %d with %d, the SyncupDn %d and %d",
+			few.verdictLists, siblings, many.verdictLists, siblings*8,
+			few.syncLists, many.syncLists)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path"
 	"slices"
 	"sort"
 	"strconv"
@@ -50,7 +51,7 @@ import (
 type cnActual struct {
 	// dms is every dm device the node holds, name to "major:minor". The devno
 	// can be empty for an entry the listing named and the kernel has already
-	// dropped.
+	// dropped, or whose numbers did not parse.
 	dms map[string]string
 	// ours is the subset whose name decodes as a dm name of this cluster and
 	// this cn.
@@ -58,9 +59,11 @@ type cnActual struct {
 	// byDevNo resolves a live table's device argument back to a dm name,
 	// which is how a wanted device's backing is recognised as unwanted.
 	byDevNo map[string]string
-	// dmListed says the `dmsetup ls` behind dms/ours/byDevNo ANSWERED. When
-	// it did not, those three maps are empty for want of an answer rather
-	// than because the node holds nothing, and an empty map is the shape of
+	// dmListed says the dm listing behind dms/ours/byDevNo ANSWERED: the
+	// pass's own `dmsetup ls`, or in a check round and an info read the
+	// reading's `dmsetup info` listing, partial or not (CN30). When it did
+	// not, those three maps are empty for want of an answer rather than
+	// because the node holds nothing, and an empty map is the shape of
 	// "there is nothing here" — so no removal may be derived from this
 	// snapshot at all (architecture.md, Teardown by sweep: "gone" is
 	// probe-verified, never inferred). The pass reports what it can and
@@ -69,10 +72,11 @@ type cnActual struct {
 	// arrays is every md array on the node, read from sysfs alone.
 	arrays []MdArray
 	// mdListed is dmListed for arrays: the /sys/block enumeration answered,
-	// for every array of it under ListArrays' strict rule. Its silence costs
-	// the most: with arrays empty for want of an answer, L9 would find no
-	// array to stop and read clean, and L10 would disconnect unwanted legs
-	// from under a live one.
+	// for every array of it under ListArrays' strict rule (in a check round
+	// and an info read, the reading's md walk read that way, MdScan.Arrays).
+	// Its silence costs the most: with arrays empty for want of an answer,
+	// L9 would find no array to stop and read clean, and L10 would
+	// disconnect unwanted legs from under a live one.
 	mdListed bool
 	// hostSubsys is every nvme subsystem entry this host holds, including
 	// one the kernel keeps with no controller (disconnectVerified).
@@ -108,10 +112,27 @@ type nvmetAttr struct {
 // because an empty answer it cannot trust must never read as "there is
 // nothing there", and every removal gated on absence would read it exactly
 // so (listed).
+//
+// Where the listings come from depends on the pass. A check round and an
+// info read pass their reading (rd) and its walk (pw): the dm devices are the
+// reading's `dmsetup info` listing, which answers even when partial — only
+// this cntlr's own converges, the node's syncup and the startup reconcile
+// create or remove its devices, and none of them runs beside the call, so a
+// device a partial listing lacks is someone else's (CN30) — and a `dmsetup
+// table` listing that did not answer fails the verdict too; the arrays are
+// the reading's md walk under ListArrays' rule (MdScan.Arrays); the
+// connections are the walk's. A converge passes no reading and its own walk,
+// which its build's lookups share: it lists the dm devices with the strict
+// `dmsetup ls` and the arrays with ListArrays. The node-level passes pass
+// neither, and take a walk of their own (ListAllSubsys). Every list of
+// connections fails on any subsysnqn read that did not answer
+// (SubsysWalk.Briefs).
 func (s *CnAgentServer) enumerateCn(
 	ctx context.Context,
 	clusterId uint64,
 	cnId uint64,
+	rd *cnReading,
+	pw *passWalk,
 	res *agent.SweepResult,
 ) *cnActual {
 	actual := &cnActual{
@@ -119,10 +140,8 @@ func (s *CnAgentServer) enumerateCn(
 		ours:    make(map[string]common.DmName),
 		byDevNo: make(map[string]string),
 	}
-	dms, err := s.dm.List(ctx)
-	if err != nil {
-		res.Fail("dmsetup ls", err)
-	} else {
+	dms, err := s.listDms(ctx, rd, res)
+	if err == nil {
 		actual.dmListed = true
 		actual.dms = dms
 		for name, devNo := range dms {
@@ -137,14 +156,14 @@ func (s *CnAgentServer) enumerateCn(
 			actual.ours[name] = dn
 		}
 	}
-	arrays, err := s.md.ListArrays(ctx)
+	arrays, err := s.listArrays(ctx, rd)
 	if err != nil {
 		res.Fail("md arrays", err)
 	} else {
 		actual.mdListed = true
 		actual.arrays = arrays
 	}
-	hostSubsys, err := s.host.ListAllSubsys(ctx)
+	hostSubsys, err := s.hostSubsys(ctx, pw)
 	if err != nil {
 		res.Fail("nvme subsystems", err)
 	} else {
@@ -165,6 +184,73 @@ func (s *CnAgentServer) enumerateCn(
 			spId: spId, ours: ours, unowned: unowned}
 	}
 	return actual
+}
+
+// listDms is the dm part of enumerateCn, name to number, with each listing
+// that did not answer recorded in res under its own name: with no reading
+// one `dmsetup ls`, strict; with a reading its `dmsetup info` listing, which
+// answers when partial, and its `dmsetup table` listing, whose failure fails
+// the verdict but leaves the names standing. The error is the name
+// listing's.
+func (s *CnAgentServer) listDms(
+	ctx context.Context,
+	rd *cnReading,
+	res *agent.SweepResult,
+) (map[string]string, error) {
+	if rd == nil {
+		dms, err := s.dm.List(ctx)
+		if err != nil {
+			res.Fail("dmsetup ls", err)
+		}
+		return dms, err
+	}
+	if rd.infoErr != nil {
+		res.Fail("dmsetup info", rd.infoErr)
+	}
+	if rd.tableErr != nil {
+		res.Fail("dmsetup table", rd.tableErr)
+	}
+	if rd.infoErr != nil {
+		return nil, rd.infoErr
+	}
+	dms := make(map[string]string, len(rd.infoList.Devs))
+	for name, dev := range rd.infoList.Devs {
+		dms[name] = dev.DevNo
+	}
+	return dms, nil
+}
+
+// listArrays is the md part of enumerateCn under ListArrays' rule: the
+// reading's md walk when the pass took a reading, a ListArrays of its own
+// when it did not.
+func (s *CnAgentServer) listArrays(
+	ctx context.Context,
+	rd *cnReading,
+) ([]MdArray, error) {
+	if rd == nil {
+		return s.md.ListArrays(ctx)
+	}
+	if rd.mdErr != nil {
+		return nil, rd.mdErr
+	}
+	return rd.md.Arrays()
+}
+
+// hostSubsys is the list of connections of enumerateCn: pw's when the pass
+// took a walk — a converge's own, or a check round's or an info read's in
+// its reading — and a walk of its own when it did not (pw nil, the
+// node-level passes).
+func (s *CnAgentServer) hostSubsys(
+	ctx context.Context,
+	pw *passWalk,
+) ([]agent.SubsysBrief, error) {
+	if pw == nil {
+		return s.host.ListAllSubsys(ctx)
+	}
+	if pw.err != nil {
+		return nil, pw.err
+	}
+	return pw.walk.Briefs()
 }
 
 // listed says every one of the four listings behind the snapshot answered.
@@ -1080,7 +1166,7 @@ func (s *CnAgentServer) parkByTable(
 					backing.Ids[0], backing.Ids[1])
 				errDev, err := s.dm.Info(ctx, errName)
 				if err == nil && errDev != nil {
-					devNo, err := s.dm.DevNo(ctx, s.nf.DmPath(errName))
+					devNo, err := s.dmDevNo(ctx, nil, errName)
 					if err == nil {
 						reload(agent.LinearTable(sectors, devNo, 0))
 						return
@@ -1451,11 +1537,17 @@ func (s *CnAgentServer) sweepCloneChunks(
 // nor connects that source (disconnectInFlight). A build whose request is
 // stored after this read, and whose step 1 runs before the disconnect is
 // registered, still adopts the source (cnagent.md Known limits).
+//
+// A live dm-clone's table comes from rd, the reading of a check round or an
+// info read, and from one `dmsetup table` of the device in every other pass
+// (dmTable). The `dmsetup info` that confirms such a device gone after its
+// table read failed is always fresh, never the reading's.
 func (s *CnAgentServer) srcNqnsInUse(
 	ctx context.Context,
 	clusterId uint64,
 	cnId uint64,
 	actual *cnActual,
+	rd *cnReading,
 	res *agent.SweepResult,
 ) map[string]struct{} {
 	inUse := make(map[string]struct{})
@@ -1481,12 +1573,12 @@ func (s *CnAgentServer) srcNqnsInUse(
 		if dn.Kind != common.DmKindCnCloneFinal {
 			continue
 		}
-		targets, err := s.dm.Table(ctx, name)
+		targets, err := s.dmTable(ctx, rd, name)
 		if err != nil {
 			// The device may have gone — this runs at L5, after L3 removed
 			// the unwanted clones — but if it did NOT, treating it as mapping
 			// nothing could disconnect a live source. Absence is CONFIRMED,
-			// never assumed.
+			// never assumed, by a fresh read.
 			dev, infoErr := s.dm.Info(ctx, name)
 			if infoErr == nil && dev == nil {
 				continue
@@ -1513,8 +1605,8 @@ func (s *CnAgentServer) srcNqnsInUse(
 		if !ok || parts.Kind != common.NqnKindXfer {
 			// Only a clone source can be the thing a dm-clone maps, and the
 			// namespace node is read only for those: on a node holding a
-			// leg per group that listing would otherwise be one forked `ls`
-			// per leg, per pass.
+			// leg per group that read would otherwise be one listing per
+			// leg, per pass.
 			continue
 		}
 		if unknown {
@@ -1531,7 +1623,7 @@ func (s *CnAgentServer) srcNqnsInUse(
 			inUse[state.Nqn] = struct{}{}
 			continue
 		}
-		devNo, err := s.dm.DevNo(ctx, devPath)
+		devNo, err := s.blockDevNo(ctx, path.Base(devPath))
 		if err != nil {
 			inUse[state.Nqn] = struct{}{}
 			continue
@@ -1544,15 +1636,16 @@ func (s *CnAgentServer) srcNqnsInUse(
 }
 
 // unownedSrcNqns is every kind-4 connection this host holds for our cluster
-// that srcNqnsInUse does not claim.
+// that srcNqnsInUse does not claim, with rd as srcNqnsInUse takes it.
 func (s *CnAgentServer) unownedSrcNqns(
 	ctx context.Context,
 	clusterId uint64,
 	cnId uint64,
 	actual *cnActual,
+	rd *cnReading,
 	res *agent.SweepResult,
 ) []string {
-	inUse := s.srcNqnsInUse(ctx, clusterId, cnId, actual, res)
+	inUse := s.srcNqnsInUse(ctx, clusterId, cnId, actual, rd, res)
 	var out []string
 	for _, state := range actual.hostSubsys {
 		parts, ok := common.ParseNqn(state.Nqn)
@@ -1613,8 +1706,11 @@ func (s *CnAgentServer) orphanCloneMetaNames(
 // in the startup Reconcile. It removes only objects attributed to this
 // cntlr's sp — which is what lets two cntlrs of one CN converge concurrently.
 //
-// remove = false is the read-only VERDICT the Check rounds and Get*Info take:
-// the same enumeration and the same comparison, with nothing touched (CN23).
+// remove = false is the read-only VERDICT a check round and an info read take
+// (readCntlr): the same attribution and the same comparison, with nothing
+// touched (CN23), over the listings of the call's reading (plan.rd,
+// plan.walk; CN30). A converge passes no reading and lists the node itself
+// (enumerateCn).
 func (s *CnAgentServer) sweepCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -1622,7 +1718,8 @@ func (s *CnAgentServer) sweepCntlr(
 	remove bool,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
-	actual := s.enumerateCn(ctx, plan.clusterId, plan.cnId, res)
+	actual := s.enumerateCn(
+		ctx, plan.clusterId, plan.cnId, plan.rd, plan.walk, res)
 	// converge is what the caller asked for; from here on, remove is what
 	// the snapshot licenses.
 	converge := remove
@@ -1645,7 +1742,8 @@ func (s *CnAgentServer) sweepCntlr(
 	chain := s.buildChain(ctx, plan.clusterId, plan.cnId, plan.spId,
 		actual, wanted, res)
 	chain.srcNqns = func() []string {
-		return s.unownedSrcNqns(ctx, plan.clusterId, plan.cnId, actual, res)
+		return s.unownedSrcNqns(
+			ctx, plan.clusterId, plan.cnId, actual, plan.rd, res)
 	}
 	if converge {
 		// P1 runs on every converge, a gated one too: it decides from the
@@ -1973,7 +2071,7 @@ func (s *CnAgentServer) sweepCn(
 	req := st.loadReq()
 	clusterId := req.GetClusterId()
 	cnId := req.GetCnId()
-	actual := s.enumerateCn(ctx, clusterId, cnId, res)
+	actual := s.enumerateCn(ctx, clusterId, cnId, nil, nil, res)
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
 	// below is "actual minus desired", and with a listing unanswered its
 	// part of `actual` is empty for want of an answer — which subtracts to
@@ -2054,7 +2152,8 @@ func (s *CnAgentServer) sweepCn(
 			res.Add(agent.LeftoverKindNvmet, nqn)
 		}
 	}
-	for _, nqn := range s.unownedSrcNqns(ctx, clusterId, cnId, actual, res) {
+	for _, nqn := range s.unownedSrcNqns(
+		ctx, clusterId, cnId, actual, nil, res) {
 		if !remove {
 			res.Add(agent.LeftoverKindNvme, nqn)
 			continue
@@ -2087,21 +2186,4 @@ func (s *CnAgentServer) sweepCn(
 		slog.Uint64("cluster_id", clusterId),
 		slog.Uint64("cn_id", cnId))
 	return res
-}
-
-// cntlrVerdict is the read-only cntlr-level comparison the Check rounds and
-// GetCntlrInfo take. A cntlr whose stored conf is unusable is refused
-// (architecture.md, Common validation) before any converge runs, so it has no
-// verdict either: reporting leftovers
-// for a cntlr this agent deliberately did not build would name objects it is
-// not allowed to remove.
-func (s *CnAgentServer) cntlrVerdict(
-	ctx context.Context,
-	st *cntlrState,
-) *agent.SweepResult {
-	req := st.loadReq()
-	if agent.ValidateBdevConf(req.GetBdevConf()) != nil {
-		return &agent.SweepResult{}
-	}
-	return s.sweepCntlr(ctx, st, newCntlrPlan(s.nf, req), false)
 }

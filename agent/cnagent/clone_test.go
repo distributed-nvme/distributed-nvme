@@ -2022,7 +2022,8 @@ func TestCloneMetaRunLargerThanTheArenaIsAnError(t *testing.T) {
 // here after a recovery whose dm-clone create the node refuses. Absence is
 // confirmed, never assumed: when that `dmsetup info` does not answer, the
 // read stays an error, the ns-dev keeps the table it has and its row reads
-// ERROR.
+// ERROR. The confirm is the dm-clone's own read in the check round too,
+// never the round's reading.
 func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -2067,6 +2068,13 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 				t.Fatalf("the check round mutated: %q", call)
 			}
 			if tc.unconfirmed {
+				// The round's info of the dm-clone is the reading's, which
+				// does not list it; its own `dmsetup info` is the confirm
+				// after the failed status read, which the kill meets.
+				if !node.hasCall("cmd dmsetup info --columns --noheadings " +
+					"-o attr " + clone) {
+					t.Fatalf("the check round never confirmed the absence")
+				}
 				want := "dmsetup status " + clone
 				assertErrorDetails(t, converged, want, "ns-dev")
 				assertErrorDetails(t, probed, want, "probed ns-dev")
@@ -2091,16 +2099,23 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 // dm-clone, and a converge runs the recovery in the same pass: the dm-clone
 // is built again, its row reads OK and no retry is registered. Read as an
 // error, the round would report ERROR and the converge would end its pass
-// and wait for the retry.
+// and wait for the retry. In a check round the first info is the reading's
+// listing, and the confirming info is the dm-clone's own, made after the
+// failed status read: the reading, taken before the device went, names it,
+// so a confirm taken from it would keep the read an error.
 func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 	// goneMidRead runs pass with the dm-clone's first status read held,
-	// removes the device while that read waits, then lets it fail. The held
-	// read must be the one that follows a `dmsetup info` of the dm-clone,
-	// which is how probeCloneDm reads.
+	// removes the device while that read waits, then lets it fail. In a
+	// converge the held read must be the one that follows a `dmsetup info`
+	// of the dm-clone, which is how probeCloneDm reads. In a check round
+	// the dm-clone's info is the reading's listing, so no `dmsetup info` of
+	// it comes before the held read, and the one right after it is the
+	// fresh confirm.
 	goneMidRead := func(
 		t *testing.T,
 		srv *CnAgentServer,
 		node *fakeNode,
+		round bool,
 		pass func(),
 	) {
 		t.Helper()
@@ -2125,7 +2140,20 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 			t.Fatal("the pass never returned")
 		}
 		first := node.indexOfCall(status)
-		if calls := node.Calls(); first < 1 || calls[first-1] != info {
+		calls := node.Calls()
+		if round {
+			listing := node.indexOfCall(dmInfoListLine)
+			if first < 1 || listing < 0 || listing > first ||
+				node.indexOfCall(info) < first ||
+				node.indexOfCall(dmNumberRead+clone) >= 0 ||
+				first+1 >= len(calls) || calls[first+1] != info {
+				t.Fatalf("the round's reads of the dm-clone are not the "+
+					"reading's listing, the held status and a fresh info "+
+					"of it\ncalls:\n%s", strings.Join(calls, "\n"))
+			}
+			return
+		}
+		if first < 1 || calls[first-1] != info {
 			t.Fatalf("fixture: the held status read is not the one that "+
 				"follows an info of the dm-clone\ncalls:\n%s",
 				strings.Join(calls, "\n"))
@@ -2139,7 +2167,7 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 			clones: []*pb.Clone{cloneOf()}})
 		node.Reset()
 		var probed *pb.CntlrInfo
-		goneMidRead(t, srv, node, func() {
+		goneMidRead(t, srv, node, true, func() {
 			_, probed = srv.checkCntlrRound(context.Background(),
 				&pb.CheckCntlrRequest{
 					ClusterId: testCluster, CnId: testCn,
@@ -2164,7 +2192,7 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 			reply *pb.SyncupCntlrReply
 			err   error
 		)
-		goneMidRead(t, srv, node, func() {
+		goneMidRead(t, srv, node, false, func() {
 			reply, err = srv.SyncupCntlr(context.Background(),
 				cntlrReq(reqOpts{revision: 3, primary: true,
 					clones: []*pb.Clone{cloneOf()}}))
@@ -2194,27 +2222,36 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 // stops CN18 step 2 there: it parks, removes and builds nothing, the ns-dev
 // keeps serving through the dm-clone, the dm row reads ERROR with the failed
 // read's error and the retry is registered. Read as an absence, the converge
-// would park the td and rebuild a dm-clone that serves.
+// would park the td and rebuild a dm-clone that serves. In a check round the
+// dm-clone's first info is the reading's listing, so its own `dmsetup info`
+// is the confirm alone.
 func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 	const readErr = "Input/output error"
 	// unconfirmed runs pass with the dm-clone's first status read refused
-	// and its second `dmsetup info` killed. It then checks that both faults
-	// fired, and that the dm-clone's reads went info, the refused status,
+	// and the `dmsetup info` of it that confirms an absence killed: its
+	// second in a converge, its first in a check round. It then checks that
+	// both faults fired, and that the dm-clone's reads went info (a
+	// converge's own; a round's comes from the reading), the refused status,
 	// then the killed info, as probeCloneDm reads.
 	unconfirmed := func(
 		t *testing.T,
 		srv *CnAgentServer,
 		node *fakeNode,
+		round bool,
 		pass func(),
 	) {
 		t.Helper()
 		clone := cloneName(srv, testClone)
 		status := "dmsetup status " + clone
 		info := "dmsetup info --columns --noheadings -o attr " + clone
+		confirm := 2
+		if round {
+			confirm = 1
+		}
 		node.mu.Lock()
 		node.failCmd[status] = "device-mapper: status ioctl on " + clone +
 			" failed: " + readErr
-		node.killCmdNth[info] = 2
+		node.killCmdNth[info] = confirm
 		node.mu.Unlock()
 		pass()
 		node.mu.Lock()
@@ -2232,6 +2269,9 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 			}
 		}
 		want := []string{"cmd " + info, "cmd " + status, "cmd " + info}
+		if round {
+			want = want[1:]
+		}
 		if len(reads) < len(want) || !slices.Equal(reads[:len(want)], want) {
 			t.Fatalf("fixture: the dm-clone's first reads are not an "+
 				"info, the refused status and the killed info\nreads:\n%s",
@@ -2246,7 +2286,8 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 			clones: []*pb.Clone{cloneOf()}})
 		node.Reset()
 		var probed *pb.CntlrInfo
-		unconfirmed(t, srv, node, func() { probed = checkRound(t, srv, 2) })
+		unconfirmed(t, srv, node, true,
+			func() { probed = checkRound(t, srv, 2) })
 		for _, call := range node.Mutations() {
 			t.Fatalf("the check round mutated: %q", call)
 		}
@@ -2275,7 +2316,7 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 			reply *pb.SyncupCntlrReply
 			err   error
 		)
-		unconfirmed(t, srv, node, func() {
+		unconfirmed(t, srv, node, false, func() {
 			reply, err = srv.SyncupCntlr(context.Background(),
 				cntlrReq(reqOpts{revision: 3, primary: true,
 					clones: []*pb.Clone{cloneOf()}}))
@@ -3097,21 +3138,22 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 }
 
 // TestWrapperEnumerationSurvivesAVanishedWrapper: the kind-`cb` name list comes
-// from a `dmsetup ls` snapshot that is stale the instant it is printed —
-// SyncupCntlr holds only the node *read* lock, so another cntlr's sweep
-// (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a wrapper between the
-// `ls` and the `dmsetup table` of that name. Failing the whole CN-wide
-// enumeration on it flipped a healthy, serving clone of an unrelated cntlr to
-// RES_STATUS_ERROR, and ERROR — unlike PROVISIONING — feeds err_epoch
-// (dnv-worker.md HL2) and the reactions of architecture.md, Automatic
-// reactions ([D14]).
+// from a listing that is stale the instant it is printed — a converge's
+// `dmsetup ls`, or the whole-node `dmsetup info` listing of an info read's or
+// a check round's reading — and SyncupCntlr holds only the node *read* lock,
+// so another cntlr's sweep (CN21), at SP_LEVEL_DISABLE or otherwise, can
+// remove a wrapper between that listing and the read of the name's table.
+// Failing the whole CN-wide enumeration on it would flip a healthy, serving
+// clone of an unrelated cntlr to RES_STATUS_ERROR, and ERROR — unlike
+// PROVISIONING — feeds err_epoch (dnv-worker.md HL2) and the reactions of
+// architecture.md, Automatic reactions ([D14]).
 func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
 
-	// Another cntlr's wrapper, listed by `ls` and gone by the time its table
-	// is read.
+	// Another cntlr's wrapper, listed and gone by the time its table is
+	// read.
 	node.lsGhosts = append(node.lsGhosts,
 		srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp+1, 0x999))
 
@@ -3145,13 +3187,21 @@ func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 // must stay fatal. Skipping it would report its units as free, and the
 // allocator's discard-first hole punch would then wipe a live dm-clone's
 // superblock — the exact corruption the discard-first order exists to prevent.
+// An info read takes the wrapper's table from its reading, so here the
+// reading's table listing leaves the wrapper out, as one that went
+// mid-listing does, and the wrapper's own `dmsetup table` is the read that
+// fails; the `dmsetup info` that follows finds it there.
 func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
 
 	metaDm := cloneMetaName(srv, testClone)
+	node.mu.Lock()
+	node.tableOmit[metaDm] = true
 	node.failCmdAlways["dmsetup table "+metaDm] = "fake: transient failure"
+	node.mu.Unlock()
+	node.Reset()
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -3165,6 +3215,46 @@ func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 		t.Fatalf("clone_id_to_meta is %v/%q, want the arena error",
 			meta.GetStatus(), meta.GetDetails())
 	}
+	// The wrapper's own table read is the one that failed, and the info
+	// after it is the wrapper's own as well, never the reading's.
+	assertOrder(t, node, dmTableListLine, "cmd dmsetup table "+metaDm,
+		"cmd dmsetup info --columns --noheadings -o attr "+metaDm)
+}
+
+// TestAConvergeKeepsALiveWrapperWhoseTableFails is the same rule on the
+// allocator's own path. A converge takes no reading: its enumeration lists
+// the wrappers with `dmsetup ls` and reads each table on its own, so a failed
+// table read of another sp's wrapper that is still there must fail the
+// allocation of this cntlr's clone, never free that wrapper's units for the
+// discard-first hole punch (CN5).
+func TestAConvergeKeepsALiveWrapperWhoseTableFails(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	other := plantWrapper(t, srv, node, 0x999, 0, 2)
+	node.mu.Lock()
+	node.failCmdAlways["dmsetup table "+other] = "fake: transient failure"
+	node.mu.Unlock()
+	node.Reset()
+
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	meta := reply.GetCntlrInfo().GetCloneIdToMeta()[testClone]
+	if meta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(meta.GetDetails(),
+			"clone-metadata arena unavailable") ||
+		!strings.Contains(meta.GetDetails(), "dmsetup table "+other) {
+		t.Fatalf("clone_id_to_meta is %v/%q, want the arena error naming "+
+			"the failed table read", meta.GetStatus(), meta.GetDetails())
+	}
+	assertOrder(t, node, "cmd dmsetup ls", "cmd dmsetup table "+other,
+		"cmd dmsetup info --columns --noheadings -o attr "+other)
+	assertNoCall(t, node, "cmd blkdiscard")
+	assertNoCall(t, node, "cmd dmsetup create "+cloneMetaName(srv, testClone))
 }
 
 // TestCloneWrapperRemovalTakesTheArenaLock: removing a kind-`cb` wrapper is a

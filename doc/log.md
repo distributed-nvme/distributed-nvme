@@ -103,7 +103,10 @@ R8. The following events MUST be logged at **Info** level, with the record
        in the interceptors (`grpc.md`, L1 to L6);
     4. every etcd read/write (human-readable key, value decoded from
        protobuf and rendered as JSON — never raw protobuf binary) —
-       implemented in the central etcd helpers of `etcdutil`.
+       implemented in the central etcd helpers of `etcdutil`;
+    5. every directory listing made in the agent's own process (full path;
+       every name, never truncated) — implemented once inside
+       `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error). When
@@ -154,6 +157,10 @@ implements them:
 * a file read logs `os read file`, a file write `os write file` and a direct
   write `os write file direct`, each with `path`, `size` (the bytes read or
   written), `data` (as `TruncForLog` renders it) and "error?";
+* a directory listing made in the agent's own process (`ReadDir`) logs
+  `os read dir` with `path`, `count` (the names returned), `names` (every
+  name, as an array, empty when none) and "error?"; a listing by `ls` is a
+  command run;
 * a raw block read logs `os read block` and a raw block write
   `os write block`, each with `path`, `offset`, `length` and "error?" —
   **never** `data`;
@@ -161,11 +168,11 @@ implements them:
   with `path`, `size` (the serialized bytes), `data` (the message as
   `PbToLogValue` renders it) and "error?".
 
-Command stdin, stdout and stderr are logged in full; the `TruncForLog`
-truncation applies to file data only. The two raw-block records — the DN's
-on-disk metadata path (`architecture.md`, [D13]) — deliberately carry no
-`data` attribute at all: the blocks are large, opaque, and may hold
-arbitrary user data.
+Command stdin, stdout and stderr, and the names of a directory listing, are
+logged in full; the `TruncForLog` truncation applies to file data only. The
+two raw-block records — the DN's on-disk metadata path (`architecture.md`,
+[D13]) — deliberately carry no `data` attribute at all: the blocks are
+large, opaque, and may hold arbitrary user data.
 
 Two block-IO records are emitted **outside** `LimitedOsClient`, by the cn
 agent's `directLegProbeIO`, because the CN11 leg health probers deliberately

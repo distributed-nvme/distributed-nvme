@@ -95,9 +95,9 @@ type CnAgentServer struct {
 // (architecture.md, Controller node, common).
 // The loop device carrying the clone-metadata arena is deliberately *not* a
 // field here: it is kernel-assigned state, re-learned from `losetup
-// --associated` on every converge and probe pass and never cached across one
-// (CN5, [D14]) — a cached path would only be as fresh as the last SyncupCn,
-// which a SyncupCntlr does not run.
+// --associated` on every converge, check round and info read and never
+// cached across them (CN5, [D14]) — a cached path would only be as fresh as
+// the last SyncupCn, which a SyncupCntlr does not run.
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
 	// stored only under the node write lock, and every reader holds
@@ -490,12 +490,12 @@ func (s *CnAgentServer) GetCntlrInfo(
 	if st == nil {
 		return unknown, nil
 	}
-	// The probe first and the verdict after it, as in a check round
-	// (checkCntlrRound, CN23, CN24), so a read answers what a round in the
+	// One reading, then the rows and the verdict from it, as in a check
+	// round (readCntlr, CN23, CN24), so a read answers what a round in the
 	// same state would.
-	info := s.probeCntlr(ctx, st)
+	info, verdict := s.readCntlr(ctx, st)
 	return &pb.GetCntlrInfoReply{
-		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
+		AgentReply: verdict.Reply(),
 		Revision:   st.loadReq().GetRevision(),
 		CntlrInfo:  info,
 	}, nil

@@ -7,13 +7,16 @@ import (
 )
 
 // FakeOsClient is a configurable OsClient test double: set only the function
-// fields your test needs; unset fields succeed with zero values.
+// fields your test needs; unset fields succeed with zero values. An unset
+// ReadDirFn answers an empty listing, so a test that expects a listing to
+// fail, or its directory to be missing, sets it and checks that it ran.
 //
 // It is exported (not a _test.go file) so that tests in other packages can
 // reuse it (osclient.md, Test double — `common/osclient_fake.go`).
 type FakeOsClient struct {
 	RunCommandFn      func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
 	ReadFileFn        func(ctx context.Context, path string) (string, error)
+	ReadDirFn         func(ctx context.Context, path string) ([]string, error)
 	WriteFileFn       func(ctx context.Context, path string, data string) error
 	WriteFileDirectFn func(ctx context.Context, path string, data string) error
 	ReadBlockFn       func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
@@ -36,6 +39,13 @@ func (f *FakeOsClient) ReadFile(ctx context.Context, path string) (string, error
 		return f.ReadFileFn(ctx, path)
 	}
 	return "", nil
+}
+
+func (f *FakeOsClient) ReadDir(ctx context.Context, path string) ([]string, error) {
+	if f.ReadDirFn != nil {
+		return f.ReadDirFn(ctx, path)
+	}
+	return nil, nil
 }
 
 func (f *FakeOsClient) WriteFile(ctx context.Context, path string, data string) error {

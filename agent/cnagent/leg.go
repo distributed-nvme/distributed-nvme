@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"regexp"
-	"strconv"
+	"path"
 	"strings"
 	"time"
 
@@ -16,8 +15,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// sysfs is where the kernel publishes one directory per nvme subsystem the
-// host holds. The cn agent reads leg state from there rather than from
+// ---------------------------------------------------------------------------
+// The pass's NVMe walk and the leg lookup (CN10)
+//
+// The cn agent reads the connections of its legs and of its clone sources
+// from sysfs, through the walk both agents share (agent.NvmeHost:
+// WalkSubsys, ReadSubsysNqn, ReadSubsys; dnagent.md SH20), rather than from
 // `nvme list-subsys`, for two measured reasons (CN10, CN12):
 //
 //   - `nvme list-subsys -o json` emits **no** `ANAState` unless it is given a
@@ -29,22 +32,15 @@ import (
 //     which the test needs together: a dead path keeps its last-known ANA
 //     state, so "available" is `state == live && ana_state == optimized`,
 //     never ANA alone.
-const (
-	sysfsNvmeSubsysDir = "/sys/class/nvme-subsystem"
-	sysfsNvmeCtrlDir   = "/sys/class/nvme"
-)
-
-var (
-	// Inside a subsystem directory, `nvme0` is a controller, `nvme0n1` the
-	// multipath namespace; inside a controller directory, `nvme0c1n1` is that
-	// controller's own (hidden) path device, the only place ana_state lives.
-	nvmeCtrlEntryPattern = regexp.MustCompile(`^nvme\d+$`)
-	nvmeNsEntryPattern   = regexp.MustCompile(`^nvme\d+n\d+$`)
-	nvmePathEntryPattern = regexp.MustCompile(`^nvme\d+c\d+n\d+$`)
-)
-
-// ---------------------------------------------------------------------------
-// The sysfs view of one leg's subsystem
+//
+// A cntlr's converge, check round and info read each start with one walk of
+// the node: the listing of /sys/class/nvme-subsystem and each entry's
+// subsysnqn say where each subsystem is (passWalk). A lookup (lookupSubsys)
+// reads its own entry alone: its subsysnqn again, then its directory and its
+// controllers. Only a converge walks again: a connect step that ran a
+// connect marks the walk stale, so the next lookup of the pass walks again
+// first; and a clone source the walk did not find is looked up once more on
+// a fresh walk before it is connected (ensureCloneSource).
 // ---------------------------------------------------------------------------
 
 // subsysView is what the agent needs to know about one connected subsystem.
@@ -131,177 +127,137 @@ func (v *subsysView) available() bool {
 	return false
 }
 
-// errSubsysUnknown marks every failure of readSubsys (CN10), so a caller can
-// tell "this pass does not know whether the NQN is connected" from its
+// errSubsysUnknown marks every failure of lookupSubsys (CN10), so a caller
+// can tell "this pass does not know whether the NQN is connected" from its
 // step's other failures, such as a refused connect. Its text is the middle
 // of that failure's: "subsystem <nqn> is unknown: <the read's error>".
 var errSubsysUnknown = errors.New("is unknown")
 
-// readSubsys walks sysfs for one subsystem NQN. An absent subsystem is "not
-// connected", never an error — and so is an absent /sys/class/nvme-subsystem,
-// which nvme-core creates when it loads: a host holds no fabrics controller
-// before it has. A walk that did not answer is not "not connected" (CN10): a
-// listing of that directory that did not answer, or a subsysnqn read that
-// failed where no other subsystem matched, leaves the pass not knowing
-// whether this NQN is connected, and each caller acts on "not connected" —
-// the connect steps ask for every side again beside the live controllers,
-// which the host refuses, and the probe rows read the connection missing.
-// So the lookup fails for the pass, naming the read, and its caller fails
-// the leg or the clone source as it fails any other step of it, which
-// registers the retry. So does a listing of the matching subsystem's own
-// directory that fails, whatever the failure: its controllers and
-// namespace are unread. A match is the answer even beside a subsysnqn read
-// that failed: the host joins every controller of one NQN to the one
-// subsystem it keeps for it ([D1]), so the entry that did not answer is not
-// this NQN's.
-func (s *CnAgentServer) readSubsys(
+// subsysUnknown is a lookup of nqn that did not answer, naming the read.
+func subsysUnknown(nqn string, err error) error {
+	return fmt.Errorf("subsystem %s %w: %w", nqn, errSubsysUnknown, err)
+}
+
+// passWalk is the NVMe walk of one converge, check round or info read
+// (CN10): where each subsystem entry of the node is, read at the start of
+// the pass and shared by every lookup of it; a converge reads it again at
+// the next lookup after it marks it stale. A check round and an info read
+// take it before their rows, a converge right before its sweep, whose list
+// of connections it is too (enumerateCn).
+type passWalk struct {
+	walk *agent.SubsysWalk
+	// err is the listing of /sys/class/nvme-subsystem that did not answer:
+	// every lookup of the pass is unknown.
+	err error
+	// stale is set before each connect of a connect step: the kernel may
+	// give the subsystem that connect makes the number of an entry freed
+	// since the walk, so the next lookup walks again first, whether or not
+	// the connect worked.
+	stale bool
+}
+
+// newPassWalk takes a pass's walk.
+func (s *CnAgentServer) newPassWalk(ctx context.Context) *passWalk {
+	pw := &passWalk{}
+	s.rewalk(ctx, pw)
+	return pw
+}
+
+// rewalk walks the node again for the pass.
+func (s *CnAgentServer) rewalk(ctx context.Context, pw *passWalk) {
+	pw.walk, pw.err = s.host.WalkSubsys(ctx)
+	pw.stale = false
+}
+
+// lookupSubsys is the leg lookup of CN10: the view of the subsystem nqn
+// names, found in the pass's walk, with the namespace node nsIdx picks (0:
+// the first). An absent subsystem is "not connected", never an error, and so
+// is an absent /sys/class/nvme-subsystem, which nvme-core creates when it
+// loads: a host holds no fabrics controller before it has. A lookup that did
+// not answer is not "not connected" (CN10): a listing of that directory that
+// did not answer, or a subsysnqn read that failed where no other entry
+// matched, leaves the pass not knowing whether this NQN is connected, and
+// each caller acts on "not connected" — the connect steps ask for every side
+// again beside the live controllers, which the host refuses, and the probe
+// rows read the connection missing. So the lookup fails for the pass, naming
+// the read, and its caller fails the leg or the clone source as it fails any
+// other step of it, which registers the retry. So does a listing of the
+// matching entry's own directory that fails, whatever the failure: its
+// controllers and namespace are unread. A match is the answer even beside a
+// subsysnqn read that failed: the host joins every controller of one NQN to
+// the one subsystem it keeps for it ([D1]), so the entry that did not answer
+// is not this NQN's.
+//
+// The walk can be as old as the pass, and the kernel gives a freed entry's
+// number to the next new subsystem, which another cntlr or a dn agent on the
+// machine may connect meanwhile. So the lookup reads the entry's subsysnqn
+// again just before it reads the entry's directory and controllers. An entry
+// gone since the walk, or whose subsysnqn reads another NQN, is no
+// subsystem, as a subsystem gone since the listing is: also beside another
+// entry whose read failed, because the walk found this NQN in this entry and
+// the host keeps one subsystem per NQN. Without the check a converge could
+// build a leg's wrapper over another pool's namespace. That read failing in
+// any other way did not answer.
+//
+// A pass with no walk has no lookup: that is an unknown error, never a walk
+// of its own, so a caller that lacks one shows as an ERROR row.
+func (s *CnAgentServer) lookupSubsys(
 	ctx context.Context,
+	pw *passWalk,
 	nqn string,
 	nsIdx uint32,
 ) (*subsysView, error) {
-	entries, present, err := s.cmd.ListDir(ctx, sysfsNvmeSubsysDir)
-	if err != nil {
-		return nil, fmt.Errorf("subsystem %s %w: %w",
-			nqn, errSubsysUnknown, err)
+	if pw == nil {
+		return nil, fmt.Errorf("subsystem %s %w: no NVMe walk in this pass",
+			nqn, errSubsysUnknown)
 	}
-	if !present {
-		// No nvme subsystem at all yet.
+	if pw.stale {
+		s.rewalk(ctx, pw)
+	}
+	if pw.err != nil {
+		return nil, subsysUnknown(nqn, pw.err)
+	}
+	match, unread := pw.walk.Find(nqn)
+	if match == nil {
+		if unread != nil {
+			return nil, subsysUnknown(nqn, unread.Err)
+		}
 		return &subsysView{}, nil
 	}
-	var unread error
-	for _, entry := range entries {
-		dir := sysfsNvmeSubsysDir + "/" + entry
-		data, ok, readErr := s.cmd.ReadAttr(ctx, dir+"/subsysnqn")
-		if readErr != nil {
-			if unread == nil {
-				unread = readErr
-			}
-			continue
-		}
-		// !ok: the subsystem went away between the listing and the read.
-		if !ok || data != nqn {
-			continue
-		}
-		view := &subsysView{found: true}
-		inner, listErr := s.listDir(ctx, dir)
-		if listErr != nil {
-			return nil, fmt.Errorf("subsystem %s %w: listing %s: %w",
-				nqn, errSubsysUnknown, dir, listErr)
-		}
-		for _, name := range inner {
-			switch {
-			case nvmeNsEntryPattern.MatchString(name):
-				if view.nsDev != "" {
-					break
-				}
-				if s.nsidMatches(ctx, dir+"/"+name, nsIdx) {
-					view.nsDev = "/dev/" + name
-				}
-			case nvmeCtrlEntryPattern.MatchString(name):
-				view.ctrls = append(view.ctrls, s.readCtrl(ctx, name))
-			}
-		}
-		return view, nil
-	}
-	if unread != nil {
-		return nil, fmt.Errorf("subsystem %s %w: %w",
-			nqn, errSubsysUnknown, unread)
-	}
-	return &subsysView{}, nil
-}
-
-func (s *CnAgentServer) nsidMatches(
-	ctx context.Context,
-	nsDir string,
-	nsIdx uint32,
-) bool {
-	if nsIdx == 0 {
-		return true
-	}
-	nsid, err := s.readSysfs(ctx, nsDir+"/nsid")
+	got, ok, err := s.host.ReadSubsysNqn(ctx, match.Dir)
 	if err != nil {
-		return false
+		return nil, subsysUnknown(nqn, err)
 	}
-	return strings.TrimSpace(nsid) == strconv.FormatUint(uint64(nsIdx), 10)
-}
-
-// readCtrl reads one controller's transport, liveness and — from its own
-// hidden path device, the only place it exists — the ANA state.
-func (s *CnAgentServer) readCtrl(
-	ctx context.Context,
-	name string,
-) ctrlView {
-	ctrlDir := sysfsNvmeCtrlDir + "/" + name
-	ctrl := ctrlView{name: name}
-	address, err := s.readSysfs(ctx, ctrlDir+"/address")
+	if !ok || got != nqn {
+		return &subsysView{}, nil
+	}
+	read, err := s.host.ReadSubsys(ctx, match.Dir, agent.SubsysReadOpts{
+		NsIdx: nsIdx,
+		Rule:  agent.ReadTolerant,
+	})
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		// CN10: the device is deleted and nothing else of it is left to
-		// read; only the subsystem's link to it is.
-		ctrl.gone = true
-		return ctrl
 	case err != nil:
-		// CN10: the failure is recorded, not left as an empty address,
-		// which matches no side and so reads as a dead path to retire.
-		ctrl.addrUnknown = fmt.Errorf("read %s/address: %w", ctrlDir, err)
-	default:
-		ctrl.trAddr, ctrl.trSvcId = agent.ParseNvmeAddress(
-			strings.TrimSpace(address))
+		return nil, subsysUnknown(nqn, err)
+	case read.DirErr != nil:
+		return nil, subsysUnknown(nqn, read.DirErr)
+	case read.DirGone:
+		return nil, subsysUnknown(nqn,
+			fmt.Errorf("list %s: %w", match.Dir, fs.ErrNotExist))
 	}
-	if state, err := s.readSysfs(ctx, ctrlDir+"/state"); err == nil {
-		ctrl.state = strings.TrimSpace(state)
+	view := &subsysView{found: true, nsDev: read.NsDev}
+	for _, ctrl := range read.Ctrls {
+		// A gone controller has nothing but its name read (ReadTolerant).
+		view.ctrls = append(view.ctrls, ctrlView{
+			name:        ctrl.Name,
+			trAddr:      ctrl.TrAddr,
+			trSvcId:     ctrl.TrSvcId,
+			state:       ctrl.State,
+			anaState:    ctrl.AnaState,
+			addrUnknown: ctrl.AddrErr,
+			gone:        ctrl.AddrGone,
+		})
 	}
-	entries, err := s.listDir(ctx, ctrlDir)
-	if err != nil {
-		return ctrl
-	}
-	for _, entry := range entries {
-		if !nvmePathEntryPattern.MatchString(entry) {
-			continue
-		}
-		if ana, readErr := s.readSysfs(
-			ctx, ctrlDir+"/"+entry+"/ana_state"); readErr == nil {
-			ctrl.anaState = strings.TrimSpace(ana)
-			break
-		}
-	}
-	return ctrl
-}
-
-// listDir lists a directory. Every failure is an error, a missing directory
-// included: readSubsys fails its lookup on one, and readCtrl leaves the
-// controller's ANA state unread.
-func (s *CnAgentServer) listDir(
-	ctx context.Context,
-	path string,
-) ([]string, error) {
-	stdout, _, _, err := s.cmd.Run(ctx, "ls", "-1", path)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, line := range strings.Split(stdout, "\n") {
-		if entry := strings.TrimSpace(line); entry != "" {
-			out = append(out, entry)
-		}
-	}
-	return out, nil
-}
-
-// readSysfs reads one sysfs attribute under the soft timeout of
-// architecture.md, Common validation (SH15). This walk calls the OsClient
-// directly rather than through an `agent` OS wrapper, so the bound has to be
-// applied here explicitly, as every direct OsClient caller of a role package
-// does (SH15): the /sys/class/nvme* tree can stall while a controller is
-// mid-reset or being torn down, which is exactly when the walk runs. listDir
-// above is already bounded, through cmd.Run.
-func (s *CnAgentServer) readSysfs(
-	ctx context.Context,
-	path string,
-) (string, error) {
-	cctx, cancel := agent.CmdCtx(ctx)
-	defer cancel()
-	return s.oc.ReadFile(cctx, path)
+	return view, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -361,13 +317,16 @@ func (s *CnAgentServer) ensureLegs(
 // namespace ([D1]); the wrapper is a whole-device dm-linear over it, sized
 // from the desired state and never from probing the device.
 //
-// The connect step waits, briefly and boundedly, for what it has just asked
-// for (CN10): a failed connect is tried again within the pass
-// (connectWithin), and after a connect this pass made the subsystem is
-// re-read until the kernel has added the multipath namespace head
-// (awaitNsHead). Both draw on budget, the pass's one wait budget; once it is
-// spent the leg fails as it always did, with the same error, and ensureLegs
-// registers the background retry.
+// The leg is looked up in the pass's walk (lookupSubsys). The connect step
+// waits, briefly and boundedly, for what it has just asked for (CN10): a
+// failed connect is tried again within the pass (connectWithin), and after a
+// connect this pass made the subsystem is read again until the kernel has
+// added the multipath namespace head (awaitNsHead). Both draw on budget, the
+// pass's one wait budget; once it is spent the leg fails with the step's
+// error, and ensureLegs registers the background retry. Each connect marks
+// the pass's walk stale first, so the lookup after it walks again: the
+// subsystem it made may have taken the number of an entry freed since the
+// walk.
 //
 // A leg whose subsystem a sweep is still disconnecting fails before any of
 // that (disconnectInFlight): its controllers are being deleted, so there is
@@ -382,7 +341,7 @@ func (s *CnAgentServer) ensureLeg(
 	if s.disconnectInFlight(lp.nqn) {
 		return nil, fmt.Errorf("%s", detailsDisconnectInFlight(lp.nqn))
 	}
-	view, err := s.readSubsys(ctx, lp.nqn, sideNsid)
+	view, err := s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
 	if err != nil {
 		return nil, err
 	}
@@ -404,6 +363,7 @@ func (s *CnAgentServer) ensureLeg(
 			view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
 			continue
 		}
+		plan.walk.stale = true
 		if err := s.connectWithin(ctx, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
@@ -416,7 +376,7 @@ func (s *CnAgentServer) ensureLeg(
 	}
 	if connected {
 		if view, err = s.awaitNsHead(
-			ctx, budget, lp.nqn, sideNsid); err != nil {
+			ctx, budget, plan.walk, lp.nqn, sideNsid); err != nil {
 			return nil, err
 		}
 	}
@@ -430,8 +390,12 @@ func (s *CnAgentServer) ensureLeg(
 	if view.nsDev == "" {
 		return nil, fmt.Errorf("no multipath namespace for %s", lp.nqn)
 	}
+	headNo, err := s.blockDevNo(ctx, path.Base(view.nsDev))
+	if err != nil {
+		return nil, err
+	}
 	if err := s.ensureDmLinear(
-		ctx, lp.name, lp.sectors, view.nsDev, 0); err != nil {
+		ctx, lp.name, lp.sectors, headNo, 0); err != nil {
 		return nil, err
 	}
 	return view, nil
@@ -479,25 +443,35 @@ func (s *CnAgentServer) connectWithin(
 	}
 }
 
-// awaitNsHead re-reads one subsystem after a connect this pass made, until
-// its multipath namespace head is there or the pass's budget no longer
+// awaitNsHead looks one subsystem up again after a connect this pass made,
+// until its multipath namespace head is there or the pass's budget no longer
 // covers another CnNsScanPause (CN10). The kernel returns from `nvme connect`
 // as soon as the controller is live and only QUEUES the namespace scan, which
-// adds the hidden per-path disk first and the head after it; a single re-read
+// adds the hidden per-path disk first and the head after it; a single read
 // right after the connect can therefore miss a head that is milliseconds
 // away. Only a connect made in this pass is waited for: a subsystem that was
 // already connected and has no head — a leg whose only path is ANA
 // inaccessible never gets one — is judged on the one read.
+//
+// The connect left pw stale, so the first lookup walks again. Each later one
+// reads that entry alone — its subsysnqn, its directory and its controllers
+// — while the entry it found stands; a lookup that finds no entry, or whose
+// entry fails the subsysnqn check, marks the walk stale again, so the next
+// one walks.
 func (s *CnAgentServer) awaitNsHead(
 	ctx context.Context,
 	budget *agent.WaitBudget,
+	pw *passWalk,
 	nqn string,
 	nsIdx uint32,
 ) (*subsysView, error) {
 	for {
-		view, err := s.readSubsys(ctx, nqn, nsIdx)
+		view, err := s.lookupSubsys(ctx, pw, nqn, nsIdx)
 		if err != nil || view.nsDev != "" {
 			return view, err
+		}
+		if !view.found {
+			pw.stale = true
 		}
 		if !budget.Pause(ctx, common.CnNsScanPause) {
 			return view, nil
@@ -569,8 +543,8 @@ func (s *CnAgentServer) legInfo(
 	view *subsysView,
 ) *pb.ResInfo {
 	key := resKeyOf(resKeyLegFmt, lp.legId)
-	status, details := s.probeDmTarget(ctx, lp.name, "linear", lp.sectors,
-		"", 0)
+	status, details := s.probeDmTarget(ctx, plan.rd, lp.name, "linear",
+		lp.sectors, "", 0)
 	if status != pb.ResStatus_RES_STATUS_OK {
 		return st.tracker.Set(key, lp.name, status, details)
 	}
@@ -580,7 +554,8 @@ func (s *CnAgentServer) legInfo(
 	}
 	if view == nil {
 		var err error
-		if view, err = s.readSubsys(ctx, lp.nqn, sideNsid); err != nil {
+		view, err = s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
+		if err != nil {
 			return st.tracker.Err(key, lp.name, err.Error())
 		}
 	}
@@ -743,15 +718,16 @@ func detailsDisconnectInFlight(nqn string) string {
 
 // disconnectInFlight reports whether a sweep's background disconnect of nqn
 // is still running, or waiting for a slot (CN10's disconnect registry). The
-// connect steps ask it before they read the subsystem, because the pass's
-// locks no longer cover the delete: the controller they would find at a
-// wanted address — and adopt, since they connect only the addresses that
-// have none — is about to go, taking the device a leg wrapper or a dm-clone
-// would be built on with it. A step that finds one in flight fails for the
-// pass, which registers the CN10/CN18 connect retry, and the first pass after
-// the goroutine has gone reads the subsystem afresh and connects whatever is
-// missing. The CN28 probe asks it too, so the Check round reports that step
-// the way the converge does.
+// connect steps ask it before they look the subsystem up, because the delete
+// outlives the locks of the pass that set it going: the controller they
+// would find at a wanted address — and adopt, since they connect only the
+// addresses that have none — is about to go, taking the device a leg wrapper
+// or a dm-clone would be built on with it. A step that finds one in flight
+// fails for the pass, which registers the CN10/CN18 connect retry, and the
+// first pass after the goroutine has gone takes a walk of its own, reads the
+// subsystem's entry, directory and controllers at its lookup, and connects
+// whatever is missing. The CN28 probe asks it too, so the Check round
+// reports that step the way the converge does.
 func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

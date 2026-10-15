@@ -17,7 +17,9 @@ import (
 // reply of the stream, and whenever the freshly probed info differs from the
 // last one actually sent. One round takes the CN1 locks of the corresponding
 // Get*Info, changes no object of the node (CN23), and runs under the trace id
-// its own request carries (agent.CheckRoundCtx).
+// its own request carries (agent.CheckRoundCtx). A CheckCntlr round reads the
+// node the way GetCntlrInfo does: one reading first, then the rows and the
+// verdict from it (readCntlr); a CheckCn round takes no reading.
 
 // streamEnded reports whether a Recv error is the normal end of a stream.
 func streamEnded(ctx context.Context, err error) bool {
@@ -134,11 +136,11 @@ func (s *CnAgentServer) checkCntlrRound(
 	if st == nil {
 		return unknown, nil
 	}
-	info := s.probeCntlr(ctx, st)
+	info, verdict := s.readCntlr(ctx, st)
 	reply := &pb.CheckCntlrReply{
 		// The cntlr-level verdict. A cn's own Check reports node-level
 		// leftovers only; each object drives its own Syncup*.
-		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
+		AgentReply: verdict.Reply(),
 		Revision:   st.loadReq().GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {

@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -1120,6 +1121,53 @@ func TestUnownedXferConnectionSwept(t *testing.T) {
 	}
 }
 
+// TestACloneSourceWhoseNumberDidNotReadIsKept is the live half of
+// TestUnownedXferConnectionSwept when a read fails: a connection whose
+// namespace node's number did not read may be the very one a live dm-clone
+// maps, so the node-level sweep keeps it rather than disconnect it on a
+// guess, and still removes the connection nothing claims.
+func TestACloneSourceWhoseNumberDidNotReadIsKept(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+
+	mapped := srv.nf.XferNqn(testCluster, testSp, 0x777)
+	stray := srv.nf.XferNqn(testCluster, testSp, 0x888)
+	connectStray(t, srv, mapped)
+	connectStray(t, srv, stray)
+	dmClone := node.dms[cloneName(srv, testClone)]
+	if dmClone == nil {
+		t.Fatalf("the fixture dm-clone is missing")
+	}
+	fields := strings.Fields(dmClone.table)
+	fields[5] = connectedNsDevNo(t, srv, node, mapped)
+	dmClone.table = strings.Join(fields, " ")
+	state, err := srv.host.ListSubsys(context.Background(), mapped)
+	if err != nil || state.DevicePath == "" {
+		t.Fatalf("listing %s: %+v, %v", mapped, state, err)
+	}
+	number := sysfsBlockDir + "/" + path.Base(state.DevicePath) + "/dev"
+	node.mu.Lock()
+	node.failReadAlways[number] = true
+	node.mu.Unlock()
+
+	node.Reset()
+	reply := cnSweepSyncupSettled(t, srv, 3, true)
+	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
+
+	if !node.hasCall("read " + number) {
+		t.Fatalf("the sweep never read %s", number)
+	}
+	if _, ok := node.subsystems[stray]; ok {
+		t.Fatalf("the unowned clone source survived the node-level sweep")
+	}
+	if _, ok := node.subsystems[mapped]; !ok {
+		t.Fatalf("%s was disconnected although its number did not read",
+			mapped)
+	}
+	assertNoCall(t, node, "cmd nvme disconnect --nqn "+mapped)
+}
+
 // TestHostFacingSubsystemAttributedByDevicePath pins the other half of that
 // rule: a host-facing subsystem's NQN is chosen by the user and carries
 // nothing of ours, so once no stored cntlr names it the only thing left that
@@ -1173,9 +1221,10 @@ func TestHostFacingSubsystemAttributedByDevicePath(t *testing.T) {
 //
 // The lab runs a dn agent in the same kernel, and a DN's own disks get
 // assembled by udev into arrays this agent enumerates along with its own —
-// `ls /sys/block` has no owner column. An array with a member that is not one
-// of our wrappers is therefore never attributed and never stopped, however
-// unwanted it looks. Stopping one would take a co-hosted DN's storage down.
+// a listing of /sys/block has no owner column. An array with a member that
+// is not one of our wrappers is therefore never attributed and never
+// stopped, however unwanted it looks. Stopping one would take a co-hosted
+// DN's storage down.
 func TestForeignMdArrayUntouched(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, raid1: true})
@@ -1443,8 +1492,8 @@ func TestUnansweredMdListingStopsTheDescent(t *testing.T) {
 
 			node.Reset()
 			// Killed, not answered "no", and one-shot: the pass's first
-			// `ls` of /sys/block is the sweep's own enumeration.
-			node.killCmd["ls -1 "+sysfsBlockDir] = true
+			// listing of /sys/block is the sweep's own enumeration.
+			node.killCmd["list "+sysfsBlockDir] = true
 			reply := tc.pass(t, srv)
 			cnSweepAssertCode(t, reply, common.ReplyCodeLeftover,
 				"the pass over an unanswered md listing")
@@ -1513,7 +1562,7 @@ func TestUnansweredSubsystemListingRemovesNothing(t *testing.T) {
 		kill string // the listing behind it
 	}{
 		{"dmsetup ls", "dmsetup ls"},
-		{"nvme subsystems", "ls -1 " + sysfsNvmeSubsysDir},
+		{"nvme subsystems", "list " + sysfsNvmeSubsysDir},
 		{"nvmet subsystems", "ls -1 " + agent.NvmetRoot + "/subsystems"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1547,16 +1596,114 @@ func TestUnansweredSubsystemListingRemovesNothing(t *testing.T) {
 	}
 }
 
-// cnSweepListings are the four listings a pass is derived from, each killed by
-// the one command behind it and named in the verdict the way enumerateCn
-// names it.
+// TestAnUnreadWalkEntryStopsTheConvergeSweep pins the converge's list of
+// connections (CN21). In a converge the sweep takes it from the pass's NVMe
+// walk, and an entry of that walk whose subsysnqn read did not answer fails
+// it, as any part of the snapshot that did not answer does: the sweep
+// removes nothing and the reply names the enumeration. The entry is another
+// pool's, which the leg lookups pass over, since a match wins beside it
+// (CN10): only the list of connections fails on it. A connection of this
+// cntlr's pool that no leg wants stays until a converge whose walk answers,
+// which disconnects it. Read past, the unread entry would leave a list that
+// looks whole, and the sweep would remove what it derives from a snapshot
+// with one connection unknown. A check round's verdict takes its list from
+// its reading's walk by the same rule (CN30): it names the enumeration, reads
+// the entry once, in the walk, and its leg rows stay OK.
+func TestAnUnreadWalkEntryStopsTheConvergeSweep(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	opts := reqOpts{revision: 2}
+	syncupBoth(t, srv, opts)
+	stray := names(srv).SideToCnNqn(testCluster, testSp, 0x97, testCn)
+	foreign := names(srv).SideToCnNqn(testCluster, testSp+1, 0x98, testCn)
+	connectStray(t, srv, stray)
+	node.mu.Lock()
+	node.plantSubsys(node.nextSubsys, foreign, endpoint{testIp2, testSvcId2})
+	node.mu.Unlock()
+	unread := subsysnqnPath(t, node, foreign)
+	node.mu.Lock()
+	node.failReadAlways[unread] = true
+	node.mu.Unlock()
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(opts))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if !node.hasCall("read " + unread) {
+		t.Fatalf("the converge never read %s", unread)
+	}
+	cnSweepAssertCode(t, reply.GetAgentReply(), common.ReplyCodeLeftover,
+		"the converge beside an unread entry")
+	cnSweepAssertDetails(t, reply.GetAgentReply(),
+		"enumeration failed: nvme subsystems", "the failure details")
+	cnSweepAssertNoRemoval(t, node)
+	node.mu.Lock()
+	_, kept := node.subsystems[stray]
+	node.mu.Unlock()
+	if !kept {
+		t.Fatalf("the converge disconnected a connection beside an " +
+			"unread entry")
+	}
+	info := reply.GetCntlrInfo()
+	assertOk(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
+	assertOk(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
+
+	// A check round over the same node: its verdict fails on the entry its
+	// walk could not read, and nothing else reads that entry again.
+	node.Reset()
+	check, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: opts.revision,
+			ShowInfo: true}, nil)
+	cnSweepAssertCode(t, check.GetAgentReply(), common.ReplyCodeLeftover,
+		"the check round beside an unread entry")
+	cnSweepAssertDetails(t, check.GetAgentReply(),
+		"enumeration failed: nvme subsystems", "the round's failure details")
+	if got := countCalls(node, "read "+unread); got != 1 {
+		t.Fatalf("the round read %s %d times, want 1 (its walk's)",
+			unread, got)
+	}
+	assertOk(t, probed.GetLegIdToLeg()[testMetaLeg], "checked leg meta")
+	assertOk(t, probed.GetLegIdToLeg()[testDataLeg], "checked leg data")
+
+	// The control: with the entry answering, a converge disconnects the
+	// connection no leg wants.
+	node.mu.Lock()
+	delete(node.failReadAlways, unread)
+	node.mu.Unlock()
+	node.Reset()
+	cnSweepAssertCode(t, syncupCntlrSettled(t, srv, opts).GetAgentReply(),
+		0, "the converge after the disconnect")
+	if !node.hasCall("cmd nvme disconnect --nqn " + stray) {
+		t.Fatalf("the unwanted connection was never disconnected:\n%s",
+			strings.Join(node.Calls(), "\n"))
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if _, ok := node.subsystems[stray]; ok {
+		t.Fatalf("the unwanted connection survived the converge")
+	}
+	if _, ok := node.subsystems[foreign]; !ok {
+		t.Fatalf("the converge disconnected another pool's connection")
+	}
+}
+
+// cnSweepListings are the four listings a converge's sweep is derived from,
+// each killed by the one command or in-process listing behind it and named in
+// the verdict the way enumerateCn names it. In a converge the listing of
+// /sys/class/nvme-subsystem is the pass's one NVMe walk, which the build's
+// lookups share, so a kill of it fails every leg and clone source lookup of
+// the pass as well. A check round and an info read take their dm devices
+// from their reading's `dmsetup info` listing instead of `dmsetup ls`
+// (TestUnansweredDmListingErrsEveryDeviceRow).
 var cnSweepListings = []struct {
 	name string // the enumeration, as the verdict names it
 	kill string // the listing behind it
 }{
 	{"dmsetup ls", "dmsetup ls"},
-	{"md arrays", "ls -1 " + sysfsBlockDir},
-	{"nvme subsystems", "ls -1 " + sysfsNvmeSubsysDir},
+	{"md arrays", "list " + sysfsBlockDir},
+	{"nvme subsystems", "list " + sysfsNvmeSubsysDir},
 	{"nvmet subsystems", "ls -1 " + agent.NvmetRoot + "/subsystems"},
 }
 
@@ -2335,11 +2482,12 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 }
 
 // TestAHeldNsDevIsRedrivenWithoutARevision pins the other half of the hold:
-// with no dm-clone at all, an unanswered `dmsetup ls` holds an ns-dev off
-// its raid0 too — nothing can rule out a dm-clone hydrating into it — and
-// here nothing is left for the Check verdict to report once the listing
-// answers again. A standby promoted to primary, and a namespace resumed, each
-// keep their ns-dev parked and inaccessible on that pass. The worker re-syncs
+// with no dm-clone at all, an unanswered `dmsetup ls` of the converge holds
+// an ns-dev off its raid0 too — nothing can rule out a dm-clone hydrating
+// into it — and here the Check verdict, which lists the node from its
+// round's own reading, finds nothing left over to report. A standby
+// promoted to primary, and a namespace resumed, each keep their ns-dev
+// parked and inaccessible on that pass. The worker re-syncs
 // on a revision or a reply code, never on a row, so without the CN10 retry
 // the namespace would stay unserved until the next revision. The pass reports
 // the ns-dev's row ERROR, as the probe does, and registers the retry, whose
@@ -2636,7 +2784,11 @@ func TestADeletedSourceControllerHoldsNothing(t *testing.T) {
 // its table read then fails, an info finds it gone, and it holds nothing:
 // both ns-devs converge. A held ns-dev keeps its live table, a parked one
 // going inaccessible and a serving one keeping its group, and its row reads
-// ERROR on both channels; the converged one reads OK on both.
+// ERROR on both channels; the converged one reads OK on both. A check round
+// takes the dm-clone's table from its reading, so where the route's fault is
+// that table's read, the reading's table listing leaves the dm-clone out, as
+// one that went mid-listing does, and the round reads that table on its own,
+// where the fault meets it too.
 func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 	const snapNs = uint64(0x1b)
 	subsysAt := func(snapSuspended bool) map[string]*pb.Subsystem {
@@ -2667,6 +2819,10 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 		fault func(srv *CnAgentServer, node *fakeNode)
 		// stopped: a listing stops the sweep, and the pass reports it.
 		stopped bool
+		// tableFault: the fault is the dm-clone's table read, which a check
+		// round makes on its own only for a name its reading's table
+		// listing lacks (tableOmit).
+		tableFault bool
 		// gone: the dm-clone is gone after the pass, which holds nothing.
 		gone       bool
 		ns, snapNs nsWant
@@ -2675,17 +2831,17 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 			func(srv *CnAgentServer, node *fakeNode) {
 				node.killCmdNoEffectAlways["dmsetup remove "+
 					cloneName(srv, testClone)] = true
-			}, false, false,
+			}, false, false, false,
 			nsWant{"error", "3", true}, nsWant{"raid0", "1", false}},
 		{"the dm listing is killed",
 			func(_ *CnAgentServer, node *fakeNode) {
 				node.killCmd["dmsetup ls"] = true
-			}, true, false,
+			}, true, false, false,
 			nsWant{"clone", "1", true}, nsWant{"error", "3", true}},
 		{"the md listing is killed",
 			func(_ *CnAgentServer, node *fakeNode) {
-				node.killCmd["ls -1 "+sysfsBlockDir] = true
-			}, true, false,
+				node.killCmd["list "+sysfsBlockDir] = true
+			}, true, false, false,
 			nsWant{"clone", "1", true}, nsWant{"raid0", "1", false}},
 		{"the dm-clone's table does not answer and its remove is killed",
 			func(srv *CnAgentServer, node *fakeNode) {
@@ -2694,7 +2850,8 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 				node.failCmdAlways["dmsetup table "+clone] =
 					"device-mapper: table ioctl on " + clone +
 						" failed: Invalid argument"
-			}, false, false,
+				node.tableOmit[clone] = true
+			}, false, true, false,
 			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
 		{"the dm-clone writes into a device the listing does not hold",
 			func(srv *CnAgentServer, node *fakeNode) {
@@ -2704,7 +2861,7 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 				fields := strings.Fields(dm.table)
 				fields[4] = "253:999" // the destination, CloneTable's second
 				dm.table = strings.Join(fields, " ")
-			}, false, false,
+			}, false, false, false,
 			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
 		{"the dm-clone's table and the info after it do not answer",
 			func(srv *CnAgentServer, node *fakeNode) {
@@ -2714,7 +2871,8 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 						" failed: Invalid argument"
 				node.killCmdAlways["dmsetup info --columns --noheadings "+
 					"-o attr "+clone] = true
-			}, false, false,
+				node.tableOmit[clone] = true
+			}, false, true, false,
 			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
 		{"the dm-clone's name carries a table that is not a dm-clone's",
 			func(srv *CnAgentServer, node *fakeNode) {
@@ -2722,7 +2880,7 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 				node.killCmdNoEffectAlways["dmsetup remove "+clone] = true
 				node.dms[clone].table = agent.LinearTable(testTdSize/512,
 					node.devNo["/dev/mapper/"+raid0Name(srv, testTd)], 0)
-			}, false, false,
+			}, false, false, false,
 			nsWant{"error", "3", true}, nsWant{"error", "3", true}},
 		// L3's second info of the dm-clone is the one that checks its
 		// remove.
@@ -2730,7 +2888,7 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 			func(srv *CnAgentServer, node *fakeNode) {
 				node.killCmdNth["dmsetup info --columns --noheadings -o attr "+
 					cloneName(srv, testClone)] = 2
-			}, false, true,
+			}, false, false, true,
 			nsWant{"raid0", "1", false}, nsWant{"raid0", "1", false}},
 	} {
 		t.Run(route.name, func(t *testing.T) {
@@ -2789,7 +2947,15 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 				t.Fatalf("the route is vacuous: the dm-clone is gone or "+
 					"not hydrating (%v)", dm)
 			}
+			node.Reset()
 			probed := checkRound(t, srv, 3)
+			if route.tableFault {
+				// The fault met the round as it met the converge: the
+				// dm-clone's own table read, then the fresh info after it.
+				assertOrder(t, node, dmTableListLine,
+					"cmd dmsetup table "+clone,
+					"cmd dmsetup info --columns --noheadings -o attr "+clone)
+			}
 			for _, ns := range []struct {
 				nsId  uint64
 				nsIdx int

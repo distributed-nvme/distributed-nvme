@@ -31,8 +31,8 @@ func cmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 // CmdCtx bounds one OS touch by the soft timeout
 // (architecture.md, Common validation; SH15). The unexported
 // cmdCtx stays; this is the same thing for role packages that call the
-// OsClient directly (the cn sysfs walk of leg.go, the thin_dump file read of
-// thinbm.go, the dn disk-metadata block reads and writes of diskmeta.go).
+// OsClient directly (the thin_dump file read of thinbm.go, the dn
+// disk-metadata block reads and writes of diskmeta.go).
 func CmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return cmdCtx(ctx)
 }
@@ -169,13 +169,15 @@ func (c *Cmd) RunProbe(
 	return c.runProbe(ctx, name, args...)
 }
 
-// ListDir lists a directory for a role package; ok is false when it does not
-// exist, and an error means the listing did not answer.
+// ListDir lists a sysfs directory for a role package, in the agent's own
+// process (readDir); ok is false only when the directory does not exist, and
+// an error means the listing did not answer. The nvmet configfs tree is never
+// listed this way (SH18).
 func (c *Cmd) ListDir(
 	ctx context.Context,
 	path string,
 ) ([]string, bool, error) {
-	return c.listDir(ctx, path)
+	return c.readDir(ctx, path)
 }
 
 // ReadAttr reads a virtual-filesystem attribute for a role package under the
@@ -202,7 +204,8 @@ type CmdError struct {
 	Name string
 	Args []string
 	// Output is the tool's trimmed stderr, else its trimmed stdout, else the
-	// run's own error when the tool printed nothing.
+	// run's own error when the tool printed nothing. A whole-node dm listing
+	// gives no stdout here: its stdout is the listing (dmListingAnswer).
 	Output string
 	// ExitCode is the tool's exit status, or -1 when it never reported
 	// (Reported).
@@ -390,11 +393,34 @@ func (b *osBase) ensureAttr(
 	return true, nil
 }
 
-// listDir returns the entries of a directory; ok is false when the directory
-// does not exist. An `ls` that did NOT answer is an error, never "absent":
-// RemoveSubsystem and RemovePortLink walk their children through this, and a
-// killed listing must never read as an empty directory, or they would skip
-// every object silently.
+// readDir lists a directory in the agent's own process (OsClient.ReadDir) on
+// a ctx carrying the soft timeout (SH15). ok is false only when the directory
+// does not exist; every other failure is an error naming the listing —
+// "list <path>: <cause>" — and is never an absence: a listing that failed,
+// read as an empty directory, would let a caller that enumerates the node
+// skip every object in it.
+func (b *osBase) readDir(
+	ctx context.Context,
+	path string,
+) ([]string, bool, error) {
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	names, err := b.oc.ReadDir(cctx, path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("list %s: %w", path, err)
+	}
+	return names, true, nil
+}
+
+// listDir returns the entries of a directory of the nvmet configfs tree by
+// `ls`: that tree alone is listed by a child rather than in the agent's own
+// process (SH18). ok is false when the directory does not exist. An `ls` that
+// did NOT answer is an error, never "absent": RemoveSubsystem and
+// RemovePortLink walk their children through this, and a killed listing must
+// never read as an empty directory, or they would skip every object silently.
 func (b *osBase) listDir(
 	ctx context.Context,
 	path string,
@@ -435,6 +461,9 @@ func (b *osBase) dirMtime(
 	return time.Unix(secs, 0), true, nil
 }
 
+// dirExists says whether a directory of the nvmet configfs tree exists, by
+// listDir's `ls` (SH18), with listDir's split: an `ls` that did not answer
+// is an error.
 func (b *osBase) dirExists(ctx context.Context, path string) (bool, error) {
 	_, ok, err := b.listDir(ctx, path)
 	return ok, err

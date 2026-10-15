@@ -129,16 +129,18 @@ for them:
   dm-clone reads its superblock from sector zero and takes no offset
   argument, so every slot must be presented as a device of its own — the
   same reason `DnMigrMetaDmName` exists on the dn side.
-  `CnCloneMetaDmPrefix` is the `dmsetup ls` filter that enumerates them,
-  and it must come from `NameFmt` because the dm prefix is configurable.
+  `CnCloneMetaDmPrefix` is the prefix filter that enumerates them, over
+  `dmsetup ls`, or over the reading's `dmsetup info` listing in a cntlr's
+  check round or info read (CN5), and it must come from `NameFmt` because
+  the dm prefix is configurable.
 
 [D1] of `architecture.md` leaves the leg wrapper agent-internal; fixing
 its name here makes it observable (`dmsetup ls`, cleanup by prefix)
 without making it part of any cross-component contract — nothing outside
 the cn agent ever addresses these three devices. For the clone-metadata
 wrapper the name is more than convenience: its tables are the allocation
-registry (CN5, CN18), so the prefix-plus-kind filter of `dmsetup ls` must
-be unambiguous.
+registry (CN5, CN18), so the prefix-plus-kind filter of a listing must be
+unambiguous.
 
 The role letter of a dm kind, and why a dnv-prefixed NQN that decodes to
 nothing (`IsDnvNqn`) is never touched, are `architecture.md`, dm-device
@@ -232,9 +234,15 @@ forever; `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 `server.go` holds the `CnAgentServer` type, the lock mapping and the RPC
 entry points other than the check streams of `check.go` and the bitmap
 reads of `bitmapread.go`; `plan.go` the per-cntlr derived names and sizes
-and the ns-dev backing and ANA state machines of CN16; `syncup_cn.go` and
-`syncup_cntlr.go` the two converges; `leg.go` the CN10 side connections
-and wrappers; `healthcheck.go` the CN11 probers and their `LegProbeIO`
+and the ns-dev backing and ANA state machines of CN16; `reading.go` the
+reading of CN28 that a cntlr's check round and info read take, and where
+the helpers both channels share take a dm device's facts and a device's
+number from; `syncup_cn.go` and `syncup_cntlr.go` the two converges;
+`leg.go` the CN10 side connections, the walk a cntlr's converge, check
+round or info read takes and the lookups in it (the walk's code is the
+one both agents share, `dnagent.md` SH20), and the wrappers;
+`healthcheck.go` the CN11
+probers and their `LegProbeIO`
 (direct syscalls, never the `OsClient`); `md.go` the mdadm wrapper, the
 sysfs reads of the arrays and the assembly cases (CN12); `clonemeta.go`
 the base-state wrappers (the tmpfs mount, `truncate` and `rm` of the arena
@@ -242,8 +250,11 @@ file, `losetup` and the loop devices' sysfs holders) and the
 CN18 clone-metadata slot allocator — unit accounting over the single loop
 device, its room check and verdict for a clone whose wrapper is absent or
 does not match, the `blkdiscard` recycle guard, the clone-metadata wrapper
-linears and the `dmsetup ls` plus `dmsetup table` enumeration that is the allocation
-registry; `pool.go` the concats, thin pools and thin volumes; `td.go` the
+linears and the enumeration that is the allocation registry (`dmsetup ls`
+plus `dmsetup table`, or in a cntlr's check round and info read the
+reading's two listings, CN5); `pool.go` the concats, thin pools and thin
+volumes;
+`td.go` the
 raid0, dm-error, ns-dev and flakey tables; `clone.go` CN18 and the clone
 crash recovery; `xfer.go` the transfers; `push_clone_bm.go` the bitmap
 push; `sweep.go` the CN21 sweep — the two scopes' enumeration,
@@ -529,7 +540,7 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   (`dnv-worker.md` HL1; `architecture.md`, Capacity index keys).
 * **loop device**: probe with `losetup` for the loop devices attached to
   `CnTmpFilePath` (the loop path is re-learned from this probe on every
-  converge and every probe pass — it is kernel-assigned state, never
+  converge, check round and info read — it is kernel-assigned state, never
   persisted, and a stale cached path is exactly what CN28's arena check
   must catch); absent ⇒ `losetup` attaches a free loop device to it, only
   while `tmpfs_info` is `OK`, as for the file; otherwise, with none
@@ -541,21 +552,32 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
 * **clone-metadata arena**: nothing to create. The arena is the loop
   device: `CnCloneMetaUnitCnt` units of `CnCloneMetaUnit`, handed out to
   clones by the CN18 slot allocator. There is no on-disk allocation
-  table — enumerating the clone-metadata wrappers (`dmsetup ls` filtered by
-  `CnCloneMetaDmPrefix`, then `dmsetup table` of each) reconstructs the
-  used map, because every wrapper's linear table records its own
-  allocation: the loop device's major:minor and the offset in sectors
-  (the name comes from `dmsetup ls`, the major:minor only from
-  `dmsetup table` — `ls` formatting varies across versions). The `ls`
-  list is a snapshot that is stale the instant it is printed — a
-  `SyncupCntlr` holds only the node read lock, so another cntlr's sweep
-  (CN21), at `SP_LEVEL_DISABLE` or otherwise, can remove a wrapper
-  between the `ls` and its `table` — so a name whose `table` fails is
-  dropped when the wrapper has meanwhile vanished: it claims no units,
-  and failing the CN-wide enumeration would flip unrelated cntlrs'
-  healthy clones to `RES_STATUS_ERROR`, which feeds `err_epoch`. The
-  absence is confirmed with `dmsetup info` first, never assumed: a
-  `table` failure on a wrapper that is still there stays fatal, because
+  table — enumerating the clone-metadata wrappers (the names
+  `CnCloneMetaDmPrefix` filters out of a listing of the node's dm devices,
+  then the table of each) reconstructs the used map, because every
+  wrapper's linear table records its own allocation: the loop device's
+  major:minor and the offset in sectors. The loop device's own
+  major:minor, which every table is compared with, is read from its
+  "/sys/block/<name>/dev" (CN28). The listing is `dmsetup ls` and each
+  table one `dmsetup table` of the wrapper (the name comes from
+  `dmsetup ls`, the major:minor only from `dmsetup table` — `ls`
+  formatting varies across versions), except in a cntlr's check round and
+  info read, which take the names from their reading's `dmsetup info`
+  listing and the tables from its `dmsetup table` listing (CN28). There a
+  wrapper of the cntlr's own clones that a partial `dmsetup info` listing
+  lacks is read on its own (CN28), so the call reads its own wrappers as a
+  converge does, and a table the `dmsetup table` listing lacks is read on
+  its own as well. A listing is a snapshot that is stale the instant it is
+  printed — a `SyncupCntlr`, a check round and an info read hold only the
+  node read lock, so another cntlr's sweep (CN21), at `SP_LEVEL_DISABLE`
+  or otherwise, can remove a
+  wrapper between the listing and the read of its table — so a name whose
+  table read fails is dropped when the wrapper has meanwhile vanished: it
+  claims no units, and failing the CN-wide enumeration would flip
+  unrelated cntlrs' healthy clones to `RES_STATUS_ERROR`, which feeds
+  `err_epoch`. The absence is confirmed with a fresh `dmsetup info` of the
+  wrapper first, never assumed and never taken from the reading: a table
+  read failure on a wrapper that is still there stays fatal, because
   reporting a live wrapper's units as free would let the next allocation
   hole-punch a serving dm-clone's superblock — the one thing CN18's
   discard-before-create order exists to prevent. Reconstructing the used
@@ -835,8 +857,9 @@ unprovisioned is provisioning (CN9): no connection, no `CnLegName`
 wrapper, no prober, and `leg_id_to_leg` reports `RES_STATUS_PROVISIONING`
 (CN28). All sides of a leg share that one NQN, so the kernel merges them
 into one multipath namespace (`architecture.md`, [D1]); the agent finds
-its head device without udev by the **sysfs walk**: the entry under
-"/sys/class/nvme-subsystem" whose "subsysnqn" matches the leg NQN, then
+its head device without udev by the **sysfs walk**, the listing of
+"/sys/class/nvme-subsystem" and each entry's "subsysnqn", and the leg's
+**lookup** in it: the entry whose "subsysnqn" matches the leg NQN, then
 the single namespace entry inside that subsystem directory names the
 device node; the controller entries inside it are the paths, each read
 through its "address" and "state" under "/sys/class/nvme", and ANA state
@@ -848,8 +871,37 @@ state (CN11, CN12, CN18, CN28): that command emits no ANA state unless it
 is given a namespace block device, and with one it answers an
 all-inaccessible namespace with an empty subsystem list, indistinguishable
 from "not connected". On top of the head the **leg wrapper** `CnLegName`,
-a whole-device dm-linear over the leg's meta and data blocks — sizes come
-from the desired state, never from probing the device.
+a whole-device dm-linear over the leg's meta and data blocks that names
+the head by the number in the head's "/sys/block/<name>/dev" (CN28) —
+sizes come from the desired state, never from probing the device.
+
+**Lookups share a walk.** A cntlr's check round and info read take one
+walk, in their reading (CN28), and make all their lookups in it. A
+converge takes one right before its sweep, and its lookups share it,
+except that it walks again after a connect step that ran a connect
+(below), and once more when a clone source's lookup reads no subsystem,
+before it connects the source (CN18, step 1); the sweep's check that a
+removed connection is gone walks once per connection (Known limits). The
+list of connections of a converge's sweep comes from the walk the
+converge takes before it, and that of the verdict of a cntlr's check
+round or info read from the reading's (CN21, CN30). Reason: a walk lists
+the class directory and reads every entry's "subsysnqn", so a walk for
+each lookup would cost a cntlr with many legs reads that grow with the
+square of its leg count. A lookup reads the entry's "subsysnqn" again
+just before it reads the entry's directory and controllers. An entry gone
+since the walk, or one whose "subsysnqn" names another NQN at that read,
+reads as no subsystem, as an absent "subsysnqn" does (below), and so even
+beside another entry whose read failed: the walk found this NQN in this
+entry, and the host keeps one subsystem per NQN (`architecture.md`,
+[D1]). Reason: the walk
+can be as old as the pass, and meanwhile the kernel can drop an entry and
+give its number to a subsystem that another cntlr, or a dn agent on the
+same machine, connects; without the check a converge could build a leg's
+wrapper over another pool's namespace and write the group's data there.
+The check costs one read per lookup. A connect step that ran a connect,
+whether or not the connect worked, makes the converge walk again before
+its next lookup, since the subsystem the connect made may hold the number
+of an entry freed since the walk.
 
 **The connect step waits, briefly and boundedly, for what it has just
 asked for.** A primary's connect to a new side can reach the disk node
@@ -875,10 +927,13 @@ it too, or does not answer at all; every failed connect is a candidate
 until the budget is gone. A connect to a disk node whose machine is down
 runs long (the kernel's SYN retries, or `CmdSoftTimeout`), spends the
 whole budget at once and so is never retried in the pass. (3) After a
-connect made in this pass, the subsystem is re-read every `CnNsScanPause`
-until its multipath head is there, as long as the budget covers the step:
-`nvme connect` returns once the controller is live and only queues the
-namespace scan that adds the head. A subsystem that was already connected
+connect made in this pass, the subsystem is looked up again every
+`CnNsScanPause` until its multipath head is there, as long as the budget
+covers the step: `nvme connect` returns once the controller is live and
+only queues the namespace scan that adds the head. The first of those
+lookups walks again (above); each later one reads only the entry found,
+with the check above, but walks again after a lookup that found no entry
+or whose entry failed the check. A subsystem that was already connected
 and has no head — a leg whose only path is ANA inaccessible never gets one
 — is judged on its one read. A pause starts only while it fits in what is
 left, and a failed connect is charged after it has run, so a retried
@@ -933,11 +988,12 @@ as long as its device exists, and its subsystem keeps listing it after
 the device was deleted, until the last reference to it drops. Such a
 controller is gone, no side's path: it is not unknown and never taken
 for a dead path, and a side it alone served reads unconnected and is
-connected again. The walk that finds the subsystem is read the same way.
-A listing of "/sys/class/nvme-subsystem" that did not answer, or a
-"subsysnqn" read that failed — any error but ENOENT — on an entry while
-no other entry names the leg's NQN, leaves the pass not knowing whether
-the leg is connected, and a listing of the matching entry's own directory
+connected again. The walk and the lookup are read the same way. A
+listing of "/sys/class/nvme-subsystem" that did not answer, or a
+walk's "subsysnqn" read that failed — any error but ENOENT — on an entry
+while no other entry names the leg's NQN, leaves the pass not knowing
+whether the leg is connected, and so does the lookup's own "subsysnqn"
+read failing that way; a listing of the matching entry's own directory
 that fails, whatever the failure, leaves its controllers and namespace
 unread: the lookup fails naming the read, and the leg's converge fails
 with it for the pass — `RES_STATUS_ERROR` naming the read, which
@@ -1085,9 +1141,12 @@ CN12. Groups (`md.go`; primary only — a standby has none,
      group's name holding none of its `leg_list` wrappers — both legs
      switched out, parked or released, while this cntlr was not
      converging — reads as absent and reaches case 1 with fresh legs,
-     where a create would put a second array under the name the pool's
-     concat resolves ("an array runs under … holding none of the group's
-     legs"). The guard errs only towards refusing, and a false refusal
+     where a create would put a second array under the name mdadm gives
+     the group's array ("an array runs under … holding none of the
+     group's legs"). The guard keeps that second array from being
+     created; the pool's concat finds the group's array by its legs as
+     well (below), never by that name. The guard errs only towards
+     refusing, and a false refusal
      needs a stale node of this very name — which, short of the case the
      guard exists for, a group whose legs carry no superblock has never
      had an array to leave. `--assume-clean` is always correct here,
@@ -1153,29 +1212,33 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   Check round past the worker's round timeout, and the primary then reads
   unreachable (Known limits).
 
-  **The array is read from sysfs.** `Md.Walk` lists "/sys/block" for the
-  array nodes and each array's "md" directory, reading every member's
-  "block/dm/name", as the sweep's `ListArrays` does — once per converge
-  or Check pass, shared by all of the pass's groups: a listing is an `ls`
-  per array, and a walk per group would list every array once per group.
+  **The array is read from sysfs.** The **md walk** lists "/sys/block"
+  for the array nodes and each array's "md" directory, reading every
+  member's "block/dm/name", as the sweep's `ListArrays` does — once per
+  converge, check round or info read, shared by all of its groups and by
+  the pool concats (below): a walk per group would list every array once
+  per group. Its listings are made in the agent's own process
+  (`osclient.md`, ReadDir). A converge takes it with `Md.Walk` at the
+  first group that needs it; a check round and an info read take it in
+  their reading (CN28), with `Md.Scan`.
   An array node is "md" followed by digits, or "md_" followed by a name:
   the node mdadm puts the "/dev/md" link on when mdadm.conf says to
   create names, which `architecture.md`, md names, sizes `CnMdDevName`
   for. The walk reads every array on the node, other sps' included, so
-  an array whose "md" listing or a member's dm name did not answer — the
-  `ls` killed at the soft timeout, a read held past it on the agent's
-  `OsClient` semaphore, which every cntlr it serves shares, ctx
-  cancelled, or a read failing with an errno other than ENOENT — is
+  an array whose "md" listing or a member's dm name did not answer — a
+  listing or a read held past the soft timeout on the agent's `OsClient`
+  semaphore, which every cntlr it serves shares, ctx cancelled, or a
+  listing or a read failing with an errno other than ENOENT — is
   recorded as unanswered instead of failing the walk: failing this pass
   for another sp's array would turn this sp's md rows `ERROR` — which
   count toward cntlr health — for a fault that is not this sp's. An array
   another cntlr is stopping never reads as unanswered: md removes a
   member's "block" link as it unbinds it, so that member's dm name reads
   ENOENT and the member is recorded with no dm name, which no group's
-  names match; an "md" directory that went makes its `ls` answer "no"
-  and drops the array. The sweep's `ListArrays` reads such an array as
-  foreign while a member is unbound, but not for the whole stop: from the
-  moment md marks the array deleted until its "md" directory goes,
+  names match; an "md" directory that went makes its listing answer
+  absent and drops the array. The sweep's `ListArrays` reads such an
+  array as foreign while a member is unbound, but not for the whole stop:
+  from the moment md marks the array deleted until its "md" directory goes,
   "array_state" reads EBUSY, and `ListArrays`' strict rule fails that
   pass's md enumeration — a Leftover the worker re-drives, from a sweep
   that removed nothing (CN21). By default md marks it when the stopped
@@ -1183,10 +1246,15 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   its "md" attributes, whichever is last — after its member directories
   are gone; with the md module's legacy asynchronous gendisk deletion
   switched off it marks it in the stop itself, while the unbound member
-  directories are still there. The walk reads no "array_state" and is
-  unaffected. Only a "/sys/block" listing that did not answer fails the
-  walk. After an assembly `Md.Refresh` lists "/sys/block" again, drops
-  the nodes that went (recorded or unanswered), and re-walks only a node
+  directories are still there. A converge's md walk reads no
+  "array_state" and is unaffected. The md walk of a check round or an
+  info read reads every array's "array_state" as well, for its verdict,
+  and keeps it apart: the group rows read the walk under `Md.Walk`'s rule
+  and never see it, and only the verdict, under `ListArrays`' rule, fails
+  on it, as the sweep's enumeration does (CN30). Only a "/sys/block"
+  listing that did not answer fails the walk. After an assembly
+  `Md.Refresh` lists "/sys/block" again, drops the nodes that went
+  (recorded or unanswered), and re-walks only a node
   that is new, was recorded with no member or as unanswered, or has a
   recorded member directory that is gone, carries another dm name or did
   not answer the check — another cntlr's converge may have stopped an
@@ -1206,10 +1274,10 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   stays. No such array is "absent" and runs the assembly above — unless an
   array of the walk is unanswered, which may be the group's own: then no
   answering array proves absence, the group's error names the unanswered
-  array, and nothing is created or assembled. Only an `ls` of an array's
-  "md" directory that did not report (killed, never started, refused by
-  the semaphore), or a member dm-name read failing with something other
-  than ENOENT, makes an array unanswered; a foreign array's non-dm member
+  array, and nothing is created or assembled. Only a listing of an
+  array's "md" directory that failed with anything but ENOENT, or a
+  member dm-name read failing with something other than ENOENT, makes an
+  array unanswered; a foreign array's non-dm member
   reads ENOENT and is recorded, so a foreign array cannot hold an
   assembly off for good. Nothing re-drives the refused assembly either —
   unless the same pass registers the CN10 retry for something else (any
@@ -1218,7 +1286,7 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   converge and tries the group again: the group's error is a row, not a
   reply code (CN29), the error itself registers no CN10 background retry,
   and the Check verdict reports a leftover (a reply code the worker
-  re-drives) only while its own enumeration, `ListArrays`, still fails —
+  re-drives) only while its md enumeration still fails (CN30) —
   so the group stays unassembled, its row `MISSING` on the Check rounds
   after the array answers, until the cntlr's next converge for some
   other reason (Known limits). Beside an answering match an unanswered
@@ -1239,11 +1307,27 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   array of the walk is unanswered, which makes it the same error as no
   match: absent always means every array of the walk answered.
 
+  **The group's device number** comes from the same match: the pool's
+  concat (CN13) maps a `RedundMdRaid1` group by the number in
+  "/sys/block/<node>/dev" of the array the match finds in the md walk, a
+  degraded array included, read once per group in a converge, a check
+  round or an info read, apart from the array's other attributes, so a
+  failed read of one of those fails the group's row alone. Reason: the
+  group's row and its concat rows then read one array, so a check round
+  and a converge build and check the concat over the same array, and
+  nothing waits for the link udev makes under "/dev/md". A group the
+  match gives no array — none holds its legs, two do, or the md walk
+  could not read the group's own array (no answering array holds its
+  legs while an array of the walk is unanswered, above) or list
+  "/sys/block" — gives its concat no number (CN28 states its rows, CN13
+  what a converge does).
+
   **Member reconciliation** covers `SwitchSpareLeg` with no extra
   mechanism: a member the array holds — its "block/dm/name", compared
-  with the names of the `leg_list` wrappers; no `lsblk`, because an
-  `lsblk` of a wanted wrapper that did not answer would otherwise read as
-  "not wanted" and fail and remove an in-sync member — that is no longer
+  with the names of the `leg_list` wrappers, never by device number,
+  because a number read of a wanted wrapper that did not answer would
+  otherwise read as "not wanted" and fail and remove an in-sync
+  member — that is no longer
   in `leg_list` is `--fail`ed and `--remove`d by the dm path sysfs named;
   an available `leg_list` member the array lacks is `--add --failfast`ed
   (md then resyncs — a bitmap catch-up for a briefly absent leg, a full
@@ -1329,8 +1413,8 @@ fail timeout runs from the reconnect that follows — far past the soft
 timeout. A Check round's probe killed that way would read the group's
 row `ERROR` for a member fault the leg row already reports, and that row
 counts toward cntlr health: it would fail the primary over. What the
-sweeps, the member reconciliation and the md rows need about an array
-they read from sysfs, which touches no member device and therefore
+sweeps, the member reconciliation, the md rows and the pool concats need
+about an array they read from sysfs, which touches no member device and therefore
 cannot block on a dead leg (of the md probes, only the assembly's
 `--examine` above still reads a member, and only an available leg's):
 `ListArrays` walks "/sys/block" for the array nodes (numbered or named,
@@ -1338,14 +1422,17 @@ above), reads each array's "array_state", and names each member through
 its "block/dm/name" under the array's "md" directory — which is what
 attributes an array to an sp, and a member with no such attribute is not
 a dm device at all. `Md.Walk` makes the same listings and dm-name reads
-(not "array_state"), once per pass for the md groups (above), under a
+(not "array_state"), once per converge for the md groups (above), under a
 different rule for an array that did not answer: `ListArrays` keeps the
 strict one — one array whose "array_state", "md" listing or member dm
 name did not answer fails the whole md enumeration, because a removal
 decision needs the whole node; that is the sweep's "enumeration failed:
 md arrays …" and a `ReplyCodeLeftover`, never a row, and the worker
 counts a Leftover reply as accepted, so it does not reach cntlr health —
-while `Md.Walk` records such an array as unanswered. `Md.Gone` verifies a
+while `Md.Walk` records such an array as unanswered. The md walk of a
+check round or an info read, `Md.Scan`, makes `ListArrays`' reads once
+and serves both rules: its group rows and concat rows read it under
+`Md.Walk`'s, its verdict under `ListArrays`'. `Md.Gone` verifies a
 stop from the same "array_state": only an absent directory or clear
 counts, never inactive, which is an assembled-but-not-running array that
 pins its members just as hard. A read that fails is an error, never gone
@@ -1369,6 +1456,17 @@ fresh pool needs its metadata to read zero, and it does: a side of a meta
 group is zeroed over its whole leg span before it is ever exported, with
 an actual write of zeros rather than a discard whose read-back is
 hardware-optional (`architecture.md`, Side provisioning protocol).
+
+Each concat target names its group's device by number: a `RedundNone`
+group's `CnGrpName` by its `dmsetup info` number, an md group by the
+number CN12 reads from the array the group's match finds. A group the
+match gives no array — none holds its legs, two do, or the md walk could
+not read the group's own array or list "/sys/block" — fails its concat
+for the pass: the live concat is left as it is, the failure is reported
+the way any unbuildable concat is (below; CN28), and the converge skips
+that slice's pool step, and with it the slice's snapshot messages, until
+its next pass, so a snapshot whose messages that pass sends is torn
+(CN14, "A torn snapshot is reported").
 
 The pool table carries no feature arguments, so dm-thin's defaults
 apply. dm-thin then writes every block the pool provisions whole before a
@@ -1836,11 +1934,17 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    subsystem, one path per source cntlr; the source's own ANA picks the
    serving path), with the host NQN `CnHostNqn` and the `dnagent.md` SH20 flags;
    failures go to the CN10 retry registry. The source namespace device
-   is found by the sysfs walk like CN10, by `src_nqn` and the nsid
-   `src_ns_idx`. The connect step is CN10's, drawing on the same pass
-   budget the legs drew on: a failed connect is retried within the pass
-   while the budget covers the pause, and after a connect this pass made
-   the subsystem is re-read until the source namespace is there. With
+   is found by a lookup in the pass's sysfs walk like CN10's, by
+   `src_nqn` and the nsid `src_ns_idx`. When the walk holds no entry for
+   the source, or its entry fails CN10's check, the converge walks once
+   more before it connects the source: every cntlr of the node may
+   connect a clone source, so another may have connected it since the
+   walk, and a source that walk finds connected is adopted. The connect
+   step is CN10's, drawing on the same pass budget the legs drew on: a
+   failed connect is retried within the pass while the budget covers the
+   pause, and after a connect this pass made the source is looked up
+   again, as CN10's head wait looks a leg up, until the source namespace
+   is there. With
    the budget spent — the legs may have spent it — a source that did not
    connect, or whose namespace did not appear, fails step 1 ("no
    namespace … on …" for the latter). CN10's unknown-controller rule is
@@ -1849,14 +1953,11 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    is connected again — a duplicate the host refuses while that
    controller lives, which fails step 1 once the budget is spent — and
    nothing is disconnected, since step 1 retires no path. CN10's rule
-   for a walk that did not answer is applied: a listing of
-   "/sys/class/nvme-subsystem" or a "subsysnqn" read that did not
-   answer, with no other entry naming `src_nqn`, or a failed listing of
-   the matching entry's own directory, fails step 1 naming the read, and
-   nothing is connected on it; `clone_id_to_dm_clone` then reads, while no
-   dm-clone of the clone is up, `MISSING` "source unknown: …" naming the
-   read, where step 1's other failures read "source not connected" (the
-   shared rule below). A source whose disconnect a
+   for a walk or a lookup that did not answer is applied: it fails step 1
+   naming the read, and nothing is connected on it; `clone_id_to_dm_clone`
+   then reads, while no dm-clone of the clone is up, `MISSING` "source
+   unknown: …" naming the read, where step 1's other failures read "source
+   not connected" (the shared rule below). A source whose disconnect a
    sweep has set going is neither adopted nor connected while that
    disconnect runs: step 1 fails naming it, and the retry reads the
    source afresh once the disconnect has returned (CN10's disconnect
@@ -2054,24 +2155,24 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 **One rule decides the clone's rows.** For a clone whose destination td
 resolves and is not deferred, the converge, wherever its pass ends, and
 the CN28 probe decide the status of each of its three rows by one rule,
-from what each reads of the node: the walk of the source, step 2's
-verdict for a source step 1 reads as connected (above), and the
+from what each reads of the node: the source's lookup in the walk, step
+2's verdict for a source step 1 reads as connected (above), and the
 dm-clone's presence and status line. The converge reads after its own
 steps and the round only reads, so for the same state the two report the
 same status, and a row's epoch moves only when the state does:
 
 * `clone_id_to_target`: `RES_STATUS_ERROR` while a sweep's disconnect of
-  the source is in flight or the walk did not answer, both this node's
-  own reading; `RES_STATUS_MISSING` with no subsystem entry, and for a
-  fault of the source, which is an endpoint with no live controller, its
-  details the path states, or no source namespace; and `RES_STATUS_OK`
-  with the path states otherwise;
+  the source is in flight or the walk or the lookup did not answer, both
+  on this node's own side, not the source's; `RES_STATUS_MISSING` with no
+  subsystem entry, and for a fault of the source, which is an endpoint
+  with no live controller, its details the path states, or no source
+  namespace; and `RES_STATUS_OK` with the path states otherwise;
 * `clone_id_to_dm_clone`, where step 2's verdict does not decide it:
   `RES_STATUS_ERROR` when the dm-clone's read did not answer,
   `RES_STATUS_MISSING` when the dm-clone is absent, its details saying why
   while step 1 does not read the source as connected ("source not
-  connected", or "source unknown: …" when the walk did not answer),
-  `RES_STATUS_OK` with the raw status line while that line shows
+  connected", or "source unknown: …" when the walk or the lookup did not
+  answer), `RES_STATUS_OK` with the raw status line while that line shows
   hydration on, and `RES_STATUS_ERROR` "hydration not enabled", followed
   by the line, when it does not;
 * `clone_id_to_meta`, where step 2's verdict does not decide it: the
@@ -2083,7 +2184,7 @@ wrapper allocation or replacement, step 3's converge of the dm-clone,
 step 4's destination bitmaps or the enable leads those of the dm-clone's
 and the wrapper's rows, each when the row is not `OK`. The arena listing
 and the read of the dm-clone that the rows are written from are
-readings, not such steps, and the rows take them by the rule above:
+reads, not such steps, and the rows take them by the rule above:
 when one does not answer, the listing's error is the wrapper row's own
 details, and the read's error the dm-clone row's where step 2's verdict
 does not decide that row; neither leads another row.
@@ -2094,7 +2195,7 @@ follow the rows: CN16 rule 5 reads the dm-clone's status itself. A
 dm-clone up with hydration off therefore reads `RES_STATUS_ERROR` on every
 check round as on every converge, and a fault of the source reads
 `RES_STATUS_MISSING` on both, while a dm-clone with hydration on serves on
-(Known limits). Reason: two readings of one device cannot both be right,
+(Known limits). Reason: two reports of one device cannot both be right,
 and rows that differ between the channels flip their status, and the
 health epoch with it, every round.
 
@@ -2208,7 +2309,8 @@ still in that list.
   reports its ns-dev row `ERROR` in the probe's words ("table is not the
   desired namespace backing"), and the hold registers the CN10 retry,
   because a hold that an unanswered `dmsetup ls` alone caused leaves
-  nothing for the Check verdict to name once the listing answers again.
+  nothing for the Check verdict, which lists the node from the round's
+  own reading (CN30), to name once that reading answers.
   The first pass whose L3 removes the dm-clone takes the order above — the
   park of one still over the dm-clone, L3, then the reload. Reason: a
   lingering dm-clone writes into one td, and holding every namespace of
@@ -2380,13 +2482,19 @@ arena step is named separately instead of reading as one more thing the
 pointer list protects.
 
 **Enumeration.** `dmsetup ls` (name to major:minor, which is also how a
-live table's device argument is resolved back to a name), the sysfs md
+live table's device argument is resolved back to a name); the sysfs md
 enumeration of CN12 (`ListArrays`, strict: one array that did not answer
-fails it — never `Md.Walk`'s unanswered rule), the sysfs subsystem walk
-for nvme host connections, and the listing of the nvmet subsystems tree
-— linked to the port or not, a partially removed subsystem is unlinked
-but present. An enumerator that did not answer leaves its part of the
-snapshot empty and is reported as "enumeration failed", and an
+fails it — never `Md.Walk`'s unanswered rule); the sysfs walk of CN10
+for nvme host connections — at cntlr level the converge's own, taken
+right before its sweep and shared with its build, at node level one of
+its own (`ListAllSubsys`) — whose list fails on any entry whose
+"subsysnqn" read did not answer, as `ListAllSubsys` does (`dnagent.md`
+SH20); and the listing of the nvmet subsystems tree — linked to the port
+or not, a partially removed subsystem is unlinked but present. A cntlr's
+verdict in a check round or an info read takes its dm, md and nvme
+listings from the call's reading instead (CN30). An enumerator that did
+not answer leaves its part of the snapshot empty and is reported as
+"enumeration failed", and an
 enumeration that did not answer licenses no removal (`architecture.md`,
 Teardown by sweep): with any one of the four unanswered the sweep
 removes nothing from the node at either scope — no chain runs, neither do
@@ -2420,7 +2528,7 @@ end of the pass: it decides only what to attempt, and every removal
 re-probes its own object.
 
 **Attribution** follows `architecture.md`, Teardown by sweep — by name,
-and by what a nameless object is built out of — with these cn readings.
+and by what a nameless object is built out of — with these cn rules.
 A dm device is ours by its parsed name (`architecture.md`, dm device
 names): the cn role letter (`DmRoleCn`), our cluster, our cn; its sp is
 the first id. An md array carries no sp in its name and is ours only when
@@ -2681,9 +2789,15 @@ CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
 holds no request for, as when none was ever accepted, or when the startup
 reload could not load or skipped its file (CN2) and none has been
 accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision`. For a
-known object the `agent_reply` is the read-only verdict of CN30. The probe
-runs first and the verdict second, as in a round (CN24), so a call
-answers what a round in the same state would. Never
+known object the `agent_reply` is the read-only verdict of CN30. A
+`GetCntlrInfo` takes the node's reading first (CN28), then builds the
+rows and then the verdict from that one reading, as a `CheckCntlr` round
+does (CN24), so a call answers what a round in the same state would. The
+reading is the call's own, taken under its locks and shared with
+nothing, so every call reads the node afresh. A cntlr whose stored conf
+the gate refuses (CN8) takes no reading: its info is empty and it has no
+verdict (CN30). A `GetCnInfo` takes no reading: its probe runs first and
+its verdict second, as in a `CheckCn` round. Never
 creates, changes or removes an object of the node, though a cntlr's call
 makes the kernel commit the metadata of each thin pool and dm-clone whose
 status it reads (`dnagent.md` SH17).
@@ -2697,7 +2811,10 @@ verdict (CN30) — which is what drives the worker's re-sync while a
 leftover is still there, and, on `CheckCn`, while a piece of the base
 state that a `SyncupCn` would build reads absent, an ANA group that it
 would rewrite reads in the wrong state, or an arena file that it would
-replace reads of another size (CN30). Like every `dnagent.md` SH24 round it
+replace reads of another size (CN30). A `CheckCntlr` round takes the
+node's reading (CN28) under those locks and builds its rows and its
+verdict from it, as `GetCntlrInfo` does (CN23); a `CheckCn` round takes
+none. Like every `dnagent.md` SH24 round it
 runs under its request's `trace_id` (the stream's id when that is empty).
 
 ### `GetThinDeviceBm` / `GetLegBm`
@@ -2811,16 +2928,85 @@ return silently wrong data.
 
 CN28. Probe map (`dnagent.md` SH17 conventions plus the cn probes fixed here:
 `findmnt` for mounts, `stat` for plain files,
-`losetup` for loops, `dmsetup ls` plus `dmsetup table` for
-the clone-metadata arena and every other dm device, CN12's sysfs read of
-the array's "md" directory for arrays — never mdadm --detail — and the
-sysfs walk of CN10 — never nvme list-subsys — for every outbound nvme
-connection). Every row reports against the effective desired state
-(CN9): a resource the provisioning gate excluded is
-`RES_STATUS_PROVISIONING` with the details "provisioning", never
-`RES_STATUS_ERROR`, and it never feeds `err_epoch`. So are the two rows of
-a clone that waits for room in the arena, with their own details (CN18
-step 2). The rows, each with its `res_name` and what its probe checks:
+`losetup` for loops, `ls` for the nvmet configfs tree (`dnagent.md`
+SH18), `dmsetup info` and `dmsetup table` for dm
+devices — over the whole node at once in the reading below, of one
+device elsewhere — with `dmsetup status` for thin pools and dm-clones
+and, outside the reading, `dmsetup ls` for the clone-metadata arena and
+the sweep (CN5, CN21), CN12's sysfs read of the array's "md" directory
+for arrays — never mdadm --detail — the sysfs walk of CN10 — never
+nvme list-subsys — for every outbound nvme connection, and
+"/sys/block" for the device numbers below). Every row reports against
+the effective desired state (CN9): a resource the provisioning gate
+excluded is `RES_STATUS_PROVISIONING` with the details "provisioning",
+never `RES_STATUS_ERROR`, and it never feeds `err_epoch`. So are the two
+rows of a clone that waits for room in the arena, with their own details
+(CN18 step 2).
+
+**The reading.** A `CheckCntlr` round and a `GetCntlrInfo` first take one
+reading of the node under their CN1 locks (CN23, CN24): one
+`dmsetup info` listing of every dm device of the node, with each one's
+number and attr flags (`Dm.ListInfo`); one `dmsetup table` listing of
+every dm device's live table (`Dm.ListTables`); the sysfs walk of CN10;
+and the md walk of CN12. Their rows and their verdict (CN30) take from
+it which dm devices, nvme subsystems and md arrays the node holds, and
+each dm device's attr flags, number and table, the clone-metadata
+wrappers' included (CN5): a row reads its dm device there, and finds its
+leg's or clone source's entry in the walk and its group's array in the
+md walk; its other reads stay outside the reading (below). Reason: most
+of a round's time goes to starting processes, and one listing of the
+whole node costs about what one device's read does, so such a call
+starts a few processes whatever the slice count, besides its status
+reads and the configfs `ls` of its exports (`dnagent.md` SH18). A
+converge reads each of its own dm devices on its own, because it
+changes them during the pass, and takes its sysfs walk and its md walk
+itself (CN10, CN12).
+
+A partial listing still answers (`osclient.md`, RunCommand): `dmsetup`
+gives one when another cntlr, or a dn agent on the same machine, removes a
+device during the listing, and read as unanswered it would turn every dm
+row of the call `ERROR`, on a standby too, which sets its health epoch and
+takes it out of the cdc's answer to hosts (`dnv-worker.md` HL2;
+`architecture.md`, [D18]). A device this cntlr
+wants that a partial `dmsetup info` listing lacks is read on its own
+once, at its first lookup, and that answer — the device, its absence or
+the read's error — serves the rest of the call; a device a complete
+listing lacks is absent, with no read; and a table the `dmsetup table`
+listing lacks is read on its own once in the same way. A listing that
+did not answer makes every row whose first read goes to it
+`RES_STATUS_ERROR` with the listing's error, and the verdict names it
+(CN30).
+
+Outside the reading stay: the `dmsetup status` of each thin pool, and of
+each dm-clone once for its rows and once more for each namespace it backs
+(CN16 rule 5), because a status read makes the kernel commit that
+device's metadata (`dnagent.md` SH17), and one over the whole node would
+do so for every pool on it; the configfs reads of the exports; the
+`losetup` of the clone-metadata arena (CN5); each walk entry a lookup
+uses — its "subsysnqn" read again, its namespace and its controllers
+(CN10); the attributes of the array the md walk matches to a group
+(CN12); the numbers "/sys/block" holds (below); and the `dmsetup info`
+that confirms a device gone after its own status or table read failed,
+which is always the device's own fresh read, never the reading's (CN5;
+CN16 rule 5; CN18 step 2).
+
+**Device numbers.** A dm table names each device it maps by its number.
+The number the agent writes into a table, or checks a live table
+against, is read for an md array, an nvme multipath head or a loop
+device from the device's own "/sys/block/<name>/dev" — an md array's
+from the array CN12's match finds — and for a dm device from
+`dmsetup info`: from the reading in a cntlr's check round and info read,
+from one `dmsetup info` of the device elsewhere. The sweep turns a live
+table's numbers back into dm names through the dm listing it enumerates
+with: `dmsetup ls` (CN21), or in a cntlr's verdict the reading's
+`dmsetup info` listing (CN30). No number comes from `lsblk`: the cn
+agent's one `lsblk` is CN12's check that no array already runs under a
+group's name, which takes no number from its answer. Reason: a file read
+in the agent's own process costs far less than a process, and a check
+round and a converge then read each number from one source, so the two
+channels check and build over the same device.
+
+The rows, each with its `res_name` and what its probe checks:
 
 * `CnInfo.port_info`, named by the agent's port id as a decimal string
   (so on a node running several agents the rows differ): the configfs
@@ -2875,10 +3061,27 @@ step 2). The rows, each with its `res_name` and what its probe checks:
   it would switch auto-grow off.
 * `slice_id_to_meta` and `slice_id_to_data`, named by the `CnPoolMetaName`
   and the `CnPoolDataName`: the multi-target `dmsetup table` matches the
-  group concat; the comparison is against the effective concat (the
-  list's leading run of non-deferred groups, CN9, CN13), so a
-  not-yet-grown concat is `OK`, not a mismatch. A deferred slice's rows
-  are `RES_STATUS_PROVISIONING` — deferred meaning either of its two
+  group concat, each target naming its group's device by number (CN13);
+  the comparison is against the effective concat (the list's leading run
+  of non-deferred groups, CN9, CN13), so a not-yet-grown concat is `OK`,
+  not a mismatch. A group whose number cannot be read makes the row of
+  its concat `RES_STATUS_ERROR` naming the group (CN12): when no array
+  holds the group's legs, when two arrays hold them, and when the md walk
+  could not read the group's own array or could not list "/sys/block",
+  the last of which fails both concat rows of every slice of md groups.
+  Reason: the concat rows take the array the group's row finds, so a
+  concat is never built or checked over an array the md walk did not
+  match to the group. A converge reads the numbers first, to build the
+  concat's table, so its row reads that error whether the concat is
+  there or not; a check round and an info read look the concat's own
+  device up first, and an absent concat is `RES_STATUS_MISSING` there
+  before any number is read. When the md walk could not read the group's
+  own array or list "/sys/block", the group's own row reads
+  `RES_STATUS_ERROR` too (`grp_id_to_md_raid` below), so a check round's
+  health does not change by the concat rows; a converge skips the slice's
+  pool step for the pass, so a snapshot whose messages that pass sends is
+  torn (CN13; CN14, "A torn snapshot is reported"). A deferred slice's
+  rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two
   group lists is non-empty and has no effective group left (CN9), not
   that every group is deferred.
 * `grp_id_to_md_raid`, named by the `CnMdDevName` node or the
@@ -2918,8 +3121,8 @@ step 2). The rows, each with its `res_name` and what its probe checks:
   `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed.
   A leg whose subsystem's sweep disconnect is still in flight (CN10's
   disconnect registry) reports `RES_STATUS_ERROR` with the converge's own
-  details and is not probed. On a standby, a walk that did not answer
-  (CN10) reads `RES_STATUS_ERROR` naming the read.
+  details and is not probed. On a standby, a walk or a lookup that did
+  not answer (CN10) reads `RES_STATUS_ERROR` naming the read.
 * `xfer_id_to_dm_linear`, `xfer_id_to_subsystem` and
   `xfer_id_to_namespace`, named by the `CnXferFinalName`, the `XferNqn`
   and the `XferNqn` with the origin namespace index: `dmsetup table` and
@@ -2933,10 +3136,13 @@ step 2). The rows, each with its `res_name` and what its probe checks:
   `RES_STATUS_MISSING` with no subsystem entry or for a fault of the
   source. While a sweep's disconnect of `src_nqn` is in flight (CN10's
   disconnect registry) it is `RES_STATUS_ERROR` with the converge's own
-  details, whatever the walk shows; otherwise a walk that did not answer
-  (CN10) makes it `RES_STATUS_ERROR` naming the read, never `MISSING`.
+  details, whatever the walk shows; otherwise a walk or a lookup that did
+  not answer (CN10) makes it `RES_STATUS_ERROR` naming the read, never
+  `MISSING`.
 * `clone_id_to_dm_clone`, named by the `CnCloneFinalName`:
-  `dmsetup info`, then `dmsetup status` of a dm-clone that is there; its
+  `dmsetup info` — the reading's in a check round or an info read — then
+  `dmsetup status` of a dm-clone that is there, and after a status read
+  that failed the fresh `dmsetup info` of CN16 rule 5 and CN18 step 2; its
   status is CN18's shared rule's, and the details carry the raw status
   line whenever it was read, whatever the row's status
   (`architecture.md`, Live-state reporting — hydration progress;
@@ -3017,10 +3223,27 @@ reads `ERROR`, and the verdict names the file.
 
 CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply
 `ReplyCodeLeftover` iff their scope's verdict is not clean. The verdict
-is the CN21 sweep with the removals left out: the same enumeration, the
-same attribution, the same comparison against the same wanted set, and
-nothing removed or built (CN23). Details and log record
-are CN20's.
+is the CN21 sweep with the removals left out: the same attribution, the
+same comparison against the same wanted set, and nothing removed or built
+(CN23). Details and log record are CN20's. A `CheckCn` round and a
+`GetCnInfo` list the node with the node-level sweep's enumeration (CN21).
+A cntlr's verdict, in a `CheckCntlr` round or a `GetCntlrInfo`, takes its
+dm, md and nvme listings from the call's reading (CN28): the dm devices
+and their numbers from its `dmsetup info` listing, a `dmsetup table`
+listing that did not answer failing the verdict as well; the arrays from
+its md walk, under `ListArrays`' strict rule (CN12); and the connections
+from its sysfs walk, failing on any entry whose "subsysnqn" read did not
+answer. It lists the nvmet tree in configfs itself, and reads the
+namespace node and the number of each clone-source connection it checks
+against a live dm-clone (CN21). A partial dm listing counts as an answer
+here, where the sweep's `dmsetup ls` keeps its strict rule (`osclient.md`,
+RunCommand). Reason: only this cntlr's own converges, the node's
+`SyncupCn` and the startup reconcile create or remove this cntlr's
+devices, and none of them runs during the call, which holds this
+cntlr's object lock and the node read lock (CN1); so a device a partial
+listing lacks is another cntlr's or a co-hosted dn agent's, which this
+verdict never names. A listing partial for another cause can hide a
+leftover of this cntlr from one call.
 
 The node-level verdict of a `CheckCn` round and of a `GetCnInfo` also
 names what of the CN's base state the call's own probe read wrong in a
@@ -3141,7 +3364,7 @@ report no `Syncup*` could ever clear.
   answering array while another array of the walk did not answer is
   neither created nor assembled that pass (CN12), and the error is a
   row, which nothing re-drives by itself; the Check verdict stays
-  non-zero only while its own enumeration, `ListArrays`, still fails.
+  non-zero only while its md enumeration still fails (CN30).
   Once the array answers, the group waits, its row `MISSING`, for the
   cntlr's next converge for some other reason — and the groups this can
   hit include those a new primary's first converge must assemble, whose
@@ -3381,6 +3604,20 @@ report no `Syncup*` could ever clear.
   underneath. Reads of regions not yet hydrated then fail until a later
   converge of that cntlr connects the source afresh and reloads the
   table. The window runs from that read to the registration.
+* The sweep's check that a removed connection is gone walks
+  "/sys/class/nvme-subsystem" once per connection: the probe behind CN10's
+  disconnect registry — for L10's legs, L5's clone sources and the
+  node-level pass's unowned sources — lists it and reads entries'
+  "subsysnqn" for each connection it checks (`ListSubsys`). So a pass that
+  removes many connections — a pool's teardown, a level that takes the
+  legs away (CN19), the node-level sweep under the node write lock — makes
+  a number of reads that grows with the square of their count, and so
+  does a converge that connects many legs, such as a standby's first
+  build, which walks again after each connect step (CN10). Reason: the
+  check is each removal's own fresh probe (CN21) under `ListSubsys`'s rule
+  (`dnagent.md` SH20); the reads are listings and file reads in the
+  agent's own process, which start no process, and only a pass that
+  removes or connects many connections makes them.
 * A thin `delete` message that fails after its volume's removal is
   re-driven only once, by the sweep of that pool's ids its own pass runs
   under an RPC-delivered request (CN14), and nothing of it is remembered.

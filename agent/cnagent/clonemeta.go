@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -290,9 +291,10 @@ type cloneMetaSlot struct {
 }
 
 // cloneMetaArena is one pass's view of the arena: the loop device it currently
-// lives on and every kind-`cb` wrapper of this CN. It is re-probed once per
-// converge or probe pass and never persisted — loop names
-// are kernel-assigned and a tmpfs remount can change them under a live agent.
+// lives on and every kind-`cb` wrapper of this CN. It is probed afresh in
+// every converge, check round or info read, never carried from one to the
+// next and never persisted — loop names are kernel-assigned and a tmpfs
+// remount can change them under a live agent.
 type cloneMetaArena struct {
 	loopDev   string // e.g. "/dev/loop0"
 	loopDevNo string // e.g. "7:0"
@@ -300,40 +302,55 @@ type cloneMetaArena struct {
 }
 
 // Wrappers enumerates the kind-`cb` wrappers of one CN and the unit range each
-// holds. `dmsetup ls` prints the literal "No devices found" and still exits 0
-// on an empty node, which the prefix filter drops by construction; a non-zero
-// exit really is a failure. Only the name is taken from `ls` — its device
-// number formatting varies across dmsetup versions — while the major:minor and
-// the offset come from `dmsetup table`, which is the registry itself.
+// holds: the names that carry prefix, then each one's table. Only the name
+// is taken from the name listing, while the major:minor and the offset come
+// from the wrapper's table, which is the registry itself.
+//
+// With no reading (rd nil) the names come from one `dmsetup ls` and each
+// table from one `dmsetup table` of the wrapper. `dmsetup ls` prints the
+// literal "No devices found" and still exits 0 on an empty node, which the
+// prefix filter drops by construction; a non-zero exit really is a failure.
+// wanted is not used.
+//
+// With the reading of a check round or an info read (CN5, CN28) the names
+// come from its `dmsetup info` listing and the tables from its `dmsetup
+// table` listing (cnReading). A partial info listing can lack a wrapper this
+// cntlr wants, so each name of wanted that the listing lacks is looked up on
+// its own (cnReading.info) and enumerated when it is there; without that,
+// such a listing would read this cntlr's own wrapper MISSING in a round
+// while a converge's `dmsetup ls` reads it OK. A complete listing that lacks
+// a wanted name answers absent with no read.
 func (c *CloneMeta) Wrappers(
 	ctx context.Context,
+	rd *cnReading,
 	prefix string,
+	wanted []string,
 ) (map[string]cloneMetaSlot, error) {
-	stdout, stderr, _, err := c.cmd.Run(ctx, "dmsetup", "ls")
+	names, err := c.wrapperNames(ctx, rd, prefix, wanted)
 	if err != nil {
-		return nil, fmt.Errorf("dmsetup ls: %s",
-			firstNonEmpty(stderr, stdout, err.Error()))
+		return nil, err
 	}
 	slots := make(map[string]cloneMetaSlot)
-	for _, line := range strings.Split(stdout, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || !strings.HasPrefix(fields[0], prefix) {
-			continue
+	for _, name := range names {
+		var targets []common.DmTarget
+		if rd == nil {
+			targets, err = c.dm.Table(ctx, name)
+		} else {
+			targets, err = rd.table(ctx, name)
 		}
-		name := fields[0]
-		targets, err := c.dm.Table(ctx, name)
 		if err != nil {
 			// The name list is a snapshot that is stale the instant it is
 			// printed: SyncupCntlr holds only the node read lock, so another
 			// cntlr's sweep (CN21), at SP_LEVEL_DISABLE or otherwise, can
-			// remove a wrapper between the `ls` and this `table`. A wrapper
-			// that is gone claims no units, so the name is dropped rather than
-			// failing the CN-wide enumeration and flipping healthy clones of
-			// unrelated cntlrs to RES_STATUS_ERROR (ERROR feeds err_epoch;
-			// PROVISIONING does not).
+			// remove a wrapper between the listing that named it and this
+			// `table`. A wrapper that is gone claims no units, so the name is
+			// dropped rather than failing the CN-wide enumeration and
+			// flipping healthy clones of unrelated cntlrs to RES_STATUS_ERROR
+			// (ERROR feeds err_epoch; PROVISIONING does not).
 			//
-			// Absence is confirmed rather than assumed: a `table` that fails
-			// for a wrapper that is still *there* is a real failure and stays
+			// Absence is confirmed rather than assumed, by a fresh `dmsetup
+			// info` and never the reading's: a `table` that fails for a
+			// wrapper that is still *there* is a real failure and stays
 			// fatal, because reporting a live wrapper's units as free would
 			// let Alloc hole-punch a serving dm-clone's superblock — the one
 			// thing the discard-first order exists to prevent.
@@ -349,6 +366,58 @@ func (c *CloneMeta) Wrappers(
 		slots[name] = parseCloneMetaSlot(name, targets)
 	}
 	return slots, nil
+}
+
+// wrapperNames is the names Wrappers enumerates: the `dmsetup ls` names that
+// carry prefix with no reading; with a reading, the names of its `dmsetup
+// info` listing that carry prefix, and each name of wanted, carrying prefix,
+// that the listing lacks and that its own lookup finds there, sorted. A
+// listing, or a lookup, that did not answer is the error.
+func (c *CloneMeta) wrapperNames(
+	ctx context.Context,
+	rd *cnReading,
+	prefix string,
+	wanted []string,
+) ([]string, error) {
+	var names []string
+	if rd == nil {
+		stdout, stderr, _, err := c.cmd.Run(ctx, "dmsetup", "ls")
+		if err != nil {
+			return nil, fmt.Errorf("dmsetup ls: %s",
+				firstNonEmpty(stderr, stdout, err.Error()))
+		}
+		for _, line := range strings.Split(stdout, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || !strings.HasPrefix(fields[0], prefix) {
+				continue
+			}
+			names = append(names, fields[0])
+		}
+		return names, nil
+	}
+	if rd.infoErr != nil {
+		return nil, rd.infoErr
+	}
+	for name := range rd.infoList.Devs {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	for _, name := range wanted {
+		if _, listed := rd.infoList.Devs[name]; listed ||
+			!strings.HasPrefix(name, prefix) || slices.Contains(names, name) {
+			continue
+		}
+		dev, err := rd.info(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if dev != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // parseCloneMetaSlot reads one wrapper's allocation back out of its table.
@@ -539,12 +608,15 @@ func cloneMetaFreeRuns(
 // ---------------------------------------------------------------------------
 
 // cloneMetaArena probes the arena: the single loop device behind
-// CnTmpFilePath (CN5's `losetup --associated`, never persisted) plus the
-// registry read back out of the kind-`cb` dm tables.
+// CnTmpFilePath (CN5's `losetup --associated`, never persisted), its number
+// from /sys/block, plus the registry read back out of the kind-`cb` dm
+// tables (Wrappers, with rd and wanted as it takes them).
 func (s *CnAgentServer) cloneMetaArena(
 	ctx context.Context,
 	clusterId uint64,
 	cnId uint64,
+	rd *cnReading,
+	wanted []string,
 ) (*cloneMetaArena, error) {
 	filePath := s.nf.CnTmpFilePath(clusterId, cnId)
 	devs, err := s.cmeta.LoopDevices(ctx, filePath)
@@ -555,12 +627,12 @@ func (s *CnAgentServer) cloneMetaArena(
 		return nil, fmt.Errorf("clone-metadata arena unavailable: "+
 			"%d loop devices back %s, want 1", len(devs), filePath)
 	}
-	devNo, err := s.dm.DevNo(ctx, devs[0])
+	devNo, err := s.blockDevNo(ctx, filepath.Base(devs[0]))
 	if err != nil {
 		return nil, fmt.Errorf("clone-metadata arena unavailable: %w", err)
 	}
 	slots, err := s.cmeta.Wrappers(
-		ctx, s.nf.CnCloneMetaDmPrefix(clusterId, cnId))
+		ctx, rd, s.nf.CnCloneMetaDmPrefix(clusterId, cnId), wanted)
 	if err != nil {
 		return nil, fmt.Errorf("clone-metadata arena unavailable: %w", err)
 	}
@@ -571,21 +643,30 @@ func (s *CnAgentServer) cloneMetaArena(
 	}, nil
 }
 
-// planArena resolves the arena once per converge or probe pass and caches it
-// on the plan, so a cntlr with N clones still issues one `losetup` and one
-// `dmsetup ls` (CN18: the loop device is re-learned every pass and
-// the probe compares against the *currently probed* one). A converge that
-// allocates enumerates once more under cloneMetaMu, and that enumeration
-// replaces the cache (ensureCloneMeta). The cache lives exactly as long as
-// the pass: each pass builds its plan afresh (newCntlrPlan), and nothing
-// keeps a plan between passes.
+// planArena resolves the arena at its first call in a converge, check round
+// or info read and caches it on the plan, so a cntlr with N clones still
+// issues one `losetup` and one enumeration of the wrappers (CN18: the loop
+// device is re-learned every pass and the probe compares against the
+// *currently probed* one). A converge enumerates them with `dmsetup ls`, a
+// check round and an info read from their reading, where the wrapper of
+// every clone of the plan is looked up on its own when a partial listing
+// lacks it (Wrappers). A converge that allocates enumerates once more under
+// cloneMetaMu, and that enumeration replaces the cache (ensureCloneMeta);
+// after a failed allocation the next call resolves the arena afresh
+// (ensureClone). The cache lives exactly as long as the pass: each pass
+// builds its plan afresh (newCntlrPlan), and nothing keeps a plan between
+// passes.
 func (s *CnAgentServer) planArena(
 	ctx context.Context,
 	plan *cntlrPlan,
 ) (*cloneMetaArena, error) {
 	if !plan.arenaDone {
+		wanted := make([]string, 0, len(plan.clones))
+		for _, cp := range plan.clones {
+			wanted = append(wanted, cp.metaDmName)
+		}
 		plan.arena, plan.arenaErr = s.cloneMetaArena(
-			ctx, plan.clusterId, plan.cnId)
+			ctx, plan.clusterId, plan.cnId, plan.rd, wanted)
 		plan.arenaDone = true
 	}
 	return plan.arena, plan.arenaErr
@@ -688,7 +769,7 @@ func (s *CnAgentServer) ensureCloneMeta(
 	// this one shows, must not read as free there, or that check would park
 	// a serving namespace for a run the pass already knows is gone. An
 	// enumeration that failed replaces nothing.
-	arena, err := s.cloneMetaArena(ctx, plan.clusterId, plan.cnId)
+	arena, err := s.cloneMetaArena(ctx, plan.clusterId, plan.cnId, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -831,7 +912,7 @@ func (s *CnAgentServer) reconcileCloneMeta(
 	s.cloneMetaMu.Lock()
 	defer s.cloneMetaMu.Unlock()
 
-	arena, err := s.cloneMetaArena(ctx, clusterId, cnId)
+	arena, err := s.cloneMetaArena(ctx, clusterId, cnId, nil, nil)
 	if err != nil {
 		slog.ErrorContext(ctx, "enumerating clone metadata wrappers failed",
 			slog.String("error", err.Error()))

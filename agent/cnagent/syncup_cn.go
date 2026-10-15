@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"sort"
 	"strings"
 
@@ -384,13 +385,13 @@ func (s *CnAgentServer) arenaFileInUse(
 	devs []string,
 ) error {
 	slots, err := s.cmeta.Wrappers(
-		ctx, s.nf.CnCloneMetaDmPrefix(clusterId, cnId))
+		ctx, nil, s.nf.CnCloneMetaDmPrefix(clusterId, cnId), nil)
 	if err != nil {
 		return err
 	}
 	devOf := make(map[string]string, len(devs))
 	for _, dev := range devs {
-		devNo, err := s.dm.DevNo(ctx, dev)
+		devNo, err := s.blockDevNo(ctx, path.Base(dev))
 		if err != nil {
 			return err
 		}

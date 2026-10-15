@@ -24,10 +24,15 @@ func NewDm(oc common.OsClient) *Dm {
 	return &Dm{osBase{oc: oc}}
 }
 
-// DmDevInfo is the `dmsetup info -o attr` view of one live device.
+// DmDevInfo is the `dmsetup info` view of one live device: its attr flags
+// and, where the read asks for it, its number.
 type DmDevInfo struct {
 	Suspended bool
 	ReadOnly  bool
+	// DevNo is the device's "major:minor", the form a dm table names a
+	// device in. Only ListInfo and InfoDevNo read it; Info leaves it empty,
+	// and so does a line whose numbers do not parse.
+	DevNo string
 }
 
 // The four positions of the dm `attr` column (dmsetup(8): "(L)ive,
@@ -37,6 +42,19 @@ const (
 	dmAttrSuspendedIdx = 2
 	dmAttrReadOnlyIdx  = 3
 )
+
+// dmAttrInfo reads the flags of one attr column. A column too short to hold
+// a flag reads as resumed and writeable.
+func dmAttrInfo(attr string) *DmDevInfo {
+	info := &DmDevInfo{}
+	if len(attr) > dmAttrSuspendedIdx && attr[dmAttrSuspendedIdx] == 's' {
+		info.Suspended = true
+	}
+	if len(attr) > dmAttrReadOnlyIdx && attr[dmAttrReadOnlyIdx] == 'r' {
+		info.ReadOnly = true
+	}
+	return info
+}
 
 // Info returns the live state of a dm device, nil when it does not exist, and
 // an error when `dmsetup info` did not answer. The third case is never folded
@@ -49,20 +67,13 @@ func (d *Dm) Info(ctx context.Context, name string) (*DmDevInfo, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
-	attr := strings.TrimSpace(stdout)
-	info := &DmDevInfo{}
-	if len(attr) > dmAttrSuspendedIdx && attr[dmAttrSuspendedIdx] == 's' {
-		info.Suspended = true
-	}
-	if len(attr) > dmAttrReadOnlyIdx && attr[dmAttrReadOnlyIdx] == 'r' {
-		info.ReadOnly = true
-	}
-	return info, nil
+	return dmAttrInfo(strings.TrimSpace(stdout)), nil
 }
 
-// dmLsEmptyLine is what `dmsetup ls` prints, with exit status 0, on a node
-// that holds no dm device at all.
-const dmLsEmptyLine = "No devices found"
+// dmNoDevicesLine is what `dmsetup ls`, and each whole-node form of `dmsetup
+// info` and `dmsetup table`, prints with exit status 0 on a node that holds
+// no dm device at all.
+const dmNoDevicesLine = "No devices found"
 
 // dmLsDevNoPattern is the normalized "major:minor" a `dmsetup ls` line ends
 // with. Both spellings the tool has used are normalized into it before the
@@ -92,7 +103,7 @@ func (d *Dm) List(ctx context.Context) (map[string]string, error) {
 	}
 	out := make(map[string]string)
 	for _, line := range strings.Split(stdout, "\n") {
-		if strings.TrimSpace(line) == dmLsEmptyLine {
+		if strings.TrimSpace(line) == dmNoDevicesLine {
 			continue
 		}
 		fields := strings.Fields(line)
@@ -107,6 +118,238 @@ func (d *Dm) List(ctx context.Context) (map[string]string, error) {
 		out[fields[0]] = devNo
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Whole-node readers. A cn check round and an info read take every dm device
+// of the node from two listings, one run each, instead of from reads per
+// device (cnagent.md CN28): a listing of the whole node costs about what a
+// read of one device costs. ListInfo gives each device's number and attr
+// flags, ListTables its live table, and InfoDevNo reads one device the way
+// ListInfo reads each.
+// ---------------------------------------------------------------------------
+
+// dmInfoArgs is the `dmsetup info` that prints one line per device, of every
+// device or of the one named: "name/major/minor/attr", with no padding. "/"
+// separates the fields because it is the one byte a dm name cannot hold, so
+// the name needs no escape and the line splits into exactly four fields.
+func dmInfoArgs(names ...string) []string {
+	return append([]string{"info", "--columns", "--noheadings",
+		"--separator", "/", "-o", "name,major,minor,attr"}, names...)
+}
+
+// DmInfoListing is one whole-node `dmsetup info` listing.
+type DmInfoListing struct {
+	// Devs is every device the listing names, by name. A device whose
+	// numbers do not parse is kept, with an empty DevNo: as for List, the
+	// name alone says the device is there.
+	Devs map[string]*DmDevInfo
+	// Partial says the listing can lack a device the node holds: the run
+	// exited above zero, as dmsetup does when a device goes away during the
+	// listing, or one of its lines did not parse.
+	Partial bool
+}
+
+// ListInfo lists every dm device of the node with its number and attr flags,
+// in one `dmsetup info` run, under the answer rule of the whole-node
+// listings (dmListingAnswer).
+func (d *Dm) ListInfo(ctx context.Context) (*DmInfoListing, error) {
+	args := dmInfoArgs()
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", args...)
+	listing := &DmInfoListing{Devs: make(map[string]*DmDevInfo)}
+	parsed := 0
+	var unparsed []string
+	for _, line := range strings.Split(stdout, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed == "" ||
+			trimmed == dmNoDevicesLine {
+			continue
+		}
+		name, info, ok := parseDmInfoLine(line)
+		if !ok {
+			unparsed = append(unparsed, line)
+			continue
+		}
+		listing.Devs[name] = info
+		parsed++
+	}
+	partial, err := dmListingAnswer(
+		args, stdout, stderr, exitCode, err, parsed, unparsed)
+	if err != nil {
+		return nil, err
+	}
+	listing.Partial = partial
+	return listing, nil
+}
+
+// InfoDevNo is Info with the device's number: one `dmsetup info` of name, in
+// ListInfo's line form. Like Info it returns nil, nil when the device does
+// not exist and an error when the run did not answer. A run that exits 0
+// and does not print the device's line first is an error too, never an
+// absence. A line whose numbers do not parse gives the device with an empty
+// DevNo, as ListInfo does; a caller that needs the number turns that into
+// its own error.
+func (d *Dm) InfoDevNo(ctx context.Context, name string) (*DmDevInfo, error) {
+	args := dmInfoArgs(name)
+	stdout, ok, err := d.runProbe(ctx, "dmsetup", args...)
+	if err != nil || !ok {
+		return nil, err
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		got, info, parsed := parseDmInfoLine(line)
+		if !parsed || got != name {
+			break
+		}
+		return info, nil
+	}
+	return nil, dmUnexpected(args, stdout)
+}
+
+// parseDmInfoLine reads one line of dmInfoArgs' output: the name, verbatim,
+// then the major, the minor and the attr column. A line that does not split
+// into those four fields, or names no device, does not parse.
+func parseDmInfoLine(line string) (string, *DmDevInfo, bool) {
+	fields := strings.Split(line, "/")
+	if len(fields) != 4 || fields[0] == "" {
+		return "", nil, false
+	}
+	info := dmAttrInfo(strings.TrimSpace(fields[3]))
+	major := strings.TrimSpace(fields[1])
+	minor := strings.TrimSpace(fields[2])
+	_, majorErr := strconv.ParseUint(major, 10, 32)
+	_, minorErr := strconv.ParseUint(minor, 10, 32)
+	if majorErr == nil && minorErr == nil {
+		info.DevNo = major + ":" + minor
+	}
+	return fields[0], info, true
+}
+
+// DmTableListing is one whole-node `dmsetup table --concise` listing.
+type DmTableListing struct {
+	// Tables is the live table of every device the listing names, by name;
+	// a device with no live table holds an empty, non-nil slice.
+	Tables map[string][]common.DmTarget
+	// Partial says the listing can lack a device the node holds, as
+	// DmInfoListing's does.
+	Partial bool
+}
+
+// ListTables lists the live table of every dm device of the node in one
+// `dmsetup table --concise` run, under the answer rule of the whole-node
+// listings (dmListingAnswer). A record is "name,uuid,minor,flags" and then
+// one field per table line, and parses when it holds those four fields and a
+// name. Each table field is read as a `dmsetup table` line
+// (common.ParseDmLines), so the space the tool can end a line with is no
+// part of it, and an empty field adds no target. The numbers come from
+// ListInfo, never from here.
+func (d *Dm) ListTables(ctx context.Context) (*DmTableListing, error) {
+	args := []string{"table", "--concise"}
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", args...)
+	listing := &DmTableListing{Tables: make(map[string][]common.DmTarget)}
+	parsed := 0
+	var unparsed []string
+	if strings.TrimSpace(stdout) != dmNoDevicesLine {
+		for _, record := range dmConciseRecords(stdout) {
+			if len(record) == 1 && strings.TrimSpace(record[0]) == "" {
+				continue
+			}
+			if len(record) < 4 || record[0] == "" {
+				unparsed = append(unparsed, strings.Join(record, ","))
+				continue
+			}
+			targets := []common.DmTarget{}
+			for _, line := range record[4:] {
+				targets = append(targets, common.ParseDmLines(line)...)
+			}
+			listing.Tables[record[0]] = targets
+			parsed++
+		}
+	}
+	partial, err := dmListingAnswer(
+		args, stdout, stderr, exitCode, err, parsed, unparsed)
+	if err != nil {
+		return nil, err
+	}
+	listing.Partial = partial
+	return listing, nil
+}
+
+// dmConciseRecords splits concise dmsetup output into records of fields. A
+// backslash makes the next byte literal, which is how a name or a table line
+// holds a ",", a ";" or a "\"; an unescaped "," ends a field, and an
+// unescaped ";" or newline ends a field and its record.
+func dmConciseRecords(out string) [][]string {
+	var records [][]string
+	var fields []string
+	var field strings.Builder
+	for i := 0; i < len(out); i++ {
+		switch c := out[i]; c {
+		case '\\':
+			if i+1 < len(out) {
+				i++
+				field.WriteByte(out[i])
+			}
+		case ',':
+			fields = append(fields, field.String())
+			field.Reset()
+		case ';', '\n':
+			records = append(records, append(fields, field.String()))
+			fields = nil
+			field.Reset()
+		default:
+			field.WriteByte(c)
+		}
+	}
+	return append(records, append(fields, field.String()))
+}
+
+// dmListingAnswer is the answer rule of the whole-node listings
+// (osclient.md, RunCommand) over one run: parsed counts its lines that parse
+// (its records, in the concise listing) and unparsed holds its other
+// non-blank ones, in order. Lines that parse answer even when dmsetup exits
+// above zero, which it does when a device goes away during the listing, and
+// the listing is then partial; so is one with a line that does not parse. A
+// run that did not report, or printed nothing that parses, did not answer,
+// but for "No devices found" with exit status 0: an empty node. It returns
+// whether the listing is partial, or the error of one that did not answer.
+//
+// That error never quotes the listing, which grows with the node and would
+// be copied into every row the listing serves: it holds dmsetup's stderr, or
+// the run's own error when stderr is empty, and for a run that exited 0 the
+// first line it cannot read.
+func dmListingAnswer(
+	args []string,
+	stdout string,
+	stderr string,
+	exitCode int,
+	err error,
+	parsed int,
+	unparsed []string,
+) (bool, error) {
+	if reported(exitCode, err) && parsed > 0 {
+		return err != nil || len(unparsed) > 0, nil
+	}
+	if err != nil {
+		return false, cmdError("dmsetup", args, "", stderr, exitCode, err)
+	}
+	if strings.TrimSpace(stdout) == dmNoDevicesLine {
+		return false, nil
+	}
+	if len(unparsed) == 0 {
+		return false, fmt.Errorf("dmsetup %s: empty output",
+			strings.Join(args, " "))
+	}
+	return false, fmt.Errorf("dmsetup %s: cannot read %q",
+		strings.Join(args, " "), unparsed[0])
+}
+
+// dmUnexpected is the error of a dmsetup run that exited 0 with output its
+// reader cannot read: the command line, then the output.
+func dmUnexpected(args []string, stdout string) error {
+	return fmt.Errorf("dmsetup %s: unexpected output %q",
+		strings.Join(args, " "), stdout)
 }
 
 // Table returns the parsed live table of a dm device.

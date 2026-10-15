@@ -31,12 +31,15 @@ func NewMd(oc common.OsClient) *Md {
 // ---------------------------------------------------------------------------
 // The sysfs view of the node's arrays
 //
-// Everything the sweep, CN12's member reconciliation and CN28's md row need
-// about an array they read from sysfs, which never touches a member device
-// and therefore never blocks on a dead leg:
+// Everything the sweep, CN12's member reconciliation, CN28's md row and the
+// pool concats need about an array they read from sysfs, which never touches
+// a member device and therefore never blocks on a dead leg:
 //
-//   - `ls /sys/block` names every array node, so a sweep finds arrays it has
-//     no plan for — the whole point of deriving removal from the live system;
+//   - a listing of /sys/block names every array node, so a sweep finds
+//     arrays it has no plan for — the whole point of deriving removal from
+//     the live system;
+//   - `/sys/block/mdN/dev` is the array's device number, which a pool concat
+//     maps (mdDevNo);
 //   - `/sys/block/mdN/md/array_state` says whether it still holds its
 //     members. Only "clear" is gone; "inactive" is an assembled but not
 //     running array, which pins them just as hard;
@@ -128,7 +131,7 @@ func (m *Md) ListArrays(ctx context.Context) ([]MdArray, error) {
 		if !mdBlockEntryPattern.MatchString(entry) {
 			continue
 		}
-		mdDir := sysfsBlockDir + "/" + entry + "/md"
+		mdDir := mdDirOf(entry)
 		state, ok, err := m.cmd.ReadAttr(ctx, mdDir+"/array_state")
 		if err != nil {
 			return nil, err
@@ -143,19 +146,126 @@ func (m *Md) ListArrays(ctx context.Context) ([]MdArray, error) {
 		if !ok {
 			continue
 		}
-		array := MdArray{
-			Dev:   "/dev/" + entry,
-			Name:  entry,
-			State: state,
+		out = append(out, mdArrayOf(entry, state, members))
+	}
+	return out, nil
+}
+
+// mdDirOf is the md/ directory of an array node under /sys/block.
+func mdDirOf(node string) string {
+	return sysfsBlockDir + "/" + node + "/md"
+}
+
+// mdArrayOf is the MdArray of one node from its array_state and its
+// members: a member with no dm name makes the array Foreign.
+func mdArrayOf(node, state string, members []mdMemberDir) MdArray {
+	array := MdArray{
+		Dev:   "/dev/" + node,
+		Name:  node,
+		State: state,
+	}
+	for _, member := range members {
+		if member.dmName == "" {
+			array.Foreign = true
+			continue
 		}
-		for _, member := range members {
-			if member.dmName == "" {
-				array.Foreign = true
-				continue
-			}
-			array.Members = append(array.Members, member.dmName)
+		array.Members = append(array.Members, member.dmName)
+	}
+	return array
+}
+
+// MdScan is the one md walk of a check round or an info read: one listing of
+// /sys/block and one read of each array, which serves both md rules of the
+// call. The group rows and the concat rows read Walk() under Md.Walk's rule,
+// which records an array that did not answer and lets a match beside it
+// stand (CN12); the verdict reads Arrays() under ListArrays' rule, which
+// fails on any read that did not answer, array_state's included (CN21,
+// CN30). A converge keeps its two md walks: its sweep's ListArrays, and the
+// Md.Walk of its groups, which an assembly of the build brings up to date
+// (Refresh).
+type MdScan struct {
+	// walk is the tolerant view, built as the scan reads.
+	walk *MdWalk
+	// nodes is every array node of the listing, in listing order, with
+	// what the scan read of it.
+	nodes []mdScanNode
+}
+
+// mdScanNode is what a scan read of one array node: its md/array_state, and
+// its md/ listing with each member's dm name (memberDirs). ok false is a
+// read that found nothing; err a read that did not answer.
+type mdScanNode struct {
+	node       string
+	state      string
+	stateOk    bool
+	stateErr   error
+	members    []mdMemberDir
+	membersOk  bool
+	membersErr error
+}
+
+// Scan lists /sys/block once and reads, for every array node in listing
+// order, its array_state and then its md/ listing and members' dm names. An
+// absent /sys/block is no array; a listing of it that did not answer is the
+// scan's error, never "no arrays" (ListArrays' rule). It reads every node's
+// members whatever its array_state read gave, since the walk view never
+// looks at array_state.
+func (m *Md) Scan(ctx context.Context) (*MdScan, error) {
+	entries, ok, err := m.cmd.ListDir(ctx, sysfsBlockDir)
+	if err != nil {
+		return nil, err
+	}
+	sc := &MdScan{walk: &MdWalk{
+		arrays:     make(map[string][]mdMemberDir),
+		unanswered: make(map[string]error),
+	}}
+	if !ok {
+		return sc, nil
+	}
+	for _, entry := range entries {
+		if !mdBlockEntryPattern.MatchString(entry) {
+			continue
 		}
-		out = append(out, array)
+		node := mdScanNode{node: entry}
+		node.state, node.stateOk, node.stateErr = m.cmd.ReadAttr(
+			ctx, mdDirOf(entry)+"/array_state")
+		node.members, node.membersOk, node.membersErr = m.walkNode(
+			ctx, sc.walk, entry)
+		sc.nodes = append(sc.nodes, node)
+	}
+	return sc, nil
+}
+
+// Walk is the scan under Md.Walk's rule, the walk a group row and a concat
+// row read (Detail, Match): every node whose members answered, and every
+// node whose md/ listing or a member's dm name did not answer recorded as
+// unanswered. An array_state read never reaches it, so the EBUSY of an
+// array another cntlr is stopping turns no group row of this cntlr ERROR.
+func (sc *MdScan) Walk() *MdWalk {
+	return sc.walk
+}
+
+// Arrays is the scan under ListArrays' rule, the verdict's md enumeration:
+// the same arrays and the same first error, in the same order of reads, as
+// a ListArrays over the same node — a node whose array_state is gone is
+// skipped and its members are not looked at, and any read that did not
+// answer is the error.
+func (sc *MdScan) Arrays() ([]MdArray, error) {
+	var out []MdArray
+	for _, node := range sc.nodes {
+		if node.stateErr != nil {
+			return nil, node.stateErr
+		}
+		if !node.stateOk {
+			continue
+		}
+		if node.membersErr != nil {
+			return nil, node.membersErr
+		}
+		if !node.membersOk {
+			continue
+		}
+		out = append(out, mdArrayOf(node.node, node.state, node.members))
 	}
 	return out, nil
 }
@@ -238,21 +348,21 @@ type MdDetail struct {
 }
 
 // MdWalk is one walk of /sys/block: every array node and its dev-* member
-// directories, each with the dm name it carries. Listing a directory is a
-// command (`ls`), so the walk is what finding a group's array costs; Detail
-// matches a group against a walk and reads only the matched array's
-// attributes, which lets a pass over g groups list each of the node's a
-// arrays once instead of g times — at 32 slices, 64 groups over 64 arrays,
-// 65 listings a round instead of 4160.
+// directories, each with the dm name it carries. Every listing and read is
+// one call to the OS, so the walk is what finding a group's array costs;
+// Match finds a group's array in a walk, and Detail and mdDevNo read only the
+// matched array's attributes, which lets a pass over g groups list each of
+// the node's a arrays once instead of g times — at 32 slices, 64 groups over
+// 64 arrays, 65 listings a round instead of 4160.
 //
 // The walk reads every array on the node, other sps' included, so an array
-// whose md/ listing or a member's dm-name read did not answer — killed at the
-// soft timeout, held past it on the agent's OsClient semaphore, which every
-// cntlr it serves shares, ctx cancelled, or an errno other than ENOENT — is
-// recorded as unanswered rather than failing the walk: failing this pass for
-// another sp's array would turn this sp's md rows ERROR, and an md row counts
-// toward cntlr health, which is exactly the fault a failover cannot fix.
-// Detail decides what an unanswered array may mean for one group. An array
+// whose md/ listing or a member's dm-name read did not answer — held past
+// the soft timeout on the agent's OsClient semaphore, which every cntlr it
+// serves shares, ctx cancelled, or an errno other than ENOENT — is recorded
+// as unanswered rather than failing the walk: failing this pass for another
+// sp's array would turn this sp's md rows ERROR, and an md row counts toward
+// cntlr health, which is exactly the fault a failover cannot fix. Match
+// decides what an unanswered array may mean for one group. An array
 // another cntlr is stopping does not land here: md removes a member's block
 // link as it unbinds it, so that member's dm name reads ENOENT and it is
 // recorded with no dm name, which no group's names match
@@ -333,21 +443,34 @@ func (m *Md) Refresh(ctx context.Context, w *MdWalk) error {
 			m.sameMembers(ctx, recorded) {
 			continue
 		}
-		members, ok, err := m.memberDirs(
-			ctx, sysfsBlockDir+"/"+node+"/md")
-		if err != nil {
-			delete(w.arrays, node)
-			w.unanswered[node] = err
-			continue
-		}
-		delete(w.unanswered, node)
-		if !ok {
-			delete(w.arrays, node)
-			continue
-		}
-		w.arrays[node] = members
+		m.walkNode(ctx, w, node)
 	}
 	return nil
+}
+
+// walkNode reads one array node's members (memberDirs) into a walk, the one
+// read of a node that Refresh and Scan share: a read that did not answer
+// records the node as unanswered, a md/ directory gone drops it, and members
+// that answered replace whatever the walk held for it. It returns the read
+// as it came, for the scan's strict view.
+func (m *Md) walkNode(
+	ctx context.Context,
+	w *MdWalk,
+	node string,
+) ([]mdMemberDir, bool, error) {
+	members, ok, err := m.memberDirs(ctx, mdDirOf(node))
+	if err != nil {
+		delete(w.arrays, node)
+		w.unanswered[node] = err
+		return nil, false, err
+	}
+	delete(w.unanswered, node)
+	if !ok {
+		delete(w.arrays, node)
+		return nil, false, nil
+	}
+	w.arrays[node] = members
+	return members, true, nil
 }
 
 // sameMembers reports whether every member directory a walk recorded is still
@@ -373,8 +496,8 @@ func (m *Md) sameMembers(ctx context.Context, members []mdMemberDir) bool {
 }
 
 // Detail finds, in a walk, the one array whose members include any of
-// dmNames — a group's leg wrapper names — and reads its state from sysfs. It
-// never runs mdadm and never resolves /dev/md/<name>.
+// dmNames, a group's leg wrapper names (Match), and reads its state from
+// sysfs. It never runs mdadm and never resolves /dev/md/<name>.
 //
 // Detail runs no mdadm because `mdadm --detail`
 // opens a member device: it loads the superblock from the first member that
@@ -404,6 +527,32 @@ func (m *Md) Detail(
 	w *MdWalk,
 	dmNames []string,
 ) (*MdDetail, error) {
+	node, err := w.Match(dmNames)
+	if err != nil {
+		return nil, err
+	}
+	if node != "" {
+		detail, err := m.readDetail(ctx, "/dev/"+node,
+			sysfsBlockDir+"/"+node+"/md", w.arrays[node])
+		if err != nil || detail.Exists {
+			return detail, err
+		}
+		// The match stopped between the walk and this read: absent, under
+		// the same rule as no match at all.
+	}
+	if err := w.unansweredErr(); err != nil {
+		return nil, err
+	}
+	return &MdDetail{}, nil
+}
+
+// Match is the array node a walk holds for a group (CN12's match): the one
+// array whose members include any of dmNames, the group's leg_list wrapper
+// names, so spares do not count. "" with no error when none matches and
+// every array answered; an error for two matches, or for no match beside an
+// array that did not answer, which may be the group's own. A degraded array
+// matches: one member the group names is enough.
+func (w *MdWalk) Match(dmNames []string) (string, error) {
 	want := make(map[string]bool, len(dmNames))
 	for _, name := range dmNames {
 		want[name] = true
@@ -419,31 +568,69 @@ func (m *Md) Detail(
 			continue
 		}
 		if found != "" {
-			return nil, fmt.Errorf(
+			return "", fmt.Errorf(
 				"arrays /dev/%s and /dev/%s both hold legs of the group",
 				found, node)
 		}
 		found = node
 	}
 	if found != "" {
-		detail, err := m.readDetail(ctx, "/dev/"+found,
-			sysfsBlockDir+"/"+found+"/md", w.arrays[found])
-		if err != nil || detail.Exists {
-			return detail, err
-		}
-		// The match stopped between the walk and this read: absent, under
-		// the same rule as no match at all.
+		return found, nil
 	}
-	for _, node := range sortedKeys(w.unanswered) {
-		return nil, fmt.Errorf(
-			"no array holds legs of the group, but /dev/%s did not "+
-				"answer: %w", node, w.unanswered[node])
-	}
-	return &MdDetail{}, nil
+	return "", w.unansweredErr()
 }
 
-// mdWalkOnce hands every group of one pass the same walk, taken at the first
-// group that needs it — a pass with no md group lists nothing.
+// unansweredErr is the error of an absence the walk cannot vouch for: the
+// first node, by name, whose md/ listing or a member's dm name did not
+// answer. nil when every array of the walk answered.
+func (w *MdWalk) unansweredErr() error {
+	nodes := sortedKeys(w.unanswered)
+	if len(nodes) == 0 {
+		return nil
+	}
+	return fmt.Errorf("no array holds legs of the group, but /dev/%s did "+
+		"not answer: %w", nodes[0], w.unanswered[nodes[0]])
+}
+
+// mdDevNo is the device number of a group's array, which the pool concats
+// map: /sys/block/<node>/dev of the node Match finds in the pass's md walk,
+// the array the group's own row reads, so a check round and a converge take
+// the number from one array and their concat rows agree. Nothing here waits
+// for the /dev/md/<name> link udev makes. It reads the number apart from the
+// array's other attributes, so a failed md/sync_completed read fails the
+// group's row and not the concat rows. Each of its errors — the walk's,
+// Match's, no match and the number read's — names the group, because the
+// concat rows that carry it are keyed by the slice.
+func (s *CnAgentServer) mdDevNo(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+) (string, error) {
+	walk, err := plan.mdWalks.get(ctx)
+	if err != nil {
+		return "", fmt.Errorf("group %s: %w", gp.resName, err)
+	}
+	node, err := walk.Match(gp.legNames())
+	if err != nil {
+		return "", fmt.Errorf("group %s: %w", gp.resName, err)
+	}
+	if node == "" {
+		return "", fmt.Errorf("group %s: no array holds its legs",
+			gp.resName)
+	}
+	devNo, err := s.blockDevNo(ctx, node)
+	if err != nil {
+		return "", fmt.Errorf("group %s: %w", gp.resName, err)
+	}
+	return devNo, nil
+}
+
+// mdWalkOnce hands every group row and every concat row of one pass the same
+// walk (cntlrPlan.mdWalks). A converge takes it at the first group that
+// needs it, so a converge with no md group lists nothing; a check round and
+// an info read hand over the walk view of their reading's md walk
+// (cnReading.mdWalks), already taken. A nil one, a plan whose builder set
+// none, is an error of every read rather than a walk of its own.
 type mdWalkOnce struct {
 	md   *Md
 	walk *MdWalk
@@ -452,6 +639,9 @@ type mdWalkOnce struct {
 }
 
 func (o *mdWalkOnce) get(ctx context.Context) (*MdWalk, error) {
+	if o == nil {
+		return nil, fmt.Errorf("no md walk in this pass")
+	}
 	if !o.done {
 		o.walk, o.err = o.md.Walk(ctx)
 		o.done = true
@@ -749,19 +939,23 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // whatever a future caller does.
 func (s *CnAgentServer) ensureGroup(
 	ctx context.Context,
+	plan *cntlrPlan,
 	gp *grpPlan,
 	available map[uint64]bool,
-	walks *mdWalkOnce,
 ) error {
 	if !gp.raid1 {
 		if len(gp.legs) != 1 {
 			return fmt.Errorf(
 				"RedundNone group has %d legs, want 1", len(gp.legs))
 		}
+		legNo, err := s.dmDevNo(ctx, nil, gp.legs[0].name)
+		if err != nil {
+			return err
+		}
 		return s.ensureDmLinear(ctx, gp.dmName, gp.dataSectors,
-			gp.legs[0].path, gp.dataOffsetSectors)
+			legNo, gp.dataOffsetSectors)
 	}
-	walk, err := walks.get(ctx)
+	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
 		return err
 	}
@@ -865,11 +1059,15 @@ func (s *CnAgentServer) assembleGroup(
 		// wrappers — both legs switched out, and the parked ones released,
 		// while this cntlr was not converging — never reaches reconcile and
 		// lands here instead, with every fresh leg answering "no
-		// superblock". A create would put a second array under the name the
-		// pool's concat resolves. The guard errs only towards refusing, and a
-		// false refusal needs a stale node of this very name: short of the
-		// case above, a group whose legs carry no superblock has never had
-		// an array that could have left one.
+		// superblock". A create would put a second array under the name
+		// mdadm gives the group's array, and the guard keeps it from doing
+		// so. The pool's concat finds the group's array by its legs
+		// (mdDevNo), never by that name, so until the group has an array of
+		// its own the concat rows read an error rather than take the running
+		// array's number. The guard errs only towards refusing, and a false
+		// refusal needs a stale node of this very name: short of the case
+		// above, a group whose legs carry no superblock has never had an
+		// array that could have left one.
 		inUse, err := s.md.NameInUse(ctx, gp.devPath)
 		if err != nil {
 			return err
@@ -897,10 +1095,10 @@ func (s *CnAgentServer) assembleGroup(
 // The held set is the dm names sysfs gave the array's members
 // (dev-*/block/dm/name), compared with the leg_list wrapper names — the key
 // Detail matched the array by — and each held member is addressed by its dm
-// path. Nothing here runs lsblk: were the wanted set keyed by device numbers
-// from an lsblk of each leg_list wrapper, one that did not answer would read
-// as "not wanted" and fail and remove that wrapper's in-sync member. A leg
-// whose wrapper this pass could not build is never available, so the add
+// path. Nothing here reads a device number: were the wanted set keyed by the
+// number of each leg_list wrapper, a number read that did not answer would
+// read as "not wanted" and fail and remove that wrapper's in-sync member. A
+// leg whose wrapper this pass could not build is never available, so the add
 // loop leaves it alone, and its member, if md still holds one, stays wanted.
 // `mdadm --fail` and `--remove` open the member's path (open only, no IO) and
 // then act on its device number. `--remove` can sleep in md's suspend for as
@@ -975,18 +1173,18 @@ func (s *CnAgentServer) reconcileMembers(
 // caller with an unguarded gp.legs[0].
 func (s *CnAgentServer) probeGroup(
 	ctx context.Context,
+	plan *cntlrPlan,
 	gp *grpPlan,
-	walks *mdWalkOnce,
 ) (pb.ResStatus, string) {
 	if !gp.raid1 {
 		if len(gp.legs) != 1 {
 			return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 				"RedundNone group has %d legs, want 1", len(gp.legs))
 		}
-		return s.probeDmTarget(ctx, gp.dmName, "linear", gp.dataSectors,
-			gp.legs[0].path, gp.dataOffsetSectors)
+		return s.probeDmTarget(ctx, plan.rd, gp.dmName, "linear",
+			gp.dataSectors, gp.legs[0].name, gp.dataOffsetSectors)
 	}
-	walk, err := walks.get(ctx)
+	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}

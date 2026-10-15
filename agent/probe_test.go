@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -25,14 +26,16 @@ type osAnswer int
 
 const (
 	// answeredNo: the tool ran, looked, and reported that the object is not
-	// there — a non-zero exit, or an ENOENT from a virtual-filesystem read.
+	// there — a non-zero exit, or an ENOENT from a virtual-filesystem read or
+	// listing.
 	answeredNo osAnswer = iota
 	// didNotAnswer: the tool never reported. Killed at the SH15 soft or hard
 	// timeout, failed to start, ctx cancelled, semaphore refused — exit code
-	// -1 with a non-nil error. The caller learned NOTHING, and in particular
-	// did not learn that the object is gone: a killed command may still have
-	// completed in the kernel, because the ioctl finishes regardless of the
-	// signal.
+	// -1 with a non-nil error; for a read or a listing in the agent's own
+	// process, any error but ENOENT. The caller learned NOTHING, and in
+	// particular did not learn that the object is gone: a killed command may
+	// still have completed in the kernel, because the ioctl finishes
+	// regardless of the signal.
 	didNotAnswer
 )
 
@@ -96,6 +99,37 @@ func TestKilledProbeIsNotAbsent(t *testing.T) {
 			},
 		},
 		{
+			// osBase.readDir, the sysfs twin of listDir: NvmeHost lists the
+			// nvme class directories in the agent's own process, and its
+			// enumerator of every connection the host holds starts with the
+			// listing of /sys/class/nvme-subsystem. That listing cut off at
+			// the soft timeout must not read as "this host holds no
+			// connection", which would let a sweep leave every connection
+			// it should disconnect.
+			name: "NvmeHost listing",
+			probe: func(answer osAnswer) (bool, error) {
+				fs := &fakeSysfs{
+					dirs:   map[string][]string{},
+					files:  map[string]string{},
+					killLs: map[string]bool{},
+				}
+				if answer == didNotAnswer {
+					fs.dirs[sysfsNvmeSubsysDir] = []string{"nvme-subsys0"}
+					fs.killLs[sysfsNvmeSubsysDir] = true
+				}
+				// answeredNo needs no fixture: the class directory is
+				// missing, as it is on a host that has not loaded
+				// nvme-core.
+				got, err := NewNvmeHost(fs.osClient()).ListAllSubsys(ctx)
+				if !slices.Contains(fs.readDirCalls, sysfsNvmeSubsysDir) {
+					// A listing that never reached the tree proves
+					// nothing; it fails both halves.
+					return false, nil
+				}
+				return len(got) == 0, err
+			},
+		},
+		{
 			// NvmeHost.readTrimmed, through the walk that answers "does this
 			// host hold a connection to this subsystem". Its absence answer
 			// disconnects nothing and forgets the subsystem; the /sys/class/
@@ -121,6 +155,10 @@ func TestKilledProbeIsNotAbsent(t *testing.T) {
 					fs.readErr[subsysNqnPath] = context.DeadlineExceeded
 				}
 				state, err := NewNvmeHost(fs.osClient()).ListSubsys(ctx, nqn)
+				if !slices.Contains(fs.readDirCalls, sysfsNvmeSubsysDir) {
+					// A walk that lists nothing reads nothing either.
+					return false, nil
+				}
 				return state != nil && !state.Found, err
 			},
 		},

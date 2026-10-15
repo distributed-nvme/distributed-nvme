@@ -456,7 +456,7 @@ func TestADestinationThatLostItsSourceStaysOffItsClone(t *testing.T) {
 		// The sweep lists the subsystems first, so its listing does not
 		// answer either.
 		{"the source walk does not answer",
-			"ls -1 /sys/class/nvme-subsystem", ""},
+			"list /sys/class/nvme-subsystem", ""},
 		{"the dm-clone's probe is killed too",
 			"-o attr " + names.meta, "-o attr " + names.clone},
 		{"the dm-clone's device number is not read either",

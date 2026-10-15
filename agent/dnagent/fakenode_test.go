@@ -27,10 +27,10 @@ type fakeNode struct {
 	mu sync.Mutex
 
 	calls []string
-	// traced is every command, file read and block read keyed by the trace
-	// id of the ctx it ran on: the trace_id its `os command` / `os read
-	// file` / `os read block` record carries in production (log.md R5); ""
-	// for a ctx without one.
+	// traced is every command, listing, file read and block read keyed by
+	// the trace id of the ctx it ran on: the trace_id its `os command` / `os
+	// read dir` / `os read file` / `os read block` record carries in
+	// production (log.md R5); "" for a ctx without one.
 	traced map[string][]string
 
 	// block devices
@@ -134,7 +134,9 @@ type fakeNode struct {
 	// failures a single converge pass is supposed to survive. Both model
 	// "the tool ran and answered no": exit code 1, a non-nil error, and no
 	// dispatch, so the fake's state is left exactly as a refused ioctl
-	// leaves the node.
+	// leaves the node. These and the kill hooks below also match a listing
+	// in the agent's own process by its line, "list <path>", which neither
+	// half answers as absent (listHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
 	// killCmd / killCmdAlways model the OTHER half of agent.Reported: a
@@ -317,6 +319,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 	return &common.FakeOsClient{
 		RunCommandFn:      f.runCommand,
 		ReadFileFn:        f.readFile,
+		ReadDirFn:         f.readDir,
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
@@ -368,7 +371,7 @@ func (f *fakeNode) Reset() {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "cmd lsblk ", "cmd stat ",
+	"cmd ls ", "list ", "cmd lsblk ", "cmd stat ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	// `dmsetup ls` is the root of the sweep's enumeration and changes
 	// nothing; without it here every SH16 no-mutation assertion would fail
@@ -489,6 +492,78 @@ func (f *fakeNode) readHookErr(path string) error {
 		}
 	}
 	return nil
+}
+
+// readDir answers OsClient.ReadDir: a listing in the agent's own process,
+// of sysfs or of the local store, from the directory model. It records
+// "list <path>", and the command hooks match that line as they match a
+// command line, so a key "list "+X catches every listing of a path that
+// starts with X. A fail hook answers an I/O error part-way through the
+// listing and a kill hook a listing the soft timeout cut off: both did not
+// answer, never a missing directory, which only the model says. A hooked
+// listing advances no pending namespace.
+func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := "list " + path
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	if err := f.listHookErr(line, path); err != nil {
+		return nil, err
+	}
+	if inNvmetTree(path) {
+		// SH18: the nvmet configfs tree is listed by `ls` alone. A listing
+		// of it here took the wrong path, and it does not answer.
+		return nil, context.DeadlineExceeded
+	}
+	if !f.dirs[path] {
+		return nil, fmt.Errorf("no such directory: %s: %w", path,
+			fs.ErrNotExist)
+	}
+	if pending := f.pendingNs[path]; pending != nil {
+		if pending.misses > 0 {
+			pending.misses--
+		} else {
+			f.addNsSysfs(pending.conn)
+			delete(f.pendingNs, path)
+		}
+	}
+	return f.children(path), nil
+}
+
+// listHookErr applies the command hooks to a listing's line, in runCommand's
+// order: failCmd* answers an I/O error part-way through the listing, and
+// killCmd* and killCmdNoEffect* a listing the soft timeout cut off — a
+// listing changes nothing, so the two kill halves are one. Called with f.mu
+// held.
+func (f *fakeNode) listHookErr(line, path string) error {
+	failed := &fs.PathError{Op: "readdirent", Path: path, Err: syscall.EIO}
+	for key := range f.failCmd {
+		if strings.Contains(line, key) {
+			delete(f.failCmd, key)
+			return failed
+		}
+	}
+	for key := range f.failCmdAlways {
+		if strings.Contains(line, key) {
+			return failed
+		}
+	}
+	if takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line) ||
+		takeKill(f.killCmd, f.killCmdAlways, line) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// inNvmetTree says whether path is in the nvmet configfs tree, the one tree
+// the agent lists with `ls` (SH18).
+func inNvmetTree(path string) bool {
+	return path == agent.NvmetRoot ||
+		strings.HasPrefix(path, agent.NvmetRoot+"/")
 }
 
 func (f *fakeNode) writeFile(
@@ -832,6 +907,13 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if name == "ls" && !inNvmetTree(args[len(args)-1]) {
+		// The agent lists sysfs and its local store in its own process
+		// (readDir) and the nvmet configfs tree alone with `ls` (SH17,
+		// SH18): an `ls` of anything else took the wrong path, and it gets
+		// the answer of a run that never reported.
+		return killedCmdResult()
+	}
 	f.dispatchStderr = ""
 	stdout, code := f.dispatch(name, args, stdin)
 	if killed {
@@ -966,18 +1048,12 @@ func childOf(dir, entry string) (string, bool) {
 	return rest, true
 }
 
+// cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only
+// tree the agent lists with `ls` (runCommand refuses any other).
 func (f *fakeNode) cmdLs(args []string) (string, int) {
 	path := args[len(args)-1]
 	if !f.dirs[path] {
 		return "", 2
-	}
-	if pending := f.pendingNs[path]; pending != nil {
-		if pending.misses > 0 {
-			pending.misses--
-		} else {
-			f.addNsSysfs(pending.conn)
-			delete(f.pendingNs, path)
-		}
 	}
 	return strings.Join(f.children(path), "\n") + "\n", 0
 }

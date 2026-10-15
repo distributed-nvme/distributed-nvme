@@ -176,6 +176,9 @@ func (s *CnAgentServer) convergeCntlr(
 	// later pass got that far. Coming first, it also comes before L10's
 	// disconnect, which is what releases a prober wedged on a pathless leg.
 	s.stopLegProbers(st, wantedProbers(plan))
+	// CN10: the pass's NVMe walk, the sweep's list of connections and where
+	// the build's lookups find their entries until the build marks it stale.
+	plan.walk = s.newPassWalk(ctx)
 	sweep := s.sweepCntlr(ctx, st, plan, true)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
@@ -276,11 +279,12 @@ func (s *CnAgentServer) build(
 	}
 
 	// Groups (CN12) — a standby has none (architecture.md, Standby cntlr).
-	// One /sys/block walk serves
-	// every group of the pass (Md.Walk).
+	// One /sys/block walk serves every group of the pass (Md.Walk), and the
+	// pool concats after them take each md group's number from the same walk
+	// (mdDevNo), which an assembly here brings up to date (Md.Refresh).
+	plan.mdWalks = &mdWalkOnce{md: s.md}
 	late := false
 	if plan.wantGrp {
-		walks := &mdWalkOnce{md: s.md}
 		for _, gp := range plan.grps {
 			if gp.deferred {
 				// [D15]: a leg of leg_list is still provisioning, so there is no
@@ -291,7 +295,7 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			err := s.ensureGroup(ctx, gp, available, walks)
+			err := s.ensureGroup(ctx, plan, gp, available)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
 			if gp.hasLateMember(available) {
@@ -500,11 +504,11 @@ func (s *CnAgentServer) build(
 				// A held ns-dev is not where its plan wants it, and nothing
 				// else is sure to re-drive the pass that puts it there: a
 				// hold that an unanswered `dmsetup ls` alone caused leaves
-				// the Check verdict clean once the listing answers, and the
-				// worker re-syncs on a revision or a reply code, never on a
-				// row. So the hold registers the CN10 retry, whose next
-				// attempt lists afresh and, with no dm-clone left to wait
-				// for, reloads the ns-dev.
+				// the Check verdict, which lists the node from the round's
+				// own reading, clean, and the worker re-syncs on a revision
+				// or a reply code, never on a row. So the hold registers the
+				// CN10 retry, whose next attempt lists afresh and, with no
+				// dm-clone left to wait for, reloads the ns-dev.
 				s.startConnectRetry(st, plan)
 				retryNeeded = true
 			}

@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
@@ -397,6 +400,91 @@ func TestCmdErrorText(t *testing.T) {
 				fmt.Sprint(args) {
 				t.Errorf("command line = %s %v, want %s %v",
 					cmdErr.Name, cmdErr.Args, name, args)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A listing in the agent's own process: absent only when missing
+// ---------------------------------------------------------------------------
+
+// TestOsBaseReadDirAbsentOnlyForMissing pins the split of a listing made in
+// the agent's own process (osclient.md, ReadDir): only a directory that does
+// not exist is absent. Every other failure — an I/O error part-way through,
+// a path that is not a directory, a listing cut off at the soft timeout — is
+// an error that names the listing, never an empty directory: a caller that
+// enumerates the node acts on what a listing leaves out as gone. Each
+// listing reaches the OsClient on a ctx carrying the SH15 soft timeout.
+func TestOsBaseReadDirAbsentOnlyForMissing(t *testing.T) {
+	const path = "/sys/block/md127/md"
+	for _, tc := range []struct {
+		name  string
+		names []string
+		err   error
+		// present and fails are what ListDir must answer.
+		present bool
+		fails   bool
+	}{
+		{name: "listed", names: []string{"array_state", "dev-dm-3"},
+			present: true},
+		{name: "empty", present: true},
+		{name: "missing", err: &fs.PathError{
+			Op: "open", Path: path, Err: syscall.ENOENT}},
+		{name: "an I/O error part-way through", err: &fs.PathError{
+			Op: "readdirent", Path: path, Err: syscall.EIO}, fails: true},
+		{name: "not a directory", err: &fs.PathError{
+			Op: "open", Path: path, Err: syscall.ENOTDIR}, fails: true},
+		{name: "cut off at the soft timeout",
+			err: context.DeadlineExceeded, fails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var listed []string
+			oc := &common.FakeOsClient{
+				ReadDirFn: func(
+					ctx context.Context, got string,
+				) ([]string, error) {
+					listed = append(listed, got)
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) >
+						common.CmdSoftTimeout*time.Second {
+						t.Errorf("the listing of %s reached the OsClient "+
+							"without the SH15 soft timeout", got)
+					}
+					return tc.names, tc.err
+				},
+			}
+			names, present, err := NewCmd(oc).ListDir(
+				context.Background(), path)
+			if len(listed) != 1 || listed[0] != path {
+				t.Fatalf("listings = %q, want %s once", listed, path)
+			}
+			if !tc.fails {
+				if err != nil || present != tc.present ||
+					fmt.Sprint(names) != fmt.Sprint(tc.names) {
+					t.Fatalf("ListDir = (%q, %v, %v), want (%q, %v, nil)",
+						names, present, err, tc.names, tc.present)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a listing that did not answer read as (%q, "+
+					"present=%v): an absent or empty directory", names,
+					present)
+			}
+			if present || names != nil {
+				t.Errorf("a failed listing came back with (%q, present=%v)",
+					names, present)
+			}
+			if !strings.Contains(err.Error(), "list "+path) {
+				t.Errorf("error %q does not name the listing", err)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("error %q does not carry the listing's own %v",
+					err, tc.err)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("error %q reads as a missing directory", err)
 			}
 		})
 	}

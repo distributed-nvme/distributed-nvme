@@ -1,10 +1,11 @@
 # osclient.md — OS client
 
 This document owns the one path every dnv binary takes to the operating
-system: the `OsClient` interface for OS commands and for file, protobuf and
-raw block IO, its production implementation `LimitedOsClient` with its
-concurrency limit, its command timeouts and kill rule, the guarantees of each
-operation (the atomic replace and fsync of a file write, the exact-length
+system: the `OsClient` interface for OS commands, for directory listings and
+for file, protobuf and raw block IO, its production implementation
+`LimitedOsClient` with its concurrency limit, its command timeouts and kill
+rule, the guarantees of each operation (a listing's names, all of them in byte
+order or none; the atomic replace and fsync of a file write; the exact-length
 read and fsynced write of a block), the exported raw helpers and the probe-IO
 carve-out that is the one sanctioned bypass, and what emitting the record of
 each operation requires. It leans on `log.md` for the helpers it reuses
@@ -25,13 +26,14 @@ it.
   `constants.go` and `name_fmt.go` (the `Local*Path` files that go through
   `ReadProto` and `WriteProto`).
 * Consumers: `dnv-agent` in both roles, for its dmsetup, mdadm, nvme and
-  nvmet-configfs work and for persisting the `Local*Path` protobuf state
-  files. **All** OS command execution and disk file IO in production code
-  goes through an `OsClient`
-  — never call `os/exec` or `os.ReadFile`/`os.WriteFile` directly outside
-  this file. This is what makes the logging rules of `log.md` R8 (its first
-  two items) enforceable and makes every consumer unit-testable via
-  `FakeOsClient`. There is exactly **one** sanctioned exception in
+  nvmet-configfs work, for its listings of sysfs and of its local store, and
+  for persisting the `Local*Path` protobuf state files. **All** OS command
+  execution, directory listing and disk file IO in production code goes
+  through an `OsClient` — never call `os/exec` or
+  `os.ReadFile`/`os.WriteFile`, and never read a directory, directly outside
+  this file. This is what makes the logging rules of `log.md` R8 (its first,
+  second and fifth items) enforceable and makes every consumer unit-testable
+  via `FakeOsClient`. There is exactly **one** sanctioned exception in
   production code, recorded under "Exported raw helpers and the probe-IO
   carve-out": the CN11 leg-health probers call the package-level helpers
   `WriteBlockAt` / `ReadBlockDirectAt` directly — outside the semaphore,
@@ -60,6 +62,12 @@ the method set is exactly the following, each taking the caller's ctx:
 * `ReadFile` loads the whole file at a path into memory as a string; the
   error is non-nil when the ctx is cancelled, the file is missing or the IO
   fails.
+* `ReadDir` lists the directory at a path in the caller's own process and
+  returns every name in it but "." and "..", untrimmed, names that start
+  with a dot included, sorted in byte order (the order `ls` prints in the C
+  locale); it opens no entry. A missing directory is an error wrapping
+  `fs.ErrNotExist`; any other failure — a path that is not a directory, a
+  read that fails part-way through — is an error, with no names.
 * `WriteFile` creates or overwrites a file with string data under the
   default file permissions, by atomic replace.
 * `WriteFileDirect` writes string data straight into the file at a path —
@@ -80,10 +88,11 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * `NewLimitedOsClient` takes the limit; a limit of zero or less means "use
   `DefaultOsClientLimit`", the default cap on in-flight operations
-  (commands, file IO and proto IO combined) that `constants.go` holds. Its
-  reason: during convergence an agent fans out many dmsetup, mdadm, nvme and
-  blkdiscard invocations plus state-file writes, and the default bounds fork
-  and disk pressure while leaving ample parallelism.
+  (commands, directory listings, file IO and proto IO combined) that
+  `constants.go` holds. Its reason: during convergence an agent fans out
+  many dmsetup, mdadm, nvme and blkdiscard invocations plus state-file
+  writes, and the default bounds fork and disk pressure while leaving ample
+  parallelism.
 * The limit caps the **sum of in-flight calls across all interface
   methods**. It deliberately does **not** cover the package-level helpers of
   the carve-out: probe IO must never consume a slot. One weighted semaphore
@@ -159,17 +168,21 @@ the method set is exactly the following, each taking the caller's ctx:
   those extents, and the next allocation hands them out twice.
 
   `agent.Reported` (`agent/oswrap.go`) is the one predicate — a nil error,
-  or an exit code above zero — and `osBase.runProbe` is the only probe
-  wrapper that applies it, so it is the one place a probe's exit code is
-  classified. Every probe whose non-zero exit means "absent" runs through
-  it, a role package's own through `Cmd.RunProbe` or `Cmd.ListDir`, and
-  answers "absent" only for a reported non-zero exit and an error for a run
-  that did not answer; `dnagent.md` SH15 names the primitives whose callers
-  act on that "absent".
-  The predicate's one other caller, `Dm.BlkZeroout`, is not a probe: it returns
-  the verdict as answered, so the `dnagent.md` DN9 zeroing loop can tell a
-  batch the soft timeout killed from one the tool refused. The enumerators
-  a removal decision is taken from — `Dm.List`, `Md.ListArrays`,
+  or an exit code above zero — and `osBase.runProbe` is the one probe
+  wrapper that applies it to a probe whose non-zero exit means "absent",
+  so it is the one place such an exit code is classified; the two
+  whole-node dm listings below apply it under their own rule. Every probe
+  whose non-zero exit means "absent" runs through it, a role package's own through `Cmd.RunProbe`, and answers "absent"
+  only for a reported non-zero exit and an error for a run that did not
+  answer; `Nvmet` lists the nvmet configfs tree with `ls` through it
+  (`dnagent.md` SH18). `Cmd.ListDir` lists sysfs in the agent's own process
+  through `ReadDir` instead, and answers "absent" only for
+  `fs.ErrNotExist`. `dnagent.md` SH15 names the primitives whose callers act
+  on either "absent".
+  `Dm.BlkZeroout` applies the predicate as well and is not a probe: it
+  returns the verdict as answered, so the `dnagent.md` DN9 zeroing loop
+  can tell a batch the soft timeout killed from one the tool refused. The
+  enumerators a removal decision is taken from — `Dm.List`, `Md.ListArrays`,
   `NvmeHost.ListAllSubsys`, `Nvmet.ListSubsystems` — and `Md.Gone`, the
   probe that judges a stop, propagate that error to their caller instead of
   answering "nothing there"; the md walk applies the same rule
@@ -181,14 +194,24 @@ the method set is exactly the following, each taking the caller's ctx:
   zero and prints "No devices found" on an empty node, so a failure there
   is never an empty listing. `CloneMeta.LoopDevices` does the same for
   `losetup --associated`, which exits zero with no output when nothing is
-  attached. The file-read half of the same rule is `osBase.readAttrStrict`
+  attached. Unlike `Dm.List`, the two whole-node listings that a cntlr's
+  check round or info read takes — `Dm.ListInfo`, each device's
+  number and attr flags, and `Dm.ListTables`, each device's live table —
+  answer with the devices they name even when `dmsetup` exits above zero,
+  as it does when a device goes away during the listing. Such a listing is
+  partial, and so is one with a line the agent cannot read: it can lack a
+  device the node holds. A listing whose process never reported, or in
+  which the agent can read no device, did not answer, but "No devices
+  found" alone, with exit zero, is an empty node. Why a cntlr's verdict may
+  rest on a partial listing is `cnagent.md` CN30's.
+  The file-read half of the same rule is `osBase.readAttrStrict`
   over `ReadFile`: only `fs.ErrNotExist` is "absent", every other error
   propagates, which is what keeps a stalled sysfs or configfs read
   (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, `Nvmet.NsAnaGrpId`, the
   "enable" reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`, the
-  attribute reads of `Nvmet.ProbePortState`, the port read of `cnagent.md`
-  CN30's verdict, and the cn leg walk's "subsysnqn" read, through
-  `Cmd.ReadAttr`) from making a live object read as an absent one.
+  attribute reads of `Nvmet.ProbePortState`, and the port read of
+  `cnagent.md` CN30's verdict) from making a live object read as an absent
+  one.
 
 ### ReadFile / WriteFile / WriteFileDirect
 
@@ -226,6 +249,34 @@ the method set is exactly the following, each taking the caller's ctx:
   `WriteFile` can never succeed there. Use it **only** for such attribute
   writes; the agents' local-store state files keep using
   `WriteFile`/`WriteProto` (`dnagent.md` SH18).
+
+### ReadDir
+
+* `ReadDir` lists a directory in the agent's own process; no child process
+  runs. Reason: an agent lists many sysfs directories in one check round or
+  converge, and starting a process for each listing costs far more than the
+  listing itself. The nvmet configfs tree is never listed this way
+  (`dnagent.md` SH18).
+* Like `ReadFile`, it holds one semaphore slot and checks the ctx error after
+  acquiring it. That is its last cancellation point: the listing itself is
+  not cancelable, and one the kernel holds returns only when the kernel does
+  (`dnagent.md` SH13).
+* A path that is not a directory fails at the open and never waits on what
+  sits there, a FIFO included, which a plain open would wait on until a
+  writer comes. A symlink to a directory lists that directory: each entry of
+  a sysfs class or block directory is such a link.
+* It reads the names alone: it opens and stats no entry.
+* It returns every name but "." and "..", untrimmed, names that start with a
+  dot included, which `ls` leaves out and which no caller acts on: sysfs
+  holds none, and the local store keeps only the names of its kinds
+  (`dnagent.md` SH6). The names are sorted in byte order, the order `ls` prints in the C
+  locale. The order is fixed because callers take the first match, such as
+  a lookup that stops at the first subsystem entry naming its NQN.
+* A missing directory is absent: the error wraps `fs.ErrNotExist`. Every
+  other failure — a path that is not a directory, a read that fails part-way
+  through — is an error that comes with no names, and the caller reads it as
+  a listing that did not answer (RunCommand). Reason: a part of a listing
+  read as the whole would make a present entry read as absent.
 
 ### ReadProto / WriteProto
 
@@ -391,9 +442,9 @@ never be confused for one another.
 
 Notes:
 
-* Command stdin, stdout and stderr are logged in full (no truncation) — the
-  `TruncForLog` rule (`LogStrDataLimit` characters) applies to file string
-  data only.
+* Command stdin, stdout and stderr, and every name of a directory listing,
+  are logged in full, and `TruncForLog` cuts file string data only
+  (`log.md`, R8, R11 and OS commands and file IO).
 * `PbToLogValue` already reduces embedded `bytes` fields (the `bitmap` of a
   persisted `PushMigrBitmapRequest`, for one) to a byte count, so large
   payloads never reach the log.
@@ -408,7 +459,10 @@ Notes:
 
 `FakeOsClient` is the configurable `OsClient` test double: a function field
 per interface method, of which a test sets only the ones it needs; an unset
-field succeeds with zero values. It is exported — not a `_test.go` file — so
+field succeeds with zero values. An unset listing field answers an empty
+listing, never a missing directory, so a test that expects a listing to fail
+or its directory to be missing sets that field and checks that it ran. It is
+exported — not a `_test.go` file — so
 tests in other packages can reuse it. It has no
 field for the direct read: the probe read is not on the interface, and probe
 IO is faked through the cn agent's own probe-IO dependency (`cnagent.md`,

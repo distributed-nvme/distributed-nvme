@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,16 +31,22 @@ type fakeNode struct {
 	mu sync.Mutex
 
 	calls []string
-	// sysfsNoDeadline records every /sys read that arrived on a ctx carrying
-	// no deadline. The leg walk's sysfs reads carry the SH15 soft timeout
-	// (readSysfs takes it from agent.CmdCtx), so this must stay empty.
+	// sysfsNoDeadline records every /sys read or listing that arrived on a
+	// ctx carrying no deadline. The NVMe walk's and the md walk's reads and
+	// listings carry the SH15 soft timeout, which the shared code they run
+	// through takes from cmdCtx (agent/oswrap.go), so this must stay empty.
 	sysfsNoDeadline []string
-	// traced is every command and file read keyed by the trace id of the
-	// ctx it ran on: the trace_id its `os command` / `os read file` record
-	// carries in production (log.md R5); "" for a ctx without one.
+	// traced is every command, file read and listing keyed by the trace id
+	// of the ctx it ran on: the trace_id its `os command` / `os read file` /
+	// `os read dir` record carries in production (log.md R5); "" for a ctx
+	// without one.
 	traced map[string][]string
 
-	// block devices
+	// block devices, by /dev path. The number of an md array, an NVMe
+	// multipath head and a loop device is published in sysfs too, at
+	// /sys/block/<kname>/dev, which the agent reads it from (blockDevNo):
+	// publishBlockDev and dropBlockDev keep the two in step, and an md
+	// array's comes from its own fakeArray.devNo (publishArray).
 	devSize   map[string]uint64
 	devNo     map[string]string
 	nextMinor int
@@ -59,8 +66,19 @@ type fakeNode struct {
 	// (CN21), at SP_LEVEL_DISABLE or otherwise, runs under the same node
 	// *read* lock and can remove a wrapper between the `ls` and the
 	// `dmsetup table` of that one name — and this is how the suite
-	// reproduces that window deterministically ([D14]).
+	// reproduces that window deterministically ([D14]). The whole-node
+	// `dmsetup info` listing names them too, with no numbers, and the
+	// `dmsetup table --concise` listing does not: a device there at the
+	// reading's info listing and gone by its table listing.
 	lsGhosts []string
+	// infoOmit and tableOmit are names the whole-node `dmsetup info` and
+	// `dmsetup table --concise` listings leave out while the devices stay:
+	// what dmsetup prints when a device goes away during the listing, with
+	// the device back, or another cntlr's, by the time the agent reads it on
+	// its own. A listing that left a name out exits 1 with the stderr the
+	// lab's dmsetup writes for a device gone mid-listing.
+	infoOmit  map[string]bool
+	tableOmit map[string]bool
 	// dmLsLegacyDevNo switches `dmsetup ls` to the "(253, 4)" device number
 	// spelling. Dm.List normalizes both into "253:4"; the lab kernels print
 	// the colon form, so this is the only way the second branch of that
@@ -150,6 +168,15 @@ type fakeNode struct {
 	// pendingHeads are the heads nsHeadAfter deferred, keyed by the
 	// subsystem's sysfs directory.
 	pendingHeads map[string]*pendingHead
+	// afterList and afterRead change the node while a pass reads it: each
+	// runs once, keyed by the exact path, right after a listing (readDir)
+	// or a file read (readFile) of that path has its answer, which the
+	// change does not alter — a subsystem dropped, and its freed number
+	// given to another one (plantSubsys), between a walk's read of an entry
+	// and a lookup of it, say. They run under the fake's lock and must not
+	// take it.
+	afterList map[string]func()
+	afterRead map[string]func()
 
 	// thinDumps is the scripted `thin_dump` output per pool metadata path;
 	// without one the fake synthesizes an empty document from the pool whose
@@ -169,7 +196,10 @@ type fakeNode struct {
 	// failCmd fails the first matching command; failCmdAlways every one.
 	// Both model "the tool ran and answered no": exit code 1, a non-nil
 	// error, and no dispatch, so the fake's state is left exactly as the
-	// real kernel would leave it after a refused ioctl.
+	// real kernel would leave it after a refused ioctl. These and the kill
+	// hooks below also match a listing in the agent's own process by its
+	// line, "list <path>", which neither half answers as absent
+	// (listHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
 	// killCmd / killCmdAlways model the OTHER half of agent.Reported: a
@@ -253,6 +283,11 @@ type fakeDm struct {
 type fakeArray struct {
 	name    string // the mdadm --name value
 	members []string
+	// devNo is the array's number, which /sys/block/{node}/dev publishes:
+	// the one mdadm's create or assembly gave it, set apart from
+	// fakeNode.devNo of its /dev/md/{name} link, so a test can point that
+	// link elsewhere and keep the array's own number.
+	devNo string
 	// node is the kernel's own name for the array: mdN by default
 	// (installArray numbers it from nextMdMinor), or md_<name> when a test
 	// sets it, as mdadm.conf `CREATE names=yes` makes it. It is what
@@ -315,6 +350,8 @@ func newFakeNode() *fakeNode {
 		nextMinor:     1,
 		dms:           make(map[string]*fakeDm),
 		thinPools:     make(map[string]map[uint32]bool),
+		infoOmit:      make(map[string]bool),
+		tableOmit:     make(map[string]bool),
 		arrays:        make(map[string]*fakeArray),
 		superblocks:   make(map[string]bool),
 		assembleDrop:  make(map[string]bool),
@@ -336,6 +373,8 @@ func newFakeNode() *fakeNode {
 		duringConnect: make(map[string]func()),
 		nsHeadAfter:   make(map[string]int),
 		pendingHeads:  make(map[string]*pendingHead),
+		afterList:     make(map[string]func()),
+		afterRead:     make(map[string]func()),
 		thinDumps:     make(map[string]string),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
@@ -357,8 +396,8 @@ func newFakeNode() *fakeNode {
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
-	// /sys/block exists on every node, empty or not: an `ls` of it that does
-	// not answer is an error to Md.ListArrays, never "this node runs no
+	// /sys/block exists on every node, empty or not: a listing of it that
+	// does not answer is an error to Md.ListArrays, never "this node runs no
 	// arrays", so the fake must not model a missing directory by default.
 	f.dirs[sysfsBlockDir] = true
 	return f
@@ -401,6 +440,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 	return &common.FakeOsClient{
 		RunCommandFn:      f.runCommand,
 		ReadFileFn:        f.readFile,
+		ReadDirFn:         f.readDir,
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
@@ -485,7 +525,7 @@ func (f *fakeNode) Reset() {
 	f.stdouts = nil
 }
 
-// SysfsNoDeadline is the SH15 evidence: the sysfs paths read on a
+// SysfsNoDeadline is the SH15 evidence: the sysfs paths read or listed on a
 // ctx with no SH15 deadline. Assertions live in cnagent_test.go, so that the
 // fake never touches *testing.T from the prober goroutines calling into it.
 func (f *fakeNode) SysfsNoDeadline() []string {
@@ -496,7 +536,7 @@ func (f *fakeNode) SysfsNoDeadline() []string {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "cmd lsblk ", "cmd stat ", "cmd findmnt ",
+	"cmd ls ", "list ", "cmd lsblk ", "cmd stat ", "cmd findmnt ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	"cmd dmsetup ls", "cmd nvme list-subsys",
 	"cmd losetup --associated", "cmd mdadm --detail", "cmd mdadm --examine",
@@ -566,6 +606,17 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		// plain-file path and is deliberately not covered by the prefix.
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
 	}
+	data, err := f.fileAnswer(path)
+	if after := f.afterRead[path]; after != nil {
+		delete(f.afterRead, path)
+		after()
+	}
+	return data, err
+}
+
+// fileAnswer is what a read of path answers: a hook's failure, an attribute
+// that exists and fails, its contents, or not there. Called with f.mu held.
+func (f *fakeNode) fileAnswer(path string) (string, error) {
 	if err := f.readHookErr(path); err != nil {
 		return "", err
 	}
@@ -618,6 +669,95 @@ func (f *fakeNode) readHookErr(path string) error {
 		}
 	}
 	return nil
+}
+
+// readDir answers OsClient.ReadDir: a listing in the agent's own process,
+// of sysfs or of the local store, from the directory model. It records
+// "list <path>", and the command hooks match that line as they match a
+// command line, so a key "list "+X catches every listing of a path that
+// starts with X. A fail hook answers an I/O error part-way through the
+// listing and a kill hook a listing the soft timeout cut off: both did not
+// answer, never a missing directory, which only the model says. A hooked
+// listing advances no pending head.
+func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := "list " + path
+	f.record("%s", line)
+	if f.traceOf != nil {
+		tid, _ := common.TraceIdFromCtx(ctx)
+		f.traceOf[line] = tid
+	}
+	f.recordTrace(ctx, line)
+	if _, ok := ctx.Deadline(); !ok && strings.HasPrefix(path, "/sys/") {
+		// SH15, as for readFile.
+		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
+	}
+	names, err := f.dirAnswer(line, path)
+	if after := f.afterList[path]; after != nil {
+		delete(f.afterList, path)
+		after()
+	}
+	return names, err
+}
+
+// dirAnswer is what the listing line of path answers: a hook's failure, the
+// holders of a loop device, the directory's entries, or not there. Called
+// with f.mu held.
+func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
+	if err := f.listHookErr(line, path); err != nil {
+		return nil, err
+	}
+	if inNvmetTree(path) {
+		// SH18: the nvmet configfs tree is listed by `ls` alone. A listing
+		// of it here took the wrong path, and it does not answer.
+		return nil, context.DeadlineExceeded
+	}
+	if dev, ok := f.loopOfHoldersDir(path); ok {
+		return f.holdersOfLoop(dev), nil
+	}
+	if !f.dirs[path] {
+		return nil, fmt.Errorf("no such directory: %s: %w", path,
+			fs.ErrNotExist)
+	}
+	f.countHeadListing(path)
+	return f.children(path), nil
+}
+
+// listHookErr applies the command hooks to a listing's line, in runCommand's
+// order: failCmd* answers an I/O error part-way through the listing, and
+// killCmd*, killCmdNth and killCmdNoEffect* a listing the soft timeout cut
+// off — a listing changes nothing, so the two kill halves are one. Called
+// with f.mu held.
+func (f *fakeNode) listHookErr(line, path string) error {
+	failed := &fs.PathError{Op: "readdirent", Path: path, Err: syscall.EIO}
+	for key := range f.failCmd {
+		if strings.Contains(line, key) {
+			delete(f.failCmd, key)
+			return failed
+		}
+	}
+	for key := range f.failCmdAlways {
+		if strings.Contains(line, key) {
+			return failed
+		}
+	}
+	killedNth := takeKillNth(f.killCmdNth, line)
+	if takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line) ||
+		takeKill(f.killCmd, f.killCmdAlways, line) || killedNth {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// inNvmetTree says whether path is in the nvmet configfs tree, the one tree
+// the agent lists with `ls` (SH18).
+func inNvmetTree(path string) bool {
+	return path == agent.NvmetRoot ||
+		strings.HasPrefix(path, agent.NvmetRoot+"/")
 }
 
 func (f *fakeNode) writeFile(
@@ -877,6 +1017,13 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if name == "ls" && !inNvmetTree(args[len(args)-1]) {
+		// The agent lists sysfs and its local store in its own process
+		// (readDir) and the nvmet configfs tree alone with `ls` (SH18): an
+		// `ls` of anything else took the wrong path, and it gets the answer
+		// of a run that never reported.
+		return killedCmdResult()
+	}
 	f.dispatchStderr = ""
 	stdout, code := f.dispatch(name, args, stdin)
 	if f.stdouts == nil {
@@ -1032,18 +1179,21 @@ func childOf(dir, entry string) (string, bool) {
 	return rest, true
 }
 
+// cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only
+// tree the agent lists with `ls`; every listing of sysfs, and the local
+// store's, is readDir's.
 func (f *fakeNode) cmdLs(args []string) (string, int) {
 	path := args[len(args)-1]
-	if dev, ok := f.loopOfHoldersDir(path); ok {
-		holders := f.holdersOfLoop(dev)
-		if len(holders) == 0 {
-			return "", 0
-		}
-		return strings.Join(holders, "\n") + "\n", 0
-	}
 	if !f.dirs[path] {
 		return "", 2
 	}
+	return strings.Join(f.children(path), "\n") + "\n", 0
+}
+
+// countHeadListing counts one listing of a subsystem directory against the
+// head nsHeadAfter deferred there, and adds the head on the listing that
+// shows it.
+func (f *fakeNode) countHeadListing(path string) {
 	if head := f.pendingHeads[path]; head != nil {
 		head.reads++
 		if head.reads >= head.after {
@@ -1051,7 +1201,6 @@ func (f *fakeNode) cmdLs(args []string) (string, int) {
 			delete(f.pendingHeads, path)
 		}
 	}
-	return strings.Join(f.children(path), "\n") + "\n", 0
 }
 
 func (f *fakeNode) cmdRm(args []string) (string, int) {
@@ -1137,6 +1286,12 @@ func (f *fakeNode) cmdLn(args []string) (string, int) {
 	return "", 0
 }
 
+// cmdLsblk answers the cn agent's one lsblk: Md.NameInUse asks whether an
+// array runs under /dev/md/{name}, and uses no number it reads. Every number
+// the agent uses comes from dmsetup info or /sys/block/{kname}/dev
+// (dmDevNo, blockDevNo, mdDevNo), so a MAJ:MIN read of any other path took
+// the wrong path: it gets the answer of a run that never reported, which
+// names that read, and so fails whatever test it reaches.
 func (f *fakeNode) cmdLsblk(args []string) (string, int) {
 	path := args[len(args)-1]
 	if contains(args, "SIZE") {
@@ -1145,6 +1300,11 @@ func (f *fakeNode) cmdLsblk(args []string) (string, int) {
 			return "", 32
 		}
 		return fmt.Sprintf("%d\n", size), 0
+	}
+	if !strings.HasPrefix(path, "/dev/md/") {
+		f.dispatchStderr = "fake: the cn agent reads no device number " +
+			"with lsblk: " + path
+		return "", -1
 	}
 	devNo, ok := f.devNo[path]
 	if !ok {
@@ -1164,9 +1324,14 @@ func contains(list []string, want string) bool {
 
 // heldBy reports the dm device or md array whose live table still maps path,
 // i.e. whoever holds it open. dm and md both refuse to release a device that
-// something above them still references.
+// something above them still references. An md array is held by whatever
+// maps its own number, the one /sys/block publishes (fakeArray.devNo),
+// wherever a test points its /dev/md/{name} link.
 func (f *fakeNode) heldBy(path string) string {
 	devNo := f.devNo[path]
+	if array := f.arrays[path]; array != nil && array.devNo != "" {
+		devNo = array.devNo
+	}
 	for name, dm := range f.dms {
 		if f.devNo["/dev/mapper/"+name] == devNo && devNo != "" {
 			continue
@@ -1253,22 +1418,36 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		}
 		return sb.String(), 0
 	case "info":
-		name := args[len(args)-1]
+		fields, sep, name := parseDmInfoFlags(args[1:])
+		if name == "" {
+			if fields != "name,major,minor,attr" {
+				return "", 3
+			}
+			return f.dmInfoListing(sep)
+		}
 		dm, ok := f.dms[name]
-		if !ok {
-			return "", 1
+		switch fields {
+		case "attr":
+			if !ok {
+				return "", 1
+			}
+			return dmAttr(dm) + "\n", 0
+		case "name,major,minor,attr":
+			// The per-device read with the number (Dm.InfoDevNo): one line,
+			// or the lab's refusal of a name that is not there.
+			if !ok {
+				f.dispatchStderr = "Device does not exist.\nCommand failed."
+				return "", 1
+			}
+			major, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
+			return strings.Join(
+				[]string{name, major, minor, dmAttr(dm)}, sep) + "\n", 0
 		}
-		attr := []byte("L---")
-		if dm.suspended {
-			attr[2] = 's'
-		}
-		if dm.readOnly {
-			attr[3] = 'r'
-		} else {
-			attr[3] = 'w'
-		}
-		return string(attr) + "\n", 0
+		return "", 3
 	case "table":
+		if len(args) == 2 && args[1] == "--concise" {
+			return f.dmTableListing()
+		}
 		dm, ok := f.dms[args[1]]
 		if !ok {
 			return "", 1
@@ -1315,6 +1494,168 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		return f.dmMessage(args)
 	}
 	return "", 3
+}
+
+// dmInfoListing is the whole-node `dmsetup info` listing (Dm.ListInfo): one
+// line per device, name/MAJ/MIN/ATTR in sorted order, a name `dmsetup ls`
+// names after the device went (lsGhosts) with no numbers, and on a
+// node with no device at all the lab's "No devices found" with exit 0. A
+// name infoOmit leaves out makes the listing exit 1 with the lab's stderr.
+// The fake writes no name that holds the separator.
+func (f *fakeNode) dmInfoListing(sep string) (string, int) {
+	if len(f.dms) == 0 && len(f.lsGhosts) == 0 {
+		return "No devices found\n", 0
+	}
+	type line struct{ name, text string }
+	var lines []line
+	omitted := false
+	for name, dm := range f.dms {
+		if f.infoOmit[name] {
+			omitted = true
+			continue
+		}
+		major, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
+		lines = append(lines, line{name, strings.Join(
+			[]string{name, major, minor, dmAttr(dm)}, sep)})
+	}
+	for _, name := range f.lsGhosts {
+		if _, live := f.dms[name]; live {
+			continue
+		}
+		lines = append(lines, line{name, strings.Join(
+			[]string{name, "", "", "L--w"}, sep)})
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i].name < lines[j].name })
+	var sb strings.Builder
+	for _, l := range lines {
+		sb.WriteString(l.text + "\n")
+	}
+	if omitted {
+		f.dispatchStderr = "Device does not exist.\nCommand failed."
+		return sb.String(), 1
+	}
+	return sb.String(), 0
+}
+
+// dmTableListing is the whole-node `dmsetup table --concise` listing
+// (Dm.ListTables) in the lab's form: per device "name,uuid,minor,flags",
+// then one field per table line, each ending in a space as dmsetup prints
+// it; "," ";" and "\" escaped with a backslash; ";" between devices and one
+// newline at the end; "No devices found" on a node with none. A ghost of
+// lsGhosts is not there. A name tableOmit leaves out makes the listing exit 1
+// with the lab's stderr for a table that went mid-listing.
+func (f *fakeNode) dmTableListing() (string, int) {
+	if len(f.dms) == 0 {
+		return "No devices found\n", 0
+	}
+	names := make([]string, 0, len(f.dms))
+	for name := range f.dms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var records []string
+	var omitted []string
+	for _, name := range names {
+		if f.tableOmit[name] {
+			omitted = append(omitted, name)
+			continue
+		}
+		dm := f.dms[name]
+		_, minor, _ := strings.Cut(f.devNo["/dev/mapper/"+name], ":")
+		flags := "rw"
+		if dm.readOnly {
+			flags = "ro"
+		}
+		fields := []string{dmConciseEscape(name), "", minor, flags}
+		for _, target := range dmTargets(dm.table) {
+			fields = append(fields, dmConciseEscape(target)+" ")
+		}
+		records = append(records, strings.Join(fields, ","))
+	}
+	out := strings.Join(records, ";")
+	if len(records) > 0 {
+		out += "\n"
+	}
+	if len(omitted) > 0 {
+		f.dispatchStderr = "device-mapper: table ioctl on " + omitted[0] +
+			"  failed: No such device or address\nCommand failed."
+		return out, 1
+	}
+	return out, 0
+}
+
+// dmConciseEscape escapes one field of the concise listing as dmsetup does:
+// a backslash before each ",", ";" and "\".
+func dmConciseEscape(field string) string {
+	var sb strings.Builder
+	for i := 0; i < len(field); i++ {
+		switch field[i] {
+		case ',', ';', '\\':
+			sb.WriteByte('\\')
+		}
+		sb.WriteByte(field[i])
+	}
+	return sb.String()
+}
+
+// dmInfoListLine and dmTableListLine are the recorded lines of the two
+// whole-node listings of a reading, exactly: a count by them counts the
+// listings alone, never a per-device read whose line extends them.
+const (
+	dmInfoListLine = "cmd dmsetup info --columns --noheadings --separator / " +
+		"-o name,major,minor,attr"
+	dmTableListLine = "cmd dmsetup table --concise"
+)
+
+// dmNumberRead is the command line, without its "cmd ", of the per-device
+// `dmsetup info` that prints a device's number (Dm.InfoDevNo), up to the
+// device's name. A hook key or a call fragment that appends a name matches
+// the number reads of that device alone, as no dnv name extends another.
+const dmNumberRead = "dmsetup info --columns --noheadings --separator / " +
+	"-o name,major,minor,attr "
+
+// parseDmInfoFlags reads the options of a `dmsetup info`: the fields -o
+// names, the --separator (":" by default, as dmsetup's) and the device name,
+// "" when none is named.
+func parseDmInfoFlags(args []string) (fields, sep, name string) {
+	sep = ":"
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--columns", "-c", "--noheadings":
+		case "-o", "--options":
+			if i+1 < len(args) {
+				i++
+				fields = args[i]
+			}
+		case "--separator":
+			if i+1 < len(args) {
+				i++
+				sep = args[i]
+			}
+		default:
+			name = args[i]
+		}
+	}
+	return fields, sep, name
+}
+
+// dmAttr is a device's `dmsetup info` attr column: "L" for a live table, "-"
+// for a device with none, as the lab's dmsetup prints one created with no
+// table; then "s" when suspended, then "r" for read-only or "w".
+func dmAttr(dm *fakeDm) string {
+	attr := []byte("L---")
+	if strings.TrimSpace(dm.table) == "" {
+		attr[0] = '-'
+	}
+	if dm.suspended {
+		attr[2] = 's'
+	}
+	if dm.readOnly {
+		attr[3] = 'r'
+	} else {
+		attr[3] = 'w'
+	}
+	return string(attr)
 }
 
 func parseDmCreateArgs(args []string, stdin string) (string, string, bool) {
@@ -1482,10 +1823,16 @@ func (f *fakeNode) dmByDevNo(devNo string) *fakeDm {
 
 // checkTableDeps rejects a table naming a device number that does not exist —
 // the kernel's behavior, and what makes an out-of-order build fail in tests.
+// An md array's own number exists whatever its /dev/md/{name} link says.
 func (f *fakeNode) checkTableDeps(table string) int {
-	known := make(map[string]bool, len(f.devNo))
+	known := make(map[string]bool, len(f.devNo)+len(f.arrays))
 	for _, devNo := range f.devNo {
 		known[devNo] = true
+	}
+	for _, array := range f.arrays {
+		if array.devNo != "" {
+			known[array.devNo] = true
+		}
 	}
 	for _, line := range dmTargets(table) {
 		fields := strings.Fields(line)
@@ -1773,6 +2120,7 @@ func (f *fakeNode) mdCreate(args []string) (string, int) {
 	}
 	f.installArray(dev, &fakeArray{name: name, members: members})
 	f.devNo[dev] = f.newDevNo()
+	f.arrays[dev].devNo = f.devNo[dev]
 	f.devSize[dev] = f.arraySize(members)
 	f.publishArray(f.arrays[dev])
 	return "", 0
@@ -1797,6 +2145,7 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	array := &fakeArray{name: name, members: members}
 	f.installArray(dev, array)
 	f.devNo[dev] = f.newDevNo()
+	array.devNo = f.devNo[dev]
 	f.devSize[dev] = f.arraySize(members)
 	f.publishArray(array)
 	return "", 0
@@ -1877,6 +2226,7 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 // kernel publishes:
 //
 //	/sys/block/{node}                               the array node, mdN or md_<name>
+//	/sys/block/{node}/dev                           the array's major:minor
 //	/sys/block/{node}/md/array_state                clean / inactive / clear
 //	/sys/block/{node}/md/degraded                   running arrays only
 //	/sys/block/{node}/md/sync_action                running arrays only
@@ -1893,8 +2243,9 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 // would turn the "inactive" verdict into a read error.
 //
 // It all lives in the ordinary dirs/files maps, exactly like the configfs and
-// nvme-subsystem trees, so `ls -1 /sys/block` picks the arrays up through
-// children() and anything else a test puts under /sys/block keeps listing.
+// nvme-subsystem trees, so a listing of /sys/block picks the arrays up
+// through children() and anything else a test puts under /sys/block keeps
+// listing.
 //
 // "mdN" below stands for either spelling, as in md.go.
 // ---------------------------------------------------------------------------
@@ -1944,6 +2295,9 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 	mdDir := sysfsBlockDir + "/" + array.node + "/md"
 	f.dirs[sysfsBlockDir] = true
 	f.dirs[sysfsBlockDir+"/"+array.node] = true
+	if array.devNo != "" {
+		f.files[sysfsBlockDir+"/"+array.node+"/dev"] = array.devNo + "\n"
+	}
 	f.dirs[mdDir] = true
 	f.files[mdDir+"/array_state"] = array.arrayState + "\n"
 	if mdRunning(array.arrayState) {
@@ -2167,6 +2521,7 @@ func (f *fakeNode) seedArray(dev, name string, members ...string) {
 	if _, ok := f.devNo[dev]; !ok {
 		f.devNo[dev] = f.newDevNo()
 	}
+	array.devNo = f.devNo[dev]
 	f.devSize[dev] = f.arraySize(members)
 	f.publishArray(array)
 }
@@ -2260,6 +2615,7 @@ func (f *fakeNode) cmdLosetup(args []string) (string, int) {
 		f.loops[path] = append(f.loops[path], dev)
 		f.devNo[dev] = f.newDevNo()
 		f.devSize[dev] = f.plain[path]
+		f.publishBlockDev(strings.TrimPrefix(dev, "/dev/"))
 		return dev + "\n", 0
 	}
 	if contains(args, "--detach") {
@@ -2282,8 +2638,7 @@ func (f *fakeNode) cmdLosetup(args []string) (string, int) {
 				break
 			}
 		}
-		delete(f.devNo, dev)
-		delete(f.devSize, dev)
+		f.dropBlockDev(dev)
 		return "", 0
 	}
 	return "", 1
@@ -2386,6 +2741,23 @@ func (f *fakeNode) thinDumpDoc(path string) string {
 // nvme host + the sysfs tree the leg probe walks
 // ---------------------------------------------------------------------------
 
+// The sysfs nvme tree the fake models, where the shared walk reads it
+// (agent/nvmehost.go): the class directories of the subsystems and of the
+// controllers, and the name of a multipath namespace head inside a
+// subsystem's directory.
+const (
+	sysfsNvmeSubsysDir = "/sys/class/nvme-subsystem"
+	sysfsNvmeCtrlDir   = "/sys/class/nvme"
+)
+
+var nvmeNsEntryPattern = regexp.MustCompile(`^nvme\d+n\d+$`)
+
+// endpoint is one transport address a controller is connected to.
+type endpoint struct {
+	trAddr  string
+	trSvcId string
+}
+
 func (f *fakeNode) cmdNvme(args []string) (string, int) {
 	switch args[0] {
 	case "connect":
@@ -2438,28 +2810,49 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	f.dirs[sysfsNvmeCtrlDir] = true
 	subsys, ok := f.subsystems[nqn]
 	if !ok {
-		subsys = &fakeSubsys{idx: f.nextSubsys, nqn: nqn}
-		f.nextSubsys++
-		f.subsystems[nqn] = subsys
-		dir := fmt.Sprintf("%s/nvme-subsys%d", sysfsNvmeSubsysDir, subsys.idx)
-		f.dirs[dir] = true
-		f.files[dir+"/subsysnqn"] = nqn + "\n"
-		nsIdx := uint32(1)
-		if want, ok := f.nsIdxOf[nqn]; ok {
-			nsIdx = want
-		}
-		nsDev := fmt.Sprintf("nvme%dn%d", subsys.idx, nsIdx)
-		if after := f.nsHeadAfter[nqn]; after > 1 {
-			f.pendingHeads[dir] = &pendingHead{
-				after: after, nsDev: nsDev, nsIdx: nsIdx}
-		} else {
-			f.addNsHead(dir, nsDev, nsIdx)
-		}
+		subsys = f.addSubsys(f.nextSubsys, nqn, f.nsHeadAfter[nqn])
 	}
+	f.addCtrl(subsys, trAddr, trSvcId)
+	if during := f.duringConnect[key]; during != nil {
+		during()
+	}
+	return "", 0
+}
+
+// addSubsys adds the entry nvme-subsys<idx> for nqn, with its subsysnqn and
+// its multipath namespace head, which appears on the headAfter-th listing of
+// the entry's directory when headAfter is above 1 (nsHeadAfter). The next
+// connect of a new NQN takes a number above idx.
+func (f *fakeNode) addSubsys(idx int, nqn string, headAfter int) *fakeSubsys {
+	subsys := &fakeSubsys{idx: idx, nqn: nqn}
+	if idx >= f.nextSubsys {
+		f.nextSubsys = idx + 1
+	}
+	f.subsystems[nqn] = subsys
+	dir := fmt.Sprintf("%s/nvme-subsys%d", sysfsNvmeSubsysDir, subsys.idx)
+	f.dirs[dir] = true
+	f.files[dir+"/subsysnqn"] = nqn + "\n"
+	nsIdx := uint32(1)
+	if want, ok := f.nsIdxOf[nqn]; ok {
+		nsIdx = want
+	}
+	nsDev := fmt.Sprintf("nvme%dn%d", subsys.idx, nsIdx)
+	if headAfter > 1 {
+		f.pendingHeads[dir] = &pendingHead{
+			after: headAfter, nsDev: nsDev, nsIdx: nsIdx}
+	} else {
+		f.addNsHead(dir, nsDev, nsIdx)
+	}
+	return subsys
+}
+
+// addCtrl adds a live controller of subsys at one endpoint, with its path
+// device's ana_state (anaOf, else optimized).
+func (f *fakeNode) addCtrl(subsys *fakeSubsys, trAddr, trSvcId string) {
 	ctrlName := fmt.Sprintf("nvme%d", f.nextCtrl)
 	f.nextCtrl++
 	ana := "optimized"
-	if want, ok := f.anaOf[nqn+"|"+trAddr+":"+trSvcId]; ok {
+	if want, ok := f.anaOf[subsys.nqn+"|"+trAddr+":"+trSvcId]; ok {
 		ana = want
 	}
 	pathDev := fmt.Sprintf("nvme%dc%sn1", subsys.idx,
@@ -2480,10 +2873,26 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	f.files[ctrlDir+"/state"] = ctrl.state + "\n"
 	f.dirs[ctrlDir+"/"+pathDev] = true
 	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = ctrl.anaState + "\n"
-	if during := f.duringConnect[key]; during != nil {
-		during()
+}
+
+// plantSubsys connects nqn at the chosen entry number, the way the kernel
+// gives a freed number to the next new subsystem — another cntlr's, or a dn
+// agent's on the same machine: the entry nvme-subsys<idx> with its
+// subsysnqn, its namespace head and one live controller per endpoint, the
+// shape nvmeConnect builds. It runs with f.mu held and never takes it, so an
+// afterList or afterRead hook can call it; a test that calls it anywhere
+// else holds f.mu around it. The number must be free.
+func (f *fakeNode) plantSubsys(idx int, nqn string, eps ...endpoint) {
+	dir := fmt.Sprintf("%s/nvme-subsys%d", sysfsNvmeSubsysDir, idx)
+	if _, taken := f.subsystems[nqn]; taken || f.dirs[dir] {
+		panic(fmt.Sprintf("fake: plantSubsys(%d, %s): taken", idx, nqn))
 	}
-	return "", 0
+	f.dirs[sysfsNvmeSubsysDir] = true
+	f.dirs[sysfsNvmeCtrlDir] = true
+	subsys := f.addSubsys(idx, nqn, 0)
+	for _, ep := range eps {
+		f.addCtrl(subsys, ep.trAddr, ep.trSvcId)
+	}
 }
 
 // addNsHead publishes a subsystem's multipath namespace head: the nvmeXnY
@@ -2493,6 +2902,24 @@ func (f *fakeNode) addNsHead(dir, nsDev string, nsIdx uint32) {
 	f.files[dir+"/"+nsDev+"/nsid"] = fmt.Sprintf("%d\n", nsIdx)
 	f.devNo["/dev/"+nsDev] = f.newDevNo()
 	f.devSize["/dev/"+nsDev] = 1 << 40
+	f.publishBlockDev(nsDev)
+}
+
+// publishBlockDev publishes /sys/block/{kname}/dev, the number the kernel
+// shows for the block device it names kname, from devNo of /dev/{kname}.
+func (f *fakeNode) publishBlockDev(kname string) {
+	f.dirs[sysfsBlockDir+"/"+kname] = true
+	f.files[sysfsBlockDir+"/"+kname+"/dev"] = f.devNo["/dev/"+kname] + "\n"
+}
+
+// dropBlockDev takes a block device away by its /dev path: its number, its
+// size and its /sys/block entry.
+func (f *fakeNode) dropBlockDev(dev string) {
+	delete(f.devNo, dev)
+	delete(f.devSize, dev)
+	root := sysfsBlockDir + "/" + strings.TrimPrefix(dev, "/dev/")
+	delete(f.files, root+"/dev")
+	delete(f.dirs, root)
 }
 
 // dropNsHead takes a connected subsystem's namespace head away and leaves its
@@ -2511,8 +2938,7 @@ func (f *fakeNode) dropNsHead(nqn string) {
 		if ok && nvmeNsEntryPattern.MatchString(name) {
 			delete(f.dirs, entry)
 			delete(f.files, entry+"/nsid")
-			delete(f.devNo, "/dev/"+name)
-			delete(f.devSize, "/dev/"+name)
+			f.dropBlockDev("/dev/" + name)
 		}
 	}
 }
@@ -2547,12 +2973,12 @@ func (f *fakeNode) dropCtrl(subsys *fakeSubsys, ctrl *fakeCtrl) {
 	delete(f.dirs, subsysDir+"/"+ctrl.name)
 	ctrlDir := sysfsNvmeCtrlDir + "/" + ctrl.name
 	for entry := range f.dirs {
-		if strings.HasPrefix(entry, ctrlDir) {
+		if inTree(ctrlDir, entry) {
 			delete(f.dirs, entry)
 		}
 	}
 	for entry := range f.files {
-		if strings.HasPrefix(entry, ctrlDir) {
+		if inTree(ctrlDir, entry) {
 			delete(f.files, entry)
 		}
 	}
@@ -2566,22 +2992,32 @@ func (f *fakeNode) dropCtrl(subsys *fakeSubsys, ctrl *fakeCtrl) {
 	if len(kept) > 0 {
 		return
 	}
+	// Every head of the subsystem goes with its last controller.
 	for entry := range f.dirs {
-		if strings.HasPrefix(entry, subsysDir) {
+		if name, ok := childOf(subsysDir, entry); ok &&
+			nvmeNsEntryPattern.MatchString(name) {
+			f.dropBlockDev("/dev/" + name)
+		}
+	}
+	for entry := range f.dirs {
+		if inTree(subsysDir, entry) {
 			delete(f.dirs, entry)
 		}
 	}
 	for entry := range f.files {
-		if strings.HasPrefix(entry, subsysDir) {
+		if inTree(subsysDir, entry) {
 			delete(f.files, entry)
 		}
 	}
-	delete(f.dirs, subsysDir)
 	delete(f.pendingHeads, subsysDir)
-	nsDev := fmt.Sprintf("/dev/nvme%dn1", subsys.idx)
-	delete(f.devNo, nsDev)
-	delete(f.devSize, nsDev)
+	f.dropBlockDev(fmt.Sprintf("/dev/nvme%dn1", subsys.idx))
 	delete(f.subsystems, subsys.nqn)
+}
+
+// inTree says whether path is dir or lies under it: nvme1's directory holds
+// nothing of nvme10's.
+func inTree(dir, path string) bool {
+	return path == dir || strings.HasPrefix(path, dir+"/")
 }
 
 // deleteCtrlDevice deletes the device of one path's controller and leaves
