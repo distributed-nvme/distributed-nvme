@@ -395,16 +395,25 @@ const (
 	DnMigrDstNsWait  = 1 * time.Second
 	DnMigrDstNsPause = 50 * time.Millisecond
 
-	// DnExportOrphanGrace is the age an unattributable :2: export must exceed
-	// before a sweep may remove it (dnagent.md DN6): one with no namespace,
-	// linked to no nvmet port or only to this agent's own. That shape is
-	// ALSO every export's shape between its subsystem `mkdir` and its
-	// namespace `mkdir`, and on a kernel shared by several dn agents the
-	// build in that window may be a sibling's, whose request this agent
-	// cannot see; only age tells an abandoned one from one in flight. The
-	// age is read from the node — the subsystem directory's mtime, `stat -c
-	// %Y`, in whole seconds — and never remembered. A time.Duration, like the
-	// two above.
+	// DnExportOrphanGrace is the age a namespace-less :2: export must exceed
+	// before a sweep reads its port links and, when it is linked to no nvmet
+	// port or only to this agent's own and no held side claims it, before a
+	// sweep removes it (dnagent.md DN6). Having no namespace is ALSO every
+	// export's shape between its subsystem `mkdir` and its namespace
+	// `mkdir`, and on a kernel shared by several dn agents the build in that
+	// window may be a sibling's, whose request this agent cannot see; only
+	// age tells an abandoned one from one in flight, so a younger one is left
+	// alone whatever port it is linked to. The age comes first because it is
+	// one `stat`, while the port links are an `ls` of the ports directory and
+	// one of each port's links, a child each (dnagent.md SH18). So the grace
+	// also bounds that cost: a live export that reads older than it while it
+	// has no namespace — a removal, a build that slow — costs each agent on
+	// the kernel that holds a side of its sp, save one whose held side claims
+	// it, that listing once in each pass that meets it, check rounds
+	// included, and a lower grace makes more of them read old (dnagent.md,
+	// Known limits). The age is read from the node — the subsystem
+	// directory's mtime, `stat -c %Y`, in whole seconds — and never
+	// remembered. A time.Duration, like the two above.
 	DnExportOrphanGrace = 30 * time.Second
 
 	// Side provisioning ([D15], architecture.md, Side provisioning protocol,

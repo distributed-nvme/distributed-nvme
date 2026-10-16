@@ -148,10 +148,11 @@ The constants this document relies on, whose values and comments
   wait for the source namespace after a connect that succeeded (DN13):
   re-read, pausing the latter between reads and the former in all. Not a
   connect retry: it has a budget of its own, apart from the connect's.
-* `DnExportOrphanGrace`, the age a namespace-less side export linked to no
-  port but the agent's own must exceed before a sweep removes it (DN6):
-  until then it may be a sibling agent's build in flight. The age is the
-  subsystem directory's mtime, read from the node.
+* `DnExportOrphanGrace`, the age a namespace-less side export must exceed
+  before a sweep reads its port links and, when it is linked to no port but
+  the agent's own, removes it (DN6): until then it may be a sibling agent's
+  build in flight. The age is the subsystem directory's mtime, read from
+  the node.
 * `DnZeroBatchMaxBytes`, `DnZeroBatchMinBytes`, `DnZeroAlign`,
   `DnZeroRetryInterval`, `DnZeroConcurrency` and `DnZeroKillBackoff`, the
   side provisioning knobs ([D15], DN9): the background zeroing goroutine
@@ -708,14 +709,34 @@ SH18. nvmet configfs access: attribute writes go through
 configfs); directory and link operations go through `RunCommand` (`mkdir`,
 `rmdir`, `ln -s`, `rm`); attribute reads through `ReadFile`; and directory
 listings through `RunCommand` as well (`ls`), never in the agent's own
-process (`OsClient.ReadDir`). Reason: a converge or a check round lists
-only a few configfs directories, and their number does not grow with the
-slice count, so the process each `ls` starts costs little; the listings
-that grow with it are the sysfs ones (`osclient.md`, ReadDir). The time
-limit bounds a configfs listing in neither form: opening and closing a
-configfs directory wait for the directory's lock, which a `mkdir` or
-`rmdir` in it holds for its whole run, and no signal ends that wait, so a
-killed `ls` exits only once the `mkdir` or `rmdir` returns (SH13).
+process (`OsClient.ReadDir`). Reason: the process each `ls` starts costs
+little as long as a converge or a check round lists few configfs
+directories. On the cn that holds every time: it lists the subsystems
+directory once, and attributes every dn export, a co-hosted dn agent's
+included, by its NQN alone (`cnagent.md`, CN21), so what it lists follows
+the subsystems and transfers on the node, never the slices of a pool; the
+listings that grow with the slice count are the sysfs ones (`osclient.md`,
+ReadDir).
+On the dn, a pass lists few configfs directories while every export on the
+kernel has its namespace one: the attribution reads that namespace in
+process (DN6), and the number of listings a converge, a check round or the
+node-level sweep makes then grows with neither the slice count nor the
+number of agents on the kernel, so there too the listings that grow with
+the slice count are the sysfs ones. The dn's attribution lists a directory
+only for an export with no namespace one (DN6), which every export is for a
+moment while it is built or removed. The namespace listing runs once for
+each such export a pass meets, so in a burst of builds or removals the
+count grows with the exports in flight on the kernel of the sps the agent
+holds sides of, the other agents' exports included. The port links — a
+listing of the ports directory and one of each port's links, as many as the
+kernel has ports — are listed at most once a pass, and only for an export
+with no namespace at all that is older than `DnExportOrphanGrace`, which on
+a kernel that stamps the directory on an attribute lookup no build in
+flight is; Known limits names when a live export reads old. The time limit
+bounds a configfs listing in neither form: opening and closing a configfs
+directory wait for the directory's lock, which a `mkdir` or `rmdir` in it
+holds for its whole run, and no signal ends that wait, so a killed `ls`
+exits only once the `mkdir` or `rmdir` returns (SH13).
 `WriteFile` MUST NOT be used on paths under "/sys/kernel/config".
 
 SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
@@ -1356,56 +1377,80 @@ no command at all. No attribution is kept from one pass to the next, and
 none needs to be: one pass attributes an export at most once, and a Check
 round's verdict and the `SyncupDn` after it each attribute it afresh — an
 owner remembered between them could be stale, the export removed and built
-again by another agent in between. An export holding no namespace at all is
-attributed by the nvmet **port** it is linked to, each agent converging
-exactly one port id: linked to a sibling's port, it is that sibling's. One
-linked to no port, or only to ours, exports nothing and holds nothing open
-— but it is not therefore nobody's. It is also the shape of **every**
-export between its subsystem `mkdir` and its namespace `mkdir` — an export
-is built subsystem first, with its attributes and then its allowed hosts,
-then its namespace, then its port link — and from the build's host-link
-step on, that half-built export already carries the CN's host link. On a
-kernel several dn agents share, the build in that window may be a
-sibling's, whose request no claim of ours can show. Removing it there takes
-the sibling's host link — and any namespace it adds meanwhile — from under
-its build, and a broken dn export is rebuilt only by some later converge of
-its side, which the breakage itself never triggers: a leg is lost that way.
-Only age tells an abandoned half-built export from one in flight, so such
-an export is removed only once its configfs subsystem directory is older
-than `DnExportOrphanGrace` — unless a held side still claims it, which is
-the claim rule again. A younger one is left alone that pass: not removed,
-not a leftover, not a failure, so the reply code is unaffected; each later
-pass judges it again, until it either has a namespace whose "device_path"
-names its owner's linear, or the age of an export nobody is building. (A
-build abandoned between its namespace `mkdir` and its "device_path" write
-leaves a namespace that names nobody; what becomes of it is a known limit,
-Known limits.) The age is read from the node, never remembered: the
-directory's mtime (`Nvmet.SubsysMtime`, a "stat") against the agent's
-clock. A "stat" that fails makes the export foreign for that pass, as every
-other failed read of the attribution does: one that did not answer is
-named as a failed enumeration, so the verdict is not clean, and one that
-found the directory gone is simply passed over. The mtime is set at
-`mkdir`, and adding an allowed-host link or a namespace directory under it
-does not move it. Kernels differ in one respect. One that stamps the parent
-directory on every lookup of one of the subsystem's own "attr_*" files — a
-read, a write, even a "stat" of one, because configfs instantiates an
-attribute's inode on each lookup — makes the age read "since the subsystem
-was created or an attribute of it was last touched": a first build is
-young from its `mkdir` on, its attribute writes only keep it so, and the
-stamp also protects a rebuild — an owner rebuilding, more than the grace
-after its first `mkdir`, an export whose first build stopped before its
-namespace makes it young again with the rebuild's attribute reads. One that
-stamps the directory only when a directory or a link is created under it
-reads the plain time since the `mkdir`, and there such a rebuild reads old.
+again by another agent in between. An export holding no namespace at all
+exports nothing and holds nothing open — but it is not therefore nobody's.
+It is the shape of **every** export between its subsystem `mkdir` and its
+namespace `mkdir` — an export is built subsystem first, with its
+attributes and then its allowed hosts, then its namespace, then its port
+link — and from the build's host-link step on, that half-built export
+already carries the CN's host link. On a kernel several dn agents share,
+the build in that window may be a sibling's, whose request no claim of ours
+can show. Removing it there takes the sibling's host link — and any
+namespace it adds meanwhile — from under its build, and a broken dn export
+is rebuilt only by some later converge of its side, which the breakage
+itself never triggers: a leg is lost that way. Only age tells an abandoned
+half-built export from one in flight, so such an export is judged by its
+**age** first: while its configfs subsystem directory is no older than
+`DnExportOrphanGrace` it is left alone that pass, whatever port it is
+linked to — not removed, not a leftover, not a failure, so the reply code
+is unaffected — and each later pass judges it again, until it either has a
+namespace whose "device_path" names its owner's linear, or the age of an
+export nobody is building. Only an older one is then attributed by the
+nvmet **port** it is linked to, each agent converging exactly one port id:
+linked to a sibling's port, it is that sibling's; linked to no port, or
+only to ours, it is an orphan and goes — unless a held side still claims
+it, which is the claim rule again. The order is the cost. The age is one
+"stat"; the port links are a listing of the ports directory and one of each
+port's links, a child process each (SH18), as many as the kernel has ports,
+built at most once a pass. On a kernel that stamps the directory on an
+attribute lookup, every export a build has in flight has the
+namespace-less shape for a moment and reads young — the build's own
+attribute reads and writes keep it so — so a burst of builds on a kernel
+many dn agents share makes no agent list a port; Known limits names when a
+live export reads old. The port links are still read for an old export,
+because they can decide it. An export one agent links alone is never left
+namespace-less on a port by that agent — a build links the port after it
+makes the namespace, a removal unlinks the port before it removes the
+namespace. But two agents of one kernel can hold the two sides of one leg,
+which the placement rule does not always prevent (`architecture.md`, Disk
+node). Both link the one export, each to its own port, and a removal by one
+unlinks only its own port and leaves the export namespace-less on the
+other's: there the port links make it the other agent's, so no sibling of
+that agent reads it as an orphan. They also guard against a configfs
+change made outside dnv. (A build abandoned between its
+namespace `mkdir` and its "device_path" write leaves a namespace that
+names nobody; what becomes of it is a known limit, Known limits.) The age
+is read from the node, never remembered: the directory's mtime
+(`Nvmet.SubsysMtime`, a "stat") against the agent's clock. A "stat" that
+fails makes the export foreign for that pass, as every other failed read
+of the attribution does — one on a sibling's port included, since the port
+is read only after the age: one that did not answer is named as a failed
+enumeration, so the verdict is not clean, and one that found the directory
+gone is simply passed over. The mtime is set at `mkdir`, and adding an
+allowed-host link or a namespace directory under it does not move it.
+Kernels differ in one respect. One that stamps the parent directory on
+every lookup of one of the subsystem's own "attr_*" files — a read, a
+write, even a "stat" of one, because configfs instantiates an attribute's
+inode on each lookup — makes the age read "since the subsystem was created
+or an attribute of it was last touched": a first build is young from its
+`mkdir` on, its attribute writes only keep it so, and the stamp also
+protects a rebuild — an owner rebuilding, more than the grace after its
+first `mkdir`, an export whose first build stopped before its namespace
+makes it young again with the rebuild's attribute reads. One that stamps
+the directory only when a directory or a link is created under it reads
+the plain time since the `mkdir`, and there such a rebuild reads old, as
+does a first build still short of its namespace that long after its
+`mkdir`.
 Nothing a sweep does looks up
 one of the subsystem's own "attr_*" files (it reads namespace one's
 "device_path", which sits in the namespace's directory and not the
 subsystem's, and which a namespace-less export does not have; it lists the
-namespaces and the port links and stats the directory), so an abandoned
-export ages, and the first sweep that finds it older than the grace settles
-it: a Syncup's removes it, and a read-only Check round's reports it as a
-leftover, which brings that Syncup. Anything else that keeps looking up
-those files keeps it young for as long as it does. A source connection is
+namespaces, stats the directory and, for an old export, lists the port
+links), so an abandoned export ages, and the first sweep that finds it
+older than the grace settles it: a Syncup's removes it, and a read-only
+Check round's reports it as a leftover, which brings that Syncup. Anything
+else that keeps looking up those files keeps it young for as long as it
+does. A source connection is
 attributed by its controller's "hostnqn" under "/sys/class/nvme": the nvme
 host namespace is per kernel, and since the NQN names the **source** DN,
 the host NQN it was opened with is the only field that names the agent
@@ -2758,6 +2803,36 @@ is still a protocol-level refusal.
   agent's attribution (DN6) reads that export as foreign, so no sweep
   removes it; a later converge of the side it was built for finishes it,
   but once no side wants it, it stays.
+* A live export that reads older than `DnExportOrphanGrace` while it has no
+  namespace costs a listing of the port links (DN6, SH18): every agent on
+  the kernel that holds a side of its sp, save one whose held side still
+  claims the export (DN6), lists the ports in each pass that meets it, once
+  a pass, a child process per port, which on a loaded kernel shared by many
+  dn agents can make a check round outlast the worker's wait for it, one
+  round interval (`dnv-worker.md` RW8). Three shapes leave a live export
+  without its namespace. A removal unlinks the port, then removes the
+  namespace, then the directory, so its export is namespace-less for a
+  moment. A build that is still short of its namespace more than the grace
+  after the export's `mkdir` — a rebuild of an export whose first build
+  stopped before its namespace, or a first build retried that long — is
+  namespace-less until its namespace `mkdir`. An export that two agents of
+  one kernel link, one for each side of a leg, is left namespace-less on one
+  agent's port by the other's removal (DN6), and stays so until a converge
+  of that agent builds its namespace again or removes the export, which can
+  be long after: every pass that meets it in that time lists the ports. On a
+  kernel that keeps a subsystem directory's time at its `mkdir`, each of the
+  three reads old unless the export was made less than the grace before. A
+  kernel that stamps the directory on an attribute lookup pays for none of
+  them while an attribute of the export was looked up less than the grace
+  before: a build's own attribute reads and writes keep its export young,
+  and so does a side that wants the export, whose check rounds and converges
+  look up its attributes. There a removal reads old when no check round and
+  no converge of its side looked up the export's attributes within the grace
+  before it — under a `side_interval` longer than the grace with no converge
+  in between, or when the side's rounds and converges stopped that long
+  before the removal; and the export two agents link reads old once no side
+  of the agent whose port it is left on has looked up its attributes within
+  the grace, as when no side of that agent wants it any more.
 * The dn sweep's disconnect of a destination's source connection (DN6 L3)
   runs under the DN1 locks, as the cn build's dead-path disconnect does;
   only the cn sweep's runs off them (`cnagent.md` CN10 and CN21). A target

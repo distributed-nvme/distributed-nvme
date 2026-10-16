@@ -6,7 +6,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **AEN, discovery-log-change AEN** — The asynchronous event the cdc completes on a host's armed asynchronous event request when that host's rendered discovery log changes. A change that moves a host's view marks it dirty and sets a pending bit on each of the host's connections; several impacts before delivery coalesce into one event.
 
-**age gate** — The dn agent's rule that a namespace-less side export linked to no port but its own, which no held side claims, is removed only once its configfs directory's modification time is older than the orphan grace (`DnExportOrphanGrace`). A sweep never looks up the export's attributes, which on some kernels refreshes that time, so a younger one, possibly a sibling agent's build in flight, is left alone (see `dnagent.md` DN6).
+**age gate** — The dn agent's rule that a namespace-less side export is judged by its age before its port. While its configfs directory's modification time is no older than the orphan grace (`DnExportOrphanGrace`), it is left alone whatever port it is linked to, since it may be a sibling agent's build in flight, and its port links are not read; an older one linked to no port but the agent's own, which no held side claims, is removed. A sweep never looks up the export's attributes, which on some kernels refreshes that time (see `dnagent.md` DN6).
 
 **agent** — Either role of `dnv-agent`: the process on a disk node or a controller node that converges the local device-mapper, md, nvmet and nvme-host state to the desired state it is sent, persists the last accepted request per object, and reports live state. An agent never talks to etcd.
 

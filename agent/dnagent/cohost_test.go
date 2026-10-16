@@ -46,7 +46,8 @@ const (
 // way a co-hosted agent's converge would have left it: a subsystem directory,
 // one namespace, and that namespace's device_path naming the per-CN dm-linear
 // it exports. devPath == "" seeds a subsystem with NO namespace, which is the
-// half-built shape classifyExport has to settle by port instead.
+// half-built shape classifyExport has to settle by its age, and then by its
+// port, instead.
 func seedExport(node *fakeNode, nqn string, devPath string) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -65,14 +66,38 @@ func seedExport(node *fakeNode, nqn string, devPath string) {
 // not have it. A sibling agent's port lives in the same configfs tree as ours
 // and is told apart only by its id (--nvmet-port-id).
 func linkPort(node *fakeNode, portId int, nqn string) {
+	addPort(node, portId)
 	node.mu.Lock()
 	defer node.mu.Unlock()
-	ports := agent.NvmetRoot + "/ports"
-	node.dirs[ports] = true
-	node.dirs[fmt.Sprintf("%s/%d", ports, portId)] = true
-	node.dirs[fmt.Sprintf("%s/%d/subsystems", ports, portId)] = true
-	node.links[fmt.Sprintf("%s/%d/subsystems/%s", ports, portId, nqn)] =
+	node.links[fmt.Sprintf("%s/subsystems/%s", portDir(portId), nqn)] =
 		agent.NvmetRoot + "/subsystems/" + nqn
+}
+
+// addPort creates an nvmet port with nothing linked to it yet, as a sibling
+// agent's converge leaves its port before its first export.
+func addPort(node *fakeNode, portId int) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.dirs[agent.NvmetRoot+"/ports"] = true
+	node.dirs[portDir(portId)] = true
+	node.dirs[portDir(portId)+"/subsystems"] = true
+}
+
+func portDir(portId int) string {
+	return fmt.Sprintf("%s/ports/%d", agent.NvmetRoot, portId)
+}
+
+// lsCount is how many `ls` of exactly dir the calls since the last Reset
+// ran. The port listing starts with an `ls` of the ports directory, which
+// nothing else lists.
+func lsCount(node *fakeNode, dir string) int {
+	n := 0
+	for _, call := range node.Calls() {
+		if call == "cmd ls -1 "+dir {
+			n++
+		}
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------
@@ -121,10 +146,18 @@ func TestSiblingExportNotSweptByOurAgent(t *testing.T) {
 		wantWhy: "its namespace backs onto a d1 of OURS whose side is in " +
 			"no pointer list",
 	}, {
-		name:    "no namespace, sibling's port",
-		portId:  siblingPort,
-		keep:    true,
-		wantWhy: "a half-built export linked to another agent's port",
+		name:   "no namespace, sibling's port",
+		portId: siblingPort,
+		keep:   true,
+		wantWhy: "a namespace-less export this young may be a build in " +
+			"flight, whatever port it is linked to",
+	}, {
+		name:   "no namespace, sibling's port, older than the grace",
+		portId: siblingPort,
+		old:    true,
+		keep:   true,
+		wantWhy: "an old namespace-less export linked to another agent's " +
+			"port is that agent's",
 	}, {
 		name:   "no namespace, our port, older than the grace",
 		portId: common.NvmetPortId,
@@ -313,8 +346,11 @@ type sweepScope struct {
 	// cn this side does not export to; the node-level scope's is a sibling
 	// leg's, in an sp this node hosts.
 	stray func(nf *common.NameFmt) string
-	run   func(t *testing.T, srv *DnAgentServer, rev uint64) *pb.AgentReply
-	read  func(t *testing.T, srv *DnAgentServer) *pb.AgentReply
+	// second names another export the scope judges, of the same kind as
+	// stray, for a pass that must judge two.
+	second func(nf *common.NameFmt) string
+	run    func(t *testing.T, srv *DnAgentServer, rev uint64) *pb.AgentReply
+	read   func(t *testing.T, srv *DnAgentServer) *pb.AgentReply
 }
 
 func sweepScopes() []sweepScope {
@@ -323,6 +359,9 @@ func sweepScopes() []sweepScope {
 		name: "node-level",
 		stray: func(nf *common.NameFmt) string {
 			return nf.SideToCnNqn(testCluster, testSp, siblingLeg, testCn0)
+		},
+		second: func(nf *common.NameFmt) string {
+			return nf.SideToCnNqn(testCluster, testSp, siblingLeg+1, testCn0)
 		},
 		run: func(t *testing.T, srv *DnAgentServer,
 			rev uint64) *pb.AgentReply {
@@ -347,6 +386,9 @@ func sweepScopes() []sweepScope {
 		name: "side-level",
 		stray: func(nf *common.NameFmt) string {
 			return nf.SideToCnNqn(testCluster, testSp, testLeg, testCn1+0x10)
+		},
+		second: func(nf *common.NameFmt) string {
+			return nf.SideToCnNqn(testCluster, testSp, testLeg, testCn1+0x11)
 		},
 		run: func(t *testing.T, srv *DnAgentServer,
 			rev uint64) *pb.AgentReply {
@@ -474,14 +516,129 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 	}
 }
 
-// TestHalfBuiltExportAgeUnreadIsForeign pins what a stat that does not answer
-// means: nothing. The age is the one piece of evidence the orphan verdict now
-// rests on, so an old export whose age cannot be read this pass is FOREIGN for
-// the pass, like every other failed read of classifyExport: not removed, and
-// the enumeration named as failed, so the verdict is not clean and the worker
-// re-drives. The next pass reads it again.
-func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
+// TestHalfBuiltExportAgeBeforePortLinks pins the order of DN6's attribution
+// of a namespace-less :2: export, in both scopes and in the read-only verdict
+// as in the Syncup's pass: the export's age is read before its port links. A
+// young one is left alone whatever port it is linked to, so its pass lists no
+// port at all; only an old one lists them, and then it is that sibling's when
+// it is on a sibling's port, and an orphan otherwise. The port listing is an
+// `ls` of the ports directory and one of each port's links, a child each, and
+// every build in flight on a kernel many dn agents share has this shape for a
+// moment: listed before the age, it would make such an agent's check rounds
+// outlast the worker's wait in every burst of builds. A sibling's port is on
+// the kernel in every case, so a listing would show.
+func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ports := agent.NvmetRoot + "/ports"
+	siblingLinks := portDir(siblingPort) + "/subsystems"
+	for _, scope := range sweepScopes() {
+		for _, tc := range []struct {
+			name   string
+			old    bool
+			portId int // 0: linked to no port
+			// gone: the read-only verdict reports it as a leftover and the
+			// Syncup removes it.
+			gone bool
+		}{
+			{"young, no port", false, 0, false},
+			{"young, our port", false, common.NvmetPortId, false},
+			{"young, sibling's port", false, siblingPort, false},
+			{"old, no port", true, 0, true},
+			{"old, our port", true, common.NvmetPortId, true},
+			{"old, sibling's port", true, siblingPort, false},
+		} {
+			t.Run(scope.name+"/"+tc.name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				ctx := context.Background()
+				ours := sweepSidePtr(testLeg, testSide)
+				if _, err := srv.SyncupDn(ctx,
+					sweepDnReq(1, ours)); err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+				syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
+				ourObjs := objectsOf(ours)
+
+				stray := scope.stray(nf)
+				dir := agent.NvmetRoot + "/subsystems/" + stray
+				seedExport(node, stray, "")
+				addPort(node, siblingPort)
+				if tc.portId != 0 {
+					linkPort(node, tc.portId, stray)
+				}
+				if tc.old {
+					node.ageDir(dir, common.DnExportOrphanGrace+time.Minute)
+				}
+
+				// listed checks one pass's reads of the export: its age
+				// once, and the port links once when it is old and not at
+				// all when it is young.
+				listed := func(pass string) {
+					t.Helper()
+					if got := len(node.callsMatching(
+						"cmd stat -c %Y " + dir)); got != 1 {
+						t.Errorf("the %s read the age of %s %d times, "+
+							"want 1", pass, stray, got)
+					}
+					want := 0
+					if tc.old {
+						want = 1
+					}
+					if got := lsCount(node, ports); got != want {
+						t.Errorf("the %s listed the ports directory %d "+
+							"times, want %d", pass, got, want)
+					}
+					if got := lsCount(node, siblingLinks); got != want {
+						t.Errorf("the %s listed the sibling port's links "+
+							"%d times, want %d", pass, got, want)
+					}
+				}
+
+				node.Reset()
+				verdict := scope.read(t, srv)
+				switch {
+				case tc.gone && (verdict.GetCode() !=
+					common.ReplyCodeLeftover ||
+					!strings.Contains(verdict.GetDetails(), stray)):
+					t.Fatalf("read-only verdict %d %q, want %d naming %s",
+						verdict.GetCode(), verdict.GetDetails(),
+						common.ReplyCodeLeftover, stray)
+				case !tc.gone && verdict.GetCode() != 0:
+					t.Fatalf("read-only verdict %d %q, want 0: %s is no "+
+						"leftover", verdict.GetCode(), verdict.GetDetails(),
+						stray)
+				}
+				listed("read-only verdict")
+
+				node.Reset()
+				reply := scope.run(t, srv, 2)
+				if got := reply.GetCode(); got != 0 {
+					t.Fatalf("code = %d (%s), want 0", got,
+						reply.GetDetails())
+				}
+				switch present := subsysPresent(node, stray); {
+				case tc.gone && present:
+					t.Fatalf("the sweep kept %s, an old namespace-less "+
+						"export on no port but ours", stray)
+				case !tc.gone && !present:
+					t.Fatalf("the sweep removed %s", stray)
+				case !tc.gone && node.hasCall("cmd rmdir "+dir):
+					t.Fatalf("the sweep attempted rmdir on %s", stray)
+				}
+				listed("Syncup's pass")
+				ourObjs.assertAllKept(t, node)
+			})
+		}
+	}
+}
+
+// TestPortLinksListedOncePerPass pins the port listing's cache: a pass that
+// meets two old namespace-less exports lists the ports once, not once per
+// export, in both scopes and in the read-only verdict as in the Syncup's
+// pass. Each pass builds the map afresh; nothing of it is kept for the next.
+func TestPortLinksListedOncePerPass(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ports := agent.NvmetRoot + "/ports"
+	siblingLinks := portDir(siblingPort) + "/subsystems"
 	for _, scope := range sweepScopes() {
 		t.Run(scope.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -491,35 +648,130 @@ func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 				t.Fatalf("SyncupDn: %v", err)
 			}
 			syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
-			stray := scope.stray(nf)
-			dir := agent.NvmetRoot + "/subsystems/" + stray
-			seedExport(node, stray, "")
-			node.ageDir(dir, common.DnExportOrphanGrace+time.Minute)
-			setHook(node, node.killCmdNoEffectAlways, "stat -c %Y "+dir)
+
+			// One orphan, on no port, and one on a sibling's port, kept.
+			orphan, siblings := scope.stray(nf), scope.second(nf)
+			for _, nqn := range []string{orphan, siblings} {
+				seedExport(node, nqn, "")
+				node.ageDir(agent.NvmetRoot+"/subsystems/"+nqn,
+					common.DnExportOrphanGrace+time.Minute)
+			}
+			linkPort(node, siblingPort, siblings)
+
+			once := func(pass string) {
+				t.Helper()
+				if got := lsCount(node, ports); got != 1 {
+					t.Errorf("the %s listed the ports directory %d times, "+
+						"want 1", pass, got)
+				}
+				if got := lsCount(node, siblingLinks); got != 1 {
+					t.Errorf("the %s listed the sibling port's links %d "+
+						"times, want 1", pass, got)
+				}
+			}
+
+			node.Reset()
+			verdict := scope.read(t, srv)
+			if verdict.GetCode() != common.ReplyCodeLeftover ||
+				!strings.Contains(verdict.GetDetails(), orphan) ||
+				strings.Contains(verdict.GetDetails(), siblings) {
+				t.Fatalf("read-only verdict %d %q, want %d naming %s "+
+					"and not %s", verdict.GetCode(), verdict.GetDetails(),
+					common.ReplyCodeLeftover, orphan, siblings)
+			}
+			once("read-only verdict")
 
 			node.Reset()
 			reply := scope.run(t, srv, 2)
-			if reply.GetCode() != common.ReplyCodeLeftover ||
-				!strings.Contains(reply.GetDetails(), "age of "+stray) {
-				t.Fatalf("code %d %q, want %d naming the unread age of %s",
-					reply.GetCode(), reply.GetDetails(),
-					common.ReplyCodeLeftover, stray)
-			}
-			if !subsysPresent(node, stray) {
-				t.Fatalf("the sweep removed %s although its age did not "+
-					"answer", stray)
-			}
-
-			clearHook(node, node.killCmdNoEffectAlways, "stat -c %Y "+dir)
-			reply = scope.run(t, srv, 3)
 			if got := reply.GetCode(); got != 0 {
-				t.Fatalf("the next pass: code = %d (%s), want 0", got,
-					reply.GetDetails())
+				t.Fatalf("code = %d (%s), want 0", got, reply.GetDetails())
 			}
-			if subsysPresent(node, stray) {
-				t.Fatalf("the next pass, with the age answering, kept %s", stray)
+			if subsysPresent(node, orphan) {
+				t.Fatalf("the sweep kept the orphan %s", orphan)
 			}
+			if !subsysPresent(node, siblings) {
+				t.Fatalf("the sweep removed %s, on a sibling's port", siblings)
+			}
+			once("Syncup's pass")
 		})
+	}
+}
+
+// TestHalfBuiltExportAgeUnreadIsForeign pins what a stat that does not answer
+// means: nothing. The age is the first evidence read of a namespace-less
+// export, and the orphan verdict rests on it, so an export whose age cannot
+// be read this pass is FOREIGN for the pass, like every other failed read of
+// classifyExport: not removed, no port listed, and the enumeration named as
+// failed, so the verdict is not clean and the worker re-drives. That holds
+// for a young export on a sibling's port too, which the port links alone
+// would settle: the age comes first. A sibling's build never has that shape,
+// since it links its port only after its namespace; a removal of an export
+// two agents of one kernel link leaves it, and so can a configfs change made
+// outside dnv. The next pass reads it again.
+func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	for _, scope := range sweepScopes() {
+		for _, tc := range []struct {
+			name   string
+			old    bool
+			portId int // 0: linked to no port
+			// gone: the next pass, with the age answering, removes it.
+			gone bool
+		}{
+			{"old, no port", true, 0, true},
+			{"young, sibling's port", false, siblingPort, false},
+		} {
+			t.Run(scope.name+"/"+tc.name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				ctx := context.Background()
+				ours := sweepSidePtr(testLeg, testSide)
+				if _, err := srv.SyncupDn(ctx,
+					sweepDnReq(1, ours)); err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+				syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
+				stray := scope.stray(nf)
+				dir := agent.NvmetRoot + "/subsystems/" + stray
+				seedExport(node, stray, "")
+				addPort(node, siblingPort)
+				if tc.portId != 0 {
+					linkPort(node, tc.portId, stray)
+				}
+				if tc.old {
+					node.ageDir(dir, common.DnExportOrphanGrace+time.Minute)
+				}
+				setHook(node, node.killCmdNoEffectAlways, "stat -c %Y "+dir)
+
+				node.Reset()
+				reply := scope.run(t, srv, 2)
+				if reply.GetCode() != common.ReplyCodeLeftover ||
+					!strings.Contains(reply.GetDetails(), "age of "+stray) {
+					t.Fatalf("code %d %q, want %d naming the unread age "+
+						"of %s", reply.GetCode(), reply.GetDetails(),
+						common.ReplyCodeLeftover, stray)
+				}
+				if !subsysPresent(node, stray) {
+					t.Fatalf("the sweep removed %s although its age did "+
+						"not answer", stray)
+				}
+				if got := lsCount(node,
+					agent.NvmetRoot+"/ports"); got != 0 {
+					t.Fatalf("the pass listed the ports %d times for an "+
+						"export whose age did not answer, want 0", got)
+				}
+
+				clearHook(node, node.killCmdNoEffectAlways, "stat -c %Y "+dir)
+				reply = scope.run(t, srv, 3)
+				if got := reply.GetCode(); got != 0 {
+					t.Fatalf("the next pass: code = %d (%s), want 0", got,
+						reply.GetDetails())
+				}
+				if present := subsysPresent(node, stray); present == tc.gone {
+					t.Fatalf("the next pass, with the age answering: %s "+
+						"present = %v, want %v", stray, present, !tc.gone)
+				}
+			})
+		}
 	}
 }
 

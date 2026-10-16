@@ -893,33 +893,40 @@ const (
 	// in the DN's pointer list keeps its export although no local state
 	// claims it, because such a side must be REBUILT from its record (DN8).
 	exportOurs
-	// exportOrphan: no namespace to read, the subsystem is linked to our port
-	// or to no port at all, and its directory is older than
-	// DnExportOrphanGrace. It exports nothing and holds nothing open — this
-	// is what our own half-finished RemoveSubsystem leaves behind, and what a
-	// build abandoned by an agent that died leaves — and leaving it would
-	// leak it for ever.
+	// exportOrphan: no namespace to read, its directory is older than
+	// DnExportOrphanGrace, and the subsystem is linked to our port or to no
+	// port at all. It exports nothing and holds nothing open — this is what
+	// our own half-finished RemoveSubsystem leaves behind, and what a build
+	// abandoned by an agent that died leaves — and leaving it would leak it
+	// for ever.
 	exportOrphan
-	// exportYoung: the orphan shape, but no older than the grace. It is not
-	// only debris: it is ALSO every export's shape between its subsystem
-	// `mkdir` and its namespace `mkdir` — carrying the CN's host link from
-	// the build's host-link step on — and on a kernel shared by several dn
-	// agents that build may be a sibling's, whose request no claim of ours
-	// can show. Removing it there strips the sibling's host link, and any
-	// namespace it adds meanwhile, from under the build, and a broken dn
-	// export is rebuilt only by some later converge of its side, which the
-	// breakage itself never triggers. Age is the only evidence that tells an
-	// abandoned export from one in flight, so a young one is left alone this
-	// pass — not removed, not a leftover, not a failure — and judged again by
-	// each later pass, until it has either a namespace naming its owner's
-	// linear or the age of an export nobody is building.
+	// exportYoung: no namespace to read, and no older than the grace,
+	// whatever port it is linked to. It is not only debris: it is ALSO every
+	// export's shape between its subsystem `mkdir` and its namespace `mkdir`
+	// — carrying the CN's host link from the build's host-link step on — and
+	// on a kernel shared by several dn agents that build may be a sibling's,
+	// whose request no claim of ours can show. Removing it there strips the
+	// sibling's host link, and any namespace it adds meanwhile, from under
+	// the build, and a broken dn export is rebuilt only by some later
+	// converge of its side, which the breakage itself never triggers. Age is
+	// the only evidence that tells an abandoned export from one in flight, so
+	// a young one is left alone this pass — not removed, not a leftover, not
+	// a failure — and judged again by each later pass, until it has either a
+	// namespace naming its owner's linear or the age of an export nobody is
+	// building.
 	exportYoung
 )
 
 // portLinks is the lazily built "which port is this subsystem linked to" map.
-// It is only ever needed for a subsystem with no namespace to attribute it
-// by, which in a healthy steady state never happens — so the listing it costs
-// is not paid on an ordinary pass.
+// It is needed only for a subsystem with no namespace to attribute it by
+// whose directory is older than DnExportOrphanGrace (classifyExport). On a
+// kernel that stamps the directory on an attribute lookup, every export a
+// build has in flight is younger than that, so the listing it costs — an
+// `ls` of the ports directory and one of each port's links, a child each, as
+// many as the kernel has ports — is paid neither when every export has its
+// namespace nor in a burst of builds on a kernel many dn agents share
+// (dnagent.md, Known limits, names when a live export reads old). A pass
+// that needs it builds it once.
 type portLinks struct {
 	done bool
 	err  error
@@ -955,10 +962,11 @@ func (s *DnAgentServer) portLinksOf(
 }
 
 // classifyExport attributes one :2: export. It reads the export's namespace
-// first — the cheap and usually conclusive evidence — and falls back to the
-// port links, and then to the subsystem directory's age, only when there is
-// no namespace to read. An export of ours also names the per-CN dm-linear its
-// namespace backs, which P0 has to have out of suspension before it goes.
+// first — the cheap and usually conclusive evidence — and only when there is
+// no namespace to read falls back to the subsystem directory's age, and then,
+// for an export older than the grace, to the port links. An export of ours
+// also names the per-CN dm-linear its namespace backs, which P0 has to have
+// out of suspension before it goes.
 //
 // The namespace is read by its id, sideNsid — every side export has that one
 // namespace and no other — and the namespaces are listed only when it is
@@ -1026,20 +1034,11 @@ func (s *DnAgentServer) classifyExport(
 		// owner off. Somebody else's, or a shape this build did not write.
 		return exportForeign, 0, 0, ""
 	}
-	byNqn, err := s.portLinksOf(ctx, links)
-	if err != nil {
-		res.Fail("nvmet port links", err)
-		return exportForeign, 0, 0, ""
-	}
-	for _, portId := range byNqn[nqn] {
-		if portId != s.port.PortId {
-			// Linked to a sibling agent's port: its half-built export.
-			return exportForeign, 0, 0, ""
-		}
-	}
-	// No namespace and no sibling's port: the orphan shape, which a build in
-	// flight has too (exportYoung). Its age is read from the node, never
-	// remembered: the subsystem directory's mtime against our clock.
+	// No namespace at all: the shape a build in flight has too (exportYoung),
+	// so the age comes first. It is read from the node, never remembered:
+	// the subsystem directory's mtime against our clock, one `stat`. A young
+	// export is left alone whatever port it is linked to, so the port links,
+	// a child per port, are listed only for an old one.
 	mtime, present, err := s.nvmet.SubsysMtime(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet subsystem age of "+nqn, err)
@@ -1052,6 +1051,25 @@ func (s *DnAgentServer) classifyExport(
 	if s.now().Sub(mtime) <= common.DnExportOrphanGrace {
 		return exportYoung, 0, 0, ""
 	}
+	byNqn, err := s.portLinksOf(ctx, links)
+	if err != nil {
+		res.Fail("nvmet port links", err)
+		return exportForeign, 0, 0, ""
+	}
+	for _, portId := range byNqn[nqn] {
+		if portId != s.port.PortId {
+			// Linked to a sibling agent's port: that agent's.
+			// An agent never leaves an export it links alone on a port
+			// without its namespace — a build makes the namespace before
+			// the port link, a removal unlinks the port first — but two
+			// agents of one kernel holding the two sides of one leg both
+			// link the one export, and a removal by one leaves it on the
+			// other's port (dnagent.md, DN6); a configfs change made
+			// outside dnv can leave it so too.
+			return exportForeign, 0, 0, ""
+		}
+	}
+	// No namespace, older than the grace, and on no port but ours.
 	return exportOrphan, 0, 0, ""
 }
 
