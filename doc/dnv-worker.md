@@ -1176,16 +1176,23 @@ because that reply may be a whole interval away (RW9): the round is
 **abandoned** — its reply would answer the request built from the
 superseded revision — and its stream is dropped with it: RW4 step 4 never
 reuses a stream across a round that ended without a reply, and an abandoned
-round is such a round. The next round opens a fresh stream, which the
-agent answers with the complete `*Info` again (`architecture.md`, Check
-streams). An abandoned round carries **no** health verdict: nothing was
-observed about the agent, the round was only overtaken. The sp coordinator
-is the one parent that hands a change on late, and on purpose: its cntlr
-children receive a fan-out once every side child RW14's sides-first hold
-waits for has reported it applied, and at the latest one `cntlr_interval`
-after the sides were handed it; a fan-out that demotes a primary reaches the
-demoted cntlr at once and the sides only when RW22's demotion hold ends;
-from each hand-over on, this rule applies unchanged.
+round is such a round. An abandoned round carries **no** health verdict:
+nothing was observed about the agent, the round was only overtaken. Its
+stream is dropped **before** the change's `Syncup*` is sent. Reason: the
+agent runs the round under the stream and holds, for it, a lock the
+`Syncup*` needs — the node lock for a node, the object lock for a side or a
+cntlr (`dnagent.md` SH25, `cnagent.md` CN1). The drop cancels the round,
+which ends at its current command and frees the lock; a `Syncup*` sent
+first would wait behind a round whose reply nobody reads, and a round with
+no verdict loses nothing by ending early. The next round opens a fresh
+stream, which the agent answers with the complete `*Info` again
+(`architecture.md`, Check streams). The sp coordinator is the one parent
+that hands a change on late, and on purpose: its cntlr children receive a
+fan-out once every side child RW14's sides-first hold waits for has
+reported it applied, and at the latest one `cntlr_interval` after the sides
+were handed it; a fan-out that demotes a primary reaches the demoted cntlr
+at once and the sides only when RW22's demotion hold ends; from each
+hand-over on, this rule applies unchanged.
 
 RW7. **Connections.** A process-wide cache from `addr_port` to one client
 connection (`grpc.NewClient` with insecure transport credentials, both

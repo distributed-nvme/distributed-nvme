@@ -548,8 +548,8 @@ func (w *revWorker) recv(
 ) (*replyState, error) {
 	timer := w.deps.clk.newTimer(interval)
 	defer timer.stop()
-	// The stream is captured: applying a desired change drops it, and the
-	// round must not then read w.stream, which is nil by that point.
+	// The stream is captured: a desired change drops it, and the round must
+	// not then read w.stream, which is nil by that point.
 	stream := w.stream
 	for {
 		select {
@@ -565,15 +565,19 @@ func (w *revWorker) recv(
 		case next := <-w.desiredCh:
 			// RW6: apply and sync AT ONCE — this reply may be a whole
 			// interval away (RW9) and the parent's change must not wait for
-			// it. The round then ends: its reply answers the request built
-			// from the superseded revision, and RW4 step 4's rule that a
-			// stream is never reused across an abandoned round holds here
-			// too, so the stream goes with it (applyDesired has already
-			// dropped it when RW13 moved the object). The next round opens a
-			// fresh one, which the agent answers with the complete *Info again
-			// (architecture.md, Check streams).
-			w.applyDesired(next, cc)
+			// it. The round ends: its reply answers the request built from
+			// the superseded revision, and RW4 step 4's rule that a stream
+			// is never reused across an abandoned round holds here too. The
+			// stream goes FIRST, before the Syncup* is sent: the agent runs
+			// the round under it, so the drop stops the round at its current
+			// command and frees the lock the round holds, which the Syncup*
+			// needs; sent first, the Syncup* would wait behind a round nobody
+			// reads. applyDesired's own drop when RW13 moved the object finds
+			// no stream left. The next round opens a fresh one, which the
+			// agent answers with the complete *Info again (architecture.md,
+			// Check streams).
 			w.dropStream()
+			w.applyDesired(next, cc)
 			return nil, errRoundAborted
 		}
 	}

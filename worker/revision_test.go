@@ -39,10 +39,21 @@ type stubDnAgent struct {
 	// context cancel of dropStream are what end the handler — so this is how
 	// a test tells "the stream is gone" from "the stream is idle".
 	streamExits int
+	// streamCtxs is the context of every CheckDn stream, in the order
+	// opened. The agent runs its rounds under it, so its end is what stops
+	// a round the agent is running.
+	streamCtxs []context.Context
 
 	// checkReply builds the reply to one CheckDn request; nil means "say
 	// nothing", which is how a round timeout is produced (RW4 step 3).
 	checkReply func(req *pb.CheckDnRequest) *pb.CheckDnReply
+	// holdRound makes a round checkReply says nothing to run until its
+	// stream's context ends, as the agent's round does: the agent reads the
+	// stream again only once a round is over, so a CloseSend reaches it only
+	// then, and only the context cancel of dropStream ends a round it is
+	// still running. Without it the handler goes straight back to Recv,
+	// where the CloseSend alone ends it.
+	holdRound bool
 	// syncupReply answers one SyncupDn.
 	syncupReply func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error)
 }
@@ -52,6 +63,7 @@ func (s *stubDnAgent) CheckDn(
 ) error {
 	s.mu.Lock()
 	s.streams++
+	s.streamCtxs = append(s.streamCtxs, stream.Context())
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -69,12 +81,17 @@ func (s *stubDnAgent) CheckDn(
 		s.mu.Lock()
 		s.checkReqs = append(s.checkReqs, req)
 		build := s.checkReply
+		hold := s.holdRound
 		s.mu.Unlock()
 		if build == nil {
 			continue
 		}
 		reply := build(req)
 		if reply == nil {
+			if hold {
+				<-stream.Context().Done()
+				return stream.Context().Err()
+			}
 			continue
 		}
 		if err := stream.Send(reply); err != nil {
@@ -124,6 +141,17 @@ func (s *stubDnAgent) streamCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.streams
+}
+
+// lastStreamCtx is the context of the CheckDn stream opened last, nil before
+// the first.
+func (s *stubDnAgent) lastStreamCtx() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.streamCtxs) == 0 {
+		return nil
+	}
+	return s.streamCtxs[len(s.streamCtxs)-1]
 }
 
 // streamExitCount is how many CheckDn handlers have returned, i.e. how many
@@ -1178,6 +1206,15 @@ func TestEveryCheckStreamSendsTheRoundTraceId(t *testing.T) {
 // syncup timeout on top, so an SpRev bump from a failover (AR5) or a spare
 // switch (AR8) would otherwise reach a mid-round agent about a minute late,
 // preceded by one request built from the superseded revision.
+//
+// It also pins RW6's order: the given-up round's stream is dropped BEFORE the
+// Syncup* is sent. The agent runs the round under the stream and holds a
+// lock for it that the Syncup* needs; a Syncup* sent first waits behind a
+// round whose answer nobody reads. The stub holds the round as the agent
+// does (holdRound), so only the drop's cancel ends it, not its CloseSend.
+// The stub's SyncupDn gives the stream a bounded wait to end — time that, in
+// the synctest bubble, passes only once nothing else can run — and records
+// whether it did.
 func TestRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	synctest.Test(t, testRevisionDesiredChangeDuringRoundSyncsAtOnce)
 }
@@ -1185,8 +1222,32 @@ func TestRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 func testRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{
-		// The agent never answers this round.
+		// The agent never answers this round, and runs it until the stream
+		// is cancelled.
 		checkReply: func(*pb.CheckDnRequest) *pb.CheckDnReply { return nil },
+		holdRound:  true,
+	}
+	var (
+		mu sync.Mutex
+		// roundLive is, per SyncupDn, whether the check stream it found
+		// was still live when the syncup was answered.
+		roundLive []bool
+	)
+	stub.syncupReply = func(
+		req *pb.SyncupDnRequest,
+	) (*pb.SyncupDnReply, error) {
+		live := false
+		if sctx := stub.lastStreamCtx(); sctx != nil {
+			select {
+			case <-sctx.Done():
+			case <-time.After(time.Second):
+				live = true
+			}
+		}
+		mu.Lock()
+		roundLive = append(roundLive, live)
+		mu.Unlock()
+		return &pb.SyncupDnReply{Revision: req.GetRevision()}, nil
 	}
 	h.fleet.addDn(t, testAddr, stub)
 	h.defaultConf()
@@ -1200,6 +1261,18 @@ func testRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	})
 	if got := stub.syncups()[0].GetRevision(); got != 2 {
 		t.Fatalf("syncup revision = %d, want the new 2", got)
+	}
+	waitFor(t, "the syncup's answer", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(roundLive) >= 1
+	})
+	mu.Lock()
+	live := roundLive[0]
+	mu.Unlock()
+	if live {
+		t.Fatalf("the syncup reached the agent while the given-up round's " +
+			"stream was still live: the round holds the lock it needs")
 	}
 	// The round was given up, not failed: an abandoned round is not a missed
 	// reply, so nothing set an err_epoch (HL1).
