@@ -314,11 +314,10 @@ func TestSweepSurvivesDeleteFailure(t *testing.T) {
 }
 
 // TestStartupReconcileDefersSweep is CN14's startup-deferral data-loss pin.
-// The
-// startup reconcile converges from the persisted request, and
-// converge-then-persist (syncupCntlr saves after convergeCntlr and only logs a
-// failed Save; a crash in the same window has the same effect) lets that copy
-// lag the pool's true contents. A sweep run against it deletes a live created
+// The startup reconcile converges from the persisted request, and a failed
+// save (syncupCntlr saves before convergeCntlr but only logs a Save that
+// fails, and converges all the same) lets that copy lag the pool's true
+// contents. A sweep run against it deletes a live created
 // td's thin id, which CN14 then reports as a permanent, never-re-messaged
 // RES_STATUS_ERROR — data loss, where the same staleness without a sweep is
 // merely a td left unbuilt until the next sync. So the startup Create arms

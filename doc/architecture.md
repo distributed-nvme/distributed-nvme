@@ -3177,10 +3177,9 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   the stored one is rejected (`AgentReply.code` non-zero, `details`
   explains). Equal revision: re-apply idempotently (workers retry).
   Higher: accept, subject to the conf gate below. When an accepted request
-  is persisted is the agent docs' rule — a node's request before its
-  converge, a side's or a cntlr's after it (`dnagent.md` SH5, `cnagent.md`
-  CN7). `Push*Bitmap` carries no revision and passes no such gate; Bitmap
-  push protocol says why.
+  is persisted is the agent docs' rule — every request once its gates admit
+  it, before its converge (`dnagent.md` SH5). `Push*Bitmap` carries no
+  revision and passes no such gate; Bitmap push protocol says why.
 * **Conf gate.** Agents resolve no conf defaults of their own (Common
   validation): a geometry an agent invented is one the rest of the
   cluster does not share, and dm, md and the on-disk headers would be
@@ -3192,9 +3191,9 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   multiple of `DnZeroAlign`, or longer than the side's `ext_cnt` extents
   (Side provisioning protocol; `dnagent.md` DN8) — is refused with its
   own `AgentReply.code` (`ReplyCodeInvalidConf`, `dnagent.md` SH9)
-  **after** the revision gate and **before** the request becomes the
-  desired state, so nothing converges, nothing is persisted, and the
-  restart reconcile cannot replay it; the reply echoes the revision the
+  **after** the revision gate and **before** the request is persisted or
+  becomes the desired state, so nothing converges, nothing is persisted,
+  and the restart reconcile cannot replay it; the reply echoes the revision the
   agent still holds, so the worker sees the request was not accepted. A
   persisted file carrying such a value never becomes live either, and
   both roles get there the same way: the file is **loaded**, never

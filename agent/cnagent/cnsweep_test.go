@@ -460,11 +460,11 @@ func TestSweepStopsANamedArrayNode(t *testing.T) {
 // list the sweep removes against — is on disk before the first removal.
 //
 // The sweep can block for the whole failfast window on a dead leg, so an RPC
-// cancelled in the middle of one is ordinary. With the save at the end (where
-// SH5 puts every other request) that cancellation lost the new list, and the
-// next Reconcile rebuilt the cntlr from the OLD one against sides that no
-// longer exist. With the save first, a crash anywhere in the pass is nothing
-// but a startup sweep.
+// cancelled in the middle of one is ordinary. With the save at the end of the
+// pass that cancellation would lose the new list, and the next Reconcile
+// would rebuild the cntlr from the OLD one against sides that no longer
+// exist. With the save first, where SH5 puts every request's, a crash
+// anywhere in the pass is nothing but a startup sweep.
 func TestPersistBeforeSweep(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})

@@ -173,10 +173,10 @@ type cntlrState struct {
 	tornTds map[uint64]bool
 	// reqFromRpc is true once req was delivered by a revision-gated
 	// SyncupCntlr in THIS incarnation. The startup Reconcile converges from
-	// the persisted copy, which converge-then-persist (syncupCntlr saves
-	// after convergeCntlr and only logs a failed Save) lets lag the pool's
-	// true contents — the sweep deletes ids absent from td_list, so it only
-	// ever trusts an RPC-delivered one (CN14).
+	// the persisted copy, which a failed save lets lag the pool's true
+	// contents: syncupCntlr saves before convergeCntlr but only logs a Save
+	// that fails, and the converge runs on — the sweep deletes ids absent
+	// from td_list, so it only ever trusts an RPC-delivered one (CN14).
 	reqFromRpc bool
 
 	// probers are the CN11 leg health probers, keyed by leg_id. They hold no

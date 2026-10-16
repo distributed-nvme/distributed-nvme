@@ -602,11 +602,10 @@ programs nothing and reports no QoS row in `CnInfo` (`architecture.md`,
 Controller node, common: QoS is not enforced).
 
 CN7. Persist first, then drop, then sweep. The request is written to
-`LocalCnPath` before the converge, not after it, as `dnagent.md` SH5
-states for a parent request and for SH5's reason: the node-level sweep
-below is what removes the resources of a cntlr whose pointer has just
-left the list, and it can block for a whole failfast window on a dead
-leg.
+`LocalCnPath` before the converge, as `dnagent.md` SH5 states for every
+request and for SH5's reason: the node-level sweep below is what removes
+the resources of a cntlr whose pointer has just left the list, and it can
+block for a whole failfast window on a dead leg.
 
 Then the CN5 base-state converge. Then the `cntlr_pointer_list` diff
 against the loaded cntlr states (`architecture.md`, Common agent rules:
@@ -647,15 +646,18 @@ node guessed is one the rest of the cluster does not share. The refusal
 is `ReplyCodeInvalidConf` (`dnagent.md` SH9) carrying the validator's
 message, and the reply echoes the stored revision, not the request's, so
 the worker sees that the request was not accepted. One Error record, msg
-"invalid stored conf", names the ids and the field.
+"invalid stored conf", names the ids and the field. A request the three
+gates admit is persisted at once, before it becomes the cntlr's desired
+state and before its converge (`dnagent.md` SH5).
 
-Placement is load-bearing: the gate sits before the request becomes this
-cntlr's desired state, so it skips the desired-state promotion, the whole
-converge — whose sweep phase alone rewrites ANA states, reloads ns-dev
-linears and removes dm devices — and CN20's local-store persist, which is
-what keeps a refused request from being replayed by the next startup
-reconcile. The same check is repeated in the converge itself for the
-entrances that do not come through this RPC — the CN2 startup reconcile,
+Placement is load-bearing: the gate sits before the local-store persist
+and before the request becomes this cntlr's desired state, so it skips the
+persist, the desired-state promotion and the whole converge — whose sweep
+phase alone rewrites ANA states, reloads ns-dev linears and removes dm
+devices; the skipped persist is what keeps a refused request from being
+replayed by the next startup reconcile. The same check is repeated in the
+converge itself for the entrances that do not come through this RPC — the
+CN2 startup reconcile,
 which converges from a file that may have been persisted with zeros, and
 the two background retries, the CN10 and CN18 connect retry and CN18's
 clone-metadata retry, which re-enter with the request they already hold.
@@ -1734,13 +1736,14 @@ that) and thin ids belong to tds alone. An agent restart under a
 surviving pool device does not sweep (nothing else writes the pool, and
 the CN2 zero-mutation reconcile stays intact), and a startup reconcile that
 re-creates the device (a node reboot) arms but does not run it: it
-converges from the persisted request, which may lag the pool's true
-contents (the converge runs before the persist and a failed persist is
-only logged), and deleting against a lagging `td_list` would destroy a
-live td — the first revision-gated `SyncupCntlr` after boot runs the
-sweep instead. A sweep failure is logged and retried on later converges
-until it succeeds once; a stray surviving a crash between creation and
-sweep waits for the next sweep of the pool's ids that gets through. A
+converges from the persisted request, which lags the pool's true
+contents after a persist that failed (one that fails is only logged and
+the converge runs on, `dnagent.md` SH5), and deleting against a lagging
+`td_list` would destroy a live td — the first revision-gated
+`SyncupCntlr` after boot runs the sweep instead. A sweep failure is logged
+and retried on later converges until it succeeds once; a stray surviving a
+crash between creation and sweep waits for the next sweep of the pool's
+ids that gets through. A
 delete message that fails, refused or unanswered, runs the same sweep of
 that pool in the same pass, on the same condition — the request the pass
 converges came by the revision-gated RPC — and that sweep spares every id
@@ -2548,8 +2551,7 @@ that level and above:
   the CN10 and CN18 connect retry and CN18's clone-metadata retry — are
   cancelled, and every `ResInfo` history of the cntlr is dropped.
 
-CN20. Persist (`dnagent.md` SH5); reply `agent_reply`, `revision`, `cntlr_info`,
-`bm_info_list`.
+CN20. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list`.
 
 **`agent_reply` is the sweep's verdict.** It is `ReplyCodeLeftover` iff
 this cntlr's sweep was not clean — the node still holds an object of this
@@ -2704,8 +2706,9 @@ holds whose `nqn_to_subsystem` still
 names it settles it, under that cntlr's sp, with nothing read from
 configfs: a cntlr's request is in memory (`putCntlr`) before its converge
 builds anything, so no subsystem can exist whose claim is not already
-visible here — the local-store save comes after the converge (CN20), so
-the guarantee is about this process's state, not about the files. Second,
+visible here — a local-store save can fail and the converge runs on
+(`dnagent.md` SH5), so the guarantee is about this process's state, not
+about the files. Second,
 for a subsystem no held request claims, its namespaces, in the listing's
 order: the first whose "device_path" parses as an ns-dev (`CnNsDevName`)
 decides for the whole subsystem — one of ours makes it that sp's; one
@@ -3907,3 +3910,15 @@ report no `Syncup*` could ever clear.
   finds every slice's id made already sees no tear, and a demoted primary
   reports no thin rows. The snapshot then flips with `torn` false
   (`architecture.md`, Known limits).
+* A cntlr's save that fails leaves the request before it on disk, the one
+  way a stale request stays there: the save comes before the converge, so a
+  crash or a cancelled call inside a pass leaves none (`dnagent.md` SH5).
+  The converge runs on after a failed save, so an agent restart before the
+  cntlr's next accepted save converges that older request. Its sweep
+  removes the thin volume of a td that request does not list and, while the
+  pool is wanted, sends the delete message of the td's thin id (CN21): a
+  thin volume the newer request created is lost. CN14's guard on its two
+  thin-id sweeps does not cover that sweep. Nothing tries the save again
+  before the cntlr's next accepted `SyncupCntlr`, and its Check rounds
+  answer the revision the process holds, so only a round's non-zero reply
+  code or a newer desired revision brings one (`dnv-worker.md` RW4).

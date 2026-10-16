@@ -303,28 +303,36 @@ do (SH6, SH7): the calls are in-process, so the bound ends only a wait for an
 `OsClient` slot. A save takes its slot under the locks its RPC holds
 (SH10, SH11), and without the bound a save that finds every slot held could
 wait until the RPC's deadline. A save the bound cuts off fails like any
-other and is only logged. Where the save is the RPC's last step, the RPC
-then returns and releases its locks: an object request is saved last, after
-its converge (SH5), and a chunk whose save failed is acked at once
-(DN15, `cnagent.md` CN22). A parent request is saved before its converge
-(SH5), which runs under the node write lock whatever the save's outcome.
+other and is only logged. A request is saved before its converge (SH5),
+which runs under the RPC's locks whatever the save's outcome; a chunk whose
+save failed is acked at once (DN15, `cnagent.md` CN22), and its RPC then
+returns and releases its locks.
 
-SH5. An **object** request (`SyncupSide`/`SyncupCntlr`) is persisted after
-its converge pass completes. A **parent** request (`SyncupDn`/`SyncupCn`)
-is persisted as soon as it has passed the gates and become the desired
-state — before the converge, and so before the sweep that removes the
-resources of a pointer which has just left the list (DN6). The parent's
-pointer list is the authoritative record of which objects still exist, and
-the sweep that acts on a shortened one can block for a whole failfast window
-on a dead remote: a save that waited for the sweep would be skipped by a
-request cancelled inside that window, and the next startup reconcile would
-then rebuild the object from the **old** list, against sides that no longer
-exist. With the new list on disk first, a crash mid-sweep is nothing worse
-than a startup sweep. Per-resource `RES_STATUS_ERROR` outcomes do not block
-persistence — the errors travel in the `*Info` and the worker's health loop
-drives repair (equal-revision re-syncs re-apply idempotently). Protocol
-rejections — stale revision, unknown pointer, invalid stored conf (SH9) —
-never reach persistence.
+SH5. Every request is persisted once it has passed the gates, before its
+converge. A **parent** request (`SyncupDn`/`SyncupCn`) is persisted as soon
+as it has passed the gates and become the desired state; an **object**
+request (`SyncupSide`/`SyncupCntlr`) as soon as it has passed the gates,
+before it becomes the desired state. Reason: a converge can run long, and a
+save that waited for it would be skipped by a request the worker cancels
+inside it, or by a crash there, so the next startup reconcile would
+converge the request before it and undo what the cut-off pass had begun. A
+parent's converge runs the sweep that removes the resources of a pointer
+which has just left the list (DN6), and that sweep can block for a whole
+failfast window on a dead remote; the parent's pointer list is the
+authoritative record of which objects still exist, and the reconcile would
+rebuild an object from the **old** list, against sides that no longer
+exist. An object's converge can run a migration's cutover or finish (DN12,
+DN13), a failover's primary flip (DN10) or a thin volume's creation
+(`cnagent.md` CN14), and the reconcile would undo it. With the new request
+on disk first, a crash mid-converge is nothing worse than a startup
+reconcile that completes the pass. A save that fails is only logged, and
+the converge runs whatever its outcome, so a full or read-only store stops
+no fence and no finish; such a save is the one way an older request stays
+on disk (Known limits; `cnagent.md`, Known limits). Per-resource
+`RES_STATUS_ERROR` outcomes do not block persistence — the errors travel in
+the `*Info` and the worker's health loop drives repair (equal-revision
+re-syncs re-apply idempotently). Protocol rejections — stale revision,
+unknown pointer, invalid stored conf (SH9) — never reach persistence.
 
 SH6. Enumeration on startup: one listing of the prefix through
 `OsClient.ReadDir`, in the agent's own process, on a ctx carrying the SH15
@@ -1687,11 +1695,15 @@ allocated with it would keep it for the side's life. The refusal is
 under the "invalid stored conf" prefix every conf refusal shares, and the
 reply echoes the **stored** revision, so the worker sees the request was
 not accepted; one Error record (msg "invalid stored conf") names the
-cluster, the dn, the sp and the side. Placement is DN4's: the gate sits
-before the request becomes the side's desired state, so nothing is swept,
-allocated, built or persisted. While the DN's stored `extent_size` is
-unusable (DN2) the side has no size to bound the length by, and only the
-first two bounds are checked.
+cluster, the dn, the sp and the side. Placement is load-bearing, as in
+DN4: the gate sits before the local-store save and before the request
+becomes the side's desired state, so nothing is swept, allocated, built or
+persisted. While the DN's stored `extent_size` is unusable (DN2) the side
+has no size to bound the length by, and only the first two bounds are
+checked.
+
+A request the three gates admit is persisted at once, before it becomes
+the side's desired state and before its converge (SH5).
 
 The same check runs inside the converge, for the entrances that do not
 come through this RPC: DN2's startup reconcile, DN13's connect retry and
@@ -2155,8 +2167,8 @@ revision (below). The request that clears the flag runs steps (3) to (5).
 The worker never sends `cutover_pending` again once its cutover cleared
 it, so a pass that waits for the cutover and finds a per-CN stack serving
 through the dm-clone converges a stale request: DN2's re-run of a stored
-request whose successor, the one that cleared the flag, was converged and
-never saved (SH5). That pass leaves the stack serving through the
+request whose successor, the one that cleared the flag, failed to save
+(SH5). That pass leaves the stack serving through the
 dm-clone, as a step that stops does, until the worker sees the side's
 older revision and sends the newer request again (`dnv-worker.md` RW4).
 Reason: reloading the leg's only serving path onto its dm-error would
@@ -2450,7 +2462,7 @@ with the area's text, no health epoch is set, the source keeps serving,
 and the retry takes the run with no further request once one comes free —
 the dn twin of the cn arena's wait in `cnagent.md` CN18.
 
-DN14. Persist (SH5); reply `agent_reply` — the side-level sweep's verdict
+DN14. Reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
 `zeroed_bytes`/`zero_bytes`, filled on every reply (DN9) — and
 `bm_info` (the applied set, SH21).
@@ -2891,3 +2903,28 @@ is still a protocol-level refusal.
   while the write keeps failing, and the round's verdict names the side as
   one nothing zeroes, so the worker re-sends its `SyncupSide` every round
   (DN16).
+* A side's save that fails leaves the request before it on disk, the one
+  way a stale request stays there: the save comes before the converge, so a
+  crash or a cancelled call inside a pass leaves none (SH5). The converge
+  runs on after a failed save, so an agent restart before the side's next
+  accepted save converges that older request and can undo what the newer
+  one did. A migration source whose stored request comes from before its
+  cutover puts its fenced dm-linears back onto the side's data, moves the
+  primary's namespace back to optimized and removes its migration source
+  export (DN12). A destination whose stored request comes from before its
+  finish takes a fresh run of the clone-metadata area and runs the
+  destination's steps again (DN13). When the source's export is gone, as it
+  is once the source has torn its side down after the finish, the source
+  connection answers with no namespace device, so the per-CN stacks go onto
+  their dm-errors with every namespace `AnaGrpIdInaccessible`: the leg's only
+  side serves nothing until the worker sees the side's older revision and
+  sends the newer request again (`dnv-worker.md` RW4). While the source's
+  export still answers, the destination builds its dm-clone again over the
+  fresh run, which copies the source's data over every write made since the
+  cutover. A side whose stored request comes from before a failover moves
+  the old primary's dm-linear back onto the side's data and its namespace
+  back to optimized. DN13's guard covers only a destination whose stored
+  request still waits for the cutover. Nothing tries the save again before
+  the side's next accepted `SyncupSide`, and its Check rounds answer the
+  revision the process holds, so only a round's non-zero reply code or a
+  newer desired revision brings one (`dnv-worker.md` RW4).

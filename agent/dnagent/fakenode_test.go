@@ -730,9 +730,17 @@ func (f *fakeNode) readProto(
 	return proto.Unmarshal(raw, target)
 }
 
+// writeProto refuses a cancelled ctx before it writes or records anything,
+// as common.LimitedOsClient.WriteProto does (ctxErr). A store save placed
+// after a converge the worker cancelled is refused that way, which is what
+// the cut-off tests of SH5's save order rest on: a fake that wrote whatever
+// the ctx said would keep the newer request on disk with either order.
 func (f *fakeNode) writeProto(
 	ctx context.Context, path string, msg proto.Message,
 ) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("writeproto %s", path)

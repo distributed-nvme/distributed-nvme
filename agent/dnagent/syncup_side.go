@@ -28,6 +28,19 @@ func (s *DnAgentServer) syncupSide(
 	if reply != nil {
 		return reply
 	}
+	// The side file is persisted as soon as the gates admit the request,
+	// BEFORE the converge (SH5). A converge can run long — a cutover, a
+	// finish, a failover's fence — and a request the worker cancels inside
+	// it would skip a save placed after it, so the next Reconcile would
+	// converge the request before this one and undo what this pass did. A
+	// failed save is only logged; the converge runs whatever its outcome.
+	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
+		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
+	if err := s.store.Save(ctx, path, req); err != nil {
+		slog.ErrorContext(ctx, "persisting side state failed",
+			slog.String("path", path),
+			slog.String("error", err.Error()))
+	}
 	// Stored before the converge builds anything, so no claim of this
 	// request can be missing from another side's pass that sees what the
 	// converge builds (collectClaims). The store is atomic because those
@@ -39,14 +52,6 @@ func (s *DnAgentServer) syncupSide(
 	s.putSide(key, st)
 
 	info, sweep := s.convergeSide(ctx, st, extentSize)
-
-	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
-		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
-	if err := s.store.Save(ctx, path, req); err != nil {
-		slog.ErrorContext(ctx, "persisting side state failed",
-			slog.String("path", path),
-			slog.String("error", err.Error()))
-	}
 	return &pb.SyncupSideReply{
 		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),

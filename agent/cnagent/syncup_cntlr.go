@@ -31,6 +31,21 @@ func (s *CnAgentServer) syncupCntlr(
 	if reply := s.gateCntlr(ctx, req, stored); reply != nil {
 		return reply
 	}
+	// The cntlr file is persisted as soon as the gates admit the request,
+	// before the converge, for dnagent.md SH5's reason: a request the
+	// worker cancels inside a long converge would skip a save placed after
+	// it, and the next Reconcile would converge the request before this one
+	// — whose td_list lacks a thin volume this pass may have created, and
+	// whose sweep would then delete that volume's thin id. A failed save is
+	// only logged; the converge runs whatever its outcome.
+	ptr := req.GetCntlrPointer()
+	path := s.nf.LocalCntlrPath(req.GetClusterId(), req.GetCnId(),
+		ptr.GetSpId(), ptr.GetCntlrId())
+	if err := s.store.Save(ctx, path, req); err != nil {
+		slog.ErrorContext(ctx, "persisting cntlr state failed",
+			slog.String("path", path),
+			slog.String("error", err.Error()))
+	}
 	if st == nil {
 		st = newCntlrState(req)
 	}
@@ -47,15 +62,6 @@ func (s *CnAgentServer) syncupCntlr(
 	s.putCntlr(key, st)
 
 	info, sweep := s.convergeCntlr(ctx, st)
-
-	ptr := req.GetCntlrPointer()
-	path := s.nf.LocalCntlrPath(req.GetClusterId(), req.GetCnId(),
-		ptr.GetSpId(), ptr.GetCntlrId())
-	if err := s.store.Save(ctx, path, req); err != nil {
-		slog.ErrorContext(ctx, "persisting cntlr state failed",
-			slog.String("path", path),
-			slog.String("error", err.Error()))
-	}
 	return &pb.SyncupCntlrReply{
 		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),

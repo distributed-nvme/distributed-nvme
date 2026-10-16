@@ -131,9 +131,9 @@ func (s *Store) Load(
 
 // Save persists one store file. When to save is the caller's decision, but a
 // save always comes after the gates: a request a gate rejected is never saved
-// (SH5; for a chunk, DN15 and CN22). A parent request (SyncupDn/SyncupCn) is
-// saved as soon as it has passed them, before its converge; an object request
-// (SyncupSide/SyncupCntlr) when SH5 says; a bitmap chunk before it is applied
+// (SH5; for a chunk, DN15 and CN22). A request, parent (SyncupDn/SyncupCn)
+// or object (SyncupSide/SyncupCntlr), is saved as soon as it has passed
+// them, before its converge (SH5); a bitmap chunk before it is applied
 // (SH21).
 //
 // It runs on a ctx carrying the soft timeout (SH4, SH15). The write is
@@ -142,11 +142,9 @@ func (s *Store) Load(
 // request, the node read lock and an object lock for an object request or a
 // chunk — and without the bound a save that finds every slot held could
 // wait for one until the RPC's deadline. A save the bound cuts off fails
-// like any other and is logged by its caller. Its RPC then returns,
-// releasing its locks, only where the save is the RPC's last step: an
-// object request is saved last, after its converge, and a chunk whose save
-// failed is acked at once. A parent request's RPC goes on to its converge
-// under the node write lock whatever the save's outcome.
+// like any other and is logged by its caller. A request's RPC goes on to
+// its converge under its locks whatever the save's outcome; a chunk whose
+// save failed is acked at once, and its RPC returns, releasing them.
 func (s *Store) Save(
 	ctx context.Context,
 	path string,

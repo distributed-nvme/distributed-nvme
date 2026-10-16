@@ -885,9 +885,15 @@ func (f *fakeNode) readProto(
 	return proto.Unmarshal(raw, target)
 }
 
+// writeProto refuses a cancelled ctx before it writes or records anything,
+// as common.LimitedOsClient.WriteProto does (ctxErr), for the reason the dn
+// twin of this fake gives: the cut-off tests of the save order rest on it.
 func (f *fakeNode) writeProto(
 	ctx context.Context, path string, msg proto.Message,
 ) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("writeproto %s", path)

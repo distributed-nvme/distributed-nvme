@@ -306,8 +306,8 @@ func (m migrServing) cloneLive() bool {
 // namespace inaccessible (DN13 step (1)). The worker never sends
 // cutover_pending again once the cutover cleared it, so a waiting pass that
 // finds a stack serving through the dm-clone converges a stale request — a
-// restart's re-run of a stored request whose successor was converged and
-// never saved (SH5) — and leaves that stack serving: reloading it onto its
+// restart's re-run of a stored request whose successor's save failed (SH5)
+// — and leaves that stack serving: reloading it onto its
 // dm-error would fail host IO until the worker sent the newer request
 // again.
 //
