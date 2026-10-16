@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -145,10 +146,10 @@ const (
 )
 
 var (
-	// Inside a subsystem directory, `nvme0` is a controller and `nvme0n1`
-	// the multipath namespace; inside a controller directory, `nvme0c1n1` is
-	// that controller's own (hidden) path device, the only place ana_state
-	// lives.
+	// Inside a subsystem directory, `nvme0` is a controller, `nvme0n1` the
+	// multipath namespace and `ng0n1` that namespace's ng device
+	// (ngDevOf); inside a controller directory, `nvme0c1n1` is that
+	// controller's own (hidden) path device, the only place ana_state lives.
 	nvmeCtrlEntryPattern = regexp.MustCompile(`^nvme\d+$`)
 	nvmeNsEntryPattern   = regexp.MustCompile(`^nvme\d+n\d+$`)
 	nvmePathEntryPattern = regexp.MustCompile(`^nvme\d+c\d+n\d+$`)
@@ -514,6 +515,11 @@ type SubsysRead struct {
 	// none; NsErr is the first nsid read that did not answer.
 	NsDev string
 	NsErr error
+	// NgListed says the listing of Dir that picked NsDev holds the node's
+	// ng device too (ngDevOf). The kernel adds the ng device last, after
+	// the node can be opened by its number, so it is the sign that the
+	// node is complete; it costs no read. False when NsDev is "".
+	NgListed bool
 	// Ctrls is one CtrlRead per controller, in listing order (CtrlPaths).
 	Ctrls []CtrlRead
 	// HostNqnHeld says some controller's hostnqn equals HostNqn
@@ -550,11 +556,12 @@ type CtrlRead struct {
 }
 
 // ReadSubsys reads one entry's directory under opts, in listing order: the
-// namespace node NsIdx picks, and of each controller what opts.Ctrls says. A
-// directory that is not there reads with DirGone set and nothing else. Under
-// ReadStrict the first read that did not answer ends the read, and
-// ReadSubsys returns nil and that read's error; under ReadTolerant only a
-// hostnqn or a transport read does (CtrlHostNqn, Transport).
+// namespace node NsIdx picks, whether its ng device is in the same listing,
+// and of each controller what opts.Ctrls says. A directory that is not there
+// reads with DirGone set and nothing else. Under ReadStrict the first read
+// that did not answer ends the read, and ReadSubsys returns nil and that
+// read's error; under ReadTolerant only a hostnqn or a transport read does
+// (CtrlHostNqn, Transport).
 func (h *NvmeHost) ReadSubsys(
 	ctx context.Context,
 	dir string,
@@ -584,6 +591,9 @@ func (h *NvmeHost) ReadSubsys(
 			}
 			if picked {
 				read.NsDev = "/dev/" + name
+				// The whole listing, whichever order it is in: the ng
+				// device sorts before its node.
+				read.NgListed = slices.Contains(names, ngDevOf(name))
 			}
 		case nvmeCtrlEntryPattern.MatchString(name):
 			switch opts.Ctrls {
@@ -607,6 +617,13 @@ func (h *NvmeHost) ReadSubsys(
 		}
 	}
 	return read, nil
+}
+
+// ngDevOf is the name of the ng device the kernel adds beside the multipath
+// namespace node nsName, inside the same subsystem directory: ng<X>n<Y> for
+// nvme<X>n<Y>, named after the node and never after the nsid.
+func ngDevOf(nsName string) string {
+	return "ng" + strings.TrimPrefix(nsName, "nvme")
 }
 
 // nsidIs says whether the namespace node at nsDir is the one nsIdx names: any

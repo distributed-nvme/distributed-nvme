@@ -655,6 +655,73 @@ func TestReadSubsysTolerant(t *testing.T) {
 	}
 }
 
+// TestReadSubsysNgListed pins the sign of a complete head (SH20): the read
+// records whether the listing that picked the namespace node holds the
+// node's ng device too, ng<X>n<Y> for nvme<X>n<Y>, named after the node and
+// not after the nsid, and in the listing before the node. The kernel adds the
+// ng device last, so the cn agent's head wait after a connect waits for it
+// (cnagent.md CN10). It is read from the names the listing already holds:
+// no read of the ng device is made. A read that picks no node records no ng
+// device, whatever the listing holds.
+func TestReadSubsysNgListed(t *testing.T) {
+	ctx := context.Background()
+	s := newNvmeSysfs()
+	dir := s.subsys("nvme-subsys0", "nqn.2024-01.io.dnv:3:a:b:c",
+		"ng0n1", "nvme0n1", "nvme0n2", "nvme3")
+	s.files[dir+"/nvme0n1/nsid"] = "2\n"
+	s.files[dir+"/nvme0n2/nsid"] = "1\n"
+	s.ctrl("nvme3", "10.0.0.3", "live", "optimized")
+	for _, tc := range []struct {
+		name     string
+		ng       string // an ng device added to the listing
+		nsIdx    uint32
+		nsDev    string
+		ngListed bool
+		reads    []string
+	}{
+		{"the node of nsid 2, its ng device listed before it", "", 2,
+			"/dev/nvme0n1", true,
+			[]string{"read " + dir + "/nvme0n1/nsid"}},
+		{"the node of nsid 1, another node's ng device listed", "", 1,
+			"/dev/nvme0n2", false,
+			[]string{"read " + dir + "/nvme0n1/nsid",
+				"read " + dir + "/nvme0n2/nsid"}},
+		{"the node of nsid 1, its ng device listed", "ng0n2", 1,
+			"/dev/nvme0n2", true,
+			[]string{"read " + dir + "/nvme0n1/nsid",
+				"read " + dir + "/nvme0n2/nsid"}},
+		{"NsIdx 0, the first node", "", 0, "/dev/nvme0n1", true, nil},
+		{"no node of nsid 3", "ng0n2", 3, "", false,
+			[]string{"read " + dir + "/nvme0n1/nsid",
+				"read " + dir + "/nvme0n2/nsid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			names := []string{"subsysnqn", "ng0n1", "nvme0n1", "nvme0n2",
+				"nvme3"}
+			if tc.ng != "" {
+				names = append(names, tc.ng)
+			}
+			s.dirs[dir] = names
+			read, err := s.host().ReadSubsys(ctx, dir, SubsysReadOpts{
+				NsIdx: tc.nsIdx,
+				Ctrls: CtrlNone,
+				Rule:  ReadTolerant,
+			})
+			if err != nil || read.NsDev != tc.nsDev ||
+				read.NgListed != tc.ngListed || read.NsErr != nil {
+				t.Fatalf("ReadSubsys = %+v, %v; want NsDev %q, NgListed %v",
+					read, err, tc.nsDev, tc.ngListed)
+			}
+			want := append([]string{"list " + dir}, tc.reads...)
+			if !slices.Equal(s.trace, want) {
+				t.Errorf("reads:\n%s\nwant:\n%s",
+					strings.Join(s.trace, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+	s.bounded(t)
+}
+
 // TestReadSubsysCtrlReads pins the two sweep reads folded into ReadSubsys
 // (SH20), each reading exactly what it reads alone. HeldWithHostNqn reads
 // each controller's hostnqn and nothing else of it, in listing order, up to

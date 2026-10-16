@@ -604,9 +604,13 @@ const (
 // the read is ready and no connect of the step failed. Its connect step is
 // CN10's, on the same pass budget the legs drew on (CN18): a failed connect
 // is tried again while the budget covers the pause, and after a connect this
-// pass made the subsystem is looked up again until the source namespace is
-// there. A connect that fails ends the step, and the subsystem is looked up
-// once more, on a fresh walk, so the rows say what that connect left behind.
+// pass made the subsystem is looked up again until the source namespace's
+// head is complete (awaitNsHead). The step holds on a head that the budget
+// left picked but not complete, since the step reads no number: the number
+// is first read in step 3, and a read that fails there fails step 3
+// (ensureDmClone). A connect that fails ends the step, and the subsystem is
+// looked up once more, on a fresh walk, so the rows say what that connect left
+// behind.
 // CN10's unknown-controller guard is not applied: a source controller whose
 // address did not answer matches no entry, so an entry it alone serves is
 // connected again — a duplicate the host refuses while that controller lives

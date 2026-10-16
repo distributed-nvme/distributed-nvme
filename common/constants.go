@@ -485,18 +485,24 @@ const (
 	// one budget of CnConnectPassBudget, shared by every leg and every clone
 	// source it connects, and exactly three things draw on it: a failed
 	// `nvme connect`'s own elapsed time; the CnConnectRetryPause before each
-	// in-pass retry of a failed connect; and the CnNsScanPause steps of the
-	// wait for the multipath namespace head after a connect this pass made.
+	// in-pass retry of a failed connect; and the steps of the wait for the
+	// multipath namespace head after a connect this pass made, until the
+	// head is complete — a CnNsScanPause while no head is picked, the far
+	// shorter CnNsHeadPause while one is picked but its ng device is not
+	// listed yet: the kernel's steps left once the head is listed end well
+	// inside one CnNsScanPause, and a pause of that size there would spend
+	// the budget the other legs of a large pass need.
 	// A pause starts only while it fits in what is left; a failed connect is
 	// charged after it ran, so a slow one can overdraw the budget, and none
 	// of this bounds a side's first connect, which every pass makes. Once it
 	// is spent the pass behaves as it did without it: the leg or the clone
 	// source fails with the same error and registers the background retry.
-	// Unlike the whole-second integers above them, these three are
+	// Unlike the whole-second integers above them, these four are
 	// time.Durations.
 	CnConnectPassBudget = 1 * time.Second
 	CnConnectRetryPause = 100 * time.Millisecond
 	CnNsScanPause       = 50 * time.Millisecond
+	CnNsHeadPause       = 5 * time.Millisecond
 
 	// ResDetailsSpLevel is the details of a CntlrInfo row the sp_level
 	// suppresses (cnagent.md CN19): RES_STATUS_MISSING that says the

@@ -91,12 +91,13 @@ and comments `common/constants.go` holds:
 * `CnCloneMetaRetryInterval`, the far slower pace of the clone-metadata
   retry, which re-runs a cntlr's converge while one of its clones waits for
   a free run in the arena; CN18 says why it is slower.
-* `CnConnectPassBudget`, `CnConnectRetryPause` and `CnNsScanPause`, the
-  connect step's one wait budget per converge pass (CN10, CN18), shared by
-  every leg and clone source of the pass and drawn on by exactly three
-  things: a failed connect's own elapsed time, the pause before each
-  in-pass retry, and the steps of the wait for the namespace head after a
-  connect this pass made.
+* `CnConnectPassBudget`, `CnConnectRetryPause`, `CnNsScanPause` and
+  `CnNsHeadPause`, the connect step's one wait budget per converge pass
+  (CN10, CN18), shared by every leg and clone source of the pass and drawn
+  on by exactly three things: a failed connect's own elapsed time, the
+  pause before each in-pass retry, and the steps of the wait for the
+  namespace head after a connect this pass made, with a pause of its own
+  while a picked head is not complete (CN10).
 * `ResDetailsSpLevel`, the details of a `CntlrInfo` row the `sp_level`
   suppresses (CN19): `RES_STATUS_MISSING` that says the resource must not
   exist, where every other `MISSING` the cn agent reports says it does not
@@ -940,24 +941,49 @@ it too, or does not answer at all; every failed connect is a candidate
 until the budget is gone. A connect to a disk node whose machine is down
 runs long (the kernel's SYN retries, or `CmdSoftTimeout`), spends the
 whole budget at once and so is never retried in the pass. (3) After a
-connect made in this pass, the subsystem is looked up again every
-`CnNsScanPause` until its multipath head is there, as long as the budget
-covers the step: `nvme connect` returns once the controller is live and
-only queues the namespace scan that adds the head. The first of those
-lookups walks again (above); each later one reads only the entry found,
-with the check above, but walks again after a lookup that found no entry
-or whose entry failed the check. A subsystem that was already connected
-and has no head — a leg whose only path is ANA inaccessible never gets one
-— is judged on its one read. A pause starts only while it fits in what is
-left, and a failed connect is charged after it has run, so a retried
-connect that runs long can overdraw the budget; nothing bounds the first
-connect of a side. Once the budget is spent the pass behaves exactly as it
-does without one: every connect it makes is made once, the first that
-fails still ends its leg's converge (the leg's other unconnected sides
-wait for a later pass), and a leg that did not connect, or whose head did
-not appear, fails with the same error. The waiting holds the cntlr's
-object lock, which every `CheckCntlr` round takes too (CN1), which is why
-the budget is one per pass and not one per leg.
+connect made in this pass, the subsystem is looked up again until its
+multipath head is complete, as long as the budget covers the pause before
+the next lookup: `nvme connect` returns once the controller is live and
+only queues the namespace scan that adds the head, and the kernel adds the
+head in steps — its directory, its "nsid", its "/sys/block" entry, then
+what lets it be opened by its number, and its **ng device** last. The
+wait counts the head complete only when a lookup picks the head and the
+head's ng device is listed beside it. Reason: a head picked before that
+can still lack the "/sys/block" entry its number is read from (CN28), or
+not yet open by that number when the wrapper's table names it, and the
+leg would fail for the pass on a head a few steps from done; the ng device
+is the last step, and the lookup reads it from the listing it already
+makes (`dnagent.md` SH20). The pause is `CnNsScanPause` while the lookup
+picks no head, none listed or none whose "nsid" reads the one asked for,
+and the far shorter `CnNsHeadPause` while it picks one whose ng device is
+not listed yet. Reason: the steps left once the head is picked end well
+inside one scan pause, and a pass that connects many legs needs the rest
+of its budget for the heads not listed yet. The first of those lookups
+walks again (above); each later one reads only the entry found, with the
+check above, but walks again after a lookup that found no entry or whose
+entry failed the check. Only this wait judges the ng device: a subsystem
+that was already connected is judged on its one read, whether it has no
+head — a leg whose only path is ANA inaccessible never gets one — or a
+head whose ng device is not listed. Reason: a head that never gets an ng device, as
+on a kernel that makes none, then costs at most what is left of the budget
+of the pass that connected it, and is used as it is, never failed for the
+missing sign. A pause starts only while it fits in what is left, and a
+failed connect is charged after it has run, so a retried connect that runs
+long can overdraw the budget; nothing bounds the first connect of a side.
+Once the budget is spent the pass behaves exactly as it does without one:
+every connect it makes is made once, the first that fails still ends its
+leg's converge (the leg's other unconnected sides wait for a later pass), a
+leg that did not connect, or whose head did not appear, fails with the
+same error, and a head that is picked but not complete is used as it is:
+its number is read and the wrapper is created, and a failure of either
+fails the leg with its own error. A head wait that the budget stops writes
+one record naming the subsystem, the head it picked, if any, and the
+pauses it took of each kind. Reason: a leg row that reads that the head's
+block device is not there can then be the budget's kept case, and the
+record in the same pass tells it from a wait that ended too early. The
+waiting holds the cntlr's object lock, which every `CheckCntlr` round
+takes too (CN1), which is why the budget is one per pass and not one per
+leg.
 
 A connect failure marks that leg `RES_STATUS_ERROR` and registers the
 cntlr in a background retry registry that re-runs the converge every
@@ -2044,16 +2070,19 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    step is CN10's, drawing on the same pass budget the legs drew on: a
    failed connect is retried within the pass while the budget covers the
    pause, and after a connect this pass made the source is looked up
-   again, as CN10's head wait looks a leg up, until the source namespace
-   is there. With
-   the budget spent — the legs may have spent it — a source that did not
-   connect, or whose namespace did not appear, fails step 1 ("no
-   namespace … on …" for the latter). CN10's unknown-controller rule is
-   not applied here: a source controller whose "address" did not answer
-   matches no entry, so an entry it alone serves reads unconnected and
-   is connected again — a duplicate the host refuses while that
-   controller lives, which fails step 1 once the budget is spent — and
-   nothing is disconnected, since step 1 retires no path. CN10's rule
+   again, as CN10's head wait looks a leg up, until the source namespace's
+   head is complete, on CN10's terms. With the budget spent — the legs
+   may have spent it — a source that did not connect, or whose namespace
+   did not appear, fails step 1 ("no namespace … on …" for the latter),
+   and a source whose head is picked but not complete passes step 1 and is
+   used as it is: step 1 reads no number, and step 3's table names the
+   source by its number (CN28), so a read of that number that fails fails
+   step 3. CN10's unknown-controller rule is not applied here: a source
+   controller whose "address" did not answer matches no entry, so an
+   entry it alone serves reads unconnected and is connected again — a
+   duplicate the host refuses while that controller lives, which fails
+   step 1 once the budget is spent — and nothing is disconnected, since
+   step 1 retires no path. CN10's rule
    for a walk or a lookup that did not answer is applied: it fails step 1
    naming the read, and nothing is connected on it; `clone_id_to_dm_clone`
    then reads, while no dm-clone of the clone is up, `MISSING` "source

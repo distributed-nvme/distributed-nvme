@@ -48,7 +48,12 @@ type subsysView struct {
 	found bool
 	// nsDev is the multipath namespace device, e.g. "/dev/nvme0n1".
 	nsDev string
-	ctrls []ctrlView
+	// ngListed says the lookup's listing held nsDev's ng device too, which
+	// the kernel adds last, once the head can be opened by its number
+	// (agent.SubsysRead.NgListed). Only the head wait after a connect of the
+	// pass judges it (awaitNsHead).
+	ngListed bool
+	ctrls    []ctrlView
 }
 
 // ctrlView is one controller (one side's path) of a subsystem.
@@ -244,7 +249,8 @@ func (s *CnAgentServer) lookupSubsys(
 		return nil, subsysUnknown(nqn,
 			fmt.Errorf("list %s: %w", match.Dir, fs.ErrNotExist))
 	}
-	view := &subsysView{found: true, nsDev: read.NsDev}
+	view := &subsysView{found: true, nsDev: read.NsDev,
+		ngListed: read.NgListed}
 	for _, ctrl := range read.Ctrls {
 		// A gone controller has nothing but its name read (ReadTolerant).
 		view.ctrls = append(view.ctrls, ctrlView{
@@ -326,9 +332,12 @@ func (s *CnAgentServer) ensureLegs(
 // waits, briefly and boundedly, for what it has just asked for (CN10): a
 // failed connect is tried again within the pass (connectWithin), and after a
 // connect this pass made the subsystem is read again until the kernel has
-// added the multipath namespace head (awaitNsHead). Both draw on budget, the
-// pass's one wait budget; once it is spent the leg fails with the step's
-// error, and ensureLegs registers the background retry. Each connect marks
+// finished adding the multipath namespace head (awaitNsHead). Both draw on
+// budget, the pass's one wait budget. Once it is spent, a connect that fails
+// fails the leg at once with its own error, and a head wait returns what
+// its last lookup read: a picked head that is not complete is used as it is,
+// and a step after the wait that fails fails the leg with its own error.
+// Either way ensureLegs registers the background retry. Each connect marks
 // the pass's walk stale first, so the lookup after it walks again: the
 // subsystem it made may have taken the number of an entry freed since the
 // walk.
@@ -449,14 +458,33 @@ func (s *CnAgentServer) connectWithin(
 }
 
 // awaitNsHead looks one subsystem up again after a connect this pass made,
-// until its multipath namespace head is there or the pass's budget no longer
-// covers another CnNsScanPause (CN10). The kernel returns from `nvme connect`
+// until its multipath namespace head is complete or the pass's budget no
+// longer covers the next pause (CN10). The kernel returns from `nvme connect`
 // as soon as the controller is live and only QUEUES the namespace scan, which
 // adds the hidden per-path disk first and the head after it; a single read
 // right after the connect can therefore miss a head that is milliseconds
-// away. Only a connect made in this pass is waited for: a subsystem that was
-// already connected and has no head — a leg whose only path is ANA
-// inaccessible never gets one — is judged on the one read.
+// away. The head itself is added in steps: its directory, its nsid, its
+// /sys/block entry, then what lets it be opened by its number, and its ng
+// device last. So a lookup that has picked the head counts it only once the
+// ng device is listed beside it: before that, the number read can find no
+// /sys/block entry, and a table naming the number can fail to open it.
+//
+// The pause between two lookups is CnNsScanPause while no head is picked —
+// none listed, or none whose nsid reads the one asked for — and the far
+// shorter CnNsHeadPause while one is picked whose ng device is not listed
+// yet. Once the budget does not cover the next pause the wait stops, writes
+// msgHeadWaitSpent and returns what the last lookup read, and a picked head
+// is then used as it is. A leg reads its number next, and a read that
+// fails fails the leg with its own error. A clone source passes CN18's step
+// 1 on it, since that step reads no number: the source's number is first
+// read in step 3, for the dm-clone's table, so a read that fails there fails
+// step 3, and its error leads the dm-clone's and the wrapper's rows that
+// are not OK, never the source's row (CN18).
+//
+// Only a connect made in this pass is waited for: a subsystem that was
+// already connected is judged on the one read, whatever it shows — no head,
+// as a leg whose only path is ANA inaccessible never gets one, or a head
+// with no ng device listed.
 //
 // The connect left pw stale, so the first lookup walks again. Each later one
 // reads that entry alone — its subsysnqn, its directory and its controllers
@@ -470,19 +498,44 @@ func (s *CnAgentServer) awaitNsHead(
 	nqn string,
 	nsIdx uint32,
 ) (*subsysView, error) {
+	scanPauses, headPauses := 0, 0
 	for {
 		view, err := s.lookupSubsys(ctx, pw, nqn, nsIdx)
-		if err != nil || view.nsDev != "" {
+		if err != nil || (view.nsDev != "" && view.ngListed) {
 			return view, err
 		}
 		if !view.found {
 			pw.stale = true
 		}
-		if !budget.Pause(ctx, common.CnNsScanPause) {
+		pause := common.CnNsScanPause
+		if view.nsDev != "" {
+			pause = common.CnNsHeadPause
+		}
+		if !budget.Pause(ctx, pause) {
+			if ctx.Err() == nil {
+				slog.WarnContext(ctx, msgHeadWaitSpent,
+					slog.String("nqn", nqn),
+					slog.String("head", view.nsDev),
+					slog.Int("scan_pauses", scanPauses),
+					slog.Int("head_pauses", headPauses))
+			}
 			return view, nil
+		}
+		if view.nsDev != "" {
+			headPauses++
+		} else {
+			scanPauses++
 		}
 	}
 }
+
+// msgHeadWaitSpent is the Warn record of a head wait (awaitNsHead) that the
+// pass's budget stopped (CN10): it names the subsystem, the head the last
+// lookup picked ("" when none) and the pauses the wait took of each kind. A
+// leg whose number read then fails on a head that was not complete, or a
+// clone whose step 3 fails on its source's, is the kept case of the budget,
+// which this record tells from a head wait that ended too early.
+const msgHeadWaitSpent = "head wait budget spent"
 
 // newPassBudget is one converge pass's CN10 wait budget: created once per
 // convergeCntlr and handed down to every leg and clone-source connect of that

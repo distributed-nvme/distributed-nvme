@@ -769,10 +769,13 @@ Both agents read them through one code, the sysfs walk. The walk lists
 "/sys/class/nvme-subsystem" and reads each entry's "subsysnqn", recording
 each read that failed apart from one that found nothing. A lookup reads one
 entry's directory: its namespace node, picked by "nsid" when the caller
-names a namespace, and of its controllers what its caller reads — address,
-state and ANA state, with the transport where `ListSubsys` reads it; for
-`HeldWithHostNqn` each controller's "hostnqn" alone, up to the first that
-matches; for `SubsysDevicePath` nothing. `ListAllSubsys`, `ListSubsys`,
+names a namespace; whether that node's ng device is listed beside it,
+taken from the names the listing holds, so at no read's cost, which
+`cnagent.md` CN10's head wait judges; and of its controllers what its
+caller reads — address, state and ANA state, with the transport where
+`ListSubsys` reads it; for `HeldWithHostNqn` each controller's "hostnqn"
+alone, up to the first that matches; for `SubsysDevicePath` nothing.
+`ListAllSubsys`, `ListSubsys`,
 `HeldWithHostNqn` and `SubsysDevicePath` each fail on a listing they make
 that failed, and each has its own rule for the reads past it:
 `ListAllSubsys` fails on any failed "subsysnqn" read; `ListSubsys` walks

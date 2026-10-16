@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -159,14 +160,15 @@ type fakeNode struct {
 	// stops answering, say, which the pass's re-read after the connect then
 	// meets. It must not take the lock.
 	duringConnect map[string]func()
-	// nsHeadAfter defers a subsystem's multipath namespace head, keyed by
-	// NQN: the connect that creates the subsystem adds its controller but
-	// not the head, which appears on the Nth listing of the subsystem
-	// directory — the kernel's namespace scan, which `nvme connect` only
-	// queues. 0 or 1 is the ordinary connect.
-	nsHeadAfter map[string]int
-	// pendingHeads are the heads nsHeadAfter deferred, keyed by the
-	// subsystem's sysfs directory.
+	// nsHeadAt stages a subsystem's multipath namespace head, keyed by NQN:
+	// the connect that creates the subsystem adds its controller but not
+	// the head, whose steps show on the listings of the subsystem directory
+	// headStages names — the kernel's namespace scan, which `nvme connect`
+	// only queues, and which adds the head in steps. Without an entry, or
+	// with every step at 0 or 1, the connect adds the whole head at once.
+	nsHeadAt map[string]headStages
+	// pendingHeads are the heads nsHeadAt staged, keyed by the subsystem's
+	// sysfs directory, until their last step shows.
 	pendingHeads map[string]*pendingHead
 	// afterList and afterRead change the node while a pass reads it: each
 	// runs once, keyed by the exact path, right after a listing (readDir)
@@ -325,10 +327,27 @@ type fakeSubsys struct {
 	ctrls []*fakeCtrl
 }
 
-// pendingHead is one namespace head the kernel's scan has not added yet.
+// headStages are the listings of a subsystem's directory, counted from the
+// first one after the connect that created it, on which each step of adding
+// its multipath namespace head shows, in the kernel's order: the head's
+// directory, its nsid, its /sys/block entry with the number behind it, and
+// its ng device last, which the kernel adds once the head can be opened by
+// its number. A step shows no earlier than the one before it; 0 and 1 are
+// the first listing.
+type headStages struct {
+	dir, nsid, block, ng int
+}
+
+// steps is the four counts in the kernel's order.
+func (h headStages) steps() []int {
+	return []int{h.dir, h.nsid, h.block, h.ng}
+}
+
+// pendingHead is one namespace head the kernel's scan has not finished adding.
 type pendingHead struct {
-	after int // the listing of the subsystem directory that shows it
+	at    headStages
 	reads int // listings so far
+	shown int // steps shown so far, in the kernel's order
 	nsDev string
 	nsIdx uint32
 }
@@ -376,7 +395,7 @@ func newFakeNode() *fakeNode {
 		connectFail:   make(map[string]int),
 		connectTakes:  make(map[string]time.Duration),
 		duringConnect: make(map[string]func()),
-		nsHeadAfter:   make(map[string]int),
+		nsHeadAt:      make(map[string]headStages),
 		pendingHeads:  make(map[string]*pendingHead),
 		afterList:     make(map[string]func()),
 		afterRead:     make(map[string]func()),
@@ -1202,15 +1221,21 @@ func (f *fakeNode) cmdLs(args []string) (string, int) {
 }
 
 // countHeadListing counts one listing of a subsystem directory against the
-// head nsHeadAfter deferred there, and adds the head on the listing that
-// shows it.
+// head nsHeadAt staged there, and shows each step of the head whose listing
+// this is, in the kernel's order.
 func (f *fakeNode) countHeadListing(path string) {
-	if head := f.pendingHeads[path]; head != nil {
-		head.reads++
-		if head.reads >= head.after {
-			f.addNsHead(path, head.nsDev, head.nsIdx)
-			delete(f.pendingHeads, path)
-		}
+	head := f.pendingHeads[path]
+	if head == nil {
+		return
+	}
+	head.reads++
+	steps := head.at.steps()
+	for head.shown < len(steps) && steps[head.shown] <= head.reads {
+		f.addNsHeadStep(path, head.nsDev, head.nsIdx, head.shown)
+		head.shown++
+	}
+	if head.shown == len(steps) {
+		delete(f.pendingHeads, path)
 	}
 }
 
@@ -2826,7 +2851,7 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	f.dirs[sysfsNvmeCtrlDir] = true
 	subsys, ok := f.subsystems[nqn]
 	if !ok {
-		subsys = f.addSubsys(f.nextSubsys, nqn, f.nsHeadAfter[nqn])
+		subsys = f.addSubsys(f.nextSubsys, nqn, f.nsHeadAt[nqn])
 	}
 	f.addCtrl(subsys, trAddr, trSvcId)
 	if during := f.duringConnect[key]; during != nil {
@@ -2836,10 +2861,10 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 }
 
 // addSubsys adds the entry nvme-subsys<idx> for nqn, with its subsysnqn and
-// its multipath namespace head, which appears on the headAfter-th listing of
-// the entry's directory when headAfter is above 1 (nsHeadAfter). The next
-// connect of a new NQN takes a number above idx.
-func (f *fakeNode) addSubsys(idx int, nqn string, headAfter int) *fakeSubsys {
+// its multipath namespace head, whose steps show on the listings of the
+// entry's directory that at names when any of them is above 1 (nsHeadAt).
+// The next connect of a new NQN takes a number above idx.
+func (f *fakeNode) addSubsys(idx int, nqn string, at headStages) *fakeSubsys {
 	subsys := &fakeSubsys{idx: idx, nqn: nqn}
 	if idx >= f.nextSubsys {
 		f.nextSubsys = idx + 1
@@ -2853,9 +2878,9 @@ func (f *fakeNode) addSubsys(idx int, nqn string, headAfter int) *fakeSubsys {
 		nsIdx = want
 	}
 	nsDev := fmt.Sprintf("nvme%dn%d", subsys.idx, nsIdx)
-	if headAfter > 1 {
+	if slices.Max(at.steps()) > 1 {
 		f.pendingHeads[dir] = &pendingHead{
-			after: headAfter, nsDev: nsDev, nsIdx: nsIdx}
+			at: at, nsDev: nsDev, nsIdx: nsIdx}
 	} else {
 		f.addNsHead(dir, nsDev, nsIdx)
 	}
@@ -2905,20 +2930,44 @@ func (f *fakeNode) plantSubsys(idx int, nqn string, eps ...endpoint) {
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
-	subsys := f.addSubsys(idx, nqn, 0)
+	subsys := f.addSubsys(idx, nqn, headStages{})
 	for _, ep := range eps {
 		f.addCtrl(subsys, ep.trAddr, ep.trSvcId)
 	}
 }
 
-// addNsHead publishes a subsystem's multipath namespace head: the nvmeXnY
-// directory with its nsid, and the block device behind it.
+// addNsHead publishes a subsystem's whole multipath namespace head: the
+// nvmeXnY directory with its nsid, the block device behind it, and its ng
+// device.
 func (f *fakeNode) addNsHead(dir, nsDev string, nsIdx uint32) {
-	f.dirs[dir+"/"+nsDev] = true
-	f.files[dir+"/"+nsDev+"/nsid"] = fmt.Sprintf("%d\n", nsIdx)
-	f.devNo["/dev/"+nsDev] = f.newDevNo()
-	f.devSize["/dev/"+nsDev] = 1 << 40
-	f.publishBlockDev(nsDev)
+	for step := range len(headStages{}.steps()) {
+		f.addNsHeadStep(dir, nsDev, nsIdx, step)
+	}
+}
+
+// addNsHeadStep publishes one step of a multipath namespace head, numbered in
+// the kernel's order (headStages): 0 the nvmeXnY directory, 1 its nsid, 2
+// the block device behind it with its /sys/block entry, 3 its ng device
+// beside it in the subsystem directory.
+func (f *fakeNode) addNsHeadStep(dir, nsDev string, nsIdx uint32, step int) {
+	switch step {
+	case 0:
+		f.dirs[dir+"/"+nsDev] = true
+	case 1:
+		f.files[dir+"/"+nsDev+"/nsid"] = fmt.Sprintf("%d\n", nsIdx)
+	case 2:
+		f.devNo["/dev/"+nsDev] = f.newDevNo()
+		f.devSize["/dev/"+nsDev] = 1 << 40
+		f.publishBlockDev(nsDev)
+	case 3:
+		f.dirs[dir+"/"+ngDevOf(nsDev)] = true
+	}
+}
+
+// ngDevOf is the ng device the kernel adds beside the multipath namespace
+// head nsDev: ng<X>n<Y> for nvme<X>n<Y>.
+func ngDevOf(nsDev string) string {
+	return "ng" + strings.TrimPrefix(nsDev, "nvme")
 }
 
 // publishBlockDev publishes /sys/block/{kname}/dev, the number the kernel
@@ -2954,6 +3003,7 @@ func (f *fakeNode) dropNsHead(nqn string) {
 		if ok && nvmeNsEntryPattern.MatchString(name) {
 			delete(f.dirs, entry)
 			delete(f.files, entry+"/nsid")
+			delete(f.dirs, dir+"/"+ngDevOf(name))
 			f.dropBlockDev("/dev/" + name)
 		}
 	}
