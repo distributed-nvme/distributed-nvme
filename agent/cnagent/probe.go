@@ -18,10 +18,12 @@ import (
 // the table listing, lacks (cnReading); and the fresh `dmsetup info` that
 // confirms a device gone after its own status or table read failed. No
 // function here creates, changes or removes an object of the node, as
-// Get*Info and the Check* streams must not (CN23, SH25); a `dmsetup status`
-// of a thin pool or a dm-clone still makes the kernel commit that target's
-// metadata (dnagent.md SH17). In particular `reserve_metadata_snap` runs
-// only inside `dumpThinMetadata` — the CN25 bitmap reads, CN14's thin id
+// Get*Info and the Check* streams must not (CN23, SH25). A thin pool's
+// `dmsetup status` carries the noflush flag and commits nothing, though it
+// waits behind a commit already running on that pool; a dm-clone's still
+// makes the kernel commit the clone's metadata (dnagent.md SH17). In
+// particular `reserve_metadata_snap`, a pool message that commits the pool,
+// runs only inside `dumpThinMetadata` — the CN25 bitmap reads, CN14's thin id
 // sweeps (the activation sweep and the sweep after a failed delete) and the
 // dst-bitmap read of architecture.md, Clone crash recovery — never from here
 // (CN29).

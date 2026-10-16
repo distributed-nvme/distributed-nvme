@@ -2916,8 +2916,8 @@ the gate refuses (CN8) takes no reading: its info is empty and it has no
 verdict (CN30). A `GetCnInfo` takes no reading: its probe runs first and
 its verdict second, as in a `CheckCn` round. Never
 creates, changes or removes an object of the node, though a cntlr's call
-makes the kernel commit the metadata of each thin pool and dm-clone whose
-status it reads (`dnagent.md` SH17).
+makes the kernel commit the metadata of each dm-clone whose status it
+reads; its status reads of thin pools commit nothing (`dnagent.md` SH17).
 
 ### `CheckCn` / `CheckCntlr`
 
@@ -3096,9 +3096,13 @@ did not answer makes every row whose first read goes to it
 
 Outside the reading stay: the `dmsetup status` of each thin pool, and of
 each dm-clone once for its rows and once more for each namespace it backs
-(CN16 rule 5), because a status read makes the kernel commit that
-device's metadata (`dnagent.md` SH17), and one over the whole node would
-do so for every pool on it; the configfs reads of the exports; the
+(CN16 rule 5), because a status read can wait on IO: a thin pool's waits
+behind a commit already running on that pool, and a dm-clone's makes the
+kernel commit the clone's metadata (`dnagent.md` SH17). Read per device,
+a call's status reads wait only on its own cntlr's pools and dm-clones; one
+read over the whole node would wait behind a commit on any pool or dm-clone
+of the node, another cntlr's too. Also outside stay the configfs reads of
+the exports; the
 `losetup` of the clone-metadata arena (CN5); each walk entry a lookup
 uses — its "subsysnqn" read again, its namespace and its controllers
 (CN10); the attributes of the array the md walk matches to a group
@@ -3186,7 +3190,8 @@ The rows, each with its `res_name` and what its probe checks:
   (CN14). The td's entry also carries its torn mark, which a round reports
   from the agent's memory as the converge does (CN14).
 * `slice_id_to_dm_pool`, named by the `CnPoolFinalName`:
-  `dmsetup status`; the details are the raw status line — the worker
+  `dmsetup status` with the `--noflush` flag (`dnagent.md` SH17); the
+  details are the raw status line — the worker
   parses data and metadata used and total out of it for the auto-grow of
   `architecture.md`, Automatic reactions. The serving pool stays
   `RES_STATUS_OK` with that raw line even while a deferred group waits to
@@ -3322,10 +3327,10 @@ change and remove nothing — the
 metadata-snapshot reserve runs only inside `dumpThinMetadata` (the CN25
 bitmap reads, CN14's sweeps of a pool's thin ids — the activation sweep
 and the sweep after a failed delete — and the destination-bitmap read of
-CN18 step 4), never from `probe.go` — though a status read of a thin pool
-or a dm-clone makes the kernel commit that target's metadata (`dnagent.md`
-SH17). `RES_STATUS_PROVISIONING` is never produced by this path: it
-is assigned by the CN9 gate, not by a failed command, or by CN18 step 2's
+CN18 step 4), never from `probe.go` — though a status read of a dm-clone
+makes the kernel commit the clone's metadata, where a thin pool's commits
+nothing (`dnagent.md` SH17). `RES_STATUS_PROVISIONING` is never produced by
+this path: it is assigned by the CN9 gate, not by a failed command, or by CN18 step 2's
 verdict on an arena with no free run, which is a wait and not a failure;
 and
 `RES_STATUS_PENDING` is produced by the CN11 registry alone, never by a

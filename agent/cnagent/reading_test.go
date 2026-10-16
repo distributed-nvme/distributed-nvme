@@ -1104,10 +1104,10 @@ func TestCheckRoundReadsTheCloneFromTheReading(t *testing.T) {
 		}
 		assertNoCall(t, node, "cmd dmsetup ls")
 		for call, want := range map[string]int{
-			"cmd dmsetup status " + poolName(srv): 1,
-			"cmd dmsetup status " + clone:         2,
-			"cmd losetup --associated ":           1,
-			"cmd dmsetup status ":                 3,
+			"cmd dmsetup status --noflush " + poolName(srv): 1,
+			"cmd dmsetup status " + clone:                   2,
+			"cmd losetup --associated ":                     1,
+			"cmd dmsetup status ":                           3,
 		} {
 			if got := callCnt(node, call); got != want {
 				t.Errorf("%s: %q ran %d times, want %d", label, call, got,
@@ -1117,6 +1117,68 @@ func TestCheckRoundReadsTheCloneFromTheReading(t *testing.T) {
 		assertRowsOk(t, info, label)
 		if verdict.GetCode() != 0 {
 			t.Errorf("%s: the verdict is %v, want clean", label, verdict)
+		}
+	}
+}
+
+// TestPoolStatusReadsCarryNoFlush pins the flag of the cn agent's status
+// reads (dnagent.md SH17; CN28): a thin pool's status read passes
+// `--noflush`, in the converge's pool step and in the probe that a check
+// round and an info read share, so none of them commits the pool; a
+// dm-clone's status reads pass no flag. The primary holds a built,
+// hydrating clone, so every entrance reads both kinds.
+func TestPoolStatusReadsCarryNoFlush(t *testing.T) {
+	srv, node := newTestServer(t)
+	o := reqOpts{revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}}
+	syncupBoth(t, srv, o)
+	probeAllLegs(t, srv)
+	pool := poolName(srv)
+	clone := cloneName(srv, testClone)
+	entrances := []struct {
+		name string
+		read func()
+	}{
+		{"a converge", func() {
+			o.revision = 3
+			syncupCntlrAt(t, srv, o)
+		}},
+	}
+	for _, entrance := range readEntrances {
+		entrances = append(entrances, struct {
+			name string
+			read func()
+		}{entrance.name, func() { entrance.read(t, srv) }})
+	}
+	for _, entrance := range entrances {
+		node.Reset()
+		entrance.read()
+		poolReads, cloneReads := 0, 0
+		for _, call := range node.callsMatching("cmd dmsetup status ") {
+			fields := strings.Fields(call)
+			flagged := slices.Contains(fields, "--noflush")
+			switch name := fields[len(fields)-1]; name {
+			case pool:
+				poolReads++
+				if len(fields) != 5 || fields[3] != "--noflush" {
+					t.Errorf("%s: %q: a pool's status read without "+
+						"--noflush commits the pool", entrance.name, call)
+				}
+			case clone:
+				cloneReads++
+				if flagged {
+					t.Errorf("%s: %q: a dm-clone's status read carries "+
+						"--noflush", entrance.name, call)
+				}
+			default:
+				if flagged {
+					t.Errorf("%s: %q: --noflush on a device that is no "+
+						"thin pool", entrance.name, call)
+				}
+			}
+		}
+		if poolReads == 0 || cloneReads == 0 {
+			t.Errorf("%s: %d pool and %d dm-clone status reads: the case "+
+				"is vacuous", entrance.name, poolReads, cloneReads)
 		}
 	}
 }

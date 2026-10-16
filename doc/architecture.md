@@ -5512,14 +5512,23 @@ that component's document and only pointed to here.
   failed out of its md-raid1 group gets none of this IO; md fails such a leg
   when an IO it sends failfast (`cnagent.md` CN12) reaches the source after
   src step 1, before the primary has read the ANA change, and the array
-  stays degraded afterwards (`cnagent.md`, Known limits). The primary's
-  check rounds and converges read the pool's status (`cnagent.md` CN28), and
-  that read commits the pool; so do a thin device's create or delete
-  (`cnagent.md` CN14), every read through a thin metadata snapshot, the
-  bitmap reads of a thin device and of a data leg among them (`cnagent.md`
-  CN25), and dm-thin's own commit once host writes have mapped new blocks.
-  While a commit waits, the rest of that pool's IO waits too. A check round,
-  a converge or a bitmap read that waits holds the cntlr's lock and the node
+  stays degraded afterwards (`cnagent.md`, Known limits). The primary's own
+  reads of the pool's status, in its check rounds, info reads and converges
+  (`cnagent.md` CN28), carry the `--noflush` flag and commit nothing
+  (`dnagent.md` SH17). What still commits the pool in a gap: a thin
+  device's create or delete (`cnagent.md` CN14); every read through a thin
+  metadata snapshot, whose reservation commits the pool, the bitmap reads of
+  a thin device and of a data leg (`cnagent.md` CN25) and the thin id
+  sweeps (`cnagent.md` CN14) among them; a reload or suspend of the pool; a
+  commit of a clone's dm-clone, which flushes the td it writes into and so
+  commits the pool, whether a status read of the dm-clone makes it
+  (`dnagent.md` SH17) or dm-clone makes it on its own once its metadata has
+  changed, as it does while hydration runs; and dm-thin's own periodic
+  commit once any write has mapped new blocks, a host's write or a clone's
+  hydration copy into the td alike. While a commit waits, the rest of that
+  pool's IO waits too, and so does a status read of the pool, which takes
+  the pool's metadata lock for reading. A check round, a converge or a
+  bitmap read that waits holds the cntlr's lock and the node
   read lock meanwhile (`cnagent.md` CN1). If the primary has not connected
   the destination yet, the converge that would connect it (`cnagent.md`
   CN10) needs that cntlr lock, so the cntlr can stay blocked until the

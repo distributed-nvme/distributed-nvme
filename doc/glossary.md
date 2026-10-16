@@ -376,7 +376,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **primary** — The cntlr that runs a pool's full stack: it connects every leg, assembles the groups, activates the thin pools, raid0s, clones and transfers, and exports the namespaces optimized. Only the sp worker changes which cntlr is primary.
 
-**probe** — A read of live state through the OS client that creates, changes and removes nothing, made per object, except for what a cntlr's check round or info read takes from the node reading (see reading); a status read of a thin pool or a dm-clone still makes the kernel commit that target's metadata (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a check round's info is built from probes alone.
+**probe** — A read of live state through the OS client that creates, changes and removes nothing, made per object, except for what a cntlr's check round or info read takes from the node reading (see reading); a status read of a dm-clone still makes the kernel commit the clone's metadata, while a thin pool's carries the `--noflush` flag and commits nothing (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a check round's info is built from probes alone.
 
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 

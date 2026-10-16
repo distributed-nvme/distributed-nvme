@@ -7266,7 +7266,7 @@ func TestGetInfoUnknownObject(t *testing.T) {
 func TestGetCntlrInfoReadsTheNodeFirst(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-	pool := "cmd dmsetup status " + poolName(srv)
+	pool := "cmd dmsetup status --noflush " + poolName(srv)
 	for _, entrance := range []struct {
 		name string
 		read func()

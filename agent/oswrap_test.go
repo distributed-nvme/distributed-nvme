@@ -148,6 +148,15 @@ func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 			errno: syscall.EBUSY,
 		},
 		{
+			name: "a noflush status read, which builds its own error",
+			run:  dmRefusal("status", dev, "Device or resource busy"),
+			call: func(oc common.OsClient) error {
+				_, err := NewDm(oc).StatusNoFlush(ctx, dev)
+				return err
+			},
+			errno: syscall.EBUSY,
+		},
+		{
 			name: "a table read, which builds its own error",
 			run:  dmRefusal("table", dev, "Device or resource busy"),
 			call: func(oc common.OsClient) error {

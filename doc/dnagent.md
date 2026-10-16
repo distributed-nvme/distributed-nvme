@@ -662,15 +662,27 @@ of the array node — the walk of
 — the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
 of the disk header for the DN's [D13] metadata. No LVM report is probed
-anywhere ([D14]). These commands create, change and remove nothing, but one
-read is not free of writes: on a `dmsetup status` of a thin pool or a
-dm-clone the kernel first commits that target's metadata unless the device
-is suspended, because dnv reads status without the flag that skips the
-commit, and once its metadata has changed since the pool device was set up,
-a thin pool's commit also flushes its data device first. A probe that reads
-such a status waits on that IO (`architecture.md`, Known limits). Probe
-reads MUST tolerate padded or normalized read-back; compare canonically,
-never byte-wise:
+anywhere ([D14]). These commands create, change and remove nothing, but a
+status read is not always free of writes. A thin pool's status read
+carries the `--noflush` flag, which makes the kernel skip the commit of the
+pool's metadata it otherwise makes first. Reason: once its metadata has
+changed since the pool device was set up, a thin pool's commit flushes its
+data device first, which reaches every leg the pool sits on, so in a
+migration gap a read that committed would wait on the leg with no usable
+path while the cn agent's call that made it holds its cntlr lock
+(`cnagent.md` CN1; `architecture.md`, Known limits). With the flag the
+counts are the open transaction's: a data block freed since dm-thin's last
+commit already counts free, and a metadata block freed since then counts
+used until the next commit, so the thin-pool auto-grow (`dnv-worker.md`
+AR6) grows metadata at most a little earlier than the committed counts
+would, and data no differently. A read with the flag still takes the
+pool's metadata lock for reading, so it waits behind a commit already
+running on that pool, and on that commit's IO. A dm-clone's
+status read carries no flag: unless the device is suspended, the kernel
+first commits the clone's metadata, which flushes the clone's destination
+once that metadata has changed, and a probe that reads it waits on that
+IO. Probe reads MUST tolerate padded or normalized read-back; compare
+canonically, never byte-wise:
 
 * "attr_serial" reads back space-padded — compare trimmed.
 * "device_uuid" and "device_nguid" read back **dash-separated and

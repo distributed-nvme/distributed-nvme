@@ -669,7 +669,7 @@ func TestSnapshotTornBesideAPoolNotReady(t *testing.T) {
 	notReadyRun := func(off, on uint64) *pb.CntlrInfo {
 		t.Helper()
 		node.Reset()
-		node.failCmd["dmsetup status "+poolNameOf(srv, off)] =
+		node.failCmd["dmsetup status --noflush "+poolNameOf(srv, off)] =
 			"device-mapper: status ioctl on " + poolNameOf(srv, off) +
 				"  failed: Input/output error"
 		info := syncupCntlrAt(t, srv, o).GetCntlrInfo()

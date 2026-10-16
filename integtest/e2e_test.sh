@@ -3555,6 +3555,164 @@ losetup_list() {
 	losetup -a 2>/dev/null || true
 	return 0
 }
+
+# --- the dump's reads that can wait in the kernel ------------------------------
+
+# DIAG_READ_SECS bounds a node dump's two detached reads (diag_kernel_reads):
+# they share one deadline, DIAG_DEADLINE, that many seconds after they start.
+# It sits well inside the driver's DIAG_TIMEOUT on the whole dump, which also
+# covers the items printed before them.
+DIAG_READ_SECS=20
+DIAG_DEADLINE=0
+
+# diag_detach sets DIAG_PID to the pid of the read it starts.
+DIAG_PID=""
+
+# diag_detach <out> <cmd…> starts one read of a node dump that can wait in
+# the kernel, detached, with its output in <out> and its exit code in
+# <out>.rc, and records its pid in DIAG_PID. <cmd…> bounds itself by the
+# shared deadline (diag_bounded). `timeout` ends a read that sleeps
+# interruptibly, but not one in uninterruptible D state: the signal does
+# nothing there and `timeout` then waits for its child (diag_cmd and open_rc
+# (cnagent_test.sh) record the finding). None of the group's descriptors is
+# the ssh session's pipe, so a read still waiting when the dump ends cannot
+# hold the session open past DIAG_TIMEOUT, and both files are opened once, by
+# the group itself.
+diag_detach() { # <out> <cmd…>
+	local out=$1
+	shift
+	{
+		"$@" >&3 2>&3
+		echo $?
+	} </dev/null >"$out.rc" 3>"$out" 2>/dev/null &
+	DIAG_PID=$!
+	return 0
+}
+
+# diag_bounded <cmd…> runs one command of a detached read under what is left
+# of the shared deadline. With no whole second left it runs nothing and
+# returns 124, `timeout`'s own code for a command it ended, as `timeout 0`
+# would mean no bound at all.
+diag_bounded() { # <cmd…>
+	local left=$((DIAG_DEADLINE - SECONDS))
+	[ "$left" -ge 1 ] || return 124
+	timeout "$left" "$@"
+}
+
+# diag_running <pid> tells whether a detached read is still running. Bash
+# reaps a background child that has ended, so `kill -0` then fails.
+diag_running() { # <pid>
+	[ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+# diag_dm_status prints the status of every dm device, read with --noflush
+# one device at a time under the shared deadline, each after a line that
+# names the device. dmsetup's output into a file is block-buffered, so one
+# read of every device that waits in the kernel on one of them leaves the
+# lines of the devices before it unwritten; read one by one, the last line
+# names the device a read waits on. The list comes from `dmsetup ls`, which
+# reads no device's status. It returns 124 when the deadline ended a read or
+# left devices unread, which it names, and otherwise the code of the last
+# read that failed, or 0.
+diag_dm_status() {
+	local list rc=0 r i
+	local -a names
+	list=$(diag_bounded dmsetup ls) || return
+	mapfile -t names < <(printf '%s\n' "$list" |
+		awk -F'\t' 'NF > 1 { print $1 }')
+	if [ "${#names[@]}" -eq 0 ]; then
+		printf '%s\n' "$list"
+		return 0
+	fi
+	for ((i = 0; i < ${#names[@]}; i++)); do
+		if [ "$((DIAG_DEADLINE - SECONDS))" -lt 1 ]; then
+			echo "(not read, the deadline passed: ${names[*]:i})"
+			return 124
+		fi
+		echo "${names[i]}:"
+		diag_bounded dmsetup status --noflush "${names[i]}" || {
+			r=$?
+			[ "$rc" -eq 124 ] || rc=$r
+		}
+	done
+	return "$rc"
+}
+
+# diag_collect <label> <out> <pid> <where> prints what one detached read
+# wrote and how it ended. A read that is still running did not finish: it
+# keeps its files, since it may still write there, and the note names the
+# file and adds <where>, what the output says about where it waits, when
+# that is not empty. A read that ended without leaving an exit code could
+# not write its result, which a full /var/tmp does (the df above shows it),
+# so its output can be cut short; that is not a read left running. A read
+# that ended goes with its files.
+diag_collect() { # <label> <out> <pid> <where>
+	local label=$1 out=$2 pid=$3 where=$4 rc
+	echo "--- $label ---"
+	if [ -z "$out" ]; then
+		echo "(not run: mktemp under /var/tmp failed)"
+		return 0
+	fi
+	cat "$out" 2>/dev/null
+	if diag_running "$pid"; then
+		echo "(DID NOT FINISH within ${DIAG_READ_SECS} s and is left" \
+			"running, most likely waiting in the kernel${where:+ $where};" \
+			"anything it writes later lands in $out)"
+		return 0
+	fi
+	rc=$(cat "$out.rc" 2>/dev/null)
+	case $rc in
+	"")
+		echo "(ended, but left no exit code in $out.rc, so its output" \
+			"above can be cut short; a full /var/tmp does that)"
+		;;
+	124) echo "(timed out: the ${DIAG_READ_SECS} s deadline ended it)" ;;
+	esac
+	rm -f "$out" "$out.rc"
+	return 0
+}
+
+# diag_kernel_reads <md label> is the end of both node dumps: it starts the
+# two reads that can wait in the kernel, each detached (diag_detach) under
+# one deadline DIAG_READ_SECS ahead, waits until both have ended or the
+# deadline has passed, and then prints both, md's scan under <md label>.
+# SECONDS counts whole seconds, so a read's bound can end up to a second
+# past the deadline; the wait gives it one more.
+#
+# The status reads carry --noflush. Without it, the read of a thin pool or
+# of a dm-clone that is not suspended first commits that device's metadata,
+# a write. A thin pool's commit can flush its data device, which reaches
+# every leg the pool sits on, and so can the commit of a clone's dm-clone
+# on a CN, which flushes the td it writes into and so commits that td's
+# pools; on a DN a dm-clone is a migration destination. With the flag no
+# read commits, but a thin pool's read still waits behind a commit of that
+# pool that waits on a leg with no usable path. `mdadm --detail` reads an
+# array's first member and can wait there the same way; on a DN any array is
+# a stray one over this suite's own dm devices (install_udev_rule).
+diag_kernel_reads() { # <md label>
+	local md_label=$1 status_out md_out status_pid="" md_pid=""
+	status_out=$(mktemp /var/tmp/dnv-e2e-diag.XXXXXX 2>/dev/null) ||
+		status_out=""
+	md_out=$(mktemp /var/tmp/dnv-e2e-diag.XXXXXX 2>/dev/null) || md_out=""
+	DIAG_DEADLINE=$((SECONDS + DIAG_READ_SECS))
+	if [ -n "$status_out" ]; then
+		diag_detach "$status_out" diag_dm_status
+		status_pid=$DIAG_PID
+	fi
+	if [ -n "$md_out" ]; then
+		diag_detach "$md_out" diag_bounded mdadm --detail --scan
+		md_pid=$DIAG_PID
+	fi
+	while [ "$SECONDS" -le "$((DIAG_DEADLINE + 1))" ]; do
+		diag_running "$status_pid" || diag_running "$md_pid" || break
+		sleep 0.1
+	done
+	diag_collect "dmsetup status --noflush, one device at a time" \
+		"$status_out" "$status_pid" \
+		"on the device named last above"
+	diag_collect "$md_label" "$md_out" "$md_pid" ""
+	return 0
+}
 HELPER_NODE_EOF
 }
 
@@ -3788,20 +3946,21 @@ dn_residue() {
 	return 0
 }
 
+# The kernel log comes first and the reads that can wait in the kernel come
+# last (diag_kernel_reads), so a read that blocks costs neither the kernel
+# log nor the dump's bound.
 diag() {
+	echo "--- dmesg | tail -100 ---"
+	dmesg 2>/dev/null | tail -n 100
 	echo "--- dnv-agent processes ---"
 	agent_pids dn
 	echo "--- dmsetup ls --tree ---"
 	dmsetup ls --tree 2>/dev/null
-	echo "--- dmsetup status ---"
-	dmsetup status 2>/dev/null
 	echo "--- suspended dnv dm devices ---"
 	suspended_dms
 	# md on a DISK NODE is always a fault.
 	echo "--- /proc/mdstat (a DN must show none) ---"
 	mdstat
-	echo "--- mdadm --detail --scan (a DN must show none) ---"
-	mdadm --detail --scan 2>/dev/null
 	echo "--- 63-dnv-md.rules ---"
 	ls -l "$UDEV_RULE" 2>/dev/null || echo "$UDEV_RULE absent"
 	echo "--- nvme subsystems ---"
@@ -3814,8 +3973,7 @@ diag() {
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
 	space
-	echo "--- dmesg | tail -100 ---"
-	dmesg 2>/dev/null | tail -n 100
+	diag_kernel_reads "mdadm --detail --scan (a DN must show none)"
 	return 0
 }
 HELPER_DN_EOF
@@ -3955,7 +4113,12 @@ cn_residue() {
 	return 0
 }
 
+# The kernel log comes first and the reads that can wait in the kernel come
+# last (diag_kernel_reads), so a read that blocks costs neither the kernel
+# log nor the dump's bound.
 diag() {
+	echo "--- dmesg | tail -100 ---"
+	dmesg 2>/dev/null | tail -n 100
 	echo "--- dnv-agent processes ---"
 	agent_pids cn
 	# The recorded agent's process state: T is an agent the cutoff case
@@ -3965,14 +4128,10 @@ diag() {
 		echo "(no recorded agent running)"
 	echo "--- dmsetup ls --tree ---"
 	dmsetup ls --tree 2>/dev/null
-	echo "--- dmsetup status ---"
-	dmsetup status 2>/dev/null
 	echo "--- suspended dnv dm devices ---"
 	suspended_dms
 	echo "--- /proc/mdstat ---"
 	mdstat
-	echo "--- mdadm --detail --scan ---"
-	mdadm --detail --scan 2>/dev/null
 	echo "--- nvme subsystems ---"
 	subsys_nqns
 	echo "--- nvmet configfs ---"
@@ -3985,8 +4144,7 @@ diag() {
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
 	space
-	echo "--- dmesg | tail -100 ---"
-	dmesg 2>/dev/null | tail -n 100
+	diag_kernel_reads "mdadm --detail --scan"
 	return 0
 }
 HELPER_CN_EOF
@@ -6595,7 +6753,11 @@ reset_control_plane() {
 #     die inside ctl_exec (its one die, on a failed ssh) is contained.
 #  c. IT MUST BE BOUNDED. Diagnostics runs when something is already wrong,
 #     which is when a guest command hangs; each dump is `timeout
-#     $DIAG_TIMEOUT bash $HELPER …`.
+#     $DIAG_TIMEOUT bash $HELPER …`. `timeout` cannot end a read in D state,
+#     and such a read that holds the ssh session's output keeps the session
+#     open past that bound, so the cn and dn dumps run their reads that can
+#     wait in the kernel last and detached (diag_kernel_reads in the node
+#     helper).
 #
 # A DN VM holds DNS_PER_VM agent logs (45 in the default shape). Dumping all
 # 180 is not a diagnostic, so the DN logs are selected: every log with an ERROR
@@ -12954,9 +13116,11 @@ copy_migration() {
 	# second wait takes WAIT_PROVISION rather than cn_wait_ana's default, as it
 	# can span the worker's sides-first hold (dnv-worker.md, RW14) and the
 	# primary's converge up to its connect of the destination. The primary's
-	# check rounds can block the same way while it has no usable path to the
-	# leg (architecture.md, Known limits), and one that blocks before that
-	# connect makes this wait time out. The wait ends as soon as the path
+	# check rounds read the pool's status with --noflush and commit nothing
+	# themselves, but such a read still waits behind a commit of the pool
+	# that waits while the primary has no usable path to the leg
+	# (architecture.md, Known limits), and a round that waits there before
+	# that connect makes this wait time out. The wait ends as soon as the path
 	# reads optimized, which can be in the middle of the converge that
 	# connected it. The read then waits for the rest of that converge, so it
 	# is a poll under WAIT_PROVISION too (leg_bm_read says why). The push may

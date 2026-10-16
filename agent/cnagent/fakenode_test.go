@@ -1465,6 +1465,11 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		}
 		return strings.Join(dmTargets(dm.table), "\n") + "\n", 0
 	case "status":
+		// `dmsetup status [--noflush] <name>`: a thin pool's read carries
+		// the flag (dnagent.md SH17).
+		if len(args) == 3 && args[1] == "--noflush" {
+			return f.dmStatus(args[2])
+		}
 		return f.dmStatus(args[1])
 	case "create":
 		return f.dmCreate(args, stdin)

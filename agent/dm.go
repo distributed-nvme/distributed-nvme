@@ -367,12 +367,24 @@ func (d *Dm) Table(
 
 // Status returns the raw `dmsetup status` output (the dm-clone hydration
 // line rides into ResInfo.details verbatim; architecture.md,
-// Live-state reporting).
+// Live-state reporting). Without the noflush flag the kernel commits the
+// target's metadata before it answers (dnagent.md SH17).
 func (d *Dm) Status(ctx context.Context, name string) (string, error) {
-	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", "status", name)
+	return d.status(ctx, "status", name)
+}
+
+// StatusNoFlush returns the raw `dmsetup status --noflush` output: the read
+// of a thin pool's status, which with the flag commits nothing (dnagent.md
+// SH17). It still waits behind a commit already running on that pool.
+func (d *Dm) StatusNoFlush(ctx context.Context, name string) (string, error) {
+	return d.status(ctx, "status", "--noflush", name)
+}
+
+// status runs one `dmsetup status` with args and returns its trimmed output.
+func (d *Dm) status(ctx context.Context, args ...string) (string, error) {
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", args...)
 	if err != nil {
-		return "", cmdError("dmsetup", []string{"status", name},
-			stdout, stderr, exitCode, err)
+		return "", cmdError("dmsetup", args, stdout, stderr, exitCode, err)
 	}
 	return strings.TrimSpace(stdout), nil
 }

@@ -605,7 +605,24 @@ A run that fails an assertion dumps instead of cleaning, so everything stays in
 place; a run failed by its end cleanup dumps what that cleanup left. The
 control-plane guest goes first, as its dump holds the failing dnvctl call's
 streams, which a later read would overwrite, and every dump is tolerant and
-bounded, as a guest command hangs exactly when something is wrong. The context
+bounded, as a guest command hangs exactly when something is wrong. A
+node's dump, on a controller node and on a disk node alike, prints its
+kernel log first. Last come the two reads that can wait in the kernel there.
+One is the status of every device-mapper device, read with the `--noflush`
+flag so that it commits neither a thin pool nor a dm-clone: on a controller
+node a clone's dm-clone, whose commit flushes the td it writes into and so
+commits that td's pools, and on a disk node the dm-clone of a migration
+destination. A thin pool's read can still wait behind a commit of that pool
+that waits on a leg. This read goes one device at a time and names each
+device before its read: dmsetup holds back the last part of what it prints
+to a file until it ends, so a read of every device at once that stops on
+one device would not name it. The other is md's scan of the node's arrays,
+which reads the first member of each. Both run detached from the session
+under one deadline, each with its output in a file on the guest. After a
+bounded wait the dump prints what they wrote and tells a read that has not
+finished from one that ended without recording its exit code, so a read
+stuck in the kernel costs neither the kernel log nor the dump's bound. The
+context
 names the stage, its trace id and the case, and the last ANA state, controller
 and path state the probes read, which tell no path from a path without the
 namespace and a live path from a retrying one; each guest's kernel, device,

@@ -77,8 +77,9 @@ func (s *CnAgentServer) ensureSlice(
 	// CN28 (architecture.md, Live-state reporting): details is the raw
 	// `dmsetup status` line — the worker parses the metadata and data
 	// used/total out of it for the thin-pool auto-grow (dnv-worker.md
-	// AR6).
-	raw, err := s.dm.Status(ctx, sp.poolFinalName)
+	// AR6). The read carries the noflush flag, so it commits nothing
+	// (dnagent.md SH17).
+	raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName)
 	if err != nil {
 		info.SliceIdToDmPool[sp.sliceId] = st.tracker.Err(
 			poolKey, sp.poolFinalName, err.Error())
@@ -434,7 +435,8 @@ func (s *CnAgentServer) probePool(
 		targets, "thin-pool", sp.dataSectors, args, len(args)) {
 		return pb.ResStatus_RES_STATUS_ERROR, "table is not the desired pool"
 	}
-	raw, err := s.dm.Status(ctx, sp.poolFinalName)
+	// The same noflush read as the converge's (dnagent.md SH17).
+	raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
