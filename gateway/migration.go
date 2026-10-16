@@ -195,6 +195,25 @@ func errMigrRunning(leg *pb.Leg) error {
 		leg.GetLegId(), len(leg.GetSideList()))
 }
 
+// migrCutoverStarted is FinishMigration's refusal of a migration whose
+// cutover has not started, read from the record alone (architecture.md,
+// Migrations): while cutover_pending is set the source side still serves the
+// leg and the destination holds no copied byte, so a finish would drop the
+// side that serves for one that holds nothing. force does not lift it, since
+// force skips only the hydration proof; a cutover that never comes is ended
+// by CancelMigration, which the message names. Both phases run it: phase 1
+// so the refusal comes before any agent call, the deciding STM because a
+// record cancelled and created again under the same name between the phases
+// is pending again.
+func migrCutoverStarted(migrName string, migr *pb.Migration) error {
+	if migr.GetCutoverPending() {
+		return errPrecondition(
+			"migration %q: the cutover has not started; "+
+				"cancel the migration instead", migrName)
+	}
+	return nil
+}
+
 // getMigration reads one migration of the SP by name inside the caller's
 // transaction; an absent record is NOT_FOUND (GW7).
 //
@@ -219,12 +238,16 @@ func getMigration(
 // allocates one destination disk node and hangs a second, unprovisioned Side
 // off the source side's leg.
 //
-// The destination is written `provisioned: false` ([D15]) and nothing else
-// happens yet: the dst DN runs only the zeroing protocol (architecture.md,
-// Side provisioning protocol), and `migr_src_conf.dst_provisioned = false`
-// keeps the source serving untouched meanwhile (architecture.md, Migration,
-// Phase 0). That is why this RPC allocates and writes but
-// starts no data movement — the sp-worker's later flip does.
+// The destination is written `provisioned: false` ([D15]) and the Migration
+// `cutover_pending: true`, and nothing else happens yet: the dst DN runs only
+// the zeroing protocol (architecture.md, Side provisioning protocol), and
+// `migr_src_conf.dst_provisioned = false` keeps the source serving untouched
+// meanwhile (architecture.md, Migration, Phase 0). The sp-worker's later
+// provisioned flip has the destination build its exports and its
+// clone-metadata wrapper and the primary connect to it; only the sp-worker's
+// cutover, which clears the flag, takes the source off the leg and starts the
+// copy (architecture.md, Migration). That is why this RPC allocates and
+// writes but starts no data movement.
 //
 // Shape (gateway.md, Migrations): the GW9 candidate unit, each round of which
 // plans from plain pre-reads, scans and decides. The plan — the group's
@@ -464,12 +487,13 @@ func (s *Server) CreateMigration(
 				model.MigrationKey(
 					sc.Cid, sc.SpId(), req.GetMigrName()),
 				&pb.Migration{
-					MigrId:      migrId,
-					SrcSideId:   req.GetSrcSideId(),
-					DstSideId:   dstSideId,
-					DmCloneConf: req.GetDmCloneConf(),
-					BmCnt:       0,
-					MetaUnits:   units,
+					MigrId:         migrId,
+					SrcSideId:      req.GetSrcSideId(),
+					DstSideId:      dstSideId,
+					DmCloneConf:    req.GetDmCloneConf(),
+					BmCnt:          0,
+					MetaUnits:      units,
+					CutoverPending: true,
 				},
 			)
 			sc.Conf.MigrNameList = append(
@@ -507,6 +531,11 @@ func (s *Server) CreateMigration(
 // cannot prove hydration is done, which is exactly the precondition
 // architecture.md, Migrations, states. `force == true` skips the whole
 // judgement and finishes regardless.
+//
+// One refusal comes ahead of that judgement and holds with or without force:
+// a migration whose record still carries cutover_pending is
+// FAILED_PRECONDITION, decided from the record before any agent call
+// (migrCutoverStarted).
 func (s *Server) FinishMigration(
 	ctx context.Context,
 	req *pb.FinishMigrationRequest,
@@ -542,6 +571,9 @@ func (s *Server) FinishMigration(
 		}
 		migr, err := getMigration(stm, sc, req.GetMigrName())
 		if err != nil {
+			return err
+		}
+		if err := migrCutoverStarted(req.GetMigrName(), migr); err != nil {
 			return err
 		}
 		phaseCid = sc.Cid
@@ -621,6 +653,9 @@ func (s *Server) FinishMigration(
 		}
 		migr, err := getMigration(stm, sc, req.GetMigrName())
 		if err != nil {
+			return err
+		}
+		if err := migrCutoverStarted(req.GetMigrName(), migr); err != nil {
 			return err
 		}
 		migrId = migr.GetMigrId()
@@ -775,7 +810,9 @@ func (s *Server) CancelMigration(
 // resolves the key and the Migration it addresses are read at one store
 // revision. It carries no token — a read never
 // needs one — and the Migration is replied verbatim, bm_cnt included, which is
-// what tells a caller how many bitmap chunks it has already appended.
+// what tells a caller how many bitmap chunks it has already appended, and
+// cutover_pending as stored, which tells it whether the cutover has started
+// and so whether a FinishMigration can succeed yet.
 func (s *Server) GetMigration(
 	ctx context.Context,
 	req *pb.GetMigrationRequest,

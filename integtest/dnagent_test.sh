@@ -83,6 +83,12 @@ FENCE_TIMEOUT=90
 
 NQN_PREFIX=nqn.2024-01.io.dnv
 
+# The details of a migration's rows while its cutover is pending (dnagent.md
+# DN12, DN18): the source's two rows, and the destination's two once its
+# metadata wrapper stands, which also carry RES_REASON_AWAITING_CUTOVER. The
+# agent's own text, compared byte for byte.
+CUTOVER_WAIT="waiting for the cutover"
+
 # Per-VM state, 1-indexed so "vm1"/"vm2" read directly.
 VM=("" "" "")
 IP=("" "" "")
@@ -359,6 +365,14 @@ cn_host_nqn() { printf '%s:1:%s:%s' "$NQN_PREFIX" "$(hex16 "$1")" "$(hex16 "$2")
 
 dn_clone_name() { # cluster dn sp migr
 	printf 'dnv-%s-%s-d3-%s-%s' \
+		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")"
+}
+
+# dn_migr_meta_name is the dm-linear wrapping one migration's slot in the
+# clone-metadata area (dm kind d5, dnagent.md DN13 step 2): what a
+# destination waiting for the cutover builds and nothing past it.
+dn_migr_meta_name() { # cluster dn sp migr
+	printf 'dnv-%s-%s-d5-%s-%s' \
 		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")"
 }
 
@@ -2149,9 +2163,13 @@ migr_prep_data() { # m
 }
 
 # migr_dst_syncup sends migration m's destination its declaring request at one
-# revision and sp_level, and prints the reply: the request migr_declare_dst
-# sends, and migr_src_ns_gone re-sends at the enabling revision.
-migr_dst_syncup() { # m revision sp_level
+# revision, sp_level and cutover flag, and prints the reply: the request
+# migr_declare_dst sends, migr_await_cutover_dst sends with the flag at the
+# read-write level, and migr_src_ns_gone re-sends at the enabling revision.
+# The flag is true in every request before the suite plays the cutover and
+# false from it on, as the worker copies it from the migration
+# (dnagent_integtest.md, Conventions, The cutover).
+migr_dst_syncup() { # m revision sp_level cutover_pending
 	local m=$1
 	ctl "${MDSTDN[$m]}" syncup-side --revision "$2" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
@@ -2162,23 +2180,27 @@ migr_dst_syncup() { # m revision sp_level
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
 		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt "$BM_CNT"
+		--bm-cnt "$BM_CNT" --cutover-pending="$4"
 }
 
 # migr_declare_dst declares the destination and later enables it
 # (dnagent_integtest.md, Cases, migr_full and migr_bitmap): the same request
 # twice, first gated with sp_level no_migration (so bitmap chunks land before
-# any region is copied), then at readwrite to build the clone. Passing the
-# level in makes the two calls provably identical apart from it.
+# any region is copied) while the cutover is pending, then at readwrite once
+# the suite has played the cutover, to build the clone. Passing the level and
+# the cutover flag in makes the two calls provably identical apart from them.
+# The flag changes nothing at the no-migration level, which builds no
+# metadata wrapper, connection or dm-clone at all (dnagent.md DN11); the
+# read-write request that carries it is migr_await_cutover_dst's.
 #
 # The destination has already been provisioned by migr_provision_dst, so every
 # call here carries --provisioned=true, because the worker's flag is monotone,
 # false to true only (dnagent.md DN9). Re-sending false would close the
 # provisioned gate, which skips the per-CN stacks and every step of the
 # migration destination (dnagent.md DN10, DN13) and tears nothing down (DN10).
-migr_declare_dst() { # m revision sp_level
+migr_declare_dst() { # m revision sp_level cutover_pending
 	local m=$1 rev=$2 level=$3 out
-	out=$(migr_dst_syncup "$m" "$rev" "$level")
+	out=$(migr_dst_syncup "$m" "$rev" "$level" "$4")
 	printf '%s' "$out" >"$REPLY_DIR/dst-$m.json"
 	assert_ok "$out" ".side_info.side_dev_info.status" "migr $m dst side_dev"
 	assert_cn_ok "$out" cn_id_to_dm_error "${MCN[$m]}" "migr $m dst"
@@ -2249,7 +2271,8 @@ migr_declare_dst() { # m revision sp_level
 # zeroing goroutine only, no per-CN stacks, no metadata wrapper, no connect
 # and no dm-clone. The request is byte-for-byte
 # migr_declare_dst's gated one except --provisioned=false, which is what makes
-# the gate provable.
+# the gate provable; like it, it carries the cutover flag, which a migration
+# holds from its creation and which changes nothing before the flip.
 migr_provision_dst() { # m revision
 	local m=$1 rev=$2 out field left nqn
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
@@ -2261,7 +2284,7 @@ migr_provision_dst() { # m revision
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
 		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt "$BM_CNT")
+		--bm-cnt "$BM_CNT" --cutover-pending=true)
 	assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
 		"migr $m dst phase 1"
 	# sp_level no_migration already suppresses the clone; the gate must not
@@ -2306,31 +2329,120 @@ migr_connect_dst() { # m
 		inaccessible 20
 }
 
+# migr_await_cutover_dst is the destination's wait for the cutover
+# (dnagent.md DN13, DN18; dnagent_integtest.md, Cases, migr_full and
+# migr_bitmap): the side is provisioned and the read-write level no longer
+# holds the migration role back, but the request still carries the cutover
+# flag. The side builds DN13's step 2, the dm-linear over its run in the
+# clone-metadata area, and its per-CN stack in step 1's shape, the dm-linear
+# on its dm-error and the namespace inaccessible, and nothing past them: no
+# connection to the source, whose migration source export does not exist
+# before the cutover, and no dm-clone. Both migration rows read PROVISIONING,
+# waiting for the cutover, with the reason the worker's cutover reads, and
+# the read-only channels read them alike, epochs included, since one rule
+# serves both (DN18). The request is migr_declare_dst's enabling one but for
+# the flag.
+#
+# The CN's path to the destination, added while it was gated, stays live and
+# inaccessible: a live path from the primary to the new side is the other
+# thing the worker's cutover waits for (dnv-worker.md RW18).
+migr_await_cutover_dst() { # m revision
+	local m=$1 rev=$2
+	local dst=${MDSTDN[$m]} vm=${MCNVM[$m]}
+	local c k g ch reply row names meta clone nqn srcnqn
+	c=$(migr_dst_syncup "$m" "$rev" readwrite true)
+	assert_ok "$c" ".side_info.side_dev_info.status" \
+		"migr $m waiting dst side_dev"
+	assert_cn_ok "$c" cn_id_to_dm_error "${MCN[$m]}" "migr $m waiting dst"
+	assert_cn_ok "$c" cn_id_to_dm_linear "${MCN[$m]}" "migr $m waiting dst"
+	assert_cn_ok "$c" cn_id_to_nvmeof "${MCN[$m]}" "migr $m waiting dst"
+	k=$(ctl "$dst" check-side --revision "$rev" --show-info \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev" \
+		"migr $m waiting dst check-side revision"
+	g=$(ctl "$dst" get-side-info \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+	for ch in converge check-side get-side-info; do
+		case "$ch" in
+		converge) reply=$c ;;
+		check-side) reply=$k ;;
+		*) reply=$g ;;
+		esac
+		for row in target_info dm_clone_info; do
+			assert_provisioning "$reply" \
+				".side_info.migr_dst_info.$row.status" \
+				"migr $m waiting dst $row ($ch)"
+			assert_eq "$(jq_of "$reply" \
+				".side_info.migr_dst_info.$row.details // \"\"")" \
+				"$CUTOVER_WAIT" "migr $m waiting dst $row details ($ch)"
+			assert_eq "$(jq_of "$reply" \
+				".side_info.migr_dst_info.$row.reason // \"RES_REASON_NONE\"")" \
+				RES_REASON_AWAITING_CUTOVER \
+				"migr $m waiting dst $row reason ($ch)"
+		done
+	done
+	assert_rows_agree "migr $m waiting dst" "$(printf '%s\n' \
+		'.side_info.migr_dst_info.target_info' \
+		'.side_info.migr_dst_info.dm_clone_info')" "$c" "$k" "$g"
+	# The node itself, read by name (dnagent_integtest.md, Conventions,
+	# Negatives are exact): a listing that did not answer fails the stage
+	# rather than reading as "no dm-clone".
+	names=$(helper "$dst" agent_dm_names) ||
+		die "migr $m: the dm listing of dn$dst did not answer"
+	meta=$(dn_migr_meta_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")
+	clone=$(dn_clone_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")
+	printf '%s\n' "$names" | grep -Fxq "$meta" ||
+		die "migr $m: the waiting dst holds no metadata wrapper $meta"
+	if printf '%s\n' "$names" | grep -Fxq "$clone"; then
+		die "migr $m: the waiting dst built its dm-clone $clone"
+	fi
+	nqn=$(side_to_cn_nqn "$CLUSTER" "$SP" "${MLEG[$m]}" "${MCN[$m]}")
+	assert_eq "$(helper "$dst" "subsys_present '$nqn'")" yes \
+		"migr $m: the waiting dst's export to its primary"
+	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[${MSRCDN[$m]}]}" \
+		"$SP" "${MID[$m]}")
+	assert_eq "$(helper "$dst" "host_subsys_present '$srcnqn'")" no \
+		"migr $m: the waiting dst already connected to $srcnqn"
+	assert_eq "$(cn_path_field "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" \
+		"$dst" State)" live "migr $m: the CN's path to the waiting dst"
+	assert_eq "$(cn_ana_state "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" \
+		"$dst")" inaccessible \
+		"migr $m: the ANA state of the CN's path to the waiting dst"
+}
+
 # migr_gate_src is the dst_provisioned = false half of the migration rule of
-# architecture.md, Migration, and it runs before the cutover: the request is
-# byte-for-byte migr_cutover_src's except --dst-provisioned=false, which the
-# spec declares **exactly equivalent** to migr_src_conf being absent. The
+# architecture.md, Migration, and it runs before the cutover, while the
+# destinations wait for it: the request is byte-for-byte migr_cutover_src's
+# except --dst-provisioned=false and --cutover-pending=true, the request a
+# source gets until the cutover (dnv-worker.md RW15), and dst_provisioned =
+# false is declared **exactly equivalent** to migr_src_conf being absent. The
 # source keeps serving, does not fence its per-CN linears and exports no
 # migr-src subsystem; only the would-be migr_src_info.* rows differ, reporting
-# PROVISIONING.
+# PROVISIONING, waiting for the cutover, with no reason (dnagent.md DN12).
 #
 # Without that equivalence the source would fence the primary's path the moment
 # the migration was created, leaving the leg with no serving path for the whole
 # destination zeroing window — which is exactly what this stage proves it does
 # not do.
 migr_gate_src() { # m revision
-	local m=$1 rev=$2 out nqn susp dev
+	local m=$1 rev=$2 out nqn susp dev row
 	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
 		--ext-cnt 2 --zero-bytes "$DATA_ZERO_BYTES" \
 		--cntlid-slot 0 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite --provisioned=true \
 		--migr-src "${MID[$m]}:${MDSTSIDE[$m]}:${DNID[${MDSTDN[$m]}]}" \
-		--dst-provisioned=false)
-	assert_provisioning "$out" ".side_info.migr_src_info.dm_linear_info.status" \
-		"migr $m gated src dm-linear"
-	assert_provisioning "$out" ".side_info.migr_src_info.nvmeof_info.status" \
-		"migr $m gated src export"
+		--dst-provisioned=false --cutover-pending=true)
+	for row in dm_linear_info nvmeof_info; do
+		assert_provisioning "$out" ".side_info.migr_src_info.$row.status" \
+			"migr $m gated src $row"
+		assert_eq "$(jq_of "$out" \
+			".side_info.migr_src_info.$row.details // \"\"")" \
+			"$CUTOVER_WAIT" "migr $m gated src $row details"
+		assert_eq "$(jq_of "$out" \
+			".side_info.migr_src_info.$row.reason // \"RES_REASON_NONE\"")" \
+			RES_REASON_NONE "migr $m gated src $row reason"
+	done
 	# Untouched: the per-CN export stacks still serve.
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m gated src"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m gated src"
@@ -2358,6 +2470,10 @@ migr_gate_src() { # m revision
 		"migr $m: a 1 MiB read through the gated src must still succeed"
 }
 
+# migr_cutover_src plays the worker's cutover on the source: its destination
+# provisioned and the cutover flag cleared, as every request of the migration
+# carries them from the cutover on (dnagent_integtest.md, Conventions, The
+# cutover).
 migr_cutover_src() { # m revision
 	local m=$1 rev=$2 out
 	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
@@ -2535,7 +2651,7 @@ migr_src_ns_gone() { # m
 	esac
 
 	# The enabling converge's request again, at its own revision.
-	c1=$(migr_dst_syncup "$m" "$rev" readwrite)
+	c1=$(migr_dst_syncup "$m" "$rev" readwrite false)
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" inaccessible 30
 	sleep 1.1
 	k=$(ctl "$dst" check-side --revision "$rev" --show-info \
@@ -2545,7 +2661,7 @@ migr_src_ns_gone() { # m
 	g=$(ctl "$dst" get-side-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
 	sleep 1.1
-	c2=$(migr_dst_syncup "$m" "$rev" readwrite)
+	c2=$(migr_dst_syncup "$m" "$rev" readwrite false)
 	# The reading compared held through all four replies.
 	now=$(helper "$dst" "subsys_shape '$srcnqn'")
 	if [ "$shape" = "1 1 0" ]; then
@@ -2722,9 +2838,9 @@ run_migration_cases() {
 	bump_rev "${MDSTDN[2]}"
 	rev2=${REV[${MDSTDN[2]}]}
 	pids=()
-	migr_declare_dst 1 "$rev1" no_migration &
+	migr_declare_dst 1 "$rev1" no_migration true &
 	pids+=($!)
-	migr_declare_dst 2 "$rev2" no_migration &
+	migr_declare_dst 2 "$rev2" no_migration true &
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
@@ -2739,6 +2855,18 @@ run_migration_cases() {
 	stage stage1bm "bitmap chunks and the equal-revision bm_info read-back"
 	push_bitmaps "$rev1" "$rev2"
 
+	stage stage1wait "destinations at readwrite wait for the cutover: wrapper and exports, no connection, no clone"
+	bump_rev "${MDSTDN[1]}"
+	rev1=${REV[${MDSTDN[1]}]}
+	bump_rev "${MDSTDN[2]}"
+	rev2=${REV[${MDSTDN[2]}]}
+	pids=()
+	migr_await_cutover_dst 1 "$rev1" &
+	pids+=($!)
+	migr_await_cutover_dst 2 "$rev2" &
+	pids+=($!)
+	join_jobs "${pids[@]}"
+
 	stage stage2gate "dst_provisioned=false: the source is provably untouched"
 	bump_rev "${MSRCDN[1]}"
 	rev1=${REV[${MSRCDN[1]}]}
@@ -2751,7 +2879,7 @@ run_migration_cases() {
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
-	stage stage2 "source cutover: the source hands IO over"
+	stage stage2 "source cutover, the cutover flag cleared: the source hands IO over"
 	bump_rev "${MSRCDN[1]}"
 	rev1=${REV[${MSRCDN[1]}]}
 	bump_rev "${MSRCDN[2]}"
@@ -2763,15 +2891,15 @@ run_migration_cases() {
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
-	stage stage3 "both destinations enabled at once — the concurrency point"
+	stage stage3 "both destinations enabled at once, the cutover flag cleared — the concurrency point"
 	bump_rev "${MDSTDN[1]}"
 	rev1=${REV[${MDSTDN[1]}]}
 	bump_rev "${MDSTDN[2]}"
 	rev2=${REV[${MDSTDN[2]}]}
 	pids=()
-	migr_declare_dst 1 "$rev1" readwrite &
+	migr_declare_dst 1 "$rev1" readwrite false &
 	pids+=($!)
-	migr_declare_dst 2 "$rev2" readwrite &
+	migr_declare_dst 2 "$rev2" readwrite false &
 	pids+=($!)
 	join_jobs "${pids[@]}"
 	# Case C's skip jump (dnagent_integtest.md, Cases, migr_bitmap), read off
@@ -2890,7 +3018,7 @@ case_migr_full() {
 		# (dnv-worker.md BM2).
 		local revs=("" "$1" "$2") m out
 		for m in 1 2; do
-			migr_declare_dst "$m" "${revs[$m]}" no_migration
+			migr_declare_dst "$m" "${revs[$m]}" no_migration true
 			out=$(cat "$REPLY_DIR/dst-$m.json")
 			assert_eq "$(jq_of "$out" '.bm_info | type')" object \
 				"migr $m bm_info present"
@@ -2958,7 +3086,7 @@ case_migr_bitmap() {
 				--migr "${MID[$m]}" --bm-idx 1 --bitmap-hex "$C_BM1" >/dev/null
 			# Re-send the gated request verbatim (equal revision, idempotent)
 			# purely to read the applied set back out of the reply.
-			migr_declare_dst "$m" "${revs[$m]}" no_migration
+			migr_declare_dst "$m" "${revs[$m]}" no_migration true
 			out=$(cat "$REPLY_DIR/dst-$m.json")
 			assert_eq "$(jq_of "$out" '.bm_info.res_id')" "$((MID[m]))" \
 				"migr $m bm_info.res_id"
@@ -3101,21 +3229,22 @@ teardown_dead_source() {
 
 	stage dsgate "the destination is declared, gated at sp_level no_migration"
 	bump_rev "$dst"
-	migr_declare_dst "$m" "${REV[$dst]}" no_migration
+	migr_declare_dst "$m" "${REV[$dst]}" no_migration true
 
 	stage dsconn "the CN adds the destination path (still inaccessible)"
 	migr_connect_dst "$m"
 
 	stage dscut "source cutover: the source hands the leg over"
-	# The dst_provisioned=false gate of the migration cases
-	# (dnagent_integtest.md, Cases) is case B's proof, not this one's: the
-	# only thing needed here is the state the cutover leaves behind.
+	# The dst_provisioned=false gate and the destination's wait for the
+	# cutover (dnagent_integtest.md, Cases) are case B's proofs, not this
+	# one's: the only thing needed here is the state the cutover leaves
+	# behind.
 	bump_rev "$src"
 	migr_cutover_src "$m" "${REV[$src]}"
 
 	stage dshydr "the destination is enabled and hydrates from the source"
 	bump_rev "$dst"
-	migr_declare_dst "$m" "${REV[$dst]}" readwrite
+	migr_declare_dst "$m" "${REV[$dst]}" readwrite false
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" optimized 30
 	# Observed, never asserted (dnagent_integtest.md, Conventions), exactly
 	# like the migration cases' read-through window: 128

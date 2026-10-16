@@ -29,6 +29,7 @@ const (
 	resKeyPoolDataFmt  = "pool_data/%016x"
 	resKeyGrpFmt       = "grp/%016x"
 	resKeyLegFmt       = "leg/%016x"
+	resKeyPathFmt      = "path/%016x"
 	resKeyXferDmFmt    = "xfer_dm/%016x"
 	resKeyXferSsFmt    = "xfer_ss/%016x"
 	resKeyXferNsFmt    = "xfer_ns/%016x"
@@ -69,6 +70,9 @@ const (
 	// for an ns-dev it held off its td's raid0 (ensureNsDev), so the two
 	// channels do not flip the row against each other.
 	detailsNsDevNotDesired = "table is not the desired namespace backing"
+	// detailsNoController is a path row whose side's address no controller
+	// of the leg's subsystem holds (CN28, legPathRows).
+	detailsNoController = "no controller"
 )
 
 func resKeyOf(format string, id uint64) string {

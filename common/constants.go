@@ -362,11 +362,26 @@ const (
 	ReplyCodeLeftover = 4
 
 	// Seconds between background retries of a migration destination whose
-	// build stopped short, at its nvme connect or at another step, and of one
-	// that waits for a free run in the node's metadata area before it zeroes
-	// (dnagent.md DN13; the loop is SH27's "DN8 retry", so nicknamed for the
-	// DN8-gated converge it re-runs).
+	// build stopped short, at its nvme connect once the in-pass retries below
+	// ran out or at another step, and of one that waits for a free run in
+	// the node's metadata area before it zeroes (dnagent.md DN13; the loop
+	// is SH27's "DN8 retry", so nicknamed for the DN8-gated converge it
+	// re-runs).
 	DnMigrConnectRetryInterval = 5
+
+	// The migration destination's in-pass retry of its connect to the
+	// migration source export (dnagent.md DN13 step (3)). After the cutover
+	// the src side builds that export only after its step 1 and the suspend
+	// that starts its step 2 (DN12), in the same pass, so the dst side's
+	// first connect often comes too early. A connect that
+	// fails is tried again after DnMigrConnectRetryPause, within the same
+	// converge, for as long as DnMigrConnectPassBudget covers the pause; each
+	// failed connect's own elapsed time draws on the budget too. Only once it
+	// is spent does the pass fail its connect and register the DN8 loop
+	// above. The namespace wait below has a budget of its own. Unlike the
+	// whole-second integer above them, these two are time.Durations.
+	DnMigrConnectPassBudget = 1 * time.Second
+	DnMigrConnectRetryPause = 100 * time.Millisecond
 
 	// The migration destination's wait for the source namespace (dnagent.md
 	// DN13 step (3)). The kernel returns from `nvme connect` once the
@@ -374,9 +389,9 @@ const (
 	// namespace node, so right after a connect that succeeded the pass
 	// re-reads the subsystem until the device is there, pausing
 	// DnMigrDstNsPause between reads and DnMigrDstNsWait in all (the reads
-	// themselves are not counted). It is not a connect retry: one connect per
-	// pass stays DN13's rule, and the DN8 loop above stays the retry. Unlike
-	// the whole-second integers above them, these two are time.Durations.
+	// themselves are not counted). It is not a connect retry: that is the
+	// in-pass retry above, and after it the DN8 loop. time.Durations, like
+	// the two above.
 	DnMigrDstNsWait  = 1 * time.Second
 	DnMigrDstNsPause = 50 * time.Millisecond
 

@@ -3752,6 +3752,19 @@ func volCreateMigration(env *volEnv, name string) *pb.CreateMigrationReply {
 	return reply
 }
 
+// volCutover plays the sp-worker's cutover on one migration (architecture.md,
+// Migration): it clears the record's cutover_pending, which CreateMigration
+// wrote set. A direct put, so the SP's revision does not move.
+func volCutover(env *volEnv, name string) {
+	env.t.Helper()
+	migr := env.migration(name)
+	if !migr.GetCutoverPending() {
+		env.t.Fatalf("migration %s: cutover_pending is already clear", name)
+	}
+	migr.CutoverPending = false
+	mustPut(env.t, env.cli, model.MigrationKey(env.cid, volSpId, name), migr)
+}
+
 // TestCreateMigrationChargesDestination pins the whole allocation of
 // architecture.md, Migrations: the leg gains a SECOND side, written
 // provisioned = false ([D15]) on a DN no leg of the group already uses, holding
@@ -3760,7 +3773,9 @@ func volCreateMigration(env *volEnv, name string) *pb.CreateMigrationReply {
 // — record, capacity key and revision bump included (architecture.md,
 // Revision keys and the sync fan-out, and Capacity index keys) — and by the
 // destination's metadata units, which the capacity value carries and the
-// Migration records (architecture.md, Metadata units). Nothing else in
+// Migration records (architecture.md, Metadata units). The Migration is
+// written with cutover_pending set, which only the sp-worker's cutover clears
+// (architecture.md, Migration). Nothing else in
 // the SP is touched: a migration destination changes no group's ext_cnt, so no
 // cntlr's CN is charged (architecture.md, Storage pools and Cntlrs).
 func TestCreateMigrationChargesDestination(t *testing.T) {
@@ -3772,12 +3787,13 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 	}
 	dstSideId := volNextId + 1
 	wantMigr := &pb.Migration{
-		MigrId:      volNextId,
-		SrcSideId:   volDataSideA,
-		DstSideId:   dstSideId,
-		DmCloneConf: &pb.DmCloneConf{HydrationThreshold: 2},
-		BmCnt:       0,
-		MetaUnits:   volMigrUnits,
+		MigrId:         volNextId,
+		SrcSideId:      volDataSideA,
+		DstSideId:      dstSideId,
+		DmCloneConf:    &pb.DmCloneConf{HydrationThreshold: 2},
+		BmCnt:          0,
+		MetaUnits:      volMigrUnits,
+		CutoverPending: true,
 	}
 	if got := env.migration("migr-a"); !proto.Equal(got, wantMigr) {
 		t.Errorf("migration: got %v, want %v", got, wantMigr)
@@ -4282,7 +4298,9 @@ func TestCancelMigrationIsTheExactMirror(t *testing.T) {
 // destination becomes the leg's only side and the SOURCE's extents and pointer
 // go back to its DN, which is what makes the source agent tear the side down
 // on its next syncup. force = true skips the hydration proof, the only part of
-// the RPC that leaves etcd (agentpath_test.go covers that path).
+// the RPC that leaves etcd (agentpath_test.go covers that path). The cutover
+// is played first: a migration whose cutover has not started is refused, with
+// force or without (TestFinishMigrationRefusesAPendingCutover).
 //
 // The destination's DN keeps the side and its extents, and gets back the
 // metadata units its dm-clone run held (architecture.md, Metadata units). That
@@ -4298,6 +4316,7 @@ func TestFinishMigrationReleasesSource(t *testing.T) {
 			dnCCreated.GetUsedMetaUnits(), volMigrUnits)
 	}
 	dnCRev := env.dnRev(volDnC)
+	volCutover(env, "migr-a")
 	reply, err := env.srv.FinishMigration(
 		env.ctx, &pb.FinishMigrationRequest{
 			ClusterName: env.cluster,
@@ -4505,6 +4524,228 @@ func TestFinishMigrationRefusesADeletingPoolInPhaseOne(t *testing.T) {
 	env.wantUntouched(before, beforeRev)
 }
 
+// volHydratedSideInfo is a destination's SideInfo whose dm-clone row reports
+// every region hydrated, the proof an unforced FinishMigration asks for.
+func volHydratedSideInfo() *pb.SideInfo {
+	return &pb.SideInfo{
+		MigrDstInfo: &pb.SideInfo_MigrDstInfo{
+			DmCloneInfo: &pb.ResInfo{
+				Details: "0 2097152 clone 8 72/32768 2048 1024/1024 0 1 " +
+					"no_discard_passdown 4 hydration_threshold 1 " +
+					"hydration_batch_size 1 rw",
+			},
+		},
+	}
+}
+
+// volWantCutoverPending asserts FinishMigration's refusal of a migration
+// whose cutover has not started (architecture.md, Migrations): the code and
+// the message, which says to cancel the migration instead.
+func volWantCutoverPending(t *testing.T, err error, migrName string) {
+	t.Helper()
+	msg := volWantCode(t, err, codes.FailedPrecondition)
+	want := fmt.Sprintf("migration %q: the cutover has not started; "+
+		"cancel the migration instead", migrName)
+	if msg != want {
+		t.Errorf("message: got %q, want %q", msg, want)
+	}
+}
+
+// TestFinishMigrationRefusesAPendingCutover pins the finish's refusal of a
+// migration whose record still carries cutover_pending (architecture.md,
+// Migrations): with force and without, the finish is FAILED_PRECONDITION
+// with a message that says to cancel instead, it writes nothing, and the
+// record alone decides it, so the destination's agent is never asked. A
+// finish there would drop the source, which still serves the leg, for a
+// destination that holds nothing.
+//
+// The destination's fake agent reports a finished dm-clone, so an unforced
+// finish that skipped the check would pass the hydration proof and finish;
+// the GetSideInfo count is asserted, not only the code. Once the cutover has
+// cleared the flag, the same request behaves as a finish always has: the
+// unforced one asks the agent once and finishes on its proof, the forced one
+// asks nothing and finishes.
+func TestFinishMigrationRefusesAPendingCutover(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force %v", force), func(t *testing.T) {
+			env := newVolEnv(t)
+			addr := fakeAddrPort(t, "dn")
+			agent := startFakeAgent(t, addr, 1<<40)
+			agent.setInfo(nil, volHydratedSideInfo(), nil, nil)
+			env.putDn(addr, 704, 0, nil)
+			created, err := env.srv.CreateMigration(
+				env.ctx, &pb.CreateMigrationRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       env.token(),
+					MigrName:    "migr-a",
+					SrcSideId:   volDataSideA,
+					DnSelector:  volDnSelector(addr),
+				})
+			if err != nil {
+				t.Fatalf("CreateMigration: %v", err)
+			}
+			finish := func() (*pb.FinishMigrationReply, error) {
+				return env.srv.FinishMigration(
+					env.ctx, &pb.FinishMigrationRequest{
+						ClusterName: env.cluster,
+						SpName:      volSpName,
+						SpRev:       env.token(),
+						MigrName:    "migr-a",
+						Force:       force,
+					})
+			}
+			before := env.dump()
+			_, err = finish()
+			volWantCutoverPending(t, err, "migr-a")
+			env.wantNoWrite("the refused FinishMigration", before)
+			if got := agent.callCount("GetSideInfo"); got != 0 {
+				t.Errorf("a finish with the cutover pending called "+
+					"GetSideInfo: %d calls, want 0", got)
+			}
+
+			volCutover(env, "migr-a")
+			reply, err := finish()
+			if err != nil {
+				t.Fatalf("FinishMigration after the cutover: %v", err)
+			}
+			if reply.GetMigrId() != created.GetMigrId() {
+				t.Errorf("reply migr_id: got %d, want %d",
+					reply.GetMigrId(), created.GetMigrId())
+			}
+			wantCalls := 1
+			if force {
+				wantCalls = 0
+			}
+			if got := agent.callCount("GetSideInfo"); got != wantCalls {
+				t.Errorf("GetSideInfo calls: got %d, want %d",
+					got, wantCalls)
+			}
+			leg := activeLegOf(
+				volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
+			if len(leg.GetSideList()) != 1 ||
+				leg.GetSideList()[0].GetAddrPort() != addr {
+				t.Errorf("the leg must keep the destination alone: %v",
+					leg.GetSideList())
+			}
+			if env.exists(
+				model.MigrationKey(env.cid, volSpId, "migr-a"),
+				&pb.Migration{},
+			) {
+				t.Errorf("the migration record must be gone")
+			}
+		})
+	}
+}
+
+// TestFinishMigrationRefusesAPendingCutoverInPhaseTwo pins the same refusal
+// in the deciding STM. Between the phases — the whole GetSideInfo round trip
+// — the migration can be cancelled and created again under the same name,
+// and the new record is pending; a finish that judged the flag in phase 1
+// alone would then finish a migration whose cutover has not started, on a
+// hydration proof that was about the destination of the one before.
+//
+// The finish sends NO sp_rev, because GW6 is presence-based: with a token it
+// would be ABORTED on the cancel's bump and never reach the check at all.
+func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
+	env := newVolEnv(t)
+	addr := fakeAddrPort(t, "dn")
+	agent := startFakeAgent(t, addr, 1<<40)
+	agent.setInfo(nil, volHydratedSideInfo(), nil, nil)
+	env.putDn(addr, 704, 0, nil)
+	create := func() {
+		t.Helper()
+		if _, err := env.srv.CreateMigration(
+			env.ctx, &pb.CreateMigrationRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				MigrName:    "migr-a",
+				SrcSideId:   volDataSideA,
+				DnSelector:  volDnSelector(addr),
+			}); err != nil {
+			t.Fatalf("CreateMigration: %v", err)
+		}
+	}
+	create()
+	volCutover(env, "migr-a")
+
+	// Hold the finish inside the agent call, which is where the window is.
+	unblock := agent.setBlock()
+	defer unblock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.srv.FinishMigration(
+			env.ctx, &pb.FinishMigrationRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				MigrName:    "migr-a",
+			})
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for agent.callCount("GetSideInfo") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the finish never reached the agent call")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := env.srv.CancelMigration(
+		env.ctx, &pb.CancelMigrationRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			MigrName:    "migr-a",
+		}); err != nil {
+		t.Fatalf("CancelMigration: %v", err)
+	}
+	create()
+	before := env.dump()
+	unblock()
+
+	volWantCutoverPending(t, <-done, "migr-a")
+	env.wantNoWrite("the refused FinishMigration", before)
+}
+
+// TestCancelMigrationAfterTheCutover pins that the cancel does not read the
+// flag (architecture.md, Migrations): a cancel after the cutover is the same
+// rollback as one before it, which TestCancelMigrationIsTheExactMirror pins
+// with the flag still set. The leg gets its source back as its only side and
+// dn-c ends as the fixture wrote it, but for its revision.
+func TestCancelMigrationAfterTheCutover(t *testing.T) {
+	env := newVolEnv(t)
+	sliceBefore := env.slice()
+	dnBefore := env.dn(volDnC)
+	created := volCreateMigration(env, "migr-a")
+	volCutover(env, "migr-a")
+	reply, err := env.srv.CancelMigration(
+		env.ctx, &pb.CancelMigrationRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			MigrName:    "migr-a",
+		})
+	if err != nil {
+		t.Fatalf("CancelMigration: %v", err)
+	}
+	if reply.GetMigrId() != created.GetMigrId() {
+		t.Errorf("reply migr_id: got %d, want %d",
+			reply.GetMigrId(), created.GetMigrId())
+	}
+	if got := env.slice(); !proto.Equal(got, sliceBefore) {
+		t.Errorf("slice did not roll back:\n got %v\nwant %v",
+			got, sliceBefore)
+	}
+	if got := env.dn(volDnC); !proto.Equal(got, dnBefore) {
+		t.Errorf("dn-c did not roll back:\n got %v\nwant %v", got, dnBefore)
+	}
+	if env.exists(
+		model.MigrationKey(env.cid, volSpId, "migr-a"), &pb.Migration{},
+	) {
+		t.Errorf("the migration record must be gone")
+	}
+}
+
 // TestCreateMigrationRefusals pins the error table of architecture.md,
 // Migrations, each with nothing
 // written — the destination must never be charged for a request that fails.
@@ -4662,7 +4903,9 @@ func TestAppendMigrationBitmapIsAppendOnly(t *testing.T) {
 
 // TestGetMigration pins the read of architecture.md, Migrations: the record is
 // replied verbatim, bm_cnt
-// included, which is what tells a caller how many chunks it has appended.
+// included, which is what tells a caller how many chunks it has appended, and
+// cutover_pending as stored: set from the create, clear once the cutover has
+// cleared it.
 func TestGetMigration(t *testing.T) {
 	env := newVolEnv(t)
 	created := volCreateMigration(env, "migr-a")
@@ -4681,6 +4924,25 @@ func TestGetMigration(t *testing.T) {
 	if reply.GetMigr().GetSrcSideId() != volDataSideA {
 		t.Errorf("src_side_id: got %d, want %d",
 			reply.GetMigr().GetSrcSideId(), volDataSideA)
+	}
+	if !proto.Equal(reply.GetMigr(), env.migration("migr-a")) {
+		t.Errorf("reply: got %v, want the stored record %v",
+			reply.GetMigr(), env.migration("migr-a"))
+	}
+	if !reply.GetMigr().GetCutoverPending() {
+		t.Errorf("cutover_pending: got false, want true from the create")
+	}
+	volCutover(env, "migr-a")
+	reply, err = env.srv.GetMigration(env.ctx, &pb.GetMigrationRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		MigrName:    "migr-a",
+	})
+	if err != nil {
+		t.Fatalf("GetMigration after the cutover: %v", err)
+	}
+	if reply.GetMigr().GetCutoverPending() {
+		t.Errorf("cutover_pending: got true, want false after the cutover")
 	}
 	if _, err := env.srv.GetMigration(env.ctx, &pb.GetMigrationRequest{
 		ClusterName: env.cluster,

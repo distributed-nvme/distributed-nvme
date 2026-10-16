@@ -266,7 +266,8 @@ func (s *CnAgentServer) lookupSubsys(
 
 // ensureLegs converges every leg of every group of every slice — spare legs
 // included, both roles. It reports which legs are **available** (cnagent.md
-// CN12), which is what the assembly needs, records each leg's ResInfo, and says
+// CN12), which is what the assembly needs, records each leg's ResInfo and a
+// two-sided leg's path rows (legPathRows), and says
 // whether any leg failed to converge — its connect, a controller's address
 // read that did not answer, its multipath namespace or its wrapper — which
 // registers the cntlr for the background retry (build registers it too for a
@@ -292,10 +293,14 @@ func (s *CnAgentServer) ensureLegs(
 			// leg_list leg is deferred, and a spare's flag is never read.
 			info.LegIdToLeg[lp.legId] = st.tracker.Provisioning(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, detailsProvisioning)
+			s.legPathRows(ctx, st, plan, lp, nil, info)
 			available[lp.legId] = false
 			continue
 		}
 		view, err := s.ensureLeg(ctx, plan, lp, budget)
+		// The path rows read the connect step's own view; a leg that failed
+		// has none, and they look it up again (legPathRows).
+		s.legPathRows(ctx, st, plan, lp, view, info)
 		if err != nil {
 			info.LegIdToLeg[lp.legId] = st.tracker.Err(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, err.Error())
@@ -627,6 +632,127 @@ func transportHealth(
 	}
 	details := strings.Join(reports, ",")
 	if !ok {
+		return pb.ResStatus_RES_STATUS_ERROR, details
+	}
+	return pb.ResStatus_RES_STATUS_OK, details
+}
+
+// legPathRows writes the path rows of one leg (CN28): for a leg whose
+// side_list holds two sides — a migration's — one row per side, keyed by
+// side id and named by the side's address, which says whether this node
+// holds a live controller to that address. The worker's cutover reads the
+// primary's row for the migration's dst side (dnv-worker.md RW18); no health
+// rule judges these rows (dnv-worker.md HL2). A leg with one side has none.
+//
+// Every cntlr writes them, primary and standby, on both channels, and this is
+// the one function that does: the converge after each leg's connect step
+// (ensureLegs, or the level's MISSING rows in build), the check round and the
+// info read in probeCntlr. A row reads, in this order: MISSING "sp_level"
+// while the sp_level suppresses legs (CN19), as the leg row does;
+// PROVISIONING while its side is unprovisioned ([D15]: nothing is exported
+// for it, so its missing controller is the desired state); ERROR with the
+// leg row's details while a sweep's disconnect of the leg's subsystem is in
+// flight (CN10's disconnect registry); otherwise it is pathHealth's verdict
+// on the leg's view.
+//
+// view is the leg's view the caller already holds — the converge's, from its
+// connect step — or nil, and the function then looks the leg up in the pass's
+// walk, once, and only when a side needs it. It returns the view it used, nil
+// when it has none, so the probe's standby leg row reads the same lookup.
+func (s *CnAgentServer) legPathRows(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	lp *legPlan,
+	view *subsysView,
+	info *pb.CntlrInfo,
+) *subsysView {
+	if !lp.twoSided() {
+		return view
+	}
+	t := st.tracker
+	var lookupErr error
+	looked := view != nil
+	for _, side := range lp.sides {
+		sideId := side.GetSideId()
+		key := resKeyOf(resKeyPathFmt, sideId)
+		tr := side.GetNvmeTrConf()
+		name := fmt.Sprintf("%s:%s", tr.GetTrAddr(), tr.GetTrSvcId())
+		switch {
+		case !plan.wantLeg:
+			info.SideIdToPath[sideId] = t.Missing(key, name, detailsSpLevel)
+			continue
+		case !side.GetProvisioned():
+			info.SideIdToPath[sideId] = t.Provisioning(
+				key, name, detailsProvisioning)
+			continue
+		case s.disconnectInFlight(lp.nqn):
+			info.SideIdToPath[sideId] = t.Err(
+				key, name, detailsDisconnectInFlight(lp.nqn))
+			continue
+		}
+		if !looked {
+			view, lookupErr = s.lookupSubsys(
+				ctx, plan.walk, lp.nqn, sideNsid)
+			looked = true
+		}
+		status, details := pathHealth(view, lookupErr, tr)
+		info.SideIdToPath[sideId] = t.Set(key, name, status, details)
+	}
+	return view
+}
+
+// twoSided reports whether the leg's side_list holds two sides: a
+// migration's leg (CN10), the only kind that reports path rows.
+func (lp *legPlan) twoSided() bool {
+	return len(lp.sides) == 2
+}
+
+// pathResKeys is the ResTracker key of each path row one leg reports
+// (legPathRows): one per side of a two-sided leg, none otherwise. A side
+// that leaves the leg, or a leg that leaves the plan, leaves the wanted keys
+// with it (cntlrResKeys), so its row's history goes.
+func pathResKeys(lp *legPlan) []string {
+	if !lp.twoSided() {
+		return nil
+	}
+	keys := make([]string, 0, len(lp.sides))
+	for _, side := range lp.sides {
+		keys = append(keys, resKeyOf(resKeyPathFmt, side.GetSideId()))
+	}
+	return keys
+}
+
+// pathHealth is a provisioned side's path row (CN28, legPathRows): OK with
+// the controller's state and ana_state when a live controller of the leg's
+// subsystem has the side's address; ERROR with the same details when that
+// controller is not live; MISSING "no controller" when none has it. The ANA
+// state does not count: while a migration's cutover is pending its dst side
+// exports inaccessible, and the cutover asks only for a live path
+// (dnv-worker.md RW18). The ana_state is read from the path device, which the
+// kernel's scan adds after the connect returns, so a fresh path may read
+// "live/" for a moment. A lookup that did not answer is ERROR naming the
+// read, never MISSING; so is a subsystem holding a controller whose address
+// read did not answer when no controller has the side's address: that
+// controller may be the side's (CN10: unknown, never unwanted). A gone
+// controller has no address and is no side's path.
+func pathHealth(
+	view *subsysView,
+	lookupErr error,
+	tr *pb.NvmeTrConf,
+) (pb.ResStatus, string) {
+	if lookupErr != nil {
+		return pb.ResStatus_RES_STATUS_ERROR, lookupErr.Error()
+	}
+	ctrl := view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId())
+	if ctrl == nil {
+		if err := view.unknownCtrl(); err != nil {
+			return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		}
+		return pb.ResStatus_RES_STATUS_MISSING, detailsNoController
+	}
+	details := ctrl.state + "/" + ctrl.anaState
+	if ctrl.state != "live" {
 		return pb.ResStatus_RES_STATUS_ERROR, details
 	}
 	return pb.ResStatus_RES_STATUS_OK, details

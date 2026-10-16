@@ -1524,18 +1524,20 @@ func cntlrRowFields(t *testing.T) []cntlrRowField {
 
 // TestHealthCntlrEveryMap pins the maps HL2 judges a cntlr by
 // (cntlrHealthMaps) against CntlrInfo itself: an ERROR row in any map but
-// leg_id_to_leg, the per-td thin maps included, is an error row, and a row
-// with no res_name of its own is named by its map — so a map dropped from the
-// list, or mislabelled, fails here, as does a map added to the proto and not
-// to the list. The row is the second of its map, in the second td for a thin
-// map: every row and every td is judged. A leg row never is (HL2's leg row).
+// leg_id_to_leg and side_id_to_path, the per-td thin maps included, is an
+// error row, and a row with no res_name of its own is named by its map — so a
+// map dropped from the list, or mislabelled, fails here, as does a map added
+// to the proto and not to the list. The row is the second of its map, in the
+// second td for a thin map: every row and every td is judged. A leg row never
+// is (HL2's leg row), nor a path row, which only the cutover beside RW18's
+// flip reads.
 func TestHealthCntlrEveryMap(t *testing.T) {
 	for _, f := range cntlrRowFields(t) {
 		info := &pb.CntlrInfo{}
 		f.put(info, 3, 1, resOk("first"))
 		f.put(info, 5, 2, &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR})
 		obs, res := cntlrObservation(0, info)
-		if f.name == "leg_id_to_leg" {
+		if f.name == "leg_id_to_leg" || f.name == "side_id_to_path" {
 			if obs != healthClean {
 				t.Errorf("%s: obs = %v, want clean", f.name, obs)
 			}
@@ -1566,7 +1568,7 @@ func TestHealthCntlrFirstErrorOrder(t *testing.T) {
 		var thin []cntlrRowField
 		for _, f := range cntlrRowFields(t) {
 			switch f.name {
-			case "leg_id_to_leg":
+			case "leg_id_to_leg", "side_id_to_path":
 				continue
 			case "slice_id_to_dm_thin":
 				thin = append(thin, f)
@@ -1644,12 +1646,14 @@ func TestHealthMarkCntlrUnknownCoversEveryMap(t *testing.T) {
 // CntlrInfo itself: a PROVISIONING row, or a MISSING row whose details are
 // not CN19's "sp_level", in any map HL2 judges a cntlr by, the per-td thin
 // maps included, except grp_id_to_md_raid, where a grow's group reads
-// PROVISIONING beside a serving pool; never a leg row (a zeroing spare); and
-// never a row of any other status, or a MISSING "sp_level" one, in any map.
+// PROVISIONING beside a serving pool; never a leg row (a zeroing spare) nor a
+// path row (a migration's zeroing dst side); and never a row of any other
+// status, or a MISSING "sp_level" one, in any map.
 func TestPrimaryShapeBuilt(t *testing.T) {
 	fields := cntlrRowFields(t)
 	notJudged := map[string]bool{
 		"leg_id_to_leg":     true,
+		"side_id_to_path":   true,
 		"grp_id_to_md_raid": true,
 	}
 	status := func(s pb.ResStatus) *pb.ResInfo { return &pb.ResInfo{Status: s} }

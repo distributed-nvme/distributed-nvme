@@ -70,8 +70,9 @@ type DnAgentServer struct {
 	migrRetryInterval time.Duration
 
 	// now and sleep are the clock seams, real by default: DN6's orphan age
-	// gate compares a subsystem directory's mtime with now, and DN13's wait
-	// for the migration source's namespace paces itself through both
+	// gate compares a subsystem directory's mtime with now, and DN13's
+	// in-pass retry of the connect to the migration source export and its
+	// wait for the source's namespace pace themselves through both
 	// (agent.WaitBudget). Fields for the same reason as the three above: a
 	// unit test runs them on a fake clock; nothing else changes them.
 	now   func() time.Time

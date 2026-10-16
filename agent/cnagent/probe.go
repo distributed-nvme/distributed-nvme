@@ -39,9 +39,12 @@ func (s *CnAgentServer) probeCntlr(
 	info := newCntlrInfo()
 
 	// Legs — the wrapper table plus the CN11 prober outcome on a primary,
-	// transport liveness and ana_state per desired side on a standby.
+	// transport liveness and ana_state per desired side on a standby. A
+	// two-sided leg's path rows come first (legPathRows), and the lookup they
+	// take serves a standby's leg row too.
 	for _, lp := range plan.legs {
 		key := resKeyOf(resKeyLegFmt, lp.legId)
+		view := s.legPathRows(ctx, st, plan, lp, nil, info)
 		// CN19's suppression is evaluated first and wins over [D15]'s deferral:
 		// the operator has said the resource must not exist, which is a
 		// stronger statement than "it is coming".
@@ -64,7 +67,7 @@ func (s *CnAgentServer) probeCntlr(
 				key, lp.name, detailsDisconnectInFlight(lp.nqn))
 			continue
 		}
-		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, nil)
+		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, view)
 	}
 
 	// Groups — the reading's md walk serves all of them and the concat rows

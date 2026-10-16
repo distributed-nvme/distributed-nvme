@@ -205,6 +205,12 @@ enum ResReason {
     // sets it, on that RES_STATUS_ERROR thin row; a check round's probe
     // never does.
     RES_REASON_THIN_ID_LOST = 1;
+    // A migration's dst side waits for the cutover: its request carries
+    // MigrDstConf.cutover_pending and its metadata wrapper stands
+    // (dnagent.md DN13, DN18). The dn agent sets it on both channels, on
+    // the two RES_STATUS_PROVISIONING rows of SideInfo.MigrDstInfo, and the
+    // worker's cutover reads it from target_info (dnv-worker.md RW18).
+    RES_REASON_AWAITING_CUTOVER = 2;
 }
 
 message ResInfo {
@@ -307,6 +313,13 @@ message CntlrInfo {
     map<uint64, ResInfo> clone_id_to_target = 15;
     map<uint64, ResInfo> clone_id_to_dm_clone = 16;
     map<uint64, ResInfo> clone_id_to_meta = 17;
+    // One row per side of each leg whose side_list holds two sides, keyed by
+    // side id: whether this node holds a live NVMe controller to that side's
+    // address (cnagent.md CN28). Every cntlr reports it, on both channels;
+    // no health rule judges it (dnv-worker.md HL2). The worker's cutover
+    // reads the primary's row for a migration's dst side (dnv-worker.md
+    // RW18). Appended, never renumbered.
+    map<uint64, ResInfo> side_id_to_path = 18;
 }
 
 // One clone bitmap chunk's address: the source slice the chunk describes and
@@ -497,8 +510,9 @@ message Cntlr {
     // settling is true from the moment this cntlr becomes primary (or,
     // still primary, is re-enabled) until the worker first observes it
     // clean in that role with its stack built — no row outside
-    // leg_id_to_leg and grp_id_to_md_raid PROVISIONING, or MISSING but
-    // for the sp_level's (dnv-worker.md HL2) — or a failover demotes it.
+    // leg_id_to_leg, grp_id_to_md_raid and side_id_to_path PROVISIONING,
+    // or MISSING but for the sp_level's (dnv-worker.md HL2) — or a failover
+    // demotes it.
     // AR5 holds a settling primary to cntlr_unhealthy instead of
     // primary_unhealthy when that is the longer. Existing records decode
     // false = settled.
@@ -605,6 +619,16 @@ message Migration {
     // FinishMigration and CancelMigration release exactly this. Appended,
     // never renumbered.
     uint64 meta_units = 6;
+    // Set by CreateMigration; cleared by the worker's cutover, once the
+    // primary reports a live path to the dst side and the dst side reports
+    // RES_REASON_AWAITING_CUTOVER (dnv-worker.md RW18), and never set again.
+    // While it is set the src side serves on, the dst side goes no further
+    // than its metadata wrapper and its exports on dm-error
+    // (architecture.md, Migration), and FinishMigration refuses, with force
+    // or without. A record without the field decodes false, read as a
+    // cutover that has started (architecture.md, Upgrade in lockstep).
+    // Appended, never renumbered.
+    bool cutover_pending = 7;
 }
 
 // {dnv_prefix} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx}
@@ -1449,6 +1473,11 @@ message SyncupSideRequest {
         uint64 dst_side_id = 2;
         uint64 dst_dn_id = 3;
         bool dst_provisioned = 4;
+        // The worker copies Migration.cutover_pending here and sends
+        // dst_provisioned true only once it is false (dnv-worker.md RW15).
+        // While dst_provisioned is false it changes only the text of the
+        // migr_src_info rows (dnagent.md DN12). Appended, never renumbered.
+        bool cutover_pending = 5;
     }
     message MigrDstConf {
         uint64 migr_id = 1;
@@ -1459,6 +1488,13 @@ message SyncupSideRequest {
         uint64 meta_blocks = 6;
         DmCloneConf dm_clone_conf = 7;
         uint32 bm_cnt = 8;
+        // The worker copies Migration.cutover_pending here (dnv-worker.md
+        // RW15). While it is true a provisioned dst side builds its
+        // metadata wrapper and its per-CN stacks, connects to no source and
+        // builds no dm-clone, and once the wrapper stands reports
+        // RES_REASON_AWAITING_CUTOVER (dnagent.md DN13, DN18). Appended,
+        // never renumbered.
+        bool cutover_pending = 9;
     }
     uint64 cluster_id = 1;
     uint64 dn_id = 2;

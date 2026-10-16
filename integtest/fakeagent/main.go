@@ -12,8 +12,13 @@
 //
 //	behavior.json  what to report. Re-read on every request whose mtime or
 //	               size changed, so the script flips behaviour without
-//	               restarting the fake. Absent (or `{}`) means: every row OK
-//	               and sides instantly zeroed. A malformed file is logged and
+//	               restarting the fake. Absent (or `{}`) means: sides
+//	               instantly zeroed and every row OK, save the rows the fake
+//	               derives from the request instead — a migration
+//	               destination's two rows while it waits for the cutover
+//	               (sideInfoLocked) and the path rows of a leg with two sides
+//	               (cntlrInfoLocked) — which the file's levers override all
+//	               the same. A malformed file is logged and
 //	               ignored, keeping the previous behaviour, so a bad file
 //	               fails a test on its assertion instead of killing the agent.
 //	state.json     the last accepted request and revision per object plus the
@@ -88,6 +93,16 @@ const (
 
 	sideObjPrefix  = "side "
 	cntlrObjPrefix = "cntlr "
+
+	// The details of the rows the fake derives from the last accepted
+	// request rather than defaulting to OK, the texts the real agents write:
+	// a migration destination's two rows while it waits for the cutover
+	// (dnagent.md DN18), and a path row of a leg with two sides, live for a
+	// provisioned side and held for one that is not (cnagent.md CN28). The
+	// worker reads none of them: it reads the reason and the status.
+	detailsAwaitingCutover  = "waiting for the cutover"
+	detailsPathLive         = "live/optimized"
+	detailsPathProvisioning = "provisioning"
 )
 
 // sideObjKey renders the "side <sp_id>:<leg_id>:<side_id>" object key —
@@ -727,8 +742,23 @@ func (a *fakeAgent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
 func (a *fakeAgent) resolveCntlrRow(
 	objKey string, primary bool, keys ...string,
 ) *pb.ResInfo {
-	resStatus := pb.ResStatus_RES_STATUS_OK
-	details := ""
+	return a.resolveDerivedRow(
+		objKey, primary, pb.ResStatus_RES_STATUS_OK, "", keys...)
+}
+
+// resolveDerivedRow is resolveCntlrRow over a row whose state the fake
+// derives from the request instead of defaulting to OK with no details:
+// baseStatus and baseDetails stand where the default OK stands, and every
+// lever of behavior.json applies over them in the usual order.
+func (a *fakeAgent) resolveDerivedRow(
+	objKey string,
+	primary bool,
+	baseStatus pb.ResStatus,
+	baseDetails string,
+	keys ...string,
+) *pb.ResInfo {
+	resStatus := baseStatus
+	details := baseDetails
 	if a.beh != nil && a.beh.Default != nil {
 		if a.beh.Default.Status != nil {
 			resStatus = a.beh.Default.status
@@ -825,6 +855,17 @@ func (a *fakeAgent) cnInfoLocked() *pb.CnInfo {
 // side_conf.zero_bytes and zeroed_bytes = zero_bytes by default (instant
 // provisioning), either overridable per object in behavior.json
 // (architecture.md, Side provisioning protocol).
+//
+// A migration destination whose request carries side_conf.provisioned and
+// migr_dst_conf.cutover_pending reports what the real dn agent reports once
+// its metadata wrapper stands and it waits for the cutover (dnagent.md DN13,
+// DN18): both migr_dst_info rows PROVISIONING "waiting for the cutover" with
+// the reason RES_REASON_AWAITING_CUTOVER, which the worker's cutover reads
+// (dnv-worker.md RW18). A lever that overrides such a row keeps the reason
+// only while the row still reads PROVISIONING, as the real agent sets the
+// reason on that status alone, so a case holds the cutover back on the side
+// by moving the target row to any other status. Before the side is
+// provisioned the rows default to OK, as every row the fake does not derive.
 func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
 	if req == nil {
@@ -856,10 +897,13 @@ func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 			NvmeofInfo:   a.resolveRow(key, "migr_src_info.nvmeof_info"),
 		}
 	}
-	if req.GetMigrDstConf() != nil {
+	if dst := req.GetMigrDstConf(); dst != nil {
+		awaiting := dst.GetCutoverPending() && conf.GetProvisioned()
 		info.MigrDstInfo = &pb.SideInfo_MigrDstInfo{
-			TargetInfo:  a.resolveRow(key, "migr_dst_info.target_info"),
-			DmCloneInfo: a.resolveRow(key, "migr_dst_info.dm_clone_info"),
+			TargetInfo: a.migrDstRowLocked(
+				key, awaiting, "migr_dst_info.target_info"),
+			DmCloneInfo: a.migrDstRowLocked(
+				key, awaiting, "migr_dst_info.dm_clone_info"),
 		}
 	}
 	zeroBytes := conf.GetZeroBytes()
@@ -874,6 +918,25 @@ func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
 	info.ZeroBytes = zeroBytes
 	info.ZeroedBytes = zeroedBytes
 	return info
+}
+
+// migrDstRowLocked resolves one of a migration destination's two rows: the
+// default OK, or — while awaiting, the side provisioned and its cutover
+// pending — PROVISIONING "waiting for the cutover", carrying the reason
+// RES_REASON_AWAITING_CUTOVER whenever the resolved status is still
+// PROVISIONING (sideInfoLocked).
+func (a *fakeAgent) migrDstRowLocked(
+	key string, awaiting bool, rowName string,
+) *pb.ResInfo {
+	if !awaiting {
+		return a.resolveRow(key, rowName)
+	}
+	row := a.resolveDerivedRow(key, true,
+		pb.ResStatus_RES_STATUS_PROVISIONING, detailsAwaitingCutover, rowName)
+	if row.GetStatus() == pb.ResStatus_RES_STATUS_PROVISIONING {
+		row.Reason = pb.ResReason_RES_REASON_AWAITING_CUTOVER
+	}
+	return row
 }
 
 // sideBmInfoLocked reports the applied migration-bitmap indexes of the side's
@@ -945,6 +1008,14 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // sp role; cnagent CN14 "primary only"), minus any thin_missing_slices — the
 // created-flip negative of worker_test.sh case S step 6 (RW19). The same
 // cntlr.primary gates every when_primary row override (resolveCntlrRow).
+//
+// side_id_to_path holds one row per side of every leg with two sides — the
+// shape a migration gives a leg — on a primary and a standby alike, as the
+// real cn agent reports its paths (cnagent.md CN28): OK "live/optimized" for
+// a provisioned side, which is what the worker's cutover waits for on the
+// primary (dnv-worker.md RW18), and PROVISIONING "provisioning" for one that
+// is not, the side the real agent connects to only once it is provisioned. A
+// row override, keyed "side_id_to_path.<side_id>", holds a path down.
 func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {
@@ -969,6 +1040,7 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		CloneIdToTarget:   make(map[uint64]*pb.ResInfo),
 		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
 		CloneIdToMeta:     make(map[uint64]*pb.ResInfo),
+		SideIdToPath:      make(map[uint64]*pb.ResInfo),
 	}
 	sliceIdList := sliceIdList(req)
 	for _, sliceId := range sliceIdList {
@@ -994,6 +1066,13 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 			for _, leg := range legList {
 				info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
 					key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
+				if len(leg.GetSideList()) != 2 {
+					continue
+				}
+				for _, side := range leg.GetSideList() {
+					info.SideIdToPath[side.GetSideId()] =
+						a.pathRowLocked(key, primary, side)
+				}
 			}
 		}
 	}
@@ -1058,6 +1137,22 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 			key, primary, rowKey("xfer_id_to_namespace", xferId))
 	}
 	return info
+}
+
+// pathRowLocked resolves one side's path row (cntlrInfoLocked): live for a
+// provisioned side, held at provisioning for one that is not, under every
+// lever of behavior.json.
+func (a *fakeAgent) pathRowLocked(
+	key string, primary bool, side *pb.Side,
+) *pb.ResInfo {
+	resStatus := pb.ResStatus_RES_STATUS_OK
+	details := detailsPathLive
+	if !side.GetProvisioned() {
+		resStatus = pb.ResStatus_RES_STATUS_PROVISIONING
+		details = detailsPathProvisioning
+	}
+	return a.resolveDerivedRow(key, primary, resStatus, details,
+		rowKey("side_id_to_path", side.GetSideId()))
 }
 
 // cntlrBmInfoListLocked reports one BitmapInfo per clone of the last request

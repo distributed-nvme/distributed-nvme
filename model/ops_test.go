@@ -1379,17 +1379,21 @@ func TestFlipProvisioned(t *testing.T) {
 		{SliceId: opsSliceId, LegId: opsDataLegA, SideId: opsDataSideA},
 		{SliceId: opsSliceId, LegId: opsMetaLegB, SideId: opsMetaSideB},
 	}
-	flipped, err := FlipProvisioned(
+	flipped, revision, err := FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, sides,
 	)
 	if err != nil {
 		t.Fatalf("FlipProvisioned: %v", err)
 	}
-	// The op reports the sides it WROTE, in the order they were listed: the
-	// caller logs one "flip applied" record (dnv-worker.md, Log records) per
-	// side.
+	// The op reports the sides it WROTE, in the order they were listed, and
+	// the revision its STM committed: the caller logs one "flip applied"
+	// record (dnv-worker.md, Log records) per side, naming that revision.
 	if !equalSideRefs(flipped, sides) {
 		t.Errorf("flipped: got %v, want %v", flipped, sides)
+	}
+	if revision != revBefore+1 {
+		t.Errorf("revision: got %d, want %d, the one the STM committed",
+			revision, revBefore+1)
 	}
 	slice := env.slice()
 	if !findSide(slice, opsDataSideA).GetProvisioned() ||
@@ -1403,21 +1407,22 @@ func TestFlipProvisioned(t *testing.T) {
 		t.Errorf("SpRev: got %d, want %d (exactly one bump)", got, revBefore+1)
 	}
 	// Idempotent: a repeated batch writes nothing and bumps nothing.
-	flipped, err = FlipProvisioned(
+	flipped, revision, err = FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, sides,
 	)
 	if err != nil {
 		t.Fatalf("FlipProvisioned again: %v", err)
 	}
-	if len(flipped) != 0 {
-		t.Errorf("flipped: got %v, want none", flipped)
+	if len(flipped) != 0 || revision != 0 {
+		t.Errorf("flipped: got %v at revision %d, want none at 0", flipped,
+			revision)
 	}
 	if got := env.spRev(); got != revBefore+1 {
 		t.Errorf("SpRev must not move: got %d, want %d", got, revBefore+1)
 	}
 	// A stale side pointer is skipped, not an error; a wrong leg id makes
 	// the pointer stale too.
-	flipped, err = FlipProvisioned(
+	flipped, _, err = FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId,
 		[]SideRef{
 			{SliceId: opsSliceId, LegId: opsDataLegB, SideId: 9999},
@@ -1434,7 +1439,7 @@ func TestFlipProvisioned(t *testing.T) {
 		t.Errorf("SpRev must not move: got %d", got)
 	}
 	// A missing slice is a precondition failure and drops the whole batch.
-	_, err = FlipProvisioned(
+	_, _, err = FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId,
 		[]SideRef{
 			{SliceId: opsSliceId, LegId: opsDataLegB, SideId: opsDataSideB},
@@ -1692,6 +1697,196 @@ func TestFlipCreatedStopsAtTheFailingTxn(t *testing.T) {
 	if got := env.spRev(); got != revBefore+1 {
 		t.Errorf("SpRev: got %d, want %d (one bump, by the one transaction "+
 			"that committed)", got, revBefore+1)
+	}
+}
+
+// opsMigrName, opsMigrId and opsDstSide are the migration StartCutover's
+// tests add to the fixture: its src side is opsDataSideA, and opsDstSide a
+// second side of the same leg, on dn-c.
+const (
+	opsMigrName = "migr0"
+	opsMigrId   = uint64(461)
+	opsDstSide  = uint64(462)
+)
+
+// addMigration gives opsDataLegA a dst side, provisioned as given, and writes
+// a Migration record with cutover_pending set, as CreateMigration does; it
+// returns the CutoverRef the sp worker would build from that load.
+func (e *opsEnv) addMigration(dstProvisioned bool) CutoverRef {
+	e.t.Helper()
+	slice := e.slice()
+	leg := findLeg(slice, opsDataLegA)
+	leg.SideList = append(leg.SideList,
+		opsSide(opsDstSide, opsDnC, dstProvisioned))
+	mustPut(e.t, e.cli, SliceKey(e.cid, opsSpId, opsSliceId), slice)
+	conf := e.spConf()
+	conf.MigrNameList = []string{opsMigrName}
+	mustPut(e.t, e.cli, SpConfKey(e.cid, opsSpName), conf)
+	mustPut(e.t, e.cli, MigrationKey(e.cid, opsSpId, opsMigrName),
+		&pb.Migration{
+			MigrId:         opsMigrId,
+			SrcSideId:      opsDataSideA,
+			DstSideId:      opsDstSide,
+			CutoverPending: true,
+		})
+	return CutoverRef{
+		MigrName:  opsMigrName,
+		MigrId:    opsMigrId,
+		SliceId:   opsSliceId,
+		LegId:     opsDataLegA,
+		SrcSideId: opsDataSideA,
+		DstSideId: opsDstSide,
+	}
+}
+
+func (e *opsEnv) migration() *pb.Migration {
+	migr := &pb.Migration{}
+	e.get(MigrationKey(e.cid, opsSpId, opsMigrName), migr)
+	return migr
+}
+
+// TestStartCutover pins the cutover's STM (MD6, RW18): it clears the
+// migration's cutover_pending and bumps SpRev once, and returns the revision
+// it committed, and only while the SP's level is below
+// SP_LEVEL_NO_MIGRATION, the flag is set, the dst side is provisioned in its
+// leg and the reporting cntlr is still the primary and not disabled. Every
+// refusal is an ErrPrecondition that writes nothing.
+func TestStartCutover(t *testing.T) {
+	env := newOpsEnv(t)
+	ref := env.addMigration(false)
+	revBefore := env.spRev()
+	refusedIn := func(what string, spName string, ref CutoverRef,
+		cntlrId uint64, reason string) {
+		t.Helper()
+		revision, err := StartCutover(env.ctx, env.cli, env.cid, opsShard,
+			opsSpId, spName, ref, cntlrId)
+		precondition := wantPrecondition(t, err, opStartCutover)
+		if revision != 0 {
+			t.Errorf("%s: revision %d from a refused STM, want 0", what,
+				revision)
+		}
+		if precondition.Reason != reason {
+			t.Errorf("%s: reason %q, want %q", what, precondition.Reason,
+				reason)
+		}
+		if got := env.spRev(); got != revBefore {
+			t.Errorf("%s: SpRev %d, want %d: a refusal bumps nothing", what,
+				got, revBefore)
+		}
+		if !env.migration().GetCutoverPending() {
+			t.Errorf("%s: the flag was cleared by a refused STM", what)
+		}
+	}
+	refused := func(what string, ref CutoverRef, cntlrId uint64,
+		reason string) {
+		t.Helper()
+		refusedIn(what, opsSpName, ref, cntlrId, reason)
+	}
+
+	refused("a dst side still zeroing", ref, opsCntlrA,
+		"dst side not provisioned")
+
+	slice := env.slice()
+	findSideOfLeg(slice, opsDataLegA, opsDstSide).Provisioned = true
+	mustPut(t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
+	revBefore = env.spRev()
+
+	refused("a standby", ref, opsCntlrB, "cntlr not primary")
+	refused("a cntlr that is gone", ref, 9999, "cntlr not found")
+	// A disabled primary runs the standby shape (cnagent.md CN9): its path
+	// says nothing of the cntlr AR5 makes the primary next.
+	primary := env.cntlr(opsCntlrA)
+	primary.Disabled = true
+	mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, opsCntlrA), primary)
+	refused("a disabled primary", ref, opsCntlrA, "cntlr disabled")
+	primary.Disabled = false
+	mustPut(t, env.cli, CntlrKey(env.cid, opsSpId, opsCntlrA), primary)
+	// Every level from SP_LEVEL_NO_MIGRATION up keeps the dst side from
+	// building its dm-clone (dnagent.md DN11), so the cutover waits there,
+	// whatever the dst side's last report said.
+	for _, level := range []pb.SpLevel{
+		pb.SpLevel_SP_LEVEL_NO_MIGRATION,
+		pb.SpLevel_SP_LEVEL_NO_SIDE,
+		pb.SpLevel_SP_LEVEL_DISABLE,
+	} {
+		env.setLevel(level)
+		refused(level.String(), ref, opsCntlrA,
+			"sp level suppresses migrations")
+	}
+	env.setLevel(pb.SpLevel_SP_LEVEL_READWRITE)
+	refusedIn("an SP that is gone", "ops-pool-gone", ref, opsCntlrA,
+		"sp not found")
+	conf := env.spConf()
+	conf.SpId = opsSpId + 1
+	mustPut(t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+	refused("an SP re-created under its name", ref, opsCntlrA,
+		"sp id changed")
+	conf.SpId = opsSpId
+	mustPut(t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+	gone := ref
+	gone.MigrName = "migr-gone"
+	refused("a migration that is gone", gone, opsCntlrA,
+		"migration not found")
+	other := ref
+	other.MigrId = opsMigrId + 1
+	refused("a migration re-created under its name", other, opsCntlrA,
+		"migration changed")
+	other = ref
+	other.DstSideId = opsDataSideB
+	refused("another dst side", other, opsCntlrA, "migration changed")
+	other = ref
+	other.LegId = opsDataLegB
+	refused("a dst side not in its leg", other, opsCntlrA,
+		"dst side not found")
+	other = ref
+	other.SliceId = 9999
+	refused("a slice that is gone", other, opsCntlrA, "slice not found")
+
+	// The levels below SP_LEVEL_NO_MIGRATION are the CN's alone, and the dst
+	// side serves at them (dnagent.md DN11): the highest of them holds
+	// nothing up.
+	env.setLevel(pb.SpLevel_SP_LEVEL_NO_REDUND)
+	revision, err := StartCutover(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, ref, opsCntlrA)
+	if err != nil {
+		t.Fatalf("StartCutover: %v", err)
+	}
+	if revision != revBefore+1 {
+		t.Errorf("StartCutover returned revision %d, want %d, the one its "+
+			"STM committed", revision, revBefore+1)
+	}
+	migr := env.migration()
+	if migr.GetCutoverPending() {
+		t.Errorf("cutover_pending still set after the cutover")
+	}
+	want := &pb.Migration{
+		MigrId:    opsMigrId,
+		SrcSideId: opsDataSideA,
+		DstSideId: opsDstSide,
+	}
+	if !proto.Equal(migr, want) {
+		t.Errorf("migration = %v, want %v: the cutover writes the flag alone",
+			migr, want)
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d (exactly one bump)", got,
+			revBefore+1)
+	}
+	if !findSideOfLeg(env.slice(), opsDataLegA, opsDstSide).GetProvisioned() {
+		t.Errorf("the dst side lost its provisioned flag")
+	}
+
+	// A cutover that started is not started again: a second call is
+	// refused and bumps nothing.
+	revBefore = env.spRev()
+	_, err = StartCutover(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, ref, opsCntlrA)
+	if precondition := wantPrecondition(t, err, opStartCutover); precondition.Reason != "cutover started" {
+		t.Errorf("a second cutover: reason %q, want %q",
+			precondition.Reason, "cutover started")
+	}
+	if got := env.spRev(); got != revBefore {
+		t.Errorf("a second cutover: SpRev %d, want %d", got, revBefore)
 	}
 }
 
@@ -3418,7 +3613,7 @@ func TestCreateSpareLeg(t *testing.T) {
 	// side is provisioned (an unprovisioned spare holds the next create
 	// back); a third is refused. Each create is planned after the one
 	// before it, so its plan holds every spare the group has.
-	if _, err := FlipProvisioned(
+	if _, _, err := FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId,
 		[]SideRef{{
 			SliceId: opsSliceId, LegId: legId, SideId: side.GetSideId(),
@@ -3561,7 +3756,7 @@ func TestCreateSpareLegRefusesWhileASpareIsPending(t *testing.T) {
 func TestCreateSpareLegRefusesASecondOwnerAfterTheFlip(t *testing.T) {
 	env := newOpsEnv(t)
 	plan, ownerB, spare := overlapSpareCreate(t, env)
-	if _, err := FlipProvisioned(
+	if _, _, err := FlipProvisioned(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId,
 		[]SideRef{{
 			SliceId: opsSliceId,

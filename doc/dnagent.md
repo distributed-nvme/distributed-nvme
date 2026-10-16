@@ -47,7 +47,8 @@ three sit on), `bitmap.go` the bitmap-chunk store, `sweep.go` the part of DN6's 
 both roles share (the leftover kinds, the result value a pass accumulates,
 its log record and the `AgentReply` it becomes) and `waitbudget.go` the
 `WaitBudget`, the bounded wait one converge pass may spend on the node
-catching up with what that pass asked of it: DN13's wait for the source's
+catching up with what that pass asked of it: DN13's two, the retries of
+the connect to the migration source export and the wait for the source's
 namespace, and the cn connect step's pass budget (`cnagent.md` CN10 and
 CN18).
 
@@ -134,13 +135,19 @@ The constants this document relies on, whose values and comments
   record and otherwise serves details and tests.
 * `DnMigrConnectRetryInterval`, the pace of the background retries of a
   migration destination whose build stopped short, at its `nvme connect`
-  or at another step, and of one that waits for a free run in the
-  clone-metadata area before it zeroes (DN13; the loop is SH27's "DN8
-  retry", so nicknamed for the DN8-gated converge it re-runs).
+  once the retries within its pass ran out or at another step, and of one
+  that waits for a free run in the clone-metadata area before it zeroes
+  (DN13; the loop is SH27's "DN8 retry", so nicknamed for the DN8-gated
+  converge it re-runs).
+* `DnMigrConnectPassBudget` and `DnMigrConnectRetryPause`, the migration
+  destination's retries of a failed connect to the migration source
+  export within one pass (DN13): connect again after the latter, for as
+  long as the former, which each failed connect's own time draws on too,
+  still covers the pause.
 * `DnMigrDstNsWait` and `DnMigrDstNsPause`, the migration destination's
   wait for the source namespace after a connect that succeeded (DN13):
   re-read, pausing the latter between reads and the former in all. Not a
-  connect retry — one connect per pass stays the rule.
+  connect retry: it has a budget of its own, apart from the connect's.
 * `DnExportOrphanGrace`, the age a namespace-less side export linked to no
   port but the agent's own must exceed before a sweep removes it (DN6):
   until then it may be a sibling agent's build in flight. The age is the
@@ -1404,8 +1411,9 @@ holding it (`NvmeHost.HeldWithHostNqn`).
 What that leaves is judged by the **claim rule**: the object goes unless
 some side this agent holds state for still wants it, read from that side's
 stored request — its **effective** `migr_src_conf` (a source whose
-destination has not provisioned claims nothing, `architecture.md`,
-Migration), its `migr_dst_conf` under a wanted destination role, its export
+request carries `dst_provisioned` false — its destination not provisioned
+yet, or the migration's cutover still pending — claims nothing,
+`architecture.md`, Migration), its `migr_dst_conf` under a wanted destination role, its export
 under a wanted export layer.
 
 **A claim on a kernel object carries its claimant's gate, and the source
@@ -1904,8 +1912,13 @@ export's one namespace, `sideNsid`, sits in `AnaGrpIdOptimized`.
 the source behaves exactly as if `migr_src_conf` were absent
 (`architecture.md`, Migration); the one difference is reporting, where the
 would-be `migr_src_info.dm_linear_info` and `.nvmeof_info` are
-`RES_STATUS_PROVISIONING` with details "side provisioning" instead of
-absent. With it true the three steps run unchanged.
+`RES_STATUS_PROVISIONING` instead of absent, with no reason and with the
+details "waiting for the cutover" while `migr_src_conf.cutover_pending` is
+set and "side provisioning" otherwise (DN18). The worker sends
+`dst_provisioned` true only once the destination is provisioned and the
+cutover has started (`dnv-worker.md` RW15), so `cutover_pending` changes
+nothing on the source but that text. With `dst_provisioned` true the three
+steps run unchanged.
 
 **The step-2 fence ([D12]).** Phase 1: suspend each per-CN dm-linear **in
 place**, leaving its table alone, and record when. Phase 2, on the first
@@ -2063,6 +2076,44 @@ larger than the whole area, a zero `migr_dst_conf.block_size` — reads
 `RES_STATUS_ERROR` on `side_dev_info` with the refusal, the rows above it
 staying "side provisioning", and registers the retry the same way.
 
+**Waiting for the cutover.** With the gate open and
+`migr_dst_conf.cutover_pending` set, the converge runs step (2) — the
+wrapper over the run the side took before zeroing — and builds the per-CN
+stacks, and nothing more: no walk of the source connection, no connect,
+no dm-clone and no status read. Where the stacks go is read as after a
+step that stops (below); a destination has no dm-clone before its
+cutover, so they take step (1)'s shape, each on its dm-error with its
+namespace `AnaGrpIdInaccessible`. A check round reads step (2) and where
+the stacks are, and no further. Once step (2) holds, `target_info` and
+`dm_clone_info` read `RES_STATUS_PROVISIONING` with the details "waiting
+for the cutover" and the reason `RES_REASON_AWAITING_CUTOVER`, on both
+channels, from the pass's own reading of step (2) and the request's flag,
+never from a text; the worker's cutover reads that reason
+(`dnv-worker.md` RW18). A pass whose step (2) holds decides its DN8 retry
+last, once the per-CN stacks have converged (`settleMigrRetry`, below):
+it stops the retry when the primary's dm-linear and its export converged
+where the pass put them, and registers it otherwise; a pass that cannot
+read where the stacks are registers it, as a step that stops does. One
+whose step (2) stops keeps the retry that step registers (below), since
+nothing else would build the wrapper the cutover waits for, and its rows
+read as the shared rule below gives them. Reason: the source still serves
+and has built no migration source export, so there is nothing to connect
+to, and a retry every `DnMigrConnectRetryInterval` would run for a wait
+with no end; but the cutover waits for the primary's path through its
+export (`dnv-worker.md` RW18), so a primary stack that did not converge,
+with nothing retrying it, would hold the migration until the SP's next
+revision (below). The request that clears the flag runs steps (3) to (5).
+
+The worker never sends `cutover_pending` again once its cutover cleared
+it, so a pass that waits for the cutover and finds a per-CN stack serving
+through the dm-clone converges a stale request: DN2's re-run of a stored
+request whose successor, the one that cleared the flag, was converged and
+never saved (SH5). That pass leaves the stack serving through the
+dm-clone, as a step that stops does, until the worker sees the side's
+older revision and sends the newer request again (`dnv-worker.md` RW4).
+Reason: reloading the leg's only serving path onto its dm-error would
+fail host IO until that request came.
+
 With the gate open, the five dst steps of `architecture.md`, Migration,
 numbered as there. What the dn adds to them: the slot of step (2) is the
 run taken before zeroing (above), contiguous `DnCloneMetaUnit` units of
@@ -2099,28 +2150,48 @@ primary's namespace in `AnaGrpIdOptimized` and the standbys' in
 numbering without changing any end state (`SyncupSide` builds bottom-up:
 slot, connect, clone, linear,
 "ana_grpid"): `ensureMigrDst` runs steps (2) to (4) **before** the per-CN
-stacks converge, so the pass that first builds those stacks *creates* the
-primary's dm-linear directly on the dm-clone and puts its namespace
-straight into `AnaGrpIdOptimized`, unless a step of it stops (below).
+stacks converge, so a pass that runs steps (2) to (4) and finds no per-CN
+stack *creates* the primary's dm-linear directly on the dm-clone and puts
+its namespace straight into `AnaGrpIdOptimized`, unless a step of it stops
+(below). A migration whose record the create wrote with `cutover_pending`
+set never takes that path: the pass that waits for the cutover builds its
+stacks first, in step (1)'s shape, and the request that clears the flag
+moves the primary onto the dm-clone with step (5)'s reload.
 Step (1)'s dm-error and `AnaGrpIdInaccessible` shape is what a pass builds
 when its source connection answers with no namespace device, or when a
-step stops and the pass finds the dm-clone absent or, with every read
-answered, no per-CN stack serving through it (below); step (5)'s *reload*
+step stops or the pass waits for the cutover and it finds the dm-clone
+absent or, with every read answered, no per-CN stack serving through it
+(below); step (5)'s *reload*
 then moves the primary onto the dm-clone in a later pass that has one to
 serve through, the retry's or an RPC's. "Retrying until success"
-(`architecture.md`, Migration) is implemented without retrying inside the
-RPC: a converge pass whose sysfs walk finds no controller for the source —
-no subsystem entry, an entry the kernel keeps with no controller in it
-(`architecture.md`, Teardown by sweep), or one that lists only controllers
-whose device is deleted (`cnagent.md` CN10) — attempts the connect
-**once**, and after a connect that succeeded it re-reads the subsystem
-until the source's namespace device is there, pausing `DnMigrDstNsPause`
-between reads and `DnMigrDstNsWait` in all (`awaitMigrSrcNs`, a
-`WaitBudget`) — the kernel returns from the connect once the controller is
-live and only queues the namespace scan that adds the device, so a single
-re-read could fail the target "controller has no namespace" for a device
-milliseconds away (the dn twin of `cnagent.md` CN10's head wait); a read
-that fails ends that wait at once. The dm-clone holds the source's
+(`architecture.md`, Migration) is implemented in two tiers. A converge pass
+whose sysfs walk finds no controller for the source — no subsystem entry, an
+entry the kernel keeps with no controller in it (`architecture.md`, Teardown
+by sweep), or one that lists only controllers whose device is deleted
+(`cnagent.md` CN10) — connects, and after a connect that failed connects
+again, pausing `DnMigrConnectRetryPause` between attempts, for as long as
+`DnMigrConnectPassBudget` still covers the pause, each failed connect's own
+time drawing on it too (`connectMigrSrc`, a `WaitBudget`, the dn twin of
+`cnagent.md` CN10's in-pass retry), so a connect that runs long can spend it
+at once. The error is not classified: an export not built yet, a source disk
+node that is down and a refused host are tried alike, and the budget caps
+how often. Reason: after the cutover the source builds its migration source
+export only after its step 1 and the suspend that starts its step 2 (DN12),
+so the pass the cutover brings often connects too early, and the DN8 retry's
+next pass would come `DnMigrConnectRetryInterval` later, the leg in the
+migration gap all that time. After a connect that succeeded the pass
+re-reads the subsystem until the source's namespace device is there, pausing
+`DnMigrDstNsPause` between reads and `DnMigrDstNsWait` in all
+(`awaitMigrSrcNs`, a `WaitBudget` of its own) — the kernel returns from the
+connect once the controller is live and only queues the namespace scan that
+adds the device, so a single re-read could fail the target "controller has
+no namespace" for a device milliseconds away (the dn twin of `cnagent.md`
+CN10's head wait); a read that fails ends that wait at once. Both waits hold
+the pass's DN1 locks, so a check round or an info read of the side, and a
+`SyncupDn`, wait behind them, about the two budgets together and longer when
+a connect itself runs long, and each DN8 retry pass against a source that
+keeps refusing holds them about the connect budget. The dm-clone holds the
+source's
 multipath head open, so after the host deletes the source's controllers —
 as it does when the target refuses a reconnect with DNR — the walk finds
 the subsystem's entry still there with no controller in it, and the side's
@@ -2129,18 +2200,20 @@ namespace device the new controller brings, a new multipath head with a
 new device number. On a destination whose last pass left no retry
 registered — its steps up to the status read held, hydration included, and
 its step (5) converged (`settleMigrRetry`, below) — that converge is its
-next `SyncupSide` or DN2's re-run (Known limits). When the connect fails,
-or the namespace has still not appeared, the
-pass records `target_info` as `RES_STATUS_ERROR` and registers the side in
-a background retry registry that re-runs the destination converge every
+next `SyncupSide` or DN2's re-run (Known limits). When the connect still
+fails once its budget is spent, or the namespace has still not appeared, the
+pass records `target_info` as `RES_STATUS_ERROR` and registers the side in a
+background retry registry that re-runs the destination converge every
 `DnMigrConnectRetryInterval` under the DN1 locks. Every other step that
 stops registers it too — the run refused before the side zeroes (above),
 the slot or its wrapper, a walk of the source connection that did not
-answer, the dm-clone, the status read — and so do
-hydration that will not converge (a knob or the enable), as the status
-line read after the messages shows it, and a step (5)
-that leaves the primary's dm-linear or its export unconverged (the linear
-onto the dm-clone, the namespace in `AnaGrpIdOptimized`). The worker
+answer, the dm-clone, the status read — and so do hydration that will
+not converge (a knob or the enable), as the status line read after the
+messages shows it, a step (5) that leaves the primary's dm-linear or its
+export unconverged (the linear onto the dm-clone, the namespace in
+`AnaGrpIdOptimized`), and a pass that waits for the cutover and leaves
+them unconverged where it puts them or cannot read where they are
+(above). The worker
 re-sends a `SyncupSide` on a revision or a reply code, never on a row
 (`dnv-worker.md` RW4), so a step nothing retried would stay undone until
 the SP's next revision; with the source having handed IO over by then
@@ -2148,7 +2221,8 @@ the SP's next revision; with the source having handed IO over by then
 leg with no serving path for that long, and one whose hydration is off
 would copy nothing in the background. The side is deregistered as the
 last act of a pass whose steps up to the status read held and whose step
-(5) converged the primary's dm-linear and export (`settleMigrRetry`);
+(5) converged the primary's dm-linear and export, or of a pass that waits
+for the cutover and converged them where it put them (`settleMigrRetry`);
 while the side has not provisioned, by the pass that takes its run; by
 the sweep's pre-step in the first converge that finds the destination
 role no longer wanted and lists the node's dm devices (DN6), which is the
@@ -2197,8 +2271,9 @@ and a check round decide the status of `migr_dst_info.target_info` and
 `migr_dst_info.dm_clone_info`, and where the per-CN rows are judged to
 serve from, by one rule, from what each reads of the destination in the
 order of its steps: step (2), the run behind the area's own gates and its
-wrapper; step (3), the walk of the source connection; step (4), the
-dm-clone on the table the step builds; and the dm-clone's status line.
+wrapper; while the cutover is pending, nothing past it; step (3), the walk
+of the source connection; step (4), the dm-clone on the table the step
+builds; and the dm-clone's status line.
 The round only reads. The converge reads what its own steps left, and a
 step whose command fails reads as not held, the command's error in the
 details of the row it concerns. So for the same state the two report the
@@ -2211,26 +2286,33 @@ finds the step held. The rule:
 
 * `target_info` reads step (2)'s refusal first — `RES_STATUS_PROVISIONING`
   for an area with no free run (above), `RES_STATUS_MISSING` for any
-  other — then the source connection: `RES_STATUS_ERROR` when the walk
-  did not answer or a converge's connect failed, when the walk finds no
-  controller, when the controllers have no namespace device, or when none
-  of them is live, and `RES_STATUS_OK` otherwise;
-* `dm_clone_info` reads the first step that stopped —
-  `RES_STATUS_PROVISIONING` for an area with no free run,
-  `RES_STATUS_MISSING` "target not connected" when the source connection
-  answers that there is nothing to read from, and `RES_STATUS_ERROR` for
-  any other refusal of step (2), a walk that did not answer, step (4)'s
-  dm-clone and its status read — and past them `RES_STATUS_ERROR` while
-  the status line does not show the knobs the conf sets and hydration on,
-  or does not parse, and `RES_STATUS_OK` once it does;
+  other — then, while the request carries `cutover_pending`,
+  `RES_STATUS_PROVISIONING` "waiting for the cutover", then the source
+  connection: `RES_STATUS_ERROR` when the walk did not answer or a
+  converge's connect failed, when the walk finds no controller, when the
+  controllers have no namespace device, or when none of them is live, and
+  `RES_STATUS_OK` otherwise;
+* `dm_clone_info` reads the first step that stopped — step (2)'s
+  refusal, `RES_STATUS_PROVISIONING` for an area with no free run and
+  `RES_STATUS_ERROR` for any other; then, while the request carries
+  `cutover_pending`, `RES_STATUS_PROVISIONING` "waiting for the cutover";
+  then `RES_STATUS_MISSING` "target not connected" when the source
+  connection answers that there is nothing to read from, and
+  `RES_STATUS_ERROR` for a walk that did not answer, step (4)'s dm-clone
+  and its status read — and past them `RES_STATUS_ERROR` while the status
+  line does not show the knobs the conf sets and hydration on, or does not
+  parse, and `RES_STATUS_OK` once it does;
+* both rows carry the reason `RES_REASON_AWAITING_CUTOVER` while they read
+  the wait for the cutover, and no reason in any other state;
 * the per-CN rows are judged where the rule puts the stacks (above), and,
-  where the stopped pass cannot read where they are, by the dm-clone's
-  presence.
+  where a pass that stopped or waits for the cutover cannot read where
+  they are, by the dm-clone's presence.
 
 `dm_clone_info` carries the raw status line whenever the pass read it,
 whatever the row's status, because `FinishMigration` judges hydration
 from it (`architecture.md`, Migrations): a round reads the line whenever
-the dm-clone is there, a converge only once its steps through step (4)
+the dm-clone is there, short of the wait for the cutover, which reads
+nothing past step (2), and a converge only once its steps through step (4)
 have held, so the two channels' details can differ where their statuses
 agree. What a pass serves from stays the steps' above. Reason: two
 reports of one device cannot both be right, and rows that differ between
@@ -2241,12 +2323,13 @@ differ once, until the next converge.
 **A deregistration can fall inside a pass of the very loop it ends, and
 that is the sharp edge.** Registering creates a cancellable context and
 deregistering cancels it, and a pass of the loop can be the one that
-deregisters: as its last act, when its whole sequence held
-(`settleMigrRetry`); in the middle of the pass, on a destination that has
-not provisioned, when its side-device step takes or finds its run in the
-clone-metadata area and goes on to start zeroing (`ensureSideDev`,
-`holdMigrMeta`); or in its sweep's pre-step, when it is the first
-converge to find the destination role no longer wanted and list the
+deregisters: as its last act, when its whole sequence held or it waits
+for the cutover with the primary's stack converged (`settleMigrRetry`); in
+the middle of the pass, on a destination that has not provisioned, when
+its side-device step takes or finds its run in the clone-metadata area and
+goes on to start zeroing (`ensureSideDev`, `holdMigrMeta`); or in its
+sweep's pre-step, when it is the
+first converge to find the destination role no longer wanted and list the
 node's dm devices (above). An attempt run on that context would fail
 every OS call that follows the deregistration in its pass, with the
 registration already cleared so that nothing ticks again: where in a pass
@@ -2434,10 +2517,11 @@ DN18. Probe map (all via SH17 conventions; a `res_name` and a probe per
 resource). `RES_STATUS_PROVISIONING` rows are **healthy**: the resource is
 deliberately not created yet, being prepared (the side device while it
 zeroes at `provisioned` false, DN9), kept unprobed behind DN9's gate
-after it closed again (DN9), or waiting for a free run in the
-clone-metadata area (DN13), no action is needed, and the worker never
-turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
-`RES_STATUS_ERROR` keeps meaning *needs intervention*.
+after it closed again (DN9), waiting for a free run in the clone-metadata
+area (DN13), or waiting for a migration's cutover (DN12, DN13), no action is
+needed, and the worker never turns one into an `err_epoch`
+(`architecture.md`, Live-state reporting); `RES_STATUS_ERROR` keeps meaning
+*needs intervention*.
 
 * `DnInfo.disk_info`, named by the `--disk` path: the disk's size read
   succeeds.
@@ -2523,20 +2607,24 @@ turns one into an `err_epoch` (`architecture.md`, Live-state reporting);
 * `migr_src_info.dm_linear_info` and `.nvmeof_info`, named `DnMigrSrcName`
   and the `MigrSrcNqn`: the dm target probe and configfs. With
   `migr_src_conf.dst_provisioned` false neither object exists by design
-  (DN12) and both report `RES_STATUS_PROVISIONING`, details "side
-  provisioning". While DN9's gate is closed on the source side neither is
-  probed either: each reports `RES_STATUS_PROVISIONING`, details "side
-  provisioning" (the export row only below `SP_LEVEL_NO_SIDE`), whether or
-  not the objects exist (DN9).
+  (DN12) and both report `RES_STATUS_PROVISIONING` with no reason, details
+  "waiting for the cutover" while `migr_src_conf.cutover_pending` is set
+  and "side provisioning" otherwise. While DN9's gate is closed on the
+  source side neither is probed either: each reports
+  `RES_STATUS_PROVISIONING`, with those details where `dst_provisioned` is
+  false and "side provisioning" where it is true (the export row only
+  below `SP_LEVEL_NO_SIDE`), whether or not the objects exist (DN9).
 * `migr_dst_info.target_info`, named by the `MigrSrcNqn`: the SH20 **sysfs
   walk** (the subsystem matched by "subsysnqn", the controllers' "state"
   and the namespace device — never `nvme list-subsys`), behind step (2)'s
-  read; its status, on a converge and a round alike, is DN13's shared
+  read, and not taken at all while the cutover is pending; its status
+  and its reason, on a converge and a round alike, are DN13's shared
   rule's. `RES_STATUS_PROVISIONING` while DN9's gate is closed on the
   destination side, details "side provisioning".
 * `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: step (2)'s and
-  step (4)'s reads, then `dmsetup status`; its status is DN13's shared
-  rule's, and the details carry the raw status line whenever it was read,
+  step (4)'s reads, then `dmsetup status`, none past step (2) while the
+  cutover is pending; its status and its reason are DN13's shared rule's,
+  and the details carry the raw status line whenever it was read,
   whatever the row's status (`architecture.md`, Live-state reporting —
   hydration progress); `RES_STATUS_PROVISIONING` while DN9's gate is
   closed on the destination side, details "side provisioning". The

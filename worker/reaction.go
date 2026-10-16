@@ -2193,9 +2193,9 @@ func pickDistinct(cands []model.Cand, n int) []model.Cand {
 
 // reactionApplied logs the `reaction applied` record (dnv-worker.md, Log
 // records). The revision is the SpRev the op's STM bumped, read back the way
-// the flips read it (RW18): the ops report their new ids, not the revision, and
-// a concurrent bump would make this report a slightly newer one — a log detail,
-// not a decision.
+// the created flip reads it (RW19): the ops report their new ids, not the
+// revision, and a concurrent bump would make this report a slightly newer one
+// — a log detail, not a decision.
 func (w *spWorker) reactionApplied(
 	ctx context.Context,
 	kind string,

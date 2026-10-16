@@ -63,20 +63,22 @@ type migrCloneState int
 const (
 	// migrCloneDown: the dm-clone does not serve — it is not there, the
 	// source connection answered without a namespace to read from, or a
-	// step stopped and every read of the per-CN stacks answered with none
-	// of them serving through it. The per-CN stacks sit on their dm-errors
-	// with every namespace inaccessible (DN13 step (1)).
+	// step stopped, or the pass waits for the cutover, and every read of
+	// the per-CN stacks answered with none of them serving through it. The
+	// per-CN stacks sit on their dm-errors with every namespace
+	// inaccessible (DN13 step (1)).
 	migrCloneDown migrCloneState = iota
 	// migrCloneUp: the dm-clone serves — every step up to its status read
-	// held over the source's namespace device, or a step stopped while a
-	// per-CN stack served through it (migrCloneMapped). The primary's stack
-	// is put on it (DN13 step (5)).
+	// held over the source's namespace device, or a step stopped, or the
+	// pass waits for the cutover, while a per-CN stack served through it
+	// (migrCloneMapped). The primary's stack is put on it (DN13 step (5)).
 	migrCloneUp
-	// migrCloneUnread: a step stopped and where the per-CN stacks are could
-	// not be read — the dm-clone's probe did not answer; or it is there and
-	// its device number did not answer; or a per-CN dm-linear's probe or
-	// table read, or a namespace's group read, did not answer and no other
-	// per-CN stack was found serving through it.
+	// migrCloneUnread: a step stopped, or the pass waits for the cutover,
+	// and where the per-CN stacks are could not be read — the dm-clone's
+	// probe did not answer; or it is there and its device number did not
+	// answer; or a per-CN dm-linear's probe or table read, or a namespace's
+	// group read, did not answer and no other per-CN stack was found
+	// serving through it.
 	// Nothing decides the per-CN stacks, so a converge leaves them exactly
 	// where they are, and both channels judge their rows by the dm-clone's
 	// presence (migrServing.cloneLive).
@@ -106,9 +108,10 @@ const (
 )
 
 // migrDstSeen is what one pass read of a migration destination, in the order
-// of DN13's steps: step (2), the slot and its wrapper; step (3), the walk of
-// the source connection; step (4), the dm-clone; and the dm-clone's status
-// line. A converge records what its own steps left behind, a failed step as
+// of DN13's steps: step (2), the slot and its wrapper; whether the pass
+// stopped there to wait for the cutover; step (3), the walk of the source
+// connection; step (4), the dm-clone; and the dm-clone's status line. A
+// converge records what its own steps left behind, a failed step as
 // its error (runMigrDst), a check round what it reads (probeMigrDst), and one
 // rule turns either reading into the destination's two rows (targetRow,
 // cloneRow) and into where the per-CN stacks serve from (migrDstServing), so
@@ -121,6 +124,12 @@ type migrDstSeen struct {
 	// metaErr is step (2)'s refusal: the area's, the record's or the
 	// wrapper's. Nothing of the later steps is read past it.
 	metaErr error
+	// awaitingCutover is set when step (2) held on a request that carries
+	// migr_dst_conf.cutover_pending: the pass stops there, so nothing of the
+	// later steps is read or built, and where the per-CN stacks serve from
+	// is read as after a step that stopped (migrDstServing) — on their
+	// dm-errors, unless a stack already serves through a dm-clone (DN13).
+	awaitingCutover bool
 	// conn is the walk of the source connection and connErr its error — on a
 	// converge also the error of the connect the pass made. connUnread marks
 	// a walk that did not answer, which says nothing about whether the
@@ -154,7 +163,9 @@ func (m *migrDstSeen) srcServes() bool {
 // is a wait, not a fault, so the row reads provisioning with the area's text,
 // as the side's own row does while it waits before zeroing (ensureSideDev),
 // and the retry takes the run once units come free; any other refusal reads
-// the slot missing. Past it the row is the walk of the source connection,
+// the slot missing. A pass that stopped after step (2) for the cutover reads
+// provisioning, waiting for the cutover, with the reason the worker's cutover
+// reads (reason). Past them the row is the walk of the source connection,
 // with the error of the connect a converge made.
 func (m *migrDstSeen) targetRow() (pb.ResStatus, string) {
 	switch {
@@ -163,6 +174,8 @@ func (m *migrDstSeen) targetRow() (pb.ResStatus, string) {
 			metaRoomDetails(m.metaErr)
 	case m.metaErr != nil:
 		return pb.ResStatus_RES_STATUS_MISSING, detailsCloneMetaMissing
+	case m.awaitingCutover:
+		return pb.ResStatus_RES_STATUS_PROVISIONING, tagCutoverWait
 	case m.connErr != nil:
 		return pb.ResStatus_RES_STATUS_ERROR, m.connErr.Error()
 	case !m.conn.HasCtrl():
@@ -178,7 +191,8 @@ func (m *migrDstSeen) targetRow() (pb.ResStatus, string) {
 }
 
 // cloneRow is migr_dst_info.dm_clone_info's status and details (DN18): the
-// first step that stopped, else the hydration the status line shows
+// first step that stopped, the wait for the cutover as target_info reads it,
+// else the hydration the status line shows
 // (hydrationGap), under the error of the message that would not apply when a
 // converge's message failed. The raw status line follows the row's own text
 // on a line of its own whenever the pass read it, whatever the status: the
@@ -192,6 +206,8 @@ func (m *migrDstSeen) cloneRow(plan *sidePlan) (pb.ResStatus, string) {
 			metaRoomDetails(m.metaErr)
 	case m.metaErr != nil:
 		status, note = pb.ResStatus_RES_STATUS_ERROR, m.metaErr.Error()
+	case m.awaitingCutover:
+		status, note = pb.ResStatus_RES_STATUS_PROVISIONING, tagCutoverWait
 	case m.connUnread:
 		status, note = pb.ResStatus_RES_STATUS_ERROR,
 			detailsTargetNotRead+m.connErr.Error()
@@ -218,11 +234,26 @@ func (m *migrDstSeen) cloneRow(plan *sidePlan) (pb.ResStatus, string) {
 
 // held reports whether every step of the pass held, hydration included, as
 // the status line read after the messages shows it: a converge whose steps
-// all held leaves the retry to settleMigrRetry, after step (5).
+// all held leaves the retry to settleMigrRetry, after step (5). A pass that
+// waits for the cutover has not held: it ran no step past (2), though it
+// leaves its retry to settleMigrRetry too, unless it could not read where
+// its stacks are, when ensureMigrDst registers it.
 func (m *migrDstSeen) held(plan *sidePlan) bool {
-	return m.metaErr == nil && !m.connUnread && m.srcServes() &&
-		m.cloneErr == nil && m.statusRead && m.statusErr == nil &&
-		m.hydrationErr == nil && hydrationGap(plan, m.raw) == nil
+	return m.metaErr == nil && !m.awaitingCutover && !m.connUnread &&
+		m.srcServes() && m.cloneErr == nil && m.statusRead &&
+		m.statusErr == nil && m.hydrationErr == nil &&
+		hydrationGap(plan, m.raw) == nil
+}
+
+// reason is the reason of both of the destination's rows (DN18):
+// RES_REASON_AWAITING_CUTOVER while the pass waits for the cutover with its
+// metadata wrapper standing, which the worker's cutover reads in place of the
+// rows' text (dnv-worker.md RW18), and none otherwise.
+func (m *migrDstSeen) reason() pb.ResReason {
+	if m.awaitingCutover {
+		return pb.ResReason_RES_REASON_AWAITING_CUTOVER
+	}
+	return pb.ResReason_RES_REASON_NONE
 }
 
 // reportMigrDst sets the destination's two rows from what the pass read, the
@@ -237,11 +268,11 @@ func (s *DnAgentServer) reportMigrDst(
 	dstInfo := &pb.SideInfo_MigrDstInfo{}
 	info.MigrDstInfo = dstInfo
 	status, details := seen.targetRow()
-	dstInfo.TargetInfo = t.Set(
-		resKeyMigrDstTarget, plan.srcNqnOfDst(), status, details)
+	dstInfo.TargetInfo = t.SetReason(resKeyMigrDstTarget,
+		plan.srcNqnOfDst(), status, details, seen.reason())
 	status, details = seen.cloneRow(plan)
-	dstInfo.DmCloneInfo = t.Set(
-		resKeyMigrDstClone, plan.migrFinalName(), status, details)
+	dstInfo.DmCloneInfo = t.SetReason(resKeyMigrDstClone,
+		plan.migrFinalName(), status, details, seen.reason())
 }
 
 // migrServing is where the destination rule puts the per-CN stacks
@@ -269,7 +300,16 @@ func (m migrServing) cloneLive() bool {
 // controller without one — whatever the dm-linears show, as a level that
 // suppresses the role does (DN11): the dm-clone has lost the device it reads
 // unhydrated regions from. Otherwise a step stopped for a reason of its own,
-// and the answer is read from where the stacks are (migrDstStopped).
+// or the pass waits for the cutover, and the answer is read from where the
+// stacks are (migrDstStopped). Before its cutover a destination has no
+// dm-clone, so a waiting pass puts the stacks on their dm-errors with every
+// namespace inaccessible (DN13 step (1)). The worker never sends
+// cutover_pending again once the cutover cleared it, so a waiting pass that
+// finds a stack serving through the dm-clone converges a stale request — a
+// restart's re-run of a stored request whose successor was converged and
+// never saved (SH5) — and leaves that stack serving: reloading it onto its
+// dm-error would fail host IO until the worker sent the newer request
+// again.
 //
 // Hydration that will not converge (a knob or the enable) does not enter it:
 // the dm-clone is converged onto the source the pass found and reads through
@@ -281,7 +321,7 @@ func (s *DnAgentServer) migrDstServing(
 	seen *migrDstSeen,
 ) migrServing {
 	switch {
-	case seen.metaErr != nil, seen.connUnread:
+	case seen.metaErr != nil, seen.awaitingCutover, seen.connUnread:
 		return s.migrDstStopped(ctx, plan)
 	case !seen.srcServes():
 		return migrServing{state: migrCloneDown}
@@ -294,9 +334,10 @@ func (s *DnAgentServer) migrDstServing(
 // migrDstStopped reads where the per-CN stacks serve from when a destination
 // step stopped for a reason of its own — the slot or its wrapper, a walk of
 // the source connection that did not answer, the dm-clone, its status read —
-// so a stopped step takes the serving path neither onto the dm-clone nor off
-// it. Off it, one unanswered command would cut the leg's only serving path
-// until a later pass finished the build. Onto it, a stopped pass would serve
+// or the pass waits for the cutover (migrDstServing), so a stopped step
+// takes the serving path neither onto the dm-clone nor off it. Off it, one
+// unanswered command would cut the leg's only serving path until a later
+// pass finished the build. Onto it, a stopped pass would serve
 // a dm-clone that an earlier pass took the stacks off when the source
 // connection answered without a namespace ("target not connected"): that pass
 // leaves the dm-clone in place, still mapping the source device that is gone.
@@ -322,14 +363,21 @@ func (s *DnAgentServer) migrDstStopped(
 // (runMigrDst), then reports the destination's two rows and decides where the
 // per-CN stacks serve from by the rule a check round applies to what it reads
 // (reportMigrDst, migrDstServing). It returns that decision, which sets the
-// per-CN dm-linear targets and ANA groups for this pass, and whether every
-// step held (migrDstSeen.held). Step (5), the primary's stack onto the
-// dm-clone, is convergeSide's, and so is the retry of a pass whose steps here
-// all held (settleMigrRetry): the retry is not deregistered here, because
-// step (5) has not run yet. Every other pass registers it here
-// (startMigrRetry). The slot of step (2) is normally the run the side has
-// held since it provisioned (holdMigrMeta), so step (2) finds its record and
-// builds the wrapper over it.
+// per-CN dm-linear targets and ANA groups for this pass, and whether the
+// pass leaves its retry to settleMigrRetry. Step (5), the primary's stack
+// onto the dm-clone, is convergeSide's, and so is the retry of a pass whose
+// steps here all held, and of a pass that stopped after step (2) to wait for
+// the cutover and read where its stacks go: either pass builds the primary's
+// stack after this, and the retry is decided only once that stack's rows are
+// known, so it is neither registered nor deregistered here. A waiting pass
+// whose stack converged wants no retry, since only the worker's cutover ends
+// the wait and it comes with a new request; one whose stack did not
+// converge does, since the cutover waits for the primary's path through that
+// stack. Every other pass registers it here (startMigrRetry), a waiting pass
+// that could not read where its stacks are among them, since that pass
+// leaves them as they are (migrCloneUnread). The slot of step (2) is
+// normally the run the side has held since it provisioned (holdMigrMeta), so
+// step (2) finds its record and builds the wrapper over it.
 func (s *DnAgentServer) ensureMigrDst(
 	ctx context.Context,
 	st *sideState,
@@ -345,17 +393,19 @@ func (s *DnAgentServer) ensureMigrDst(
 	seen := s.runMigrDst(ctx, st, plan)
 	s.reportMigrDst(st, plan, info, seen)
 	serving := s.migrDstServing(ctx, plan, seen)
-	held := seen.held(plan)
-	if !held {
+	settles := seen.held(plan) ||
+		(seen.awaitingCutover && serving.state != migrCloneUnread)
+	if !settles {
 		s.startMigrRetry(st, plan)
 	}
-	return serving, held
+	return serving, settles
 }
 
 // runMigrDst runs the destination's steps (2) to (4), the hydration messages
 // and the status read, and records what each left behind: the converge's
 // reading of the destination. A step that fails ends the run there, and its
-// error is its reading, whatever its command did in the kernel (DN13).
+// error is its reading, whatever its command did in the kernel (DN13). While
+// the request carries cutover_pending the run ends after step (2) holds.
 func (s *DnAgentServer) runMigrDst(
 	ctx context.Context,
 	st *sideState,
@@ -368,13 +418,21 @@ func (s *DnAgentServer) runMigrDst(
 	if seen.metaErr = s.ensureMigrMeta(ctx, plan); seen.metaErr != nil {
 		return seen
 	}
+	// Before the cutover the src side still serves the leg and has built no
+	// migration source export, so there is nothing to connect to yet: the
+	// side stops with its wrapper standing and its stacks where a stopped
+	// step puts them (migrDstServing), and says so (migrDstSeen.reason).
+	if plan.migrDst.GetCutoverPending() {
+		seen.awaitingCutover = true
+		return seen
+	}
 
-	// (3) one connect attempt per pass, never retried inside the RPC:
-	// "retrying until success" (architecture.md, Migration, dst step 3) is the
-	// DN8 background registry. The
-	// only other wait here comes after a connect that succeeded: for the
+	// (3) the connect, tried again within the pass for a short while
+	// (connectMigrSrc), and after a connect that succeeded the wait for the
 	// source's namespace node, which the kernel adds from a scan the connect
-	// only queued, pausing DnMigrDstNsWait at most (awaitMigrSrcNs).
+	// only queued (awaitMigrSrcNs). "Retrying until success"
+	// (architecture.md, Migration, dst step 3) past that is the DN8
+	// background registry.
 	state, err := s.host.ListSubsys(ctx, nqn)
 	// unread: the walk did not answer, so the connection is not known to be
 	// gone. A connect that failed is the opposite case — the walk had just
@@ -387,12 +445,7 @@ func (s *DnAgentServer) runMigrDst(
 	// source's (architecture.md, Teardown by sweep). The cn twin is
 	// ensureCloneSource.
 	if err == nil && !state.HasCtrl() {
-		if connErr := s.host.Connect(ctx, agent.TrConf{
-			TrType:  plan.migrDst.GetSrcNvmeTrConf().GetTrType(),
-			AdrFam:  plan.migrDst.GetSrcNvmeTrConf().GetAdrFam(),
-			TrAddr:  plan.migrDst.GetSrcNvmeTrConf().GetTrAddr(),
-			TrSvcId: plan.migrDst.GetSrcNvmeTrConf().GetTrSvcId(),
-		}, nqn, plan.dnHostNqn()); connErr != nil {
+		if connErr := s.connectMigrSrc(ctx, plan, nqn); connErr != nil {
 			err = connErr
 		} else {
 			state, err = s.awaitMigrSrcNs(ctx, nqn)
@@ -570,6 +623,47 @@ func (s *DnAgentServer) migrMetaRead(
 	return nil
 }
 
+// connectMigrSrc connects this destination to the migration source export
+// on the source DN (DN13 step (3)), and tries a connect that failed again
+// after DnMigrConnectRetryPause, within this pass, for as long as
+// DnMigrConnectPassBudget covers the pause; each failed connect's own
+// elapsed time draws on the budget too, so a slow refusal can spend it at
+// once. After the cutover the src side builds that export only after its
+// step 1 and the suspend that starts its step 2 (DN12), in the same pass, so
+// the first connect of the pass the cutover brings often comes too early, and the DN8 loop's next pass would come
+// DnMigrConnectRetryInterval seconds later, with the leg in the migration
+// gap all that time. The error is never classified: an export not built
+// yet, a dead source DN and a refused host answer alike, and the budget is
+// what caps how often the last two are tried. The last attempt's error is
+// the one returned, and the pass then registers the DN8 loop
+// (ensureMigrDst). The cn twin is connectWithin.
+func (s *DnAgentServer) connectMigrSrc(
+	ctx context.Context,
+	plan *sidePlan,
+	nqn string,
+) error {
+	tr := plan.migrDst.GetSrcNvmeTrConf()
+	conf := agent.TrConf{
+		TrType:  tr.GetTrType(),
+		AdrFam:  tr.GetAdrFam(),
+		TrAddr:  tr.GetTrAddr(),
+		TrSvcId: tr.GetTrSvcId(),
+	}
+	budget := agent.NewWaitBudget(
+		common.DnMigrConnectPassBudget, s.now, s.sleep)
+	for {
+		start := budget.Now()
+		err := s.host.Connect(ctx, conf, nqn, plan.dnHostNqn())
+		if err == nil {
+			return nil
+		}
+		budget.Charge(budget.Now().Sub(start))
+		if !budget.Pause(ctx, common.DnMigrConnectRetryPause) {
+			return err
+		}
+	}
+}
+
 // awaitMigrSrcNs re-reads the migration source's subsystem after a connect
 // this pass made, until its namespace device is there, pausing
 // DnMigrDstNsPause between reads and DnMigrDstNsWait in all — the reads
@@ -578,8 +672,9 @@ func (s *DnAgentServer) migrMetaRead(
 // namespace scan that adds the device, so a single re-read could find the
 // controller and no namespace yet, failing the target with "controller has
 // no namespace" for a device milliseconds away.
-// A ListSubsys that fails ends the wait at once. It connects nothing: one
-// connect per pass stays DN13's rule, and the DN8 loop stays the retry.
+// A ListSubsys that fails ends the wait at once. It connects nothing and
+// has a budget of its own: the connect's retries are connectMigrSrc's, and
+// past them the DN8 loop's.
 func (s *DnAgentServer) awaitMigrSrcNs(
 	ctx context.Context,
 	nqn string,
@@ -606,10 +701,13 @@ func (s *DnAgentServer) awaitMigrSrcNs(
 // nothing written.
 //
 // The run comes first because a destination that zeroes is flipped
-// provisioned once it is done, and the source then cuts its own paths: one
-// that found no room only after that would leave the leg in the migration
-// gap until units came free (architecture.md, Migration). While it holds no
-// run it zeroes nothing, so it is not flipped and the source keeps serving.
+// provisioned once it is done, and the cutover then waits for the wrapper
+// over that run (DN13 step (2)): one that found no room only after that
+// would hold its migration until units came free, or, where its request
+// never carries cutover_pending (architecture.md, Upgrade in lockstep), leave
+// the leg in the migration gap that long, since the source then cuts its own
+// paths at the flip (architecture.md, Migration). While it holds no run it
+// zeroes nothing, so it is not flipped and the source keeps serving.
 func (s *DnAgentServer) holdMigrMeta(
 	ctx context.Context,
 	plan *sidePlan,
@@ -919,23 +1017,29 @@ func hydrationGap(plan *sidePlan, raw string) error {
 // ---------------------------------------------------------------------------
 
 // startMigrRetry registers a side whose destination pass did not run the
-// whole sequence: the connect failed or the source's namespace did not
-// appear, another step stopped for a reason of its own (migrDstStopped),
-// hydration would not converge (a knob or the enable) as the status line read
-// after the messages shows it (hydrationGap), or the primary's stack did not
-// converge onto the dm-clone (DN13 step (5), settleMigrRetry). It
-// also registers a destination that has not provisioned and could not take
-// its run in the clone-metadata area before zeroing (holdMigrMeta, in
-// ensureSideDev). A goroutine re-runs the destination converge every
-// DnMigrConnectRetryInterval seconds under the DN1 locks, until a pass runs
-// the whole sequence, the primary's stack included, or, for a destination
-// that has not provisioned, takes its run; a pass whose sweep lists the
-// node's dm devices finds the destination role no longer wanted
-// (sidePreSteps), though a destination that has not provisioned keeps its
-// retry at a level that suppresses the role, until it takes its run; or the
-// side is dropped (dropSideState). The RPC itself never retries a connect:
-// it waits only for the namespace of one that succeeded, pausing
-// DnMigrDstNsWait at most (awaitMigrSrcNs).
+// whole sequence, save one that waits for the cutover with the primary's
+// stack converged (settleMigrRetry): the connect failed after its in-pass
+// retries (connectMigrSrc) or the source's namespace did not appear, another
+// step stopped for a reason of its own (migrDstStopped), hydration would not
+// converge (a knob or the enable) as the status line read after the messages
+// shows it (hydrationGap), the primary's stack did not converge where the
+// pass puts it — onto the dm-clone (DN13 step (5)) or, while the pass waits
+// for the cutover, wherever that pass reads it goes (settleMigrRetry) — or a
+// pass that waits for the cutover could not read where its stacks go
+// (ensureMigrDst). It also registers a destination that has not
+// provisioned and could not take its run in the clone-metadata area before
+// zeroing (holdMigrMeta, in ensureSideDev). A goroutine re-runs the
+// destination converge every DnMigrConnectRetryInterval seconds under the
+// DN1 locks, until a pass runs the whole sequence, the primary's stack
+// included, or, for a destination that has not provisioned, takes its run;
+// a pass whose sweep lists the node's dm devices finds the destination role
+// no longer wanted (sidePreSteps), though a destination that has not
+// provisioned keeps its retry at a level that suppresses the role, until it
+// takes its run; a pass that waits for the cutover converges the primary's
+// stack where it puts it (settleMigrRetry); or the side is dropped
+// (dropSideState). Within a pass a failed connect is tried again only for
+// DnMigrConnectPassBudget (connectMigrSrc), and the source's namespace is
+// waited for only DnMigrDstNsWait (awaitMigrSrcNs).
 //
 // The loop is enrolled in the server's WaitGroup so WaitBackground covers the
 // connect retries too, not just zeroing (SH27). As in startZeroing, the
@@ -961,16 +1065,23 @@ func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
 }
 
 // settleMigrRetry ends a destination pass whose steps in ensureMigrDst all
-// held. DN13 step (5) has run by then, so the retry is deregistered only
-// when the primary's dm-linear and its export converged on what step (5)
-// asks of them with the dm-clone serving — the dm-linear on the dm-clone,
-// the namespace optimized (linearBacking, anaGrpId) — and registered
-// otherwise: the worker re-sends a SyncupSide on a revision or a reply code,
-// never on a row, so a step (5) that failed with nothing retrying it would
-// stay failed until the SP's next revision — a refused reload, for one,
-// leaves the primary's dm-linear suspended (a reload fails closed). Both
-// rows are there: wantMigr implies wantExport, and the primary is the first
-// of plan.cnIds.
+// held, or that stopped after step (2) to wait for the cutover and read
+// where its stacks go (ensureMigrDst). The per-CN stacks have converged by
+// then, so the retry is deregistered only when the primary's dm-linear and
+// its export converged on what the pass asks of them — after the whole
+// sequence, step (5)'s, the dm-linear on the dm-clone and the namespace
+// optimized; while the pass waits for the cutover, step (1)'s, the
+// dm-linear on its dm-error and the namespace inaccessible, unless a stack
+// already served through the dm-clone (linearBacking, anaGrpId,
+// migrDstServing) — and registered otherwise: the worker re-sends a
+// SyncupSide on a revision or a reply code, never on a row, so a primary
+// stack that failed with nothing retrying it would stay failed until the
+// SP's next revision — a refused reload, for one, leaves the primary's
+// dm-linear suspended (a reload fails closed), and a waiting destination
+// whose primary export is not linked to the port leaves the primary no path
+// to it, which the cutover waits for (dnv-worker.md RW18). Both rows are
+// there: wantMigr implies wantExport, and the primary is the first of
+// plan.cnIds.
 //
 // convergeSide calls it last, so no OS call of the pass follows its
 // deregistration.
@@ -1017,10 +1128,11 @@ func (s *DnAgentServer) migrRetryLoop(
 		// The attempt runs on rootCtx, never on this loop's ctx. That ctx is
 		// what stopMigrRetry cancels, and a pass of this very loop can be
 		// the one that calls it: settleMigrRetry, the last act of a pass
-		// whose build held; ensureSideDev's run step in the middle of a
-		// pass, on a destination that has not provisioned, once it takes or
-		// finds its run (holdMigrMeta), after which the pass goes on to
-		// start zeroing; or the sweep's pre-step near the start of a pass
+		// whose build held or that waits for the cutover with the primary's
+		// stack converged; ensureSideDev's run step in the middle of a pass,
+		// on a destination that has not provisioned, once it takes or finds
+		// its run (holdMigrMeta), after which the pass goes on to start
+		// zeroing; or the sweep's pre-step near the start of a pass
 		// (sidePreSteps), for a destination role no longer wanted — a role
 		// that is gone, or one a level suppresses on a destination that has
 		// provisioned, since one that has not keeps its retry until it takes

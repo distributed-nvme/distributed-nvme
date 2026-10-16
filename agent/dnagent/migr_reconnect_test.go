@@ -214,6 +214,9 @@ func TestMigrationRetryReconnectsASourceWithNoController(t *testing.T) {
 	nqn, lost := serveThenDropSourceCtrls(t, srv, node, names, false)
 
 	const refused = "Connect Invalid Data Parameter"
+	// Every refused connect spends the pass's connect budget, on a clock
+	// that does not sleep.
+	withDnClock(srv, node)
 	setFailAlways(node, "nvme connect", refused)
 	reply, err := srv.SyncupSide(context.Background(),
 		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE))

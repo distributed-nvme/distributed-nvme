@@ -1747,12 +1747,16 @@ func TestSpCreatedFlipOnlyForUncreatedTds(t *testing.T) {
 
 // TestSpFlipBatchesOneStm checks RW18: several sides reported within one drain
 // of the report channel share one FlipProvisioned STM, and duplicates are
-// dropped.
+// dropped. Each side's record names the revision that STM committed, never
+// a later one the store holds by the time the records are written: a reply
+// to the first request that carries the side provisioned is at the STM's
+// revision, and must not read as older than the flip.
 func TestSpFlipBatchesOneStm(t *testing.T) {
 	h := newSpHarness(t)
 	logs := h.logs
 	h.store.seed(t, model.SpRevKey(testShard, testCid, testSpId),
-		&pb.SpRev{SpName: testSpName, Revision: testSpRev + 1})
+		&pb.SpRev{SpName: testSpName, Revision: testSpRev + 2})
+	h.ops.provisionedRev = testSpRev + 1
 	w := spTestWorker(h.deps)
 	w.ops = h.ops
 	first := model.SideRef{
@@ -1777,11 +1781,14 @@ func TestSpFlipBatchesOneStm(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("%d flip applied records, want one per side", len(records))
 	}
-	if records[0]["kind"] != flipKindProvisioned {
-		t.Fatalf("kind = %v", records[0]["kind"])
-	}
-	if rev, _ := records[0]["revision"].(float64); uint64(rev) != testSpRev+1 {
-		t.Fatalf("revision = %v, want the new SpRev", records[0]["revision"])
+	for _, record := range records {
+		if record["kind"] != flipKindProvisioned {
+			t.Fatalf("kind = %v", record["kind"])
+		}
+		if rev, _ := record["revision"].(float64); uint64(rev) != testSpRev+1 {
+			t.Fatalf("revision = %v, want %d, the one the STM committed",
+				record["revision"], testSpRev+1)
+		}
 	}
 }
 
@@ -2087,6 +2094,21 @@ type fakeSpOps struct {
 	// onLoad, when set, sees every state a load returns, on the loader's
 	// goroutine and before the loader does.
 	onLoad func(state *model.SpState)
+	// cutovers records every startCutover call; cutoverErr, when set, is
+	// what each returns, as a refused STM would. A committed one returns
+	// cutoverRev, the revision its STM wrote.
+	cutovers   []cutoverCall
+	cutoverErr error
+	cutoverRev uint64
+	// provisionedRev is the revision a flipProvisioned that wrote returns.
+	provisionedRev uint64
+}
+
+// cutoverCall is one startCutover call of the coordinator.
+type cutoverCall struct {
+	spName  string
+	ref     model.CutoverRef
+	cntlrId uint64
 }
 
 func (o *fakeSpOps) setState(state *model.SpState) {
@@ -2128,12 +2150,12 @@ func (o *fakeSpOps) flipProvisioned(
 	shard uint32,
 	spId uint64,
 	sides []model.SideRef,
-) ([]model.SideRef, error) {
+) ([]model.SideRef, uint64, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.provisioned = append(o.provisioned, sides)
 	if o.applySides == nil {
-		return sides, nil
+		return sides, o.provisionedRev, nil
 	}
 	var applied []model.SideRef
 	for _, ref := range sides {
@@ -2141,7 +2163,10 @@ func (o *fakeSpOps) flipProvisioned(
 			applied = append(applied, ref)
 		}
 	}
-	return applied, nil
+	if len(applied) == 0 {
+		return nil, 0, nil
+	}
+	return applied, o.provisionedRev, nil
 }
 
 func (o *fakeSpOps) flipCreated(
@@ -2164,6 +2189,38 @@ func (o *fakeSpOps) flipCreated(
 		}
 	}
 	return applied, nil
+}
+
+func (o *fakeSpOps) startCutover(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.CutoverRef,
+	cntlrId uint64,
+) (uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cutovers = append(o.cutovers, cutoverCall{
+		spName: spName, ref: ref, cntlrId: cntlrId,
+	})
+	if o.cutoverErr != nil {
+		return 0, o.cutoverErr
+	}
+	return o.cutoverRev, nil
+}
+
+func (o *fakeSpOps) cutoverCalls() []cutoverCall {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]cutoverCall(nil), o.cutovers...)
+}
+
+func (o *fakeSpOps) setCutoverErr(err error) {
+	o.mu.Lock()
+	o.cutoverErr = err
+	o.mu.Unlock()
 }
 
 func (o *fakeSpOps) provisionedCalls() [][]model.SideRef {

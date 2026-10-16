@@ -691,8 +691,9 @@ type cntlrRowMap struct {
 }
 
 // cntlrHealthMaps are the CntlrInfo maps HL2 judges a cntlr by: every map but
-// leg_id_to_leg, whose rows belong to the legs (below), the per-td thin maps
-// included.
+// leg_id_to_leg, whose rows belong to the legs (below), and side_id_to_path,
+// whose rows no health rule judges and only the cutover beside RW18's flip
+// reads, the per-td thin maps included.
 func cntlrHealthMaps(info *pb.CntlrInfo) []cntlrRowMap {
 	maps := []cntlrRowMap{
 		{"ss_id_to_subsystem", info.GetSsIdToSubsystem()},
@@ -725,7 +726,8 @@ const thinMapLabel = "slice_id_to_dm_thin"
 
 // cntlrObservation applies the HL2 cntlr row to one CheckCntlr/SyncupCntlr
 // reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
-// leg_id_to_leg, whose rows belong to the legs (below). A row of either of
+// leg_id_to_leg, whose rows belong to the legs (below), and side_id_to_path
+// (cntlrHealthMaps). A row of either of
 // HL2's classes counts (sharedStateTds): the class steers AR5 and AR7, not
 // the verdict, so the row stays visible and the epoch set.
 func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
@@ -896,9 +898,10 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // comes one CnConnectRetryInterval later; a Check round in between probes the
 // absent devices and
 // reports them MISSING "", not ERROR, and in an SP with no td, as a new SP is
-// until one is created, that reply has no ERROR row outside leg_id_to_leg (a
-// td's raid0 row reads ERROR while its thins are absent; a leg row reads the
-// CN11 prober, which fails on a path still non-optimized). Every other MISSING
+// until one is created, that reply has no ERROR row in the maps HL2 judges a
+// cntlr by (a td's raid0 row reads ERROR while its thins are absent; a leg row,
+// which is not judged, reads the CN11 prober, which fails on a path still
+// non-optimized). Every other MISSING
 // the cn agent reports is likewise a device not built, or a clone whose
 // source is not connected, has a fault (an endpoint with no live controller,
 // or no namespace) or could not be read this pass (CN18), so a primary
@@ -912,7 +915,9 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // Neither row is an ERROR, so the wait sets no err_epoch and fails nothing
 // over. Leg
 // rows are left out: a spare whose side is still zeroing reads PROVISIONING
-// there for as long as it zeroes. So are group rows, for a grow: its new
+// there for as long as it zeroes. So are path rows, in no map HL2 judges: a
+// migration's dst side reads PROVISIONING there while it zeroes. So are group
+// rows, for a grow: its new
 // groups are appended to their lists and stay out of the live concat while
 // their sides zero (CN9's prefix cut), so their group rows alone read
 // PROVISIONING, beside a serving pool, for as long as those sides zero.
@@ -920,8 +925,12 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // planSpGroups), so a group of its that is still provisioning defers its
 // whole slice, whose pool rows say so, and a group a converge could not
 // assemble leaves the pool rows over it ERROR or MISSING. A leg that a forced
-// FinishMigration left with an unprovisioned destination as its only side is,
-// to the agent, a leg still zeroing: in the first group of its list it defers
+// FinishMigration left with an unprovisioned destination as its only side —
+// possible only for a Migration whose record carries no cutover_pending
+// (architecture.md, Upgrade in lockstep), as a finish is refused while the
+// flag is set and the cutover that clears it needs the destination
+// provisioned — is, to the agent, a leg still zeroing: in the first group of
+// its list it defers
 // the whole slice and every td with it, as a new SP's first zeroing does, so
 // a primary that takes the role meanwhile stays settling until that side's
 // RW18 flip, and indefinitely if the side never finishes; in a later group,
@@ -1038,6 +1047,7 @@ func markCntlrUnknown(info *pb.CntlrInfo) {
 		info.GetCloneIdToTarget(),
 		info.GetCloneIdToDmClone(),
 		info.GetCloneIdToMeta(),
+		info.GetSideIdToPath(),
 	}
 	for _, rows := range maps {
 		for _, res := range rows {

@@ -9,8 +9,9 @@
 // integtest/worker_test.sh, whose fake gateway it is (dnv-worker.md,
 // Integration test plan, The driver), and integtest/gateway_test.sh, which
 // reads etcd back through it as ground truth and writes through exactly the
-// four worker-role stand-ins — set-created, set-provisioned, drain-sp and
-// drain-clone — of gateway.md, Integration test plan, The etcd verification.
+// five worker-role stand-ins — set-created, set-provisioned, start-cutover,
+// drain-sp and drain-clone — of gateway.md, Integration test plan, The etcd
+// verification.
 // It never dials an agent and never sleeps: it is the gateway's write path
 // with explicit placement (dnv-worker.md, Integration test plan, The driver).
 // Every mutation is one etcdutil.RunSTM, so the state it leaves behind is
@@ -1117,6 +1118,7 @@ var commands = []command{
 	{"set-epoch", cmdSetEpoch},
 	{"set-created", cmdSetCreated},
 	{"set-provisioned", cmdSetProvisioned},
+	{"start-cutover", cmdStartCutover},
 	{"set-deleting", cmdSetDeleting},
 	{"drain-sp", cmdDrainSp},
 	{"set-clone-deleting", cmdSetCloneDeleting},
@@ -3148,6 +3150,12 @@ func cmdPutXfer(g *globals, args []string) {
 // read what to give back. It refuses a DN short of extents, whose count would
 // wrap below zero, but never one past its metadata area: a used count only
 // grows, and the driver plants whatever shape a case needs.
+//
+// --cutover-pending writes the record's cutover_pending, which
+// CreateMigration always sets and only the sp worker's cutover clears
+// (architecture.md, Migrations; dnv-worker.md RW18); without it the record
+// reads as a migration whose cutover has started, a shape no gateway writes
+// but a case may plant.
 func cmdPutMigr(g *globals, args []string) {
 	fs := newFlagSet("put-migr", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3155,6 +3163,8 @@ func cmdPutMigr(g *globals, args []string) {
 	var dstDn hexUint
 	fs.Var(&dstDn, "dst-dn", "dn_id hosting the destination side (required)")
 	dstSlot := fs.Uint("dst-slot", 0, "the destination side's cntlid_slot")
+	pending := fs.Bool("cutover-pending", false,
+		"write the record with cutover_pending set, as CreateMigration does")
 	fs.Parse(args)
 
 	spec, err := parseMigrSpec(*migr)
@@ -3252,11 +3262,12 @@ func cmdPutMigr(g *globals, args []string) {
 		})
 		s.Put(model.SliceKey(cid, target.spId, sliceId), slice)
 		s.Put(model.MigrationKey(cid, target.spId, spec.name), &pb.Migration{
-			MigrId:    spec.migrId,
-			SrcSideId: spec.srcSide,
-			DstSideId: spec.dstSide,
-			BmCnt:     0,
-			MetaUnits: units,
+			MigrId:         spec.migrId,
+			SrcSideId:      spec.srcSide,
+			DstSideId:      spec.dstSide,
+			BmCnt:          0,
+			MetaUnits:      units,
+			CutoverPending: *pending,
 		})
 		conf.MigrNameList = append(conf.MigrNameList, spec.name)
 		advanceNextId(conf, spec.migrId, spec.dstSide)
@@ -3276,20 +3287,21 @@ func cmdPutMigr(g *globals, args []string) {
 		die("put-migr: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":     target.name,
-		"migr_name":   spec.name,
-		"migr_id":     idHex(spec.migrId),
-		"src_side_id": idHex(spec.srcSide),
-		"dst_side_id": idHex(spec.dstSide),
-		"leg_id":      idHex(legId),
-		"grp_id":      idHex(grpId),
-		"slice_id":    idHex(sliceId),
-		"dn_id":       idHex(uint64(dstDn)),
-		"addr_port":   dstAddr,
-		"ext_cnt":     extCnt,
-		"meta_units":  units,
-		"dn_revision": dnRev,
-		"sp_rev":      spRev,
+		"sp_name":         target.name,
+		"migr_name":       spec.name,
+		"migr_id":         idHex(spec.migrId),
+		"src_side_id":     idHex(spec.srcSide),
+		"dst_side_id":     idHex(spec.dstSide),
+		"leg_id":          idHex(legId),
+		"grp_id":          idHex(grpId),
+		"slice_id":        idHex(sliceId),
+		"dn_id":           idHex(uint64(dstDn)),
+		"addr_port":       dstAddr,
+		"ext_cnt":         extCnt,
+		"meta_units":      units,
+		"cutover_pending": *pending,
+		"dn_revision":     dnRev,
+		"sp_rev":          spRev,
 	})
 }
 
@@ -3860,16 +3872,18 @@ func setSliceEpoch(
 // Playing the worker (gateway.md, Integration test plan, The etcd verification)
 // ---------------------------------------------------------------------------
 //
-// These are the ONLY writes the gateway integration suite performs through
-// workerctl (gateway.md, Integration test plan, The etcd verification). They
-// exist because two gateway preconditions are gated on a flag only the
-// sp-worker ever sets — CreateThinDevice's snapshot gate on ThinDevice.created
-// (architecture.md, Thin devices) and SwitchSpareLeg's gate on Side.provisioned
-// (architecture.md, Side provisioning protocol) — and that suite deliberately
-// runs no dnv-worker.
-// Both go through the very model op the worker calls, so the state they leave
-// behind is exactly the state a converging worker would have produced,
-// including the single SpRev bump the flip owes (which the suite's rev
+// These, with the drains below, are the ONLY writes the gateway integration
+// suite performs through workerctl (gateway.md, Integration test plan, The
+// etcd verification). They exist because three gateway preconditions are
+// gated on a flag only the sp-worker ever moves — CreateThinDevice's snapshot
+// gate on ThinDevice.created (architecture.md, Thin devices), SwitchSpareLeg's
+// gate on Side.provisioned (architecture.md, Side provisioning protocol) and
+// FinishMigration's gate on Migration.cutover_pending, which only the
+// worker's cutover clears (architecture.md, Migrations) — and that suite
+// deliberately runs no dnv-worker.
+// All three go through the very model op the worker calls, so the state they
+// leave behind is exactly the state a converging worker would have produced,
+// including the single SpRev bump each owes (which the suite's rev
 // bookkeeping must count).
 
 // cmdSetCreated flips ThinDevice.created through model.FlipCreated: the
@@ -3945,7 +3959,7 @@ func cmdSetProvisioned(g *globals, args []string) {
 		LegId:   uint64(leg),
 		SideId:  uint64(side),
 	}
-	flipped, err := model.FlipProvisioned(
+	flipped, _, err := model.FlipProvisioned(
 		ctx, cli, cid, target.shard, target.spId, []model.SideRef{ref},
 	)
 	if err != nil {
@@ -3958,6 +3972,139 @@ func cmdSetProvisioned(g *globals, args []string) {
 		"flipped":  len(flipped) == 1,
 		"sp_rev":   readSpRev(ctx, cli, cid, target),
 	})
+}
+
+// cmdStartCutover clears one Migration.cutover_pending through
+// model.StartCutover: the cutover the sp worker starts beside its provisioned
+// flip, once the pool's primary reports a live path to the migration's dst
+// side and that side reports it waits for the cutover (dnv-worker.md RW18;
+// architecture.md, Migration). The gateway suite runs no worker, and
+// FinishMigration refuses a migration whose cutover has not started, so this
+// is how the suite takes a migration past it before a finish.
+//
+// The migration's leg comes from the stored record and slices (cutoverRefOf)
+// and the cntlr the op checks is the pool's stored primary (storedPrimary)
+// unless --cntlr names one. The op re-checks in its own STM what the store
+// holds — the pool's level below SP_LEVEL_NO_MIGRATION, the flag still set,
+// the dst side provisioned, the cntlr the primary and not disabled — and the
+// driver dies on its refusal, so a case that skipped the provisioned flip
+// (set-provisioned) learns it here rather than at the finish.
+func cmdStartCutover(g *globals, args []string) {
+	fs := newFlagSet("start-cutover", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "migr_name (required)")
+	var cntlr hexUint
+	fs.Var(&cntlr, "cntlr",
+		"cntlr_id the op checks is the primary (default: the stored primary)")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	state, err := model.LoadSp(ctx, cli, cid, target.name)
+	if err != nil {
+		die("start-cutover: %v", err)
+	}
+	ref, err := cutoverRefOf(state, *name)
+	if err != nil {
+		die("start-cutover: %v", err)
+	}
+	cntlrId := uint64(cntlr)
+	if cntlrId == 0 {
+		if cntlrId, err = storedPrimary(state); err != nil {
+			die("start-cutover: %v", err)
+		}
+	}
+	_, err = model.StartCutover(
+		ctx, cli, cid, target.shard, target.spId, target.name, ref, cntlrId)
+	if err != nil {
+		die("start-cutover: %v", err)
+	}
+	emit(map[string]any{
+		"migr_name":   ref.MigrName,
+		"migr_id":     idHex(ref.MigrId),
+		"slice_id":    idHex(ref.SliceId),
+		"leg_id":      idHex(ref.LegId),
+		"src_side_id": idHex(ref.SrcSideId),
+		"dst_side_id": idHex(ref.DstSideId),
+		"cntlr_id":    idHex(cntlrId),
+		"sp_rev":      readSpRev(ctx, cli, cid, target),
+	})
+}
+
+// cutoverRefOf names one migration of a load for model.StartCutover: its
+// record's id and sides, and the slice and leg that carry both sides. It
+// refuses a name the load has no record of and a record whose two sides
+// share no leg, the two shapes no op could start a cutover on.
+func cutoverRefOf(
+	state *model.SpState,
+	migrName string,
+) (model.CutoverRef, error) {
+	migr, ok := state.Migrs[migrName]
+	if !ok {
+		return model.CutoverRef{}, fmt.Errorf(
+			"no migration %q in the pool", migrName)
+	}
+	ref := model.CutoverRef{
+		MigrName:  migrName,
+		MigrId:    migr.GetMigrId(),
+		SrcSideId: migr.GetSrcSideId(),
+		DstSideId: migr.GetDstSideId(),
+	}
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		slice, ok := state.Slices[sliceId]
+		if !ok {
+			continue
+		}
+		grpList := make([]*pb.Group, 0,
+			len(slice.GetMetaGrpList())+len(slice.GetDataGrpList()))
+		grpList = append(grpList, slice.GetMetaGrpList()...)
+		grpList = append(grpList, slice.GetDataGrpList()...)
+		for _, grp := range grpList {
+			legList := make([]*pb.Leg, 0,
+				len(grp.GetLegList())+len(grp.GetSpareLegList()))
+			legList = append(legList, grp.GetLegList()...)
+			legList = append(legList, grp.GetSpareLegList()...)
+			for _, leg := range legList {
+				src, dst := false, false
+				for _, side := range leg.GetSideList() {
+					src = src || side.GetSideId() == ref.SrcSideId
+					dst = dst || side.GetSideId() == ref.DstSideId
+				}
+				if src && dst {
+					ref.SliceId = sliceId
+					ref.LegId = leg.GetLegId()
+					return ref, nil
+				}
+			}
+		}
+	}
+	return model.CutoverRef{}, fmt.Errorf(
+		"migration %q: sides %#x and %#x share no leg",
+		migrName, ref.SrcSideId, ref.DstSideId)
+}
+
+// storedPrimary returns the one cntlr of a load whose record says primary,
+// refusing a pool with none or with more than one: the cntlr start-cutover
+// names when --cntlr does not.
+func storedPrimary(state *model.SpState) (uint64, error) {
+	var primaries []uint64
+	for _, cntlrId := range state.Conf.GetCntlrIdList() {
+		if state.Cntlrs[cntlrId].GetPrimary() {
+			primaries = append(primaries, cntlrId)
+		}
+	}
+	if len(primaries) != 1 {
+		return 0, fmt.Errorf(
+			"want exactly one primary cntlr, the pool has %d", len(primaries))
+	}
+	return primaries[0], nil
 }
 
 // cmdSetDeleting latches an SP the way DeleteStoragePool does

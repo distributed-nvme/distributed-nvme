@@ -55,10 +55,13 @@ func splMigrate(env *volEnv, srcSideId uint64, dstAddr string) uint64 {
 	return reply.GetMigrId() + 1
 }
 
-// splFinish ends splMigrName keeping its destination. force = true skips the
-// hydration proof, the only part of the RPC that leaves etcd.
+// splFinish ends splMigrName keeping its destination, after the cutover:
+// a finish of a migration whose cutover has not started is refused
+// (architecture.md, Migrations). force = true skips the hydration proof, the
+// only part of the RPC that leaves etcd.
 func splFinish(env *volEnv) error {
 	env.t.Helper()
+	volCutover(env, splMigrName)
 	_, err := env.srv.FinishMigration(env.ctx, &pb.FinishMigrationRequest{
 		ClusterName: env.cluster,
 		SpName:      volSpName,

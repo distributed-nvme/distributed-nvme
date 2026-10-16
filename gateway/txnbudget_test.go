@@ -915,3 +915,22 @@ func TestFinishCloneDeleteTxnBudget(t *testing.T) {
 		overDefault: false,
 	}.check(t)
 }
+
+// TestStartCutoverTxnBudget is the tripwire of model.StartCutover, the sp
+// worker's cutover (dnv-worker.md RW18, MD6): it reads one record of each
+// kind it re-checks and writes two, whatever the pool's shape, so no ceiling
+// is a factor. model/ops_test.go's TestStartCutover commits it against a real
+// etcd.
+func TestStartCutoverTxnBudget(t *testing.T) {
+	txnShape{
+		name: "StartCutover",
+		stm:  "model.StartCutover's STM and BumpSpRev",
+		// The SpConf (its level), the Migration, the dst side's Slice, the
+		// reporting Cntlr and SpRev.
+		fixedReads: 5,
+		// The Migration and SpRev puts.
+		fixedWrites: 2,
+		maxCompares: 7,
+		overDefault: false,
+	}.check(t)
+}

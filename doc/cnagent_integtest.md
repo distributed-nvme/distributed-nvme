@@ -355,11 +355,13 @@ any dm or nvmet residue fails it, since reporting it is not success.
 
 Error paths beyond the six above; QoS, not enforced (`cnagent.md` CN6);
 `GrowSlice`; spare legs; a leg gaining or losing a second side, which the dn
-suite's migrations prove; levels but read-write, read-only and the no-clone
-gate; more than one slice; several namespaces per subsystem; snapshots of
-snapshots; `UpdateNamespaceDev`; a host-facing namespace or subsystem dropped
-short of a cntlr teardown, leaving the park before its removal (`cnagent.md`
-CN21's park before every layer and its nvmet layer L1) to the unit tests;
+suite's migrations prove, and the path rows of a leg with two sides
+(`cnagent.md` CN28), which the unit tests cover; levels but read-write,
+read-only and the no-clone gate; more than one slice; several namespaces per
+subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a host-facing
+namespace or subsystem dropped short of a cntlr teardown, leaving the park
+before its removal (`cnagent.md` CN21's park before every layer and its nvmet
+layer L1) to the unit tests;
 cntlid-slot exhaustion; the cdc; TLS and authentication; performance; faults
 beyond the partition, the pin, the writer and the lost source; provisioning deferral
 (`cnagent.md` CN9); an arena with no free run for a clone, whose

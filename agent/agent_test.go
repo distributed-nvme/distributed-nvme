@@ -300,10 +300,10 @@ func TestResTrackerEpoch(t *testing.T) {
 }
 
 // TestResTrackerReason pins the reason beside the epoch rule (architecture.md,
-// Live-state reporting): only ErrReason names one, every other helper gives
-// RES_REASON_NONE, the tracker keeps the reason of the latest outcome, and
-// the reason never moves the epoch — only a status change does. The returned
-// row is a copy of the whole stored row, the reason included.
+// Live-state reporting): only ErrReason and SetReason name one, every other
+// helper gives RES_REASON_NONE, the tracker keeps the reason of the latest
+// outcome, and the reason never moves the epoch — only a status change does.
+// The returned row is a copy of the whole stored row, the reason included.
 func TestResTrackerReason(t *testing.T) {
 	const lost = pb.ResReason_RES_REASON_THIN_ID_LOST
 	const none = pb.ResReason_RES_REASON_NONE
@@ -368,6 +368,26 @@ func TestResTrackerReason(t *testing.T) {
 	if again := tracker.ErrReason("thin", "dnv-thin", "y", lost); again.
 		GetEpoch() != 700 || again.GetReason() != lost {
 		t.Errorf("ERROR again = %v, want the reason at epoch 700", again)
+	}
+	// SetReason names one on any status, under the same epoch rule: a row
+	// that gains it at its status keeps the epoch, and Set clears it.
+	const cutover = pb.ResReason_RES_REASON_AWAITING_CUTOVER
+	now = 800
+	waiting := tracker.Provisioning("dst", "dnv-dst", "waiting")
+	now = 900
+	if got := tracker.SetReason("dst", "dnv-dst",
+		pb.ResStatus_RES_STATUS_PROVISIONING, "waiting for the cutover",
+		cutover); got.GetReason() != cutover ||
+		got.GetEpoch() != waiting.GetEpoch() {
+		t.Errorf("SetReason = %v, want the reason at epoch %d", got,
+			waiting.GetEpoch())
+	}
+	now = 1000
+	if got := tracker.Set("dst", "dnv-dst",
+		pb.ResStatus_RES_STATUS_PROVISIONING, "waiting"); got.
+		GetReason() != none || got.GetEpoch() != waiting.GetEpoch() {
+		t.Errorf("Set after SetReason = %v, want no reason at epoch %d",
+			got, waiting.GetEpoch())
 	}
 	// The other helpers give no reason.
 	for name, row := range map[string]*pb.ResInfo{

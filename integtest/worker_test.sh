@@ -1418,6 +1418,51 @@ flip_records_gt() { # <n> <sp_id>
 	count_gt "$1" flip_record_cnt "$2"
 }
 
+# cutover_records prints "<migr_id> <src_side_id> <dst_side_id> <cntlr_id>
+# <report_revision> <revision>" for every `flip applied kind=cutover` record
+# of one migration, over every worker log of the case, in log order: the
+# cutover the coordinator starts beside the provisioned flip (RW18), naming
+# the primary whose report it acted on and that report's revision.
+cutover_records() { # <sp_id> <migr name>
+	local w
+	for w in "${SEEN_WORKERS[@]}"; do
+		recsr "$(wpath "$w")" \
+			'select(.msg == "flip applied") | select(.kind == "cutover")
+			 | select((.sp_id | tostring) == $sp and .migr_name == $m)
+			 | "\(.migr_id) \(.src_side_id) \(.dst_side_id) \(.cntlr_id) \(.report_revision) \(.revision)"' \
+			--arg sp "$1" --arg m "$2" || return 1
+	done
+}
+
+# cutover_record_cnt counts cutover_records' lines, and fails when any read
+# did.
+cutover_record_cnt() { # <sp_id> <migr name>
+	local out
+	out=$(cutover_records "$1" "$2") || return 1
+	printf '%s' "$out" | grep -c . || true
+}
+
+# migr_pending prints one Migration's stored cutover_pending, "true" or
+# "false": workerctl emits the field even when it is false, so a read that
+# failed prints neither.
+migr_pending() { # <sp> <migr name>
+	ctl get-sp --sp "$1" | "$JQ" -r --arg m "$2" '.migrs[$m].cutover_pending'
+}
+
+# path_reply_cnt counts one cn fake's SyncupCntlr replies and CheckCntlr
+# sends whose side_id_to_path row for one side reads one status — the path
+# rows the cutover reads off the primary (RW18). It fails when either read
+# did.
+path_reply_cnt() { # <agent> <side id> <RES_STATUS_*>
+	local filter='(.cntlr_info.side_id_to_path[$s].status // "") == $st'
+	local syncups checks
+	syncups=$(replies "$1" SyncupCntlr "$filter" --arg s "$2" --arg st "$3") ||
+		return 1
+	checks=$(replies "$1" CheckCntlr "$filter" --arg s "$2" --arg st "$3") ||
+		return 1
+	printf '%s' $((syncups + checks))
+}
+
 health_changed_cnt() { # <record> <reason>
 	wcount 'select(.msg == "health changed") | select(.record == $rec and .reason == $rea)' \
 		--arg rec "$1" --arg rea "$2"
@@ -2018,7 +2063,7 @@ push_clone_req_time() { # <agent> <src_slice_idx> <bm_idx>
 case_bitmap() {
 	CASE=bitmap
 
-	stage 1 "an SP with a migration and a clone, both with two chunks"
+	stage 1 "an SP with a migration past its cutover and a clone, both with two chunks"
 	new_cluster bitmap
 	put_dn 1 8
 	put_dn 2 8
@@ -2036,7 +2081,98 @@ case_bitmap() {
 		all_provisioned sp0 1
 	# The migration's destination side S3 lands on dn 2, so dn1 is the only
 	# legal target of a migration chunk (BM4) and dn0, the source, gets none.
-	ctl put-migr --sp sp0 --migr "m0:3:1:3" --dst-dn 2 --dst-slot 1
+	# It is written as CreateMigration writes it, its cutover pending
+	# (architecture.md, Migrations), and cn0, which holds the primary, has
+	# its path to S3 held down first: the cutover beside the provisioned
+	# flip (RW18) must wait for the primary's path, however live the
+	# standby's reads. The hold is an ERROR row, which no health rule may
+	# judge (HL2), so cntlr 1 must stay healthy through it.
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"rows": {"side_id_to_path.3":
+  {"status": "ERROR", "details": "connecting/inaccessible"}}}}}
+EOF
+	local migr_put
+	migr_put=$(ctl put-migr --sp sp0 --migr "m0:3:1:3" --dst-dn 2 --dst-slot 1 \
+		--cutover-pending)
+	assert_eq "$("$JQ" -r '.cutover_pending' <<<"$migr_put")" true \
+		"put-migr wrote m0 with its cutover pending"
+	# Everything the cutover waits for but the primary's path: S3
+	# provisioned, S3 reporting that it waits for the cutover, and the
+	# standby's live path to it — a path the coordinator must not count.
+	wait_until "$WAIT_SYNCUP" "side 3 provisioned" side_provisioned sp0 1 3
+	wait_until "$WAIT_SHORT" "dn1: side 3 waits for the cutover" \
+		reply_ge 1 dn1 SyncupSide \
+		'.side_info.migr_dst_info.target_info.reason == "RES_REASON_AWAITING_CUTOVER"'
+	wait_until "$WAIT_SHORT" "cn1 (the standby): a live path to side 3" \
+		count_ge 1 path_reply_cnt cn1 3 RES_STATUS_OK
+	wait_until "$WAIT_SHORT" "cn0 (the primary): its path to side 3 held down" \
+		count_ge 1 path_reply_cnt cn0 3 RES_STATUS_ERROR
+	assert_none_for 3 "a cutover of m0 while the primary's path to side 3 is down" \
+		count_ge 1 cutover_record_cnt 1 m0
+	assert_eq "$(migr_pending sp0 m0)" true "m0's cutover_pending while it waits"
+	assert_eq "$(cntlr_field sp0 1 err_epoch)" 0 \
+		"cntlr 1's err_epoch under an ERROR path row (HL2 judges no path row)"
+	# The primary's path comes up: the coordinator starts the cutover, once,
+	# from that report.
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "the cutover of m0" \
+		count_ge 1 cutover_record_cnt 1 m0
+	local cut cut_migr cut_src cut_dst cut_cntlr cut_report cut_rev flip_rev
+	cut=$(cutover_records 1 m0)
+	assert_eq "$(printf '%s\n' "$cut" | grep -c .)" 1 \
+		"flip applied kind=cutover records of m0 (exactly one)"
+	read -r cut_migr cut_src cut_dst cut_cntlr cut_report cut_rev <<<"$cut"
+	assert_eq "$cut_migr $cut_src $cut_dst" "3 1 3" \
+		"the cutover record's migr_id, src_side_id and dst_side_id"
+	assert_eq "$cut_cntlr" 1 "the cutover record names the primary, cntlr 1"
+	# The report it acted on was built after S3's provisioned flip — only a
+	# request carrying S3 provisioned gives the fake a live path to it — and
+	# before the cutover's own bump.
+	flip_rev=$(flip_records 1 | awk '$1 == 3 { print $2 }')
+	case "$flip_rev" in
+	'' | *[!0-9]*) die "side 3's flip applied kind=provisioned revision is '$flip_rev'" ;;
+	esac
+	assert_ge "$cut_report" "$flip_rev" \
+		"the cutover's report_revision against side 3's provisioned flip"
+	[ "$cut_report" -lt "$cut_rev" ] ||
+		die "the cutover's report_revision $cut_report is not below its own revision $cut_rev"
+	assert_eq "$(wcount 'select(.msg == "sp flip failed") | select(.kind == "cutover")')" \
+		0 "sp flip failed kind=cutover records"
+	assert_eq "$(migr_pending sp0 m0)" false "m0's cutover_pending after the cutover"
+	# What the two sides were told (RW15): until the cutover, the old side's
+	# role holds back — the flag set, dst_provisioned false although S3 was
+	# provisioned — and the new side, provisioned, carries the flag; from the
+	# cutover's revision on, the old side reads dst_provisioned and neither
+	# carries the flag.
+	wait_until "$WAIT_SHORT" "dn0: side 1 told the cutover started" \
+		req_ge 1 dn0 SyncupSide \
+		'(.side_pointer.side_id // 0) == 1 and (.migr_src_conf.dst_provisioned // false)'
+	wait_until "$WAIT_SHORT" "dn1: side 3 told the cutover started" \
+		req_ge 1 dn1 SyncupSide \
+		'(.side_pointer.side_id // 0) == 3 and (.revision // 0) >= $r
+		 and has("migr_dst_conf") and ((.migr_dst_conf.cutover_pending // false) | not)' \
+		--argjson r "$cut_rev"
+	assert_ge "$(reqs dn0 SyncupSide \
+		'(.side_pointer.side_id // 0) == 1 and (.migr_src_conf.cutover_pending // false)')" \
+		1 "dn0: side 1 requests carrying the pending cutover"
+	assert_ge "$(reqs dn1 SyncupSide \
+		'(.side_pointer.side_id // 0) == 3 and (.side_conf.provisioned // false)
+		 and (.migr_dst_conf.cutover_pending // false)')" \
+		1 "dn1: side 3 requests provisioned with the cutover pending"
+	assert_eq "$(reqs dn0 SyncupSide \
+		'(.side_pointer.side_id // 0) == 1 and has("migr_src_conf")
+		 and (.revision // 0) < $r
+		 and ((.migr_src_conf.dst_provisioned // false)
+		      or ((.migr_src_conf.cutover_pending // false) | not))' \
+		--argjson r "$cut_rev")" 0 \
+		"dn0: side 1 requests below the cutover's revision that let its role go"
+	assert_eq "$(reqs dn0 SyncupSide \
+		'(.side_pointer.side_id // 0) == 1 and has("migr_src_conf")
+		 and (.revision // 0) >= $r
+		 and (((.migr_src_conf.dst_provisioned // false) | not)
+		      or (.migr_src_conf.cutover_pending // false))' \
+		--argjson r "$cut_rev")" 0 \
+		"dn0: side 1 requests from the cutover's revision on that still hold its role"
 	ctl put-clone --sp sp0 --name c0 --id "$CLONE_ID" --dst-td td0 --src-slice-cnt 2
 	# Hold the clone pushes back while the three chunks are seeded: the fake's
 	# chunk_id_list lever (dnv-worker.md, Integration test plan, The fake agent)

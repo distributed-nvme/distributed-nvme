@@ -213,6 +213,7 @@ func newCntlrInfo() *pb.CntlrInfo {
 		CloneIdToTarget:   make(map[uint64]*pb.ResInfo),
 		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
 		CloneIdToMeta:     make(map[uint64]*pb.ResInfo),
+		SideIdToPath:      make(map[uint64]*pb.ResInfo),
 	}
 }
 
@@ -275,6 +276,7 @@ func (s *CnAgentServer) build(
 		for _, lp := range plan.legs {
 			info.LegIdToLeg[lp.legId] = st.tracker.Missing(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, detailsSpLevel)
+			s.legPathRows(ctx, st, plan, lp, nil, info)
 		}
 	}
 
@@ -917,6 +919,9 @@ func (s *CnAgentServer) dropAllResKeys(st *cntlrState, plan *cntlrPlan) {
 	t := st.tracker
 	for _, lp := range plan.legs {
 		t.Drop(resKeyOf(resKeyLegFmt, lp.legId))
+		for _, key := range pathResKeys(lp) {
+			t.Drop(key)
+		}
 	}
 	for _, gp := range plan.grps {
 		t.Drop(resKeyOf(resKeyGrpFmt, gp.grpId))

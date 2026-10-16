@@ -37,11 +37,12 @@ func migrSrcReq(revision uint64) *pb.SyncupSideRequest {
 		MigrId:    testMigrId,
 		DstSideId: testSide2,
 		DstDnId:   testSrcDn,
-		// The steady state: the destination has finished provisioning, so the
-		// source really does take on its role (architecture.md, Migration). The
-		// false case is exactly equivalent to having no migr_src_conf at all
-		// and is covered
-		// by TestMigrationSourceDeferredUntilDestinationProvisions.
+		// The steady state: the destination has finished provisioning and the
+		// cutover has started, so the source really does take on its role
+		// (architecture.md, Migration). The false case is exactly equivalent
+		// to having no migr_src_conf at all and is covered by
+		// TestMigrationSourceDeferredUntilDestinationProvisions and
+		// TestASourceWaitsForTheCutover.
 		DstProvisioned: true,
 	}
 	return req
@@ -335,77 +336,6 @@ func TestMigrationDestinationHydrationEnabledAtReadOnly(t *testing.T) {
 	}
 	if node.dms[cloneName].noHydration {
 		t.Error("a CN-only level disabled hydration on the dn")
-	}
-}
-
-func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
-	srv, node := newTestServer(t)
-	ctx := context.Background()
-	syncupBoth(t, srv, 1, testSide)
-
-	node.failCmd["nvme connect"] = "connect refused"
-	reply, err := srv.SyncupSide(ctx,
-		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
-	if err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
-	// The RPC still returns; the connect is retried in the background.
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("rejected: %v", reply.GetAgentReply())
-	}
-	target := reply.GetSideInfo().GetMigrDstInfo().GetTargetInfo()
-	if target.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
-		t.Errorf("target_info = %v, want ERROR", target.GetStatus())
-	}
-	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
-	if !st.retrying {
-		t.Fatal("no background retry was registered")
-	}
-	// While the dm-clone is absent the destination keeps its exports on
-	// dm-error with every namespace inaccessible.
-	for cnId := range reply.GetSideInfo().GetCnIdToNvmeof() {
-		nqn := srv.nf.SideToCnNqn(testCluster, testSp, testLeg, cnId)
-		state, err := srv.nvmet.ProbeNamespace(ctx, nqn, sideNsid)
-		if err != nil {
-			t.Fatalf("ProbeNamespace: %v", err)
-		}
-		if state.AnaGrpId != common.AnaGrpIdInaccessible {
-			t.Errorf("cn %d ana_grpid = %d, want inaccessible",
-				cnId, state.AnaGrpId)
-		}
-	}
-
-	// The next converge succeeds: it reloads the primary's dm-linear onto
-	// the dm-clone and moves the namespaces off inaccessible (architecture.md,
-	// Migration, dst step 5) — the transition the retry loop exists to reach.
-	node.Reset()
-	if _, err := srv.SyncupSide(ctx,
-		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
-	if st.retrying {
-		t.Error("retry registration survived a pass that ran the whole " +
-			"destination sequence")
-	}
-	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
-	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
-	assertOrder(t, node,
-		"cmd dmsetup create "+
-			nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId),
-		"cmd dmsetup reload "+linName,
-		fmt.Sprintf("writedirect %s/subsystems/%s/namespaces/1/ana_grpid=%d",
-			agent.NvmetRoot,
-			nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
-			common.AnaGrpIdOptimized),
-	)
-	state, err := srv.nvmet.ProbeNamespace(ctx,
-		nf.SideToCnNqn(testCluster, testSp, testLeg, testCn1), sideNsid)
-	if err != nil {
-		t.Fatalf("ProbeNamespace: %v", err)
-	}
-	if state.AnaGrpId != common.AnaGrpIdNonOptimized {
-		t.Errorf("standby ana_grpid = %d, want non-optimized",
-			state.AnaGrpId)
 	}
 }
 
@@ -2913,7 +2843,8 @@ func TestFenceRestartThatHoldsNoSideOpensAWholeWindow(t *testing.T) {
 // destination ends serving through its dm-clone, and the loop's own pass —
 // the one that gets it there — deregisters it.
 //
-// The retry test above drives its second converge from an RPC. Here every
+// TestMigrationDestinationConnectFailureRetries drives its second converge
+// from an RPC. Here every
 // step after the refused connect, DN13 step (5) included, runs in a pass of
 // the loop, on the ctx the loop hands its attempts (rootCtx,
 // migrRetryLoop). That pass deregisters the loop as its last act
@@ -2925,6 +2856,9 @@ func TestMigrationConnectSucceedsFromTheRetryLoop(t *testing.T) {
 	ctx := context.Background()
 	srv.migrRetryInterval = 5 * time.Millisecond
 	syncupBoth(t, srv, 1, testSide)
+	// Every refused connect spends the pass's connect budget, on a clock
+	// that does not sleep.
+	withDnClock(srv, node)
 	names := newMigrDstNames()
 
 	// Every connect is refused until the registration has been read, and

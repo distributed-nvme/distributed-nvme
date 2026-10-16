@@ -271,12 +271,14 @@ func (s *DnAgentServer) probeAboveSideDev(
 }
 
 // probeMigrDst reads a migration destination as DN13's steps would find it,
-// in their order, with nothing built: step (2) (migrMetaRead), then, only
-// where it holds, the walk of the source connection, then, only over a source
-// that serves, step (4) (migrCloneRead). The dm-clone's status line is read
-// whenever the dm-clone is there, whatever stopped before it, because its
-// row carries the line for the gateway's hydration checks (architecture.md,
-// Live-state reporting).
+// in their order, with nothing built: step (2) (migrMetaRead); then, where it
+// holds, the stop for the cutover while the request carries cutover_pending,
+// which reads nothing more, as the converge runs nothing more (runMigrDst);
+// else the walk of the source connection, then, only over a source that
+// serves, step (4) (migrCloneRead). Short of the stop for the cutover, the
+// dm-clone's status line is read whenever the dm-clone is there, whatever
+// stopped before it, because its row carries the line for the gateway's
+// hydration checks (architecture.md, Live-state reporting).
 func (s *DnAgentServer) probeMigrDst(
 	ctx context.Context,
 	plan *sidePlan,
@@ -289,6 +291,10 @@ func (s *DnAgentServer) probeMigrDst(
 	// does not answer only goes without its status line.
 	present := false
 	if seen.metaErr = s.migrMetaRead(ctx, plan); seen.metaErr == nil {
+		if plan.migrDst.GetCutoverPending() {
+			seen.awaitingCutover = true
+			return seen
+		}
 		state, err := s.host.ListSubsys(ctx, plan.srcNqnOfDst())
 		seen.conn, seen.connErr, seen.connUnread = state, err, err != nil
 		if seen.srcServes() {
@@ -400,9 +406,10 @@ func (s *DnAgentServer) probeStacks(
 	}
 
 	if plan.migrSrcDeferred {
-		// The destination has not provisioned: this side is serving exactly as
-		// if it had no migr_src_conf, and only the would-be rows differ
-		// (architecture.md, Migration).
+		// The request carries dst_provisioned false (the destination not
+		// provisioned yet, or the cutover still pending): this side is serving
+		// exactly as if it had no migr_src_conf, and only the would-be rows
+		// differ (architecture.md, Migration).
 		s.reportMigrSrcDeferred(st, plan, info)
 	}
 

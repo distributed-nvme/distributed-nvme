@@ -491,6 +491,9 @@ func TestADestinationThatLostItsSourceStaysOffItsClone(t *testing.T) {
 			if code != 0 {
 				t.Fatal("fixture is wrong: the source was not connected")
 			}
+			// Every refused connect spends the pass's connect budget, on a
+			// clock that does not sleep.
+			withDnClock(srv, node)
 			setFailAlways(node, "nvme connect",
 				"failed to write to nvme-fabrics device")
 			reply, err := srv.SyncupSide(ctx,
@@ -607,6 +610,9 @@ func TestMigrationDestinationStepFiveIsRetried(t *testing.T) {
 		srv.migrRetryInterval = 5 * time.Millisecond
 		ctx := context.Background()
 		syncupBoth(t, srv, 1, testSide)
+		// Every refused connect spends the pass's connect budget, on a
+		// clock that does not sleep.
+		withDnClock(srv, node)
 		setFailAlways(node, "nvme connect",
 			"failed to write to nvme-fabrics device")
 		if _, err := srv.SyncupSide(ctx,
@@ -897,6 +903,7 @@ func TestADestinationReadsTheSameOnBothChannels(t *testing.T) {
 		{"never connected", func(t *testing.T, srv *DnAgentServer,
 			node *fakeNode) uint64 {
 			syncupBoth(t, srv, 1, testSide)
+			withDnClock(srv, node)
 			setFailAlways(node, "nvme connect", "connect refused")
 			return 2
 		}, errored, missing, false, nil},
@@ -906,6 +913,7 @@ func TestADestinationReadsTheSameOnBothChannels(t *testing.T) {
 		{"the source lost its controllers", func(t *testing.T,
 			srv *DnAgentServer, node *fakeNode) uint64 {
 			serveThenDropSourceCtrls(t, srv, node, names, false)
+			withDnClock(srv, node)
 			setFailAlways(node, "nvme connect",
 				"Connect Invalid Data Parameter")
 			return 3
@@ -964,6 +972,7 @@ func TestADestinationReadsTheSameOnBothChannels(t *testing.T) {
 		{"a stopped step after the stacks left the dm-clone", func(
 			t *testing.T, srv *DnAgentServer, node *fakeNode) uint64 {
 			serveThenDropSourceCtrls(t, srv, node, names, false)
+			withDnClock(srv, node)
 			setFailAlways(node, "nvme connect",
 				"Connect Invalid Data Parameter")
 			if _, err := srv.SyncupSide(context.Background(),
@@ -1046,7 +1055,8 @@ func TestADestinationReadsTheSameOnBothChannels(t *testing.T) {
 // TestMigrDstRowRule pins the destination rule itself (DN13), on readings
 // built by hand: which step's fault each row reports, in step order, the
 // status line kept in dm_clone_info whenever the pass read it, whatever the
-// status, whether the pass held, and where the stacks serve from. A
+// status, whether the pass held, where the stacks serve from, and the rows'
+// reason, which only the wait for the cutover gives (DN18). A
 // destination whose dm-clone probe does not answer tells the rule's own
 // answers from the one read from the stacks (migrDstStopped), which is
 // unread there.
@@ -1097,6 +1107,10 @@ func TestMigrDstRowRule(t *testing.T) {
 		missing     = pb.ResStatus_RES_STATUS_MISSING
 		provisioned = pb.ResStatus_RES_STATUS_PROVISIONING
 	)
+	// reasons names the one case whose rows carry a reason.
+	reasons := map[string]pb.ResReason{
+		"awaiting the cutover": pb.ResReason_RES_REASON_AWAITING_CUTOVER,
+	}
 	for _, tc := range []struct {
 		name          string
 		seen          migrDstSeen
@@ -1120,6 +1134,11 @@ func TestMigrDstRowRule(t *testing.T) {
 			statusRead: true},
 			missing, detailsCloneMetaMissing,
 			errored, "wrapper killed\n" + raw, false, migrCloneUnread},
+		// The wait for the cutover reads where the stacks are, as a step
+		// that stops does.
+		{"awaiting the cutover", migrDstSeen{awaitingCutover: true},
+			provisioned, tagCutoverWait,
+			provisioned, tagCutoverWait, false, migrCloneUnread},
 		{"the walk unread", migrDstSeen{connErr: walk, connUnread: true},
 			errored, "walk killed",
 			errored, detailsTargetNotRead + "walk killed", false,
@@ -1202,6 +1221,9 @@ func TestMigrDstRowRule(t *testing.T) {
 			}
 			if got := seen.held(plan); got != tc.held {
 				t.Errorf("held = %v, want %v", got, tc.held)
+			}
+			if got, want := seen.reason(), reasons[tc.name]; got != want {
+				t.Errorf("reason = %v, want %v", got, want)
 			}
 			if got := srv.migrDstServing(context.Background(), plan,
 				&seen); got.state != tc.serving {
@@ -1427,6 +1449,9 @@ func TestALinearLeftOnASourcelessCloneIsNotServing(t *testing.T) {
 	if code != 0 {
 		t.Fatal("fixture is wrong: the source was not connected")
 	}
+	// Every refused connect spends the pass's connect budget, on a clock
+	// that does not sleep.
+	withDnClock(srv, node)
 	setFailAlways(node, "nvme connect",
 		"failed to write to nvme-fabrics device")
 	if _, err := srv.SyncupSide(ctx,

@@ -55,6 +55,7 @@ const (
 	opSetSideErrEpoch  = "SetSideErrEpoch"
 	opFlipProvisioned  = "FlipProvisioned"
 	opFlipCreated      = "FlipCreated"
+	opStartCutover     = "StartCutover"
 	opFailover         = "Failover"
 	opGrowSlice        = "GrowSlice"
 	opReplaceCntlr     = "ReplaceCntlr"
@@ -496,14 +497,30 @@ func BumpSpRev(
 	cid uint64,
 	spId uint64,
 ) error {
+	_, err := bumpSpRevTo(s, op, shard, cid, spId)
+	return err
+}
+
+// bumpSpRevTo is BumpSpRev that also returns the revision it writes: the
+// revision the STM commits when it commits, which an op that reports it
+// hands its caller (FlipProvisioned, StartCutover) so the "flip applied"
+// record (dnv-worker.md, Log records) names that revision and never a later
+// one read back.
+func bumpSpRevTo(
+	s etcdutil.STM,
+	op string,
+	shard uint32,
+	cid uint64,
+	spId uint64,
+) (uint64, error) {
 	key := SpRevKey(shard, cid, spId)
 	rev := &pb.SpRev{}
 	if !s.Get(key, rev) {
-		return fail(op, "sp rev not found")
+		return 0, fail(op, "sp rev not found")
 	}
 	rev.Revision++
 	s.Put(key, rev)
-	return nil
+	return rev.GetRevision(), nil
 }
 
 // BumpDnRev bumps one DN's revision key in place (architecture.md, Revision
@@ -1012,14 +1029,18 @@ type TdRef struct {
 // false and bumps SpRev exactly once if at least one was flipped (MD6, RW18).
 // It returns the sides it ACTUALLY wrote, in the
 // order they were
-// listed; the MD6 count is len() of that slice.
+// listed; the MD6 count is len() of that slice. It also returns the SpRev
+// revision its STM committed, 0 when it wrote nothing.
 //
 // The refs and not a bare count, because the caller logs one "flip applied"
 // record (dnv-worker.md, Log records) per side and that record names the
 // side (`ids`): a
 // candidate this STM skipped was never flipped by this worker, and logging it
 // would attribute a write — and a revision — to an owner that did not cause
-// either.
+// either. The revision is the one this STM wrote, never one read back after
+// it: a bump that lands in between would make the record name a later
+// revision than the one the flip produced, which the request that first
+// carries the side provisioned is driven at.
 //
 // A side that has already been flipped — by another owner, or by an earlier
 // round — is skipped, which is what makes the flip idempotent and lets the
@@ -1036,12 +1057,14 @@ func FlipProvisioned(
 	shard uint32,
 	spId uint64,
 	sides []SideRef,
-) ([]SideRef, error) {
+) ([]SideRef, uint64, error) {
 	var flipped []SideRef
+	var revision uint64
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		// A retried attempt (EU4) re-reads everything, so the report of the
 		// abandoned one is dropped with it.
 		flipped = nil
+		revision = 0
 		// Every slice is read once and written at most once, however many
 		// of its sides the batch names.
 		slices := make(map[uint64]*pb.Slice)
@@ -1072,12 +1095,14 @@ func FlipProvisioned(
 		for _, sliceId := range touched {
 			s.Put(SliceKey(cid, spId, sliceId), slices[sliceId])
 		}
-		return BumpSpRev(s, opFlipProvisioned, shard, cid, spId)
+		var err error
+		revision, err = bumpSpRevTo(s, opFlipProvisioned, shard, cid, spId)
+		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return flipped, nil
+	return flipped, revision, nil
 }
 
 // containsId reports whether ids already holds id. The lists it guards hold at
@@ -1177,6 +1202,118 @@ func flipCreatedTxn(
 		return nil, err
 	}
 	return created, nil
+}
+
+// ---------------------------------------------------------------------------
+// The cutover (MD6, RW18; architecture.md, Migration)
+// ---------------------------------------------------------------------------
+
+// CutoverRef names one migration for StartCutover (MD6): the record's name
+// and id, and where its two sides sit, which the sp worker read from the load
+// that showed the cutover pending.
+type CutoverRef struct {
+	MigrName  string
+	MigrId    uint64
+	SliceId   uint64
+	LegId     uint64
+	SrcSideId uint64
+	DstSideId uint64
+}
+
+// StartCutover clears the migration's cutover_pending and bumps SpRev, in
+// one STM (MD6, RW18), and returns the SpRev revision that STM committed. The
+// sp worker calls it once the cntlr cntlrId, which its plan makes the
+// primary and not disabled, reported a live path to the dst side and the dst
+// side reported that it waits for the cutover; the bump hands the src side
+// dst_provisioned true and both sides the cleared flag, so the src side
+// starts the cutover (architecture.md, Migration).
+//
+// The STM re-checks what the store holds of those conditions, and refuses
+// with an ErrPrecondition, writing nothing, when any fails: the SP's SpConf
+// is gone or names another sp_id, or its sp_level is SP_LEVEL_NO_MIGRATION or
+// above; the migration's record is gone, holds another migr_id or dst side,
+// or no longer has the flag set (the cutover started already); the dst
+// side's slice is gone, or the side is not in its leg or not provisioned; the
+// cntlr's record is gone, it is not the primary any more, or it is disabled.
+// The reports themselves are no part of the store, so the caller judges
+// them; a refusal is retried on a later report.
+//
+// The level is read here because the caller's reading of the dst side's wait
+// is that side's latest report, which can come from before a level raise: at
+// SP_LEVEL_NO_MIGRATION and above the dst side builds no dm-clone (dnagent.md
+// DN11), so a cutover committed then would fence the src side with nothing
+// to serve the leg in its place. Read inside the STM, the level is the one
+// in force when the cutover commits, whatever that report said. A disabled
+// primary runs the standby shape (cnagent.md CN9), and its disable is AR5's
+// trigger on its own (dnv-worker.md AR5), so its path says nothing of the
+// cntlr that will hold the arrays; the flag is checked here for a disable
+// that commits after the report.
+func StartCutover(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref CutoverRef,
+	cntlrId uint64,
+) (uint64, error) {
+	var revision uint64
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		revision = 0
+		conf := &pb.SpConf{}
+		if !s.Get(SpConfKey(cid, spName), conf) {
+			return fail(opStartCutover, "sp not found")
+		}
+		if conf.GetSpId() != spId {
+			return fail(opStartCutover, "sp id changed")
+		}
+		if conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_MIGRATION {
+			return fail(opStartCutover, "sp level suppresses migrations")
+		}
+		key := MigrationKey(cid, spId, ref.MigrName)
+		migr := &pb.Migration{}
+		if !s.Get(key, migr) {
+			return fail(opStartCutover, "migration not found")
+		}
+		if migr.GetMigrId() != ref.MigrId ||
+			migr.GetDstSideId() != ref.DstSideId {
+			return fail(opStartCutover, "migration changed")
+		}
+		if !migr.GetCutoverPending() {
+			return fail(opStartCutover, "cutover started")
+		}
+		slice := &pb.Slice{}
+		if !s.Get(SliceKey(cid, spId, ref.SliceId), slice) {
+			return fail(opStartCutover, "slice not found")
+		}
+		dst := findSideOfLeg(slice, ref.LegId, ref.DstSideId)
+		if dst == nil {
+			return fail(opStartCutover, "dst side not found")
+		}
+		if !dst.GetProvisioned() {
+			return fail(opStartCutover, "dst side not provisioned")
+		}
+		cntlr := &pb.Cntlr{}
+		if !s.Get(CntlrKey(cid, spId, cntlrId), cntlr) {
+			return fail(opStartCutover, "cntlr not found")
+		}
+		if !cntlr.GetPrimary() {
+			return fail(opStartCutover, "cntlr not primary")
+		}
+		if cntlr.GetDisabled() {
+			return fail(opStartCutover, "cntlr disabled")
+		}
+		migr.CutoverPending = false
+		s.Put(key, migr)
+		var err error
+		revision, err = bumpSpRevTo(s, opStartCutover, shard, cid, spId)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return revision, nil
 }
 
 // ---------------------------------------------------------------------------

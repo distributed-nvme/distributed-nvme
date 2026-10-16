@@ -7,7 +7,8 @@
 // joins the placement flags on their ids, and the metadata units the planted
 // copies cost (architecture.md, Metadata units): the units put-clone and
 // put-migr size them by and, over an in-memory STM, put-clone's charge to the
-// CN of every cntlr of the pool and put-migr's charge to its destination DN.
+// CN of every cntlr of the pool and put-migr's charge to its destination DN;
+// and how start-cutover names the migration and the cntlr its op checks.
 package main
 
 import (
@@ -1508,6 +1509,87 @@ func TestContainsNameAndAdvanceNextId(t *testing.T) {
 	advanceNextId(conf, 5, 9)
 	if conf.NextId != 10 {
 		t.Fatalf("next_id = %d, want 10", conf.NextId)
+	}
+}
+
+// TestCutoverRefOf pins how start-cutover names a migration for
+// model.StartCutover: the record's id and sides, and the slice and leg that
+// carry both sides — found among the spare legs and in a later slice too —
+// and a refusal for a name with no record and for sides that share no leg.
+func TestCutoverRefOf(t *testing.T) {
+	state := &model.SpState{
+		Conf: &pb.SpConf{SliceIdList: []uint64{1, 2}},
+		Slices: map[uint64]*pb.Slice{
+			1: {MetaGrpList: []*pb.Group{{
+				LegList: []*pb.Leg{{
+					LegId:    11,
+					SideList: []*pb.Side{{SideId: 101}},
+				}},
+			}}},
+			2: {DataGrpList: []*pb.Group{{
+				LegList: []*pb.Leg{{
+					LegId:    21,
+					SideList: []*pb.Side{{SideId: 201}},
+				}},
+				SpareLegList: []*pb.Leg{{
+					LegId: 22,
+					SideList: []*pb.Side{
+						{SideId: 202}, {SideId: 203},
+					},
+				}},
+			}}},
+		},
+		Migrs: map[string]*pb.Migration{
+			"m0": {MigrId: 7, SrcSideId: 202, DstSideId: 203},
+			"m1": {MigrId: 8, SrcSideId: 101, DstSideId: 201},
+		},
+	}
+	ref, err := cutoverRefOf(state, "m0")
+	if err != nil {
+		t.Fatalf("cutoverRefOf(m0): %v", err)
+	}
+	want := model.CutoverRef{
+		MigrName: "m0", MigrId: 7, SliceId: 2, LegId: 22,
+		SrcSideId: 202, DstSideId: 203,
+	}
+	if ref != want {
+		t.Errorf("cutoverRefOf(m0) = %+v, want %+v", ref, want)
+	}
+	if _, err := cutoverRefOf(state, "m1"); err == nil ||
+		!strings.Contains(err.Error(), "share no leg") {
+		t.Errorf("cutoverRefOf(m1) = %v, want a share-no-leg refusal", err)
+	}
+	if _, err := cutoverRefOf(state, "nosuch"); err == nil ||
+		!strings.Contains(err.Error(), "no migration") {
+		t.Errorf("cutoverRefOf(nosuch) = %v, want a no-migration refusal",
+			err)
+	}
+}
+
+// TestStoredPrimary pins the cntlr start-cutover names by default: the one
+// listed cntlr whose record says primary, and a refusal for none or two.
+func TestStoredPrimary(t *testing.T) {
+	stateOf := func(primaries ...bool) *model.SpState {
+		state := &model.SpState{
+			Conf:   &pb.SpConf{},
+			Cntlrs: map[uint64]*pb.Cntlr{},
+		}
+		for i, primary := range primaries {
+			cntlrId := uint64(i + 1)
+			state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, cntlrId)
+			state.Cntlrs[cntlrId] = &pb.Cntlr{Primary: primary}
+		}
+		return state
+	}
+	got, err := storedPrimary(stateOf(false, true, false))
+	if err != nil || got != 2 {
+		t.Errorf("storedPrimary = %d, %v; want 2", got, err)
+	}
+	for _, primaries := range [][]bool{{false, false}, {true, true}} {
+		if got, err := storedPrimary(stateOf(primaries...)); err == nil {
+			t.Errorf("storedPrimary(%v) = %d, want a refusal",
+				primaries, got)
+		}
 	}
 }
 

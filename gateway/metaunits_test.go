@@ -408,10 +408,13 @@ func TestCreateMigrationReplansWhenItsDnFillsUp(t *testing.T) {
 	}
 }
 
-// volEndMigration ends migr-a, by cancel or by a forced finish.
+// volEndMigration ends migr-a, by cancel or by a forced finish, which comes
+// after the cutover: a finish of a migration whose cutover has not started is
+// refused (architecture.md, Migrations).
 func volEndMigration(env *volEnv, finish bool) error {
 	env.t.Helper()
 	if finish {
+		volCutover(env, "migr-a")
 		_, err := env.srv.FinishMigration(env.ctx,
 			&pb.FinishMigrationRequest{
 				ClusterName: env.cluster,

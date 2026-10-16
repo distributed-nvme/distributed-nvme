@@ -398,6 +398,16 @@ func cmdSyncupSide(args []string) {
 	dstProvisioned := fs.Bool("dst-provisioned", false,
 		"migr_src_conf.dst_provisioned — false makes the source behave "+
 			"exactly as if migr_src_conf were absent")
+	// The migration's cutover flag, which the worker copies from the
+	// migration into either side's conf, set from the migration's creation
+	// until its cutover (dnv-worker.md RW15). It lands on whichever of
+	// migr_src_conf and migr_dst_conf this call sends, and a call that sends
+	// neither is refused. A bool like the gates above: always write
+	// --cutover-pending=true.
+	cutoverPending := fs.Bool("cutover-pending", false,
+		"cutover_pending of the migr_src_conf or migr_dst_conf this call "+
+			"sends — true stops a provisioned destination after its "+
+			"metadata wrapper, and changes only a waiting source's row text")
 	// The length to zero (architecture.md, Side provisioning protocol), in
 	// decimal bytes. It has no default the agent accepts: its side conf gate
 	// refuses 0, a length that is not a whole multiple of common.DnZeroAlign
@@ -444,6 +454,7 @@ func cmdSyncupSide(args []string) {
 			DstSideId:      dstSideId,
 			DstDnId:        dstDnId,
 			DstProvisioned: *dstProvisioned,
+			CutoverPending: *cutoverPending,
 		}
 	}
 	if *migrDst != "" {
@@ -468,8 +479,12 @@ func cmdSyncupSide(args []string) {
 				HydrationThreshold: uint32(*hydrThreshold),
 				HydrationBatchSize: uint32(*hydrBatch),
 			},
-			BmCnt: uint32(*bmCnt),
+			BmCnt:          uint32(*bmCnt),
+			CutoverPending: *cutoverPending,
 		}
+	}
+	if *cutoverPending && *migrSrc == "" && *migrDst == "" {
+		die("--cutover-pending needs --migr-src or --migr-dst")
 	}
 
 	conn, client, err := g.dial()

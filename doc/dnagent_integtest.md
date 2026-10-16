@@ -109,6 +109,12 @@ script never derives itself.
   and the node hold no export, dm-error or dm-linear of the side (DN10): the
   kernel check, scoped to the side as a sibling's export is live, catches what
   the agent's own report would hide.
+* **The cutover.** The suite plays the worker's cutover too (`architecture.md`,
+  Migration): in the migration cases every request that carries a
+  migration's conf carries its cutover flag until the cutover, as the
+  worker's do (`dnv-worker.md` RW15), and the cutover is the source's request
+  with its destination provisioned and the flag cleared, the destination's
+  following it without the flag.
 * **Negatives are exact.** Provisioning is healthy (`dnagent.md` DN18), so no
   check is a bare "not OK": each names its exact status — absent or missing
   where nothing may be built, which at the no-migration level covers a
@@ -168,10 +174,17 @@ DN10).
 migrations at once in opposite directions, each node the source of one and the
 destination of the other, so that every stage's two calls go to different
 agents: a destination declared at the no-migration level provisions with no
-clone and no connection (`dnagent.md` DN11, DN13); a source told its
-destination is not provisioned serves as if no migration existed (DN12); the
-cutover fences the source (`architecture.md`, [D12]), whose path the host then
-reads inaccessible; one converge enables the destination, whose connection
+clone and no connection (`dnagent.md` DN11, DN13); at the read-write level,
+the cutover still pending, it builds its metadata wrapper and its export
+over its dm-error and nothing past them, no connection and no clone, the
+host's path to it staying live and inaccessible, and its two migration rows
+read provisioning, waiting for the cutover, with the reason the worker's
+cutover reads, on a converge and on the read-only channels alike (DN13,
+DN18); a source told its destination is not provisioned, the cutover
+pending, serves as if no migration existed, its migration rows reading the
+same wait with no reason (DN12); the cutover fences the source
+(`architecture.md`, [D12]), whose path the host then reads inaccessible; one
+converge enables the destination, whose connection
 exercises `dnagent.md` SH17 and SH20, and whose clone's table carries exactly
 the no-hydration and no-discard-passdown pair (DN13; `architecture.md`, [D7]);
 the last must-copy region reads from the destination as the source holds it,
@@ -280,11 +293,12 @@ Error paths beyond the stale probe and migr_full's lost source, the
 provisioning error rows among them (`dnagent.md` DN9); a migration
 destination that waits for a free run in the clone-metadata area, and the
 other states of the destination's shared row rule, whose rows the unit
-tests cover (DN13); the cn role; fault injection under a live stack beyond
-that lost source, the teardown case removing a real remote instead; a
-shutdown that meets a background task starting or a fence timer armed
-(`dnagent.md` SH27), and the lock entry a refused request must not leave
-(`dnagent.md`, Concurrency — `locks.go`), both left to the unit tests;
-performance; TLS and authentication; levels other than read-write and
+tests cover (DN13); the destination's retries of a failed connect within
+its pass, left to the unit tests (DN13); the cn role; fault injection under
+a live stack beyond that lost source, the teardown case removing a real
+remote instead; a shutdown that meets a background task starting or a fence
+timer armed (`dnagent.md` SH27), and the lock entry a refused request must
+not leave (`dnagent.md`, Concurrency — `locks.go`), both left to the unit
+tests; performance; TLS and authentication; levels other than read-write and
 no-migration (`dnagent.md` DN11); lock contention on one agent; the source
 half of a cancelled migration; a zeroing batch cancelled mid-flight.

@@ -264,6 +264,15 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateMigration for the FinishMigration case: %v", err)
 	}
+	// The sp-worker's cutover, played on the record: a finish of a migration
+	// whose cutover has not started is refused, force or not
+	// (architecture.md, Migrations), which would stand in for the conf
+	// refusal.
+	finMigrKey := model.MigrationKey(env.cid, spId, finMigrName)
+	finMigr := &pb.Migration{}
+	env.get(finMigrKey, finMigr)
+	finMigr.CutoverPending = false
+	mustPut(t, env.cli, finMigrKey, finMigr)
 	cancelMigrName := "sc-cancel-migr"
 	if _, err := env.srv.CreateMigration(env.ctx, &pb.CreateMigrationRequest{
 		ClusterName: env.name,

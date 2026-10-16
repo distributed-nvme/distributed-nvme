@@ -7,8 +7,10 @@ import (
 
 // WaitBudget is a bounded amount of waiting one pass may spend on the node
 // catching up with what the pass itself just asked of it: the cn connect
-// step's one budget per converge pass (cnagent.md CN10, CN18) and the dn
-// migration destination's wait for the source namespace (dnagent.md DN13).
+// step's one budget per converge pass (cnagent.md CN10, CN18), and the dn
+// migration destination's two, one for the retries of its connect to the
+// migration source export and one for its wait for the source namespace
+// (dnagent.md DN13).
 //
 // It is an ACCUMULATOR, not a deadline. Nothing but what a caller explicitly
 // charges or pauses draws on it — a pass may spend any amount of time on

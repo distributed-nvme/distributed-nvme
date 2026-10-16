@@ -111,7 +111,10 @@ func widestCounts() map[protoreflect.FullName]int {
 		"CntlrInfo.clone_id_to_target":           common.MaxCloneCntPerSp,
 		"CntlrInfo.clone_id_to_dm_clone":         common.MaxCloneCntPerSp,
 		"CntlrInfo.clone_id_to_meta":             common.MaxCloneCntPerSp,
-		"SyncupCntlrReply.bm_info_list":          common.MaxCloneCntPerSp,
+		// A path row per side of each leg with two sides: at most
+		// MaxMigrCntPerSp migrations, two sides each.
+		"CntlrInfo.side_id_to_path":     2 * common.MaxMigrCntPerSp,
+		"SyncupCntlrReply.bm_info_list": common.MaxCloneCntPerSp,
 		// A migration's list; a cntlr reports the bitmaps of clones only.
 		"BitmapInfo.bm_idx_list":   0,
 		"BitmapInfo.chunk_id_list": common.MaxSliceCntPerSp * common.MaxCloneBmCnt,
@@ -143,10 +146,12 @@ func widestKeyLens() map[protoreflect.FullName]int {
 }
 
 // widestRowNames is the length of the name of a row of each map of a cntlr
-// report: an NQN, an NQN and a namespace index, or a dm device name.
+// report: an NQN, an NQN and a namespace index, a dm device name, or a
+// side's address.
 func widestRowNames() map[protoreflect.FullName]int {
 	nqnRow := common.MaxNqnLength
 	nsRow := common.MaxNqnLength + nsRowSuffix
+	pathRow := 2*common.MaxStrSize + len(":")
 	return map[protoreflect.FullName]int{
 		"CntlrInfo.ss_id_to_subsystem":           nqnRow,
 		"CntlrInfo.ns_id_to_namespace":           nsRow,
@@ -165,6 +170,9 @@ func widestRowNames() map[protoreflect.FullName]int {
 		"CntlrInfo.clone_id_to_target":           nqnRow,
 		"CntlrInfo.clone_id_to_dm_clone":         dmNameMax,
 		"CntlrInfo.clone_id_to_meta":             dmNameMax,
+		// A path row is named by its side's address, tr_addr:tr_svc_id
+		// (legPathRows), each part a name of at most MaxStrSize.
+		"CntlrInfo.side_id_to_path": pathRow,
 	}
 }
 
@@ -522,6 +530,10 @@ func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 		got, want int
 	}{
 		{"leg rows", len(info.GetLegIdToLeg()), want.legs + want.spares},
+		// Every side of a leg with two sides: twice the legs a migration
+		// gave a second side.
+		{"path rows", len(info.GetSideIdToPath()),
+			2 * (want.sides - want.legs - want.spares)},
 		{"group rows", len(info.GetGrpIdToMdRaid()), want.groups},
 		{"thin rows", thinRows, len(syncup.GetTdList()) * want.slices},
 		{"clone chunk ids", chunkIds,
@@ -613,7 +625,7 @@ func TestFlipProvisionedAtTheSliceCeiling(t *testing.T) {
 			mib(clientv3DefaultSendBytes), mib(common.EtcdMaxRequestBytes))
 	}
 
-	flipped, err := FlipProvisioned(ctx, cli, cid, shard, spId, refs)
+	flipped, _, err := FlipProvisioned(ctx, cli, cid, shard, spId, refs)
 	if err != nil {
 		t.Fatalf("FlipProvisioned over %d widest slices: %v (\"trying to "+
 			"send message larger than max\" is the client's send limit, "+

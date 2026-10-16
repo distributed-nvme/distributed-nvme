@@ -852,7 +852,8 @@ none of them. See CN21's P0.
 A primary-to-standby flip is therefore nothing but "the desired set
 shrank to the standby shape"; standby-to-primary is "it grew".
 The CN's whole part in a migration is a leg's two-sided `side_list`
-(CN10): the cntlr request names no migration.
+(CN10) and the path rows it reports for such a leg (CN28): the cntlr
+request names no migration.
 
 CN10. Legs (`leg.go`; every leg of every group of every slice in
 `id_to_slice`, `spare_leg_list` included, both roles). Per side in the
@@ -862,7 +863,9 @@ sp, leg and this cn at the side's `nvme_tr_conf`, with the host NQN
 dn exports nothing for it yet (`dnagent.md` DN9, DN10), so a connect
 could only fail and arm the retry registry. Provisioned sides of the same
 leg connect normally, which is what keeps a two-side migrating leg
-serving while its destination side zeroes. A leg all of whose sides are
+serving while its destination side zeroes, and what connects every cntlr
+to the destination once it is provisioned, before the migration's
+cutover (`architecture.md`, Migration). A leg all of whose sides are
 unprovisioned is provisioning (CN9): no connection, no `CnLegName`
 wrapper, no prober, and `leg_id_to_leg` reports `RES_STATUS_PROVISIONING`
 (CN28). All sides of a leg share that one NQN, so the kernel merges them
@@ -3261,6 +3264,45 @@ The rows, each with its `res_name` and what its probe checks:
   disconnect registry) reports `RES_STATUS_ERROR` with the converge's own
   details and is not probed. On a standby, a walk or a lookup that did
   not answer (CN10) reads `RES_STATUS_ERROR` naming the read.
+* `side_id_to_path`, keyed by side id and named by the side's transport
+  address and service id, joined by a colon: the path rows, one per side
+  of each leg whose `side_list` holds two sides — a migration's (CN10) —
+  and none for a leg with one side, each saying whether this node holds a
+  live controller to that side. Every cntlr reports them, primary and
+  standby alike, on both channels, through one function, which reads a
+  row in this order: `RES_STATUS_MISSING` "sp_level" while the level
+  suppresses legs (CN19), as the leg row does; `RES_STATUS_PROVISIONING`
+  "provisioning" while the side is unprovisioned, since nothing is
+  exported for it (CN9); `RES_STATUS_ERROR` with the leg row's details
+  while a sweep's disconnect of the leg's subsystem is in flight (CN10's
+  disconnect registry); otherwise the leg's lookup in the walk:
+  `RES_STATUS_OK` when a live controller of the subsystem has the side's
+  address, `RES_STATUS_ERROR` when that controller is not live, both with
+  the controller's "state" and "ana_state" as the details, and
+  `RES_STATUS_MISSING` "no controller" when no controller has it. A walk
+  or a lookup that did not answer reads `RES_STATUS_ERROR` naming the
+  read, never `MISSING`, and so does a subsystem one of whose
+  controllers' "address" read did not answer when no controller has the
+  side's address, since that controller may be the side's (CN10). The
+  ANA state does not count: while a migration's cutover is pending its
+  destination exports inaccessible, and the cutover asks only for a live
+  path (`dnv-worker.md` RW18); right after a connect the "ana_state" can
+  read empty for a moment, the kernel's scan adding the path device after
+  the connect returns. A converge's rows read the lookup its connect step
+  made; for a leg whose connect step failed they look the leg up again,
+  so they say what the node holds rather than the connect's error. In a
+  check round and an info read they come first in each leg's turn, and a
+  standby's leg row reads their lookup, so a primary's round looks up only
+  the legs with two sides, and a standby's round each leg once, or twice
+  where that lookup did not answer. The
+  worker's cutover reads the primary's row of a migration's destination
+  side (`dnv-worker.md` RW18), and no health rule judges these rows
+  (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
+  row carries its prober's verdict, which goes over the serving path and
+  says nothing of the destination, while a row for every side of every
+  leg would grow the largest report with the pool's legs; legs with two
+  sides are bounded by the migrations (`architecture.md`, Live-state
+  reporting).
 * `xfer_id_to_dm_linear`, `xfer_id_to_subsystem` and
   `xfer_id_to_namespace`, named by the `CnXferFinalName`, the `XferNqn`
   and the `XferNqn` with the origin namespace index: `dmsetup table` and

@@ -848,6 +848,8 @@ func TestCntlrInfoDerivation(t *testing.T) {
 	wantKeys(t, "xfer_id_to_namespace", info.GetXferIdToNamespace(), 51)
 	// thin_ok is absent, so the thin map stays empty even on the primary.
 	wantKeys(t, "td_id_to_thin_info", info.GetTdIdToThinInfo())
+	// No leg of the fixture has two sides, so there is no path row.
+	wantKeys(t, "side_id_to_path", info.GetSideIdToPath())
 
 	leg := info.GetLegIdToLeg()[103]
 	if leg.GetResName() != "leg_id_to_leg.103" ||
@@ -1059,6 +1061,238 @@ func TestSideInfoDerivation(t *testing.T) {
 	if info.GetZeroedBytes() != 8<<20 || info.GetZeroBytes() != 8<<20 {
 		t.Errorf("counters = %d/%d, want the override %d/%d",
 			info.GetZeroedBytes(), info.GetZeroBytes(), 8<<20, 8<<20)
+	}
+}
+
+// syncupMigrDst sends a migration destination's SyncupSide: side_conf
+// provisioned or not, and migr_dst_conf with or without cutover_pending.
+func syncupMigrDst(
+	t *testing.T, client pb.DiskNodeAgentClient, ptr *pb.SidePointer,
+	revision uint64, provisioned bool, pending bool,
+) *pb.SyncupSideReply {
+	t.Helper()
+	reply, err := client.SyncupSide(context.Background(),
+		&pb.SyncupSideRequest{
+			ClusterId:   1,
+			DnId:        1,
+			SidePointer: ptr,
+			Revision:    revision,
+			SideConf: &pb.SyncupSideRequest_SideConf{
+				ExtCnt:      2,
+				PrimaryCnId: 1,
+				ZeroBytes:   testZeroBytes,
+				Provisioned: provisioned,
+			},
+			MigrDstConf: &pb.SyncupSideRequest_MigrDstConf{
+				MigrId:         30,
+				CutoverPending: pending,
+			},
+		})
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if code := reply.GetAgentReply().GetCode(); code != 0 {
+		t.Fatalf("SyncupSide code = %d (%s)", code,
+			reply.GetAgentReply().GetDetails())
+	}
+	return reply
+}
+
+// wantRow asserts one ResInfo's status, details and reason.
+func wantRow(
+	t *testing.T, name string, row *pb.ResInfo,
+	status pb.ResStatus, details string, reason pb.ResReason,
+) {
+	t.Helper()
+	if row.GetResName() != name || row.GetStatus() != status ||
+		row.GetDetails() != details || row.GetReason() != reason {
+		t.Errorf("%s = %v, want %v %q %v", name, row, status, details,
+			reason)
+	}
+}
+
+// TestSideInfoAwaitsTheCutover is the fake's half of the cutover
+// (dnv-worker.md, Integration test plan, The fake agent): a migration
+// destination whose request carries the side provisioned and the cutover
+// pending reports both migr_dst_info rows PROVISIONING "waiting for the
+// cutover" with RES_REASON_AWAITING_CUTOVER, on the Syncup reply and on
+// GetSideInfo alike; neither half alone does, and a lever that moves a row
+// off PROVISIONING takes the reason with it.
+func TestSideInfoAwaitsTheCutover(t *testing.T) {
+	const (
+		target = "migr_dst_info.target_info"
+		clone  = "migr_dst_info.dm_clone_info"
+		ok     = pb.ResStatus_RES_STATUS_OK
+		prov   = pb.ResStatus_RES_STATUS_PROVISIONING
+		none   = pb.ResReason_RES_REASON_NONE
+		await  = pb.ResReason_RES_REASON_AWAITING_CUTOVER
+	)
+	for _, tc := range []struct {
+		name        string
+		provisioned bool
+		pending     bool
+		behavior    string
+		wantTarget  [3]any
+		wantClone   [3]any
+	}{
+		{
+			name:       "pending but not provisioned",
+			pending:    true,
+			wantTarget: [3]any{ok, "", none},
+			wantClone:  [3]any{ok, "", none},
+		},
+		{
+			name:        "provisioned, the cutover started",
+			provisioned: true,
+			wantTarget:  [3]any{ok, "", none},
+			wantClone:   [3]any{ok, "", none},
+		},
+		{
+			name:        "provisioned and pending",
+			provisioned: true,
+			pending:     true,
+			wantTarget:  [3]any{prov, detailsAwaitingCutover, await},
+			wantClone:   [3]any{prov, detailsAwaitingCutover, await},
+		},
+		{
+			name:        "a lever moves the target row off PROVISIONING",
+			provisioned: true,
+			pending:     true,
+			behavior: `{"objects": {"side 1:3:5": {"rows": {
+			  "migr_dst_info.target_info": {"status": "MISSING",
+			                                "details": "held"}}}}}`,
+			wantTarget: [3]any{pb.ResStatus_RES_STATUS_MISSING, "held", none},
+			wantClone:  [3]any{prov, detailsAwaitingCutover, await},
+		},
+		{
+			name:        "a lever on the details alone keeps the reason",
+			provisioned: true,
+			pending:     true,
+			behavior: `{"objects": {"side 1:3:5": {"rows": {
+			  "migr_dst_info.target_info": {"details": "other text"}}}}}`,
+			wantTarget: [3]any{prov, "other text", await},
+			wantClone:  [3]any{prov, detailsAwaitingCutover, await},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newTestAgent(t)
+			dnClient, _ := startAgent(t, agent)
+			if tc.behavior != "" {
+				writeFile(t, agent, behaviorFileName, tc.behavior)
+			}
+			ptr := sidePtr(1, 3, 5)
+			syncupDn(t, dnClient, 1, ptr)
+			reply := syncupMigrDst(
+				t, dnClient, ptr, 1, tc.provisioned, tc.pending)
+			got, err := dnClient.GetSideInfo(context.Background(),
+				&pb.GetSideInfoRequest{
+					ClusterId: 1, DnId: 1, SidePointer: ptr,
+				})
+			if err != nil {
+				t.Fatalf("GetSideInfo: %v", err)
+			}
+			for _, info := range []*pb.SideInfo{
+				reply.GetSideInfo(), got.GetSideInfo(),
+			} {
+				dst := info.GetMigrDstInfo()
+				wantRow(t, target, dst.GetTargetInfo(),
+					tc.wantTarget[0].(pb.ResStatus),
+					tc.wantTarget[1].(string),
+					tc.wantTarget[2].(pb.ResReason))
+				wantRow(t, clone, dst.GetDmCloneInfo(),
+					tc.wantClone[0].(pb.ResStatus),
+					tc.wantClone[1].(string),
+					tc.wantClone[2].(pb.ResReason))
+			}
+		})
+	}
+}
+
+// TestCntlrInfoPathRows is the fake's side_id_to_path (dnv-worker.md,
+// Integration test plan, The fake agent): one row per side of a leg with two
+// sides and none for any other leg, on a standby as on the primary, live for
+// a provisioned side and held at provisioning for one that is not, under the
+// row levers.
+func TestCntlrInfoPathRows(t *testing.T) {
+	request := func(primary bool) *pb.SyncupCntlrRequest {
+		req := cntlrFixture(primary)
+		grp := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, 1)].
+			GetDataGrpList()[0]
+		// Leg 103 is mid-migration, src side 61 provisioned and dst side
+		// 62 not yet; leg 104 has the one side every other leg has.
+		grp.GetLegList()[0].SideList = []*pb.Side{
+			{SideId: 61, Provisioned: true},
+			{SideId: 62},
+		}
+		grp.GetLegList()[1].SideList = []*pb.Side{
+			{SideId: 63, Provisioned: true},
+		}
+		return req
+	}
+	syncup := func(
+		t *testing.T, cnClient pb.ControllerNodeAgentClient,
+		req *pb.SyncupCntlrRequest,
+	) *pb.CntlrInfo {
+		t.Helper()
+		ctx := context.Background()
+		if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+			ClusterId: 1, CnId: 1, Revision: 1,
+			CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
+		}); err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		reply, err := cnClient.SyncupCntlr(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if code := reply.GetAgentReply().GetCode(); code != 0 {
+			t.Fatalf("SyncupCntlr code = %d", code)
+		}
+		return reply.GetCntlrInfo()
+	}
+	const (
+		ok   = pb.ResStatus_RES_STATUS_OK
+		prov = pb.ResStatus_RES_STATUS_PROVISIONING
+		none = pb.ResReason_RES_REASON_NONE
+	)
+	for _, primary := range []bool{false, true} {
+		t.Run(fmt.Sprintf("primary %v", primary), func(t *testing.T) {
+			agent := newTestAgent(t)
+			_, cnClient := startAgent(t, agent)
+			info := syncup(t, cnClient, request(primary))
+			wantKeys(t, "side_id_to_path", info.GetSideIdToPath(), 61, 62)
+			wantRow(t, "side_id_to_path.61", info.GetSideIdToPath()[61],
+				ok, detailsPathLive, none)
+			wantRow(t, "side_id_to_path.62", info.GetSideIdToPath()[62],
+				prov, detailsPathProvisioning, none)
+
+			// The dst side provisioned: both paths live.
+			req := request(primary)
+			req.Revision++
+			req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, 1)].
+				GetDataGrpList()[0].GetLegList()[0].
+				GetSideList()[1].Provisioned = true
+			info = syncup(t, cnClient, req)
+			wantRow(t, "side_id_to_path.62", info.GetSideIdToPath()[62],
+				ok, detailsPathLive, none)
+
+			// A row lever holds one path down; the other stays live.
+			writeFile(t, agent, behaviorFileName, `{"objects": {
+			  "cntlr 1:1": {"rows": {"side_id_to_path.62":
+			    {"status": "MISSING", "details": "no controller"}}}}}`)
+			got, err := cnClient.GetCntlrInfo(context.Background(),
+				&pb.GetCntlrInfoRequest{
+					ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
+				})
+			if err != nil {
+				t.Fatalf("GetCntlrInfo: %v", err)
+			}
+			paths := got.GetCntlrInfo().GetSideIdToPath()
+			wantRow(t, "side_id_to_path.62", paths[62],
+				pb.ResStatus_RES_STATUS_MISSING, "no controller", none)
+			wantRow(t, "side_id_to_path.61", paths[61],
+				ok, detailsPathLive, none)
+		})
 	}
 }
 

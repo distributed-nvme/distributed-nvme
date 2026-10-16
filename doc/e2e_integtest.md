@@ -380,12 +380,16 @@ source left to read through, holds what hydration copied (`architecture.md`,
 Transfer + clone = cross-SP live migration, [D3]); a source on the primary's
 own kernel that fails routes to a second pool on another controller node
 (Known limits). A migration moves
-a side to a disk node outside its group, on a distinct cntlid slot, its leg
-bitmap read and pushed only once the primary reaches the leg through the new
-side, and finishes under the same leg id with an optimized path before any
-read (`architecture.md`, Migration; `dnagent.md` DN12, DN13); a cancelled one
-leaves its source untouched, the case relying on leg repair leaving a
-two-sided leg alone (`dnv-worker.md` AR8). A spare leg (raid1 only) is
+a side to a disk node outside its group, on a distinct cntlid slot. Its
+cutover comes only once the primary holds a live path to the new side, and
+the worker's record of it names the primary and a reply of the primary's at
+a revision no older than the new side's provisioned flip
+(`dnv-worker.md` RW18). Its leg bitmap is read and pushed only once the
+primary reaches the leg through the new side, and it finishes under the
+same leg id with an optimized path before any read (`architecture.md`,
+Migration; `dnagent.md` DN12, DN13); a cancelled one leaves its source
+untouched, the case relying on leg repair leaving a two-sided leg alone
+(`dnv-worker.md` AR8). A spare leg (raid1 only) is
 connected by both cntlrs and switched in, the replaced leg parked and then
 deleted, md's rebuild onto it judged by the array's state words rather than
 its OK status (`architecture.md`, Spare legs; `cnagent.md` CN10, CN12, CN28).

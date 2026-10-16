@@ -537,6 +537,13 @@ away needs no proof about the copy — while `migr finish` has one; and
 chunks are an append sequence, while a clone chunk is addressed by the pair
 of source slice and chunk index (`clone` — `ctl/clone.go`).
 
+`migr finish` with `--force` sends `force` true, which skips the gateway's
+proof that the copy finished and nothing else: a migration whose cutover
+has not started is refused with `--force` or without, and `migr cancel` is
+the way out (`architecture.md`, Migrations). `migr get` prints the record
+as stored, its `cutover_pending` included (CT4), which tells whether a
+finish can succeed yet.
+
 ## Integration test plan
 
 **What the suite proves.** `integtest/dnvctl_test.sh` proves, against a real

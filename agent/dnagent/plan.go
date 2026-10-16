@@ -49,6 +49,12 @@ const (
 	// destination that waits for a free run in the node's clone-metadata
 	// area (DN13); metaRoomDetails puts the area's own text after it.
 	tagMetaRoomWait = "waiting for metadata room"
+	// tagCutoverWait is the RES_STATUS_PROVISIONING detail of a migration's
+	// rows while its request carries cutover_pending: the src side's
+	// migr_src_info rows in place of tagProvisioningWait (DN12), and the dst
+	// side's two migr_dst_info rows once its metadata wrapper stands, which
+	// carry RES_REASON_AWAITING_CUTOVER too (DN13, DN18).
+	tagCutoverWait = "waiting for the cutover"
 )
 
 // metaRoomDetails is the detail of every row that waits for a free run in
@@ -102,13 +108,15 @@ type sidePlan struct {
 	// zeroed count over the flag, because the disk is authoritative ([D13]).
 	provisioned bool
 	// migrSrcRaw is migr_src_conf exactly as received, and migrSrcDeferred
-	// says the destination has not provisioned yet. In that case migrSrc above
-	// is nil, because `dst_provisioned = false` is **exactly
-	// equivalent** to "no migr_src_conf at all" (architecture.md, Migration):
-	// fencing at migration start would leave the leg with no serving path for
-	// the whole zeroing
-	// window. The only visible difference is that the would-be migr_src_info
-	// rows report PROVISIONING.
+	// says its dst_provisioned is false: the destination has not provisioned
+	// yet, or the migration's cutover is pending, which the request's
+	// cutover_pending tells apart. In that case migrSrc above is nil, because
+	// `dst_provisioned = false` is **exactly equivalent** to "no
+	// migr_src_conf at all" (architecture.md, Migration): fencing at
+	// migration start would leave the leg with no serving path for the whole
+	// zeroing window and the wait for the cutover. The only visible
+	// difference is that the would-be migr_src_info rows report PROVISIONING
+	// (reportMigrSrcDeferred).
 	migrSrcRaw      *pb.SyncupSideRequest_MigrSrcConf
 	migrSrcDeferred bool
 

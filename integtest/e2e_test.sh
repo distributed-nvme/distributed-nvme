@@ -11800,14 +11800,17 @@ COPY_HYD_MARK=0
 COPY_SRC_START=0
 
 # The two migrations, and the "last observation" scratch of the predicates
-# below (migr_dst_serving, leg_bm_read and side_hydrated share MIGR_HYD_LAST,
-# as no two of their waits overlap). Each of those is logged from inside its
-# predicate when the value CHANGES and is never interpolated into a
-# wait_until label: a label is expanded once, at the call, so it can only
-# carry what was there before the first poll.
+# below (migr_cutover_started, migr_dst_serving, leg_bm_read and
+# side_hydrated share MIGR_HYD_LAST, as no two of their waits overlap). Each
+# of those is logged from inside its predicate when the value CHANGES and is
+# never interpolated into a wait_until label: a label is expanded once, at
+# the call, so it can only carry what was there before the first poll.
+# COPY_FLIP_RECS is copy_flip_records' answer, kept in the parent shell so a
+# predicate can hand it to its caller.
 MIGR0_ID=""
 MIGR1_ID=""
 MIGR_HYD_LAST=""
+COPY_FLIP_RECS=""
 MD_STATE_LAST=""
 SRC_STACK_LAST=""
 
@@ -11992,8 +11995,9 @@ copy_clone_progress() { # <cntlr id> <clone id>
 # hydrationComplete on migr_dst_info.dm_clone_info.details — so a
 # `migr finish` issued after this wait cannot be refused for lack of proof.
 #
-# Until the destination side has finished zeroing there is no dm-clone at all
-# and the row reports PROVISIONING or nothing; both keep the poll going.
+# Until the destination has built its dm-clone, which it does only once the
+# cutover has started, the row reports a status other than OK or nothing;
+# every one of them keeps the poll going.
 side_hydrated() { # <side id>
 	local st det frac sig
 	if ! ctl_try sp inspect-side --id "$1"; then
@@ -12018,12 +12022,13 @@ side_hydrated() { # <side id>
 # side_hydrated reads, migr_dst_info.dm_clone_info — RES_STATUS_OK once every
 # step of the destination holds over a source that serves and the device's
 # status line shows the hydration its conf asks for, RES_STATUS_PROVISIONING
-# while DN9's gate is closed on the side or its node's metadata area has no
-# room for it, another status otherwise (dnagent.md, DN13, DN18), by one rule
-# on a converge and a Check round alike. It is the first of the two waits
-# in front of the copy case's leg bitmap read; the second is the primary's
-# own path to the destination reading optimized (architecture.md,
-# Migration; copy_migration says why).
+# while DN9's gate is closed on the side, its node's metadata area has no
+# room for it or it waits for the cutover, another status otherwise
+# (dnagent.md, DN13, DN18), by one rule on a converge and a Check round
+# alike. After the cutover wait it is the first of the two waits in front of
+# the copy case's leg bitmap read; the second is the primary's own path to
+# the destination reading optimized (architecture.md, Migration;
+# copy_migration says why).
 migr_dst_serving() { # <side id>
 	local st sig
 	if ! ctl_try sp inspect-side --id "$1"; then
@@ -12037,6 +12042,99 @@ migr_dst_serving() { # <side id>
 		log "  migration destination side $1: $sig"
 	fi
 	[ "$st" = RES_STATUS_OK ]
+}
+
+# migr_cutover_started is "the worker has started the migration's cutover"
+# as the gateway's record says it: `migr get` reads cutover_pending false.
+# CreateMigration writes the flag set, and only the worker's cutover clears
+# it (architecture.md, Migrations; dnv-worker.md, RW18). A failed read keeps
+# the poll going and is logged when its message changes, so a NOT_FOUND
+# from a migration that went away shows in the transcript before the wait
+# times out.
+migr_cutover_started() { # <migr name>
+	local pending sig
+	pending=""
+	if ctl_try migr get --name "$1"; then
+		pending=$(jq_of "$CTL_OUT" '.migr.cutover_pending')
+		sig="cutover_pending=$pending"
+	else
+		sig=${CTL_ERR:-"dnvctl exit code $CTL_RC"}
+	fi
+	if [ "$sig" != "$MIGR_HYD_LAST" ]; then
+		MIGR_HYD_LAST=$sig
+		log "  migration $1: $sig"
+	fi
+	[ "$pending" = false ]
+}
+
+# copy_flip_records sets COPY_FLIP_RECS to the worker log's `flip applied`
+# records (dnv-worker.md, Log records) of <kind> in this case's sp that also
+# pass <jq condition>, one compact JSON object per line, parsed on the
+# driver; `fromjson?` drops a line torn by a write still in progress. The
+# ids are slog's bare numbers. Fatal on a log it cannot read, as
+# worker_msg_cnt is: an empty answer read that way would keep a caller
+# polling a log it never read. It runs in the caller's shell, never in a
+# command substitution, so a die here ends the run.
+copy_flip_records() { # <kind> <jq condition>
+	local lines
+	case "$SP_ID" in
+	'' | *[!0-9]*) die "copy_flip_records: SP_ID is '$SP_ID', not a decimal id" ;;
+	esac
+	COPY_FLIP_RECS=""
+	lines=$(ssh_cp "grep -F '\"msg\":\"flip applied\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read the flip records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$lines" ] || return 0
+	COPY_FLIP_RECS=$(printf '%s\n' "$lines" | "$JQ" -R -c --arg kind "$1" \
+		"fromjson? // empty | select(.kind == \$kind and .sp_id == $SP_ID and ($2))") ||
+		die "copy_flip_records: jq failed on the worker's flip records ($2)"
+}
+
+# copy_cutover_logged is true once the worker's log holds a cutover record
+# of migration <migr id>.
+copy_cutover_logged() { # <migr id>
+	copy_flip_records cutover ".migr_id == $1"
+	[ -n "$COPY_FLIP_RECS" ]
+}
+
+# copy_check_cutover checks the worker's record of a migration's cutover:
+# exactly one `flip applied` record of kind cutover for <migr id>, naming
+# the migration's two sides, the case's primary as the cntlr whose report it
+# acted on, and a report_revision at or after the revision of the
+# destination's one `flip applied` record of kind provisioned (copy_migration
+# says why). The worker logs the cutover after its transaction commits, so
+# the record can trail the flag that migr_cutover_started read by a moment;
+# it is polled for under WAIT_SHORT.
+copy_check_cutover() { # <migr id> <src side id> <dst side id>
+	local n rec provrev rrev
+	case "$1$2$3$PRIMARY_CNTLR_ID" in
+	'' | *[!0-9]*) die "copy_check_cutover: the ids '$1' '$2' '$3' '$PRIMARY_CNTLR_ID' are not decimal" ;;
+	esac
+	wait_until "$WAIT_SHORT" \
+		"the worker to log the cutover of migration $1" \
+		copy_cutover_logged "$1"
+	rec=$COPY_FLIP_RECS
+	n=$(printf '%s\n' "$rec" | grep -c . || true)
+	assert_eq "$n" 1 "the worker's 'flip applied' records of kind cutover for migration $1"
+	assert_field "$rec" '.src_side_id' "$2" "the cutover record's src_side_id"
+	assert_field "$rec" '.dst_side_id' "$3" "the cutover record's dst_side_id"
+	assert_field "$rec" '.cntlr_id' "$PRIMARY_CNTLR_ID" \
+		"the cutover record's cntlr_id: the cutover acts only on a live path the primary reported"
+	rrev=$(jq_of "$rec" '.report_revision')
+	copy_flip_records provisioned ".side_id == $3"
+	n=$(printf '%s\n' "$COPY_FLIP_RECS" | grep -c . || true)
+	assert_eq "$n" 1 "the worker's 'flip applied' records of kind provisioned for side $3"
+	provrev=$(jq_of "$COPY_FLIP_RECS" '.revision')
+	case "$rrev" in
+	'' | *[!0-9]*) die "the cutover record's report_revision reads '$rrev': $rec" ;;
+	esac
+	case "$provrev" in
+	'' | *[!0-9]*) die "side $3's provisioned flip record's revision reads '$provrev': $COPY_FLIP_RECS" ;;
+	esac
+	assert_ge "$rrev" "$provrev" \
+		"the cutover record's report_revision vs the revision of side $3's provisioned flip"
+	log "  the worker started migration $1's cutover on cntlr $PRIMARY_CNTLR_ID's" \
+		"reply at revision $rrev; side $3 was provisioned at revision $provrev"
 }
 
 # leg_bm_read is the copy case's leg bitmap read as a poll. The primary's cn
@@ -12948,18 +13046,26 @@ copy_xfer_delete() {
 #
 # WHAT IT DOES HAVE TO WAIT FOR, AND THE TRAP THAT MAKES IT MANDATORY. "ANA
 # picks the live one" is true only once there IS one. agent/dnagent/plan.go's
-# anaGrpId puts a migration SOURCE in AnaGrpIdInaccessible once
-# its destination is provisioned, and a DESTINATION in AnaGrpIdInaccessible
-# until `cloneLive`, which holds once its converge has a dm-clone to serve
-# through (ensureMigrDst, agent/dnagent/migr.go). So from that provisioning
-# until the destination serves, EVERY path of that leg is inaccessible,
-# and an inaccessible nvme namespace REQUEUES rather than errors. A host read
-# issued in that window blocks in D state, where `timeout` cannot reach it.
+# anaGrpId puts a migration SOURCE in AnaGrpIdInaccessible once its request
+# carries dst_provisioned, which the worker sends only after it has started
+# the migration's cutover (architecture.md, Migration; dnv-worker.md, RW15,
+# RW18), and a DESTINATION in AnaGrpIdInaccessible until `cloneLive`, which
+# holds once its converge has a dm-clone to serve through (ensureMigrDst,
+# agent/dnagent/migr.go). So from the source's first step after the cutover
+# until the destination serves — the migration gap — EVERY path of that leg
+# is inaccessible, and an inaccessible nvme namespace REQUEUES rather than
+# errors. A host read issued in that window blocks in D state, where
+# `timeout` cannot reach it. The cutover waits for the destination's zeroing
+# and for the primary's live path to it, so the gap holds only the disk
+# nodes' steps that the cutover's syncups start: the source's, then the
+# destination's connect to the source, its dm-clone and its ANA write. The
+# gap is short, but nothing here bounds it.
 #
 # This step therefore issues NO host IO between `migr create` and the wait
-# that proves the leg is serving again, and it proves that from the PRIMARY
-# CN's own view of its path (cn_wait_ana), not from the gateway's record — the
-# record going away is what the DN acts on, one syncup later.
+# that proves the leg is serving again. The gateway's record cannot prove
+# that: cutover_pending clears just BEFORE the gap begins, and the record's
+# removal at the finish is what the DN acts on, one syncup later. So the
+# proof is the PRIMARY CN's own view of its path (cn_wait_ana).
 #
 # The worker will not interfere, and that holds for a reason that does not
 # depend on a number: AR8 skips a leg with two sides outright ("two sides means
@@ -12987,7 +13093,7 @@ copy_xfer_delete() {
 # has somewhere anti-affine to go; with DN_VM_CNT == LEGS it is skipped with a
 # log line instead of failing a run that is behaving correctly.
 copy_migration() {
-	stage 04 "migr create, append-bm, finish — then a second one, cancelled"
+	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
 	local hex v k legnqn straddr strsvcid dsttraddr dsttrsvcid
 
@@ -13082,6 +13188,30 @@ copy_migration() {
 	assert_field "$CTL_OUT" '.migr.dst_side_id' "$dstside" "the migration's destination side"
 	assert_field "$CTL_OUT" '.migr.bm_cnt' 0 \
 		"a fresh migration holds no bitmap chunks (uint32, a bare number)"
+	assert_jq "$CTL_OUT" '(.migr.cutover_pending | type) == "boolean"' \
+		"GetMigration renders cutover_pending, a false included (CT4)"
+
+	# THE CUTOVER. The source keeps serving the leg until the worker starts
+	# the migration's cutover, and the worker starts it only once the
+	# destination has zeroed and reports that it waits for the cutover, and
+	# the primary reports a live path to the destination (architecture.md,
+	# Migration; dnv-worker.md, RW18). Its transaction clears the record's
+	# cutover_pending, which this wait reads; as the flag clears just before
+	# the gap begins, the waits after it still decide when the leg serves
+	# again. The worker's record of the cutover must name the primary and a
+	# reply of the primary's at a revision no older than the destination's
+	# provisioned flip: the primary connects a side only once its request
+	# carries the side provisioned (cnagent.md, CN10), so no earlier reply can
+	# show a live path to it, and a record that names another cntlr or an
+	# earlier reply means the cutover acted on a path the primary did not
+	# have. The wait takes WAIT_PROVISION, as it spans the destination's
+	# zeroing, the flip and the primary's converge up to its connect of the
+	# destination, behind the worker's sides-first hold (dnv-worker.md, RW14).
+	MIGR_HYD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the worker to start the cutover of migration $MIGR0" \
+		migr_cutover_started "$MIGR0"
+	copy_check_cutover "$MIGR0_ID" "$sideid" "$dstside"
 
 	# THE LEG BITMAP IS READ ONLY ONCE THE PRIMARY REACHES THE LEG THROUGH THE
 	# DESTINATION, and that is a rule, not a stylistic ordering
@@ -13095,17 +13225,18 @@ copy_migration() {
 	# destination's extent held before — maybe another pool's bytes, as
 	# zeroing covers only a data side's meta region and first data block.
 	#
-	# Or it can wedge the primary's cntlr. To read the mappings, GetLegBm
+	# Or it can stall the primary's cntlr. To read the mappings, GetLegBm
 	# reserves a metadata snapshot of the slice's thin pool, which commits the
 	# pool, and the commit flushes the pool's data device, this leg included.
-	# From the source's first step (dnagent.md, DN12) until the primary's path
-	# to the destination is live and optimized, the primary holds a live
+	# In the migration gap (dnagent.md, DN12, DN13) the primary holds a live
 	# controller to the leg but no usable path, so nvme multipath requeues the
-	# flush, and GetLegBm waits for it holding the cntlr's lock. If the
-	# primary has not connected the destination yet, the SyncupCntlr that
-	# would connect it (cnagent.md, CN10) needs that very lock, so the cntlr
-	# can stay blocked until the migration ends
-	# (architecture.md, Known limits).
+	# flush, and GetLegBm waits for it holding the cntlr's lock until the gap
+	# ends, and the primary's check rounds wait with it
+	# (architecture.md, Known limits). The cutover starts only once the
+	# primary holds a live path to the destination, so no connect of the
+	# primary (cnagent.md, CN10) waits behind that lock and the gap ends on the
+	# disk nodes; a read taken in it still holds the primary for the rest of
+	# the gap.
 	#
 	# So the read waits for the destination's dm-clone (migr_dst_serving), and
 	# then for the primary's own path to the destination to read optimized
@@ -13113,17 +13244,13 @@ copy_migration() {
 	# destination in the optimized group only while that dm-clone is live
 	# (anaGrpId (agent/dnagent/plan.go)), and from then on the source takes no
 	# write and every write reaches the destination through its dm-clone. The
-	# second wait takes WAIT_PROVISION rather than cn_wait_ana's default, as it
-	# can span the worker's sides-first hold (dnv-worker.md, RW14) and the
-	# primary's converge up to its connect of the destination. The primary's
-	# check rounds read the pool's status with --noflush and commit nothing
-	# themselves, but such a read still waits behind a commit of the pool
-	# that waits while the primary has no usable path to the leg
-	# (architecture.md, Known limits), and a round that waits there before
-	# that connect makes this wait time out. The wait ends as soon as the path
-	# reads optimized, which can be in the middle of the converge that
-	# connected it. The read then waits for the rest of that converge, so it
-	# is a poll under WAIT_PROVISION too (leg_bm_read says why). The push may
+	# primary holds its controller to the destination from before the
+	# cutover, so the second wait spans no connect, only the destination's
+	# ANA write reaching the primary's kernel; it keeps WAIT_PROVISION, a
+	# bound and not a latency, as it ends the moment the path reads
+	# optimized. The read itself can still find the cntlr's lock held by a
+	# converge or a check round, so it is a poll under WAIT_PROVISION too
+	# (leg_bm_read says why). The push may
 	# come at any time: the dn agent applies a chunk to a live dm-clone too,
 	# marking its regions hydrated without copying them (dnagent.md, DN13,
 	# DN15).
@@ -13143,7 +13270,7 @@ copy_migration() {
 	esac
 	MIGR_HYD_LAST=""
 	wait_until "$WAIT_PROVISION" \
-		"the migration's destination side $dstside to zero and serve through its dm-clone" \
+		"the migration's destination side $dstside to serve through its dm-clone" \
 		migr_dst_serving "$dstside"
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" optimized \
 		"$WAIT_PROVISION"
@@ -13197,7 +13324,7 @@ copy_migration() {
 	ctl_fail NOT_FOUND migr get --name "$MIGR0"
 
 	# THE LEG MUST BE SERVING AGAIN BEFORE ANY HOST IO TOUCHES IT. A migration
-	# SOURCE side is ANA-inaccessible once its destination is provisioned, and
+	# SOURCE side is ANA-inaccessible once the cutover has started, and
 	# a destination side while it does not serve through its dm-clone
 	# (anaGrpId (agent/dnagent/plan.go)). Both conditions are cleared by now — the
 	# record is gone — but the DN rewrites `ana_grpid` on its NEXT syncup, so
@@ -13241,10 +13368,12 @@ copy_migration() {
 		"migr_name_list is empty again"
 	ctl_fail NOT_FOUND migr get --name "$MIGR1"
 
-	# The same wait, for the same reason: this side went ANA-inaccessible if
-	# its destination was provisioned before the cancel, and the cancel only
-	# removed the record — the DN's next syncup is what puts the namespace back
-	# in the optimized group.
+	# The same wait, for the same reason. This side went ANA-inaccessible
+	# only if the migration's cutover started before the cancel, which a
+	# cancel issued at once almost always beats, as the cutover waits for the
+	# destination's zeroing and for the primary's connect to it. Either way
+	# the cancel only removed the record, and the DN's next syncup is what
+	# puts the namespace back in the optimized group.
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
 	check_sha0 "after a migration was cancelled"
 }

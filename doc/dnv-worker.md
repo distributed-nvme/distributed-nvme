@@ -112,21 +112,27 @@ refuses it (RW9, RW14, AR1).
 
 ### Schema this document owns
 
-Two members of the schema are this document's. `WorkerReg`, the value of a
+Three members of the schema are this document's. `WorkerReg`, the value of a
 registration key (`architecture.md`, Key table), holds the writer's unix
 seconds at the put in `epoch`; the field is informational, because liveness
 is judged by the observer's own clock since the put it last saw (VW3, VW4),
 never by comparing the epoch with local time. `Cntlr.settling` is the flag
 HL2 clears and AR5 reads: true from the moment a cntlr becomes primary (or,
 still primary, is re-enabled) until the worker first observes it clean in
-that role with its stack built — no row outside `leg_id_to_leg` and
-`grp_id_to_md_raid` provisioning, or missing but for the level's — or a
+that role with its stack built — no row outside `leg_id_to_leg`,
+`grp_id_to_md_raid` and `side_id_to_path` provisioning, or missing but for
+the level's — or a
 failover demotes it; AR5 holds a settling primary to `cntlr_unhealthy`
 instead of `primary_unhealthy` when that is the longer. A record that lacks
 the field decodes false, settled, and is judged by `primary_unhealthy` as
-any settled primary is. Nothing else in the schema is this document's; in
-particular `Migration` carries no field of this document's, because there is
-no migration reaction (Automatic reactions). The generated code is
+any settled primary is. `Migration.cutover_pending` is the flag RW18's
+cutover clears: `CreateMigration` writes it set (`architecture.md`,
+Migrations), and nothing but the cutover changes it after that; a record
+that lacks the field decodes false, a cutover that has started
+(`architecture.md`, Upgrade in lockstep). Nothing else in the schema is
+this document's; in particular `Migration` carries no other field of this
+document's, because there is no migration reaction (Automatic reactions).
+The generated code is
 regenerated and committed with the schema (`layout.md`, Protobuf
 generation).
 
@@ -444,8 +450,9 @@ RPCs; this worker's reaction path passes zero.
   same rule on the embedded record; they rewrite the `Slice`; no bump.
 * `FlipProvisioned` takes a list of `SideRef`s and requires the slice to
   exist: every listed side still `provisioned` false is set true; `SpRev` is
-  bumped once iff any was written. It returns the sides actually flipped, so
-  the `flip applied` record can name each (RW18; Log records).
+  bumped once iff any was written. It returns the sides actually flipped and
+  the revision its bump wrote, so the `flip applied` record can name each,
+  at that revision (RW18; Log records).
 * `FlipCreated` takes a list of `TdRef`s (name, td id and the torn mark the
   reports carried) and commits them
   `MaxFlipCreatedPerTxn` at a time in list order, one STM each (RW19): it
@@ -456,6 +463,23 @@ RPCs; this worker's reaction path passes zero.
   returns the tds actually flipped, as above — on an error, those of the STMs
   that committed before the failing one, which the sp worker does not log
   (RW19).
+* `StartCutover` takes one migration — its name and `migr_id`, the slice
+  and the leg that hold its two sides, and the two side ids — and the cntlr
+  whose report it acts on. It requires the SP's `SpConf` to hold the SP's
+  id and an `sp_level` below `SP_LEVEL_NO_MIGRATION`, the `Migration` to
+  exist with that `migr_id` and destination side and with
+  `cutover_pending` set, the destination side in that leg of that slice
+  and `provisioned`, and the cntlr to exist, be `primary` and not be
+  `disabled`; it clears `cutover_pending`, bumps `SpRev` once and returns
+  the revision its bump wrote (RW18; `architecture.md`, Migration). The
+  reports it acts on are no part of the store, so the caller judges them.
+  The level is the store's, so the transaction reads it: the destination's
+  report that it waits for the cutover can come from before a raise of the
+  level, and at `SP_LEVEL_NO_MIGRATION` and above the destination builds
+  no dm-clone (`dnagent.md` DN11), so a cutover committed there would fence
+  the source with no side left to serve the leg. A disabled primary's path
+  counts for nothing (RW18), so the transaction reads `disabled` too, for a
+  disable that commits after the report.
 * `Failover` requires the SP not `deleting` and its `sp_level` below
   `SP_LEVEL_NO_THINPOOL`; the old cntlr `primary`; and, unless the old cntlr
   is `disabled` (a disabled primary is the AR5 trigger on its own,
@@ -1554,12 +1578,16 @@ alone — no extent size and no cluster conf — and every side of the group
 carries it: an active leg's and a spare's, a migration's source and
 destination, provisioned or not. If the side's leg has two sides and a
 `Migration` of the SP names this side as
-`src_side_id`: a `migr_src_conf` with `migr_id`, `dst_side_id`, `dst_dn_id`
-and `dst_provisioned` (the destination side's `provisioned`); as
+`src_side_id`: a `migr_src_conf` with `migr_id`, `dst_side_id`,
+`dst_dn_id`, `dst_provisioned` — the destination side's `provisioned` while
+the `Migration`'s `cutover_pending` is clear, and false while it is set, so
+the source serves on until the cutover (RW18; `architecture.md`,
+Migration) — and `cutover_pending` from the `Migration`; as
 `dst_side_id`: a `migr_dst_conf` with `migr_id`, `src_side_id`, `src_dn_id`,
 `src_nvme_tr_conf` (the source side's `nvme_tr_conf`), `block_size` from
 `bdev_conf.dm_pool_conf.data_block_size`, `meta_blocks` from the group, the
-migration's `dm_clone_conf` and `bm_cnt` from the `Migration`. The
+migration's `dm_clone_conf`, and `bm_cnt` and `cutover_pending` from the
+`Migration`. The
 migration's `dm_clone_conf` is the one conf still filled in here (a zero
 `hydration_threshold` or `hydration_batch_size` takes its default of
 `architecture.md`, Common validation, on a copy — the loaded state is
@@ -1592,6 +1620,39 @@ within one round MAY share one STM). The bump re-fans the SP (RW14) and the
 re-synced sides carry `provisioned` true. Nothing is remembered across a
 handoff: the new owner's first round carries the full `*Info` and flips
 whatever is still false.
+
+**The cutover** of `architecture.md`, Migration, runs beside the flip. A
+migration of the loaded state is a candidate when its `cutover_pending` is
+set, a leg holds exactly its two sides and its destination side is
+`provisioned`. The coordinator starts it when two reports hold: the
+destination side's latest `SideInfo` reads `migr_dst_info.target_info`
+`RES_STATUS_PROVISIONING` with the reason `RES_REASON_AWAITING_CUTOVER`
+(`dnagent.md` DN13, DN18), and a cntlr that the plan the coordinator last
+decided makes primary — the primary HL2 records leg rows from — and not
+`disabled` reported the
+destination side's `side_id_to_path` row `RES_STATUS_OK` (`cnagent.md` CN28)
+in the drain of reports the coordinator is handling, read from a reply's own
+info: for a round, what its stream last carried; for a `SyncupCntlr` reply,
+the info that reply carried; and of one cntlr's replies that the drain
+folds, the last counts, live or not. It never reads the latest info a child
+holds, which can be another reply's, one from before a failover among them.
+A standby's path counts for nothing, so after a failover the cutover waits
+for the new primary's own report. A disabled primary's path counts for
+nothing either: its agent runs the standby shape (`cnagent.md` CN9), with
+no arrays and no thin pools, and its disable is AR5's trigger on its own,
+so the cutover waits for the report of the primary that takes over, or of
+the same cntlr once it is enabled again.
+The coordinator runs `model.StartCutover`
+(MD6) for it, after the provisioned flip and before the created flip, one
+STM per migration. One that commits leaves the candidates, and its bump
+re-fans the SP, whose side requests then carry the cleared flag (RW15); one
+that fails or is refused is logged and tried again on a later report. The
+coordinator does not read the pool's level; `model.StartCutover` refuses at
+`SP_LEVEL_NO_MIGRATION` and above (MD6), so the cutover waits there, even
+on a destination report of the wait from before the level rose. Its
+reasons are those of `architecture.md`, Migration. Nothing of it is
+remembered across a handoff either: the new owner's first replies carry the
+full `*Info`, and the cutover runs off them.
 
 RW19. **Created flip.** Every `SyncupCntlrReply`
 and `CheckCntlrReply` with an accepted code (RW18: code zero or
@@ -1718,7 +1779,8 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
 
 * `Cntlr.err_epoch` is set to now (if zero) when its `CheckCntlr` stream
   cannot be opened, breaks or misses a round, or any `RES_STATUS_ERROR` row of
-  its `CntlrInfo` **other than** `leg_id_to_leg` reads so; it is cleared when
+  its `CntlrInfo` **other than** `leg_id_to_leg` and `side_id_to_path` reads
+  so; it is cleared when
   its next round is clean. The write keeps the SP's discovery records to the
   listing rule of `architecture.md`, [D18], in the same transaction (MD6):
   an enabled standby leaves them when its epoch is set and returns when it
@@ -1735,7 +1797,8 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
   is not `disabled` (the agent's own effective role, `cnagent.md` CN9), and
   the reply's `revision` equals the plan's, and the reply shows the stack
   built: no row of the maps this row is judged by (every map but
-  `leg_id_to_leg`), `grp_id_to_md_raid` aside, reads `PROVISIONING`, or
+  `leg_id_to_leg` and `side_id_to_path`), `grp_id_to_md_raid` aside, reads
+  `PROVISIONING`, or
   `MISSING` with details other than `cnagent.md` CN19's "sp_level"; with the
   `err_epoch` clear in one write, or in a write of its own when `err_epoch`
   is already zero.
@@ -1750,6 +1813,10 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
   `RES_STATUS_ERROR`, or a `migr_src_info` or `migr_dst_info` row is `ERROR`;
   it is cleared when its next round is clean. A sides-first hold whose
   fan-out loads the epoch set does not wait for the side (RW14).
+
+The path rows of `side_id_to_path` (`cnagent.md` CN28), a primary's and a
+standby's alike, set and clear none of the three: they exist for RW18's
+cutover alone, and a leg's health is its leg row's.
 
 `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any of
 the three, and `Leg.err_epoch` clears on the primary's `RES_STATUS_OK`
@@ -1774,12 +1841,13 @@ not logged — and its child logs the rows of the later replies as a
 standby's.
 
 **Row classes.** The `ERROR` rows a cntlr is judged by — every map but
-`leg_id_to_leg` — are of two classes. A **shared-state** row belongs to the
-stack of a td whose `created` is set and whose thin row, in some slice,
-reads `ERROR` with the reason `RES_REASON_THIN_ID_LOST` (`architecture.md`,
-Live-state reporting): the cn agent sets it when dm-thin refuses a created
-td's thin table with ENODATA because the slice's pool has lost its id
-(`cnagent.md` CN14). The class reads that field, never a row's details:
+`leg_id_to_leg` and `side_id_to_path` — are of two classes. A **shared-state**
+row belongs to the stack of a td whose `created` is set and whose thin row, in
+some slice, reads `ERROR` with the reason `RES_REASON_THIN_ID_LOST`
+(`architecture.md`, Live-state reporting): the cn agent sets it when dm-thin
+refuses a created td's thin table with ENODATA because the slice's pool has
+lost its id (`cnagent.md` CN14). The class reads that field, never a row's
+details:
 a control-plane decision does not parse a tool's English. The stack is the
 td's own rows — its thin rows, its raid0 and its dm-error — and every row
 of an object that exists for it alone: the ns-dev and the nvmet namespace
@@ -1835,14 +1903,16 @@ clone that waits for room in its CN's metadata area, whose two
 rows read `PROVISIONING` (`architecture.md`, Metadata units) — is the cn
 agent's (`cnagent.md` CN9, CN10, CN16, CN17, CN18); a
 primary showing such a row stays settling, held to the longer threshold, until
-it clears. Three kinds of row are left out of that test, each for one reason.
+it clears. Four kinds of row are left out of that test, each for one reason.
 Leg rows: a spare still zeroing reads `PROVISIONING` there for as long as it
-zeroes. Group rows: a grow appends its new groups to their lists, and while
-their sides zero they stay out of the live concat, so their group rows alone
-read `PROVISIONING` beside a serving pool while those sides zero — and nothing
-else needs them, since a group of a new SP that is still provisioning defers
-its whole slice, whose pool rows say so, and a group a converge could not
-assemble leaves the pool rows over it `ERROR` or `MISSING`. Rows the
+zeroes. Path rows: a migration's destination side reads `PROVISIONING` there
+for as long as it zeroes. Group rows: a grow appends its new groups to their
+lists, and while their sides zero they stay out of the live concat, so their
+group rows alone read `PROVISIONING` beside a serving pool while those sides
+zero — and nothing else needs them, since a group of a new SP that is still
+provisioning defers its whole slice, whose pool rows say so, and a group a
+converge could not assemble leaves the pool rows over it `ERROR` or `MISSING`.
+Rows the
 `sp_level` suppresses: they read `MISSING` with `ResDetailsSpLevel`
 (`cnagent.md` CN19) and hold nothing, so a primary does not wait for a layer
 its level suppresses; the deferral of a slice does not depend on the level,
@@ -2289,7 +2359,8 @@ last made, over only the rows of the primary it replaced (AR7, Known
 limits):
 
 * **Shared state.** Every `ERROR` row of its latest report that HL2 judges
-  it by (every map but `leg_id_to_leg`) is of HL2's shared-state class:
+  it by (every map but `leg_id_to_leg` and `side_id_to_path`) is of HL2's
+  shared-state class:
   `reaction skipped` (`shared_state`, with the primary's `cntlr_id` and the
   smallest such `td_id`), judged ahead of the candidate, so a primary with
   none logs this rather than `no candidate`; nor does AR7 replace such a
@@ -2998,7 +3069,13 @@ of HL2's settle: at most once per acquisition of the primary role, the
 re-enable of a primary counting as one and none when the cntlr is demoted
 before it settles, plus a repeat for a plan loaded before the write landed
 (HL2) or for a second owner in an overlap (VW7); `flip applied` a committed
-provisioned or created flip, naming the new `SpRev` (RW18, RW19);
+provisioned or created flip or a committed cutover, naming the new `SpRev`
+— for a provisioned flip and a cutover the revision their own transaction
+wrote, never a later one, so a reply to the first request that carries the
+change is never older than the record — and a cutover's naming the cntlr
+whose report it acted on and that report's revision (RW18, RW19);
+`sp flip failed` a flip or a cutover whose STM did not commit, which a
+later report tries again (RW18, RW19);
 `sp sides unsynced` the release of RW14's sides-first hold by its timer, one
 record per hold and never per round, and expected in normal operation too:
 for a new side whose first `SyncupSide` its disk node refused
@@ -3091,7 +3168,12 @@ revision gate being per object and not per cluster.
   records;
 * bitmap — chunks reach their targets one at a time, in order, an empty
   diff pushes nothing, and a rejected syncup is re-driven by the round's
-  reply;
+  reply; its migration's cutover waits for the primary's live path to the
+  destination, a standby's live path counting for nothing and the
+  primary's path row in `ERROR` setting no health epoch, is logged once,
+  naming the primary and a report at or after the destination's
+  provisioned flip, and tells the source that its destination is
+  provisioned only from the cutover's own revision on;
 * reaction — every automatic reaction fires on its trigger and holds on its
   guard, and a settling primary is held to `cntlr_unhealthy`;
 * failover — failovers at the shipped default timers: a standby that stops
@@ -3136,12 +3218,12 @@ and CM5; SW1 to SW3, SW5 and SW6 are exercised by the smoke, revision and
 handoff cases; RW1 to RW12 by the smoke, revision and health cases, RW10 by
 the attribution of the vote and handoff cases; RW13 to RW21 (save RW13's
 count compare, below) by the smoke case's request builders, the revision
-case's moved endpoint, the bitmap case's migration confs and the reaction
-case's grow and spare confs; RW22, its demotion hold ended once by the
-demoted cntlr's report and once by its timer, with the sides-first hold of
-RW14 behind it, by the failover case; RW14's choice of the sides its hold
-waits for, at a hold's start, at a bump and after a demotion hold, by the
-hold case; HL1 to HL6 (save HL1's rule for the disk counts, below) by the
+case's moved endpoint, the bitmap case's migration confs and cutover and
+the reaction case's grow and spare confs; RW22, its demotion hold ended once
+by the demoted cntlr's report and once by its timer, with the sides-first hold
+of RW14 behind it, by the failover case; RW14's choice of the sides its hold
+waits for, at a hold's start, at a bump and after a demotion hold, by the hold
+case; HL1 to HL6 (save HL1's rule for the disk counts, below) by the
 health case and HL2's settle by the reaction case; the rewrite of the
 discovery records by the listing rule (`architecture.md`, [D18]) in a cntlr's
 health write (HL2) and in a failover on either trigger (MD6) by the failover
@@ -3167,6 +3249,11 @@ attempted, let alone failed; AR5's and AR7's refusals (HL2's row classes,
 and the rows of the last failover or primary replacement), since the
 reaction case only keeps
 clear of AR5's second refusal and fails its sole primary on a row of its own;
+the cutover's wait for the destination's reason, its reading of a reply's
+own info rather than the latest a child holds, its wait for a new
+primary's own report after a failover, its refusal of a disabled primary's
+path (RW18), and `StartCutover`'s refusal at `SP_LEVEL_NO_MIGRATION` and
+above (MD6), which the bitmap case does not stage;
 a bump or a cntlr replacement during RW22's demotion hold, HL2's rule that a standby's
 clean reply below the revision its child drives is no verdict, AR10
 holding back a cntlr replacement or a leg repair, and RW14's hold still
@@ -3180,9 +3267,11 @@ pick — with the next pass's retry; the tripwires of SPD1 and SPD14 and the
 guards of SPD2; and the guards of CLD2 and the gateway halves of CLD1 and
 CLD3, the gateway suite owning the clone latch.
 The suite never produces `invalid stored conf`, because its driver resolves
-every conf it writes, and the three conf gates are unit-tested instead. Six
-records no case stages: `sp drain failed` and `clone drain failed`, which the
-drain case asserts at zero after every drain; `cluster conf missing`, which
+every conf it writes, and the three conf gates are unit-tested instead.
+Seven records no case stages: `sp drain failed` and `clone drain failed`,
+which the drain case asserts at zero after every drain; `sp flip failed`,
+which the bitmap case asserts at zero for its cutover; `cluster conf
+missing`, which
 every case avoids by writing its cluster conf before any rev key and no case
 asserts either way; `syncup leftover`, which no fake produces on its own,
 since no fake computes a sweep verdict and no case forces that code;
@@ -3233,7 +3322,10 @@ copies it plants: `put-clone` charges the clone's metadata units to the CN
 of every cntlr of the pool and `put-migr` charges its destination DN the
 side's extents and the migration's units, as the gateway's creates do but
 never refusing for room (`architecture.md`, Metadata units), so that a
-later release, the clone drain's among them, finds what it gives back. Its
+later release, the clone drain's among them, finds what it gives back.
+`put-migr` sets the migration's `cutover_pending` only when a case asks
+for it, which a case that means to stage what `CreateMigration` writes
+does. Its
 `set-epoch` is raw in the
 same way: it plants one `err_epoch`, on a cntlr, a leg or a side, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can
@@ -3256,7 +3348,12 @@ rounds it means to whatever its own polls cost, `delay_rounds_ms` answers
 every round late, as a busy agent does, and `hang_syncup` leaves the
 object's `Syncup*` unanswered while it is set, as a stopped cn agent leaves
 its demotion (RW22), or as a side whose agent answers its rounds but never
-its syncup holds a sides-first hold to its bound (RW14). It computes no
+its syncup holds a sides-first hold to its bound (RW14). Among the rows it
+derives, a migration destination whose request carries the side
+provisioned and its cutover pending reports both migration rows waiting
+for the cutover, with the reason the cutover reads, and each cntlr reports
+a path row per side of a leg that has two sides, live once that side is
+provisioned (RW18); a behavior file's rows override them. It computes no
 sweep verdict, so it never answers `ReplyCodeLeftover` on its own, and it
 reports no disk counts (`dnagent.md` DN18), so no case runs RW13's count
 compare.
@@ -3333,7 +3430,9 @@ compare.
   never reports its stack built and clean as primary — a new primary that is
   itself dead, a build that keeps it unhealthy longer than that, a new SP
   whose first zeroing never finishes, which keeps its pools `PROVISIONING`, a
-  migration destination that `FinishMigration` forced before its RW18 flip and
+  migration destination whose record carries no `cutover_pending`
+  (`architecture.md`, Upgrade in lockstep), which `FinishMigration` forced
+  before its RW18 flip and
   that never finishes zeroing while it is the only side of a leg in the first
   group of its list, which keeps that slice's pools and every td
   `PROVISIONING` the same way, a clone whose source stays unconnected, or

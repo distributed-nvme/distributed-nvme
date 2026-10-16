@@ -116,6 +116,8 @@ The core words of dnv in plain language: the short list to read first. The entri
 
 **migration** — The move of one leg from one disk node to another while the leg stays in use. An operator starts it: a new side is created on the other disk node and pulls the data from the old side. The operator finishes it when the copy is complete, and the old side is removed.
 
+**cutover** — The moment in a migration when the old side stops serving the leg and the new side starts to serve it. The worker starts it only once the primary has a live path to the new side.
+
 **clone** — A copy of an outside NVMe-oF namespace into a local thin device. The primary pulls the data with dm-clone.
 
 **transfer** — The other end of a clone: a storage pool exports one of its volumes over a subsystem made for this purpose, so that a clone in another pool can read it.

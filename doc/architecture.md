@@ -1163,7 +1163,7 @@ this document relies on:
 | `Clone` | {p} clone {cluster_id} {sp_id} {clone_name} | carries `meta_units`, the clone's metadata units, written by `CreateClone` (Metadata units) |
 | `CloneBitmap` | {p} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx} | one chunk of source slice `src_slice_idx`'s bitmap, self-positioned at byte `bm_idx` times `CloneBmChunkBytes` within it (Bitmap push protocol); `src_slice_idx` is below `src_slice_cnt`, itself at most `MaxSliceCntPerSp`, and `bm_idx` is below `MaxCloneBmCnt` |
 | `Transfer` | {p} transfer {cluster_id} {sp_id} {xfer_name} | |
-| `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | carries `meta_units`, the destination's metadata units, written by `CreateMigration` (Metadata units) |
+| `Migration` | {p} migration {cluster_id} {sp_id} {migr_name} | carries `meta_units`, the destination's metadata units, written by `CreateMigration` (Metadata units), and `cutover_pending`, which `CreateMigration` writes set and only the sp worker's cutover clears (Migration) |
 | `MigrBitmap` | {p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx} | `bm_idx` is the append sequence from zero |
 | `SpName` | {p} sp_id_to_name {cluster_id} {sp_id} | reverse lookup for admin and log analysis; needed because `SpRev`, which also carries `sp_name`, can only be addressed with the SP's shard code [D10] |
 | `WorkerReg` | {p} worker {role} {seed} | the worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (Membership and shard ownership; `dnv-worker.md` VW2, VW4, VW6 and CM5) |
@@ -2957,17 +2957,19 @@ the STM: `migr_id` and `dst_side_id` from
 the only slot constraint sides have (cntlid slots) —, `addr_port` and
 `nvme_tr_conf` copied from the destination DN, and `provisioned` false
 ([D15]); a `Migration` written with `migr_id`, `src_side_id`,
-`dst_side_id`, the request's `dm_clone_conf`, a zero `bm_cnt` and its
-`meta_units`, its name appended to `migr_name_list`; the destination DN's
-bookkeeping — the side in its `side_ptr_list`, the group's `ext_cnt` taken
-from its `free_ext_cnt`, the migration's units added to its
-`used_meta_units`, its capacity key per Capacity index keys, its `DnRev`
-bumped —; a `SpRev` bump. Reply `migr_id`. The destination side therefore
-takes its clone-metadata run and then provisions (Side provisioning
-protocol) before any migration machinery starts (Migration, Phase 0); until
-the sp worker flips it, `migr_src_conf.dst_provisioned` false keeps the
-source side serving untouched (Migration, which carries the data-plane
-choreography).
+`dst_side_id`, the request's `dm_clone_conf`, a zero `bm_cnt`, its
+`meta_units` and `cutover_pending` set, its name appended to
+`migr_name_list`; the destination DN's bookkeeping — the side in its
+`side_ptr_list`, the group's `ext_cnt` taken from its `free_ext_cnt`, the
+migration's units added to its `used_meta_units`, its capacity key per
+Capacity index keys, its `DnRev` bumped —; a `SpRev` bump. Reply
+`migr_id`. The destination side therefore takes its clone-metadata run and
+then provisions (Side provisioning protocol) before any migration
+machinery starts (Migration, Phase 0); until the sp worker's cutover,
+which comes only after it flips the destination provisioned,
+`migr_src_conf.dst_provisioned` false keeps the source side serving
+untouched (Migration, which carries the data-plane choreography). Only the
+cutover clears `cutover_pending`, and nothing sets it again.
 
 **Admission.** The DN candidate scan covers extents and metadata units.
 The destination DN's [D13] clone-metadata area — `DnCloneMetaSize` bytes
@@ -2983,11 +2985,18 @@ Contiguous runs) takes no run, zeroes nothing and reports its rows
 `RES_STATUS_PROVISIONING` with the area's text, so the source keeps serving
 as if no migration had started (`dnagent.md` DN13).
 
-**FinishMigration** — Errors: `FAILED_PRECONDITION` when `force` is false
-and hydration is incomplete, which is checked outside the STM through
+**FinishMigration** — Errors: `FAILED_PRECONDITION` while the migration's
+`cutover_pending` is set, with `force` or without, decided from the record
+before any agent call, its message saying that the cutover has not started
+and to cancel the migration instead; `FAILED_PRECONDITION` when `force` is
+false and hydration is incomplete, which is checked outside the STM through
 `GetSideInfo` of the **destination** side
 (`migr_dst_info.dm_clone_info.details`); an agent that does not answer
-that call is `FAILED_PRECONDITION` too (`gateway.md` AG3). Action: STM:
+that call is `FAILED_PRECONDITION` too (`gateway.md` AG3). `force` skips
+the hydration proof and nothing else. Reason: before the cutover the source
+still serves the leg and the destination holds no copied byte, so a finish
+then would drop the side that serves for one that holds nothing; a cutover
+that never comes is ended by a cancel (Migration). Action: STM:
 remove the **source** `Side` from the leg, the destination side becoming
 its only one; the source DN's bookkeeping (pointer out, extents back,
 capacity key per Capacity index keys, `DnRev`); the destination DN's
@@ -3007,10 +3016,13 @@ down. Reply `migr_id`.
 destination DN's extents and the migration's metadata units, and bumps
 `SpRev` and the destination's `DnRev`.
 The source side returns to normal service on the next `SyncupSide` (ANA
-back, the migration export dropped); the destination agent tears its stack
-down, the `LocalMigrBmPath` files included.
+back, the migration export dropped), or, before the cutover, simply keeps
+serving; the destination agent tears its stack down, the
+`LocalMigrBmPath` files included. A cancel needs no cutover, and it is how
+an operator ends a migration whose cutover never comes (Migration).
 
-**GetMigration** — one STM read.
+**GetMigration** — one STM read; the reply is the record as stored, its
+`cutover_pending` included, which tells whether a finish can succeed yet.
 
 **AppendMigrationBitmap** — Errors: `INVALID_ARGUMENT` empty `bitmap`;
 `RESOURCE_EXHAUSTED` when `bm_cnt` is at or above `MaxMigrBmCnt`.
@@ -3265,18 +3277,19 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`,
   `sp_level`, `provisioned`, `zero_bytes`) and — only when this side is a
   migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`,
-  `dst_dn_id`, `dst_provisioned`: the source role, Migration) and/or
-  `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`,
-  `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`,
-  `bm_cnt`: the destination role). It is rejected if the pointer is
-  unknown (`SyncupDn` must introduce it first). It converges the per-side
-  stack of Disk node: the side device of `ext_cnt` extents and its
-  zeroing state (Side provisioning protocol), the per-CN dm-error,
-  dm-linear and nvmet subsystem, the primary versus standby table targets
-  and ANA states, and the migration source and destination roles
-  (Migration). Reply `agent_reply`, `revision`, `side_info` (which always
-  reports `zeroed_bytes` and `zero_bytes`, Side provisioning protocol) and
-  `bm_info` (the applied migration-bitmap indexes, Bitmap push protocol).
+  `dst_dn_id`, `dst_provisioned`, `cutover_pending`: the source role,
+  Migration) and/or `migr_dst_conf` (`migr_id`, `src_side_id`,
+  `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`,
+  `dm_clone_conf`, `bm_cnt`, `cutover_pending`: the destination role). It
+  is rejected if the pointer is unknown (`SyncupDn` must introduce it
+  first). It converges the per-side stack of Disk node: the side device of
+  `ext_cnt` extents and its zeroing state (Side provisioning protocol),
+  the per-CN dm-error, dm-linear and nvmet subsystem, the primary versus
+  standby table targets and ANA states, and the migration source and
+  destination roles (Migration). Reply `agent_reply`, `revision`,
+  `side_info` (which always reports `zeroed_bytes` and `zero_bytes`, Side
+  provisioning protocol) and `bm_info` (the applied migration-bitmap
+  indexes, Bitmap push protocol).
 * `PushMigrBitmap` delivers one `MigrBitmap` chunk (`side_pointer`,
   `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per
   Bitmap push protocol: persist the chunk at `LocalMigrBmPath`, then
@@ -3463,8 +3476,9 @@ with `ResStatus`:
 * `RES_STATUS_OK`.
 * `RES_STATUS_PROVISIONING` — deliberately not created, being prepared,
   kept unprobed behind a side's provisioning gate that closed again
-  (`dnagent.md` DN9), or waiting for a free run in a node's metadata area
-  (Metadata units): **healthy, not ready, no action needed**.
+  (`dnagent.md` DN9), waiting for a free run in a node's metadata area
+  (Metadata units), or waiting for a migration's cutover (Migration):
+  **healthy, not ready, no action needed**.
 * `RES_STATUS_PENDING` — the primary's prober for the leg has not
   completed a round, or none is registered yet: **no verdict, no action
   needed**. Only the primary's leg report produces it (`cnagent.md` CN11).
@@ -3474,23 +3488,31 @@ with `ResStatus`:
 returned next to an `*Info` (`Syncup*`, `Check*` and `Get*Info` replies)
 is that of the request the agent holds for the object — the last one it
 accepted (`dnagent.md` SH8, SH25) — whatever the outcome of its converge.
-Map keys in `SideInfo` and `CntlrInfo` are the obvious owner ids —
-`cn_id` for a side's per-CN export stack; the td, slice, group, leg,
-namespace, subsystem, clone and transfer ids in `CntlrInfo`, with
+Map keys in `SideInfo` and `CntlrInfo` are the obvious owner ids — `cn_id`
+for a side's per-CN export stack; the td, slice, group, leg, namespace,
+subsystem, clone and transfer ids in `CntlrInfo`, with
 `td_id_to_thin_info[td].slice_id_to_dm_thin` for the per-td × slice thin
 volumes; the sp worker's `created` flip reads exactly these rows, and each
-td's `torn` mark beside them (sp role; Thin devices). A dm-clone row's
-`details` carry the raw `dmsetup status` line, on a line of its own after
-any text of the row's, whenever the agent read it, whatever the row's
-status, so hydration progress is visible through `Inspect*` and the
-hydration checks of `DeleteClone` and `FinishMigration` read it (Clones,
-Migrations).
+td's `torn` mark beside them (sp role; Thin devices). `side_id_to_path` is
+keyed by side id: a cntlr's path rows, one per side of each leg that has
+two sides, which say whether its node holds a live controller to that side
+(`cnagent.md` CN28); the sp worker's cutover reads the primary's row of a
+migration's destination side (Migration). A pool has at most
+`MaxMigrCntPerSp` migrations, so a report holds at most twice that many
+path rows. A dm-clone row's `details` carry the raw `dmsetup status` line,
+on a line of its own after any text of the row's, whenever the agent read
+it, whatever the row's status, so hydration progress is visible through
+`Inspect*` and the hydration checks of `DeleteClone` and `FinishMigration`
+read it (Clones, Migrations).
 
 `reason` (`ResReason`) is the cause of a row's status that a control-plane
-decision reads: `RES_REASON_NONE` on a row no rule gives a reason, and
-`RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets and
-`dnv-worker.md` HL2 reads; `cnagent.md` CN29 says how an agent sets a
-reason.
+decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
+`RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
+and `dnv-worker.md` HL2 reads; and `RES_REASON_AWAITING_CUTOVER`, which
+`dnagent.md` DN13 sets on a migration destination's two `PROVISIONING`
+migration rows and `dnv-worker.md` RW18 reads. An agent sets a reason from
+what its own pass established, never from a row's text: `cnagent.md` CN29
+says how the cn agent does, `dnagent.md` DN13 how the dn agent does.
 
 `CntlrInfo.leg_id_to_leg` reflects the health check of Group on-leg
 layout: meta region, data region, health block — the block-probe IO on the
@@ -3509,11 +3531,12 @@ provisioning gate holds it back (Side provisioning protocol, [D15]), and
 the rows of a copy that waits for a free run in its node's metadata area —
 a clone's metadata and dm-clone rows on the primary, a migration
 destination's side device and migration rows — whose details say so
-(Metadata units; `cnagent.md` CN18, `dnagent.md` DN13). Only those carry
-it — a
-serving thin pool keeps reporting `RES_STATUS_OK` with its raw `dmsetup
-status` details even while a grow is deferred, so the thin-pool auto-grow
-of Automatic reactions keeps parsing them. `SideInfo` additionally
+(Metadata units; `cnagent.md` CN18, `dnagent.md` DN13), and the migration
+rows of both sides of a migration whose cutover is pending (Migration;
+`dnagent.md` DN12, DN13). Only those carry it — a serving thin pool keeps
+reporting `RES_STATUS_OK` with its raw `dmsetup status` details even while
+a grow is deferred, so the thin-pool auto-grow of Automatic reactions
+keeps parsing them. `SideInfo` additionally
 reports `zeroed_bytes` and `zero_bytes` on every reply and every Check
 round, which the sp worker's flip rule reads (sp role).
 
@@ -3960,13 +3983,22 @@ neither sets nor clears `Leg.err_epoch` (Live-state reporting).
 **Provisioning gate** ([D15], Side provisioning protocol). The sp role
 fills `SideConf.provisioned` from the etcd `Side.provisioned`,
 `SideConf.zero_bytes` from the side's group and the pool's `block_size`
-(Side provisioning protocol), and `MigrSrcConf.dst_provisioned` from the
-migration's **destination** side's flag, and flips `Side.provisioned`
-true, bumping `SpRev`, when an accepted reply reports the side's zeroing
-complete (`dnv-worker.md` RW18). The normal fan-out then re-syncs the
-sides, now exporting (`dnagent.md` DN10), and the cntlrs, now connecting
-(`cnagent.md` CN10); there are no long gRPC deadlines and no Check-round
-exemptions — every RPC stays short.
+(Side provisioning protocol), `MigrSrcConf.dst_provisioned` from the
+migration's **destination** side's flag while the migration's cutover is
+not pending and false while it is, and both sides' `cutover_pending` from
+the `Migration`; it flips `Side.provisioned` true, bumping `SpRev`, when
+an accepted reply reports the side's zeroing complete (`dnv-worker.md`
+RW18). The normal fan-out then re-syncs the sides, now exporting
+(`dnagent.md` DN10), and the cntlrs, now connecting (`cnagent.md` CN10);
+there are no long gRPC deadlines and no Check-round exemptions — every RPC
+stays short.
+
+**Cutover.** Beside the provisioned flip the sp role starts each
+migration's cutover, once the destination side reports that it waits for
+it and the primary reports a live path to that side: one transaction
+clears the migration's `cutover_pending` and bumps `SpRev` (Migration;
+`dnv-worker.md` RW18, MD6). The bump's fan-out hands the source side
+`dst_provisioned` true, and the source starts its steps.
 
 **Materialization flip.** A reply from **any** cntlr of the SP may complete
 a td: thin rows are only ever filled by a cntlr acting as primary, and the
@@ -4276,35 +4308,85 @@ as for any side of the group. No per-CN stacks, no metadata wrapper, no
 `nvme connect`, no dm-clone. While the area has no free run for it, the
 destination zeroes nothing, so the sp worker never flips it and the source
 serves as if no migration had started; it takes the run once units come
-free (Metadata units). Reason: the source cuts its own paths as soon as the
+free (Metadata units). Reason: where a record carries no `cutover_pending`
+(Upgrade in lockstep) the source cuts its own paths as soon as the
 destination is provisioned, so a destination that found no room only then
-would leave the leg in the migration gap, where a thin-pool commit on the
-primary can block (Known limits), until room came. The run is taken at
-every `sp_level`, as zeroing is (Side provisioning protocol). What the
-destination's rows report meanwhile, and at which levels, is
-`dnagent.md` DN13.
+would leave the leg in the migration gap (Known limits) until room came;
+with the flag such a destination would hold its migration at the cutover,
+which waits for the metadata wrapper over that run (below), its zeroing
+spent on a copy that cannot start. The run is taken at every `sp_level`,
+as zeroing is (Side provisioning protocol). What the destination's rows
+report meanwhile, and at which levels, is `dnagent.md` DN13.
 
 For the **src** side, `migr_src_conf.dst_provisioned` false is normative
 and means: **behave exactly as if `migr_src_conf` were absent** — keep
 serving normally, no fence, no suspension, no migration-source export —
 differing only in reporting the would-be `migr_src_info` rows as
-`RES_STATUS_PROVISIONING` (`dnagent.md` DN12). Without this gate the
-source would fence the primary's path at migration start and the leg would
-have **no serving path for the whole zeroing window**.
+`RES_STATUS_PROVISIONING` (`dnagent.md` DN12). The sp worker sends it true
+only once the destination is provisioned and the cutover has started
+(below). Without this gate the source would fence the primary's path at
+migration start and the leg would have **no serving path for the whole
+zeroing window and the wait for the cutover**.
 
-When the sp worker flips the destination side (sp role), the next fan-out
-carries `side_conf.provisioned` true on the destination and
-`migr_src_conf.dst_provisioned` true on the source, and both roles run the
-sequences below unchanged; the destination's connect retry of step 3
-absorbs any cross-side ordering. The cost is added **migration-start
-latency** — the destination's zeroing pass (Side provisioning protocol),
-and on an area with no free run its wait for one, before any data moves.
+**Connect first.** When the sp worker flips the destination side (sp
+role), the next fan-out carries `side_conf.provisioned` true on the
+destination, while both sides' confs still carry `cutover_pending` and the
+source's `dst_provisioned` stays false. The destination runs dst steps 1
+and 2 below and stops there: its per-CN exports on dm-error, all
+inaccessible, and its metadata wrapper, with no connection to the source
+and no dm-clone; once step 2 holds, its two migration rows read
+`RES_STATUS_PROVISIONING` with the reason `RES_REASON_AWAITING_CUTOVER`
+(Live-state reporting; `dnagent.md` DN13). Every cntlr connects to the
+destination's export as to any provisioned side, a second path of the
+leg's multipath namespace (`cnagent.md` CN10), and reports a path row for
+each side of the leg (`cnagent.md` CN28). The source serves on.
+
+**The cutover.** The sp worker starts the cutover once two reports hold:
+the destination's migration rows wait for it with that reason, and the
+primary's path row of the destination reads OK, a live controller to it,
+in the primary's own reply, read from that reply alone (`dnv-worker.md`
+RW18). One transaction clears the migration's `cutover_pending` and bumps
+`SpRev`, after it checks that the pool's level is below
+`SP_LEVEL_NO_MIGRATION` and checks again that the flag is set, the
+destination provisioned and the reporting cntlr still the primary and not
+disabled (`dnv-worker.md` MD6). The next fan-out
+carries `migr_src_conf.dst_provisioned` true on the source and
+`cutover_pending` false on both sides, and both roles run the sequences
+below: the source its three steps, the destination steps 3 to 5. Only the
+path of a primary that is not disabled counts, so after a failover the
+cutover waits for the new primary's report; a disabled primary runs the
+standby shape (`cnagent.md` CN9), so its path counts no more than a
+standby's. Reason: only the primary holds arrays and thin pools, so
+only it can block in the migration gap, and a gap that opens with the
+primary already connected ends on the disk nodes alone, whatever the
+primary is doing (Known limits); waiting for every cntlr would let one
+broken standby hold up every migration; and without the destination's
+reason a destination whose wrapper failed would still get the cutover and
+leave the leg with no usable path for as long as that failure lasted. The
+source builds its migration source export only after its step 1 and the
+suspend that starts its step 2, so the destination's connect of step 3
+often comes too early, and the destination tries it again within the same
+pass (`dnagent.md` DN13).
+
+At `SP_LEVEL_NO_MIGRATION` and above a cutover still pending waits until
+the level comes back down, the source serving meanwhile: the destination
+reports no migration rows there (`dnagent.md` DN11, DN18), and the
+cutover's transaction refuses at those levels (`dnv-worker.md` MD6), as
+the destination's last report of its wait can predate the level's raise.
+A cutover that never comes leaves the source
+serving, both sides' rows showing the wait and the record its
+`cutover_pending`; an operator cancels the migration, and a finish is
+refused until the cutover has started (Migrations). The cost is added
+**migration-start latency** — the destination's zeroing pass (Side
+provisioning protocol), on an area with no free run its wait for one, and
+the primary's connect and its next report — before any data moves.
 `CancelMigration` during the zeroing window cancels the zeroing goroutine
 and waits for it before the dm devices are removed (Side provisioning
 protocol).
 
 **src side** (driven by its `SyncupSide` carrying `migr_src_conf`:
-`migr_id`, `dst_side_id`, `dst_dn_id`, `dst_provisioned` true):
+`migr_id`, `dst_side_id`, `dst_dn_id`, `dst_provisioned` true, which comes
+only with the cutover):
 
 1. Move every per-CN subsystem's namespace to inaccessible (all cntlrs).
 2. Retire every per-CN dm-linear, in two phases ([D12]):
@@ -4335,9 +4417,10 @@ protocol).
 
 **dst side** (its `SyncupSide` carries `migr_dst_conf`: `migr_id`,
 `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`,
-`meta_blocks`, `dm_clone_conf`, `bm_cnt`). The steps are logical; the
-agent's converge builds bottom-up and reaches the same end state
-(`dnagent.md` DN13):
+`meta_blocks`, `dm_clone_conf`, `bm_cnt`, `cutover_pending`). While
+`cutover_pending` is set it runs steps 1 and 2 alone (above). The steps
+are logical; the agent's converge builds bottom-up and reaches the same
+end state (`dnagent.md` DN13):
 
 1. Create the per-CN subsystems and namespaces with dm-error backing, all
    inaccessible.
@@ -4354,11 +4437,11 @@ agent's converge builds bottom-up and reaches the same end state
 5. Reload the **primary** CN's dm-linear onto the dm-clone; set that
    subsystem optimized and every other CN's non-optimized. The destination
    exports the same NQN as the source side, so to each CN it is a second
-   path of the leg's existing multipath namespace (Primary cntlr): the CN
-   connects to it as a newly provisioned side in the same fan-out
-   (`cnagent.md` CN10), and the ANA change alone moves IO from the source
-   path to the destination path once that path is up — no dm reload
-   happens on the CN side.
+   path of the leg's existing multipath namespace (Primary cntlr): each CN
+   connected to it as a newly provisioned side in the fan-out of the
+   provisioned flip, before the cutover (`cnagent.md` CN10), so the ANA
+   change alone moves IO from the source path to the destination path —
+   no dm reload happens on the CN side.
 
 IO then flows host → primary cntlr → destination side, whose dm-clone pulls
 missing regions from the source on demand and hydrates in the background.
@@ -4442,8 +4525,8 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   deleted, and `DeleteClone` only latches (Clones), so deleting that td
   means polling `GetClone` to `NOT_FOUND` first: the destination-td guard
   walks `clone_name_list`, which the drain shrinks in its last transaction
-  (`dnv-worker.md` CLD9). **Aborting after the cutover discards every
-  write served through sp2**: with `auto_resume` the sp2 namespace
+  (`dnv-worker.md` CLD9). **Aborting after hosts flip to sp2 discards
+  every write served through sp2**: with `auto_resume` the sp2 namespace
   became the serving path at `CreateClone`, its writes live only on the
   abandoned sp2 td, and sp1 resumes from its retained copy, which
   stopped receiving writes at `CreateTransfer` with `auto_suspend` — so an
@@ -4840,7 +4923,14 @@ release, while the node that builds it still takes a run for it: until
 such copies are gone, a node's count reads below what its area holds, and
 a copy the count admits may wait as provisioning for room (Metadata units).
 A node record or a capacity value with no `used_meta_units` counts nothing
-used. A `ClusterConf` is write-once, so a cluster keeps a `qos_ratio` an
+used. A `Migration` that carries no `cutover_pending` reads it false, a
+cutover that has started, which is how the build that wrote it ran its
+sides: one whose destination still zeroes at the upgrade has its source
+cut its paths at the provisioned flip, with no wait for the primary's path
+(Migration). Reason for the flag's sense: a field set once the cutover
+started would read not started in such a record, and an upgraded worker
+would then tell a source that had already handed the leg over to serve it
+again. A `ClusterConf` is write-once, so a cluster keeps a `qos_ratio` an
 older build stored even where it is not all zero, which `CreateCluster`
 refuses (Common validation): the worker copies it into every
 controller-node syncup and nothing enforces it (Controller node, common).
@@ -5456,8 +5546,9 @@ that component's document and only pointed to here.
   adds a dm-linear and an nvmet subsystem on its source side's disk node
   and a dm-clone and its metadata wrapper on its destination's (Disk
   node). The cntlr syncup and the pool get reply grow with the pool's
-  groups and legs, and the cntlr report with them and with the thin
-  devices times the slices; every dnv gRPC server and client takes messages
+  groups and legs, and the cntlr report with them, with the thin devices
+  times the slices and with the migrations, two path rows each (Live-state
+  reporting); every dnv gRPC server and client takes messages
   up to `GrpcMaxMsgSize` (`grpc.md`, Wiring), and unit tests hold the three
   under it at the limits of Cardinality limits and Common validation. Three
   parts have no such limit: a row's text, which a failed command fills with
@@ -5500,7 +5591,7 @@ that component's document and only pointed to here.
   defend against an attacker on the storage network, nor against root on
   a node, which can read the old bytes of a recycled extent from the raw
   leg or disk. Deploy on an isolated, trusted fabric.
-* **A pool commit in a migration gap can wedge the primary.** A migration
+* **A pool commit in a migration gap waits for the gap to end.** A migration
   gap is the time in which the primary has no usable path to a migrating
   leg: from src step 1, which moves the source's per-CN namespaces to
   inaccessible, until the primary's path to the destination is live and
@@ -5528,27 +5619,38 @@ that component's document and only pointed to here.
   hydration copy into the td alike. While a commit waits, the rest of that
   pool's IO waits too, and so does a status read of the pool, which takes
   the pool's metadata lock for reading. A check round, a converge or a
-  bitmap read that waits holds the cntlr's lock and the node
-  read lock meanwhile (`cnagent.md` CN1). If the primary has not connected
-  the destination yet, the converge that would connect it (`cnagent.md`
-  CN10) needs that cntlr lock, so the cntlr can stay blocked until the
-  migration ends. A cancel gives the primary back its path to the source,
-  which lets the commit finish. A finish removes the source's exports, which
-  fails the IO that waits on the leg: an md-raid1 group that keeps another
-  working member absorbs that error, as md completes the array's flush and
-  charges a failed write to the leg, so the commit goes on; a `RedundNone`
-  group passes it up, so the waiting commit fails, and dm-thin drops the
-  block mappings made since the last commit and leaves the pool read-only
-  with its needs_check flag set, which nothing clears (No thin-metadata
-  repair path is specified, above), while the pool's row still reads OK
-  (`cnagent.md` CN28). On such a group only a cancel ends the block with the
-  pool intact. Meanwhile a node write queued behind the blocked call, a
-  `SyncupCn`, holds up every later call of that agent that takes the node
-  lock (the head-of-line blocking above). Migration's read rule does not
-  keep a bitmap read out of a gap: a data leg's bitmap read that keeps the
-  rule for its own leg can still block in the gap of another leg the same
-  pool sits on, and a thin device's bitmap read can block in the gap of any
-  leg the pool it reads sits on.
+  bitmap read that waits holds the cntlr's lock and the node read lock
+  meanwhile (`cnagent.md` CN1), so the cntlr's other calls wait with it.
+  The gap's end needs nothing of the primary: the cutover comes only once
+  the primary holds a live path to the destination (Migration), and the
+  destination's last step moves that path to optimized, so the waiting IO
+  goes on and the commit finishes once the disk nodes have run their
+  steps. Where a step of theirs stops instead, as when the destination's
+  connect to the source is still refused once its pass's retries run out,
+  the gap lasts until a later pass of the destination's retry runs it
+  (`dnagent.md` DN13), and a commit waits that long. A migration whose
+  record carries no `cutover_pending` has no cutover to wait at (Upgrade
+  in lockstep): its gap can open before the primary has connected the
+  destination, and the converge that would connect it (`cnagent.md` CN10)
+  needs the cntlr lock a waiting call holds, so the cntlr can stay blocked
+  until the migration ends. A cancel gives the primary back its path to
+  the source, which lets the commit finish. A finish removes the source's
+  exports, which fails the IO that waits on the leg: an md-raid1 group
+  that keeps another working member absorbs that error, as md completes
+  the array's flush and charges a failed write to the leg, so the commit
+  goes on; a `RedundNone` group passes it up, so the waiting commit fails,
+  and dm-thin drops the block mappings made since the last commit and
+  leaves the pool read-only with its needs_check flag set, which nothing
+  clears (No thin-metadata repair path is specified, above), while the
+  pool's row still reads OK (`cnagent.md` CN28). On such a group only a
+  cancel ends the block with the pool intact. Meanwhile a node write
+  queued behind the blocked call, a `SyncupCn`, holds up every later call
+  of that agent that takes the node lock (the head-of-line blocking
+  above). Migration's read rule does not keep a bitmap read out of a gap:
+  a data leg's bitmap read that keeps the rule for its own leg can still
+  block in the gap of another leg the same pool sits on, and a thin
+  device's bitmap read can block in the gap of any leg the pool it reads
+  sits on.
 * **A leg bitmap read too early can hand a pool another pool's bytes.**
   Nothing in the gateway orders a `GetLegBitmap` read against the
   migration it feeds; the caller keeps the order (Migration). Read while

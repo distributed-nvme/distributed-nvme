@@ -6,10 +6,10 @@
 # fake dn/cn agents of dnv-worker.md
 # (Integration test plan, The fake agent, `fakeagent`), driven from this
 # machine over ssh by integtest/gatewayctl (the gRPC driver) with etcd ground
-# truth read back through integtest/workerctl (read-only, plus the four
-# worker-role writes — the flips set-created/set-provisioned and the drains
-# drain-sp/drain-clone — of gateway.md, Integration test plan,
-# The etcd verification, `workerctl`).
+# truth read back through integtest/workerctl (read-only, plus the five
+# worker-role writes — the flips set-created/set-provisioned, the cutover
+# start-cutover and the drains drain-sp/drain-clone — of gateway.md,
+# Integration test plan, The etcd verification, `workerctl`).
 #
 #   bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
 #
@@ -312,7 +312,9 @@ gwx() { # <UPPER_SNAKE code> <args…>
 # (Integration test plan, The etcd verification, `workerctl`): the raw decoded
 # etcd state, read back by a binary that is NOT the code under test. Its only
 # writes in this suite are the worker-role stand-ins named there —
-# set-created, set-provisioned, drain-sp and drain-clone; the drains finish the
+# set-created, set-provisioned, start-cutover, drain-sp and drain-clone; the
+# cutover lets `finish-migr` past its refusal of a migration whose cutover has
+# not started (play_cutover), and the drains finish the
 # teardowns the latching `delete-sp` and `delete-clone` start. Every sp drain
 # step but the last, which deletes the SpRev key, bumps SpRev, and so does a
 # clone drain's final step, its batches bumping nothing (dnv-worker.md, CLD8,
@@ -750,6 +752,48 @@ sp_primary_cntlr() { # <sp>
 		| "\(.[0]) \(.[1].addr_port)"'
 }
 
+# play_cutover plays the two worker writes that stand between a created
+# migration and its finish (Integration test plan, The etcd verification,
+# `workerctl`), in the worker's order: the provisioned flip of the
+# destination side, which the sp worker records once the dn agent reports
+# the side zeroed, then the cutover, which it starts once the pool's primary
+# reports a live path to that side and the side reports it waits for it
+# (dnv-worker.md RW18). FinishMigration refuses a migration whose cutover
+# has not started, with force or without (architecture.md, Migrations), and
+# no worker runs here to start it. Both writes go through the model op the
+# worker calls and each bumps SpRev, so the token is refreshed after them.
+# A read that fails DIES, as smoke_side_field's does: an empty slice or leg
+# id would hand set-provisioned a usage error far from its cause.
+play_cutover() { # <sp> <migr name>
+	local json dst where slice leg out
+	json=$(sp_json "$1") ||
+		die "play_cutover: \`workerctl get-sp --sp $1\` failed"
+	dst=$(printf '%s' "$json" | "$JQ" -r --arg m "$2" \
+		'.migrs[$m].dst_side_id // empty')
+	[ -n "$dst" ] || die "play_cutover: $1 holds no migration $2"
+	# The slices are keyed by the %016x spelling of their id (workerctl's
+	# idHex), which the 0x prefix keeps from reading as octal.
+	where=$(printf '%s' "$json" | "$JQ" -r --arg d "$dst" '
+		[ .slices | to_entries[] | .key as $s | .value
+		  | (.meta_grp_list[]?, .data_grp_list[]?)
+		  | (.leg_list[]?, .spare_leg_list[]?) | .leg_id as $l
+		  | .side_list[]? | select(.side_id == $d)
+		  | "0x\($s) \($l)" ][0] // empty')
+	[ -n "$where" ] || die "play_cutover: side $dst of $2 is in no leg of $1"
+	slice=${where%% *}
+	leg=${where##* }
+	out=$(wctl set-provisioned --sp "$1" --slice "$slice" --leg "$leg" \
+		--side "$dst")
+	assert_field "$out" '.flipped' "true" \
+		"$2: set-provisioned flipped the destination side"
+	out=$(wctl start-cutover --sp "$1" --name "$2")
+	assert_field "$out" '.dst_side_id' "$(printf '%016x' "$dst")" \
+		"$2: start-cutover named the destination side"
+	refresh_rev "$1"
+	assert_field "$(gw get-migr --sp "$1" --name "$2")" \
+		'.migr.cutover_pending' "false" "$2: get-migr after the cutover"
+}
+
 # verify_sp is the write-set verifier (gateway.md, Storage pools and GrowSlice)
 # of a freshly created standard SP (the test-time shape). Case S step 6 asserts
 # it in full, and cases A and D reuse it for every SP they create, which is
@@ -1166,6 +1210,13 @@ smoke_jq() { # <json> <filter> [jq args…]
 	local json=$1 filter=$2
 	shift 2
 	printf '%s' "$json" | "$JQ" -r "$@" "$filter"
+}
+
+# smoke_gwx_out is gwx with the reply kept in SMOKE_OUT, for the refusals
+# whose message is part of the assertion; faults_gwx_out explains why it is a
+# global.
+smoke_gwx_out() { # <UPPER_SNAKE code> <args…>
+	SMOKE_OUT=$(gwx "$@")
 }
 
 # smoke_dn_dir / smoke_cn_dir map an addr_port back to the fake's $WORK
@@ -2588,6 +2639,11 @@ EOF
 	assert_ne "$dstSide" "$srcSide" "migration dst_side_id differs from the source"
 	assert_field "$(smoke_jq "$(sp_json sp0)" '.migrs.m0 | @json')" '.bm_cnt' \
 		"0" "migration bm_cnt at creation"
+	# The create writes the record with its cutover pending, which only the
+	# worker's cutover clears (architecture.md, Migrations), and the get
+	# returns the record as stored.
+	assert_field "$(smoke_jq "$(sp_json sp0)" '.migrs.m0 | @json')" \
+		'.cutover_pending' "true" "migration cutover_pending at creation"
 	# [D15]: only the sp-worker flips provisioned, once the dn agent reports
 	# the side's zeroing done — so a fresh destination is always false.
 	assert_eq "$(smoke_side_field sp0 "$dstSide" provisioned)" "false" \
@@ -2645,8 +2701,10 @@ EOF
 	assert_field "$out" '.migr.src_side_id' "$srcSide" "get-migr src_side_id"
 	assert_field "$out" '.migr.dst_side_id' "$dstSide" "get-migr dst_side_id"
 	assert_field "$out" '.migr.bm_cnt' "2" "get-migr bm_cnt"
+	assert_field "$out" '.migr.cutover_pending' "true" "get-migr cutover_pending"
 	# CancelMigration throws the unfinished copy away: the destination's
-	# extents come back and the source was never touched.
+	# extents come back and the source was never touched. It needs no
+	# cutover: m0's is still pending.
 	out=$(gw cancel-migr --sp sp0 --rev "$SP_REV" --name m0)
 	refresh_rev sp0
 	assert_field "$out" '.migr_id' "$migrId" "cancel-migr reply migr_id"
@@ -2676,7 +2734,10 @@ EOF
 	# The finish path, on a fresh migration. --force skips the "fully
 	# hydrated" proof the destination DN would otherwise have to give (AG3;
 	# gateway.md, Migrations) — no worker ever pushed a dm-clone status line
-	# to these fakes.
+	# to these fakes — and nothing else: a finish is refused, with force or
+	# without, while the migration's cutover is pending (architecture.md,
+	# Migrations), so the suite plays the worker's provisioned flip and
+	# cutover first.
 	out=$(gw create-migr --sp sp0 --rev "$SP_REV" --name m1 --src-side "$srcSide")
 	refresh_rev sp0
 	migrId=$(jq_of "$out" '.migr_id')
@@ -2689,6 +2750,17 @@ EOF
 	assert_field "$(smoke_jq "$(sp_json sp0)" '.migrs.m1 | @json')" \
 		'.meta_units' "$migrUnits" "migration m1 meta_units"
 	smoke_check_dn_units "$dstAddr" "$migrUnits"
+	assert_no_write "finish-migr of m1 while its cutover is pending" \
+		smoke_gwx_out FAILED_PRECONDITION finish-migr --sp sp0 \
+		--rev "$SP_REV" --name m1
+	assert_field "$SMOKE_OUT" '.message | test("the cutover has not started")' \
+		"true" "m1: the refusal is the cutover one"
+	assert_no_write "finish-migr --force of m1 while its cutover is pending" \
+		smoke_gwx_out FAILED_PRECONDITION finish-migr --sp sp0 \
+		--rev "$SP_REV" --name m1 --force
+	assert_field "$SMOKE_OUT" '.message | test("the cutover has not started")' \
+		"true" "m1: force does not lift the cutover refusal"
+	play_cutover sp0 m1
 	out=$(gw finish-migr --sp sp0 --rev "$SP_REV" --name m1 --force)
 	refresh_rev sp0
 	assert_field "$out" '.migr_id' "$migrId" "finish-migr reply migr_id"
@@ -4710,6 +4782,8 @@ case_faults() {
 	dstSide=$(jq_of "$out" '.migr.dst_side_id')
 	assert_field "$out" '.migr.src_side_id' "$srcSide" \
 		"get-migr read-back: src_side_id"
+	assert_field "$out" '.migr.cutover_pending' "true" \
+		"get-migr read-back: cutover_pending"
 	assert_ne "$dstSide" "$srcSide" "m0: the destination is a new side"
 
 	# One spare leg on the data group — step 3's unprovisioned switch.
@@ -4882,13 +4956,30 @@ case_faults() {
 		gwx FAILED_PRECONDITION create-migr --sp sp0 --rev "$SP_REV" \
 		--name m1 --src-side "$srcSide"
 
+	# A migration whose cutover has not started cannot finish, with force or
+	# without (architecture.md, Migrations): m0's cutover is pending until
+	# step 5 plays it, and the refusal is decided from the record before any
+	# agent call.
+	assert_no_write "finish-migr while m0's cutover is pending" \
+		faults_gwx_out FAILED_PRECONDITION finish-migr --sp sp0 \
+		--rev "$SP_REV" --name m0
+	assert_field "$FAULTS_OUT" \
+		'.message | test("the cutover has not started")' "true" \
+		"m0: the refusal is the cutover one"
+	assert_no_write "finish-migr --force while m0's cutover is pending" \
+		faults_gwx_out FAILED_PRECONDITION finish-migr --sp sp0 \
+		--rev "$SP_REV" --name m0 --force
+	assert_field "$FAULTS_OUT" \
+		'.message | test("the cutover has not started")' "true" \
+		"m0: force does not lift the cutover refusal"
+
 	# A spare whose side is not yet provisioned must never become an md member
 	# (architecture.md, Spare legs).
 	assert_no_write "switch-spare with an unprovisioned spare" \
 		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"
 
-	# The thirteenth guard of this stage — an SP-level mutator refused
+	# The fifteenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
 	# sets the flag
 	# (gateway.md, Storage pools and GrowSlice), and step 18 of case S drives
@@ -4901,7 +4992,7 @@ case_faults() {
 	# nothing, so every call above was made with a token that was still
 	# current when the next one went out.
 	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
-		"step 3: SpRev is untouched by twelve refusals"
+		"step 3: SpRev is untouched by fourteen refusals"
 
 	# -----------------------------------------------------------------
 	stage 4 "agent faults: hung, closed and stopped agents are ABORTED"
@@ -5040,7 +5131,11 @@ case_faults() {
 	wait_until "$WAIT_SHORT" "$cnDir's port to listen again" ports_up \
 		"${cnAddr##*:}"
 
-	# --- FinishMigration, on the DESTINATION side's DN.
+	# --- FinishMigration, on the DESTINATION side's DN. Step 3 proved the
+	# finish refused while m0's cutover is pending; the worker's provisioned
+	# flip and cutover are played first, so what is refused below is the
+	# hydration proof alone.
+	play_cutover sp0 m0
 	dnAddr=$(faults_side_addr sp0 "$dstSide")
 	dnDir=$(faults_dn_dir "$dnAddr")
 	dnId=$(dn_id_of "$dnAddr")
@@ -5102,6 +5197,9 @@ case_faults() {
 		'.migr.dst_side_id')
 	assert_ne "$forceDstSide" "$dstSide" \
 		"m-force: the destination is a new side"
+	# Its cutover is played before the DN stops, so the refusal below is the
+	# hydration one and the forced finish has only that proof to skip.
+	play_cutover sp0 m-force
 	# The gateway picks the destination DN itself (architecture.md,
 	# Per-operation allocation), so which fake to stop is only knowable from
 	# the stored side.
@@ -6155,12 +6253,17 @@ case_ceiling() {
 	assert_eq "$(dn_rev_of "$(dn_addr 2)")" "$((rev + 1))" \
 		"dn2 dn_rev after the cancel"
 	# The finish gives dn1 back only its units, a write that moves no DnRev,
-	# and the source DN its extents, with one bump. --force skips the proof
-	# that every region is hydrated, which no fake here could give.
+	# and the source DN its extents, with one bump. FinishMigration refuses
+	# a migration whose cutover has not started, with force or without, so
+	# the cutover is played first (play_cutover); its two writes move a
+	# Slice, the Migration and SpRev, no DnRev, so the counts read here
+	# before it still hold for the finish. --force skips the proof that
+	# every region is hydrated, which no fake here could give.
 	srcAddr=$(ceil_side_addr spE2 "$fillSide")
 	assert_ne "$srcAddr" "$(dn_addr 1)" "mFill's source is not dn1"
 	rev=$(dn_rev_of "$(dn_addr 1)")
 	srcRev=$(dn_rev_of "$srcAddr")
+	play_cutover spE2 mFill
 	gw finish-migr --sp spE2 --rev "$SP_REV" --name mFill --force >/dev/null
 	refresh_rev spE2
 	ceil_dn_used "$(dn_addr 1)" 0 "after the finish"

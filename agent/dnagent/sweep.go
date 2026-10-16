@@ -211,10 +211,11 @@ func (s *DnAgentServer) collectClaims(
 //	d3 clone, d5 wrapper,
 //	:3: connection        wantMigr (ensureMigrDst)
 //
-// migrSrc here is the EFFECTIVE one: a source conf whose destination has not
-// provisioned is exactly equivalent to no source conf at all (architecture.md,
-// Migration), so a
-// deferred source wants nothing and the side keeps serving unchanged.
+// migrSrc here is the EFFECTIVE one: a source conf whose request carries
+// dst_provisioned false — its destination not provisioned yet, or the
+// migration's cutover still pending — is exactly equivalent to no source
+// conf at all (architecture.md, Migration), so a deferred source wants
+// nothing and the side keeps serving unchanged.
 type dnWanted struct {
 	dms      map[string]struct{}
 	nvmetSs  map[string]struct{}

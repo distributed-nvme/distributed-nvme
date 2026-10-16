@@ -10,9 +10,11 @@
 // exactly as it does for DNs and CNs.
 //
 // What the coordinator keeps for itself is everything that is not per-object:
-// the two flips (RW18/RW19), the Leg health rows — which the PRIMARY cntlr
-// reports but which are written on the SLICE, so only the coordinator knows
-// where they go (HL2) — and the reaction pass (AR1-AR10).
+// the two flips (RW18/RW19) and a migration's cutover beside the first, which
+// read the reports of a side and of the primary cntlr together, the Leg health
+// rows — which the PRIMARY cntlr reports but which are written on the SLICE,
+// so only the coordinator knows where they go (HL2) — and the reaction pass
+// (AR1-AR10).
 package worker
 
 import (
@@ -20,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,8 +35,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// msgFlipApplied is the record of the two flips (RW18, RW19; dnv-worker.md, Log
-// records).
+// msgFlipApplied is the record of the two flips and of a migration's cutover
+// (RW18, RW19; dnv-worker.md, Log records).
 const msgFlipApplied = "flip applied"
 
 // The "kind" attribute of the "flip applied" record (dnv-worker.md, Log
@@ -41,6 +44,7 @@ const msgFlipApplied = "flip applied"
 const (
 	flipKindProvisioned = "provisioned"
 	flipKindCreated     = "created"
+	flipKindCutover     = "cutover"
 )
 
 // Non-normative records of the sp coordinator. The strings of dnv-worker.md,
@@ -57,7 +61,7 @@ const (
 	// msgSpChildUnresolved is RW14's idle child: an endpoint with no
 	// DnConf/CnConf yields no dn_id/cn_id, so no request can be built for it.
 	msgSpChildUnresolved = "sp child unresolved"
-	// msgSpFlipFailed reports a flip STM that did not commit.
+	// msgSpFlipFailed reports a flip or cutover STM that did not commit.
 	msgSpFlipFailed = "sp flip failed"
 	// msgSpStandbyLegRow is HL2's "a standby's leg row is logged, never
 	// recorded".
@@ -115,14 +119,15 @@ type spOps interface {
 	) (*model.SpState, error)
 	// flipProvisioned is RW18/MD6; it returns the sides it actually wrote,
 	// which is what the "flip applied" record (dnv-worker.md, Log records)
-	// names (one per side).
+	// names (one per side), and the revision its STM committed, which each
+	// of those records names.
 	flipProvisioned(
 		ctx context.Context,
 		cid uint64,
 		shard uint32,
 		spId uint64,
 		sides []model.SideRef,
-	) ([]model.SideRef, error)
+	) ([]model.SideRef, uint64, error)
 	// flipCreated is RW19/MD6; it returns the tds it actually wrote.
 	flipCreated(
 		ctx context.Context,
@@ -131,6 +136,20 @@ type spOps interface {
 		spId uint64,
 		cands []model.TdRef,
 	) ([]model.TdRef, error)
+	// startCutover is the cutover beside RW18's flip (MD6): it clears the
+	// migration's cutover_pending once cntlrId, still the primary and not
+	// disabled, reported a live path to its dst side, at a level below
+	// SP_LEVEL_NO_MIGRATION, and returns the revision its STM committed; or
+	// it refuses and writes nothing.
+	startCutover(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		ref model.CutoverRef,
+		cntlrId uint64,
+	) (uint64, error)
 }
 
 // modelSpOps is the production spOps.
@@ -152,7 +171,7 @@ func (o *modelSpOps) flipProvisioned(
 	shard uint32,
 	spId uint64,
 	sides []model.SideRef,
-) ([]model.SideRef, error) {
+) ([]model.SideRef, uint64, error) {
 	return model.FlipProvisioned(ctx, o.cli, cid, shard, spId, sides)
 }
 
@@ -164,6 +183,20 @@ func (o *modelSpOps) flipCreated(
 	cands []model.TdRef,
 ) ([]model.TdRef, error) {
 	return model.FlipCreated(ctx, o.cli, cid, shard, spId, cands)
+}
+
+func (o *modelSpOps) startCutover(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.CutoverRef,
+	cntlrId uint64,
+) (uint64, error) {
+	return model.StartCutover(
+		ctx, o.cli, cid, shard, spId, spName, ref, cntlrId,
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +269,10 @@ type spPlan struct {
 	// tdRefs are the tds whose created flag is still false, keyed by td_id:
 	// the only candidates RW19 may flip.
 	tdRefs map[uint64]model.TdRef
+	// cutovers are the migrations whose cutover_pending is set and whose
+	// dst side is provisioned, in migr_name_list order: the only ones the
+	// cutover beside RW18's flip may start (cutoverRefs).
+	cutovers []model.CutoverRef
 	// unresolved counts what the snapshot could not resolve — an endpoint
 	// with no DnConf/CnConf, a cntlr whose record is missing — each of which
 	// leaves a child idle: no request, so a running one is stopped (RW14). A
@@ -295,6 +332,11 @@ type spReport struct {
 	tornTdIds []uint64
 	// legRows are the primary cntlr's leg probe rows (HL2).
 	legRows []legRow
+	// paths is the primary cntlr's path rows as its reply's own info
+	// carried them, for the cutover beside RW18's flip; nil when the reply
+	// carried no info of its own or came from a standby or a disabled
+	// primary.
+	paths *pathReport
 	// cntlrId is the cntlr whose reply produced the report: its legRows are
 	// recorded only while the coordinator's latest plan for that cntlr makes
 	// it the primary (recordsLegRows).
@@ -313,6 +355,47 @@ type spReport struct {
 type sideSynced struct {
 	key      sideKey
 	revision uint64
+}
+
+// pathReport is what one cntlr reply's own info says of the paths of the
+// legs that have two sides (CntlrInfo.side_id_to_path), as the cutover beside
+// RW18's flip reads it.
+type pathReport struct {
+	// revision is the reply's revision, which the cutover's record names.
+	revision uint64
+	// rowCnt counts the reply's path rows, live or not.
+	rowCnt int
+	// liveSides are the sides whose path row reads RES_STATUS_OK: the node
+	// holds a live controller to the side's address. Ascending.
+	liveSides []uint64
+}
+
+// newPathReport reads one reply's own info; nil when there is none.
+func newPathReport(revision uint64, info *pb.CntlrInfo) *pathReport {
+	if info == nil {
+		return nil
+	}
+	rows := info.GetSideIdToPath()
+	rep := &pathReport{revision: revision, rowCnt: len(rows)}
+	for _, sideId := range sortedKeys(rows) {
+		if rows[sideId].GetStatus() == pb.ResStatus_RES_STATUS_OK {
+			rep.liveSides = append(rep.liveSides, sideId)
+		}
+	}
+	return rep
+}
+
+// live reports whether the report shows a live path to sideId.
+func (r *pathReport) live(sideId uint64) bool {
+	return r != nil && slices.Contains(r.liveSides, sideId)
+}
+
+// empty reports whether a report has no path row at all: no reason to send,
+// since the coordinator keeps no path report beyond one drain. A report whose
+// rows read anything but live is sent all the same, so it replaces an older
+// live one of the same drain (handleReports).
+func (r *pathReport) empty() bool {
+	return r == nil || r.rowCnt == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -348,12 +431,15 @@ type spWorker struct {
 	after <-chan struct{}
 
 	// Everything below is owned by the run goroutine.
-	desired   desiredState
-	sides     map[sideKey]*sideChild
-	cntlrs    map[uint64]*cntlrChild
-	legs      map[uint64]*healthMonitor
-	legSlice  map[uint64]uint64
-	tdRefs    map[uint64]model.TdRef
+	desired  desiredState
+	sides    map[sideKey]*sideChild
+	cntlrs   map[uint64]*cntlrChild
+	legs     map[uint64]*healthMonitor
+	legSlice map[uint64]uint64
+	tdRefs   map[uint64]model.TdRef
+	// cutovers are the latest fan-out's spPlan.cutovers, less those a
+	// cutover started since.
+	cutovers  []model.CutoverRef
 	fanWanted bool
 	idleCnt   int
 	// sideStops and cntlrStops are the graceful stops RW14's diff issued,
@@ -781,7 +867,72 @@ func (w *spWorker) buildPlan(
 	}
 	w.buildSidePlans(ctx, plan, state, primaryCnId, standby, sideReason == "")
 	w.buildCntlrPlans(ctx, plan, state, cnIds)
+	plan.cutovers = cutoverRefs(state)
 	return plan
+}
+
+// cutoverRefs lists the migrations of one load whose cutover the coordinator
+// may start (RW18): cutover_pending set, on a leg with two sides, the src and
+// the dst side, and the dst side provisioned in this load. A migration whose
+// leg the load does not hold is left out.
+func cutoverRefs(state *model.SpState) []model.CutoverRef {
+	var out []model.CutoverRef
+	for _, migrName := range state.Conf.GetMigrNameList() {
+		migr, ok := state.Migrs[migrName]
+		if !ok || !migr.GetCutoverPending() {
+			continue
+		}
+		ref, ok := migrLegOf(state, migr)
+		if !ok {
+			continue
+		}
+		ref.MigrName = migrName
+		out = append(out, ref)
+	}
+	return out
+}
+
+// migrLegOf finds the leg of one migration in a load: the leg with exactly
+// two sides, the migration's src side and its dst side, whose dst side is
+// provisioned.
+func migrLegOf(
+	state *model.SpState,
+	migr *pb.Migration,
+) (model.CutoverRef, bool) {
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		slice, ok := state.Slices[sliceId]
+		if !ok {
+			continue
+		}
+		for _, grp := range allGroups(slice) {
+			for _, list := range [][]*pb.Leg{
+				grp.GetLegList(),
+				grp.GetSpareLegList(),
+			} {
+				for _, leg := range list {
+					if len(leg.GetSideList()) != 2 {
+						continue
+					}
+					dst := sideOfLeg(leg, migr.GetDstSideId())
+					src := sideOfLeg(leg, migr.GetSrcSideId())
+					if dst == nil || src == nil {
+						continue
+					}
+					if !dst.GetProvisioned() {
+						return model.CutoverRef{}, false
+					}
+					return model.CutoverRef{
+						MigrId:    migr.GetMigrId(),
+						SliceId:   sliceId,
+						LegId:     leg.GetLegId(),
+						SrcSideId: migr.GetSrcSideId(),
+						DstSideId: migr.GetDstSideId(),
+					}, true
+				}
+			}
+		}
+	}
+	return model.CutoverRef{}, false
 }
 
 // grpList is one of a slice's two group lists. Which one a group is in decides
@@ -964,6 +1115,10 @@ func (w *spWorker) addMigrConf(
 		if !ok {
 			continue
 		}
+		// Both sides carry the flag; the src side is told the dst side is
+		// provisioned only once the cutover is no longer pending, so it
+		// serves on until the cutover (architecture.md, Migration).
+		pending := migr.GetCutoverPending()
 		if migr.GetSrcSideId() == side.GetSideId() {
 			dst := sideOfLeg(leg, migr.GetDstSideId())
 			if dst == nil {
@@ -982,7 +1137,8 @@ func (w *spWorker) addMigrConf(
 				MigrId:         migr.GetMigrId(),
 				DstSideId:      dst.GetSideId(),
 				DstDnId:        dstDn.GetDnId(),
-				DstProvisioned: dst.GetProvisioned(),
+				DstProvisioned: dst.GetProvisioned() && !pending,
+				CutoverPending: pending,
 			}
 		}
 		if migr.GetDstSideId() == side.GetSideId() {
@@ -1000,14 +1156,15 @@ func (w *spWorker) addMigrConf(
 				return false
 			}
 			out.req.MigrDstConf = &pb.SyncupSideRequest_MigrDstConf{
-				MigrId:        migr.GetMigrId(),
-				SrcSideId:     src.GetSideId(),
-				SrcDnId:       srcDn.GetDnId(),
-				SrcNvmeTrConf: src.GetNvmeTrConf(),
-				BlockSize:     dataBlockSize(conf.GetBdevConf()),
-				MetaBlocks:    grp.GetMetaBlocks(),
-				DmCloneConf:   migrCloneConf(migr.GetDmCloneConf()),
-				BmCnt:         migr.GetBmCnt(),
+				MigrId:         migr.GetMigrId(),
+				SrcSideId:      src.GetSideId(),
+				SrcDnId:        srcDn.GetDnId(),
+				SrcNvmeTrConf:  src.GetNvmeTrConf(),
+				BlockSize:      dataBlockSize(conf.GetBdevConf()),
+				MetaBlocks:     grp.GetMetaBlocks(),
+				DmCloneConf:    migrCloneConf(migr.GetDmCloneConf()),
+				BmCnt:          migr.GetBmCnt(),
+				CutoverPending: pending,
 			}
 			// BM1/BM4: only the destination side's DN receives this
 			// migration's chunks.
@@ -1422,6 +1579,35 @@ func (w *spWorker) handSides(sides map[sideKey]*sidePlan) {
 	}
 }
 
+// effectivePrimary is the cn agent's own role gate (cnagent.md CN9): the
+// cntlr runs the primary shape, the arrays and the thin pools, only while it
+// is the primary and not disabled. A nil plan is no primary.
+func (p *cntlrPlan) effectivePrimary() bool {
+	return p != nil && p.primary && !p.req.GetCntlr().GetDisabled()
+}
+
+// latestCntlrPlan is the plan the coordinator last decided for a cntlr: the
+// held one while a hold keeps the cntlrs, else the one its child was handed;
+// nil when it decided none.
+func (w *spWorker) latestCntlrPlan(cntlrId uint64) *cntlrPlan {
+	if w.held != nil {
+		return w.held.plans[cntlrId]
+	}
+	if child, ok := w.cntlrs[cntlrId]; ok {
+		return child.plan
+	}
+	return nil
+}
+
+// countsPaths is the cutover's reading of recordsLegRows (RW18): a cntlr's
+// path report counts only while the plan the coordinator last decided makes
+// it the primary and not disabled (effectivePrimary). A disabled primary
+// holds no arrays and no thin pools, and its disable is AR5's trigger on its
+// own, so its live path says nothing of the cntlr that will hold them.
+func (w *spWorker) countsPaths(cntlrId uint64) bool {
+	return w.latestCntlrPlan(cntlrId).effectivePrimary()
+}
+
 // recordsLegRows is HL2's "only the primary's leg rows are recorded", judged
 // by the plan the coordinator last decided for the cntlr: the held one while
 // a hold keeps the cntlrs, else the one its child was handed. A demoted
@@ -1433,12 +1619,8 @@ func (w *spWorker) handSides(sides map[sideKey]*sidePlan) {
 // primary can be read after it was handed the standby plan: they are dropped
 // the same way.
 func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
-	if w.held != nil {
-		next, ok := w.held.plans[cntlrId]
-		return ok && next.primary
-	}
-	child, ok := w.cntlrs[cntlrId]
-	return ok && child.plan.primary
+	plan := w.latestCntlrPlan(cntlrId)
+	return plan != nil && plan.primary
 }
 
 // applyPlan is RW14's child diff: new => start; gone => stop (RW11), off the
@@ -1497,6 +1679,7 @@ func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 
 	w.legSlice = plan.legSlice
 	w.tdRefs = plan.tdRefs
+	w.cutovers = plan.cutovers
 	for legId := range w.legs {
 		if _, ok := w.legSlice[legId]; !ok {
 			delete(w.legs, legId)
@@ -1650,7 +1833,7 @@ func (w *spWorker) logUnresolved(
 }
 
 // ---------------------------------------------------------------------------
-// Reports: the two flips (RW18, RW19) and the leg rows (HL2)
+// Reports: the two flips (RW18, RW19), the cutover and the leg rows (HL2)
 // ---------------------------------------------------------------------------
 
 // handleReports drains everything the children reported and applies it. The
@@ -1660,7 +1843,10 @@ func (w *spWorker) logUnresolved(
 // (RW19). A demoted cntlr's synced revision goes to RW22's demotion hold and a
 // side's to RW14's barrier, which the last report each waits for moves on
 // ahead of those STMs, and a cntlr's leg rows are recorded only while it is
-// the primary of the plan the coordinator last decided (recordsLegRows).
+// the primary of the plan the coordinator last decided (recordsLegRows). Its
+// path rows count for a cutover under the same rule, the cntlr also not
+// disabled (countsPaths), the newest report of the drain for each cntlr, and
+// the cutovers run after the provisioned flip.
 func (w *spWorker) handleReports(first spReport) {
 	ctx := newTraceCtx(w.ctx, w.seed)
 	reports := []spReport{first}
@@ -1678,11 +1864,18 @@ func (w *spWorker) handleReports(first spReport) {
 	var tds []model.TdRef
 	// tdIdx is each candidate's index in tds.
 	tdIdx := make(map[uint64]int)
+	// paths is the newest path report of each cntlr the plan makes the
+	// primary and not disabled: a later reply of the drain replaces an
+	// earlier one, live path or not.
+	paths := make(map[uint64]*pathReport)
 	for _, rep := range reports {
 		if w.recordsLegRows(rep.cntlrId) {
 			for _, row := range rep.legRows {
 				w.observeLeg(ctx, row)
 			}
+		}
+		if rep.paths != nil && w.countsPaths(rep.cntlrId) {
+			paths[rep.cntlrId] = rep.paths
 		}
 		if ref := rep.provisioned; ref != nil {
 			key := sideKey{legId: ref.LegId, sideId: ref.SideId}
@@ -1731,6 +1924,7 @@ func (w *spWorker) handleReports(first spReport) {
 	}
 	w.releaseHeld(ctx)
 	w.applyProvisionedFlip(ctx, sides)
+	w.applyCutovers(ctx, paths)
 	w.applyCreatedFlip(ctx, tds)
 }
 
@@ -1844,7 +2038,9 @@ func (w *spWorker) applyProvisionedFlip(
 	if len(sides) == 0 {
 		return
 	}
-	flipped, err := w.ops.flipProvisioned(ctx, w.cid, w.shard, w.spId, sides)
+	flipped, revision, err := w.ops.flipProvisioned(
+		ctx, w.cid, w.shard, w.spId, sides,
+	)
 	if err != nil {
 		slog.InfoContext(ctx, msgSpFlipFailed,
 			slog.String("kind", flipKindProvisioned),
@@ -1861,8 +2057,11 @@ func (w *spWorker) applyProvisionedFlip(
 	}
 	// One record per side the STM WROTE, never per candidate reported: a side
 	// another owner flipped first is not this worker's flip, and the record
-	// carries the revision this STM produced (dnv-worker.md, Log records).
-	revision := w.currentRevision(ctx)
+	// carries the revision this STM produced (dnv-worker.md, Log records) as
+	// the op returned it, never one read back after it: a bump in between
+	// would name a revision newer than the first request carrying the side
+	// provisioned, so a reply to that request would read as older than the
+	// flip.
 	for _, ref := range flipped {
 		slog.InfoContext(ctx, msgFlipApplied,
 			slog.String("kind", flipKindProvisioned),
@@ -1874,6 +2073,93 @@ func (w *spWorker) applyProvisionedFlip(
 			slog.Uint64("revision", revision),
 		)
 	}
+}
+
+// applyCutovers starts the cutover of every migration of the latest load
+// that waits for it, beside RW18's flip, when all of these hold: (1) its dst
+// side is provisioned in that load (cutoverRefs); (2) the dst side's latest
+// SideInfo reads the target row PROVISIONING with the reason
+// RES_REASON_AWAITING_CUTOVER (sideDriver.awaitsCutover); (3) a cntlr the
+// plan the coordinator last decided makes the primary, and not disabled
+// (countsPaths), reported a live path to the dst side in the newest reply of
+// this drain that carried an info of its own (paths). Only the primary holds
+// the arrays and the thin pools a cutover's gap can block, so a standby's
+// path counts for nothing, nor does a disabled primary's, as it runs the
+// standby shape (cnagent.md CN9), and after a failover the cutover waits for
+// the new primary's own report. Each runs model.StartCutover, which re-checks
+// in its STM what the store holds of these conditions and refuses at a level
+// that keeps the dst side from building its dm-clone, whatever (2) read; a
+// cutover that commits leaves the list, one that fails or is refused stays
+// on it and is tried again on a later report, and the bump's fan-out reloads
+// the list.
+func (w *spWorker) applyCutovers(
+	ctx context.Context,
+	paths map[uint64]*pathReport,
+) {
+	if len(paths) == 0 || len(w.cutovers) == 0 {
+		return
+	}
+	var kept []model.CutoverRef
+	for _, ref := range w.cutovers {
+		cntlrId, rep := livePathTo(paths, ref.DstSideId)
+		if rep == nil || !w.awaitsCutover(ref) {
+			kept = append(kept, ref)
+			continue
+		}
+		revision, err := w.ops.startCutover(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle, ref, cntlrId,
+		)
+		if err != nil {
+			slog.InfoContext(ctx, msgSpFlipFailed,
+				slog.String("kind", flipKindCutover),
+				slog.Uint64("cluster_id", w.cid),
+				slog.Uint64("sp_id", w.spId),
+				slog.String("migr_name", ref.MigrName),
+				slog.Uint64("migr_id", ref.MigrId),
+				slog.Uint64("cntlr_id", cntlrId),
+				slog.String("error", err.Error()),
+			)
+			kept = append(kept, ref)
+			continue
+		}
+		slog.InfoContext(ctx, msgFlipApplied,
+			slog.String("kind", flipKindCutover),
+			slog.Uint64("cluster_id", w.cid),
+			slog.Uint64("sp_id", w.spId),
+			slog.String("migr_name", ref.MigrName),
+			slog.Uint64("migr_id", ref.MigrId),
+			slog.Uint64("src_side_id", ref.SrcSideId),
+			slog.Uint64("dst_side_id", ref.DstSideId),
+			slog.Uint64("cntlr_id", cntlrId),
+			slog.Uint64("report_revision", rep.revision),
+			slog.Uint64("revision", revision),
+		)
+	}
+	w.cutovers = kept
+}
+
+// livePathTo returns the cntlr, the lowest id first, whose path report shows
+// a live path to sideId, and that report; nil when none does.
+func livePathTo(
+	paths map[uint64]*pathReport,
+	sideId uint64,
+) (uint64, *pathReport) {
+	for _, cntlrId := range sortedKeys(paths) {
+		if paths[cntlrId].live(sideId) {
+			return cntlrId, paths[cntlrId]
+		}
+	}
+	return 0, nil
+}
+
+// awaitsCutover is condition (2) of applyCutovers, read from the side child
+// of the migration's dst side; a side with no running child does not wait.
+func (w *spWorker) awaitsCutover(ref model.CutoverRef) bool {
+	child, ok := w.sides[sideKey{legId: ref.LegId, sideId: ref.DstSideId}]
+	if !ok || child.driver == nil {
+		return false
+	}
+	return child.driver.awaitsCutover()
 }
 
 // applyCreatedFlip runs RW19's STM and logs the "flip applied" record
@@ -1911,11 +2197,13 @@ func (w *spWorker) applyCreatedFlip(ctx context.Context, cands []model.TdRef) {
 	}
 }
 
-// currentRevision reads the SpRev the flip just bumped, for the "revision"
-// attribute of the "flip applied" record (dnv-worker.md, Log records). The flip
-// ops report only how many records they wrote, so the new revision is read
-// back; a concurrent bump would make this report a slightly newer one, which is
-// a log detail, not a decision.
+// currentRevision reads the SpRev an op just bumped, for the "revision"
+// attribute of the created flip's "flip applied" record and of the "reaction
+// applied" record (dnv-worker.md, Log records). Those ops report what they
+// wrote, not the revision, so the new revision is read back; a concurrent
+// bump would make this report a slightly newer one, which is a log detail,
+// not a decision. The provisioned flip and the cutover name the revision
+// their own STM committed instead (applyProvisionedFlip).
 func (w *spWorker) currentRevision(ctx context.Context) uint64 {
 	rev := &pb.SpRev{}
 	found, err := w.deps.store.Get(
@@ -1946,11 +2234,16 @@ type sideDriver struct {
 	addr string
 
 	// mu guards next — the newest plan the coordinator built (RW6), which the
-	// loop takes in setDesired — and lastInfo, which fold writes from the
-	// stream's pump goroutine and the loop reads.
+	// loop takes in setDesired — lastInfo, which fold writes from the
+	// stream's pump goroutine and the loop reads, and awaiting.
 	mu       sync.Mutex
 	next     *sidePlan
 	lastInfo *pb.SideInfo
+	// awaiting is whether the latest SideInfo, as the loop last observed
+	// it, shows a migration dst side that waits for the cutover
+	// (sideAwaitsCutover). The loop writes it; the coordinator reads it for
+	// the cutover beside RW18's flip (applyCutovers).
+	awaiting bool
 
 	plan   *sidePlan
 	health *healthMonitor
@@ -1973,6 +2266,20 @@ func (d *sideDriver) info() *pb.SideInfo {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.lastInfo
+}
+
+// setAwaiting records what the latest SideInfo says of the cutover;
+// awaitsCutover reads it, from the coordinator's goroutine.
+func (d *sideDriver) setAwaiting(awaiting bool) {
+	d.mu.Lock()
+	d.awaiting = awaiting
+	d.mu.Unlock()
+}
+
+func (d *sideDriver) awaitsCutover() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.awaiting
 }
 
 // newSideDriver builds one side child's driver.
@@ -2184,14 +2491,30 @@ func (d *sideDriver) diffBitmap(
 }
 
 // observe folds one CheckSide/SyncupSide reply into the side's health (HL2,
-// HL4), the RW18 flip report and RW14's barrier. A failed push is not re-armed
-// here: it is logged and left to the next Syncup* reply, which re-plans the
-// diff from the agent's own acknowledged set.
+// HL4), the RW18 flip report, the cutover's wait (setAwaiting) and RW14's
+// barrier. A failed push is not re-armed here: it is logged and left to the
+// next Syncup* reply, which re-plans the diff from the agent's own
+// acknowledged set.
 func (d *sideDriver) observe(ctx context.Context, r *replyState) {
-	obs, res := sideObservation(r.code, d.info())
+	info := d.info()
+	obs, res := sideObservation(r.code, info)
 	d.health.observe(ctx, obs, res)
 	d.reportProvisioned(ctx, r, d.current())
+	d.setAwaiting(sideAwaitsCutover(info))
 	d.reportSynced(ctx, r)
+}
+
+// sideAwaitsCutover reads condition (2) of the cutover (applyCutovers) off a
+// side's SideInfo: the target row of a migration dst side reads
+// RES_STATUS_PROVISIONING with the reason RES_REASON_AWAITING_CUTOVER, which
+// the dn agent sets once the side's metadata wrapper stands while its
+// request carries cutover_pending (dnagent.md DN13, DN18). The
+// worker reads the reason, never the row's text (architecture.md,
+// Live-state reporting; dnagent.md DN13).
+func sideAwaitsCutover(info *pb.SideInfo) bool {
+	row := info.GetMigrDstInfo().GetTargetInfo()
+	return row.GetStatus() == pb.ResStatus_RES_STATUS_PROVISIONING &&
+		row.GetReason() == pb.ResReason_RES_REASON_AWAITING_CUTOVER
 }
 
 // reportProvisioned is RW18: a side whose request carried provisioned == false
@@ -2253,6 +2576,8 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 // Live-state reporting) and never written to etcd.
 func (d *sideDriver) unreachable(ctx context.Context) {
 	markSideUnknown(d.info())
+	// The rows read UNKNOWN now, which waits for nothing.
+	d.setAwaiting(false)
 	d.health.observe(ctx, healthUnreachable, "")
 }
 
@@ -2351,6 +2676,11 @@ type cntlrDriver struct {
 	// where lastInfo may hold a Syncup*'s since. AR10's run judges a round
 	// by it; nil until the stream's first info.
 	streamInfo *pb.CntlrInfo
+	// syncupInfo is the CntlrInfo the last SyncupCntlr reply carried, nil
+	// when it carried none: that reply's own report, where lastInfo may hold
+	// a round's that the stream's pump folded meanwhile (ownInfo). Only the
+	// loop goroutine touches it.
+	syncupInfo *pb.CntlrInfo
 	// memo is the coordinator's own-verdict memo, and cntlrId this cntlr's
 	// key in it (AR10).
 	memo    *verdictMemo
@@ -2477,6 +2807,19 @@ func (d *cntlrDriver) roundInfo() *pb.CntlrInfo {
 	return d.streamInfo
 }
 
+// ownInfo is the CntlrInfo reply r itself reports: for a round, what its
+// stream last carried (roundInfo), the reply's own info or the unchanged one
+// it left out; for a Syncup*, the info its reply carried, or nil. It is never
+// info(), which may mix the two kinds: a round's reply that leaves its info
+// out as unchanged would read a Syncup*'s older info there, from before a
+// failover, say.
+func (d *cntlrDriver) ownInfo(r *replyState) *pb.CntlrInfo {
+	if r.fromRound {
+		return d.roundInfo()
+	}
+	return d.syncupInfo
+}
+
 // infoSnapshot returns a COPY of the cntlr's latest info, taken under the
 // driver's lock. info() hands out the live message, which only the child's own
 // goroutine may read: the coordinator's reaction pass runs on ITS goroutine
@@ -2580,6 +2923,7 @@ func (d *cntlrDriver) syncup(
 	if err != nil {
 		return nil, fmt.Errorf("syncup cntlr: %w", err)
 	}
+	d.syncupInfo = reply.GetCntlrInfo()
 	state := d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),
 	)
@@ -2637,10 +2981,10 @@ func (d *cntlrDriver) diffBitmaps(
 }
 
 // observe folds one CheckCntlr/SyncupCntlr reply into the cntlr's health
-// (HL2 — every ERROR row of the CntlrInfo OTHER than leg_id_to_leg), the
-// settling flag, the RW19 created candidates and the leg rows the coordinator
-// records. A failed push is not re-armed here: it is logged and left to the
-// next Syncup* reply.
+// (HL2 — every ERROR row of the CntlrInfo OTHER than leg_id_to_leg and
+// side_id_to_path), the settling flag, the RW19 created candidates, the leg
+// rows the coordinator records and the path rows its cutover reads. A failed
+// push is not re-armed here: it is logged and left to the next Syncup* reply.
 func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	plan := d.current()
 	info := d.info()
@@ -2677,7 +3021,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// unavailable and the retry that builds over them reports the unbuilt
 	// devices MISSING, clean too when the SP has no td; settling on either
 	// would leave the build that follows to primary_unhealthy.
-	canSettle := plan.primary && !plan.req.GetCntlr().GetDisabled() &&
+	canSettle := plan.effectivePrimary() &&
 		r.revision == plan.req.GetRevision() && primaryShapeBuilt(info)
 	if r.fromRound && obs != healthNone {
 		// AR10: the run judges a round by its own report — the info the
@@ -2710,6 +3054,13 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	rep.tornTdIds = tornTds(info, rep.createdTdIds)
 	if plan.primary {
 		rep.legRows = d.legRows(info)
+		// The cutover reads the reply's own info, never the latest known
+		// state, which can be another reply's (ownInfo), and only a reply
+		// to a plan that makes the cntlr the primary and not disabled: a
+		// disabled primary's agent runs the standby shape (countsPaths).
+		if plan.effectivePrimary() {
+			rep.paths = newPathReport(r.revision, d.ownInfo(r))
+		}
 	} else {
 		d.logStandbyLegRows(ctx, info, plan.cntlrId)
 	}
@@ -2720,7 +3071,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		rep.cntlrSynced = r.revision
 	}
 	if len(rep.createdTdIds) == 0 && len(rep.legRows) == 0 &&
-		rep.cntlrSynced == 0 {
+		rep.cntlrSynced == 0 && rep.paths.empty() {
 		return
 	}
 	d.send(ctx, rep)

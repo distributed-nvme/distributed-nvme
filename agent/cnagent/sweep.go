@@ -1832,6 +1832,9 @@ func cntlrResKeys(plan *cntlrPlan) map[string]struct{} {
 	add := func(key string) { keys[key] = struct{}{} }
 	for _, lp := range plan.legs {
 		add(resKeyOf(resKeyLegFmt, lp.legId))
+		for _, key := range pathResKeys(lp) {
+			add(key)
+		}
 	}
 	for _, gp := range plan.grps {
 		add(resKeyOf(resKeyGrpFmt, gp.grpId))

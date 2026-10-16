@@ -226,10 +226,10 @@ func (s *DnAgentServer) convergeSide(
 		s.moveCnAnaGroups(ctx, plan, common.AnaGrpIdInaccessible)
 	}
 
-	cloneLive, dstHeld := false, false
+	cloneLive, dstSettles := false, false
 	if plan.wantMigr {
 		var serving migrServing
-		serving, dstHeld = s.ensureMigrDst(ctx, st, plan, info)
+		serving, dstSettles = s.ensureMigrDst(ctx, st, plan, info)
 		switch serving.state {
 		case migrCloneUp:
 			cloneLive = true
@@ -258,10 +258,12 @@ func (s *DnAgentServer) convergeSide(
 	if plan.wantExport {
 		s.ensureCnExports(ctx, st, plan, info, cloneLive)
 	}
-	if dstHeld {
-		// DN13 step (5) has run: whether the destination still needs its
-		// retry is decided last, so no OS call of this pass follows its
-		// deregistration.
+	if dstSettles {
+		// The per-CN stacks have been converged where the destination rule
+		// puts them — by DN13 step (5), or, while the pass waits for the
+		// cutover, where a stopped step puts them: whether the destination
+		// still needs its retry is decided last, so no OS call of this pass
+		// follows its deregistration.
 		s.settleMigrRetry(st, plan, info)
 	}
 	return info, sweep
@@ -921,7 +923,7 @@ func (s *DnAgentServer) reportAboveSideDeferred(
 }
 
 // reportMigrSrcDeferred fills the migration-source rows a side would publish
-// once its destination has provisioned.
+// once the migration's cutover has started.
 //
 // `migr_src_conf.dst_provisioned = false` makes the source behave **exactly**
 // as if migr_src_conf were absent (architecture.md, Migration): it keeps
@@ -929,8 +931,11 @@ func (s *DnAgentServer) reportAboveSideDeferred(
 // Without that equivalence
 // the source would fence the primary's path the moment the migration was
 // created, and the leg would have no serving path for the whole zeroing
-// window. The only visible difference is right here — the would-be rows report
-// PROVISIONING instead of being omitted.
+// window and the wait for the cutover. The only visible difference is right
+// here — the would-be rows report PROVISIONING instead of being omitted:
+// "waiting for the cutover" while the request carries cutover_pending on a
+// deferred role, and "side provisioning" otherwise (DN12). The converge and
+// the probe both report through it.
 func (s *DnAgentServer) reportMigrSrcDeferred(
 	st *sideState,
 	plan *sidePlan,
@@ -940,16 +945,20 @@ func (s *DnAgentServer) reportMigrSrcDeferred(
 		return
 	}
 	t := st.tracker
+	details := tagProvisioningWait
+	if plan.migrSrcDeferred && plan.migrSrcRaw.GetCutoverPending() {
+		details = tagCutoverWait
+	}
 	// migrSrc is nil while the role is deferred, so the names come from a plan
 	// with the raw conf re-attached.
 	srcPlan := plan.withMigrSrc(plan.migrSrcRaw)
 	srcInfo := &pb.SideInfo_MigrSrcInfo{}
 	info.MigrSrcInfo = srcInfo
 	srcInfo.DmLinearInfo = t.Provisioning(
-		resKeyMigrSrcDm, srcPlan.migrSrcName(), tagProvisioningWait)
+		resKeyMigrSrcDm, srcPlan.migrSrcName(), details)
 	if plan.wantExport {
 		srcInfo.NvmeofInfo = t.Provisioning(
-			resKeyMigrSrcNvmeof, srcPlan.migrSrcNqn(), tagProvisioningWait)
+			resKeyMigrSrcNvmeof, srcPlan.migrSrcNqn(), details)
 	}
 }
 

@@ -1127,8 +1127,9 @@ The codes are those of `architecture.md`, Migrations.
   append the new `Side` to the leg per `architecture.md`, Migrations
   (`provisioned` false, the `cntlid_slot` of GW18); the destination DN's
   bookkeeping — the extents and the units (`chargeUnits`) — and one
-  `BumpDnRev`; put the `Migration` with its `meta_units`; `BumpSpRev`.
-  Reply `migr_id`.
+  `BumpDnRev`; put the `Migration` with its `meta_units` and
+  `cutover_pending` set, which only the worker's cutover clears
+  (`architecture.md`, Migration); `BumpSpRev`. Reply `migr_id`.
 
 GW18. **The destination side's slot.** A migration destination side takes
 the first `cntlid_slot_list` entry that differs from the source side's
@@ -1141,25 +1142,31 @@ rather than a candidate problem.
   opens with `openSp`, as `CreateMigration`'s planning read does: resolve,
   the `deleting` gate included, then the token, so a deleting SP is
   `FAILED_PRECONDITION` and a stale token `ABORTED` ahead of the migration
-  lookup and of any agent call; then the migration; with `force` false, the
-  **destination** side's DN. Between the phases, `force` false calls
-  `GetSideInfo` and judges hydration with `hydrationComplete` from
-  `migr_dst_info.dm_clone_info`; incomplete or unreachable is
-  `FAILED_PRECONDITION`. Deciding STM: re-resolve and the token; apply the
-  finish of `architecture.md`, Migrations (the destination side becomes the
-  leg's side, the source side is removed, the source DN's bookkeeping is
-  released with `BumpDnRev`, and the destination DN, its address read before
-  the source leaves the side list, gets back the `meta_units` the
-  `Migration` records through `releaseUnits` — a units-only change, so that
-  DN is written and re-indexed with no `BumpDnRev`; a record with no units
-  leaves it unread); delete the `Migration`, its `MigrBitmap` chunks (every
-  index below `bm_cnt`) and its list entry; `BumpSpRev`. Reply `migr_id`.
+  lookup and of any agent call; then the migration, refused
+  `FAILED_PRECONDITION` while its `cutover_pending` is set, with `force` or
+  without, before any agent call (`migrCutoverStarted`; `architecture.md`,
+  Migrations); with `force` false, the **destination** side's DN. Between
+  the phases, `force` false calls `GetSideInfo` and judges hydration with
+  `hydrationComplete` from `migr_dst_info.dm_clone_info`; incomplete or
+  unreachable is `FAILED_PRECONDITION`. Deciding STM: re-resolve and the
+  token; the migration's `cutover_pending` again, since a cancel and a
+  create under the same name between the phases leave a pending record
+  there; apply the finish of `architecture.md`, Migrations (the destination
+  side becomes the leg's side, the source side is removed, the source DN's
+  bookkeeping is released with `BumpDnRev`, and the destination DN, its
+  address read before the source leaves the side list, gets back the
+  `meta_units` the `Migration` records through `releaseUnits` — a units-only
+  change, so that DN is written and re-indexed with no `BumpDnRev`; a record
+  with no units leaves it unread); delete the `Migration`, its `MigrBitmap`
+  chunks (every index below `bm_cnt`) and its list entry; `BumpSpRev`. Reply
+  `migr_id`.
 * **CancelMigration** — STM: resolve; token; the reverse of the create
   (drop the destination side, release the destination DN's extents and the
   `meta_units` the `Migration` records with one `BumpDnRev`, delete the
   `Migration`, its chunks and its list entry); `BumpSpRev`. Reply
   `migr_id`.
-* **GetMigration** — one STM read.
+* **GetMigration** — one STM read; the record as stored, `cutover_pending`
+  included.
 * **AppendMigrationBitmap** — validate non-empty (`validateBitmap`); STM:
   resolve; token; the migration; the `MaxMigrBmCnt` ceiling on `bm_cnt`; put a
   **new** chunk at the index `bm_cnt` (chunks are immutable, append-only);
@@ -1345,11 +1352,11 @@ instances are correct — disjoint work all succeeds, contended work has
 exactly one winner and no partial writes; (c) refusals of every class write
 nothing, provably; (d) instances are stateless — one can be killed mid-load
 and restarted with no cleanup and no corruption. Correctness only: the
-suite asserts nothing about latency or throughput. No `dnv-worker` runs;
-the suite plays the worker through `workerctl` wherever a gateway
-precondition waits on a worker flip or a latch needs the worker's drain. It
-runs on one server as a plain user, because nothing it exercises needs
-root.
+suite asserts nothing about latency or throughput. No `dnv-worker` runs; the
+suite plays the worker through `workerctl` wherever a gateway precondition
+waits on a worker flip or a migration's cutover, or a latch needs the
+worker's drain. It runs on one server as a plain user, because nothing it
+exercises needs root.
 
 **Topology.** The developer machine builds the binaries and drives one
 Linux server over ssh, with no sudo anywhere. Everything runs on that
@@ -1392,9 +1399,13 @@ gateway, never through `workerctl`.
   paging with its empty last page and a malformed token; the inspects and
   bitmap reads passing the agent's bytes and revision through verbatim, a
   revision no stored rev key holds; the worker flips the snapshot and
-  spare-switch preconditions wait for; the clone's pair-addressed chunks,
-  its latch with the destination namespace resumed, its repeat delete and
-  its refusals while latched, then its drain; the metadata units of
+  spare-switch preconditions wait for; a migration's `cutover_pending` set
+  at its create, a cancel while it is pending, and a finish refused while
+  it is pending, with `force` and without, before the suite plays the
+  destination's provisioned flip and the cutover; the clone's
+  pair-addressed chunks, its latch with the destination namespace resumed,
+  its repeat delete and its refusals while latched, then its drain; the
+  metadata units of
   `architecture.md`, Metadata units — a new node's none, the clone's on the
   CN of every cntlr of its pool, kept through the latch and given back by
   the drain, each migration's on its destination DN, given back by the
@@ -1418,17 +1429,18 @@ gateway, never through `workerctl`.
   present zero token are refused — and, through the documented client retry
   on "stale revision", as a liveness loop that converges.
 * faults (one gateway) — the refusal batteries on a live pool: validation,
-  not-found and precondition classes, each refusal provably writing
-  nothing; the primary threshold's floor of `architecture.md`, Common
-  validation, from both sides — the validation battery refuses a pool
-  whose primary threshold is one second under twice the cluster's stored
-  `cntlr_interval`, and the same request at exactly twice it is accepted
-  with its threshold stored as sent, the pool then deleted and drained so
-  that every node gets back what its create took; agent faults — a hung
-  agent bounded by the agent-call budget, a closed port refused fast,
-  inspects of hung and stopped fakes; and the hydration checks of
-  `DeleteClone` and `FinishMigration` refusing on incomplete hydration and
-  on an unreachable agent, `force` skipping them.
+  not-found and precondition classes — a finish of a migration whose cutover
+  is pending among them, refused with `force` and without —, each refusal
+  provably writing nothing; the primary threshold's floor of
+  `architecture.md`, Common validation, from both sides — the validation
+  battery refuses a pool whose primary threshold is one second under twice
+  the cluster's stored `cntlr_interval`, and the same request at exactly
+  twice it is accepted with its threshold stored as sent, the pool then
+  deleted and drained so that every node gets back what its create took;
+  agent faults — a hung agent bounded by the agent-call budget, a closed
+  port refused fast, inspects of hung and stopped fakes; and the hydration
+  checks of `DeleteClone` and `FinishMigration` refusing on incomplete
+  hydration and on an unreachable agent, `force` skipping them.
 * restart (kill under load) — one gateway is killed with SIGKILL while it
   provably holds a create in its handler; every pool of the wave is then
   either complete or absent, never partial, and the accounting matches the
@@ -1557,11 +1569,14 @@ the formula of `architecture.md`, Metadata units, gives a copy, by which
 the suite sizes its copies and checks the units the gateway stored. The
 only writes it performs here are the
 worker-role ones, the suite playing the worker: the flips `set-created`
-and `set-provisioned`, at exactly the stages where a gateway precondition
-waits on the worker, and the drains `drain-sp` and `drain-clone`, standing
-in for the sp coordinator after a latch the gateway committed
-(`dnv-worker.md`, The sp drain and The clone drain). Every flip and every
-drain step moves `SpRev` as the worker's own would: each bumps it, except
+and `set-provisioned` and the cutover `start-cutover`, at exactly the
+stages where a gateway precondition waits on the worker — before every
+migration finish the destination's provisioned flip and then the cutover,
+which runs the worker's own operation (`dnv-worker.md` MD6) —, and the
+drains `drain-sp` and `drain-clone`, standing in for the sp coordinator
+after a latch the gateway committed (`dnv-worker.md`, The sp drain and The
+clone drain). Every flip, the cutover and every drain step move `SpRev` as
+the worker's own would: each bumps it, except
 the sp drain's last step, which deletes the key, and a clone drain's
 batch, which leaves it alone (`dnv-worker.md` CLD8); the script's token
 bookkeeping counts them. Any other `workerctl` write would test

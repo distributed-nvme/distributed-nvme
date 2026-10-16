@@ -139,6 +139,10 @@ type fakeNode struct {
 	// half answers as absent (listHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
+	// failCmdLeft, when set for a failCmd key, is how many matching
+	// commands that key fails before it is spent; a key it does not name
+	// fails one (takeFailCmd).
+	failCmdLeft map[string]int
 	// killCmd / killCmdAlways model the OTHER half of agent.Reported: a
 	// command that never answered — exit code -1 with a non-nil error, what
 	// common.OsClient.RunCommand returns when the SH15 soft timeout killed
@@ -273,6 +277,7 @@ func newFakeNode() *fakeNode {
 		pendingNs:     make(map[string]*pendingNs),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
+		failCmdLeft:   make(map[string]int),
 
 		killCmd:               make(map[string]bool),
 		killCmdAlways:         make(map[string]bool),
@@ -541,11 +546,8 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 // held.
 func (f *fakeNode) listHookErr(line, path string) error {
 	failed := &fs.PathError{Op: "readdirent", Path: path, Err: syscall.EIO}
-	for key := range f.failCmd {
-		if strings.Contains(line, key) {
-			delete(f.failCmd, key)
-			return failed
-		}
+	if _, ok := f.takeFailCmd(line); ok {
+		return failed
 	}
 	for key := range f.failCmdAlways {
 		if strings.Contains(line, key) {
@@ -557,6 +559,25 @@ func (f *fakeNode) listHookErr(line, path string) error {
 		return context.DeadlineExceeded
 	}
 	return nil
+}
+
+// takeFailCmd reports whether a failCmd key matches line, with that key's
+// stderr, and spends one of the failures the key was armed with
+// (failCmdLeft). Called with f.mu held.
+func (f *fakeNode) takeFailCmd(line string) (string, bool) {
+	for key, stderr := range f.failCmd {
+		if !strings.Contains(line, key) {
+			continue
+		}
+		if f.failCmdLeft[key] > 1 {
+			f.failCmdLeft[key]--
+		} else {
+			delete(f.failCmd, key)
+			delete(f.failCmdLeft, key)
+		}
+		return stderr, true
+	}
+	return "", false
 }
 
 // inNvmetTree says whether path is in the nvmet configfs tree, the one tree
@@ -866,12 +887,9 @@ func (f *fakeNode) runCommand(
 			break
 		}
 	}
-	for key, stderr := range f.failCmd {
-		if strings.Contains(line, key) {
-			delete(f.failCmd, key)
-			f.mu.Unlock()
-			return "", stderr, 1, fmt.Errorf("exit status 1")
-		}
+	if stderr, ok := f.takeFailCmd(line); ok {
+		f.mu.Unlock()
+		return "", stderr, 1, fmt.Errorf("exit status 1")
 	}
 	for key, stderr := range f.failCmdAlways {
 		if strings.Contains(line, key) {
