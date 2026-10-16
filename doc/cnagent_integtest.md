@@ -135,7 +135,8 @@ names (`CnMdDevName`) and a host NQN's host id.
   listing prints a failing line, a status-less check reply fails, the
   agent-log readers fail their stage on a log that is missing or cannot be
   read, thinbm's and the finalize's checks that a converge ran no such
-  command fail when that converge logged nothing at all, the long-dead stage
+  command and the late flip's check that its promotion wrote no optimized
+  group fail when that converge logged nothing at all, the long-dead stage
   counts a path absent only once the same read saw it live, an admission
   refusal needs nvmet's own refusal record behind a fresh mark, the park's
   open check and the dead-leg "no mdadm" carry positive controls, and in
@@ -212,11 +213,17 @@ data row reports degraded and the dead legs' rows error, and no mdadm runs
 the leg rows recover once the partition lifts, and the member md failed
 staying failed is the known limit the stage tolerates (`cnagent.md`, Known
 limits). Read-only fails writes through dm-flakey (CN16's read-only rule,
-CN19; `architecture.md`, [D11]). The late flip promotes before any side flips:
-both md rows read "no available leg" until the late members' connect retry
-assembles them under its own trace ids, with no second `SyncupCntlr`, then
-stops, and a block only the newer leg holds reads as that leg's, the stale
-member kicked (CN10, CN12; `architecture.md`, [D16]).
+CN19; `architecture.md`, [D11]). The late flip promotes before any side
+flips, so the promotion assembles no array and builds no raid0: both md rows
+read "no available leg", the ns-dev stays parked with its row in error, and
+the promotion writes no optimized group, so the host's path stays inaccessible
+and its IO would wait rather than fail; the namespace row reads OK on the
+converge and on an info read alike (CN12, CN16's ANA rule, CN28). The connect
+retry, which the late members and the waiting namespace keep registered, then
+assembles the arrays under its own trace ids, with no second `SyncupCntlr`,
+puts the ns-dev on the raid0 and moves the namespace optimized, then stops;
+and a block only the newer leg holds reads as that leg's, the stale member
+kicked (CN10, CN12; `architecture.md`, [D16]).
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,

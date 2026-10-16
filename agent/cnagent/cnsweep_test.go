@@ -2260,8 +2260,8 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 // stopped sweep leaves out: CN9's pre-steps 2 and 3, which exist only so the
 // layers below them can remove. The namespace here moves to another td while
 // its old td leaves td_list. Run on this pass, P2 would park it on the new
-// td's dm-error first — while it is still optimized, so its host takes IO
-// errors — for the sake of a raid0 removal the stopped pass does not make.
+// td's dm-error first — moving it inaccessible before, so its host waits —
+// for the sake of a raid0 removal the stopped pass does not make.
 // Without P2 the build moves it in one reload, straight onto the new td's
 // raid0. The dm listing's own silence is the exception: with no snapshot to
 // rule out a dm-clone still hydrating into a raid0, the build keeps the
@@ -2321,13 +2321,16 @@ func TestUnansweredListingDoesNotParkAServingNamespace(t *testing.T) {
 // (the ns-dev stays suspended on the dm-clone's table, so L3's remove fails
 // EBUSY), L3's remove is killed before it acts, and the descent stops above
 // L3 — here at L2, on a sibling namespace dropped in the same revision whose
-// ns-dev will not go. On each the pass reloads nothing onto the raid0 and
-// moves nothing to the optimized group. The ns-dev P2 did not park serves on
-// through the dm-clone, still optimized; one it parked stays parked and goes
-// inaccessible, so a host queues its IO rather than take errors on an
-// optimized path. Its row reads ERROR, as the Check probe reads it, and the
-// pass registers the CN10 retry. The pass after the fault, the dm-clone
-// removed, puts the ns-dev on the raid0 and only then moves it optimized.
+// ns-dev will not go. On each the pass reloads nothing onto the raid0. P2
+// moves the namespace inaccessible before its park (parkNsDev). The ns-dev
+// whose park failed serves on through the dm-clone, and the hold moves its
+// namespace back to its desired group, optimized, in the same pass, so its
+// hosts do not wait for nothing; one P2 parked stays parked and inaccessible,
+// so a host queues its IO rather than take errors on an optimized path. The
+// ns-dev row reads ERROR, as the Check probe reads it, the namespace row OK
+// on both channels, and the pass registers the CN10 retry. The pass after
+// the fault, the dm-clone removed, puts the ns-dev on the raid0 and only
+// then moves it optimized.
 func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 	const sibling = uint64(0x1b)
 	withSibling := defaultSubsys(false)
@@ -2431,7 +2434,25 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 			if got := node.files[ana]; got != route.ana {
 				t.Fatalf("ana_grpid is %q, want %q", got, route.ana)
 			}
-			assertNoCall(t, node, "writedirect "+ana+"=1")
+			// P2 moves the namespace before its park, which failed or not;
+			// a held ns-dev that serves then takes the desired group again,
+			// after its device is resumed on the dm-clone, and a parked one
+			// is moved to optimized never.
+			assertOrder(t, node, "writedirect "+ana+"=3",
+				"cmd dmsetup reload "+nsDev+" --table "+linear(on["error"]))
+			if route.on == "clone" {
+				assertOrder(t, node,
+					"cmd dmsetup reload "+nsDev+" --table "+
+						linear(on["error"]),
+					"cmd dmsetup resume "+nsDev,
+					"writedirect "+ana+"=1")
+			} else {
+				assertNoCall(t, node, "writedirect "+ana+"=1")
+			}
+			assertOk(t, reply.GetCntlrInfo().GetNsIdToNamespace()[testNs],
+				"the held namespace's row")
+			assertOk(t, probedCntlrInfo(t, srv).GetNsIdToNamespace()[testNs],
+				"the held namespace's probe")
 			assertErrorDetails(t,
 				reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs],
 				detailsNsDevNotDesired, "the held ns-dev's row")
@@ -2455,8 +2476,8 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 			if route.on == "clone" {
 				assertOrder(t, node, "cmd dmsetup reload "+nsDev+
 					" --table "+linear(on["error"]),
-					"cmd dmsetup remove "+clone, toRaid0)
-				assertNoCall(t, node, "writedirect "+ana+"=")
+					"cmd dmsetup remove "+clone, toRaid0,
+					"writedirect "+ana+"=1")
 			} else {
 				assertOrder(t, node, "cmd dmsetup remove "+clone, toRaid0,
 					"writedirect "+ana+"=1")
@@ -2783,12 +2804,13 @@ func TestADeletedSourceControllerHoldsNothing(t *testing.T) {
 // though its check did not answer leaves the dm-clone counted as lingering;
 // its table read then fails, an info finds it gone, and it holds nothing:
 // both ns-devs converge. A held ns-dev keeps its live table, a parked one
-// going inaccessible and a serving one keeping its group, and its row reads
-// ERROR on both channels; the converged one reads OK on both. A check round
-// takes the dm-clone's table from its reading, so where the route's fault is
-// that table's read, the reading's table listing leaves the dm-clone out, as
-// one that went mid-listing does, and the round reads that table on its own,
-// where the fault meets it too.
+// going inaccessible and a serving one taking its desired group, the
+// optimized one it has here, and its row reads ERROR on both channels; the
+// converged one reads OK on both. A check round takes the dm-clone's table
+// from its reading, so where the route's fault is that table's read, the
+// reading's table listing leaves the dm-clone out, as one that went
+// mid-listing does, and the round reads that table on its own, where the
+// fault meets it too.
 func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 	const snapNs = uint64(0x1b)
 	subsysAt := func(snapSuspended bool) map[string]*pb.Subsystem {

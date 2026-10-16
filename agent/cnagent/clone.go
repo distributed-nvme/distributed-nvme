@@ -323,25 +323,29 @@ func (s *CnAgentServer) cloneRows(
 }
 
 // ensureClone runs the CN18 sequence for one clone and reports which
-// background retry the cntlr needs, and whether the build is finished.
+// background retry the cntlr needs.
 // connectRetry asks for the CN10 retry: the source is not ready, the arena
 // did not answer, a later step stopped the build before step 5 turned
 // hydration on — step 2's wrapper allocation or replacement (ensureCloneMeta)
 // among them, unless the arena had no free run — or the read after step 5
-// did not show hydration on. waitRoom asks for CN18's slow retry
-// (startCloneMetaRetry, which ensureClone registers itself, as it does the
-// CN10 one): the arena answered and has no free run for the clone's
-// metadata, so both of its step-2 rows read PROVISIONING (reportCloneNoRoom)
-// and the clone waits for another one to leave the node. A run larger than
-// the whole arena asks for neither and is left to its ERROR rows, which every
-// check round reports again (cloneMetaVerdict). finished says the pass read
-// the dm-clone hydrating after step 5; when a pass that finished the build
-// fails to converge a rule-5 ns-dev of the td, CN16 registers the CN10 retry
-// itself (build). A failed knob message or source chunk stops nothing and is
-// only logged. CN16 serves the destination td through the dm-clone only
-// while its status shows hydration on (rule 5, nsDevNow), and step 5 alone
-// turns that on, so a build or a recovery that stops short of step 5 leaves
-// the td parked until a later pass finishes it.
+// did not show hydration on. room says whether step 2's room check stopped
+// the build. cloneRoomWait asks for CN18's slow retry (startCloneMetaRetry,
+// which ensureClone registers itself, as it does the CN10 one): the arena
+// answered and has no free run for the clone's metadata, so both of its
+// step-2 rows read PROVISIONING (reportCloneNoRoom) and the clone waits for
+// another one to leave the node. cloneRoomNever, a run larger than the whole
+// arena, asks for neither and is left to its ERROR rows, which every check
+// round reports again (cloneMetaVerdict). Under either, a namespace of the
+// destination td that waits only for the clone registers no CN10 retry
+// either (build). A pass that finished the build but failed to converge a
+// rule-5 ns-dev of the td registers the CN10 retry in CN16, as every other
+// ns-dev step that leaves a namespace short of its desired group does
+// (build). A failed knob message or source chunk stops nothing and is only
+// logged. CN16 serves the destination td through the
+// dm-clone only while its status shows hydration on (rule 5, nsDevNow), and
+// step 5 alone turns that on, so a build or a recovery that stops short of
+// step 5 leaves the td parked, and its namespaces inaccessible, until a
+// later pass finishes it.
 //
 // The clone's rows are not the steps' own. Wherever the pass ends, cloneRows
 // writes them from what it then reads of the node, the function the check
@@ -360,17 +364,17 @@ func (s *CnAgentServer) ensureClone(
 	cp *clonePlan,
 	info *pb.CntlrInfo,
 	budget *agent.WaitBudget,
-) (connectRetry bool, waitRoom bool, finished bool) {
+) (connectRetry bool, room cloneRoom) {
 	if cp.dstTd == nil {
 		s.reportCloneNoDst(st, cp, info)
-		return false, false, false
+		return false, cloneRoomOk
 	}
 	if cp.deferred {
 		// [D15]: the destination td's raid0 does not exist yet, so there is
 		// nothing to clone onto — no metadata slot, no dm-clone and no source
 		// connection.
 		s.reportCloneDeferred(st, cp, info)
-		return false, false, false
+		return false, cloneRoomOk
 	}
 	// fresh reads the dm-clone for the rows of a pass a step ends, after
 	// whatever that step did to the device.
@@ -384,7 +388,7 @@ func (s *CnAgentServer) ensureClone(
 	if !ok {
 		s.cloneRows(ctx, st, plan, cp, info, src, fresh, "")
 		s.startConnectRetry(st, plan)
-		return true, false, false
+		return true, cloneRoomOk
 	}
 
 	// (2) the dm-clone's metadata. This build is a recovery (its triggers are
@@ -418,7 +422,7 @@ func (s *CnAgentServer) ensureClone(
 		// not answer (cloneMetaVerdict).
 		s.cloneRows(ctx, st, plan, cp, info, src, fresh, "")
 		s.startConnectRetry(st, plan)
-		return true, false, false
+		return true, cloneRoomOk
 	}
 	metaOk := s.cloneMetaConverged(ctx, arena, cp)
 	// A build that must allocate or replace the wrapper first asks whether
@@ -437,9 +441,9 @@ func (s *CnAgentServer) ensureClone(
 			s.cloneRows(ctx, st, plan, cp, info, src, fresh, "")
 			if status == pb.ResStatus_RES_STATUS_PROVISIONING {
 				s.startCloneMetaRetry(st, plan)
-				return false, true, false
+				return false, cloneRoomWait
 			}
-			return false, false, false
+			return false, cloneRoomNever
 		}
 	}
 	dm := s.probeCloneDm(ctx, nil, cp)
@@ -447,7 +451,7 @@ func (s *CnAgentServer) ensureClone(
 		s.cloneRows(ctx, st, plan, cp, info, src,
 			func() cloneDmRead { return dm }, "")
 		s.startConnectRetry(st, plan)
-		return true, false, false
+		return true, cloneRoomOk
 	}
 	recovery := !metaOk || !dm.present || !dm.hydrating
 	if recovery {
@@ -457,7 +461,9 @@ func (s *CnAgentServer) ensureClone(
 		// destination bitmaps are still being applied, or a read of an
 		// already-copied (and possibly since-rewritten) region would be
 		// fetched from the source again, returning stale data over the newer
-		// local bytes.
+		// local bytes. A namespace in the optimized group goes inaccessible
+		// before its ns-dev parks, or is found parked (parkNsDev), so its
+		// hosts wait out the recovery.
 		s.parkTdNsDevs(ctx, plan, cp.dstTd.tdId)
 		s.removeDm(ctx, cp.finalName)
 		// Only now, once the dm-clone is gone, may a mismatched wrapper be
@@ -477,7 +483,7 @@ func (s *CnAgentServer) ensureClone(
 					// verdict on that enumeration saying so in its rows.
 					s.cloneRows(ctx, st, plan, cp, info, src, fresh, "")
 					s.startCloneMetaRetry(st, plan)
-					return false, true, false
+					return false, cloneRoomWait
 				}
 				// Any other failure — the fresh listing, the removal of a
 				// mismatched wrapper, the hole punch or the wrapper's
@@ -494,7 +500,7 @@ func (s *CnAgentServer) ensureClone(
 				plan.arenaDone = false
 				s.cloneRows(ctx, st, plan, cp, info, src, fresh, err.Error())
 				s.startConnectRetry(st, plan)
-				return true, false, false
+				return true, cloneRoomOk
 			}
 		}
 	}
@@ -508,7 +514,7 @@ func (s *CnAgentServer) ensureClone(
 	if err != nil {
 		s.cloneRows(ctx, st, plan, cp, info, src, fresh, err.Error())
 		s.startConnectRetry(st, plan)
-		return true, false, false
+		return true, cloneRoomOk
 	}
 	if knobErr := s.ensureHydrationKnobs(ctx, cp); knobErr != nil {
 		slog.ErrorContext(ctx, "applying dm-clone hydration knobs failed",
@@ -541,7 +547,7 @@ func (s *CnAgentServer) ensureClone(
 				s.cloneRows(ctx, st, plan, cp, info, src, fresh,
 					"destination bitmaps not applied: "+err.Error())
 				s.startConnectRetry(st, plan)
-				return true, false, false
+				return true, cloneRoomOk
 			}
 		}
 		s.applyCloneChunks(ctx, st, plan, cp)
@@ -554,7 +560,7 @@ func (s *CnAgentServer) ensureClone(
 	if err := s.enableHydration(ctx, cp); err != nil {
 		s.cloneRows(ctx, st, plan, cp, info, src, fresh, err.Error())
 		s.startConnectRetry(st, plan)
-		return true, false, false
+		return true, cloneRoomOk
 	}
 	// The read after step 5 is the rows' (architecture.md, Live-state
 	// reporting: the raw status line carries hydration progress, which is
@@ -566,13 +572,31 @@ func (s *CnAgentServer) ensureClone(
 		func() cloneDmRead { return dm }, "")
 	if dm.err != nil || !dm.present || !dm.hydrating {
 		s.startConnectRetry(st, plan)
-		return true, false, false
+		return true, cloneRoomOk
 	}
 	// (6) the dst td's ns-devs move onto the dm-clone in CN16, which runs
 	// after clones in the CN9 build order and reads the status once more
-	// before it does (nsDevNow).
-	return false, false, true
+	// before it does (nsDevNow); their namespaces turn optimized in the same
+	// pass, after the reload (build).
+	return false, cloneRoomOk
 }
+
+// cloneRoom is what CN18 step 2's room check made of a clone's build in one
+// pass (ensureClone), which decides the clone's retry and whether a
+// namespace of its destination td that waits for it registers the CN10 one
+// (build).
+type cloneRoom int
+
+const (
+	// cloneRoomOk: the room check did not stop the build.
+	cloneRoomOk cloneRoom = iota
+	// cloneRoomWait: the arena has no free run for the clone's metadata
+	// wrapper, and the clone waits for CN18's clone-metadata retry.
+	cloneRoomWait
+	// cloneRoomNever: the run is larger than the whole arena, which nothing
+	// but a new revision can change.
+	cloneRoomNever
+)
 
 // ensureCloneSource converges CN18 step 1, connecting every entry of
 // src_tr_conf_list that has no controller, and returns the source namespace
@@ -816,7 +840,11 @@ func (s *CnAgentServer) cloneStatus(
 
 // parkTdNsDevs reloads every ns-dev backed by one td onto its dm-error, so the
 // td serves nothing while a clone is (re)built over it (the park of the
-// recovery build, cnagent.md CN18).
+// recovery build, cnagent.md CN18). parkNsDev moves each namespace in the
+// optimized group to inaccessible before its reload, or when it finds the
+// ns-dev parked already, so its hosts queue their IO until the build puts
+// the ns-dev on the hydrating dm-clone, when the namespace turns optimized
+// again.
 func (s *CnAgentServer) parkTdNsDevs(
 	ctx context.Context,
 	plan *cntlrPlan,

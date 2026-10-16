@@ -1928,6 +1928,15 @@ func (s *CnAgentServer) cntlrPreSteps(
 	// The live table answers "does this ns-dev still map something unwanted?"
 	// with no memory of a previous plan — and it is also right for a device
 	// an interrupted pass left pointing somewhere the plan never described.
+	//
+	// The park of an ns-dev whose rules want a serving device — one still
+	// mapping a dm-clone the plan dropped, say — moves its namespace
+	// inaccessible first (parkNsDev), so its hosts queue until the build puts
+	// the ns-dev on that serving device, or finds it serving on through a
+	// park that failed (CN18's hold); the park of rules 0-4 moves nothing,
+	// since P1 has moved every namespace the desired state wants
+	// inaccessible, and rules 3 and 4 keep theirs optimized over the dm-error
+	// they select.
 	for _, np := range plan.namespaces {
 		if np.td == nil || !plan.wantAny {
 			continue
@@ -1944,6 +1953,8 @@ func (s *CnAgentServer) cntlrPreSteps(
 		if plan.xferServed(xp) {
 			continue
 		}
+		// A failure is logged inside, and the build's ensureXfer meets the
+		// device again.
 		s.demoteXfer(ctx, xp)
 	}
 }
@@ -1959,10 +1970,15 @@ func (s *CnAgentServer) cntlrPreSteps(
 // from the device's OWN LIVE TABLE when it does not — a transfer whose origin
 // td was deleted in the same request has no plan size left, and a previously
 // applied plan is exactly the remembered state this design does without.
-func (s *CnAgentServer) demoteXfer(ctx context.Context, xp *xferPlan) {
+//
+// It logs what fails and returns it, nil for a device that is not there or
+// whose table sizes nothing: ensureXfer's demotion of a transfer whose
+// origin is gone moves the transfer's ANA group only when the device is
+// where CN17 wants it (xferAnaMove).
+func (s *CnAgentServer) demoteXfer(ctx context.Context, xp *xferPlan) error {
 	dev, err := s.dm.Info(ctx, xp.finalName)
 	if err != nil || dev == nil {
-		return
+		return err
 	}
 	sectors := xp.sectors
 	if sectors == 0 {
@@ -1971,20 +1987,22 @@ func (s *CnAgentServer) demoteXfer(ctx context.Context, xp *xferPlan) {
 			slog.ErrorContext(ctx, "reading a transfer device table failed",
 				slog.String("dm", xp.finalName),
 				slog.String("error", err.Error()))
-			return
+			return err
 		}
 		for _, target := range targets {
 			sectors += target.Length
 		}
 	}
 	if sectors == 0 {
-		return
+		return nil
 	}
 	if err := s.ensureDmError(ctx, xp.finalName, sectors); err != nil {
 		slog.ErrorContext(ctx, "demoting a transfer device failed",
 			slog.String("dm", xp.finalName),
 			slog.String("error", err.Error()))
+		return err
 	}
+	return nil
 }
 
 // nsDevMapsUnwanted reports whether one of the plan's ns-devs has a live

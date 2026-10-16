@@ -3489,8 +3489,9 @@ compare.
   while a fault at the source lasts can take even a clone that has
   hydrated in full out of service: a new primary that cannot connect the
   source, or finds no source namespace, cannot build the clone's dm-clone
-  while the fault lasts, so the clone's destination namespace answers IO
-  errors until the source comes back or the clone is deleted with `force`.
+  while the fault lasts, so the clone's destination namespace waits
+  inaccessible, its hosts' IO queued, until the source comes back or the
+  clone is deleted with `force` (`cnagent.md` CN16).
   What else those rows cost on the cn agent is `cnagent.md`, Known limits.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and the
   migration that could have moved a readable-but-sick side is an operator's

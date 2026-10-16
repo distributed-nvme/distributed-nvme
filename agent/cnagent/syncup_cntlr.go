@@ -314,14 +314,13 @@ func (s *CnAgentServer) build(
 		// ANA flip has not reached this CN's sysfs yet (the worker's
 		// sides-first hold is bounded, so a promotion's SyncupCntlr can still
 		// come before the sides' flips, [D16]), its DN is rebooting, its path
-		// is mid-reconnect — and nothing else re-drives the converge that
-		// would assemble it, add it or build the pool over it: the worker
+		// is mid-reconnect — and the worker does not re-drive the converge
+		// that would assemble it, add it or build the pool over it: it
 		// re-syncs on a revision or a reply code, never on a row. So it
 		// registers the CN10 retry, which re-runs the whole converge until
 		// every such member is available. There is no record of its own: the
-		// rows already report it — an md group's error, or "degraded" once a
-		// probe reads the array, the error of a layer above a RedundNone
-		// group, and the member's own leg row.
+		// rows already report it — a group's error, or "degraded" once a
+		// probe reads an md array, and the member's own leg row.
 		s.startConnectRetry(st, plan)
 		retryNeeded = true
 	}
@@ -465,67 +464,49 @@ func (s *CnAgentServer) build(
 		}
 	}
 
-	// Clones (CN18), then transfers (CN17). finished: the clones whose
-	// dm-clone this pass read hydrating after CN18 step 5.
-	finished := make(map[uint64]bool, len(plan.clones))
+	// Clones (CN18), then transfers (CN17). roomStopped: the clones whose
+	// build CN18 step 2's room check stopped in this pass, waiting for room
+	// in the arena or never to fit (cloneRoom).
+	roomStopped := make(map[uint64]bool, len(plan.clones))
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			connectRetry, waitRoom, done := s.ensureClone(
+			connectRetry, room := s.ensureClone(
 				ctx, st, plan, cp, info, budget)
 			if connectRetry {
 				retryNeeded = true
 			}
-			if waitRoom {
+			if room == cloneRoomWait {
 				metaWait = true
 			}
-			finished[cp.cloneId] = done
+			if room != cloneRoomOk {
+				roomStopped[cp.cloneId] = true
+			}
 		}
 	} else if plan.primary {
 		for _, cp := range plan.clones {
 			s.reportCloneSuppressed(st, cp, info)
 		}
 	}
+	// xferSteps: what ensureXfer did with each transfer, which decides its
+	// ANA move and the rows written after the transfer ANA loop.
+	xferSteps := make(map[uint64]xferStep, len(plan.xfers))
 	if plan.wantAny {
 		for _, xp := range plan.xfers {
-			s.ensureXfer(ctx, st, plan, xp, info)
+			xferSteps[xp.xferId] = s.ensureXfer(ctx, st, plan, xp, info)
 		}
 	}
 
 	// ns-devs and the host-facing nvmet objects (CN16).
 	if plan.wantAny {
-		// held: the namespaces whose ns-dev ensureNsDev kept off a raid0 a
-		// dm-clone the plan does not want may still be hydrating into
-		// (plan.cloneHold).
-		held := make(map[uint64]nsDevHold)
+		// outcomes: what ensureNsDev did with each namespace's ns-dev, which
+		// decides the namespace's ANA move and the group its row is compared
+		// with.
+		outcomes := make(map[uint64]nsDevOutcome, len(plan.namespaces))
 		for _, np := range plan.namespaces {
-			nsHeld, err := s.ensureNsDev(ctx, np, plan.cloneHold)
-			if nsHeld != nsDevConverged {
-				held[np.nsId] = nsHeld
-				// A held ns-dev is not where its plan wants it, and nothing
-				// else is sure to re-drive the pass that puts it there: a
-				// hold that an unanswered `dmsetup ls` alone caused leaves
-				// the Check verdict, which lists the node from the round's
-				// own reading, clean, and the worker re-syncs on a revision
-				// or a reply code, never on a row. So the hold registers the
-				// CN10 retry, whose next attempt lists afresh and, with no
-				// dm-clone left to wait for, reloads the ns-dev.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
-			}
-			if err != nil && np.clone != nil && finished[np.clone.cloneId] {
-				// Rule 5 after a build this pass finished: hydration is on,
-				// so whatever still keeps the td's hosts off the dm-clone is
-				// this ns-dev — left on a recovery's park (CN18 step 2),
-				// whose namespace stays optimized, or not created yet. CN18
-				// registered no retry for the clone, and the worker re-syncs
-				// on a revision or a reply code, never on a row, so this
-				// registers the CN10 retry: its next attempt reads the
-				// status and the table afresh.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
-			}
+			outcome, err := s.ensureNsDev(ctx, np, plan.cloneHold)
+			outcomes[np.nsId] = outcome
 			key := resKeyOf(resKeyNsDevFmt, np.nsId)
-			if err == nil && nsHeld != nsDevConverged {
+			if err == nil && outcome.held() {
 				// In the probe's words, so the converge and the Check
 				// round report the held ns-dev alike.
 				info.NsIdToDmLinear[np.nsId] = st.tracker.Err(
@@ -539,39 +520,86 @@ func (s *CnAgentServer) build(
 				st.tracker, np.deferred, key, np.devName,
 				nsDevDetails(np), err)
 		}
+		// nsErrs: each namespace object's step, for the rows written after
+		// the ANA loop (reportNamespaces).
+		nsErrs := make(map[uint64]error, len(plan.namespaces))
 		for _, ssp := range plan.subsystems {
-			s.ensureSubsystem(ctx, st, plan, ssp, info)
+			s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs)
 		}
 
 		// ANA rewrites to optimized last — architecture.md, Failover,
-		// new_primary step 4. A held
-		// namespace that serves keeps the group it has and goes on serving
-		// from the table it keeps. A held one that is parked goes
-		// inaccessible rather than optimized over the dm-error: it may have
-		// been optimized until this pass's P2 parked it for an L3 that then
-		// left the dm-clone, and a host should queue, not take IO errors.
+		// new_primary step 4 — and only over what the desired state wants
+		// (CN16): a namespace moves to optimized in a pass whose ns-dev step
+		// put its ns-dev on its serving device, or on the dm-error rules 3
+		// and 4 select (nsAnaMove). One whose ns-dev sits on the td's
+		// dm-error while its rules want a serving device — the stack of a
+		// promotion that came before the sides' switch-over not built yet
+		// ([D16]), a clone build or recovery not finished, a hold that parked
+		// it, a failed step that found it parked — goes inaccessible, and its
+		// hosts queue their IO rather than read IO errors. A held namespace
+		// that serves takes its desired group and goes on serving from the
+		// table it keeps: P2 may have moved it inaccessible before a park
+		// whose load failed. A failed step that did not find its ns-dev
+		// parked keeps the group: a failed read never moves an optimized
+		// namespace back. A namespace the desired state wants inaccessible
+		// is there already: CN9's P1 moved it before anything under it was
+		// touched.
 		for _, np := range plan.namespaces {
-			grpId := np.anaGrpId
-			switch held[np.nsId] {
-			case nsDevHeldServing:
+			if np.anaGrpId == common.AnaGrpIdInaccessible {
 				continue
-			case nsDevHeldParked:
-				grpId = common.AnaGrpIdInaccessible
-			default:
-				if grpId == common.AnaGrpIdInaccessible {
-					continue
-				}
+			}
+			outcome := outcomes[np.nsId]
+			if !outcome.onPlan() && !waitsForRoom(np, outcome, roomStopped) {
+				// A namespace left short of its desired group waits, and
+				// nothing else is sure to re-drive the pass that ends the
+				// wait: the worker re-syncs on a revision or a reply code,
+				// never on a row, and a hold that an unanswered `dmsetup ls`
+				// alone caused leaves the Check verdict, which lists the
+				// node from the round's own reading, clean. So it registers
+				// the CN10 retry, whose next attempt reads the node afresh,
+				// until the namespace serves — for as long as its cause
+				// lasts, a cause that never goes away included. One that
+				// waits only for its clone's room in the arena does not
+				// (waitsForRoom).
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
+			}
+			grpId, move := nsAnaMove(np, outcome)
+			if !move {
+				continue
 			}
 			if err := s.setAna(
 				ctx, np.ss.nqn, np.nsIdx, grpId); err != nil {
 				slog.ErrorContext(ctx, "ana transition failed",
 					slog.String("nqn", np.ss.nqn),
 					slog.String("error", err.Error()))
+				// A move that fails leaves the namespace short of the group
+				// its ns-dev step earned, an ns-dev on what its rules want
+				// included, and a row re-drives nothing: it registers the
+				// CN10 retry, whose next attempt moves it again.
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
 			}
 		}
+		// The transfers' ANA, by the same rule (CN17): a transfer moves to
+		// optimized only in a pass whose device step put its transfer device
+		// where the desired state wants it — the linear over the origin's
+		// raid0 where it is served, the error table where it is not on
+		// purpose (xferAnaMove). A served transfer whose device step failed
+		// goes inaccessible when its device is an error table, and keeps its
+		// group otherwise; one left short, its move that failed included,
+		// registers the CN10 retry, for the namespaces' reason.
 		for _, xp := range plan.xfers {
-			grpId := plan.xferAnaGrpId(xp)
-			if grpId == common.AnaGrpIdInaccessible {
+			if plan.xferAnaGrpId(xp) == common.AnaGrpIdInaccessible {
+				continue
+			}
+			step := xferSteps[xp.xferId]
+			if step.outcome != xferDevPut {
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
+			}
+			grpId, move := plan.xferAnaMove(xp, step.outcome)
+			if !move {
 				continue
 			}
 			if err := s.setAna(ctx, xp.nqn,
@@ -579,7 +607,17 @@ func (s *CnAgentServer) build(
 				slog.ErrorContext(ctx, "ana transition failed",
 					slog.String("nqn", xp.nqn),
 					slog.String("error", err.Error()))
+				// As a namespace's move that fails: the CN10 retry.
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
 			}
+		}
+		// The namespace rows, and the transfer rows ensureXfer left, come
+		// after the ANA loops, compared as a check round compares them
+		// (CN28).
+		s.reportNamespaces(ctx, st, plan, info, nsErrs)
+		for _, xp := range plan.xfers {
+			s.reportXferExport(ctx, st, plan, xp, xferSteps[xp.xferId], info)
 		}
 	} else {
 		// SP_LEVEL_DISABLE. Everything cntlr-scoped is gone, and CN19 wants

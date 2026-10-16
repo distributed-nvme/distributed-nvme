@@ -97,14 +97,14 @@ func nsDevTable(np *nsPlan, devNo string) string {
 	return agent.LinearTable(np.sectors, devNo, 0)
 }
 
-// nsDevNow is np with the backing CN16 installs on this node now. It is np
-// itself under every rule but 5: a dm-clone may serve only once CN18 step 5
-// has turned its hydration on, which follows step 4's bitmaps and nothing
-// before them (architecture.md, Clone crash recovery), so a rule-5 ns-dev
-// whose dm-clone's live status does
-// not show hydration on — a build or a recovery that has not finished,
-// whatever stopped it — gets the td's dm-error instead: the table of rule
-// 1's park, live and never under dm-flakey, though with no ANA move. A
+// nsDevNow is np with the backing CN16 installs on this node in this pass.
+// It is np itself under every rule but 5: a dm-clone may serve only once
+// CN18 step 5 has turned its hydration on, which follows step 4's bitmaps
+// and nothing before them (architecture.md, Clone crash recovery), so a
+// rule-5 ns-dev whose dm-clone's live status does not show hydration on — a
+// build or a recovery that has not finished, whatever stopped it — gets the
+// td's dm-error instead: the table of rule 1's park, live and never under
+// dm-flakey, while its namespace waits in the inaccessible group (build). A
 // dm-clone that does not exist shows no hydration either, so its td's ns-devs
 // park with their rows OK — whether a failed build removed it, its build has
 // not got that far, or its clone waits for room in the arena (CN18 step 2).
@@ -132,9 +132,79 @@ func (s *CnAgentServer) nsDevNow(
 	return &parked, nil
 }
 
+// wantsServing reports whether the CN16 rules want np's ns-dev on a serving
+// device — rule 5's dm-clone or rule 6's raid0, under rule 7's dm-flakey at
+// the read-only level — rather than on the td's dm-error, which rules 0-4
+// select.
+func (np *nsPlan) wantsServing() bool {
+	return np.td != nil && np.backingName != "" &&
+		np.backingName != np.td.errorName
+}
+
+// nsAnaWanted is the ANA group CN16 wants a namespace in, given whether its
+// ns-dev's live table maps the td's dm-error (parked): inaccessible when the
+// rules want the ns-dev on a serving device and it is parked — a host then
+// queues its IO rather than reads IO errors from an optimized path — and the
+// desired group, np.anaGrpId, otherwise, a table that could not be read
+// included. The build's ANA move takes it for what the ns-dev step did
+// (nsAnaMove), and both channels' namespace rows compare the group with it
+// for the ns-dev's live table (nsRowAnaGrpId).
+func nsAnaWanted(np *nsPlan, parked bool) int {
+	if parked && np.wantsServing() {
+		return common.AnaGrpIdInaccessible
+	}
+	return np.anaGrpId
+}
+
+// nsAnaMove is the group the build's last loop moves a namespace whose
+// desired group is optimized to, and false where the namespace keeps the
+// group it has (CN16): an ns-dev the step put on what its rules want takes
+// the desired group, and one parked while its rules want a serving device
+// takes inaccessible. A failed step that did not find the ns-dev parked
+// keeps the group, since a failed read never moves an optimized namespace
+// back: the ns-dev may still serve, and the move would pause its hosts for
+// nothing. So does a failed step that found it on the dm-error its rules
+// select. A hold that serves (CN18) takes the desired group: its ns-dev
+// serves on from the table it keeps, and P2 may have moved its namespace to
+// inaccessible before a park whose load failed, which would pause its hosts
+// for nothing until the hold ends. The move goes by what the step did, so it
+// counts as parked a held ns-dev whose dm-error number cannot be read
+// (heldNsDev), which the namespace row, read from the live table, does not
+// (nsRowAnaGrpId): that row then reads ERROR on both channels.
+func nsAnaMove(np *nsPlan, outcome nsDevOutcome) (int, bool) {
+	switch outcome {
+	case nsDevFailed:
+		return 0, false
+	case nsDevFailedParked:
+		if !np.wantsServing() {
+			return 0, false
+		}
+	}
+	return nsAnaWanted(np, outcome.parked()), true
+}
+
+// waitsForRoom reports whether a namespace waits only for its clone's room in
+// the clone-metadata arena: its ns-dev step parked it by rule 5's fallback,
+// the dm-clone showing no hydration, in a pass whose CN18 step 2 room check
+// stopped the clone's build (roomStopped, cloneRoom). Such a namespace
+// registers no CN10 retry (build): a clone that waits for room has CN18's
+// clone-metadata retry, which re-drives the wait, and a run larger than the
+// whole arena changes only with a new revision, which comes with a
+// SyncupCntlr of its own.
+func waitsForRoom(
+	np *nsPlan,
+	outcome nsDevOutcome,
+	roomStopped map[uint64]bool,
+) bool {
+	return outcome == nsDevAwaiting && np.clone != nil &&
+		roomStopped[np.clone.cloneId]
+}
+
 // ensureNsDev converges one namespace's own dm-linear (architecture.md,
 // Primary cntlr, step 5) onto the
-// CN16 backing. An effectively suspended namespace needs no step of its own
+// CN16 backing, and says what it did (nsDevOutcome), which decides the
+// namespace's ANA move (build). An effectively suspended namespace needs no
+// step of its own
 // here: it is **parked**, and rule 1 of the backing state machine has already
 // made its backing the td's dm-error, so the ordinary reload below installs
 // the park — live, never dm-suspended (architecture.md, Namespace suspend
@@ -154,29 +224,57 @@ func (s *CnAgentServer) nsDevNow(
 // the dm-clone serves on through it (nsDevHeldServing), a parked one stays
 // parked (nsDevHeldParked) — and a new one starts parked on the td's
 // dm-error. The caller reports a held ns-dev's row ERROR, registers the
-// CN10 retry, keeps a serving namespace in the ANA group it has and moves a
-// parked one inaccessible; the first pass that leaves no such dm-clone live
-// — its listing names none, or its L3 removed it, parking first an ns-dev
-// still over it — reloads it. The ns-devs of a td whose raid0 no such
+// CN10 retry, moves a serving namespace to its desired group and a parked
+// one inaccessible (nsAnaMove); the first pass that leaves no such dm-clone
+// live — its listing names none, or its L3 removed it, parking first an
+// ns-dev still over it — reloads it. The ns-devs of a td whose raid0 no such
 // dm-clone writes into converge as usual.
+//
+// A step that fails, whatever read or command failed, reads the ns-dev's
+// live table afterwards (failedNsDev) — the number of a raid0 that is not
+// there yet included, which is how a promotion that came before the sides'
+// switch-over ([D16]) fails — so the build can tell an ns-dev parked while
+// its rules want a serving device from one that may still serve.
 func (s *CnAgentServer) ensureNsDev(
 	ctx context.Context,
 	np *nsPlan,
 	lingering cloneHold,
-) (held nsDevHold, err error) {
+) (nsDevOutcome, error) {
+	outcome, err := s.convergeNsDev(ctx, np, lingering)
+	if err != nil {
+		return s.failedNsDev(ctx, np), err
+	}
+	return outcome, nil
+}
+
+// convergeNsDev is ensureNsDev's step. Its outcome means nothing when it
+// returns an error.
+func (s *CnAgentServer) convergeNsDev(
+	ctx context.Context,
+	np *nsPlan,
+	lingering cloneHold,
+) (nsDevOutcome, error) {
 	if np.backingName == "" {
-		return nsDevConverged, fmt.Errorf("namespace has no thin device")
+		return nsDevFailed, fmt.Errorf("namespace has no thin device")
 	}
 	if np.sectors == 0 {
-		return nsDevConverged, fmt.Errorf("namespace size is 0")
+		return nsDevFailed, fmt.Errorf("namespace size is 0")
 	}
 	// A rule-5 ns-dev gets the park's table while its dm-clone does not show
-	// hydration on, with no ANA move: its namespace stays optimized, as it
+	// hydration on, and its namespace waits in the inaccessible group, as it
 	// does through a recovery's own park (CN18 step 2).
-	np, err = s.nsDevNow(ctx, np)
+	now, err := s.nsDevNow(ctx, np)
 	if err != nil {
-		return nsDevConverged, err
+		return nsDevFailed, err
 	}
+	outcome := nsDevServing
+	switch {
+	case now.backingName != np.backingName:
+		outcome = nsDevAwaiting
+	case !np.wantsServing():
+		outcome = nsDevOnError
+	}
+	np = now
 	hold := np.td != nil && np.backingName == np.td.raid0Name &&
 		lingering.holds(np.td.raid0Name)
 	// The td's dm-error is ensured again here, probe-first: the build's td
@@ -185,52 +283,59 @@ func (s *CnAgentServer) ensureNsDev(
 	if np.td != nil && np.backingName == np.td.errorName {
 		if err := s.ensureDmError(
 			ctx, np.td.errorName, np.td.sectors); err != nil {
-			return nsDevConverged, err
+			return nsDevFailed, err
 		}
 	}
 	devNo, err := s.dmDevNo(ctx, nil, np.backingName)
 	if err != nil {
-		return nsDevConverged, err
+		return nsDevFailed, err
 	}
 	table := nsDevTable(np, devNo)
 	dev, err := s.dm.Info(ctx, np.devName)
 	if err != nil {
-		return nsDevConverged, err
+		return nsDevFailed, err
 	}
 	if dev == nil {
 		if hold {
 			// Created parked, on the td's dm-error.
 			if err := s.ensureDmError(
 				ctx, np.td.errorName, np.td.sectors); err != nil {
-				return nsDevConverged, err
+				return nsDevFailed, err
 			}
 			errNo, err := s.dmDevNo(ctx, nil, np.td.errorName)
 			if err != nil {
-				return nsDevConverged, err
+				return nsDevFailed, err
 			}
-			held = nsDevHeldParked
+			outcome = nsDevHeldParked
 			table = agent.LinearTable(np.sectors, errNo, 0)
 		}
 		if err := s.dm.Create(ctx, np.devName, table); err != nil {
-			return held, err
+			return nsDevFailed, err
 		}
 		dev = &agent.DmDevInfo{}
 	} else {
 		targets, tableErr := s.dm.Table(ctx, np.devName)
 		if tableErr != nil {
-			return nsDevConverged, tableErr
+			return nsDevFailed, tableErr
 		}
 		if !nsDevTableMatches(targets, np, devNo) || dev.ReadOnly {
 			if hold && !onDevice(targets, devNo) {
-				held = s.heldNsDev(ctx, np, targets)
+				outcome = s.heldNsDev(ctx, np, targets)
 			} else {
+				if outcome == nsDevAwaiting {
+					// Rule 5's fallback parks an ns-dev whose namespace the
+					// desired state wants optimized: the namespace goes
+					// inaccessible before the reload, as before every such
+					// park (parkNsDev).
+					s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
+				}
 				// Reload is suspend, load, resume: it leaves the device
 				// live, or fails and returns here before the guard below —
 				// a failed load leaving the device suspended on purpose
 				// (Dm.Reload fails closed) — so the guard needs no case
 				// for this branch.
 				if err := s.dm.Reload(ctx, np.devName, table); err != nil {
-					return nsDevConverged, err
+					return nsDevFailed, err
 				}
 				dev = &agent.DmDevInfo{}
 			}
@@ -242,27 +347,144 @@ func (s *CnAgentServer) ensureNsDev(
 	// or held — is one a reload that was interrupted or failed left behind,
 	// and it is resumed (CN16).
 	if dev.Suspended {
-		return held, s.dm.Resume(ctx, np.devName)
+		return outcome, s.dm.Resume(ctx, np.devName)
 	}
-	return held, nil
+	return outcome, nil
 }
 
-// nsDevHold is what ensureNsDev did with an ns-dev it held off its td's
-// raid0, which decides the namespace's ANA move (build).
-type nsDevHold int
+// failedNsDev is the outcome of an ns-dev step that failed:
+// nsDevFailedParked when the ns-dev's live table, read after the failure,
+// maps the td's dm-error (nsDevParked), and nsDevFailed otherwise — a table
+// or a dm-error number that cannot be read included, since what is not known
+// moves no namespace (nsAnaMove).
+func (s *CnAgentServer) failedNsDev(
+	ctx context.Context,
+	np *nsPlan,
+) nsDevOutcome {
+	if np.td != nil && s.nsDevParked(ctx, nil, np) {
+		return nsDevFailedParked
+	}
+	return nsDevFailed
+}
+
+// nsDevParked reports whether np's ns-dev's live table maps the td's dm-error
+// (nsDevParkedTable): the table from rd, the reading of a check round or an
+// info read, or with no reading from one `dmsetup table` of the ns-dev. An
+// ns-dev that is not there, or a table that cannot be read, answers false.
+func (s *CnAgentServer) nsDevParked(
+	ctx context.Context,
+	rd *cnReading,
+	np *nsPlan,
+) bool {
+	if rd != nil {
+		// A reading looks a table up only for a device its info lookup
+		// found (cnReading.table). With no reading, the table read of a
+		// device that is not there fails, which answers the same.
+		if dev, err := rd.info(ctx, np.devName); err != nil || dev == nil {
+			return false
+		}
+	}
+	targets, err := s.dmTable(ctx, rd, np.devName)
+	return err == nil && s.nsDevParkedTable(ctx, rd, np, targets)
+}
+
+// nsRowAnaGrpId is the group a namespace row compares the namespace's
+// "ana_grpid" with, on both channels alike (CN28): nsAnaWanted for whether
+// the ns-dev's live table maps the td's dm-error (nsDevParked) — read from a
+// check round's reading, or by a converge after its ANA loop. So the two
+// channels decide the row by one rule from what the node holds, whatever the
+// converge's ns-dev step did.
+func (s *CnAgentServer) nsRowAnaGrpId(
+	ctx context.Context,
+	rd *cnReading,
+	np *nsPlan,
+) int {
+	if np.anaGrpId == common.AnaGrpIdInaccessible || !np.wantsServing() {
+		// The table cannot change the group nsAnaWanted answers, so it is
+		// not read.
+		return np.anaGrpId
+	}
+	return nsAnaWanted(np, s.nsDevParked(ctx, rd, np))
+}
+
+// nsDevParkedTable reports whether a live ns-dev table maps the td's
+// dm-error: a single target over it, or a single error target. The
+// dm-error's number comes from rd, the reading of a check round or an info
+// read, and with no reading from one `dmsetup info` of it (dmDevNo); a number
+// that cannot be read answers false.
+func (s *CnAgentServer) nsDevParkedTable(
+	ctx context.Context,
+	rd *cnReading,
+	np *nsPlan,
+	targets []common.DmTarget,
+) bool {
+	if len(targets) == 1 && targets[0].Type == "error" {
+		return true
+	}
+	if np.td == nil {
+		return false
+	}
+	errNo, err := s.dmDevNo(ctx, rd, np.td.errorName)
+	return err == nil && onDevice(targets, errNo)
+}
+
+// nsDevOutcome is what ensureNsDev did with one ns-dev, which decides its
+// namespace's ANA move (nsAnaMove) and whether the namespace waits for the
+// CN10 retry (build).
+type nsDevOutcome int
 
 const (
-	// nsDevConverged: not held — the ns-dev is on the backing its plan
-	// wants, or the converge failed and its error says why.
-	nsDevConverged nsDevHold = iota
-	// nsDevHeldServing: held on a live table that maps data — the dm-clone
-	// the plan dropped, typically — so its namespace keeps its ANA group.
+	// nsDevFailed: the step failed, and the ns-dev's live table is not known
+	// to map the td's dm-error — it maps something else, or it could not be
+	// read.
+	nsDevFailed nsDevOutcome = iota
+	// nsDevFailedParked: the step failed, and the ns-dev's live table maps
+	// the td's dm-error (failedNsDev).
+	nsDevFailedParked
+	// nsDevServing: the ns-dev maps its serving device in this pass — the
+	// raid0, or the dm-clone showing hydration on, under dm-flakey at the
+	// read-only level — put there or found there.
+	nsDevServing
+	// nsDevOnError: the rules select the td's dm-error (CN16 rules 0-4), and
+	// the ns-dev maps it.
+	nsDevOnError
+	// nsDevAwaiting: rule 5's dm-clone does not show hydration on, so the
+	// ns-dev maps the td's dm-error instead (nsDevNow) — a clone build or
+	// recovery that has not finished.
+	nsDevAwaiting
+	// nsDevHeldServing: held (CN18) on a live table that maps data — the
+	// dm-clone the plan dropped, typically — so its namespace takes its
+	// desired group (nsAnaMove).
 	nsDevHeldServing
 	// nsDevHeldParked: held on, or created on, a table that maps none — the
 	// td's dm-error — so its namespace goes inaccessible: a host queues its
 	// IO rather than take errors on an optimized path.
 	nsDevHeldParked
 )
+
+// held reports whether ensureNsDev held the ns-dev off its td's raid0
+// (CN18).
+func (o nsDevOutcome) held() bool {
+	return o == nsDevHeldServing || o == nsDevHeldParked
+}
+
+// onPlan reports whether the step left the ns-dev on what its rules want:
+// its serving device, or the dm-error rules 0-4 select.
+func (o nsDevOutcome) onPlan() bool {
+	return o == nsDevServing || o == nsDevOnError
+}
+
+// parked reports whether the step left the ns-dev on the td's dm-error as
+// far as the step knows, which decides the group the ANA move takes
+// (nsAnaMove): a held ns-dev whose dm-error number cannot be read counts as
+// parked (heldNsDev).
+func (o nsDevOutcome) parked() bool {
+	switch o {
+	case nsDevFailedParked, nsDevOnError, nsDevAwaiting, nsDevHeldParked:
+		return true
+	}
+	return false
+}
 
 // heldNsDev tells a held ns-dev that is parked from one that serves, by its
 // live table. A dm-error it cannot resolve counts as parked: the namespace
@@ -272,7 +494,7 @@ func (s *CnAgentServer) heldNsDev(
 	ctx context.Context,
 	np *nsPlan,
 	targets []common.DmTarget,
-) nsDevHold {
+) nsDevOutcome {
 	if len(targets) == 1 && targets[0].Type == "error" {
 		return nsDevHeldParked
 	}
@@ -301,6 +523,20 @@ func onDevice(targets []common.DmTarget, devNo string) bool {
 // device a reload that was interrupted or failed left suspended — when its
 // own commands succeed: one whose load fails leaves the device suspended
 // (Dm.Reload fails closed).
+//
+// A namespace whose desired group is optimized while its rules want its
+// ns-dev on a serving device — P2's park of an ns-dev mapping a device the
+// pass removes, and every recovery park — goes inaccessible before the
+// reload (CN16, CN18 step 2), and so does one whose ns-dev the park finds
+// parked already: a recovery after the level that removes the clone stacks
+// is lowered finds the ns-dev on the dm-error rule 4 selected, its namespace
+// optimized over it. Its hosts then queue their IO through the park rather
+// than read IO errors from an optimized path; the build moves it back
+// in the pass that puts the ns-dev on its serving device, or that finds it
+// still serving after a park whose load failed (CN18's hold). A move that fails
+// is logged and the park goes on: the park guards the data, the move only
+// spares the hosts IO errors. Rules 3 and 4 park onto the dm-error they
+// select, with no move.
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -325,6 +561,9 @@ func (s *CnAgentServer) parkNsDev(
 	}
 	parked := len(targets) == 1 && targets[0].Type == "linear" &&
 		len(targets[0].Args) == 2 && targets[0].Args[0] == devNo
+	if np.anaGrpId != common.AnaGrpIdInaccessible && np.wantsServing() {
+		s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
+	}
 	if parked && !dev.Suspended {
 		return nil
 	}
@@ -366,8 +605,11 @@ func (s *CnAgentServer) nsConf(np *nsPlan, anaGrpId int) agent.NsConf {
 }
 
 // ensureNamespaceObject creates or converges one nvmet namespace **without**
-// moving its ANA group: an existing namespace keeps the group it has and the
-// CN9 final pass promotes it, a fresh one starts `inaccessible`. Folding the
+// moving its ANA group: an enabled namespace keeps the group it has and the
+// CN9 final pass promotes it, and one that is not enabled — a fresh one, or
+// one a step left behind between its `mkdir` and its enable — gets
+// `inaccessible` before EnsureNamespace enables it, never the kernel's
+// default group. Folding the
 // ANA write in here would both break the build's "objects first, ANA last"
 // order (CN9's ANA rewrite to optimized comes last, as ensureXferNamespace
 // keeps it too) and make an idempotent re-apply write `ana_grpid` twice.
@@ -379,11 +621,19 @@ func (s *CnAgentServer) ensureNamespaceObject(
 	if err != nil {
 		return err
 	}
-	anaGrpId := common.AnaGrpIdInaccessible
-	if state.Exists && state.AnaGrpId != 0 {
-		anaGrpId = state.AnaGrpId
+	return s.nvmet.EnsureNamespace(ctx, s.nsConf(np, objectAnaGrpId(state)))
+}
+
+// objectAnaGrpId is the group a namespace object's step writes: the one an
+// enabled namespace has, and `inaccessible` for one that is absent or not
+// enabled, which EnsureNamespace writes before its enable. A namespace that
+// serves hosts is thus never moved by its object's step, and one that does
+// not yet serve starts where a host queues.
+func objectAnaGrpId(state *agent.NsState) int {
+	if state.Exists && state.Enabled && state.AnaGrpId != 0 {
+		return state.AnaGrpId
 	}
-	return s.nvmet.EnsureNamespace(ctx, s.nsConf(np, anaGrpId))
+	return common.AnaGrpIdInaccessible
 }
 
 // ensureSubsystem converges one host-facing subsystem, its namespaces and its
@@ -391,13 +641,17 @@ func (s *CnAgentServer) ensureNamespaceObject(
 // its business: CN21's L1 removes it, inaccessible first, and only from an
 // enumeration that answered — and nothing does under a subsystem whose NQN
 // carries the dnv prefix but decodes to nothing, which the sweep never
-// attributes (cnagent.md CN16).
+// attributes (cnagent.md CN16). Each namespace's step leaves its error in
+// nsErrs, from which reportNamespaces writes the namespace rows after the
+// build's ANA loop; a subsystem whose own step fails steps none of its
+// namespaces, and they get no row.
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	sp *ssPlan,
 	info *pb.CntlrInfo,
+	nsErrs map[uint64]error,
 ) {
 	ssKey := resKeyOf(resKeySubsysFmt, sp.ssId)
 	if err := s.nvmet.EnsureSubsystem(
@@ -407,18 +661,45 @@ func (s *CnAgentServer) ensureSubsystem(
 		return
 	}
 	for _, np := range sp.namespaces {
-		nsKey := resKeyOf(resKeyNamespaceFmt, np.nsId)
-		err := s.ensureNamespaceObject(ctx, np)
-		// The namespace object of a provisioning-deferred backing chain is
-		// created and correct, but it is inaccessible and no host can do IO
-		// through it — PROVISIONING, not OK ([D15]). The subsystem row above is
-		// untouched: the subsystem itself is fully converged.
-		info.NsIdToNamespace[np.nsId] = deferredFromErr(
-			st.tracker, np.deferred,
-			nsKey, nsResName(sp.nqn, np.nsIdx), "", err)
+		nsErrs[np.nsId] = s.ensureNamespaceObject(ctx, np)
 	}
 	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn)
 	info.SsIdToSubsystem[sp.ssId] = st.tracker.FromErr(ssKey, sp.nqn, "", err)
+}
+
+// reportNamespaces writes a converge's namespace rows after its ANA loop
+// (CN28), one per namespace ensureSubsystem stepped: the step's error wins,
+// and otherwise the namespace is read and compared as a check round compares
+// it, its group with nsRowAnaGrpId's for the ns-dev's live table, so the two
+// channels report the same row for the same node. The namespace
+// object of a provisioning-deferred backing chain is created and correct,
+// but it is inaccessible and no host can do IO through it — PROVISIONING,
+// not OK ([D15]); its subsystem's row is untouched, since the subsystem
+// itself is fully converged.
+func (s *CnAgentServer) reportNamespaces(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	info *pb.CntlrInfo,
+	nsErrs map[uint64]error,
+) {
+	for _, np := range plan.namespaces {
+		err, stepped := nsErrs[np.nsId]
+		if !stepped {
+			continue
+		}
+		key := resKeyOf(resKeyNamespaceFmt, np.nsId)
+		name := nsResName(np.ss.nqn, np.nsIdx)
+		if err != nil {
+			info.NsIdToNamespace[np.nsId] = deferredFromErr(
+				st.tracker, np.deferred, key, name, "", err)
+			continue
+		}
+		status, details := s.probeNamespaceObject(
+			ctx, s.nsConf(np, s.nsRowAnaGrpId(ctx, nil, np)))
+		info.NsIdToNamespace[np.nsId] = deferredSet(
+			st.tracker, np.deferred, key, name, status, details)
+	}
 }
 
 func nsResName(nqn string, nsIdx int) string {

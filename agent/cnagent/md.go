@@ -928,15 +928,15 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // ---------------------------------------------------------------------------
 
 // ensureGroup converges one group device. A RedundNone group is a dm-linear
-// over its single leg's data region; a RedundMdRaid1 group instantiates the
-// assembly cases of cnagent.md CN12 over the member leg wrappers. Spare legs
-// are never members
+// over its single leg's data region (ensureLinearGroup); a RedundMdRaid1
+// group instantiates the assembly cases of cnagent.md CN12 over the member
+// leg wrappers. Spare legs are never members
 // (architecture.md, Spare legs) — they stay connected, wrapped and probed.
 //
 // A provisioning-deferred group never gets here: the build phase reports it
-// PROVISIONING and skips it ([D15]). The leg-count check below is kept explicit
-// all the same, so gp.legs[0] can never be indexed on an empty member list
-// whatever a future caller does.
+// PROVISIONING and skips it ([D15]). The leg-count check of ensureLinearGroup
+// is kept explicit all the same, so gp.legs[0] can never be indexed on an
+// empty member list whatever a future caller does.
 func (s *CnAgentServer) ensureGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -944,16 +944,7 @@ func (s *CnAgentServer) ensureGroup(
 	available map[uint64]bool,
 ) error {
 	if !gp.raid1 {
-		if len(gp.legs) != 1 {
-			return fmt.Errorf(
-				"RedundNone group has %d legs, want 1", len(gp.legs))
-		}
-		legNo, err := s.dmDevNo(ctx, nil, gp.legs[0].name)
-		if err != nil {
-			return err
-		}
-		return s.ensureDmLinear(ctx, gp.dmName, gp.dataSectors,
-			legNo, gp.dataOffsetSectors)
+		return s.ensureLinearGroup(ctx, gp, available)
 	}
 	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
@@ -992,6 +983,76 @@ func (s *CnAgentServer) ensureGroup(
 	return s.reconcileMembers(ctx, gp, detail, available)
 }
 
+// ensureLinearGroup converges a RedundNone group's dm-linear over its leg
+// wrapper (cnagent.md CN12), and creates or reloads it only over an
+// available leg. The layers above do IO through the group, and a side that
+// has not flipped to this CN yet exports dm-error to it: a pool, a raid0 and
+// an ns-dev built over such a leg would let a promotion that came before the
+// sides' switch-over ([D16]) move its namespaces optimized over IO errors.
+// A device that is there with the table it wants is kept whatever the leg's
+// availability, resumed if it is suspended, as ensureDmSingle does: a
+// primary that serves keeps serving through a short loss of its leg's path,
+// with no teardown and no reload. A late leg under a device that is missing
+// or maps something else fails the group with "no available leg" and
+// touches nothing. A missing device leaves the slice's concat without the
+// group's number: a pool not built yet, as at a promotion's first converge,
+// waits, and every layer above it with it, the namespaces inaccessible
+// (CN16); a pool that serves when a grow adds the group keeps serving at its
+// old size, with the raid0s and ns-devs over it, while its concat and pool
+// rows read ERROR. The CN10 retry that the late member registers (build)
+// then finds the leg available, builds the group and builds or grows the
+// pool.
+func (s *CnAgentServer) ensureLinearGroup(
+	ctx context.Context,
+	gp *grpPlan,
+	available map[uint64]bool,
+) error {
+	if len(gp.legs) != 1 {
+		return fmt.Errorf(
+			"RedundNone group has %d legs, want 1", len(gp.legs))
+	}
+	lp := gp.legs[0]
+	if available[lp.legId] {
+		legNo, err := s.dmDevNo(ctx, nil, lp.name)
+		if err != nil {
+			return err
+		}
+		return s.ensureDmLinear(ctx, gp.dmName, gp.dataSectors,
+			legNo, gp.dataOffsetSectors)
+	}
+	dev, err := s.dm.Info(ctx, gp.dmName)
+	if err != nil {
+		return err
+	}
+	if dev == nil {
+		return errNoAvailableLeg()
+	}
+	legNo, err := s.dmDevNo(ctx, nil, lp.name)
+	if err != nil {
+		return err
+	}
+	targets, err := s.dm.Table(ctx, gp.dmName)
+	if err != nil {
+		return err
+	}
+	args := []string{legNo, strconv.FormatUint(gp.dataOffsetSectors, 10)}
+	if dev.ReadOnly ||
+		!dmTableMatches(targets, "linear", gp.dataSectors, args, 0) {
+		return errNoAvailableLeg()
+	}
+	if dev.Suspended {
+		return s.dm.Resume(ctx, gp.dmName)
+	}
+	return nil
+}
+
+// errNoAvailableLeg is the error of a group this pass leaves unbuilt because
+// none of its legs is available (cnagent.md CN12), one text for both kinds of
+// group.
+func errNoAvailableLeg() error {
+	return fmt.Errorf("no available leg")
+}
+
 // assembleGroup is the case selection of cnagent.md CN12: probe each
 // available member for an md superblock and either create the array or
 // assemble it from the members that have one.
@@ -1019,7 +1080,7 @@ func (s *CnAgentServer) assembleGroup(
 		}
 	}
 	if len(members) == 0 {
-		return fmt.Errorf("no available leg")
+		return errNoAvailableLeg()
 	}
 	conf := MdCreateConf{
 		DevPath:        gp.devPath,

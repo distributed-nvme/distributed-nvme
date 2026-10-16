@@ -3700,7 +3700,7 @@ case_redund() {
 	local req1="$WORK/req-redund-cn1.json" req2="$WORK/req-redund-cn2.json"
 	local out dev want got seq rev1 rev2 i nsdev
 	local writer deadline mkey dkey lkey mst dst ldet n rules mark cmds name
-	local grp md2 la lb
+	local grp md2 la lb nsdev1 err1 raid01 info1
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
@@ -4048,18 +4048,26 @@ case_redund() {
 	assert_eq "$(helper "$hv" "write_probe '$dev' 9")" ok \
 		"redund write after readwrite"
 
-	stage lateflip "a promotion that outruns the sides' flip completes on the retry"
+	stage lateflip "a promotion that outruns the sides' flip waits inaccessible, then completes on the retry"
 	# CN12's late-member retry and link 1 of the failover ping-pong: a
 	# failover's SyncupCntlr waits for the sides' SyncupSide answers, but one
 	# cntlr_interval at most ([D16]), so a promoted standby can still read its
 	# legs before any side has flipped. Every path is then live but still
 	# non-optimized, no leg is available, and both groups report "no available
-	# leg". Nothing re-drives that converge — the worker re-syncs on a
-	# revision or a reply code, never on a row — so the agent's CN10 retry,
-	# registered for the late members, must finish it. This stage promotes
-	# CN1 BEFORE it flips any side, then
-	# flips them all: the arrays must be assembled by a retry attempt, under a
-	# trace id of its own, and CN1 must see no second SyncupCntlr. CN1
+	# leg". The promotion builds no raid0, so its ns-dev stays parked on the
+	# td's dm-error and its row reads an error naming the missing raid0; and
+	# since a namespace turns optimized only in a converge that put its ns-dev
+	# on its serving device (CN16's ANA rule), the namespace stays
+	# inaccessible and the host's IO waits instead of failing. Its namespace
+	# row reads OK on the converge and on an info read alike, both comparing
+	# its group with the inaccessible one a parked ns-dev calls for (CN28).
+	# Nothing re-drives that converge — the worker re-syncs on a revision or a
+	# reply code, never on a row — so the agent's CN10 retry, registered for
+	# the late members and for the namespace left waiting, must finish it.
+	# This stage promotes CN1 BEFORE it flips any side, then flips them all:
+	# the arrays must be assembled by a retry attempt, under a trace id of its
+	# own, which also puts the ns-dev on the raid0 and moves the namespace
+	# optimized, and CN1 must see no second SyncupCntlr. CN1
 	# assembles from the members' superblocks, where the data array's DN1
 	# leg is the member md failed on CN2 in the degrade stage: md kicks that
 	# stale member from the assembly, and CN12's member reconciliation adds
@@ -4069,13 +4077,13 @@ case_redund() {
 	# fresher one and a later attempt adds the other. Either way the rows
 	# end OK, degraded or not, and that is all this stage asserts of them.
 	# The readonly stage restored READWRITE on req2, and req1 never left it.
-	# Host IO is quiesced from the demote until the rows read OK: the build
-	# moves CN1's namespace to optimized with the promotion itself (CN16's
-	# ANA rule does not wait for the stack), over the td's dm-error until a
-	# converge has built the raid0. The host's path to CN1 went down with the
-	# degrade stage's partition; it must be back for the readback below.
+	# The host's path to CN1 went down with the degrade stage's partition; it
+	# must be live again for the ANA reads and the readback below.
 	helper "$hv" "wait_path_live '$nqn' '${IP[1]}' 30" ||
 		die "lateflip: the host path to cn1 is not live again"
+	nsdev1=$(cn_dm_name c6 1 "$sp" "$A_NS")
+	err1=$(cn_dm_name c5 1 "$sp" "$A_TD")
+	raid01=$(cn_dm_name c4 1 "$sp" "$A_TD")
 	mark=$(helper 1 cn_log_lines)
 	req_set "$req2" '.cntlr.primary = false'
 	bump_cn_rev 2
@@ -4093,6 +4101,26 @@ case_redund() {
 	seq=$(helper 1 "cn_events $TRACE")
 	assert_eq "$(event_cnt "$seq" '^mdadm --(assemble|create) ')" 0 \
 		"redund lateflip: the promotion assembled nothing"
+	# The wait (CN16's ANA rule). The promotion wrote no optimized group:
+	# assert_absent fails on a stream with no event at all, and this one holds
+	# the promotion's commands. The host's path to CN1 still reads
+	# inaccessible, the ns-dev is still parked, its row reads the missing
+	# raid0 as an error, and the namespace row reads OK, on the converge and
+	# on an info read alike (CN28). A retry attempt that runs before the flips
+	# below finds the members still late and changes none of this.
+	assert_absent "$seq" '^write .*/ana_grpid 1$' \
+		"redund lateflip: the promotion moved a namespace optimized"
+	assert_eq "$(host_ana "$hv" "$nqn" 1)" inaccessible \
+		"redund lateflip: the host path to the promoted cn1"
+	assert_parked 1 "$nsdev1" "$err1" "redund lateflip promoted"
+	assert_map_status "$out" ns_id_to_dm_linear "$A_NS" RES_STATUS_ERROR \
+		"dm device $raid01 is not there" "redund lateflip promoted"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund lateflip promoted"
+	info1=$(cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1")
+	assert_map_status "$info1" ns_id_to_dm_linear "$A_NS" RES_STATUS_ERROR \
+		"dm device $raid01 is not there" "redund lateflip info read"
+	assert_map_ok "$info1" ns_id_to_namespace "$A_NS" \
+		"redund lateflip info read"
 	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
 		"${CNID[1]}" "${CNID[2]}"
 	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
@@ -4125,6 +4153,12 @@ case_redund() {
 	done
 	assert_map_ok "$out" td_id_to_raid0 "$A_TD" "redund lateflip retried"
 	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund lateflip retried"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund lateflip retried"
+	# The stack is built: the attempt that built the raid0 put the ns-dev on
+	# it, and in that same attempt moved the namespace optimized (below).
+	assert_eq "$(helper 1 "dm_backing $nsdev1")" \
+		"$(helper 1 "dm_devno $raid01")" \
+		"redund lateflip: the retried ns-dev maps the raid0"
 	log "  after the retry: data md row" \
 		"'$(jq_of "$out" ".cntlr_info.grp_id_to_md_raid[\"$dkey\"].details")'"
 	# Who assembled: every `mdadm --assemble` CN1 ran since the demote, with
@@ -4144,9 +4178,10 @@ case_redund() {
 	n=$(helper 1 "cn_requests_since $mark SyncupCntlr $(d16 "$sp") $(d16 "$c1")")
 	assert_eq "$n" 1 \
 		"lateflip: SyncupCntlr requests for cntlr $c1 on cn1 since the demote"
-	# The retry stops once no member is late (and no connect fails): after
-	# the attempt that is still due, if any, CN1 runs no command under any
-	# trace id but this stage's own for a whole retry interval.
+	# The retry stops once no member is late, no connect fails and no
+	# namespace waits: after the attempt that is still due, if any, CN1 runs
+	# no command under any trace id but this stage's own for a whole retry
+	# interval.
 	deadline=$((SECONDS + 30))
 	while :; do
 		mark=$(helper 1 cn_log_lines)
@@ -4157,6 +4192,9 @@ case_redund() {
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "lateflip: cn1 still runs converges of its own: $cmds"
 	done
+	# The wait ends: the host's path to CN1 reads optimized, a move only a
+	# retry attempt can have made, since the promotion wrote no optimized
+	# group and CN1 saw no second SyncupCntlr.
 	host_wait_ana "$hv" "$nqn" 1 optimized 30
 	assert_eq "$(host_ana "$hv" "$nqn" 2)" inaccessible \
 		"redund lateflip demoted primary path"

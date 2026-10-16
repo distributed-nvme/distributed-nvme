@@ -237,6 +237,11 @@ type fakeNode struct {
 	failReadAlways map[string]bool
 	killRead       map[string]bool
 	killReadAlways map[string]bool
+	// failWriteAlways is the WriteFileDirect counterpart of failCmdAlways,
+	// matched on a substring of "path=data": the write is recorded, refused
+	// with the given error text, and changes nothing — a configfs store
+	// handler that answered no.
+	failWriteAlways map[string]string
 	// gate blocks a command until the channel is closed (lock tests).
 	gate map[string]chan struct{}
 	// hardGate blocks a command until the channel is closed and — unlike gate
@@ -388,6 +393,7 @@ func newFakeNode() *fakeNode {
 		failReadAlways:        make(map[string]bool),
 		killRead:              make(map[string]bool),
 		killReadAlways:        make(map[string]bool),
+		failWriteAlways:       make(map[string]string),
 
 		gate:      make(map[string]chan struct{}),
 		hardGate:  make(map[string]chan struct{}),
@@ -776,6 +782,11 @@ func (f *fakeNode) writeFileDirect(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("writedirect %s=%s", path, data)
+	for key, refusal := range f.failWriteAlways {
+		if strings.Contains(path+"="+data, key) {
+			return errors.New(refusal)
+		}
+	}
 	if !f.dirs[parentDir(path)] {
 		return fmt.Errorf("no such directory: %s", parentDir(path))
 	}

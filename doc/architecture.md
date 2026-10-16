@@ -754,7 +754,10 @@ available"):
    which is a member of the fixed optimized ANA group [D4] only on an
    enabled primary below `SP_LEVEL_DISABLE`, and only while it is not
    effectively suspended and its td's backing chain is not
-   provisioning-deferred ([D15]) — otherwise of the inaccessible group
+   provisioning-deferred ([D15]), and it joins that group only in a
+   converge that leaves its `CnNsDevName` on a device that serves, or on
+   the dm-error the level selects (`cnagent.md` CN16) — otherwise of the
+   inaccessible group
    (Subsystems, namespaces); suspended ⇒ the ns-dev is parked on its td's
    dm-error and the namespace moved to the inaccessible group everywhere
    (Namespace suspend semantics; `cnagent.md` CN16).
@@ -4079,13 +4082,15 @@ revision):
    the td's raid0 — or onto the dm-clone, for an in-flight clone, after
    the clone crash recovery if the clone state was lost (Clone crash
    recovery).
-4. Move all namespaces from inaccessible to optimized. Step 4 does not
-   wait for steps 1 to 3 to succeed: a converge in which a member not yet
-   available (step 1) kept the stack from being built moves the namespaces
-   to optimized all the same, over the td's `CnErrorName` (the ANA rule of
-   `cnagent.md` CN16 reads the plan, not the stack), and host IO on that
-   path fails — target-internal (DNR), not a path error — until the
-   agent's retry has built the stack (`cnagent.md`, Known limits).
+4. Move each namespace from inaccessible to optimized once step 3 has put
+   its `CnNsDevName` on the raid0 or on the dm-clone with hydration on —
+   on the dm-error only at the levels that remove the thin pools or the
+   clone stacks (SpLevel) — and not before (`cnagent.md` CN16). A
+   converge in which a member not yet available (step 1) kept the stack
+   from being built leaves the namespaces inaccessible, and host IO waits
+   on the path until the agent's retry has built the stack (`cnagent.md`
+   CN10; `cnagent.md`, Known limits); a transfer the new primary serves
+   waits the same way (`cnagent.md` CN17).
 
 The failover's own transaction marks the new primary settling; until it
 has reported its stack built and clean as primary, a failover of it for
@@ -4135,13 +4140,19 @@ fencing epoch of its own, so (b) is an explicit dependency on mdadm's
 behaviour ([D16]).
 
 **What hosts see at a failover ([D16]).** The common failover — a dead CN
-— is clean from the host's side once the new primary's stack is built:
-its paths drop, IO queues, and the new primary's optimized flip releases
-it. A promotion that outruns the sides' ANA flips (new_primary step 1) can
-make that flip over dm-error, and the released IO then fails until the
-agent's retry builds the stack (new_primary step 4). In two cases an old
-primary that is still running stops taking host IO before the sides fence
-it, and the worker need not know which case it is in:
+— is a pause from the host's side: its paths drop, IO queues, and the
+new primary's optimized flip releases it once its stack is built
+(new_primary step 4). A promotion that outruns the sides' ANA flips
+(new_primary step 1) makes the pause longer by the agent's retry, which
+builds the stack (`cnagent.md`, Known limits), and never turns it into IO
+errors: the new primary builds its groups only over available legs, so no
+stack it builds reaches a side that still exports dm-error to it
+(`cnagent.md` CN12), and it moves no namespace to optimized over the
+dm-error, except at the levels that remove the thin pools or the clone
+stacks, where hosts are meant to see IO errors (SpLevel; `cnagent.md`
+CN16). In two cases an old primary that is still running stops taking
+host IO before the sides fence it, and the worker need not know which
+case it is in:
 
 * An old primary that applies its demotion inside the demotion hold (sp
   role) moves its namespaces to ANA inaccessible (**old_primary** step 1)
@@ -4503,17 +4514,25 @@ already copied". The volatile clone metadata — arena units under the
 wrapper `CnCloneMetaDmName` on the CN's tmpfs and loop device (Controller
 node, common) — is therefore rebuildable: whenever the primary (re)builds a
 clone whose dm-clone metadata is missing or unusable, whose dm-clone is
-absent, or whose dm-clone does not yet show hydration enabled, it parks the
-td's namespaces off the clone, creates the dm-clone with hydration disabled
-over a usable metadata wrapper, reads the destination td's mapping bitmap
-from every thin pool of the SP (per slice, *mapped = 1 = copied*) and
+absent, or whose dm-clone does not yet show hydration enabled, it moves the
+td's namespaces to the inaccessible ANA group and parks their ns-devs off
+the clone, creates the dm-clone with hydration disabled over a usable
+metadata wrapper, reads the destination td's mapping bitmap from every
+thin pool of the SP (per slice, *mapped = 1 = copied*) and
 `blkdiscard`s every dm-clone region whose bits are 1 there (raid0 bitmap
 math, the B side only), marking those regions "already hydrated", and only
-then enables hydration and puts the namespaces' ns-devs onto the dm-clone.
-The triggers, the order of those steps and what each step keeps or removes
-are `cnagent.md` CN18, and the agent puts a td's ns-devs onto its dm-clone
+then enables hydration, puts the namespaces' ns-devs onto the dm-clone and
+moves the namespaces back to optimized. Hosts wait through the recovery,
+their IO queued, rather than read IO errors from the parked ns-devs, and
+so they do while a recovery cannot finish, as at a promotion that outruns
+the sides' ANA flips, whose raid0 is not there yet (Failover). The triggers,
+the order of those steps and what each step keeps or removes are
+`cnagent.md` CN18, and below `SP_LEVEL_NO_CLONE` the agent puts a td's
+ns-devs onto its dm-clone, and their namespaces in the optimized group,
 only while the dm-clone's status shows hydration enabled (`cnagent.md`
-CN16).
+CN16); at `SP_LEVEL_NO_CLONE` a destination namespace that is not
+effectively suspended, an `auto_resume` clone's included, stays optimized
+over the dm-error with no dm-clone (`cnagent.md` CN16, CN19).
 
 A rebuild that must allocate the clone's metadata wrapper, or replace one
 that does not match, first asks whether the arena can supply a fresh run
@@ -5113,14 +5132,14 @@ document and the component documents cite it by its id.
   (`cnagent.md` CN16) and nvmet refuses IO to an inaccessible namespace at
   the target, so a window would absorb nothing but a local scanner's bios;
   the reload's own flushing suspend is what keeps in-flight IO from being
-  replayed. Two bounds on that argument are stated rather than hidden: the
+  replayed. One bound on that argument is stated rather than hidden: the
   ANA write is best-effort (a failed "ana_grpid" write is logged and the
   pass continues), so a host racing that failure takes IO errors rather
   than queueing in a suspended device — fail-fast rather than an
-  unkillable wedge, and the next converge rewrites the group; and the clone
-  rebuild (Clone crash recovery) parks a *serving* namespace's ns-dev with
-  no ANA move at all, which is that recovery's own documented window and
-  not this one (`cnagent.md` CN18). With the park, the CN holds no
+  unkillable wedge, and the next converge rewrites the group. The clone
+  rebuild (Clone crash recovery) parks a *serving* namespace's ns-dev the
+  same way, its namespace moved to inaccessible first, under the same
+  bound (`cnagent.md` CN16, CN18). With the park, the CN holds no
   suspension **across** a converge pass at all, short of a `dmsetup`
   command that fails (a park whose load fails leaves its ns-dev suspended
   on its old table: `cnagent.md` CN16 and `cnagent.md`, Known limits).

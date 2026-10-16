@@ -311,18 +311,17 @@ func (gp *grpPlan) legNames() []string {
 // --add skipped by reconcileMembers, or running with md still holding it —
 // its side died under the array (AR8's case), its path is otherwise no
 // longer both live and optimized, or its converge failed this pass (CN10);
-// reconcileMembers keeps a held leg_list member (CN12). A RedundNone group
-// builds its dm-linear whatever its leg's availability, and its leg is late
-// all the same: the layers above do IO through it — the pool create (CN13)
-// reads the pool's metadata through the meta group — and a side that has not
-// flipped to this CN yet exports dm-error to it (a non-optimized path), so a
-// pool over a late meta leg is built only by a later converge. Only
-// availability decides: a held member md has failed on a leg that is available
-// again is not late (cnagent.md, Known limits). Spares are not members
-// (architecture.md, Spare legs), so a spare is never late. A provisioning leg
-// defers its whole group
-// ([D15]), so the build never asks about one; it is excluded all the same
-// rather than trusting the caller.
+// reconcileMembers keeps a held leg_list member (CN12). In a RedundNone
+// group it leaves the group's dm-linear unbuilt, and with it a pool not
+// built yet and every layer above that pool, while a pool that serves when a
+// grow adds the group keeps serving at its old size; or, where the dm-linear
+// is there already, it keeps it as it is (ensureLinearGroup): a side that has
+// not flipped to this CN yet exports dm-error to it (a non-optimized path).
+// Only availability decides: a held member md has failed on a leg that is
+// available again is not late (cnagent.md, Known limits). Spares are not
+// members (architecture.md, Spare legs), so a spare is never late. A
+// provisioning leg defers its whole group ([D15]), so the build never asks
+// about one; it is excluded all the same rather than trusting the caller.
 func (gp *grpPlan) hasLateMember(available map[uint64]bool) bool {
 	for _, lp := range gp.legs {
 		if !lp.provisioning && !available[lp.legId] {
@@ -882,12 +881,16 @@ func (p *cntlrPlan) buildSubsystems() {
 				np.clone = cp
 			}
 			np.anaGrpId = common.AnaGrpIdInaccessible
-			// CN16: optimized iff primary ∧ not disabled (folded into
-			// p.primary) ∧ not effectively suspended ∧ the backing chain is
-			// not provisioning-deferred ([D15]) ∧ sp_level below
-			// SP_LEVEL_DISABLE (wantAny). During initial provisioning hosts
-			// queue on an inaccessible path instead of eating IO errors from
-			// an error-backed ns-dev.
+			// CN16's desired group: optimized iff primary ∧ not disabled
+			// (folded into p.primary) ∧ not effectively suspended ∧ the
+			// backing chain is not provisioning-deferred ([D15]) ∧ sp_level
+			// below SP_LEVEL_DISABLE (wantAny). During initial provisioning
+			// hosts queue on an inaccessible path instead of eating IO errors
+			// from an error-backed ns-dev. The build moves a namespace to
+			// optimized only in a pass whose ns-dev step left its ns-dev
+			// where the rules want it, or held it on a device it still
+			// serves through (nsAnaMove), and one parked while its rules
+			// want a serving device waits inaccessible (nsAnaWanted).
 			if p.primary && p.wantAny && !np.suspended && !np.deferred {
 				np.anaGrpId = common.AnaGrpIdOptimized
 			}

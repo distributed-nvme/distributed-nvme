@@ -760,8 +760,10 @@ One converge pass has two phases, and the phase order is what implements
 * **Build phase, bottom-up** — legs (CN10) → groups (CN12) → per-slice
   pools (CN13) → thin volumes (CN14) → raid0 and error (CN15) → clones
   (CN18) → transfers (CN17) → ns-devs plus host-facing nvmet (CN16) → ANA
-  rewrites to optimized last. This is the new primary's part of
-  `architecture.md`, Failover.
+  rewrites to optimized last, each namespace and each transfer only in a
+  pass that leaves its device serving, or on the error device the desired
+  state selects (CN16, CN17).
+  This is the new primary's part of `architecture.md`, Failover.
 
 **The wanted set** is the object-level wanted set of `architecture.md`,
 Teardown by sweep — what the build phase would ensure for this plan, with
@@ -816,7 +818,15 @@ build phase — and runs on every converge:
    no error device to park on and is skipped. The live table answers
    "does this namespace's previous td still exist?" with no memory, and
    it is also right for a device an interrupted pass left mapping
-   something no plan ever described. The reload's own flushing suspend is
+   something no plan ever described. An ns-dev whose rules want a serving
+   device (CN16) — one still mapping a dm-clone the plan dropped, say —
+   has its namespace moved to inaccessible before the reload, and the
+   build moves it back in the pass that puts the ns-dev on that device,
+   or that finds it still serving there after a park whose load failed
+   (CN18's hold);
+   an ns-dev of rules 0 to 4 needs no move, since pre-step 1 has moved
+   every namespace the plan wants inaccessible and rules 3 and 4 keep
+   theirs optimized on purpose (CN16). The reload's own flushing suspend is
    what completes the in-flight host IO — the old primary's next step of
    `architecture.md`, Failover — and without it the removal below fails
    EBUSY behind a live ns-dev. The park creates its error device when it
@@ -959,18 +969,21 @@ recovery whose destination bitmaps were not applied or another clone
 failure CN18 lists, a failed allocation or replacement of its metadata
 wrapper among them (an arena with no free run for the wrapper registers
 CN18's slower clone-metadata retry instead, and a run larger than the
-whole arena registers nothing), a `leg_list` member of a group that is not available
-(CN12: a promotion whose first converge reads its legs before the sides'
-ANA flips have reached this CN's sysfs would otherwise leave its md groups
-unassembled — and a `RedundNone` SP's pools unbuilt — until the next
-revision bump, because nothing else re-runs that converge), an ns-dev
-the build held off its td's raid0 while a dm-clone the plan does not want
-may still write into it (CN18), and a clone destination's ns-dev whose
-converge fails in a pass whose CN18 finished the clone's build (CN16 rule
-5). Every
-attempt mints its own trace id (CN2) and
-is a whole converge, which decides afresh whether any of them still
-holds; the first converge that finds none stops the retry.
+whole arena registers nothing), a `leg_list` member of
+a group that is not available (CN12: a promotion whose first converge
+reads its legs before the sides' ANA flips have reached this CN's sysfs
+would otherwise leave its groups unbuilt, and the stack above them, until
+the next revision bump, because the worker does not re-run that
+converge), a namespace or a transfer whose ANA group the
+build fails to move (CN16, CN17), and a namespace or a transfer whose
+desired group is optimized and whose device the build leaves off what the
+desired state wants (CN16, CN17), whatever the cause — a stack not built
+yet, a clone build or recovery not finished, CN18's hold, a failed step —
+and for as long as it lasts (Known limits) — except a namespace that
+waits only for its clone's room in the arena, a wait the clone's own
+retry or a new revision ends (CN16). Every attempt mints its own trace id
+(CN2) and is a whole converge, which decides afresh whether any of them
+still holds; the first converge that finds none stops the retry.
 
 **Dead paths**: a controller of the leg NQN whose traddr and trsvcid
 match no desired side (the source side after `FinishMigration` — its
@@ -1118,7 +1131,7 @@ CN12. Groups (`md.go`; primary only — a standby has none,
 
 * `RedundNone`: the group device is `CnGrpName`, a dm-linear over the
   single leg wrapper at the data region's offset and of the data region's
-  length.
+  length, created or reloaded only while that leg is available (below).
 * `RedundMdRaid1`: an md-raid1 array under `CnMdDevName` (`--name` is
   `CnMdArrayName`, an internal bitmap with its chunk from
   `bitmap_chunk_block_cnt` and the block size, the data offset from
@@ -1177,7 +1190,7 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   multipath namespace found and its wrapper built — and that namespace
   has a path that is both live and optimized, probed from sysfs (CN10's
   walk). A `leg_list` member that is not available this pass — whether
-  its group was left unassembled ("no available leg", "only k of n legs
+  its group was left unbuilt ("no available leg", "only k of n legs
   available …"), started degraded without it, holds the array while the
   member reconciliation below skips its `--add`, or runs the array with
   md still holding the member (its side died under the array — the leg
@@ -1196,16 +1209,28 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   wants no group, nor does a primary whose `sp_level` suppresses its
   groups (CN19); a deferred group (below) never counts, spares are not
   members, and a held member md has failed on a leg that is available is
-  not late (Known limits). A `RedundNone` group's leg counts too, although
-  its dm-linear (above) is built whatever the leg's availability: the
-  layers over it do IO through it — the pool create (CN13) reads the
-  pool's metadata through the meta group — and a side that has not
-  flipped to this CN yet exports dm-error to it (`architecture.md`, Disk
-  node), so a pool over a late meta leg, and
-  every layer above that pool, is built only by a later converge. No log
-  record of its own: the rows already report it — an md group's error,
-  or degraded once a probe reads the array, the error of a layer above a
-  `RedundNone` group, and the member's own leg row. The retry runs a
+  not late (Known limits). A `RedundNone` group's leg counts too, and its
+  dm-linear (above) is created or reloaded only over an available leg:
+  the layers over it do IO through it, and a side that has not flipped to
+  this CN yet exports dm-error to it (`architecture.md`, Disk node), so a
+  pool, a raid0 and an ns-dev built over a late leg would serve that
+  leg's blocks as IO errors, and a promotion would move their namespaces
+  to optimized (CN16). A late leg under a group device that is missing,
+  or that maps another table, fails the group ("no available leg") and
+  touches nothing. A missing device fails the slice's concat that names
+  it (CN13). A pool that is not built yet, such as the pools of a
+  promotion's first converge, waits for it, and every layer above the
+  pool waits too, their namespaces inaccessible (CN16). A pool that
+  serves when a grow adds the group keeps serving at its old size, and so
+  do the raid0s and ns-devs over it, their namespaces optimized, while
+  that concat's row and the pool's row read `ERROR`, until the retry
+  builds the group and grows the concat and the pool. A group device
+  that is there with the table the group wants is kept whatever the
+  leg's availability, with no teardown and no reload: a primary that
+  serves keeps serving through a short loss of its leg's path. No log
+  record of its own: the rows already report it — a group's error, or
+  degraded once a probe reads an md array, and the member's own leg row.
+  The retry runs a
   converge every `CnConnectRetryInterval` for as long as a member stays
   unavailable, each under the cntlr's object lock, which every
   `CheckCntlr` round takes too (CN1): on a wide SP an attempt can hold a
@@ -1282,7 +1307,8 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   assembly off for good. Nothing re-drives the refused assembly either —
   unless the same pass registers the CN10 retry for something else (any
   of CN10's triggers, among them a `leg_list` member of any group of this
-  cntlr that is not available, above), whose next attempt is a whole
+  cntlr that is not available, above, and a namespace that waits for the
+  layers above the group, CN16), whose next attempt is a whole
   converge and tries the group again: the group's error is a row, not a
   reply code (CN29), the error itself registers no CN10 background retry,
   and the Check verdict reports a leftover (a reply code the worker
@@ -1741,29 +1767,23 @@ backing state machine, evaluated in this order (first match wins;
    that does not exist, whether a failed build removed it, the build has
    not reached it, or its clone waits for room in the arena (CN18 step 2)
    — the ns-dev gets the td's `CnErrorName` instead, parked like rule 1:
-   live, never under dm-flakey, its row `OK`. Every converge and every
+   live, never under dm-flakey, its row `OK`, and its namespace waits in
+   the inaccessible group (the ANA rule below), moved there before the
+   reload where the ns-dev was serving. Every converge and every
    probe reads that status afresh (`nsDevNow`); nothing is remembered. A
    dm-clone's absence is confirmed, never assumed: only when the status
    read fails does a `dmsetup info` ask whether the device is there, and
    only its answer that it is not reads as no hydration (`cloneHydrating`).
    A read that fails or does not answer, of a dm-clone that is there or
    whose absence that `dmsetup info` did not confirm, moves the ns-dev
-   nowhere: it keeps its table, and its `ns_id_to_dm_linear` row is
-   `RES_STATUS_ERROR`. The ANA rule below
-   does not look at any of this, so the namespace is optimized all the
-   same and a host takes IO errors — the recovery's own window (CN18
-   step 4) — until a pass's read here finds hydration enabled and the
-   ns-dev moves onto the dm-clone. Most CN18 failures that stop the build
-   before step 5 has enabled hydration register the CN10 retry that runs
-   such a pass (CN18 lists which; an arena with no free run for the
-   metadata wrapper registers CN18's clone-metadata retry instead, and a
-   run larger than the whole arena registers none), and so does any
-   failure to converge
-   this ns-dev, this read and its reload onto the dm-clone among them, in
-   a pass whose CN18 finished the build, reading the dm-clone hydrating
-   after step 5: the worker re-syncs on a revision or
-   a reply code, never on a row, so without it the park a recovery left
-   would stay until the cntlr's next converge for another reason;
+   nowhere: it keeps its table, its `ns_id_to_dm_linear` row is
+   `RES_STATUS_ERROR`, and its namespace keeps its group unless that
+   table is the park (the ANA rule below). The namespace turns optimized
+   in the pass whose read here finds hydration enabled and moves the
+   ns-dev onto the dm-clone, and every pass before it that leaves the
+   namespace waiting registers the CN10 retry that runs such a pass,
+   whatever stopped the build, unless it was CN18 step 2's room check
+   (the ANA rule below);
 6. otherwise ⇒ → `CnRaid0Name` (via dm-flakey when rule 7 applies);
 7. `sp_level` at or above `SP_LEVEL_READONLY` (primary only): the table
    is a dm-flakey table with the error-writes feature over the rule-5 or
@@ -1773,7 +1793,8 @@ Rules 4 and 5 and the `auto_resume` override below combine into one flip
 worth stating out loud. An `auto_resume` clone's destination namespace
 is stored suspended, which on its own would leave it inaccessible and its
 host queueing; the override makes it serve, so below `SP_LEVEL_NO_CLONE`
-it is already optimized over `CnCloneFinalName`. At or above
+it is optimized over `CnCloneFinalName` once that dm-clone shows
+hydration on (rule 5). At or above
 `SP_LEVEL_NO_CLONE` the override still applies (it keys on the
 `clone_list` entry, not on whether the clone stack was built), so the
 namespace stays exported and stays optimized while rule 4 parks its
@@ -1781,8 +1802,9 @@ ns-dev on `CnErrorName`: what changes is the backing, and the host
 therefore takes IO errors instead of queueing. That is deliberate and
 consistent with the `SP_LEVEL_NO_THINPOOL` posture (CN19: a host sees IO
 errors, not a vanished device); it is not a bug. "Queueing
-(inaccessible)" describes only the stored-suspended baseline, never the
-state the override leaves behind.
+(inaccessible)" describes only the stored-suspended baseline and rule
+5's wait for hydration, never the state the override leaves behind at
+that level.
 
 **Effective suspend** (`architecture.md`, Namespace suspend semantics,
 Transfers, and Clones): a namespace is effectively suspended iff its
@@ -1860,10 +1882,11 @@ A pass in which one did not — one of the four listings, or the sweep's own
 listing of that subsystem's namespaces — leaves it where it is with a non-OK
 verdict, and the next pass whose listings answer removes it.
 
-**ANA**: `AnaGrpIdOptimized` iff primary and not disabled and not
-effectively suspended and its backing chain is not provisioning-deferred
-(CN9) and the `sp_level` is below `SP_LEVEL_DISABLE` (CN9's `wantAny`);
-else `AnaGrpIdInaccessible` (single "ana_grpid" writes, `dnagent.md` SH19). The
+**ANA**: the desired group is `AnaGrpIdOptimized` iff primary and not
+disabled and not effectively suspended and its backing chain is not
+provisioning-deferred (CN9) and the `sp_level` is below `SP_LEVEL_DISABLE`
+(CN9's `wantAny`); else `AnaGrpIdInaccessible` (single "ana_grpid" writes,
+`dnagent.md` SH19). The
 deferral conjunct is what makes initial provisioning painless for hosts:
 while the td's legs are still zeroing, the namespace stays inaccessible
 and hosts queue on the path instead of eating IO errors from an
@@ -1873,6 +1896,62 @@ the last leg's provisioning. A deferred namespace's own rows
 `RES_STATUS_PROVISIONING` — the ns-dev and the nvmet namespace do exist,
 on the permanent dm-error, but reporting them `OK` would show a fully
 healthy `CntlrInfo` while no host can do IO.
+
+**A namespace turns optimized only over what the rules select.** The
+build's last loop moves a namespace whose desired group is optimized there
+only in a converge whose ns-dev step put the ns-dev on the backing the
+rules select, or found it there — its **serving device** under rules 5 to
+7, the raid0 or the dm-clone showing hydration on, through the dm-flakey
+at the read-only level, or the td's `CnErrorName` under rules 3 and 4 — or
+held it on a device it still serves through (CN18's hold, below). An
+ns-dev the step leaves or finds on the td's `CnErrorName` while the rules
+want a serving device — rule 5's fallback, CN18's recovery park or its
+hold, a promotion's stack not built yet — puts its namespace in the
+inaccessible group, where it waits: its hosts queue their IO. An ns-dev
+CN18's hold keeps on a device it still serves through puts its namespace
+in the desired group: pre-step 2 may have moved it to inaccessible before
+a park whose load failed, and the ns-dev serves on, so a wait would pause
+its hosts for nothing. Every
+park of a planned ns-dev whose rules want a serving device — CN9's
+pre-step 2, CN18's recovery park, rule 5's fallback — moves the namespace
+to inaccessible before the reload, and CN18's recovery park does so also
+for an ns-dev it finds parked already: after the level that removes the
+clone stacks is lowered, the ns-dev is still on the `CnErrorName` rule 4
+selected, its namespace optimized over it. A move that fails is logged
+and the park goes on, since the park guards the data and the move only
+spares the hosts IO errors. An ns-dev step that fails, whatever read or command
+failed — the number of a raid0 not built yet included, which is how the
+step fails at a promotion that came before the sides' ANA flips
+(`architecture.md`, [D16]) — reads the ns-dev's live table afterwards, and
+the namespace keeps the group it has unless that read shows the table on
+the td's `CnErrorName` while the rules want a serving device: a failed
+read never moves an optimized namespace back, since the ns-dev may still
+serve and the move would pause its hosts for nothing. A namespace object
+the build creates, or finds not enabled, gets `AnaGrpIdInaccessible`
+before its enable, never the kernel's default group, so only the last loop
+moves a namespace to optimized. A converge that leaves the ns-dev of a
+namespace whose desired group is optimized off the backing the rules
+select — waiting, held or failed — registers the CN10 retry, whatever the
+cause and for as long as it lasts (Known limits), except one that waits
+only because CN18 step 2's room check stopped its clone's build: a clone
+that waits for room has CN18's clone-metadata retry, which re-drives the
+wait, and a run larger than the whole arena changes only with a new
+revision, which comes with a `SyncupCntlr` of its own. A move of the
+last loop that fails registers the CN10 retry too: the namespace stays
+out of the group this rule gives it, even over an ns-dev on its serving
+device. Reasons: an IO
+error the target returns with the do-not-retry bit reaches the application and
+cannot be taken back, while a wait ends by itself, and everywhere else the
+design makes a host wait when the stack is not there (the deferral
+conjunct above, CN18's hold); only the converge knows whether it put the
+ns-dev where the desired state wants it; and the worker re-syncs on a
+revision or a reply code, never on a row, so without the retry a short
+cause would leave the hosts waiting for a revision that may never come.
+Rules 3 and 4 serve IO errors on purpose, their namespaces optimized over
+the dm-error (above; CN19): each is a level the operator chose, and a wait
+there would never end. A stack that never builds keeps its namespaces
+inaccessible with no time limit; an operator ends the wait by disabling
+the cntlr, by a level step or by a delete.
 
 CN17. Transfers (`xfer.go`; both roles; `architecture.md`, Transfers).
 Per `xfer_list` entry: resolve the origin namespace by `ori_nqn` and
@@ -1888,7 +1967,7 @@ sees one multipath device), "attr_cntlid_min" and "attr_cntlid_max" from
 `Cntlr.cntlid_slot`, `allowed_hosts` from the record; one namespace whose
 nsid is `ori_ns_idx`, with the origin namespace's "uuid" and "nguid" and
 the transfer device as its "device_path"; ANA optimized on the primary,
-inaccessible on standbys. The origin namespace's own retirement is
+inaccessible on standbys (below). The origin namespace's own retirement is
 CN16's effective-suspend rule. A cntlr that keeps the transfer device but
 stops serving it — demoted to standby, or at a level from
 `SP_LEVEL_NO_THINPOOL` up to but excluding `SP_LEVEL_DISABLE`, or the
@@ -1917,15 +1996,34 @@ device like a standby and the transfer no longer holds the departed raid0
 against L6 — a linear left serving would keep that raid0's
 `dmsetup remove` failing EBUSY on every pass while the transfer stays in
 the request. Its namespace stays `AnaGrpIdOptimized` all the same, as it
-does at `SP_LEVEL_NO_THINPOOL`: the transfer's ANA group follows the
+does at `SP_LEVEL_NO_THINPOOL`: the transfer's desired group follows the
 role, the level and deferral only, so the destination is handed IO errors
-from the error table, not a queue. The live table is deliberately not the
+from the error table, not a queue: an origin gone from the request is
+lost for good, a level is the operator's choice, and a wait for either
+would never end. The live table is deliberately not the
 plan applied last time: it is the same answer, from the kernel, with
 nothing remembered. A transfer whose origin td is provisioning-deferred
 (CN9) is deferred with it: its three rows report
 `RES_STATUS_PROVISIONING` and its namespace stays `AnaGrpIdInaccessible`
 — mapping a linear over a raid0 that does not exist yet would only
 produce an `ERROR` and an `err_epoch`.
+
+**A transfer turns optimized only over what the desired state wants**, by
+CN16's rule and for its reasons. The build's transfer loop moves a
+transfer whose desired group is optimized there only in a converge that
+put its transfer device where the desired state wants it, or found it
+there: the linear over the origin td's raid0 where the transfer is
+served, the error table where it is not on purpose, and for an origin
+that no longer resolves a demotion that succeeded or a device that is
+not there. A transfer whose device step fails keeps its group, except a
+served one whose device's live table is an error table, which moves to
+inaccessible — at a promotion that came before the sides' ANA flips the
+origin's raid0 is not there yet. A transfer namespace the build creates,
+or finds not enabled, gets `AnaGrpIdInaccessible` before its enable, and
+a converge that leaves the device of a transfer whose desired group is
+optimized off what the desired state wants registers the CN10 retry, as
+does a transfer's move that fails. The clone in the other pool then waits
+rather than reads IO errors.
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:
@@ -2000,13 +2098,16 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
      read `RES_STATUS_PROVISIONING` with the details "waiting for metadata
      room: " followed by the allocator's message; nothing is parked,
      removed or built for the clone, whatever of it still serves keeps
-     serving, and the converge registers the clone-metadata retry (below),
-     never the CN10 retry — the ordering and its reason are
-     `architecture.md`, Clone crash recovery;
+     serving, and the clone registers the clone-metadata retry (below),
+     not the CN10 retry — the ordering and its reason are
+     `architecture.md`, Clone crash recovery — and neither does a
+     namespace of the destination td that waits only for that room, its
+     dm-clone absent or not hydrating (CN16);
    * the run is larger than the whole arena, which can never fit:
      `clone_id_to_meta` `RES_STATUS_ERROR` with the allocator's message and
      `clone_id_to_dm_clone` `RES_STATUS_ERROR` "metadata wrapper missing",
-     and no retry;
+     and no retry, neither for the clone nor for a namespace of the td
+     that waits for it (CN16);
    * otherwise step 2 goes on.
 
    Under each verdict that stops step 2, a dm-clone still up from an
@@ -2070,7 +2171,9 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    dm-clone that does not show hydration enabled — step 4) that the
    verdict above lets go on, this step first parks the destination td's
    ns-devs on `CnErrorName`
-   (`parkTdNsDevs`, no ANA move), removes the old dm-clone if one is
+   (`parkTdNsDevs`), each namespace in the optimized group moved to
+   inaccessible first, one whose ns-dev is parked already included
+   (CN16), removes the old dm-clone if one is
    still present, and only then allocates a missing wrapper or replaces
    a mismatched one — a matching wrapper is left alone. An old dm-clone
    whose removal fails is kept: step 3 converges it like any existing
@@ -2127,9 +2230,10 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    when the namespace is effectively suspended or the cntlr is standby
    and no unanswered listing stopped the sweep (CN21), and otherwise by
    step 2 of a recovery build, before the old dm-clone is removed —
-   `parkTdNsDevs` takes a serving namespace off the td with no ANA move,
-   and that IO-error window is this recovery's own), read the td's
-   mapping bitmap from every slice pool (the CN25 machinery, the
+   `parkTdNsDevs` moves a namespace in the optimized group to
+   inaccessible before it parks the ns-dev, so its hosts wait out the
+   recovery, CN16), read the
+   td's mapping bitmap from every slice pool (the CN25 machinery, the
    destination side of `architecture.md`, raid0 bitmap math) and
    `blkdiscard` every mapped region. Mapped means already copied because
    the destination td started empty (`architecture.md`, [D3]).
@@ -2229,18 +2333,19 @@ met it, and the parked ns-dev reads `OK` (CN16 rule 5). None of that sets
 a health epoch, and a Check round cannot tell that state from one the
 build has not reached, so nothing but the retry runs the build again, and
 the retry is registered all the same. Two outcomes of step 2 register no
-CN10 retry: an arena with no free run for the clone, whether the verdict or
-`ensureCloneMeta`'s own enumeration finds it, registers the clone-metadata
-retry instead, and a run larger than the whole arena registers nothing and
-is left to its rows, the same `ERROR` pair, which the Check round reports
-too (CN28).
+CN10 retry for the clone: an arena with no free run for the clone, whether
+the verdict or `ensureCloneMeta`'s own enumeration finds it, registers the
+clone-metadata retry instead, and a run larger than the whole arena
+registers nothing and is left to its rows, the same `ERROR` pair, which
+the Check round reports too (CN28); after either, a namespace of the
+destination td that waits only for the clone registers none either
+(CN16).
 Some failures stop nothing and are only logged: step 2's failed removal
 of an old dm-clone (which is then kept, above), a failed knob message of
 step 3 (the knob keeps the value it had) and a failed source-chunk
-`blkdiscard` of step 4 (it costs an extra copy). Step 6 is CN16's: in a
-pass that finished steps 1 to 5 and whose read after them found hydration
-on, a failure to converge a rule-5 ns-dev of the td registers the
-retry too (CN16 rule 5). Whatever stopped
+`blkdiscard` of step 4 (it costs an extra copy). Step 6 is CN16's, and a
+namespace of the td that a pass leaves waiting, whatever stopped it unless
+it was step 2's room check, registers the retry too (CN16). Whatever stopped
 a pass, CN16 puts the td's ns-devs on the dm-clone only while its status
 shows hydration enabled (rule 5), which no dm-clone shows before step 5
 has run on it; a later pass — the retry's, where one was registered —
@@ -2261,8 +2366,13 @@ again by itself. It is not the CN10 retry because of what each attempt costs: a
 whole converge under the object lock the cntlr's Check rounds take (CN1),
 which at CN10's pace would make a large pool's Check rounds miss, while a
 clone that waits for room is not broken, so the slower pace loses nothing.
-The two retries may run at once; each attempt is a whole converge, and a
-second one in a row is harmless.
+A namespace of the destination td that waits only for the clone — no
+dm-clone of the clone up, or one not hydrating — registers no CN10 retry
+either (CN16): this retry's attempt that finds room builds the clone and
+moves the namespace to optimized, and the faster pace would only cost the
+Check rounds more. The two retries may run at once, when another cause
+registers the CN10 one; each attempt is a whole converge, and a second
+one in a row is harmless.
 
 **Removing a clone** is not a step of its own: it is the CN21 sweep
 finding the clone's objects unwanted and taking them in layer order,
@@ -2302,10 +2412,17 @@ still in that list.
   is not one dm-clone target or names a device the listing does not hold,
   nothing is known of what it writes, and every namespace of the cntlr is
   held. One held over the dm-clone stays there and serves on through it,
-  in the ANA group it has. One parked stays parked and goes inaccessible:
-  pre-step 2 may have parked it on this very pass while it was optimized,
-  and its hosts should queue rather than take IO errors. A new one is
-  created parked. None of them is moved to optimized on that pass; each
+  and its namespace takes the desired group: pre-step 2 may have moved it
+  to inaccessible before a park whose load failed, and its hosts should
+  not wait while it serves. One parked stays parked and goes
+  inaccessible, as every namespace does whose ns-dev is on the dm-error
+  while its rules want a serving device (CN16): its hosts should queue
+  rather than take IO errors. One the pass cannot tell from the park,
+  because the number of its td's `CnErrorName` device cannot be read,
+  counts as parked and goes inaccessible, a wait rather than an IO error,
+  and its namespace row reads `ERROR` (CN28). A new one is created
+  parked. None of them is put on the raid0 on that pass, and none parked
+  is moved to optimized; each
   reports its ns-dev row `ERROR` in the probe's words ("table is not the
   desired namespace backing"), and the hold registers the CN10 retry,
   because a hold that an unanswered `dmsetup ls` alone caused leaves
@@ -3031,9 +3148,25 @@ The rows, each with its `res_name` and what its probe checks:
   as desired (the identity compared through `agent.SameNsId` — configfs
   reads both back dash-separated and lower-cased whichever form was
   written, so a byte-wise compare fails a healthy namespace forever;
-  `dnagent.md` SH17), and the "ana_grpid" as CN16 desires — inaccessible
-  while the backing chain is provisioning-deferred (CN9), and the row
-  itself is `RES_STATUS_PROVISIONING` then.
+  `dnagent.md` SH17), and the "ana_grpid" as CN16 wants it for the
+  ns-dev's live table: inaccessible while that table maps the td's
+  `CnErrorName` and the rules want a serving device, and otherwise the
+  desired group, which is inaccessible while the backing chain is
+  provisioning-deferred (CN9), the row itself `RES_STATUS_PROVISIONING`
+  then. Both channels compare the group by this one rule from the
+  ns-dev's live table: a check round with the table from its reading,
+  which it takes also when the backing's number cannot be read, and a
+  converge after its ANA loops, with a read of the namespace and, where
+  the rule depends on it, of the table, an error of the namespace
+  object's own step winning. The
+  converge's ANA move goes by what its ns-dev step did instead (CN16), so
+  a held ns-dev whose `CnErrorName` number cannot be read goes
+  inaccessible while the row wants the desired group, and the row reads
+  `ERROR` on both channels (CN18). So in
+  the window of a promotion that came before the sides' ANA flips the
+  ns-dev row of a namespace on CN16 rule 6 reads `ERROR` — a clone
+  destination's reads `OK` over its park (rule 5) — and the namespace row
+  `OK`, in the inaccessible group, on both channels.
 * `ns_id_to_dm_linear`, named by the `CnNsDevName`: `dmsetup table`
   matches the CN16 backing (flakey line included) — for a rule-5 ns-dev
   the one CN16 installs now, read the same way (`nsDevNow`): the td's
@@ -3126,8 +3259,14 @@ The rows, each with its `res_name` and what its probe checks:
 * `xfer_id_to_dm_linear`, `xfer_id_to_subsystem` and
   `xfer_id_to_namespace`, named by the `CnXferFinalName`, the `XferNqn`
   and the `XferNqn` with the origin namespace index: `dmsetup table` and
-  configfs, per CN17; a deferred transfer's three rows are
-  `RES_STATUS_PROVISIONING`.
+  configfs, per CN17, the namespace's "ana_grpid" compared with the group
+  CN17 wants for the transfer device's live table — inaccessible while a
+  transfer that should serve has an error table there, the desired group
+  otherwise — on both channels alike: a converge writes the namespace row
+  after its ANA loops from a read of the namespace and, for a transfer
+  that should serve, of the transfer device's table and, when its device
+  step failed, reads the subsystem as a check round does; a deferred
+  transfer's three rows are `RES_STATUS_PROVISIONING`.
 * `clone_id_to_target`, named by the clone's `src_nqn`: the sysfs walk of
   CN10 — the subsystem whose "subsysnqn" is `src_nqn`, each controller's
   "state" and the source namespace's device — not nvme list-subsys; its
@@ -3371,7 +3510,14 @@ report no `Syncup*` could ever clear.
   slice layers cannot be built meanwhile. The late-member retry of CN12
   does not reliably cover it: it runs only while some `leg_list` member
   of the cntlr is not available, and the group's own legs, like every
-  other leg, may all be available.
+  other leg, may all be available. The retry a waiting namespace or
+  transfer registers (CN16, CN17) covers a group that a td's raid0 not
+  built yet needs, while a namespace or a transfer of that td the desired
+  state wants optimized waits for it, as at a new primary's first
+  converge. It does not cover a group the serving stack does not need,
+  such as a grow's new group under a pool that serves (CN13), nor a group
+  at the level that removes the thin pools, whose namespaces sit on the
+  dm-error on purpose (CN16 rule 3).
 * A failed `--examine` read answers "no superblock": `Md.HasSuperblock`
   keeps a killed `mdadm --examine` apart from a member without a
   superblock, but not one that answered after its path's failfast
@@ -3462,50 +3608,67 @@ report no `Syncup*` could ever clear.
   remembered. It is not done, so that the cn retry loop stays the `dnagent.md` DN13
   pattern (the comment on `connectRetryLoop` says why the two copies must
   not drift apart).
-* A promotion that outruns the sides' flip serves IO errors until the
-  retry builds the stack: CN16's ANA rule reads the plan — primary, not
-  disabled, not effectively suspended, not deferred, below
-  `SP_LEVEL_DISABLE` — and not the stack, so the promotion's own converge
-  moves its namespaces to optimized even when its late members kept the
-  stack from being built — a group with no available leg, a pool over a
-  side that still exports dm-error — and the
-  ns-dev reload onto the raid0 (CN16 rule 6) failed with the raid0
-  missing: the ns-dev stays on the td's `CnErrorName`, the standby table
-  of rule 2. A host's IO on that path fails with target-internal (DNR)
-  errors, not path errors — the IO it queued while no path served
-  included — until the first CN10 retry attempt after the sides' flips
-  have reached this CN's sysfs builds the stack and reloads the ns-dev
-  onto the raid0, within about one `CnConnectRetryInterval` of that
-  (`architecture.md`, Failover). An ANA conjunct in the style of
-  `architecture.md`, [D15] — optimized only once the ns-dev is on the
-  backing it wants — is not done here.
+* A promotion that outruns the sides' ANA flips pauses its hosts until the
+  retry builds the stack: the promotion's own converge reads its legs
+  before the sides' ANA flips have reached this CN's sysfs (CN12), so its
+  late members keep the stack from being built: no pool is built over an
+  md group with no available leg, or one md refuses to start from the
+  legs that are, nor over a `RedundNone` group whose leg is late (CN12),
+  and the ns-dev cannot be put on the raid0 (CN16 rule 6); it stays on the td's
+  `CnErrorName`, the standby table of rule 2. Its namespaces stay
+  inaccessible and a host's IO waits, the IO it queued while no path
+  served included (CN16), and a transfer of the pool waits the same way
+  (CN17). The ns-dev row reads `ERROR`, which sets the health epoch, and
+  the namespace row `OK` (CN28). The first CN10 retry attempt after those
+  flips have reached this CN builds the stack, puts the ns-devs on the
+  raid0 and moves the namespaces to optimized (`architecture.md`,
+  Failover). So the pause runs past the demotion hold by the sides-first
+  hold's wait (`dnv-worker.md` RW14), the promotion's own converge, one
+  `CnConnectRetryInterval` and the converge of the attempt after it, more
+  when the ANA flips reach this CN only after that attempt has begun; each
+  converge grows with the slice count.
+* A namespace that waits keeps the CN10 retry running for as long as its
+  cause lasts (CN16), a wait for its clone's room in the arena aside, so
+  a cause that never goes away — a thin pool that cannot be built, an
+  assembly md refuses with every leg available, a lost thin id — re-runs the whole converge every `CnConnectRetryInterval`
+  until an operator acts, at the cost the late-member retry above states:
+  each attempt holds the cntlr's object lock for a whole converge, and
+  check rounds and info reads that wait behind it can miss. The retry
+  holds no reaction back: each of those causes leaves the td's raid0
+  unbuilt, whose row reads `ERROR` and sets the health epoch whether or not
+  the retry runs (`dnv-worker.md` HL2, AR5), as the ns-dev row of a
+  namespace on CN16 rule 6 does too, and the
+  hosts wait with no time limit until the cause goes or an operator ends
+  the wait by disabling the cntlr, by a level step or by a delete.
 * A clone build that keeps failing reads the same on every report, and
   only some ways of failing set a health epoch: CN16 keeps a clone's td
-  parked while its dm-clone does not show hydration enabled (rule 5). A
+  parked, and its namespaces inaccessible, while its dm-clone does not
+  show hydration enabled (rule 5). A
   failed CN18 step that stopped the build before step 5 enabled
   hydration registers the CN10 retry (all but two outcomes of step 2: an
   arena with no free run for the metadata wrapper registers the slower
   clone-metadata retry, the clone's two rows reading `PROVISIONING`, and
   a run larger than the whole arena registers none, its two rows reading
-  `RES_STATUS_ERROR`), which re-runs the converge every
-  `CnConnectRetryInterval` until the build finishes. What keeps failing
+  `RES_STATUS_ERROR`, and a namespace of the td that waits only for the
+  clone registers none after those two either, CN16), which re-runs the
+  converge every `CnConnectRetryInterval` until the build finishes. What keeps failing
   may leave the dm-clone up with hydration off: among others a refused
   enable, a `dmsetup create` killed after its ioctl ran, or a stale
   dm-clone that will not go while a later step fails, such as the read of
   its destination bitmaps. Its row then reads `RES_STATUS_ERROR`
   "hydration not enabled" on every converge and every check round (CN18's
   shared rule), so the primary's health epoch stays set — what that costs
-  in failovers is `dnv-worker.md`, Known limits — while a host takes IO
-  errors on the namespace, which stays optimized: the recovery's own
-  IO-error window (CN18 step 4), drawn out for as long as the build keeps
-  failing. With the dm-clone gone between attempts (step 4's fail-closed
-  removal, a refused create, a failed allocation of the metadata wrapper
-  once the recovery has removed the dm-clone), `clone_id_to_dm_clone`
+  in failovers is `dnv-worker.md`, Known limits — while a host waits on
+  the namespace, which stays inaccessible for as long as the build keeps
+  failing (CN16). With the dm-clone gone between attempts (step 4's
+  fail-closed removal, a refused create, a failed allocation of the
+  metadata wrapper once the recovery has removed the dm-clone),
+  `clone_id_to_dm_clone`
   reads `RES_STATUS_MISSING`, which sets none, and `ns_id_to_dm_linear`
   reads `OK` over the park, because a dm-clone confirmed absent reads as
   not hydrating (CN16 rule 5, `nsDevNow`), so a rebuild that keeps failing
-  that way sets no health epoch while a host takes IO errors on the
-  namespace; an arena listing or a status read that keeps not answering
+  that way sets no health epoch while a host waits on the namespace; an
+  arena listing or a status read that keeps not answering
   leaves its rows `RES_STATUS_ERROR`; and a source fault reads
   `RES_STATUS_MISSING` in `clone_id_to_target`, which sets no health epoch
   (the next item). Nothing but the retry re-runs the build unless the
@@ -3545,8 +3708,8 @@ report no `Syncup*` could ever clear.
   on a CN with no controller at an endpoint that it then cannot connect,
   and on any CN while the source has no namespace. CN16 rule 5 then parks
   every ns-dev of the destination td on its `CnErrorName`, and a host
-  takes IO errors on the namespace, which stays optimized, until the
-  source comes back or the clone is deleted with `force`. Without `force`
+  waits on the namespace, which stays inaccessible, until the source
+  comes back or the clone is deleted with `force`. Without `force`
   the delete is refused: its hydration check reads the primary's
   `clone_id_to_dm_clone`, which carries no status line (`architecture.md`,
   Clones).
@@ -3556,7 +3719,10 @@ report no `Syncup*` could ever clear.
   (CN18) has the profile of the late-member retry above at a slower pace,
   and the wait can last as long as the node holds the units — on a CN a
   cntlr replacement charged past its ceiling, until clones of the node
-  drain (`architecture.md`, Metadata units).
+  drain (`architecture.md`, Metadata units). A namespace of the clone's
+  destination td that no dm-clone serves meanwhile — a first build, or a
+  recovery after a CN reboot or a failover — waits inaccessible as long,
+  its hosts' IO queued (CN16 rule 5).
 * A controller delete whose target vanishes mid-delete waits out the
   kernel's admin timeout: when a disk node removes a side's export while
   this CN's `nvme disconnect` of the leg is mid-delete — the two ends of

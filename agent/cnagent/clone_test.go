@@ -1203,9 +1203,12 @@ func assertMissingDetails(
 // they never trade the rows — and PROVISIONING sets no health epoch. Nothing
 // of the clone is built: no wrapper, no hole punch, no dm-clone, no bitmap
 // read. Its td's ns-dev is parked, with an OK row, because a dm-clone that
-// does not exist shows no hydration (CN16 rule 5). The cntlr registers CN18's
-// slow clone-metadata retry, never the CN10 one, and the first attempt that
-// finds room builds the clone, moves the ns-dev onto it and ends the retry.
+// does not exist shows no hydration (CN16 rule 5), and its namespace waits in
+// the inaccessible group, the namespace row OK on both channels. The cntlr
+// registers CN18's slow clone-metadata retry, never the CN10 one: a namespace
+// that waits only for its clone's room leaves that wait to the slow retry
+// (CN16). The first attempt that finds room builds the clone, moves the
+// ns-dev onto it, turns the namespace optimized and ends the retry.
 func TestCloneMetaNoRunIsProvisioning(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -1235,11 +1238,16 @@ func TestCloneMetaNoRunIsProvisioning(t *testing.T) {
 	}
 	assertParked(t, srv, node, testNs, testTd, "the waiting clone's td")
 	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+	assertOk(t, info.GetNsIdToNamespace()[testNs], "namespace")
+	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+		t.Fatalf("ana_grpid is %q while the clone waits, want 3", got)
+	}
 	if !metaRetrying(t, srv) {
 		t.Fatalf("a clone waiting for room registered no clone-metadata retry")
 	}
 	if retrying(t, srv) {
-		t.Fatalf("a clone waiting for room registered the CN10 retry")
+		t.Fatalf("a namespace waiting for its clone's room registered the " +
+			"CN10 retry")
 	}
 
 	// The check round reports the same pair, and finds it from this round's
@@ -1249,6 +1257,7 @@ func TestCloneMetaNoRunIsProvisioning(t *testing.T) {
 	assertSameCloneRows(t, info, probed)
 	assertOk(t, probed.GetCloneIdToTarget()[testClone], "probed clone target")
 	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
+	assertOk(t, probed.GetNsIdToNamespace()[testNs], "probed namespace")
 	for _, call := range node.Mutations() {
 		t.Fatalf("the check round mutated: %q", call)
 	}
@@ -1265,7 +1274,8 @@ func TestCloneMetaNoRunIsProvisioning(t *testing.T) {
 		"cmd dmsetup create "+metaDm,
 		"cmd dmsetup create "+clone,
 		"cmd dmsetup message "+clone+" 0 enable_hydration",
-		"cmd dmsetup reload "+nsDev)
+		"cmd dmsetup reload "+nsDev,
+		"writedirect "+anaPath(testNqn, 1)+"=1")
 	cloneNo := node.devNo["/dev/mapper/"+clone]
 	if got, want := node.dms[nsDev].table,
 		agent.LinearTable(testTdSize/512, cloneNo, 0); got != want {
@@ -1626,7 +1636,10 @@ func TestCloneMetaRemovedWrapperFreesItsRunInThePass(t *testing.T) {
 // no free run in ensureCloneMeta and reports what the room check would have:
 // the waiting pair and the slow retry, never the ERROR of a failed
 // allocation — and it creates nothing and leaves the mismatched wrapper as
-// it is, while the td stays parked with its row OK.
+// it is, while the td stays parked with its row OK. The recovery moved the
+// serving namespace inaccessible before the park, and it stays there while
+// the clone waits, with no CN10 retry: the slow retry re-drives the wait
+// (CN16).
 func TestCloneMetaRunTakenAfterThePreCheck(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -1676,13 +1689,18 @@ func TestCloneMetaRunTakenAfterThePreCheck(t *testing.T) {
 		waitingForTwoUnits, "clone meta")
 	assertProvisioningDetails(t, info.GetCloneIdToDmClone()[testClone],
 		waitingForTwoUnits, "dm-clone")
-	assertOrder(t, node, park, "cmd dmsetup remove "+clone)
+	assertOrder(t, node, "writedirect "+anaPath(testNqn, 1)+"=3", park,
+		"cmd dmsetup remove "+clone)
 	for _, call := range []string{"cmd dmsetup remove " + metaDm,
 		"cmd blkdiscard", "cmd dmsetup create"} {
 		assertNoCall(t, node, call)
 	}
 	assertParked(t, srv, node, testNs, testTd, "the raced pass")
 	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=1")
+	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+		t.Fatalf("ana_grpid is %q while the clone waits, want 3", got)
+	}
 	if !metaRetrying(t, srv) {
 		t.Fatalf("the raced pass registered no clone-metadata retry")
 	}
@@ -1707,7 +1725,8 @@ func TestCloneMetaRunTakenAfterThePreCheck(t *testing.T) {
 // parks and removes nothing: the second clone reads the waiting pair, keeps
 // serving, waits for CN18's slow retry, and the check round reports the same
 // rows. The first clone waits the same way when the other cntlr took the
-// only run, and is rebuilt in the run left to it when there is one.
+// only run, its namespace inaccessible with no CN10 retry (CN16), and is
+// rebuilt in the run left to it when there is one.
 func TestCloneMetaLaterCloneReadsTheNewestEnumeration(t *testing.T) {
 	const secondNs = uint64(0x1b)
 	for _, tc := range []struct {
@@ -1847,6 +1866,8 @@ func TestCloneMetaLaterCloneReadsTheNewestEnumeration(t *testing.T) {
 				t.Fatalf("the waiting clone registered no clone-metadata " +
 					"retry")
 			}
+			// A namespace that waits only for its clone's room registers
+			// no CN10 retry.
 			if retrying(t, srv) {
 				t.Fatalf("the raced pass registered the CN10 retry")
 			}
@@ -1965,9 +1986,12 @@ func TestCloneMetaOtherAllocFailureRetries(t *testing.T) {
 
 // TestCloneMetaRunLargerThanTheArenaIsAnError: a clone whose metadata needs
 // more units than the whole arena holds can never be built, however many
-// clones leave the node, so it does not wait: both channels report the ERROR
-// pair with the allocator's own text, nothing is allocated, and neither
-// background retry is registered. A 1 PiB td at a 1 MiB block needs 257
+// clones leave the node, so it does not wait for room: both channels report
+// the ERROR pair with the allocator's own text, nothing is allocated, and
+// neither background retry is registered. Its td's namespace waits
+// inaccessible — moved there before rule 5's fallback parks the ns-dev that
+// served from the raid0 — with no CN10 retry either, since nothing but a new
+// revision can end that wait (CN16). A 1 PiB td at a 1 MiB block needs 257
 // units of the 256-unit arena.
 func TestCloneMetaRunLargerThanTheArenaIsAnError(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -2003,6 +2027,16 @@ func TestCloneMetaRunLargerThanTheArenaIsAnError(t *testing.T) {
 	if retrying(t, srv) || metaRetrying(t, srv) {
 		t.Fatalf("a clone that can never fit registered a retry")
 	}
+	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+		t.Fatalf("ana_grpid is %q under a clone that can never fit, want 3",
+			got)
+	}
+	// Rule 5's fallback parks the ns-dev that served from the raid0, and its
+	// namespace goes inaccessible before that reload.
+	assertOrder(t, node, "writedirect "+anaPath(testNqn, 1)+"=3",
+		"cmd dmsetup reload "+nsDevName(srv, testNs)+" --table "+
+			agent.LinearTable((1<<50)/512,
+				node.devNo["/dev/mapper/"+errorName(srv, testTd)], 0))
 	if !node.hasCall("cmd losetup --associated") || loop == "" {
 		t.Fatalf("the case is vacuous: the arena was never read")
 	}
@@ -2012,6 +2046,63 @@ func TestCloneMetaRunLargerThanTheArenaIsAnError(t *testing.T) {
 	assertSameCloneRows(t, info, probed)
 	for _, call := range node.Mutations() {
 		t.Fatalf("the check round mutated: %q", call)
+	}
+}
+
+// TestCloneMetaRunLargerThanTheArenaWithAFailedPark is the failed-step side
+// of that exemption (cnagent.md CN16): only a namespace that waits for its
+// clone's room alone registers no CN10 retry, so one whose rule-5 park fails
+// under a clone that can never fit — its ns-dev left on the raid0's table —
+// registers it, although the clone-metadata retry does not run. The attempt
+// after the fault parks the ns-dev, live, and ends the retry, the namespace
+// inaccessible.
+func TestCloneMetaRunLargerThanTheArenaWithAFailedPark(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	srv.metaRetryInterval = time.Hour
+	tds := []*pb.ThinDevice{{TdId: testTd, DevId: 1, Size: 1 << 50}}
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})
+	nsDev := nsDevName(srv, testNs)
+	served := node.dms[nsDev].table
+	reload := "dmsetup reload " + nsDev
+	node.failCmdAlways[reload] = "device-mapper: reload ioctl failed"
+	req := cntlrReq(reqOpts{revision: 3, primary: true, tds: tds,
+		clones: []*pb.Clone{cloneOf()}})
+
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), req); err != nil {
+		t.Fatalf("oversized clone: %v", err)
+	}
+	if got := node.dms[nsDev].table; got != served {
+		t.Fatalf("the case is vacuous: the ns-dev is %q, want it still on "+
+			"the raid0 %q", got, served)
+	}
+	if metaRetrying(t, srv) {
+		t.Fatalf("a clone that can never fit registered the clone-metadata " +
+			"retry")
+	}
+	if !retrying(t, srv) {
+		t.Fatalf("a failed park under a clone that can never fit " +
+			"registered no retry")
+	}
+
+	delete(node.failCmdAlways, reload)
+	node.Reset()
+	retryAttempt(t, srv)
+	if got, want := node.dms[nsDev].table, agent.LinearTable((1<<50)/512,
+		node.devNo["/dev/mapper/"+errorName(srv, testTd)], 0); got != want {
+		t.Fatalf("the ns-dev is %q after the fault, want the park %q",
+			got, want)
+	}
+	if node.dms[nsDev].suspended {
+		t.Fatalf("the parked ns-dev is dm-suspended ([D12])")
+	}
+	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+		t.Fatalf("ana_grpid is %q under a clone that can never fit, want 3",
+			got)
+	}
+	if retrying(t, srv) || metaRetrying(t, srv) {
+		t.Fatalf("a retry outlived the fault")
 	}
 }
 

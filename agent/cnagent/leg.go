@@ -744,16 +744,22 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 // a clone source failed to converge (CN10/CN18), a clone recovery's
 // destination bitmaps were not applied or another later step of a clone
 // failed (CN18 says which), a group's leg_list holds a member that is not
-// available (CN12), or the build held an ns-dev off its td's raid0 while a
-// dm-clone the plan does not want may still write into it (CN18). A goroutine
+// available (CN12), the build failed to move the ANA group of a namespace
+// or a transfer (CN16, CN17), or the build left the device of a namespace
+// or a transfer whose desired group is optimized off what the desired state
+// wants — held off its td's raid0 (CN18), waiting on the dm-error, or after
+// a failed step — whatever the cause (CN16, CN17), but for its clone's room
+// in the arena alone (waitsForRoom). A goroutine
 // re-runs the whole converge every CnConnectRetryInterval seconds under the
 // CN1 locks until a pass registers none of these (build's stopConnectRetry)
 // or the cntlr is torn down. The RPC itself retries a connect, or waits for
 // its namespace head, only as far as the pass's CnConnectPassBudget allows:
 // an in-pass retry, or a step of that wait, starts only while the budget
 // still covers its pause (connectWithin, awaitNsHead). An arena that has no
-// free run for a clone's metadata is not one of its causes: that clone waits
-// for CN18's slower clone-metadata retry (startCloneMetaRetry).
+// free run for a clone's metadata is not one of its causes: that clone, and
+// a namespace of its destination td that waits only for it, wait for CN18's
+// slower clone-metadata retry (startCloneMetaRetry), and a run larger than
+// the whole arena registers neither retry.
 func (s *CnAgentServer) startConnectRetry(
 	st *cntlrState,
 	plan *cntlrPlan,
@@ -798,8 +804,11 @@ func (s *CnAgentServer) stopConnectRetry(st *cntlrState) {
 // costs: a whole converge under the object lock the cntlr's check rounds
 // need, which at the CN10 pace would make a large pool's check rounds miss —
 // and a clone that waits for room is not broken, so the longer interval
-// loses nothing. The two retries may run at once; each attempt is a whole
-// converge, and a second one in a row is harmless.
+// loses nothing. A namespace of the clone's destination td that waits only
+// for the clone registers no CN10 retry either: the attempt of this one that
+// finds room builds the clone and moves the namespace to optimized (CN16).
+// The two retries may run at once; each attempt is a whole converge, and a
+// second one in a row is harmless.
 func (s *CnAgentServer) startCloneMetaRetry(
 	st *cntlrState,
 	plan *cntlrPlan,

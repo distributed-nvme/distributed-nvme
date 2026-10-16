@@ -250,8 +250,10 @@ func (s *CnAgentServer) probeCntlr(
 		status, details = s.probeExport(ctx, s.xferSubsysConf(plan, xp))
 		info.XferIdToSubsystem[xp.xferId] = deferredSet(
 			t, xp.deferred, ssKey, xp.nqn, status, details)
-		status, details = s.probeNamespaceObject(
-			ctx, s.xferNsConf(plan, xp, plan.xferAnaGrpId(xp)))
+		// The group CN17 wants for this reading's table of the transfer
+		// device, as the converge compares it (xferRowAnaGrpId).
+		status, details = s.probeNamespaceObject(ctx, s.xferNsConf(
+			plan, xp, s.xferRowAnaGrpId(ctx, plan.rd, plan, xp)))
 		info.XferIdToNamespace[xp.xferId] = deferredSet(
 			t, xp.deferred, nsKey, nsName, status, details)
 	}
@@ -270,8 +272,10 @@ func (s *CnAgentServer) probeCntlr(
 			// np.anaGrpId already carries [D15]'s fourth conjunct, so a deferred
 			// namespace matches at ana_grpid = 3 and is healthy — it is only
 			// not yet ready, which is what PROVISIONING says.
+			// The group CN16 wants for this reading's table of the ns-dev,
+			// as the converge compares it (nsRowAnaGrpId).
 			nsStatus, nsDetails := s.probeNamespaceObject(
-				ctx, s.nsConf(np, np.anaGrpId))
+				ctx, s.nsConf(np, s.nsRowAnaGrpId(ctx, plan.rd, np)))
 			info.NsIdToNamespace[np.nsId] = deferredSet(t, np.deferred,
 				resKeyOf(resKeyNamespaceFmt, np.nsId),
 				nsResName(ssp.nqn, np.nsIdx), nsStatus, nsDetails)
