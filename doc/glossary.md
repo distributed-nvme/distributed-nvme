@@ -264,7 +264,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **ledger** — The node-budget bookkeeping of a transaction: the gateway's DN and CN ledgers (`dnLedger`, `cnLedger`) read each node a transaction touches once, write it once, maintain its capacity key once and bump its revision at most once — once when a side or a cntlr was charged to it or released from it, and not at all when only its used metadata units changed (`chargeUnits`, `releaseUnits`). A drain returns budget to the node records, the receiving ledger, in the transaction that shrinks the record describing it.
 
-**leftover** — An object a node holds that its desired state does not want and a sweep has not yet removed, reported as `ReplyCodeLeftover` with its name in the reply's details: the request is accepted and stored, and the worker re-issues the syncup every round until the verdict is clean. The same code carries an enumeration that did not answer and the conditions only a syncup cures.
+**leftover** — An object a node holds that its desired state does not want and a sweep has not yet removed, reported as `ReplyCodeLeftover` with its name in the reply's details: the request is accepted and stored, and the worker re-issues the syncup every round until the verdict is clean. The same code carries an enumeration that did not answer and the conditions only a syncup cures; of those conditions, a wanted md member that a cntlr's converge would put back or add is listed among the leftovers, under a kind of its own, by a check round's or an info read's verdict (see `cnagent.md` CN30).
 
 **leg** — `Leg`, one replica of a group: a side on one disk node, two while the leg migrates, and on every cntlr a connected multipath namespace wrapped by a leg device; its index orders the group's md members.
 
@@ -298,7 +298,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **mechanism, policy** — The split of the agent code: what both roles need verbatim is mechanism and lives in `agent`, and what knows which resource to build is policy and lives in `dnagent` or `cnagent`.
 
-**member reconciliation** — The primary's comparison of an md array's live members with the group's leg list on every converge: a listed leg that is missing is added once available, a member that is not listed is failed and removed, and a spare is never a member until it is switched in; a deferred group runs none of it.
+**member reconciliation** — The primary's comparison of an md array's live members with the group's leg list on every converge: a listed leg that is missing is added once available, a member that is not listed is failed and removed, a listed member md has failed and moved out of its place in the array is removed and added back once its leg is available and its health probe passes, which md resyncs from its write-intent bitmap, and a spare is never a member until it is switched in; a deferred group runs none of it. A check round names a member the reconciliation would put back or add only when its leg's health probe passed and its path is both live and optimized, so the worker re-sends the syncup, whose converge then runs the reconciliation (see `cnagent.md` CN12, CN30).
 
 **meta region, data region** — The two parts of every leg: the meta region at the head, holding the md superblock and write-intent bitmap of a redundant leg and the health block of every leg, and the data region behind it, which is the only part the pool sees.
 

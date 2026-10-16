@@ -1238,7 +1238,12 @@ agent (`grpc.md` T1), whose log then names the worker that sent each
 request — the worker suite's "one owner per shard" evidence. A `Check*`
 stream's metadata is sent once, at open, under the round that opened it, so
 every round also puts its own id in the request's `trace_id` (RW4 step 2),
-under which the agent runs the round (`grpc.md` T3).
+under which the agent runs the round (`grpc.md` T3). The `Syncup*` a round
+issues (RW4 step 5) runs under that round's id, while an immediate syncup
+(RW6) gets an id of its own. Reason: the agent's records of a verdict that
+was not clean and of the converge the re-sync brings then share one id
+with the worker's record of that syncup, which is how a leftover that only
+a verdict names is followed to its re-send (`log.md`, Leftovers).
 
 RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
 unary call (its own deadline bounds the wait; the stop ctx is not the RPC

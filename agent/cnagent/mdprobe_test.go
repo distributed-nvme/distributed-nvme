@@ -91,8 +91,10 @@ func TestMdDetailFromSysfsOnly(t *testing.T) {
 		byName[member.DmName] = member
 	}
 	for _, want := range []MdMember{
-		{DevNo: node.devNo[legA], DmName: "dnv-leg-a", State: "in_sync,failfast"},
-		{DevNo: node.devNo[legB], DmName: "dnv-leg-b", State: "spare,failfast"},
+		{DevNo: node.devNo[legA], DmName: "dnv-leg-a",
+			State: "in_sync,failfast", Slot: "0"},
+		{DevNo: node.devNo[legB], DmName: "dnv-leg-b",
+			State: "spare,failfast", Slot: "1"},
 	} {
 		if got := byName[want.DmName]; got != want {
 			t.Errorf("member %s read as %+v, want %+v", want.DmName, got, want)
@@ -141,7 +143,7 @@ func TestMdDetailFromSysfsOnly(t *testing.T) {
 
 	// Did not answer: the /sys/block listing, every array's md/ listing,
 	// every member's dm name, the array_state that decides present, each
-	// running-only attribute, a member's state and a member's block/dev.
+	// running-only attribute, a member's state, its slot and its block/dev.
 	// The md/ and dm-name kills match every array, so no array answers
 	// and matches; the rest are reads of the matched array itself.
 	for _, kill := range []func(){
@@ -153,6 +155,7 @@ func TestMdDetailFromSysfsOnly(t *testing.T) {
 		func() { node.killReadAlways["/md/sync_action"] = true },
 		func() { node.killReadAlways["/md/sync_completed"] = true },
 		func() { node.failReadAlways["/state"] = true },
+		func() { node.failReadAlways["/slot"] = true },
 		func() { node.killReadAlways["/block/dev"] = true },
 	} {
 		kill()

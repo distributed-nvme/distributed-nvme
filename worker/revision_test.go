@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1045,15 +1046,17 @@ func TestRevisionCheckRequestShape(t *testing.T) {
 // traceDnAgent is a DiskNodeAgent whose CheckDn derives each round's trace id
 // the way the agents do — the request's trace_id when set, else the stream's
 // — and records it beside the trace_id metadata the stream was opened with.
-// Its replies name revision 0, so every round ends in a SyncupDn.
+// Its replies name revision 0, so every round ends in a SyncupDn, whose
+// trace_id metadata it records too.
 type traceDnAgent struct {
 	pb.UnimplementedDiskNodeAgentServer
 
-	mu       sync.Mutex
-	streams  int
-	syncups  int
-	metaIds  []string
-	roundIds []string
+	mu        sync.Mutex
+	streams   int
+	syncups   int
+	metaIds   []string
+	roundIds  []string
+	syncupIds []string
 }
 
 func (s *traceDnAgent) CheckDn(
@@ -1091,12 +1094,24 @@ func (s *traceDnAgent) CheckDn(
 // a revision the worker did not ask for, so RW4 step 5 syncs after recv()
 // returned and stopped the round timer.
 func (s *traceDnAgent) SyncupDn(
-	_ context.Context, req *pb.SyncupDnRequest,
+	ctx context.Context, req *pb.SyncupDnRequest,
 ) (*pb.SyncupDnReply, error) {
+	var id string
+	md, _ := metadata.FromIncomingContext(ctx)
+	if vals := md.Get(common.TraceIdMetadataKey); len(vals) > 0 {
+		id = vals[0]
+	}
 	s.mu.Lock()
 	s.syncups++
+	s.syncupIds = append(s.syncupIds, id)
 	s.mu.Unlock()
 	return &pb.SyncupDnReply{Revision: req.GetRevision()}, nil
+}
+
+func (s *traceDnAgent) syncupTraceIds() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.syncupIds...)
 }
 
 func (s *traceDnAgent) syncupCount() int {
@@ -1116,7 +1131,9 @@ func (s *traceDnAgent) snapshot() (streams int, metaIds, roundIds []string) {
 // stream: the stream's metadata is written once, at open, under the id of
 // the round that opened it, so each later round must carry its own id in the
 // request — else every agent record of round two, three, … is filed under
-// round one's id.
+// round one's id. And the Syncup* a round issues (RW4 step 5) runs under that
+// round's id, which is what joins the agent's record of a verdict to the
+// worker's re-send it brought (log.md, Leftovers).
 func TestEachCheckRoundCarriesItsOwnTraceId(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &traceDnAgent{}
@@ -1154,6 +1171,13 @@ func TestEachCheckRoundCarriesItsOwnTraceId(t *testing.T) {
 		if !strings.HasPrefix(id, seedPrefix(seedOf(1))+"-") {
 			t.Fatalf("round trace id %q lacks the worker's seed prefix", id)
 		}
+	}
+	waitFor(t, "the second round's syncup", func() bool {
+		return stub.syncupCount() >= 2
+	})
+	if got := stub.syncupTraceIds()[:2]; !slices.Equal(got, roundIds[:2]) {
+		t.Fatalf("the rounds' syncups ran under %q, want each under its "+
+			"round's id %q", got, roundIds[:2])
 	}
 }
 

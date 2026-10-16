@@ -322,7 +322,9 @@ func (gp *grpPlan) legNames() []string {
 // is there already, it keeps it as it is (ensureLinearGroup): a side that has
 // not flipped to this CN yet exports dm-error to it (a non-optimized path).
 // Only availability decides: a held member md has failed on a leg that is
-// available again is not late (cnagent.md, Known limits). Spares are not
+// available again is not late — the check round's verdict names it once its
+// leg can take it, and the converge of the syncup the worker re-sends puts it
+// back (putBackNames, reconcileMembers; cnagent.md CN12). Spares are not
 // members (architecture.md, Spare legs), so a spare is never late. A
 // provisioning leg defers its whole group ([D15]), so the build never asks
 // about one; it is excluded all the same rather than trusting the caller.

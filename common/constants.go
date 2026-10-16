@@ -353,7 +353,11 @@ const (
 	// for a free run in the clone-metadata area (dnagent.md DN16); on a cn a
 	// piece of the node's base state that a CheckCn round's or GetCnInfo's
 	// probe read absent, or an ANA group it read in a state other than its
-	// fixed one on a port whose transport attributes match.
+	// fixed one on a port whose transport attributes match; and on a cntlr
+	// an md member that a CheckCntlr round or GetCntlrInfo read as one its
+	// converge would put back — failed by md and moved out of its slot, or
+	// lacking from its running array — on a leg that serves with its row OK
+	// (cnagent.md CN12, CN30).
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
 	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)

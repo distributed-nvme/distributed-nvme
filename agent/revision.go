@@ -51,11 +51,15 @@ func OkReply() *pb.AgentReply {
 // node's base state that a CheckCn round's or GetCnInfo's probe read absent,
 // or an ANA group it read in a state other than its fixed one on a port
 // whose transport attributes match. Each arrives among the failures,
-// rendered like an enumeration that did not answer.
+// rendered like an enumeration that did not answer. One condition arrives
+// among the leftovers instead: on a cntlr, an md member that a CheckCntlr
+// round or GetCntlrInfo names as one its converge would put back or add, under
+// LeftoverKindMdMember (cnagent.md CN30).
 //
 // A leftover is the one per-resource outcome that cannot ride in the *Info
 // rows (SH14, CN29, DN19): the rows are keyed by the ids of WANTED objects,
-// and a leftover is by definition something nothing wanted names. It is never
+// and a leftover is by definition something nothing wanted names — the md
+// member above is the one wanted object listed among them. It is never
 // stored anywhere — the agent recomputes it by enumerating the node on every
 // Syncup* and every Check*, so the worker's ordinary "re-sync while the code
 // is non-zero" rule is the whole retry machinery for a leftover.

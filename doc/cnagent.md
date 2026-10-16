@@ -1168,7 +1168,16 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   `bitmap_chunk_block_cnt` and the block size, the data offset from
   `meta_blocks` and the block size, every member `--failfast`,
   `--homehost any`), whose members are the leg wrappers of `leg_list`
-  (never `spare_leg_list`; `architecture.md`, Spare legs). Assembly
+  (never `spare_leg_list`; `architecture.md`, Spare legs). Every member
+  carries md's failfast flag, from its create or its add, so that an IO
+  error on a member fails that member at once, with no retry. Reason: a
+  disk node that stays connected but never completes IO then costs the
+  array that member instead of hanging the whole array; the fast IO fail
+  timeout every connection is made with (`dnagent.md` SH20) covers only a
+  path whose controller is lost. The flag also lets a short fault fail a
+  member, such as an IO that reaches a migration's source in the moment
+  after its export turns inaccessible (`architecture.md`, Known limits),
+  and the member reconciliation (below) puts such a member back. Assembly
   is the step of `architecture.md`, Failover, that makes every group
   available; its cases are these, decided by probing each available
   member for an md superblock (`mdadm --examine`):
@@ -1240,8 +1249,10 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   wants no group, nor does a primary whose `sp_level` suppresses its
   groups (CN19); a deferred group (below) never counts, spares are not
   members, and a held member md has failed on a leg that is available is
-  not late (Known limits). A `RedundNone` group's leg counts too, and its
-  dm-linear (above) is created or reloaded only over an available leg:
+  not late: while the array runs, the member reconciliation (below) puts
+  it back once md has moved it out of its slot and its leg can take it. A
+  `RedundNone` group's leg counts too, and its dm-linear (above) is
+  created or reloaded only over an available leg:
   the layers over it do IO through it, and a side that has not flipped to
   this CN yet exports dm-error to it (`architecture.md`, Disk node), so a
   pool, a raid0 and an ns-dev built over a late leg would serve that
@@ -1355,9 +1366,11 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   "degraded", "sync_action" and "sync_completed" — an inactive array has
   none of the three, and its members read a bare spare — and each
   member's "state" (a flag list, in_sync and failfast on a healthy dnv
-  member) and "block/dev". Running means "array_state" is clean, active,
-  active-idle, write-pending, readonly or read-auto; an array in any
-  other state (inactive, broken, …) is left exactly as it is and its
+  member), "slot" (its place number in the array, or none for a member
+  that holds no place) and "block/dev". Running means "array_state" is
+  clean, active, active-idle, write-pending, readonly or read-auto; an
+  array in any other state (inactive, broken, …) is left exactly as it
+  is and its
   state is the group's error. A read of the matched array that did not
   answer is an error, never absent. A matched array whose "array_state"
   has gone by that read (stopped since the walk) reads absent — unless an
@@ -1380,50 +1393,71 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   what a converge does).
 
   **Member reconciliation** covers `SwitchSpareLeg` with no extra
-  mechanism: a member the array holds — its "block/dm/name", compared
-  with the names of the `leg_list` wrappers, never by device number,
-  because a number read of a wanted wrapper that did not answer would
-  otherwise read as "not wanted" and fail and remove an in-sync
-  member — that is no longer
-  in `leg_list` is `--fail`ed and `--remove`d by the dm path sysfs named;
-  an available `leg_list` member the array lacks is `--add --failfast`ed
-  (md then resyncs — a bitmap catch-up for a briefly absent leg, a full
-  rebuild for a promoted spare). Every `leg_list` name is wanted,
-  available or not: a leg this pass cannot use (no path both live and
-  optimized, or its CN10 converge failing: a connect, an "address" read
-  that did not answer, its multipath namespace or its wrapper) is never
-  added, and a member md still holds for it is neither failed nor
-  removed. `--fail` and `--remove` open the member's path (no IO) and act
-  on its device number. A `--remove` issued within seconds of the
-  member's side dying, while a superblock write is stuck on that member,
-  sleeps in md's suspend until the write fails at the path's error
-  recovery, so it can be killed at the soft timeout with the member still
-  held: that pass reports the group `ERROR` and does not reach the
-  promoted spare's `--add --failfast` either, because extras leave before
-  promotions arrive. Nothing remembers the failure, and nothing schedules
-  another converge for it: the group's error is a row, not a reply code
-  (CN29), so the worker does not re-drive it, and it registers no CN10
-  background retry (a leg that failed to converge does, CN10, and so
-  does a clone source whose connection failed or another clone failure
-  CN18 lists, and so does a `leg_list` member that is not available —
-  above — which is cntlr-wide: any such member of any group of this
-  cntlr registers it, and the retry finishes the switch, the first of its
-  attempts that finds the promoted spare available adding it; the trigger
-  includes the promoted spare if it is not available yet, or, when the
-  switched-out leg's whole DN died, another group's leg still on that DN
-  (the leg repair switches one leg per pass, `dnv-worker.md` AR8), while
-  the switched-out member itself never counts, since it has left
-  `leg_list`); later Check rounds read the running array `OK`, degraded.
-  The switched-out member stays held and the spare stays out until the
-  cntlr's next converge, for whatever other reason it runs (a
-  `SyncupCntlr` for a revision bump or a non-zero reply code, an agent
-  restart's CN2 re-run, a background retry registered for something
-  else), which removes the member in milliseconds and adds the spare —
-  or, while the spare is not available yet, leaves its `--add` to the
-  retry that the late spare registers (Known limits). The cn agent never
-  runs mdadm --zero-superblock: a leg only ever leaves an array into the
-  spare list (where a stale superblock makes a later re-add cheap) or out
-  of existence with its side.
+  mechanism, and puts back a member md has failed. A member the array
+  holds is compared by its "block/dm/name" with the names of the
+  `leg_list` wrappers, never by device number, because a number read of
+  a wanted wrapper that did not answer would otherwise read as "not
+  wanted" and fail and remove an in-sync member. A held member that is
+  no longer in `leg_list` is `--fail`ed and `--remove`d by the dm path
+  sysfs named; then a `leg_list` member md has failed and moved out of
+  its slot ("faulty" in its "state", its "slot" none), on a leg that can
+  take it, is `--remove`d; then an available `leg_list` member the array
+  lacks, one just removed included, is `--add --failfast`ed. md then
+  resyncs: a bitmap catch-up for a briefly absent leg or a member put
+  back, a full rebuild for a promoted spare. A leg **can take** a member
+  back when it is available and its own leg row reads `OK`, which on the
+  primary is the CN11 probe's last result. Reason: a leg whose disk
+  returns errors usually fails its probe too, and is then left to the
+  leg repair (`dnv-worker.md` AR8) instead of being put back on every
+  pass.
+
+  The put-back is a remove and then an add, run by mdadm. md keeps its
+  claim on a failed member until the member is removed, so an `--add`
+  alone is refused; after the remove, mdadm turns the add into a re-add,
+  and md resyncs only the regions its write-intent bitmap marks, since
+  md keeps every region written while the array is degraded marked in
+  that bitmap. It is not a write of "re-add" to the member's "state":
+  that write is made in the agent's own process and waits on md's own
+  lock, which a superblock write stuck on a member holds for as long as
+  that member's IO is held; it cannot be killed and would hold the
+  cntlr's object lock with it, while mdadm is a child the soft timeout
+  kills. The slot test keeps the remove from being refused: md moves a
+  failed member out of its slot by itself once no IO to it is pending,
+  and refuses to remove one that still has IO pending, which on a leg
+  that can take it is only an IO the cutover window of a migration's
+  source absorbed (`dnagent.md` DN12). Nothing limits how
+  often one member is put back: a limit would need the agent to remember
+  past attempts (Known limits).
+
+  Every `leg_list` name is wanted, available or not: a leg this pass
+  cannot use (no path both live and optimized, or its CN10 converge
+  failing: a connect, an "address" read that did not answer, its
+  multipath namespace or its wrapper) is never added, and a member md
+  still holds for it is neither failed nor removed, whatever its state.
+  `--fail` and `--remove` open the member's path (no IO) and act on its
+  device number. A `--remove` issued within seconds of the member's side
+  dying, while a superblock write is stuck on that member, sleeps in
+  md's suspend until the write fails at the path's error recovery, so it
+  can be killed at the soft timeout with the member still held: that
+  pass reports the group `ERROR` and does not reach the promoted spare's
+  `--add --failfast` either, because extras leave before promotions
+  arrive. A remove or an add that fails or is killed is the group's
+  error for that pass, a row, not a reply code (CN29), and registers no
+  CN10 background retry. What re-drives it is the verdict of the
+  cntlr's check rounds, which names each `leg_list` member the
+  reconciliation would put back or add, on a leg the call reads as able
+  to take it (CN30): the worker re-sends the `SyncupCntlr`
+  (`dnv-worker.md` RW4), whose converge tries again. So a switch whose
+  `--remove` was killed is finished by the converge the named spare
+  brings, or, while the promoted spare is not available, by the CN10
+  retry that a `leg_list` member that is not available registers
+  (above), cntlr-wide; while the spare is available but its leg row does
+  not read `OK`, neither comes (Known limits). The switched-out member
+  itself has left `leg_list` and is never named. Nothing remembers the
+  failure. The cn agent never runs mdadm
+  --zero-superblock: a leg only ever leaves an array into the spare list
+  (where a stale superblock makes a later re-add cheap) or out of
+  existence with its side.
 
   A group whose non-spare `leg_list` holds a provisioning leg (CN9) is
   **deferred**: none of `--examine`, `--create`, `--assemble`, `--add`,
@@ -3261,10 +3295,13 @@ The rows, each with its `res_name` and what its probe checks:
   `CnGrpName`: `RedundMdRaid1`: the array holding the group's `leg_list`
   wrappers, read from sysfs — "array_state", and for a running array
   "degraded", "sync_action" and "sync_completed", plus each member's
-  "state", "block/dev" and "block/dm/name" — never mdadm --detail, which
-  opens a member and can block on a dead one for the length of the path's
-  failfast (CN12). A running array (degraded included) ⇒ `OK` with the
-  "array_state" as the details, then the word degraded while "degraded"
+  "state", "slot", "block/dev" and "block/dm/name" — never mdadm
+  --detail, which opens a member and can block on a dead one for the
+  length of the path's failfast (CN12). A member md has failed is the
+  leg row's to report while its leg does not serve, and the verdict's to
+  name once the leg can take it back (CN12, CN30); the group's row reads
+  `OK`, degraded, either way. A running array (degraded included) ⇒ `OK`
+  with the "array_state" as the details, then the word degraded while "degraded"
   is non-zero, then the word of a sync that is running (recovering,
   resyncing, checking, repairing, reshaping; none while "sync_completed"
   reads none) followed by its done and total sectors in parentheses. The
@@ -3414,7 +3451,9 @@ in-sync member does not turn the row `ERROR` — it reads `OK`, with
 degraded once md has failed the member (an IO to it that errors does,
 and so does CN12's reconciliation failing it out as an extra; until then
 the dead member does not count in "degraded"), and the fault is its leg
-row's, from the CN11 prober's own IO. md does not fail the last in-sync
+row's, from the CN11 prober's own IO, until the leg can take the member
+back, when the verdict names it (CN30) and the converge puts it back
+(CN12). md does not fail the last in-sync
 member of a mirror (dnv never sets md's fail-last-device option): an
 error it charges to that member — a failed superblock or bitmap write,
 which array writes bring, is one — marks the array broken instead. The
@@ -3435,7 +3474,10 @@ other than its fixed one while the port's transport attributes match,
 which a `SyncupCn` would rewrite: the port row reads `ERROR` with the
 probe's words, and the verdict names it. And so does an arena file of
 another size that a `SyncupCn` would replace (CN5): `tmp_file_info`
-reads `ERROR`, and the verdict names the file.
+reads `ERROR`, and the verdict names the file. And so does an md member
+that a cntlr's converge would put back or add (CN12) on a leg that can
+take it: its group's row reads `OK`, degraded, and the cntlr's verdict
+names the member (CN30).
 
 ### The read-only verdict
 
@@ -3506,6 +3548,33 @@ refused every time, say — is re-sent its `SyncupCn` every round, and
 each attempt is logged, as a disk node whose disk identity stays
 unconfirmed is (`dnagent.md` DN16).
 
+A cntlr's verdict, in a `CheckCntlr` round or a `GetCntlrInfo`, also
+names each md member that its converge's member reconciliation would put
+back or add (CN12): a `leg_list` member of a wanted group's running
+array that md has failed and moved out of its slot, or that the array
+lacks, on a leg whose leg row reads `OK` (its wrapper there and its last
+CN11 probe passed) and whose subsystem has a multipath namespace, every
+controller's "address" known and a path both live and optimized. It
+reads them from the arrays and the leg rows of the call's own probe and,
+for each such member whose leg row reads `OK`, from one lookup of the
+leg's subsystem in the call's walk. It lists each among the leftovers
+under a kind of its own (`agent.LeftoverKindMdMember`) by the dm name of
+the leg's wrapper; the log record lists it there too. Reason: a converge
+must first see the failed member, and a drop changes no desired state,
+so no `SyncupCntlr` follows it; the late-member retry counts
+availability alone (CN12), and a retrier of the agent's own beside the
+verdict would be invisible to the control plane (below). The verdict
+tests the parts of the leg's availability a call can read without
+building anything, so no syncup comes for a leg whose path is not live
+and optimized, none in a migration gap, and one drop costs one
+`SyncupCntlr`. A step only the converge takes can still fail, the
+connect of a provisioned side that has no controller among them: the leg
+is then not available, the member stays out, and the verdict names it
+again every round (Known limits). The `SyncupCntlr` reply does not name
+them: its converge has just tried to put them back, and its group row
+says how that went. A member md keeps failing while its leg's probe
+passes is named again after each failure (Known limits).
+
 It is recomputed every round and stored nowhere. That is the whole retry
 mechanism for a leftover and it is deliberately the only one: a leftover
 that has since gone stops being reported by itself, one that is still
@@ -3554,30 +3623,47 @@ report no `Syncup*` could ever clear.
 
 ## Known limits
 
-* A member md has failed stays failed: `reconcileMembers` adds only a
-  member the array does not hold, so a held faulty member is not
-  re-added when its side returns — the array stays degraded until a
-  spare switch or a re-assembly. Nor does the late-member retry (CN12)
-  reach it: lateness is availability alone, and the held faulty member's
-  leg is available again. A re-add would need a `--remove` before the
-  `--add` of a held wanted member whose `MdMember.State` carries the
-  faulty flag: mdadm opens an added device exclusively, and md keeps its
-  claim on a faulty member until the member is removed, so an `--add`
-  alone is refused.
+* A member md keeps failing while its leg's probe passes is put back
+  again after every failure: md fails a member with the failfast flag on
+  any read error from it (CN12), so one bad sector outside the health
+  block is enough, while the CN11 probe, which reads the health block
+  alone, passes, and the leg can take the member back. Each failure then
+  costs one `SyncupCntlr` and one converge of the cntlr, under the object
+  lock its check rounds take too (CN1), and a resync of what md's bitmap
+  marks. Nothing limits how often, since a limit would need the agent to
+  remember past attempts (`architecture.md`, Teardown by sweep); it shows
+  as the agent's leftover record naming the same member after each
+  failure, each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
+  Leftovers). The leg repair does not act on it, since the leg's row
+  reads `OK` (`dnv-worker.md` AR8); an operator's spare switch ends it.
+* A member can be named every round on a leg whose converge fails: the
+  verdict tests only the parts of the leg's availability a call can read
+  (CN30). A leg with two sides, a migration in flight, whose path through
+  one side reads live and optimized while the other provisioned side has
+  no controller and refuses a new connect — its controller gone after a
+  reconnect refused with DNR, say — has its failed member named on every
+  check round. Each round then costs one `SyncupCntlr` and one converge,
+  which fails the leg at the connect and puts nothing back, beside the
+  CN10 retry that failed connect registers, until the side connects or
+  leaves the leg. A verdict that also asked for a controller on every
+  provisioned side would not name the member when that connect succeeds,
+  and that converge is the one that puts the member back.
 * A killed `--remove` leaves a spare switch half done: a switch applied
   within seconds of the switched-out leg's side dying can have its
-  `--remove` killed at the soft timeout while a superblock write is
-  stuck on that member (CN12). The pass reports the group `ERROR` and
-  does not add the promoted spare, and nothing re-drives it: the worker
-  re-syncs on a revision or a reply code, never on a row, and a group
-  error registers no CN10 background retry (the retry does finish the
-  switch when the same pass registers it for something else, such as a
-  failed leg connect or any `leg_list` member of the cntlr that is not
-  available — the promoted spare or, after a whole DN died, another
-  group's leg still on it, CN12). With no such trigger left — a lone
-  switched-out leg, or the last switch off a dead DN — the array runs on
-  its surviving member until the cntlr's next converge for some other
-  reason.
+  `--remove` killed at the soft timeout while a superblock write is stuck
+  on that member (CN12). The pass reports the group `ERROR` and does not
+  add the promoted spare, and the array runs on its surviving member
+  until the next converge: the one the `SyncupCntlr` brings that the
+  worker re-sends once the check round's verdict names the spare (CN30),
+  or, while the spare is not available, an attempt of the CN10 retry its
+  lateness registers (CN12). A promoted spare that is available while
+  its leg row does not read `OK` — its probe fails, or has not yet
+  completed — brings neither: the verdict does not name it and it is not
+  late. An operator's `SwitchSpareLeg` can promote such a spare: the
+  switch does not read the spare's health. The switch then waits for
+  the next converge that comes: the one the verdict brings once the
+  spare's row reads `OK`, or one for some other reason, such as a
+  revision bump.
 * An unanswered array can leave a group unassembled: a group with no
   answering array while another array of the walk did not answer is
   neither created nor assembled that pass (CN12), and the error is a

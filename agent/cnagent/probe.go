@@ -29,14 +29,19 @@ import (
 // (CN29).
 
 // probeCntlr writes the rows of one check round or info read from plan, whose
-// reading readCntlr took (plan.rd, plan.walk, plan.mdWalks).
+// reading readCntlr took (plan.rd, plan.walk, plan.mdWalks). It also returns
+// the dm names of the md members the converge would put back or add, which
+// the verdict names (putBackNames, cnagent.md CN30): they are read from the
+// arrays and the leg rows the probe has just read, and from a lookup of each
+// such member's leg in the call's walk.
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
-) *pb.CntlrInfo {
+) (*pb.CntlrInfo, []string) {
 	t := st.tracker
 	info := newCntlrInfo()
+	var putBack []string
 
 	// Legs — the wrapper table plus the CN11 prober outcome on a primary,
 	// transport liveness and ana_state per desired side on a standby. A
@@ -79,9 +84,11 @@ func (s *CnAgentServer) probeCntlr(
 			info.GrpIdToMdRaid[gp.grpId] = t.Provisioning(
 				key, gp.resName, detailsProvisioning)
 		case plan.wantGrp:
-			status, details := s.probeGroup(ctx, plan, gp)
+			status, details, detail := s.probeGroup(ctx, plan, gp)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
+			putBack = append(putBack, s.putBackNames(
+				ctx, plan, gp, detail, info.LegIdToLeg)...)
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = t.Missing(
 				key, gp.resName, detailsSpLevel)
@@ -231,7 +238,7 @@ func (s *CnAgentServer) probeCntlr(
 		// CntlrInfo for the same stored request (architecture.md, Check
 		// streams: show_info always fills the complete current info).
 		s.reportSuppressed(st, plan, info)
-		return info
+		return info, putBack
 	}
 
 	// Transfers.
@@ -286,7 +293,7 @@ func (s *CnAgentServer) probeCntlr(
 				nsResName(ssp.nqn, np.nsIdx), nsStatus, nsDetails)
 		}
 	}
-	return info
+	return info, putBack
 }
 
 // cloneSourceLive reports whether every configured source endpoint has a live

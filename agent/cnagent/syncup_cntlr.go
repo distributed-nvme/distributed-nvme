@@ -185,7 +185,7 @@ func (s *CnAgentServer) convergeCntlr(
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.
 	plan.walk = s.newPassWalk(ctx)
-	sweep := s.sweepCntlr(ctx, st, plan, true)
+	sweep := s.sweepCntlr(ctx, st, plan, true, nil)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
@@ -303,7 +303,7 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			err := s.ensureGroup(ctx, plan, gp, available)
+			err := s.ensureGroup(ctx, plan, gp, available, info.LegIdToLeg)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
 			if gp.hasLateMember(available) {

@@ -2677,7 +2677,11 @@ func switchSpareReq(revision uint64, promoted bool) *pb.SyncupCntlrRequest {
 // `--remove` leaves the pass before the add loop — extras leave before
 // promotions arrive, so the promoted spare is never added beside a member md
 // may still hold — and the next converge completes the switch. An error
-// swallowed here would read the row OK over a half-done switch.
+// swallowed here would read the row OK over a half-done switch. What brings
+// that converge is the check round's verdict: once the promoted spare's row
+// reads OK it names the spare the array lacks (CN12, CN30), unless the
+// killed command was an `--add` the kernel completed, which left nothing to
+// add.
 func TestSwitchSpareLegKilledVerb(t *testing.T) {
 	for _, verb := range []string{" --fail ", " --remove ", " --add "} {
 		for _, noEffect := range []bool{true, false} {
@@ -2730,6 +2734,17 @@ func TestSwitchSpareLegKilledVerb(t *testing.T) {
 				clear(node.killCmdNoEffectAlways)
 				clear(node.killCmdAlways)
 				node.mu.Unlock()
+				probeAllLegs(t, srv)
+				verdict := checkCntlrVerdict(t, srv, 3)
+				if verb == " --add " && !noEffect {
+					if verdict.GetCode() != 0 {
+						t.Fatalf("the check round after a completed --add: "+
+							"%v, want a clean verdict", verdict)
+					}
+				} else {
+					assertNamesOnly(t, verdict, "the check round after "+
+						"the half-done switch", legName(srv, switchSpareLeg))
+				}
 				node.Reset()
 				if reply, err = srv.SyncupCntlr(
 					ctx, switchSpareReq(4, true)); err != nil {
@@ -4027,11 +4042,11 @@ func TestGroupMembersComparedByName(t *testing.T) {
 // optimized again runs no mdadm and only stops the retry. A non-optimized
 // path is the side's dm-error, so the first write through it fails (a
 // target-internal DNR error, not a path error), md fails the failfast
-// member, and it stays failed (cnagent.md, Known limits, "a member md has
-// failed stays failed"): neither this converge nor the retry re-adds it, and
-// the attempt after the path is optimized again likewise runs no mdadm and
-// only stops the retry. Until then each attempt is the cost cnagent.md, Known
-// limits, records.
+// member, and neither this converge nor the retry puts it back while the
+// path is not optimized; once it is and the leg's row reads OK, the verdict
+// names the member and the converge of the syncup that brings puts it back
+// (CN12, TestConvergePutsAFailedMemberBack). Until then each attempt is the
+// cost cnagent.md, Known limits, records.
 func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -4121,22 +4136,24 @@ func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 // TestGroupHeldFaultyMemberStaysHeld pins the held set of CN12's member
 // comparison: every member sysfs lists counts as held, whatever its
 // dev-*/state. Leg 2's member reads "faulty,failfast" while its leg is
-// available again, and an equal-revision converge runs no --fail, --remove
-// or --add and reads OK — the known limit "a member md has failed stays
-// failed" (cnagent.md, Known limits). A held set of in-sync members only would
-// --add a member
-// md still holds, which mdadm refuses (it opens the device O_EXCL, and md
-// keeps its claim on a faulty member until the member is removed), and the
-// group row would read ERROR on every converge; the follow-up that re-adds a
-// faulty member must --remove it first. Nor is the faulty member late: only
-// availability makes a member late (CN12), so the converge registers no CN10
-// retry either.
+// available and its row reads OK, but md has not moved it out of its slot
+// yet, which it does once no IO to the member is pending: an equal-revision
+// converge runs no --fail, --remove or --add, reads OK, and the check round
+// names nothing. A held set of in-sync members only would --add a member md
+// still holds, which mdadm refuses (it opens the device O_EXCL, and md keeps
+// its claim on a faulty member until the member is removed), and the group
+// row would read ERROR on every converge; and a put-back that did not wait
+// for the slot would --remove a member that may still have IO pending, which
+// md refuses (TestConvergePutsAFailedMemberBack is the put-back itself). Nor
+// is the faulty member late: only availability makes a member late (CN12),
+// so the converge registers no CN10 retry either.
 func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
 	syncupBoth(t, srv, opts)
+	probeAllLegs(t, srv)
 	mdDev := srv.nf.MdPath(
 		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
 	held := slices.Clone(node.arrays[mdDev].members)
@@ -4153,11 +4170,15 @@ func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
 	faulty := false
 	for _, member := range detail.Members {
 		faulty = faulty || member.DmName == legName(srv, testDataLeg2) &&
-			strings.Contains(member.State, "faulty")
+			strings.Contains(member.State, "faulty") &&
+			member.Slot != mdSlotNone
 	}
 	if !faulty {
-		t.Fatalf("leg 2's member read %+v, want it faulty; the case is "+
-			"vacuous otherwise", detail.Members)
+		t.Fatalf("leg 2's member read %+v, want it faulty in its slot; the "+
+			"case is vacuous otherwise", detail.Members)
+	}
+	if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+		t.Fatalf("a faulty member still in its slot was named: %v", reply)
 	}
 
 	node.Reset()
@@ -4175,6 +4196,491 @@ func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
 	}
 	if retrying(t, srv) {
 		t.Fatalf("a faulty member on an available leg registered the retry")
+	}
+}
+
+// checkCntlrVerdict is the verdict of one check round of the fixture cntlr
+// at a revision.
+func checkCntlrVerdict(
+	t *testing.T,
+	srv *CnAgentServer,
+	revision uint64,
+) *pb.AgentReply {
+	t.Helper()
+	reply, _ := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: revision,
+		}, nil)
+	return reply.GetAgentReply()
+}
+
+// infoVerdict is the verdict of one GetCntlrInfo of the fixture cntlr.
+func infoVerdict(t *testing.T, srv *CnAgentServer) *pb.AgentReply {
+	t.Helper()
+	reply, err := srv.GetCntlrInfo(context.Background(),
+		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr()})
+	if err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	return reply.GetAgentReply()
+}
+
+// assertNamesOnly checks a verdict is the leftover code naming exactly the
+// md members names, by dm name, and nothing else (cnagent.md CN30).
+func assertNamesOnly(
+	t *testing.T,
+	reply *pb.AgentReply,
+	label string,
+	names ...string,
+) {
+	t.Helper()
+	var want []string
+	for _, name := range names {
+		want = append(want, agent.LeftoverKindMdMember+":"+name)
+	}
+	wantDetails := fmt.Sprintf("leftover(%d): %s", len(want),
+		strings.Join(want, ", "))
+	if reply.GetCode() != common.ReplyCodeLeftover ||
+		reply.GetDetails() != wantDetails {
+		t.Fatalf("%s: code %d details %q, want code %d details %q",
+			label, reply.GetCode(), reply.GetDetails(),
+			common.ReplyCodeLeftover, wantDetails)
+	}
+}
+
+// failOutOfSlot is what md leaves of a member it has failed once no IO to it
+// is pending: "faulty,failfast", out of its slot, the array degraded.
+func failOutOfSlot(node *fakeNode, mdDev, member string) {
+	node.setMdSync(mdDev, 1, "idle", "none")
+	node.setMemberState(mdDev, member, "faulty,failfast")
+	node.setMemberSlot(mdDev, member, mdSlotNone)
+}
+
+// TestCheckRoundNamesAFailedMemberOnlyWhenItCanBePutBack pins the cntlr
+// verdict's half of CN12's put-back (cnagent.md CN30): a check round and an
+// info read name, with the leftover code, a leg_list member md has failed
+// and moved out of its slot, on a leg whose path is live and optimized and
+// whose row reads OK, and nothing else: no member still in its slot, no
+// spare without a slot, none on a leg whose row is not OK — in error or
+// before its first probe — or whose path is not optimized, whose
+// controller's address is unknown or whose subsystem has no multipath
+// namespace, none being recovered, and none of a standby, which wants no
+// group. A drop changes no desired state, so without the name nothing would
+// bring the converge that puts the member back; and a name on a leg the
+// converge does not use would bring a syncup every round for nothing. Each
+// case that names nothing also runs an equal-revision converge, which leaves
+// the array as it is: the converge's own test reads the same row.
+func TestCheckRoundNamesAFailedMemberOnlyWhenItCanBePutBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// set puts leg 2's member, its leg and its row in the case's shape
+		// on a converged primary whose legs have been probed, unless
+		// unprobed.
+		set   func(srv *CnAgentServer, node *fakeNode, mdDev, leg2 string)
+		named bool
+		// unprobed leaves every leg row PENDING: no probe has completed.
+		unprobed bool
+	}{
+		{"failed out of its slot", func(srv *CnAgentServer, node *fakeNode,
+			mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+		}, true, false},
+		{"failed, still in its slot", func(srv *CnAgentServer,
+			node *fakeNode, mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+			node.setMemberSlot(mdDev, leg2, "1")
+		}, false, false},
+		{"failed, row not OK", func(srv *CnAgentServer, node *fakeNode,
+			mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+			st := srv.getCntlr(
+				cntlrKey(testCluster, testCn, testSp, testCntlr))
+			srv.mu.Lock()
+			prober := st.probers[testDataLeg2]
+			srv.mu.Unlock()
+			prober.finish(fmt.Errorf("input/output error"))
+		}, false, false},
+		{"failed, path not optimized", func(srv *CnAgentServer,
+			node *fakeNode, mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
+				testDataLeg2, testCn), testIp2, testSvcId2, "non-optimized")
+		}, false, false},
+		{"recovering", func(srv *CnAgentServer, node *fakeNode,
+			mdDev, leg2 string) {
+			node.setMdSync(mdDev, 1, "recover", "100 / 200")
+			node.setMemberState(mdDev, leg2, "spare,failfast")
+		}, false, false},
+		// A spare md holds without a slot: right after an --add, before md
+		// gives it one, or one md cannot start recovering. The slot alone
+		// would name it; only the faulty flag keeps it out.
+		{"spare out of its slot", func(srv *CnAgentServer, node *fakeNode,
+			mdDev, leg2 string) {
+			node.setMdSync(mdDev, 1, "idle", "none")
+			node.setMemberState(mdDev, leg2, "spare,failfast")
+			node.setMemberSlot(mdDev, leg2, mdSlotNone)
+		}, false, false},
+		// After an agent restart or a promotion, before the first probe:
+		// a row that is not OK is any row but OK, PENDING too.
+		{"failed, row pending", func(srv *CnAgentServer, node *fakeNode,
+			mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+		}, false, true},
+		// The converge fails a leg on a controller whose address read does
+		// not answer, while the other parts of the path still read live
+		// and optimized.
+		{"failed, a controller's address unknown", func(srv *CnAgentServer,
+			node *fakeNode, mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+			ctrl := ctrlNameOf(node, legNqn(srv, testDataLeg2), testIp2,
+				testSvcId2)
+			if ctrl == "" {
+				t.Fatalf("leg 2 has no controller; the case is vacuous")
+			}
+			node.mu.Lock()
+			node.killReadAlways[sysfsNvmeCtrlDir+"/"+ctrl+"/address"] = true
+			node.mu.Unlock()
+		}, false, false},
+		// The converge fails a leg whose subsystem has no multipath
+		// namespace, while its controller's path still reads live and
+		// optimized and the last probe passed.
+		{"failed, no multipath namespace", func(srv *CnAgentServer,
+			node *fakeNode, mdDev, leg2 string) {
+			failOutOfSlot(node, mdDev, leg2)
+			node.dropNsHead(legNqn(srv, testDataLeg2))
+		}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			ctx := context.Background()
+			opts := reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true}
+			syncupBoth(t, srv, opts)
+			if !tc.unprobed {
+				probeAllLegs(t, srv)
+			}
+			mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
+				testCluster, testCn, testSp, 0, 0, false))
+			leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+			if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+				t.Fatalf("the whole array's verdict: %v", reply)
+			}
+			tc.set(srv, node, mdDev, leg2)
+
+			if tc.named {
+				assertNamesOnly(t, checkCntlrVerdict(t, srv, 2),
+					"check round", legName(srv, testDataLeg2))
+				assertNamesOnly(t, infoVerdict(t, srv), "info read",
+					legName(srv, testDataLeg2))
+				return
+			}
+			if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+				t.Fatalf("check round: %v, want a clean verdict", reply)
+			}
+			if reply := infoVerdict(t, srv); reply.GetCode() != 0 {
+				t.Fatalf("info read: %v, want a clean verdict", reply)
+			}
+			held := slices.Clone(node.arrays[mdDev].members)
+			node.Reset()
+			if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if got := node.callsMatching("cmd mdadm"); len(got) != 0 {
+				t.Fatalf("the converge ran %v, want no mdadm", got)
+			}
+			if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
+				t.Fatalf("the array's members changed to %v, want %v",
+					got, held)
+			}
+		})
+	}
+	t.Run("standby", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{
+			revision: 2, primary: false, raid1: true, twoLegs: true})
+		// A standby wants no group, so an array of the group's legs on its
+		// node is a leftover of the md kind, never a member to put back.
+		mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
+			testCluster, testCn, testSp, 0, 0, false))
+		leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+		node.seedArray(mdDev, "dnv-grp",
+			srv.nf.DmPath(legName(srv, testDataLeg)), leg2)
+		failOutOfSlot(node, mdDev, leg2)
+		reply := checkCntlrVerdict(t, srv, 2)
+		if !strings.Contains(reply.GetDetails(),
+			agent.LeftoverKindMd+":"+node.mdNode(mdDev)) {
+			t.Fatalf("the standby's verdict %v does not name the array; "+
+				"the case is vacuous otherwise", reply)
+		}
+		if strings.Contains(reply.GetDetails(),
+			agent.LeftoverKindMdMember+":") {
+			t.Fatalf("the standby's verdict names a member: %v", reply)
+		}
+	})
+}
+
+// TestCheckRoundNamesNoMemberOfAnArrayThatIsNotRunning pins the "running
+// array" part of the verdict's test (cnagent.md CN30): a member md has failed
+// and moved out of its slot, on a leg that can take it, is named only while
+// its group's array runs. An array that is not running — CN29's broken, where
+// md charged an error to the last in-sync member, among them — and one that
+// holds a foreign member read ERROR, and their converge refuses before it
+// reaches the members (TestGroupProbeArrayStates,
+// TestGroupForeignMemberIsAnError), so a name there would bring a syncup
+// every round that puts nothing back; a missing one reads MISSING, and a
+// stopped array lacks every member. Each case first sees the member named
+// while the array runs, and then the group row read as the case wants, so it
+// is not vacuous; a broken or foreign array may still make the verdict
+// unclean for a reason of its own, so the case asks only that no member is
+// named.
+func TestCheckRoundNamesNoMemberOfAnArrayThatIsNotRunning(t *testing.T) {
+	const (
+		failed  = pb.ResStatus_RES_STATUS_ERROR
+		missing = pb.ResStatus_RES_STATUS_MISSING
+	)
+	for _, tc := range []struct {
+		name string
+		// set takes the running array, leg 2's member failed out of its
+		// slot, out of the running states.
+		set    func(node *fakeNode, mdDev, leg2 string)
+		status pb.ResStatus
+	}{
+		{"broken", func(node *fakeNode, mdDev, leg2 string) {
+			node.setArrayState(mdDev, "broken")
+		}, failed},
+		{"inactive", func(node *fakeNode, mdDev, leg2 string) {
+			node.setArrayState(mdDev, "inactive")
+		}, failed},
+		{"clear", func(node *fakeNode, mdDev, leg2 string) {
+			node.setArrayState(mdDev, "clear")
+		}, missing},
+		// Stopped by hand while both legs serve: every leg_list member is
+		// lacking, and none is named.
+		{"stopped", func(node *fakeNode, mdDev, leg2 string) {
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			key, array := node.arrayByDev(mdDev)
+			node.unpublishArray(array)
+			delete(node.arrays, key)
+		}, missing},
+		{"foreign member", func(node *fakeNode, mdDev, leg2 string) {
+			held := append(slices.Clone(node.arrays[mdDev].members),
+				"/dev/sdb1")
+			node.seedArray(mdDev, node.arrays[mdDev].name, held...)
+			failOutOfSlot(node, mdDev, leg2)
+		}, failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			ctx := context.Background()
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true})
+			probeAllLegs(t, srv)
+			mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
+				testCluster, testCn, testSp, 0, 0, false))
+			leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+			failOutOfSlot(node, mdDev, leg2)
+			assertNamesOnly(t, checkCntlrVerdict(t, srv, 2),
+				"running array", legName(srv, testDataLeg2))
+			tc.set(node, mdDev, leg2)
+
+			reply, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr(), Revision: 2,
+			}, nil)
+			infoReply, err := srv.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr()})
+			if err != nil {
+				t.Fatalf("GetCntlrInfo: %v", err)
+			}
+			for _, read := range []struct {
+				label string
+				reply *pb.AgentReply
+				row   *pb.ResInfo
+			}{
+				{"check round", reply.GetAgentReply(),
+					info.GetGrpIdToMdRaid()[testDataGrp]},
+				{"info read", infoReply.GetAgentReply(),
+					infoReply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]},
+			} {
+				if read.row.GetStatus() != tc.status {
+					t.Fatalf("%s: the md row reported %v %q, want %v; the "+
+						"case is vacuous otherwise", read.label,
+						read.row.GetStatus(), read.row.GetDetails(),
+						tc.status)
+				}
+				if strings.Contains(read.reply.GetDetails(),
+					agent.LeftoverKindMdMember+":") {
+					t.Fatalf("%s: the verdict names a member of an array "+
+						"that is not running: %v", read.label, read.reply)
+				}
+			}
+		})
+	}
+}
+
+// TestConvergePutsAFailedMemberBack pins CN12's put-back: the converge of the
+// syncup the verdict brings removes the member md has failed and moved out of
+// its slot and adds it back, in that order, one command each, and touches
+// nothing else — no --fail, the other member and the meta array left alone.
+// mdadm turns that --add into a re-add, which md resyncs from its write-intent
+// bitmap. The removed member is no longer held, so the add comes in the same
+// pass; an add loop that still counted it held would leave the array
+// degraded. The member is not late (CN12), so no CN10 retry is registered,
+// and the next check round reads clean.
+func TestConvergePutsAFailedMemberBack(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	probeAllLegs(t, srv)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	leg1 := srv.nf.DmPath(legName(srv, testDataLeg))
+	leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+	failOutOfSlot(node, mdDev, leg2)
+	assertNamesOnly(t, checkCntlrVerdict(t, srv, 2), "check round",
+		legName(srv, testDataLeg2))
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	removeCall := "cmd mdadm " + mdDev + " --remove " + leg2
+	addCall := "cmd mdadm " + mdDev + " --add --failfast " + leg2
+	assertOrder(t, node, removeCall, addCall)
+	mdadm := node.callsMatching("cmd mdadm")
+	if !slices.Equal(mdadm, []string{removeCall, addCall}) {
+		t.Fatalf("the converge ran %v, want exactly %q then %q",
+			mdadm, removeCall, addCall)
+	}
+	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+		"grp data after the put-back")
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("the converge's reply %v, want a clean verdict",
+			reply.GetAgentReply())
+	}
+	if got := node.arrays[mdDev].members; !slices.Equal(got,
+		[]string{leg1, leg2}) {
+		t.Fatalf("the array holds %v, want %v", got, []string{leg1, leg2})
+	}
+	if retrying(t, srv) {
+		t.Fatalf("the put-back registered the CN10 retry")
+	}
+	if verdict := checkCntlrVerdict(t, srv, 2); verdict.GetCode() != 0 {
+		t.Fatalf("the check round after the put-back: %v", verdict)
+	}
+}
+
+// TestCheckRoundNamesALackingMemberAndTheConvergeAddsIt is the put-back's
+// other half (CN12, CN30): a running array that lacks a leg_list member on a
+// leg that serves with its row OK — a remove that went through before its
+// add failed, or a spare switch whose --remove was killed — is named by the
+// verdict, so the worker's re-sent syncup brings the converge that adds it;
+// nothing else re-drives it. Before its leg's first probe its row reads
+// PENDING and the verdict names nothing, though the converge's add, which
+// asks for availability alone, adds it all the same.
+func TestCheckRoundNamesALackingMemberAndTheConvergeAddsIt(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+	node.mu.Lock()
+	array := node.arrays[mdDev]
+	array.members = slices.DeleteFunc(slices.Clone(array.members),
+		func(member string) bool { return member == leg2 })
+	array.degraded = 1
+	node.publishArray(array)
+	node.mu.Unlock()
+	if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+		t.Fatalf("a lacking member on a leg with a pending row was named: %v",
+			reply)
+	}
+	probeAllLegs(t, srv)
+	assertNamesOnly(t, checkCntlrVerdict(t, srv, 2), "check round",
+		legName(srv, testDataLeg2))
+	assertNamesOnly(t, infoVerdict(t, srv), "info read",
+		legName(srv, testDataLeg2))
+
+	node.Reset()
+	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	addCall := "cmd mdadm " + mdDev + " --add --failfast " + leg2
+	if mdadm := node.callsMatching("cmd mdadm"); !slices.Equal(mdadm,
+		[]string{addCall}) {
+		t.Fatalf("the converge ran %v, want exactly %q", mdadm, addCall)
+	}
+	if verdict := checkCntlrVerdict(t, srv, 2); verdict.GetCode() != 0 {
+		t.Fatalf("the check round after the add: %v", verdict)
+	}
+}
+
+// TestARefusedPutBackRemoveLeavesTheAddUnrun pins the put-back's error rule
+// (CN12): a --remove of the failed member that md refuses, or that is killed
+// before it does anything, is the group's error for the pass, and the add is
+// not run, since mdadm would refuse to add a member md still holds. Nothing
+// is remembered: the next check round names the member again, so the
+// worker's re-sent syncup tries again.
+func TestARefusedPutBackRemoveLeavesTheAddUnrun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arm  func(node *fakeNode, line string)
+	}{
+		{"refused", func(node *fakeNode, line string) {
+			node.failCmd[line] = "mdadm: hot remove failed: " +
+				"Device or resource busy"
+		}},
+		{"killed, no effect", func(node *fakeNode, line string) {
+			node.killCmdNoEffect[line] = true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			ctx := context.Background()
+			opts := reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true}
+			syncupBoth(t, srv, opts)
+			probeAllLegs(t, srv)
+			mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
+				testCluster, testCn, testSp, 0, 0, false))
+			leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+			failOutOfSlot(node, mdDev, leg2)
+			removeCall := "cmd mdadm " + mdDev + " --remove " + leg2
+			tc.arm(node, removeCall)
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if got := countCalls(node, removeCall); got != 1 {
+				t.Fatalf("the converge ran %q %d times, want once",
+					removeCall, got)
+			}
+			assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
+			assertNoCall(t, node, "cmd mdadm "+mdDev+" --fail")
+			row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+			if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("grp data after a refused remove: %v %q, want ERROR",
+					row.GetStatus(), row.GetDetails())
+			}
+			assertNamesOnly(t, checkCntlrVerdict(t, srv, 2),
+				"check round after the refused remove",
+				legName(srv, testDataLeg2))
+		})
 	}
 }
 

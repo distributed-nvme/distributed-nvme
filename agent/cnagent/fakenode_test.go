@@ -315,6 +315,11 @@ type fakeArray struct {
 	// memberState scripts dev-*/state per member path; a member without an
 	// entry reads what the kernel shows for dnv's members (memberStateOf).
 	memberState map[string]string
+	// memberSlot scripts dev-*/slot per member path; a member without an
+	// entry reads its place in members (memberSlotOf). mdFail moves a member
+	// out of its slot, as md does once no IO to it is pending, and an mdadm
+	// --add or --remove of the member ends the entry.
+	memberSlot map[string]string
 	// unbound are the members md has unbound (fakeNode.unbindMember). A
 	// republish keeps them unbound; an mdadm --add or --remove of the
 	// member, or a stop, ends it.
@@ -2218,6 +2223,7 @@ func (f *fakeNode) mdAdd(args []string) (string, int) {
 	member := args[len(args)-1]
 	array.members = append(array.members, member)
 	delete(array.memberState, member)
+	delete(array.memberSlot, member)
 	delete(array.unbound, member)
 	f.superblocks[member] = true
 	f.publishArray(array)
@@ -2225,7 +2231,9 @@ func (f *fakeNode) mdAdd(args []string) (string, int) {
 }
 
 // mdFail marks a member faulty, as SET_DISK_FAULTY does: it stays held, and
-// its dev-*/state keeps the failfast flag beside the new one.
+// its dev-*/state keeps the failfast flag beside the new one. md moves a
+// failed member out of its slot once no IO to it is pending, and the fake
+// has none, so the slot reads none at once.
 func (f *fakeNode) mdFail(args []string) (string, int) {
 	dev := args[0]
 	_, array := f.arrayByDev(dev)
@@ -2240,6 +2248,10 @@ func (f *fakeNode) mdFail(args []string) (string, int) {
 		array.memberState = make(map[string]string)
 	}
 	array.memberState[member] = "faulty,failfast"
+	if array.memberSlot == nil {
+		array.memberSlot = make(map[string]string)
+	}
+	array.memberSlot[member] = mdSlotNone
 	f.publishArray(array)
 	return "", 0
 }
@@ -2259,6 +2271,7 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 	}
 	array.members = kept
 	delete(array.memberState, member)
+	delete(array.memberSlot, member)
 	delete(array.unbound, member)
 	f.publishArray(array)
 	return "", 0
@@ -2280,6 +2293,7 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 //	/sys/block/{node}/md/sync_completed             running arrays only
 //	/sys/block/{node}/md/dev-{kname}                one per member
 //	/sys/block/{node}/md/dev-{kname}/state          "in_sync,failfast", …
+//	/sys/block/{node}/md/dev-{kname}/slot           "0", "1", or "none"
 //	/sys/block/{node}/md/dev-{kname}/block/dev      the member's major:minor
 //	/sys/block/{node}/md/dev-{kname}/block/dm/name  the member's DM NAME
 //
@@ -2352,18 +2366,21 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 		f.files[mdDir+"/sync_action"] = array.syncAction + "\n"
 		f.files[mdDir+"/sync_completed"] = array.syncCompleted + "\n"
 	}
-	for _, member := range array.members {
+	for i, member := range array.members {
 		devDir := mdDir + "/dev-" + f.kernelName(member)
 		f.dirs[devDir] = true
 		if array.unbound[member] {
 			// No block link, and an attribute of the member's own reads
 			// ENODEV (unbindMember).
-			f.errFiles[devDir+"/state"] = &fs.PathError{
-				Op: "read", Path: devDir + "/state", Err: syscall.ENODEV}
+			for _, attr := range []string{"/state", "/slot"} {
+				f.errFiles[devDir+attr] = &fs.PathError{
+					Op: "read", Path: devDir + attr, Err: syscall.ENODEV}
+			}
 			continue
 		}
 		f.dirs[devDir+"/block"] = true
 		f.files[devDir+"/state"] = f.memberStateOf(array, member) + "\n"
+		f.files[devDir+"/slot"] = memberSlotOf(array, member, i) + "\n"
 		if devNo := f.devNo[member]; devNo != "" {
 			f.files[devDir+"/block/dev"] = devNo + "\n"
 		}
@@ -2391,6 +2408,15 @@ func (f *fakeNode) memberStateOf(array *fakeArray, member string) string {
 		return "in_sync,failfast"
 	}
 	return "spare"
+}
+
+// memberSlotOf is a member's dev-*/slot: the scripted one, else its place
+// in the array's member list, the place md gives a member it holds in sync.
+func memberSlotOf(array *fakeArray, member string, place int) string {
+	if slot, ok := array.memberSlot[member]; ok {
+		return slot
+	}
+	return strconv.Itoa(place)
 }
 
 func (f *fakeNode) unpublishArray(array *fakeArray) {
@@ -2481,6 +2507,21 @@ func (f *fakeNode) setMemberState(dev, member, state string) {
 		array.memberState = make(map[string]string)
 	}
 	array.memberState[member] = state
+	f.publishArray(array)
+}
+
+// setMemberSlot scripts one member's dev-*/slot, verbatim.
+func (f *fakeNode) setMemberSlot(dev, member, slot string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return
+	}
+	if array.memberSlot == nil {
+		array.memberSlot = make(map[string]string)
+	}
+	array.memberSlot[member] = slot
 	f.publishArray(array)
 }
 

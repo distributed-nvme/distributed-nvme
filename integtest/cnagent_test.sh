@@ -1243,6 +1243,63 @@ kmsg_refused() {
 
 mdstat() { cat /proc/mdstat 2>/dev/null || true; }
 
+# md_member_of <dm name> — the md array node that holds the dm device <dm
+# name> as a member, and the member's kernel name, as "<mdN> <dm-K>": the
+# array whose md/ directory holds the member's dev-<dm-K>, which needs no
+# udev link. It fails, saying so, when the device or such an array is not
+# there, as between the remove and the add of a put-back.
+md_member_of() {
+	local dmk d node
+	dmk=$(readlink -f "/dev/mapper/$1" 2>/dev/null) || dmk=""
+	dmk=${dmk##*/}
+	case "$dmk" in
+	dm-*) ;;
+	*)
+		echo "md_member_of: /dev/mapper/$1 is not a dm device" >&2
+		return 1
+		;;
+	esac
+	for d in /sys/block/md*/md/dev-"$dmk"; do
+		[ -d "$d" ] || continue
+		node=${d#/sys/block/}
+		echo "${node%%/*} $dmk"
+		return 0
+	done
+	echo "md_member_of: no array holds $1 ($dmk)" >&2
+	return 1
+}
+
+# md_member_read <dm name> — one line "state=<s> slot=<n> wsect=<w>": the
+# member's md "state" and "slot" (cnagent.md CN12) and the sectors written
+# to the member device so far, field 7 of its /sys/block stat. It fails,
+# saying so, on a read that fails.
+md_member_read() {
+	local where node dmk state slot wsect
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	state=$(cat "/sys/block/$node/md/dev-$dmk/state") || return 1
+	slot=$(cat "/sys/block/$node/md/dev-$dmk/slot") || return 1
+	wsect=$(awk '{print $7}' "/sys/block/$dmk/stat") || return 1
+	case "$wsect" in
+	'' | *[!0-9]*)
+		echo "md_member_read: $dmk's write sector count reads '$wsect'" >&2
+		return 1
+		;;
+	esac
+	echo "state=$state slot=$slot wsect=$wsect"
+}
+
+# md_member_fail <dm name> — fails the member by hand with mdadm --fail, as
+# md fails one whose IO errors with md's failfast flag, then prints
+# md_member_read's line.
+md_member_fail() {
+	local where node dmk
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	mdadm "/dev/$node" --fail "/dev/mapper/$1" >&2 || return 1
+	md_member_read "$1"
+}
+
 # ctrl_of <nqn> <traddr> — the controller device backing one path, so a dead
 # path can be disconnected by device instead of by NQN (cnagent_integtest.md,
 # Cases, clone_xfer).
@@ -3305,6 +3362,81 @@ converge_check() { # cnidx sp cntlr cntlrrev
 	assert_all_ok "$out" .cntlr_info "cn$idx check-cntlr"
 }
 
+# check_verdict prints one CheckCntlr round's verdict as "<code> <details>",
+# whatever the code: the code is what the caller reads, not what the call
+# asserts (cnagentctl prints the reply before it exits on another code). A
+# round that did not answer prints nothing.
+check_verdict() { # cnidx sp cntlr rev
+	local out
+	out=$(cnctl "$1" check-cntlr --revision "$4" --sp "$2" --cntlr "$3" \
+		--expect-code 4 2>/dev/null || true)
+	[ -n "$out" ] || return 0
+	printf '%s %s\n' "$(jq_of "$out" '.agent_reply.code // 0')" \
+		"$(jq_of "$out" '.agent_reply.details // ""')"
+}
+
+# resync_until_clean plays the worker's re-sync on a cntlr's verdict
+# (dnv-worker.md RW4): a check round, and while it answers the leftover code,
+# the SyncupCntlr re-sent at the stored revision, until a round reads clean.
+resync_until_clean() { # cnidx sp cntlr rev req secs label
+	local deadline=$((SECONDS + $6)) got
+	while :; do
+		got=$(check_verdict "$1" "$2" "$3" "$4")
+		case "$got" in
+		"0 "*) return 0 ;;
+		"4 "*) cn_syncup_cntlr "$1" "$5" >/dev/null ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$7: after $6 s cn$1's check round reads '$got'"
+		sleep 1
+	done
+}
+
+# md_wait_clean polls a cntlr's GetCntlrInfo until each md row it names
+# reads OK with none of the state words a missing, failed or rebuilding
+# member brings (cnagent.md CN28): the array whole again.
+md_wait_clean() { # cnidx sp cntlr secs label grpid…
+	local idx=$1 sp=$2 c=$3 secs=$4 label=$5 out key st det bad
+	local deadline=$((SECONDS + secs))
+	shift 5
+	while :; do
+		out=$(cnctl "$idx" get-cntlr-info --sp "$sp" --cntlr "$c" \
+			--expect-code 4 2>/dev/null || true)
+		bad=""
+		for key in "$@"; do
+			key=$(d16 "$key")
+			st=$(jq_of "$out" \
+				".cntlr_info.grp_id_to_md_raid[\"$key\"].status // \"ABSENT\"")
+			det=$(jq_of "$out" \
+				".cntlr_info.grp_id_to_md_raid[\"$key\"].details // \"\"")
+			case "$st:$det" in
+			RES_STATUS_OK:*degraded* | RES_STATUS_OK:*recovering* | \
+				RES_STATUS_OK:*resyncing* | RES_STATUS_OK:) bad="$bad $key=[$det]" ;;
+			RES_STATUS_OK:*) ;;
+			*) bad="$bad $key=$st[$det]" ;;
+			esac
+		done
+		[ -z "$bad" ] && return 0
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$label: after $secs s cn$idx's md rows read:$bad"
+		sleep 1
+	done
+}
+
+# member_field <md_member_read line> <key> — one field of the line.
+member_field() {
+	printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p"
+}
+
+# member_in_sync is true when an md_member_read line's state carries both
+# in_sync and failfast: a member in sync that kept md's failfast flag.
+member_in_sync() { # <md_member_read line>
+	local state
+	state=",$(member_field "$1" state),"
+	case "$state" in *,in_sync,*) ;; *) return 1 ;; esac
+	case "$state" in *,failfast,*) ;; *) return 1 ;; esac
+}
+
 # bitmap_hex runs one of the bitmap RPCs and returns just the hex line; the
 # second line of the reply is the bit count
 # (cnagent_integtest.md, The driver: `cnagentctl`). Taking it here rather than
@@ -3999,14 +4131,17 @@ case_redund() {
 	[ -z "$rules" ] || die "degrade: vm1 still holds partition rules: $rules"
 	leg_wait_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
 	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
-	# The leg rows clear on their probers' next completed round. The md
-	# member md failed stays failed — CN12 re-adds a leg only when the array
-	# lacks it (cnagent.md, Known limits) — so the data array stays
-	# degraded, and OK, on CN2 through the readonly stage; the lateflip
-	# stage assembles the arrays anew on CN1.
+	# The leg rows clear on their probers' next completed round. The member
+	# md failed stays failed until a converge puts it back (cnagent.md
+	# CN12), and no converge of CN2 runs before the readd stage, which plays
+	# the worker's re-send of the SyncupCntlr that the check round's verdict
+	# asks for once those rows read OK. So the reply's code is read there and
+	# not here: an info read names the member as soon as its leg's row reads
+	# OK (CN30).
 	deadline=$((SECONDS + 60))
 	while :; do
-		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2")
+		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" \
+			--expect-code 4 2>/dev/null || true)
 		n=0
 		for lkey in "$(d16 "${A_MLEG[1]}")" "$(d16 "${A_DLEG[1]}")"; do
 			[ "$(jq_of "$out" \
@@ -4023,6 +4158,109 @@ case_redund() {
 	# which could land on DN2's member alone: md had failed DN1's.
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund degraded readback"
+
+	stage readd "the member md failed is named and put back (CN12, CN30)"
+	# The degrade stage left the data member of DN1's leg failed on CN2 —
+	# and the meta member as well, if md sent it an IO while the partition
+	# held — and its leg serves again with its row OK. md moves a failed
+	# member out of its slot once no IO to it is pending, and CN2's check
+	# round then names it with the leftover code: a drop changes no desired
+	# state, so nothing else would bring the converge that puts it back.
+	# The round names nothing but DN1's members.
+	name=$(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")
+	local mname details entry vd mrd
+	mname=$(cn_dm_name c9 2 "$sp" "${A_MLEG[1]}")
+	deadline=$((SECONDS + 30))
+	while :; do
+		vd=$(check_verdict 2 "$sp" "$c2" "$rev2")
+		case "$vd" in
+		"4 "*"md_member:$name"*) break ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "readd: after 30 s CN2's check round reads '$vd', want" \
+				"the leftover code naming md_member:$name"
+		sleep 1
+	done
+	details=${vd#4 }
+	details=${details#leftover(*): }
+	case "$details" in
+	*";"*) die "readd: the verdict reports more than members: $vd" ;;
+	esac
+	while IFS= read -r entry; do
+		case "$entry" in
+		"md_member:$name" | "md_member:$mname") ;;
+		*) die "readd: the verdict names '$entry', not a member of DN1's legs: $vd" ;;
+		esac
+	done < <(printf '%s\n' "$details" | sed 's/, /\n/g')
+	log "  CN2's verdict: $vd"
+	# The worker re-sends the SyncupCntlr on that code every round until it
+	# goes (dnv-worker.md RW4, RW12), at the revision it already sent; its
+	# converge removes each member and adds it back (CN12).
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 "readd"
+	md_wait_clean 2 "$sp" "$c2" 120 "readd" "$A_MGRP" "$A_DGRP"
+	mrd=$(helper 2 "md_member_read $name") ||
+		die "readd: DN1's data member is not in CN2's data array: $mrd"
+	member_in_sync "$mrd" ||
+		die "readd: DN1's data member put back reads $mrd, want in_sync with failfast"
+	seq=$(helper 2 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" "^mdadm .* --remove /dev/mapper/$name\$")" -ge 1 ] ||
+		die "readd: no converge of this stage removed $name"
+	[ "$(event_cnt "$seq" "^mdadm .* --add --failfast /dev/mapper/$name\$")" -ge 1 ] ||
+		die "readd: no converge of this stage added $name back"
+
+	stage resync "a member put back is resynced from md's bitmap, measured in sectors"
+	# The same put-back on a whole array, by hand and with no IO to the
+	# array while the member is out, so md's write-intent bitmap marks
+	# nothing and a re-add copies nothing: the sectors written to the member
+	# tell it from a full copy of the array, which mdadm can make instead
+	# when it cannot re-add, where the time a resync takes cannot. md fails a
+	# member the same way on an IO error with its failfast flag (cnagent.md
+	# CN12).
+	local before after delta full
+	mrd=$(helper 2 "md_member_fail $name") ||
+		die "resync: failing DN1's data member by hand failed: $mrd"
+	case ",$(member_field "$mrd" state)," in
+	*,faulty,*) ;;
+	*) die "resync: DN1's data member reads $mrd after mdadm --fail" ;;
+	esac
+	deadline=$((SECONDS + 30))
+	while [ "$(member_field "$mrd" slot)" != none ]; do
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "resync: md has not moved the failed member out of its slot: $mrd"
+		sleep 1
+		mrd=$(helper 2 "md_member_read $name") ||
+			die "resync: reading DN1's data member failed: $mrd"
+	done
+	before=$(member_field "$mrd" wsect)
+	assert_eq "$(check_verdict 2 "$sp" "$c2" "$rev2")" \
+		"4 leftover(1): md_member:$name" "resync: CN2's verdict"
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "resync put back"
+	# That converge's only mdadm commands: the remove, then the add.
+	md2=$(cnctl 2 md-name --sp "$sp" --slice-idx 0 --grp-idx 0)
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" '^mdadm ')" 2 \
+		"resync: the converge's mdadm commands"
+	assert_before "$seq" \
+		"^mdadm $(jq_of "$md2" .dev_path) --remove /dev/mapper/$name\$" \
+		"^mdadm $(jq_of "$md2" .dev_path) --add --failfast /dev/mapper/$name\$" \
+		"resync: the remove, then the add"
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 30 "resync"
+	md_wait_clean 2 "$sp" "$c2" 60 "resync" "$A_DGRP"
+	mrd=$(helper 2 "md_member_read $name") ||
+		die "resync: DN1's data member is not in CN2's data array: $mrd"
+	member_in_sync "$mrd" ||
+		die "resync: DN1's data member put back reads $mrd, want in_sync with failfast"
+	[ "$(member_field "$mrd" slot)" != none ] ||
+		die "resync: DN1's data member put back holds no slot: $mrd"
+	after=$(member_field "$mrd" wsect)
+	delta=$((after - before))
+	full=$((RAID1_EXT2_DATA * BLOCK_SIZE / 512))
+	log "  the put-back wrote $delta sectors to the member; a full copy" \
+		"writes $full"
+	[ $((delta * 8)) -lt "$full" ] ||
+		die "resync: the put-back wrote $delta sectors to the member, not" \
+			"under an eighth of the array's $full: a full copy, not a re-add"
 
 	stage readonly "SP_LEVEL_READONLY: reads served, writes error ([D11])"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READONLY"'
@@ -4045,6 +4283,17 @@ case_redund() {
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund readwrite again"
+	# DN1's data member is failed by hand before the write, as md fails one
+	# on an IO error, so the write reaches DN2's leg alone and the lateflip
+	# stage finds DN1's leg stale (Lab facts). No check round or converge of
+	# CN2 runs from here to the lateflip's demote, which stops the array: a
+	# converge would put the member back (cnagent.md CN12).
+	mrd=$(helper 2 "md_member_fail $(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")") ||
+		die "redund readwrite: failing DN1's data member by hand failed: $mrd"
+	case ",$(member_field "$mrd" state)," in
+	*,faulty,*) ;;
+	*) die "redund readwrite: DN1's data member reads $mrd after mdadm --fail" ;;
+	esac
 	assert_eq "$(helper "$hv" "write_probe '$dev' 9")" ok \
 		"redund write after readwrite"
 
@@ -4069,9 +4318,9 @@ case_redund() {
 	# own, which also puts the ns-dev on the raid0 and moves the namespace
 	# optimized, and CN1 must see no second SyncupCntlr. CN1
 	# assembles from the members' superblocks, where the data array's DN1
-	# leg is the member md failed on CN2 in the degrade stage: md kicks that
-	# stale member from the assembly, and CN12's member reconciliation adds
-	# it back. An attempt that runs between two flips sees one member of a
+	# leg is the member failed by hand on CN2 in the readonly stage: md kicks
+	# that stale member from the assembly, and CN12's member reconciliation
+	# adds it back. An attempt that runs between two flips sees one member of a
 	# group available: mdadm refuses to start the array from a member whose
 	# superblock still counts both ([D16]), or starts it degraded from the
 	# fresher one and a later attempt adds the other. Either way the rows
@@ -4203,8 +4452,9 @@ case_redund() {
 	# Once both legs are back, a block only the newer leg holds reads as that
 	# leg's ([D16]). For MiB 9 of the device only DN2's data leg holds zeros,
 	# from the readonly stage's write, which reached DN2's leg alone because
-	# md had failed DN1's member in the degrade stage; DN1's stale leg holds
-	# the failover stage's pattern, and that stage's write allocated MiB 9 in
+	# DN1's member had been failed by hand just before it; DN1's stale leg
+	# holds the degrade stage's pattern, which the readd stage resynced onto
+	# it, and the failover stage's write allocated MiB 9 in
 	# the thin pool, so zeros here come from a leg, never from an unwritten
 	# block. However CN1's attempts started the data array (above), it must
 	# run from DN2's leg, so the block reads as zeros; an array started from

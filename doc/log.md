@@ -247,7 +247,9 @@ thing.
   `cluster_id` plus `cn_id` or `dn_id` for a node-level pass, plus `sp_id`
   and `cntlr_id` or `side_id` for an object-level one — then `leftover_cnt`,
   `leftovers` (the sorted "kind:name" entries joined by a space; `kind` is
-  one of the `LeftoverKind*` labels of `agent/sweep.go`) and
+  one of the `LeftoverKind*` labels of `agent/sweep.go`, and a cntlr's
+  read-only verdict lists there, under a kind of its own, the md members
+  `cnagent.md` CN30 names) and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
   the dn, a disk whose identity is not confirmed or a side with bytes
@@ -274,7 +276,13 @@ syncup on the code (`dnv-worker.md` RW4). Both are emitted once per pass —
 the agent's on every sweep and every
 verdict that was not clean, the worker's on every such reply — so a
 leftover that does NOT go away is in both logs every round, which is
-exactly what distinguishes it from one the next pass removed. A clean pass
+exactly what distinguishes it from one the next pass removed. A leftover
+that only a `Check*` round's verdict names, and that the `Syncup*` it
+brings does not report — an md member that syncup's converge puts back
+or adds (`cnagent.md` CN12), or a subsystem directory that outlives its last
+controller — is in the agent's record alone: the worker runs the re-sent
+`Syncup*` under the round's own trace id (`dnv-worker.md` RW4, RW10), so its
+`syncup result` record under that id is the re-send. A clean pass
 emits nothing; `sweep leftover` is never a "nothing to report" record. The
 agent's record carries the FULL list, while `details` — in the reply and
 therefore in `syncup leftover` — shows at most `maxLeftoverNames` leftover

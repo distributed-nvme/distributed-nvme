@@ -5616,11 +5616,13 @@ that component's document and only pointed to here.
   namespace that has a live controller but no usable path. A leg that md has
   failed out of its md-raid1 group gets none of this IO; md fails such a leg
   when an IO it sends failfast (`cnagent.md` CN12) reaches the source after
-  src step 1, before the primary has read the ANA change, and the array
-  stays degraded afterwards (`cnagent.md`, Known limits). The primary's own
-  reads of the pool's status, in its check rounds, info reads and converges
-  (`cnagent.md` CN28), carry the `--noflush` flag and commit nothing
-  (`dnagent.md` SH17). What still commits the pool in a gap: a thin
+  src step 1, before the primary has read the ANA change, and the primary's
+  member reconciliation puts the leg back once its path to the destination
+  serves and its health probe passes (`cnagent.md` CN12, CN30). The
+  primary's own reads of the pool's status, in its check rounds, info
+  reads and converges (`cnagent.md` CN28), carry the `--noflush` flag and
+  commit nothing (`dnagent.md` SH17). What still commits the pool in a
+  gap: a thin
   device's create or delete (`cnagent.md` CN14); every read through a thin
   metadata snapshot, whose reservation commits the pool, the bitmap reads of
   a thin device and of a data leg (`cnagent.md` CN25) and the thin id

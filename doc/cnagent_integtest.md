@@ -80,7 +80,7 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   the systemd-ready property the mask depends on.
 * mdadm gates a degraded assembly from a device list by the survivor's recorded
   array state (`cnagent.md` CN12), and the late flip relies on both halves: the
-  member md failed in the dead-leg stage is kicked as stale while the other,
+  member failed by hand before it is kicked as stale while the other,
   whose array state excludes it, starts the array; and a lone member whose
   superblock still counts both is refused, leaving no inactive array for
   `ensureGroup` to hold in error. redund asserts the refusal before it builds
@@ -210,10 +210,20 @@ data surviving. With the primary's legs into one
 DN cut under a host write, every check round reads both md rows OK until the
 data row reports degraded and the dead legs' rows error, and no mdadm runs
 (CN12, CN28, CN29); the write completes on the surviving leg and reads back,
-the leg rows recover once the partition lifts, and the member md failed
-staying failed is the known limit the stage tolerates (`cnagent.md`, Known
-limits). Read-only fails writes through dm-flakey (CN16's read-only rule,
-CN19; `architecture.md`, [D11]). The late flip promotes before any side
+and the leg rows recover once the partition lifts. The check round then
+names the member md failed, with the leftover code, and the `SyncupCntlr`
+re-sent as the worker would puts it back: the arrays read clean and the
+member is in sync with its failfast flag (CN12, CN30). The same put-back of
+a member failed by hand, on a whole array with no IO while the member is
+out, is one converge whose only mdadm commands are the remove and then the
+add, and the sectors it writes to the member are a small part of the
+array: that count, never a time, tells md's re-add from its bitmap from
+the full copy mdadm makes when it cannot re-add. Read-only fails writes
+through dm-flakey (CN16's read-only rule, CN19; `architecture.md`,
+[D11]); the data array's member on the DN the
+partition cut is then failed by hand, so the stage's last write reaches the
+other leg alone, and no converge of the primary puts it back before the
+late flip demotes it. The late flip promotes before any side
 flips, so the promotion assembles no array and builds no raid0: both md rows
 read "no available leg", the ns-dev stays parked with its row in error, and
 the promotion writes no optimized group, so the host's path stays inaccessible

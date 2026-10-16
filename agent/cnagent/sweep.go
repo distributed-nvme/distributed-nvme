@@ -1711,11 +1711,18 @@ func (s *CnAgentServer) orphanCloneMetaNames(
 // touched (CN23), over the listings of the call's reading (plan.rd,
 // plan.walk; CN30). A converge passes no reading and lists the node itself
 // (enumerateCn).
+//
+// putBack are the md members the verdict names beside the leftovers, by dm
+// name, each a member the converge would put back or add (putBackNames,
+// CN30): what the call's probe read, so nothing here reads them again. A
+// converge passes none: it has just tried to put them back, and its rows say
+// how that went.
 func (s *CnAgentServer) sweepCntlr(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	remove bool,
+	putBack []string,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	actual := s.enumerateCn(
@@ -1801,6 +1808,9 @@ func (s *CnAgentServer) sweepCntlr(
 		// dead object's (SH14). From the request alone as well, so this too
 		// runs on every converge.
 		st.tracker.Keep(cntlrResKeys(plan))
+	}
+	for _, name := range putBack {
+		res.Add(agent.LeftoverKindMdMember, name)
 	}
 	res.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return res

@@ -393,6 +393,20 @@ not come from the new side's cutover request: that request's pass waits for
 the old side's own pass only as long as its connect budget (`dnagent.md`
 DN13), so an old side whose pass outlasts the budget, or any other step of
 that pass that stops, leaves the gap to a later pass and fails the case.
+With raid1 the case then fails the moving leg's md member on the primary by
+hand: the drop an IO md sends with its failfast flag makes when it meets the
+old side just after its export turns inaccessible (`architecture.md`, Known
+limits), which no run can force. It does so after the gap check, so the
+syncup the drop brings lies outside the window that check reads, and waits
+for the array to read clean before the finish. Any converge of the
+primary would put the member back, so before the drop the primary has
+applied the pool's latest revision and runs no CN10 retry: the converge
+that puts the member back is then the one the naming round brings. The
+member must come back in sync with its failfast flag, and one
+trace id must carry the primary's check round whose verdict named it, the
+`SyncupCntlr` the worker re-sent on that round, and that converge's remove
+and then add of the member (`cnagent.md` CN12, CN30; `dnv-worker.md` RW4,
+RW10).
 Its leg bitmap is read and pushed only once the primary reaches the leg
 through the new side, and it finishes under the same leg id with an
 optimized path before any read (`architecture.md`, Migration;
@@ -660,7 +674,7 @@ the connect attempted.
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
 * **Without redundancy the suite is smaller**: ops' leg bitmap read, copy's
-  spare stage and react's leg repair are skipped.
+  forced drop and spare stage and react's leg repair are skipped.
 * **A disk node holds the controller node's md superblocks**
   (`architecture.md`, Components: invocation reference), as the primary's
   per-CN linear maps the side itself, and an unmasked disk-node guest's stock

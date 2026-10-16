@@ -1894,6 +1894,16 @@ side_to_cn_nqn() { # <sp_id> <leg_id> <cn_id>
 		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")"
 }
 
+# cn_leg_name is common.NameFmt.CnLegName (common/name_fmt.go): a cntlr's
+# dm-linear wrapper over one leg, the device md holds as the leg's member of
+# its group's array (cnagent.md CN10, CN12). The dm prefix is the helper
+# preamble's DM_PREFIX and the kind the leg's DmKind.
+cn_leg_name() { # <cn_id> <sp_id> <leg_id>
+	require_cluster_id
+	printf 'dnv-%s-%s-c9-%s-%s' "$(hex16 "$CLUSTER_ID")" "$(hex16 "$1")" \
+		"$(hex16 "$2")" "$(hex16 "$3")"
+}
+
 # NO STEP OF THIS SUITE CALLS IT: the copy case's migration is asserted
 # through `sp inspect-side` and the side lists, never by looking the source
 # export up by NQN on the DN. The dn cleanup sweeps the :3: family by prefix.
@@ -3998,6 +4008,61 @@ tmpfs_teardown() {
 	done
 	rmdir "$TMPFS_DIR" 2>/dev/null
 	return 0
+}
+
+# md_member_of <dm name> prints the md array node holding the dm device <dm
+# name> as a member and the member's kernel name, "<mdN> <dm-K>", found by
+# the member's directory under each array's md/; md_member_read <dm name>
+# prints "state=<s> slot=<n> wsect=<w>", the member's md state and slot
+# (cnagent.md CN12) and the sectors written to the member device, field 7 of
+# its /sys/block stat; md_member_fail <dm name> fails the member by hand with
+# mdadm --fail and prints md_member_read's line. Each fails, saying so, on a
+# device or an array that is not there and on a read that fails. Copied from
+# md_member_of, md_member_read and md_member_fail
+# (integtest/cnagent_test.sh).
+md_member_of() {
+	local dmk d node
+	dmk=$(readlink -f "/dev/mapper/$1" 2>/dev/null) || dmk=""
+	dmk=${dmk##*/}
+	case "$dmk" in
+	dm-*) ;;
+	*)
+		echo "md_member_of: /dev/mapper/$1 is not a dm device" >&2
+		return 1
+		;;
+	esac
+	for d in /sys/block/md*/md/dev-"$dmk"; do
+		[ -d "$d" ] || continue
+		node=${d#/sys/block/}
+		echo "${node%%/*} $dmk"
+		return 0
+	done
+	echo "md_member_of: no array holds $1 ($dmk)" >&2
+	return 1
+}
+
+md_member_read() {
+	local where node dmk state slot wsect
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	state=$(cat "/sys/block/$node/md/dev-$dmk/state") || return 1
+	slot=$(cat "/sys/block/$node/md/dev-$dmk/slot") || return 1
+	wsect=$(awk '{print $7}' "/sys/block/$dmk/stat") || return 1
+	case "$wsect" in
+	'' | *[!0-9]*)
+		echo "md_member_read: $dmk's write sector count reads '$wsect'" >&2
+		return 1
+		;;
+	esac
+	echo "state=$state slot=$slot wsect=$wsect"
+}
+
+md_member_fail() {
+	local where node dmk
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	mdadm "/dev/$node" --fail "/dev/mapper/$1" >&2 || return 1
+	md_member_read "$1"
 }
 
 # cn_up installs the md mask and starts THIS guest's single cn agent.
@@ -11816,6 +11881,9 @@ COPY_FLIP_RECS=""
 # copy_gap_reads' answer; copy_check_gap reads both.
 COPY_CUTOVER_REV=""
 COPY_GAP_READ=""
+# COPY_QUIET_LAST is copy_drop_quiet's last observation, logged when it
+# changes.
+COPY_QUIET_LAST=""
 MD_STATE_LAST=""
 SRC_STACK_LAST=""
 
@@ -12267,6 +12335,178 @@ leg_bm_read() { # <leg id>
 		log "  td get-leg-bm of leg $1 failed: $sig"
 	fi
 	return 1
+}
+
+# copy_forced_drop is the copy case's forced drop (e2e_integtest.md, The
+# cases). With the primary's path to the new side optimized and the gap
+# printed, it fails the moving leg's md member on the primary by hand, as md
+# fails one when an IO it sends with its failfast flag meets the old side in
+# the moment after its export turns inaccessible (architecture.md, Known
+# limits), a race no run can force. A drop changes no desired state, so what
+# puts the member back is the primary's check round naming it once md has
+# moved it out of its slot, the SyncupCntlr the worker re-sends on that
+# code, and that converge's remove and add (cnagent.md CN12, CN30); the
+# resync writes through the new side's dm-clone.
+#
+# EVERY CONVERGE PUTS THE MEMBER BACK, so before the drop no converge other
+# than a re-send may still be due, or it would put the member back under a
+# trace id no check round's verdict carries and copy_check_drop would fail
+# a put-back that worked. Two can be due. (1) The SyncupCntlr of the pool's
+# latest revision: `migr append-bm` bumps it, and the worker holds the
+# cntlr half of that fan-out until the sides report it, for up to one
+# cntlr_interval (dnv-worker.md, RW14). So the group must read clean at an
+# applied revision no older than the pool's revision of now (grp_md_clean
+# says why that proves the converge at it has finished). (2) An attempt of
+# the primary's CN10 retry, which the cutover's converge registers when it
+# runs inside the gap, at 32 slices most often: the primary must run no
+# converge of its own for a whole retry interval (copy_drop_quiet). The
+# group is read clean before the drop, so a drop the race made is put back
+# first, and after it; then the member must read in sync with its failfast
+# flag, and the records must show the re-send (copy_check_drop).
+copy_forced_drop() { # <leg id> <grp id>
+	local name mark mrd state rev
+	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")
+	case "$name" in
+	*notanid-*) die "cn_leg_name produced '$name'" ;;
+	esac
+	sp_refresh
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
+	MD_STATE_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"cn$PRIMARY_CN to apply revision $rev and group $2 to read clean before the forced drop" \
+		grp_md_clean "$PRIMARY_CNTLR_ID" "$2" "$rev"
+	COPY_QUIET_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"cn$PRIMARY_CN to run no converge of its own for a whole retry interval before the forced drop" \
+		copy_drop_quiet
+	mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") ||
+		die "cannot count the lines of $(cn_log) on cn$PRIMARY_CN"
+	case "$mark" in
+	'' | *[!0-9]*) die "the line count of $(cn_log) on cn$PRIMARY_CN reads '$mark'" ;;
+	esac
+	mrd=$(helper_cn "$PRIMARY_CN" md_member_fail "$name") ||
+		die "failing leg $1's member $name on cn$PRIMARY_CN failed: $mrd"
+	state=${mrd%% *}
+	case ",${state#state=}," in
+	*,faulty,*) ;;
+	*) die "leg $1's member $name reads '$mrd' after mdadm --fail" ;;
+	esac
+	log "  failed leg $1's member $name on the primary by hand: $mrd"
+	MD_STATE_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary to put leg $1's member back and group $2 to read clean" \
+		grp_md_clean "$PRIMARY_CNTLR_ID" "$2" "$rev"
+	mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name") ||
+		die "leg $1's member $name is not in its array on cn$PRIMARY_CN: $mrd"
+	state=${mrd%% *}
+	case ",${state#state=}," in
+	*,in_sync,*) ;;
+	*) die "leg $1's member $name put back reads '$mrd', want in_sync" ;;
+	esac
+	case ",${state#state=}," in
+	*,failfast,*) ;;
+	*) die "leg $1's member $name put back reads '$mrd': md's failfast flag is gone" ;;
+	esac
+	log "  leg $1's member is back: $mrd"
+	copy_check_drop "$mark" "$name"
+}
+
+# copy_drop_quiet is true when the primary's cn agent runs no `os command`
+# under a trace id it minted itself for one CnConnectRetryInterval
+# (common/constants.go) and a margin: no attempt of the CN10 retry, a
+# converge of its own, has then run for a whole interval, so that retry is
+# not registered (cnagent.md, CN10). The agent mints such an id as
+# common.NewTraceId's bare hex output, where the worker's ids carry its
+# seed's prefix and a dash (dnv-worker.md, RW10) and the case's own is
+# $TRACE (grpc.md, T4); the gateway mints a bare one too, but only for a
+# request that arrives without an id, and every dnvctl call of this suite
+# carries $TRACE. The agent's leg health probes run no command. The guest
+# filters its log by the record's message and the driver parses what is
+# left; `fromjson?` drops a line torn by a write still in progress. A log it
+# cannot read is a false answer, which the caller's wait_until asks again. A
+# window with commands in it is logged when the commands change.
+copy_drop_quiet() {
+	local mark lines cmds
+	# common.CnConnectRetryInterval, plus a margin for an attempt that waits
+	# for the cntlr's lock behind a check round or an info read (cnagent.md,
+	# CN1).
+	local window=$((5 + 3))
+	mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") || return 1
+	case "$mark" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	sleep "$window"
+	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$((mark + 1)) $(cn_log) | \
+		grep -F '\"msg\":\"os command\"' || [ \$? -eq 1 ]") || return 1
+	cmds=$(printf '%s\n' "$lines" | "$JQ" -R -s -c '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "os command"
+		     and ((.trace_id // "") | test("^[0-9a-f]+$")))
+		 | .trace_id + " " + .cmd] | unique') || return 1
+	[ "$cmds" = "[]" ] && return 0
+	if [ "$cmds" != "$COPY_QUIET_LAST" ]; then
+		COPY_QUIET_LAST=$cmds
+		log "  cn$PRIMARY_CN ran converges of its own within ${window}s: $cmds"
+	fi
+	return 1
+}
+
+# copy_check_drop reads, in the primary's cn agent log after line <mark>, the
+# verdicts that named md_member:<name> (the `sweep leftover` records, log.md,
+# Leftovers) and the mdadm commands that named the member's device, and in
+# the worker's log the `syncup result` records (dnv-worker.md, Log records).
+# It fails unless one trace id carries all three: a check round's verdict
+# naming the member, the SyncupCntlr the worker re-sent on it, which runs
+# under the round's own trace id (dnv-worker.md RW10), and that converge's
+# remove and then add of the member. The gateway's info reads name the
+# member too, under the case's own trace id, with no syncup behind them. The
+# guest filters its log by the member's name and the driver parses what is
+# left; `fromjson?` drops a line torn by a write still in progress. Fatal on
+# a log it cannot read, as copy_gap_reads is.
+copy_check_drop() { # <mark> <name>
+	local lines drop traces t n
+	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$(($1 + 1)) $(cn_log) | \
+		grep -F '$2' || [ \$? -eq 1 ]") ||
+		die "cannot read $(cn_log) on cn$PRIMARY_CN"
+	drop=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
+		--arg m "md_member:$2" --arg dev "/dev/mapper/$2" '
+		[split("\n")[] | fromjson? // empty] as $r
+		| ([$r[] | select(.msg == "sweep leftover"
+		    and ((.leftovers // "") | split(" ") | any(. == $m)))
+		    | .trace_id] | unique) as $named
+		| [$named[] as $t
+		   | [$r[] | select(.msg == "os command" and .trace_id == $t
+		       and .cmd == "mdadm") | (.args // []) | join(" ")] as $c
+		   | ([$c[] | endswith("--remove " + $dev)] | index(true)) as $rm
+		   | ([$c[] | endswith("--add --failfast " + $dev)] | index(true)) as $add
+		   | select($rm != null and $add != null and $rm < $add)
+		   | $t] as $put
+		| {named: $named, put_back: $put}') ||
+		die "copy_check_drop: jq failed on $(cn_log) of cn$PRIMARY_CN"
+	traces=$(jq_of "$drop" '.put_back[]')
+	[ -n "$traces" ] ||
+		die "no trace id in $(cn_log) of cn$PRIMARY_CN carries both a" \
+			"verdict naming md_member:$2 and a converge's remove and then" \
+			"add of it: $drop"
+	for t in $traces; do
+		n=$(ssh_cp "grep -F '\"trace_id\":\"$t\"' $WORK/worker/worker.log | \
+			grep -cF '\"msg\":\"syncup result\"' || [ \$? -eq 1 ]") ||
+			die "cannot read the syncup records in $WORK/worker/worker.log on $CP_IP"
+		case "$n" in
+		'' | *[!0-9]*) die "the worker log's syncup records under $t read '$n'" ;;
+		esac
+		if [ "$n" -ge 1 ]; then
+			log "  the worker re-sent the SyncupCntlr under trace $t, whose" \
+				"check round named md_member:$2 and whose converge put it back"
+			return 0
+		fi
+	done
+	die "the worker's log holds no syncup result under a trace id whose" \
+		"check round named md_member:$2 and whose converge put it back" \
+		"($traces)"
 }
 
 # grp_md_clean is "md has finished rebuilding onto the promoted spare".
@@ -13163,8 +13403,11 @@ copy_xfer_delete() {
 # which moves its per-CN namespaces to inaccessible, until the destination
 # serves — the migration gap — EVERY path of that leg is inaccessible, and
 # an inaccessible nvme namespace REQUEUES rather than
-# errors. A host read issued in that window blocks in D state, where
-# `timeout` cannot reach it. The cutover waits for the destination's zeroing
+# errors, all but an IO md sends with its failfast flag: nvme fails that one
+# at once, and md fails the member (cnagent.md CN12), which only the IO sent
+# in the moment before the primary has read the ANA change can meet; the
+# forced drop below makes that drop by hand. A host read issued in that
+# window blocks in D state, where `timeout` cannot reach it. The cutover waits for the destination's zeroing
 # and for the primary's live path to it, so the gap holds only the disk
 # nodes' steps that the cutover's syncups start: the source's, then the
 # destination's connect to the source, its dm-clone and its ANA write. The
@@ -13422,6 +13665,16 @@ copy_migration() {
 		# refuses it, so an empty leg bitmap is reported rather than sent.
 		log "  leg $legid's bitmap is empty; skipping migr append-bm" \
 			"(an empty --bm-hex is refused on purpose, ctl/migr.go)"
+	fi
+
+	# THE FORCED DROP (raid1 only), after the gap check, so its syncup lies
+	# outside the window that check reads, and before the finish, while the
+	# leg has two sides and its writes go through the new side's dm-clone
+	# (copy_forced_drop).
+	if [ "$REDUND" = raid1 ]; then
+		copy_forced_drop "$legid" "$gid"
+	else
+		log "  no forced drop: under --redund $REDUND the leg is no md member"
 	fi
 
 	# FinishMigration without --force proves hydration with a live

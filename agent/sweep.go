@@ -25,25 +25,32 @@ import (
 
 // LeftoverKind labels a leftover in the reply's details and in the agent log,
 // so an operator reading either can tell which enumeration found it.
+// LeftoverKindMdMember is the one label no sweep's attribution produces: it
+// names an md member that a cn agent's cntlr verdict reports so that the
+// worker re-sends the SyncupCntlr whose converge puts the member back, or
+// adds it to an array that lacks it (cnagent.md CN30).
 const (
-	LeftoverKindDm      = "dm"
-	LeftoverKindMd      = "md"
-	LeftoverKindNvmet   = "nvmet"
-	LeftoverKindNvmetNs = "nvmet_ns"
-	LeftoverKindNvme    = "nvme"
-	LeftoverKindRecord  = "record"
+	LeftoverKindDm       = "dm"
+	LeftoverKindMd       = "md"
+	LeftoverKindMdMember = "md_member"
+	LeftoverKindNvmet    = "nvmet"
+	LeftoverKindNvmetNs  = "nvmet_ns"
+	LeftoverKindNvme     = "nvme"
+	LeftoverKindRecord   = "record"
 )
 
 // MsgSweepLeftover is the record of log.md, Leftovers, naming everything one
-// pass found that the desired state does not want. One record per pass, so a
-// lingering leftover shows up in the agent log every round rather than once.
+// pass found that keeps its scope from being clean (SweepResult). One record
+// per pass, so a lingering leftover shows up in the agent log every round
+// rather than once.
 const MsgSweepLeftover = "sweep leftover"
 
-// SweepResult is what one pass found: the objects still present that nothing
-// wants, and the failures — each enumeration or read that did not answer,
-// each removal that failed, and each condition an agent reports the same way
-// so that the worker re-sends the Syncup* whose converge acts on it
-// (LeftoverReply).
+// SweepResult is what one pass found: the leftovers — the objects still
+// present that nothing wants and, under LeftoverKindMdMember, the wanted md
+// members a cntlr verdict names (cnagent.md CN30) — and the failures — each
+// enumeration or read that did not answer, each removal that failed, and each
+// other condition an agent reports the same way so that the worker re-sends
+// the Syncup* whose converge acts on it (LeftoverReply).
 type SweepResult struct {
 	leftovers []string
 	failures  []string
@@ -55,7 +62,8 @@ func (r *SweepResult) Clean() bool {
 	return len(r.leftovers) == 0 && len(r.failures) == 0
 }
 
-// Add records one object of kind that is present and unwanted.
+// Add records one object of kind that is present and unwanted, or, under
+// LeftoverKindMdMember, an md member the converge would put back or add.
 func (r *SweepResult) Add(kind string, name string) {
 	r.leftovers = append(r.leftovers, kind+":"+name)
 }
