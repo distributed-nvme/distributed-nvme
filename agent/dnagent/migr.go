@@ -13,16 +13,28 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Migration source (DN12) — steps 1 and 2 happen in convergeSide/ensureCnDm;
-// this is step 3.
+// Migration source (DN12) — step 3, in two halves: the build, which
+// convergeSide runs before step 1, and the port link, which it runs after
+// ensureCnDm's suspend of step 2.
 // ---------------------------------------------------------------------------
 
-func (s *DnAgentServer) ensureMigrSrc(
+// buildMigrSrc is the build of src step 3 (architecture.md, Migration): the
+// dm-linear over the side device and, where the level has an export layer,
+// the subsystem that admits the destination's host and its namespace, all
+// probe-first. It reports whether the build held. It makes no port link, so
+// what it builds is out of the destination's reach (buildExport): the
+// destination can read through it only once linkMigrSrc runs, after the
+// suspend of step 2 has run, the order [D12]'s reason needs: no write may
+// reach a region of the side's data after the copy has read it. The link
+// does not wait for a suspend to have held (dnagent.md, Known limits). The
+// migration source rows carry a step that failed; the export's row is
+// otherwise left to linkMigrSrc, so that it reports the link.
+func (s *DnAgentServer) buildMigrSrc(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
-) {
+) bool {
 	t := st.tracker
 	srcInfo := &pb.SideInfo_MigrSrcInfo{}
 	info.MigrSrcInfo = srcInfo
@@ -30,11 +42,14 @@ func (s *DnAgentServer) ensureMigrSrc(
 	name := plan.migrSrcName()
 	err := s.ensureDmLinear(ctx, name, plan.sectors, plan.sideDevPath)
 	srcInfo.DmLinearInfo = t.FromErr(resKeyMigrSrcDm, name, "", err)
-	if err != nil || !plan.wantExport {
-		return
+	if err != nil {
+		return false
+	}
+	if !plan.wantExport {
+		return true
 	}
 	nqn := plan.migrSrcNqn()
-	exportErr := s.ensureExport(ctx,
+	err = s.buildExport(ctx,
 		agent.SubsysConf{
 			Nqn: nqn,
 			AllowedHosts: []string{
@@ -47,8 +62,29 @@ func (s *DnAgentServer) ensureMigrSrc(
 			DevicePath: s.nf.DmPath(name),
 			AnaGrpId:   common.AnaGrpIdOptimized,
 		})
-	srcInfo.NvmeofInfo = t.FromErr(
-		resKeyMigrSrcNvmeof, nqn, "", exportErr)
+	if err != nil {
+		srcInfo.NvmeofInfo = t.FromErr(resKeyMigrSrcNvmeof, nqn, "", err)
+		return false
+	}
+	return true
+}
+
+// linkMigrSrc is the last of src step 3: the port link of the export
+// buildMigrSrc built, the one act that puts it in the destination's reach.
+// It sets the export's row, after the link, so the row reports it.
+func (s *DnAgentServer) linkMigrSrc(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+) {
+	if !plan.wantExport {
+		return
+	}
+	nqn := plan.migrSrcNqn()
+	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, nqn)
+	info.MigrSrcInfo.NvmeofInfo = st.tracker.FromErr(
+		resKeyMigrSrcNvmeof, nqn, "", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +413,14 @@ func (s *DnAgentServer) migrDstStopped(
 // that could not read where its stacks are among them, since that pass
 // leaves them as they are (migrCloneUnread). The slot of step (2) is
 // normally the run the side has held since it provisioned (holdMigrMeta), so
-// step (2) finds its record and builds the wrapper over it.
+// step (2) finds its record and builds the wrapper over it. connectBudget is
+// the budget of step (3)'s retries (connectMigrSrc).
 func (s *DnAgentServer) ensureMigrDst(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
+	connectBudget time.Duration,
 ) (migrServing, bool) {
 	// Chunks left over from a previous migration on this side are never
 	// applied to a new one.
@@ -390,7 +428,7 @@ func (s *DnAgentServer) ensureMigrDst(
 		st.chunkMigrId != plan.migrDst.GetMigrId() {
 		s.dropChunks(ctx, st)
 	}
-	seen := s.runMigrDst(ctx, st, plan)
+	seen := s.runMigrDst(ctx, st, plan, connectBudget)
 	s.reportMigrDst(st, plan, info, seen)
 	serving := s.migrDstServing(ctx, plan, seen)
 	settles := seen.held(plan) ||
@@ -406,10 +444,12 @@ func (s *DnAgentServer) ensureMigrDst(
 // reading of the destination. A step that fails ends the run there, and its
 // error is its reading, whatever its command did in the kernel (DN13). While
 // the request carries cutover_pending the run ends after step (2) holds.
+// connectBudget is the budget of step (3)'s retries (connectMigrSrc).
 func (s *DnAgentServer) runMigrDst(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
+	connectBudget time.Duration,
 ) *migrDstSeen {
 	seen := &migrDstSeen{}
 	nqn := plan.srcNqnOfDst()
@@ -445,7 +485,8 @@ func (s *DnAgentServer) runMigrDst(
 	// source's (architecture.md, Teardown by sweep). The cn twin is
 	// ensureCloneSource.
 	if err == nil && !state.HasCtrl() {
-		if connErr := s.connectMigrSrc(ctx, plan, nqn); connErr != nil {
+		if connErr := s.connectMigrSrc(
+			ctx, plan, nqn, connectBudget); connErr != nil {
 			err = connErr
 		} else {
 			state, err = s.awaitMigrSrcNs(ctx, nqn)
@@ -626,21 +667,26 @@ func (s *DnAgentServer) migrMetaRead(
 // connectMigrSrc connects this destination to the migration source export
 // on the source DN (DN13 step (3)), and tries a connect that failed again
 // after DnMigrConnectRetryPause, within this pass, for as long as
-// DnMigrConnectPassBudget covers the pause; each failed connect's own
-// elapsed time draws on the budget too, so a slow refusal can spend it at
-// once. After the cutover the src side builds that export only after its
-// step 1 and the suspend that starts its step 2 (DN12), in the same pass, so
-// the first connect of the pass the cutover brings often comes too early, and the DN8 loop's next pass would come
-// DnMigrConnectRetryInterval seconds later, with the leg in the migration
-// gap all that time. The error is never classified: an export not built
-// yet, a dead source DN and a refused host answer alike, and the budget is
-// what caps how often the last two are tried. The last attempt's error is
-// the one returned, and the pass then registers the DN8 loop
-// (ensureMigrDst). The cn twin is connectWithin.
+// connectBudget covers the pause; each failed connect's own elapsed time
+// draws on the budget too, so a slow refusal can spend it at once. After the
+// cutover the src side links that export to its port only after its step 1
+// and the suspend that starts its step 2 (DN12), in its own pass, so the
+// first connect of the pass the cutover brings often comes too early. That
+// pass's budget is DnMigrCutoverConnectBudget, sized to outlast the src
+// side's pass on a loaded node, so that normally the connect that ends the
+// migration gap is this pass's and not the DN8 loop's, whose next pass would
+// come DnMigrConnectRetryInterval seconds later; a src side slower than that
+// leaves it to the loop all the same. Every other pass's budget is
+// DnMigrConnectPassBudget (convergeSide). The error is never classified: an
+// export not linked yet, a dead source DN and a refused host answer alike,
+// and the budget is what caps how often the last two are tried. The last
+// attempt's error is the one returned, and the pass then registers the DN8
+// loop (ensureMigrDst). The cn twin is connectWithin.
 func (s *DnAgentServer) connectMigrSrc(
 	ctx context.Context,
 	plan *sidePlan,
 	nqn string,
+	connectBudget time.Duration,
 ) error {
 	tr := plan.migrDst.GetSrcNvmeTrConf()
 	conf := agent.TrConf{
@@ -649,8 +695,7 @@ func (s *DnAgentServer) connectMigrSrc(
 		TrAddr:  tr.GetTrAddr(),
 		TrSvcId: tr.GetTrSvcId(),
 	}
-	budget := agent.NewWaitBudget(
-		common.DnMigrConnectPassBudget, s.now, s.sleep)
+	budget := agent.NewWaitBudget(connectBudget, s.now, s.sleep)
 	for {
 		start := budget.Now()
 		err := s.host.Connect(ctx, conf, nqn, plan.dnHostNqn())
@@ -1037,9 +1082,9 @@ func hydrationGap(plan *sidePlan, raw string) error {
 // provisioned keeps its retry at a level that suppresses the role, until it
 // takes its run; a pass that waits for the cutover converges the primary's
 // stack where it puts it (settleMigrRetry); or the side is dropped
-// (dropSideState). Within a pass a failed connect is tried again only for
-// DnMigrConnectPassBudget (connectMigrSrc), and the source's namespace is
-// waited for only DnMigrDstNsWait (awaitMigrSrcNs).
+// (dropSideState). Within a pass of the loop a failed connect is tried again
+// only for DnMigrConnectPassBudget (connectMigrSrc), and the source's
+// namespace is waited for only DnMigrDstNsWait (awaitMigrSrcNs).
 //
 // The loop is enrolled in the server's WaitGroup so WaitBackground covers the
 // connect retries too, not just zeroing (SH27). As in startZeroing, the
@@ -1187,5 +1232,6 @@ func (s *DnAgentServer) reconvergeSide(
 	if dn == nil {
 		return
 	}
-	s.convergeSide(attemptCtx, st, dn.req.Load().GetExtentSize())
+	s.convergeSide(attemptCtx, st, dn.req.Load().GetExtentSize(),
+		common.DnMigrConnectPassBudget)
 }

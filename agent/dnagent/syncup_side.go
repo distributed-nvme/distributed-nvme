@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/bits"
 	"strconv"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -20,13 +21,21 @@ func (s *DnAgentServer) syncupSide(
 	req *pb.SyncupSideRequest,
 ) *pb.SyncupSideReply {
 	st := s.getSide(key)
-	var stored uint64
+	var held *pb.SyncupSideRequest
 	if st != nil {
-		stored = st.req.Load().GetRevision()
+		held = st.req.Load()
 	}
-	reply, extentSize := s.gateSide(ctx, req, stored)
+	reply, extentSize := s.gateSide(ctx, req, held.GetRevision())
 	if reply != nil {
 		return reply
+	}
+	// The request held so far is read here, before the save and before req
+	// replaces it, and nothing of the reading is stored: the converge the
+	// cutover brings is the one whose request carries no cutover_pending
+	// while the held one carried it for the same migration (DN13).
+	connectBudget := common.DnMigrConnectPassBudget
+	if bringsCutover(held, req) {
+		connectBudget = common.DnMigrCutoverConnectBudget
 	}
 	// The side file is persisted as soon as the gates admit the request,
 	// BEFORE the converge (SH5). A converge can run long — a cutover, a
@@ -51,13 +60,33 @@ func (s *DnAgentServer) syncupSide(
 	st.req.Store(req)
 	s.putSide(key, st)
 
-	info, sweep := s.convergeSide(ctx, st, extentSize)
+	info, sweep := s.convergeSide(ctx, st, extentSize, connectBudget)
 	return &pb.SyncupSideReply{
 		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),
 		SideInfo:   info,
 		BmInfo:     s.bitmapInfo(st),
 	}
+}
+
+// bringsCutover reports whether req is the request the worker's cutover
+// brings a migration destination: its migr_dst_conf no longer carries
+// cutover_pending, and held, the request this process held for the side
+// before it, carried the flag for the same migration. The flag comes from
+// the migration's record, which nothing but the worker's cutover changes
+// once it is written (dnv-worker.md RW15, RW18), so a process passes at
+// most one request per cutover. A restart whose DN2 re-run puts back a
+// stored request that still carries the flag, because the save of the
+// request after it failed (SH5), lets the new process pass that later
+// request once more when the worker sends it again, and a process that held
+// no request with the flag when the request without it came passes none
+// (DN13). The entrances that converge a request stored earlier — DN2's
+// startup re-run, the DN13 retry and the DN12 fence timer — do not come
+// through here, so none of them passes either.
+func bringsCutover(held, req *pb.SyncupSideRequest) bool {
+	was, dst := held.GetMigrDstConf(), req.GetMigrDstConf()
+	return was.GetCutoverPending() && dst != nil &&
+		!dst.GetCutoverPending() && dst.GetMigrId() == was.GetMigrId()
 }
 
 // gateSide is DN8's gating of a SyncupSide against stored, the revision of
@@ -164,11 +193,16 @@ func logInvalidSideConf(
 // the desired state does not want, top-down, then build what it does want
 // bottom-up — side device, dm, nvmet — probing first at every step (SH16).
 // It returns the SideInfo and the sweep's verdict, which is what the reply's
-// agent_reply carries.
+// agent_reply carries. connectBudget is the budget of a migration
+// destination's retries of its connect within the pass (connectMigrSrc):
+// DnMigrCutoverConnectBudget in the converge the cutover brings, which only
+// syncupSide can tell (bringsCutover), and DnMigrConnectPassBudget in every
+// other (DN13).
 func (s *DnAgentServer) convergeSide(
 	ctx context.Context,
 	st *sideState,
 	extentSize uint64,
+	connectBudget time.Duration,
 ) (*pb.SideInfo, *agent.SweepResult) {
 	// The same refusal as syncupSide's (DN8), for the entrances that do not
 	// come through it: the startup Reconcile, which converges from a stored
@@ -225,16 +259,34 @@ func (s *DnAgentServer) convergeSide(
 		return info, sweep
 	}
 
-	// architecture.md, Migration, src step 1: hand IO over before the
-	// dm-linears are reloaded onto their dm-errors.
-	if plan.migrSrc != nil && plan.wantExport {
-		s.moveCnAnaGroups(ctx, plan, common.AnaGrpIdInaccessible)
+	// architecture.md, Migration: the source builds its migration source
+	// export first, then runs src step 1, the suspend of src step 2, and only
+	// then links the export to the port (DN12). A build that fails stops the
+	// pass before step 1: its migration source rows carry the failure, the
+	// per-CN stacks are left where they are and only reported, judged as a
+	// check round judges them (probeCnStacks), and the fence is settled as
+	// under the DN9 gate above, for the same reason: [D12]'s bound does not
+	// wait for the next syncup. Until a pass's build has held no pass has
+	// run steps 1 and 2, so there the side serves on; once one has, a failed
+	// build undoes nothing of them or of the port link.
+	if plan.migrSrc != nil {
+		if !s.buildMigrSrc(ctx, st, plan, info) {
+			s.settleFence(ctx, st, plan)
+			s.probeCnStacks(ctx, st, plan, info, false)
+			return info, sweep
+		}
+		// Src step 1: hand IO over before the dm-linears are suspended, and
+		// later reloaded onto their dm-errors.
+		if plan.wantExport {
+			s.moveCnAnaGroups(ctx, plan, common.AnaGrpIdInaccessible)
+		}
 	}
 
 	cloneLive, dstSettles := false, false
 	if plan.wantMigr {
 		var serving migrServing
-		serving, dstSettles = s.ensureMigrDst(ctx, st, plan, info)
+		serving, dstSettles = s.ensureMigrDst(ctx, st, plan, info,
+			connectBudget)
 		switch serving.state {
 		case migrCloneUp:
 			cloneLive = true
@@ -254,7 +306,7 @@ func (s *DnAgentServer) convergeSide(
 	s.ensureCnDm(ctx, st, plan, info, cloneLive)
 	switch {
 	case plan.migrSrc != nil:
-		s.ensureMigrSrc(ctx, st, plan, info)
+		s.linkMigrSrc(ctx, st, plan, info)
 	case plan.migrSrcDeferred:
 		// Serving is untouched; only the reporting differs (architecture.md,
 		// Migration).
@@ -817,13 +869,25 @@ func (s *DnAgentServer) ensureExport(
 	subsys agent.SubsysConf,
 	ns agent.NsConf,
 ) error {
-	if err := s.nvmet.EnsureSubsystem(ctx, subsys); err != nil {
-		return err
-	}
-	if err := s.nvmet.EnsureNamespace(ctx, ns); err != nil {
+	if err := s.buildExport(ctx, subsys, ns); err != nil {
 		return err
 	}
 	return s.nvmet.EnsurePortLink(ctx, s.port.PortId, subsys.Nqn)
+}
+
+// buildExport converges one subsystem and its single namespace, probe-first
+// (SH16), and leaves its port link alone: the kernel finds a subsystem for a
+// connect only through the port's links, so an export built here is out of
+// every host's reach until its link is made.
+func (s *DnAgentServer) buildExport(
+	ctx context.Context,
+	subsys agent.SubsysConf,
+	ns agent.NsConf,
+) error {
+	if err := s.nvmet.EnsureSubsystem(ctx, subsys); err != nil {
+		return err
+	}
+	return s.nvmet.EnsureNamespace(ctx, ns)
 }
 
 // moveCnAnaGroups rewrites the ana_grpid of every existing per-CN namespace

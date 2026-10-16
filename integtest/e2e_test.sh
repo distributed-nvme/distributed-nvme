@@ -11811,6 +11811,11 @@ MIGR0_ID=""
 MIGR1_ID=""
 MIGR_HYD_LAST=""
 COPY_FLIP_RECS=""
+# COPY_CUTOVER_REV is the revision the worker's cutover wrote, which
+# copy_check_cutover reads off its record, and COPY_GAP_READ is
+# copy_gap_reads' answer; copy_check_gap reads both.
+COPY_CUTOVER_REV=""
+COPY_GAP_READ=""
 MD_STATE_LAST=""
 SRC_STACK_LAST=""
 
@@ -12121,6 +12126,10 @@ copy_check_cutover() { # <migr id> <src side id> <dst side id>
 	assert_field "$rec" '.cntlr_id' "$PRIMARY_CNTLR_ID" \
 		"the cutover record's cntlr_id: the cutover acts only on a live path the primary reported"
 	rrev=$(jq_of "$rec" '.report_revision')
+	COPY_CUTOVER_REV=$(jq_of "$rec" '.revision')
+	case "$COPY_CUTOVER_REV" in
+	'' | *[!0-9]*) die "the cutover record's revision reads '$COPY_CUTOVER_REV': $rec" ;;
+	esac
 	copy_flip_records provisioned ".side_id == $3"
 	n=$(printf '%s\n' "$COPY_FLIP_RECS" | grep -c . || true)
 	assert_eq "$n" 1 "the worker's 'flip applied' records of kind provisioned for side $3"
@@ -12135,6 +12144,105 @@ copy_check_cutover() { # <migr id> <src side id> <dst side id>
 		"the cutover record's report_revision vs the revision of side $3's provisioned flip"
 	log "  the worker started migration $1's cutover on cntlr $PRIMARY_CNTLR_ID's" \
 		"reply at revision $rrev; side $3 was provisioned at revision $provrev"
+}
+
+# copy_gap_reads sets COPY_GAP_READ to what one dn agent's own log says of
+# the migration gap (copy_check_gap), as one compact JSON object: the
+# trace_id of the side's first SyncupSide request at <revision> or later,
+# and the time, trace_id and error of the first write of <group> to the
+# ana_grpid of <nqn>'s namespace that comes after that request in the log,
+# each null when the log holds none, the error also for a write that held:
+# WriteFileDirect (common/osclient.go) logs a write that failed under the
+# same message, with an error attribute. The guest filters the log by two
+# fixed strings and the driver parses what is left; `fromjson?` drops a line
+# torn by a write still in progress, and the ids and the revision are slog's
+# bare numbers. Fatal on a log it cannot read, as copy_flip_records is. It
+# runs in the caller's shell, never in a command substitution, so a die here
+# ends the run.
+copy_gap_reads() { # <v> <k> <side id> <revision> <nqn> <group>
+	local lines path
+	case "$3$4$6$SP_ID" in
+	'' | *[!0-9]*) die "copy_gap_reads: the ids '$3' '$4' '$6' '$SP_ID' are not decimal" ;;
+	esac
+	path="$NVMET/subsystems/$5/namespaces/1/ana_grpid"
+	COPY_GAP_READ=""
+	lines=$(ssh_dn "$1" "grep -F -e '/DiskNodeAgent/SyncupSide' -e '$path' \
+		$(dn_log "$2") || [ \$? -eq 1 ]") ||
+		die "cannot read $(dn_log "$2") on ${DN_IP[$1]}"
+	COPY_GAP_READ=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
+		--arg path "$path" --arg grp "$6" --argjson sp "$SP_ID" \
+		--argjson side "$3" --argjson rev "$4" '
+		[split("\n")[] | fromjson? // empty] as $r
+		| ([range(0; $r | length)
+		    | select($r[.] | .msg == "grpc server request"
+		        and .method == "/DiskNodeAgent/SyncupSide"
+		        and .data.side_pointer.sp_id == $sp
+		        and .data.side_pointer.side_id == $side
+		        and .data.revision >= $rev)] | first) as $s
+		| (if $s == null then null else
+		    [range($s + 1; $r | length)
+		     | select($r[.] | .msg == "os write file direct"
+		         and .path == $path and .data == $grp)] | first end) as $w
+		| {sync_trace: (if $s == null then null else $r[$s].trace_id end),
+		   write_time: (if $w == null then null else $r[$w].time end),
+		   write_trace: (if $w == null then null else $r[$w].trace_id end),
+		   write_error: (if $w == null then null else $r[$w].error end)}') ||
+		die "copy_gap_reads: jq failed on $(dn_log "$2") of dn$1"
+}
+
+# copy_check_gap checks the migration gap of the copy case's migration
+# (e2e_integtest.md, The cases): from the source's first write of the
+# inaccessible group to the primary's export of the leg, after its cutover
+# request, to the destination's first write of the optimized group to the
+# same export, after its own. The cutover request of a side is its first
+# SyncupSide at the revision the worker's cutover wrote or later, the first
+# that carries no cutover_pending. It prints the gap, at every slice count,
+# and sets no time limit on it. It fails when the destination's optimized
+# write does not carry the trace id of the destination's cutover request,
+# which means that a pass of the destination's background retry, or a later
+# SyncupSide, ended the gap, and not the pass the cutover brought. That pass
+# waits for the source's own pass only as long as its connect budget
+# (dnagent.md, DN13), so a source whose pass outlasts the budget, or any
+# other step of that pass that stops, fails the check: a slow enough lab
+# can. A first write of either end that failed fails it too: the write did
+# not move the path, so its time ends nothing, and on the destination the
+# pass it came from stopped. The guests' clocks agree to within a few
+# milliseconds, so two records' times on two guests give the gap. Each
+# case's agents log afresh (E2E11), so no record of an earlier case's pool,
+# whose ids and revisions may repeat this one's, is read.
+copy_check_gap() { # <src v> <src k> <src side> <dst v> <dst k> <dst side> <leg nqn>
+	local src dst t0 t1 e0 e1 gap trace err
+	# common.AnaGrpIdInaccessible and AnaGrpIdOptimized (common/constants.go).
+	local inaccessible=3 optimized=1
+	case "$COPY_CUTOVER_REV" in
+	'' | *[!0-9]*) die "copy_check_gap: no cutover revision ('$COPY_CUTOVER_REV')" ;;
+	esac
+	copy_gap_reads "$1" "$2" "$3" "$COPY_CUTOVER_REV" "$7" "$inaccessible"
+	src=$COPY_GAP_READ
+	copy_gap_reads "$4" "$5" "$6" "$COPY_CUTOVER_REV" "$7" "$optimized"
+	dst=$COPY_GAP_READ
+	t0=$(jq_of "$src" '.write_time // ""')
+	t1=$(jq_of "$dst" '.write_time // ""')
+	trace=$(jq_of "$dst" '.sync_trace // ""')
+	[ -n "$t0" ] || die "the source side $3's log (dn$1 instance $2) holds" \
+		"no inaccessible write to $7 after its cutover request: $src"
+	[ -n "$t1" ] || die "the destination side $6's log (dn$4 instance $5)" \
+		"holds no optimized write to $7 after its cutover request: $dst"
+	[ -n "$trace" ] || die "the destination side $6's cutover request" \
+		"carries no trace id: $dst"
+	err=$(jq_of "$src" '.write_error // ""')
+	[ -z "$err" ] || die "the source side $3's first inaccessible write to $7" \
+		"after its cutover request failed (dn$1 instance $2): $err"
+	err=$(jq_of "$dst" '.write_error // ""')
+	[ -z "$err" ] || die "the destination side $6's first optimized write to" \
+		"$7 after its cutover request failed (dn$4 instance $5): $err"
+	e0=$(date -u -d "$t0" +%s.%N) && e1=$(date -u -d "$t1" +%s.%N) ||
+		die "copy_check_gap: cannot read the times '$t0' and '$t1'"
+	gap=$(awk -v a="$e1" -v b="$e0" 'BEGIN { printf "%.3f", a - b }')
+	log "  the migration gap of leg $7: ${gap} s, from the source's" \
+		"inaccessible write at $t0 to the destination's optimized write at $t1"
+	assert_eq "$(jq_of "$dst" '.write_trace // ""')" "$trace" \
+		"the trace id of the destination's optimized write vs its cutover request's: a pass other than the cutover's ended the gap of ${gap} s"
 }
 
 # leg_bm_read is the copy case's leg bitmap read as a poll. The primary's cn
@@ -13051,15 +13159,18 @@ copy_xfer_delete() {
 # the migration's cutover (architecture.md, Migration; dnv-worker.md, RW15,
 # RW18), and a DESTINATION in AnaGrpIdInaccessible until `cloneLive`, which
 # holds once its converge has a dm-clone to serve through (ensureMigrDst,
-# agent/dnagent/migr.go). So from the source's first step after the cutover
-# until the destination serves — the migration gap — EVERY path of that leg
-# is inaccessible, and an inaccessible nvme namespace REQUEUES rather than
+# agent/dnagent/migr.go). So from the source's step 1 after the cutover,
+# which moves its per-CN namespaces to inaccessible, until the destination
+# serves — the migration gap — EVERY path of that leg is inaccessible, and
+# an inaccessible nvme namespace REQUEUES rather than
 # errors. A host read issued in that window blocks in D state, where
 # `timeout` cannot reach it. The cutover waits for the destination's zeroing
 # and for the primary's live path to it, so the gap holds only the disk
 # nodes' steps that the cutover's syncups start: the source's, then the
 # destination's connect to the source, its dm-clone and its ANA write. The
-# gap is short, but nothing here bounds it.
+# gap is short, but nothing here bounds it: the step prints it, and checks
+# that the destination's cutover request ended it and that neither end's
+# ANA write failed (copy_check_gap).
 #
 # This step therefore issues NO host IO between `migr create` and the wait
 # that proves the leg is serving again. The gateway's record cannot prove
@@ -13095,7 +13206,7 @@ copy_xfer_delete() {
 copy_migration() {
 	stage 04 "migr create, the cutover, append-bm, finish — then a second one, cancelled"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
-	local hex v k legnqn straddr strsvcid dsttraddr dsttrsvcid
+	local hex v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid
 
 	sp_refresh
 	sp_read_roles
@@ -13114,6 +13225,8 @@ copy_migration() {
 	assert_ne "$v" none "side $sideid's addr_port $saddr names one of the --dn guests"
 	assert_ne "$k" none "side $sideid's addr_port $saddr names a dn instance index"
 	diag_note_dn "$v" "$k"
+	srcv=$v
+	srck=$k
 
 	# What the group occupies now, so the destination can be checked against
 	# both exclusions.
@@ -13274,6 +13387,15 @@ copy_migration() {
 		migr_dst_serving "$dstside"
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" optimized \
 		"$WAIT_PROVISION"
+	# THE GAP ENDS IN THE PASS THE CUTOVER BROUGHT. The destination serves,
+	# so both dn agents have logged the gap's two ends: the source's write of
+	# the inaccessible group to the primary's export, and the destination's
+	# write of the optimized group to its own. The gap is printed, and the
+	# optimized write must come from the destination's cutover request, whose
+	# connect waits for the source's own pass only as long as its connect
+	# budget (dnagent.md, DN13), never from a pass of its background retry
+	# or a later request (copy_check_gap).
+	copy_check_gap "$srcv" "$srck" "$sideid" "$v" "$k" "$dstside" "$legnqn"
 	MIGR_HYD_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the primary to answer td get-leg-bm for leg $legid" \

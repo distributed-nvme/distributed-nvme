@@ -139,11 +139,13 @@ The constants this document relies on, whose values and comments
   that waits for a free run in the clone-metadata area before it zeroes
   (DN13; the loop is SH27's "DN8 retry", so nicknamed for the DN8-gated
   converge it re-runs).
-* `DnMigrConnectPassBudget` and `DnMigrConnectRetryPause`, the migration
-  destination's retries of a failed connect to the migration source
-  export within one pass (DN13): connect again after the latter, for as
-  long as the former, which each failed connect's own time draws on too,
-  still covers the pause.
+* `DnMigrConnectPassBudget`, `DnMigrCutoverConnectBudget` and
+  `DnMigrConnectRetryPause`, the migration destination's retries of a
+  failed connect to the migration source export within one pass (DN13):
+  connect again after the last, for as long as the pass's budget, which
+  each failed connect's own time draws on too, still covers the pause. The
+  budget is `DnMigrCutoverConnectBudget` in the converge the cutover brings
+  and `DnMigrConnectPassBudget` in every other.
 * `DnMigrDstNsWait` and `DnMigrDstNsPause`, the migration destination's
   wait for the source namespace after a connect that succeeded (DN13):
   re-read, pausing the latter between reads and the former in all. Not a
@@ -1963,10 +1965,12 @@ enforced solely on the CN's user-facing namespaces, by reloading each
 error).
 
 DN12. **Migration source** (`migr_src_conf` set): the three src steps of
-`architecture.md`, Migration, in order and numbered as there. The dn's part
-of them is the two-phase fence of step 2 (below) and the ANA groups: step 1
-moves the per-CN namespaces to `AnaGrpIdInaccessible`, and the `MigrSrcNqn`
-export's one namespace, `sideNsid`, sits in `AnaGrpIdOptimized`.
+`architecture.md`, Migration, numbered as there and run in the order given
+there, which takes step 3 in two parts, its build and its port link. The
+dn's part of them is the gate on that build and the two-phase fence of
+step 2 (below), and the ANA groups: step 1 moves the per-CN namespaces to
+`AnaGrpIdInaccessible`, and the `MigrSrcNqn` export's one namespace,
+`sideNsid`, sits in `AnaGrpIdOptimized`.
 
 **The `dst_provisioned` gate.** With `migr_src_conf.dst_provisioned` false
 the source behaves exactly as if `migr_src_conf` were absent
@@ -1978,7 +1982,27 @@ set and "side provisioning" otherwise (DN18). The worker sends
 `dst_provisioned` true only once the destination is provisioned and the
 cutover has started (`dnv-worker.md` RW15), so `cutover_pending` changes
 nothing on the source but that text. With `dst_provisioned` true the three
-steps run unchanged.
+steps run in that order, and `cutover_pending` changes nothing of them.
+
+**Step 3's build gates steps 1 and 2.** The converge builds step 3's
+export first: the `DnMigrSrcName` linear and, at a level with an export
+layer, the `MigrSrcNqn` subsystem with its allowed host and its namespace,
+probe-first, all of step 3 but the port link. When any part of the build
+fails, the converge runs neither step 1 nor the suspend of step 2 and goes
+no further: its `migr_src_info` rows carry the failure, its per-CN rows are
+read as a check round reads them, and a fence that an earlier converge
+began is settled as under rule 4 below. Until a converge's build has held,
+no converge of the migration has run steps 1 and 2, so there a failed build
+leaves the side serving, and a later converge of the side builds again,
+normally its next `SyncupSide` (Known limits). Once one has held, a failed
+build undoes nothing an earlier pass did of steps 1 and 2 and the port
+link: it only stops its own pass. Reason: steps 1 and 2 cut the primary's
+path through this side, and without the export the destination has nothing
+to serve the leg from, so after a failed build they would leave the leg
+with no usable path until a later converge's build held, which blocks the
+pool's commits on the primary (`architecture.md`, Known limits) and can
+fail over a healthy primary. A serving leg with an error row is the safe
+state, and an operator can cancel the migration.
 
 **The step-2 fence ([D12]).** Phase 1: suspend each per-CN dm-linear **in
 place**, leaving its table alone, and record when. Phase 2, on the first
@@ -2045,19 +2069,20 @@ Four rules keep the suspension bounded, which is what makes it safe:
   of ready: still provisioning (zeroing, or zeroed and not yet released by
   the control plane), or a side-device fault (an unreadable disk, "record
   missing", "not zeroed", a refused allocation, a table or probe that
-  would not converge) — skips the whole per-CN stack, but never the fence
-  (`settleFence`): inside the window it re-arms the timer; past it, it
-  finishes phase 2 itself. Nothing else would end the window there: the
-  timer nils itself before converging, the only other unfences are the two
-  above and neither applies while the role, the side and its exports are
-  still wanted, the agent's one periodic converge — DN8's connect retry,
-  armed only while a destination role's build has stopped short, or while
-  a destination that has not provisioned has not taken its run in the
-  clone-metadata area (DN13) — would take this same gate, and a
-  `CheckSide` round neither converges nor bumps a revision. One transient
-  probe failure would otherwise leave the
-  linears suspended, queueing bios with no timeout, until the worker next
-  happened to re-sync the side. Running phase 2 under that gate is safe: it
+  would not converge) — or at the gate on step 3's build (above) skips the
+  whole per-CN stack, but never the fence (`settleFence`): inside the
+  window it re-arms the timer; past it, it finishes phase 2 itself.
+  Nothing else would end the window there: the timer nils itself before
+  converging, the only other unfences are the two above and neither
+  applies while the role, the side and its exports are still wanted, the
+  agent's one periodic converge — DN8's connect retry, armed only while a
+  destination role's build has stopped short, or while a destination that
+  has not provisioned has not taken its run in the clone-metadata area
+  (DN13) — would take the same side-device gate and is never armed for a
+  source, and a `CheckSide` round neither converges nor bumps a revision.
+  One transient probe failure would otherwise leave the linears suspended,
+  queueing bios with no timeout, until the worker next happened to re-sync
+  the side. Running phase 2 under that gate is safe: it
   only puts each per-CN dm-linear on its dm-error, building either device
   where it is absent, as after a level with no export layer marked the
   fence over (`endFence`), and that only moves the side further from
@@ -2230,29 +2255,63 @@ entry the kernel keeps with no controller in it (`architecture.md`, Teardown
 by sweep), or one that lists only controllers whose device is deleted
 (`cnagent.md` CN10) — connects, and after a connect that failed connects
 again, pausing `DnMigrConnectRetryPause` between attempts, for as long as
-`DnMigrConnectPassBudget` still covers the pause, each failed connect's own
+the pass's connect budget still covers the pause, each failed connect's own
 time drawing on it too (`connectMigrSrc`, a `WaitBudget`, the dn twin of
 `cnagent.md` CN10's in-pass retry), so a connect that runs long can spend it
-at once. The error is not classified: an export not built yet, a source disk
-node that is down and a refused host are tried alike, and the budget caps
-how often. Reason: after the cutover the source builds its migration source
-export only after its step 1 and the suspend that starts its step 2 (DN12),
-so the pass the cutover brings often connects too early, and the DN8 retry's
-next pass would come `DnMigrConnectRetryInterval` later, the leg in the
-migration gap all that time. After a connect that succeeded the pass
-re-reads the subsystem until the source's namespace device is there, pausing
+at once. The budget is `DnMigrCutoverConnectBudget` in the converge the
+cutover brings and `DnMigrConnectPassBudget` in every other. The converge
+the cutover brings is that of a `SyncupSide` whose request carries
+`migr_dst_conf` without `cutover_pending` while the request this process
+held for the side before it carried the flag for the same migration; the RPC
+reads the held request before it saves the new one and lets it replace the
+held one (SH5), and stores nothing of the reading. Every other converge
+keeps the shorter budget, among them a `SyncupSide` that finds the process
+holding a request without the flag or none for the side, and the DN8 retry,
+the DN12 fence timer and DN2's re-run, which converge a request the process
+already holds. The error is not classified: an export not linked yet, a
+source disk node that is down and a refused host are tried alike, and the
+budget caps how often. Reason: after the cutover the source links its
+migration source export to its nvmet port only after its step 1 and the
+suspend that starts its step 2 (DN12), in its own pass, so the pass the
+cutover brings often connects too early, and the DN8 retry's next pass would
+come `DnMigrConnectRetryInterval` later, the leg in the migration gap all
+that time; the longer budget is sized to outlast the source's pass on a
+loaded node, so that normally the gap holds only the two sides' own steps. A
+process gives it to one pass per cutover, since once that pass's request has
+replaced the held one the process holds no request with the flag, so a
+source that never answers holds the side's locks that long once, not on
+every retry and not on every revision. A restart can give it once more: when
+the save of the request that cleared the flag failed, DN2's re-run converges
+the stored request before it, which still carries the flag (Known limits),
+and the process then holds that request, so the request the worker sends
+again gets the longer budget a second time. The longer budget is a bound,
+not a wait for the source: a source whose pass outlasts it leaves the gap to
+a pass of the DN8 retry (`architecture.md`, Known limits), and so does a
+source slower than the shorter budget wherever no pass gets the longer one:
+for a migration whose record never carried the flag (`architecture.md`,
+Upgrade in lockstep), and wherever the process holds no request with the
+flag when the request that clears it comes, as after a restart inside the
+cutover's converge, whose re-run starts from the stored request alone, or
+after a restart that left the process holding no request for the side, as a
+lost `--local-store`, a missing `side-*` file or a side DN2 skips does.
+After a connect that succeeded the pass re-reads the
+subsystem until the source's namespace device is there, pausing
 `DnMigrDstNsPause` between reads and `DnMigrDstNsWait` in all
 (`awaitMigrSrcNs`, a `WaitBudget` of its own) — the kernel returns from the
 connect once the controller is live and only queues the namespace scan that
 adds the device, so a single re-read could fail the target "controller has
 no namespace" for a device milliseconds away (the dn twin of `cnagent.md`
 CN10's head wait); a read that fails ends that wait at once. Both waits hold
-the pass's DN1 locks, so a check round or an info read of the side, and a
-`SyncupDn`, wait behind them, about the two budgets together and longer when
-a connect itself runs long, and each DN8 retry pass against a source that
-keeps refusing holds them about the connect budget. The dm-clone holds the
-source's
-multipath head open, so after the host deletes the source's controllers —
+the pass's DN1 locks, so an info read of the side and a `SyncupDn` wait
+behind them, about the two budgets together and longer when a connect
+itself runs long, and while that `SyncupDn` waits for the node write lock
+every later call of the agent that takes the node lock waits too. A check
+round of the side waits behind a pass of the DN8 retry, which against a
+source that keeps refusing holds the locks about the shorter connect
+budget, and not behind the pass of a `SyncupSide`: the worker's loop of the
+side sends both and waits for the call (`dnv-worker.md` RW1).
+The dm-clone holds the source's multipath head open, so after the host
+deletes the source's controllers —
 as it does when the target refuses a reconnect with DNR — the walk finds
 the subsystem's entry still there with no controller in it, and the side's
 next converge connects again: step (4) reloads the dm-clone onto the
@@ -2706,8 +2765,9 @@ command marks that resource `RES_STATUS_ERROR` with the command output in
 `details` and the converge pass **continues** with the remaining resources
 — the agent converges as much as it can — except for a layer a gate holds
 back on purpose, which the pass reports instead: the per-CN stacks and the
-migration roles above a side device short of ready (DN9, DN10), and the
-per-CN stacks of a migration destination whose stopped pass could not
+migration roles above a side device short of ready (DN9, DN10), the
+per-CN stacks of a migration source whose step 3 build failed (DN12), and
+the per-CN stacks of a migration destination whose stopped pass could not
 read where they are (DN13). The rows of a migration destination take
 their status from DN13's shared rule, a failed step reading as not held
 with the command's output in their details, and a migration source's
@@ -2845,6 +2905,23 @@ is still a protocol-level refusal.
   before the removal; and the export two agents link reads old once no side
   of the agent whose port it is left on has looked up its attributes within
   the grace, as when no side of that agent wants it any more.
+* The port link of a migration source's step 3 does not wait for the
+  suspends of step 2 to have held (DN12; `architecture.md`, Migration):
+  when a per-CN dm-linear's suspend fails, or its dm-error fails and the
+  converge skips that linear, the converge still links the migration source
+  export, so the destination's copy can read a region of the side before a
+  write the old primary still had in flight through that linear lands
+  there, and the two sides then differ, which [D12] exists to prevent.
+* A migration source whose step 3 build fails before any build of its
+  migration has held serves on until a later converge of the side builds
+  it (DN12), and the migration waits that long. Only a `SyncupSide`, DN2's
+  re-run after a restart, or the timer of a fence window an earlier pass
+  opened converges the source: the DN8 retry is never armed for a source,
+  its check rounds converge nothing, and a failed build sets no reply
+  code, so the worker sends it the next request only with the SP's next
+  revision (`dnv-worker.md` RW4). Meanwhile the destination's connect stays
+  refused, tried again by its DN8 retry, and an operator's cancel ends the
+  wait.
 * The dn sweep's disconnect of a destination's source connection (DN6 L3)
   runs under the DN1 locks, as the cn build's dead-path disconnect does;
   only the cn sweep's runs off them (`cnagent.md` CN10 and CN21). A target

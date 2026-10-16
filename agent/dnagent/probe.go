@@ -335,13 +335,64 @@ func (s *DnAgentServer) probeFencedLinear(
 	return pb.ResStatus_RES_STATUS_OK, fenceSuspendedDetails
 }
 
-// probeStacks probes the per-CN stacks and the migration source's rows. It is
-// shared by probeAboveSideDev and by a converge pass whose migration
-// destination could not read where its per-CN stacks are (convergeSide's
-// migrCloneUnread branch), which reports those rows instead of converging
-// them. cloneLive is the destination rule's reading of the dm-clone
-// (migrServing.cloneLive), false on a side that is no destination.
+// probeStacks probes the per-CN stacks (probeCnStacks) and the migration
+// source's rows. It is shared by probeAboveSideDev and by a converge pass
+// whose migration destination could not read where its per-CN stacks are
+// (convergeSide's migrCloneUnread branch), which reports those rows instead
+// of converging them. cloneLive is the destination rule's reading of the
+// dm-clone (migrServing.cloneLive), false on a side that is no destination.
 func (s *DnAgentServer) probeStacks(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+	cloneLive bool,
+) {
+	t := st.tracker
+	s.probeCnStacks(ctx, st, plan, info, cloneLive)
+
+	if plan.migrSrcDeferred {
+		// The request carries dst_provisioned false (the destination not
+		// provisioned yet, or the cutover still pending): this side is serving
+		// exactly as if it had no migr_src_conf, and only the would-be rows
+		// differ (architecture.md, Migration).
+		s.reportMigrSrcDeferred(st, plan, info)
+	}
+
+	if plan.migrSrc != nil {
+		srcInfo := &pb.SideInfo_MigrSrcInfo{}
+		info.MigrSrcInfo = srcInfo
+		name := plan.migrSrcName()
+		status, details := s.probeDmTarget(
+			ctx, name, "linear", plan.sectors, plan.sideDevPath)
+		srcInfo.DmLinearInfo = t.Set(
+			resKeyMigrSrcDm, name, status, details)
+		if plan.wantExport {
+			nqn := plan.migrSrcNqn()
+			status, details = s.probeExport(ctx,
+				agent.SubsysConf{
+					Nqn: nqn,
+					AllowedHosts: []string{s.nf.DnHostNqn(
+						plan.clusterId, plan.migrSrc.GetDstDnId())},
+				},
+				agent.NsConf{
+					Nqn:        nqn,
+					Nsid:       sideNsid,
+					DevicePath: s.nf.DmPath(name),
+					AnaGrpId:   common.AnaGrpIdOptimized,
+				})
+			srcInfo.NvmeofInfo = t.Set(
+				resKeyMigrSrcNvmeof, nqn, status, details)
+		}
+	}
+}
+
+// probeCnStacks probes the per-CN stacks alone: each CN's dm-error, dm-linear
+// and, where the level has an export layer, export. Besides probeStacks, a
+// converge pass of a migration source whose export build failed reports
+// those rows through it (convergeSide), as it leaves the stacks where they
+// are.
+func (s *DnAgentServer) probeCnStacks(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
@@ -402,41 +453,6 @@ func (s *DnAgentServer) probeStacks(
 				})
 			info.CnIdToNvmeof[cnId] = t.Set(
 				resKeyOf(resKeyNvmeofFmt, cnId), nqn, status, details)
-		}
-	}
-
-	if plan.migrSrcDeferred {
-		// The request carries dst_provisioned false (the destination not
-		// provisioned yet, or the cutover still pending): this side is serving
-		// exactly as if it had no migr_src_conf, and only the would-be rows
-		// differ (architecture.md, Migration).
-		s.reportMigrSrcDeferred(st, plan, info)
-	}
-
-	if plan.migrSrc != nil {
-		srcInfo := &pb.SideInfo_MigrSrcInfo{}
-		info.MigrSrcInfo = srcInfo
-		name := plan.migrSrcName()
-		status, details := s.probeDmTarget(
-			ctx, name, "linear", plan.sectors, plan.sideDevPath)
-		srcInfo.DmLinearInfo = t.Set(
-			resKeyMigrSrcDm, name, status, details)
-		if plan.wantExport {
-			nqn := plan.migrSrcNqn()
-			status, details = s.probeExport(ctx,
-				agent.SubsysConf{
-					Nqn: nqn,
-					AllowedHosts: []string{s.nf.DnHostNqn(
-						plan.clusterId, plan.migrSrc.GetDstDnId())},
-				},
-				agent.NsConf{
-					Nqn:        nqn,
-					Nsid:       sideNsid,
-					DevicePath: s.nf.DmPath(name),
-					AnaGrpId:   common.AnaGrpIdOptimized,
-				})
-			srcInfo.NvmeofInfo = t.Set(
-				resKeyMigrSrcNvmeof, nqn, status, details)
 		}
 	}
 }

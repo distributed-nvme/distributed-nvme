@@ -371,17 +371,24 @@ const (
 
 	// The migration destination's in-pass retry of its connect to the
 	// migration source export (dnagent.md DN13 step (3)). After the cutover
-	// the src side builds that export only after its step 1 and the suspend
-	// that starts its step 2 (DN12), in the same pass, so the dst side's
-	// first connect often comes too early. A connect that
-	// fails is tried again after DnMigrConnectRetryPause, within the same
-	// converge, for as long as DnMigrConnectPassBudget covers the pause; each
-	// failed connect's own elapsed time draws on the budget too. Only once it
-	// is spent does the pass fail its connect and register the DN8 loop
-	// above. The namespace wait below has a budget of its own. Unlike the
-	// whole-second integer above them, these two are time.Durations.
-	DnMigrConnectPassBudget = 1 * time.Second
-	DnMigrConnectRetryPause = 100 * time.Millisecond
+	// the src side links that export to its nvmet port only after its step 1
+	// and the suspend that starts its step 2 (DN12), in its own pass, so the
+	// dst side's first connect often comes too early. A connect that fails
+	// is tried again after DnMigrConnectRetryPause, within the same converge,
+	// for as long as the pass's budget covers the pause; each failed
+	// connect's own elapsed time draws on the budget too. The budget is
+	// DnMigrCutoverConnectBudget in the converge the cutover brings — a
+	// request without cutover_pending for a migration whose flag the request
+	// this process held before it carried — sized to outlast the src side's
+	// own cutover pass on a loaded node, and DnMigrConnectPassBudget in
+	// every other converge. Only once it is spent does the pass fail its
+	// connect and register the DN8 loop above, so a src side whose pass
+	// outlasts even the longer budget leaves the migration gap to that loop.
+	// The namespace wait below has a budget of its own. Unlike the
+	// whole-second integer above them, these three are time.Durations.
+	DnMigrConnectPassBudget    = 1 * time.Second
+	DnMigrCutoverConnectBudget = 5 * time.Second
+	DnMigrConnectRetryPause    = 100 * time.Millisecond
 
 	// The migration destination's wait for the source namespace (dnagent.md
 	// DN13 step (3)). The kernel returns from `nvme connect` once the
@@ -391,7 +398,7 @@ const (
 	// DnMigrDstNsPause between reads and DnMigrDstNsWait in all (the reads
 	// themselves are not counted). It is not a connect retry: that is the
 	// in-pass retry above, and after it the DN8 loop. time.Durations, like
-	// the two above.
+	// the three above.
 	DnMigrDstNsWait  = 1 * time.Second
 	DnMigrDstNsPause = 50 * time.Millisecond
 

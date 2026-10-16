@@ -206,8 +206,9 @@ func (s *DnAgentServer) collectClaims(
 //	d4 side device        always   (ensureSideDev — every level, DN11)
 //	d0 error, d1 linear   wantDm   (ensureCnDm, one pair per cn in cnIds)
 //	:2: export            wantExport (ensureCnExports)
-//	d2 migr-src linear    migrSrc != nil && wantDm   (ensureMigrSrc)
-//	:3: export            migrSrc != nil && wantExport
+//	d2 migr-src linear    migrSrc != nil && wantDm   (buildMigrSrc)
+//	:3: export            migrSrc != nil && wantExport (buildMigrSrc,
+//	                      linkMigrSrc)
 //	d3 clone, d5 wrapper,
 //	:3: connection        wantMigr (ensureMigrDst)
 //

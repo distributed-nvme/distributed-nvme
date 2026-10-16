@@ -533,21 +533,30 @@ func TestMigrationSourceSequence(t *testing.T) {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
 	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
 	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
 	errName := nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0)
-	// (1) every namespace inaccessible, (2) reload every per-CN dm-linear
-	// onto its dm-error ([D12]; newTestServer runs with the DN12 cutover
-	// window off, so phase 2 happens at once — TestMigrationSourceFence
-	// covers the window), (3) build + export.
+	srcNs := agent.NvmetRoot + "/subsystems/" + srcNqn + "/namespaces/1"
+	// (3) the build of the export — its dm-linear, its subsystem and its
+	// namespace, enabled — ahead of the steps that cut the primary's path,
+	// then (1) every namespace inaccessible, (2) reload every per-CN
+	// dm-linear onto its dm-error ([D12]; newTestServer runs with the DN12
+	// cutover window off, so phase 2 happens at once —
+	// TestMigrationSourceFence covers the window), and only then (3) the
+	// export's port link, which alone puts it in the destination's reach
+	// (DN12).
 	assertOrder(t, node,
+		"cmd dmsetup create "+srcName,
+		"cmd mkdir -p "+agent.NvmetRoot+"/subsystems/"+srcNqn,
+		"cmd mkdir -p "+srcNs,
+		"writedirect "+srcNs+"/enable=1",
 		fmt.Sprintf("writedirect %s/subsystems/%s/namespaces/1/ana_grpid=%d",
 			agent.NvmetRoot,
 			nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
 			common.AnaGrpIdInaccessible),
 		"cmd dmsetup reload "+linName,
-		"cmd dmsetup create "+srcName,
-		"cmd mkdir -p "+agent.NvmetRoot+"/subsystems/"+
-			nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId),
+		"cmd ln -s "+agent.NvmetRoot+"/subsystems/"+srcNqn+" "+
+			portPathOf(common.NvmetPortId)+"/subsystems/"+srcNqn,
 	)
 	if node.dms[linName].suspended {
 		t.Error("the per-CN dm-linear was left suspended ([D12] forbids it)")
@@ -559,7 +568,7 @@ func TestMigrationSourceSequence(t *testing.T) {
 	}
 	hostNqn := nf.DnHostNqn(testCluster, testSrcDn)
 	link := fmt.Sprintf("%s/subsystems/%s/allowed_hosts/%s", agent.NvmetRoot,
-		nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId), hostNqn)
+		srcNqn, hostNqn)
 	if _, ok := node.links[link]; !ok {
 		t.Errorf("the destination DN host is not in allowed_hosts")
 	}
@@ -593,6 +602,238 @@ func TestMigrationSourceSequence(t *testing.T) {
 	}
 	if state.AnaGrpId != common.AnaGrpIdOptimized {
 		t.Errorf("primary ana_grpid = %d, want optimized", state.AnaGrpId)
+	}
+}
+
+// A migration source whose export build fails runs neither src step 1 nor
+// the suspend of src step 2 (DN12): it serves on. The primary's namespace
+// stays optimized over its dm-linear on the side device, no per-CN dm-linear
+// is suspended or reloaded, nothing is linked to the port, and the migration
+// source rows carry the failure. Each part of the build is failed in turn:
+// the dm-linear, the subsystem and its namespace. The per-CN rows are read as
+// a check round reads them: each CN's export reads ERROR, its namespace not
+// yet inaccessible, the primary's naming the group it still serves in, and
+// the primary's dm-linear reads ERROR, not yet on its dm-error, where the
+// standby's already is. Run with the cutover window on, so a suspend would
+// stay visible. The next SyncupSide whose build holds runs the whole
+// cutover.
+func TestASourceWhoseExportBuildFailsServesOn(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+	for _, tc := range []struct {
+		name string
+		fail string
+		row  func(*pb.SideInfo_MigrSrcInfo) *pb.ResInfo
+	}{
+		{"the dm-linear", "dmsetup create " + srcName,
+			(*pb.SideInfo_MigrSrcInfo).GetDmLinearInfo},
+		{"the subsystem", "mkdir -p " + agent.NvmetRoot + "/subsystems/" +
+			srcNqn, (*pb.SideInfo_MigrSrcInfo).GetNvmeofInfo},
+		{"the namespace", "mkdir -p " + agent.NvmetRoot + "/subsystems/" +
+			srcNqn + "/namespaces/1",
+			(*pb.SideInfo_MigrSrcInfo).GetNvmeofInfo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			srv.fenceWait = time.Hour
+			portLink := portPathOf(common.NvmetPortId) + "/subsystems/" +
+				srcNqn
+			linked := func() bool {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				_, ok := node.links[portLink]
+				return ok
+			}
+
+			setFailAlways(node, tc.fail, "build refused")
+			node.Reset()
+			reply, err := srv.SyncupSide(ctx, migrSrcReq(2))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() != 0 {
+				t.Fatalf("rejected: %v", reply.GetAgentReply())
+			}
+			for _, call := range node.Calls() {
+				if strings.Contains(call, "/ana_grpid=") ||
+					strings.HasPrefix(call, "cmd dmsetup suspend ") ||
+					strings.HasPrefix(call, "cmd dmsetup reload ") {
+					t.Errorf("a source whose build failed ran %q", call)
+				}
+			}
+			for _, cnId := range []uint64{testCn0, testCn1} {
+				lin := nf.DnLinearName(testCluster, testDn, testSp, testSide,
+					cnId)
+				if dmSuspended(node, lin) {
+					t.Errorf("cn %d: %s was suspended", cnId, lin)
+				}
+			}
+			primaryLin := nf.DnLinearName(testCluster, testDn, testSp,
+				testSide, testCn0)
+			if !linearMapsDm(node, primaryLin, nf.DnSideName(testCluster,
+				testDn, testSp, testSide)) {
+				t.Error("the primary's dm-linear left the side device")
+			}
+			if got := anaGrpOf(t, srv, node, nf.SideToCnNqn(testCluster,
+				testSp, testLeg, testCn0)); got != common.AnaGrpIdOptimized {
+				t.Errorf("the primary's ana_grpid = %d, want optimized", got)
+			}
+			if linked() {
+				t.Error("the migration source export is linked to the port")
+			}
+			row := tc.row(reply.GetSideInfo().GetMigrSrcInfo())
+			if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				!strings.Contains(row.GetDetails(), "build refused") {
+				t.Errorf("the failed step's migr_src row = %v/%q, want "+
+					"ERROR with the refusal", row.GetStatus(),
+					row.GetDetails())
+			}
+			if st := srv.getSide(sideKey(testCluster, testDn, testSp,
+				testSide)); srv.fenceStarted(st) {
+				t.Error("a source whose build failed started the fence")
+			}
+			info := reply.GetSideInfo()
+			for _, row := range []struct {
+				name string
+				info *pb.ResInfo
+				want pb.ResStatus
+			}{
+				{"the primary's dm_error", info.GetCnIdToDmError()[testCn0],
+					pb.ResStatus_RES_STATUS_OK},
+				{"the standby's dm_error", info.GetCnIdToDmError()[testCn1],
+					pb.ResStatus_RES_STATUS_OK},
+				{"the primary's dm_linear",
+					info.GetCnIdToDmLinear()[testCn0],
+					pb.ResStatus_RES_STATUS_ERROR},
+				{"the standby's dm_linear",
+					info.GetCnIdToDmLinear()[testCn1],
+					pb.ResStatus_RES_STATUS_OK},
+				{"the primary's nvmeof", info.GetCnIdToNvmeof()[testCn0],
+					pb.ResStatus_RES_STATUS_ERROR},
+				{"the standby's nvmeof", info.GetCnIdToNvmeof()[testCn1],
+					pb.ResStatus_RES_STATUS_ERROR},
+			} {
+				if row.info.GetStatus() != row.want {
+					t.Errorf("%s row = %v/%q, want %v", row.name,
+						row.info.GetStatus(), row.info.GetDetails(), row.want)
+				}
+			}
+			if got, want := info.GetCnIdToNvmeof()[testCn0].GetDetails(),
+				fmt.Sprintf("ana_grpid is %d, want %d",
+					common.AnaGrpIdOptimized,
+					common.AnaGrpIdInaccessible); !strings.Contains(
+				got, want) {
+				t.Errorf("the primary's nvmeof row reads %q, want %q", got,
+					want)
+			}
+
+			clearFailAlways(node, tc.fail)
+			if _, err := srv.SyncupSide(ctx, migrSrcReq(3)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if !dmSuspended(node, primaryLin) || !linked() ||
+				anaGrpOf(t, srv, node, nf.SideToCnNqn(testCluster, testSp,
+					testLeg, testCn0)) != common.AnaGrpIdInaccessible {
+				t.Error("the next SyncupSide did not run the cutover")
+			}
+		})
+	}
+}
+
+// A build that fails in a later pass, once the cutover's own pass has begun
+// the fence, still settles it, as every converge that stops short of the
+// per-CN stacks does (DN12): past the window it puts each per-CN dm-linear
+// on its dm-error, resumed, so [D12]'s bound does not wait for a build that
+// holds.
+func TestAFailedSourceBuildSettlesTheFence(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	lins := map[uint64]string{}
+	for _, cnId := range []uint64{testCn0, testCn1} {
+		lins[cnId] = nf.DnLinearName(testCluster, testDn, testSp, testSide,
+			cnId)
+		if !dmSuspended(node, lins[cnId]) {
+			t.Fatalf("fixture is wrong: cn %d's dm-linear is not suspended",
+				cnId)
+		}
+	}
+
+	srv.fenceWait = 0
+	setFailAlways(node, "dmsetup table "+srcName, "table read refused")
+	node.Reset()
+	reply, err := srv.SyncupSide(ctx, migrSrcReq(3))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if row := reply.GetSideInfo().GetMigrSrcInfo().GetDmLinearInfo(); row.
+		GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("fixture is wrong: the build held (migr_src dm-linear "+
+			"%v/%q)", row.GetStatus(), row.GetDetails())
+	}
+	for cnId, lin := range lins {
+		errName := nf.DnErrorName(testCluster, testDn, testSp, testSide, cnId)
+		if dmSuspended(node, lin) || !linearMapsDm(node, lin, errName) {
+			t.Errorf("cn %d: the window ended with %s not resumed on its "+
+				"dm-error", cnId, lin)
+		}
+	}
+}
+
+// The export's row of a migration source is set after its port link, so it
+// reports the link (linkMigrSrc): a link the kernel refuses reads ERROR
+// there with the refusal, though the build held and the pass went on to
+// steps 1 and 2, and nothing is linked, so the destination cannot reach the
+// export (DN12).
+func TestASourceWhosePortLinkFailsReportsIt(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+
+	setFailAlways(node, "ln -s "+agent.NvmetRoot+"/subsystems/"+srcNqn,
+		"link refused")
+	node.Reset()
+	reply, err := srv.SyncupSide(ctx, migrSrcReq(2))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	}
+	srcInfo := reply.GetSideInfo().GetMigrSrcInfo()
+	if row := srcInfo.GetDmLinearInfo(); row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Fatalf("fixture is wrong: the build failed (migr_src dm-linear "+
+			"%v/%q)", row.GetStatus(), row.GetDetails())
+	}
+	if !node.hasCall("cmd dmsetup reload " + nf.DnLinearName(testCluster,
+		testDn, testSp, testSide, testCn0)) {
+		t.Error("the pass did not go on to step 2")
+	}
+	if row := srcInfo.GetNvmeofInfo(); row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(row.GetDetails(), "link refused") {
+		t.Errorf("migr_src nvmeof row = %v/%q, want ERROR with the refusal",
+			row.GetStatus(), row.GetDetails())
+	}
+	node.mu.Lock()
+	_, linked := node.links[portPathOf(common.NvmetPortId)+"/subsystems/"+
+		srcNqn]
+	node.mu.Unlock()
+	if linked {
+		t.Error("the migration source export is linked to the port")
 	}
 }
 
@@ -1449,13 +1690,21 @@ func TestMigrationSourceFence(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	// Namespaces inaccessible first, then the suspend — never a reload.
+	// Namespaces inaccessible first, then the suspend — never a reload —
+	// and the migration source export's port link only once every per-CN
+	// dm-linear is suspended: the link alone puts the export in the
+	// destination's reach, and the copy must read no region the source can
+	// still write (DN12).
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
 	assertOrder(t, node,
 		fmt.Sprintf("writedirect %s/subsystems/%s/namespaces/1/ana_grpid=%d",
 			agent.NvmetRoot,
 			nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
 			common.AnaGrpIdInaccessible),
 		"cmd dmsetup suspend "+linName,
+		"cmd dmsetup suspend "+stbName,
+		"cmd ln -s "+agent.NvmetRoot+"/subsystems/"+srcNqn+" "+
+			portPathOf(common.NvmetPortId)+"/subsystems/"+srcNqn,
 	)
 	if node.hasCall("cmd dmsetup reload " + linName) {
 		t.Error("phase 1 swapped the table instead of suspending in place")

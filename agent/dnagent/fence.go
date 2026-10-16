@@ -152,11 +152,12 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 	s.mu.Unlock()
 }
 
-// settleFence is the fence bookkeeping of the two converges that stop short
-// of ensureCnDm while the per-CN layer is still wanted: one that took the DN9
-// side-device gate (syncup_side.go's `state != sideDevReady` fork), or one
-// whose migration destination could not read where its per-CN stacks are
-// (convergeSide's migrCloneUnread branch).
+// settleFence is the fence bookkeeping of the three converges that stop
+// short of ensureCnDm while the per-CN layer is still wanted: one that took
+// the DN9 side-device gate (syncup_side.go's `state != sideDevReady` fork),
+// one whose migration source could not build its export (convergeSide's
+// buildMigrSrc branch), or one whose migration destination could not read
+// where its per-CN stacks are (convergeSide's migrCloneUnread branch).
 //
 // Without it the window can end with the per-CN dm-linears still suspended
 // and nothing left to re-arm: the timer nils itself before it converges

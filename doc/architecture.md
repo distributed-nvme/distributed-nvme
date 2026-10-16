@@ -4362,10 +4362,11 @@ primary is doing (Known limits); waiting for every cntlr would let one
 broken standby hold up every migration; and without the destination's
 reason a destination whose wrapper failed would still get the cutover and
 leave the leg with no usable path for as long as that failure lasted. The
-source builds its migration source export only after its step 1 and the
-suspend that starts its step 2, so the destination's connect of step 3
-often comes too early, and the destination tries it again within the same
-pass (`dnagent.md` DN13).
+source links its migration source export to its nvmet port only after its
+step 1 and the suspend that starts its step 2 (src side, below), so the
+destination's connect of step 3 often comes too early, and the destination
+tries it again within the same pass, for longer in the pass the cutover
+brings (`dnagent.md` DN13).
 
 At `SP_LEVEL_NO_MIGRATION` and above a cutover still pending waits until
 the level comes back down, the source serving meanwhile: the destination
@@ -4413,6 +4414,20 @@ only with the cutover):
 3. Build `DnMigrSrcName` (a linear on the side device) and export it
    through `MigrSrcNqn`, its `allowed_hosts` the `DnHostNqn` of the cluster
    and `migr_src_conf.dst_dn_id` alone.
+
+The steps keep these numbers, but the source runs them in another order:
+step 3's build first — the linear, and the subsystem with its
+`allowed_hosts` and its namespace — then step 1, the suspend of step 2,
+and step 3's last act, the export's link to the node's nvmet port. The
+kernel finds a subsystem for a connect only through its port's links, so
+the link alone puts the export in the destination's reach, and the copy
+starts only after the source has run its suspends: [D12]'s reason needs
+that order, since no write may reach a region of the source's data after
+the copy has read it. It is an order, not a gate: a suspend that fails
+does not hold the link back (`dnagent.md`, Known limits). The build goes
+before step 1 so that none of its commands sits in the migration gap
+(Known limits); a build that fails stops the source's converge before
+step 1 (`dnagent.md` DN12).
 
 **dst side** (its `SyncupSide` carries `migr_dst_conf`: `migr_id`,
 `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`,
@@ -5627,9 +5642,11 @@ that component's document and only pointed to here.
   steps. Where a step of theirs stops instead, as when the destination's
   connect to the source is still refused once its pass's retries run out,
   the gap lasts until a later pass of the destination's retry runs it
-  (`dnagent.md` DN13), and a commit waits that long. A migration whose
-  record carries no `cutover_pending` has no cutover to wait at (Upgrade
-  in lockstep): its gap can open before the primary has connected the
+  (`dnagent.md` DN13), and a commit waits that long. The pass the cutover
+  brings retries the connect longer than any other (`dnagent.md` DN13). A
+  migration whose record carries no `cutover_pending` has no cutover to
+  wait at (Upgrade in lockstep): its gap can open before the primary has
+  connected the
   destination, and the converge that would connect it (`cnagent.md` CN10)
   needs the cntlr lock a waiting call holds, so the cntlr can stay blocked
   until the migration ends. A cancel gives the primary back its path to

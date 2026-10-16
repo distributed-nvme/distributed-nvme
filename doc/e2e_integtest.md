@@ -384,11 +384,20 @@ a side to a disk node outside its group, on a distinct cntlid slot. Its
 cutover comes only once the primary holds a live path to the new side, and
 the worker's record of it names the primary and a reply of the primary's at
 a revision no older than the new side's provisioned flip
-(`dnv-worker.md` RW18). Its leg bitmap is read and pushed only once the
-primary reaches the leg through the new side, and it finishes under the
-same leg id with an optimized path before any read (`architecture.md`,
-Migration; `dnagent.md` DN12, DN13); a cancelled one leaves its source
-untouched, the case relying on leg repair leaving a two-sided leg alone
+(`dnv-worker.md` RW18). Once the new side serves, the case reads both dn
+agents' logs and prints the migration gap, from the old side's first write
+of the inaccessible group to the primary's export of the leg to the new
+side's write of the optimized group to its own. It sets no time limit on
+the gap, and fails when either write failed, or when the new side's does
+not come from the new side's cutover request: that request's pass waits for
+the old side's own pass only as long as its connect budget (`dnagent.md`
+DN13), so an old side whose pass outlasts the budget, or any other step of
+that pass that stops, leaves the gap to a later pass and fails the case.
+Its leg bitmap is read and pushed only once the primary reaches the leg
+through the new side, and it finishes under the same leg id with an
+optimized path before any read (`architecture.md`, Migration;
+`dnagent.md` DN12, DN13); a cancelled one leaves its source untouched,
+the case relying on leg repair leaving a two-sided leg alone
 (`dnv-worker.md` AR8). A spare leg (raid1 only) is
 connected by both cntlrs and switched in, the replaced leg parked and then
 deleted, md's rebuild onto it judged by the array's state words rather than

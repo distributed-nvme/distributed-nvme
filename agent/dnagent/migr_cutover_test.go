@@ -2,10 +2,13 @@ package dnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -610,10 +613,10 @@ const budgetRetries = int(
 
 // A connect the source refuses is tried again within the same pass, every
 // DnMigrConnectRetryPause while DnMigrConnectPassBudget covers the pause:
-// after the cutover the src side builds its export only after its own first
-// two steps, so the first connect often comes too early. One that answers
-// within the budget is absorbed: the pass builds the dm-clone and serves
-// through it, and registers no DN8 retry. The wait for the source's
+// after the cutover the src side links its export to its port only after its
+// own first two steps, so the first connect often comes too early. One that
+// answers within the budget is absorbed: the pass builds the dm-clone and
+// serves through it, and registers no DN8 retry. The wait for the source's
 // namespace runs after it unchanged, on a budget of its own, even after a
 // connect that took the whole of the connect's.
 func TestMigrationDestinationRetriesItsConnectWithinThePass(t *testing.T) {
@@ -674,6 +677,346 @@ func TestMigrationDestinationRetriesItsConnectWithinThePass(t *testing.T) {
 					"registered the DN8 retry")
 			}
 		})
+	}
+}
+
+// cutoverRetries is how many in-pass retries of a refused connect the
+// cutover's budget covers, every pause of them fitting in it.
+const cutoverRetries = int(
+	common.DnMigrCutoverConnectBudget / common.DnMigrConnectRetryPause)
+
+// The converge the cutover brings — a request without cutover_pending while
+// the process held one that carried it for the same migration — tries
+// its connect for DnMigrCutoverConnectBudget (DN13): the source links its
+// export to the port only after its own step 1 and the suspend of its step
+// 2, which on a loaded node takes longer than DnMigrConnectPassBudget. A
+// source that answers after the short budget's last retry is still caught
+// by that pass, which builds the dm-clone, serves through it and registers
+// no DN8 retry, so the migration gap ends in the cutover's own pass.
+func TestTheCutoverConvergeOutwaitsASlowSource(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.migrRetryInterval = time.Hour
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	clock := withDnClock(srv, node)
+	names := newMigrDstNames()
+	if _, err := srv.SyncupSide(ctx,
+		pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	refusals := budgetRetries + 5
+	node.mu.Lock()
+	node.failCmd["nvme connect "] = "failed to write to nvme-fabrics device"
+	node.failCmdLeft["nvme connect "] = refusals
+	node.mu.Unlock()
+
+	start := clock.Now()
+	node.Reset()
+	reply, err := srv.SyncupSide(ctx,
+		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if n := len(node.callsMatching("cmd nvme connect ")); n != refusals+1 {
+		t.Errorf("%d connects, want %d refused and one more", n, refusals)
+	}
+	want := time.Duration(refusals) * common.DnMigrConnectRetryPause
+	if got := clock.Now().Sub(start); got != want {
+		t.Errorf("the pass waited %v, want %v", got, want)
+	}
+	for name, row := range destinationRows(reply.GetSideInfo()) {
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("%s = %v/%q, want OK", name, row.GetStatus(),
+				row.GetDetails())
+		}
+	}
+	if !servesThroughClone(t, srv, node, names) || migrRetrying(srv) {
+		t.Error("the cutover's pass does not serve through its dm-clone " +
+			"with no retry registered")
+	}
+}
+
+// Only the converge the cutover brings waits the longer budget, and only
+// once: against a source that never answers it spends
+// DnMigrCutoverConnectBudget, while the same request sent again, the next
+// SyncupSide and a pass of the DN8 retry each spend DnMigrConnectPassBudget,
+// as every other converge does (DN13). The longer wait holds the side's
+// locks once per cutover in a process, not on every retry and not on every
+// revision.
+func TestOnlyTheCutoverConvergeWaitsTheLongerBudget(t *testing.T) {
+	srv, node := newTestServer(t)
+	// The DN8 retry's own passes would run on the fake clock while a pass
+	// is measured; the test runs one by hand instead.
+	srv.migrRetryInterval = time.Hour
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	clock := withDnClock(srv, node)
+	if _, err := srv.SyncupSide(ctx,
+		pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	setFailAlways(node, "nvme connect", "connect refused")
+	key := sideKey(testCluster, testDn, testSp, testSide)
+	syncup := func(revision uint64) func() {
+		return func() {
+			if _, err := srv.SyncupSide(ctx, migrDstReq(revision,
+				pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+		}
+	}
+	for _, pass := range []struct {
+		name   string
+		run    func()
+		budget time.Duration
+	}{
+		{"the cutover's converge", syncup(3),
+			common.DnMigrCutoverConnectBudget},
+		{"the cutover's request sent again", syncup(3),
+			common.DnMigrConnectPassBudget},
+		{"the next SyncupSide", syncup(4), common.DnMigrConnectPassBudget},
+		{"a pass of the DN8 retry", func() {
+			srv.reconvergeSide(ctx, key, srv.getSide(key))
+		}, common.DnMigrConnectPassBudget},
+	} {
+		start := clock.Now()
+		node.Reset()
+		pass.run()
+		if got := clock.Now().Sub(start); got != pass.budget {
+			t.Errorf("%s waited %v, want %v", pass.name, got, pass.budget)
+		}
+		retries := int(pass.budget / common.DnMigrConnectRetryPause)
+		if n := len(node.callsMatching(
+			"cmd nvme connect ")); n != retries+1 {
+			t.Errorf("%s made %d connects, want the first and %d retries",
+				pass.name, n, retries)
+		}
+	}
+	if !migrRetrying(srv) {
+		t.Error("no DN8 retry is registered for a source that never answers")
+	}
+}
+
+// A converge keeps DnMigrConnectPassBudget unless the request held before it
+// carried cutover_pending for the same migration: on a side that held no
+// migration, on a migration whose requests never carried the flag
+// (architecture.md, Upgrade in lockstep), and after a flag of another
+// migration, nothing tells the pass that the cutover brought it (DN13).
+func TestAConvergeWithNoFlagClearedKeepsTheShortBudget(t *testing.T) {
+	otherPending := pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)
+	otherPending.MigrDstConf.MigrId = testMigrId + 1
+	for _, tc := range []struct {
+		name string
+		held *pb.SyncupSideRequest
+	}{
+		{"a side that held no migration", nil},
+		{"a migration whose requests never carried the flag",
+			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)},
+		{"a flag of another migration", otherPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.migrRetryInterval = time.Hour
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			clock := withDnClock(srv, node)
+			setFailAlways(node, "nvme connect", "connect refused")
+			if tc.held != nil {
+				if _, err := srv.SyncupSide(ctx, tc.held); err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+			}
+
+			start := clock.Now()
+			node.Reset()
+			if _, err := srv.SyncupSide(ctx,
+				migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if got := clock.Now().Sub(start); got !=
+				common.DnMigrConnectPassBudget {
+				t.Errorf("the pass waited %v, want %v", got,
+					common.DnMigrConnectPassBudget)
+			}
+			if n := len(node.callsMatching(
+				"cmd nvme connect ")); n != budgetRetries+1 {
+				t.Errorf("%d connects, want the first and %d retries", n,
+					budgetRetries)
+			}
+		})
+	}
+}
+
+// DN2's re-run after a restart keeps DnMigrConnectPassBudget, even over the
+// request the cutover brought: it converges from the stored request alone,
+// with no request held before it to show the flag cleared (DN13). So a
+// restart inside the cutover's converge leaves the gap to the DN8 retry, and
+// a restarted agent with many destination sides whose source does not answer
+// holds each side's locks the shorter budget, not the longer one, side after
+// side.
+func TestARestartReRunKeepsTheShortBudget(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.migrRetryInterval = time.Hour
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	withDnClock(srv, node)
+	setFailAlways(node, "nvme connect", "connect refused")
+	for _, req := range []*pb.SyncupSideRequest{
+		pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE),
+		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE),
+	} {
+		if _, err := srv.SyncupSide(ctx, req); err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+	}
+
+	// The kernel state and the stored request survive; the agent process
+	// does not.
+	restarted := NewDnAgentServer(node.osClient(),
+		common.NewNameFmt(common.DefaultLocalStorPrefix),
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
+	restarted.migrRetryInterval = time.Hour
+	clock := withDnClock(restarted, node)
+	rootCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(func() {
+		cancel()
+		restarted.WaitBackground()
+	})
+	start := clock.Now()
+	node.Reset()
+	if err := restarted.Reconcile(rootCtx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := clock.Now().Sub(start); got != common.DnMigrConnectPassBudget {
+		t.Errorf("the re-run waited %v, want %v", got,
+			common.DnMigrConnectPassBudget)
+	}
+	if n := len(node.callsMatching("cmd nvme connect ")); n != budgetRetries+1 {
+		t.Errorf("the re-run made %d connects, want the first and %d retries",
+			n, budgetRetries)
+	}
+}
+
+// A restart that leaves the process holding no request for the side keeps
+// DnMigrConnectPassBudget for the cutover's request even when that is the
+// first request of the side the new process takes: with nothing held,
+// nothing shows the pass that the flag was cleared (DN13). So after a lost
+// --local-store a source slower than the shorter budget leaves the gap to
+// the DN8 retry.
+func TestARestartThatHoldsNoRequestKeepsTheShortBudget(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.migrRetryInterval = time.Hour
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx,
+		pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+
+	// The agent restarts over an empty --local-store; the disk and every
+	// kernel object survive.
+	stopTestServer(t, srv)
+	node.mu.Lock()
+	node.protos = map[string][]byte{}
+	node.mu.Unlock()
+	restarted := startTestServer(t, node)
+	restarted.migrRetryInterval = time.Hour
+	clock := withDnClock(restarted, node)
+	if _, err := restarted.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	setFailAlways(node, "nvme connect", "connect refused")
+
+	start := clock.Now()
+	node.Reset()
+	if _, err := restarted.SyncupSide(ctx,
+		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := clock.Now().Sub(start); got != common.DnMigrConnectPassBudget {
+		t.Errorf("the cutover's request waited %v, want %v", got,
+			common.DnMigrConnectPassBudget)
+	}
+	if n := len(node.callsMatching("cmd nvme connect ")); n != budgetRetries+1 {
+		t.Errorf("the cutover's request made %d connects, want the first "+
+			"and %d retries", n, budgetRetries)
+	}
+}
+
+// A restart whose DN2 re-run puts back a stored request that still carries
+// cutover_pending gives the request the worker sends again the longer budget
+// once more (DN13): the save of the request that cleared the flag failed,
+// which is only logged (SH5), so the restarted process holds the flagged
+// request, and the request without the flag brings the cutover to it as it
+// did to the process before. The longer budget goes to one pass per cutover
+// in a process, not in the side's whole life.
+func TestARestartOverAFlaggedRequestGivesTheLongerBudgetOnceMore(
+	t *testing.T,
+) {
+	srv, node := newTestServer(t)
+	srv.migrRetryInterval = time.Hour
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	withDnClock(srv, node)
+	setFailAlways(node, "nvme connect", "connect refused")
+	if _, err := srv.SyncupSide(ctx,
+		pendingDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide)
+	oc := node.osClient()
+	write := oc.WriteProtoFn
+	oc.WriteProtoFn = func(
+		ctx context.Context, p string, msg proto.Message,
+	) error {
+		if p == path {
+			return errors.New("write " + p + ": no space left on device")
+		}
+		return write(ctx, p, msg)
+	}
+	srv.store = agent.NewStore(oc, common.DefaultLocalStorPrefix)
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := storedSideRevision(t, srv, node); got != 2 {
+		t.Fatalf("the side file holds revision %d, want the 2 before the "+
+			"failed save", got)
+	}
+
+	// The kernel state and the stored request survive; the agent process
+	// does not.
+	restarted := NewDnAgentServer(node.osClient(),
+		common.NewNameFmt(common.DefaultLocalStorPrefix),
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
+	restarted.migrRetryInterval = time.Hour
+	clock := withDnClock(restarted, node)
+	rootCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(func() {
+		cancel()
+		restarted.WaitBackground()
+	})
+	if err := restarted.Reconcile(rootCtx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	start := clock.Now()
+	node.Reset()
+	if _, err := restarted.SyncupSide(ctx,
+		migrDstReq(3, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := clock.Now().Sub(start); got !=
+		common.DnMigrCutoverConnectBudget {
+		t.Errorf("the request sent again waited %v, want %v", got,
+			common.DnMigrCutoverConnectBudget)
+	}
+	if n := len(node.callsMatching(
+		"cmd nvme connect ")); n != cutoverRetries+1 {
+		t.Errorf("the request sent again made %d connects, want the first "+
+			"and %d retries", n, cutoverRetries)
 	}
 }
 

@@ -224,7 +224,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 			// already recorded the refusal for this DN.
 			continue
 		}
-		s.convergeSide(ctx, st, extentSize)
+		s.convergeSide(ctx, st, extentSize, common.DnMigrConnectPassBudget)
 	}
 	// DN2: the dm-clone may have survived the restart, so re-apply every
 	// chunk once here rather than only on (re)creation.
