@@ -750,6 +750,12 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // also reads each sibling export's namespace 1 exactly once, and the age of
 // each without it exactly once, which is what makes a cache of the
 // attribution pointless within a pass.
+//
+// The execs left are the fixed ones, and only two: the sweep's `dmsetup ls`
+// and its `ls` of the subsystems directory. The disk's size and whether the
+// agent's own port is there are read in the agent's own process, once each
+// a pass (dnagent.md SH17, SH18): a child for either would cost every Check
+// round of a disk node one more process.
 func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 
@@ -798,6 +804,42 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		node.mu.Lock()
 		node.subsysGhosts = gone
 		node.mu.Unlock()
+		// fixedOnly checks that the pass just run started no child but the
+		// sweep's two whole-node listings, and read the disk's number and
+		// its own port's directory in its own process, once each.
+		fixedOnly := func(pass string) {
+			t.Helper()
+			fixed := []string{"cmd dmsetup ls",
+				"cmd ls -1 " + agent.NvmetRoot + "/subsystems"}
+			var got []string
+			for _, call := range node.callsMatching("cmd ") {
+				got = append(got, call)
+				known := false
+				for _, prefix := range fixed {
+					known = known || strings.HasPrefix(call, prefix)
+				}
+				if !known {
+					t.Errorf("siblings=%d per=%d: the %s ran %q, a child "+
+						"beside the sweep's two listings", siblings, per,
+						pass, call)
+				}
+			}
+			if len(got) != len(fixed) {
+				t.Errorf("siblings=%d per=%d: the %s ran %d children, want "+
+					"%d, the sweep's two listings: %q", siblings, per, pass,
+					len(got), len(fixed), got)
+			}
+			for _, read := range []string{
+				"devno " + testDisk,
+				"mtime " + portPathOf(common.NvmetPortId),
+			} {
+				if n := len(node.callsMatching(read)); n != 1 {
+					t.Errorf("siblings=%d per=%d: the %s made %d reads "+
+						"%q in its own process, want 1", siblings, per, pass,
+						n, read)
+				}
+			}
+		}
 		// readsOnce checks that the pass just run attributed every sibling
 		// export by exactly one read of its namespace 1, and every one
 		// without it by exactly one read of its age too: none skipped, none
@@ -837,6 +879,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		c.verdictCmds = len(node.callsMatching("cmd "))
 		c.verdictLists = len(node.callsMatching("list "))
 		readsOnce("CheckDn verdict")
+		fixedOnly("CheckDn round")
 
 		node.Reset()
 		syncReply, err := srv.SyncupDn(ctx, sweepDnReq(2, ours))
@@ -851,6 +894,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		c.syncCmds = len(node.callsMatching("cmd "))
 		c.syncLists = len(node.callsMatching("list "))
 		readsOnce("SyncupDn")
+		fixedOnly("SyncupDn")
 
 		// Cheaper is only worth having if it is still right: every
 		// sibling export is attributed to its agent and left alone, and so

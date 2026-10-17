@@ -138,8 +138,9 @@ func portPathOf(portId int) string {
 // one of: end of string, "/" (a child of the port), "=" (a write/writedirect
 // of a port attribute) or " " (the next argument). Matching on portPath+"/"
 // alone is not enough — it misses the two shapes a half-converted call site
-// produces most often, `cmd ls -1 {portPath}` (every dirExists probe, so
-// every ProbePort) and `cmd mkdir -p {portPath}` (EnsurePort's own mkdir).
+// produces most often, `mtime {portPath}` (the port directory's time read,
+// so every ProbePort) and `cmd mkdir -p {portPath}` (EnsurePort's own
+// mkdir).
 // The separator test is what keeps ports/1 from matching ports/11.
 func mentionsPort(call, portPath string) bool {
 	rest := call

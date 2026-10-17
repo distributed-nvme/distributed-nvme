@@ -288,8 +288,8 @@ const (
 	DefaultNvmeFastIoFailTmo = 5
 
 	// Default cap on the number of in-flight OsClient operations
-	// (commands + directory listings + modification-time reads + file I/O +
-	// proto I/O combined). See osclient.md.
+	// (commands + directory listings + modification-time reads +
+	// device-number reads + file I/O + proto I/O combined). See osclient.md.
 	DefaultOsClientLimit = 32
 
 	// Maximum number of characters of string file data included in a log

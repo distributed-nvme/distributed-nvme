@@ -124,9 +124,9 @@ func TestDnInfoCountsNeedASizeAndThisDnsDisk(t *testing.T) {
 
 	t.Run("no size read has answered", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		sizeCmd := "--output SIZE " + testDisk
+		sizeRead := "/sys/dev/block/" + node.devNo[testDisk] + "/size"
 		node.mu.Lock()
-		node.failCmdAlways[sizeCmd] = "lsblk: cannot read the size"
+		node.failReadAlways[sizeRead] = true
 		node.mu.Unlock()
 		reply, err := srv.SyncupDn(ctx, dnReq(1))
 		if err != nil {
@@ -150,7 +150,7 @@ func TestDnInfoCountsNeedASizeAndThisDnsDisk(t *testing.T) {
 			}
 		}
 		node.mu.Lock()
-		delete(node.failCmdAlways, sizeCmd)
+		delete(node.failReadAlways, sizeRead)
 		node.mu.Unlock()
 		wantCounts(t, "the probe whose size read answered",
 			dnInfoOf(t, srv), testDataExtCnt, 0, true)

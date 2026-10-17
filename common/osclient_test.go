@@ -218,6 +218,16 @@ func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
 		t.Errorf("ReadMtime with the only slot held = (%v, %v), "+
 			"want (zero, context.DeadlineExceeded)", mtime, err)
 	}
+	if devNo, err := client.ReadDevNo(ctx, "/dev/null"); err != context.Canceled || devNo != "" {
+		t.Errorf("ReadDevNo = (%q, %v), want (\"\", context.Canceled)", devNo, err)
+	}
+	// A device-number read waits for a slot like every other call.
+	shortDevNo, cancelShortDevNo := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShortDevNo()
+	if devNo, err := client.ReadDevNo(shortDevNo, "/dev/null"); err != context.DeadlineExceeded || devNo != "" {
+		t.Errorf("ReadDevNo with the only slot held = (%q, %v), "+
+			"want (\"\", context.DeadlineExceeded)", devNo, err)
+	}
 	if err := client.WriteFile(ctx, filepath.Join(t.TempDir(), "f"), "x"); err != context.Canceled {
 		t.Errorf("WriteFile err = %v, want context.Canceled", err)
 	}
@@ -225,6 +235,81 @@ func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
 	// A semaphore-acquire failure logs nothing: the operation never happened.
 	if recs := capture.records(t); len(recs) != 0 {
 		t.Errorf("blocked calls logged %d records: %s", len(recs), capture.buf.String())
+	}
+}
+
+// endsOnErrCtx is a ctx that ends the moment it is asked whether it has: its
+// Done channel stays open until Err is called, and Err closes it and answers
+// context.Canceled, as a ctx canceled just before that call would.
+// semaphore.Acquire hands out a free slot without calling Err, so the ctx
+// ends after the call took its slot and before its read, where only the
+// call's own ctx check can see it.
+type endsOnErrCtx struct {
+	context.Context
+	once sync.Once
+	done chan struct{}
+}
+
+func newEndsOnErrCtx() *endsOnErrCtx {
+	return &endsOnErrCtx{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+	}
+}
+
+func (c *endsOnErrCtx) Done() <-chan struct{} { return c.done }
+
+func (c *endsOnErrCtx) Err() error {
+	c.once.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+// TestInProcessReadsCheckTheCtxAfterTheirSlot: an mtime read and a
+// device-number read check the ctx once more after they take their slot
+// (osclient.md, ReadMtime and ReadDevNo; dnagent.md SH13). A ctx that ended
+// while the call took its slot returns the ctx error, performs nothing and
+// logs nothing, and the slot goes back. TestLimitBlocksAndCanceledCtxDoesNotRun
+// cannot show this: a ctx that ended before the call never gets a slot.
+func TestInProcessReadsCheckTheCtxAfterTheirSlot(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "plain")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		read func(*LimitedOsClient, context.Context) (bool, error)
+	}{
+		{"ReadMtime", func(c *LimitedOsClient, ctx context.Context) (bool, error) {
+			mtime, err := c.ReadMtime(ctx, dir)
+			return mtime.IsZero(), err
+		}},
+		{"ReadDevNo", func(c *LimitedOsClient, ctx context.Context) (bool, error) {
+			devNo, err := c.ReadDevNo(ctx, file)
+			return devNo == "", err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := captureLogs(t)
+			client := NewLimitedOsClient(1)
+
+			if empty, err := tc.read(client, newEndsOnErrCtx()); err != context.Canceled || !empty {
+				t.Errorf("%s = (empty %v, %v), want (empty, context.Canceled)",
+					tc.name, empty, err)
+			}
+			if recs := capture.records(t); len(recs) != 0 {
+				t.Errorf("a read whose ctx ended after its slot logged %d "+
+					"records: %s", len(recs), capture.buf.String())
+			}
+			// The read gave the only slot back.
+			short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancelShort()
+			if _, err := client.ReadFile(short, file); err != nil {
+				t.Errorf("a call made after the read = %v, want nil: a read "+
+					"whose ctx ended kept the only slot", err)
+			}
+		})
 	}
 }
 
@@ -313,6 +398,42 @@ func TestReadMtimeGivesItsSlotBack(t *testing.T) {
 	if _, err := client.ReadFile(short, file); err != nil {
 		t.Errorf("a call made after the mtime reads = %v, want nil: an "+
 			"mtime read kept the only slot", err)
+	}
+}
+
+// TestReadDevNoGivesItsSlotBack: a device-number read holds one slot like an
+// mtime read and gives it back when it returns, after a read that failed, as
+// "not exist" or otherwise, as well as after one that answered. A read that
+// keeps its slot leaves an agent, after as many size reads of its disk as it
+// has slots, with every call waiting for a slot that never comes.
+func TestReadDevNoGivesItsSlotBack(t *testing.T) {
+	client := NewLimitedOsClient(1)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "plain")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	for _, path := range []string{
+		blockDevForTest(t),
+		filepath.Join(dir, "missing"),
+		file,
+		blockDevForTest(t),
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := client.ReadDevNo(ctx, path)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ReadDevNo(%s) found no free slot: an earlier read "+
+				"kept it", path)
+		}
+	}
+	// Every other call finds the slot free as well.
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if _, err := client.ReadFile(short, file); err != nil {
+		t.Errorf("a call made after the device-number reads = %v, want "+
+			"nil: a device-number read kept the only slot", err)
 	}
 }
 
@@ -775,6 +896,129 @@ func TestReadMtimeOfARealDirectory(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ReadDevNo (osclient.md, ReadDevNo)
+// ---------------------------------------------------------------------------
+
+// blockDevForTest is the /dev node of a block device of this machine, the
+// first sysfs lists that has one; "/dev/null", a character device, when
+// none has, so a caller that needs a block device skips on its answer.
+func blockDevForTest(t *testing.T) string {
+	t.Helper()
+	names, err := os.ReadDir("/sys/class/block")
+	if err != nil {
+		return "/dev/null"
+	}
+	for _, entry := range names {
+		dev := filepath.Join("/dev", entry.Name())
+		if info, err := os.Stat(dev); err == nil &&
+			info.Mode()&os.ModeDevice != 0 &&
+			info.Mode()&os.ModeCharDevice == 0 {
+			return dev
+		}
+	}
+	return "/dev/null"
+}
+
+// TestReadDevNoOfARealDevice runs a device-number read on this machine's
+// block devices: each answers the number sysfs prints in its "dev" file, and
+// so does a link to it, since the read follows links as the /dev/disk/by-*
+// names of a disk need. A missing path, or a link that leads nowhere, is the
+// one failure that wraps fs.ErrNotExist. A path that is not a block device —
+// a plain file, a directory, a character device — is an error that does not,
+// so no caller takes it for a device that is gone. Every failure comes with
+// "".
+func TestReadDevNoOfARealDevice(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	names, err := os.ReadDir("/sys/class/block")
+	if err != nil {
+		t.Skipf("no /sys/class/block: %v", err)
+	}
+	read := 0
+	for _, entry := range names {
+		dev := filepath.Join("/dev", entry.Name())
+		if _, err := os.Stat(dev); err != nil {
+			continue
+		}
+		want, err := os.ReadFile(filepath.Join(
+			"/sys/class/block", entry.Name(), "dev"))
+		if err != nil {
+			t.Fatalf("read %s's dev: %v", entry.Name(), err)
+		}
+		got, err := client.ReadDevNo(ctx, dev)
+		if err != nil || got != strings.TrimSpace(string(want)) {
+			t.Errorf("ReadDevNo(%s) = (%q, %v), want (%q, nil)", dev, got,
+				err, strings.TrimSpace(string(want)))
+		}
+		link := filepath.Join(t.TempDir(), "by-id")
+		if err := os.Symlink(dev, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		if got, err := client.ReadDevNo(ctx, link); err != nil ||
+			got != strings.TrimSpace(string(want)) {
+			t.Errorf("ReadDevNo of a link to %s = (%q, %v), want (%q, nil)",
+				dev, got, err, strings.TrimSpace(string(want)))
+		}
+		read++
+	}
+	if read == 0 {
+		t.Log("no block device of this machine has a /dev node: only " +
+			"the failures are read")
+	}
+
+	dir := t.TempDir()
+	nowhere := filepath.Join(dir, "nowhere")
+	if err := os.Symlink(filepath.Join(dir, "gone"), nowhere); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, "missing"),
+		filepath.Join(dir, "missing", "below"),
+		nowhere,
+	} {
+		got, err := client.ReadDevNo(ctx, path)
+		if !errors.Is(err, fs.ErrNotExist) || got != "" {
+			t.Errorf("ReadDevNo(%s) = (%q, %v), want (\"\", an error "+
+				"wrapping fs.ErrNotExist)", path, got, err)
+		}
+	}
+
+	file := filepath.Join(dir, "plain")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, path := range []string{file, dir, "/dev/null"} {
+		got, err := client.ReadDevNo(ctx, path)
+		if err == nil || errors.Is(err, fs.ErrNotExist) || got != "" {
+			t.Errorf("ReadDevNo(%s) = (%q, %v), want (\"\", an error that "+
+				"is not fs.ErrNotExist)", path, got, err)
+		}
+	}
+}
+
+// TestDevNoStringDecodesLinuxDevT pins the decoding of a device number
+// against the C library's makedev: the major's low 12 bits sit at bit 8 and
+// the rest at bit 44, the minor's low 8 bits at bit 0 and the rest at bit 20.
+// A number past either low part — an NVMe namespace's major, a minor past
+// 255 — reads back whole.
+func TestDevNoStringDecodesLinuxDevT(t *testing.T) {
+	makedev := func(major, minor uint64) uint64 {
+		return minor&0xff | (major&0xfff)<<8 |
+			(minor&^uint64(0xff))<<12 | (major&^uint64(0xfff))<<32
+	}
+	for _, tc := range []struct{ major, minor uint64 }{
+		{7, 0}, {8, 17}, {253, 4}, {259, 3}, {259, 1048575},
+		{4095, 255}, {4096, 256}, {1<<32 - 1, 1<<32 - 1},
+	} {
+		want := fmt.Sprintf("%d:%d", tc.major, tc.minor)
+		if got := devNoString(makedev(tc.major, tc.minor)); got != want {
+			t.Errorf("devNoString(makedev(%d, %d)) = %q, want %q",
+				tc.major, tc.minor, got, want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Logging (osclient.md, Logging)
 // ---------------------------------------------------------------------------
 
@@ -1016,6 +1260,38 @@ func TestOsClientLogRecords(t *testing.T) {
 		t.Errorf("os read mtime: mtime = %v, want %v", mtimeRecs[0]["mtime"],
 			stamped)
 	}
+
+	// 8. device-number reads: the path and the number read, "" and the
+	// error for a failed one
+	dev := blockDevForTest(t)
+	devNo, devNoErr := client.ReadDevNo(ctx, dev)
+	if _, err := client.ReadDevNo(ctx, missing); err == nil {
+		t.Fatal("reading the device number of a missing path succeeded")
+	}
+	devNoRecs := capture.withMsg(t, "os read devno")
+	if len(devNoRecs) != 2 {
+		t.Fatalf("%d os read devno records for 2 reads\n%s", len(devNoRecs),
+			capture.buf.String())
+	}
+	for i, want := range []struct {
+		path   string
+		devNo  string
+		failed bool
+	}{
+		{path: dev, devNo: devNo, failed: devNoErr != nil},
+		{path: missing, failed: true},
+	} {
+		rec := devNoRecs[i]
+		hasAttrs(t, rec, "path", "devno", TraceIdLogKey)
+		if rec["path"] != want.path || rec["devno"] != want.devNo {
+			t.Errorf("os read devno: (path, devno) = (%v, %v), want (%s, %q)",
+				rec["path"], rec["devno"], want.path, want.devNo)
+		}
+		if _, has := rec["error"]; has != want.failed {
+			t.Errorf("os read devno %s: error attr present = %v, want %v: "+
+				"%v", want.path, has, want.failed, rec)
+		}
+	}
 }
 
 // toAny is a []string as a decoded JSON array holds it.
@@ -1048,6 +1324,9 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 		errors.Is(err, fs.ErrNotExist) || !mtime.IsZero() {
 		t.Errorf("unset ReadMtimeFn = (%v, %v), want (zero, an error that "+
 			"is not fs.ErrNotExist)", mtime, err)
+	}
+	if devNo, err := fake.ReadDevNo(ctx, "/x"); devNo != "" || err != nil {
+		t.Errorf("unset ReadDevNoFn = (%q, %v)", devNo, err)
 	}
 	if err := fake.WriteFile(ctx, "/x", "d"); err != nil {
 		t.Errorf("unset WriteFileFn = %v", err)
@@ -1115,6 +1394,16 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	if mtime, err := fake.ReadMtime(ctx, "/sys/kernel/config"); err != nil ||
 		!mtime.Equal(stamp) || gotPath != "/sys/kernel/config" {
 		t.Errorf("stubbed ReadMtime → (%v, %v), stub saw %q", mtime, err,
+			gotPath)
+	}
+
+	fake.ReadDevNoFn = func(_ context.Context, path string) (string, error) {
+		gotPath = path
+		return "259:3", nil
+	}
+	if devNo, err := fake.ReadDevNo(ctx, "/dev/nvme0n1"); err != nil ||
+		devNo != "259:3" || gotPath != "/dev/nvme0n1" {
+		t.Errorf("stubbed ReadDevNo → (%q, %v), stub saw %q", devNo, err,
 			gotPath)
 	}
 

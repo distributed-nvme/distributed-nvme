@@ -3114,8 +3114,13 @@ return silently wrong data.
 
 CN28. Probe map (`dnagent.md` SH17 conventions plus the cn probes fixed here:
 `findmnt` for mounts, `stat` for plain files,
-`losetup` for loops, `ls` for the nvmet configfs tree (`dnagent.md`
-SH18), `dmsetup info` and `dmsetup table` for dm
+`losetup` for loops, `ls` for the nvmet configfs tree — except in the
+port probe the two agents share (`Nvmet.ProbePort`,
+`Nvmet.ProbePortState`), which tests whether the port's own directory is
+there by reading the directory's modification time in the agent's own
+process (`dnagent.md` SH18), while the port build (`Nvmet.EnsurePort`),
+which runs only once that probe found the port short, keeps its `ls` —
+`dmsetup info` and `dmsetup table` for dm
 devices — over the whole node at once in the reading below, of one
 device elsewhere — with `dmsetup status` for thin pools and dm-clones
 and, outside the reading, `dmsetup ls` for the clone-metadata arena and

@@ -37,10 +37,10 @@ type fakeNode struct {
 	// listings carry the SH15 soft timeout, which the shared code they run
 	// through takes from cmdCtx (agent/oswrap.go), so this must stay empty.
 	sysfsNoDeadline []string
-	// traced is every command, file read and listing keyed by the trace id
-	// of the ctx it ran on: the trace_id its `os command` / `os read file` /
-	// `os read dir` record carries in production (log.md R5); "" for a ctx
-	// without one.
+	// traced is every command, file read, listing and mtime read keyed by
+	// the trace id of the ctx it ran on: the trace_id its `os command` / `os
+	// read file` / `os read dir` / `os read mtime` record carries in
+	// production (log.md R5); "" for a ctx without one.
 	traced map[string][]string
 
 	// block devices, by /dev path. The number of an md array, an NVMe
@@ -200,8 +200,8 @@ type fakeNode struct {
 	// error, and no dispatch, so the fake's state is left exactly as the
 	// real kernel would leave it after a refused ioctl. These and the kill
 	// hooks below also match a listing in the agent's own process by its
-	// line, "list <path>", which neither half answers as absent
-	// (listHookErr).
+	// line, "list <path>", and an mtime read by its line, "mtime <path>",
+	// which neither half answers as absent (inProcessHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
 	// killCmd / killCmdAlways model the OTHER half of agent.Reported: a
@@ -471,6 +471,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		RunCommandFn:      f.runCommand,
 		ReadFileFn:        f.readFile,
 		ReadDirFn:         f.readDir,
+		ReadMtimeFn:       f.readMtime,
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
@@ -566,7 +567,7 @@ func (f *fakeNode) SysfsNoDeadline() []string {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "list ", "cmd lsblk ", "cmd stat ", "cmd findmnt ",
+	"cmd ls ", "list ", "mtime ", "cmd lsblk ", "cmd stat ", "cmd findmnt ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	"cmd dmsetup ls", "cmd nvme list-subsys",
 	"cmd losetup --associated", "cmd mdadm --detail", "cmd mdadm --examine",
@@ -738,7 +739,8 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 // holders of a loop device, the directory's entries, or not there. Called
 // with f.mu held.
 func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
-	if err := f.listHookErr(line, path); err != nil {
+	if err := f.inProcessHookErr(line, &fs.PathError{
+		Op: "readdirent", Path: path, Err: syscall.EIO}); err != nil {
 		return nil, err
 	}
 	if inNvmetTree(path) {
@@ -757,13 +759,49 @@ func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 	return f.children(path), nil
 }
 
-// listHookErr applies the command hooks to a listing's line, in runCommand's
-// order: failCmd* answers an I/O error part-way through the listing, and
-// killCmd*, killCmdNth and killCmdNoEffect* a listing the soft timeout cut
-// off — a listing changes nothing, so the two kill halves are one. Called
-// with f.mu held.
-func (f *fakeNode) listHookErr(line, path string) error {
-	failed := &fs.PathError{Op: "readdirent", Path: path, Err: syscall.EIO}
+// readMtime answers OsClient.ReadMtime, an mtime read in the agent's own
+// process: the port probe's test of whether the port's directory is there
+// (dnagent.md SH18). The cn judges no age, so every directory answers one
+// fixed time. It records "mtime <path>", and the command hooks match that
+// line as they match a listing's: a fail hook answers an I/O error and a
+// kill hook a read the soft timeout cut off, both never a missing
+// directory, which only the model says.
+func (f *fakeNode) readMtime(
+	ctx context.Context, path string,
+) (time.Time, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return time.Time{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := "mtime " + path
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	if _, ok := ctx.Deadline(); !ok && strings.HasPrefix(path, "/sys/") {
+		// SH15, as for readFile.
+		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
+	}
+	if err := f.inProcessHookErr(line, &fs.PathError{
+		Op: "lstat", Path: path, Err: syscall.EIO}); err != nil {
+		return time.Time{}, err
+	}
+	if !f.dirs[path] {
+		return time.Time{}, &fs.PathError{
+			Op: "lstat", Path: path, Err: syscall.ENOENT}
+	}
+	return fakeDirMtime, nil
+}
+
+// fakeDirMtime is the one time readMtime answers for every directory.
+var fakeDirMtime = time.Unix(1700000000, 0)
+
+// inProcessHookErr applies the command hooks to the line of a call in the
+// agent's own process, a listing or an mtime read, in runCommand's order:
+// failCmd* answers failed, the call's own I/O error, and killCmd*,
+// killCmdNth and killCmdNoEffect* a call the soft timeout cut off — such a
+// call changes nothing, so the two kill halves are one. Called with f.mu
+// held.
+func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 	for key := range f.failCmd {
 		if strings.Contains(line, key) {
 			delete(f.failCmd, key)

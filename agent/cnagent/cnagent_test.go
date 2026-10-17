@@ -775,8 +775,9 @@ func portPathOf(portId int) string {
 // one of: end of string, "/" (a child of the port), "=" (a write/writedirect
 // of a port attribute) or " " (the next argument). Matching on portPath+"/"
 // alone is not enough — it misses the two shapes a half-converted call site
-// produces most often, `cmd ls -1 {portPath}` (every dirExists probe, so
-// every ProbePort) and `cmd mkdir -p {portPath}` (EnsurePort's own mkdir).
+// produces most often, `mtime {portPath}` (the port directory's time read,
+// so every ProbePort) and `cmd mkdir -p {portPath}` (EnsurePort's own
+// mkdir).
 // The separator test is what keeps ports/1 from matching ports/11.
 func mentionsPort(call, portPath string) bool {
 	rest := call
@@ -1603,8 +1604,8 @@ func TestAnAbsentBaseStateReDrivesTheSyncupCn(t *testing.T) {
 // creates nothing on an unanswered probe (CN5). So an unanswered `findmnt`
 // after a reboot — the arena file and the loop device then read absent, but
 // the converge creates them only on a tmpfs it found or mounted — and a port
-// whose directory listing, ANA group read or transport attribute read was
-// cut off read ERROR and leave the verdict clean. So does a mismatch the
+// whose directory's time read, ANA group read or transport attribute read
+// was cut off read ERROR and leave the verdict clean. So does a mismatch the
 // verdict leaves to its row: a transport attribute of the port that differs,
 // which nvmet refuses to rewrite while a subsystem is linked to the port;
 // and an arena file of another size whose loop device something holds, a
@@ -1649,9 +1650,9 @@ func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
 		row  func(*pb.CnInfo) *pb.ResInfo
 		want string
 	}{
-		{"the port listing killed", func(node *fakeNode) {
-			node.killCmdAlways["ls -1 "+portPath] = true
-		}, portRow, "ls -1 " + portPath},
+		{"the port directory's time read cut off", func(node *fakeNode) {
+			node.killCmdAlways["mtime "+portPath] = true
+		}, portRow, "mtime of " + portPath},
 		{"an ana group read cut off", func(node *fakeNode) {
 			node.killReadAlways[portPath+"/ana_groups/2/ana_state"] = true
 		}, portRow, portPath + "/ana_groups/2/ana_state"},

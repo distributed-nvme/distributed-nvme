@@ -20,16 +20,17 @@ import (
 )
 
 // OsClient defines high-level primitives for executing OS commands, listing
-// directories, reading a path's modification time, performing disk file I/O,
-// and handling Protobuf binary serialization with context support.
+// directories, reading a path's modification time or a block device's
+// number, performing disk file I/O, and handling Protobuf binary
+// serialization with context support.
 //
-// All OS command execution, directory listing, modification-time read and
-// disk file I/O in production code goes through an OsClient; os/exec and
-// os.ReadFile/os.WriteFile are never called, and no directory is read and no
-// path is stat'ed, directly outside this file (osclient.md, Scope and
-// placement). That is what makes the logging rules of log.md R8.1,
-// R8.2, R8.5 and R8.6 enforceable, and every consumer unit-testable through
-// FakeOsClient.
+// All OS command execution, directory listing, modification-time read,
+// device-number read and disk file I/O in production code goes through an
+// OsClient; os/exec and os.ReadFile/os.WriteFile are never called, and no
+// directory is read and no path is stat'ed, directly outside this file
+// (osclient.md, Scope and placement). That is what makes the logging rules
+// of log.md R8.1, R8.2, R8.5, R8.6 and R8.7 enforceable, and every consumer
+// unit-testable through FakeOsClient.
 //
 // One carve-out is recorded (osclient.md, Exported raw helpers and the
 // probe-IO carve-out): the CN11
@@ -86,6 +87,14 @@ type OsClient interface {
 	// error wrapping fs.ErrNotExist. Any other failure is an error, and the
 	// time that comes back with an error is the zero time.
 	ReadMtime(ctx context.Context, path string) (mtime time.Time, err error)
+
+	// ReadDevNo reads the number of the block device at path in the
+	// caller's own process, as "major:minor", and nothing else about it: it
+	// follows symbolic links, so a link answers the number of the device it
+	// leads to. A missing path is an error wrapping fs.ErrNotExist. A path
+	// that is not a block device is an error, and so is any other failure;
+	// the number that comes back with an error is "".
+	ReadDevNo(ctx context.Context, path string) (devNo string, err error)
 
 	// WriteFile creates or overwrites a file at the specified path with
 	// string data using default file permissions. The replacement is atomic:
@@ -288,6 +297,56 @@ func (c *LimitedOsClient) ReadMtime(
 	slog.InfoContext(ctx, "os read mtime", appendErr(attrs, err)...)
 
 	return mtime, err
+}
+
+func (c *LimitedOsClient) ReadDevNo(
+	ctx context.Context,
+	path string,
+) (string, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return "", err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	devNo, err := readDevNo(path)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.String("devno", devNo),
+	}
+	slog.InfoContext(ctx, "os read devno", appendErr(attrs, err)...)
+
+	return devNo, err
+}
+
+// readDevNo is the read behind ReadDevNo (osclient.md, ReadDevNo): the stat
+// follows links, as the /dev/disk/by-* names of a disk are links, and a
+// path that is not a block device fails with ENOTBLK, which is no "not
+// exist".
+func readDevNo(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if info.Mode()&os.ModeDevice == 0 ||
+		info.Mode()&os.ModeCharDevice != 0 || !ok {
+		return "", &os.PathError{Op: "stat", Path: path, Err: syscall.ENOTBLK}
+	}
+	return devNoString(uint64(st.Rdev)), nil
+}
+
+// devNoString renders a device number as the "major:minor" that sysfs's
+// "dev" files and dm tables print, decoding Linux's dev_t as the C
+// library's major and minor do: the major is bits 8 to 19 and 44 to 63, the
+// minor bits 0 to 7 and 20 to 43.
+func devNoString(dev uint64) string {
+	major := (dev&0x00000000000fff00)>>8 | (dev&0xfffff00000000000)>>32
+	minor := dev&0x00000000000000ff | (dev&0x00000ffffff00000)>>12
+	return fmt.Sprintf("%d:%d", major, minor)
 }
 
 // dirNames is the read of every name behind readDirNames. It is package

@@ -1327,9 +1327,9 @@ and etcd items of `log.md` R8 are fully covered by the interceptor chains (every
 server and client request and reply, the trace id included; `grpc.md`, L1
 to L6) and by `etcdutil` (every get, put, delete and range, once per STM
 attempt — duplicates on retry are expected and acceptable; `log.md`, etcd).
-The OS-command, file, directory-listing and modification-time-read items of
-`log.md` R8 are implemented inside `LimitedOsClient`, which the gateway never
-uses.
+The OS-command, file, directory-listing, modification-time-read and
+device-number-read items of `log.md` R8 are implemented inside
+`LimitedOsClient`, which the gateway never uses.
 
 LG2. The record names this component owns, all emitted through the ctx
 forms, are normative: `gateway starting` and `gateway stopping` from

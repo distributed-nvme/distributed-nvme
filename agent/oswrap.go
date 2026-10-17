@@ -441,11 +441,13 @@ func (b *osBase) listDir(
 // dirMtime reads a directory's modification time from the node in the
 // agent's own process (OsClient.ReadMtime) on a ctx carrying the soft timeout
 // (SH15), so an age can be judged from what the kernel says rather than from
-// anything remembered (dnagent.md DN6). It reads the directory itself, never
-// one of its entries, and is no listing (SH18). ok is false only when the
-// directory does not exist; every other failure is an error naming the read
-// — "mtime of <path>: <cause>" — and is never an absence, as listDir's split
-// has it: a read that did not answer is not a directory that is gone.
+// anything remembered (dnagent.md DN6), and so the port probe learns whether
+// the port's directory is there without a child process. It reads the
+// directory itself, never one of its entries, and is no listing (SH18). ok
+// is false only when the directory does not exist; every other failure is an
+// error naming the read — "mtime of <path>: <cause>" — and is never an
+// absence, as listDir's split has it: a read that did not answer is not a
+// directory that is gone.
 func (b *osBase) dirMtime(
 	ctx context.Context,
 	path string,
@@ -460,6 +462,21 @@ func (b *osBase) dirMtime(
 		return time.Time{}, false, fmt.Errorf("mtime of %s: %w", path, err)
 	}
 	return mtime, true, nil
+}
+
+// readDevNo reads the number of the block device at path, "major:minor", in
+// the agent's own process (OsClient.ReadDevNo) on a ctx carrying the soft
+// timeout (SH15). Every failure is an error naming the read — "device number
+// of <path>: <cause>" — a missing path's as well: its one caller, the disk's
+// size read, reports a disk that is not there as a read that failed.
+func (b *osBase) readDevNo(ctx context.Context, path string) (string, error) {
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	devNo, err := b.oc.ReadDevNo(cctx, path)
+	if err != nil {
+		return "", fmt.Errorf("device number of %s: %w", path, err)
+	}
+	return devNo, nil
 }
 
 // dirExists says whether a directory of the nvmet configfs tree exists, by

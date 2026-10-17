@@ -5744,7 +5744,7 @@ DIAG_MAX_DN_LOGS=6
 # will actually inherit.
 #
 # lsblk and blkdiscard are in the SHARED list because both roles really run
-# them: the dn agent's DevNo and DiskSize (agent/dm.go) are `lsblk`, and so is
+# them: the dn agent's DevNo (agent/dm.go) is `lsblk`, and so is
 # the cn agent's check before an md create that no array runs under the
 # group's name, NameInUse (agent/cnagent/md.go); blkdiscard runs on
 # both — agent/dnagent/zeroing.go (BlkZeroout, side provisioning:

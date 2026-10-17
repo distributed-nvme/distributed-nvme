@@ -453,11 +453,12 @@ under a lock is acceptable: every OS command is bounded by
 `CmdSoftTimeout`/`CmdHardTimeout` (SH15) except a child in an
 uninterruptible kernel wait (SH15) — which is why the cn sweep's
 `nvme disconnect` runs off the locks (`cnagent.md` CN10) — and an
-in-process `OsClient` listing, modification-time read, file or block call is
-bounded only up to its syscall: its ctx is checked once, before it
-(`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for a listing,
-`osclient.md`, ReadDir; for a modification-time read, `osclient.md`,
-ReadMtime), so a sysfs, configfs or device access the kernel holds returns
+in-process `OsClient` listing, modification-time read, device-number read,
+file or block call is bounded only up to its syscall: its ctx is checked
+once, before it (`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for
+a listing, `osclient.md`, ReadDir; for a modification-time read,
+`osclient.md`, ReadMtime; for a device-number read, `osclient.md`,
+ReadDevNo), so a sysfs, configfs or device access the kernel holds returns
 only when the kernel does.
 
 ### `ResInfo` tracking — `resinfo.go`
@@ -561,16 +562,18 @@ file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
 disk metadata (`DiskMeta`) — takes the same bound from the exported
 `agent.CmdCtx`. The bound holds in full only for a child the signals end.
 An in-process `OsClient` call — a directory listing, a modification-time
-read, a file, proto or block read or write — is bounded only until its
-syscall starts: its ctx is checked once, before it (`osclient.md`, ReadFile
-/ WriteFile / WriteFileDirect; for a listing, `osclient.md`, ReadDir; for a
-modification-time read, `osclient.md`, ReadMtime). A child blocked in
-an uninterruptible kernel wait is not bounded at all: both signals are
-delivered, and the call returns, and gives back its `OsClient` slot, only
-when the kernel does (an `nvme disconnect` whose target vanishes mid-delete
-waits out the kernel's admin timeout; `cnagent.md` CN10 runs the cn sweep's
-off the locks, while the cn build's dead-path disconnect and the dn sweep's
-source-connection disconnect still run under them — Known limits).
+read, a device-number read, a file, proto or block read or write — is
+bounded only until its syscall starts: its ctx is checked once, before it
+(`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for a listing,
+`osclient.md`, ReadDir; for a modification-time read, `osclient.md`,
+ReadMtime; for a device-number read, `osclient.md`, ReadDevNo). A child
+blocked in an uninterruptible kernel wait is not bounded at all: both
+signals are delivered, and the call returns, and gives back its `OsClient`
+slot, only when the kernel does (an `nvme disconnect` whose target vanishes
+mid-delete waits out the kernel's admin timeout; `cnagent.md` CN10 runs the
+cn sweep's off the locks, while the cn build's dead-path disconnect and the
+dn sweep's source-connection disconnect still run under them — Known
+limits).
 
 **A command that was killed did not answer, and "did not answer" is not
 "absent".** `OsClient.RunCommand` returns an exit code of -1 with a non-nil
@@ -594,7 +597,7 @@ the soft timeout killed from one the tool refused.
 These primitives must honour it, because each one's caller answers an
 "absent" with a removal, with a decision that can destroy data, with —
 `CloneMeta.Mounted`'s — a mount that sends every clone on the CN into a
-rebuild, or — `dirMtime`'s — with a clean verdict:
+rebuild, or — `dirMtime`'s — with a clean verdict or a re-sent `SyncupCn`:
 
 * `Dm.Info`, whose "absent" answer gates `FreeSide` and `FreeCloneMeta`
   (DN6's record rule);
@@ -606,7 +609,10 @@ rebuild, or — `dirMtime`'s — with a clean verdict:
   without namespace one: a subsystem directory that reads absent is passed
   over and is no leftover, so only `fs.ErrNotExist` is absent, and a read
   that failed otherwise or did not answer is named as a failed enumeration
-  instead, and the verdict is not clean;
+  instead, and the verdict is not clean; and behind the port probe's test
+  of whether the port's directory is there (`Nvmet.ProbePortState`,
+  `cnagent.md` CN30), where a port directory read as absent would make a
+  `CheckCn` verdict re-send a `SyncupCn` for a port that is there;
 * `Md.Detail`, a lookup in an `Md.Walk` of "/sys/block" through
   `Cmd.ListDir` and `readAttrStrict` (`cnagent.md` CN12), whose "absent"
   sends `ensureGroup` into an assembly;
@@ -677,16 +683,24 @@ live port-to-subsystem link or reloading a live dm table stalls host IO).
 
 SH17. Probing follows these conventions: the probe commands — the dn's are
 `dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`,
-`lsblk`, and `ls` of the nvmet configfs tree alone (SH18), since it lists
-sysfs and its local store in its own process (`OsClient.ReadDir`) and reads
-a subsystem directory's age there too (`OsClient.ReadMtime`, SH18);
+`lsblk` for a device's number, and `ls` of the nvmet configfs tree alone
+(SH18), since it lists sysfs and its local store in its own process
+(`OsClient.ReadDir`) and reads there too a subsystem directory's age and,
+in the port probe, whether its port's directory is there
+(`OsClient.ReadMtime`, SH18), and
+the size of its `--disk`: the number of the device the `--disk` path names
+(`OsClient.ReadDevNo`), then the size sysfs keeps under that number, the
+file `lsblk` reads it from;
 the cn's are `cnagent.md` CN28's, and CN12's `mdadm --examine` and `lsblk`
 of the array node — the walk of
 "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact
 — the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
 of the disk header for the DN's [D13] metadata. No LVM report is probed
-anywhere ([D14]). These commands create, change and remove nothing, but a
+anywhere ([D14]). Reason for the disk's size: every check round of a disk
+node reads it, and a read in the agent's own process costs far less than
+a process, which on a node of many dn agents waits for its turn on the
+CPU. These commands create, change and remove nothing, but a
 status read is not always free of writes. A thin pool's status read
 carries the `--noflush` flag, which makes the kernel skip the commit of the
 pool's metadata it otherwise makes first. Reason: once its metadata has
@@ -723,25 +737,29 @@ canonically, never byte-wise:
 SH18. nvmet configfs access: attribute writes go through
 `OsClient.WriteFileDirect` (the atomic replace of `WriteFile` cannot work on
 configfs); directory and link operations go through `RunCommand` (`mkdir`,
-`rmdir`, `ln -s`, `rm`); attribute reads through `ReadFile`; on the dn, a
-subsystem directory's modification time through `OsClient.ReadMtime`, in the
-agent's own process, and never an "attr_*" file's, whose lookup moves the
-directory's time on a kernel that stamps the directory on an attribute
-lookup; and directory listings through `RunCommand` as well (`ls`), never
-in the agent's own process (`OsClient.ReadDir`). Reason for the time read:
-it is no listing — it looks up the one directory and opens nothing in it —
-and DN6 reads it for every export without namespace one that a pass meets,
-which every export is for a moment while it is built or removed, so a child
-process for each read would make a burst of builds or removals cost a check
-round one child per export in flight; like every in-process call, it is
-bounded only up to its syscall (SH13). Reason for the listings: the process
-each `ls` starts costs little as long as a converge or a check round lists
-few configfs directories. On the cn that holds every time: it lists the
-subsystems directory once, and attributes every dn export, a co-hosted dn
-agent's included, by its NQN alone (`cnagent.md`, CN21), so what it lists
-follows the subsystems and transfers on the node, never the slices of a
-pool; the listings that grow with the slice count are the sysfs ones
-(`osclient.md`, ReadDir).
+`rmdir`, `ln -s`, `rm`); attribute reads through `ReadFile`; a directory's
+modification time through `OsClient.ReadMtime`, in the agent's own process:
+on the dn a subsystem directory's, for its age, and never an "attr_*"
+file's, whose lookup moves the directory's time on a kernel that stamps the
+directory on an attribute lookup, and on both agents the agent's own port
+directory's, for whether it is there (`Nvmet.ProbePort`,
+`Nvmet.ProbePortState`); and directory listings through `RunCommand` as
+well (`ls`), never in the agent's own process (`OsClient.ReadDir`). Reason
+for the time read: it is no listing — it looks up the one directory and
+opens nothing in it — and DN6 reads it for every export without namespace
+one that a pass meets, which every export is for a moment while it is built
+or removed, so a child process for each read would make a burst of builds
+or removals cost a check round one child per export in flight; and every
+`CheckDn` and `CheckCn` round probes the agent's port, so a child for the
+port's directory would cost every such round one more; like every
+in-process call, it is bounded only up to its syscall (SH13). Reason for
+the listings: the process each `ls` starts costs little as long as a
+converge or a check round lists few configfs directories. On the cn that
+holds every time: it lists the subsystems directory once, and attributes
+every dn export, a co-hosted dn agent's included, by its NQN alone
+(`cnagent.md`, CN21), so what it lists follows the subsystems and transfers
+on the node, never the slices of a pool; the listings that grow with the
+slice count are the sysfs ones (`osclient.md`, ReadDir).
 On the dn, a pass lists few configfs directories as long as no export it
 meets without namespace one is older than `DnExportOrphanGrace`: the
 attribution reads namespace one in process and, for an export without it,
@@ -1033,13 +1051,13 @@ converge (DN5 and DN6) from the stored request — **unless** its
 **loaded** into the in-memory DN set exactly
 as read — not skipped like an unreadable one — and refused by `convergeDn`
 instead, once per pass: a zero extent size is not a geometry any converge
-may run on, so the converge stops before DN5 touches anything (no `lsblk`,
-no header read, the port left as found) and reports the conf fault of
-`architecture.md`, Common validation, as one Error record (msg "invalid
-stored conf", naming the cluster and the dn). That record is the one place
-the field is named: the `meta_info` of `RES_STATUS_ERROR` that `convergeDn`
-hands back has no reply to travel in at startup, and the next
-`GetDnInfo`/`CheckDn` round re-probes the header against the zero and
+may run on, so the converge stops before DN5 touches anything (no read of
+the disk's size, no header read, the port left as found) and reports the
+conf fault of `architecture.md`, Common validation, as one Error record
+(msg "invalid stored conf", naming the cluster and the dn). That record is
+the one place the field is named: the `meta_info` of `RES_STATUS_ERROR`
+that `convergeDn` hands back has no reply to travel in at startup, and the
+next `GetDnInfo`/`CheckDn` round re-probes the header against the zero and
 reports the meta row as a foreign disk on a formatted disk, as an
 unformatted disk on a blank one. Refusing there rather than converging is
 what keeps the fault legible: DN5's `EnsureFormatted` cannot confirm this
@@ -1136,10 +1154,10 @@ side's object lock (DN1).
 
 ### `GetDnSize`
 
-DN3. Read the byte size of the `--disk` device with `lsblk`; reply the
-parsed size **minus `DnDataOffset`** — the byte size of the [D13] data
-area, which is what the control plane divides by `extent_size`
-(`architecture.md`, Size → extents). A size at or below `DnDataOffset` is a
+DN3. Read the byte size of the `--disk` device (SH17); reply the size
+**minus `DnDataOffset`** — the byte size of the [D13] data area, which is
+what the control plane divides by `extent_size` (`architecture.md`,
+Size → extents). A size at or below `DnDataOffset` is a
 "disk too small" error. Failures (bad disk, parse, too small) return a gRPC
 Internal status (`architecture.md`, Common agent rules — this RPC has no
 `AgentReply`). `dn_id` may be zero (pre-registration call from the
@@ -1169,7 +1187,7 @@ size, which is a disk fact, not a conf fact.)
 DN5. Converge the once-per-DN base state of `architecture.md`, Disk node,
 probe-first (SH16), building `DnInfo` as it goes:
 
-* read the `--disk` device's size with `lsblk` — to report `disk_info`, to
+* read the `--disk` device's size (SH17) — to report `disk_info`, to
   give the disk counts of DN18 their total, and to hand the allocator the
   raw size, the one input the disk format itself does not carry (the
   extent count is that size minus `DnDataOffset`, divided by the

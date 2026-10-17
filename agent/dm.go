@@ -627,24 +627,34 @@ func LinearRunsTable(runs []ExtentRunSectors, devNo string) string {
 	return sb.String()
 }
 
-// DiskSize returns the byte size of a block device
-// (`lsblk --bytes --nodeps`, the GetDnSize probe).
+// sysDevBlockDir is the sysfs directory that names every block device by
+// its number.
+const sysDevBlockDir = "/sys/dev/block"
+
+// DiskSize returns the byte size of a block device, the GetDnSize probe,
+// read in the agent's own process (dnagent.md SH17): the number of the
+// device dev names, then the "size" sysfs keeps under that number, which
+// counts 512-byte sectors whatever the device's block size — the file
+// `lsblk` reads the size from. Every failure is an error: a device that is
+// not there, a read that did not answer, a value that is not a number.
 func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
-	stdout, stderr, exitCode, err := d.run(ctx, "lsblk",
-		"--bytes", "--nodeps", "--noheadings", "--output", "SIZE", dev)
+	devNo, err := d.readDevNo(ctx, dev)
 	if err != nil {
-		return 0, cmdError("lsblk", []string{dev},
-			stdout, stderr, exitCode, err)
+		return 0, err
 	}
-	text := strings.TrimSpace(stdout)
-	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
-		text = strings.TrimSpace(text[:idx])
+	path := sysDevBlockDir + "/" + devNo + "/size"
+	text, ok, err := d.readAttrStrict(ctx, path)
+	if err != nil {
+		return 0, err
 	}
-	size, parseErr := strconv.ParseUint(text, 10, 64)
+	if !ok {
+		return 0, fmt.Errorf("block device %s (%s) is not there", dev, devNo)
+	}
+	sectors, parseErr := strconv.ParseUint(text, 10, 64)
 	if parseErr != nil {
-		return 0, fmt.Errorf("lsblk %s: unparsable size %q", dev, text)
+		return 0, fmt.Errorf("%s reads %q, not a size", path, text)
 	}
-	return size, nil
+	return sectors * SectorSize, nil
 }
 
 // CloneTable builds a dm-clone table. Hydration and discard passdown are

@@ -2,12 +2,14 @@
 
 This document owns the one path every dnv binary takes to the operating
 system: the `OsClient` interface for OS commands, for directory listings, for
-modification-time reads and for file, protobuf and raw block IO, its
-production implementation `LimitedOsClient` with its concurrency limit, its
-command timeouts and kill rule, the guarantees of each operation (a listing's
-names, all of them in byte order or none; the time of the path itself, never
-of what a link names; the atomic replace and fsync of a file write; the
-exact-length read and fsynced write of a block), the exported raw helpers and the probe-IO
+modification-time reads, for device-number reads and for file, protobuf and
+raw block IO, its production implementation `LimitedOsClient` with its
+concurrency limit, its command timeouts and kill rule, the guarantees of each
+operation (a listing's names, all of them in byte order or none; the time of
+the path itself, never of what a link names; the number of the block device
+a path leads to, links followed; the atomic replace and fsync of a file
+write; the exact-length read and fsynced write of a block), the exported raw
+helpers and the probe-IO
 carve-out that is the one sanctioned bypass, and what emitting the record of
 each operation requires. It leans on `log.md` for the helpers it reuses
 (`PbToLogValue`, `TruncForLog`, `LogStrDataLimit`), for its rules on Info
@@ -28,13 +30,16 @@ it.
   `ReadProto` and `WriteProto`).
 * Consumers: `dnv-agent` in both roles, for its dmsetup, mdadm, nvme and
   nvmet-configfs work, for its listings of sysfs and of its local store, for
-  the dn's read of an nvmet subsystem directory's age, and for persisting the
-  `Local*Path` protobuf state files. **All** OS command execution, directory
-  listing, modification-time read and disk file IO in production code goes
+  the dn's read of an nvmet subsystem directory's age, for both roles' read
+  of whether their nvmet port's directory is there, for the dn's read of its
+  disk's device number, and for persisting the `Local*Path` protobuf state
+  files. **All** OS command execution, directory listing, modification-time
+  read, device-number read and disk file IO in production code goes
   through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile`, and never read a directory or stat a path,
   directly outside this file. This is what makes the logging rules of
-  `log.md` R8 (its first, second, fifth and sixth items) enforceable and
+  `log.md` R8 (its first, second, fifth, sixth and seventh items)
+  enforceable and
   makes every consumer unit-testable via `FakeOsClient`. There is exactly **one** sanctioned exception in
   production code, recorded under "Exported raw helpers and the probe-IO
   carve-out": the CN11 leg-health probers call the package-level helpers
@@ -74,6 +79,11 @@ the method set is exactly the following, each taking the caller's ctx:
   caller's own process, following no symbolic link, and returns that time
   and nothing else. A missing path is an error wrapping `fs.ErrNotExist`;
   any other failure is an error, with the zero time.
+* `ReadDevNo` reads the number of the block device at a path in the
+  caller's own process, following symbolic links, and returns it as
+  "major:minor" and nothing else. A missing path is an error wrapping
+  `fs.ErrNotExist`; a path that is not a block device, and any other
+  failure, is an error, with an empty number.
 * `WriteFile` creates or overwrites a file with string data under the
   default file permissions, by atomic replace.
 * `WriteFileDirect` writes string data straight into the file at a path —
@@ -94,8 +104,8 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * `NewLimitedOsClient` takes the limit; a limit of zero or less means "use
   `DefaultOsClientLimit`", the default cap on in-flight operations
-  (commands, directory listings, modification-time reads, file IO and proto
-  IO combined) that
+  (commands, directory listings, modification-time reads, device-number
+  reads, file IO and proto IO combined) that
   `constants.go` holds. Its reason: during convergence an agent fans out
   many dmsetup, mdadm, nvme and blkdiscard invocations plus state-file
   writes, and the default bounds fork and disk pressure while leaving ample
@@ -184,9 +194,14 @@ the method set is exactly the following, each taking the caller's ctx:
   answer; `Nvmet` lists the nvmet configfs tree with `ls` through it
   (`dnagent.md` SH18). `Cmd.ListDir` lists sysfs in the agent's own process
   through `ReadDir` instead, and answers "absent" only for
-  `fs.ErrNotExist`; so does `Nvmet.SubsysMtime`, which reads a subsystem
-  directory's age through `ReadMtime`. `dnagent.md` SH15 names the primitives whose callers act
-  on either "absent".
+  `fs.ErrNotExist`; so do `Nvmet.SubsysMtime`, which reads a subsystem
+  directory's age through `ReadMtime`, and the port probe's test of whether
+  the port's directory is there (`Nvmet.ProbePort`,
+  `Nvmet.ProbePortState`), read the same way. Of the probe's attribute
+  reads, only those of `Nvmet.ProbePortState` keep that split;
+  `Nvmet.ProbePort` reads them loosely, so a read that failed for any
+  reason makes the port read as not matching. `dnagent.md` SH15 names the
+  primitives whose callers act on either "absent".
   `Dm.BlkZeroout` applies the predicate as well and is not a probe: it
   returns the verdict as answered, so the `dnagent.md` DN9 zeroing loop
   can tell a batch the soft timeout killed from one the tool refused. The
@@ -290,10 +305,12 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * `ReadMtime` reads a path's modification time in the agent's own process;
   no child process runs. The dn's attribution reads a subsystem directory's
-  age this way, for the reason the configfs access rule gives
-  (`dnagent.md` SH18, DN6).
-* It returns the time and nothing else. Reason: the age read is its only
-  caller, and a general stat would add surface no caller needs.
+  age this way, and both agents' port probe whether their port's directory
+  is there, for the reasons the configfs access rule gives (`dnagent.md`
+  SH18, DN6).
+* It returns the time and nothing else. Reason: its callers need the time,
+  or only whether the path is there, and a general stat would add surface
+  no caller needs.
 * Like `ReadDir`, it holds one semaphore slot and checks the ctx error after
   acquiring it. That is its last cancellation point: the read itself is not
   cancelable, and one the kernel holds returns only when the kernel does
@@ -309,8 +326,35 @@ the method set is exactly the following, each taking the caller's ctx:
   path or a directory on it is missing. Every other failure — a path that
   runs through a file, an I/O error — is an error that comes with the zero
   time, and the caller reads it as a read that did not answer (RunCommand).
-  Reason: the dn's caller passes a gone export over, so a failed read taken
-  as absent would make a live export read as gone and the verdict clean.
+  Reason: the dn's attribution passes a gone export over, and the cn's port
+  probe answers a missing port directory with a re-sent `SyncupCn`, so a
+  failed read taken as absent would make a live export read as gone and the
+  verdict clean, or a port that is there read as missing.
+
+### ReadDevNo
+
+* `ReadDevNo` reads the number of a block device in the agent's own
+  process; no child process runs. The dn reads its disk's number this way,
+  to read the disk's size from sysfs, which names each block device by its
+  number, for the reason the probing conventions give (`dnagent.md` SH17).
+* It returns the number and nothing else, as "major:minor", the form
+  sysfs and dm tables print. Reason: the size read is its only caller, and
+  a general stat would add surface no caller needs.
+* Like `ReadMtime`, it holds one semaphore slot and checks the ctx error
+  after acquiring it. That is its last cancellation point: the read itself
+  is not cancelable, and one the kernel holds returns only when the kernel
+  does (`dnagent.md` SH13).
+* It follows symbolic links, as `lsblk` does: the names under
+  "/dev/disk" by which a disk is often given are links to its node. It
+  reads the node's own device number and opens nothing, so it waits on no
+  device.
+* A missing path is absent: the error wraps `fs.ErrNotExist`, whether the
+  path, a directory on it or the end of a link is missing. A path that is
+  not a block device — a plain file, a directory, a character device — is
+  an error that does not, and so is every other failure; each comes with
+  an empty number. Reason: a path that is there but is no block device is
+  not a device that is gone, and the split is the one every other read of
+  this client keeps.
 
 ### ReadProto / WriteProto
 

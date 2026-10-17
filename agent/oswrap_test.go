@@ -269,18 +269,6 @@ func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 			},
 		},
 		{
-			name: "lsblk's size, which builds its own error",
-			run: osRun{
-				stderr:   "lsblk: /dev/x: Device or resource busy",
-				exitCode: 32,
-				err:      errors.New("exit status 32"),
-			},
-			call: func(oc common.OsClient) error {
-				_, err := NewDm(oc).DiskSize(ctx, "/dev/x")
-				return err
-			},
-		},
-		{
 			name: "losetup through Cmd",
 			run: osRun{
 				stderr:   "losetup: /dev/loop0: File exists",
@@ -581,6 +569,117 @@ func TestSubsysMtimeAbsentOnlyForMissing(t *testing.T) {
 			}
 			if errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("error %q reads as a missing directory", err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The disk's size, read in the agent's own process
+// ---------------------------------------------------------------------------
+
+// TestDiskSizeReadsSysfsInProcess pins the read of a disk's size (dnagent.md
+// SH17): the number of the block device the path names, then the "size"
+// sysfs keeps under that number, which counts 512-byte sectors, both read in
+// the agent's own process on a ctx carrying the SH15 soft timeout, with no
+// command run. Every failure is an error that names what failed: a device
+// that is not there or is not a block device, a read that did not answer, a
+// size file that is not there, a value that is not a number. None of them
+// reads as a size.
+func TestDiskSizeReadsSysfsInProcess(t *testing.T) {
+	const dev = "/dev/disk/by-id/nvme-fake"
+	const sizePath = "/sys/dev/block/259:3/size"
+	for _, tc := range []struct {
+		name     string
+		devNo    string
+		devNoErr error
+		size     string
+		sizeErr  error
+		want     uint64
+		// wantErr is a part of the error's text; "" when the read answers.
+		wantErr string
+	}{
+		{name: "read", devNo: "259:3", size: "2097152\n", want: 1 << 30},
+		{name: "no device there", devNoErr: &fs.PathError{
+			Op: "stat", Path: dev, Err: syscall.ENOENT},
+			wantErr: "device number of " + dev},
+		{name: "not a block device", devNoErr: &fs.PathError{
+			Op: "stat", Path: dev, Err: syscall.ENOTBLK},
+			wantErr: "device number of " + dev},
+		{name: "the number read cut off", devNoErr: context.DeadlineExceeded,
+			wantErr: "device number of " + dev},
+		{name: "no size file", devNo: "259:3", sizeErr: &fs.PathError{
+			Op: "open", Path: sizePath, Err: syscall.ENOENT},
+			wantErr: dev + " (259:3) is not there"},
+		{name: "the size read failed", devNo: "259:3",
+			sizeErr: &fs.PathError{
+				Op: "read", Path: sizePath, Err: syscall.EIO},
+			wantErr: "read " + sizePath},
+		{name: "not a number", devNo: "259:3", size: "lots\n",
+			wantErr: sizePath + ` reads "lots"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads []string
+			bounded := func(ctx context.Context, what string) {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) >
+					common.CmdSoftTimeout*time.Second {
+					t.Errorf("%s reached the OsClient without the SH15 "+
+						"soft timeout", what)
+				}
+			}
+			oc := &common.FakeOsClient{
+				RunCommandFn: func(
+					_ context.Context, name string, args []string, _ string,
+				) (string, string, int, error) {
+					t.Errorf("the size read ran %s %q", name, args)
+					return "", "", 0, nil
+				},
+				ReadDevNoFn: func(
+					ctx context.Context, path string,
+				) (string, error) {
+					reads = append(reads, "devno "+path)
+					bounded(ctx, "the device-number read")
+					return tc.devNo, tc.devNoErr
+				},
+				ReadFileFn: func(
+					ctx context.Context, path string,
+				) (string, error) {
+					reads = append(reads, "read "+path)
+					bounded(ctx, "the size read")
+					return tc.size, tc.sizeErr
+				},
+			}
+			size, err := NewDm(oc).DiskSize(context.Background(), dev)
+			wantReads := []string{"devno " + dev}
+			if tc.devNoErr == nil {
+				wantReads = append(wantReads, "read "+sizePath)
+			}
+			if strings.Join(reads, "; ") != strings.Join(wantReads, "; ") {
+				t.Errorf("reads = %q, want %q", reads, wantReads)
+			}
+			if tc.wantErr == "" {
+				if err != nil || size != tc.want {
+					t.Fatalf("DiskSize = (%d, %v), want (%d, nil)", size,
+						err, tc.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a failed read gave the size %d", size)
+			}
+			if size != 0 {
+				t.Errorf("a failed read came back with the size %d", size)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not say %q", err, tc.wantErr)
+			}
+			for _, cause := range []error{tc.devNoErr, tc.sizeErr} {
+				if cause != nil && !errors.Is(err, cause) &&
+					!errors.Is(cause, fs.ErrNotExist) {
+					t.Errorf("error %q does not carry the read's own %v",
+						err, cause)
+				}
 			}
 		})
 	}

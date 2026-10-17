@@ -83,7 +83,8 @@ func TestGetDnSize(t *testing.T) {
 	if _, err := client.GetDnSize(ctx, &pb.GetDnSizeRequest{
 		ClusterId: testCluster,
 	}); err == nil {
-		t.Error("a failing lsblk did not produce a gRPC error")
+		t.Error("a disk whose size cannot be read did not produce a " +
+			"gRPC error")
 	}
 }
 

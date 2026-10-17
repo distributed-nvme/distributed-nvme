@@ -815,7 +815,7 @@ func (d *DiskMeta) Identity() (uint64, uint64, bool) {
 }
 
 // SetDiskSize tells the allocator how big the raw device is; the DN converge
-// and probe pass it the size they already read with lsblk. An allocation
+// and probe pass it the size they already read (Dm.DiskSize). An allocation
 // attempted before it is an error rather than a silent overrun.
 func (d *DiskMeta) SetDiskSize(diskSize uint64) {
 	d.mu.Lock()

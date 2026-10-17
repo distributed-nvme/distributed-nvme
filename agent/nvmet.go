@@ -43,9 +43,11 @@ func AnaStateOf(grpId int) string {
 
 // Nvmet wraps the nvmet configfs patterns (SH18, SH19; cnagent.md CN16).
 // Attribute writes go through OsClient.WriteFileDirect, directory and link
-// operations through
-// RunCommand, probing through ReadFile (SH18); WriteFile is never used on a
-// /sys/kernel/config path.
+// operations and directory listings through RunCommand, attribute reads
+// through ReadFile, and a directory's modification time through ReadMtime,
+// in the agent's own process: a subsystem's age (SubsysMtime) and the port
+// probe's test of whether the port's directory is there (SH18). WriteFile is
+// never used on a /sys/kernel/config path.
 type Nvmet struct {
 	osBase
 }
@@ -202,11 +204,12 @@ const (
 // absent from one that does not match — and a transport attribute that
 // differs from a group state that does — and all of them from a probe that
 // did not answer (cnagent.md CN28): every read goes through the strict probe
-// (SH15), so err is set whenever a listing or a read did not answer, and
-// PortAbsent is reported only on an answer that the port's directory or a
-// group's is not there. ProbePort reads the attributes loosely instead, so
-// there a group whose state read failed for any reason reads missing. The
-// state is meaningless when err is set.
+// (SH15), the time read of the port's directory as well, so err is set
+// whenever a read did not answer, and PortAbsent is reported only on an
+// answer that the port's directory or a group's is not there. ProbePort
+// reads the attributes loosely instead, so there a group whose state read
+// failed for any reason reads missing. The state is meaningless when err is
+// set.
 func (n *Nvmet) ProbePortState(
 	ctx context.Context,
 	portId int,
@@ -222,7 +225,10 @@ func (n *Nvmet) probePort(
 	read func(context.Context, string) (string, bool, error),
 ) (PortState, string, error) {
 	portPath := n.PortPath(portId)
-	exists, err := n.dirExists(ctx, portPath)
+	// Whether the port's directory is there is a read of its time in the
+	// agent's own process, not an `ls` of it (SH18): every CheckDn and
+	// CheckCn round probes the port, and a child would cost each round one.
+	_, exists, err := n.dirMtime(ctx, portPath)
 	if err != nil {
 		return 0, "", err
 	}
@@ -238,8 +244,8 @@ func (n *Nvmet) probePort(
 			return 0, "", err
 		}
 		// An attribute is never absent from a port directory that exists;
-		// one that reads absent went with its port between the listing
-		// and the read, and the next probe finds the port missing.
+		// one that reads absent went with its port between the time read
+		// and the attribute read, and the next probe finds the port missing.
 		if !ok || cur != strings.TrimSpace(attr[1]) {
 			return PortAttrMismatch, fmt.Sprintf(
 				"%s is %q, want %q", attr[0], cur, attr[1]), nil

@@ -23,6 +23,7 @@ type FakeOsClient struct {
 	ReadFileFn        func(ctx context.Context, path string) (string, error)
 	ReadDirFn         func(ctx context.Context, path string) ([]string, error)
 	ReadMtimeFn       func(ctx context.Context, path string) (time.Time, error)
+	ReadDevNoFn       func(ctx context.Context, path string) (string, error)
 	WriteFileFn       func(ctx context.Context, path string, data string) error
 	WriteFileDirectFn func(ctx context.Context, path string, data string) error
 	ReadBlockFn       func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
@@ -62,6 +63,13 @@ func (f *FakeOsClient) ReadMtime(ctx context.Context, path string) (time.Time, e
 		return f.ReadMtimeFn(ctx, path)
 	}
 	return time.Time{}, errReadMtimeUnset
+}
+
+func (f *FakeOsClient) ReadDevNo(ctx context.Context, path string) (string, error) {
+	if f.ReadDevNoFn != nil {
+		return f.ReadDevNoFn(ctx, path)
+	}
+	return "", nil
 }
 
 func (f *FakeOsClient) WriteFile(ctx context.Context, path string, data string) error {

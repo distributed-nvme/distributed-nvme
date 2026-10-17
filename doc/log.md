@@ -108,7 +108,9 @@ R8. The following events MUST be logged at **Info** level, with the record
        every name, never truncated) — implemented once inside
        `LimitedOsClient`;
     6. every modification-time read made in the agent's own process (full
-       path; the time read) — implemented once inside `LimitedOsClient`.
+       path; the time read) — implemented once inside `LimitedOsClient`;
+    7. every device-number read made in the agent's own process (full path;
+       the number read) — implemented once inside `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error). When
@@ -166,6 +168,9 @@ implements them:
 * a modification-time read made in the agent's own process (`ReadMtime`)
   logs `os read mtime` with `path`, `mtime` (the time read, the zero time
   when the read failed) and "error?";
+* a device-number read made in the agent's own process (`ReadDevNo`) logs
+  `os read devno` with `path`, `devno` (the number read as "major:minor",
+  empty when the read failed) and "error?";
 * a raw block read logs `os read block` and a raw block write
   `os write block`, each with `path`, `offset`, `length` and "error?" —
   **never** `data`;

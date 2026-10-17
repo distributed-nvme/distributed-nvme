@@ -27,14 +27,16 @@ type fakeNode struct {
 	mu sync.Mutex
 
 	calls []string
-	// traced is every command, listing, mtime read, file read and block
-	// read keyed by the trace id of the ctx it ran on: the trace_id its `os
-	// command` / `os read dir` / `os read mtime` / `os read file` / `os read
-	// block` record carries in production (log.md R5); "" for a ctx without
-	// one.
+	// traced is every command, listing, mtime read, device-number read,
+	// file read and block read keyed by the trace id of the ctx it ran on:
+	// the trace_id its `os command` / `os read dir` / `os read mtime` / `os
+	// read devno` / `os read file` / `os read block` record carries in
+	// production (log.md R5); "" for a ctx without one.
 	traced map[string][]string
 
-	// block devices
+	// block devices, by /dev path. A device-number read answers devNo, and
+	// a read of the "size" sysfs keeps under that number answers devSize in
+	// 512-byte sectors (sysBlockSize).
 	devSize   map[string]uint64
 	devNo     map[string]string
 	nextMinor int
@@ -141,8 +143,9 @@ type fakeNode struct {
 	// "the tool ran and answered no": exit code 1, a non-nil error, and no
 	// dispatch, so the fake's state is left exactly as a refused ioctl
 	// leaves the node. These and the kill hooks below also match a listing
-	// in the agent's own process by its line, "list <path>", and an mtime
-	// read by its line, "mtime <path>", which neither half answers as absent
+	// in the agent's own process by its line, "list <path>", an mtime read
+	// by its line, "mtime <path>", and a device-number read by its line,
+	// "devno <path>", which neither half answers as absent
 	// (inProcessHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
@@ -333,6 +336,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		ReadFileFn:        f.readFile,
 		ReadDirFn:         f.readDir,
 		ReadMtimeFn:       f.readMtime,
+		ReadDevNoFn:       f.readDevNo,
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
@@ -384,7 +388,7 @@ func (f *fakeNode) Reset() {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "list ", "mtime ", "cmd lsblk ",
+	"cmd ls ", "list ", "mtime ", "devno ", "cmd lsblk ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	// `dmsetup ls` is the root of the sweep's enumeration and changes
 	// nothing; without it here every SH16 no-mutation assertion would fail
@@ -459,6 +463,9 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		return "", err
 	}
 	f.touchAttrParent(path)
+	if size, ok := f.sysBlockSize(path); ok {
+		return size, nil
+	}
 	data, ok := f.files[path]
 	if !ok {
 		// The absent-file error MUST wrap fs.ErrNotExist. The production
@@ -578,11 +585,58 @@ func (f *fakeNode) readMtime(
 	return time.Unix(f.mtimeOf(path), 0), nil
 }
 
+// readDevNo answers OsClient.ReadDevNo, a device-number read in the agent's
+// own process, from devNo. It records "devno <path>", and the command hooks
+// match that line as they match a listing's: a fail hook answers an I/O
+// error and a kill hook a read the soft timeout cut off, both never a
+// missing device, which only the model says.
+func (f *fakeNode) readDevNo(ctx context.Context, path string) (string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := "devno " + path
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	if err := f.inProcessHookErr(line, &fs.PathError{
+		Op: "stat", Path: path, Err: syscall.EIO}); err != nil {
+		return "", err
+	}
+	devNo, ok := f.devNo[path]
+	if !ok {
+		return "", &fs.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+	}
+	return devNo, nil
+}
+
+// sysBlockSize answers a read of "/sys/dev/block/<number>/size": the size of
+// the device devNo gives that number, in 512-byte sectors, as sysfs keeps
+// it. ok is false for any other path, and for a number no device of a known
+// size has, which then reads as a file that is not there. Called with f.mu
+// held.
+func (f *fakeNode) sysBlockSize(path string) (string, bool) {
+	devNo, ok := strings.CutPrefix(path, "/sys/dev/block/")
+	if !ok {
+		return "", false
+	}
+	if devNo, ok = strings.CutSuffix(devNo, "/size"); !ok {
+		return "", false
+	}
+	for dev, no := range f.devNo {
+		if size, sized := f.devSize[dev]; no == devNo && sized {
+			return fmt.Sprintf("%d\n", size/agent.SectorSize), true
+		}
+	}
+	return "", false
+}
+
 // inProcessHookErr applies the command hooks to the line of a call in the
-// agent's own process, a listing or an mtime read, in runCommand's order:
-// failCmd* answers failed, the call's own I/O error, and killCmd* and
-// killCmdNoEffect* a call the soft timeout cut off — such a call changes
-// nothing, so the two kill halves are one. Called with f.mu held.
+// agent's own process, a listing, an mtime read or a device-number read, in
+// runCommand's order: failCmd* answers failed, the call's own I/O error, and
+// killCmd* and killCmdNoEffect* a call the soft timeout cut off — such a
+// call changes nothing, so the two kill halves are one. Called with f.mu
+// held.
 func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 	if _, ok := f.takeFailCmd(line); ok {
 		return failed
@@ -1201,6 +1255,11 @@ func (f *fakeNode) cmdLn(args []string) (string, int) {
 	return "", 0
 }
 
+// cmdLsblk answers lsblk as the tool does. The agent runs it only for a
+// device's number (Dm.DevNo) and reads the disk's size from sysfs
+// (sysBlockSize); a size read by lsblk still answers, so one put back shows
+// as the child it is in the cost test (TestNodeSweepCostIsLinearInOwnExports)
+// rather than as a disk of no size.
 func (f *fakeNode) cmdLsblk(args []string) (string, int) {
 	path := args[len(args)-1]
 	if contains(args, "SIZE") {
