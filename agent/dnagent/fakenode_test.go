@@ -27,10 +27,11 @@ type fakeNode struct {
 	mu sync.Mutex
 
 	calls []string
-	// traced is every command, listing, file read and block read keyed by
-	// the trace id of the ctx it ran on: the trace_id its `os command` / `os
-	// read dir` / `os read file` / `os read block` record carries in
-	// production (log.md R5); "" for a ctx without one.
+	// traced is every command, listing, mtime read, file read and block
+	// read keyed by the trace id of the ctx it ran on: the trace_id its `os
+	// command` / `os read dir` / `os read mtime` / `os read file` / `os read
+	// block` record carries in production (log.md R5); "" for a ctx without
+	// one.
 	traced map[string][]string
 
 	// block devices
@@ -69,7 +70,12 @@ type fakeNode struct {
 	dirs  map[string]bool
 	files map[string]string
 	links map[string]string
-	// mtimes is each directory's mtime in whole seconds, what `stat -c %Y`
+	// subsysGhosts are names the `ls` of the nvmet subsystems directory
+	// reports that no longer exist: an export removed between the listing
+	// and the reads of it that follow, as a sibling agent's removal does in
+	// a burst. Like lsGhosts, the deterministic form of a stale snapshot.
+	subsysGhosts []string
+	// mtimes is each directory's mtime in whole seconds, what an mtime read
 	// answers (DN6's orphan age). cmdMkdir stamps a directory it creates
 	// with the fake's clock, and — as a kernel that stamps the parent on an
 	// attribute lookup does — a read or a write of one of a subsystem's own
@@ -135,8 +141,9 @@ type fakeNode struct {
 	// "the tool ran and answered no": exit code 1, a non-nil error, and no
 	// dispatch, so the fake's state is left exactly as a refused ioctl
 	// leaves the node. These and the kill hooks below also match a listing
-	// in the agent's own process by its line, "list <path>", which neither
-	// half answers as absent (listHookErr).
+	// in the agent's own process by its line, "list <path>", and an mtime
+	// read by its line, "mtime <path>", which neither half answers as absent
+	// (inProcessHookErr).
 	failCmd       map[string]string
 	failCmdAlways map[string]string
 	// failCmdLeft, when set for a failCmd key, is how many matching
@@ -325,6 +332,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		RunCommandFn:      f.runCommand,
 		ReadFileFn:        f.readFile,
 		ReadDirFn:         f.readDir,
+		ReadMtimeFn:       f.readMtime,
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
@@ -376,7 +384,7 @@ func (f *fakeNode) Reset() {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "list ", "cmd lsblk ", "cmd stat ",
+	"cmd ls ", "list ", "mtime ", "cmd lsblk ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	// `dmsetup ls` is the root of the sweep's enumeration and changes
 	// nothing; without it here every SH16 no-mutation assertion would fail
@@ -516,7 +524,8 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 	line := "list " + path
 	f.record("%s", line)
 	f.recordTrace(ctx, line)
-	if err := f.listHookErr(line, path); err != nil {
+	if err := f.inProcessHookErr(line, &fs.PathError{
+		Op: "readdirent", Path: path, Err: syscall.EIO}); err != nil {
 		return nil, err
 	}
 	if inNvmetTree(path) {
@@ -539,13 +548,42 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 	return f.children(path), nil
 }
 
-// listHookErr applies the command hooks to a listing's line, in runCommand's
-// order: failCmd* answers an I/O error part-way through the listing, and
-// killCmd* and killCmdNoEffect* a listing the soft timeout cut off — a
-// listing changes nothing, so the two kill halves are one. Called with f.mu
-// held.
-func (f *fakeNode) listHookErr(line, path string) error {
-	failed := &fs.PathError{Op: "readdirent", Path: path, Err: syscall.EIO}
+// readMtime answers OsClient.ReadMtime, an mtime read in the agent's own
+// process, for a directory: the time mtimes holds for it, in whole seconds.
+// It records "mtime <path>", and the command hooks match that line as they
+// match a listing's. A fail hook answers an I/O error and a kill hook a read
+// the soft timeout cut off: both did not answer, never a missing directory,
+// which only the model says. Looking a subsystem's `attr_*` file up stamps the
+// subsystem, as a read of it does (touchAttrParent).
+func (f *fakeNode) readMtime(
+	ctx context.Context, path string,
+) (time.Time, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return time.Time{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := "mtime " + path
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	if err := f.inProcessHookErr(line, &fs.PathError{
+		Op: "lstat", Path: path, Err: syscall.EIO}); err != nil {
+		return time.Time{}, err
+	}
+	f.touchAttrParent(path)
+	if !f.dirs[path] {
+		return time.Time{}, &fs.PathError{
+			Op: "lstat", Path: path, Err: syscall.ENOENT}
+	}
+	return time.Unix(f.mtimeOf(path), 0), nil
+}
+
+// inProcessHookErr applies the command hooks to the line of a call in the
+// agent's own process, a listing or an mtime read, in runCommand's order:
+// failCmd* answers failed, the call's own I/O error, and killCmd* and
+// killCmdNoEffect* a call the soft timeout cut off — such a call changes
+// nothing, so the two kill halves are one. Called with f.mu held.
+func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 	if _, ok := f.takeFailCmd(line); ok {
 		return failed
 	}
@@ -691,7 +729,7 @@ func (f *fakeNode) ageDir(path string, d time.Duration) {
 	f.mtimes[path] = f.clock().Add(-d).Unix()
 }
 
-// mtimeOf is what `stat -c %Y` reads for an existing directory.
+// mtimeOf is what an mtime read answers for an existing directory.
 func (f *fakeNode) mtimeOf(path string) int64 {
 	if mtime, ok := f.mtimes[path]; ok {
 		return mtime
@@ -1006,26 +1044,8 @@ func (f *fakeNode) dispatch(
 		return f.cmdDmsetup(args, stdin)
 	case "nvme":
 		return f.cmdNvme(args)
-	case "stat":
-		return f.cmdStat(args)
 	}
 	return "", 127
-}
-
-// cmdStat answers `stat -c %Y <path>`, the one form the agent runs, for a
-// directory: its mtime in whole seconds, or exit 1 with coreutils' words when
-// it does not exist.
-func (f *fakeNode) cmdStat(args []string) (string, int) {
-	if len(args) != 3 || args[0] != "-c" || args[1] != "%Y" {
-		return "", 1
-	}
-	path := args[2]
-	if !f.dirs[path] {
-		f.dispatchStderr = "stat: cannot stat '" + path +
-			"': No such file or directory"
-		return "", 1
-	}
-	return strconv.FormatInt(f.mtimeOf(path), 10) + "\n", 0
 }
 
 func (f *fakeNode) children(path string) []string {
@@ -1075,13 +1095,19 @@ func childOf(dir, entry string) (string, bool) {
 }
 
 // cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only
-// tree the agent lists with `ls` (runCommand refuses any other).
+// tree the agent lists with `ls` (runCommand refuses any other). A listing of
+// the subsystems directory also names the subsysGhosts.
 func (f *fakeNode) cmdLs(args []string) (string, int) {
 	path := args[len(args)-1]
 	if !f.dirs[path] {
 		return "", 2
 	}
-	return strings.Join(f.children(path), "\n") + "\n", 0
+	names := f.children(path)
+	if path == agent.NvmetRoot+"/subsystems" && len(f.subsysGhosts) > 0 {
+		names = append(names, f.subsysGhosts...)
+		sort.Strings(names)
+	}
+	return strings.Join(names, "\n") + "\n", 0
 }
 
 func (f *fakeNode) cmdRm(args []string) (string, int) {

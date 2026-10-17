@@ -75,6 +75,10 @@ SYNCUP_TIMEOUT=60
 # (DnZeroRetryInterval = 5 s).
 ZERO_TIMEOUT=120
 
+# The orphan grace (common.DnExportOrphanGrace), in seconds: the age past
+# which the smoke case's export made by hand reads old (dnagent.md DN6).
+ORPHAN_GRACE=30
+
 # Polling budget for the end of a migration source's cutover grace window
 # (architecture.md, Migration, src step 2), which migr_full's lost source
 # waits for: common.SuspendSeconds from the cutover, and the converge that
@@ -614,6 +618,52 @@ host_subsys_present() {
 	    [ .. | objects | select(has("NQN") and .NQN == $nqn) ] | length') ||
 		return 1
 	if [ "${n:-0}" -gt 0 ]; then echo yes; else echo no; fi
+}
+
+# --- the age read (dnagent_integtest.md, Cases, smoke) ----------------------
+
+# make_bare_export <nqn> — an export made by hand: the subsystem directory
+# alone, with no namespace and no port link, the shape of a build in flight
+# short of its namespace. Nothing here reads one of its attribute files, a
+# lookup that on the lab kernel moves the directory's time.
+make_bare_export() {
+	mkdir "$NVMET/subsystems/$1" && echo made
+}
+
+# subsys_mtime <nqn> — the subsystem directory's time in whole seconds. stat
+# looks up the directory alone, so it leaves that time where it is.
+subsys_mtime() { stat -c %Y "$NVMET/subsystems/$1"; }
+
+# wait_older <nqn> <secs> — wait until the subsystem directory is more than
+# <secs> seconds old by this node's clock, the one the agent judges it by,
+# and print its age.
+wait_older() {
+	local t now
+	t=$(subsys_mtime "$1") || return 1
+	while :; do
+		now=$(date +%s) || return 1
+		[ $((now - t)) -gt "$2" ] && break
+		sleep 1
+	done
+	echo $((now - t))
+}
+
+# attribution_reads <trace> <nqn> — what the agent read of one export under
+# one trace id, as three counts on one line: its in-process age reads, the
+# listings of its namespaces, and the listings of the ports directory, which
+# every port listing starts with. One jq evaluation (see the note above
+# clone_discards).
+attribution_reads() {
+	jq -rn --arg t "$1" --arg dir "$NVMET/subsystems/$2" \
+		--arg ports "$NVMET/ports" '
+	    [ inputs | select(.trace_id == $t) ] as $r
+	    | [ ($r | map(select(.msg == "os read mtime" and .path == $dir))
+	          | length),
+	        ($r | map(select(.msg == "os command" and .cmd == "ls"
+	                  and .args[-1] == $dir + "/namespaces")) | length),
+	        ($r | map(select(.msg == "os command" and .cmd == "ls"
+	                  and .args[-1] == $ports)) | length) ]
+	    | map(tostring) | join(" ")' "$WORK/agent.log"
 }
 
 # --- the lost source (dnagent_integtest.md, Cases, migr_full) ---------------
@@ -1804,6 +1854,60 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 # Case S — smoke (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
+# age_gate_stages proves DN6's age read on a real kernel (dnagent_integtest.md,
+# Cases, smoke): an export of the side's sp for a leg no side holds, made by
+# hand with no namespace and no port link. While it is young the check rounds
+# stay clean, the agent reads its age in its own process and lists neither
+# its namespaces nor the ports, and nothing moves the directory's time. Once
+# it is older than the orphan grace — the real one: nothing backdates it — a
+# check round reports it as a leftover after one listing of its namespaces
+# and one of the ports, and the next syncup removes it.
+age_gate_stages() { # dnidx sp leg side cn
+	local dn=$1 sp=$2 leg=$3 side=$4 cn=$5
+	local nqn out t0 t1 i age details rounds=3
+	nqn=$(side_to_cn_nqn "$CLUSTER" "$sp" 0x2 "$cn")
+
+	stage bare "an export of the sp for a leg no side holds, made by hand"
+	assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no "$nqn before"
+	helper "$dn" "make_bare_export '$nqn'" >/dev/null
+	# A second past the mkdir, so a lookup that moved the directory's time
+	# would show in whole seconds.
+	sleep 2
+	t0=$(helper "$dn" "subsys_mtime '$nqn'")
+
+	stage young "check rounds while it is young: clean, its age read in process, nothing listed"
+	for ((i = 1; i <= rounds; i++)); do
+		out=$(ctl "$dn" check-dn --revision "${DNREV[$dn]}" --show-info)
+		assert_dn_info_ok "$out" "young check-dn $i"
+		sleep 1
+	done
+	t1=$(helper "$dn" "subsys_mtime '$nqn'")
+	assert_eq "$t1" "$t0" "the time of $nqn after the young rounds"
+	assert_eq "$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")" \
+		"$rounds 0 0" \
+		"the young rounds' age reads, namespace and port listings of $nqn"
+
+	stage old "past the orphan grace a check round reports it, after one listing of each"
+	age=$(helper "$dn" "wait_older '$nqn' $ORPHAN_GRACE")
+	log "smoke: $nqn is ${age}s old"
+	out=$(ctl "$dn" check-dn --revision "${DNREV[$dn]}" --show-info \
+		--expect-code 4)
+	details=$(jq_of "$out" '.agent_reply.details // ""')
+	case "$details" in
+	*"$nqn"*) ;;
+	*) die "the old export's check round names no $nqn: $details" ;;
+	esac
+	assert_eq "$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")" "1 1 1" \
+		"the old round's age reads, namespace and port listings of $nqn"
+
+	stage sweep "the next syncup removes it"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$side")
+	assert_dn_info_ok "$out" "smoke age syncup-dn"
+	assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no "$nqn after the syncup"
+}
+
 case_smoke() {
 	CASE=smoke
 	local sp=0xa1 leg=0x1 side=0x11 cn=0x21 cnvm=2 dn=1
@@ -1848,6 +1952,8 @@ case_smoke() {
 
 	stage check "converge check round"
 	converge_check "$dn" "$sp" "$leg" "$side" "$siderev"
+
+	age_gate_stages "$dn" "$sp" "$leg" "$side" "$cn"
 
 	stage teardown "an empty side list tears the side down declaratively"
 	cn_disconnect "$cnvm" "$sp" "$leg" "$cn"

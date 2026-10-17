@@ -685,12 +685,14 @@ func (n *Nvmet) ListPorts(ctx context.Context) ([]int, error) {
 }
 
 // SubsysMtime is the mtime of one subsystem's configfs directory, the age a
-// sweep judges an unattributable export by (dnagent.md DN6); ok is false when
-// the subsystem is gone. The mtime is set at `mkdir`; adding an allowed-host
-// link or a namespace directory under it does not move it, and neither does
-// listing it. Kernels differ in one respect. One that stamps the parent
-// directory on every lookup of one of the subsystem's OWN attribute files — a
-// read, a write, even a stat of `attr_*`, because configfs instantiates an
+// sweep judges an unattributable export by (dnagent.md DN6), read in the
+// agent's own process (SH18); ok is false when the subsystem is gone. The
+// mtime is set at `mkdir`; adding an allowed-host link or a namespace
+// directory under it does not move it, and neither does listing it or this
+// read, which looks up the directory itself and none of its attributes.
+// Kernels differ in one respect. One that stamps the parent directory on
+// every lookup of one of the subsystem's OWN attribute files — a read, a
+// write, even a stat of `attr_*`, because configfs instantiates an
 // attribute's inode on each lookup — makes it read "time since the subsystem
 // was created or an attribute of it was last touched": a build in flight
 // writes the attributes and reads young, and an export nobody touches ages.

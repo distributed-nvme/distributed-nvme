@@ -208,6 +208,16 @@ func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
 		t.Errorf("ReadDir with the only slot held = (%q, %v), "+
 			"want (nil, context.DeadlineExceeded)", names, err)
 	}
+	if mtime, err := client.ReadMtime(ctx, t.TempDir()); err != context.Canceled || !mtime.IsZero() {
+		t.Errorf("ReadMtime = (%v, %v), want (zero, context.Canceled)", mtime, err)
+	}
+	// An mtime read waits for a slot like every other call.
+	shortMtime, cancelShortMtime := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShortMtime()
+	if mtime, err := client.ReadMtime(shortMtime, t.TempDir()); err != context.DeadlineExceeded || !mtime.IsZero() {
+		t.Errorf("ReadMtime with the only slot held = (%v, %v), "+
+			"want (zero, context.DeadlineExceeded)", mtime, err)
+	}
 	if err := client.WriteFile(ctx, filepath.Join(t.TempDir(), "f"), "x"); err != context.Canceled {
 		t.Errorf("WriteFile err = %v, want context.Canceled", err)
 	}
@@ -267,6 +277,42 @@ func TestReadDirHoldsItsSlotUntilItReturns(t *testing.T) {
 			t.Fatalf("ReadDir(%s) found no free slot: an earlier listing "+
 				"kept it", path)
 		}
+	}
+}
+
+// TestReadMtimeGivesItsSlotBack: an mtime read holds one slot like a listing
+// and gives it back when it returns, after a read that failed, as "not
+// exist" or otherwise, as well as after one that answered. A read that keeps
+// its slot leaves an agent, after as many age reads as it has slots, with
+// every call waiting for a slot that never comes.
+func TestReadMtimeGivesItsSlotBack(t *testing.T) {
+	client := NewLimitedOsClient(1)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "attr_serial")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	for _, path := range []string{
+		dir,
+		filepath.Join(dir, "missing"),
+		filepath.Join(file, "below"),
+		dir,
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := client.ReadMtime(ctx, path)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ReadMtime(%s) found no free slot: an earlier read "+
+				"kept it", path)
+		}
+	}
+	// Every other call finds the slot free as well.
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if _, err := client.ReadFile(short, file); err != nil {
+		t.Errorf("a call made after the mtime reads = %v, want nil: an "+
+			"mtime read kept the only slot", err)
 	}
 }
 
@@ -658,6 +704,77 @@ func TestReadDirClosesTheDirectory(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ReadMtime (osclient.md, ReadMtime)
+// ---------------------------------------------------------------------------
+
+// TestReadMtimeOfARealDirectory runs an mtime read on a real directory: it
+// answers the time the directory holds, to the nanosecond the file system
+// keeps, not rounded to the second. It reads the path itself and follows no
+// link: a link to the directory answers the link's own time, and a link that
+// leads nowhere answers its time too, never "not exist". A missing path, or
+// one under a missing directory, is the one failure a caller reads as
+// absent: its error wraps fs.ErrNotExist. A path that runs through a file is
+// an error that is not, so no caller reads it as absent. Every failure comes
+// with the zero time.
+func TestReadMtimeOfARealDirectory(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "subsys")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Old, and not a whole second: a read that followed a link, or one that
+	// rounded, would not answer exactly this.
+	want := time.Date(2001, 2, 3, 4, 5, 6, 789012345, time.Local)
+	if err := os.Chtimes(dir, want, want); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	got, err := client.ReadMtime(ctx, dir)
+	if err != nil || !got.Equal(want) {
+		t.Fatalf("ReadMtime(%s) = (%v, %v), want (%v, nil)", dir, got, err,
+			want)
+	}
+
+	for _, target := range []string{dir, filepath.Join(dir, "gone")} {
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("lstat: %v", err)
+		}
+		got, err := client.ReadMtime(ctx, link)
+		if err != nil || !got.Equal(info.ModTime()) {
+			t.Errorf("ReadMtime of a link to %s = (%v, %v), want the "+
+				"link's own time (%v, nil)", target, got, err,
+				info.ModTime())
+		}
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, "missing"),
+		filepath.Join(dir, "missing", "below"),
+	} {
+		got, err := client.ReadMtime(ctx, path)
+		if !errors.Is(err, fs.ErrNotExist) || !got.IsZero() {
+			t.Errorf("ReadMtime(%s) = (%v, %v), want (zero, an error "+
+				"wrapping fs.ErrNotExist)", path, got, err)
+		}
+	}
+
+	file := filepath.Join(dir, "attr_serial")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err = client.ReadMtime(ctx, filepath.Join(file, "below"))
+	if err == nil || errors.Is(err, fs.ErrNotExist) || !got.IsZero() {
+		t.Errorf("ReadMtime through a file = (%v, %v), want (zero, an "+
+			"error that is not fs.ErrNotExist)", got, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Logging (osclient.md, Logging)
 // ---------------------------------------------------------------------------
 
@@ -857,6 +974,48 @@ func TestOsClientLogRecords(t *testing.T) {
 				want.path, has, want.failed, rec)
 		}
 	}
+
+	// 7. mtime reads: the path and the time read, and a failed one its
+	// error
+	stamped := time.Date(2001, 2, 3, 4, 5, 6, 789012345, time.UTC)
+	if err := os.Chtimes(listed, stamped, stamped); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if _, err := client.ReadMtime(ctx, listed); err != nil {
+		t.Fatalf("ReadMtime: %v", err)
+	}
+	if _, err := client.ReadMtime(ctx, missing); err == nil {
+		t.Fatal("reading the mtime of a missing directory succeeded")
+	}
+	mtimeRecs := capture.withMsg(t, "os read mtime")
+	if len(mtimeRecs) != 2 {
+		t.Fatalf("%d os read mtime records for 2 reads\n%s", len(mtimeRecs),
+			capture.buf.String())
+	}
+	for i, want := range []struct {
+		path   string
+		failed bool
+	}{
+		{path: listed},
+		{path: missing, failed: true},
+	} {
+		rec := mtimeRecs[i]
+		hasAttrs(t, rec, "path", "mtime", TraceIdLogKey)
+		if rec["path"] != want.path {
+			t.Errorf("os read mtime: path = %v, want %s", rec["path"],
+				want.path)
+		}
+		if _, has := rec["error"]; has != want.failed {
+			t.Errorf("os read mtime %s: error attr present = %v, want %v: "+
+				"%v", want.path, has, want.failed, rec)
+		}
+	}
+	if logged, err := time.Parse(time.RFC3339Nano,
+		fmt.Sprint(mtimeRecs[0]["mtime"])); err != nil ||
+		!logged.Equal(stamped) {
+		t.Errorf("os read mtime: mtime = %v, want %v", mtimeRecs[0]["mtime"],
+			stamped)
+	}
 }
 
 // toAny is a []string as a decoded JSON array holds it.
@@ -882,6 +1041,13 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	// An unset ReadDirFn is an empty listing, never a missing directory.
 	if names, err := fake.ReadDir(ctx, "/x"); names != nil || err != nil {
 		t.Errorf("unset ReadDirFn = (%q, %v)", names, err)
+	}
+	// An unset ReadMtimeFn fails, and not as a missing path: a zero time
+	// reads as older than any age, and a missing path as gone.
+	if mtime, err := fake.ReadMtime(ctx, "/x"); err == nil ||
+		errors.Is(err, fs.ErrNotExist) || !mtime.IsZero() {
+		t.Errorf("unset ReadMtimeFn = (%v, %v), want (zero, an error that "+
+			"is not fs.ErrNotExist)", mtime, err)
 	}
 	if err := fake.WriteFile(ctx, "/x", "d"); err != nil {
 		t.Errorf("unset WriteFileFn = %v", err)
@@ -939,6 +1105,17 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 		names != nil {
 		t.Errorf("stubbed missing directory → (%q, %v), want (nil, an error "+
 			"wrapping fs.ErrNotExist)", names, err)
+	}
+
+	stamp := time.Unix(1000, 5)
+	fake.ReadMtimeFn = func(_ context.Context, path string) (time.Time, error) {
+		gotPath = path
+		return stamp, nil
+	}
+	if mtime, err := fake.ReadMtime(ctx, "/sys/kernel/config"); err != nil ||
+		!mtime.Equal(stamp) || gotPath != "/sys/kernel/config" {
+		t.Errorf("stubbed ReadMtime → (%v, %v), stub saw %q", mtime, err,
+			gotPath)
 	}
 
 	var blockOff uint64

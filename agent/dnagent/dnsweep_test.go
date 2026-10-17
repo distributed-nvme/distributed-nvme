@@ -732,17 +732,24 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // the sp — about s·(s−1) execs per cn per round for s side-holding agents.
 //
 // dnv builds every side export with one namespace, nsid 1, so its
-// device_path is read directly and the namespaces are listed only when there
-// is no namespace 1. The test runs both passes — a Check round's verdict and a
-// SyncupDn — over four sibling agents of one sp holding one export each, then
-// eight each, then thirty-two agents holding one each, and counts the execs
-// and the listings the agent makes in its own process (sysfs and the local
-// store): neither count may move. The third run holds the number of exports
-// of the second and changes only the number of agents, each on its own port:
-// a cost per sibling AGENT (a port listing, say) is as quadratic on the node
-// as one per export, and the first two runs hold the agent count still. Each
-// pass also reads each sibling export's namespace 1 exactly once, which is
-// what makes a cache of the attribution pointless within a pass.
+// device_path is read directly, and the age of an export without it is read
+// in process too: the namespaces are listed only for one that is old. Every
+// export is without namespace 1 for a moment while it is built or removed, so
+// a burst of builds and removals puts many such exports in front of every
+// pass: beside each export that has its namespace, each sibling agent here
+// has a build in flight short of its namespace, young, and an export removed
+// after the subsystems listing, which every read of it then finds gone. The
+// test runs both passes — a Check round's verdict and a SyncupDn — over four
+// sibling agents of one sp holding one export of each shape each, then eight
+// each, then thirty-two agents holding one each, and counts the execs and the
+// listings the agent makes in its own process (sysfs and the local store):
+// neither count may move. The third run holds the number of exports of the
+// second and changes only the number of agents, each on its own port: a cost
+// per sibling AGENT (a port listing, say) is as quadratic on the node as one
+// per export, and the first two runs hold the agent count still. Each pass
+// also reads each sibling export's namespace 1 exactly once, and the age of
+// each without it exactly once, which is what makes a cache of the
+// attribution pointless within a pass.
 func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 
@@ -765,7 +772,9 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		}
 		syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
 
-		var seeded []string
+		// seeded have their namespace 1; young are builds in flight short
+		// of it; gone were removed after the subsystems listing.
+		var seeded, young, gone []string
 		for i := 0; i < siblings; i++ {
 			for j := 0; j < per; j++ {
 				n := uint64(i*16 + j)
@@ -776,20 +785,41 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 					siblingSide+n, testCn0))
 				linkPort(node, siblingPort+i, nqn)
 				seeded = append(seeded, nqn)
+				building := nf.SideToCnNqn(testCluster, testSp,
+					siblingLeg+n, testCn1)
+				seedExport(node, building, "")
+				linkAllowedHost(node, building,
+					nf.CnHostNqn(testCluster, testCn1))
+				young = append(young, building)
+				gone = append(gone, nf.SideToCnNqn(testCluster, testSp,
+					siblingLeg+n, testCn1+1))
 			}
 		}
+		node.mu.Lock()
+		node.subsysGhosts = gone
+		node.mu.Unlock()
 		// readsOnce checks that the pass just run attributed every sibling
-		// export by exactly one read of its namespace 1: none skipped, none
+		// export by exactly one read of its namespace 1, and every one
+		// without it by exactly one read of its age too: none skipped, none
 		// read twice.
 		readsOnce := func(pass string) {
 			t.Helper()
-			for _, nqn := range seeded {
+			for _, nqn := range append(append(append([]string(nil),
+				seeded...), young...), gone...) {
 				got := len(node.callsMatching("read " + agent.NvmetRoot +
 					"/subsystems/" + nqn + "/namespaces/1/device_path"))
 				if got != 1 {
 					t.Errorf("siblings=%d per=%d: the %s read %s's "+
 						"namespace 1 %d times, want 1", siblings, per, pass,
 						nqn, got)
+				}
+			}
+			for _, nqn := range append(append([]string(nil),
+				young...), gone...) {
+				got := ageReads(node, agent.NvmetRoot+"/subsystems/"+nqn)
+				if got != 1 {
+					t.Errorf("siblings=%d per=%d: the %s read the age of "+
+						"%s %d times, want 1", siblings, per, pass, nqn, got)
 				}
 			}
 		}
@@ -823,8 +853,10 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		readsOnce("SyncupDn")
 
 		// Cheaper is only worth having if it is still right: every
-		// sibling export is attributed to its agent and left alone.
-		for _, nqn := range seeded {
+		// sibling export is attributed to its agent and left alone, and so
+		// is every build in flight.
+		for _, nqn := range append(append([]string(nil),
+			seeded...), young...) {
 			if !subsysPresent(node, nqn) {
 				t.Errorf("siblings=%d per=%d: the sweep removed a "+
 					"sibling's export %s", siblings, per, nqn)
@@ -840,8 +872,8 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 	// per sibling AGENT (a port listing, say) is as quadratic on the node
 	// as one per export, and the two runs above hold the agent count still.
 	agents := execs(t, siblings*8, 1)
-	t.Logf("execs with %d sibling exports: %+v; with %d: %+v; with %d "+
-		"agents holding one each: %+v",
+	t.Logf("execs with %d sibling exports of each shape: %+v; with %d: "+
+		"%+v; with %d agents holding one of each: %+v",
 		siblings, few, siblings*8, many, siblings*8, agents)
 	if agents != few {
 		t.Errorf("execs or listings grew with the number of sibling "+

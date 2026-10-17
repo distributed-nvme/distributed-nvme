@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -439,26 +438,28 @@ func (b *osBase) listDir(
 	return out, true, nil
 }
 
-// dirMtime reads a directory's modification time from the node — `stat -c
-// %Y`, whole seconds since the epoch — so an age can be judged from what the
-// kernel says rather than from anything remembered (dnagent.md DN6). ok is
-// false when the directory does not exist (stat answered, non-zero); an error
-// means the command did not answer, or answered something that is not a
-// number. It follows listDir's split: a killed stat is never an absence.
+// dirMtime reads a directory's modification time from the node in the
+// agent's own process (OsClient.ReadMtime) on a ctx carrying the soft timeout
+// (SH15), so an age can be judged from what the kernel says rather than from
+// anything remembered (dnagent.md DN6). It reads the directory itself, never
+// one of its entries, and is no listing (SH18). ok is false only when the
+// directory does not exist; every other failure is an error naming the read
+// — "mtime of <path>: <cause>" — and is never an absence, as listDir's split
+// has it: a read that did not answer is not a directory that is gone.
 func (b *osBase) dirMtime(
 	ctx context.Context,
 	path string,
 ) (time.Time, bool, error) {
-	stdout, ok, err := b.runProbe(ctx, "stat", "-c", "%Y", path)
-	if err != nil || !ok {
-		return time.Time{}, false, err
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	mtime, err := b.oc.ReadMtime(cctx, path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, fmt.Errorf("mtime of %s: %w", path, err)
 	}
-	secs, convErr := strconv.ParseInt(strings.TrimSpace(stdout), 10, 64)
-	if convErr != nil {
-		return time.Time{}, false, fmt.Errorf(
-			"stat -c %%Y %s: not a number: %q", path, strings.TrimSpace(stdout))
-	}
-	return time.Unix(secs, 0), true, nil
+	return mtime, true, nil
 }
 
 // dirExists says whether a directory of the nvmet configfs tree exists, by

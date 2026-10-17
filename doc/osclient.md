@@ -1,12 +1,13 @@
 # osclient.md — OS client
 
 This document owns the one path every dnv binary takes to the operating
-system: the `OsClient` interface for OS commands, for directory listings and
-for file, protobuf and raw block IO, its production implementation
-`LimitedOsClient` with its concurrency limit, its command timeouts and kill
-rule, the guarantees of each operation (a listing's names, all of them in byte
-order or none; the atomic replace and fsync of a file write; the exact-length
-read and fsynced write of a block), the exported raw helpers and the probe-IO
+system: the `OsClient` interface for OS commands, for directory listings, for
+modification-time reads and for file, protobuf and raw block IO, its
+production implementation `LimitedOsClient` with its concurrency limit, its
+command timeouts and kill rule, the guarantees of each operation (a listing's
+names, all of them in byte order or none; the time of the path itself, never
+of what a link names; the atomic replace and fsync of a file write; the
+exact-length read and fsynced write of a block), the exported raw helpers and the probe-IO
 carve-out that is the one sanctioned bypass, and what emitting the record of
 each operation requires. It leans on `log.md` for the helpers it reuses
 (`PbToLogValue`, `TruncForLog`, `LogStrDataLimit`), for its rules on Info
@@ -26,14 +27,15 @@ it.
   `constants.go` and `name_fmt.go` (the `Local*Path` files that go through
   `ReadProto` and `WriteProto`).
 * Consumers: `dnv-agent` in both roles, for its dmsetup, mdadm, nvme and
-  nvmet-configfs work, for its listings of sysfs and of its local store, and
-  for persisting the `Local*Path` protobuf state files. **All** OS command
-  execution, directory listing and disk file IO in production code goes
+  nvmet-configfs work, for its listings of sysfs and of its local store, for
+  the dn's read of an nvmet subsystem directory's age, and for persisting the
+  `Local*Path` protobuf state files. **All** OS command execution, directory
+  listing, modification-time read and disk file IO in production code goes
   through an `OsClient` — never call `os/exec` or
-  `os.ReadFile`/`os.WriteFile`, and never read a directory, directly outside
-  this file. This is what makes the logging rules of `log.md` R8 (its first,
-  second and fifth items) enforceable and makes every consumer unit-testable
-  via `FakeOsClient`. There is exactly **one** sanctioned exception in
+  `os.ReadFile`/`os.WriteFile`, and never read a directory or stat a path,
+  directly outside this file. This is what makes the logging rules of
+  `log.md` R8 (its first, second, fifth and sixth items) enforceable and
+  makes every consumer unit-testable via `FakeOsClient`. There is exactly **one** sanctioned exception in
   production code, recorded under "Exported raw helpers and the probe-IO
   carve-out": the CN11 leg-health probers call the package-level helpers
   `WriteBlockAt` / `ReadBlockDirectAt` directly — outside the semaphore,
@@ -68,6 +70,10 @@ the method set is exactly the following, each taking the caller's ctx:
   locale); it opens no entry. A missing directory is an error wrapping
   `fs.ErrNotExist`; any other failure — a path that is not a directory, a
   read that fails part-way through — is an error, with no names.
+* `ReadMtime` reads the modification time of the path itself in the
+  caller's own process, following no symbolic link, and returns that time
+  and nothing else. A missing path is an error wrapping `fs.ErrNotExist`;
+  any other failure is an error, with the zero time.
 * `WriteFile` creates or overwrites a file with string data under the
   default file permissions, by atomic replace.
 * `WriteFileDirect` writes string data straight into the file at a path —
@@ -88,7 +94,8 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * `NewLimitedOsClient` takes the limit; a limit of zero or less means "use
   `DefaultOsClientLimit`", the default cap on in-flight operations
-  (commands, directory listings, file IO and proto IO combined) that
+  (commands, directory listings, modification-time reads, file IO and proto
+  IO combined) that
   `constants.go` holds. Its reason: during convergence an agent fans out
   many dmsetup, mdadm, nvme and blkdiscard invocations plus state-file
   writes, and the default bounds fork and disk pressure while leaving ample
@@ -177,7 +184,8 @@ the method set is exactly the following, each taking the caller's ctx:
   answer; `Nvmet` lists the nvmet configfs tree with `ls` through it
   (`dnagent.md` SH18). `Cmd.ListDir` lists sysfs in the agent's own process
   through `ReadDir` instead, and answers "absent" only for
-  `fs.ErrNotExist`. `dnagent.md` SH15 names the primitives whose callers act
+  `fs.ErrNotExist`; so does `Nvmet.SubsysMtime`, which reads a subsystem
+  directory's age through `ReadMtime`. `dnagent.md` SH15 names the primitives whose callers act
   on either "absent".
   `Dm.BlkZeroout` applies the predicate as well and is not a probe: it
   returns the verdict as answered, so the `dnagent.md` DN9 zeroing loop
@@ -277,6 +285,32 @@ the method set is exactly the following, each taking the caller's ctx:
   through — is an error that comes with no names, and the caller reads it as
   a listing that did not answer (RunCommand). Reason: a part of a listing
   read as the whole would make a present entry read as absent.
+
+### ReadMtime
+
+* `ReadMtime` reads a path's modification time in the agent's own process;
+  no child process runs. The dn's attribution reads a subsystem directory's
+  age this way, for the reason the configfs access rule gives
+  (`dnagent.md` SH18, DN6).
+* It returns the time and nothing else. Reason: the age read is its only
+  caller, and a general stat would add surface no caller needs.
+* Like `ReadDir`, it holds one semaphore slot and checks the ctx error after
+  acquiring it. That is its last cancellation point: the read itself is not
+  cancelable, and one the kernel holds returns only when the kernel does
+  (`dnagent.md` SH13).
+* It reads the path itself and follows no symbolic link, as `stat` without
+  its follow flag does: a link answers its own time, one that leads nowhere
+  included. Reading a directory's time looks up none of its entries, which
+  on configfs matters: a lookup of one of a subsystem's attribute files
+  moves the subsystem directory's time on some kernels (`dnagent.md` SH18).
+* The time is the file system's own, to the precision it keeps; nothing
+  rounds it.
+* A missing path is absent: the error wraps `fs.ErrNotExist`, whether the
+  path or a directory on it is missing. Every other failure — a path that
+  runs through a file, an I/O error — is an error that comes with the zero
+  time, and the caller reads it as a read that did not answer (RunCommand).
+  Reason: the dn's caller passes a gone export over, so a failed read taken
+  as absent would make a live export read as gone and the verdict clean.
 
 ### ReadProto / WriteProto
 
@@ -461,7 +495,12 @@ Notes:
 per interface method, of which a test sets only the ones it needs; an unset
 field succeeds with zero values. An unset listing field answers an empty
 listing, never a missing directory, so a test that expects a listing to fail
-or its directory to be missing sets that field and checks that it ran. It is
+or its directory to be missing sets that field and checks that it ran. An
+unset mtime-read field is the one exception: it fails, with an error that
+does not wrap `fs.ErrNotExist`. Reason: the zero time reads as older than
+any age a caller judges by, so with a zero default every unit test that met
+an export without namespace one would read it as old and remove it, and a
+"not exist" default would pass every such export over as gone. It is
 exported — not a `_test.go` file — so
 tests in other packages can reuse it. It has no
 field for the direct read: the probe read is not on the interface, and probe

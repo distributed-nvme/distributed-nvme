@@ -149,7 +149,16 @@ disk format and port by a baseline `SyncupDn` (DN5, SH19; `architecture.md`,
 **smoke** proves the plumbing: one side through the flip exported to one host,
 its path live and optimized, a data round trip, clean check rounds, and the
 side torn down by an empty side list (`dnagent.md` DN6 to DN10, L1, L2, L5,
-L7).
+L7). Before the teardown it proves the age gate on a real kernel
+(`dnagent.md` DN6, SH18): an export of the side's sp for a leg no side
+holds, made by hand with no namespace and no port link. While it is young
+the check rounds stay clean, the agent's log shows its age read in the
+agent's own process and no listing of its namespaces or of the ports, and
+its directory's time, read from the shell before and after, does not move.
+Once it is older than the orphan grace, the real one, as nothing backdates
+it, a check round reports it as a leftover after exactly one listing of its
+namespaces and one of the ports, and the next syncup removes it, which the
+case's residue check proves too.
 
 **zeroing** proves that a side zeroes the length its request asks for and not
 a byte past it (`architecture.md`, Side provisioning protocol; `dnagent.md`

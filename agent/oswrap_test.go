@@ -498,3 +498,90 @@ func TestOsBaseReadDirAbsentOnlyForMissing(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// An mtime read in the agent's own process: absent only when missing
+// ---------------------------------------------------------------------------
+
+// TestSubsysMtimeAbsentOnlyForMissing pins the split of the age read DN6
+// judges an export without namespace one by (osclient.md, ReadMtime): it
+// reads the subsystem's own directory, in the agent's own process, and only
+// a directory that does not exist is absent — the export is gone, and a
+// sweep passes it over. Every other failure — an I/O error, a path that runs
+// through a file, a read cut off at the soft timeout — is an error that names
+// the read, never an absence: a sweep would pass a live export over as gone,
+// and its verdict would come back clean. Each read reaches the OsClient on a
+// ctx carrying the SH15 soft timeout.
+func TestSubsysMtimeAbsentOnlyForMissing(t *testing.T) {
+	const nqn = "nqn.2024-01.io.dnv:2:0000000000000001:0000000000000011:" +
+		"0000000000000021:0000000000000005"
+	path := NvmetRoot + "/subsystems/" + nqn
+	stamp := time.Unix(1700000000, 123456789)
+	for _, tc := range []struct {
+		name  string
+		mtime time.Time
+		err   error
+		// present and fails are what SubsysMtime must answer.
+		present bool
+		fails   bool
+	}{
+		{name: "read", mtime: stamp, present: true},
+		{name: "missing", err: &fs.PathError{
+			Op: "lstat", Path: path, Err: syscall.ENOENT}},
+		{name: "an I/O error", err: &fs.PathError{
+			Op: "lstat", Path: path, Err: syscall.EIO}, fails: true},
+		{name: "through a file", err: &fs.PathError{
+			Op: "lstat", Path: path, Err: syscall.ENOTDIR}, fails: true},
+		{name: "cut off at the soft timeout",
+			err: context.DeadlineExceeded, fails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var read []string
+			oc := &common.FakeOsClient{
+				ReadMtimeFn: func(
+					ctx context.Context, got string,
+				) (time.Time, error) {
+					read = append(read, got)
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) >
+						common.CmdSoftTimeout*time.Second {
+						t.Errorf("the mtime read of %s reached the "+
+							"OsClient without the SH15 soft timeout", got)
+					}
+					return tc.mtime, tc.err
+				},
+			}
+			mtime, present, err := NewNvmet(oc).SubsysMtime(
+				context.Background(), nqn)
+			if len(read) != 1 || read[0] != path {
+				t.Fatalf("mtime reads = %q, want %s once", read, path)
+			}
+			if !tc.fails {
+				if err != nil || present != tc.present ||
+					!mtime.Equal(tc.mtime) {
+					t.Fatalf("SubsysMtime = (%v, %v, %v), want (%v, %v, "+
+						"nil)", mtime, present, err, tc.mtime, tc.present)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a read that did not answer read as (%v, "+
+					"present=%v)", mtime, present)
+			}
+			if present || !mtime.IsZero() {
+				t.Errorf("a failed read came back with (%v, present=%v)",
+					mtime, present)
+			}
+			if !strings.Contains(err.Error(), "mtime of "+path) {
+				t.Errorf("error %q does not name the read", err)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("error %q does not carry the read's own %v",
+					err, tc.err)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("error %q reads as a missing directory", err)
+			}
+		})
+	}
+}

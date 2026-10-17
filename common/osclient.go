@@ -20,14 +20,15 @@ import (
 )
 
 // OsClient defines high-level primitives for executing OS commands, listing
-// directories, performing disk file I/O, and handling Protobuf binary
-// serialization with context support.
+// directories, reading a path's modification time, performing disk file I/O,
+// and handling Protobuf binary serialization with context support.
 //
-// All OS command execution, directory listing and disk file I/O in production
-// code goes through an OsClient; os/exec and os.ReadFile/os.WriteFile are never
-// called, and no directory is read, directly outside this file (osclient.md,
-// Scope and placement). That is what makes the logging rules of log.md R8.1,
-// R8.2 and R8.5 enforceable, and every consumer unit-testable through
+// All OS command execution, directory listing, modification-time read and
+// disk file I/O in production code goes through an OsClient; os/exec and
+// os.ReadFile/os.WriteFile are never called, and no directory is read and no
+// path is stat'ed, directly outside this file (osclient.md, Scope and
+// placement). That is what makes the logging rules of log.md R8.1,
+// R8.2, R8.5 and R8.6 enforceable, and every consumer unit-testable through
 // FakeOsClient.
 //
 // One carve-out is recorded (osclient.md, Exported raw helpers and the
@@ -78,6 +79,13 @@ type OsClient interface {
 	// read that fails part-way through — is an error, and no names come back
 	// with it.
 	ReadDir(ctx context.Context, path string) (names []string, err error)
+
+	// ReadMtime reads the modification time of the path itself in the
+	// caller's own process, and nothing else about it: it follows no
+	// symbolic link, so a link answers its own time. A missing path is an
+	// error wrapping fs.ErrNotExist. Any other failure is an error, and the
+	// time that comes back with an error is the zero time.
+	ReadMtime(ctx context.Context, path string) (mtime time.Time, err error)
 
 	// WriteFile creates or overwrites a file at the specified path with
 	// string data using default file permissions. The replacement is atomic:
@@ -252,6 +260,34 @@ func (c *LimitedOsClient) ReadDir(
 	slog.InfoContext(ctx, "os read dir", appendErr(attrs, err)...)
 
 	return names, err
+}
+
+func (c *LimitedOsClient) ReadMtime(
+	ctx context.Context,
+	path string,
+) (time.Time, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return time.Time{}, err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+
+	// osclient.md, ReadMtime: the path itself, never what a link names.
+	var mtime time.Time
+	info, err := os.Lstat(path)
+	if err == nil {
+		mtime = info.ModTime()
+	}
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Time("mtime", mtime),
+	}
+	slog.InfoContext(ctx, "os read mtime", appendErr(attrs, err)...)
+
+	return mtime, err
 }
 
 // dirNames is the read of every name behind readDirNames. It is package

@@ -49,6 +49,13 @@ const (
 // half-built shape classifyExport has to settle by its age, and then by its
 // port, instead.
 func seedExport(node *fakeNode, nqn string, devPath string) {
+	seedExportNs(node, nqn, sideNsid, devPath)
+}
+
+// seedExportNs is seedExport with the one namespace at nsid. An id other than
+// sideNsid is a shape dnv never builds, but another tool can make: an export
+// without namespace one, which classifyExport judges by its age first.
+func seedExportNs(node *fakeNode, nqn string, nsid int, devPath string) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	dir := agent.NvmetRoot + "/subsystems/" + nqn
@@ -57,9 +64,10 @@ func seedExport(node *fakeNode, nqn string, devPath string) {
 	if devPath == "" {
 		return
 	}
-	node.dirs[dir+"/namespaces/1"] = true
-	node.files[dir+"/namespaces/1/device_path"] = devPath + "\n"
-	node.files[dir+"/namespaces/1/enable"] = "1\n"
+	ns := fmt.Sprintf("%s/namespaces/%d", dir, nsid)
+	node.dirs[ns] = true
+	node.files[ns+"/device_path"] = devPath + "\n"
+	node.files[ns+"/enable"] = "1\n"
 }
 
 // linkPort puts an export on an nvmet port, creating the port if the fake does
@@ -94,6 +102,18 @@ func lsCount(node *fakeNode, dir string) int {
 	n := 0
 	for _, call := range node.Calls() {
 		if call == "cmd ls -1 "+dir {
+			n++
+		}
+	}
+	return n
+}
+
+// ageReads is how many reads of exactly dir's mtime, in the agent's own
+// process, the calls since the last Reset made.
+func ageReads(node *fakeNode, dir string) int {
+	n := 0
+	for _, call := range node.Calls() {
+		if call == "mtime "+dir {
 			n++
 		}
 	}
@@ -427,6 +447,9 @@ func sweepScopes() []sweepScope {
 // read-only verdict alike. The old one is the orphan rule unchanged: nobody
 // is building it, it is reported by the read-only verdict (so the Check
 // rounds re-drive it), and the next Syncup removes it, host link and all.
+// Each pass's verdict rests on its own read of the age, one read in the
+// agent's own process and no `stat` child, never on an age remembered from
+// an earlier pass.
 func TestHalfBuiltExportAgeGate(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	hostNqn := nf.CnHostNqn(testCluster, testCn0)
@@ -467,8 +490,24 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 					t.Fatalf("fixture is wrong: %s was never seeded", stray)
 				}
 
+				// aged checks that one pass read the export's age exactly
+				// once, in the agent's own process, and ran no `stat` child.
+				aged := func(pass string) {
+					t.Helper()
+					if got := ageReads(node, dir); got != 1 {
+						t.Errorf("the %s read the age of %s %d times in "+
+							"process, want 1", pass, stray, got)
+					}
+					if got := len(node.callsMatching(
+						"cmd stat ")); got != 0 {
+						t.Errorf("the %s ran %d `stat` children, want 0",
+							pass, got)
+					}
+				}
+
 				// The read-only verdict first: an old one is a leftover the
 				// Check rounds report (and so re-drive), a young one is not.
+				node.Reset()
 				verdict := scope.read(t, srv)
 				switch {
 				case tc.old && (verdict.GetCode() != common.ReplyCodeLeftover ||
@@ -481,6 +520,7 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 						"half-built export is not a leftover",
 						verdict.GetCode(), verdict.GetDetails())
 				}
+				aged("read-only verdict")
 
 				node.Reset()
 				reply := scope.run(t, srv, 2)
@@ -497,6 +537,7 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 					t.Fatalf("the sweep removed %s, a namespace-less "+
 						"export younger than the grace", stray)
 				}
+				aged("Syncup's pass")
 				if !tc.old {
 					if node.hasCall("cmd rmdir " + dir) {
 						t.Fatalf("the sweep attempted rmdir on %s", stray)
@@ -517,35 +558,48 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 }
 
 // TestHalfBuiltExportAgeBeforePortLinks pins the order of DN6's attribution
-// of a namespace-less :2: export, in both scopes and in the read-only verdict
-// as in the Syncup's pass: the export's age is read before its port links. A
-// young one is left alone whatever port it is linked to, so its pass lists no
-// port at all; only an old one lists them, and then it is that sibling's when
-// it is on a sibling's port, and an orphan otherwise. The port listing is an
-// `ls` of the ports directory and one of each port's links, a child each, and
-// every build in flight on a kernel many dn agents share has this shape for a
-// moment: listed before the age, it would make such an agent's check rounds
-// outlast the worker's wait in every burst of builds. A sibling's port is on
-// the kernel in every case, so a listing would show.
+// of a :2: export without namespace one, in both scopes and in the read-only
+// verdict as in the Syncup's pass: the export's age is read first, in the
+// agent's own process, then, only for an old export, its namespaces are
+// listed and, when it has none at all, its port links. A young one is left
+// alone whatever it holds and whatever port it is linked to, so its pass
+// lists nothing of it at all — a namespace at an id other than one included,
+// which decides it only once it is old. An old one with no namespace is that
+// sibling's when it is on a sibling's port, and an orphan otherwise. The
+// namespace listing is a child per export and the port listing an `ls` of
+// the ports directory and one of each port's links, a child each, and every
+// build or removal in flight on a kernel many dn agents share has the shape
+// for a moment: listed before the age, either would make such an agent's
+// check rounds outlast the worker's wait in every burst. A sibling's port is
+// on the kernel in every case, so a listing would show.
 func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ports := agent.NvmetRoot + "/ports"
 	siblingLinks := portDir(siblingPort) + "/subsystems"
+	// A namespace at another id names a sibling dn's linear: once the
+	// export is old, that namespace makes it the sibling's.
+	siblingLinear := "/dev/mapper/" + nf.DnLinearName(
+		testCluster, siblingDn, testSp, siblingSide, testCn0)
 	for _, scope := range sweepScopes() {
 		for _, tc := range []struct {
 			name   string
 			old    bool
 			portId int // 0: linked to no port
+			// nsAt seeds one namespace at that id, naming a sibling dn's
+			// linear; 0 seeds none.
+			nsAt int
 			// gone: the read-only verdict reports it as a leftover and the
 			// Syncup removes it.
 			gone bool
 		}{
-			{"young, no port", false, 0, false},
-			{"young, our port", false, common.NvmetPortId, false},
-			{"young, sibling's port", false, siblingPort, false},
-			{"old, no port", true, 0, true},
-			{"old, our port", true, common.NvmetPortId, true},
-			{"old, sibling's port", true, siblingPort, false},
+			{"young, no port", false, 0, 0, false},
+			{"young, our port", false, common.NvmetPortId, 0, false},
+			{"young, sibling's port", false, siblingPort, 0, false},
+			{"young, namespace at another id", false, 0, 2, false},
+			{"old, no port", true, 0, 0, true},
+			{"old, our port", true, common.NvmetPortId, 0, true},
+			{"old, sibling's port", true, siblingPort, 0, false},
+			{"old, namespace at another id", true, 0, 2, false},
 		} {
 			t.Run(scope.name+"/"+tc.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
@@ -560,7 +614,11 @@ func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 
 				stray := scope.stray(nf)
 				dir := agent.NvmetRoot + "/subsystems/" + stray
-				seedExport(node, stray, "")
+				if tc.nsAt != 0 {
+					seedExportNs(node, stray, tc.nsAt, siblingLinear)
+				} else {
+					seedExport(node, stray, "")
+				}
 				addPort(node, siblingPort)
 				if tc.portId != 0 {
 					linkPort(node, tc.portId, stray)
@@ -570,26 +628,43 @@ func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 				}
 
 				// listed checks one pass's reads of the export: its age
-				// once, and the port links once when it is old and not at
-				// all when it is young.
-				listed := func(pass string) {
+				// once, in process; its namespaces once when it is old and
+				// not at all when it is young, and once more in a pass that
+				// removes it, whose removal walks them; and the port links
+				// once when it is old with no namespace, and not at all
+				// otherwise.
+				listed := func(pass string, removes bool) {
 					t.Helper()
+					if got := ageReads(node, dir); got != 1 {
+						t.Errorf("the %s read the age of %s %d times in "+
+							"process, want 1", pass, stray, got)
+					}
 					if got := len(node.callsMatching(
-						"cmd stat -c %Y " + dir)); got != 1 {
-						t.Errorf("the %s read the age of %s %d times, "+
-							"want 1", pass, stray, got)
+						"cmd stat ")); got != 0 {
+						t.Errorf("the %s ran %d `stat` children, want 0",
+							pass, got)
 					}
-					want := 0
+					wantNs, wantPorts := 0, 0
 					if tc.old {
-						want = 1
+						wantNs = 1
+						if tc.nsAt == 0 {
+							wantPorts = 1
+						}
 					}
-					if got := lsCount(node, ports); got != want {
+					if removes {
+						wantNs++
+					}
+					if got := lsCount(node, dir+"/namespaces"); got != wantNs {
+						t.Errorf("the %s listed the namespaces of %s %d "+
+							"times, want %d", pass, stray, got, wantNs)
+					}
+					if got := lsCount(node, ports); got != wantPorts {
 						t.Errorf("the %s listed the ports directory %d "+
-							"times, want %d", pass, got, want)
+							"times, want %d", pass, got, wantPorts)
 					}
-					if got := lsCount(node, siblingLinks); got != want {
+					if got := lsCount(node, siblingLinks); got != wantPorts {
 						t.Errorf("the %s listed the sibling port's links "+
-							"%d times, want %d", pass, got, want)
+							"%d times, want %d", pass, got, wantPorts)
 					}
 				}
 
@@ -607,7 +682,7 @@ func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 						"leftover", verdict.GetCode(), verdict.GetDetails(),
 						stray)
 				}
-				listed("read-only verdict")
+				listed("read-only verdict", false)
 
 				node.Reset()
 				reply := scope.run(t, srv, 2)
@@ -624,7 +699,7 @@ func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 				case !tc.gone && node.hasCall("cmd rmdir "+dir):
 					t.Fatalf("the sweep attempted rmdir on %s", stray)
 				}
-				listed("Syncup's pass")
+				listed("Syncup's pass", tc.gone)
 				ourObjs.assertAllKept(t, node)
 			})
 		}
@@ -632,9 +707,10 @@ func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 }
 
 // TestPortLinksListedOncePerPass pins the port listing's cache: a pass that
-// meets two old namespace-less exports lists the ports once, not once per
-// export, in both scopes and in the read-only verdict as in the Syncup's
-// pass. Each pass builds the map afresh; nothing of it is kept for the next.
+// meets two old namespace-less exports reads the age of each once, in
+// process, and lists the ports once, not once per export, in both scopes and
+// in the read-only verdict as in the Syncup's pass. Each pass builds the map
+// afresh; nothing of it is kept for the next.
 func TestPortLinksListedOncePerPass(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ports := agent.NvmetRoot + "/ports"
@@ -660,6 +736,13 @@ func TestPortLinksListedOncePerPass(t *testing.T) {
 
 			once := func(pass string) {
 				t.Helper()
+				for _, nqn := range []string{orphan, siblings} {
+					if got := ageReads(node,
+						agent.NvmetRoot+"/subsystems/"+nqn); got != 1 {
+						t.Errorf("the %s read the age of %s %d times in "+
+							"process, want 1", pass, nqn, got)
+					}
+				}
 				if got := lsCount(node, ports); got != 1 {
 					t.Errorf("the %s listed the ports directory %d times, "+
 						"want 1", pass, got)
@@ -697,17 +780,19 @@ func TestPortLinksListedOncePerPass(t *testing.T) {
 	}
 }
 
-// TestHalfBuiltExportAgeUnreadIsForeign pins what a stat that does not answer
-// means: nothing. The age is the first evidence read of a namespace-less
-// export, and the orphan verdict rests on it, so an export whose age cannot
-// be read this pass is FOREIGN for the pass, like every other failed read of
-// classifyExport: not removed, no port listed, and the enumeration named as
-// failed, so the verdict is not clean and the worker re-drives. That holds
-// for a young export on a sibling's port too, which the port links alone
-// would settle: the age comes first. A sibling's build never has that shape,
-// since it links its port only after its namespace; a removal of an export
-// two agents of one kernel link leaves it, and so can a configfs change made
-// outside dnv. The next pass reads it again.
+// TestHalfBuiltExportAgeUnreadIsForeign pins what an age read that does not
+// answer means: nothing. The age is the first evidence read of a :2: export
+// without namespace one, and the orphan verdict rests on it, so an export
+// whose age cannot be read this pass — the read cut off at the soft timeout,
+// or failed with an error other than "not exist" — is FOREIGN for the pass,
+// like every other failed read of classifyExport: not removed, nothing of it
+// listed, and the enumeration named as failed, so the verdict is not clean
+// and the worker re-drives. That holds for a young export on a sibling's port
+// too, which the port links alone would settle: the age comes first. A
+// sibling's build never has that shape, since it links its port only after
+// its namespace; a removal of an export two agents of one kernel link leaves
+// it, and so can a configfs change made outside dnv. The next pass reads it
+// again.
 func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	for _, scope := range sweepScopes() {
@@ -715,11 +800,16 @@ func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 			name   string
 			old    bool
 			portId int // 0: linked to no port
+			// failed: the read answers an I/O error; otherwise the soft
+			// timeout cuts it off.
+			failed bool
 			// gone: the next pass, with the age answering, removes it.
 			gone bool
 		}{
-			{"old, no port", true, 0, true},
-			{"young, sibling's port", false, siblingPort, false},
+			{"old, no port, cut off", true, 0, false, true},
+			{"old, no port, I/O error", true, 0, true, true},
+			{"young, sibling's port, cut off", false, siblingPort, false,
+				false},
 		} {
 			t.Run(scope.name+"/"+tc.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
@@ -740,7 +830,12 @@ func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 				if tc.old {
 					node.ageDir(dir, common.DnExportOrphanGrace+time.Minute)
 				}
-				setHook(node, node.killCmdNoEffectAlways, "stat -c %Y "+dir)
+				hook := "mtime " + dir
+				if tc.failed {
+					setFailAlways(node, hook, "")
+				} else {
+					setHook(node, node.killCmdNoEffectAlways, hook)
+				}
 
 				node.Reset()
 				reply := scope.run(t, srv, 2)
@@ -754,13 +849,25 @@ func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 					t.Fatalf("the sweep removed %s although its age did "+
 						"not answer", stray)
 				}
+				if got := ageReads(node, dir); got != 1 {
+					t.Fatalf("the pass read the age of %s %d times, want 1",
+						stray, got)
+				}
+				if got := lsCount(node, dir+"/namespaces"); got != 0 {
+					t.Fatalf("the pass listed the namespaces %d times for "+
+						"an export whose age did not answer, want 0", got)
+				}
 				if got := lsCount(node,
 					agent.NvmetRoot+"/ports"); got != 0 {
 					t.Fatalf("the pass listed the ports %d times for an "+
 						"export whose age did not answer, want 0", got)
 				}
 
-				clearHook(node, node.killCmdNoEffectAlways, "stat -c %Y "+dir)
+				if tc.failed {
+					clearFailAlways(node, hook)
+				} else {
+					clearHook(node, node.killCmdNoEffectAlways, hook)
+				}
 				reply = scope.run(t, srv, 3)
 				if got := reply.GetCode(); got != 0 {
 					t.Fatalf("the next pass: code = %d (%s), want 0", got,
@@ -772,6 +879,65 @@ func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestGoneExportIsPassedOver pins the other half of the age read's split: an
+// export removed between the subsystems listing and its reads — every
+// removal by a sibling agent in a burst can leave one — is passed over,
+// in both scopes and in the read-only verdict as in the Syncup's pass. Its
+// age read answers "not exist", which is no failure: the verdict stays clean,
+// and nothing of it is listed, so a gone export costs a pass no child process.
+func TestGoneExportIsPassedOver(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	for _, scope := range sweepScopes() {
+		t.Run(scope.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			ours := sweepSidePtr(testLeg, testSide)
+			if _, err := srv.SyncupDn(ctx, sweepDnReq(1, ours)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
+			stray := scope.stray(nf)
+			dir := agent.NvmetRoot + "/subsystems/" + stray
+			addPort(node, siblingPort)
+			node.mu.Lock()
+			node.subsysGhosts = []string{stray}
+			node.mu.Unlock()
+
+			passedOver := func(pass string, reply *pb.AgentReply) {
+				t.Helper()
+				if reply.GetCode() != 0 ||
+					strings.Contains(reply.GetDetails(), stray) {
+					t.Errorf("the %s: code %d %q, want 0 naming nothing "+
+						"of %s", pass, reply.GetCode(), reply.GetDetails(),
+						stray)
+				}
+				if got := ageReads(node, dir); got != 1 {
+					t.Errorf("the %s read the age of %s %d times in "+
+						"process, want 1", pass, stray, got)
+				}
+				if got := lsCount(node, dir+"/namespaces"); got != 0 {
+					t.Errorf("the %s listed the namespaces of the gone %s "+
+						"%d times, want 0", pass, stray, got)
+				}
+				if got := lsCount(node,
+					agent.NvmetRoot+"/ports"); got != 0 {
+					t.Errorf("the %s listed the ports %d times for a gone "+
+						"export, want 0", pass, got)
+				}
+				if node.hasCall("cmd rmdir " + dir) {
+					t.Errorf("the %s tried to remove the gone %s", pass,
+						stray)
+				}
+			}
+
+			node.Reset()
+			passedOver("read-only verdict", scope.read(t, srv))
+			node.Reset()
+			passedOver("Syncup's pass", scope.run(t, srv, 2))
+		})
 	}
 }
 

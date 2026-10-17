@@ -2,6 +2,8 @@ package common
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -9,7 +11,10 @@ import (
 // FakeOsClient is a configurable OsClient test double: set only the function
 // fields your test needs; unset fields succeed with zero values. An unset
 // ReadDirFn answers an empty listing, so a test that expects a listing to
-// fail, or its directory to be missing, sets it and checks that it ran.
+// fail, or its directory to be missing, sets it and checks that it ran. An
+// unset ReadMtimeFn is the one exception: it fails, with an error that is not
+// fs.ErrNotExist, since the zero time reads as older than any age a caller
+// judges by, and a missing path reads as gone.
 //
 // It is exported (not a _test.go file) so that tests in other packages can
 // reuse it (osclient.md, Test double — `common/osclient_fake.go`).
@@ -17,6 +22,7 @@ type FakeOsClient struct {
 	RunCommandFn      func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
 	ReadFileFn        func(ctx context.Context, path string) (string, error)
 	ReadDirFn         func(ctx context.Context, path string) ([]string, error)
+	ReadMtimeFn       func(ctx context.Context, path string) (time.Time, error)
 	WriteFileFn       func(ctx context.Context, path string, data string) error
 	WriteFileDirectFn func(ctx context.Context, path string, data string) error
 	ReadBlockFn       func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
@@ -46,6 +52,16 @@ func (f *FakeOsClient) ReadDir(ctx context.Context, path string) ([]string, erro
 		return f.ReadDirFn(ctx, path)
 	}
 	return nil, nil
+}
+
+// errReadMtimeUnset is what an unset ReadMtimeFn answers.
+var errReadMtimeUnset = errors.New("FakeOsClient: ReadMtimeFn is not set")
+
+func (f *FakeOsClient) ReadMtime(ctx context.Context, path string) (time.Time, error) {
+	if f.ReadMtimeFn != nil {
+		return f.ReadMtimeFn(ctx, path)
+	}
+	return time.Time{}, errReadMtimeUnset
 }
 
 func (f *FakeOsClient) WriteFile(ctx context.Context, path string, data string) error {
