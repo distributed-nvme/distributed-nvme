@@ -11,10 +11,10 @@
 #
 # Cases (Integration test plan, Cases), in order, each in its own cluster ids
 # and each after a fleet restart and a `cdcctl wipe`: smoke, matrix, lowlevel,
-# flood, stas, ha. Cleanup runs unconditionally at the start and, on success
-# only, at the end: a failing run leaves etcd's data, every cdc log, the
-# nvmet/dm state and the host connections in place and dumps the diagnostics
-# (Integration test plan, Cleanup).
+# flood, manyhosts, stas, ha. Cleanup runs unconditionally at the start and,
+# on success only, at the end: a failing run leaves etcd's data, every cdc
+# log, the nvmet/dm state and the host connections in place and dumps the
+# diagnostics (Integration test plan, Cleanup).
 #
 # SUDO: s1 needs none — etcd, the cdc fleet and cdcctl are plain user
 # processes. s2 and both hosts need passwordless sudo: nvmet configfs, device
@@ -127,6 +127,16 @@ SETTLE=3
 # start, and FLOOD_EXTRA of them still wait there once the second wave holds
 # the cap.
 FLOOD_EXTRA=16
+# The manyhosts case: the stafd copies each host runs, each a host of its
+# own; the entries of its own each copy gets in each half; the memory one
+# copy needs, its stafd and its bus, rounded up from what the lab measures,
+# and the memory the host must keep beyond the copies; and the bound of a
+# wait for every copy, all of them reading their logs on one two-CPU host.
+MANY_PER_HOST=16
+MANY_OWN=3
+MANY_COPY_MIB=48
+MANY_SPARE_MIB=256
+WAIT_MANY=120
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it:cdc
 # The ghost identity (Integration test plan, Topology), used only through an
@@ -165,11 +175,12 @@ declare -A E_SS=(
 # (M -> 0x1cdc2).
 declare -A CASE_CID=(
 	[smoke]=0xcdc1 [matrix]=0xcdc2 [lowlevel]=0xcdc3 [stas]=0xcdc4 [ha]=0xcdc5
-	[flood]=0xcdc6
+	[flood]=0xcdc6 [manyhosts]=0xcdc7
 )
 
-# flood runs before stas: like lowlevel, it needs the stas daemons stopped.
-CASES=(smoke matrix lowlevel flood stas ha)
+# flood and manyhosts run before stas: like lowlevel, they need the host's
+# own stas daemons stopped.
+CASES=(smoke matrix lowlevel flood manyhosts stas ha)
 
 # The uevent property the discovery-log-change AEN reaches a host as (header
 # item 1).
@@ -199,6 +210,16 @@ RUN_START=""
 
 declare -A PID=()      # cdc dir -> pid recorded from $! at launch
 declare -A RUNNING=()  # cdc dir -> 1 while we believe the process is alive
+
+# The manyhosts case's copies by copy number g (h1's first, then h2's): the
+# host NQN and host id each started under, as many_start printed them.
+MANY_NQN=()
+MANY_ID=()
+# The manyhosts case's entries by name: shard code, sp id, ss id, nvmet port
+# numbers in tr-conf order, the copy numbers allowed, and whether the entry
+# is in etcd now. ME_NAMES keeps the order the entries were first named in.
+declare -A ME_SHARD=() ME_SP=() ME_SS=() ME_TRS=() ME_ALLOW=() ME_LIVE=()
+ME_NAMES=()
 
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 	-o ConnectTimeout=15 -o ServerAliveInterval=15)
@@ -1121,6 +1142,18 @@ write_host_helper() { # <path>
 #   flood_stop             close them
 #   flood_count <work> <tcp state>
 #                          how many of the flood's sockets are in that state
+#   many_start <work> <nqn base> <n> <ip> <p0> <p1> <p2> <p3>
+#                          start the manyhosts case's n stafd copies, each a
+#                          host of its own, and print "<NN> <hostnqn>
+#                          <hostid>" per copy once each owns its bus name
+#   many_dump <work>       every copy's discovery controllers and cached log
+#                          records, read over its own bus
+#   many_ctrls <ip>        "<hostnqn> <hostid> <trsvcid> <state>" of every
+#                          kernel discovery controller pointing at the fleet
+#   many_stop <work>       stop the copies, disconnect their controllers and
+#                          put the shared udev override back
+#   many_state <work>      the host state record the case compares before and
+#                          after
 #
 # It never uses `nvme disconnect-all`: that would take down subsystems this
 # suite has nothing to do with.
@@ -1363,6 +1396,308 @@ stas_stop() { # <work>
 	echo "cdc_host.sh: stas stopped"
 }
 
+# The manyhosts case's stafd copies (cdc.md, Integration test plan, The host
+# helper, `cdc_host.sh`). Each copy is a host of its own and shares nothing
+# with the others or with the host's own nvme-stas:
+#
+#  - its identity: stafd reads the host NQN and host id from the fixed path
+#    /etc/stas/sys.conf, so each copy runs in a transient service whose
+#    private mount puts the copy's own directory over /etc/stas. The
+#    directory, not the file, is mounted: a host with no sys.conf of its own
+#    would otherwise get an empty one created as the mount point;
+#  - its bus: stafd takes a fixed well-known name on the system bus, and a
+#    second owner dies at start, so each copy has a dbus-daemon of its own,
+#    found through DBUS_SYSTEM_BUS_ADDRESS by the copy and by stafctl alike;
+#  - its runtime directory: stafd keeps its last known controllers there,
+#    and a shared one makes one copy adopt another's controller and delete
+#    it.
+#
+# The copies share two things they cannot help sharing. Every copy sees
+# every nvme uevent, and runs `systemctl restart nvmf-connect@…` for each
+# discovery-change AEN of a controller it does not own; the unit is masked
+# for the whole run (do_mask), so that costs a process start and does
+# nothing. And every copy writes the same override of the kernel's
+# autoconnect udev rule at start, which the first clean stop removes for
+# all; many_start saves what was there and many_stop puts it back.
+MANY_UNIT=dnv-cdc-many
+MANY_UDEV=/run/udev/rules.d/70-nvmf-autoconnect.rules
+MANY_BUS_NAME=org.nvmexpress.staf
+
+# MANY_PARSE turns one `stafctl adlp -d` answer into many_dump's lines.
+# stafctl prints a Python value, so it is parsed as one, never read as text:
+# only the keys are relied on, not the layout of the printout.
+MANY_PARSE='
+import ast, sys
+nn = sys.argv[1]
+for dc in ast.literal_eval(sys.stdin.read()):
+    ctrl = dc["discovery-controller"]
+    port = ctrl["trsvcid"]
+    print("dc", nn, ctrl["traddr"], port, ctrl["connected"])
+    for rec in dc["log-pages"]:
+        print("rec", nn, port, rec["subnqn"], rec["traddr"], rec["trsvcid"])
+'
+
+# many_units lists the case's loaded units, one name per line.
+many_units() {
+	systemctl list-units --all --plain --no-legend --type=service \
+		"$MANY_UNIT-*" 2>/dev/null | awk '{ print $1 }'
+}
+
+many_owns_name() { # <copy dir>
+	busctl --address="unix:path=$1/bus.sock" call org.freedesktop.DBus \
+		/org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s \
+		"$MANY_BUS_NAME" 2>/dev/null | grep -qx 'b true'
+}
+
+many_start() { # <work> <nqn base> <n> <ip> <p0> <p1> <p2> <p3>
+	local work=$1 base=$2 n=$3 ip=$4
+	shift 4
+	local root="$work/many" tool i nn dir id port deadline stafd_bin
+	for tool in stafd stafctl dbus-daemon busctl systemd-run uuidgen python3; do
+		command -v "$tool" >/dev/null 2>&1 || {
+			echo "cdc_host.sh: $tool is not installed" >&2
+			exit 1
+		}
+	done
+	stafd_bin=$(command -v stafd)
+	# A failed run's copies go first: the unit names and the directory are
+	# reused.
+	many_stop "$work" >/dev/null
+	mkdir -p "$root" || exit 1
+	if [ -e "$MANY_UDEV" ]; then
+		cp -p "$MANY_UDEV" "$root/udev.saved" || exit 1
+	else
+		touch "$root/udev.absent" || exit 1
+	fi
+	for ((i = 0; i < n; i++)); do
+		nn=$(printf '%02d' "$i")
+		dir="$root/i$nn"
+		mkdir -p "$dir/etc" || exit 1
+		id=$(uuidgen) || exit 1
+		{
+			echo '[Host]'
+			echo "nqn = $base-$nn"
+			echo "id = $id"
+			echo "symname = $MANY_UNIT-$nn"
+		} > "$dir/etc/sys.conf"
+		# stas_start's stafd.conf, the controllers being the four cdc
+		# instances.
+		{
+			echo '[Global]'
+			echo 'tron=false'
+			echo 'hdr-digest=false'
+			echo 'data-digest=false'
+			echo 'kato=10'
+			echo 'ignore-iface=false'
+			echo 'ip-family=ipv4'
+			echo 'pleo=disabled'
+			echo
+			echo '[Service Discovery]'
+			echo 'zeroconf=disabled'
+			echo
+			echo '[Discovery controller connection management]'
+			echo 'persistent-connections=true'
+			echo
+			echo '[Controllers]'
+			for port in "$@"; do
+				echo "controller = transport=tcp;traddr=$ip;trsvcid=$port"
+			done
+		} > "$dir/etc/stafd.conf"
+		cat > "$dir/dbus.conf" <<DBUS_EOF
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>system</type>
+  <listen>unix:path=$dir/bus.sock</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>
+DBUS_EOF
+		systemd-run --quiet --unit "$MANY_UNIT-bus$nn" --collect \
+			-p TimeoutStopSec=5 \
+			/usr/bin/dbus-daemon --config-file="$dir/dbus.conf" --nofork || {
+			echo "cdc_host.sh: starting the bus of copy $nn failed" >&2
+			exit 1
+		}
+	done
+	deadline=$((SECONDS + 30))
+	for dir in "$root"/i[0-9][0-9]; do
+		until [ -S "$dir/bus.sock" ]; do
+			[ "$SECONDS" -lt "$deadline" ] || {
+				echo "cdc_host.sh: no bus socket in $dir" >&2
+				exit 1
+			}
+			sleep 0.2
+		done
+	done
+	for dir in "$root"/i[0-9][0-9]; do
+		nn=${dir##*/i}
+		systemd-run --quiet --unit "$MANY_UNIT-stafd$nn" --collect \
+			-p TimeoutStopSec=10 \
+			-p RuntimeDirectory="$MANY_UNIT-stafd$nn" \
+			-p BindPaths="$dir/etc:/etc/stas" \
+			--setenv=DBUS_SYSTEM_BUS_ADDRESS="unix:path=$dir/bus.sock" \
+			/usr/bin/python3 -u "$stafd_bin" -f "$dir/etc/stafd.conf" || {
+			echo "cdc_host.sh: starting stafd copy $nn failed" >&2
+			exit 1
+		}
+	done
+	# Ready is each copy owning its name on its own bus: a copy that died at
+	# start never does.
+	deadline=$((SECONDS + 60))
+	for dir in "$root"/i[0-9][0-9]; do
+		until many_owns_name "$dir"; do
+			[ "$SECONDS" -lt "$deadline" ] || {
+				echo "cdc_host.sh: stafd copy ${dir##*/i} never took" \
+					"$MANY_BUS_NAME on its bus" >&2
+				exit 1
+			}
+			sleep 0.5
+		done
+	done
+	for dir in "$root"/i[0-9][0-9]; do
+		printf '%s %s %s\n' "${dir##*/i}" \
+			"$(sed -n 's/^nqn = //p' "$dir/etc/sys.conf")" \
+			"$(sed -n 's/^id = //p' "$dir/etc/sys.conf")"
+	done
+}
+
+# many_dump_one reads one copy's controllers and log over its own bus. It
+# leaves dump.ok beside the answer only when both the read and the parse
+# worked, so many_dump can tell a copy that failed to answer from one whose
+# log is empty.
+many_dump_one() { # <copy dir>
+	local dir=$1
+	rm -f "$dir/dump.ok" "$dir/dump.out" "$dir/dump.err"
+	DBUS_SYSTEM_BUS_ADDRESS="unix:path=$dir/bus.sock" timeout 30 \
+		stafctl adlp -d > "$dir/adlp.txt" 2> "$dir/dump.err" || return 0
+	python3 -c "$MANY_PARSE" "${dir##*/i}" < "$dir/adlp.txt" \
+		> "$dir/dump.out" 2>> "$dir/dump.err" || return 0
+	touch "$dir/dump.ok"
+}
+
+# many_dump reads the copies four at a time: each stafctl is a Python start,
+# and the server has two CPUs and the copies' memory to share.
+many_dump() { # <work>
+	local root="$1/many" dir rc=0
+	ls -d "$root"/i[0-9][0-9] >/dev/null 2>&1 || {
+		echo "cdc_host.sh: no stafd copies under $root" >&2
+		exit 1
+	}
+	printf '%s\n' "$root"/i[0-9][0-9] | xargs -P 4 -n 1 "$0" many_dump_one
+	for dir in "$root"/i[0-9][0-9]; do
+		if [ -e "$dir/dump.ok" ]; then
+			cat "$dir/dump.out"
+		else
+			echo "cdc_host.sh: copy ${dir##*/i} did not answer:" \
+				"$(head -c 300 "$dir/dump.err" 2>/dev/null)" >&2
+			rc=1
+		fi
+	done
+	return "$rc"
+}
+
+# many_ctrls lists the kernel's discovery controllers that point at the
+# fleet, by the identity each connected under. A controller that goes away
+# while it is read is left out.
+many_ctrls() { # <cdc ip>
+	local ctrl nqn addr svc hostnqn hostid state
+	for ctrl in /sys/class/nvme/nvme*; do
+		[ -e "$ctrl/subsysnqn" ] || continue
+		nqn=$(cat "$ctrl/subsysnqn" 2>/dev/null) || continue
+		[ "$nqn" = "$DISC_NQN" ] || continue
+		addr=$(cat "$ctrl/address" 2>/dev/null) || continue
+		case "$addr" in
+		*"traddr=$1,"*) ;;
+		*) continue ;;
+		esac
+		svc=${addr#*trsvcid=}
+		svc=${svc%%,*}
+		hostnqn=$(cat "$ctrl/hostnqn" 2>/dev/null) || continue
+		hostid=$(cat "$ctrl/hostid" 2>/dev/null) || continue
+		state=$(cat "$ctrl/state" 2>/dev/null) || continue
+		echo "$hostnqn $hostid $svc $state"
+	done
+}
+
+# many_stop stops the copies before their buses, so that each copy's own
+# stop is clean, and only then disconnects the kernel discovery controllers
+# whose host NQN is one of the copies' identities, and only those: with
+# persistent connections on they outlive their copy, and a copy still
+# running would connect again. Every step tolerates absence, so it is also
+# the cleanup of a failed run.
+many_stop() { # <work>
+	local root="$1/many" units u stafds="" buses="" nqns ctrl hostnqn
+	units=$(many_units)
+	for u in $units; do
+		case "$u" in
+		"$MANY_UNIT"-stafd*) stafds="$stafds $u" ;;
+		*) buses="$buses $u" ;;
+		esac
+	done
+	# shellcheck disable=SC2086 # one unit name per word
+	[ -z "$stafds" ] || systemctl stop $stafds >/dev/null 2>&1 || true
+	nqns=$(sed -n 's/^nqn = //p' "$root"/i[0-9][0-9]/etc/sys.conf 2>/dev/null)
+	if [ -n "$nqns" ]; then
+		for ctrl in /sys/class/nvme/nvme*; do
+			hostnqn=$(cat "$ctrl/hostnqn" 2>/dev/null) || continue
+			if printf '%s\n' "$nqns" | grep -qxF -- "$hostnqn"; then
+				nvme disconnect -d "${ctrl##*/}" >/dev/null 2>&1 || true
+			fi
+		done
+	fi
+	# shellcheck disable=SC2086 # one unit name per word
+	[ -z "$buses" ] || systemctl stop $buses >/dev/null 2>&1 || true
+	systemctl reset-failed "$MANY_UNIT-*" >/dev/null 2>&1 || true
+	if [ -e "$root/udev.saved" ]; then
+		cp -p "$root/udev.saved" "$MANY_UDEV"
+	elif [ -e "$root/udev.absent" ]; then
+		rm -f "$MANY_UDEV"
+	fi
+	rm -rf "$root"
+	echo "cdc_host.sh: stafd copies stopped"
+}
+
+# many_state is the record the manyhosts case compares before and after
+# itself, each line sorted within its kind: the host's own nvme-stas and the
+# autoconnect mask, the case's units, runtime directories, processes,
+# /etc/stas mounts and work directory, every nvme controller by what it is
+# rather than by its number, and the files the copies could touch, by
+# checksum.
+many_state() { # <work>
+	local ctrl f
+	echo "stas: stafd=$(systemctl is-active stafd 2>/dev/null)" \
+		"stacd=$(systemctl is-active stacd 2>/dev/null)"
+	echo "autoconnect: $(systemctl is-enabled nvmf-connect@.service 2>/dev/null)" \
+		"$(systemctl is-enabled nvmf-connect.target 2>/dev/null)"
+	many_units | sed 's/^/unit: /'
+	for ctrl in /sys/class/nvme/nvme*; do
+		[ -e "$ctrl/subsysnqn" ] || continue
+		echo "ctrl: $(cat "$ctrl/subsysnqn" 2>/dev/null)" \
+			"$(cat "$ctrl/hostnqn" 2>/dev/null)" \
+			"$(cat "$ctrl/address" 2>/dev/null)" \
+			"$(cat "$ctrl/state" 2>/dev/null)"
+	done | sort
+	for f in /run/udev/rules.d/* /etc/stas/* /etc/nvme/*; do
+		[ -e "$f" ] || continue
+		echo "file: $(sha256sum "$f")"
+	done
+	for f in /run/"$MANY_UNIT"-*; do
+		[ -e "$f" ] && echo "rundir: $f"
+	done
+	# shellcheck disable=SC2009 # the command lines, without the pids pgrep -a adds
+	ps -eo args= | grep -E '[s]tafd|[s]tacd|[d]bus-daemon --config-file' |
+		sort | sed 's/^/proc: /'
+	findmnt -rn -o TARGET | grep '^/etc/stas' | sed 's/^/mount: /'
+	[ -e "$1/many" ] && echo "workdir: $1/many"
+	return 0
+}
+
 case "${1-}" in
 wipe)
 	uev_stop
@@ -1407,11 +1742,22 @@ flood_stop)
 	echo "cdc_host.sh: flood stopped"
 	;;
 flood_count) flood_count "${2-}" "${3-}" ;;
+many_start)
+	shift
+	many_start "$@"
+	;;
+many_dump) many_dump "${2-}" ;;
+many_dump_one) many_dump_one "${2-}" ;;
+many_ctrls) many_ctrls "${2-}" ;;
+many_stop) many_stop "${2-}" ;;
+many_state) many_state "${2-}" ;;
 *)
 	echo "usage: cdc_host.sh wipe <ip> | wipe_data | mask | unmask |" \
 		"uev_start <work> | uev_stop | stas_start <ip> <work> <p…> |" \
 		"stas_stop <work> | flood_start <ip> <port> <n> <work> |" \
-		"flood_stop | flood_count <work> <tcp state>" >&2
+		"flood_stop | flood_count <work> <tcp state> |" \
+		"many_start <work> <nqn base> <n> <ip> <p…> | many_dump <work> |" \
+		"many_ctrls <ip> | many_stop <work> | many_state <work>" >&2
 	exit 2
 	;;
 esac
@@ -1476,10 +1822,12 @@ EOF
 # then s1. end removes $WORK everywhere and puts the hosts' autoconnect back.
 cleanup() { # <end 0|1>
 	local end=$1
-	log "[cleanup] hosts: stop stas, stop captures, disconnect everything ours"
+	log "[cleanup] hosts: stop the stafd copies and stas, stop captures," \
+		"disconnect everything ours"
 	ship_helpers
 	local hostsel
 	for hostsel in h1 h2; do
+		ok_or_true h "$hostsel" "$WORK/cdc_host.sh many_stop $WORK"
 		ok_or_true h "$hostsel" "$WORK/cdc_host.sh stas_stop $WORK"
 		ok_or_true h "$hostsel" "$WORK/cdc_host.sh wipe $IP1"
 	done
@@ -1561,6 +1909,13 @@ diagnostics() {
 		banner "$hostsel: stafctl / stacctl"
 		ok_or_true h "$hostsel" "stafctl ls 2>&1; stafctl status 2>&1" >&2
 		ok_or_true h "$hostsel" "stacctl ls 2>&1; stacctl status 2>&1" >&2
+		banner "$hostsel: the manyhosts case's stafd copies and their journal"
+		ok_or_true h "$hostsel" "systemctl list-units --all --plain" \
+			"--no-legend 'dnv-cdc-many-*'" >&2
+		ok_or_true h "$hostsel" "$WORK/cdc_host.sh many_ctrls $IP1" >&2
+		ok_or_true h "$hostsel" \
+			"journalctl -u 'dnv-cdc-many-*' --since '$RUN_START' --no-pager |" \
+			"tail -n 60" >&2
 		banner "$hostsel: dmesg tail"
 		ok_or_true h "$hostsel" "dmesg | tail -50" >&2
 	done
@@ -2393,6 +2748,382 @@ case_flood() {
 	# of h2's one-shot discover above may still be on its way.
 	wait_until "$WAIT_SHORT" "cdc0 to log h1's disconnect" \
 		disconnected_ge cdc0 "$H1NQN" 1
+}
+
+# ---------------------------------------------------------------------------
+# Case N — manyhosts (Integration test plan, Cases), stas stopped
+# ---------------------------------------------------------------------------
+
+# many_copies is the number of stafd copies on both hosts together. A copy is
+# numbered g: h1's are 0 to MANY_PER_HOST - 1, h2's the next MANY_PER_HOST.
+many_copies() { printf '%d' $((2 * MANY_PER_HOST)); }
+
+# many_range prints the copy numbers from <from> up to <to> - 1, every
+# <step>-th one.
+many_range() { # <from> <to> [step]
+	local g out=""
+	for ((g = $1; g < $2; g += ${3-1})); do out+="$g "; done
+	printf '%s' "${out% }"
+}
+
+# many_entry names an entry the first time, which fixes its sp and ss ids
+# and so its key, and sets its shard code, its nvmet ports in tr-conf order
+# and the copy numbers it allows.
+many_entry() { # <name> <shard> <"ports"> <"copy numbers">
+	local name=$1
+	if [ -z "${ME_SP[$name]-}" ]; then
+		ME_NAMES+=("$name")
+		ME_SP[$name]=$(printf '0x%x' $((0x100 + ${#ME_NAMES[@]})))
+		ME_SS[$name]=$(printf '0x%x' "${#ME_NAMES[@]}")
+	fi
+	ME_SHARD[$name]=$2
+	ME_TRS[$name]=$3
+	ME_ALLOW[$name]=$4
+}
+
+# many_put_line and many_del_line render one line of a `cdcctl batch`.
+many_put_line() { # <name>
+	local name=$1 line p g
+	line="put --shard ${ME_SHARD[$name]} --sp ${ME_SP[$name]}"
+	line+=" --ss ${ME_SS[$name]} --nqn $NQN_PREFIX:many-$name"
+	for p in ${ME_TRS[$name]}; do line+=" --tr $(tr_arg "$p")"; done
+	for g in ${ME_ALLOW[$name]}; do line+=" --allowed ${MANY_NQN[$g]}"; done
+	printf '%s\n' "$line"
+}
+
+many_del_line() { # <name>
+	printf 'del --shard %s --sp %s --ss %s\n' \
+		"${ME_SHARD[$1]}" "${ME_SP[$1]}" "${ME_SS[$1]}"
+}
+
+# many_batch applies one batch file as one transaction (Integration test
+# plan, The driver, `cdcctl`) and checks what it says it wrote. The driver's
+# etcd records, one per key, go to a log on s1 rather than into this
+# transcript.
+many_batch() { # <file> <puts> <deletes>
+	local out
+	out=$(s1 "$WORK/bin/cdcctl --etcd 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"--cluster $CID --trace-id $TRACE batch" \
+		"2>> $WORK/cdcctl-batch.log" < "$1") ||
+		die "cdcctl batch failed; its records are in" \
+			"$WORK/cdcctl-batch.log on s1"
+	assert_eq "$(jq_of "$out" .put)" "$2" "entries the batch put"
+	assert_eq "$(jq_of "$out" .deleted)" "$3" "entries the batch deleted"
+	log "  ok: one transaction put $2 and deleted $3 entries"
+}
+
+# many_want_dump prints what many_dump must print on one host with the
+# entries of ME_LIVE in etcd: each copy's four discovery controllers,
+# connected, and on each controller one record per transport (DS3) of every
+# live entry in that instance's range (DS2) that names the copy (DS4).
+many_want_dump() { # <1|2>
+	local v=$1 k g nn c port name p digit
+	local -a range=()
+	for c in 0 1 2 3; do range[c]=",$(cdc_range "$c"),"; done
+	for ((k = 0; k < MANY_PER_HOST; k++)); do
+		g=$(((v - 1) * MANY_PER_HOST + k))
+		nn=$(printf '%02d' "$k")
+		for c in 0 1 2 3; do
+			port=$(cdc_port "$c")
+			echo "dc $nn $IP1 $port True"
+			for name in "${!ME_LIVE[@]}"; do
+				[[ " ${ME_ALLOW[$name]} " == *" $g "* ]] || continue
+				digit=${ME_SHARD[$name]:0:1}
+				[[ "${range[c]}" == *",$digit,"* ]] || continue
+				for p in ${ME_TRS[$name]}; do
+					echo "rec $nn $port $NQN_PREFIX:many-$name $IP2" \
+						"$((NVMET_PORT_BASE + p - 1))"
+				done
+			done
+		done
+	done | LC_ALL=C sort
+}
+
+# many_want_ctrls prints what many_ctrls must print on one host: four live
+# discovery controllers per copy, one to each instance, each under the
+# copy's own host NQN and host id.
+many_want_ctrls() { # <1|2>
+	local v=$1 k g c
+	for ((k = 0; k < MANY_PER_HOST; k++)); do
+		g=$(((v - 1) * MANY_PER_HOST + k))
+		for c in 0 1 2 3; do
+			echo "${MANY_NQN[$g]} ${MANY_ID[$g]} $(cdc_port "$c") live"
+		done
+	done | LC_ALL=C sort
+}
+
+# many_read runs one read of the host helper on one host and sorts its
+# answer into a file, the helper's complaints beside it. Its status is the
+# read's: a host whose copies did not all answer is a failed read, never an
+# empty log.
+many_read() { # <h1|h2> <helper verb and arguments> <out file>
+	h "$1" "$WORK/cdc_host.sh $2" 2> "$3.err" | LC_ALL=C sort > "$3"
+}
+
+# many_poll reads both hosts at once and answers whether both match.
+many_poll() { # <helper verb and arguments> <want h1> <want h2>
+	local rc1=0 rc2=0 p1 p2
+	many_read h1 "$1" "$TMPDIR_LOCAL/many.got.h1" &
+	p1=$!
+	many_read h2 "$1" "$TMPDIR_LOCAL/many.got.h2" &
+	p2=$!
+	wait "$p1" || rc1=$?
+	wait "$p2" || rc2=$?
+	[ "$rc1" = 0 ] && [ "$rc2" = 0 ] || return 1
+	cmp -s "$2" "$TMPDIR_LOCAL/many.got.h1" &&
+		cmp -s "$3" "$TMPDIR_LOCAL/many.got.h2"
+}
+
+# wait_many is wait_until for many_poll, which on a timeout shows how the
+# last answers differ from the wanted ones.
+wait_many() { # <helper verb and arguments> <label> <want h1> <want h2>
+	local deadline=$((SECONDS + WAIT_MANY)) saved=$QUIET hostsel want
+	QUIET=1
+	until many_poll "$1" "$3" "$4"; do
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			QUIET=$saved
+			for hostsel in h1 h2; do
+				want=$3
+				[ "$hostsel" = h1 ] || want=$4
+				log "  $hostsel: wanted vs got, the first 40 lines of the diff:"
+				diff "$want" "$TMPDIR_LOCAL/many.got.$hostsel" |
+					head -n 40 >&2 || true
+				head -n 10 "$TMPDIR_LOCAL/many.got.$hostsel.err" >&2 || true
+			done
+			die "timed out after ${WAIT_MANY}s waiting for: $2"
+		fi
+		sleep 1
+	done
+	QUIET=$saved
+	log "  ok: $2"
+}
+
+# wait_many_logs waits until every copy's log on both hosts is what ME_LIVE
+# makes it.
+wait_many_logs() { # <label>
+	many_want_dump 1 > "$TMPDIR_LOCAL/many.want.h1"
+	many_want_dump 2 > "$TMPDIR_LOCAL/many.want.h2"
+	wait_many "many_dump $WORK" "$1" \
+		"$TMPDIR_LOCAL/many.want.h1" "$TMPDIR_LOCAL/many.want.h2"
+}
+
+# many_take_ids reads many_start's answer for one host: each copy's number,
+# the host NQN it was told to use, and the host id it was given.
+many_take_ids() { # <1|2> <many_start's answer>
+	local v=$1 nn nqn id k=0 g
+	while read -r nn nqn id; do
+		assert_eq "$nn" "$(printf '%02d' "$k")" \
+			"h$v: copy number in many_start's answer"
+		g=$(((v - 1) * MANY_PER_HOST + k))
+		assert_eq "$nqn" "${MANY_NQN[$g]}" "h$v: copy $nn's host NQN"
+		[[ "$id" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] ||
+			die "h$v: copy $nn's host id '$id' is not a uuid"
+		MANY_ID[g]=$id
+		k=$((k + 1))
+	done < "$2"
+	assert_eq "$k" "$MANY_PER_HOST" "h$v: copies many_start answered for"
+}
+
+# many_cdc_saw_exactly answers whether one instance's `host connected`
+# records name exactly the case's copies. One name more is a copy that
+# connected under its host's own identity.
+many_cdc_saw_exactly() { # <dir>
+	local got
+	got=$(connected_hosts "$1") || return 1
+	[ "$got" = "$(printf '%s\n' "${MANY_NQN[@]}" | sort -u)" ]
+}
+
+# case_manyhosts runs many real nvme-stas hosts against the fleet: on each
+# host, MANY_PER_HOST stafd copies, each its own host with its own host NQN,
+# host id, bus and runtime directory, all listing the four instances. Every
+# change of the entries is one `cdcctl batch`, one transaction, and after
+# each one every copy's own log, read over its own bus, must be the records
+# of the entries in its instance's range that name it. Only stafd runs: the
+# entries need no subsystem behind them, and the stas case covers stacd.
+# The case leaves both hosts as it found them, which it proves by a state
+# record taken before and after.
+case_manyhosts() {
+	[ "$STAS_RUNNING" = 0 ] ||
+		die "case manyhosts needs the stas daemons stopped"
+	local copies hostsel avail need g v k j name lo hi ports_j batch dir
+	local ports p1 p2 rc1=0 rc2=0 left=0
+	copies=$(many_copies)
+	batch="$TMPDIR_LOCAL/many.batch"
+	MANY_NQN=()
+	MANY_ID=()
+	ME_SHARD=() ME_SP=() ME_SS=() ME_TRS=() ME_ALLOW=() ME_LIVE=()
+	ME_NAMES=()
+
+	stage room "both hosts have the memory for $MANY_PER_HOST copies each"
+	need=$((MANY_PER_HOST * MANY_COPY_MIB + MANY_SPARE_MIB))
+	for hostsel in h1 h2; do
+		avail=$(hu "$hostsel" \
+			"awk '/^MemAvailable:/ { print int(\$2 / 1024) }' /proc/meminfo") ||
+			die "$hostsel: reading MemAvailable failed"
+		assert_ge "$avail" "$need" "$hostsel: MemAvailable in MiB"
+	done
+
+	stage before "record each host's state before the case"
+	for hostsel in h1 h2; do
+		h "$hostsel" "$WORK/cdc_host.sh many_state $WORK" \
+			> "$TMPDIR_LOCAL/many.before.$hostsel" ||
+			die "$hostsel: recording the state failed"
+	done
+
+	stage base "one batch puts the two entries every copy sees, one per range"
+	for ((g = 0; g < copies; g++)); do
+		v=$((g / MANY_PER_HOST + 1))
+		k=$((g % MANY_PER_HOST))
+		MANY_NQN[g]=$(printf '%s:many-h%d-%02d' "$NQN_PREFIX" "$v" "$k")
+	done
+	many_entry base-lo 7f "1" "$(many_range 0 "$copies")"
+	many_entry base-hi 80 "2" "$(many_range 0 "$copies")"
+	: > "$batch"
+	for name in base-lo base-hi; do
+		many_put_line "$name" >> "$batch"
+		ME_LIVE[$name]=1
+	done
+	many_batch "$batch" 2 0
+	for dir in "${CDC_DIRS[@]}"; do
+		wait_until "$WAIT_SHORT" "$dir to apply the entry of its range" \
+			cdc_applied_ge "$dir" 1
+	done
+
+	stage start "start $MANY_PER_HOST stafd copies on each host"
+	ports="$(cdc_port 0) $(cdc_port 1) $(cdc_port 2) $(cdc_port 3)"
+	h h1 "$WORK/cdc_host.sh many_start $WORK $NQN_PREFIX:many-h1" \
+		"$MANY_PER_HOST $IP1 $ports" > "$TMPDIR_LOCAL/many.start.h1" &
+	p1=$!
+	h h2 "$WORK/cdc_host.sh many_start $WORK $NQN_PREFIX:many-h2" \
+		"$MANY_PER_HOST $IP1 $ports" > "$TMPDIR_LOCAL/many.start.h2" &
+	p2=$!
+	wait "$p1" || rc1=$?
+	wait "$p2" || rc2=$?
+	[ "$rc1" = 0 ] || die "h1: starting the stafd copies failed (rc $rc1)"
+	[ "$rc2" = 0 ] || die "h2: starting the stafd copies failed (rc $rc2)"
+	many_take_ids 1 "$TMPDIR_LOCAL/many.start.h1"
+	many_take_ids 2 "$TMPDIR_LOCAL/many.start.h2"
+	assert_eq "$(printf '%s\n' "${MANY_ID[@]}" | sort -u | wc -l | tr -d ' ')" \
+		"$copies" "distinct host ids of the copies"
+	log "  ok: $copies copies own their bus names, each under its own identity"
+
+	stage converge "four live discovery connections per copy, then the base log"
+	many_want_ctrls 1 > "$TMPDIR_LOCAL/many.ctrls.h1"
+	many_want_ctrls 2 > "$TMPDIR_LOCAL/many.ctrls.h2"
+	wait_many "many_ctrls $IP1" \
+		"every copy's four discovery controllers live under its own identity" \
+		"$TMPDIR_LOCAL/many.ctrls.h1" "$TMPDIR_LOCAL/many.ctrls.h2"
+	for dir in "${CDC_DIRS[@]}"; do
+		wait_until "$WAIT_MANY" "$dir: connections from exactly the $copies copies" \
+			many_cdc_saw_exactly "$dir"
+	done
+	log "  ok: every instance saw exactly the $copies copies"
+	wait_many_logs "every copy reads the two base entries"
+
+	stage add "one batch adds each copy's own entries and one entry per host"
+	# Per copy, MANY_OWN entries in each range, the first of each on two
+	# nvmet ports, so that it renders two records (DS3); one entry for every
+	# copy of h1 in the high range and one for every copy of h2 in the low
+	# range. Shard codes 7f and 80 stay the base entries' own.
+	: > "$batch"
+	for ((g = 0; g < copies; g++)); do
+		for ((j = 0; j < MANY_OWN; j++)); do
+			ports_j="$((1 + (g + j) % 4))"
+			[ "$j" != 0 ] || ports_j="1 2"
+			lo=$(printf '%02x' $(((g * MANY_OWN + j) % 0x7f)))
+			hi=$(printf '%02x' $((0x81 + (g * MANY_OWN + j) % 0x7f)))
+			name=$(printf 'own-%02d-lo-%d' "$g" "$j")
+			many_entry "$name" "$lo" "$ports_j" "$g"
+			many_put_line "$name" >> "$batch"
+			ME_LIVE[$name]=1
+			name=$(printf 'own-%02d-hi-%d' "$g" "$j")
+			many_entry "$name" "$hi" "$ports_j" "$g"
+			many_put_line "$name" >> "$batch"
+			ME_LIVE[$name]=1
+		done
+	done
+	many_entry h1-hi c0 "3" "$(many_range 0 "$MANY_PER_HOST")"
+	many_entry h2-lo 40 "4" "$(many_range "$MANY_PER_HOST" "$copies")"
+	for name in h1-hi h2-lo; do
+		many_put_line "$name" >> "$batch"
+		ME_LIVE[$name]=1
+	done
+	many_batch "$batch" $((copies * MANY_OWN * 2 + 2)) 0
+	wait_many_logs "every copy reads its own entries and its host's"
+
+	stage remove "one batch removes, moves and narrows entries"
+	# Every copy loses its last high entry and hands its second low entry to
+	# the next copy, the last of h1's to h2's first and the last of h2's to
+	# h1's first; h1's entry narrows to every other copy of h1; the low base
+	# entry goes. Every copy's view moves in both ranges.
+	: > "$batch"
+	for ((g = 0; g < copies; g++)); do
+		name=$(printf 'own-%02d-hi-%d' "$g" $((MANY_OWN - 1)))
+		many_del_line "$name" >> "$batch"
+		unset "ME_LIVE[$name]"
+		name=$(printf 'own-%02d-lo-1' "$g")
+		ME_ALLOW[$name]=$(((g + 1) % copies))
+		many_put_line "$name" >> "$batch"
+	done
+	ME_ALLOW[h1-hi]=$(many_range 0 "$MANY_PER_HOST" 2)
+	many_put_line h1-hi >> "$batch"
+	many_del_line base-lo >> "$batch"
+	unset "ME_LIVE[base-lo]"
+	many_batch "$batch" $((copies + 1)) $((copies + 1))
+	wait_many_logs "every copy reads its log after the removals and moves"
+
+	stage empty "one batch deletes every entry left: every copy's log is empty"
+	: > "$batch"
+	for name in "${ME_NAMES[@]}"; do
+		[ "${ME_LIVE[$name]-}" = 1 ] || continue
+		many_del_line "$name" >> "$batch"
+		unset "ME_LIVE[$name]"
+		left=$((left + 1))
+	done
+	many_batch "$batch" 0 "$left"
+	wait_many_logs "every copy reads an empty log"
+
+	stage persist "the copies' discovery connections lasted the whole case"
+	# No instance ever saw a copy disconnect, so every log change above
+	# reached its copies as an AEN on a persistent connection (DS6, NP11),
+	# not by a reconnect that read the log afresh.
+	wait_many "many_ctrls $IP1" \
+		"every copy's four discovery controllers are still live" \
+		"$TMPDIR_LOCAL/many.ctrls.h1" "$TMPDIR_LOCAL/many.ctrls.h2"
+	for dir in "${CDC_DIRS[@]}"; do
+		assert_eq "$(cdc_msg_count "$dir" "host disconnected")" 0 \
+			"$dir: host disconnected records while the copies ran"
+	done
+	log "  ok: no instance logged a disconnect"
+
+	stage stop "stop every copy: none of their discovery controllers is left"
+	for hostsel in h1 h2; do
+		h "$hostsel" "$WORK/cdc_host.sh many_stop $WORK" >/dev/null ||
+			die "$hostsel: stopping the stafd copies failed"
+	done
+	for hostsel in h1 h2; do
+		many_read "$hostsel" "many_ctrls $IP1" \
+			"$TMPDIR_LOCAL/many.got.$hostsel" ||
+			die "$hostsel: listing the discovery controllers failed"
+		[ ! -s "$TMPDIR_LOCAL/many.got.$hostsel" ] ||
+			die "$hostsel: discovery controllers left after the stop:" \
+				"$(head -n 5 "$TMPDIR_LOCAL/many.got.$hostsel")"
+	done
+	log "  ok: no discovery controller to the fleet is left on either host"
+
+	stage after "each host is as the case found it"
+	for hostsel in h1 h2; do
+		h "$hostsel" "$WORK/cdc_host.sh many_state $WORK" \
+			> "$TMPDIR_LOCAL/many.after.$hostsel" ||
+			die "$hostsel: recording the state failed"
+		if ! cmp -s "$TMPDIR_LOCAL/many.before.$hostsel" \
+			"$TMPDIR_LOCAL/many.after.$hostsel"; then
+			die "$hostsel: the state differs from the one before the case:
+$(diff "$TMPDIR_LOCAL/many.before.$hostsel" \
+				"$TMPDIR_LOCAL/many.after.$hostsel" | head -n 40)"
+		fi
+		log "  ok: $hostsel's state record is the one before the case"
+	done
 }
 
 # ---------------------------------------------------------------------------

@@ -424,6 +424,12 @@ func (s *Server) CreateNamespace(
 	); err != nil {
 		return nil, err
 	}
+	// NVMe reserves NSID 0. The request alone shows it, so it is refused
+	// with the rest of the validation, before any read (GW4): a full
+	// subsystem must not answer it with its namespace ceiling.
+	if req.GetNsIdx() == 0 {
+		return nil, errInvalid("ns_idx must not be 0")
+	}
 	var nsId uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		nsId = 0
@@ -441,9 +447,6 @@ func (s *Server) CreateNamespace(
 				"subsystem %q holds %d namespaces, the maximum is %d",
 				req.GetNqn(), len(subsystem.GetNsList()),
 				common.MaxNsCntPerSs)
-		}
-		if req.GetNsIdx() == 0 {
-			return errInvalid("ns_idx must not be 0")
 		}
 		if findNs(subsystem, req.GetNsIdx()) != nil {
 			return errInvalid("ns_idx %d is already used by subsystem %q",

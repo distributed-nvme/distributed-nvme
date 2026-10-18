@@ -39,10 +39,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -367,18 +369,57 @@ func entryKey(g *globals, shard *shardFlag, spId, ssId hexUint) (
 	string, uint64,
 ) {
 	cid := g.clusterId()
+	key, err := entryKeyOf(cid, shard, spId, ssId)
+	if err != nil {
+		die("%v", err)
+	}
+	return key, cid
+}
+
+// entryKeyOf is entryKey's check and formatting for a cluster id already
+// read, returning the refusal instead of exiting, so that a batch line is
+// refused by the same words as a single `put` or `del`.
+func entryKeyOf(cid uint64, shard *shardFlag, spId, ssId hexUint) (
+	string, error,
+) {
 	if !shard.set {
-		die("--shard is required (2 hex digits, e.g. 00, 3c, ff)")
+		return "", fmt.Errorf(
+			"--shard is required (2 hex digits, e.g. 00, 3c, ff)",
+		)
 	}
 	if uint64(spId) == 0 {
-		die("--sp is required (a nonzero sp_id)")
+		return "", fmt.Errorf("--sp is required (a nonzero sp_id)")
 	}
 	if uint64(ssId) == 0 {
-		die("--ss is required (a nonzero ss_id)")
+		return "", fmt.Errorf("--ss is required (a nonzero ss_id)")
 	}
 	return model.CdcEntryKey(
 		cid, shard.code, uint64(spId), uint64(ssId),
-	), cid
+	), nil
+}
+
+// newCdcEntry builds the value of one put out of its flags, refusing the
+// shapes no case means: shared by `put` and every put line of a batch.
+func newCdcEntry(nqn string, trConfs trConfList, allowed stringList) (
+	*pb.CdcEntry, error,
+) {
+	subNqn := strings.TrimSpace(nqn)
+	if subNqn == "" {
+		return nil, fmt.Errorf("--nqn is required")
+	}
+	if len(trConfs) == 0 {
+		// An entry with no transport renders no discovery log entry at all
+		// (DS3), so it would be served as silence — indistinguishable from a
+		// put that never happened. That is never what a case means.
+		return nil, fmt.Errorf(
+			"at least one --tr is required (%s)", trConfForm,
+		)
+	}
+	return &pb.CdcEntry{
+		Nqn:            subNqn,
+		NvmeTrConfList: []*pb.NvmeTrConf(trConfs),
+		AllowedHosts:   []string(allowed),
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +437,7 @@ var commands = []command{
 	{"del", cmdDel},
 	{"wipe", cmdWipe},
 	{"list", cmdList},
+	{"batch", cmdBatch},
 }
 
 func main() {
@@ -501,21 +543,9 @@ func cmdPut(g *globals, args []string) {
 	fs.Parse(args)
 
 	key, cid := entryKey(g, &shard, spId, ssId)
-	subNqn := strings.TrimSpace(*nqn)
-	if subNqn == "" {
-		die("--nqn is required")
-	}
-	if len(trConfs) == 0 {
-		// An entry with no transport renders no discovery log entry at all
-		// (DS3), so it would be served as silence — indistinguishable from a
-		// put that never happened. That is never what a case means.
-		die("at least one --tr is required (%s)", trConfForm)
-	}
-
-	entry := &pb.CdcEntry{
-		Nqn:            subNqn,
-		NvmeTrConfList: []*pb.NvmeTrConf(trConfs),
-		AllowedHosts:   []string(allowed),
+	entry, err := newCdcEntry(*nqn, trConfs, allowed)
+	if err != nil {
+		die("%v", err)
 	}
 
 	ctx, done, cli := g.open()
@@ -646,4 +676,189 @@ func cmdList(g *globals, args []string) {
 		}
 		fmt.Printf("%s\t%s\n", kv.Key, mustJson(pbToAny(entry)))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// batch
+// ---------------------------------------------------------------------------
+
+// batchOp is one line of a batch: a put of entry at key, or, with entry nil,
+// a delete of key.
+type batchOp struct {
+	line  int
+	key   string
+	entry *pb.CdcEntry
+}
+
+// cmdBatch applies many puts and deletes in ONE etcd transaction
+// (Integration test plan, The driver, `cdcctl`). It reads the batch from
+// stdin, one operation per line: `put` or `del` followed by exactly the
+// flags of the single subcommand, every line under the invocation's
+// --cluster; a blank line and a line that starts with # are skipped.
+//
+// One transaction is the point of it. dnv-cdc applies the events of one
+// revision back to back, and the impacts that land while a connection has
+// no armed AER coalesce into one AEN (NP11), so a host whose view a batch
+// moves gets an AEN or two for the whole batch, where one put per entry
+// would give it about one per entry it sees; a case that writes hundreds of
+// entries for many nvme-stas hosts on one server would otherwise spend the
+// run in those hosts' AEN handling.
+//
+// The whole batch is checked before etcd is dialled, and refused as a whole:
+// a line that a single `put` or `del` would refuse, a key named twice, and an
+// empty batch. A `del` of a key that is not there aborts the transaction
+// without writing anything, for the reason cmdDel gives. The transaction
+// carries a compare for every key it reads or writes, so a batch is bounded
+// by the etcd's --max-txn-ops; a larger one is etcd's refusal, reported as
+// the error.
+func cmdBatch(g *globals, args []string) {
+	fs := newFlagSet("batch", g)
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		usageDie("batch takes no arguments, it reads its lines from stdin")
+	}
+	cid := g.clusterId()
+	ops, err := parseBatch(os.Stdin, cid)
+	if err != nil {
+		die("batch: %v", err)
+	}
+
+	ctx, done, cli := g.open()
+	defer done()
+
+	puts, dels, err := runBatch(ctx, cli, ops)
+	if err != nil {
+		die("batch: %v", err)
+	}
+	emit(map[string]any{
+		"cluster_id": idHex(cid),
+		"put":        puts,
+		"deleted":    dels,
+	})
+}
+
+// stmRunner is the one etcdutil.Client method a batch uses, so that a test
+// can count the transactions a batch takes.
+type stmRunner interface {
+	RunSTM(ctx context.Context, f func(s etcdutil.STM) error) error
+}
+
+// runBatch applies the whole batch as ONE transaction and reports what it
+// committed.
+func runBatch(ctx context.Context, cli stmRunner, ops []batchOp) (
+	puts, dels int, err error,
+) {
+	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		var applyErr error
+		puts, dels, applyErr = applyBatch(s, ops)
+		return applyErr
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return puts, dels, nil
+}
+
+// parseBatch reads every line of a batch into its operations, in order.
+func parseBatch(r io.Reader, cid uint64) ([]batchOp, error) {
+	var ops []batchOp
+	seen := map[string]int{}
+	sc := bufio.NewScanner(r)
+	n := 0
+	for sc.Scan() {
+		n++
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		op, err := parseBatchLine(fields, cid)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", n, err)
+		}
+		// One key, one operation: two lines naming one key are a mistyped id
+		// in a case's table, and the transaction would keep only the last.
+		if first, dup := seen[op.key]; dup {
+			return nil, fmt.Errorf(
+				"line %d: key %q is already named on line %d",
+				n, op.key, first,
+			)
+		}
+		seen[op.key] = n
+		op.line = n
+		ops = append(ops, op)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("reading the batch: %w", err)
+	}
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("the batch names no entry")
+	}
+	return ops, nil
+}
+
+// parseBatchLine reads one line, its fields already split at blanks: none of
+// the values a flag takes holds a blank.
+func parseBatchLine(fields []string, cid uint64) (batchOp, error) {
+	verb := fields[0]
+	if verb != "put" && verb != "del" {
+		return batchOp{}, fmt.Errorf("%q is neither put nor del", verb)
+	}
+	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var shard shardFlag
+	fs.Var(&shard, "shard", "shard code")
+	var spId hexUint
+	fs.Var(&spId, "sp", "sp_id")
+	var ssId hexUint
+	fs.Var(&ssId, "ss", "ss_id")
+	var nqn string
+	var trConfs trConfList
+	var allowed stringList
+	if verb == "put" {
+		fs.StringVar(&nqn, "nqn", "", "CdcEntry.nqn")
+		fs.Var(&trConfs, "tr", "one nvme_tr_conf")
+		fs.Var(&allowed, "allowed", "one allowed hostnqn")
+	}
+	if err := fs.Parse(fields[1:]); err != nil {
+		return batchOp{}, fmt.Errorf("%s: %w", verb, err)
+	}
+	if fs.NArg() != 0 {
+		return batchOp{}, fmt.Errorf(
+			"%s: unexpected argument %q", verb, fs.Arg(0),
+		)
+	}
+	key, err := entryKeyOf(cid, &shard, spId, ssId)
+	if err != nil {
+		return batchOp{}, fmt.Errorf("%s: %w", verb, err)
+	}
+	if verb == "del" {
+		return batchOp{key: key}, nil
+	}
+	entry, err := newCdcEntry(nqn, trConfs, allowed)
+	if err != nil {
+		return batchOp{}, fmt.Errorf("%s: %w", verb, err)
+	}
+	return batchOp{key: key, entry: entry}, nil
+}
+
+// applyBatch stages every operation in one transaction and counts them. It
+// is a pure function of what it reads through s, as RunSTM requires of a
+// callback it may run again on a conflict.
+func applyBatch(s etcdutil.STM, ops []batchOp) (puts, dels int, err error) {
+	for _, op := range ops {
+		if op.entry != nil {
+			s.Put(op.key, op.entry)
+			puts++
+			continue
+		}
+		if !s.Get(op.key, &pb.CdcEntry{}) {
+			return 0, 0, fmt.Errorf(
+				"line %d: key %q not found: %w",
+				op.line, op.key, etcdutil.ErrNoCommit,
+			)
+		}
+		s.Del(op.key)
+		dels++
+	}
+	return puts, dels, nil
 }

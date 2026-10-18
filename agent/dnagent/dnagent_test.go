@@ -2535,7 +2535,9 @@ func readCntlidSpan(t *testing.T, node *fakeNode, nqn string) cntlidSpan {
 // at `min + Step` handed its last id to the next slot as well.
 func TestCntlidSlotsAreDisjoint(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
-	spans := make([]cntlidSpan, common.DnCntlidSlotCnt)
+	// A side's slot comes from its pool's cntlid_slot_list, which the
+	// gateway bounds by CnCntlidSlotCnt (architecture.md, cntlid slots).
+	spans := make([]cntlidSpan, common.CnCntlidSlotCnt)
 	for slot := range spans {
 		srv, node := newTestServer(t)
 		dnReply, err := srv.SyncupDn(context.Background(),

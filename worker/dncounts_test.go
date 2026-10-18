@@ -326,9 +326,9 @@ func TestDnCountsCompareRuns(t *testing.T) {
 			store.mu.Lock()
 			store.getErr = nil
 			store.mu.Unlock()
-			if r != nil || err != nil {
-				t.Fatalf("a syncup whose read failed = %v, %v, want neither",
-					r, err)
+			if r != nil || err == nil {
+				t.Fatalf("a syncup whose read failed = %v, %v, want no "+
+					"reply and the read's error (RW13)", r, err)
 			}
 		default:
 			t.Fatalf("unknown step %q", step)

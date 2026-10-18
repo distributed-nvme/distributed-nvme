@@ -78,7 +78,12 @@ func freePort() (int, error) {
 }
 
 // startEtcd runs a single-node etcd on free localhost ports with a temporary
-// data dir and waits until it serves.
+// data dir and waits until it serves. A port is free when freePort picks it
+// and taken only when etcd binds it, so another process can take it in
+// between. An etcd that cannot bind its ports exits at start, before it
+// writes its WAL; startEtcd then fails, instead of handing back an endpoint
+// another process's etcd serves, and a caller that starts many retries
+// (newWorkerHarness).
 func startEtcd(bin string) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "dnv-worker-")
 	if err != nil {
@@ -131,21 +136,40 @@ func startEtcd(bin string) (string, func(), error) {
 		cleanupDir()
 		return "", nil, err
 	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	stop := func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-exited
 		cleanupDir()
 	}
 	endpoint := fmt.Sprintf("127.0.0.1:%d", clientPort)
-	if err := waitForEtcd(endpoint); err != nil {
+	if err := waitForEtcd(endpoint, exited); err != nil {
 		stop()
 		return "", nil, err
+	}
+	// The endpoint answers. It is this etcd's only if this etcd bound both its
+	// ports, which it has once it wrote its WAL and while it still runs.
+	_, err = os.Stat(filepath.Join(dir, "data", "member", "wal"))
+	select {
+	case <-exited:
+		err = errors.New("it exited")
+	default:
+	}
+	if err != nil {
+		stop()
+		return "", nil, fmt.Errorf("etcd at %s is not the one started: %w",
+			endpoint, err)
 	}
 	return endpoint, stop, nil
 }
 
-// waitForEtcd polls the server until one point read succeeds.
-func waitForEtcd(endpoint string) error {
+// waitForEtcd polls the server until one point read succeeds, and gives up
+// once the etcd process has exited.
+func waitForEtcd(endpoint string, exited <-chan struct{}) error {
 	cli, err := etcdutil.New(context.Background(), []string{endpoint}, time.Second)
 	if err != nil {
 		return err
@@ -154,6 +178,11 @@ func waitForEtcd(endpoint string) error {
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			return errors.New("etcd exited before it served")
+		default:
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_, lastErr = cli.Get(ctx, "dnv-worker-probe", &pb.WorkerReg{})
 		cancel()

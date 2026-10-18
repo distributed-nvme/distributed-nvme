@@ -115,16 +115,23 @@ func (w *spWorker) drainStep(
 			slog.Bool("slice_done", done),
 		)
 	default:
+		// D3 deletes the SpRev key, which is the shard worker's signal to stop
+		// this coordinator (SW3), and that stop cancels ctx, possibly while
+		// the commit's reply is still on its way back. A stop lets a call in
+		// flight finish (RW11), so the step runs under a ctx the stop does not
+		// cancel, bounded by etcdutil's own budget (EU5): the stop this
+		// commit brings then never turns it into a msgSpDrainFailed (SPD12).
+		final := context.WithoutCancel(ctx)
 		err := ops.finishSpDelete(
-			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			final, w.cid, w.shard, w.spId, w.desired.handle,
 		)
 		if err != nil {
-			w.drainFailed(ctx, drainPhaseFinal, err)
+			w.drainFailed(final, drainPhaseFinal, err)
 			return
 		}
 		// D3 deletes the SpRev key rather than bumping it, so nothing is armed:
 		// the shard worker stops this coordinator on that delete (SW3).
-		slog.InfoContext(ctx, msgSpDrainDone,
+		slog.InfoContext(final, msgSpDrainDone,
 			slog.Uint64("cluster_id", w.cid),
 			slog.Uint64("sp_id", w.spId),
 			slog.String("sp_name", w.desired.handle),

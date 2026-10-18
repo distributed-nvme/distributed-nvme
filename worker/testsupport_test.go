@@ -978,6 +978,7 @@ func newTestDeps(cfg Config, store *fakeStore, clk *fakeClock) *deps {
 		conns:  newConnCache(),
 		health: &fakeHealthWriter{},
 		clk:    clk,
+		tmo:    prodTimeouts(),
 		kinds:  kindFor,
 	}
 	d.conf = newConfCache(d)

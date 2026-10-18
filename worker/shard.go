@@ -329,8 +329,9 @@ func (w *shardWorker) stopAll() {
 }
 
 // stopParallel stops a set of revision workers concurrently and joins them
-// (SW5, RW11): each may take up to common.DefaultWorkerSyncupTimeout to
-// finish an in-flight unary call, so they must not be stopped one by one.
+// (SW5, RW11): each may take up to the syncup timeout of deps
+// (common.DefaultWorkerSyncupTimeout in production) to finish an in-flight
+// unary call, so they must not be stopped one by one.
 func stopParallel(entries []*revObjEntry) {
 	if len(entries) == 0 {
 		return
@@ -349,12 +350,13 @@ func stopParallel(entries []*revObjEntry) {
 // childStops runs the graceful stops a parent issues while it goes on running
 // — a delete or a rescan in a shard worker (SW3, SW4), the child diff of the
 // sp coordinator (RW14) — each on a goroutine of its own. A stop waits out
-// the child's in-flight unary call (RW11), which can take
-// common.DefaultWorkerSyncupTimeout, and a parent that joined it in line
-// would hold every other object it drives that long. What such a join would
-// guarantee is kept otherwise: the parent's own graceful stop joins every
-// stop still running (join, SW5), and a child it starts for the same object
-// meanwhile waits for the stop of the one before it (after, RW1).
+// the child's in-flight unary call (RW11), which can take the syncup timeout
+// of deps (common.DefaultWorkerSyncupTimeout in production), and a parent
+// that joined it in line would hold every other object it drives that long.
+// What such a join would guarantee is kept otherwise: the parent's own
+// graceful stop joins every stop still running (join, SW5), and a child it
+// starts for the same object meanwhile waits for the stop of the one before
+// it (after, RW1).
 //
 // It is owned by the parent's goroutine; the zero value is ready to use.
 type childStops[K comparable] struct {

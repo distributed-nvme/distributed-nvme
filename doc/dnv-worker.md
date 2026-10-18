@@ -269,7 +269,8 @@ tests the etcd on the PATH, else the one in `integtest/bin/cache`, where
 the `fetch-etcd` target fetches the etcd release the integration suites
 pin, and with neither it fails before any test runs and names the
 `fetch-etcd` target. The same contract serves the etcd-backed tests of
-`model` (MD9), the worker and the gateway.
+`model` (MD9), the worker, the gateway, the cdc (`cdc.md`, Integration
+test plan) and the planting library.
 
 ## Package `model`
 
@@ -782,7 +783,10 @@ one's, and a rescan that counted it as a put would re-arm the deadline of
 every dead peer, so a watch that keeps failing faster than the dead
 threshold would keep them alive for good; keys that were live but are
 absent from the rescan transition to dead; the watch restarts from the
-rescan's revision plus one.
+rescan's revision plus one. A scan that fails, the first or a rescan, is
+tried again one `--vote-interval` later — never a hot loop — and the role's
+watch restarts only from a scan that succeeded, since its revision is where
+the watch resumes.
 
 VW4. The stored `epoch` is **never** compared with local time. Liveness
 depends only on the observer's own monotonic clock and the events it saw; the
@@ -1352,10 +1356,11 @@ RW13. Inputs: `cluster_id` and `dn_id` from the key, `addr_port` and
 the cache and, at one store revision (EU4), the `DnConf` at `DnConfKey` of
 the cluster and endpoint together with the `DnRev` of the DN that record
 names, so that the record comes with the revision it belongs to (a missing
-`DnConf`: log, skip, retry next round); it sends a `SyncupDnRequest`
-carrying `cluster_id`, `dn_id`, the revision, `side_pointer_list` from the
-record's `side_ptr_list` and `extent_size` from the cluster's
-`dn_bin_conf` to the endpoint. Rounds send a
+`DnConf`: log, skip, retry next round; a read that fails fails the syncup,
+whose `syncup result` names the read's error, and the next round retries);
+it sends a `SyncupDnRequest` carrying `cluster_id`, `dn_id`, the revision,
+`side_pointer_list` from the record's `side_ptr_list` and `extent_size` from
+the cluster's `dn_bin_conf` to the endpoint. Rounds send a
 `CheckDnRequest` carrying `cluster_id`, `dn_id`, the revision, `show_info`
 and `trace_id`. Health per HL1, judged against a cache of the record's
 `err_epoch` that the syncup's read re-seeds and that the health monitor
@@ -2394,7 +2399,8 @@ past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, which can hold for as long as the error does — an
 operator's intervention, for a lost thin id; AR6's `grow_pending`,
-`grp_list_full`, `meta_ladder_cap` and `no_data_group` (each can hold
+`grp_list_full`, `meta_ladder_cap` and `no_data_group` when the pass's own
+check finds them, ahead of any scan and any transaction (each can hold
 indefinitely — a grow deferred on the CN, a ceiling of `architecture.md`,
 GrowSlice — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state` and `same_error`, which can hold as long as AR5's and move
@@ -2405,7 +2411,14 @@ leg — a spare that cannot be connected stays pending until its leg has
 been unhealthy for `leg_unhealthy`, one the primary never reports has no
 bound at all, and step 3's hold on a spare whose DN failed while it zeroed
 has none either. Everything else ends the pass: every `ErrPrecondition`,
-every empty allocator scan and every transient op failure. Two owners
+every empty allocator scan and every transient op failure — `GrowSlice`'s
+refusal from inside its transaction among them, though it carries the
+`grow_pending` or `grp_list_full` of the pass's own check: that check found
+the grow applicable on the pass's snapshot, so the slice gained a group
+after the snapshot was read — another owner's grow (VW7) or an operator's
+`GrowSlice` — and the pass applies nothing more from a snapshot the store
+has overtaken; the next pass reads the slice afresh, and its own check then
+finds the grow pending or the list full and goes on. Two owners
 overlapping on one SP (VW7) cannot apply an action twice — the second STM
 fails its precondition — with one exception, a spare create, and that only
 in a narrow case. A group may hold several spares and nothing records which
@@ -2668,7 +2681,8 @@ already holds `MaxGrpCntPerSlice` groups (`architecture.md`, GrowSlice) can
 never grow that kind again: a breach of that kind that is not pending logs
 `reaction skipped` (`grp_list_full`) without a scan and the pass goes on
 (AR2); `GrowSlice`'s in-STM refusal carries the same reason, both through
-`model.GrpListFull`.
+`model.GrpListFull`, and ends the pass, as its in-STM `grow_pending` does
+(AR2).
 
 ### Cntlr replacement
 
@@ -2945,12 +2959,16 @@ or unusable, runs nothing and leaves the drain to the next pass. It
 evaluates no reaction and re-seeds no health memo, because a drain step
 calls no agent (SPD13) and both stay the `cntlr_interval` pass's (AR1,
 HL3). A step that removed nothing does not wake it, and is picked up by the
-next pass instead. A FAILED step commits nothing, bumps nothing and is
-retried on the next tick, forever (RW12, no backoff): there is no
-terminal-failure state, because a delete that gave up would only strand
-garbage. Progress is already visible through `GetStoragePool` — `deleting`
-true and a shrinking inventory — so no status field and no progress key is
-added.
+next pass instead. A FAILED step whose transaction did not commit changes
+nothing, bumps nothing and is retried on the next tick, forever (RW12, no
+backoff): there is no terminal-failure state, because a delete that gave up
+would only strand garbage. A step whose call fails after etcd applied its
+transaction logs `sp drain failed` all the same and is not retried as
+such: the next tick derives its step from the freshly loaded `SpConf`
+(SPD8), which already holds the commit, and after the last step there is no
+next tick (SPD12). Progress is already visible through `GetStoragePool` —
+`deleting` true and a shrinking inventory — so no status field and no
+progress key is added.
 
 SPD7. **Fan-out tolerance.** The drain's first step leaves an SP with NO
 cntlr, a shape `CreateStoragePool` can never produce. `buildCntlrPlans`
@@ -3006,7 +3024,16 @@ GW12's deletion half on `SpGlobal`, guarded on both id lists being empty so an
 owner one step behind cannot skip to the end. It is the one drain STM that
 does NOT bump `SpRev`: it deletes the key, which is already the shard worker's
 stop signal, so the drain terminates itself in the transaction that finishes
-the job. After the commit the name is reusable.
+the job. The step runs under a context that the coordinator's stop does not
+cancel, bounded by `etcdutil`'s own budget (EU5): the stop its own delete
+brings (SW3) can come before the commit's reply has reached the step, and a
+stop lets a call in flight finish (RW11), so that stop never turns a
+committed step into an `sp drain failed`. The step's time limit or a lost
+connection still can end the call after etcd applied the commit; the record
+then says `sp drain failed` for a pool whose keys are gone, and the step is
+not run again, since its own delete has stopped the pool's coordinator
+(SW3), so no `sp drained` follows (SPD6). After the commit the name is
+reusable.
 
 **A lost sub-object key wedges the drain, deliberately.** D1 refuses when a
 listed `Cntlr` key is absent and D2 when a listed `Slice` key is; both are the
@@ -3332,13 +3359,13 @@ an invented zero.
 `reaction skipped` a reaction the pass does not take, with its reason (AR2);
 `sp drain step` every committed D1 and D2 step and `sp drained` the D3 that
 ends the drain (SPD12), so no step record carries a final phase;
-`sp drain failed` a drain step that did not commit, retried on the next tick
-with no terminal-failure state (SPD6); `clone drain step` every committed
-batch and `clone drained` the final STM (CLD8, CLD9), so no step record
-carries a final step; `clone drain failed` a clone-drain step that did not
-commit (CLD10). The two step records are non-normative — they name no
-decision — but the worker suite counts them: they are the only records that
-show a multi-batch drain advancing.
+`sp drain failed` a drain step whose call failed, retried on the next tick
+with no terminal-failure state when its transaction did not commit (SPD6);
+`clone drain step` every committed batch and `clone drained` the final STM
+(CLD8, CLD9), so no step record carries a final step; `clone drain failed` a
+clone-drain step that did not commit (CLD10). The two step records are
+non-normative — they name no decision — but the worker suite counts them:
+they are the only records that show a multi-batch drain advancing.
 
 ## Integration test plan
 
@@ -3355,6 +3382,50 @@ compaction races) are out of scope. It runs on one server as a plain user,
 because nothing it exercises needs root: real etcd, several real workers, fake
 agents driven by a behavior file, etcd driven by a fake-gateway CLI, and
 assertions over the JSON logs.
+
+**What the Go cases prove.** Most of the worker package's Go tests drive its
+layers directly, over an in-memory store on a fake clock or over the package's
+shared etcd of EU7. The whole-worker cases run whole workers — the real
+`worker`, `model` and `etcdutil` packages, from the vote layer down to the
+syncups and the reactions — inside the test process, on the real clock, since
+simulated time cannot run beside a real etcd. Each whole-worker case starts an
+etcd of its own from the binary EU7 finds: the registrations, the revision
+prefixes and the cluster confs a worker watches are keys of no one cluster, so
+whole workers on a shared etcd would drive one another's objects, and a
+private etcd lets the cases run in parallel. The agents are fake agents of
+`integtest/agentfake`, served in the process and reached through the dial the
+connection cache takes (RW7), and the cluster is planted through
+`integtest/plant` with the placement the case chooses; the paragraphs on the
+fake agent and on the driver below say what each does. A worker starts through
+an unexported entry beside `Run` that takes the clock, the dial and the four
+fixed timeouts: the per-call deadlines of a `Syncup*` and of a push (RW5,
+BM3), the bound of the demotion hold (RW22) and the bound of each CM5 delete.
+`Run` hands it the production ones — `DefaultWorkerSyncupTimeout`,
+`DefaultWorkerPushTimeout`, `DemotionHoldTimeout` and `DefaultEtcdOpTimeout` —
+and a case short ones, with the health-check intervals, the event thresholds
+and the vote timers shortened too, so that a call no fake answers costs a case
+seconds, not a minute; the `etcdutil` client bounds each of its own operations
+as EU5 says whatever the entry is handed. A whole-worker case stops a worker
+in CM5's order, or crashes it: the worker's agent connections and etcd client
+are cut before its context ends, so a call it has in flight ends at once, its
+registrations stay, and its peers find it dead by the dead threshold (VW3), as
+they find a killed process. A restart is a new incarnation under a new seed
+(VW1). A worker's records reach its case by the seed prefix of their trace id
+(RW10) or by the seed they name as their own; a record that carries neither
+belongs to no one worker. Each whole-worker case asserts on what etcd holds,
+on what each fake received and on those records, so a case proves a whole
+path, from a planted desired state to the agents' syncups and the worker's own
+writes, at the moments the fakes' levers choose. The fake records each round's
+own trace id (RW4 step 2), under which the round's syncup and verdict are
+logged (RW10), so a case tells what a round caused from what a syncup did. A
+handoff case crashes the worker that owns a pool while a lever holds a step of
+a failover, a cutover or a leg repair open, so that the peer that takes the
+pool's shard, handed nothing, must finish that step from etcd and its own
+rounds alone. A case can also act from inside one of a worker's records, in
+the call that logs it, so that a change lands between two steps of that call,
+such as a scan and its commit. A whole-worker case that holds one dimension at
+its maximum of `architecture.md`, Cardinality limits, asserts the state the
+worker leaves in etcd and in the fakes, never how long it takes.
 
 **Topology.** The developer machine drives one Linux server over ssh, as a
 plain user with no sudo. The server runs one etcd on localhost, configured
@@ -3472,14 +3543,18 @@ be induced from outside the process; that the drain's wake-up runs no
 reaction and re-seeds no health memo (SPD6, CLD7), because a pass with no
 reaction due and no epoch to correct leaves no record, so no case can tell
 the wake-up from a pass; RW13's count compare and HL1's rule for the disk
-counts, since no fake reports a disk node's counts, the end-to-end suite
-holding real disk nodes to the compare (`e2e_integtest.md`, The cases);
-RW23's count of new observations only and HL7's late rounds and rounds
-whose observation is too old, since the fake answers every reply about an
-object it knows from a new observation;
-SW4, compaction; BM6, because the one lever the suite has over a reply
-code, a forced code, rejects the object's `Syncup*` itself, so no push is
-attempted, let alone failed; AR5's and AR7's refusals (HL2's row classes,
+counts, since no suite case sets `disk_counts`, the one lever by which a
+fake reports a disk node's counts, the end-to-end suite holding real disk nodes
+to the compare (`e2e_integtest.md`, The cases); RW23's count of new
+observations only and HL7's late rounds and rounds whose observation is too
+old, since no suite case sets `obs_age_ms` or `obs_none`, the levers by
+which a fake answers from an old observation or from none;
+SW4, compaction; BM6, because every code a suite case forces, a stale
+revision or an unknown object, rejects the object's `Syncup*` itself, so no
+push is attempted, let alone failed, while no suite case forces
+`ReplyCodeLeftover`, the one forced code under which the worker can still
+push and the fake refuses the push with that code, and `leftover_rounds`
+leaves a push's code alone; AR5's and AR7's refusals (HL2's row classes,
 and the rows of the last failover or primary replacement), since the
 reaction case only keeps
 clear of AR5's second refusal and fails its sole primary on a row of its own;
@@ -3492,8 +3567,8 @@ a bump or a cntlr replacement during RW22's demotion hold, HL2's rule that a sta
 clean reply below the revision its child drives is no verdict, AR10
 holding back a cntlr replacement or a leg repair, and RW14's hold still
 waiting, with no bump, for a side that turns unhealthy during the wait and
-keeping its sides at a re-fan of the held revision, all of which no case
-stages;
+keeping its sides at a re-fan of the held revision, all of which no suite
+case stages;
 AR7's charge of a new CN past its metadata ceiling, since the reaction case's
 pools hold no clone, and the `candidate changed` refusal of AR8 step 3's
 create — a group that gained a DN after the pass's snapshot, or a stale
@@ -3502,16 +3577,16 @@ guards of SPD2; and the guards of CLD2 and the gateway halves of CLD1 and
 CLD3, the gateway suite owning the clone latch.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the three conf gates are unit-tested instead.
-Eight records no case stages: `sp drain failed` and `clone drain failed`,
+Eight records no suite case stages: `sp drain failed` and `clone drain failed`,
 which the drain case asserts at zero after every drain; `sp flip failed`,
 which the bitmap case asserts at zero for its cutover; `cluster conf
-missing`, which
-every case avoids by writing its cluster conf before any rev key and no case
-asserts either way; `syncup leftover`, which no fake produces on its own,
-since no fake computes a sweep verdict and no case forces that code;
-`bitmap push failed`, which the forced-code lever cannot stage either;
-`late observation`, since no fake answers from an old observation; and
-`dn free count disagrees`, since no fake reports a disk node's counts.
+missing`, which every suite case avoids by writing its cluster conf before
+any rev key and no suite case asserts either way; `syncup leftover`, which
+no fake produces on its own, since no fake computes a sweep verdict, and no
+suite case forces that code or sets `leftover_rounds`;
+`bitmap push failed`, for the reason given for BM6 above;
+`late observation`, since no suite case sets `obs_age_ms` or `obs_none`; and
+`dn free count disagrees`, since no suite case sets `disk_counts`.
 
 Out of scope: real agents, and real hosts, whose drop of a path the discovery
 records withdraw is the e2e suite's to show (`e2e_integtest.md`, The cases);
@@ -3551,6 +3626,9 @@ behind.
 gateway: it writes through `model` as a gateway's STM would, resolves the
 cluster conf and the pool `bdev_conf` it writes — because the worker refuses
 a conf nobody made concrete (RW9, RW14, AR1) — and never dials an agent.
+It is a front over the planting library `integtest/plant` (`layout.md`,
+Directory tree), whose calls the Go cases make directly, so what this
+paragraph says of a `workerctl` write holds of the library call behind it.
 Where the gateway's writes carry more than the record, its own are raw, so a
 case plants exactly the state it means to — save the node bookkeeping of the
 copies it plants: `put-clone` charges the clone's metadata units to the CN
@@ -3566,44 +3644,82 @@ same way: it plants one `err_epoch`, on a cntlr, a leg or a side, and touches
 neither a revision nor a `CdcEntry` nor a `settling` flag, so a case can
 stage the epoch an earlier owner or another observer would have left (AR10).
 
-**The fake agent, `fakeagent`.** `fakeagent` serves the generated
-`DiskNodeAgent` and `ControllerNodeAgent` services with the real server
-interceptors, so its log records every message the worker sent under the
-caller's trace id — the suite's evidence of what was sent, when, and by which
-worker. It applies the agents' revision gate per object and their ordering
-rule — a side or cntlr its node's last syncup does not list is an unknown
-object, which the worker's independent roles must survive (RW5) — and derives
-every `*Info` row from the last accepted request, persisting what it accepted
-so that a killed and restarted fake replies like a restarted agent; a
-behavior file per fake, re-read whenever it changes, sets what each object
-reports and how its streams and replies misbehave. Of its levers, `hang`
-holds an object's `Check*` rounds while it is set, `hang_rounds` holds only
-as many of the next rounds as it counts, so that a case misses exactly the
-rounds it means to whatever its own polls cost, `delay_rounds_ms` answers
-every round late, and `hang_syncup` leaves the
-object's `Syncup*` unanswered while it is set, as a stopped cn agent leaves
-its demotion (RW22), or as a side whose agent answers its rounds but never
-its syncup holds a sides-first hold to its bound (RW14). Among the rows it
+**The fake agent, `fakeagent`.** The fake agent is one library,
+`integtest/agentfake`, whose levers are set in two ways, so that it cannot
+drift from itself: through the program `fakeagent`, which the worker and
+gateway suites run and which takes its levers from a behavior file per fake,
+re-read whenever it changes; and through Go calls, by which a Go test serves
+a fleet of fake agents inside its own process over in-memory connections,
+one listener per address and port, reached through a dial that takes the
+place of the worker's own (RW7). It serves the generated `DiskNodeAgent` and
+`ControllerNodeAgent` services. In `fakeagent` it serves them with the real
+server interceptors, so its log records every message the worker sent under
+the caller's trace id — the suite's evidence of what was sent, when, and by
+which worker. The whole-worker cases serve their fleets without those
+interceptors, and so without that log, each fake still reading a unary
+call's trace id from the call's metadata; every fake keeps, per object, the
+requests it received and the streams it served, the evidence those cases
+read instead. It applies the agents' revision gate per object and
+their ordering rule — a side or cntlr its node's last syncup does not list
+is an unknown object, which the worker's independent roles must survive
+(RW5) — refuses a bitmap push for a migration or a clone its object's last
+request does not name, and derives every `*Info` row from the last accepted
+request. It keeps what it accepted, in memory or in a state file, so that a
+killed and restarted fake replies like a restarted agent; a Go test stops a
+fake, which ends every call and stream it serves as a killed agent's end,
+so that no call in flight at the stop applies anything after it, and starts
+it again with what it kept or with nothing, as an agent restarts on its
+local files or on empty ones. Of its levers, `hang` holds an
+object's `Check*` rounds while it is set, `hang_rounds` holds only as many
+of the next rounds as it counts, so that a case misses exactly the rounds
+it means to whatever its own polls cost, `delay_rounds_ms` answers every
+round late, and `hang_syncup` leaves the object's `Syncup*` unanswered
+while it is set, as a stopped cn agent leaves its demotion (RW22), or as a
+side whose agent answers its rounds but never its syncup holds a
+sides-first hold to its bound (RW14); a call `hang` or `hang_syncup` holds
+ends as soon as its lever is cleared or its caller gives up, and a round
+`hang_rounds` holds only when its caller gives up. Among the rows it
 derives, a migration destination whose request carries the side
 provisioned and its cutover pending reports both migration rows waiting
 for the cutover, with the reason the cutover reads, and each cntlr reports
 a path row per side of a leg that has two sides, live once that side is
-provisioned (RW18); a behavior file's rows override them. It stamps every
-reply as an agent does (`dnagent.md` SH28): a round or an info read about
-an object it knows, and a `Syncup*` it does not refuse, answers from a new
-observation, made as it answers and under the call's trace id — the
-round's own for a round — so no round of the suite answers from an
-observation that is late, too old or already seen; a round or an info
-read that refuses its object as unknown carries no observation; a
-`Syncup*` it refuses — a stale revision, an object its node's last syncup
-does not list, or a refusing code the behavior file forces — carries no
-stamp, as an agent's refusal carries none (`architecture.md`, Live-state
-reporting); and a `Syncup*` that saved its request carries the save time,
-with its observation after it, while one whose code the behavior file
+provisioned (RW18); a lever's row overrides them, its reason included. It
+stamps every reply as an agent does (`dnagent.md` SH28): a round or an info
+read about an object it knows, and a `Syncup*` it does not refuse, answers
+from a new observation, made as it answers and under the call's trace id —
+the round's own for a round — so that, unless a lever says otherwise, no
+round answers from an observation that is late, too old or already seen; a
+round or an info read that refuses its object as unknown carries no
+observation; a `Syncup*` it refuses — a stale revision, an object its
+node's last syncup does not list, or a refusing code a lever forces —
+carries no stamp, as an agent's refusal carries none (`architecture.md`,
+Live-state reporting); and a `Syncup*` that saved its request carries the
+save time, with its observation after it, while one whose code a lever
 forces saves nothing, so a forced `ReplyCodeLeftover` carries an
-observation and no save time. It computes no sweep verdict, so it
-never answers `ReplyCodeLeftover` on its own, and it reports no disk counts
-(`dnagent.md` DN18), so no case runs RW13's count compare.
+observation and no save time.
+
+Further levers, each set on one object, shape what a round, an info read
+or a `Syncup*` answers. Two of them shape the observation a round or an
+info read answers from, the one HL7 judges by its age:
+`obs_age_ms` answers from an observation that ended a given time before the
+answer, or, while the last observation the fake gave is newer, repeats that
+one whole, its rows, code and revision with its time, as an agent whose
+reads stall answers; and `obs_none` answers as an agent that holds the
+object and no observation of it yet, with code zero, revision zero, no
+`*Info` and no observation time (`dnagent.md` SH28). A `Syncup*` still
+answers from its converge's new observation under either.
+`syncup_revision` makes an accepted `Syncup*` reply carry another revision
+than the request's: an agent answers an accepted request with that
+request's revision, so the lever hands the worker, at a moment a case
+chooses, the reply it reads once its desired state has moved past the
+request it sent. `leftover_rounds` is a leftover that clears: the fake
+applies and saves the request, unlike under a forced code, answers
+`ReplyCodeLeftover` (RW5) on the syncups and info reads meanwhile and on as
+many rounds as it counts, and then answers code zero. `disk_counts` gives
+the dn disk counts, sent only beside an OK meta row, as the dn agent sends
+them (`dnagent.md` DN18). The fake computes no sweep verdict and no disk
+counts of its own: a leftover and the counts come only from those levers,
+which no suite case sets, so no suite case runs RW13's count compare.
 
 ## Known limits
 

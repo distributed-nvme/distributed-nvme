@@ -100,6 +100,15 @@ const ReasonSpareUnprovisioned = "spare_unprovisioned"
 // pass finds the list full before it would scan for a grow.
 const ReasonGrpListFull = "grp_list_full"
 
+// ReasonSpareListFull is the Reason a CreateSpareLeg carries when the group's
+// spare_leg_list already holds common.MaxSpareLegPerGrp spares. It is
+// exported because the gateway answers it with the count-ceiling code its
+// error table lists for that limit (gateway.md GW7), not with the
+// FAILED_PRECONDITION every other ErrPrecondition maps to: a gateway create
+// reaches it when another create filled the list after the gateway's own
+// pre-check.
+const ReasonSpareListFull = "spare list full"
+
 // ReasonStaleRevision is the Reason the three ops the gateway shares with the
 // worker carry when their expectRev argument does not match the stored
 // SpRev.revision (gateway.md GW6). The gateway maps exactly this reason to
@@ -2243,7 +2252,7 @@ func spConfById(
 // rather than two when both planned the create from snapshots that held the
 // same DNs in the group, and the second STM fails on whichever of them comes
 // first. When the first owner's new spare filled the spare list, it fails
-// with "spare list full". Otherwise, while that spare is still
+// with ReasonSpareListFull. Otherwise, while that spare is still
 // unprovisioned, it fails with ReasonSpareUnprovisioned, and once RW18 has
 // flipped it, it finds the group holding a DN the plan did not — the first
 // owner's spare's — and fails with ReasonCandidateChanged. In each case the
@@ -2301,7 +2310,7 @@ func CreateSpareLeg(
 			return fail(opCreateSpareLeg, "group not found")
 		}
 		if len(grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
-			return fail(opCreateSpareLeg, "spare list full")
+			return fail(opCreateSpareLeg, ReasonSpareListFull)
 		}
 		if UnprovisionedSpare(grp) != nil {
 			return fail(opCreateSpareLeg, ReasonSpareUnprovisioned)

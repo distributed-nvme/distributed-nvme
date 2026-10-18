@@ -63,6 +63,19 @@ func resolveCntlr(
 	return key, cntlr, nil
 }
 
+// cntlrCntBelowCeiling is CreateCntlr's count ceiling: a pool whose
+// cntlr_id_list already holds MaxCntlrCntPerSp cntlrs takes no other
+// (architecture.md, Cntlrs). The planning read and the deciding STM both
+// run it, so the two give one refusal the same words.
+func cntlrCntBelowCeiling(conf *pb.SpConf) error {
+	if len(conf.GetCntlrIdList()) >= common.MaxCntlrCntPerSp {
+		return errExhausted(
+			"cntlr count %d has reached the per-storage-pool maximum %d",
+			len(conf.GetCntlrIdList()), common.MaxCntlrCntPerSp)
+	}
+	return nil
+}
+
 // cntlrPlan is what CreateCntlr prepares outside its STM (GW8): the cluster
 // the scan runs in, the number of extents one cntlr of this SP reserves on
 // its CN, the metadata units its CN holds for the SP's clones, the CNs that
@@ -103,8 +116,10 @@ type cntlrPlan struct {
 // no CN left to draw, a stale client would hear RESOURCE_EXHAUSTED, computed
 // against cntlrs it has not read, and hear it again after refreshing its
 // token, and a pool whose deletion has begun would answer RESOURCE_EXHAUSTED
-// rather than "is being deleted". The deciding STM checks both again (AG4);
-// this read only fixes which refusal such a caller is given.
+// rather than "is being deleted". The cntlr count ceiling follows them here
+// for the same reason (GW9): a pool at it would otherwise hear that no CN is
+// free. The deciding STM checks all three again (AG4); this read only fixes
+// which refusal such a caller is given.
 //
 // The snapshot serves every read at one store revision, so a slice, cntlr or
 // clone its SpConf lists and the store lacks is a lost invariant key, never a
@@ -125,6 +140,12 @@ func planCreateCntlr(
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
 			req.GetSpRev())
 		if err != nil {
+			return err
+		}
+		// The count ceiling before the scan (GW9): a pool that already has
+		// every cntlr it may have is told so, not that no CN is free. The
+		// deciding STM checks it again for a cntlr committed since.
+		if err := cntlrCntBelowCeiling(sc.Conf); err != nil {
 			return err
 		}
 		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
@@ -246,11 +267,8 @@ func (s *Server) CreateCntlr(
 				return err
 			}
 			conf := sc.Conf
-			if len(conf.GetCntlrIdList()) >= common.MaxCntlrCntPerSp {
-				return errExhausted(
-					"cntlr count %d has reached the per-storage-pool "+
-						"maximum %d",
-					len(conf.GetCntlrIdList()), common.MaxCntlrCntPerSp)
+			if err := cntlrCntBelowCeiling(conf); err != nil {
+				return err
 			}
 			slot := req.GetCntlidSlot()
 			allowed := false

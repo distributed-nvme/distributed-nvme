@@ -55,9 +55,11 @@ const (
 // read here is re-derived and re-checked inside it — so nothing read here is
 // trusted for a write. The only verdicts reached on this read are refusals:
 // NOT_FOUND for a missing cluster and, in CreateStoragePool, the stored-conf
-// gate, the merged geometry and the primary threshold against the cluster's
-// cntlr_interval, judged here so that they come before the scans and judged
-// again in its transaction.
+// gate, the overflow of init_ext_cnt times the extent size, the merged
+// geometry and the primary threshold against the cluster's cntlr_interval,
+// judged here so that they come before the scans; every one but the overflow
+// is judged again in its transaction, where model.GroupBlocks refuses an
+// overflow of its own.
 func spPreReadCluster(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -73,6 +75,60 @@ func spPreReadCluster(
 		return 0, nil, errNotFound("cluster %q not found", name)
 	}
 	return model.ClusterId(name, cc.GetCreationEpoch()), cc, nil
+}
+
+// errSpExists is CreateStoragePool's ALREADY_EXISTS for a pool name the
+// cluster already holds, in the words of both checks that give it.
+func errSpExists(spName string) error {
+	return errExists("storage pool %q already exists", spName)
+}
+
+// spNameUnused is CreateStoragePool's name check ahead of its count ceiling
+// and its scans: a plain read of the pool's SpConf key, ALREADY_EXISTS when it
+// is there. The deciding STM checks the name before it mints from SpGlobal,
+// so this read keeps that order: a create re-sent for a pool that took the
+// cluster's last place hears that its pool exists, not that the cluster is
+// full. The STM checks the name again, for a pool committed since.
+func spNameUnused(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spName string,
+) error {
+	found, err := cli.Get(ctx, model.SpConfKey(cid, spName), &pb.SpConf{})
+	if err != nil {
+		return errAborted("%v", err)
+	}
+	if found {
+		return errSpExists(spName)
+	}
+	return nil
+}
+
+// spCntBelowCeiling is CreateStoragePool's count ceiling ahead of its scans
+// (GW9): a plain read of the cluster's SpGlobal, whose shard_bucket sum is
+// the live pool count, refused at MaxSpCntPerCluster by mintClusterId's own
+// check, so a cluster at the ceiling hears the ceiling and not that no node
+// is free. The deciding STM mints from the SpGlobal it reads and so checks
+// the ceiling again, for a pool committed since.
+func spCntBelowCeiling(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+) error {
+	globalKey := model.SpGlobalKey(cid)
+	global := &pb.SpGlobal{}
+	found, err := cli.Get(ctx, globalKey, global)
+	if err != nil {
+		return errAborted("%v", err)
+	}
+	if !found {
+		return errAborted("sp_global key %q is missing", globalKey)
+	}
+	_, err = mintClusterId(
+		global.GetNextId(), global.GetShardBucket(),
+		common.MaxSpCntPerCluster, "storage pool")
+	return err
 }
 
 // spDefaultCntlidSlots is the `cntlid_slot_list = [0..7]` default of
@@ -310,18 +366,23 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 //
 // The scans need the extent size, the batch sizes and the leg count, all of
 // which live in ClusterConf, so each iteration starts with one plain pre-read
-// of it (architecture.md, STM discipline). That read decides nothing but four
+// of it (architecture.md, STM discipline). That read decides nothing but five
 // refusals: NOT_FOUND for a cluster that is not there, ABORTED for a stored
 // conf that fails architecture.md, Common validation (the allocator's gate,
-// run before anything is computed from it), and the two rules of
-// architecture.md, Common validation, that read the cluster — the geometry of
-// the request merged over it, and the primary threshold against its
-// cntlr_interval — judged before the scans so that a request that breaks one
-// is INVALID_ARGUMENT even on a cluster too short of nodes for them. The
-// in-STM read is authoritative and judges all four again; when it yields a
-// different cluster_id — the cluster
-// was deleted and re-created under the scan — or a different leg count, every
-// pick was drawn for a different SP shape and the unit re-plans.
+// run before anything is computed from it), INVALID_ARGUMENT for an
+// init_ext_cnt whose bytes at the cluster's extent size overflow, and the two
+// rules of architecture.md, Common validation, that read the cluster — the
+// geometry of the request merged over it, and the primary threshold against
+// its cntlr_interval — judged before the scans so that a request that breaks
+// one is INVALID_ARGUMENT even on a cluster too short of nodes for them.
+// Plain reads of the pool's SpConf key and of SpGlobal then answer the name
+// and the pool count ceiling before the scans as well, in the STM's order
+// (spNameUnused, spCntBelowCeiling, GW9). The in-STM read is authoritative
+// and judges the conf gate, the two rules, the name and the ceiling again,
+// and model.GroupBlocks the overflow; when it yields a different cluster_id
+// — the cluster was deleted and re-created under the scan — or a different
+// leg count, every pick was drawn for a different SP shape and the unit
+// re-plans.
 //
 // Nothing is bumped here. SpRev is CREATED at revision 1, and the DN/CN
 // revisions are bumped once per node by the two ledgers' flush
@@ -432,6 +493,18 @@ func (s *Server) CreateStoragePool(
 		if err := model.ValidateClusterConf(scanCc); err != nil {
 			return errAborted("%v", err)
 		}
+		// The overflow of architecture.md, Storage pools, right behind the
+		// conf it needs: the data group's bytes are init_ext_cnt times the
+		// cluster's extent size, and a product past uint64 is an invalid
+		// request. Left to GroupBlocks in the STM, it would never be
+		// heard, since no DN has that many free extents and the scan
+		// refuses first.
+		extentSize := scanCc.GetDnBinConf().GetExtentSize()
+		if req.GetInitExtCnt() > math.MaxUint64/extentSize {
+			return errInvalid(
+				"init_ext_cnt %d times extent_size %d overflows",
+				req.GetInitExtCnt(), extentSize)
+		}
 		scanBdev := model.ResolveBdevConf(mergeSpBdevConf(
 			req.GetBdevConf(), scanCc.GetBdevConf()))
 		// The geometry rules of architecture.md, Common validation, on the
@@ -448,6 +521,17 @@ func (s *Server) CreateStoragePool(
 		if err := validatePrimaryThreshold(
 			req.GetEventThreshold(), scanCc.GetHealthCheckConf(),
 		); err != nil {
+			return err
+		}
+		// The name, then the pool count ceiling, after every check of the
+		// request itself and before the scans (GW9), in the order the
+		// deciding STM judges them.
+		if err := spNameUnused(
+			ctx, s.cli, scanCid, req.GetSpName(),
+		); err != nil {
+			return err
+		}
+		if err := spCntBelowCeiling(ctx, s.cli, scanCid); err != nil {
 			return err
 		}
 		legs := legCntOf(scanBdev)
@@ -529,8 +613,7 @@ func (s *Server) CreateStoragePool(
 			}
 			confKey := model.SpConfKey(cid, req.GetSpName())
 			if stm.Get(confKey, &pb.SpConf{}) {
-				return errExists(
-					"storage pool %q already exists", req.GetSpName())
+				return errSpExists(req.GetSpName())
 			}
 			globalKey := model.SpGlobalKey(cid)
 			global := &pb.SpGlobal{}

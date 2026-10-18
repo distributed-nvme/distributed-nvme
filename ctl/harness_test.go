@@ -80,6 +80,12 @@ type recordingClient struct {
 	// reply, when set, is returned instead of the empty canned reply. Its
 	// type must be the driven method's reply type (CT4).
 	reply proto.Message
+	// answer, when set, takes the place of err and reply: it decides the
+	// failure, or the reply, from the request the RPC received, the way the
+	// gateway's validation and paging do. A nil reply with a nil error is
+	// the empty canned reply. The limits tests use it so that a refusal
+	// depends on the value dnvctl actually sent (CT8).
+	answer func(req proto.Message) (proto.Message, error)
 }
 
 // rpcCall is the body every one of the 60 methods shares.
@@ -94,15 +100,22 @@ func rpcCall[Req proto.Message, Reply proto.Message](
 	c.method = name
 	c.req = in
 	var zero Reply
-	if c.err != nil {
+	injected := c.reply
+	if c.answer != nil {
+		reply, err := c.answer(in)
+		if err != nil {
+			return zero, err
+		}
+		injected = reply
+	} else if c.err != nil {
 		return zero, c.err
 	}
-	if c.reply != nil {
-		typed, ok := c.reply.(Reply)
+	if injected != nil {
+		typed, ok := injected.(Reply)
 		if !ok {
 			panic(fmt.Sprintf(
 				"injected reply %T is not %s's reply type %T",
-				c.reply, name, canned))
+				injected, name, canned))
 		}
 		return typed, nil
 	}

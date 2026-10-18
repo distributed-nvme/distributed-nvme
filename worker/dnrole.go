@@ -178,8 +178,10 @@ func (d *dnDriver) openStream(
 // syncup issues one SyncupDn (RW5, RW13). Per syncup it reads the DN's
 // DnConf at DnConfKey(cluster_id, addr_port) together with its DnRev, both at
 // one store revision (readDnRecord); a missing record is logged and skipped,
-// and the next round retries. The read is a load of the DN's record, so it
-// re-seeds the health memo (HL3): an err_epoch another observer wrote, or
+// and the next round retries. A read that fails fails the syncup with its
+// error, which the loop logs as the syncup's result and leaves to the next
+// round, as it does a failed call. The read is a load of the DN's record, so
+// it re-seeds the health memo (HL3): an err_epoch another observer wrote, or
 // cleared, since this monitor's last write makes the verdict on this
 // syncup's reply a transition when the two disagree. It also replaces the
 // record the count compare holds (noteRecord). A quiet DN never syncs; its
@@ -193,9 +195,10 @@ func (d *dnDriver) syncup(
 		ctx, d.deps.store, d.cid, d.addr,
 	)
 	if err != nil {
-		// The "etcd get" record carries the error; no SyncupDn was issued, so
-		// there is no syncup result to report. Retried next round (RW12).
-		return nil, nil
+		// No SyncupDn was issued, but the syncup failed all the same: its
+		// result names the read's error (RW13), and the next round retries
+		// (RW12).
+		return nil, fmt.Errorf("read dn record: %w", err)
 	}
 	d.noteRecord(dnConf, revision, found, revFound)
 	if !found {

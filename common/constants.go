@@ -13,6 +13,11 @@ const (
 	// can never validate (architecture.md, Common validation).
 	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
 	MaxNqnLength    = 223
+	// MaxTrSvcIdLength is the longest NvmeTrConf.tr_svc_id the gateway
+	// takes: the width of the TRSVCID field of a discovery log entry, which
+	// dnv-cdc fills with it verbatim (cdc.md DS3; architecture.md, Common
+	// validation).
+	MaxTrSvcIdLength = 32
 
 	ShardBucketSize = 256
 	ShardCodeFmt    = "%02x"
@@ -174,7 +179,6 @@ const (
 
 	DnCntlidSlotBase = 10000
 	DnCntlidSlotStep = 5000
-	DnCntlidSlotCnt  = 8
 
 	DefaultClusterName = "default"
 	DefaultCnCap       = 4 * 1024 * 1024 * 1024 * 1024

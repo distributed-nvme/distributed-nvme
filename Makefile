@@ -37,13 +37,14 @@ build:
 vet:
 	$(GO) vet ./...
 
-# test runs every package's tests. The tests of etcdutil, model, gateway and
-# worker run against a real etcd (dnv-worker.md EU7). An ETCD_BIN that is not
-# empty is passed on unchecked, a relative path taken from this directory,
-# since each test binary runs in its own package's directory; the test
-# binaries refuse one that names no file. With ETCD_BIN empty or unset the
-# target takes etcd on the PATH, else the one `make fetch-etcd` leaves in
-# integtest/bin/cache, and with neither it fails before go test runs.
+# test runs every package's tests. The tests of etcdutil, model, gateway,
+# worker, cdc and integtest/plant run against a real etcd (dnv-worker.md
+# EU7). An ETCD_BIN that is not empty is passed on unchecked, a relative path
+# taken from this directory, since each test binary runs in its own package's
+# directory; the test binaries refuse one that names no file. With ETCD_BIN
+# empty or unset the target takes etcd on the PATH, else the one `make
+# fetch-etcd` leaves in integtest/bin/cache, and with neither it fails before
+# go test runs.
 test:
 	@bin="$$ETCD_BIN"; \
 	if [ -z "$$bin" ]; then \

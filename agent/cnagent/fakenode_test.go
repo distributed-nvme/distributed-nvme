@@ -51,6 +51,15 @@ type fakeNode struct {
 	devSize   map[string]uint64
 	devNo     map[string]string
 	nextMinor int
+	// devNoPaths and dmOfDevNo are reverse indexes of devNo: from a device
+	// number to a path, and to a dm device, that held it when the index was
+	// last built or the fake last numbered a device. They are hints only: a
+	// hit is checked against devNo and dms, and a miss rebuilds the index,
+	// so a test that writes devNo straight gets the answer a scan of devNo
+	// gives. They keep the table checks of a converge that builds tens of
+	// thousands of devices from going quadratic.
+	devNoPaths map[string]string
+	dmOfDevNo  map[string]string
 
 	// device-mapper
 	dms map[string]*fakeDm
@@ -1246,16 +1255,17 @@ func (f *fakeNode) children(path string) []string {
 	return out
 }
 
+// childOf is the name of entry inside dir when entry is a direct child of
+// it. The test of the entry's last slash comes first, read from the end of
+// the entry, so a listing that walks every entry of the fake compares dir
+// only with the entries whose parent is as long as dir: a node of a thousand
+// exports holds tens of thousands of entries that share a long prefix.
 func childOf(dir, entry string) (string, bool) {
-	prefix := dir + "/"
-	if !strings.HasPrefix(entry, prefix) {
+	if strings.LastIndexByte(entry, '/') != len(dir) ||
+		len(entry) == len(dir)+1 || entry[:len(dir)] != dir {
 		return "", false
 	}
-	rest := entry[len(prefix):]
-	if rest == "" || strings.Contains(rest, "/") {
-		return "", false
-	}
-	return rest, true
+	return entry[len(dir)+1:], true
 }
 
 // cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only
@@ -1801,7 +1811,14 @@ func (f *fakeNode) dmCreate(args []string, stdin string) (string, int) {
 	}
 	f.dms[name] = dm
 	path := "/dev/mapper/" + name
-	f.devNo[path] = f.newDevNo()
+	devNo := f.newDevNo()
+	f.devNo[path] = devNo
+	if f.devNoPaths != nil {
+		f.devNoPaths[devNo] = path
+	}
+	if f.dmOfDevNo != nil {
+		f.dmOfDevNo[devNo] = name
+	}
 	f.devSize[path] = tableSectors(table) * 512
 	return "", 0
 }
@@ -1903,26 +1920,47 @@ func (f *fakeNode) checkThinTable(name, table string) int {
 // dmByDevNo resolves the major:minor a table argument carries back to the dm
 // device it names, or nil when it is not one of this node's dm devices.
 func (f *fakeNode) dmByDevNo(devNo string) *fakeDm {
-	for name, dm := range f.dms {
-		if f.devNo["/dev/mapper/"+name] == devNo {
+	if name, ok := f.dmOfDevNo[devNo]; ok {
+		if dm := f.dms[name]; dm != nil &&
+			f.devNo["/dev/mapper/"+name] == devNo {
 			return dm
 		}
 	}
+	f.dmOfDevNo = make(map[string]string, len(f.dms))
+	for name := range f.dms {
+		f.dmOfDevNo[f.devNo["/dev/mapper/"+name]] = name
+	}
+	if name, ok := f.dmOfDevNo[devNo]; ok {
+		return f.dms[name]
+	}
 	return nil
+}
+
+// devNoHeld reports whether some path of devNo holds the device number
+// devNo, through the devNoPaths index.
+func (f *fakeNode) devNoHeld(devNo string) bool {
+	if path, ok := f.devNoPaths[devNo]; ok && f.devNo[path] == devNo {
+		return true
+	}
+	f.devNoPaths = make(map[string]string, len(f.devNo))
+	for path, number := range f.devNo {
+		f.devNoPaths[number] = path
+	}
+	_, ok := f.devNoPaths[devNo]
+	return ok
 }
 
 // checkTableDeps rejects a table naming a device number that does not exist —
 // the kernel's behavior, and what makes an out-of-order build fail in tests.
 // An md array's own number exists whatever its /dev/md/{name} link says.
 func (f *fakeNode) checkTableDeps(table string) int {
-	known := make(map[string]bool, len(f.devNo)+len(f.arrays))
-	for _, devNo := range f.devNo {
-		known[devNo] = true
-	}
-	for _, array := range f.arrays {
-		if array.devNo != "" {
-			known[array.devNo] = true
+	arrayHolds := func(devNo string) bool {
+		for _, array := range f.arrays {
+			if array.devNo == devNo {
+				return true
+			}
 		}
+		return false
 	}
 	for _, line := range dmTargets(table) {
 		fields := strings.Fields(line)
@@ -1930,7 +1968,7 @@ func (f *fakeNode) checkTableDeps(table string) int {
 			if strings.Count(field, ":") != 1 {
 				continue
 			}
-			if !known[field] {
+			if !f.devNoHeld(field) && !arrayHolds(field) {
 				return 1
 			}
 		}

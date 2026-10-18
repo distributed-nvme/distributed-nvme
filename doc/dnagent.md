@@ -2783,27 +2783,33 @@ DN14. Reply `agent_reply` — the side-level sweep's verdict
 
 ### `PushMigrBitmap`
 
-DN15. Gate: the side must be known and its `migr_dst_conf.migr_id` must
-equal the request's `migr_id` (`ReplyCodeUnknownObject` otherwise — only a
-destination side accepts chunks). There is **no revision gate**: the
-request carries no `revision` field at all. A chunk is position-addressed
-data keyed by ids that are never reused, and applying one never advances
-the stored revision, so a push the worker planned against a report the
-agent has since replaced with a newer one is harmless — while rejecting it
-would throw away work the worker has already done and need a whole re-sync
-to re-drive (`dnv-worker.md` BM3). Then SH21 to SH23: persist the chunk at
-`LocalMigrBmPath`, recompute from the applied set's contiguous prefix
-(SH23; shifted by the leg's `meta_blocks`), `blkdiscard` the
-fully-skippable regions of
-`DnMigrFinalName`. If the dm-clone does not currently exist — not built
-yet, suppressed by `sp_level`, or still behind DN13's provisioning gate —
-the file still counts as applied; chunks are re-applied whenever the
-dm-clone is (re)created. A **failed persist is still acked code zero**,
-with the error logged and neither the recompute nor the `blkdiscard`
-attempted (`architecture.md`, Bitmap push protocol): not persisted is not
-applied, so the chunk stays out of the applied set — SH21 derives that set
-from the files present — the next `SyncupSide` reply's `bm_info.bm_idx_list`
-omits the index, and the worker pushes it again on a later round. Reply
+DN15. Gate: the side must be known, its `migr_dst_conf.migr_id` must equal
+the request's `migr_id`, and the chunk's `bm_idx` must be below
+`MaxMigrBmCnt` (`ReplyCodeUnknownObject` otherwise, the last refusal naming
+the index and the limit). Only a destination side accepts chunks, and only
+at an index a migration can hold: `AppendMigrationBitmap` refuses an append
+once `bm_cnt` reaches `MaxMigrBmCnt` (`architecture.md`, Migrations), so a
+chunk past it is none of the migration's, and a file persisted for it would
+stay in the applied set (SH21) every `SyncupSide` reply reports. The cn
+agent bounds a clone chunk's index the same way (`cnagent.md` CN22). There
+is **no revision gate**: the request carries no `revision` field at all. A
+chunk is position-addressed data keyed by ids that are never reused, and
+applying one never advances the stored revision, so a push the worker
+planned against a report the agent has since replaced with a newer one is
+harmless — while rejecting it would throw away work the worker has already
+done and need a whole re-sync to re-drive (`dnv-worker.md` BM3). Then SH21
+to SH23: persist the chunk at `LocalMigrBmPath`, recompute from the applied
+set's contiguous prefix (SH23; shifted by the leg's `meta_blocks`),
+`blkdiscard` the fully-skippable regions of `DnMigrFinalName`. If the
+dm-clone does not currently exist — not built yet, suppressed by
+`sp_level`, or still behind DN13's provisioning gate — the file still
+counts as applied; chunks are re-applied whenever the dm-clone is
+(re)created. A **failed persist is still acked code zero**, with the error
+logged and neither the recompute nor the `blkdiscard` attempted
+(`architecture.md`, Bitmap push protocol): not persisted is not applied, so
+the chunk stays out of the applied set — SH21 derives that set from the
+files present — the next `SyncupSide` reply's `bm_info.bm_idx_list` omits
+the index, and the worker pushes it again on a later round. Reply
 `agent_reply` only.
 
 ### `GetDnInfo` / `GetSideInfo`

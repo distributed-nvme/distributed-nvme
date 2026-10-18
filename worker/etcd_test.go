@@ -474,6 +474,7 @@ func TestVoteWorkerAgainstEtcd(t *testing.T) {
 		conns:  newConnCache(),
 		health: &fakeHealthWriter{},
 		clk:    realClock{},
+		tmo:    prodTimeouts(),
 		kinds:  kindFor,
 	}
 	d.conf = newConfCache(d)

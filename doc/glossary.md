@@ -32,7 +32,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **base state** — The once-per-node state a node syncup ensures before any object and no sweep removes: on a disk node the dnv disk format and the agent's nvmet port, on a controller node the tmpfs, the sparse arena file, its single loop device and the port (see `cnagent.md` CN5). A background read that finds a piece of the controller node's base state absent names it in its verdict, so the worker re-sends the node syncup on a round that answers from that observation.
 
-**behavior file** — The JSON file a fake agent or fake gateway re-reads whenever it changes to decide what to report or reply (`behavior.json`): statuses, rows, hangs, dropped streams and forced reply codes. A malformed file leaves the behavior in force unchanged.
+**behavior file** — The JSON file a fake agent or fake gateway re-reads whenever it changes to decide what to report or reply (`behavior.json`): statuses, rows, hangs, dropped streams, forced reply codes and the fake agent's other levers. A malformed file leaves the behavior in force unchanged.
 
 **bins, bin ladder** — The free-extent bands disk-node capacity keys are indexed under, defined by the cluster's shift ladder (`DnBinConf`). A scan walks the bins from the smallest that can hold the request, largest free first.
 
@@ -184,7 +184,13 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **failover** — The sp worker's reaction that makes a healthy, enabled standby the primary when the primary is disabled or has been unhealthy past the primary threshold, held to the cntlr threshold when that is longer while it is settling, and not where a failover cannot help, such as an error any primary would read alike (see `dnv-worker.md` AR5); the unhealthy trigger also needs the coordinator's own verdict (see own-verdict rule). Its transaction takes an old primary that has a health epoch out of the discovery records (see listing rule). The old primary becomes a standby and the new one is settling until its stack is seen built and clean.
 
-**fake agent, fake gateway** — The suites' stand-ins for the processes they do not run, each behind the real server interceptors so its log records every message it receives: `fakeagent` plays the dn and cn agents for the worker and gateway suites, answering from its behavior file and from each object's last accepted request, which its state file keeps across a restart. `fakegateway` plays the gateway for the dnvctl suite, recording each method's call count and last request before answering from its behavior file.
+**fake agent, fake gateway** — The tests' stand-ins for the processes they do not run. A fake agent is any test stand-in for a dn or cn agent. The shared one is the library `integtest/agentfake`, which plays the dn and cn agents, answering from each object's last accepted request and from its levers, which are set in two ways: through the program `fakeagent`, which the worker and gateway suites run behind the real server interceptors so that its log records every message it receives, reads its levers from its behavior file and keeps its stored state in its state file across a restart; and through Go calls, which let a Go test serve a fleet of fake agents in its own process over in-memory connections, stop one and start it again. A package's tests can also keep a fake agent of their own, as the gateway's do (`startFakeAgent`). `fakegateway` plays the gateway for the dnvctl suite, behind the same interceptors, recording each method's call count and last request before answering from its behavior file.
+
+**fake host** — The test code that plays an NVMe/TCP host against the real discovery service of the cdc inside a Go test (`fakeHost` in the cdc package's tests): it speaks only the PDU subset the cdc implements (`cdc.md` NP2, NP3), over a TCP connection on loopback, so the tests drive the real codec (see `cdc.md`, Integration test plan).
+
+**fake OS client** — The test double of the OS client (`FakeOsClient`). The tests of `agent/dnagent` and `agent/cnagent` back it with an in-memory model of the part of the OS their agent drives (`fakeNode`), which answers the agent's commands, reads and writes from memory and records every call, so a real agent runs in a Go test without root or real devices (see `dnagent_integtest.md` and `cnagent_integtest.md`, Goal and scope).
+
+**fake worker** — The test code that plays the worker against a real dn or cn agent inside a Go test (`fakeWorker` in each agent package's tests): it sends the syncups and check rounds a worker sends over an in-memory gRPC connection behind the real server interceptors, one check stream per object, and the dn agent's fake worker also sends migration bitmap pushes, while the package's fake OS client answers the agent's OS calls (see `dnagent_integtest.md` and `cnagent_integtest.md`, Goal and scope).
 
 **fan-out, sync fan-out** — The delivery a revision bump sets off: the worker syncs every object the revision covers, and for a pool the coordinator builds every side and cntlr request once and hands each child its own through the hold: the sides unordered among themselves and before the cntlrs, except that a fan-out that demotes a primary hands that cntlr its demotion before the sides (see `dnv-worker.md` RW14, RW22).
 
@@ -286,6 +292,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **level, sp level** — A pool's degradation ladder (`SpLevel`), from read-write through read-only, no clone, no thin pool, no redundancy, no migration and no side, to disabled; each step suppresses the resources above it so an operator can take a damaged pool apart in stages, and read-only is enforced on the controller node by failing writes.
 
+**lever** — A setting of a fake agent that changes how it answers about one object, such as a row's status, details or reason, a hang of its rounds or of its syncup, a late answer, a dropped stream, a forced reply code, an old or absent observation, or a leftover that clears after some rounds. Its behavior file and Go calls set the same levers (see `dnv-worker.md`, Integration test plan).
+
 **listing rule, discovery listing rule** — The rule that decides which cntlrs' addresses a pool's discovery records carry: a cntlr is listed while it is enabled and either is the primary or has a zero health epoch, which names the primary and every standby a failover may elect (`CdcListed`, `CdcTrConfList`; see `architecture.md` [D18]). Every writer of a `CdcEntry` applies it.
 
 **local store** — The directory an agent keeps the last accepted request per object and one file per received bitmap chunk in (`--local-store`), each written through a temp file, fsync and rename. After a restart it is the desired state the agent reconciles to before serving, and its temp leftovers are deleted at startup.
@@ -378,6 +386,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **planning snapshot** — A read-only etcd snapshot (`Snapshot`) an RPC plans from before its deciding STM: `DeleteThinDevice` walks its thin devices in one, and `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` read the cluster conf in theirs rather than in their deciding STM, `CreateSpareLeg` in a fresh one each round (see `gateway.md` GW5).
 
+**plant, planting library** — To write state into etcd directly from a test, as its writer would have written it: the gateway's transaction for a desired state, or the worker for what it records, such as a health epoch or a `CdcEntry`. Where an allocator would place an object, the test chooses the placement instead. The planting library (`integtest/plant`) holds a set of such writes as Go calls: `workerctl` is a front over it for the shell suites, and the worker's Go tests may call it (see `layout.md`, Dependency rules).
+
 **plays the worker** — What the gateway suite does when it writes a worker-owned flip, starts a migration's cutover or runs a worker-owned drain through `workerctl`, so a gateway precondition can be exercised without a running worker.
 
 **pointer list** — The ids of the sides or cntlrs a node hosts, kept in its record (`side_ptr_list`, `cntlr_ptr_list`) and sent in its syncup request (`side_pointer_list`, `cntlr_pointer_list`); the list is authoritative, so an object it omits is removed by the node sweep.
@@ -451,6 +461,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **row** — One line of an agent's report about one device, with a status and a text: one `ResInfo` of an info (see ResInfo).
 
 **runner** — The script that runs the suites one after another from one configuration file listing each run of a suite with its arguments (`integtest/runner.sh`), runs a failed suite's cleanup-only run before it goes on, and ends with a summary of every run (see `layout.md`, Directory tree). The STM runners of `etcdutil` (see `dnv-worker.md` EU4) and gatewayctl's barrier runner are other things.
+
+**seam** — A place where a test steps into the code it runs without changing what that code does in production: a value the test hands in for the production one, such as the clock or the dial a whole worker starts with, or a log handler that knows one of a call's records and runs the test's own action inside that call, between two of its steps (see `gateway.md`, Integration test plan).
 
 **seed, registration** — Each worker process mints a fresh seed per incarnation and keeps one registration per role under it (`WorkerReg`), re-put every vote interval with no etcd lease: observers judge it by their own clock and delete the key of one they commit dead (see `dnv-worker.md` VW2, VW6). The seed enters the worker's tickets, and a worker that fences itself rejoins under a new one.
 

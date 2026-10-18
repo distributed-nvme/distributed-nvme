@@ -212,11 +212,9 @@ State-dependent validation (a slot in use, an `ns_idx` taken, the geometry
 rules on the `bdev_conf` `CreateStoragePool` merges over the cluster's, the
 primary threshold judged against the cluster's `cntlr_interval`
 (`architecture.md`, Common validation), …) happens inside the STM.
-`CreateStoragePool` judges the merged `bdev_conf` and the primary threshold
-before its STM as well, right after its plain pre-read of `ClusterConf` and
-before its candidate scans (Storage pools and GrowSlice), so a request that
-breaks either rule is `INVALID_ARGUMENT` even on a cluster whose scans would
-come up short (`RESOURCE_EXHAUSTED`).
+`CreateStoragePool` also judges the merged `bdev_conf` and the primary
+threshold before its STM and before its candidate scans, at the place and
+for the reason `architecture.md`, Storage pools, gives.
 
 GW5. **Resolution in-STM.** Resolution is the in-STM reads that turn
 `cluster_name`, and `sp_name`, into the cluster id and the `SpConf`; the
@@ -333,7 +331,7 @@ uncommitted (`dnv-worker.md` EU4).
 * `ALREADY_EXISTS`: a create finds the name key (or, for `CreateCluster`, a
   global) present.
 * `FAILED_PRECONDITION`: a documented public precondition fails, a
-  `model.ErrPrecondition` with any reason but the two below included — the
+  `model.ErrPrecondition` with any reason but the three below included — the
   meta ladder cap among them, `GrowSlice`'s `MaxGrpCntPerSlice` group
   ceiling (`architecture.md`, GrowSlice), a counter the id step cannot move
   without wrapping (GW19), and a pool that has spent every thin id
@@ -345,7 +343,10 @@ uncommitted (`dnv-worker.md` EU4).
   `clone_name_list` at `MaxCloneCntPerSp`, `xfer_name_list` at
   `MaxXferCntPerSp`, `migr_name_list` at `MaxMigrCntPerSp`, a group's
   `spare_leg_list` at `MaxSpareLegPerGrp` (`architecture.md`,
-  `service Gateway` — RPC specifications); too few candidates
+  `service Gateway` — RPC specifications), whether the gateway's own check
+  sees it or `model.CreateSpareLeg`'s, whose `ErrPrecondition` with
+  `model.ReasonSpareListFull` a create committed after the gateway's check
+  reaches (Spare legs); too few candidates
   (`architecture.md`, Per-operation allocation); `AppendMigrationBitmap`'s
   `bm_cnt` at `MaxMigrBmCnt`; `AppendCloneBitmap`'s stored chunk plus the
   new page above `CloneBmChunkBytes` — one chunk's ceiling reached by
@@ -436,9 +437,21 @@ whose rounds have reached the cap answers `ABORTED` "candidate allocation
 did not settle", naming the ctx's error or the cap. The cap is what bounds
 a request whose client set no deadline, which steady churn could otherwise
 hold in its handler for ever (Constants this document owns). The reason
-is never surfaced to a client. `DeleteThinDevice` runs the same loop, cap
-included, without allocating: its scan is the plan's walk for uncreated
-snapshots, and its STM fails candidate-changed when the SP it resolves is
+is never surfaced to a client. Each allocating RPC answers its count
+ceiling in every round ahead of its scan, from a read made before the
+scan: `MaxSpCntPerCluster` (`CreateStoragePool`, at the place
+`architecture.md`, Storage pools, gives it), `MaxCntlrCntPerSp`
+(`CreateCntlr`) and `MaxMigrCntPerSp` (`CreateMigration`) from the planning
+read, right behind GW6's token check, and the spare list at
+`MaxSpareLegPerGrp` and `GrowSlice`'s group ceiling from the planning
+snapshot. A caller at a
+ceiling then hears the ceiling rather than a scan's shortfall, and no scan
+is run for a create that cannot commit. The deciding STM checks the
+ceiling again, because only it sees a create that commits between the two
+reads.
+`DeleteThinDevice` runs the same loop, cap included, without allocating:
+its scan is the plan's walk for uncreated snapshots, and its STM fails
+candidate-changed when the SP it resolves is
 not the one the plan walked or its `SpRev.revision` is no longer the one the
 plan read — though a request carrying the token that finds the revision
 moved fails GW6 first, `ABORTED` (Thin devices).
@@ -684,19 +697,16 @@ delete, get, list, update-disabled and inspect.
   (one extent) first, then the data group (`init_ext_cnt` extents) — extent
   counts only; `model.GroupBlocks` turns each into `meta_blocks` and
   `data_blocks` in the STM, where the conf it needs has been read and
-  checked. Candidate unit (GW9): a plain pre-read of `ClusterConf`, gated by
-  `model.ValidateClusterConf` as the scans gate it (a stored conf that fails
-  it is `ABORTED`, GW11, before anything is computed from it), and over it
+  checked. Candidate unit (GW9): first the checks `architecture.md`,
+  Storage pools, makes before the scans, in its order and for its reasons.
+  Over a plain pre-read of `ClusterConf` (`spPreReadCluster`) they are
+  `model.ValidateClusterConf` (a stored conf that fails it is `ABORTED`,
+  GW11), the overflow of `init_ext_cnt` times that conf's `extent_size`,
   the same merge and resolution the STM makes below, which gives the scans
-  their leg count (`legCntOf`); `validateMergedBdevConf` on that conf,
-  because the raw request was judged by the geometry rules only between the
-  members it set (a refusal is `INVALID_ARGUMENT`, and the message says it
-  concerns the merged conf), and before the scans, so that a cluster short
-  of nodes does not answer a request that breaks a rule `RESOURCE_EXHAUSTED`
-  first; `validatePrimaryThreshold` of the request's `event_threshold`
-  against that `ClusterConf`, the rule of `architecture.md`, Common
-  validation, that ties a pool's primary threshold to its cluster's
-  `cntlr_interval`, there for the same reason; then the DN scan per group
+  their leg count (`legCntOf`) and which `validateMergedBdevConf` judges,
+  and `validatePrimaryThreshold`; then come the name (`spNameUnused`) and
+  the pool count ceiling (`spCntBelowCeiling`), each on a plain read of its
+  own. Then the DN scan per group
   (`pickDns`) and the CN scan per cntlr (`pickCn`) of `architecture.md`,
   Per-operation allocation, which owns the growing black list, the random
   pick and the two CN tiers — neither asks for metadata units, since a new
@@ -830,7 +840,8 @@ position, and a re-run of the STM closure on the same picks and reads
   gate included, then the token (GW6), so a deleting SP is
   `FAILED_PRECONDITION` and a stale token `ABORTED` before the scan can
   answer `RESOURCE_EXHAUSTED` for want of an eligible CN — to a stale
-  client, an answer computed against cntlrs it has not read; then the SP's
+  client, an answer computed against cntlrs it has not read; then the
+  `MaxCntlrCntPerSp` ceiling (`cntlrCntBelowCeiling`, GW9); then the SP's
   slices, which size the scan, its cntlrs, whose CNs the scan excludes, and
   every clone it lists, a draining one included (`loadClones`), whose
   `meta_units` sum is the scan's floor of free metadata units
@@ -839,7 +850,8 @@ position, and a re-run of the STM closure on the same picks and reads
   `RESOURCE_EXHAUSTED` saying no CN has metadata room. A listed clone whose
   key is missing is `ABORTED`. The locations are read after the snapshot,
   from those CNs' `CnConf`s (`cnLocations`), outside every transaction.
-  STM: resolve; token; the slot in `cntlid_slot_list` and unused, else
+  STM: resolve; token; the `MaxCntlrCntPerSp` ceiling again; the slot in
+  `cntlid_slot_list` and unused, else
   `INVALID_ARGUMENT`; the gain check of `architecture.md`, Per-operation
   allocation — the SP as this STM reads it having a cntlr on a CN the
   round's plan did not hold is candidate changed (GW9), which only a
@@ -969,8 +981,11 @@ are those of `architecture.md`, Subsystems, namespaces.
   the listing rule as every writer does (`architecture.md` [D18]); a
   `CdcEntry` whose key is missing is rebuilt as `CreateSubsystem` writes it
   (`rebuildCdcEntry`) and written with the new hosts. Reply `ss_id`.
-* **CreateNamespace** — the subsystem by NQN; `ns_idx` non-zero and unused
-  in this subsystem; the td by `td_name`; mint `ns_id`; defaults: an empty
+* **CreateNamespace** — `ns_idx` non-zero, judged with the rest of the
+  validation before any read (GW4), so that a full subsystem never answers
+  it with its ceiling; STM: the subsystem by NQN; the `MaxNsCntPerSs`
+  ceiling; `ns_idx` unused in this subsystem; the td by `td_name`; mint
+  `ns_id`; defaults: an empty
   `dev_uuid` is a random RFC 4122 version 4 UUID in the canonical dashed
   form, an empty `dev_nguid` a random NGUID in hex; append to `ns_list`.
   Reply `ns_id`.
@@ -1111,7 +1126,9 @@ able to complete.
 
 The codes are those of `architecture.md`, Migrations.
 
-* **CreateMigration** — locate `src_side_id` by a slice scan; its leg
+* **CreateMigration** — the `MaxMigrCntPerSp` ceiling, right behind the
+  token in each round's planning read (`migrCntBelowCeiling`, GW9); locate
+  `src_side_id` by a slice scan; its leg
   already holding two sides is refused; a candidate unit for one DN
   (`pickDns`, with the black list and the two tiers of `architecture.md`,
   Per-operation allocation; the group's DN locations are read outside every
@@ -1121,7 +1138,8 @@ The codes are those of `architecture.md`, Migrations.
   locations — before it scans). The scan passes over a DN without room for
   those units (`architecture.md`, Metadata units), and a round left with no
   DN for that reason alone answers `RESOURCE_EXHAUSTED` saying no DN has
-  metadata room. STM: resolve; token; re-verify the topology; the units
+  metadata room. STM: resolve; token; the ceiling again; re-verify the
+  topology; the units
   computed again from what this STM reads; the gain check of
   `architecture.md`, Per-operation allocation — the group as this STM reads
   it holding a DN the round's read of it did not is candidate changed
@@ -1198,7 +1216,10 @@ deciding STM below.
   `pickDns` with the two tiers of `architecture.md`, Per-operation
   allocation, and no metadata units; then the call of `model.CreateSpareLeg`
   with the token's revision as its expected revision (GW6) and the plan,
-  whose STM also refuses while a spare of the group still has an
+  whose STM checks the full list again — a create committed since the
+  snapshot reaches it, and its `model.ReasonSpareListFull` is answered
+  `RESOURCE_EXHAUSTED` like the pre-check (GW7) — also refuses while a
+  spare of the group still has an
   unprovisioned side (`FAILED_PRECONDITION` through `ErrPrecondition`,
   `dnv-worker.md` AR8), and answers candidate changed — so the round runs
   again from a fresh snapshot — for a group that holds a DN outside the
@@ -1365,6 +1386,36 @@ suite plays the worker through `workerctl` wherever a gateway precondition
 waits on a worker flip or a migration's cutover, or a latch needs the
 worker's drain. It runs on one server as a plain user, because nothing it
 exercises needs root.
+
+**What the Go cases prove.** The package's Go tests call the handlers as plain
+methods against one real etcd per test binary (`dnv-worker.md` EU7), with the
+package's own fake agent (`startFakeAgent`) behind every node a handler calls,
+and with `model` calls or planted writes in the worker's place where a
+precondition waits on the worker. Beyond each handler's own rules, they hold,
+through the real handlers, the count ceilings of `architecture.md`,
+Cardinality limits, on a cluster's nodes and pools, a pool's cntlrs and named
+objects, a subsystem's namespaces, a node's sides or cntlrs, a group's spare
+legs, a slice's groups and a migration bitmap's chunks, and the size edges of
+`architecture.md`, Size → extents and Group on-leg layout, and of a transport
+service id: a ceiling is filled by real creates, the create that takes its
+last place is accepted and the next is refused with nothing written, and a
+size is accepted at its edge and, one past it, refused or, for a controller
+node's budget, cut to it. The allowed-host list is held at its length through
+every handler that takes one, and the rest of `architecture.md`, Common
+validation, through the validator's own functions (GW4). The pool count is the
+one exception to the real creates: the case that runs in every mode plants the
+pool count for its race and its refusals, which keeps it fast enough for every
+run; only outside `go test -short` do real creates fill the count in full, and
+the next create is then refused. The id counters at the id step's last values
+are planted too, since no run of calls reaches them in a test. Each of these
+count ceilings is also raced at its last place by two token-less creates, the
+second run to its end inside the first at the moment the first has read the
+counted record — a log handler on the etcd read record (`volReadHook`) is the
+seam — so the order that only the deciding STM's check can refuse is played on
+every run (GW9). For a node's ceiling that check is the STM's re-check of its
+pick: a node at its ceiling leaves the scan by the presence rule of
+`architecture.md`, Capacity index keys, and a create that picked it before is
+sent back to its scan.
 
 **Topology.** The developer machine builds the binaries and drives one
 Linux server over ssh, with no sudo anywhere. Everything runs on that

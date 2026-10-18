@@ -4,14 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"maps"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,48 +17,109 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/integtest/agentfake"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
+// The program's own tests: its command line and its two files. What the
+// fake answers under each lever is the library's (integtest/agentfake);
+// these tests play the levers through the behavior file and the stored
+// state through the state file, over the program's own wiring.
+
 // ---------------------------------------------------------------------------
-// Harness: one fake agent behind the real server interceptors (grpc.md,
-// Wiring) on bufconn, exactly as main() wires it (common/interceptor_test.go's
-// house pattern).
+// The command line
 // ---------------------------------------------------------------------------
 
-func newTestAgent(t *testing.T) *fakeAgent {
-	t.Helper()
-	agent, err := newFakeAgent(context.Background(), t.TempDir(), 4096)
-	if err != nil {
-		t.Fatalf("newFakeAgent: %v", err)
+func TestParseArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantMsg  string
+		want     options
+	}{
+		{name: "no subcommand", args: nil, wantCode: 2, wantMsg: usageText},
+		{name: "unknown subcommand", args: []string{"xn"}, wantCode: 2,
+			wantMsg: usageText},
+		{name: "flag before the subcommand",
+			args: []string{"--dir", "d", "dn"}, wantCode: 2,
+			wantMsg: usageText},
+		{name: "unknown flag", args: []string{"dn", "--nope"}, wantCode: 2},
+		{name: "help", args: []string{"cn", "-h"}, wantCode: 0},
+		{name: "no address", args: []string{"dn", "--dir", "d"},
+			wantCode: 1, wantMsg: "fakeagent: --grpc-address is required"},
+		{name: "no dir", args: []string{"dn", "--grpc-address", "a:1"},
+			wantCode: 1, wantMsg: "fakeagent: --dir is required"},
+		{name: "dn with the default size",
+			args: []string{"dn", "--grpc-address", "127.0.0.1:1",
+				"--dir", "/w/dn0"},
+			wantCode: -1,
+			want: options{mode: "dn", kind: agentfake.Dn,
+				addr: "127.0.0.1:1", dir: "/w/dn0",
+				size: agentfake.DefaultNodeSize}},
+		// The gateway suite starts its cn fakes at size zero, which the
+		// fake replies as it is.
+		{name: "cn at size zero",
+			args: []string{"cn", "--grpc-address", "127.0.0.1:2",
+				"--dir", "/w/cn0", "--size", "0"},
+			wantCode: -1,
+			want: options{mode: "cn", kind: agentfake.Cn,
+				addr: "127.0.0.1:2", dir: "/w/cn0", size: 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			got, err := parseArgs(tc.args, &output)
+			if tc.wantCode < 0 {
+				if err != nil {
+					t.Fatalf("parseArgs(%q): %v", tc.args, err)
+				}
+				if got != tc.want {
+					t.Fatalf("parseArgs(%q) = %+v, want %+v", tc.args, got,
+						tc.want)
+				}
+				return
+			}
+			var exit *exitError
+			if !errors.As(err, &exit) || exit.code != tc.wantCode ||
+				exit.msg != tc.wantMsg {
+				t.Fatalf("parseArgs(%q) = %v, want exit %d %q", tc.args, err,
+					tc.wantCode, tc.wantMsg)
+			}
+		})
 	}
-	return agent
 }
 
-func startAgent(
-	t *testing.T, agent *fakeAgent,
-) (pb.DiskNodeAgentClient, pb.ControllerNodeAgentClient) {
-	t.Helper()
+// ---------------------------------------------------------------------------
+// Harness: the program's wiring, served over bufconn
+// ---------------------------------------------------------------------------
 
+// startProgram builds and serves one program of the kind over dir, with its
+// behavior file poll running, and returns a client connection to it.
+func startProgram(
+	t *testing.T, kind agentfake.Kind, dir string, size uint64,
+) (*program, *grpc.ClientConn) {
+	t.Helper()
+	mode := "dn"
+	if kind == agentfake.Cn {
+		mode = "cn"
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p, err := newProgram(ctx, options{
+		mode: mode, kind: kind, addr: "bufnet", dir: dir, size: size,
+	})
+	if err != nil {
+		cancel()
+		t.Fatalf("newProgram: %v", err)
+	}
 	lis := bufconn.Listen(1024 * 1024)
-	server := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)
-	pb.RegisterDiskNodeAgentServer(server, agent)
-	pb.RegisterControllerNodeAgentServer(server, agent)
 	go func() {
-		if err := server.Serve(lis); err != nil {
+		if err := p.serve(ctx, lis); err != nil {
 			t.Logf("fake agent server stopped: %v", err)
 		}
 	}()
-
-	conn, err := grpc.NewClient(
-		"passthrough:///bufnet",
+	conn, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(
 			func(ctx context.Context, _ string) (net.Conn, error) {
 				return lis.DialContext(ctx)
@@ -70,23 +127,24 @@ func startAgent(
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
+		cancel()
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() {
 		conn.Close()
-		server.Stop()
-		lis.Close()
+		p.server.Stop()
+		cancel()
 	})
-	return pb.NewDiskNodeAgentClient(conn), pb.NewControllerNodeAgentClient(conn)
+	return p, conn
 }
 
-// writeFile writes one of the agent's two files and stamps a strictly newer
-// mtime, so the reload rules ("mtime changed" for behavior.json, "newer than
-// the fake's own last write" for state.json) fire deterministically however
-// coarse the filesystem's timestamps are.
-func writeFile(t *testing.T, agent *fakeAgent, name, content string) {
+// writeFile writes one file of the directory and stamps a strictly newer
+// mtime, so the reload rules ("mtime or size changed" for behavior.json,
+// "newer than the fake's own last write" for state.json) fire
+// deterministically however coarse the filesystem's timestamps are.
+func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
-	path := filepath.Join(agent.dir, name)
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("writing %s: %v", name, err)
 	}
@@ -96,2069 +154,8 @@ func writeFile(t *testing.T, agent *fakeAgent, name, content string) {
 	}
 }
 
-func sidePtr(spId, legId, sideId uint64) *pb.SidePointer {
-	return &pb.SidePointer{SpId: spId, LegId: legId, SideId: sideId}
-}
-
-func cntlrPtr(spId, cntlrId uint64) *pb.CntlrPointer {
-	return &pb.CntlrPointer{SpId: spId, CntlrId: cntlrId}
-}
-
-func keysOf[V any](m map[uint64]V) []uint64 {
-	keys := make([]uint64, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
-}
-
-// chunkPairs flattens an applied clone set to the (src_slice_idx, bm_idx)
-// pairs it addresses, in the order reported.
-func chunkPairs(chunkIdList []*pb.BmChunkId) [][2]uint32 {
-	pairs := make([][2]uint32, 0, len(chunkIdList))
-	for _, chunkId := range chunkIdList {
-		pairs = append(pairs,
-			[2]uint32{chunkId.GetSrcSliceIdx(), chunkId.GetBmIdx()})
-	}
-	return pairs
-}
-
-func wantKeys[V any](t *testing.T, name string, m map[uint64]V, want ...uint64) {
-	t.Helper()
-	got := keysOf(m)
-	if want == nil {
-		want = []uint64{}
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("%s keys = %v, want %v", name, got, want)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// behavior.json parsing (dnv-worker.md, Integration test plan, The fake agent)
-// ---------------------------------------------------------------------------
-
-func TestParseBehaviorBothStatusSpellings(t *testing.T) {
-	parsed, err := parseBehavior([]byte(`{
-	  "default": {"status": "OK"},
-	  "objects": {
-	    "dn": {"rows": {"meta_info": {"status": "PROVISIONING"}}},
-	    "cn": {"status": "RES_STATUS_MISSING",
-	           "rows": {"port_info": {"status": "res_status_error",
-	                                  "details": "boom"}}},
-	    "side 1:3:5": {"zeroed_bytes": 0, "zero_bytes": 4194304},
-	    "cntlr 1:1": {"thin_ok": true, "thin_missing_slices": [1, 2],
-	                  "bm_idx_list": [0, 1],
-	                  "chunk_id_list": ["2:1", "0:3"], "hang": false,
-	                  "drop_stream": true, "reply_code": 2,
-	                  "rows": {"leg_id_to_leg.7": {"status": "ERROR",
-	                                               "details": "probe timeout"}}}
-	  }
-	}`))
-	if err != nil {
-		t.Fatalf("parseBehavior: %v", err)
-	}
-	if parsed.Default.status != pb.ResStatus_RES_STATUS_OK {
-		t.Errorf("default status = %v", parsed.Default.status)
-	}
-	dn := parsed.Objects["dn"]
-	if got := dn.Rows["meta_info"].status; got !=
-		pb.ResStatus_RES_STATUS_PROVISIONING {
-		t.Errorf("dn meta_info status = %v", got)
-	}
-	cn := parsed.Objects["cn"]
-	if cn.status != pb.ResStatus_RES_STATUS_MISSING {
-		t.Errorf("cn status = %v", cn.status)
-	}
-	// The full RES_STATUS_* spelling must resolve to the same enum as the
-	// short one.
-	if got := cn.Rows["port_info"].status; got !=
-		pb.ResStatus_RES_STATUS_ERROR {
-		t.Errorf("cn port_info status = %v", got)
-	}
-	side := parsed.Objects["side 1:3:5"]
-	if side.ZeroedBytes == nil || *side.ZeroedBytes != 0 {
-		t.Errorf("side zeroed_bytes = %v", side.ZeroedBytes)
-	}
-	if side.ZeroBytes == nil || *side.ZeroBytes != 4<<20 {
-		t.Errorf("side zero_bytes = %v", side.ZeroBytes)
-	}
-	cntlr := parsed.Objects["cntlr 1:1"]
-	if !cntlr.ThinOk || cntlr.Hang || !cntlr.DropStream ||
-		cntlr.ReplyCode != 2 {
-		t.Errorf("cntlr levers = %+v", cntlr)
-	}
-	if !slices.Equal(cntlr.ThinMissingSlices, []uint64{1, 2}) {
-		t.Errorf("thin_missing_slices = %v", cntlr.ThinMissingSlices)
-	}
-	if cntlr.BmIdxList == nil || !slices.Equal(*cntlr.BmIdxList,
-		[]uint32{0, 1}) {
-		t.Errorf("bm_idx_list = %v", cntlr.BmIdxList)
-	}
-	// chunk_id_list is parsed to pairs once, in the order given: it is a
-	// forced set, not a derived one, so validate does not reorder it.
-	if !slices.Equal(chunkPairs(cntlr.chunkIdList),
-		[][2]uint32{{2, 1}, {0, 3}}) {
-		t.Errorf("chunk_id_list = %v", chunkPairs(cntlr.chunkIdList))
-	}
-}
-
-// TestParseResStatusNames pins the behavior file's status vocabulary: every
-// ResStatus value parses in both spellings, so a behavior file can plant any
-// row a real agent can report — PENDING included, the cn agent's leg row
-// before its prober completes a round (cnagent.md CN11).
-func TestParseResStatusNames(t *testing.T) {
-	for value, name := range pb.ResStatus_name {
-		want := pb.ResStatus(value)
-		short := strings.TrimPrefix(name, "RES_STATUS_")
-		for _, spelling := range []string{short, name, strings.ToLower(name)} {
-			got, err := parseResStatus(spelling)
-			if err != nil || got != want {
-				t.Errorf("parseResStatus(%q) = %v, %v; want %v",
-					spelling, got, err, want)
-			}
-		}
-	}
-	for _, spelling := range []string{"PENDING", "RES_STATUS_PENDING"} {
-		if got, err := parseResStatus(spelling); err != nil ||
-			got != pb.ResStatus_RES_STATUS_PENDING {
-			t.Errorf("parseResStatus(%q) = %v, %v; want PENDING",
-				spelling, got, err)
-		}
-	}
-}
-
-func TestParseBehaviorMalformed(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		data string
-	}{
-		{"broken json", `{"default": {`},
-		{"unknown field", `{"objects": {"dn": {"reply-code": 2}}}`},
-		{"unknown status", `{"objects": {"dn": {"status": "BROKEN"}}}`},
-		{"unknown row status",
-			`{"objects": {"dn": {"rows": {"disk_info": {"status": "nope"}}}}}`},
-		{"wrong type", `{"objects": {"dn": {"thin_ok": "yes"}}}`},
-		{"unpaired chunk id",
-			`{"objects": {"cntlr 1:1": {"chunk_id_list": ["1"]}}}`},
-		{"non-decimal chunk id",
-			`{"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0x1"]}}}`},
-		{"trailing data", `{} {}`},
-		// when_primary gates on a cntlr's role, which nothing else has.
-		{"when_primary on a dn",
-			`{"objects": {"dn": {"rows": {"disk_info":
-			  {"status": "ERROR", "when_primary": true}}}}}`},
-		{"when_primary on a side",
-			`{"objects": {"side 1:3:5": {"rows": {"side_dev_info":
-			  {"status": "ERROR", "when_primary": true}}}}}`},
-		{"when_primary in default",
-			`{"default": {"rows": {"disk_info": {"when_primary": true}}}}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parseBehavior([]byte(tc.data)); err == nil {
-				t.Fatalf("parseBehavior(%q) succeeded, want an error", tc.data)
-			}
-		})
-	}
-}
-
-// TestBehaviorReloadKeepsPreviousOnMalformed pins that a malformed
-// behavior.json is logged and IGNORED: the agent must keep answering with the
-// last good behaviour instead of dying.
-func TestBehaviorReloadKeepsPreviousOnMalformed(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ctx := context.Background()
-
-	if _, err := dnClient.SyncupDn(ctx, &pb.SyncupDnRequest{
-		ClusterId: 1, DnId: 1, Revision: 1,
-	}); err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"dn": {"rows": {"disk_info": {"status": "ERROR",
-		 "details": "io"}}}}}`)
-	reply, err := dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-		ClusterId: 1, DnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetDnInfo: %v", err)
-	}
-	if got := reply.GetDnInfo().GetDiskInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != "io" {
-		t.Fatalf("disk_info = %v", got)
-	}
-
-	writeFile(t, agent, behaviorFileName, `{"objects": {"dn": {`)
-	reply, err = dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-		ClusterId: 1, DnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetDnInfo after the malformed file: %v", err)
-	}
-	if got := reply.GetDnInfo().GetDiskInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != "io" {
-		t.Fatalf("disk_info after the malformed file = %v, want the "+
-			"previous behaviour", got)
-	}
-
-	// An absent file means {}: every row OK again.
-	if err := os.Remove(
-		filepath.Join(agent.dir, behaviorFileName)); err != nil {
-		t.Fatalf("removing behavior.json: %v", err)
-	}
-	reply, err = dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-		ClusterId: 1, DnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetDnInfo after the removal: %v", err)
-	}
-	if got := reply.GetDnInfo().GetDiskInfo().GetStatus(); got !=
-		pb.ResStatus_RES_STATUS_OK {
-		t.Fatalf("disk_info status after the removal = %v, want OK", got)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// The revision gate (dnv-worker.md, Integration test plan, The fake agent)
-// ---------------------------------------------------------------------------
-
-// syncupDn is the fixture every side test needs first: the DN must know the
-// side pointer before a SyncupSide is anything but ReplyCodeUnknownObject.
-func syncupDn(
-	t *testing.T, client pb.DiskNodeAgentClient,
-	revision uint64, ptrList ...*pb.SidePointer,
-) *pb.SyncupDnReply {
-	t.Helper()
-	reply, err := client.SyncupDn(context.Background(), &pb.SyncupDnRequest{
-		ClusterId:       1,
-		DnId:            1,
-		Revision:        revision,
-		SidePointerList: ptrList,
-		ExtentSize:      67108864,
-	})
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	return reply
-}
-
-// testZeroBytes is the side_conf.zero_bytes syncupSide sends: a data side's
-// length to zero, its meta region and first data block, at three meta blocks
-// of 1 MiB (architecture.md, Side provisioning protocol).
-const testZeroBytes = uint64(4) << 20
-
-func syncupSide(
-	t *testing.T, client pb.DiskNodeAgentClient,
-	ptr *pb.SidePointer, revision uint64, migrId uint64,
-) *pb.SyncupSideReply {
-	t.Helper()
-	req := &pb.SyncupSideRequest{
-		ClusterId:   1,
-		DnId:        1,
-		SidePointer: ptr,
-		Revision:    revision,
-		SideConf: &pb.SyncupSideRequest_SideConf{
-			ExtCnt:        2,
-			PrimaryCnId:   1,
-			StandbyIdList: []uint64{2, 3},
-			ZeroBytes:     testZeroBytes,
-		},
-	}
-	if migrId != 0 {
-		req.MigrDstConf = &pb.SyncupSideRequest_MigrDstConf{
-			MigrId: migrId,
-			BmCnt:  2,
-		}
-	}
-	reply, err := client.SyncupSide(context.Background(), req)
-	if err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
-	return reply
-}
-
-// TestGateStaleSyncupRevision covers the revision gate (dnv-worker.md,
-// Integration test plan, The fake agent): a Syncup* whose revision is lower
-// than the stored one is ReplyCodeStaleRevision, and the reply still reports
-// the agent's own (higher) revision.
-func TestGateStaleSyncupRevision(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-
-	if code := syncupDn(t, dnClient, 2).GetAgentReply().GetCode(); code != 0 {
-		t.Fatalf("SyncupDn revision 2 code = %d", code)
-	}
-	reply := syncupDn(t, dnClient, 1)
-	if got := reply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeStaleRevision {
-		t.Fatalf("SyncupDn revision 1 code = %d, want %d",
-			got, common.ReplyCodeStaleRevision)
-	}
-	if reply.GetRevision() != 2 {
-		t.Errorf("rejected reply revision = %d, want 2", reply.GetRevision())
-	}
-	// Equal revisions re-apply (workers retry): the Revision gate of
-	// architecture.md, Common agent rules.
-	if code := syncupDn(t, dnClient, 2).GetAgentReply().GetCode(); code != 0 {
-		t.Errorf("SyncupDn at the equal revision code = %d, want 0", code)
-	}
-
-	cnReply, err := cnClient.SyncupCn(context.Background(), &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 4,
-	})
-	if err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	if cnReply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("SyncupCn code = %d", cnReply.GetAgentReply().GetCode())
-	}
-	cnReply, err = cnClient.SyncupCn(context.Background(), &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 3,
-	})
-	if err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	if got := cnReply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeStaleRevision {
-		t.Fatalf("stale SyncupCn code = %d, want %d",
-			got, common.ReplyCodeStaleRevision)
-	}
-}
-
-// TestPushIsNotGatedOnRevision pins the revision-free push (dnv-worker.md BM3;
-// architecture.md, Bitmap push protocol): a Push* carries no revision at all,
-// so the fake's gatePushLocked has nothing to compare and a chunk planned
-// against a report the desired state has since superseded is still recorded.
-// The descriptor check is the part a future edit cannot quietly undo — a
-// revision field could only come back by being added to the proto again.
-func TestPushIsNotGatedOnRevision(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 2, ptr)
-	syncupSide(t, dnClient, ptr, 2, 30)
-
-	for _, req := range []proto.Message{
-		&pb.PushMigrBitmapRequest{}, &pb.PushCloneBitmapRequest{},
-	} {
-		desc := req.ProtoReflect().Descriptor()
-		if desc.Fields().ByName("revision") != nil {
-			t.Fatalf("%s still carries a revision field", desc.FullName())
-		}
-	}
-
-	// The side's stored revision moves far past the round the push below was
-	// planned in, and the push is still a plain accept, because a chunk is
-	// position-addressed data keyed by an id that is never reused.
-	syncupDn(t, dnClient, 9, ptr)
-	syncupSide(t, dnClient, ptr, 9, 30)
-	reply, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId:   1,
-		DnId:        1,
-		SidePointer: ptr,
-		MigrId:      30,
-		BmIdx:       0,
-		Bitmap:      []byte{0xff, 0x00},
-	})
-	if err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
-	}
-	if got := reply.GetAgentReply().GetCode(); got != 0 {
-		t.Fatalf("push code = %d (%s), want it accepted",
-			got, reply.GetAgentReply().GetDetails())
-	}
-	if got := syncupSide(t, dnClient, ptr, 9, 30).GetBmInfo().
-		GetBmIdxList(); !slices.Equal(got, []uint32{0}) {
-		t.Fatalf("bm_idx_list = %v, want the pushed chunk applied", got)
-	}
-
-	// The cn twin, through the same gate.
-	syncupCntlrFixture(t, cnClient, true)
-	pushCloneBm(t, cnClient, 41, 0, 0, 3)
-}
-
-// TestForcedReplyCodeCarriesLeftover pins the one lever the teardown suites
-// need from the fake: behavior.json's reply_code is passed through verbatim,
-// so an object can be made to answer common.ReplyCodeLeftover on a Syncup*, a
-// Check* round and a Get*Info alike. The fake does not MODEL a sweep — a
-// forced non-zero code still suppresses the apply, which a real leftover
-// reply never does — it only produces the code the worker must accept.
-func TestForcedReplyCodeCarriesLeftover(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ctx := context.Background()
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, ptr)
-	syncupSide(t, dnClient, ptr, 1, 30)
-
-	writeFile(t, agent, behaviorFileName,
-		fmt.Sprintf(`{"objects": {"side 1:3:5": {"reply_code": %d}}}`,
-			common.ReplyCodeLeftover))
-
-	if got := syncupSide(t, dnClient, ptr, 1, 30).GetAgentReply().
-		GetCode(); got != common.ReplyCodeLeftover {
-		t.Fatalf("SyncupSide code = %d, want %d",
-			got, common.ReplyCodeLeftover)
-	}
-	info, err := dnClient.GetSideInfo(ctx, &pb.GetSideInfoRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-	})
-	if err != nil {
-		t.Fatalf("GetSideInfo: %v", err)
-	}
-	if got := info.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeLeftover {
-		t.Fatalf("GetSideInfo code = %d, want %d",
-			got, common.ReplyCodeLeftover)
-	}
-	stream, err := dnClient.CheckSide(ctx)
-	if err != nil {
-		t.Fatalf("CheckSide: %v", err)
-	}
-	if err := stream.Send(&pb.CheckSideRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
-	}); err != nil {
-		t.Fatalf("CheckSide send: %v", err)
-	}
-	checkReply, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("CheckSide recv: %v", err)
-	}
-	if got := checkReply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeLeftover {
-		t.Fatalf("CheckSide code = %d, want %d",
-			got, common.ReplyCodeLeftover)
-	}
-}
-
-// TestGateUnknownPushId covers the fake's push refusal (dnv-worker.md,
-// Integration test plan, The fake agent): a Push* naming a migr_id/clone_id
-// absent from the object's last accepted request is ReplyCodeUnknownObject.
-func TestGateUnknownPushId(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 2, ptr)
-	syncupSide(t, dnClient, ptr, 2, 30)
-
-	reply, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-		MigrId: 99, BmIdx: 0, Bitmap: []byte{0xff},
-	})
-	if err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
-	}
-	if got := reply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeUnknownObject {
-		t.Fatalf("unknown migr_id code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-
-	// The known id is accepted and lands in the derived applied set.
-	if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-		MigrId: 30, BmIdx: 1, Bitmap: []byte{0xff, 0xff},
-	}); err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
-	}
-	if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-		MigrId: 30, BmIdx: 0, Bitmap: []byte{0xff, 0xff},
-	}); err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
-	}
-	bmInfo := syncupSide(t, dnClient, ptr, 2, 30).GetBmInfo()
-	if bmInfo.GetResId() != 30 ||
-		!slices.Equal(bmInfo.GetBmIdxList(), []uint32{0, 1}) {
-		t.Fatalf("bm_info = %v, want res_id 30 and [0 1]", bmInfo)
-	}
-
-	// The cn twin: a clone_id absent from the last SyncupCntlr.
-	cPtr := cntlrPtr(1, 1)
-	if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-		CntlrPointerList: []*pb.CntlrPointer{cPtr},
-	}); err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	if _, err := cnClient.SyncupCntlr(ctx, &pb.SyncupCntlrRequest{
-		ClusterId: 1, CnId: 1, CntlrPointer: cPtr, Revision: 1,
-		CloneList: []*pb.Clone{{CloneId: 41}},
-	}); err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
-	cloneReply, err := cnClient.PushCloneBitmap(ctx,
-		&pb.PushCloneBitmapRequest{
-			ClusterId: 1, CnId: 1, CntlrPointer: cPtr,
-			CloneId: 42, SrcSliceIdx: 1, BmIdx: 0, Bitmap: []byte{0x01},
-		})
-	if err != nil {
-		t.Fatalf("PushCloneBitmap: %v", err)
-	}
-	if got := cloneReply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeUnknownObject {
-		t.Fatalf("unknown clone_id code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-}
-
-// TestGateOrderingUnknownChild covers the fake's ordering rejection
-// (dnv-worker.md, Integration test plan, The fake agent), the real agents'
-// ordering rule the worker's independent roles must survive: a side
-// absent from the DN's last SyncupDn — or a cntlr absent from the CN's last
-// SyncupCn — is ReplyCodeUnknownObject on Syncup*, Check* and Get*Info alike.
-func TestGateOrderingUnknownChild(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-	ptr := sidePtr(1, 3, 5)
-
-	// No SyncupDn at all yet.
-	if got := syncupSide(t, dnClient, ptr, 1, 0).GetAgentReply().
-		GetCode(); got != common.ReplyCodeUnknownObject {
-		t.Fatalf("SyncupSide before SyncupDn code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-
-	// A SyncupDn that does not list this pointer.
-	syncupDn(t, dnClient, 1, sidePtr(1, 3, 6))
-	if got := syncupSide(t, dnClient, ptr, 1, 0).GetAgentReply().
-		GetCode(); got != common.ReplyCodeUnknownObject {
-		t.Fatalf("SyncupSide for an unlisted pointer code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-
-	stream, err := dnClient.CheckSide(ctx)
-	if err != nil {
-		t.Fatalf("CheckSide: %v", err)
-	}
-	if err := stream.Send(&pb.CheckSideRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
-	}); err != nil {
-		t.Fatalf("CheckSide send: %v", err)
-	}
-	checkReply, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("CheckSide recv: %v", err)
-	}
-	if got := checkReply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeUnknownObject {
-		t.Fatalf("CheckSide for an unlisted pointer code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-	if checkReply.GetSideInfo() != nil || checkReply.GetRevision() != 0 {
-		t.Errorf("unknown CheckSide reply = %v, want no info and revision 0",
-			checkReply)
-	}
-	stream.CloseSend()
-
-	// Listing it makes the very same request apply.
-	syncupDn(t, dnClient, 2, ptr)
-	if got := syncupSide(t, dnClient, ptr, 2, 0).GetAgentReply().
-		GetCode(); got != 0 {
-		t.Fatalf("SyncupSide for a listed pointer code = %d, want 0", got)
-	}
-	// ... and dropping it again forgets the side (the Full sync rule of
-	// architecture.md, Common agent rules).
-	syncupDn(t, dnClient, 3)
-	if got := syncupSide(t, dnClient, ptr, 3, 0).GetAgentReply().
-		GetCode(); got != common.ReplyCodeUnknownObject {
-		t.Fatalf("SyncupSide after the pointer was dropped code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-
-	// The cn twin.
-	cPtr := cntlrPtr(1, 1)
-	cntlrReply, err := cnClient.SyncupCntlr(ctx, &pb.SyncupCntlrRequest{
-		ClusterId: 1, CnId: 1, CntlrPointer: cPtr, Revision: 1,
-	})
-	if err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
-	if got := cntlrReply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeUnknownObject {
-		t.Fatalf("SyncupCntlr before SyncupCn code = %d, want %d",
-			got, common.ReplyCodeUnknownObject)
-	}
-}
-
-// TestForcedReplyCodeRejects covers behavior.json's reply_code lever: it
-// forces agent_reply.code on every reply of the object and, because a
-// rejected request must not have been applied, suppresses the apply —
-// worker_test.sh case C step 6 clears the lever and expects the push to still
-// be missing.
-func TestForcedReplyCodeRejects(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, ptr)
-	syncupSide(t, dnClient, ptr, 1, 30)
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"side 1:3:5": {"reply_code": 1}}}`)
-	pushReply, err := dnClient.PushMigrBitmap(context.Background(),
-		&pb.PushMigrBitmapRequest{
-			ClusterId: 1, DnId: 1, SidePointer: ptr,
-			MigrId: 30, BmIdx: 0, Bitmap: []byte{0x01},
-		})
-	if err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
-	}
-	if got := pushReply.GetAgentReply().GetCode(); got != 1 {
-		t.Fatalf("forced push code = %d, want 1", got)
-	}
-
-	writeFile(t, agent, behaviorFileName, `{}`)
-	if got := syncupSide(t, dnClient, ptr, 1, 30).GetBmInfo().
-		GetBmIdxList(); len(got) != 0 {
-		t.Fatalf("bm_idx_list = %v, want the forced push not to have "+
-			"been applied", got)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// *Info derivation (dnv-worker.md, Integration test plan, The fake agent)
-// ---------------------------------------------------------------------------
-
-// cntlrFixture is a SyncupCntlrRequest shaped like worker_test.sh's cases,
-// which the derivation tests assert against: two slices, a meta and a data
-// group with a spare leg each, two tds, one subsystem with two namespaces, one
-// clone and one xfer.
-func cntlrFixture(primary bool) *pb.SyncupCntlrRequest {
-	return &pb.SyncupCntlrRequest{
-		ClusterId:    1,
-		CnId:         1,
-		CntlrPointer: cntlrPtr(1, 1),
-		Revision:     5,
-		Cntlr:        &pb.Cntlr{CntlidSlot: 0, Primary: primary},
-		IdToSlice: map[string]*pb.Slice{
-			fmt.Sprintf(common.IdKeyFmt, 1): {
-				SliceIdx: 0,
-				MetaGrpList: []*pb.Group{{
-					GrpId:   11,
-					ExtCnt:  1,
-					LegList: []*pb.Leg{{LegId: 101, LegIdx: 0}},
-					SpareLegList: []*pb.Leg{
-						{LegId: 102, LegIdx: 1},
-					},
-				}},
-				DataGrpList: []*pb.Group{{
-					GrpId:  12,
-					ExtCnt: 2,
-					LegList: []*pb.Leg{
-						{LegId: 103, LegIdx: 0},
-						{LegId: 104, LegIdx: 1},
-					},
-				}},
-			},
-			fmt.Sprintf(common.IdKeyFmt, 2): {
-				SliceIdx: 1,
-				DataGrpList: []*pb.Group{{
-					GrpId:        21,
-					ExtCnt:       2,
-					LegList:      []*pb.Leg{{LegId: 201, LegIdx: 0}},
-					SpareLegList: []*pb.Leg{{LegId: 202, LegIdx: 1}},
-				}},
-			},
-		},
-		TdList: []*pb.ThinDevice{
-			{TdId: 7, DevId: 1, Size: 1 << 30},
-			{TdId: 8, DevId: 2, Size: 1 << 30},
-		},
-		NqnToSubsystem: map[string]*pb.Subsystem{
-			"nqn.2024-01.io.dnv-it:ss0": {
-				SsId: 3,
-				NsList: []*pb.Namespace{
-					{NsId: 31, NsIdx: 1, TdId: 7},
-					{NsId: 32, NsIdx: 2, TdId: 8},
-				},
-			},
-		},
-		CloneList: []*pb.Clone{{CloneId: 41, DstTdId: 7}},
-		XferList:  []*pb.Transfer{{XferId: 51}},
-	}
-}
-
-// syncupCntlrFixture brings the CN and the cntlr up to the fixture state and
-// returns the SyncupCntlr reply.
-func syncupCntlrFixture(
-	t *testing.T, cnClient pb.ControllerNodeAgentClient, primary bool,
-) *pb.SyncupCntlrReply {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
-	}); err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	reply, err := cnClient.SyncupCntlr(ctx, cntlrFixture(primary))
-	if err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("SyncupCntlr code = %d (%s)",
-			reply.GetAgentReply().GetCode(),
-			reply.GetAgentReply().GetDetails())
-	}
-	return reply
-}
-
-func TestCntlrInfoDerivation(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	writeFile(t, agent, behaviorFileName, `{
-	  "objects": {"cntlr 1:1": {"rows": {
-	    "leg_id_to_leg.103": {"status": "ERROR", "details": "probe timeout"},
-	    "slice_id_to_dm_pool.1": {"details": "0 8192 thin-pool 5 40/1024"}
-	  }}}
-	}`)
-
-	reply := syncupCntlrFixture(t, cnClient, true)
-	info := reply.GetCntlrInfo()
-	if info == nil {
-		t.Fatal("cntlr_info is nil")
-	}
-	if reply.GetRevision() != 5 {
-		t.Errorf("revision = %d, want 5", reply.GetRevision())
-	}
-
-	wantKeys(t, "slice_id_to_dm_pool", info.GetSliceIdToDmPool(), 1, 2)
-	wantKeys(t, "slice_id_to_meta", info.GetSliceIdToMeta(), 1, 2)
-	wantKeys(t, "slice_id_to_data", info.GetSliceIdToData(), 1, 2)
-	wantKeys(t, "grp_id_to_md_raid", info.GetGrpIdToMdRaid(), 11, 12, 21)
-	// One row per leg AND per SPARE leg of every group: 102 and 202 are the
-	// spares, and worker_test.sh case D step 7 reads exactly them.
-	wantKeys(t, "leg_id_to_leg", info.GetLegIdToLeg(),
-		101, 102, 103, 104, 201, 202)
-	wantKeys(t, "td_id_to_raid0", info.GetTdIdToRaid0(), 7, 8)
-	wantKeys(t, "td_id_to_dm_error", info.GetTdIdToDmError(), 7, 8)
-	wantKeys(t, "ss_id_to_subsystem", info.GetSsIdToSubsystem(), 3)
-	wantKeys(t, "ns_id_to_namespace", info.GetNsIdToNamespace(), 31, 32)
-	wantKeys(t, "ns_id_to_dm_linear", info.GetNsIdToDmLinear(), 31, 32)
-	wantKeys(t, "clone_id_to_target", info.GetCloneIdToTarget(), 41)
-	wantKeys(t, "clone_id_to_dm_clone", info.GetCloneIdToDmClone(), 41)
-	wantKeys(t, "clone_id_to_meta", info.GetCloneIdToMeta(), 41)
-	wantKeys(t, "xfer_id_to_dm_linear", info.GetXferIdToDmLinear(), 51)
-	wantKeys(t, "xfer_id_to_subsystem", info.GetXferIdToSubsystem(), 51)
-	wantKeys(t, "xfer_id_to_namespace", info.GetXferIdToNamespace(), 51)
-	// thin_ok is absent, so the thin map stays empty even on the primary.
-	wantKeys(t, "td_id_to_thin_info", info.GetTdIdToThinInfo())
-	// No leg of the fixture has two sides, so there is no path row.
-	wantKeys(t, "side_id_to_path", info.GetSideIdToPath())
-
-	leg := info.GetLegIdToLeg()[103]
-	if leg.GetResName() != "leg_id_to_leg.103" ||
-		leg.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		leg.GetDetails() != "probe timeout" {
-		t.Errorf("leg_id_to_leg.103 = %v", leg)
-	}
-	if leg.GetEpoch() == 0 {
-		t.Errorf("leg_id_to_leg.103 epoch = 0, want the change time")
-	}
-	pool := info.GetSliceIdToDmPool()[1]
-	if pool.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
-		pool.GetDetails() != "0 8192 thin-pool 5 40/1024" {
-		t.Errorf("slice_id_to_dm_pool.1 = %v, want an OK row with details",
-			pool)
-	}
-	if got := info.GetLegIdToLeg()[101].GetStatus(); got !=
-		pb.ResStatus_RES_STATUS_OK {
-		t.Errorf("leg_id_to_leg.101 status = %v, want the default OK", got)
-	}
-
-	// bm_info_list: one entry per clone, res_id = clone_id (architecture.md,
-	// Bitmap push protocol).
-	if len(reply.GetBmInfoList()) != 1 ||
-		reply.GetBmInfoList()[0].GetResId() != 41 {
-		t.Errorf("bm_info_list = %v, want one entry for clone 41",
-			reply.GetBmInfoList())
-	}
-}
-
-// TestCntlrInfoWhenPrimary is the fake's when_primary (dnv-worker.md,
-// Integration test plan, The fake agent): the row override applies only while
-// the cntlr's last accepted request carries cntlr.primary = true, and an
-// ungated override beside it applies either way.
-func TestCntlrInfoWhenPrimary(t *testing.T) {
-	const behavior = `{"objects": {"cntlr 1:1": {"rows": {
-	  "slice_id_to_dm_pool.1": {"status": "ERROR", "details": "settling test",
-	                            "when_primary": true},
-	  "slice_id_to_meta.1": {"status": "ERROR", "details": "always"}
-	}}}}`
-	if _, err := parseBehavior([]byte(behavior)); err != nil {
-		t.Fatalf("parseBehavior: %v, want when_primary accepted on a cntlr",
-			err)
-	}
-	for _, tc := range []struct {
-		name     string
-		primary  bool
-		wantPool pb.ResStatus
-	}{
-		{"standby", false, pb.ResStatus_RES_STATUS_OK},
-		{"primary", true, pb.ResStatus_RES_STATUS_ERROR},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			agent := newTestAgent(t)
-			_, cnClient := startAgent(t, agent)
-			writeFile(t, agent, behaviorFileName, behavior)
-			info := syncupCntlrFixture(t, cnClient, tc.primary).GetCntlrInfo()
-			pool := info.GetSliceIdToDmPool()[1]
-			if pool.GetStatus() != tc.wantPool {
-				t.Errorf("slice_id_to_dm_pool.1 status = %v, want %v",
-					pool.GetStatus(), tc.wantPool)
-			}
-			wantDetails := ""
-			if tc.primary {
-				wantDetails = "settling test"
-			}
-			if pool.GetDetails() != wantDetails {
-				t.Errorf("slice_id_to_dm_pool.1 details = %q, want %q",
-					pool.GetDetails(), wantDetails)
-			}
-			if got := info.GetSliceIdToDmPool()[2].GetStatus(); got !=
-				pb.ResStatus_RES_STATUS_OK {
-				t.Errorf("slice_id_to_dm_pool.2 status = %v, want OK", got)
-			}
-			if got := info.GetSliceIdToMeta()[1].GetStatus(); got !=
-				pb.ResStatus_RES_STATUS_ERROR {
-				t.Errorf("slice_id_to_meta.1 status = %v, want the ungated "+
-					"ERROR", got)
-			}
-		})
-	}
-}
-
-func TestCntlrInfoThinRows(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		primary    bool
-		behavior   string
-		wantTds    []uint64
-		wantSlices []uint64
-	}{
-		{
-			name:     "primary without thin_ok",
-			primary:  true,
-			behavior: `{"objects": {"cntlr 1:1": {}}}`,
-			wantTds:  nil,
-		},
-		{
-			name:     "standby with thin_ok",
-			primary:  false,
-			behavior: `{"objects": {"cntlr 1:1": {"thin_ok": true}}}`,
-			wantTds:  nil,
-		},
-		{
-			name:       "primary with thin_ok",
-			primary:    true,
-			behavior:   `{"objects": {"cntlr 1:1": {"thin_ok": true}}}`,
-			wantTds:    []uint64{7, 8},
-			wantSlices: []uint64{1, 2},
-		},
-		{
-			name:    "primary with a missing slice",
-			primary: true,
-			behavior: `{"objects": {"cntlr 1:1": {"thin_ok": true,
-			            "thin_missing_slices": [2]}}}`,
-			wantTds:    []uint64{7, 8},
-			wantSlices: []uint64{1},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			agent := newTestAgent(t)
-			_, cnClient := startAgent(t, agent)
-			writeFile(t, agent, behaviorFileName, tc.behavior)
-			info := syncupCntlrFixture(t, cnClient, tc.primary).GetCntlrInfo()
-			wantKeys(t, "td_id_to_thin_info", info.GetTdIdToThinInfo(),
-				tc.wantTds...)
-			for _, tdId := range tc.wantTds {
-				thin := info.GetTdIdToThinInfo()[tdId]
-				wantKeys(t,
-					fmt.Sprintf("td_id_to_thin_info.%d.slice_id_to_dm_thin",
-						tdId),
-					thin.GetSliceIdToDmThin(), tc.wantSlices...)
-				for _, sliceId := range tc.wantSlices {
-					row := thin.GetSliceIdToDmThin()[sliceId]
-					want := fmt.Sprintf("td_id_to_thin_info.%d.%d",
-						tdId, sliceId)
-					if row.GetResName() != want {
-						t.Errorf("res_name = %q, want %q",
-							row.GetResName(), want)
-					}
-					if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
-						t.Errorf("%s status = %v, want OK",
-							want, row.GetStatus())
-					}
-				}
-			}
-		})
-	}
-}
-
-// TestSideInfoDerivation asserts the fake's SideInfo shape: one row per
-// per-CN export stack, the migration roles only when their conf rode along,
-// and the provisioning counters of architecture.md, Side provisioning protocol
-// (zero_bytes = side_conf.zero_bytes, zeroed_bytes = zero_bytes by default).
-func TestSideInfoDerivation(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, ptr)
-
-	info := syncupSide(t, dnClient, ptr, 1, 0).GetSideInfo()
-	if info == nil {
-		t.Fatal("side_info is nil")
-	}
-	wantKeys(t, "cn_id_to_dm_error", info.GetCnIdToDmError(), 1, 2, 3)
-	wantKeys(t, "cn_id_to_dm_linear", info.GetCnIdToDmLinear(), 1, 2, 3)
-	wantKeys(t, "cn_id_to_nvmeof", info.GetCnIdToNvmeof(), 1, 2, 3)
-	if info.GetMigrSrcInfo() != nil || info.GetMigrDstInfo() != nil {
-		t.Errorf("migr info = %v/%v without a conf",
-			info.GetMigrSrcInfo(), info.GetMigrDstInfo())
-	}
-	if info.GetZeroBytes() != testZeroBytes ||
-		info.GetZeroedBytes() != testZeroBytes {
-		t.Errorf("counters = %d/%d, want the instant-zeroing default %d/%d",
-			info.GetZeroedBytes(), info.GetZeroBytes(),
-			testZeroBytes, testZeroBytes)
-	}
-	if got := info.GetSideDevInfo().GetResName(); got != "side_dev_info" {
-		t.Errorf("side_dev_info res_name = %q", got)
-	}
-
-	// The destination role and a partial-zeroing override (worker_test.sh case
-	// F step 2 holds a side unprovisioned exactly this way).
-	writeFile(t, agent, behaviorFileName, `{
-	  "objects": {"side 1:3:5": {"zeroed_bytes": 0,
-	    "rows": {"side_dev_info": {"status": "PROVISIONING"}}}}
-	}`)
-	info = syncupSide(t, dnClient, ptr, 1, 30).GetSideInfo()
-	if info.GetMigrDstInfo().GetTargetInfo() == nil ||
-		info.GetMigrDstInfo().GetDmCloneInfo() == nil {
-		t.Errorf("migr_dst_info = %v, want both rows",
-			info.GetMigrDstInfo())
-	}
-	if info.GetZeroedBytes() != 0 || info.GetZeroBytes() != testZeroBytes {
-		t.Errorf("counters = %d/%d, want 0/%d",
-			info.GetZeroedBytes(), info.GetZeroBytes(), testZeroBytes)
-	}
-	if got := info.GetSideDevInfo().GetStatus(); got !=
-		pb.ResStatus_RES_STATUS_PROVISIONING {
-		t.Errorf("side_dev_info status = %v, want PROVISIONING", got)
-	}
-
-	// A zero_bytes override alone: zeroed_bytes follows it, as it follows
-	// the request's length by default.
-	writeFile(t, agent, behaviorFileName, `{
-	  "objects": {"side 1:3:5": {"zero_bytes": 8388608}}
-	}`)
-	info = syncupSide(t, dnClient, ptr, 1, 0).GetSideInfo()
-	if info.GetZeroedBytes() != 8<<20 || info.GetZeroBytes() != 8<<20 {
-		t.Errorf("counters = %d/%d, want the override %d/%d",
-			info.GetZeroedBytes(), info.GetZeroBytes(), 8<<20, 8<<20)
-	}
-}
-
-// syncupMigrDst sends a migration destination's SyncupSide: side_conf
-// provisioned or not, and migr_dst_conf with or without cutover_pending.
-func syncupMigrDst(
-	t *testing.T, client pb.DiskNodeAgentClient, ptr *pb.SidePointer,
-	revision uint64, provisioned bool, pending bool,
-) *pb.SyncupSideReply {
-	t.Helper()
-	reply, err := client.SyncupSide(context.Background(),
-		&pb.SyncupSideRequest{
-			ClusterId:   1,
-			DnId:        1,
-			SidePointer: ptr,
-			Revision:    revision,
-			SideConf: &pb.SyncupSideRequest_SideConf{
-				ExtCnt:      2,
-				PrimaryCnId: 1,
-				ZeroBytes:   testZeroBytes,
-				Provisioned: provisioned,
-			},
-			MigrDstConf: &pb.SyncupSideRequest_MigrDstConf{
-				MigrId:         30,
-				CutoverPending: pending,
-			},
-		})
-	if err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
-	if code := reply.GetAgentReply().GetCode(); code != 0 {
-		t.Fatalf("SyncupSide code = %d (%s)", code,
-			reply.GetAgentReply().GetDetails())
-	}
-	return reply
-}
-
-// wantRow asserts one ResInfo's status, details and reason.
-func wantRow(
-	t *testing.T, name string, row *pb.ResInfo,
-	status pb.ResStatus, details string, reason pb.ResReason,
-) {
-	t.Helper()
-	if row.GetResName() != name || row.GetStatus() != status ||
-		row.GetDetails() != details || row.GetReason() != reason {
-		t.Errorf("%s = %v, want %v %q %v", name, row, status, details,
-			reason)
-	}
-}
-
-// TestSideInfoAwaitsTheCutover is the fake's half of the cutover
-// (dnv-worker.md, Integration test plan, The fake agent): a migration
-// destination whose request carries the side provisioned and the cutover
-// pending reports both migr_dst_info rows PROVISIONING "waiting for the
-// cutover" with RES_REASON_AWAITING_CUTOVER, on the Syncup reply and on
-// GetSideInfo alike; neither half alone does, and a lever that moves a row
-// off PROVISIONING takes the reason with it.
-func TestSideInfoAwaitsTheCutover(t *testing.T) {
-	const (
-		target = "migr_dst_info.target_info"
-		clone  = "migr_dst_info.dm_clone_info"
-		ok     = pb.ResStatus_RES_STATUS_OK
-		prov   = pb.ResStatus_RES_STATUS_PROVISIONING
-		none   = pb.ResReason_RES_REASON_NONE
-		await  = pb.ResReason_RES_REASON_AWAITING_CUTOVER
-	)
-	for _, tc := range []struct {
-		name        string
-		provisioned bool
-		pending     bool
-		behavior    string
-		wantTarget  [3]any
-		wantClone   [3]any
-	}{
-		{
-			name:       "pending but not provisioned",
-			pending:    true,
-			wantTarget: [3]any{ok, "", none},
-			wantClone:  [3]any{ok, "", none},
-		},
-		{
-			name:        "provisioned, the cutover started",
-			provisioned: true,
-			wantTarget:  [3]any{ok, "", none},
-			wantClone:   [3]any{ok, "", none},
-		},
-		{
-			name:        "provisioned and pending",
-			provisioned: true,
-			pending:     true,
-			wantTarget:  [3]any{prov, detailsAwaitingCutover, await},
-			wantClone:   [3]any{prov, detailsAwaitingCutover, await},
-		},
-		{
-			name:        "a lever moves the target row off PROVISIONING",
-			provisioned: true,
-			pending:     true,
-			behavior: `{"objects": {"side 1:3:5": {"rows": {
-			  "migr_dst_info.target_info": {"status": "MISSING",
-			                                "details": "held"}}}}}`,
-			wantTarget: [3]any{pb.ResStatus_RES_STATUS_MISSING, "held", none},
-			wantClone:  [3]any{prov, detailsAwaitingCutover, await},
-		},
-		{
-			name:        "a lever on the details alone keeps the reason",
-			provisioned: true,
-			pending:     true,
-			behavior: `{"objects": {"side 1:3:5": {"rows": {
-			  "migr_dst_info.target_info": {"details": "other text"}}}}}`,
-			wantTarget: [3]any{prov, "other text", await},
-			wantClone:  [3]any{prov, detailsAwaitingCutover, await},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			agent := newTestAgent(t)
-			dnClient, _ := startAgent(t, agent)
-			if tc.behavior != "" {
-				writeFile(t, agent, behaviorFileName, tc.behavior)
-			}
-			ptr := sidePtr(1, 3, 5)
-			syncupDn(t, dnClient, 1, ptr)
-			reply := syncupMigrDst(
-				t, dnClient, ptr, 1, tc.provisioned, tc.pending)
-			got, err := dnClient.GetSideInfo(context.Background(),
-				&pb.GetSideInfoRequest{
-					ClusterId: 1, DnId: 1, SidePointer: ptr,
-				})
-			if err != nil {
-				t.Fatalf("GetSideInfo: %v", err)
-			}
-			for _, info := range []*pb.SideInfo{
-				reply.GetSideInfo(), got.GetSideInfo(),
-			} {
-				dst := info.GetMigrDstInfo()
-				wantRow(t, target, dst.GetTargetInfo(),
-					tc.wantTarget[0].(pb.ResStatus),
-					tc.wantTarget[1].(string),
-					tc.wantTarget[2].(pb.ResReason))
-				wantRow(t, clone, dst.GetDmCloneInfo(),
-					tc.wantClone[0].(pb.ResStatus),
-					tc.wantClone[1].(string),
-					tc.wantClone[2].(pb.ResReason))
-			}
-		})
-	}
-}
-
-// TestCntlrInfoPathRows is the fake's side_id_to_path (dnv-worker.md,
-// Integration test plan, The fake agent): one row per side of a leg with two
-// sides and none for any other leg, on a standby as on the primary, live for
-// a provisioned side and held at provisioning for one that is not, under the
-// row levers.
-func TestCntlrInfoPathRows(t *testing.T) {
-	request := func(primary bool) *pb.SyncupCntlrRequest {
-		req := cntlrFixture(primary)
-		grp := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, 1)].
-			GetDataGrpList()[0]
-		// Leg 103 is mid-migration, src side 61 provisioned and dst side
-		// 62 not yet; leg 104 has the one side every other leg has.
-		grp.GetLegList()[0].SideList = []*pb.Side{
-			{SideId: 61, Provisioned: true},
-			{SideId: 62},
-		}
-		grp.GetLegList()[1].SideList = []*pb.Side{
-			{SideId: 63, Provisioned: true},
-		}
-		return req
-	}
-	syncup := func(
-		t *testing.T, cnClient pb.ControllerNodeAgentClient,
-		req *pb.SyncupCntlrRequest,
-	) *pb.CntlrInfo {
-		t.Helper()
-		ctx := context.Background()
-		if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-			ClusterId: 1, CnId: 1, Revision: 1,
-			CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
-		}); err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		reply, err := cnClient.SyncupCntlr(ctx, req)
-		if err != nil {
-			t.Fatalf("SyncupCntlr: %v", err)
-		}
-		if code := reply.GetAgentReply().GetCode(); code != 0 {
-			t.Fatalf("SyncupCntlr code = %d", code)
-		}
-		return reply.GetCntlrInfo()
-	}
-	const (
-		ok   = pb.ResStatus_RES_STATUS_OK
-		prov = pb.ResStatus_RES_STATUS_PROVISIONING
-		none = pb.ResReason_RES_REASON_NONE
-	)
-	for _, primary := range []bool{false, true} {
-		t.Run(fmt.Sprintf("primary %v", primary), func(t *testing.T) {
-			agent := newTestAgent(t)
-			_, cnClient := startAgent(t, agent)
-			info := syncup(t, cnClient, request(primary))
-			wantKeys(t, "side_id_to_path", info.GetSideIdToPath(), 61, 62)
-			wantRow(t, "side_id_to_path.61", info.GetSideIdToPath()[61],
-				ok, detailsPathLive, none)
-			wantRow(t, "side_id_to_path.62", info.GetSideIdToPath()[62],
-				prov, detailsPathProvisioning, none)
-
-			// The dst side provisioned: both paths live.
-			req := request(primary)
-			req.Revision++
-			req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, 1)].
-				GetDataGrpList()[0].GetLegList()[0].
-				GetSideList()[1].Provisioned = true
-			info = syncup(t, cnClient, req)
-			wantRow(t, "side_id_to_path.62", info.GetSideIdToPath()[62],
-				ok, detailsPathLive, none)
-
-			// A row lever holds one path down; the other stays live.
-			writeFile(t, agent, behaviorFileName, `{"objects": {
-			  "cntlr 1:1": {"rows": {"side_id_to_path.62":
-			    {"status": "MISSING", "details": "no controller"}}}}}`)
-			got, err := cnClient.GetCntlrInfo(context.Background(),
-				&pb.GetCntlrInfoRequest{
-					ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-				})
-			if err != nil {
-				t.Fatalf("GetCntlrInfo: %v", err)
-			}
-			paths := got.GetCntlrInfo().GetSideIdToPath()
-			wantRow(t, "side_id_to_path.62", paths[62],
-				pb.ResStatus_RES_STATUS_MISSING, "no controller", none)
-			wantRow(t, "side_id_to_path.61", paths[61],
-				ok, detailsPathLive, none)
-		})
-	}
-}
-
-func TestDnAndCnInfoRows(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-
-	// Nothing applied yet: no info, revision 0, so the worker re-syncs.
-	dnInfo, err := dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-		ClusterId: 1, DnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetDnInfo: %v", err)
-	}
-	if dnInfo.GetDnInfo() != nil || dnInfo.GetRevision() != 0 {
-		t.Errorf("GetDnInfo before any syncup = %v", dnInfo)
-	}
-
-	syncupDn(t, dnClient, 1)
-	dnInfo, err = dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-		ClusterId: 1, DnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetDnInfo: %v", err)
-	}
-	got := dnInfo.GetDnInfo()
-	if got.GetDiskInfo().GetResName() != "disk_info" ||
-		got.GetMetaInfo().GetResName() != "meta_info" ||
-		got.GetPortInfo().GetResName() != "port_info" {
-		t.Errorf("dn_info = %v", got)
-	}
-
-	if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-	}); err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	cnInfo, err := cnClient.GetCnInfo(ctx, &pb.GetCnInfoRequest{
-		ClusterId: 1, CnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetCnInfo: %v", err)
-	}
-	cn := cnInfo.GetCnInfo()
-	if cn.GetPortInfo().GetResName() != "port_info" ||
-		cn.GetTmpfsInfo().GetResName() != "tmpfs_info" ||
-		cn.GetTmpFileInfo().GetResName() != "tmp_file_info" ||
-		cn.GetLoopDevInfo().GetResName() != "loop_dev_info" {
-		t.Errorf("cn_info = %v", cn)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// The Check streams (dnv-worker.md, Integration test plan, The fake agent;
-// architecture.md, Check streams)
-// ---------------------------------------------------------------------------
-
-// TestCheckDnChangeOnlyInfo is worker_test.sh case S step 2's "show_info false
-// after the first": the first reply on a fresh stream always carries the full
-// info, show_info = false carries it only when something changed, and
-// show_info = true always carries it.
-func TestCheckDnChangeOnlyInfo(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ctx := context.Background()
-	syncupDn(t, dnClient, 1)
-
-	stream, err := dnClient.CheckDn(ctx)
-	if err != nil {
-		t.Fatalf("CheckDn: %v", err)
-	}
-	round := func(showInfo bool) *pb.CheckDnReply {
-		t.Helper()
-		if err := stream.Send(&pb.CheckDnRequest{
-			ClusterId: 1, DnId: 1, Revision: 1, ShowInfo: showInfo,
-		}); err != nil {
-			t.Fatalf("CheckDn send: %v", err)
-		}
-		reply, err := stream.Recv()
-		if err != nil {
-			t.Fatalf("CheckDn recv: %v", err)
-		}
-		if reply.GetRevision() != 1 {
-			t.Errorf("reply revision = %d, want 1", reply.GetRevision())
-		}
-		return reply
-	}
-
-	if round(false).GetDnInfo() == nil {
-		t.Fatal("the first reply on a fresh stream carries no dn_info")
-	}
-	if got := round(false).GetDnInfo(); got != nil {
-		t.Fatalf("an unchanged round carries dn_info = %v", got)
-	}
-	if round(true).GetDnInfo() == nil {
-		t.Fatal("show_info = true carries no dn_info")
-	}
-	if got := round(false).GetDnInfo(); got != nil {
-		t.Fatalf("an unchanged round after show_info = true carries %v", got)
-	}
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"dn": {"rows": {"disk_info": {"status": "ERROR",
-		 "details": "io"}}}}}`)
-	changed := round(false).GetDnInfo()
-	if changed == nil {
-		t.Fatal("a changed round carries no dn_info")
-	}
-	if changed.GetDiskInfo().GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
-		t.Errorf("disk_info = %v, want ERROR", changed.GetDiskInfo())
-	}
-	if got := round(false).GetDnInfo(); got != nil {
-		t.Fatalf("the round after the change carries %v", got)
-	}
-
-	// A fresh stream always starts with the full info again.
-	stream2, err := dnClient.CheckDn(ctx)
-	if err != nil {
-		t.Fatalf("CheckDn: %v", err)
-	}
-	if err := stream2.Send(&pb.CheckDnRequest{
-		ClusterId: 1, DnId: 1, Revision: 1,
-	}); err != nil {
-		t.Fatalf("CheckDn send: %v", err)
-	}
-	reply, err := stream2.Recv()
-	if err != nil {
-		t.Fatalf("CheckDn recv: %v", err)
-	}
-	if reply.GetDnInfo() == nil {
-		t.Fatal("the first reply on the second stream carries no dn_info")
-	}
-	stream.CloseSend()
-	stream2.CloseSend()
-}
-
-// obsTimes returns a stamp's observation and answer times, zero when unset.
-func obsTimes(stamp *pb.ObsStamp) (obs, answer time.Time) {
-	if ts := stamp.GetObsTime(); ts != nil {
-		obs = ts.AsTime()
-	}
-	if ts := stamp.GetAnswerTime(); ts != nil {
-		answer = ts.AsTime()
-	}
-	return obs, answer
-}
-
-// TestCheckStampsANewObservation covers the fake's observation stamps
-// (dnagent.md SH28): every round of an object the fake knows answers from a
-// new observation — a time later than the last one, the round's own trace
-// id, an answer time not before it and no converge start — and the stamp
-// rides beside the *Info, so the change-only rule still leaves an unchanged
-// info out.
-func TestCheckStampsANewObservation(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	syncupDn(t, dnClient, 1)
-
-	stream, err := dnClient.CheckDn(context.Background())
-	if err != nil {
-		t.Fatalf("CheckDn: %v", err)
-	}
-	defer stream.CloseSend()
-	var last time.Time
-	for i := range 3 {
-		traceId := fmt.Sprintf("round-%d", i)
-		if err := stream.Send(&pb.CheckDnRequest{
-			ClusterId: 1, DnId: 1, Revision: 1, TraceId: traceId,
-		}); err != nil {
-			t.Fatalf("CheckDn send: %v", err)
-		}
-		reply, err := stream.Recv()
-		if err != nil {
-			t.Fatalf("CheckDn recv: %v", err)
-		}
-		if i > 0 && reply.GetDnInfo() != nil {
-			t.Fatalf("round %d carries an unchanged dn_info", i)
-		}
-		stamp := reply.GetObsStamp()
-		obs, answer := obsTimes(stamp)
-		if obs.IsZero() || !obs.After(last) {
-			t.Fatalf("round %d: obs_time %v, want one later than %v",
-				i, obs, last)
-		}
-		if answer.Before(obs) {
-			t.Fatalf("round %d: answer_time %v before obs_time %v",
-				i, answer, obs)
-		}
-		if stamp.GetObsTraceId() != traceId {
-			t.Fatalf("round %d: obs_trace_id %q, want %q", i,
-				stamp.GetObsTraceId(), traceId)
-		}
-		if stamp.GetConvergeStart() != nil {
-			t.Fatalf("round %d: converge_start %v, want unset", i,
-				stamp.GetConvergeStart())
-		}
-		last = obs
-	}
-}
-
-// TestUnknownObjectHasNoObservation: a round or an info read that refuses an
-// object as unknown — a side the last SyncupDn did not list — carries an
-// answer time and no observation, and a Syncup* that refuses it so carries
-// no stamp and no save time at all.
-func TestUnknownObjectHasNoObservation(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ctx := context.Background()
-	syncupDn(t, dnClient, 1)
-	ptr := sidePtr(1, 1, 1)
-
-	wantNone := func(what string, code uint32, stamp *pb.ObsStamp) {
-		t.Helper()
-		if code != common.ReplyCodeUnknownObject {
-			t.Fatalf("%s: code %d, want unknown object", what, code)
-		}
-		obs, answer := obsTimes(stamp)
-		if !obs.IsZero() || stamp.GetObsTraceId() != "" || answer.IsZero() {
-			t.Fatalf("%s: stamp %v, want an answer time alone", what, stamp)
-		}
-	}
-
-	stream, err := dnClient.CheckSide(ctx)
-	if err != nil {
-		t.Fatalf("CheckSide: %v", err)
-	}
-	defer stream.CloseSend()
-	if err := stream.Send(&pb.CheckSideRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1, TraceId: "r",
-	}); err != nil {
-		t.Fatalf("CheckSide send: %v", err)
-	}
-	round, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("CheckSide recv: %v", err)
-	}
-	wantNone("a round", round.GetAgentReply().GetCode(), round.GetObsStamp())
-
-	info, err := dnClient.GetSideInfo(ctx, &pb.GetSideInfoRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr,
-	})
-	if err != nil {
-		t.Fatalf("GetSideInfo: %v", err)
-	}
-	wantNone("an info read", info.GetAgentReply().GetCode(),
-		info.GetObsStamp())
-
-	syncup := syncupSide(t, dnClient, ptr, 1, 0)
-	if code := syncup.GetAgentReply().GetCode(); code !=
-		common.ReplyCodeUnknownObject {
-		t.Fatalf("a SyncupSide: code %d, want unknown object", code)
-	}
-	if syncup.GetObsStamp() != nil || syncup.GetSaveTime() != nil {
-		t.Fatalf("a refused SyncupSide carries stamp %v and save_time %v, "+
-			"want neither", syncup.GetObsStamp(), syncup.GetSaveTime())
-	}
-}
-
-// TestForcedUnknownObjectHasNoObservation: an object behavior.json's
-// reply_code refuses as unknown has no observation either, though its parent
-// lists it, as the real agent sends none with that code (dnagent.md SH25): a
-// round and an info read of each kind carry an answer time alone, and once
-// the lever is cleared the same calls carry an observation again.
-func TestForcedUnknownObjectHasNoObservation(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-	side := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, side)
-	syncupSide(t, dnClient, side, 1, 0)
-	syncupCntlrFixture(t, cnClient, false)
-
-	type stamped interface {
-		GetAgentReply() *pb.AgentReply
-		GetObsStamp() *pb.ObsStamp
-	}
-	// replies is one round and one info read of every kind.
-	replies := func() map[string]stamped {
-		out := map[string]stamped{
-			"CheckDn": oneRound(t, dnClient.CheckDn, &pb.CheckDnRequest{
-				ClusterId: 1, DnId: 1, Revision: 1, TraceId: "r",
-			}),
-			"CheckSide": oneRound(t, dnClient.CheckSide, &pb.CheckSideRequest{
-				ClusterId: 1, DnId: 1, SidePointer: side, Revision: 1,
-				TraceId: "r",
-			}),
-			"CheckCn": oneRound(t, cnClient.CheckCn, &pb.CheckCnRequest{
-				ClusterId: 1, CnId: 1, Revision: 1, TraceId: "r",
-			}),
-			"CheckCntlr": oneRound(t, cnClient.CheckCntlr,
-				&pb.CheckCntlrRequest{
-					ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-					Revision: 5, TraceId: "r",
-				}),
-		}
-		var err error
-		if out["GetDnInfo"], err = dnClient.GetDnInfo(ctx,
-			&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1}); err != nil {
-			t.Fatalf("GetDnInfo: %v", err)
-		}
-		if out["GetSideInfo"], err = dnClient.GetSideInfo(ctx,
-			&pb.GetSideInfoRequest{
-				ClusterId: 1, DnId: 1, SidePointer: side,
-			}); err != nil {
-			t.Fatalf("GetSideInfo: %v", err)
-		}
-		if out["GetCnInfo"], err = cnClient.GetCnInfo(ctx,
-			&pb.GetCnInfoRequest{ClusterId: 1, CnId: 1}); err != nil {
-			t.Fatalf("GetCnInfo: %v", err)
-		}
-		if out["GetCntlrInfo"], err = cnClient.GetCntlrInfo(ctx,
-			&pb.GetCntlrInfoRequest{
-				ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-			}); err != nil {
-			t.Fatalf("GetCntlrInfo: %v", err)
-		}
-		return out
-	}
-
-	writeFile(t, agent, behaviorFileName, `{"objects": {
-		"dn": {"reply_code": 2}, "side 1:3:5": {"reply_code": 2},
-		"cn": {"reply_code": 2}, "cntlr 1:1": {"reply_code": 2}}}`)
-	for call, reply := range replies() {
-		if code := reply.GetAgentReply().GetCode(); code !=
-			common.ReplyCodeUnknownObject {
-			t.Fatalf("%s: code %d, want the forced unknown object", call,
-				code)
-		}
-		stamp := reply.GetObsStamp()
-		obs, answer := obsTimes(stamp)
-		if !obs.IsZero() || stamp.GetObsTraceId() != "" || answer.IsZero() {
-			t.Errorf("%s refusing its object as unknown: stamp %v, want an "+
-				"answer time alone", call, stamp)
-		}
-	}
-
-	writeFile(t, agent, behaviorFileName, `{}`)
-	for call, reply := range replies() {
-		if code := reply.GetAgentReply().GetCode(); code != 0 {
-			t.Fatalf("%s after the clear: code %d", call, code)
-		}
-		if obs, _ := obsTimes(reply.GetObsStamp()); obs.IsZero() {
-			t.Errorf("%s after the clear carries no observation", call)
-		}
-	}
-}
-
-// TestSyncupStampsItsSave: a Syncup* that saved its request carries the save
-// time and an observation after it, under the call's trace id; one the
-// revision gate refuses carries neither, as a live agent's refusal does. An
-// info read stamps an observation too, a later one each time.
-func TestSyncupStampsItsSave(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	ctx := metadata.AppendToOutgoingContext(context.Background(),
-		common.TraceIdMetadataKey, "syncup-trace")
-
-	saved, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 2,
-		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
-	})
-	if err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	obs, answer := obsTimes(saved.GetObsStamp())
-	if saved.GetSaveTime() == nil {
-		t.Fatal("a SyncupCn that saved carries no save_time")
-	}
-	saveAt := saved.GetSaveTime().AsTime()
-	if !obs.After(saveAt) || answer.Before(obs) {
-		t.Fatalf("save %v, obs %v, answer %v; want save < obs <= answer",
-			saveAt, obs, answer)
-	}
-	if got := saved.GetObsStamp().GetObsTraceId(); got != "syncup-trace" {
-		t.Fatalf("obs_trace_id %q, want the call's", got)
-	}
-
-	stale, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-	})
-	if err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	if code := stale.GetAgentReply().GetCode(); code !=
-		common.ReplyCodeStaleRevision {
-		t.Fatalf("SyncupCn revision 1 code = %d, want stale revision", code)
-	}
-	if stale.GetSaveTime() != nil || stale.GetObsStamp() != nil {
-		t.Fatalf("a refused SyncupCn: save_time %v, stamp %v; want neither",
-			stale.GetSaveTime(), stale.GetObsStamp())
-	}
-
-	last := obs
-	for i := range 2 {
-		info, err := cnClient.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
-			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-		})
-		if err != nil {
-			t.Fatalf("GetCntlrInfo: %v", err)
-		}
-		infoObs, _ := obsTimes(info.GetObsStamp())
-		cnInfo, err := cnClient.GetCnInfo(ctx, &pb.GetCnInfoRequest{
-			ClusterId: 1, CnId: 1,
-		})
-		if err != nil {
-			t.Fatalf("GetCnInfo: %v", err)
-		}
-		cnObs, _ := obsTimes(cnInfo.GetObsStamp())
-		if infoObs.IsZero() || !cnObs.After(last) {
-			t.Fatalf("info read %d: cntlr obs %v, cn obs %v; want both "+
-				"set, the cn's after %v", i, infoObs, cnObs, last)
-		}
-		if got := cnInfo.GetObsStamp().GetObsTraceId(); got != "syncup-trace" {
-			t.Fatalf("info read obs_trace_id %q, want the call's", got)
-		}
-		last = cnObs
-	}
-}
-
-// TestRefusedSyncupCarriesNoStamp pins the fake to the live agents on a
-// refused Syncup* (architecture.md, Live-state reporting): for every kind, a
-// reply that refuses the request — a stale revision, a code behavior.json's
-// reply_code forces (InvalidConf), or for a side and a cntlr a pointer the
-// node's last Syncup* does not list — carries no stamp and no save time. A
-// forced ReplyCodeLeftover is no refusal (dnagent.md SH9): its reply carries
-// an observation under the call's trace id, later than the one before it,
-// and no save time, since the fake saves nothing on a forced code. Once the
-// lever is cleared, an accepted request carries both again.
-func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := metadata.AppendToOutgoingContext(context.Background(),
-		common.TraceIdMetadataKey, "syncup-trace")
-	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
-	type reply interface {
-		GetAgentReply() *pb.AgentReply
-		GetObsStamp() *pb.ObsStamp
-		GetSaveTime() *timestamppb.Timestamp
-	}
-	// syncups sends one Syncup* of every kind, each object's at the
-	// revision rev names and the dn's and cn's listing listed, and returns
-	// the replies by RPC name.
-	syncups := func(
-		rev map[string]uint64, listed bool,
-	) map[string]reply {
-		t.Helper()
-		var sides []*pb.SidePointer
-		var cntlrs []*pb.CntlrPointer
-		if listed {
-			sides, cntlrs = []*pb.SidePointer{side}, []*pb.CntlrPointer{cntlr}
-		}
-		out := make(map[string]reply)
-		var err error
-		if out["SyncupDn"], err = dnClient.SyncupDn(ctx, &pb.SyncupDnRequest{
-			ClusterId: 1, DnId: 1, Revision: rev["dn"],
-			SidePointerList: sides, ExtentSize: 67108864,
-		}); err != nil {
-			t.Fatalf("SyncupDn: %v", err)
-		}
-		if out["SyncupSide"], err = dnClient.SyncupSide(ctx,
-			&pb.SyncupSideRequest{
-				ClusterId: 1, DnId: 1, SidePointer: side,
-				Revision: rev["side"],
-				SideConf: &pb.SyncupSideRequest_SideConf{
-					ExtCnt: 2, PrimaryCnId: 1, ZeroBytes: testZeroBytes,
-				},
-			}); err != nil {
-			t.Fatalf("SyncupSide: %v", err)
-		}
-		if out["SyncupCn"], err = cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
-			ClusterId: 1, CnId: 1, Revision: rev["cn"],
-			CntlrPointerList: cntlrs,
-		}); err != nil {
-			t.Fatalf("SyncupCn: %v", err)
-		}
-		req := cntlrFixture(false)
-		req.Revision = rev["cntlr"]
-		if out["SyncupCntlr"], err = cnClient.SyncupCntlr(ctx,
-			req); err != nil {
-			t.Fatalf("SyncupCntlr: %v", err)
-		}
-		return out
-	}
-	wantCode := func(what, call string, r reply, code uint32) {
-		t.Helper()
-		if got := r.GetAgentReply().GetCode(); got != code {
-			t.Fatalf("%s, %s: code %d (%s), want %d", what, call, got,
-				r.GetAgentReply().GetDetails(), code)
-		}
-	}
-	wantNoStamp := func(what string, replies map[string]reply, code uint32) {
-		t.Helper()
-		for call, r := range replies {
-			wantCode(what, call, r, code)
-			if r.GetObsStamp() != nil || r.GetSaveTime() != nil {
-				t.Errorf("%s, %s: stamp %v, save_time %v; want neither",
-					what, call, r.GetObsStamp(), r.GetSaveTime())
-			}
-		}
-	}
-	at := map[string]uint64{"dn": 2, "side": 2, "cn": 2, "cntlr": 5}
-	behind := map[string]uint64{"dn": 1, "side": 1, "cn": 1, "cntlr": 4}
-
-	saved := syncups(at, true)
-	last := make(map[string]time.Time)
-	for call, r := range saved {
-		wantCode("the first Syncups", call, r, 0)
-		obs, _ := obsTimes(r.GetObsStamp())
-		if obs.IsZero() || r.GetSaveTime() == nil {
-			t.Fatalf("the first %s: stamp %v, save_time %v; want both",
-				call, r.GetObsStamp(), r.GetSaveTime())
-		}
-		last[call] = obs
-	}
-
-	wantNoStamp("a stale revision", syncups(behind, true),
-		common.ReplyCodeStaleRevision)
-
-	writeFile(t, agent, behaviorFileName, fmt.Sprintf(`{"objects": {
-		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
-		"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
-		common.ReplyCodeInvalidConf))
-	wantNoStamp("a forced InvalidConf", syncups(at, true),
-		common.ReplyCodeInvalidConf)
-
-	writeFile(t, agent, behaviorFileName, fmt.Sprintf(`{"objects": {
-		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
-		"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
-		common.ReplyCodeLeftover))
-	for call, r := range syncups(at, true) {
-		wantCode("a forced leftover", call, r, common.ReplyCodeLeftover)
-		obs, answer := obsTimes(r.GetObsStamp())
-		if !obs.After(last[call]) || answer.Before(obs) {
-			t.Errorf("a forced leftover, %s: obs %v, answer %v; want obs "+
-				"after %v and answer no earlier", call, obs, answer,
-				last[call])
-		}
-		if got := r.GetObsStamp().GetObsTraceId(); got != "syncup-trace" {
-			t.Errorf("a forced leftover, %s: obs_trace_id %q, want the "+
-				"call's", call, got)
-		}
-		if r.GetSaveTime() != nil {
-			t.Errorf("a forced leftover, %s: save_time %v, want none: the "+
-				"fake saved nothing", call, r.GetSaveTime())
-		}
-	}
-
-	writeFile(t, agent, behaviorFileName, `{}`)
-	// The node Syncups list neither child, so the child Syncups that follow
-	// them are refused as unknown objects.
-	unlisted := syncups(at, false)
-	for _, call := range []string{"SyncupDn", "SyncupCn"} {
-		wantCode("an empty listing", call, unlisted[call], 0)
-		if unlisted[call].GetObsStamp() == nil ||
-			unlisted[call].GetSaveTime() == nil {
-			t.Errorf("an empty listing, %s: stamp %v, save_time %v; want "+
-				"both", call, unlisted[call].GetObsStamp(),
-				unlisted[call].GetSaveTime())
-		}
-		delete(unlisted, call)
-	}
-	wantNoStamp("an unlisted pointer", unlisted,
-		common.ReplyCodeUnknownObject)
-}
-
-// oneRound sends req as the only round of a fresh Check* stream opened by
-// open and returns its reply.
-func oneRound[Req, Rep any](
-	t *testing.T,
-	open func(
-		context.Context, ...grpc.CallOption,
-	) (grpc.BidiStreamingClient[Req, Rep], error),
-	req *Req,
-) *Rep {
-	t.Helper()
-	stream, err := open(context.Background())
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer stream.CloseSend()
-	if err := stream.Send(req); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	reply, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("recv: %v", err)
-	}
-	return reply
-}
-
-// TestEveryReplyIsStamped covers the stamp of every kind's Syncup*, Check*
-// round and info read (dnagent.md SH28): the Syncup* that saved its request
-// carries the save time and an observation after it, and the round and the
-// info read after it each a later observation of the same object, under the
-// call's trace id — the request's own for a round — answered no earlier than
-// it was made.
-func TestEveryReplyIsStamped(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ptr := sidePtr(1, 3, 5)
-	// call is a unary call's ctx carrying traceId, as the worker sends it.
-	call := func(traceId string) context.Context {
-		return metadata.AppendToOutgoingContext(context.Background(),
-			common.TraceIdMetadataKey, traceId)
-	}
-	// reply is one stamped reply of an object, in the order made.
-	type reply interface{ GetObsStamp() *pb.ObsStamp }
-	type saved interface {
-		reply
-		GetAgentReply() *pb.AgentReply
-		GetSaveTime() *timestamppb.Timestamp
-	}
-	check := func(
-		kind string, syncup saved, syncupTrace string,
-		round reply, roundTrace string, info reply, infoTrace string,
-	) {
-		t.Helper()
-		if code := syncup.GetAgentReply().GetCode(); code != 0 {
-			t.Fatalf("%s: Syncup code %d", kind, code)
-		}
-		if syncup.GetSaveTime() == nil {
-			t.Fatalf("%s: a Syncup that saved carries no save_time", kind)
-		}
-		last := syncup.GetSaveTime().AsTime()
-		for _, step := range []struct {
-			what    string
-			stamp   *pb.ObsStamp
-			traceId string
-		}{
-			{"the Syncup", syncup.GetObsStamp(), syncupTrace},
-			{"the round", round.GetObsStamp(), roundTrace},
-			{"the info read", info.GetObsStamp(), infoTrace},
-		} {
-			obs, answer := obsTimes(step.stamp)
-			if !obs.After(last) || answer.Before(obs) {
-				t.Fatalf("%s, %s: obs %v, answer %v; want obs after %v and "+
-					"answer no earlier", kind, step.what, obs, answer, last)
-			}
-			if got := step.stamp.GetObsTraceId(); got != step.traceId {
-				t.Fatalf("%s, %s: obs_trace_id %q, want %q", kind,
-					step.what, got, step.traceId)
-			}
-			last = obs
-		}
-	}
-
-	dnSyncup, err := dnClient.SyncupDn(call("dn-syncup"), &pb.SyncupDnRequest{
-		ClusterId: 1, DnId: 1, Revision: 1,
-		SidePointerList: []*pb.SidePointer{ptr}, ExtentSize: 67108864,
-	})
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	dnRound := oneRound(t, dnClient.CheckDn, &pb.CheckDnRequest{
-		ClusterId: 1, DnId: 1, Revision: 1, TraceId: "dn-round",
-	})
-	dnInfo, err := dnClient.GetDnInfo(call("dn-info"),
-		&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1})
-	if err != nil {
-		t.Fatalf("GetDnInfo: %v", err)
-	}
-	check("dn", dnSyncup, "dn-syncup", dnRound, "dn-round", dnInfo, "dn-info")
-
-	sideSyncup, err := dnClient.SyncupSide(call("side-syncup"),
-		&pb.SyncupSideRequest{
-			ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
-			SideConf: &pb.SyncupSideRequest_SideConf{
-				ExtCnt: 2, PrimaryCnId: 1, ZeroBytes: testZeroBytes,
-			},
-		})
-	if err != nil {
-		t.Fatalf("SyncupSide: %v", err)
-	}
-	sideRound := oneRound(t, dnClient.CheckSide, &pb.CheckSideRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
-		TraceId: "side-round",
-	})
-	sideInfo, err := dnClient.GetSideInfo(call("side-info"),
-		&pb.GetSideInfoRequest{ClusterId: 1, DnId: 1, SidePointer: ptr})
-	if err != nil {
-		t.Fatalf("GetSideInfo: %v", err)
-	}
-	check("side", sideSyncup, "side-syncup", sideRound, "side-round",
-		sideInfo, "side-info")
-
-	cnSyncup, err := cnClient.SyncupCn(call("cn-syncup"), &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
-	})
-	if err != nil {
-		t.Fatalf("SyncupCn: %v", err)
-	}
-	cnRound := oneRound(t, cnClient.CheckCn, &pb.CheckCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1, TraceId: "cn-round",
-	})
-	cnInfo, err := cnClient.GetCnInfo(call("cn-info"),
-		&pb.GetCnInfoRequest{ClusterId: 1, CnId: 1})
-	if err != nil {
-		t.Fatalf("GetCnInfo: %v", err)
-	}
-	check("cn", cnSyncup, "cn-syncup", cnRound, "cn-round", cnInfo, "cn-info")
-
-	cntlrSyncup, err := cnClient.SyncupCntlr(call("cntlr-syncup"),
-		cntlrFixture(false))
-	if err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
-	cntlrRound := oneRound(t, cnClient.CheckCntlr, &pb.CheckCntlrRequest{
-		ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 5,
-		TraceId: "cntlr-round",
-	})
-	cntlrInfo, err := cnClient.GetCntlrInfo(call("cntlr-info"),
-		&pb.GetCntlrInfoRequest{
-			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-		})
-	if err != nil {
-		t.Fatalf("GetCntlrInfo: %v", err)
-	}
-	check("cntlr", cntlrSyncup, "cntlr-syncup", cntlrRound, "cntlr-round",
-		cntlrInfo, "cntlr-info")
-}
-
-// TestCheckCntlrHang is the fake's hang lever (dnv-worker.md,
-// Integration test plan, The fake agent): the round is accepted and not
-// answered while the lever is set, so the worker's round times out
-// (worker_test.sh case B step 4), and the handler ends promptly both when the
-// worker gives up on the stream and when the script clears the lever.
-func TestCheckCntlrHang(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang": true}}}`)
-
-	sendRound := func(
-		stream grpc.BidiStreamingClient[pb.CheckCntlrRequest, pb.CheckCntlrReply],
-	) chan error {
-		t.Helper()
-		if err := stream.Send(&pb.CheckCntlrRequest{
-			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 5,
-		}); err != nil {
-			t.Fatalf("CheckCntlr send: %v", err)
-		}
-		done := make(chan error, 1)
-		go func() {
-			_, err := stream.Recv()
-			done <- err
-		}()
-		select {
-		case err := <-done:
-			t.Fatalf("a hanging round replied: %v", err)
-		case <-time.After(2 * hangPollInterval):
-		}
-		return done
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := cnClient.CheckCntlr(ctx)
-	if err != nil {
-		t.Fatalf("CheckCntlr: %v", err)
-	}
-	done := sendRound(stream)
-
-	// Another object's stream must stay live while the cntlr hangs.
-	other, err := cnClient.CheckCn(context.Background())
-	if err != nil {
-		t.Fatalf("CheckCn: %v", err)
-	}
-	if err := other.Send(&pb.CheckCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-	}); err != nil {
-		t.Fatalf("CheckCn send: %v", err)
-	}
-	if _, err := other.Recv(); err != nil {
-		t.Fatalf("CheckCn recv while another object hangs: %v", err)
-	}
-	other.CloseSend()
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the hanging round did not end when the stream was cancelled")
-	}
-
-	// Clearing the lever releases a round the worker is still waiting on.
-	stream2, err := cnClient.CheckCntlr(context.Background())
-	if err != nil {
-		t.Fatalf("CheckCntlr: %v", err)
-	}
-	done = sendRound(stream2)
-	writeFile(t, agent, behaviorFileName, `{}`)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("the released round failed: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the round did not resume when hang was cleared")
-	}
-	stream2.CloseSend()
-}
-
-// cntlrRound opens a fresh CheckCntlr stream for the fixture's cntlr, sends one
-// round on it and returns the channel the round's outcome lands on, with the
-// stream's cancel — what the worker does on a round timeout.
-func cntlrRound(
-	t *testing.T, cnClient pb.ControllerNodeAgentClient,
-) (chan error, context.CancelFunc) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := cnClient.CheckCntlr(ctx)
-	if err != nil {
-		cancel()
-		t.Fatalf("CheckCntlr: %v", err)
-	}
-	if err := stream.Send(&pb.CheckCntlrRequest{
-		ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 5,
-	}); err != nil {
-		cancel()
-		t.Fatalf("CheckCntlr send: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, err := stream.Recv()
-		done <- err
-	}()
-	return done, cancel
-}
-
-// cnRound runs one CheckCn round on a fresh stream, which also makes the fake
-// load a changed behavior file, and fails unless it is answered.
-func cnRound(t *testing.T, cnClient pb.ControllerNodeAgentClient) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	stream, err := cnClient.CheckCn(ctx)
-	if err != nil {
-		t.Fatalf("CheckCn: %v", err)
-	}
-	if err := stream.Send(&pb.CheckCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 1,
-	}); err != nil {
-		t.Fatalf("CheckCn send: %v", err)
-	}
-	if _, err := stream.Recv(); err != nil {
-		t.Fatalf("CheckCn recv: %v", err)
-	}
-	stream.CloseSend()
-}
-
-// wantHeld fails when a call that must be held has returned.
-func wantHeld(t *testing.T, what string, done chan error) {
-	t.Helper()
-	select {
-	case err := <-done:
-		t.Fatalf("%s returned while held: %v", what, err)
-	case <-time.After(2 * hangPollInterval):
-	}
-}
-
-// wantReturned waits for a call to return and hands back its error.
-func wantReturned(t *testing.T, what string, done chan error) error {
+// returned waits for a call's outcome.
+func returned(t *testing.T, what string, done chan error) error {
 	t.Helper()
 	select {
 	case err := <-done:
@@ -2169,620 +166,342 @@ func wantReturned(t *testing.T, what string, done chan error) error {
 	}
 }
 
-// TestCheckCntlrHangRounds is the fake's hang_rounds lever (worker_test.sh
-// case H's single missed round): each of the next N rounds of the object
-// after the file is loaded is held until its stream ends — a reload that
-// clears the lever does not answer it, and another object's round is answered
-// meanwhile — and the round after them is answered at once. A rewrite of the
-// file counts its rounds afresh.
-func TestCheckCntlrHangRounds(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang_rounds": 1}}}`)
-
-	done, cancel := cntlrRound(t, cnClient)
-	wantHeld(t, "the counted round", done)
-	// The CheckCn round reloads the cleared file while the cntlr's round is
-	// held: the reload re-arms nothing, and the held round stays held.
-	writeFile(t, agent, behaviorFileName, `{}`)
-	cnRound(t, cnClient)
-	wantHeld(t, "the counted round after the reload", done)
-	cancel()
-	if err := wantReturned(t, "the counted round", done); err == nil {
-		t.Fatal("the counted round replied after its stream ended")
-	}
-	done, cancel = cntlrRound(t, cnClient)
-	if err := wantReturned(t, "the round after it", done); err != nil {
-		t.Fatalf("the round after the counted one failed: %v", err)
-	}
-	cancel()
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang_rounds": 2}}}`)
-	for idx := range 2 {
-		done, cancel = cntlrRound(t, cnClient)
-		wantHeld(t, fmt.Sprintf("counted round %d", idx+1), done)
-		cancel()
-		if err := wantReturned(t, "a counted round", done); err == nil {
-			t.Fatalf("counted round %d replied", idx+1)
-		}
-	}
-	done, cancel = cntlrRound(t, cnClient)
-	if err := wantReturned(t, "the round after two", done); err != nil {
-		t.Fatalf("the round after the two counted ones failed: %v", err)
-	}
-	cancel()
-
-	// A load that drops the lever drops the rounds it had not spent: the
-	// CheckCn round loads one counted round, and the cntlr's own round
-	// reloads the file without it first.
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang_rounds": 1}}}`)
-	cnRound(t, cnClient)
-	writeFile(t, agent, behaviorFileName, `{}`)
-	done, cancel = cntlrRound(t, cnClient)
-	if err := wantReturned(t, "the round after the lever went", done); err != nil {
-		t.Fatalf("the round after the lever went failed: %v", err)
-	}
-	cancel()
-}
-
-// TestCheckCntlrDelayRounds is the fake's delay_rounds_ms lever (worker_test.sh
-// case H's missed round followed by a late answer): every round of the object
-// is answered, but no sooner than the delay, while another object's round is
-// answered at once; and a round hang_rounds holds is held first, the delay
-// applying to the rounds after it.
-func TestCheckCntlrDelayRounds(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
-	const delay = 600 * time.Millisecond
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"delay_rounds_ms": 600}}}`)
-
-	start := time.Now()
-	done, cancel := cntlrRound(t, cnClient)
-	cnRound(t, cnClient)
-	if elapsed := time.Since(start); elapsed >= delay {
-		t.Fatalf("another object's round took %v, as long as the delay",
-			elapsed)
-	}
-	if err := wantReturned(t, "the late round", done); err != nil {
-		t.Fatalf("the late round failed: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed < delay {
-		t.Fatalf("the round was answered after %v, before the %v delay",
-			elapsed, delay)
-	}
-	cancel()
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang_rounds": 1, "delay_rounds_ms": 600}}}`)
-	done, cancel = cntlrRound(t, cnClient)
-	// Held, not delayed: a round that is only delayed answers inside this
-	// wait.
+// held fails when a call that must be held has returned.
+func held(t *testing.T, what string, done chan error) {
+	t.Helper()
 	select {
 	case err := <-done:
-		t.Fatalf("the counted round returned while held: %v", err)
-	case <-time.After(delay + 2*hangPollInterval):
-	}
-	cancel()
-	if err := wantReturned(t, "the counted round", done); err == nil {
-		t.Fatal("the counted round replied")
-	}
-	start = time.Now()
-	done, cancel = cntlrRound(t, cnClient)
-	if err := wantReturned(t, "the round after it", done); err != nil {
-		t.Fatalf("the round after the counted one failed: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed < delay {
-		t.Fatalf("the round after the counted one came after %v, before "+
-			"the %v delay", elapsed, delay)
-	}
-	cancel()
-}
-
-// TestSyncupCntlrHangSyncup is the fake's hang_syncup lever (worker_test.sh
-// case H's demotion that a stalled old primary never confirms): a
-// SyncupCntlr is held unanswered while the lever is set, with the lock
-// released, so the object's own Check round and another object's syncup still
-// answer; a held request whose caller gives up ends unapplied, and one still
-// held when the script clears the lever is applied as usual.
-func TestSyncupCntlrHangSyncup(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang_syncup": true}}}`)
-
-	demotion := cntlrFixture(false)
-	demotion.Revision = 6
-	type outcome struct {
-		reply *pb.SyncupCntlrReply
-		err   error
-	}
-	send := func(ctx context.Context) chan outcome {
-		out := make(chan outcome, 1)
-		go func() {
-			reply, err := cnClient.SyncupCntlr(ctx, demotion)
-			out <- outcome{reply, err}
-		}()
-		return out
-	}
-	held := func(what string, out chan outcome) {
-		t.Helper()
-		select {
-		case got := <-out:
-			t.Fatalf("%s returned while held: %v, %v", what, got.reply, got.err)
-		case <-time.After(2 * hangPollInterval):
-		}
-	}
-	returned := func(what string, out chan outcome) outcome {
-		t.Helper()
-		select {
-		case got := <-out:
-			return got
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s did not return", what)
-			return outcome{}
-		}
-	}
-	// storedRevision is the revision a Check round reports: that of the last
-	// SyncupCntlr the fake applied. The round is answered while a syncup of
-	// the same object is held, or the bounded stream fails the test.
-	storedRevision := func() uint64 {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(
-			context.Background(), 5*time.Second)
-		defer cancel()
-		stream, err := cnClient.CheckCntlr(ctx)
-		if err != nil {
-			t.Fatalf("CheckCntlr: %v", err)
-		}
-		if err := stream.Send(&pb.CheckCntlrRequest{
-			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 6,
-		}); err != nil {
-			t.Fatalf("CheckCntlr send: %v", err)
-		}
-		reply, err := stream.Recv()
-		if err != nil {
-			t.Fatalf("a Check round while a syncup is held: %v", err)
-		}
-		return reply.GetRevision()
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	out := send(ctx)
-	held("the demotion", out)
-	if got := storedRevision(); got != 5 {
-		t.Fatalf("stored revision while the demotion is held = %d, want 5", got)
-	}
-	if _, err := cnClient.SyncupCn(context.Background(), &pb.SyncupCnRequest{
-		ClusterId: 1, CnId: 1, Revision: 2,
-		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
-	}); err != nil {
-		t.Fatalf("SyncupCn while another object's syncup is held: %v", err)
-	}
-	cancel()
-	if got := returned("the abandoned demotion", out); status.Code(got.err) !=
-		codes.Canceled {
-		t.Fatalf("the abandoned demotion = %v, %v; want codes.Canceled",
-			got.reply, got.err)
-	}
-	// Past one poll the handler has seen its caller go: clearing the lever
-	// now must not apply what nobody waits for.
-	time.Sleep(3 * hangPollInterval)
-	writeFile(t, agent, behaviorFileName, `{}`)
-	if got := storedRevision(); got != 5 {
-		t.Fatalf("stored revision after the abandoned demotion = %d, "+
-			"want 5 (applied after its caller gave up)", got)
-	}
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"hang_syncup": true}}}`)
-	out = send(context.Background())
-	held("the second demotion", out)
-	writeFile(t, agent, behaviorFileName, `{}`)
-	got := returned("the released demotion", out)
-	if got.err != nil {
-		t.Fatalf("the released demotion failed: %v", got.err)
-	}
-	if code := got.reply.GetAgentReply().GetCode(); code != 0 {
-		t.Fatalf("the released demotion code = %d, want 0", code)
-	}
-	if got.reply.GetRevision() != 6 {
-		t.Fatalf("the released demotion revision = %d, want 6",
-			got.reply.GetRevision())
+		t.Fatalf("%s returned while held: %v", what, err)
+	case <-time.After(2 * pollInterval):
 	}
 }
 
-// TestHangSyncupEveryKind pins that hang_syncup reaches every Syncup*, each
-// held under its own object's key and answered once the lever is cleared.
-func TestHangSyncupEveryKind(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, ptr)
-	syncupSide(t, dnClient, ptr, 1, 0)
-
-	cases := []struct {
-		method string
-		key    string
-		call   func() error
-	}{
-		{"SyncupDn", dnObjKey, func() error {
-			_, err := dnClient.SyncupDn(context.Background(),
-				&pb.SyncupDnRequest{
-					ClusterId: 1, DnId: 1, Revision: 2,
-					SidePointerList: []*pb.SidePointer{ptr},
-					ExtentSize:      67108864,
-				})
-			return err
-		}},
-		{"SyncupSide", sideObjKey(ptr), func() error {
-			_, err := dnClient.SyncupSide(context.Background(),
-				&pb.SyncupSideRequest{
-					ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 2,
-					SideConf: &pb.SyncupSideRequest_SideConf{
-						ExtCnt: 2, PrimaryCnId: 1,
-					},
-				})
-			return err
-		}},
-		{"SyncupCn", cnObjKey, func() error {
-			_, err := cnClient.SyncupCn(context.Background(),
-				&pb.SyncupCnRequest{ClusterId: 1, CnId: 1, Revision: 1})
-			return err
-		}},
-	}
-	for _, tc := range cases {
-		writeFile(t, agent, behaviorFileName, fmt.Sprintf(
-			`{"objects": {%q: {"hang_syncup": true}}}`, tc.key))
-		done := make(chan error, 1)
-		go func() { done <- tc.call() }()
-		wantHeld(t, tc.method, done)
-		writeFile(t, agent, behaviorFileName, `{}`)
-		if err := wantReturned(t, tc.method, done); err != nil {
-			t.Fatalf("%s released: %v", tc.method, err)
-		}
-	}
-}
-
-// TestCheckSideDropStream is the fake's drop_stream lever (dnv-worker.md,
-// Integration test plan, The fake agent).
-func TestCheckSideDropStream(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, ptr)
-	syncupSide(t, dnClient, ptr, 1, 0)
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"side 1:3:5": {"drop_stream": true}}}`)
-
-	stream, err := dnClient.CheckSide(context.Background())
+func syncupDn(
+	t *testing.T, client pb.DiskNodeAgentClient, revision uint64,
+	ptrList ...*pb.SidePointer,
+) *pb.SyncupDnReply {
+	t.Helper()
+	reply, err := client.SyncupDn(context.Background(), &pb.SyncupDnRequest{
+		ClusterId: 1, DnId: 1, Revision: revision,
+		SidePointerList: ptrList, ExtentSize: 67108864,
+	})
 	if err != nil {
-		t.Fatalf("CheckSide: %v", err)
+		t.Fatalf("SyncupDn: %v", err)
 	}
-	if err := stream.Send(&pb.CheckSideRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
+	return reply
+}
+
+func dnInfo(t *testing.T, client pb.DiskNodeAgentClient) *pb.GetDnInfoReply {
+	t.Helper()
+	reply, err := client.GetDnInfo(context.Background(),
+		&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	return reply
+}
+
+// dnRound runs one CheckDn round on a fresh stream.
+func dnRound(t *testing.T, client pb.DiskNodeAgentClient) *pb.CheckDnReply {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := client.CheckDn(ctx)
+	if err != nil {
+		t.Fatalf("CheckDn: %v", err)
+	}
+	defer stream.CloseSend()
+	if err := stream.Send(&pb.CheckDnRequest{
+		ClusterId: 1, DnId: 1, Revision: 1, TraceId: "round",
 	}); err != nil {
-		t.Fatalf("CheckSide send: %v", err)
+		t.Fatalf("CheckDn send: %v", err)
 	}
-	if _, err := stream.Recv(); err == nil {
-		t.Fatal("drop_stream still replied")
+	reply, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("CheckDn recv: %v", err)
 	}
+	return reply
 }
 
 // ---------------------------------------------------------------------------
-// state.json (dnv-worker.md, Integration test plan, The fake agent)
+// behavior.json
 // ---------------------------------------------------------------------------
 
-// TestStateSurvivesRestart is worker_test.sh case B step 5: a killed and
-// restarted fake reports the stored revision (so the worker does not re-sync)
-// and the bm_idx_list derived from the recorded chunks.
-func TestStateSurvivesRestart(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 7, ptr)
-	syncupSide(t, dnClient, ptr, 7, 30)
-	if _, err := dnClient.PushMigrBitmap(context.Background(),
-		&pb.PushMigrBitmapRequest{
-			ClusterId: 1, DnId: 1, SidePointer: ptr,
-			MigrId: 30, BmIdx: 1, Bitmap: []byte{0x01, 0x02, 0x03},
-		}); err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
+// TestBehaviorFileReload pins the behavior file's reload: a changed file is
+// seen by the next request, a malformed one is logged and IGNORED — the agent
+// keeps answering with the last good levers instead of dying — and an absent
+// one means `{}`.
+func TestBehaviorFileReload(t *testing.T) {
+	dir := t.TempDir()
+	_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+	client := pb.NewDiskNodeAgentClient(conn)
+	syncupDn(t, client, 1)
+
+	writeFile(t, dir, behaviorFileName,
+		`{"objects": {"dn": {"rows": {"disk_info": {"status": "ERROR",
+		 "details": "io"}}}}}`)
+	if got := dnInfo(t, client).GetDnInfo().GetDiskInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != "io" {
+		t.Fatalf("disk_info = %v", got)
 	}
 
-	restarted, err := newFakeAgent(context.Background(), agent.dir, 4096)
-	if err != nil {
-		t.Fatalf("restarting: %v", err)
+	writeFile(t, dir, behaviorFileName, `{"objects": {"dn": {`)
+	if got := dnInfo(t, client).GetDnInfo().GetDiskInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != "io" {
+		t.Fatalf("disk_info after the malformed file = %v, want the "+
+			"previous behaviour", got)
 	}
-	restartedClient, _ := startAgent(t, restarted)
-	reply, err := restartedClient.GetSideInfo(context.Background(),
-		&pb.GetSideInfoRequest{ClusterId: 1, DnId: 1, SidePointer: ptr})
-	if err != nil {
-		t.Fatalf("GetSideInfo: %v", err)
-	}
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("GetSideInfo code = %d (%s)",
-			reply.GetAgentReply().GetCode(),
-			reply.GetAgentReply().GetDetails())
-	}
-	if reply.GetRevision() != 7 {
-		t.Errorf("restarted revision = %d, want 7", reply.GetRevision())
-	}
-	wantKeys(t, "cn_id_to_nvmeof", reply.GetSideInfo().GetCnIdToNvmeof(),
-		1, 2, 3)
-
-	restarted.mu.Lock()
-	idxList := restarted.state[sideObjKey(ptr)].bmIdxList(30)
-	restarted.mu.Unlock()
-	if !slices.Equal(idxList, []uint32{1}) {
-		t.Errorf("restarted bm_idx_list = %v, want [1]", idxList)
+	// A file the library refuses — when_primary on the dn — is malformed
+	// the same way.
+	writeFile(t, dir, behaviorFileName, `{"objects": {"dn": {"rows":
+		{"disk_info": {"status": "OK", "when_primary": true}}}}}`)
+	if got := dnInfo(t, client).GetDnInfo().GetDiskInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("disk_info after a refused file = %v, want the previous "+
+			"behaviour", got)
 	}
 
-	// A stale round after the restart is still refused.
-	if got := syncupDn(t, restartedClient, 6).GetAgentReply().
-		GetCode(); got != common.ReplyCodeStaleRevision {
-		t.Errorf("stale SyncupDn after the restart code = %d, want %d",
-			got, common.ReplyCodeStaleRevision)
+	if err := os.Remove(filepath.Join(dir, behaviorFileName)); err != nil {
+		t.Fatalf("removing behavior.json: %v", err)
+	}
+	if got := dnInfo(t, client).GetDnInfo().GetDiskInfo().
+		GetStatus(); got != pb.ResStatus_RES_STATUS_OK {
+		t.Fatalf("disk_info status after the removal = %v, want OK", got)
 	}
 }
 
-// pushCloneBm pushes one clone chunk at the (src_slice_idx, bm_idx) pair it
-// is addressed by and requires it to be accepted; the payload is `size` bytes,
-// which is what state.json records next to the pair.
-func pushCloneBm(
-	t *testing.T, client pb.ControllerNodeAgentClient,
-	cloneId uint64, srcSliceIdx, bmIdx uint32, size int,
-) {
-	t.Helper()
-	reply, err := client.PushCloneBitmap(context.Background(),
-		&pb.PushCloneBitmapRequest{
-			ClusterId:    1,
-			CnId:         1,
-			CntlrPointer: cntlrPtr(1, 1),
-			CloneId:      cloneId,
-			SrcSliceIdx:  srcSliceIdx,
-			BmIdx:        bmIdx,
-			Bitmap:       bytes.Repeat([]byte{0xa5}, size),
-		})
+// TestBehaviorFilePollReleasesAHold pins the poll of the behavior file: a
+// Check round the hang lever holds, and a syncup hang_syncup holds, are
+// answered once the script clears the lever, with no other request made to
+// load the rewrite.
+func TestBehaviorFilePollReleasesAHold(t *testing.T) {
+	dir := t.TempDir()
+	_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+	client := pb.NewDiskNodeAgentClient(conn)
+	syncupDn(t, client, 1)
+	writeFile(t, dir, behaviorFileName,
+		`{"objects": {"dn": {"hang": true, "hang_syncup": true}}}`)
+
+	round := make(chan error, 1)
+	stream, err := client.CheckDn(context.Background())
 	if err != nil {
-		t.Fatalf("PushCloneBitmap: %v", err)
+		t.Fatalf("CheckDn: %v", err)
 	}
-	if got := reply.GetAgentReply().GetCode(); got != 0 {
-		t.Fatalf("PushCloneBitmap (%d, %d) code = %d (%s)",
-			srcSliceIdx, bmIdx, got, reply.GetAgentReply().GetDetails())
+	defer stream.CloseSend()
+	if err := stream.Send(&pb.CheckDnRequest{
+		ClusterId: 1, DnId: 1, Revision: 1,
+	}); err != nil {
+		t.Fatalf("CheckDn send: %v", err)
+	}
+	go func() {
+		_, err := stream.Recv()
+		round <- err
+	}()
+	syncup := make(chan error, 1)
+	go func() {
+		_, err := client.SyncupDn(context.Background(),
+			&pb.SyncupDnRequest{ClusterId: 1, DnId: 1, Revision: 2})
+		syncup <- err
+	}()
+	held(t, "the round", round)
+	held(t, "the syncup", syncup)
+
+	writeFile(t, dir, behaviorFileName, `{}`)
+	if err := returned(t, "the round", round); err != nil {
+		t.Fatalf("the released round: %v", err)
+	}
+	if err := returned(t, "the syncup", syncup); err != nil {
+		t.Fatalf("the released syncup: %v", err)
 	}
 }
 
-// readStateChunks reads one object's recorded chunks for one migration/clone
-// back off disk, so the tests assert the shape of the artifact the suite's jq
-// reads and not just the in-memory map.
-func readStateChunks(
-	t *testing.T, agent *fakeAgent, objKey string, resId uint64,
-) map[string]uint64 {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(agent.dir, stateFileName))
-	if err != nil {
-		t.Fatalf("reading state.json: %v", err)
-	}
-	parsed := &stateFile{}
-	if err := json.Unmarshal(raw, parsed); err != nil {
-		t.Fatalf("state.json is not readable JSON: %v", err)
-	}
-	obj := parsed.Objects[objKey]
-	if obj == nil {
-		t.Fatalf("state.json has no %q object", objKey)
-	}
-	return obj.Chunks[strconv.FormatUint(resId, 10)]
+// TestBehaviorFileNewLevers plays each lever the library adds to the
+// program's through the behavior file, by the key the Go front's field
+// carries, and sees it act on the wire.
+func TestBehaviorFileNewLevers(t *testing.T) {
+	ptr := &pb.SidePointer{SpId: 1, LegId: 3, SideId: 5}
+	t.Run("obs_age_ms", func(t *testing.T) {
+		dir := t.TempDir()
+		_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+		client := pb.NewDiskNodeAgentClient(conn)
+		saved := syncupDn(t, client, 1)
+		writeFile(t, dir, behaviorFileName,
+			`{"objects": {"dn": {"obs_age_ms": 3600000}}}`)
+		stamp := dnRound(t, client).GetObsStamp()
+		if !stamp.GetObsTime().AsTime().Equal(
+			saved.GetObsStamp().GetObsTime().AsTime()) {
+			t.Fatalf("a round under an hour's age: obs %v, want the "+
+				"syncup's %v repeated", stamp.GetObsTime(),
+				saved.GetObsStamp().GetObsTime())
+		}
+	})
+	t.Run("obs_none", func(t *testing.T) {
+		dir := t.TempDir()
+		_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+		client := pb.NewDiskNodeAgentClient(conn)
+		syncupDn(t, client, 1)
+		writeFile(t, dir, behaviorFileName,
+			`{"objects": {"dn": {"obs_none": true}}}`)
+		round := dnRound(t, client)
+		if stamp := round.GetObsStamp(); round.GetAgentReply().GetCode() !=
+			0 || round.GetRevision() != 0 || round.GetDnInfo() != nil ||
+			stamp.GetObsTime() != nil || stamp.GetAnswerTime() == nil {
+			t.Fatalf("a round under obs_none = %v; want code 0, revision 0, "+
+				"no info and an answer time alone", round)
+		}
+		if read := dnInfo(t, client); read.GetRevision() != 0 ||
+			read.GetDnInfo() != nil || read.GetObsStamp().GetObsTime() != nil {
+			t.Fatalf("an info read under obs_none = %v; want revision 0, no "+
+				"info and no observation", read)
+		}
+	})
+	t.Run("reason", func(t *testing.T) {
+		dir := t.TempDir()
+		_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+		client := pb.NewDiskNodeAgentClient(conn)
+		syncupDn(t, client, 1)
+		writeFile(t, dir, behaviorFileName, `{"objects": {"dn": {"rows":
+		  {"meta_info": {"status": "ERROR", "reason": "THIN_ID_LOST"}}}}}`)
+		if got := dnInfo(t, client).GetDnInfo().GetMetaInfo(); got.
+			GetReason() != pb.ResReason_RES_REASON_THIN_ID_LOST {
+			t.Fatalf("meta_info = %v, want the lever's reason", got)
+		}
+	})
+	t.Run("syncup_revision", func(t *testing.T) {
+		dir := t.TempDir()
+		_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+		client := pb.NewDiskNodeAgentClient(conn)
+		writeFile(t, dir, behaviorFileName,
+			`{"objects": {"dn": {"syncup_revision": 9}}}`)
+		if got := syncupDn(t, client, 2).GetRevision(); got != 9 {
+			t.Fatalf("an accepted SyncupDn echoes revision %d, want 9", got)
+		}
+		if got := dnRound(t, client).GetRevision(); got != 2 {
+			t.Fatalf("a round reports revision %d, want the stored 2", got)
+		}
+	})
+	t.Run("leftover_rounds", func(t *testing.T) {
+		dir := t.TempDir()
+		_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+		client := pb.NewDiskNodeAgentClient(conn)
+		writeFile(t, dir, behaviorFileName,
+			`{"objects": {"dn": {"leftover_rounds": 1}}}`)
+		if code := syncupDn(t, client, 1).GetAgentReply().GetCode(); code !=
+			common.ReplyCodeLeftover {
+			t.Fatalf("a SyncupDn under a leftover: code %d", code)
+		}
+		for i, want := range []uint32{common.ReplyCodeLeftover, 0} {
+			round := dnRound(t, client)
+			if got := round.GetAgentReply().GetCode(); got != want ||
+				round.GetRevision() != 1 {
+				t.Fatalf("round %d: code %d revision %d, want %d and the "+
+					"applied 1", i, got, round.GetRevision(), want)
+			}
+		}
+	})
+	t.Run("disk_counts", func(t *testing.T) {
+		dir := t.TempDir()
+		_, conn := startProgram(t, agentfake.Dn, dir, 4096)
+		client := pb.NewDiskNodeAgentClient(conn)
+		syncupDn(t, client, 1, ptr)
+		writeFile(t, dir, behaviorFileName, `{"objects": {"dn":
+		  {"disk_counts": {"total_ext_cnt": 64, "free_ext_cnt": 60,
+		                   "free_meta_units": 3}}}}`)
+		counts := dnInfo(t, client).GetDnInfo().GetDiskCounts()
+		if counts.GetTotalExtCnt() != 64 || counts.GetFreeExtCnt() != 60 ||
+			counts.GetFreeMetaUnits() != 3 || counts.GetSideRecCnt() != 1 ||
+			!counts.GetSideRecsMatch() {
+			t.Fatalf("disk counts = %v, want 64 60 3 and one matching "+
+				"side record", counts)
+		}
+	})
 }
 
-// TestCloneChunkKeysAndChunkIdList pins the clone half of the fake's
-// state.json contract: a clone chunk is recorded under the decimal
-// "{src_slice_idx}:{bm_idx}" pair that addresses it, two source slices sharing
-// a bm_idx are two distinct chunks, a re-push at the same pair only updates
-// the recorded length (the grown chunk of [D8]/BM5), and the derived set rides
-// in chunk_id_list — ascending (src_slice_idx, bm_idx) — never in bm_idx_list,
-// which carries migration chunks alone.
-func TestCloneChunkKeysAndChunkIdList(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
+// ---------------------------------------------------------------------------
+// state.json and --size
+// ---------------------------------------------------------------------------
 
-	pushCloneBm(t, cnClient, 41, 2, 1, 4)
-	pushCloneBm(t, cnClient, 41, 0, 1, 2)
-	pushCloneBm(t, cnClient, 41, 2, 0, 5)
-	pushCloneBm(t, cnClient, 41, 0, 0, 3)
-	pushCloneBm(t, cnClient, 41, 0, 0, 8)
+// TestStateFileAcrossRestart pins the program's state file: a program
+// started again over the same directory answers from the stored state — the
+// stored revision, so the worker sends no syncup, and the side its node
+// syncup listed — and a rewrite of the file while it runs is seen by the
+// next request: a revision set by hand, and the store emptied as the suites'
+// reset does.
+func TestStateFileAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	first, conn := startProgram(t, agentfake.Dn, dir, 4096)
+	client := pb.NewDiskNodeAgentClient(conn)
+	ptr := &pb.SidePointer{SpId: 1, LegId: 3, SideId: 5}
+	syncupDn(t, client, 7, ptr)
+	first.server.Stop()
 
-	chunks := readStateChunks(t, agent, cntlrObjKey(cntlrPtr(1, 1)), 41)
-	want := map[string]uint64{"0:0": 8, "0:1": 2, "2:0": 5, "2:1": 4}
-	if !maps.Equal(chunks, want) {
-		t.Errorf("state.json chunks = %v, want %v", chunks, want)
-	}
-
-	bmInfoList := syncupCntlrFixture(t, cnClient, true).GetBmInfoList()
-	if len(bmInfoList) != 1 || bmInfoList[0].GetResId() != 41 {
-		t.Fatalf("bm_info_list = %v, want one entry for clone 41", bmInfoList)
-	}
-	if got := chunkPairs(bmInfoList[0].GetChunkIdList()); !slices.Equal(got,
-		[][2]uint32{{0, 0}, {0, 1}, {2, 0}, {2, 1}}) {
-		t.Errorf("chunk_id_list = %v, want [(0,0) (0,1) (2,0) (2,1)]", got)
-	}
-	if got := bmInfoList[0].GetBmIdxList(); len(got) != 0 {
-		t.Errorf("bm_idx_list = %v, want a clone to report chunks only in "+
-			"chunk_id_list", got)
-	}
-}
-
-// TestCloneChunksSurviveRestart is worker_test.sh case B step 5 for clones: a
-// killed and restarted fake derives the same chunk_id_list from the recorded
-// chunks, pairs and all.
-func TestCloneChunksSurviveRestart(t *testing.T) {
-	agent := newTestAgent(t)
-	_, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
-	pushCloneBm(t, cnClient, 41, 1, 0, 2)
-	pushCloneBm(t, cnClient, 41, 0, 2, 3)
-
-	restarted, err := newFakeAgent(context.Background(), agent.dir, 4096)
-	if err != nil {
-		t.Fatalf("restarting: %v", err)
-	}
-	restarted.mu.Lock()
-	loaded := restarted.state[cntlrObjKey(cntlrPtr(1, 1))].chunkIdList(41)
-	restarted.mu.Unlock()
-	if got := chunkPairs(loaded); !slices.Equal(got,
-		[][2]uint32{{0, 2}, {1, 0}}) {
-		t.Errorf("chunk_id_list after the restart = %v, want [(0,2) (1,0)]",
+	_, conn = startProgram(t, agentfake.Dn, dir, 4096)
+	client = pb.NewDiskNodeAgentClient(conn)
+	if got := dnRound(t, client).GetRevision(); got != 7 {
+		t.Fatalf("the restarted program's revision = %d, want the stored 7",
 			got)
 	}
-
-	// The restarted fake reports it on the wire too: the cntlr is still
-	// known from the reloaded SyncupCn, so the worker's re-syncup gets the
-	// applied set and pushes nothing (BM2).
-	_, restartedClient := startAgent(t, restarted)
-	reply, err := restartedClient.SyncupCntlr(
-		context.Background(), cntlrFixture(true))
-	if err != nil {
-		t.Fatalf("SyncupCntlr after the restart: %v", err)
-	}
-	if code := reply.GetAgentReply().GetCode(); code != 0 {
-		t.Fatalf("SyncupCntlr after the restart code = %d (%s)",
-			code, reply.GetAgentReply().GetDetails())
-	}
-	if got := chunkPairs(
-		reply.GetBmInfoList()[0].GetChunkIdList()); !slices.Equal(got,
-		[][2]uint32{{0, 2}, {1, 0}}) {
-		t.Errorf("reported chunk_id_list after the restart = %v, "+
-			"want [(0,2) (1,0)]", got)
-	}
-}
-
-// TestAppliedSetOverrides covers the two behavior-file levers that force an
-// applied set: chunk_id_list for a clone, bm_idx_list for a migration. An
-// empty list is a forced empty set, not an absent override.
-func TestAppliedSetOverrides(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	syncupCntlrFixture(t, cnClient, true)
-	pushCloneBm(t, cnClient, 41, 0, 0, 2)
-
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"chunk_id_list": ["3:1", "0:5"]}}}`)
-	bmInfoList := syncupCntlrFixture(t, cnClient, true).GetBmInfoList()
-	if got := chunkPairs(bmInfoList[0].GetChunkIdList()); !slices.Equal(got,
-		[][2]uint32{{3, 1}, {0, 5}}) {
-		t.Errorf("forced chunk_id_list = %v, want [(3,1) (0,5)]", got)
+	side, err := client.SyncupSide(context.Background(),
+		&pb.SyncupSideRequest{ClusterId: 1, DnId: 1, SidePointer: ptr,
+			Revision: 7, SideConf: &pb.SyncupSideRequest_SideConf{ExtCnt: 2}})
+	if err != nil || side.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupSide after the restart = %v, %v; want the side "+
+			"the stored SyncupDn listed known", side, err)
 	}
 
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"cntlr 1:1": {"chunk_id_list": []}}}`)
-	bmInfoList = syncupCntlrFixture(t, cnClient, true).GetBmInfoList()
-	if got := bmInfoList[0].GetChunkIdList(); len(got) != 0 {
-		t.Errorf("forced empty chunk_id_list = %v, want none",
-			chunkPairs(got))
-	}
-
-	// The migration override is untouched by the clone one.
-	ptr := sidePtr(1, 3, 5)
-	syncupDn(t, dnClient, 1, ptr)
-	syncupSide(t, dnClient, ptr, 1, 30)
-	writeFile(t, agent, behaviorFileName,
-		`{"objects": {"side 1:3:5": {"bm_idx_list": [0, 2]}}}`)
-	if got := syncupSide(t, dnClient, ptr, 1, 30).GetBmInfo().
-		GetBmIdxList(); !slices.Equal(got, []uint32{0, 2}) {
-		t.Errorf("forced bm_idx_list = %v, want [0 2]", got)
-	}
-}
-
-// TestStateHandEdit is worker_test.sh case A step 3: the script rewrites a
-// stored revision in state.json while the fake runs, and the next round must
-// see it.
-func TestStateHandEdit(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
-	syncupDn(t, dnClient, 3)
-
-	raw, err := os.ReadFile(filepath.Join(agent.dir, stateFileName))
+	raw, err := os.ReadFile(filepath.Join(dir, agentfake.StateFileName))
 	if err != nil {
 		t.Fatalf("reading state.json: %v", err)
 	}
-	parsed := &stateFile{}
-	if err := json.Unmarshal(raw, parsed); err != nil {
+	var parsed map[string]map[string]map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
 		t.Fatalf("state.json is not readable JSON: %v", err)
 	}
-	if parsed.Objects[dnObjKey].Revision != 3 {
-		t.Fatalf("stored revision = %d, want 3",
-			parsed.Objects[dnObjKey].Revision)
-	}
-	if len(parsed.Objects[dnObjKey].Request) == 0 {
-		t.Fatal("the stored request is empty")
-	}
-	parsed.Objects[dnObjKey].Revision = 9
-	edited, err := json.MarshalIndent(parsed, "", "  ")
+	dn := parsed["objects"][agentfake.DnKey]
+	dn["revision"] = 9
+	edited, err := json.Marshal(parsed)
 	if err != nil {
 		t.Fatalf("marshaling the edit: %v", err)
 	}
-	writeFile(t, agent, stateFileName, string(edited))
-
-	reply := syncupDn(t, dnClient, 3)
-	if got := reply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeStaleRevision {
-		t.Fatalf("SyncupDn after the edit code = %d, want %d",
-			got, common.ReplyCodeStaleRevision)
+	writeFile(t, dir, agentfake.StateFileName, string(edited))
+	if got := dnRound(t, client).GetRevision(); got != 9 {
+		t.Fatalf("revision after the hand edit = %d, want 9", got)
 	}
-	if reply.GetRevision() != 9 {
-		t.Errorf("reply revision = %d, want the edited 9", reply.GetRevision())
+
+	writeFile(t, dir, agentfake.StateFileName, `{"objects":{}}`)
+	if got := dnRound(t, client).GetRevision(); got != 0 {
+		t.Fatalf("revision after the reset = %d, want 0", got)
 	}
 }
 
-func TestGetSizeAndBitmapStubs(t *testing.T) {
-	agent := newTestAgent(t)
-	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-
-	dnSize, err := dnClient.GetDnSize(ctx, &pb.GetDnSizeRequest{
-		ClusterId: 1, DnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetDnSize: %v", err)
+// TestSizeFlagAndFile pins the GetDnSize/GetCnSize reply: --size, zero
+// included, unless the behavior file's "size" says otherwise; and the
+// program serves only its subcommand's service.
+func TestSizeFlagAndFile(t *testing.T) {
+	dir := t.TempDir()
+	_, conn := startProgram(t, agentfake.Cn, dir, 0)
+	client := pb.NewControllerNodeAgentClient(conn)
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		common.TraceIdMetadataKey, "size")
+	size := func() uint64 {
+		t.Helper()
+		reply, err := client.GetCnSize(ctx,
+			&pb.GetCnSizeRequest{ClusterId: 1, CnId: 1})
+		if err != nil {
+			t.Fatalf("GetCnSize: %v", err)
+		}
+		return reply.GetSize()
 	}
-	if dnSize.GetSize() != 4096 {
-		t.Errorf("GetDnSize = %d, want the configured 4096", dnSize.GetSize())
+	if got := size(); got != 0 {
+		t.Fatalf("GetCnSize = %d, want --size's 0", got)
 	}
-	writeFile(t, agent, behaviorFileName, `{"size": 8192}`)
-	cnSize, err := cnClient.GetCnSize(ctx, &pb.GetCnSizeRequest{
-		ClusterId: 1, CnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetCnSize: %v", err)
+	writeFile(t, dir, behaviorFileName, `{"size": 8192}`)
+	if got := size(); got != 8192 {
+		t.Fatalf("GetCnSize = %d, want the behavior file's 8192", got)
 	}
-	if cnSize.GetSize() != 8192 {
-		t.Errorf("GetCnSize = %d, want the behavior file's 8192",
-			cnSize.GetSize())
-	}
-
-	tdBm, err := cnClient.GetThinDeviceBm(ctx, &pb.GetThinDeviceBmRequest{
-		ClusterId: 1, CnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetThinDeviceBm: %v", err)
-	}
-	if len(tdBm.GetBitmap()) != 0 {
-		t.Errorf("GetThinDeviceBm = %v, want an empty bitmap", tdBm.GetBitmap())
-	}
-	legBm, err := cnClient.GetLegBm(ctx, &pb.GetLegBmRequest{
-		ClusterId: 1, CnId: 1,
-	})
-	if err != nil {
-		t.Fatalf("GetLegBm: %v", err)
-	}
-	if len(legBm.GetBitmap()) != 0 {
-		t.Errorf("GetLegBm = %v, want an empty bitmap", legBm.GetBitmap())
+	if _, err := pb.NewDiskNodeAgentClient(conn).GetDnSize(ctx,
+		&pb.GetDnSizeRequest{ClusterId: 1, DnId: 1}); status.Code(err) !=
+		codes.Unimplemented {
+		t.Fatalf("GetDnSize on a cn program: %v, want Unimplemented", err)
 	}
 }

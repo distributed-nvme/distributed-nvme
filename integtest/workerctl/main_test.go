@@ -2,18 +2,15 @@
 // Integration test plan, The driver). The driver writes straight into the etcd
 // the whole suite reads back, so a malformed test invocation must fail loudly
 // here rather than land garbage in a key: these cover every tuple form of its
-// flags, the 0x hex ids, the bitmap payload, the key kind → message mapping of
-// `get` (architecture.md, Key table), the put-sp wiring validation that
-// joins the placement flags on their ids, and the metadata units the planted
-// copies cost (architecture.md, Metadata units): the units put-clone and
-// put-migr size them by and, over an in-memory STM, put-clone's charge to the
-// CN of every cntlr of the pool and put-migr's charge to its destination DN;
-// and how start-cutover names the migration and the cntlr its op checks.
+// flags and the typed spec of the planting library each one becomes, the 0x
+// hex ids, the bitmap payload, the key kind → message mapping of `get`
+// (architecture.md, Key table), the three printers that touch no etcd, and
+// set-epoch's value. What the library does with a spec is the library's own
+// tests' (integtest/plant).
 package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -22,8 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
-	"github.com/distributed-nvme/distributed-nvme/etcdutil"
-	"github.com/distributed-nvme/distributed-nvme/model"
+	"github.com/distributed-nvme/distributed-nvme/integtest/plant"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -110,6 +106,17 @@ func TestTriBool(t *testing.T) {
 	if !flag.IsBoolFlag() {
 		t.Fatalf("IsBoolFlag() = false, want true so --primary alone works")
 	}
+	// The library's form: nil when not given, the value when given.
+	var unset triBool
+	if unset.ptr() != nil {
+		t.Fatalf("ptr() of an unset triBool is not nil")
+	}
+	if err := flag.Set("false"); err != nil {
+		t.Fatalf("Set(false) failed: %v", err)
+	}
+	if got := flag.ptr(); got == nil || *got {
+		t.Fatalf("ptr() after Set(false) = %v, want a pointer to false", got)
+	}
 }
 
 func TestParseSidePointer(t *testing.T) {
@@ -149,7 +156,7 @@ func TestParseCntlrSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseCntlrSpec failed: %v", err)
 	}
-	want := cntlrSpec{cntlrId: 1, cnId: 2, slot: 3, primary: true}
+	want := plant.CntlrSpec{CntlrId: 1, CnId: 2, Slot: 3, Primary: true}
 	if got != want {
 		t.Fatalf("parseCntlrSpec = %+v, want %+v", got, want)
 	}
@@ -157,7 +164,7 @@ func TestParseCntlrSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseCntlrSpec failed: %v", err)
 	}
-	if got.primary {
+	if got.Primary {
 		t.Fatalf("parseCntlrSpec(...:0) is primary")
 	}
 	for _, bad := range []string{
@@ -174,7 +181,7 @@ func TestParseSliceSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSliceSpec failed: %v", err)
 	}
-	if got != (sliceSpec{sliceId: 3, sliceIdx: 0}) {
+	if got != (plant.SliceSpec{SliceId: 3, SliceIdx: 0}) {
 		t.Fatalf("parseSliceSpec = %+v", got)
 	}
 	for _, bad := range []string{"", "3", "3:0:1", "x:0"} {
@@ -189,7 +196,7 @@ func TestParseGroupSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGroupSpec failed: %v", err)
 	}
-	want := groupSpec{sliceId: 1, grpId: 2, isMeta: true, extCnt: 1, raid1: true}
+	want := plant.GroupSpec{SliceId: 1, GrpId: 2, Meta: true, ExtCnt: 1, Raid1: true}
 	if got != want {
 		t.Fatalf("parseGroupSpec = %+v, want %+v", got, want)
 	}
@@ -197,7 +204,7 @@ func TestParseGroupSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseGroupSpec failed: %v", err)
 	}
-	want = groupSpec{sliceId: 1, grpId: 4, isMeta: false, extCnt: 2, raid1: false}
+	want = plant.GroupSpec{SliceId: 1, GrpId: 4, Meta: false, ExtCnt: 2, Raid1: false}
 	if got != want {
 		t.Fatalf("parseGroupSpec = %+v, want %+v", got, want)
 	}
@@ -221,7 +228,7 @@ func TestParseLegSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseLegSpec failed: %v", err)
 	}
-	if got != (legSpec{grpId: 2, legId: 3, legIdx: 1}) {
+	if got != (plant.LegSpec{GrpId: 2, LegId: 3, LegIdx: 1}) {
 		t.Fatalf("parseLegSpec = %+v", got)
 	}
 	for _, bad := range []string{"", "2:3", "2:3:1:0", "2:3:x"} {
@@ -236,7 +243,7 @@ func TestParseSideSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSideSpec failed: %v", err)
 	}
-	if got != (sideSpec{legId: 3, sideId: 4, dnId: 1, slot: 0}) {
+	if got != (plant.SideSpec{LegId: 3, SideId: 4, DnId: 1, Slot: 0}) {
 		t.Fatalf("parseSideSpec = %+v", got)
 	}
 	for _, bad := range []string{"", "3:4:1", "3:4:1:0:9", "3:4:1:x"} {
@@ -251,7 +258,7 @@ func TestParseMigrSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseMigrSpec failed: %v", err)
 	}
-	want := migrSpec{name: "m0", migrId: 3, srcSide: 1, dstSide: 9}
+	want := plant.MigrSpec{Name: "m0", Id: 3, SrcSide: 1, DstSide: 9}
 	if got != want {
 		t.Fatalf("parseMigrSpec = %+v, want %+v", got, want)
 	}
@@ -267,7 +274,7 @@ func TestParseNsSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseNsSpec failed: %v", err)
 	}
-	if got != (nsSpec{nsId: 5, nsIdx: 1, tdId: 7}) {
+	if got != (plant.NsSpec{NsId: 5, NsIdx: 1, TdId: 7}) {
 		t.Fatalf("parseNsSpec = %+v", got)
 	}
 	for _, bad := range []string{"", "5:1", "5:1:7:9", "5:x:7"} {
@@ -741,858 +748,6 @@ func TestMetaUnitsEmitsWhatTheSuitesRead(t *testing.T) {
 	}
 }
 
-// memStm is an in-memory etcdutil.STM over marshaled values, so a value read
-// back is a fresh copy, as it is from etcd, and a staged write is seen by a
-// later read. It counts the reads and the writes of every key: "one write
-// per node" and "zero units read nothing" are counts.
-type memStm struct {
-	vals map[string][]byte
-	gets map[string]int
-	puts map[string]int
-}
-
-func newMemStm() *memStm {
-	return &memStm{
-		vals: make(map[string][]byte),
-		gets: make(map[string]int),
-		puts: make(map[string]int),
-	}
-}
-
-func (m *memStm) Get(key string, msg proto.Message) bool {
-	m.gets[key]++
-	return m.peek(key, msg)
-}
-
-func (m *memStm) Put(key string, msg proto.Message) {
-	m.seed(key, msg)
-	m.puts[key]++
-}
-
-func (m *memStm) Del(key string) { delete(m.vals, key) }
-
-func (m *memStm) Rev(key string) int64 { return 0 }
-
-// seed stores a fixture value without counting a write.
-func (m *memStm) seed(key string, msg proto.Message) {
-	data, err := proto.Marshal(msg)
-	if err != nil {
-		panic(fmt.Sprintf("memStm: marshaling %q: %v", key, err))
-	}
-	m.vals[key] = data
-}
-
-// peek reads a value for an assertion without counting a read.
-func (m *memStm) peek(key string, msg proto.Message) bool {
-	data, ok := m.vals[key]
-	if !ok {
-		return false
-	}
-	if err := proto.Unmarshal(data, msg); err != nil {
-		panic(fmt.Sprintf("memStm: decoding %q: %v", key, err))
-	}
-	return true
-}
-
-// memStm must stay a valid etcdutil.STM.
-var _ etcdutil.STM = (*memStm)(nil)
-
-// testPoolBdev is a stored pool BdevConf with blockSize as its block size:
-// every member model.ValidateBdevConf requires is concrete, and no
-// redund_conf is the redund_none choice.
-func testPoolBdev(blockSize uint64) *pb.BdevConf {
-	return &pb.BdevConf{
-		DmPoolConf: &pb.DmPoolConf{
-			DataBlockSize:   blockSize,
-			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
-		},
-		DmRaid0Conf: &pb.DmRaid0Conf{
-			StripeSize: common.DefaultDmRaid0StripeSize,
-		},
-	}
-}
-
-// TestCloneChargePerCn pins put-clone's charge (architecture.md, Metadata
-// units): the clone's units once per cntlr on the CN its record names, one
-// write per CN, the capacity value following the record, no CnRev, and no
-// refusal for room — the charge model.FinishCloneDelete gives back.
-func TestCloneChargePerCn(t *testing.T) {
-	const (
-		cid    = uint64(0xc1d)
-		spId   = uint64(7)
-		cnA    = "10.0.0.1:29700"
-		cnB    = "10.0.0.1:29701"
-		cnGone = "10.0.0.1:29702"
-		free   = uint64(64)
-		units  = uint64(4)
-	)
-	// fixture plants a pool whose cntlr id i+1 sits on cntlrCns[i] (an empty
-	// addr is a listed cntlr with no key) and the CNs cnA and cnB, cnA with
-	// usedA units already used. cnGone has no CnConf.
-	fixture := func(usedA uint64, cntlrCns ...string) (*memStm, *pb.SpConf) {
-		m := newMemStm()
-		conf := &pb.SpConf{SpId: spId}
-		for i, addrPort := range cntlrCns {
-			cntlrId := uint64(i + 1)
-			conf.CntlrIdList = append(conf.CntlrIdList, cntlrId)
-			if addrPort == "" {
-				continue
-			}
-			m.seed(model.CntlrKey(cid, spId, cntlrId),
-				&pb.Cntlr{AddrPort: addrPort})
-		}
-		m.seed(model.CnConfKey(cid, cnA), &pb.CnConf{
-			CnId: 1, Location: "rack0", TotalExtCnt: free,
-			FreeExtCnt: free, UsedMetaUnits: usedA,
-		})
-		m.seed(model.CnConfKey(cid, cnB), &pb.CnConf{
-			CnId: 2, Location: "rack1", TotalExtCnt: free,
-			FreeExtCnt: free,
-		})
-		return m, conf
-	}
-	// used reads a CN's count from its record and from its capacity value,
-	// failing when the two disagree or the key is gone.
-	used := func(t *testing.T, m *memStm, addrPort string) uint64 {
-		t.Helper()
-		cn := &pb.CnConf{}
-		if !m.peek(model.CnConfKey(cid, addrPort), cn) {
-			t.Fatalf("%s: no CnConf", addrPort)
-		}
-		value := &pb.CnCapacity{}
-		if !m.peek(model.CnCapacityKey(cid, free, addrPort), value) {
-			t.Fatalf("%s: the capacity key is gone", addrPort)
-		}
-		if value.GetUsedMetaUnits() != cn.GetUsedMetaUnits() {
-			t.Fatalf("%s: capacity value carries %d used units, the "+
-				"record %d", addrPort, value.GetUsedMetaUnits(),
-				cn.GetUsedMetaUnits())
-		}
-		if value.GetLocation() != cn.GetLocation() {
-			t.Fatalf("%s: capacity value location %q, the record %q",
-				addrPort, value.GetLocation(), cn.GetLocation())
-		}
-		return cn.GetUsedMetaUnits()
-	}
-	// onlyNodeWrites fails on any write but a CnConf or a capacity key, and
-	// on a second write of one key: a units-only charge bumps no CnRev.
-	onlyNodeWrites := func(t *testing.T, m *memStm) {
-		t.Helper()
-		for key, cnt := range m.puts {
-			if !strings.HasPrefix(key, common.DnvPrefix+" cn_conf ") &&
-				!strings.HasPrefix(key, common.DnvPrefix+" cn_capacity ") {
-				t.Errorf("the charge wrote %q", key)
-			}
-			if cnt != 1 {
-				t.Errorf("the charge wrote %q %d times, want once", key, cnt)
-			}
-		}
-	}
-
-	t.Run("two cntlrs on two CNs charge each CN once", func(t *testing.T) {
-		m, conf := fixture(10, cnA, cnB)
-		charged, err := chargeCloneCns(m, cid, conf, units)
-		if err != nil {
-			t.Fatalf("chargeCloneCns: %v", err)
-		}
-		if got := used(t, m, cnA); got != 10+units {
-			t.Errorf("cnA used %d, want %d", got, 10+units)
-		}
-		if got := used(t, m, cnB); got != units {
-			t.Errorf("cnB used %d, want %d", got, units)
-		}
-		if len(charged) != 2 || charged[cnA] != units ||
-			charged[cnB] != units {
-			t.Errorf("charged %v, want %d on each of %s and %s",
-				charged, units, cnA, cnB)
-		}
-		onlyNodeWrites(t, m)
-	})
-	t.Run("two cntlrs on one CN charge it twice in one write",
-		func(t *testing.T) {
-			m, conf := fixture(0, cnA, cnB, cnA)
-			charged, err := chargeCloneCns(m, cid, conf, units)
-			if err != nil {
-				t.Fatalf("chargeCloneCns: %v", err)
-			}
-			if got := used(t, m, cnA); got != 2*units {
-				t.Errorf("cnA used %d, want %d", got, 2*units)
-			}
-			if got := used(t, m, cnB); got != units {
-				t.Errorf("cnB used %d, want %d", got, units)
-			}
-			if charged[cnA] != 2*units {
-				t.Errorf("charged %v, want %d on %s", charged, 2*units, cnA)
-			}
-			onlyNodeWrites(t, m)
-		})
-	t.Run("no cntlr charges nothing", func(t *testing.T) {
-		m, conf := fixture(0)
-		charged, err := chargeCloneCns(m, cid, conf, units)
-		if err != nil || len(charged) != 0 || len(m.puts) != 0 {
-			t.Errorf("charged %v, err %v, writes %v; want none",
-				charged, err, m.puts)
-		}
-	})
-	t.Run("zero units read nothing", func(t *testing.T) {
-		m, conf := fixture(0, cnA, cnB)
-		charged, err := chargeCloneCns(m, cid, conf, 0)
-		if err != nil || len(charged) != 0 {
-			t.Errorf("charged %v, err %v; want nothing", charged, err)
-		}
-		if len(m.gets) != 0 || len(m.puts) != 0 {
-			t.Errorf("zero units read %v and wrote %v", m.gets, m.puts)
-		}
-	})
-	t.Run("a CN past its ceiling is charged all the same",
-		func(t *testing.T) {
-			m, conf := fixture(common.CnCloneMetaUnitCnt-1, cnA)
-			if _, err := chargeCloneCns(m, cid, conf, units); err != nil {
-				t.Fatalf("chargeCloneCns refused a full CN: %v", err)
-			}
-			want := uint64(common.CnCloneMetaUnitCnt - 1 + units)
-			if got := used(t, m, cnA); got != want {
-				t.Errorf("cnA used %d, want %d", got, want)
-			}
-			cn := &pb.CnConf{}
-			m.peek(model.CnConfKey(cid, cnA), cn)
-			if free := model.CnFreeMetaUnits(cn); free != 0 {
-				t.Errorf("cnA past its ceiling has %d free units, want 0",
-					free)
-			}
-		})
-	t.Run("a listed cntlr with no key refuses before any write",
-		func(t *testing.T) {
-			m, conf := fixture(0, cnA, "", cnB)
-			_, err := chargeCloneCns(m, cid, conf, units)
-			if err == nil || !strings.Contains(err.Error(), "not found") {
-				t.Fatalf("chargeCloneCns = %v, want a \"not found\" "+
-					"refusal", err)
-			}
-			if len(m.puts) != 0 {
-				t.Errorf("the refusal wrote %v", m.puts)
-			}
-		})
-	t.Run("a CN that is gone is skipped", func(t *testing.T) {
-		m, conf := fixture(0, cnA, cnGone)
-		charged, err := chargeCloneCns(m, cid, conf, units)
-		if err != nil {
-			t.Fatalf("chargeCloneCns: %v", err)
-		}
-		if _, ok := charged[cnGone]; ok {
-			t.Errorf("charged %v names the CN that is gone", charged)
-		}
-		if m.puts[model.CnConfKey(cid, cnGone)] != 0 {
-			t.Errorf("the charge wrote the CnConf of the CN that is gone")
-		}
-		if got := used(t, m, cnA); got != units {
-			t.Errorf("cnA used %d, want %d", got, units)
-		}
-		onlyNodeWrites(t, m)
-	})
-}
-
-// TestMigrDstCharge pins put-migr's charge of its destination DN
-// (architecture.md, Metadata units): the side pointer, the extents and the
-// migration's units in the one write of the record, the capacity value
-// following the record, one DnRev bump, no refusal past the DN's metadata
-// area, and a DN short of extents refused before any write — the charge
-// FinishMigration and CancelMigration give back.
-func TestMigrDstCharge(t *testing.T) {
-	const (
-		cid    = uint64(0xc1d)
-		spId   = uint64(7)
-		dnId   = uint64(0x21)
-		shard  = uint32(3)
-		addr   = "10.0.0.2:29600"
-		total  = uint64(100)
-		free   = uint64(64)
-		extCnt = uint64(2)
-		units  = uint64(3)
-		rev    = uint64(41)
-	)
-	cc := &pb.ClusterConf{DnBinConf: model.ResolveDnBinConf(nil)}
-	ptr := &pb.SidePointer{SpId: spId, LegId: 0x31, SideId: 0x32}
-	held := &pb.SidePointer{SpId: spId, LegId: 0x11, SideId: 0x12}
-	capKey := func(t *testing.T, freeExt uint64) string {
-		t.Helper()
-		binIdx, ok := model.DnBinIdx(freeExt, cc.GetDnBinConf())
-		if !ok {
-			t.Fatalf("%d free extents have no bin", freeExt)
-		}
-		return model.DnCapacityKey(cid, binIdx, freeExt, addr)
-	}
-	// fixture plants the DN with freeExt free extents, used units already
-	// used and one side it already holds, its capacity key as
-	// model.MaintainDnCapacity writes it, and its DnRev at rev; it returns
-	// the record as an STM reads it.
-	fixture := func(t *testing.T, freeExt, used uint64) (*memStm, *pb.DnConf) {
-		t.Helper()
-		m := newMemStm()
-		dn := &pb.DnConf{
-			DnId: dnId, ShardCode: shard, Location: "rack2",
-			TotalExtCnt: total, FreeExtCnt: freeExt, UsedMetaUnits: used,
-			SidePtrList: []*pb.SidePointer{held},
-		}
-		m.seed(model.DnConfKey(cid, addr), dn)
-		m.seed(capKey(t, freeExt), model.DnCapacityValue(dn))
-		m.seed(model.DnRevKey(shard, cid, dnId), &pb.DnRev{Revision: rev})
-		read := &pb.DnConf{}
-		if !m.Get(model.DnConfKey(cid, addr), read) {
-			t.Fatalf("no DnConf at %q", addr)
-		}
-		return m, read
-	}
-	// charged checks one successful charge: the record and its capacity
-	// value carry the extents and the units, the key moved with the free
-	// count, the revision went up once, and nothing else was written.
-	charged := func(t *testing.T, m *memStm, dnRev, used uint64) {
-		t.Helper()
-		dn := &pb.DnConf{}
-		if !m.peek(model.DnConfKey(cid, addr), dn) {
-			t.Fatalf("the charge removed the DnConf")
-		}
-		if dn.GetFreeExtCnt() != free-extCnt {
-			t.Errorf("free_ext_cnt %d, want %d", dn.GetFreeExtCnt(),
-				free-extCnt)
-		}
-		if dn.GetUsedMetaUnits() != used+units {
-			t.Errorf("used_meta_units %d, want %d", dn.GetUsedMetaUnits(),
-				used+units)
-		}
-		ptrs := dn.GetSidePtrList()
-		if len(ptrs) != 2 || !proto.Equal(ptrs[0], held) ||
-			!proto.Equal(ptrs[1], ptr) {
-			t.Errorf("side_ptr_list %v, want %v then %v", ptrs, held, ptr)
-		}
-		if m.peek(capKey(t, free), &pb.DnCapacity{}) {
-			t.Errorf("the capacity key of %d free extents is still there",
-				free)
-		}
-		value := &pb.DnCapacity{}
-		if !m.peek(capKey(t, free-extCnt), value) {
-			t.Fatalf("no capacity key for %d free extents", free-extCnt)
-		}
-		if !proto.Equal(value, model.DnCapacityValue(dn)) {
-			t.Errorf("capacity value %v, the record implies %v", value,
-				model.DnCapacityValue(dn))
-		}
-		got := &pb.DnRev{}
-		m.peek(model.DnRevKey(shard, cid, dnId), got)
-		if got.GetRevision() != rev+1 || dnRev != rev+1 {
-			t.Errorf("DnRev %d, returned %d; want %d once",
-				got.GetRevision(), dnRev, rev+1)
-		}
-		for key, cnt := range m.puts {
-			if key != model.DnConfKey(cid, addr) &&
-				key != capKey(t, free-extCnt) &&
-				key != model.DnRevKey(shard, cid, dnId) {
-				t.Errorf("the charge wrote %q", key)
-			}
-			if cnt != 1 {
-				t.Errorf("the charge wrote %q %d times, want once", key, cnt)
-			}
-		}
-	}
-
-	t.Run("the units ride the extents' write", func(t *testing.T) {
-		m, dn := fixture(t, free, 10)
-		dnRev, err := chargeMigrDst(m, cid, cc, addr, dn, ptr, extCnt, units)
-		if err != nil {
-			t.Fatalf("chargeMigrDst: %v", err)
-		}
-		charged(t, m, dnRev, 10)
-	})
-	t.Run("a DN past its metadata area is charged all the same",
-		func(t *testing.T) {
-			used := uint64(common.DnCloneMetaUnitCnt - 1)
-			m, dn := fixture(t, free, used)
-			dnRev, err := chargeMigrDst(
-				m, cid, cc, addr, dn, ptr, extCnt, units)
-			if err != nil {
-				t.Fatalf("chargeMigrDst refused a full DN: %v", err)
-			}
-			charged(t, m, dnRev, used)
-			after := &pb.DnConf{}
-			m.peek(model.DnConfKey(cid, addr), after)
-			if room := model.DnFreeMetaUnits(after); room != 0 {
-				t.Errorf("a DN past its area has %d free units, want 0",
-					room)
-			}
-		})
-	t.Run("a DN short of extents refuses before any write",
-		func(t *testing.T) {
-			m, dn := fixture(t, extCnt-1, 0)
-			_, err := chargeMigrDst(m, cid, cc, addr, dn, ptr, extCnt, units)
-			if err == nil || !strings.Contains(err.Error(), "free_ext_cnt") {
-				t.Fatalf("chargeMigrDst = %v, want a free_ext_cnt refusal",
-					err)
-			}
-			if len(m.puts) != 0 {
-				t.Errorf("the refusal wrote %v", m.puts)
-			}
-		})
-}
-
-// TestPlantedCloneTd pins how put-clone's --dst-td finds the td it sizes the
-// clone by: a name first, then a td_id among the pool's tds, and a td_id no
-// td carries planted unsized.
-func TestPlantedCloneTd(t *testing.T) {
-	const cid, spId = uint64(0xc1d), uint64(7)
-	m := newMemStm()
-	conf := &pb.SpConf{SpId: spId, TdNameList: []string{"td0", "5"}}
-	m.seed(model.ThinDeviceKey(cid, spId, "td0"),
-		&pb.ThinDevice{TdId: 0x10, Size: 10 << 30})
-	// A td NAMED like an id: the name is tried first, so "5" is this td and
-	// never td_id 5.
-	m.seed(model.ThinDeviceKey(cid, spId, "5"),
-		&pb.ThinDevice{TdId: 0x11, Size: 1 << 30})
-	cases := []struct {
-		dstTd string
-		id    uint64
-		size  uint64
-		found bool
-	}{
-		{"td0", 0x10, 10 << 30, true},
-		{"0x10", 0x10, 10 << 30, true},
-		{"16", 0x10, 10 << 30, true},
-		{"5", 0x11, 1 << 30, true},
-		{"0x99", 0x99, 0, false},
-	}
-	for _, tc := range cases {
-		id, td, err := plantedCloneTd(m, cid, conf, tc.dstTd)
-		if err != nil {
-			t.Errorf("plantedCloneTd(%q): %v", tc.dstTd, err)
-			continue
-		}
-		if id != tc.id || (td != nil) != tc.found ||
-			td.GetSize() != tc.size {
-			t.Errorf("plantedCloneTd(%q) = %#x, %v; want %#x, size %d, "+
-				"found %t", tc.dstTd, id, td, tc.id, tc.size, tc.found)
-		}
-	}
-	if _, _, err := plantedCloneTd(m, cid, conf, "nope"); err == nil {
-		t.Errorf("plantedCloneTd(\"nope\") succeeded, want an error")
-	}
-}
-
-// TestPlantedUnits pins the units put-clone and put-migr store and charge
-// (architecture.md, Metadata units): the formula at the pool's block size,
-// behind the stored conf's gate, and none for a clone with no td to size.
-func TestPlantedUnits(t *testing.T) {
-	small := &pb.SpConf{BdevConf: testPoolBdev(64 << 10)}
-	large := &pb.SpConf{BdevConf: testPoolBdev(1 << 20)}
-	broken := &pb.SpConf{BdevConf: testPoolBdev(0)}
-
-	cloneCases := []struct {
-		name  string
-		conf  *pb.SpConf
-		td    *pb.ThinDevice
-		units uint64
-	}{
-		{"the worker suite's drain-case clone", large,
-			&pb.ThinDevice{Size: 10 << 30}, 2},
-		{"the cn agent's example", small,
-			&pb.ThinDevice{Size: 1 << 40}, 5},
-		{"no td to size", small, nil, 0},
-		{"no td to size, whatever the conf", broken, nil, 0},
-	}
-	for _, tc := range cloneCases {
-		units, err := plantedCloneUnits(tc.conf, tc.td)
-		if err != nil || units != tc.units {
-			t.Errorf("plantedCloneUnits, %s = %d, %v; want %d",
-				tc.name, units, err, tc.units)
-		}
-	}
-	if units, err := plantedCloneUnits(
-		broken, &pb.ThinDevice{Size: 10 << 30}); err == nil {
-		t.Errorf("plantedCloneUnits on a zero block size = %d, want a "+
-			"refusal", units)
-	}
-
-	migrCases := []struct {
-		name       string
-		conf       *pb.SpConf
-		extCnt     uint64
-		extentSize uint64
-		units      uint64
-	}{
-		{"the worker suite's bitmap-case migration", large,
-			2, common.MinDnExtSize, 2},
-		{"the gateway suite's smoke migration", large,
-			2, 1 << 30, 2},
-		{"the ceiling case's migration that fills a DN", small,
-			12032, 1 << 30, common.DnCloneMetaUnitCnt},
-	}
-	for _, tc := range migrCases {
-		units, err := plantedMigrUnits(tc.conf, tc.extCnt, tc.extentSize)
-		if err != nil || units != tc.units {
-			t.Errorf("plantedMigrUnits, %s = %d, %v; want %d",
-				tc.name, units, err, tc.units)
-		}
-	}
-	if units, err := plantedMigrUnits(broken, 2, 1<<30); err == nil {
-		t.Errorf("plantedMigrUnits on a zero block size = %d, want a "+
-			"refusal", units)
-	}
-}
-
-func TestNvmeTrConfOf(t *testing.T) {
-	conf := nvmeTrConfOf("192.168.10.20:29600")
-	if conf.GetTrAddr() != "192.168.10.20" {
-		t.Fatalf("tr_addr = %q", conf.GetTrAddr())
-	}
-	// The node's own port, so two nodes on one host get distinct
-	// NvmeTrConfs and a CdcEntry's transport list stays attributable
-	// (worker_test.sh case D step 3).
-	if conf.GetTrSvcId() != "29600" {
-		t.Fatalf("tr_svc_id = %q, want %q", conf.GetTrSvcId(), "29600")
-	}
-	if other := nvmeTrConfOf("192.168.10.20:29700"); other.GetTrSvcId() ==
-		conf.GetTrSvcId() {
-		t.Fatalf("two nodes on one host share an NvmeTrConf")
-	}
-	// An address with no port still yields a usable default.
-	if bare := nvmeTrConfOf("192.168.10.20"); bare.GetTrSvcId() != nvmeTrSvcId {
-		t.Fatalf("bare addr tr_svc_id = %q", bare.GetTrSvcId())
-	}
-	if conf.GetTrType() != "tcp" || conf.GetAdrFam() != "ipv4" {
-		t.Fatalf("tr_type/adr_fam = %q/%q",
-			conf.GetTrType(), conf.GetAdrFam())
-	}
-}
-
-func TestNsIdentityIsDeterministic(t *testing.T) {
-	uuid, nguid := nsIdentity(1, 2, 3)
-	again, againNguid := nsIdentity(1, 2, 3)
-	if uuid != again || nguid != againNguid {
-		t.Fatalf("nsIdentity is not deterministic")
-	}
-	other, _ := nsIdentity(1, 2, 4)
-	if uuid == other {
-		t.Fatalf("two namespaces share one uuid")
-	}
-	if len(nguid) != 32 {
-		t.Fatalf("nguid %q is not 16 bytes of hex", nguid)
-	}
-	if len(uuid) != 36 || strings.Count(uuid, "-") != 4 {
-		t.Fatalf("uuid %q is not RFC 4122 shaped", uuid)
-	}
-	if uuid[14] != '4' {
-		t.Fatalf("uuid %q is not version 4", uuid)
-	}
-}
-
-// smokePlan is worker_test.sh's case S placement: two cntlrs, one slice, a
-// raid1 meta group of 1 extent and a raid1 data group of 2, four sides on two
-// DNs.
-func smokePlan() (cntlrs, slices, groups, legs, sides []string) {
-	return []string{"1:1:0:true", "2:2:1:false"},
-		[]string{"1:0"},
-		[]string{"1:2:meta:1:raid1", "1:5:data:2:raid1"},
-		[]string{"2:3:0", "2:4:1", "5:6:0", "5:7:1"},
-		[]string{"3:8:1:0", "4:9:2:0", "6:10:1:0", "7:11:2:0"}
-}
-
-func TestBuildSpPlan(t *testing.T) {
-	cntlrs, slices, groups, legs, sides := smokePlan()
-	plan, err := buildSpPlan(
-		cntlrs, slices, groups, legs, sides, []uint32{0, 1, 2},
-	)
-	if err != nil {
-		t.Fatalf("buildSpPlan failed: %v", err)
-	}
-	if !plan.raid1 {
-		t.Fatalf("plan.raid1 = false")
-	}
-	// Σ ext_cnt over ALL groups is what one cntlr's CN reserves
-	// (architecture.md, Storage pools).
-	if plan.footprint != 3 {
-		t.Fatalf("footprint = %d, want 3", plan.footprint)
-	}
-	// next_id must be past every id the script assigned.
-	if plan.nextId != 12 {
-		t.Fatalf("next_id = %d, want 12", plan.nextId)
-	}
-	if plan.grpOfLeg[6] != 5 || plan.grpOfLeg[3] != 2 {
-		t.Fatalf("grpOfLeg = %v", plan.grpOfLeg)
-	}
-	// A side of a data-group leg costs the data group's 2 extents.
-	if plan.extOfLeg[6] != 2 || plan.extOfLeg[3] != 1 {
-		t.Fatalf("extOfLeg = %v", plan.extOfLeg)
-	}
-	if len(plan.sides) != 4 || len(plan.legs) != 4 {
-		t.Fatalf("plan has %d sides / %d legs", len(plan.sides), len(plan.legs))
-	}
-}
-
-func TestBuildSpPlanRejectsBadWiring(t *testing.T) {
-	slots := []uint32{0, 1, 2}
-	cases := []struct {
-		name   string
-		mutate func(c, s, g, l, si *[]string)
-		want   string
-	}{
-		{
-			name: "dangling group slice",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*g)[0] = "9:2:meta:1:raid1"
-			},
-			want: "no --slice with id",
-		},
-		{
-			name: "dangling leg group",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*l)[0] = "9:3:0"
-			},
-			want: "no --group with id",
-		},
-		{
-			name: "dangling side leg",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*si)[0] = "9:8:1:0"
-			},
-			want: "no --leg with id",
-		},
-		{
-			name: "duplicate side id",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*si)[1] = "4:8:2:0"
-			},
-			want: "side id 0x8 is used twice",
-		},
-		{
-			name: "duplicate leg id",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*l)[1] = "2:3:1"
-			},
-			want: "leg id 0x3 is used twice",
-		},
-		{
-			name: "duplicate cntlr id",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*c)[1] = "1:2:1:false"
-			},
-			want: "cntlr id 0x1 is used twice",
-		},
-		{
-			name: "id zero",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*s)[0] = "0:0"
-			},
-			want: "never valid",
-		},
-		{
-			name: "two primaries",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*c)[1] = "2:2:1:true"
-			},
-			want: "exactly one --cntlr must be primary",
-		},
-		{
-			name: "no primary",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*c)[0] = "1:1:0:false"
-			},
-			want: "exactly one --cntlr must be primary",
-		},
-		{
-			name: "shared cntlid slot",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*c)[1] = "2:2:0:false"
-			},
-			want: "already taken by cntlr",
-		},
-		{
-			name: "slot outside --slots",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*c)[1] = "2:2:7:false"
-			},
-			want: "is not in --slots",
-		},
-		{
-			name: "two cntlrs on one cn",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*c)[1] = "2:1:1:false"
-			},
-			want: "already hosts a cntlr of this sp",
-		},
-		{
-			name: "mixed redundancy",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*g)[1] = "1:5:data:2:none"
-			},
-			want: "same redundancy",
-		},
-		{
-			name: "two legs of one group on one dn",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*si)[1] = "4:9:1:0"
-			},
-			want: "already carries side",
-		},
-		{
-			name: "duplicate leg_idx",
-			mutate: func(c, s, g, l, si *[]string) {
-				(*l)[1] = "2:4:0"
-			},
-			want: "already used by leg",
-		},
-		{
-			name: "duplicate slice_idx",
-			mutate: func(c, s, g, l, si *[]string) {
-				*s = append(*s, "12:0")
-			},
-			want: "already used by slice",
-		},
-		{
-			name: "group with no leg",
-			mutate: func(c, s, g, l, si *[]string) {
-				*g = append(*g, "1:20:data:2:raid1")
-			},
-			want: "has no --leg",
-		},
-		{
-			name: "leg with no side",
-			mutate: func(c, s, g, l, si *[]string) {
-				*l = append(*l, "2:20:2")
-			},
-			want: "has no --side",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c, s, g, l, si := smokePlan()
-			tc.mutate(&c, &s, &g, &l, &si)
-			_, err := buildSpPlan(c, s, g, l, si, slots)
-			if err == nil {
-				t.Fatalf("buildSpPlan succeeded, want %q", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error %q does not mention %q", err, tc.want)
-			}
-		})
-	}
-}
-
-func TestBuildSpPlanRequiresEveryPart(t *testing.T) {
-	c, s, g, l, si := smokePlan()
-	slots := []uint32{0, 1, 2}
-	if _, err := buildSpPlan(nil, s, g, l, si, slots); err == nil {
-		t.Errorf("a plan with no --cntlr was accepted")
-	}
-	if _, err := buildSpPlan(c, nil, g, l, si, slots); err == nil {
-		t.Errorf("a plan with no --slice was accepted")
-	}
-	if _, err := buildSpPlan(c, s, nil, l, si, slots); err == nil {
-		t.Errorf("a plan with no --group was accepted")
-	}
-	// Fewer slots than cntlrs cannot give every cntlr a distinct one
-	// (architecture.md, cntlid slots).
-	if _, err := buildSpPlan(c, s, g, l, si, []uint32{0}); err == nil {
-		t.Errorf("a plan with fewer slots than cntlrs was accepted")
-	}
-}
-
-func TestContainsNameAndAdvanceNextId(t *testing.T) {
-	if !containsName([]string{"a", "b"}, "b") {
-		t.Fatalf("containsName missed an entry")
-	}
-	if containsName([]string{"a", "b"}, "c") {
-		t.Fatalf("containsName invented an entry")
-	}
-	conf := &pb.SpConf{NextId: 5}
-	advanceNextId(conf, 3)
-	if conf.NextId != 5 {
-		t.Fatalf("next_id went backwards to %d", conf.NextId)
-	}
-	advanceNextId(conf, 5, 9)
-	if conf.NextId != 10 {
-		t.Fatalf("next_id = %d, want 10", conf.NextId)
-	}
-}
-
-// TestCutoverRefOf pins how start-cutover names a migration for
-// model.StartCutover: the record's id and sides, and the slice and leg that
-// carry both sides — found among the spare legs and in a later slice too —
-// and a refusal for a name with no record and for sides that share no leg.
-func TestCutoverRefOf(t *testing.T) {
-	state := &model.SpState{
-		Conf: &pb.SpConf{SliceIdList: []uint64{1, 2}},
-		Slices: map[uint64]*pb.Slice{
-			1: {MetaGrpList: []*pb.Group{{
-				LegList: []*pb.Leg{{
-					LegId:    11,
-					SideList: []*pb.Side{{SideId: 101}},
-				}},
-			}}},
-			2: {DataGrpList: []*pb.Group{{
-				LegList: []*pb.Leg{{
-					LegId:    21,
-					SideList: []*pb.Side{{SideId: 201}},
-				}},
-				SpareLegList: []*pb.Leg{{
-					LegId: 22,
-					SideList: []*pb.Side{
-						{SideId: 202}, {SideId: 203},
-					},
-				}},
-			}}},
-		},
-		Migrs: map[string]*pb.Migration{
-			"m0": {MigrId: 7, SrcSideId: 202, DstSideId: 203},
-			"m1": {MigrId: 8, SrcSideId: 101, DstSideId: 201},
-		},
-	}
-	ref, err := cutoverRefOf(state, "m0")
-	if err != nil {
-		t.Fatalf("cutoverRefOf(m0): %v", err)
-	}
-	want := model.CutoverRef{
-		MigrName: "m0", MigrId: 7, SliceId: 2, LegId: 22,
-		SrcSideId: 202, DstSideId: 203,
-	}
-	if ref != want {
-		t.Errorf("cutoverRefOf(m0) = %+v, want %+v", ref, want)
-	}
-	if _, err := cutoverRefOf(state, "m1"); err == nil ||
-		!strings.Contains(err.Error(), "share no leg") {
-		t.Errorf("cutoverRefOf(m1) = %v, want a share-no-leg refusal", err)
-	}
-	if _, err := cutoverRefOf(state, "nosuch"); err == nil ||
-		!strings.Contains(err.Error(), "no migration") {
-		t.Errorf("cutoverRefOf(nosuch) = %v, want a no-migration refusal",
-			err)
-	}
-}
-
-// TestStoredPrimary pins the cntlr start-cutover names by default: the one
-// listed cntlr whose record says primary, and a refusal for none or two.
-func TestStoredPrimary(t *testing.T) {
-	stateOf := func(primaries ...bool) *model.SpState {
-		state := &model.SpState{
-			Conf:   &pb.SpConf{},
-			Cntlrs: map[uint64]*pb.Cntlr{},
-		}
-		for i, primary := range primaries {
-			cntlrId := uint64(i + 1)
-			state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, cntlrId)
-			state.Cntlrs[cntlrId] = &pb.Cntlr{Primary: primary}
-		}
-		return state
-	}
-	got, err := storedPrimary(stateOf(false, true, false))
-	if err != nil || got != 2 {
-		t.Errorf("storedPrimary = %d, %v; want 2", got, err)
-	}
-	for _, primaries := range [][]bool{{false, false}, {true, true}} {
-		if got, err := storedPrimary(stateOf(primaries...)); err == nil {
-			t.Errorf("storedPrimary(%v) = %d, want a refusal",
-				primaries, got)
-		}
-	}
-}
-
 // TestShardFlag pins the one place where a decimal reading would be silently
 // wrong: worker_test.sh's case E spreads DNs over the shard codes "00", "55",
 // "aa" and "ff", which are the common.ShardCodeFmt spelling and therefore hex.
@@ -1670,84 +825,6 @@ func TestPlantedEpoch(t *testing.T) {
 			t.Errorf("plantedEpoch(age %d given %v clear %v) = %d, %v; "+
 				"want %d", tc.age, tc.ageGiven, tc.clearEpoch, got, err,
 				tc.want)
-		}
-	}
-}
-
-// TestSetSliceEpoch pins where set-epoch finds a leg or a side: in either
-// group list and on an active or a spare leg, as the health ops do, touching
-// that one object and nothing else.
-func TestSetSliceEpoch(t *testing.T) {
-	newSlice := func() *pb.Slice {
-		return &pb.Slice{
-			MetaGrpList: []*pb.Group{{
-				GrpId: 1,
-				LegList: []*pb.Leg{{
-					LegId: 1, SideList: []*pb.Side{{SideId: 11}},
-				}},
-				SpareLegList: []*pb.Leg{{
-					LegId: 2, ErrEpoch: 7,
-					SideList: []*pb.Side{{SideId: 12, ErrEpoch: 8}},
-				}},
-			}},
-			DataGrpList: []*pb.Group{{
-				GrpId: 2,
-				LegList: []*pb.Leg{{
-					LegId: 3, SideList: []*pb.Side{{SideId: 13}},
-				}},
-			}},
-		}
-	}
-	cases := []struct {
-		kind  string
-		id    uint64
-		old   uint64
-		found bool
-		// read returns the epoch the case set, from a fresh walk.
-		read func(*pb.Slice) uint64
-	}{
-		{"leg", 2, 7, true, func(s *pb.Slice) uint64 {
-			return s.GetMetaGrpList()[0].GetSpareLegList()[0].GetErrEpoch()
-		}},
-		{"leg", 3, 0, true, func(s *pb.Slice) uint64 {
-			return s.GetDataGrpList()[0].GetLegList()[0].GetErrEpoch()
-		}},
-		{"side", 12, 8, true, func(s *pb.Slice) uint64 {
-			return s.GetMetaGrpList()[0].GetSpareLegList()[0].
-				GetSideList()[0].GetErrEpoch()
-		}},
-		{"side", 13, 0, true, func(s *pb.Slice) uint64 {
-			return s.GetDataGrpList()[0].GetLegList()[0].
-				GetSideList()[0].GetErrEpoch()
-		}},
-		{"leg", 11, 0, false, nil},
-		{"side", 3, 0, false, nil},
-		{"cntlr", 1, 0, false, nil},
-	}
-	for _, tc := range cases {
-		slice := newSlice()
-		old, found := setSliceEpoch(slice, tc.kind, tc.id, 42)
-		if found != tc.found || old != tc.old {
-			t.Errorf("setSliceEpoch(%s %d) = %d, %v; want %d, %v",
-				tc.kind, tc.id, old, found, tc.old, tc.found)
-			continue
-		}
-		if !found {
-			if !proto.Equal(slice, newSlice()) {
-				t.Errorf("setSliceEpoch(%s %d) found nothing and still "+
-					"changed the slice: %v", tc.kind, tc.id, slice)
-			}
-			continue
-		}
-		if got := tc.read(slice); got != 42 {
-			t.Errorf("setSliceEpoch(%s %d) left %d, want 42",
-				tc.kind, tc.id, got)
-		}
-		// Undo the one write: what remains must be the fixture.
-		setSliceEpoch(slice, tc.kind, tc.id, tc.old)
-		if !proto.Equal(slice, newSlice()) {
-			t.Errorf("setSliceEpoch(%s %d) changed more than its object: %v",
-				tc.kind, tc.id, slice)
 		}
 	}
 }

@@ -1,77 +1,39 @@
 // Command fakeagent is the fake dn/cn agent pair of the dnv-worker
-// integration suite (doc/dnv-worker.md, Integration test plan, The fake agent).
-// One binary with a `dn` and a `cn` subcommand, serving the generated
-// DiskNodeAgent resp. ControllerNodeAgent service on a plaintext listener
-// behind the real server interceptors (doc/grpc.md, Wiring), so `agent.log`
-// carries one `grpc server request`/`reply`/`recv`/`send` record per message
-// with the caller's trace id — the suite's evidence of what the worker sent and
-// which worker sent it (RW10). The JSON log goes to stderr through common's
-// default logger; the script redirects it into `agent.log`.
+// integration suite (doc/dnv-worker.md, Integration test plan, The fake
+// agent): the behavior-file front of the integtest/agentfake library, served
+// over TCP. One binary with a `dn` and a `cn` subcommand, serving the
+// generated DiskNodeAgent resp. ControllerNodeAgent service on a plaintext
+// listener behind the real server interceptors (doc/grpc.md, Wiring), so
+// `agent.log` carries one `grpc server request`/`reply`/`recv`/`send` record
+// per message with the caller's trace id — the suite's evidence of what the
+// worker sent and which worker sent it (RW10). The JSON log goes to stderr
+// through common's default logger; the script redirects it into `agent.log`.
 //
 // Two files in --dir drive and record the fake:
 //
-//	behavior.json  what to report. Re-read on every request whose mtime or
-//	               size changed, so the script flips behaviour without
-//	               restarting the fake. Absent (or `{}`) means: sides
-//	               instantly zeroed and every row OK, save the rows the fake
-//	               derives from the request instead — a migration
-//	               destination's two rows while it waits for the cutover
-//	               (sideInfoLocked) and the path rows of a leg with two sides
-//	               (cntlrInfoLocked) — which the file's levers override all
-//	               the same. A malformed file is logged and
-//	               ignored, keeping the previous behaviour, so a bad file
-//	               fails a test on its assertion instead of killing the agent.
-//	state.json     the last accepted request and revision per object plus the
-//	               received bitmap chunks (address + byte length; a migration
-//	               chunk is addressed by its bm_idx alone, a clone chunk by the
-//	               (src_slice_idx, bm_idx) pair it sits at: architecture.md,
-//	               Bitmap push protocol).
-//	               Written on every apply (temp file + rename) and loaded at
+//	behavior.json  the levers, in the format agentfake.ParseBehavior parses.
+//	               Re-read at the arrival of every request when its mtime or
+//	               size changed, and every pollInterval, so the script flips
+//	               behaviour without restarting the fake and a request the
+//	               file holds sees the flip with no other request. Absent (or
+//	               `{}`) means: sides instantly zeroed and every row OK, save
+//	               the rows the fake derives from the request. A malformed
+//	               file is logged and ignored, keeping the previous
+//	               behaviour, so a bad file fails a test on its assertion
+//	               instead of killing the agent.
+//	state.json     the stored state (agentfake.StateFileName): the last
+//	               accepted request and revision per object plus the received
+//	               bitmap chunks, written on every change and loaded at
 //	               start, so a killed and restarted fake replies like a
-//	               restarted real agent — the last revision and the applied
-//	               set derived from the recorded chunks, a bm_idx_list for a
-//	               migration and a chunk_id_list for a clone (worker_test.sh
-//	               case B step 5). The requests
-//	               are protojson so the file stays human-editable: case A
-//	               step 3 sets a DN's stored revision by hand while the
-//	               process runs, and the fake picks the edit up on the next
-//	               request because the file's mtime is newer than its own
-//	               last write.
-//
-// Every Check* and Get*Info reply, and every Syncup* reply that does not
-// refuse its request, carries an observation stamp (dnagent.md SH28) beside
-// its *Info, never inside it, so the change-only rule's fingerprint of the
-// *Info stays put: the fake observes an object at every answer, so the
-// observation's time is the answer's own, made later than the object's
-// previous observation, and its trace id is the call's — the round's own for
-// a Check* round. Every round is thus a fresh, new observation to the worker
-// (dnv-worker.md HL7, RW23). A round or an info read that refuses its object
-// as unknown — one its parent does not list, or one behavior.json's
-// reply_code refuses so — has no observation: its stamp carries only the
-// answer time. A Syncup* that saved the request also carries the save time,
-// and its observation comes after it; one that refuses the request — a stale
-// revision, an object its parent does not list, or a refusing code
-// behavior.json's reply_code forces — carries no stamp and no save time, as a
-// live agent's refusal carries neither (architecture.md, Live-state
-// reporting). A forced ReplyCodeLeftover is no refusal: it carries an
-// observation, and no save time, since the fake saves nothing on a forced
-// code. The times are not persisted: a restarted fake stamps the time it
-// answers, as an agent's startup reconcile stores a new observation.
-//
-// Objects are keyed exactly as behavior.json keys them — "dn", "cn",
-// "side <sp_id>:<leg_id>:<side_id>", "cntlr <sp_id>:<cntlr_id>", ids in plain
-// decimal — and every rule the fake follows (the revision gate, the ordering
-// gate, the *Info shape, the change-only Check streams) is per object
-// (dnv-worker.md, Integration test plan, The fake agent).
+//	               restarted agent; a hand edit while the fake runs — a
+//	               stored revision set by hand, the store emptied — is seen
+//	               by the next request.
 //
 //	usage: fakeagent dn|cn --grpc-address <ip:port> --dir <dir> [--size N]
 package main
 
 import (
-	"bytes"
-	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -80,2107 +42,254 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
-	"github.com/distributed-nvme/distributed-nvme/pb"
+	"github.com/distributed-nvme/distributed-nvme/integtest/agentfake"
 )
 
 const (
-	// The two files of the per-agent directory, next to agent.log.
+	// behaviorFileName is the behavior file of the per-agent directory,
+	// next to agent.log and the state file.
 	behaviorFileName = "behavior.json"
-	stateFileName    = "state.json"
 
-	// defaultNodeSize is what GetDnSize/GetCnSize reply unless --size or
-	// behavior.json's "size" says otherwise (the worker never calls them).
-	defaultNodeSize = 1024 * 1024 * 1024 * 1024
+	// pollInterval is how often the behavior file is re-read, besides at
+	// the arrival of every request, so that a request a lever holds sees
+	// the script's rewrite with no other request.
+	pollInterval = 200 * time.Millisecond
 
-	// The behavior.json object keys. The side and cntlr forms are built by
-	// sideObjKey/cntlrObjKey; these are the two singletons.
-	dnObjKey = "dn"
-	cnObjKey = "cn"
-
-	sideObjPrefix  = "side "
-	cntlrObjPrefix = "cntlr "
-
-	// The details of the rows the fake derives from the last accepted
-	// request rather than defaulting to OK, the texts the real agents write:
-	// a migration destination's two rows while it waits for the cutover
-	// (dnagent.md DN18), and a path row of a leg with two sides, live for a
-	// provisioned side and held for one that is not (cnagent.md CN28). The
-	// worker reads none of them: it reads the reason and the status.
-	detailsAwaitingCutover  = "waiting for the cutover"
-	detailsPathLive         = "live/optimized"
-	detailsPathProvisioning = "provisioning"
+	usageText = "usage: fakeagent dn|cn --grpc-address <ip:port> --dir <dir> " +
+		"[--size N]"
 )
 
-// sideObjKey renders the "side <sp_id>:<leg_id>:<side_id>" object key —
-// the same string behavior.json uses ("side 1:3:5").
-func sideObjKey(ptr *pb.SidePointer) string {
-	return fmt.Sprintf("%s%d:%d:%d", sideObjPrefix,
-		ptr.GetSpId(), ptr.GetLegId(), ptr.GetSideId())
-}
-
-// cntlrObjKey renders the "cntlr <sp_id>:<cntlr_id>" object key
-// ("cntlr 1:1").
-func cntlrObjKey(ptr *pb.CntlrPointer) string {
-	return fmt.Sprintf("%s%d:%d", cntlrObjPrefix,
-		ptr.GetSpId(), ptr.GetCntlrId())
-}
-
-// rowKey renders the "<map_field>.<id>" behavior.json row key of a map row.
-func rowKey(field string, id uint64) string {
-	return field + "." + strconv.FormatUint(id, 10)
-}
-
-// migrChunkKey renders the state.json chunk key of one migration chunk: the
-// bm_idx alone, in plain decimal, because a migration bitmap's chunks are
-// numbered by their append sequence (architecture.md, Bitmap push protocol).
-func migrChunkKey(bmIdx uint32) string {
-	return strconv.FormatUint(uint64(bmIdx), 10)
-}
-
-// cloneChunkKey renders the state.json chunk key of one clone chunk: the
-// (src_slice_idx, bm_idx) pair a clone chunk is addressed by
-// (architecture.md, Bitmap push protocol), decimal and colon-separated
-// ("2:1"). behavior.json's chunk_id_list override spells a chunk the same way.
-func cloneChunkKey(srcSliceIdx, bmIdx uint32) string {
-	return fmt.Sprintf("%d:%d", srcSliceIdx, bmIdx)
-}
-
-// parseCloneChunkKey is cloneChunkKey's inverse. A key that is not an "s:b"
-// pair — a migration chunk's plain index, or a hand edit's typo — addresses no
-// clone chunk and is skipped by its caller.
-func parseCloneChunkKey(key string) (uint32, uint32, bool) {
-	sliceField, bmField, found := strings.Cut(key, ":")
-	if !found {
-		return 0, 0, false
-	}
-	srcSliceIdx, err := strconv.ParseUint(sliceField, 10, 32)
-	if err != nil {
-		return 0, 0, false
-	}
-	bmIdx, err := strconv.ParseUint(bmField, 10, 32)
-	if err != nil {
-		return 0, 0, false
-	}
-	return uint32(srcSliceIdx), uint32(bmIdx), true
-}
-
-// sortChunkIdList orders a clone's applied set ascending by (src_slice_idx,
-// bm_idx), the order the worker diffs and pushes in (architecture.md, Bitmap
-// push protocol).
-func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
-	slices.SortFunc(chunkIdList, func(a, b *pb.BmChunkId) int {
-		if c := cmp.Compare(
-			a.GetSrcSliceIdx(), b.GetSrcSliceIdx()); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.GetBmIdx(), b.GetBmIdx())
-	})
-}
-
 // ---------------------------------------------------------------------------
-// behavior.json (dnv-worker.md, Integration test plan, The fake agent)
+// The command line
 // ---------------------------------------------------------------------------
 
-// rowBehavior overrides one row of an object's *Info. Both fields are
-// optional: a row may set only the status, only the details, or both.
-//
-// WhenPrimary gates the override on the cntlr's role: it applies only while
-// the cntlr's last accepted request carries cntlr.primary = true, so a row
-// planted on a standby bites the moment a failover promotes it and not
-// before (dnv-worker.md, Integration test plan, The fake agent; the settling
-// step of worker_test.sh case D). The fake reports a standby's pool and md rows
-// too — every row but the primary-only thin rows — where the real cn agent
-// reports those for a primary only, so an ungated
-// ERROR row would make the standby unhealthy — and ineligible — before the
-// failover. Only a cntlr object has a role: validate rejects it anywhere else.
-type rowBehavior struct {
-	Status      *string `json:"status,omitempty"`
-	Details     *string `json:"details,omitempty"`
-	WhenPrimary bool    `json:"when_primary,omitempty"`
-
-	// status is Status parsed once by validate.
-	status pb.ResStatus
-}
-
-// objectBehavior is one entry of behavior.json's "objects" map (and the
-// shape of its "default" entry, of which only status/details are read).
-type objectBehavior struct {
-	Status            *string                 `json:"status,omitempty"`
-	Details           *string                 `json:"details,omitempty"`
-	Rows              map[string]*rowBehavior `json:"rows,omitempty"`
-	ZeroedBytes       *uint64                 `json:"zeroed_bytes,omitempty"`
-	ZeroBytes         *uint64                 `json:"zero_bytes,omitempty"`
-	ThinOk            bool                    `json:"thin_ok,omitempty"`
-	ThinMissingSlices []uint64                `json:"thin_missing_slices,omitempty"`
-	BmIdxList         *[]uint32               `json:"bm_idx_list,omitempty"`
-	ChunkIdList       *[]string               `json:"chunk_id_list,omitempty"`
-	Hang              bool                    `json:"hang,omitempty"`
-	DropStream        bool                    `json:"drop_stream,omitempty"`
-	ReplyCode         uint32                  `json:"reply_code,omitempty"`
-	// HangSyncup holds the object's Syncup* the way Hang holds its Check
-	// rounds (hangSyncup), and HangRounds holds the next that many Check
-	// rounds after the file is loaded, each until its stream ends
-	// (waitForRound).
-	HangSyncup bool   `json:"hang_syncup,omitempty"`
-	HangRounds uint32 `json:"hang_rounds,omitempty"`
-	// DelayRoundsMs answers each of the object's Check* rounds that many
-	// milliseconds late, as a busy agent does (waitForRound).
-	DelayRoundsMs uint32 `json:"delay_rounds_ms,omitempty"`
-
-	// status is Status parsed once by validate; chunkIdList is ChunkIdList's
-	// "s:b" strings parsed by the same pass.
-	status      pb.ResStatus
-	chunkIdList []*pb.BmChunkId
-}
-
-// behaviorFile is the whole file. "size" is this fake's one addition to the
-// levers of dnv-worker.md, Integration test plan, The fake agent: the
-// GetDnSize/GetCnSize reply, so it too can be changed without a restart.
-type behaviorFile struct {
-	Size    uint64                     `json:"size,omitempty"`
-	Default *objectBehavior            `json:"default,omitempty"`
-	Objects map[string]*objectBehavior `json:"objects,omitempty"`
-}
-
-var resStatusNames = map[string]pb.ResStatus{
-	"UNKNOWN":      pb.ResStatus_RES_STATUS_UNKNOWN,
-	"MISSING":      pb.ResStatus_RES_STATUS_MISSING,
-	"ERROR":        pb.ResStatus_RES_STATUS_ERROR,
-	"OK":           pb.ResStatus_RES_STATUS_OK,
-	"PROVISIONING": pb.ResStatus_RES_STATUS_PROVISIONING,
-	"PENDING":      pb.ResStatus_RES_STATUS_PENDING,
-}
-
-// parseResStatus accepts both the short spelling ("OK", "ERROR",
-// "MISSING", "PROVISIONING", "PENDING", "UNKNOWN") and the full proto enum
-// name ("RES_STATUS_ERROR"), case-insensitively.
-func parseResStatus(name string) (pb.ResStatus, error) {
-	key := strings.ToUpper(strings.TrimSpace(name))
-	key = strings.TrimPrefix(key, "RES_STATUS_")
-	resStatus, ok := resStatusNames[key]
-	if !ok {
-		return 0, fmt.Errorf("unknown status %q", name)
-	}
-	return resStatus, nil
-}
-
-// validate parses every status string of one object entry, and the "s:b"
-// chunk addresses of its chunk_id_list override. An unparseable one makes the
-// whole file malformed, which the caller logs and ignores — a silently
-// misspelled status or chunk address would otherwise fail a test far from its
-// cause. cntlr says whether the entry is a cntlr object's: a row's
-// when_primary anywhere else is refused the same way, since it could never
-// apply there.
-func (ob *objectBehavior) validate(where string, cntlr bool) error {
-	if ob == nil {
-		return nil
-	}
-	if ob.Status != nil {
-		resStatus, err := parseResStatus(*ob.Status)
-		if err != nil {
-			return fmt.Errorf("%s: %w", where, err)
-		}
-		ob.status = resStatus
-	}
-	if ob.ChunkIdList != nil {
-		ob.chunkIdList = make([]*pb.BmChunkId, 0, len(*ob.ChunkIdList))
-		for _, key := range *ob.ChunkIdList {
-			srcSliceIdx, bmIdx, ok := parseCloneChunkKey(key)
-			if !ok {
-				return fmt.Errorf(
-					"%s: chunk_id_list: %q is not a \"<src_slice_idx>:"+
-						"<bm_idx>\" pair", where, key)
-			}
-			ob.chunkIdList = append(ob.chunkIdList, &pb.BmChunkId{
-				SrcSliceIdx: srcSliceIdx,
-				BmIdx:       bmIdx,
-			})
-		}
-	}
-	for key, row := range ob.Rows {
-		if row == nil {
-			continue
-		}
-		if row.WhenPrimary && !cntlr {
-			return fmt.Errorf(
-				"%s: rows[%q]: when_primary on a non-cntlr object",
-				where, key)
-		}
-		if row.Status == nil {
-			continue
-		}
-		resStatus, err := parseResStatus(*row.Status)
-		if err != nil {
-			return fmt.Errorf("%s: rows[%q]: %w", where, key, err)
-		}
-		row.status = resStatus
-	}
-	return nil
-}
-
-// parseBehavior decodes behavior.json. Unknown fields are an error on
-// purpose: a typo in a key ("reply-code") must be reported, not silently
-// dropped, because the resulting behaviour would look like a worker bug.
-func parseBehavior(data []byte) (*behaviorFile, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	parsed := &behaviorFile{}
-	if err := dec.Decode(parsed); err != nil {
-		return nil, err
-	}
-	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("trailing data after the top-level object")
-	}
-	if err := parsed.Default.validate("default", false); err != nil {
-		return nil, err
-	}
-	for key, ob := range parsed.Objects {
-		err := ob.validate(
-			"objects["+key+"]", strings.HasPrefix(key, cntlrObjPrefix))
-		if err != nil {
-			return nil, err
-		}
-	}
-	return parsed, nil
-}
-
-// ---------------------------------------------------------------------------
-// state.json (dnv-worker.md, Integration test plan, The fake agent)
-// ---------------------------------------------------------------------------
-
-// objectState is one object's last accepted request. Chunks maps a
-// migration/clone id to a chunk key (migrChunkKey resp. cloneChunkKey) to the
-// chunk's byte length, which is all the applied-set report needs
-// (architecture.md, Bitmap push protocol).
-type objectState struct {
-	Revision uint64                       `json:"revision"`
-	Request  json.RawMessage              `json:"request,omitempty"`
-	Chunks   map[string]map[string]uint64 `json:"chunks,omitempty"`
-
-	// msg is Request unmarshalled; rebuilt on every load and apply.
-	msg proto.Message
-}
-
-type stateFile struct {
-	Objects map[string]*objectState `json:"objects"`
-}
-
-// newRequestForKey returns the empty request message an object key stores,
-// so a loaded state.json can be unmarshalled without a type tag.
-func newRequestForKey(key string) proto.Message {
-	switch {
-	case key == dnObjKey:
-		return &pb.SyncupDnRequest{}
-	case key == cnObjKey:
-		return &pb.SyncupCnRequest{}
-	case strings.HasPrefix(key, sideObjPrefix):
-		return &pb.SyncupSideRequest{}
-	case strings.HasPrefix(key, cntlrObjPrefix):
-		return &pb.SyncupCntlrRequest{}
-	}
-	return nil
-}
-
-// putChunk records one received Push*Bitmap chunk (its address and byte
-// length). chunkKey is the caller's rendered address — migrChunkKey for a
-// migration chunk, cloneChunkKey for a clone one — so a chunk that arrives
-// again at the same address overwrites its length, which is how a grown chunk
-// ([D8], BM5) is recorded.
-func (o *objectState) putChunk(resId uint64, chunkKey string, size int) {
-	if o.Chunks == nil {
-		o.Chunks = make(map[string]map[string]uint64)
-	}
-	key := strconv.FormatUint(resId, 10)
-	if o.Chunks[key] == nil {
-		o.Chunks[key] = make(map[string]uint64)
-	}
-	o.Chunks[key][chunkKey] = uint64(size)
-}
-
-// bmIdxList derives the applied index set of one MIGRATION from the recorded
-// chunks (architecture.md, Bitmap push protocol: the report is derived from
-// the files present, so it survives a restart). A clone's applied set is
-// pair-addressed and derived by chunkIdList.
-func (o *objectState) bmIdxList(resId uint64) []uint32 {
-	if o == nil {
-		return nil
-	}
-	chunks := o.Chunks[strconv.FormatUint(resId, 10)]
-	idxList := make([]uint32, 0, len(chunks))
-	for key := range chunks {
-		idx, err := strconv.ParseUint(key, 10, 32)
-		if err != nil {
-			continue
-		}
-		idxList = append(idxList, uint32(idx))
-	}
-	slices.Sort(idxList)
-	return idxList
-}
-
-// chunkIdList is bmIdxList's clone twin: the applied set of one CLONE, derived
-// from the recorded chunks the same way and for the same reason. A clone chunk
-// is addressed by the (src_slice_idx, bm_idx) pair, so two source slices
-// sharing a bm_idx are two distinct entries; the result is ascending
-// (src_slice_idx, bm_idx) and a key that is no pair is skipped.
-func (o *objectState) chunkIdList(resId uint64) []*pb.BmChunkId {
-	if o == nil {
-		return nil
-	}
-	chunks := o.Chunks[strconv.FormatUint(resId, 10)]
-	chunkIdList := make([]*pb.BmChunkId, 0, len(chunks))
-	for key := range chunks {
-		srcSliceIdx, bmIdx, ok := parseCloneChunkKey(key)
-		if !ok {
-			continue
-		}
-		chunkIdList = append(chunkIdList, &pb.BmChunkId{
-			SrcSliceIdx: srcSliceIdx,
-			BmIdx:       bmIdx,
-		})
-	}
-	sortChunkIdList(chunkIdList)
-	return chunkIdList
-}
-
-// ---------------------------------------------------------------------------
-// The agent
-// ---------------------------------------------------------------------------
-
-// epochEntry tracks one row's last reported status so ResInfo.epoch only
-// moves when the status actually changes (architecture.md, Live-state
-// reporting).
-type epochEntry struct {
-	status pb.ResStatus
-	epoch  uint64
-}
-
-// fakeAgent implements both agent services; main registers only the one its
-// subcommand names. Every field behind mu is shared by the concurrent unary
-// handlers and Check streams of one process.
-type fakeAgent struct {
-	pb.UnimplementedDiskNodeAgentServer
-	pb.UnimplementedControllerNodeAgentServer
-
+// options are the parsed command line.
+type options struct {
+	mode string
+	kind agentfake.Kind
+	addr string
 	dir  string
 	size uint64
-
-	mu         sync.Mutex
-	state      map[string]*objectState
-	stateMtime time.Time
-	beh        *behaviorFile
-	behMtime   time.Time
-	behSize    int64
-	behPresent bool
-	epochs     map[string]map[string]*epochEntry
-	// observed is each object's latest observation time (observeLocked).
-	observed map[string]time.Time
-	// heldRounds counts, per object, the Check rounds hang_rounds still
-	// holds: armed from the file each time it is loaded
-	// (reloadBehaviorLocked) and spent one per round (waitForRound).
-	heldRounds map[string]uint32
-}
-
-func newFakeAgent(ctx context.Context, dir string, size uint64) (*fakeAgent, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	agent := &fakeAgent{
-		dir:        dir,
-		size:       size,
-		state:      make(map[string]*objectState),
-		beh:        &behaviorFile{},
-		epochs:     make(map[string]map[string]*epochEntry),
-		observed:   make(map[string]time.Time),
-		heldRounds: make(map[string]uint32),
-	}
-	agent.mu.Lock()
-	defer agent.mu.Unlock()
-	agent.refreshLocked(ctx)
-	return agent, nil
-}
-
-// refreshLocked re-reads both files if they changed. It runs at the top of
-// every request handler: behavior.json so the script can flip behaviour
-// without a restart, state.json so a hand edit of a stored revision
-// (worker_test.sh case A step 3) is seen by the next round.
-func (a *fakeAgent) refreshLocked(ctx context.Context) {
-	a.reloadBehaviorLocked(ctx)
-	a.reloadStateLocked(ctx)
-}
-
-// reloadBehaviorLocked implements the behavior file's re-read on every request
-// when its mtime or size changed (dnv-worker.md,
-// Integration test plan, The fake agent). A malformed file is logged once per
-// mtime or size change and ignored, keeping the previous behaviour. Every load
-// re-arms hang_rounds from the file, so a rewrite counts its rounds afresh.
-func (a *fakeAgent) reloadBehaviorLocked(ctx context.Context) {
-	path := filepath.Join(a.dir, behaviorFileName)
-	info, err := os.Stat(path)
-	if err != nil {
-		if a.behPresent {
-			slog.InfoContext(ctx, "behavior file gone",
-				slog.String("path", path))
-			a.beh = &behaviorFile{}
-			a.behPresent = false
-			a.behMtime = time.Time{}
-			a.behSize = 0
-			clear(a.heldRounds)
-		}
-		return
-	}
-	if a.behPresent && info.ModTime().Equal(a.behMtime) &&
-		info.Size() == a.behSize {
-		return
-	}
-	a.behPresent = true
-	a.behMtime = info.ModTime()
-	a.behSize = info.Size()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		slog.ErrorContext(ctx, "behavior file unreadable",
-			slog.String("path", path),
-			slog.String("error", err.Error()))
-		return
-	}
-	parsed, err := parseBehavior(data)
-	if err != nil {
-		slog.ErrorContext(ctx, "behavior file malformed",
-			slog.String("path", path),
-			slog.String("error", err.Error()))
-		return
-	}
-	a.beh = parsed
-	clear(a.heldRounds)
-	for key, ob := range parsed.Objects {
-		if ob != nil && ob.HangRounds != 0 {
-			a.heldRounds[key] = ob.HangRounds
-		}
-	}
-	slog.InfoContext(ctx, "behavior file loaded",
-		slog.String("path", path),
-		slog.Int("object_cnt", len(parsed.Objects)))
-}
-
-// reloadStateLocked re-reads state.json when it is newer than this process's
-// own last write — the hand-edit path of worker_test.sh case A step 3.
-// Comparing against the fake's own write is what keeps an apply from being
-// mistaken for an operator edit (and the operator's edit from being
-// clobbered).
-func (a *fakeAgent) reloadStateLocked(ctx context.Context) {
-	path := filepath.Join(a.dir, stateFileName)
-	info, err := os.Stat(path)
-	if err != nil {
-		return
-	}
-	if !info.ModTime().After(a.stateMtime) {
-		return
-	}
-	a.stateMtime = info.ModTime()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		slog.ErrorContext(ctx, "state file unreadable",
-			slog.String("path", path),
-			slog.String("error", err.Error()))
-		return
-	}
-	parsed := &stateFile{}
-	if err := json.Unmarshal(data, parsed); err != nil {
-		slog.ErrorContext(ctx, "state file malformed",
-			slog.String("path", path),
-			slog.String("error", err.Error()))
-		return
-	}
-	loaded := make(map[string]*objectState, len(parsed.Objects))
-	for key, obj := range parsed.Objects {
-		if obj == nil {
-			continue
-		}
-		if len(obj.Request) != 0 {
-			msg := newRequestForKey(key)
-			if msg == nil {
-				slog.ErrorContext(ctx, "state file unknown object",
-					slog.String("object", key))
-				continue
-			}
-			opts := protojson.UnmarshalOptions{DiscardUnknown: true}
-			if err := opts.Unmarshal(obj.Request, msg); err != nil {
-				slog.ErrorContext(ctx, "state file request malformed",
-					slog.String("object", key),
-					slog.String("error", err.Error()))
-				continue
-			}
-			obj.msg = msg
-		}
-		loaded[key] = obj
-	}
-	a.state = loaded
-	slog.InfoContext(ctx, "state file loaded",
-		slog.String("path", path),
-		slog.Int("object_cnt", len(loaded)))
-}
-
-// saveStateLocked writes state.json through a temp file and a rename, so the
-// script's concurrent reader never sees a partial file. The resulting mtime
-// is remembered as "our own last write" for reloadStateLocked.
-func (a *fakeAgent) saveStateLocked(ctx context.Context) {
-	path := filepath.Join(a.dir, stateFileName)
-	data, err := json.MarshalIndent(&stateFile{Objects: a.state}, "", "  ")
-	if err != nil {
-		slog.ErrorContext(ctx, "state file marshaling failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	data = append(data, '\n')
-	tmp, err := os.CreateTemp(a.dir, stateFileName+".tmp*")
-	if err != nil {
-		slog.ErrorContext(ctx, "state file temp failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		slog.ErrorContext(ctx, "state file write failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		slog.ErrorContext(ctx, "state file close failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		slog.ErrorContext(ctx, "state file rename failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	if info, err := os.Stat(path); err == nil {
-		a.stateMtime = info.ModTime()
-	}
-}
-
-// applyLocked stores one object's request and revision (the revision gate of
-// dnv-worker.md, Integration test plan, The fake agent: revision >= stored =>
-// apply, storing the request and the revision).
-func (a *fakeAgent) applyLocked(
-	ctx context.Context, key string, revision uint64, req proto.Message,
-) {
-	obj := a.state[key]
-	if obj == nil {
-		obj = &objectState{}
-		a.state[key] = obj
-	}
-	obj.Revision = revision
-	obj.msg = proto.Clone(req)
-	raw, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(req)
-	if err != nil {
-		slog.ErrorContext(ctx, "request marshaling failed",
-			slog.String("object", key),
-			slog.String("error", err.Error()))
-		return
-	}
-	obj.Request = raw
-}
-
-// pruneLocked drops the child objects that disappeared from their parent's
-// pointer list, the way the real agent deletes their local files
-// (the Full sync rule of architecture.md, Common agent rules).
-func (a *fakeAgent) pruneLocked(prefix string, keep map[string]bool) {
-	for key := range a.state {
-		if strings.HasPrefix(key, prefix) && !keep[key] {
-			delete(a.state, key)
-			delete(a.epochs, key)
-			delete(a.observed, key)
-		}
-	}
-}
-
-// observeLocked is one observation of an object (dnagent.md SH28): the fake
-// observes at every answer, so its time is now, made later than the object's
-// previous observation and than after, so that two observations never share
-// a time and equal times keep meaning the same observation.
-func (a *fakeAgent) observeLocked(key string, after time.Time) time.Time {
-	t := time.Now().Round(0)
-	if last := a.observed[key]; !t.After(last) {
-		t = last.Add(time.Nanosecond)
-	}
-	if !t.After(after) {
-		t = after.Add(time.Nanosecond)
-	}
-	a.observed[key] = t
-	return t
-}
-
-// stampLocked is the ObsStamp of one reply about an object: an observation of
-// it made now (observeLocked, later than after), under traceId, when the
-// reply knows the object, and the answer time in any case, never before the
-// observation's.
-func (a *fakeAgent) stampLocked(
-	key string, known bool, traceId string, after time.Time,
-) *pb.ObsStamp {
-	stamp := &pb.ObsStamp{}
-	var obs time.Time
-	if known {
-		obs = a.observeLocked(key, after)
-		stamp.ObsTime = agent.Timestamp(obs)
-		stamp.ObsTraceId = traceId
-	}
-	answer := time.Now().Round(0)
-	if answer.Before(obs) {
-		answer = obs
-	}
-	stamp.AnswerTime = agent.Timestamp(answer)
-	return stamp
-}
-
-// syncupStampLocked is stampLocked for a Syncup* reply under ctx's trace id,
-// with the save time: saved is whether the call saved the request (code 0),
-// and the save time it returns is when, unset otherwise. A reply whose code
-// refuses the request carries neither, as a live agent's does
-// (architecture.md, Live-state reporting): a code the worker reads as
-// accepted is zero or ReplyCodeLeftover (dnagent.md SH9), which
-// behavior.json's reply_code can force without the fake saving anything.
-func (a *fakeAgent) syncupStampLocked(
-	ctx context.Context, key string, code uint32, saved bool,
-) (*pb.ObsStamp, *timestamppb.Timestamp) {
-	if code != 0 && code != common.ReplyCodeLeftover {
-		return nil, nil
-	}
-	var saveAt time.Time
-	if saved {
-		saveAt = time.Now().Round(0)
-	}
-	stamp := a.stampLocked(key, true, callTraceId(ctx), saveAt)
-	return stamp, agent.Timestamp(saveAt)
-}
-
-// infoStampLocked is stampLocked for an info read of an object its parent
-// lists, under ctx's trace id: the object is known unless behavior.json's
-// reply_code refuses it as unknown, which leaves the stamp the answer time
-// alone, as for an object the parent does not list.
-func (a *fakeAgent) infoStampLocked(
-	ctx context.Context, key string,
-) *pb.ObsStamp {
-	return a.stampLocked(key,
-		a.forcedCodeLocked(key) != common.ReplyCodeUnknownObject,
-		callTraceId(ctx), time.Time{})
-}
-
-// callTraceId is the trace id of a unary call, the one a Syncup*'s or an info
-// read's observation is stamped with.
-func callTraceId(ctx context.Context) string {
-	traceId, _ := common.TraceIdFromCtx(ctx)
-	return traceId
-}
-
-func (a *fakeAgent) revisionLocked(key string) uint64 {
-	if obj := a.state[key]; obj != nil {
-		return obj.Revision
-	}
-	return 0
-}
-
-func (a *fakeAgent) requestLocked(key string) proto.Message {
-	if obj := a.state[key]; obj != nil {
-		return obj.msg
-	}
-	return nil
-}
-
-func (a *fakeAgent) objBehaviorLocked(key string) *objectBehavior {
-	if a.beh == nil {
-		return nil
-	}
-	return a.beh.Objects[key]
-}
-
-func (a *fakeAgent) sizeLocked() uint64 {
-	if a.beh != nil && a.beh.Size != 0 {
-		return a.beh.Size
-	}
-	return a.size
-}
-
-// ---------------------------------------------------------------------------
-// Row resolution (dnv-worker.md, Integration test plan, The fake agent;
-// architecture.md, Live-state reporting)
-// ---------------------------------------------------------------------------
-
-// resolveRow builds one ResInfo. The status and details come from
-// behavior.json's "default" entry, then the object's own status/details, then
-// its "rows" overrides, applied in the order the keys are given (the last key
-// is the most specific and becomes res_name). epoch is the unix second of the
-// last status change, so it only moves when the status actually moves.
-//
-// It serves the dn, cn and side objects, whose rows cannot carry
-// when_primary (validate), so no override is gated; a cntlr's rows go through
-// resolveCntlrRow.
-func (a *fakeAgent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
-	return a.resolveCntlrRow(objKey, true, keys...)
-}
-
-// resolveCntlrRow is resolveRow for a cntlr object: a row override marked
-// when_primary is skipped while primary — the cntlr.primary of the cntlr's
-// last accepted request — is false (dnv-worker.md,
-// Integration test plan, The fake agent).
-func (a *fakeAgent) resolveCntlrRow(
-	objKey string, primary bool, keys ...string,
-) *pb.ResInfo {
-	return a.resolveDerivedRow(
-		objKey, primary, pb.ResStatus_RES_STATUS_OK, "", keys...)
-}
-
-// resolveDerivedRow is resolveCntlrRow over a row whose state the fake
-// derives from the request instead of defaulting to OK with no details:
-// baseStatus and baseDetails stand where the default OK stands, and every
-// lever of behavior.json applies over them in the usual order.
-func (a *fakeAgent) resolveDerivedRow(
-	objKey string,
-	primary bool,
-	baseStatus pb.ResStatus,
-	baseDetails string,
-	keys ...string,
-) *pb.ResInfo {
-	resStatus := baseStatus
-	details := baseDetails
-	if a.beh != nil && a.beh.Default != nil {
-		if a.beh.Default.Status != nil {
-			resStatus = a.beh.Default.status
-		}
-		if a.beh.Default.Details != nil {
-			details = *a.beh.Default.Details
-		}
-	}
-	if ob := a.objBehaviorLocked(objKey); ob != nil {
-		if ob.Status != nil {
-			resStatus = ob.status
-		}
-		if ob.Details != nil {
-			details = *ob.Details
-		}
-		for _, key := range keys {
-			row := ob.Rows[key]
-			if row == nil || (row.WhenPrimary && !primary) {
-				continue
-			}
-			if row.Status != nil {
-				resStatus = row.status
-			}
-			if row.Details != nil {
-				details = *row.Details
-			}
-		}
-	}
-	resName := keys[len(keys)-1]
-	return &pb.ResInfo{
-		ResName: resName,
-		Status:  resStatus,
-		Details: details,
-		Epoch:   a.epochLocked(objKey, resName, resStatus),
-	}
-}
-
-// epochLocked returns the unix seconds of resName's last status change.
-func (a *fakeAgent) epochLocked(
-	objKey, resName string, resStatus pb.ResStatus,
-) uint64 {
-	rows := a.epochs[objKey]
-	if rows == nil {
-		rows = make(map[string]*epochEntry)
-		a.epochs[objKey] = rows
-	}
-	entry := rows[resName]
-	if entry == nil || entry.status != resStatus {
-		entry = &epochEntry{
-			status: resStatus,
-			epoch:  uint64(time.Now().Unix()),
-		}
-		rows[resName] = entry
-	}
-	return entry.epoch
-}
-
-// ---------------------------------------------------------------------------
-// *Info derivation from the last accepted request
-// (dnv-worker.md, Integration test plan, The fake agent)
-// ---------------------------------------------------------------------------
-
-// dnInfoLocked reports the three DnInfo rows; nil until a SyncupDn has been
-// applied, so the worker's revision check re-issues the syncup.
-func (a *fakeAgent) dnInfoLocked() *pb.DnInfo {
-	if a.requestLocked(dnObjKey) == nil {
-		return nil
-	}
-	return &pb.DnInfo{
-		DiskInfo: a.resolveRow(dnObjKey, "disk_info"),
-		MetaInfo: a.resolveRow(dnObjKey, "meta_info"),
-		PortInfo: a.resolveRow(dnObjKey, "port_info"),
-	}
-}
-
-// cnInfoLocked reports the four CnInfo rows — port, tmpfs, the sparse arena
-// file and its loop device (architecture.md, Controller node, common).
-func (a *fakeAgent) cnInfoLocked() *pb.CnInfo {
-	if a.requestLocked(cnObjKey) == nil {
-		return nil
-	}
-	return &pb.CnInfo{
-		PortInfo:    a.resolveRow(cnObjKey, "port_info"),
-		TmpfsInfo:   a.resolveRow(cnObjKey, "tmpfs_info"),
-		TmpFileInfo: a.resolveRow(cnObjKey, "tmp_file_info"),
-		LoopDevInfo: a.resolveRow(cnObjKey, "loop_dev_info"),
-	}
-}
-
-// sideInfoLocked derives SideInfo from the side's last accepted request: one
-// row per per-CN export stack (primary_cn_id when non-zero plus every
-// standby_id_list entry), the migration roles only when the request carried
-// their conf, and the provisioning counters — zero_bytes = the request's
-// side_conf.zero_bytes and zeroed_bytes = zero_bytes by default (instant
-// provisioning), either overridable per object in behavior.json
-// (architecture.md, Side provisioning protocol).
-//
-// A migration destination whose request carries side_conf.provisioned and
-// migr_dst_conf.cutover_pending reports what the real dn agent reports once
-// its metadata wrapper stands and it waits for the cutover (dnagent.md DN13,
-// DN18): both migr_dst_info rows PROVISIONING "waiting for the cutover" with
-// the reason RES_REASON_AWAITING_CUTOVER, which the worker's cutover reads
-// (dnv-worker.md RW18). A lever that overrides such a row keeps the reason
-// only while the row still reads PROVISIONING, as the real agent sets the
-// reason on that status alone, so a case holds the cutover back on the side
-// by moving the target row to any other status. Before the side is
-// provisioned the rows default to OK, as every row the fake does not derive.
-func (a *fakeAgent) sideInfoLocked(key string) *pb.SideInfo {
-	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
-	if req == nil {
-		return nil
-	}
-	conf := req.GetSideConf()
-	info := &pb.SideInfo{
-		SideDevInfo:    a.resolveRow(key, "side_dev_info"),
-		CnIdToDmError:  make(map[uint64]*pb.ResInfo),
-		CnIdToDmLinear: make(map[uint64]*pb.ResInfo),
-		CnIdToNvmeof:   make(map[uint64]*pb.ResInfo),
-	}
-	cnIdList := make([]uint64, 0, len(conf.GetStandbyIdList())+1)
-	if conf.GetPrimaryCnId() != 0 {
-		cnIdList = append(cnIdList, conf.GetPrimaryCnId())
-	}
-	cnIdList = append(cnIdList, conf.GetStandbyIdList()...)
-	for _, cnId := range cnIdList {
-		info.CnIdToDmError[cnId] = a.resolveRow(
-			key, rowKey("cn_id_to_dm_error", cnId))
-		info.CnIdToDmLinear[cnId] = a.resolveRow(
-			key, rowKey("cn_id_to_dm_linear", cnId))
-		info.CnIdToNvmeof[cnId] = a.resolveRow(
-			key, rowKey("cn_id_to_nvmeof", cnId))
-	}
-	if req.GetMigrSrcConf() != nil {
-		info.MigrSrcInfo = &pb.SideInfo_MigrSrcInfo{
-			DmLinearInfo: a.resolveRow(key, "migr_src_info.dm_linear_info"),
-			NvmeofInfo:   a.resolveRow(key, "migr_src_info.nvmeof_info"),
-		}
-	}
-	if dst := req.GetMigrDstConf(); dst != nil {
-		awaiting := dst.GetCutoverPending() && conf.GetProvisioned()
-		info.MigrDstInfo = &pb.SideInfo_MigrDstInfo{
-			TargetInfo: a.migrDstRowLocked(
-				key, awaiting, "migr_dst_info.target_info"),
-			DmCloneInfo: a.migrDstRowLocked(
-				key, awaiting, "migr_dst_info.dm_clone_info"),
-		}
-	}
-	zeroBytes := conf.GetZeroBytes()
-	ob := a.objBehaviorLocked(key)
-	if ob != nil && ob.ZeroBytes != nil {
-		zeroBytes = *ob.ZeroBytes
-	}
-	zeroedBytes := zeroBytes
-	if ob != nil && ob.ZeroedBytes != nil {
-		zeroedBytes = *ob.ZeroedBytes
-	}
-	info.ZeroBytes = zeroBytes
-	info.ZeroedBytes = zeroedBytes
-	return info
-}
-
-// migrDstRowLocked resolves one of a migration destination's two rows: the
-// default OK, or — while awaiting, the side provisioned and its cutover
-// pending — PROVISIONING "waiting for the cutover", carrying the reason
-// RES_REASON_AWAITING_CUTOVER whenever the resolved status is still
-// PROVISIONING (sideInfoLocked).
-func (a *fakeAgent) migrDstRowLocked(
-	key string, awaiting bool, rowName string,
-) *pb.ResInfo {
-	if !awaiting {
-		return a.resolveRow(key, rowName)
-	}
-	row := a.resolveDerivedRow(key, true,
-		pb.ResStatus_RES_STATUS_PROVISIONING, detailsAwaitingCutover, rowName)
-	if row.GetStatus() == pb.ResStatus_RES_STATUS_PROVISIONING {
-		row.Reason = pb.ResReason_RES_REASON_AWAITING_CUTOVER
-	}
-	return row
-}
-
-// sideBmInfoLocked reports the applied migration-bitmap indexes of the side's
-// destination role (architecture.md, Bitmap push protocol: BitmapInfo.res_id
-// = migr_id, the set derived from the recorded chunks unless behavior.json
-// overrides it).
-func (a *fakeAgent) sideBmInfoLocked(key string) *pb.BitmapInfo {
-	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
-	if req == nil || req.GetMigrDstConf() == nil {
-		return nil
-	}
-	migrId := req.GetMigrDstConf().GetMigrId()
-	return &pb.BitmapInfo{
-		ResId:     migrId,
-		BmIdxList: a.bmIdxListLocked(key, migrId),
-	}
-}
-
-// bmIdxListLocked derives one migration's applied index set, honouring the
-// behavior file's bm_idx_list override.
-func (a *fakeAgent) bmIdxListLocked(key string, resId uint64) []uint32 {
-	if ob := a.objBehaviorLocked(key); ob != nil && ob.BmIdxList != nil {
-		return slices.Clone(*ob.BmIdxList)
-	}
-	return a.state[key].bmIdxList(resId)
-}
-
-// chunkIdListLocked derives one clone's applied chunk set, honouring the
-// behavior file's chunk_id_list override — the pair-addressed counterpart of
-// bm_idx_list, by which a script forces a clone's applied set (an empty list
-// forces "nothing applied"). The entries are rebuilt rather than handed out,
-// so a reply the grpc codec touches cannot reach back into the parsed file.
-func (a *fakeAgent) chunkIdListLocked(
-	key string, resId uint64,
-) []*pb.BmChunkId {
-	if ob := a.objBehaviorLocked(key); ob != nil && ob.ChunkIdList != nil {
-		forced := make([]*pb.BmChunkId, 0, len(ob.chunkIdList))
-		for _, chunkId := range ob.chunkIdList {
-			forced = append(forced, &pb.BmChunkId{
-				SrcSliceIdx: chunkId.GetSrcSliceIdx(),
-				BmIdx:       chunkId.GetBmIdx(),
-			})
-		}
-		return forced
-	}
-	return a.state[key].chunkIdList(resId)
-}
-
-// sliceIdList returns the sorted slice ids of a cntlr's last request.
-// id_to_slice is keyed by common.IdKeyFmt ("%016x").
-func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
-	idList := make([]uint64, 0, len(req.GetIdToSlice()))
-	for key := range req.GetIdToSlice() {
-		sliceId, err := strconv.ParseUint(key, 16, 64)
-		if err != nil {
-			continue
-		}
-		idList = append(idList, sliceId)
-	}
-	slices.Sort(idList)
-	return idList
-}
-
-// cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
-// one row per object it named — per slice, per group (meta and data), per leg
-// AND per spare leg of every group, per td, per subsystem, per namespace, per
-// clone and per xfer. td_id_to_thin_info is filled only when the request's
-// cntlr.primary is true and behavior.json's thin_ok says so (architecture.md,
-// sp role; cnagent CN14 "primary only"), minus any thin_missing_slices — the
-// created-flip negative of worker_test.sh case S step 6 (RW19). The same
-// cntlr.primary gates every when_primary row override (resolveCntlrRow).
-//
-// side_id_to_path holds one row per side of every leg with two sides — the
-// shape a migration gives a leg — on a primary and a standby alike, as the
-// real cn agent reports its paths (cnagent.md CN28): OK "live/optimized" for
-// a provisioned side, which is what the worker's cutover waits for on the
-// primary (dnv-worker.md RW18), and PROVISIONING "provisioning" for one that
-// is not, the side the real agent connects to only once it is provisioned. A
-// row override, keyed "side_id_to_path.<side_id>", holds a path down.
-func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
-	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
-	if req == nil {
-		return nil
-	}
-	primary := req.GetCntlr().GetPrimary()
-	info := &pb.CntlrInfo{
-		SsIdToSubsystem:   make(map[uint64]*pb.ResInfo),
-		NsIdToNamespace:   make(map[uint64]*pb.ResInfo),
-		NsIdToDmLinear:    make(map[uint64]*pb.ResInfo),
-		TdIdToRaid0:       make(map[uint64]*pb.ResInfo),
-		TdIdToDmError:     make(map[uint64]*pb.ResInfo),
-		TdIdToThinInfo:    make(map[uint64]*pb.CntlrInfo_ThinInfo),
-		SliceIdToDmPool:   make(map[uint64]*pb.ResInfo),
-		SliceIdToMeta:     make(map[uint64]*pb.ResInfo),
-		SliceIdToData:     make(map[uint64]*pb.ResInfo),
-		GrpIdToMdRaid:     make(map[uint64]*pb.ResInfo),
-		LegIdToLeg:        make(map[uint64]*pb.ResInfo),
-		XferIdToDmLinear:  make(map[uint64]*pb.ResInfo),
-		XferIdToSubsystem: make(map[uint64]*pb.ResInfo),
-		XferIdToNamespace: make(map[uint64]*pb.ResInfo),
-		CloneIdToTarget:   make(map[uint64]*pb.ResInfo),
-		CloneIdToDmClone:  make(map[uint64]*pb.ResInfo),
-		CloneIdToMeta:     make(map[uint64]*pb.ResInfo),
-		SideIdToPath:      make(map[uint64]*pb.ResInfo),
-	}
-	sliceIdList := sliceIdList(req)
-	for _, sliceId := range sliceIdList {
-		info.SliceIdToDmPool[sliceId] = a.resolveCntlrRow(
-			key, primary, rowKey("slice_id_to_dm_pool", sliceId))
-		info.SliceIdToMeta[sliceId] = a.resolveCntlrRow(
-			key, primary, rowKey("slice_id_to_meta", sliceId))
-		info.SliceIdToData[sliceId] = a.resolveCntlrRow(
-			key, primary, rowKey("slice_id_to_data", sliceId))
-	}
-	for _, slice := range req.GetIdToSlice() {
-		grpList := make([]*pb.Group, 0,
-			len(slice.GetMetaGrpList())+len(slice.GetDataGrpList()))
-		grpList = append(grpList, slice.GetMetaGrpList()...)
-		grpList = append(grpList, slice.GetDataGrpList()...)
-		for _, grp := range grpList {
-			info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
-				key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
-			legList := make([]*pb.Leg, 0,
-				len(grp.GetLegList())+len(grp.GetSpareLegList()))
-			legList = append(legList, grp.GetLegList()...)
-			legList = append(legList, grp.GetSpareLegList()...)
-			for _, leg := range legList {
-				info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
-					key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
-				if len(leg.GetSideList()) != 2 {
-					continue
-				}
-				for _, side := range leg.GetSideList() {
-					info.SideIdToPath[side.GetSideId()] =
-						a.pathRowLocked(key, primary, side)
-				}
-			}
-		}
-	}
-	thinOk := false
-	var thinMissing map[uint64]bool
-	if ob := a.objBehaviorLocked(key); ob != nil {
-		thinOk = ob.ThinOk
-		thinMissing = make(map[uint64]bool, len(ob.ThinMissingSlices))
-		for _, sliceId := range ob.ThinMissingSlices {
-			thinMissing[sliceId] = true
-		}
-	}
-	for _, td := range req.GetTdList() {
-		tdId := td.GetTdId()
-		info.TdIdToRaid0[tdId] = a.resolveCntlrRow(
-			key, primary, rowKey("td_id_to_raid0", tdId))
-		info.TdIdToDmError[tdId] = a.resolveCntlrRow(
-			key, primary, rowKey("td_id_to_dm_error", tdId))
-		if !primary || !thinOk {
-			continue
-		}
-		thinKey := rowKey("td_id_to_thin_info", tdId)
-		thin := &pb.CntlrInfo_ThinInfo{
-			SliceIdToDmThin: make(map[uint64]*pb.ResInfo),
-		}
-		for _, sliceId := range sliceIdList {
-			if thinMissing[sliceId] {
-				continue
-			}
-			thin.SliceIdToDmThin[sliceId] = a.resolveCntlrRow(
-				key, primary, thinKey,
-				thinKey+"."+strconv.FormatUint(sliceId, 10))
-		}
-		info.TdIdToThinInfo[tdId] = thin
-	}
-	for _, subsystem := range req.GetNqnToSubsystem() {
-		info.SsIdToSubsystem[subsystem.GetSsId()] = a.resolveCntlrRow(
-			key, primary, rowKey("ss_id_to_subsystem", subsystem.GetSsId()))
-		for _, ns := range subsystem.GetNsList() {
-			info.NsIdToNamespace[ns.GetNsId()] = a.resolveCntlrRow(
-				key, primary, rowKey("ns_id_to_namespace", ns.GetNsId()))
-			info.NsIdToDmLinear[ns.GetNsId()] = a.resolveCntlrRow(
-				key, primary, rowKey("ns_id_to_dm_linear", ns.GetNsId()))
-		}
-	}
-	for _, clone := range req.GetCloneList() {
-		cloneId := clone.GetCloneId()
-		info.CloneIdToTarget[cloneId] = a.resolveCntlrRow(
-			key, primary, rowKey("clone_id_to_target", cloneId))
-		info.CloneIdToDmClone[cloneId] = a.resolveCntlrRow(
-			key, primary, rowKey("clone_id_to_dm_clone", cloneId))
-		info.CloneIdToMeta[cloneId] = a.resolveCntlrRow(
-			key, primary, rowKey("clone_id_to_meta", cloneId))
-	}
-	for _, xfer := range req.GetXferList() {
-		xferId := xfer.GetXferId()
-		info.XferIdToDmLinear[xferId] = a.resolveCntlrRow(
-			key, primary, rowKey("xfer_id_to_dm_linear", xferId))
-		info.XferIdToSubsystem[xferId] = a.resolveCntlrRow(
-			key, primary, rowKey("xfer_id_to_subsystem", xferId))
-		info.XferIdToNamespace[xferId] = a.resolveCntlrRow(
-			key, primary, rowKey("xfer_id_to_namespace", xferId))
-	}
-	return info
-}
-
-// pathRowLocked resolves one side's path row (cntlrInfoLocked): live for a
-// provisioned side, held at provisioning for one that is not, under every
-// lever of behavior.json.
-func (a *fakeAgent) pathRowLocked(
-	key string, primary bool, side *pb.Side,
-) *pb.ResInfo {
-	resStatus := pb.ResStatus_RES_STATUS_OK
-	details := detailsPathLive
-	if !side.GetProvisioned() {
-		resStatus = pb.ResStatus_RES_STATUS_PROVISIONING
-		details = detailsPathProvisioning
-	}
-	return a.resolveDerivedRow(key, primary, resStatus, details,
-		rowKey("side_id_to_path", side.GetSideId()))
-}
-
-// cntlrBmInfoListLocked reports one BitmapInfo per clone of the last request
-// (architecture.md, Bitmap push protocol: SyncupCntlrReply.bm_info_list,
-// res_id = clone_id). A clone's applied set rides in chunk_id_list, the
-// pair-addressed field; bm_idx_list stays unset, it carries migration chunks
-// only.
-func (a *fakeAgent) cntlrBmInfoListLocked(key string) []*pb.BitmapInfo {
-	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
-	if req == nil {
-		return nil
-	}
-	bmInfoList := make([]*pb.BitmapInfo, 0, len(req.GetCloneList()))
-	for _, clone := range req.GetCloneList() {
-		bmInfoList = append(bmInfoList, &pb.BitmapInfo{
-			ResId:       clone.GetCloneId(),
-			ChunkIdList: a.chunkIdListLocked(key, clone.GetCloneId()),
-		})
-	}
-	if len(bmInfoList) == 0 {
-		return nil
-	}
-	return bmInfoList
-}
-
-// ---------------------------------------------------------------------------
-// The gates (dnv-worker.md, Integration test plan, The fake agent)
-// ---------------------------------------------------------------------------
-
-func agentReply(code uint32, details string) *pb.AgentReply {
-	return &pb.AgentReply{Code: code, Details: details}
-}
-
-// forcedCodeLocked applies behavior.json's reply_code, which forces
-// agent_reply.code on every reply of an object. A forced non-zero code also
-// suppresses the apply: an agent that answers "rejected" must not have
-// stored the request, or worker_test.sh case C step 6's "clear ⇒ the push
-// succeeds" would have nothing left to push.
-func (a *fakeAgent) forcedCodeLocked(key string) uint32 {
-	if ob := a.objBehaviorLocked(key); ob != nil {
-		return ob.ReplyCode
-	}
-	return 0
-}
-
-// gateSyncupLocked is the revision gate: a Syncup* with a revision lower than
-// the stored one is ReplyCodeStaleRevision, anything else applies
-// (dnv-worker.md, Integration test plan, The fake agent).
-func (a *fakeAgent) gateSyncupLocked(
-	key string, revision uint64,
-) (uint32, string) {
-	if code := a.forcedCodeLocked(key); code != 0 {
-		return code, "behavior.json reply_code"
-	}
-	if obj := a.state[key]; obj != nil && revision < obj.Revision {
-		return common.ReplyCodeStaleRevision, fmt.Sprintf(
-			"stale revision %d < stored %d", revision, obj.Revision)
-	}
-	return 0, ""
-}
-
-// gatePushLocked is the gate of the Push* RPCs. A push carries no revision:
-// its only rejections are behavior.json's forced code and an object its
-// node's last syncup does not list or an id the object's last request does
-// not name (dnv-worker.md, Integration test plan, The fake agent).
-func (a *fakeAgent) gatePushLocked(
-	key string, resId uint64, known bool,
-) (uint32, string) {
-	if code := a.forcedCodeLocked(key); code != 0 {
-		return code, "behavior.json reply_code"
-	}
-	if !known {
-		return common.ReplyCodeUnknownObject, fmt.Sprintf(
-			"id %d is not in %s's last request", resId, key)
-	}
-	return 0, ""
-}
-
-// sideKnownLocked implements the fake's ordering rule (dnv-worker.md,
-// Integration test plan, The fake agent): a side pointer
-// absent from the DN's last SyncupDn.side_pointer_list is unknown, so its
-// SyncupSide/CheckSide/PushMigrBitmap is refused with
-// ReplyCodeUnknownObject. The worker's independent dn and sp roles must
-// survive exactly this.
-func (a *fakeAgent) sideKnownLocked(ptr *pb.SidePointer) bool {
-	req, _ := a.requestLocked(dnObjKey).(*pb.SyncupDnRequest)
-	if req == nil {
-		return false
-	}
-	want := sideObjKey(ptr)
-	for _, known := range req.GetSidePointerList() {
-		if sideObjKey(known) == want {
-			return true
-		}
-	}
-	return false
-}
-
-// cntlrKnownLocked is sideKnownLocked's cn twin: a cntlr absent from the CN's
-// last SyncupCn.cntlr_pointer_list is unknown.
-func (a *fakeAgent) cntlrKnownLocked(ptr *pb.CntlrPointer) bool {
-	req, _ := a.requestLocked(cnObjKey).(*pb.SyncupCnRequest)
-	if req == nil {
-		return false
-	}
-	want := cntlrObjKey(ptr)
-	for _, known := range req.GetCntlrPointerList() {
-		if cntlrObjKey(known) == want {
-			return true
-		}
-	}
-	return false
-}
-
-// migrKnownLocked reports whether a migr_id appears in the side's last
-// accepted request, in either the source or the destination role.
-func (a *fakeAgent) migrKnownLocked(key string, migrId uint64) bool {
-	req, _ := a.requestLocked(key).(*pb.SyncupSideRequest)
-	if req == nil {
-		return false
-	}
-	if src := req.GetMigrSrcConf(); src != nil && src.GetMigrId() == migrId {
-		return true
-	}
-	if dst := req.GetMigrDstConf(); dst != nil && dst.GetMigrId() == migrId {
-		return true
-	}
-	return false
-}
-
-// cloneKnownLocked reports whether a clone_id appears in the cntlr's last
-// accepted request.
-func (a *fakeAgent) cloneKnownLocked(key string, cloneId uint64) bool {
-	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
-	if req == nil {
-		return false
-	}
-	for _, clone := range req.GetCloneList() {
-		if clone.GetCloneId() == cloneId {
-			return true
-		}
-	}
-	return false
-}
-
-// ---------------------------------------------------------------------------
-// The Check* streams (dnv-worker.md, Integration test plan, The fake agent;
-// architecture.md, Check streams)
-// ---------------------------------------------------------------------------
-
-// checkResult is what one Check* round decides under the lock, before the
-// handler sends its single reply.
-type checkResult struct {
-	code     uint32
-	details  string
-	revision uint64
-}
-
-// checkGateLocked resolves a Check* round for one object: the gate's code and
-// the object's stored revision (architecture.md, Check streams — a reply
-// whose revision differs from the request's is what makes the worker re-issue
-// the object's Syncup*).
-func (a *fakeAgent) checkGateLocked(key string, known bool) checkResult {
-	if !known {
-		return checkResult{
-			code:    common.ReplyCodeUnknownObject,
-			details: key + " is not in its parent's last pointer list",
-		}
-	}
-	result := checkResult{revision: a.revisionLocked(key)}
-	if code := a.forcedCodeLocked(key); code != 0 {
-		result.code = code
-		result.details = "behavior.json reply_code"
-	}
-	return result
-}
-
-// infoTracker implements the change-only delivery of architecture.md, Check
-// streams:
-// show_info = true always sends the *Info, show_info = false sends it only
-// when it changed since the previous reply ON THIS STREAM, and the first
-// reply on a fresh stream always carries it.
-type infoTracker struct {
-	sent bool
-	last []byte
-}
-
-func (t *infoTracker) include(showInfo bool, info proto.Message) bool {
-	var fingerprint []byte
-	if info != nil && info.ProtoReflect().IsValid() {
-		fingerprint, _ = proto.MarshalOptions{Deterministic: true}.
-			Marshal(info)
-	}
-	if !t.sent || showInfo || !bytes.Equal(fingerprint, t.last) {
-		t.sent = true
-		t.last = fingerprint
-		return true
-	}
-	return false
-}
-
-// hangPollInterval is how often a hanging round re-reads behavior.json.
-const hangPollInterval = 200 * time.Millisecond
-
-// waitForRound applies the fake's stream levers (dnv-worker.md,
-// Integration test plan, The fake agent) between a Check* request and its
-// reply, and reports whether the stream must be dropped.
-//
-// hang holds this object's round — and only this object's, the lock is never
-// held while waiting — for as long as behavior.json says so, so the worker
-// misses the reply and times the round out. It returns as soon as the
-// stream's context is cancelled (the worker closes the stream on that
-// timeout), so no goroutine is leaked per round, and it also returns once the
-// script clears the lever, so a fake whose stream the worker happens to keep
-// open cannot stay wedged.
-//
-// hang_rounds is hang counted: each of the next that many rounds of the
-// object after the file is loaded is held until its stream ends, and the
-// rounds after them are answered — so a case misses exactly the rounds it
-// asks for, whatever its own polls cost. Clearing the file does not release
-// a round it holds: the worker's round timeout ends it. drop_stream wins over
-// both.
-//
-// delay_rounds_ms answers a round that is neither held nor hung that many
-// milliseconds late — a late answer, still in time while the delay stays
-// under the worker's round timeout (worker_test.sh case H's missed round
-// followed by a late one). A stream that ends during the delay gets no reply.
-func (a *fakeAgent) waitForRound(
-	ctx context.Context, key string,
-) (bool, error) {
-	for {
-		a.mu.Lock()
-		a.refreshLocked(ctx)
-		hang, drop := false, false
-		var delay time.Duration
-		if ob := a.objBehaviorLocked(key); ob != nil {
-			hang, drop = ob.Hang, ob.DropStream
-			delay = time.Duration(ob.DelayRoundsMs) * time.Millisecond
-		}
-		held := !drop && a.heldRounds[key] != 0
-		if held {
-			a.heldRounds[key]--
-		}
-		a.mu.Unlock()
-		if drop {
-			return true, nil
-		}
-		if held {
-			<-ctx.Done()
-			return false, ctx.Err()
-		}
-		if !hang {
-			if delay > 0 {
-				select {
-				case <-ctx.Done():
-					return false, ctx.Err()
-				case <-time.After(delay):
-				}
-			}
-			return false, nil
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-time.After(hangPollInterval):
-		}
-	}
-}
-
-// hangUnary applies behavior.json's `hang` lever to a UNARY request, the way
-// waitForRound applies it to a Check* round.
-//
-// It exists for the dnv-gateway integration suite (gateway.md AG2 and AG3):
-// the gateway bounds every agent call by
-// common.DefaultGatewayAgentTimeout, and the only way to prove that bound is a
-// listening agent that never answers — distinct from a closed port, which
-// fails instantly. The dnv-worker suite is unaffected: the worker never calls
-// any of the unary RPCs this guards.
-//
-// The lock is never held while waiting, so one hung request cannot block the
-// rest of the process, and the wait ends as soon as the caller's context does
-// (which is what the gateway's timeout cancels) or the script clears the
-// lever.
-func (a *fakeAgent) hangUnary(ctx context.Context, key string) error {
-	return a.holdUnary(ctx, key, func(ob *objectBehavior) bool {
-		return ob.Hang
-	})
-}
-
-// hangSyncup applies behavior.json's `hang_syncup` lever to one object's
-// Syncup*, the way hang holds its Check rounds: an agent that takes the
-// request and never answers it, as a stopped cn agent does with the demotion
-// of dnv-worker.md RW22 (worker_test.sh case H). The server interceptor logs
-// the request on arrival, before this runs, so its record times it exactly. A
-// held request ends unapplied when the caller's context does — the worker's
-// per-call deadline (RW5) — and is applied as usual once the script clears
-// the lever. hang alone never holds a Syncup*.
-func (a *fakeAgent) hangSyncup(ctx context.Context, key string) error {
-	return a.holdUnary(ctx, key, func(ob *objectBehavior) bool {
-		return ob.HangSyncup
-	})
-}
-
-// holdUnary is the wait of hangUnary and hangSyncup: it holds one unary
-// request of an object while lever reports true for the object's entry in
-// behavior.json, re-read every hangPollInterval with the lock released.
-func (a *fakeAgent) holdUnary(
-	ctx context.Context, key string, lever func(*objectBehavior) bool,
-) error {
-	for {
-		a.mu.Lock()
-		a.refreshLocked(ctx)
-		hold := false
-		if ob := a.objBehaviorLocked(key); ob != nil {
-			hold = lever(ob)
-		}
-		a.mu.Unlock()
-		if !hold {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return status.FromContextError(ctx.Err()).Err()
-		case <-time.After(hangPollInterval):
-		}
-	}
-}
-
-// dropStreamError is what drop_stream closes a Check* stream with.
-func dropStreamError() error {
-	return status.Error(codes.Unavailable, "behavior.json drop_stream")
-}
-
-// ---------------------------------------------------------------------------
-// service DiskNodeAgent
-// ---------------------------------------------------------------------------
-
-// GetDnSize replies the configured size (the worker never calls it).
-func (a *fakeAgent) GetDnSize(
-	ctx context.Context, req *pb.GetDnSizeRequest,
-) (*pb.GetDnSizeReply, error) {
-	if err := a.hangUnary(ctx, dnObjKey); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-	return &pb.GetDnSizeReply{Size: a.sizeLocked()}, nil
-}
-
-// SyncupDn implements the revision gate for the "dn" object (dnv-worker.md,
-// Integration test plan, The fake agent) and the Full sync rule of
-// architecture.md, Common agent rules: side pointers that disappear from the
-// list are dropped, as the real agent deletes their local files.
-func (a *fakeAgent) SyncupDn(
-	ctx context.Context, req *pb.SyncupDnRequest,
-) (*pb.SyncupDnReply, error) {
-	if err := a.hangSyncup(ctx, dnObjKey); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	code, details := a.gateSyncupLocked(dnObjKey, req.GetRevision())
-	if code == 0 {
-		a.applyLocked(ctx, dnObjKey, req.GetRevision(), req)
-		keep := make(map[string]bool, len(req.GetSidePointerList()))
-		for _, ptr := range req.GetSidePointerList() {
-			keep[sideObjKey(ptr)] = true
-		}
-		a.pruneLocked(sideObjPrefix, keep)
-		a.saveStateLocked(ctx)
-	}
-	stamp, saveTime := a.syncupStampLocked(ctx, dnObjKey, code, code == 0)
-	return &pb.SyncupDnReply{
-		AgentReply: agentReply(code, details),
-		Revision:   a.revisionLocked(dnObjKey),
-		DnInfo:     a.dnInfoLocked(),
-		ObsStamp:   stamp,
-		SaveTime:   saveTime,
-	}, nil
-}
-
-// SyncupSide implements the ordering gate (a side pointer absent from the
-// last SyncupDn is ReplyCodeUnknownObject) followed by the revision gate
-// (dnv-worker.md, Integration test plan, The fake agent).
-func (a *fakeAgent) SyncupSide(
-	ctx context.Context, req *pb.SyncupSideRequest,
-) (*pb.SyncupSideReply, error) {
-	key := sideObjKey(req.GetSidePointer())
-	if err := a.hangSyncup(ctx, key); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	if !a.sideKnownLocked(req.GetSidePointer()) {
-		return &pb.SyncupSideReply{
-			AgentReply: agentReply(common.ReplyCodeUnknownObject,
-				key+" is not in the last SyncupDn.side_pointer_list"),
-		}, nil
-	}
-	code, details := a.gateSyncupLocked(key, req.GetRevision())
-	if code == 0 {
-		a.applyLocked(ctx, key, req.GetRevision(), req)
-		a.saveStateLocked(ctx)
-	}
-	stamp, saveTime := a.syncupStampLocked(ctx, key, code, code == 0)
-	return &pb.SyncupSideReply{
-		AgentReply: agentReply(code, details),
-		Revision:   a.revisionLocked(key),
-		SideInfo:   a.sideInfoLocked(key),
-		BmInfo:     a.sideBmInfoLocked(key),
-		ObsStamp:   stamp,
-		SaveTime:   saveTime,
-	}, nil
-}
-
-// PushMigrBitmap records one migration-bitmap chunk behind the push gate
-// (dnv-worker.md, Integration test plan, The fake agent); the applied set
-// derived from the recorded chunks is what the next SyncupSide reply reports as
-// bm_info (architecture.md, Bitmap push protocol).
-func (a *fakeAgent) PushMigrBitmap(
-	ctx context.Context, req *pb.PushMigrBitmapRequest,
-) (*pb.PushMigrBitmapReply, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	key := sideObjKey(req.GetSidePointer())
-	known := a.sideKnownLocked(req.GetSidePointer()) &&
-		a.migrKnownLocked(key, req.GetMigrId())
-	code, details := a.gatePushLocked(key, req.GetMigrId(), known)
-	if code == 0 {
-		a.state[key].putChunk(req.GetMigrId(),
-			migrChunkKey(req.GetBmIdx()), len(req.GetBitmap()))
-		a.saveStateLocked(ctx)
-	}
-	return &pb.PushMigrBitmapReply{
-		AgentReply: agentReply(code, details),
-	}, nil
-}
-
-// GetDnInfo returns the same DnInfo the CheckDn stream reports.
-func (a *fakeAgent) GetDnInfo(
-	ctx context.Context, req *pb.GetDnInfoRequest,
-) (*pb.GetDnInfoReply, error) {
-	if err := a.hangUnary(ctx, dnObjKey); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-	return &pb.GetDnInfoReply{
-		AgentReply: agentReply(a.forcedCodeLocked(dnObjKey), ""),
-		Revision:   a.revisionLocked(dnObjKey),
-		DnInfo:     a.dnInfoLocked(),
-		ObsStamp:   a.infoStampLocked(ctx, dnObjKey),
-	}, nil
-}
-
-// GetSideInfo returns the same SideInfo the CheckSide stream reports.
-func (a *fakeAgent) GetSideInfo(
-	ctx context.Context, req *pb.GetSideInfoRequest,
-) (*pb.GetSideInfoReply, error) {
-	if err := a.hangUnary(ctx, sideObjKey(req.GetSidePointer())); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	key := sideObjKey(req.GetSidePointer())
-	if !a.sideKnownLocked(req.GetSidePointer()) {
-		return &pb.GetSideInfoReply{
-			AgentReply: agentReply(common.ReplyCodeUnknownObject,
-				key+" is not in the last SyncupDn.side_pointer_list"),
-			ObsStamp: a.stampLocked(key, false, "", time.Time{}),
-		}, nil
-	}
-	return &pb.GetSideInfoReply{
-		AgentReply: agentReply(a.forcedCodeLocked(key), ""),
-		Revision:   a.revisionLocked(key),
-		SideInfo:   a.sideInfoLocked(key),
-		ObsStamp:   a.infoStampLocked(ctx, key),
-	}, nil
-}
-
-// CheckDn serves the DN health stream: one reply per request, never an
-// unsolicited message, with the *Info delivered per the change-only rule of
-// architecture.md, Check streams.
-func (a *fakeAgent) CheckDn(
-	stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply],
-) error {
-	ctx := stream.Context()
-	tracker := &infoTracker{}
-	for {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		drop, err := a.waitForRound(
-			agent.CheckRoundCtx(ctx, req.GetTraceId()), dnObjKey)
-		if err != nil {
-			return err
-		}
-		if drop {
-			return dropStreamError()
-		}
-		a.mu.Lock()
-		result := a.checkGateLocked(dnObjKey, true)
-		info := a.dnInfoLocked()
-		stamp := a.stampLocked(dnObjKey,
-			result.code != common.ReplyCodeUnknownObject, req.GetTraceId(),
-			time.Time{})
-		a.mu.Unlock()
-
-		reply := &pb.CheckDnReply{
-			AgentReply: agentReply(result.code, result.details),
-			Revision:   result.revision,
-			ObsStamp:   stamp,
-		}
-		if tracker.include(req.GetShowInfo(), info) {
-			reply.DnInfo = info
-		}
-		if err := stream.Send(reply); err != nil {
-			return err
-		}
-	}
-}
-
-// CheckSide serves one side's health stream; a side pointer absent from the
-// last SyncupDn is refused with ReplyCodeUnknownObject on every round
-// (dnv-worker.md, Integration test plan, The fake agent).
-func (a *fakeAgent) CheckSide(
-	stream grpc.BidiStreamingServer[pb.CheckSideRequest, pb.CheckSideReply],
-) error {
-	ctx := stream.Context()
-	tracker := &infoTracker{}
-	for {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		key := sideObjKey(req.GetSidePointer())
-		drop, err := a.waitForRound(
-			agent.CheckRoundCtx(ctx, req.GetTraceId()), key)
-		if err != nil {
-			return err
-		}
-		if drop {
-			return dropStreamError()
-		}
-		a.mu.Lock()
-		result := a.checkGateLocked(
-			key, a.sideKnownLocked(req.GetSidePointer()))
-		known := result.code != common.ReplyCodeUnknownObject
-		var info *pb.SideInfo
-		if known {
-			info = a.sideInfoLocked(key)
-		}
-		stamp := a.stampLocked(key, known, req.GetTraceId(), time.Time{})
-		a.mu.Unlock()
-
-		reply := &pb.CheckSideReply{
-			AgentReply: agentReply(result.code, result.details),
-			Revision:   result.revision,
-			ObsStamp:   stamp,
-		}
-		if tracker.include(req.GetShowInfo(), info) {
-			reply.SideInfo = info
-		}
-		if err := stream.Send(reply); err != nil {
-			return err
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// service ControllerNodeAgent
-// ---------------------------------------------------------------------------
-
-// GetCnSize replies the configured size (the worker never calls it).
-func (a *fakeAgent) GetCnSize(
-	ctx context.Context, req *pb.GetCnSizeRequest,
-) (*pb.GetCnSizeReply, error) {
-	if err := a.hangUnary(ctx, cnObjKey); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-	return &pb.GetCnSizeReply{Size: a.sizeLocked()}, nil
-}
-
-// SyncupCn implements the revision gate for the "cn" object (dnv-worker.md,
-// Integration test plan, The fake agent) and drops the cntlrs that disappeared
-// from the pointer list (the Full sync rule of architecture.md, Common agent
-// rules).
-func (a *fakeAgent) SyncupCn(
-	ctx context.Context, req *pb.SyncupCnRequest,
-) (*pb.SyncupCnReply, error) {
-	if err := a.hangSyncup(ctx, cnObjKey); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	code, details := a.gateSyncupLocked(cnObjKey, req.GetRevision())
-	if code == 0 {
-		a.applyLocked(ctx, cnObjKey, req.GetRevision(), req)
-		keep := make(map[string]bool, len(req.GetCntlrPointerList()))
-		for _, ptr := range req.GetCntlrPointerList() {
-			keep[cntlrObjKey(ptr)] = true
-		}
-		a.pruneLocked(cntlrObjPrefix, keep)
-		a.saveStateLocked(ctx)
-	}
-	stamp, saveTime := a.syncupStampLocked(ctx, cnObjKey, code, code == 0)
-	return &pb.SyncupCnReply{
-		AgentReply: agentReply(code, details),
-		Revision:   a.revisionLocked(cnObjKey),
-		CnInfo:     a.cnInfoLocked(),
-		ObsStamp:   stamp,
-		SaveTime:   saveTime,
-	}, nil
-}
-
-// SyncupCntlr implements the ordering gate (a cntlr absent from the last
-// SyncupCn is ReplyCodeUnknownObject) followed by the revision gate
-// (dnv-worker.md, Integration test plan, The fake agent).
-func (a *fakeAgent) SyncupCntlr(
-	ctx context.Context, req *pb.SyncupCntlrRequest,
-) (*pb.SyncupCntlrReply, error) {
-	key := cntlrObjKey(req.GetCntlrPointer())
-	if err := a.hangSyncup(ctx, key); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	if !a.cntlrKnownLocked(req.GetCntlrPointer()) {
-		return &pb.SyncupCntlrReply{
-			AgentReply: agentReply(common.ReplyCodeUnknownObject,
-				key+" is not in the last SyncupCn.cntlr_pointer_list"),
-		}, nil
-	}
-	code, details := a.gateSyncupLocked(key, req.GetRevision())
-	if code == 0 {
-		a.applyLocked(ctx, key, req.GetRevision(), req)
-		a.saveStateLocked(ctx)
-	}
-	stamp, saveTime := a.syncupStampLocked(ctx, key, code, code == 0)
-	return &pb.SyncupCntlrReply{
-		AgentReply: agentReply(code, details),
-		Revision:   a.revisionLocked(key),
-		CntlrInfo:  a.cntlrInfoLocked(key),
-		BmInfoList: a.cntlrBmInfoListLocked(key),
-		ObsStamp:   stamp,
-		SaveTime:   saveTime,
-	}, nil
-}
-
-// PushCloneBitmap records one clone-bitmap chunk behind the push gate
-// (dnv-worker.md, Integration test plan, The fake agent), at the
-// (src_slice_idx, bm_idx) pair the request addresses it by (architecture.md,
-// Bitmap push protocol); the applied set is reported as the chunk_id_list of
-// the next SyncupCntlr reply's bm_info_list.
-func (a *fakeAgent) PushCloneBitmap(
-	ctx context.Context, req *pb.PushCloneBitmapRequest,
-) (*pb.PushCloneBitmapReply, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	key := cntlrObjKey(req.GetCntlrPointer())
-	known := a.cntlrKnownLocked(req.GetCntlrPointer()) &&
-		a.cloneKnownLocked(key, req.GetCloneId())
-	code, details := a.gatePushLocked(key, req.GetCloneId(), known)
-	if code == 0 {
-		a.state[key].putChunk(req.GetCloneId(),
-			cloneChunkKey(req.GetSrcSliceIdx(), req.GetBmIdx()),
-			len(req.GetBitmap()))
-		a.saveStateLocked(ctx)
-	}
-	return &pb.PushCloneBitmapReply{
-		AgentReply: agentReply(code, details),
-	}, nil
-}
-
-// GetCnInfo returns the same CnInfo the CheckCn stream reports.
-func (a *fakeAgent) GetCnInfo(
-	ctx context.Context, req *pb.GetCnInfoRequest,
-) (*pb.GetCnInfoReply, error) {
-	if err := a.hangUnary(ctx, cnObjKey); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-	return &pb.GetCnInfoReply{
-		AgentReply: agentReply(a.forcedCodeLocked(cnObjKey), ""),
-		Revision:   a.revisionLocked(cnObjKey),
-		CnInfo:     a.cnInfoLocked(),
-		ObsStamp:   a.infoStampLocked(ctx, cnObjKey),
-	}, nil
-}
-
-// GetCntlrInfo returns the same CntlrInfo the CheckCntlr stream reports.
-func (a *fakeAgent) GetCntlrInfo(
-	ctx context.Context, req *pb.GetCntlrInfoRequest,
-) (*pb.GetCntlrInfoReply, error) {
-	if err := a.hangUnary(
-		ctx, cntlrObjKey(req.GetCntlrPointer()),
-	); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.refreshLocked(ctx)
-
-	key := cntlrObjKey(req.GetCntlrPointer())
-	if !a.cntlrKnownLocked(req.GetCntlrPointer()) {
-		return &pb.GetCntlrInfoReply{
-			AgentReply: agentReply(common.ReplyCodeUnknownObject,
-				key+" is not in the last SyncupCn.cntlr_pointer_list"),
-			ObsStamp: a.stampLocked(key, false, "", time.Time{}),
-		}, nil
-	}
-	return &pb.GetCntlrInfoReply{
-		AgentReply: agentReply(a.forcedCodeLocked(key), ""),
-		Revision:   a.revisionLocked(key),
-		CntlrInfo:  a.cntlrInfoLocked(key),
-		ObsStamp:   a.infoStampLocked(ctx, key),
-	}, nil
-}
-
-// GetThinDeviceBm replies an empty bitmap (the worker never calls it).
-func (a *fakeAgent) GetThinDeviceBm(
-	ctx context.Context, req *pb.GetThinDeviceBmRequest,
-) (*pb.GetThinDeviceBmReply, error) {
-	if err := a.hangUnary(ctx, cnObjKey); err != nil {
-		return nil, err
-	}
-	return &pb.GetThinDeviceBmReply{}, nil
-}
-
-// GetLegBm replies an empty bitmap (the worker never calls it).
-func (a *fakeAgent) GetLegBm(
-	ctx context.Context, req *pb.GetLegBmRequest,
-) (*pb.GetLegBmReply, error) {
-	if err := a.hangUnary(ctx, cnObjKey); err != nil {
-		return nil, err
-	}
-	return &pb.GetLegBmReply{}, nil
-}
-
-// CheckCn serves the CN health stream, one reply per request.
-func (a *fakeAgent) CheckCn(
-	stream grpc.BidiStreamingServer[pb.CheckCnRequest, pb.CheckCnReply],
-) error {
-	ctx := stream.Context()
-	tracker := &infoTracker{}
-	for {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		drop, err := a.waitForRound(
-			agent.CheckRoundCtx(ctx, req.GetTraceId()), cnObjKey)
-		if err != nil {
-			return err
-		}
-		if drop {
-			return dropStreamError()
-		}
-		a.mu.Lock()
-		result := a.checkGateLocked(cnObjKey, true)
-		info := a.cnInfoLocked()
-		stamp := a.stampLocked(cnObjKey,
-			result.code != common.ReplyCodeUnknownObject, req.GetTraceId(),
-			time.Time{})
-		a.mu.Unlock()
-
-		reply := &pb.CheckCnReply{
-			AgentReply: agentReply(result.code, result.details),
-			Revision:   result.revision,
-			ObsStamp:   stamp,
-		}
-		if tracker.include(req.GetShowInfo(), info) {
-			reply.CnInfo = info
-		}
-		if err := stream.Send(reply); err != nil {
-			return err
-		}
-	}
 }
 
-// CheckCntlr serves one cntlr's health stream; a cntlr absent from the last
-// SyncupCn is refused with ReplyCodeUnknownObject on every round
-// (dnv-worker.md, Integration test plan, The fake agent).
-func (a *fakeAgent) CheckCntlr(
-	stream grpc.BidiStreamingServer[pb.CheckCntlrRequest, pb.CheckCntlrReply],
-) error {
-	ctx := stream.Context()
-	tracker := &infoTracker{}
-	for {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		key := cntlrObjKey(req.GetCntlrPointer())
-		drop, err := a.waitForRound(
-			agent.CheckRoundCtx(ctx, req.GetTraceId()), key)
-		if err != nil {
-			return err
-		}
-		if drop {
-			return dropStreamError()
-		}
-		a.mu.Lock()
-		result := a.checkGateLocked(
-			key, a.cntlrKnownLocked(req.GetCntlrPointer()))
-		known := result.code != common.ReplyCodeUnknownObject
-		var info *pb.CntlrInfo
-		if known {
-			info = a.cntlrInfoLocked(key)
-		}
-		stamp := a.stampLocked(key, known, req.GetTraceId(), time.Time{})
-		a.mu.Unlock()
-
-		reply := &pb.CheckCntlrReply{
-			AgentReply: agentReply(result.code, result.details),
-			Revision:   result.revision,
-			ObsStamp:   stamp,
-		}
-		if tracker.include(req.GetShowInfo(), info) {
-			reply.CntlrInfo = info
-		}
-		if err := stream.Send(reply); err != nil {
-			return err
-		}
-	}
+// exitError is a command line the program refuses, with the status it exits
+// with and the text it prints first, if any.
+type exitError struct {
+	code int
+	msg  string
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
+func (e *exitError) Error() string { return e.msg }
 
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-	}
-	mode := os.Args[1]
-	if mode != "dn" && mode != "cn" {
-		usage()
+// parseArgs parses the arguments after the program name. A missing or
+// unknown subcommand is a usage error (status 2), as is a flag the flag
+// package refuses, which prints its own diagnostics to output; -h exits 0;
+// a missing required flag exits 1.
+func parseArgs(args []string, output io.Writer) (options, error) {
+	if len(args) < 1 || (args[0] != "dn" && args[0] != "cn") {
+		return options{}, &exitError{code: 2, msg: usageText}
 	}
-	fs := flag.NewFlagSet(mode, flag.ExitOnError)
+	mode := args[0]
+	fs := flag.NewFlagSet(mode, flag.ContinueOnError)
+	fs.SetOutput(output)
 	addr := fs.String("grpc-address", "",
 		"listen address ip:port (required)")
 	dir := fs.String("dir", "",
 		"directory holding behavior.json and state.json (required)")
-	size := fs.Uint64("size", defaultNodeSize,
+	size := fs.Uint64("size", agentfake.DefaultNodeSize,
 		"the GetDnSize/GetCnSize reply, unless behavior.json sets \"size\"")
-	fs.Parse(os.Args[2:])
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return options{}, &exitError{code: 0}
+		}
+		return options{}, &exitError{code: 2}
+	}
 	if *addr == "" {
-		die("--grpc-address is required")
+		return options{}, &exitError{
+			code: 1, msg: "fakeagent: --grpc-address is required"}
 	}
 	if *dir == "" {
-		die("--dir is required")
+		return options{}, &exitError{
+			code: 1, msg: "fakeagent: --dir is required"}
 	}
+	kind := agentfake.Dn
+	if mode == "cn" {
+		kind = agentfake.Cn
+	}
+	return options{mode: mode, kind: kind, addr: *addr, dir: *dir,
+		size: *size}, nil
+}
 
-	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
-	agent, err := newFakeAgent(ctx, *dir, *size)
+// ---------------------------------------------------------------------------
+// The behavior file front (dnv-worker.md, Integration test plan, The fake
+// agent)
+// ---------------------------------------------------------------------------
+
+// behaviorFront keeps the agent's levers equal to the behavior file: refresh
+// re-reads the file when its mtime or size changed, sets what it parses and
+// keeps the levers in force on a malformed file. The agent calls refresh at
+// the arrival of every request (agentfake.Config.Refresh) and poll calls it
+// every pollInterval; mu serializes the two.
+type behaviorFront struct {
+	path  string
+	agent *agentfake.Agent
+
+	mu      sync.Mutex
+	present bool
+	mtime   time.Time
+	size    int64
+}
+
+// refresh implements the behavior file's re-read when its mtime or size
+// changed. A malformed file is logged once per mtime or size change and
+// ignored, keeping the previous levers; a file that is gone clears them.
+// Every load sets every lever, so it re-arms hang_rounds and leftover_rounds
+// and a rewrite counts their rounds afresh.
+func (f *behaviorFront) refresh(ctx context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	info, err := os.Stat(f.path)
 	if err != nil {
-		die("%v", err)
+		if f.present {
+			slog.InfoContext(ctx, "behavior file gone",
+				slog.String("path", f.path))
+			f.present = false
+			f.mtime = time.Time{}
+			f.size = 0
+			f.set(ctx, nil)
+		}
+		return
 	}
-	listener, err := net.Listen("tcp", *addr)
+	if f.present && info.ModTime().Equal(f.mtime) && info.Size() == f.size {
+		return
+	}
+	f.present = true
+	f.mtime = info.ModTime()
+	f.size = info.Size()
+	data, err := os.ReadFile(f.path)
 	if err != nil {
-		die("listening on %s failed: %v", *addr, err)
+		slog.ErrorContext(ctx, "behavior file unreadable",
+			slog.String("path", f.path),
+			slog.String("error", err.Error()))
+		return
 	}
-	// The server interceptors are not optional: agent.log is the suite's
-	// only record of what the worker sent and which worker sent it
-	// (doc/grpc.md, Wiring; dnv-worker.md,
-	// Integration test plan, The fake agent). The message limit of the same
-	// rule comes first, so the fake takes any request an agent takes.
-	server := grpc.NewServer(append(common.GrpcServerMsgOptions(),
-		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)...)
-	if mode == "dn" {
-		pb.RegisterDiskNodeAgentServer(server, agent)
-	} else {
-		pb.RegisterControllerNodeAgentServer(server, agent)
+	parsed, err := agentfake.ParseBehavior(data)
+	if err != nil {
+		slog.ErrorContext(ctx, "behavior file malformed",
+			slog.String("path", f.path),
+			slog.String("error", err.Error()))
+		return
 	}
-	slog.InfoContext(ctx, "fakeagent started",
-		slog.String("mode", mode),
-		slog.String("grpc_address", *addr),
-		slog.String("dir", *dir),
-	)
-	if err := server.Serve(listener); err != nil {
-		die("serving failed: %v", err)
+	if f.set(ctx, parsed) {
+		slog.InfoContext(ctx, "behavior file loaded",
+			slog.String("path", f.path),
+			slog.Int("object_cnt", len(parsed.Objects)))
 	}
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr,
-		"usage: fakeagent dn|cn --grpc-address <ip:port> --dir <dir> [--size N]\n")
-	os.Exit(2)
+// set hands the parsed levers to the agent and reports whether it took them.
+func (f *behaviorFront) set(ctx context.Context, b *agentfake.Behavior) bool {
+	if err := f.agent.SetBehavior(b); err != nil {
+		slog.ErrorContext(ctx, "behavior file refused",
+			slog.String("path", f.path),
+			slog.String("error", err.Error()))
+		return false
+	}
+	return true
+}
+
+// poll re-reads the behavior file every pollInterval until ctx ends.
+func (f *behaviorFront) poll(ctx context.Context) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			f.refresh(ctx)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The program
+// ---------------------------------------------------------------------------
+
+// program is one fake agent with its behavior file front and its server.
+type program struct {
+	front  *behaviorFront
+	agent  *agentfake.Agent
+	server *grpc.Server
+}
+
+// newProgram builds the agent of opts over its directory — the stored state
+// loaded from the state file, the levers from the behavior file — and the
+// server that serves it behind the real server interceptors: they are not
+// optional, since agent.log is the suite's only record of what the worker
+// sent and which worker sent it (doc/grpc.md, Wiring).
+func newProgram(ctx context.Context, opts options) (*program, error) {
+	front := &behaviorFront{path: filepath.Join(opts.dir, behaviorFileName)}
+	agent, err := agentfake.New(ctx, agentfake.Config{
+		Size:    opts.size,
+		Dir:     opts.dir,
+		Refresh: front.refresh,
+	})
+	if err != nil {
+		return nil, err
+	}
+	front.agent = agent
+	front.refresh(ctx)
+	return &program{
+		front:  front,
+		agent:  agent,
+		server: agentfake.NewServer(agent, opts.kind, false),
+	}, nil
+}
+
+// serve serves the program on lis, polling the behavior file meanwhile,
+// until the server stops.
+func (p *program) serve(ctx context.Context, lis net.Listener) error {
+	go p.front.poll(ctx)
+	return p.server.Serve(lis)
+}
+
+func main() {
+	opts, err := parseArgs(os.Args[1:], os.Stderr)
+	if err != nil {
+		var exit *exitError
+		if errors.As(err, &exit) {
+			if exit.msg != "" {
+				fmt.Fprintln(os.Stderr, exit.msg)
+			}
+			os.Exit(exit.code)
+		}
+		die("%v", err)
+	}
+
+	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
+	p, err := newProgram(ctx, opts)
+	if err != nil {
+		die("%v", err)
+	}
+	listener, err := net.Listen("tcp", opts.addr)
+	if err != nil {
+		die("listening on %s failed: %v", opts.addr, err)
+	}
+	slog.InfoContext(ctx, "fakeagent started",
+		slog.String("mode", opts.mode),
+		slog.String("grpc_address", opts.addr),
+		slog.String("dir", opts.dir),
+	)
+	if err := p.serve(ctx, listener); err != nil {
+		die("serving failed: %v", err)
+	}
 }
 
 func die(format string, args ...any) {

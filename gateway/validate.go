@@ -169,8 +169,11 @@ func validateBound(field string, value uint64, min uint64, max uint64) error {
 }
 
 // validateTrConf checks the four members of an NvmeTrConf against the
-// MaxStrSize / ValidStrPattern rule of architecture.md, Common validation. An
-// entirely empty message is accepted here; the RPCs that require one say so
+// MaxStrSize / ValidStrPattern rule of architecture.md, Common validation,
+// and tr_svc_id against MaxTrSvcIdLength as well: a CN's transport conf is
+// copied verbatim into the discovery log, whose TRSVCID field holds no more
+// (cdc.md DS3), and the one rule holds for every transport conf. An entirely
+// empty message is accepted here; the RPCs that require one say so
 // themselves.
 func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 	if conf == nil {
@@ -191,6 +194,10 @@ func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 		); err != nil {
 			return err
 		}
+	}
+	if len(conf.GetTrSvcId()) > common.MaxTrSvcIdLength {
+		return errInvalid("%s.tr_svc_id is %d bytes, the maximum is %d",
+			field, len(conf.GetTrSvcId()), common.MaxTrSvcIdLength)
 	}
 	return nil
 }

@@ -22,6 +22,22 @@ The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
 migr_bitmap, teardown, restart — each under storage-pool ids of its own, and
 each ends with neither node holding anything of its pool.
 
+Beside the suite, the Go tests of `agent/dnagent` run a real dn agent inside
+the test process, behind the real server interceptors over an in-memory gRPC
+connection, and drive it with a fake worker over the package's fake OS
+client, which answers the agent's device-mapper, nvmet, nvme host, raw-disk
+and local-store calls from memory and records each one. They prove what the
+lab cannot hold or time: a disk node of the most sides one holds, built and
+exported with every round clean; the disk header at the room of its block
+and the volume table at the room of its slot, and one byte past each; the
+bound the dn agent puts on a migration chunk's index (`dnagent.md` DN15);
+and orderings across many syncups and rounds that need a scripted node: a
+restart with the local store kept and with it lost (`dnagent.md` DN2, DN6),
+an OS command that hangs across rounds and past the pass budget
+(`dnagent.md` SH15, DN13), a syncup that arrives during a converge
+(`dnagent.md` SH30), and a sweep whose listings name objects already gone
+(`dnagent.md` DN6, DN16).
+
 ## Topology
 
 The developer machine ships the agent over ssh and drives two lab VMs over

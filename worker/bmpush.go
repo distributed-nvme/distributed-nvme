@@ -6,11 +6,9 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
-	"time"
 
 	"google.golang.org/grpc"
 
-	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
 )
 
@@ -279,7 +277,8 @@ func (p *bmPusher) submit(plan *bmPlan) {
 }
 
 // stop ends the engine and joins its runners. An in-flight push is allowed to
-// finish — its own DefaultWorkerPushTimeout deadline bounds the wait, exactly
+// finish — its own deadline, the push timeout of deps
+// (common.DefaultWorkerPushTimeout in production), bounds the wait, exactly
 // as RW11 bounds an in-flight Syncup* — and the connection reference is given
 // back afterwards.
 func (p *bmPusher) stop() {
@@ -378,8 +377,7 @@ func (p *bmPusher) pushOne(
 		return false
 	}
 	rpcCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx),
-		common.DefaultWorkerPushTimeout*time.Second,
+		context.WithoutCancel(ctx), p.deps.tmo.push,
 	)
 	defer cancel()
 	code, details, err := p.deliver(rpcCtx, conn, bmPart{

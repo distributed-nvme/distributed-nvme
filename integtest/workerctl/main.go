@@ -1,8 +1,10 @@
 // Command workerctl is the etcd driver of the dnv-worker integration test
 // (dnv-worker.md, Integration test plan, The driver): "the etcd driver that
-// plays the gateway". It formats the keys of architecture.md, Key table,
-// through model, marshals the pb messages, bumps the revision keys and reads
-// keys back as protojson.
+// plays the gateway". It is a front over the planting library,
+// integtest/plant, which holds every write it makes: this program parses its
+// flags and their string specs into the library's typed specs, calls the
+// library, and prints what the library wrote. It reads keys back as protojson
+// on its own.
 //
 // Every subcommand that reaches etcd runs ON THE TEST SERVER, where etcd
 // listens on localhost, and is invoked over ssh by two suites:
@@ -14,11 +16,8 @@
 // verification.
 // It never dials an agent and never sleeps: it is the gateway's write path
 // with explicit placement (dnv-worker.md, Integration test plan, The driver).
-// Every mutation is one etcdutil.RunSTM, so the state it leaves behind is
-// exactly the state a real gateway STM would have produced — capacity keys per
-// architecture.md, Capacity index keys; revision keys bumped in place per
-// architecture.md, Revision keys and the sync fan-out; SpConf.next_id past
-// every id the script assigned.
+// Every mutation is one etcdutil.RunSTM of the library, so the state it
+// leaves behind is exactly the state a real gateway STM would have produced.
 //
 // `constants`, `geometry` and `meta-units` are the exceptions: they open no
 // client and read no key, so a suite runs them on the DRIVER, on the binary it
@@ -46,7 +45,9 @@
 //     assertions read — err_epoch, provisioned, created, primary — are present
 //     even when they hold their proto3 default. uint64 fields are JSON strings
 //     (the proto3 JSON mapping), so jq compares them as "0", not 0.
-//   - Ids accept decimal or 0x hex everywhere.
+//   - Ids accept decimal or 0x hex everywhere, and every id flag that names
+//     a new object is required: the library's "0 takes the next free id" is
+//     for Go callers only.
 //
 // Exit codes: 0 on success, 1 on any error (with a message on stderr), 2 on a
 // usage error.
@@ -54,12 +55,10 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"strconv"
 	"strings"
@@ -70,6 +69,7 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
+	"github.com/distributed-nvme/distributed-nvme/integtest/plant"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -83,16 +83,6 @@ const (
 	// writes: the probe succeeds on not-found, so what it proves is that etcd
 	// answers, not that anything is stored.
 	pingKey = common.DnvPrefix + " ping"
-	// nvmeTrType / nvmeAdrFam are the nvme_tr_conf fields every DnConf/CnConf
-	// this driver writes carries; the fake agents never open an NVMe-oF port,
-	// so they only have to be deterministic and plausible. nvmeTrSvcId is only
-	// the FALLBACK tr_svc_id of an --addr with no port — nvmeTrConfOf stores
-	// the node's own port instead — and 4420 is the IANA nvme-tcp port, which
-	// is all that makes it the plausible fallback: a real agent has no default
-	// here at all, since dnv-agent's --tr-svc-id is required (dnagent.md CM2).
-	nvmeTrType  = "tcp"
-	nvmeAdrFam  = "ipv4"
-	nvmeTrSvcId = "4420"
 )
 
 // ---------------------------------------------------------------------------
@@ -152,6 +142,20 @@ func emitPb(msg proto.Message) {
 // the same spelling the keys use.
 func idHex(id uint64) string {
 	return fmt.Sprintf(common.IdKeyFmt, id)
+}
+
+// idHexList renders a list of ids with idHex.
+func idHexList(ids []uint64) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, idHex(id))
+	}
+	return out
+}
+
+// shardHex renders a shard code the way every key field does.
+func shardHex(shard uint32) string {
+	return fmt.Sprintf(common.ShardCodeFmt, shard)
 }
 
 // ---------------------------------------------------------------------------
@@ -239,9 +243,19 @@ func (t *triBool) Set(s string) error {
 // IsBoolFlag lets `--disabled` stand for `--disabled=true`.
 func (t *triBool) IsBoolFlag() bool { return true }
 
+// ptr is the library's form of a triBool: nil when the flag was not given.
+func (t *triBool) ptr() *bool {
+	if !t.set {
+		return nil
+	}
+	value := t.value
+	return &value
+}
+
 // ---------------------------------------------------------------------------
 // Tuple parsers. Every one of them rejects a malformed spec loudly, so
 // that a mistyped test invocation fails instead of writing garbage into etcd.
+// Each turns one string spec of a flag into the library's typed spec.
 // ---------------------------------------------------------------------------
 
 // parseId parses one id field: decimal or 0x hex.
@@ -337,31 +351,25 @@ func parseCntlrPointer(spec string) (*pb.CntlrPointer, error) {
 
 const cntlrForm = "id:cn_id:slot:primary"
 
-// cntlrSpec is one `--cntlr id:cn_id:slot:primary` of put-sp: which cntlr id
-// to use, which CN hosts it, its cntlid slot and whether it is the primary.
-type cntlrSpec struct {
-	cntlrId uint64
-	cnId    uint64
-	slot    uint32
-	primary bool
-}
-
-func parseCntlrSpec(spec string) (cntlrSpec, error) {
-	var out cntlrSpec
+// parseCntlrSpec reads one `--cntlr id:cn_id:slot:primary` of put-sp: which
+// cntlr id to use, which CN hosts it, its cntlid slot and whether it is the
+// primary.
+func parseCntlrSpec(spec string) (plant.CntlrSpec, error) {
+	var out plant.CntlrSpec
 	parts, err := splitSpec(spec, 4, cntlrForm)
 	if err != nil {
 		return out, err
 	}
-	if out.cntlrId, err = parseIdField(parts[0], spec, cntlrForm); err != nil {
+	if out.CntlrId, err = parseIdField(parts[0], spec, cntlrForm); err != nil {
 		return out, err
 	}
-	if out.cnId, err = parseIdField(parts[1], spec, cntlrForm); err != nil {
+	if out.CnId, err = parseIdField(parts[1], spec, cntlrForm); err != nil {
 		return out, err
 	}
-	if out.slot, err = parseU32Field(parts[2], spec, cntlrForm); err != nil {
+	if out.Slot, err = parseU32Field(parts[2], spec, cntlrForm); err != nil {
 		return out, err
 	}
-	if out.primary, err = parseBoolField(parts[3], spec, cntlrForm); err != nil {
+	if out.Primary, err = parseBoolField(parts[3], spec, cntlrForm); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -369,22 +377,17 @@ func parseCntlrSpec(spec string) (cntlrSpec, error) {
 
 const sliceForm = "id:idx"
 
-// sliceSpec is one `--slice id:idx` of put-sp.
-type sliceSpec struct {
-	sliceId  uint64
-	sliceIdx uint32
-}
-
-func parseSliceSpec(spec string) (sliceSpec, error) {
-	var out sliceSpec
+// parseSliceSpec reads one `--slice id:idx` of put-sp.
+func parseSliceSpec(spec string) (plant.SliceSpec, error) {
+	var out plant.SliceSpec
 	parts, err := splitSpec(spec, 2, sliceForm)
 	if err != nil {
 		return out, err
 	}
-	if out.sliceId, err = parseIdField(parts[0], spec, sliceForm); err != nil {
+	if out.SliceId, err = parseIdField(parts[0], spec, sliceForm); err != nil {
 		return out, err
 	}
-	if out.sliceIdx, err = parseU32Field(parts[1], spec, sliceForm); err != nil {
+	if out.SliceIdx, err = parseU32Field(parts[1], spec, sliceForm); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -392,52 +395,41 @@ func parseSliceSpec(spec string) (sliceSpec, error) {
 
 const groupForm = "slice:grp:meta|data:ext_cnt:none|raid1"
 
-// groupSpec is one `--group slice:grp:meta|data:ext_cnt:none|raid1` of put-sp.
-// The redundancy kind is per group in the flag because that is what decides
-// the group's meta_blocks (architecture.md, Group on-leg layout: meta region,
-// data region, health block); every group of one SP must name the same kind,
-// since SpConf.bdev_conf holds exactly one redund_conf.
-type groupSpec struct {
-	sliceId uint64
-	grpId   uint64
-	isMeta  bool
-	extCnt  uint64
-	raid1   bool
-}
-
-func parseGroupSpec(spec string) (groupSpec, error) {
-	var out groupSpec
+// parseGroupSpec reads one `--group slice:grp:meta|data:ext_cnt:none|raid1` of
+// put-sp.
+func parseGroupSpec(spec string) (plant.GroupSpec, error) {
+	var out plant.GroupSpec
 	parts, err := splitSpec(spec, 5, groupForm)
 	if err != nil {
 		return out, err
 	}
-	if out.sliceId, err = parseIdField(parts[0], spec, groupForm); err != nil {
+	if out.SliceId, err = parseIdField(parts[0], spec, groupForm); err != nil {
 		return out, err
 	}
-	if out.grpId, err = parseIdField(parts[1], spec, groupForm); err != nil {
+	if out.GrpId, err = parseIdField(parts[1], spec, groupForm); err != nil {
 		return out, err
 	}
 	switch strings.TrimSpace(parts[2]) {
 	case "meta":
-		out.isMeta = true
+		out.Meta = true
 	case "data":
-		out.isMeta = false
+		out.Meta = false
 	default:
 		return out, fmt.Errorf(
 			"%q in %q: want meta or data", parts[2], spec,
 		)
 	}
-	if out.extCnt, err = parseIdField(parts[3], spec, groupForm); err != nil {
+	if out.ExtCnt, err = parseIdField(parts[3], spec, groupForm); err != nil {
 		return out, err
 	}
-	if out.extCnt == 0 {
+	if out.ExtCnt == 0 {
 		return out, fmt.Errorf("%q: ext_cnt must not be zero", spec)
 	}
 	switch strings.TrimSpace(parts[4]) {
 	case "raid1":
-		out.raid1 = true
+		out.Raid1 = true
 	case "none":
-		out.raid1 = false
+		out.Raid1 = false
 	default:
 		return out, fmt.Errorf(
 			"%q in %q: want none or raid1", parts[4], spec,
@@ -448,26 +440,20 @@ func parseGroupSpec(spec string) (groupSpec, error) {
 
 const legForm = "grp:leg:idx"
 
-// legSpec is one `--leg grp:leg:idx` of put-sp.
-type legSpec struct {
-	grpId  uint64
-	legId  uint64
-	legIdx uint32
-}
-
-func parseLegSpec(spec string) (legSpec, error) {
-	var out legSpec
+// parseLegSpec reads one `--leg grp:leg:idx` of put-sp.
+func parseLegSpec(spec string) (plant.LegSpec, error) {
+	var out plant.LegSpec
 	parts, err := splitSpec(spec, 3, legForm)
 	if err != nil {
 		return out, err
 	}
-	if out.grpId, err = parseIdField(parts[0], spec, legForm); err != nil {
+	if out.GrpId, err = parseIdField(parts[0], spec, legForm); err != nil {
 		return out, err
 	}
-	if out.legId, err = parseIdField(parts[1], spec, legForm); err != nil {
+	if out.LegId, err = parseIdField(parts[1], spec, legForm); err != nil {
 		return out, err
 	}
-	if out.legIdx, err = parseU32Field(parts[2], spec, legForm); err != nil {
+	if out.LegIdx, err = parseU32Field(parts[2], spec, legForm); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -475,30 +461,23 @@ func parseLegSpec(spec string) (legSpec, error) {
 
 const sideForm = "leg:side:dn_id:slot"
 
-// sideSpec is one `--side leg:side:dn_id:slot` of put-sp.
-type sideSpec struct {
-	legId  uint64
-	sideId uint64
-	dnId   uint64
-	slot   uint32
-}
-
-func parseSideSpec(spec string) (sideSpec, error) {
-	var out sideSpec
+// parseSideSpec reads one `--side leg:side:dn_id:slot` of put-sp.
+func parseSideSpec(spec string) (plant.SideSpec, error) {
+	var out plant.SideSpec
 	parts, err := splitSpec(spec, 4, sideForm)
 	if err != nil {
 		return out, err
 	}
-	if out.legId, err = parseIdField(parts[0], spec, sideForm); err != nil {
+	if out.LegId, err = parseIdField(parts[0], spec, sideForm); err != nil {
 		return out, err
 	}
-	if out.sideId, err = parseIdField(parts[1], spec, sideForm); err != nil {
+	if out.SideId, err = parseIdField(parts[1], spec, sideForm); err != nil {
 		return out, err
 	}
-	if out.dnId, err = parseIdField(parts[2], spec, sideForm); err != nil {
+	if out.DnId, err = parseIdField(parts[2], spec, sideForm); err != nil {
 		return out, err
 	}
-	if out.slot, err = parseU32Field(parts[3], spec, sideForm); err != nil {
+	if out.Slot, err = parseU32Field(parts[3], spec, sideForm); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -506,31 +485,25 @@ func parseSideSpec(spec string) (sideSpec, error) {
 
 const migrForm = "name:id:src_side:dst_side"
 
-// migrSpec is the `--migr name:id:src_side:dst_side` of put-migr.
-type migrSpec struct {
-	name    string
-	migrId  uint64
-	srcSide uint64
-	dstSide uint64
-}
-
-func parseMigrSpec(spec string) (migrSpec, error) {
-	var out migrSpec
+// parseMigrSpec reads the `--migr name:id:src_side:dst_side` of put-migr into
+// the four members of the library's spec it names.
+func parseMigrSpec(spec string) (plant.MigrSpec, error) {
+	var out plant.MigrSpec
 	parts, err := splitSpec(spec, 4, migrForm)
 	if err != nil {
 		return out, err
 	}
-	out.name = strings.TrimSpace(parts[0])
-	if out.name == "" {
+	out.Name = strings.TrimSpace(parts[0])
+	if out.Name == "" {
 		return out, fmt.Errorf("%q: the migration name is empty", spec)
 	}
-	if out.migrId, err = parseIdField(parts[1], spec, migrForm); err != nil {
+	if out.Id, err = parseIdField(parts[1], spec, migrForm); err != nil {
 		return out, err
 	}
-	if out.srcSide, err = parseIdField(parts[2], spec, migrForm); err != nil {
+	if out.SrcSide, err = parseIdField(parts[2], spec, migrForm); err != nil {
 		return out, err
 	}
-	if out.dstSide, err = parseIdField(parts[3], spec, migrForm); err != nil {
+	if out.DstSide, err = parseIdField(parts[3], spec, migrForm); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -538,26 +511,20 @@ func parseMigrSpec(spec string) (migrSpec, error) {
 
 const nsForm = "id:idx:td_id"
 
-// nsSpec is one `--ns id:idx:td_id` of put-ss.
-type nsSpec struct {
-	nsId  uint64
-	nsIdx uint32
-	tdId  uint64
-}
-
-func parseNsSpec(spec string) (nsSpec, error) {
-	var out nsSpec
+// parseNsSpec reads one `--ns id:idx:td_id` of put-ss.
+func parseNsSpec(spec string) (plant.NsSpec, error) {
+	var out plant.NsSpec
 	parts, err := splitSpec(spec, 3, nsForm)
 	if err != nil {
 		return out, err
 	}
-	if out.nsId, err = parseIdField(parts[0], spec, nsForm); err != nil {
+	if out.NsId, err = parseIdField(parts[0], spec, nsForm); err != nil {
 		return out, err
 	}
-	if out.nsIdx, err = parseU32Field(parts[1], spec, nsForm); err != nil {
+	if out.NsIdx, err = parseU32Field(parts[1], spec, nsForm); err != nil {
 		return out, err
 	}
-	if out.tdId, err = parseIdField(parts[2], spec, nsForm); err != nil {
+	if out.TdId, err = parseIdField(parts[2], spec, nsForm); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -635,7 +602,7 @@ func parseSpLevel(spec string) (pb.SpLevel, error) {
 
 // keyPrefix joins key fields per architecture.md, Key grammar, and ends in the
 // separating space, so that a prefix can never match a longer sibling field.
-// Every full key this driver writes comes from model; model exports no bare
+// Every full key this driver reads comes from model; model exports no bare
 // scan prefix for the kinds `list-keys` walks, so this mirrors the one grammar
 // rule rather than hand-spelling each prefix.
 func keyPrefix(fields ...string) string {
@@ -771,55 +738,6 @@ func messageForKey(key string) (proto.Message, error) {
 	return info.newMsg(), nil
 }
 
-// nvmeTrConfOf builds the transport record of a node from its gRPC endpoint.
-// The fakes never open an NVMe-oF port, so only the shape matters: these
-// fields are copied into the Sides put-sp and put-migr write, the Cntlrs
-// put-sp writes and the CdcEntry put-ss builds; the worker sends a migration
-// source side's as src_nvme_tr_conf.
-func nvmeTrConfOf(addrPort string) *pb.NvmeTrConf {
-	host, port := addrPort, nvmeTrSvcId
-	if idx := strings.LastIndex(addrPort, ":"); idx >= 0 {
-		host, port = addrPort[:idx], addrPort[idx+1:]
-	}
-	// tr_svc_id is the node's own port, not the fixed nvmeTrSvcId: the fake
-	// agents never open an NVMe-oF port, so the value is inert, and every node
-	// of the suite's topology shares one host address (dnv-worker.md,
-	// Integration test plan, Topology). A constant here would make every node's
-	// NvmeTrConf byte-identical, and a CdcEntry's nvme_tr_conf_list would then
-	// be unattributable to a particular CN — which is exactly what
-	// worker_test.sh case D step 3 has to assert ("CdcEntry of ss0 lists cn 2
-	// and cn 3, not cn 1").
-	return &pb.NvmeTrConf{
-		TrType:  nvmeTrType,
-		AdrFam:  nvmeAdrFam,
-		TrAddr:  host,
-		TrSvcId: port,
-	}
-}
-
-// nsIdentity derives a namespace's dev_uuid / dev_nguid from (cluster_id,
-// sp_id, ns_id). The gateway generates a random v4 uuid and 16 random bytes
-// (architecture.md, Subsystems, namespaces: CreateNamespace); a test driver
-// must instead be reproducible, so the same namespace of the same cluster
-// always gets the same identity.
-func nsIdentity(cid uint64, spId uint64, nsId uint64) (string, string) {
-	var raw [16]byte
-	high := fnv.New64a()
-	fmt.Fprintf(high, "dnv-ns-uuid %016x %016x %016x", cid, spId, nsId)
-	binary.BigEndian.PutUint64(raw[0:8], high.Sum64())
-	low := fnv.New64a()
-	fmt.Fprintf(low, "dnv-ns-nguid %016x %016x %016x", cid, spId, nsId)
-	binary.BigEndian.PutUint64(raw[8:16], low.Sum64())
-	// The RFC 4122 v4 shape: version 4, variant 10xx.
-	raw[6] = (raw[6] & 0x0f) | 0x40
-	raw[8] = (raw[8] & 0x3f) | 0x80
-	nguid := hex.EncodeToString(raw[:])
-	uuid := strings.Join([]string{
-		nguid[0:8], nguid[8:12], nguid[12:16], nguid[16:20], nguid[20:32],
-	}, "-")
-	return uuid, nguid
-}
-
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
@@ -873,215 +791,50 @@ func (g *globals) open() (context.Context, func(), *etcdutil.Client) {
 	}, cli
 }
 
-// clusterId reads ClusterConf and derives the cluster_id from it, exactly as
-// the gateway must (architecture.md, cluster_id derivation): cluster_id is not
-// computable from a name alone, so a subcommand that BUILDS a cluster-scoped
-// key comes through here first. Seven subcommands never do: put-cluster (it
-// writes the very ClusterConf this reads), get (it is handed a whole key and
-// needs no id), list-workers (the worker registry is keyed by role and seed,
-// not by cluster), ping, and the three etcd-free ones, constants, geometry and
+// loadCluster reads the --cluster's ClusterConf through plant.LoadCluster,
+// which derives the cluster_id from it exactly as the gateway must
+// (architecture.md, cluster_id derivation): cluster_id is not computable from
+// a name alone, so a subcommand that BUILDS a cluster-scoped key comes
+// through here first. Seven subcommands never do: put-cluster (it writes the
+// very ClusterConf this reads), get (it is handed a whole key and needs no
+// id), list-workers (the worker registry is keyed by role and seed, not by
+// cluster), ping, and the three etcd-free ones, constants, geometry and
 // meta-units.
 // list-keys is the single CONDITIONAL caller: it reads the ClusterConf when it
 // was given a cluster-scoped kind name and a --cluster, and not when it was
 // given a raw `dnv `-prefixed prefix. Every other subcommand reads it
 // unconditionally.
-func (g *globals) clusterId(
+func (g *globals) loadCluster(
 	ctx context.Context,
 	cli *etcdutil.Client,
-) (uint64, *pb.ClusterConf) {
+) plant.Cluster {
 	if g.cluster == "" {
 		die("--cluster is required")
 	}
-	cc := &pb.ClusterConf{}
-	found, err := cli.Get(ctx, model.ClusterConfKey(g.cluster), cc)
+	cl, err := plant.LoadCluster(ctx, cli, g.cluster)
 	if err != nil {
 		die("%v", err)
 	}
-	if !found {
-		die("cluster %q does not exist", g.cluster)
-	}
-	return model.ClusterId(g.cluster, cc.GetCreationEpoch()), cc
+	return cl
 }
 
-// ---------------------------------------------------------------------------
-// Shared lookups
-// ---------------------------------------------------------------------------
-
-// findNodeAddr resolves a dn_id / cn_id to the addr_port its record is keyed
-// by: DnConf and CnConf are keyed by endpoint, several subcommands take an
-// id, so exactly one helper scans the cluster's conf prefix for the record
-// that carries the id.
-func findNodeAddr(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	kind string,
-	id uint64,
-) string {
-	prefix := keyPrefix(common.DnvPrefix, kind, idHex(cid))
-	kvs, _, err := cli.Range(ctx, prefix)
-	if err != nil {
-		die("%v", err)
-	}
-	found := ""
-	for _, kv := range kvs {
-		addrPort := strings.TrimPrefix(kv.Key, prefix)
-		var stored uint64
-		switch kind {
-		case "dn_conf":
-			dn := &pb.DnConf{}
-			if err := cli.Decode(ctx, kv, dn); err != nil {
-				die("%v", err)
-			}
-			stored = dn.GetDnId()
-		case "cn_conf":
-			cn := &pb.CnConf{}
-			if err := cli.Decode(ctx, kv, cn); err != nil {
-				die("%v", err)
-			}
-			stored = cn.GetCnId()
-		default:
-			die("findNodeAddr: unknown kind %q", kind)
-		}
-		if stored != id {
-			continue
-		}
-		if found != "" {
-			die("%s %#x is stored at both %q and %q",
-				kind, id, found, addrPort)
-		}
-		found = addrPort
-	}
-	if found == "" {
-		die("no %s with id %#x under prefix %q", kind, id, prefix)
-	}
-	return found
-}
-
-// spTarget is an SP resolved from a `--sp` value, which may be either the SP
-// NAME (SpConf is name-keyed) or the sp_id (the suite's steps use both, e.g.
-// `set-lwm sp0` and `set-cntlr --sp 1`).
-type spTarget struct {
-	name  string
-	spId  uint64
-	shard uint32
-}
-
-// resolveSp turns a `--sp` value into a target. A value that parses as a
-// number is looked up through the {p} sp_id_to_name reverse key first; a value
-// that does not, or an id with no reverse key, is taken as a name.
+// resolveSp turns a `--sp` value, the SP NAME (SpConf is name-keyed) or the
+// sp_id (the suite's steps use both, e.g. `set-lwm sp0` and
+// `set-cntlr --sp 1`), into the library's reference (plant.ResolveSp).
 func resolveSp(
 	ctx context.Context,
 	cli *etcdutil.Client,
-	cid uint64,
+	cl plant.Cluster,
 	spec string,
-) spTarget {
+) plant.SpRef {
 	if strings.TrimSpace(spec) == "" {
 		die("--sp is required")
 	}
-	name := strings.TrimSpace(spec)
-	if id, err := parseId(name); err == nil {
-		reverse := &pb.SpName{}
-		found, err := cli.Get(ctx, model.SpNameKey(cid, id), reverse)
-		if err != nil {
-			die("%v", err)
-		}
-		if found {
-			name = reverse.GetSpName()
-		}
-	}
-	conf := &pb.SpConf{}
-	found, err := cli.Get(ctx, model.SpConfKey(cid, name), conf)
+	target, err := plant.ResolveSp(ctx, cli, cl, spec)
 	if err != nil {
 		die("%v", err)
 	}
-	if !found {
-		die("no storage pool %q in cluster %s", spec, idHex(cid))
-	}
-	return spTarget{
-		name:  name,
-		spId:  conf.GetSpId(),
-		shard: conf.GetShardCode(),
-	}
-}
-
-// getSpConf re-reads an SP inside an STM and re-checks its identity, the way
-// model does for the worker's ops (AR3): the SpConf is name-keyed, so an SP
-// deleted and re-created under the same name between the resolve and this
-// transaction is a different SP and none of the ids the caller carries mean
-// anything in it.
-func getSpConf(
-	s etcdutil.STM,
-	cid uint64,
-	target spTarget,
-) (*pb.SpConf, error) {
-	conf := &pb.SpConf{}
-	if !s.Get(model.SpConfKey(cid, target.name), conf) {
-		return nil, fmt.Errorf("storage pool %q not found", target.name)
-	}
-	if conf.GetSpId() != target.spId {
-		return nil, fmt.Errorf(
-			"storage pool %q changed its id: %#x, want %#x",
-			target.name, conf.GetSpId(), target.spId,
-		)
-	}
-	return conf, nil
-}
-
-// bumpSpRev rewrites the SP's revision key with revision + 1 IN PLACE
-// (architecture.md, Revision keys and the sync fan-out): the key is id-based
-// and therefore stable, so a watcher must see one put, not a delete followed
-// by a put. Every SpConf sub-object mutation calls it exactly once. model has
-// the same body, unexported.
-func bumpSpRev(
-	s etcdutil.STM,
-	cid uint64,
-	conf *pb.SpConf,
-) (uint64, error) {
-	key := model.SpRevKey(conf.GetShardCode(), cid, conf.GetSpId())
-	rev := &pb.SpRev{}
-	if !s.Get(key, rev) {
-		return 0, fmt.Errorf("sp rev key %q not found", key)
-	}
-	rev.Revision++
-	s.Put(key, rev)
-	return rev.Revision, nil
-}
-
-// bumpDnRev bumps one DN's revision key in place
-// (architecture.md, Revision keys and the sync fan-out).
-func bumpDnRev(s etcdutil.STM, cid uint64, dn *pb.DnConf) (uint64, error) {
-	key := model.DnRevKey(dn.GetShardCode(), cid, dn.GetDnId())
-	rev := &pb.DnRev{}
-	if !s.Get(key, rev) {
-		return 0, fmt.Errorf("dn rev key %q not found", key)
-	}
-	rev.Revision++
-	s.Put(key, rev)
-	return rev.Revision, nil
-}
-
-// bumpCnRev bumps one CN's revision key in place
-// (architecture.md, Revision keys and the sync fan-out).
-func bumpCnRev(s etcdutil.STM, cid uint64, cn *pb.CnConf) (uint64, error) {
-	key := model.CnRevKey(cn.GetShardCode(), cid, cn.GetCnId())
-	rev := &pb.CnRev{}
-	if !s.Get(key, rev) {
-		return 0, fmt.Errorf("cn rev key %q not found", key)
-	}
-	rev.Revision++
-	s.Put(key, rev)
-	return rev.Revision, nil
-}
-
-// cloneBdevConf copies a BdevConf for mutation. proto.Clone of a nil message
-// returns a read-only zero, so a cluster written without a bdev_conf needs a
-// fresh one.
-func cloneBdevConf(src *pb.BdevConf) *pb.BdevConf {
-	if src == nil {
-		return &pb.BdevConf{}
-	}
-	return proto.Clone(src).(*pb.BdevConf)
+	return target
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,6 +957,14 @@ func kindArg(fs *flag.FlagSet, kind string, want ...string) string {
 	return ""
 }
 
+// requireId dies unless an id flag was given and is not 0.
+func requireId(id hexUint) uint64 {
+	if uint64(id) == 0 {
+		die("--id is required and must not be 0")
+	}
+	return uint64(id)
+}
+
 // ---------------------------------------------------------------------------
 // ping
 // ---------------------------------------------------------------------------
@@ -1302,8 +1063,8 @@ func cmdConstants(g *globals, args []string) {
 // and data_blocks a group of --ext-cnt extents gets — by calling
 // model.GroupBlocks, the one implementation of that formula (MD6). The
 // arithmetic is deliberately NOT repeated here: put-sp computes a group's
-// geometry with the same call on a BdevConf assembled the same way, so the two
-// cannot disagree.
+// geometry with the same call on a BdevConf assembled the same way, with the
+// redund_conf of plant.RedundConf, so the two cannot disagree.
 //
 // It prints the length to zero (architecture.md, Side provisioning protocol)
 // of a side of that group too, by calling model.SideZeroBytes, which the sp
@@ -1340,21 +1101,7 @@ func cmdGeometry(g *globals, args []string) {
 	}
 	bdev := &pb.BdevConf{
 		DmPoolConf: &pb.DmPoolConf{DataBlockSize: *blockSize},
-	}
-	if *raid1 {
-		bdev.RedundConf = &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundMdRaid1{
-				RedundMdRaid1: &pb.RedundMdRaid1{
-					BitmapChunkBlockCnt: *chunkBlocks,
-				},
-			},
-		}
-	} else {
-		bdev.RedundConf = &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundNone{
-				RedundNone: &pb.RedundNone{},
-			},
-		}
+		RedundConf: plant.RedundConf(*raid1, *chunkBlocks),
 	}
 	bdev = model.ResolveBdevConf(bdev)
 	metaBlocks, dataBlocks, err := model.GroupBlocks(*extCnt, *extentSize, bdev)
@@ -1435,15 +1182,10 @@ func metaUnitsOf(copyBytes uint64, blockSize uint64) (uint64, error) {
 // put-cluster
 // ---------------------------------------------------------------------------
 
-// cmdPutCluster implements CreateCluster (architecture.md, Clusters and
-// cluster_id derivation): it stamps creation_epoch = time.Now().UnixNano()
-// like the gateway, derives the cluster_id from the name and that epoch, and
-// writes the three zeroed globals alongside the ClusterConf (architecture.md,
-// Globals: id allocation + shard buckets).
-//
-// It refuses to overwrite an existing cluster: creation_epoch is immutable, and
-// rewriting it would orphan every other key of the cluster (architecture.md,
-// cluster_id derivation).
+// cmdPutCluster implements CreateCluster through plant.PutCluster
+// (architecture.md, Clusters and cluster_id derivation). Its flags default to
+// the extent size, block size, bitmap chunk and low-water mark a suite's
+// cluster has unless the case says otherwise, and it prints them as given.
 func cmdPutCluster(g *globals, args []string) {
 	fs := newFlagSet("put-cluster", g)
 	name := fs.String("name", "", "cluster name (defaults to --cluster)")
@@ -1476,84 +1218,27 @@ func cmdPutCluster(g *globals, args []string) {
 	ctx, done, cli := g.open()
 	defer done()
 
-	// The epoch is stamped once, outside the transaction: a retried attempt
-	// must derive the same cluster_id.
-	epoch := uint64(time.Now().UnixNano())
-	cid := model.ClusterId(clusterName, epoch)
-	cc := &pb.ClusterConf{
-		CreationEpoch: epoch,
-		BdevConf: &pb.BdevConf{
-			DmPoolConf: &pb.DmPoolConf{
-				DataBlockSize:   *blockSize,
-				LowWaterMarkPct: uint32(*lwm),
-			},
-			// put-sp inherits this bdev_conf and replaces the redund kind
-			// with the one its --group flags name; the chunk count rides
-			// along, which is how a case pins the group geometry
-			// (architecture.md, Group on-leg layout: meta region, data
-			// region, health block).
-			RedundConf: &pb.RedundConf{
-				RedunKind: &pb.RedundConf_RedundMdRaid1{
-					RedundMdRaid1: &pb.RedundMdRaid1{
-						BitmapChunkBlockCnt: *chunkBlocks,
-					},
-				},
-			},
-		},
-		DnBinConf: &pb.DnBinConf{ExtentSize: *extentSize},
-		AllocConf: &pb.AllocConf{
-			DnBatchSize: uint32(*dnBatch),
-			CnBatchSize: uint32(*cnBatch),
-		},
-		HealthCheckConf: &pb.HealthCheckConf{
-			DnInterval:    uint32(*dnInterval),
-			CnInterval:    uint32(*cnInterval),
-			SideInterval:  uint32(*sideInterval),
-			CntlrInterval: uint32(*cntlrInterval),
-		},
-	}
-	// workerctl plays the gateway for this suite, so it must store what
-	// CreateCluster stores: a FULLY RESOLVED conf (architecture.md, Common
-	// validation). Every member left at its flag's zero — the batch sizes, the
-	// four intervals, the bin shift ladder, dm_raid0_conf.stripe_size —
-	// becomes concrete here, because the worker now validates the stored conf
-	// and refuses to drive an object whose geometry nobody chose. Writing the
-	// raw literal would make every case in the suite fail at the first round.
-	cc = model.ResolveClusterConf(cc)
-	newGlobal := func() ([]uint32, uint64) {
-		return make([]uint32, common.ShardBucketSize), 1
-	}
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		key := model.ClusterConfKey(clusterName)
-		if s.Get(key, &pb.ClusterConf{}) {
-			return fmt.Errorf(
-				"cluster %q already exists; creation_epoch is immutable "+
-					"(architecture.md, cluster_id derivation)", clusterName,
-			)
-		}
-		s.Put(key, cc)
-		bucket, nextId := newGlobal()
-		s.Put(model.DnGlobalKey(cid), &pb.DnGlobal{
-			NextId: nextId, ShardBucket: bucket,
-		})
-		bucket, nextId = newGlobal()
-		s.Put(model.CnGlobalKey(cid), &pb.CnGlobal{
-			NextId: nextId, ShardBucket: bucket,
-		})
-		bucket, nextId = newGlobal()
-		s.Put(model.SpGlobalKey(cid), &pb.SpGlobal{
-			NextId: nextId, ShardBucket: bucket,
-		})
-		return nil
+	cl, err := plant.PutCluster(ctx, cli, plant.ClusterSpec{
+		Name:          clusterName,
+		DnInterval:    uint32(*dnInterval),
+		CnInterval:    uint32(*cnInterval),
+		SideInterval:  uint32(*sideInterval),
+		CntlrInterval: uint32(*cntlrInterval),
+		ExtentSize:    *extentSize,
+		Lwm:           uint32(*lwm),
+		BlockSize:     *blockSize,
+		ChunkBlocks:   *chunkBlocks,
+		DnBatch:       uint32(*dnBatch),
+		CnBatch:       uint32(*cnBatch),
 	})
 	if err != nil {
 		die("put-cluster: %v", err)
 	}
 	emit(map[string]any{
 		"cluster_name":       clusterName,
-		"cluster_id":         idHex(cid),
-		"cluster_id_0x":      fmt.Sprintf("%#016x", cid),
-		"creation_epoch":     epoch,
+		"cluster_id":         idHex(cl.Id),
+		"cluster_id_0x":      fmt.Sprintf("%#016x", cl.Id),
+		"creation_epoch":     cl.Conf.GetCreationEpoch(),
 		"extent_size":        *extentSize,
 		"block_size":         *blockSize,
 		"chunk_blocks":       *chunkBlocks,
@@ -1566,10 +1251,7 @@ func cmdPutCluster(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdPutDn implements CreateDiskNode with an explicit id, shard and budget
-// (architecture.md, Disk nodes): ONE STM writes DnConf, DnRev (revision =
-// current + 1, or 1 when absent) and the DnCapacity key through
-// model.MaintainDnCapacity, so the presence rule of architecture.md, Capacity
-// index keys, holds the moment the transaction commits.
+// through plant.PutDn (architecture.md, Disk nodes).
 func cmdPutDn(g *globals, args []string) {
 	fs := newFlagSet("put-dn", g)
 	var id hexUint
@@ -1586,89 +1268,46 @@ func cmdPutDn(g *globals, args []string) {
 	fs.Var(&sides, "side", "a side pointer, "+sidePtrForm+" (repeatable)")
 	fs.Parse(args)
 
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
+	spec := plant.DnSpec{
+		Id:       requireId(id),
+		Shard:    uint32(shard),
+		Addr:     *addr,
+		Location: *location,
+		TotalExt: *totalExt,
+		FreeExt:  *freeExt,
+		Disabled: *disabled,
 	}
-	if *addr == "" {
+	if spec.Addr == "" {
 		die("--addr is required")
 	}
-	if *totalExt == 0 {
-		*totalExt = *freeExt
-	}
-	shardCode := uint32(shard)
-	ptrList := make([]*pb.SidePointer, 0, len(sides))
-	for _, spec := range sides {
-		ptr, err := parseSidePointer(spec)
+	for _, text := range sides {
+		ptr, err := parseSidePointer(text)
 		if err != nil {
 			die("--side: %v", err)
 		}
-		ptrList = append(ptrList, ptr)
+		spec.Sides = append(spec.Sides, ptr)
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, cc := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
-	newDn := &pb.DnConf{
-		DnId:        uint64(id),
-		ShardCode:   shardCode,
-		Disabled:    *disabled,
-		ErrEpoch:    0,
-		NvmeTrConf:  nvmeTrConfOf(*addr),
-		Location:    *location,
-		SidePtrList: ptrList,
-		TotalExtCnt: *totalExt,
-		FreeExtCnt:  *freeExt,
-	}
-	revision := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		confKey := model.DnConfKey(cid, *addr)
-		old := &pb.DnConf{}
-		var oldDn *pb.DnConf
-		if s.Get(confKey, old) {
-			oldDn = old
-		}
-		revKey := model.DnRevKey(shardCode, cid, uint64(id))
-		rev := &pb.DnRev{}
-		created := !s.Get(revKey, rev)
-		revision = rev.GetRevision() + 1
-		s.Put(confKey, newDn)
-		model.MaintainDnCapacity(s, cid, *addr, cc, oldDn, newDn)
-		s.Put(revKey, &pb.DnRev{AddrPort: *addr, Revision: revision})
-		if created {
-			// Creating a node consumes an id and one bucket slot
-			// (architecture.md, Globals: id allocation + shard buckets), so
-			// a worker reaction that allocates later never reuses this id.
-			globalKey := model.DnGlobalKey(cid)
-			global := &pb.DnGlobal{}
-			if s.Get(globalKey, global) {
-				if global.NextId <= uint64(id) {
-					global.NextId = uint64(id) + 1
-				}
-				if int(shardCode) < len(global.ShardBucket) {
-					global.ShardBucket[shardCode]++
-				}
-				s.Put(globalKey, global)
-			}
-		}
-		return nil
-	})
+	dn, err := plant.PutDn(ctx, cli, cl, spec)
 	if err != nil {
 		die("put-dn: %v", err)
 	}
 	emit(map[string]any{
-		"dn_id":        idHex(uint64(id)),
-		"shard_code":   fmt.Sprintf(common.ShardCodeFmt, shardCode),
-		"addr_port":    *addr,
-		"revision":     revision,
-		"free_ext_cnt": *freeExt,
-		"allocatable":  model.DnAllocatable(newDn, cc.GetDnBinConf()),
+		"dn_id":        idHex(dn.Conf.GetDnId()),
+		"shard_code":   shardHex(dn.Conf.GetShardCode()),
+		"addr_port":    dn.Addr,
+		"revision":     dn.Revision,
+		"free_ext_cnt": dn.Conf.GetFreeExtCnt(),
+		"allocatable":  model.DnAllocatable(dn.Conf, cl.Conf.GetDnBinConf()),
 	})
 }
 
-// cmdPutCn is cmdPutDn's mirror for a controller node (architecture.md,
-// Controller nodes): CnConf, CnRev and the CnCapacity key through
-// model.MaintainCnCapacity.
+// cmdPutCn is cmdPutDn's mirror for a controller node through plant.PutCn
+// (architecture.md, Controller nodes).
 func cmdPutCn(g *globals, args []string) {
 	fs := newFlagSet("put-cn", g)
 	var id hexUint
@@ -1685,80 +1324,41 @@ func cmdPutCn(g *globals, args []string) {
 	fs.Var(&cntlrs, "cntlr", "a cntlr pointer, "+cntlrPtrForm+" (repeatable)")
 	fs.Parse(args)
 
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
+	spec := plant.CnSpec{
+		Id:       requireId(id),
+		Shard:    uint32(shard),
+		Addr:     *addr,
+		Location: *location,
+		TotalExt: *totalExt,
+		FreeExt:  *freeExt,
+		Disabled: *disabled,
 	}
-	if *addr == "" {
+	if spec.Addr == "" {
 		die("--addr is required")
 	}
-	if *totalExt == 0 {
-		*totalExt = *freeExt
-	}
-	shardCode := uint32(shard)
-	ptrList := make([]*pb.CntlrPointer, 0, len(cntlrs))
-	for _, spec := range cntlrs {
-		ptr, err := parseCntlrPointer(spec)
+	for _, text := range cntlrs {
+		ptr, err := parseCntlrPointer(text)
 		if err != nil {
 			die("--cntlr: %v", err)
 		}
-		ptrList = append(ptrList, ptr)
+		spec.Cntlrs = append(spec.Cntlrs, ptr)
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
-	newCn := &pb.CnConf{
-		CnId:         uint64(id),
-		ShardCode:    shardCode,
-		Disabled:     *disabled,
-		ErrEpoch:     0,
-		NvmeTrConf:   nvmeTrConfOf(*addr),
-		Location:     *location,
-		CntlrPtrList: ptrList,
-		TotalExtCnt:  *totalExt,
-		FreeExtCnt:   *freeExt,
-	}
-	revision := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		confKey := model.CnConfKey(cid, *addr)
-		old := &pb.CnConf{}
-		var oldCn *pb.CnConf
-		if s.Get(confKey, old) {
-			oldCn = old
-		}
-		revKey := model.CnRevKey(shardCode, cid, uint64(id))
-		rev := &pb.CnRev{}
-		created := !s.Get(revKey, rev)
-		revision = rev.GetRevision() + 1
-		s.Put(confKey, newCn)
-		model.MaintainCnCapacity(s, cid, *addr, oldCn, newCn)
-		s.Put(revKey, &pb.CnRev{AddrPort: *addr, Revision: revision})
-		if created {
-			globalKey := model.CnGlobalKey(cid)
-			global := &pb.CnGlobal{}
-			if s.Get(globalKey, global) {
-				if global.NextId <= uint64(id) {
-					global.NextId = uint64(id) + 1
-				}
-				if int(shardCode) < len(global.ShardBucket) {
-					global.ShardBucket[shardCode]++
-				}
-				s.Put(globalKey, global)
-			}
-		}
-		return nil
-	})
+	cn, err := plant.PutCn(ctx, cli, cl, spec)
 	if err != nil {
 		die("put-cn: %v", err)
 	}
 	emit(map[string]any{
-		"cn_id":        idHex(uint64(id)),
-		"shard_code":   fmt.Sprintf(common.ShardCodeFmt, shardCode),
-		"addr_port":    *addr,
-		"revision":     revision,
-		"free_ext_cnt": *freeExt,
-		"allocatable":  model.CnAllocatable(newCn),
+		"cn_id":        idHex(cn.Conf.GetCnId()),
+		"shard_code":   shardHex(cn.Conf.GetShardCode()),
+		"addr_port":    cn.Addr,
+		"revision":     cn.Revision,
+		"free_ext_cnt": cn.Conf.GetFreeExtCnt(),
+		"allocatable":  model.CnAllocatable(cn.Conf),
 	})
 }
 
@@ -1766,10 +1366,8 @@ func cmdPutCn(g *globals, args []string) {
 // bump-rev / move-dn / del-rev
 // ---------------------------------------------------------------------------
 
-// cmdBumpRev raises one revision key IN PLACE (architecture.md, Revision keys
-// and the sync fan-out): the key is id-based and therefore stable, so a
-// watcher sees one put — never a delete followed by a put, which would read as
-// "node removed, then a different node added".
+// cmdBumpRev raises one revision key in place through plant.BumpRev
+// (architecture.md, Revision keys and the sync fan-out).
 func cmdBumpRev(g *globals, args []string) {
 	fs := newFlagSet("bump-rev", g)
 	kind, rest := splitKind(args)
@@ -1779,70 +1377,28 @@ func cmdBumpRev(g *globals, args []string) {
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
 	fs.Parse(rest)
 	kind = kindArg(fs, kind, "dn", "cn", "sp")
-
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
-	shardCode := uint32(shard)
+	objId := requireId(id)
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
-	revision := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		switch kind {
-		case "dn":
-			key := model.DnRevKey(shardCode, cid, uint64(id))
-			rev := &pb.DnRev{}
-			if !s.Get(key, rev) {
-				return fmt.Errorf("%q not found", key)
-			}
-			rev.Revision++
-			revision = rev.Revision
-			s.Put(key, rev)
-		case "cn":
-			key := model.CnRevKey(shardCode, cid, uint64(id))
-			rev := &pb.CnRev{}
-			if !s.Get(key, rev) {
-				return fmt.Errorf("%q not found", key)
-			}
-			rev.Revision++
-			revision = rev.Revision
-			s.Put(key, rev)
-		case "sp":
-			key := model.SpRevKey(shardCode, cid, uint64(id))
-			rev := &pb.SpRev{}
-			if !s.Get(key, rev) {
-				return fmt.Errorf("%q not found", key)
-			}
-			rev.Revision++
-			revision = rev.Revision
-			s.Put(key, rev)
-		}
-		return nil
-	})
+	revision, err := plant.BumpRev(
+		ctx, cli, cl, plant.RevKind(kind), uint32(shard), objId)
 	if err != nil {
 		die("bump-rev: %v", err)
 	}
 	emit(map[string]any{
 		"kind":       kind,
-		"id":         idHex(uint64(id)),
-		"shard_code": fmt.Sprintf(common.ShardCodeFmt, shardCode),
+		"id":         idHex(objId),
+		"shard_code": shardHex(uint32(shard)),
 		"revision":   revision,
 	})
 }
 
 // cmdMoveDn is the moved-node case of architecture.md, Revision keys and the
-// sync fan-out: one STM rewrites DnRev.addr_port and bumps its revision, and
-// moves DnConf and the DnCapacity key to the new endpoint. The rev key itself
-// is rewritten, never deleted and re-created, so the watching worker sees a
-// single put that says "the same DN now answers somewhere else".
-//
-// It rewrites nothing else: Sides already placed on the DN keep the old
-// addr_port copy their Slice holds, because the rev keys have no rename path
-// and no RPC changes a node's endpoint. The suite only moves a DN that
-// carries no side (worker_test.sh case A step 2, before its SP exists).
+// sync fan-out, through plant.MoveDn. The suite only moves a DN that carries
+// no side (worker_test.sh case A step 2, before its SP exists).
 func cmdMoveDn(g *globals, args []string) {
 	fs := newFlagSet("move-dn", g)
 	var id hexUint
@@ -1852,71 +1408,31 @@ func cmdMoveDn(g *globals, args []string) {
 	addr := fs.String("addr", "", "the NEW ip:port (required)")
 	fs.Parse(args)
 
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	dnId := requireId(id)
 	if *addr == "" {
 		die("--addr is required")
 	}
-	shardCode := uint32(shard)
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, cc := g.clusterId(ctx, cli)
-	oldAddr := findNodeAddr(ctx, cli, cid, "dn_conf", uint64(id))
-	if oldAddr == *addr {
-		die("dn %#x is already at %q", uint64(id), *addr)
-	}
+	cl := g.loadCluster(ctx, cli)
 
-	revision := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		oldKey := model.DnConfKey(cid, oldAddr)
-		oldDn := &pb.DnConf{}
-		if !s.Get(oldKey, oldDn) {
-			return fmt.Errorf("%q not found", oldKey)
-		}
-		if oldDn.GetDnId() != uint64(id) {
-			return fmt.Errorf(
-				"%q holds dn %#x, want %#x",
-				oldKey, oldDn.GetDnId(), uint64(id),
-			)
-		}
-		newKey := model.DnConfKey(cid, *addr)
-		if s.Get(newKey, &pb.DnConf{}) {
-			return fmt.Errorf("%q already exists", newKey)
-		}
-		newDn := proto.Clone(oldDn).(*pb.DnConf)
-		newDn.NvmeTrConf = nvmeTrConfOf(*addr)
-		s.Del(oldKey)
-		model.MaintainDnCapacity(s, cid, oldAddr, cc, oldDn, nil)
-		s.Put(newKey, newDn)
-		model.MaintainDnCapacity(s, cid, *addr, cc, nil, newDn)
-		revKey := model.DnRevKey(shardCode, cid, uint64(id))
-		rev := &pb.DnRev{}
-		if !s.Get(revKey, rev) {
-			return fmt.Errorf("%q not found", revKey)
-		}
-		rev.AddrPort = *addr
-		rev.Revision++
-		revision = rev.Revision
-		s.Put(revKey, rev)
-		return nil
-	})
+	oldAddr, revision, err := plant.MoveDn(
+		ctx, cli, cl, dnId, uint32(shard), *addr)
 	if err != nil {
 		die("move-dn: %v", err)
 	}
 	emit(map[string]any{
-		"dn_id":         idHex(uint64(id)),
-		"shard_code":    fmt.Sprintf(common.ShardCodeFmt, shardCode),
+		"dn_id":         idHex(dnId),
+		"shard_code":    shardHex(uint32(shard)),
 		"old_addr_port": oldAddr,
 		"addr_port":     *addr,
 		"revision":      revision,
 	})
 }
 
-// cmdDelRev deletes one revision key and nothing else — the "the object is
-// gone as far as the watching worker is concerned" case of SW3, which
-// worker_test.sh case A step 5 stages.
+// cmdDelRev deletes one revision key and nothing else through plant.DelRev —
+// the case of SW3 that worker_test.sh case A step 5 stages.
 func cmdDelRev(g *globals, args []string) {
 	fs := newFlagSet("del-rev", g)
 	kind, rest := splitKind(args)
@@ -1926,52 +1442,21 @@ func cmdDelRev(g *globals, args []string) {
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
 	fs.Parse(rest)
 	kind = kindArg(fs, kind, "dn", "cn", "sp")
-
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
-	shardCode := uint32(shard)
+	objId := requireId(id)
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
-	key := ""
-	revision := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		switch kind {
-		case "dn":
-			key = model.DnRevKey(shardCode, cid, uint64(id))
-			rev := &pb.DnRev{}
-			if !s.Get(key, rev) {
-				return fmt.Errorf("%q not found", key)
-			}
-			revision = rev.GetRevision()
-		case "cn":
-			key = model.CnRevKey(shardCode, cid, uint64(id))
-			rev := &pb.CnRev{}
-			if !s.Get(key, rev) {
-				return fmt.Errorf("%q not found", key)
-			}
-			revision = rev.GetRevision()
-		case "sp":
-			key = model.SpRevKey(shardCode, cid, uint64(id))
-			rev := &pb.SpRev{}
-			if !s.Get(key, rev) {
-				return fmt.Errorf("%q not found", key)
-			}
-			revision = rev.GetRevision()
-		}
-		s.Del(key)
-		return nil
-	})
+	key, revision, err := plant.DelRev(
+		ctx, cli, cl, plant.RevKind(kind), uint32(shard), objId)
 	if err != nil {
 		die("del-rev: %v", err)
 	}
 	emit(map[string]any{
 		"kind":         kind,
-		"id":           idHex(uint64(id)),
-		"shard_code":   fmt.Sprintf(common.ShardCodeFmt, shardCode),
+		"id":           idHex(objId),
+		"shard_code":   shardHex(uint32(shard)),
 		"key":          key,
 		"old_revision": revision,
 	})
@@ -1981,274 +1466,10 @@ func cmdDelRev(g *globals, args []string) {
 // put-sp
 // ---------------------------------------------------------------------------
 
-// spPlan is the validated tree the --cntlr/--slice/--group/--leg/--side flags
-// describe. The flags name their parent by id, so the tree is built by joining
-// on those ids; every dangling reference and every duplicate id is a hard
-// error, because a mistyped placement would otherwise become an SP no worker
-// can drive.
-type spPlan struct {
-	cntlrs []cntlrSpec
-	slices []sliceSpec
-	groups []groupSpec
-	legs   []legSpec
-	sides  []sideSpec
-	// raid1 is the one redundancy kind every group named.
-	raid1 bool
-	// grpOfLeg and extOfLeg answer "which group owns this leg" and "how many
-	// extents does a side of this leg cost".
-	grpOfLeg map[uint64]uint64
-	extOfLeg map[uint64]uint64
-	// footprint is Σ ext_cnt over ALL groups — what one cntlr's CN reserves
-	// for the SP (architecture.md, Storage pools and Cntlrs).
-	footprint uint64
-	// nextId is one past the largest id the plan uses, so that a worker
-	// reaction allocates fresh ids ABOVE the script's.
-	nextId uint64
-}
-
-// buildSpPlan parses and validates the placement flags of put-sp.
-func buildSpPlan(
-	cntlrSpecs, sliceSpecs, groupSpecs, legSpecs, sideSpecs []string,
-	slots []uint32,
-) (*spPlan, error) {
-	plan := &spPlan{
-		grpOfLeg: make(map[uint64]uint64),
-		extOfLeg: make(map[uint64]uint64),
-	}
-	// Every sub-object id must be distinct WITHIN ITS KIND, and next_id ends
-	// up past all of them (architecture.md, Globals: id allocation + shard
-	// buckets). Uniqueness is not enforced ACROSS kinds even though a real
-	// gateway draws all of them from the one SpConf.next_id counter:
-	// worker_test.sh labels the objects of one SP per kind
-	// (slice `1`, group `G1`, leg `L1`, side `S1`), nothing in model or
-	// worker ever looks an id up without knowing its kind, and refusing the
-	// numbering the cases are written in would buy nothing.
-	ids := make(map[string]map[uint64]struct{})
-	claim := func(id uint64, what string) error {
-		if id == 0 {
-			return fmt.Errorf("%s id 0 is never valid", what)
-		}
-		if ids[what] == nil {
-			ids[what] = make(map[uint64]struct{})
-		}
-		if _, ok := ids[what][id]; ok {
-			return fmt.Errorf("%s id %#x is used twice", what, id)
-		}
-		ids[what][id] = struct{}{}
-		if plan.nextId <= id {
-			plan.nextId = id + 1
-		}
-		return nil
-	}
-	slotSet := make(map[uint32]struct{}, len(slots))
-	for _, slot := range slots {
-		slotSet[slot] = struct{}{}
-	}
-
-	primaryCnt := 0
-	usedSlots := make(map[uint32]uint64)
-	usedCns := make(map[uint64]uint64)
-	for _, spec := range cntlrSpecs {
-		parsed, err := parseCntlrSpec(spec)
-		if err != nil {
-			return nil, fmt.Errorf("--cntlr: %w", err)
-		}
-		if err := claim(parsed.cntlrId, "cntlr"); err != nil {
-			return nil, err
-		}
-		if _, ok := slotSet[parsed.slot]; !ok {
-			return nil, fmt.Errorf(
-				"--cntlr %q: cntlid slot %d is not in --slots",
-				spec, parsed.slot,
-			)
-		}
-		if prev, ok := usedSlots[parsed.slot]; ok {
-			return nil, fmt.Errorf(
-				"--cntlr %q: cntlid slot %d already taken by cntlr %#x "+
-					"(architecture.md, cntlid slots, wants them distinct)",
-				spec, parsed.slot, prev,
-			)
-		}
-		usedSlots[parsed.slot] = parsed.cntlrId
-		if prev, ok := usedCns[parsed.cnId]; ok {
-			return nil, fmt.Errorf(
-				"--cntlr %q: cn %#x already hosts a cntlr of this sp, "+
-					"%#x (architecture.md, Finding CN candidates)",
-				spec, parsed.cnId, prev,
-			)
-		}
-		usedCns[parsed.cnId] = parsed.cntlrId
-		if parsed.primary {
-			primaryCnt++
-		}
-		plan.cntlrs = append(plan.cntlrs, parsed)
-	}
-	if len(plan.cntlrs) == 0 {
-		return nil, fmt.Errorf("at least one --cntlr is required")
-	}
-	if len(slots) < len(plan.cntlrs) {
-		return nil, fmt.Errorf(
-			"--slots has %d entries, fewer than the %d cntlrs",
-			len(slots), len(plan.cntlrs),
-		)
-	}
-	if primaryCnt != 1 {
-		return nil, fmt.Errorf(
-			"exactly one --cntlr must be primary, got %d", primaryCnt,
-		)
-	}
-
-	sliceIdx := make(map[uint32]uint64)
-	knownSlices := make(map[uint64]struct{})
-	for _, spec := range sliceSpecs {
-		parsed, err := parseSliceSpec(spec)
-		if err != nil {
-			return nil, fmt.Errorf("--slice: %w", err)
-		}
-		if err := claim(parsed.sliceId, "slice"); err != nil {
-			return nil, err
-		}
-		if prev, ok := sliceIdx[parsed.sliceIdx]; ok {
-			return nil, fmt.Errorf(
-				"--slice %q: slice_idx %d already used by slice %#x",
-				spec, parsed.sliceIdx, prev,
-			)
-		}
-		sliceIdx[parsed.sliceIdx] = parsed.sliceId
-		knownSlices[parsed.sliceId] = struct{}{}
-		plan.slices = append(plan.slices, parsed)
-	}
-	if len(plan.slices) == 0 {
-		return nil, fmt.Errorf("at least one --slice is required")
-	}
-
-	knownGroups := make(map[uint64]groupSpec)
-	for i, spec := range groupSpecs {
-		parsed, err := parseGroupSpec(spec)
-		if err != nil {
-			return nil, fmt.Errorf("--group: %w", err)
-		}
-		if err := claim(parsed.grpId, "group"); err != nil {
-			return nil, err
-		}
-		if _, ok := knownSlices[parsed.sliceId]; !ok {
-			return nil, fmt.Errorf(
-				"--group %q: no --slice with id %#x", spec, parsed.sliceId,
-			)
-		}
-		if i == 0 {
-			plan.raid1 = parsed.raid1
-		} else if parsed.raid1 != plan.raid1 {
-			return nil, fmt.Errorf(
-				"--group %q: every group of one sp must name the same "+
-					"redundancy (SpConf.bdev_conf holds one redund_conf)",
-				spec,
-			)
-		}
-		knownGroups[parsed.grpId] = parsed
-		plan.footprint += parsed.extCnt
-		plan.groups = append(plan.groups, parsed)
-	}
-	if len(plan.groups) == 0 {
-		return nil, fmt.Errorf("at least one --group is required")
-	}
-
-	legIdx := make(map[uint64]map[uint32]uint64)
-	grpLegCnt := make(map[uint64]int)
-	for _, spec := range legSpecs {
-		parsed, err := parseLegSpec(spec)
-		if err != nil {
-			return nil, fmt.Errorf("--leg: %w", err)
-		}
-		if err := claim(parsed.legId, "leg"); err != nil {
-			return nil, err
-		}
-		grp, ok := knownGroups[parsed.grpId]
-		if !ok {
-			return nil, fmt.Errorf(
-				"--leg %q: no --group with id %#x", spec, parsed.grpId,
-			)
-		}
-		if legIdx[parsed.grpId] == nil {
-			legIdx[parsed.grpId] = make(map[uint32]uint64)
-		}
-		if prev, ok := legIdx[parsed.grpId][parsed.legIdx]; ok {
-			return nil, fmt.Errorf(
-				"--leg %q: leg_idx %d already used by leg %#x in group %#x",
-				spec, parsed.legIdx, prev, parsed.grpId,
-			)
-		}
-		legIdx[parsed.grpId][parsed.legIdx] = parsed.legId
-		grpLegCnt[parsed.grpId]++
-		plan.grpOfLeg[parsed.legId] = parsed.grpId
-		plan.extOfLeg[parsed.legId] = grp.extCnt
-		plan.legs = append(plan.legs, parsed)
-	}
-	for _, grp := range plan.groups {
-		if grpLegCnt[grp.grpId] == 0 {
-			return nil, fmt.Errorf(
-				"group %#x has no --leg", grp.grpId,
-			)
-		}
-	}
-
-	legSideCnt := make(map[uint64]int)
-	grpDns := make(map[uint64]map[uint64]uint64)
-	for _, spec := range sideSpecs {
-		parsed, err := parseSideSpec(spec)
-		if err != nil {
-			return nil, fmt.Errorf("--side: %w", err)
-		}
-		if err := claim(parsed.sideId, "side"); err != nil {
-			return nil, err
-		}
-		grpId, ok := plan.grpOfLeg[parsed.legId]
-		if !ok {
-			return nil, fmt.Errorf(
-				"--side %q: no --leg with id %#x", spec, parsed.legId,
-			)
-		}
-		if _, ok := slotSet[parsed.slot]; !ok {
-			return nil, fmt.Errorf(
-				"--side %q: cntlid slot %d is not in --slots",
-				spec, parsed.slot,
-			)
-		}
-		if grpDns[grpId] == nil {
-			grpDns[grpId] = make(map[uint64]uint64)
-		}
-		if prev, ok := grpDns[grpId][parsed.dnId]; ok {
-			return nil, fmt.Errorf(
-				"--side %q: dn %#x already carries side %#x of group %#x "+
-					"(two legs of one group on one node have no redundancy)",
-				spec, parsed.dnId, prev, grpId,
-			)
-		}
-		grpDns[grpId][parsed.dnId] = parsed.sideId
-		legSideCnt[parsed.legId]++
-		plan.sides = append(plan.sides, parsed)
-	}
-	for _, leg := range plan.legs {
-		if legSideCnt[leg.legId] == 0 {
-			return nil, fmt.Errorf("leg %#x has no --side", leg.legId)
-		}
-	}
-	return plan, nil
-}
-
 // cmdPutSp implements the CreateStoragePool STM with EXPLICIT PLACEMENT
-// (dnv-worker.md, Integration test plan, The driver; architecture.md,
-// Storage pools). Everything CreateStoragePool's Action step 2 does is done
-// here, with the allocator of architecture.md, Per-operation allocation,
-// replaced by the --cntlr/--side flags: SpConf (next_id past every id used,
-// next_dev_id 1, bdev_conf inherited from ClusterConf, event_threshold,
-// cntlid_slot_list, sp_level, deleting = false, every id list filled),
-// SpName, one Cntlr per --cntlr, one Slice per --slice with its groups → legs
-// → sides (provisioned = false, [D15]), the SpRev key with revision = 1,
-// SpGlobal, and the DN/CN bookkeeping: every DN gains its side pointers, loses
-// the group's ext_cnt, has its capacity key maintained (architecture.md,
-// Capacity index keys) and its DnRev bumped ONCE; every CN gains its cntlr
-// pointer, loses the SP footprint, and likewise.
+// through plant.PutSp (dnv-worker.md, Integration test plan, The driver;
+// architecture.md, Storage pools): the --cntlr/--slice/--group/--leg/--side
+// flags are the five lists of plant.SpSpec, which name their parent by id.
 func cmdPutSp(g *globals, args []string) {
 	fs := newFlagSet("put-sp", g)
 	name := fs.String("name", "", "sp_name (required)")
@@ -2274,30 +1495,19 @@ func cmdPutSp(g *globals, args []string) {
 	if *name == "" {
 		die("--name is required")
 	}
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
+	spec := plant.SpSpec{
+		Name:  *name,
+		Id:    requireId(id),
+		Shard: uint32(shard),
 	}
-	shardCode := uint32(shard)
-	slots, err := parseU32List(*slotSpec)
-	if err != nil {
+	var err error
+	if spec.Slots, err = parseU32List(*slotSpec); err != nil {
 		die("--slots: %v", err)
 	}
-	if len(slots) == 0 {
+	if len(spec.Slots) == 0 {
 		die("--slots must not be empty")
 	}
-	seenSlot := make(map[uint32]struct{}, len(slots))
-	for _, slot := range slots {
-		if slot >= common.CnCntlidSlotCnt {
-			die("--slots: %d is >= CnCntlidSlotCnt (%d)",
-				slot, common.CnCntlidSlotCnt)
-		}
-		if _, ok := seenSlot[slot]; ok {
-			die("--slots: %d appears twice", slot)
-		}
-		seenSlot[slot] = struct{}{}
-	}
-	level, err := parseSpLevel(*levelSpec)
-	if err != nil {
+	if spec.Level, err = parseSpLevel(*levelSpec); err != nil {
 		die("--level: %v", err)
 	}
 	thresholdList, err := parseU32List(*thresholdSpec)
@@ -2307,354 +1517,111 @@ func cmdPutSp(g *globals, args []string) {
 	if len(thresholdList) != 0 && len(thresholdList) != 4 {
 		die("--thresholds wants four values, primary,cntlr,side,leg")
 	}
-	threshold := &pb.EventThreshold{}
 	if len(thresholdList) == 4 {
-		threshold = &pb.EventThreshold{
+		spec.Threshold = &pb.EventThreshold{
 			PrimaryUnhealthy: thresholdList[0],
 			CntlrUnhealthy:   thresholdList[1],
 			SideUnhealthy:    thresholdList[2],
 			LegUnhealthy:     thresholdList[3],
 		}
 	}
-	plan, err := buildSpPlan(
-		cntlrSpecs, sliceSpecs, groupSpecs, legSpecs, sideSpecs, slots,
-	)
-	if err != nil {
+	if *lwm >= 0 {
+		pct := uint32(*lwm)
+		spec.Lwm = &pct
+	}
+	for _, text := range cntlrSpecs {
+		parsed, err := parseCntlrSpec(text)
+		if err != nil {
+			die("put-sp: --cntlr: %v", err)
+		}
+		spec.Cntlrs = append(spec.Cntlrs, parsed)
+	}
+	for _, text := range sliceSpecs {
+		parsed, err := parseSliceSpec(text)
+		if err != nil {
+			die("put-sp: --slice: %v", err)
+		}
+		spec.Slices = append(spec.Slices, parsed)
+	}
+	for _, text := range groupSpecs {
+		parsed, err := parseGroupSpec(text)
+		if err != nil {
+			die("put-sp: --group: %v", err)
+		}
+		spec.Groups = append(spec.Groups, parsed)
+	}
+	for _, text := range legSpecs {
+		parsed, err := parseLegSpec(text)
+		if err != nil {
+			die("put-sp: --leg: %v", err)
+		}
+		spec.Legs = append(spec.Legs, parsed)
+	}
+	for _, text := range sideSpecs {
+		parsed, err := parseSideSpec(text)
+		if err != nil {
+			die("put-sp: --side: %v", err)
+		}
+		spec.Sides = append(spec.Sides, parsed)
+	}
+	if err := spec.Check(); err != nil {
 		die("put-sp: %v", err)
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, cc := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
-	// The SP's bdev_conf is the cluster's, with the redundancy the groups
-	// name and the --lwm override (architecture.md, Storage pools:
-	// CreateStoragePool takes bdev_conf member-wise from
-	// ClusterConf.bdev_conf, then from the constants).
-	bdev := cloneBdevConf(cc.GetBdevConf())
-	if bdev.DmPoolConf == nil {
-		bdev.DmPoolConf = &pb.DmPoolConf{}
-	}
-	if *lwm >= 0 {
-		bdev.DmPoolConf.LowWaterMarkPct = uint32(*lwm)
-	}
-	chunkBlocks := bdev.GetRedundConf().GetRedundMdRaid1().
-		GetBitmapChunkBlockCnt()
-	if plan.raid1 {
-		bdev.RedundConf = &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundMdRaid1{
-				RedundMdRaid1: &pb.RedundMdRaid1{
-					BitmapChunkBlockCnt: chunkBlocks,
-				},
-			},
-		}
-	} else {
-		bdev.RedundConf = &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundNone{
-				RedundNone: &pb.RedundNone{},
-			},
-		}
-	}
-	// The gateway's resolve-at-write, mirrored (architecture.md, Common
-	// validation): CreateStoragePool stores the merge passed through
-	// model.ResolveBdevConf, so put-sp does too — the cluster's bdev_conf is
-	// already concrete, but the SP's redund kind was just rebuilt above and
-	// the merge's own constants rung still has to fire.
-	bdev = model.ResolveBdevConf(bdev)
-	if err := model.ValidateClusterConf(cc); err != nil {
-		die("put-sp: %v", err)
-	}
-	extentSize := cc.GetDnBinConf().GetExtentSize()
-
-	// The geometry of every group (architecture.md, Group on-leg layout:
-	// meta region, data region, health block), computed by model.GroupBlocks
-	// — the one implementation of the formula (MD6).
-	type grpGeometry struct {
-		metaBlocks uint64
-		dataBlocks uint64
-	}
-	geometry := make(map[uint64]grpGeometry, len(plan.groups))
-	grpReport := make([]any, 0, len(plan.groups))
-	for _, grp := range plan.groups {
-		metaBlocks, dataBlocks, err := model.GroupBlocks(
-			grp.extCnt, extentSize, bdev,
-		)
-		if err != nil {
-			die("put-sp: group %#x: %v", grp.grpId, err)
-		}
-		geometry[grp.grpId] = grpGeometry{metaBlocks, dataBlocks}
-		kind := "data"
-		if grp.isMeta {
-			kind = "meta"
-		}
-		grpReport = append(grpReport, map[string]any{
-			"grp_id":      idHex(grp.grpId),
-			"slice_id":    idHex(grp.sliceId),
-			"kind":        kind,
-			"ext_cnt":     grp.extCnt,
-			"meta_blocks": metaBlocks,
-			"data_blocks": dataBlocks,
-		})
-	}
-
-	// Resolve every named node to the endpoint its record is keyed by. The
-	// STM re-reads each record and re-checks the id, so a node that moved
-	// between the scan and the transaction fails the put instead of
-	// corrupting the placement.
-	dnAddr := make(map[uint64]string)
-	dnOrder := make([]string, 0, len(plan.sides))
-	dnCharge := make(map[string]uint64)
-	dnPtrs := make(map[string][]*pb.SidePointer)
-	dnIdOf := make(map[string]uint64)
-	for _, side := range plan.sides {
-		addr, ok := dnAddr[side.dnId]
-		if !ok {
-			addr = findNodeAddr(ctx, cli, cid, "dn_conf", side.dnId)
-			dnAddr[side.dnId] = addr
-			dnIdOf[addr] = side.dnId
-			dnOrder = append(dnOrder, addr)
-		}
-		dnCharge[addr] += plan.extOfLeg[side.legId]
-		dnPtrs[addr] = append(dnPtrs[addr], &pb.SidePointer{
-			SpId:   uint64(id),
-			LegId:  side.legId,
-			SideId: side.sideId,
-		})
-	}
-	cnAddr := make(map[uint64]string)
-	cnOrder := make([]string, 0, len(plan.cntlrs))
-	cnPtrs := make(map[string][]*pb.CntlrPointer)
-	cnIdOf := make(map[string]uint64)
-	for _, cntlr := range plan.cntlrs {
-		addr, ok := cnAddr[cntlr.cnId]
-		if !ok {
-			addr = findNodeAddr(ctx, cli, cid, "cn_conf", cntlr.cnId)
-			cnAddr[cntlr.cnId] = addr
-			cnIdOf[addr] = cntlr.cnId
-			cnOrder = append(cnOrder, addr)
-		}
-		cnPtrs[addr] = append(cnPtrs[addr], &pb.CntlrPointer{
-			SpId:    uint64(id),
-			CntlrId: cntlr.cntlrId,
-		})
-	}
-
-	dnRevisions := make(map[string]uint64)
-	cnRevisions := make(map[string]uint64)
-	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		confKey := model.SpConfKey(cid, *name)
-		if s.Get(confKey, &pb.SpConf{}) {
-			return fmt.Errorf("%q already exists", confKey)
-		}
-		nameKey := model.SpNameKey(cid, uint64(id))
-		if s.Get(nameKey, &pb.SpName{}) {
-			return fmt.Errorf("%q already exists", nameKey)
-		}
-		// --- the nodes, read once and used for both the copies and the
-		// bookkeeping ---
-		dns := make(map[string]*pb.DnConf, len(dnOrder))
-		for _, addr := range dnOrder {
-			dn := &pb.DnConf{}
-			if !s.Get(model.DnConfKey(cid, addr), dn) {
-				return fmt.Errorf("%q not found", model.DnConfKey(cid, addr))
-			}
-			if dn.GetDnId() != dnIdOf[addr] {
-				return fmt.Errorf(
-					"%q holds dn %#x, want %#x",
-					addr, dn.GetDnId(), dnIdOf[addr],
-				)
-			}
-			dns[addr] = dn
-		}
-		cns := make(map[string]*pb.CnConf, len(cnOrder))
-		for _, addr := range cnOrder {
-			cn := &pb.CnConf{}
-			if !s.Get(model.CnConfKey(cid, addr), cn) {
-				return fmt.Errorf("%q not found", model.CnConfKey(cid, addr))
-			}
-			if cn.GetCnId() != cnIdOf[addr] {
-				return fmt.Errorf(
-					"%q holds cn %#x, want %#x",
-					addr, cn.GetCnId(), cnIdOf[addr],
-				)
-			}
-			cns[addr] = cn
-		}
-		// --- the slices, built by joining the flags on their ids ---
-		legs := make(map[uint64]*pb.Leg, len(plan.legs))
-		groups := make(map[uint64]*pb.Group, len(plan.groups))
-		slices := make(map[uint64]*pb.Slice, len(plan.slices))
-		sliceIds := make([]uint64, 0, len(plan.slices))
-		for _, spec := range plan.slices {
-			slices[spec.sliceId] = &pb.Slice{SliceIdx: spec.sliceIdx}
-			sliceIds = append(sliceIds, spec.sliceId)
-		}
-		for _, spec := range plan.groups {
-			geo := geometry[spec.grpId]
-			grp := &pb.Group{
-				GrpId:      spec.grpId,
-				ExtCnt:     spec.extCnt,
-				MetaBlocks: geo.metaBlocks,
-				DataBlocks: geo.dataBlocks,
-			}
-			groups[spec.grpId] = grp
-			slice := slices[spec.sliceId]
-			if spec.isMeta {
-				slice.MetaGrpList = append(slice.MetaGrpList, grp)
-			} else {
-				slice.DataGrpList = append(slice.DataGrpList, grp)
-			}
-		}
-		for _, spec := range plan.legs {
-			leg := &pb.Leg{LegId: spec.legId, LegIdx: spec.legIdx}
-			legs[spec.legId] = leg
-			grp := groups[spec.grpId]
-			grp.LegList = append(grp.LegList, leg)
-		}
-		for _, spec := range plan.sides {
-			addr := dnAddr[spec.dnId]
-			leg := legs[spec.legId]
-			leg.SideList = append(leg.SideList, &pb.Side{
-				SideId:      spec.sideId,
-				AddrPort:    addr,
-				CntlidSlot:  spec.slot,
-				NvmeTrConf:  dns[addr].GetNvmeTrConf(),
-				ErrEpoch:    0,
-				Provisioned: false,
-			})
-		}
-		for _, sliceId := range sliceIds {
-			s.Put(model.SliceKey(cid, uint64(id), sliceId), slices[sliceId])
-		}
-		// --- the cntlrs ---
-		cntlrIds := make([]uint64, 0, len(plan.cntlrs))
-		for _, spec := range plan.cntlrs {
-			addr := cnAddr[spec.cnId]
-			s.Put(model.CntlrKey(cid, uint64(id), spec.cntlrId), &pb.Cntlr{
-				AddrPort:   addr,
-				NvmeTrConf: cns[addr].GetNvmeTrConf(),
-				CntlidSlot: spec.slot,
-				Primary:    spec.primary,
-				Disabled:   false,
-				ErrEpoch:   0,
-				// As CreateStoragePool: the primary is created settling
-				// (dnv-worker.md HL2 and Integration test plan, The driver).
-				Settling: spec.primary,
-			})
-			cntlrIds = append(cntlrIds, spec.cntlrId)
-		}
-		// --- SpConf, SpName, SpRev ---
-		s.Put(confKey, &pb.SpConf{
-			SpId:           uint64(id),
-			ShardCode:      shardCode,
-			NextId:         plan.nextId,
-			NextDevId:      1,
-			BdevConf:       bdev,
-			EventThreshold: threshold,
-			CntlidSlotList: slots,
-			SpLevel:        level,
-			Deleting:       false,
-			CntlrIdList:    cntlrIds,
-			SliceIdList:    sliceIds,
-		})
-		s.Put(nameKey, &pb.SpName{SpName: *name})
-		s.Put(model.SpRevKey(shardCode, cid, uint64(id)), &pb.SpRev{
-			SpName:   *name,
-			Revision: 1,
-		})
-		// --- the DN bookkeeping, once per DN (architecture.md, Storage
-		// pools; Capacity index keys; Revision keys and the sync fan-out) ---
-		for _, addr := range dnOrder {
-			dn := dns[addr]
-			charge := dnCharge[addr]
-			if dn.GetFreeExtCnt() < charge {
-				return fmt.Errorf(
-					"dn %#x at %q has free_ext_cnt %d, needs %d",
-					dn.GetDnId(), addr, dn.GetFreeExtCnt(), charge,
-				)
-			}
-			newDn := proto.Clone(dn).(*pb.DnConf)
-			newDn.SidePtrList = append(newDn.SidePtrList, dnPtrs[addr]...)
-			newDn.FreeExtCnt -= charge
-			s.Put(model.DnConfKey(cid, addr), newDn)
-			model.MaintainDnCapacity(s, cid, addr, cc, dn, newDn)
-			revision, err := bumpDnRev(s, cid, newDn)
-			if err != nil {
-				return err
-			}
-			dnRevisions[addr] = revision
-		}
-		// --- the CN bookkeeping, once per CN (architecture.md, Storage
-		// pools and Cntlrs) ---
-		for _, addr := range cnOrder {
-			cn := cns[addr]
-			if cn.GetFreeExtCnt() < plan.footprint {
-				return fmt.Errorf(
-					"cn %#x at %q has free_ext_cnt %d, needs the sp "+
-						"footprint %d",
-					cn.GetCnId(), addr, cn.GetFreeExtCnt(), plan.footprint,
-				)
-			}
-			newCn := proto.Clone(cn).(*pb.CnConf)
-			newCn.CntlrPtrList = append(newCn.CntlrPtrList, cnPtrs[addr]...)
-			newCn.FreeExtCnt -= plan.footprint
-			s.Put(model.CnConfKey(cid, addr), newCn)
-			model.MaintainCnCapacity(s, cid, addr, cn, newCn)
-			revision, err := bumpCnRev(s, cid, newCn)
-			if err != nil {
-				return err
-			}
-			cnRevisions[addr] = revision
-		}
-		// --- SpGlobal (architecture.md, Globals: id allocation + shard
-		// buckets) ---
-		globalKey := model.SpGlobalKey(cid)
-		global := &pb.SpGlobal{}
-		if s.Get(globalKey, global) {
-			if global.NextId <= uint64(id) {
-				global.NextId = uint64(id) + 1
-			}
-			if int(shardCode) < len(global.ShardBucket) {
-				global.ShardBucket[shardCode]++
-			}
-			s.Put(globalKey, global)
-		}
-		return nil
-	})
+	sp, err := plant.PutSp(ctx, cli, cl, spec)
 	if err != nil {
 		die("put-sp: %v", err)
 	}
 
-	cntlrIds := make([]string, 0, len(plan.cntlrs))
-	for _, spec := range plan.cntlrs {
-		cntlrIds = append(cntlrIds, idHex(spec.cntlrId))
+	cntlrIds := make([]uint64, 0, len(spec.Cntlrs))
+	for _, cntlr := range spec.Cntlrs {
+		cntlrIds = append(cntlrIds, cntlr.CntlrId)
 	}
-	sliceIds := make([]string, 0, len(plan.slices))
-	for _, spec := range plan.slices {
-		sliceIds = append(sliceIds, idHex(spec.sliceId))
+	sliceIds := make([]uint64, 0, len(spec.Slices))
+	for _, slice := range spec.Slices {
+		sliceIds = append(sliceIds, slice.SliceId)
 	}
-	legIds := make([]string, 0, len(plan.legs))
-	for _, spec := range plan.legs {
-		legIds = append(legIds, idHex(spec.legId))
+	legIds := make([]uint64, 0, len(spec.Legs))
+	for _, leg := range spec.Legs {
+		legIds = append(legIds, leg.LegId)
 	}
-	sideIds := make([]string, 0, len(plan.sides))
-	for _, spec := range plan.sides {
-		sideIds = append(sideIds, idHex(spec.sideId))
+	sideIds := make([]uint64, 0, len(spec.Sides))
+	for _, side := range spec.Sides {
+		sideIds = append(sideIds, side.SideId)
+	}
+	grpReport := make([]any, 0, len(sp.Groups))
+	for _, grp := range sp.Groups {
+		kind := "data"
+		if grp.Meta {
+			kind = "meta"
+		}
+		grpReport = append(grpReport, map[string]any{
+			"grp_id":      idHex(grp.GrpId),
+			"slice_id":    idHex(grp.SliceId),
+			"kind":        kind,
+			"ext_cnt":     grp.ExtCnt,
+			"meta_blocks": grp.MetaBlocks,
+			"data_blocks": grp.DataBlocks,
+		})
 	}
 	emit(map[string]any{
-		"sp_id":         idHex(uint64(id)),
-		"sp_name":       *name,
-		"shard_code":    fmt.Sprintf(common.ShardCodeFmt, shardCode),
-		"next_id":       plan.nextId,
-		"revision":      uint64(1),
-		"footprint":     plan.footprint,
-		"cntlr_id_list": cntlrIds,
-		"slice_id_list": sliceIds,
-		"leg_id_list":   legIds,
-		"side_id_list":  sideIds,
+		"sp_id":         idHex(sp.Ref.Id),
+		"sp_name":       sp.Ref.Name,
+		"shard_code":    shardHex(sp.Ref.Shard),
+		"next_id":       sp.NextId,
+		"revision":      sp.Revision,
+		"footprint":     sp.Footprint,
+		"cntlr_id_list": idHexList(cntlrIds),
+		"slice_id_list": idHexList(sliceIds),
+		"leg_id_list":   idHexList(legIds),
+		"side_id_list":  idHexList(sideIds),
 		"groups":        grpReport,
-		"dn_revisions":  dnRevisions,
-		"cn_revisions":  cnRevisions,
+		"dn_revisions":  sp.DnRevisions,
+		"cn_revisions":  sp.CnRevisions,
 	})
 }
 
@@ -2662,29 +1629,8 @@ func cmdPutSp(g *globals, args []string) {
 // SpConf sub-object writes
 // ---------------------------------------------------------------------------
 
-// advanceNextId keeps SpConf.next_id past every id the script assigned, so
-// that a worker reaction allocates fresh ids ABOVE them (architecture.md,
-// Globals: id allocation + shard buckets).
-func advanceNextId(conf *pb.SpConf, ids ...uint64) {
-	for _, id := range ids {
-		if conf.NextId <= id {
-			conf.NextId = id + 1
-		}
-	}
-}
-
-// containsName reports whether a name list already holds name.
-func containsName(list []string, name string) bool {
-	for _, item := range list {
-		if item == name {
-			return true
-		}
-	}
-	return false
-}
-
-// cmdPutTd writes one ThinDevice and its SpConf.td_name_list entry
-// (architecture.md, Thin devices: CreateThinDevice), then bumps SpRev once.
+// cmdPutTd writes one ThinDevice through plant.PutTd (architecture.md, Thin
+// devices: CreateThinDevice).
 func cmdPutTd(g *globals, args []string) {
 	fs := newFlagSet("put-td", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2699,67 +1645,33 @@ func cmdPutTd(g *globals, args []string) {
 	if *name == "" {
 		die("--name is required")
 	}
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
+	spec := plant.TdSpec{
+		Name:  *name,
+		Id:    requireId(id),
+		DevId: uint32(devId),
+		Size:  *size,
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	assignedDev := uint32(0)
-	spRev := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if containsName(conf.GetTdNameList(), *name) {
-			return fmt.Errorf("td %q already exists", *name)
-		}
-		key := model.ThinDeviceKey(cid, target.spId, *name)
-		if s.Get(key, &pb.ThinDevice{}) {
-			return fmt.Errorf("%q already exists", key)
-		}
-		assignedDev = uint32(devId)
-		if assignedDev == 0 {
-			assignedDev = conf.GetNextDevId()
-		}
-		if conf.NextDevId <= assignedDev {
-			conf.NextDevId = assignedDev + 1
-		}
-		s.Put(key, &pb.ThinDevice{
-			TdId:    uint64(id),
-			DevId:   assignedDev,
-			OriId:   0,
-			Size:    *size,
-			Created: false,
-		})
-		conf.TdNameList = append(conf.TdNameList, *name)
-		advanceNextId(conf, uint64(id))
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	td, err := plant.PutTd(ctx, cli, cl, target, spec)
 	if err != nil {
 		die("put-td: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name": target.name,
-		"td_name": *name,
-		"td_id":   idHex(uint64(id)),
-		"dev_id":  assignedDev,
-		"sp_rev":  spRev,
+		"sp_name": target.Name,
+		"td_name": td.Name,
+		"td_id":   idHex(td.Id),
+		"dev_id":  td.DevId,
+		"sp_rev":  td.SpRev,
 	})
 }
 
-// cmdPutSs writes one Subsystem, its SpConf.nqn_list entry and the SP's
-// CdcEntry (architecture.md, Subsystems, namespaces: CreateSubsystem; and
-// dnv-cdc): the discovery entry is keyed by the SP's shard code and lists the
-// transport of every cntlr the listing rule lists (architecture.md [D18]),
-// and it is what case D3 reads back after a cntlr replacement and case H
-// after every failover.
+// cmdPutSs writes one Subsystem and the SP's CdcEntry through plant.PutSs
+// (architecture.md, Subsystems, namespaces: CreateSubsystem).
 func cmdPutSs(g *globals, args []string) {
 	fs := newFlagSet("put-ss", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2775,119 +1687,45 @@ func cmdPutSs(g *globals, args []string) {
 	if *nqn == "" {
 		die("--nqn is required")
 	}
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
+	spec := plant.SsSpec{
+		Nqn:    *nqn,
+		Id:     requireId(id),
+		Serial: *serial,
+		Model:  *model_,
 	}
-	namespaces := make([]nsSpec, 0, len(nsSpecs))
-	seenIdx := make(map[uint32]uint64)
-	for _, spec := range nsSpecs {
-		parsed, err := parseNsSpec(spec)
+	for _, text := range nsSpecs {
+		parsed, err := parseNsSpec(text)
 		if err != nil {
 			die("--ns: %v", err)
 		}
-		if parsed.nsIdx == 0 {
-			die("--ns %q: ns_idx 0 is never valid", spec)
-		}
-		if prev, ok := seenIdx[parsed.nsIdx]; ok {
-			die("--ns %q: ns_idx %d already used by ns %#x",
-				spec, parsed.nsIdx, prev)
-		}
-		seenIdx[parsed.nsIdx] = parsed.nsId
-		namespaces = append(namespaces, parsed)
+		spec.Namespaces = append(spec.Namespaces, parsed)
+	}
+	if err := spec.Check(); err != nil {
+		die("put-ss: %v", err)
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	spRev := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if containsName(conf.GetNqnList(), *nqn) {
-			return fmt.Errorf("subsystem %q already exists", *nqn)
-		}
-		key := model.SubsystemKey(cid, target.spId, *nqn)
-		if s.Get(key, &pb.Subsystem{}) {
-			return fmt.Errorf("%q already exists", key)
-		}
-		subsystem := &pb.Subsystem{
-			SsId:   uint64(id),
-			Serial: *serial,
-			Model:  *model_,
-		}
-		advanceNextId(conf, uint64(id))
-		for _, spec := range namespaces {
-			uuid, nguid := nsIdentity(cid, target.spId, spec.nsId)
-			subsystem.NsList = append(subsystem.NsList, &pb.Namespace{
-				NsId:      spec.nsId,
-				NsIdx:     spec.nsIdx,
-				TdId:      spec.tdId,
-				DevUuid:   uuid,
-				DevNguid:  nguid,
-				Suspended: false,
-			})
-			advanceNextId(conf, spec.nsId)
-		}
-		s.Put(key, subsystem)
-		// The discovery entry lists what the listing rule lists
-		// (architecture.md [D18]), as CreateSubsystem writes it.
-		cntlrs := make([]*pb.Cntlr, 0, len(conf.GetCntlrIdList()))
-		for _, cntlrId := range conf.GetCntlrIdList() {
-			cntlr := &pb.Cntlr{}
-			if !s.Get(model.CntlrKey(cid, target.spId, cntlrId), cntlr) {
-				return fmt.Errorf("cntlr %#x not found", cntlrId)
-			}
-			cntlrs = append(cntlrs, cntlr)
-		}
-		s.Put(
-			model.CdcEntryKey(
-				cid, conf.GetShardCode(), target.spId, uint64(id),
-			),
-			&pb.CdcEntry{
-				Nqn:            *nqn,
-				NvmeTrConfList: model.CdcTrConfList(cntlrs),
-			},
-		)
-		conf.NqnList = append(conf.NqnList, *nqn)
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	ss, err := plant.PutSs(ctx, cli, cl, target, spec)
 	if err != nil {
 		die("put-ss: %v", err)
 	}
-	nsIds := make([]string, 0, len(namespaces))
-	for _, spec := range namespaces {
-		nsIds = append(nsIds, idHex(spec.nsId))
-	}
 	emit(map[string]any{
-		"sp_name": target.name,
-		"nqn":     *nqn,
-		"ss_id":   idHex(uint64(id)),
-		"ns_ids":  nsIds,
-		"cdc_key": model.CdcEntryKey(cid, target.shard, target.spId, uint64(id)),
-		"sp_rev":  spRev,
+		"sp_name": target.Name,
+		"nqn":     ss.Nqn,
+		"ss_id":   idHex(ss.Id),
+		"ns_ids":  idHexList(ss.NsIds),
+		"cdc_key": model.CdcEntryKey(cl.Id, target.Shard, target.Id, ss.Id),
+		"sp_rev":  ss.SpRev,
 	})
 }
 
-// cmdPutClone writes one Clone and its SpConf.clone_name_list entry
-// (architecture.md, Clones), then bumps SpRev once. --dst-td accepts either a
-// td name or a td_id.
-//
-// It charges the clone's metadata units as CreateClone does (architecture.md,
-// Metadata units): common.CloneMetaUnits of the destination td's size at the
-// pool's block size, stored on the Clone record and charged to the CN of every
-// cntlr of the pool (chargeCloneCns). The clone drain's last step,
-// model.FinishCloneDelete, gives exactly those charges back, so a planted
-// clone that drains leaves its nodes' counts where it found them. Unlike
-// CreateClone it never refuses a CN past its area: the driver plants whatever
-// shape a case needs, and the worker's cntlr replacement can leave a CN past
-// its ceiling anyway. A --dst-td id that no td of the pool carries is planted
-// with no units, as there is no size to charge for.
+// cmdPutClone writes one Clone and charges its units through plant.PutClone
+// (architecture.md, Clones; Metadata units). --dst-td accepts either a td
+// name or a td_id.
 func cmdPutClone(g *globals, args []string) {
 	fs := newFlagSet("put-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -2905,178 +1743,43 @@ func cmdPutClone(g *globals, args []string) {
 	if *name == "" {
 		die("--name is required")
 	}
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	cloneId := requireId(id)
 	if *dstTd == "" {
 		die("--dst-td is required")
+	}
+	spec := plant.CloneSpec{
+		Name:          *name,
+		Id:            cloneId,
+		DstTd:         *dstTd,
+		SrcSliceCnt:   uint32(*srcSliceCnt),
+		SrcNqn:        *srcNqn,
+		SrcNsIdx:      uint32(*srcNsIdx),
+		SrcStripeSize: *srcStripe,
+		SrcBlockSize:  *srcBlock,
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	dstTdId := uint64(0)
-	spRev := uint64(0)
-	units := uint64(0)
-	var charged map[string]uint64
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		dstTdId, units, charged = 0, 0, nil
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if containsName(conf.GetCloneNameList(), *name) {
-			return fmt.Errorf("clone %q already exists", *name)
-		}
-		var td *pb.ThinDevice
-		dstTdId, td, err = plantedCloneTd(s, cid, conf, *dstTd)
-		if err != nil {
-			return err
-		}
-		units, err = plantedCloneUnits(conf, td)
-		if err != nil {
-			return fmt.Errorf("storage pool %q: %w", target.name, err)
-		}
-		key := model.CloneKey(cid, target.spId, *name)
-		if s.Get(key, &pb.Clone{}) {
-			return fmt.Errorf("%q already exists", key)
-		}
-		charged, err = chargeCloneCns(s, cid, conf, units)
-		if err != nil {
-			return err
-		}
-		s.Put(key, &pb.Clone{
-			CloneId:       uint64(id),
-			SrcNqn:        *srcNqn,
-			SrcNsIdx:      uint32(*srcNsIdx),
-			SrcSliceCnt:   uint32(*srcSliceCnt),
-			SrcStripeSize: *srcStripe,
-			SrcBlockSize:  *srcBlock,
-			DstTdId:       dstTdId,
-			MetaUnits:     units,
-		})
-		conf.CloneNameList = append(conf.CloneNameList, *name)
-		advanceNextId(conf, uint64(id))
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	clone, err := plant.PutClone(ctx, cli, cl, target, spec)
 	if err != nil {
 		die("put-clone: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":     target.name,
-		"clone_name":  *name,
-		"clone_id":    idHex(uint64(id)),
-		"dst_td_id":   idHex(dstTdId),
-		"meta_units":  units,
-		"charged_cns": charged,
-		"sp_rev":      spRev,
+		"sp_name":     target.Name,
+		"clone_name":  clone.Name,
+		"clone_id":    idHex(clone.Id),
+		"dst_td_id":   idHex(clone.DstTdId),
+		"meta_units":  clone.MetaUnits,
+		"charged_cns": clone.Charged,
+		"sp_rev":      clone.SpRev,
 	})
 }
 
-// plantedCloneTd resolves put-clone's --dst-td inside its STM: a td name
-// first, else a td_id, which is looked up among the pool's tds so the clone
-// can be sized. A td_id that no td of the pool carries resolves to itself
-// with a nil td, and put-clone plants that clone with no units.
-func plantedCloneTd(
-	s etcdutil.STM,
-	cid uint64,
-	conf *pb.SpConf,
-	dstTd string,
-) (uint64, *pb.ThinDevice, error) {
-	td := &pb.ThinDevice{}
-	if s.Get(model.ThinDeviceKey(cid, conf.GetSpId(), dstTd), td) {
-		return td.GetTdId(), td, nil
-	}
-	tdId, err := parseId(dstTd)
-	if err != nil {
-		return 0, nil, fmt.Errorf("--dst-td %q: no such td", dstTd)
-	}
-	for _, tdName := range conf.GetTdNameList() {
-		candidate := &pb.ThinDevice{}
-		if !s.Get(model.ThinDeviceKey(cid, conf.GetSpId(), tdName), candidate) {
-			continue
-		}
-		if candidate.GetTdId() == tdId {
-			return tdId, candidate, nil
-		}
-	}
-	return tdId, nil, nil
-}
-
-// plantedCloneUnits is the units CreateClone stores on a clone of td
-// (architecture.md, Metadata units): common.CloneMetaUnits of the td's size
-// at the pool's block size, behind the ValidateBdevConf gate that every
-// model.PoolBlockSize caller sits behind. A nil td has no size and gets no
-// units.
-func plantedCloneUnits(conf *pb.SpConf, td *pb.ThinDevice) (uint64, error) {
-	if td == nil {
-		return 0, nil
-	}
-	bdev := conf.GetBdevConf()
-	if err := model.ValidateBdevConf(bdev); err != nil {
-		return 0, err
-	}
-	return common.CloneMetaUnits(td.GetSize(), model.PoolBlockSize(bdev)), nil
-}
-
-// chargeCloneCns charges a planted clone's units, inside put-clone's STM, to
-// the CN of every cntlr of the pool, as CreateClone charges them
-// (architecture.md, Metadata units): once per cntlr, summed per CN, so each
-// CN is written once, in the order the cntlrs first name it, and a CN that
-// hosts two cntlrs of the pool is charged twice in that one write — exactly
-// what model.FinishCloneDelete later gives back. The capacity value follows
-// the record (model.MaintainCnCapacity) and no CnRev is bumped, since a write
-// that changes only units raises no revision. Nothing is refused for room.
-//
-// Every Cntlr is read before any write, and a listed one that is missing
-// refuses: the record is what names the CN to charge. A CnConf that is gone
-// is skipped, as the release skips it, since there is nothing to charge. Zero
-// units read nothing. The result maps each CN it writes to the units it
-// charges that CN.
-func chargeCloneCns(
-	s etcdutil.STM,
-	cid uint64,
-	conf *pb.SpConf,
-	units uint64,
-) (map[string]uint64, error) {
-	charged := make(map[string]uint64)
-	if units == 0 {
-		return charged, nil
-	}
-	var order []string
-	perCn := make(map[string]uint64)
-	for _, cntlrId := range conf.GetCntlrIdList() {
-		cntlr := &pb.Cntlr{}
-		if !s.Get(model.CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr) {
-			return nil, fmt.Errorf("cntlr %#x not found", cntlrId)
-		}
-		addrPort := cntlr.GetAddrPort()
-		if _, seen := perCn[addrPort]; !seen {
-			order = append(order, addrPort)
-		}
-		perCn[addrPort] += units
-	}
-	for _, addrPort := range order {
-		key := model.CnConfKey(cid, addrPort)
-		cn := &pb.CnConf{}
-		if !s.Get(key, cn) {
-			continue
-		}
-		newCn := proto.Clone(cn).(*pb.CnConf)
-		newCn.UsedMetaUnits += perCn[addrPort]
-		s.Put(key, newCn)
-		model.MaintainCnCapacity(s, cid, addrPort, cn, newCn)
-		charged[addrPort] = perCn[addrPort]
-	}
-	return charged, nil
-}
-
-// cmdPutXfer writes one Transfer and its SpConf.xfer_name_list entry
-// (architecture.md, Transfers), then bumps SpRev once.
+// cmdPutXfer writes one Transfer through plant.PutXfer (architecture.md,
+// Transfers).
 func cmdPutXfer(g *globals, args []string) {
 	fs := newFlagSet("put-xfer", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3090,72 +1793,36 @@ func cmdPutXfer(g *globals, args []string) {
 	if *name == "" {
 		die("--name is required")
 	}
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	xferId := requireId(id)
 	if *oriNqn == "" {
 		die("--ori-nqn is required")
+	}
+	spec := plant.XferSpec{
+		Name:     *name,
+		Id:       xferId,
+		OriNqn:   *oriNqn,
+		OriNsIdx: uint32(*oriNsIdx),
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	spRev := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if containsName(conf.GetXferNameList(), *name) {
-			return fmt.Errorf("transfer %q already exists", *name)
-		}
-		key := model.TransferKey(cid, target.spId, *name)
-		if s.Get(key, &pb.Transfer{}) {
-			return fmt.Errorf("%q already exists", key)
-		}
-		s.Put(key, &pb.Transfer{
-			XferId:   uint64(id),
-			OriNqn:   *oriNqn,
-			OriNsIdx: uint32(*oriNsIdx),
-		})
-		conf.XferNameList = append(conf.XferNameList, *name)
-		advanceNextId(conf, uint64(id))
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	xfer, err := plant.PutXfer(ctx, cli, cl, target, spec)
 	if err != nil {
 		die("put-xfer: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":   target.name,
-		"xfer_name": *name,
-		"xfer_id":   idHex(uint64(id)),
-		"sp_rev":    spRev,
+		"sp_name":   target.Name,
+		"xfer_name": xfer.Name,
+		"xfer_id":   idHex(xfer.Id),
+		"sp_rev":    xfer.SpRev,
 	})
 }
 
-// cmdPutMigr writes one Migration and its SpConf.migr_name_list entry
-// (architecture.md, Migrations) AND appends the destination Side to the
-// SOURCE side's leg, which is what makes the leg carry two sides — the shape
-// RW15 keys migr_src_conf/migr_dst_conf off and the precondition AR8 reads as
-// "a leg with two sides is left alone". The destination DN gets the
-// CreateMigration treatment (architecture.md, Migrations; Metadata units): the
-// side pointer, the group's ext_cnt off its budget, the migration's metadata
-// units (plantedMigrUnits) on its used count, its capacity key maintained and
-// its DnRev bumped once (chargeMigrDst). The units are stored on the
-// Migration record too, which is where FinishMigration and CancelMigration
-// read what to give back. It refuses a DN short of extents, whose count would
-// wrap below zero, but never one past its metadata area: a used count only
-// grows, and the driver plants whatever shape a case needs.
-//
-// --cutover-pending writes the record's cutover_pending, which
-// CreateMigration always sets and only the sp worker's cutover clears
-// (architecture.md, Migrations; dnv-worker.md RW18); without it the record
-// reads as a migration whose cutover has started, a shape no gateway writes
-// but a case may plant.
+// cmdPutMigr writes one Migration and its destination side through
+// plant.PutMigr (architecture.md, Migrations; Metadata units).
 func cmdPutMigr(g *globals, args []string) {
 	fs := newFlagSet("put-migr", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3171,207 +1838,47 @@ func cmdPutMigr(g *globals, args []string) {
 	if err != nil {
 		die("--migr: %v", err)
 	}
-	if spec.migrId == 0 || spec.srcSide == 0 || spec.dstSide == 0 {
+	if spec.Id == 0 || spec.SrcSide == 0 || spec.DstSide == 0 {
 		die("--migr %q: ids must not be 0", *migr)
 	}
 	if uint64(dstDn) == 0 {
 		die("--dst-dn is required and must not be 0")
 	}
+	spec.DstDn = uint64(dstDn)
+	spec.DstSlot = uint32(*dstSlot)
+	spec.CutoverPending = *pending
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, cc := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
-	dstAddr := findNodeAddr(ctx, cli, cid, "dn_conf", uint64(dstDn))
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	var legId, grpId, sliceId, extCnt, units, dnRev, spRev uint64
-	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		legId, grpId, sliceId, extCnt, units = 0, 0, 0, 0, 0
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if containsName(conf.GetMigrNameList(), spec.name) {
-			return fmt.Errorf("migration %q already exists", spec.name)
-		}
-		dn := &pb.DnConf{}
-		if !s.Get(model.DnConfKey(cid, dstAddr), dn) {
-			return fmt.Errorf("%q not found", model.DnConfKey(cid, dstAddr))
-		}
-		if dn.GetDnId() != uint64(dstDn) {
-			return fmt.Errorf(
-				"%q holds dn %#x, want %#x",
-				dstAddr, dn.GetDnId(), uint64(dstDn),
-			)
-		}
-		// Find the leg that carries the source side.
-		var slice *pb.Slice
-		var leg *pb.Leg
-		for _, candidateId := range conf.GetSliceIdList() {
-			candidate := &pb.Slice{}
-			key := model.SliceKey(cid, target.spId, candidateId)
-			if !s.Get(key, candidate) {
-				return fmt.Errorf("%q not found", key)
-			}
-			grpLists := [][]*pb.Group{
-				candidate.GetMetaGrpList(),
-				candidate.GetDataGrpList(),
-			}
-			for _, grpList := range grpLists {
-				for _, grp := range grpList {
-					for _, candidateLeg := range grp.GetLegList() {
-						for _, side := range candidateLeg.GetSideList() {
-							if side.GetSideId() != spec.srcSide {
-								continue
-							}
-							slice = candidate
-							leg = candidateLeg
-							legId = candidateLeg.GetLegId()
-							grpId = grp.GetGrpId()
-							sliceId = candidateId
-							extCnt = grp.GetExtCnt()
-						}
-					}
-				}
-			}
-		}
-		if leg == nil {
-			return fmt.Errorf(
-				"no side %#x in storage pool %q", spec.srcSide, target.name,
-			)
-		}
-		for _, side := range leg.GetSideList() {
-			if side.GetSideId() == spec.dstSide {
-				return fmt.Errorf(
-					"leg %#x already carries side %#x", legId, spec.dstSide,
-				)
-			}
-		}
-		units, err = plantedMigrUnits(
-			conf, extCnt, cc.GetDnBinConf().GetExtentSize())
-		if err != nil {
-			return fmt.Errorf("storage pool %q: %w", target.name, err)
-		}
-		leg.SideList = append(leg.SideList, &pb.Side{
-			SideId:      spec.dstSide,
-			AddrPort:    dstAddr,
-			CntlidSlot:  uint32(*dstSlot),
-			NvmeTrConf:  dn.GetNvmeTrConf(),
-			ErrEpoch:    0,
-			Provisioned: false,
-		})
-		s.Put(model.SliceKey(cid, target.spId, sliceId), slice)
-		s.Put(model.MigrationKey(cid, target.spId, spec.name), &pb.Migration{
-			MigrId:         spec.migrId,
-			SrcSideId:      spec.srcSide,
-			DstSideId:      spec.dstSide,
-			BmCnt:          0,
-			MetaUnits:      units,
-			CutoverPending: *pending,
-		})
-		conf.MigrNameList = append(conf.MigrNameList, spec.name)
-		advanceNextId(conf, spec.migrId, spec.dstSide)
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		dnRev, err = chargeMigrDst(s, cid, cc, dstAddr, dn, &pb.SidePointer{
-			SpId:   target.spId,
-			LegId:  legId,
-			SideId: spec.dstSide,
-		}, extCnt, units)
-		if err != nil {
-			return err
-		}
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	out, err := plant.PutMigr(ctx, cli, cl, target, spec)
 	if err != nil {
 		die("put-migr: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":         target.name,
-		"migr_name":       spec.name,
-		"migr_id":         idHex(spec.migrId),
-		"src_side_id":     idHex(spec.srcSide),
-		"dst_side_id":     idHex(spec.dstSide),
-		"leg_id":          idHex(legId),
-		"grp_id":          idHex(grpId),
-		"slice_id":        idHex(sliceId),
-		"dn_id":           idHex(uint64(dstDn)),
-		"addr_port":       dstAddr,
-		"ext_cnt":         extCnt,
-		"meta_units":      units,
-		"cutover_pending": *pending,
-		"dn_revision":     dnRev,
-		"sp_rev":          spRev,
+		"sp_name":         target.Name,
+		"migr_name":       out.Name,
+		"migr_id":         idHex(out.Id),
+		"src_side_id":     idHex(out.SrcSide),
+		"dst_side_id":     idHex(out.DstSide),
+		"leg_id":          idHex(out.LegId),
+		"grp_id":          idHex(out.GrpId),
+		"slice_id":        idHex(out.SliceId),
+		"dn_id":           idHex(out.DstDn),
+		"addr_port":       out.Addr,
+		"ext_cnt":         out.ExtCnt,
+		"meta_units":      out.MetaUnits,
+		"cutover_pending": out.CutoverPending,
+		"dn_revision":     out.DnRevision,
+		"sp_rev":          out.SpRev,
 	})
 }
 
-// plantedMigrUnits is the units CreateMigration stores on a migration and
-// charges its destination DN (architecture.md, Metadata units):
-// common.CloneMetaUnits of the moved group's ext_cnt × extent_size at the
-// pool's block size, behind the ValidateBdevConf gate that every
-// model.PoolBlockSize caller sits behind.
-func plantedMigrUnits(
-	conf *pb.SpConf,
-	extCnt uint64,
-	extentSize uint64,
-) (uint64, error) {
-	bdev := conf.GetBdevConf()
-	if err := model.ValidateBdevConf(bdev); err != nil {
-		return 0, err
-	}
-	return common.CloneMetaUnits(
-		extCnt*extentSize, model.PoolBlockSize(bdev)), nil
-}
-
-// chargeMigrDst is put-migr's bookkeeping of its destination DN, inside
-// put-migr's STM, as CreateMigration does it (architecture.md, Storage pools;
-// Capacity index keys; Metadata units; Revision keys and the sync fan-out):
-// the side pointer in, extCnt off free_ext_cnt and the migration's units on
-// used_meta_units, all in the one write of the record, the capacity key
-// following the record (model.MaintainDnCapacity) and the DN's revision
-// bumped once — the units FinishMigration and CancelMigration give back. dn
-// is the record as read in the same STM, which MaintainDnCapacity needs to
-// find the key it replaces. It refuses a DN short of extents, whose count
-// would wrap below zero, and writes nothing then, but never refuses one past
-// its metadata area. It returns the DN's new revision.
-func chargeMigrDst(
-	s etcdutil.STM,
-	cid uint64,
-	cc *pb.ClusterConf,
-	addrPort string,
-	dn *pb.DnConf,
-	ptr *pb.SidePointer,
-	extCnt uint64,
-	units uint64,
-) (uint64, error) {
-	if dn.GetFreeExtCnt() < extCnt {
-		return 0, fmt.Errorf(
-			"dn %#x at %q has free_ext_cnt %d, needs %d",
-			dn.GetDnId(), addrPort, dn.GetFreeExtCnt(), extCnt,
-		)
-	}
-	newDn := proto.Clone(dn).(*pb.DnConf)
-	newDn.SidePtrList = append(newDn.SidePtrList, ptr)
-	newDn.FreeExtCnt -= extCnt
-	newDn.UsedMetaUnits += units
-	s.Put(model.DnConfKey(cid, addrPort), newDn)
-	model.MaintainDnCapacity(s, cid, addrPort, cc, dn, newDn)
-	return bumpDnRev(s, cid, newDn)
-}
-
-// cmdPutBitmap writes one chunk of a clone's or a migration's bitmap
-// (architecture.md, Clones and Migrations; BM3), raises `bm_cnt` on a
-// MIGRATION's parent, and bumps SpRev once.
-//
-// A clone chunk is addressed by the PAIR --src-slice-idx / --bm-idx and holds
-// the bytes at offset bm_idx*CloneBmChunkBytes of that source slice's bitmap,
-// so the same bm_idx on two slices seeds two distinct chunks. The Clone record
-// carries no chunk count, so a clone put writes the chunk key and nothing
-// else. A migration chunk keeps its flat append sequence, where the new index
-// IS the count.
-//
-// Rewriting an existing chunk raises no count but still bumps SpRev — which is
-// exactly the "grown chunk" trigger of BM5.
+// cmdPutBitmap writes one chunk of a clone's or a migration's bitmap through
+// plant.PutCloneBitmap or plant.PutMigrBitmap (architecture.md, Clones and
+// Migrations; BM3).
 func cmdPutBitmap(g *globals, args []string) {
 	fs := newFlagSet("put-bitmap", g)
 	kind := fs.String("kind", "", "clone|migr (required)")
@@ -3396,10 +1903,9 @@ func cmdPutBitmap(g *globals, args []string) {
 	if *name == "" {
 		die("--name is required")
 	}
-	// A clone chunk key carries BOTH indexes as a common.BmIdxFmt field,
-	// exactly two hex digits each (model.ParseCloneBmKey); a migration key
-	// carries the bm_idx field alone (model.ParseBmIdx). An index of 256 or
-	// more could not be parsed back out of either.
+	// The flags are wider than the library's indexes, so their bound is
+	// checked here, before the conversion could wrap: a chunk key field
+	// holds two hex digits (model.ParseCloneBmKey, model.ParseBmIdx).
 	if *srcSliceIdx >= 1<<8 {
 		die("--src-slice-idx %d does not fit in the %q key field",
 			*srcSliceIdx, common.BmIdxFmt)
@@ -3415,62 +1921,31 @@ func cmdPutBitmap(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	// bmCnt is Migration's only: a Clone record carries no chunk count, so
-	// the output key is emitted for --kind migr.
-	var bmCnt uint32
-	var migr bool
-	var spRev uint64
-	created := false
-	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if *kind == "clone" {
-			// The clone record is still LOADED — the existence guard is what
-			// keeps `put-bitmap --name <unknown>` from planting an orphan
-			// chunk key under a clone nothing else knows about — but it is
-			// never rewritten: an append changes nothing in it.
-			parentKey := model.CloneKey(cid, target.spId, *name)
-			parent := &pb.Clone{}
-			if !s.Get(parentKey, parent) {
-				return fmt.Errorf("%q not found", parentKey)
-			}
-			key := model.CloneBitmapKey(
-				cid, target.spId, *name,
-				uint32(*srcSliceIdx), uint32(*bmIdx),
-			)
-			created = !s.Get(key, &pb.CloneBitmap{})
-			s.Put(key, &pb.CloneBitmap{Bitmap: data})
-		} else {
-			migr = true
-			parentKey := model.MigrationKey(cid, target.spId, *name)
-			parent := &pb.Migration{}
-			if !s.Get(parentKey, parent) {
-				return fmt.Errorf("%q not found", parentKey)
-			}
-			key := model.MigrBitmapKey(
-				cid, target.spId, *name, uint32(*bmIdx),
-			)
-			created = !s.Get(key, &pb.MigrBitmap{})
-			s.Put(key, &pb.MigrBitmap{Bitmap: data})
-			if created {
-				parent.BmCnt++
-				s.Put(parentKey, parent)
-			}
-			bmCnt = parent.GetBmCnt()
-		}
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	var bitmap plant.Bitmap
+	if *kind == "clone" {
+		bitmap, err = plant.PutCloneBitmap(ctx, cli, cl, target,
+			plant.CloneBitmapSpec{
+				Clone:       *name,
+				SrcSliceIdx: uint32(*srcSliceIdx),
+				BmIdx:       uint32(*bmIdx),
+				Data:        data,
+			})
+	} else {
+		bitmap, err = plant.PutMigrBitmap(ctx, cli, cl, target,
+			plant.MigrBitmapSpec{
+				Migr:  *name,
+				BmIdx: uint32(*bmIdx),
+				Data:  data,
+			})
+	}
 	if err != nil {
 		die("put-bitmap: %v", err)
 	}
 	out := map[string]any{
-		"sp_name": target.name,
+		"sp_name": target.Name,
 		"kind":    *kind,
 		"name":    *name,
 		// The pair a clone chunk was written at; 0 for a migration, whose
@@ -3478,11 +1953,12 @@ func cmdPutBitmap(g *globals, args []string) {
 		"src_slice_idx": uint32(*srcSliceIdx),
 		"bm_idx":        uint32(*bmIdx),
 		"bytes":         len(data),
-		"created":       created,
-		"sp_rev":        spRev,
+		"created":       bitmap.Created,
+		"sp_rev":        bitmap.SpRev,
 	}
-	if migr {
-		out["bm_cnt"] = bmCnt
+	// bm_cnt is Migration's only: a Clone record carries no chunk count.
+	if *kind == "migr" {
+		out["bm_cnt"] = bitmap.BmCnt
 	}
 	emit(out)
 }
@@ -3491,10 +1967,9 @@ func cmdPutBitmap(g *globals, args []string) {
 // set-*
 // ---------------------------------------------------------------------------
 
-// cmdSetCntlr rewrites one Cntlr's primary / disabled flags and bumps SpRev
-// once. The two flags are independently settable and a tri-state, so that
-// "not given" differs from "false" — case C7 flips the primary role
-// with two calls and case D10 disables a standby without touching its role.
+// cmdSetCntlr rewrites one Cntlr's primary / disabled flags through
+// plant.SetCntlr. The two flags are independently settable and a tri-state,
+// so that "not given" differs from "false".
 func cmdSetCntlr(g *globals, args []string) {
 	fs := newFlagSet("set-cntlr", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3506,56 +1981,31 @@ func cmdSetCntlr(g *globals, args []string) {
 	fs.Var(disabled, "disabled", "Cntlr.disabled")
 	fs.Parse(args)
 
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	cntlrId := requireId(id)
 	if !primary.set && !disabled.set {
 		die("at least one of --primary / --disabled is required")
 	}
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	var stored *pb.Cntlr
-	spRev := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		key := model.CntlrKey(cid, target.spId, uint64(id))
-		cntlr := &pb.Cntlr{}
-		if !s.Get(key, cntlr) {
-			return fmt.Errorf("%q not found", key)
-		}
-		if primary.set {
-			cntlr.Primary = primary.value
-		}
-		if disabled.set {
-			cntlr.Disabled = disabled.value
-		}
-		s.Put(key, cntlr)
-		stored = cntlr
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	stored, spRev, err := plant.SetCntlr(ctx, cli, cl, target, cntlrId,
+		plant.CntlrFlags{Primary: primary.ptr(), Disabled: disabled.ptr()})
 	if err != nil {
 		die("set-cntlr: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":  target.name,
-		"cntlr_id": idHex(uint64(id)),
+		"sp_name":  target.Name,
+		"cntlr_id": idHex(cntlrId),
 		"cntlr":    pbToAny(stored),
 		"sp_rev":   spRev,
 	})
 }
 
-// cmdSetLevel writes SpConf.sp_level and bumps SpRev once (architecture.md,
-// Storage pools: UpdateStoragePoolLevel): the level rides in both Syncup
-// requests, and AR3 makes NO_THINPOOL and above suppress every reaction —
-// which is what case D10 proves.
+// cmdSetLevel writes SpConf.sp_level through plant.SetLevel (architecture.md,
+// Storage pools: UpdateStoragePoolLevel).
 func cmdSetLevel(g *globals, args []string) {
 	fs := newFlagSet("set-level", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3569,34 +2019,23 @@ func cmdSetLevel(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	spRev := uint64(0)
-	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		conf.SpLevel = level
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	spRev, err := plant.SetLevel(ctx, cli, cl, target, level)
 	if err != nil {
 		die("set-level: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":  target.name,
+		"sp_name":  target.Name,
 		"sp_level": level.String(),
 		"level":    int32(level),
 		"sp_rev":   spRev,
 	})
 }
 
-// cmdSetLwm writes SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct and bumps
-// SpRev once: the lever case D5/D6 pulls to arm and disarm the AR6 grow rule
-// (a value above 100 means "never grow automatically").
+// cmdSetLwm writes the pool's low_water_mark_pct through plant.SetLwm: the
+// lever case D5/D6 pulls to arm and disarm the AR6 grow rule.
 func cmdSetLwm(g *globals, args []string) {
 	fs := newFlagSet("set-lwm", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3605,50 +2044,23 @@ func cmdSetLwm(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	// The gateway's rule, mirrored (architecture.md, Common validation): 0 asks
-	// for the default and is resolved before the write, because the worker
-	// refuses a stored 0. A value above 100 is a MEANING — "never grow
-	// automatically" — and is stored exactly as given.
-	pctValue := uint32(*pct)
-	if pctValue == 0 {
-		pctValue = common.DefaultPoolLowWatermarkPct
-	}
-
-	spRev := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if conf.BdevConf == nil {
-			conf.BdevConf = &pb.BdevConf{}
-		}
-		if conf.BdevConf.DmPoolConf == nil {
-			conf.BdevConf.DmPoolConf = &pb.DmPoolConf{}
-		}
-		conf.BdevConf.DmPoolConf.LowWaterMarkPct = pctValue
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		return err
-	})
+	stored, spRev, err := plant.SetLwm(ctx, cli, cl, target, uint32(*pct))
 	if err != nil {
 		die("set-lwm: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":            target.name,
-		"low_water_mark_pct": pctValue,
+		"sp_name":            target.Name,
+		"low_water_mark_pct": stored,
 		"sp_rev":             spRev,
 	})
 }
 
-// cmdSetFree rewrites a node's free_ext_cnt and maintains its capacity key in
-// the same STM (architecture.md, Capacity index keys) — and bumps NO revision:
-// a budget change is an allocator input, not agent-visible desired state
-// (architecture.md, Revision keys and the sync fan-out). It is the script's
-// lever for deterministic allocation.
+// cmdSetFree rewrites a node's free_ext_cnt through plant.SetDnFree or
+// plant.SetCnFree — the script's lever for deterministic allocation, which
+// bumps no revision.
 func cmdSetFree(g *globals, args []string) {
 	fs := newFlagSet("set-free", g)
 	kind, rest := splitKind(args)
@@ -3657,78 +2069,46 @@ func cmdSetFree(g *globals, args []string) {
 	freeExt := fs.Uint64("free-ext", 0, "the new free_ext_cnt")
 	fs.Parse(rest)
 	kind = kindArg(fs, kind, "dn", "cn")
-
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	nodeId := requireId(id)
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, cc := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
 	allocatable := false
 	addr := ""
 	if kind == "dn" {
-		addr = findNodeAddr(ctx, cli, cid, "dn_conf", uint64(id))
-		err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-			key := model.DnConfKey(cid, addr)
-			dn := &pb.DnConf{}
-			if !s.Get(key, dn) {
-				return fmt.Errorf("%q not found", key)
-			}
-			newDn := proto.Clone(dn).(*pb.DnConf)
-			newDn.FreeExtCnt = *freeExt
-			s.Put(key, newDn)
-			model.MaintainDnCapacity(s, cid, addr, cc, dn, newDn)
-			allocatable = model.DnAllocatable(newDn, cc.GetDnBinConf())
-			return nil
-		})
+		var dn *pb.DnConf
+		var err error
+		addr, dn, err = plant.SetDnFree(ctx, cli, cl, nodeId, *freeExt)
 		if err != nil {
 			die("set-free: %v", err)
 		}
+		allocatable = model.DnAllocatable(dn, cl.Conf.GetDnBinConf())
 	} else {
-		addr = findNodeAddr(ctx, cli, cid, "cn_conf", uint64(id))
-		err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-			key := model.CnConfKey(cid, addr)
-			cn := &pb.CnConf{}
-			if !s.Get(key, cn) {
-				return fmt.Errorf("%q not found", key)
-			}
-			newCn := proto.Clone(cn).(*pb.CnConf)
-			newCn.FreeExtCnt = *freeExt
-			s.Put(key, newCn)
-			model.MaintainCnCapacity(s, cid, addr, cn, newCn)
-			allocatable = model.CnAllocatable(newCn)
-			return nil
-		})
+		var cn *pb.CnConf
+		var err error
+		addr, cn, err = plant.SetCnFree(ctx, cli, cl, nodeId, *freeExt)
 		if err != nil {
 			die("set-free: %v", err)
 		}
+		allocatable = model.CnAllocatable(cn)
 	}
 	emit(map[string]any{
 		"kind":         kind,
-		"id":           idHex(uint64(id)),
+		"id":           idHex(nodeId),
 		"addr_port":    addr,
 		"free_ext_cnt": *freeExt,
 		"allocatable":  allocatable,
 	})
 }
 
-// cmdSetEpoch plants one err_epoch and writes nothing else: a Cntlr's, or a
-// Leg's or a Side's inside its Slice, set --age seconds before now, or
-// cleared with --clear. Now is the clock of the host it runs on, which in the
-// suites is the test server, whose clock the workers read too. It is raw
-// (dnv-worker.md, Integration test plan, The driver): it bumps no revision,
-// as no health write does (HL3), and touches no CdcEntry and no settling
-// flag. On a leg, a side, a primary or a disabled cntlr, a health write that
-// sets or clears the epoch can leave just that as well, so there a case
-// plants the epoch an earlier owner or another observer would have left
-// (worker_test.sh case H plants a primary's). A health write that sets or
-// clears the epoch of an enabled standby also rewrites the SP's CdcEntry
-// records, because that epoch decides whether the listing rule lists the
-// standby (architecture.md [D18]; dnv-worker.md HL2). This command leaves
-// them as they are, so after it the records may disagree with that rule
-// about such a cntlr.
+// cmdSetEpoch plants one err_epoch, a Cntlr's or a Leg's or a Side's, through
+// plant.SetCntlrEpoch, plant.SetLegEpoch or plant.SetSideEpoch: set --age
+// seconds before now, or cleared with --clear. Now is the clock of the host
+// it runs on, which in the suites is the test server, whose clock the workers
+// read too. The library call is raw: it writes the epoch and nothing else
+// (dnv-worker.md, Integration test plan, The driver).
 func cmdSetEpoch(g *globals, args []string) {
 	fs := newFlagSet("set-epoch", g)
 	kind, rest := splitKind(args)
@@ -3742,9 +2122,7 @@ func cmdSetEpoch(g *globals, args []string) {
 	fs.Parse(rest)
 	kind = kindArg(fs, kind, "cntlr", "leg", "side")
 
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	objId := requireId(id)
 	if (kind == "cntlr") != (uint64(sliceId) == 0) {
 		die("--slice is required for a leg or a side, and refused for a " +
 			"cntlr")
@@ -3764,46 +2142,27 @@ func cmdSetEpoch(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
 	var old uint64
-	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		if _, err := getSpConf(s, cid, target); err != nil {
-			return err
-		}
-		if kind == "cntlr" {
-			key := model.CntlrKey(cid, target.spId, uint64(id))
-			cntlr := &pb.Cntlr{}
-			if !s.Get(key, cntlr) {
-				return fmt.Errorf("%q not found", key)
-			}
-			old = cntlr.GetErrEpoch()
-			cntlr.ErrEpoch = epoch
-			s.Put(key, cntlr)
-			return nil
-		}
-		key := model.SliceKey(cid, target.spId, uint64(sliceId))
-		slice := &pb.Slice{}
-		if !s.Get(key, slice) {
-			return fmt.Errorf("%q not found", key)
-		}
-		var found bool
-		old, found = setSliceEpoch(slice, kind, uint64(id), epoch)
-		if !found {
-			return fmt.Errorf("slice %#x holds no %s %#x",
-				uint64(sliceId), kind, uint64(id))
-		}
-		s.Put(key, slice)
-		return nil
-	})
+	switch kind {
+	case "cntlr":
+		old, err = plant.SetCntlrEpoch(ctx, cli, cl, target, objId, epoch)
+	case "leg":
+		old, err = plant.SetLegEpoch(
+			ctx, cli, cl, target, uint64(sliceId), objId, epoch)
+	default:
+		old, err = plant.SetSideEpoch(
+			ctx, cli, cl, target, uint64(sliceId), objId, epoch)
+	}
 	if err != nil {
 		die("set-epoch: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":       target.name,
+		"sp_name":       target.Name,
 		"kind":          kind,
-		"id":            idHex(uint64(id)),
+		"id":            idHex(objId),
 		"slice_id":      idHex(uint64(sliceId)),
 		"err_epoch":     epoch,
 		"old_err_epoch": old,
@@ -3830,71 +2189,17 @@ func plantedEpoch(
 	return now - age, nil
 }
 
-// setSliceEpoch sets the err_epoch of one leg, or of one side, of a slice —
-// in a meta or a data group, on an active or a spare leg, wherever the health
-// ops look them up (model.SetLegErrEpoch, model.SetSideErrEpoch) — and
-// returns the value it replaced; found is false when the slice holds no such
-// object.
-func setSliceEpoch(
-	slice *pb.Slice, kind string, id uint64, epoch uint64,
-) (old uint64, found bool) {
-	grps := append(
-		append([]*pb.Group(nil), slice.GetMetaGrpList()...),
-		slice.GetDataGrpList()...,
-	)
-	for _, grp := range grps {
-		legs := append(
-			append([]*pb.Leg(nil), grp.GetLegList()...),
-			grp.GetSpareLegList()...,
-		)
-		for _, leg := range legs {
-			if kind == "leg" && leg.GetLegId() == id {
-				old = leg.GetErrEpoch()
-				leg.ErrEpoch = epoch
-				return old, true
-			}
-			if kind != "side" {
-				continue
-			}
-			for _, side := range leg.GetSideList() {
-				if side.GetSideId() == id {
-					old = side.GetErrEpoch()
-					side.ErrEpoch = epoch
-					return old, true
-				}
-			}
-		}
-	}
-	return 0, false
-}
-
 // ---------------------------------------------------------------------------
 // Playing the worker (gateway.md, Integration test plan, The etcd verification)
 // ---------------------------------------------------------------------------
 //
-// These, with the drains below, are the ONLY writes the gateway integration
-// suite performs through workerctl (gateway.md, Integration test plan, The
-// etcd verification). They exist because three gateway preconditions are
-// gated on a flag only the sp-worker ever moves — CreateThinDevice's snapshot
-// gate on ThinDevice.created (architecture.md, Thin devices), SwitchSpareLeg's
-// gate on Side.provisioned (architecture.md, Side provisioning protocol) and
-// FinishMigration's gate on Migration.cutover_pending, which only the
-// worker's cutover clears (architecture.md, Migrations) — and that suite
-// deliberately runs no dnv-worker.
-// All three go through the very model op the worker calls, so the state they
-// leave behind is exactly the state a converging worker would have produced,
-// including the single SpRev bump each owes (which the suite's rev
-// bookkeeping must count).
+// set-created, set-provisioned and start-cutover, with the drains below, are
+// the ONLY writes the gateway integration suite performs through workerctl
+// (gateway.md, Integration test plan, The etcd verification). Each is a
+// library call that goes through the very model op the worker calls.
 
-// cmdSetCreated flips ThinDevice.created through model.FlipCreated: the
-// materialization the sp-worker performs once a cntlr has reported the td's
-// thin volume RES_STATUS_OK in every slice (architecture.md, sp role;
-// dnv-worker.md RW19).
-//
-// The td_id comes from the stored record rather than from a flag: FlipCreated
-// takes a TdRef of name AND id precisely so a td deleted and re-created under
-// the same name between the read and the transaction is skipped instead of
-// silently flipped, and a caller that could pass a wrong id would defeat that.
+// cmdSetCreated flips ThinDevice.created through plant.SetCreated
+// (dnv-worker.md RW19).
 func cmdSetCreated(g *globals, args []string) {
 	fs := newFlagSet("set-created", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3907,39 +2212,23 @@ func cmdSetCreated(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	key := model.ThinDeviceKey(cid, target.spId, *name)
-	td := &pb.ThinDevice{}
-	found, err := cli.Get(ctx, key, td)
-	if err != nil {
-		die("%v", err)
-	}
-	if !found {
-		die("key %q not found", key)
-	}
-
-	flipped, err := model.FlipCreated(
-		ctx, cli, cid, target.shard, target.spId,
-		[]model.TdRef{{Name: *name, TdId: td.GetTdId()}},
-	)
+	tdId, flipped, spRev, err := plant.SetCreated(ctx, cli, cl, target, *name)
 	if err != nil {
 		die("set-created: %v", err)
 	}
 	emit(map[string]any{
 		"td_name": *name,
-		"td_id":   idHex(td.GetTdId()),
-		"flipped": len(flipped) == 1,
-		"sp_rev":  readSpRev(ctx, cli, cid, target),
+		"td_id":   idHex(tdId),
+		"flipped": flipped,
+		"sp_rev":  spRev,
 	})
 }
 
-// cmdSetProvisioned flips one Side.provisioned through model.FlipProvisioned:
-// the provisioning completion (architecture.md, Side provisioning protocol)
-// the sp-worker records once the dn agent reports the side's zeroing done. The
-// suite pulls it exactly where a gateway precondition demands it —
-// SwitchSpareLeg refuses an unprovisioned spare (architecture.md, Spare legs).
+// cmdSetProvisioned flips one Side.provisioned through plant.SetProvisioned
+// (architecture.md, Side provisioning protocol).
 func cmdSetProvisioned(g *globals, args []string) {
 	fs := newFlagSet("set-provisioned", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3951,17 +2240,15 @@ func cmdSetProvisioned(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
 	ref := model.SideRef{
 		SliceId: uint64(slice),
 		LegId:   uint64(leg),
 		SideId:  uint64(side),
 	}
-	flipped, _, err := model.FlipProvisioned(
-		ctx, cli, cid, target.shard, target.spId, []model.SideRef{ref},
-	)
+	flipped, spRev, err := plant.SetProvisioned(ctx, cli, cl, target, ref)
 	if err != nil {
 		die("set-provisioned: %v", err)
 	}
@@ -3969,26 +2256,14 @@ func cmdSetProvisioned(g *globals, args []string) {
 		"slice_id": idHex(ref.SliceId),
 		"leg_id":   idHex(ref.LegId),
 		"side_id":  idHex(ref.SideId),
-		"flipped":  len(flipped) == 1,
-		"sp_rev":   readSpRev(ctx, cli, cid, target),
+		"flipped":  flipped,
+		"sp_rev":   spRev,
 	})
 }
 
 // cmdStartCutover clears one Migration.cutover_pending through
-// model.StartCutover: the cutover the sp worker starts beside its provisioned
-// flip, once the pool's primary reports a live path to the migration's dst
-// side and that side reports it waits for the cutover (dnv-worker.md RW18;
-// architecture.md, Migration). The gateway suite runs no worker, and
-// FinishMigration refuses a migration whose cutover has not started, so this
-// is how the suite takes a migration past it before a finish.
-//
-// The migration's leg comes from the stored record and slices (cutoverRefOf)
-// and the cntlr the op checks is the pool's stored primary (storedPrimary)
-// unless --cntlr names one. The op re-checks in its own STM what the store
-// holds — the pool's level below SP_LEVEL_NO_MIGRATION, the flag still set,
-// the dst side provisioned, the cntlr the primary and not disabled — and the
-// driver dies on its refusal, so a case that skipped the provisioned flip
-// (set-provisioned) learns it here rather than at the finish.
+// plant.StartCutover (dnv-worker.md RW18): the cntlr the op checks is the
+// pool's stored primary unless --cntlr names one.
 func cmdStartCutover(g *globals, args []string) {
 	fs := newFlagSet("start-cutover", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -4004,28 +2279,15 @@ func cmdStartCutover(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	state, err := model.LoadSp(ctx, cli, cid, target.name)
+	cutover, err := plant.StartCutover(
+		ctx, cli, cl, target, *name, uint64(cntlr))
 	if err != nil {
 		die("start-cutover: %v", err)
 	}
-	ref, err := cutoverRefOf(state, *name)
-	if err != nil {
-		die("start-cutover: %v", err)
-	}
-	cntlrId := uint64(cntlr)
-	if cntlrId == 0 {
-		if cntlrId, err = storedPrimary(state); err != nil {
-			die("start-cutover: %v", err)
-		}
-	}
-	_, err = model.StartCutover(
-		ctx, cli, cid, target.shard, target.spId, target.name, ref, cntlrId)
-	if err != nil {
-		die("start-cutover: %v", err)
-	}
+	ref := cutover.Ref
 	emit(map[string]any{
 		"migr_name":   ref.MigrName,
 		"migr_id":     idHex(ref.MigrId),
@@ -4033,96 +2295,14 @@ func cmdStartCutover(g *globals, args []string) {
 		"leg_id":      idHex(ref.LegId),
 		"src_side_id": idHex(ref.SrcSideId),
 		"dst_side_id": idHex(ref.DstSideId),
-		"cntlr_id":    idHex(cntlrId),
-		"sp_rev":      readSpRev(ctx, cli, cid, target),
+		"cntlr_id":    idHex(cutover.CntlrId),
+		"sp_rev":      cutover.SpRev,
 	})
 }
 
-// cutoverRefOf names one migration of a load for model.StartCutover: its
-// record's id and sides, and the slice and leg that carry both sides. It
-// refuses a name the load has no record of and a record whose two sides
-// share no leg, the two shapes no op could start a cutover on.
-func cutoverRefOf(
-	state *model.SpState,
-	migrName string,
-) (model.CutoverRef, error) {
-	migr, ok := state.Migrs[migrName]
-	if !ok {
-		return model.CutoverRef{}, fmt.Errorf(
-			"no migration %q in the pool", migrName)
-	}
-	ref := model.CutoverRef{
-		MigrName:  migrName,
-		MigrId:    migr.GetMigrId(),
-		SrcSideId: migr.GetSrcSideId(),
-		DstSideId: migr.GetDstSideId(),
-	}
-	for _, sliceId := range state.Conf.GetSliceIdList() {
-		slice, ok := state.Slices[sliceId]
-		if !ok {
-			continue
-		}
-		grpList := make([]*pb.Group, 0,
-			len(slice.GetMetaGrpList())+len(slice.GetDataGrpList()))
-		grpList = append(grpList, slice.GetMetaGrpList()...)
-		grpList = append(grpList, slice.GetDataGrpList()...)
-		for _, grp := range grpList {
-			legList := make([]*pb.Leg, 0,
-				len(grp.GetLegList())+len(grp.GetSpareLegList()))
-			legList = append(legList, grp.GetLegList()...)
-			legList = append(legList, grp.GetSpareLegList()...)
-			for _, leg := range legList {
-				src, dst := false, false
-				for _, side := range leg.GetSideList() {
-					src = src || side.GetSideId() == ref.SrcSideId
-					dst = dst || side.GetSideId() == ref.DstSideId
-				}
-				if src && dst {
-					ref.SliceId = sliceId
-					ref.LegId = leg.GetLegId()
-					return ref, nil
-				}
-			}
-		}
-	}
-	return model.CutoverRef{}, fmt.Errorf(
-		"migration %q: sides %#x and %#x share no leg",
-		migrName, ref.SrcSideId, ref.DstSideId)
-}
-
-// storedPrimary returns the one cntlr of a load whose record says primary,
-// refusing a pool with none or with more than one: the cntlr start-cutover
-// names when --cntlr does not.
-func storedPrimary(state *model.SpState) (uint64, error) {
-	var primaries []uint64
-	for _, cntlrId := range state.Conf.GetCntlrIdList() {
-		if state.Cntlrs[cntlrId].GetPrimary() {
-			primaries = append(primaries, cntlrId)
-		}
-	}
-	if len(primaries) != 1 {
-		return 0, fmt.Errorf(
-			"want exactly one primary cntlr, the pool has %d", len(primaries))
-	}
-	return primaries[0], nil
-}
-
-// cmdSetDeleting latches an SP the way DeleteStoragePool does
-// (architecture.md, Storage pools; gateway.md, Storage pools and GrowSlice):
-// `deleting = true` plus ONE SpRev bump, and nothing else.
-//
-// The worker suite runs no gateway, so this is how a case puts an SP into the
-// state the sp coordinator's drain reacts to. It deliberately does NOT apply
-// the five-empty-lists precondition: that gate is the gateway's, the worker
-// suite (dnv-worker.md, Integration test plan, The driver) plants whatever
-// shape a case needs, and re-implementing a public precondition in a test
-// driver is how the two drift apart.
-//
-// That precondition is also what lets the sp drain give back no metadata
-// units (architecture.md, Metadata units): a pool that still has a clone or a
-// migration cannot be deleted. A pool latched here while it still holds a
-// planted clone or migration therefore leaves their units charged on its
-// nodes once it has drained.
+// cmdSetDeleting latches an SP the way DeleteStoragePool does, through
+// plant.SetDeleting: the worker suite runs no gateway, so this is how a case
+// puts an SP into the state the sp coordinator's drain reacts to.
 func cmdSetDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -4130,54 +2310,24 @@ func cmdSetDeleting(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	spRev := uint64(0)
-	latched := false
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		spRev, latched = 0, false
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		if conf.GetDeleting() {
-			// SPD3's no-op, so that a case can re-run a stage without a second
-			// bump moving every token it holds.
-			spRev = readSpRevIn(s, cid, target)
-			return nil
-		}
-		conf.Deleting = true
-		s.Put(model.SpConfKey(cid, target.name), conf)
-		spRev, err = bumpSpRev(s, cid, conf)
-		latched = true
-		return err
-	})
+	latch, err := plant.SetDeleting(ctx, cli, cl, target)
 	if err != nil {
 		die("set-deleting: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name": target.name,
-		"sp_id":   idHex(target.spId),
-		"latched": latched,
-		"sp_rev":  spRev,
+		"sp_name": target.Name,
+		"sp_id":   idHex(target.Id),
+		"latched": latch.Latched,
+		"sp_rev":  latch.SpRev,
 	})
 }
 
-// cmdDrainSp runs a latched SP's drain to completion: SPD8's derivation in a
-// loop over the three model ops the sp coordinator calls, with no pass and no
-// wake-up.
-//
-// It is the gateway suite's stand-in for the sp coordinator, which that suite
-// does not run — the same kind of worker-role write as `set-provisioned` and
-// `set-created`, and for the same reason: the gateway's END state after a
-// delete cannot be asserted without SOMEBODY draining, and standing up a whole
-// dnv-worker inside a gateway case would make every other assertion in it
-// depend on a converging fleet.
-//
-// The worker suite drives exactly ONE batch through this, with --max-steps 1,
-// to BUILD a partially drained SP rather than race one; the drain that
-// finishes it is the real coordinator's, which is the point of that case.
+// cmdDrainSp runs a latched SP's drain through plant.DrainSp. The worker
+// suite drives exactly ONE batch through this, with --max-steps 1, to BUILD a
+// partially drained SP; the gateway suite drains to the end.
 func cmdDrainSp(g *globals, args []string) {
 	fs := newFlagSet("drain-sp", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -4193,86 +2343,26 @@ func cmdDrainSp(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, cc := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	steps := 0
-	cntlrs, grps, slices := 0, 0, 0
-	deleted := false
-	// steps is incremented after the switch, not by a post statement, so that
-	// the iteration which commits D3 counts once and still reports
-	// sp_deleted: a budget sized to exactly the number of steps the drain
-	// needs must not report a fully committed drain as unfinished.
-	for steps < *maxSteps {
-		conf := &pb.SpConf{}
-		found, err := cli.Get(ctx, model.SpConfKey(cid, target.name), conf)
-		if err != nil {
-			die("drain-sp: %v", err)
-		}
-		if !found {
-			// Already gone — by an earlier invocation, or by the real
-			// coordinator racing this one. No step ran, so none is counted.
-			deleted = true
-			break
-		}
-		if conf.GetSpId() != target.spId {
-			die("drain-sp: storage pool %q changed its id", target.name)
-		}
-		if !conf.GetDeleting() {
-			die("drain-sp: storage pool %q is not being deleted", target.name)
-		}
-		switch {
-		case len(conf.GetCntlrIdList()) > 0:
-			removed, err := model.DrainSpCntlrs(
-				ctx, cli, cid, target.shard, target.spId, target.name)
-			if err != nil {
-				die("drain-sp: cntlrs: %v", err)
-			}
-			cntlrs += removed
-		case len(conf.GetSliceIdList()) > 0:
-			removed, sliceDone, err := model.DrainSpSlice(
-				ctx, cli, cid, target.shard, target.spId, target.name,
-				lowestId(conf.GetSliceIdList()), cc)
-			if err != nil {
-				die("drain-sp: slice: %v", err)
-			}
-			grps += removed
-			if sliceDone {
-				slices++
-			}
-		default:
-			if err := model.FinishSpDelete(
-				ctx, cli, cid, target.shard, target.spId, target.name,
-			); err != nil {
-				die("drain-sp: final: %v", err)
-			}
-			deleted = true
-		}
-		steps++
-		if deleted {
-			break
-		}
+	drain, err := plant.DrainSp(ctx, cli, cl, target, *maxSteps)
+	if err != nil {
+		die("drain-sp: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":    target.name,
-		"sp_id":      idHex(target.spId),
-		"steps":      steps,
-		"cntlr_cnt":  cntlrs,
-		"grp_cnt":    grps,
-		"slice_cnt":  slices,
-		"sp_deleted": deleted,
+		"sp_name":    target.Name,
+		"sp_id":      idHex(target.Id),
+		"steps":      drain.Steps,
+		"cntlr_cnt":  drain.CntlrCnt,
+		"grp_cnt":    drain.GrpCnt,
+		"slice_cnt":  drain.SliceCnt,
+		"sp_deleted": drain.Deleted,
 	})
 }
 
-// cmdSetCloneDeleting latches one clone the way DeleteClone does (CLD4,
-// architecture.md, Clones): `deleting = true` plus one BumpSpRev.
-//
-// It deliberately does NOT resume the destination namespaces, which the RPC
-// does in the same transaction: that write belongs to the gateway's request
-// validation and subsystem walk, the worker suite (dnv-worker.md,
-// Integration test plan, The driver) plants whatever shape a case needs, and
-// re-implementing a public action in a test driver is how the two drift
-// apart. A case that cares about the resume drives the real RPC.
+// cmdSetCloneDeleting latches one clone the way DeleteClone does, through
+// plant.SetCloneDeleting (CLD4).
 func cmdSetCloneDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-clone-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -4284,65 +2374,25 @@ func cmdSetCloneDeleting(g *globals, args []string) {
 	}
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	spRev := uint64(0)
-	latched := false
-	cloneId := uint64(0)
-	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
-		spRev, latched, cloneId = 0, false, 0
-		conf, err := getSpConf(s, cid, target)
-		if err != nil {
-			return err
-		}
-		key := model.CloneKey(cid, target.spId, *name)
-		clone := &pb.Clone{}
-		if !s.Get(key, clone) {
-			return fmt.Errorf("clone %q not found", *name)
-		}
-		cloneId = clone.GetCloneId()
-		if clone.GetDeleting() {
-			// CLD3's no-op, so a case can re-run a stage without a second
-			// bump moving every token it holds.
-			spRev = readSpRevIn(s, cid, target)
-			return nil
-		}
-		clone.Deleting = true
-		s.Put(key, clone)
-		spRev, err = bumpSpRev(s, cid, conf)
-		latched = true
-		return err
-	})
+	latch, err := plant.SetCloneDeleting(ctx, cli, cl, target, *name)
 	if err != nil {
 		die("set-clone-deleting: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":    target.name,
+		"sp_name":    target.Name,
 		"clone_name": *name,
-		"clone_id":   idHex(cloneId),
-		"latched":    latched,
-		"sp_rev":     spRev,
+		"clone_id":   idHex(latch.Id),
+		"latched":    latch.Latched,
+		"sp_rev":     latch.SpRev,
 	})
 }
 
-// cmdDrainClone runs a latched clone's drain to completion: CLD7's derivation
-// in a loop over model.DrainCloneBm and model.FinishCloneDelete, with no pass
-// and no wake-up.
-//
-// It is the GATEWAY suite's stand-in for the sp coordinator, which that suite
-// does not run — the clone twin of drain-sp, and there for the same reason: the
-// gateway's end state after a clone delete cannot be asserted without somebody
-// draining. The worker suite drives exactly ONE batch through it, with
-// --max-steps 1, to BUILD case G's restart fixture; the drain that finishes
-// that clone, and every step of the clone before it, is the real coordinator's.
-//
-// Its last step, model.FinishCloneDelete, gives the clone's metadata units
-// back on the CN of every cntlr of the pool (architecture.md, Metadata
-// units). Each of those CNs holds them: CreateClone and put-clone charge the
-// CNs of the cntlrs the pool has at the time, and CreateCntlr, like the
-// worker's cntlr replacement, charges the CN it places a later cntlr on the
-// pool's whole clone sum. Both suites read that release after a drain.
+// cmdDrainClone runs a latched clone's drain through plant.DrainClone (CLD7).
+// The worker suite drives exactly ONE batch through it, with --max-steps 1,
+// to BUILD case G's restart fixture.
 func cmdDrainClone(g *globals, args []string) {
 	fs := newFlagSet("drain-clone", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -4355,152 +2405,22 @@ func cmdDrainClone(g *globals, args []string) {
 	}
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
-	// A clone that was never there is a caller error, not a finished drain:
-	// `clone_deleted: true` must mean "this invocation, or an earlier one,
-	// removed it", so the existence check happens once, up front, and a
-	// missing clone dies rather than reporting success.
-	if !cloneExists(ctx, cli, cid, target.spId, *name) {
-		die("drain-clone: clone %q not found", *name)
-	}
-	steps, chunks := 0, 0
-	deleted := false
-	for steps < *maxSteps {
-		clone := &pb.Clone{}
-		found, err := cli.Get(
-			ctx, model.CloneKey(cid, target.spId, *name), clone)
-		if err != nil {
-			die("drain-clone: %v", err)
-		}
-		if !found {
-			deleted = true
-			break
-		}
-		if !clone.GetDeleting() {
-			die("drain-clone: clone %q is not being deleted", *name)
-		}
-		batch := cloneChunks(ctx, cli, cid, target.spId, *name)
-		if len(batch) > common.MaxDelBmPerTxn {
-			batch = batch[:common.MaxDelBmPerTxn]
-		}
-		if len(batch) == 0 {
-			err = model.FinishCloneDelete(ctx, cli, cid, target.shard,
-				target.spId, target.name, *name, clone.GetCloneId())
-			if err != nil {
-				die("drain-clone: final: %v", err)
-			}
-			deleted = true
-		} else {
-			removed, err := model.DrainCloneBm(ctx, cli, cid,
-				target.spId, target.name, *name, clone.GetCloneId(), batch)
-			if err != nil {
-				die("drain-clone: batch: %v", err)
-			}
-			chunks += removed
-		}
-		steps++
-		if deleted {
-			break
-		}
+	drain, err := plant.DrainClone(ctx, cli, cl, target, *name, *maxSteps)
+	if err != nil {
+		die("drain-clone: %v", err)
 	}
 	emit(map[string]any{
-		"sp_name":    target.name,
+		"sp_name":    target.Name,
 		"clone_name": *name,
-		"steps":      steps,
+		"steps":      drain.Steps,
 		// chunk_cnt is the number of chunk KEYS this drain removed. The Clone
 		// record carries no count of its own to confuse it with.
-		"chunk_cnt":     chunks,
-		"clone_deleted": deleted,
+		"chunk_cnt":     drain.ChunkCnt,
+		"clone_deleted": drain.Deleted,
 	})
-}
-
-// cloneExists reports whether one clone's key is there.
-func cloneExists(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	spId uint64,
-	cloneName string,
-) bool {
-	found, err := cli.Get(ctx, model.CloneKey(cid, spId, cloneName),
-		&pb.Clone{})
-	if err != nil {
-		die("drain-clone: %v", err)
-	}
-	return found
-}
-
-// cloneChunks is MD3's keys-only scan of one clone's chunk prefix, in ascending
-// (src_slice_idx, bm_idx) order — the surviving set a drain step derives its
-// position from (CLD7).
-func cloneChunks(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	spId uint64,
-	cloneName string,
-) []model.BmChunk {
-	prefix := model.CloneBitmapPrefix(cid, spId, cloneName)
-	keys, _, err := cli.RangeKeys(ctx, prefix)
-	if err != nil {
-		die("drain-clone: %v", err)
-	}
-	out := make([]model.BmChunk, 0, len(keys))
-	for _, entry := range keys {
-		sliceIdx, bmIdx, ok := model.ParseCloneBmKey(entry.Key)
-		if !ok {
-			continue
-		}
-		out = append(out, model.BmChunk{
-			SliceIdx: sliceIdx, Idx: bmIdx, ModRev: entry.ModRev,
-		})
-	}
-	return out
-}
-
-// lowestId is SPD10's target rule: the LOWEST listed id, so that two drivers
-// pick the same one however the list is stored.
-func lowestId(ids []uint64) uint64 {
-	lowest := ids[0]
-	for _, id := range ids[1:] {
-		if id < lowest {
-			lowest = id
-		}
-	}
-	return lowest
-}
-
-// readSpRevIn is readSpRev inside a caller's STM, for the paths that must not
-// issue a second round trip after a decision.
-func readSpRevIn(s etcdutil.STM, cid uint64, target spTarget) uint64 {
-	rev := &pb.SpRev{}
-	if !s.Get(model.SpRevKey(target.shard, cid, target.spId), rev) {
-		return 0
-	}
-	return rev.GetRevision()
-}
-
-// readSpRev reports the SP's revision after a flip, so the caller can refresh
-// the optimistic-concurrency token the flip invalidated without a second
-// round trip through get-rev.
-func readSpRev(
-	ctx context.Context,
-	cli *etcdutil.Client,
-	cid uint64,
-	target spTarget,
-) uint64 {
-	rev := &pb.SpRev{}
-	found, err := cli.Get(
-		ctx, model.SpRevKey(target.shard, cid, target.spId), rev)
-	if err != nil {
-		die("%v", err)
-	}
-	if !found {
-		die("sp_rev of %q not found", target.name)
-	}
-	return rev.GetRevision()
 }
 
 // ---------------------------------------------------------------------------
@@ -4546,17 +2466,20 @@ func cmdGetDn(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
 	endpoint := *addr
 	if endpoint == "" {
 		if uint64(id) == 0 {
 			die("--id or --addr is required")
 		}
-		endpoint = findNodeAddr(ctx, cli, cid, "dn_conf", uint64(id))
+		var err error
+		if endpoint, err = plant.DnAddr(ctx, cli, cl, uint64(id)); err != nil {
+			die("%v", err)
+		}
 	}
 	dn := &pb.DnConf{}
-	found, err := cli.Get(ctx, model.DnConfKey(cid, endpoint), dn)
+	found, err := cli.Get(ctx, model.DnConfKey(cl.Id, endpoint), dn)
 	if err != nil {
 		die("%v", err)
 	}
@@ -4576,17 +2499,20 @@ func cmdGetCn(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
 	endpoint := *addr
 	if endpoint == "" {
 		if uint64(id) == 0 {
 			die("--id or --addr is required")
 		}
-		endpoint = findNodeAddr(ctx, cli, cid, "cn_conf", uint64(id))
+		var err error
+		if endpoint, err = plant.CnAddr(ctx, cli, cl, uint64(id)); err != nil {
+			die("%v", err)
+		}
 	}
 	cn := &pb.CnConf{}
-	found, err := cli.Get(ctx, model.CnConfKey(cid, endpoint), cn)
+	found, err := cli.Get(ctx, model.CnConfKey(cl.Id, endpoint), cn)
 	if err != nil {
 		die("%v", err)
 	}
@@ -4606,25 +2532,22 @@ func cmdGetRev(g *globals, args []string) {
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
 	fs.Parse(rest)
 	kind = kindArg(fs, kind, "dn", "cn", "sp")
-
-	if uint64(id) == 0 {
-		die("--id is required and must not be 0")
-	}
+	objId := requireId(id)
 	shardCode := uint32(shard)
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
+	cl := g.loadCluster(ctx, cli)
 
 	var key string
 	var msg proto.Message
 	switch kind {
 	case "dn":
-		key, msg = model.DnRevKey(shardCode, cid, uint64(id)), &pb.DnRev{}
+		key, msg = model.DnRevKey(shardCode, cl.Id, objId), &pb.DnRev{}
 	case "cn":
-		key, msg = model.CnRevKey(shardCode, cid, uint64(id)), &pb.CnRev{}
+		key, msg = model.CnRevKey(shardCode, cl.Id, objId), &pb.CnRev{}
 	case "sp":
-		key, msg = model.SpRevKey(shardCode, cid, uint64(id)), &pb.SpRev{}
+		key, msg = model.SpRevKey(shardCode, cl.Id, objId), &pb.SpRev{}
 	}
 	found, err := cli.Get(ctx, key, msg)
 	if err != nil {
@@ -4654,10 +2577,10 @@ func cmdGetSp(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, spec)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, spec)
 
-	state, err := model.LoadSp(ctx, cli, cid, target.name)
+	state, err := model.LoadSp(ctx, cli, cl.Id, target.Name)
 	if err != nil {
 		die("get-sp: %v", err)
 	}
@@ -4714,7 +2637,7 @@ func cmdGetSp(g *globals, args []string) {
 		return out
 	}
 	emit(map[string]any{
-		"sp_name":      target.name,
+		"sp_name":      target.Name,
 		"store_rev":    state.Rev,
 		"sp_conf":      pbToAny(state.Conf),
 		"cntlrs":       cntlrs,
@@ -4741,11 +2664,11 @@ func cmdGetCntlr(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
 	if uint64(id) != 0 {
-		key := model.CntlrKey(cid, target.spId, uint64(id))
+		key := model.CntlrKey(cl.Id, target.Id, uint64(id))
 		cntlr := &pb.Cntlr{}
 		found, err := cli.Get(ctx, key, cntlr)
 		if err != nil {
@@ -4757,7 +2680,7 @@ func cmdGetCntlr(g *globals, args []string) {
 		emitPb(cntlr)
 		return
 	}
-	state, err := model.LoadSp(ctx, cli, cid, target.name)
+	state, err := model.LoadSp(ctx, cli, cl.Id, target.Name)
 	if err != nil {
 		die("get-cntlr: %v", err)
 	}
@@ -4779,11 +2702,11 @@ func cmdGetSlice(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
 	if uint64(id) != 0 {
-		key := model.SliceKey(cid, target.spId, uint64(id))
+		key := model.SliceKey(cl.Id, target.Id, uint64(id))
 		slice := &pb.Slice{}
 		found, err := cli.Get(ctx, key, slice)
 		if err != nil {
@@ -4795,7 +2718,7 @@ func cmdGetSlice(g *globals, args []string) {
 		emitPb(slice)
 		return
 	}
-	state, err := model.LoadSp(ctx, cli, cid, target.name)
+	state, err := model.LoadSp(ctx, cli, cl.Id, target.Name)
 	if err != nil {
 		die("get-slice: %v", err)
 	}
@@ -4816,11 +2739,11 @@ func cmdGetTd(g *globals, args []string) {
 
 	ctx, done, cli := g.open()
 	defer done()
-	cid, _ := g.clusterId(ctx, cli)
-	target := resolveSp(ctx, cli, cid, *sp)
+	cl := g.loadCluster(ctx, cli)
+	target := resolveSp(ctx, cli, cl, *sp)
 
 	if *name != "" {
-		key := model.ThinDeviceKey(cid, target.spId, *name)
+		key := model.ThinDeviceKey(cl.Id, target.Id, *name)
 		td := &pb.ThinDevice{}
 		found, err := cli.Get(ctx, key, td)
 		if err != nil {
@@ -4832,7 +2755,7 @@ func cmdGetTd(g *globals, args []string) {
 		emitPb(td)
 		return
 	}
-	state, err := model.LoadSp(ctx, cli, cid, target.name)
+	state, err := model.LoadSp(ctx, cli, cl.Id, target.Name)
 	if err != nil {
 		die("get-td: %v", err)
 	}
@@ -4876,8 +2799,8 @@ func cmdListKeys(g *globals, args []string) {
 				"instead", spec, common.DnvPrefix)
 		}
 		if info.clusterScoped && g.cluster != "" {
-			cid, _ := g.clusterId(ctx, cli)
-			scan = keyPrefix(common.DnvPrefix, spec, idHex(cid))
+			cl := g.loadCluster(ctx, cli)
+			scan = keyPrefix(common.DnvPrefix, spec, idHex(cl.Id))
 		} else {
 			scan = keyPrefix(common.DnvPrefix, spec)
 		}

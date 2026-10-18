@@ -1167,16 +1167,17 @@ func (f *fakeNode) children(path string) []string {
 	return out
 }
 
+// childOf is the name of entry inside dir when entry is a direct child of
+// it. The test of the entry's last slash comes first, read from the end of
+// the entry, so a listing that walks every entry of the fake compares dir
+// only with the entries whose parent is as long as dir: a node of a thousand
+// exports holds tens of thousands of entries that share a long prefix.
 func childOf(dir, entry string) (string, bool) {
-	prefix := dir + "/"
-	if !strings.HasPrefix(entry, prefix) {
+	if strings.LastIndexByte(entry, '/') != len(dir) ||
+		len(entry) == len(dir)+1 || entry[:len(dir)] != dir {
 		return "", false
 	}
-	rest := entry[len(prefix):]
-	if rest == "" || strings.Contains(rest, "/") {
-		return "", false
-	}
-	return rest, true
+	return entry[len(dir)+1:], true
 }
 
 // cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only

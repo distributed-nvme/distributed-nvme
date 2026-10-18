@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -175,7 +176,10 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 // candidate scan whose result the op can only throw away. The pre-check is
 // also what gives them the codes of architecture.md, Spare legs —
 // INVALID_ARGUMENT and RESOURCE_EXHAUSTED — since model raises every one of
-// its own preconditions as FAILED_PRECONDITION.
+// its own preconditions as FAILED_PRECONDITION. The full list is the one the
+// op's STM can still meet after the pre-check passed, when another create
+// fills it in between, and its reason, model.ReasonSpareListFull, is answered
+// RESOURCE_EXHAUSTED as well (GW7).
 func (s *Server) CreateSpareLeg(
 	ctx context.Context,
 	req *pb.CreateSpareLegRequest,
@@ -215,10 +219,7 @@ func (s *Server) CreateSpareLeg(
 				req.GetGrpId())
 		}
 		if len(loc.Grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
-			return errExhausted(
-				"group %d has %d spare legs, the maximum is %d",
-				req.GetGrpId(), len(loc.Grp.GetSpareLegList()),
-				common.MaxSpareLegPerGrp)
+			return spareListFull(req.GetGrpId())
 		}
 		// The spare joins an existing Group and inherits its geometry
 		// unchanged (architecture.md, Spare legs: no on-leg layout —
@@ -253,6 +254,12 @@ func (s *Server) CreateSpareLeg(
 			req.GetSpRev().GetRevision(), loc.SliceId, req.GetGrpId(),
 			picks[0], planBlack, sc.Cc,
 		)
+		if isSpareListFull(err) {
+			// The op's own full-list check: a create committed since the
+			// snapshot filled the list. It is the same ceiling the
+			// pre-check above answers, so it gets the same refusal (GW7).
+			return spareListFull(req.GetGrpId())
+		}
 		if err != nil {
 			return mapModelErr(err)
 		}
@@ -263,6 +270,23 @@ func (s *Server) CreateSpareLeg(
 		return nil, err
 	}
 	return &pb.CreateSpareLegReply{LegId: legId}, nil
+}
+
+// spareListFull is CreateSpareLeg's refusal of a group whose spare_leg_list
+// already holds MaxSpareLegPerGrp spares (architecture.md, Spare legs). The
+// pre-check and the mapping of the op's own check both return it, so the two
+// give one refusal the same words.
+func spareListFull(grpId uint64) error {
+	return errExhausted(
+		"group %d already has the maximum of %d spare legs",
+		grpId, common.MaxSpareLegPerGrp)
+}
+
+// isSpareListFull reports whether err is model.CreateSpareLeg's refusal of a
+// group whose spare list is already full.
+func isSpareListFull(err error) bool {
+	var pre *model.ErrPrecondition
+	return errors.As(err, &pre) && pre.Reason == model.ReasonSpareListFull
 }
 
 // DeleteSpareLeg is the DeleteSpareLeg of architecture.md, Spare legs: the

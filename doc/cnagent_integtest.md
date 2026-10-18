@@ -26,6 +26,22 @@ restart — each under pool ids of its own and each leaving nothing of its pools
 a teardown per case and per stage that also keeps the run inside a DN's data
 area, which the cases together would overdraw.
 
+Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
+the dn agent's run (`dnagent_integtest.md`, Goal and scope), driven by a fake
+worker over the package's own fake OS client, which answers the agent's dm,
+md, nvmet, nvme host, tmpfs and loop, thin-tool and local-store calls from
+memory, while a probe-IO double over the same model (`fakeProbeIO`) answers
+its leg probers' block IO, which leaves the OS client (`osclient.md`, Exported
+raw helpers and the probe-IO carve-out). They prove a controller node of the
+most cntlrs one holds, every one converged with every round clean; the widest
+cntlr the fake converges inside a test's time bound, its request holding every
+list at its limit but the groups of a slice; and orderings across many syncups
+and rounds: a restart with the local store kept and with it lost (`cnagent.md`
+CN2, CN21), a leg connect that hangs across rounds and past the pass budget
+(`cnagent.md` CN10), a syncup that arrives during a converge (`dnagent.md`
+SH30), and a sweep whose `dmsetup ls` names devices already gone (`cnagent.md`
+CN21, CN30).
+
 ## Topology
 
 The developer machine ships one agent binary over ssh and drives four agents

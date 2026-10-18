@@ -611,9 +611,10 @@ func MaintainDnCapacity(
 	// the five handlers that keep their own DN bookkeeping share); in model,
 	// GrowSlice's and DrainSpSlice's own gates and, for CreateSpareLeg, its
 	// two callers'; in the worker, newDnMonitor's per-write re-validation. The
-	// callers with no gate are integtest/workerctl's put-dn, move-dn,
-	// put-migr and set-free, which plant records on purpose; its put-sp
-	// validates the stored conf like the gateway does.
+	// callers with no gate are integtest/plant's PutDn and PutDns, MoveDn,
+	// PutMigr and SetDnFree, which plant records on purpose for
+	// integtest/workerctl and the worker's Go tests; plant's PutSp validates
+	// the cluster conf it is handed like the gateway does.
 	conf := cc.GetDnBinConf()
 	oldKey := dnCapacityKeyOf(cid, addrPort, conf, oldDn)
 	newKey := dnCapacityKeyOf(cid, addrPort, conf, newDn)

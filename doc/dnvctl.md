@@ -549,6 +549,30 @@ finish can succeed yet.
 
 ## Integration test plan
 
+**What the Go cases prove.** The unit tests of `ctl/` run the real command
+tree through `Execute` inside the test process, with no etcd and no gateway.
+The package's dial hook, `dialer`, hands an invocation `recordingClient`, a
+stand-in for the gateway that records the one request a command line
+produces and answers it from the test, with an injected status, an injected
+reply, or a verdict it takes from the request itself, as the gateway's
+validation and paging would. Against it they prove the field and flag rules
+of every leaf, the tokens of CT3, the rendering of CT4, the exit codes and
+failure line of CT5 and the binding of CT9, and CT8 at the limits of the
+count, size, name and NQN flags. A number its flag cannot hold does not
+parse, so it is a usage error that issues no RPC (CT5, CT8). The ranges the
+gateway sets on a count or a size and the lengths it allows a name or an NQN
+(`architecture.md`, Common validation) are never checked by dnvctl: the
+value goes out as typed and the gateway's verdict comes back, a full page
+rendered whole with its page token reaching the next request verbatim, a
+refusal rendered as the failure line with exit 1. The stand-in
+judges against the constants of `common` with refusal texts of its own, so
+the gateway's wording stays the gateway's tests' to pin. Other dials the
+tests hand out record the address, the deadline and the close of the
+connection, fail, for the connection half of CT5, or reach a real gRPC
+server behind the server chain over an in-memory connection, for the trace
+id and the deadline of CT2; the production dial itself carries the trace id
+to such a server over loopback.
+
 **What the suite proves.** `integtest/dnvctl_test.sh` proves, against a real
 gRPC wire, that every leaf of the command tree marshals its argv into
 exactly the intended request proto, renders replies per CT4, maps errors

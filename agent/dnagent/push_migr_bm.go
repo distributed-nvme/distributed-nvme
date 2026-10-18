@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -30,6 +31,18 @@ func (s *DnAgentServer) pushMigrBitmap(
 			AgentReply: agent.UnknownObjectReply(
 				"unknown migration %d on side %s", req.GetMigrId(),
 				sidePointerText(req.GetSidePointer())),
+		}
+	}
+	// The chunk index is bounded as the gateway bounds the appends (DN15):
+	// an index at or past MaxMigrBmCnt names no chunk etcd can hold, and a
+	// file stored for it would stay in the applied set.
+	if req.GetBmIdx() >= common.MaxMigrBmCnt {
+		return &pb.PushMigrBitmapReply{
+			AgentReply: agent.UnknownObjectReply(
+				"chunk bm_idx %d out of range for migration %d on side %s "+
+					"(max_migr_bm_cnt %d)",
+				req.GetBmIdx(), req.GetMigrId(),
+				sidePointerText(req.GetSidePointer()), common.MaxMigrBmCnt),
 		}
 	}
 	path := s.nf.LocalMigrBmPath(req.GetClusterId(), req.GetDnId(),

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -187,7 +188,7 @@ type etcdStore interface {
 
 // deps is what every layer of the worker shares: one etcd client, one
 // ClusterConf cache (RW21), one connection cache (RW7), one health writer
-// (HL1/HL2) and one clock.
+// (HL1/HL2), one clock and the four fixed timeouts.
 type deps struct {
 	cfg    Config
 	store  etcdStore
@@ -196,10 +197,38 @@ type deps struct {
 	conns  *connCache
 	health healthWriter
 	clk    clock
+	tmo    timeouts
 	// kinds resolves a role's shard plumbing (SW1). It is a field so the
 	// vote tests can substitute recording fakes for the real shard and
 	// revision workers.
 	kinds func(role string) (revKind, bool)
+}
+
+// timeouts are the worker's four fixed timeouts: the per-call deadlines of a
+// Syncup* and of a bitmap push (RW5, BM3), the bound of the demotion hold
+// (RW22), and the bound of each etcd operation the worker bounds itself, the
+// deletes of its orderly stop (CM5, shutdownCtx). The first two and the last
+// are deadlines on the real clock, which no clock of deps shortens; the
+// demotion hold runs on deps.clk, but its length is fixed with the others.
+// Run uses prodTimeouts; the worker's whole-worker Go tests shorten them
+// (dnv-worker.md, Integration test plan). The etcdutil client bounds each of
+// its own operations by common.DefaultEtcdOpTimeout (EU5) whatever etcdOp
+// says; a shorter deadline of the caller wins there.
+type timeouts struct {
+	syncup       time.Duration
+	push         time.Duration
+	demotionHold time.Duration
+	etcdOp       time.Duration
+}
+
+// prodTimeouts are the production values of the four fixed timeouts.
+func prodTimeouts() timeouts {
+	return timeouts{
+		syncup:       common.DefaultWorkerSyncupTimeout * time.Second,
+		push:         common.DefaultWorkerPushTimeout * time.Second,
+		demotionHold: common.DemotionHoldTimeout * time.Second,
+		etcdOp:       common.DefaultEtcdOpTimeout * time.Second,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -253,20 +282,52 @@ func newTraceCtx(ctx context.Context, seed string) context.Context {
 // workers, which may take up to common.DefaultWorkerSyncupTimeout; close the
 // cache watch; close the etcd client. It returns nil: nothing about a shutdown
 // is an error.
+//
+// Everything after the seed is run's, with the production clock, the agent
+// dial of grpc.md, Wiring, and the production timeouts.
 func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	seed, err := newSeed()
 	if err != nil {
 		return err
 	}
+	return run(ctx, cli, cfg, seed, runEnv{
+		clk:  realClock{},
+		dial: dialAgent,
+		tmo:  prodTimeouts(),
+	})
+}
+
+// runEnv is what run takes in place of the production wiring: the clock, the
+// dial of one agent connection (the connection cache's, RW7) and the four
+// fixed timeouts. Run passes the production ones; the worker's whole-worker
+// Go tests pass their own (dnv-worker.md, Integration test plan).
+type runEnv struct {
+	clk  clock
+	dial func(addrPort string) (*grpc.ClientConn, error)
+	tmo  timeouts
+}
+
+// run is Run from the minted seed on: the worker under seed, with env's
+// clock, dial and timeouts. The caller mints the seed, so a test knows the
+// worker's records (RW10) before the first one.
+func run(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cfg Config,
+	seed string,
+	env runEnv,
+) error {
 	d := &deps{
 		cfg:    cfg,
 		store:  cli,
 		cli:    cli,
 		conns:  newConnCache(),
 		health: &modelHealthWriter{cli: cli},
-		clk:    realClock{},
+		clk:    env.clk,
+		tmo:    env.tmo,
 		kinds:  kindFor,
 	}
+	d.conns.dial = env.dial
 	d.conf = newConfCache(d)
 
 	slog.InfoContext(ctx, msgWorkerStarting,
@@ -308,15 +369,16 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	return nil
 }
 
-// shutdownCtx bounds one best-effort etcd operation of the CM5 shutdown path.
-// The parent ctx is already cancelled by then, so a plain child would be dead
-// on arrival: the deletes run under a fresh ctx that keeps the parent's values
-// (the trace id) but not its cancellation.
-func shutdownCtx(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(
-		context.WithoutCancel(ctx),
-		common.DefaultEtcdOpTimeout*time.Second,
-	)
+// shutdownCtx bounds one best-effort etcd operation of the CM5 shutdown path
+// by timeout, the etcd operation timeout of deps (common.DefaultEtcdOpTimeout
+// in production). The parent ctx is already cancelled by then, so a plain
+// child would be dead on arrival: the deletes run under a fresh ctx that keeps
+// the parent's values (the trace id) but not its cancellation.
+func shutdownCtx(
+	ctx context.Context,
+	timeout time.Duration,
+) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
 // shardCode renders a shard the way every dnv key and log record does

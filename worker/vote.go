@@ -1156,13 +1156,15 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 //     peers would then observe an appear for a seed that no longer exists.
 //  2. Every shard worker is told to stop before the deletes, without waiting
 //     for it: a delete that cannot land — a fence of VW8 (a) is usually cut
-//     off from etcd — takes common.DefaultEtcdOpTimeout per role, and shard
+//     off from etcd — takes the etcd operation timeout of deps
+//     (common.DefaultEtcdOpTimeout in production) per role, and shard
 //     workers left running behind it would go on starting rounds, syncups
 //     and reaction passes for a worker that has already given up its
 //     membership.
 //  3. The deletes come before the join: the join waits out the shard
 //     workers' in-flight calls (RW11, the revision worker's graceful stop),
-//     which can take common.DefaultWorkerSyncupTimeout, and a delete issued
+//     which can take the syncup timeout of deps
+//     (common.DefaultWorkerSyncupTimeout in production), and a delete issued
 //     only after it would let the peers see this seed go only when the join
 //     ends or the dead threshold passes, whichever comes first — the old
 //     shards undriven that much longer than the grace window.
@@ -1202,9 +1204,10 @@ func (v *voteWorker) stopHeartbeat(inc *incarnation) {
 }
 
 // deleteOwnRegs deletes this incarnation's registrations, best effort, one
-// Delete per role (CM5, VW8). Each runs under a FRESH context bounded by
-// common.DefaultEtcdOpTimeout: on the shutdown path the parent ctx is already
-// cancelled, so a plain child would be dead on arrival.
+// Delete per role (CM5, VW8). Each runs under a FRESH context bounded by the
+// etcd operation timeout of deps (common.DefaultEtcdOpTimeout in production):
+// on the shutdown path the parent ctx is already cancelled, so a plain child
+// would be dead on arrival.
 //
 // This is the ONLY place that deletes an own registration, and its one caller,
 // leave — the fence's and the shutdown's way out — runs it on the loop
@@ -1216,7 +1219,7 @@ func (v *voteWorker) stopHeartbeat(inc *incarnation) {
 func (v *voteWorker) deleteOwnRegs(parent context.Context, inc *incarnation) {
 	for _, role := range v.roles {
 		key := workerRegKey(role, inc.seed)
-		ctx, cancel := shutdownCtx(parent)
+		ctx, cancel := shutdownCtx(parent, v.deps.tmo.etcdOp)
 		_ = v.deps.store.Delete(ctx, key)
 		cancel()
 	}
@@ -1237,8 +1240,9 @@ func (v *voteWorker) cancelManagers(inc *incarnation) {
 }
 
 // stopManagers stops every role's shard workers gracefully and IN PARALLEL
-// (VW8, CM5): each may take up to common.DefaultWorkerSyncupTimeout to let an
-// in-flight syncup finish (RW11).
+// (VW8, CM5): each may take up to the syncup timeout of deps
+// (common.DefaultWorkerSyncupTimeout in production) to let an in-flight
+// syncup finish (RW11).
 func (v *voteWorker) stopManagers(inc *incarnation) {
 	var wg sync.WaitGroup
 	for _, rs := range inc.roles {
@@ -1305,9 +1309,10 @@ func (v *voteWorker) armTimer(
 // ---------------------------------------------------------------------------
 
 // shardManager applies one role's owned-shard set on its own goroutine, so
-// that a graceful handoff (SW5 -> RW11, up to
-// common.DefaultWorkerSyncupTimeout) never stalls the vote loop's heartbeat
-// and watch handling — which would fence the worker for no reason.
+// that a graceful handoff (SW5 -> RW11, up to the syncup timeout of deps,
+// common.DefaultWorkerSyncupTimeout in production) never stalls the vote
+// loop's heartbeat and watch handling — which would fence the worker for no
+// reason.
 type shardManager struct {
 	deps *deps
 	kind revKind

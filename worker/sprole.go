@@ -85,9 +85,9 @@ const (
 	// the same.
 	msgSpSidesUnsynced = "sp sides unsynced"
 	// msgSpDemotionUnsynced is RW22's demotion hold ended by its timer: a
-	// demoted cntlr did not report its demotion applied within
-	// common.DemotionHoldTimeout, and the sides are sent the fan-out all the
-	// same.
+	// demoted cntlr did not report its demotion applied within the demotion
+	// hold of deps (common.DemotionHoldTimeout in production), and the sides
+	// are sent the fan-out all the same.
 	msgSpDemotionUnsynced = "sp demotion unsynced"
 )
 
@@ -1377,7 +1377,8 @@ func (w *spWorker) demotions(plan *spPlan) map[uint64]uint64 {
 // handed its standby plan at once, so that its agent moves its namespaces to
 // ANA inaccessible before any side fences it, and the side plans and the
 // other cntlr plans wait until each demoted cntlr reports its demotion
-// applied, or common.DemotionHoldTimeout passes. The worker judges no
+// applied, or the demotion hold of deps (common.DemotionHoldTimeout in
+// production) passes. The worker judges no
 // reachability: an agent that never answers simply uses up the wait, which is
 // what a host following the discovery log needs to drop the path the
 // failover withdrew.
@@ -1405,9 +1406,7 @@ func (w *spWorker) holdDemotion(plan *spPlan, fresh map[uint64]uint64) {
 		if held.timer != nil {
 			held.timer.stop()
 		}
-		held.timer = w.deps.clk.newTimer(
-			common.DemotionHoldTimeout * time.Second,
-		)
+		held.timer = w.deps.clk.newTimer(w.deps.tmo.demotionHold)
 	}
 	for cntlrId, revision := range fresh {
 		held.demoted[cntlrId] = revision
@@ -1799,7 +1798,8 @@ type revisionedRequest interface {
 }
 
 // stopSpChildren runs a set of child stops concurrently and joins them (SW5):
-// each may take up to common.DefaultWorkerSyncupTimeout to finish an in-flight
+// each may take up to the syncup timeout of deps
+// (common.DefaultWorkerSyncupTimeout in production) to finish an in-flight
 // unary call, so they must not be stopped one by one.
 func stopSpChildren(stops []func()) {
 	if len(stops) == 0 {

@@ -214,6 +214,19 @@ func migrCutoverStarted(migrName string, migr *pb.Migration) error {
 	return nil
 }
 
+// migrCntBelowCeiling is CreateMigration's count ceiling: a pool whose
+// migr_name_list already holds MaxMigrCntPerSp migrations starts no other
+// (architecture.md, Migrations). The planning read and the deciding STM both
+// run it, so the two give one refusal the same words.
+func migrCntBelowCeiling(conf *pb.SpConf, spName string) error {
+	if len(conf.GetMigrNameList()) >= common.MaxMigrCntPerSp {
+		return errExhausted(
+			"storage pool %q already has %d migrations, the maximum is %d",
+			spName, len(conf.GetMigrNameList()), common.MaxMigrCntPerSp)
+	}
+	return nil
+}
+
 // getMigration reads one migration of the SP by name inside the caller's
 // transaction; an absent record is NOT_FOUND (GW7).
 //
@@ -256,7 +269,8 @@ func getMigration(
 // coherent; nothing from it is trusted, since the deciding STM re-locates the
 // side and re-verifies both the pick's capacity key and the plan the pick was
 // scanned against: the group, as that STM reads it, must occupy no DN the
-// plan's read of it did not.
+// plan's read of it did not. The same read answers the MaxMigrCntPerSp
+// ceiling ahead of the scan, and the deciding STM answers it again (GW9).
 //
 // The destination's dm-clone run takes room in its DN's metadata area
 // (migrMetaUnitsOf; architecture.md, Metadata units). The scan skips every DN
@@ -326,6 +340,15 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
+			// The count ceiling before the scan (GW9), right behind the
+			// token: a pool with every migration it may run in flight is
+			// told so, not that no DN is free. The deciding STM checks it
+			// again for a migration committed since.
+			if err := migrCntBelowCeiling(
+				sc.Conf, req.GetSpName(),
+			); err != nil {
+				return err
+			}
 			slices, err := loadSlices(stm, sc.Cid, sc.Conf)
 			if err != nil {
 				return err
@@ -377,12 +400,10 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
-			if len(sc.Conf.GetMigrNameList()) >= common.MaxMigrCntPerSp {
-				return errExhausted(
-					"storage pool %q already has %d migrations, "+
-						"the maximum is %d",
-					req.GetSpName(), len(sc.Conf.GetMigrNameList()),
-					common.MaxMigrCntPerSp)
+			if err := migrCntBelowCeiling(
+				sc.Conf, req.GetSpName(),
+			); err != nil {
+				return err
 			}
 			if containsName(
 				sc.Conf.GetMigrNameList(), req.GetMigrName(),

@@ -27,14 +27,8 @@ import (
 // The shared fixtures of the unit tests: a fake clock for every timer, a
 // fake etcd store for the watcher, a log-record capture for the assertions
 // on cdc.md, Log records, and — the one that matters — an in-process fake
-// NVMe/TCP host that speaks NP2/NP3 over a loopback socket.
-
-func TestMain(m *testing.M) {
-	// Tests that assert on records install their own capture handler; the
-	// rest of the package's log volume goes nowhere.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	os.Exit(m.Run())
-}
+// NVMe/TCP host that speaks NP2/NP3 over a loopback socket. TestMain, which
+// starts the package's real etcd, is etcdenv_test.go's.
 
 // ---------------------------------------------------------------------------
 // Fake clock
@@ -465,7 +459,8 @@ func poked(c *conn) bool {
 // ---------------------------------------------------------------------------
 
 // testServer is one dnv-cdc instance on a loopback port, with the fake clock
-// and the fake store behind it.
+// and a store behind it: the fake store, or for an instance startPlanted
+// starts the real etcd, when store is nil.
 type testServer struct {
 	t     *testing.T
 	srv   *server
@@ -476,8 +471,9 @@ type testServer struct {
 	// cancel ends the instance's context, which is the NP1 shutdown path.
 	cancel context.CancelFunc
 	done   chan struct{}
-	// accepts counts the listener's Accept calls. Only startInstance sets
-	// it: its accept loop must not call Accept before the first scan.
+	// accepts counts the listener's Accept calls. startInstance and
+	// startPlanted set it: an instance's accept loop must not call Accept
+	// before the first scan, nor while the pending cap is full (NP1).
 	accepts *atomic.Int32
 }
 

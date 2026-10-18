@@ -174,7 +174,9 @@ type objDriver interface {
 	) (checkStream, error)
 	// syncup issues the kind's unary Syncup* (RW5). A nil reply with a nil
 	// error means the driver deliberately sent nothing — a DN whose DnConf
-	// is missing, say (RW13) — and the round retries next time.
+	// is missing, say (RW13) — and the round retries next time. An error is
+	// a failed syncup, the call's or the failed read of the record the
+	// request is built from (RW13), and is logged as its result.
 	syncup(
 		ctx context.Context,
 		conn *grpc.ClientConn,
@@ -367,8 +369,9 @@ func (w *revWorker) update(d desiredState) {
 
 // stop cancels the worker and joins it (RW11). An in-flight unary call is
 // allowed to finish first — its own deadline bounds the wait — so this can
-// take up to common.DefaultWorkerSyncupTimeout, which is why a parent that
-// keeps running issues it off its own goroutine (childStops).
+// take up to the syncup timeout of deps (common.DefaultWorkerSyncupTimeout in
+// production), which is why a parent that keeps running issues it off its own
+// goroutine (childStops).
 func (w *revWorker) stop() {
 	w.cancel()
 	<-w.done
@@ -674,13 +677,13 @@ func (w *revWorker) syncup(
 	// deliberately NOT the RPC ctx, so a graceful stop lets an in-flight
 	// Syncup* finish instead of cancelling it.
 	rpcCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(ctx),
-		common.DefaultWorkerSyncupTimeout*time.Second,
+		context.WithoutCancel(ctx), w.deps.tmo.syncup,
 	)
 	defer cancel()
 	reply, err := w.driver.syncup(rpcCtx, conn, cc)
 	if err != nil {
-		// A gRPC error is logged and left to the next round (RW5, RW12).
+		// A gRPC error, or a failed read of what the request is built from
+		// (RW13), is logged and left to the next round (RW5, RW12).
 		w.logSyncupResult(ctx, revision, obsTraceId, nil, err)
 		return
 	}
@@ -750,7 +753,7 @@ func (w *revWorker) openStream(ctx context.Context) bool {
 // recv waits at most interval for the round's reply (RW4 step 3, RW8) while
 // staying responsive to a desired change (RW6): the parent's put must not sit
 // in the channel until this round ends, which RW9 allows to be an hour away
-// and RW5 a further DefaultWorkerSyncupTimeout on top.
+// and RW5 a further syncup timeout of deps on top.
 func (w *revWorker) recv(
 	cc *pb.ClusterConf,
 	interval time.Duration,

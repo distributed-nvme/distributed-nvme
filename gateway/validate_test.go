@@ -680,9 +680,10 @@ func TestValidateListCountClamp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestValidateTrConf pins that all four NvmeTrConf members obey the name row
-// of architecture.md, Common validation, and that an entirely empty message is
-// accepted here: the RPCs that
-// require a non-empty one (CreateDiskNode, CreateControllerNode) say so
+// of architecture.md, Common validation, that tr_svc_id is held to
+// MaxTrSvcIdLength on top of it, the width the discovery log copies it into
+// (cdc.md DS3), and that an entirely empty message is accepted here: the RPCs
+// that require a non-empty one (CreateDiskNode, CreateControllerNode) say so
 // themselves through trConfEmpty.
 func TestValidateTrConf(t *testing.T) {
 	good := func() *pb.NvmeTrConf {
@@ -702,6 +703,10 @@ func TestValidateTrConf(t *testing.T) {
 	withTrAddr.TrAddr = "192.168.0.17 "
 	withTrSvcId := good()
 	withTrSvcId.TrSvcId = "44 20"
+	svcIdAtWidth := good()
+	svcIdAtWidth.TrSvcId = strings.Repeat("9", common.MaxTrSvcIdLength)
+	svcIdOverWidth := good()
+	svcIdOverWidth.TrSvcId = strings.Repeat("9", common.MaxTrSvcIdLength+1)
 	cases := []struct {
 		name string
 		conf *pb.NvmeTrConf
@@ -714,6 +719,9 @@ func TestValidateTrConf(t *testing.T) {
 		{"over-long adr_fam", withAdrFam, codes.InvalidArgument},
 		{"bad tr_addr", withTrAddr, codes.InvalidArgument},
 		{"bad tr_svc_id", withTrSvcId, codes.InvalidArgument},
+		{"tr_svc_id at the discovery log width", svcIdAtWidth, codes.OK},
+		{"tr_svc_id one byte over it", svcIdOverWidth,
+			codes.InvalidArgument},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {

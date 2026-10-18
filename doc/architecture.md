@@ -295,9 +295,9 @@ their values:
   (sp role, `dnv-worker.md` RW19);
 * messages: `GrpcMaxMsgSize` is the largest message every dnv gRPC server
   and client sends or takes (`grpc.md`, Wiring);
-* cntlid slots: `CnCntlidSlotCnt` and `DnCntlidSlotCnt`, the slots of the
-  cntlid partition (cntlid slots); the gateway refuses a `cntlid_slot` or
-  `cntlid_slot_list` value at or above `CnCntlidSlotCnt`;
+* cntlid slots: `CnCntlidSlotCnt`, the slots of the cntlid partition on
+  CNs and DNs alike (cntlid slots); the gateway refuses a `cntlid_slot` or
+  `cntlid_slot_list` value at or above it;
 * ids: `MaxThinDevId`, the largest thin id dm-thin takes, and
   `IdStepStride` and `ThinIdStepStride`, how far the id step moves the id
   counters (Clusters);
@@ -1677,6 +1677,12 @@ it parks a namespace (Clone crash recovery).
 * At most `MaxStrSize` bytes for `cluster_name`, `addr_port`, `sp_name`,
   `td_name`, `clone_name`, `xfer_name`, `migr_name`, `location` and the
   `NvmeTrConf` members, each of which must also match `ValidStrPattern`.
+* `NvmeTrConf.tr_svc_id` is in addition at most `MaxTrSvcIdLength` bytes:
+  dnv-cdc copies a CN's verbatim into the TRSVCID field of a discovery log
+  entry, which holds no more (`cdc.md` DS3), so a longer one could reach a
+  host only cut short. The rule holds for every transport conf a request
+  carries, a DN's and a clone source's as well: each names an NVMe/TCP
+  service the same way, and one check covers them all.
 * NQNs (every NQN field but the `nqn` of `DeleteNamespace` and
   `DeleteSubsystem`, below): at most `MaxNqnLength` bytes, no "..", and a
   match for `ValidNqnPattern` — "nqn.", a date, a lower-case domain, a ":"
@@ -2167,16 +2173,27 @@ Action:
    the STM closure alone (`gateway.md` GW9; `dnv-worker.md` EU4). Before
    the scan, check a plain pre-read of
    `ClusterConf` against Common validation as the scan does (`ABORTED`
-   otherwise, UNEXPECTED_ERROR → `ABORTED`), then merge and
-   resolve `bdev_conf` against it: the result gives the scan its leg
-   count, and the geometry rules judge it right there (`INVALID_ARGUMENT`,
-   and the message says it concerns the merged conf: a member the request
-   omitted is inherited, and only the merge shows whether it meets the
-   ones the request set), so a request whose merge breaks a rule is
+   otherwise, UNEXPECTED_ERROR → `ABORTED`), then judge the overflow of
+   `init_ext_cnt` times that pre-read's `extent_size`
+   (`INVALID_ARGUMENT`), which no DN could hold, so the scan would
+   otherwise answer it first. Then merge and resolve `bdev_conf` against
+   that pre-read: the result gives the scan its leg count, and the
+   geometry rules judge it right there (`INVALID_ARGUMENT`, and the
+   message says it concerns the merged conf: a member the request omitted
+   is inherited, and only the merge shows whether it meets the ones the
+   request set), so a request whose merge breaks a rule is
    `INVALID_ARGUMENT`, not `RESOURCE_EXHAUSTED`, even while the cluster
    lacks the DNs or CNs the scan would need. The primary threshold of
-   Common validation is judged against that pre-read's `cntlr_interval` at
-   the same point, for the same reason. In the STM, in this order:
+   Common validation is judged next, against that pre-read's
+   `cntlr_interval`, for the same reason. Then, in the STM's order, a
+   plain read that finds the `sp_conf` key is `ALREADY_EXISTS`, so a
+   create re-sent for a pool that took the cluster's last place is told
+   that its pool exists, and last before the scan, a plain read of
+   `SpGlobal` whose `shard_bucket` sum is at `MaxSpCntPerCluster` is
+   `RESOURCE_EXHAUSTED`, a count ceiling answered ahead of the scan
+   (`gateway.md` GW9). The STM's own checks of the name
+   and the count below still decide, since only they see a pool created
+   after these reads. In the STM, in this order:
    merge and resolve `bdev_conf` against the `ClusterConf` this
    transaction read, **before any id is minted**, and refuse the picks
    right there if the leg count or the `cluster_id` moved since the scan;
@@ -2185,7 +2202,9 @@ Action:
    repeats the pre-read's verdict, but this read is the authoritative
    one), and the primary threshold against that `ClusterConf`; the
    `sp_conf` existence check; allocate `sp_id` and `shard_code`
-   from `SpGlobal`; validate that `ClusterConf` (Common validation) and
+   from `SpGlobal`, whose `shard_bucket` sum this read holds to
+   `MaxSpCntPerCluster` once more; validate that `ClusterConf` (Common
+   validation) and
    compute every group's `meta_blocks` and `data_blocks` (Group on-leg
    layout: meta region, data region, health block) from the resolved
    `bdev_conf` and the cluster's stored `extent_size`; verify every DN and
@@ -3697,8 +3716,9 @@ set again, and what is still missing is planned again from that
 
 **The agent's contract.** Its only gate is the object's identity and the
 chunk's address, never a revision: a `migr_id` or `clone_id` it does not
-know, or on the CN a pair outside the clone's own geometry, is refused
-with a non-zero `code`. It **persists before it applies**: the chunk goes
+know, or a chunk address its object cannot hold, is refused with a
+non-zero `code` (`dnagent.md` DN15, `cnagent.md` CN22). It **persists
+before it applies**: the chunk goes
 to its `LocalMigrBmPath` or `LocalCloneBmPath`
 file first, with the atomic, durable replace of Common agent rules, and
 only then are the fully skippable dm-clone regions recomputed — for a
@@ -4837,8 +4857,10 @@ NVMe multipath requires distinct CNTLIDs among the controllers a host
 aggregates. dnv partitions the cntlid space through each nvmet subsystem's
 "attr_cntlid_min" and "attr_cntlid_max" into slots, the same partition on
 CNs and DNs: `CnCntlidSlotCnt` slots from `CnCntlidSlotBase` in steps of
-`CnCntlidSlotStep`, with their DN twins `DnCntlidSlotCnt`,
-`DnCntlidSlotBase` and `DnCntlidSlotStep`. Slot *s* starts at the base plus
+`CnCntlidSlotStep`, with their DN twins `DnCntlidSlotBase` and
+`DnCntlidSlotStep`. The count has no DN twin: a side's slot comes from its
+pool's `cntlid_slot_list`, which the gateway holds below `CnCntlidSlotCnt`
+like every cntlr's. Slot *s* starts at the base plus
 *s* steps and ends one CNTLID below the next slot's start; nvmet's range
 includes both ends, so a slot holds exactly one step of CNTLIDs and no two
 slots share one. All slots come from `SpConf.cntlid_slot_list`. Rules:

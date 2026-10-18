@@ -142,7 +142,8 @@ entry per element of `nvme_tr_conf_list`:
   carrying it), not once per skipped element: however many elements share
   a foreign transport, they are one record.
 * TRADDR and TRSVCID verbatim from `tr_addr` and `tr_svc_id`; SUBNQN from
-  `nqn`.
+  `nqn`. Each fits its field by the gateway's validation
+  (`architecture.md`, Common validation).
 * SUBTYPE an NVM subsystem; TREQ not specified; CNTLID the dynamic
   controller; ASQSZ `CdcMaxAdminSqSize`; no EFLAGS; TSAS TCP with no
   security type.
@@ -563,8 +564,10 @@ single-node etcd — against real kernel NVMe hosts and real nvmet targets:
 range sharding and twin equality, per-host filtering, the per-host AEN and
 GENCTR semantics of DS6 and DS7, automatic connect, re-point and disconnect
 end to end through nvme-stas, the high availability of twins and of
-restarts, and that a flood of connections that never connect leaves a
-connected host served (NP1, NP10). nvme-stas is the production host
+restarts, that a flood of connections that never connect leaves a
+connected host served (NP1, NP10), and that many nvme-stas hosts on one
+host server each keep reading exactly their own discovery log through adds
+and removals of entries. nvme-stas is the production host
 stack, and the service serves plain nvme-cli equally: the AEN path is
 stock kernel — the host kernel publishes the discovery-change AEN as an
 "NVME_AEN" uevent — and nvme-stas adds the automatic connect, re-point and
@@ -578,6 +581,37 @@ Integration test plan), and the worker suite asserts the worker's rewrites
 of it, at a cntlr's health transitions, at a failover and at a cntlr
 replacement (`dnv-worker.md`, Integration test plan). Nor does it prove
 data-path correctness beyond one read (the agent suites) or etcd failures.
+
+**What the Go cases prove.** The package's own tests prove, on the developer
+machine, what the suite leaves out or cannot force; every test binary of the
+package starts the real etcd of `dnv-worker.md` EU7 and fails without one as
+EU7 says, which one test proves by running the test binary again with no etcd.
+Most tests drive the codec, the registry, the watcher and the connection state
+machine directly, or run an instance over an in-memory store. One test runs
+`Run` itself, to prove that it goes through the gate of CM4, over an etcd
+client whose only endpoint refuses connections, so that no scan ever lands.
+The cases that plant entries run whole instances, composed as `Run` composes
+them, over a real etcd whose watchers scan and watch it: the one the test
+binary starts, except for the case at the largest shape, which starts an etcd
+of its own so that its entries, written and deleted on every run, do not grow
+the shared one's history. In every test but the one that runs `Run`, the
+timers of NP10, WV5 and CM4 run on a fake clock; `Run` builds its instance on
+the real clock. The entries the real-etcd instances serve are written into
+etcd as the worker writes them: keys by `model`'s helpers, transport lists by
+the listing rule over the pool's cntlrs ([D18]). Those instances serve
+in-process fake hosts, NVMe/TCP hosts written in Go inside the test that speak
+the PDU subset of NP2 and NP3 over loopback sockets, and they prove the
+discovery service model at the largest shape a cluster holds — its most pools,
+each with its most subsystems, every entry with the widest transport list and
+the most allowed hosts, and one host seeing every record — through ownership
+by range (DS2), the order of DS5 and the impact of one change (DS6); that a
+burst of more hosts than `CdcMaxPendingConnCnt` waits at the cap and none is
+refused (NP1, NP12); that one change reaches every connection of every host it
+concerns on twins (DS6, NP11); that a host which stops reading is ended by its
+write deadline while the watcher and the other hosts go on, and that a slow
+host loses nothing and stalls nobody (NP13, DS9); the host NQN bounds of NP5;
+NP8's transfer bound at its limit and one record past it; and the wrap of the
+CNTLID counter (NP5).
 
 **Topology.** The developer machine builds the binaries and drives four lab
 servers over ssh; the suite occupies all four, so no other suite may run in
@@ -594,8 +628,9 @@ ports, one of them on two ports so that one subsystem has two paths. The
 last two servers are the hosts, with passwordless sudo, nvme-cli and
 nvme-stas, each connecting under its own host NQN; a third, ghost identity,
 named in no entry's allowed hosts, discovers from the first host under an
-explicit host NQN and host id. The suite's ports collide with no other
-suite's.
+explicit host NQN and host id. In the manyhosts case each host server also
+runs many copies of nvme-stas's discovery daemon, `stafd`, each a host of
+its own. The suite's ports collide with no other suite's.
 
 **Cases.** The cases run in a fixed order and fail fast, each against a
 wiped cdc prefix, its own fabricated cluster ids and a restarted fleet
@@ -615,16 +650,37 @@ keeps reading the log and receiving its AEN while the flood's connections
 past the cap wait in the listen backlog, the flood's connections end at
 their deadline, and a new discover is answered once they are gone; the
 flood and its waits are sized by `CdcMaxPendingConnCnt` and
-`DefaultCdcPendingTmoMs`, read from the same `workerctl`. Left to the
-unit tests, never forced on hardware: log paging past one page,
-keep-alive expiry, AER-limit exhaustion, a refused Connect that keeps its
-connection pending, and the exact instant a pre-Connect deadline ends a
-connection.
+`DefaultCdcPendingTmoMs`, read from the same `workerctl`. The manyhosts
+case runs many copies of the discovery daemon on each host server, each
+its own host — its own host NQN and host id, its own private bus and its
+own runtime directory — listing every instance, with the host's own
+nvme-stas stopped and the kernel's autoconnect unit masked as for every
+case: each daemon starts that unit for every AEN another daemon receives,
+so unmasked it would try to connect every entry of the other daemons' logs
+at every change. Only the discovery daemon runs, because the case proves
+the log each host reads: its entries then need no subsystem behind them,
+and the stas case covers the connector. Each change of the entries is one
+transaction of the driver, and after the adds, after removals that also
+move entries from one host to another and narrow an entry's hosts, and
+once every entry is gone, each daemon's log, read
+over its own bus, holds exactly the records of the entries in its
+instances' ranges that name it (DS2 to DS4). Each daemon holds a live
+discovery connection to every instance under its own identity, every
+instance sees connections from exactly the daemons' identities, so a daemon
+that fell back to its server's own identity fails the case, and no instance
+sees a daemon disconnect while the case runs, so every change reached the
+daemons as an AEN on a persistent connection (DS6, NP11). The case leaves
+each host server as it found it, which a record of the server's state taken
+before and after the case proves. Left to the unit tests, never forced on
+hardware: log paging past one page, keep-alive expiry, AER-limit
+exhaustion, a refused Connect that keeps its connection pending, and the
+exact instant a pre-Connect deadline ends a connection.
 
 Out of scope: etcd quorum loss and compaction races; TLS and in-band
-authentication; non-TCP transports; digests; scale — every shard code,
-many hosts; mDNS (TP-8009); TP-8010 registration; the nvme-stas version
-matrix, the lab pinning one version; and referrals.
+authentication; non-TCP transports; digests; scale past the manyhosts
+case — every shard code, more hosts than two host servers can run; mDNS
+(TP-8009); TP-8010 registration; the nvme-stas version matrix, the lab
+pinning one version; and referrals.
 
 **What a pass means.** Exit status zero and `PASS` mean every case's
 assertions held, in a run that stops at the first failure. Discovery is
@@ -634,7 +690,12 @@ whole documents; GENCTR only on a persistent discovery connection, because
 a one-shot discover creates and drops its host state each time (DS7).
 nvme-stas is judged by kernel state — the host's subsystem list and the
 device nodes it publishes by namespace uuid — never by its own output,
-whose format varies by version. Every wait is a bounded poll; and
+whose format varies by version. The manyhosts case is the one exception,
+because it runs the discovery daemon without the connector and so what a
+daemon read leaves no trace in the kernel: it reads each daemon's cached
+log over that daemon's bus, parses the answer as data rather than as text,
+and keeps the same triples, while the daemons' discovery connections are
+judged by kernel state. Every wait is a bounded poll; and
 "undisturbed throughout" holds on every poll of
 the wait, not at two point samples, which would pass a connection that
 dropped and came back between them. The cdc records are matched by their
@@ -649,14 +710,16 @@ at the end only on success: a failing run leaves etcd's data, every cdc
 log, the nvmet and dm state and the host connections in place and prints
 its diagnostics — the failing stage and its trace id, the tail of every
 cdc log, the entries in etcd, the target's configfs tree and dm tables,
-and the hosts' subsystems, uevent captures, flood sockets and nvme-stas
-journals — so the debris is what the developer reads; a cleanup-only run
+and the hosts' subsystems, uevent captures, flood sockets, nvme-stas
+journals and the manyhosts case's daemons' services, discovery controllers
+and journals — so the debris is what the developer reads; a cleanup-only run
 does the end-of-run cleanup alone. Order matters, and
 every step tolerates absence: the hosts first, with the flood's idle
-connections closed and nvme-stas stopped so that its reconnect loops die
-before their targets vanish; then the target, its port links first, which
-is safe because the hosts are already disconnected: a port unlinked under
-a live connection kills the host's controller and the host never
+connections closed, the manyhosts case's daemons stopped and their discovery
+controllers disconnected, and nvme-stas stopped, so that their reconnect
+loops die before their targets vanish; then the target, its port links
+first, which is safe because the hosts are already disconnected: a port
+unlinked under a live connection kills the host's controller and the host never
 reconnects by itself; then the first server's processes. Cleanup touches
 only what is the suite's — the test subsystems and the discovery
 controllers that point at the fleet, never every subsystem of a host —
@@ -667,7 +730,14 @@ kernel's autoconnect unit.
 **The driver, `cdcctl`.** `cdcctl` is the etcd driver that plays the
 gateway and the worker for `CdcEntry` keys only: it formats the keys
 through `model`, marshals `pb.CdcEntry`, and puts, deletes, wipes and lists
-the prefix. `dnv-cdc` reads only those keys and never a `ClusterConf`, so
+the prefix. It also applies a batch of puts and deletes as one
+transaction, refused as a whole when any of its lines would be: the
+instances apply the events of one transaction back to back, so a host the
+batch moves gets an AEN or two for the batch rather than about one per
+entry, which is what keeps a case that writes many entries for many
+daemons on one host server from spending its run in their AEN handling,
+every daemon there reacting to every AEN the others receive. `dnv-cdc`
+reads only those keys and never a `ClusterConf`, so
 the suite fabricates its cluster ids and writes no other key, and the
 pipeline that builds real entries stays out of this suite. It runs on the
 first server against the loopback etcd, prints its result on stdout, and
@@ -697,12 +767,22 @@ connect every entry and disconnect only the connections nvme-stas made or
 took over once their entry vanishes — and restores the original afterwards;
 the masking of the kernel's autoconnect unit, which would otherwise connect on
 the very AEN the lowlevel case measures, so it is masked for every case and
-setup checks the mask rather than trusting it; the uevent capture of the
-lowlevel and flood cases; the flood case's idle connections, held by one
-process that the wipes end; and the scoped wipes. The wipes disconnect
-only the test subsystems and the discovery controllers that point at the
-fleet; while nvme-stas runs, the reset leaves the discovery controllers to
-it, because one taken down behind its back is treated as gone for good and
-never re-created. Both helpers are generated by `cdc_test.sh`, shipped to
-their servers and run under sudo, so that everything the suite is lives in
-the script and the driver.
+setup checks the mask rather than trusting it; the manyhosts case's
+daemons, each started as a transient service whose private mount of the
+nvme-stas configuration directory carries the daemon's own identity, with a
+bus and a runtime directory of its own, because the daemon reads its
+identity from a fixed path, takes a fixed name on its bus, and adopts, and
+then removes, the controllers its runtime directory remembers; the reads
+of every daemon's log over its bus; the daemons' stop, which stops them
+before their buses, then disconnects the discovery controllers under the
+daemons' identities and only those, which outlive their daemon, and puts
+back the override of the kernel's autoconnect rule that every daemon writes
+and the first to stop removes; and the record of the server's state the
+case compares; the uevent capture of the lowlevel and flood cases; the
+flood case's idle connections, held by one process that the wipes end; and
+the scoped wipes. The wipes disconnect only the test subsystems and the
+discovery controllers that point at the fleet; while nvme-stas runs, the
+reset leaves the discovery controllers to it, because one taken down behind
+its back is treated as gone for good and never re-created. Both helpers are
+generated by `cdc_test.sh`, shipped to their servers and run under sudo, so
+that everything the suite is lives in the script and the driver.
