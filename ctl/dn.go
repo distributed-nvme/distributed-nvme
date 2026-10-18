@@ -16,7 +16,7 @@
 // GW6). Either way the wire content is the operator's to choose.
 //
 // `dn get` is the token source an operator reads before either mutator, and
-// it reads etcd. `dn inspect` is the group's only live read: the gateway
+// it reads etcd. `dn inspect` is the group's only agent read: the gateway
 // answers it from the DN agent's GetDnInfo instead. `dn create` also reaches
 // the agent — for GetDnSize — which is why a create can fail on a node that
 // is merely unreachable.
@@ -189,12 +189,13 @@ func dnSetDisabledCmd() *cobra.Command {
 }
 
 // dnInspectCmd drives InspectDiskNode, which the gateway answers by calling
-// the DN agent's GetDnInfo — a live read of the node, not of etcd, whose reply
-// pairs the DnInfo with the revision of the last SyncupDn the agent accepted
-// for the node.
+// the DN agent's GetDnInfo — the agent's latest observation of the node, not
+// etcd, whose reply pairs the DnInfo with the revision the agent held when
+// that observation's reading started, and adds the observation's stamp and
+// age.
 func dnInspectCmd() *cobra.Command {
-	cmd := leaf("inspect", "read a disk node live from its agent "+
-		"(InspectDiskNode)",
+	cmd := leaf("inspect", "read a disk node's latest observation from its "+
+		"agent (InspectDiskNode)",
 		func() (job, error) {
 			req := &pb.InspectDiskNodeRequest{
 				ClusterName: clusterOf(),

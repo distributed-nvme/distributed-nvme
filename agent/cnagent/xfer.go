@@ -114,7 +114,7 @@ const (
 	xferRowsNamespace
 	// xferRowsExport: the device step failed, so ensureXfer left the export
 	// alone, and its subsystem and namespace rows are what a read of them
-	// finds, as in a check round.
+	// finds, as in a read.
 	xferRowsExport
 )
 
@@ -274,7 +274,7 @@ func (s *CnAgentServer) reportXferExport(
 
 // xferDevOnError reports whether a transfer device's live table is an error
 // table, the shape CN17 gives a transfer device that does not serve. It reads
-// from rd, the reading of a check round or an info read, and with no reading
+// from rd, the reading of a cntlr's read, and with no reading
 // the device's own `dmsetup info` and `dmsetup table`; a device that is not
 // there, or a read that fails, answers false.
 func (s *CnAgentServer) xferDevOnError(
@@ -293,7 +293,7 @@ func (s *CnAgentServer) xferDevOnError(
 // xferRowAnaGrpId is the group a transfer namespace row compares the
 // namespace's "ana_grpid" with, on both channels alike (CN28): xferAnaWanted
 // for whether the transfer device's live table is an error table
-// (xferDevOnError) — read from a check round's reading, or by a converge
+// (xferDevOnError) — read from a read's reading, or by a converge
 // after its transfer ANA loop.
 func (s *CnAgentServer) xferRowAnaGrpId(
 	ctx context.Context,

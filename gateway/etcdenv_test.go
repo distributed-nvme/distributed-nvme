@@ -22,6 +22,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -335,6 +337,10 @@ type fakeAgent struct {
 	sideInfo  *pb.SideInfo
 	cnInfo    *pb.CnInfo
 	cntlrInfo *pb.CntlrInfo
+	// stamp is the ObsStamp every *Info reply carries: the agent answers
+	// from its latest observation (architecture.md, Live-state reporting),
+	// and every Inspect* reply passes the stamp on with its age.
+	stamp *pb.ObsStamp
 }
 
 // enter is what every fake method runs first: it records the call and the T3
@@ -406,6 +412,13 @@ func (f *fakeAgent) setInfo(
 	}
 }
 
+// setStamp installs the ObsStamp the *Info replies carry from now on.
+func (f *fakeAgent) setStamp(stamp *pb.ObsStamp) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stamp = stamp
+}
+
 // callCount is how many times one method was called — the count, not the
 // order, because a handler is allowed to retry its candidate unit (GW9) and a
 // test that asserted an exact sequence would be pinning the retry, not the
@@ -468,6 +481,7 @@ func (f *fakeDnServer) GetDnInfo(
 	return &pb.GetDnInfoReply{
 		Revision: fakeAgentRevision,
 		DnInfo:   f.agent.dnInfo,
+		ObsStamp: f.agent.stamp,
 	}, nil
 }
 
@@ -483,6 +497,7 @@ func (f *fakeDnServer) GetSideInfo(
 	return &pb.GetSideInfoReply{
 		Revision: fakeAgentRevision,
 		SideInfo: f.agent.sideInfo,
+		ObsStamp: f.agent.stamp,
 	}, nil
 }
 
@@ -517,6 +532,7 @@ func (f *fakeCnServer) GetCnInfo(
 	return &pb.GetCnInfoReply{
 		Revision: fakeAgentRevision,
 		CnInfo:   f.agent.cnInfo,
+		ObsStamp: f.agent.stamp,
 	}, nil
 }
 
@@ -532,6 +548,7 @@ func (f *fakeCnServer) GetCntlrInfo(
 	return &pb.GetCntlrInfoReply{
 		Revision:  fakeAgentRevision,
 		CntlrInfo: f.agent.cntlrInfo,
+		ObsStamp:  f.agent.stamp,
 	}, nil
 }
 
@@ -562,6 +579,60 @@ func (f *fakeCnServer) GetLegBm(
 // time, so a value no plausible bump sequence reaches makes a handler that
 // regressed to the stored revision unmistakable.
 const fakeAgentRevision = uint64(0xfa5e)
+
+// fakeAgentObsAge is the age of the observation fakeAgentStamp describes:
+// the agent answers that long after the reading of it ended.
+const fakeAgentObsAge = 1500 * time.Millisecond
+
+// fakeAgentStamp is the ObsStamp a fake answers with until a test sets
+// another: an observation fakeAgentObsAge old when the agent answers, made
+// under a trace id of its own while a converge of the object is in flight,
+// so every field of it is set and a handler that dropped one is caught.
+func fakeAgentStamp() *pb.ObsStamp {
+	obsTime := time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)
+	return &pb.ObsStamp{
+		ObsTime:       timestamppb.New(obsTime),
+		ObsTraceId:    "fake-agent-observation",
+		AnswerTime:    timestamppb.New(obsTime.Add(fakeAgentObsAge)),
+		ConvergeStart: timestamppb.New(obsTime.Add(time.Second)),
+	}
+}
+
+// fakeAgentNoObsStamp is the ObsStamp of an object the agent holds no
+// observation of yet: the agent's answer time alone (dnagent.md SH28).
+func fakeAgentNoObsStamp() *pb.ObsStamp {
+	answerTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	return &pb.ObsStamp{AnswerTime: timestamppb.New(answerTime)}
+}
+
+// wantInspectObs checks the observation an Inspect* reply passes on
+// (architecture.md, Live-state reporting): the agent's stamp verbatim, and the
+// age the gateway derives from it, wantAge, or unset when wantAge is nil. An
+// age of zero is not an unset one: a zero would read as a fresh observation.
+func wantInspectObs(
+	t *testing.T,
+	what string,
+	gotStamp *pb.ObsStamp,
+	gotAge *durationpb.Duration,
+	wantStamp *pb.ObsStamp,
+	wantAge *durationpb.Duration,
+) {
+	t.Helper()
+	if !proto.Equal(gotStamp, wantStamp) {
+		t.Errorf("%s: obs_stamp = %v, want the agent's %v",
+			what, gotStamp, wantStamp)
+	}
+	switch {
+	case wantAge == nil && gotAge != nil:
+		t.Errorf("%s: obs_age = %v, want it unset",
+			what, gotAge.AsDuration())
+	case wantAge != nil && gotAge == nil:
+		t.Errorf("%s: obs_age unset, want %v", what, wantAge.AsDuration())
+	case wantAge != nil && !proto.Equal(gotAge, wantAge):
+		t.Errorf("%s: obs_age = %v, want %v",
+			what, gotAge.AsDuration(), wantAge.AsDuration())
+	}
+}
 
 // fakeAddrPort returns an addr_port a fake agent can bind and the gateway can
 // dial, built from a name the test chooses so a failure message says which
@@ -610,7 +681,11 @@ func startFakeAgent(t *testing.T, addrPort string, size uint64) *fakeAgent {
 			"listen %s %s: %v (take addr_port from fakeAddrPort)",
 			network, target, err)
 	}
-	agent := &fakeAgent{AddrPort: addrPort, size: size}
+	agent := &fakeAgent{
+		AddrPort: addrPort,
+		size:     size,
+		stamp:    fakeAgentStamp(),
+	}
 	server := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),

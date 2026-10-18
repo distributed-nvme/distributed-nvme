@@ -13,16 +13,17 @@ import (
 )
 
 // The disk counts (DN18) as the server sends them: beside the meta row of the
-// DN converge's SyncupDn reply (DN5) and of the probe behind GetDnInfo and the
-// CheckDn rounds.
+// DN converge's SyncupDn reply (DN5) and of the probe of the DN's read, whose
+// observation GetDnInfo and the CheckDn rounds answer (SH29).
 
 // testDataExtCnt is the data area of the test server's disk in extents.
 var testDataExtCnt = (uint64(512<<20) - common.DnDataOffset) / testExtentSize
 
-// dnInfoOf is GetDnInfo's DnInfo for the test dn.
+// dnInfoOf is GetDnInfo's DnInfo for the test dn once the dn's read has run
+// (dnInfoNow): what the node holds now (SH29).
 func dnInfoOf(t *testing.T, srv *DnAgentServer) *pb.DnInfo {
 	t.Helper()
-	reply, err := srv.GetDnInfo(context.Background(),
+	reply, err := dnInfoNow(srv, context.Background(),
 		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
 	if err != nil {
 		t.Fatalf("GetDnInfo: %v", err)
@@ -165,7 +166,7 @@ func TestDnInfoCountsNeedASizeAndThisDnsDisk(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SyncupDn: %v", err)
 		}
-		probe, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+		probe, err := dnInfoNow(srv, ctx, &pb.GetDnInfoRequest{
 			ClusterId: testCluster, DnId: testDn + 100,
 		})
 		if err != nil {
@@ -191,8 +192,9 @@ func TestDnInfoCountsNeedASizeAndThisDnsDisk(t *testing.T) {
 // TestCheckDnStreamResendsOnAMatchFlip: a CheckDn round without show_info
 // omits the info only when it equals the last one sent (SH26), and the counts
 // are part of it. A SyncupDn that adds a pointer whose side never syncs
-// changes no row and no record, only side_recs_match, and the next round
-// carries the info again.
+// changes no row and no record, only side_recs_match, and the round after the
+// DN's next read carries the info again. Each round follows a read of the
+// DN, so that both compare what the node holds (SH29).
 func TestCheckDnStreamResendsOnAMatchFlip(t *testing.T) {
 	srv, _ := newTestServer(t)
 	client := dialAgent(t, srv)
@@ -217,8 +219,10 @@ func TestCheckDnStreamResendsOnAMatchFlip(t *testing.T) {
 		}
 		return reply
 	}
+	readDnNow(ctx, srv)
 	first := round(1).GetDnInfo()
 	wantCounts(t, "the first round", first, testDataExtCnt-testExtCnt, 1, true)
+	readDnNow(ctx, srv)
 	if got := round(1).GetDnInfo(); got != nil {
 		t.Fatalf("an unchanged round carried the info: %v", got)
 	}
@@ -226,6 +230,7 @@ func TestCheckDnStreamResendsOnAMatchFlip(t *testing.T) {
 	if _, err := srv.SyncupDn(ctx, dnReq(2, testSide, testSide2)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
+	readDnNow(ctx, srv)
 	flipped := round(2).GetDnInfo()
 	if flipped == nil {
 		t.Fatal("the round after the match flipped omitted the info")

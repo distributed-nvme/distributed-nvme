@@ -38,6 +38,26 @@
 //	               request because the file's mtime is newer than its own
 //	               last write.
 //
+// Every Check* and Get*Info reply, and every Syncup* reply that does not
+// refuse its request, carries an observation stamp (dnagent.md SH28) beside
+// its *Info, never inside it, so the change-only rule's fingerprint of the
+// *Info stays put: the fake observes an object at every answer, so the
+// observation's time is the answer's own, made later than the object's
+// previous observation, and its trace id is the call's — the round's own for
+// a Check* round. Every round is thus a fresh, new observation to the worker
+// (dnv-worker.md HL7, RW23). A round or an info read that refuses its object
+// as unknown — one its parent does not list, or one behavior.json's
+// reply_code refuses so — has no observation: its stamp carries only the
+// answer time. A Syncup* that saved the request also carries the save time,
+// and its observation comes after it; one that refuses the request — a stale
+// revision, an object its parent does not list, or a refusing code
+// behavior.json's reply_code forces — carries no stamp and no save time, as a
+// live agent's refusal carries neither (architecture.md, Live-state
+// reporting). A forced ReplyCodeLeftover is no refusal: it carries an
+// observation, and no save time, since the fake saves nothing on a forced
+// code. The times are not persisted: a restarted fake stamps the time it
+// answers, as an agent's startup reconcile stores a new observation.
+//
 // Objects are keyed exactly as behavior.json keys them — "dn", "cn",
 // "side <sp_id>:<leg_id>:<side_id>", "cntlr <sp_id>:<cntlr_id>", ids in plain
 // decimal — and every rule the fake follows (the revision gate, the ordering
@@ -71,6 +91,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -467,6 +488,8 @@ type fakeAgent struct {
 	behSize    int64
 	behPresent bool
 	epochs     map[string]map[string]*epochEntry
+	// observed is each object's latest observation time (observeLocked).
+	observed map[string]time.Time
 	// heldRounds counts, per object, the Check rounds hang_rounds still
 	// holds: armed from the file each time it is loaded
 	// (reloadBehaviorLocked) and spent one per round (waitForRound).
@@ -483,6 +506,7 @@ func newFakeAgent(ctx context.Context, dir string, size uint64) (*fakeAgent, err
 		state:      make(map[string]*objectState),
 		beh:        &behaviorFile{},
 		epochs:     make(map[string]map[string]*epochEntry),
+		observed:   make(map[string]time.Time),
 		heldRounds: make(map[string]uint32),
 	}
 	agent.mu.Lock()
@@ -685,8 +709,87 @@ func (a *fakeAgent) pruneLocked(prefix string, keep map[string]bool) {
 		if strings.HasPrefix(key, prefix) && !keep[key] {
 			delete(a.state, key)
 			delete(a.epochs, key)
+			delete(a.observed, key)
 		}
 	}
+}
+
+// observeLocked is one observation of an object (dnagent.md SH28): the fake
+// observes at every answer, so its time is now, made later than the object's
+// previous observation and than after, so that two observations never share
+// a time and equal times keep meaning the same observation.
+func (a *fakeAgent) observeLocked(key string, after time.Time) time.Time {
+	t := time.Now().Round(0)
+	if last := a.observed[key]; !t.After(last) {
+		t = last.Add(time.Nanosecond)
+	}
+	if !t.After(after) {
+		t = after.Add(time.Nanosecond)
+	}
+	a.observed[key] = t
+	return t
+}
+
+// stampLocked is the ObsStamp of one reply about an object: an observation of
+// it made now (observeLocked, later than after), under traceId, when the
+// reply knows the object, and the answer time in any case, never before the
+// observation's.
+func (a *fakeAgent) stampLocked(
+	key string, known bool, traceId string, after time.Time,
+) *pb.ObsStamp {
+	stamp := &pb.ObsStamp{}
+	var obs time.Time
+	if known {
+		obs = a.observeLocked(key, after)
+		stamp.ObsTime = agent.Timestamp(obs)
+		stamp.ObsTraceId = traceId
+	}
+	answer := time.Now().Round(0)
+	if answer.Before(obs) {
+		answer = obs
+	}
+	stamp.AnswerTime = agent.Timestamp(answer)
+	return stamp
+}
+
+// syncupStampLocked is stampLocked for a Syncup* reply under ctx's trace id,
+// with the save time: saved is whether the call saved the request (code 0),
+// and the save time it returns is when, unset otherwise. A reply whose code
+// refuses the request carries neither, as a live agent's does
+// (architecture.md, Live-state reporting): a code the worker reads as
+// accepted is zero or ReplyCodeLeftover (dnagent.md SH9), which
+// behavior.json's reply_code can force without the fake saving anything.
+func (a *fakeAgent) syncupStampLocked(
+	ctx context.Context, key string, code uint32, saved bool,
+) (*pb.ObsStamp, *timestamppb.Timestamp) {
+	if code != 0 && code != common.ReplyCodeLeftover {
+		return nil, nil
+	}
+	var saveAt time.Time
+	if saved {
+		saveAt = time.Now().Round(0)
+	}
+	stamp := a.stampLocked(key, true, callTraceId(ctx), saveAt)
+	return stamp, agent.Timestamp(saveAt)
+}
+
+// infoStampLocked is stampLocked for an info read of an object its parent
+// lists, under ctx's trace id: the object is known unless behavior.json's
+// reply_code refuses it as unknown, which leaves the stamp the answer time
+// alone, as for an object the parent does not list.
+func (a *fakeAgent) infoStampLocked(
+	ctx context.Context, key string,
+) *pb.ObsStamp {
+	return a.stampLocked(key,
+		a.forcedCodeLocked(key) != common.ReplyCodeUnknownObject,
+		callTraceId(ctx), time.Time{})
+}
+
+// callTraceId is the trace id of a unary call, the one a Syncup*'s or an info
+// read's observation is stamped with.
+func callTraceId(ctx context.Context) string {
+	traceId, _ := common.TraceIdFromCtx(ctx)
+	return traceId
 }
 
 func (a *fakeAgent) revisionLocked(key string) uint64 {
@@ -1527,10 +1630,13 @@ func (a *fakeAgent) SyncupDn(
 		a.pruneLocked(sideObjPrefix, keep)
 		a.saveStateLocked(ctx)
 	}
+	stamp, saveTime := a.syncupStampLocked(ctx, dnObjKey, code, code == 0)
 	return &pb.SyncupDnReply{
 		AgentReply: agentReply(code, details),
 		Revision:   a.revisionLocked(dnObjKey),
 		DnInfo:     a.dnInfoLocked(),
+		ObsStamp:   stamp,
+		SaveTime:   saveTime,
 	}, nil
 }
 
@@ -1559,11 +1665,14 @@ func (a *fakeAgent) SyncupSide(
 		a.applyLocked(ctx, key, req.GetRevision(), req)
 		a.saveStateLocked(ctx)
 	}
+	stamp, saveTime := a.syncupStampLocked(ctx, key, code, code == 0)
 	return &pb.SyncupSideReply{
 		AgentReply: agentReply(code, details),
 		Revision:   a.revisionLocked(key),
 		SideInfo:   a.sideInfoLocked(key),
 		BmInfo:     a.sideBmInfoLocked(key),
+		ObsStamp:   stamp,
+		SaveTime:   saveTime,
 	}, nil
 }
 
@@ -1606,6 +1715,7 @@ func (a *fakeAgent) GetDnInfo(
 		AgentReply: agentReply(a.forcedCodeLocked(dnObjKey), ""),
 		Revision:   a.revisionLocked(dnObjKey),
 		DnInfo:     a.dnInfoLocked(),
+		ObsStamp:   a.infoStampLocked(ctx, dnObjKey),
 	}, nil
 }
 
@@ -1625,12 +1735,14 @@ func (a *fakeAgent) GetSideInfo(
 		return &pb.GetSideInfoReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
 				key+" is not in the last SyncupDn.side_pointer_list"),
+			ObsStamp: a.stampLocked(key, false, "", time.Time{}),
 		}, nil
 	}
 	return &pb.GetSideInfoReply{
 		AgentReply: agentReply(a.forcedCodeLocked(key), ""),
 		Revision:   a.revisionLocked(key),
 		SideInfo:   a.sideInfoLocked(key),
+		ObsStamp:   a.infoStampLocked(ctx, key),
 	}, nil
 }
 
@@ -1661,11 +1773,15 @@ func (a *fakeAgent) CheckDn(
 		a.mu.Lock()
 		result := a.checkGateLocked(dnObjKey, true)
 		info := a.dnInfoLocked()
+		stamp := a.stampLocked(dnObjKey,
+			result.code != common.ReplyCodeUnknownObject, req.GetTraceId(),
+			time.Time{})
 		a.mu.Unlock()
 
 		reply := &pb.CheckDnReply{
 			AgentReply: agentReply(result.code, result.details),
 			Revision:   result.revision,
+			ObsStamp:   stamp,
 		}
 		if tracker.include(req.GetShowInfo(), info) {
 			reply.DnInfo = info
@@ -1704,15 +1820,18 @@ func (a *fakeAgent) CheckSide(
 		a.mu.Lock()
 		result := a.checkGateLocked(
 			key, a.sideKnownLocked(req.GetSidePointer()))
+		known := result.code != common.ReplyCodeUnknownObject
 		var info *pb.SideInfo
-		if result.code != common.ReplyCodeUnknownObject {
+		if known {
 			info = a.sideInfoLocked(key)
 		}
+		stamp := a.stampLocked(key, known, req.GetTraceId(), time.Time{})
 		a.mu.Unlock()
 
 		reply := &pb.CheckSideReply{
 			AgentReply: agentReply(result.code, result.details),
 			Revision:   result.revision,
+			ObsStamp:   stamp,
 		}
 		if tracker.include(req.GetShowInfo(), info) {
 			reply.SideInfo = info
@@ -1764,10 +1883,13 @@ func (a *fakeAgent) SyncupCn(
 		a.pruneLocked(cntlrObjPrefix, keep)
 		a.saveStateLocked(ctx)
 	}
+	stamp, saveTime := a.syncupStampLocked(ctx, cnObjKey, code, code == 0)
 	return &pb.SyncupCnReply{
 		AgentReply: agentReply(code, details),
 		Revision:   a.revisionLocked(cnObjKey),
 		CnInfo:     a.cnInfoLocked(),
+		ObsStamp:   stamp,
+		SaveTime:   saveTime,
 	}, nil
 }
 
@@ -1796,11 +1918,14 @@ func (a *fakeAgent) SyncupCntlr(
 		a.applyLocked(ctx, key, req.GetRevision(), req)
 		a.saveStateLocked(ctx)
 	}
+	stamp, saveTime := a.syncupStampLocked(ctx, key, code, code == 0)
 	return &pb.SyncupCntlrReply{
 		AgentReply: agentReply(code, details),
 		Revision:   a.revisionLocked(key),
 		CntlrInfo:  a.cntlrInfoLocked(key),
 		BmInfoList: a.cntlrBmInfoListLocked(key),
+		ObsStamp:   stamp,
+		SaveTime:   saveTime,
 	}, nil
 }
 
@@ -1845,6 +1970,7 @@ func (a *fakeAgent) GetCnInfo(
 		AgentReply: agentReply(a.forcedCodeLocked(cnObjKey), ""),
 		Revision:   a.revisionLocked(cnObjKey),
 		CnInfo:     a.cnInfoLocked(),
+		ObsStamp:   a.infoStampLocked(ctx, cnObjKey),
 	}, nil
 }
 
@@ -1866,12 +1992,14 @@ func (a *fakeAgent) GetCntlrInfo(
 		return &pb.GetCntlrInfoReply{
 			AgentReply: agentReply(common.ReplyCodeUnknownObject,
 				key+" is not in the last SyncupCn.cntlr_pointer_list"),
+			ObsStamp: a.stampLocked(key, false, "", time.Time{}),
 		}, nil
 	}
 	return &pb.GetCntlrInfoReply{
 		AgentReply: agentReply(a.forcedCodeLocked(key), ""),
 		Revision:   a.revisionLocked(key),
 		CntlrInfo:  a.cntlrInfoLocked(key),
+		ObsStamp:   a.infoStampLocked(ctx, key),
 	}, nil
 }
 
@@ -1920,11 +2048,15 @@ func (a *fakeAgent) CheckCn(
 		a.mu.Lock()
 		result := a.checkGateLocked(cnObjKey, true)
 		info := a.cnInfoLocked()
+		stamp := a.stampLocked(cnObjKey,
+			result.code != common.ReplyCodeUnknownObject, req.GetTraceId(),
+			time.Time{})
 		a.mu.Unlock()
 
 		reply := &pb.CheckCnReply{
 			AgentReply: agentReply(result.code, result.details),
 			Revision:   result.revision,
+			ObsStamp:   stamp,
 		}
 		if tracker.include(req.GetShowInfo(), info) {
 			reply.CnInfo = info
@@ -1963,15 +2095,18 @@ func (a *fakeAgent) CheckCntlr(
 		a.mu.Lock()
 		result := a.checkGateLocked(
 			key, a.cntlrKnownLocked(req.GetCntlrPointer()))
+		known := result.code != common.ReplyCodeUnknownObject
 		var info *pb.CntlrInfo
-		if result.code != common.ReplyCodeUnknownObject {
+		if known {
 			info = a.cntlrInfoLocked(key)
 		}
+		stamp := a.stampLocked(key, known, req.GetTraceId(), time.Time{})
 		a.mu.Unlock()
 
 		reply := &pb.CheckCntlrReply{
 			AgentReply: agentReply(result.code, result.details),
 			Revision:   result.revision,
+			ObsStamp:   stamp,
 		}
 		if tracker.include(req.GetShowInfo(), info) {
 			reply.CntlrInfo = info

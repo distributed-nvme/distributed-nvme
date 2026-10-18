@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -101,6 +102,11 @@ type agentpathFake struct {
 	// cntlrInfo and sideInfo are what GetCntlrInfo / GetSideInfo report.
 	cntlrInfo *pb.CntlrInfo
 	sideInfo  *pb.SideInfo
+	// stamp is the ObsStamp every Get*Info reply carries, fakeAgentStamp
+	// until a test sets another: the agent answers from its latest
+	// observation (architecture.md, Live-state reporting), and every
+	// Inspect* reply passes the stamp on with its age.
+	stamp *pb.ObsStamp
 	// hang makes every call block until its ctx ends, which is the only way
 	// to exercise the AG2 timeout without touching the constant.
 	hang bool
@@ -127,7 +133,10 @@ func agentpathStartAgent(t *testing.T) *agentpathFake {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	fake := &agentpathFake{addrPort: lis.Addr().String()}
+	fake := &agentpathFake{
+		addrPort: lis.Addr().String(),
+		stamp:    fakeAgentStamp(),
+	}
 	fake.server = grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			fake.captureInterceptor(),
@@ -199,6 +208,13 @@ func (f *agentpathFake) setSpInfos(
 	f.cntlrInfo, f.sideInfo = cntlrInfo, sideInfo
 }
 
+// setStamp fixes the ObsStamp the four info probes carry from now on.
+func (f *agentpathFake) setStamp(stamp *pb.ObsStamp) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stamp = stamp
+}
+
 // setHang makes every call block until its ctx ends.
 func (f *agentpathFake) setHang(hang bool) {
 	f.mu.Lock()
@@ -260,12 +276,16 @@ func (f *agentpathFake) GetDnInfo(
 ) (*pb.GetDnInfoReply, error) {
 	f.mu.Lock()
 	f.dnInfoReqs = append(f.dnInfoReqs, req)
-	info, rev := f.dnInfo, f.agentRev
+	info, rev, stamp := f.dnInfo, f.agentRev, f.stamp
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.GetDnInfoReply{Revision: rev, DnInfo: info}, nil
+	return &pb.GetDnInfoReply{
+		Revision: rev,
+		DnInfo:   info,
+		ObsStamp: stamp,
+	}, nil
 }
 
 func (f *agentpathFake) GetCnInfo(
@@ -274,12 +294,16 @@ func (f *agentpathFake) GetCnInfo(
 ) (*pb.GetCnInfoReply, error) {
 	f.mu.Lock()
 	f.cnInfoReqs = append(f.cnInfoReqs, req)
-	info, rev := f.cnInfo, f.agentRev
+	info, rev, stamp := f.cnInfo, f.agentRev, f.stamp
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.GetCnInfoReply{Revision: rev, CnInfo: info}, nil
+	return &pb.GetCnInfoReply{
+		Revision: rev,
+		CnInfo:   info,
+		ObsStamp: stamp,
+	}, nil
 }
 
 func (f *agentpathFake) GetCntlrInfo(
@@ -288,12 +312,16 @@ func (f *agentpathFake) GetCntlrInfo(
 ) (*pb.GetCntlrInfoReply, error) {
 	f.mu.Lock()
 	f.cntlrInfoReqs = append(f.cntlrInfoReqs, req)
-	info, rev := f.cntlrInfo, f.agentRev
+	info, rev, stamp := f.cntlrInfo, f.agentRev, f.stamp
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.GetCntlrInfoReply{Revision: rev, CntlrInfo: info}, nil
+	return &pb.GetCntlrInfoReply{
+		Revision:  rev,
+		CntlrInfo: info,
+		ObsStamp:  stamp,
+	}, nil
 }
 
 func (f *agentpathFake) GetSideInfo(
@@ -302,12 +330,16 @@ func (f *agentpathFake) GetSideInfo(
 ) (*pb.GetSideInfoReply, error) {
 	f.mu.Lock()
 	f.sideInfoReqs = append(f.sideInfoReqs, req)
-	info, rev := f.sideInfo, f.agentRev
+	info, rev, stamp := f.sideInfo, f.agentRev, f.stamp
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.GetSideInfoReply{Revision: rev, SideInfo: info}, nil
+	return &pb.GetSideInfoReply{
+		Revision: rev,
+		SideInfo: info,
+		ObsStamp: stamp,
+	}, nil
 }
 
 // agentpathDeadAddr returns an address nothing listens on: a port is bound to
@@ -673,17 +705,23 @@ func TestAgentPathCreateControllerNodeCapBudget(t *testing.T) {
 
 // TestAgentPathInspectRepliesTheAppliedRevision pins architecture.md,
 // Disk nodes and Cntlrs: an Inspect* reply's `applied_revision` is the one
-// the agent's own reply carries — the revision of the last Syncup* it
-// accepted for the object — never the one stored in an etcd rev key. The rev
-// keys are hand-written to a value the agent does not report, so a handler
-// that regressed to the stored revision fails here.
+// the agent's own reply carries — the revision of the agent's latest
+// observation of the object — never the one stored in an etcd rev key. The
+// rev keys are hand-written to a value the agent does not report, so a
+// handler that regressed to the stored revision fails here.
 //
 // The *Info message travels with it: both fields are the agent's, verbatim,
-// because the whole point of Inspect* is one coherent live snapshot the
-// store does not have.
+// because the whole point of Inspect* is one coherent observation the store
+// does not have. So does the stamp the agent answered with, beside the age
+// the gateway derives from it on the node's clock (architecture.md,
+// Live-state reporting), over the real gRPC hop: an observation's age, and
+// none for an object the agent holds no observation of yet.
 func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 	const storedRev = uint64(7)
 	const agentRev = uint64(99)
+	// seenAge is the age of fakeAgentStamp, the stamp every fake answers
+	// with until a subtest swaps in fakeAgentNoObsStamp.
+	seenAge := durationpb.New(fakeAgentObsAge)
 	wantDnInfo := &pb.DnInfo{
 		DiskInfo: &pb.ResInfo{
 			ResName: "disk",
@@ -760,6 +798,8 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("dn_info = %v, want the agent's %v",
 				reply.GetDnInfo(), wantDnInfo)
 		}
+		wantInspectObs(t, "InspectDiskNode",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentStamp(), seenAge)
 		fake.mu.Lock()
 		infoReqs := append([]*pb.GetDnInfoRequest(nil), fake.dnInfoReqs...)
 		fake.mu.Unlock()
@@ -772,6 +812,18 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 				infoReqs[0].GetClusterId(), infoReqs[0].GetDnId(),
 				cid, created.GetDnId())
 		}
+
+		fake.setStamp(fakeAgentNoObsStamp())
+		reply, err = srv.InspectDiskNode(
+			context.Background(), &pb.InspectDiskNodeRequest{
+				ClusterName: clusterName,
+				AddrPort:    fake.addrPort,
+			})
+		if err != nil {
+			t.Fatalf("InspectDiskNode with no observation: %v", err)
+		}
+		wantInspectObs(t, "InspectDiskNode with no observation",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 	})
 
 	t.Run("controller node", func(t *testing.T) {
@@ -811,6 +863,8 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("cn_info = %v, want the agent's %v",
 				reply.GetCnInfo(), wantCnInfo)
 		}
+		wantInspectObs(t, "InspectControllerNode",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentStamp(), seenAge)
 		fake.mu.Lock()
 		infoReqs := append([]*pb.GetCnInfoRequest(nil), fake.cnInfoReqs...)
 		fake.mu.Unlock()
@@ -823,6 +877,18 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 				infoReqs[0].GetClusterId(), infoReqs[0].GetCnId(),
 				cid, created.GetCnId())
 		}
+
+		fake.setStamp(fakeAgentNoObsStamp())
+		reply, err = srv.InspectControllerNode(
+			context.Background(), &pb.InspectControllerNodeRequest{
+				ClusterName: clusterName,
+				AddrPort:    fake.addrPort,
+			})
+		if err != nil {
+			t.Fatalf("InspectControllerNode with no observation: %v", err)
+		}
+		wantInspectObs(t, "InspectControllerNode with no observation",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 	})
 
 	// spFixture is the shared bed of the cntlr and side subtests: two fakes,
@@ -931,6 +997,8 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("cntlr_info = %v, want the agent's %v",
 				reply.GetCntlrInfo(), wantCntlrInfo)
 		}
+		wantInspectObs(t, "InspectCntlr",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentStamp(), seenAge)
 		fake.mu.Lock()
 		infoReqs := append(
 			[]*pb.GetCntlrInfoRequest(nil), fake.cntlrInfoReqs...)
@@ -950,6 +1018,19 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 				infoReqs[0].GetCntlrPointer().GetCntlrId(),
 				fx.cid, fx.cnId, fx.conf.GetSpId(), cntlrId)
 		}
+
+		fake.setStamp(fakeAgentNoObsStamp())
+		reply, err = fx.srv.InspectCntlr(
+			context.Background(), &pb.InspectCntlrRequest{
+				ClusterName: fx.cluster,
+				SpName:      fx.spName,
+				CntlrId:     cntlrId,
+			})
+		if err != nil {
+			t.Fatalf("InspectCntlr with no observation: %v", err)
+		}
+		wantInspectObs(t, "InspectCntlr with no observation",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 	})
 
 	t.Run("side", func(t *testing.T) {
@@ -979,6 +1060,8 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("side_info = %v, want the agent's %v",
 				reply.GetSideInfo(), wantSideInfo)
 		}
+		wantInspectObs(t, "InspectSide",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentStamp(), seenAge)
 		fake.mu.Lock()
 		infoReqs := append(
 			[]*pb.GetSideInfoRequest(nil), fake.sideInfoReqs...)
@@ -998,6 +1081,19 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 				infoReqs[0].GetClusterId(), infoReqs[0].GetDnId(),
 				infoReqs[0].GetSidePointer(), fx.cid, dnId, wantPointer)
 		}
+
+		fake.setStamp(fakeAgentNoObsStamp())
+		reply, err = fx.srv.InspectSide(
+			context.Background(), &pb.InspectSideRequest{
+				ClusterName: fx.cluster,
+				SpName:      fx.spName,
+				SideId:      side.GetSideId(),
+			})
+		if err != nil {
+			t.Fatalf("InspectSide with no observation: %v", err)
+		}
+		wantInspectObs(t, "InspectSide with no observation",
+			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 	})
 }
 

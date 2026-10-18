@@ -252,7 +252,7 @@ func TestCnDriverInfoIsRaceFree(t *testing.T) {
 			d.fold(&pb.AgentReply{}, uint64(i), &pb.CnInfo{
 				TmpfsInfo: resErr("tmpfs", "no space"),
 				PortInfo:  resOk("port"),
-			})
+			}, testStamp(), nil)
 		}
 	}()
 	go func() {

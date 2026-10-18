@@ -802,10 +802,15 @@ func TestStandbyCleanReplyBelowItsRevisionClearsNothing(t *testing.T) {
 // time each add one, a Syncup* reply with an ERROR row neither starts the run
 // nor adds to it, and a clean answer of either kind ends it. A round is judged
 // by its own report: a reply that leaves its info out as unchanged repeats
-// what its stream last carried, not a Syncup*'s info stored since. The loop
-// halves show the revision worker marking a round's reply and leaving a
-// Syncup*'s unmarked: the agent answers every round one revision behind, so
-// each round is followed by a Syncup*.
+// what its stream last carried, not a Syncup*'s info stored since. Only a
+// round answering from an observation new to the loop counts by its own
+// report (RW23): one answering from an observation already seen, a round's or
+// a Syncup*'s, or from an older one, adds nothing to the run. Each reply in
+// the driver half carries its observation time, and the half marks it as the
+// revision worker does (seeRound). The loop halves show the revision worker
+// marking a round's reply and
+// leaving a Syncup*'s unmarked: the agent answers every round one revision
+// behind, so each round is followed by a Syncup*.
 func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 	ctx := context.Background()
 	failed := func() *pb.CntlrInfo {
@@ -834,20 +839,41 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		judged := func() bool {
 			return w.verdicts.snapshot(spFixture()).cntlrs[spCntlrPrimary]
 		}
-		// A round's reply is what its stream carried; nil is a reply that
-		// left its info out as unchanged.
-		round := func(info *pb.CntlrInfo) {
+		// loop marks each reply as the revision worker does: a round's by
+		// seeRound, which tells a new observation from one seen (RW23), and
+		// a Syncup*'s by seeObservation. last is the observation the latest
+		// round answered from, synced the one the latest Syncup* carried.
+		var loop revWorker
+		var last, synced time.Time
+		// A round's reply is what its stream carried, answering from the
+		// observation made at obs; nil is a reply that left its info out as
+		// unchanged.
+		roundFrom := func(obs time.Time, info *pb.CntlrInfo) {
 			if info != nil {
 				driver.storeInfo(info)
 				driver.setStreamInfo(info)
 			}
-			driver.observe(ctx, &replyState{
-				revision: 7, infoPresent: info != nil, fromRound: true,
-			})
+			r := &replyState{
+				revision: 7, infoPresent: info != nil,
+				obsTime: obs, answerTime: obs,
+			}
+			loop.seeRound(r)
+			driver.observe(ctx, r)
+			last = obs
 		}
+		// round answers from a new observation; repeat from the one the
+		// round before it answered from, leaving its info out as unchanged.
+		round := func(info *pb.CntlrInfo) { roundFrom(nextObsTime(), info) }
+		repeat := func() { roundFrom(last, nil) }
 		syncup := func(info *pb.CntlrInfo) {
+			synced = nextObsTime()
 			driver.storeInfo(info)
-			driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+			r := &replyState{
+				revision: 7, infoPresent: true,
+				obsTime: synced, answerTime: synced,
+			}
+			loop.seeObservation(r)
+			driver.observe(ctx, r)
 		}
 		want := func(what string, wantRun int, wantJudged bool) {
 			t.Helper()
@@ -880,6 +906,31 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		round(nil)
 		want("rounds repeating a stream's ERROR row", 2, true)
 
+		// A round that repeats an observation already seen is one look, not
+		// two: its own report adds nothing to the run. Nor does a round
+		// answering from an observation older than one seen, though the
+		// loop never saw that one.
+		round(clean())
+		round(failed())
+		repeat()
+		repeat()
+		roundFrom(last.Add(-time.Nanosecond), nil)
+		want("rounds repeating an observation with an ERROR row, and one "+
+			"older", 1, true)
+		round(nil)
+		want("a new observation after them", 2, true)
+
+		// A round answering from the observation a Syncup* reply carried
+		// repeats that reply's look, which never counts: its ERROR row,
+		// carried on the stream as changed, starts no run.
+		round(clean())
+		syncup(failed())
+		roundFrom(synced, failed())
+		want("a round answering from a Syncup's observation with an ERROR "+
+			"row", 0, true)
+		round(nil)
+		want("a new observation after it", 1, true)
+
 		// A round's own clean report ends the run even while the latest
 		// known state is a Syncup*'s ERROR row, which keeps the verdict
 		// unhealthy.
@@ -892,10 +943,14 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 	})
 
 	// loop starts a coordinator whose primary's agent answers every round one
-	// revision behind with check's info, and every Syncup with an ERROR row.
-	loop := func(t *testing.T, check *pb.CntlrInfo, omit bool) (
-		*spHarness, func() int, func() int,
-	) {
+	// revision behind with check's info, and every Syncup with an ERROR row;
+	// each reply from a new observation, or, given stamp, from the one stamp
+	// returns for a round's reply (round) or a Syncup's, or from a new one
+	// where it returns nil.
+	loop := func(
+		t *testing.T, check *pb.CntlrInfo, omit bool,
+		stamp func(round bool) *pb.ObsStamp,
+	) (*spHarness, func() int, func() int) {
 		t.Helper()
 		h := newSpHarness(t)
 		h.addFixtureAgents()
@@ -906,9 +961,13 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		stub.syncupReply = func(
 			req *pb.SyncupCntlrRequest,
 		) *pb.SyncupCntlrReply {
-			return &pb.SyncupCntlrReply{
+			reply := &pb.SyncupCntlrReply{
 				Revision: req.GetRevision(), CntlrInfo: failed(),
 			}
+			if stamp != nil {
+				reply.ObsStamp = stamp(false)
+			}
+			return reply
 		}
 		stub.checkReply = func(
 			req *pb.CheckCntlrRequest,
@@ -916,10 +975,14 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 			mu.Lock()
 			checks++
 			mu.Unlock()
-			return &pb.CheckCntlrReply{
+			reply := &pb.CheckCntlrReply{
 				Revision:  req.GetRevision() - 1,
 				CntlrInfo: proto.Clone(check).(*pb.CntlrInfo),
 			}
+			if stamp != nil {
+				reply.ObsStamp = stamp(true)
+			}
+			return reply
 		}
 		w := h.start()
 		h.reactWith(w, &fakeReactionOps{})
@@ -941,7 +1004,7 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 	}
 
 	t.Run("the loop", func(t *testing.T) {
-		h, run, rounds := loop(t, failed(), false)
+		h, run, rounds := loop(t, failed(), false, nil)
 		waitFor(t, "the first round and its Syncup", func() bool {
 			return run() >= 1 && len(h.cntlrs[spCnA].syncups()) >= 1
 		})
@@ -958,7 +1021,7 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 	})
 
 	t.Run("the loop, rounds repeating a clean stream", func(t *testing.T) {
-		h, run, _ := loop(t, clean(), true)
+		h, run, _ := loop(t, clean(), true, nil)
 		waitFor(t, "a Syncup after the first round", func() bool {
 			return len(h.cntlrs[spCnA].syncups()) >= 1
 		})
@@ -971,6 +1034,442 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 				"repeating a clean stream; want no run", run(), n)
 		}
 	})
+
+	// Every round answers from one observation with an ERROR row: the first
+	// round's is new and starts the run, and no later round is new, since
+	// each repeats an observation already seen — older, too, than those of
+	// the Syncups between them, which are seen without counting — so the
+	// run stays at one look however many rounds repeat it (RW23).
+	t.Run("the loop, rounds repeating one observation", func(t *testing.T) {
+		one := testStamp()
+		h, run, rounds := loop(t, failed(), false,
+			func(round bool) *pb.ObsStamp {
+				if round {
+					return proto.CloneOf(one)
+				}
+				return nil
+			})
+		waitFor(t, "the first round's verdict and its Syncup", func() bool {
+			return run() >= 1 && len(h.cntlrs[spCnA].syncups()) >= 1
+		})
+		for range 3 {
+			h.clk.advance(roundInterval)
+			settle()
+		}
+		if got := rounds(); got < 3 || run() != 1 {
+			t.Fatalf("run %d after %d rounds repeating one observation "+
+				"with an ERROR row; want 1", run(), got)
+		}
+	})
+
+	// Every round after the first answers from the observation the Syncup*
+	// before it carried, as an agent does whose converge each round's
+	// re-sync runs, cancelling the read the round started (dnagent.md
+	// SH30): those observations are seen and never counted, so no round
+	// after the first is new and the run stays at the first round's look.
+	t.Run("the loop, rounds answering from each Syncup's observation",
+		func(t *testing.T) {
+			var mu sync.Mutex
+			var latest *pb.ObsStamp
+			h, run, rounds := loop(t, failed(), false,
+				func(round bool) *pb.ObsStamp {
+					mu.Lock()
+					defer mu.Unlock()
+					if !round || latest == nil {
+						latest = testStamp()
+					}
+					return proto.CloneOf(latest)
+				})
+			waitFor(t, "the first round's verdict and its Syncup",
+				func() bool {
+					return run() >= 1 &&
+						len(h.cntlrs[spCnA].syncups()) >= 1
+				})
+			for range 3 {
+				h.clk.advance(roundInterval)
+				settle()
+			}
+			n := len(h.cntlrs[spCnA].syncups())
+			if got := rounds(); got < 3 || n < got || run() != 1 {
+				t.Fatalf("run %d after %d rounds and %d Syncups, each "+
+					"round answering from the Syncup before it, all with "+
+					"an ERROR row; want 1", run(), got, n)
+			}
+		})
+}
+
+// TestCntlrRunAcrossAChildRestart pins AR10's run across a cntlr's children,
+// through their real loops: the run lives in the coordinator's memo and
+// outlives a child restarted at the same endpoint (RW14), while what has
+// been seen lives with each loop (RW23), so the new loop has seen nothing.
+// Its first round still adds nothing when the agent answers it from a look
+// the old child counted, or from the one the old child's Syncup* reply
+// carried: that observation ended before the new loop's first round, and
+// such a round gives no verdict (HL7). The round after it, answering from
+// the read that first round started, counts.
+func TestCntlrRunAcrossAChildRestart(t *testing.T) {
+	ms := time.Millisecond
+	t0 := testNodeBase
+	failed := func() *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resErr("md", "failed")},
+		}
+	}
+	clean := func() *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resOk("md")},
+		}
+	}
+	// restart runs the cntlr's first child, answering round n with
+	// round(n) and every SyncupCntlr with syncup, until it has answered
+	// first rounds and the Syncups it brings, then stops it the way the
+	// coordinator restarts a child (applyPlan) and starts its successor. It
+	// returns the harness, the run, the rounds answered and a step to the
+	// next round.
+	restart := func(
+		t *testing.T,
+		first int64,
+		round func(n int64) *pb.CheckCntlrReply,
+		syncup func() *pb.SyncupCntlrReply,
+	) (*spHarness, func() int, *atomic.Int64, func(n int64)) {
+		h := newSpHarness(t)
+		w := spTestWorker(h.deps)
+		w.verdicts = newVerdictMemo()
+		plan := settlePlan(true, false)
+		stub := h.addCntlr(plan.addr)
+		var rounds atomic.Int64
+		stub.checkReply = func(*pb.CheckCntlrRequest) *pb.CheckCntlrReply {
+			return round(rounds.Add(1))
+		}
+		if syncup != nil {
+			stub.syncupReply = func(*pb.SyncupCntlrRequest) *pb.SyncupCntlrReply {
+				return syncup()
+			}
+		}
+		run := func() int {
+			return w.verdicts.snapshot(spFixture()).runs[spCntlrPrimary]
+		}
+		step := func(n int64) {
+			t.Helper()
+			h.advanceUntil("the next round", roundInterval, func() bool {
+				return rounds.Load() >= n
+			})
+		}
+		t.Cleanup(w.cntlrStops.join)
+		old := w.startCntlrChild(plan)
+		t.Cleanup(w.cntlrStopper(old))
+		step(first)
+		synctest.Wait()
+		w.cntlrStops.stop(plan.cntlrId, w.cntlrStopper(old))
+		restarted := w.startCntlrChild(plan)
+		t.Cleanup(w.cntlrStopper(restarted))
+		return h, run, &rounds, step
+	}
+
+	t.Run("a look the old child counted", inBubble(func(t *testing.T) {
+		x := t0.Add(ms) // the read the old child's first round started
+		_, run, _, step := restart(t, 2,
+			func(n int64) *pb.CheckCntlrReply {
+				reply := &pb.CheckCntlrReply{Revision: 7, CntlrInfo: failed()}
+				switch n {
+				case 1:
+					reply.CntlrInfo = clean()
+					reply.ObsStamp = stampAt(t0.Add(-ms), t0, "read-before")
+				case 2, 3:
+					reply.ObsStamp = stampAt(x,
+						t0.Add(time.Duration(n-1)*roundInterval), "read-x")
+				default:
+					reply.ObsStamp = stampAt(t0.Add(2*roundInterval+ms),
+						t0.Add(time.Duration(n-1)*roundInterval), "read-y")
+				}
+				return reply
+			}, nil)
+		if got := run(); got != 1 {
+			t.Fatalf("run %d after the old child's round on a new look, "+
+				"want 1", got)
+		}
+		step(3)
+		if got := run(); got != 1 {
+			t.Fatalf("run %d after the restarted child's first round, "+
+				"answering from the look the old child counted; want 1", got)
+		}
+		step(4)
+		if got := run(); got != 2 {
+			t.Fatalf("run %d after the read the restarted child's first "+
+				"round started, want 2", got)
+		}
+	}))
+
+	t.Run("a look the old child's Syncup carried", inBubble(func(t *testing.T) {
+		s := t0.Add(ms) // the converge of the old child's Syncup
+		h, run, _, step := restart(t, 1,
+			func(n int64) *pb.CheckCntlrReply {
+				reply := &pb.CheckCntlrReply{Revision: 7, CntlrInfo: failed()}
+				switch n {
+				case 1:
+					// A revision behind: the round re-sends the Syncup.
+					reply.Revision = 6
+					reply.CntlrInfo = clean()
+					reply.ObsStamp = stampAt(t0.Add(-ms), t0, "read-before")
+				case 2:
+					reply.ObsStamp = stampAt(s, t0.Add(roundInterval),
+						"syncup")
+				default:
+					reply.ObsStamp = stampAt(t0.Add(roundInterval+ms),
+						t0.Add(time.Duration(n-1)*roundInterval), "read-y")
+				}
+				return reply
+			},
+			func() *pb.SyncupCntlrReply {
+				return &pb.SyncupCntlrReply{
+					Revision:  7,
+					CntlrInfo: failed(),
+					ObsStamp:  stampAt(s, s, "syncup"),
+				}
+			})
+		if got := len(h.cntlrs[spCnA].syncups()); got != 1 {
+			t.Fatalf("%d SyncupCntlr from the old child, want its re-send",
+				got)
+		}
+		if got := run(); got != 0 {
+			t.Fatalf("run %d after the old child's Syncup with an ERROR "+
+				"row, want 0", got)
+		}
+		step(2)
+		if got := run(); got != 0 {
+			t.Fatalf("run %d after the restarted child's first round, "+
+				"answering from the old child's Syncup's look; want 0", got)
+		}
+		step(3)
+		if got := run(); got != 1 {
+			t.Fatalf("run %d after the read the restarted child's first "+
+				"round started, want 1", got)
+		}
+	}))
+}
+
+// TestStaleRoundsOnTheSpChildren pins HL7's stale verdict on the two sp
+// children through their real loops: a side whose round answers from an
+// observation too old stops waiting for the cutover (RW18) and has its epoch
+// set, and a cntlr's run of unhealthy verdicts (AR10) adds one on every such
+// round, though none of them answers from a new observation (RW23).
+//
+// The first round answers from an observation that ended before it, which
+// starts the age's count and gives no verdict (HL7's pause rule); the second
+// answers from the read the first started, and the agent's reads stop ending
+// there. Every later round answers from that observation too, the first of
+// them just past the bound after it and each next an interval later.
+func TestStaleRoundsOnTheSpChildren(t *testing.T) {
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	t0 := testNodeBase
+	read := t0.Add(ms)
+	// stamp is round n's stamp.
+	stamp := func(n int64) *pb.ObsStamp {
+		switch n {
+		case 1:
+			return stampAt(t0.Add(-ms), t0, "read-s")
+		case 2:
+			return stampAt(read, t0.Add(roundInterval), "read-s")
+		default:
+			return stampAt(read,
+				read.Add(bound+ms+time.Duration(n-3)*roundInterval), "read-s")
+		}
+	}
+
+	t.Run("a side stops waiting for the cutover", inBubble(func(t *testing.T) {
+		h := newSpHarness(t)
+		w := spTestWorker(h.deps)
+		w.verdicts = newVerdictMemo()
+		plan := w.buildPlan(context.Background(), cutoverFixture(true)).
+			sides[spDstKey]
+		stub := h.addSide(plan.addr)
+		var rounds atomic.Int64
+		stub.checkReply = func(req *pb.CheckSideRequest) *pb.CheckSideReply {
+			return &pb.CheckSideReply{
+				Revision: req.GetRevision(),
+				SideInfo: awaitingSideInfo(),
+				ObsStamp: stamp(rounds.Add(1)),
+			}
+		}
+		child := w.startSideChild(spDstKey, plan)
+		t.Cleanup(w.sideStopper(child))
+
+		h.advanceUntil("the wait for the cutover", roundInterval,
+			child.driver.awaitsCutover)
+		if got := len(h.hw.all()); got != 1 || h.hw.all()[0].epoch != 0 {
+			t.Fatalf("a fresh round wrote %v, want one clear", h.hw.all())
+		}
+		h.advanceUntil("the wait off", roundInterval, func() bool {
+			return !child.driver.awaitsCutover()
+		})
+		synctest.Wait()
+		writes := h.hw.all()
+		if len(writes) != 2 || writes[1].record != healthRecordSide ||
+			writes[1].epoch == 0 {
+			t.Fatalf("health writes %v, want the side's epoch set", writes)
+		}
+		if got := len(h.logs.withMsg("check round failed")); got != 1 {
+			t.Fatalf("%d failed rounds, want the stale one", got)
+		}
+	}))
+
+	t.Run("a cntlr's run adds on every stale round",
+		inBubble(func(t *testing.T) {
+			h := newSpHarness(t)
+			w := spTestWorker(h.deps)
+			w.verdicts = newVerdictMemo()
+			plan := settlePlan(true, false)
+			stub := h.addCntlr(plan.addr)
+			var rounds atomic.Int64
+			stub.checkReply = func(
+				req *pb.CheckCntlrRequest,
+			) *pb.CheckCntlrReply {
+				n := rounds.Add(1)
+				reply := &pb.CheckCntlrReply{
+					Revision: req.GetRevision(),
+					ObsStamp: stamp(n),
+				}
+				if n <= 2 {
+					reply.CntlrInfo = &pb.CntlrInfo{
+						GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+							1: resOk("md"),
+						},
+					}
+				}
+				return reply
+			}
+			child := w.startCntlrChild(plan)
+			t.Cleanup(w.cntlrStopper(child))
+			run := func() int {
+				return w.verdicts.snapshot(spFixture()).runs[spCntlrPrimary]
+			}
+			failed := func() int {
+				return len(h.logs.withMsg("check round failed"))
+			}
+
+			h.advanceUntil("three stale rounds", roundInterval, func() bool {
+				return failed() >= 3
+			})
+			synctest.Wait()
+			if got := run(); got != failed() {
+				t.Fatalf("run %d after %d stale rounds, want one per round",
+					got, failed())
+			}
+			if got := len(stub.syncups()); got != 0 {
+				t.Fatalf("stale rounds issued %d Syncups, want none", got)
+			}
+		}))
+}
+
+// TestFirstRoundGivesTheSpChildrenNoVerdict pins HL7's pause rule on the two
+// sp children: a child's first round answers from an observation that ended
+// before it, which no round of its loop asked for, so it gives no verdict —
+// a side does not start waiting for the cutover on it (RW18), a cntlr's run
+// of unhealthy verdicts (AR10) does not count its ERROR row, and no epoch is
+// written. The next round, answering from the read the first started, is
+// judged.
+func TestFirstRoundGivesTheSpChildrenNoVerdict(t *testing.T) {
+	ms := time.Millisecond
+	t0 := testNodeBase
+	// stamp is round n's stamp: the first from an observation an hour old,
+	// every later one from the read the first started.
+	stamp := func(n int64) *pb.ObsStamp {
+		if n == 1 {
+			return stampAt(t0.Add(-time.Hour), t0, "read-old")
+		}
+		return stampAt(t0.Add(ms), t0.Add(time.Duration(n-1)*roundInterval),
+			"read-new")
+	}
+
+	t.Run("a side", inBubble(func(t *testing.T) {
+		h := newSpHarness(t)
+		w := spTestWorker(h.deps)
+		w.verdicts = newVerdictMemo()
+		plan := w.buildPlan(context.Background(), cutoverFixture(true)).
+			sides[spDstKey]
+		stub := h.addSide(plan.addr)
+		var rounds atomic.Int64
+		stub.checkReply = func(req *pb.CheckSideRequest) *pb.CheckSideReply {
+			return &pb.CheckSideReply{
+				Revision: req.GetRevision(),
+				SideInfo: awaitingSideInfo(),
+				ObsStamp: stamp(rounds.Add(1)),
+			}
+		}
+		child := w.startSideChild(spDstKey, plan)
+		t.Cleanup(w.sideStopper(child))
+
+		h.advanceUntil("the first round", roundInterval, func() bool {
+			return rounds.Load() >= 1
+		})
+		if child.driver.awaitsCutover() {
+			t.Fatal("the side waits for the cutover on its first round, " +
+				"which answers from an observation an hour old")
+		}
+		if got := h.hw.all(); len(got) != 0 {
+			t.Fatalf("the first round wrote %v", got)
+		}
+		h.advanceUntil("the second round", roundInterval, func() bool {
+			return rounds.Load() >= 2
+		})
+		if !child.driver.awaitsCutover() {
+			t.Fatal("the side does not wait for the cutover on the round " +
+				"answering from the first round's read")
+		}
+		if got := h.hw.all(); len(got) != 1 || got[0].epoch != 0 {
+			t.Fatalf("health writes %v, want the second round's clear", got)
+		}
+	}))
+
+	t.Run("a cntlr", inBubble(func(t *testing.T) {
+		h := newSpHarness(t)
+		w := spTestWorker(h.deps)
+		w.verdicts = newVerdictMemo()
+		plan := settlePlan(true, false)
+		stub := h.addCntlr(plan.addr)
+		var rounds atomic.Int64
+		stub.checkReply = func(req *pb.CheckCntlrRequest) *pb.CheckCntlrReply {
+			return &pb.CheckCntlrReply{
+				Revision: req.GetRevision(),
+				CntlrInfo: &pb.CntlrInfo{
+					GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+						1: resErr("md", "failed"),
+					},
+				},
+				ObsStamp: stamp(rounds.Add(1)),
+			}
+		}
+		child := w.startCntlrChild(plan)
+		t.Cleanup(w.cntlrStopper(child))
+		run := func() int {
+			return w.verdicts.snapshot(spFixture()).runs[spCntlrPrimary]
+		}
+
+		h.advanceUntil("the first round", roundInterval, func() bool {
+			return rounds.Load() >= 1
+		})
+		if got := run(); got != 0 {
+			t.Fatalf("run %d after a first round answering from an "+
+				"observation an hour old, want 0", got)
+		}
+		if got := h.hw.all(); len(got) != 0 {
+			t.Fatalf("the first round wrote %v", got)
+		}
+		h.advanceUntil("the second round", roundInterval, func() bool {
+			return rounds.Load() >= 2
+		})
+		if got := run(); got != 1 {
+			t.Fatalf("run %d after the round answering from the first "+
+				"round's read, want 1", got)
+		}
+		if got := h.hw.all(); len(got) != 1 || got[0].epoch == 0 {
+			t.Fatalf("health writes %v, want the ERROR row's epoch", got)
+		}
+		if got := len(stub.syncups()); got != 0 {
+			t.Fatalf("%d Syncups, want none", got)
+		}
+	}))
 }
 
 // settleDriver builds one cntlr child's driver outside any loop, the way the
@@ -1169,11 +1668,12 @@ func TestSpCntlrSettle(t *testing.T) {
 	t.Run("stack probed missing after a failed build", func(t *testing.T) {
 		// A td-less primary whose converge at the driven revision found its
 		// members not available: the SyncupCntlr reply reads its groups and
-		// pool ERROR, and the Check round before the agent's retry probes
-		// the devices absent and reads them MISSING "" — clean, at the
-		// driven revision, and no proof of the build the retry still has to
-		// do (primaryShapeBuilt). A row the sp_level suppresses reads
-		// MISSING "sp_level" and holds nothing.
+		// pool ERROR, and a background read between that converge and the
+		// agent's retry probes the devices absent and reads them MISSING ""
+		// — clean, at the driven revision, and no proof of the build the
+		// retry still has to do (primaryShapeBuilt). The rounds answer from
+		// that read's observation and probe nothing themselves. A row the
+		// sp_level suppresses reads MISSING "sp_level" and holds nothing.
 		driver, hw, logs := settleDriver(t, settlePlan(true, true))
 		driver.storeInfo(&pb.CntlrInfo{
 			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
@@ -1920,9 +2420,9 @@ func (s *stubSideAgent) SyncupSide(
 	s.mu.Unlock()
 	if build == nil {
 		// The agent applied it: the revision matches from now on.
-		return &pb.SyncupSideReply{Revision: req.GetRevision()}, nil
+		return stamped(&pb.SyncupSideReply{Revision: req.GetRevision()}), nil
 	}
-	return build(req), nil
+	return syncupStamped(build(req)), nil
 }
 
 func (s *stubSideAgent) CheckSide(
@@ -1943,13 +2443,13 @@ func (s *stubSideAgent) CheckSide(
 		if build == nil {
 			// A revision the worker does not expect forces the RW4 step 5
 			// syncup, which is what a fresh agent does too.
-			if err := stream.Send(&pb.CheckSideReply{}); err != nil {
+			if err := stream.Send(stamped(&pb.CheckSideReply{})); err != nil {
 				return err
 			}
 			continue
 		}
 		if reply := build(req); reply != nil {
-			if err := stream.Send(reply); err != nil {
+			if err := stream.Send(stamped(reply)); err != nil {
 				return err
 			}
 		}
@@ -2008,9 +2508,9 @@ func (s *stubCntlrAgent) SyncupCntlr(
 	build := s.syncupReply
 	s.mu.Unlock()
 	if build == nil {
-		return &pb.SyncupCntlrReply{Revision: req.GetRevision()}, nil
+		return stamped(&pb.SyncupCntlrReply{Revision: req.GetRevision()}), nil
 	}
-	return build(req), nil
+	return syncupStamped(build(req)), nil
 }
 
 func (s *stubCntlrAgent) CheckCntlr(
@@ -2030,7 +2530,7 @@ func (s *stubCntlrAgent) CheckCntlr(
 		omit := s.omitUnchangedInfo
 		s.mu.Unlock()
 		if build == nil {
-			if err := stream.Send(&pb.CheckCntlrReply{}); err != nil {
+			if err := stream.Send(stamped(&pb.CheckCntlrReply{})); err != nil {
 				return err
 			}
 			continue
@@ -2044,7 +2544,7 @@ func (s *stubCntlrAgent) CheckCntlr(
 					lastSent = info
 				}
 			}
-			if err := stream.Send(reply); err != nil {
+			if err := stream.Send(stamped(reply)); err != nil {
 				return err
 			}
 		}
@@ -6089,13 +6589,15 @@ const (
 
 // lostThinInfo is what a cn agent reports as the primary of the fixture SP
 // once the pool of spSliceB no longer holds the created td's thin id
-// (cnagent.md CN14): with converge, its converge's report, which the
-// SyncupCntlr reply carries, and otherwise a Check round's probe. The
-// converge's `dmsetup create` of the thin table fails with ENODATA, so its
-// thin row carries the reason thin id lost, and the raid0 over the td's
-// volumes cannot be built, nor the ns-dev of its namespace over the raid0.
-// The probe finds the volume absent — MISSING, with no reason — and the raid0
-// and the ns-dev failing as before. A standby builds none of it (CN9).
+// (cnagent.md CN14): with converge, the observation its converge stores,
+// which the SyncupCntlr reply carries, and otherwise the observation of a
+// background read, which the rounds after that read answer from (dnagent.md
+// SH29). The converge's `dmsetup create` of the thin table fails with
+// ENODATA, so its thin row carries the reason thin id lost, and the raid0
+// over the td's volumes cannot be built, nor the ns-dev of its namespace over
+// the raid0. The read's probes find the volume absent — MISSING, with no
+// reason — and the raid0 and the ns-dev failing as before. A standby builds
+// none of it (CN9).
 func lostThinInfo(converge bool) *pb.CntlrInfo {
 	thin := &pb.ResInfo{
 		ResName: "thin-b",
@@ -6134,28 +6636,35 @@ func lostThinInfo(converge bool) *pb.CntlrInfo {
 	}
 }
 
-// TestASharedErrorDoesNotPingPongTheRole pins AR5's two refusals end to end,
-// on a live coordinator with the fake clock. The pool of one slice has lost a
-// created td's thin id, so whichever cntlr is primary reports the td's
-// volume, its raid0 and the ns-dev of its namespace failing — its converge's
-// SyncupCntlr reply carrying the lost-id reason on the volume's row, every
-// Check round after it reading the volume MISSING with no reason — and a
-// standby reports none of it. The cn agents leave a probe's info out of a
-// Check reply when the stream last sent the same (omitUnchangedInfo). A
-// probe's report, held at the primary's threshold, fails the primary over
-// once, and the role is not handed back while the new primary fails only on
-// rows the old one failed on (the second refusal). Then a bump re-syncs the
-// new primary: its converge's report is held from then on, the probes after
-// it being unchanged, and its thin row is no row the old primary failed on,
-// so only HL2's shared-state class, which reads the row's reason, keeps the
-// role where it is (the first refusal). Without the two refusals the
-// promoted primary, never settling, would hand the role back once per
-// cntlr_unhealthy to the peer whose standby report had cleared its
-// err_epoch, and host paths would move every window for as long as the td
-// stayed lost. Across three windows there is that one failover, the
-// primary's err_epoch stays set, and the passes past its threshold say why
-// nothing moves, by the second refusal before the bump and by the first
-// after it.
+// TestASharedErrorDoesNotPingPongTheRole pins AR5's two refusals end to end, on
+// a live coordinator with the fake clock. The pool of one slice has lost a
+// created td's thin id, so whichever cntlr is primary reports the td's volume,
+// its raid0 and the ns-dev of its namespace failing — its converge's
+// SyncupCntlr reply carrying the lost-id reason on the volume's row, a
+// background read's report reading the volume MISSING with no reason — and a
+// standby reports none of it. A real cn agent's first round after a SyncupCntlr
+// answers from the converge's observation, and the read that round starts
+// brings the read's report one round later (dnagent.md SH28, SH29); the stub
+// answers every round after a SyncupCntlr with the read's report at once. Like
+// the cn agents, it leaves the report out of a Check reply when the stream last
+// sent the same (omitUnchangedInfo). A read's report, held at the primary's
+// threshold, fails the primary over once, and the role is not handed back while
+// the new primary fails only on rows the old one failed on (the second
+// refusal). Then a bump re-syncs the new primary: its converge's report is held
+// from then on, since the stub's rounds after it repeat the read's report the
+// stream last sent and so carry none, and its thin row is no row the old
+// primary failed on, so only HL2's shared-state class, which reads the row's
+// reason, keeps the role where it is (the first refusal). There the stub
+// differs from a real agent, whose round after the re-sync carries the
+// converge's report and whose next round carries the read's again, so the
+// report held would go back to the read's and the second refusal would hold the
+// role instead. Without the two refusals the promoted primary, never settling,
+// would hand the role back once per cntlr_unhealthy to the peer whose standby
+// report had cleared its err_epoch, and host paths would move every window for
+// as long as the td stayed lost. Across three windows there is that one
+// failover, the primary's err_epoch stays set, and the passes past its
+// threshold say why nothing moves, by the second refusal before the bump and by
+// the first after it.
 func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	synctest.Test(t, testASharedErrorDoesNotPingPongTheRole)
 }
@@ -6176,12 +6685,16 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	}}
 	h.ops.setState(state)
 	h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
-	// Both cntlrs that can hold the role answer as the cn agent does: the
-	// converge's report on a SyncupCntlr, the probe's on a Check round at the
-	// revision of the last request accepted, left out when unchanged since
-	// the stream last sent it, the lost td's rows only while the request says
-	// primary and enabled. A Check before any SyncupCntlr answers revision 0,
-	// which re-syncs (RW4 step 5).
+	// Both cntlrs that can hold the role answer much as the cn agent does:
+	// the converge's report on a SyncupCntlr, a background read's on a Check
+	// round at the revision of the last request accepted, left out when
+	// unchanged since the stream last sent it, the lost td's rows only while
+	// the request says primary and enabled. They differ in one place: the cn
+	// agent's first round after a SyncupCntlr answers from the converge's
+	// observation, and the read that round starts brings the read's report
+	// one round later (dnagent.md SH28, SH29), while the stub answers every
+	// round after a SyncupCntlr with the read's report at once. A Check
+	// before any SyncupCntlr answers revision 0, which re-syncs (RW4 step 5).
 	actsPrimary := func(req *pb.SyncupCntlrRequest) bool {
 		return req.GetCntlr().GetPrimary() && !req.GetCntlr().GetDisabled()
 	}
@@ -6315,18 +6828,21 @@ func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 // fixture's standby is disabled too — so AR7 is what would act on it. Without
 // the refusal it would be replaced once its err_epoch is cntlr_unhealthy old,
 // and again on every pass after, though a replacement reads the same rows from
-// the same pool. The refusal reads the held report, the primary's latest
-// (AR1), which carries the lost-id reason only when it is a converge's: here
-// the cn agent answers as it does once its stream has already sent the
-// probe's view — its first Check, one revision behind as after an agent
+// the same pool. The refusal reads the held report, the primary's latest (AR1),
+// which carries the lost-id reason only when it is a converge's: here the stub
+// answers as a cn agent does once its stream has already sent a background
+// read's report — its first Check, one revision behind as after an agent
 // restart while the SP moved on, reads the volume MISSING, the re-sync's
-// converge carries the reason, and every later probe, unchanged, carries no
-// CntlrInfo (omitUnchangedInfo) — so the converge's report stays the one
-// held. Across three windows of cntlr_unhealthy the primary is not replaced,
-// its err_epoch stays set, and a pass says why. An own row beside the lost
-// td's still gets it replaced, at cntlr_unhealthy and not before; so does a
-// probe's report held instead (TestReactionSharedStateErrorIsNotReplaced),
-// after which AR7's second refusal holds the replacement
+// converge carries the reason, and every later Check repeats the read's report,
+// unchanged, so it carries no CntlrInfo (omitUnchangedInfo) — so the converge's
+// report stays the one held. A real agent's first round after the re-sync would
+// answer from the converge's observation and its next from the read that round
+// started, which carries the read's report again; the stub leaves that read
+// out. Across three windows of cntlr_unhealthy the primary is not replaced, its
+// err_epoch stays set, and a pass says why. An own row beside the lost td's
+// still gets it replaced, at cntlr_unhealthy and not before; so does a read's
+// report held instead (TestReactionSharedStateErrorIsNotReplaced), after which
+// AR7's second refusal holds the replacement
 // (TestASharedErrorDoesNotReplaceTheReplacement).
 func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 	// run drives the SP for windows of cntlr_unhealthy past the primary's
@@ -6489,16 +7005,19 @@ const (
 	replFirstId = uint64(3000)
 )
 
-// answerLostThinId makes a cn agent stub answer for every cntlr as the cn
-// agent does once the pool of spSliceB no longer holds the created td's thin
-// id (lostThinInfo): a Check for a cntlr it has had no SyncupCntlr for is
-// refused as an unknown object, with no info (checkCntlrRound); a SyncupCntlr
-// is answered with the converge's report, which carries the lost-id reason;
-// and every Check after it with the probe's, which reads the volume MISSING
-// and carries none, left out when unchanged since the stream last sent it
-// (omitUnchangedInfo). The lost td's rows are reported only while the
-// cntlr's last request says primary and enabled. With own, the cntlr also
-// fails a row of its own.
+// answerLostThinId makes a cn agent stub answer for every cntlr much as the
+// cn agent does once the pool of spSliceB no longer holds the created td's
+// thin id (lostThinInfo): a Check for a cntlr it has had no SyncupCntlr for
+// is refused as an unknown object, with no info (checkCntlrRound); a
+// SyncupCntlr is answered with the converge's report, which carries the
+// lost-id reason; and every Check after it with a background read's, which
+// reads the volume MISSING and carries none, left out when unchanged since
+// the stream last sent it (omitUnchangedInfo). There it differs from the cn
+// agent, whose first round after a SyncupCntlr answers from the converge's
+// observation, the read that round starts bringing the read's report one
+// round later (dnagent.md SH28, SH29). The lost td's rows are reported only
+// while the cntlr's last request says primary and enabled. With own, the
+// cntlr also fails a row of its own.
 func answerLostThinId(stub *stubCntlrAgent, own bool) {
 	report := func(req *pb.SyncupCntlrRequest, converge bool) *pb.CntlrInfo {
 		if !req.GetCntlr().GetPrimary() || req.GetCntlr().GetDisabled() {
@@ -6536,27 +7055,31 @@ func answerLostThinId(stub *stubCntlrAgent, own bool) {
 	}
 }
 
-// TestASharedErrorDoesNotReplaceTheReplacement pins AR7's second refusal end
-// to end, on a live coordinator with the fake clock: the residual
+// TestASharedErrorDoesNotReplaceTheReplacement pins AR7's second refusal end to
+// end, on a live coordinator with the fake clock: the residual
 // TestASharedErrorDoesNotReplaceTheCntlr leaves. The SP has one cntlr, so AR7
 // is what acts on its primary, and the pool of one slice has lost a created
-// td's thin id. Every cntlr of the SP answers as the cn agent does
-// (answerLostThinId): its converge carries the lost-id reason, and the Check
-// round after it already carries the probe's report, which carries none, so
-// at cntlr_unhealthy the report the coordinator holds is the probe's and
+// td's thin id. Every cntlr of the SP answers much as the cn agent does
+// (answerLostThinId): its converge carries the lost-id reason, and a background
+// read's report carries none. The stub's first Check round after a SyncupCntlr
+// already carries the read's report, where a real agent's answers from the
+// converge's observation and brings the read's report one round later; either
+// way, at cntlr_unhealthy the report the coordinator holds is the read's and
 // AR7's first refusal cannot hold it. The primary is replaced, and the
 // replacement builds over the same pool and reads the same rows. The
-// coordinator keeps the rows of the primary it replaced, so the replacement
-// is not replaced in turn once per cntlr_unhealthy for as long as the td
-// stays lost: across three windows of cntlr_unhealthy there is that one
-// replacement, the replacement's err_epoch stays set, and a pass says why it
-// stays. Once a pass has, a bump re-syncs the replacement, and its converge's
-// report is held from then on, the probes after it being unchanged: its thin
-// row is no row of the replaced primary's report, so AR7's first refusal,
-// which reads the row's reason, is what keeps the replacement from then on. A
-// replacement that fails on a row of its own beside the lost td's is still
-// replaced, not before cntlr_unhealthy, and its own replacement, failing on
-// the lost td's rows alone, is held by that second replacement's record.
+// coordinator keeps the rows of the primary it replaced, so the replacement is
+// not replaced in turn once per cntlr_unhealthy for as long as the td stays
+// lost: across three windows of cntlr_unhealthy there is that one replacement,
+// the replacement's err_epoch stays set, and a pass says why it stays. Once a
+// pass has, a bump re-syncs the replacement, and its converge's report is held
+// from then on, the stub's rounds after it repeating the read's report
+// unchanged: its thin row is no row of the replaced primary's report, so AR7's
+// first refusal, which reads the row's reason, is what keeps the replacement
+// from then on. A real agent's second round after the re-sync would carry the
+// read's report again, and the second refusal would keep the replacement
+// instead. A replacement that fails on a row of its own beside the lost td's is
+// still replaced, not before cntlr_unhealthy, and its own replacement, failing
+// on the lost td's rows alone, is held by that second replacement's record.
 func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
 	// refusals are the passes' records of one of AR7's refusals of cntlrId.
 	refusals := func(h *spHarness, reason string, cntlrId uint64) int {

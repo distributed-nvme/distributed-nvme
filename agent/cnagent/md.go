@@ -174,15 +174,14 @@ func mdArrayOf(node, state string, members []mdMemberDir) MdArray {
 	return array
 }
 
-// MdScan is the one md walk of a check round or an info read: one listing of
-// /sys/block and one read of each array, which serves both md rules of the
-// call. The group rows and the concat rows read Walk() under Md.Walk's rule,
-// which records an array that did not answer and lets a match beside it
-// stand (CN12); the verdict reads Arrays() under ListArrays' rule, which
-// fails on any read that did not answer, array_state's included (CN21,
-// CN30). A converge keeps its two md walks: its sweep's ListArrays, and the
-// Md.Walk of its groups, which an assembly of the build brings up to date
-// (Refresh).
+// MdScan is the one md walk of a cntlr's read: one listing of /sys/block and
+// one read of each array, which serves both md rules of the read. The group
+// rows and the concat rows read Walk() under Md.Walk's rule, which records an
+// array that did not answer and lets a match beside it stand (CN12); the
+// verdict reads Arrays() under ListArrays' rule, which fails on any read that
+// did not answer, array_state's included (CN21, CN30). A converge keeps its
+// two md walks: its sweep's ListArrays, and the Md.Walk of its groups, which
+// an assembly of the build brings up to date (Refresh).
 type MdScan struct {
 	// walk is the tolerant view, built as the scan reads.
 	walk *MdWalk
@@ -381,7 +380,7 @@ type MdDetail struct {
 // Match finds a group's array in a walk, and Detail and mdDevNo read only the
 // matched array's attributes, which lets a pass over g groups list each of
 // the node's a arrays once instead of g times — at 32 slices, 64 groups over
-// 64 arrays, 65 listings a round instead of 4160.
+// 64 arrays, 65 listings a read instead of 4160.
 //
 // The walk reads every array on the node, other sps' included, so an array
 // whose md/ listing or a member's dm-name read did not answer — held past
@@ -622,7 +621,7 @@ func (w *MdWalk) unansweredErr() error {
 
 // mdDevNo is the device number of a group's array, which the pool concats
 // map: /sys/block/<node>/dev of the node Match finds in the pass's md walk,
-// the array the group's own row reads, so a check round and a converge take
+// the array the group's own row reads, so a read and a converge take
 // the number from one array and their concat rows agree. Nothing here waits
 // for the /dev/md/<name> link udev makes. It reads the number apart from the
 // array's other attributes, so a failed md/sync_completed read fails the
@@ -654,11 +653,11 @@ func (s *CnAgentServer) mdDevNo(
 }
 
 // mdWalkOnce hands every group row and every concat row of one pass the same
-// walk (cntlrPlan.mdWalks). A converge takes it at the first group that
-// needs it, so a converge with no md group lists nothing; a check round and
-// an info read hand over the walk view of their reading's md walk
-// (cnReading.mdWalks), already taken. A nil one, a plan whose builder set
-// none, is an error of every read rather than a walk of its own.
+// walk (cntlrPlan.mdWalks). A converge takes it at the first group that needs
+// it, so a converge with no md group lists nothing; a read hands over the walk
+// view of its reading's md walk (cnReading.mdWalks), already taken. A nil one,
+// a plan whose builder set none, is an error of every read rather than a walk
+// of its own.
 type mdWalkOnce struct {
 	md   *Md
 	walk *MdWalk
@@ -1214,9 +1213,9 @@ func (s *CnAgentServer) assembleGroup(
 // member still held: this pass fails before the add loop, so the promoted
 // spare is not added either. A remove or an add that fails is the group's
 // error for the pass, a row, which registers no background retry of its own.
-// What re-drives it is the check round's verdict, which names a leg_list
-// member that this function would put back or add on a leg the round reads
-// as able to take it (putBackNames, cnagent.md CN30), so the worker re-sends
+// What re-drives it is the read's verdict, which names a leg_list member
+// that this function would put back or add on a leg the read finds able to
+// take it (putBackNames, cnagent.md CN30), so the worker re-sends
 // the SyncupCntlr whose converge tries again; the CN10 retry tries again too
 // when the same pass registers it for something else, such as a leg that
 // failed to converge or any leg_list member of this cntlr that is not
@@ -1297,8 +1296,11 @@ func legTakesMember(serves bool, legRow *pb.ResInfo) bool {
 // call can read of a leg's availability without building anything, so no
 // syncup is brought for a leg whose path is not live and optimized; a step
 // only the converge takes, the connect of a provisioned side that has no
-// controller, can still fail, and the member is then named again every round
-// (cnagent.md, Known limits). A member that still holds its slot, one being
+// controller, can still fail, and the member is then named again by every
+// read, and each round that answers from such a read brings the SyncupCntlr
+// again (cnagent.md, Known limits). A converge's code never names it
+// (convergeCntlr), so the round that answers from the re-send's observation
+// brings none for it. A member that still holds its slot, one being
 // recovered or a spare is never named. The late-member retry does not count
 // any of them (hasLateMember).
 func (s *CnAgentServer) putBackNames(
@@ -1336,7 +1338,7 @@ func (s *CnAgentServer) putBackNames(
 // leg row's (legInfo), which putBackNames reads beside it. Not read: the
 // converge's connect of a provisioned side that has no controller, which
 // ensureLeg makes and which can fail (cnagent.md, Known limits). A lookup
-// that did not answer serves nothing: the next round asks again.
+// that did not answer serves nothing: the next read asks again.
 func (s *CnAgentServer) legServes(
 	ctx context.Context,
 	plan *cntlrPlan,

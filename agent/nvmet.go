@@ -226,8 +226,10 @@ func (n *Nvmet) probePort(
 ) (PortState, string, error) {
 	portPath := n.PortPath(portId)
 	// Whether the port's directory is there is a read of its time in the
-	// agent's own process, not an `ls` of it (SH18): every CheckDn and
-	// CheckCn round probes the port, and a child would cost each round one.
+	// agent's own process, not an `ls` of it (SH18): every background read
+	// of a DN or a CN, which a check round starts (SH29), probes the agent's
+	// port, as a converge of one does, and a child for the port's directory
+	// would cost each of them one more.
 	_, exists, err := n.dirMtime(ctx, portPath)
 	if err != nil {
 		return 0, "", err

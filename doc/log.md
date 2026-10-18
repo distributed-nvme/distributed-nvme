@@ -67,12 +67,14 @@ R5. The trace id is carried in the context under an unexported key and
     which writes it straight into the incoming metadata
     (`gateway/traceid.go`), and `gatewayctl`, `dnagentctl` and `cnagentctl`,
     which put it into their outgoing metadata themselves because they dial
-    without the client interceptors (`grpc.md`, Drivers and fakes) — and two places that move an id they
+    without the client interceptors (`grpc.md`, Drivers and fakes) — and three places that move an id they
     were handed: the `Check*` streams, whose requests carry each round's id
     in a `trace_id` field that the worker fills and the agent adopts
-    (`grpc.md` T3), and the cn sweep's background "nvme disconnect", which
-    puts the id of the pass that set it going onto the agent's lifetime ctx
-    (`rootCtx`) and mints one only if that pass had none (`dnagent.md` SH27,
+    (`grpc.md` T3); the background read a round starts, which puts that
+    round's id onto the agent's lifetime ctx (`rootCtx`) and mints one only
+    if the round had none (`dnagent.md` SH29); and the cn sweep's background
+    "nvme disconnect", which puts the id of the pass that set it going onto
+    `rootCtx` and mints one only if that pass had none (`dnagent.md` SH27,
     `cnagent.md` CN10). On a logger derived with `WithGroup` the attribute
     is nested inside that group rather than at the top level — see R12 — so
     a consumer that greps `trace_id` positionally must account for it.
@@ -246,14 +248,17 @@ transactions are expected and acceptable.
 
 An agent decides what to REMOVE by comparing what its node actually holds
 with what the desired state wants (`architecture.md`, Teardown by sweep),
-so "something is left over" is the verdict of one comparison, recomputed
-every pass and stored nowhere. Two records carry it, one on each side of
-the RPC; they are specified here rather than in one subsystem's document
-because an operator chasing a leaked device greps both logs for the same
-thing.
+so "something is left over" is the verdict of one comparison, recomputed by
+every converge and every background read, and kept only as the code of the
+observation each makes (`dnagent.md` SH28, SH29). Two records carry it, one
+on each side of the RPC; they are specified here rather than in one
+subsystem's document because an operator chasing a leaked device greps both
+logs for the same thing.
 
-* The agent logs `sweep leftover` (`agent/sweep.go`) on a sweep or
-  read-only verdict that was not clean. It carries the object's ids —
+* The agent logs `sweep leftover` (`agent/sweep.go`) on a sweep, or a
+  background read's read-only verdict, that was not clean; a read logs it
+  under the trace id of the round that started the read (`dnagent.md`
+  SH29). It carries the object's ids —
   `cluster_id` plus `cn_id` or `dn_id` for a node-level pass, plus `sp_id`
   and `cntlr_id` or `side_id` for an object-level one — then `leftover_cnt`,
   `leftovers` (the sorted "kind:name" entries joined by a space; `kind` is
@@ -265,10 +270,12 @@ thing.
   the dn, a disk whose identity is not confirmed or a side with bytes
   still to zero and no zeroing goroutine that is not a migration
   destination waiting for a free run in the clone-metadata area
-  (`dnagent.md` DN16), or, on the cn, a piece of the node's base state a
-  `CheckCn` round's or `GetCnInfo`'s probe read absent, or an ANA group it
-  read in a state other than its fixed one on a port whose transport
-  attributes match — each rendered "what: error" and joined by "; ".
+  (`dnagent.md` DN16), or, on the cn, a piece of the node's base state
+  that the CN's background read found absent, an arena file it found of
+  another size, or an ANA group it found in a state other than its fixed
+  one, in each case only where a `SyncupCn` would build, replace or
+  rewrite it (`cnagent.md` CN30) — each rendered "what: error" and joined
+  by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`
   (the one the request carried) and `details` (the agent's own leftover
@@ -278,22 +285,28 @@ Both are Info: a leftover is a normal state for as long as a dead remote's
 failfast window lasts, on the pass of a cn teardown that sets its
 "nvme disconnect" commands going (they run off the pass, `cnagent.md` CN10),
 and for as long as such a delete waits out the kernel's admin timeout. A
-disconnect still running goes when it completes, and the next `Check*`
-verdict or `Syncup*` probe finds it gone; a later `Syncup*` sweeps away any
-other leftover and issues again a disconnect that failed. Nothing on the
-agent re-drives that sweep because of a leftover: the worker re-issues the
-syncup on the code (`dnv-worker.md` RW4). Both are emitted once per pass —
-the agent's on every sweep and every
-verdict that was not clean, the worker's on every such reply — so a
-leftover that does NOT go away is in both logs every round, which is
-exactly what distinguishes it from one the next pass removed. A leftover
-that only a `Check*` round's verdict names, and that the `Syncup*` it
-brings does not report — an md member that syncup's converge puts back
-or adds (`cnagent.md` CN12), or a subsystem directory that outlives its last
-controller — is in the agent's record alone: the worker runs the re-sent
-`Syncup*` under the round's own trace id (`dnv-worker.md` RW4, RW10), so its
-`syncup result` record under that id is the re-send. A clean pass
-emits nothing; `sweep leftover` is never a "nothing to report" record. The
+disconnect still running goes when it completes, and the next background
+read or `Syncup*` finds it gone; a later `Syncup*` sweeps away any other
+leftover and issues again a disconnect that failed. Nothing on the agent
+re-drives that sweep because of a leftover: the worker re-issues the syncup
+on the code (`dnv-worker.md` RW4). The agent's record is emitted once by
+each sweep or read whose verdict was not clean, the worker's once per such
+`Syncup*` reply, so a leftover that the converges of the re-sent `Syncup*`
+calls do NOT remove is in both logs at every re-send, which is exactly
+what distinguishes it from one the next pass removed. A leftover that only a
+background read's verdict names, and that the `Syncup*` it brings does not
+report — an md member that syncup's converge puts back or adds
+(`cnagent.md` CN12), or a subsystem directory that outlives its last
+controller — is in the agent's record alone, under the trace id of the
+round that started the read. The worker re-sends the `Syncup*` on the
+round that answers from that read's observation, under that round's own
+trace id, and its `syncup result` record of the re-send also names the
+observation's trace id (`dnv-worker.md` RW4, RW10): the read's id joins
+the agent's record to that `syncup result` record, and the round's id
+joins that record to the converge the re-send brings. That converge's observation carries its own
+code, which does not name such a leftover, so only a read after it names
+it again (`dnagent.md` SH28). A clean pass or read emits nothing;
+`sweep leftover` is never a "nothing to report" record. The
 agent's record carries the FULL list, while `details` — in the reply and
 therefore in `syncup leftover` — shows at most `maxLeftoverNames` leftover
 names before a "[+k more]" tail, so that one stuck node cannot fill the

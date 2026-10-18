@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -41,19 +44,18 @@ type stubDnAgent struct {
 	// a test tells "the stream is gone" from "the stream is idle".
 	streamExits int
 	// streamCtxs is the context of every CheckDn stream, in the order
-	// opened. The agent runs its rounds under it, so its end is what stops
-	// a round the agent is running.
+	// opened. A round the stub holds (holdRound) runs until it ends.
 	streamCtxs []context.Context
 
 	// checkReply builds the reply to one CheckDn request; nil means "say
 	// nothing", which is how a round timeout is produced (RW4 step 3).
 	checkReply func(req *pb.CheckDnRequest) *pb.CheckDnReply
 	// holdRound makes a round checkReply says nothing to run until its
-	// stream's context ends, as the agent's round does: the agent reads the
-	// stream again only once a round is over, so a CloseSend reaches it only
-	// then, and only the context cancel of dropStream ends a round it is
-	// still running. Without it the handler goes straight back to Recv,
-	// where the CloseSend alone ends it.
+	// stream's context ends, a round not answered yet: the handler reads
+	// the stream again only once a round is over, so a CloseSend reaches it
+	// only then, and only the context cancel of dropStream ends a round it
+	// still holds. Without it the handler goes straight back to Recv, where
+	// the CloseSend alone ends it.
 	holdRound bool
 	// syncupReply answers one SyncupDn.
 	syncupReply func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error)
@@ -95,7 +97,7 @@ func (s *stubDnAgent) CheckDn(
 			}
 			continue
 		}
-		if err := stream.Send(reply); err != nil {
+		if err := stream.Send(stamped(reply)); err != nil {
 			return err
 		}
 	}
@@ -109,9 +111,13 @@ func (s *stubDnAgent) SyncupDn(
 	answer := s.syncupReply
 	s.mu.Unlock()
 	if answer == nil {
-		return &pb.SyncupDnReply{Revision: req.GetRevision()}, nil
+		return stamped(&pb.SyncupDnReply{Revision: req.GetRevision()}), nil
 	}
-	return answer(req)
+	reply, err := answer(req)
+	if reply != nil {
+		reply = syncupStamped(reply)
+	}
+	return reply, err
 }
 
 func (s *stubDnAgent) checkCount() int {
@@ -201,7 +207,7 @@ func (s *stubCnAgent) CheckCn(
 			continue
 		}
 		if reply := build(req); reply != nil {
-			if err := stream.Send(reply); err != nil {
+			if err := stream.Send(stamped(reply)); err != nil {
 				return err
 			}
 		}
@@ -214,7 +220,7 @@ func (s *stubCnAgent) SyncupCn(
 	s.mu.Lock()
 	s.syncupReqs = append(s.syncupReqs, req)
 	s.mu.Unlock()
-	return &pb.SyncupCnReply{Revision: req.GetRevision()}, nil
+	return stamped(&pb.SyncupCnReply{Revision: req.GetRevision()}), nil
 }
 
 func (s *stubCnAgent) syncups() []*pb.SyncupCnRequest {
@@ -1084,7 +1090,11 @@ func (s *traceDnAgent) CheckDn(
 		s.metaIds = append(s.metaIds, metaId)
 		s.roundIds = append(s.roundIds, roundId)
 		s.mu.Unlock()
-		if err := stream.Send(&pb.CheckDnReply{Revision: 0}); err != nil {
+		stamp := testStamp()
+		stamp.ObsTraceId = roundId
+		if err := stream.Send(&pb.CheckDnReply{
+			Revision: 0, ObsStamp: stamp,
+		}); err != nil {
 			return err
 		}
 	}
@@ -1105,7 +1115,7 @@ func (s *traceDnAgent) SyncupDn(
 	s.syncups++
 	s.syncupIds = append(s.syncupIds, id)
 	s.mu.Unlock()
-	return &pb.SyncupDnReply{Revision: req.GetRevision()}, nil
+	return stamped(&pb.SyncupDnReply{Revision: req.GetRevision()}), nil
 }
 
 func (s *traceDnAgent) syncupTraceIds() []string {
@@ -1232,13 +1242,13 @@ func TestEveryCheckStreamSendsTheRoundTraceId(t *testing.T) {
 // preceded by one request built from the superseded revision.
 //
 // It also pins RW6's order: the given-up round's stream is dropped BEFORE the
-// Syncup* is sent. The agent runs the round under the stream and holds a
-// lock for it that the Syncup* needs; a Syncup* sent first waits behind a
-// round whose answer nobody reads. The stub holds the round as the agent
-// does (holdRound), so only the drop's cancel ends it, not its CloseSend.
-// The stub's SyncupDn gives the stream a bounded wait to end — time that, in
-// the synctest bubble, passes only once nothing else can run — and records
-// whether it did.
+// Syncup* is sent. The round's reply would answer the request built from the
+// superseded revision, so the stream goes with the round and is never reused
+// (RW4 step 4); the agent's Syncup* cancels the object's background read
+// itself (dnagent.md SH30). The stub holds the round unanswered (holdRound),
+// so only the drop's cancel ends it, not its CloseSend. The stub's SyncupDn
+// gives the stream a bounded wait to end — time that, in the synctest bubble,
+// passes only once nothing else can run — and records whether it did.
 func TestRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	synctest.Test(t, testRevisionDesiredChangeDuringRoundSyncsAtOnce)
 }
@@ -1296,7 +1306,7 @@ func testRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	mu.Unlock()
 	if live {
 		t.Fatalf("the syncup reached the agent while the given-up round's " +
-			"stream was still live: the round holds the lock it needs")
+			"stream was still live: the stream outlived its round")
 	}
 	// The round was given up, not failed: an abandoned round is not a missed
 	// reply, so nothing set an err_epoch (HL1).
@@ -1366,4 +1376,1756 @@ func TestSyncupLeftoverLogged(t *testing.T) {
 	if got := len(h.logs.withMsg(msgSyncupRejected)); got != 0 {
 		t.Fatalf("%d 'syncup rejected' records for an accepted reply", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The observation's age (HL7) and new observations (RW23)
+// ---------------------------------------------------------------------------
+
+// obsRecorder wraps a revision worker's real driver and records what the
+// loop hands it: a copy of every reply observe sees, in order, and the count
+// of unreachable verdicts.
+type obsRecorder struct {
+	objDriver
+
+	mu           sync.Mutex
+	replies      []replyState
+	unreachables int
+}
+
+func (r *obsRecorder) observe(ctx context.Context, reply *replyState) {
+	r.mu.Lock()
+	r.replies = append(r.replies, *reply)
+	r.mu.Unlock()
+	r.objDriver.observe(ctx, reply)
+}
+
+func (r *obsRecorder) unreachable(ctx context.Context) {
+	r.mu.Lock()
+	r.unreachables++
+	r.mu.Unlock()
+	r.objDriver.unreachable(ctx)
+}
+
+// seen returns the replies observe saw and the unreachable verdicts so far.
+func (r *obsRecorder) seen() ([]replyState, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]replyState(nil), r.replies...), r.unreachables
+}
+
+// startRecordedDn is startDn with the dn driver wrapped in an obsRecorder.
+func (h *revHarness) startRecordedDn(
+	addrPort string, revision uint64,
+) (*revWorker, *obsRecorder, *dnDriver) {
+	h.t.Helper()
+	params := revWorkerParams{
+		deps:    h.deps,
+		role:    common.WorkerRoleDn,
+		shard:   testShard,
+		cid:     testCid,
+		id:      testDnId,
+		seed:    seedOf(1),
+		desired: desiredState{revision: revision, handle: addrPort},
+	}
+	rec := &obsRecorder{}
+	var driver *dnDriver
+	w := startRevWorker(params, func(host *revWorker) objDriver {
+		driver = newDnDriver(params, host).(*dnDriver)
+		rec.objDriver = driver
+		return rec
+	})
+	h.t.Cleanup(w.stop)
+	return w, rec, driver
+}
+
+// stampAt is the stamp of a reply answering at answer from an observation
+// made at obs under traceId.
+func stampAt(obs, answer time.Time, traceId string) *pb.ObsStamp {
+	return &pb.ObsStamp{
+		ObsTime:    timestamppb.New(obs),
+		ObsTraceId: traceId,
+		AnswerTime: timestamppb.New(answer),
+	}
+}
+
+// recNumber reads a numeric attribute of a JSON record; ok is false when the
+// record lacks it.
+func recNumber(rec map[string]any, key string) (float64, bool) {
+	v, ok := rec[key].(float64)
+	return v, ok
+}
+
+// TestObservationAgeFrom pins the age HL7 judges (ageFrom): the answer time
+// less the later of the observation's time and from, the answer time of the
+// first round after a pause, all from the reply's stamp and the loop. A
+// negative difference reads zero, a reply with no observation time counts
+// from from alone, and a reply with no answer time has no age at all. An
+// unset time stays unset through fold, not the Unix epoch.
+func TestObservationAgeFrom(t *testing.T) {
+	at := testObsBase
+	ms := time.Millisecond
+	for _, c := range []struct {
+		name              string
+		obs, answer, from time.Time
+		age               time.Duration
+		known             bool
+	}{
+		{"an observation after from", at, at.Add(1500 * ms),
+			at.Add(-time.Second), 1500 * ms, true},
+		{"an observation as from", at, at.Add(1500 * ms), at, 1500 * ms,
+			true},
+		{"an observation before from", at, at.Add(1500 * ms),
+			at.Add(time.Second), 500 * ms, true},
+		{"an answer as the observation ends", at, at, at.Add(-time.Second),
+			0, true},
+		{"an answer before the observation", at, at.Add(-time.Second),
+			at.Add(-2 * time.Second), 0, true},
+		{"an answer before from", at, at.Add(time.Second),
+			at.Add(2 * time.Second), 0, true},
+		{"no observation time", time.Time{}, at.Add(1500 * ms), at,
+			1500 * ms, true},
+		{"no observation time, an answer before from", time.Time{}, at,
+			at.Add(time.Second), 0, true},
+		{"no answer time", at, time.Time{}, at.Add(-time.Second), 0, false},
+		{"no time at all", time.Time{}, time.Time{}, at, 0, false},
+	} {
+		r := &replyState{obsTime: c.obs, answerTime: c.answer}
+		if age, known := r.ageFrom(c.from); age != c.age ||
+			known != c.known {
+			t.Errorf("%s: age %v, known %t; want %v, %t", c.name, age, known,
+				c.age, c.known)
+		}
+	}
+	r := newReplyState(nil, 0, false,
+		&pb.ObsStamp{AnswerTime: timestamppb.New(at)}, nil)
+	if !r.obsTime.IsZero() || !r.saveTime.IsZero() || !r.answerTime.Equal(at) {
+		t.Fatalf("an unset observation and save time folded to %v, %v; "+
+			"answer %v", r.obsTime, r.saveTime, r.answerTime)
+	}
+	if age, known := r.ageFrom(at.Add(-time.Second)); !known ||
+		age != time.Second {
+		t.Fatalf("a folded reply with no observation time: age %v, known "+
+			"%t; want %v counted from from", age, known, time.Second)
+	}
+}
+
+// TestStaleObservationIsAMissedRound pins HL7's stale verdict through the
+// real dn loop: a reply that came in time but answers from an observation
+// older than ObsMaxAgeIntervals of the interval is a missed round in every
+// way. The stream drops, the rows read UNKNOWN, the health epoch is set, and
+// no Syncup* is issued though the reply's revision is behind; the failed
+// round names the cause and the late observation its age. The next round
+// opens a fresh stream, and the first fresh observation clears the epoch.
+//
+// The first round answers from an observation that ended before it, which
+// starts the age's count and gives no verdict (HL7's pause rule); the second
+// answers from the read the first started, a clean one, and the agent's reads
+// stop ending there. The stale third, which a pause cannot precede, is judged
+// by that observation's own age.
+func TestStaleObservationIsAMissedRound(t *testing.T) {
+	synctest.Test(t, testStaleObservationIsAMissedRound)
+}
+
+func testStaleObservationIsAMissedRound(t *testing.T) {
+	h := newRevHarness(t)
+	ms := time.Millisecond
+	age := common.ObsMaxAgeIntervals*roundInterval + ms
+	t0 := testNodeBase
+	read := t0.Add(ms) // the end of the read the first round started
+	var mu sync.Mutex
+	at := t0 // the agent's latest answer
+	var rounds atomic.Int64
+	var recovered atomic.Bool
+	stub := &stubDnAgent{}
+	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		mu.Lock()
+		defer mu.Unlock()
+		n := rounds.Add(1)
+		fresh := &pb.CheckDnReply{
+			Revision: req.GetRevision(),
+			DnInfo:   &pb.DnInfo{DiskInfo: resOk("disk")},
+		}
+		switch {
+		case recovered.Load():
+			obs := at.Add(ms)
+			at = at.Add(roundInterval)
+			fresh.ObsStamp = stampAt(obs, at, "read-fresh")
+			return fresh
+		case n == 1:
+			fresh.ObsStamp = stampAt(t0.Add(-ms), t0, "read-before")
+			return fresh
+		case n == 2:
+			// Within an interval of its observation: not late.
+			at = t0.Add(roundInterval)
+			fresh.ObsStamp = stampAt(read, at, "read-fresh")
+			return fresh
+		case n == 3:
+			at = read.Add(age)
+		default:
+			at = at.Add(roundInterval)
+		}
+		// A revision behind, which a fresh reply would re-sync on, and its
+		// info left out as unchanged.
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision() - 1,
+			ObsStamp: stampAt(read, at, "read-trace"),
+		}
+	})
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, dnTestConf())
+	_, rec, driver := h.startRecordedDn(testAddr, 5)
+
+	h.advanceUntil("the first round", roundInterval, func() bool {
+		return rounds.Load() >= 1
+	})
+	if got := h.hw.all(); len(got) != 0 {
+		t.Fatalf("the first round, answering from an observation that "+
+			"ended before it, wrote %+v", got)
+	}
+	h.advanceUntil("the first verdict", roundInterval, func() bool {
+		return rounds.Load() >= 2
+	})
+	if got := h.hw.all(); len(got) != 1 || got[0].epoch != 0 {
+		t.Fatalf("the round answering from the first round's read wrote "+
+			"%+v, want a clear", got)
+	}
+	if got := h.logs.withMsg(msgLateObservation); len(got) != 0 {
+		t.Fatalf("a round within an interval of its observation is logged "+
+			"late: %v", got)
+	}
+	h.advanceUntil("the stale round's verdict", roundInterval, func() bool {
+		return len(h.hw.all()) == 2
+	})
+	synctest.Wait()
+	if got := h.hw.all()[1]; got.record != healthRecordDn || got.epoch == 0 {
+		t.Fatalf("the stale round wrote %+v, want a dn epoch", got)
+	}
+	if got := len(stub.syncups()); got != 0 {
+		t.Fatalf("the stale round issued %d Syncups, want none", got)
+	}
+	if got := driver.info().GetDiskInfo().GetStatus(); got !=
+		pb.ResStatus_RES_STATUS_UNKNOWN {
+		t.Fatalf("disk_info reads %v after the stale round, want UNKNOWN",
+			got)
+	}
+	if got := stub.streamExitCount(); got != 1 {
+		t.Fatalf("%d streams ended after the stale round, want 1", got)
+	}
+	replies, unreachables := rec.seen()
+	if len(replies) != 1 || unreachables != 1 {
+		t.Fatalf("observe saw %d replies and %d unreachable verdicts; want "+
+			"the fresh round's alone and one", len(replies), unreachables)
+	}
+	failed := h.logs.withMsg("check round failed")
+	if len(failed) != 1 || failed[0]["error"] != "observation too old" {
+		t.Fatalf("failed rounds %v, want one stale", failed)
+	}
+	if ms, _ := recNumber(failed[0], "age_ms"); ms != float64(age.Milliseconds()) {
+		t.Fatalf("the failed round's age_ms = %v, want %d", ms,
+			age.Milliseconds())
+	}
+	late := h.logs.withMsg(msgLateObservation)
+	if len(late) != 1 {
+		t.Fatalf("%d late observation records, want 1", len(late))
+	}
+	for key, want := range map[string]any{
+		"cluster_id":   float64(testCid),
+		"dn_id":        float64(testDnId),
+		"stale":        true,
+		"age_ms":       float64(age.Milliseconds()),
+		"interval_ms":  float64(roundInterval.Milliseconds()),
+		"obs_trace_id": "read-trace",
+	} {
+		if got := late[0][key]; got != want {
+			t.Errorf("late observation %s = %v, want %v", key, got, want)
+		}
+	}
+	if _, ok := late[0]["converge_ms"]; ok {
+		t.Errorf("a late observation with no converge running carries "+
+			"converge_ms: %v", late[0])
+	}
+	wantNoObs(t, late[0], false)
+
+	h.advanceUntil("a fresh stream", roundInterval, func() bool {
+		return stub.streamCount() >= 2
+	})
+	recovered.Store(true)
+	h.advanceUntil("the clear", roundInterval, func() bool {
+		return len(h.hw.all()) == 3
+	})
+	if got := h.hw.all()[2]; got.epoch != 0 {
+		t.Fatalf("the first fresh round after the stale ones wrote %+v, "+
+			"want a clear", got)
+	}
+}
+
+// TestObservationAgeBound pins where HL7 draws its two lines, on the third
+// round of a dn loop: the first starts the age's count (HL7's pause rule),
+// from an observation that ended before it, and the second answers from the
+// read the first started, one interval on, so the third, which a pause cannot
+// precede, is judged by its observation's own age. An observation older than one interval is logged as
+// late, one older than ObsMaxAgeIntervals of them is stale, and both
+// records name the age judged. A reply with no observation time is late once
+// more than an interval, and stale once more than the bound, has passed
+// since the first round, the age both records name; one with no stamp at
+// all is both, with no age. The late record of either says the reply has no
+// observation (no_obs), which no other late record says. A
+// converge in flight is reported but is not stale by itself, and a reply
+// refusing the object as unknown carries no observation and is not judged: it
+// re-syncs, which is what makes the object known.
+func TestObservationAgeBound(t *testing.T) {
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	// Each builder is the third round's stamp, given start, the first
+	// round's answer, and obs, the end of the read it started, which the
+	// second answered from.
+	aged := func(age time.Duration) func(time.Time, time.Time) *pb.ObsStamp {
+		return func(_, obs time.Time) *pb.ObsStamp {
+			return stampAt(obs, obs.Add(age), "read-b")
+		}
+	}
+	answerOnly := func(
+		after time.Duration,
+	) func(time.Time, time.Time) *pb.ObsStamp {
+		return func(start, _ time.Time) *pb.ObsStamp {
+			return answerStamp(start.Add(after))
+		}
+	}
+	converging := func(start, obs time.Time) *pb.ObsStamp {
+		stamp := aged(roundInterval+ms)(start, obs)
+		stamp.ConvergeStart = timestamppb.New(
+			stamp.GetAnswerTime().AsTime().Add(-5 * time.Second))
+		return stamp
+	}
+	newer := func(_, obs time.Time) *pb.ObsStamp {
+		answer := obs.Add(2 * roundInterval)
+		return stampAt(answer.Add(time.Second), answer, "read-b")
+	}
+	for _, c := range []struct {
+		name  string
+		stamp func(start, obs time.Time) *pb.ObsStamp
+		code  uint32
+		late  bool
+		stale bool
+		// ageMs and convergeMs are the late record's attributes and
+		// failedMs the failed round's age, -1 when a record must not carry
+		// it; noObs is whether the late record says the reply has no
+		// observation.
+		ageMs      int64
+		convergeMs int64
+		failedMs   int64
+		noObs      bool
+	}{
+		{"at one interval", aged(roundInterval), 0, false, false, -1, -1, -1,
+			false},
+		{"just above one interval", aged(roundInterval + ms), 0,
+			true, false, 2001, -1, -1, false},
+		{"just under the bound", aged(bound - ms), 0, true, false, 5999, -1,
+			-1, false},
+		{"at the bound", aged(bound), 0, true, false, 6000, -1, -1, false},
+		{"just over the bound", aged(bound + ms), 0, true, true, 6001, -1,
+			6001, false},
+		{"an observation that ends after the answer", newer, 0,
+			false, false, -1, -1, -1, false},
+		{"no observation time within the bound",
+			answerOnly(2 * roundInterval), 0, true, false, 4000, -1, -1,
+			true},
+		{"no observation time past the bound", answerOnly(bound + ms), 0,
+			true, true, 6001, -1, 6001, true},
+		{"no stamp",
+			func(_, _ time.Time) *pb.ObsStamp { return &pb.ObsStamp{} },
+			0, true, true, -1, -1, -1, true},
+		{"a converge in flight", converging, 0, true, false, 2001, 5000, -1,
+			false},
+		{"an unknown object", answerOnly(2 * roundInterval),
+			common.ReplyCodeUnknownObject, false, false, -1, -1, -1, false},
+	} {
+		t.Run(c.name, inBubble(func(t *testing.T) {
+			h := newRevHarness(t)
+			start := testNodeBase
+			obs := start.Add(ms)
+			var rounds atomic.Int64
+			stub := &stubDnAgent{}
+			stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+				reply := &pb.CheckDnReply{Revision: req.GetRevision()}
+				switch rounds.Add(1) {
+				case 1:
+					reply.ObsStamp = stampAt(start.Add(-ms), start, "read-a")
+				case 2:
+					reply.ObsStamp = stampAt(obs, obs.Add(roundInterval),
+						"read-a")
+				default:
+					reply.AgentReply = &pb.AgentReply{Code: c.code}
+					reply.ObsStamp = c.stamp(start, obs)
+				}
+				return reply
+			})
+			h.fleet.addDn(t, testAddr, stub)
+			h.defaultConf()
+			h.seedDnConf(testAddr, dnTestConf())
+			h.startDn(testAddr, 5)
+
+			h.advanceUntil("the two rounds before the case's", roundInterval,
+				func() bool { return rounds.Load() >= 2 })
+			before := h.hw.all()
+			if len(before) != 1 || before[0].epoch != 0 {
+				t.Fatalf("the two rounds before the case's wrote %v, want "+
+					"one clear", before)
+			}
+			if n := len(h.logs.withMsg(msgLateObservation)) +
+				len(h.logs.withMsg("check round failed")); n != 0 {
+				t.Fatalf("the two rounds before the case's left %d late "+
+					"or failed records", n)
+			}
+			h.advanceUntil("the case's round", roundInterval,
+				func() bool { return rounds.Load() >= 3 })
+			writes := h.hw.all()[len(before):]
+			if c.code != 0 {
+				if len(writes) != 0 {
+					t.Fatalf("the unknown object's round wrote %v", writes)
+				}
+				if got := len(stub.syncups()); got != 1 {
+					t.Fatalf("the unknown object's round issued %d "+
+						"Syncups, want its re-sync", got)
+				}
+			} else {
+				set := len(writes) == 1 && writes[0].epoch != 0
+				if set != c.stale || len(writes) > 1 {
+					t.Fatalf("the round wrote %v; set the epoch: %t, want "+
+						"%t", writes, set, c.stale)
+				}
+			}
+			if c.stale {
+				if got := len(stub.syncups()); got != 0 {
+					t.Fatalf("a stale round issued %d Syncups", got)
+				}
+			}
+			late := h.logs.withMsg(msgLateObservation)
+			if c.late != (len(late) == 1) || len(late) > 1 {
+				t.Fatalf("%d late observation records, want late %t",
+					len(late), c.late)
+			}
+			failed := h.logs.withMsg("check round failed")
+			if c.stale != (len(failed) == 1) || len(failed) > 1 {
+				t.Fatalf("%d failed rounds, want stale %t", len(failed),
+					c.stale)
+			}
+			wantAttr := func(rec map[string]any, key string, want int64) {
+				t.Helper()
+				got, ok := recNumber(rec, key)
+				if want < 0 && ok {
+					t.Errorf("%s carries %s = %v, want none", rec["msg"],
+						key, got)
+				}
+				if want >= 0 && (!ok || got != float64(want)) {
+					t.Errorf("%s %s = %v, want %d", rec["msg"], key,
+						rec[key], want)
+				}
+			}
+			if c.late {
+				if got := late[0]["stale"]; got != c.stale {
+					t.Errorf("late observation stale = %v, want %t", got,
+						c.stale)
+				}
+				wantAttr(late[0], "age_ms", c.ageMs)
+				wantAttr(late[0], "interval_ms", roundInterval.Milliseconds())
+				wantAttr(late[0], "converge_ms", c.convergeMs)
+				wantNoObs(t, late[0], c.noObs)
+			}
+			if c.stale {
+				if got := failed[0]["error"]; got != errStaleObservation.Error() {
+					t.Errorf("failed round error = %v", got)
+				}
+				wantAttr(failed[0], "age_ms", c.failedMs)
+			}
+		}))
+	}
+}
+
+// TestRoundAfterASyncupIsNotLate pins HL7's late record around a Syncup*:
+// the round right after one answers, as a rule, from the observation that
+// reply carried, a whole interval and more after it was made, since the
+// Syncup* cancelled the read the round before started and the loop waits an
+// interval after the reply. That age is the loop's own making, so the round
+// is not logged late, after a round's re-send (RW4 step 5) or an immediate
+// syncup (RW6) alike. A later round still answering from it is late in
+// earnest, and a stale one right after a Syncup* is logged and fails as any.
+//
+// The agent's answers never lie more than the bound apart, so no round but
+// the first starts the age's count (HL7's pause rule). The stale round comes
+// right after a re-send the agent refused: an accepted one stores a new
+// observation the round after it answers from, which a round can only find
+// stale after a pause; a refused one stores nothing, and its reply carries
+// the observation the rounds before it answered from.
+func TestRoundAfterASyncupIsNotLate(t *testing.T) {
+	synctest.Test(t, testRoundAfterASyncupIsNotLate)
+}
+
+func testRoundAfterASyncupIsNotLate(t *testing.T) {
+	h := newRevHarness(t)
+	ms := time.Millisecond
+	var mu sync.Mutex
+	at := testNodeBase   // the agent's latest answer
+	var synced time.Time // the observation the latest Syncup carried
+	var syncs int
+	stub := &stubDnAgent{
+		syncupReply: func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			syncs++
+			at = at.Add(ms)
+			if syncs == 2 {
+				// The second re-send is refused: it stores nothing.
+				return &pb.SyncupDnReply{
+					AgentReply: &pb.AgentReply{
+						Code:    common.ReplyCodeInvalidConf,
+						Details: "refused",
+					},
+					Revision: req.GetRevision(),
+					ObsStamp: stampAt(synced, at, "syncup"),
+				}, nil
+			}
+			synced = at
+			return &pb.SyncupDnReply{
+				Revision: req.GetRevision(),
+				ObsStamp: stampAt(synced, synced, "syncup"),
+			}, nil
+		},
+	}
+	// fromSyncup answers req at the revision behind from the latest Syncup's
+	// observation, age after it was made.
+	fromSyncup := func(
+		req *pb.CheckDnRequest, behind uint64, age time.Duration,
+	) *pb.CheckDnReply {
+		at = synced.Add(age)
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision() - behind,
+			ObsStamp: stampAt(synced, at, "syncup"),
+		}
+	}
+	// fresh answers req at the revision behind an interval after the
+	// agent's latest answer, from the read that ended a millisecond after
+	// it; one behind re-sends the Syncup.
+	fresh := func(req *pb.CheckDnRequest, behind uint64) *pb.CheckDnReply {
+		obs := at.Add(ms)
+		at = at.Add(roundInterval)
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision() - behind,
+			ObsStamp: stampAt(obs, at, "read"),
+		}
+	}
+	var rounds atomic.Int64
+	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		mu.Lock()
+		defer mu.Unlock()
+		switch rounds.Add(1) {
+		case 1, 8:
+			return fresh(req, 1)
+		case 2:
+			return fromSyncup(req, 0, roundInterval+ms)
+		case 3:
+			// No read has ended since: late in earnest, not stale. A
+			// revision behind, it re-sends the Syncup, which is refused.
+			return fromSyncup(req, 1, 2*roundInterval+ms)
+		case 4:
+			return fromSyncup(req, 0,
+				common.ObsMaxAgeIntervals*roundInterval+ms)
+		case 6:
+			// Held: the immediate syncup overtakes it.
+			return nil
+		case 7:
+			return fromSyncup(req, 0, roundInterval+ms)
+		case 9:
+			// No reply: the round times out.
+			return nil
+		case 10:
+			return fromSyncup(req, 0, 2*roundInterval+ms)
+		default:
+			return fresh(req, 0)
+		}
+	})
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, dnTestConf())
+	w := h.startDn(testAddr, 5)
+
+	late := func() []map[string]any { return h.logs.withMsg(msgLateObservation) }
+	failed := func() int { return len(h.logs.withMsg("check round failed")) }
+
+	h.advanceUntil("the round after the re-send", roundInterval, func() bool {
+		return rounds.Load() >= 2
+	})
+	synctest.Wait()
+	if got := len(stub.syncups()); got != 1 {
+		t.Fatalf("%d Syncups after the first round, want its re-send", got)
+	}
+	if got := late(); len(got) != 0 {
+		t.Fatalf("the round after the re-send, answering from its "+
+			"observation one interval on, is logged late: %v", got)
+	}
+
+	h.advanceUntil("a second round from the same observation", roundInterval,
+		func() bool { return rounds.Load() >= 3 && len(late()) >= 1 })
+	synctest.Wait()
+	if got := late(); len(got) != 1 || got[0]["stale"] != false {
+		t.Fatalf("late records %v, want one, not stale, for the second "+
+			"round answering from the Syncup's observation", got)
+	}
+	if got := len(stub.syncups()); got != 2 {
+		t.Fatalf("%d Syncups after the second round from the same "+
+			"observation, want its re-send too", got)
+	}
+
+	h.advanceUntil("a stale round right after a re-send", roundInterval,
+		func() bool { return rounds.Load() >= 4 && failed() >= 1 })
+	synctest.Wait()
+	if got := late(); len(got) != 2 || got[1]["stale"] != true {
+		t.Fatalf("late records %v, want a stale one for the round right "+
+			"after the second re-send", got)
+	}
+	if got := failed(); got != 1 {
+		t.Fatalf("%d failed rounds, want the stale one", got)
+	}
+
+	// An immediate syncup overtakes a held round (RW6).
+	h.advanceUntil("a clean round", roundInterval, func() bool {
+		return rounds.Load() >= 5
+	})
+	stub.mu.Lock()
+	stub.holdRound = true
+	stub.mu.Unlock()
+	h.advanceUntil("the held round", roundInterval, func() bool {
+		return rounds.Load() >= 6
+	})
+	synctest.Wait()
+	n := len(stub.syncups())
+	w.update(desiredState{revision: 6, handle: testAddr})
+	waitFor(t, "the immediate syncup", func() bool {
+		return len(stub.syncups()) > n
+	})
+	synctest.Wait()
+	h.advanceUntil("the round after the immediate syncup", roundInterval,
+		func() bool { return rounds.Load() >= 7 })
+	synctest.Wait()
+	if got := late(); len(got) != 2 {
+		t.Fatalf("late records %v; the round after the immediate syncup, "+
+			"answering from its observation one interval on, is logged "+
+			"late", got[2:])
+	}
+	if got := failed(); got != 1 {
+		t.Fatalf("%d failed rounds after the immediate syncup, want the "+
+			"stale one alone", got)
+	}
+
+	// A round that fails after a re-send ends the leave: the round after
+	// it, still answering from the Syncup's observation, is late.
+	stub.mu.Lock()
+	stub.holdRound = false
+	stub.mu.Unlock()
+	h.advanceUntil("the round after a re-send and a timed-out round",
+		roundInterval, func() bool {
+			return rounds.Load() >= 10 && len(late()) >= 3
+		})
+	synctest.Wait()
+	if got := failed(); got != 2 {
+		t.Fatalf("%d failed rounds, want the timed-out one too", got)
+	}
+	if got := late(); len(got) != 3 || got[2]["stale"] != false {
+		t.Fatalf("late records %v, want one, not stale, for the round "+
+			"after the timed-out one", got)
+	}
+	if got := len(stub.syncups()); got != 4 {
+		t.Fatalf("%d Syncups, want four", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The pause rule (HL7): the age's count starts at the first round after a
+// pause in the loop's rounds
+// ---------------------------------------------------------------------------
+
+// tooOld returns the records of the rounds that failed on an observation
+// too old (HL7), leaving out the other failed rounds.
+func tooOld(logs *logCapture) []map[string]any {
+	var out []map[string]any
+	for _, rec := range logs.withMsg("check round failed") {
+		if rec["error"] == errStaleObservation.Error() {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// roundsSeen counts the round replies observe saw, leaving out the Syncup*
+// replies.
+func roundsSeen(rec *obsRecorder) int {
+	replies, _ := rec.seen()
+	n := 0
+	for _, r := range replies {
+		if r.fromRound {
+			n++
+		}
+	}
+	return n
+}
+
+// wantAgeMs fails t unless the failed round rec names age.
+func wantAgeMs(t *testing.T, rec map[string]any, age time.Duration) {
+	t.Helper()
+	if got, ok := recNumber(rec, "age_ms"); !ok ||
+		got != float64(age.Milliseconds()) {
+		t.Fatalf("the failed round's age_ms = %v, want %d", rec["age_ms"],
+			age.Milliseconds())
+	}
+}
+
+// wantLateAgeMs fails t unless the late observation record rec names age,
+// the age HL7 judged.
+func wantLateAgeMs(t *testing.T, rec map[string]any, age time.Duration) {
+	t.Helper()
+	if got, ok := recNumber(rec, "age_ms"); !ok ||
+		got != float64(age.Milliseconds()) {
+		t.Fatalf("the late observation's age_ms = %v, want %d, the age "+
+			"judged", rec["age_ms"], age.Milliseconds())
+	}
+}
+
+// wantNoObs fails t unless the late observation record rec says the reply
+// has no observation exactly when noObs: no_obs true then, and no no_obs at
+// all otherwise.
+func wantNoObs(t *testing.T, rec map[string]any, noObs bool) {
+	t.Helper()
+	got, ok := rec["no_obs"]
+	if noObs && got != true {
+		t.Fatalf("the late observation of a reply with no observation "+
+			"carries no_obs = %v, want true", got)
+	}
+	if !noObs && ok {
+		t.Fatalf("the late observation of a reply with an observation "+
+			"carries no_obs = %v", got)
+	}
+}
+
+// TestFirstRoundStartsTheAgeCount pins HL7's pause rule on a loop's first
+// round: no round of the loop asked the agent to read before it, so the
+// observation it answers from, which ended before it — here an hour before —
+// is neither stale nor logged late, and gives no health verdict either: no
+// epoch is set or cleared. It still drives the re-sync its revision calls
+// for, and it starts the age's count. A later round answering from the read
+// the first round started is judged. Later rounds still answering from the
+// observation before the first give no verdict either, and are late once
+// more than an interval, and stale once more than ObsMaxAgeIntervals of
+// them, has passed since the first round's answer; the late records and the
+// failed round name that age, not the observation's own.
+func TestFirstRoundStartsTheAgeCount(t *testing.T) {
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	t0 := testNodeBase
+	old := t0.Add(-time.Hour)
+	ok := &pb.DnInfo{DiskInfo: resOk("disk")}
+
+	t.Run("a read that does not end", inBubble(func(t *testing.T) {
+		h := newRevHarness(t)
+		// Each round's answer after the first's, the last for any round
+		// after it; the first round is a revision behind.
+		after := []time.Duration{
+			0, roundInterval, roundInterval + ms, bound, bound + ms,
+		}
+		var rounds atomic.Int64
+		stub := &stubDnAgent{
+			// The re-send is refused: it stores nothing, and its reply
+			// carries the observation the rounds answer from.
+			syncupReply: func(
+				req *pb.SyncupDnRequest,
+			) (*pb.SyncupDnReply, error) {
+				return &pb.SyncupDnReply{
+					AgentReply: &pb.AgentReply{
+						Code:    common.ReplyCodeInvalidConf,
+						Details: "refused",
+					},
+					Revision: req.GetRevision() - 1,
+					ObsStamp: stampAt(old, t0.Add(ms), "read-old"),
+				}, nil
+			},
+		}
+		stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			n := int(rounds.Add(1))
+			reply := &pb.CheckDnReply{
+				Revision: req.GetRevision(),
+				DnInfo:   proto.CloneOf(ok),
+				ObsStamp: stampAt(old, t0.Add(after[min(n, len(after))-1]),
+					"read-old"),
+			}
+			if n == 1 {
+				reply.Revision--
+			}
+			return reply
+		})
+		h.fleet.addDn(t, testAddr, stub)
+		h.defaultConf()
+		h.seedDnConf(testAddr, dnTestConf())
+		_, rec, _ := h.startRecordedDn(testAddr, 5)
+		late := func() []map[string]any {
+			return h.logs.withMsg(msgLateObservation)
+		}
+		round := func(n int64) {
+			t.Helper()
+			h.advanceUntil("the next round", roundInterval, func() bool {
+				return rounds.Load() >= n
+			})
+		}
+
+		round(1)
+		if got := h.hw.all(); len(got) != 0 {
+			t.Fatalf("the first round, answering from an observation an "+
+				"hour old, wrote %v", got)
+		}
+		if got := len(stub.syncups()); got != 1 {
+			t.Fatalf("%d Syncups after the first round, a revision "+
+				"behind, want its re-send", got)
+		}
+		if got := late(); len(got) != 0 {
+			t.Fatalf("the first round, answering from an observation an "+
+				"hour old, is logged late: %v", got)
+		}
+
+		round(2)
+		if got := late(); len(got) != 0 {
+			t.Fatalf("a round an interval after the first is logged "+
+				"late: %v", got)
+		}
+		round(3)
+		if got := late(); len(got) != 1 || got[0]["stale"] != false {
+			t.Fatalf("late records %v, want one, not stale, for a round "+
+				"more than an interval after the first", got)
+		}
+		wantLateAgeMs(t, late()[0], roundInterval+ms)
+		round(4)
+		if got := late(); len(got) != 2 || got[1]["stale"] != false {
+			t.Fatalf("late records %v, want a second, not stale, for a "+
+				"round the bound after the first", got)
+		}
+		wantLateAgeMs(t, late()[1], bound)
+		if got := len(h.logs.withMsg("check round failed")); got != 0 {
+			t.Fatalf("%d failed rounds within the bound of the first", got)
+		}
+		if got := h.hw.all(); len(got) != 0 {
+			t.Fatalf("rounds answering from an observation older than the "+
+				"first round wrote %v", got)
+		}
+		if got := roundsSeen(rec); got != 0 {
+			t.Fatalf("observe saw %d rounds answering from an observation "+
+				"older than the first round", got)
+		}
+
+		round(5)
+		if got := late(); len(got) != 3 || got[2]["stale"] != true {
+			t.Fatalf("late records %v, want a stale one for a round past "+
+				"the bound after the first", got)
+		}
+		wantLateAgeMs(t, late()[2], bound+ms)
+		stale := tooOld(h.logs)
+		if len(stale) != 1 {
+			t.Fatalf("%d rounds failed on their observation's age, want "+
+				"one", len(stale))
+		}
+		wantAgeMs(t, stale[0], bound+ms)
+		if got := h.hw.all(); len(got) != 1 || got[0].epoch == 0 {
+			t.Fatalf("health writes %v, want the stale round's epoch", got)
+		}
+		if got := len(stub.syncups()); got != 1 {
+			t.Fatalf("%d Syncups, want the first round's alone", got)
+		}
+	}))
+
+	t.Run("the read the first round started", inBubble(func(t *testing.T) {
+		h := newRevHarness(t)
+		var rounds atomic.Int64
+		stub := &stubDnAgent{}
+		stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			stamp := stampAt(old, t0, "read-old")
+			if rounds.Add(1) > 1 {
+				stamp = stampAt(t0.Add(ms), t0.Add(roundInterval), "read-new")
+			}
+			return &pb.CheckDnReply{
+				Revision: req.GetRevision(),
+				DnInfo:   proto.CloneOf(ok),
+				ObsStamp: stamp,
+			}
+		})
+		h.fleet.addDn(t, testAddr, stub)
+		h.defaultConf()
+		h.seedDnConf(testAddr, dnTestConf())
+		_, rec, _ := h.startRecordedDn(testAddr, 5)
+
+		h.advanceUntil("the first round", roundInterval, func() bool {
+			return rounds.Load() >= 1
+		})
+		if got := h.hw.all(); len(got) != 0 {
+			t.Fatalf("the first round, answering from an observation an "+
+				"hour old, wrote %v", got)
+		}
+		h.advanceUntil("the second round", roundInterval, func() bool {
+			return rounds.Load() >= 2
+		})
+		if got := h.hw.all(); len(got) != 1 || got[0].epoch != 0 {
+			t.Fatalf("health writes %v, want the clear of the round "+
+				"answering from the first round's read", got)
+		}
+		if got := roundsSeen(rec); got != 1 {
+			t.Fatalf("observe saw %d rounds, want the second alone", got)
+		}
+	}))
+}
+
+// TestAGapIsNoPause pins HL7's pause rule on a running loop: only its start,
+// an idle or a refused conf, and a move are pauses, so a gap between two of
+// its rounds — rounds that got no reply, or a Syncup* that timed out while
+// the agent held the object behind a hung converge — leaves the age's count
+// where the loop's first round started it. The round after the gap is
+// judged by its observation's own age and, here, is stale, the late record
+// and the failed round naming that age.
+func TestAGapIsNoPause(t *testing.T) {
+	ms := time.Millisecond
+	t0 := testNodeBase
+	read := t0.Add(ms) // the end of the read the first round started
+	second := t0.Add(roundInterval)
+	for _, c := range []struct {
+		name string
+		// gap is the agent's clock from the second round's answer to the
+		// round after the gap, timeouts how many rounds got no reply in
+		// between, and resend whether the second round's re-send fails,
+		// the agent having held it for the gap.
+		gap      time.Duration
+		timeouts int64
+		resend   bool
+	}{
+		{"rounds that got no reply", 5 * roundInterval, 2, false},
+		{"a re-send that timed out",
+			common.DefaultWorkerSyncupTimeout*time.Second + roundInterval,
+			0, true},
+	} {
+		t.Run(c.name, inBubble(func(t *testing.T) {
+			h := newRevHarness(t)
+			after := 3 + c.timeouts // the round after the gap
+			var rounds atomic.Int64
+			stub := &stubDnAgent{
+				syncupReply: func(
+					*pb.SyncupDnRequest,
+				) (*pb.SyncupDnReply, error) {
+					return nil, errors.New("context deadline exceeded")
+				},
+			}
+			stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+				n := rounds.Add(1)
+				stamp := stampAt(read, second.Add(c.gap), "read")
+				switch {
+				case n == 1:
+					stamp = stampAt(t0.Add(-ms), t0, "read-before")
+				case n == 2:
+					stamp = stampAt(read, second, "read")
+				case n < after:
+					return nil
+				}
+				reply := &pb.CheckDnReply{
+					Revision: req.GetRevision(),
+					DnInfo:   &pb.DnInfo{DiskInfo: resOk("disk")},
+					ObsStamp: stamp,
+				}
+				if c.resend && n >= 2 {
+					// A converge holds the object from just after the read.
+					reply.Revision--
+					stamp.ConvergeStart = timestamppb.New(read.Add(ms))
+				}
+				return reply
+			})
+			h.fleet.addDn(t, testAddr, stub)
+			h.defaultConf()
+			h.seedDnConf(testAddr, dnTestConf())
+			h.startDn(testAddr, 5)
+
+			h.advanceUntil("the second round", roundInterval,
+				func() bool { return rounds.Load() >= 2 })
+			if got := h.hw.all(); len(got) != 1 || got[0].epoch != 0 {
+				t.Fatalf("health writes %v, want the second round's clear",
+					got)
+			}
+			h.advanceUntil("the round after the gap", roundInterval,
+				func() bool { return rounds.Load() >= after })
+			age := second.Add(c.gap).Sub(read)
+			stale := tooOld(h.logs)
+			if len(stale) != 1 {
+				t.Fatalf("%d rounds failed on their observation's age, want "+
+					"the round after the gap", len(stale))
+			}
+			wantAgeMs(t, stale[0], age)
+			late := h.logs.withMsg(msgLateObservation)
+			if len(late) != 1 || late[0]["stale"] != true {
+				t.Fatalf("late records %v, want a stale one for the round "+
+					"after the gap", late)
+			}
+			wantLateAgeMs(t, late[0], age)
+			if got := len(h.logs.withMsg("check round failed")) -
+				len(stale); int64(got) != c.timeouts {
+				t.Fatalf("%d rounds failed otherwise, want the %d that got "+
+					"no reply", got, c.timeouts)
+			}
+			if got := h.hw.all(); got[len(got)-1].epoch == 0 {
+				t.Fatalf("health writes %v, want the epoch set", got)
+			}
+			want := 0
+			if c.resend {
+				want = 1
+			}
+			if got := len(stub.syncups()); got != want {
+				t.Fatalf("%d Syncups, want %d: none on the stale round", got,
+					want)
+			}
+		}))
+	}
+}
+
+// TestAnIdleRestartsTheAgeCount pins HL7's pause rule across a quiesced
+// loop: an idle on a missing cluster conf (RW9) and a refused stored conf
+// (architecture.md, Common validation) open no stream and so ask the agent
+// for no read, and the first round after either starts the age's count
+// again. It answers from the observation the loop's last round answered
+// from, now older than the bound, and is neither stale nor late and gives no
+// verdict; later rounds still answering from it are late and stale counted
+// from that round's answer.
+func TestAnIdleRestartsTheAgeCount(t *testing.T) {
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	t0 := testNodeBase
+	read := t0.Add(ms) // the end of the read the first round started
+	resumed := t0.Add(roundInterval + bound)
+	for _, c := range []struct {
+		name   string
+		pause  func(h *revHarness)
+		record string
+	}{
+		{"a missing cluster conf", func(h *revHarness) {
+			h.deps.conf.mu.Lock()
+			delete(h.deps.conf.entries, testCid)
+			h.deps.conf.mu.Unlock()
+		}, msgClusterConfMissing},
+		{"a refused cluster conf", func(h *revHarness) {
+			h.setClusterConf(testCid, testClusterConf(func(cc *pb.ClusterConf) {
+				cc.DnBinConf = nil
+			}))
+		}, msgInvalidStoredConf},
+	} {
+		t.Run(c.name, inBubble(func(t *testing.T) {
+			h := newRevHarness(t)
+			var rounds atomic.Int64
+			stub := &stubDnAgent{}
+			stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+				obs, at := read, resumed.Add(bound+ms)
+				switch rounds.Add(1) {
+				case 1:
+					obs, at = t0.Add(-ms), t0
+				case 2:
+					at = t0.Add(roundInterval)
+				case 3:
+					at = resumed
+				case 4:
+					at = resumed.Add(roundInterval + ms)
+				}
+				return &pb.CheckDnReply{
+					Revision: req.GetRevision(),
+					DnInfo:   &pb.DnInfo{DiskInfo: resOk("disk")},
+					ObsStamp: stampAt(obs, at, "read"),
+				}
+			})
+			h.fleet.addDn(t, testAddr, stub)
+			h.defaultConf()
+			h.seedDnConf(testAddr, dnTestConf())
+			_, rec, _ := h.startRecordedDn(testAddr, 5)
+			late := func() []map[string]any {
+				return h.logs.withMsg(msgLateObservation)
+			}
+
+			h.advanceUntil("the second round", roundInterval,
+				func() bool { return rounds.Load() >= 2 })
+			if got := h.hw.all(); len(got) != 1 || got[0].epoch != 0 {
+				t.Fatalf("health writes %v, want the second round's clear",
+					got)
+			}
+			c.pause(h)
+			h.advanceUntil("the quiesced loop", roundInterval, func() bool {
+				return len(h.logs.withMsg(c.record)) >= 1
+			})
+			if got := rounds.Load(); got != 2 {
+				t.Fatalf("%d rounds while the loop is quiesced, want none "+
+					"after the second", got)
+			}
+			h.defaultConf()
+
+			h.advanceUntil("the round after the pause", roundInterval,
+				func() bool { return rounds.Load() >= 3 })
+			if got := tooOld(h.logs); len(got) != 0 {
+				t.Fatalf("the round after the pause failed on its "+
+					"observation's age: %v", got)
+			}
+			if got := late(); len(got) != 0 {
+				t.Fatalf("the round after the pause is logged late: %v", got)
+			}
+			if got := roundsSeen(rec); got != 1 {
+				t.Fatalf("observe saw %d rounds, want the second alone", got)
+			}
+			if got := h.hw.all(); len(got) != 1 {
+				t.Fatalf("health writes %v, want the second round's clear "+
+					"alone", got)
+			}
+
+			h.advanceUntil("a late round", roundInterval,
+				func() bool { return rounds.Load() >= 4 })
+			if got := late(); len(got) != 1 || got[0]["stale"] != false {
+				t.Fatalf("late records %v, want one, not stale", got)
+			}
+			wantLateAgeMs(t, late()[0], roundInterval+ms)
+			h.advanceUntil("a stale round", roundInterval,
+				func() bool { return rounds.Load() >= 5 })
+			stale := tooOld(h.logs)
+			if len(stale) != 1 {
+				t.Fatalf("%d rounds failed on their observation's age, want "+
+					"the one past the bound after the round after the pause",
+					len(stale))
+			}
+			wantAgeMs(t, stale[0], bound+ms)
+			if got := late(); len(got) != 2 || got[1]["stale"] != true {
+				t.Fatalf("late records %v, want a stale one", got)
+			}
+			wantLateAgeMs(t, late()[1], bound+ms)
+		}))
+	}
+}
+
+// TestRoundWithNoObservation pins HL7's reading of a reply of an object the
+// agent holds but has no observation of (its observation time unset, its
+// code not ReplyCodeUnknownObject): until the bound has passed since the
+// first round after a pause it carries no health verdict — no epoch set or
+// cleared, no row marked, the stream kept — but its revision, none, still
+// brings the re-sync of RW4 step 5. Once the bound has passed with still no
+// observation, the round is stale. Each late record of such a round says the
+// reply has no observation (no_obs), beside the age counted from that first
+// round. The agent refuses every re-sync here, so it stores nothing and the
+// replies go on carrying no observation.
+func TestRoundWithNoObservation(t *testing.T) {
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	t0 := testNodeBase
+	// harness starts a dn loop whose agent answers round n with reply(n)
+	// and refuses every SyncupDn, which stores nothing, with a reply that
+	// carries no stamp.
+	harness := func(
+		t *testing.T, reply func(n int64) *pb.CheckDnReply,
+	) (*revHarness, *stubDnAgent, *obsRecorder, *dnDriver, *atomic.Int64) {
+		h := newRevHarness(t)
+		var rounds atomic.Int64
+		stub := &stubDnAgent{
+			syncupReply: func(
+				req *pb.SyncupDnRequest,
+			) (*pb.SyncupDnReply, error) {
+				return &pb.SyncupDnReply{
+					AgentReply: &pb.AgentReply{
+						Code:    common.ReplyCodeInvalidConf,
+						Details: "refused",
+					},
+				}, nil
+			},
+		}
+		stub.setCheckReply(func(*pb.CheckDnRequest) *pb.CheckDnReply {
+			return reply(rounds.Add(1))
+		})
+		h.fleet.addDn(t, testAddr, stub)
+		h.defaultConf()
+		h.seedDnConf(testAddr, dnTestConf())
+		_, rec, driver := h.startRecordedDn(testAddr, 5)
+		return h, stub, rec, driver, &rounds
+	}
+	// none answers at at from no observation, at no revision.
+	none := func(at time.Time) *pb.CheckDnReply {
+		return &pb.CheckDnReply{ObsStamp: answerStamp(at)}
+	}
+	unreachables := func(rec *obsRecorder) int {
+		_, n := rec.seen()
+		return n
+	}
+
+	t.Run("from the loop's first round", inBubble(func(t *testing.T) {
+		after := []time.Duration{0, roundInterval + ms, bound, bound + ms}
+		h, stub, rec, _, rounds := harness(t, func(n int64) *pb.CheckDnReply {
+			return none(t0.Add(after[min(int(n), len(after))-1]))
+		})
+		late := func() []map[string]any {
+			return h.logs.withMsg(msgLateObservation)
+		}
+		// The age each late record names: the age judged, counted from
+		// the first round's answer.
+		lateAges := []time.Duration{roundInterval + ms, bound}
+		for n, wantLate := range []int{0, 1, 2} {
+			h.advanceUntil("the next round", roundInterval, func() bool {
+				return rounds.Load() >= int64(n+1)
+			})
+			if got := h.hw.all(); len(got) != 0 {
+				t.Fatalf("round %d with no observation wrote %v", n+1, got)
+			}
+			if got := roundsSeen(rec); got != 0 {
+				t.Fatalf("observe saw %d rounds with no observation", got)
+			}
+			if got := len(stub.syncups()); got != n+1 {
+				t.Fatalf("%d Syncups after %d rounds with no observation, "+
+					"want one re-sync each", got, n+1)
+			}
+			if got := len(h.logs.withMsg("check round failed")); got != 0 {
+				t.Fatalf("%d failed rounds within the bound", got)
+			}
+			if got := stub.streamExitCount(); got != 0 {
+				t.Fatalf("%d streams ended within the bound", got)
+			}
+			got := late()
+			if len(got) != wantLate {
+				t.Fatalf("late records %v after round %d, want %d", got,
+					n+1, wantLate)
+			}
+			for i, r := range got {
+				if r["stale"] != false {
+					t.Fatalf("a round within the bound is logged stale: %v",
+						r)
+				}
+				wantLateAgeMs(t, r, lateAges[i])
+				wantNoObs(t, r, true)
+			}
+		}
+
+		h.advanceUntil("the round past the bound", roundInterval,
+			func() bool { return rounds.Load() >= 4 })
+		stale := tooOld(h.logs)
+		if len(stale) != 1 {
+			t.Fatalf("%d rounds failed on their observation's age, want "+
+				"the round past the bound", len(stale))
+		}
+		wantAgeMs(t, stale[0], bound+ms)
+		if got := late(); len(got) != 3 || got[2]["stale"] != true {
+			t.Fatalf("late records %v, want a stale one", got)
+		}
+		wantLateAgeMs(t, late()[2], bound+ms)
+		wantNoObs(t, late()[2], true)
+		if got := h.hw.all(); len(got) != 1 || got[0].epoch == 0 {
+			t.Fatalf("health writes %v, want the stale round's epoch", got)
+		}
+		if got := len(stub.syncups()); got != 3 {
+			t.Fatalf("%d Syncups, want none on the stale round", got)
+		}
+		if got := unreachables(rec); got != 1 {
+			t.Fatalf("%d unreachable verdicts, want the stale round's", got)
+		}
+	}))
+
+	t.Run("after a judged round", inBubble(func(t *testing.T) {
+		// The first round answers from an observation that ended before
+		// it; the second from the read the first started, with a clean
+		// row; the third from none; the fourth not at all; the fifth and
+		// sixth from none again, the bound and just past it after the
+		// first.
+		h, stub, rec, driver, rounds := harness(t,
+			func(n int64) *pb.CheckDnReply {
+				switch n {
+				case 1, 2:
+					stamp := stampAt(t0.Add(-ms), t0, "read-before")
+					if n == 2 {
+						stamp = stampAt(t0.Add(ms), t0.Add(roundInterval),
+							"read")
+					}
+					return &pb.CheckDnReply{
+						Revision: 5,
+						DnInfo:   &pb.DnInfo{DiskInfo: resOk("disk")},
+						ObsStamp: stamp,
+					}
+				case 3:
+					return none(t0.Add(2 * roundInterval))
+				case 4:
+					return nil
+				case 5:
+					return none(t0.Add(bound))
+				default:
+					return none(t0.Add(bound + ms))
+				}
+			})
+		disk := func() pb.ResStatus {
+			return driver.info().GetDiskInfo().GetStatus()
+		}
+
+		h.advanceUntil("the round with no observation", roundInterval,
+			func() bool { return rounds.Load() >= 3 })
+		if got := h.hw.all(); len(got) != 1 || got[0].epoch != 0 {
+			t.Fatalf("health writes %v, want the second round's clear alone",
+				got)
+		}
+		if got := disk(); got != pb.ResStatus_RES_STATUS_OK {
+			t.Fatalf("disk_info reads %v after a round with no "+
+				"observation, want OK", got)
+		}
+		if got := stub.streamExitCount(); got != 0 {
+			t.Fatalf("%d streams ended after a round with no observation",
+				got)
+		}
+		if got := roundsSeen(rec); got != 1 {
+			t.Fatalf("observe saw %d rounds, want the second alone", got)
+		}
+		if got := len(stub.syncups()); got != 1 {
+			t.Fatalf("%d Syncups, want the re-sync of the round with no "+
+				"observation", got)
+		}
+
+		h.advanceUntil("the timed-out round", roundInterval, func() bool {
+			return len(h.hw.all()) >= 2
+		})
+		if got := h.hw.all(); len(got) != 2 || got[1].epoch == 0 {
+			t.Fatalf("health writes %v, want the timeout's epoch", got)
+		}
+		h.advanceUntil("a round with no observation after the timeout",
+			roundInterval, func() bool { return rounds.Load() >= 5 })
+		if got := h.hw.all(); len(got) != 2 {
+			t.Fatalf("health writes %v; a round with no observation "+
+				"cleared the timeout's epoch", got)
+		}
+		if got := roundsSeen(rec); got != 1 {
+			t.Fatalf("observe saw %d rounds, want the second alone", got)
+		}
+		if got := len(stub.syncups()); got != 2 {
+			t.Fatalf("%d Syncups, want a re-sync of each round with no "+
+				"observation", got)
+		}
+		if got := tooOld(h.logs); len(got) != 0 {
+			t.Fatalf("a round with no observation the bound after the "+
+				"first failed on its age: %v", got)
+		}
+
+		h.advanceUntil("the round past the bound", roundInterval,
+			func() bool { return rounds.Load() >= 6 })
+		stale := tooOld(h.logs)
+		if len(stale) != 1 {
+			t.Fatalf("%d rounds failed on their observation's age, want "+
+				"the round past the bound", len(stale))
+		}
+		wantAgeMs(t, stale[0], bound+ms)
+		if got := len(stub.syncups()); got != 2 {
+			t.Fatalf("%d Syncups, want none on the stale round", got)
+		}
+		if got := unreachables(rec); got != 2 {
+			t.Fatalf("%d unreachable verdicts, want the timeout's and the "+
+				"stale round's", got)
+		}
+	}))
+}
+
+// TestAMoveForgetsTheAgeCount pins HL7's pause rule across a move (RW13):
+// the age's count belongs to the endpoint, as the latest observation seen
+// does (RW23), since the node there is another node with another clock. The
+// first round at the new endpoint starts the count again, though the agent
+// there answers it from an observation older than the old count's start; the
+// next round, answering from the read it started, is judged.
+func TestAMoveForgetsTheAgeCount(t *testing.T) {
+	synctest.Test(t, testAMoveForgetsTheAgeCount)
+}
+
+func testAMoveForgetsTheAgeCount(t *testing.T) {
+	h := newRevHarness(t)
+	const newAddr = "dn1:9520"
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	t0 := testNodeBase
+	ok := &pb.DnInfo{DiskInfo: resOk("disk")}
+	var oldRounds atomic.Int64
+	old := &stubDnAgent{}
+	old.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		stamp := stampAt(t0.Add(-ms), t0, "old")
+		if oldRounds.Add(1) > 1 {
+			stamp = stampAt(t0.Add(ms), t0.Add(roundInterval), "old")
+		}
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision(),
+			DnInfo:   proto.CloneOf(ok),
+			ObsStamp: stamp,
+		}
+	})
+	// The first round at the new endpoint answers the bound after the old
+	// endpoint's last answer, from an observation an hour before the old
+	// count's start, which the old count would find stale. Later rounds there
+	// answer from the read it started.
+	first := t0.Add(roundInterval + bound)
+	var movedRounds atomic.Int64
+	moved := &stubDnAgent{}
+	moved.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		stamp := stampAt(t0.Add(-time.Hour), first, "moved-old")
+		if movedRounds.Add(1) > 1 {
+			stamp = stampAt(first.Add(ms), first.Add(roundInterval), "moved")
+		}
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision(),
+			DnInfo:   proto.CloneOf(ok),
+			ObsStamp: stamp,
+		}
+	})
+	h.fleet.addDn(t, testAddr, old)
+	h.fleet.addDn(t, newAddr, moved)
+	h.defaultConf()
+	h.seedDnConf(testAddr, dnTestConf())
+	h.seedDnConf(newAddr, dnTestConf())
+	w, rec, _ := h.startRecordedDn(testAddr, 5)
+
+	h.advanceUntil("two rounds at the old endpoint", roundInterval,
+		func() bool { return old.checkCount() >= 2 })
+	w.update(desiredState{revision: 5, handle: newAddr})
+	h.advanceUntil("a round at the new endpoint", roundInterval, func() bool {
+		return moved.checkCount() >= 1
+	})
+	if got := h.logs.withMsg("check round failed"); len(got) != 0 {
+		t.Fatalf("failed rounds %v: the old endpoint's count was kept", got)
+	}
+	if got := h.logs.withMsg(msgLateObservation); len(got) != 0 {
+		t.Fatalf("late records %v: the old endpoint's count was kept", got)
+	}
+	h.advanceUntil("a second round at the new endpoint", roundInterval,
+		func() bool { return moved.checkCount() >= 2 })
+	replies, _ := rec.seen()
+	last := replies[len(replies)-1]
+	if !last.fromRound || last.obsTraceId != "moved" {
+		t.Fatalf("the round answering from the read the new endpoint's "+
+			"first round started gave no verdict: the last reply observed "+
+			"is %+v", last)
+	}
+	if got := h.logs.withMsg("check round failed"); len(got) != 0 {
+		t.Fatalf("failed rounds %v at the new endpoint", got)
+	}
+}
+
+// TestASyncupLeavesTheAgeCount pins HL7's pause rule around a Syncup*: its
+// reply is no round, so it does not start the age's count again, however
+// long the agent took to answer it. Every round here answers a revision
+// behind from one observation, which ended before the first round, and the
+// stub refuses every re-send, which stores nothing. It still stamps each
+// refusal with that observation and an answer time, which no live agent
+// sends (architecture.md, Live-state reporting): the stamp is there only to
+// hand the worker a Syncup* answer time to ignore. After quick re-sends the
+// round past the bound after the first is stale, counted from the first;
+// after a re-send the stub took longer than the bound to answer, which is no
+// pause, the round right after it is stale, counted from the first too.
+func TestASyncupLeavesTheAgeCount(t *testing.T) {
+	ms := time.Millisecond
+	bound := common.ObsMaxAgeIntervals * roundInterval
+	for _, c := range []struct {
+		name string
+		// rounds is each round's answer after t0, the last for any round
+		// after it; took is how long the stub took to answer the first
+		// re-send, each later one taking a millisecond.
+		rounds []time.Duration
+		took   time.Duration
+		// stale is the first round that fails on its observation's age,
+		// and age the age it names.
+		stale int64
+		age   time.Duration
+	}{
+		{"after quick re-sends",
+			[]time.Duration{0, roundInterval, bound + ms}, ms, 3, bound + ms},
+		{"after a re-send longer than the bound",
+			[]time.Duration{0, bound + ms + roundInterval}, bound + ms, 2,
+			bound + ms + roundInterval},
+	} {
+		t.Run(c.name, inBubble(func(t *testing.T) {
+			h := newRevHarness(t)
+			t0 := testNodeBase
+			obs := t0.Add(-ms)
+			var mu sync.Mutex
+			var at time.Time // the agent's latest round answer
+			var syncs int
+			var rounds atomic.Int64
+			stub := &stubDnAgent{
+				syncupReply: func(
+					req *pb.SyncupDnRequest,
+				) (*pb.SyncupDnReply, error) {
+					mu.Lock()
+					defer mu.Unlock()
+					syncs++
+					took := ms
+					if syncs == 1 {
+						took = c.took
+					}
+					return &pb.SyncupDnReply{
+						AgentReply: &pb.AgentReply{
+							Code:    common.ReplyCodeInvalidConf,
+							Details: "refused",
+						},
+						Revision: req.GetRevision() - 1,
+						// No live agent stamps a refusal; this
+						// one carries the answer time to ignore.
+						ObsStamp: stampAt(obs, at.Add(took), "read"),
+					}, nil
+				},
+			}
+			stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+				mu.Lock()
+				defer mu.Unlock()
+				n := min(int(rounds.Add(1)), len(c.rounds))
+				at = t0.Add(c.rounds[n-1])
+				return &pb.CheckDnReply{
+					Revision: req.GetRevision() - 1,
+					DnInfo:   &pb.DnInfo{DiskInfo: resOk("disk")},
+					ObsStamp: stampAt(obs, at, "read"),
+				}
+			})
+			h.fleet.addDn(t, testAddr, stub)
+			h.defaultConf()
+			h.seedDnConf(testAddr, dnTestConf())
+			h.startDn(testAddr, 5)
+
+			h.advanceUntil("the round before the stale one", roundInterval,
+				func() bool { return rounds.Load() >= c.stale-1 })
+			if got := tooOld(h.logs); len(got) != 0 {
+				t.Fatalf("a round before the stale one failed on its "+
+					"observation's age: %v", got)
+			}
+			if got := len(stub.syncups()); int64(got) != c.stale-1 {
+				t.Fatalf("%d Syncups before the stale round, want a "+
+					"re-send of each round", got)
+			}
+			h.advanceUntil("the stale round", roundInterval,
+				func() bool { return rounds.Load() >= c.stale })
+			stale := tooOld(h.logs)
+			if len(stale) != 1 {
+				t.Fatalf("%d rounds failed on their observation's age, want "+
+					"the round past the bound", len(stale))
+			}
+			wantAgeMs(t, stale[0], c.age)
+			if got := len(stub.syncups()); int64(got) != c.stale-1 {
+				t.Fatalf("%d Syncups, want none on the stale round", got)
+			}
+		}))
+	}
+}
+
+// TestNewObservationsCount pins RW23 on the loop: a round's reply is new only
+// when its observation time is later than every one the loop has seen, in a
+// round's reply or a Syncup*'s; a Syncup* reply's observation is seen but
+// never new itself, so a round answering from it afterwards is not new
+// either.
+func TestNewObservationsCount(t *testing.T) {
+	synctest.Test(t, testNewObservationsCount)
+}
+
+func testNewObservationsCount(t *testing.T) {
+	h := newRevHarness(t)
+	t1, t2, t3, t4 := nextObsTime(), nextObsTime(), nextObsTime(), nextObsTime()
+	// Each round answers from the script's observation; the third is a
+	// revision behind, so a Syncup* follows it, answering from t3.
+	script := []struct {
+		obs    time.Time
+		behind bool
+	}{{t1, false}, {t1, false}, {t2, true}, {t3, false}, {t4, false}}
+	var rounds atomic.Int64
+	stub := &stubDnAgent{
+		syncupReply: func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error) {
+			return &pb.SyncupDnReply{
+				Revision: req.GetRevision(),
+				ObsStamp: stampAt(t3, t3, "syncup"),
+			}, nil
+		},
+	}
+	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		step := script[min(int(rounds.Add(1))-1, len(script)-1)]
+		reply := &pb.CheckDnReply{
+			Revision: req.GetRevision(),
+			ObsStamp: stampAt(step.obs, step.obs, "read"),
+		}
+		if step.behind {
+			reply.Revision--
+		}
+		return reply
+	})
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, dnTestConf())
+	_, rec, _ := h.startRecordedDn(testAddr, 5)
+
+	h.advanceUntil("five rounds and the Syncup", roundInterval, func() bool {
+		replies, _ := rec.seen()
+		return len(replies) >= 6
+	})
+	replies, unreachables := rec.seen()
+	type seen struct{ fromRound, newObs bool }
+	want := []seen{
+		{true, true},   // t1, the first observation
+		{true, false},  // t1 again
+		{true, true},   // t2
+		{false, false}, // the Syncup*'s t3: seen, never new
+		{true, false},  // t3, seen on the Syncup* reply
+		{true, true},   // t4
+	}
+	for i, w := range want {
+		got := seen{replies[i].fromRound, replies[i].newObs}
+		if got != w {
+			t.Errorf("reply %d (obs %v): fromRound %t, newObs %t; want %t, %t",
+				i, replies[i].obsTime, got.fromRound, got.newObs, w.fromRound,
+				w.newObs)
+		}
+	}
+	if unreachables != 0 {
+		t.Fatalf("%d unreachable verdicts, want none", unreachables)
+	}
+	// A round repeating t4 is not new.
+	h.advanceUntil("a round repeating t4", roundInterval, func() bool {
+		replies, _ := rec.seen()
+		return len(replies) >= 7
+	})
+	replies, _ = rec.seen()
+	if replies[6].newObs {
+		t.Fatalf("a round repeating t4 is new")
+	}
+}
+
+// TestObservationsSeenResetOnAMove pins RW23's reset: the latest observation
+// time a loop has seen belongs to its endpoint, so when the node moves to
+// another one (RW13) the first round there is new even though the new node's
+// clock reads earlier than the old one's.
+func TestObservationsSeenResetOnAMove(t *testing.T) {
+	synctest.Test(t, testObservationsSeenResetOnAMove)
+}
+
+func testObservationsSeenResetOnAMove(t *testing.T) {
+	h := newRevHarness(t)
+	const newAddr = "dn1:9520"
+	ahead := testObsBase.Add(time.Hour)
+	var aheadCount atomic.Int64
+	old := &stubDnAgent{}
+	old.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		at := ahead.Add(time.Duration(aheadCount.Add(1)) * time.Millisecond)
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision(),
+			ObsStamp: stampAt(at, at, "old"),
+		}
+	})
+	moved := &stubDnAgent{}
+	moved.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		return &pb.CheckDnReply{Revision: req.GetRevision()}
+	})
+	h.fleet.addDn(t, testAddr, old)
+	h.fleet.addDn(t, newAddr, moved)
+	h.defaultConf()
+	h.seedDnConf(testAddr, dnTestConf())
+	h.seedDnConf(newAddr, dnTestConf())
+	w, rec, _ := h.startRecordedDn(testAddr, 5)
+
+	h.advanceUntil("two rounds at the old endpoint", roundInterval,
+		func() bool { return old.checkCount() >= 2 })
+	before, _ := rec.seen()
+	w.update(desiredState{revision: 5, handle: newAddr})
+	h.advanceUntil("a round at the new endpoint", roundInterval, func() bool {
+		return moved.checkCount() >= 1 && func() bool {
+			replies, _ := rec.seen()
+			for _, r := range replies[len(before):] {
+				if r.fromRound {
+					return true
+				}
+			}
+			return false
+		}()
+	})
+	replies, _ := rec.seen()
+	for _, r := range replies[len(before):] {
+		if !r.fromRound {
+			continue
+		}
+		if !r.obsTime.Before(ahead) {
+			t.Fatalf("the new endpoint's observation %v is not behind the "+
+				"old one's %v", r.obsTime, ahead)
+		}
+		if !r.newObs {
+			t.Fatal("the first round at the new endpoint is not new: the " +
+				"old endpoint's observation time was kept")
+		}
+		return
+	}
+}
+
+// TestSyncupResultNamesTheObservation pins the syncup result record of a
+// round's re-send (RW10): it names the trace id of the observation the round
+// answered from beside the call's own trace id, and gives the time from the
+// agent's save of the request to the observation its reply carries, the
+// converge's length. An immediate syncup (RW6) names no observation, and a
+// reply that saved nothing gives no length.
+func TestSyncupResultNamesTheObservation(t *testing.T) {
+	synctest.Test(t, testSyncupResultNamesTheObservation)
+}
+
+func testSyncupResultNamesTheObservation(t *testing.T) {
+	h := newRevHarness(t)
+	var saved atomic.Bool
+	saved.Store(true)
+	stub := &stubDnAgent{
+		syncupReply: func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error) {
+			obs := nextObsTime().Add(time.Hour)
+			reply := &pb.SyncupDnReply{
+				Revision: req.GetRevision(),
+				ObsStamp: stampAt(obs, obs, "syncup"),
+			}
+			if saved.Load() {
+				reply.SaveTime = timestamppb.New(
+					obs.Add(-1500 * time.Millisecond))
+			}
+			return reply, nil
+		},
+	}
+	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		return &pb.CheckDnReply{
+			Revision: req.GetRevision() - 1,
+			ObsStamp: agedStamp(0, "read-7"),
+		}
+	})
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, dnTestConf())
+	w := h.startDn(testAddr, 5)
+
+	waitFor(t, "the re-send's record", func() bool {
+		return len(h.logs.withMsg(msgSyncupResult)) >= 1
+	})
+	rec := h.logs.withMsg(msgSyncupResult)[0]
+	if got := rec["obs_trace_id"]; got != "read-7" {
+		t.Errorf("the re-send's obs_trace_id = %v, want read-7", got)
+	}
+	if got, _ := rec["trace_id"].(string); got == "" || got == "read-7" {
+		t.Errorf("the re-send's trace_id = %q, want the round's own", got)
+	}
+	if got, ok := recNumber(rec, "converge_ms"); !ok || got != 1500 {
+		t.Errorf("converge_ms = %v, want 1500", rec["converge_ms"])
+	}
+
+	// An immediate syncup, whose reply saved nothing.
+	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		return &pb.CheckDnReply{Revision: req.GetRevision()}
+	})
+	saved.Store(false)
+	synctest.Wait()
+	n := len(h.logs.withMsg(msgSyncupResult))
+	w.update(desiredState{revision: 6, handle: testAddr})
+	waitFor(t, "the immediate syncup's record", func() bool {
+		return len(h.logs.withMsg(msgSyncupResult)) > n
+	})
+	for _, rec := range h.logs.withMsg(msgSyncupResult)[n:] {
+		if got, _ := recNumber(rec, "revision"); got != 6 {
+			continue
+		}
+		if _, ok := rec["obs_trace_id"]; ok {
+			t.Errorf("an immediate syncup names an observation: %v", rec)
+		}
+		if _, ok := rec["converge_ms"]; ok {
+			t.Errorf("a reply that saved nothing gives a length: %v", rec)
+		}
+		return
+	}
+	t.Fatal("no syncup result at revision 6")
 }

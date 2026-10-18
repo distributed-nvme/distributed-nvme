@@ -546,7 +546,11 @@ func (w *spWorker) reactor() *reactor {
 // primary's Check* rounds alone, that AR5's threshold trigger needs besides
 // its threshold (AR10): one round missed or slow, followed by a clean answer
 // of either kind, fails no primary over, while a primary that answers no
-// round gives its second such verdict one round later.
+// round, or answers every round from an observation too old (HL7), gives its
+// second such verdict one round later. A round that answers from an
+// observation its child's loop has already seen adds nothing (RW23), nor
+// does one that answers from an observation that ended before the loop's
+// first round after a pause (HL7).
 const failoverRun = 2
 
 // verdictMemo is AR10's memo: the objects of the SP — cntlrs, legs and sides
@@ -565,10 +569,17 @@ type verdictMemo struct {
 	cntlrs map[uint64]bool
 	// runs counts, for each cntlr, the unhealthy verdicts its Check* rounds
 	// gave in a row, each judged by the round's own report (noteRound) — an
-	// ERROR row, or no reply in time — since its last clean answer of either
-	// kind. A Syncup* reply with an ERROR row neither starts a run nor adds
-	// to one: a converge still waiting for a member reports its groups
-	// ERROR, and the next primary would wait too.
+	// ERROR row in an observation new to the child's loop (RW23), or no
+	// reply in time, or one whose observation is too old (HL7) — since its
+	// last clean answer of either kind. A Syncup* reply with an ERROR row
+	// neither starts a run nor adds to one: a converge still waiting for a
+	// member reports its groups ERROR, and the next primary would wait too.
+	// The run outlives the child, and no look of a child's counts again by
+	// its rows under the child restarted after it (RW14, RW23): the new
+	// loop's first round starts the age's count, and every observation the
+	// old child counted or saw ended before that round, so it gives no
+	// verdict until it is too old, when a round on it counts as a missed
+	// round does, by its age (HL7).
 	runs  map[uint64]int
 	legs  map[uint64]bool
 	sides map[sideKey]bool
@@ -600,7 +611,10 @@ func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
 
 // noteRound records what one Check* round of a cntlr reported, judged by that
 // round's own report (cntlrDriver.roundInfo): unhealthy — an ERROR row, or no
-// reply in time — adds one to the cntlr's run, clean ends it.
+// reply in time, or an observation too old (HL7) — adds one to the cntlr's
+// run, clean ends it. A round that answers from an observation its child's
+// loop has seen already is not noted at all (RW23), nor is one that gives
+// no verdict (HL7).
 func (m *verdictMemo) noteRound(cntlrId uint64, unhealthy bool) {
 	if m == nil {
 		return
@@ -1166,15 +1180,16 @@ type failoverMemo struct {
 // over the same error — once per cntlr_unhealthy while the primary never
 // settles, sooner once it has. An enabled primary whose report HL2's classes
 // call shared state is not failed over at all (the first refusal); this keeps
-// an error they do not name — a Check round's report of a lost thin id among
-// them — from sending the role back to the cntlr it last left while the new
-// primary fails no row the old one did not: in an SP of two cntlrs it moves
-// the role once, and in a larger one it can first move it on to a cntlr that
-// has not held it. A report with any other ERROR row is taken for a fault of
-// the primary's own, and an err_epoch set later for a new error: the role
-// moves as for any, and that failover records the report's rows in turn. The
-// record goes with the coordinator: after a restart or a handoff, one
-// failover more records it again.
+// an error they do not name — a background read's report of a lost thin id,
+// which carries no reason (sharedStateTds), among them — from sending the
+// role back to the cntlr it last left while the new primary fails no row the
+// old one did not: in an SP of two cntlrs it moves the role once, and in a
+// larger one it can first move it on to a cntlr that has not held it. A
+// report with any other ERROR row is taken for a fault of the primary's own,
+// and an err_epoch set later for a new error: the role moves as for any, and
+// that failover records the report's rows in turn. The record goes with the
+// coordinator: after a restart or a handoff, one failover more records it
+// again.
 func (r *reactor) errorFollowedRole(p *spPass) bool {
 	m := r.lastFailover
 	if m == nil || m.lost != p.failoverCand {
@@ -1601,13 +1616,15 @@ func (w *spWorker) replaceTarget(
 		// ERROR row belongs to the stack of a created td whose thin id the
 		// pool no longer holds is not replaced. The replacement would read
 		// the same rows from the same pool. The report carries the lost-id
-		// reason only while it is a converge's (dnv-worker.md, Known limits).
+		// reason only while it is a converge's observation (dnv-worker.md,
+		// Known limits).
 		//
 		// The second is AR5's second, for a replacement
-		// (errorFollowedReplacement): a Check round's report of the same loss
-		// carries no reason, so the first lets the primary be replaced on it,
-		// and the replacement, reading the same rows, would be replaced in
-		// turn once per cntlr_unhealthy, for as long as the td stayed lost.
+		// (errorFollowedReplacement): a background read's observation of the
+		// same loss carries no reason, so the first lets the primary be
+		// replaced on a round answering from it, and the replacement,
+		// reading the same rows, would be replaced in turn once per
+		// cntlr_unhealthy, for as long as the td stayed lost.
 		if cntlrId == p.primaryId {
 			if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
 				w.reactionSkipped(ctx, reactionReplaceCntlr, reasonSharedState,

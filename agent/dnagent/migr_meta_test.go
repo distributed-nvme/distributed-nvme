@@ -74,12 +74,13 @@ func convergePasses(node *fakeNode) int {
 	return len(node.callsMatching("cmd dmsetup ls"))
 }
 
-// checkSide runs one CheckSide round of the fixture side, its info included.
+// checkSide runs the fixture side's read and then one CheckSide round of it,
+// its info included, so the round answers what the node holds now (SH29).
 func checkSide(
 	ctx context.Context,
 	srv *DnAgentServer,
 ) *pb.CheckSideReply {
-	reply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	reply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
 	}, nil)

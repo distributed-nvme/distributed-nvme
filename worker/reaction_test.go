@@ -1226,9 +1226,10 @@ func sharedStateFixture(t *testing.T) *model.SpState {
 // reason thin id lost — the `dmsetup create` of its thin table failed with
 // ENODATA — and every other row of the td's stack fails with it: its raid0
 // and dm-error, its namespace's ns-dev and nvmet namespace, the transfer out
-// of that namespace and the clone onto the td. Otherwise it is a Check
-// round's probe, which reads the absent volume MISSING and carries no reason.
-// Everything else is OK.
+// of that namespace and the clone onto the td. Otherwise it is a background
+// read's, which the rounds after that read answer from (dnagent.md SH29): its
+// probes read the absent volume MISSING, with no reason. Everything else is
+// OK.
 func lostStackInfo(converge bool) *pb.CntlrInfo {
 	thin := &pb.ResInfo{
 		ResName: "thin", Status: pb.ResStatus_RES_STATUS_MISSING,
@@ -3710,8 +3711,11 @@ func TestReactionNeedsOwnVerdict(t *testing.T) {
 
 	t.Run("a grow: the Syncup's ERROR rows, a missed round, a clean round", func(t *testing.T) {
 		// The slice-16 order: the converge reports the new groups ERROR while
-		// a member is not connected yet, the next round misses behind the
-		// agent's retry, and the round after it answers clean.
+		// a member is not connected yet, the next round misses, and the round
+		// after it answers clean. A round answers at once from the agent's
+		// latest observation, so here it misses when no reply comes in time,
+		// or when its observation is too old while the agent's retry holds
+		// the cntlr's reads off (HL7).
 		h := newHarness(t)
 		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
 		syncupVerdict(h.w.verdicts, reactCntlrA, true)

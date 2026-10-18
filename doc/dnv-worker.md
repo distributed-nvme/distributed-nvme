@@ -5,8 +5,8 @@ first consumer of: package `etcdutil`, the one door to etcd (EU1 to EU7);
 package `model`, the etcd data model as Go together with the internal
 mutations the gateway's handlers share (MD1 to MD9); the `cmd/dnv-worker`
 command (CM1 to CM7); the vote worker (VW1 to VW11); the shard worker (SW1 to
-SW6); the revision worker with its dn, cn and sp role files (RW1 to RW22);
-health bookkeeping (HL1 to HL6); bitmap pushes (BM1 to BM6); the automatic
+SW6); the revision worker with its dn, cn and sp role files (RW1 to RW23);
+health bookkeeping (HL1 to HL7); bitmap pushes (BM1 to BM6); the automatic
 reactions (AR1 to AR10) with the sp drain (SPD1 to SPD14) and the clone drain
 (CLD1 to CLD12); the worker's log records; and the intent of the worker
 integration suite. It leans on `architecture.md` for the object model, the
@@ -51,8 +51,10 @@ The packages this document owns — `etcdutil`, `model`, `worker` and
 `cmd/dnv-worker` — are placed by `layout.md`, Directory tree, and what each
 may import is `layout.md`, Dependency rules.
 
-Out of scope here: the gateway (request validation, the public RPCs, the
-`Inspect*`/`Get*Size`/`Get*Bm` agent calls), `dnv-cdc`, `dnvctl`. Where the
+Out of scope here: the gateway (request validation, the public RPCs, and
+the agent calls it makes: the `Get*Info` info reads, which serve its
+inspects and its hydration checks, and the `Get*Size` and `Get*Bm` calls),
+`dnv-cdc`, `dnvctl`. Where the
 worker performs an "internal" variant of a gateway mutation (Automatic
 reactions), the STM body lives in `model` and the gateway adds only
 validation and reply mapping on top (MD8).
@@ -93,7 +95,10 @@ the request size etcd recommends, which etcd notes when it starts, and a
 unit test commits that flip against a real etcd started with it;
 `MaxFlipCreatedPerTxn`, the most candidates one created-flip transaction
 carries (RW19); and the three role names `WorkerRoleDn`, `WorkerRoleCn` and
-`WorkerRoleSp`.
+`WorkerRoleSp`. One constant of this document's sits outside that region,
+beside the health-check intervals it counts in: `ObsMaxAgeIntervals`, how
+many of an object's intervals the observation a round's reply answers from
+may be old before the round is a missed one (HL7).
 
 Derived, never a constant: the **dead threshold** is twice the configured vote
 interval; the **round timeout** is the object kind's health-check interval
@@ -1032,34 +1037,48 @@ folds into the memo, before its next verdict (HL3).
 RW2. **State**: the desired revision plus the inputs the request is built
 from, the stream, `lastInfo` (the last `*Info` received, on a dn loop with
 the revision of the reply that carried it, RW13), the health state (Health
-bookkeeping), and the round timer. No round's outcome is kept as
-WORK STILL OWED: no last-acknowledged revision decides a re-sync, and no
-"re-sync wanted" flag exists anywhere in the loop. RW4 step 5 recomputes
-the whole re-sync condition from the reply in hand — its own `revision`
-against the desired revision, its own `agent_reply.code` — so a worker just
-handed the shard decides its re-syncs exactly as one that has driven the
-object for an hour, and no failure can be forgotten by a flag something
-cleared. Two things a round produces do outlive it, and neither is such a
-record: `lastInfo`, because a `show_info` false reply omits an unchanged
-`*Info` and health is evaluated on the latest known one (HL5); and the health
-state, a cache of the record: the last verdict WRITTEN, re-seeded from the
-record by the loads HL3 names — which is exactly what HL3's
-transitions-only rule has to compare the next observation against — the
-time a DN's or a CN's monitor last read or wrote the record, which paces
+bookkeeping), the latest observation time seen for the object with the
+endpoint it was seen at (RW23), the observation time of the latest
+`Syncup*` reply, kept for the late record's leave until the next round is
+judged or a round fails (HL7), the agent's answer time on the first round
+after a pause in the loop's rounds, kept until the next pause (HL7), and
+the round timer. No round's outcome is
+kept as WORK STILL OWED: no last-acknowledged revision decides a re-sync,
+and no "re-sync wanted" flag exists anywhere in the loop. RW4 step 5
+recomputes the whole re-sync condition from the reply in hand — its own
+`revision` against the desired revision, its own `agent_reply.code` — so a
+worker just handed the shard decides its re-syncs exactly as one that has
+driven the object for an hour, and no failure can be forgotten by a flag
+something cleared. Five things the loop's replies leave do outlive them, and
+none is such a record: `lastInfo`, because a `show_info` false reply omits
+an unchanged `*Info` and health is evaluated on the latest known one (HL5);
+the health state, a cache of the record: the last health verdict WRITTEN,
+re-seeded from the record by the loads HL3 names — which is exactly what
+HL3's transitions-only rule has to compare the next health verdict
+against — the time a DN's or a CN's monitor last read or wrote the record, which paces
 HL3's re-read, and a cntlr's settle memo included (HL2: the record's
 `settling` as the last plan loaded it, cleared by the write that clears it
-in etcd). BM5's mod-revision memo survives rounds too, but it belongs to
-the pusher, and AR10's memo of the verdicts the rounds reach belongs to the
-sp coordinator: it holds observations, the objects the coordinator last
-judged unhealthy and each cntlr's run of unhealthy verdicts from rounds,
-and no work owed. A dn loop's count compare (RW13) keeps a cache of the
-record as well — its free and total extents with the `DnRev` revision read
-with them, replaced by every read of the record that answers — and two
-memos of observations that owe nothing: its run of disagreeing compares,
-and whether that run was logged. The memos of what was LOGGED — RW9's
-two, plus, on a cntlr child, the last standby leg row logged per leg, so
-HL2's standing row does not repeat every round — never record what is
-owed, and neither does a side or cntlr child's memo of what it REPORTED:
+in etcd); the latest observation time seen, because a run of rounds in a
+row counts a round only on an observation later than every one seen
+(RW23); the answer time of the first round after a pause, because an
+observation's age counts from no earlier than that round and one that
+ended before it gives no verdict, no round having asked the agent to read
+during the pause (HL7); and the latest `Syncup*` reply's observation time,
+because the round right after that reply, when it answers from that observation, is
+late by the loop's own wait when that `Syncup*` ended a round (RW4 step 5,
+RW6), which the late record leaves out (HL7).
+BM5's mod-revision memo survives rounds too, but it belongs to the pusher,
+and AR10's memo of the health verdicts the rounds reach belongs to the sp
+coordinator: it holds health verdicts — the objects the coordinator last judged
+unhealthy and each cntlr's run of unhealthy verdicts from rounds — and no
+work owed. A dn loop's count compare (RW13) keeps a cache of the record as
+well — its free and total extents with the `DnRev` revision read with them,
+replaced by every read of the record that answers — and two memos of its
+compares that owe nothing: its run of disagreeing compares, and whether
+that run was logged. The memos of what was LOGGED — RW9's two, plus, on a
+cntlr child, the last standby leg row logged per leg, so HL2's standing row
+does not repeat every round — never record what is owed, and neither does
+a side or cntlr child's memo of what it REPORTED:
 the last revision it handed RW14's sides-first hold or RW22's demotion
 hold as applied, so a standing reply does not report it every round.
 
@@ -1075,23 +1094,36 @@ RW4. **Round**, every interval (RW9):
 2. send the `Check*` request carrying the ids, `revision` (the desired
    revision), `show_info` false and the round's `trace_id` (RW10);
 3. wait for the reply at most one interval (RW8);
-4. no reply, or a stream error: close the stream; health "unreachable"
-   (HL1, HL2) — except for a round abandoned under RW6, and for a round the
-   graceful stop of RW11 cut short, each of which drops its stream the same
-   way but carries no health verdict: a cancelled stop ctx is not a sick
-   agent, and the verdict would start the threshold clock of Automatic
-   reactions on a healthy object;
-5. reply: process its `*Info` if present (Health bookkeeping; sp: RW18,
-   RW19); then if `agent_reply.code` is non-zero **or** the reply's
+4. no reply, a stream error, or a reply whose observation is too old, which
+   is a missed round in every way and issues no `Syncup*` whatever its code
+   and revision (HL7): close the stream; health "unreachable" (HL1, HL2) —
+   except for a round abandoned under RW6, and for a round the graceful
+   stop of RW11 cut short, each of which drops its stream the same way but
+   carries no health verdict: a cancelled stop ctx is not a sick agent, and
+   the verdict would start the threshold clock of Automatic reactions on a
+   healthy object;
+5. any other reply: process its `*Info` if present (Health bookkeeping; sp:
+   RW18, RW19), which for a round that answers from an observation no
+   round asked for is only to keep it as the latest known info (HL7);
+   then if `agent_reply.code` is non-zero **or** the reply's
    `revision` differs from the desired revision, issue the `Syncup*`
    (RW5) — this is also how the first sync after a shard handoff, a worker
    restart or an agent restart happens, with no recovery step of its own,
-   and how a leftover is re-driven: the agent recomputes
-   `ReplyCodeLeftover` (RW5) from a fresh enumeration of its node on every
-   `Check*`, so for as long as it still holds something the desired state
-   does not want, every round issues the `Syncup*` that sweeps again, and
-   the round it comes clean is the round the re-sync stops — no backoff
-   (RW12), no flag, the code is the state;
+   and how a leftover is re-driven: a round's code and revision are those
+   of the observation it answers from (`dnagent.md` SH28), which the
+   converges and the background reads of the object store, each with its
+   own verdict on the node (`dnagent.md` SH29), so for as long as the node
+   still holds something the desired state does not want, a round whose
+   observation names it issues the `Syncup*` that sweeps again, and a round
+   answering from a clean observation at the desired revision issues none —
+   no backoff (RW12), no flag, the code is the state. The re-sync stops for
+   good there only when no later read names the condition again: a
+   converge's observation carries the code of the converge's own reply,
+   which leaves out what only a read's verdict names (`dnagent.md` SH28,
+   SH29), so for such a condition a converge's clean observation only
+   pauses the re-sync, and while the condition lasts the re-sends fall to
+   every other round at most instead of stopping (the subsystem directory
+   a cn teardown leaves is such a condition, RW5);
 6. re-arm the timer.
 
 RW5. **Syncup.** Build the request from the current inputs (RW13 to RW16),
@@ -1129,7 +1161,10 @@ not want, or an enumeration of what it holds did not answer, which proves
 nothing either way, or — on a dn — a disk whose identity it has not
 confirmed, which it reports the same way so that its `SyncupDn` is re-sent
 (`architecture.md`, Teardown by sweep); the agents' other such conditions
-ride only on `Check*` and `Get*Info` replies. It is logged as
+come only from the verdict a background read gives (`dnagent.md` SH29), so
+they ride only on the `Check*` and `Get*Info` replies that answer from a
+read's observation, never on a converge's, a `Syncup*` reply's included.
+It is logged as
 `syncup leftover` (`log.md`, Leftovers) beside the ordinary
 `syncup result`: nothing agent-side re-drives the sweep for a leftover (the
 agents' own background converges, `cnagent.md` CN10's connect retry and
@@ -1143,19 +1178,24 @@ code routinely: the cn agent's sweep sets every `nvme disconnect` it issues
 — of a leg or a clone source — going off its pass (`cnagent.md` CN10) and
 names the connection as a leftover (the nvme kind plus the NQN) until a
 later pass finds it gone (a removing pass once it has no controller; a
-Check round once its sysfs subsystem directory, which can outlive the last
-controller, is gone), so a `SyncupCntlr` or `SyncupCn` whose sweep
+background read once its sysfs subsystem directory, which can outlive the
+last controller, is gone), so a `SyncupCntlr` or `SyncupCn` whose sweep
 disconnects anything is answered `ReplyCodeLeftover` however fast the
-disconnect turns out to be. The disconnect needs no re-sync to finish, and
-the first Check round that no longer finds the connection, with nothing
-else left, answers code zero, after which RW4 step 5 issues nothing more; a
-round before it re-issues the `Syncup*`, whose pass sets no second
-disconnect of that subsystem going while the first still runs. While all
-that is left is a subsystem directory whose last controller is gone, the
-re-issued `Syncup*`'s removing pass counts the connection gone and answers
-code zero, so the worker re-syncs every round and logs a `syncup result`
-with no `syncup leftover`; what names the connection then is the agent's
-own `sweep leftover` record of each Check verdict (`log.md`, Leftovers).
+disconnect turns out to be. The disconnect needs no re-sync to finish: a
+round answering from an observation that no longer finds the connection,
+with nothing else left, answers code zero and issues nothing, and once no
+later read names the connection again RW4 step 5 issues nothing more for
+it; a round whose observation still names it re-issues the `Syncup*`,
+whose pass sets no second disconnect of that subsystem going while the
+first still runs. While all that is left is a subsystem directory whose
+last controller is gone, the re-issued `Syncup*`'s removing pass counts
+the connection gone and answers code zero, and the observation its
+converge stores carries that code (`dnagent.md` SH28): the round after it
+issues nothing and starts a read (`dnagent.md` SH29), whose verdict names
+the directory again, so the worker re-syncs on every other round at most
+and logs a `syncup result` with no `syncup leftover`; what names the
+connection then is the agent's own `sweep leftover` record of each read's
+verdict (`log.md`, Leftovers).
 
 The rejection handling does not enumerate the codes: only
 `ReplyCodeStaleRevision` raises the record to Error, every other value —
@@ -1179,15 +1219,16 @@ reuses a stream across a round that ended without a reply, and an abandoned
 round is such a round. An abandoned round carries **no** health verdict:
 nothing was observed about the agent, the round was only overtaken. Its
 stream is dropped **before** the change's `Syncup*` is sent. Reason: the
-agent runs the round under the stream and holds, for it, a lock the
-`Syncup*` needs — the node lock for a node, the object lock for a side or a
-cntlr (`dnagent.md` SH25, `cnagent.md` CN1). The drop cancels the round,
-which ends at its current command and frees the lock; a `Syncup*` sent
-first would wait behind a round whose reply nobody reads, and a round with
-no verdict loses nothing by ending early. The next round opens a fresh
-stream, which the agent answers with the complete `*Info` again
-(`architecture.md`, Check streams). The sp coordinator is the one parent
-that hands a change on late, and on purpose: its cntlr children receive a
+drop is for the sake of the round's reply, which would answer the request
+built from the superseded revision and must never be read as a later
+round's answer, and no lock rides on it: the round holds none the
+`Syncup*` needs, because the
+agent answers it from its latest observation and takes no lock for it
+(`dnagent.md` SH25), and the `Syncup*` cancels the object's background read
+itself before it waits for its locks (`dnagent.md` SH30). The next round
+opens a fresh stream, which the agent answers with the complete `*Info`
+again (`architecture.md`, Check streams). The sp coordinator is the one
+parent that hands a change on late, and on purpose: its cntlr children receive a
 fan-out once every side child RW14's sides-first hold waits for has
 reported it applied, and at the latest one `cntlr_interval` after the sides
 were handed it; a fan-out that demotes a primary reaches the demoted cntlr
@@ -1203,9 +1244,10 @@ connection. A stream is opened lazily on the first round and after every
 failure, and closed with `CloseSend` plus ctx cancellation on stop (RW11).
 
 RW8. **Round timeout** is the object kind's interval: a reply arriving
-later is a missed reply (`architecture.md`, Check streams). The timer is
-re-armed *after* each round, so a slow round never queues a burst of
-catch-up rounds.
+later is a missed reply (`architecture.md`, Check streams). A reply in time
+is a missed round too when HL7 finds the observation it answers from too
+old. The timer is re-armed *after* each round, so a slow round never
+queues a burst of catch-up rounds.
 
 RW9. **Inputs from the cache** (RW21), every one used **as stored**:
 `dn_interval`, `cn_interval`, `side_interval` and `cntlr_interval` (already
@@ -1238,12 +1280,17 @@ agent (`grpc.md` T1), whose log then names the worker that sent each
 request — the worker suite's "one owner per shard" evidence. A `Check*`
 stream's metadata is sent once, at open, under the round that opened it, so
 every round also puts its own id in the request's `trace_id` (RW4 step 2),
-under which the agent runs the round (`grpc.md` T3). The `Syncup*` a round
-issues (RW4 step 5) runs under that round's id, while an immediate syncup
-(RW6) gets an id of its own. Reason: the agent's records of a verdict that
-was not clean and of the converge the re-sync brings then share one id
-with the worker's record of that syncup, which is how a leftover that only
-a verdict names is followed to its re-send (`log.md`, Leftovers).
+under which the agent runs the round (`grpc.md` T3), and the background
+read the round starts (`dnagent.md` SH29). The `Syncup*` a round issues
+(RW4 step 5) runs under that round's id, while an immediate syncup (RW6)
+gets an id of its own; the `syncup result` record of a round's re-send also
+names the trace id of the observation the round answered from
+(`dnagent.md` SH28). Reason: the agent logs a verdict that was not clean
+under the id of the read that reached it, so that record joins the
+verdict to the re-send it brought, and the re-send's id joins the worker's
+record to the converge, which is how a leftover that only a verdict names
+is followed to its re-send (`log.md`, Leftovers); the call itself keeps
+the worker's own id, the owner's mark in the agent's log.
 
 RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
 unary call (its own deadline bounds the wait; the stop ctx is not the RPC
@@ -1269,6 +1316,35 @@ because it waits longer: it arms nothing at all (BM6), so no round retries
 it. It is re-planned only when the object's next `Syncup*` is issued for
 some other reason, from the agent's own acknowledged set (BM2).
 
+RW23. **New observations.** Each loop keeps the latest observation time it
+has seen for its object in a round's reply or a `Syncup*` reply
+(`dnagent.md` SH28), and a round's reply whose observation time is later
+than that answers from a new observation. Of the rounds whose reply comes
+in time from an observation that is not too old, only one on a new
+observation that a round asked for (HL7) adds to a run of rounds in a row:
+a cntlr's run of unhealthy verdicts (AR10) and a DN's run of disagreeing
+count compares (RW13). A round whose observation is too old counts in each
+run as a missed round does (HL7): it adds to a cntlr's run every time and
+does nothing to a DN's. A `Syncup*` reply's observation is seen but never
+adds to a run. A round that answers from an observation no round asked for
+is seen too, and neither adds to a run nor ends one, since it gives no
+verdict and makes no compare (HL7). What ends
+a run is that run's own rule: only an agreeing compare ends a DN's run, and
+only a round on a new observation that a round asked for makes a compare
+(RW13), while any clean
+health verdict ends a cntlr's run, that of a round on an observation already seen
+or of a `Syncup*` reply included (AR10). The time seen is forgotten when
+the object moves to another endpoint (RW13), and a loop starts with none.
+A child restarted at the same endpoint never counts in its cntlr's run
+(AR10) what a look its predecessor saw reported: its loop's start is a
+pause (HL7), and the new loop starts only once the old one has stopped,
+its call in flight finished (RW1, RW11), so every observation the old
+loop saw ended before the new loop's first round and gives that loop no
+verdict until it is too old, when a round on it counts as a missed round
+does, by its age and not by its rows (HL7; Known limits). Reason: while a
+converge holds an object's reads off, several rounds carry one
+observation, and counting each of them would act on one look.
+
 ### dn role — `worker/dnrole.go`
 
 RW13. Inputs: `cluster_id` and `dn_id` from the key, `addr_port` and
@@ -1290,27 +1366,33 @@ endpoint: the loop drops its stream and connection reference and continues
 at the new address; no delete ever reaches the agent (`architecture.md`,
 dn / cn roles, [D10]).
 
-A round's accepted reply (code zero or `ReplyCodeLeftover`, RW5) is also a
-**count compare** when three things hold: the last read of the record — a
-syncup's, or HL3's re-read — found this DN's record with its `DnRev`; the
-disk counts in the latest known `DnInfo` (HL5; `dnagent.md` DN18) are
-present and say that the disk's side records name exactly the side
-pointers of the request the agent holds; and the revision of the reply that
-carried those counts, the round reply's own and the `DnRev` revision read
-with the record are one. A compare sets the counts' free extents beside the
-record's `free_ext_cnt`. At one revision a DN has one side pointer list and
+A round's accepted reply (code zero or `ReplyCodeLeftover`, RW5) that
+answers from a new observation (RW23) that a round asked for (HL7) is
+also a **count compare** when
+three things hold: the last read of the record — a syncup's, or HL3's
+re-read — found this DN's record with its `DnRev`; the disk counts in the
+latest known `DnInfo` (HL5; `dnagent.md` DN18) are present and say that the
+disk's side records name exactly the side pointers of the request the
+agent holds; and the revision of the reply that carried those counts —
+that of the observation they belong to (`dnagent.md` SH28) —, the round
+reply's own and the `DnRev` revision read with the record are one. A
+compare sets the counts' free extents beside the record's `free_ext_cnt`.
+At one revision a DN has one side pointer list and
 one free count: every change of its free count also changes that list and
 bumps its `DnRev` (`architecture.md`, Per-operation allocation). An
 agreeing compare ends the run of disagreeing ones, and the second
 disagreeing compare in a row logs `dn free count disagrees` (Log records),
 once until a compare agrees. Nothing else extends or ends the run: not a
-`SyncupDn`'s reply, a rejected round, a missed one, nor a round whose
-counts are absent or do not match or whose revisions differ. Two in a row,
-because one compare can disagree with no fault: while two owners overlap
-(VW7), the other owner's `SyncupDn` can hand the agent the revision of this
-loop's record with a side pointer list read after it, until either owner's
-watch delivers the newer revision; and only rounds count, so that the two
-compares lie a round apart. Free metadata units are not compared: the dn
+`SyncupDn`'s reply, a rejected round, a missed one, a round that answers
+from an observation already seen or from one no round asked for (HL7),
+nor a round whose counts are absent or
+do not match or whose revisions differ. Two in a row, because one compare
+can disagree with no fault: while two owners overlap (VW7), the other
+owner's `SyncupDn` can hand the agent the revision of this loop's record
+with a side pointer list read after it, until either owner's watch
+delivers the newer revision; and only rounds on new observations count, so
+that the two compares rest on two different looks at the node and lie at
+least a round apart. Free metadata units are not compared: the dn
 agent takes a migration destination's run of units in that side's
 converge, after the create charged the record, and holds none while the
 side waits for room (`dnagent.md` DN13), so the two counts can differ on a
@@ -1398,8 +1480,12 @@ is stopped at once, beside the sides', and one it restarts is started with
 the release. A side child reports each accepted reply (RW5)
 whose revision is newer than the last one it reported, and a `CheckSide`
 reply counts as much as a `SyncupSide` one, because a side whose agent
-already holds the revision — after a handoff, say — is sent no `Syncup*` at
-all (RW4 step 5). The hold lives on the coordinator's loop, released by
+already holds the revision is sent no `Syncup*` at all (RW4 step 5). A
+round that answers from an observation no round asked for reports nothing
+(HL7), so a new side child whose first round brings no `Syncup*` — its
+agent already holding the revision, after a handoff or a worker restart,
+or when the diff restarts the child — reports from its second round at
+the earliest (the cost is below). The hold lives on the coordinator's loop, released by
 those reports or by a timer on the same loop, and never blocks it: reports,
 ticks and the next desired change are served while it waits, and every
 child keeps its rounds. A fan-out that finds a hold pending replaces what
@@ -1468,7 +1554,16 @@ by default. It is paid as well, in part or in whole, when the diff restarts a
 side whose old child is still inside a `Syncup*`: the new child sends and
 reports nothing until that call has ended and the old child has stopped (RW1,
 RW11), which can be up to `DefaultWorkerSyncupTimeout` later — past the hold's
-deadline at the default `cntlr_interval`.
+deadline at the default `cntlr_interval`. And it is paid at the first
+fan-out of a new owner or a restarted worker, and at a fan-out that
+restarts a side, for each side the hold waits for whose new child's first
+round brings no `Syncup*`, its agent already holding the fan-out's
+revision: that round answers from an observation no round asked for and
+reports nothing (HL7), and the child's next round comes one
+`side_interval` after the first ended, after the hold's deadline when the two intervals are
+equal. Such a hold runs to its timer and logs `sp sides unsynced`, and
+the cntlr requests it holds, and the cntlr children it starts, go about
+one `cntlr_interval` after the sides.
 
 Between the load and the plan the fan-out validates the SP's stored
 `bdev_conf` with `model.ValidateBdevConf` (`architecture.md`, Common
@@ -1630,8 +1725,13 @@ to a non-zero `zero_bytes`, the child reports the side to the
 coordinator, which runs `model.FlipProvisioned` (several sides reported
 within one round MAY share one STM). The bump re-fans the SP (RW14) and the
 re-synced sides carry `provisioned` true. Nothing is remembered across a
-handoff: the new owner's first round carries the full `*Info` and flips
-whatever is still false.
+handoff: the new owner's first round that gets a reply carries the full
+`*Info`, as the first reply on every stream does (a missed round drops its
+stream), and that info becomes the latest known one. That round answers
+from an observation no round asked for and flips nothing (HL7); the first
+later reply that HL7 lets give a verdict — a `Syncup*` reply the round
+brings, or the first round that answers from an observation made after
+it — flips whatever is still false.
 
 **The cutover** of `architecture.md`, Migration, runs beside the flip. A
 migration of the loaded state is a candidate when its `cutover_pending` is
@@ -1648,6 +1748,10 @@ info: for a round, what its stream last carried; for a `SyncupCntlr` reply,
 the info that reply carried; and of one cntlr's replies that the drain
 folds, the last counts, live or not. It never reads the latest info a child
 holds, which can be another reply's, one from before a failover among them.
+A round of the destination side whose stream breaks or that misses, a
+round whose observation is too old included (HL7), marks the side's rows
+`RES_STATUS_UNKNOWN` (`architecture.md`, Live-state reporting), so the
+side reads no wait until a later reply reports it again.
 A standby's path counts for nothing, so after a failover the cutover waits
 for the new primary's own report. A disabled primary's path counts for
 nothing either: its agent runs the standby shape (`cnagent.md` CN9), with
@@ -1663,8 +1767,9 @@ coordinator does not read the pool's level; `model.StartCutover` refuses at
 `SP_LEVEL_NO_MIGRATION` and above (MD6), so the cutover waits there, even
 on a destination report of the wait from before the level rose. Its
 reasons are those of `architecture.md`, Migration. Nothing of it is
-remembered across a handoff either: the new owner's first replies carry the
-full `*Info`, and the cutover runs off them.
+remembered across a handoff either: the new owner's first rounds carry
+the full `*Info`, and the cutover runs off the first later replies that
+HL7 lets give a verdict, as the provisioned flip does (above).
 
 RW19. **Created flip.** Every `SyncupCntlrReply`
 and `CheckCntlrReply` with an accepted code (RW18: code zero or
@@ -1731,19 +1836,25 @@ record of its own. Watch errors and compaction are handled like SW4.
 HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
 the node's own stream; written through `model.SetDnErrEpoch` and
 `SetCnErrEpoch`, which maintain the capacity key in the same STM (MD4;
-`architecture.md`, Capacity index keys). The effect of each observation on
-`DnConf.err_epoch` or `CnConf.err_epoch`:
+`architecture.md`, Capacity index keys). The effect of each reply or
+missed round on `DnConf.err_epoch` or `CnConf.err_epoch`:
 
 * the stream cannot be opened, breaks, or no reply arrives within the round
-  timeout: set to now if zero; the in-memory info is marked
+  timeout, or a reply answers from an observation HL7 finds too old: set to
+  now if zero; the in-memory info is marked
   `RES_STATUS_UNKNOWN` (what the worker records itself while the stream is
   dead, `architecture.md`, Live-state reporting — never written to etcd);
 * any `RES_STATUS_ERROR` row in `DnInfo` (`disk_info`, `meta_info`,
   `port_info`) or `CnInfo` (`port_info`, `tmpfs_info`, `tmp_file_info`,
-  `loop_dev_info`): set to now if zero;
-* a clean round — a reply in time, an accepted code (zero or
+  `loop_dev_info`), save on a round that answers from an observation no
+  round asked for (below): set to now if zero;
+* a clean round — a reply in time from an observation that is not too old
+  and that a round asked for (HL7), an accepted code (zero or
   `ReplyCodeLeftover`), no `ERROR` row in the latest known info: cleared to
   zero;
+* a round that answers from an observation no round asked for (HL7):
+  neither set nor clear, whatever its code and rows; it still triggers the
+  re-sync of RW4 step 5 when its code or revision calls for one;
 * `RES_STATUS_PROVISIONING` and `MISSING` never set it
   (`architecture.md`, [D15]); neither is an `ERROR` row, so a reply that
   carries them and no `ERROR` row is the clean round above and clears it.
@@ -1790,10 +1901,11 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
 `SetLegErrEpoch` and `SetSideErrEpoch`:
 
 * `Cntlr.err_epoch` is set to now (if zero) when its `CheckCntlr` stream
-  cannot be opened, breaks or misses a round, or any `RES_STATUS_ERROR` row of
-  its `CntlrInfo` **other than** `leg_id_to_leg` and `side_id_to_path` reads
-  so; it is cleared when
-  its next round is clean. The write keeps the SP's discovery records to the
+  cannot be opened, breaks or misses a round — a round whose observation
+  HL7 finds too old included — or any `RES_STATUS_ERROR` row of its
+  `CntlrInfo` **other than** `leg_id_to_leg` and `side_id_to_path` reads
+  so; it is cleared when its next round is clean (HL1). The write keeps the
+  SP's discovery records to the
   listing rule of `architecture.md`, [D18], in the same transaction (MD6):
   an enabled standby leaves them when its epoch is set and returns when it
   is cleared, while an enabled primary stays. A clean reply of a cntlr its
@@ -1820,7 +1932,8 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch`,
   health block; spares included) — a standby's leg row is logged, never
   recorded — and cleared when the primary reports the row `RES_STATUS_OK`.
 * `Side.err_epoch` is set to now (if zero) when its `CheckSide` stream cannot
-  be opened, breaks or misses a round, or `side_dev_info` or any
+  be opened, breaks or misses a round — a round whose observation HL7 finds
+  too old included — or `side_dev_info` or any
   `cn_id_to_dm_error`, `cn_id_to_dm_linear` or `cn_id_to_nvmeof` row is
   `RES_STATUS_ERROR`, or a `migr_src_info` or `migr_dst_info` row is `ERROR`;
   it is cleared when its next round is clean. A sides-first hold whose
@@ -1837,7 +1950,9 @@ not completed a round (or none is registered yet) — a first round stalled
 past `CnLegProbeStallSeconds` reads `ERROR` — and a fresh prober starts at
 every promotion and agent restart (`cnagent.md` CN11); were that row to
 read `OK`, every promotion's fresh probers would clear a dead leg's
-`err_epoch` and restart AR8 case 1's `leg_unhealthy` clock.
+`err_epoch` and restart AR8 case 1's `leg_unhealthy` clock. A round that
+answers from an observation no round asked for sets and clears none of the
+three, whatever its rows (HL7).
 `ReplyCodeLeftover` is not a rejection: its rows are evaluated exactly as a
 code-zero reply's — here, and in the RW18 and RW19 reports the same replies
 carry — for HL1's reason. The **primary** of the `Leg.err_epoch` row is the
@@ -1872,10 +1987,11 @@ limits). Every other `ERROR` row is the cntlr's **own**. Both classes set
 epoch set — and the class steers AR5 and AR7 alone: a report whose
 `ERROR` rows are all shared-state is no failover trigger, nor a
 replacement one for a primary with no failover candidate. Only a
-converge's report carries the reason. A Check round's probe finds the
-volume absent and reads it `MISSING` with empty details and no reason,
-while the raid0 over it still reads `ERROR`, so its report of the same
-loss holds own rows only. It is the second refusals that bound what those
+converge's observation carries the reason (`dnagent.md` SH28). A
+background read's probe finds the volume absent and reads it `MISSING`
+with empty details and no reason, while the raid0 over it still reads
+`ERROR`, so a report from a read's observation of the same loss holds own
+rows only. It is the second refusals that bound what those
 rows cost: AR5's keeps the role from moving back and forth over them, and
 AR7's, once a primary with no failover candidate has been replaced over
 them, keeps its replacement, which reads the same rows, from being
@@ -1894,7 +2010,8 @@ transport failure before the agent stored the request), the next Check round's
 reply carries the previous revision and describes the **standby** shape —
 clean, and meaningless for the promotion (RW4 step 5 re-syncs it). One the
 agent applied but whose reply was lost leaves the agent at the driven
-revision, and its Check reply then reports the primary shape. Rounds and
+revision, and a Check reply that answers from an observation made at that
+revision (`dnagent.md` SH28) reports the primary shape. Rounds and
 syncups run on the child's one goroutine (RW1), and a revision carries one set
 of roles: a role change is agent-visible desired state, which bumps `SpRev`
 (`architecture.md`, Revision keys and the sync fan-out), and RW14 builds no
@@ -1909,7 +2026,7 @@ reads is clean and no proof of the build that follows, and settling on it
 would leave that build to `primary_unhealthy`. Which rows read `PROVISIONING`,
 `MISSING` or `ERROR` in which state — a slice deferred by its first zeroing, a
 member a converge found unavailable and left to the connect retry, a device a
-Check round probes absent, a clone whose source is not connected, has an
+background read probes absent, a clone whose source is not connected, has an
 endpoint with no live controller or no namespace, or could not be read, a
 clone that waits for room in its CN's metadata area, whose two
 rows read `PROVISIONING` (`architecture.md`, Metadata units) — is the cn
@@ -1955,8 +2072,8 @@ changes (healthy to unhealthy sets the epoch once — while the record stays
 set, the threshold clock of Automatic reactions never restarts; unhealthy
 to healthy clears it). The op re-reads the record inside its STM, so two
 owners observing the same transition write once. Health never bumps a
-revision (`architecture.md`, Revision keys and the sync fan-out). What an
-observation is compared with is a cache of the record, not only a memory
+revision (`architecture.md`, Revision keys and the sync fan-out). What a
+health verdict is compared with is a cache of the record, not only a memory
 of the monitor's own writes, and these loads re-seed it: the sp
 coordinator's reaction pass, every `cntlr_interval` (AR1), hands each side
 and cntlr child its record's `err_epoch`, which the child folds in before
@@ -1971,8 +2088,8 @@ with it (RW13), and one at each verdict while that read fails. A monitor
 that has written nothing yet — a child just started, a new owner after a
 handoff — starts empty and writes its first verdict whatever the record
 holds. So a record that says unhealthy
-while the observation is clean is a transition and clears, and one that
-says healthy while the observation is not sets a new epoch: an `err_epoch`
+while the health verdict is clean is a transition and clears, and one that
+says healthy while the health verdict is not sets a new epoch: an `err_epoch`
 another observer wrote or cleared — the other owner of an overlap (VW7), a
 partitioned observer (Known limits) — is corrected at the owner's first
 verdict after its next load, a reply that neither sets nor clears being no
@@ -1999,13 +2116,16 @@ owner's settle writes nothing.
 
 HL4. A `Syncup*` reply's `*Info` is processed exactly like a `Check*`
 reply's (the secondary signal, `architecture.md`, Check streams), but for
-a cntlr's run of unhealthy health verdicts, which counts rounds only
-(AR10). A `Syncup*` gRPC failure is not by itself a health failure — an unreachable
-agent breaks the stream too.
+a cntlr's run of unhealthy health verdicts, to which only rounds add
+(AR10), and for its observation, which the loop sees but which never adds
+to a run (RW23) and is never judged by its age (HL7). A `Syncup*`
+gRPC failure is not by itself a health failure — an unreachable agent
+breaks the stream too.
 
 HL5. `show_info` false streams carry an `*Info` only when something
 changed; the worker evaluates health on the latest known info, and a reply
-with neither info nor error is a clean round.
+with neither info nor error is a clean round when the observation it
+answers from is not too old and is one a round asked for (HL7).
 
 HL6. **No cross-role health writes.** The sp role's health bookkeeping —
 this section's `err_epoch` writers — never touches `DnConf` or `CnConf`
@@ -2021,6 +2141,73 @@ cntlr CN (CLD9) — but that is allocation bookkeeping, not health.) An
 unreachable DN is therefore marked
 on `DnConf` by its dn-role owner and on the `Side` records of its sides by
 each sp-role owner, independently.
+
+HL7. **The observation's age.** An agent answers a round from its latest
+observation of the object (`dnagent.md` SH28). The worker takes its age as
+the agent's answer time less the observation's time, both from the reply's
+stamp and both by the node's clock, so no clock difference between the
+worker's host and the node enters a verdict. It counts the age from no
+earlier than the first round after a pause in its rounds of the object,
+and from that round alone for a reply that carries no observation time,
+and keeps the agent's answer time on that round until the next pause
+(RW2). A pause is the loop's start, an idle or a refused conf (RW9), or a
+move to another endpoint (RW13); its first round is the first that the
+agent answers in time without refusing the object as unknown. A gap
+between two rounds of a running loop is no pause: a round that waited out
+a long `Syncup*` behind a converge that holds the object's reads off finds
+the observation as old as it is. A round whose observation ended before
+the agent answered that first round, or that has none, answers from an
+observation no round asked for. Until the observation is too old, such
+a round gives no health verdict, settles nothing (HL2), makes no count compare (RW13),
+counts in no run and reports nothing to the sp coordinator: no flip, no
+cutover report, no leg row (RW18, RW19, HL2) and no revision for RW14's or
+RW22's hold. Its `*Info`, when it carries one, still becomes the latest
+known info (HL5), and it still brings the re-sync of RW4 step 5, whose
+`Syncup*` reply is processed as any other (HL4). The first round that
+answers from an observation that ended after that answer — normally the
+next round, which answers from the read the first round started — is
+judged as any other (Known limits). A round answered with
+`ReplyCodeUnknownObject` is not judged by its age: the agent holds no
+state of the object and so no observation of it, and the re-sync of RW4
+step 5 that this reply brings is what makes the object known. A round
+whose observation's age, so counted, exceeds `ObsMaxAgeIntervals` of the
+object's intervals, or whose reply carries no answer time to count it by —
+an observation too old — is a missed round in every way (RW4 step 4): the
+worker logs `check round failed` with the cause, drops the stream, and
+gives the "unreachable" verdict of HL1 and HL2 — the rows read
+`RES_STATUS_UNKNOWN`, a side's wait for the cutover is off (RW18), the
+health epoch is set until the next clean round — which adds to a cntlr's
+run on every such round (AR10); it issues no `Syncup*` on that reply. A
+round whose observation's age, so counted, exceeds one interval, or whose
+reply carries no answer time, is logged as `late observation` (Log
+records), too old or not, save the first round after a `Syncup*` reply
+when it answers from that reply's observation and that observation is not
+too old. After
+the re-send a round issues (RW4 step 5), and after an immediate syncup
+that abandons a round (RW6), the loop waits a whole interval from the
+reply (RW4 step 6), and no read of the object ends meanwhile: only a round
+starts one (`dnagent.md` SH29), and the syncup cancelled the read the
+round before it had started, if one still ran (`dnagent.md` SH30). So
+that round is late by the loop's own wait. After an immediate syncup sent
+between rounds, the round timer, armed after the round before (RW8),
+keeps running, so the next round comes less than an interval after the
+reply and is seldom late at all. A converge in flight that the
+stamp reports is not unhealthy by itself, and a `Syncup*` reply's
+observation is never judged by its age. Reason: a retry attempt or a
+migration's converge can hold an object's reads off for seconds at the
+largest pools, which a bound of several intervals lets pass where a round's
+one-interval wait would not; a node whose reads hang is found later than
+that wait alone would find it, by about the bound less one of the object's
+intervals; and a hang can sit in a read as well as in a converge. The age
+counts from the first round after a pause because only a round starts a
+read (`dnagent.md` SH29): while no round asks — the worker restarts, fences
+itself (VW8), takes over the shard or idles — every observation ages with
+no fault of the agent's, and judged from its own time the first round
+after the pause would set the health epoch of every object. An
+observation that ended before that first round tells of the object as it
+was while no round asked, so no verdict rests on what it reports.
+The stream drops because the agent leaves an unchanged info out on a kept
+stream, which the unknown marking would then read as clean.
 
 ## Bitmap pushes — `worker/bmpush.go`
 
@@ -2277,18 +2464,28 @@ unhealthy; the clock still runs from the stored `err_epoch` (AR4), and
 AR5's `disabled` trigger needs no verdict. AR8's case 1 needs the leg's
 verdict, and its case 2 the leg's and that of the side whose clock fires.
 AR5's threshold trigger needs more than the latest verdict: the primary's
-last two verdicts from check rounds — a reply with an `ERROR` row, or a
-round with no reply in time — must both be unhealthy, with no clean answer,
-of a round or of a `Syncup*`, since the earlier of them; a `Syncup*` reply
-with an `ERROR` row neither starts that run nor adds to it. A round counts
-by its own report: the info its reply carried or, when the reply leaves it
-out as unchanged, the info its stream last carried, never a `Syncup*`'s
-info that the latest known state holds since (HL5). The coordinator keeps a
-memo of the verdicts its own monitors reach on its cntlrs, legs and sides
-(HL2): an unhealthy verdict puts the object in, a clean one takes it out,
-and a reply that neither sets nor clears changes nothing; for a cntlr it
-also counts the run of unhealthy verdicts from rounds, which a clean answer
-ends. A verdict counts whether or not its monitor writes, so one that
+last two verdicts from check rounds — a round with no reply in time or
+whose observation is too old (HL7), which counts on every such round, or a
+reply with an `ERROR` row that answers from an observation new to the
+loop of the cntlr's child (RW23) and that a round asked for (HL7) — must
+both be unhealthy,
+with no clean answer, of a round or of a `Syncup*`, since the earlier of
+them; a `Syncup*` reply with an `ERROR` row neither starts that run nor
+adds to it, and neither does a round that answers from an observation
+already seen and not too old (RW23), nor one that answers from an
+observation no round asked for and not too old, which gives no verdict at
+all (HL7). A
+round counts by its
+own report: the info its reply carried or, when the reply leaves it out as
+unchanged, the info its stream last carried, never a `Syncup*`'s info that
+the latest known state holds since (HL5). The coordinator keeps a memo of
+the verdicts its own monitors reach on its cntlrs, legs and sides (HL2): an
+unhealthy verdict puts the object in, a clean one takes it out, and a reply
+that neither sets nor clears changes nothing; for a cntlr it also counts
+the run of unhealthy verdicts from rounds, which a clean answer ends and
+which outlives the cntlr's child (RW23 says what a restarted child adds
+to it). A
+verdict counts whether or not its monitor writes, so one that
 finds the record set already — re-seeded from another observer's epoch,
 say (HL3) — counts though it is no transition. The memo lives with the
 coordinator from its start to its stop, which is the coordinator's tenure
@@ -2302,20 +2499,29 @@ nothing before this coordinator has judged the object itself, and one rule
 for every threshold reaction is simpler than an exception for one. The run
 is the failover's alone because its threshold is the one counted in check
 rounds: epochs are whole seconds and the next verdict can come late, so one
-missed round could otherwise reach it, and the converge of a grow or of a
-promotion that waits for a member reports its groups `ERROR` though the
-next primary would wait the same, while its next round can miss behind it
-on the cntlr's locks (`cnagent.md` CN1). The cost: after a restart or a
-handoff a reaction waits for the first round's verdict on its object, a
-failover on its threshold for the second, and for a leg whose rounds give
-none, for its primary's next converge (Known limits).
+missed round could otherwise reach it. A `Syncup*` reply is left out of
+the run because the converge of a grow or of a promotion that waits for a
+member reports its groups `ERROR` though the next primary would wait the
+same. A round that answers from a retry attempt of such a converge is not
+left out: the cn agent's connect retry re-runs the converge while the
+member stays late (`cnagent.md` CN10, CN12), each attempt's observation
+carries the same rows, and a round that answers from one new to the
+child's loop counts them (RW23), so two such rounds in a row fill the run with no round
+missed (Known limits). The cost: after a restart or a handoff a reaction
+waits for this coordinator's first verdict on its object. A missed round
+gives one at once; otherwise it comes from a `Syncup*` reply that the
+first answered round brings, or from the first round that answers from an
+observation made after that round, normally the second (HL7). A failover
+on its threshold waits for the second counted round (RW23), and a repair
+of a leg whose primary's rounds give it no verdict waits for that
+primary's next converge (Known limits).
 
 ### Failover
 
 AR5. When the primary cntlr is `disabled`, or has `err_epoch` set, `now`
 minus it at least `primary_unhealthy` — `cntlr_unhealthy`, when that is the
 longer, while it is **settling** (HL2) — and this coordinator's own
-verdicts on it unhealthy for two of its rounds in a row (AR10): the
+verdicts on it unhealthy for two of its counted rounds in a row (AR10): the
 candidate is the cntlr with the
 smallest `cntlr_id` among those with `primary` false, `disabled` false and
 `err_epoch` zero; none means `reaction skipped` (`no candidate`) and the
@@ -2395,8 +2601,8 @@ limits):
   settles and sooner once it has. A report with any other `ERROR` row is
   taken for a fault of the primary's own, and the role moves as for any;
   that failover records the report's rows in turn. So an error the classes
-  do not name — a lost thin id a Check round reports, whose probe carries
-  no reason, among them (HL2) — does not send the role back to the
+  do not name — a lost thin id a background read reports, whose probe
+  carries no reason, among them (HL2) — does not send the role back to the
   cntlr it last left while the new primary fails no row the old one did
   not: in an SP of two cntlrs it moves the role once, and in a larger one
   it can first move it on to a cntlr that has not held it. An `err_epoch` set later is a new
@@ -2411,7 +2617,8 @@ the two records of its own a pass decides by (AR7's second refusal rests on
 the other): why the role moved is kept in no etcd record. A coordinator
 without it — restarted, handed the shard, or the other owner of an overlap
 (VW7) — can fail over once more once its own verdicts read the primary
-unhealthy for two of its rounds in a row (AR10), which records it again.
+unhealthy for two of its counted rounds in a row (AR10), which records it
+again.
 
 ### Thin-pool auto-grow
 
@@ -2514,15 +2721,17 @@ due for replacement is still replaced, and with none the pass goes on
   shared-state class alone is not replaced — `reaction skipped`
   (`shared_state`, with its `old_cntlr_id` and the smallest such `td_id`).
   The replacement would read the same rows from the same pool. The report
-  carries the lost-id reason only while it is a converge's (HL2). A Check
-  reply carries an info when the probe's view changed since its stream last sent
-  one, and always on a fresh stream's first probe (HL5; `architecture.md`,
-  Check streams), so a converge's report stays the one held only until that
-  view changes or the stream is replaced, as by a round timeout, a broken
-  stream, a desired change that overtakes a round (RW6), or a worker
-  restart or shard handoff. A primary whose held report is a probe's,
-  whose rows a dead stream has marked `UNKNOWN` (HL1), or whose child holds
-  no report yet is not held by this refusal (Known limits).
+  carries the lost-id reason only while it comes from a converge's
+  observation (HL2). A `Check*` reply carries an info when the info of the
+  observation it answers from differs from the last one its stream sent,
+  and always on a fresh stream's first reply (HL5; `dnagent.md` SH26), and
+  a read that a later round starts replaces the converge's observation with
+  one whose rows carry no reason (`dnagent.md` SH29), so a converge's
+  report stays the one held only until a round answers from a read's
+  observation, or a dead stream marks its rows `UNKNOWN`. A primary whose
+  held report is a read's, whose rows a dead stream has marked `UNKNOWN`
+  (HL1), or whose child holds no report yet is not held by this refusal
+  (Known limits).
 * **The same error.** When the pass replaces a primary, the coordinator
   records the replacement the op created, the pass's `now` and the `ERROR`
   rows of the replaced primary's latest report, each named and compared as
@@ -2533,7 +2742,7 @@ due for replacement is still replaced, and with none the pass goes on
   `reaction skipped` (`same_error`, with its `old_cntlr_id`; the kind,
   `replace_cntlr`, tells the record from AR5's). The rule presumes the
   error followed the replacement, as AR5's presumes it followed the role: a
-  Check round's report of a lost thin id carries no reason, so the first
+  read's report of a lost thin id carries no reason, so the first
   refusal lets the primary be replaced on it, and the replacement, which
   reads the same rows from the same pool, would otherwise be replaced in
   turn once
@@ -3069,10 +3278,16 @@ Error, a stored conf one of the three conf gates refused — a revision
 worker's (RW9), the sp fan-out's (RW14) or the pass's (AR1), whose
 cluster-conf gate a latched SP's drain wake-up applies too (SPD6) — once
 per distinct error and never once per round; `syncup result` every
-`Syncup*` reply or failure, and `syncup rejected` a rejecting code, at
-Error for a stale revision (RW5); `dn free count disagrees`, at Error, the
-second round compare in a row that found a disk node's own free count other
-than its record's, once until a compare agrees (RW13).
+`Syncup*` reply or failure (RW5, RW10), and `syncup rejected` a rejecting
+code, at Error for a stale revision (RW5); `late observation` a round HL7
+judges whose observation's age, counted from no earlier than the first
+round after a pause, exceeds one interval, or whose reply carries no
+answer time, too old or not, but for the leave HL7 gives the round right
+after a `Syncup*` reply (HL7), the record telling a round whose reply
+carries no observation from one that answers from an observation;
+`dn free count disagrees`, at Error, the second compare in a row, each on
+a round's new observation, that found a disk node's own free count other
+than its record's, once until a compare agrees (RW13, RW23).
 
 **Health and the sp role.** `health changed` every HL1 or HL2 transition,
 judged against the memo HL3 re-seeds from the record — the correction of an
@@ -3093,8 +3308,12 @@ record per hold and never per round, and expected in normal operation too:
 for a new side whose first `SyncupSide` its disk node refused
 (`dnagent.md` DN8), at a hold that waits for a side on a disk node that died
 too recently for its epoch to be in the hold's load, or during the hold,
-and at a hold whose fan-out restarted a side while its old child was inside
-a `Syncup*` that outlasts the hold (RW1, RW14); `sp demotion unsynced` the
+at a hold whose fan-out restarted a side while its old child was inside
+a `Syncup*` that outlasts the hold (RW1, RW14), and at a hold that waits for
+a side whose child a new owner's or a restarted worker's first fan-out
+starts, or a fan-out restarts, and whose first round brings no `Syncup*`,
+its agent already holding the revision, and so reports nothing (RW14,
+HL7); `sp demotion unsynced` the
 end of RW22's demotion
 hold by its timer, one record per demotion hold and never per round, and expected
 at every failover whose old primary does not report its demotion applied
@@ -3255,6 +3474,9 @@ reaction due and no epoch to correct leaves no record, so no case can tell
 the wake-up from a pass; RW13's count compare and HL1's rule for the disk
 counts, since no fake reports a disk node's counts, the end-to-end suite
 holding real disk nodes to the compare (`e2e_integtest.md`, The cases);
+RW23's count of new observations only and HL7's late rounds and rounds
+whose observation is too old, since the fake answers every reply about an
+object it knows from a new observation;
 SW4, compaction; BM6, because the one lever the suite has over a reply
 code, a forced code, rejects the object's `Syncup*` itself, so no push is
 attempted, let alone failed; AR5's and AR7's refusals (HL2's row classes,
@@ -3280,14 +3502,15 @@ guards of SPD2; and the guards of CLD2 and the gateway halves of CLD1 and
 CLD3, the gateway suite owning the clone latch.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the three conf gates are unit-tested instead.
-Seven records no case stages: `sp drain failed` and `clone drain failed`,
+Eight records no case stages: `sp drain failed` and `clone drain failed`,
 which the drain case asserts at zero after every drain; `sp flip failed`,
 which the bitmap case asserts at zero for its cutover; `cluster conf
 missing`, which
 every case avoids by writing its cluster conf before any rev key and no case
 asserts either way; `syncup leftover`, which no fake produces on its own,
 since no fake computes a sweep verdict and no case forces that code;
-`bitmap push failed`, which the forced-code lever cannot stage either; and
+`bitmap push failed`, which the forced-code lever cannot stage either;
+`late observation`, since no fake answers from an old observation; and
 `dn free count disagrees`, since no fake reports a disk node's counts.
 
 Out of scope: real agents, and real hosts, whose drop of a path the discovery
@@ -3301,7 +3524,7 @@ build is still deferred. Two things the clone drain's design asks for are out
 of reach of every suite in the tree: a host IO probe of a clone's destination
 namespace right after the latch, which would need a real host and a real CN,
 so CLD4's resume is asserted at the etcd level only, and only by the gateway
-suite; and an observation that the coordinator makes no agent call during a
+suite; and a proof that the coordinator makes no agent call during a
 drain (CLD10).
 
 **What a pass means.** Exit status zero means every case's assertions held,
@@ -3357,7 +3580,7 @@ reports and how its streams and replies misbehave. Of its levers, `hang`
 holds an object's `Check*` rounds while it is set, `hang_rounds` holds only
 as many of the next rounds as it counts, so that a case misses exactly the
 rounds it means to whatever its own polls cost, `delay_rounds_ms` answers
-every round late, as a busy agent does, and `hang_syncup` leaves the
+every round late, and `hang_syncup` leaves the
 object's `Syncup*` unanswered while it is set, as a stopped cn agent leaves
 its demotion (RW22), or as a side whose agent answers its rounds but never
 its syncup holds a sides-first hold to its bound (RW14). Among the rows it
@@ -3365,10 +3588,22 @@ derives, a migration destination whose request carries the side
 provisioned and its cutover pending reports both migration rows waiting
 for the cutover, with the reason the cutover reads, and each cntlr reports
 a path row per side of a leg that has two sides, live once that side is
-provisioned (RW18); a behavior file's rows override them. It computes no
-sweep verdict, so it never answers `ReplyCodeLeftover` on its own, and it
-reports no disk counts (`dnagent.md` DN18), so no case runs RW13's count
-compare.
+provisioned (RW18); a behavior file's rows override them. It stamps every
+reply as an agent does (`dnagent.md` SH28): a round or an info read about
+an object it knows, and a `Syncup*` it does not refuse, answers from a new
+observation, made as it answers and under the call's trace id — the
+round's own for a round — so no round of the suite answers from an
+observation that is late, too old or already seen; a round or an info
+read that refuses its object as unknown carries no observation; a
+`Syncup*` it refuses — a stale revision, an object its node's last syncup
+does not list, or a refusing code the behavior file forces — carries no
+stamp, as an agent's refusal carries none (`architecture.md`, Live-state
+reporting); and a `Syncup*` that saved its request carries the save time,
+with its observation after it, while one whose code the behavior file
+forces saves nothing, so a forced `ReplyCodeLeftover` carries an
+observation and no save time. It computes no sweep verdict, so it
+never answers `ReplyCodeLeftover` on its own, and it reports no disk counts
+(`dnagent.md` DN18), so no case runs RW13's count compare.
 
 ## Known limits
 
@@ -3397,6 +3632,38 @@ compare.
   waiting for their drain (CM5, VW8), so the window does not wait out the
   drain's in-flight calls. Revision keys are durable, so nothing is lost:
   convergence is delayed, not skipped.
+* **After a pause, the first verdict waits a round.** Only rounds start
+  background reads (`dnagent.md` SH29), so while no round drives an
+  object — an undriven window, the gap of an ownership change (VW7), an
+  idle (RW9) — its observation ages, unless a converge of the agent's own
+  stores one: a background retry attempt, the dn's fence timer or a
+  startup reconcile (`dnagent.md` SH28). The first round after the pause
+  answers from that observation and gives no verdict on it (HL7): it
+  re-syncs when its reply says so, but sets and clears no health epoch,
+  counts in no run and reports nothing to the sp coordinator. Unless a
+  round misses, the object's first verdict, flip and report to a hold come
+  from a `Syncup*` reply that round brings or from the first round that
+  answers from an observation made after it, normally the next, which is
+  also the first round to count in a run. So a stored epoch that the
+  object has outgrown stays until that verdict, and at the default
+  intervals a new owner's first sides-first hold runs to its timer when
+  the sides' agents already hold its revision (RW14). The pause alone turns
+  rounds into missed ones only when no observation of the object ends
+  within HL7's bound after that first round; a gap between two rounds of a
+  running loop stays judged by the observation's own age (HL7).
+* **A node clock that steps back hides an observation's age for up to the
+  step.** The agent keeps each object's observation times strictly
+  increasing (`dnagent.md` SH28), and the worker reads an observation's
+  age, and the first round after a pause that it counts that age from, by
+  the node's clock (HL7). After the node's clock steps back, an
+  observation stored before the step reads younger by up to the step, and
+  every one the agent stores after it carries a time ahead of that clock
+  until the clock catches up, so its age reads zero meanwhile: a node
+  whose reads hang in that time is taken for unreachable up to the step
+  later. A cntlr child restarted at the same endpoint just after such a
+  step can also count again a look its predecessor counted, since an
+  observation made before the step can read as ending after the new
+  loop's first round (RW23).
 * **The grown-chunk memo of BM5** (`architecture.md`, [D8]) is per worker; a
   handoff can leave a shorter chunk at the agent (cost: extra copying, never
   correctness).
@@ -3459,27 +3726,78 @@ compare.
   failed on (AR5's same error).
 * **Two missed rounds in a row fail over a primary that is only busy.** A
   failover on its threshold needs two unhealthy verdicts in a row from the
-  primary's rounds (AR10), so one missed or slow round followed by a clean
-  answer fails no primary over, however late that answer comes, and neither
-  does a `Syncup*` reply that lists a converge still waiting for a member.
-  But the worker judges no reachability: rounds that each wait past their
-  timeout for the cntlr's locks behind a converge that outlasts them
-  (`cnagent.md` CN1) are two missed rounds all the same, and fail over a
-  primary that still serves its hosts once its threshold has run out.
+  primary's rounds (AR10), so one missed or slow round, or one whose
+  observation is too old, followed by a clean answer fails no primary
+  over, however late that answer comes, and neither does a `Syncup*` reply
+  that lists a converge still waiting for a member, though a round that
+  answers from a retry attempt of that converge can add to the run (next
+  item). A round waits for no lock of the cntlr, since the agent answers it
+  from its latest observation (`dnagent.md` SH25), but no read of the cntlr
+  starts while a converge of it, or a syncup of its node that marks the
+  node, is in flight (`dnagent.md` SH29, SH30). A converge that holds the cntlr's reads off
+  long enough for the cntlr's latest observation to grow older than HL7's
+  bound, or a read that takes that long on a loaded node, makes its
+  rounds answer from an observation too old, and the worker judges no
+  reachability: two such rounds in a row are two missed rounds all the
+  same, and fail over a primary that still serves its hosts once its
+  threshold has run out.
+* **A round that answers from a retry attempt counts the attempt's rows.**
+  The cn agent's connect retry re-runs the cntlr's whole converge while a
+  member stays late (`cnagent.md` CN10, CN12), and each attempt stores its
+  observation with that converge's rows, in which the groups that wait
+  read `ERROR`, as they do in the `Syncup*` reply AR10 leaves out of the
+  run. No reply has carried that observation to a child of the cntlr
+  before, so the first round that answers from it answers from a new one,
+  and its `ERROR` rows add to the primary's failover run (AR10, RW23). Two
+  counted rounds in a row that each answer from an attempt fill the run
+  with no round missed, as when an attempt outlasts
+  `CnConnectRetryInterval`, the next follows at once and no read fits
+  between them (`cnagent.md`, Known limits). Once the primary's threshold
+  has run out, that fails over a primary that only waits for a member,
+  though the next primary would wait the same.
+* **While a leftover keeps every round re-sending, a round's own report
+  counts in a run only when a background converge made it.** Each such
+  round answers from the object's latest observation: the one the
+  `Syncup*` before it stored, unless a background converge of the object
+  stored a later one between that reply and the round. The loop saw the
+  `Syncup*`'s observation on that reply, so a round that answers from it
+  answers from no new one (RW23), and the `Syncup*` the round issues
+  cancels the read the round starts (`dnagent.md` SH30), so no round
+  answers from a read. A cntlr's background converge is an attempt of the
+  cn agent's connect retry or clone-metadata retry (`cnagent.md` CN10,
+  CN18), which runs for a cause of its own beside the re-sends. An
+  attempt's observation reaches the loop first in a round's reply, so the
+  first round that answers from it answers from a new one, and its report
+  counts in the cntlr's run (AR10; previous item). A primary's failover
+  on its threshold therefore waits until the leftover clears unless its
+  rounds miss, answer from an observation too old or answer from such
+  attempts (AR10). The dn agent's background converges, its fence timer
+  and its migration retry, each converge a side (`dnagent.md` DN12,
+  DN13), so a DN's count compare (RW13) waits until the leftover clears. A `Syncup*` reply's observation
+  counts for nothing because a converge's rows can read unhealthy while it
+  waits for a member (AR10); the case needs a leftover that lasts and an
+  unhealthy primary at once. A leftover of a disk node or a controller
+  node keeps no read of its sides or cntlrs from ending (`dnagent.md`
+  SH30).
 * **After a restart or a handoff, a leg its primary reads missing waits
-  for a converge.** A primary's check round reads a leg whose
+  for a converge.** A primary's background read reads a leg whose
   device-mapper wrapper is absent — one it had to build while the leg's
   disk node was down, or after its CN rebooted — `MISSING` with no details,
-  which neither sets nor clears (HL2); only its converge reports such a leg
-  `ERROR`. A coordinator that starts after the one that stamped the leg's
-  `err_epoch` therefore has no verdict on the leg, and AR8 waits (AR10)
-  until something makes the primary converge: a revision bump of the SP.
+  which neither sets nor clears (HL2); only its converge's observation
+  reports such a leg `ERROR`. A coordinator that starts after the one that
+  stamped the leg's `err_epoch` therefore has no verdict on the leg, and AR8
+  waits (AR10) until something makes the primary converge, a revision bump
+  of the SP say, and a reply carries that converge's report.
 * **The hold delays the cntlr requests, and at a failover the sides too**
   (RW14, RW22): a side the hold waits for that does not report — one on a
   disk node that died too recently for its epoch to be in the fan-out's
   load, or during the hold, a new side its disk node refuses until the dn
-  role's `SyncupDn` has introduced it (`dnagent.md` DN8), or a side the
-  fan-out restarted whose old child is still inside a `Syncup*` (RW1) —
+  role's `SyncupDn` has introduced it (`dnagent.md` DN8), a side the
+  fan-out restarted whose old child is still inside a `Syncup*` (RW1), or
+  a side whose child a new owner's or a restarted worker's first fan-out
+  starts, or a fan-out restarts, and whose first round brings no
+  `Syncup*`, its agent already holding the revision, so that it reports
+  from its second round at the earliest (RW14, HL7) —
   delays every cntlr request of its SP's fan-out but a demotion by up to
   one `cntlr_interval`, which RW9 lets be as long as
   `MaxHealthCheckInterval`, a failover's promotion included; and a failover
@@ -3529,10 +3847,10 @@ compare.
   (`architecture.md`, Known limits).
 * **A lost thin id costs a failover or a replacement, and the second refusals
   that bound them are a memory.** A report marks a created td's lost thin
-  id, with its thin row's reason, only when it is a converge's; a Check
-  round's probe reads the absent volume `MISSING` with no reason (HL2), so
-  a primary whose latest report is a
-  probe's is failed over, and the second refusal then keeps the role from
+  id, with its thin row's reason, only when it comes from a converge's
+  observation; a background read's probe reads the absent volume `MISSING`
+  with no reason (HL2), so a primary whose latest report is a read's is
+  failed over, and the second refusal then keeps the role from
   going back to it for as long as the new primary fails only on rows it failed
   on (AR5) — in an SP of two cntlrs, one failover in all, and one more each
   time a new primary also fails a row of its own; in a larger one the role can
@@ -3540,26 +3858,27 @@ compare.
   coordinator's record of the last failover it applied: a coordinator after a
   restart or a shard handoff, or the other owner of an overlap (VW7), has
   none, and once its own verdicts read the primary unhealthy for two of its
-  rounds in a row (AR10) it can fail over once more before it has. It compares rows, not
-  causes: a new primary whose own fault fails only rows the old primary failed
-  on is held as well, for as long as that fault lasts or until an operator
+  counted rounds in a row (AR10) it can fail over once more before it has.
+  It compares rows, not causes: a new primary whose own fault fails only
+  rows the old primary failed on is held as well, for as long as that fault
+  lasts or until an operator
   moves the role, every pass logging why. AR7's sole-primary variant takes the
   twins of both refusals, judged on the same report (AR7). The first holds the
   primary of an SP with no failover candidate only while the report the
-  coordinator holds for it is a converge's that carries the reason, which lasts
-  until a Check reply carries an info — as one does as soon as the probe's
-  view differs from the last one its stream sent, and on a fresh stream's
-  first probe (HL5; `architecture.md`, Check streams) — or a dead stream marks
-  its rows `UNKNOWN` (HL1): after a re-sync over a view the stream had already
-  sent — as when an agent restart left it a revision behind — it lasts until
-  that view changes or the stream is replaced, as by a round timeout, a broken
-  stream, a desired change that overtakes a round (RW6), or a worker restart
-  or shard handoff, whose new child holds no report until a reply carries one.
-  It does not break the replacement loop on its own: a replacement's first
-  probe after its converge goes out on a stream that has sent no info yet, so
-  the report held for it is a probe's, which carries no reason. The second does:
-  once a primary whose held report is a probe's has been replaced at
-  `cntlr_unhealthy`, by a cntlr that reads the same rows, that replacement is
+  coordinator holds for it is a converge's that carries the reason, which
+  lasts until a round answers from a read's observation, whose info differs
+  from the converge's and so travels in the reply (HL5; `dnagent.md` SH26),
+  or a dead stream marks its rows `UNKNOWN` (HL1): a round starts a read
+  when no read or converge of the cntlr and no syncup of its node that
+  marks the node is in flight (`dnagent.md` SH29), and a later round
+  answers from it once it has
+  ended; a new child after a worker restart or a shard handoff holds no
+  report until a reply carries one. It does not break the replacement loop
+  on its own: the report held for a replacement is a read's, which carries
+  no reason, from the first round that answers from a read after its
+  converge. The second does: once a primary whose held report is a read's
+  has been replaced at `cntlr_unhealthy`, by a cntlr that reads the same
+  rows, that replacement is
   not replaced while it fails only on rows the primary it replaced failed on,
   from an error set within `cntlr_unhealthy` of that replacement — one
   replacement, rather than one per `cntlr_unhealthy` for as long as the td
@@ -3583,9 +3902,9 @@ compare.
   fault fails only rows the old primary failed on is held as well, for as long
   as that fault lasts, every pass logging why.
 * **A dm-clone left with hydration off moves the role of the clone's
-  pool.** Its row reads `ERROR` on every report, a check round's as much as
-  a converge's (`cnagent.md` CN18, CN28). That is a row of the primary's
-  own (HL2), so its `err_epoch` stays set, and AR5 fails it over at its
+  pool.** Its row reads `ERROR` in every observation, a background read's
+  as much as a converge's (`cnagent.md` CN18, CN28). That is a row of the
+  primary's own (HL2), so its `err_epoch` stays set, and AR5 fails it over at its
   threshold, or AR7 replaces it where there is no failover candidate; the
   new primary rebuilds the clone by its crash recovery (`cnagent.md`
   CN18). A fault of the clone's source does not itself move the role
@@ -3594,11 +3913,13 @@ compare.
   neither AR5 nor AR7 acts on that row, and a fault in the primary's own
   path to the source reads the same; the operator can move the role by
   disabling the primary cntlr (AR5). The cn agent's retry of a source it
-  cannot connect, or that has no namespace, can still make the primary's
-  rounds miss (`cnagent.md`, Known limits), and missed rounds can fail it
-  over, as they can a primary that is only busy (above). A role that moves
-  while a fault at the source lasts can take even a clone that has
-  hydrated in full out of service: a new primary that cannot connect the
+  cannot connect, or that has no namespace, holds the cntlr's reads off
+  while each attempt is in flight (`dnagent.md` SH30; `cnagent.md`, Known
+  limits), so an attempt that outlasts HL7's bound makes the primary's
+  rounds answer from an observation too old, and such rounds can fail it
+  over, as they can a primary that is only busy (above). A role that moves while a fault at the source
+  lasts can take even a clone that has hydrated in full out of service: a
+  new primary that cannot connect the
   source, or finds no source namespace, cannot build the clone's dm-clone
   while the fault lasts, so the clone's destination namespace waits
   inaccessible, its hosts' IO queued, until the source comes back or the
@@ -3609,7 +3930,8 @@ compare.
   tool (`CreateMigration`), not a reaction (Automatic reactions).
 * **Reaction inputs are one pass old**: `err_epoch`s are read fresh each pass,
   but pool usage and spare readiness come from the primary's last Check reply,
-  at most one interval old. A reaction is at most one interval late; never
+  at most one interval old, which answers from an observation HL7 lets be
+  up to its bound older. A reaction is late by at most that much; never
   wrong, because the op re-validates. That does not hold across a promotion,
   since no op can re-validate a probe: from the moment RW14's release hands a
   failover's promotion to the new primary's child until that primary's reply
@@ -3620,9 +3942,15 @@ compare.
   the window is the promotion's own round trip. Nor does it hold for an
   `err_epoch` another driver stamped: AR10 holds a reaction until this
   coordinator's own verdict reads the object unhealthy, and a failover on
-  its threshold until its verdicts on two of the primary's rounds in a row
-  do, but the clock then runs from that stamp, which is the very record the op re-validates against
-  (the partitioned-observer limit above, HL3).
+  its threshold until its verdicts on two of the primary's counted rounds
+  in a row do, but the clock then runs from that stamp, which is the very record the op re-validates against
+  (the partitioned-observer limit above, HL3). Nor is HL7's bound kept just
+  after a pause in the primary's rounds: the first round after it answers
+  from an observation of any age, to which HL7 gives no verdict but which
+  becomes the latest known info (HL5), so until a later round answers from
+  an observation made after that round, normally one interval later, the
+  pass reads pool usage and spare readiness from that older observation,
+  and AR6, which waits for no verdict, can act on that usage.
 * **A disk node's own free count is compared, never reconciled** (RW13): a
   disagreement that two compares in a row see is logged, once until a
   compare agrees, and nothing corrects the record or the disk's volume
@@ -3645,15 +3973,19 @@ compare.
   that recur every round for as long as their cause lasts: an unreachable
   object's `check stream open failed`, `check stream send failed` or
   `check round failed` (the revision loop's own records, which the Log records
-  above do not list, and whose names are not normative); the `syncup result`
+  above do not list and no suite parses, though `integtest/round_counts.sh`,
+  which no suite calls, counts them from a run's copied logs); the
+  `syncup result`
   of each `Syncup*` that RW4 step 5 re-issues, paired with a `syncup leftover`
   or a `syncup rejected` while its reply still carries the leftover or the
-  rejection (RW5; a leftover only the `Check*` verdict still names is paired
-  with neither) — a stale revision after an etcd restore repeats its
+  rejection (RW5; a leftover only a background read's verdict still names
+  is paired with neither) — a stale revision after an etcd restore repeats its
   `syncup rejected` at Error every round until the revision in etcd reaches
   the agent's; a `dn conf missing` or `cn conf missing` while the node's
-  `DnConf` or `CnConf` is absent (RW13); and a `health write failed` while a
-  health write keeps failing (RW12). The sp coordinator's pass adds its own,
+  `DnConf` or `CnConf` is absent (RW13); a `late observation` while an
+  object's observations stay older than an interval (HL7); and a
+  `health write failed` while a health write keeps failing (RW12). The sp
+  coordinator's pass adds its own,
   once per pass rather than per object — AR5's `reaction skipped` with
   `no candidate`, say, for as long as a primary due for failover has no
   eligible candidate, or `shared_state` or `same_error` for as long as the

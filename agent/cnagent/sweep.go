@@ -60,20 +60,19 @@ type cnActual struct {
 	// which is how a wanted device's backing is recognised as unwanted.
 	byDevNo map[string]string
 	// dmListed says the dm listing behind dms/ours/byDevNo ANSWERED: the
-	// pass's own `dmsetup ls`, or in a check round and an info read the
-	// reading's `dmsetup info` listing, partial or not (CN30). When it did
-	// not, those three maps are empty for want of an answer rather than
-	// because the node holds nothing, and an empty map is the shape of
-	// "there is nothing here" — so no removal may be derived from this
-	// snapshot at all (architecture.md, Teardown by sweep: "gone" is
-	// probe-verified, never inferred). The pass reports what it can and
-	// re-drives.
+	// pass's own `dmsetup ls`, or in a read the reading's `dmsetup info`
+	// listing, partial or not (CN30). When it did not, those three maps are
+	// empty for want of an answer rather than because the node holds nothing,
+	// and an empty map is the shape of "there is nothing here" — so no removal
+	// may be derived from this snapshot at all (architecture.md, Teardown by
+	// sweep: "gone" is probe-verified, never inferred). The pass reports what
+	// it can and re-drives.
 	dmListed bool
 	// arrays is every md array on the node, read from sysfs alone.
 	arrays []MdArray
 	// mdListed is dmListed for arrays: the /sys/block enumeration answered,
-	// for every array of it under ListArrays' strict rule (in a check round
-	// and an info read, the reading's md walk read that way, MdScan.Arrays).
+	// for every array of it under ListArrays' strict rule (in a read, the
+	// reading's md walk read that way, MdScan.Arrays).
 	// Its silence costs the most: with arrays empty for want of an answer,
 	// L9 would find no array to stop and read clean, and L10 would
 	// disconnect unwanted legs from under a live one.
@@ -113,20 +112,19 @@ type nvmetAttr struct {
 // nothing there", and every removal gated on absence would read it exactly
 // so (listed).
 //
-// Where the listings come from depends on the pass. A check round and an
-// info read pass their reading (rd) and its walk (pw): the dm devices are the
-// reading's `dmsetup info` listing, which answers even when partial — only
-// this cntlr's own converges, the node's syncup and the startup reconcile
-// create or remove its devices, and none of them runs beside the call, so a
-// device a partial listing lacks is someone else's (CN30) — and a `dmsetup
-// table` listing that did not answer fails the verdict too; the arrays are
-// the reading's md walk under ListArrays' rule (MdScan.Arrays); the
-// connections are the walk's. A converge passes no reading and its own walk,
-// which its build's lookups share: it lists the dm devices with the strict
-// `dmsetup ls` and the arrays with ListArrays. The node-level passes pass
-// neither, and take a walk of their own (ListAllSubsys). Every list of
-// connections fails on any subsysnqn read that did not answer
-// (SubsysWalk.Briefs).
+// Where the listings come from depends on the pass. A read passes its reading
+// (rd) and its walk (pw): the dm devices are the reading's `dmsetup info`
+// listing, which answers even when partial — only this cntlr's own converges,
+// the node's syncup and the startup reconcile create or remove its devices,
+// and none of them runs beside the read, so a device a partial listing lacks
+// is someone else's (CN30) — and a `dmsetup table` listing that did not answer
+// fails the verdict too; the arrays are the reading's md walk under
+// ListArrays' rule (MdScan.Arrays); the connections are the walk's. A converge
+// passes no reading and its own walk, which its build's lookups share: it
+// lists the dm devices with the strict `dmsetup ls` and the arrays with
+// ListArrays. The node-level passes pass neither, and take a walk of their own
+// (ListAllSubsys). Every list of connections fails on any subsysnqn read that
+// did not answer (SubsysWalk.Briefs).
 func (s *CnAgentServer) enumerateCn(
 	ctx context.Context,
 	clusterId uint64,
@@ -237,9 +235,8 @@ func (s *CnAgentServer) listArrays(
 }
 
 // hostSubsys is the list of connections of enumerateCn: pw's when the pass
-// took a walk — a converge's own, or a check round's or an info read's in
-// its reading — and a walk of its own when it did not (pw nil, the
-// node-level passes).
+// took a walk — a converge's own, or a read's in its reading — and a walk of
+// its own when it did not (pw nil, the node-level passes).
 func (s *CnAgentServer) hostSubsys(
 	ctx context.Context,
 	pw *passWalk,
@@ -1538,10 +1535,10 @@ func (s *CnAgentServer) sweepCloneChunks(
 // stored after this read, and whose step 1 runs before the disconnect is
 // registered, still adopts the source (cnagent.md Known limits).
 //
-// A live dm-clone's table comes from rd, the reading of a check round or an
-// info read, and from one `dmsetup table` of the device in every other pass
-// (dmTable). The `dmsetup info` that confirms such a device gone after its
-// table read failed is always fresh, never the reading's.
+// A live dm-clone's table comes from rd, the reading of a cntlr's read, and
+// from one `dmsetup table` of the device in every other pass (dmTable). The
+// `dmsetup info` that confirms such a device gone after its table read failed
+// is always fresh, never the reading's.
 func (s *CnAgentServer) srcNqnsInUse(
 	ctx context.Context,
 	clusterId uint64,
@@ -1706,11 +1703,10 @@ func (s *CnAgentServer) orphanCloneMetaNames(
 // in the startup Reconcile. It removes only objects attributed to this
 // cntlr's sp — which is what lets two cntlrs of one CN converge concurrently.
 //
-// remove = false is the read-only VERDICT a check round and an info read take
-// (readCntlr): the same attribution and the same comparison, with nothing
-// touched (CN23), over the listings of the call's reading (plan.rd,
-// plan.walk; CN30). A converge passes no reading and lists the node itself
-// (enumerateCn).
+// remove = false is the read-only VERDICT a cntlr's read takes (readCntlr):
+// the same attribution and the same comparison, with nothing touched (CN23),
+// over the listings of the read's reading (plan.rd, plan.walk; CN30). A
+// converge passes no reading and lists the node itself (enumerateCn).
 //
 // putBack are the md members the verdict names beside the leftovers, by dm
 // name, each a member the converge would put back or add (putBackNames,
@@ -2072,7 +2068,7 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 
 // sweepCn is the node-level pass: everything of an sp whose pointer has left
 // this CN's list, plus the objects no sp can be read off at all. It runs
-// under the node write lock, so no cntlr converge, no Check round and no push
+// under the node write lock, so no cntlr converge, no read and no push
 // runs beside it — which is what makes judging an UNOWNED object safe. A
 // disconnect it sets going (startDisconnect) can land after the lock is
 // released; the connect steps' registry check (disconnectInFlight) keeps a
@@ -2086,7 +2082,7 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // redrive is what of the base state the caller's own probe read wrong in a
 // way a SyncupCn's converge would cure (probeCn): a piece of it absent, or an
 // ANA group in a state other than its fixed one. The read-only verdict of a
-// CheckCn round or a GetCnInfo reports each as a failure, so the verdict is
+// CN's read (refreshCn) reports each as a failure, so the verdict is
 // not clean and the worker re-sends the SyncupCn whose converge builds or
 // rewrites it (CN30); nothing else would, since the worker re-syncs on a
 // reply's code and never on its rows. The removing passes pass none: their

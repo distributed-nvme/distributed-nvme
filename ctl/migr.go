@@ -94,9 +94,9 @@ func migrCreateCmd() *cobra.Command {
 // the leg's only side and the source is released.
 //
 // --force mirrors DeleteClone's. Without it the gateway must first prove, with
-// a live `GetSideInfo` of the DESTINATION side, that every dm-clone region is
-// hydrated, and an incomplete copy is FAILED_PRECONDITION; with it the
-// operator takes that risk deliberately.
+// a `GetSideInfo` of the DESTINATION side, the agent's latest observation of
+// it, that every dm-clone region is hydrated, and an incomplete copy is
+// FAILED_PRECONDITION; with it the operator takes that risk deliberately.
 func migrFinishCmd() *cobra.Command {
 	cmd := leaf(
 		"finish",

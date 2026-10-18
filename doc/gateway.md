@@ -651,9 +651,11 @@ bumps a rev key. An error in any transaction ends the RPC there.
   cluster id, so there is no plain pre-read — and no `DnRev` read: a client
   that wants the desired-state token calls `GetDiskNode`); **after** the STM
   call `GetDnInfo` with the cluster id and `dn_id`; an agent failure is
-  `ABORTED`. Reply `applied_revision` and `dn_info`, both from the agent's
-  reply (`architecture.md`, Disk nodes — deliberately the agent's
-  revision, never the stored rev key).
+  `ABORTED`. Reply `applied_revision`, `dn_info` and `obs_stamp`, all from
+  the agent's reply, which answers from its latest observation of the node,
+  and `obs_age`, which `obsAge` derives from that stamp (`architecture.md`,
+  Disk nodes — deliberately the observation's revision, never the stored
+  rev key).
 
 ### Controller nodes
 
@@ -875,14 +877,16 @@ position, and a re-run of the STM closure on the same picks and reads
   its `addr_port` and the `CnConf`'s `cn_id` (read `CnConfKey` of that
   address in the same STM; deliberately no `SpRev` read); after the STM,
   `GetCntlrInfo` with the cluster id, `cn_id`, `sp_id` and `cntlr_id` at
-  that address; a failure is `ABORTED`. Reply `applied_revision` and
-  `cntlr_info`, both from the agent's reply (`architecture.md`, Cntlrs).
+  that address; a failure is `ABORTED`. Reply `applied_revision`,
+  `cntlr_info`, `obs_stamp` and `obs_age` as `InspectDiskNode` replies its
+  own (`architecture.md`, Cntlrs).
 * **InspectSide** — STM: resolve; find the side by scanning the SP's slices
   (bounded, `architecture.md`, Cntlrs) for `side_id` (`NOT_FOUND`), keeping
   its DN's `addr_port`, its `dn_id` (through `DnConfKey`) and the side
   pointer (deliberately no `SpRev` read); after the STM, `GetSideInfo` with
   the cluster id, `dn_id` and the side pointer; a failure is `ABORTED`.
-  Reply `applied_revision` and `side_info`, both from the agent's reply.
+  Reply `applied_revision`, `side_info`, `obs_stamp` and `obs_age` as
+  `InspectDiskNode` replies its own.
 
 ### Thin devices
 
@@ -1018,9 +1022,10 @@ below name.
   (`force` true skips the lookup
   entirely: no agent call follows, which is what lets force delete a clone
   whose cntlr is unreachable). Between the phases, `force` false calls
-  `GetCntlrInfo` and judges hydration with `hydrationComplete`; incomplete
-  hydration **or an unreachable agent** is `FAILED_PRECONDITION`. Phase 2 STM
-  (deciding): full re-resolution and the token check (GW6 — any interleaved
+  `GetCntlrInfo` and judges hydration with `hydrationComplete` on the
+  agent's latest observation of the primary cntlr, which that call answers
+  with (`architecture.md`, Clones); incomplete hydration **or an
+  unreachable agent** is `FAILED_PRECONDITION`. Phase 2 STM (deciding): full re-resolution and the token check (GW6 — any interleaved
   mutation bumped `SpRev`, so a token the request carried subsumes the
   staleness of phase 1; a token-less request gets the re-resolution only,
   AG4); `loadClone` again, and if `deleting` became true since phase 1,
@@ -1147,8 +1152,10 @@ rather than a candidate problem.
   without, before any agent call (`migrCutoverStarted`; `architecture.md`,
   Migrations); with `force` false, the **destination** side's DN. Between
   the phases, `force` false calls `GetSideInfo` and judges hydration with
-  `hydrationComplete` from `migr_dst_info.dm_clone_info`; incomplete or
-  unreachable is `FAILED_PRECONDITION`. Deciding STM: re-resolve and the
+  `hydrationComplete` from `migr_dst_info.dm_clone_info` of the agent's
+  latest observation of the destination side, which that call answers with
+  (`architecture.md`, Migrations); incomplete or unreachable is
+  `FAILED_PRECONDITION`. Deciding STM: re-resolve and the
   token; the migration's `cutover_pending` again, since a cancel and a
   create under the same name between the phases leave a pending record
   there; apply the finish of `architecture.md`, Migrations (the destination

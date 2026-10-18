@@ -443,11 +443,13 @@ func spGrowSliceCmd() *cobra.Command {
 }
 
 // spInspectSideCmd is InspectSide: the gateway asks the DN agent that hosts
-// the side for its live SideInfo, so this reads past etcd. --id is a SIDE id
-// here, spelled the same as `cntlr … --id` on purpose (dnvctl.md,
-// Conventions) — the RPC, not the flag name, decides what the id means.
+// the side for the SideInfo of its latest observation, so this reads past
+// etcd. --id is a SIDE id here, spelled the same as `cntlr … --id` on purpose
+// (dnvctl.md, Conventions) — the RPC, not the flag name, decides what the id
+// means.
 func spInspectSideCmd() *cobra.Command {
-	cmd := leaf("inspect-side", "read a side from its DN agent (InspectSide)",
+	cmd := leaf("inspect-side",
+		"read a side's latest observation from its DN agent (InspectSide)",
 		func() (job, error) {
 			sideId, err := hexOf("id")
 			if err != nil {

@@ -97,30 +97,40 @@ root, the faults the react and cutoff cases put on node guests never reach the
 processes that must observe and repair them, and its address, an IP literal as
 the cdc requires, is what the hosts discover against. Every daemon log lives
 under a work directory the between-cases rebuild removes, so each case's logs
-replace the last and a passing run leaves none. Every node guest carries the
-suite's md assembly mask
-while its agents run, installed before an agent starts: on a controller node
-the stock udev rule would otherwise race the agent for an array it is creating,
-and on a disk node it would assemble the superblocks the controller node writes
-there (Known limits). The suite computes the NQNs the agents mint, mirroring
-`common/name_fmt.go`, and never mints one; it renders ids from dnvctl's decimal
-strings, never through shell arithmetic, as a cluster id can exceed the shell's
-signed range; each namespace has an explicit uuid, so a host finds it by its
-uuid link, the one name that survives a reconnect; and each host connects as
-itself, under a host NQN distinct from the other's.
+replace the last and a passing run keeps none of them, unless the run is asked
+to keep its logs: then the driver copies the control plane's worker, gateway
+and cdc logs and every log in the node guests' work directories into a
+directory of its own before the between-cases cleanup and a passing run's end
+cleanup remove them, and at the end of a failed run too, whose logs the next
+run's start cleanup would remove, a copy that never fails the run. That copy is
+what `integtest/round_counts.sh` reads: the worker's failed check rounds by
+cause, the check streams it failed to open or to send a round on, its health
+changes to unreachable and its late observations with the largest age, as no
+stage of the suite counts missed rounds. Every node guest carries the suite's
+md assembly mask while its agents run, installed before an agent starts: on a
+controller node the stock udev rule would otherwise race the agent for an array
+it is creating, and on a disk node it would assemble the superblocks the
+controller node writes there (Known limits). The suite computes the NQNs the
+agents mint, mirroring `common/name_fmt.go`, and never mints one; it renders
+ids from dnvctl's decimal strings, never through shell arithmetic, as a cluster
+id can exceed the shell's signed range; each namespace has an explicit uuid, so
+a host finds it by its uuid link, the one name that survives a reconnect; and
+each host connects as itself, under a host NQN distinct from the other's.
 
 **Parameters.** The slice count, by default the ceiling; the redundancy,
 md-raid1 or none, which sets the legs per group; the dn agents per disk-node
-guest, by default the placement bound (E2E3); one case to run alone; and a
-cleanup-only run that sweeps every guest and stops. Every other number derives
-from these before a guest is touched, and a slice count `CreateStoragePool`
-would refuse is refused at parse time. The react case builds its pool at the
-slice count but at most `REACT_SLICE_CAP`, a constant of the suite: a
-primary's build at the ceiling holds its cntlr's lock (`cnagent.md` CN1) for
-longer than react's primary and cntlr thresholds, and the suite cannot
-shorten that hold (Known limits). The numbers that follow from the slice count
-are worked out for react beside the run's, and the dn agents per disk-node
-guest stay the run's.
+guest, by default the placement bound (E2E3); one case to run alone; a
+cleanup-only run that sweeps every guest and stops; and a directory on the
+driver to keep the logs in. Every other number derives from these before a
+guest is touched, and a slice count `CreateStoragePool` would refuse is refused
+at parse time. The react case builds its pool at the slice count but at most
+`REACT_SLICE_CAP`, a constant of the suite: a primary's build at the ceiling
+holds the reads of its cntlr off (`dnagent.md` SH29, SH30), so the observation
+its check rounds answer from ages past the worker's bound and its rounds count
+as missed (`dnv-worker.md` HL7) for longer than react's primary and cntlr
+thresholds, and the suite cannot shorten that hold (Known limits). The numbers
+that follow from the slice count are worked out for react beside the run's, and
+the dn agents per disk-node guest stay the run's.
 
 **The placement bound.** A create puts every side on a disk node of its own and
 a scan keeps one disk node per location (`architecture.md`, Per-operation
@@ -401,12 +411,16 @@ syncup the drop brings lies outside the window that check reads, and waits
 for the array to read clean before the finish. Any converge of the
 primary would put the member back, so before the drop the primary has
 applied the pool's latest revision and runs no CN10 retry: the converge
-that puts the member back is then the one the naming round brings. The
-member must come back in sync with its failfast flag, and one
-trace id must carry the primary's check round whose verdict named it, the
-`SyncupCntlr` the worker re-sent on that round, and that converge's remove
-and then add of the member (`cnagent.md` CN12, CN30; `dnv-worker.md` RW4,
-RW10).
+that puts the member back is then a re-send the naming verdict brings. The
+member must come back in sync with its failfast flag, and the logs must join
+that verdict to that converge through trace ids in three steps: a read of
+the primary's cntlr whose verdict named the member, logged under the id of
+the check round that started the read (`dnagent.md` SH29); the worker's
+`syncup result` record of the `SyncupCntlr` it re-sent on the code of a
+round that answered from that read's observation, which names the read's id
+as the observation's trace id while the re-send runs under the round's own
+id; and the converge's remove and then add of the member under that
+re-send's id (`cnagent.md` CN12, CN30; `dnv-worker.md` RW4, RW10).
 Its leg bitmap is read and pushed only once the primary reaches the leg
 through the new side, and it finishes under the same leg id with an
 optimized path before any read (`architecture.md`, Migration;
@@ -693,16 +707,19 @@ the connect attempted.
 * **A blocked probe, abandoned host IO, or the write the cutoff case's loop had
   queued when it was stopped leaves an unkillable dd or sync behind** (E2E7)
   until its device or path serves IO again.
-* **react is capped below the ceiling.** At the widest shape a building
-  primary cannot answer a health check within a short primary threshold, the
-  default included, so the role can move and move back; a settling primary is
-  therefore held to the cntlr threshold (`dnv-worker.md` AR5, HL2), but the
-  reacting set's cntlr threshold is still shorter than a build at the ceiling,
-  so there react's build can fail over and mint spares repeatedly. Hence
-  react builds at most `REACT_SLICE_CAP` slices (Topology and parameters), and
-  its reactions are not exercised at the ceiling, though the cutoff case's
-  failover is. Below the cap its build may react too, which each reaction's
-  delta from values read just before its trigger absorbs (The cases).
+* **react is capped below the ceiling.** At the widest shape a primary's build
+  holds the reads of its cntlr off, and the observation its check rounds answer
+  from ages past the worker's bound, its rounds then counting as missed
+  (`dnv-worker.md` HL7) for longer than a short primary threshold, the default
+  included, so the role can move and move back; a settling primary is therefore
+  held to the cntlr threshold (`dnv-worker.md` AR5, HL2), but the reacting
+  set's cntlr threshold is still shorter than the stretch of rounds a build at
+  the ceiling makes count as missed, so there react's build can fail over and
+  mint spares repeatedly. Hence react builds at most `REACT_SLICE_CAP` slices
+  (Topology and parameters), and its reactions are not exercised at the
+  ceiling, though the cutoff case's failover is. Below the cap its build may
+  react too, which each reaction's delta from values read just before its
+  trigger absorbs (The cases).
 * **The widest build is bounded by the primary's process spawning, not its
   memory**: fewer slices, no redundancy or more cores on the controller nodes
   shorten it.

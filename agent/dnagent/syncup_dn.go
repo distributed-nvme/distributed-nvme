@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -23,9 +24,12 @@ const (
 // or deleted, and while a side-* file does not load, neither is a chunk whose
 // side is not loaded but whose loaded DN still names that side — converge
 // every loaded DN, tear down sides whose pointer left their DN's list,
-// converge the rest, then re-apply every bitmap chunk it loaded. It runs
+// converge the rest, then re-apply every bitmap chunk it loaded. Each DN's
+// observation is stored once its node-level sweep has run, and each side's
+// once its converge has (SH28); a side the pass skips gets none. It runs
 // under the node write lock with the caller's startup trace id (SH2), and
-// fails only when the local store itself is unreadable (SH3).
+// fails only when the local store itself is unreadable (SH3). No RPC reaches
+// the server before it returns, so it marks no converge (SH30).
 func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	s.rootCtx = ctx
 	s.locks.Node().Lock()
@@ -177,9 +181,12 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	// Each DN's info is kept for its observation, which waits for its sweep
+	// below: the sweep's verdict is the observation's code.
+	dnInfos := make(map[string]*pb.DnInfo)
 	for _, key := range s.dnKeys() {
 		st := s.getDn(key)
-		s.convergeDn(ctx, st)
+		dnInfos[key] = s.convergeDn(ctx, st)
 	}
 	// A side whose pointer has left its parent's list is FORGOTTEN here —
 	// file, chunks, memory entry, object lock and goroutines — without any
@@ -199,13 +206,16 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	}
 	for _, key := range s.dnKeys() {
 		st := s.getDn(key)
-		if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) != nil {
-			// architecture.md, Common validation: a dn whose stored conf is
-			// unusable converges nothing and sweeps nothing. A conf fault must
-			// not destroy resources.
-			continue
+		sweep := &agent.SweepResult{}
+		// architecture.md, Common validation: a dn whose stored conf is
+		// unusable converges nothing and sweeps nothing. A conf fault must
+		// not destroy resources. Its observation carries the empty verdict
+		// dnVerdict gives such a DN.
+		if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) == nil {
+			sweep = s.sweepDn(ctx, st, true)
 		}
-		s.sweepDn(ctx, st, true)
+		storeObs(s, ctx, &st.obs, dnInfos[key], sweep.Reply(),
+			st.req.Load().GetRevision())
 	}
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
@@ -224,7 +234,10 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 			// already recorded the refusal for this DN.
 			continue
 		}
-		s.convergeSide(ctx, st, extentSize, common.DnMigrConnectPassBudget)
+		info, sweep := s.convergeSide(ctx, st, extentSize,
+			common.DnMigrConnectPassBudget)
+		storeObs(s, ctx, &st.obs, info, sweep.Reply(),
+			st.req.Load().GetRevision())
 	}
 	// DN2: the dm-clone may have survived the restart, so re-apply every
 	// chunk once here rather than only on (re)creation.
@@ -267,7 +280,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 //
 // SyncupDn and the startup Reconcile hold the node write lock, so neither
 // the DN set nor the side set can move under them. The read-only verdict
-// (dnVerdict, behind CheckDn and GetDnInfo) runs under the read lock only,
+// (dnVerdict, in the DN's background read) runs under the read lock only,
 // where a side's SyncupSide may store its request meanwhile; knownSides is
 // read before claimedMigrs for the same reason sweepSide reads it before the
 // claims.
@@ -284,7 +297,7 @@ func (s *DnAgentServer) sweepOrphanRecords(
 		// this step could not run, and a verdict that stayed OK would leave
 		// nothing to re-drive the SyncupDn whose converge reads the disk
 		// again and formats a blank one once no device maps it (DN5). A disk
-		// that stays another node's or corrupt keeps every round's verdict
+		// that stays another node's or corrupt keeps every read's verdict
 		// non-clean for as long as it does (DN16).
 		res.Fail("volume table",
 			fmt.Errorf("disk identity is not confirmed for this node"))
@@ -512,7 +525,9 @@ func pointerKnown(req *pb.SyncupDnRequest, ptr *pb.SidePointer) bool {
 // dnv-worker's own refusal so one grep finds every one of them.
 const msgInvalidStoredConf = "invalid stored conf"
 
-// syncupDn implements DN4-DN7. The node write lock is held by the caller.
+// syncupDn implements DN4-DN7. The node write lock is held by the caller. A
+// request the gates refuse stores no observation; an admitted one stores its
+// converge's before the caller lets go of the lock (SH28).
 func (s *DnAgentServer) syncupDn(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,
@@ -559,19 +574,30 @@ func (s *DnAgentServer) syncupDn(
 	// names the side. With the new list on disk first, a crash mid-sweep is
 	// nothing but a startup sweep.
 	path := s.nf.LocalDnPath(req.GetClusterId(), req.GetDnId())
+	var savedAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting dn state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
+	} else {
+		savedAt = s.now()
 	}
 	info := s.convergeDn(ctx, st)
 	s.dropRemovedSides(ctx, req)
 	sweep := s.sweepDn(ctx, st, true)
+	reply := sweep.Reply()
 
+	// The observation is the reply's info and code. Its disk counts are
+	// convergeDn's, taken before the pointer diff and the sweep (DN6), as
+	// the reply's are: one that drops a pointer still counts that side's
+	// record, and the DN's next read finds the record swept.
+	obs := storeObs(s, ctx, &st.obs, info, reply, req.GetRevision())
 	return &pb.SyncupDnReply{
-		AgentReply: sweep.Reply(),
+		AgentReply: reply,
 		Revision:   req.GetRevision(),
 		DnInfo:     info,
+		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		SaveTime:   agent.Timestamp(savedAt),
 	}
 }
 
@@ -584,7 +610,9 @@ func (s *DnAgentServer) convergeDn(
 	st *dnState,
 ) *pb.DnInfo {
 	req := st.req.Load()
-	t := st.tracker
+	// A row made after the call is cut off moves no epoch, through a view of
+	// its own, as the DN's read writes (agent.ResTracker.In).
+	t := st.tracker.In(ctx)
 	info := &pb.DnInfo{}
 
 	// architecture.md, Common validation: the entrance that does not come

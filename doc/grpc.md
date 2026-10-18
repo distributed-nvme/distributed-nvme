@@ -59,12 +59,19 @@ T3. Propagation is transitive end to end by construction: dnvctl sets an id
     (`dnv-worker.md` RW10). On these streams the id therefore also travels
     in the request: every `Check*Request` the worker sends carries its
     round's id in `trace_id`, and the agent runs the round under it
-    (`agent.CheckRoundCtx`, `dnagent.md` SH24), so that round's
-    `os command` and file records carry the round's id; an empty `trace_id`
-    keeps the stream's. The stream's own per-message records (L4) are logged
-    under the stream ctx and keep the id its metadata brought at open; a
-    round's id shows in the `data` of its request's `grpc client send` and
-    `grpc server recv` records.
+    (`agent.CheckRoundCtx`, `dnagent.md` SH24); an empty `trace_id` keeps
+    the stream's. The round itself runs no OS command and reads no file —
+    it answers from the agent's latest observation of the object
+    (`dnagent.md` SH25) — but the background read it starts runs under the
+    round's id (`dnagent.md` SH29), so that read's `os command` and file
+    records carry it. The reply's stamp carries the trace id of the
+    converge or read that made the observation it answers from (`dnagent.md`
+    SH28), and the worker's `syncup result` record of a re-send the round
+    brings names that id beside the round's own (`dnv-worker.md` RW10). The
+    stream's own per-message records (L4) are logged under the stream ctx
+    and keep the id its metadata brought at open; a round's id shows in the
+    `data` of its request's `grpc client send` and `grpc server recv`
+    records.
 
 T4. Minting trace ids is the entry points' job, never the interceptors':
     the shared interceptors only move an id that is already there between
@@ -78,10 +85,12 @@ T4. Minting trace ids is the entry points' job, never the interceptors':
     shared chain adopts the id as it adopts a client's and logs the request
     under it. Each daemon also mints one at startup, for its startup and
     other process-lifetime records; `dnv-agent` mints one per attempt of a
-    background task, all but one: the cn sweep's background
+    background task, all but two: the cn sweep's background
     "nvme disconnect" runs under the id of the pass that set it going and
     mints one only when that pass had none (`dnagent.md` SH27, `cnagent.md`
-    CN10); and `dnv-cdc` mints one per accepted host connection, one per
+    CN10), and the background read a check round starts runs under that
+    round's id and mints one only when the round had none (`dnagent.md`
+    SH29); and `dnv-cdc` mints one per accepted host connection, one per
     scan attempt (the watch it opens included) and one per applied watch
     event. The generator is `NewTraceId` (`log.md`, Placement); the ids the
     worker mints per unit of work put a prefix of its seed in front of the
@@ -209,8 +218,11 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   the suites parse (`log.md` R3). The only log records reaching a driver's
   stderr are the `etcd *` ones `etcdutil` emits under `workerctl` and
   `cdcctl` — `gatewayctl` calls nothing that logs, and `dnagentctl` and
-  `cnagentctl` never call `slog` — while each driver's die and usage
-  diagnostics share that stream as plain text. `fakeagent` and `fakegateway`
-  inherit the same default and, as daemons emitting an interceptor record per
-  gRPC message, log far more than a one-shot driver; the suite that launches
-  each captures its stderr into the log file it reads.
+  `cnagentctl` never call `slog` — while each driver's die, usage and
+  progress diagnostics share that stream as plain text, among them, from
+  `dnagentctl` and `cnagentctl`, the age of the observation a reply answered
+  from and how many rounds a command in fresh mode sent. `fakeagent` and
+  `fakegateway` inherit the same default and, as daemons emitting an
+  interceptor record per gRPC message, log far more than a one-shot driver;
+  the suite that launches each captures its stderr into the log file it
+  reads.

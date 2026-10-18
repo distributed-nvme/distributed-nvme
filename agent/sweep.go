@@ -41,8 +41,8 @@ const (
 
 // MsgSweepLeftover is the record of log.md, Leftovers, naming everything one
 // pass found that keeps its scope from being clean (SweepResult). One record
-// per pass, so a lingering leftover shows up in the agent log every round
-// rather than once.
+// per pass — every converge and every background read — so a lingering
+// leftover shows up in the agent log again and again rather than once.
 const MsgSweepLeftover = "sweep leftover"
 
 // SweepResult is what one pass found: the leftovers — the objects still
@@ -90,8 +90,9 @@ func (r *SweepResult) Log(ctx context.Context, ids ...any) {
 	slog.InfoContext(ctx, MsgSweepLeftover, attrs...)
 }
 
-// Reply is the AgentReply every Syncup*, Check* and Get*Info of this scope
-// carries: OK when the scope is clean, ReplyCodeLeftover otherwise.
+// Reply is the AgentReply a converge or a background read of this scope
+// stores as its observation's code, and a Syncup* reply carries: OK when the
+// scope is clean, ReplyCodeLeftover otherwise.
 func (r *SweepResult) Reply() *pb.AgentReply {
 	if r.Clean() {
 		return OkReply()

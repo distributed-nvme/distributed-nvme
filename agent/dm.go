@@ -121,10 +121,10 @@ func (d *Dm) List(ctx context.Context) (map[string]string, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Whole-node readers. A cn check round and an info read take every dm device
-// of the node from two listings, one run each, instead of from reads per
-// device (cnagent.md CN28): a listing of the whole node costs about what a
-// read of one device costs. ListInfo gives each device's number and attr
+// Whole-node readers. A cntlr's background read takes every dm device of the
+// node from two listings, one run each, instead of from reads per device
+// (cnagent.md CN28; dnagent.md SH29): a listing of the whole node costs about
+// what a read of one device costs. ListInfo gives each device's number and attr
 // flags, ListTables its live table, and InfoDevNo reads one device the way
 // ListInfo reads each.
 // ---------------------------------------------------------------------------

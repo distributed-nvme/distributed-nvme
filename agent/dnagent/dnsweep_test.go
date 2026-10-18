@@ -724,12 +724,13 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // TestNodeSweepCostIsLinearInOwnExports pins the cost of attributing a :2:
 // export on a kernel several dn agents share. The NQN names no dn, so the
 // node-level pass attributes every export of an sp this node hosts that no
-// held side of its own claims — in the verdict of every Check round and in
-// every SyncupDn — and on a shared kernel nearly all of those are the
-// siblings': each side-holding agent exports its own leg of the sp, one
-// export per cn. Attributing each with an `ls` exec of its namespaces would
-// make every side-holding agent's pass grow with everybody else's exports of
-// the sp — about s·(s−1) execs per cn per round for s side-holding agents.
+// held side of its own claims — in the verdict of every read of the DN a
+// check round starts (SH29) and in every SyncupDn — and on a shared kernel
+// nearly all of those are the siblings': each side-holding agent exports its
+// own leg of the sp, one export per cn. Attributing each with an `ls` exec of
+// its namespaces would make every side-holding agent's pass grow with
+// everybody else's exports of the sp — about s·(s−1) execs per cn per round
+// for s side-holding agents.
 //
 // dnv builds every side export with one namespace, nsid 1, so its
 // device_path is read directly, and the age of an export without it is read
@@ -739,23 +740,24 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // pass: beside each export that has its namespace, each sibling agent here
 // has a build in flight short of its namespace, young, and an export removed
 // after the subsystems listing, which every read of it then finds gone. The
-// test runs both passes — a Check round's verdict and a SyncupDn — over four
-// sibling agents of one sp holding one export of each shape each, then eight
-// each, then thirty-two agents holding one each, and counts the execs and the
-// listings the agent makes in its own process (sysfs and the local store):
-// neither count may move. The third run holds the number of exports of the
-// second and changes only the number of agents, each on its own port: a cost
-// per sibling AGENT (a port listing, say) is as quadratic on the node as one
-// per export, and the first two runs hold the agent count still. Each pass
-// also reads each sibling export's namespace 1 exactly once, and the age of
-// each without it exactly once, which is what makes a cache of the
-// attribution pointless within a pass.
+// test runs both passes — the verdict of the DN's read and a SyncupDn — over
+// four sibling agents of one sp holding one export of each shape each, then
+// eight each, then thirty-two agents holding one each, and counts the execs
+// and the listings the agent makes in its own process (sysfs and the local
+// store): neither count may move. The third run holds the number of exports
+// of the second and changes only the number of agents, each on its own port:
+// a cost per sibling AGENT (a port listing, say) is as quadratic on the node
+// as one per export, and the first two runs hold the agent count still. Each
+// pass also reads each sibling export's namespace 1 exactly once, and the age
+// of each without it exactly once, which is what makes a cache of the
+// attribution pointless within a pass. The read's count is the read's own:
+// the round after it answers from the observation and adds no call (SH28).
 //
 // The execs left are the fixed ones, and only two: the sweep's `dmsetup ls`
 // and its `ls` of the subsystems directory. The disk's size and whether the
 // agent's own port is there are read in the agent's own process, once each
-// a pass (dnagent.md SH17, SH18): a child for either would cost every Check
-// round of a disk node one more process.
+// a pass (dnagent.md SH17, SH18): a child for either would cost every read
+// of a disk node one more process.
 func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 
@@ -868,7 +870,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 
 		var c cost
 		node.Reset()
-		reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		reply, _ := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 			ClusterId: testCluster, DnId: testDn,
 		}, nil)
 		if got := reply.GetAgentReply().GetCode(); got != 0 {
@@ -878,8 +880,8 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		c.verdictLs = len(node.callsMatching("cmd ls "))
 		c.verdictCmds = len(node.callsMatching("cmd "))
 		c.verdictLists = len(node.callsMatching("list "))
-		readsOnce("CheckDn verdict")
-		fixedOnly("CheckDn round")
+		readsOnce("DN's read")
+		fixedOnly("DN's read")
 
 		node.Reset()
 		syncReply, err := srv.SyncupDn(ctx, sweepDnReq(2, ours))
@@ -1110,7 +1112,7 @@ func TestSuspendedLinearResumedBeforeNvmetDisable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The read-only verdicts (Check* and Get*Info)
+// The read-only verdicts (the read behind Check* and Get*Info)
 // ---------------------------------------------------------------------------
 
 // TestCheckSideReportsLeftover pins the side-level verdict: the same
@@ -1120,9 +1122,12 @@ func TestSuspendedLinearResumedBeforeNvmetDisable(t *testing.T) {
 // Teardown by sweep; `dnv-worker.md` RW4). The agent stores no "pending" flag
 // — a stored flag is memory of failure, and memory of failure is what let the
 // old teardowns forget an object that would not go — so what drives the
-// worker's next SyncupSide is a code recomputed from the node on every round.
-// A verdict that mutated would be worse than useless: Check runs under the
-// node READ lock and against objects another converge may own (DN16/SH25).
+// worker's next SyncupSide is a code recomputed from the node on every read,
+// which the next round carries (SH28, SH29). A verdict that mutated would be
+// worse than useless: the read runs under the node READ lock and against
+// objects another converge may own (DN16, SH29). Each round and info read
+// here follows a read of its object, and the node is checked for mutations
+// across both.
 func TestCheckSideReportsLeftover(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -1142,7 +1147,7 @@ func TestCheckSideReportsLeftover(t *testing.T) {
 	}
 
 	node.Reset()
-	reply, info := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	reply, info := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), ShowInfo: true,
 	}, nil)
@@ -1160,7 +1165,7 @@ func TestCheckSideReportsLeftover(t *testing.T) {
 	if info == nil || reply.GetSideInfo().GetSideDevInfo() == nil {
 		t.Error("a leftover verdict dropped the SideInfo")
 	}
-	getReply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	getReply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -1185,7 +1190,7 @@ func TestCheckSideReportsLeftover(t *testing.T) {
 		t.Fatalf("SyncupSide: %v", err)
 	}
 	node.Reset()
-	reply, _ = srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	reply, _ = checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), ShowInfo: true,
 	}, nil)
@@ -1223,7 +1228,7 @@ func TestCheckDnReportsLeftover(t *testing.T) {
 	}
 
 	node.Reset()
-	reply, info := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+	reply, info := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, ShowInfo: true,
 	}, nil)
 	if got := reply.GetAgentReply().GetCode(); got !=
@@ -1238,7 +1243,7 @@ func TestCheckDnReportsLeftover(t *testing.T) {
 	if info == nil || reply.GetDnInfo().GetMetaInfo() == nil {
 		t.Error("a leftover verdict dropped the DnInfo")
 	}
-	getReply, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+	getReply, err := dnInfoNow(srv, ctx, &pb.GetDnInfoRequest{
 		ClusterId: testCluster, DnId: testDn,
 	})
 	if err != nil {
@@ -1261,7 +1266,7 @@ func TestCheckDnReportsLeftover(t *testing.T) {
 		t.Fatalf("SyncupDn: %v", err)
 	}
 	node.Reset()
-	reply, _ = srv.checkDnRound(ctx, &pb.CheckDnRequest{
+	reply, _ = checkDnNow(srv, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, ShowInfo: true,
 	}, nil)
 	if got := reply.GetAgentReply().GetCode(); got != 0 {

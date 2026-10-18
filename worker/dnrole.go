@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -214,6 +215,7 @@ func (d *dnDriver) syncup(
 	}
 	return d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetDnInfo(),
+		reply.GetObsStamp(), reply.GetSaveTime(),
 	), nil
 }
 
@@ -279,17 +281,20 @@ func (d *dnDriver) noteRecord(
 	}
 }
 
-// compareCounts is RW13's count compare, run on a round's accepted reply:
-// the free extents of the disk counts in the latest known info (HL5) against
-// the record's free_ext_cnt. It compares only when the counts are present and
-// say the side records match the side pointer list, and when the revision of
-// the reply that carried them, this round's reply revision and the revision
-// read with the record are one: at one revision a DN has one list and one
-// free count (dnRecordCounts). Any other reply neither counts nor resets the
-// run. A compare that agrees ends the run; the dnCountsRun-th disagreement in
-// a row is logged once, until a compare agrees. Nothing is written.
+// compareCounts is RW13's count compare, run on a round's accepted reply
+// that answers from an observation new to this loop (RW23): the free extents
+// of the disk counts in the latest known info (HL5) against the record's
+// free_ext_cnt. It compares only when the counts are present and say the side
+// records match the side pointer list, and when the revision of the reply
+// that carried them, this round's reply revision and the revision read with
+// the record are one: at one revision a DN has one list and one free count
+// (dnRecordCounts). Any other reply neither counts nor resets the run — a
+// round repeating an observation already seen among them, since counting it
+// again would count one look twice. A compare that agrees ends the run; the
+// dnCountsRun-th disagreement in a row is logged once, until a compare
+// agrees. Nothing is written.
 func (d *dnDriver) compareCounts(ctx context.Context, r *replyState) {
-	if !r.fromRound || !accepted(r.code) {
+	if !r.fromRound || !r.newObs || !accepted(r.code) {
 		return
 	}
 	info, infoRev := d.infoAt()
@@ -323,10 +328,11 @@ func (d *dnDriver) compareCounts(ctx context.Context, r *replyState) {
 	)
 }
 
-// unreachable folds a broken stream or a missed reply into the DN's health
-// (HL1). The in-memory info is marked RES_STATUS_UNKNOWN — what the worker
-// records itself while the stream is dead (architecture.md, Live-state
-// reporting) — and never written to etcd.
+// unreachable folds a broken stream, a missed reply or a reply whose
+// observation is too old (HL7) into the DN's health (HL1). The in-memory info
+// is marked RES_STATUS_UNKNOWN — what the worker records itself while the
+// stream is dead (architecture.md, Live-state reporting) — and never written
+// to etcd.
 func (d *dnDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.health.observe(ctx, healthUnreachable, "")
@@ -334,21 +340,20 @@ func (d *dnDriver) unreachable(ctx context.Context) {
 
 // fold turns one reply into a replyState, remembering the DnInfo it carried
 // with the reply's revision (HL5: a show_info = false reply carries one only
-// when something changed; RW13 pairs the counts with that revision).
+// when something changed; RW13 pairs the counts with that revision). stamp
+// is the reply's observation stamp and saveTime a SyncupDn reply's save time,
+// nil on a round's reply.
 func (d *dnDriver) fold(
 	agentReply *pb.AgentReply,
 	revision uint64,
 	info *pb.DnInfo,
+	stamp *pb.ObsStamp,
+	saveTime *timestamppb.Timestamp,
 ) *replyState {
 	if info != nil {
 		d.storeInfo(info, revision)
 	}
-	return &replyState{
-		revision:    revision,
-		code:        agentReply.GetCode(),
-		details:     agentReply.GetDetails(),
-		infoPresent: info != nil,
-	}
+	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
 }
 
 // dnCheckStream adapts the generated CheckDn stream to checkStream (RW4).
@@ -375,6 +380,7 @@ func (s *dnCheckStream) recv() (*replyState, error) {
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetDnInfo(),
+		reply.GetObsStamp(), nil,
 	), nil
 }
 

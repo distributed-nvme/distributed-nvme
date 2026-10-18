@@ -67,6 +67,12 @@ DATA_ZERO_BYTES=$(((META_BLOCKS + 1) * BLOCK_SIZE))
 # Per-RPC deadline for the converge RPCs (see ctl).
 SYNCUP_TIMEOUT=60
 
+# Deadline of a fresh check round, a check-dn or check-side with --fresh
+# (see ctl): its rounds wait for two reads of the object that the agent makes
+# after the command begins, and for any converge of the object that runs
+# meanwhile (dnagent.md SH29, SH30).
+FRESH_TIMEOUT=30
+
 # Polling budget of `dnagentctl wait-zeroed` (architecture.md,
 # Side provisioning protocol). On a loop device the kernel maps
 # REQ_OP_WRITE_ZEROES onto fallocate, so even the longest length this suite
@@ -312,15 +318,27 @@ helper_ok() {
 	sshv_ok "$idx" "bash $HELPER $*"
 }
 
-# ctl drives one agent. Every call carries the current stage's trace id.
+# ctl drives one agent. Every call carries the current stage's trace id, and
+# the reads a check round starts log under it (dnagent.md SH29).
 #
-# The driver's default --timeout suits the read-only RPCs, but one
-# converge pass runs dozens of OS commands, each with its own soft and hard
-# budget (architecture.md, Common validation) — enabling a migration
+# The driver's default --timeout suits the RPCs that answer from memory, but
+# one converge pass runs dozens of OS commands, each with its own soft and
+# hard budget (architecture.md, Common validation) — enabling a migration
 # destination alone creates a clone-metadata wrapper, an nvme connection, a
 # dm-clone and reloads the export stack, with the two concurrent migrations
-# converging on both nodes at once. Syncups get a much larger budget; a
-# caller's own --timeout still wins, since it lands later on the command line.
+# converging on both nodes at once. Syncups get a much larger budget, and a
+# fresh check round, which waits for reads and for a converge, a budget of
+# its own; a caller's own --timeout still wins, since it lands later on the
+# command line.
+#
+# The agent answers a check round and an info read from its latest
+# observation of the object (dnagent.md SH28), and only a round starts a read
+# of the node. No worker runs here, so a stage that must see the node as it
+# is now — after a fault, behind a converge, or counting what one read does —
+# sends a check-dn or check-side with --fresh, which sends rounds until one
+# answers from an observation read after the command began. A plain info
+# read is enough where the last converge or a fresh round just stored the
+# observation the stage reads.
 ctl() {
 	local idx=$1
 	shift
@@ -329,6 +347,11 @@ ctl() {
 	local extra=()
 	case "$sub" in
 	syncup-dn | syncup-side) extra=(--timeout "$SYNCUP_TIMEOUT") ;;
+	check-dn | check-side)
+		case " $* " in
+		*" --fresh "*) extra=(--timeout "$FRESH_TIMEOUT") ;;
+		esac
+		;;
 	esac
 	log "[dn$idx] dnagentctl $sub $*"
 	"$CTL" "$sub" \
@@ -1465,8 +1488,10 @@ cleanup_all() {
 # Teardown and cleanup, can end with the last get-side-info of every
 # involved side — the one view of a failure that names the migration's own
 # resources (clone, target, per-CN maps) instead of the node's raw dm/nvmet
-# state. The migration cases fill it as they set each side up (a side that does
-# not exist yet has nothing to report), and clear it once the case has torn its
+# state. An info read answers from memory, so it shows the side as the last
+# converge or read left it, and it answers even while a converge is wedged.
+# The migration cases fill it as they set each side up (a side that does not
+# exist yet has nothing to report), and clear it once the case has torn its
 # sides down again.
 DIAG_SIDES=()
 diag_add_side() { # dnidx sp leg side
@@ -1614,14 +1639,16 @@ setup() {
 
 # converge_check runs the check-dn/check-side round pair (dnagent_integtest.md,
 # Conventions, Check rounds) against a side and asserts that each reply echoes
-# the revision the agent actually stored.
+# the revision the agent actually stored. Both are fresh: the disk node's
+# observation is the last syncup-dn's, older than the side converges since,
+# so the pair judges reads made after the stage began.
 converge_check() { # dnidx sp leg side siderev
 	local idx=$1 out
-	out=$(ctl "$idx" check-dn --revision "${DNREV[$idx]}" --show-info)
+	out=$(ctl "$idx" check-dn --fresh --revision "${DNREV[$idx]}" --show-info)
 	assert_dn_info_ok "$out" "dn$idx check-dn"
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$idx]}" \
 		"dn$idx check-dn revision"
-	out=$(ctl "$idx" check-side --revision "$5" --show-info \
+	out=$(ctl "$idx" check-side --fresh --revision "$5" --show-info \
 		--sp "$2" --leg "$3" --side "$4")
 	assert_ok "$out" ".side_info.side_dev_info.status" "dn$idx check-side side_dev"
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "$5" \
@@ -1651,11 +1678,12 @@ assert_no_residue() { # sp
 # (DefaultNvmeFastIoFailTmo), and the pass after that finds the device gone.
 #
 # Re-driving is the worker's own rule, and the loop is the suite playing that
-# part: in production the retry comes from the CHECK round — the agent
-# recomputes the verdict on every CheckDn, and a round whose code is non-zero
-# issues another SyncupDn (RW4 step 5) — never from the Syncup reply itself.
-# No such round is running behind this suite, so it re-sends the request
-# itself.
+# part: in production the retry comes from the CHECK round — each CheckDn
+# answers from the agent's latest observation, whose verdict the read a round
+# starts stores again (dnagent.md SH28, SH29), and a round whose code is
+# non-zero issues another SyncupDn (RW4 step 5) — never from the Syncup reply
+# itself. No such round is running behind this suite, so it re-sends the
+# request itself.
 #
 # Only code 4 is tolerated in between. Every other non-zero code is a refusal
 # (stale revision, invalid conf, unknown object) that repeating cannot fix, so
@@ -1821,7 +1849,8 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	[ -z "$left" ] ||
 		die "provisioning $sp/$leg/$side: export dm devices exist at provisioned=false: $left"
 	# The provisioning-window sample (dnagent_integtest.md, Conventions): one
-	# get-side-info before the wait, to
+	# fresh check-side before the wait — the zeroing loop stores no
+	# observation, so only a read a round starts shows its progress — to
 	# record whether this run ever observed the side mid-zeroing. Purely an
 	# observation and never an assertion — a side here zeroes its length in
 	# one or two batches and loop maps Write Zeroes onto `fallocate`, so the
@@ -1831,8 +1860,8 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	# for the same reason: this must not be able to fail the suite (the next
 	# line's wait-zeroed is where a real problem surfaces). The reply is
 	# protojson, which prints a uint64 as a decimal string and omits a zero.
-	sample=$(ctl "$idx" get-side-info --sp "$sp" --leg "$leg" --side "$side" ||
-		true)
+	sample=$(ctl "$idx" check-side --fresh --show-info \
+		--sp "$sp" --leg "$leg" --side "$side" || true)
 	[ -n "$sample" ] || sample="{}"
 	zdone=$(jq_of "$sample" '.side_info.zeroed_bytes // "0"')
 	ztotal=$(jq_of "$sample" '.side_info.zero_bytes // "0"')
@@ -1856,15 +1885,24 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 
 # age_gate_stages proves DN6's age read on a real kernel (dnagent_integtest.md,
 # Cases, smoke): an export of the side's sp for a leg no side holds, made by
-# hand with no namespace and no port link. While it is young the check rounds
-# stay clean, the agent reads its age in its own process and lists neither
-# its namespaces nor the ports, and nothing moves the directory's time. Once
-# it is older than the orphan grace — the real one: nothing backdates it — a
-# check round reports it as a leftover after one listing of its namespaces
-# and one of the ports, and the next syncup removes it.
+# hand with no namespace and no port link. While it is young the disk node's
+# reads stay clean, each reading its age in the agent's own process and
+# listing neither its namespaces nor the ports, and nothing moves the
+# directory's time. Once it is older than the orphan grace — the real one:
+# nothing backdates it — a read reports it as a leftover after one listing of
+# its namespaces and one of the ports, and the next syncup removes it.
+#
+# The rounds are fresh, and a read logs under the trace id of the round that
+# started it (dnagent.md SH29), so the stage counts what the reads of its own
+# rounds did in total, not per read: a fresh command sends several rounds,
+# each of which can start a read, takes its reply from a read one of them
+# started, and can leave the last read running as it exits. Before it
+# counts, flush_reads waits for that last read to end, under a trace id of
+# its own.
 age_gate_stages() { # dnidx sp leg side cn
 	local dn=$1 sp=$2 leg=$3 side=$4 cn=$5
-	local nqn out t0 t1 i age details rounds=3
+	local nqn out t0 t1 i age details reads age_reads ns_lists port_lists
+	local rounds=3
 	nqn=$(side_to_cn_nqn "$CLUSTER" "$sp" 0x2 "$cn")
 
 	stage bare "an export of the sp for a leg no side holds, made by hand"
@@ -1875,30 +1913,48 @@ age_gate_stages() { # dnidx sp leg side cn
 	sleep 2
 	t0=$(helper "$dn" "subsys_mtime '$nqn'")
 
-	stage young "check rounds while it is young: clean, its age read in process, nothing listed"
+	stage young "reads while it is young: clean, its age read in process, nothing listed"
 	for ((i = 1; i <= rounds; i++)); do
-		out=$(ctl "$dn" check-dn --revision "${DNREV[$dn]}" --show-info)
+		out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" \
+			--show-info)
 		assert_dn_info_ok "$out" "young check-dn $i"
 		sleep 1
 	done
+	flush_reads "$dn" 0
 	t1=$(helper "$dn" "subsys_mtime '$nqn'")
 	assert_eq "$t1" "$t0" "the time of $nqn after the young rounds"
-	assert_eq "$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")" \
-		"$rounds 0 0" \
-		"the young rounds' age reads, namespace and port listings of $nqn"
+	# Each read reads the age once; each fresh command's reply comes from a
+	# read one of its own rounds started, so there are at least as many.
+	reads=$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")
+	case "$reads" in
+	*" 0 0") ;;
+	*) die "the young reads listed the namespaces or the ports of $nqn" \
+		"(age reads, namespace and port listings: $reads)" ;;
+	esac
+	[ "${reads%% *}" -ge "$rounds" ] ||
+		die "the young reads read the age of $nqn ${reads%% *} times," \
+			"want at least $rounds (age reads, namespace and port" \
+			"listings: $reads)"
 
-	stage old "past the orphan grace a check round reports it, after one listing of each"
+	stage old "past the orphan grace a read reports it, after one listing of each"
 	age=$(helper "$dn" "wait_older '$nqn' $ORPHAN_GRACE")
 	log "smoke: $nqn is ${age}s old"
-	out=$(ctl "$dn" check-dn --revision "${DNREV[$dn]}" --show-info \
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" --show-info \
 		--expect-code 4)
 	details=$(jq_of "$out" '.agent_reply.details // ""')
 	case "$details" in
 	*"$nqn"*) ;;
 	*) die "the old export's check round names no $nqn: $details" ;;
 	esac
-	assert_eq "$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")" "1 1 1" \
-		"the old round's age reads, namespace and port listings of $nqn"
+	flush_reads "$dn" 4
+	# Every read of the old export reads its age, lists its namespaces and
+	# lists the ports once each.
+	reads=$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")
+	read -r age_reads ns_lists port_lists <<<"$reads"
+	[ "$age_reads" -ge 1 ] && [ "$ns_lists" = "$age_reads" ] &&
+		[ "$port_lists" = "$age_reads" ] ||
+		die "the old reads' age reads, namespace and port listings of" \
+			"$nqn are '$reads', want three equal counts of at least 1"
 
 	stage sweep "the next syncup removes it"
 	bump_dn_rev "$dn"
@@ -1906,6 +1962,21 @@ age_gate_stages() { # dnidx sp leg side cn
 		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$side")
 	assert_dn_info_ok "$out" "smoke age syncup-dn"
 	assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no "$nqn after the syncup"
+}
+
+# flush_reads <dnidx> <code> runs one fresh check-dn under a trace id of its
+# own, the stage's with -flush appended, whose reply must carry <code>. One
+# read of an object runs at a time, and a fresh round's reply comes from a
+# read that began after the read running when the command began had ended, so
+# once it returns every read the stage's own rounds started has ended and
+# logged, and the reads it starts itself log under the other id.
+flush_reads() {
+	local idx=$1 code=$2
+	(
+		TRACE="$TRACE-flush"
+		ctl "$idx" check-dn --fresh --revision "${DNREV[$idx]}" \
+			--expect-code "$code" >/dev/null
+	)
 }
 
 case_smoke() {
@@ -2039,8 +2110,9 @@ $((DATA_OFFSET / 1048576)) $ext_mib $((DATA_SIZE / EXTENT_SIZE))" >/dev/null ||
 	assert_ok "$SYNC_SIDE_REPLY" ".side_info.side_dev_info.status" \
 		"zeroing data side_dev"
 	# The real disk counts both sides' records, two extents each, and they
-	# match the two pointers.
-	out=$(ctl "$dn" get-dn-info)
+	# match the two pointers. Fresh: the disk node's observation is the
+	# syncup-dn's, older than both side records.
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
 	assert_eq "$(jq_of "$out" "$counts")" "$area $((area - 4)) 2 true" \
 		"zeroing: dn$dn's counts (total, free, side records, match) with both sides built"
 
@@ -2068,9 +2140,10 @@ $((DATA_OFFSET / 1048576)) $ext_mib $((DATA_SIZE / EXTENT_SIZE))" >/dev/null ||
 	assert_dn_info_ok "$out" "zeroing teardown syncup-dn"
 	assert_no_residue "$sp"
 	# The records went with their devices: an orphaned one would make the
-	# read-only verdict a leftover, which ctl's default expected code fails.
-	# The counts say so too: the whole data area is free again.
-	out=$(ctl "$dn" get-dn-info)
+	# verdict of a read made after the teardown a leftover, which ctl's
+	# default expected code fails. The counts say so too: the whole data area
+	# is free again.
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
 	assert_eq "$(jq_of "$out" "$counts")" "$area $area 0 true" \
 		"zeroing: dn$dn's counts (total, free, side records, match) after the teardown"
 	sshv_ok "$dn" "rm -f $WORK/fill.bin"
@@ -2445,9 +2518,11 @@ migr_connect_dst() { # m
 # connection to the source, whose migration source export does not exist
 # before the cutover, and no dm-clone. Both migration rows read PROVISIONING,
 # waiting for the cutover, with the reason the worker's cutover reads, and
-# the read-only channels read them alike, epochs included, since one rule
-# serves both (DN18). The request is migr_declare_dst's enabling one but for
-# the flag.
+# the agent's read stores them alike, epochs included, since one rule serves
+# the converge and the read (DN18): a fresh CheckSide round answers from a
+# read made after the converge, and a GetSideInfo then from the same
+# observation or a later one. The request is migr_declare_dst's enabling one
+# but for the flag.
 #
 # The CN's path to the destination, added while it was gated, stays live and
 # inaccessible: a live path from the primary to the new side is the other
@@ -2462,7 +2537,7 @@ migr_await_cutover_dst() { # m revision
 	assert_cn_ok "$c" cn_id_to_dm_error "${MCN[$m]}" "migr $m waiting dst"
 	assert_cn_ok "$c" cn_id_to_dm_linear "${MCN[$m]}" "migr $m waiting dst"
 	assert_cn_ok "$c" cn_id_to_nvmeof "${MCN[$m]}" "migr $m waiting dst"
-	k=$(ctl "$dst" check-side --revision "$rev" --show-info \
+	k=$(ctl "$dst" check-side --fresh --revision "$rev" --show-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
 	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev" \
 		"migr $m waiting dst check-side revision"
@@ -2615,12 +2690,13 @@ migr_cutover_src() { # m revision
 # migr_full and migr_bitmap): the last must-copy MiB read through the
 # destination. Correct either way — served by read-through from the source
 # when hydration has not reached it — but the window is where the proof is
-# strongest, so the sample is logged.
+# strongest, so the sample is logged. The sample is a fresh round: hydration
+# moves in the kernel with no converge, and only a read shows it.
 migr_read_through() { # m lastMiB
 	local m=$1 skip=$2
 	local vm=${MCNVM[$m]} dev out hydrated total want got
 	dev=$(ns_by_id "$SP" "${MLEG[$m]}")
-	out=$(ctl "${MDSTDN[$m]}" get-side-info \
+	out=$(ctl "${MDSTDN[$m]}" check-side --fresh --show-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
 	local raw pair
 	raw=$(jq_of "$out" '.side_info.migr_dst_info.dm_clone_info.details // ""')
@@ -2682,12 +2758,13 @@ migr_finish_dst() { # m revision
 # migr_full). Once migration m's destination has hydrated, its source's export
 # loses its namespace behind both agents' backs, the export and the
 # destination's controller of it staying, and one rule judges the destination
-# on both channels (dnagent.md DN13, DN18): its migration rows and its per-CN
-# rows read one status, with one epoch, on a converge, a CheckSide round, a
-# GetSideInfo and a second converge. What serves is not the rows' to decide:
-# the converge takes the primary's per-CN stack off the dm-clone, as for any
-# source with nothing to read from, and the read-only channel still proves the
-# hydration the gateway's checks read.
+# in a converge and in the agent's read (dnagent.md DN13, DN18): its migration
+# rows and its per-CN rows read one status, with one epoch, on a converge, a
+# fresh CheckSide round — a read made after that converge —, a GetSideInfo
+# answering from the same observation or a later one, and a second converge.
+# What serves is not the rows' to decide: the converge takes the primary's
+# per-CN stack off the dm-clone, as for any source with nothing to read from,
+# and the agent's read still proves the hydration the gateway's checks read.
 #
 # The state compared is measured, never assumed. The destination's node must
 # read the source subsystem with a live controller and no namespace node,
@@ -2711,8 +2788,10 @@ migr_src_ns_gone() { # m
 	# timer runs done (dnagent.md DN12), before the export loses anything:
 	# that converge runs the source's whole build again, the export's
 	# namespace included. The window ends with the source's per-CN dm-linears
-	# resumed onto their dm-errors, inside that converge, and a GetSideInfo of
-	# the source side takes the side's lock behind it.
+	# resumed onto their dm-errors, inside that converge, and a fresh
+	# CheckSide of the source side returns only once no converge of the side
+	# runs and a read made after that has ended (dnagent.md SH29, SH30): an
+	# info read takes no lock and would not wait.
 	deadline=$((SECONDS + FENCE_TIMEOUT))
 	while :; do
 		susp=$(helper "$src" "fenced_linears '$srcside'")
@@ -2722,8 +2801,8 @@ migr_src_ns_gone() { # m
 				"suspended after ${FENCE_TIMEOUT}s: $susp"
 		sleep 2
 	done
-	ctl "$src" get-side-info --sp "$SP" --leg "${MLEG[$m]}" \
-		--side "${MSRCSIDE[$m]}" >/dev/null
+	ctl "$src" check-side --fresh --sp "$SP" --leg "${MLEG[$m]}" \
+		--side "${MSRCSIDE[$m]}" --timeout "$FENCE_TIMEOUT" >/dev/null
 	# The positive control of the reading below: one live controller and its
 	# namespace node.
 	assert_eq "$(helper "$dst" "subsys_shape '$srcnqn'")" "1 1 1" \
@@ -2760,7 +2839,7 @@ migr_src_ns_gone() { # m
 	c1=$(migr_dst_syncup "$m" "$rev" readwrite false)
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" inaccessible 30
 	sleep 1.1
-	k=$(ctl "$dst" check-side --revision "$rev" --show-info \
+	k=$(ctl "$dst" check-side --fresh --revision "$rev" --show-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
 	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev" \
 		"migr $m check-side revision"
@@ -2813,9 +2892,10 @@ migr_src_ns_gone() { # m
 		".side_info.cn_id_to_nvmeof[\"$key\"]")
 	assert_rows_agree "migr $m with no source namespace" "$rows" \
 		"$c1" "$k" "$g" "$c2"
-	# A GetSideInfo reads the dm-clone's status line whenever the device is
-	# there, whatever its row's status, so it still proves the hydration
-	# hydrationComplete (gateway/common.go) reads.
+	# The agent's read records the dm-clone's status line whenever the device
+	# is there, whatever its row's status, so its observation still proves the
+	# hydration hydrationComplete (gateway/common.go) reads; wait-hydrated
+	# samples it with rounds, which start the reads.
 	ctl "$dst" wait-hydrated --sp "$SP" --leg "${MLEG[$m]}" \
 		--side "${MDSTSIDE[$m]}" --interval 0.5 --timeout 10 >/dev/null
 }
@@ -3358,8 +3438,9 @@ teardown_dead_source() {
 	# samples. Hydration still in flight is what makes the clone's removal
 	# below block on the dead source; hydration already finished still
 	# exercises the removal order and both record releases. Both are a pass,
-	# and the log says which of the two this run got.
-	out=$(ctl "$dst" get-side-info \
+	# and the log says which of the two this run got. The sample is a fresh
+	# round, since only a read shows the kernel's hydration.
+	out=$(ctl "$dst" check-side --fresh --show-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
 	raw=$(jq_of "$out" '.side_info.migr_dst_info.dm_clone_info.details // ""')
 	pair=$(printf '%s' "$raw" | awk '{for (i = 1; i <= NF; i++) if ($i == "clone") { split($(i + 4), a, "/"); print a[1], a[2]; exit }}')
@@ -3414,9 +3495,10 @@ teardown_dead_source() {
 	[ -z "$got" ] || die "dn$dst still holds objects of sp $SP: $got"
 	# Both records are gone, and this is the proof: an allocation or
 	# clone-metadata record whose owner left the authoritative lists is a
-	# leftover in its own right, so the read-only verdict a Get*Info takes
-	# would answer 4 while either one survived. ctl enforces the 0 itself.
-	ctl "$dst" get-dn-info >/dev/null
+	# leftover in its own right, so the verdict of a read made after the drop,
+	# which a fresh CheckDn answers from, would be 4 while either one
+	# survived. ctl enforces the 0 itself.
+	ctl "$dst" check-dn --fresh --revision "${DNREV[$dst]}" >/dev/null
 
 	stage dssrcdrop "the source side goes too, taking the orphaned d2 with it"
 	# The source was never told its migration ended, so its migr-src linear is
@@ -3431,7 +3513,7 @@ teardown_dead_source() {
 		[ -z "$got" ] || die "vm$idx still holds a migr-src linear: $got"
 	done
 	assert_no_residue "$SP"
-	ctl "$src" get-dn-info >/dev/null
+	ctl "$src" check-dn --fresh --revision "${DNREV[$src]}" >/dev/null
 	sshv_ok "$vm" "rm -f $WORK/pattern-$m.bin"
 	# Both sides are gone, so the failure dump of dnagent_integtest.md,
 	# Teardown and cleanup, must not ask for them again.
@@ -3440,9 +3522,9 @@ teardown_dead_source() {
 
 # teardown_pinned_side holds one side device open from outside the agent and
 # drops the side. The removal cannot succeed while the fd is there, and the
-# stage asserts what the agent does about that: it reports the device, it
-# keeps reporting it on the read-only path, and it finishes the job on the
-# next pass of the same revision once the fd is gone.
+# stage asserts what the agent does about that: it reports the device, its
+# reads of the node keep reporting it, and it finishes the job on the next
+# pass of the same revision once the fd is gone.
 teardown_pinned_side() {
 	local dn=2 sp=0xf2 leg=0x1 side=0x11 cn=0x21
 	local out provrev siderev name details
@@ -3490,23 +3572,41 @@ teardown_pinned_side() {
 	# one that never reached the layers above, would leave more than this.
 	assert_eq "$(helper "$dn" "residue $(hex16 "$sp")")" "$name" \
 		"the residue while the side device is pinned"
-	# The verdict is recomputed, never stored: the read-only path enumerates
-	# the node again and has to reach the same answer.
-	ctl "$dn" get-dn-info --expect-code 4 >/dev/null
+	# The agent's read reaches the verdict apart from the converge: it
+	# enumerates the node again and has to reach the same answer, and a fresh
+	# CheckDn answers from a read made after the drop's reply.
+	ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" --expect-code 4 \
+		>/dev/null
 
 	stage pinfree "the fd goes; the same revision, re-sent, finishes the job"
 	helper "$dn" "unpin_dev '$name'"
 	dn_drop_until_clean "$dn" 30
 	assert_no_residue "$sp"
 	# And the record went with the device: an orphan side record would make
-	# this verdict 4 exactly as the pinned device did.
-	ctl "$dn" get-dn-info >/dev/null
+	# the verdict of a read made after the drop 4 exactly as the pinned
+	# device did.
+	ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" >/dev/null
 	DIAG_SIDES=()
 }
 
 # ---------------------------------------------------------------------------
 # Case D — restart (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
+
+# snapshot_infos <dir> <pre|post> <sp> <leg> <srcside> <dstside> writes the
+# restart case's four snapshots, each a fresh round with the info: dn1, dn2,
+# the source side on dn1 and the destination side on dn2.
+snapshot_infos() {
+	local dir=$1 when=$2 sp=$3 leg=$4 srcside=$5 dstside=$6 idx
+	for idx in 1 2; do
+		ctl "$idx" check-dn --fresh --revision "${DNREV[$idx]}" \
+			>"$dir/dn$idx.$when.raw"
+	done
+	ctl 1 check-side --fresh --sp "$sp" --leg "$leg" --side "$srcside" \
+		>"$dir/side1.$when.raw"
+	ctl 2 check-side --fresh --sp "$sp" --leg "$leg" --side "$dstside" \
+		>"$dir/side2.$when.raw"
+}
 
 case_restart() {
 	CASE=restart
@@ -3567,12 +3667,10 @@ case_restart() {
 		--migr "$migr" --bm-idx 0 --bitmap-hex "$C_BM0" >/dev/null
 
 	stage snapshot "record the pre-restart infos and the applied bitmap set"
-	ctl 1 get-dn-info >"$snap/dn1.pre.raw"
-	ctl 2 get-dn-info >"$snap/dn2.pre.raw"
-	ctl 1 get-side-info --sp "$sp" --leg "$leg" --side "$srcside" \
-		>"$snap/side1.pre.raw"
-	ctl 2 get-side-info --sp "$sp" --leg "$leg" --side "$dstside" \
-		>"$snap/side2.pre.raw"
+	# Every snapshot, on both sides of the restart, is a fresh round: it
+	# compares the nodes as the agents read them, and a disk node's last
+	# observation here is older than its sides.
+	snapshot_infos "$snap" pre "$sp" "$leg" "$srcside" "$dstside"
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
 		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
@@ -3608,14 +3706,11 @@ case_restart() {
 
 	stage reconcile "the reloaded state deep-equals the pre-restart snapshot"
 	# ResInfo.epoch is the time of the last observed status change and the
-	# trackers are in-memory, so it legitimately differs after a restart.
-	local norm='walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
-	ctl 1 get-dn-info >"$snap/dn1.post.raw"
-	ctl 2 get-dn-info >"$snap/dn2.post.raw"
-	ctl 1 get-side-info --sp "$sp" --leg "$leg" --side "$srcside" \
-		>"$snap/side1.post.raw"
-	ctl 2 get-side-info --sp "$sp" --leg "$leg" --side "$dstside" \
-		>"$snap/side2.post.raw"
+	# trackers are in-memory, so it legitimately differs after a restart; the
+	# reply's stamp names an observation, its times and its trace id, which
+	# differ by nature.
+	local norm='del(.obs_stamp) | walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
+	snapshot_infos "$snap" post "$sp" "$leg" "$srcside" "$dstside"
 	local name when
 	for name in dn1 dn2 side1 side2; do
 		for when in pre post; do

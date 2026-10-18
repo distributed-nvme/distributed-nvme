@@ -29,8 +29,8 @@ import (
 //
 // Two of the six leave etcd (AG1): CreateDiskNode needs the node's disk size
 // before it can compute `total_ext_cnt`, and InspectDiskNode needs the agent's
-// live view. Both calls sit strictly outside the transaction, one before it
-// and one after it.
+// latest observation of the node. Both calls sit strictly outside the
+// transaction, one before it and one after it.
 
 // CreateDiskNode is the CreateDiskNode of architecture.md, Disk nodes.
 //
@@ -457,13 +457,19 @@ func (s *Server) UpdateDiskNodeDisabled(
 }
 
 // InspectDiskNode is the InspectDiskNode of architecture.md, Disk nodes: the
-// node as its agent currently sees it, for diagnostics.
+// node as its agent last observed it, for diagnostics.
 //
 // The reply is the agent's, whole: `applied_revision` and `dn_info` both
 // come from the GetDnInfo reply (architecture.md, Disk nodes, deliberately not
-// the stored rev key), so the pair is one coherent agent snapshot and a caller
-// can diff `applied_revision` against the desired-state token GetDiskNode
-// hands out.
+// the stored rev key), which answers from the agent's latest observation of
+// the node and reads nothing (architecture.md, Live-state reporting). The
+// pair is that one observation: `applied_revision` is the revision the agent
+// held when the reading started, which can trail the last SyncupDn it
+// accepted, as it does while that syncup's converge runs, and a caller diffs
+// it against the desired-state token GetDiskNode hands out. The reply's stamp
+// passes through beside them with the observation's age (obsAge), so a
+// caller sees how old the observation is and whether a converge of the node
+// is in flight.
 //
 // The Snapshot resolves the cluster itself, so the agent request's cluster_id
 // comes from it rather than from a second plain pre-read: the read is already
@@ -501,6 +507,7 @@ func (s *Server) InspectDiskNode(
 	}
 	var appliedRevision uint64
 	var info *pb.DnInfo
+	var stamp *pb.ObsStamp
 	agentErr := withDnAgent(ctx, req.GetAddrPort(),
 		func(ctx context.Context, client pb.DiskNodeAgentClient) error {
 			reply, err := client.GetDnInfo(ctx, &pb.GetDnInfoRequest{
@@ -512,6 +519,7 @@ func (s *Server) InspectDiskNode(
 			}
 			appliedRevision = reply.GetRevision()
 			info = reply.GetDnInfo()
+			stamp = reply.GetObsStamp()
 			return nil
 		})
 	if agentErr != nil {
@@ -521,5 +529,7 @@ func (s *Server) InspectDiskNode(
 	return &pb.InspectDiskNodeReply{
 		AppliedRevision: appliedRevision,
 		DnInfo:          info,
+		ObsStamp:        stamp,
+		ObsAge:          obsAge(stamp),
 	}, nil
 }

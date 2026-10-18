@@ -339,9 +339,9 @@ func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 	}
 	assertAna(t, node, testNqn, "1", "the fixture")
 	// The dm-error's number reads back with no device number, on a
-	// converge's own `dmsetup info` and in a check round's listing alike:
-	// P2 cannot park the ns-dev, L3 cannot remove the dm-clone under it, and
-	// the build holds it.
+	// converge's own `dmsetup info` and in the listing a cntlr's read takes
+	// alike: P2 cannot park the ns-dev, L3 cannot remove the dm-clone under
+	// it, and the build holds it.
 	node.devNo["/dev/mapper/"+errorName(srv, testTd)] = "unreadable"
 
 	node.Reset()

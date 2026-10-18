@@ -46,8 +46,8 @@ import (
 //
 // Two of the six leave etcd (AG1): CreateControllerNode needs the node's
 // capacity budget before it can compute `total_ext_cnt`, and
-// InspectControllerNode needs the agent's live view. Both calls sit strictly
-// outside the transaction, one before it and one after it.
+// InspectControllerNode needs the agent's latest observation of the node. Both
+// calls sit strictly outside the transaction, one before it and one after it.
 
 // cnCapBudget maps a GetCnSize reply onto the capacity budget `total_ext_cnt`
 // is computed from (architecture.md, Size → extents). This is the one place
@@ -485,15 +485,17 @@ func (s *Server) UpdateControllerNodeDisabled(
 }
 
 // InspectControllerNode is the InspectControllerNode of architecture.md,
-// Controller nodes: the node as its agent currently sees it — port, tmpfs, tmp
+// Controller nodes: the node as its agent last observed it — port, tmpfs, tmp
 // file and loop device (architecture.md, `service ControllerNodeAgent`) — for
 // diagnostics.
 //
 // The reply is the agent's, whole: `applied_revision` and `cn_info` both
 // come from the GetCnInfo reply (architecture.md, Controller nodes,
-// deliberately not the stored rev key), so the pair is one coherent agent
-// snapshot and a caller can diff `applied_revision` against the desired-state
-// token GetControllerNode hands out.
+// deliberately not the stored rev key), which answers from the agent's latest
+// observation of the node, so the pair is that one observation and a caller
+// can diff `applied_revision` against the desired-state token
+// GetControllerNode hands out. The stamp passes through as InspectDiskNode
+// passes it, beside the age obsAge derives from it.
 //
 // The Snapshot resolves the cluster itself, so the agent request's cluster_id
 // comes from it rather than from a second plain pre-read: the read is already
@@ -533,6 +535,7 @@ func (s *Server) InspectControllerNode(
 	}
 	var appliedRevision uint64
 	var info *pb.CnInfo
+	var stamp *pb.ObsStamp
 	agentErr := withCnAgent(ctx, req.GetAddrPort(),
 		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
 			reply, err := client.GetCnInfo(ctx, &pb.GetCnInfoRequest{
@@ -544,6 +547,7 @@ func (s *Server) InspectControllerNode(
 			}
 			appliedRevision = reply.GetRevision()
 			info = reply.GetCnInfo()
+			stamp = reply.GetObsStamp()
 			return nil
 		})
 	if agentErr != nil {
@@ -556,5 +560,7 @@ func (s *Server) InspectControllerNode(
 	return &pb.InspectControllerNodeReply{
 		AppliedRevision: appliedRevision,
 		CnInfo:          info,
+		ObsStamp:        stamp,
+		ObsAge:          obsAge(stamp),
 	}, nil
 }

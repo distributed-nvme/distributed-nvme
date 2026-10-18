@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -41,10 +42,13 @@ func (s *CnAgentServer) syncupCntlr(
 	ptr := req.GetCntlrPointer()
 	path := s.nf.LocalCntlrPath(req.GetClusterId(), req.GetCnId(),
 		ptr.GetSpId(), ptr.GetCntlrId())
+	var saveAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting cntlr state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
+	} else {
+		saveAt = s.now()
 	}
 	if st == nil {
 		st = newCntlrState(req)
@@ -62,41 +66,70 @@ func (s *CnAgentServer) syncupCntlr(
 	s.putCntlr(key, st)
 
 	info, sweep := s.convergeCntlr(ctx, st)
+	code := sweep.Reply()
+	// The converge's observation, stored under the object lock before the
+	// reply is built (dnagent.md SH28): the next round answers from it.
+	obs := s.storeCntlrObs(ctx, st, req.GetRevision(), info, code)
 	return &pb.SyncupCntlrReply{
-		AgentReply: sweep.Reply(),
+		AgentReply: code,
 		Revision:   req.GetRevision(),
 		CntlrInfo:  info,
 		BmInfoList: s.bitmapInfoList(st),
+		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		SaveTime:   agent.Timestamp(saveAt),
 	}
 }
 
 // gateCntlr is CN8's gating of a SyncupCntlr against stored, the revision of
 // the request this process holds for the cntlr, zero for a cntlr it does not
-// hold: the pointer, then the revision, then the conf. It returns the
-// refusal, or nil for a request the converge may take. It writes nothing but
-// the conf refusal's Error record, so SyncupCntlr runs it under the node read
-// lock before it takes the object lock of a cntlr this process does not
-// hold, and a refused request leaves no lock entry behind (dnagent.md, SH11);
-// syncupCntlr runs it again under that lock. The CN request the pointer gate
-// reads cannot change under the node read lock, since SyncupCn replaces it
-// under the write lock.
+// hold: the pointer, then the revision, then the conf (cntlrGates). It
+// returns the refusal, or nil for a request the converge may take. It writes
+// nothing but the conf refusal's Error record, so SyncupCntlr runs it under
+// the node read lock before it takes the object lock of a cntlr this process
+// does not hold, and a refused request leaves no lock entry behind
+// (dnagent.md, SH11); syncupCntlr runs it again under that lock. The CN
+// request the pointer gate reads cannot change under the node read lock,
+// since SyncupCn replaces it under the write lock.
 func (s *CnAgentServer) gateCntlr(
 	ctx context.Context,
 	req *pb.SyncupCntlrRequest,
 	stored uint64,
 ) *pb.SyncupCntlrReply {
+	cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
+	reply, confErr := cntlrGates(cn, req, stored)
+	if confErr != nil {
+		ptr := req.GetCntlrPointer()
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("cn_id", req.GetCnId()),
+			slog.Uint64("sp_id", ptr.GetSpId()),
+			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
+			slog.String("error", confErr.Error()))
+	}
+	return reply
+}
+
+// cntlrGates is gateCntlr's gating against cn, the state of the cntlr's CN,
+// nil for a CN the process does not hold. It returns the refusal, or nil,
+// plus the conf gate's error when that gate refused. It reads nothing but
+// cn's request, takes no lock and writes nothing, so markSyncup runs it under
+// mu without a record.
+func cntlrGates(
+	cn *cnState,
+	req *pb.SyncupCntlrRequest,
+	stored uint64,
+) (*pb.SyncupCntlrReply, error) {
 	// CN8 gating: SyncupCn introduces the pointer first (architecture.md,
 	// Common agent rules).
-	cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
 	if cn == nil || !pointerKnown(cn.loadReq(), req.GetCntlrPointer()) {
 		return &pb.SyncupCntlrReply{
 			AgentReply: agent.UnknownObjectReply(
 				"cntlr pointer %s not in the cn's list",
 				cntlrPointerText(req.GetCntlrPointer())),
-		}
+		}, nil
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
-		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}
+		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}, nil
 	}
 	// architecture.md, Common validation: the control plane stores concrete
 	// geometry, so a zero member here
@@ -110,19 +143,12 @@ func (s *CnAgentServer) gateCntlr(
 	// next Reconcile. The stored revision is echoed back, not the request's,
 	// so the worker sees the request was not accepted.
 	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
-		ptr := req.GetCntlrPointer()
-		slog.ErrorContext(ctx, msgInvalidStoredConf,
-			slog.Uint64("cluster_id", req.GetClusterId()),
-			slog.Uint64("cn_id", req.GetCnId()),
-			slog.Uint64("sp_id", ptr.GetSpId()),
-			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
-			slog.String("error", err.Error()))
 		return &pb.SyncupCntlrReply{
 			AgentReply: agent.InvalidConfReply("%v", err),
 			Revision:   stored,
-		}
+		}, err
 	}
-	return nil
+	return nil, nil
 }
 
 // convergeCntlr is the CN9 converge pass: one sweep top-down, then one build
@@ -164,6 +190,10 @@ func (s *CnAgentServer) convergeCntlr(
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
+	// A row made after the call is cut off moves no epoch. Every converge of
+	// the cntlr holds its object lock or the node write lock, so the helpers
+	// write through st.tracker with this pass bound (agent.ResTracker.Bind).
+	defer st.tracker.Bind(ctx)()
 	// CN14: the torn marks follow the request alone, on every converge.
 	keepTornMarks(st, plan)
 	info := newCntlrInfo()
@@ -515,8 +545,8 @@ func (s *CnAgentServer) build(
 			outcomes[np.nsId] = outcome
 			key := resKeyOf(resKeyNsDevFmt, np.nsId)
 			if err == nil && outcome.held() {
-				// In the probe's words, so the converge and the Check
-				// round report the held ns-dev alike.
+				// In the probe's words, so the converge and a read
+				// report the held ns-dev alike.
 				info.NsIdToDmLinear[np.nsId] = st.tracker.Err(
 					key, np.devName, detailsNsDevNotDesired)
 				continue
@@ -562,8 +592,8 @@ func (s *CnAgentServer) build(
 				// nothing else is sure to re-drive the pass that ends the
 				// wait: the worker re-syncs on a revision or a reply code,
 				// never on a row, and a hold that an unanswered `dmsetup ls`
-				// alone caused leaves the Check verdict, which lists the
-				// node from the round's own reading, clean. So it registers
+				// alone caused leaves the read's verdict, which lists the
+				// node from the read's own reading, clean. So it registers
 				// the CN10 retry, whose next attempt reads the node afresh,
 				// until the namespace serves — for as long as its cause
 				// lasts, a cause that never goes away included. One that
@@ -621,7 +651,7 @@ func (s *CnAgentServer) build(
 			}
 		}
 		// The namespace rows, and the transfer rows ensureXfer left, come
-		// after the ANA loops, compared as a check round compares them
+		// after the ANA loops, compared as a read compares them
 		// (CN28).
 		s.reportNamespaces(ctx, st, plan, info, nsErrs)
 		for _, xp := range plan.xfers {
@@ -776,10 +806,10 @@ func (s *CnAgentServer) snapshotPrePass(
 const msgSnapshotTorn = "snapshot torn"
 
 // tornMark is the torn mark a cntlr's report carries in one td's thin info,
-// the same on the converge and the check round (CN14, CN28): set while the
+// the same on the converge and the read (CN14, CN28): set while the
 // cntlr holds a mark for the td and its request does not list it created
 // yet. A created td reads false here even before a converge has dropped its
-// mark (keepTornMarks), so a check round never reports one either.
+// mark (keepTornMarks), so a read never reports one either.
 func tornMark(st *cntlrState, tp *tdPlan) bool {
 	return !tp.td.GetCreated() && st.tornTds[tp.tdId]
 }

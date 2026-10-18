@@ -642,8 +642,9 @@ func (d *DiskMeta) provisioningSideCntLocked() uint64 {
 	return cnt
 }
 
-// ProbeHeader re-reads only the 4 KiB header — cheap enough for the health
-// rounds at any interval — and verifies magic, version, CRC and identity.
+// ProbeHeader re-reads only the 4 KiB header — cheap enough for the reads the
+// health rounds start, at any interval — and verifies magic, version, CRC and
+// identity.
 //
 // What it reads is also this cache's view of the disk (DN18). A header that
 // is not the one the table in memory was loaded under — blank, corrupt, or
@@ -661,8 +662,8 @@ func (d *DiskMeta) ProbeHeader(
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// The lazy load populates the table counts Describe reports. It writes
-	// nothing, so a probe round mutates nothing on the node (DN16/SH25);
-	// what it can change is this cache (below).
+	// nothing, so the read a round starts mutates nothing on the node (DN16,
+	// SH29); what it can change is this cache (below).
 	if err := d.load(ctx); err != nil {
 		return "", err
 	}

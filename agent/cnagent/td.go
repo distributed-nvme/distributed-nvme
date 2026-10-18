@@ -368,8 +368,8 @@ func (s *CnAgentServer) failedNsDev(
 }
 
 // nsDevParked reports whether np's ns-dev's live table maps the td's dm-error
-// (nsDevParkedTable): the table from rd, the reading of a check round or an
-// info read, or with no reading from one `dmsetup table` of the ns-dev. An
+// (nsDevParkedTable): the table from rd, the reading of a cntlr's read, or
+// with no reading from one `dmsetup table` of the ns-dev. An
 // ns-dev that is not there, or a table that cannot be read, answers false.
 func (s *CnAgentServer) nsDevParked(
 	ctx context.Context,
@@ -391,7 +391,7 @@ func (s *CnAgentServer) nsDevParked(
 // nsRowAnaGrpId is the group a namespace row compares the namespace's
 // "ana_grpid" with, on both channels alike (CN28): nsAnaWanted for whether
 // the ns-dev's live table maps the td's dm-error (nsDevParked) — read from a
-// check round's reading, or by a converge after its ANA loop. So the two
+// read's reading, or by a converge after its ANA loop. So the two
 // channels decide the row by one rule from what the node holds, whatever the
 // converge's ns-dev step did.
 func (s *CnAgentServer) nsRowAnaGrpId(
@@ -409,8 +409,8 @@ func (s *CnAgentServer) nsRowAnaGrpId(
 
 // nsDevParkedTable reports whether a live ns-dev table maps the td's
 // dm-error: a single target over it, or a single error target. The
-// dm-error's number comes from rd, the reading of a check round or an info
-// read, and with no reading from one `dmsetup info` of it (dmDevNo); a number
+// dm-error's number comes from rd, the reading of a cntlr's read, and with
+// no reading from one `dmsetup info` of it (dmDevNo); a number
 // that cannot be read answers false.
 func (s *CnAgentServer) nsDevParkedTable(
 	ctx context.Context,
@@ -669,7 +669,7 @@ func (s *CnAgentServer) ensureSubsystem(
 
 // reportNamespaces writes a converge's namespace rows after its ANA loop
 // (CN28), one per namespace ensureSubsystem stepped: the step's error wins,
-// and otherwise the namespace is read and compared as a check round compares
+// and otherwise the namespace is read and compared as a read compares
 // it, its group with nsRowAnaGrpId's for the ns-dev's live table, so the two
 // channels report the same row for the same node. The namespace
 // object of a provisioning-deferred backing chain is created and correct,

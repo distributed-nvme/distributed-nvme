@@ -421,8 +421,9 @@ func setupSetCntlrEnabled(fs *flag.FlagSet) job {
 }
 
 // setupInspectCntlr drives InspectCntlr (gateway.md, Cntlrs and inspects):
-// the gateway asks the CN agent that hosts the controller for its live
-// CntlrInfo. It is a read, so it takes no token — --id is the cntlr_id.
+// the gateway asks the CN agent that hosts the controller for the CntlrInfo
+// of its latest observation. It is a read, so it takes no token — --id is the
+// cntlr_id.
 func setupInspectCntlr(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var id hexUint
@@ -442,9 +443,9 @@ func setupInspectCntlr(fs *flag.FlagSet) job {
 
 // setupInspectSide drives InspectSide (gateway.md, Cntlrs and inspects): the
 // DN-side mirror of inspect-cntlr, asking the DN agent that hosts the side for
-// its SideInfo. --id is the SIDE_ID here, not a cntlr_id — the two inspects
-// share the flag name so the subcommand table reads as one row, and the RPC
-// decides what it means.
+// the SideInfo of its latest observation. --id is the SIDE_ID here, not a
+// cntlr_id — the two inspects share the flag name so the subcommand table
+// reads as one row, and the RPC decides what it means.
 func setupInspectSide(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var id hexUint

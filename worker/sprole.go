@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -2444,6 +2445,7 @@ func (d *sideDriver) syncup(
 	}
 	state := d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetSideInfo(),
+		reply.GetObsStamp(), reply.GetSaveTime(),
 	)
 	if accepted(state.code) {
 		d.diffBitmap(plan, reply.GetBmInfo())
@@ -2571,9 +2573,10 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 	}
 }
 
-// unreachable folds a broken stream or a missed reply into the side's health
-// (HL2). The in-memory info is marked RES_STATUS_UNKNOWN (architecture.md,
-// Live-state reporting) and never written to etcd.
+// unreachable folds a broken stream, a missed reply or a reply whose
+// observation is too old (HL7) into the side's health (HL2). The in-memory
+// info is marked RES_STATUS_UNKNOWN (architecture.md, Live-state reporting)
+// and never written to etcd.
 func (d *sideDriver) unreachable(ctx context.Context) {
 	markSideUnknown(d.info())
 	// The rows read UNKNOWN now, which waits for nothing.
@@ -2582,21 +2585,18 @@ func (d *sideDriver) unreachable(ctx context.Context) {
 }
 
 // fold turns one reply into a replyState, remembering the SideInfo it carried
-// (HL5).
+// (HL5); stamp and saveTime as for dnDriver.fold.
 func (d *sideDriver) fold(
 	agentReply *pb.AgentReply,
 	revision uint64,
 	info *pb.SideInfo,
+	stamp *pb.ObsStamp,
+	saveTime *timestamppb.Timestamp,
 ) *replyState {
 	if info != nil {
 		d.storeInfo(info)
 	}
-	return &replyState{
-		revision:    revision,
-		code:        agentReply.GetCode(),
-		details:     agentReply.GetDetails(),
-		infoPresent: info != nil,
-	}
+	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
 }
 
 // sideCheckStream adapts the generated CheckSide stream to checkStream (RW17).
@@ -2625,6 +2625,7 @@ func (s *sideCheckStream) recv() (*replyState, error) {
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetSideInfo(),
+		reply.GetObsStamp(), nil,
 	), nil
 }
 
@@ -2926,6 +2927,7 @@ func (d *cntlrDriver) syncup(
 	d.syncupInfo = reply.GetCntlrInfo()
 	state := d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),
+		reply.GetObsStamp(), reply.GetSaveTime(),
 	)
 	if accepted(state.code) {
 		d.diffBitmaps(plan, reply.GetBmInfoList())
@@ -3017,17 +3019,23 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// UpdateCntlrEnabled marks a primary it re-enables settling again. And the
 	// report must show the stack built (primaryShapeBuilt): a new SP's primary
 	// reports its pools and what is over them PROVISIONING, clean, until its
-	// sides are zeroed, and a Check round between a converge that left members
-	// unavailable and the retry that builds over them reports the unbuilt
-	// devices MISSING, clean too when the SP has no td; settling on either
+	// sides are zeroed, and a background read between a converge that left
+	// members unavailable and the retry that builds over them reports the
+	// unbuilt devices MISSING to the rounds that answer from it, clean too
+	// when the SP has no td; settling on either
 	// would leave the build that follows to primary_unhealthy.
 	canSettle := plan.effectivePrimary() &&
 		r.revision == plan.req.GetRevision() && primaryShapeBuilt(info)
-	if r.fromRound && obs != healthNone {
+	if r.fromRound && r.newObs && obs != healthNone {
 		// AR10: the run judges a round by its own report — the info the
 		// reply carried or, when it left it out as unchanged, the info its
 		// stream last carried — and never by a Syncup*'s info that the
-		// latest known state may hold since.
+		// latest known state may hold since. Only a round that answers from
+		// an observation new to this loop (newObs) adds to the run or ends
+		// it (RW23): two rounds answering from one observation are one look.
+		// The run outlives the child, and a child restarted after it never
+		// counts a look of the old one's: its loop observes no round whose
+		// observation ended before its own first round (HL7).
 		own, _ := cntlrObservation(r.code, d.roundInfo())
 		d.memo.noteRound(d.cntlrId, own != healthClean)
 	}
@@ -3135,11 +3143,12 @@ func (d *cntlrDriver) send(ctx context.Context, rep spReport) {
 	}
 }
 
-// unreachable folds a broken stream or a missed reply into the cntlr's health
-// (HL2; architecture.md, Live-state reporting). It reports nothing about the
-// legs: only an ERROR row from the primary sets a leg's err_epoch, and an
-// unreachable primary is the CNTLR's health, not the legs'. Only a round
-// reaches it, so it adds to AR10's run.
+// unreachable folds a broken stream, a missed reply or a reply whose
+// observation is too old (HL7) into the cntlr's health (HL2; architecture.md,
+// Live-state reporting). It reports nothing about the legs: only an ERROR row
+// from the primary sets a leg's err_epoch, and an unreachable primary is the
+// CNTLR's health, not the legs'. Only a round reaches it, so it adds to
+// AR10's run, on every such round: there is no observation to be new.
 func (d *cntlrDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.memo.noteRound(d.cntlrId, true)
@@ -3157,21 +3166,18 @@ func (d *cntlrDriver) markInfoUnknown() {
 }
 
 // fold turns one reply into a replyState, remembering the CntlrInfo it carried
-// (HL5).
+// (HL5); stamp and saveTime as for dnDriver.fold.
 func (d *cntlrDriver) fold(
 	agentReply *pb.AgentReply,
 	revision uint64,
 	info *pb.CntlrInfo,
+	stamp *pb.ObsStamp,
+	saveTime *timestamppb.Timestamp,
 ) *replyState {
 	if info != nil {
 		d.storeInfo(info)
 	}
-	return &replyState{
-		revision:    revision,
-		code:        agentReply.GetCode(),
-		details:     agentReply.GetDetails(),
-		infoPresent: info != nil,
-	}
+	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
 }
 
 // cntlrCheckStream adapts the generated CheckCntlr stream to checkStream
@@ -3204,6 +3210,7 @@ func (s *cntlrCheckStream) recv() (*replyState, error) {
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),
+		reply.GetObsStamp(), nil,
 	), nil
 }
 

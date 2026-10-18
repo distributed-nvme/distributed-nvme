@@ -28,6 +28,10 @@ const (
 	MaxHealthCheckInterval     = 3600
 	MinHealthCheckInterval     = 1
 	DefaultHealthCheckInterval = 2
+	// ObsMaxAgeIntervals is how many of an object's health-check intervals
+	// the observation a round's reply answers from may be old before the
+	// worker counts the round as a missed one (dnv-worker.md HL7).
+	ObsMaxAgeIntervals = 3
 
 	MinAllocDnBatchSize     = 1
 	MaxAllocDnBatchSize     = 1024
@@ -326,8 +330,9 @@ const (
 	// rejections: the request was not applied, so the worker reads no
 	// verdict from the reply's rows. ReplyCodeLeftover (4) is accepted: the
 	// worker reads the rows exactly as for 0 (worker/health.go accepted).
-	// Any code != 0 in a Check* reply makes the worker issue a Syncup*
-	// (dnv-worker.md RW4 step 5), and in a Push*Bitmap reply ends that push
+	// Any code != 0 in a Check* reply whose observation is not too old makes
+	// the worker issue a Syncup* (dnv-worker.md RW4 step 5, HL7), and in a
+	// Push*Bitmap reply ends that push
 	// plan. Among the rejections the specific value only sets the level of
 	// the worker's `syncup rejected` record (a stale revision logs at Error)
 	// and otherwise serves details and tests.
@@ -351,18 +356,20 @@ const (
 	// on a dn a disk identity not yet confirmed, or a side with bytes left to
 	// zero and nothing zeroing it that is not a migration destination waiting
 	// for a free run in the clone-metadata area (dnagent.md DN16); on a cn a
-	// piece of the node's base state that a CheckCn round's or GetCnInfo's
-	// probe read absent, or an ANA group it read in a state other than its
-	// fixed one on a port whose transport attributes match; and on a cntlr
-	// an md member that a CheckCntlr round or GetCntlrInfo read as one its
-	// converge would put back — failed by md and moved out of its slot, or
-	// lacking from its running array — on a leg that serves with its row OK
-	// (cnagent.md CN12, CN30).
+	// piece of the node's base state that the CN's background read probed
+	// absent, or an ANA group it read in a state other than its fixed one on
+	// a port whose transport attributes match; and on a cntlr an md member
+	// that the cntlr's background read found its converge would put back —
+	// failed by md and moved out of its slot, or lacking from its running
+	// array — on a leg that serves with its row OK (cnagent.md CN12, CN30).
+	// Only a read's verdict names these; a converge's own code does not.
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
-	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)
-	// until the code changes. "Pending" is never stored anywhere; the code is
-	// recomputed by enumerating the node on every Syncup* and every Check*.
+	// for code 0 and re-issues the Syncup* on every round whose reply carries
+	// it (RW12, no backoff) until the code changes. "Pending" is never stored
+	// as work owed; the code is recomputed by enumerating the node in every
+	// converge and every background read, and kept only as the code of the
+	// object's observation, which rounds answer from (dnagent.md SH28).
 	ReplyCodeLeftover = 4
 
 	// Seconds between background retries of a migration destination whose
@@ -422,7 +429,7 @@ const (
 	// cost: a live export that reads older than it while it has no namespace — a
 	// removal, a build that slow — costs each agent on the kernel that holds a
 	// side of its sp, save one whose held side claims it, those listings once in
-	// each pass that meets it, check rounds included, and a lower grace makes
+	// each pass that meets it, background reads included, and a lower grace makes
 	// more of them read old (dnagent.md, Known limits). The age is read from the
 	// node — the subsystem directory's mtime, as exact as the kernel keeps it —
 	// and never remembered. A time.Duration, like the two above.
@@ -495,9 +502,10 @@ const (
 	// Seconds between background retries of a cn cntlr's converge while one
 	// of its clones waits for a free run in the node's metadata area
 	// (cnagent.md CN18). It is far slower than CnConnectRetryInterval
-	// because each attempt runs the cntlr's whole converge under the lock the
-	// check rounds need, and a fast retry would make a large pool's check
-	// rounds miss.
+	// because each attempt runs the cntlr's whole converge under its object
+	// lock and holds the cntlr's background reads off while it does
+	// (dnagent.md SH30), and a fast retry would let a large pool's
+	// observation age past the worker's bound (dnv-worker.md HL7).
 	CnCloneMetaRetryInterval = 60
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,
@@ -704,7 +712,11 @@ const (
 	// behind the force = false checks of DeleteClone/FinishMigration, the
 	// Get*Bm bitmap reads), in seconds. Applied with context.WithTimeout
 	// around each dial+call (AG2); chosen equal to DefaultEtcdOpTimeout so a
-	// hung agent and a hung etcd bound an RPC alike.
+	// hung agent and a hung etcd bound an RPC alike. A Get*Info answers from
+	// the agent's latest observation and reads nothing of the node
+	// (dnagent.md SH28), so for it the budget bounds the dial and a hung
+	// agent; the size probes and the bitmap reads still do their work inside
+	// it.
 	DefaultGatewayAgentTimeout = 10
 	// MaxCandidateRoundCnt is the most rounds one candidate unit runs
 	// (gateway.md GW9): candidateUnit plans again after a round that ends in

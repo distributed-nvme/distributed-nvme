@@ -43,14 +43,32 @@ type CnAgentServer struct {
 	port     agent.PortConf
 
 	// mu guards the in-memory mirrors of the local store below — the two
-	// maps — and four registries that mirror nothing: in each cntlr's state
-	// the connect-retry, clone-metadata-retry and prober registries, and the
-	// CN10 disconnect registry. It does not guard the request each state
-	// holds, which is an atomic pointer (cnState.req, cntlrState.req). It is
-	// a leaf lock: never held across an OS call.
+	// maps — and what mirrors nothing: in each cntlr's state the
+	// connect-retry, clone-metadata-retry and prober registries, in each
+	// CN's and each cntlr's state its observation slot (obs), the converge
+	// marks (marks) and the CN10 disconnect registry. It does not guard the
+	// request each state holds, which is an atomic pointer (cnState.req,
+	// cntlrState.req). It is a leaf lock: never held across an OS call.
 	mu     sync.Mutex
 	cns    map[string]*cnState
 	cntlrs map[string]*cntlrState
+	// marks are the converges in flight, by CN key and cntlr key, and the
+	// SyncupCn calls in flight that carry a request newer than the CN's held
+	// one, or for a CN the agent does not hold (dnagent.md SH30): what keeps
+	// a round from starting a read beside a converge, and the converge start
+	// a reply reports.
+	marks *agent.ConvergeMarks
+	// roundReads says whether a check round starts the background read of
+	// its object (dnagent.md SH29). NewCnAgentServer sets it; it is a field
+	// so unit tests can keep rounds from starting reads of their own, which
+	// would race the test's own steps, and run the read themselves
+	// (refreshCn, refreshCntlr).
+	roundReads bool
+	// reads counts the background reads rounds have started and that have
+	// not ended. Nothing in production waits on it: the cn joins none of its
+	// background tasks, and a cancelled read stores nothing (SH29). Unit
+	// tests join it.
+	reads sync.WaitGroup
 	// disconnecting is the CN10 disconnect registry: the subsystem NQNs whose
 	// sweep `nvme disconnect` is running in the background right now, or
 	// queued for one of disconnectSlots (startDisconnect). An entry lives
@@ -71,8 +89,8 @@ type CnAgentServer struct {
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the
 	// CN10/CN18 connect retries, CN18's clone-metadata retry, the CN10
-	// background disconnects and the CN11 probers hang off it, so shutdown
-	// cancels them.
+	// background disconnects, the CN11 probers and the background reads
+	// (SH29) hang off it, so shutdown cancels them.
 	rootCtx context.Context
 
 	// probeInterval / probeStall / retryInterval / metaRetryInterval are
@@ -92,12 +110,12 @@ type CnAgentServer struct {
 // cnState is one synced CN: its last accepted SyncupCnRequest as this process
 // holds it (SH8) — a SyncupCn stores it once it has passed the revision gate,
 // before its converge runs — plus the ResInfo history of the base state
-// (architecture.md, Controller node, common).
+// (architecture.md, Controller node, common), and its latest observation.
 // The loop device carrying the clone-metadata arena is deliberately *not* a
 // field here: it is kernel-assigned state, re-learned from `losetup
-// --associated` on every converge, check round and info read and never
-// cached across them (CN5, [D14]) — a cached path would only be as fresh as
-// the last SyncupCn, which a SyncupCntlr does not run.
+// --associated` on every converge and every read and never cached across
+// them (CN5, [D14]) — a cached path would only be as fresh as the
+// last SyncupCn, which a SyncupCntlr does not run.
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
 	// stored only under the node write lock, and every reader holds
@@ -106,6 +124,9 @@ type cnState struct {
 	// added off the node lock cannot race it.
 	req     atomic.Pointer[pb.SyncupCnRequest]
 	tracker *agent.ResTracker
+	// obs is the CN's latest observation and its running read (dnagent.md
+	// SH28, SH29), guarded by the server's mu.
+	obs agent.ObsSlot[*pb.CnInfo]
 }
 
 func newCnState(req *pb.SyncupCnRequest) *cnState {
@@ -131,11 +152,11 @@ type cntlrState struct {
 	// loadReq and storeReq only. A SyncupCntlr stores it under the node read
 	// lock and this cntlr's object lock, while other goroutines read it
 	// holding neither that object lock nor the node write lock: every other
-	// cntlr's converge and check round asks every cntlr of the CN whether its
+	// cntlr's converge and read asks every cntlr of the CN whether its
 	// request still claims a host-facing subsystem or a clone source
-	// (hostFacingClaim, srcNqnsInUse), and the node-level verdict of a
-	// CheckCn round or a GetCnInfo reads every cntlr's host-facing
-	// subsystems and clone list (hostFacingClaim, orphanCloneMetaNames) —
+	// (hostFacingClaim, srcNqnsInUse), and the node-level verdict of a CN's
+	// read reads every cntlr's host-facing subsystems and clone list
+	// (hostFacingClaim, orphanCloneMetaNames) —
 	// cntlrKeysOf reads every cntlr's ids too. So it is an atomic pointer: a
 	// lock-free read cannot race the store, and taking no lock for it adds no
 	// lock order. A request is never modified once stored. reqFromRpc, which
@@ -192,6 +213,10 @@ type cntlrState struct {
 	// (startCloneMetaRetry).
 	metaRetrying bool
 	metaCancel   context.CancelFunc
+
+	// obs is the cntlr's latest observation and its running read
+	// (dnagent.md SH28, SH29), guarded by the server's mu.
+	obs agent.ObsSlot[*pb.CntlrInfo]
 }
 
 // NewCnAgentServer builds the cn role server. oc is the process's single
@@ -232,6 +257,8 @@ func NewCnAgentServer(
 		},
 		cns:               make(map[string]*cnState),
 		cntlrs:            make(map[string]*cntlrState),
+		marks:             agent.NewConvergeMarks(),
+		roundReads:        true,
 		disconnecting:     make(map[string]struct{}),
 		disconnectSlots:   make(chan struct{}, disconnectConcurrency),
 		rootCtx:           context.Background(),
@@ -268,9 +295,15 @@ func (s *CnAgentServer) getCn(key string) *cnState {
 	return s.cns[key]
 }
 
+// putCn and putCntlr store a state under its key. A state they replace —
+// the startup reconcile builds every state afresh — has its read cancelled,
+// as a dropped one has (dropCntlr).
 func (s *CnAgentServer) putCn(key string, st *cnState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if old := s.cns[key]; old != nil && old != st {
+		old.obs.CancelReadLocked()
+	}
 	s.cns[key] = st
 }
 
@@ -283,12 +316,21 @@ func (s *CnAgentServer) getCntlr(key string) *cntlrState {
 func (s *CnAgentServer) putCntlr(key string, st *cntlrState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if old := s.cntlrs[key]; old != nil && old != st {
+		old.obs.CancelReadLocked()
+	}
 	s.cntlrs[key] = st
 }
 
+// dropCntlr forgets a cntlr's state, and cancels its running read, if any,
+// waiting for nothing: the read finds the cntlr gone and stores nothing
+// (dnagent.md SH30).
 func (s *CnAgentServer) dropCntlr(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if st := s.cntlrs[key]; st != nil {
+		st.obs.CancelReadLocked()
+	}
 	delete(s.cntlrs, key)
 }
 
@@ -389,29 +431,51 @@ func (s *CnAgentServer) GetCnSize(
 	return &pb.GetCnSizeReply{Size: s.capacity}, nil
 }
 
+// SyncupCn marks its converge as it arrives, before it waits for the node
+// write lock (dnagent.md SH30). A request newer than the CN's held one, or
+// for a CN the agent does not hold, marks the node too and cancels every
+// read of the agent: that lock waits for every holder of its read half,
+// every cntlr's read among them, and the node's mark keeps a round from
+// starting a new one until the syncup ends. A re-send at the held revision,
+// which a CN-level leftover brings every round, cancels the CN's read alone
+// and waits for the cntlr reads in flight, so it keeps no cntlr's read from
+// ending. A request the revision gate refuses against the CN's held request
+// marks nothing and cancels nothing, so a stale request the worker re-sends
+// every round keeps no read from ending; the gate refuses it under the write
+// lock (markNodeSyncup).
 func (s *CnAgentServer) SyncupCn(
 	ctx context.Context,
 	req *pb.SyncupCnRequest,
 ) (*pb.SyncupCnReply, error) {
+	defer s.markNodeSyncup(cnKey(req.GetClusterId(), req.GetCnId()),
+		req.GetRevision())()
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 	return s.syncupCn(ctx, req), nil
 }
 
-// SyncupCntlr takes the cntlr's object lock only for a cntlr this process
-// holds or a request CN8's gates admit: a request they refuse for a cntlr it
-// does not hold is answered under the node read lock alone, so it leaves no
-// lock entry behind (dnagent.md, SH11) — only the teardown of a held cntlr
-// drops one (dropCntlrState). syncupCntlr runs every gate again under the
+// SyncupCntlr marks its cntlr's converge in flight and cancels the cntlr's
+// running read before it takes a lock (dnagent.md SH30), save a request CN8's
+// gates refuse against the cntlr's held request, which marks nothing and
+// cancels nothing, so a refused request the worker re-sends every round
+// keeps no read from ending (markSyncup); the gates refuse it under the
 // object lock.
+//
+// It takes the cntlr's object lock only for a cntlr this process holds or a
+// request CN8's gates admit: a request they refuse for a cntlr it does not
+// hold is answered under the node read lock alone, so it leaves no lock
+// entry behind (dnagent.md, SH11) — only the teardown of a held cntlr drops
+// one (dropCntlrState). syncupCntlr runs every gate again under the object
+// lock.
 func (s *CnAgentServer) SyncupCntlr(
 	ctx context.Context,
 	req *pb.SyncupCntlrRequest,
 ) (*pb.SyncupCntlrReply, error) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
+	defer s.markSyncup(key, req)()
+	s.locks.Node().RLock()
+	defer s.locks.Node().RUnlock()
 	if s.getCntlr(key) == nil {
 		if reply := s.gateCntlr(ctx, req, 0); reply != nil {
 			return reply, nil
@@ -424,9 +488,10 @@ func (s *CnAgentServer) SyncupCntlr(
 }
 
 // PushCloneBitmap refuses a push for a cntlr this process does not hold under
-// the node read lock alone, as GetCntlrInfo does, so the refusal leaves no
-// lock entry behind (dnagent.md, SH11); pushCloneBitmap checks the cntlr
-// again under its object lock.
+// the node read lock alone, so the refusal leaves no lock entry behind
+// (dnagent.md, SH11); pushCloneBitmap checks the cntlr again under its object
+// lock. It cancels no read: it waits for one as it waits for a converge
+// (dnagent.md SH30).
 func (s *CnAgentServer) PushCloneBitmap(
 	ctx context.Context,
 	req *pb.PushCloneBitmapRequest,
@@ -444,59 +509,63 @@ func (s *CnAgentServer) PushCloneBitmap(
 	return s.pushCloneBitmap(ctx, key, req), nil
 }
 
-// GetCnInfo probes fresh live state and never mutates (CN23).
+// GetCnInfo answers from the CN's latest observation, as a CheckCn round
+// does, and starts no read (dnagent.md SH28): it takes no lock and reads
+// nothing of the node (CN23).
 func (s *CnAgentServer) GetCnInfo(
 	ctx context.Context,
 	req *pb.GetCnInfoRequest,
 ) (*pb.GetCnInfoReply, error) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
-	st := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
-	if st == nil {
+	obs, since, known := s.answerCn(ctx,
+		cnKey(req.GetClusterId(), req.GetCnId()), false)
+	now := s.now()
+	if !known {
 		return &pb.GetCnInfoReply{
-			AgentReply: agent.UnknownObjectReply(
-				"unknown cn %d", req.GetCnId()),
+			AgentReply: unknownCn(req.GetCnId()),
+			ObsStamp:   (&cnObs{}).Stamp(now, time.Time{}),
 		}, nil
 	}
-	info, redrive := s.probeCn(ctx, st)
 	return &pb.GetCnInfoReply{
-		AgentReply: s.sweepCn(ctx, st, false, redrive).Reply(),
-		Revision:   st.loadReq().GetRevision(),
-		CnInfo:     info,
+		AgentReply: obs.Reply,
+		Revision:   obs.Revision,
+		CnInfo:     obs.Info,
+		ObsStamp:   obs.Stamp(now, since),
 	}, nil
 }
 
+// GetCntlrInfo answers from the cntlr's latest observation, as a CheckCntlr
+// round does, and starts no read (dnagent.md SH28): it takes no lock, so a
+// read of an unknown cntlr leaves no lock entry (dnagent.md, SH11), and reads
+// nothing of the node (CN23).
 func (s *CnAgentServer) GetCntlrInfo(
 	ctx context.Context,
 	req *pb.GetCntlrInfoRequest,
 ) (*pb.GetCntlrInfoReply, error) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
-	unknown := &pb.GetCntlrInfoReply{
-		AgentReply: agent.UnknownObjectReply(
-			"unknown cntlr %s", cntlrPointerText(req.GetCntlrPointer())),
+	obs, since, known := s.answerCntlr(ctx, key, false)
+	now := s.now()
+	if !known {
+		return &pb.GetCntlrInfoReply{
+			AgentReply: unknownCntlr(req.GetCntlrPointer()),
+			ObsStamp:   (&cntlrObs{}).Stamp(now, time.Time{}),
+		}, nil
 	}
-	// A read of an unknown cntlr needs no serialization — and taking its
-	// object lock would create one for an id that does not exist.
-	if s.getCntlr(key) == nil {
-		return unknown, nil
-	}
-	objLock := s.locks.Obj(key)
-	objLock.Lock()
-	defer objLock.Unlock()
-	st := s.getCntlr(key)
-	if st == nil {
-		return unknown, nil
-	}
-	// One reading, then the rows and the verdict from it, as in a check
-	// round (readCntlr, CN23, CN24), so a read answers what a round in the
-	// same state would.
-	info, verdict := s.readCntlr(ctx, st)
 	return &pb.GetCntlrInfoReply{
-		AgentReply: verdict.Reply(),
-		Revision:   st.loadReq().GetRevision(),
-		CntlrInfo:  info,
+		AgentReply: obs.Reply,
+		Revision:   obs.Revision,
+		CntlrInfo:  obs.Info,
+		ObsStamp:   obs.Stamp(now, since),
 	}, nil
+}
+
+// unknownCn and unknownCntlr are the refusals of a round or an info read of
+// an object this process holds no request for (CN23).
+func unknownCn(cnId uint64) *pb.AgentReply {
+	return agent.UnknownObjectReply("unknown cn %d", cnId)
+}
+
+func unknownCntlr(ptr *pb.CntlrPointer) *pb.AgentReply {
+	return agent.UnknownObjectReply(
+		"unknown cntlr %s", cntlrPointerText(ptr))
 }

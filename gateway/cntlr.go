@@ -543,9 +543,9 @@ func (s *Server) UpdateCntlrEnabled(
 	}, nil
 }
 
-// InspectCntlr is the InspectCntlr of architecture.md, Cntlrs: the live state
-// of one cntlr as its cn agent sees it, which is how an operator watches a
-// clone hydrate before calling DeleteClone (architecture.md, Clones).
+// InspectCntlr is the InspectCntlr of architecture.md, Cntlrs: the state of
+// one cntlr as its cn agent last observed it, which is how an operator watches
+// a clone hydrate before calling DeleteClone (architecture.md, Clones).
 //
 // Phase 1 is a Snapshot and not a RunSTM because the RPC writes nothing: one
 // store revision makes the Cntlr and the CN it names mutually consistent
@@ -556,18 +556,22 @@ func (s *Server) UpdateCntlrEnabled(
 // whose `cntlr_ptr_list` is non-empty, so a live cntlr pointing at a missing
 // CnConf is a lost invariant key.
 //
-// The reply is the agent's, whole: `applied_revision` (the revision of
-// the last SyncupCntlr the agent accepted for this cntlr) and `cntlr_info`
-// both come from the GetCntlrInfo reply (architecture.md, Cntlrs) — diff
-// `applied_revision` against the SpRev token
-// GetStoragePool hands out to see how far the agent lags desired state.
+// The reply is the agent's, whole: `applied_revision` and `cntlr_info`
+// both come from the GetCntlrInfo reply (architecture.md, Cntlrs), which
+// answers from the agent's latest observation of the cntlr and reads nothing
+// (architecture.md, Live-state reporting). `applied_revision` is the revision
+// the agent held when that observation's reading started — it can trail the
+// last SyncupCntlr the agent accepted, as it does while that syncup's
+// converge runs — so diff it against the SpRev token GetStoragePool hands out
+// to see how far the agent lags desired state. The reply's stamp passes
+// through beside them with the observation's age (obsAge).
 //
 // The agent's reply is passed through as it comes: only a transport failure
 // or a non-OK gRPC status is this RPC's ABORTED, because AG3 exempts the
 // Get*Info calls from the AgentReply.code convention — an agent that does not
 // know the cntlr yet (nothing has synced it up) answers "unknown object" with
-// no CntlrInfo, and that is a truthful description of the node's live state,
-// not a failure of the call.
+// no CntlrInfo and no observation time, and that is a truthful description of
+// what the agent holds, not a failure of the call.
 func (s *Server) InspectCntlr(
 	ctx context.Context,
 	req *pb.InspectCntlrRequest,
@@ -614,6 +618,7 @@ func (s *Server) InspectCntlr(
 	}
 	var appliedRevision uint64
 	var info *pb.CntlrInfo
+	var stamp *pb.ObsStamp
 	err = withCnAgent(ctx, addrPort,
 		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
 			reply, err := client.GetCntlrInfo(
@@ -632,6 +637,7 @@ func (s *Server) InspectCntlr(
 			}
 			appliedRevision = reply.GetRevision()
 			info = reply.GetCntlrInfo()
+			stamp = reply.GetObsStamp()
 			return nil
 		})
 	if err != nil {
@@ -641,11 +647,13 @@ func (s *Server) InspectCntlr(
 	return &pb.InspectCntlrReply{
 		AppliedRevision: appliedRevision,
 		CntlrInfo:       info,
+		ObsStamp:        stamp,
+		ObsAge:          obsAge(stamp),
 	}, nil
 }
 
-// InspectSide is the InspectSide of architecture.md, Cntlrs: the live state of
-// one side as its dn agent sees it, which is how an operator watches a
+// InspectSide is the InspectSide of architecture.md, Cntlrs: the state of one
+// side as its dn agent last observed it, which is how an operator watches a
 // migration hydrate before calling FinishMigration (architecture.md,
 // Migrations).
 //
@@ -661,13 +669,14 @@ func (s *Server) InspectCntlr(
 // alone and its absence is ABORTED for the same reason InspectCntlr's CnConf
 // is — DeleteDiskNode refuses a DN that still carries side pointers.
 //
-// The reply is the agent's, whole: `applied_revision` (the revision of
-// the last SyncupSide the agent accepted for this side) and `side_info`
-// both come from the GetSideInfo reply (architecture.md, Cntlrs) — diff
-// `applied_revision` against the SpRev token
-// GetStoragePool hands out to see how far the agent lags desired state.
-// The agent's SideInfo is passed through exactly as InspectCntlr passes
-// its CntlrInfo (AG3).
+// The reply is the agent's, whole: `applied_revision` and `side_info`
+// both come from the GetSideInfo reply (architecture.md, Cntlrs), the
+// agent's latest observation of the side, with `applied_revision` the
+// revision the agent held when that observation's reading started — diff it
+// against the SpRev token GetStoragePool hands out to see how far the agent
+// lags desired state. The agent's SideInfo and stamp are passed through
+// exactly as InspectCntlr passes its own (AG3), with the age the gateway
+// derives from the stamp (obsAge).
 func (s *Server) InspectSide(
 	ctx context.Context,
 	req *pb.InspectSideRequest,
@@ -720,6 +729,7 @@ func (s *Server) InspectSide(
 	}
 	var appliedRevision uint64
 	var info *pb.SideInfo
+	var stamp *pb.ObsStamp
 	err = withDnAgent(ctx, addrPort,
 		func(ctx context.Context, client pb.DiskNodeAgentClient) error {
 			reply, err := client.GetSideInfo(
@@ -735,6 +745,7 @@ func (s *Server) InspectSide(
 			}
 			appliedRevision = reply.GetRevision()
 			info = reply.GetSideInfo()
+			stamp = reply.GetObsStamp()
 			return nil
 		})
 	if err != nil {
@@ -744,5 +755,7 @@ func (s *Server) InspectSide(
 	return &pb.InspectSideReply{
 		AppliedRevision: appliedRevision,
 		SideInfo:        info,
+		ObsStamp:        stamp,
+		ObsAge:          obsAge(stamp),
 	}, nil
 }

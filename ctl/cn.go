@@ -173,10 +173,11 @@ func registerCn(root *cobra.Command) {
 		"the disabled flag to store; write --disabled=false to re-enable")
 
 	// cn inspect — InspectControllerNode. The gateway answers it from the CN
-	// agent's live GetCnInfo, not from etcd, which is why it can fail with
-	// the agent's own error while `cn get` on the same node succeeds.
+	// agent's GetCnInfo, the agent's latest observation of the node, not from
+	// etcd, which is why it can fail with the agent's own error while `cn get`
+	// on the same node succeeds.
 	inspect := leaf("inspect",
-		"read a controller node's live CnInfo from its agent",
+		"read a controller node's latest observed CnInfo from its agent",
 		func() (job, error) {
 			cluster := clusterOf()
 			addr := strOf("addr")

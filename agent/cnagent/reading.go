@@ -12,22 +12,24 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// The reading of a check round and an info read (CN28), and where a
-// device-mapper fact and a device number come from
+// The reading of a cntlr's read (CN28), and where a device-mapper fact and a
+// device number come from
 //
-// A check round and an info read first take one reading of the node
-// (takeReading): one whole-node `dmsetup info` listing, one whole-node
-// `dmsetup table` listing, one NVMe walk (CN10) and one md walk (CN12). Their
-// rows and their verdict take from it which dm devices, NVMe subsystems and
-// md arrays the node holds, and each dm device's attrs, number and table
-// (readCntlr); cnReading says when it reads a dm name on its own instead.
-// The rows' other reads are in the probe map (probe.go): the status reads,
-// the matched array's attributes, each looked-up NVMe entry and the numbers
-// in /sys/block among them. The verdict also lists the nvmet tree in
-// configfs, and reads the namespace node and the number of each connection
-// it checks against a live dm-clone (srcNqnsInUse). So such a call starts a
-// few processes whatever the slice count, plus the status reads of its thin
-// pools and dm-clones and the configfs `ls` of its exports (dnagent.md SH18).
+// A cntlr's read (refreshCntlr), the background read a check round starts and
+// whose observation a round and an info read answer from (dnagent.md SH28,
+// SH29), first takes one reading of the node (takeReading): one whole-node
+// `dmsetup info` listing, one whole-node `dmsetup table` listing, one NVMe
+// walk (CN10) and one md walk (CN12). Their rows and their verdict take from
+// it which dm devices, NVMe subsystems and md arrays the node holds, and each
+// dm device's attrs, number and table (readCntlr); cnReading says when it
+// reads a dm name on its own instead. The rows' other reads are in the probe
+// map (probe.go): the status reads, the matched array's attributes, each
+// looked-up NVMe entry and the numbers in /sys/block among them. The verdict
+// also lists the nvmet tree in configfs, and reads the namespace node and the
+// number of each connection it checks against a live dm-clone (srcNqnsInUse).
+// So such a read starts a few processes whatever the slice count, plus the
+// status reads of its thin pools and dm-clones and the configfs `ls` of its
+// exports (dnagent.md SH18).
 //
 // dmInfo, dmTable and dmDevNo read a dm device's attrs, its live table and
 // its number for the helpers the converge and the probe share: from the
@@ -37,14 +39,13 @@ import (
 // /sys/block/<kname>/dev (blockDevNo, mdDevNo); no number comes from lsblk.
 // ---------------------------------------------------------------------------
 
-// cnReading is what a check round or an info read takes of the node first
-// (CN28): one whole-node `dmsetup info` listing (Dm.ListInfo), one
-// `dmsetup table` listing (Dm.ListTables), one NVMe walk and one md walk
-// (Md.Scan), taken under the call's locks and shared with nothing (CN23). A
-// name a complete info listing lacks is not there. A name a partial info
-// listing lacks, or a name the table listing lacks, is read on its own at its
-// first lookup, and the answer is kept for the call, so no device is read
-// twice.
+// cnReading is what a cntlr's read takes of the node first (CN28): one
+// whole-node `dmsetup info` listing (Dm.ListInfo), one `dmsetup table`
+// listing (Dm.ListTables), one NVMe walk and one md walk (Md.Scan), taken
+// under the read's locks and shared with nothing (CN23). A name a complete
+// info listing lacks is not there. A name a partial info listing lacks, or a
+// name the table listing lacks, is read on its own at its first lookup, and
+// the answer is kept for the read, so no device is read twice.
 type cnReading struct {
 	dm *agent.Dm
 	// infoList is nil when infoErr is set: the info listing did not answer.
@@ -94,13 +95,12 @@ func (rd *cnReading) mdWalks() *mdWalkOnce {
 	return walks
 }
 
-// readCntlr is what a check round and an info read take of the node (CN23,
-// CN24), under the node read lock and the cntlr's lock their callers hold:
-// one plan and one reading, then the rows (probeCntlr), then the verdict
+// readCntlr is what a cntlr's read takes of the node (refreshCntlr; CN23,
+// CN24), under the node read lock and the cntlr's lock the read holds: one
+// plan and one reading, then the rows (probeCntlr), then the verdict
 // (sweepCntlr with nothing removed), both from that reading, so the verdict
-// judges the node the rows read and a call answers what a round in the same
-// state would. The verdict also names the md members the rows show the
-// converge would put back or add (putBackNames, CN30).
+// judges the node the rows read. The verdict also names the md members the
+// rows show the converge would put back or add (putBackNames, CN30).
 //
 // A stored conf the gate refuses (architecture.md, Common validation) takes
 // no reading: its rows are empty, what a cntlr with nothing provable looks
@@ -235,7 +235,7 @@ func (s *CnAgentServer) dmTable(
 // dmDevNo is a dm device's number, "major:minor", the form a dm table names
 // a device in: from the reading, or with no reading one `dmsetup info` of the
 // device that prints its number (Dm.InfoDevNo). Both channels make the same
-// three checks, so a check round and a converge write the same text for the
+// three checks, so a read and a converge write the same text for the
 // same device: the read's error, a device that is not there
 // (errDmNotThere), and a device listed with numbers that do not parse.
 func (s *CnAgentServer) dmDevNo(

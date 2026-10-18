@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -22,23 +23,76 @@ import (
 // One tracker belongs to one synced object (a DN, a side, …). State is
 // in-memory: after a restart the epochs restart at the reconcile time, which
 // is what "last observed change" means for a freshly started agent.
+//
+// A pass that writes the object's rows — a converge or a background read —
+// writes them through the tracker with its ctx bound (Bind) or through a view
+// of its own (In). Once that ctx is done the pass is cut off: a row it makes
+// then is returned, with the epoch the status rule gives it, but not
+// recorded. Such a pass stores no observation (SH28, SH29): every command
+// after the cut fails at once, so its rows tell of the cut and not of the
+// node. Recorded, they would move the epoch of each row the cut turned to an
+// error, the next pass would move it back, and every reply after would give
+// that pass as the row's last status change, where the node changed nothing
+// (architecture.md, Live-state reporting); each syncup that cancels a running
+// read (SH30) would move them so. A row made with no pass bound — a unit test
+// that calls a probe itself — is recorded.
 type ResTracker struct {
+	hist *resHistory
+	// pass is the ctx of the converge or read that writes through this
+	// tracker, nil when none is bound. On an object's own tracker a pass sets
+	// it (Bind) and every write reads it under the one lock that serializes
+	// every pass that writes the object's rows; on a view from In it never
+	// changes.
+	pass context.Context
+}
+
+// resHistory is the rows of one object as its tracker and every view of it
+// (In) record them.
+type resHistory struct {
 	mu    sync.Mutex
 	state map[string]*pb.ResInfo
 	now   func() int64 // overridable in tests
 }
 
 func NewResTracker() *ResTracker {
-	return &ResTracker{
+	return &ResTracker{hist: &resHistory{
 		state: make(map[string]*pb.ResInfo),
 		now:   func() int64 { return time.Now().Unix() },
-	}
+	}}
+}
+
+// Bind makes ctx the pass that writes through t until the func it returns
+// runs, which puts back the pass bound before. The caller holds the lock that
+// serializes every pass that writes the object's rows — a side's or a
+// cntlr's object lock, or the node write lock — and holds it until that func
+// has run, so the helpers its passes share write through the object's own
+// tracker. An object whose passes can overlap has its passes write through In
+// instead.
+func (t *ResTracker) Bind(ctx context.Context) func() {
+	prev := t.pass
+	t.pass = ctx
+	return func() { t.pass = prev }
+}
+
+// In is a view of t's history that the pass under ctx writes through, for an
+// object whose passes can overlap: a DN's or a CN's background read holds
+// only the node read lock, which the object's next read may share before this
+// one has returned. Every pass of such an object writes through a view of its
+// own, its converges too, so no write reads a pass that another may bind.
+func (t *ResTracker) In(ctx context.Context) *ResTracker {
+	return &ResTracker{hist: t.hist, pass: ctx}
+}
+
+// cut reports whether the pass that writes through t has been cut off.
+func (t *ResTracker) cut() bool {
+	return t.pass != nil && t.pass.Err() != nil
 }
 
 // Set records an outcome for the resource identified by key (a stable
 // logical key, e.g. "dm_linear/{cn_id}") and returns the ResInfo to embed in
 // the reply. resName is the user-visible name of the resource (a device
-// name, an NQN, a path). The row's reason is RES_REASON_NONE.
+// name, an NQN, a path). The row's reason is RES_REASON_NONE. A pass that is
+// cut off records nothing (ResTracker).
 func (t *ResTracker) Set(
 	key string,
 	resName string,
@@ -55,7 +109,8 @@ func (t *ResTracker) Set(
 // the cutover (dnagent.md DN18). The epoch moves only when the status
 // changes, whatever the details and the reason do, and the caller gets a
 // copy of the whole stored row, every field of it, so no caller can reach
-// the state.
+// the state. A pass that is cut off gets the row and records nothing
+// (ResTracker).
 func (t *ResTracker) SetReason(
 	key string,
 	resName string,
@@ -63,10 +118,11 @@ func (t *ResTracker) SetReason(
 	details string,
 	reason pb.ResReason,
 ) *pb.ResInfo {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	prev, ok := t.state[key]
-	epoch := uint64(t.now())
+	h := t.hist
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	prev, ok := h.state[key]
+	epoch := uint64(h.now())
 	if ok && prev.GetStatus() == status {
 		epoch = prev.GetEpoch()
 	}
@@ -77,7 +133,10 @@ func (t *ResTracker) SetReason(
 		Epoch:   epoch,
 		Reason:  reason,
 	}
-	t.state[key] = cur
+	if t.cut() {
+		return cur
+	}
+	h.state[key] = cur
 	return proto.Clone(cur).(*pb.ResInfo)
 }
 
@@ -146,9 +205,10 @@ func (t *ResTracker) FromErr(
 // Drop forgets a resource's history (used when a resource leaves the desired
 // state, so a later re-creation reports a fresh epoch).
 func (t *ResTracker) Drop(key string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.state, key)
+	h := t.hist
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.state, key)
 }
 
 // Keep forgets every history whose key the desired state no longer names. It
@@ -157,11 +217,12 @@ func (t *ResTracker) Drop(key string) {
 // desired state cannot leave its epoch behind to be read as a new object's on
 // a later rebuild (SH14).
 func (t *ResTracker) Keep(wanted map[string]struct{}) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for key := range t.state {
+	h := t.hist
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for key := range h.state {
 		if _, ok := wanted[key]; !ok {
-			delete(t.state, key)
+			delete(h.state, key)
 		}
 	}
 }

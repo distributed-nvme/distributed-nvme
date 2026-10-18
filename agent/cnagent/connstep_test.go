@@ -687,7 +687,7 @@ func TestSlowFailedConnectIsNotRetried(t *testing.T) {
 // (the plan's first) keeps failing and spends the whole budget on its own
 // retries, so the data leg's failed connect gets no retry at all — although a
 // retry would have succeeded. A budget per leg would multiply what a pass with
-// several failing sides costs under the object lock the Check rounds need.
+// several failing sides costs under the object lock the cntlr's reads need.
 // The next pass is a new budget: a retry attempt retries again.
 func TestPassBudgetSharedByEveryLeg(t *testing.T) {
 	srv, node := newTestServer(t)

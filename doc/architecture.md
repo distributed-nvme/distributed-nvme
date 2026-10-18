@@ -231,9 +231,9 @@ always means the SP's `DmPoolConf.data_block_size`.
   primary by `cntlr_unhealthy` instead of `primary_unhealthy` when that is
   the longer; a `disabled` one still fails over at once (`dnv-worker.md`
   AR5). It is health bookkeeping of the same kind as `err_epoch`: set by
-  the op that makes the cntlr primary, cleared by the observation that
-  proves the role, in a write that bumps no revision, or by the failover
-  that demotes it.
+  the op that makes the cntlr primary, cleared by the worker's clean
+  health verdict that proves the role, in a write that bumps no revision,
+  or by the failover that demotes it.
 
 Ownership hierarchy (etcd side):
 
@@ -1824,10 +1824,12 @@ it parks a namespace (Clone crash recovery).
   (`INVALID_ARGUMENT` otherwise). The rule reads the cluster as well as the
   request, so `CreateStoragePool` judges it against the stored
   `ClusterConf`, on its plain pre-read before the scans and again in its
-  STM (Storage pools). The reason: a check round that gets no reply stamps
-  the primary's `err_epoch`, and the next round, due one interval later,
-  clears it when that round is clean (`dnv-worker.md` RW4, RW8), so the
-  epoch of one missed round lives about one interval, and the rule leaves
+  STM (Storage pools). The reason: a check round that gets no reply in
+  time, or whose reply answers from an observation too old, is a missed
+  round that stamps the primary's `err_epoch` (`dnv-worker.md` HL7), and
+  the next round, due one interval later, clears it when that round is
+  clean (`dnv-worker.md` RW4, RW8), so the epoch of one missed round lives
+  about one interval, and the rule leaves
   a second interval of margin before that epoch can fail the primary
   over. Epochs are whole seconds and the next answer can come late, so the
   margin alone can be crossed; the failover therefore also needs two
@@ -2081,11 +2083,21 @@ already hosted by the node keep running. Reply `dn_id`.
 fails.
 Action: read the `DnConf` in an STM for the ids, which address the agent
 request and the log line; then, outside the STM, call
-`DiskNodeAgent.GetDnInfo` and return its `revision` and `DnInfo`. The
-reply's `applied_revision` is that `revision`, the revision of the last
-`SyncupDn` the agent accepted for the node (Live-state reporting), so a
-caller can diff it against the desired revision `GetDiskNode` returns in
-its `DnRev`.
+`DiskNodeAgent.GetDnInfo`, which answers from the agent's latest
+observation of the node and reads nothing (Live-state reporting), and
+return its `revision`, `DnInfo` and stamp. The reply's `applied_revision`
+is that `revision`, the revision of the request the agent held for the
+node while the converge or read that made the observation ran, so a caller
+can diff it against the desired revision
+`GetDiskNode` returns in its `DnRev`. It can trail the last `SyncupDn`
+the agent accepted, as it does while that syncup's converge runs.
+`obs_stamp` is the agent's stamp, passed through, and `obs_age` is the
+observation's age when the agent answered: the stamp's answer time less
+its observation time, both by the node's clock, so no clock difference
+between the gateway's host and the node enters it; a negative difference,
+which a node clock that steps back gives, reads as zero. `obs_age` is
+unset when the stamp carries no observation time, since a zero would read
+as a fresh observation.
 
 ### Controller nodes
 
@@ -2101,8 +2113,8 @@ and `CnGlobal`, with these differences:
 * **UpdateControllerNodeDisabled**: as `UpdateDiskNodeDisabled` against
   `CnConf` and `CnCapacity`, with the `CnRev` token; reply `cn_id`.
 * **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`; reply
-  `applied_revision` and `cn_info`, with the diff semantics of
-  `InspectDiskNode` against `CnRev`.
+  `applied_revision`, `cn_info`, `obs_stamp` and `obs_age`, with the
+  semantics of `InspectDiskNode`, diffed against `CnRev`.
 * `location` is write-once here too: no RPC changes a CN's `location`
   after `CreateControllerNode`, so a `location` read outside a transaction
   never goes stale (Per-operation allocation).
@@ -2402,17 +2414,18 @@ Reply `cntlr_id` and `enabled`.
 **InspectCntlr** — read the `Cntlr` in an STM for its `addr_port`;
 outside the STM call `ControllerNodeAgent.GetCntlrInfo` with the
 `cluster_id`, `cn_id`, `sp_id` and `cntlr_id`; an agent failure is
-`ABORTED`. Reply `applied_revision` — the revision of the last
-`SyncupCntlr` the agent accepted for this cntlr, to diff against the
-desired `SpRev` of `GetStoragePool`, with the semantics of
-`InspectDiskNode` — and the `CntlrInfo`.
+`ABORTED`. Reply `applied_revision` — the revision of the agent's latest
+observation of the cntlr, to diff against the desired `SpRev` of
+`GetStoragePool` —, the `CntlrInfo`, `obs_stamp` and `obs_age`, all with
+the semantics of `InspectDiskNode`.
 
 **InspectSide** — locate the side by scanning the SP's slices in the STM
 (bounded by the SP's slices, groups and legs) and get its DN; outside the
 STM call `DiskNodeAgent.GetSideInfo` with the `cluster_id`, the `dn_id`
-and the side pointer. Reply `applied_revision` and the `SideInfo`. Both
-Inspect RPCs are the way to watch clone and migration hydration before
-`DeleteClone` and `FinishMigration`.
+and the side pointer. Reply `applied_revision`, the `SideInfo`,
+`obs_stamp` and `obs_age`, as `InspectCntlr` replies. Both Inspect RPCs
+are the way to watch clone and migration hydration before `DeleteClone`
+and `FinishMigration`.
 
 ### Thin devices
 
@@ -2529,10 +2542,21 @@ revision", Revision keys and the sync fan-out). `CreateThinDevice` never
 blocks (STM discipline keeps every RPC short). Typical latency is one
 fan-out — the `SpRev` bump of `CreateThinDevice` sends `SyncupCntlr` to the
 primary, whose reply already reports every slice `OK` in the common case,
-so the flip lands in the same round; the worst case is one
-`health_check_conf.cntlr_interval` later through `CheckCntlr` (Check
-streams), and up to one more while a side `dnv-worker.md` RW14 waits for
-has not accepted the bump (sp role, sides first).
+so the flip follows that reply; that `SyncupCntlr` waits up to one
+`health_check_conf.cntlr_interval` while a side `dnv-worker.md` RW14 waits
+for has not accepted the bump (sp role, sides first). When the reply does
+not report every slice `OK`, the flip follows the first later reply that
+does. A `SyncupCntlr` that a round re-sends on a non-zero code (Check
+streams) can be that reply. A row that the connect retry or the
+clone-metadata retry makes `OK` (`cnagent.md` CN10, CN18) shows on the
+first `CheckCntlr` round after that retry's converge, since a round
+answers from the agent's latest observation of the cntlr (Live-state
+reporting). A row that only a background read finds `OK` shows on the
+first round after such a read ends, and the first read that can store an
+observation of the cntlr after the reply is one that a round after the
+reply starts (`dnagent.md` SH29, SH30). With no converge in flight and a
+read that ends within an interval, that row shows within about two
+`cntlr_interval` of the reply.
 
 **Interaction with `SpLevel` and provisioning.** At an `sp_level` that
 suppresses pools the thin rows read `RES_STATUS_MISSING` with details
@@ -2759,11 +2783,17 @@ is set, and the agent tries again slowly until a run comes free
 **DeleteClone** — Errors: `FAILED_PRECONDITION` when `force` is false and
 hydration is not complete — checked outside the STM through `GetCntlrInfo`
 of the primary (`clone_id_to_dm_clone.details` carries the dm-clone
-status); an unreachable agent is `FAILED_PRECONDITION` too, and so is an
-SP with no primary cntlr while `force` is false (nobody to prove hydration
-with). A delete of a clone whose `deleting` is **already** true returns OK
-with no writes, no revision bump and **no agent call**, with or without
-`force`; a stale revision token is still `ABORTED` ahead of it
+status), which answers from the agent's latest observation of the cntlr
+(Live-state reporting); an unreachable agent is `FAILED_PRECONDITION` too,
+and so is an SP with no primary cntlr while `force` is false (nobody to
+prove hydration with). An observation is proof enough because a copy only
+advances: one that lags the node shows no more of the copy than the node
+holds, so the worst a late observation gives is a refusal the caller
+repeats; an agent that holds no observation of the cntlr yet reports no
+row, which refuses. A delete of a
+clone whose `deleting` is **already** true returns OK with no writes, no
+revision bump and **no agent call**, with or without `force`; a stale
+revision token is still `ABORTED` ahead of it
 (`dnv-worker.md` CLD3). Action: the deciding STM latches and writes
 nothing beyond the latch: `Clone.deleting` true, `suspended` false on
 every namespace whose `td_id` is the clone's `dst_td_id`, and one `SpRev`
@@ -2991,9 +3021,11 @@ before any agent call, its message saying that the cutover has not started
 and to cancel the migration instead; `FAILED_PRECONDITION` when `force` is
 false and hydration is incomplete, which is checked outside the STM through
 `GetSideInfo` of the **destination** side
-(`migr_dst_info.dm_clone_info.details`); an agent that does not answer
-that call is `FAILED_PRECONDITION` too (`gateway.md` AG3). `force` skips
-the hydration proof and nothing else. Reason: before the cutover the source
+(`migr_dst_info.dm_clone_info.details`), which answers from the agent's
+latest observation of the side, proof enough for the reason `DeleteClone`
+gives (Clones); an agent that does not answer that call is
+`FAILED_PRECONDITION` too (`gateway.md` AG3). `force` skips the hydration
+proof and nothing else. Reason: before the cutover the source
 still serves the leg and the destination holds no copied byte, so a finish
 then would drop the side that serves for one that holds nothing; a cutover
 that never comes is ended by a cancel (Migration). Action: STM:
@@ -3221,12 +3253,19 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   `GetCnSize`, and `GetThinDeviceBm` and `GetLegBm` are unary; the four
   `Check*` RPCs are the only bidirectional streams (Check streams).
   `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*` replies embed
-  `AgentReply` with its `code` and `details` (zero is OK); `Syncup*` and
-  `Get*Info` replies also carry the current `*Info` (Live-state reporting),
-  and every `Syncup*`, `Get*Info` and `Check*` reply additionally carries
-  the revision of the last request the agent accepted for the object
-  (`revision`, Live-state reporting) — the exact reply fields are
-  listed per RPC under `service DiskNodeAgent` and
+  `AgentReply` with its `code` and `details` (zero is OK). `Syncup*`,
+  `Get*Info` and `Check*` replies also carry the object's `*Info`, a
+  `revision` and an `obs_stamp` (Live-state reporting). A `Get*Info` or
+  `Check*` reply about an object the agent holds answers from the agent's
+  latest observation of it: the code, the `revision` and the `*Info` — on
+  a `Check*` reply as `show_info` asks (Check streams) — are that
+  observation's, and the stamp names it. A `Syncup*` reply carries the
+  revision of the request the agent holds for the object; when its gates
+  admitted the request, its code and `*Info` are what its converge
+  reached, its stamp is that of the observation the converge stored, and
+  its `save_time` is when the agent saved the request, unset when the save
+  failed (`dnagent.md` SH28).
+  The exact reply fields are listed per RPC under `service DiskNodeAgent` and
   `service ControllerNodeAgent`. `PushMigrBitmapReply` and
   `PushCloneBitmapReply` carry only `AgentReply`; `GetDnSize`, `GetCnSize`,
   `GetThinDeviceBm` and `GetLegBm` return only their payload (`size`,
@@ -3242,8 +3281,8 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   for a copy is no failure: it is a wait, reported
   `RES_STATUS_PROVISIONING` (Metadata units). The rows of a clone and of a
   migration destination take their status otherwise: one rule decides it,
-  on a converge and a check round alike, from what each reads, with what
-  failed in their details (`cnagent.md` CN18; `dnagent.md` DN13, which
+  on a converge and a background read alike, from what each reads, with
+  what failed in their details (`cnagent.md` CN18; `dnagent.md` DN13, which
   says when a destination's two channels differ).
 * **Bitmap durability.** Received `Push*Bitmap` chunks are persisted per
   chunk under `LocalMigrBmPath` or `LocalCloneBmPath`; the applied sets
@@ -3271,7 +3310,7 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   format time and immutable from then on, Disk node). It ensures the Disk
   node base state — the [D13] disk format and this agent's own nvmet port
   — and diffs the pointer list per Common agent rules. Reply
-  `agent_reply`, `revision`, `dn_info`.
+  `agent_reply`, `revision`, `dn_info`, `obs_stamp` and `save_time`.
 * `SyncupSide` carries one `side_pointer`, `revision`, `side_conf`
   (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`,
   `sp_level`, `provisioned`, `zero_bytes`) and — only when this side is a
@@ -3287,19 +3326,21 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   standby table targets and ANA states, and the migration source and
   destination roles (Migration). Reply `agent_reply`, `revision`,
   `side_info` (which always reports `zeroed_bytes` and `zero_bytes`, Side
-  provisioning protocol) and `bm_info` (the applied migration-bitmap
-  indexes, Bitmap push protocol).
+  provisioning protocol), `bm_info` (the applied migration-bitmap
+  indexes, Bitmap push protocol), `obs_stamp` and `save_time`.
 * `PushMigrBitmap` delivers one `MigrBitmap` chunk (`side_pointer`,
   `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per
   Bitmap push protocol: persist the chunk at `LocalMigrBmPath`, then
   recompute and `blkdiscard` the fully skippable dm-clone regions
   (Migrations, raid0 bitmap math). Reply `agent_reply` only.
-* `GetDnInfo` and `GetSideInfo` return the current `DnInfo` or `SideInfo`
-  without changing anything (`agent_reply`, `revision`, the info).
+* `GetDnInfo` and `GetSideInfo` return the agent's latest observation of
+  the DN or the side from memory, without changing anything, reading the
+  node or starting a read (`agent_reply`, `revision`, the info,
+  `obs_stamp`; Live-state reporting).
 * `CheckDn` and `CheckSide` are the health streams, one per DN or per
   side, with the protocol of Check streams. Request: the ids, `revision`,
   `show_info` and `trace_id` (the sending round's id); reply:
-  `agent_reply`, `revision`, `dn_info` or `side_info`.
+  `agent_reply`, `revision`, `dn_info` or `side_info`, and `obs_stamp`.
 
 ### `service ControllerNodeAgent`
 
@@ -3313,7 +3354,8 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   and never persisted, and the single nvmet port; it accepts and persists
   `qos_ratio` and programs no limit (Controller node, common; `cnagent.md`
   CN6); and it diffs the pointers.
-  Reply `agent_reply`, `revision`, `cn_info`.
+  Reply `agent_reply`, `revision`, `cn_info`, `obs_stamp` and
+  `save_time`.
 * `SyncupCntlr` carries one `cntlr_pointer`, `revision`, `bdev_conf`
   (`dm_pool_conf.low_water_mark_pct` included, Primary cntlr),
   `sp_level`, `cntlr`, `id_to_slice` (keyed by the `slice_id` rendered
@@ -3321,18 +3363,20 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
   `xfer_list`. It converges Primary cntlr or Standby
   cntlr; a primary-to-standby or standby-to-primary flip follows Failover
   exactly, and a clone rebuild follows Clone crash recovery. Reply
-  `agent_reply`, `revision`, `cntlr_info` and `bm_info_list` (the applied
+  `agent_reply`, `revision`, `cntlr_info`, `bm_info_list` (the applied
   clone-bitmap chunks, one `BitmapInfo` per clone, its applied set carried
   as `chunk_id_list` of `(src_slice_idx, bm_idx)` pairs, Bitmap push
-  protocol; `bm_idx_list` is for migrations only).
+  protocol; `bm_idx_list` is for migrations only), `obs_stamp` and
+  `save_time`.
 * `PushCloneBitmap` delivers one `CloneBitmap` chunk (`cntlr_pointer`,
   `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary**
   cntlr's agent, per Bitmap push protocol: persist the chunk at the
   `LocalCloneBmPath` of its pair, translate through raid0 bitmap math,
   `blkdiscard` the dm-clone. Safe at any time (Clone crash recovery).
   Reply `agent_reply` only.
-* `GetCnInfo` and `GetCntlrInfo` return the read-only live state
-  (`agent_reply`, `revision`, the info).
+* `GetCnInfo` and `GetCntlrInfo` return the agent's latest observation of
+  the CN or the cntlr, as `GetDnInfo` does (`agent_reply`, `revision`, the
+  info, `obs_stamp`).
 * `GetThinDeviceBm` and `GetLegBm` serve the gateway's bitmap reads
   (Bitmap reads) from a dm-thin metadata snapshot, reserved, dumped and
   always released (`cnagent.md` CN25 to CN27): the per-slice td mapping
@@ -3341,7 +3385,7 @@ plain byte concatenation (Bitmap push protocol, raid0 bitmap math).
 * `CheckCn` and `CheckCntlr` are the health streams, one per CN or per
   cntlr, with the protocol of Check streams. Request: the ids, `revision`,
   `show_info` and `trace_id` (the sending round's id); reply:
-  `agent_reply`, `revision`, `cn_info` or `cntlr_info`.
+  `agent_reply`, `revision`, `cn_info` or `cntlr_info`, and `obs_stamp`.
 
 ### Side provisioning protocol
 
@@ -3456,17 +3500,19 @@ rule reads (sp role). Zeroing runs at **every** `sp_level`,
 `SP_LEVEL_DISABLE` included (SpLevel): it is bottom-layer provisioning, and
 so is a migration destination's taking of the run its zeroing waits for.
 `dnagent.md` DN9 holds the converge matrix, the zeroing goroutine and its
-batch sizing; `dnagent.md` DN18 holds the rows of the read-only probes
-(`GetSideInfo`, `CheckSide`), which never allocate and never start or
-stop the goroutine (`dnagent.md` DN16).
+batch sizing; `dnagent.md` DN18 holds the rows of the read-only probes,
+those of the background read a `CheckSide` round starts (`dnagent.md`
+SH29), which never allocate and never start or stop the goroutine
+(`dnagent.md` DN16).
 
 ### Live-state reporting
 
 `ResInfo` carries `res_name`, `status`, `details`, `reason` and `epoch`,
 with `ResStatus`:
 
-* `RES_STATUS_UNKNOWN` — no answer from the node; set by *workers*, never
-  by the agent itself.
+* `RES_STATUS_UNKNOWN` — no answer from the node, or one from an
+  observation too old (`dnv-worker.md` HL7); set by *workers*, never by
+  the agent itself.
 * `RES_STATUS_MISSING` — the agent has not created it; a clone's
   `clone_id_to_target` row also reads it for a fault of the clone's source
   (`cnagent.md` CN18).
@@ -3484,9 +3530,38 @@ with `ResStatus`:
 
 `epoch` is the unix seconds of the last status change; a change of
 `details` or of `reason` alone does not move it. The `revision`
-returned next to an `*Info` (`Syncup*`, `Check*` and `Get*Info` replies)
-is that of the request the agent holds for the object — the last one it
-accepted (`dnagent.md` SH8, SH25) — whatever the outcome of its converge.
+returned next to an `*Info` by a `Syncup*` is that of the request the
+agent holds for the object — the last one it accepted (`dnagent.md` SH8) —
+whatever the outcome of its converge.
+
+An **observation** is the real state of one DN, side, CN or cntlr as its
+agent last read it: the rows of its `*Info`, the code that says whether the
+object is clean or what is left over, the revision of the request the
+agent held for the object while the converge or read that made it ran, the
+time by the node's clock when that converge or read ended, and the trace
+id of the call whose converge or read made it (`dnagent.md` SH28, SH29).
+The end of a converge stores one, unless the converge's call was cut off,
+and so does the end of a background read, which a check round starts,
+unless a syncup cancelled it (`dnagent.md` SH29, SH30). A
+`Check*` round and a `Get*Info` answer at once from the latest one and
+read nothing themselves: their `agent_reply`, `revision` and `*Info` are
+the observation's, and their `obs_stamp` gives its time and trace id, the
+agent's clock as it answers and the start of a converge of the object in
+flight. A round or an info read of an object the agent does not hold
+refuses it as unknown (`dnagent.md` SH25, DN16; `cnagent.md` CN23); its
+stamp carries no observation time, nor does the stamp of one about an
+object the agent holds but has not observed yet. When the gates admit a
+`Syncup*` request, its reply's `obs_stamp` gives the observation its
+converge stored, and its `save_time` when the agent saved the request,
+unset when the save failed; a reply that refuses the request carries
+neither. The worker judges an observation by its age, which it takes on
+the node's own clock from the times the agent's stamps carry
+(`dnv-worker.md` HL7).
+Reason: an answer that read the node itself, or waited for a converge's
+lock to read it, would make a busy node miss the worker's rounds; the cost
+is that a change on the node that no converge makes reaches the worker one
+round later.
+
 Map keys in `SideInfo` and `CntlrInfo` are the obvious owner ids — `cn_id`
 for a side's per-CN export stack; the td, slice, group, leg, namespace,
 subsystem, clone and transfer ids in `CntlrInfo`, with
@@ -3543,11 +3618,11 @@ round, which the sp worker's flip rule reads (sp role).
 its rows that holds numbers and no status: the disk's total extents, its
 free extents, the number of side records its volume table holds, its free
 metadata units (Metadata units), and whether those side records name
-exactly the side pointers of the request the agent holds, the one whose
-revision the reply carries. The agent sends the part only while it knows
-its volume table, as this disk node's, and its disk size, and leaves it
-out otherwise, so a reader tells a count not known from a zero
-(`dnagent.md` DN18). The counts are no row and set no `err_epoch`
+exactly the side pointers of the request the agent held when it read
+them, the one whose revision the reply carries. The agent sends the part
+only while it knows its volume table, as this disk node's, and its disk
+size, and leaves it out otherwise, so a reader tells a count not known
+from a zero (`dnagent.md` DN18). The counts are no row and set no `err_epoch`
 (`dnv-worker.md` HL1): the dn role compares their free extents with the
 record's `free_ext_cnt` (dn / cn roles; `dnv-worker.md` RW13), nothing
 writes them to etcd, and `InspectDiskNode` returns them as the agent
@@ -3677,7 +3752,10 @@ the memo's comparison is inert for them and they have no such caveat.
 The four `Check*` RPCs — `CheckDn`, `CheckSide`, `CheckCn` and
 `CheckCntlr` — are the only bidirectional streams of the agent services.
 They carry no desired state — `Syncup*` does that — and exist so a worker
-can watch an object's live state cheaply instead of polling `Get*Info`:
+can watch an object's state cheaply: a round answers at once from the
+agent's latest observation of the object (Live-state reporting) and can
+start the background read that makes the next one, which a `Get*Info`
+never does (`dnagent.md` SH28, SH29):
 
 * **One stream per object.** The owning worker keeps one `CheckDn` per
   DN, one `CheckSide` per side, one `CheckCn` per CN and one `CheckCntlr`
@@ -3698,16 +3776,20 @@ can watch an object's live state cheaply instead of polling `Get*Info`:
   ignore this request field, and the mismatch check below is the worker
   comparing the *reply's* revision against desired) —, `show_info`, and
   `trace_id`: the id of the worker round that sent it, under which the
-  agent runs the round, because the stream's metadata names only the
-  round that opened it (`grpc.md` T3).
-* **Reply:** `agent_reply`, `revision` — the revision of the last request
-  the agent accepted for the object (Live-state reporting) — and the
-  `*Info`:
-  * `show_info` true ⇒ the agent always fills the complete current
-    `*Info` (Live-state reporting);
-  * `show_info` false ⇒ the `*Info` is filled on the first reply of the
-    stream and whenever the freshly probed `*Info` differs from the last
-    one sent on this stream — protobuf equality, so any changed row,
+  agent answers the round and runs the background read the round starts,
+  because the stream's metadata names only the round that opened it
+  (`grpc.md` T3; `dnagent.md` SH29).
+* **Reply:** `agent_reply`, `revision` and the `*Info` of the agent's
+  latest observation of the object — so `revision` is the revision of the
+  request the agent held for the object while the converge or read that
+  made that observation ran — and its
+  `obs_stamp` (Live-state reporting):
+  * `show_info` true ⇒ the agent fills the observation's complete
+    `*Info`;
+  * `show_info` false ⇒ the `*Info` is filled on the stream's first reply
+    that has an observation to carry, and whenever the observation's
+    `*Info` differs from the last one sent on this stream — protobuf
+    equality, so any changed row,
     `details` or `epoch` counts, a side's advancing `zeroed_bytes`
     included, which the sp worker's flip rule reads (sp role) — and is
     left unset otherwise (`dnagent.md` SH26).
@@ -3715,13 +3797,19 @@ can watch an object's live state cheaply instead of polling `Get*Info`:
   object's `Syncup*` when the reply's `revision` differs from the
   **desired** one or when `agent_reply.code` is non-zero at all,
   `ReplyCodeLeftover` included — which is the whole of the sweep's retry
-  machinery (Teardown by sweep; `dnv-worker.md` RW4 and RW5).
+  machinery (Teardown by sweep; `dnv-worker.md` RW4 and RW5) — save on a
+  reply whose observation is too old, which re-issues nothing (Health,
+  below).
 * **Health.** The worker turns a broken stream, a missing reply within the
-  round timeout, or `RES_STATUS_ERROR` entries in the `*Info` into the
-  `err_epoch` updates of dn / cn roles and sp role (`RES_STATUS_UNKNOWN`
-  is what the worker records itself while the stream is dead, Live-state
-  reporting). The `Check*` replies are the primary health signal; the
-  `Syncup*` replies are the secondary one.
+  round timeout, a reply whose observation is too old, or
+  `RES_STATUS_ERROR` entries in the `*Info` into the `err_epoch` updates
+  of dn / cn roles and sp role (`RES_STATUS_UNKNOWN` is what the worker
+  records itself while the stream is dead, Live-state reporting). A reply
+  whose observation is too old counts as a missing reply; how old is too
+  old, and why, is `dnv-worker.md` HL7, which also makes the first round
+  after a pause in the worker's rounds of an object give no verdict on an
+  observation that ended before that round. The `Check*` replies are the
+  primary health signal; the `Syncup*` replies are the secondary one.
 
 ### Teardown by sweep
 
@@ -3841,33 +3929,43 @@ device is there, the next enumeration finds it.
   leftovers without being touched. Each role's layers, and the step each
   runs ahead of its first layer, are `dnagent.md` DN6 and `cnagent.md`
   CN21.
-* **The verdict is recomputed every time and stored nowhere.** "Something
-  is left" is the result of one comparison, never a flag. The read-only
-  paths read the node afresh and run the same comparison with nothing
-  touched, so every `Check*` round and every `Get*Info` answers a verdict
-  as current as the sweep's own while still removing nothing; which
-  listings a cntlr's check round and info read take is `cnagent.md` CN30's.
-  A leftover that has since gone therefore stops being reported by itself,
-  and one that is still there keeps being reported without anything having
-  remembered it.
+* **The verdict is recomputed, and kept only to be reported.** "Something is
+  left" is the result of one comparison, never a flag. A converge's sweep
+  makes it as it removes; the background read a check round starts reads the
+  node afresh and runs the same comparison with nothing touched
+  (`dnagent.md` SH29); which listings a cntlr's read takes is `cnagent.md`
+  CN30's. Each keeps its verdict only as the code of the object's
+  observation (Live-state reporting), which the agent reports and never acts
+  on, and a `Check*` round or a `Get*Info` answers from the latest one,
+  removing nothing. A change that no converge makes shows in the verdict
+  once a read has found it, and a converge's observation carries its own
+  sweep's code, so a condition only the read-only verdict names
+  (`dnagent.md` DN16; `cnagent.md` CN30) shows once a read has run after
+  that converge. A leftover that has since gone stops being reported once a
+  read or a converge finds it gone, and one that is still there keeps being
+  reported without anything having remembered it.
 * **A leftover travels as `ReplyCodeLeftover`.** It is the one
   per-resource outcome that cannot ride in the `*Info` rows of Live-state
   reporting: those rows are keyed by the ids of *wanted* objects, and a
   leftover is by definition something nothing wants. The code means
   **accepted with residue** — the desired state is stored and every wanted
   object converged — and is not a rejection: the worker reads the reply's
-  rows exactly as for code zero and re-issues the object's `Syncup*` every
-  round until the code changes (`dnv-worker.md` RW4, RW5), and nothing on
-  the agent re-drives a sweep because something is left (`dnagent.md`
-  DN17; `cnagent.md` CN10, CN30). The startup case needs no recovery step,
-  because the first `Check*` after a restart reports whatever the node
-  still holds. `details` names the leftovers, at most `maxLeftoverNames`
-  of them, and reports an enumeration that did not answer the same way —
-  an answer the agent cannot trust cannot prove the node clean — as it
-  does each role's conditions that only a `Syncup*` cures (`dnagent.md`
-  DN16; `cnagent.md` CN30). The agent log carries the full list
-  (`log.md`, Leftovers), so a lingering leftover is visible every round
-  rather than once.
+  rows exactly as for code zero and re-issues the object's `Syncup*` on a
+  round whose reply carries it, save a round whose observation is too old,
+  as Check streams says (`dnv-worker.md` RW4, RW5), and nothing on the
+  agent re-drives a sweep because something is left (`dnagent.md` DN17;
+  `cnagent.md` CN10, CN30). The startup case
+  needs no recovery step, because the startup reconcile stores an
+  observation of each object it converges, and the first `Check*` after a
+  restart answers from it with whatever that reconcile's sweep left on the
+  node. `details` names the
+  leftovers, at most `maxLeftoverNames` of them, and reports an
+  enumeration that did not answer the same way — an answer the agent
+  cannot trust cannot prove the node clean — as it does each role's
+  conditions that only a `Syncup*` cures (`dnagent.md` DN16; `cnagent.md`
+  CN30). The agent log carries the full list (`log.md`, Leftovers), so a
+  lingering leftover is visible on every pass that finds it rather than
+  once.
 
 ## Workers
 
@@ -3916,11 +4014,14 @@ STMs that bump no revision: unhealthy sets the epoch and deletes the key,
 recovered clears the epoch and recreates the key (`dnv-worker.md` HL1,
 MD4). From a disk node's disk counts (Live-state reporting) the dn-role
 worker also compares the node's own free extents with the record's and
-logs a disagreement that two compares in a row find; it writes nothing for
-it (`dnv-worker.md` RW13). A `revision` mismatch or a non-zero reply code
-re-issues the `Syncup*` (`dnv-worker.md` RW4). `RES_STATUS_PROVISIONING` is
-**not** a bad status and never sets `err_epoch` or removes a capacity key
-([D15], Live-state reporting).
+logs a disagreement that two compares in a row find, each from a round
+whose observation is new to the worker (`dnv-worker.md` RW23); it writes
+nothing for it (`dnv-worker.md` RW13). A round whose reply carries a
+`revision` other than the desired one or a non-zero code re-issues the
+`Syncup*`, save a round whose observation is too old, which issues none
+(`dnv-worker.md` RW4, HL7).
+`RES_STATUS_PROVISIONING` is **not** a bad status and never sets
+`err_epoch` or removes a capacity key ([D15], Live-state reporting).
 
 ### sp role
 
@@ -4010,9 +4111,11 @@ the SP, which is how `created` reaches the cn agent (`cnagent.md` CN14).
 It cannot loop: the re-sync's reply, reporting the same rows `OK`, finds
 no candidate. The flip is idempotent and observation-driven, so a worker
 restart or a shard-ownership change (Membership and shard ownership) needs
-no recovery step: the new owner's first reply on a fresh Check stream
-carries the complete `*Info`, any torn mark the agent still holds
-included, and flips whatever is complete and still false.
+no recovery step: the new owner's first round on a Check stream carries
+the complete `*Info`, any torn mark the agent still holds included, and
+the first later reply the worker judges — a `Syncup*` reply that round
+brings, or the first round that answers from an observation made after it
+(`dnv-worker.md` HL7) — flips whatever is complete and still false.
 
 ### Automatic reactions
 
@@ -4030,13 +4133,25 @@ fires a reaction — the failover of an unhealthy primary, a cntlr
 replacement, a leg repair on either of its clocks — only on an object
 whose latest health verdict by this worker's coordinator of the SP is
 unhealthy, and the failover only once the primary's last two health
-verdicts from check rounds are both unhealthy, with no clean answer, of a
-round or of a syncup, since the earlier of them. A coordinator has no verdict when it starts, after a restart
-and after a handoff alike; the clock still runs from the stored
+verdicts from check rounds, counted as `dnv-worker.md` RW23 says, are both
+unhealthy, with no clean answer, of a round or of a syncup, since the
+earlier of them. A coordinator has no verdict when it starts, after a
+restart and after a handoff alike; the clock still runs from the stored
 `err_epoch`, and the disabled trigger needs no verdict (`dnv-worker.md`
 AR10). An epoch that an earlier owner left, or that another observer
 wrote, therefore fires nothing before this worker has judged the object
-itself. The four reactions:
+itself. That judgment reads the agent's report, and the agent answers from
+its latest observation, which only a converge or a read that a round
+starts renews (Live-state reporting; `dnagent.md` SH29). After a pause in
+the worker's rounds of an object (`dnv-worker.md` HL7), such as a worker
+restart, a fence or a handoff, a round that answers from an observation
+that ended before the first round after the pause gives no verdict on
+what it reports and drives only the re-sync, until the
+observation is too old and the round is a missed round (`dnv-worker.md`
+HL7). No failover on its threshold, cntlr replacement or leg repair
+therefore rests on what such an observation reports, though a missed
+round counts in a failover run as any other does (`dnv-worker.md` AR10).
+The four reactions:
 
 * **Failover** (`dnv-worker.md` AR5): an unhealthy primary — or a
   `disabled` one, with no threshold wait (Cntlrs) — gives the role to a
@@ -4795,8 +4910,11 @@ that started while etcd was away can fence once more first
 (`dnv-worker.md` VW8). Once it drives, it opens every check stream afresh
 and re-syncs only an object whose agent reports another revision or a
 non-zero code (`dnv-worker.md` RW4); its flips and drains resume, and a
-reaction fires only once the worker's own verdicts call for it
-(`dnv-worker.md` AR10).
+threshold reaction fires only once the worker's own verdicts call for it
+(`dnv-worker.md` AR10). Its loops start afresh, so the first round on an
+object gives no verdict on an observation that aged while no worker drove
+it, and the outage alone sets no health epoch (`dnv-worker.md` HL7;
+Automatic reactions).
 Nothing is replayed and nothing is lost: the revision keys are durable, so
 what was committed and not yet driven converges then (`dnv-worker.md`,
 Known limits).
@@ -5290,7 +5408,8 @@ document and the component documents cite it by its id.
   members and pathless multipath legs, and can hold suspended devices,
   which wedge an LVM scan in unkillable D state ("exit_aio";
   "ignore_suspended_devices" and "global_filter" do not help) — while the
-  cn agent would run those scans on every converge and every Check round.
+  cn agent would run those scans on every converge and every read its
+  check rounds start.
   The arena instead (Controller node, common; tmpfs / file names): one
   tmpfs-backed sparse file (`CnTmpFilePath`, `CnCloneMetaAreaSize` bytes)
   on **one** loop device, which the agent finds afresh rather than
@@ -5584,8 +5703,13 @@ that component's document and only pointed to here.
   that reason (`cnagent.md` CN10 and CN21); the disconnects that still run
   under a lock are each role's own limit (`cnagent.md`, Known limits;
   `dnagent.md`, Known limits). On a node where many commands run to their
-  timeouts, one sick object can delay every other object's converge and
-  Check round by up to a whole converge pass. Accepted: object locks keep
+  timeouts, one sick object can delay every other object's converge by up
+  to a whole converge pass, and while a node write that marks the node
+  waits the agent starts no background read (`dnagent.md` SH30), so the
+  observation of every object it holds ages meanwhile and can grow too
+  old (`dnv-worker.md` HL7). A `SyncupDn` or `SyncupCn` that the worker
+  re-sends at the revision the agent holds keeps no read of a side or a
+  cntlr from ending (`dnagent.md` SH30). Accepted: object locks keep
   steady-state concurrency, and the zeroing loop's try-acquire rule
   (`dnagent.md` DN9) keeps the one long-running background writer out of
   that queue.
@@ -5619,9 +5743,9 @@ that component's document and only pointed to here.
   src step 1, before the primary has read the ANA change, and the primary's
   member reconciliation puts the leg back once its path to the destination
   serves and its health probe passes (`cnagent.md` CN12, CN30). The
-  primary's own reads of the pool's status, in its check rounds, info
-  reads and converges (`cnagent.md` CN28), carry the `--noflush` flag and
-  commit nothing (`dnagent.md` SH17). What still commits the pool in a
+  primary's own reads of the pool's status, in its background reads and
+  converges (`cnagent.md` CN28), carry the `--noflush` flag and commit
+  nothing (`dnagent.md` SH17). What still commits the pool in a
   gap: a thin
   device's create or delete (`cnagent.md` CN14); every read through a thin
   metadata snapshot, whose reservation commits the pool, the bitmap reads of
@@ -5634,9 +5758,13 @@ that component's document and only pointed to here.
   commit once any write has mapped new blocks, a host's write or a clone's
   hydration copy into the td alike. While a commit waits, the rest of that
   pool's IO waits too, and so does a status read of the pool, which takes
-  the pool's metadata lock for reading. A check round, a converge or a
-  bitmap read that waits holds the cntlr's lock and the node read lock
-  meanwhile (`cnagent.md` CN1), so the cntlr's other calls wait with it.
+  the pool's metadata lock for reading. A background read, a converge or
+  a bitmap read that waits holds the cntlr's lock and the node read lock
+  meanwhile (`cnagent.md` CN1), so the cntlr's other calls that take them
+  wait with it — a syncup that cancels the read included, since a
+  cancelled read lets go only once its waiting command returns — while
+  its check rounds answer from an observation that ages and, if the wait
+  lasts, grows too old (`dnv-worker.md` HL7).
   The gap's end needs nothing of the primary: the cutover comes only once
   the primary holds a live path to the destination (Migration), and the
   destination's last step moves that path to optimized, so the waiting IO
@@ -5832,10 +5960,12 @@ that component's document and only pointed to here.
   health epoch, so through that row neither a fault at the source nor one
   in the primary's own path to it fails the primary over or replaces it
   while the copy waits. The cn agent's retry of a source it cannot
-  connect, or that has no namespace, can still make the primary's check
-  rounds miss, and missed rounds can move the role. A build of the clone's
-  dm-clone that cannot connect the source, or finds no source namespace,
-  while the fault lasts — after a role move or a CN reboot, among others —
+  connect, or that has no namespace, can still hold the primary's reads
+  off long enough that the observation its check rounds answer from grows
+  too old (`dnv-worker.md` HL7), and such rounds count as missed ones,
+  which can move the role. A build of the clone's dm-clone that cannot
+  connect the source, or finds no source namespace, while the fault
+  lasts — after a role move or a CN reboot, among others —
   takes even a clone that has hydrated in full out of service until the
   source comes back or the clone is deleted with `force`.
 * **Worker membership tolerates, but does not repair, a partitioned

@@ -218,10 +218,10 @@ the method set is exactly the following, each taking the caller's ctx:
   is never an empty listing. `CloneMeta.LoopDevices` does the same for
   `losetup --associated`, which exits zero with no output when nothing is
   attached. Unlike `Dm.List`, the two whole-node listings that a cntlr's
-  check round or info read takes — `Dm.ListInfo`, each device's
-  number and attr flags, and `Dm.ListTables`, each device's live table —
-  answer with the devices they name even when `dmsetup` exits above zero,
-  as it does when a device goes away during the listing. Such a listing is
+  background read takes — `Dm.ListInfo`, each device's number and attr
+  flags, and `Dm.ListTables`, each device's live table — answer with the
+  devices they name even when `dmsetup` exits above zero, as it does when a
+  device goes away during the listing. Such a listing is
   partial, and so is one with a line the agent cannot read: it can lack a
   device the node holds. A listing whose process never reported, or in
   which the agent can read no device, did not answer, but "No devices
@@ -276,9 +276,9 @@ the method set is exactly the following, each taking the caller's ctx:
 ### ReadDir
 
 * `ReadDir` lists a directory in the agent's own process; no child process
-  runs. Reason: an agent lists many sysfs directories in one check round or
-  converge, and starting a process for each listing costs far more than the
-  listing itself. The nvmet configfs tree is never listed this way
+  runs. Reason: an agent lists many sysfs directories in one background
+  read or converge, and starting a process for each listing costs far more
+  than the listing itself. The nvmet configfs tree is never listed this way
   (`dnagent.md` SH18).
 * Like `ReadFile`, it holds one semaphore slot and checks the ctx error after
   acquiring it. That is its last cancellation point: the listing itself is
@@ -471,7 +471,8 @@ sanctioned direct-syscall path in dnv:
   fails with EBUSY until that command exits.
 * *It must never run under a lock.* `cnagent.md` CN1 already keeps the
   probers out of the lock hierarchy; a wedged probe under the node or object
-  lock would freeze every converge and Check round on the node.
+  lock would freeze every converge and background read on the node, so its
+  observations would only age.
 * *It must never run through the semaphore.* `LimitedOsClient` is a
   `DefaultOsClientLimit`-slot semaphore held across the blocking syscall.
   One dead or partitioned DN can back more legs on a CN than the client has

@@ -1782,11 +1782,11 @@ case_smoke() {
 	# -------------------------------------------------------------------
 	# The suite runs NO dnv-worker, so no Syncup* has ever reached a fake and
 	# every *Info it derives from "the last accepted request" is absent. That
-	# is the truthful live state of the node, not a failure of the call (AG3),
-	# and the reply's applied_revision is the agent's — the revision of the
-	# last Syncup* it accepted for the node, 0 for a fake that has accepted
-	# nothing (architecture.md, Disk nodes and Controller nodes), never the
-	# stored rev key.
+	# is the truthful state the agent holds, not a failure of the call (AG3),
+	# and the reply's applied_revision is the agent's — the revision of its
+	# latest observation of the node, 0 for a fake that has accepted nothing
+	# (architecture.md, Disk nodes and Controller nodes), never the stored
+	# rev key.
 	out=$(gw inspect-dn --addr "$(dn_addr 0)")
 	assert_field "$out" '.applied_revision' "0" \
 		"inspect-dn applied_revision of an unsynced fake"
@@ -2945,7 +2945,8 @@ EOF
                      "primary_cn_id":"$primaryCnId"}}}}}
 EOF
 	# architecture.md, Cntlrs: the reply's applied_revision is the revision of
-	# the last request the agent accepted for the object, passed through with
+	# the agent's latest observation of the object — for the fake, the
+	# revision of the request it holds for the object — passed through with
 	# the info. The seeded 7 is distinctive — the stored sp_rev is far past 7
 	# by this stage, so a handler that regressed to the store cannot pass.
 	out=$(gw inspect-cntlr --sp sp0 --id "$primaryId")

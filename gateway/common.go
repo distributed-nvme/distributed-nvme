@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -1015,8 +1016,40 @@ func spSliceCnt(conf *pb.SpConf) int {
 // they can PROVE the copy is done, and an unreadable status is not proof
 // (architecture.md, Clones). The zero rule is the gateway's own; the parser
 // reads a count that does not parse, one past 64 bits included, as zero.
+//
+// The row is the one in the agent's latest observation, not a fresh read of
+// the node (architecture.md, Live-state reporting). That is proof enough: a
+// copy only advances, so an observation that lags the node shows less of it,
+// and the refusal it gives is one the caller repeats; an agent that holds no
+// observation of the object yet reports no row, and empty details refuse.
 func hydrationComplete(details string) bool {
 	status, ok := common.ParseCloneStatus(details)
 	return ok && status.TotalRegions != 0 &&
 		status.HydratedRegions >= status.TotalRegions
+}
+
+// ---------------------------------------------------------------------------
+// The observation an Inspect* reply passes on (architecture.md, Live-state
+// reporting)
+// ---------------------------------------------------------------------------
+
+// obsAge is the age of the observation an agent's Get*Info reply answered
+// from, which an Inspect* reply carries beside the reply's stamp: the agent's
+// answer time less the observation's time, both by the node's own clock, so a
+// clock difference between the gateway's host and the node never enters it.
+// It is unset when either time is: an agent that holds no observation of the
+// object yet has no age to give, and a zero would read as a fresh one. A
+// negative difference is zero: a node clock that stepped back gives one, and
+// so does an observation time the agent moved one nanosecond past a tie to
+// keep the object's times increasing (dnagent.md SH28).
+func obsAge(stamp *pb.ObsStamp) *durationpb.Duration {
+	obsTime, answerTime := stamp.GetObsTime(), stamp.GetAnswerTime()
+	if obsTime == nil || answerTime == nil {
+		return nil
+	}
+	age := answerTime.AsTime().Sub(obsTime.AsTime())
+	if age < 0 {
+		age = 0
+	}
+	return durationpb.New(age)
 }

@@ -595,6 +595,8 @@ func TestReconcileKeepsTheCntlrsOfAnUnreadableCnFile(t *testing.T) {
 		!bytes.Equal(got, seeded[chunkPath]) {
 		t.Errorf("%s did not survive the rebuild", chunkPath)
 	}
+	// A read of the rebuilt cntlr agrees (dnagent.md SH29).
+	refreshTestCntlr(t, srv)
 	if got := checkCntlr(); got.GetCode() != 0 {
 		t.Errorf("CheckCntlr after the rebuild = %v, want code 0", got)
 	}

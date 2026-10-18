@@ -292,7 +292,7 @@ type cloneMetaSlot struct {
 
 // cloneMetaArena is one pass's view of the arena: the loop device it currently
 // lives on and every kind-`cb` wrapper of this CN. It is probed afresh in
-// every converge, check round or info read, never carried from one to the
+// every converge and every read of the cntlr, never carried from one to the
 // next and never persisted — loop names are kernel-assigned and a tmpfs
 // remount can change them under a live agent.
 type cloneMetaArena struct {
@@ -312,14 +312,14 @@ type cloneMetaArena struct {
 // prefix filter drops by construction; a non-zero exit really is a failure.
 // wanted is not used.
 //
-// With the reading of a check round or an info read (CN5, CN28) the names
-// come from its `dmsetup info` listing and the tables from its `dmsetup
-// table` listing (cnReading). A partial info listing can lack a wrapper this
-// cntlr wants, so each name of wanted that the listing lacks is looked up on
-// its own (cnReading.info) and enumerated when it is there; without that,
-// such a listing would read this cntlr's own wrapper MISSING in a round
-// while a converge's `dmsetup ls` reads it OK. A complete listing that lacks
-// a wanted name answers absent with no read.
+// With the reading of a cntlr's read (CN5, CN28) the names come from its
+// `dmsetup info` listing and the tables from its `dmsetup table` listing
+// (cnReading). A partial info listing can lack a wrapper this cntlr wants, so
+// each name of wanted that the listing lacks is looked up on its own
+// (cnReading.info) and enumerated when it is there; without that, such a
+// listing would read this cntlr's own wrapper MISSING in a read while a
+// converge's `dmsetup ls` reads it OK. A complete listing that lacks a wanted
+// name answers absent with no read.
 func (c *CloneMeta) Wrappers(
 	ctx context.Context,
 	rd *cnReading,
@@ -643,19 +643,18 @@ func (s *CnAgentServer) cloneMetaArena(
 	}, nil
 }
 
-// planArena resolves the arena at its first call in a converge, check round
-// or info read and caches it on the plan, so a cntlr with N clones still
-// issues one `losetup` and one enumeration of the wrappers (CN18: the loop
-// device is re-learned every pass and the probe compares against the
-// *currently probed* one). A converge enumerates them with `dmsetup ls`, a
-// check round and an info read from their reading, where the wrapper of
-// every clone of the plan is looked up on its own when a partial listing
-// lacks it (Wrappers). A converge that allocates enumerates once more under
-// cloneMetaMu, and that enumeration replaces the cache (ensureCloneMeta);
-// after a failed allocation the next call resolves the arena afresh
-// (ensureClone). The cache lives exactly as long as the pass: each pass
-// builds its plan afresh (newCntlrPlan), and nothing keeps a plan between
-// passes.
+// planArena resolves the arena at its first call in a converge or a read and
+// caches it on the plan, so a cntlr with N clones still issues one `losetup`
+// and one enumeration of the wrappers (CN18: the loop device is re-learned
+// every pass and the probe compares against the *currently probed* one). A
+// converge enumerates them with `dmsetup ls`, a read from its reading, where
+// the wrapper of every clone of the plan is looked up on its own when a
+// partial listing lacks it (Wrappers). A converge that allocates enumerates
+// once more under cloneMetaMu, and that enumeration replaces the cache
+// (ensureCloneMeta); after a failed allocation the next call resolves the
+// arena afresh (ensureClone). The cache lives exactly as long as the pass:
+// each pass builds its plan afresh (newCntlrPlan), and nothing keeps a plan
+// between passes.
 func (s *CnAgentServer) planArena(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -851,10 +850,10 @@ func (s *CnAgentServer) probeCloneMeta(
 // punch or a `dmsetup create` that failed inside Alloc leaves an absent
 // wrapper in an arena with room, for instance, and a mismatched wrapper
 // ensureCloneMeta could not remove leaves a present one. The converge's rows
-// read the node as the check round's do, with the failure in their details,
+// read the node as the read's do, with the failure in their details,
 // and it registers the CN10 retry, which runs the pass again (ensureClone).
 //
-// Read-only throughout (CN23, SH25): planArena is this pass's cached
+// Read-only throughout (CN23; dnagent.md SH29): planArena is this pass's cached
 // enumeration and cloneMetaCanSupply is pure, so nothing here takes
 // cloneMetaMu, calls Alloc or changes what the arena holds. The one thing
 // written is planArena's cache, which the first call of a pass fills.

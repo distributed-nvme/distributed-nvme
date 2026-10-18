@@ -114,6 +114,12 @@ func newCnServerOnPort(node *fakeNode, portId int) *CnAgentServer {
 	srv.sleep = func(ctx context.Context, _ time.Duration) error {
 		return ctx.Err()
 	}
+	// A round starts no read of its own here: one running in the background
+	// would race the test's own steps — its node.Reset, its call counts and
+	// its fault injection. A test reads the node through the read function
+	// itself (refreshCn, refreshCntlr; refreshTestCn, refreshTestCntlr), and
+	// the tests of the round's read turn this back on (dnagent.md SH29).
+	srv.roundReads = false
 	return srv
 }
 
@@ -887,8 +893,9 @@ func TestFreshSyncupCn(t *testing.T) {
 // port links are read out of the fake's symlink table, before and after the
 // teardown. The converge reply's subsystem row is written by
 // ensureSubsystem's EnsurePortLink, so the READ path needs an assertion of
-// its own: GetCntlrInfo, which is how a test reaches probeExport (the
-// CheckCntlr stream of check.go is the only other caller).
+// its own: the cntlr's read (refreshCntlr, which a CheckCntlr round starts in
+// the background; dnagent.md SH29), which is how a test reaches probeExport,
+// read back with a GetCntlrInfo.
 func TestSyncupCnOnNonDefaultPort(t *testing.T) {
 	const portId = 7
 	if portId == common.NvmetPortId {
@@ -933,6 +940,7 @@ func TestSyncupCnOnNonDefaultPort(t *testing.T) {
 	assertOk(t, reply.GetCntlrInfo().GetSsIdToSubsystem()[testSs],
 		"converged subsystem")
 
+	refreshTestCn(t, srv)
 	cnReply, err := srv.GetCnInfo(context.Background(),
 		&pb.GetCnInfoRequest{ClusterId: testCluster, CnId: testCn})
 	if err != nil {
@@ -947,6 +955,7 @@ func TestSyncupCnOnNonDefaultPort(t *testing.T) {
 	// asks PortLinked about s.port.PortId and reports "not linked to the
 	// port" when the link is not under it, so this row is OK only from
 	// ports/7.
+	refreshTestCntlr(t, srv)
 	probeReply, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -1072,8 +1081,8 @@ func (k arenaKill) arm(node *fakeNode, probe string) {
 // and tmpfs_info reads OK; killed every time, tmpfs_info says which probe did
 // not answer.
 // Either way it mounts nothing, truncates nothing and keeps the one loop
-// device. A check round does not ask again: a kill there reads ERROR, never
-// MISSING.
+// device. The CN's read, which a check round answers from (dnagent.md
+// SH29), does not ask again: a kill there reads ERROR, never MISSING.
 func TestKilledFindmntDoesNotRemountTheArena(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1126,6 +1135,7 @@ func TestKilledFindmntDoesNotRemountTheArena(t *testing.T) {
 				delete(node.killCmdAlways, probe)
 				node.Reset()
 				node.killCmd[probe] = true
+				refreshTestCn(t, srv)
 				check, _ := srv.checkCnRound(context.Background(),
 					&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
 						Revision: 3}, nil)
@@ -1143,8 +1153,8 @@ func TestKilledFindmntDoesNotRemountTheArena(t *testing.T) {
 // resize in place of a file of any other size, which the converge otherwise
 // leaves alone while anything uses it.
 // The converge asks once more, and exactly once: killed once, tmp_file_info
-// reads OK; killed every time, it names the probe. A check round reads the
-// same kill as ERROR, never MISSING.
+// reads OK; killed every time, it names the probe. The CN's read, which a
+// check round answers from, reads the same kill as ERROR, never MISSING.
 func TestKilledStatDoesNotTruncateTheArenaFile(t *testing.T) {
 	for _, kill := range arenaKills {
 		t.Run("killed "+kill.name, func(t *testing.T) {
@@ -1182,6 +1192,7 @@ func TestKilledStatDoesNotTruncateTheArenaFile(t *testing.T) {
 			delete(node.killCmdAlways, probe)
 			node.Reset()
 			node.killCmd[probe] = true
+			refreshTestCn(t, srv)
 			check, _ := srv.checkCnRound(context.Background(),
 				&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
 					Revision: 3}, nil)
@@ -1201,7 +1212,8 @@ func TestKilledStatDoesNotTruncateTheArenaFile(t *testing.T) {
 //
 // After a reboot the tmpfs is gone while the cn file survives: the startup
 // reconcile whose first `findmnt` is killed mounts the tmpfs exactly once,
-// and the first check round reads the base state OK. On a fresh CN the arena
+// and the first read after it, and the check round answering from that read,
+// see the base state OK. On a fresh CN the arena
 // file is not there yet: the first SyncupCn whose first `stat` of it is
 // killed truncates it exactly once and attaches the one loop device.
 func TestAskingAgainBuildsAnAbsentArena(t *testing.T) {
@@ -1227,6 +1239,7 @@ func TestAskingAgainBuildsAnAbsentArena(t *testing.T) {
 				"more asking", probe, n)
 		}
 		node.Reset()
+		refreshTestCn(t, srv)
 		check, _ := srv.checkCnRound(context.Background(),
 			&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
 				Revision: 2}, nil)
@@ -1388,9 +1401,36 @@ func TestUnconfirmedTmpfsCreatesNoArena(t *testing.T) {
 	})
 }
 
-// checkCnOnce runs one CheckCn round of the fixture CN at revision 2.
+// refreshTestCn runs one read of the fixture CN (refreshCn) on a ctx of the
+// test's own, the read a round would start in the background (dnagent.md
+// SH29), so the next round or info read answers from what the node holds
+// now.
+func refreshTestCn(t *testing.T, srv *CnAgentServer) {
+	t.Helper()
+	key := cnKey(testCluster, testCn)
+	st := srv.getCn(key)
+	if st == nil {
+		t.Fatalf("the fixture cn is not known")
+	}
+	srv.refreshCn(context.Background(), key, st)
+}
+
+// refreshTestCntlr is refreshTestCn for the fixture cntlr (refreshCntlr).
+func refreshTestCntlr(t *testing.T, srv *CnAgentServer) {
+	t.Helper()
+	key := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	st := srv.getCntlr(key)
+	if st == nil {
+		t.Fatalf("the fixture cntlr is not known")
+	}
+	srv.refreshCntlr(context.Background(), key, st)
+}
+
+// checkCnOnce reads the fixture CN and then runs one CheckCn round of it at
+// revision 2, which answers from that read.
 func checkCnOnce(t *testing.T, srv *CnAgentServer) *pb.CheckCnReply {
 	t.Helper()
+	refreshTestCn(t, srv)
 	reply, _ := srv.checkCnRound(context.Background(), &pb.CheckCnRequest{
 		ClusterId: testCluster, CnId: testCn, Revision: 2}, nil)
 	return reply
@@ -2530,6 +2570,7 @@ func TestGroupFoundByItsHigherLeg(t *testing.T) {
 	assertNoCall(t, node, "cmd mdadm --detail")
 
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 4,
@@ -3268,14 +3309,15 @@ func TestGroupRowReadsItsLegWrapperFirst(t *testing.T) {
 	}
 }
 
-// TestGroupProbeWalksOnce pins the cost of the sysfs md read (CN12): a Check
-// round lists /sys/block and each array's md/ directory once, in its
+// TestGroupProbeWalksOnce pins the cost of the sysfs md read (CN12): a
+// cntlr's read, which a Check round starts and answers from (dnagent.md
+// SH29), lists /sys/block and each array's md/ directory once, in its
 // reading's one md walk, which serves all of its group rows, its concat rows
 // and its verdict (CN28, CN30), not once per group and not once more for the
 // verdict. A walk per group lists every array of the node per group: at 32
-// slices, 64 groups over 64 arrays, 4160 listings a round where the whole
+// slices, 64 groups over 64 arrays, 4160 listings a read where the whole
 // round has one cntlr_interval. The walk lists no /sys/block entry that is
-// not an array node, and the round reads nothing of one, its number
+// not an array node, and the read reads nothing of one, its number
 // included: a CN's dm devices and nvme heads outnumber its arrays many times
 // over.
 func TestGroupProbeWalksOnce(t *testing.T) {
@@ -3291,6 +3333,7 @@ func TestGroupProbeWalksOnce(t *testing.T) {
 	}
 	others := seedNonArrayEntries(node)
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, info := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -3301,16 +3344,16 @@ func TestGroupProbeWalksOnce(t *testing.T) {
 			len(info.GetGrpIdToMdRaid()))
 	}
 	if got := countCalls(node, "list "+sysfsBlockDir); got != 1 {
-		t.Errorf("the round listed %s %d times, want 1 (its reading's md "+
+		t.Errorf("the read listed %s %d times, want 1 (its reading's md "+
 			"walk)", sysfsBlockDir, got)
 	}
 	for _, array := range arrays {
 		dir := sysfsBlockDir + "/" + array + "/md"
 		if got := countCalls(node, "list "+dir); got != 1 {
-			t.Errorf("the round listed %s %d times, want 1", dir, got)
+			t.Errorf("the read listed %s %d times, want 1", dir, got)
 		}
 	}
-	assertNoNonArrayRead(t, node, others, "the round")
+	assertNoNonArrayRead(t, node, others, "the read")
 }
 
 // seedNonArrayEntries puts more of the block devices a CN really has beside
@@ -3551,6 +3594,7 @@ func TestGroupBesideAnUnboundMember(t *testing.T) {
 		probeAllLegs(t, srv)
 		unbound(t, node)
 		node.Reset()
+		refreshTestCntlr(t, srv)
 		check, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr(), Revision: 2,
@@ -3626,6 +3670,7 @@ func TestGroupBesideAnUnansweredArray(t *testing.T) {
 				}
 			}
 			node.Reset()
+			refreshTestCntlr(t, srv)
 			check, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 				ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr(), Revision: 2,
@@ -3696,11 +3741,12 @@ func TestGroupBesideAnUnansweredArray(t *testing.T) {
 	}
 }
 
-// TestGroupProbeIsSysfsOnly pins the md probe (CN28). A primary's Check round
-// over an array md has failed a member of (md/degraded 1, the member faulty)
-// reports the md row from sysfs: OK with "degraded" in its details, and not
-// one mdadm command, because an `mdadm --detail` loads a superblock from a
-// member, blocks on a dead one past the soft timeout and would turn the row
+// TestGroupProbeIsSysfsOnly pins the md probe (CN28). A primary's read of the
+// cntlr (refreshCntlr), which its Check round answers from, over an array md
+// has failed a member of (md/degraded 1, the member faulty) reports the md
+// row from sysfs: OK with "degraded" in its details, and not one mdadm
+// command, because an `mdadm --detail` loads a superblock from a member,
+// blocks on a dead one past the soft timeout and would turn the row
 // ERROR, which counts toward cntlr health and would fail the primary over. A
 // rebuild reads in mdadm's own words
 // with sysfs's progress. An array that is not running (inactive here, the
@@ -3720,13 +3766,16 @@ func TestGroupProbeIsSysfsOnly(t *testing.T) {
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 2,
 	}
+	// round reads the cntlr and answers the round from that read, which is
+	// what reads the node (dnagent.md SH29).
 	round := func(label string) *pb.ResInfo {
 		t.Helper()
 		node.Reset()
+		refreshTestCntlr(t, srv)
 		_, info := srv.checkCntlrRound(context.Background(), req, nil)
 		for _, call := range node.Calls() {
 			if strings.Contains(call, "cmd mdadm") {
-				t.Fatalf("%s: the check round ran mdadm: %s", label, call)
+				t.Fatalf("%s: the read ran mdadm: %s", label, call)
 			}
 		}
 		return info.GetGrpIdToMdRaid()[testDataGrp]
@@ -3780,7 +3829,7 @@ func TestGroupProbeIsSysfsOnly(t *testing.T) {
 // verdict a failover trigger. Every other state reads ERROR
 // with the state as details, and "clear", which the lab never showed (a
 // stopped array's /sys/block/mdN goes at once), reads MISSING like an absent
-// array on the Check round. No converge is driven over "clear": md reads
+// array on a read of the cntlr. No converge is driven over "clear": md reads
 // clear only for an array with no member at all, which no group's Detail can
 // match. A converge reconciles a running array whatever its state — here the
 // --add of the leg_list member it lacks — and runs no mdadm against an array
@@ -3831,6 +3880,7 @@ func TestGroupProbeArrayStates(t *testing.T) {
 		node.setArrayState(mdDev, tc.state)
 
 		node.Reset()
+		refreshTestCntlr(t, srv)
 		_, info := srv.checkCntlrRound(ctx, req, nil)
 		row := info.GetGrpIdToMdRaid()[testDataGrp]
 		if row.GetStatus() != tc.status || row.GetDetails() != tc.details {
@@ -3896,6 +3946,7 @@ func TestGroupForeignMemberIsAnError(t *testing.T) {
 	}
 
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 2,
@@ -3915,7 +3966,7 @@ func TestGroupForeignMemberIsAnError(t *testing.T) {
 
 // TestGroupUnansweredSysfsReadIsAnError is "did not answer is not absent"
 // (CN12, CN28) at the callers, where TestMdDetailFromSysfsOnly pins it at
-// Md: a Check round whose walk left no array answering (the kill hits every
+// Md: a cntlr's read whose walk left no array answering (the kill hits every
 // array's member names), or whose read of the matched array did not answer,
 // reports the md row ERROR, never MISSING, and a converge refuses with
 // no mdadm at all. Read as absent, a killed member name or array_state would
@@ -3947,6 +3998,7 @@ func TestGroupUnansweredSysfsReadIsAnError(t *testing.T) {
 		node.mu.Unlock()
 
 		node.Reset()
+		refreshTestCntlr(t, srv)
 		_, info := srv.checkCntlrRound(ctx, req, nil)
 		row := info.GetGrpIdToMdRaid()[testDataGrp]
 		if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
@@ -4200,14 +4252,15 @@ func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
 	}
 }
 
-// checkCntlrVerdict is the verdict of one check round of the fixture cntlr
-// at a revision.
+// checkCntlrVerdict is the verdict of one read of the fixture cntlr as the
+// check round after it answers it, at a revision.
 func checkCntlrVerdict(
 	t *testing.T,
 	srv *CnAgentServer,
 	revision uint64,
 ) *pb.AgentReply {
 	t.Helper()
+	refreshTestCntlr(t, srv)
 	reply, _ := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -4216,9 +4269,11 @@ func checkCntlrVerdict(
 	return reply.GetAgentReply()
 }
 
-// infoVerdict is the verdict of one GetCntlrInfo of the fixture cntlr.
+// infoVerdict is the verdict of one read of the fixture cntlr as the
+// GetCntlrInfo after it answers it.
 func infoVerdict(t *testing.T, srv *CnAgentServer) *pb.AgentReply {
 	t.Helper()
+	refreshTestCntlr(t, srv)
 	reply, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -4489,6 +4544,7 @@ func TestCheckRoundNamesNoMemberOfAnArrayThatIsNotRunning(t *testing.T) {
 				"running array", legName(srv, testDataLeg2))
 			tc.set(node, mdDev, leg2)
 
+			refreshTestCntlr(t, srv)
 			reply, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 				ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr(), Revision: 2,
@@ -4793,10 +4849,12 @@ func retryAttempt(t *testing.T, srv *CnAgentServer) {
 	srv.reconvergeCntlr(srv.rootCtx, key, st)
 }
 
-// probedCntlrInfo is the fixture cntlr's GetCntlrInfo rows: how a test reads
-// the outcome of a converge that, like a retry attempt, has no reply.
+// probedCntlrInfo is the fixture cntlr's rows as one read of it probes them,
+// read back with a GetCntlrInfo: how a test reads the node after a converge
+// that, like a retry attempt, has no reply.
 func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 	t.Helper()
+	refreshTestCntlr(t, srv)
 	reply, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -4932,8 +4990,9 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 // TestLateMembersProbeMissingWithoutTd pins the agent half of the worker's
 // settle (dnv-worker.md HL2, primaryShapeBuilt): a primary with no td whose
 // promotion found its members late reads its groups and pool ERROR in the
-// SyncupCntlr reply, but a Check round before the retry's first attempt
-// probes those devices absent and reads them MISSING "", not ERROR. That
+// SyncupCntlr reply, but a read before the retry's first attempt probes
+// those devices absent and reads them MISSING "", not ERROR, and the Check
+// round after it answers that (dnagent.md SH29). That
 // reply, at the driven revision with an accepted code, then carries no ERROR
 // and no PROVISIONING row outside the leg rows: only its MISSING rows say the
 // stack is not built. A td would keep an ERROR row, its raid0 over the absent
@@ -4970,6 +5029,7 @@ func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 		t.Fatalf("the promotion registered no retry")
 	}
 
+	refreshTestCntlr(t, srv)
 	check, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 4,
@@ -6144,9 +6204,11 @@ func TestUnansweredSubsystemWalkKeepsTheConnections(t *testing.T) {
 				t.Fatalf("a walk that did not answer registered no " +
 					"retry: nothing else would re-run the converge")
 			}
-			// A check round in between reads the same where its row comes
-			// from the walk: a standby's legs, a clone's source.
+			// A read in between, and the check round answering from it,
+			// read the same where the row comes from the walk: a
+			// standby's legs, a clone's source.
 			if !tc.opts.primary || tc.clone {
+				refreshTestCntlr(t, srv)
 				_, probed := srv.checkCntlrRound(context.Background(),
 					&pb.CheckCntlrRequest{ClusterId: testCluster,
 						CnId: testCn, CntlrPointer: cntlrPtr(),
@@ -6486,8 +6548,9 @@ func TestAnEntryWhoseCheckDidNotAnswerIsUnknown(t *testing.T) {
 					t.Fatalf("the fault of %s never fired", path)
 				}
 				// The walk's read and the check: the leg failed on its
-				// own entry's check, not on the walk. A check round's
-				// verdict lists the connections from the same walk.
+				// own entry's check, not on the walk. A cntlr's read
+				// lists the connections for its verdict from the same
+				// walk.
 				if n := countCalls(node, "read "+path); n != 2 {
 					t.Fatalf("the %s read %s %d times, want 2", name, path, n)
 				}
@@ -6649,8 +6712,11 @@ func TestParkIsIdempotent(t *testing.T) {
 // build produces one, so finding one is a fault to report and not a steady
 // state, for an effectively suspended namespace too.
 func TestParkedNamespaceProbe(t *testing.T) {
+	// nsDevRow is the ns-dev row of one read of the cntlr (probeNsDev),
+	// read back with a GetCntlrInfo.
 	nsDevRow := func(t *testing.T, srv *CnAgentServer) *pb.ResInfo {
 		t.Helper()
+		refreshTestCntlr(t, srv)
 		reply, err := srv.GetCntlrInfo(context.Background(),
 			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr()})
@@ -6844,6 +6910,7 @@ func TestLeftoverSuspendedNsDevIsResumed(t *testing.T) {
 		// every OTHER dm device still probes OK with `details = "suspended"`.
 		// Deliberate — only the ns-dev has a plan state a suspend could be
 		// mistaken for.
+		refreshTestCntlr(t, srv)
 		probe, err := srv.GetCntlrInfo(context.Background(),
 			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr()})
@@ -7492,16 +7559,24 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 // Check streams (CN24)
 // ---------------------------------------------------------------------------
 
+// fakeCheckCnStream and fakeCheckCntlrStream hand the handler their
+// requests one Recv at a time. beforeRecv, when set, runs at every Recv: the
+// point between two rounds of the stream, where a test waits for the read
+// the last round started.
 type fakeCheckCnStream struct {
 	pb.ControllerNodeAgent_CheckCnServer
-	ctx      context.Context
-	requests []*pb.CheckCnRequest
-	replies  []*pb.CheckCnReply
+	ctx        context.Context
+	requests   []*pb.CheckCnRequest
+	replies    []*pb.CheckCnReply
+	beforeRecv func()
 }
 
 func (s *fakeCheckCnStream) Context() context.Context { return s.ctx }
 
 func (s *fakeCheckCnStream) Recv() (*pb.CheckCnRequest, error) {
+	if s.beforeRecv != nil {
+		s.beforeRecv()
+	}
 	if len(s.requests) == 0 {
 		return nil, io.EOF
 	}
@@ -7517,14 +7592,18 @@ func (s *fakeCheckCnStream) Send(reply *pb.CheckCnReply) error {
 
 type fakeCheckCntlrStream struct {
 	pb.ControllerNodeAgent_CheckCntlrServer
-	ctx      context.Context
-	requests []*pb.CheckCntlrRequest
-	replies  []*pb.CheckCntlrReply
+	ctx        context.Context
+	requests   []*pb.CheckCntlrRequest
+	replies    []*pb.CheckCntlrReply
+	beforeRecv func()
 }
 
 func (s *fakeCheckCntlrStream) Context() context.Context { return s.ctx }
 
 func (s *fakeCheckCntlrStream) Recv() (*pb.CheckCntlrRequest, error) {
+	if s.beforeRecv != nil {
+		s.beforeRecv()
+	}
 	if len(s.requests) == 0 {
 		return nil, io.EOF
 	}
@@ -7542,7 +7621,10 @@ func TestCheckCnRounds(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 
+	// The rounds answer from the CN's read, which is what reads the node and
+	// must change nothing of it (dnagent.md SH29).
 	node.Reset()
+	refreshTestCn(t, srv)
 	lastSent := (*pb.CnInfo)(nil)
 	reply, info := srv.checkCnRound(context.Background(),
 		&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
@@ -7558,6 +7640,9 @@ func TestCheckCnRounds(t *testing.T) {
 	}
 	lastSent = info
 
+	// A second read of the unchanged node stores an equal info, which the
+	// round after it omits (SH26).
+	refreshTestCn(t, srv)
 	reply, _ = srv.checkCnRound(context.Background(),
 		&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
 			Revision: 2}, lastSent)
@@ -7565,7 +7650,7 @@ func TestCheckCnRounds(t *testing.T) {
 		t.Fatalf("an unchanged round must omit the info")
 	}
 	for _, call := range node.Mutations() {
-		t.Fatalf("a check round mutated: %q", call)
+		t.Fatalf("a read mutated: %q", call)
 	}
 
 	// An unknown CN keeps the stream open with code 2.
@@ -7583,7 +7668,10 @@ func TestCheckCntlrRounds(t *testing.T) {
 	// legs read PENDING (CN11).
 	probeAllLegs(t, srv)
 
+	// The rounds answer from the cntlr's read, which is what reads the node
+	// and must change nothing of it (dnagent.md SH29).
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	req := &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 2,
@@ -7592,6 +7680,9 @@ func TestCheckCntlrRounds(t *testing.T) {
 	if reply.GetCntlrInfo() == nil {
 		t.Fatalf("the first reply must carry the info")
 	}
+	// A second read of the unchanged node stores an equal info, which the
+	// round after it omits (SH26).
+	refreshTestCntlr(t, srv)
 	reply2, _ := srv.checkCntlrRound(context.Background(), req, info)
 	if reply2.GetCntlrInfo() != nil {
 		t.Fatalf("an unchanged round must omit the info")
@@ -7603,7 +7694,7 @@ func TestCheckCntlrRounds(t *testing.T) {
 		t.Fatalf("show_info must fill the info")
 	}
 	for _, call := range node.Mutations() {
-		t.Fatalf("a check round mutated: %q", call)
+		t.Fatalf("a read mutated: %q", call)
 	}
 	// A steady-state check round reports every resource OK. "No mutation" is
 	// not enough on its own: a probe that misreads a healthy resource — say by
@@ -7614,22 +7705,28 @@ func TestCheckCntlrRounds(t *testing.T) {
 
 // TestCheckRoundsCarryTheRequestTraceId pins CN24's per-round trace id: the
 // stream's context names only the worker round that opened it, so every
-// command and read of a round runs under the request's trace_id, and a round
-// that names none keeps the stream's.
+// command and read of the read a round starts runs under the request's
+// trace_id (dnagent.md SH29), and a round that names none keeps the
+// stream's. The streams wait for each read before their next round, so
+// every round starts one.
 func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	probeAllLegs(t, srv)
+	srv.roundReads = true
 
 	// The stream contexts are what the server interceptor hands the handler:
 	// the trace id of the stream's metadata (grpc.md T2).
 	check := func(streamId string, roundIds ...string) {
 		t.Helper()
+		bg := context.Background()
 		cn := &fakeCheckCnStream{
-			ctx: common.WithTraceId(context.Background(), "cn-"+streamId),
+			ctx:        common.WithTraceId(bg, "cn-"+streamId),
+			beforeRecv: srv.reads.Wait,
 		}
 		cntlr := &fakeCheckCntlrStream{
-			ctx: common.WithTraceId(context.Background(), "cntlr-"+streamId),
+			ctx:        common.WithTraceId(bg, "cntlr-"+streamId),
+			beforeRecv: srv.reads.Wait,
 		}
 		for _, id := range roundIds {
 			cn.requests = append(cn.requests, &pb.CheckCnRequest{
@@ -7761,42 +7858,34 @@ func TestGetInfoUnknownObject(t *testing.T) {
 	}
 }
 
-// TestGetCntlrInfoReadsTheNodeFirst pins the order of a known cntlr's
-// GetCntlrInfo (CN23): the reading first, then the rows and the read-only
-// verdict from it, as a check round takes them (CN24), so a read answers what
-// a round in the same state would. The reading's two whole-node dm listings,
+// TestACntlrReadTakesItsReadingFirst pins the order of a known cntlr's read
+// (refreshCntlr; CN23, CN28), which a GetCntlrInfo and a check round both
+// answer from (dnagent.md SH28, SH29): the reading first, then the rows and
+// the read-only verdict from it. The reading's two whole-node dm listings,
 // its NVMe walk and its md walk each run once, in that order — the info
 // listing before the table listing, so a name the table listing lacks went
 // away between the two — and before the pool's status, the first read of a
 // row; the verdict lists no dm device, array or connection of its own, no
-// `dmsetup ls` and no second reading. A check round is the control.
-func TestGetCntlrInfoReadsTheNodeFirst(t *testing.T) {
+// `dmsetup ls` and no second reading. That the info read and the round read
+// nothing of the node themselves is TestAnInfoReadStartsNoRead's and
+// TestARoundBesideAConvergeAnswersFromMemory's.
+func TestACntlrReadTakesItsReadingFirst(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	pool := "cmd dmsetup status --noflush " + poolName(srv)
-	for _, entrance := range []struct {
-		name string
-		read func()
-	}{
-		{"GetCntlrInfo", func() { probedCntlrInfo(t, srv) }},
-		{"a check round", func() { checkRound(t, srv, 2) }},
-	} {
-		t.Run(entrance.name, func(t *testing.T) {
-			node.Reset()
-			entrance.read()
-			reading := []string{
-				dmInfoListLine, dmTableListLine,
-				"list " + sysfsNvmeSubsysDir, "list " + sysfsBlockDir,
-			}
-			for _, listing := range reading {
-				if got := countCalls(node, listing); got != 1 {
-					t.Errorf("%q ran %d times, want 1", listing, got)
-				}
-			}
-			assertOrder(t, node, append(reading, pool)...)
-			assertNoCall(t, node, "cmd dmsetup ls")
-		})
+	node.Reset()
+	refreshTestCntlr(t, srv)
+	reading := []string{
+		dmInfoListLine, dmTableListLine,
+		"list " + sysfsNvmeSubsysDir, "list " + sysfsBlockDir,
 	}
+	for _, listing := range reading {
+		if got := countCalls(node, listing); got != 1 {
+			t.Errorf("%q ran %d times, want 1", listing, got)
+		}
+	}
+	assertOrder(t, node, append(reading, pool)...)
+	assertNoCall(t, node, "cmd dmsetup ls")
 }
 
 // ---------------------------------------------------------------------------
@@ -7911,6 +8000,7 @@ func TestProvisioningDeferredGroup(t *testing.T) {
 		}
 	}
 	// The read-only probe reports exactly the same shape (CN28).
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -8188,10 +8278,13 @@ func TestDeferredTdNamespaceIsInaccessible(t *testing.T) {
 
 // TestProvisioningCheckRoundIsStable is CN9's check-stream clause: a
 // deferred resource's details string is the fixed "provisioning" and carries no
-// progress counter, so the second identical round of a CN24 stream suppresses
-// the whole CntlrInfo (proto.Equal, SH26) and the round mutates nothing
-// (CN23). A counter that advanced with the dn's zeroing would re-send the info
-// on every round for a state the worker cannot act on.
+// progress counter, so the round after a second identical read of a CN24
+// stream suppresses the whole CntlrInfo (proto.Equal, SH26) and the reads
+// mutate nothing (CN23). A counter that advanced with the dn's zeroing would
+// re-send the info on every round for a state the worker cannot act on. Each
+// round answers from the read before it (dnagent.md SH29), so the second
+// round follows a read of its own: without it the two rounds would carry one
+// observation, equal whatever its details.
 func TestProvisioningCheckRoundIsStable(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -8202,6 +8295,7 @@ func TestProvisioningCheckRoundIsStable(t *testing.T) {
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 2,
 	}
+	refreshTestCntlr(t, srv)
 	reply, info := srv.checkCntlrRound(context.Background(), req, nil)
 	if reply.GetCntlrInfo() == nil {
 		t.Fatalf("the first reply must carry the info")
@@ -8209,13 +8303,14 @@ func TestProvisioningCheckRoundIsStable(t *testing.T) {
 	assertProvisioning(t, info.GetSliceIdToDmPool()[testSlice], "pool")
 	assertProvisioning(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
 
+	refreshTestCntlr(t, srv)
 	reply2, _ := srv.checkCntlrRound(context.Background(), req, info)
 	if reply2.GetCntlrInfo() != nil {
 		t.Fatalf("an unchanged provisioning round re-sent the info: %v",
 			reply2.GetCntlrInfo())
 	}
 	for _, call := range node.Mutations() {
-		t.Fatalf("a check round of a provisioning cntlr mutated: %q", call)
+		t.Fatalf("a read of a provisioning cntlr mutated: %q", call)
 	}
 }
 
@@ -8233,6 +8328,7 @@ func TestSpLevelBeatsProvisioning(t *testing.T) {
 	assertMissingSpLevel(t, info.GetNsIdToNamespace()[testNs], "namespace")
 	assertMissingSpLevel(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
 
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})

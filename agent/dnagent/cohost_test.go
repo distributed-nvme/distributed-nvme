@@ -357,7 +357,8 @@ func linkPresent(node *fakeNode, link string) bool {
 // sweepScope is one of the two sweeps DN6 runs, driven the way the worker
 // drives it: the node-level one by a SyncupDn, the side-level one by a
 // SyncupSide of the side the fixture converged. read is the same scope's
-// read-only verdict, the Get*Info (and Check round) answer.
+// read-only verdict: the background read's (SH29), which the Get*Info (and
+// Check round) answer then carries.
 type sweepScope struct {
 	name string
 	// stray names the export the arms seed. The side-level scope judges its
@@ -395,7 +396,7 @@ func sweepScopes() []sweepScope {
 		},
 		read: func(t *testing.T, srv *DnAgentServer) *pb.AgentReply {
 			t.Helper()
-			reply, err := srv.GetDnInfo(context.Background(),
+			reply, err := dnInfoNow(srv, context.Background(),
 				&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
 			if err != nil {
 				t.Fatalf("GetDnInfo: %v", err)
@@ -422,7 +423,7 @@ func sweepScopes() []sweepScope {
 		},
 		read: func(t *testing.T, srv *DnAgentServer) *pb.AgentReply {
 			t.Helper()
-			reply, err := srv.GetSideInfo(context.Background(),
+			reply, err := sideInfoNow(srv, context.Background(),
 				&pb.GetSideInfoRequest{ClusterId: testCluster, DnId: testDn,
 					SidePointer: ours})
 			if err != nil {
@@ -557,21 +558,21 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 	}
 }
 
-// TestHalfBuiltExportAgeBeforePortLinks pins the order of DN6's attribution
-// of a :2: export without namespace one, in both scopes and in the read-only
+// TestHalfBuiltExportAgeBeforePortLinks pins the order of DN6's attribution of
+// a :2: export without namespace one, in both scopes and in the read-only
 // verdict as in the Syncup's pass: the export's age is read first, in the
-// agent's own process, then, only for an old export, its namespaces are
-// listed and, when it has none at all, its port links. A young one is left
-// alone whatever it holds and whatever port it is linked to, so its pass
-// lists nothing of it at all — a namespace at an id other than one included,
-// which decides it only once it is old. An old one with no namespace is that
+// agent's own process, then, only for an old export, its namespaces are listed
+// and, when it has none at all, its port links. A young one is left alone
+// whatever it holds and whatever port it is linked to, so its pass lists
+// nothing of it at all — a namespace at an id other than one included, which
+// decides it only once it is old. An old one with no namespace is that
 // sibling's when it is on a sibling's port, and an orphan otherwise. The
-// namespace listing is a child per export and the port listing an `ls` of
-// the ports directory and one of each port's links, a child each, and every
-// build or removal in flight on a kernel many dn agents share has the shape
-// for a moment: listed before the age, either would make such an agent's
-// check rounds outlast the worker's wait in every burst. A sibling's port is
-// on the kernel in every case, so a listing would show.
+// namespace listing is a child per export and the port listing an `ls` of the
+// ports directory and one of each port's links, a child each, and every build
+// or removal in flight on a kernel many dn agents share has the shape for a
+// moment: listed before the age, either would make such an agent's reads
+// (SH29) run long in every burst. A sibling's port is on the kernel in every
+// case, so a listing would show.
 func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ports := agent.NvmetRoot + "/ports"

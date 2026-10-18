@@ -433,8 +433,9 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 					return tc.row(checked).GetStatus() ==
 						pb.ResStatus_RES_STATUS_OK && !migrRetrying(srv)
 				})
-			// A check round lists the dm devices as a converge does, so a
-			// command only a converge runs counts the passes.
+			// The read before each round lists the dm devices as a
+			// converge does, so a command only a converge runs counts the
+			// passes.
 			if n := len(node.callsMatching(tc.rerun)); n < tc.runs {
 				t.Errorf("%q ran %d times, want %d at least: the retry "+
 					"ran no pass", tc.rerun, n, tc.runs)
@@ -461,16 +462,16 @@ func TestAWaitingDestinationRetriesAPrimaryStackThatFailed(t *testing.T) {
 	}
 }
 
-// The worker never sends cutover_pending again once its cutover cleared it,
-// so a destination converges a pending request over a dm-clone that serves
-// only when that request is a stale one: a restart's re-run of a stored
-// request whose successor, the one that cleared the flag, was converged
-// after a save that failed (dnagent.md SH5). Such a pass reads where the
-// per-CN stacks are, as a step that stops does, so the primary keeps serving
-// through the dm-clone until the worker sends the newer request again:
-// reloading it onto its dm-error under a live dm-clone would fail host IO.
-// The check round reads the per-CN rows by the same answer, and the pass
-// leaves no retry, since its primary's stack is where the pass put it.
+// The worker never sends cutover_pending again once its cutover cleared it, so
+// a destination converges a pending request over a dm-clone that serves only
+// when that request is a stale one: a restart's re-run of a stored request
+// whose successor, the one that cleared the flag, was converged after a save
+// that failed (dnagent.md SH5). Such a pass reads where the per-CN stacks are,
+// as a step that stops does, so the primary keeps serving through the dm-clone
+// until the worker sends the newer request again: reloading it onto its
+// dm-error under a live dm-clone would fail host IO. The check round's read
+// reads the per-CN rows by the same answer, and the pass leaves no retry,
+// since its primary's stack is where the pass put it.
 func TestAStalePendingRequestKeepsAServingClone(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()
@@ -876,6 +877,7 @@ func TestARestartReRunKeepsTheShortBudget(t *testing.T) {
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	restarted.roundReads = false
 	restarted.migrRetryInterval = time.Hour
 	clock := withDnClock(restarted, node)
 	rootCtx, cancel := context.WithCancel(ctx)
@@ -991,6 +993,7 @@ func TestARestartOverAFlaggedRequestGivesTheLongerBudgetOnceMore(
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	restarted.roundReads = false
 	restarted.migrRetryInterval = time.Hour
 	clock := withDnClock(restarted, node)
 	rootCtx, cancel := context.WithCancel(ctx)

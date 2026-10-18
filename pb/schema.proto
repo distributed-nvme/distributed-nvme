@@ -2,9 +2,28 @@ syntax = "proto3";
 
 option go_package = "github.com/distributed-nvme/distributed-nvme/pb";
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
 message AgentReply {
     uint32 code = 1;
     string details = 2;
+}
+
+// ObsStamp says which observation an agent's reply answers from
+// (architecture.md, Live-state reporting). Every time is by the node's
+// clock, so a difference of two of them never holds a clock difference
+// between machines.
+message ObsStamp {
+    // When the reading of the observation ended. Unset: the agent holds no
+    // observation of the object yet.
+    google.protobuf.Timestamp obs_time = 1;
+    // The trace id of the call whose converge or read made the observation.
+    string obs_trace_id = 2;
+    // The agent's clock when it answered.
+    google.protobuf.Timestamp answer_time = 3;
+    // When the converge of the object that runs now began. Unset: none runs.
+    google.protobuf.Timestamp converge_start = 4;
 }
 
 message NodeSelector {
@@ -202,8 +221,9 @@ enum ResReason {
     // The thin volume build of a created thin device failed because its
     // slice's pool no longer holds the thin id: dm-thin refused the thin
     // table with ENODATA (cnagent.md CN14, CN29). Only a converge's report
-    // sets it, on that RES_STATUS_ERROR thin row; a check round's probe
-    // never does.
+    // sets it, on that RES_STATUS_ERROR thin row; a background read's probe
+    // never does, so a Check round carries it only while it answers from a
+    // converge's observation.
     RES_REASON_THIN_ID_LOST = 1;
     // A migration's dst side waits for the cutover: its request carries
     // MigrDstConf.cutover_pending and its metadata wrapper stands
@@ -291,7 +311,7 @@ message CntlrInfo {
         // one run of the snapshot pre-pass a slice's message made a new thin
         // id while another slice already had its id. The cn agent keeps it
         // in memory until the request shows the td created or drops it, the
-        // converge's report and the check round's carry it alike, and the
+        // converge's report and a background read's carry it alike, and the
         // created flip copies it into ThinDevice.torn (dnv-worker.md RW19).
         // Appended, never renumbered.
         bool torn = 2;
@@ -765,6 +785,11 @@ message InspectDiskNodeRequest {
 message InspectDiskNodeReply {
     uint64 applied_revision = 1;
     DnInfo dn_info = 2;
+    // The stamp of the agent's reply, passed through.
+    ObsStamp obs_stamp = 3;
+    // The observation's age when the agent answered: its answer time less
+    // its observation time. Unset while the agent holds no observation.
+    google.protobuf.Duration obs_age = 4;
 }
 
 message CreateControllerNodeRequest {
@@ -830,6 +855,11 @@ message InspectControllerNodeRequest {
 message InspectControllerNodeReply {
     uint64 applied_revision = 1;
     CnInfo cn_info = 2;
+    // The stamp of the agent's reply, passed through.
+    ObsStamp obs_stamp = 3;
+    // The observation's age when the agent answered: its answer time less
+    // its observation time. Unset while the agent holds no observation.
+    google.protobuf.Duration obs_age = 4;
 }
 
 message CreateStoragePoolRequest {
@@ -974,6 +1004,11 @@ message InspectCntlrRequest {
 message InspectCntlrReply {
     uint64 applied_revision = 1;
     CntlrInfo cntlr_info = 2;
+    // The stamp of the agent's reply, passed through.
+    ObsStamp obs_stamp = 3;
+    // The observation's age when the agent answered: its answer time less
+    // its observation time. Unset while the agent holds no observation.
+    google.protobuf.Duration obs_age = 4;
 }
 
 message InspectSideRequest {
@@ -985,6 +1020,11 @@ message InspectSideRequest {
 message InspectSideReply {
     uint64 applied_revision = 1;
     SideInfo side_info = 2;
+    // The stamp of the agent's reply, passed through.
+    ObsStamp obs_stamp = 3;
+    // The observation's age when the agent answered: its answer time less
+    // its observation time. Unset while the agent holds no observation.
+    google.protobuf.Duration obs_age = 4;
 }
 
 message CreateThinDeviceRequest {
@@ -1456,6 +1496,10 @@ message SyncupDnReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     DnInfo dn_info = 3;
+    ObsStamp obs_stamp = 4;
+    // When the agent saved the request to its local store; unset when it
+    // saved none.
+    google.protobuf.Timestamp save_time = 5;
 }
 
 message SyncupSideRequest {
@@ -1510,6 +1554,9 @@ message SyncupSideReply {
     uint64 revision = 2;
     SideInfo side_info = 3;
     BitmapInfo bm_info = 4;
+    ObsStamp obs_stamp = 5;
+    // As SyncupDnReply.save_time.
+    google.protobuf.Timestamp save_time = 6;
 }
 
 message PushMigrBitmapRequest {
@@ -1534,6 +1581,7 @@ message GetDnInfoReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     DnInfo dn_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 message GetSideInfoRequest {
@@ -1546,6 +1594,7 @@ message GetSideInfoReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     SideInfo side_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 message CheckDnRequest {
@@ -1565,6 +1614,7 @@ message CheckDnReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     DnInfo dn_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 message CheckSideRequest {
@@ -1581,6 +1631,7 @@ message CheckSideReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     SideInfo side_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 service DiskNodeAgent {
@@ -1615,6 +1666,9 @@ message SyncupCnReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     CnInfo cn_info = 3;
+    ObsStamp obs_stamp = 4;
+    // As SyncupDnReply.save_time.
+    google.protobuf.Timestamp save_time = 5;
 }
 
 message SyncupCntlrRequest {
@@ -1642,6 +1696,9 @@ message SyncupCntlrReply {
     uint64 revision = 2;
     CntlrInfo cntlr_info = 3;
     repeated BitmapInfo bm_info_list = 4;
+    ObsStamp obs_stamp = 5;
+    // As SyncupDnReply.save_time.
+    google.protobuf.Timestamp save_time = 6;
 }
 
 message PushCloneBitmapRequest {
@@ -1667,6 +1724,7 @@ message GetCnInfoReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     CnInfo cn_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 message GetCntlrInfoRequest {
@@ -1679,6 +1737,7 @@ message GetCntlrInfoReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     CntlrInfo cntlr_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 message GetThinDeviceBmRequest {
@@ -1723,6 +1782,7 @@ message CheckCnReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     CnInfo cn_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 message CheckCntlrRequest {
@@ -1739,6 +1799,7 @@ message CheckCntlrReply {
     AgentReply agent_reply = 1;
     uint64 revision = 2;
     CntlrInfo cntlr_info = 3;
+    ObsStamp obs_stamp = 4;
 }
 
 service ControllerNodeAgent {

@@ -283,7 +283,7 @@ func TestDnDriverInfoIsRaceFree(t *testing.T) {
 			d.fold(&pb.AgentReply{}, uint64(i), &pb.DnInfo{
 				DiskInfo: resErr("disk", "io error"),
 				MetaInfo: resOk("meta"),
-			})
+			}, testStamp(), nil)
 		}
 	}()
 	go func() {

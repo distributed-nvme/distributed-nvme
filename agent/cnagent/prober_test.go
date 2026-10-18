@@ -297,7 +297,9 @@ func TestStandbyStartsNoProber(t *testing.T) {
 	if len(st.probers) != 0 {
 		t.Fatalf("a standby started %d probers", len(st.probers))
 	}
-	// A standby reports transport liveness and ana_state instead.
+	// A standby reports transport liveness and ana_state instead, on a read
+	// as on the converge.
+	refreshTestCntlr(t, srv)
 	reply, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})

@@ -87,10 +87,29 @@ on these lab facts:
 reflection: one subcommand per `DiskNodeAgent` RPC, each reply printed as
 protojson, and a failure on a gRPC error or an unexpected reply code. It sends
 the stage's trace id as metadata and in `Check*` requests (`grpc.md`, Drivers
-and fakes), runs the polling loops until a side is zeroed or a destination
-hydrated, the latter through `common.ParseCloneStatus`, and prints a leg's
-namespace identity (`common.DnNsIdentity`) and a host NQN's host id, which the
-script never derives itself.
+and fakes), and prints a leg's namespace identity (`common.DnNsIdentity`) and
+a host NQN's host id, which the script never derives itself.
+
+The agent answers a check round and an info read from its latest observation of
+the object, and only a round starts a read of the node (`dnagent.md` SH28,
+SH29). No worker runs in this suite, so no rounds but the suite's own start
+reads, and the driver's two round commands have a fresh mode: they send rounds
+on one stream until one answers from an observation read wholly after the agent
+answered the command's first round, with no converge of the object in flight,
+and print and judge that reply alone; this document calls such a command a
+fresh round. An observation's time is when its reading ended, so the first one
+to end after that answer may have begun before it; the object's reads and
+converges hold its locks one at a time, so an observation newer than that one
+was read wholly after that answer, at the cost of about one read more. Where
+a background converge of the object can run, such as an attempt of the
+connect retry (`dnagent.md` SH28), the observation a fresh round reports can
+be that converge's rather than a read's. The pollers, which wait until a side
+is zeroed or a destination hydrated, the latter through
+`common.ParseCloneStatus`, sample with rounds on one stream: the first sample
+is a fresh round's reply and each later one a reply with a newer observation,
+since neither the zeroing loop nor the kernel's hydration stores an
+observation and a read a round starts brings their progress in. The info-read
+commands are plain memory reads.
 
 ## Conventions
 
@@ -126,12 +145,21 @@ script never derives itself.
   their tool did not answer, since a failed read taken for an absence passes
   every negative built on it (SH15); the pin release alone reads an unanswered
   `dmsetup info` as a device already gone.
-* **Check rounds.** In smoke and sides at steady state, a `CheckDn` round must
-  reply code zero, the stored revision and the node rows OK, and a `CheckSide`
-  round the side's revision and its side-device row OK (`dnagent.md` DN17,
-  SH24 to SH26); the migration cases run the `CheckDn` round after their
-  teardown, the restart case compares snapshots instead, and the teardown case
-  reads residue and read-only verdicts.
+* **Check rounds.** A stage that reads the agent after a fault, behind a
+  converge, for progress no converge stores — a zeroing, a hydration — or to
+  count what a read does sends a fresh round, and a poll samples with rounds
+  (The driver: `dnagentctl`); an info read answers from whatever observation
+  the agent holds, so a stage uses one only where the last converge's
+  observation, or the one a round of the stage just answered from, holds what
+  it reads. In smoke and sides at steady state, a fresh `CheckDn` round must
+  reply code zero, the stored revision and the node rows OK, and a fresh
+  `CheckSide` round the side's revision and its side-device row OK
+  (`dnagent.md` DN17, SH24 to SH26), fresh because the disk node's last
+  observation is its `SyncupDn`'s, older than the side converges that followed
+  it; the migration cases run a plain `CheckDn` round after their teardown,
+  which answers from the observation the teardown's `SyncupDn` stored, the
+  restart case compares snapshots instead, and the teardown case reads residue
+  and the verdicts of reads made after its drops.
 * **Observed, never asserted.** The provisioning and read-through windows are
   races a loop device usually wins; the cutover window lasts `SuspendSeconds`
   and is sampled once right after the cutover reply, which a slow step can
@@ -149,16 +177,21 @@ disk format and port by a baseline `SyncupDn` (DN5, SH19; `architecture.md`,
 **smoke** proves the plumbing: one side through the flip exported to one host,
 its path live and optimized, a data round trip, clean check rounds, and the
 side torn down by an empty side list (`dnagent.md` DN6 to DN10, L1, L2, L5,
-L7). Before the teardown it proves the age gate on a real kernel
-(`dnagent.md` DN6, SH18): an export of the side's sp for a leg no side
-holds, made by hand with no namespace and no port link. While it is young
-the check rounds stay clean, the agent's log shows its age read in the
-agent's own process and no listing of its namespaces or of the ports, and
-its directory's time, read from the shell before and after, does not move.
-Once it is older than the orphan grace, the real one, as nothing backdates
-it, a check round reports it as a leftover after exactly one listing of its
-namespaces and one of the ports, and the next syncup removes it, which the
-case's residue check proves too.
+L7). Before the teardown it proves the age gate on a real kernel (`dnagent.md`
+DN6, SH18): an export of the side's sp for a leg no side holds, made by hand
+with no namespace and no port link. While it is young the fresh rounds stay
+clean, the agent's log shows its age read in the agent's own process at least
+as many times as the stage sent fresh rounds under its trace id, and no
+listing of its namespaces or of the ports, and its directory's time, read from
+the shell before and after, does not move. Once it is older than the orphan
+grace, the real one, as nothing backdates it, a fresh round reports it as a
+leftover, the agent's log shows its namespaces and the ports listed as many
+times as its age was read, at least once, and the next syncup removes it,
+which the case's residue check proves too. Each count is a total over the
+reads the stage's own rounds started, not a count per read, as a read logs
+under the trace id of the round that started it (`dnagent.md` SH29) and a
+fresh round sends several rounds, each of which can start a read; the stage
+counts once every such read has ended.
 
 **zeroing** proves that a side zeroes the length its request asks for and not
 a byte past it (`architecture.md`, Side provisioning protocol; `dnagent.md`
@@ -188,10 +221,11 @@ the cutover still pending, it builds its metadata wrapper and its export
 over its dm-error and nothing past them, no connection and no clone, the
 host's path to it staying live and inaccessible, and its two migration rows
 read provisioning, waiting for the cutover, with the reason the worker's
-cutover reads, on a converge and on the read-only channels alike (DN13,
-DN18); a source told its destination is not provisioned, the cutover
-pending, serves as if no migration existed, its migration rows reading the
-same wait with no reason (DN12); the cutover fences the source
+cutover reads, on a converge and in a read made after it alike, which a
+fresh round and then an info read report (DN13, DN18); a source told its
+destination is not provisioned, the cutover pending, serves as if no
+migration existed, its migration rows reading the same wait with no reason
+(DN12); the cutover fences the source
 (`architecture.md`, [D12]), whose path the host then reads inaccessible; one
 converge enables the destination, whose connection
 exercises `dnagent.md` SH17 and SH20, and whose clone's table carries exactly
@@ -209,10 +243,16 @@ no discard reaches any clone. Its first migration,
 once hydrated, also loses its source's namespace behind both agents' backs,
 the export and the destination's controller of it staying: the
 destination's rows — its side device, its migration rows and its per-CN
-rows — then read one status, with one epoch, on a converge and on the
-read-only channels alike (`dnagent.md` DN13, DN18); the converge takes the primary's stack off the dm-clone, whose
-status line the read-only channel still carries, so the hydration the
-gateway reads stays provable. The state compared is measured, never
+rows — then read one status, with one epoch, on a converge, in the
+observations a fresh round and then an info read report, each made after
+that converge by a read or by an attempt of the connect retry, which a
+destination with no source to read from keeps registered, and on a second
+converge (`dnagent.md` DN13, DN18). The converge takes the primary's stack
+off the dm-clone and, with no source to read from, does not read the
+dm-clone's status line, which the agent's reads still record: only a read's
+observation then proves the hydration the gateway reads, and the stage's
+hydration poll, which samples until an observation carries that line, finds
+one showing every region hydrated. The state compared is measured, never
 assumed, and one that moves before the comparison ends fails the stage.
 **migr_bitmap** pushes skip-bitmap chunks of its own making, not a bitmap
 read from a pool, to the gated destination, with no revision (`dnagent.md`
@@ -233,24 +273,29 @@ outlasts a pass: a migration's source export is yanked and the destination
 side dropped at once, so its clone comes off before the connection it hydrates
 through (`dnagent.md` L3), over a source already dead; the same revision is
 re-sent until clean, only the leftover code tolerated, nothing of the migration
-may remain on either node, and a clean read-only `GetDnInfo` proves its
+may remain on either node, and a fresh `CheckDn` round, whose verdict is
+that of a read made after the drop, replies clean, which proves its
 allocation and clone-metadata records went with their devices, an orphaned
 record being a leftover itself (DN6's record step); that a record never goes
 before its device is left to the unit tests. A removal blocked from outside
-the agent: a side device is held open and the side dropped; the leftover reply
-names it, the residue is exactly that device (DN6's layers), the read-only
-verdict agrees, and the same revision, re-sent once the device is free,
-finishes.
+the agent: a side device is held open and the side dropped; the leftover
+reply names it, the residue is exactly that device (DN6's layers), the
+verdict of a read made after the drop, which a fresh round reports, agrees,
+and the same revision, re-sent once the device is free, finishes.
 
 **restart** proves persistence and an idempotent reconcile (`dnagent.md` SH1,
 SH4 to SH6, DN2): with a connected side on one node and a gated destination
 holding a chunk on the other, both agents restart over untouched kernel state
-while the host keeps reading. The reloaded infos, revisions included, equal
-the snapshots but for the status epochs (SH14), the zeroing's byte counts with
-them (`architecture.md`, [D13]); the chunk is still applied (SH21); unchanged
-re-sends leave the new log free of any mutating command or block or configfs
-write (SH16, SH17, DN5, DN9); and a revision below the one those re-sends
-stored is refused as stale in a normal reply (SH8, SH9, DN4).
+while the host keeps reading. Every snapshot, on both sides of the restart,
+is a fresh round's reply, so it shows the node as a read after the command
+began found it. The reloaded infos, revisions included, equal the snapshots
+but for the status epochs (SH14), the zeroing's byte counts with them
+(`architecture.md`, [D13]), and the replies' stamps, which name an
+observation's times and trace id and so differ by nature; the chunk is still
+applied (SH21); unchanged re-sends leave the new log free of any mutating
+command or block or configfs write (SH16, SH17, DN5, DN9); and a revision
+below the one those re-sends stored is refused as stale in a normal reply
+(SH8, SH9, DN4).
 
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern
@@ -266,7 +311,9 @@ that pass is as good as that line.
 Cleanup runs unconditionally at the start of every run and at its end only on
 success; a failing run leaves its debris and dumps the agents' logs, the dm,
 nvmet and host state of both VMs, the last info of every migration or teardown
-side, and the failing stage's trace id. A cleanup-only run does the scrub
+side, an info read's, which shows the side as the last converge or read left
+it and answers even while a converge is wedged, and the failing stage's trace
+id. A cleanup-only run does the scrub
 alone. It takes every `dnv-agent` and every dnv dm device on the node, of
 either role, which is why one dnv suite runs at a time in the lab
 (`layout.md`, Directory tree). Each step is best-effort, and the order is

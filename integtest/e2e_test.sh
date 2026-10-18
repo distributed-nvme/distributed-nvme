@@ -17,7 +17,7 @@
 #     --host yupeng@192.168.122.193 --host yupeng@192.168.122.197
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N]
-#             [--redund raid1|none] [--dns-per-vm N]
+#             [--redund raid1|none] [--dns-per-vm N] [--keep-logs DIR]
 #
 # Cases, in order, each from an EMPTY etcd and a freshly built storage pool
 # (E2E11): smoke, ops, copy, react, cutoff. `--only` picks one. Cleanup runs
@@ -272,9 +272,11 @@ SLICE_CNT_DEFAULT=32
 # The most slices the react case builds: its pool has min(--slice-cnt,
 # REACT_SLICE_CAP) of them (derive_params, sp_shape), every other case's the
 # whole --slice-cnt. react's primary and cntlr thresholds are shorter than the
-# time a primary's build at the ceiling holds its cntlr's lock, so at the
-# ceiling its own build can fail over again and again (e2e_integtest.md,
-# Topology and parameters). A choice of this suite; it mirrors no Go constant.
+# time a primary's build at the ceiling holds the reads of its cntlr off, while
+# the observation its check rounds answer from grows older than the worker's
+# bound (dnv-worker.md HL7), so at the ceiling its own build can fail over
+# again and again (e2e_integtest.md, Topology and parameters). A choice of
+# this suite; it mirrors no Go constant.
 REACT_SLICE_CAP=8
 
 # common.MinDnExtSize — 64 MiB, the smallest extent validateDnBinConf
@@ -338,12 +340,14 @@ SLOTS=0,1
 # 64 md arrays over 128 legs, 32 thin pools — keeps the primary CN spawning a
 # few hundred processes a second on a controller-node guest for minutes on end
 # (the whole build window, restarts included — see WAIT_BUILD). Under that load
-# the primary cannot answer a health check inside one check round — the round's
-# timeout is the cluster's cntlr_interval, which here is always
-# common.DefaultHealthCheckInterval, as `cluster create` has no flag for it —
-# the worker sets its err_epoch, and AR5 moves the role. The new primary then
-# starts the SAME build from scratch, goes unresponsive in its turn and can
-# hand the role back, all inside setup.
+# the primary's converges run long, no read of its cntlr runs while one does,
+# and the observation its check rounds answer from grows older than the
+# worker's bound, common.ObsMaxAgeIntervals of the cluster's cntlr_interval,
+# which here is always common.DefaultHealthCheckInterval, as `cluster create`
+# has no flag for it (dnv-worker.md HL7): the worker sets its err_epoch, and
+# AR5 moves the role. The new primary then starts the SAME build from
+# scratch, goes stale in its turn and can hand the role back, all inside
+# setup.
 #
 # NOTE CAREFULLY, because it is what decides the shape of the remedy: an absent
 # flag resolves to common.DefaultPrimaryUnhealthy (model.ResolveEventThreshold),
@@ -678,6 +682,11 @@ REACT_TD_UNIT=0
 JQ=jq
 ONLY=""
 CLEANUP_ONLY=0
+# --keep-logs DIR, a directory on the driver, empty when the flag is absent
+# (keep_logs). LOGS_CASE names the case whose logs the guests hold now: the
+# case run_case last started, or "setup" while a build runs.
+KEEP_LOGS=""
+LOGS_CASE=setup
 CASE=setup
 TRACE=it-setup
 STAGE="(startup)"
@@ -761,14 +770,17 @@ log() { echo "$*" >&2; }
 # stage names the step for the failure report and mints the trace id. Every
 # dnvctl call of the stage sends it; the gateway's records carry it, and so do
 # an agent's records (the grpc request and reply, and any os command) of the
-# reads the gateway makes of it for such a call: a node create's size probe,
+# calls the gateway makes to it for such a call: a node create's size probe,
 # an inspect, a get-bm or get-leg-bm, the hydration check of an unforced migr
-# finish or clone delete. The worker never sees it: the converge a stage sets
-# off runs under the worker's own per-round ids, which each Syncup and each
-# Check round hands to its agent, and under ids an agent mints for its own
-# background work (each side-zeroing attempt, say). So
-# `jq 'select(.trace_id=="…")'` pulls the stage's requests and the gateway's
-# handling of them, not the converge they set off.
+# finish or clone delete. An inspect and a hydration check answer from the
+# agent's latest observation of the object and run no command (dnagent.md
+# SH28). The worker never sees it: the converge a stage sets off runs under
+# the worker's own per-round ids, which each Syncup and each Check round
+# hands to its agent, as do the reads those rounds start (dnagent.md SH29),
+# and under ids an agent mints for its own background work (each
+# side-zeroing attempt, say). So `jq 'select(.trace_id=="…")'` pulls the
+# stage's requests and the gateway's handling of them, not the converge they
+# set off.
 stage() { # <nn> <text>
 	STAGE="$CASE: $2"
 	TRACE="it-$CASE-$1"
@@ -831,6 +843,12 @@ assert_parses() { # <json> <label>
 on_exit() {
 	local rc=$? dirty=0
 	trap - EXIT
+	# --keep-logs: the logs of the case that ran last, before the end cleanup
+	# removes them on a pass, and on a failure too, since the next run's start
+	# cleanup removes them then. keep_logs never dies.
+	if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
+		keep_logs "$LOGS_CASE"
+	fi
 	# CLEANUP_DIRTY is only read where an END cleanup actually ran: cleanup_all
 	# clears it on entry, so after a mid-run failure it still holds the START
 	# sweep's verdict, where a warning is expected and means nothing about what
@@ -1287,6 +1305,7 @@ usage() {
 	cat >&2 <<EOF
 usage: bash integtest/e2e_test.sh [--only <case>] [--cleanup-only]
            [--slice-cnt N] [--redund raid1|none] [--dns-per-vm N]
+           [--keep-logs DIR]
            --cp user@ip --cn user@ip … --dn user@ip … --host user@ip …
 
 roles (repeatable flags; nothing is positional, nothing is hardcoded):
@@ -1315,6 +1334,12 @@ parameters:
                       different VMs. Below the bound is allowed and warns.
   --only <case>       run one case: ${CASES[*]}
   --cleanup-only      run the start cleanup on every guest and stop
+  --keep-logs DIR     before each cleanup that removes the guests' work
+                      directories — between cases, and at the end of a run
+                      that passed or failed — copy the worker, gateway and
+                      cdc logs of the cp and every cn and dn agent log into
+                      DIR/<case>/<role>-<ip>/ on the driver, for
+                      integtest/round_counts.sh (off by default)
 
 Every guest must be a DIFFERENT machine, and no other dnv suite may run
 anywhere in the lab while this one does.
@@ -1430,6 +1455,15 @@ parse_args() {
 			DNS_PER_VM_OPT=${1#*=}
 			shift
 			;;
+		--keep-logs)
+			[ $# -ge 2 ] || usage
+			KEEP_LOGS=$2
+			shift 2
+			;;
+		--keep-logs=*)
+			KEEP_LOGS=${1#*=}
+			shift
+			;;
 		-h | --help) usage ;;
 		*) usage ;;
 		esac
@@ -1456,6 +1490,14 @@ parse_args() {
 		'' | *[!0-9]*) usage ;;
 		esac
 		[ "$DNS_PER_VM_OPT" -ge 1 ] || usage
+	fi
+
+	# The directory is made, and made absolute, here, before anything runs:
+	# keep_logs runs on the exit path too, where a directory it cannot write
+	# could only be a warning.
+	if [ -n "$KEEP_LOGS" ]; then
+		mkdir -p -- "$KEEP_LOGS" && KEEP_LOGS=$(cd -- "$KEEP_LOGS" && pwd) ||
+			die "--keep-logs: cannot make the directory '$KEEP_LOGS'"
 	fi
 
 	[ -n "$CP" ] || usage
@@ -6688,6 +6730,62 @@ cleanup_verb() { # <ssh-wrapper> <index|""> <label> <sentinel> <verb…>
 	cleanup_report "$label" "$verb" "$want" "$rc" "$out"
 }
 
+# keep_logs <case> is --keep-logs: with a directory given, it copies the logs
+# the guests hold into <dir>/<case>/<role>-<ip>/ on the driver, each under its
+# path below $WORK: the worker's, the gateway's and the cdc's from the cp, and
+# every log of every dn and cn agent from the DN and CN guests. A second copy
+# for one case name — the setup between two cases, a failure inside one —
+# goes to <case>.2, .3 and so on, never over the first. A passing run deletes
+# the logs at every cleanup, so this is the only way the round counter
+# (integtest/round_counts.sh) gets the worker's log of a passing case. It
+# runs before each cleanup that removes the work directories: between cases
+# (setup_between_cases) and on the exit path (on_exit). Every daemon still
+# runs and writes its log while it is copied, so a log that grows under tar
+# is copied as far as tar read it, with no warning and no failure: tar's exit
+# status 1, which on a create says only that, passes. It never
+# dies: a guest it cannot read, or an archive it cannot unpack, is a WARNING
+# line and the copy goes on with the next guest.
+keep_logs() { # <case>
+	[ -n "$KEEP_LOGS" ] || return 0
+	local dir="$KEEP_LOGS/$1" n=2 v
+	while [ -e "$dir" ]; do
+		dir="$KEEP_LOGS/$1.$n"
+		n=$((n + 1))
+	done
+	log "--- --keep-logs: the guests' logs of case $1 into $dir"
+	keep_logs_from "$dir/cp-$CP_IP" ssh_cp \
+		"cd $WORK 2>/dev/null && { find worker gateway cdc -name '*.log' -type f -print0 2>/dev/null | tar --null --warning=no-file-changed -czf - -T - || [ \$? -eq 1 ]; }"
+	for v in "${!CN[@]}"; do
+		keep_logs_from "$dir/cn$v-${CN_IP[$v]}" ssh_cn "$v" \
+			"cd $WORK 2>/dev/null && { find . -name '*.log' -type f -print0 | tar --null --warning=no-file-changed -czf - -T - || [ \$? -eq 1 ]; }"
+	done
+	for v in "${!DN[@]}"; do
+		keep_logs_from "$dir/dn$v-${DN_IP[$v]}" ssh_dn "$v" \
+			"cd $WORK 2>/dev/null && { find . -name '*.log' -type f -print0 | tar --null --warning=no-file-changed -czf - -T - || [ \$? -eq 1 ]; }"
+	done
+}
+
+# keep_logs_from <dest> <ssh function> [<guest index>] <command> runs the
+# command, which writes a gzipped tar of logs on its stdout, on one guest and
+# unpacks it under <dest>. Never dies (keep_logs).
+keep_logs_from() {
+	local dest=$1 tgz
+	shift
+	tgz="$dest.tgz"
+	if ! mkdir -p -- "$dest"; then
+		log "WARNING: --keep-logs: cannot make $dest"
+		return 0
+	fi
+	if ! QUIET=1 "$@" >"$tgz"; then
+		log "WARNING: --keep-logs: reading the logs into $dest failed"
+	fi
+	if [ -s "$tgz" ] && ! tar -xzf "$tgz" -C "$dest"; then
+		log "WARNING: --keep-logs: unpacking $tgz failed; the archive stays"
+		return 0
+	fi
+	rm -f -- "$tgz"
+}
+
 cleanup_all() {
 	local v extra=""
 
@@ -8793,12 +8891,12 @@ setup_wait_stack() {
 		assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" \
 			"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
 			"every leg of the primary is RES_STATUS_OK"
-		# applied_revision is the revision of the last SyncupCntlr the agent
-		# accepted for this cntlr, whatever its converge's outcome
-		# (InspectCntlrReply.applied_revision comes from the agent, not from the
-		# rev key), so a zero here would mean the CN has never accepted a
-		# revision-gated SyncupCntlr and every row above was read off a node that
-		# is converging blind.
+		# applied_revision is the revision of the cntlr's latest observation on
+		# the agent, that of the request the agent held while the converge or
+		# read that made it ran (InspectCntlrReply.applied_revision comes from
+		# the agent, not from the rev key), so a zero here would mean that
+		# observation was made with no revision-gated SyncupCntlr accepted, and
+		# every row above was read off a node that is converging blind.
 		assert_ge "$(jq_of "$CTL_OUT" '.applied_revision')" 1 \
 			"the primary has accepted at least one SyncupCntlr revision"
 
@@ -9303,6 +9401,9 @@ setup_between_cases() {
 	log "    (a fresh cluster_id makes every existing DN disk header foreign,"
 	log "     EnsureFormatted (agent/dnagent/diskmeta.go) — an etcd reset alone is not"
 	log "     enough)"
+	# --keep-logs: the case that just ran, before the sweep removes its logs.
+	keep_logs "$LOGS_CASE"
+	LOGS_CASE=setup
 	cleanup_all
 	# The between-cases sweep is a START cleanup for the case that follows —
 	# E2E11 wants that case to begin from an EMPTY etcd and a freshly built
@@ -10999,10 +11100,17 @@ ops_inspect() {
 # back until the sides RW14 waits for have reported the new revision
 # applied, or for one cntlr_interval (RW14's sides-first hold). So every
 # rung also waits for the primary's applied_revision to reach the SpRev the
-# set-level produced. InspectCntlr reads the agent's GetCntlrInfo, which
-# takes the same per-cntlr lock SyncupCntlr holds across its whole converge,
-# so a reply at that revision comes after the converge that applied the
-# level, and its rows are judged against the plan of that level: at READONLY
+# set-level produced. InspectCntlr passes on the agent's GetCntlrInfo, which
+# answers from the cntlr's latest observation, and an observation at that
+# revision is the converge's own, stored as it ends, or a later read's: no
+# read starts while the converge runs, and one running when it arrives is
+# cancelled (dnagent.md SH28, SH30). So a reply at that revision comes after
+# the converge of the level, and its rows are judged against the plan of
+# that level. The converge need not have applied the level: one whose call
+# was cut off stores no observation, but the agent already holds its
+# request, so the reads after it answer at its revision, judged against the
+# same plan (dnagent.md SH28 and Known limits) — an ns-dev it did not reload
+# reads as not OK. At READONLY
 # an OK ns-dev row is the flakey table. What that cannot see is a plan that
 # never asked for flakey at all, so the rung still asserts what the HOST
 # sees.
@@ -11705,10 +11813,11 @@ case_ops() {
 # from the agent's OWN report rather than inferred by the suite:
 #
 #   1. the connect never came up. `clone_id_to_target` is the CN's verdict on
-#      the source subsystem, by one rule on a converge and a Check round
-#      alike: Ok with the path states when every source endpoint has a live
-#      controller and the source namespace is there, Err while a sweep's
-#      disconnect of the source is in flight or the walk did not answer,
+#      the source subsystem, by one rule on a converge and on the read a
+#      Check round answers from alike: Ok with the path states when every
+#      source endpoint has a live controller and the source namespace is
+#      there, Err while a sweep's disconnect of the source is in flight or
+#      the walk did not answer,
 #      and Missing for no subsystem, an endpoint with no live controller,
 #      or no namespace; a converge's failed connect leads the details of a
 #      row that is not Ok
@@ -11884,6 +11993,9 @@ COPY_GAP_READ=""
 # COPY_QUIET_LAST is copy_drop_quiet's last observation, logged when it
 # changes.
 COPY_QUIET_LAST=""
+# COPY_MEMBER_LAST is copy_member_in_sync's last state and slot, logged when
+# they change.
+COPY_MEMBER_LAST=""
 MD_STATE_LAST=""
 SRC_STACK_LAST=""
 
@@ -12097,9 +12209,10 @@ side_hydrated() { # <side id>
 # status line shows the hydration its conf asks for, RES_STATUS_PROVISIONING
 # while DN9's gate is closed on the side, its node's metadata area has no
 # room for it or it waits for the cutover, another status otherwise
-# (dnagent.md, DN13, DN18), by one rule on a converge and a Check round
-# alike. After the cutover wait it is the first of the two waits in front of
-# the copy case's leg bitmap read; the second is the primary's own path to
+# (dnagent.md, DN13, DN18), by one rule on a converge and on the read a Check
+# round answers from alike. After the cutover wait it is the first of the two
+# waits in front of the copy case's leg bitmap read; the second is the
+# primary's own path to
 # the destination reading optimized (architecture.md, Migration;
 # copy_migration says why).
 migr_dst_serving() { # <side id>
@@ -12315,7 +12428,8 @@ copy_check_gap() { # <src v> <src k> <src side> <dst v> <dst k> <dst side> <leg 
 
 # leg_bm_read is the copy case's leg bitmap read as a poll. The primary's cn
 # agent serves GetLegBm under the cntlr's lock (cnagent.md, CN25), so the
-# read waits while a converge or a check round holds that lock. The gateway
+# read waits while a converge or a background read of the cntlr, which a
+# check round starts, holds that lock (dnagent.md SH29, SH30). The gateway
 # bounds its call to the agent by DefaultGatewayAgentTimeout
 # (common/constants.go), which a longer dnvctl --timeout does not extend, and
 # answers ABORTED when the call fails. If a read the gateway gave up on leaves
@@ -12343,17 +12457,19 @@ leg_bm_read() { # <leg id>
 # fails one when an IO it sends with its failfast flag meets the old side in
 # the moment after its export turns inaccessible (architecture.md, Known
 # limits), a race no run can force. A drop changes no desired state, so what
-# puts the member back is the primary's check round naming it once md has
-# moved it out of its slot, the SyncupCntlr the worker re-sends on that
-# code, and that converge's remove and add (cnagent.md CN12, CN30); the
-# resync writes through the new side's dm-clone.
+# puts the member back is a read of the primary's cntlr naming it once md
+# has moved it out of its slot (a read a check round starts, dnagent.md
+# SH29; cnagent.md CN30), the SyncupCntlr the worker re-sends on the code of
+# a round that answers from that read's observation, and that converge's
+# remove and add (cnagent.md CN12); the resync writes through the new side's
+# dm-clone.
 #
 # EVERY CONVERGE PUTS THE MEMBER BACK, so before the drop no converge other
 # than a re-send may still be due, or it would put the member back under a
-# trace id no check round's verdict carries and copy_check_drop would fail
-# a put-back that worked. Two can be due. (1) The SyncupCntlr of the pool's
-# latest revision: `migr append-bm` bumps it, and the worker holds the
-# cntlr half of that fan-out until the sides report it, for up to one
+# trace id that no re-send on a read's verdict carries and copy_check_drop
+# would fail a put-back that worked. Two can be due. (1) The SyncupCntlr of
+# the pool's latest revision: `migr append-bm` bumps it, and the worker holds
+# the cntlr half of that fan-out until the sides report it, for up to one
 # cntlr_interval (dnv-worker.md, RW14). So the group must read clean at an
 # applied revision no older than the pool's revision of now (grp_md_clean
 # says why that proves the converge at it has finished). (2) An attempt of
@@ -12363,6 +12479,12 @@ leg_bm_read() { # <leg id>
 # group is read clean before the drop, so a drop the race made is put back
 # first, and after it; then the member must read in sync with its failfast
 # flag, and the records must show the re-send (copy_check_drop).
+#
+# After the drop the wait reads the member on the primary itself before it
+# reads the group's row (copy_member_in_sync): `cntlr inspect` answers from
+# the agent's latest observation (dnagent.md SH28), and the first one after
+# the drop is most often a read that ended before it, which reads the group
+# clean, while the put-back comes a round later than that read.
 copy_forced_drop() { # <leg id> <grp id>
 	local name mark mrd state rev
 	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$1")
@@ -12395,6 +12517,10 @@ copy_forced_drop() { # <leg id> <grp id>
 	*) die "leg $1's member $name reads '$mrd' after mdadm --fail" ;;
 	esac
 	log "  failed leg $1's member $name on the primary by hand: $mrd"
+	COPY_MEMBER_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary to put leg $1's member back in sync" \
+		copy_member_in_sync "$name"
 	MD_STATE_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the primary to put leg $1's member back and group $2 to read clean" \
@@ -12414,6 +12540,28 @@ copy_forced_drop() { # <leg id> <grp id>
 	copy_check_drop "$mark" "$name"
 }
 
+# copy_member_in_sync is true when the md member <dm name> reads in_sync on
+# the primary itself (md_member_read): the node's own state, which no
+# observation of the agent's can predate. A member that is out of its array,
+# between the put-back's remove and add, is a false answer, which the
+# caller's wait_until asks again. The state and slot are logged when they
+# change; the write count, which moves with every write, is left out.
+copy_member_in_sync() { # <dm name>
+	local mrd sig state
+	mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$1" 2>/dev/null) ||
+		mrd="not in its array"
+	sig=${mrd% wsect=*}
+	if [ "$sig" != "$COPY_MEMBER_LAST" ]; then
+		COPY_MEMBER_LAST=$sig
+		log "  member $1 on the primary: $sig"
+	fi
+	state=${mrd%% *}
+	case ",${state#state=}," in
+	*,in_sync,*) return 0 ;;
+	esac
+	return 1
+}
+
 # copy_drop_quiet is true when the primary's cn agent runs no `os command`
 # under a trace id it minted itself for one CnConnectRetryInterval
 # (common/constants.go) and a margin: no attempt of the CN10 retry, a
@@ -12426,13 +12574,15 @@ copy_forced_drop() { # <leg id> <grp id>
 # carries $TRACE. The agent's leg health probes run no command. The guest
 # filters its log by the record's message and the driver parses what is
 # left; `fromjson?` drops a line torn by a write still in progress. A log it
-# cannot read is a false answer, which the caller's wait_until asks again. A
-# window with commands in it is logged when the commands change.
+# cannot read is a false answer, which the caller's wait_until asks again:
+# the guest checks the status of its tail as well as of its grep, as a
+# pipeline's own status is its last command's alone. A window with commands
+# in it is logged when the commands change.
 copy_drop_quiet() {
 	local mark lines cmds
 	# common.CnConnectRetryInterval, plus a margin for an attempt that waits
-	# for the cntlr's lock behind a check round or an info read (cnagent.md,
-	# CN1).
+	# for the cntlr's lock behind a background read of the cntlr (dnagent.md
+	# SH29; cnagent.md, CN1).
 	local window=$((5 + 3))
 	mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") || return 1
 	case "$mark" in
@@ -12440,7 +12590,8 @@ copy_drop_quiet() {
 	esac
 	sleep "$window"
 	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$((mark + 1)) $(cn_log) | \
-		grep -F '\"msg\":\"os command\"' || [ \$? -eq 1 ]") || return 1
+		grep -F '\"msg\":\"os command\"'; s=(\${PIPESTATUS[@]}); \
+		[ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]") || return 1
 	cmds=$(printf '%s\n' "$lines" | "$JQ" -R -s -c '
 		[split("\n")[] | fromjson? // empty
 		 | select(.msg == "os command"
@@ -12454,59 +12605,86 @@ copy_drop_quiet() {
 	return 1
 }
 
-# copy_check_drop reads, in the primary's cn agent log after line <mark>, the
-# verdicts that named md_member:<name> (the `sweep leftover` records, log.md,
-# Leftovers) and the mdadm commands that named the member's device, and in
-# the worker's log the `syncup result` records (dnv-worker.md, Log records).
-# It fails unless one trace id carries all three: a check round's verdict
-# naming the member, the SyncupCntlr the worker re-sent on it, which runs
-# under the round's own trace id (dnv-worker.md RW10), and that converge's
-# remove and then add of the member. The gateway's info reads name the
-# member too, under the case's own trace id, with no syncup behind them. The
-# guest filters its log by the member's name and the driver parses what is
-# left; `fromjson?` drops a line torn by a write still in progress. Fatal on
-# a log it cannot read, as copy_gap_reads is.
+# copy_check_drop follows the forced drop from the read that named the
+# member to the converge that put it back, through three joins of trace ids:
+#
+#  1. In the primary's cn agent log after line <mark>, the `sweep leftover`
+#     records naming md_member:<name> (log.md, Leftovers): the verdicts of
+#     the reads that found the member out, each under the trace id of the
+#     check round that started the read (dnagent.md SH29). Their ids are T1.
+#  2. In the worker's log, the `syncup result` records whose obs_trace_id is
+#     one of T1: the SyncupCntlr the worker re-sent on the code of a round
+#     that answered from such a read's observation. The re-send runs under
+#     that round's own trace id, and its record names the observation's
+#     (dnv-worker.md RW10). Their trace ids are T2.
+#  3. In the same cn agent log, under one id of T2, the converge's mdadm
+#     --remove and then --add --failfast of the member's device.
+#
+# It fails unless the chain holds for one id of T2. The gateway's inspects
+# answer from the agent's observation and read nothing (dnagent.md SH28), so
+# they add no verdict of their own. Each guest filters its log by fixed
+# strings and the driver parses what is left; `fromjson?` drops a line torn by
+# a write still in progress. Fatal on a log it cannot read, as copy_gap_reads
+# is: the control plane filters the worker's log with one grep, and the cn
+# guest checks the status of its tail as well as of its grep, as a pipeline's
+# own status is its last command's alone, so an unreadable log never reads as
+# one with no record.
 copy_check_drop() { # <mark> <name>
-	local lines drop traces t n
+	local lines named t pats recs resent puts
 	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$(($1 + 1)) $(cn_log) | \
-		grep -F '$2' || [ \$? -eq 1 ]") ||
+		grep -F '$2'; s=(\${PIPESTATUS[@]}); \
+		[ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]") ||
 		die "cannot read $(cn_log) on cn$PRIMARY_CN"
-	drop=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
-		--arg m "md_member:$2" --arg dev "/dev/mapper/$2" '
+	named=$(printf '%s\n' "$lines" | "$JQ" -R -s -c --arg m "md_member:$2" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "sweep leftover"
+		     and ((.leftovers // "") | split(" ") | any(. == $m)))
+		 | .trace_id // empty] | unique') ||
+		die "copy_check_drop: jq failed on $(cn_log) of cn$PRIMARY_CN"
+	[ "$named" != "[]" ] ||
+		die "no read in $(cn_log) of cn$PRIMARY_CN named md_member:$2" \
+			"after the drop"
+	pats=""
+	for t in $(jq_of "$named" '.[]'); do
+		case "$t" in
+		*[!A-Za-z0-9._:-]*)
+			die "copy_check_drop: the trace id '$t' of a verdict naming" \
+				"md_member:$2 cannot be matched as a fixed string"
+			;;
+		esac
+		pats="$pats -e '\"obs_trace_id\":\"$t\"'"
+	done
+	recs=$(ssh_cp "grep -F $pats $WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read $WORK/worker/worker.log on $CP_IP"
+	resent=$(printf '%s\n' "$recs" | "$JQ" -R -s -c --argjson t1 "$named" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "syncup result"
+		     and (.obs_trace_id as $o | $t1 | any(. == $o)))
+		 | {trace: (.trace_id // ""), obs: .obs_trace_id}
+		 | select(.trace != "")] | unique') ||
+		die "copy_check_drop: jq failed on the syncup records of" \
+			"$WORK/worker/worker.log"
+	[ "$resent" != "[]" ] ||
+		die "the worker's log holds no syncup result whose obs_trace_id is" \
+			"that of a read naming md_member:$2 ($named)"
+	puts=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
+		--arg dev "/dev/mapper/$2" --argjson resent "$resent" '
 		[split("\n")[] | fromjson? // empty] as $r
-		| ([$r[] | select(.msg == "sweep leftover"
-		    and ((.leftovers // "") | split(" ") | any(. == $m)))
-		    | .trace_id] | unique) as $named
-		| [$named[] as $t
-		   | [$r[] | select(.msg == "os command" and .trace_id == $t
+		| [$resent[] as $s
+		   | [$r[] | select(.msg == "os command" and .trace_id == $s.trace
 		       and .cmd == "mdadm") | (.args // []) | join(" ")] as $c
 		   | ([$c[] | endswith("--remove " + $dev)] | index(true)) as $rm
 		   | ([$c[] | endswith("--add --failfast " + $dev)] | index(true)) as $add
 		   | select($rm != null and $add != null and $rm < $add)
-		   | $t] as $put
-		| {named: $named, put_back: $put}') ||
+		   | $s]') ||
 		die "copy_check_drop: jq failed on $(cn_log) of cn$PRIMARY_CN"
-	traces=$(jq_of "$drop" '.put_back[]')
-	[ -n "$traces" ] ||
-		die "no trace id in $(cn_log) of cn$PRIMARY_CN carries both a" \
-			"verdict naming md_member:$2 and a converge's remove and then" \
-			"add of it: $drop"
-	for t in $traces; do
-		n=$(ssh_cp "grep -F '\"trace_id\":\"$t\"' $WORK/worker/worker.log | \
-			grep -cF '\"msg\":\"syncup result\"' || [ \$? -eq 1 ]") ||
-			die "cannot read the syncup records in $WORK/worker/worker.log on $CP_IP"
-		case "$n" in
-		'' | *[!0-9]*) die "the worker log's syncup records under $t read '$n'" ;;
-		esac
-		if [ "$n" -ge 1 ]; then
-			log "  the worker re-sent the SyncupCntlr under trace $t, whose" \
-				"check round named md_member:$2 and whose converge put it back"
-			return 0
-		fi
-	done
-	die "the worker's log holds no syncup result under a trace id whose" \
-		"check round named md_member:$2 and whose converge put it back" \
-		"($traces)"
+	[ "$puts" != "[]" ] ||
+		die "no re-send on a read naming md_member:$2 removed and then" \
+			"added it back in $(cn_log) of cn$PRIMARY_CN (re-sends: $resent)"
+	log "  the worker re-sent the SyncupCntlr under trace" \
+		"$(jq_of "$puts" '.[0].trace') on the observation of read" \
+		"$(jq_of "$puts" '.[0].obs'), which named md_member:$2, and that" \
+		"converge put it back"
 }
 
 # grp_md_clean is "md has finished rebuilding onto the promoted spare".
@@ -12538,13 +12716,22 @@ copy_check_drop() { # <mark> <name>
 # window between the RPC returning and the CN converging the array is still
 # the old, whole pair and reports "clean". A bare md-state test would pass
 # there and prove nothing. InspectCntlr's applied_revision is the revision of
-# the last SyncupCntlr the agent accepted, read under the per-cntlr lock that
-# SyncupCntlr holds across its whole converge (gateway/cntlr.go's InspectCntlr
-# copies the agent's own GetCntlrInfo reply revision), and the worker builds
+# the cntlr's latest observation on the agent (gateway/cntlr.go's
+# InspectCntlr copies the agent's own GetCntlrInfo reply revision): a
+# SyncupCntlr's converge stores its observation, at its request's revision,
+# only as it ends, and no read starts while it runs (dnagent.md SH28, SH30),
+# so a reply at a revision is never one from before or inside the converge
+# of that revision. The worker builds
 # that request with the SP's current SpRev (buildCntlrPlans in
 # worker/sprole.go, handed to the cntlr child by releaseCntlrs). So
 # "applied_revision >= the SpRev the switch bumped to" is the proof that the
-# array being read is the NEW one.
+# array being read is the NEW one, except after a converge whose call was cut
+# off: it stores no observation, but the agent already holds its request, so
+# the reads after it answer at its revision with the node as it left it
+# (dnagent.md SH28 and Known limits). The group row finds the array by any
+# member it names, so if the cut came before the switch reached md, this
+# check reads the old, whole pair at the new revision and passes. It does
+# not guard against that case.
 grp_md_clean() { # <cntlr id> <grp id> <min applied revision>
 	local st det rev sig
 	if ! ctl_try cntlr inspect --id "$1"; then
@@ -13587,8 +13774,9 @@ copy_migration() {
 	# In the migration gap (dnagent.md, DN12, DN13) the primary holds a live
 	# controller to the leg but no usable path, so nvme multipath requeues the
 	# flush, and GetLegBm waits for it holding the cntlr's lock until the gap
-	# ends, and the primary's check rounds wait with it
-	# (architecture.md, Known limits). The cutover starts only once the
+	# ends; no read of the cntlr runs meanwhile, so the observation the
+	# primary's check rounds answer from ages with it, past the worker's
+	# bound in a long gap (architecture.md, Known limits; dnv-worker.md HL7). The cutover starts only once the
 	# primary holds a live path to the destination, so no connect of the
 	# primary (cnagent.md, CN10) waits behind that lock and the gap ends on the
 	# disk nodes; a read taken in it still holds the primary for the rest of
@@ -13605,7 +13793,8 @@ copy_migration() {
 	# ANA write reaching the primary's kernel; it keeps WAIT_PROVISION, a
 	# bound and not a latency, as it ends the moment the path reads
 	# optimized. The read itself can still find the cntlr's lock held by a
-	# converge or a check round, so it is a poll under WAIT_PROVISION too
+	# converge or a background read of the cntlr, so it is a poll under
+	# WAIT_PROVISION too
 	# (leg_bm_read says why). The push may
 	# come at any time: the dn agent applies a chunk to a live dm-clone too,
 	# marking its regions hydrated without copying them (dnagent.md, DN13,
@@ -13677,9 +13866,10 @@ copy_migration() {
 		log "  no forced drop: under --redund $REDUND the leg is no md member"
 	fi
 
-	# FinishMigration without --force proves hydration with a live
-	# GetSideInfo of the DESTINATION side, so the wait below is the same
-	# measurement the RPC will make.
+	# FinishMigration without --force proves hydration from a GetSideInfo of
+	# the DESTINATION side, which answers from the side's latest observation,
+	# and the wait below reads that same observation through InspectSide, so
+	# it is the same measurement the RPC will make.
 	MIGR_HYD_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the migration's destination side $dstside to hydrate" \
@@ -14067,8 +14257,10 @@ case_copy() {
 # The consequence is real, not hypothetical. Building this shape keeps the
 # primary CN spawning dmsetup, mdadm and lsblk processes for minutes on end
 # on a controller-node guest — the whole window, restarts included, see
-# WAIT_BUILD — and under that load it cannot answer a health check inside one
-# check round. A build under this set can record, all inside setup, a
+# WAIT_BUILD — and under that load its converges hold the reads of its cntlr
+# off until the observation its check rounds answer from is older than the
+# worker's bound (dnv-worker.md HL7). A build under this set can record, all
+# inside setup, a
 # `failover`, a `spare_create` and a `failover` back.
 #
 # So when this case starts, the sp MAY already hold a spare leg it did not ask
@@ -14598,7 +14790,9 @@ react_primary_moved() { # <old cntlr id>
 #
 # WHY IT IS NOT cntlr_full_ready. The rebuild is a whole stack on a node that had
 # only legs — the WAIT_BUILD comment's piece of work — and a CN doing that
-# work misses health rounds and gets its err_epoch stamped. The
+# work holds the reads of its cntlr off behind its converge, so the
+# observation its rounds answer from grows older than the worker's bound and
+# its err_epoch gets stamped (dnv-worker.md HL7). The
 # elected cntlr is SETTLING for all of it (dnv-worker.md HL2: a promoted primary
 # settles at its first clean report as primary that shows its stack built),
 # and AR5 holds a settling primary to cntlr_unhealthy — $THR_REACT_CNTLR
@@ -17238,6 +17432,7 @@ space_summary() {
 # itself, then the space-guard reading of what it left behind. They are one
 # function so that a case can never be run without being measured.
 run_case() { # <case name>
+	LOGS_CASE=$1
 	"case_$1"
 	space_note_case "$1"
 }

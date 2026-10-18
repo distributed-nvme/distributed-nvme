@@ -527,6 +527,12 @@ func (s *Server) CreateMigration(
 // GW6 is presence-based, so an interleaved mutation stays invisible
 // to it.
 //
+// The agent answers GetSideInfo from its latest observation of the side and
+// reads nothing of the node (architecture.md, Live-state reporting). That is
+// still proof: a copy only advances, so an observation that lags the node
+// shows less of it, and the refusal it gives is one the caller repeats
+// (hydrationComplete).
+//
 // An unreachable agent is FAILED_PRECONDITION, not ABORTED (AG3): the caller
 // cannot prove hydration is done, which is exactly the precondition
 // architecture.md, Migrations, states. `force == true` skips the whole

@@ -974,8 +974,8 @@ func TestMdListArraysFromSysfsOnly(t *testing.T) {
 // md_<name> (architecture.md, md names, sizes CnMdDevName for it), and
 // /sys/block lists md_<name>. The md rows are read from the walk: a walk
 // listing md[0-9]+ alone would read the group's running array as absent on
-// every Check round and send every converge into an assembly of an array
-// already active — ERROR on every md row of the cn — and the sweep would
+// every read of the cntlr and send every converge into an assembly of an
+// array already active — ERROR on every md row of the cn — and the sweep would
 // never stop such an array either (the stop itself is
 // TestSweepStopsANamedArrayNode's).
 func TestMdNamedKernelNode(t *testing.T) {
@@ -1187,18 +1187,18 @@ func TestMdGoneOnlyForClearOrAbsent(t *testing.T) {
 	}
 }
 
-// TestMdScanKeepsBothRules pins the md walk of a check round and an info
-// read (Md.Scan, CN12, CN21): one listing of /sys/block and one read of each
-// array serve both md rules, each as its own reader would read the same
-// node. Walk() is Md.Walk's view — the arrays and the nodes recorded as
-// unanswered — and Arrays() is ListArrays' — the same arrays, or the same
-// first error in the same order of reads. The trees cover each way a read
-// of an array can end: answered, an array_state that reads EBUSY while md
-// stops the array, a killed md/ listing, a member dm name that fails, a
-// member that is no dm device, a member md has unbound, an md/ gone, an
-// array_state gone, and two faults on two arrays, in either order. An
-// array_state that fails never reaches the walk view: a group row must not
-// turn ERROR for another pool's array being stopped.
+// TestMdScanKeepsBothRules pins the md walk of a cntlr's read, which a check
+// round and an info read answer from (Md.Scan, CN12, CN21): one listing of
+// /sys/block and one read of each array serve both md rules, each as its own
+// reader would read the same node. Walk() is Md.Walk's view — the arrays
+// and the nodes recorded as unanswered — and Arrays() is ListArrays' — the
+// same arrays, or the same first error in the same order of reads. The
+// trees cover each way a read of an array can end: answered, an array_state
+// that reads EBUSY while md stops the array, a killed md/ listing, a member
+// dm name that fails, a member that is no dm device, a member md has
+// unbound, an md/ gone, an array_state gone, and two faults on two arrays,
+// in either order. An array_state that fails never reaches the walk view: a
+// group row must not turn ERROR for another pool's array being stopped.
 func TestMdScanKeepsBothRules(t *testing.T) {
 	ctx := context.Background()
 	const ours = "/dev/mapper/dnv-leg-a"

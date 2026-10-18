@@ -14,7 +14,9 @@ import (
 )
 
 // syncupSide implements DN8-DN14. The node read lock and this side's object
-// lock are held by the caller.
+// lock are held by the caller. A request the gates refuse stores no
+// observation; an admitted one stores its converge's before the caller lets
+// go of the locks (SH28).
 func (s *DnAgentServer) syncupSide(
 	ctx context.Context,
 	key string,
@@ -45,10 +47,13 @@ func (s *DnAgentServer) syncupSide(
 	// failed save is only logged; the converge runs whatever its outcome.
 	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
+	var savedAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting side state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
+	} else {
+		savedAt = s.now()
 	}
 	// Stored before the converge builds anything, so no claim of this
 	// request can be missing from another side's pass that sees what the
@@ -61,11 +66,15 @@ func (s *DnAgentServer) syncupSide(
 	s.putSide(key, st)
 
 	info, sweep := s.convergeSide(ctx, st, extentSize, connectBudget)
+	converged := sweep.Reply()
+	obs := storeObs(s, ctx, &st.obs, info, converged, req.GetRevision())
 	return &pb.SyncupSideReply{
-		AgentReply: sweep.Reply(),
+		AgentReply: converged,
 		Revision:   req.GetRevision(),
 		SideInfo:   info,
 		BmInfo:     s.bitmapInfo(st),
+		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		SaveTime:   agent.Timestamp(savedAt),
 	}
 }
 
@@ -91,33 +100,53 @@ func bringsCutover(held, req *pb.SyncupSideRequest) bool {
 
 // gateSide is DN8's gating of a SyncupSide against stored, the revision of
 // the request this process holds for the side, zero for a side it does not
-// hold: the pointer, then the revision, then the side conf. It returns the
-// refusal, or nil and the extent size of the DN the side is sized by. It
-// writes nothing but the side conf gate's Error record, so SyncupSide can run
-// it under the node read lock before it takes the object lock of a side the
-// process does not hold, and syncupSide runs it again under that lock.
+// hold: the pointer, then the revision, then the side conf (sideGates). It
+// returns the refusal, or nil and the extent size of the DN the side is
+// sized by. It writes nothing but the side conf gate's Error record, so
+// SyncupSide can run it under the node read lock before it takes the object
+// lock of a side the process does not hold, and syncupSide runs it again
+// under that lock.
 func (s *DnAgentServer) gateSide(
 	ctx context.Context,
 	req *pb.SyncupSideRequest,
 	stored uint64,
 ) (*pb.SyncupSideReply, uint64) {
+	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
+	reply, extentSize, confErr := sideGates(dn, req, stored)
+	if confErr != nil {
+		logInvalidSideConf(ctx, req, confErr)
+	}
+	return reply, extentSize
+}
+
+// sideGates is gateSide's gating against dn, the state of the side's DN, nil
+// for a DN the process does not hold. It returns the refusal, or nil and the
+// extent size, plus the side conf gate's error when that gate refused. It
+// reads nothing but dn's request and writes nothing, so beginSideSyncup runs
+// it under s.mu without a record.
+func sideGates(
+	dn *dnState,
+	req *pb.SyncupSideRequest,
+	stored uint64,
+) (*pb.SyncupSideReply, uint64, error) {
 	// DN8 gating: SyncupDn introduces the pointer first (architecture.md,
 	// `service DiskNodeAgent`).
-	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 	if dn == nil || !pointerKnown(dn.req.Load(), req.GetSidePointer()) {
 		return &pb.SyncupSideReply{
 			AgentReply: agent.UnknownObjectReply(
 				"side pointer %s not in the dn's list",
 				sidePointerText(req.GetSidePointer())),
-		}, 0
+		}, 0, nil
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
-		return &pb.SyncupSideReply{AgentReply: reject, Revision: stored}, 0
+		return &pb.SyncupSideReply{AgentReply: reject, Revision: stored}, 0, nil
 	}
 	// DN8's side conf gate: a length to zero the sp worker cannot have derived
-	// from a stored group. The DN request cannot change under this RPC —
-	// SyncupDn replaces it under the node write lock, and this holds the read
-	// lock — so the gate and the converge see one extent size. This is the
+	// from a stored group. The DN request cannot change under gateSide —
+	// SyncupDn replaces it under the node write lock, and gateSide's callers
+	// hold the read lock — so the gate and the converge see one extent size;
+	// beginSideSyncup's run of it holds no node lock, and the run under the
+	// locks is the one that decides. This is the
 	// last point with literally zero side effects: refusing here skips the
 	// desired-state promotion, the whole converge and the local-store Save
 	// (syncupSide), so a bad request cannot be replayed by the next Reconcile
@@ -125,13 +154,12 @@ func (s *DnAgentServer) gateSide(
 	// worker sees the request was not accepted.
 	extentSize := dn.req.Load().GetExtentSize()
 	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
-		logInvalidSideConf(ctx, req, err)
 		return &pb.SyncupSideReply{
 			AgentReply: agent.InvalidConfReply("%v", err),
 			Revision:   stored,
-		}, 0
+		}, 0, err
 	}
-	return nil, extentSize
+	return nil, extentSize, nil
 }
 
 // validateZeroBytes is DN8's side conf gate. side_conf.zero_bytes is the
@@ -218,6 +246,11 @@ func (s *DnAgentServer) convergeSide(
 	}
 	plan := newSidePlan(s.nf, req, extentSize)
 	info := &pb.SideInfo{}
+	// A row made after the call is cut off moves no epoch. Every pass of the
+	// side — this converge from each of its entrances, and the side's read —
+	// holds the side's object lock or the node write lock, so the helpers
+	// write through st.tracker with this pass bound (agent.ResTracker.Bind).
+	defer st.tracker.Bind(ctx)()
 
 	// What to remove is derived by subtracting the desired state from what
 	// the node actually holds, never from memory of a past converge.
@@ -260,15 +293,16 @@ func (s *DnAgentServer) convergeSide(
 	}
 
 	// architecture.md, Migration: the source builds its migration source
-	// export first, then runs src step 1, the suspend of src step 2, and only
-	// then links the export to the port (DN12). A build that fails stops the
-	// pass before step 1: its migration source rows carry the failure, the
-	// per-CN stacks are left where they are and only reported, judged as a
-	// check round judges them (probeCnStacks), and the fence is settled as
-	// under the DN9 gate above, for the same reason: [D12]'s bound does not
-	// wait for the next syncup. Until a pass's build has held no pass has
-	// run steps 1 and 2, so there the side serves on; once one has, a failed
-	// build undoes nothing of them or of the port link.
+	// export first, then runs src step 1, the suspend of src step 2, and
+	// only then links the export to the port (DN12). A build that fails
+	// stops the pass before step 1: its migration source rows carry the
+	// failure, the per-CN stacks are left where they are and only
+	// reported, judged as a check round's read judges them
+	// (probeCnStacks), and the fence is settled as under the DN9 gate
+	// above, for the same reason: [D12]'s bound does not wait for the next
+	// syncup. Until a pass's build has held no pass has run steps 1 and 2,
+	// so there the side serves on; once one has, a failed build undoes
+	// nothing of them or of the port link.
 	if plan.migrSrc != nil {
 		if !s.buildMigrSrc(ctx, st, plan, info) {
 			s.settleFence(ctx, st, plan)
@@ -293,9 +327,9 @@ func (s *DnAgentServer) convergeSide(
 		case migrCloneUnread:
 			// Nothing decides the per-CN stacks this pass, so they stay
 			// where they are and are only reported, judged by the
-			// dm-clone's presence as a check round judges them in the same
-			// state (probeStacks); the retry the destination registered
-			// converges them. The fence is settled as under the DN9 gate
+			// dm-clone's presence as a check round's read judges them in
+			// the same state (probeStacks); the retry the destination
+			// registered converges them. The fence is settled as under the DN9 gate
 			// above, for the same reason: [D12]'s bound does not wait for a
 			// probe.
 			s.settleFence(ctx, st, plan)

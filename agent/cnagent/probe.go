@@ -7,7 +7,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The probe map of CN28: the rows of a check round and an info read, read
+// The probe map of CN28: the rows of a cntlr's read (refreshCntlr), read
 // from the node's reading (readCntlr, takeReading) and from the reads that
 // stay outside it: the status of each thin pool and dm-clone; the configfs
 // of the exports; the clone metadata area's loop device and its number; the
@@ -17,8 +17,8 @@ import (
 // (lookupSubsys); the own read of a dm name that a partial info listing, or
 // the table listing, lacks (cnReading); and the fresh `dmsetup info` that
 // confirms a device gone after its own status or table read failed. No
-// function here creates, changes or removes an object of the node, as
-// Get*Info and the Check* streams must not (CN23, SH25). A thin pool's
+// function here creates, changes or removes an object of the node, as a
+// cntlr's background read must not (CN23; dnagent.md SH29). A thin pool's
 // `dmsetup status` carries the noflush flag and commits nothing, though it
 // waits behind a commit already running on that pool; a dm-clone's still
 // makes the kernel commit the clone's metadata (dnagent.md SH17). In
@@ -28,7 +28,7 @@ import (
 // dst-bitmap read of architecture.md, Clone crash recovery — never from here
 // (CN29).
 
-// probeCntlr writes the rows of one check round or info read from plan, whose
+// probeCntlr writes the rows of one read of the cntlr from plan, whose
 // reading readCntlr took (plan.rd, plan.walk, plan.mdWalks). It also returns
 // the dm names of the md members the converge would put back or add, which
 // the verdict names (putBackNames, cnagent.md CN30): they are read from the
@@ -65,8 +65,8 @@ func (s *CnAgentServer) probeCntlr(
 		// ensureLeg's registry gate (CN10), answered the way the converge
 		// answers it: that leg fails before it reads anything, so a row
 		// judged from what the probe finds of a leg still being torn down
-		// would flip against the converge's, and move its epoch, every
-		// round the disconnect runs.
+		// would flip against the converge's, and move its epoch, on every
+		// read while the disconnect runs.
 		if s.disconnectInFlight(lp.nqn) {
 			info.LegIdToLeg[lp.legId] = t.Err(
 				key, lp.name, detailsDisconnectInFlight(lp.nqn))
@@ -173,7 +173,7 @@ func (s *CnAgentServer) probeCntlr(
 		} else {
 			// CN19: the converge reports the suppressed dm-error rather than
 			// leaving it out (syncup_cntlr.go build()), so the probe must
-			// too — a row that disappears one round after being reported
+			// too — a row that disappears one read after being reported
 			// MISSING is exactly the omitted-vs-never-looked-at ambiguity
 			// CN19 forbids.
 			info.TdIdToDmError[tp.tdId] = t.Missing(
@@ -203,8 +203,8 @@ func (s *CnAgentServer) probeCntlr(
 	}
 
 	// Clones: the rows of CN18's shared reading (cloneRows), from this
-	// round's read of the source and of the dm-clone, so a check round
-	// reports what the converge reports for the same node.
+	// read's look at the source and at the dm-clone, so a read reports what
+	// the converge reports for the same node.
 	for _, cp := range plan.clones {
 		if !plan.wantClone {
 			if plan.primary {

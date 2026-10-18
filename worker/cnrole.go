@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -153,6 +154,7 @@ func (d *cnDriver) syncup(
 	}
 	return d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCnInfo(),
+		reply.GetObsStamp(), reply.GetSaveTime(),
 	), nil
 }
 
@@ -162,29 +164,27 @@ func (d *cnDriver) observe(ctx context.Context, r *replyState) {
 	d.health.observe(ctx, obs, res)
 }
 
-// unreachable folds a broken stream or a missed reply into the CN's health
-// (HL1; architecture.md, Live-state reporting).
+// unreachable folds a broken stream, a missed reply or a reply whose
+// observation is too old (HL7) into the CN's health (HL1; architecture.md,
+// Live-state reporting).
 func (d *cnDriver) unreachable(ctx context.Context) {
 	d.markInfoUnknown()
 	d.health.observe(ctx, healthUnreachable, "")
 }
 
 // fold turns one reply into a replyState, remembering the CnInfo it carried
-// (HL5).
+// (HL5); stamp and saveTime as for dnDriver.fold.
 func (d *cnDriver) fold(
 	agentReply *pb.AgentReply,
 	revision uint64,
 	info *pb.CnInfo,
+	stamp *pb.ObsStamp,
+	saveTime *timestamppb.Timestamp,
 ) *replyState {
 	if info != nil {
 		d.storeInfo(info)
 	}
-	return &replyState{
-		revision:    revision,
-		code:        agentReply.GetCode(),
-		details:     agentReply.GetDetails(),
-		infoPresent: info != nil,
-	}
+	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
 }
 
 // cnCheckStream adapts the generated CheckCn stream to checkStream (RW4).
@@ -211,6 +211,7 @@ func (s *cnCheckStream) recv() (*replyState, error) {
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCnInfo(),
+		reply.GetObsStamp(), nil,
 	), nil
 }
 

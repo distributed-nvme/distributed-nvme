@@ -106,8 +106,12 @@ bitmaps as hex; a call fails on a gRPC error or a code other than the expected
 one, zero unless the stage names another. It sends the stage's trace id as
 metadata and in `Check*` requests (`grpc.md`, Drivers and fakes), takes a
 cntlr's request whole from a file, and holds what the script must not
-re-derive: the hydration poller (`common.ParseCloneStatus`), a group's hashed md
-names (`CnMdDevName`) and a host NQN's host id.
+re-derive: the hydration poller (`common.ParseCloneStatus`), a group's hashed
+md names (`CnMdDevName`) and a host NQN's host id. It reads the agent as the dn
+driver does (`dnagent_integtest.md`, The driver: `dnagentctl`): its round
+commands have the fresh mode, its hydration poller samples with rounds on one
+stream, the first sample a fresh one, so its one-sample probe takes a fresh
+sample, and its info-read commands are plain memory reads.
 
 ## Conventions
 
@@ -153,10 +157,14 @@ names (`CnMdDevName`) and a host NQN's host id.
   still hold none of a stage's records, so restart's zero-mutation and mdadm
   checks, the late flip's "assembled nothing" and the gated clone's
   "no source connection" have no positive control.
-* **Steady state.** One `CheckCn` and one `CheckCntlr` round per CN reply code
-  zero, the revision that RPC stored and every row OK (`cnagent.md` CN24,
-  CN30), the cntlr round first waiting out a fresh primary's pending legs
-  (CN11). The teardown case runs none: it pins the removal.
+* **Steady state.** Stages read the agent as the dn suite's stages do
+  (`dnagent_integtest.md`, Conventions, Check rounds). One fresh `CheckCn`
+  and one fresh `CheckCntlr` round per CN reply code zero, the revision that
+  RPC stored and every row OK (`cnagent.md` CN24, CN30), the cntlr round
+  first polling with rounds until no leg row reads pending, as a primary's
+  legs do until their probers' first round (CN11). The teardown case runs no
+  `CheckCntlr` round, since its cntlrs are gone; each of its stages ends with
+  the fresh `CheckCn` round per CN, code zero and the base-state rows OK.
 * **Mutation-free.** The mutation reader lists every mutating command and every
   configfs or block write ("os write block" by name) in a cn agent log, whole
   or for one trace; the probers' "probe …" records fall outside it by
@@ -180,83 +188,86 @@ refused; host IO; clean check rounds, the namespace identity included
 (`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
 and a teardown by an empty pointer list, re-sent while it replies leftover
 (CN7, CN21), leaving the CN no dm device, clone-metadata wrapper (CN18) or
-host-facing subsystem and a clean `GetCnInfo` (CN30).
+host-facing subsystem and a fresh `CheckCn` round replying clean (CN30).
 
 **redund** first pins, with no agent and no NVMe-oF path, the refusal the
 cross-leg half of failover safety rests on (`architecture.md`, [D16]): on one
 VM, a clean two-leg array over two loop devices, built and stopped with the
-agent's create and stop commands under a dnv name the md udev mask matches
-(Lab facts), so that both superblocks still count both legs at one event
-count. Started from one leg with the agent's assemble command (`cnagent.md`
-CN12's assembly case), mdadm refuses, its own message saying it needs every
-member to start the array, writes nothing to that leg's superblock and leaves
-no array holding either leg; started from both legs, the array runs clean,
-both members in sync, with nothing to rebuild. The command is the agent's:
-the promotion below holds each assemble command the agent runs from both
-legs to the arguments the same rule builds for that group, and the unit
-tests hold the agent's start from one leg to the same rule. It then builds
-md-raid1 groups across both DNs under a primary and a standby. The primary
-creates both with `--assume-clean`: provisioning zeroed every leg's meta
-region, so none carries a superblock, and no read reaches a data block the
-pool has not written (`cnagent.md` CN12's create case; `architecture.md`,
-[D15]); the standby keeps every leg connected and
-non-optimized, assembles no two-member array, and backs its ns-dev with the
-td's dm-error, the namespace inaccessible (CN10, CN11, CN16's standby rule);
-each CN's subsystem admits exactly the host's NQN (CN16). The demote moves
-ANA before the park (CN9's ANA pre-step before its park pre-step), stops the
-arrays and keeps the legs; the promote assembles both (CN12's assembly case),
-each with the arguments the first stage's rule builds for its own group, the
-data surviving. With the primary's legs into one
-DN cut under a host write, every check round reads both md rows OK until the
-data row reports degraded and the dead legs' rows error, and no mdadm runs
-(CN12, CN28, CN29); the write completes on the surviving leg and reads back,
-and the leg rows recover once the partition lifts. The check round then
-names the member md failed, with the leftover code, and the `SyncupCntlr`
-re-sent as the worker would puts it back: the arrays read clean and the
-member is in sync with its failfast flag (CN12, CN30). The same put-back of
-a member failed by hand, on a whole array with no IO while the member is
-out, is one converge whose only mdadm commands are the remove and then the
-add, and the sectors it writes to the member are a small part of the
-array: that count, never a time, tells md's re-add from its bitmap from
-the full copy mdadm makes when it cannot re-add. Read-only fails writes
-through dm-flakey (CN16's read-only rule, CN19; `architecture.md`,
-[D11]); the data array's member on the DN the
-partition cut is then failed by hand, so the stage's last write reaches the
-other leg alone, and no converge of the primary puts it back before the
-late flip demotes it. The late flip promotes before any side
-flips, so the promotion assembles no array and builds no raid0: both md rows
-read "no available leg", the ns-dev stays parked with its row in error, and
-the promotion writes no optimized group, so the host's path stays inaccessible
-and its IO would wait rather than fail; the namespace row reads OK on the
-converge and on an info read alike (CN12, CN16's ANA rule, CN28). The connect
+agent's create and stop commands under a dnv name the md udev mask matches (Lab
+facts), so that both superblocks still count both legs at one event count.
+Started from one leg with the agent's assemble command (`cnagent.md` CN12's
+assembly case), mdadm refuses, its own message saying it needs every member to
+start the array, writes nothing to that leg's superblock and leaves no array
+holding either leg; started from both legs, the array runs clean, both members
+in sync, with nothing to rebuild. The command is the agent's: the promotion
+below holds each assemble command the agent runs from both legs to the
+arguments the same rule builds for that group, and the unit tests hold the
+agent's start from one leg to the same rule. It then builds md-raid1 groups
+across both DNs under a primary and a standby. The primary creates both with
+`--assume-clean`: provisioning zeroed every leg's meta region, so none carries
+a superblock, and no read reaches a data block the pool has not written
+(`cnagent.md` CN12's create case; `architecture.md`, [D15]); the standby keeps
+every leg connected and non-optimized, assembles no two-member array, and backs
+its ns-dev with the td's dm-error, the namespace inaccessible (CN10, CN11,
+CN16's standby rule); each CN's subsystem admits exactly the host's NQN (CN16).
+The demote moves ANA before the park (CN9's ANA pre-step before its park
+pre-step), stops the arrays and keeps the legs; the promote assembles both
+(CN12's assembly case), each with the arguments the first stage's rule builds
+for its own group, the data surviving. With the primary's legs into one DN cut
+under a host write, every fresh check round reads both md rows OK until the
+data row reports degraded and the dead legs' rows error (CN12, CN28, CN29).
+Once the write completes on the surviving leg, the agent's log holds no mdadm
+command under the stage's trace id, under which each read those rounds start
+logs (`dnagent.md` SH29): that covers every such read that has ended by then,
+but not the read the last fresh round leaves running, which the stage does not
+wait for. The leg rows recover once the partition lifts, and the write reads
+back. A fresh check round then names the member md failed, with the leftover
+code, and the `SyncupCntlr` re-sent as the worker would puts it back: the
+arrays read clean and the member is in sync with its failfast flag (CN12,
+CN30). The same put-back of a member failed by hand,
+on a whole array with no IO while the member is out, is one converge whose only
+mdadm commands are the remove and then the add, and the sectors it writes to
+the member are a small part of the array: that count, never a time, tells md's
+re-add from its bitmap from the full copy mdadm makes when it cannot re-add.
+Read-only fails writes through dm-flakey (CN16's read-only rule, CN19;
+`architecture.md`, [D11]); the data array's member on the DN the partition cut
+is then failed by hand, so the stage's last write reaches the other leg alone,
+and no converge of the primary puts it back before the late flip demotes it.
+The late flip promotes before any side flips, so the promotion assembles no
+array and builds no raid0: both md rows read "no available leg", the ns-dev
+stays parked with its row in error, and the promotion writes no optimized
+group, so the host's path stays inaccessible and its IO would wait rather than
+fail; the namespace row reads OK on the converge and alike in the observation
+a fresh round then reports, made after the converge by a read or by an
+attempt of the connect retry (CN12, CN16's ANA rule, CN28). The connect
 retry, which the late members and the waiting namespace keep registered, then
 assembles the arrays under its own trace ids, with no second `SyncupCntlr`,
-puts the ns-dev on the raid0 and moves the namespace optimized, then stops;
-and a block only the newer leg holds reads as that leg's, the stale member
-kicked (CN10, CN12; `architecture.md`, [D16]).
+puts the ns-dev on the raid0 and moves the namespace optimized, then stops; and
+a block only the newer leg holds reads as that leg's, the stale member kicked
+(CN10, CN12; `architecture.md`, [D16]).
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,
 and what cannot go is reported and retried, never forgotten (`cnagent.md` CN7,
 CN20, CN21, CN30). Its request is what a pool drain sends while the sides
 vanish: an empty pointer list, re-sent at the stored revision. It proves this
-under the conditions the lab can stage: sides already gone; paths long
-dead, live before and gone after the refused reconnect; IO in flight, where no
-write succeeds after the sides go and one fails or stays queued on the host,
-as a park killed at its timeout leaves it, while the parks, namespace removals
-and pool commits complete (`cnagent.md` CN21: its park before every layer, its
-nvmet layer L1 and its thin-pool layer L8) — in these three the DN drops
-finish in one pass while the primary still holds every leg (`dnagent.md`
-DN6); a partitioned DN, its sides dropped later under a CN already gone
-(`dnagent.md` DN6); and a leg device held open from outside the agent, a
-leftover with no row (CN29), recomputed by a read-only `GetCnInfo` (CN30), the
-residue exactly that device since every layer above the legs' is gone
-(`cnagent.md` L10), cleared by the same request at the same revision. Each
-condition is built under its own pool and namespace identity, so residue names
-its stage, and is first proved up, both arrays running and the host on both
-paths, since a teardown of a stack that
-never came up passes every residue check; each ends with nothing of its pool
-or either CN left, base states OK.
+under the conditions the lab can stage: sides already gone; paths long dead,
+live before and gone after the refused reconnect; IO in flight, where no write
+succeeds after the sides go and one fails or stays queued on the host, as a
+park killed at its timeout leaves it, while the parks, namespace removals and
+pool commits complete (`cnagent.md` CN21: its park before every layer, its
+nvmet layer L1 and its thin-pool layer L8) — in these three the DN drops finish
+in one pass while the primary still holds every leg (`dnagent.md` DN6); a
+partitioned DN, its sides dropped later under a CN already gone (`dnagent.md`
+DN6); and a leg device held open from outside the agent, a leftover with no row
+(CN29), reached again by a read made after the drop, which a fresh `CheckCn`
+round reports (CN30), the residue exactly that device since every layer above
+the legs' is gone (`cnagent.md` L10), cleared by the same request at the same
+revision. Each condition is built under its own pool and namespace identity, so
+residue names its stage, and is first proved up, both arrays running and the
+host on both paths, since a teardown of a stack that never came up passes every
+residue check; each ends with nothing of its pool or either CN left, base
+states OK.
 
 **thinbm** proves the bitmap reads exact over known writes, a meta leg all zero
 (`cnagent.md` CN25 to CN27; `architecture.md`, raid0 bitmap math), and the
@@ -282,39 +293,41 @@ read-write one converge hole-punches an arena range for the wrapper (CN18's
 metadata-slot step; `architecture.md`, [D14]), builds the dm-clone with exactly
 the no-hydration and no-discard-passdown pair, and lands the chunk as one
 discard at its skip range before hydration is enabled (CN18's dm-clone, bitmap
-and hydration steps); the first hydration sample already counts the skipped
-half, and the last region the source wrote reads back right, through
-read-through if need be. The startup reconcile alone rebuilds a wiped
+and hydration steps); the first hydration sample, a fresh one, already counts
+the skipped half, and the last region the source wrote reads back right,
+through read-through if need be. The startup reconcile alone rebuilds a wiped
 destination CN, bitmaps first, the destination's own discard from offset zero
 included when the wipe-time sample shows a region copied (CN2, CN18), its dead
 host path replaced by device as the pools share the NQN, and hydration runs to
 completion. The hydrated clone's source then loses its namespace behind both
-agents' backs, the transfer's export and the destination CN's controller of
-it staying: the clone's three rows and its destination namespace's two read
-one status, with one epoch, on a converge and on the read-only channels
-alike (`cnagent.md` CN18, CN28), the source's row missing, which sets no
-health epoch, and the other four ok, while the namespace serves on, optimized,
-through the hydrated dm-clone (CN16's clone rule) and the dm-clone's row
-still carries the status line the gateway's hydration check reads. The state
-compared is measured as the dn suite's lost source measures it
-(`dnagent_integtest.md`, Cases), and a reading that moves before the
-comparison ends fails the stage. The finalize takes the clone down in layer
-order, the clone, its wrapper, then its source connection (`cnagent.md` L3
-to L5), leftover while the source's disconnect runs or clean if its
-controller was already gone. The
-half the source wrote reads back intact through the destination, which then
-takes a write, while the half it never wrote stays unmapped and zero there, the
-destination starting empty (`architecture.md`, [D3]); and at teardown both CNs
-pass smoke's per-CN check.
+agents' backs, the transfer's export and the destination CN's controller of it
+staying: the clone's three rows and its destination namespace's two read one
+status, with one epoch, on a converge, in the observations a fresh round and
+then an info read report, each made after that converge by a read or by an
+attempt of the connect retry, which a clone whose source is not ready keeps
+registered, and on a second converge (`cnagent.md` CN10, CN18, CN28), the
+source's row missing, which sets no health epoch, and the other four ok, while the namespace serves on, optimized, through the hydrated
+dm-clone (CN16's clone rule) and the dm-clone's row still carries the status
+line the gateway's hydration check reads. The state compared is measured as the
+dn suite's lost source measures it (`dnagent_integtest.md`, Cases), and a
+reading that moves before the comparison ends fails the stage. The finalize
+takes the clone down in layer order, the clone, its wrapper, then its source
+connection (`cnagent.md` L3 to L5), leftover while the source's disconnect runs
+or clean if its controller was already gone. The half the source wrote reads
+back intact through the destination, which then takes a write, while the half
+it never wrote stays unmapped and zero there, the destination starting empty
+(`architecture.md`, [D3]); and at teardown both CNs pass smoke's per-CN check.
 
 **restart** proves persistence and an idempotent reconcile (`cnagent.md` CN2;
 `dnagent.md` SH1, SH4 to SH6): both cn agents restart over untouched kernel
-state as the host reads on; the reloaded infos, revisions included, equal the
-snapshots but for the status epochs (`dnagent.md` SH14); mdadm runs nothing but
-its superblock examine (CN12); equal-revision re-sends leave the new logs free
-of any mutation, an activation sweep's included (`dnagent.md` SH16;
-`cnagent.md` CN14); and a `SyncupCn` below the revision those re-sends stored
-is refused as stale in a normal reply (`dnagent.md` SH8, SH9; CN4).
+state as the host reads on; every snapshot, on both sides of the restart, is a
+fresh round's reply, and the reloaded infos, revisions included, equal the
+snapshots but for the status epochs (`dnagent.md` SH14) and the replies'
+stamps, which differ by nature; mdadm runs nothing but its superblock examine
+(CN12); equal-revision re-sends leave the new logs free of any mutation, an
+activation sweep's included (`dnagent.md` SH16; `cnagent.md` CN14); and a
+`SyncupCn` below the revision those re-sends stored is refused as stale in a
+normal reply (`dnagent.md` SH8, SH9; CN4).
 
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents

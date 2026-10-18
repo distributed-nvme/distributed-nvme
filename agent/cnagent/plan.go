@@ -171,15 +171,15 @@ type cntlrPlan struct {
 	// tds above it (anySliceDeferred).
 	anyDeferred bool
 
-	// arena / arenaErr / arenaDone cache this pass's clone-metadata arena
-	// view ([D14], CN18 step 2), so a cntlr with N clones still issues one
+	// arena / arenaErr / arenaDone cache this pass's clone-metadata arena view
+	// ([D14], CN18 step 2), so a cntlr with N clones still issues one
 	// enumeration: the loop device is re-learned from `losetup --associated`
-	// in every converge, check round or info read and never persisted. They,
-	// the sweep fact below and the reading and walks after it are the only
-	// fields here that are not a pure function of the request; these three
-	// are filled lazily by planArena, an allocation's own enumeration
-	// replaces them (ensureCloneMeta), and a failed allocation clears
-	// arenaDone so the clone's rows read the arena afresh (ensureClone).
+	// in every converge and every read and never persisted. They, the sweep
+	// fact below and the reading and walks after it are the only fields here
+	// that are not a pure function of the request; these three are filled
+	// lazily by planArena, an allocation's own enumeration replaces them
+	// (ensureCloneMeta), and a failed allocation clears arenaDone so the
+	// clone's rows read the arena afresh (ensureClone).
 	arena     *cloneMetaArena
 	arenaErr  error
 	arenaDone bool
@@ -197,25 +197,23 @@ type cntlrPlan struct {
 	// pass, so it never outlives the pass that learned it.
 	cloneHold cloneHold
 
-	// rd is the reading a check round or an info read took (CN28,
-	// readCntlr): the shared helpers read dm facts and numbers from it
-	// (dmInfo, dmTable, dmDevNo), and the verdict its listings. It is nil
-	// in a converge and in every other plan builder, and the helpers then
-	// read each device on its own.
+	// rd is the reading a cntlr's read took (CN28, readCntlr): the shared
+	// helpers read dm facts and numbers from it (dmInfo, dmTable, dmDevNo),
+	// and the verdict its listings. It is nil in a converge and in every other
+	// plan builder, and the helpers then read each device on its own.
 	rd *cnReading
-	// walk is the pass's NVMe walk (CN10), shared by every lookup of the
-	// pass and by its sweep's or its verdict's list of connections: the
-	// reading's in a check round and an info read, and in a converge the
-	// one convergeCntlr takes right before its sweep. No other plan builder
-	// looks a subsystem up, and their plans leave it nil: a lookup with no
-	// walk fails (lookupSubsys).
+	// walk is the pass's NVMe walk (CN10), shared by every lookup of the pass
+	// and by its sweep's or its verdict's list of connections: the reading's
+	// in a read, and in a converge the one convergeCntlr takes right before
+	// its sweep. No other plan builder looks a subsystem up, and their plans
+	// leave it nil: a lookup with no walk fails (lookupSubsys).
 	walk *passWalk
 	// mdWalks is the pass's md walk, shared by every group row and every
 	// concat row of the pass, so a group's row and its concat rows read one
 	// array (mdDevNo): in a converge taken at the first group that needs it
-	// (build), in a check round and an info read the walk view of the
-	// reading's md walk (cnReading.mdWalks). No other plan builder reads an
-	// md array, and their plans leave it nil.
+	// (build), in a read the walk view of the reading's md walk
+	// (cnReading.mdWalks). No other plan builder reads an md array, and their
+	// plans leave it nil.
 	mdWalks *mdWalkOnce
 }
 
@@ -322,7 +320,7 @@ func (gp *grpPlan) legNames() []string {
 // is there already, it keeps it as it is (ensureLinearGroup): a side that has
 // not flipped to this CN yet exports dm-error to it (a non-optimized path).
 // Only availability decides: a held member md has failed on a leg that is
-// available again is not late — the check round's verdict names it once its
+// available again is not late — the read's verdict names it once its
 // leg can take it, and the converge of the syncup the worker re-sends puts it
 // back (putBackNames, reconcileMembers; cnagent.md CN12). Spares are not
 // members (architecture.md, Spare legs), so a spare is never late. A

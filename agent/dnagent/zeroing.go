@@ -27,16 +27,17 @@ import (
 // The work is a goroutine rather than part of the RPC because a meta group's
 // side is zeroed whole, which can take far longer than an RPC may hold its
 // locks: a node-read holder plus one queued SyncupDn writer would freeze the
-// entire DN agent (RWMutex writer preference) and block the side's Check
-// rounds. The registry is keyed by the side tuple, single-flight per side,
-// created on demand by any converge — the startup reconcile included — that
-// finds zeroing still needed, except for a migration destination that does
-// not hold its run in the clone-metadata area yet, which starts zeroing only
-// once it does (DN13), and sides zero in parallel, at most
-// common.DnZeroConcurrency batches at a time per agent: N concurrent batches
-// split the disk's zeroing rate N ways, and with no cap a busy DN would have
-// every batch killed at the soft timeout and redone for ever. Each side sizes
-// its own batches from the kills it sees (zeroLoop).
+// entire DN agent (RWMutex writer preference) and block the side's reads and
+// syncups, so its observation would age past the worker's bound
+// (dnv-worker.md HL7). The registry is keyed by the side tuple, single-flight
+// per side, created on demand by any converge — the startup reconcile
+// included — that finds zeroing still needed, except for a migration
+// destination that does not hold its run in the clone-metadata area yet,
+// which starts zeroing only once it does (DN13), and sides zero in parallel,
+// at most common.DnZeroConcurrency batches at a time per agent: N concurrent
+// batches split the disk's zeroing rate N ways, and with no cap a busy DN
+// would have every batch killed at the soft timeout and redone for ever. Each
+// side sizes its own batches from the kills it sees (zeroLoop).
 
 // zeroLockPoll is how often the loop retries a lock it could not take. The
 // loop must NEVER block on a lock: dropSideState and the DN6 record sweep

@@ -48,21 +48,24 @@ func OkReply() *pb.AgentReply {
 // disk identity not yet confirmed, or a side with bytes left to zero and
 // nothing zeroing it that is not a migration destination waiting for a free
 // run in the clone-metadata area (dnagent.md DN16); on a cn a piece of the
-// node's base state that a CheckCn round's or GetCnInfo's probe read absent,
-// or an ANA group it read in a state other than its fixed one on a port
-// whose transport attributes match. Each arrives among the failures,
-// rendered like an enumeration that did not answer. One condition arrives
-// among the leftovers instead: on a cntlr, an md member that a CheckCntlr
-// round or GetCntlrInfo names as one its converge would put back or add, under
-// LeftoverKindMdMember (cnagent.md CN30).
+// node's base state that the CN's background read probed absent, or an ANA
+// group it read in a state other than its fixed one on a port whose
+// transport attributes match. Each arrives among the failures, rendered like
+// an enumeration that did not answer. One condition arrives among the
+// leftovers instead: on a cntlr, an md member that the cntlr's background
+// read names as one its converge would put back or add, under
+// LeftoverKindMdMember (cnagent.md CN30). Only a read's verdict names these
+// conditions; a converge's own code does not (dnagent.md SH28).
 //
 // A leftover is the one per-resource outcome that cannot ride in the *Info
 // rows (SH14, CN29, DN19): the rows are keyed by the ids of WANTED objects,
 // and a leftover is by definition something nothing wanted names — the md
 // member above is the one wanted object listed among them. It is never
-// stored anywhere — the agent recomputes it by enumerating the node on every
-// Syncup* and every Check*, so the worker's ordinary "re-sync while the code
-// is non-zero" rule is the whole retry machinery for a leftover.
+// stored as work owed — the agent recomputes it by enumerating the node in
+// every converge and every background read, and keeps it only as the code of
+// the object's observation (dnagent.md SH28, SH29), so the worker's ordinary
+// "re-sync while the code is non-zero" rule is the whole retry machinery for
+// a leftover.
 //
 // details names at most maxLeftoverNames objects so one stuck object cannot
 // produce an unbounded reply; the agent log carries the full list every pass.

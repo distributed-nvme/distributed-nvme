@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -58,23 +62,55 @@ func countsDriver(t *testing.T) (*dnDriver, *logCapture) {
 	return d, h.logs
 }
 
-// roundReply folds one round's reply as the loop does: the pump decodes it
-// (fold) and the round marks it as a round's before observe sees it.
+// roundAt folds one round's reply answering from an observation made at obs,
+// as the loop does: the pump decodes it (fold) and the round marks it
+// (revWorker.seeRound) before observe sees it — a round's, new when obs is
+// later than every observation loop has seen (RW23).
+func roundAt(
+	d *dnDriver,
+	loop *revWorker,
+	obs time.Time,
+	code uint32,
+	revision uint64,
+	info *pb.DnInfo,
+) *replyState {
+	r := d.fold(&pb.AgentReply{Code: code}, revision, info,
+		stampAt(obs, obs, ""), nil)
+	loop.seeRound(r)
+	return r
+}
+
+// syncupAt folds one SyncupDn reply carrying an observation made at obs, as
+// the loop's syncup does: loop sees the observation, and the reply is no
+// round's (RW23).
+func syncupAt(
+	d *dnDriver,
+	loop *revWorker,
+	obs time.Time,
+	revision uint64,
+	info *pb.DnInfo,
+) *replyState {
+	r := d.fold(&pb.AgentReply{}, revision, info, stampAt(obs, obs, ""), nil)
+	loop.seeObservation(r)
+	return r
+}
+
+// roundReply is roundAt for a round answering from a new observation: its
+// time is later than every one handed out before, so it is new to any loop.
 func roundReply(
 	d *dnDriver,
 	code uint32,
 	revision uint64,
 	info *pb.DnInfo,
 ) *replyState {
-	r := d.fold(&pb.AgentReply{Code: code}, revision, info)
-	r.fromRound = true
-	return r
+	return roundAt(d, &revWorker{}, nextObsTime(), code, revision, info)
 }
 
 // TestDnCountsCompareGates: a reply is compared only when it is a round's
-// accepted reply whose latest known info carries counts that say the side
-// records match, and when the revision of the reply that carried them, the
-// round's reply revision and the revision read with the record are one. Each
+// accepted reply that answers from an observation new to the loop (RW23),
+// whose latest known info carries counts that say the side records match,
+// and when the revision of the reply that carried them, the round's reply
+// revision and the revision read with the record are one. Each
 // case makes three replies, and a run logs on its second disagreeing compare
 // (dnCountsRun), so a case whose replies passed every gate would log within
 // them, as the two controls do.
@@ -99,8 +135,15 @@ func TestDnCountsCompareGates(t *testing.T) {
 			}},
 		{name: "a syncup's reply",
 			reply: func(d *dnDriver) *replyState {
-				return d.fold(&pb.AgentReply{}, 42, disagree)
+				return d.fold(&pb.AgentReply{}, 42, disagree, nil, nil)
 			}},
+		{name: "rounds repeating the first one's observation",
+			reply: func() func(d *dnDriver) *replyState {
+				loop, obs := &revWorker{}, nextObsTime()
+				return func(d *dnDriver) *replyState {
+					return roundAt(d, loop, obs, 0, 42, disagree)
+				}
+			}()},
 		{name: "a rejected round",
 			reply: func(d *dnDriver) *replyState {
 				return roundReply(
@@ -139,14 +182,14 @@ func TestDnCountsCompareGates(t *testing.T) {
 			}},
 		{name: "counts a reply at another revision carried",
 			setup: func(d *dnDriver) {
-				d.fold(&pb.AgentReply{}, 41, disagree)
+				d.fold(&pb.AgentReply{}, 41, disagree, nil, nil)
 			},
 			reply: func(d *dnDriver) *replyState {
 				return roundReply(d, 0, 42, nil)
 			}},
 		{name: "a round at another revision than the counts and record",
 			setup: func(d *dnDriver) {
-				d.fold(&pb.AgentReply{}, 42, disagree)
+				d.fold(&pb.AgentReply{}, 42, disagree, nil, nil)
 			},
 			reply: func(d *dnDriver) *replyState {
 				return roundReply(d, 0, 43, nil)
@@ -160,7 +203,7 @@ func TestDnCountsCompareGates(t *testing.T) {
 			}},
 		{name: "counts a dead stream reported",
 			setup: func(d *dnDriver) {
-				d.fold(&pb.AgentReply{}, 42, disagree)
+				d.fold(&pb.AgentReply{}, 42, disagree, nil, nil)
 				d.markInfoUnknown()
 			},
 			reply: func(d *dnDriver) *replyState {
@@ -188,25 +231,44 @@ func TestDnCountsCompareGates(t *testing.T) {
 // per run, whichever way the counts disagree; an agreeing compare ends the
 // run; nothing else extends or ends it (RW13). rev is the revision of the
 // record the compare holds, 42 until a B, and a step's replies come at rev
-// unless it says otherwise. D and U are rounds that disagree, the agent
-// counting fewer free extents than the record and more, and A is one that
-// agrees. Every other step neither extends nor ends a run, and those that
-// carry counts carry D's. S is a round whose side records do not match, N a
-// round whose latest info has no counts, V a round at rev+1 with its counts,
-// O a round whose latest counts came on a syncup's reply at rev-1, L a round
-// at rev+1 whose latest counts came on a syncup's reply at rev, X a round
-// while the last read of the record found none, after which a read finds it
-// again, Y a SyncupDn's reply, R a rejected round, M a missed round, F a
-// syncup whose read of the record fails, which leaves the record the compare
-// holds as it is (RW2), and B a read that finds the record at rev+1, which
-// becomes rev. A step that carries counts builds a fresh info, because a
-// missed round marks the latest one unknown in place.
+// unless it says otherwise. Every step's reply carries its own observation
+// time, later than every one before it, unless it says otherwise, and the
+// loop marks a round new as revWorker.seeRound does (RW23). D and U are rounds
+// that disagree, the agent counting fewer free extents than the record and
+// more, and A is one that agrees. Every other step neither extends nor ends a
+// run, and those that carry counts carry D's but for Q. S is a round whose
+// side records do not match, N a round whose latest info has no counts, V a
+// round at rev+1 with its counts, O a round whose latest counts came on a
+// syncup's reply at rev-1, L a round at rev+1 whose latest counts came on a
+// syncup's reply at rev, X a round while the last read of the record found
+// none, after which a read finds it again, Y a SyncupDn's reply, R a rejected
+// round, M a missed round, F a syncup whose read of the record fails, which
+// leaves the record the compare holds as it is (RW2), and B a read that finds
+// the record at rev+1, which becomes rev. P and Q are rounds answering from
+// the observation the round before them answered from, carrying D's counts
+// and A's; Z is a round answering from the observation the last Y carried;
+// and E is a round answering from an observation older than the last round's,
+// which the loop has never seen but is not new either. A step that carries
+// counts builds a fresh info, because a missed round marks the latest one
+// unknown in place.
 func TestDnCountsCompareRuns(t *testing.T) {
 	ctx := context.Background()
+	// last is the observation the latest round answered from, synced the
+	// one the latest Y carried.
+	var loop revWorker
+	var last, synced time.Time
 	play := func(t *testing.T, d *dnDriver, rev *uint64, step rune) {
 		t.Helper()
+		roundFrom := func(obs time.Time, revision uint64, info *pb.DnInfo) {
+			d.compareCounts(ctx, roundAt(d, &loop, obs, 0, revision, info))
+			last = obs
+		}
 		round := func(revision uint64, info *pb.DnInfo) {
-			d.compareCounts(ctx, roundReply(d, 0, revision, info))
+			roundFrom(nextObsTime(), revision, info)
+		}
+		syncup := func(revision uint64, info *pb.DnInfo) {
+			synced = nextObsTime()
+			d.compareCounts(ctx, syncupAt(d, &loop, synced, revision, info))
 		}
 		switch step {
 		case 'D':
@@ -224,12 +286,10 @@ func TestDnCountsCompareRuns(t *testing.T) {
 		case 'V':
 			round(*rev+1, countsInfo(80, 100, true))
 		case 'O':
-			d.compareCounts(ctx,
-				d.fold(&pb.AgentReply{}, *rev-1, countsInfo(80, 100, true)))
+			syncup(*rev-1, countsInfo(80, 100, true))
 			round(*rev, nil)
 		case 'L':
-			d.compareCounts(ctx,
-				d.fold(&pb.AgentReply{}, *rev, countsInfo(80, 100, true)))
+			syncup(*rev, countsInfo(80, 100, true))
 			round(*rev+1, nil)
 		case 'X':
 			d.noteRecord(nil, 0, false, false)
@@ -239,13 +299,23 @@ func TestDnCountsCompareRuns(t *testing.T) {
 			*rev++
 			d.noteRecord(dnTestConf(), *rev, true, true)
 		case 'Y':
-			d.compareCounts(ctx,
-				d.fold(&pb.AgentReply{}, *rev, countsInfo(80, 100, true)))
+			syncup(*rev, countsInfo(80, 100, true))
 		case 'R':
-			d.compareCounts(ctx, roundReply(d, common.ReplyCodeStaleRevision,
-				*rev, countsInfo(80, 100, true)))
+			obs := nextObsTime()
+			d.compareCounts(ctx, roundAt(d, &loop, obs,
+				common.ReplyCodeStaleRevision, *rev, countsInfo(80, 100, true)))
+			last = obs
 		case 'M':
 			d.unreachable(ctx)
+		case 'P':
+			roundFrom(last, *rev, countsInfo(80, 100, true))
+		case 'Q':
+			roundFrom(last, *rev, countsInfo(90, 100, true))
+		case 'Z':
+			roundFrom(synced, *rev, countsInfo(80, 100, true))
+		case 'E':
+			roundFrom(last.Add(-time.Nanosecond), *rev,
+				countsInfo(80, 100, true))
 		case 'F':
 			// The read fails before the syncup uses its connection.
 			store := d.deps.store.(*fakeStore)
@@ -314,6 +384,19 @@ func TestDnCountsCompareRuns(t *testing.T) {
 		{"MMD", 0},
 		{"DMD", 1},
 		{"DDMDD", 1},
+		{"DP", 0},
+		{"PPD", 0},
+		{"DPD", 1},
+		{"DDPDD", 1},
+		{"DQD", 1},
+		{"DDQDD", 1},
+		{"DYZ", 0},
+		{"YZD", 0},
+		{"DYZD", 1},
+		{"DDYZDD", 1},
+		{"DE", 0},
+		{"DED", 1},
+		{"DDEDD", 1},
 		{"DFD", 1},
 		{"DBD", 1},
 		{"DDBDD", 1},
@@ -321,6 +404,7 @@ func TestDnCountsCompareRuns(t *testing.T) {
 		t.Run(tc.steps, func(t *testing.T) {
 			d, logs := countsDriver(t)
 			rev := uint64(42)
+			loop, last, synced = revWorker{}, time.Time{}, time.Time{}
 			for _, step := range tc.steps {
 				play(t, d, &rev, step)
 			}
@@ -374,10 +458,14 @@ type dnCountsCase struct {
 	// revision of that dn's DnRev; the loop drives testDnId at 42.
 	dnId  uint64
 	dnRev uint64
-	// want is the count of records after each of four compares.
+	// want is the count of records after each of the four rounds that
+	// follow the syncup.
 	want [4]int
 	// errorRow says info holds an ERROR row, which sets err_epoch.
 	errorRow bool
+	// repeat says each observation the agent makes once it has synced
+	// answers two rounds in a row, as while a converge holds its reads off.
+	repeat bool
 }
 
 // TestDnRoleComparesAtTheRecordRevision runs the compare through the real
@@ -386,7 +474,10 @@ type dnCountsCase struct {
 // rounds after it are compared with. A record whose DnRev reads another
 // revision than the one the agent holds is never compared, though the loop
 // drives that very revision, so a compare against the revision driven instead
-// of the one read with the record would log there. The counts are no row and
+// of the one read with the record would log there. Only a round answering
+// from an observation new to the loop compares (RW23): an agent whose every
+// observation answers two rounds in a row gives its second disagreement on
+// the third round after the syncup, not the second. The counts are no row and
 // a compare writes nothing (HL1, RW13): in every case the health writes are
 // the ones the rows alone call for, the clear of the first verdict, which the
 // round before the syncup reaches, and, beside an ERROR row, the set that
@@ -404,6 +495,9 @@ func TestDnRoleComparesAtTheRecordRevision(t *testing.T) {
 			dnId: testDnId, dnRev: 42, errorRow: true},
 		{name: "disagreeing", info: countsInfo(80, 100, true),
 			dnId: testDnId, dnRev: 42, want: [4]int{0, 1, 1, 1}},
+		{name: "disagreeing, each observation answering two rounds",
+			info: countsInfo(80, 100, true), dnId: testDnId, dnRev: 42,
+			repeat: true, want: [4]int{0, 0, 1, 1}},
 		{name: "side records that do not match",
 			info: countsInfo(80, 100, false), dnId: testDnId, dnRev: 42},
 		{name: "no counts", info: noCounts, dnId: testDnId, dnRev: 42},
@@ -421,14 +515,29 @@ func TestDnRoleComparesAtTheRecordRevision(t *testing.T) {
 			h.store.seed(t, model.DnRevKey(testShard, testCid, tc.dnId),
 				&pb.DnRev{AddrPort: testAddr, Revision: tc.dnRev})
 			stub := &stubDnAgent{}
+			var mu sync.Mutex
+			var synced int
+			var obs *pb.ObsStamp
 			stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
 				if len(stub.syncups()) == 0 {
 					return &pb.CheckDnReply{}
 				}
-				return &pb.CheckDnReply{
+				reply := &pb.CheckDnReply{
 					Revision: req.GetRevision(),
 					DnInfo:   tc.info,
 				}
+				if tc.repeat {
+					// Made after the SyncupDn's reply, so the first
+					// round of each pair is new and the second is not.
+					mu.Lock()
+					if synced%2 == 0 {
+						obs = testStamp()
+					}
+					synced++
+					reply.ObsStamp = proto.CloneOf(obs)
+					mu.Unlock()
+				}
+				return reply
 			})
 			h.fleet.addDn(t, testAddr, stub)
 			h.startDn(testAddr, 42)
@@ -438,11 +547,11 @@ func TestDnRoleComparesAtTheRecordRevision(t *testing.T) {
 			})
 			for i, want := range tc.want {
 				checks := i + 2
-				h.advanceUntil(fmt.Sprintf("compare %d", i+1), roundInterval,
+				h.advanceUntil(fmt.Sprintf("round %d", i+1), roundInterval,
 					func() bool { return stub.checkCount() >= checks })
 				got := len(h.logs.withMsg(msgDnFreeCountDisagrees))
 				if got != want {
-					t.Fatalf("after compare %d: %d records, want %d",
+					t.Fatalf("after round %d: %d records, want %d",
 						i+1, got, want)
 				}
 			}

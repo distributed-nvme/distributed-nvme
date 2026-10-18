@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -11,15 +12,16 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// CN24 instantiates the SH24-SH26 check loop with the CN28 probes: rounds are
-// worker-initiated, exactly one reply per received request, never an
-// unsolicited send. The info rides along when show_info is set, on the first
-// reply of the stream, and whenever the freshly probed info differs from the
-// last one actually sent. One round takes the CN1 locks of the corresponding
-// Get*Info, changes no object of the node (CN23), and runs under the trace id
-// its own request carries (agent.CheckRoundCtx). A CheckCntlr round reads the
-// node the way GetCntlrInfo does: one reading first, then the rows and the
-// verdict from it (readCntlr); a CheckCn round takes no reading.
+// CN24 instantiates the SH24-SH26 check loop: rounds are worker-initiated,
+// exactly one reply per received request, never an unsolicited send. A round
+// answers from the object's latest observation (dnagent.md SH28): it takes no
+// lock of the CN1 mapping, runs no OS call and changes nothing, and then
+// starts the object's background read when SH29 allows one (observation.go).
+// The read runs under the trace id the round's own request carries
+// (agent.CheckRoundCtx). The info rides along when show_info is set, on the
+// first reply of the stream, and whenever the observation's info differs
+// from the last one actually sent; an object with no observation yet has no
+// info to send.
 
 // streamEnded reports whether a Recv error is the normal end of a stream.
 func streamEnded(ctx context.Context, err error) bool {
@@ -50,36 +52,38 @@ func (s *CnAgentServer) CheckCn(
 	}
 }
 
+// checkCnRound answers one CheckCn round from the CN's observation
+// (dnagent.md SH28). When a read made it, its code is the node-level
+// read-only verdict (CN30); when a converge made it — a SyncupCn or the
+// startup reconcile — its code is the one the converge's own reply carries,
+// that of its node-level sweep, which removes. A leftover that has since
+// gone stops being reported once a later read or converge stores its
+// absence, and one that is still there keeps driving the worker's re-sync
+// until it goes — a background disconnect finishing, or the next SyncupCn
+// sweeping it away or building or rewriting what the probe read wrong.
 func (s *CnAgentServer) checkCnRound(
 	ctx context.Context,
 	req *pb.CheckCnRequest,
 	lastSent *pb.CnInfo,
 ) (*pb.CheckCnReply, *pb.CnInfo) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
-
-	st := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
-	if st == nil {
+	obs, since, known := s.answerCn(ctx,
+		cnKey(req.GetClusterId(), req.GetCnId()), true)
+	now := s.now()
+	if !known {
 		// The stream stays open; the worker re-issues SyncupCn.
 		return &pb.CheckCnReply{
-			AgentReply: agent.UnknownObjectReply(
-				"unknown cn %d", req.GetCnId()),
+			AgentReply: unknownCn(req.GetCnId()),
+			ObsStamp:   (&cnObs{}).Stamp(now, time.Time{}),
 		}, nil
 	}
-	info, redrive := s.probeCn(ctx, st)
-	// The verdict: the same enumeration and the same comparison the sweep
-	// makes, with nothing touched (CN23), plus what of the base state this
-	// round's probe read wrong in a way a SyncupCn would cure (probeCn). It
-	// is recomputed every round and stored nowhere, so a leftover that has
-	// since gone stops being reported on its own, and one that is still
-	// there keeps driving the worker's re-sync until it goes: a background
-	// disconnect finishing, or the next SyncupCn sweeping it away or
-	// building or rewriting what the probe read wrong.
 	reply := &pb.CheckCnReply{
-		AgentReply: s.sweepCn(ctx, st, false, redrive).Reply(),
-		Revision:   st.loadReq().GetRevision(),
+		AgentReply: obs.Reply,
+		Revision:   obs.Revision,
+		ObsStamp:   obs.Stamp(now, since),
 	}
-	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
+	info := obs.Info
+	if info == nil ||
+		!req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
 		return reply, nil
 	}
 	reply.CnInfo = info
@@ -110,40 +114,33 @@ func (s *CnAgentServer) CheckCntlr(
 	}
 }
 
+// checkCntlrRound answers one CheckCntlr round from the cntlr's observation.
+// Its code is the cntlr-level verdict: a cn's own Check reports node-level
+// leftovers only, and each object drives its own Syncup*.
 func (s *CnAgentServer) checkCntlrRound(
 	ctx context.Context,
 	req *pb.CheckCntlrRequest,
 	lastSent *pb.CntlrInfo,
 ) (*pb.CheckCntlrReply, *pb.CntlrInfo) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
-
 	key := cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId())
-	unknown := &pb.CheckCntlrReply{
-		AgentReply: agent.UnknownObjectReply(
-			"unknown cntlr %s", cntlrPointerText(req.GetCntlrPointer())),
+	obs, since, known := s.answerCntlr(ctx, key, true)
+	now := s.now()
+	if !known {
+		// The stream stays open; the worker re-issues SyncupCntlr.
+		return &pb.CheckCntlrReply{
+			AgentReply: unknownCntlr(req.GetCntlrPointer()),
+			ObsStamp:   (&cntlrObs{}).Stamp(now, time.Time{}),
+		}, nil
 	}
-	// The stream stays open; the worker re-issues SyncupCntlr.
-	if s.getCntlr(key) == nil {
-		return unknown, nil
-	}
-	objLock := s.locks.Obj(key)
-	objLock.Lock()
-	defer objLock.Unlock()
-
-	st := s.getCntlr(key)
-	if st == nil {
-		return unknown, nil
-	}
-	info, verdict := s.readCntlr(ctx, st)
 	reply := &pb.CheckCntlrReply{
-		// The cntlr-level verdict. A cn's own Check reports node-level
-		// leftovers only; each object drives its own Syncup*.
-		AgentReply: verdict.Reply(),
-		Revision:   st.loadReq().GetRevision(),
+		AgentReply: obs.Reply,
+		Revision:   obs.Revision,
+		ObsStamp:   obs.Stamp(now, since),
 	}
-	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
+	info := obs.Info
+	if info == nil ||
+		!req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
 		return reply, nil
 	}
 	reply.CntlrInfo = info

@@ -144,10 +144,10 @@ func registerCntlr(root *cobra.Command) {
 		"the new enabled state; write --enabled=false to disable")
 
 	// cntlr inspect — InspectCntlr. A read, so it carries no token: the
-	// gateway asks the CN agent that hosts the controller for its live
-	// CntlrInfo rather than reading etcd.
+	// gateway asks the CN agent that hosts the controller for the CntlrInfo
+	// of its latest observation rather than reading etcd.
 	inspect := leaf("inspect",
-		"read a controller's live CntlrInfo from its agent",
+		"read a controller's latest observed CntlrInfo from its agent",
 		func() (job, error) {
 			id, err := hexOf("id")
 			if err != nil {

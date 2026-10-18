@@ -267,10 +267,11 @@ type clonePhase1 struct {
 // force = false is a proof obligation, not a best effort. Removing the
 // dm-clone while regions are still unhydrated would silently lose every
 // byte that was never pulled from the source, so the RPC refuses unless the
-// primary's `clone_id_to_dm_clone` row shows the copy complete. An
-// unreachable agent is FAILED_PRECONDITION for exactly the same reason
-// (architecture.md, Clones): silence is not proof. force = true skips the
-// whole check and is how an operator abandons a clone whose source is gone.
+// primary's `clone_id_to_dm_clone` row, in its agent's latest observation of
+// the cntlr, shows the copy complete (checkCloneHydrated). An unreachable
+// agent is FAILED_PRECONDITION for exactly the same reason (architecture.md,
+// Clones): silence is not proof. force = true skips the whole check and is
+// how an operator abandons a clone whose source is gone.
 //
 // The deciding STM also resumes the destination's namespaces: architecture.md,
 // Transfer + clone = cross-SP live migration, has them
@@ -423,7 +424,11 @@ func (s *Server) DeleteClone(
 // checkCloneHydrated is the between-the-phases agent call of DeleteClone
 // (AG1, AG3): the primary's `clone_id_to_dm_clone` row carries the raw
 // dm-clone status line, and hydrationComplete refuses to read anything but a
-// finished copy out of it.
+// finished copy out of it. GetCntlrInfo answers from the agent's latest
+// observation of the cntlr and reads nothing of the node (architecture.md,
+// Live-state reporting). That is still proof: a copy only advances, so an
+// observation that lags the node shows less of it, and the refusal it gives
+// is one the caller repeats.
 //
 // Both failure modes are FAILED_PRECONDITION rather than the usual ABORTED
 // of AG3, because both mean the same thing to the caller: hydration could

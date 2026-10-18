@@ -3,8 +3,9 @@
 This document owns the `dnv-agent` binary: the mechanism package `agent`
 both roles share (bootstrap and lifecycle, the local store, the revision and
 conf gates, the lock hierarchy, `ResInfo` tracking, the dm, nvmet and
-nvme-host wrappers, the bitmap-chunk store and the check-stream rules), the
-`cmd/dnv-agent` command, and the dn role, package `dnagent`, which serves
+nvme-host wrappers, the bitmap-chunk store, the check-stream rules and the
+observations), the `cmd/dnv-agent` command, and the dn role, package
+`dnagent`, which serves
 `DiskNodeAgent`: the startup reconcile, `SyncupDn` with the on-disk format,
 side provisioning and zeroing, the per-CN exports and the sweep, `SyncupSide`
 with the migration source and destination roles and the fence, bitmap
@@ -22,7 +23,7 @@ migration procedure, the levels, the cntlid slots and the decisions [D4],
 
 | package | path | role | may import (`layout.md`, Dependency rules) |
 |---|---|---|---|
-| `agent` | `agent/` | shared dn/cn **mechanism**: bootstrap, local store, revision gate, locks, `ResInfo` tracking, OS wrappers, bitmap store, check-loop rules | `common`, `pb` |
+| `agent` | `agent/` | shared dn/cn **mechanism**: bootstrap, local store, revision gate, locks, `ResInfo` tracking, OS wrappers, bitmap store, check-loop rules, observations | `common`, `pb` |
 | `dnagent` | `agent/dnagent/` | dn **policy**: the `DiskNodeAgent` service — which extent allocations, dm tables and nvmet objects to build and when | `common`, `pb`, `agent` |
 | `main` | `cmd/dnv-agent/` | cobra `dn`/`cn` dispatch, viper flags, dependency construction | `agent`, `agent/dnagent`, `agent/cnagent`, `common`, `pb` |
 
@@ -43,14 +44,16 @@ local store, `revision.go` the revision gate and the reply builders,
 `locks.go` the lock hierarchy, `resinfo.go` the `ResInfo` tracker,
 `oswrap.go`, `dm.go`, `nvmet.go` and `nvmehost.go` the OS wrappers
 (`oswrap.go` is the shared command, listing and configfs plumbing the other
-three sit on), `bitmap.go` the bitmap-chunk store, `sweep.go` the part of DN6's sweep
-both roles share (the leftover kinds, the result value a pass accumulates,
-its log record and the `AgentReply` it becomes) and `waitbudget.go` the
-`WaitBudget`, the bounded wait one converge pass may spend on the node
-catching up with what that pass asked of it: DN13's two, the retries of
-the connect to the migration source export and the wait for the source's
-namespace, and the cn connect step's pass budget (`cnagent.md` CN10 and
-CN18).
+three sit on), `bitmap.go` the bitmap-chunk store, `observation.go` the
+observation, the slot that holds an object's latest one and its running
+background read, and the converge marks (SH28 to SH30), `sweep.go` the part
+of DN6's sweep both roles share (the leftover kinds, the result value a pass
+accumulates, its log record and the `AgentReply` it becomes) and
+`waitbudget.go` the `WaitBudget`, the bounded wait one converge pass may
+spend on the node catching up with what that pass asked of it: DN13's two,
+the retries of the connect to the migration source export and the wait for
+the source's namespace, and the cn connect step's pass budget (`cnagent.md`
+CN10 and CN18).
 
 `conf.go` is a **deliberate second copy** of `model`'s stored-conf rules.
 `layout.md`, Dependency rules, forbids the agent packages from importing
@@ -120,19 +123,23 @@ The constants this document relies on, whose values and comments
   `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
   sweep): on a dn a disk identity not yet confirmed, or a side with bytes
   still to zero and nothing zeroing it that is not a migration destination
-  waiting for a free run in the clone-metadata area (DN16); on a cn a piece
-  of the node's base state that a `CheckCn` round's or `GetCnInfo`'s probe
-  read absent, or an ANA group it read in a state other than its fixed one
-  on a port whose transport attributes match. It is not a rejection: the
-  worker evaluates the reply's rows exactly as for code zero and re-issues
-  the `Syncup*` every round (`dnv-worker.md` RW12, no backoff) until the
-  code changes.
-  "Pending" is never stored anywhere; the code is recomputed by enumerating
-  the node on every `Syncup*` and every `Check*`. Any non-zero code in a
-  `Check*` reply makes the worker issue a `Syncup*` (`dnv-worker.md` RW4),
-  and in a `Push*Bitmap` reply ends that push plan. Among the rejections
-  the specific value only sets the level of the worker's "syncup rejected"
-  record and otherwise serves details and tests.
+  waiting for a free run in the clone-metadata area (DN16); on a cn what
+  `cnagent.md` CN30 lists. Only a read's verdict names a side nothing
+  zeroes, so the observation a converge stores leaves it out until the
+  side's next read (DN16); `cnagent.md` CN30 says which of the cn's
+  conditions only a read names. It is not a rejection: the worker
+  evaluates the reply's rows exactly as for code zero and re-issues the
+  `Syncup*` on every round whose reply carries the code from an
+  observation that is not too old (`dnv-worker.md` HL7; RW12, no backoff)
+  until the code changes.
+  "Pending" is never stored as a flag: the code is recomputed by
+  enumerating the node in every converge and every background read, and
+  kept only as the code of the observation each of them stores (SH28). Any
+  non-zero code in a `Check*` reply makes the worker issue a `Syncup*`
+  (`dnv-worker.md` RW4), save in a reply whose observation is too old
+  (`dnv-worker.md` HL7), and in a `Push*Bitmap` reply ends that push plan.
+  Among the rejections the specific value only sets the level of the
+  worker's "syncup rejected" record and otherwise serves details and tests.
 * `DnMigrConnectRetryInterval`, the pace of the background retries of a
   migration destination whose build stopped short, at its `nvme connect`
   once the retries within its pass ran out or at another step, and of one
@@ -213,29 +220,35 @@ SH3. Reconcile returns an error only for **fatal** conditions (the
 local-store prefix unreadable); per-resource failures are captured as
 `RES_STATUS_ERROR` (`ResInfo` tracking) and never abort startup.
 
-SH27. **Background tasks and process exit.** (Numbered last because SH rules
-are append-only — SH1 to SH26 are cited from code comments and must not
-shift.) A role server MAY run goroutines outside any RPC: the DN8 retry of
-a migration destination (so nicknamed for the DN8-gated converge it re-runs;
-the retry loop itself is specified in DN13), the DN12 fence timer, the DN9
-side-zeroing workers, the cn's connect retry and clone-metadata retry,
-the CN11 leg probers and the cn sweep's background `nvme disconnect`
-(`cnagent.md` CN10, CN18). Every one of
-them derives its ctx from the server's **`rootCtx`** — the process-lifetime
-ctx captured at `Reconcile`, which `Serve` derives from its own ctx and
-cancels before returning — and, the background disconnect aside, mints a
-fresh trace id per attempt (`common.NewTraceId`), taking the SH11 locks for
-the attempt only, never across the whole task. The background disconnect is
-one command of the pass that set it going: it carries that pass's trace id,
-minting one only when that pass had none, and, like the CN11 probers,
-takes no SH11 lock at all.
+SH27. **Background tasks and process exit.** (Its number is out of order
+because rule ids never shift: code comments cite them.) A role server MAY
+run goroutines outside any RPC: the DN8 retry of a migration destination
+(so nicknamed for the DN8-gated converge it re-runs; the retry loop itself
+is specified in DN13), the DN12 fence timer, the DN9 side-zeroing workers,
+the background reads the check rounds start (SH29), the cn's connect retry
+and clone-metadata retry, the CN11 leg probers and the cn sweep's
+background `nvme disconnect` (`cnagent.md` CN10, CN18). Every one of them
+derives its ctx from the server's **`rootCtx`** — the process-lifetime ctx
+captured at `Reconcile`, which `Serve` derives from its own ctx and cancels
+before returning — and, the background disconnect and the background reads
+aside, mints a fresh trace id per attempt (`common.NewTraceId`), taking the
+SH11 locks for the attempt only, never across the whole task. The
+background disconnect is one command of the pass that set it going: it
+carries that pass's trace id, minting one only when that pass had none,
+and, like the CN11 probers, takes no SH11 lock at all. A background read
+reads for the round that started it: it carries that round's trace id,
+minting one only when that round had none, so its records, a verdict that
+is not clean among them, name the round that brought them; and it takes
+the SH11 or SH12 locks for that one read.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converges one runs (the DN13
 retry's, the DN12 fence timer's, the cn connect retry's and clone-metadata
-retry's), and the cn sweep's background `nvme disconnect` is one. Such a child must not outlive the
-agent — the cn sweep's background `nvme disconnect` (below) is allowed to
-— so the dn server registers every goroutine that owns one in a wait group
+retry's), so do the background reads, whose probes run commands (SH17),
+and the cn sweep's background `nvme disconnect` is one.
+Such a child must not outlive the agent — the cn sweep's background
+`nvme disconnect` (below) is allowed to — so the dn server registers every
+goroutine that owns one, its background reads included, in a wait group
 before it starts and exposes a `WaitBackground` that waits for them; a
 registration and the start of that wait take one lock, so the join waits
 for every task that registered before it and none registers once it has
@@ -259,10 +272,16 @@ finishes whether or not anybody waits for it, and a join could hold shutdown
 for the kernel's whole admin timeout. Nor are the cn's connect retry and
 clone-metadata retry (`cnagent.md` CN10, CN18): an attempt of either runs
 the bounded commands of an ordinary pass, which the cancellation of
-`rootCtx` ends, and nothing waits for them. Object-scoped tasks that hold a
-device open are additionally cancelled **and waited for** at teardown, before the
-resources they hold are removed (DN6, DN9): a live child keeps an fd on the
-dm device and `dmsetup remove` would fail EBUSY.
+`rootCtx` ends, and nothing waits for them. Nor are the cn's background
+reads (SH29): a read runs bounded commands too, which the same
+cancellation ends, and its children hold nothing a restarted agent needs.
+Object-scoped tasks that hold a device open are additionally cancelled
+**and waited for** at teardown, before the resources they hold are removed
+(DN6, DN9): a live child keeps an fd on the dm device and `dmsetup remove`
+would fail EBUSY. A background read is cancelled at its object's teardown
+and not waited for (SH30): the teardown runs under the node write lock, so
+no read runs beside it, and a read waiting for that lock finds the object
+gone once it gets it.
 
 One deliberate carve-out from "every goroutine that owns one": the DN12
 fence timer's callback — which runs a full side converge and so can spawn
@@ -417,36 +436,43 @@ objects MAY hit the agent concurrently, and `Check*` streams run alongside
 agent therefore serializes with a **two-level hierarchy**, `LockSet`: a
 node-level read-write lock (`Node`) and one mutex per object (`Obj`),
 created on first use and dropped (`DropObj`) only during teardown while the
-node write lock is held. First use is a call that has found, under the
-node read lock, that the agent holds the object, or a `SyncupSide` or
-`SyncupCntlr` of an object it does not hold whose gates (DN8,
-`cnagent.md` CN8) admit the request: a request refused as unknown, or
-refused by those gates before the agent holds the object, leaves no
-entry, and a background converge attempt checks its object under the
-node read lock before it takes its lock. Lock order is always node before
-object. Reason: only the teardown of an
-object the agent holds drops an entry, so an entry a refused request
-created would stay for the life of the process, and refused requests
-would grow the set without bound.
+node write lock is held. First use is a call, a background converge attempt
+or a background read (SH29) that has found, under the node read lock, that
+the agent holds the object, or a `SyncupSide` or `SyncupCntlr` of an object
+it does not hold whose gates (DN8, `cnagent.md` CN8) admit the request: a
+request refused as unknown, or refused by those gates before the agent
+holds the object, leaves no entry, and a check round or an info read takes
+no lock of the hierarchy (SH28). Lock order is always node before object.
+Reason: only the teardown of an object the agent holds drops an entry, so
+an entry a refused request created would stay for the life of the process,
+and refused requests would grow the set without bound.
 
 SH10. Node **write** lock: the startup reconcile and the node-level syncup
 (`SyncupDn`/`SyncupCn` — they diff the pointer list and run the node-level
 sweep, which enumerates the whole node and may remove the resources of any
-object **of this agent** on it).
+object **of this agent** on it). Which background reads a node-level
+syncup cancels as it arrives, and which it waits for, is SH30; one that
+cancels every read of the agent waits behind a read no longer than that
+read's current command, or than the holder of the object lock that read
+waits for, which holds the node read lock too.
 
 SH11. Node **read** lock + the object's lock: every object-scoped RPC
-(`SyncupSide`/`SyncupCntlr`, `Push*Bitmap`, `GetSideInfo`/`GetCntlrInfo`,
-one `CheckSide`/`CheckCntlr` round) and every background converge attempt
-(the dn's connect retry — DN13; DN1's and SH27's "DN8 retry" — and DN12
-fence timer, which share `reconvergeSide`, and the cn's connect retry and
-clone-metadata retry, which share `reconvergeCntlr` — the SH27 background
-tasks that converge; `cnagent.md` CN1). Each takes the object's lock only
-once it has found the object, or its gates have admitted the request,
-under the node read lock (Concurrency — `locks.go`): a call refused for
-an object the agent does not hold takes the read lock alone.
+but a check round and an info read (SH12) — `SyncupSide`/`SyncupCntlr`,
+`Push*Bitmap`, the cn's `Get*Bm` bitmap reads — the background read of a
+side or a cntlr (SH29), and every background converge attempt (the dn's connect retry — DN13; DN1's and
+SH27's "DN8 retry" — and DN12 fence timer, which share `reconvergeSide`,
+and the cn's connect retry and clone-metadata retry, which share
+`reconvergeCntlr` — the SH27 background tasks that converge; `cnagent.md`
+CN1). Each takes the object's lock only once it has found the object, or
+its gates have admitted the request, under the node read lock (Concurrency
+— `locks.go`): a call refused for an object the agent does not hold takes
+the read lock alone. A `SyncupSide` or `SyncupCntlr` cancels the object's
+read before it takes a lock, save a refused one that marks nothing (SH30);
+every other holder waits for a read as it waits for a converge.
 
-SH12. Node **read** lock only: node-scoped reads (`GetDnInfo`/`GetCnInfo`,
-one `CheckDn`/`CheckCn` round). `GetDnSize`/`GetCnSize` take no lock.
+SH12. Node **read** lock only: the background read of a DN or a CN (SH29).
+`GetDnSize`/`GetCnSize`, the four info reads and every check round take no
+lock of the hierarchy (SH25, SH28).
 
 SH13. Lock order is node then object, never nested object locks. Probing
 under a lock is acceptable: every OS command is bounded by
@@ -459,7 +485,11 @@ once, before it (`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for
 a listing, `osclient.md`, ReadDir; for a modification-time read,
 `osclient.md`, ReadMtime; for a device-number read, `osclient.md`,
 ReadDevNo), so a sysfs, configfs or device access the kernel holds returns
-only when the kernel does.
+only when the kernel does. A check round and an info read probe nothing
+(SH28), so a probe under a lock that runs long holds up the object's next
+observation and the calls that wait for its locks, never the reply to a
+round or an info read, and the worker judges that observation's age
+(`dnv-worker.md` HL7).
 
 ### `ResInfo` tracking — `resinfo.go`
 
@@ -489,6 +519,27 @@ than from a diff against a remembered plan. Tracker state is in-memory;
 after a restart epochs restart at the reconcile time — acceptable, the
 epoch means "last observed change".
 
+A pass that is cut off — a background read a syncup cancels (SH30), or a
+converge whose call was cut off — stores no observation (SH28, SH29), but
+it still makes rows after the cut, and since every command after the cut
+fails at once, those rows tell of the cut and not of the node. So a row a
+pass makes once its ctx is done is returned, with the epoch the status
+rule gives it, but not recorded, and the tracker keeps the history the cut
+would break. Every pass that writes an object's rows writes them under its
+own ctx: a side's or a cntlr's passes, which its object lock or the node
+write lock serializes, bind theirs to the object's tracker while they hold
+that lock; a DN's or a CN's passes each write through a view of the
+tracker of their own, since a read of a DN or a CN holds only the node
+read lock and stops counting as the object's running read (SH29) when it
+stores, before it lets that lock go, so the object's next read can start
+under the same shared lock before the first has returned. Reason:
+recorded, the cut would move the epoch of each row whose status it
+changed, the next pass that reads the resource would change the
+status back and move the epoch again, and every reply after that would
+give that next pass as the row's last status change, though the node
+changed nothing; each syncup that cancels a running read would move
+epochs so.
+
 ### OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`
 
 Thin, mechanism-only wrappers over the process's single
@@ -497,7 +548,7 @@ stacks of `architecture.md`, Data-plane device stacks, need; policy (which
 device, which table) stays in the role packages.
 
 `Dm.ListInfo` and `Dm.ListTables` are the cn agent's whole-node readers,
-which a cntlr's check round and info read take (`cnagent.md` CN28): each lists
+which a cntlr's background read takes (SH29, `cnagent.md` CN28): each lists
 every dm device of the node in one `dmsetup` run, the first with each
 device's number and attr flags, the second with each device's live table.
 `Dm.InfoDevNo` is its per-device read with the number: one device read the
@@ -612,7 +663,7 @@ rebuild, or — `dirMtime`'s — with a clean verdict or a re-sent `SyncupCn`:
   instead, and the verdict is not clean; and behind the port probe's test
   of whether the port's directory is there (`Nvmet.ProbePortState`,
   `cnagent.md` CN30), where a port directory read as absent would make a
-  `CheckCn` verdict re-send a `SyncupCn` for a port that is there;
+  CN read's verdict re-send a `SyncupCn` for a port that is there;
 * `Md.Detail`, a lookup in an `Md.Walk` of "/sys/block" through
   `Cmd.ListDir` and `readAttrStrict` (`cnagent.md` CN12), whose "absent"
   sends `ensureGroup` into an assembly;
@@ -664,7 +715,7 @@ reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
 "absent" would skip the disabling write and the rmdir of a namespace the
 kernel still has enabled), the attribute reads of `Nvmet.ProbePortState`
 (`cnagent.md` CN30: a group whose state read did not answer, read as
-absent, would make a `CheckCn` verdict re-send a `SyncupCn` for a port that
+absent, would make a CN read's verdict re-send a `SyncupCn` for a port that
 is there) and, through `Cmd.ReadAttr`, the md sysfs reads of `Md.ListArrays`
 and `Md.Gone` (`cnagent.md` CN12: an array read as absent, or as gone, would
 let the sweep disconnect a leg under a live array).
@@ -697,8 +748,8 @@ of the array node — the walk of
 — the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
 of the disk header for the DN's [D13] metadata. No LVM report is probed
-anywhere ([D14]). Reason for the disk's size: every check round of a disk
-node reads it, and a read in the agent's own process costs far less than
+anywhere ([D14]). Reason for the disk's size: every background read of a
+DN reads it, and a read in the agent's own process costs far less than
 a process, which on a node of many dn agents waits for its turn on the
 CPU. These commands create, change and remove nothing, but a
 status read is not always free of writes. A thin pool's status read
@@ -707,7 +758,7 @@ pool's metadata it otherwise makes first. Reason: once its metadata has
 changed since the pool device was set up, a thin pool's commit flushes its
 data device first, which reaches every leg the pool sits on, so in a
 migration gap a read that committed would wait on the leg with no usable
-path while the cn agent's call that made it holds its cntlr lock
+path while the cn agent's read or converge that made it holds its cntlr lock
 (`cnagent.md` CN1; `architecture.md`, Known limits). With the flag the
 counts are the open transaction's: a data block freed since dm-thin's last
 commit already counts free, and a metadata block freed since then counts
@@ -731,8 +782,8 @@ canonically, never byte-wise:
   reports a permanent difference on the nguid, which makes the converge
   disable the namespace, rewrite the attribute and re-enable it on
   **every** pass — an SH16 violation that drops a live export's namespace
-  once per Check round — and makes every probe report the healthy
-  namespace `RES_STATUS_ERROR`.
+  each time its side or cntlr converges — and makes every probe report the
+  healthy namespace `RES_STATUS_ERROR`.
 
 SH18. nvmet configfs access: attribute writes go through
 `OsClient.WriteFileDirect` (the atomic replace of `WriteFile` cannot work on
@@ -747,31 +798,32 @@ directory's, for whether it is there (`Nvmet.ProbePort`,
 well (`ls`), never in the agent's own process (`OsClient.ReadDir`). Reason
 for the time read: it is no listing — it looks up the one directory and
 opens nothing in it — and DN6 reads it for every export without namespace
-one that a pass meets, which every export is for a moment while it is built
-or removed, so a child process for each read would make a burst of builds
-or removals cost a check round one child per export in flight; and every
-`CheckDn` and `CheckCn` round probes the agent's port, so a child for the
-port's directory would cost every such round one more; like every
+one that a sweep meets, which every export is for a moment while it is built
+or removed, so a child process for each time read would make a burst of
+builds or removals cost a background read or a converge one child per
+export in flight; and every background read of a DN or a CN probes the
+agent's port, so a child for the port's directory would cost every such
+read one more; like every
 in-process call, it is bounded only up to its syscall (SH13). Reason for
 the listings: the process each `ls` starts costs little as long as a
-converge or a check round lists few configfs directories. On the cn that
+converge or a background read lists few configfs directories. On the cn that
 holds every time: it lists the subsystems directory once, and attributes
 every dn export, a co-hosted dn agent's included, by its NQN alone
 (`cnagent.md`, CN21), so what it lists follows the subsystems and transfers
 on the node, never the slices of a pool; the listings that grow with the
 slice count are the sysfs ones (`osclient.md`, ReadDir).
-On the dn, a pass lists few configfs directories as long as no export it
+On the dn, a sweep lists few configfs directories as long as no export it
 meets without namespace one is older than `DnExportOrphanGrace`: the
 attribution reads namespace one in process and, for an export without it,
 the export's age in process too (DN6), so the number of listings a
-converge, a check round or the node-level sweep makes then grows with
+converge, a background read or the node-level sweep makes then grows with
 neither the slice count nor the number of agents on the kernel, and there
 too the listings that grow with the slice count are the sysfs ones. The
 dn's attribution lists a directory only for an export without namespace one
-that is older than the grace (DN6): its namespaces, once each time a pass
+that is older than the grace (DN6): its namespaces, once each time a sweep
 meets it, and, when it has no namespace at all, the port links — a listing
 of the ports directory and one of each port's links, as many as the kernel
-has ports — at most once a pass. On a kernel that stamps the directory on
+has ports — at most once a sweep. On a kernel that stamps the directory on
 an attribute lookup no build in flight reads that old; Known limits names
 when a live export reads old. The time limit bounds a configfs listing in
 neither form: opening and closing a configfs directory wait for the
@@ -794,11 +846,11 @@ SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
   rewrite a namespace's "ana_grpid". Probe-first is also what lets two
   agents on one node co-own one port id (`architecture.md`, Disk node): the
   second one finds every attribute already as it wants it and writes
-  nothing. That
-  holds only while their `--tr-*` values agree — two agents sharing a port
-  id with different transports would each try to rewrite the other's
-  address attributes every round — so agents that need different
-  transports need different `--nvmet-port-id`s.
+  nothing. That holds only while their `--tr-*` values agree — two agents
+  sharing a port id with different transports would each try to rewrite
+  the other's address attributes each time its DN or CN converges — so
+  agents that need different transports need different
+  `--nvmet-port-id`s.
 * every ANA transition is `SetNsAnaGrpId` — a single `WriteFileDirect` of
   the namespace's "ana_grpid", valid on a live namespace because the
   target group always exists.
@@ -854,9 +906,10 @@ in the other.
 Every read and listing of the walk carries the SH15 soft timeout: unlike
 most of sysfs, the nvme class directories can stall while a controller is
 mid-reset or being torn down, which is exactly when these probes run, and
-no converge — nor, through the DN1 and CN1 locks, a whole node's RPC
-surface — may be held on one. The bound is on the read's own scheduling,
-not a magic abort of a read already blocked inside the kernel.
+no converge or background read — nor, through the DN1 and CN1 locks,
+every converge and read that waits behind it — may be held on one. The
+bound is on the read's own scheduling, not a magic abort of a read already
+blocked inside the kernel.
 `DisconnectDevice` is `nvme disconnect --device` for retiring **one**
 controller of an NQN whose other paths must live — the two sides of
 a migrating leg share a subsystem NQN (`architecture.md`, [D1]), so the cn
@@ -911,21 +964,155 @@ SH24. The handler loops on the stream's receive — a receive returning
 end-of-file, or the stream ctx ending, ends it with nil — and answers each
 request from inside that loop, which is what keeps every reply solicited.
 Each round runs under the trace id its request carries in `trace_id`
-(`agent.CheckRoundCtx`): the stream ctx holds only the id its metadata
-brought at open (`grpc.md` T2) — on a worker's stream, that of the round
-that opened it (T3) — so without it every later round's records would carry
-that first round's id. An empty `trace_id` keeps the stream ctx's id.
+(`agent.CheckRoundCtx`), and so does the background read it starts (SH29):
+the stream ctx holds only the id its metadata brought at open (`grpc.md`
+T2) — on a worker's stream, that of the round that opened it (T3) — so
+without it every later round's read would log under that first round's id.
+An empty `trace_id` keeps the stream ctx's id.
 
-SH25. Per round, under the SH11/SH12 locks: validate the object (unknown ⇒
-reply `agent_reply.code` of `ReplyCodeUnknownObject`, `revision` zero, no
-info — the stream stays open), probe the **fresh** live state, reply
-`revision` = SH8's `stored`.
+SH25. Per round: validate the object (unknown ⇒ reply `agent_reply.code`
+of `ReplyCodeUnknownObject`, `revision` zero, no info, and a stamp with no
+observation time — the stream stays open); otherwise answer from the
+object's latest observation (SH28) — its code in `agent_reply`, its
+revision, its info as SH26 says, and the reply's stamp — then start the
+object's background read when SH29 allows one. The round takes no lock of
+the SH10 to SH13 hierarchy and reads nothing of the node.
 
 SH26. Whether a reply carries the `*Info` is the contract's `show_info`
 rule; the handler decides "changed" by a protobuf equality comparison of
-the freshly probed `*Info` against the last info actually sent on this
-stream, and a fresh stream's first probed reply carries it because nothing
-has been sent on that stream yet.
+the observation's `*Info` against the last info actually sent on this
+stream. An object with no observation yet has no info to carry, so a
+reply about it carries none; the first reply on a fresh stream that has
+an observation to carry carries it, because no info has been sent on
+that stream yet.
+
+### Observations — `observation.go`
+
+SH28. **The observation.** For every DN, side, CN and cntlr it holds, the
+agent keeps in memory its latest observation (`architecture.md`,
+Live-state reporting): the rows, the code, the revision of the request the
+agent held for the object while the converge or read that made it ran,
+the time by the node's clock when that converge or read ended, and the
+trace id of the call whose converge or read made it. The four
+check rounds and the four info reads (`GetDnInfo`, `GetSideInfo`,
+`GetCnInfo`, `GetCntlrInfo`) answer from it alone: they take no lock of
+the SH10 to SH13 hierarchy, read nothing of the node, and put in the reply
+its stamp (`ObsStamp`) — the observation's time and trace id, the agent's
+clock as it answers, and the start of a converge of the object in flight
+(SH30), unset when none is. An info read starts no read. An object the
+agent holds but has no observation of yet is answered with code zero,
+revision zero and no observation time; how the worker judges such a reply
+is `dnv-worker.md` HL7.
+
+The end of every converge stores an observation before its locks go: a
+syncup's, the startup reconcile's for each object it converges, a DN13
+retry attempt's, the DN12 fence timer's, and the cn's connect retry's and
+clone-metadata retry's (`cnagent.md` CN10, CN18). It holds the rows and the
+code the converge's own reply carries, or would carry where no reply is
+sent, and the revision of the request it converged. A converge whose call
+was cut off stores none: every command after the cut fails at once, so
+its rows tell of the cut and not of the node. The object keeps the
+observation it had before the syncup until another converge or a read
+stores one, and a round that answers from it brings the syncup again when
+its revision or code calls for one (`dnv-worker.md` RW4). A round that
+finds it too old brings none (`dnv-worker.md` HL7), and a read that round
+starts stores the node's state at the revision the agent now holds, the
+cut-off syncup's own (SH8), so the rounds after it answer at that
+revision, and only a verdict that is not clean brings a syncup until the
+desired revision moves on (Known limits). A syncup's reply carries the
+stamp of the observation its converge stored, with no converge start, and
+the time the agent saved the request to its local store (SH5), unset when
+it saved none. An object's observation times only increase: a time not later than
+the stored one is stored as just after it, so equal times mean the same
+observation.
+
+Reason: a reply that waited for the object's lock behind a converge or a
+retry attempt, or for its own node reads on a loaded node, would make the
+worker miss rounds, which sets health epochs and can fail a primary over
+(`dnv-worker.md` HL1, HL2, AR10). A converge must store, because the
+worker's next round after a syncup's reply would otherwise answer from the
+observation before the converge, at the old revision, and make the worker
+re-send the syncup every time (`dnv-worker.md` RW4).
+
+SH29. **The background read.** A check round of an object the agent holds
+starts a read of that object when no read of it runs, no converge of it is
+in flight and no node-level syncup marks the node (SH30), and, on the dn, the join of
+SH27 has not begun. The read runs under `rootCtx` with the trace id of the
+round that started it (SH24, SH27), so it outlives the round and its
+stream. It holds the node read lock, plus the object's lock for a side or a
+cntlr (SH11, SH12), which it takes only once it has found under the node
+read lock that the agent still holds the object, so a read of an object
+dropped meanwhile leaves no lock entry (Concurrency — `locks.go`). It runs
+the probes and then the read-only verdict (DN16; `cnagent.md` CN23, CN30)
+and stores the observation at its end, with the revision the agent held
+when it took its locks, even when a listing did not answer, as the verdict
+then says. A cancelled read stores nothing. At most one read of an object
+runs at a time: a read counts as running until it stores its observation
+or, storing none, until it ends. The dn enrolls
+each read in its wait group, because a read runs child processes (SH27);
+the cn joins none, as it joins none of its tasks: a read's children hold
+nothing a restarted agent needs. Reason: the worker stays the only driver
+of node reads, so the agent needs no period of its own and never learns the
+cluster's interval. Cost: a round answers what an earlier read or converge
+found, so a change on the node reaches the worker one round later than a
+read in the round's own path would bring it.
+
+SH30. **Converge marks.** A syncup marks a converge of its object in flight
+as it arrives, then cancels the object's running read, and only then waits
+for its locks; its mark ends once its converge has stored its observation.
+
+A syncup that a gate refuses as it arrives marks nothing and cancels
+nothing; its gates run again under its locks, and that run decides. That
+is a node-level syncup (`SyncupDn`, `SyncupCn`) that the revision gate
+(SH8) refuses against the request the agent holds for its DN or CN, a
+`SyncupDn` that DN4's conf gate refuses, whether the agent holds the DN or
+not, and a `SyncupSide` or `SyncupCntlr` for an object the agent holds
+that any of its three gates refuses (DN8, `cnagent.md` CN8). The gates
+run as the syncup arrives with no lock of the SH10 to SH13 hierarchy and
+no read of the node. The held revision only grows, and what the other
+gates read changes only under a node-level syncup, so the two runs differ
+only when another syncup lands between them, which costs that one syncup a
+wait for a read or one cancelled read. Reason: the worker
+re-sends such a syncup every round — after an etcd restore, or over a bad
+stored conf — and its cancel would stop each such round's read unless the
+read beat the re-send, so the observation could go too old: a round on it
+would then be a missed round, which brings no syncup and so lets its own
+read end, and the object's health epoch would go on and off with no fault
+on the node (`dnv-worker.md` HL7).
+
+A node-level syncup that marks its object marks the node too, save one at
+the revision the agent holds for its DN or CN. The node's mark keeps every
+read from starting until the syncup ends, and the syncup cancels every
+read of the agent, each of which holds the node read lock its write lock
+waits for. A node-level syncup at the held revision is the re-send the
+worker issues on every round while the DN's or CN's code is not zero, as it is
+while a leftover lasts (`dnv-worker.md` RW4): it marks its DN or CN and
+cancels that object's read alone, and its write lock waits for the side or
+cntlr reads that hold the node read lock when it asks for it; a side or
+cntlr read a round starts after that waits for the node read lock until
+the syncup ends, so it takes no lock ahead of the syncup. Reason: were
+each re-send to cancel the side or cntlr reads and keep them from
+starting, such a read would end only between two re-sends, none would
+while a read takes longer than that, and the observations of sides and
+cntlrs with no fault would go too old (`dnv-worker.md` HL7).
+
+A background converge attempt (DN12, DN13; `cnagent.md` CN10, CN18) marks
+its object before it waits for the object's lock and cancels nothing. The
+teardown of an object's state cancels its read and waits for nothing. The
+converge start a reply reports (SH28) is when the object's own marks began
+to stand without a break, so a node-level syncup shows as a converge start
+only in its DN's or CN's replies: its mark of the node, where it makes one,
+shows in no side's or cntlr's, though no read of them starts while it
+stands. Reason: the worker's deadline cannot cut a lock wait, so a syncup
+cancels a read rather than wait for all of its probes, and waits for it no
+longer than its current command, save the side or cntlr reads a
+node-level syncup at the held revision waits for (above); the other lock
+holders it may wait for are
+the converges, the `Push*Bitmap` calls, the cn's bitmap reads and a zeroing
+batch's volume-table update (DN9). Marking before the
+cancel keeps a round in between from starting a read the lock might be
+handed to first. A `Push*Bitmap` and the cn's bitmap reads cancel
+nothing: they wait for a read as they wait for a converge.
 
 ## `cmd/dnv-agent` — cobra + viper
 
@@ -998,8 +1185,9 @@ role server (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
 `pb.RegisterDiskNodeAgentServer` (resp.
 `pb.RegisterControllerNodeAgentServer`), and the role's SH27 background
 waiter — the dn passes its `WaitBackground`, the cn passes nil (its probers
-are cancelled, never joined, and its sweep's background `nvme disconnect`
-is not joined either — SH27). Transport is plaintext (`grpc.md`, Wiring);
+are cancelled, never joined, and neither its sweep's background
+`nvme disconnect` nor its background reads are joined — SH27). Transport
+is plaintext (`grpc.md`, Wiring);
 log level stays the default Info (`log.md` R6 — the agent calls nothing).
 No flag is marked required through cobra: "required" is checked after the
 viper binding, so a config file or env var satisfies it too (CM2, CM3).
@@ -1019,8 +1207,9 @@ request; `migr.go` the source and destination choreography of
 settle); `zeroing.go` the DN9 side-provisioning registry and its
 `blkdiscard --zeroout` batches; `push_migr_bm.go` the bitmap pushes;
 `sweep.go` DN6 (the node's enumeration, the two scopes' wanted sets, the
-claim rules, the layers and the record gate); `check.go` the check streams;
-`probe.go` the `DnInfo`/`SideInfo` probing.
+claim rules, the layers and the record gate); `check.go` the check streams,
+the background reads of a DN and of a side (SH29) and the converge marks
+(SH30); `probe.go` the `DnInfo`/`SideInfo` probing.
 
 ### Server type and lock mapping
 
@@ -1029,19 +1218,27 @@ formatter, the local store, the `DiskMeta`, the `Dm`, `Nvmet` and
 `NvmeHost` wrappers — the `OsClient`-backed wrappers, no raw client field —
 the `LockSet` (object key = the `LocalSidePath` id tuple), the `--disk`
 path, the port conf (`--tr-*` plus `--nvmet-port-id` as one `PortConf`),
-the per-object `ResInfo` trackers, the DN8 retry registry (DN13), the
-per-side zeroing registry and its zeroing slots (DN9), and the SH27
-background-task bookkeeping: the `rootCtx` captured at `Reconcile`, the
-wait group that `WaitBackground` waits on, and the mark that wait sets
-when it begins, under the lock every registration and every fence-timer
-arming takes, and never clears: from then on no task registers and no
-fence timer is armed (SH27).
+the per-object `ResInfo` trackers, each DN's and each side's latest
+observation and running background read (SH28, SH29), the converge marks
+(SH30), the DN8 retry registry (DN13), the per-side zeroing registry and its
+zeroing slots (DN9), and the SH27 background-task bookkeeping: the
+`rootCtx` captured at `Reconcile`, the wait group that `WaitBackground`
+waits on, and the mark that wait sets when it begins, under the lock every
+registration and every fence-timer arming takes, and never clears: from
+then on no task registers and no fence timer is armed (SH27). The
+observations and the converge marks sit under that same lock, so a round's
+test that no read and no converge of its object runs and its start of a
+read are one step against a syncup's mark and its cancel of that read
+(SH30).
 
 DN1. Lock mapping (instantiates SH10 to SH13): `SyncupDn` and the startup
-reconcile — node write; `SyncupSide`, `PushMigrBitmap`, `GetSideInfo`, one
-`CheckSide` round, one DN8 retry attempt — node read + that side's object
-lock (key = `(cluster_id, dn_id, sp_id, side_id)`); `GetDnInfo` and one
-`CheckDn` round — node read; `GetDnSize` — no lock.
+reconcile — node write; `SyncupSide`, `PushMigrBitmap`, a side's background
+read, one DN8 retry attempt or DN12 fence-timer converge — node read + that
+side's object lock (key = `(cluster_id, dn_id, sp_id, side_id)`); a DN's
+background read — node read; `GetDnSize`, `GetDnInfo`, `GetSideInfo` and
+every `CheckDn` and `CheckSide` round — no lock of the hierarchy.
+`SyncupDn` and `SyncupSide` cancel the reads SH30 names for each, as each
+arrives and before it takes a lock.
 
 ### Startup reconcile
 
@@ -1054,10 +1251,10 @@ instead, once per pass: a zero extent size is not a geometry any converge
 may run on, so the converge stops before DN5 touches anything (no read of
 the disk's size, no header read, the port left as found) and reports the
 conf fault of `architecture.md`, Common validation, as one Error record
-(msg "invalid stored conf", naming the cluster and the dn). That record is
-the one place the field is named: the `meta_info` of `RES_STATUS_ERROR`
-that `convergeDn` hands back has no reply to travel in at startup, and the
-next `GetDnInfo`/`CheckDn` round re-probes the header against the zero and
+(msg "invalid stored conf", naming the cluster and the dn). The
+`meta_info` of `RES_STATUS_ERROR` that `convergeDn` hands back names the
+field as well, in the DN's observation the reconcile stores (SH28), until
+the DN's first background read re-probes the header against the zero and
 reports the meta row as a foreign disk on a formatted disk, as an
 unformatted disk on a blank one. Refusing there rather than converging is
 what keeps the fault legible: DN5's `EnsureFormatted` cannot confirm this
@@ -1207,8 +1404,9 @@ probe-first (SH16), building `DnInfo` as it goes:
   DN6 sweep removes its own such devices once nothing wants them. A device
   named for another cluster or dn is not its to remove: while one maps the
   disk, the disk stays blank, `meta_info` names the first device that maps
-  it and every round's verdict replies `ReplyCodeLeftover` (DN6's record
-  step), until an operator removes it. Once no side device or
+  it and the DN's code is `ReplyCodeLeftover` (DN6's record step), in
+  every `SyncupDn`'s reply and every observation of the DN, until an
+  operator removes it. Once no side device or
   clone-metadata wrapper maps the disk, the next converge whose reads all
   answer formats. The format writes slot A with an empty table at the first
   sequence number **first**, then the header (a fresh `format_uuid` from
@@ -1407,19 +1605,19 @@ export has that one namespace and no other (`SyncupSide`) — and the
 namespaces are listed only when there is no namespace one and the export is
 older than `DnExportOrphanGrace` (below); one whose namespace one names no
 per-CN linear of this cluster is foreign, whatever else it holds. The cost
-is the reason. Scope 1 attributes, on every pass —
-each Check round's verdict among them — every export of an sp this agent
-holds a device or a known side of that no held side of its own claims,
-which includes every sibling's export of that sp. Listing each one's
-namespaces would cost an `ls` apiece, so the pass of every agent holding
-sides of an sp would grow with all the other agents' exports of it,
-quadratically in the agents of one sp on a kernel. The read runs in
-process, so attributing an export that has its namespace one costs a pass
-no command at all. No attribution is kept from one pass to the next, and
-none needs to be: one pass attributes an export at most once, and a Check
-round's verdict and the `SyncupDn` after it each attribute it afresh — an
-owner remembered between them could be stale, the export removed and built
-again by another agent in between. An export holding no namespace at all
+is the reason. Scope 1 attributes, in every sweep — each background
+read's verdict among them, the sweep with its removals left out (DN16) —
+every export of an sp this agent holds a device or a known side of that no
+held side of its own claims, which includes every sibling's export of that
+sp. Listing each one's namespaces would cost an `ls` apiece, so each sweep
+of every agent holding sides of an sp would grow with all the other
+agents' exports of it, quadratically in the agents of one sp on a kernel.
+The read of namespace one runs in process, so attributing an export that
+has it costs a sweep no command at all. No attribution is kept from one
+sweep to the next, and none needs to be: one sweep attributes an export at
+most once, and a read's verdict and the `SyncupDn` after it each attribute
+it afresh — an owner remembered between them could be stale, the export
+removed and built again by another agent in between. An export holding no namespace at all
 exports nothing and holds nothing open — but it is not therefore nobody's.
 It is the shape of **every** export between its subsystem `mkdir` and its
 namespace `mkdir` — an export is built subsystem first, with its
@@ -1433,9 +1631,9 @@ is rebuilt only by some later converge of its side, which the breakage
 itself never triggers: a leg is lost that way. Only age tells an abandoned
 half-built export from one in flight, so an export without namespace one is
 judged by its **age** first: while its configfs subsystem directory is no
-older than `DnExportOrphanGrace` it is left alone that pass, whatever else
+older than `DnExportOrphanGrace` it is left alone that sweep, whatever else
 it holds and whatever port it is linked to — not removed, not a leftover,
-not a failure, so the reply code is unaffected — and each later pass judges
+not a failure, so the reply code is unaffected — and each later sweep judges
 it again, until it either has a namespace one whose "device_path" names its
 owner's linear, or the age of an export nobody is building. Only an older
 one has its namespaces listed: a namespace at another id, which dnv never
@@ -1449,10 +1647,10 @@ it, which is the claim rule again. The order is the cost. The age is one
 read in the agent's own process (SH18); the namespaces are a listing, a
 child process; the port links are a listing of the ports directory and one
 of each port's links, a child process each, as many as the kernel has
-ports, built at most once a pass. Every export is without namespace one for
+ports, built at most once a sweep. Every export is without namespace one for
 a moment while it is built or removed, and the age alone settles every one
 that is young or already gone, so a burst of builds or removals costs a
-pass no child process for those. On a kernel that stamps the directory on
+sweep no child process for those. On a kernel that stamps the directory on
 an attribute lookup, every export a build has in flight reads young — the
 build's own attribute reads and writes keep it so — so a burst of builds on
 a kernel many dn agents share makes no agent list a namespace or a port;
@@ -1472,7 +1670,7 @@ names nobody; what becomes of it is a known limit, Known limits.) The age
 is read from the node, never remembered: the directory's mtime
 (`Nvmet.SubsysMtime`, read in the agent's own process, SH18) against the
 agent's clock, as exact as the kernel keeps it. A read of it that fails
-makes the export foreign for that pass, as every other failed read of the
+makes the export foreign for that sweep, as every other failed read of the
 attribution does — one on a sibling's port or holding a namespace at
 another id included, since both are read only after the age: one that did
 not answer, or failed other than as "not exist", is named as a failed
@@ -1500,8 +1698,8 @@ subsystem's, and which such an export does not have; it reads the
 directory's own time, which looks up none of its entries, and, for an old
 export, lists the namespaces and the port links), so an abandoned export
 ages, and the first sweep that finds it
-older than the grace settles it: a Syncup's removes it, and a read-only
-Check round's reports it as a leftover, which brings that Syncup. Anything
+older than the grace settles it: a Syncup's removes it, and a background
+read's verdict reports it as a leftover, which brings that Syncup. Anything
 else that keeps looking up those files keeps it young for as long as it
 does. A source connection is
 attributed by its controller's "hostnqn" under "/sys/class/nvme": the nvme
@@ -1709,12 +1907,15 @@ reload can leave a device suspended, OS wrappers), and one still suspended
 resume.
 
 **The verdict.** Whatever a pass could not remove, plus any enumeration
-that did not answer, is what the reply's `agent_reply` carries (DN19). It
-is one comparison's result, recomputed every round and stored nowhere.
+that did not answer, is what the reply's `agent_reply` and the observation
+the converge stores carry (DN19, SH28). It is one comparison's result,
+taken afresh by every converge and every background read, and kept only
+as the code of the observation each of them stores.
 
 DN7. The request was persisted before the converge (SH5) and the node-level
 sweep has run (DN6); reply `agent_reply` — the sweep's verdict (DN19) —
-`revision` (= the stored revision after this call) and `dn_info`.
+`revision` (= the stored revision after this call), `dn_info`, and the
+stamp and save time of SH28.
 
 ### `SyncupSide`
 
@@ -1871,7 +2072,7 @@ area (DN13). While the area has no free run for it, no goroutine starts
 and `side_dev_info` reads `RES_STATUS_PROVISIONING` with the details
 "waiting for metadata room: " followed by the area's own message; any
 other refusal of the run reads `RES_STATUS_ERROR` with the refusal. Every
-row above is a *converge* outcome. A read-only round (DN16, SH25) allocates
+row above is a *converge* outcome. A background read (DN16, SH29) allocates
 nothing, so "no record" at `provisioned` false reads `RES_STATUS_MISSING`
 there — the converge that would allocate has not run yet, and `n` must
 never be taken from the request.
@@ -1937,8 +2138,9 @@ never be taken from the request.
   running child holds `DnSideName` open and `dmsetup remove` would fail
   EBUSY. Process exit is SH27's `WaitBackground`, so no orphan
   `blkdiscard` ever outlives the agent.
-* `SideInfo.zeroed_bytes` / `zero_bytes` are filled on every reply and
-  every Check round (DN14, DN16, DN18) of a side DN8's gate admits.
+* `SideInfo.zeroed_bytes` / `zero_bytes` are filled by every converge and
+  every background read (DN14, DN16, DN18) of a side DN8's gate admits, so
+  every info of such a side carries them.
   `zero_bytes` comes from the record, or from `side_conf.zero_bytes` while
   there is no record yet — so "no record" reads zero of the request's
   length, never equal counts. Equality is what the worker's flip rule
@@ -2033,7 +2235,7 @@ layer, the `MigrSrcNqn` subsystem with its allowed host and its namespace,
 probe-first, all of step 3 but the port link. When any part of the build
 fails, the converge runs neither step 1 nor the suspend of step 2 and goes
 no further: its `migr_src_info` rows carry the failure, its per-CN rows are
-read as a check round reads them, and a fence that an earlier converge
+read as a background read reads them, and a fence that an earlier converge
 began is settled as under rule 4 below. Until a converge's build has held,
 no converge of the migration has run steps 1 and 2, so there a failed build
 leaves the side serving, and a later converge of the side builds again,
@@ -2122,7 +2324,8 @@ Four rules keep the suspension bounded, which is what makes it safe:
   destination role's build has stopped short, or while a destination that
   has not provisioned has not taken its run in the clone-metadata area
   (DN13) — would take the same side-device gate and is never armed for a
-  source, and a `CheckSide` round neither converges nor bumps a revision.
+  source, and a side's background read neither converges nor bumps a
+  revision.
   One transient probe failure would otherwise leave the linears suspended,
   queueing bios with no timeout, until the worker next happened to re-sync
   the side. Running phase 2 under that gate is safe: it
@@ -2134,12 +2337,12 @@ Four rules keep the suspension bounded, which is what makes it safe:
 While the window is open the per-CN `dm_linear_info` is `RES_STATUS_OK`
 with details "suspended (migration cutover grace window)", unless DN9's
 gate is closed, when it reads `RES_STATUS_PROVISIONING` unprobed (DN18):
-it is an expected, time-bounded state. A check round reads the linear by
-the test phase 1 converges it to — there and suspended, on whatever table
-it carries — so the two channels report the same status for the same
-state, a healthy cutover reports no table mismatch, the second window of
-Known limits included, and a linear found absent inside the window reads
-`RES_STATUS_MISSING`, one found resumed `RES_STATUS_ERROR`.
+it is an expected, time-bounded state. A background read reads the linear
+by the test phase 1 converges it to — there and suspended, on whatever
+table it carries — so the converge and the read report the same status for
+the same state, a healthy cutover reports no table mismatch, the second
+window of Known limits included, and a linear found absent inside the
+window reads `RES_STATUS_MISSING`, one found resumed `RES_STATUS_ERROR`.
 
 **Ending the role removes nothing directly.** `DnMigrSrcName` and its
 `MigrSrcNqn` export simply stop being wanted, and the sweep takes them (DN6
@@ -2211,17 +2414,18 @@ stacks, and nothing more: no walk of the source connection, no connect,
 no dm-clone and no status read. Where the stacks go is read as after a
 step that stops (below); a destination has no dm-clone before its
 cutover, so they take step (1)'s shape, each on its dm-error with its
-namespace `AnaGrpIdInaccessible`. A check round reads step (2) and where
-the stacks are, and no further. Once step (2) holds, `target_info` and
-`dm_clone_info` read `RES_STATUS_PROVISIONING` with the details "waiting
-for the cutover" and the reason `RES_REASON_AWAITING_CUTOVER`, on both
-channels, from the pass's own reading of step (2) and the request's flag,
-never from a text; the worker's cutover reads that reason
-(`dnv-worker.md` RW18). A pass whose step (2) holds decides its DN8 retry
-last, once the per-CN stacks have converged (`settleMigrRetry`, below):
-it stops the retry when the primary's dm-linear and its export converged
-where the pass put them, and registers it otherwise; a pass that cannot
-read where the stacks are registers it, as a step that stops does. One
+namespace `AnaGrpIdInaccessible`. A background read reads step (2) and
+where the stacks are, and no further. Once step (2) holds, `target_info`
+and `dm_clone_info` read `RES_STATUS_PROVISIONING` with the details
+"waiting for the cutover" and the reason `RES_REASON_AWAITING_CUTOVER`, in
+the converge and in the read alike, from what that converge or read itself
+found of step (2) and from the request's flag, never from a text; the
+worker's cutover reads that reason (`dnv-worker.md` RW18). A pass whose
+step (2) holds decides its DN8 retry last, once the per-CN stacks have
+converged (`settleMigrRetry`, below): it stops the retry when the
+primary's dm-linear and its export converged where the pass put them, and
+registers it otherwise; a pass that cannot read where the stacks are
+registers it, as a step that stops does. One
 whose step (2) stops keeps the retry that step registers (below), since
 nothing else would build the wrapper the cutover waits for, and its rows
 read as the shared rule below gives them. Reason: the source still serves
@@ -2345,14 +2549,18 @@ connect once the controller is live and only queues the namespace scan that
 adds the device, so a single re-read could fail the target "controller has
 no namespace" for a device milliseconds away (the dn twin of `cnagent.md`
 CN10's head wait); a read that fails ends that wait at once. Both waits hold
-the pass's DN1 locks, so an info read of the side and a `SyncupDn` wait
-behind them, about the two budgets together and longer when a connect
-itself runs long, and while that `SyncupDn` waits for the node write lock
-every later call of the agent that takes the node lock waits too. A check
-round of the side waits behind a pass of the DN8 retry, which against a
-source that keeps refusing holds the locks about the shorter connect
-budget, and not behind the pass of a `SyncupSide`: the worker's loop of the
-side sends both and waits for the call (`dnv-worker.md` RW1).
+the pass's DN1 locks, so a `SyncupDn` waits behind them, about the two
+budgets together and longer when a connect itself runs long, and while
+that `SyncupDn` waits for the node write lock every later call, task and
+background read of the agent that takes the node lock waits too (SH30).
+No read of the side starts while the pass runs, since its converge mark
+stands (SH30): the side's rounds answer at once
+from the observation before the pass, which ages for as long as the pass
+runs (`dnv-worker.md` HL7). A pass of the DN8 retry against a source that
+keeps refusing holds the locks about the shorter connect budget; the pass
+of a `SyncupSide` ends in the observation its reply stamps, and the
+worker's loop of the side waits for that call before its next round
+(`dnv-worker.md` RW1).
 The dm-clone holds the source's multipath head open, so after the host
 deletes the source's controllers —
 as it does when the target refuses a reconnect with DNR — the walk finds
@@ -2406,9 +2614,9 @@ serves through it, the stacks sit on their dm-errors with every namespace
 `AnaGrpIdInaccessible` (step 1); when a read the answer needs did not
 answer — the dm-clone's own, its device number, a dm-linear's or a
 namespace's — and no stack was found serving through it, the pass leaves
-the per-CN stacks exactly as they are and reports them as a check round
-would. One unanswered command must not reload the leg's only serving path
-onto its dm-error, and a stopped pass must not put the stacks back on a
+the per-CN stacks exactly as they are and reports them as a background
+read would. One unanswered command must not reload the leg's only serving
+path onto its dm-error, and a stopped pass must not put the stacks back on a
 dm-clone the source connection's answer took them off. The namespace's
 group is the half of that read that records the answer: the pass that
 takes the stacks off moves the namespaces out of `AnaGrpIdOptimized` even
@@ -2428,23 +2636,26 @@ enable), with the status read after it answering, is decided like the
 whole sequence: steps (2) to (4) held, the dm-clone reads through to the
 source this pass found, and the primary's stack goes onto it.
 
-**One rule decides the destination's rows on both channels.** A converge
-and a check round decide the status of `migr_dst_info.target_info` and
+**One rule decides the destination's rows on both channels.** The two
+channels a side's observation comes from, a converge and a background read
+(SH28, SH29), decide the status of `migr_dst_info.target_info` and
 `migr_dst_info.dm_clone_info`, and where the per-CN rows are judged to
 serve from, by one rule, from what each reads of the destination in the
 order of its steps: step (2), the run behind the area's own gates and its
 wrapper; while the cutover is pending, nothing past it; step (3), the walk
 of the source connection; step (4), the dm-clone on the table the step
 builds; and the dm-clone's status line.
-The round only reads. The converge reads what its own steps left, and a
+The read only reads. The converge reads what its own steps left, and a
 step whose command fails reads as not held, the command's error in the
 details of the row it concerns. So for the same state the two report the
-same statuses, and a row's epoch moves only when the state does, except
-after a command that took effect in the kernel and still failed, as a
-killed one can (SH15): that converge reads as not held a step the node
-holds, so its statuses, and the side's health epoch with them, can differ
-from a round's until the next converge, the DN8 retry's at the latest,
-finds the step held. The rule:
+same statuses, and a row's epoch moves only when the state does — a pass
+that is cut off, a read a syncup cancels or a converge whose call was cut
+off, records no row it makes after the cut (SH14) — with one exception. A
+converge one of whose commands took effect in
+the kernel and still failed, as a killed one can (SH15), reads as not held
+a step the node holds, so its statuses, and the side's health epoch with
+them, can differ from a read's until the next converge, the DN8 retry's at
+the latest, finds the step held. The rule:
 
 * `target_info` reads step (2)'s refusal first — `RES_STATUS_PROVISIONING`
   for an area with no free run (above), `RES_STATUS_MISSING` for any
@@ -2470,17 +2681,18 @@ finds the step held. The rule:
   where a pass that stopped or waits for the cutover cannot read where
   they are, by the dm-clone's presence.
 
-`dm_clone_info` carries the raw status line whenever the pass read it,
-whatever the row's status, because `FinishMigration` judges hydration
-from it (`architecture.md`, Migrations): a round reads the line whenever
+`dm_clone_info` carries the raw status line whenever the converge or read
+that made the row read it, whatever the row's status, because
+`FinishMigration` judges hydration from it (`architecture.md`, Migrations): a read reads the line whenever
 the dm-clone is there, short of the wait for the cutover, which reads
 nothing past step (2), and a converge only once its steps through step (4)
 have held, so the two channels' details can differ where their statuses
 agree. What a pass serves from stays the steps' above. Reason: two
 reports of one device cannot both be right, and rows that differ between
 the channels flip their status, and the side's health epoch with it,
-every round, while a command that took effect and still failed makes them
-differ once, until the next converge.
+each time a converge's observation and a read's follow each other, while a
+command that took effect and still failed makes them differ once, until
+the next converge.
 
 **A deregistration can fall inside a pass of the very loop it ends, and
 that is the sharp edge.** Registering creates a cancellable context and
@@ -2566,8 +2778,8 @@ the dn twin of the cn arena's wait in `cnagent.md` CN18.
 
 DN14. Reply `agent_reply` — the side-level sweep's verdict
 (DN19) — `revision`, `side_info` — including
-`zeroed_bytes`/`zero_bytes`, filled on every reply (DN9) — and
-`bm_info` (the applied set, SH21).
+`zeroed_bytes`/`zero_bytes`, filled on every reply (DN9) — `bm_info`
+(the applied set, SH21), and the stamp and save time of SH28.
 
 ### `PushMigrBitmap`
 
@@ -2596,79 +2808,101 @@ omits the index, and the worker pushes it again on a later round. Reply
 
 ### `GetDnInfo` / `GetSideInfo`
 
-DN16. Read-only: probe fresh under the DN1 locks and reply `agent_reply`,
-`revision`, the info. An unknown DN or side pointer — one this process
-holds no request for, as when none was ever accepted, or when the startup
-reload could not load or skipped its file (DN2) and none has been accepted
-since — ⇒ `ReplyCodeUnknownObject` with `revision` zero.
+DN16. Each answers from the object's latest observation (SH28) and reads
+nothing of the node: `agent_reply` is the observation's code, `revision`
+its revision and the info its rows, beside the reply's stamp; it takes no
+lock of the SH10 to SH13 hierarchy and starts no read. An unknown DN or
+side pointer — one this process holds no request for, as when none was
+ever accepted, or when the startup reload could not load or skipped its
+file (DN2) and none has been accepted since — ⇒ `ReplyCodeUnknownObject`
+with `revision` zero and no observation time (SH25).
 
-For a **known** object the `agent_reply` is the **verdict**: the sweep of
-DN6 run with its removals left out — the same enumeration, the same wanted
-set, the same comparison, nothing touched — so `GetDnInfo` replies
-`ReplyCodeLeftover` while the node holds node-level leftovers, while one of
-its listings does not answer, and while the disk's identity is not
-confirmed (DN6's record step: every round for as long as the disk stays
-unreadable, corrupt, another node's, or blank under a live side device or
-clone-metadata wrapper, and the worker re-sends `SyncupDn` each time), and
-`GetSideInfo` while that side holds leftovers, while one of its listings
-does not answer, and — the one comparison a side's verdict makes beyond its
-sweep's — while its record, read from a table this node has confirmed
-(DN5), still has bytes to zero and no DN9 zeroing goroutine is running
-for it ("zeroing k/n MiB: nothing is zeroing the side"). Only a converge
-starts that goroutine, and one that could not — the startup reconcile's,
-while no read of the disk answered — would otherwise leave the side
-reporting the same progress every round with nothing to re-send its
-`SyncupSide`; the registry and the record are both read fresh, so nothing
-about the failed converge is remembered. A migration destination that has
-not provisioned, that the clone-metadata area has no free run for, and
-whose DN8 retry is registered adds nothing to the verdict: it zeroes
-nothing until it holds its run (DN13), that retry takes the run once one
-comes free, and a `SyncupSide` sent every round would only repeat the
-wait. The area's answer is read fresh from the loaded table, and the retry
-from its registry, like the rest, so a destination whose run the area
-could supply, or that no retry covers — one whose passes all stopped
-before the run's step (DN13) —, and that still zeroes nothing is named
-like any other side.
-Both reply zero otherwise.
-`GetDnInfo`, `GetSideInfo` and every `CheckDn` and `CheckSide` round probe
-before they take the verdict: the probe's read of the disk can be the
-first to answer, which is what confirms the identity (DN5) and loads the
-volume table a side's verdict reads its record from, so a call answers
-what a round in the same state would. A DN's verdict covers the
-node-level scope only and a side's covers its own side; each drives its own `Syncup*`. The
-verdict is recomputed on every call and stored nowhere, so a leftover that
-has since gone stops being reported without anyone clearing a flag. A DN
-whose stored `extent_size` is unusable has **no** verdict — the conf gate
-says it converges nothing and sweeps nothing, so naming leftovers there
-would report objects this agent has deliberately refused to touch — and
-neither has a side whose DN is unknown or in that state, since its own
-geometry comes from the DN, nor a side whose stored request DN8's side conf
-gate refuses, which converges and sweeps nothing for the same reason.
+The DN18 probes and the read-only **verdict** run in the object's
+background read (SH29), under the DN1 locks, and the read stores both. For a known
+object the verdict is the sweep of DN6 run with its removals left out — the
+same enumeration, the same wanted set, the same comparison, nothing touched
+— so a DN's read stores `ReplyCodeLeftover` while the node holds
+node-level leftovers, while one of its listings does not answer, and while
+the disk's identity is not confirmed (DN6's record step, which a
+`SyncupDn`'s sweep runs too: for as long as the disk stays unreadable,
+corrupt, another node's, or blank under a live side device or
+clone-metadata wrapper, and the worker re-sends `SyncupDn` on the rounds
+whose reply carries the code), and a side's read while that side holds
+leftovers, while one of its listings does not answer, and — the one
+comparison a side's verdict makes beyond its sweep's — while its record,
+read from a table this node has confirmed (DN5), still has bytes to zero
+and no DN9 zeroing goroutine is running for it ("zeroing k/n MiB: nothing
+is zeroing the side"). Only a converge starts that goroutine, and one that
+could not — the startup reconcile's, while no read of the disk answered —
+would otherwise leave every read reporting the same progress with nothing
+to re-send its `SyncupSide`; each read takes the registry and the record
+afresh, so nothing about the failed converge is remembered. A migration
+destination that has not provisioned, that the clone-metadata area has no
+free run for, and whose DN8 retry is registered adds nothing to the
+verdict: it zeroes nothing until it holds its run (DN13), that retry takes
+the run once one comes free, and a `SyncupSide` sent every round would only
+repeat the wait. Each read takes the area's answer afresh from the loaded
+table, and the retry from its registry, like the rest, so a destination
+whose run the area could supply, or that no retry covers — one whose passes
+all stopped before the run's step (DN13) —, and that still zeroes nothing
+is named like any other side. Both store zero otherwise.
 
-Never creates, changes or removes an object of the node, though a round that
-reads a migration destination's dm-clone status makes the kernel commit the
-clone's metadata (SH17). In particular a `Get*Info` or `Check*` round never
-allocates a record and never registers a DN9 zeroing goroutine
+The read probes before it takes the verdict: the probe's read of the disk
+can be the first to answer, which is what confirms the identity (DN5) and
+loads the volume table a side's verdict reads its record from, and a
+verdict taken first would report the table unconfirmed beside a meta row
+that reads OK. A DN's verdict covers the node-level scope only and a side's
+covers its own side; each drives its own `Syncup*`. The verdict is
+recomputed by every read and kept only in the observation that read
+stores, so a leftover that has since gone stops being reported once a read
+finds it gone, without anyone clearing a flag. A converge's observation
+carries the code of the converge's own sweep instead (SH28), which leaves
+out the comparison only the verdict makes: while nothing zeroes a side and
+the re-sent `SyncupSide` cannot start the goroutine, a read's observation
+names the side and the converge's does not, so the worker re-sends the
+`SyncupSide` on the rounds that answer a read's observation. A DN whose
+stored `extent_size` is unusable has **no** verdict — the conf gate says it
+converges nothing and sweeps nothing, so naming leftovers there would
+report objects this agent has deliberately refused to touch — and neither
+has a side whose DN is unknown or in that state, since its own geometry
+comes from the DN, nor a side whose stored request DN8's side conf gate
+refuses, which converges and sweeps nothing for the same reason.
+
+A read never creates, changes or removes an object of the node, though one
+that reads a migration destination's dm-clone status makes the kernel
+commit the clone's metadata (SH17); a check round and an info read change
+nothing at all, save that a round starts a read. In particular a read
+never allocates a record and never registers a DN9 zeroing goroutine
 (registration happens only on a converge path), and it reports
 `RES_STATUS_MISSING` for a side whose record the converge has not written
 yet. That holds for the verdict too: it enumerates and compares, and
-removes nothing. What a round does change is the agent's own account of
-what it observed: the SH14 tracker, the disk size the allocator reads, and
-`DiskMeta`'s copy of the volume table, which a read that answers loads
-(that read can be the one that confirms the identity, DN5) and which a
-header other than the one it came from drops (DN18), so the converges,
-probes and DN9 goroutines that follow re-read the disk.
+removes nothing. What a read does change is the agent's own account of
+what it observed: the object's observation (SH28), the SH14 tracker, the
+disk size the allocator reads, and `DiskMeta`'s copy of the volume table,
+which a disk read that answers loads (that disk read can be the one that
+confirms the identity, DN5) and which a header other than the one it came
+from drops (DN18), so the converges, reads and DN9 goroutines that follow
+re-read the disk.
 
 ### `CheckDn` / `CheckSide`
 
-DN17. Instantiate the SH24 to SH26 loop with the probes of Probing and
-error capture; one round takes the DN1 locks of the corresponding
-`Get*Info` and carries the same read-only verdict in its `agent_reply`
-(DN16). That is what makes the retry worker-driven: while leftovers exist
-every round replies `ReplyCodeLeftover`, the worker re-issues the
-`Syncup*` that owns them (`dnv-worker.md` RW4), and the sweep inside it
-tries again — including after a restart, where the first Check round is
-what reports what the startup sweep could not remove. No agent-side loop
+DN17. Instantiate the SH24 to SH26 loop: a round answers from the object's
+latest observation as the corresponding `Get*Info` does (DN16), and starts
+the object's background read when SH29 allows one; the read runs the probes
+of Probing and error capture and the read-only verdict under the DN1 locks.
+That is what
+makes the retry worker-driven: while leftovers exist, a read's verdict and
+a converge's sweep both name them, so the rounds reply
+`ReplyCodeLeftover`, the worker re-issues the `Syncup*` that owns them
+(`dnv-worker.md` RW4), and the sweep inside it tries again — including
+after a restart, where the observations the startup reconcile stores
+(SH28) report what the startup sweep could not remove. The condition only
+a read's verdict names re-drives on the rounds that answer a read's
+observation (DN16). While a leftover keeps every round re-sending, each
+re-sent `Syncup*` cancels the read that the round which brought it started
+(SH30), so a read of the object ends only where it beats the re-send; what
+that does to the worker's runs of rounds in a row is the worker's
+(`dnv-worker.md` RW23; `dnv-worker.md`, Known limits). No agent-side loop
 exists for leftovers, because the one the worker already runs is enough;
 DN13's migration connect retry and DN12's fence timer sweep only as part
 of a converge they re-run for a reason of their own.
@@ -2691,11 +2925,12 @@ needed, and the worker never turns one into an `err_epoch`
   header checks magic, version, CRC and the `cluster_id`/`dn_id`/
   `extent_size` identity (`DiskMeta.ProbeHeader`) — a header other than
   the one the loaded volume table came from (blank, corrupt, or valid with
-  another identity or another `format_uuid`) also drops that table, so the
-  next call re-reads the disk and nothing is handed out or written from
-  the old one, and a blank disk is then formatted only as DN5 allows —
-  until then every side's lookup finds no record (the `side_dev_info` row
-  below); a read that did not answer changes nothing. The details when OK
+  another identity or another `format_uuid`) also drops that table, so
+  whatever uses the table next re-reads the disk and nothing is handed out
+  or written from the old one, and a blank disk is then formatted only as
+  DN5 allows — until then every side's lookup finds no record (the
+  `side_dev_info` row below); a header read that did not answer changes
+  nothing. The details when OK
   are `DiskMeta.Describe`'s summary (the table sequence, the side and
   clone-metadata record counts, the free extents and units, and the count
   of sides whose zeroing is not done, DN9); on failure the error text
@@ -2742,10 +2977,10 @@ needed, and the worker never turns one into an `err_epoch`
   run ⇒ `RES_STATUS_PROVISIONING` with the converge's wait details (DN13),
   any other refusal it establishes ⇒ `RES_STATUS_ERROR` with the refusal; a
   failed write of the run, which only the converge meets, does not show
-  here. The same read fills
-  `SideInfo.zeroed_bytes`/`zero_bytes` every round. A side whose stored
-  request DN8's side conf gate refuses is not probed at all: the probe
-  writes that gate's Error record and answers an empty `SideInfo`.
+  here. The same record read fills `SideInfo.zeroed_bytes`/`zero_bytes` in
+  every background read of the side. A side whose stored request DN8's
+  side conf gate refuses is not probed at all: the probe writes that gate's
+  Error record and answers an empty `SideInfo`.
 * `cn_id_to_dm_error` and `cn_id_to_dm_linear` per cn, named `DnErrorName`
   and `DnLinearName`: `dmsetup info` plus `dmsetup table` (`probeDmTarget`;
   the linear's target — side device, dm-error or dm-clone — must match the
@@ -2780,9 +3015,9 @@ needed, and the worker never turns one into an `err_epoch`
   walk** (the subsystem matched by "subsysnqn", the controllers' "state"
   and the namespace device — never `nvme list-subsys`), behind step (2)'s
   read, and not taken at all while the cutover is pending; its status
-  and its reason, on a converge and a round alike, are DN13's shared
-  rule's. `RES_STATUS_PROVISIONING` while DN9's gate is closed on the
-  destination side, details "side provisioning".
+  and its reason, on a converge and a background read alike, are DN13's
+  shared rule's. `RES_STATUS_PROVISIONING` while DN9's gate is closed on
+  the destination side, details "side provisioning".
 * `migr_dst_info.dm_clone_info`, named `DnMigrFinalName`: step (2)'s and
   step (4)'s reads, then `dmsetup status`, none past step (2) while the
   cutover is pending; its status and its reason are DN13's shared rule's,
@@ -2791,9 +3026,9 @@ needed, and the worker never turns one into an `err_epoch`
   hydration progress); `RES_STATUS_PROVISIONING` while DN9's gate is
   closed on the destination side, details "side provisioning". The
   `DnMigrMetaDmName` wrapper has no `ResInfo` of its own: its health
-  folds into this one, through step (2)'s read, which a round takes from
-  the loaded volume table with nothing allocated, behind the gates the
-  converge's allocation applies, in their order and texts.
+  folds into this one, through step (2)'s read, which a background read
+  takes from the loaded volume table with nothing allocated, behind the
+  gates the converge's allocation applies, in their order and texts.
 
 The level comes first for both `migr_dst_info` rows: at a level that does
 not want the destination role (`SP_LEVEL_NO_MIGRATION` and above, DN11)
@@ -2827,19 +3062,22 @@ more]" tail — and an "enumeration failed" entry naming what did not answer
 and the error, for each such listing (`LeftoverReply`). Two dn checks that
 are not listings are folded into the same outcome, in that same form, so
 that they drive the same re-send: DN6's record step on a disk whose
-identity is not confirmed, and — in the read-only verdict only — a side
-with bytes still to zero and no zeroing goroutine, other than a migration
-destination waiting for a free run in the clone-metadata area (DN16). The
-full list goes to the agent log as the "sweep leftover" record (`log.md`,
-Leftovers), so a lingering leftover is visible every round rather than
-once.
+identity is not confirmed, and — in the read-only verdict only, so a
+converge's observation leaves it out until the side's next read (DN16) — a
+side with bytes still to zero and no zeroing goroutine, other than a
+migration destination waiting for a free run in the clone-metadata area.
+The full list goes to the agent log as the "sweep leftover" record
+(`log.md`, Leftovers), once per converge and once per background read, so
+a lingering leftover is visible in each of them rather than once.
 
 It is **not** a rejection (SH9). The request was applied, the desired state
-is stored, and the `*Info` rows are the converge's full account of every
-wanted object, so the worker evaluates them exactly as it does for code
-zero and simply re-issues the `Syncup*` every round until the code changes
-(`dnv-worker.md` RW5, HL1). Everything else reported through `agent_reply`
-is still a protocol-level refusal.
+is stored, and the `*Info` rows are the full account of every wanted
+object by the converge or the read that made the observation (SH28,
+SH29), so the worker evaluates them exactly as it does for code zero and
+simply re-issues the `Syncup*` on every round whose reply carries the
+code from an observation that is not too old, until the code changes
+(`dnv-worker.md` RW4, RW5, HL1, HL7). Everything
+else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
@@ -2903,9 +3141,19 @@ is still a protocol-level refusal.
   `SyncupSide` that keeps the role at an exporting level does not end the
   window. DN8 then checks only its first two bounds and accepts a request
   that passes them. Its converge cannot size the side without an extent
-  size, so phase 2 reloads nothing. The side's and the DN's Check rounds
-  both answer code zero at their stored revisions, so the worker re-sends
-  nothing while those are the SP's and the DN's revisions. The linears
+  size, so phase 2 reloads nothing. The reconcile stores no observation of
+  a side it does not converge, so the side's first round after the restart
+  answers revision zero with no observation time (SH28). The worker takes
+  that round for a missed round (the bullet below on a side the startup
+  reconcile holds but does not converge), or, when it does not find it too
+  old, takes no verdict from it and re-sends the side's request, since
+  revision zero is not the SP's (`dnv-worker.md` HL7); while the stored
+  revision is the SP's, that `SyncupSide` carries the stored request
+  again, which DN8 accepts and whose converge leaves the window as it is.
+  From the side's first stored observation on, the side's and the DN's
+  Check rounds answer code zero at their stored revisions, so the worker
+  re-sends nothing more while those are the SP's and the DN's revisions.
+  The linears
   stay so until a `SyncupDn` that DN4 accepts: if it drops the side, its
   node-level sweep ends the window as above; if not, the side's first
   converge after it that gets past DN8's side conf gate ends it. Before
@@ -2922,11 +3170,12 @@ is still a protocol-level refusal.
   namespace costs a listing of its namespaces and of the port links (DN6,
   SH18): every agent on the kernel that holds a side of its sp, save one
   whose held side still claims the export (DN6), lists its namespaces, a
-  child process, and the ports, once a pass, a child process per port, in
-  each pass that meets it, which on a loaded kernel shared by many dn agents
-  can make a check round outlast the worker's wait for it, one round
-  interval (`dnv-worker.md` RW8). Three shapes leave a live export
-  without its namespace. A removal unlinks the port, then removes the
+  child process, and the ports, once a sweep, a child process per port, in
+  each sweep that meets it, which on a loaded kernel shared by many dn
+  agents can make a background read run long: the object's rounds answer its
+  observation from before the read meanwhile, and an observation that ages
+  past the worker's bound makes a missed round (`dnv-worker.md` HL7). Three
+  shapes leave a live export without its namespace. A removal unlinks the port, then removes the
   namespace, then the directory, so its export is namespace-less for a
   moment. A build that is still short of its namespace more than the grace
   after the export's `mkdir` — a rebuild of an export whose first build
@@ -2935,20 +3184,20 @@ is still a protocol-level refusal.
   one kernel link, one for each side of a leg, is left namespace-less on one
   agent's port by the other's removal (DN6), and stays so until a converge
   of that agent builds its namespace again or removes the export, which can
-  be long after: every pass that meets it in that time lists the ports. On a
+  be long after: every sweep that meets it in that time lists the ports. On a
   kernel that keeps a subsystem directory's time at its `mkdir`, each of the
   three reads old unless the export was made less than the grace before. A
   kernel that stamps the directory on an attribute lookup pays for none of
   them while an attribute of the export was looked up less than the grace
   before: a build's own attribute reads and writes keep its export young,
-  and so does a side that wants the export, whose check rounds and converges
-  look up its attributes. There a removal reads old when no check round and
-  no converge of its side looked up the export's attributes within the grace
-  before it — under a `side_interval` longer than the grace with no converge
-  in between, or when the side's rounds and converges stopped that long
-  before the removal; and the export two agents link reads old once no side
-  of the agent whose port it is left on has looked up its attributes within
-  the grace, as when no side of that agent wants it any more.
+  and so does a side that wants the export, whose background reads and
+  converges look up its attributes. There a removal reads old when no read
+  and no converge of its side looked up the export's attributes within the
+  grace before it — under a `side_interval` longer than the grace with no
+  converge in between, or when the side's reads and converges stopped that
+  long before the removal; and the export two agents link reads old once no
+  side of the agent whose port it is left on has looked up its attributes
+  within the grace, as when no side of that agent wants it any more.
 * The port link of a migration source's step 3 does not wait for the
   suspends of step 2 to have held (DN12; `architecture.md`, Migration):
   when a per-CN dm-linear's suspend fails, or its dm-error fails and the
@@ -2974,13 +3223,14 @@ is still a protocol-level refusal.
 * A migration destination whose last pass left no connect retry
   registered — its steps up to the status read held, hydration included,
   and its step (5) converged (DN13) — has nothing that converges it again
-  by itself: its check rounds converge nothing, and a source with no
-  controller leaves their verdict at zero (DN16). So when the host deletes
-  the source's controllers under a dm-clone that serves — as it does when
+  by itself: its check rounds and their background reads converge nothing,
+  and a source with no controller leaves the reads' verdict at zero (DN16).
+  So when the host deletes the source's controllers under a dm-clone that
+  serves — as it does when
   the target refuses a reconnect with DNR — no connect follows until the
   side's next converge: a `SyncupSide` that the SP's next revision or a
   non-zero reply code brings (`dnv-worker.md` RW4), or DN2's re-run after
-  a restart. Until then a check round reads the destination by DN13's
+  a restart. Until then a background read reads the destination by DN13's
   shared rule — `migr_dst_info.target_info` `RES_STATUS_ERROR` and
   `dm_clone_info` `RES_STATUS_MISSING` — and judges the per-CN stacks
   where the source connection's answer puts them, on their dm-errors with
@@ -2989,7 +3239,7 @@ is still a protocol-level refusal.
   `RES_STATUS_ERROR` too: the side's health epoch is set, and the dm-clone
   has no source for the regions it has not hydrated.
 * A fault DN13's shared rule reads holds the destination side's health
-  epoch for as long as it lasts, a check round reading it as a converge
+  epoch for as long as it lasts, a background read reading it as a converge
   does: a source connection with no controller, or with controllers and
   no namespace device, a dm-clone whose hydration is off or short of the
   knobs its conf sets, a status line that does not parse, as the kernel's
@@ -3004,9 +3254,35 @@ is still a protocol-level refusal.
   (`dropSideState`), and the join lasts as long as the in-flight
   `blkdiscard --zeroout` child does: bounded by the SH15 kill of that
   child, unless it sits in an uninterruptible kernel wait on a stalled
-  disk, which no signal ends. For that long every RPC of the agent that
-  takes a DN1 lock — every `CheckDn` and `CheckSide` round among them —
-  waits behind the write lock.
+  disk, which no signal ends. For that long every call, task and
+  background read of the agent that takes a DN1 lock waits behind the
+  write lock (SH30): the rounds answer at once, from
+  observations that age, past the worker's bound when the join lasts long
+  enough (`dnv-worker.md` HL7).
+* A side the startup reconcile holds but does not converge — one whose
+  DN's stored extent size is unusable (DN2) — has no observation until its
+  first read (SH28), so its first round after the restart is answered with
+  no observation time. An agent restart is no pause in the worker's
+  rounds of the side (`dnv-worker.md` HL7), so unless those rounds paused
+  meanwhile for a reason of the worker's own, the worker counts that
+  reply's age from a round before the restart, and takes the round for a
+  missed round once that earlier round lies more than its bound back.
+* A converge whose call was cut off stores no observation (SH28), while
+  the agent already holds the request of the syncup that brought it
+  (SH8). When the worker takes the round after the cut for a missed round
+  — the syncup is no pause in the worker's rounds of the object, and the
+  observation from before it, aged as `dnv-worker.md` HL7 counts it, is
+  older than the worker's bound by then — that round brings no syncup,
+  and a read it starts stores the node's state at the held revision. The rows then show what the converge
+  left unfinished, but the code carries only the read-only verdict (DN16;
+  `cnagent.md` CN30), and a round brings the syncup again only while that
+  verdict is not clean. A wanted object the converge left unfinished makes
+  it so only in the cases those rules list, such as a side with bytes to
+  zero that nothing zeroes. While it is clean, the rest of the converge
+  waits for the object's next revision or for a converge that comes for a
+  reason of its own: a restart's startup reconcile (DN2; `cnagent.md`
+  CN2), a DN13 retry attempt, the DN12 fence timer, or on a cn an attempt
+  of `cnagent.md` CN10's connect retry or CN18's clone-metadata retry.
 * The dn sweep gates its removals on its `dmsetup ls` alone: an nvmet
   listing or a host walk that did not answer is named in the verdict, so
   the reply is not clean and the worker re-drives the pass, but it stops
@@ -3014,16 +3290,17 @@ is still a protocol-level refusal.
   source connections finds nothing to remove, and the layers below run on.
 * A migration destination that waits for a free run in the clone-metadata
   area re-runs its side's converge every `DnMigrConnectRetryInterval` under
-  the DN1 locks for as long as it waits (DN13), so the side's Check rounds
-  wait behind each attempt, and the wait lasts until another destination
-  role of the node ends and its run is freed. A run whose write fails —
-  the area has the room but the volume table cannot be saved — reads
-  `RES_STATUS_ERROR` on the converge's `side_dev_info` and not on a Check
-  round's, which reads the area's answer without writing (DN18) and reports
-  the side's zeroing progress instead: the two channels trade that row
-  while the write keeps failing, and the round's verdict names the side as
-  one nothing zeroes, so the worker re-sends its `SyncupSide` every round
-  (DN16).
+  the DN1 locks for as long as it waits (DN13), so each attempt holds the
+  side's background reads off while it runs (SH30), and the wait lasts
+  until another destination role of the node ends and its run is freed. A
+  run whose write fails — the area has the room but the volume table cannot
+  be saved — reads `RES_STATUS_ERROR` on the `side_dev_info` of a
+  converge's observation and not on a background read's, which reads the
+  area's answer without writing (DN18) and reports the side's zeroing
+  progress instead: the two channels trade that row while the write keeps
+  failing, and a read's verdict names the side as one nothing zeroes, so
+  the worker re-sends its `SyncupSide` on the rounds that answer a read's
+  observation (DN16).
 * A side's save that fails leaves the request before it on disk, the one
   way a stale request stays there: the save comes before the converge, so a
   crash or a cancelled call inside a pass leaves none (SH5). The converge
@@ -3046,6 +3323,6 @@ is still a protocol-level refusal.
   the old primary's dm-linear back onto the side's data and its namespace
   back to optimized. DN13's guard covers only a destination whose stored
   request still waits for the cutover. Nothing tries the save again before
-  the side's next accepted `SyncupSide`, and its Check rounds answer the
-  revision the process holds, so only a round's non-zero reply code or a
-  newer desired revision brings one (`dnv-worker.md` RW4).
+  the side's next accepted `SyncupSide`, and the side's observations carry
+  the revision the process holds, so only a round's non-zero reply code or
+  a newer desired revision brings one (`dnv-worker.md` RW4).

@@ -250,7 +250,8 @@ func setupSetDnDisabled(fs *flag.FlagSet) job {
 }
 
 // setupInspectDn drives InspectDiskNode, which the gateway answers by calling
-// the DN agent's GetDnInfo — so this is a live-agent read, not an etcd read.
+// the DN agent's GetDnInfo — so this reads the agent's latest observation of
+// the node, not etcd.
 func setupInspectDn(fs *flag.FlagSet) job {
 	addr := nodeAddrFlag(fs)
 	return func(
@@ -355,7 +356,7 @@ func setupSetCnDisabled(fs *flag.FlagSet) job {
 }
 
 // setupInspectCn drives InspectControllerNode, answered by the CN agent's
-// GetCnInfo.
+// GetCnInfo from its latest observation of the node.
 func setupInspectCn(fs *flag.FlagSet) job {
 	addr := nodeAddrFlag(fs)
 	return func(

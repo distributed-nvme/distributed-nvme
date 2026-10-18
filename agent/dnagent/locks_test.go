@@ -24,8 +24,10 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 }
 
 // 10. Lock mapping smoke (DN1): a SyncupSide stuck in a slow command holds
-// the node read lock and its own object lock — so node-scoped reads and other
-// sides run on, and only the same side waits.
+// the node read lock and its own object lock — so the DN's read and other
+// sides run on, and only the same side waits, its read included (SH29). A
+// round and an info read take no lock at all (SH28), so even the busy side's
+// answer at once.
 func TestLockMapping(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -52,19 +54,27 @@ func TestLockMapping(t *testing.T) {
 		t.Fatal("the slow command never started")
 	}
 
-	// A node-scoped CheckDn round only needs the node read lock.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		srv.checkDnRound(ctx, &pb.CheckDnRequest{
-			ClusterId: testCluster, DnId: testDn, ShowInfo: true,
-		}, nil)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("a CheckDn round was blocked by a busy side")
-	}
+	// The DN's read only needs the node read lock.
+	within(t, 2*time.Second, "the DN's read beside a busy side", func() {
+		readDnNow(ctx, srv)
+	})
+	// Rounds and info reads take no lock, the busy side's included.
+	within(t, 2*time.Second, "rounds and info reads beside a busy side",
+		func() {
+			dnRound(srv, "dn-round")
+			sideRound(srv, "side-round")
+			if _, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+				ClusterId: testCluster, DnId: testDn,
+			}); err != nil {
+				t.Errorf("GetDnInfo: %v", err)
+			}
+			if _, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+				ClusterId: testCluster, DnId: testDn,
+				SidePointer: sidePtr(testSide),
+			}); err != nil {
+				t.Errorf("GetSideInfo: %v", err)
+			}
+		})
 
 	// A different side takes a different object lock.
 	otherDone := make(chan struct{})
@@ -79,25 +89,33 @@ func TestLockMapping(t *testing.T) {
 		t.Fatal("a SyncupSide for another side was blocked")
 	}
 
-	// The same side must wait.
+	// The same side must wait, and so must its read.
 	sameDone := make(chan struct{})
 	go func() {
 		defer close(sameDone)
 		_, _ = srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide, testCn0, nil,
 			pb.SpLevel_SP_LEVEL_READWRITE))
 	}()
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		readSideNow(ctx, srv, sidePtr(testSide))
+	}()
 	select {
 	case <-sameDone:
 		t.Fatal("a second SyncupSide for the same side was not serialized")
+	case <-readDone:
+		t.Fatal("the busy side's read did not wait for its object lock")
 	case <-time.After(150 * time.Millisecond):
 	}
 
 	close(gate)
-	for _, ch := range []chan struct{}{blocked, sameDone} {
+	for _, ch := range []chan struct{}{blocked, sameDone, readDone} {
 		select {
 		case <-ch:
 		case <-time.After(5 * time.Second):
-			t.Fatal("a SyncupSide never finished after the gate opened")
+			t.Fatal("a SyncupSide or the read never finished after the " +
+				"gate opened")
 		}
 	}
 }
@@ -150,12 +168,13 @@ func TestSyncupDnWaitsForBusySide(t *testing.T) {
 
 // TestAnotherSidesPassReadsARequestBeingReplaced: a SyncupSide replaces its
 // side's request under that side's object lock, and other passes read it
-// under locks that do not order them with that one: another side's CheckSide
-// round builds its claims from every side's request under the node read lock
-// and its own object lock, and a CheckDn round does the same under the node
-// read lock alone. The replacement must therefore be safe on its own; under
+// under locks that do not order them with that one: another side's read
+// builds its claims from every side's request under the node read lock and
+// its own object lock, and the DN's read does the same under the node read
+// lock alone (SH29). The replacement must therefore be safe on its own; under
 // the race detector, a plain assignment fails this test with a DATA RACE on
-// the request field.
+// the request field. Each read is followed by a round, which answers from the
+// observation the read stored beside the replacement's (SH28).
 func TestAnotherSidesPassReadsARequestBeingReplaced(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx := context.Background()
@@ -193,7 +212,7 @@ func TestAnotherSidesPassReadsARequestBeingReplaced(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			srv.checkSideRound(ctx, &pb.CheckSideRequest{
+			checkSideNow(srv, ctx, &pb.CheckSideRequest{
 				ClusterId: testCluster, DnId: testDn,
 				SidePointer: side2Ptr, Revision: 1,
 			}, nil)
@@ -202,14 +221,14 @@ func TestAnotherSidesPassReadsARequestBeingReplaced(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			srv.checkDnRound(ctx, &pb.CheckDnRequest{
+			checkDnNow(srv, ctx, &pb.CheckDnRequest{
 				ClusterId: testCluster, DnId: testDn, Revision: 1,
 			}, nil)
 		}
 	}()
 	wg.Wait()
 
-	reply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	reply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), Revision: 1 + rounds,
 	}, nil)
@@ -328,34 +347,54 @@ func TestARefusedRequestLeavesNoLockEntry(t *testing.T) {
 // the attempt gets the node read lock — a fence callback or a retry pass
 // racing the side's pointer leaving its DN's list — creates no lock entry:
 // the attempt checks the side under the node read lock, which the drop's
-// write lock excludes, before it takes the object lock (reconvergeSide).
+// write lock excludes, before it takes the object lock (reconvergeSide). So
+// does the side's background read (refreshSide, SH29). Neither stores an
+// observation.
 func TestABackgroundAttemptOnADroppedSideLeavesNoLockEntry(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, node := newTestServer(t)
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	key := sideKey(testCluster, testDn, testSp, testSide)
 	st := srv.getSide(key)
+	stored := sideObs(t, srv)
 
+	node.Reset()
 	srv.locks.Node().Lock()
-	started, done := make(chan struct{}), make(chan struct{})
+	started := make(chan struct{})
+	var done sync.WaitGroup
+	done.Add(2)
 	go func() {
-		close(started)
+		defer done.Done()
+		<-started
 		srv.reconvergeSide(ctx, key, st)
-		close(done)
 	}()
-	<-started
-	// The attempt reaches the node lock and waits behind the write lock.
+	go func() {
+		defer done.Done()
+		<-started
+		srv.refreshSide(traced("read"), key, st)
+	}()
+	close(started)
+	// The attempt and the read reach the node lock and wait behind the
+	// write lock.
 	time.Sleep(50 * time.Millisecond)
 	srv.dropSideState(ctx, key, st)
 	before := srv.locks.ObjCount()
 	srv.locks.Node().Unlock()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the attempt never returned")
-	}
+	within(t, 5*time.Second, "the attempt and the read", done.Wait)
 	if got := srv.locks.ObjCount(); got != before {
-		t.Errorf("%d lock entries after the attempt, want %d", got, before)
+		t.Errorf("%d lock entries after the attempt and the read, want %d",
+			got, before)
+	}
+	if got := node.Traced("read"); len(got) != 0 {
+		t.Errorf("the read of a dropped side ran %q", got)
+	}
+	srv.mu.Lock()
+	obs := st.obs.LatestLocked()
+	srv.mu.Unlock()
+	if !obs.Time.Equal(stored.Time) {
+		t.Errorf("a pass over the dropped side stored trace %q at %v, "+
+			"want the observation from before the drop", obs.TraceId,
+			obs.Time)
 	}
 }
 

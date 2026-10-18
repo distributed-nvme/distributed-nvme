@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -142,7 +143,15 @@ func TestCheckDnStream(t *testing.T) {
 		t.Fatal("the first reply omitted the info")
 	}
 
-	// Unchanged round with show_info = false omits it.
+	// Unchanged round with show_info = false omits it. Two reads of the
+	// unchanged DN come first: a round answers from the observation (SH28),
+	// so only an observation from a read of its own, compared with one from
+	// the read before, proves that two reads of an unchanged DN give equal
+	// infos (SH26). The round after the first read may carry the info, since
+	// the read's info may differ from the converge's.
+	readDnNow(ctx, srv)
+	round(false)
+	readDnNow(ctx, srv)
 	if got := round(false); got.GetDnInfo() != nil {
 		t.Errorf("unchanged round carried the info: %v", got.GetDnInfo())
 	}
@@ -151,9 +160,16 @@ func TestCheckDnStream(t *testing.T) {
 		t.Error("show_info = true omitted the info")
 	}
 	// A probe flipped to error re-includes it: wipe the disk header behind
-	// the agent's back and the meta probe must notice.
+	// the agent's back and the meta probe of the DN's next read must notice
+	// (SH29). Until that read has run, a round answers the observation it
+	// had, which it sent already.
 	node.corruptBlock(testDisk, common.DnHeaderOffset,
 		make([]byte, common.DnHeaderSize))
+	if got := round(false); got.GetDnInfo() != nil {
+		t.Errorf("a round before the read carried the info: %v",
+			got.GetDnInfo())
+	}
+	readDnNow(ctx, srv)
 	changed := round(false)
 	if changed.GetDnInfo() == nil {
 		t.Fatal("a changed probe did not re-include the info")
@@ -215,12 +231,26 @@ func TestCheckSideStream(t *testing.T) {
 	if reply.GetRevision() != 1 {
 		t.Errorf("revision = %d, want 1", reply.GetRevision())
 	}
+	// Unchanged round omits it. Two reads of the unchanged side come first,
+	// as in TestCheckDnStream: only an observation from a read of its own,
+	// compared with one from the read before, proves that two reads of an
+	// unchanged side give equal infos (SH26).
+	readSideNow(ctx, srv, sidePtr(testSide))
+	round(false)
+	readSideNow(ctx, srv, sidePtr(testSide))
 	if got := round(false); got.GetSideInfo() != nil {
 		t.Errorf("unchanged round carried the info: %v", got.GetSideInfo())
 	}
-	// Break the primary's dm-linear behind the agent's back.
+	// Break the primary's dm-linear behind the agent's back: the side's next
+	// read notices (SH29), and until it has run a round answers the
+	// observation it had, which it sent already.
 	delete(node.dms, srv.nf.DnLinearName(
 		testCluster, testDn, testSp, testSide, testCn0))
+	if got := round(false); got.GetSideInfo() != nil {
+		t.Errorf("a round before the read carried the info: %v",
+			got.GetSideInfo())
+	}
+	readSideNow(ctx, srv, sidePtr(testSide))
 	changed := round(false)
 	if changed.GetSideInfo() == nil {
 		t.Fatal("a changed probe did not re-include the info")
@@ -232,13 +262,14 @@ func TestCheckSideStream(t *testing.T) {
 }
 
 // TestCheckRoundsCarryTheRequestTraceId pins SH24's per-round trace id: the
-// stream's metadata names only the worker round that opened it, so every
-// command and read of a round runs under the request's trace_id, and a round
-// that names none keeps the stream's.
+// stream's metadata names only the worker round that opened it, so the read
+// each round starts (SH29) runs every command and read under the request's
+// trace_id, and the read of a round that names none keeps the stream's.
 func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 	srv, node := newTestServer(t)
 	client := dialAgent(t, srv)
 	syncupBoth(t, srv, 1, testSide)
+	srv.roundReads = true
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -252,6 +283,8 @@ func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckSide: %v", err)
 	}
+	// Each round's read is joined before the next round, so every round
+	// starts one: a round starts none while a read of its object runs.
 	dnRound := func(traceId string) {
 		t.Helper()
 		if err := dnStream.Send(&pb.CheckDnRequest{
@@ -263,6 +296,7 @@ func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 		if _, err := dnStream.Recv(); err != nil {
 			t.Fatalf("recv: %v", err)
 		}
+		joinReads(t, srv)
 	}
 	sideRound := func(traceId string) {
 		t.Helper()
@@ -275,6 +309,7 @@ func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 		if _, err := sideStream.Recv(); err != nil {
 			t.Fatalf("recv: %v", err)
 		}
+		joinReads(t, srv)
 	}
 
 	dnRound("dn-round-1")
@@ -305,30 +340,54 @@ func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
 	}
 }
 
-// A Check round issues no mutating command (DN16/SH25) — including the [D13]
-// metadata: writeblock is not in readOnlyPrefixes, so Mutations() covers it.
+// A check round and an info read run no command and read nothing of the
+// node: they answer from the observation (SH28). The read a round starts
+// issues no mutating command (DN16, SH29) — including the [D13] metadata:
+// writeblock is not in readOnlyPrefixes, so Mutations() covers it.
 func TestCheckRoundsNeverMutate(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, 1, testSide)
 	ctx := context.Background()
 
 	node.Reset()
-	srv.checkDnRound(ctx, &pb.CheckDnRequest{
-		ClusterId: testCluster, DnId: testDn, ShowInfo: true,
-	}, nil)
-	srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	dnRound(srv, "dn-round")
+	sideRound(srv, "side-round")
+	if _, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
 		ClusterId: testCluster, DnId: testDn,
-		SidePointer: sidePtr(testSide), ShowInfo: true,
-	}, nil)
+	}); err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if _, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	}); err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if got := node.Calls(); len(got) != 0 {
+		t.Errorf("a round or an info read ran calls of its own: %q", got)
+	}
+
+	srv.roundReads = true
+	node.Reset()
+	dnRound(srv, "dn-round")
+	sideRound(srv, "side-round")
+	joinReads(t, srv)
+	for _, id := range []string{"dn-round", "side-round"} {
+		if len(node.Traced(id)) == 0 {
+			t.Fatalf("fixture is wrong: %s started no read", id)
+		}
+	}
 	if got := node.Mutations(); len(got) != 0 {
-		t.Errorf("a Check round mutated: %v", got)
+		t.Errorf("a check round's read mutated: %v", got)
 	}
 }
 
-// GetSideInfo probes first and takes the verdict second, as a check round
-// does (DN16), so it runs a check round's calls in a check round's order:
-// what the probe reads can move the agent's own view the verdict reads.
-func TestGetSideInfoReadsAsACheckRound(t *testing.T) {
+// GetSideInfo answers as a check round does, from the side's observation
+// (SH28): the same code, revision, info and observation, and neither runs a
+// call. The side's read that made the observation probes first and takes the
+// verdict second (DN16, SH29), so it runs the probe's calls and then the
+// verdict's: what the probe reads can move the agent's own view the verdict
+// reads.
+func TestGetSideInfoAnswersAsACheckRound(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(t *testing.T, srv *DnAgentServer)
@@ -348,30 +407,54 @@ func TestGetSideInfoReadsAsACheckRound(t *testing.T) {
 			srv, node := newTestServer(t)
 			ctx := context.Background()
 			tc.setup(t, srv)
+			key := sideKey(testCluster, testDn, testSp, testSide)
+			st := srv.getSide(key)
+
 			node.Reset()
-			srv.checkSideRound(ctx, &pb.CheckSideRequest{
+			srv.probeSide(ctx, st)
+			want := node.Calls()
+			node.Reset()
+			srv.sideVerdict(ctx, st)
+			want = append(want, node.Calls()...)
+			node.Reset()
+			srv.refreshSide(ctx, key, st)
+			read := node.Calls()
+			if len(read) == 0 {
+				t.Fatal("fixture is wrong: the read ran nothing")
+			}
+			for i := range max(len(read), len(want)) {
+				if i >= len(read) || i >= len(want) || read[i] != want[i] {
+					t.Fatalf("the read ran %d calls, the probe and then the "+
+						"verdict %d; the first difference at %d:\n%q\n%q",
+						len(read), len(want), i, read[min(i, len(read)-1)],
+						want[min(i, len(want)-1)])
+				}
+			}
+
+			node.Reset()
+			round, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
 				ClusterId: testCluster, DnId: testDn,
 				SidePointer: sidePtr(testSide), ShowInfo: true,
 			}, nil)
-			round := node.Calls()
-			node.Reset()
-			if _, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+			get, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
 				ClusterId: testCluster, DnId: testDn,
 				SidePointer: sidePtr(testSide),
-			}); err != nil {
+			})
+			if err != nil {
 				t.Fatalf("GetSideInfo: %v", err)
 			}
-			get := node.Calls()
-			if len(round) == 0 {
-				t.Fatal("fixture is wrong: the round ran nothing")
+			if calls := node.Calls(); len(calls) != 0 {
+				t.Errorf("the round and GetSideInfo ran %q", calls)
 			}
-			for i := range max(len(get), len(round)) {
-				if i >= len(get) || i >= len(round) || get[i] != round[i] {
-					t.Fatalf("GetSideInfo ran %d calls, a round %d; the "+
-						"first difference at %d:\n%q\n%q", len(get),
-						len(round), i, get[min(i, len(get)-1)],
-						round[min(i, len(round)-1)])
-				}
+			obs := sideObs(t, srv)
+			if !proto.Equal(get.GetAgentReply(), round.GetAgentReply()) ||
+				get.GetRevision() != round.GetRevision() ||
+				!proto.Equal(get.GetSideInfo(), round.GetSideInfo()) ||
+				!proto.Equal(get.GetSideInfo(), obs.Info) ||
+				!get.GetObsStamp().GetObsTime().AsTime().Equal(obs.Time) ||
+				!round.GetObsStamp().GetObsTime().AsTime().Equal(obs.Time) {
+				t.Errorf("GetSideInfo = %v\nround = %v\nwant both the "+
+					"read's observation", get, round)
 			}
 		})
 	}

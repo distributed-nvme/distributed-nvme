@@ -114,6 +114,11 @@ func startTestServerOnPort(
 	// kills and backs off to 1 MiB.
 	srv.zeroBatchMax = testZeroBatchMax
 	srv.zeroBatchMin = testZeroBatchMin
+	// And rounds start no read of their own (SH29): one in the background
+	// would race the test's steps, so a test that wants a round to answer
+	// what the node holds now runs the read itself (refreshDn, refreshSide),
+	// and the tests of the read turn them on.
+	srv.roundReads = false
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
@@ -321,9 +326,9 @@ func waitZeroed(t *testing.T, srv *DnAgentServer, sideId uint64) {
 
 // syncupBoth brings a DN and one side to a converged, exporting state. It
 // returns the SyncupDn reply, which most callers ignore; the ones that do not
-// are asserting the dn-side ResInfo rows that only this reply carries
-// (SyncupDn's port_info comes from ensurePort, GetDnInfo's from probeDn —
-// two different sites).
+// are asserting the dn-side ResInfo rows of the converge itself (SyncupDn's
+// port_info comes from ensurePort, a read's from probeDn — two different
+// sites; GetDnInfo answers with whichever stored the latest observation).
 func syncupBoth(
 	t *testing.T,
 	srv *DnAgentServer,
@@ -507,7 +512,7 @@ func TestSyncupOnNonDefaultPort(t *testing.T) {
 
 	// Probing reads the same port back: port_info names it, and the side's
 	// nvmeof rows are OK, which PortLinked can only report from ports/7.
-	dnReply, err := srv.GetDnInfo(context.Background(),
+	dnReply, err := dnInfoNow(srv, context.Background(),
 		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
 	if err != nil {
 		t.Fatalf("GetDnInfo: %v", err)
@@ -520,7 +525,7 @@ func TestSyncupOnNonDefaultPort(t *testing.T) {
 	if got := dnReply.GetDnInfo().GetPortInfo().GetResName(); got != "7" {
 		t.Errorf("port res_name = %q, want \"7\"", got)
 	}
-	sideReply, err := srv.GetSideInfo(context.Background(),
+	sideReply, err := sideInfoNow(srv, context.Background(),
 		&pb.GetSideInfoRequest{
 			ClusterId:   testCluster,
 			DnId:        testDn,
@@ -1200,7 +1205,7 @@ func TestSideProvisioningMatrix(t *testing.T) {
 		waitZeroed(t, srv, testSide)
 		clearRecord(t, srv, node)
 		node.Reset()
-		reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		reply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide),
 		})
@@ -1226,7 +1231,7 @@ func TestSideProvisioningMatrix(t *testing.T) {
 		syncupBoth(t, srv, 1, testSide)
 		clearZeroed(t, srv, node)
 		node.Reset()
-		reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		reply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide),
 		})
@@ -1411,7 +1416,7 @@ func TestAllocFailureReportsTheRecordsCounters(t *testing.T) {
 		testZeroBytes, testZeroBytes)
 	// The read-only twin already answers from the record, and the two must
 	// not contradict each other over identical on-disk state.
-	infoReply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	infoReply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -1475,7 +1480,7 @@ func TestZeroBytesMismatchIsAnErrorRow(t *testing.T) {
 		// The read-only twin compares nothing with the request, but its
 		// counters come from the same record, never from the request's
 		// length.
-		info, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		info, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide),
 		})
@@ -1679,7 +1684,7 @@ func TestZeroingBatchHalvesAfterAKill(t *testing.T) {
 				path, got.GetStatus(), got.GetDetails(), killedOut)
 		}
 	}
-	info, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	info, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -1768,7 +1773,7 @@ func TestZeroingBacksOffAfterRepeatedKills(t *testing.T) {
 	infoReq := &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	}
-	info, err := srv.GetSideInfo(ctx, infoReq)
+	info, err := sideInfoNow(srv, ctx, infoReq)
 	if err != nil {
 		t.Fatalf("GetSideInfo: %v", err)
 	}
@@ -1806,7 +1811,7 @@ func TestZeroingBacksOffAfterRepeatedKills(t *testing.T) {
 				got.GetDetails(), cleared)
 		}
 	}
-	info, err = srv.GetSideInfo(ctx, infoReq)
+	info, err = sideInfoNow(srv, ctx, infoReq)
 	if err != nil {
 		t.Fatalf("GetSideInfo: %v", err)
 	}
@@ -1997,7 +2002,7 @@ func TestZeroingConcurrencyIsCapped(t *testing.T) {
 			strings.Join(node.callsMatching(zeroout), "\n"))
 	}
 	for _, sideId := range sideIds {
-		reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		reply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(sideId),
 		})
 		if err != nil {
@@ -2914,6 +2919,7 @@ func TestLocalStoreLossKeepsSideAllocation(t *testing.T) {
 	srv2 := NewDnAgentServer(node.osClient(), nf,
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	srv2.roundReads = false
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -3027,6 +3033,7 @@ func TestForeignDiskIsNeverWritten(t *testing.T) {
 				common.NewNameFmt(common.DefaultLocalStorPrefix),
 				common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 				common.NvmetPortId)
+			srv2.roundReads = false
 			if err := srv2.Reconcile(ctx); err != nil {
 				t.Fatalf("reconcile: %v", err)
 			}
@@ -3103,8 +3110,9 @@ func TestForeignDiskIsNeverWritten(t *testing.T) {
 //
 // While no read of the header has answered at all, the DN's verdict is not
 // clean (DN6's record step), so the worker re-drives the SyncupDn; and the
-// first GetDnInfo whose probe reads the header back replies clean, because
-// the probe runs before the verdict is taken.
+// first read of the DN (refreshDn) whose probe reads the header back stores
+// a clean verdict, because the probe runs before the verdict is taken; a
+// GetDnInfo after it answers from that observation.
 func TestATransientHeaderReadDoesNotFreezeTheSides(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -3116,7 +3124,7 @@ func TestATransientHeaderReadDoesNotFreezeTheSides(t *testing.T) {
 
 	checkDn := func(srv *DnAgentServer) *pb.CheckDnReply {
 		t.Helper()
-		reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		reply, _ := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 			ClusterId: testCluster, DnId: testDn, Revision: 1,
 			ShowInfo: true,
 		}, nil)
@@ -3192,10 +3200,11 @@ func TestATransientHeaderReadDoesNotFreezeTheSides(t *testing.T) {
 			"leftover naming the disk identity", got)
 	}
 
-	// Once the disk answers again, the first GetDnInfo is clean: its probe
-	// reads the header back before the verdict is taken.
+	// Once the disk answers again, the first read of the DN is clean, and
+	// GetDnInfo answers from it: the read's probe reads the header back
+	// before the verdict is taken.
 	clearHook(node, node.killReadAlways, header)
-	info, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+	info, err := dnInfoNow(srv, ctx, &pb.GetDnInfoRequest{
 		ClusterId: testCluster, DnId: testDn,
 	})
 	if err != nil {
@@ -3335,7 +3344,7 @@ func TestATransientHeaderReadKeepsZeroing(t *testing.T) {
 // A side still being zeroed when the agent stops, after a restart during
 // which no read of the disk header answers: the startup converge of the side
 // cannot read its record, so nothing starts its zeroing, and once the disk
-// answers again every check round reads the record back fine. The side's
+// answers again every read of the side reads the record back fine. The side's
 // verdict is what notices — a record with bytes still to zero and no
 // zeroing goroutine is not clean — and the worker re-sends the SyncupSide
 // whose converge starts the goroutine. A verdict clean on every round would
@@ -3381,7 +3390,7 @@ func TestASideLeftWithNothingZeroingIsReDriven(t *testing.T) {
 	// object's Syncup* (RW4).
 	var firstSide *pb.AgentReply
 	for round := 0; round < 3; round++ {
-		dnReply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		dnReply, _ := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 			ClusterId: testCluster, DnId: testDn, Revision: 1,
 		}, nil)
 		if dnReply.GetAgentReply().GetCode() != 0 {
@@ -3389,7 +3398,7 @@ func TestASideLeftWithNothingZeroingIsReDriven(t *testing.T) {
 				t.Fatalf("SyncupDn: %v", err)
 			}
 		}
-		sideReply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+		sideReply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide), Revision: 1,
 		}, nil)
@@ -3420,7 +3429,7 @@ func TestASideLeftWithNothingZeroingIsReDriven(t *testing.T) {
 			strings.Join(want, "\n"))
 	}
 	// Once zeroed, the verdict is clean again.
-	sideReply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	sideReply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), Revision: 1,
 	}, nil)
@@ -3468,7 +3477,7 @@ func TestAZeroingLoopIssuesNoBatchUnderAForeignHeader(t *testing.T) {
 		t.Fatalf("buildDnHeader: %v", err)
 	}
 	node.corruptBlock(testDisk, common.DnHeaderOffset, block)
-	reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+	reply, _ := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, Revision: 1, ShowInfo: true,
 	}, nil)
 	if meta := reply.GetDnInfo().GetMetaInfo(); !strings.Contains(
@@ -3506,7 +3515,7 @@ func TestAZeroingLoopIssuesNoBatchUnderAForeignHeader(t *testing.T) {
 	if !waitFor(t, 5*time.Second, refused) {
 		t.Fatal("the loop stopped reporting the foreign disk")
 	}
-	sideReply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	sideReply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
 	}, nil)
@@ -3545,6 +3554,7 @@ func TestAForeignRecordIsNotZeroingToReDrive(t *testing.T) {
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	srv2.roundReads = false
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -3565,7 +3575,7 @@ func TestAForeignRecordIsNotZeroingToReDrive(t *testing.T) {
 		t.Fatalf("side_dev on a foreign disk = %v/%q, want a foreign-disk "+
 			"refusal", got.GetStatus(), got.GetDetails())
 	}
-	reply, _ := srv2.checkSideRound(ctx, &pb.CheckSideRequest{
+	reply, _ := checkSideNow(srv2, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn + 100,
 		SidePointer: sidePtr(testSide), Revision: 1,
 	}, nil)
@@ -3574,7 +3584,7 @@ func TestAForeignRecordIsNotZeroingToReDrive(t *testing.T) {
 		t.Errorf("side verdict on a foreign disk = %v, want no zeroing "+
 			"to re-drive", got)
 	}
-	dnCheck, _ := srv2.checkDnRound(ctx, &pb.CheckDnRequest{
+	dnCheck, _ := checkDnNow(srv2, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn + 100, Revision: 1,
 	}, nil)
 	if got := dnCheck.GetAgentReply(); got.GetCode() !=
@@ -3606,7 +3616,7 @@ func TestABlankHeaderUnderLiveSidesIsNeverFormatted(t *testing.T) {
 	node.corruptBlock(testDisk, common.DnHeaderOffset,
 		make([]byte, common.DnHeaderSize))
 
-	reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+	reply, _ := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, Revision: 1, ShowInfo: true,
 	}, nil)
 	if got := reply.GetAgentReply(); got.GetCode() !=
@@ -3729,7 +3739,7 @@ func blankHeaderWithNoSide(
 	node.mu.Unlock()
 	node.corruptBlock(testDisk, common.DnHeaderOffset,
 		make([]byte, common.DnHeaderSize))
-	srv.checkDnRound(ctx, &pb.CheckDnRequest{
+	checkDnNow(srv, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, Revision: 1, ShowInfo: true,
 	}, nil)
 	// The side leaves the DN: this converge still finds its device and
@@ -4043,7 +4053,7 @@ func TestFragmentedSideBuildsMultiTargetTable(t *testing.T) {
 	}
 
 	// And the probe agrees the live table matches the record.
-	reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	reply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -4066,7 +4076,7 @@ func TestProbeSideDevErrorPaths(t *testing.T) {
 
 	getInfo := func() *pb.ResInfo {
 		t.Helper()
-		reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		reply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide),
 		})
@@ -4196,7 +4206,7 @@ func TestSideInfoReportsZeroingInBytes(t *testing.T) {
 		}
 		assertSideInfoCounts(t, "SyncupSide", reply.GetSideInfo(),
 			zeroed, testZeroBytes)
-		info, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		info, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide),
 		})
@@ -4205,7 +4215,7 @@ func TestSideInfoReportsZeroingInBytes(t *testing.T) {
 		}
 		assertSideInfoCounts(t, "GetSideInfo", info.GetSideInfo(),
 			zeroed, testZeroBytes)
-		round, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+		round, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
 		}, nil)
@@ -4235,7 +4245,7 @@ func TestProbeReportsABrokenDeviceWhileZeroing(t *testing.T) {
 
 	getInfo := func() *pb.ResInfo {
 		t.Helper()
-		reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		reply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide),
 		})

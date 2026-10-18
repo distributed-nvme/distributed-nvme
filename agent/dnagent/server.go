@@ -91,12 +91,33 @@ type DnAgentServer struct {
 	// mu guards the in-memory mirrors of the local store below: which DNs
 	// and sides this agent holds. The request each of them holds is an
 	// atomic pointer of its own (dnState.req, sideState.req). It also guards
-	// bgClosed and each side's retry, zeroing and fence fields, so a task's
-	// start and the join's mark are ordered by it. It is a leaf lock: never
-	// held across an OS call.
+	// bgClosed, each side's retry, zeroing and fence fields, each DN's and
+	// side's observation slot (obs) and marks, so a task's start and the
+	// join's mark are ordered by it, and so are a round's start of a read
+	// and a syncup's mark and its cancel of that read (SH30). It is a leaf
+	// lock: never held across an OS call.
 	mu    sync.Mutex
 	dns   map[string]*dnState
 	sides map[string]*sideState
+
+	// marks records the converges in flight, keyed by the DN and side keys,
+	// and the SyncupDn calls in flight that carry a request newer than the
+	// DN's held one, or for a DN the agent does not hold (SH30): a check
+	// round starts no read while its object's or the node's mark stands, and
+	// a reply reports the earliest start among its object's marks. Guarded
+	// by mu.
+	marks *agent.ConvergeMarks
+
+	// roundReads lets a check round start the background read of its object
+	// (SH29). NewDnAgentServer sets it and nothing else in production
+	// changes it; it is a field so that a unit test can keep rounds from
+	// starting reads of their own, which would race the test's own steps,
+	// and call refreshDn and refreshSide itself instead.
+	roundReads bool
+	// reads counts the background reads check rounds started that have not
+	// ended, so a unit test can join them. Production joins them through bg,
+	// in which each read is enrolled too (SH27).
+	reads sync.WaitGroup
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the DN8
 	// background retries and the DN9 zeroing loops hang off it so shutdown
@@ -105,7 +126,8 @@ type DnAgentServer struct {
 }
 
 // WaitBackground joins the dn background goroutines enrolled in bg — the DN9
-// zeroing loops and the DN8 connect retries — after it stops every armed DN12
+// zeroing loops, the DN8 connect retries and the background reads check
+// rounds start (SH29) — after it stops every armed DN12
 // fence timer (SH27). It first marks the server closed (bgClosed) under mu,
 // the lock every enrollment and every arming takes, so a task either enrolled
 // before the join began and is waited for, or is refused, and no timer is
@@ -162,14 +184,19 @@ var bgEnrolling = func(*sync.Mutex) {}
 // dnState is one synced DN: its last accepted request as this process holds it
 // (SH8) — a SyncupDn stores it once it has passed the revision and conf gates,
 // before its converge runs — plus the ResInfo history of its node-level
-// resources.
+// resources and its latest observation.
 type dnState struct {
 	// req is replaced only under the node write lock (SyncupDn), which
-	// orders it against every reader, since each holds the node lock. It is
-	// an atomic pointer all the same, like a side's, so that no read of it
-	// depends on which lock its caller happens to hold.
+	// orders it against every converge and read, since each holds the node
+	// lock. It is an atomic pointer all the same, like a side's, so that no
+	// load of it depends on which lock its caller happens to hold. A check
+	// round and GetDnInfo never load it: they answer the revision of the
+	// observation (SH28).
 	req     atomic.Pointer[pb.SyncupDnRequest]
 	tracker *agent.ResTracker
+	// obs is the DN's latest observation and its running background read
+	// (SH28, SH29), under s.mu.
+	obs agent.ObsSlot[*pb.DnInfo]
 }
 
 func newDnState(req *pb.SyncupDnRequest) *dnState {
@@ -185,17 +212,20 @@ func newDnState(req *pb.SyncupDnRequest) *dnState {
 type sideState struct {
 	// req is the side's current request. Its SyncupSide replaces it under
 	// the node read lock and this side's object lock, and passes that do
-	// not hold that object lock read it: another side's converge or Check
-	// round, and a CheckDn round, read every held side's request — for the
+	// not hold that object lock read it: another side's converge or read,
+	// and a read of the DN, read every held side's request — for the
 	// claims and for the sides this node may host — under the node read
 	// lock, which the replacement shares. So it is an atomic pointer, and
 	// each of them loads a whole request, the old one or the new one.
 	// Nothing else a SyncupSide changes is read that way: the chunk set and
 	// the tracker stay under this side's object lock, and the retry,
-	// zeroing and fence fields under s.mu.
+	// zeroing and fence fields and the observation under s.mu.
 	req     atomic.Pointer[pb.SyncupSideRequest]
 	tracker *agent.ResTracker
 	chunks  *agent.ChunkSet
+	// obs is the side's latest observation and its running background read
+	// (SH28, SH29), under s.mu.
+	obs agent.ObsSlot[*pb.SideInfo]
 	// chunkMigrId identifies the migration the chunks belong to, so chunks
 	// left over from an earlier migration are never applied to a new one.
 	chunkMigrId uint64
@@ -273,6 +303,8 @@ func NewDnAgentServer(
 		migrRetryInterval: common.DnMigrConnectRetryInterval * time.Second,
 		now:               time.Now,
 		sleep:             agent.SleepCtx,
+		marks:             agent.NewConvergeMarks(),
+		roundReads:        true,
 		port: agent.PortConf{
 			PortId:  portId,
 			TrType:  trConf.GetTrType(),
@@ -324,9 +356,16 @@ func (s *DnAgentServer) putSide(key string, st *sideState) {
 	s.sides[key] = st
 }
 
+// dropSide forgets a side's state, the one place a state leaves the maps. It
+// cancels the side's running read in the same hold of s.mu, and waits for
+// nothing (SH30): the read may be parked on the node lock the dropper holds,
+// and once it gets it, it finds the side gone and ends.
 func (s *DnAgentServer) dropSide(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if st := s.sides[key]; st != nil {
+		st.obs.CancelReadLocked()
+	}
 	delete(s.sides, key)
 }
 
@@ -371,16 +410,39 @@ func (s *DnAgentServer) GetDnSize(
 	return &pb.GetDnSizeReply{Size: size - common.DnDataOffset}, nil
 }
 
+// SyncupDn marks its converge as it arrives, before it waits for the node
+// write lock (SH30). A request newer than the DN's held one, or for a DN the
+// agent does not hold, marks the node too and cancels every read of the
+// agent: each read holds the node read lock that lock waits for, and the
+// node's mark keeps a round from starting a new one until the syncup ends.
+// A re-send at the held revision, which a leftover brings every round,
+// cancels the DN's read alone and waits for the side reads in flight, so it
+// keeps no side's read from ending. A request DN4's gates refuse against the
+// held request marks nothing and cancels nothing, so a request the worker
+// re-sends every round keeps no read from ending; the gates refuse it under
+// the write lock (beginDnSyncup).
 func (s *DnAgentServer) SyncupDn(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,
 ) (*pb.SyncupDnReply, error) {
+	key := dnKey(req.GetClusterId(), req.GetDnId())
+	if end := s.beginDnSyncup(key, req); end != nil {
+		defer end()
+	}
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 	return s.syncupDn(ctx, req), nil
 }
 
-// SyncupSide takes the side's object lock only for a side this process holds
+// SyncupSide marks its converge as it arrives and cancels the side's running
+// read before it takes any lock (SH30), so it never waits behind a read; the
+// mark ends once the call has, refusals included — save a request DN8's
+// gates refuse against the side's held request, which marks nothing and
+// cancels nothing, so a refused request the worker re-sends every round
+// keeps no read from ending (beginSideSyncup); the gates refuse it under the
+// object lock.
+//
+// It takes the side's object lock only for a side this process holds
 // or a request DN8's gates admit: a request they refuse for a side it does
 // not hold is answered under the node read lock alone, so it leaves no lock
 // entry behind (dnagent.md, Concurrency — `locks.go`). The DN request the
@@ -390,10 +452,13 @@ func (s *DnAgentServer) SyncupSide(
 	ctx context.Context,
 	req *pb.SyncupSideRequest,
 ) (*pb.SyncupSideReply, error) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
 	key := sideKey(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
+	if s.beginSideSyncup(key, req) {
+		defer s.endConverge(key)
+	}
+	s.locks.Node().RLock()
+	defer s.locks.Node().RUnlock()
 	if s.getSide(key) == nil {
 		if reply, _ := s.gateSide(ctx, req, 0); reply != nil {
 			return reply, nil
@@ -406,9 +471,10 @@ func (s *DnAgentServer) SyncupSide(
 }
 
 // PushMigrBitmap refuses a push for a side this process does not hold under
-// the node read lock alone, as GetSideInfo does, so the refusal leaves no
-// lock entry behind (dnagent.md, Concurrency — `locks.go`); pushMigrBitmap
-// checks the side again under its object lock.
+// the node read lock alone, so the refusal leaves no lock entry behind
+// (dnagent.md, Concurrency — `locks.go`); pushMigrBitmap checks the side
+// again under its object lock. It cancels no read: it waits for one as it
+// waits for a converge (SH30).
 func (s *DnAgentServer) PushMigrBitmap(
 	ctx context.Context,
 	req *pb.PushMigrBitmapRequest,
@@ -429,65 +495,61 @@ func (s *DnAgentServer) PushMigrBitmap(
 	return s.pushMigrBitmap(ctx, key, req), nil
 }
 
-// GetDnInfo probes fresh live state and never mutates the node (DN16).
+// GetDnInfo answers from the DN's latest observation, as a check round does,
+// and takes no lock, reads nothing of the node and starts no read (SH28).
 func (s *DnAgentServer) GetDnInfo(
 	ctx context.Context,
 	req *pb.GetDnInfoRequest,
 ) (*pb.GetDnInfoReply, error) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
-	st := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
+	key := dnKey(req.GetClusterId(), req.GetDnId())
+	s.mu.Lock()
+	st := s.dns[key]
 	if st == nil {
+		s.mu.Unlock()
 		return &pb.GetDnInfoReply{
 			AgentReply: agent.UnknownObjectReply(
 				"unknown dn %d", req.GetDnId()),
+			ObsStamp: noObsStamp[*pb.DnInfo](s.now()),
 		}, nil
 	}
-	// The probe runs first, as in checkDnRound: its read of the disk can be
-	// the first that answers, which is what confirms DN5's identity, and a
-	// verdict taken before it would report the volume table unconfirmed
-	// beside a meta row that reads OK.
-	info := s.probeDn(ctx, st)
+	obs := st.obs.LatestLocked()
+	since := s.marks.SinceLocked(key)
+	s.mu.Unlock()
 	return &pb.GetDnInfoReply{
-		AgentReply: s.dnVerdict(ctx, st).Reply(),
-		Revision:   st.req.Load().GetRevision(),
-		DnInfo:     info,
+		AgentReply: obs.Reply,
+		Revision:   obs.Revision,
+		DnInfo:     obs.Info,
+		ObsStamp:   obs.Stamp(s.now(), since),
 	}, nil
 }
 
+// GetSideInfo answers from the side's latest observation, as a check round
+// does, and takes no lock, reads nothing of the node and starts no read
+// (SH28). A side the agent does not hold gets no lock entry from it.
 func (s *DnAgentServer) GetSideInfo(
 	ctx context.Context,
 	req *pb.GetSideInfoRequest,
 ) (*pb.GetSideInfoReply, error) {
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
 	key := sideKey(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
-	unknown := &pb.GetSideInfoReply{
-		AgentReply: agent.UnknownObjectReply(
-			"unknown side %s", sidePointerText(req.GetSidePointer())),
-	}
-	// A read of an unknown side needs no serialization — and taking its
-	// object lock would create one for an id that does not exist.
-	if s.getSide(key) == nil {
-		return unknown, nil
-	}
-	objLock := s.locks.Obj(key)
-	objLock.Lock()
-	defer objLock.Unlock()
-	st := s.getSide(key)
+	s.mu.Lock()
+	st := s.sides[key]
 	if st == nil {
-		return unknown, nil
+		s.mu.Unlock()
+		return &pb.GetSideInfoReply{
+			AgentReply: agent.UnknownObjectReply(
+				"unknown side %s", sidePointerText(req.GetSidePointer())),
+			ObsStamp: noObsStamp[*pb.SideInfo](s.now()),
+		}, nil
 	}
-	// The probe runs first, as in checkSideRound and GetDnInfo: what it reads
-	// can move the agent's own view the verdict reads — a read of the disk
-	// that answers loads the volume table the side's record is read from
-	// (DN16) — and in one order the call reads as a check round does.
-	info := s.probeSide(ctx, st)
+	obs := st.obs.LatestLocked()
+	since := s.marks.SinceLocked(key)
+	s.mu.Unlock()
 	return &pb.GetSideInfoReply{
-		AgentReply: s.sideVerdict(ctx, st).Reply(),
-		Revision:   st.req.Load().GetRevision(),
-		SideInfo:   info,
+		AgentReply: obs.Reply,
+		Revision:   obs.Revision,
+		SideInfo:   obs.Info,
+		ObsStamp:   obs.Stamp(s.now(), since),
 	}, nil
 }
 

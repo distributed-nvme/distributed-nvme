@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -1436,10 +1437,13 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 
 // TestInspectDiskNodeRepliesTheAppliedRevision pins architecture.md,
 // Disk nodes, and gateway.md, Disk nodes: the reply's `applied_revision` is
-// the one the agent's GetDnInfo reply carries — the revision of the last
-// SyncupDn it accepted — NOT the DnRev stored in etcd. The fake answers with a
-// value no bump sequence reaches, so a handler that regressed to the stored
-// revision would be unmistakable.
+// the one the agent's GetDnInfo reply carries — the revision of the agent's
+// latest observation of the node — NOT the DnRev stored in etcd. The fake
+// answers with a value no bump sequence reaches, so a handler that regressed
+// to the stored revision would be unmistakable. The reply's stamp passes
+// through with the age derived from it, and an agent that holds no
+// observation of the node yet gives no age (architecture.md, Live-state
+// reporting).
 func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1484,6 +1488,8 @@ func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 			reply.GetAppliedRevision(), fakeAgentRevision)
 	}
 	hnodeWantProto(t, reply.GetDnInfo(), info, "dn_info")
+	wantInspectObs(t, "InspectDiskNode", reply.GetObsStamp(), reply.GetObsAge(),
+		fakeAgentStamp(), durationpb.New(fakeAgentObsAge))
 	if got := agent.callCount("GetDnInfo"); got != 1 {
 		t.Errorf("GetDnInfo call count: got %d, want 1", got)
 	}
@@ -1508,6 +1514,17 @@ func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 		t.Errorf("applied_revision after a bump: got %#x, want %#x",
 			reply.GetAppliedRevision(), fakeAgentRevision)
 	}
+
+	// No observation yet: the stamp carries the answer time alone, and the
+	// reply passes it on with no age rather than a zero one.
+	agent.setStamp(fakeAgentNoObsStamp())
+	reply, err = s.InspectDiskNode(ctx, &pb.InspectDiskNodeRequest{
+		ClusterName: cluster,
+		AddrPort:    addr,
+	})
+	wantCode(t, err, codes.OK, "InspectDiskNode with no observation")
+	wantInspectObs(t, "InspectDiskNode with no observation",
+		reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -1903,7 +1920,8 @@ func TestDeleteControllerNodeReleasesTheShard(t *testing.T) {
 // TestInspectControllerNodeRepliesTheAppliedRevision is
 // TestInspectDiskNodeRepliesTheAppliedRevision on the CN side
 // (architecture.md, Controller nodes): the reply's `applied_revision` is the one the
-// agent's GetCnInfo reply carries, never the CnRev the store holds.
+// agent's GetCnInfo reply carries, never the CnRev the store holds, and the
+// stamp and the age pass through as they do there.
 func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1941,6 +1959,9 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 			reply.GetAppliedRevision(), fakeAgentRevision)
 	}
 	hnodeWantProto(t, reply.GetCnInfo(), info, "cn_info")
+	wantInspectObs(t, "InspectControllerNode",
+		reply.GetObsStamp(), reply.GetObsAge(),
+		fakeAgentStamp(), durationpb.New(fakeAgentObsAge))
 	if got := agent.callCount("GetCnInfo"); got != 1 {
 		t.Errorf("GetCnInfo call count: got %d, want 1", got)
 	}
@@ -1964,6 +1985,17 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 		t.Errorf("applied_revision after a bump: got %#x, want %#x",
 			reply.GetAppliedRevision(), fakeAgentRevision)
 	}
+
+	// No observation yet: no age.
+	agent.setStamp(fakeAgentNoObsStamp())
+	reply, err = s.InspectControllerNode(
+		ctx, &pb.InspectControllerNodeRequest{
+			ClusterName: cluster,
+			AddrPort:    addr,
+		})
+	wantCode(t, err, codes.OK, "InspectControllerNode with no observation")
+	wantInspectObs(t, "InspectControllerNode with no observation",
+		reply.GetObsStamp(), reply.GetObsAge(), fakeAgentNoObsStamp(), nil)
 }
 
 // ---------------------------------------------------------------------------

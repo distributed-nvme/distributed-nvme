@@ -236,7 +236,7 @@ func TestLockSetObjCount(t *testing.T) {
 func TestResTrackerEpoch(t *testing.T) {
 	tracker := NewResTracker()
 	now := int64(100)
-	tracker.now = func() int64 { return now }
+	tracker.hist.now = func() int64 { return now }
 
 	first := tracker.Ok("lv", "side-lv", "")
 	if first.GetEpoch() != 100 {
@@ -309,7 +309,7 @@ func TestResTrackerReason(t *testing.T) {
 	const none = pb.ResReason_RES_REASON_NONE
 	tracker := NewResTracker()
 	now := int64(100)
-	tracker.now = func() int64 { return now }
+	tracker.hist.now = func() int64 { return now }
 
 	plain := tracker.Err("thin", "dnv-thin", "dmsetup create: Invalid argument")
 	if plain.GetReason() != none || plain.GetEpoch() != 100 {
@@ -330,7 +330,7 @@ func TestResTrackerReason(t *testing.T) {
 		t.Fatalf("ErrReason row = %v, want %v", withReason, want)
 	}
 	// The tracker stores the whole row, the reason included.
-	if stored := tracker.state["thin"]; !proto.Equal(stored, want) {
+	if stored := tracker.hist.state["thin"]; !proto.Equal(stored, want) {
 		t.Errorf("stored row = %v, want %v", stored, want)
 	}
 	// The returned row is a copy: changing it reaches no stored field.
@@ -400,6 +400,104 @@ func TestResTrackerReason(t *testing.T) {
 		if row.GetReason() != none {
 			t.Errorf("%s gave the reason %v", name, row.GetReason())
 		}
+	}
+}
+
+// TestResTrackerCutPass pins the rule for a pass that is cut off (SH14): a
+// row made through a tracker whose bound pass (Bind) or whose view's pass
+// (In) is done is returned with the epoch the status rule gives it, and not
+// recorded, so the next row of the resource keeps the epoch from before the
+// cut. A row made with no pass bound, or while the pass runs, is recorded;
+// the func Bind returns puts back the pass bound before, and a view leaves
+// the tracker's own pass alone.
+func TestResTrackerCutPass(t *testing.T) {
+	tracker := NewResTracker()
+	now := int64(100)
+	tracker.hist.now = func() int64 { return now }
+	tracker.Ok("dev", "dnv-dev", "")
+
+	live, cancelLive := context.WithCancel(context.Background())
+	defer cancelLive()
+	cut, cancelCut := context.WithCancel(context.Background())
+	cancelCut()
+
+	// The bound pass is cut: the error row is returned at a status change's
+	// epoch, and the history keeps the OK row of epoch 100.
+	now = 200
+	unbind := tracker.Bind(cut)
+	if got := tracker.Err("dev", "dnv-dev", "context canceled"); got.
+		GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		got.GetEpoch() != 200 {
+		t.Errorf("cut row = %v, want ERROR at epoch 200", got)
+	}
+	// One that keeps the status gets the stored epoch, still unrecorded.
+	if got := tracker.Ok("dev", "dnv-dev", "after the cut"); got.
+		GetEpoch() != 100 {
+		t.Errorf("cut OK row = %v, want epoch 100", got)
+	}
+	// A new key is not recorded either.
+	tracker.Missing("new", "dnv-new", "")
+	// Nested: a live pass bound over the cut one records, and its unbind
+	// puts the cut one back.
+	unbindLive := tracker.Bind(live)
+	tracker.Ok("other", "dnv-other", "")
+	unbindLive()
+	tracker.Err("other", "dnv-other", "context canceled")
+	unbind()
+	if tracker.pass != nil {
+		t.Errorf("unbind left the pass %v bound", tracker.pass)
+	}
+
+	now = 300
+	if got := tracker.Ok("dev", "dnv-dev", "d").GetEpoch(); got != 100 {
+		t.Errorf("epoch after the cut pass = %d, want 100", got)
+	}
+	// The same status again: a MISSING row the cut pass had recorded would
+	// keep its epoch 200.
+	if got := tracker.Missing("new", "dnv-new", "").GetEpoch(); got != 300 {
+		t.Errorf("a key the cut pass made reads epoch %d, want 300 (never "+
+			"recorded)", got)
+	}
+	if got := tracker.Ok("other", "dnv-other", "").GetEpoch(); got != 200 {
+		t.Errorf("the live pass's row reads epoch %d, want 200", got)
+	}
+
+	// A view: a cut view records nothing, a live one records, and neither
+	// binds the tracker itself.
+	now = 400
+	if got := tracker.In(cut).Err("dev", "dnv-dev", "x"); got.
+		GetEpoch() != 400 {
+		t.Errorf("cut view row = %v, want epoch 400", got)
+	}
+	if tracker.pass != nil {
+		t.Errorf("In bound the pass %v on the tracker", tracker.pass)
+	}
+	now = 450
+	if got := tracker.Ok("dev", "dnv-dev", "").GetEpoch(); got != 100 {
+		t.Errorf("epoch after a cut view = %d, want 100", got)
+	}
+	tracker.In(live).Missing("dev", "dnv-dev", "")
+	now = 500
+	if got := tracker.Missing("dev", "dnv-dev", "").GetEpoch(); got != 450 {
+		t.Errorf("epoch after the live view = %d, want 450", got)
+	}
+	// Drop and Keep follow the desired state and act whatever the pass. Each
+	// row below keeps its status, so a row they left would keep its epoch.
+	tracker.In(cut).Drop("dev")
+	now = 550
+	if got := tracker.Missing("dev", "dnv-dev", "").GetEpoch(); got != 550 {
+		t.Errorf("epoch after a cut view's Drop = %d, want 550 (the "+
+			"dropped row had 450)", got)
+	}
+	tracker.In(cut).Keep(map[string]struct{}{"dev": {}})
+	now = 600
+	if got := tracker.Ok("other", "dnv-other", "").GetEpoch(); got != 600 {
+		t.Errorf("epoch after a cut view's Keep = %d, want 600 (the "+
+			"unwanted row had 200)", got)
+	}
+	if got := tracker.Missing("dev", "dnv-dev", "").GetEpoch(); got != 550 {
+		t.Errorf("a wanted row after a cut view's Keep reads epoch %d, "+
+			"want 550", got)
 	}
 }
 

@@ -56,13 +56,15 @@ const (
 	// is SETTING an err_epoch — which healthClean never does.
 	healthNone healthObs = iota
 	// healthUnreachable is a stream that cannot be opened, breaks, or misses
-	// its reply within the round timeout.
+	// its reply within the round timeout, or a reply in time that answers
+	// from an observation too old (HL7).
 	healthUnreachable
 	// healthErrorRow is a RES_STATUS_ERROR row in the object's latest known
 	// info.
 	healthErrorRow
-	// healthClean is a clean round: reply in time, an accepted code, no
-	// ERROR row in the latest known info (HL5).
+	// healthClean is a clean round: reply in time from an observation not
+	// too old (HL7), an accepted code, no ERROR row in the latest known info
+	// (HL5).
 	healthClean
 )
 
@@ -780,12 +782,14 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 // RES_REASON_THIN_ID_LOST (architecture.md, Live-state reporting): the cn
 // agent's build of a created td's thin volume found the id gone from its
 // slice's pool (cnagent.md CN14). The reason is a field of the row, never a
-// text in its details, and only a converge's report carries it: a Check
-// round's probe finds the volume absent and reads it MISSING. The class holds
-// the td's own rows — its thin rows, its raid0 and its dm-error — and every
-// row of an object that exists for it alone — the ns-dev and the nvmet
-// namespace of each of its namespaces, the three rows of a transfer out of
-// one of them, the three of a clone onto it. The pool lives on the SP's legs,
+// text in its details, and only a converge's observation carries it: a
+// background read's probe finds the volume absent and reads it MISSING, so a
+// round carries the reason only while it answers from the converge's
+// observation, until the next read replaces it (dnagent.md SH28, SH29). The
+// class holds the td's own rows — its thin rows, its raid0 and its dm-error —
+// and every row of an object that exists for it alone — the ns-dev and the
+// nvmet namespace of each of its namespaces, the three rows of a transfer out
+// of one of them, the three of a clone onto it. The pool lives on the SP's legs,
 // so whichever cntlr holds the primary role reads the same rows, and no
 // failover or replacement brings the td, or anything over it, back: an
 // operator does (architecture.md, Known limits).
@@ -895,10 +899,11 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // finds a member not available (a promotion ahead of the sides' ANA flips, a
 // provisioned flip ahead of the side's export) reports the groups and pools it
 // could not build ERROR and leaves them to the CN10 retry, whose first pass
-// comes one CnConnectRetryInterval later; a Check round in between probes the
-// absent devices and
-// reports them MISSING "", not ERROR, and in an SP with no td, as a new SP is
-// until one is created, that reply has no ERROR row in the maps HL2 judges a
+// comes one CnConnectRetryInterval later; a background read in between, which
+// a Check round starts and the next round answers from (dnagent.md SH29),
+// probes the absent devices and reports them MISSING "", not ERROR, and in an
+// SP with no td, as a new SP is until one is created, that reply has no ERROR
+// row in the maps HL2 judges a
 // cntlr by (a td's raid0 row reads ERROR while its thins are absent; a leg row,
 // which is not judged, reads the CN11 prober, which fails on a path still
 // non-optimized). Every other MISSING

@@ -108,9 +108,9 @@ func (s *DnAgentServer) fenceStarted(st *sideState) bool {
 }
 
 // inFence reports whether a window is currently running, without starting
-// one. The probe path uses it: a Check round changes no state of the agent
-// but its own account of what it observed (DN16), and starting the clock is a
-// change of the side's state.
+// one. The probe path uses it: a check round's read changes no state of the
+// agent but its own account of what it observed (DN16, SH29), and starting
+// the clock is a change of the side's state.
 func (s *DnAgentServer) inFence(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -164,7 +164,7 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 // (armFenceTimer), unfenceLinears runs only from the sweep's pre-step and
 // only for a side that is no longer a migration source, the one periodic
 // side converge, the DN8 retry, would take the same gate, and a CheckSide
-// round neither converges nor bumps a revision — so one transient
+// round's read neither converges nor bumps a revision — so one transient
 // `dmsetup info` failure on the side device would leave suspended devices
 // behind until the worker happened to re-sync the side. A suspended dm target
 // queues bios with no timeout (see the header), so [D12]'s bound is the

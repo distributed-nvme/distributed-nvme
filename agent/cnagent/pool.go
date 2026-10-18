@@ -247,7 +247,7 @@ func (s *CnAgentServer) ensureThin(
 // dnv-worker.md HL2). The errno comes from the refusal's type
 // (agent.IsNoData). An uncreated td's ENODATA is no lost id — a snapshot
 // whose create_snap has not made its id yet reads the same — and keeps no
-// reason. Only a converge names a lost id: a check round reads the absent
+// reason. Only a converge names a lost id: a read reads the absent
 // volume RES_STATUS_MISSING (probeThin).
 func thinRowOf(
 	st *cntlrState,

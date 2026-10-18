@@ -18,9 +18,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -1428,6 +1430,592 @@ func TestCheckDnChangeOnlyInfo(t *testing.T) {
 	}
 	stream.CloseSend()
 	stream2.CloseSend()
+}
+
+// obsTimes returns a stamp's observation and answer times, zero when unset.
+func obsTimes(stamp *pb.ObsStamp) (obs, answer time.Time) {
+	if ts := stamp.GetObsTime(); ts != nil {
+		obs = ts.AsTime()
+	}
+	if ts := stamp.GetAnswerTime(); ts != nil {
+		answer = ts.AsTime()
+	}
+	return obs, answer
+}
+
+// TestCheckStampsANewObservation covers the fake's observation stamps
+// (dnagent.md SH28): every round of an object the fake knows answers from a
+// new observation — a time later than the last one, the round's own trace
+// id, an answer time not before it and no converge start — and the stamp
+// rides beside the *Info, so the change-only rule still leaves an unchanged
+// info out.
+func TestCheckStampsANewObservation(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, _ := startAgent(t, agent)
+	syncupDn(t, dnClient, 1)
+
+	stream, err := dnClient.CheckDn(context.Background())
+	if err != nil {
+		t.Fatalf("CheckDn: %v", err)
+	}
+	defer stream.CloseSend()
+	var last time.Time
+	for i := range 3 {
+		traceId := fmt.Sprintf("round-%d", i)
+		if err := stream.Send(&pb.CheckDnRequest{
+			ClusterId: 1, DnId: 1, Revision: 1, TraceId: traceId,
+		}); err != nil {
+			t.Fatalf("CheckDn send: %v", err)
+		}
+		reply, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("CheckDn recv: %v", err)
+		}
+		if i > 0 && reply.GetDnInfo() != nil {
+			t.Fatalf("round %d carries an unchanged dn_info", i)
+		}
+		stamp := reply.GetObsStamp()
+		obs, answer := obsTimes(stamp)
+		if obs.IsZero() || !obs.After(last) {
+			t.Fatalf("round %d: obs_time %v, want one later than %v",
+				i, obs, last)
+		}
+		if answer.Before(obs) {
+			t.Fatalf("round %d: answer_time %v before obs_time %v",
+				i, answer, obs)
+		}
+		if stamp.GetObsTraceId() != traceId {
+			t.Fatalf("round %d: obs_trace_id %q, want %q", i,
+				stamp.GetObsTraceId(), traceId)
+		}
+		if stamp.GetConvergeStart() != nil {
+			t.Fatalf("round %d: converge_start %v, want unset", i,
+				stamp.GetConvergeStart())
+		}
+		last = obs
+	}
+}
+
+// TestUnknownObjectHasNoObservation: a round or an info read that refuses an
+// object as unknown — a side the last SyncupDn did not list — carries an
+// answer time and no observation, and a Syncup* that refuses it so carries
+// no stamp and no save time at all.
+func TestUnknownObjectHasNoObservation(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, _ := startAgent(t, agent)
+	ctx := context.Background()
+	syncupDn(t, dnClient, 1)
+	ptr := sidePtr(1, 1, 1)
+
+	wantNone := func(what string, code uint32, stamp *pb.ObsStamp) {
+		t.Helper()
+		if code != common.ReplyCodeUnknownObject {
+			t.Fatalf("%s: code %d, want unknown object", what, code)
+		}
+		obs, answer := obsTimes(stamp)
+		if !obs.IsZero() || stamp.GetObsTraceId() != "" || answer.IsZero() {
+			t.Fatalf("%s: stamp %v, want an answer time alone", what, stamp)
+		}
+	}
+
+	stream, err := dnClient.CheckSide(ctx)
+	if err != nil {
+		t.Fatalf("CheckSide: %v", err)
+	}
+	defer stream.CloseSend()
+	if err := stream.Send(&pb.CheckSideRequest{
+		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1, TraceId: "r",
+	}); err != nil {
+		t.Fatalf("CheckSide send: %v", err)
+	}
+	round, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("CheckSide recv: %v", err)
+	}
+	wantNone("a round", round.GetAgentReply().GetCode(), round.GetObsStamp())
+
+	info, err := dnClient.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: 1, DnId: 1, SidePointer: ptr,
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	wantNone("an info read", info.GetAgentReply().GetCode(),
+		info.GetObsStamp())
+
+	syncup := syncupSide(t, dnClient, ptr, 1, 0)
+	if code := syncup.GetAgentReply().GetCode(); code !=
+		common.ReplyCodeUnknownObject {
+		t.Fatalf("a SyncupSide: code %d, want unknown object", code)
+	}
+	if syncup.GetObsStamp() != nil || syncup.GetSaveTime() != nil {
+		t.Fatalf("a refused SyncupSide carries stamp %v and save_time %v, "+
+			"want neither", syncup.GetObsStamp(), syncup.GetSaveTime())
+	}
+}
+
+// TestForcedUnknownObjectHasNoObservation: an object behavior.json's
+// reply_code refuses as unknown has no observation either, though its parent
+// lists it, as the real agent sends none with that code (dnagent.md SH25): a
+// round and an info read of each kind carry an answer time alone, and once
+// the lever is cleared the same calls carry an observation again.
+func TestForcedUnknownObjectHasNoObservation(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	ctx := context.Background()
+	side := sidePtr(1, 3, 5)
+	syncupDn(t, dnClient, 1, side)
+	syncupSide(t, dnClient, side, 1, 0)
+	syncupCntlrFixture(t, cnClient, false)
+
+	type stamped interface {
+		GetAgentReply() *pb.AgentReply
+		GetObsStamp() *pb.ObsStamp
+	}
+	// replies is one round and one info read of every kind.
+	replies := func() map[string]stamped {
+		out := map[string]stamped{
+			"CheckDn": oneRound(t, dnClient.CheckDn, &pb.CheckDnRequest{
+				ClusterId: 1, DnId: 1, Revision: 1, TraceId: "r",
+			}),
+			"CheckSide": oneRound(t, dnClient.CheckSide, &pb.CheckSideRequest{
+				ClusterId: 1, DnId: 1, SidePointer: side, Revision: 1,
+				TraceId: "r",
+			}),
+			"CheckCn": oneRound(t, cnClient.CheckCn, &pb.CheckCnRequest{
+				ClusterId: 1, CnId: 1, Revision: 1, TraceId: "r",
+			}),
+			"CheckCntlr": oneRound(t, cnClient.CheckCntlr,
+				&pb.CheckCntlrRequest{
+					ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
+					Revision: 5, TraceId: "r",
+				}),
+		}
+		var err error
+		if out["GetDnInfo"], err = dnClient.GetDnInfo(ctx,
+			&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1}); err != nil {
+			t.Fatalf("GetDnInfo: %v", err)
+		}
+		if out["GetSideInfo"], err = dnClient.GetSideInfo(ctx,
+			&pb.GetSideInfoRequest{
+				ClusterId: 1, DnId: 1, SidePointer: side,
+			}); err != nil {
+			t.Fatalf("GetSideInfo: %v", err)
+		}
+		if out["GetCnInfo"], err = cnClient.GetCnInfo(ctx,
+			&pb.GetCnInfoRequest{ClusterId: 1, CnId: 1}); err != nil {
+			t.Fatalf("GetCnInfo: %v", err)
+		}
+		if out["GetCntlrInfo"], err = cnClient.GetCntlrInfo(ctx,
+			&pb.GetCntlrInfoRequest{
+				ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
+			}); err != nil {
+			t.Fatalf("GetCntlrInfo: %v", err)
+		}
+		return out
+	}
+
+	writeFile(t, agent, behaviorFileName, `{"objects": {
+		"dn": {"reply_code": 2}, "side 1:3:5": {"reply_code": 2},
+		"cn": {"reply_code": 2}, "cntlr 1:1": {"reply_code": 2}}}`)
+	for call, reply := range replies() {
+		if code := reply.GetAgentReply().GetCode(); code !=
+			common.ReplyCodeUnknownObject {
+			t.Fatalf("%s: code %d, want the forced unknown object", call,
+				code)
+		}
+		stamp := reply.GetObsStamp()
+		obs, answer := obsTimes(stamp)
+		if !obs.IsZero() || stamp.GetObsTraceId() != "" || answer.IsZero() {
+			t.Errorf("%s refusing its object as unknown: stamp %v, want an "+
+				"answer time alone", call, stamp)
+		}
+	}
+
+	writeFile(t, agent, behaviorFileName, `{}`)
+	for call, reply := range replies() {
+		if code := reply.GetAgentReply().GetCode(); code != 0 {
+			t.Fatalf("%s after the clear: code %d", call, code)
+		}
+		if obs, _ := obsTimes(reply.GetObsStamp()); obs.IsZero() {
+			t.Errorf("%s after the clear carries no observation", call)
+		}
+	}
+}
+
+// TestSyncupStampsItsSave: a Syncup* that saved its request carries the save
+// time and an observation after it, under the call's trace id; one the
+// revision gate refuses carries neither, as a live agent's refusal does. An
+// info read stamps an observation too, a later one each time.
+func TestSyncupStampsItsSave(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		common.TraceIdMetadataKey, "syncup-trace")
+
+	saved, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 2,
+		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
+	})
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	obs, answer := obsTimes(saved.GetObsStamp())
+	if saved.GetSaveTime() == nil {
+		t.Fatal("a SyncupCn that saved carries no save_time")
+	}
+	saveAt := saved.GetSaveTime().AsTime()
+	if !obs.After(saveAt) || answer.Before(obs) {
+		t.Fatalf("save %v, obs %v, answer %v; want save < obs <= answer",
+			saveAt, obs, answer)
+	}
+	if got := saved.GetObsStamp().GetObsTraceId(); got != "syncup-trace" {
+		t.Fatalf("obs_trace_id %q, want the call's", got)
+	}
+
+	stale, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 1,
+	})
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	if code := stale.GetAgentReply().GetCode(); code !=
+		common.ReplyCodeStaleRevision {
+		t.Fatalf("SyncupCn revision 1 code = %d, want stale revision", code)
+	}
+	if stale.GetSaveTime() != nil || stale.GetObsStamp() != nil {
+		t.Fatalf("a refused SyncupCn: save_time %v, stamp %v; want neither",
+			stale.GetSaveTime(), stale.GetObsStamp())
+	}
+
+	last := obs
+	for i := range 2 {
+		info, err := cnClient.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
+		})
+		if err != nil {
+			t.Fatalf("GetCntlrInfo: %v", err)
+		}
+		infoObs, _ := obsTimes(info.GetObsStamp())
+		cnInfo, err := cnClient.GetCnInfo(ctx, &pb.GetCnInfoRequest{
+			ClusterId: 1, CnId: 1,
+		})
+		if err != nil {
+			t.Fatalf("GetCnInfo: %v", err)
+		}
+		cnObs, _ := obsTimes(cnInfo.GetObsStamp())
+		if infoObs.IsZero() || !cnObs.After(last) {
+			t.Fatalf("info read %d: cntlr obs %v, cn obs %v; want both "+
+				"set, the cn's after %v", i, infoObs, cnObs, last)
+		}
+		if got := cnInfo.GetObsStamp().GetObsTraceId(); got != "syncup-trace" {
+			t.Fatalf("info read obs_trace_id %q, want the call's", got)
+		}
+		last = cnObs
+	}
+}
+
+// TestRefusedSyncupCarriesNoStamp pins the fake to the live agents on a
+// refused Syncup* (architecture.md, Live-state reporting): for every kind, a
+// reply that refuses the request — a stale revision, a code behavior.json's
+// reply_code forces (InvalidConf), or for a side and a cntlr a pointer the
+// node's last Syncup* does not list — carries no stamp and no save time. A
+// forced ReplyCodeLeftover is no refusal (dnagent.md SH9): its reply carries
+// an observation under the call's trace id, later than the one before it,
+// and no save time, since the fake saves nothing on a forced code. Once the
+// lever is cleared, an accepted request carries both again.
+func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		common.TraceIdMetadataKey, "syncup-trace")
+	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
+	type reply interface {
+		GetAgentReply() *pb.AgentReply
+		GetObsStamp() *pb.ObsStamp
+		GetSaveTime() *timestamppb.Timestamp
+	}
+	// syncups sends one Syncup* of every kind, each object's at the
+	// revision rev names and the dn's and cn's listing listed, and returns
+	// the replies by RPC name.
+	syncups := func(
+		rev map[string]uint64, listed bool,
+	) map[string]reply {
+		t.Helper()
+		var sides []*pb.SidePointer
+		var cntlrs []*pb.CntlrPointer
+		if listed {
+			sides, cntlrs = []*pb.SidePointer{side}, []*pb.CntlrPointer{cntlr}
+		}
+		out := make(map[string]reply)
+		var err error
+		if out["SyncupDn"], err = dnClient.SyncupDn(ctx, &pb.SyncupDnRequest{
+			ClusterId: 1, DnId: 1, Revision: rev["dn"],
+			SidePointerList: sides, ExtentSize: 67108864,
+		}); err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		if out["SyncupSide"], err = dnClient.SyncupSide(ctx,
+			&pb.SyncupSideRequest{
+				ClusterId: 1, DnId: 1, SidePointer: side,
+				Revision: rev["side"],
+				SideConf: &pb.SyncupSideRequest_SideConf{
+					ExtCnt: 2, PrimaryCnId: 1, ZeroBytes: testZeroBytes,
+				},
+			}); err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if out["SyncupCn"], err = cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+			ClusterId: 1, CnId: 1, Revision: rev["cn"],
+			CntlrPointerList: cntlrs,
+		}); err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		req := cntlrFixture(false)
+		req.Revision = rev["cntlr"]
+		if out["SyncupCntlr"], err = cnClient.SyncupCntlr(ctx,
+			req); err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		return out
+	}
+	wantCode := func(what, call string, r reply, code uint32) {
+		t.Helper()
+		if got := r.GetAgentReply().GetCode(); got != code {
+			t.Fatalf("%s, %s: code %d (%s), want %d", what, call, got,
+				r.GetAgentReply().GetDetails(), code)
+		}
+	}
+	wantNoStamp := func(what string, replies map[string]reply, code uint32) {
+		t.Helper()
+		for call, r := range replies {
+			wantCode(what, call, r, code)
+			if r.GetObsStamp() != nil || r.GetSaveTime() != nil {
+				t.Errorf("%s, %s: stamp %v, save_time %v; want neither",
+					what, call, r.GetObsStamp(), r.GetSaveTime())
+			}
+		}
+	}
+	at := map[string]uint64{"dn": 2, "side": 2, "cn": 2, "cntlr": 5}
+	behind := map[string]uint64{"dn": 1, "side": 1, "cn": 1, "cntlr": 4}
+
+	saved := syncups(at, true)
+	last := make(map[string]time.Time)
+	for call, r := range saved {
+		wantCode("the first Syncups", call, r, 0)
+		obs, _ := obsTimes(r.GetObsStamp())
+		if obs.IsZero() || r.GetSaveTime() == nil {
+			t.Fatalf("the first %s: stamp %v, save_time %v; want both",
+				call, r.GetObsStamp(), r.GetSaveTime())
+		}
+		last[call] = obs
+	}
+
+	wantNoStamp("a stale revision", syncups(behind, true),
+		common.ReplyCodeStaleRevision)
+
+	writeFile(t, agent, behaviorFileName, fmt.Sprintf(`{"objects": {
+		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
+		"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
+		common.ReplyCodeInvalidConf))
+	wantNoStamp("a forced InvalidConf", syncups(at, true),
+		common.ReplyCodeInvalidConf)
+
+	writeFile(t, agent, behaviorFileName, fmt.Sprintf(`{"objects": {
+		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
+		"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
+		common.ReplyCodeLeftover))
+	for call, r := range syncups(at, true) {
+		wantCode("a forced leftover", call, r, common.ReplyCodeLeftover)
+		obs, answer := obsTimes(r.GetObsStamp())
+		if !obs.After(last[call]) || answer.Before(obs) {
+			t.Errorf("a forced leftover, %s: obs %v, answer %v; want obs "+
+				"after %v and answer no earlier", call, obs, answer,
+				last[call])
+		}
+		if got := r.GetObsStamp().GetObsTraceId(); got != "syncup-trace" {
+			t.Errorf("a forced leftover, %s: obs_trace_id %q, want the "+
+				"call's", call, got)
+		}
+		if r.GetSaveTime() != nil {
+			t.Errorf("a forced leftover, %s: save_time %v, want none: the "+
+				"fake saved nothing", call, r.GetSaveTime())
+		}
+	}
+
+	writeFile(t, agent, behaviorFileName, `{}`)
+	// The node Syncups list neither child, so the child Syncups that follow
+	// them are refused as unknown objects.
+	unlisted := syncups(at, false)
+	for _, call := range []string{"SyncupDn", "SyncupCn"} {
+		wantCode("an empty listing", call, unlisted[call], 0)
+		if unlisted[call].GetObsStamp() == nil ||
+			unlisted[call].GetSaveTime() == nil {
+			t.Errorf("an empty listing, %s: stamp %v, save_time %v; want "+
+				"both", call, unlisted[call].GetObsStamp(),
+				unlisted[call].GetSaveTime())
+		}
+		delete(unlisted, call)
+	}
+	wantNoStamp("an unlisted pointer", unlisted,
+		common.ReplyCodeUnknownObject)
+}
+
+// oneRound sends req as the only round of a fresh Check* stream opened by
+// open and returns its reply.
+func oneRound[Req, Rep any](
+	t *testing.T,
+	open func(
+		context.Context, ...grpc.CallOption,
+	) (grpc.BidiStreamingClient[Req, Rep], error),
+	req *Req,
+) *Rep {
+	t.Helper()
+	stream, err := open(context.Background())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer stream.CloseSend()
+	if err := stream.Send(req); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	reply, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	return reply
+}
+
+// TestEveryReplyIsStamped covers the stamp of every kind's Syncup*, Check*
+// round and info read (dnagent.md SH28): the Syncup* that saved its request
+// carries the save time and an observation after it, and the round and the
+// info read after it each a later observation of the same object, under the
+// call's trace id — the request's own for a round — answered no earlier than
+// it was made.
+func TestEveryReplyIsStamped(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	ptr := sidePtr(1, 3, 5)
+	// call is a unary call's ctx carrying traceId, as the worker sends it.
+	call := func(traceId string) context.Context {
+		return metadata.AppendToOutgoingContext(context.Background(),
+			common.TraceIdMetadataKey, traceId)
+	}
+	// reply is one stamped reply of an object, in the order made.
+	type reply interface{ GetObsStamp() *pb.ObsStamp }
+	type saved interface {
+		reply
+		GetAgentReply() *pb.AgentReply
+		GetSaveTime() *timestamppb.Timestamp
+	}
+	check := func(
+		kind string, syncup saved, syncupTrace string,
+		round reply, roundTrace string, info reply, infoTrace string,
+	) {
+		t.Helper()
+		if code := syncup.GetAgentReply().GetCode(); code != 0 {
+			t.Fatalf("%s: Syncup code %d", kind, code)
+		}
+		if syncup.GetSaveTime() == nil {
+			t.Fatalf("%s: a Syncup that saved carries no save_time", kind)
+		}
+		last := syncup.GetSaveTime().AsTime()
+		for _, step := range []struct {
+			what    string
+			stamp   *pb.ObsStamp
+			traceId string
+		}{
+			{"the Syncup", syncup.GetObsStamp(), syncupTrace},
+			{"the round", round.GetObsStamp(), roundTrace},
+			{"the info read", info.GetObsStamp(), infoTrace},
+		} {
+			obs, answer := obsTimes(step.stamp)
+			if !obs.After(last) || answer.Before(obs) {
+				t.Fatalf("%s, %s: obs %v, answer %v; want obs after %v and "+
+					"answer no earlier", kind, step.what, obs, answer, last)
+			}
+			if got := step.stamp.GetObsTraceId(); got != step.traceId {
+				t.Fatalf("%s, %s: obs_trace_id %q, want %q", kind,
+					step.what, got, step.traceId)
+			}
+			last = obs
+		}
+	}
+
+	dnSyncup, err := dnClient.SyncupDn(call("dn-syncup"), &pb.SyncupDnRequest{
+		ClusterId: 1, DnId: 1, Revision: 1,
+		SidePointerList: []*pb.SidePointer{ptr}, ExtentSize: 67108864,
+	})
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	dnRound := oneRound(t, dnClient.CheckDn, &pb.CheckDnRequest{
+		ClusterId: 1, DnId: 1, Revision: 1, TraceId: "dn-round",
+	})
+	dnInfo, err := dnClient.GetDnInfo(call("dn-info"),
+		&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	check("dn", dnSyncup, "dn-syncup", dnRound, "dn-round", dnInfo, "dn-info")
+
+	sideSyncup, err := dnClient.SyncupSide(call("side-syncup"),
+		&pb.SyncupSideRequest{
+			ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
+			SideConf: &pb.SyncupSideRequest_SideConf{
+				ExtCnt: 2, PrimaryCnId: 1, ZeroBytes: testZeroBytes,
+			},
+		})
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	sideRound := oneRound(t, dnClient.CheckSide, &pb.CheckSideRequest{
+		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
+		TraceId: "side-round",
+	})
+	sideInfo, err := dnClient.GetSideInfo(call("side-info"),
+		&pb.GetSideInfoRequest{ClusterId: 1, DnId: 1, SidePointer: ptr})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	check("side", sideSyncup, "side-syncup", sideRound, "side-round",
+		sideInfo, "side-info")
+
+	cnSyncup, err := cnClient.SyncupCn(call("cn-syncup"), &pb.SyncupCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 1,
+		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1)},
+	})
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	cnRound := oneRound(t, cnClient.CheckCn, &pb.CheckCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 1, TraceId: "cn-round",
+	})
+	cnInfo, err := cnClient.GetCnInfo(call("cn-info"),
+		&pb.GetCnInfoRequest{ClusterId: 1, CnId: 1})
+	if err != nil {
+		t.Fatalf("GetCnInfo: %v", err)
+	}
+	check("cn", cnSyncup, "cn-syncup", cnRound, "cn-round", cnInfo, "cn-info")
+
+	cntlrSyncup, err := cnClient.SyncupCntlr(call("cntlr-syncup"),
+		cntlrFixture(false))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	cntlrRound := oneRound(t, cnClient.CheckCntlr, &pb.CheckCntlrRequest{
+		ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 5,
+		TraceId: "cntlr-round",
+	})
+	cntlrInfo, err := cnClient.GetCntlrInfo(call("cntlr-info"),
+		&pb.GetCntlrInfoRequest{
+			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
+		})
+	if err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	check("cntlr", cntlrSyncup, "cntlr-syncup", cntlrRound, "cntlr-round",
+		cntlrInfo, "cntlr-info")
 }
 
 // TestCheckCntlrHang is the fake's hang lever (dnv-worker.md,

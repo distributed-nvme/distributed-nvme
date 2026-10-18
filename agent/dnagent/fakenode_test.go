@@ -194,6 +194,17 @@ type fakeNode struct {
 	// gap is exactly what makes the DN9 cancel-**and-wait** different from a
 	// bare cancel, so a test that pins the wait cannot use the ctx-aware gate.
 	hardGate map[string]chan struct{}
+	// cancelCmd models a caller whose ctx is cancelled while a matching
+	// command runs — a client that went away, a syncup that cancels a read.
+	// The first match calls its cancel func; the command has dispatched, as
+	// killCmd's does, and answers what exec answers for a child killed on a
+	// done ctx: exit code -1 with ctx.Err(). A listing, an mtime read or a
+	// device-number read in the agent's own process matches it as the other
+	// command hooks do (inProcessHookErr) and answers context.Canceled.
+	// Everything the caller runs afterwards on that ctx fails the fake's ctx
+	// check, as it does in the production client. The cn twin of this fake
+	// carries the same knob for commands.
+	cancelCmd map[string]context.CancelFunc
 }
 
 // fakeSegment is one recorded WriteBlock, in write order: later segments
@@ -298,8 +309,9 @@ func newFakeNode() *fakeNode {
 		killRead:              make(map[string]bool),
 		killReadAlways:        make(map[string]bool),
 
-		gate:     make(map[string]chan struct{}),
-		hardGate: make(map[string]chan struct{}),
+		gate:      make(map[string]chan struct{}),
+		hardGate:  make(map[string]chan struct{}),
+		cancelCmd: make(map[string]context.CancelFunc),
 
 		lostAfterConnect:      make(map[string]bool),
 		listedAfterDisconnect: make(map[string]bool),
@@ -649,6 +661,13 @@ func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 	if takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line) ||
 		takeKill(f.killCmd, f.killCmdAlways, line) {
 		return context.DeadlineExceeded
+	}
+	for key, cancel := range f.cancelCmd {
+		if strings.Contains(line, key) {
+			delete(f.cancelCmd, key)
+			cancel()
+			return context.Canceled
+		}
 	}
 	return nil
 }
@@ -1006,6 +1025,14 @@ func (f *fakeNode) runCommand(
 	if !killedNoEffect {
 		killed = takeKill(f.killCmd, f.killCmdAlways, line)
 	}
+	var cancel context.CancelFunc
+	for key, fn := range f.cancelCmd {
+		if strings.Contains(line, key) {
+			delete(f.cancelCmd, key)
+			cancel = fn
+			break
+		}
+	}
 	f.mu.Unlock()
 	if killedNoEffect {
 		return killedCmdResult()
@@ -1034,6 +1061,10 @@ func (f *fakeNode) runCommand(
 	}
 	f.dispatchStderr = ""
 	stdout, code := f.dispatch(name, args, stdin)
+	if cancel != nil {
+		cancel()
+		return "", "signal: killed", -1, ctx.Err()
+	}
 	if killed {
 		// The tool was killed, but the ioctl it had already issued ran to
 		// completion in the kernel: the node changed and the agent was told

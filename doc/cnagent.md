@@ -16,8 +16,9 @@ transfers and the clones, the level gating and the reply), the sweep,
 `PushCloneBitmap`, the info and check handlers, the bitmap reads, probing
 and the read-only verdict. The mechanism both roles share — bootstrap and
 lifecycle, the local store, the revision and conf gates, the lock
-hierarchy, `ResInfo` tracking, the OS wrappers, the bitmap-chunk store and
-the check-stream rules (SH1 to SH27) — and the `cmd/dnv-agent` command
+hierarchy, `ResInfo` tracking, the OS wrappers, the bitmap-chunk store,
+the check-stream rules and the observations (SH1 to SH30) — and the
+`cmd/dnv-agent` command
 (CM1 to CM4) are `dnagent.md`'s and are not restated here. This document
 leans on `dnagent.md` for them, on `log.md`, `osclient.md` and `grpc.md`
 for the logging, OS-access and interceptor rules, on `schema.proto` for
@@ -132,8 +133,8 @@ for them:
   same reason `DnMigrMetaDmName` exists on the dn side.
   `CnCloneMetaDmPrefix` is the prefix filter that enumerates them, over
   `dmsetup ls`, or over the reading's `dmsetup info` listing in a cntlr's
-  check round or info read (CN5), and it must come from `NameFmt` because
-  the dm prefix is configurable.
+  read (CN5), and it must come from `NameFmt` because the dm prefix is
+  configurable.
 
 [D1] of `architecture.md` leaves the leg wrapper agent-internal; fixing
 its name here makes it observable (`dmsetup ls`, cleanup by prefix)
@@ -222,11 +223,11 @@ is being built.
 
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
 differences. `--capacity` is optional, since zero is a value (CN3). And
-`agent.Serve` gets no `dnagent.md` SH27 background waiter — the cn joins
-no background task: a sweep's background `nvme disconnect` (CN10) holds
-nothing a restarted agent needs, and its CN11 probers are cancelled at
-`rootCtx`, never joined (a wedged direct read would hang shutdown
-forever; `osclient.md`, Exported raw helpers and the probe-IO carve-out).
+`agent.Serve` gets no `dnagent.md` SH27 background waiter: the cn joins
+no background task — its CN11 probers, its sweep's background
+`nvme disconnect` (CN10), its connect retry and clone-metadata retry
+(CN10, CN18) and its background reads are cancelled at `rootCtx` and
+never joined, for the reasons `dnagent.md` SH27 gives.
 
 ## The cn role — package `cnagent`
 
@@ -236,12 +237,12 @@ forever; `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 entry points other than the check streams of `check.go` and the bitmap
 reads of `bitmapread.go`; `plan.go` the per-cntlr derived names and sizes
 and the ns-dev backing and ANA state machines of CN16; `reading.go` the
-reading of CN28 that a cntlr's check round and info read take, and where
-the helpers both channels share take a dm device's facts and a device's
-number from; `syncup_cn.go` and `syncup_cntlr.go` the two converges;
-`leg.go` the CN10 side connections, the walk a cntlr's converge, check
-round or info read takes and the lookups in it (the walk's code is the
-one both agents share, `dnagent.md` SH20), and the wrappers;
+reading of CN28 that a cntlr's read takes, and where the helpers both
+channels share take a dm device's facts and a device's number from;
+`syncup_cn.go` and `syncup_cntlr.go` the two converges;
+`leg.go` the CN10 side connections, the walk a cntlr's converge or read
+takes and the lookups in it (the walk's code is the one both agents
+share, `dnagent.md` SH20), and the wrappers;
 `healthcheck.go` the CN11
 probers and their `LegProbeIO`
 (direct syscalls, never the `OsClient`); `md.go` the mdadm wrapper, the
@@ -252,8 +253,8 @@ CN18 clone-metadata slot allocator — unit accounting over the single loop
 device, its room check and verdict for a clone whose wrapper is absent or
 does not match, the `blkdiscard` recycle guard, the clone-metadata wrapper
 linears and the enumeration that is the allocation registry (`dmsetup ls`
-plus `dmsetup table`, or in a cntlr's check round and info read the
-reading's two listings, CN5); `pool.go` the concats, thin pools and thin
+plus `dmsetup table`, or in a cntlr's read the reading's two listings,
+CN5); `pool.go` the concats, thin pools and thin
 volumes;
 `td.go` the
 raid0, dm-error, ns-dev and flakey tables; `clone.go` CN18 and the clone
@@ -267,9 +268,11 @@ and probe helpers (`ensureDmSingle`, `ensureDmError`, `ensureDmLinear`,
 stays in `clone.go`); `thinbm.go` the thin-metadata snapshot reader
 behind `GetThinDeviceBm` and `GetLegBm` (CN25 to CN27) and the
 clone-geometry fold of `architecture.md`, raid0 bitmap math;
-`bitmapread.go` those two RPC entry points; `check.go` and `probe.go` the
-check rounds and the probes. Package boundaries are binding, file names
-are not.
+`bitmapread.go` those two RPC entry points; `check.go` the check rounds;
+`observation.go` what the check rounds and the info reads answer from,
+the background reads and the converge marks, as the cn holds them
+(`dnagent.md` SH28 to SH30); `probe.go` the probes. Package boundaries
+are binding, file names are not.
 
 ### Server type and lock mapping
 
@@ -281,10 +284,13 @@ the `LocalCntlrPath` id tuple), the `--capacity` value and the port conf
 (`PortConf`: the transport flags plus `--nvmet-port-id`). A leaf mutex
 guards the in-memory mirrors of the local store — two maps: cn requests,
 and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
-`CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and four
-registries that mirror nothing: in each cntlr's state the connect-retry,
-clone-metadata-retry and prober registries, and the CN10 disconnect
-registry, in memory only, never persisted. Three more in-memory-only
+`CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and what
+mirrors nothing: in each cntlr's state the connect-retry,
+clone-metadata-retry and prober registries; in each CN's and each
+cntlr's state its observation slot, which holds its latest observation
+and its running background read (`dnagent.md` SH28, SH29); the converge
+marks (`dnagent.md` SH30); and the CN10 disconnect registry, all in
+memory only, never persisted. Three more in-memory-only
 fields of a cntlr's state sit outside that mutex, touched only under the
 cntlr's object lock or the node write lock: the marks of CN14's
 activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`) and
@@ -297,19 +303,24 @@ own lock; the chunk sets are touched only under the cntlr's object lock,
 or under the node write lock, which excludes it. A buffered channel of
 `disconnectConcurrency` slots caps how many of the disconnect registry's
 disconnects run at once. `rootCtx` anchors the CN10 and CN18 connect-retry
-loops, CN18's clone-metadata retry loop, the CN10 background disconnects
-and the CN11 probers. `cloneMetaMu`
+loops, CN18's clone-metadata retry loop, the CN10 background disconnects,
+the CN11 probers and the background reads, so shutdown cancels them and
+joins none (CN-CM2). `cloneMetaMu`
 serializes the CN18 allocator (CN5): the registry is the kernel's dm
 tables, so enumerate, discard and create must be one critical section. It
 is the one cn lock held across OS calls — a leaf taken below every
 `LockSet` lock, never held while another is acquired.
 
 CN1. Lock mapping (instantiates `dnagent.md` SH10 to SH13): `SyncupCn` and the startup
-reconcile — node write; `SyncupCntlr`, `PushCloneBitmap`, `GetCntlrInfo`,
-one `CheckCntlr` round, one background connect-retry or clone-metadata-retry
-attempt, `GetThinDeviceBm` and `GetLegBm` — node read plus that cntlr's object lock
-(key = the cluster, cn, sp and cntlr ids); `GetCnInfo` and one `CheckCn`
-round — node read; `GetCnSize` — no lock. The CN11 leg probers take no
+reconcile — node write; `SyncupCntlr`, `PushCloneBitmap`, one background
+read of a cntlr (`dnagent.md` SH29), one background connect-retry or
+clone-metadata-retry attempt, `GetThinDeviceBm` and `GetLegBm` — node
+read plus that cntlr's object lock (key = the cluster, cn, sp and cntlr
+ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
+`GetCntlrInfo` and one `CheckCn` or `CheckCntlr` round — no lock, since
+the last four answer from the object's latest observation (`dnagent.md`
+SH28). How a syncup cancels a read and how every other holder waits for
+one is `dnagent.md` SH30. The CN11 leg probers take no
 lock at all: their IO can block far past every command timeout (a leg
 with no serving path queues IO indefinitely), and nothing that holds a
 lock ever waits on them — they only publish results into their own
@@ -451,9 +462,13 @@ happens to exist, so a clone this pass is about to (re)build is already
 named by its cntlr's `clone_list` and is never mistaken for an orphan.
 All under the node write lock, with the `dnagent.md` SH2 trace id. Background retries
 (CN10, CN18) and probers (CN11) mint a fresh trace id per attempt.
-Whatever this pass could not remove is not remembered anywhere: the first
-`Check*` of the object that still holds it recomputes it and reports it
-(CN30).
+Each CN's converge and node-level sweep, and each cntlr's converge, end
+in the object's observation (`dnagent.md` SH28): its rows, with the code
+of its own sweep. Whatever this pass could not remove is remembered only
+as the code of the object's observation, which the next read or converge
+replaces, and no later pass reads it (CN30): the object's `Check*` rounds
+answer from that observation until then, and each later read names
+afresh what is still there.
 
 ### `GetCnSize`
 
@@ -507,11 +522,11 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   file; the next converge's `mount` would hide that file and bring the
   cascade above: a fresh file, a second loop device, and every clone
   built on the first loop rebuilt. As after a failed `mount`, the arena
-  then waits for a later converge: a check round whose probes answer
-  reads what is absent `MISSING` and names it in the `CheckCn` verdict
-  (CN30), so the worker re-sends `SyncupCn` every round until a converge
-  has built it; a round whose `findmnt` does not answer reads
-  `tmpfs_info` `ERROR` and names nothing of the arena.
+  then waits for a later converge: a read of the CN whose probes answer
+  reads what is absent `MISSING` and names it in its verdict (CN30), so
+  the worker re-sends `SyncupCn` on each round that answers from such a
+  read until a converge has built it; a read whose `findmnt` does not
+  answer reads `tmpfs_info` `ERROR` and names nothing of the arena.
 * **backing file** `CnTmpFilePath`: probe its size with `stat`; absent ⇒
   `truncate` the file to `CnCloneMetaAreaSize` (sparse — tmpfs pages
   materialize only as clone metadata is written, and CN18's hole-punch
@@ -522,8 +537,9 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   either: the converge asks once more in the same pass, and when that
   does not answer either, `tmp_file_info` is an `ERROR` naming it and
   nothing is truncated — a file that really is absent then waits, as the
-  tmpfs does, for a check round that reads it absent and names it (CN30),
-  and the `SyncupCn` that round makes the worker re-send. A file of another
+  tmpfs does, for a read that reads it absent and names it (CN30), and
+  the `SyncupCn` that the round answering from that read makes the worker
+  re-send. A file of another
   size is replaced while nothing uses it, on a tmpfs this pass found or
   mounted (`tmpfs_info` `OK`): no clone-metadata wrapper of the CN maps
   one of the file's loop devices, every wrapper's table is a run of the
@@ -540,8 +556,8 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   epoch set, and the CN out of allocation, for as long as it stays
   (`dnv-worker.md` HL1; `architecture.md`, Capacity index keys).
 * **loop device**: probe with `losetup` for the loop devices attached to
-  `CnTmpFilePath` (the loop path is re-learned from this probe on every
-  converge, check round and info read — it is kernel-assigned state, never
+  `CnTmpFilePath` (the loop path is re-learned from this probe by every
+  converge and every read that uses it — it is kernel-assigned state, never
   persisted, and a stale cached path is exactly what CN28's arena check
   must catch); absent ⇒ `losetup` attaches a free loop device to it, only
   while `tmpfs_info` is `OK`, as for the file; otherwise, with none
@@ -562,15 +578,15 @@ node, common, probe-first (`dnagent.md` SH16), building `CnInfo` as it goes:
   "/sys/block/<name>/dev" (CN28). The listing is `dmsetup ls` and each
   table one `dmsetup table` of the wrapper (the name comes from
   `dmsetup ls`, the major:minor only from `dmsetup table` — `ls`
-  formatting varies across versions), except in a cntlr's check round and
-  info read, which take the names from their reading's `dmsetup info`
-  listing and the tables from its `dmsetup table` listing (CN28). There a
-  wrapper of the cntlr's own clones that a partial `dmsetup info` listing
-  lacks is read on its own (CN28), so the call reads its own wrappers as a
-  converge does, and a table the `dmsetup table` listing lacks is read on
-  its own as well. A listing is a snapshot that is stale the instant it is
-  printed — a `SyncupCntlr`, a check round and an info read hold only the
-  node read lock, so another cntlr's sweep (CN21), at `SP_LEVEL_DISABLE`
+  formatting varies across versions), except in a cntlr's read, which
+  takes the names from its reading's `dmsetup info` listing and the
+  tables from its `dmsetup table` listing (CN28). There a wrapper of the
+  cntlr's own clones that a partial `dmsetup info` listing lacks is read
+  on its own (CN28), so the read reads its own wrappers as a converge
+  does, and a table the `dmsetup table` listing lacks is read on its own
+  as well. A listing is a snapshot that is stale the instant it is
+  printed — a `SyncupCntlr` and every read hold only the node read lock,
+  so another cntlr's sweep (CN21), at `SP_LEVEL_DISABLE`
   or otherwise, can remove a
   wrapper between the listing and the read of its table — so a name whose
   table read fails is dropped when the wrapper has meanwhile vanished: it
@@ -615,15 +631,18 @@ local state needs nothing
 yet — resources come with its first `SyncupCntlr`; the persisted request
 is what makes the pointer known. A local cntlr whose pointer left the
 list is forgotten: its cntlr file and chunk files are deleted, its
-connect retry, its clone-metadata retry and its leg probers are cancelled,
-its memory entry and object lock are dropped (`dnagent.md` SH7) — and
-nothing of its is removed from the node by
-this step. Then the node-level sweep (CN21) finds its resources by name
-and removes them. Nothing is remembered about what the sweep could not
-finish; the reply's code is recomputed from the sweep's own verdict
-(CN30). The base state itself is never swept — like the DN port, it
+connect retry, its clone-metadata retry, its leg probers and its running
+read are cancelled, its memory entry and object lock are dropped
+(`dnagent.md` SH7) — and nothing of its is removed from the node by this
+step. Then the node-level sweep (CN21) finds its resources by name
+and removes them. What the sweep could not finish is remembered only as
+the code of the CN's observation, which the next read or converge
+replaces, and no later pass reads it (CN30); the reply's code is that of
+the sweep's own verdict. The base state itself is never swept — like the DN port, it
 outlives every cntlr and only lab cleanup removes it. Reply
-`agent_reply`, `revision`, `cn_info`.
+`agent_reply`, `revision`, `cn_info`, and the `obs_stamp` and
+`save_time` of `dnagent.md` SH28: the CN's observation, stored before the
+reply, holds that code and that `cn_info`.
 
 ### `SyncupCntlr`
 
@@ -836,7 +855,7 @@ build phase — and runs on every converge:
    is missing, so it does not run at `SP_LEVEL_DISABLE`: the wanted set
    holds no dm-error there, and one created after the sweep's enumeration
    would be in no chain — the pass would remove the ns-dev parked on it,
-   reply clean, and leave an unwanted device for the next round to find.
+   reply clean, and leave an unwanted device for the next read to find.
    Nothing is lost by skipping it: the wanted set holds no ns-dev at that
    level either, so P0 parks every one by its own live table (CN21),
    which needs no planned dm-error — where the td's is missing, it
@@ -891,16 +910,16 @@ a whole-device dm-linear over the leg's meta and data blocks that names
 the head by the number in the head's "/sys/block/<name>/dev" (CN28) —
 sizes come from the desired state, never from probing the device.
 
-**Lookups share a walk.** A cntlr's check round and info read take one
-walk, in their reading (CN28), and make all their lookups in it. A
+**Lookups share a walk.** A cntlr's read takes one walk, in its reading
+(CN28), and makes all its lookups in it. A
 converge takes one right before its sweep, and its lookups share it,
 except that it walks again after a connect step that ran a connect
 (below), and once more when a clone source's lookup reads no subsystem,
 before it connects the source (CN18, step 1); the sweep's check that a
 removed connection is gone walks once per connection (Known limits). The
 list of connections of a converge's sweep comes from the walk the
-converge takes before it, and that of the verdict of a cntlr's check
-round or info read from the reading's (CN21, CN30). Reason: a walk lists
+converge takes before it, and that of the verdict of a cntlr's read from
+the reading's (CN21, CN30). Reason: a walk lists
 the class directory and reads every entry's "subsysnqn", so a walk for
 each lookup would cost a cntlr with many legs reads that grow with the
 square of its leg count. A lookup reads the entry's "subsysnqn" again
@@ -983,9 +1002,10 @@ one record naming the subsystem, the head it picked, if any, and the
 pauses it took of each kind. Reason: a leg row that reads that the head's
 block device is not there can then be the budget's kept case, and the
 record in the same pass tells it from a wait that ended too early. The
-waiting holds the cntlr's object lock, which every `CheckCntlr` round
-takes too (CN1), which is why the budget is one per pass and not one per
-leg.
+waiting is part of a converge, which holds the cntlr's object lock and
+keeps the cntlr's reads off while it runs (CN1; `dnagent.md` SH30), so
+the cntlr's observation ages for as long as the pass waits; that is why
+the budget is one per pass and not one per leg.
 
 A connect failure marks that leg `RES_STATUS_ERROR` and registers the
 cntlr in a background retry registry that re-runs the converge every
@@ -1058,9 +1078,11 @@ is never run inline: when the target vanishes mid-delete the kernel cannot
 enter error recovery on a DELETING controller, the controller's shutdown
 command waits out the admin timeout, and `nvme disconnect` waits with it
 in an uninterruptible write that no signal of `dnagent.md` SH15 ends.
-Inline, that would hold the cntlr's object lock — and every `CheckCntlr`
-round of the cntlr with it (CN1) — for the whole timeout, and the worker's
-`SyncupCntlr` would run into its own deadline. So the pass probes the
+Inline, that would hold the converge, and the cntlr's object lock with
+it, for the whole timeout: no read of the cntlr would run meanwhile
+(CN1), so its observation would age that long and could become too old
+(`dnv-worker.md` HL7), and the worker's `SyncupCntlr` would run into its
+own deadline. So the pass probes the
 connection under its locks and nothing more: one with no controller is
 gone; one the probe could not read is a leftover and nothing is issued for
 it; one with a controller is a leftover of that pass, which sets its
@@ -1073,8 +1095,8 @@ slot and stay registered while they wait.
 Uncapped, one L10 of many legs or one pool drain would set them all going
 together, and each delete a vanished target stalls holds an `OsClient`
 slot for the admin timeout — enough of them, and the node's converges and
-Check rounds are refused a slot at the soft timeout and report `ERROR`
-rows on healthy objects. The registry is a server-wide set of subsystem
+reads are refused a slot at the soft timeout and report `ERROR` rows on
+healthy objects. The registry is a server-wide set of subsystem
 NQNs under the leaf mutex, and it is bookkeeping of work in progress,
 never memory of work that failed: an entry lives exactly as long as its
 goroutine, and it is read for two things. A later pass issues no second
@@ -1127,7 +1149,7 @@ the window is one `CnLegProbeInterval` tick plus the probe itself, and a
 fresh wrapper, a promotion and an agent restart each open it. A leg whose
 wrapper exists but whose converge fails before its prober registers — on
 a promoted or restarted primary whose connect is refused, say — reads
-`PENDING` in every probe round until a converge registers one, while each
+`PENDING` in every read until a converge registers one, while each
 failing converge marks the leg `RES_STATUS_ERROR` (CN10). A standby (and
 spare legs on it) reports the transport probe instead: the sysfs walk
 (CN10) shows a live controller per desired (provisioned) side and, for a
@@ -1274,20 +1296,20 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   degraded once a probe reads an md array, and the member's own leg row.
   The retry runs a
   converge every `CnConnectRetryInterval` for as long as a member stays
-  unavailable, each under the cntlr's object lock, which every
-  `CheckCntlr` round takes too (CN1): on a wide SP an attempt can hold a
-  Check round past the worker's round timeout, and the primary then reads
-  unreachable (Known limits).
+  unavailable, each holding the cntlr's reads off while it runs (CN1;
+  `dnagent.md` SH30): on a wide SP an attempt can outlast the worker's
+  bound on an observation's age (`dnv-worker.md` HL7), and the primary
+  then reads unreachable (Known limits).
 
   **The array is read from sysfs.** The **md walk** lists "/sys/block"
   for the array nodes and each array's "md" directory, reading every
   member's "block/dm/name", as the sweep's `ListArrays` does — once per
-  converge, check round or info read, shared by all of its groups and by
-  the pool concats (below): a walk per group would list every array once
-  per group. Its listings are made in the agent's own process
+  converge or read of a cntlr, shared by all of its groups and by the
+  pool concats (below): a walk per group would list every array once per
+  group. Its listings are made in the agent's own process
   (`osclient.md`, ReadDir). A converge takes it with `Md.Walk` at the
-  first group that needs it; a check round and an info read take it in
-  their reading (CN28), with `Md.Scan`.
+  first group that needs it; a read takes it in its reading (CN28), with
+  `Md.Scan`.
   An array node is "md" followed by digits, or "md_" followed by a name:
   the node mdadm puts the "/dev/md" link on when mdadm.conf says to
   create names, which `architecture.md`, md names, sizes `CnMdDevName`
@@ -1314,8 +1336,8 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   are gone; with the md module's legacy asynchronous gendisk deletion
   switched off it marks it in the stop itself, while the unbound member
   directories are still there. A converge's md walk reads no
-  "array_state" and is unaffected. The md walk of a check round or an
-  info read reads every array's "array_state" as well, for its verdict,
+  "array_state" and is unaffected. The md walk of a cntlr's read reads
+  every array's "array_state" as well, for its verdict,
   and keeps it apart: the group rows read the walk under `Md.Walk`'s rule
   and never see it, and only the verdict, under `ListArrays`' rule, fails
   on it, as the sweep's enumeration does (CN30). Only a "/sys/block"
@@ -1353,7 +1375,7 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   layers above the group, CN16), whose next attempt is a whole
   converge and tries the group again: the group's error is a row, not a
   reply code (CN29), the error itself registers no CN10 background retry,
-  and the Check verdict reports a leftover (a reply code the worker
+  and the cntlr's verdict reports a leftover (a reply code the worker
   re-drives) only while its md enumeration still fails (CN30) —
   so the group stays unassembled, its row `MISSING` on the Check rounds
   after the array answers, until the cntlr's next converge for some
@@ -1380,11 +1402,11 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   **The group's device number** comes from the same match: the pool's
   concat (CN13) maps a `RedundMdRaid1` group by the number in
   "/sys/block/<node>/dev" of the array the match finds in the md walk, a
-  degraded array included, read once per group in a converge, a check
-  round or an info read, apart from the array's other attributes, so a
-  failed read of one of those fails the group's row alone. Reason: the
-  group's row and its concat rows then read one array, so a check round
-  and a converge build and check the concat over the same array, and
+  degraded array included, read once per group in a converge or a read,
+  apart from the array's other attributes, so a failed read of one of
+  those fails the group's row alone. Reason: the group's row and its
+  concat rows then read one array, so a read and a converge check and
+  build the concat over the same array, and
   nothing waits for the link udev makes under "/dev/md". A group the
   match gives no array — none holds its legs, two do, or the md walk
   could not read the group's own array (no answering array holds its
@@ -1443,11 +1465,12 @@ CN12. Groups (`md.go`; primary only — a standby has none,
   `--add --failfast` either, because extras leave before promotions
   arrive. A remove or an add that fails or is killed is the group's
   error for that pass, a row, not a reply code (CN29), and registers no
-  CN10 background retry. What re-drives it is the verdict of the
-  cntlr's check rounds, which names each `leg_list` member the
-  reconciliation would put back or add, on a leg the call reads as able
-  to take it (CN30): the worker re-sends the `SyncupCntlr`
-  (`dnv-worker.md` RW4), whose converge tries again. So a switch whose
+  CN10 background retry. What re-drives it is the read-only verdict of
+  the cntlr's read, which names each `leg_list` member the
+  reconciliation would put back or add, on a leg the read reads as able
+  to take it (CN30): on the round that answers from that read the worker
+  re-sends the `SyncupCntlr` (`dnv-worker.md` RW4), whose converge tries
+  again. So a switch whose
   `--remove` was killed is finished by the converge the named spare
   brings, or, while the promoted spare is not available, by the CN10
   retry that a `leg_list` member that is not available registers
@@ -1501,7 +1524,7 @@ side has gone, the read sits in the multipath head's requeue list until
 the path's failfast expires — the controller stays live until its
 keep-alive times out, error recovery starts after it, and the fast IO
 fail timeout runs from the reconnect that follows — far past the soft
-timeout. A Check round's probe killed that way would read the group's
+timeout. A read's probe killed that way would read the group's
 row `ERROR` for a member fault the leg row already reports, and that row
 counts toward cntlr health: it would fail the primary over. What the
 sweeps, the member reconciliation, the md rows and the pool concats need
@@ -1521,7 +1544,7 @@ decision needs the whole node; that is the sweep's "enumeration failed:
 md arrays …" and a `ReplyCodeLeftover`, never a row, and the worker
 counts a Leftover reply as accepted, so it does not reach cntlr health —
 while `Md.Walk` records such an array as unanswered. The md walk of a
-check round or an info read, `Md.Scan`, makes `ListArrays`' reads once
+cntlr's read, `Md.Scan`, makes `ListArrays`' reads once
 and serves both rules: its group rows and concat rows read it under
 `Md.Walk`'s, its verdict under `ListArrays`'. `Md.Gone` verifies a
 stop from the same "array_state": only an absent directory or clear
@@ -1652,8 +1675,8 @@ event for an operator instead of an empty volume under a live `dev_id`,
 which is what an unconditional thin create would produce. This build is
 the one place the reason is set, and only for a created td: an uncreated
 snapshot's table meets the same refusal until its message has made the id,
-and its row carries no reason, and a check round's probe finds a created
-td's absent volume `MISSING` with no reason (CN28). Reason: the worker
+and its row carries no reason, and a read's probe finds a created td's
+absent volume `MISSING` with no reason (CN28). Reason: the worker
 decides by the field, and a tool's wording is no contract. Standby cntlrs
 build no thin volumes and are unaffected. The delete message a td leaving
 `td_list` triggers is not gated on `created` (below).
@@ -1721,8 +1744,8 @@ fails otherwise count as neither, and a run that makes every slice's id,
 or none, marks nothing. The agent keeps the mark in memory (`tornTds`)
 from that run until a request carries the td `created` or the td leaves
 `td_list`, and every report carries it in the td's entry of
-`td_id_to_thin_info` while the td is uncreated, a converge's and a check
-round's alike (CN28), so the created flip, which either reply can bring,
+`td_id_to_thin_info` while the td is uncreated, a converge's and a
+read's alike (CN28), so the created flip, which either reply can bring,
 writes it into the thin device record
 (`dnv-worker.md` RW19). The mark is best effort: between the run that saw
 the tear and the flip, an agent restart can lose it, and so can a failover
@@ -2331,7 +2354,7 @@ the CN28 probe decide the status of each of its three rows by one rule,
 from what each reads of the node: the source's lookup in the walk, step
 2's verdict for a source step 1 reads as connected (above), and the
 dm-clone's presence and status line. The converge reads after its own
-steps and the round only reads, so for the same state the two report the
+steps and a read only reads, so for the same state the two report the
 same status, and a row's epoch moves only when the state does:
 
 * `clone_id_to_target`: `RES_STATUS_ERROR` while a sweep's disconnect of
@@ -2366,11 +2389,12 @@ it, whatever its status, because `DeleteClone`'s hydration check reads it
 (`architecture.md`, Clones). Where the namespaces serve from does not
 follow the rows: CN16 rule 5 reads the dm-clone's status itself. A
 dm-clone up with hydration off therefore reads `RES_STATUS_ERROR` on every
-check round as on every converge, and a fault of the source reads
+read as on every converge, and a fault of the source reads
 `RES_STATUS_MISSING` on both, while a dm-clone with hydration on serves on
 (Known limits). Reason: two reports of one device cannot both be right,
 and rows that differ between the channels flip their status, and the
-health epoch with it, every round.
+health epoch with it, each time a converge's observation and a read's
+follow each other.
 
 **A fault of the source does not itself move the role.** It reads
 `RES_STATUS_MISSING`, not `ERROR`, and a missing row sets no health epoch
@@ -2379,8 +2403,10 @@ replacement. Reason: moving the primary cannot repair the source, and the
 worker cannot tell a fault in the primary's own path to the source from
 one at the source; the operator can move the role by disabling the
 primary cntlr (`dnv-worker.md` AR5). A fault that fails step 1 still
-keeps the CN10 retry running, whose attempts can make the primary's check
-rounds miss, and missed rounds can move the role (Known limits). A
+keeps the CN10 retry running, whose attempts hold the primary's reads
+off while they run, so its observation can become too old, which the worker
+counts as a missed round, and missed rounds can move the role (Known
+limits). A
 dm-clone up with hydration off is this node's own fault and reads
 `ERROR`: the primary that takes the role rebuilds the clone by its crash
 recovery (`architecture.md`, Clone crash recovery).
@@ -2399,14 +2425,14 @@ with room — and on a recovery the dm-clone too, which the recovery
 removes before it allocates — the clone's dm-clone and wrapper rows read
 `RES_STATUS_MISSING`, the failure leading their details on the pass that
 met it, and the parked ns-dev reads `OK` (CN16 rule 5). None of that sets
-a health epoch, and a Check round cannot tell that state from one the
+a health epoch, and a read cannot tell that state from one the
 build has not reached, so nothing but the retry runs the build again, and
 the retry is registered all the same. Two outcomes of step 2 register no
 CN10 retry for the clone: an arena with no free run for the clone, whether
 the verdict or `ensureCloneMeta`'s own enumeration finds it, registers the
 clone-metadata retry instead, and a run larger than the whole arena
 registers nothing and is left to its rows, the same `ERROR` pair, which
-the Check round reports too (CN28); after either, a namespace of the
+a read reports too (CN28); after either, a namespace of the
 destination td that waits only for the clone registers none either
 (CN16).
 Some failures stop nothing and are only logged: step 2's failed removal
@@ -2432,14 +2458,18 @@ clone still waits —, the cntlr reaches `SP_LEVEL_DISABLE` (CN19) or it is
 dropped (CN7). Nothing the cntlr is sent says that a run came free: one
 does when a clone of another cntlr of the node goes, so the cntlr asks
 again by itself. It is not the CN10 retry because of what each attempt costs: a
-whole converge under the object lock the cntlr's Check rounds take (CN1),
-which at CN10's pace would make a large pool's Check rounds miss, while a
-clone that waits for room is not broken, so the slower pace loses nothing.
+whole converge under the cntlr's object lock, which holds the cntlr's
+reads off while it runs (CN1; `dnagent.md` SH30), so at CN10's pace a
+large pool's attempts would follow one another with hardly a gap for a
+round to start a read in, and its rounds would answer from an
+observation as old as the attempt in progress, too old whenever one
+attempt outlasts the worker's bound (`dnv-worker.md` HL7); a clone that
+waits for room is not broken, so the slower pace loses nothing.
 A namespace of the destination td that waits only for the clone — no
 dm-clone of the clone up, or one not hydrating — registers no CN10 retry
 either (CN16): this retry's attempt that finds room builds the clone and
-moves the namespace to optimized, and the faster pace would only cost the
-Check rounds more. The two retries may run at once, when another cause
+moves the namespace to optimized, and the faster pace would only hold
+the reads off more. The two retries may run at once, when another cause
 registers the CN10 one; each attempt is a whole converge, and a second
 one in a row is harmless.
 
@@ -2495,8 +2525,8 @@ still in that list.
   reports its ns-dev row `ERROR` in the probe's words ("table is not the
   desired namespace backing"), and the hold registers the CN10 retry,
   because a hold that an unanswered `dmsetup ls` alone caused leaves
-  nothing for the Check verdict, which lists the node from the round's
-  own reading (CN30), to name once that reading answers.
+  nothing for the read-only verdict, which lists the node from the
+  read's own reading (CN30), to name once that reading answers.
   The first pass whose L3 removes the dm-clone takes the order above — the
   park of one still over the dm-clone, L3, then the reload. Reason: a
   lingering dm-clone writes into one td, and holding every namespace of
@@ -2585,7 +2615,8 @@ that level and above:
   the CN10 and CN18 connect retry and CN18's clone-metadata retry — are
   cancelled, and every `ResInfo` history of the cntlr is dropped.
 
-CN20. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list`.
+CN20. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list`, and
+the `obs_stamp` and `save_time` of `dnagent.md` SH28.
 
 **`agent_reply` is the sweep's verdict.** It is `ReplyCodeLeftover` iff
 this cntlr's sweep was not clean — the node still holds an object of this
@@ -2593,12 +2624,14 @@ sp that the desired state does not want, or one of the enumerations did
 not answer — and zero otherwise. The details list the leftovers by kind
 and name, a bounded number of them with a tail saying how many more,
 plus one "enumeration failed" entry naming each unanswered enumeration;
-the full list goes to the agent log every pass, in the leftover record
-of `log.md`, Leftovers, so a lingering leftover is visible every round
-and not only once. The code means accepted with residue, not a rejection
+the full list goes to the agent log from every pass and every read whose
+verdict is not clean, in the leftover record of `log.md`, Leftovers, so
+a lingering leftover is visible on every pass and every read that still
+finds it, not only once. The code means accepted with residue, not a rejection
 (`architecture.md`, Teardown by sweep), and `revision` is the request's
-own. Nothing about it is stored: it is recomputed by enumerating the node on
-every `Syncup*` and every `Check*` (CN30). A cntlr the conf gate refused
+own. No pass remembers it: every converge and every read recomputes it
+by enumerating the node, and a `Check*` carries the code of the cntlr's
+latest observation (CN30). A cntlr the conf gate refused
 has no verdict at all (CN8): nothing was converged and nothing
 enumerated, so the reply carries `ReplyCodeInvalidConf` and the sweep
 never ran.
@@ -2625,8 +2658,8 @@ cn agent runs it at two scopes:
   under the node write lock: every sp that appears on the node and is
   not in the stored `cntlr_pointer_list` — wanted set empty — plus the
   cross-sp objects of the attribution rules below. The write lock is
-  what makes judging an unowned object safe: no cntlr converge, no Check
-  round and no push runs beside the pass. A disconnect the pass sets
+  what makes judging an unowned object safe: no cntlr converge, no read
+  and no push runs beside the pass. A disconnect the pass sets
   going can complete after the lock is released (CN10), so it is CN10's
   registry, read by the CN10 and CN18 connect steps, that keeps a
   converge from adopting that connection meanwhile.
@@ -2676,8 +2709,8 @@ its own (`ListAllSubsys`) — whose list fails on any entry whose
 "subsysnqn" read did not answer, as `ListAllSubsys` does (`dnagent.md`
 SH20); and the listing of the nvmet subsystems tree — linked to the port
 or not, a partially removed subsystem is unlinked but present. A cntlr's
-verdict in a check round or an info read takes its dm, md and nvme
-listings from the call's reading instead (CN30). An enumerator that did
+read takes its verdict's dm, md and nvme listings from its reading
+instead (CN30). An enumerator that did
 not answer leaves its part of the snapshot empty and is reported as
 "enumeration failed", and an
 enumeration that did not answer licenses no removal (`architecture.md`,
@@ -2970,38 +3003,52 @@ correctness-neutral loss `architecture.md`, [D8], already accepts. Reply
 
 ### `GetCnInfo` / `GetCntlrInfo`
 
-CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
-`revision`, the info. An unknown CN or cntlr pointer — one this process
-holds no request for, as when none was ever accepted, or when the startup
-reload could not load or skipped its file (CN2) and none has been
-accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision`. For a
-known object the `agent_reply` is the read-only verdict of CN30. A
-`GetCntlrInfo` takes the node's reading first (CN28), then builds the
-rows and then the verdict from that one reading, as a `CheckCntlr` round
-does (CN24), so a call answers what a round in the same state would. The
-reading is the call's own, taken under its locks and shared with
-nothing, so every call reads the node afresh. A cntlr whose stored conf
-the gate refuses (CN8) takes no reading: its info is empty and it has no
-verdict (CN30). A `GetCnInfo` takes no reading: its probe runs first and
-its verdict second, as in a `CheckCn` round. Never
-creates, changes or removes an object of the node, though a cntlr's call
-makes the kernel commit the metadata of each dm-clone whose status it
-reads; its status reads of thin pools commit nothing (`dnagent.md` SH17).
+CN23. Answer from the object's latest observation (`dnagent.md` SH28),
+taking no lock of CN1, reading nothing of the node and starting no read:
+reply `agent_reply`, `revision` and the info of that observation, and its
+`obs_stamp`; an object held with no observation yet is answered with no
+info and no observation time. An unknown CN or cntlr pointer — one this
+process holds no request for, as when none was ever accepted, or when
+the startup reload could not load or skipped its file (CN2) and none has
+been accepted since — ⇒ `ReplyCodeUnknownObject` with a zero `revision` and a stamp
+with no observation time. For a known object the `agent_reply` is the
+observation's code (CN30), and a `CheckCn` or `CheckCntlr` round at the
+same moment answers the same observation (CN24).
+
+What the observation holds was read by the object's background read,
+which a round starts (`dnagent.md` SH29), or made by a converge, whose
+observation carries the converge's own rows and code (`dnagent.md` SH28).
+A cntlr's read takes the node's reading first (CN28), then builds the
+rows and then the verdict from that one reading, so its rows and its code
+tell of one look at the node. The reading is the read's own, taken under
+its CN1 locks and shared with nothing, so every read reads the node
+afresh. A read of a cntlr whose stored conf the gate refuses (CN8) takes
+no reading: its info is empty and it has no verdict (CN30). A CN's read
+takes no reading: its probe runs first and its verdict second. A read
+never creates, changes or removes an object of the node, though a
+cntlr's read makes the kernel commit the metadata of each dm-clone whose
+status it reads; its status reads of thin pools commit nothing
+(`dnagent.md` SH17).
 
 ### `CheckCn` / `CheckCntlr`
 
-CN24. Instantiate the `dnagent.md` SH24 to SH26 loop with the probes of Probing and
-error capture — `probe.go`; one round takes the CN1 locks of the
-corresponding `Get*Info`, and its `agent_reply` is the same read-only
-verdict (CN30) — which is what drives the worker's re-sync while a
-leftover is still there, and, on `CheckCn`, while a piece of the base
+CN24. Instantiate the `dnagent.md` SH24 to SH26 loop: one round answers
+from the object's latest observation as the corresponding `Get*Info`
+does (CN23), taking no lock of CN1 and reading nothing of the node, and
+then starts the object's background read when `dnagent.md` SH29 allows
+one. The read runs the probes of Probing and error capture — `probe.go`: a
+cntlr's read takes the node's reading (CN28) under its CN1 locks and
+builds its rows and its verdict from it (CN23); a CN's read takes none.
+The round's `agent_reply` is the observation's code (CN30), which is what
+drives the worker's re-sync on each round whose observation is not
+too old and names a leftover — a converge's observation names only what its own removing
+sweep names (CN30) — and, on a
+`CheckCn` round that answers from a read, while a piece of the base
 state that a `SyncupCn` would build reads absent, an ANA group that it
 would rewrite reads in the wrong state, or an arena file that it would
-replace reads of another size (CN30). A `CheckCntlr` round takes the
-node's reading (CN28) under those locks and builds its rows and its
-verdict from it, as `GetCntlrInfo` does (CN23); a `CheckCn` round takes
-none. Like every `dnagent.md` SH24 round it
-runs under its request's `trace_id` (the stream's id when that is empty).
+replace reads of another size (CN30). Like every `dnagent.md` SH24 round
+it runs under its request's `trace_id` (the stream's id when that is
+empty), and so does the read it starts.
 
 ### `GetThinDeviceBm` / `GetLegBm`
 
@@ -3134,19 +3181,19 @@ never `RES_STATUS_ERROR`, and it never feeds `err_epoch`. So are the two
 rows of a clone that waits for room in the arena, with their own details
 (CN18 step 2).
 
-**The reading.** A `CheckCntlr` round and a `GetCntlrInfo` first take one
-reading of the node under their CN1 locks (CN23, CN24): one
+**The reading.** A cntlr's read (`dnagent.md` SH29) first takes one
+reading of the node under its CN1 locks (CN23, CN24): one
 `dmsetup info` listing of every dm device of the node, with each one's
 number and attr flags (`Dm.ListInfo`); one `dmsetup table` listing of
 every dm device's live table (`Dm.ListTables`); the sysfs walk of CN10;
-and the md walk of CN12. Their rows and their verdict (CN30) take from
+and the md walk of CN12. Its rows and its verdict (CN30) take from
 it which dm devices, nvme subsystems and md arrays the node holds, and
 each dm device's attr flags, number and table, the clone-metadata
 wrappers' included (CN5): a row reads its dm device there, and finds its
 leg's or clone source's entry in the walk and its group's array in the
 md walk; its other reads stay outside the reading (below). Reason: most
-of a round's time goes to starting processes, and one listing of the
-whole node costs about what one device's read does, so such a call
+of a read's time goes to starting processes, and one listing of the
+whole node costs about what one device's read does, so such a read
 starts a few processes whatever the slice count, besides its status
 reads and the configfs `ls` of its exports (`dnagent.md` SH18). A
 converge reads each of its own dm devices on its own, because it
@@ -3156,12 +3203,12 @@ itself (CN10, CN12).
 A partial listing still answers (`osclient.md`, RunCommand): `dmsetup`
 gives one when another cntlr, or a dn agent on the same machine, removes a
 device during the listing, and read as unanswered it would turn every dm
-row of the call `ERROR`, on a standby too, which sets its health epoch and
+row of the read `ERROR`, on a standby too, which sets its health epoch and
 takes it out of the cdc's answer to hosts (`dnv-worker.md` HL2;
 `architecture.md`, [D18]). A device this cntlr
 wants that a partial `dmsetup info` listing lacks is read on its own
 once, at its first lookup, and that answer — the device, its absence or
-the read's error — serves the rest of the call; a device a complete
+the read's error — serves the rest of the read; a device a complete
 listing lacks is absent, with no read; and a table the `dmsetup table`
 listing lacks is read on its own once in the same way. A listing that
 did not answer makes every row whose first read goes to it
@@ -3173,7 +3220,7 @@ each dm-clone once for its rows and once more for each namespace it backs
 (CN16 rule 5), because a status read can wait on IO: a thin pool's waits
 behind a commit already running on that pool, and a dm-clone's makes the
 kernel commit the clone's metadata (`dnagent.md` SH17). Read per device,
-a call's status reads wait only on its own cntlr's pools and dm-clones; one
+a read's status reads wait only on its own cntlr's pools and dm-clones; one
 read over the whole node would wait behind a commit on any pool or dm-clone
 of the node, another cntlr's too. Also outside stay the configfs reads of
 the exports; the
@@ -3190,15 +3237,15 @@ The number the agent writes into a table, or checks a live table
 against, is read for an md array, an nvme multipath head or a loop
 device from the device's own "/sys/block/<name>/dev" — an md array's
 from the array CN12's match finds — and for a dm device from
-`dmsetup info`: from the reading in a cntlr's check round and info read,
-from one `dmsetup info` of the device elsewhere. The sweep turns a live
+`dmsetup info`: from the reading in a cntlr's read, from one
+`dmsetup info` of the device elsewhere. The sweep turns a live
 table's numbers back into dm names through the dm listing it enumerates
 with: `dmsetup ls` (CN21), or in a cntlr's verdict the reading's
 `dmsetup info` listing (CN30). No number comes from `lsblk`: the cn
 agent's one `lsblk` is CN12's check that no array already runs under a
 group's name, which takes no number from its answer. Reason: a file read
-in the agent's own process costs far less than a process, and a check
-round and a converge then read each number from one source, so the two
+in the agent's own process costs far less than a process, and a read
+and a converge then read each number from one source, so the two
 channels check and build over the same device.
 
 The rows, each with its `res_name` and what its probe checks:
@@ -3232,7 +3279,7 @@ The rows, each with its `res_name` and what its probe checks:
   desired group, which is inaccessible while the backing chain is
   provisioning-deferred (CN9), the row itself `RES_STATUS_PROVISIONING`
   then. Both channels compare the group by this one rule from the
-  ns-dev's live table: a check round with the table from its reading,
+  ns-dev's live table: a read with the table from its reading,
   which it takes also when the backing's number cannot be read, and a
   converge after its ANA loops, with a read of the namespace and, where
   the rule depends on it, of the table, an error of the namespace
@@ -3260,8 +3307,8 @@ The rows, each with its `res_name` and what its probe checks:
   and the `CnErrorName`: `dmsetup table`.
 * `td_id_to_thin_info` with its `slice_id_to_dm_thin`, named by the
   `CnThinDevName`: `dmsetup table` (pool and `dev_id`); a created td's
-  volume a round reads absent is `RES_STATUS_MISSING` with no reason
-  (CN14). The td's entry also carries its torn mark, which a round reports
+  volume a read reads absent is `RES_STATUS_MISSING` with no reason
+  (CN14). The td's entry also carries its torn mark, which a read reports
   from the agent's memory as the converge does (CN14).
 * `slice_id_to_dm_pool`, named by the `CnPoolFinalName`:
   `dmsetup status` with the `--noflush` flag (`dnagent.md` SH17); the
@@ -3285,14 +3332,14 @@ The rows, each with its `res_name` and what its probe checks:
   concat is never built or checked over an array the md walk did not
   match to the group. A converge reads the numbers first, to build the
   concat's table, so its row reads that error whether the concat is
-  there or not; a check round and an info read look the concat's own
-  device up first, and an absent concat is `RES_STATUS_MISSING` there
-  before any number is read. When the md walk could not read the group's
+  there or not; a read looks the concat's own device up first, and an
+  absent concat is `RES_STATUS_MISSING` there before any number is
+  read. When the md walk could not read the group's
   own array or list "/sys/block", the group's own row reads
-  `RES_STATUS_ERROR` too (`grp_id_to_md_raid` below), so a check round's
-  health does not change by the concat rows; a converge skips the slice's
-  pool step for the pass, so a snapshot whose messages that pass sends is
-  torn (CN13; CN14, "A torn snapshot is reported"). A deferred slice's
+  `RES_STATUS_ERROR` too (`grp_id_to_md_raid` below), so the health a
+  read's rows give does not change by the concat rows; a converge skips
+  the slice's pool step for the pass, so a snapshot whose messages that
+  pass sends is torn (CN13; CN14, "A torn snapshot is reported"). A deferred slice's
   rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two
   group lists is non-empty and has no effective group left (CN9), not
   that every group is deferred.
@@ -3365,9 +3412,9 @@ The rows, each with its `res_name` and what its probe checks:
   the connect returns. A converge's rows read the lookup its connect step
   made; for a leg whose connect step failed they look the leg up again,
   so they say what the node holds rather than the connect's error. In a
-  check round and an info read they come first in each leg's turn, and a
-  standby's leg row reads their lookup, so a primary's round looks up only
-  the legs with two sides, and a standby's round each leg once, or twice
+  read they come first in each leg's turn, and a standby's leg row reads
+  their lookup, so a primary's read looks up only the legs with two
+  sides, and a standby's read each leg once, or twice
   where that lookup did not answer. The
   worker's cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
@@ -3386,7 +3433,7 @@ The rows, each with its `res_name` and what its probe checks:
   otherwise — on both channels alike: a converge writes the namespace row
   after its ANA loops from a read of the namespace and, for a transfer
   that should serve, of the transfer device's table and, when its device
-  step failed, reads the subsystem as a check round does; a deferred
+  step failed, reads the subsystem as a read does; a deferred
   transfer's three rows are `RES_STATUS_PROVISIONING`.
 * `clone_id_to_target`, named by the clone's `src_nqn`: the sysfs walk of
   CN10 — the subsystem whose "subsysnqn" is `src_nqn`, each controller's
@@ -3400,7 +3447,7 @@ The rows, each with its `res_name` and what its probe checks:
   not answer (CN10) makes it `RES_STATUS_ERROR` naming the read, never
   `MISSING`.
 * `clone_id_to_dm_clone`, named by the `CnCloneFinalName`:
-  `dmsetup info` — the reading's in a check round or an info read — then
+  `dmsetup info` — the reading's in a read — then
   `dmsetup status` of a dm-clone that is there, and after a status read
   that failed the fresh `dmsetup info` of CN16 rule 5 and CN18 step 2; its
   status is CN18's shared rule's, and the details carry the raw status
@@ -3437,7 +3484,7 @@ reason (`architecture.md`, Live-state reporting), set from the command
 wrapper's typed error, never from the text (`dnagent.md`, OS wrappers —
 `dm.go`, `nvmet.go`, `nvmehost.go`); the one reason the cn agent sets is
 CN14's lost thin id. And a clone's three rows take their status from
-CN18's shared rule, from the live state, on a converge and a round
+CN18's shared rule, from the live state, on a converge and a read
 alike, a failed command's output joining their details. Probes create,
 change and remove nothing — the
 metadata-snapshot reserve runs only inside `dumpThinMetadata` (the CN25
@@ -3470,30 +3517,35 @@ Two kinds of thing travel in `agent_reply` rather than in the rows:
 protocol failures (the CN8 gates, CN22's), and leftovers — the one
 per-resource outcome that cannot ride in a row, carried as
 `ReplyCodeLeftover` (`architecture.md`, Teardown by sweep, and Live-state
-reporting; CN20, CN30). A piece of the CN's base state that a `CheckCn` round
-or a `GetCnInfo` reads absent, and that a `SyncupCn` would build, travels
+reporting; CN20, CN30). A piece of the CN's base state that a read of
+the CN reads absent, and that a `SyncupCn` would build, travels
 in both: its row reads `MISSING` (`ERROR` for the port), and the verdict
 names it too (CN30), because the worker re-syncs on a reply's code and
-never on its rows. So does an ANA group that the round reads in a state
+never on its rows. So does an ANA group that the read reads in a state
 other than its fixed one while the port's transport attributes match,
 which a `SyncupCn` would rewrite: the port row reads `ERROR` with the
 probe's words, and the verdict names it. And so does an arena file of
 another size that a `SyncupCn` would replace (CN5): `tmp_file_info`
 reads `ERROR`, and the verdict names the file. And so does an md member
 that a cntlr's converge would put back or add (CN12) on a leg that can
-take it: its group's row reads `OK`, degraded, and the cntlr's verdict
+take it: its group's row reads `OK`, degraded, and a read's verdict
 names the member (CN30).
 
 ### The read-only verdict
 
-CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply
-`ReplyCodeLeftover` iff their scope's verdict is not clean. The verdict
-is the CN21 sweep with the removals left out: the same attribution, the
-same comparison against the same wanted set, and nothing removed or built
-(CN23). Details and log record are CN20's. A `CheckCn` round and a
-`GetCnInfo` list the node with the node-level sweep's enumeration (CN21).
-A cntlr's verdict, in a `CheckCntlr` round or a `GetCntlrInfo`, takes its
-dm, md and nvme listings from the call's reading (CN28): the dm devices
+CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply the
+code of the object's latest observation (`dnagent.md` SH28), which is the
+verdict of what made it. A read's (`dnagent.md` SH29) is the read-only
+verdict of its scope: `ReplyCodeLeftover` iff that verdict is not clean.
+A converge's — a `Syncup*`'s, the startup reconcile's, a CN10 or CN18
+retry attempt's — is the code its own reply carries, or would carry where
+no reply is sent: that of its own sweep, which removes (CN20, CN21). The
+read-only verdict is the CN21 sweep with the removals left out: the same
+attribution, the same comparison against the same wanted set, and nothing
+removed or built (CN23). Details and log record are CN20's. A CN's read
+lists the node with the node-level sweep's enumeration (CN21). A cntlr's
+read takes its verdict's dm, md and nvme listings from its reading
+(CN28): the dm devices
 and their numbers from its `dmsetup info` listing, a `dmsetup table`
 listing that did not answer failing the verdict as well; the arrays from
 its md walk, under `ListArrays`' strict rule (CN12); and the connections
@@ -3504,14 +3556,14 @@ against a live dm-clone (CN21). A partial dm listing counts as an answer
 here, where the sweep's `dmsetup ls` keeps its strict rule (`osclient.md`,
 RunCommand). Reason: only this cntlr's own converges, the node's
 `SyncupCn` and the startup reconcile create or remove this cntlr's
-devices, and none of them runs during the call, which holds this
+devices, and none of them runs during the read, which holds this
 cntlr's object lock and the node read lock (CN1); so a device a partial
 listing lacks is another cntlr's or a co-hosted dn agent's, which this
 verdict never names. A listing partial for another cause can hide a
-leftover of this cntlr from one call.
+leftover of this cntlr from one read.
 
-The node-level verdict of a `CheckCn` round and of a `GetCnInfo` also
-names what of the CN's base state the call's own probe read wrong in a
+The node-level verdict of a CN's read also names what of the CN's base
+state the read's own probe read wrong in a
 way a `SyncupCn` would cure (CN5). That is each piece it read absent: an
 absent tmpfs; an absent arena file or loop device, while the same probe
 read the tmpfs there or absent, since the converge creates them only on
@@ -3528,9 +3580,9 @@ naming the piece as absent, the port's with the probe's own words after
 it, a group's state as differing from the wanted one, and the arena
 file as one of another size — and the log record lists it among its
 failures. Nothing else re-drives them — the
-worker re-syncs on a reply's code, never on a row — and a check round
-cannot build or rewrite them itself (CN23). A probe that did not answer
-names nothing, and the next round asks again. Nor does anything else
+worker re-syncs on a reply's code, never on a row — and a read cannot
+build or rewrite them itself (CN23). A probe that did not answer names
+nothing, and the next read asks again. Nor does anything else
 that is there but not as wanted, which its row alone reports: a
 filesystem of another type at the arena's path — and with it an absent
 arena file or loop device, which the converge would not create on it —
@@ -3548,53 +3600,71 @@ not named. The port is read with strict reads for this
 not answer is an `ERROR` naming the read, not a missing group or a
 mismatch. The `SyncupCn` reply does not carry any of them: its converge
 has just tried to build the base state, and its rows say how that went.
-So a node whose base state can never be built — a `mount` that is
-refused every time, say — is re-sent its `SyncupCn` every round, and
-each attempt is logged, as a disk node whose disk identity stays
-unconfirmed is (`dnagent.md` DN16).
+Nor does the observation that converge stores, or the startup
+reconcile's, so the round after it answers without them, and the read
+that round starts names them again. So a node whose base state can never
+be built — a `mount` that is refused every time, say — is re-sent its
+`SyncupCn` on each round that answers from a read, and each attempt is
+logged, as a disk node whose disk identity stays unconfirmed is
+(`dnagent.md` DN16).
 
-A cntlr's verdict, in a `CheckCntlr` round or a `GetCntlrInfo`, also
-names each md member that its converge's member reconciliation would put
+A cntlr's read-only verdict also names each md member that its
+converge's member reconciliation would put
 back or add (CN12): a `leg_list` member of a wanted group's running
 array that md has failed and moved out of its slot, or that the array
 lacks, on a leg whose leg row reads `OK` (its wrapper there and its last
 CN11 probe passed) and whose subsystem has a multipath namespace, every
 controller's "address" known and a path both live and optimized. It
-reads them from the arrays and the leg rows of the call's own probe and,
+reads them from the arrays and the leg rows of the read's own probe and,
 for each such member whose leg row reads `OK`, from one lookup of the
-leg's subsystem in the call's walk. It lists each among the leftovers
+leg's subsystem in the read's walk. It lists each among the leftovers
 under a kind of its own (`agent.LeftoverKindMdMember`) by the dm name of
 the leg's wrapper; the log record lists it there too. Reason: a converge
 must first see the failed member, and a drop changes no desired state,
 so no `SyncupCntlr` follows it; the late-member retry counts
 availability alone (CN12), and a retrier of the agent's own beside the
 verdict would be invisible to the control plane (below). The verdict
-tests the parts of the leg's availability a call can read without
+tests the parts of the leg's availability a read can read without
 building anything, so no syncup comes for a leg whose path is not live
 and optimized, none in a migration gap, and one drop costs one
 `SyncupCntlr`. A step only the converge takes can still fail, the
 connect of a provisioned side that has no controller among them: the leg
 is then not available, the member stays out, and the verdict names it
-again every round (Known limits). The `SyncupCntlr` reply does not name
+again on every read (Known limits). The `SyncupCntlr` reply does not name
 them: its converge has just tried to put them back, and its group row
-says how that went. A member md keeps failing while its leg's probe
-passes is named again after each failure (Known limits).
+says how that went. Nor does the observation a converge of the cntlr
+stores, so a member still out shows again on the next read. A member md
+keeps failing while its leg's probe passes is named again after each
+failure (Known limits).
 
-It is recomputed every round and stored nowhere. That is the whole retry
-mechanism for a leftover and it is deliberately the only one: a leftover
-that has since gone stops being reported by itself, one that is still
-there keeps the code non-zero, and the worker's "re-sync while the code
-is non-zero" rule (`dnv-worker.md` RW4) re-issues the `Syncup*` that
-sweeps again. No agent-side loop exists for leftovers, because a second
-retrier for something the worker already re-drives would be invisible to
-the control plane. CN10's connect retry and CN18's clone-metadata retry
-sweep only as part of a converge they re-run for a reason of their own,
-and a sweep's `nvme disconnect` completes off the pass (CN10's
-disconnect registry), where the next probe finds it gone; one that
-failed is issued again by the next pass that still finds the controller. A restart is covered by the same path:
-whatever the startup reconcile could not remove surfaces on the first
-`Check*` of the object that owns it (CN2). On the `Get*Info` side the
-code is carried but read by nobody — the gateway's inspects pass those
+No verdict is carried over: each read and each converge that takes one
+computes its own, which is kept only as the code of the object's
+observation, until the next read or converge stores another; nothing
+else remembers it and no pass reads it. That is the whole retry mechanism for a leftover and it is
+deliberately the only one: a leftover that has since gone stops being
+reported once a later read or converge stores its absence; one that is
+still there is named again by the next read, whose observation's code is
+then non-zero, and by each converge whose own removing sweep names it;
+and on each round that answers from an observation that names it and
+is not too old (`dnv-worker.md` HL7), the worker's "re-sync while the code is non-zero" rule (`dnv-worker.md` RW4)
+re-issues the `Syncup*` that sweeps again. A converge's observation
+carries only what its own removing sweep names, so what only a read's
+verdict names — a connection whose subsystem directory is left
+with no controller (CN21), an md member to put back and a piece of the
+base state (both above) — brings by itself the `Syncup*` on every second
+round at most (`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
+directory). No agent-side loop exists for
+leftovers, because a second retrier for something the worker already
+re-drives would be invisible to the control plane. CN10's connect retry
+and CN18's clone-metadata retry sweep only as part of a converge they
+re-run for a reason of their own, and a sweep's `nvme disconnect`
+completes off the pass (CN10's disconnect registry), where the next read
+or pass finds it gone; one that failed is issued again by the next pass
+that still finds the controller. A restart is covered by the same path:
+whatever the startup reconcile could not remove is named by the
+observation it stores, from which the `Check*` rounds of the object that
+owns it answer until a read or converge stores another (CN2). On the `Get*Info` side the code is carried but
+read by nobody — the gateway's inspects pass those
 replies through and by `gateway.md` AG3 do not apply the `AgentReply`
 convention to them — so the operator-visible form of a leftover is the
 worker's log and the `Syncup*` reply's details.
@@ -3633,33 +3703,34 @@ report no `Syncup*` could ever clear.
   any read error from it (CN12), so one bad sector outside the health
   block is enough, while the CN11 probe, which reads the health block
   alone, passes, and the leg can take the member back. Each failure then
-  costs one `SyncupCntlr` and one converge of the cntlr, under the object
-  lock its check rounds take too (CN1), and a resync of what md's bitmap
+  costs one `SyncupCntlr` and one converge of the cntlr, which holds the
+  cntlr's reads off while it runs (CN1), and a resync of what md's bitmap
   marks. Nothing limits how often, since a limit would need the agent to
   remember past attempts (`architecture.md`, Teardown by sweep); it shows
   as the agent's leftover record naming the same member after each
   failure, each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
   Leftovers). The leg repair does not act on it, since the leg's row
   reads `OK` (`dnv-worker.md` AR8); an operator's spare switch ends it.
-* A member can be named every round on a leg whose converge fails: the
-  verdict tests only the parts of the leg's availability a call can read
-  (CN30). A leg with two sides, a migration in flight, whose path through
-  one side reads live and optimized while the other provisioned side has
-  no controller and refuses a new connect — its controller gone after a
-  reconnect refused with DNR, say — has its failed member named on every
-  check round. Each round then costs one `SyncupCntlr` and one converge,
-  which fails the leg at the connect and puts nothing back, beside the
-  CN10 retry that failed connect registers, until the side connects or
-  leaves the leg. A verdict that also asked for a controller on every
-  provisioned side would not name the member when that connect succeeds,
-  and that converge is the one that puts the member back.
+* A member can be named on every read on a leg whose converge fails:
+  the verdict tests only the parts of the leg's availability a read can
+  read (CN30). A leg with two sides, a migration in flight, whose path
+  through one side reads live and optimized while the other provisioned
+  side has no controller and refuses a new connect — its controller gone
+  after a reconnect refused with DNR, say — has its failed member named
+  by every read. Each round that answers from such a read then costs one
+  `SyncupCntlr` and one converge, which fails the leg at the connect and
+  puts nothing back, beside the CN10 retry that failed connect registers,
+  until the side connects or leaves the leg. A verdict that also asked
+  for a controller on every provisioned side would not name the member
+  when that connect succeeds, and that converge is the one that puts the
+  member back.
 * A killed `--remove` leaves a spare switch half done: a switch applied
   within seconds of the switched-out leg's side dying can have its
   `--remove` killed at the soft timeout while a superblock write is stuck
   on that member (CN12). The pass reports the group `ERROR` and does not
   add the promoted spare, and the array runs on its surviving member
   until the next converge: the one the `SyncupCntlr` brings that the
-  worker re-sends once the check round's verdict names the spare (CN30),
+  worker re-sends once a read's verdict names the spare (CN30),
   or, while the spare is not available, an attempt of the CN10 retry its
   lateness registers (CN12). A promoted spare that is available while
   its leg row does not read `OK` — its probe fails, or has not yet
@@ -3672,7 +3743,7 @@ report no `Syncup*` could ever clear.
 * An unanswered array can leave a group unassembled: a group with no
   answering array while another array of the walk did not answer is
   neither created nor assembled that pass (CN12), and the error is a
-  row, which nothing re-drives by itself; the Check verdict stays
+  row, which nothing re-drives by itself; the cntlr's verdict stays
   non-zero only while its md enumeration still fails (CN30).
   Once the array answers, the group waits, its row `MISSING`, for the
   cntlr's next converge for some other reason — and the groups this can
@@ -3724,9 +3795,9 @@ report no `Syncup*` could ever clear.
   at the ns-dev layer on every pass (`architecture.md`, Common
   validation).
 * A member that stays unavailable costs a converge every
-  `CnConnectRetryInterval`, under the lock every Check round needs: the
-  late-member retry (CN10, CN12) runs the whole converge of the cntlr
-  until every `leg_list` member is available. On members that are
+  `CnConnectRetryInterval`, which holds the cntlr's reads off while it
+  runs: the late-member retry (CN10, CN12) runs the whole converge of the
+  cntlr until every `leg_list` member is available. On members that are
   genuinely dead that lasts until the worker's leg repair
   (`dnv-worker.md` AR8) has switched the last of them out of `leg_list`,
   since the retry is cntlr-wide and the leg repair takes one step per
@@ -3752,32 +3823,35 @@ report no `Syncup*` could ever clear.
   reconnect refused with DNR, as when the side's port link is gone while
   the port still listens, or lost to a CN reboot — the next converge's
   `nvme connect` fails while the side stays down, and registers the same
-  retry). The cost is not CPU alone: an attempt holds the cntlr's object
-  lock for its whole converge, and every `CheckCntlr` round takes that
-  lock too (CN1). The worker waits for a round's reply at most one
-  `cntlr_interval` (`dnv-worker.md` RW8); a round that waits behind an
-  attempt past that is a missed round, which stamps `Cntlr.err_epoch`
+  retry). The cost is not CPU alone: an attempt marks the cntlr's
+  converge before it waits for the object lock and holds that lock for
+  its whole converge, so no read of the cntlr runs meanwhile (CN1;
+  `dnagent.md` SH30), and the cntlr's observation ages until the attempt
+  stores its own (`dnagent.md` SH28). A round still answers at once, but
+  one whose observation is older than the worker's bound is a missed
+  round (`dnv-worker.md` HL7), which stamps `Cntlr.err_epoch`
   (`dnv-worker.md` HL2), and two such rounds in a row, once that epoch has
   aged the primary-unhealthy threshold, let the failover reaction
   (`dnv-worker.md` AR5, AR10) fail over a primary whose only fault is a
   dead leg — and the new
   primary inherits the same late member, and with it the same retry. The
-  connect retry holds that lock too, but only while a side's connect
+  connect retry holds the reads off too, but only while a side's connect
   fails — and with the CN10 pass budget such an attempt also spends about
-  `CnConnectPassBudget` more of it on in-pass retries and head waits,
-  more when a retried connect itself runs long. How long an attempt
-  holds the lock grows with the slice count: an attempt that outlasts
-  `CnConnectRetryInterval` finds the loop's next tick already due and is
-  followed by the next at once, so the lock is then almost always held,
-  and a Check round waits out the rest of the attempt in progress before
-  its own probe. The guard against this failover, not an optimization,
-  would be a pre-check that runs the converge, and takes the object lock
-  for it, only when the converge has something to act on — a late member
+  `CnConnectPassBudget` more on in-pass retries and head waits, more when
+  a retried connect itself runs long. How long an attempt runs grows with
+  the slice count: an attempt that outlasts `CnConnectRetryInterval` finds
+  the loop's next tick already due and is followed by the next at once,
+  so a round seldom finds the gap between two attempts to start a read
+  in, and each round answers from the observation the last attempt
+  stored, which becomes too old once one attempt runs longer than the bound.
+  The guard against this failover, not an optimization, would be a
+  pre-check that runs the converge, and takes the object lock for it,
+  only when the converge has something to act on — a late member
   available again, a provisioned side with no controller, CN18's clone
   triggers — read from the desired state and sysfs with nothing
-  remembered. It is not done, so that the cn retry loop stays the `dnagent.md` DN13
-  pattern (the comment on `connectRetryLoop` says why the two copies must
-  not drift apart).
+  remembered. It is not done, so that the cn retry loop stays the
+  `dnagent.md` DN13 pattern (the comment on `connectRetryLoop` says why
+  the two copies must not drift apart).
 * A promotion that outruns the sides' ANA flips pauses its hosts until the
   retry builds the stack: the promotion's own converge reads its legs
   before the sides' ANA flips have reached this CN's sysfs (CN12), so its
@@ -3802,8 +3876,8 @@ report no `Syncup*` could ever clear.
   a cause that never goes away — a thin pool that cannot be built, an
   assembly md refuses with every leg available, a lost thin id — re-runs the whole converge every `CnConnectRetryInterval`
   until an operator acts, at the cost the late-member retry above states:
-  each attempt holds the cntlr's object lock for a whole converge, and
-  check rounds and info reads that wait behind it can miss. The retry
+  each attempt holds the cntlr's reads off for a whole converge, and the
+  cntlr's observation can become too old meanwhile. The retry
   holds no reaction back: each of those causes leaves the td's raid0
   unbuilt, whose row reads `ERROR` and sets the health epoch whether or not
   the retry runs (`dnv-worker.md` HL2, AR5), as the ns-dev row of a
@@ -3826,7 +3900,7 @@ report no `Syncup*` could ever clear.
   enable, a `dmsetup create` killed after its ioctl ran, or a stale
   dm-clone that will not go while a later step fails, such as the read of
   its destination bitmaps. Its row then reads `RES_STATUS_ERROR`
-  "hydration not enabled" on every converge and every check round (CN18's
+  "hydration not enabled" on every converge and every read (CN18's
   shared rule), so the primary's health epoch stays set — what that costs
   in failovers is `dnv-worker.md`, Known limits — while a host waits on
   the namespace, which stays inaccessible for as long as the build keeps
@@ -3847,7 +3921,7 @@ report no `Syncup*` could ever clear.
 * A fault of a clone's source does not itself move the role: a source
   with no live controller at one of its endpoints, or with no namespace,
   reads `clone_id_to_target` `RES_STATUS_MISSING` on every converge and
-  every check round alike (CN18's shared rule), as a source with no
+  every read alike (CN18's shared rule), as a source with no
   subsystem entry does, and a missing row sets no health epoch, so the row
   neither fails the primary over nor replaces it. The copy waits until the
   source answers, and a host's read of a block not yet copied waits for
@@ -3858,8 +3932,9 @@ report no `Syncup*` could ever clear.
   fault that fails step 1 — no source namespace, or an endpoint with no
   controller at all that step 1 then fails to connect — keeps the CN10
   retry running for as long as it lasts (CN18), with the profile of the
-  late-member retry above: check rounds that wait behind its attempts can
-  miss, and missed rounds can fail the primary over. A source whose every
+  late-member retry above: its attempts hold the cntlr's reads off, so
+  its observation can become too old, which counts as a missed round, and
+  missed rounds can fail the primary over. A source whose every
   endpoint has a controller, live or not, and whose namespace is there
   passes step 1, so its fault registers no retry. A clone that has
   hydrated in full serves on through its dm-clone, its namespace
@@ -3884,8 +3959,8 @@ report no `Syncup*` could ever clear.
   `clone_id_to_dm_clone`, which carries no status line (`architecture.md`,
   Clones).
 * A clone that waits for room in the arena costs a whole converge of its
-  cntlr every `CnCloneMetaRetryInterval`, under the object lock its Check
-  rounds take (CN1), for as long as it waits: the clone-metadata retry
+  cntlr every `CnCloneMetaRetryInterval`, which holds the cntlr's reads
+  off while it runs (CN1), for as long as it waits: the clone-metadata retry
   (CN18) has the profile of the late-member retry above at a slower pace,
   and the wait can last as long as the node holds the units — on a CN a
   cntlr replacement charged past its ceiling, until clones of the node
@@ -3901,12 +3976,20 @@ report no `Syncup*` could ever clear.
   its shutdown command waits out the admin timeout, and the disconnect
   with it, in an uninterruptible write that no signal of `dnagent.md` SH15 ends. The
   sweep issues the disconnect off its locks (CN10's disconnect registry),
-  so the stall holds neither the cntlr's object lock and its Check
-  rounds, nor a `SyncupCn`'s node write lock, nor the worker's
+  so the stall holds none of the CN1 locks and does not hold the worker's
   `SyncupCntlr` past its deadline; the connection reads as a leftover
   until the kernel lets go, and the child keeps one of the node's
   `DefaultOsClientLimit` `OsClient` slots for the whole wait
-  (`osclient.md`, RunCommand). The pool drain keeps its cross-role race —
+  (`osclient.md`, RunCommand). The leftover still costs reads: the
+  controller being deleted stays listed with its state, so each later
+  converge whose removing sweep covers the connection names it again
+  (CN10), the observation that converge stores carries the code, and the
+  worker re-sends the `Syncup*` on every round that answers from it
+  (`dnv-worker.md` RW4); each re-send cancels the read its round has just
+  started, if that read still runs (`dnagent.md` SH30). So a cntlr whose
+  own converge names the connection has its observation renewed by those
+  converges, and by a read only when the read ends before the re-send
+  arrives. The pool drain keeps its cross-role race —
   it deletes an sp's cntlrs and then its slices and waits on no agent
   (`dnv-worker.md` SPD13) — so a `SyncupCn` that drops the cntlr from its
   pointer list sets the leg disconnects going in the background and is
@@ -3914,8 +3997,9 @@ report no `Syncup*` could ever clear.
   exports away; a stalled disconnect then runs the admin timeout out, and
   one still in flight when the agent exits is not waited for
   (`dnagent.md` SH27), so only the leftover every later reply named
-  records it. A drain that catches many deletes in the kernel at once
-  holds at most `disconnectConcurrency` of those slots (CN10), and the
+  records it. Each `SyncupCn` re-sent for that leftover keeps no cntlr's
+  read from ending (`dnagent.md` SH30). A drain that
+  catches many deletes in the kernel at once holds at most `disconnectConcurrency` of those slots (CN10), and the
   rest of its disconnects wait for one: their connections stay leftovers,
   and a converge that wants one of them back waits as well, about an
   admin timeout for every `disconnectConcurrency` stuck deletes ahead of
@@ -3963,25 +4047,29 @@ report no `Syncup*` could ever clear.
   delete in that pool, or an activation sweep, which the pool device's
   creation alone arms — and until then its blocks stay allocated, for the
   life of the pool device on this primary if no such sweep comes.
-* A base state that cannot be built is re-sent every round: a check
-  round that reads absent a piece of the CN's base state that a
-  `SyncupCn` would build, or an ANA group in a state other than its fixed
-  one on a port whose transport attributes match, names it in its verdict
-  (CN30), so while a `mount`, `truncate`, `losetup`, port `mkdir`
-  or "ana_state" write keeps being refused, the worker re-sends the
-  `SyncupCn` every round and each attempt is logged — the agent's
-  leftover record of each round names what the round read, and each
-  refused command or write is logged as it fails — as for a disk node
-  whose disk identity stays unconfirmed. Until the arena is built CN18
-  has no loop device to allocate clone metadata from, so no clone on the
-  CN can be built. A file of another size whose loop device a process
-  holds open through a plain file handle, which sysfs shows as no holder,
-  is named all the same (CN5, CN30): the converge's detach leaves that
+* A base state that cannot be built is re-sent on each round that
+  answers from a read: a read of the CN that reads absent a piece of its
+  base state that a `SyncupCn` would build, or an ANA group in a state
+  other than its fixed one on a port whose transport attributes match,
+  names it in its verdict (CN30), so while a `mount`, `truncate`,
+  `losetup`, port `mkdir` or "ana_state" write keeps being refused, the
+  worker re-sends the `SyncupCn` on each such round and each attempt is
+  logged — the agent's leftover record of each read names what the read
+  read, and each refused command or write is logged as it fails — as for
+  a disk node whose disk identity stays unconfirmed. The converge's own
+  observation does not name the piece (CN30), so the round after each
+  re-send answers without it and starts the read that names it again:
+  the piece brings a re-send at most every second round (`dnv-worker.md`
+  RW4). Until the arena
+  is built CN18 has no loop device to allocate clone metadata from, so no
+  clone on the CN can be built. A file of another size whose loop device
+  a process holds open through a plain file handle, which sysfs shows as
+  no holder, is named all the same (CN5, CN30): the converge's detach leaves that
   device attached until the handle closes, so the replacement stops
-  there, and the worker re-sends the `SyncupCn` every round until it
-  does. The verdict does not re-drive the rest of what is
-  there but not as wanted (CN30): its row reads `ERROR`. The arena's — a
-  filesystem of another type at its path, a file of another size that a
+  there, and the worker re-sends the `SyncupCn` on each round that
+  answers from a read until it does. The verdict does not re-drive the
+  rest of what is there but not as wanted (CN30): its row reads `ERROR`.
+  The arena's — a filesystem of another type at its path, a file of another size that a
   clone-metadata wrapper maps or a holder holds, or a second loop device
   — wait for an operator, since the converge leaves
   them as they are, and so does a port transport attribute that differs
@@ -3990,8 +4078,9 @@ report no `Syncup*` could ever clear.
   which a re-sent `SyncupCn` would rewrite, is not re-driven either and
   waits for the CN's next `SyncupCn` for another reason or the agent's
   next start. Each re-sent `SyncupCn` holds the node write lock for its
-  converge and its removing node-level sweep (CN1), so every cntlr's
-  Check round and converge on the CN waits it out once a round.
+  converge and its removing node-level sweep (CN1), so a cntlr converge or
+  read that comes after it waits it out, once for each re-send; it keeps
+  no cntlr's read from ending (`dnagent.md` SH30).
 * A torn snapshot's mark is best effort. CN14 keeps it in memory from the
   pre-pass run that saw the tear until a request carries the td `created`,
   and the created flip records it from a reply that completes the td

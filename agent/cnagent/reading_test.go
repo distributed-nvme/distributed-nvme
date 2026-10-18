@@ -21,7 +21,7 @@ import (
 // that answer, an error included, serves every later lookup of the call, so
 // no device is read twice; a name a complete info listing lacks is not
 // there, with no read at all; a listed name, or a listing that did not
-// answer, costs no read either. A check round looks no device's table up
+// answer, costs no read either. A cntlr's read looks no device's table up
 // twice, so only this test proves the table cache. The readings are taken
 // from the fake node (takeReading), whose listings leave out the names the
 // test omits, as dmsetup's do for a device that goes away mid-listing.
@@ -341,9 +341,9 @@ func assertRowsOk(t *testing.T, info *pb.CntlrInfo, label string) {
 	}
 }
 
-// readEntrance is one of the two read-only calls that take a reading: a
-// check round or an info read of the fixture cntlr, its verdict and its
-// rows.
+// readEntrance is one of the two read-only calls of the fixture cntlr, a
+// check round or an info read, run after the read that takes the reading
+// (refreshCntlr) and answering from it: its verdict and its rows.
 type readEntrance struct {
 	name string
 	read func(t *testing.T, srv *CnAgentServer) (*pb.AgentReply, *pb.CntlrInfo)
@@ -353,6 +353,7 @@ var readEntrances = []readEntrance{
 	{"a check round",
 		func(t *testing.T, srv *CnAgentServer) (*pb.AgentReply, *pb.CntlrInfo) {
 			t.Helper()
+			refreshTestCntlr(t, srv)
 			req := srv.getCntlr(cntlrKey(testCluster, testCn, testSp,
 				testCntlr)).loadReq()
 			reply, info := srv.checkCntlrRound(context.Background(),
@@ -367,6 +368,7 @@ var readEntrances = []readEntrance{
 	{"an info read",
 		func(t *testing.T, srv *CnAgentServer) (*pb.AgentReply, *pb.CntlrInfo) {
 			t.Helper()
+			refreshTestCntlr(t, srv)
 			reply, err := srv.GetCntlrInfo(context.Background(),
 				&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 					CntlrPointer: cntlrPtr()})
@@ -393,8 +395,9 @@ func perDeviceDmReads(node *fakeNode) []string {
 	return out
 }
 
-// TestCheckRoundReadsTheNodeOnce pins what a check round and an info read
-// cost (CN28): one reading, whatever the slice count. On a primary and on a
+// TestACntlrReadReadsTheNodeOnce pins what a cntlr's read costs, the read a
+// check round and an info read answer from (CN28; dnagent.md SH29): one
+// reading, whatever the slice count. On a primary and on a
 // standby of 2 and of 8 slices — 8 and 32 legs at raid1 — each call lists
 // /sys/class/nvme-subsystem once and /sys/block once, runs one whole-node
 // `dmsetup info` and one `dmsetup table`, reads no device on its own with
@@ -406,7 +409,7 @@ func perDeviceDmReads(node *fakeNode) []string {
 // too. Every row of the node, which matches its desired state, reads OK,
 // and so does the verdict. The primary's legs have each had one successful
 // probe round, the steady state in which its leg rows read OK.
-func TestCheckRoundReadsTheNodeOnce(t *testing.T) {
+func TestACntlrReadReadsTheNodeOnce(t *testing.T) {
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn,
 		OriNsIdx: 1, AllowedHosts: []string{testHostNqn}}}
 	for _, primary := range []bool{true, false} {
@@ -857,11 +860,11 @@ func TestPartialDmListingStillAnswers(t *testing.T) {
 // metadata wrapper this cntlr wants under a complete info listing
 // (Wrappers, CN28): a listing that lacks it answers it absent, with no read
 // of its own. TestPartialDmListingStillAnswers pins the partial listing.
-// The fixture's clone waits for room, so its wrapper is not built; a check
-// round and an info read take the wrapper's absence from their reading,
-// name it in no command and no file read, and their clone rows read the
+// The fixture's clone waits for room, so its wrapper is not built; a cntlr's
+// read takes the wrapper's absence from its reading,
+// names it in no command and no file read, and its clone rows read the
 // converge's PROVISIONING pair. Read on its own, the wrapper would cost one
-// more process in every round for as long as the clone waits.
+// more process in every read for as long as the clone waits.
 func TestACompleteListingReadsNoUnbuiltWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -912,8 +915,8 @@ func TestACompleteListingReadsNoUnbuiltWrapper(t *testing.T) {
 // every dmsetup form prints on a node with no dm device. It is an empty
 // node, not a listing that did not answer: a cntlr synced at
 // SP_LEVEL_DISABLE from its first request builds nothing, the base state's
-// loop device is no dm device, and the verdict of its check round and of its
-// info read is clean, naming no dmsetup listing.
+// loop device is no dm device, and the verdict of its read, which its check
+// round and its info read answer, is clean, naming no dmsetup listing.
 func TestEmptyNodeListingIsAnAnswer(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
@@ -949,14 +952,15 @@ func TestEmptyNodeListingIsAnAnswer(t *testing.T) {
 	}
 }
 
-// TestARoundBesideAStoppingArray pins the md walk of a check round and an
-// info read under its two rules (CN12, CN21): another pool's array that md
-// has marked deleted, whose array_state reads EBUSY until its md/ goes. The
-// group rows and the concat rows read the walk under Md.Walk's rule, which
-// never reads array_state, and stay OK; the verdict reads it under
-// ListArrays' rule, which fails on that read, and names the md enumeration,
-// as the converge's sweep does for the same window.
-func TestARoundBesideAStoppingArray(t *testing.T) {
+// TestACntlrReadBesideAStoppingArray pins the md walk of a cntlr's read,
+// which a check round and an info read answer from, under its two rules
+// (CN12, CN21): another pool's array that md has marked deleted, whose
+// array_state reads EBUSY until its md/ goes. The group rows and the concat
+// rows read the walk under Md.Walk's rule, which never reads array_state, and
+// stay OK; the verdict reads it under ListArrays' rule, which fails on that
+// read, and names the md enumeration, as the converge's sweep does for the
+// same window.
+func TestACntlrReadBesideAStoppingArray(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, raid1: true})
 	probeAllLegs(t, srv)
@@ -983,10 +987,11 @@ func TestARoundBesideAStoppingArray(t *testing.T) {
 	}
 }
 
-// TestAReadOfARefusedConfTakesNoReading pins the gate of a check round and
-// an info read (readCntlr; architecture.md, Common validation): a stored
-// conf the agent refuses, a zero low_water_mark_pct here, takes no reading
-// and reads nothing of the node. The call answers what a cntlr with nothing
+// TestAReadOfARefusedConfTakesNoReading pins the gate of a cntlr's read,
+// which a check round and an info read answer from (readCntlr;
+// architecture.md, Common validation): a stored conf the agent refuses, a
+// zero low_water_mark_pct here, takes no reading and reads nothing of the
+// node. The call answers what a cntlr with nothing
 // provable looks like — no row at all — and a clean verdict, and writes the
 // one refusal record. Every table its rows would compare is built from that
 // conf, so a probe with the zero would report a correctly built pool as
@@ -1021,13 +1026,13 @@ func TestAReadOfARefusedConfTakesNoReading(t *testing.T) {
 	}
 }
 
-// TestUnansweredMdListingErrsTheGroupRows pins the md walk of a check round
-// and an info read when its listing of /sys/block did not answer (CN12,
-// CN28): every group row reads ERROR with the listing's error, and so does
-// every concat row, naming its group, since a group's device number comes
-// from the array the walk matches; every other row reads OK, and the verdict
-// names the md enumeration. Read as a node with no array, the group rows
-// would read MISSING, which sets no health epoch.
+// TestUnansweredMdListingErrsTheGroupRows pins the md walk of a cntlr's read
+// when its listing of /sys/block did not answer (CN12, CN28): every group
+// row reads ERROR with the listing's error, and so does every concat row,
+// naming its group, since a group's device number comes from the array the
+// walk matches; every other row reads OK, and the verdict names the md
+// enumeration. Read as a node with no array, the group rows would read
+// MISSING, which sets no health epoch.
 func TestUnansweredMdListingErrsTheGroupRows(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, raid1: true})
@@ -1080,16 +1085,16 @@ func TestUnansweredMdListingErrsTheGroupRows(t *testing.T) {
 	}
 }
 
-// TestCheckRoundReadsTheCloneFromTheReading pins the clone stack's part of
-// a check round and an info read (CN5, CN18, CN28): a primary with a built,
-// hydrating clone takes the dm-clone's attrs, the clone metadata wrappers'
-// names and tables and, in the verdict, the dm-clone's table for the source
-// it maps, all from the reading. It reads no device on its own with
+// TestACntlrReadTakesTheCloneFromTheReading pins the clone stack's part of
+// a cntlr's read (CN5, CN18, CN28): a primary with a built, hydrating clone
+// takes the dm-clone's attrs, the clone metadata wrappers' names and tables
+// and, in the verdict, the dm-clone's table for the source it maps, all
+// from the reading. It reads no device on its own with
 // `dmsetup info` or `dmsetup table`, runs no `dmsetup ls`, and its status
 // reads stay per device: the pool's, and the dm-clone's for its rows and
 // once more for the namespace it backs. Its one `losetup` finds the loop
 // device of the metadata area. Every row reads OK and the verdict is clean.
-func TestCheckRoundReadsTheCloneFromTheReading(t *testing.T) {
+func TestACntlrReadTakesTheCloneFromTheReading(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 		clones: []*pb.Clone{cloneOf()}})
@@ -1123,10 +1128,10 @@ func TestCheckRoundReadsTheCloneFromTheReading(t *testing.T) {
 
 // TestPoolStatusReadsCarryNoFlush pins the flag of the cn agent's status
 // reads (dnagent.md SH17; CN28): a thin pool's status read passes
-// `--noflush`, in the converge's pool step and in the probe that a check
-// round and an info read share, so none of them commits the pool; a
-// dm-clone's status reads pass no flag. The primary holds a built,
-// hydrating clone, so every entrance reads both kinds.
+// `--noflush`, in the converge's pool step and in the probe of the cntlr's
+// read, which a check round and an info read answer from, so none of them
+// commits the pool; a dm-clone's status reads pass no flag. The primary
+// holds a built, hydrating clone, so every entrance reads both kinds.
 func TestPoolStatusReadsCarryNoFlush(t *testing.T) {
 	srv, node := newTestServer(t)
 	o := reqOpts{revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}}

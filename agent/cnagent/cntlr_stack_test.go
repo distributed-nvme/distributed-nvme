@@ -353,6 +353,7 @@ func TestCloneRecoveryFailsClosed(t *testing.T) {
 	// converge and in the check round alike; the failure is the dm-clone
 	// row's.
 	assertOk(t, reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs], "ns-dev")
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -515,9 +516,11 @@ func subsysWithHosts(hosts ...string) map[string]*pb.Subsystem {
 	return subsys
 }
 
-// probedSubsysRow is the fixture subsystem's row as the check channel reads it.
+// probedSubsysRow is the fixture subsystem's row as the check channel reads
+// it: one read of the cntlr, answered by a GetCntlrInfo.
 func probedSubsysRow(t *testing.T, srv *CnAgentServer) *pb.ResInfo {
 	t.Helper()
+	refreshTestCntlr(t, srv)
 	reply, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -673,6 +676,7 @@ func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 		}
 	}
 
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -710,6 +714,7 @@ func TestSuppressedCloneReportsSpLevel(t *testing.T) {
 		assertCloneSuppressed(t, reply.GetCntlrInfo(), level.String()+
 			" converged")
 
+		refreshTestCntlr(t, srv)
 		probe, err := srv.GetCntlrInfo(context.Background(),
 			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr()})
@@ -756,6 +761,7 @@ func TestCloneWithUnresolvableDstTdAgrees(t *testing.T) {
 	converged := reply.GetCntlrInfo()
 	assertCloneRows(t, converged, "converged", details)
 
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})

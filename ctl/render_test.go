@@ -19,8 +19,11 @@ package ctl
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -155,7 +158,7 @@ var renderCases = []renderCase{
 			`{"free_ext_cnt":"231","free_meta_units":"64",` +
 			`"side_rec_cnt":"1","side_recs_match":false,` +
 			`"total_ext_cnt":"256"},"disk_info":null,"meta_info":null,` +
-			`"port_info":null}}` + "\n",
+			`"port_info":null},"obs_age":null,"obs_stamp":null}` + "\n",
 	},
 	{
 		// Counts the agent could not take are absent, never zeros: the
@@ -168,7 +171,34 @@ var renderCases = []renderCase{
 			DnInfo:          &pb.DnInfo{},
 		},
 		want: `{"applied_revision":"7","dn_info":{"disk_counts":null,` +
-			`"disk_info":null,"meta_info":null,"port_info":null}}` + "\n",
+			`"disk_info":null,"meta_info":null,"port_info":null},` +
+			`"obs_age":null,"obs_stamp":null}` + "\n",
+	},
+	{
+		// The agent's stamp and the observation's age (architecture.md,
+		// Live-state reporting): the times as RFC 3339 strings in UTC, the
+		// age as protojson's seconds string, and a converge start the agent
+		// left unset as null.
+		name: "cntlr inspect, the observation's stamp and age",
+		rpc:  "InspectCntlr",
+		argv: []string{"cntlr", "inspect", "--id", "3"},
+		reply: &pb.InspectCntlrReply{
+			AppliedRevision: 9,
+			ObsStamp: &pb.ObsStamp{
+				ObsTime: timestamppb.New(
+					time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC)),
+				ObsTraceId: "trace-1",
+				AnswerTime: timestamppb.New(
+					time.Date(2026, 1, 2, 3, 4, 6, 500506000, time.UTC)),
+			},
+			ObsAge: durationpb.New(1500500 * time.Microsecond),
+		},
+		want: `{"applied_revision":"9","cntlr_info":null,` +
+			`"obs_age":"1.500500s","obs_stamp":{` +
+			`"answer_time":"2026-01-02T03:04:06.500506Z",` +
+			`"converge_start":null,` +
+			`"obs_time":"2026-01-02T03:04:05.000006Z",` +
+			`"obs_trace_id":"trace-1"}}` + "\n",
 	},
 	{
 		// A uint64 MAP KEY is quoted too, and the re-marshal sorts the map's

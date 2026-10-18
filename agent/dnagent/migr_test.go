@@ -417,7 +417,7 @@ func TestMigrationSourceDeferredUntilDestinationProvisions(t *testing.T) {
 		}
 	}
 	// The read-only probe agrees.
-	infoReply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	infoReply, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -605,18 +605,17 @@ func TestMigrationSourceSequence(t *testing.T) {
 	}
 }
 
-// A migration source whose export build fails runs neither src step 1 nor
-// the suspend of src step 2 (DN12): it serves on. The primary's namespace
-// stays optimized over its dm-linear on the side device, no per-CN dm-linear
-// is suspended or reloaded, nothing is linked to the port, and the migration
-// source rows carry the failure. Each part of the build is failed in turn:
-// the dm-linear, the subsystem and its namespace. The per-CN rows are read as
-// a check round reads them: each CN's export reads ERROR, its namespace not
-// yet inaccessible, the primary's naming the group it still serves in, and
+// A migration source whose export build fails runs neither src step 1 nor the
+// suspend of src step 2 (DN12): it serves on. The primary's namespace stays
+// optimized over its dm-linear on the side device, no per-CN dm-linear is
+// suspended or reloaded, nothing is linked to the port, and the migration
+// source rows carry the failure. Each part of the build is failed in turn: the
+// dm-linear, the subsystem and its namespace. The per-CN rows are read as a
+// check round's read reads them: each CN's export reads ERROR, its namespace
+// not yet inaccessible, the primary's naming the group it still serves in, and
 // the primary's dm-linear reads ERROR, not yet on its dm-error, where the
 // standby's already is. Run with the cutover window on, so a suspend would
-// stay visible. The next SyncupSide whose build holds runs the whole
-// cutover.
+// stay visible. The next SyncupSide whose build holds runs the whole cutover.
 func TestASourceWhoseExportBuildFailsServesOn(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
@@ -896,7 +895,7 @@ func TestLostStoreKeepsAMigrationSourceUntilItsSideIsKnown(t *testing.T) {
 		t.Errorf("SyncupDn code = %d (%s), want 0",
 			got, reply.GetAgentReply().GetDetails())
 	}
-	infoReply, err := restarted.GetDnInfo(ctx,
+	infoReply, err := dnInfoNow(restarted, ctx,
 		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
 	if err != nil {
 		t.Fatalf("GetDnInfo: %v", err)
@@ -998,7 +997,7 @@ func TestLostStoreKeepsAMigrationDestinationUntilItsSideIsKnown(t *testing.T) {
 		t.Errorf("SyncupDn code = %d (%s), want 0",
 			got, reply.GetAgentReply().GetDetails())
 	}
-	infoReply, err := restarted.GetDnInfo(ctx,
+	infoReply, err := dnInfoNow(restarted, ctx,
 		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
 	if err != nil {
 		t.Fatalf("GetDnInfo: %v", err)
@@ -1129,7 +1128,7 @@ func TestLostStoreSiblingSideKeepsAMigrationSource(t *testing.T) {
 		t.Errorf("sibling SyncupSide code = %d (%s), want 0",
 			got, reply.GetAgentReply().GetDetails())
 	}
-	infoReply, err := restarted.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	infoReply, err := sideInfoNow(restarted, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sibling})
 	if err != nil {
 		t.Fatalf("GetSideInfo: %v", err)
@@ -1217,7 +1216,7 @@ func TestLostStoreSiblingSideKeepsAMigrationDestination(t *testing.T) {
 		t.Errorf("sibling SyncupSide code = %d (%s), want 0",
 			got, reply.GetAgentReply().GetDetails())
 	}
-	infoReply, err := restarted.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	infoReply, err := sideInfoNow(restarted, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sibling})
 	if err != nil {
 		t.Fatalf("GetSideInfo: %v", err)
@@ -1404,6 +1403,7 @@ func TestPushMigrBitmap(t *testing.T) {
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	restarted.roundReads = false
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1731,9 +1731,9 @@ func TestMigrationSourceFence(t *testing.T) {
 		t.Errorf("dm_linear details = %q, want the cutover grace window note",
 			info.GetDetails())
 	}
-	// A probe agrees, row for row, and does not mutate (DN16/SH25).
+	// A probe agrees, row for row, and does not mutate (DN16/SH29).
 	node.Reset()
-	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	probe, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -1789,11 +1789,11 @@ func TestMigrationSourceFence(t *testing.T) {
 	}
 }
 
-// A check round reads a fenced dm-linear by the test phase 1 converges it to
-// (DN12, DN18): there and suspended, on whatever table it carries. So the two
-// channels agree in every window — the first, over the pre-fence table, and
-// DN12 rule 1's known-limit second one, which a restart opens over the
-// dm-error phase 2 had already installed, where a round that expected the
+// A check round's read reads a fenced dm-linear by the test phase 1 converges
+// it to (DN12, DN18): there and suspended, on whatever table it carries. So
+// the two channels agree in every window — the first, over the pre-fence
+// table, and DN12 rule 1's known-limit second one, which a restart opens over
+// the dm-error phase 2 had already installed, where a round that expected the
 // pre-fence table would read the primary's linear as broken for the whole
 // window. A linear found resumed inside the window reads ERROR until the
 // converge suspends it again.
@@ -2190,13 +2190,13 @@ func TestTeardownInsideTheFenceWindowOverAnUnreadExport(t *testing.T) {
 
 // A level raise to SP_LEVEL_NO_SIDE inside the window takes the exports off
 // linears the fence holds suspended. At that level the linears stay wanted and
-// only the exports above them go, so a sweep that resumes only the linears
-// it is about to REMOVE would touch none of them, and L1 would disable every
+// only the exports above them go, so a sweep that resumes only the linears it
+// is about to REMOVE would touch none of them, and L1 would disable every
 // namespace over a suspended device — a write that waits for the namespace's
 // in-flight IO, which is what the window holds, so it would not return; it
 // would sit with the node read lock and the side's object lock held, and the
-// next SyncupDn, every Check round and the fence timer itself would queue
-// behind it. The level change has to end the window the way its
+// next SyncupDn, every read a check round starts and the fence timer itself
+// would queue behind it. The level change has to end the window the way its
 // deadline would have: each linear put on its dm-error and resumed before its
 // namespace is disabled, so the IO the window absorbed fails instead of
 // replaying onto the side's data, and nothing is left suspended for the build
@@ -2306,7 +2306,7 @@ func TestNoSideInsideTheFenceWindow(t *testing.T) {
 	// dm layer serving, no export layer. A probe agrees — one that still
 	// read the window as running would report the resumed linears as
 	// broken.
-	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	probe, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -2630,7 +2630,7 @@ func TestNoSideThenLevelDownOpensNoSecondWindow(t *testing.T) {
 	// A probe reads the rebuilt side as healthy, row by row: no window is
 	// running, so it expects the dm-errors the linears are on, and the
 	// exports, the migration source's included, are back.
-	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	probe, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {
@@ -2817,6 +2817,7 @@ func TestFenceNotRestartedAcrossAnAgentRestart(t *testing.T) {
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	restarted.roundReads = false
 	restarted.fenceWait = time.Hour
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -2910,6 +2911,7 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
 		common.NvmetPortId)
+	restarted.roundReads = false
 	restarted.fenceWait = time.Hour
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)

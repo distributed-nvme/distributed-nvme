@@ -10,19 +10,24 @@ import (
 )
 
 // The probe map of DN18. No function here creates, changes or removes an
-// object of the node, as Get*Info and the Check* streams must not (DN16,
-// SH25); reading a migration destination's dm-clone status still makes the
-// kernel commit the clone's metadata (SH17). What a probe can change is the
-// agent's own view of the disk (probeDn). A migration destination's two rows,
-// and where its per-CN rows are judged to serve from, come from the rule its
-// converge applies to what it reads (migrDstSeen, DN13).
+// object of the node, as the background read behind the check rounds must
+// not (DN16, SH29); reading a migration destination's dm-clone status still
+// makes the kernel commit the clone's metadata (SH17). What a probe can
+// change is the agent's own view of the disk (probeDn). A migration
+// destination's two rows, and where its per-CN rows are judged to serve from,
+// come from the rule its converge applies to what it reads (migrDstSeen,
+// DN13).
 
 func (s *DnAgentServer) probeDn(
 	ctx context.Context,
 	st *dnState,
 ) *pb.DnInfo {
 	req := st.req.Load()
-	t := st.tracker
+	// A row made after the read is cancelled moves no epoch. The read holds
+	// only the node read lock, which the DN's next read may share before
+	// this one has returned, so it writes through a view of its own
+	// (agent.ResTracker.In).
+	t := st.tracker.In(ctx)
 	info := &pb.DnInfo{}
 
 	size, err := s.dm.DiskSize(ctx, s.disk)
@@ -86,7 +91,7 @@ func (s *DnAgentServer) probeSide(
 	// The same refusal convergeSide makes (DN8), because this reads the SAME
 	// stored request: a side whose length to zero is refused converges
 	// nothing, so there is nothing provable to report about it. Read-only
-	// either way (DN16, SH25): an empty SideInfo is what such a side looks
+	// either way (DN16, SH29): an empty SideInfo is what such a side looks
 	// like.
 	if err := validateZeroBytes(req.GetSideConf(), extentSize); err != nil {
 		logInvalidSideConf(ctx, req, err)
@@ -115,7 +120,7 @@ func (s *DnAgentServer) probeSide(
 // exportable.
 //
 // Unlike ensureSideDev it never allocates and never starts or stops the
-// zeroing goroutine (DN16, SH25). That is why "record absent at
+// zeroing goroutine (DN16, SH29). That is why "record absent at
 // provisioned = false" reports MISSING with empty details rather than the
 // matrix's "zeroing 0/n MiB": with no record the only available length is
 // the request's, and the etcd flag is a gate, never evidence (DN9). Nor does
@@ -146,14 +151,14 @@ func (s *DnAgentServer) probeSideDev(
 		}
 		return sideDevFailed, nil
 	}
-	// The counters are filled on every round, whatever the outcome below is:
-	// they are what the worker's provisioned-flip rule reads
+	// The counters are filled on every read of the side (SH29), whatever the
+	// outcome below is: they are what the worker's provisioned-flip rule reads
 	// (architecture.md, sp role). They come from the record, never from the
 	// request — the disk is authoritative ([D13]).
 	zeroed, zero := sideZeroedBytes(rec), sideZeroBytes(rec)
 	info.ZeroedBytes, info.ZeroBytes = zeroed, zero
 	if !sideFullyZeroed(rec) {
-		// The device is judged on every round, provisioning or not: DN18 reads
+		// The device is judged on every read, provisioning or not: DN18 reads
 		// this row off the volume-table record, its zeroed count and
 		// `dmsetup table`, and a non-OK device wins. Skipping the check while
 		// the count is short would let a side whose dm-linear could not be
@@ -251,10 +256,11 @@ func (s *DnAgentServer) probeSideDm(
 }
 
 // probeAboveSideDev probes everything the side's desired state puts on top of
-// the side device (GetSideInfo/CheckSide): a migration destination's two rows
-// first, by the rule its converge applies (probeMigrDst, reportMigrDst), whose
-// answer to where the per-CN stacks serve from the per-CN rows are judged by,
-// and then the per-CN stacks and the migration source's rows (probeStacks).
+// the side device (the side's background read, SH29): a migration
+// destination's two rows first, by the rule its converge applies
+// (probeMigrDst, reportMigrDst), whose answer to where the per-CN stacks serve
+// from the per-CN rows are judged by, and then the per-CN stacks and the
+// migration source's rows (probeStacks).
 func (s *DnAgentServer) probeAboveSideDev(
 	ctx context.Context,
 	st *sideState,
@@ -316,8 +322,8 @@ func (s *DnAgentServer) probeMigrDst(
 // the cutover grace window (architecture.md, Migration, src step 2) by the
 // test phase 1 converges it to (ensureDmLinearSuspended): the device there
 // and suspended, on whatever table it carries — its pre-fence one, or the
-// dm-error of DN12 rule 1's known-limit second window — so a check round
-// reads every window as the converge that holds it reports it.
+// dm-error of DN12 rule 1's known-limit second window — so the read a check
+// round starts reads every window as the converge that holds it reports it.
 func (s *DnAgentServer) probeFencedLinear(
 	ctx context.Context,
 	name string,
@@ -400,7 +406,7 @@ func (s *DnAgentServer) probeCnStacks(
 	cloneLive bool,
 ) {
 	t := st.tracker
-	// A read-only probe must not start the window (DN16/SH25), so it asks
+	// A read-only probe must not start the window (DN16/SH29), so it asks
 	// whether one is already running rather than going through beginFence.
 	fencing := plan.migrSrc != nil && s.inFence(st)
 

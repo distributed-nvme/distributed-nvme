@@ -510,13 +510,14 @@ func seedStrayDm(node *fakeNode, name string, devNo string) {
 }
 
 // TestCheckCnReportsLeftover pins `architecture.md`, Teardown by sweep, "The
-// verdict is recomputed every time and stored nowhere".
+// verdict is recomputed, and kept only to be reported": every read takes it
+// afresh from the node, and the rounds answer the latest one.
 //
 // That is what makes the leftover code a working retry: the worker re-issues
 // SyncupCn while a Check replies non-zero (RW4 step 5), and it stops as soon
-// as the node is clean — including when the object went away for a reason
-// this agent knows nothing about, such as an operator's own `dmsetup remove`
-// or a co-hosted tool. A stored "pending" flag would be memory of failure,
+// as a read finds the node clean — including when the object went away for a
+// reason this agent knows nothing about, such as an operator's own `dmsetup
+// remove` or a co-hosted tool. A stored "pending" flag would be memory of failure,
 // and memory of failure is exactly what the design does without: it would
 // keep re-driving the worker over an object that no longer exists, and would
 // need a second mechanism to ever be cleared.
@@ -535,6 +536,9 @@ func TestCheckCnReportsLeftover(t *testing.T) {
 	node.Reset()
 	checkReq := &pb.CheckCnRequest{
 		ClusterId: testCluster, CnId: testCn, Revision: 2}
+	// The round and the info read answer from the CN's read (dnagent.md
+	// SH29), which takes the verdict.
+	refreshTestCn(t, srv)
 	reply, _ := srv.checkCnRound(ctx, checkReq, nil)
 	cnSweepAssertCode(t, reply.GetAgentReply(),
 		common.ReplyCodeLeftover, "CheckCn with residue")
@@ -560,10 +564,11 @@ func TestCheckCnReportsLeftover(t *testing.T) {
 	}
 
 	// The object goes behind the agent's back — no Syncup, no RPC of any
-	// kind between the two rounds — and the next verdict is recomputed from
-	// the node, not replayed from the last one.
+	// kind between the two rounds — and the next read's verdict is
+	// recomputed from the node, not replayed from the last one.
 	delete(node.dms, stray)
 	delete(node.devNo, "/dev/mapper/"+stray)
+	refreshTestCn(t, srv)
 	reply, _ = srv.checkCnRound(ctx, checkReq, nil)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "CheckCn once clean")
 }
@@ -1606,9 +1611,10 @@ func TestUnansweredSubsystemListingRemovesNothing(t *testing.T) {
 // cntlr's pool that no leg wants stays until a converge whose walk answers,
 // which disconnects it. Read past, the unread entry would leave a list that
 // looks whole, and the sweep would remove what it derives from a snapshot
-// with one connection unknown. A check round's verdict takes its list from
-// its reading's walk by the same rule (CN30): it names the enumeration, reads
-// the entry once, in the walk, and its leg rows stay OK.
+// with one connection unknown. A cntlr's read, which a check round answers
+// from (dnagent.md SH29), takes its verdict's list from its reading's walk by
+// the same rule (CN30): it names the enumeration, reads the entry once, in
+// the walk, and its leg rows stay OK.
 func TestAnUnreadWalkEntryStopsTheConvergeSweep(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -1649,9 +1655,11 @@ func TestAnUnreadWalkEntryStopsTheConvergeSweep(t *testing.T) {
 	assertOk(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
 	assertOk(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
 
-	// A check round over the same node: its verdict fails on the entry its
-	// walk could not read, and nothing else reads that entry again.
+	// A read over the same node, and the check round after it: its verdict
+	// fails on the entry its walk could not read, and nothing else reads
+	// that entry again.
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	check, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr(), Revision: opts.revision,
@@ -1661,7 +1669,7 @@ func TestAnUnreadWalkEntryStopsTheConvergeSweep(t *testing.T) {
 	cnSweepAssertDetails(t, check.GetAgentReply(),
 		"enumeration failed: nvme subsystems", "the round's failure details")
 	if got := countCalls(node, "read "+unread); got != 1 {
-		t.Fatalf("the round read %s %d times, want 1 (its walk's)",
+		t.Fatalf("the read read %s %d times, want 1 (its walk's)",
 			unread, got)
 	}
 	assertOk(t, probed.GetLegIdToLeg()[testMetaLeg], "checked leg meta")
@@ -1694,9 +1702,10 @@ func TestAnUnreadWalkEntryStopsTheConvergeSweep(t *testing.T) {
 // the verdict the way enumerateCn names it. In a converge the listing of
 // /sys/class/nvme-subsystem is the pass's one NVMe walk, which the build's
 // lookups share, so a kill of it fails every leg and clone source lookup of
-// the pass as well. A check round and an info read take their dm devices
-// from their reading's `dmsetup info` listing instead of `dmsetup ls`
-// (TestUnansweredDmListingErrsEveryDeviceRow).
+// the pass as well. A cntlr's background read, which a check round and an
+// info read answer from, takes its dm devices from its reading's
+// `dmsetup info` listing instead of `dmsetup ls` (CN30;
+// TestUnansweredDmListingErrsEveryDeviceRow).
 var cnSweepListings = []struct {
 	name string // the enumeration, as the verdict names it
 	kill string // the listing behind it
@@ -1813,10 +1822,12 @@ func TestUnansweredListingStillMovesAnaBeforeThePark(t *testing.T) {
 					}
 				}
 
-				// What the worker sees next: the namespace is where the
-				// desired state wants it, whether or not a leftover still
-				// drives another pass.
+				// What the worker sees next, once a read has looked again
+				// (dnagent.md SH29): the namespace is where the desired
+				// state wants it, whether or not a leftover still drives
+				// another pass.
 				node.Reset()
+				refreshTestCntlr(t, srv)
 				check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 					ClusterId: testCluster, CnId: testCn,
 					CntlrPointer: cntlrPtr(), Revision: 3, ShowInfo: true,
@@ -1841,8 +1852,8 @@ func TestUnansweredListingStillMovesAnaBeforeThePark(t *testing.T) {
 // sweep still does. The chunk files of a clone that left clone_list are local
 // state, swept against the request alone, so an unanswered listing is no
 // reason to leave them: they go in this pass, and a standby, which builds no
-// clone device, has nothing left to remove, so the Check round after it reads
-// OK. (A chunk file a pass did not remove would keep the verdict naming it:
+// clone device, has nothing left to remove, so the next read, and the Check
+// round answering from it, read OK. (A chunk file a pass did not remove would keep the verdict naming it:
 // TestUnremovedChunkFileIsRedriven.)
 func TestUnansweredListingStillSweepsCloneChunks(t *testing.T) {
 	for _, listing := range cnSweepListings {
@@ -1877,6 +1888,7 @@ func TestUnansweredListingStillSweepsCloneChunks(t *testing.T) {
 			if got := reply.GetBmInfoList(); len(got) != 0 {
 				t.Fatalf("the reply still reports applied chunks: %v", got)
 			}
+			refreshTestCntlr(t, srv)
 			check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 				ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr(), Revision: 3,
@@ -2505,8 +2517,8 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 // TestAHeldNsDevIsRedrivenWithoutARevision pins the other half of the hold:
 // with no dm-clone at all, an unanswered `dmsetup ls` of the converge holds
 // an ns-dev off its raid0 too — nothing can rule out a dm-clone hydrating
-// into it — and here the Check verdict, which lists the node from its
-// round's own reading, finds nothing left over to report. A standby
+// into it — and here the verdict of the cntlr's read, which lists the node
+// from that read's own reading, finds nothing left over to report. A standby
 // promoted to primary, and a namespace resumed, each keep their ns-dev
 // parked and inaccessible on that pass. The worker re-syncs
 // on a revision or a reply code, never on a row, so without the CN10 retry
@@ -2619,7 +2631,10 @@ func TestUnremovedChunkFileIsRedriven(t *testing.T) {
 			}
 			record := agent.LeftoverKindRecord + ":" + bmPath
 			req := cntlrReq(reqOpts{revision: 3, primary: false})
+			// checkRound is the verdict of a read and the check round
+			// answering from it (dnagent.md SH29).
 			checkRound := func() *pb.AgentReply {
+				refreshTestCntlr(t, srv)
 				check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 					ClusterId: testCluster, CnId: testCn,
 					CntlrPointer: cntlrPtr(), Revision: 3,
@@ -2806,11 +2821,11 @@ func TestADeletedSourceControllerHoldsNothing(t *testing.T) {
 // both ns-devs converge. A held ns-dev keeps its live table, a parked one
 // going inaccessible and a serving one taking its desired group, the
 // optimized one it has here, and its row reads ERROR on both channels; the
-// converged one reads OK on both. A check round takes the dm-clone's table
-// from its reading, so where the route's fault is that table's read, the
-// reading's table listing leaves the dm-clone out, as one that went
-// mid-listing does, and the round reads that table on its own, where the
-// fault meets it too.
+// converged one reads OK on both. The cntlr's read, which a check round
+// answers from, takes the dm-clone's table from its reading, so where the
+// route's fault is that table's read, the reading's table listing leaves the
+// dm-clone out, as one that went mid-listing does, and the read reads that
+// table on its own, where the fault meets it too.
 func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 	const snapNs = uint64(0x1b)
 	subsysAt := func(snapSuspended bool) map[string]*pb.Subsystem {

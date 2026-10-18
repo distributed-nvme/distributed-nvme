@@ -56,6 +56,25 @@ func (c *logCapture) Write(p []byte) (int, error) {
 // other record is ignored, so an unrelated goroutine cannot fail these tests.
 func (c *logCapture) msgRecords(t *testing.T, msg string) []map[string]any {
 	t.Helper()
+	return c.records(t, "msg", msg)
+}
+
+// traceRecords is msgRecords for the records carrying the given trace id.
+func (c *logCapture) traceRecords(
+	t *testing.T,
+	traceId string,
+) []map[string]any {
+	t.Helper()
+	return c.records(t, "trace_id", traceId)
+}
+
+// records decodes every captured JSON line whose field key is value.
+func (c *logCapture) records(
+	t *testing.T,
+	key string,
+	value string,
+) []map[string]any {
+	t.Helper()
 	c.mu.Lock()
 	text := c.buf.String()
 	c.mu.Unlock()
@@ -68,7 +87,7 @@ func (c *logCapture) msgRecords(t *testing.T, msg string) []map[string]any {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("captured line is not JSON: %q: %v", line, err)
 		}
-		if rec["msg"] == msg {
+		if rec[key] == value {
 			out = append(out, rec)
 		}
 	}
@@ -680,7 +699,7 @@ func TestReconcileRefusesAStoredInvalidZeroBytes(t *testing.T) {
 			// The read-only round: no verdict and nothing provable to
 			// report.
 			node.Reset()
-			round, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+			round, _ := checkSideNow(restarted, ctx, &pb.CheckSideRequest{
 				ClusterId: testCluster, DnId: testDn,
 				SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
 			}, nil)
@@ -776,7 +795,7 @@ func TestAStoredInvalidZeroBytesHasNoVerdict(t *testing.T) {
 	if calls := node.callsMatching("blkdiscard"); len(calls) != 0 {
 		t.Errorf("a refused side was zeroed: %v", calls)
 	}
-	round, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+	round, _ := checkSideNow(restarted, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), Revision: 1,
 	}, nil)
@@ -915,13 +934,13 @@ func TestReconcileKeepsTheSidesOfAnUnreadableDnFile(t *testing.T) {
 
 	// Unknown, not healthy: the reply the worker answers with a re-sync.
 	checkSide := func() *pb.AgentReply {
-		reply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+		reply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide), Revision: 2,
 		}, nil)
 		return reply.GetAgentReply()
 	}
-	dnReply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+	dnReply, _ := checkDnNow(srv, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, Revision: 1,
 	}, nil)
 	if got := dnReply.GetAgentReply().GetCode(); got !=
@@ -1006,7 +1025,7 @@ func TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn(t *testing.T) {
 				t.Fatalf("a temporary dn file skipped a side of a " +
 					"loaded dn")
 			}
-			reply, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+			reply, _ := checkSideNow(restarted, ctx, &pb.CheckSideRequest{
 				ClusterId: testCluster, DnId: testDn,
 				SidePointer: sidePtr(testSide), Revision: 1,
 			}, nil)
@@ -1126,7 +1145,7 @@ func TestReconcileKeepsTheChunksOfAnUnreadableSideFile(t *testing.T) {
 		}
 		// Not hidden either: the side is unknown to its Check round, which
 		// is what the worker re-sends the SyncupSide for.
-		reply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+		reply, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide), Revision: 2,
 		}, nil)
@@ -1289,7 +1308,7 @@ func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
 
 	restarted := startTestServer(t, node)
 
-	dnReply, _ := restarted.checkDnRound(ctx, &pb.CheckDnRequest{
+	dnReply, _ := checkDnNow(restarted, ctx, &pb.CheckDnRequest{
 		ClusterId: testCluster, DnId: testDn, Revision: 2,
 	}, nil)
 	if got := dnReply.GetRevision(); got != 2 {
@@ -1297,7 +1316,7 @@ func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
 			got)
 	}
 	for _, ptr := range []*pb.SidePointer{sidePtr(testSide), side2Ptr} {
-		reply, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+		reply, _ := checkSideNow(restarted, ctx, &pb.CheckSideRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: ptr, Revision: 2,
 		}, nil)

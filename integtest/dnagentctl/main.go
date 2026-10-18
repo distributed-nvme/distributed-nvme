@@ -7,6 +7,12 @@
 //
 // It exits non-zero on a gRPC error or when agent_reply.code differs from
 // --expect-code (default 0), so the caller's `set -e` catches both.
+//
+// The agent answers a check round and an info read from its latest
+// observation of the object (dnagent.md SH28), and only a round starts a read
+// of the node (SH29). The info reads here stay plain memory reads; check-dn
+// and check-side --fresh, and both pollers, send rounds until one carries an
+// observation read after the command began (fresh.go).
 package main
 
 import (
@@ -160,7 +166,8 @@ func (g *globals) bind(fs *flag.FlagSet, withTimeout bool) {
 	g.timeout = 10
 	if withTimeout {
 		fs.Float64Var(&g.timeout, "timeout", 10,
-			"per-RPC timeout in seconds")
+			"timeout in seconds of the call, or of a --fresh command's "+
+				"whole stream")
 	}
 	fs.UintVar(&g.expectCode, "expect-code", 0,
 		"the AgentReply.code the call must return")
@@ -184,14 +191,21 @@ func (g *globals) dial() (*grpc.ClientConn, pb.DiskNodeAgentClient, error) {
 
 // rpcCtx carries the trace id as gRPC metadata so the driver's call, both
 // agents' handlers and every os command they run share one id in the logs.
+// Its deadline is --timeout.
 func (g *globals) rpcCtx() (context.Context, context.CancelFunc) {
+	return g.ctxFor(g.timeout)
+}
+
+// ctxFor is rpcCtx with a deadline of seconds: a poller's stream lives for
+// its whole polling budget.
+func (g *globals) ctxFor(seconds float64) (context.Context, context.CancelFunc) {
 	ctx := context.Background()
 	if g.traceId != "" {
 		ctx = metadata.AppendToOutgoingContext(
 			ctx, common.TraceIdMetadataKey, g.traceId)
 	}
 	return context.WithTimeout(
-		ctx, time.Duration(g.timeout*float64(time.Second)))
+		ctx, time.Duration(seconds*float64(time.Second)))
 }
 
 // emit prints a reply as one line of JSON. protojson deliberately varies its
@@ -541,6 +555,10 @@ func cmdPushMigrBm(args []string) {
 	g.checkReply(reply.GetAgentReply())
 }
 
+// cmdGetDnInfo and cmdGetSideInfo are info reads: the agent answers from
+// memory and starts no read (dnagent.md SH28), so they show the observation
+// the last converge or read stored, and the stage that needs the node as it
+// is now uses a check command's --fresh instead.
 func cmdGetDnInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-dn-info", &g)
@@ -560,6 +578,7 @@ func cmdGetDnInfo(args []string) {
 		die("GetDnInfo failed: %v", err)
 	}
 	emit(reply)
+	noteStamp("GetDnInfo", reply.GetObsStamp())
 	g.checkReply(reply.GetAgentReply())
 }
 
@@ -587,22 +606,31 @@ func cmdGetSideInfo(args []string) {
 	}
 	emit(reply)
 	// The provisioning counters (architecture.md, Side provisioning protocol)
-	// as one human line on **stderr**: stdout stays exactly one protojson line,
-	// because case D diffs it and every caller parses it with jq.
+	// and the observation's age as human lines on **stderr**: stdout stays
+	// exactly one protojson line, because every caller parses it with jq.
 	fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d bytes\n",
 		reply.GetSideInfo().GetZeroedBytes(),
 		reply.GetSideInfo().GetZeroBytes())
+	noteStamp("GetSideInfo", reply.GetObsStamp())
 	g.checkReply(reply.GetAgentReply())
 }
 
-// cmdCheckDn runs exactly one worker-initiated round on the bidi stream and
-// closes it (SH24).
+// cmdCheckDn sends worker-style rounds on one bidi stream (SH24) and closes
+// it. Without --fresh it sends one round, which answers from the agent's
+// latest observation and starts a read of the node when none runs (SH25,
+// SH29). With --fresh it sends a round every 100 ms, each asking for the info,
+// until the reply answers from an observation read after the command began
+// with no converge running (fresh.go), all within --timeout; only that reply
+// is printed and checked against --expect-code.
 func cmdCheckDn(args []string) {
 	var g globals
 	fs := newFlagSet("check-dn", &g)
 	var revision hexUint
 	fs.Var(&revision, "revision", "the revision the worker believes is current")
 	showInfo := fs.Bool("show-info", false, "ask for the info on every reply")
+	fresh := fs.Bool("fresh", false,
+		"send rounds until one answers from an observation read after "+
+			"the command began")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -617,26 +645,17 @@ func cmdCheckDn(args []string) {
 	if err != nil {
 		die("CheckDn failed: %v", err)
 	}
-	if err := stream.Send(&pb.CheckDnRequest{
+	round := streamRounds(stream, &pb.CheckDnRequest{
 		ClusterId: uint64(g.cluster),
 		DnId:      uint64(g.dn),
 		Revision:  uint64(revision),
-		ShowInfo:  *showInfo,
+		ShowInfo:  *showInfo || *fresh,
 		TraceId:   g.traceId,
-	}); err != nil {
-		die("CheckDn send failed: %v", err)
-	}
-	reply, err := stream.Recv()
-	if err != nil {
-		die("CheckDn recv failed: %v", err)
-	}
-	if err := stream.CloseSend(); err != nil {
-		die("CheckDn close failed: %v", err)
-	}
-	emit(reply)
-	g.checkReply(reply.GetAgentReply())
+	})
+	g.runCheck(ctx, "CheckDn", round, stream.CloseSend, *fresh)
 }
 
+// cmdCheckSide is cmdCheckDn for one side.
 func cmdCheckSide(args []string) {
 	var g globals
 	fs := newFlagSet("check-side", &g)
@@ -644,6 +663,9 @@ func cmdCheckSide(args []string) {
 	var revision hexUint
 	fs.Var(&revision, "revision", "the revision the worker believes is current")
 	showInfo := fs.Bool("show-info", false, "ask for the info on every reply")
+	fresh := fs.Bool("fresh", false,
+		"send rounds until one answers from an observation read after "+
+			"the command began")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -658,35 +680,55 @@ func cmdCheckSide(args []string) {
 	if err != nil {
 		die("CheckSide failed: %v", err)
 	}
-	if err := stream.Send(&pb.CheckSideRequest{
+	round := streamRounds(stream, &pb.CheckSideRequest{
 		ClusterId:   uint64(g.cluster),
 		DnId:        uint64(g.dn),
 		SidePointer: sidePointerOf(sp, leg, side),
 		Revision:    uint64(revision),
-		ShowInfo:    *showInfo,
+		ShowInfo:    *showInfo || *fresh,
 		TraceId:     g.traceId,
-	}); err != nil {
-		die("CheckSide send failed: %v", err)
-	}
-	reply, err := stream.Recv()
-	if err != nil {
-		die("CheckSide recv failed: %v", err)
-	}
-	if err := stream.CloseSend(); err != nil {
-		die("CheckSide close failed: %v", err)
-	}
-	emit(reply)
-	g.checkReply(reply.GetAgentReply())
+	})
+	g.runCheck(ctx, "CheckSide", round, stream.CloseSend, *fresh)
 }
 
-// cmdWaitHydrated polls GetSideInfo until the destination dm-clone reports
+// sideSampler opens one CheckSide stream for a poller, alive for its whole
+// budget of seconds, whose rounds ask for the info every time at revision 0
+// — the agent only echoes the revision it stored — under the stage's trace
+// id, so the reads they start log under it.
+func (g *globals) sideSampler(client pb.DiskNodeAgentClient,
+	ptr *pb.SidePointer, seconds, interval float64) (
+	*sampler, func()) {
+	ctx, cancel := g.ctxFor(seconds)
+	stream, err := client.CheckSide(ctx)
+	if err != nil {
+		cancel()
+		die("CheckSide failed: %v", err)
+	}
+	return &sampler{
+		ctx: ctx,
+		round: streamRounds(stream, &pb.CheckSideRequest{
+			ClusterId:   uint64(g.cluster),
+			DnId:        uint64(g.dn),
+			SidePointer: ptr,
+			ShowInfo:    true,
+			TraceId:     g.traceId,
+		}),
+		interval: time.Duration(interval * float64(time.Second)),
+		period:   freshPeriod,
+	}, cancel
+}
+
+// cmdWaitHydrated polls the destination side until its dm-clone reports
 // every region hydrated, parsing the raw `dmsetup status` line the agent puts
 // in migr_dst_info.dm_clone_info.details (architecture.md,
-// Live-state reporting). --min-first asserts a floor on the first sample this
-// poll takes. Case C's bitmap jump (dnagent_integtest.md, Cases, migr_bitmap)
-// is not checked with it: the suite polls only after the ANA wait and the
-// read-through probe, when hydration may be complete, so the script reads the
-// jump off the enabling converge's reply instead.
+// Live-state reporting). Hydration moves in the kernel with no converge, so
+// an info read, which answers from memory, would never see it move: the poll
+// samples with check rounds, which start the agent's reads (sampler).
+// --min-first asserts a floor on the first sample this poll takes. Case C's
+// bitmap jump (dnagent_integtest.md, Cases, migr_bitmap) is not checked with
+// it: the suite polls only after the ANA wait and the read-through probe,
+// when hydration may be complete, so the script reads the jump off the
+// enabling converge's reply instead.
 func cmdWaitHydrated(args []string) {
 	var g globals
 	fs := flag.NewFlagSet("wait-hydrated", flag.ExitOnError)
@@ -704,70 +746,67 @@ func cmdWaitHydrated(args []string) {
 	}
 	defer conn.Close()
 
-	req := &pb.GetSideInfoRequest{
-		ClusterId:   uint64(g.cluster),
-		DnId:        uint64(g.dn),
-		SidePointer: sidePointerOf(sp, leg, side),
-	}
-	deadline := time.Now().Add(time.Duration(*limit * float64(time.Second)))
+	samples, cancel := g.sideSampler(client,
+		sidePointerOf(sp, leg, side), *limit, *interval)
+	defer cancel()
 	var firstHydrated, firstTotal uint64
 	haveFirst := false
-	samples := 0
+	sampleCnt := 0
+	raw := ""
 	for {
-		ctx, cancel := g.rpcCtx()
-		reply, err := client.GetSideInfo(ctx, req)
-		cancel()
+		reply, err := samples.next()
 		if err != nil {
-			die("GetSideInfo failed: %v", err)
+			if samples.ctx.Err() != nil {
+				die("hydration did not finish within %gs (last status %q, "+
+					"%s)", *limit, raw, samples.rule.describe())
+			}
+			die("CheckSide failed: %v", err)
 		}
 		if reply.GetAgentReply().GetCode() != 0 {
 			die("agent_reply.code = %d (%s)",
 				reply.GetAgentReply().GetCode(),
 				reply.GetAgentReply().GetDetails())
 		}
-		raw := reply.GetSideInfo().GetMigrDstInfo().
+		raw = reply.(*pb.CheckSideReply).GetSideInfo().GetMigrDstInfo().
 			GetDmCloneInfo().GetDetails()
 		status, ok := common.ParseCloneStatus(raw)
-		if ok {
-			samples++
-			if !haveFirst {
-				haveFirst = true
-				firstHydrated = status.HydratedRegions
-				firstTotal = status.TotalRegions
-				if *minFirst != 0 && firstHydrated < *minFirst {
-					die("first hydration sample is %d/%d, want >= %d",
-						firstHydrated, firstTotal, *minFirst)
-				}
-			}
-			fmt.Fprintf(os.Stderr,
-				"dnagentctl: hydrated %d/%d\n",
-				status.HydratedRegions, status.TotalRegions)
-			if status.TotalRegions != 0 &&
-				status.HydratedRegions >= status.TotalRegions {
-				out, _ := json.Marshal(map[string]any{
-					"hydrated":       status.HydratedRegions,
-					"total":          status.TotalRegions,
-					"first_hydrated": firstHydrated,
-					"first_total":    firstTotal,
-					"samples":        samples,
-				})
-				fmt.Println(string(out))
-				return
+		if !ok {
+			continue
+		}
+		sampleCnt++
+		if !haveFirst {
+			haveFirst = true
+			firstHydrated = status.HydratedRegions
+			firstTotal = status.TotalRegions
+			if *minFirst != 0 && firstHydrated < *minFirst {
+				die("first hydration sample is %d/%d, want >= %d",
+					firstHydrated, firstTotal, *minFirst)
 			}
 		}
-		if time.Now().After(deadline) {
-			die("hydration did not finish within %gs (last status %q)",
-				*limit, raw)
+		fmt.Fprintf(os.Stderr,
+			"dnagentctl: hydrated %d/%d\n",
+			status.HydratedRegions, status.TotalRegions)
+		if status.TotalRegions != 0 &&
+			status.HydratedRegions >= status.TotalRegions {
+			out, _ := json.Marshal(map[string]any{
+				"hydrated":       status.HydratedRegions,
+				"total":          status.TotalRegions,
+				"first_hydrated": firstHydrated,
+				"first_total":    firstTotal,
+				"samples":        sampleCnt,
+			})
+			fmt.Println(string(out))
+			return
 		}
-		time.Sleep(time.Duration(*interval * float64(time.Second)))
 	}
 }
 
-// cmdWaitZeroed polls GetSideInfo until the side reports its whole length to
-// zero zeroed — zeroed_bytes up to zero_bytes (architecture.md, Side
-// provisioning protocol). It is the script's stand-in for the sp-worker's
-// flip rule: once it returns, the caller re-sends the same SyncupSide at a
-// fresh revision with --provisioned=true.
+// cmdWaitZeroed polls the side until it reports its whole length to zero
+// zeroed — zeroed_bytes up to zero_bytes (architecture.md, Side provisioning
+// protocol). It is the script's stand-in for the sp-worker's flip rule: once
+// it returns, the caller re-sends the same SyncupSide at a fresh revision with
+// --provisioned=true. The zeroing loop stores no observation, so the poll
+// samples with check rounds, whose reads report its progress (sampler).
 //
 // Two guards make it a real assertion rather than a sleep. zero_bytes != 0,
 // because a reply whose counters are both zero — no length known yet — would
@@ -775,11 +814,11 @@ func cmdWaitHydrated(args []string) {
 // complete. And a fail-fast on side_dev_info = RES_STATUS_ERROR, because
 // "record missing", "not zeroed" and a failing batch are terminal or paced —
 // waiting out the whole budget for them only hides the reason. MISSING is
-// deliberately NOT terminal: a read-only probe reports it while the
+// deliberately NOT terminal: a read of the side reports it while the
 // allocation record is still being written, which is exactly what this call
 // is waiting through.
 //
-// A length that disagrees with the side's record never shows here: the probe
+// A length that disagrees with the side's record never shows here: the read
 // never compares the request's length with the record's and reports the
 // record's own counts (dnagent.md DN18), so only the SyncupSide that sent that
 // length carries the error row (dnagent.md DN9). A caller that needs the
@@ -800,28 +839,28 @@ func cmdWaitZeroed(args []string) {
 	}
 	defer conn.Close()
 
-	req := &pb.GetSideInfoRequest{
-		ClusterId:   uint64(g.cluster),
-		DnId:        uint64(g.dn),
-		SidePointer: sidePointerOf(sp, leg, side),
-	}
-	deadline := time.Now().Add(time.Duration(*limit * float64(time.Second)))
-	samples := 0
+	samples, cancel := g.sideSampler(client,
+		sidePointerOf(sp, leg, side), *limit, *interval)
+	defer cancel()
+	sampleCnt := 0
 	var zeroedBytes, zeroBytes uint64
 	for {
-		ctx, cancel := g.rpcCtx()
-		reply, err := client.GetSideInfo(ctx, req)
-		cancel()
+		reply, err := samples.next()
 		if err != nil {
-			die("GetSideInfo failed: %v", err)
+			if samples.ctx.Err() != nil {
+				die("zeroing did not finish within %gs (last %d/%d bytes, "+
+					"%s)", *limit, zeroedBytes, zeroBytes,
+					samples.rule.describe())
+			}
+			die("CheckSide failed: %v", err)
 		}
 		if reply.GetAgentReply().GetCode() != 0 {
 			die("agent_reply.code = %d (%s)",
 				reply.GetAgentReply().GetCode(),
 				reply.GetAgentReply().GetDetails())
 		}
-		info := reply.GetSideInfo()
-		samples++
+		info := reply.(*pb.CheckSideReply).GetSideInfo()
+		sampleCnt++
 		zeroedBytes, zeroBytes = info.GetZeroedBytes(), info.GetZeroBytes()
 		fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d bytes\n",
 			zeroedBytes, zeroBytes)
@@ -833,16 +872,11 @@ func cmdWaitZeroed(args []string) {
 			out, _ := json.Marshal(map[string]any{
 				"zeroed_bytes": zeroedBytes,
 				"zero_bytes":   zeroBytes,
-				"samples":      samples,
+				"samples":      sampleCnt,
 			})
 			fmt.Println(string(out))
 			return
 		}
-		if time.Now().After(deadline) {
-			die("zeroing did not finish within %gs (last %d/%d bytes)",
-				*limit, zeroedBytes, zeroBytes)
-		}
-		time.Sleep(time.Duration(*interval * float64(time.Second)))
 	}
 }
 

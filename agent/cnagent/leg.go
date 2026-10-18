@@ -33,7 +33,7 @@ import (
 //     state, so "available" is `state == live && ana_state == optimized`,
 //     never ANA alone.
 //
-// A cntlr's converge, check round and info read each start with one walk of
+// A cntlr's converge and its read each start with one walk of
 // the node: the listing of /sys/class/nvme-subsystem and each entry's
 // subsysnqn say where each subsystem is (passWalk). A lookup (lookupSubsys)
 // reads its own entry alone: its subsysnqn again, then its directory and its
@@ -143,12 +143,11 @@ func subsysUnknown(nqn string, err error) error {
 	return fmt.Errorf("subsystem %s %w: %w", nqn, errSubsysUnknown, err)
 }
 
-// passWalk is the NVMe walk of one converge, check round or info read
-// (CN10): where each subsystem entry of the node is, read at the start of
-// the pass and shared by every lookup of it; a converge reads it again at
-// the next lookup after it marks it stale. A check round and an info read
-// take it before their rows, a converge right before its sweep, whose list
-// of connections it is too (enumerateCn).
+// passWalk is the NVMe walk of one converge or read (CN10): where each
+// subsystem entry of the node is, read at the start of the pass and shared by
+// every lookup of it; a converge reads it again at the next lookup after it
+// marks it stale. A read takes it before its rows, a converge right before its
+// sweep, whose list of connections it is too (enumerateCn).
 type passWalk struct {
 	walk *agent.SubsysWalk
 	// err is the listing of /sys/class/nvme-subsystem that did not answer:
@@ -699,8 +698,8 @@ func transportHealth(
 //
 // Every cntlr writes them, primary and standby, on both channels, and this is
 // the one function that does: the converge after each leg's connect step
-// (ensureLegs, or the level's MISSING rows in build), the check round and the
-// info read in probeCntlr. A row reads, in this order: MISSING "sp_level"
+// (ensureLegs, or the level's MISSING rows in build), the read in
+// probeCntlr. A row reads, in this order: MISSING "sp_level"
 // while the sp_level suppresses legs (CN19), as the leg row does;
 // PROVISIONING while its side is unprovisioned ([D15]: nothing is exported
 // for it, so its missing controller is the desired state); ERROR with the
@@ -821,7 +820,7 @@ func pathHealth(
 // attribute. No SH15 signal ends that child — SIGTERM at the soft timeout and
 // SIGKILL at the hard one are delivered, and it still returns only when the
 // kernel does — so issued inline it would hold the cntlr's object lock, and
-// with it every CheckCntlr round of the cntlr (CN1), for the whole minute.
+// with it every read of the cntlr (CN1), for the whole minute.
 //
 // The registry is bookkeeping of work in progress, never memory of work that
 // failed: an entry lives exactly as long as its goroutine, and it does two
@@ -846,7 +845,7 @@ func pathHealth(
 // one L10 of many legs or one pool drain would set them all going together,
 // and each delete a vanished target stalls holds an OsClient slot for the
 // admin timeout. Enough of those would leave no slot for the node's converges
-// and Check rounds, whose OS calls would then be refused at the soft timeout
+// and reads, whose OS calls would then be refused at the soft timeout
 // and report ERROR rows on healthy objects.
 func (s *CnAgentServer) startDisconnect(ctx context.Context, nqn string) {
 	s.mu.Lock()
@@ -905,8 +904,8 @@ func detailsDisconnectInFlight(nqn string) string {
 // fails for the pass, which registers the CN10/CN18 connect retry, and the
 // first pass after the goroutine has gone takes a walk of its own, reads the
 // subsystem's entry, directory and controllers at its lookup, and connects
-// whatever is missing. The CN28 probe asks it too, so the Check round
-// reports that step the way the converge does.
+// whatever is missing. The CN28 probe asks it too, so a read reports that
+// step the way the converge does.
 func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -980,12 +979,15 @@ func (s *CnAgentServer) stopConnectRetry(st *cntlrState) {
 // the cntlr is disabled (SP_LEVEL_DISABLE) or it is torn down
 // (dropCntlrState). It runs through connectRetryLoop, the one copy of the
 // DN13 pattern, and it is not the CN10 retry because of what each attempt
-// costs: a whole converge under the object lock the cntlr's check rounds
-// need, which at the CN10 pace would make a large pool's check rounds miss —
-// and a clone that waits for room is not broken, so the longer interval
-// loses nothing. A namespace of the clone's destination td that waits only
-// for the clone registers no CN10 retry either: the attempt of this one that
-// finds room builds the clone and moves the namespace to optimized (CN16).
+// costs: a whole converge under the object lock, which holds the cntlr's
+// reads off while it runs (dnagent.md SH30), so at the CN10 pace a large
+// pool's attempts would follow one another with hardly a gap for a round to
+// start a read in, and its rounds would answer from an observation as old as
+// the attempt in progress (dnv-worker.md HL7) — and a clone that waits for
+// room is not broken, so the longer interval loses nothing. A namespace of
+// the clone's destination td that waits only for the clone registers no CN10
+// retry either: the attempt of this one that finds room builds the clone and
+// moves the namespace to optimized (CN16).
 // The two retries may run at once; each attempt is a whole converge, and a
 // second one in a row is harmless.
 func (s *CnAgentServer) startCloneMetaRetry(
@@ -1059,7 +1061,11 @@ func (s *CnAgentServer) connectRetryLoop(
 // (dropCntlrState) — gets no new entry from an attempt that converges
 // nothing (dnagent.md, SH11). Nothing that drops or replaces a held cntlr
 // runs under the read lock — a SyncupCntlr makes a new state only for a key
-// that has none — so the state the check finds stays for the attempt.
+// that has none — so the state the check finds stays for the attempt. Once
+// it has found the cntlr the attempt marks its converge, before it waits for
+// the object lock, so no round starts a read while it waits or converges;
+// it ends the mark once it has stored its observation (dnagent.md SH28,
+// SH30).
 func (s *CnAgentServer) reconvergeCntlr(
 	ctx context.Context,
 	key string,
@@ -1071,8 +1077,11 @@ func (s *CnAgentServer) reconvergeCntlr(
 	if s.getCntlr(key) != st {
 		return
 	}
+	defer s.markConverge(key)()
 	objLock := s.locks.Obj(key)
 	objLock.Lock()
 	defer objLock.Unlock()
-	s.convergeCntlr(attemptCtx, st)
+	rev := st.loadReq().GetRevision()
+	info, sweep := s.convergeCntlr(attemptCtx, st)
+	s.storeCntlrObs(attemptCtx, st, rev, info, sweep.Reply())
 }

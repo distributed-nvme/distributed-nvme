@@ -677,8 +677,8 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // object lock in SyncupSide and reconvergeSide, the node write lock in the
 // startup Reconcile.
 //
-// remove = false is the read-only verdict the Check rounds and GetSideInfo
-// take: same enumeration, same comparison, nothing touched — plus the one
+// remove = false is the read-only verdict the side's background read takes
+// (SH29): same enumeration, same comparison, nothing touched — plus the one
 // comparison only the verdict makes (zeroingVerdict), taken before the result
 // is logged so the pass's one `sweep leftover` record carries it.
 func (s *DnAgentServer) sweepSide(
@@ -811,8 +811,8 @@ func sideIdAttrs(plan *sidePlan) []any {
 // claim taken by a lost store, and taking a source's d2 and :3: export
 // strands the destination's dm-clone. The wait ends by itself: that side's
 // Check round answers "unknown side" until its SyncupSide stores the
-// request, and from then on the Check rounds' verdicts name every unwanted
-// one, which re-drives its removal.
+// request, and from then on the verdicts its reads store (SH29), which the
+// Check rounds answer, name every unwanted one, which re-drives its removal.
 func (s *DnAgentServer) buildSideChain(
 	ctx context.Context,
 	plan *sidePlan,
@@ -1583,8 +1583,9 @@ func (s *DnAgentServer) sweepDn(
 // The read-only verdicts
 // ---------------------------------------------------------------------------
 
-// dnVerdict is the node-level comparison the CheckDn rounds and GetDnInfo
-// take. A DN whose stored extent size is unusable converges nothing and
+// dnVerdict is the node-level comparison the DN's background read takes
+// (SH29), which its observation, and so its CheckDn rounds and GetDnInfo,
+// carry. A DN whose stored extent size is unusable converges nothing and
 // sweeps nothing (architecture.md, Common validation), so it has no verdict
 // either: naming leftovers for a
 // node this agent deliberately did not touch would report objects it is not
@@ -1599,8 +1600,9 @@ func (s *DnAgentServer) dnVerdict(
 	return s.sweepDn(ctx, st, false)
 }
 
-// sideVerdict is the side-level comparison the CheckSide rounds and
-// GetSideInfo take. The side's extent size comes from its DN, and a side
+// sideVerdict is the side-level comparison the side's background read takes
+// (SH29), which its observation, and so its CheckSide rounds and
+// GetSideInfo, carry. The side's extent size comes from its DN, and a side
 // whose DN is unknown or unusable has nothing to compare against. Nor has a
 // side whose stored length to zero DN8's gate refuses: it converges nothing
 // and sweeps nothing, so naming leftovers for it would report objects it is
@@ -1631,13 +1633,15 @@ func (s *DnAgentServer) sideVerdict(
 // at every level and on both sides of the provisioned gate, and only a
 // converge starts one. A converge that could not — the startup reconcile's
 // while no read of the disk answered, say — left nothing zeroing the side,
-// and the probe then reports the same progress every round with nothing to
-// re-send the SyncupSide. Both halves are read fresh on every call, the
+// and every read then reports the same progress with nothing to re-send
+// the SyncupSide. Both halves are read fresh on every call, the
 // record from the table and the goroutine from the registry, so nothing about
 // the failed converge is remembered. A record that cannot be read, or that
 // sits on a disk this node has not confirmed, adds nothing: a converge could
-// not start the goroutine either, the next round reads it again, and the
-// DN's own verdict reports an unconfirmed disk.
+// not start the goroutine either, the next read reads it again, and the
+// DN's own verdict reports an unconfirmed disk. A converge's own verdict,
+// the removing sweep, takes no part of it, so the observation a converge
+// stores (SH28) leaves it out until the side's next read.
 //
 // A migration destination that has not provisioned, that the
 // clone-metadata area has no free run for, and whose DN8 retry is registered

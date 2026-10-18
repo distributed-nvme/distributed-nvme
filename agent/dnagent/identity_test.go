@@ -31,7 +31,7 @@ func TestSideExportIdentity(t *testing.T) {
 	cnIds := []uint64{testCn0, testCn1}
 	converged := syncupSideTwoPhase(t, srv, sideReq(1, testSide, cnIds[0],
 		cnIds[1:], pb.SpLevel_SP_LEVEL_READWRITE)).GetSideInfo()
-	probed, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+	probed, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
 	})
 	if err != nil {

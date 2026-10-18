@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -16,6 +17,11 @@ import (
 
 // errRoundTimeout is RW4 step 4's "no reply within the round timeout" (RW8).
 var errRoundTimeout = errors.New("round timeout")
+
+// errStaleObservation is HL7's cause of a failed round: a reply that came in
+// time but answers from an observation older than ObsMaxAgeIntervals of the
+// object's intervals, or from none at all.
+var errStaleObservation = errors.New("observation too old")
 
 // errRoundAborted ends a round that a desired change overtook (RW6). The
 // pending reply would answer the request built from the SUPERSEDED revision,
@@ -38,8 +44,11 @@ type desiredState struct {
 // only on these fields, and the driver folds the info into health and the
 // kind-specific consequences from its own observe (HL4).
 type replyState struct {
-	// revision is the reply's revision: that of the last request the agent
-	// accepted for the object (architecture.md, Live-state reporting).
+	// revision is the reply's revision. A round's is the revision of the
+	// observation it answers from, the one the agent held when that reading
+	// started (dnagent.md SH28), so a Syncup* whose converge stored nothing
+	// leaves the rounds at the older one; a Syncup* reply's is that of the
+	// request the agent holds (architecture.md, Live-state reporting).
 	revision uint64
 	// code and details are the reply's AgentReply.
 	code    uint32
@@ -50,8 +59,79 @@ type replyState struct {
 	infoPresent bool
 	// fromRound reports whether the reply answered a Check* round rather
 	// than a Syncup*: AR10's run of unhealthy health verdicts, which AR5's
-	// threshold trigger asks two of, counts rounds only.
+	// threshold trigger asks two of, and RW13's run of disagreeing count
+	// compares count rounds only, and of those only a new observation
+	// (newObs).
 	fromRound bool
+
+	// The reply's stamp of the observation it answers from (dnagent.md
+	// SH28), every time by the node's clock and zero when unset: obsTime is
+	// when the reading ended, zero while the agent holds no observation of
+	// the object; answerTime is the agent's clock when it answered;
+	// convergeStart is the start of a converge of the object in flight then;
+	// obsTraceId is the trace id of the call whose converge or read made the
+	// observation.
+	obsTime       time.Time
+	answerTime    time.Time
+	convergeStart time.Time
+	obsTraceId    string
+	// saveTime is when the agent saved the request a Syncup* reply answers
+	// to its local store, zero on a round's reply and on a Syncup* reply
+	// that saved nothing.
+	saveTime time.Time
+	// newObs reports whether a round's observation is later than every one
+	// the loop has seen for the object (RW23). The loop sets it, on a
+	// round's reply only, so a Syncup* reply's observation never counts.
+	newObs bool
+}
+
+// newReplyState is the replyState of one reply, built by each driver's fold:
+// the reply's AgentReply and revision, whether it carried an *Info, its
+// observation stamp, and its save time — nil on a round's reply.
+func newReplyState(
+	agentReply *pb.AgentReply,
+	revision uint64,
+	infoPresent bool,
+	stamp *pb.ObsStamp,
+	saveTime *timestamppb.Timestamp,
+) *replyState {
+	return &replyState{
+		revision:      revision,
+		code:          agentReply.GetCode(),
+		details:       agentReply.GetDetails(),
+		infoPresent:   infoPresent,
+		obsTime:       pbTime(stamp.GetObsTime()),
+		answerTime:    pbTime(stamp.GetAnswerTime()),
+		convergeStart: pbTime(stamp.GetConvergeStart()),
+		obsTraceId:    stamp.GetObsTraceId(),
+		saveTime:      pbTime(saveTime),
+	}
+}
+
+// pbTime is a protobuf time as a time.Time, the zero time when it is unset,
+// which AsTime alone would turn into the Unix epoch.
+func pbTime(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil {
+		return time.Time{}
+	}
+	return ts.AsTime()
+}
+
+// ageFrom is the age HL7 judges: the agent's answer time less the later of
+// the observation's time and from, the answer time of the first round after
+// a pause in the loop's rounds (revWorker.askFrom), so that a reply with no
+// observation counts from from alone. Every time is by the node's clock, so
+// no clock difference between this host and the node enters it. It is known
+// only when the reply carries an answer time; a negative age reads 0.
+func (r *replyState) ageFrom(from time.Time) (age time.Duration, known bool) {
+	if r.answerTime.IsZero() {
+		return 0, false
+	}
+	start := r.obsTime
+	if start.Before(from) {
+		start = from
+	}
+	return max(r.answerTime.Sub(start), 0), true
 }
 
 // checkStream is one object's Check* bidirectional stream (RW4,
@@ -101,12 +181,17 @@ type objDriver interface {
 		cc *pb.ClusterConf,
 	) (*replyState, error)
 	// observe folds one reply — from a round or from a syncup, which are the
-	// same thing here (HL4) but for AR10's run, which counts rounds only
-	// (replyState.fromRound) — into health and the kind's own consequences
-	// (the flips of RW18/RW19, the pushes of BM1-BM6).
+	// same thing here (HL4) but for the runs of rounds in a row, which count
+	// a round's new observation only (replyState.fromRound, newObs; RW23) —
+	// into health and the kind's own consequences (the flips of RW18/RW19,
+	// the pushes of BM1-BM6). A round whose observation is too old never
+	// reaches it, and neither does one whose observation ended before the
+	// first round after a pause in the loop's rounds, or that has none
+	// (HL7).
 	observe(ctx context.Context, r *replyState)
 	// unreachable folds a stream that cannot be opened, breaks or misses its
-	// reply into health (HL1/HL2). Only a round reaches it (fail).
+	// reply, or a reply whose observation is too old (HL7), into health
+	// (HL1/HL2). Only a round reaches it (fail).
 	unreachable(ctx context.Context)
 }
 
@@ -201,6 +286,28 @@ type revWorker struct {
 	// invalid conf costs one Error record rather than one per round, and a
 	// conf that changes from one invalid value to another still reports.
 	confRefused string
+	// obsSeen is the latest observation time a round's or a Syncup* reply
+	// carried for the object (RW23), and obsAddr the endpoint it was seen
+	// at: a move to another endpoint forgets it (connect). It lives here, on
+	// the loop goroutine, not in fold, which runs on the stream's pump
+	// goroutine for a round's reply.
+	obsSeen time.Time
+	obsAddr string
+	// syncupObs is the observation time the latest Syncup* reply carried,
+	// kept until the next round's reply is judged or a round fails
+	// (staleRound, fail). That round answers from it as a rule, a whole
+	// interval after the reply (RW4 step 6) with no read of the object in
+	// between, since the Syncup* cancelled the one the round before it
+	// started (dnagent.md SH30): an age past one interval of the loop's own
+	// making, which the late record leaves out (HL7).
+	syncupObs time.Time
+	// askFrom is the agent's answer time on the first round the loop judged
+	// after a pause in its rounds of the object: its start, an idle or a
+	// refused conf (quiesce), or a move to another endpoint (connect). An
+	// observation's age is counted from no earlier than askFrom (HL7), since
+	// no round asked the agent to read during the pause. It is by the node's
+	// clock; zero until that first round.
+	askFrom time.Time
 }
 
 // streamState is one open Check* stream plus the goroutine that turns its
@@ -376,22 +483,110 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 		w.fail(ctx)
 		return
 	}
+	if w.staleRound(ctx, reply, interval) {
+		return
+	}
 	// Step 5: process the reply's *Info if present (HL4/HL5), then re-sync
 	// when the agent rejected the request, reported leftovers, or holds
 	// another revision — which is also how the first sync after a shard
 	// handoff, a worker restart or an agent restart happens, with no recovery
 	// step of its own.
 	//
-	// The leftover case is what re-drives a sweep: the agent recomputes the
-	// verdict on every Check*, so as long as the node still holds something
+	// The leftover case is what re-drives a sweep: the observation's code is
+	// written by every converge and every background read of the object
+	// (dnagent.md SH28, SH29), so as long as the node still holds something
 	// the desired state does not want, every round issues a Syncup* that
 	// sweeps again. No backoff (RW12), and no flag anywhere — the code itself
 	// is the state.
-	reply.fromRound = true
-	w.driver.observe(ctx, reply)
+	w.seeRound(reply)
+	// An observation that ended before the first round after a pause in the
+	// loop's rounds (askFrom), or none at all, is one no round asked for: it
+	// carries no health verdict and drives nothing but the re-sync below,
+	// until staleRound finds it too old (HL7). The read that round started
+	// brings one the next round judges.
+	if !reply.obsTime.Before(w.askFrom) ||
+		reply.code == common.ReplyCodeUnknownObject {
+		w.driver.observe(ctx, reply)
+	}
 	needSyncup := reply.code != 0 || reply.revision != w.desired.revision
 	if needSyncup {
-		w.syncup(ctx, cc)
+		w.syncup(ctx, cc, reply.obsTraceId)
+	}
+}
+
+// staleRound judges the age of the observation a round's reply answers from
+// (HL7) and reports whether the round failed on it. The age counts from no
+// earlier than the first round after a pause in the loop's rounds (askFrom):
+// its start, an idle or a move. No round asked the agent to read during the
+// pause, so an observation that aged then tells nothing of the agent. A gap
+// between two rounds of a running loop is no pause: a round that waited out
+// a long Syncup*, behind a converge that holds the object's reads off, must
+// find the observation as old as it is. The reply came in time, but the
+// observation may not have: one older than an interval is logged as a late
+// observation, but for the round right after a Syncup* answering from that
+// reply's observation (syncupObs); one older than ObsMaxAgeIntervals of them,
+// or none at all once the pause lies that far behind, is a missed round in
+// every way (fail). The stream
+// drops, because the agent leaves an unchanged *Info out on a kept stream and
+// the unknown marking would then read clean, and no Syncup* is issued on the
+// reply's revision or code: the next round's fresh stream brings them again.
+//
+// A reply that refuses the object as unknown is not judged: the agent holds
+// no state of the object and so no observation of it, and its answer is its
+// state as it answers. Judged, it would fail every round, and the re-sync of
+// RW4 step 5 that makes the object known — an agent's first SyncupDn, a
+// side's first SyncupSide — would never be issued.
+func (w *revWorker) staleRound(
+	ctx context.Context,
+	reply *replyState,
+	interval time.Duration,
+) bool {
+	afterSyncup := !w.syncupObs.IsZero() && reply.obsTime.Equal(w.syncupObs)
+	w.syncupObs = time.Time{}
+	if reply.code == common.ReplyCodeUnknownObject {
+		return false
+	}
+	bound := common.ObsMaxAgeIntervals * interval
+	if w.askFrom.IsZero() {
+		w.askFrom = reply.answerTime
+	}
+	age, known := reply.ageFrom(w.askFrom)
+	stale := !known || age > bound
+	// The round right after a Syncup* that answers from that reply's
+	// observation is late by the loop's own wait (syncupObs), so it is
+	// logged late only when it is stale; a later round still answering from
+	// it is late in earnest, a read that has not ended within an interval.
+	if (!known || age > interval) && (stale || !afterSyncup) {
+		w.logLateObservation(ctx, reply, interval, stale, age, known)
+	}
+	if !stale {
+		return false
+	}
+	attrs := append(w.idAttrs(),
+		slog.String("error", errStaleObservation.Error()),
+	)
+	if known {
+		attrs = append(attrs, slog.Int64("age_ms", age.Milliseconds()))
+	}
+	slog.InfoContext(ctx, "check round failed", attrs...)
+	w.fail(ctx)
+	return true
+}
+
+// seeRound marks a round's reply r, one not judged stale (HL7), before
+// observe sees it: a round's, and new when its observation is later than
+// every one the loop has seen for the object (RW23), which it then sees too.
+func (w *revWorker) seeRound(r *replyState) {
+	r.fromRound = true
+	r.newObs = r.obsTime.After(w.obsSeen)
+	w.seeObservation(r)
+}
+
+// seeObservation raises the latest observation time the loop has seen for
+// the object to r's when r's is later (RW23).
+func (w *revWorker) seeObservation(r *replyState) {
+	if r.obsTime.After(w.obsSeen) {
+		w.obsSeen = r.obsTime
 	}
 }
 
@@ -399,8 +594,10 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 // (HL1/HL2). A worker that is stopping reports nothing — a cancelled stop ctx
 // is not a sick agent, and writing "unreachable" on the way out would restart
 // the threshold clock of the automatic reactions (AR4) of a perfectly healthy
-// object.
+// object. A failed round also ends the late record's leave for the round
+// after a Syncup* (syncupObs).
 func (w *revWorker) fail(ctx context.Context) {
+	w.syncupObs = time.Time{}
 	w.dropStream()
 	if w.ctx.Err() != nil {
 		return
@@ -445,7 +642,7 @@ func (w *revWorker) applyDesired(next desiredState, cc *pb.ClusterConf) {
 	if cc == nil {
 		return
 	}
-	w.syncup(newTraceCtx(w.ctx, w.seed), cc)
+	w.syncup(newTraceCtx(w.ctx, w.seed), cc, "")
 }
 
 // drainDesired applies a desired change that is already waiting, without
@@ -459,12 +656,18 @@ func (w *revWorker) drainDesired(cc *pb.ClusterConf) {
 }
 
 // syncup issues one Syncup* and folds its reply into the object's state
-// (RW5).
-func (w *revWorker) syncup(ctx context.Context, cc *pb.ClusterConf) {
+// (RW5). obsTraceId is the trace id of the observation a round's reply
+// answered from when the round issues it (RW4 step 5), which its syncup
+// result record names (RW10); empty for an immediate syncup (RW6).
+func (w *revWorker) syncup(
+	ctx context.Context,
+	cc *pb.ClusterConf,
+	obsTraceId string,
+) {
 	revision := w.desired.revision
 	conn, err := w.connect()
 	if err != nil {
-		w.logSyncupResult(ctx, revision, 0, err)
+		w.logSyncupResult(ctx, revision, obsTraceId, nil, err)
 		return
 	}
 	// RW11: the call's own deadline bounds it and the stop ctx is
@@ -478,14 +681,20 @@ func (w *revWorker) syncup(ctx context.Context, cc *pb.ClusterConf) {
 	reply, err := w.driver.syncup(rpcCtx, conn, cc)
 	if err != nil {
 		// A gRPC error is logged and left to the next round (RW5, RW12).
-		w.logSyncupResult(ctx, revision, 0, err)
+		w.logSyncupResult(ctx, revision, obsTraceId, nil, err)
 		return
 	}
 	if reply == nil {
 		// The driver sent nothing and said why (RW13's missing DnConf).
 		return
 	}
-	w.logSyncupResult(ctx, revision, reply.code, nil)
+	// RW23: the reply's observation is seen, so a round that answers from it
+	// afterwards is no new one, but it never counts itself: newObs stays
+	// false. Nor is it judged by its age (HL7), and the next round, which
+	// answers from it as a rule, is not logged late on it (syncupObs).
+	w.seeObservation(reply)
+	w.syncupObs = reply.obsTime
+	w.logSyncupResult(ctx, revision, obsTraceId, reply, nil)
 	if !accepted(reply.code) {
 		w.logSyncupRejected(ctx, revision, reply)
 		// HL1/HL2: a rejection neither sets nor clears health; observe is
@@ -567,15 +776,15 @@ func (w *revWorker) recv(
 			// interval away (RW9) and the parent's change must not wait for
 			// it. The round ends: its reply answers the request built from
 			// the superseded revision, and RW4 step 4's rule that a stream
-			// is never reused across an abandoned round holds here too. The
-			// stream goes FIRST, before the Syncup* is sent: the agent runs
-			// the round under it, so the drop stops the round at its current
-			// command and frees the lock the round holds, which the Syncup*
-			// needs; sent first, the Syncup* would wait behind a round nobody
-			// reads. applyDesired's own drop when RW13 moved the object finds
-			// no stream left. The next round opens a fresh one, which the
-			// agent answers with the complete *Info again (architecture.md,
-			// Check streams).
+			// is never reused across an abandoned round holds here too, so
+			// the stream goes with it, before the Syncup* is sent. The round
+			// itself holds no lock the Syncup* needs: the agent answers it
+			// from memory, and the Syncup* cancels the object's background
+			// read itself before it waits for its locks (dnagent.md SH30).
+			// applyDesired's own drop when RW13 moved the object finds no
+			// stream left. The next round opens a fresh one, which the agent
+			// answers with the complete *Info again (architecture.md, Check
+			// streams).
 			w.dropStream()
 			w.applyDesired(next, cc)
 			return nil, errRoundAborted
@@ -619,11 +828,18 @@ func (w *revWorker) dropStream() {
 // A put whose only change is addr_port re-syncs the node at its NEW endpoint
 // (RW13; architecture.md, dn / cn roles): the stream and the connection
 // reference are dropped and the loop continues at the new address. No delete
-// ever reaches the agent.
+// ever reaches the agent. The latest observation time seen is forgotten with
+// the old endpoint (RW23): the node there is another node with another
+// clock.
 func (w *revWorker) connect() (*grpc.ClientConn, error) {
 	addr := w.driver.addrPort()
 	if addr == "" {
 		return nil, fmt.Errorf("worker %s: empty addr_port", w.role)
+	}
+	if addr != w.obsAddr {
+		w.obsSeen = time.Time{}
+		w.askFrom = time.Time{}
+		w.obsAddr = addr
 	}
 	if w.conn != nil && w.connAddr == addr {
 		return w.conn, nil
@@ -687,6 +903,9 @@ func (w *revWorker) refuseConf(err error) {
 func (w *revWorker) quiesce() {
 	w.dropStream()
 	w.releaseConn()
+	// No round asks the agent to read while the loop idles, so the first
+	// round after it counts an observation's age from its own answer (HL7).
+	w.askFrom = time.Time{}
 }
 
 // cleanup is the graceful-stop tail of RW11.
@@ -720,21 +939,72 @@ func (w *revWorker) idAttrs() []any {
 }
 
 // logSyncupResult emits the "syncup result" record (dnv-worker.md, Log
-// records), which every Syncup* reply or failure produces (RW5).
+// records), which every Syncup* reply (reply) or failure (err, reply nil)
+// produces (RW5). The record of a round's re-send names the trace id of the
+// observation the round answered from (obsTraceId, RW10), and one whose reply
+// carries both a save time and an observation time gives the time from the
+// save to that observation, the converge's length.
 func (w *revWorker) logSyncupResult(
 	ctx context.Context,
 	revision uint64,
-	code uint32,
+	obsTraceId string,
+	reply *replyState,
 	err error,
 ) {
+	var code uint32
+	if reply != nil {
+		code = reply.code
+	}
 	attrs := append(w.idAttrs(),
 		slog.Uint64("revision", revision),
 		slog.Uint64("code", uint64(code)),
 	)
+	if obsTraceId != "" {
+		attrs = append(attrs, slog.String("obs_trace_id", obsTraceId))
+	}
+	if reply != nil && !reply.saveTime.IsZero() && !reply.obsTime.IsZero() {
+		attrs = append(attrs, slog.Int64("converge_ms",
+			reply.obsTime.Sub(reply.saveTime).Milliseconds()))
+	}
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
 	}
 	slog.InfoContext(ctx, msgSyncupResult, attrs...)
+}
+
+// logLateObservation emits the "late observation" record (HL7; dnv-worker.md,
+// Log records) of a round staleRound logs late: one whose age HL7 judges
+// (ageFrom) is more than one interval, or unknown for want of an answer time.
+// A reply with no observation counts its age from the first round after a
+// pause (askFrom), so it is logged only once that round lies more than an
+// interval behind. The record names whether the round is stale, no_obs when
+// the reply has no observation, the age judged when the reply carries an
+// answer time, the interval, the observation's trace id and, while a
+// converge of the object runs, how long it has run.
+func (w *revWorker) logLateObservation(
+	ctx context.Context,
+	reply *replyState,
+	interval time.Duration,
+	stale bool,
+	age time.Duration,
+	known bool,
+) {
+	attrs := append(w.idAttrs(), slog.Bool("stale", stale))
+	if reply.obsTime.IsZero() {
+		attrs = append(attrs, slog.Bool("no_obs", true))
+	}
+	if known {
+		attrs = append(attrs, slog.Int64("age_ms", age.Milliseconds()))
+	}
+	attrs = append(attrs,
+		slog.Int64("interval_ms", interval.Milliseconds()),
+		slog.String("obs_trace_id", reply.obsTraceId),
+	)
+	if !reply.convergeStart.IsZero() && !reply.answerTime.IsZero() {
+		attrs = append(attrs, slog.Int64("converge_ms",
+			reply.answerTime.Sub(reply.convergeStart).Milliseconds()))
+	}
+	slog.InfoContext(ctx, msgLateObservation, attrs...)
 }
 
 // logSyncupRejected emits the "syncup rejected" record (RW5; dnv-worker.md, Log
@@ -768,20 +1038,22 @@ func (w *revWorker) logSyncupRejected(
 // anything — the cn agent's sweep sets each `nvme disconnect` it issues, of a
 // leg or a clone source, going off its pass and names the connection a leftover
 // until a later pass finds it gone (a removing pass once it has no controller,
-// a Check round once its sysfs subsystem directory, which can outlive the last
-// controller, is gone), so that pass's SyncupCntlr/SyncupCn reply carries the
-// code, and the first Check round that no longer finds the connection, with
-// nothing else left, answers code 0 and ends the re-sync.
-// A Check round only recomputes the verdict and removes nothing, and the
-// agent registers nothing for a leftover: its background converges (the cn's
-// connect retry and clone-metadata retry, the dn's connect retry and fence
-// timer) sweep only while one is registered or armed for a reason of its own.
-// So the sweep a leftover brings back is the one in the re-sync RW4 step 5
-// issues on that verdict, and a leftover that re-sync still finds is logged
-// every round. One only the Check verdict names (a subsystem directory whose
-// last controller is gone, above) is not: the re-sync's removing pass counts
-// it gone, so its reply does not carry it, and what names it every round is
-// the agent's own `sweep leftover` record of each Check verdict.
+// a background read once its sysfs subsystem directory, which can outlive the
+// last controller, is gone), so that pass's SyncupCntlr/SyncupCn reply carries
+// the code, and the first round answering from an observation that no longer
+// finds the connection, with nothing else left, answers code 0 and ends the
+// re-sync.
+// A background read only computes the observation's code and removes nothing
+// (dnagent.md SH29), and the agent registers nothing for a leftover: its
+// background converges (the cn's connect retry and clone-metadata retry, the
+// dn's connect retry and fence timer) sweep only while one is registered or
+// armed for a reason of its own. So the sweep a leftover brings back is the
+// one in the re-sync RW4 step 5 issues on that code, and a leftover that
+// re-sync still finds is logged every round. One only a read's verdict names
+// (a subsystem directory whose last controller is gone, above) is not: the
+// re-sync's removing pass counts it gone, so its reply does not carry it, and
+// what names it is the agent's own `sweep leftover` record of each read's
+// verdict.
 func (w *revWorker) logSyncupLeftover(
 	ctx context.Context,
 	revision uint64,

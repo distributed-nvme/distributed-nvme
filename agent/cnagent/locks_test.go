@@ -12,8 +12,8 @@ import (
 )
 
 // The CN1 lock mapping: a SyncupCntlr blocked in a slow command
-// blocks a same-cntlr SyncupCntlr, but neither a CheckCn round (node read
-// lock only) nor another cntlr's converge (a different object lock).
+// blocks a same-cntlr SyncupCntlr, but neither a CN's read (node read lock
+// only) nor another cntlr's converge (a different object lock).
 
 const (
 	testCntlr2 = uint64(0x2)
@@ -91,10 +91,35 @@ func TestLockSmoke(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
+	// A round and an info read of the cntlr whose converge holds its object
+	// lock answer at once: they take no lock (dnagent.md SH28).
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2}, nil)
+		if _, err := srv.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr()}); err != nil {
+			t.Errorf("GetCntlrInfo: %v", err)
+		}
+	}()
+	select {
+	case <-answered:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("a CheckCntlr round or a GetCntlrInfo waited for the " +
+			"object lock its cntlr's converge holds")
+	}
+
 	// A node-scoped read does get through: it takes the node read lock only.
+	// The round itself takes no lock at all (dnagent.md SH28); the CN's read
+	// it starts is what takes the node read lock.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		key := cnKey(testCluster, testCn)
+		srv.refreshCn(ctx, key, srv.getCn(key))
 		reply, _ := srv.checkCnRound(ctx, &pb.CheckCnRequest{
 			ClusterId: testCluster, CnId: testCn, Revision: 2}, nil)
 		if reply.GetAgentReply().GetCode() != 0 {
@@ -126,23 +151,24 @@ func TestLockSmoke(t *testing.T) {
 	<-sameCntlr
 }
 
-// TestAStuckDisconnectDoesNotHoldTheCheckRound pins the CN21 sweep's
+// TestAStuckDisconnectDoesNotHoldTheCntlrRead pins the CN21 sweep's
 // disconnect off the object lock (CN10's disconnect registry). A controller
 // delete whose target vanishes mid-delete waits out the kernel's admin
 // timeout (60 s) in an uninterruptible sysfs write, and no SH15 signal ends
 // it: the child returns when the kernel does. Run under the cntlr's object
-// lock, that child would hold every CheckCntlr round of the cntlr — which
-// takes the same lock (CN1) — for the whole minute, and the worker's
+// lock, that child would hold every read of the cntlr — which takes the same
+// lock (CN1, dnagent.md SH29) — for the whole minute, and the worker's
 // SyncupCntlr with it, until its own 60 s deadline.
 //
 // The disconnect is parked with blockCmd, which ignores ctx exactly as such a
 // child ignores its signals, and the level drop to SP_LEVEL_NO_SIDE wants
 // neither of the standby's two legs. The pass must return with both
-// connections named as leftovers, a Check round must get through, a second
-// pass must not issue a second disconnect for a subsystem whose first one is
-// still in flight — the count, not only the order — and once the kernel lets
-// go, the next pass's own enumeration finds both gone.
-func TestAStuckDisconnectDoesNotHoldTheCheckRound(t *testing.T) {
+// connections named as leftovers, a read and the Check round after it must
+// get through, a second pass must not issue a second disconnect for a
+// subsystem whose first one is still in flight — the count, not only the
+// order — and once the kernel lets go, the next pass's own enumeration finds
+// both gone.
+func TestAStuckDisconnectDoesNotHoldTheCntlrRead(t *testing.T) {
 	srv, node := newTestServer(t)
 	withPassClock(srv, node)
 	ctx := context.Background()
@@ -180,10 +206,16 @@ func TestAStuckDisconnectDoesNotHoldTheCheckRound(t *testing.T) {
 		}
 		return nil
 	}
+	// The round's read holds the object lock now (dnagent.md SH29), so it is
+	// the read that must get through, and the round after it answers what
+	// it read.
 	check := func(label string) *pb.CheckCntlrReply {
 		t.Helper()
 		done := make(chan *pb.CheckCntlrReply, 1)
 		go func() {
+			srv.refreshCntlr(ctx, cntlrKey(testCluster, testCn, testSp,
+				testCntlr), srv.getCntlr(cntlrKey(testCluster, testCn,
+				testSp, testCntlr)))
 			reply, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 				ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr(), Revision: 3}, nil)
@@ -303,12 +335,12 @@ func TestAFailedDisconnectIsIssuedAgain(t *testing.T) {
 }
 
 // TestAStuckDisconnectDoesNotHoldTheNodeLock is the node-level twin of
-// TestAStuckDisconnectDoesNotHoldTheCheckRound: a SyncupCn that drops the
+// TestAStuckDisconnectDoesNotHoldTheCntlrRead: a SyncupCn that drops the
 // cntlr's pointer — the pool drain's shape, under the node WRITE lock, whose
 // stall would hold every object of the node — with both leg disconnects
-// parked. The pass must reply beside the parked children, a CheckCn round
-// must get through, and once the kernel lets go the re-sync is clean with
-// each leg disconnected exactly once.
+// parked. The pass must reply beside the parked children, the CN's read and
+// a CheckCn round must get through, and once the kernel lets go the re-sync
+// is clean with each leg disconnected exactly once.
 func TestAStuckDisconnectDoesNotHoldTheNodeLock(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2})
@@ -331,8 +363,11 @@ func TestAStuckDisconnectDoesNotHoldTheNodeLock(t *testing.T) {
 		t.Fatalf("SyncupCn held the node write lock across a stuck " +
 			"nvme disconnect")
 	}
+	// The CN's read, which the round starts, holds the node read lock.
 	checked := make(chan *pb.CheckCnReply, 1)
 	go func() {
+		key := cnKey(testCluster, testCn)
+		srv.refreshCn(context.Background(), key, srv.getCn(key))
 		reply, _ := srv.checkCnRound(context.Background(), &pb.CheckCnRequest{
 			ClusterId: testCluster, CnId: testCn, Revision: 3}, nil)
 		checked <- reply
@@ -513,9 +548,11 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 				"flight", n, legId)
 		}
 	}
-	// The Check round answers the registry gate the way the converge does:
-	// the same row, not one judged from the half-torn-down leg it finds —
-	// the two channels would otherwise flip it, and its epoch, every round.
+	// The read answers the registry gate the way the converge does, and the
+	// Check round after it carries what it read (dnagent.md SH29): the same
+	// row, not one judged from the half-torn-down leg it finds — the two
+	// channels would otherwise flip it, and its epoch, every round.
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 4,
@@ -554,15 +591,16 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 	}
 }
 
-// TestTheCheckRoundMirrorsTheDisconnectGate pins the read-only half of
+// TestTheCntlrReadMirrorsTheDisconnectGate pins the read-only half of
 // ensureCloneSource's registry gate. A converge whose clone source is still
 // being disconnected stops at CN18 step 1 and reports the dm-clone MISSING,
-// so the Check round must not judge the clone's step 2 — the arena verdict of
+// so the cntlr's read, which the Check round answers from (dnagent.md SH29),
+// must not judge the clone's step 2 — the arena verdict of
 // cloneMetaVerdict — however connected the source still looks: the two
 // channels would flip the row, and its epoch, against each other every
 // round. The arena is filled after the converge, so step 2 would find no
 // free run for this clone's slot the moment a probe reached it.
-func TestTheCheckRoundMirrorsTheDisconnectGate(t *testing.T) {
+func TestTheCntlrReadMirrorsTheDisconnectGate(t *testing.T) {
 	srv, node := newTestServer(t)
 	// The failed step registers the connect retry; a retry pass would sweep
 	// the squatter below, which is of this sp.
@@ -601,6 +639,7 @@ func TestTheCheckRoundMirrorsTheDisconnectGate(t *testing.T) {
 	node.devNo["/dev/mapper/"+squatter] = "253:201"
 	node.mu.Unlock()
 
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 4,
@@ -914,6 +953,8 @@ func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
 	fresh := newCnServer(node)
 	reconcileForTest(t, fresh)
 
+	// The rounds answer from the observations the reconcile stored for the
+	// requests it loaded (dnagent.md SH28).
 	cnReply, _ := fresh.checkCnRound(ctx, &pb.CheckCnRequest{
 		ClusterId: testCluster, CnId: testCn, Revision: 2,
 	}, nil)
@@ -965,10 +1006,10 @@ func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
 // against the reads other goroutines make of them. A SyncupCntlr stores the
 // cntlr's new request under the node read lock and that cntlr's object lock,
 // and the claim reads of every other pass read it holding neither that
-// object lock nor the node write lock: another cntlr's converge or check
-// round attributes each host-facing subsystem by asking every cntlr of the
-// CN whether its request still names it, and the node-level verdict of a
-// CheckCn round or a GetCnInfo reads every cntlr's clone list too. Run
+// object lock nor the node write lock: another cntlr's converge or read
+// attributes each host-facing subsystem by asking every cntlr of the CN
+// whether its request still names it, and the node-level verdict of a CN's
+// read reads every cntlr's clone list too. Run
 // beside one another they must not race, which is what the race detector
 // checks here; without it the test proves nothing. The detector reports a
 // pair only when the two accesses happen to interleave between the locks
@@ -1008,14 +1049,26 @@ func TestAConvergeDoesNotRaceAnotherCntlrsReads(t *testing.T) {
 			}
 		}
 	}()
+	// The claim reads are made by the reads a round starts (dnagent.md
+	// SH29), so the rounds here start theirs in the background, beside the
+	// syncups that mark and cancel them, and the readers also run one in
+	// the foreground before each round: a round starts none while one runs
+	// or a converge of its object is marked. The test joins the background
+	// reads before it returns.
+	srv.roundReads = true
+	defer srv.reads.Wait()
+	key2 := cntlrKey(testCluster, testCn, testSp2, testCntlr2)
+	cn := cnKey(testCluster, testCn)
 	readers := []func(){
 		func() {
+			srv.refreshCntlr(ctx, key2, srv.getCntlr(key2))
 			srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 				ClusterId: testCluster, CnId: testCn,
 				CntlrPointer: cntlrPtr2(), Revision: 2,
 			}, nil)
 		},
 		func() {
+			srv.refreshCn(ctx, cn, srv.getCn(cn))
 			srv.checkCnRound(ctx, &pb.CheckCnRequest{
 				ClusterId: testCluster, CnId: testCn, Revision: 2,
 			}, nil)

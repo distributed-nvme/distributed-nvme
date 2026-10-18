@@ -183,17 +183,17 @@ func (src cloneSource) unready() string {
 
 // cloneTargetRow is the clone_id_to_target row of one read of the source
 // (CN28), the same for the converge and the probe. It reads ERROR only for
-// this node's own side: while a sweep's disconnect of the source is in
-// flight, or when the walk or the lookup did not answer. A fault of the
-// source reads MISSING, as a source with no subsystem entry does: a
-// configured endpoint with no live controller, its details the path states,
-// or no source namespace. A MISSING row sets no health epoch, so the row
-// does not move the role: moving the primary cannot repair the source, and
-// the worker cannot tell a fault in this node's own path to the source from
-// one at the source (CN18). A fault that fails CN18 step 1 still keeps the
-// CN10 retry running, whose attempts can make check rounds miss (cnagent.md,
-// Known limits). The row reads OK, with the path states, while every
-// endpoint has a live controller and the namespace is there. A failed
+// this node's own side: while a sweep's disconnect of the source is in flight,
+// or when the walk or the lookup did not answer. A fault of the source reads
+// MISSING, as a source with no subsystem entry does: a configured endpoint
+// with no live controller, its details the path states, or no source
+// namespace. A MISSING row sets no health epoch, so the row does not move the
+// role: moving the primary cannot repair the source, and the worker cannot
+// tell a fault in this node's own path to the source from one at the source
+// (CN18). A fault that fails CN18 step 1 still keeps the CN10 retry running,
+// whose attempts hold the cntlr's reads off while each runs (dnagent.md SH30;
+// cnagent.md, Known limits). The row reads OK, with the path states, while
+// every endpoint has a live controller and the namespace is there. A failed
 // connect of the converge's decides nothing and leads the details of a row
 // that is not OK.
 func cloneTargetRow(cp *clonePlan, src cloneSource) (pb.ResStatus, string) {
@@ -334,8 +334,8 @@ func (s *CnAgentServer) cloneRows(
 // answered and has no free run for the clone's metadata, so both of its
 // step-2 rows read PROVISIONING (reportCloneNoRoom) and the clone waits for
 // another one to leave the node. cloneRoomNever, a run larger than the whole
-// arena, asks for neither and is left to its ERROR rows, which every check
-// round reports again (cloneMetaVerdict). Under either, a namespace of the
+// arena, asks for neither and is left to its ERROR rows, which every read of
+// the cntlr (refreshCntlr) reports again (cloneMetaVerdict). Under either, a namespace of the
 // destination td that waits only for the clone registers no CN10 retry
 // either (build). A pass that finished the build but failed to converge a
 // rule-5 ns-dev of the td registers the CN10 retry in CN16, as every other
@@ -348,9 +348,9 @@ func (s *CnAgentServer) cloneRows(
 // later pass finishes it.
 //
 // The clone's rows are not the steps' own. Wherever the pass ends, cloneRows
-// writes them from what it then reads of the node, the function the check
-// round writes them by too, and the failure of a step that ended the pass
-// only rides in their details (CN29). The pass's arena listing (planArena),
+// writes them from what it then reads of the node, the function the cntlr's
+// read (refreshCntlr) writes them by too, and the failure of a step that
+// ended the pass only rides in their details (CN29). The pass's arena listing (planArena),
 // step 2's read of the dm-clone and the read after step 5 are reads, not
 // steps: when one of them ends the pass, the rows take that read
 // themselves, and no note rides with it. A listing or a read inside
@@ -487,8 +487,8 @@ func (s *CnAgentServer) ensureClone(
 				}
 				// Any other failure — the fresh listing, the removal of a
 				// mismatched wrapper, the hole punch or the wrapper's
-				// `dmsetup create` — registers the CN10 retry: a check round
-				// cannot tell an absent wrapper in an arena with room from
+				// `dmsetup create` — registers the CN10 retry: a read cannot
+				// tell an absent wrapper in an arena with room from
 				// one not built yet (cloneMetaVerdict), so once the dm-clone
 				// is gone it reads the clone's rows MISSING and the parked
 				// ns-dev OK (nsDevNow), no health epoch follows, and the
@@ -889,7 +889,7 @@ func (dm cloneDmRead) rawLine() string {
 // probeCloneDm reads a clone's dm-clone, for CN18 step 2's test of an
 // unfinished build and for the clone's rows (cloneRows): `dmsetup info`, then
 // `dmsetup status` of a device that is there. The info comes from rd, the
-// reading of a check round or an info read, and from one `dmsetup info` of
+// reading of a cntlr's read, and from one `dmsetup info` of
 // the device in a converge, which passes nil. The status is always the
 // device's own. The raw status line rides into the dm row's details
 // (architecture.md, Live-state reporting), and a status that does not parse

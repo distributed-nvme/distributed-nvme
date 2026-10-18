@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -162,8 +163,9 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	cnInfos := make(map[string]*pb.CnInfo)
 	for _, key := range s.cnKeys() {
-		s.convergeCn(ctx, s.getCn(key))
+		cnInfos[key] = s.convergeCn(ctx, s.getCn(key))
 	}
 	// A cntlr whose pointer has left its parent's list is FORGOTTEN here —
 	// file, chunks, memory entry and object lock — without any attempt to
@@ -185,11 +187,21 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// run before the cntlr converges because its wanted set comes from the
 	// stored REQUESTS, not from what happens to exist: a clone this pass is
 	// about to (re)build is named by its cntlr's clone_list already.
+	//
+	// Each CN's observation is its converge's rows with the code of its
+	// node-level sweep, as a SyncupCn's reply would carry them, and each
+	// cntlr's its converge's (dnagent.md SH28).
 	for _, key := range s.cnKeys() {
-		s.sweepCn(ctx, s.getCn(key), true, nil)
+		st := s.getCn(key)
+		sweep := s.sweepCn(ctx, st, true, nil)
+		s.storeCnObs(ctx, st, st.loadReq().GetRevision(), cnInfos[key],
+			sweep.Reply())
 	}
 	for _, key := range s.allCntlrKeys() {
-		s.convergeCntlr(ctx, s.getCntlr(key))
+		st := s.getCntlr(key)
+		info, sweep := s.convergeCntlr(ctx, st)
+		s.storeCntlrObs(ctx, st, st.loadReq().GetRevision(), info,
+			sweep.Reply())
 	}
 	return nil
 }
@@ -222,19 +234,27 @@ func (s *CnAgentServer) syncupCn(
 	// window is nothing but a startup sweep, never a Reconcile that rebuilds
 	// the cntlr from a stale list against sides that no longer exist.
 	path := s.nf.LocalCnPath(req.GetClusterId(), req.GetCnId())
+	var saveAt time.Time
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting cn state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
+	} else {
+		saveAt = s.now()
 	}
 	info := s.convergeCn(ctx, st)
 	s.dropRemovedCntlrs(ctx, req)
-	sweep := s.sweepCn(ctx, st, true, nil)
+	code := s.sweepCn(ctx, st, true, nil).Reply()
+	// The converge's observation, stored under the node write lock before
+	// the reply is built (dnagent.md SH28): the next round answers from it.
+	obs := s.storeCnObs(ctx, st, req.GetRevision(), info, code)
 
 	return &pb.SyncupCnReply{
-		AgentReply: sweep.Reply(),
+		AgentReply: code,
 		Revision:   req.GetRevision(),
 		CnInfo:     info,
+		ObsStamp:   obs.Stamp(s.now(), time.Time{}),
+		SaveTime:   agent.Timestamp(saveAt),
 	}
 }
 
@@ -254,7 +274,9 @@ func (s *CnAgentServer) convergeCn(
 	st *cnState,
 ) *pb.CnInfo {
 	req := st.loadReq()
-	t := st.tracker
+	// A row made after the call is cut off moves no epoch, through a view of
+	// its own, as the CN's read writes (agent.ResTracker.In).
+	t := st.tracker.In(ctx)
 	info := &pb.CnInfo{}
 	clusterId := req.GetClusterId()
 	cnId := req.GetCnId()
@@ -553,7 +575,8 @@ func (s *CnAgentServer) dropRemovedCntlrs(
 }
 
 // dropCntlrState is the bookkeeping half of a cntlr's drop (CN7): stop what
-// this cntlr is running, delete what it persisted, and forget it.
+// this cntlr is running, delete what it persisted, and forget it — which
+// cancels its running read too (dropCntlr).
 func (s *CnAgentServer) dropCntlrState(
 	ctx context.Context,
 	key string,
@@ -582,7 +605,7 @@ func (s *CnAgentServer) dropCntlrState(
 // ---------------------------------------------------------------------------
 
 // errBaseStateAbsent, errAnaStateDiffers and errArenaFileSize are the
-// failures the node-level verdict records for what the round's probe read of
+// failures the node-level verdict records for what the read's probe read of
 // the base state that a SyncupCn would cure (CN30): a piece of it absent, an
 // ANA group of the port in a state other than its fixed one, or an arena file
 // of another size that nothing uses (arenaFileInUse).
@@ -613,7 +636,7 @@ type baseRedrive struct {
 // makes; and an ANA group in a state other than its fixed one on a port
 // whose transport attributes all match, which EnsurePort rewrites, since
 // nvmet takes an ana_state write whatever is linked to the port. A probe
-// that did not answer proves nothing, and the next round asks again. The
+// that did not answer proves nothing, and the next read asks again. The
 // rest of what is there but not as wanted is left to its row: a filesystem
 // of another type at the path (and with it the arena file and loop device
 // the converge would not create on it), a file of another size that
@@ -628,7 +651,9 @@ func (s *CnAgentServer) probeCn(
 	st *cnState,
 ) (*pb.CnInfo, []baseRedrive) {
 	req := st.loadReq()
-	t := st.tracker
+	// A row made after the read is cancelled moves no epoch
+	// (agent.ResTracker.In).
+	t := st.tracker.In(ctx)
 	info := &pb.CnInfo{}
 	var redrive []baseRedrive
 	clusterId := req.GetClusterId()

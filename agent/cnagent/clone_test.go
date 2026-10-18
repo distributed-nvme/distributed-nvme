@@ -697,6 +697,7 @@ func TestCloneRecoveryNeverServesAnUnfinishedDmClone(t *testing.T) {
 			// CN16 wants while hydration is off, and a probe issues no
 			// mutating command.
 			node.Reset()
+			refreshTestCntlr(t, srv)
 			_, probed := srv.checkCntlrRound(context.Background(),
 				&pb.CheckCntlrRequest{
 					ClusterId: testCluster, CnId: testCn,
@@ -1070,14 +1071,15 @@ func dropWrapper(node *fakeNode, name string) {
 	delete(node.devSize, "/dev/mapper/"+name)
 }
 
-// checkRound is one CN24 check round of the fixture cntlr at a revision, and
-// the rows it probed.
+// checkRound is one read of the fixture cntlr and the CN24 check round after
+// it at a revision, and the rows that read probed, which the round carries.
 func checkRound(
 	t *testing.T,
 	srv *CnAgentServer,
 	revision uint64,
 ) *pb.CntlrInfo {
 	t.Helper()
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -1250,8 +1252,9 @@ func TestCloneMetaNoRunIsProvisioning(t *testing.T) {
 			"CN10 retry")
 	}
 
-	// The check round reports the same pair, and finds it from this round's
-	// enumeration with nothing allocated, punched or created (CN23).
+	// The check round reports the same pair, which the read before it found
+	// from its own enumeration with nothing allocated, punched or created
+	// (CN23).
 	node.Reset()
 	probed := checkRound(t, srv, 3)
 	assertSameCloneRows(t, info, probed)
@@ -2113,8 +2116,8 @@ func TestCloneMetaRunLargerThanTheArenaWithAFailedPark(t *testing.T) {
 // here after a recovery whose dm-clone create the node refuses. Absence is
 // confirmed, never assumed: when that `dmsetup info` does not answer, the
 // read stays an error, the ns-dev keeps the table it has and its row reads
-// ERROR. The confirm is the dm-clone's own read in the check round too,
-// never the round's reading.
+// ERROR. The confirm is the dm-clone's own `dmsetup info` in a cntlr's read
+// too, never the reading's listing.
 func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -2186,19 +2189,20 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 // decides CN18 step 2 and the clone's rows (probeCloneDm): a dm-clone that
 // its `dmsetup info` finds and that is gone by its status read fails that
 // read, and a second `dmsetup info` that confirms it gone makes the read an
-// absence. A check round then reads the dm row MISSING, as for any absent
+// absence. A check round then reports the dm row MISSING, as for any absent
 // dm-clone, and a converge runs the recovery in the same pass: the dm-clone
 // is built again, its row reads OK and no retry is registered. Read as an
 // error, the round would report ERROR and the converge would end its pass
-// and wait for the retry. In a check round the first info is the reading's
-// listing, and the confirming info is the dm-clone's own, made after the
-// failed status read: the reading, taken before the device went, names it,
-// so a confirm taken from it would keep the read an error.
+// and wait for the retry. In a cntlr's read, which a check round answers
+// from, the first info is the reading's listing, and the confirming info is
+// the dm-clone's own, made after the failed status read: the reading, taken
+// before the device went, names it, so a confirm taken from it would keep the
+// read an error.
 func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 	// goneMidRead runs pass with the dm-clone's first status read held,
 	// removes the device while that read waits, then lets it fail. In a
 	// converge the held read must be the one that follows a `dmsetup info`
-	// of the dm-clone, which is how probeCloneDm reads. In a check round
+	// of the dm-clone, which is how probeCloneDm reads. In a cntlr's read
 	// the dm-clone's info is the reading's listing, so no `dmsetup info` of
 	// it comes before the held read, and the one right after it is the
 	// fresh confirm.
@@ -2258,7 +2262,12 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 			clones: []*pb.Clone{cloneOf()}})
 		node.Reset()
 		var probed *pb.CntlrInfo
+		key := cntlrKey(testCluster, testCn, testSp, testCntlr)
+		st := srv.getCntlr(key)
 		goneMidRead(t, srv, node, true, func() {
+			// The round answers from the cntlr's read (dnagent.md SH29),
+			// so the read is what the device goes under.
+			srv.refreshCntlr(context.Background(), key, st)
 			_, probed = srv.checkCntlrRound(context.Background(),
 				&pb.CheckCntlrRequest{
 					ClusterId: testCluster, CnId: testCn,
@@ -2309,20 +2318,20 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 // TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError pins the other half of
 // probeCloneDm's rule: a dm-clone that is there, whose status read fails and
 // whose `dmsetup info` after that read does not answer, keeps the read an
-// error. A check round reads the dm row ERROR, not MISSING, and a converge
+// error. A check round reports the dm row ERROR, not MISSING, and a converge
 // stops CN18 step 2 there: it parks, removes and builds nothing, the ns-dev
 // keeps serving through the dm-clone, the dm row reads ERROR with the failed
 // read's error and the retry is registered. Read as an absence, the converge
-// would park the td and rebuild a dm-clone that serves. In a check round the
-// dm-clone's first info is the reading's listing, so its own `dmsetup info`
-// is the confirm alone.
+// would park the td and rebuild a dm-clone that serves. In a cntlr's read,
+// which a check round answers from, the dm-clone's first info is the
+// reading's listing, so its own `dmsetup info` is the confirm alone.
 func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 	const readErr = "Input/output error"
 	// unconfirmed runs pass with the dm-clone's first status read refused
 	// and the `dmsetup info` of it that confirms an absence killed: its
-	// second in a converge, its first in a check round. It then checks that
+	// second in a converge, its first in a cntlr's read. It then checks that
 	// both faults fired, and that the dm-clone's reads went info (a
-	// converge's own; a round's comes from the reading), the refused status,
+	// converge's own; a read's comes from the reading), the refused status,
 	// then the killed info, as probeCloneDm reads.
 	unconfirmed := func(
 		t *testing.T,
@@ -2667,6 +2676,7 @@ func TestCloneMetaAbsentWrapperWithRoomProbesMissing(t *testing.T) {
 	delete(node.devSize, "/dev/mapper/"+metaDm)
 
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -2738,6 +2748,7 @@ func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
 	}
 
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -2815,6 +2826,7 @@ func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
 	}
 
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -2873,6 +2885,7 @@ func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 	node.devNo["/dev/mapper/"+filler] = "253:200"
 
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	_, probed := srv.checkCntlrRound(context.Background(),
 		&pb.CheckCntlrRequest{
 			ClusterId: testCluster, CnId: testCn,
@@ -2956,6 +2969,7 @@ func TestCloneMetaWrapperMismatchRebuilds(t *testing.T) {
 	node.dms[metaDm].table = fmt.Sprintf("0 %d linear %s 0",
 		2*cnCloneMetaUnitSectors, stale)
 
+	refreshTestCntlr(t, srv)
 	info, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{
 			ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
@@ -3230,8 +3244,8 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 
 // TestWrapperEnumerationSurvivesAVanishedWrapper: the kind-`cb` name list comes
 // from a listing that is stale the instant it is printed — a converge's
-// `dmsetup ls`, or the whole-node `dmsetup info` listing of an info read's or
-// a check round's reading — and SyncupCntlr holds only the node *read* lock,
+// `dmsetup ls`, or the whole-node `dmsetup info` listing of a cntlr's
+// read's reading — and SyncupCntlr holds only the node *read* lock,
 // so another cntlr's sweep (CN21), at SP_LEVEL_DISABLE or otherwise, can
 // remove a wrapper between that listing and the read of the name's table.
 // Failing the whole CN-wide enumeration on it would flip a healthy, serving
@@ -3248,6 +3262,7 @@ func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 	node.lsGhosts = append(node.lsGhosts,
 		srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp+1, 0x999))
 
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -3278,10 +3293,11 @@ func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 // must stay fatal. Skipping it would report its units as free, and the
 // allocator's discard-first hole punch would then wipe a live dm-clone's
 // superblock — the exact corruption the discard-first order exists to prevent.
-// An info read takes the wrapper's table from its reading, so here the
-// reading's table listing leaves the wrapper out, as one that went
-// mid-listing does, and the wrapper's own `dmsetup table` is the read that
-// fails; the `dmsetup info` that follows finds it there.
+// The cntlr's read, which an info read answers from, takes the wrapper's
+// table from its reading, so here the reading's table listing leaves the
+// wrapper out, as one that went mid-listing does, and the wrapper's own
+// `dmsetup table` is the read that fails; the `dmsetup info` that follows
+// finds it there.
 func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -3293,6 +3309,7 @@ func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 	node.failCmdAlways["dmsetup table "+metaDm] = "fake: transient failure"
 	node.mu.Unlock()
 	node.Reset()
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})
@@ -3407,6 +3424,7 @@ func TestWrapperLengthIsComparedRaw(t *testing.T) {
 	node.dms[metaDm].table = fmt.Sprintf("0 %d linear %s 0",
 		2*cnCloneMetaUnitSectors+1, node.devNo[loop])
 
+	refreshTestCntlr(t, srv)
 	probe, err := srv.GetCntlrInfo(context.Background(),
 		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
 			CntlrPointer: cntlrPtr()})

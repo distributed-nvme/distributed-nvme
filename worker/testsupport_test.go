@@ -9,15 +9,110 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
+
+// ---------------------------------------------------------------------------
+// Observation stamps (dnagent.md SH28; dnv-worker.md HL7, RW23)
+// ---------------------------------------------------------------------------
+
+// testObsCount numbers the observation times the stub agents hand out. A
+// counter, not time.Now: inside a synctest bubble time stands still between
+// blocking points, so two replies would share a time and read as one
+// observation.
+var testObsCount atomic.Int64
+
+// testObsBase is the first observation time's base; any fixed instant will
+// do, since the worker only ever compares a node's times with each other.
+var testObsBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// nextObsTime returns an observation time later than every one returned
+// before it.
+func nextObsTime() time.Time {
+	return testObsBase.Add(
+		time.Duration(testObsCount.Add(1)) * time.Millisecond)
+}
+
+// testStamp is the stamp of a reply that answers from a new observation made
+// as it answers: a new time, age zero, no converge running.
+func testStamp() *pb.ObsStamp {
+	at := nextObsTime()
+	return &pb.ObsStamp{
+		ObsTime:    timestamppb.New(at),
+		AnswerTime: timestamppb.New(at),
+	}
+}
+
+// agedStamp is the stamp of a reply that answers age after an observation
+// made under traceId.
+func agedStamp(age time.Duration, traceId string) *pb.ObsStamp {
+	at := nextObsTime()
+	return &pb.ObsStamp{
+		ObsTime:    timestamppb.New(at),
+		ObsTraceId: traceId,
+		AnswerTime: timestamppb.New(at.Add(age)),
+	}
+}
+
+// testNodeBase is where the loop tests that judge an observation's age (HL7)
+// start their agent's clock, a day past testObsBase, so that no time
+// nextObsTime hands out — a default-stamped Syncup* reply's, say — reads
+// later than theirs. Those tests give every round's answer time themselves:
+// HL7 counts an age from no earlier than the first round after a pause, two
+// rounds the agent answered more than the bound apart, and the answer times
+// of testStamp and agedStamp jump about.
+var testNodeBase = testObsBase.Add(24 * time.Hour)
+
+// answerStamp is the stamp of a reply answered at at from no observation.
+func answerStamp(at time.Time) *pb.ObsStamp {
+	return &pb.ObsStamp{AnswerTime: timestamppb.New(at)}
+}
+
+// stamped returns reply with testStamp's stamp when it carries none — a copy,
+// since a test's builder may hand one reply to every round — and as it is
+// when it carries one, which is the test's own. The stub agents send every
+// reply through it, a Syncup* reply a test builds through syncupStamped, so
+// a loop test that sets no stamp sees each round answer from a new
+// observation, as a live agent's reads give it.
+func stamped[R interface {
+	proto.Message
+	GetObsStamp() *pb.ObsStamp
+}](reply R) R {
+	if !reply.ProtoReflect().IsValid() || reply.GetObsStamp() != nil {
+		return reply
+	}
+	out := proto.CloneOf(reply)
+	msg := out.ProtoReflect()
+	msg.Set(msg.Descriptor().Fields().ByName("obs_stamp"),
+		protoreflect.ValueOfMessage(testStamp().ProtoReflect()))
+	return out
+}
+
+// syncupStamped is stamped for a Syncup* reply, but a reply that refuses its
+// request it returns as it is: a live agent's refusal carries no stamp
+// (architecture.md, Live-state reporting), so a stub refusal gets one only
+// when the test sets it.
+func syncupStamped[R interface {
+	proto.Message
+	GetObsStamp() *pb.ObsStamp
+	GetAgentReply() *pb.AgentReply
+}](reply R) R {
+	if code := reply.GetAgentReply().GetCode(); reply.ProtoReflect().IsValid() &&
+		code != 0 && code != common.ReplyCodeLeftover {
+		return reply
+	}
+	return stamped(reply)
+}
 
 // ---------------------------------------------------------------------------
 // Fake clock

@@ -8,6 +8,12 @@
 //
 // It exits non-zero on a gRPC error or when agent_reply.code differs from
 // --expect-code (default 0), so the caller's `set -e` catches both.
+//
+// The agent answers a check round and an info read from its latest
+// observation of the object (dnagent.md SH28), and only a round starts a read
+// of the node (dnagent.md SH29). The info reads here stay plain memory reads;
+// check-cn and check-cntlr --fresh, and wait-hydrated, send rounds until one
+// carries an observation read after the command began (fresh.go).
 package main
 
 import (
@@ -107,7 +113,8 @@ func (g *globals) bind(fs *flag.FlagSet, withTimeout bool) {
 	g.timeout = 10
 	if withTimeout {
 		fs.Float64Var(&g.timeout, "timeout", 10,
-			"per-RPC timeout in seconds")
+			"timeout in seconds of the call, or of a --fresh command's "+
+				"whole stream")
 	}
 	fs.UintVar(&g.expectCode, "expect-code", 0,
 		"the AgentReply.code the call must return")
@@ -131,14 +138,21 @@ func (g *globals) dial() (*grpc.ClientConn, pb.ControllerNodeAgentClient, error)
 
 // rpcCtx carries the trace id as gRPC metadata so the driver's call, both
 // agents' handlers and every os command they run share one id in the logs.
+// Its deadline is --timeout.
 func (g *globals) rpcCtx() (context.Context, context.CancelFunc) {
+	return g.ctxFor(g.timeout)
+}
+
+// ctxFor is rpcCtx with a deadline of seconds: a poller's stream lives for
+// its whole polling budget.
+func (g *globals) ctxFor(seconds float64) (context.Context, context.CancelFunc) {
 	ctx := context.Background()
 	if g.traceId != "" {
 		ctx = metadata.AppendToOutgoingContext(
 			ctx, common.TraceIdMetadataKey, g.traceId)
 	}
 	return context.WithTimeout(
-		ctx, time.Duration(g.timeout*float64(time.Second)))
+		ctx, time.Duration(seconds*float64(time.Second)))
 }
 
 // emit prints a reply as one line of JSON. protojson deliberately varies its
@@ -415,6 +429,10 @@ func cmdPushCloneBm(args []string) {
 	g.checkReply(reply.GetAgentReply())
 }
 
+// cmdGetCnInfo and cmdGetCntlrInfo are info reads: the agent answers from
+// memory and starts no read (dnagent.md SH28), so they show the observation
+// the last converge or read stored, and the stage that needs the node as it
+// is now uses a check command's --fresh instead.
 func cmdGetCnInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-info", &g)
@@ -434,6 +452,7 @@ func cmdGetCnInfo(args []string) {
 		die("GetCnInfo failed: %v", err)
 	}
 	emit(reply)
+	noteStamp("GetCnInfo", reply.GetObsStamp())
 	g.checkReply(reply.GetAgentReply())
 }
 
@@ -460,17 +479,26 @@ func cmdGetCntlrInfo(args []string) {
 		die("GetCntlrInfo failed: %v", err)
 	}
 	emit(reply)
+	noteStamp("GetCntlrInfo", reply.GetObsStamp())
 	g.checkReply(reply.GetAgentReply())
 }
 
-// cmdCheckCn runs exactly one worker-initiated round on the bidi stream and
-// closes it.
+// cmdCheckCn sends worker-style rounds on one bidi stream (dnagent.md SH24)
+// and closes it. Without --fresh it sends one round, which answers from the
+// agent's latest observation and starts a read of the node when none runs
+// (dnagent.md SH25, SH29). With --fresh it sends a round every 100 ms, each
+// asking for the info, until the reply answers from an observation read after
+// the command began with no converge running (fresh.go), all within
+// --timeout; only that reply is printed and checked against --expect-code.
 func cmdCheckCn(args []string) {
 	var g globals
 	fs := newFlagSet("check-cn", &g)
 	var revision hexUint
 	fs.Var(&revision, "revision", "the revision the worker believes is current")
 	showInfo := fs.Bool("show-info", false, "ask for the info on every reply")
+	fresh := fs.Bool("fresh", false,
+		"send rounds until one answers from an observation read after "+
+			"the command began")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -485,26 +513,17 @@ func cmdCheckCn(args []string) {
 	if err != nil {
 		die("CheckCn failed: %v", err)
 	}
-	if err := stream.Send(&pb.CheckCnRequest{
+	round := streamRounds(stream, &pb.CheckCnRequest{
 		ClusterId: uint64(g.cluster),
 		CnId:      uint64(g.cn),
 		Revision:  uint64(revision),
-		ShowInfo:  *showInfo,
+		ShowInfo:  *showInfo || *fresh,
 		TraceId:   g.traceId,
-	}); err != nil {
-		die("CheckCn send failed: %v", err)
-	}
-	reply, err := stream.Recv()
-	if err != nil {
-		die("CheckCn recv failed: %v", err)
-	}
-	if err := stream.CloseSend(); err != nil {
-		die("CheckCn close failed: %v", err)
-	}
-	emit(reply)
-	g.checkReply(reply.GetAgentReply())
+	})
+	g.runCheck(ctx, "CheckCn", round, stream.CloseSend, *fresh)
 }
 
+// cmdCheckCntlr is cmdCheckCn for one cntlr.
 func cmdCheckCntlr(args []string) {
 	var g globals
 	fs := newFlagSet("check-cntlr", &g)
@@ -512,6 +531,9 @@ func cmdCheckCntlr(args []string) {
 	var revision hexUint
 	fs.Var(&revision, "revision", "the revision the worker believes is current")
 	showInfo := fs.Bool("show-info", false, "ask for the info on every reply")
+	fresh := fs.Bool("fresh", false,
+		"send rounds until one answers from an observation read after "+
+			"the command began")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -526,25 +548,15 @@ func cmdCheckCntlr(args []string) {
 	if err != nil {
 		die("CheckCntlr failed: %v", err)
 	}
-	if err := stream.Send(&pb.CheckCntlrRequest{
+	round := streamRounds(stream, &pb.CheckCntlrRequest{
 		ClusterId:    uint64(g.cluster),
 		CnId:         uint64(g.cn),
 		CntlrPointer: cntlrPointerOf(sp, cntlr),
 		Revision:     uint64(revision),
-		ShowInfo:     *showInfo,
+		ShowInfo:     *showInfo || *fresh,
 		TraceId:      g.traceId,
-	}); err != nil {
-		die("CheckCntlr send failed: %v", err)
-	}
-	reply, err := stream.Recv()
-	if err != nil {
-		die("CheckCntlr recv failed: %v", err)
-	}
-	if err := stream.CloseSend(); err != nil {
-		die("CheckCntlr close failed: %v", err)
-	}
-	emit(reply)
-	g.checkReply(reply.GetAgentReply())
+	})
+	g.runCheck(ctx, "CheckCntlr", round, stream.CloseSend, *fresh)
 }
 
 // cmdGetTdBm reads the thin device's allocation bitmap. GetThinDeviceBmReply
@@ -620,12 +632,15 @@ func cmdGetLegBm(args []string) {
 	emitBitmap(reply.GetBitmap())
 }
 
-// cmdWaitHydrated polls GetCntlrInfo until the clone reports every region
+// cmdWaitHydrated polls the cntlr until the clone reports every region
 // hydrated, parsing the raw `dmsetup status` line the agent puts in
-// cntlr_info.clone_id_to_dm_clone[<clone>].details. --min-first asserts the
-// bitmap jump: case C's first sample must already show >= 32/64
-// (cnagent_integtest.md, Cases, clone_xfer), and --sample-only stops right
-// there, taking exactly one sample so the
+// cntlr_info.clone_id_to_dm_clone[<clone>].details. Hydration moves in the
+// kernel with no converge, so an info read, which answers from memory, would
+// never see it move: the poll samples with CheckCntlr rounds on one stream,
+// which start the agent's reads (sampler), and its first sample is a fresh
+// one. --min-first asserts the bitmap jump: case C's first sample must
+// already show >= 32/64 (cnagent_integtest.md, Cases, clone_xfer), and
+// --sample-only stops right there, taking exactly one sample so the
 // mid-hydration probe never waits for the copy to finish.
 func cmdWaitHydrated(args []string) {
 	var g globals
@@ -639,7 +654,7 @@ func cmdWaitHydrated(args []string) {
 	minFirst := fs.Uint64("min-first", 0,
 		"the first parseable sample must show at least this many hydrated")
 	sampleOnly := fs.Bool("sample-only", false,
-		"take exactly one sample, print hydrated/total and exit")
+		"take exactly one fresh sample, print hydrated/total and exit")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -648,74 +663,89 @@ func cmdWaitHydrated(args []string) {
 	}
 	defer conn.Close()
 
-	req := &pb.GetCntlrInfoRequest{
-		ClusterId:    uint64(g.cluster),
-		CnId:         uint64(g.cn),
-		CntlrPointer: cntlrPointerOf(sp, cntlr),
+	// One stream for the whole budget, its rounds at revision 0 — the agent
+	// only echoes the revision it stored — asking for the info every time,
+	// under the stage's trace id, so the reads they start log under it.
+	ctx, cancel := g.ctxFor(*limit)
+	defer cancel()
+	stream, err := client.CheckCntlr(ctx)
+	if err != nil {
+		die("CheckCntlr failed: %v", err)
 	}
-	deadline := time.Now().Add(time.Duration(*limit * float64(time.Second)))
+	samples := &sampler{
+		ctx: ctx,
+		round: streamRounds(stream, &pb.CheckCntlrRequest{
+			ClusterId:    uint64(g.cluster),
+			CnId:         uint64(g.cn),
+			CntlrPointer: cntlrPointerOf(sp, cntlr),
+			ShowInfo:     true,
+			TraceId:      g.traceId,
+		}),
+		interval: time.Duration(*interval * float64(time.Second)),
+		period:   freshPeriod,
+	}
 	var firstHydrated, firstTotal uint64
 	haveFirst := false
-	samples := 0
+	sampleCnt := 0
+	raw := ""
 	for {
-		ctx, cancel := g.rpcCtx()
-		reply, err := client.GetCntlrInfo(ctx, req)
-		cancel()
+		reply, err := samples.next()
 		if err != nil {
-			die("GetCntlrInfo failed: %v", err)
+			if ctx.Err() != nil {
+				die("hydration did not finish within %gs (last status %q, "+
+					"%s)", *limit, raw, samples.rule.describe())
+			}
+			die("CheckCntlr failed: %v", err)
 		}
 		if reply.GetAgentReply().GetCode() != 0 {
 			die("agent_reply.code = %d (%s)",
 				reply.GetAgentReply().GetCode(),
 				reply.GetAgentReply().GetDetails())
 		}
-		raw := reply.GetCntlrInfo().
+		raw = reply.(*pb.CheckCntlrReply).GetCntlrInfo().
 			GetCloneIdToDmClone()[uint64(clone)].GetDetails()
 		status, ok := common.ParseCloneStatus(raw)
-		if ok {
-			samples++
-			if !haveFirst {
-				haveFirst = true
-				firstHydrated = status.HydratedRegions
-				firstTotal = status.TotalRegions
-				if *minFirst != 0 && firstHydrated < *minFirst {
-					die("first hydration sample is %d/%d, want >= %d",
-						firstHydrated, firstTotal, *minFirst)
-				}
-			}
-			fmt.Fprintf(os.Stderr,
-				"cnagentctl: hydrated %d/%d\n",
-				status.HydratedRegions, status.TotalRegions)
-			// The single sample of clone_xfer's stage 5 probe
-			// (cnagent_integtest.md, Cases, clone_xfer): --min-first is
-			// the assertion, the ratio is the observation the script logs
-			// as the read-through window HIT or missed.
+		if !ok {
 			if *sampleOnly {
-				fmt.Printf("%d/%d\n",
-					status.HydratedRegions, status.TotalRegions)
-				return
+				die("no dm-clone status for clone %#x (details %q)",
+					uint64(clone), raw)
 			}
-			if status.TotalRegions != 0 &&
-				status.HydratedRegions >= status.TotalRegions {
-				out, _ := json.Marshal(map[string]any{
-					"hydrated":       status.HydratedRegions,
-					"total":          status.TotalRegions,
-					"first_hydrated": firstHydrated,
-					"first_total":    firstTotal,
-					"samples":        samples,
-				})
-				fmt.Println(string(out))
-				return
+			continue
+		}
+		sampleCnt++
+		if !haveFirst {
+			haveFirst = true
+			firstHydrated = status.HydratedRegions
+			firstTotal = status.TotalRegions
+			if *minFirst != 0 && firstHydrated < *minFirst {
+				die("first hydration sample is %d/%d, want >= %d",
+					firstHydrated, firstTotal, *minFirst)
 			}
-		} else if *sampleOnly {
-			die("no dm-clone status for clone %#x (details %q)",
-				uint64(clone), raw)
 		}
-		if time.Now().After(deadline) {
-			die("hydration did not finish within %gs (last status %q)",
-				*limit, raw)
+		fmt.Fprintf(os.Stderr,
+			"cnagentctl: hydrated %d/%d\n",
+			status.HydratedRegions, status.TotalRegions)
+		// The single sample of clone_xfer's stage 5 probe
+		// (cnagent_integtest.md, Cases, clone_xfer): --min-first is
+		// the assertion, the ratio is the observation the script logs
+		// as the read-through window HIT or missed.
+		if *sampleOnly {
+			fmt.Printf("%d/%d\n",
+				status.HydratedRegions, status.TotalRegions)
+			return
 		}
-		time.Sleep(time.Duration(*interval * float64(time.Second)))
+		if status.TotalRegions != 0 &&
+			status.HydratedRegions >= status.TotalRegions {
+			out, _ := json.Marshal(map[string]any{
+				"hydrated":       status.HydratedRegions,
+				"total":          status.TotalRegions,
+				"first_hydrated": firstHydrated,
+				"first_total":    firstTotal,
+				"samples":        sampleCnt,
+			})
+			fmt.Println(string(out))
+			return
+		}
 	}
 }
 

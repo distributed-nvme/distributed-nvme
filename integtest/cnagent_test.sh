@@ -95,6 +95,12 @@ RAID1_DGRP_ZERO_BYTES=$(((RAID1_META_BLOCKS + 1) * BLOCK_SIZE))
 DN_SYNCUP_TIMEOUT=60
 CN_SYNCUP_TIMEOUT=180
 
+# Deadline of a fresh check round, a check-* with --fresh (see dnctl/cnctl):
+# its rounds wait for two reads of the object that the agent makes after the
+# command begins, and for any converge of the object that runs meanwhile, a
+# retry attempt's included (dnagent.md SH29, SH30).
+FRESH_TIMEOUT=30
+
 # Polling budget of `dnagentctl wait-zeroed` (architecture.md,
 # Side provisioning protocol). On a loop device the kernel maps
 # REQ_OP_WRITE_ZEROES onto fallocate, so even a meta group's side, zeroed
@@ -472,14 +478,26 @@ helper_ok() {
 }
 
 # dnctl drives one dn agent, cnctl one cn agent. Every call carries the current
-# stage's trace id.
+# stage's trace id, and the reads a check round starts log under it
+# (dnagent.md SH29).
 #
-# The drivers' default --timeout suits the read-only RPCs, but one converge
-# pass runs dozens of OS commands, each with its own soft/hard budget: a cn
-# primary converge connects four legs, creates two md arrays, a pool, thin
-# volumes, a raid0 and the nvmet objects. Syncups therefore get a much larger
-# budget; a caller's own --timeout still wins, since it lands later on the
-# command line.
+# The drivers' default --timeout suits the RPCs that answer from memory, but
+# one converge pass runs dozens of OS commands, each with its own soft/hard
+# budget: a cn primary converge connects four legs, creates two md arrays, a
+# pool, thin volumes, a raid0 and the nvmet objects. Syncups therefore get a
+# much larger budget, and a fresh check round, which waits for reads and for
+# a converge, a budget of its own; a caller's own --timeout still wins, since
+# it lands later on the command line.
+#
+# Both agents answer a check round and an info read from their latest
+# observation of the object (dnagent.md SH28), and only a round starts a read
+# of the node. No worker runs here, so a stage that must see the node as it
+# is now — after a fault, behind a converge, or counting what one read does —
+# sends a check-* with --fresh, which sends rounds until one answers from an
+# observation read after the command began; a loop that polls the kernel's
+# progress samples with plain rounds, each of which starts the next read. A
+# plain info read is enough where the last converge or a fresh round just
+# stored the observation the stage reads.
 dnctl() {
 	local idx=$1
 	shift
@@ -488,6 +506,11 @@ dnctl() {
 	local extra=()
 	case "$sub" in
 	syncup-dn | syncup-side) extra=(--timeout "$DN_SYNCUP_TIMEOUT") ;;
+	check-dn | check-side)
+		case " $* " in
+		*" --fresh "*) extra=(--timeout "$FRESH_TIMEOUT") ;;
+		esac
+		;;
 	esac
 	log "[dn$idx] dnagentctl $sub $*"
 	"$CTL_DN" "$sub" \
@@ -504,6 +527,11 @@ cnctl() {
 	local extra=()
 	case "$sub" in
 	syncup-cn | syncup-cntlr) extra=(--timeout "$CN_SYNCUP_TIMEOUT") ;;
+	check-cn | check-cntlr)
+		case " $* " in
+		*" --fresh "*) extra=(--timeout "$FRESH_TIMEOUT") ;;
+		esac
+		;;
 	esac
 	log "[cn$idx] cnagentctl $sub $*"
 	"$CTL_CN" "$sub" \
@@ -3174,12 +3202,14 @@ dn_side() { # dnidx sp leg side ext_cnt zero_bytes primary_cn [standby_cn]
 		# degrades to a miss for the same reason — under `set -euo pipefail`
 		# an unguarded one-shot RPC would turn a transient dial error into a
 		# suite abort, and this helper runs on every first converge of every
-		# side. get-side-info prints the reply before it checks the reply
-		# code, so only a call that never reached the agent leaves nothing to
-		# read. The reply is protojson, which prints a uint64 as a decimal
+		# side. The sample is a fresh round, since the zeroing loop stores no
+		# observation and only a read shows its progress; check-side prints
+		# the reply it takes before it checks the reply code, so only a call
+		# that never reached the agent or found no fresh reply leaves nothing
+		# to read. The reply is protojson, which prints a uint64 as a decimal
 		# string and omits a zero.
-		out=$(dnctl "$idx" get-side-info --sp "$2" --leg "$3" --side "$4" ||
-			true)
+		out=$(dnctl "$idx" check-side --fresh --show-info \
+			--sp "$2" --leg "$3" --side "$4" || true)
 		[ -n "$out" ] || out="{}"
 		zeroed=$(jq_of "$out" '.side_info.zeroed_bytes // "0"')
 		total=$(jq_of "$out" '.side_info.zero_bytes // "0"')
@@ -3227,9 +3257,10 @@ dn_drop() { # dnidx
 # the DN's own sweep may legally need more than one pass. It re-sends the SAME
 # empty side list at the SAME revision until the reply carries code 0, which is
 # exactly what the worker does every round while the code is non-zero (RW12):
-# the agent stores nothing at all about a leftover — the verdict is an
-# enumeration of the node, recomputed from scratch on every request — so the
-# retry carries no new information and needs none.
+# the agent keeps no record of a leftover to work from — every syncup
+# enumerates the node again, and the observation its converge stores is only
+# what that enumeration found — so the retry carries no new information and
+# needs none.
 #
 # Unlike dn_drop it does NOT bump the revision. The revision is the desired
 # state's, not the attempt's, and an equal-revision re-send is a legal full
@@ -3324,20 +3355,25 @@ cn_drop_until_clean() { # cnidx secs
 	done
 }
 
-# wait_legs_probed polls a cntlr's GetCntlrInfo until no leg row reads
+# wait_legs_probed polls a cntlr with check rounds until no leg row reads
 # RES_STATUS_PENDING — CN11's "the prober has not completed a round", which a
 # primary reports for every leg whose prober has just started (a build, a
 # promotion, an agent restart) until the first CnLegProbeInterval tick plus the
 # probe itself. A standby never reports it, so there the first poll returns.
+# The prober's results reach the observation only through a read, so the
+# poll's rounds start the reads it samples (dnagent.md SH29); a reply with no
+# observation yet, which carries no info, is no sample.
 wait_legs_probed() { # cnidx sp cntlr secs label
 	local deadline=$((SECONDS + $4)) out pending
 	while :; do
-		out=$(cnctl "$1" get-cntlr-info --sp "$2" --cntlr "$3")
+		out=$(cnctl "$1" check-cntlr --show-info --sp "$2" --cntlr "$3")
 		pending=$(jq_of "$out" \
-			'[(.cntlr_info.leg_id_to_leg // {})[] | select(.status == "RES_STATUS_PENDING")] | length')
+			'if .obs_stamp.obs_time == null then "no observation" else
+			 [(.cntlr_info.leg_id_to_leg // {})[] | select(.status == "RES_STATUS_PENDING")] | length end')
 		[ "$pending" = 0 ] && return 0
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "$5: cn$1 still reports $pending leg(s) RES_STATUS_PENDING after $4s"
+			die "$5: after $4s cn$1's leg rows read RES_STATUS_PENDING:" \
+				"$pending"
 		sleep 1
 	done
 }
@@ -3347,29 +3383,32 @@ wait_legs_probed() { # cnidx sp cntlr secs label
 # each reply echoes the revision the agent actually stored. A primary's steady
 # state includes a completed probe round on every leg, so the cntlr round waits
 # out CN11's PENDING window first (wait_legs_probed) — a stage that built or
-# promoted a primary a few seconds earlier would otherwise race it.
+# promoted a primary a few seconds earlier would otherwise race it. Both
+# rounds are fresh, so the pair judges reads made after the stage's converges.
 converge_check() { # cnidx sp cntlr cntlrrev
 	local idx=$1 out
-	out=$(cnctl "$idx" check-cn --revision "${CNSYNC[$idx]}" --show-info)
+	out=$(cnctl "$idx" check-cn --fresh --revision "${CNSYNC[$idx]}" --show-info)
 	assert_cn_info_ok "$out" "cn$idx check-cn"
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "${CNSYNC[$idx]}" \
 		"cn$idx check-cn revision"
 	wait_legs_probed "$idx" "$2" "$3" 20 "cn$idx check-cntlr"
-	out=$(cnctl "$idx" check-cntlr --revision "$4" --show-info \
+	out=$(cnctl "$idx" check-cntlr --fresh --revision "$4" --show-info \
 		--sp "$2" --cntlr "$3")
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "$4" \
 		"cn$idx check-cntlr revision"
 	assert_all_ok "$out" .cntlr_info "cn$idx check-cntlr"
 }
 
-# check_verdict prints one CheckCntlr round's verdict as "<code> <details>",
-# whatever the code: the code is what the caller reads, not what the call
-# asserts (cnagentctl prints the reply before it exits on another code). A
-# round that did not answer prints nothing.
+# check_verdict prints the verdict of one fresh CheckCntlr round as
+# "<code> <details>", whatever the code: the code is what the caller reads,
+# not what the call asserts (cnagentctl prints the reply before it exits on
+# another code). The round is fresh, so the verdict is that of a read made
+# after the call began, which a fault injected just before it cannot
+# predate. A round that did not answer prints nothing.
 check_verdict() { # cnidx sp cntlr rev
 	local out
-	out=$(cnctl "$1" check-cntlr --revision "$4" --sp "$2" --cntlr "$3" \
-		--expect-code 4 2>/dev/null || true)
+	out=$(cnctl "$1" check-cntlr --fresh --revision "$4" --sp "$2" \
+		--cntlr "$3" --expect-code 4 2>/dev/null || true)
 	[ -n "$out" ] || return 0
 	printf '%s %s\n' "$(jq_of "$out" '.agent_reply.code // 0')" \
 		"$(jq_of "$out" '.agent_reply.details // ""')"
@@ -3392,15 +3431,17 @@ resync_until_clean() { # cnidx sp cntlr rev req secs label
 	done
 }
 
-# md_wait_clean polls a cntlr's GetCntlrInfo until each md row it names
+# md_wait_clean polls a cntlr with check rounds until each md row it names
 # reads OK with none of the state words a missing, failed or rebuilding
-# member brings (cnagent.md CN28): the array whole again.
+# member brings (cnagent.md CN28): the array whole again. md's state moves in
+# the kernel with no converge, so the poll's rounds start the reads it
+# samples (dnagent.md SH29).
 md_wait_clean() { # cnidx sp cntlr secs label grpid…
 	local idx=$1 sp=$2 c=$3 secs=$4 label=$5 out key st det bad
 	local deadline=$((SECONDS + secs))
 	shift 5
 	while :; do
-		out=$(cnctl "$idx" get-cntlr-info --sp "$sp" --cntlr "$c" \
+		out=$(cnctl "$idx" check-cntlr --show-info --sp "$sp" --cntlr "$c" \
 			--expect-code 4 2>/dev/null || true)
 		bad=""
 		for key in "$@"; do
@@ -3569,7 +3610,8 @@ case_smoke() {
 		"smoke closed $nqn allowed_hosts"
 	assert_eq "$(helper "$cn" "port_linked '$nqn'")" linked \
 		"smoke closed $nqn is on the port"
-	# A check round reads the subsystem with no host link as converged.
+	# A read made after the converge reads the subsystem with no host link
+	# as converged.
 	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
 	host_refused "$hv" "$cn" "$nqn" "smoke closed"
 
@@ -3601,6 +3643,8 @@ case_smoke() {
 
 	stage check "converge check round and the pool status format"
 	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
+	# The info read answers from the observation converge_check's fresh
+	# round took, or a later one.
 	out=$(cnctl "$cn" get-cntlr-info --sp "$sp" --cntlr "$cntlr")
 	got=$(jq_of "$out" \
 		".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$S_SLICE")\"].details // \"\"")
@@ -3637,7 +3681,7 @@ case_smoke() {
 	got=$(helper "$cn" "clone_meta_wrappers $(hex16 "${CNID[$cn]}")")
 	[ -z "$got" ] ||
 		die "smoke: the clone-metadata arena still holds wrappers: $got"
-	out=$(cnctl "$cn" get-cn-info)
+	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}")
 	assert_cn_info_ok "$out" "smoke base state after teardown"
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-smoke.bin"
@@ -4080,7 +4124,7 @@ case_redund() {
 	dkey=$(d16 "$A_DGRP")
 	deadline=$((SECONDS + 90))
 	while :; do
-		out=$(cnctl 2 check-cntlr --revision "$rev2" --show-info \
+		out=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
 			--sp "$sp" --cntlr "$c2")
 		mst=$(jq_of "$out" \
 			".cntlr_info.grp_id_to_md_raid[\"$mkey\"].status // \"ABSENT\"")
@@ -4088,6 +4132,7 @@ case_redund() {
 			".cntlr_info.grp_id_to_md_raid[\"$dkey\"].status // \"ABSENT\"")
 		# Every round, not just the last: the window this stage exists for
 		# is the one where the member is dead and md has not failed it yet.
+		# Each is fresh, so it answers from a read made inside that window.
 		[ "$mst" = RES_STATUS_OK ] && [ "$dst" = RES_STATUS_OK ] ||
 			die "degrade: an md row read meta $mst / data $dst with a dead" \
 				"member: $(jq_of "$out" '.cntlr_info.grp_id_to_md_raid')"
@@ -4116,14 +4161,16 @@ case_redund() {
 	done
 	wait "$writer" || die "degrade: the host write through DN2's leg failed"
 	# No md probe of this stage ran mdadm — not `--detail`, not anything:
-	# the check rounds read /sys/block. The listing record of /sys/block is the
-	# positive control that the rounds' reads are under this trace at all.
+	# the reads the check rounds started read /sys/block, under the trace id
+	# of the round that started each (dnagent.md SH29). The listing record of
+	# /sys/block is the positive control that those reads are under this
+	# trace at all.
 	seq=$(helper 2 "cn_events $TRACE")
 	[ "$(event_cnt "$seq" '^list /sys/block$')" != 0 ] ||
-		die "degrade: no listing of /sys/block by the check rounds is" \
+		die "degrade: no listing of /sys/block by the rounds' reads is" \
 			"under this trace"
 	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
-		"degrade: a check round ran mdadm (the md row must come from sysfs)"
+		"degrade: a read ran mdadm (the md row must come from sysfs)"
 	# Restored before the readonly stage, which needs every leg serving.
 	assert_eq "$(helper 1 "unpartition_from ${IP[2]}")" unpartitioned \
 		"degrade: the partition rule was not removed"
@@ -4131,16 +4178,17 @@ case_redund() {
 	[ -z "$rules" ] || die "degrade: vm1 still holds partition rules: $rules"
 	leg_wait_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
 	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
-	# The leg rows clear on their probers' next completed round. The member
-	# md failed stays failed until a converge puts it back (cnagent.md
-	# CN12), and no converge of CN2 runs before the readd stage, which plays
-	# the worker's re-send of the SyncupCntlr that the check round's verdict
-	# asks for once those rows read OK. So the reply's code is read there and
-	# not here: an info read names the member as soon as its leg's row reads
-	# OK (CN30).
+	# The leg rows clear on their probers' next completed round, which the
+	# observation shows once a read after it has ended, so the poll samples
+	# with rounds that start the reads. The member md failed stays failed
+	# until a converge puts it back (cnagent.md CN12), and no converge of CN2
+	# runs before the readd stage, which plays the worker's re-send of the
+	# SyncupCntlr that the check round's verdict asks for once those rows
+	# read OK. So the reply's code is read there and not here: a read names
+	# the member as soon as its leg's row reads OK (CN30).
 	deadline=$((SECONDS + 60))
 	while :; do
-		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" \
+		out=$(cnctl 2 check-cntlr --show-info --sp "$sp" --cntlr "$c2" \
 			--expect-code 4 2>/dev/null || true)
 		n=0
 		for lkey in "$(d16 "${A_MLEG[1]}")" "$(d16 "${A_DLEG[1]}")"; do
@@ -4308,8 +4356,9 @@ case_redund() {
 	# since a namespace turns optimized only in a converge that put its ns-dev
 	# on its serving device (CN16's ANA rule), the namespace stays
 	# inaccessible and the host's IO waits instead of failing. Its namespace
-	# row reads OK on the converge and on an info read alike, both comparing
-	# its group with the inaccessible one a parked ns-dev calls for (CN28).
+	# row reads OK on the converge and on a read made after it alike, both
+	# comparing its group with the inaccessible one a parked ns-dev calls for
+	# (CN28).
 	# Nothing re-drives that converge — the worker re-syncs on a revision or a
 	# reply code, never on a row — so the agent's CN10 retry, registered for
 	# the late members and for the namespace left waiting, must finish it.
@@ -4355,8 +4404,9 @@ case_redund() {
 	# the promotion's commands. The host's path to CN1 still reads
 	# inaccessible, the ns-dev is still parked, its row reads the missing
 	# raid0 as an error, and the namespace row reads OK, on the converge and
-	# on an info read alike (CN28). A retry attempt that runs before the flips
-	# below finds the members still late and changes none of this.
+	# on a read made after it alike (CN28): the fresh round answers from one.
+	# A retry attempt that runs before the flips below finds the members still
+	# late and changes none of this.
 	assert_absent "$seq" '^write .*/ana_grpid 1$' \
 		"redund lateflip: the promotion moved a namespace optimized"
 	assert_eq "$(host_ana "$hv" "$nqn" 1)" inaccessible \
@@ -4365,11 +4415,11 @@ case_redund() {
 	assert_map_status "$out" ns_id_to_dm_linear "$A_NS" RES_STATUS_ERROR \
 		"dm device $raid01 is not there" "redund lateflip promoted"
 	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund lateflip promoted"
-	info1=$(cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1")
+	info1=$(cnctl 1 check-cntlr --fresh --show-info --sp "$sp" --cntlr "$c1")
 	assert_map_status "$info1" ns_id_to_dm_linear "$A_NS" RES_STATUS_ERROR \
-		"dm device $raid01 is not there" "redund lateflip info read"
+		"dm device $raid01 is not there" "redund lateflip fresh round"
 	assert_map_ok "$info1" ns_id_to_namespace "$A_NS" \
-		"redund lateflip info read"
+		"redund lateflip fresh round"
 	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
 		"${CNID[1]}" "${CNID[2]}"
 	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
@@ -4382,14 +4432,16 @@ case_redund() {
 		leg_wait_ana 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i" optimized 20
 		leg_wait_ana 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i" optimized 20
 	done
-	# The retry re-runs the converge every CnConnectRetryInterval (5 s); an
-	# attempt holds the cntlr's lock, which GetCntlrInfo takes too, so a row
-	# read here is never one from the middle of an attempt.
+	# The retry re-runs the converge every CnConnectRetryInterval (5 s). An
+	# attempt holds the cntlr's lock and stores its observation before it
+	# lets the lock go, and a read takes the same lock (dnagent.md SH28,
+	# SH29), so a row sampled here is never one from the middle of an
+	# attempt; the poll's rounds start the reads between attempts.
 	mkey=$(d16 "$A_MGRP")
 	dkey=$(d16 "$A_DGRP")
 	deadline=$((SECONDS + 15))
 	while :; do
-		out=$(cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1")
+		out=$(cnctl 1 check-cntlr --show-info --sp "$sp" --cntlr "$c1")
 		mst=$(jq_of "$out" \
 			".cntlr_info.grp_id_to_md_raid[\"$mkey\"].status // \"ABSENT\"")
 		dst=$(jq_of "$out" \
@@ -4503,11 +4555,13 @@ case_redund() {
 # actually holds, minus what the desired state wants, is removed top-down;
 # every removal is verified by a probe that cannot block on a dead remote; and
 # "something is left" is recomputed from scratch on every Syncup* and every
-# Check*/Get*Info and travels as agent_reply.code = ReplyCodeLeftover (4),
-# details `leftover(<n>): kind:name, …`. Nothing about a failure is stored, so
-# the retry is nothing more than the same request at the same revision — which
-# is what cn_drop_until_clean/dn_drop_until_clean do here and what the worker
-# does in production.
+# read the agent makes of the node, whose observation the Check* and
+# Get*Info replies answer from (dnagent.md SH28), and travels as
+# agent_reply.code = ReplyCodeLeftover (4), details `leftover(<n>):
+# kind:name, …`. No list of failed work is kept, so the retry is nothing more
+# than the same request at the same revision — which is what
+# cn_drop_until_clean/dn_drop_until_clean do here and what the worker does in
+# production.
 #
 # Five stages on one shape, case_redund's A-shaped raid1 SP: a primary cntlr on
 # CN1, a standby on CN2, four sides across both DNs, one host-facing subsystem
@@ -4612,10 +4666,11 @@ teardown_shape() { # sp nqn uuid req1 req2 hostvm
 # arena with it would satisfy every residue check above and still leave the CN
 # unable to build the next SP.
 #
-# get-cn-info is also the node-level verdict (cnagent.md CN30), and cnagentctl
+# A fresh check-cn answers from a read the agent made after the call began,
+# whose verdict is the node-level one (cnagent.md CN30), and cnagentctl
 # defaults to --expect-code 0, so each of these two calls additionally asserts
-# that the CN's own read-only sweep finds nothing — the same property from the
-# other side of the lock.
+# that the CN's own read-only sweep finds nothing — the same property seen
+# from the agent's side.
 teardown_assert_clean() { # sp label
 	local idx got out
 	assert_no_residue "$1"
@@ -4625,7 +4680,7 @@ teardown_assert_clean() { # sp label
 		got=$(helper "$idx" "clone_meta_wrappers $(hex16 "${CNID[$idx]}")")
 		[ -z "$got" ] ||
 			die "$2: vm$idx's clone arena still holds wrappers: $got"
-		out=$(cnctl "$idx" get-cn-info)
+		out=$(cnctl "$idx" check-cn --fresh --revision "${CNSYNC[$idx]}")
 		assert_cn_info_ok "$out" "$2 cn$idx base state"
 	done
 }
@@ -4908,9 +4963,10 @@ s4_partitioned_dn() {
 # s5_pinned_wrapper is the complementary stage, and the only one that does not
 # need a dead remote: everything here is alive and one dm device simply cannot
 # be removed. It pins the three properties the reply code exists for — the
-# leftover is NAMED, the verdict is RECOMPUTED by a read-only path that issued
-# no syncup, and the retry is the same request at the same revision — plus the
-# stop rule of cnagent.md CN21 that makes the residue readable at all.
+# leftover is NAMED, the verdict is REACHED AGAIN by the agent's own read,
+# which issued no syncup, and the retry is the same request at the same
+# revision — plus the stop rule of cnagent.md CN21 that makes the residue
+# readable at all.
 #
 # It runs last because it is the only stage that pins a dm device open. A pin
 # left behind by an earlier stage's failure would be released by cleanup before
@@ -4949,14 +5005,15 @@ s5_pinned_wrapper() {
 	*) die "s5: the reply does not name the pinned wrapper: '$details'" ;;
 	esac
 	assert_cn_info_ok "$out" "s5 cn1 base state while pinned"
-	# Recomputed, never stored (cnagent.md CN30): a read-only path that issued no
+	# Reached again, not carried over (cnagent.md CN30): a read that issued no
 	# syncup at all reaches the same verdict, because the verdict IS an
-	# enumeration of the node and not a flag the syncup left behind. The reply
+	# enumeration of the node and not a flag the syncup left behind; the fresh
+	# round answers from a read made after the syncup's reply. The reply
 	# still carries CnInfo, because code 4 is not a refusal.
-	out=$(cnctl 1 get-cn-info --expect-code 4)
+	out=$(cnctl 1 check-cn --fresh --revision "${CNSYNC[1]}" --expect-code 4)
 	assert_eq "$(jq_of "$out" '.agent_reply.code // 0')" 4 \
-		"s5: get-cn-info must report the leftover too"
-	assert_cn_info_ok "$out" "s5 cn1 get-cn-info while pinned"
+		"s5: a fresh check-cn must report the leftover too"
+	assert_cn_info_ok "$out" "s5 cn1 check-cn while pinned"
 	# The stop rule of cnagent.md CN21 on hardware: a layer that leaves
 	# something behind stops the
 	# descent, and the leg wrappers are the LAST layer — so everything above
@@ -5537,7 +5594,9 @@ case_clone_xfer() {
 	# destination bitmaps and re-applies the chunk before it answers.
 	out=$(cnctl 2 get-cn-size --wait 120)
 	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "clone_xfer cn2 size"
-	# The restarted agent's probers start over, and cn2 is sp2's primary.
+	# The restarted agent's probers start over, and cn2 is sp2's primary. The
+	# info read answers from the observation the poll saw clear, or a later
+	# one.
 	wait_legs_probed 2 "$sp2" "$cntlr" 20 "clone_xfer post-wipe"
 	out=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
 	assert_all_ok "$out" .cntlr_info "clone_xfer post-wipe cntlr"
@@ -5634,14 +5693,15 @@ case_clone_xfer() {
 	stage srcgone "stage 7b: the source loses its namespace; the clone's rows read one status on every channel"
 	# CN1's export of the transfer loses its namespace behind both agents'
 	# backs, the export and CN2's controller of it staying, and one rule
-	# judges the clone on both channels (cnagent.md CN18, CN28): its three
-	# rows and its destination namespace's two read one status, with one
-	# epoch, on a converge, a CheckCntlr round, a GetCntlrInfo and a second
-	# converge. The source's row reads MISSING, which sets no health epoch,
-	# and the other four OK. What serves is not the rows' to decide (CN16):
-	# the namespace keeps serving through the hydrated dm-clone, and the
-	# read-only channel still proves the hydration the gateway's checks
-	# read.
+	# judges the clone in a converge and in the agent's read (cnagent.md
+	# CN18, CN28): its three rows and its destination namespace's two read
+	# one status, with one epoch, on a converge, a fresh CheckCntlr round — a
+	# read made after that converge —, a GetCntlrInfo answering from the same
+	# observation or a later one, and a second converge. The source's row
+	# reads MISSING, which sets no health epoch, and the other four OK. What
+	# serves is not the rows' to decide (CN16): the namespace keeps serving
+	# through the hydrated dm-clone, and the agent's read still proves the
+	# hydration the gateway's checks read.
 	#
 	# The state compared is measured, never assumed, as the dn suite's lost
 	# source is (dnagent_integtest.md, Cases, migr_full): CN2's node must read
@@ -5689,7 +5749,7 @@ case_clone_xfer() {
 	assert_eq "$(host_ana "$hv" "$nqn" 2)" optimized \
 		"clone_xfer: the host's path to cn2 stays optimized"
 	sleep 1.1
-	k=$(cnctl 2 check-cntlr --revision "$rev2" --show-info \
+	k=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
 		--sp "$sp2" --cntlr "$cntlr")
 	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev2" \
 		"clone_xfer srcgone check-cntlr revision"
@@ -5744,8 +5804,8 @@ case_clone_xfer() {
 	assert_rows_agree "clone_xfer with no source namespace" "$rows" \
 		"$c1" "$k" "$g" "$c2"
 	# The dm-clone's row carries its status line whenever the device is
-	# there, so a GetCntlrInfo still proves the hydration checkCloneHydrated
-	# (gateway/clone.go) reads.
+	# there, so the agent's read still proves the hydration checkCloneHydrated
+	# (gateway/clone.go) reads; the sample is a fresh round's.
 	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
 		--clone "$C_CLONE" --sample-only)
 	case "$sample" in
@@ -5886,7 +5946,7 @@ case_clone_xfer() {
 		got=$(helper "$idx" "clone_meta_wrappers $(hex16 "${CNID[$idx]}")")
 		[ -z "$got" ] ||
 			die "clone_xfer: vm$idx's arena still holds wrappers: $got"
-		out=$(cnctl "$idx" get-cn-info)
+		out=$(cnctl "$idx" check-cn --fresh --revision "${CNSYNC[$idx]}")
 		assert_cn_info_ok "$out" "clone_xfer cn$idx base state after teardown"
 	done
 	assert_no_residue "$sp1"
@@ -5897,6 +5957,23 @@ case_clone_xfer() {
 # ---------------------------------------------------------------------------
 # Case D — restart (cnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
+
+# snapshot_infos <dir> <pre|post> <sp> <cntlr1> <cntlr2> writes the restart
+# case's four snapshots, each a fresh round with the info: cn1, cn2 and each
+# CN's cntlr.
+snapshot_infos() {
+	local dir=$1 when=$2 sp=$3 idx c
+	for idx in 1 2; do
+		cnctl "$idx" check-cn --fresh --revision "${CNSYNC[$idx]}" \
+			>"$dir/cn$idx.$when.raw"
+	done
+	for idx in 1 2; do
+		c=$4
+		[ "$idx" = 1 ] || c=$5
+		cnctl "$idx" check-cntlr --fresh --sp "$sp" --cntlr "$c" \
+			>"$dir/cntlr$idx.$when.raw"
+	done
+}
 
 case_restart() {
 	CASE=restart
@@ -5955,11 +6032,10 @@ case_restart() {
 	# The post-restart snapshot is taken once cn1's legs have been probed
 	# again, so this one must be too: a leg reads RES_STATUS_PENDING until
 	# its prober's first round (CN11), and the build was seconds ago.
+	# Every snapshot, on both sides of the restart, is a fresh round: it
+	# compares the nodes as the agents read them.
 	wait_legs_probed 1 "$sp" "$c1" 20 "restart pre-snapshot"
-	cnctl 1 get-cn-info >"$snap/cn1.pre.raw"
-	cnctl 2 get-cn-info >"$snap/cn2.pre.raw"
-	cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1" >"$snap/cntlr1.pre.raw"
-	cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" >"$snap/cntlr2.pre.raw"
+	snapshot_infos "$snap" pre "$sp" "$c1" "$c2"
 
 	stage restart "kill both cn agents; the kernel-side state is untouched"
 	for idx in 1 2; do
@@ -5986,7 +6062,9 @@ case_restart() {
 
 	stage reconcile "the reloaded state deep-equals the pre-restart snapshot"
 	# ResInfo.epoch is the time of the last observed status change and the
-	# trackers are in-memory, so it is the one field left out. The leg rows
+	# trackers are in-memory, so it is the one field of the info left out;
+	# the reply's stamp names an observation, its times and its trace id,
+	# which differ by nature. The leg rows
 	# are compared whole, status and details, which is the stage's point: the
 	# restarted primary's probers start over and read RES_STATUS_PENDING
 	# "health probe pending" until their first post-restart round, so the
@@ -5994,11 +6072,8 @@ case_restart() {
 	# a standby's the sysfs transport report of kernel state the restart
 	# leaves alone.
 	wait_legs_probed 1 "$sp" "$c1" 20 "restart post-snapshot"
-	local norm='walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
-	cnctl 1 get-cn-info >"$snap/cn1.post.raw"
-	cnctl 2 get-cn-info >"$snap/cn2.post.raw"
-	cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1" >"$snap/cntlr1.post.raw"
-	cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" >"$snap/cntlr2.post.raw"
+	local norm='del(.obs_stamp) | walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
+	snapshot_infos "$snap" post "$sp" "$c1" "$c2"
 	for name in cn1 cn2 cntlr1 cntlr2; do
 		for when in pre post; do
 			"$JQ" "$norm" "$snap/$name.$when.raw" >"$snap/$name.$when.json"

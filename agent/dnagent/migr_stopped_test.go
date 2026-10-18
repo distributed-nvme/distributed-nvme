@@ -715,14 +715,14 @@ func TestMigrationDestinationStepFiveIsRetried(t *testing.T) {
 	})
 }
 
-// A destination whose slot the metadata area has no free run for waits:
-// both migr_dst_info rows read PROVISIONING with the area's text, so no
-// health epoch is set (DN13). It says so on both channels in the same rows —
-// the converge's reply and the check round's probe — instead of trading the
-// rows, and the epoch on them, every round; and it builds with no further RPC
-// once the units are free. A destination normally takes its run before it
-// zeroes (TestMigrationDestinationWaitsForRoomBeforeZeroing); this one
-// provisions as a plain side, so DN13 step (2) is where it meets the full
+// A destination whose slot the metadata area has no free run for waits: both
+// migr_dst_info rows read PROVISIONING with the area's text, so no health
+// epoch is set (DN13). It says so on both channels in the same rows — the
+// converge's reply and the probe of the check round's read — instead of
+// trading the rows, and the epoch on them, every round; and it builds with no
+// further RPC once the units are free. A destination normally takes its run
+// before it zeroes (TestMigrationDestinationWaitsForRoomBeforeZeroing); this
+// one provisions as a plain side, so DN13 step (2) is where it meets the full
 // area.
 func TestMigrationDestinationExhaustionIsReportedAndRetried(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -774,7 +774,7 @@ func TestMigrationDestinationExhaustionIsReportedAndRetried(t *testing.T) {
 	}
 
 	// The check round reports the same refusal, row for row, epoch included.
-	check, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+	check, _ := checkSideNow(srv, ctx, &pb.CheckSideRequest{
 		ClusterId: testCluster, DnId: testDn,
 		SidePointer: sidePtr(testSide), Revision: 2, ShowInfo: true,
 	}, nil)
@@ -828,15 +828,16 @@ func destinationRows(info *pb.SideInfo) map[string]*pb.ResInfo {
 	return rows
 }
 
-// checkRoundInfo runs one CheckSide round of the test side at revision and
-// returns the info it carries.
+// checkRoundInfo runs the test side's read and then one CheckSide round of
+// it at revision, and returns the info the round carries: what the read found
+// (SH29).
 func checkRoundInfo(
 	t *testing.T,
 	srv *DnAgentServer,
 	revision uint64,
 ) *pb.SideInfo {
 	t.Helper()
-	reply, _ := srv.checkSideRound(context.Background(),
+	reply, _ := checkSideNow(srv, context.Background(),
 		&pb.CheckSideRequest{
 			ClusterId: testCluster, DnId: testDn,
 			SidePointer: sidePtr(testSide), Revision: revision,
@@ -1301,11 +1302,11 @@ func TestADestinationConvergesItsHydrationKnobs(t *testing.T) {
 	}
 }
 
-// A check round reads DN13 steps (2) and (4) as the converge's steps leave
-// them (migrMetaRead, migrCloneRead): each read holds exactly where its step
-// holds with nothing to do. Over each fault below the read refuses and the
-// step changes the node; once the step has run, the read holds and the step
-// changes nothing.
+// A check round's read reads DN13 steps (2) and (4) as the converge's steps
+// leave them (migrMetaRead, migrCloneRead): each read holds exactly where its
+// step holds with nothing to do. Over each fault below the read refuses and
+// the step changes the node; once the step has run, the read holds and the
+// step changes nothing.
 func TestAStepReadHoldsWhereItsStepHasNothingToDo(t *testing.T) {
 	names := newMigrDstNames()
 	// shiftArg moves the numeric table argument at index i of a single-line

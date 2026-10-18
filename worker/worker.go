@@ -53,6 +53,8 @@ const (
 
 	msgHealthChanged = "health changed"
 	msgCntlrSettled  = "cntlr settled"
+
+	msgLateObservation = "late observation"
 )
 
 // Config is everything cmd/dnv-worker passes to Run (CM1, CM4).

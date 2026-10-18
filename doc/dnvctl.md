@@ -268,11 +268,12 @@ after what it sets (`dn set-disabled`, `sp set-cntlid-slots`, `ns set-dev`,
 re-sending a node's disabled flag or a cntlr's enabled flag as it is stored
 is the gateway's idempotent no-write (`gateway.md` GW6), not a flip back, so
 the leaf is safe to script. An inspect RPC is an `inspect` leaf
-(`sp inspect-side` for a side), a live read the gateway answers from the
-agent that hosts the object, not from etcd. The bitmap RPCs are `get-bm`,
-`get-leg-bm` and `append-bm`; every other leaf keeps its RPC's verb
-(`cluster advance-ids`, `sp find-names`, `sp grow-slice`, `migr finish`,
-`migr cancel`, `spare switch`).
+(`sp inspect-side` for a side), a read the gateway answers from the agent
+that hosts the object, out of that agent's latest observation of it, not
+from etcd. The bitmap RPCs are `get-bm`, `get-leg-bm` and `append-bm`;
+every other leaf keeps its RPC's verb (`cluster advance-ids`,
+`sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
+`spare switch`).
 
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:
@@ -413,9 +414,10 @@ a cluster of many pools it needs a `--timeout` that covers them all.
 `dn create` reaches the agent: the gateway calls the DN agent's `GetDnSize`
 inline (`gateway.md`, Agent calls), so the invocation's trace id chains
 through to the agent's records (`grpc.md` T3). `dn inspect` is the group's
-live read, the DN agent's `GetDnInfo` rather than etcd, so its disk counts
-are the agent's own, to set beside the record's counts that `dn get` shows
-(`architecture.md`, Live-state reporting).
+read of the DN agent's latest observation of the node, through its
+`GetDnInfo`, rather than of etcd, so its disk counts are the agent's own,
+to set beside the record's counts that `dn get` shows (`architecture.md`,
+Live-state reporting).
 
 ### `cn` — `ctl/cn.go`
 
@@ -486,11 +488,12 @@ its device with the group's `--name`, where gatewayctl spells it `--td`.
 
 `ss list` is the only etcd read that shows a namespace's configuration: a
 namespace is a field of its subsystem, so the `ns` group creates and changes
-namespaces but has no read of its own; `cntlr inspect` shows a cntlr's live
-namespaces, from the agent, not their configuration. `ss set-hosts` sends
-the `--hosts` list as a full replacement of `allowed_hosts`, an empty list
-included, and `ss create` without `--hosts` sends an empty list too; what
-an empty list admits is `architecture.md`, Primary cntlr.
+namespaces but has no read of its own; `cntlr inspect` shows a cntlr's
+namespaces as its agent last observed them, not their configuration.
+`ss set-hosts` sends the `--hosts` list as a full replacement of
+`allowed_hosts`, an empty list included, and `ss create` without `--hosts`
+sends an empty list too; what an empty list admits is `architecture.md`,
+Primary cntlr.
 
 ### `ns` — `ctl/ns.go`
 
