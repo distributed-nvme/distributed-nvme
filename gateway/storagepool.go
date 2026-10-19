@@ -1268,7 +1268,7 @@ func (s *Server) GrowSlice(
 		}
 		// Both confs as stored (architecture.md, Common validation).
 		// Validating before the ladder is what
-		// keeps model.MetaLadderExtCnt's "false" meaning the 16 GiB cap and
+		// keeps model.MetaLadderExtCnt's "false" meaning the metadata cap and
 		// nothing else: an unvalidated zero extent size would report the same
 		// false and be reported to the operator as a metadata ceiling.
 		if err := model.ValidateClusterConf(cc); err != nil {
@@ -1302,14 +1302,14 @@ func (s *Server) GrowSlice(
 			}
 			ladder, ok := model.MetaLadderExtCnt(total, extentSize)
 			if !ok {
-				// The 16 GiB dm-thin metadata cap is the SP's own permanent
+				// The dm-thin metadata cap is the SP's own permanent
 				// ceiling — object state, not exhaustible capacity — so it
 				// is FAILED_PRECONDITION (architecture.md, GrowSlice;
 				// gateway.md GW7; model.GrowSlice's in-STM re-check of the
 				// same cap already maps there).
 				return errPrecondition(
 					"slice %d has %d meta extents and cannot grow past the "+
-						"16 GiB dm-thin metadata cap",
+						"dm-thin metadata cap",
 					req.GetSliceId(), total)
 			}
 			extCnt = ladder

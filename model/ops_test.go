@@ -985,8 +985,12 @@ func TestPoolBlockSize(t *testing.T) {
 }
 
 // TestMetaLadderExtCnt walks the meta ladder of architecture.md, GrowSlice,
-// 1 → 2 → 4 → 8 → 16 GiB and
-// refuses at the cap.
+// 1 → 2 → 4 → 8 → 16 GiB and refuses there, past the cap, and pins the cap
+// itself: dm-thin's largest metadata device, 255 index entries of 2^14 - 64
+// metadata blocks of 4 KiB. A total one block below it still grows and a
+// total at it does not. A cap of 16 GiB would let both grow, and a grow from
+// groups that already fill dm-thin's largest device would stay pending for
+// ever, since dm-thin reports no more metadata than that device holds.
 func TestMetaLadderExtCnt(t *testing.T) {
 	total := uint64(1)
 	for _, want := range []uint64{1, 2, 4, 8} {
@@ -1003,7 +1007,19 @@ func TestMetaLadderExtCnt(t *testing.T) {
 		t.Fatalf("ladder total: got %d, want 16", total)
 	}
 	if _, ok := MetaLadderExtCnt(total, opsExtSize); ok {
-		t.Errorf("16 GiB must be the cap")
+		t.Errorf("a 16 GiB total is past the cap and must not grow")
+	}
+	// Extents of one metadata block put the totals on the cap's own edge.
+	capBlocks := uint64(255) * (1<<14 - 64)
+	if _, ok := MetaLadderExtCnt(
+		capBlocks-1, common.ThinMetaBlockSize,
+	); !ok {
+		t.Errorf("a total one block below the cap must still grow")
+	}
+	if _, ok := MetaLadderExtCnt(
+		capBlocks, common.ThinMetaBlockSize,
+	); ok {
+		t.Errorf("a total at the cap must not grow")
 	}
 	if _, ok := MetaLadderExtCnt(0, opsExtSize); ok {
 		t.Errorf("a slice with no meta group has no ladder step")
@@ -2570,7 +2586,7 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 		[]Cand{env.dnCand("dn-z0:9000"), env.dnCand("dn-z1:9000")},
 	)
 	precondition := wantPrecondition(t, err, opGrowSlice)
-	if precondition.Reason != "meta ladder at the 16 GiB cap" {
+	if precondition.Reason != "meta ladder at the dm-thin metadata cap" {
 		t.Errorf("Reason: got %q", precondition.Reason)
 	}
 	if got := env.spRev(); got != revBefore {

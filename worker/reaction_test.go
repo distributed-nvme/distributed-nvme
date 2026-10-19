@@ -2090,7 +2090,7 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 	t.Run("leg repair while the meta ladder is capped", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		h.dnCands(reactDnC)
-		// 256 × 64 MiB = the 16 GiB dm-thin metadata ceiling of
+		// 256 × 64 MiB = 16 GiB, past the dm-thin metadata ceiling of
 		// architecture.md, GrowSlice: the meta grow can never run again for
 		// this slice.
 		h.slice().MetaGrpList = []*pb.Group{reactGroup(

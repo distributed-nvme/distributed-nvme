@@ -51,7 +51,7 @@ const (
 	// handler that read the cluster from one that substituted the constant —
 	// the two would agree on every number. Substituting either alone, or both
 	// together, moves the group geometry below: the ladder cap moves with the
-	// extent size too (16 GiB / 2 GiB is 8 extents, not 16).
+	// extent size too (8 extents of 2 GiB reach it, 8 of 1 GiB do not).
 	sptExtSize   = uint64(2) << 30
 	sptBlockSize = uint64(4) << 20
 	// sptDnFree / sptCnFree sit in DN bin 1 (the DefaultDnBin*Shift ladder),
@@ -3100,14 +3100,15 @@ func TestGrowSliceMeta(t *testing.T) {
 }
 
 // TestGrowSliceMetaLadderCap pins the meta ladder's ceiling AND its error
-// class (architecture.md, GrowSlice; gateway.md GW7): the 16 GiB cap is the SP's
-// own permanent structural ceiling — per-object state, not exhaustible
-// capacity — so it is FAILED_PRECONDITION, never RESOURCE_EXHAUSTED.
+// class (architecture.md, GrowSlice; gateway.md GW7): the dm-thin metadata cap
+// is the SP's own permanent structural ceiling — per-object state, not
+// exhaustible capacity — so it is FAILED_PRECONDITION, never
+// RESOURCE_EXHAUSTED.
 // model.GrowSlice's in-STM re-check of the same cap maps there too, so the
 // gateway pre-check and the transaction agree on the client's code no matter
 // which wins the race; this test is the pre-check's half of that.
 //
-// The slice's meta total is raised to the cap directly rather than by the
+// The slice's meta total is raised past the cap directly rather than by the
 // three real grows the 1 → 2 → 4 → 8 ladder would take: the refusal is decided
 // from the slice alone and returns before anything is written, so the DN
 // budgets those grows would have spent never enter it.
@@ -3117,10 +3118,10 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 	sliceId := env.spConf(sptSpName).GetSliceIdList()[0]
 	slice := env.slice(spId, sliceId)
 	// The cap is a size, not an ext_cnt: 8 extents of this cluster's stored
-	// 2 GiB is exactly the 16 GiB ceiling, and the ladder is refused once the
+	// 2 GiB are 16 GiB, past the cap, and the ladder is refused once the
 	// total has REACHED it. A handler that read the default extent size of
-	// architecture.md, Common validation, instead would make this 16 GiB look like
-	// 8 and grow.
+	// architecture.md, Common validation, instead would make this 16 GiB look
+	// like 8, below the cap, and grow.
 	slice.GetMetaGrpList()[0].ExtCnt = 8
 	mustPut(t, env.cli, model.SliceKey(env.cid, spId, sliceId), slice)
 	before := env.dump()
@@ -3134,15 +3135,15 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 	sptWantCode(t, err, codes.FailedPrecondition)
 	// WHICH gate refused, not merely that one did: the pre-check's sentence
 	// names the slice and its meta total, while model.GrowSlice's in-STM
-	// re-check says only "meta ladder at the 16 GiB cap". The two map to the
-	// same code on purpose, so the message is the only thing that tells them
-	// apart — and the pre-check can only have fired by measuring 8 extents
-	// against this cluster's STORED 2 GiB, since against the default of
-	// architecture.md, Common validation, they would be 8 GiB and it would have
-	// let the grow through to the STM.
+	// re-check says only "meta ladder at the dm-thin metadata cap". The two
+	// map to the same code on purpose, so the message is the only thing that
+	// tells them apart — and the pre-check can only have fired by measuring
+	// 8 extents against this cluster's STORED 2 GiB, since against the
+	// default of architecture.md, Common validation, they would be 8 GiB and
+	// it would have let the grow through to the STM.
 	wantMsg := fmt.Sprintf(
-		"slice %d has 8 meta extents and cannot grow past the 16 GiB "+
-			"dm-thin metadata cap", sliceId)
+		"slice %d has 8 meta extents and cannot grow past the dm-thin "+
+			"metadata cap", sliceId)
 	if got := status.Convert(err).Message(); got != wantMsg {
 		t.Errorf("message %q, want the pre-check's %q", got, wantMsg)
 	}

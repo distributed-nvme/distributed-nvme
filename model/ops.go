@@ -418,18 +418,26 @@ func SideZeroBytes(
 // extent, and every further meta grow adds the slice's current meta total, so
 // the totals run 1 → 2 → 4 → 8 → 16 …
 //
-// ok is false once the total has reached the 16 GiB dm-thin metadata ceiling,
-// which is where architecture.md, GrowSlice, refuses to grow further; the
-// cap is expressed in bytes,
-// so it holds for any extent size (with 1 TiB extents the very first meta
-// group is already past it and no meta grow is ever allowed). A slice with no
-// meta group at all also reports false: the ladder has nothing to double.
+// ok is false once the total has reached the dm-thin metadata ceiling
+// (metaSizeCap), which is where architecture.md, GrowSlice, refuses to grow
+// further. What is compared with the cap is the total in bytes of the meta
+// groups' extents, which is never smaller than the pool's metadata device,
+// the concat of their data regions (GrowPending), so a total below the cap
+// means a device below it. The cap is judged on the total before the grow,
+// so the rung it allows may carry the total past the cap; when that rung
+// carries the metadata device past the cap as well, dm-thin uses only the
+// device's leading metaSizeCap bytes and the rest of it stays allocated and
+// unused, which architecture.md, GrowSlice, accepts. The cap is expressed in
+// bytes, so it holds for any extent size (with 1 TiB extents the very first
+// meta group is already past it and no meta grow is ever allowed). A slice
+// with no meta group at all also reports false: the ladder has nothing to
+// double.
 //
 // extentSize is the cluster's STORED value and is not resolved here
 // (architecture.md, Common validation); a
 // zero would be a divide by zero, so it reports false as a last-resort guard.
 // Callers validate the ClusterConf first, which is what keeps that arm
-// unreachable and keeps "false" meaning the 16 GiB cap.
+// unreachable and keeps "false" meaning the metadata cap.
 func MetaLadderExtCnt(currentTotal uint64, extentSize uint64) (uint64, bool) {
 	if currentTotal == 0 {
 		return 0, false
@@ -446,9 +454,19 @@ func MetaLadderExtCnt(currentTotal uint64, extentSize uint64) (uint64, bool) {
 	return currentTotal, true
 }
 
-// metaSizeCap is the 16 GiB dm-thin metadata ceiling of architecture.md,
-// GrowSlice.
-const metaSizeCap = uint64(16) * 1024 * 1024 * 1024
+// metaSizeCap is the dm-thin metadata ceiling of architecture.md, GrowSlice:
+// the largest metadata device dm-thin uses, in bytes. Its space map has one
+// index block of 255 entries, each entry describes one bitmap block, and a
+// bitmap block tracks 2^14 - 64 metadata blocks of ThinMetaBlockSize, 4 KiB,
+// so dm-thin uses 255 x (2^14 - 64) x 4 KiB of a metadata device and no more
+// (the kernel's DM_SM_METADATA_MAX_BLOCKS). A larger device is cut to that
+// size, and the kernel warns only past its own 16 GiB warning line, which
+// lies above this cap. The cap is that exact size and not the warning line:
+// meta groups whose extent total lies between the two may already make a
+// metadata device that fills what dm-thin uses, and a grow from them would
+// stay pending for ever, since the metadata total the pool reports could
+// not pass what those groups already hold (dnv-worker.md, AR6).
+const metaSizeCap = uint64(255) * (1<<14 - 64) * common.ThinMetaBlockSize
 
 // ---------------------------------------------------------------------------
 // Shared STM helpers
@@ -1509,9 +1527,10 @@ func Failover(
 // the slice's FIRST data group's ext_cnt (grow by the original allocation
 // unit), for a meta grow the ladder value of architecture.md, GrowSlice,
 // which doubles the slice's meta total and is refused once that total
-// reaches 16 GiB. meta_blocks and data_blocks follow the group on-leg layout
-// (architecture.md, Group on-leg layout: meta region, data region, health
-// block) from the SP's own bdev_conf and the cluster's extent_size. A list of
+// reaches the dm-thin metadata ceiling (metaSizeCap). meta_blocks and
+// data_blocks follow the group on-leg layout (architecture.md, Group on-leg
+// layout: meta region, data region, health block) from the SP's own
+// bdev_conf and the cluster's extent_size. A list of
 // either kind that already holds
 // common.MaxGrpCntPerSlice groups takes no more (GrpListFull).
 //
@@ -1688,8 +1707,8 @@ func GrowSlice(
 // growExtCnt is the size of the group a GrowSlice appends (architecture.md,
 // GrowSlice): the slice's
 // first data group's ext_cnt for a data grow — the original allocation unit —
-// and the meta ladder value for a meta grow, which is refused at the 16 GiB
-// dm-thin metadata ceiling.
+// and the meta ladder value for a meta grow, which is refused at the dm-thin
+// metadata ceiling (metaSizeCap).
 func growExtCnt(
 	slice *pb.Slice,
 	isMeta bool,
@@ -1711,7 +1730,7 @@ func growExtCnt(
 	}
 	extCnt, ok := MetaLadderExtCnt(total, extentSize)
 	if !ok {
-		return 0, fail(opGrowSlice, "meta ladder at the 16 GiB cap")
+		return 0, fail(opGrowSlice, "meta ladder at the dm-thin metadata cap")
 	}
 	return extCnt, nil
 }

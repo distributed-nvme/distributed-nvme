@@ -2336,7 +2336,7 @@ Errors: `NOT_FOUND` when `slice_id` is not in `SpConf.slice_id_list`;
 `is_meta` is true and `ext_cnt` is not zero — the request's `ext_cnt` is
 only this data-or-meta **exclusivity signal**, and group sizes are
 computed (below); `FAILED_PRECONDITION` when `is_meta` is true and the
-slice's meta total already sits at the dm-thin metadata ceiling, when the
+slice's meta total has already reached the dm-thin metadata ceiling, when the
 slice's group list of the requested kind already holds
 `MaxGrpCntPerSlice` groups (the width of md names; a count, but one
 nothing frees on a live slice, because groups leave a slice only from the
@@ -2358,8 +2358,23 @@ shortfall.
 not by the caller: the first meta group, created with the SP, is one
 extent, and each further meta grow appends a group whose `ext_cnt` equals
 the slice's current meta total in extents, so the additions double. Meta
-growth stops once the total meta size reaches the dm-thin metadata
-ceiling (`metaSizeCap`), and further meta growth is refused.
+growth stops once the total meta size, the meta total times
+`extent_size`, reaches the dm-thin metadata ceiling (`metaSizeCap`), the
+largest metadata device dm-thin uses, and further meta growth is refused.
+The total meta size is never smaller than the pool's metadata device, the
+concat of the meta groups' data regions (Primary cntlr; Group on-leg
+layout: meta region, data region, health block), so a slice below the
+ceiling has a metadata device below it too. The ceiling is judged on the
+total before a grow, so the rung a grow adds may carry the total past it.
+When the rung carries the metadata device past the ceiling as well,
+dm-thin uses only the leading part of that device, with a kernel warning
+only past a line somewhat above the ceiling, and the rest of the device
+stays allocated and unused. This is accepted: the excess is smaller than
+the rung, a refusal of the rung would leave the pool short of metadata
+room, and a rung cut to fit would make the ladder irregular. The ceiling
+is dm-thin's exact maximum and not its warning line, so that every grow
+it allows adds metadata room the pool then reports, and the grow's
+pending rule (`dnv-worker.md` AR6) clears.
 
 Action: allocate legs for one new group. `is_meta` selects the list, and
 the new group's size is always computed, never taken from the request: a

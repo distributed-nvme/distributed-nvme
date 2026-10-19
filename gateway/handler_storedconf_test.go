@@ -163,7 +163,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     the one that would otherwise be divided by;
 //   - GrowSlice checks both confs after its snapshot and before the meta
 //     ladder, so that model.MetaLadderExtCnt's "false" can keep meaning the
-//     16 GiB cap and nothing else;
+//     dm-thin metadata cap and nothing else;
 //   - the five allocating RPCs — CreateStoragePool, GrowSlice, CreateCntlr,
 //     CreateSpareLeg and CreateMigration, i.e. every caller of pickDns or
 //     pickCn — reach the check through the scan (architecture.md,

@@ -100,9 +100,9 @@ const (
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
 	// flight and is left alone".
 	reasonTwoSides = "leg_has_two_sides"
-	// reasonMetaLadderCap is the 16 GiB dm-thin metadata ceiling of
-	// architecture.md, GrowSlice, reached before model.GrowSlice is even called
-	// because the allocator has to search for the ladder's size first.
+	// reasonMetaLadderCap is the dm-thin metadata ceiling of architecture.md,
+	// GrowSlice (model's metaSizeCap), reached before model.GrowSlice is even
+	// called because the allocator has to search for the ladder's size first.
 	reasonMetaLadderCap = "meta_ladder_cap"
 	// reasonGrpListFull is the group ceiling of architecture.md, GrowSlice: the
 	// slice's list of that kind already holds common.MaxGrpCntPerSlice groups,

@@ -20,15 +20,18 @@ import (
 )
 
 // This file is the boundary tests of the gateway (gateway.md, Integration
-// test plan): count ceilings of architecture.md, Cardinality limits, and the
+// test plan): count ceilings of architecture.md, Cardinality limits, the
 // size edges of architecture.md, Size → extents and Group on-leg layout, and
-// of the transport service id, and the id counters at their top
-// (architecture.md, Globals: id allocation + shard buckets), each named by
-// its case and reached through
+// of the transport service id, the meta ladder's cap (architecture.md,
+// GrowSlice), and the id counters at their top (architecture.md, Globals: id
+// allocation + shard buckets), each named by its case and reached through
 // the real handlers against the package's etcd. A count ceiling is filled by
 // real creates, the create that takes the last place is accepted, and the
 // one after it is refused and writes nothing; a size bound is accepted at its
-// edge and refused one past it, at both ends where it has two. The rest of
+// edge and refused one past it, at both ends where it has two. The meta
+// ladder's cap is not pinned at its edge here: its case pins that the cap is
+// judged on the total before a grow, so that the last rung passes it, and
+// model's TestMetaLadderExtCnt pins the cap's exact edge. The rest of
 // architecture.md, Common validation, is validate_test.go's.
 //
 // Every count ceiling here is also raced at its last place. Two token-less
@@ -1521,6 +1524,52 @@ func TestCreateStoragePoolOverflowBeforeTheScan(t *testing.T) {
 	}
 }
 
+// TestMetaLadderPassesItsCapWithAnOddExtent pins the meta ladder of
+// architecture.md, GrowSlice, where its cap, dm-thin's largest metadata
+// device, is judged on the meta total before a grow, so the rung it allows
+// may carry the total past the cap: with 5 GiB extents the meta total grows
+// 5, 10, 20 GiB, and only the grow after that is FAILED_PRECONDITION. The
+// last rung passes the cap so at every extent size whose ladder does not
+// land on the cap, the default size included; 5 GiB extents put the cap
+// well inside that rung, so the case holds for any cap above 10 GiB and up
+// to 20 GiB and pins the rule, not the cap's value.
+func TestMetaLadderPassesItsCapWithAnOddExtent(t *testing.T) {
+	const extentSize = uint64(5) << 30
+	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+	env.cc.DnBinConf.ExtentSize = extentSize
+	mustPut(t, env.cli, model.ClusterConfKey(env.name), env.cc)
+	spId := env.createSp(sptSmallSpec(sptSpName))
+	sliceId := env.spConf(sptSpName).GetSliceIdList()[0]
+	grow := func() error {
+		_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			SliceId:     sliceId,
+			IsMeta:      true,
+		})
+		return err
+	}
+	for idx := 0; idx < 2; idx++ {
+		if err := grow(); err != nil {
+			t.Fatalf("meta grow %d: %v", idx+1, err)
+		}
+	}
+	total := uint64(0)
+	var extCnts []uint64
+	for _, grp := range env.slice(spId, sliceId).GetMetaGrpList() {
+		total += grp.GetExtCnt()
+		extCnts = append(extCnts, grp.GetExtCnt())
+	}
+	if fmt.Sprint(extCnts) != "[1 1 2]" {
+		t.Errorf("meta groups of %v extents, want [1 1 2]", extCnts)
+	}
+	if total*extentSize != 20<<30 {
+		t.Errorf("meta total %d bytes, want 20 GiB", total*extentSize)
+	}
+	bndWantMsg(t, grow(), codes.FailedPrecondition, "dm-thin metadata cap",
+		"the grow past 20 GiB")
+}
+
 // ---------------------------------------------------------------------------
 // The id counters at their top: the id step's last value and the last id
 // ---------------------------------------------------------------------------
@@ -1715,48 +1764,6 @@ func TestTrSvcIdAtTheDiscoveryLogWidth(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Rules the docs leave open, pinned as the code has them
 // ---------------------------------------------------------------------------
-
-// TestMetaLadderPassesItsCapWithAnOddExtent pins the meta ladder of
-// architecture.md, GrowSlice, where its 16 GiB cap meets an extent size that
-// is not a power of two: with 5 GiB extents the meta total grows 5, 10, 20
-// GiB, since the cap is judged on the total before a grow, and only the grow
-// after that is FAILED_PRECONDITION.
-func TestMetaLadderPassesItsCapWithAnOddExtent(t *testing.T) {
-	const extentSize = uint64(5) << 30
-	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
-	env.cc.DnBinConf.ExtentSize = extentSize
-	mustPut(t, env.cli, model.ClusterConfKey(env.name), env.cc)
-	spId := env.createSp(sptSmallSpec(sptSpName))
-	sliceId := env.spConf(sptSpName).GetSliceIdList()[0]
-	grow := func() error {
-		_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
-			ClusterName: env.name,
-			SpName:      sptSpName,
-			SliceId:     sliceId,
-			IsMeta:      true,
-		})
-		return err
-	}
-	for idx := 0; idx < 2; idx++ {
-		if err := grow(); err != nil {
-			t.Fatalf("meta grow %d: %v", idx+1, err)
-		}
-	}
-	total := uint64(0)
-	var extCnts []uint64
-	for _, grp := range env.slice(spId, sliceId).GetMetaGrpList() {
-		total += grp.GetExtCnt()
-		extCnts = append(extCnts, grp.GetExtCnt())
-	}
-	if fmt.Sprint(extCnts) != "[1 1 2]" {
-		t.Errorf("meta groups of %v extents, want [1 1 2]", extCnts)
-	}
-	if total*extentSize != 20<<30 {
-		t.Errorf("meta total %d bytes, want 20 GiB", total*extentSize)
-	}
-	bndWantMsg(t, grow(), codes.FailedPrecondition, "16 GiB",
-		"the grow past 20 GiB")
-}
 
 // TestAddrPortIsNotParsed pins the addr_port check of architecture.md, Common
 // validation, as the gateway has it: the name rule alone. An endpoint that is
