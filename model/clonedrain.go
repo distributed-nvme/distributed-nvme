@@ -35,9 +35,9 @@ import (
 //     mutator instead of deleting a stop signal.
 //   - The drain runs ALONGSIDE the SP's normal reaction pass rather than
 //     instead of it (CLD7): the SP is healthy, and its other children must keep
-//     converging while one of its clones goes away. The wake-up a committed
-//     batch sets off runs the next drain steps alone, at most one per deleting
-//     clone, and the reactions keep their cntlr_interval pass.
+//     converging while one of its clones goes away. The wake-up a batch posts
+//     once its call succeeds runs the next drain steps alone, at most one per
+//     deleting clone, and the reactions keep their cntlr_interval pass.
 //
 // A single deciding STM sweeping the whole MaxSliceCntPerSp x MaxCloneBmCnt
 // rectangle of chunk keys would grow with both ceilings; incremental deletion

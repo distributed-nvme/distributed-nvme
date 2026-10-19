@@ -909,12 +909,12 @@ position, and a re-run of the STM closure on the same picks and reads
 
 ### Thin devices
 
-* **CreateThinDevice** — validate that `size` is a positive multiple of
-  `slice_cnt` times the stripe size (the stripe as the SP stored it,
-  `bdev_conf.dm_raid0_conf.stripe_size`; state-dependent, so checked
-  in-STM, behind a `model.ValidateBdevConf` of that conf — GW11 — so a zero
-  stripe is `ABORTED` instead of reaching the "has no slice" refusal, which
-  is about `slice_id_list`). STM: resolve; token; `td_name` in
+* **CreateThinDevice** — validate `size` against the stripe multiple that
+  `architecture.md`, Thin devices, requires, with the stripe as the SP
+  stored it (`bdev_conf.dm_raid0_conf.stripe_size`; state-dependent, so
+  checked in-STM, behind a `model.ValidateBdevConf` of that conf — GW11 — so
+  a zero stripe is `ABORTED` instead of reaching the "has no slice" refusal,
+  which is about `slice_id_list`). STM: resolve; token; `td_name` in
   `td_name_list` or its key present is `ALREADY_EXISTS`; if `ori_name` is
   set: read the origin (`NOT_FOUND` if absent), and its `created` false is
   `FAILED_PRECONDITION` **writing nothing** (no id consumed, no bump —

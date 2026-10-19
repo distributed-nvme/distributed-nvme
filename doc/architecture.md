@@ -1749,6 +1749,11 @@ it parks a namespace (Clone crash recovery).
   this is the only path that accepts such an NQN: every other RPC that
   names such a subsystem refuses it with `INVALID_ARGUMENT`.
 * `addr_port` is the gRPC endpoint of the node's agent, a host and a port.
+  The gateway checks only the first bullet's length and pattern and does
+  not parse it: `CreateDiskNode` and `CreateControllerNode` call the agent
+  there for its size before the node is stored, so an address at which that
+  call fails is refused with nothing written (Disk nodes, Controller nodes),
+  and the workers dial it as given.
 * A clone's `src_tr_conf` holds at most `MaxCntlrCntPerSp` entries, the most
   cntlrs a source pool has, since every cntlr syncup of the destination pool
   carries it.
@@ -2506,7 +2511,7 @@ of the copy (Known limits, "A snapshot accepted before a clone targets its
 origin can hold part of the copy"); `INVALID_ARGUMENT`
 `size` zero without `ori_name`, or `size` not a multiple of `slice_cnt`
 times the SP's `DmRaid0Conf.stripe_size` (dm-striped needs equal,
-chunk-aligned members; sizes should also be multiples of `block_size`).
+chunk-aligned members).
 Defaults: `ori_name` empty (a fresh device, not a snapshot); when
 `ori_name` is set and `size` is zero, `size` is the origin's size (a
 snapshot may also be created larger). Action: STM: `td_id` from `next_id`,

@@ -13,8 +13,9 @@
 //   - It runs ALONGSIDE the normal pass, not instead of it (CLD7). The sp drain
 //     owns a doomed SP, so its pass does nothing else; here the SP is healthy
 //     and every other child of it must keep converging while one clone goes
-//     away. A committed batch's wake-up (drainTick) runs the next steps
-//     alone, as the sp drain's does, and leaves the reactions to the pass.
+//     away. The wake-up a batch posts once its call succeeds (drainTick)
+//     runs the next steps alone, as the sp drain's does, and leaves the
+//     reactions to the pass.
 //   - The teardown comes from EXCLUSION rather than from a step (CLD5). From
 //     the first post-latch fan-out the deleting clone is absent from every
 //     cntlr's plan and from the primary's chunk-push plans, and the cn
@@ -124,8 +125,8 @@ func (w *spWorker) drainCloneStep(
 		)
 		// The final STM bumps SpRev like every other mutator (CLD9), the
 		// drain's one bump after the latch's. Nothing is armed: there is no
-		// next step for this clone, and a sibling still draining armed its
-		// own.
+		// next step for this clone, and a sibling still draining arms its
+		// own once its batch's call succeeds.
 		return
 	}
 	batch := chunks
@@ -180,8 +181,10 @@ func sortedChunks(chunks []model.BmChunk) []model.BmChunk {
 	return out
 }
 
-// cloneDrainFailed is the record of a step that did not commit (CLD10: retry
-// forever, log only — there is no terminal-failure state). A model.ErrPrecondition contributes the
+// cloneDrainFailed is the record of a step whose call failed (CLD10: one
+// whose transaction did not commit is retried forever, log only — there is no
+// terminal-failure state; one whose call failed after etcd applied it is
+// logged here all the same). A model.ErrPrecondition contributes the
 // precondition that did not hold — CLD2's refusals land here — and every
 // failure carries the error text: a drain step that does not run leaves keys
 // nothing else will ever remove.

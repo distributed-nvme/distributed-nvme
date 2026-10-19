@@ -771,11 +771,10 @@ type spPass struct {
 // must see the err_epochs this same worker wrote since (HL3), and model.LoadSp
 // is one Snapshot (EU4) even though it loads more than a pass reads.
 //
-// A committed drain step's wake-up runs the drain half of this pass alone, in
-// the same order and behind the same gates (drainTick): the load, the clone
-// drain, and for a latched SP the cluster-conf gate and the sp drain's step.
-// The load and the gate are the helpers both call (loadPassState,
-// passClusterConf).
+// A drain step's wake-up runs the drain half of this pass alone, in the same
+// order and behind the same gates (drainTick): the load, the clone drain, and
+// for a latched SP the cluster-conf gate and the sp drain's step. The load
+// and the gate are the helpers both call (loadPassState, passClusterConf).
 func (w *spWorker) reactionPass(ctx context.Context) {
 	seqs := w.healthSeqs()
 	state, ok := w.loadPassState(ctx)

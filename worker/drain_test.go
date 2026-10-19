@@ -23,7 +23,7 @@ func (h *reactHarness) latch() {
 }
 
 // drainTick runs one drain wake-up, which is what run() does with the token a
-// committed drain step posts (SPD6, CLD7).
+// drain step posts (SPD6, CLD7).
 func (h *reactHarness) drainTick() {
 	h.t.Helper()
 	h.w.drainTick(context.Background())
@@ -180,11 +180,11 @@ func TestDrainRunsAheadOfTheSpGates(t *testing.T) {
 }
 
 // TestDrainFailedStepIsLogged is SPD6 and its record (dnv-worker.md, Log
-// records): a failed step commits nothing, logs `sp drain failed` with the
-// phase and the cause, and is simply retried on the next tick. There is no
-// terminal-failure state and no status field on the SpConf (SPD6) — a delete
-// that gave up would just strand garbage. The RECORD does carry `error`,
-// asserted below.
+// records): a step refused before its commit changes nothing, logs
+// `sp drain failed` with the phase and the cause, and is simply retried on
+// the next tick. There is no terminal-failure state and no status field on
+// the SpConf (SPD6) — a delete that gave up would just strand garbage. The
+// RECORD does carry `error`, asserted below.
 //
 // The `reason` attribute is asserted separately from `error`, because an
 // SPD2 refusal is a model.ErrPrecondition whose Reason is the whole diagnosis
@@ -248,9 +248,9 @@ func TestDrainStepRecordsProgress(t *testing.T) {
 	}
 }
 
-// TestDrainArmsItsOwnTick is SPD6's self-tick: a committed step that moved the
-// SP posts the drain's wake-up AT ONCE, instead of waiting for the
-// cntlr_interval ticker.
+// TestDrainArmsItsOwnTick is SPD6's self-tick: a step whose call succeeded and
+// that moved the SP posts the drain's wake-up AT ONCE, instead of waiting for
+// the cntlr_interval ticker.
 //
 // Three properties, and all three matter:
 //
@@ -364,10 +364,10 @@ func TestDrainStepArmsOnlyOnProgress(t *testing.T) {
 //
 // Without it, deleting either the `case <-w.drainCh` arm or the channel's
 // allocation leaves every test green and the drain still finishing — one step
-// per cntlr_interval instead of one per commit, which the integration suite's
-// 65-second budget cannot see either. And a case that ran reactionPass
-// instead would re-evaluate every reaction and re-seed every health memo once
-// per committed step.
+// per cntlr_interval instead of one per step that posts a wake-up, which the
+// integration suite's 65-second budget cannot see either. And a case that ran
+// reactionPass instead would re-evaluate every reaction and re-seed every
+// health memo once per step that posts a wake-up.
 //
 // The fixture tells the two apart through AR3: its SP sits at
 // SP_LEVEL_NO_THINPOOL with a latched clone, and passes every gate of AR1
@@ -429,9 +429,9 @@ func TestDrainSelfTickIsWired(t *testing.T) {
 }
 
 // TestDrainTickRunsTheDrainAlone is the wake-up's half of SPD6 and CLD7: the
-// token a committed step posts runs the next drain step and nothing else — no
-// reaction, no candidate scan, no AR3 record, and no pass built (newPass),
-// whose AR10 snapshot would prune the verdict memo.
+// token a step posts runs the next drain step and nothing else — no reaction,
+// no candidate scan, no AR3 record, and no pass built (newPass), whose AR10
+// snapshot would prune the verdict memo.
 //
 // Every row but one carries a trigger the pass acts on, and runs the same
 // fixture through the pass afterwards as its control: an unhealthy primary

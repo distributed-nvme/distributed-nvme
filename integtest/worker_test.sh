@@ -4549,8 +4549,9 @@ case_drain() {
 	latched=$(ctl set-deleting --sp sp0)
 	assert_field "$latched" '.latched' "true" "set-deleting latched sp0"
 	# AR3 splits (SPD6): a latched SP runs a drain step instead of its
-	# reactions, and a committed step posts the drain's own wake-up, which
-	# runs only the next drain step, behind the cluster-conf gate.
+	# reactions, and a step whose call succeeds and that moved the SP posts
+	# the drain's own wake-up, which runs only the next drain step, behind
+	# the cluster-conf gate.
 	wait_until "$WAIT_SYNCUP" "sp0 to drain away" drain_finished
 	assert_eq "$(key_cnt sp_rev)" "0" "sp_rev keys after the drain"
 	assert_eq "$(key_cnt sp_id_to_name)" "0" "sp_id_to_name keys after the drain"

@@ -15,20 +15,25 @@
 //     progress key would only be a second copy of the truth that can disagree
 //     with the first.
 //   - A committed step that popped something ends in `BumpSpRev` — every step
-//     but the last — and posts the drain's own wake-up, so the drain is its
-//     own tick (SPD6): run() turns the wake-up into drainTick, which loads the
-//     SP and runs the next step alone, behind the pass's cluster-conf gate.
-//     The bump re-fires the coordinator's fan-out, which is what stops the
-//     children of the objects the step removed. A step that popped nothing
-//     bumps nothing, posts nothing, and is left to the RW12 tick.
+//     but the last — and, once its call succeeds, posts the drain's own
+//     wake-up, so the drain is its own tick (SPD6): run() turns the wake-up
+//     into drainTick, which loads the SP and runs the next step alone, behind
+//     the pass's cluster-conf gate. The bump re-fires the coordinator's
+//     fan-out, which is what stops the children of the objects the step
+//     removed. A step that popped nothing bumps nothing, posts nothing, and is
+//     left to the RW12 tick.
 //   - The last step, D3, DELETES the SpRev key, which is already the shard
 //     worker's stop signal (SW3) — so the drain terminates itself in the same
 //     transaction that finishes the job.
 //
-// A failed step commits nothing, bumps nothing and is retried on the next RW12
-// tick, forever (SPD6). There is no terminal-failure state: a delete that gave
-// up would just strand garbage, and progress is already user-visible through
-// `sp get` (a shrinking inventory), so no error field is added.
+// A failed step whose transaction did not commit changes nothing, bumps
+// nothing and is retried on the next RW12 tick, forever (SPD6). A step whose
+// call failed after etcd applied its transaction is logged as failed all the
+// same and posts no wake-up, and the next tick derives its step from the
+// stored SpConf, which already holds the commit; after the last step there is
+// no next tick (SPD12). There is no terminal-failure state: a delete that
+// gave up would just strand garbage, and progress is already user-visible
+// through `sp get` (a shrinking inventory), so no error field is added.
 package worker
 
 import (
@@ -139,8 +144,8 @@ func (w *spWorker) drainStep(
 	}
 }
 
-// drainStepped logs one committed step and, when the step actually moved the
-// SP, arms the next one.
+// drainStepped logs one step whose call succeeded and, when the step actually
+// moved the SP, arms the next one.
 //
 // progressed is false for the idempotent no-op an accepted two-owner overlap
 // produces — the other owner had already popped what this step went for. Arming
@@ -201,12 +206,14 @@ func (w *spWorker) drainFailed(
 // rather than at the next cntlr_interval tick (SPD6: "the drain is its own
 // tick").
 //
-// A committed step posts here and run() turns the token into drainTick, which
-// runs the next steps alone. The signal is the step's commit itself, not an
-// SpRev bump: a clone drain's batch bumps nothing (CLD8), and a bump reaches
-// the coordinator as a DESIRED CHANGE, which drives the fan-out and not the
-// drain (run()). The channel holds one token and the send never blocks, so a
-// burst of steps cannot queue wake-ups up.
+// A step posts here only once its call succeeded — one whose call failed posts
+// nothing, even when etcd applied its transaction (SPD6, CLD10) — and run()
+// turns the token into drainTick, which runs the next steps alone. The signal
+// comes from the step itself, not from an SpRev bump: a clone drain's batch
+// bumps nothing (CLD8), and a bump reaches the coordinator as a DESIRED
+// CHANGE, which drives the fan-out and not the drain (run()). The channel
+// holds one token and the send never blocks, so a burst of steps cannot queue
+// wake-ups up.
 //
 // A coordinator assembled by hand — the plan-only and reaction test fixtures —
 // has no loop to wake and no channel; its passes and wake-ups are driven
@@ -222,8 +229,8 @@ func (w *spWorker) armDrain() {
 }
 
 // drainTick is the drain's wake-up (SPD6, CLD7), what run() does with the
-// token a committed drain step posted (armDrain). It runs exactly the drain
-// half of a reaction pass, in the pass's order and behind the pass's gates:
+// token a drain step posted (armDrain). It runs exactly the drain half of a
+// reaction pass, in the pass's order and behind the pass's gates:
 // the load (loadPassState); the clone drain (drainClones), which the pass runs
 // ahead of every gate; and for a latched SP the cluster-conf gate
 // (passClusterConf), the clear of that gate's refusal memo, and one sp drain

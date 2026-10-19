@@ -418,11 +418,11 @@ type spWorker struct {
 	desiredCh chan desiredState
 	// reportCh carries the children's flip and leg-row reports.
 	reportCh chan spReport
-	// drainCh is the two drains' wake-up (drain.go, clonedrain.go): a
-	// committed drain step that left work behind posts one token here, so the
-	// next step runs at once and alone (drainTick) instead of at the next
-	// cntlr_interval. Capacity one, never blocking — a burst of steps cannot
-	// queue wake-ups up.
+	// drainCh is the two drains' wake-up (drain.go, clonedrain.go): a drain
+	// step whose call succeeded and that left work behind may post one token
+	// here (armDrain), so the next step runs at once and alone (drainTick)
+	// instead of at the next cntlr_interval. Capacity one, never blocking — a
+	// burst of steps cannot queue wake-ups up.
 	drainCh chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -529,8 +529,8 @@ func (w *spWorker) stop() {
 // children's reports — a demoted cntlr's ends RW22's demotion hold, and the
 // sides' release the cntlr half a fan-out holds back, as does each wait's
 // own timer — and ticks once per cntlr_interval for the idle-child
-// re-resolution and the reaction pass (AR1). A committed drain step's token
-// wakes it for the drain steps alone (drainTick; SPD6, CLD7).
+// re-resolution and the reaction pass (AR1). A drain step's token wakes it
+// for the drain steps alone (drainTick; SPD6, CLD7).
 func (w *spWorker) run() {
 	defer close(w.done)
 	if !awaitPredecessor(w.ctx, w.after) {

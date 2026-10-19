@@ -287,9 +287,10 @@ func TestCloneDrainOnePerPassPerClone(t *testing.T) {
 	}
 }
 
-// TestCloneDrainFailedStepIsLogged is CLD10's retry half: a failed step commits
-// nothing, logs `clone drain failed` with the step and the cause, and is
-// retried unchanged on the next pass. There is no terminal-failure state.
+// TestCloneDrainFailedStepIsLogged is CLD10's retry half: a step refused
+// before its commit changes nothing, logs `clone drain failed` with the step
+// and the cause, and is retried unchanged on the next pass. There is no
+// terminal-failure state.
 //
 // BOTH steps, because they fail through different call sites and the final one
 // is the step whose silence would be invisible: a swallowed error there logs
@@ -355,8 +356,8 @@ func TestCloneDrainFailedStepIsLogged(t *testing.T) {
 }
 
 // TestCloneDrainArmsAfterACommittedBatch is CLD12's termination argument at the
-// coordinator: a COMMITTED batch posts the drain's wake-up from its own
-// commit, and nothing else arms.
+// coordinator: a batch whose call SUCCEEDS posts the drain's wake-up itself,
+// and nothing else arms.
 //
 // Deliberately not "only on progress", the sp drain's rule (worker/drain.go's
 // `removed > 0`): this op reports the batch it was handed, not keys it found,
@@ -364,10 +365,12 @@ func TestCloneDrainFailedStepIsLogged(t *testing.T) {
 // full-looking batch that removed nothing and arms — and still terminates,
 // because its next step re-scans, finds the winner's deletes and moves on.
 //
-// A step that did NOT commit does not arm: it changed nothing, and a retry
-// comes with the next tick anyway. The final STM never arms either — there is
-// no next step for that clone. Every row runs through the pass and through
-// the wake-up, which is the path every step after a drain's first takes.
+// A step whose call failed does not arm, even when etcd applied its
+// transaction (CLD10); the failed row's batch is refused before its commit,
+// so it changed nothing, and a retry comes with the next pass anyway. The
+// final STM never arms either — there is no next step for that clone. Every
+// row runs through the pass and through the wake-up, which is the path every
+// step after a drain's first takes.
 func TestCloneDrainArmsAfterACommittedBatch(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

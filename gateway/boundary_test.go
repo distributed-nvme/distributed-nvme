@@ -23,16 +23,18 @@ import (
 // test plan): count ceilings of architecture.md, Cardinality limits, the
 // size edges of architecture.md, Size → extents and Group on-leg layout, and
 // of the transport service id, the meta ladder's cap (architecture.md,
-// GrowSlice), and the id counters at their top (architecture.md, Globals: id
-// allocation + shard buckets), each named by its case and reached through
-// the real handlers against the package's etcd. A count ceiling is filled by
-// real creates, the create that takes the last place is accepted, and the
-// one after it is refused and writes nothing; a size bound is accepted at its
-// edge and refused one past it, at both ends where it has two. The meta
-// ladder's cap is not pinned at its edge here: its case pins that the cap is
-// judged on the total before a grow, so that the last rung passes it, and
-// model's TestMetaLadderExtCnt pins the cap's exact edge. The rest of
-// architecture.md, Common validation, is validate_test.go's.
+// GrowSlice), the id counters at their top (architecture.md, Globals: id
+// allocation + shard buckets), the addr_port check (architecture.md, Common
+// validation) and the thin device size rule (architecture.md, Thin devices),
+// each named by its case and reached through the real handlers against the
+// package's etcd. A count ceiling is filled by real creates, the create that
+// takes the last place is accepted, and the one after it is refused and
+// writes nothing; a size bound is accepted at its edge and refused one past
+// it, at both ends where it has two. The meta ladder's cap is not pinned at
+// its edge here: its case pins that the cap is judged on the total before a
+// grow, so that the last rung passes it, and model's TestMetaLadderExtCnt
+// pins the cap's exact edge. The rest of architecture.md, Common validation,
+// is validate_test.go's.
 //
 // Every count ceiling here is also raced at its last place. Two token-less
 // creates ask for it — a token would make the later commit ABORTED "stale
@@ -1762,7 +1764,7 @@ func TestTrSvcIdAtTheDiscoveryLogWidth(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Rules the docs leave open, pinned as the code has them
+// The addr_port check and the thin device size rule
 // ---------------------------------------------------------------------------
 
 // TestAddrPortIsNotParsed pins the addr_port check of architecture.md, Common

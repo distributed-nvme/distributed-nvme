@@ -3024,24 +3024,24 @@ SP whose stored geometry cannot be read permanently undeletable, the latch
 being one-way.) The FIRST step comes from the ordinary `cntlr_interval`
 pass — the latch's `SpRev` bump reaches the coordinator as a desired
 change, which drives the fan-out, not the pass. After that a committed step
-ends in `BumpSpRev` (except the last) and, from its own commit, wakes the
-coordinator for the next step at once, so the drain is its own tick. That
-wake-up loads the SP afresh and runs the drain step alone, behind the same
-gates as the pass's drain branch: a failed load, or a cluster conf missing
-or unusable, runs nothing and leaves the drain to the next pass. It
-evaluates no reaction and re-seeds no health memo, because a drain step
-calls no agent (SPD13) and both stay the `cntlr_interval` pass's (AR1,
-HL3). A step that removed nothing does not wake it, and is picked up by the
-next pass instead. A FAILED step whose transaction did not commit changes
-nothing, bumps nothing and is retried on the next tick, forever (RW12, no
-backoff): there is no terminal-failure state, because a delete that gave up
-would only strand garbage. A step whose call fails after etcd applied its
-transaction logs `sp drain failed` all the same and is not retried as
-such: the next tick derives its step from the freshly loaded `SpConf`
-(SPD8), which already holds the commit, and after the last step there is no
-next tick (SPD12). Progress is already visible through `GetStoragePool` —
-`deleting` true and a shrinking inventory — so no status field and no
-progress key is added.
+ends in `BumpSpRev` (except the last), and once its call succeeds the step
+itself, not that bump, wakes the coordinator for the next step at once, so
+the drain is its own tick. That wake-up loads the SP afresh and runs the
+drain step alone, behind the same gates as the pass's drain branch: a
+failed load, or a cluster conf missing or unusable, runs nothing and leaves
+the drain to the next pass. It evaluates no reaction and re-seeds no health
+memo, because a drain step calls no agent (SPD13) and both stay the
+`cntlr_interval` pass's (AR1, HL3). A step that removed nothing does not
+wake it, and is picked up by the next pass instead. A FAILED step whose
+transaction did not commit changes nothing, bumps nothing and is retried on
+the next tick, forever (RW12, no backoff): there is no terminal-failure
+state, because a delete that gave up would only strand garbage. A step
+whose call fails after etcd applied its transaction logs `sp drain failed`
+all the same, posts no wake-up and is not retried as such: the next tick
+derives its step from the freshly loaded `SpConf` (SPD8), which already
+holds the commit, and after the last step there is no next tick (SPD12).
+Progress is already visible through `GetStoragePool` — `deleting` true and
+a shrinking inventory — so no status field and no progress key is added.
 
 SPD7. **Fan-out tolerance.** The drain's first step leaves an SP with NO
 cntlr, a shape `CreateStoragePool` can never produce. `buildCntlrPlans`
@@ -3238,13 +3238,13 @@ per deleting clone, bounded by `MaxCloneCntPerSp`, in `clone_name_list`
 order; the steps run ahead of EVERY gate of the pass — the cluster-conf
 cache lookup, `ValidateClusterConf`, the SP's own `bdev_conf` and
 group-length gates (AR1) and AR3's suppression — because none of them
-applies. A committed batch also wakes the coordinator at once (CLD12), and
-that wake-up runs these steps alone: it loads the SP afresh and runs at
-most one step per deleting clone, in the same order and with no gate in
-front of them, and it evaluates no reaction and re-seeds no health memo,
-because a batch calls no agent (CLD10) and a pass would evaluate every
-reaction again for each batch; the reactions and the health memos keep
-their `cntlr_interval` pass (AR1, HL3). A doomed clone drains at any
+applies. A batch whose call succeeds also wakes the coordinator at once
+(CLD12), and that wake-up runs these steps alone: it loads the SP afresh
+and runs at most one step per deleting clone, in the same order and with no
+gate in front of them, and it evaluates no reaction and re-seeds no health
+memo, because a batch calls no agent (CLD10) and a pass would evaluate
+every reaction again for each batch; the reactions and the health memos
+keep their `cntlr_interval` pass (AR1, HL3). A doomed clone drains at any
 `sp_level`; the drain reads no geometry and no cluster conf (unlike the sp
 drain's D2, which maintains DN capacity keys and therefore stays behind the
 ladder's gate — the final STM rewrites only CN capacity values, which carry
@@ -3268,12 +3268,12 @@ the keys belong to a clone the latch already took out of every cntlr's
 request (CLD5): a bump would re-send the SP's whole desired state to every
 side and cntlr for deletes no agent reads. No read, because CLD2's load of
 the `SpConf` already refuses an SP that is gone, the sp drain's final step
-deleting the `SpConf` and the `SpRev` in one transaction (SPD12). The
-batch's commit, not a bump, wakes the drain for its next step (CLD7,
-CLD12). Physical effect: none. The CN drops its local chunk files in the
-sweep that follows the exclusion (CLD5), agents never read etcd, and a push
-of the clone that reads a chunk key a batch deleted ends there, harmlessly
-(CLD5).
+deleting the `SpConf` and the `SpRev` in one transaction (SPD12). A batch
+whose call succeeds wakes the drain for its next step itself, not through a
+bump (CLD7, CLD12). Physical effect: none. The CN drops its local chunk
+files in the sweep that follows the exclusion (CLD5), agents never read
+etcd, and a push of the clone that reads a chunk key a batch deleted ends
+there, harmlessly (CLD5).
 
 CLD9. **The final STM.** Delete the `Clone` key, put the `SpConf` with the
 name removed from `clone_name_list`, give the clone's metadata units back on
@@ -3298,29 +3298,37 @@ CLD10. **Asynchrony and retry.** SPD13 verbatim: no drain STM waits on,
 calls or verifies any agent; etcd emptiness MAY outrun physical teardown,
 and a CN that is down keeps its stale stack until its next syncup, which
 removes it because the clone is no longer in the request and not because
-anything recorded that it should be. A failed step commits nothing, bumps
-nothing and retries on the next RW12 tick, forever; progress has exactly
-two user-visible states — `deleting` true, then `NOT_FOUND` — accepted
-deliberately, since even a maximum-shape drain is a handful of sub-second
-transactions after the latch: its batches and the final STM (CLD12).
+anything recorded that it should be. A failed step whose transaction did
+not commit changes nothing, bumps nothing and is run again by the next pass
+or wake-up that runs the drain (CLD7), forever and with no backoff (RW12),
+as for the sp drain (SPD6). A step whose call fails after etcd applied its
+transaction logs `clone drain failed` all the same, posts no wake-up and is
+not retried as such: the next step is derived afresh (CLD7) from chunk keys
+that no longer hold the batch's, and a final STM that committed took the
+clone's name out of `clone_name_list`, so no step runs for that clone again
+and no `clone drained` follows. Progress has exactly two user-visible
+states — `deleting` true, then `NOT_FOUND` — accepted deliberately, since
+even a maximum-shape drain is a handful of sub-second transactions after
+the latch: its batches and the final STM (CLD12).
 
 CLD12. **Termination and the revision contract.** The latch and the final
 STM each end in `BumpSpRev` with their own op tag; a batch bumps nothing
-(CLD8), and neither does a repeat delete or a failed step. Termination is
-structural: no committed batch can ever ADD a chunk key (CLD1 closed the
-only writer), the set is finite, the final STM removes the clone, and a
-pass or a wake-up that finds no deleting clone runs no drain step, so the
+(CLD8), and neither does a repeat delete or a step whose transaction did
+not commit. Termination is structural: no committed batch can ever ADD a
+chunk key (CLD1 closed the only writer), the set is finite, the final STM
+removes the clone, and a pass or a wake-up that finds no deleting clone
+runs no drain step, so the
 drain commits and bumps nothing (that pass's own reactions are unaffected,
 CLD7) — under one owner, one bump for the latch and one for the final STM
 per deleted clone, whatever its batch count. Note the shrink is a property
 of the SET, not of each batch: the loser of an accepted two-owner overlap
 commits a batch of keys the winner already popped, so ITS batch shrinks
 nothing — and still terminates, because its next step re-scans, sees the
-winner's deletes and moves on. That is also why every committed batch wakes
-the drain (CLD7) whatever it removed, where the sp drain wakes only on
-progress (SPD6): that guard would be dead code here, a batch reporting the
-size it was handed, never a count of keys it found. The two bumps
-invalidate a client's stale `gateway.md` GW6 token exactly as
+winner's deletes and moves on. That is also why every batch whose call
+succeeds wakes the drain (CLD7) whatever it removed, where the sp drain
+wakes only on progress (SPD6): that guard would be dead code here, a batch
+reporting the size it was handed, never a count of keys it found. The two
+bumps invalidate a client's stale `gateway.md` GW6 token exactly as
 `ReplaceCntlr` does: correct, and not new; a batch leaves a token as valid
 as it found it.
 
@@ -3440,20 +3448,26 @@ non-normative — it names no decision — and exists because a push with no
 reply has no code to report and must not be logged as a `bitmap pushed` with
 an invented zero.
 
-**Reactions and drains.** `reaction applied` a committed reaction and
-`reaction skipped` a reaction the pass does not take, with its reason (AR2),
-and with the op's name as `op` when a `model` op refused it
+**Reactions and drains.** `reaction applied` a reaction whose op call
+succeeded and `reaction skipped` a reaction the pass does not take, with its
+reason (AR2), and with the op's name as `op` when a `model` op refused it
 (`ErrPrecondition`, MD7): one reason can come from the pass's own check or
-from the op, and only the op's refusal always ends the pass (AR2);
-`sp drain step` every committed D1 and D2 step and `sp drained` the D3 that
-ends the drain (SPD12), so no step record carries a final phase;
+from the op, and only the op's refusal always ends the pass (AR2); an op
+call that failed otherwise is also logged `reaction skipped`, with its
+error, and its transaction may still have committed, which the next pass
+reads from the stored state;
+`sp drain step` every D1 and D2 step whose call succeeded and `sp drained`
+a D3 whose call succeeded, the step that ends the drain (SPD12), so no step
+record carries a final phase;
 `sp drain failed` a drain step whose call failed, retried on the next tick
 with no terminal-failure state when its transaction did not commit (SPD6);
-`clone drain step` every committed batch and `clone drained` the final STM
-(CLD8, CLD9), so no step record carries a final step; `clone drain failed` a
-clone-drain step that did not commit (CLD10). The two step records are
-non-normative — they name no decision — but the worker suite counts them:
-they are the only records that show a multi-batch drain advancing.
+`clone drain step` every batch whose call succeeded and `clone drained` a
+final STM whose call succeeded (CLD8, CLD9, CLD10), so no step record
+carries a final step; `clone drain failed` a clone-drain step whose call
+failed, run again with no terminal-failure state when its transaction did
+not commit (CLD10). The two step records are non-normative — they name no
+decision — but the worker suite counts them: they are the only records that
+show a multi-batch drain advancing.
 
 ## Integration test plan
 
