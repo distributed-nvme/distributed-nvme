@@ -432,10 +432,14 @@ func assertMostNodeRevisions(
 // The widest pool's shape (architecture.md, Cardinality limits): every
 // per-pool maximum at once, with one meta group and one data group per
 // slice as CreateStoragePool builds a pool. Every group's legs sit on
-// wideGrpDnCnt disk nodes, one leg of each group on each, because PutSp
-// writes the pool in one transaction and each disk node costs it six
-// operations; each migration's new side goes to a disk node of its own past
-// them.
+// wideGrpDnCnt disk nodes, one leg of each group on each, and each
+// migration's new side goes to a disk node of its own past them. The
+// placement is the case's free choice, because the worker does not care how
+// many disk nodes carry a pool. etcd's cap on operations per transaction is
+// no reason for it: PutSp writes the pool in one transaction, but the
+// gateway's own spread, a disk node of its own for each leg a new pool is
+// created with, would fit that one transaction too, with the spares on
+// those same disk nodes.
 const (
 	wideLegCnt   = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
 	wideGrpDnCnt = wideLegCnt
