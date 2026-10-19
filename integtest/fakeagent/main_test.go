@@ -374,7 +374,7 @@ func TestBehaviorFileNewLevers(t *testing.T) {
 		writeFile(t, dir, behaviorFileName,
 			`{"objects": {"dn": {"syncup_revision": 9}}}`)
 		if got := syncupDn(t, client, 2).GetRevision(); got != 9 {
-			t.Fatalf("an accepted SyncupDn echoes revision %d, want 9", got)
+			t.Fatalf("an accepted SyncupDn carries revision %d, want 9", got)
 		}
 		if got := dnRound(t, client).GetRevision(); got != 2 {
 			t.Fatalf("a round reports revision %d, want the stored 2", got)

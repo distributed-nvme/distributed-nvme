@@ -245,7 +245,7 @@ func (a *Agent) gateSyncupLocked(
 
 // syncupRevisionLocked is the revision of a Syncup* reply: the stored one, or
 // for an accepted reply (code zero or ReplyCodeLeftover) the one the
-// syncup_revision lever echoes in its place.
+// syncup_revision lever sets in its place.
 func (a *Agent) syncupRevisionLocked(key string, code uint32) uint64 {
 	if code == 0 || code == common.ReplyCodeLeftover {
 		if ob := a.objLocked(key); ob != nil && ob.SyncupRevision != nil {

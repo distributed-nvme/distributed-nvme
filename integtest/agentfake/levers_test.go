@@ -355,10 +355,10 @@ func TestRowReasonLever(t *testing.T) {
 // ptrTo is a pointer to a copy of v.
 func ptrTo[T any](v T) *T { return &v }
 
-// TestSyncupRevisionLever is the echoed revision (SyncupRevision): an
-// accepted Syncup* reply, code zero or a leftover, carries the lever's
-// revision while the fake stores the request's, which its rounds and info
-// reads report; a refused reply carries the stored one.
+// TestSyncupRevisionLever is the reply revision lever (SyncupRevision): an
+// accepted Syncup* reply, code zero or a leftover_rounds leftover, carries
+// the lever's revision while the fake stores the request's, which its
+// rounds and info reads report; a refused reply carries the stored one.
 func TestSyncupRevisionLever(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, _ := startAgent(t, agent)
@@ -373,11 +373,11 @@ func TestSyncupRevisionLever(t *testing.T) {
 	if code := reply.GetAgentReply().GetCode(); code != 0 ||
 		reply.GetRevision() != 7 {
 		t.Fatalf("an accepted SyncupDn: code %d revision %d, want 0 and the "+
-			"echoed 7", code, reply.GetRevision())
+			"lever's 7", code, reply.GetRevision())
 	}
 	if got := dnRound(t, dnClient, 3, "r").GetRevision(); got != 3 {
-		t.Fatalf("a round after the echo reports revision %d, want the "+
-			"stored 3", got)
+		t.Fatalf("a round after the lever's reply reports revision %d, want "+
+			"the stored 3", got)
 	}
 	if got := dnInfoRead(t, dnClient, "i").GetRevision(); got != 3 {
 		t.Fatalf("an info read reports revision %d, want the stored 3", got)
@@ -385,7 +385,7 @@ func TestSyncupRevisionLever(t *testing.T) {
 	if side := syncupSide(t, dnClient, ptr, 4, 0); side.GetAgentReply().
 		GetCode() != 0 || side.GetRevision() != 0 {
 		t.Fatalf("an accepted SyncupSide = code %d revision %d, want 0 and "+
-			"the echoed 0", side.GetAgentReply().GetCode(), side.GetRevision())
+			"the lever's 0", side.GetAgentReply().GetCode(), side.GetRevision())
 	}
 
 	stale := syncupDn(t, dnClient, 2, ptr)
@@ -400,7 +400,7 @@ func TestSyncupRevisionLever(t *testing.T) {
 	if code := left.GetAgentReply().GetCode(); code !=
 		common.ReplyCodeLeftover || left.GetRevision() != 7 {
 		t.Fatalf("a leftover SyncupDn: code %d revision %d, want the "+
-			"leftover and the echoed 7", code, left.GetRevision())
+			"leftover and the lever's 7", code, left.GetRevision())
 	}
 }
 

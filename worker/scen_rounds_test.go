@@ -1118,25 +1118,28 @@ func TestWholeWorkerSyncupLeftoverResentEveryRound(t *testing.T) {
 	}
 }
 
-// TestWholeWorkerSyncupAcceptedReplyEchoesAnotherRevision pins how an
+// TestWholeWorkerSyncupAcceptedReplyAtAnotherRevision pins how an
 // accepted syncup reply that carries another revision than its request's is
-// read. The loop does not compare it with the request: dn 3's fake answers
-// the syncup of a revision change with an unrelated revision, the syncup is
-// accepted and logged as such, and no syncup follows, since the next rounds
-// answer the revision the agent stored, the request's (RW4 step 5, RW5). A
-// cntlr has a rule of its own (HL2): a clean reply of a cntlr its child
-// drives as a standby, at a revision below the one the child drives, neither
-// sets nor clears its health epoch. Cntlr 2's fake holds its rounds, so its
-// epoch is set, and answers the syncup of a pool revision change with the
-// revision before it: the epoch stays as the missed rounds set it, and the
-// first round answered after the fake lets its rounds go clears it.
-func TestWholeWorkerSyncupAcceptedReplyEchoesAnotherRevision(t *testing.T) {
+// read. A dn loop compares only a round's revision with the desired one:
+// dn 3's fake answers the syncup of a revision change with an unrelated
+// revision, the syncup is accepted and logged as such, and no syncup
+// follows, since the next rounds answer the revision the agent stored, the
+// request's (RW4 step 5, RW5). A cntlr's loop reads the reply against the
+// plan its child drives, the reading the lever plays (dnv-worker.md,
+// Integration test plan, The fake agent), and has a rule of its own for it
+// (HL2): a clean reply of a cntlr its child drives as a standby, at a
+// revision below the one the child drives, neither sets nor clears its
+// health epoch. Cntlr 2's fake holds its rounds, so its epoch is set, and
+// answers the syncup of a pool revision change with the revision before it:
+// the epoch stays as the missed rounds set it, and the first round answered
+// after the fake lets its rounds go clears it.
+func TestWholeWorkerSyncupAcceptedReplyAtAnotherRevision(t *testing.T) {
 	t.Parallel()
 	h, c, w := roundsCase(t, roundsLongCntlrThreshold)
 
 	dn := roundDn(c, 3)
-	echo := uint64(1000)
-	dn.set(t, func(ob *agentfake.Object) { ob.SyncupRevision = &echo })
+	other := uint64(1000)
+	dn.set(t, func(ob *agentfake.Object) { ob.SyncupRevision = &other })
 	since := time.Now()
 	syncups := len(dn.record().Syncups)
 	rev := c.bumpDn(t, 3)
@@ -1150,7 +1153,7 @@ func TestWholeWorkerSyncupAcceptedReplyEchoesAnotherRevision(t *testing.T) {
 		t.Errorf("dn 3 got %d syncups for one revision change, want 1", got-syncups)
 	}
 	if recs := h.roundRecords(w, msgSyncupRejected, dn, since); len(recs) != 0 {
-		t.Errorf("dn 3's syncup echoing revision %d was refused: code %d", echo,
+		t.Errorf("dn 3's syncup answered at revision %d was refused: code %d", other,
 			recs[0].num("code"))
 	}
 

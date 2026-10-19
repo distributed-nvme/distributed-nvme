@@ -3726,10 +3726,22 @@ object and no observation of it yet, with code zero, revision zero, no
 `*Info` and no observation time (`dnagent.md` SH28). A `Syncup*` still
 answers from its converge's new observation under either.
 `syncup_revision` makes an accepted `Syncup*` reply carry another revision
-than the request's: an agent answers an accepted request with that
-request's revision, so the lever hands the worker, at a moment a case
-chooses, the reply it reads once its desired state has moved past the
-request it sent. `leftover_rounds` is a leftover that clears: the fake
+than the request's, and the fake stores the request as it would without
+the lever. An agent answers an accepted request with that request's
+revision (`architecture.md`, Live-state reporting). What the lever plays is
+a reply read against a plan newer than the request, one the pool
+coordinator handed the child while the call was in flight (RW14): a
+cntlr's loop reads the reply against that plan itself (HL2), and the
+sides-first hold and the demotion hold read the revision a side's or a
+demoted cntlr's loop reports applied (RW14, RW22). A disk node's or a
+controller node's loop compares only a round's revision with the desired
+one (RW4 step 5), so there the lever changes
+nothing but the revision a dn loop keeps with the `DnInfo` a `SyncupDn`
+reply carried (RW2), which holds the count compare off (RW13) until a
+round's reply carries a `DnInfo` again. A value above the request's
+revision plays nothing an agent produces: on a side or a cntlr it can
+release the sides-first hold (RW14) or the demotion hold (RW22) early.
+`leftover_rounds` is a leftover that clears: the fake
 applies and saves the request, unlike under a forced code, answers
 `ReplyCodeLeftover` (RW5) on the syncups and info reads meanwhile and on as
 many rounds as it counts, and then answers code zero. `disk_counts` gives

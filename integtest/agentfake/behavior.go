@@ -119,11 +119,22 @@ type Object struct {
 	ObsNone bool
 
 	// SyncupRevision is the revision an accepted Syncup* reply carries in
-	// place of the stored one, the request's. A real agent answers an
-	// accepted syncup with the request's revision, so this plays, at a
-	// moment the test chooses, the reply the worker reads after its desired
-	// state has moved past the request it sent; the stored revision is the
-	// request's all the same.
+	// place of the stored one; the fake stores the request as it would
+	// without the lever. A real agent answers an accepted syncup with the
+	// request's revision (architecture.md, Live-state reporting). What this
+	// plays is a reply read against a plan newer than the request, one the
+	// pool coordinator handed the child while the call was in flight
+	// (dnv-worker.md, RW14): a cntlr's loop reads the reply against that
+	// plan itself (dnv-worker.md, HL2), and the sides-first hold and the
+	// demotion hold read the revision a side's or a demoted cntlr's loop
+	// reports applied (dnv-worker.md, RW14, RW22). A dn or cn loop compares
+	// only a round's revision with the desired one, so there it changes
+	// nothing but the revision a dn loop keeps with a SyncupDn reply's
+	// DnInfo, which holds the count compare off until a round's reply
+	// carries a DnInfo again (dnv-worker.md, RW13). A value above the
+	// request's plays nothing an agent produces: on a side or a cntlr it can
+	// release the sides-first hold or the demotion hold early
+	// (dnv-worker.md, RW14, RW22).
 	SyncupRevision *uint64
 
 	// LeftoverRounds is a leftover that clears: while it lasts, a Syncup*
