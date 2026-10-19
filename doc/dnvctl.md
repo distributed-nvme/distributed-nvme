@@ -321,11 +321,21 @@ id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--spare`,
 `--target` — is declared as a string and parsed by dnvctl with Go's base-0
 rule, so a `0x` prefix is accepted. `--slots` and `--ids` are
 comma-separated numeric lists; `--hosts` and the selector flags are
-comma-separated string lists. A list flag replaces its value on each
-occurrence rather than accumulating, which is why the lists are plain string
-flags: pflag's own slice flags append. A boolean that must be turned off is
-written `--enabled=false`, never `--enabled false`, whose `false` would be a
-positional argument, which no leaf accepts.
+comma-separated string lists. An empty list flag is the empty list. Any
+other value is split at each comma: a string list sends every item as
+typed, spaces and empty items included, and a numeric list trims each item
+and parses it, so an empty item is a usage error. No item is dropped,
+because a comma list whose items are all unset shell variables, such as
+`$A,$B`, would otherwise shrink to nothing and revoke every host of a
+subsystem (`architecture.md`, Primary cntlr) or drop a white list
+(`architecture.md`, Finding DN candidates), while the gateway refuses an
+empty host NQN or node address (`architecture.md`, Common validation). A
+list flag
+replaces its value on each occurrence rather than accumulating, which is
+why the lists are plain string flags: pflag's own slice flags append. A
+boolean that must be turned off is written `--enabled=false`, never
+`--enabled false`, whose `false` would be a positional argument, which no
+leaf accepts.
 
 **Defaults.** dnvctl keeps a leaf-flag default of its own only where a spec
 names one: `sp create`'s redundancy (`sp` — `ctl/sp.go`), the transport flags

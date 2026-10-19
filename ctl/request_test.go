@@ -21,6 +21,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1043,9 +1044,12 @@ func TestDmCloneConfNilRule(t *testing.T) {
 	wantRequest(t, other.DmCloneConf, &pb.DmCloneConf{HydrationBatchSize: 4})
 }
 
-// TestListFlagsReplaceOnSet pins the list rule of dnvctl.md, Conventions: a
-// repeated occurrence REPLACES, empty items are dropped, and an empty value
-// clears the list rather than leaving the previous one in place.
+// TestListFlagsReplaceOnSet pins the list rules of dnvctl.md, Conventions,
+// Value types: a repeated occurrence REPLACES; an empty value is the empty
+// list, so it clears the list rather than leaving the previous one in place;
+// a string list sends its items as typed, spaces and empty items included;
+// and a numeric list trims each item and parses it, so an empty item is a
+// usage error with no RPC issued.
 func TestListFlagsReplaceOnSet(t *testing.T) {
 	replaced := runArgv(t, "UpdateSubsystemHosts", "ss", "set-hosts",
 		"--nqn", itNqn, "--hosts", "a,b", "--hosts", "c,d").(*pb.UpdateSubsystemHostsRequest)
@@ -1056,35 +1060,77 @@ func TestListFlagsReplaceOnSet(t *testing.T) {
 		AllowedHosts: []string{"c", "d"},
 	})
 
-	trimmed := runArgv(t, "UpdateSubsystemHosts", "ss", "set-hosts",
+	typed := runArgv(t, "UpdateSubsystemHosts", "ss", "set-hosts",
 		"--nqn", itNqn, "--hosts", " a , , b ").(*pb.UpdateSubsystemHostsRequest)
-	if len(trimmed.AllowedHosts) != 2 ||
-		trimmed.AllowedHosts[0] != "a" || trimmed.AllowedHosts[1] != "b" {
-		t.Errorf("--hosts %q gave %v, want [a b]",
-			" a , , b ", trimmed.AllowedHosts)
+	if want := []string{" a ", " ", " b "}; !slices.Equal(
+		typed.AllowedHosts, want) {
+		t.Errorf("--hosts %q gave %q, want %q",
+			" a , , b ", typed.AllowedHosts, want)
+	}
+
+	// A truly empty item is kept as well: "$A,$B" with both variables unset
+	// is two empty hosts for the gateway to refuse, never the empty list
+	// that revokes every host.
+	for _, tc := range []struct {
+		value string
+		want  []string
+	}{
+		{",", []string{"", ""}},
+		{"a,,b", []string{"a", "", "b"}},
+	} {
+		got := runArgv(t, "UpdateSubsystemHosts", "ss", "set-hosts",
+			"--nqn", itNqn, "--hosts", tc.value).(*pb.UpdateSubsystemHostsRequest)
+		if !slices.Equal(got.AllowedHosts, tc.want) {
+			t.Errorf("--hosts %q gave %q, want %q",
+				tc.value, got.AllowedHosts, tc.want)
+		}
 	}
 
 	cleared := runArgv(t, "UpdateSubsystemHosts", "ss", "set-hosts",
-		"--nqn", itNqn, "--hosts=").(*pb.UpdateSubsystemHostsRequest)
+		"--nqn", itNqn, "--hosts", "a", "--hosts=").(*pb.UpdateSubsystemHostsRequest)
 	if len(cleared.AllowedHosts) != 0 {
-		t.Errorf("--hosts= gave %v, want an empty list", cleared.AllowedHosts)
+		t.Errorf("--hosts a --hosts= gave %q, want an empty list",
+			cleared.AllowedHosts)
 	}
 
-	// The numeric lists follow the same rule.
+	// The numeric lists replace and clear the same way, and trim each item.
 	slots := runArgv(t, "UpdateStoragePoolCntlidSlotList",
-		"sp", "set-cntlid-slots", "--slots", "0,1", "--slots", "5,0x6").(*pb.UpdateStoragePoolCntlidSlotListRequest)
+		"sp", "set-cntlid-slots", "--slots", "0,1", "--slots", " 5 , 0x6 ").(*pb.UpdateStoragePoolCntlidSlotListRequest)
 	wantRequest(t, slots, &pb.UpdateStoragePoolCntlidSlotListRequest{
 		ClusterName:    itCluster,
 		SpName:         itSp,
 		CntlidSlotList: []uint32{5, 6},
 	})
+	noSlots := runArgv(t, "UpdateStoragePoolCntlidSlotList",
+		"sp", "set-cntlid-slots", "--slots", "0,1", "--slots=").(*pb.UpdateStoragePoolCntlidSlotListRequest)
+	wantRequest(t, noSlots, &pb.UpdateStoragePoolCntlidSlotListRequest{
+		ClusterName: itCluster,
+		SpName:      itSp,
+	})
 
 	ids := runArgv(t, "FindStoragePoolNames",
-		"sp", "find-names", "--ids", "1,0x63").(*pb.FindStoragePoolNamesRequest)
+		"sp", "find-names", "--ids", "1, 0x63").(*pb.FindStoragePoolNamesRequest)
 	wantRequest(t, ids, &pb.FindStoragePoolNamesRequest{
 		ClusterName: itCluster,
 		SpIdList:    []uint64{1, 0x63},
 	})
+	noIds := runArgv(t, "FindStoragePoolNames",
+		"sp", "find-names", "--ids", "1", "--ids=").(*pb.FindStoragePoolNamesRequest)
+	wantRequest(t, noIds, &pb.FindStoragePoolNamesRequest{
+		ClusterName: itCluster,
+	})
+
+	// An empty numeric item does not parse: dnvctl's own usage error, never
+	// a shorter list.
+	for _, tc := range []struct{ path, flag, value string }{
+		{"sp set-cntlid-slots", "slots", "0,,1"},
+		{"sp find-names", "ids", "1,,2"},
+	} {
+		client := &recordingClient{}
+		res := runLeaf(t, client, tc.path, "--"+tc.flag, tc.value)
+		wantUnparsed(t, res, client, tc.flag, tc.value,
+			"dnvctl: invalid --"+tc.flag+":")
+	}
 }
 
 // TestSpCreateAlwaysSendsRedundConf pins the default of

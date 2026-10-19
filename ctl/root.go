@@ -562,27 +562,31 @@ func hexOf(name string) (uint64, error) {
 }
 
 // strListOf is a comma-split string list. It REPLACES on each occurrence
-// rather than accumulating, and empty items are dropped, so `--hosts a,,b` is
-// two hosts. An empty flag is an empty list, which several RPCs treat as a
-// meaningful "clear it".
+// rather than accumulating, and it sends every item as typed, spaces and
+// empty items included (dnvctl.md, Conventions, Value types), so
+// `--hosts a,,b` is three hosts, the middle one empty, for the gateway to
+// refuse. An empty flag is an empty list, which several RPCs treat as a
+// meaningful "clear it"; the guard is explicit, because splitting an empty
+// string yields one empty item.
 func strListOf(name string) []string {
-	var out []string
-	for _, item := range strings.Split(strOf(name), ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
+	raw := strOf(name)
+	if raw == "" {
+		return nil
 	}
-	return out
+	return strings.Split(raw, ",")
 }
 
-// idListOf is a comma-split base-0 numeric list (--ids).
+// idListOf is a comma-split base-0 numeric list (--ids). An empty flag is an
+// empty list; otherwise each item is trimmed and parsed, so an empty item is
+// a usage error (dnvctl.md, Conventions, Value types).
 func idListOf(name string) ([]uint64, error) {
+	raw := strOf(name)
+	if raw == "" {
+		return nil, nil
+	}
 	var out []uint64
-	for _, item := range strings.Split(strOf(name), ",") {
-		if item = strings.TrimSpace(item); item == "" {
-			continue
-		}
-		value, err := strconv.ParseUint(item, 0, 64)
+	for _, item := range strings.Split(raw, ",") {
+		value, err := strconv.ParseUint(strings.TrimSpace(item), 0, 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid --%s: %w", name, err)
 		}
@@ -591,14 +595,16 @@ func idListOf(name string) ([]uint64, error) {
 	return out, nil
 }
 
-// u32ListOf is a comma-split base-0 numeric list of 32-bit values (--slots).
+// u32ListOf is a comma-split base-0 numeric list of 32-bit values (--slots),
+// read as idListOf reads its list.
 func u32ListOf(name string) ([]uint32, error) {
+	raw := strOf(name)
+	if raw == "" {
+		return nil, nil
+	}
 	var out []uint32
-	for _, item := range strings.Split(strOf(name), ",") {
-		if item = strings.TrimSpace(item); item == "" {
-			continue
-		}
-		value, err := strconv.ParseUint(item, 0, 32)
+	for _, item := range strings.Split(raw, ",") {
+		value, err := strconv.ParseUint(strings.TrimSpace(item), 0, 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid --%s: %w", name, err)
 		}
