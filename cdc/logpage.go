@@ -37,6 +37,20 @@ const (
 	entryOffTcpSecTp = entryOffTsas + 0
 )
 
+// Each string field of an entry holds the longest value the gateway takes for
+// what fills it (DS3; architecture.md, Common validation): TRSVCID a
+// tr_svc_id of common.MaxTrSvcIdLength, SUBNQN an NQN of common.MaxNqnLength
+// and TRADDR a tr_addr of common.MaxStrSize. A constant below zero does not
+// convert to uint, so a gateway bound raised past its field fails the build
+// here rather than reaching a host cut short. The widths above stay literal:
+// they are the specs', and a width taken from a gateway bound would move
+// with it.
+const (
+	_ = uint(entryLenTrSvcId - common.MaxTrSvcIdLength)
+	_ = uint(entryLenSubNqn - common.MaxNqnLength)
+	_ = uint(entryLenTrAddr - common.MaxStrSize)
+)
+
 // The field VALUES of DS3. TRTYPE/ADRFAM are the specs' transport and address
 // family codes; SUBTYPE says these entries name NVM subsystems, never further
 // discovery services (dnv-cdc serves no referrals,
@@ -115,9 +129,9 @@ func portId(trAddr string, trSvcId string) uint16 {
 
 // putField copies a string into a fixed-size, NUL-padded character field, the
 // way every NVMe string field on the wire is shaped. A value longer than the
-// field is truncated rather than rejected: dnv itself never writes one (an NQN
-// is capped at common.MaxNqnLength, below the 256 byte field), and a truncated
-// record still serves the rest of the entry.
+// field is truncated rather than rejected: dnv itself never writes one (each
+// gateway bound fits its field, as the build-time check beside the layout
+// table proves), and a truncated record still serves the rest of the entry.
 func putField(dst []byte, value string) {
 	n := copy(dst, value)
 	for i := n; i < len(dst); i++ {

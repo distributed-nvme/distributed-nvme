@@ -16,7 +16,8 @@ const (
 	// MaxTrSvcIdLength is the longest NvmeTrConf.tr_svc_id the gateway
 	// takes: the width of the TRSVCID field of a discovery log entry, which
 	// dnv-cdc fills with it verbatim (cdc.md DS3; architecture.md, Common
-	// validation).
+	// validation). The cdc's log page code keeps the width of its own and
+	// does not build when this bound is raised past it.
 	MaxTrSvcIdLength = 32
 
 	ShardBucketSize = 256
