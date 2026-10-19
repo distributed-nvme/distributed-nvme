@@ -328,12 +328,14 @@ type recvResult struct {
 }
 
 // startRevWorker builds a revision worker, hands it to newDriver so the
-// kind-specific half can call back into it, and starts its goroutine.
+// kind-specific half can call back into it, and starts its goroutine. The
+// loop's own trace id (RW10) is on the records it writes outside a round or a
+// syncup, which mint their own: its start, stop and idle records among them.
 func startRevWorker(
 	p revWorkerParams,
 	newDriver func(w *revWorker) objDriver,
 ) *revWorker {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), p.seed))
 	w := &revWorker{
 		deps:      p.deps,
 		role:      p.role,

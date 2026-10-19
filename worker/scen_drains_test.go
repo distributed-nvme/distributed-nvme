@@ -162,11 +162,13 @@ func TestScenPoolDrainFinalStepLogsItsEndOnce(t *testing.T) {
 	c.latchStd(t)
 	c.waitDrained(t, 20*time.Second)
 	// The coordinator's stop, which the last step's own delete brings
-	// (SW3), has run: its record names the pool's cluster and no worker.
-	h.waitRecord(t, 10*time.Second, nil, msgRevisionWorkerStopped,
+	// (SW3), has run: its record, the one of the pool's that names no side
+	// and no cntlr, is w1's by the coordinator's own trace id (RW10).
+	h.waitRecord(t, 10*time.Second, w, msgRevisionWorkerStopped,
 		func(rec logRecord) bool {
 			return rec.str("role") == common.WorkerRoleSp &&
-				rec.num("cluster_id") == c.cl.Id && rec.num("id") == stdSpId
+				rec.num("cluster_id") == c.cl.Id && rec.num("id") == stdSpId &&
+				rec.str("side_pointer") == "" && rec.str("cntlr_pointer") == ""
 		})
 	done := c.drainEnds(t)
 	if done.num("sp_id") != stdSpId || done.worker != w {

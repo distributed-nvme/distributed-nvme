@@ -410,7 +410,9 @@ func (v *voteWorker) run(ctx context.Context) {
 // watch events (VW2/VW3).
 func (v *voteWorker) startIncarnation(seed string) {
 	v.nextGen++
-	ctx, cancel := context.WithCancel(context.Background())
+	// The incarnation's own trace id (RW10), which its heartbeat, registry
+	// scan, watch, membership and fence records carry for the seed's life.
+	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), seed))
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	now := v.deps.clk.now()
 	inc := &incarnation{
@@ -1326,9 +1328,11 @@ type shardManager struct {
 	running map[uint32]*shardWorker
 }
 
-// startShardManager starts one role's shard manager.
+// startShardManager starts one role's shard manager. Its own trace id (RW10)
+// is on its shard owned and shard released records and on its shard
+// workers' scans and watches, which run under a child of its ctx.
 func startShardManager(d *deps, kind revKind, seed string) *shardManager {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), seed))
 	m := &shardManager{
 		deps:    d,
 		kind:    kind,

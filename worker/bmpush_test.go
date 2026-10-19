@@ -608,12 +608,15 @@ func TestBmPushRecordsCarryATraceId(t *testing.T) {
 		t.Fatalf("%d distinct trace ids for two pushes", len(seen))
 	}
 
-	// A push that cannot even take its connection is still a push (RW10).
+	// A push that cannot even take its connection is still a push (RW10):
+	// its record carries an id of its own, not the pusher's lifetime id,
+	// which has the same prefix.
 	d := bmTestDeps(t)
 	d.conns.dial = func(addrPort string) (*grpc.ClientConn, error) {
 		return nil, errors.New("no route to host")
 	}
 	failing := newTestPusher(t, d, newPushRecorder())
+	own, _ := common.TraceIdFromCtx(failing.ctx)
 	failing.submit(&bmPlan{
 		resId: spCloneId, name: spCloneNm,
 		parts: []model.BmChunk{{Idx: 0, ModRev: 10}},
@@ -623,9 +626,13 @@ func TestBmPushRecordsCarryATraceId(t *testing.T) {
 	})
 	record := logs.withMsg(msgBitmapPushFailed)[0]
 	traceId, _ := record["trace_id"].(string)
-	if !strings.HasPrefix(traceId, want+"-") {
-		t.Fatalf("connect failure trace_id = %q, want the %q prefix",
+	if !strings.HasPrefix(traceId, want+"-") || len(traceId) <= len(want)+1 {
+		t.Fatalf("connect failure trace_id = %q, want %q + \"-\" + a fresh id",
 			traceId, want)
+	}
+	if traceId == own {
+		t.Fatalf("connect failure trace_id = %q is the pusher's own, want "+
+			"an id of the push's own", traceId)
 	}
 }
 

@@ -76,14 +76,13 @@ T3. Propagation is transitive end to end by construction: dnvctl sets an id
 T4. Minting trace ids is the entry points' job, never the interceptors':
     the shared interceptors only move an id that is already there between
     ctx and metadata (T1, T2). `dnvctl` mints one per CLI invocation unless
-    `--trace-id` supplies one (`dnvctl.md` CT2); `dnv-worker` one per unit
-    of work, an in-round syncup sharing the round's id (`dnv-worker.md`
-    RW10); `dnv-gateway` one for a request that arrived without one
-    (`gateway.md` GW2), not in its handlers but in its entry-point mint,
-    `ensureTraceIdUnary` and `ensureTraceIdStream` (`gateway/traceid.go`),
-    which `serverOptions` chains first, upstream of the shared pair, so the
-    shared chain adopts the id as it adopts a client's and logs the request
-    under it. Each daemon also mints one at startup, for its startup and
+    `--trace-id` supplies one (`dnvctl.md` CT2); `dnv-worker` the ones
+    `dnv-worker.md` RW10 names; `dnv-gateway` one for a request that
+    arrived without one (`gateway.md` GW2), not in its handlers but in its
+    entry-point mint, `ensureTraceIdUnary` and `ensureTraceIdStream`
+    (`gateway/traceid.go`), which `serverOptions` chains first, upstream of
+    the shared pair, so the shared chain adopts the id as it adopts a
+    client's and logs the request under it. Each daemon also mints one at startup, for its startup and
     other process-lifetime records; `dnv-agent` mints one per attempt of a
     background task, all but two: the cn sweep's background
     "nvme disconnect" runs under the id of the pass that set it going and
@@ -92,9 +91,9 @@ T4. Minting trace ids is the entry points' job, never the interceptors':
     round's id and mints one only when the round had none (`dnagent.md`
     SH29); and `dnv-cdc` mints one per accepted host connection, one per
     scan attempt (the watch it opens included) and one per applied watch
-    event. The generator is `NewTraceId` (`log.md`, Placement); the ids the
-    worker mints per unit of work put a prefix of its seed in front of the
-    generator's output (`dnv-worker.md` RW10).
+    event. The generator is `NewTraceId` (`log.md`, Placement); the
+    worker's ids of `dnv-worker.md` RW10 put a seed prefix in front of its
+    output.
 
 ## Message logging
 

@@ -180,9 +180,10 @@ type bmPusher struct {
 	stopped  bool
 }
 
-// newBmPusher builds one child's push engine (BM1-BM6).
+// newBmPusher builds one child's push engine (BM1-BM6). The engine holds a
+// trace id of its own (RW10), and every push mints one of its own under it.
 func newBmPusher(p bmPusherParams) *bmPusher {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), p.seed))
 	return &bmPusher{
 		deps:     p.deps,
 		seed:     p.seed,
@@ -332,8 +333,8 @@ func (p *bmPusher) pushPlan(plan *bmPlan) {
 	if err != nil {
 		if !errors.Is(err, errPusherStopped) {
 			// RW10: a push that never got as far as a chunk is still a push,
-			// so its record carries a trace id of this worker's incarnation
-			// like every other one.
+			// a unit of work, so it mints its own trace id under the
+			// pusher's, like every other push.
 			slog.InfoContext(
 				newTraceCtx(p.ctx, p.seed), msgBitmapPushFailed, append(
 					p.attrs(plan.resId, 0, 0),

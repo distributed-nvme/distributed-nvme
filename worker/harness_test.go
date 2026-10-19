@@ -632,18 +632,21 @@ func (h *workerHarness) file(rec logRecord) {
 // each record under the harness and the worker incarnation it belongs to.
 //
 // A worker's record is its own when its trace id starts with the worker's
-// seed prefix (RW10) — every round, syncup, push, flip, pass and drain
-// record, the harness's Run-level records and every etcdutil and gRPC record
-// under them — or when it names the worker's own seed: worker registered,
-// shard owned, shard released, worker fenced (by its old seed, and the new
-// seed joins the incarnation) and membership observed with own set. The
-// others carry no trace id and no seed of their emitter: membership
-// observed and membership committed of a peer, which the router files under
-// the harness of the seed they name; revision worker started and stopped,
-// cluster conf missing and invalid stored conf of a revision worker, filed
-// under the harness of their cluster_id; and the vote layer's and the shard
-// workers' watch restarts and malformed keys, with the etcdutil records of
-// the heartbeat, the scans and the watches, which it drops.
+// seed prefix (RW10), and every record a worker writes carries such an id: a
+// unit of work's own, a round's, syncup's, push's, flip's, pass's or drain
+// step's, or outside one the id its incarnation, a shard manager, a loop or a
+// coordinator holds for its life, so the membership records of its own seed
+// and of its peers', the fence, the ownership records, the watch restarts,
+// the malformed keys and the loops' lifecycle, idle and invalid stored conf
+// records are the worker's too. The harness's Run-level records carry the id
+// startWorker mints, and every etcdutil and gRPC record the id of the call it
+// logs. A worker fenced record joins its new seed to the incarnation.
+//
+// A record with no worker's trace id, the case's own or a fake's, is filed by
+// what it names: under the worker whose own seed it names (ownSeedMsgs, the
+// old seed of worker fenced, membership observed with own set), else under
+// the harness of a seed it names, else under the harness of its cluster_id.
+// A wire record of no worker is dropped, and so is one that names neither.
 type logRouter struct {
 	installMu sync.Mutex
 
@@ -731,8 +734,9 @@ func (r *logRouter) cluster(cid uint64) *workerHarness {
 	return r.byCluster[cid]
 }
 
-// ownSeedMsgs are the records without a trace id whose seed attribute names
-// the worker that logs them.
+// ownSeedMsgs are the records whose seed attribute names the worker that logs
+// them, by which one that reaches the router with no worker's trace id is
+// filed.
 var ownSeedMsgs = map[string]bool{
 	msgWorkerStarting:   true,
 	msgWorkerStopping:   true,

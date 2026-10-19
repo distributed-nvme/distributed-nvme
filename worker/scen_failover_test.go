@@ -580,6 +580,19 @@ func TestFailoverSideSilentUntilTheSecondWaitEnds(t *testing.T) {
 	demoted := foWaitCntlrSynced(t, h, w, 1, failRev, 10*time.Second)
 	unsynced := h.waitRecord(t, 10*time.Second, w, msgSpSidesUnsynced,
 		func(rec logRecord) bool { return rec.num("revision") == failRev })
+	// The timer's end is a unit of work of the pool's coordinator, so it
+	// runs under a trace id of its own, not under the coordinator's
+	// lifetime id that its start record carries (RW10).
+	started := h.waitRecord(t, 10*time.Second, w, msgRevisionWorkerStarted,
+		func(rec logRecord) bool {
+			return rec.str("role") == common.WorkerRoleSp &&
+				rec.num("cluster_id") == c.cl.Id && rec.num("id") == stdSpId &&
+				rec.str("side_pointer") == "" && rec.str("cntlr_pointer") == ""
+		})
+	if unsynced.traceId == started.traceId {
+		t.Errorf("the second wait's end was logged under the coordinator's "+
+			"own trace id %q, want an id of its own", started.traceId)
+	}
 	if n := unsynced.num("side_cnt"); n != 1 {
 		t.Errorf("the second wait ended with %d sides unsynced, want the "+
 			"silent one", n)

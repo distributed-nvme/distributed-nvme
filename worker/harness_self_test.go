@@ -83,15 +83,17 @@ func TestHarnessCrashLeavesRegistrations(t *testing.T) {
 		if !ok {
 			t.Fatalf("no delete of %s reached the watch", key)
 		}
+		// The commit is w2's own record: its incarnation's trace id names it
+		// (RW10).
 		var committed []logRecord
-		for _, rec := range h.records(nil, msgMembershipCommitted) {
+		for _, rec := range h.records(w2, msgMembershipCommitted) {
 			if rec.str("seed") == w1.seed && rec.str("role") == role &&
 				rec.str("state") == stateNonmember {
 				committed = append(committed, rec)
 			}
 		}
 		if len(committed) == 0 {
-			t.Fatalf("no %s commit of w1 as a nonmember", role)
+			t.Fatalf("no %s commit of w1 as a nonmember by w2", role)
 		}
 		if at.Before(committed[0].at) {
 			t.Errorf("%s was deleted %v before w2 committed w1 a nonmember: "+

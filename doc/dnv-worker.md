@@ -727,7 +727,11 @@ The `worker starting` record carries `roles`, `seed`, `endpoints`,
 `vote_interval` and `grace_time`; `worker stopping` carries `seed`. Every
 round, syncup, push, flip and reaction runs under a trace id minted per RW10,
 so the seed prefix in an agent's `trace_id` attributes the request to this
-process.
+process. The parts of an incarnation that outlive one unit of work hold an
+id of that shape for their life (RW10), so the worker's own records carry
+the seed prefix too, all but those written under CM4's startup trace id,
+such as the process's start and stop records, the `ClusterConf` cache's
+(RW21) and those of CM5's deletes.
 
 CM7. **Wiring.** The worker binary links the etcd client; `dnv-agent` and
 `dnvctl` link none (`layout.md`, Dependency rules).
@@ -1312,6 +1316,22 @@ verdict to the re-send it brought, and the re-send's id joins the worker's
 record to the converge, which is how a leftover that only a verdict names
 is followed to its re-send (`log.md`, Leftovers); the call itself keeps
 the worker's own id, the owner's mark in the agent's log.
+
+The parts of an incarnation that outlive one unit of work hold an id of the
+same shape for their whole life, minted when each starts: the vote worker's
+incarnation (VW1), each role's shard workers, which share one, each
+per-object loop, each sp coordinator and each pusher (BM3). Every unit of
+work under them still mints its own. A record such a part writes outside a
+unit of work carries its id: one id groups every heartbeat, registry scan
+and watch, membership and fence record of an incarnation; one per role the
+`shard owned` and `shard released` records and the shard workers' scans,
+watches and malformed keys; one per loop or coordinator its start and stop
+records, and a loop's idle records and its refusals of a cluster's stored
+conf as well. Only CM4's startup trace id goes without the seed: the
+`ClusterConf` cache (RW21) runs under it across every rejoin after a
+self-fence (VW8) and would carry a stale prefix. Reason: a Go case with
+several workers tells each worker's records apart by these ids, and an
+operator pulls one incarnation's records by its prefix.
 
 RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
 unary call (its own deadline bounds the wait; the stop ctx is not the RPC
@@ -3288,9 +3308,14 @@ the cntlr replacement's (MD6).
 ## Log records
 
 The worker's records are JSON records under the rules of `log.md`, R1 to R12,
-carrying the trace id of RW10 where one exists. Record names (the `msg`
-strings) are normative — the worker suite parses them; what each record
-carries is the code's. Two families are `log.md`'s and are not restated here:
+carrying a trace id: the one RW10 gives the unit of work that wrote the
+record; or else the one RW10 gives the part of the incarnation that wrote
+it for that part's life, so that one id groups, for example, every
+heartbeat and registry scan record of an incarnation; or else, on a record
+written outside every unit of work and every such part, CM4's startup trace
+id, the one id with no seed prefix (CM6). Record names (the `msg` strings) are
+normative — the worker suite parses them; what each record carries is the
+code's. Two families are `log.md`'s and are not restated here:
 the records `etcdutil` emits for every etcd read, write, range and watch event
 (`log.md`, etcd), and the `syncup leftover` record RW5 emits (`log.md`,
 Leftovers). The records of the client interceptors are `grpc.md`'s (L1 to
@@ -3428,11 +3453,11 @@ are cut before its context ends, so a call it has in flight ends at once, its
 registrations stay, and its peers find it dead by the dead threshold (VW3), as
 they find a killed process. A restart is a new incarnation under a new seed
 (VW1). A worker's records reach its case by the seed prefix of their trace id
-(RW10) or by the seed they name as their own; a record that carries neither
-belongs to no one worker. Each whole-worker case asserts on what etcd holds,
-on what each fake received and on those records, so a case proves a whole
-path, from a planted desired state to the agents' syncups and the worker's own
-writes, at the moments the fakes' levers choose. The fake records each round's
+(RW10) or by the seed they name as their own. Each whole-worker case asserts
+on what etcd holds, on what each fake received and on those records, so a
+case proves a whole path, from a planted desired state to the agents'
+syncups and the worker's own writes, at the moments the fakes' levers
+choose. The fake records each round's
 own trace id (RW4 step 2), under which the round's syncup and verdict are
 logged (RW10), so a case tells what a round caused from what a syncup did. A
 handoff case crashes the worker that owns a pool while a lever holds a step of

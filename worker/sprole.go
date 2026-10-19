@@ -472,9 +472,11 @@ func newSpWorker(p revWorkerParams) revWorkerHandle {
 }
 
 // startSpWorker is newSpWorker with the model surface injected, so the unit
-// tests drive a real coordinator without etcd.
+// tests drive a real coordinator without etcd. The coordinator's own trace id
+// (RW10) is on its start and stop records; every step of its loop mints one
+// of its own.
 func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), p.seed))
 	w := &spWorker{
 		deps:      p.deps,
 		ops:       ops,

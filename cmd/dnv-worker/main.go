@@ -229,8 +229,8 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// The startup trace id; every round, syncup, push, flip and reaction
-	// below mints its own from the seed (RW10).
+	// The startup trace id; every unit of work below, and every part of an
+	// incarnation that outlives one, mints its own from the seed (RW10).
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
 	if opts.graceTooShort {
 		slog.WarnContext(ctx, "grace time does not exceed the dead threshold",
