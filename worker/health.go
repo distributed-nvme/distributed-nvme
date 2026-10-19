@@ -31,6 +31,12 @@ const (
 	reasonUnreachable = "unreachable"
 	reasonErrorRow    = "error_row"
 	reasonRecovered   = "recovered"
+	// reasonInitial is a clean verdict of a monitor that has written nothing
+	// yet, which HL3 writes whatever the record holds: every worker start,
+	// every rejoin under a new seed after a self-fence (VW8) and every shard
+	// handoff writes one per healthy object, none of which recovered from
+	// anything this monitor saw.
+	reasonInitial = "initial"
 )
 
 // healthObs is one health observation about one object, i.e. one row of the
@@ -361,6 +367,9 @@ func (m *healthMonitor) observeSettle(
 		unhealthy, reason = true, reasonErrorRow
 	case healthClean:
 		unhealthy, reason = false, reasonRecovered
+		if !m.known {
+			reason = reasonInitial
+		}
 	default:
 		// HL1/HL2 (healthNone): a rejected code, and a leg row that is
 		// neither ERROR nor OK or is absent (legObservation), neither set

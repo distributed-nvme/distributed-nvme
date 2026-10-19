@@ -118,7 +118,8 @@ func assertNoFailedRoundOf(t *testing.T, h *workerHarness, w *harnessWorker) {
 
 // assertNoEpochSetBy fails the case for every health change record of w that
 // set an epoch (HL1, HL2): with no epoch ever set, each such record is an
-// object's first verdict, clean, which HL3 writes whatever the record holds.
+// object's first verdict, clean, which HL3 writes whatever the record holds
+// and which names the reason initial.
 func assertNoEpochSetBy(t *testing.T, h *workerHarness, w *harnessWorker) {
 	t.Helper()
 	set := 0
@@ -316,7 +317,7 @@ func TestFullShapeMostNodes(t *testing.T) {
 	// No node's record holds a health epoch, and none ever did: the worker
 	// logs every health transition (HL1), and a monitor writes its first
 	// verdict whatever the record holds (HL3), so each node's first clean
-	// round logs one with no epoch.
+	// round logs one with no epoch and the reason initial, not recovered.
 	assertMostNodeEpochs(t, h, cl, dnCnt, cnCnt)
 	assertNoEpochSetBy(t, h, w)
 	assertNoFailedRoundOf(t, h, w)

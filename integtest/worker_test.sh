@@ -1869,6 +1869,11 @@ case_health() {
 		req_ge 1 dn0 SyncupDn '(.revision | tostring) == "1"'
 	wait_until "$WAIT_SHORT" "cn0: SyncupCn revision 1" \
 		req_ge 1 cn0 SyncupCn '(.revision | tostring) == "1"'
+	# The DN's first verdict is clean, and its monitor has written nothing
+	# yet: the record of that write says initial, not recovered
+	# (dnv-worker.md, Log records).
+	wait_until "$WAIT_SHORT" "health changed record=dn reason=initial" \
+		count_ge 1 health_changed_cnt dn initial
 	local capkey
 	capkey=$(dn_capacity_key)
 	[ -n "$capkey" ] || die "the dn_capacity key is missing"
@@ -1885,11 +1890,13 @@ EOF
 		"health changed record=dn reason=error_row"
 
 	stage 3 "clearing the row restores err_epoch and the capacity key"
+	local dn_recov
+	dn_recov=$(health_changed_cnt dn recovered)
 	clear_behavior dn0
 	wait_until "$WAIT_SHORT" "dn 1 err_epoch cleared" dn_err_epoch_clear 1
 	wait_until "$WAIT_SHORT" "the dn_capacity key to come back unchanged" \
 		dn_capacity_is "$capkey"
-	assert_ge "$(health_changed_cnt dn recovered)" 1 \
+	assert_ge "$(health_changed_cnt dn recovered)" $((dn_recov + 1)) \
 		"health changed record=dn reason=recovered"
 
 	stage 4 "a hung agent is unreachable, and recovers"
@@ -3938,7 +3945,7 @@ EOF
 EOF
 	wait_until $((2 * hc + WAIT_SHORT)) "cn2: a SyncupCntlr refused with code 2" \
 		reply_gt "$refused" cn2 SyncupCntlr '(.agent_reply.code // 0) == 2'
-	local owner new_owner new8 lift level new_recov now_at
+	local owner new_owner new8 lift level new_init now_at
 	reactions=$(reaction_any_cnt)
 	owner=$(owner_of sp 00)
 	[ -n "$owner" ] || die "no owner for (sp, 00)"
@@ -3974,13 +3981,17 @@ EOF
 		die "C3's err_epoch $c3_epoch is not past the threshold at $now_at"
 
 	log "  7.2: C3 answers again: the new owner's first verdict clears it"
-	new_recov=$(cntlr_health_cnt 1 3 recovered "$new_owner")
+	# A clean verdict of a monitor that has written nothing yet says
+	# initial, though it clears the old owner's epoch (dnv-worker.md, Log
+	# records): every C3 reply the new owner got before was refused, and a
+	# refused reply is no verdict (dnv-worker.md HL2).
+	new_init=$(cntlr_health_cnt 1 3 initial "$new_owner")
 	clear_behavior cn2
 	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch cleared" \
 		cntlr_epoch_clear sp0 3
-	assert_ge "$(cntlr_health_cnt 1 3 recovered "$new_owner")" \
-		$((new_recov + 1)) \
-		"health changed record=cntlr reason=recovered for C3 in $new_owner's log"
+	assert_ge "$(cntlr_health_cnt 1 3 initial "$new_owner")" \
+		$((new_init + 1)) \
+		"health changed record=cntlr reason=initial for C3 in $new_owner's log"
 	assert_eq "$(reaction_any_cnt)" "$reactions" "reactions across the handoff"
 
 	stage 8 "a verdict that writes nothing still counts (dnv-worker.md AR10, HL3)"

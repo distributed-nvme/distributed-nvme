@@ -450,6 +450,59 @@ func TestHealthTransitionsOnly(t *testing.T) {
 	}
 }
 
+// TestHealthFirstCleanVerdictIsInitial pins the reason of the "health
+// changed" record of a clean verdict (dnv-worker.md, Log records): a clean
+// verdict while its monitor has written nothing yet, which HL3 writes
+// whatever the record holds, says initial — after a failed first write too,
+// which leaves the monitor with nothing written, and over a record that
+// holds another observer's epoch, which that write clears — and a clean
+// verdict after the monitor's own unhealthy one says recovered.
+func TestHealthFirstCleanVerdictIsInitial(t *testing.T) {
+	logs := captureLogs(t)
+	d, writer := healthTestDeps(t)
+	seedClusterConf(d, 7)
+	ctx := context.Background()
+	reasons := func() []string {
+		var out []string
+		for _, rec := range logs.withMsg(msgHealthChanged) {
+			reason, _ := rec["reason"].(string)
+			out = append(out, reason)
+		}
+		return out
+	}
+
+	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" }, nil)
+	writer.err = errors.New("etcd down")
+	monitor.observe(ctx, healthClean, "")
+	writer.err = nil
+	monitor.observe(ctx, healthClean, "")
+	monitor.observe(ctx, healthClean, "")
+	monitor.observe(ctx, healthUnreachable, "")
+	monitor.observe(ctx, healthClean, "")
+	writes := writer.all()
+	if len(writes) != 3 || writes[0].epoch != 0 || writes[1].epoch == 0 ||
+		writes[2].epoch != 0 {
+		t.Fatalf("writes = %+v, want the first verdict, a set and a clear", writes)
+	}
+	want := []string{reasonInitial, reasonUnreachable, reasonRecovered}
+	if got := reasons(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("reasons = %v, want %v", got, want)
+	}
+
+	// Another observer's epoch in the record: the first verdict clears it,
+	// and is still no recovery this monitor saw.
+	other := newDnMonitor(d, 7, 12, func() string { return "dn1:9520" }, nil)
+	other.seedRecord(1234)
+	other.observe(ctx, healthClean, "")
+	if writes := writer.all(); len(writes) != 4 || writes[3].epoch != 0 {
+		t.Fatalf("writes = %+v, want a fourth one, clean", writes)
+	}
+	want = append(want, reasonInitial)
+	if got := reasons(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("reasons = %v, want %v", got, want)
+	}
+}
+
 // TestHealthVerdictIsToldWithoutAWrite pins the hook AR10's memo hangs on: a
 // monitor tells its verdict hook every verdict it reaches — unhealthy for an
 // unreachable object or an ERROR row, clean for a clean round — whether or

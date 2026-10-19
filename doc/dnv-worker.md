@@ -3361,12 +3361,19 @@ than its record's, once until a compare agrees (RW13, RW23).
 
 **Health and the sp role.** `health changed` every HL1 or HL2 transition,
 judged against the memo HL3 re-seeds from the record — the correction of an
-epoch another observer wrote or cleared included; `cntlr settled` the write
-of HL2's settle: at most once per acquisition of the primary role, the
-re-enable of a primary counting as one and none when the cntlr is demoted
-before it settles, plus a repeat for a plan loaded before the write landed
-(HL2) or for a second owner in an overlap (VW7); `flip applied` a committed
-provisioned or created flip or a committed cutover, naming the new `SpRev`
+epoch another observer wrote or cleared included —, a clean one with the
+reason `initial` while its monitor has written nothing yet and `recovered`
+otherwise: every worker start, every rejoin after a self-fence (VW8) and
+every shard handoff gives the objects concerned new monitors, whose first
+clean verdict on a healthy object is no recovery, and HL3 writes it
+whatever the record holds, so an `initial` can also clear an epoch another
+observer or an earlier owner left;
+`cntlr settled` the write of HL2's settle: at most once per acquisition of
+the primary role, the re-enable of a primary counting as one and none when
+the cntlr is demoted before it settles, plus a repeat for a plan loaded
+before the write landed (HL2) or for a second owner in an overlap (VW7);
+`flip applied` a committed provisioned or created flip or a committed
+cutover, naming the new `SpRev`
 — for a provisioned flip and a cutover the revision their own transaction
 wrote, never a later one, so a reply to the first request that carries the
 change is never older than the record — and a cutover's naming the cntlr
