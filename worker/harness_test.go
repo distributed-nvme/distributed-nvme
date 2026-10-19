@@ -168,24 +168,11 @@ type harnessWorker struct {
 	owned map[string]map[uint32]bool
 }
 
-// harnessEtcdTries is how many etcds a harness starts before it gives up:
-// another process may take a port between its pick and etcd's bind
-// (startEtcd).
-const harnessEtcdTries = 3
-
 // newWorkerHarness starts a harness: its own etcd, from the binary the
 // package's etcd runs (EU7), an etcd client for the case, and an empty fleet.
 func newWorkerHarness(t *testing.T, opts harnessOpts) *workerHarness {
 	t.Helper()
-	var endpoint string
-	var stop func()
-	var err error
-	for try := 0; try < harnessEtcdTries; try++ {
-		if endpoint, stop, err = startEtcd(findEtcdBin()); err == nil {
-			break
-		}
-		t.Logf("harness etcd, try %d: %v", try+1, err)
-	}
+	endpoint, stop, err := startEtcd(findEtcdBin())
 	if err != nil {
 		t.Fatalf("harness etcd: %v", err)
 	}

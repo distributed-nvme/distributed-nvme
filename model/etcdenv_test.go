@@ -1,19 +1,24 @@
 package model
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -80,10 +85,43 @@ func freePort() (int, error) {
 	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
+// etcdDirPrefix starts the name of every data directory startEtcd makes in
+// the temporary directory, and the pid of the test binary follows it, so
+// that reclaimEtcdDirs can tell the directory of a binary that died from one
+// of a binary that runs.
+const etcdDirPrefix = "dnv-model-"
+
+// etcdStartTries is how many etcds startEtcd starts before it gives up.
+const etcdStartTries = 3
+
+// etcdStderrCap is how much of what etcd writes to its standard error a
+// start keeps for its error.
+const etcdStderrCap = 8 << 10
+
 // startEtcd runs a single-node etcd on free localhost ports with a temporary
-// data dir and waits until it serves.
+// data dir and waits until it serves. A port is free when freePort picks it
+// and taken only when etcd binds it, so another process can take it in
+// between. An etcd that cannot bind its ports exits at start, before it
+// writes its WAL; that start then fails, instead of handing back an endpoint
+// another process's etcd serves, and startEtcd starts another, up to
+// etcdStartTries in all.
 func startEtcd(bin string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "dnv-model-")
+	var errs []error
+	for range etcdStartTries {
+		endpoint, stop, err := startEtcdOnce(bin)
+		if err == nil {
+			return endpoint, stop, nil
+		}
+		errs = append(errs, err)
+	}
+	return "", nil, errors.Join(errs...)
+}
+
+// startEtcdOnce is one start of startEtcd.
+func startEtcdOnce(bin string) (string, func(), error) {
+	dir, err := os.MkdirTemp(
+		"", fmt.Sprintf("%s%d-", etcdDirPrefix, os.Getpid()),
+	)
 	if err != nil {
 		return "", nil, err
 	}
@@ -132,27 +170,56 @@ func startEtcd(bin string) (string, func(), error) {
 		"--log-level", "error",
 		"--log-outputs", "stderr",
 	)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// etcd's output reaches no stream of the test binary: its standard
+	// output goes nowhere, and its standard error only into the error of a
+	// start that fails.
+	stderr := &etcdStderr{}
+	cmd.Stderr = stderr
+	// The kernel kills etcd when the test binary dies, however it dies: a
+	// kill, the panic of the test timeout or a lost pipe, none of which runs
+	// a cleanup. It sends the signal when the thread that started etcd
+	// exits; the Go runtime ends a thread only when a goroutine locked to it
+	// exits without unlocking it, and no goroutine of this binary does, so
+	// that thread lives as long as the binary.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		cleanupDir()
 		return "", nil, err
 	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	stop := func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-exited
 		cleanupDir()
 	}
 	endpoint := fmt.Sprintf("127.0.0.1:%d", clientPort)
-	if err := waitForEtcd(endpoint); err != nil {
+	if err := waitForEtcd(endpoint, exited); err != nil {
 		stop()
-		return "", nil, err
+		return "", nil, stderr.wrap(err)
+	}
+	// The endpoint answers. It is this etcd's only if this etcd bound both its
+	// ports, which it has once it wrote its WAL and while it still runs.
+	_, err = os.Stat(filepath.Join(dir, "data", "member", "wal"))
+	select {
+	case <-exited:
+		err = errors.New("it exited")
+	default:
+	}
+	if err != nil {
+		stop()
+		return "", nil, stderr.wrap(fmt.Errorf(
+			"etcd at %s is not the one started: %w", endpoint, err))
 	}
 	return endpoint, stop, nil
 }
 
-// waitForEtcd polls the server until one point read succeeds.
-func waitForEtcd(endpoint string) error {
+// waitForEtcd polls the server until one point read succeeds, and gives up
+// once the etcd process has exited.
+func waitForEtcd(endpoint string, exited <-chan struct{}) error {
 	cli, err := etcdutil.New(
 		context.Background(),
 		[]string{endpoint},
@@ -165,6 +232,11 @@ func waitForEtcd(endpoint string) error {
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			return errors.New("etcd exited before it served")
+		default:
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_, lastErr = cli.Get(ctx, "dnv-model-probe", &pb.SpName{})
 		cancel()
@@ -176,12 +248,78 @@ func waitForEtcd(endpoint string) error {
 	return fmt.Errorf("etcd did not come up: %w", lastErr)
 }
 
+// etcdStderr keeps the first etcdStderrCap bytes etcd writes to its standard
+// error. It takes every write whole, so etcd never sees a write to its
+// standard error fail.
+type etcdStderr struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (s *etcdStderr) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if room := etcdStderrCap - len(s.buf); room > 0 {
+		s.buf = append(s.buf, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
+}
+
+// wrap returns err with what etcd wrote to its standard error, if anything.
+func (s *etcdStderr) wrap(err error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.buf) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w (etcd stderr: %q)", err, s.buf)
+}
+
+// reclaimEtcdDirs removes the data directories startEtcd made for a test
+// binary that no longer runs: a binary that was killed, or whose test timed
+// out, removes none of its own. The pid in a directory's name says whose it
+// is; the directories of a binary that runs, this one's or a sibling's, stay,
+// and so does every name of another shape.
+func reclaimEtcdDirs() {
+	tmp := os.TempDir()
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		rest, ok := strings.CutPrefix(entry.Name(), etcdDirPrefix)
+		if !ok || !entry.IsDir() {
+			continue
+		}
+		pidText, _, ok := strings.Cut(rest, "-")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(pidText)
+		if err != nil || pid <= 0 || pidRuns(pid) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(tmp, entry.Name()))
+	}
+}
+
+// pidRuns reports whether a process with the pid exists: every answer of the
+// kernel but "no such process", a refusal included, counts as one.
+func pidRuns(pid int) bool {
+	return !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+}
+
 func TestMain(m *testing.M) {
 	// model logs nothing of its own, but every etcdutil call it makes emits
 	// a record of log.md, etcd. The tests assert behavior, not logs, so the
 	// records go nowhere and keep the test output readable.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	endpoint, stop, err := startEtcd(findEtcdBin())
+	if os.Getenv(etcdChildEnv) == "1" {
+		runEtcdChild()
+	}
+	bin := findEtcdBin()
+	reclaimEtcdDirs()
+	endpoint, stop, err := startEtcd(bin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot start etcd: %v\n", err)
 		os.Exit(1)
@@ -312,5 +450,136 @@ func TestNoEtcdFailsTheRun(t *testing.T) {
 				t.Fatalf("stderr %q does not say %q", stderr.String(), tt.want)
 			}
 		})
+	}
+}
+
+// etcdChildEnv puts the re-executed test binary into the child mode of
+// TestEtcdDiesWithTheTestBinary.
+const etcdChildEnv = "DNV_MODEL_ETCD_CHILD"
+
+// etcdChildReady is the line the child prints once its etcd serves.
+const etcdChildReady = "etcd ready"
+
+// runEtcdChild is the child mode of TestEtcdDiesWithTheTestBinary: it starts
+// an etcd, prints etcdChildReady, and sleeps until it is killed. It never
+// returns.
+func runEtcdChild() {
+	if _, _, err := startEtcd(findEtcdBin()); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot start etcd: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(etcdChildReady)
+	time.Sleep(time.Hour)
+	os.Exit(1)
+}
+
+// etcdPidsOf returns the pids of the processes whose arguments name dataDir,
+// the etcd that serves from it. A process that has exited and not yet been
+// reaped has no arguments left, so it is not among them.
+func etcdPidsOf(t *testing.T, dataDir string) []int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatalf("read /proc: %v", err)
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		if slices.Contains(strings.Split(string(raw), "\x00"), dataDir) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// TestEtcdDiesWithTheTestBinary: the etcd a launcher started dies with the
+// test binary that started it, even when that binary is killed and runs no
+// cleanup, and the next binary's TestMain removes the data directory the
+// killed one left, while the directory of a binary that runs, this one's,
+// stays. The first child is this test binary run again in etcdChildEnv's
+// mode, killed with SIGKILL once its etcd serves; the second runs no test,
+// so it does no more than TestMain does.
+func TestEtcdDiesWithTheTestBinary(t *testing.T) {
+	child := exec.Command(os.Args[0], "-test.run=^$")
+	child.Env = append(os.Environ(), etcdChildEnv+"=1")
+	// A run that fails before it kills the child leaves no child behind.
+	child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	child.Stderr = os.Stderr
+	out, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatalf("child stdout: %v", err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatalf("start the child: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+	ready := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(out).ReadString('\n')
+		ready <- strings.TrimSpace(line)
+	}()
+	select {
+	case line := <-ready:
+		if line != etcdChildReady {
+			t.Fatalf("the child printed %q, want %q", line, etcdChildReady)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the child's etcd did not come up")
+	}
+	dirs, err := filepath.Glob(filepath.Join(os.TempDir(),
+		fmt.Sprintf("%s%d-*", etcdDirPrefix, child.Process.Pid)))
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("the child's data directories: %v (err %v), want one",
+			dirs, err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dirs[0]) })
+	dataDir := filepath.Join(dirs[0], "data")
+	pids := etcdPidsOf(t, dataDir)
+	if len(pids) != 1 {
+		t.Fatalf("processes serving from %s: %v, want one etcd", dataDir, pids)
+	}
+	t.Cleanup(func() {
+		if len(etcdPidsOf(t, dataDir)) > 0 {
+			_ = syscall.Kill(pids[0], syscall.SIGKILL)
+		}
+	})
+
+	if err := child.Process.Kill(); err != nil {
+		t.Fatalf("kill the child: %v", err)
+	}
+	_ = child.Wait()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(etcdPidsOf(t, dataDir)) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("etcd %d outlived the test binary that started it",
+				pids[0])
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	next := exec.Command(os.Args[0], "-test.run=^$")
+	next.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if output, err := next.CombinedOutput(); err != nil {
+		t.Fatalf("the next test binary: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(dirs[0]); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the killed binary's data directory %s is still there "+
+			"after the next binary started (stat: %v)", dirs[0], err)
+	}
+	own, err := filepath.Glob(filepath.Join(os.TempDir(),
+		fmt.Sprintf("%s%d-*", etcdDirPrefix, os.Getpid())))
+	if err != nil || len(own) == 0 {
+		t.Fatalf("this binary's data directory went with the reclaim "+
+			"(err %v)", err)
 	}
 }
