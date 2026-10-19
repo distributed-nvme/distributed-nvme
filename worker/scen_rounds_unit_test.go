@@ -78,8 +78,6 @@ func testDnRoleFailedRecordReadLogsTheSyncupResult(t *testing.T) {
 // error, which its syncup result names, and is retried by the next round once
 // the read answers.
 func TestCnRoleFailedRecordReadLogsTheSyncupResult(t *testing.T) {
-	t.Skip("the cn role's syncup returns no error when its CnConf read " +
-		"fails, so no syncup result names the failure")
 	synctest.Test(t, testCnRoleFailedRecordReadLogsTheSyncupResult)
 }
 
@@ -101,6 +99,11 @@ func testCnRoleFailedRecordReadLogsTheSyncupResult(t *testing.T) {
 	})
 	if got := len(stub.syncups()); got != 0 {
 		t.Fatalf("%d SyncupCn sent with no record read", got)
+	}
+	rec := roundsSyncupResultsNaming(h.logs, roundsErrRecordRead)[0]
+	if rec["cn_id"] != float64(testCnId) || rec["revision"] != float64(2) {
+		t.Errorf("the syncup result names cn %v at revision %v, want cn %d at 2",
+			rec["cn_id"], rec["revision"], testCnId)
 	}
 	roundsSetGetErr(h.store, nil)
 	h.advanceUntil("the syncup once the read answers", roundInterval, func() bool {

@@ -134,8 +134,10 @@ func (d *cnDriver) syncup(
 		ctx, model.CnConfKey(d.cid, d.addr), cnConf,
 	)
 	if err != nil {
-		// The "etcd get" record carries the error; no SyncupCn was issued.
-		return nil, nil
+		// No SyncupCn was issued, but the syncup failed all the same: its
+		// result names the read's error (RW13), and the next round retries
+		// (RW12).
+		return nil, fmt.Errorf("read cn record: %w", err)
 	}
 	if !found {
 		slog.InfoContext(ctx, "cn conf missing",
