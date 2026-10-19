@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -673,6 +674,90 @@ func TestRecords(t *testing.T) {
 	if got := agent.Record("side 9:9:9"); got.Streams != 0 ||
 		len(got.Syncups) != 0 {
 		t.Errorf("an object never named has a record: %+v", got)
+	}
+}
+
+// TestStoredIsTheLastAcceptedRequest pins Stored beside Record: a refused
+// syncup, a stale one or one under a forced code, joins the record and not
+// what the agent keeps; a held one joins the record as it arrives and what
+// the agent keeps only once the lever releases it; and after a start on
+// empty files the agent keeps nothing while the record keeps every
+// request.
+func TestStoredIsTheLastAcceptedRequest(t *testing.T) {
+	fleet := newTestFleet(t, true)
+	agent := addAgent(t, fleet, "dn0:9520", Dn, Config{})
+	client := pb.NewDiskNodeAgentClient(dialFleet(t, fleet, "dn0:9520"))
+	ctx := boundCtx(t)
+
+	recorded := func() []uint64 {
+		var revs []uint64
+		for _, req := range agent.Record(DnKey).Syncups {
+			revs = append(revs, req.(*pb.SyncupDnRequest).GetRevision())
+		}
+		return revs
+	}
+	wantStored := func(what string, want uint64, wantRecorded ...uint64) {
+		t.Helper()
+		req, _ := agent.Stored(DnKey).(*pb.SyncupDnRequest)
+		if req == nil || req.GetRevision() != want {
+			t.Fatalf("%s: the agent keeps %v, want the syncup at revision %d",
+				what, req, want)
+		}
+		if got := recorded(); !slices.Equal(got, wantRecorded) {
+			t.Fatalf("%s: recorded syncup revisions %v, want %v", what, got,
+				wantRecorded)
+		}
+	}
+
+	if got := agent.Stored(DnKey); got != nil {
+		t.Fatalf("a new agent keeps %v, want nothing", got)
+	}
+	syncupDn(t, client, 2)
+	wantStored("an accepted syncup", 2, 2)
+	syncupDn(t, client, 1)
+	wantStored("a stale syncup", 2, 2, 1)
+	update(t, agent, DnKey, func(ob *Object) {
+		ob.ReplyCode = common.ReplyCodeInvalidConf
+	})
+	syncupDn(t, client, 3)
+	wantStored("a syncup under a forced code", 2, 2, 1, 3)
+
+	update(t, agent, DnKey, func(ob *Object) {
+		ob.ReplyCode = 0
+		ob.HangSyncup = true
+	})
+	held := make(chan error, 1)
+	go func() {
+		_, err := client.SyncupDn(ctx, &pb.SyncupDnRequest{
+			ClusterId: 1, DnId: 1, Revision: 4,
+		})
+		held <- err
+	}()
+	eventually(t, "the held syncup recorded", func() error {
+		if got := recorded(); len(got) != 4 {
+			return status.Errorf(codes.FailedPrecondition,
+				"recorded syncup revisions %v, want 4 of them", got)
+		}
+		return nil
+	})
+	wantHeld(t, "the held syncup", held)
+	wantStored("a held syncup", 2, 2, 1, 3, 4)
+	update(t, agent, DnKey, func(ob *Object) { ob.HangSyncup = false })
+	if err := wantReturned(t, "the released syncup", held); err != nil {
+		t.Fatalf("the released syncup: %v", err)
+	}
+	wantStored("a released syncup", 4, 2, 1, 3, 4)
+
+	agent.Stop()
+	if err := agent.Start(DropStore); err != nil {
+		t.Fatalf("Start(DropStore): %v", err)
+	}
+	if got := agent.Stored(DnKey); got != nil {
+		t.Fatalf("an agent started on empty files keeps %v, want nothing", got)
+	}
+	if got := recorded(); !slices.Equal(got, []uint64{2, 1, 3, 4}) {
+		t.Fatalf("recorded syncup revisions after the restart %v, want "+
+			"[2 1 3 4]", got)
 	}
 }
 

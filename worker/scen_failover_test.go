@@ -221,29 +221,6 @@ func foWaitCntlrSynced(
 	return found
 }
 
-// foWaitAcceptedSince waits for w's accepted syncup of a cntlr logged after
-// since. A fake records a refused request too, so a case that clears a
-// refusing lever waits for this before it waits for convergence, whose check
-// reads the last request a fake recorded.
-func foWaitAcceptedSince(
-	t *testing.T,
-	h *workerHarness,
-	w *harnessWorker,
-	cntlrId uint64,
-	since time.Time,
-) {
-	t.Helper()
-	h.waitUntil(t, 10*time.Second, fmt.Sprintf("an accepted syncup of cntlr %d",
-		cntlrId), func() (bool, string) {
-		for _, rec := range h.records(w, msgSyncupResult) {
-			if rec.at.After(since) && foAccepted(rec) && foIsCntlr(cntlrId)(rec) {
-				return true, ""
-			}
-		}
-		return false, "none yet"
-	})
-}
-
 // foWaitFailover waits for w's (nil: any worker's) "reaction applied" record of
 // the failover from cntlr from to cntlr to.
 func foWaitFailover(
@@ -547,9 +524,7 @@ func TestFailoverDemotionRefusedHoldsToTheTimer(t *testing.T) {
 		}
 	}
 
-	clearedAt := time.Now()
 	foLever(t, oldAgent, oldKey, func(o *agentfake.Object) { o.ReplyCode = 0 })
-	foWaitAcceptedSince(t, h, w, 1, clearedAt)
 	c.waitConverged(t)
 }
 

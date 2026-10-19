@@ -3712,7 +3712,10 @@ which worker. The whole-worker cases serve their fleets without those
 interceptors, and so without that log, each fake still reading a unary
 call's trace id from the call's metadata; every fake keeps, per object, the
 requests it received and the streams it served, the evidence those cases
-read instead. It applies the agents' revision gate per object and
+read instead. Their wait for convergence compares etcd with the request a
+fake keeps for each object, the last one it saved, and not with the last
+one it received, which it records as it arrives, before it accepts, holds
+or refuses it. It applies the agents' revision gate per object and
 their ordering rule — a side or cntlr its node's last syncup does not list
 is an unknown object, which the worker's independent roles must survive
 (RW5) — refuses a bitmap push for a migration or a clone its object's last

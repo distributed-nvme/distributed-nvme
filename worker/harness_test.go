@@ -1308,13 +1308,30 @@ type convergence struct {
 	objs   []objProgress
 }
 
-// lastSyncup is the newest Syncup* request a fake recorded about an object.
+// lastSyncup is the newest Syncup* request a fake recorded about an object:
+// the last one it received, refused and held ones included.
 func lastSyncup(agent *agentfake.Agent, key string) (proto.Message, int, int) {
 	rec := agent.Record(key)
 	if len(rec.Syncups) == 0 {
 		return nil, 0, len(rec.Rounds)
 	}
 	return rec.Syncups[len(rec.Syncups)-1], len(rec.Syncups), len(rec.Rounds)
+}
+
+// storedSyncup is the Syncup* request a fake keeps for an object, the last
+// one it saved, with the counts of the syncups and rounds it received;
+// convergedNow alone reads it. A fake records a request as it arrives,
+// before it accepts, holds or refuses it, so a case that clears a refusal,
+// releases a held syncup or restarts a fake on empty files would read
+// converged early from the record (lastSyncup). The request is read before
+// the counts: a syncup that lands between the two reads is counted and not
+// judged, which only leaves it out of the check that no syncup follows
+// convergence, while the other order could judge a syncup it did not count
+// and fail that check.
+func storedSyncup(agent *agentfake.Agent, key string) (proto.Message, int, int) {
+	msg := agent.Stored(key)
+	rec := agent.Record(key)
+	return msg, len(rec.Syncups), len(rec.Rounds)
 }
 
 // sidePtrSet and cntlrPtrSet render pointer lists for comparison.
@@ -1338,10 +1355,10 @@ func cntlrPtrSet(list []*pb.CntlrPointer) string {
 
 // convergedNow reads etcd and the fakes once and reports whether the cluster
 // has converged, as waitConverged defines it, short of the rounds after it:
-// every object's fake got a syncup at the revision its key holds with the
-// planted content, every side is provisioned, the thin device created, the
-// primary settled, and no health epoch is set. It returns why not, and every
-// object's fake with its counts.
+// every object's fake keeps a syncup at the revision its key holds with the
+// planted content (storedSyncup), every side is provisioned, the thin device
+// created, the primary settled, and no health epoch is set. It returns why
+// not, and every object's fake with its counts.
 func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 	t.Helper()
 	conv := convergence{
@@ -1359,16 +1376,16 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 		rev, conf := c.dnRev(t, id), c.dnConf(t, id)
 		conv.dnRevs[id] = rev
 		agent := c.dnAgent(id)
-		msg, syncups, rounds := lastSyncup(agent, agentfake.DnKey)
+		msg, syncups, rounds := storedSyncup(agent, agentfake.DnKey)
 		conv.objs = append(conv.objs, objProgress{name, agent, agentfake.DnKey, syncups, rounds})
 		req, _ := msg.(*pb.SyncupDnRequest)
 		switch {
 		case req == nil:
-			note("%s: no SyncupDn yet", name)
+			note("%s: keeps no SyncupDn yet", name)
 		case req.GetRevision() != rev:
-			note("%s: last SyncupDn at revision %d, DnRev %d", name, req.GetRevision(), rev)
+			note("%s: keeps a SyncupDn at revision %d, DnRev %d", name, req.GetRevision(), rev)
 		case sidePtrSet(req.GetSidePointerList()) != sidePtrSet(conf.GetSidePtrList()):
-			note("%s: last SyncupDn lists sides %q, the record %q", name,
+			note("%s: keeps a SyncupDn listing sides %q, the record %q", name,
 				sidePtrSet(req.GetSidePointerList()), sidePtrSet(conf.GetSidePtrList()))
 		case conf.GetErrEpoch() != 0:
 			note("%s: err_epoch %d", name, conf.GetErrEpoch())
@@ -1379,16 +1396,16 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 		rev, conf := c.cnRev(t, id), c.cnConf(t, id)
 		conv.cnRevs[id] = rev
 		agent := c.cnAgent(id)
-		msg, syncups, rounds := lastSyncup(agent, agentfake.CnKey)
+		msg, syncups, rounds := storedSyncup(agent, agentfake.CnKey)
 		conv.objs = append(conv.objs, objProgress{name, agent, agentfake.CnKey, syncups, rounds})
 		req, _ := msg.(*pb.SyncupCnRequest)
 		switch {
 		case req == nil:
-			note("%s: no SyncupCn yet", name)
+			note("%s: keeps no SyncupCn yet", name)
 		case req.GetRevision() != rev:
-			note("%s: last SyncupCn at revision %d, CnRev %d", name, req.GetRevision(), rev)
+			note("%s: keeps a SyncupCn at revision %d, CnRev %d", name, req.GetRevision(), rev)
 		case cntlrPtrSet(req.GetCntlrPointerList()) != cntlrPtrSet(conf.GetCntlrPtrList()):
-			note("%s: last SyncupCn lists cntlrs %q, the record %q", name,
+			note("%s: keeps a SyncupCn listing cntlrs %q, the record %q", name,
 				cntlrPtrSet(req.GetCntlrPointerList()), cntlrPtrSet(conf.GetCntlrPtrList()))
 		case conf.GetErrEpoch() != 0:
 			note("%s: err_epoch %d", name, conf.GetErrEpoch())
@@ -1407,7 +1424,7 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 					name := fmt.Sprintf("side %d", side.GetSideId())
 					agent := c.h.fleet.Agent(side.GetAddrPort())
 					key := agentfake.SideKey(stdSpId, leg.GetLegId(), side.GetSideId())
-					msg, syncups, rounds := lastSyncup(agent, key)
+					msg, syncups, rounds := storedSyncup(agent, key)
 					conv.objs = append(conv.objs, objProgress{name, agent, key, syncups, rounds})
 					req, _ := msg.(*pb.SyncupSideRequest)
 					switch {
@@ -1416,12 +1433,12 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 					case side.GetErrEpoch() != 0:
 						note("%s: err_epoch %d", name, side.GetErrEpoch())
 					case req == nil:
-						note("%s: no SyncupSide yet", name)
+						note("%s: keeps no SyncupSide yet", name)
 					case req.GetRevision() != state.SpRevision:
-						note("%s: last SyncupSide at revision %d, SpRev %d", name,
+						note("%s: keeps a SyncupSide at revision %d, SpRev %d", name,
 							req.GetRevision(), state.SpRevision)
 					case !req.GetSideConf().GetProvisioned():
-						note("%s: last SyncupSide says not provisioned", name)
+						note("%s: keeps a SyncupSide that says not provisioned", name)
 					}
 				}
 			}
@@ -1432,7 +1449,7 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 		cntlr := state.Cntlrs[cntlrId]
 		agent := c.h.fleet.Agent(cntlr.GetAddrPort())
 		key := agentfake.CntlrKey(stdSpId, cntlrId)
-		msg, syncups, rounds := lastSyncup(agent, key)
+		msg, syncups, rounds := storedSyncup(agent, key)
 		conv.objs = append(conv.objs, objProgress{name, agent, key, syncups, rounds})
 		req, _ := msg.(*pb.SyncupCntlrRequest)
 		switch {
@@ -1441,12 +1458,12 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 		case cntlr.GetSettling():
 			note("%s: settling", name)
 		case req == nil:
-			note("%s: no SyncupCntlr yet", name)
+			note("%s: keeps no SyncupCntlr yet", name)
 		case req.GetRevision() != state.SpRevision:
-			note("%s: last SyncupCntlr at revision %d, SpRev %d", name,
+			note("%s: keeps a SyncupCntlr at revision %d, SpRev %d", name,
 				req.GetRevision(), state.SpRevision)
 		case req.GetCntlr().GetPrimary() != cntlr.GetPrimary():
-			note("%s: last SyncupCntlr primary %t, the record %t", name,
+			note("%s: keeps a SyncupCntlr with primary %t, the record %t", name,
 				req.GetCntlr().GetPrimary(), cntlr.GetPrimary())
 		}
 	}
@@ -1460,13 +1477,13 @@ func (c *stdCluster) convergedNow(t *testing.T) (bool, string, convergence) {
 
 // waitConverged waits until the cluster has converged and returns what it
 // converged at. Converged means: every revision key stays where it is; every
-// object's fake got a syncup at the revision its key holds, with the planted
-// content (a dn's side list and a cn's cntlr list as their records hold
-// them, a side provisioned, a cntlr in the role its record gives it); every
-// side is provisioned, the thin device created, the primary settled (HL2),
-// and no health epoch is set; and after that every object's fake gets two
-// more check rounds and no syncup, so the rounds answer the revision the
-// worker wants (RW4 step 5).
+// object's fake keeps a syncup, the last one it saved, at the revision its
+// key holds, with the planted content (a dn's side list and a cn's cntlr list
+// as their records hold them, a side provisioned, a cntlr in the role its
+// record gives it); every side is provisioned, the thin device created, the
+// primary settled (HL2), and no health epoch is set; and after that every
+// object's fake gets two more check rounds and no syncup, so the rounds
+// answer the revision the worker wants (RW4 step 5).
 func (c *stdCluster) waitConverged(t *testing.T) convergence {
 	t.Helper()
 	var conv convergence

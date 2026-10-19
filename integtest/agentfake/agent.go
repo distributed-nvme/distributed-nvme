@@ -340,8 +340,8 @@ const (
 // order. A request is recorded as it arrives, before any lever holds it or
 // any gate refuses it, so a held or a refused request is in it too; one that
 // reaches the agent only after a Stop, or after its caller gave up, is not
-// (liveLocked). The messages are the received ones and must not be
-// modified.
+// (liveLocked). Stored is the request the agent keeps. The messages are the
+// received ones and must not be modified.
 type Record struct {
 	// Syncups are the object's Syncup* requests.
 	Syncups []proto.Message
@@ -387,6 +387,19 @@ func (a *Agent) Record(key string) Record {
 		Streams:    rec.streams,
 		StreamEnds: rec.streamEnds,
 	}
+}
+
+// Stored returns a copy of the Syncup* request the agent keeps for the
+// object at key, the last one it saved, or nil when it keeps none.
+// Unlike a Record's last syncup, it leaves out a request the agent refused
+// and one a lever still holds, and it is nil after a start on empty files.
+func (a *Agent) Stored(key string) proto.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if req := a.requestLocked(key); req != nil {
+		return proto.Clone(req)
+	}
+	return nil
 }
 
 // Calls is how many calls of one RPC the agent received, by its method name
