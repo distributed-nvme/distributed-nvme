@@ -586,6 +586,15 @@ const (
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
+	// etcd client keepalive (EU1): seconds without a read on a connection
+	// before the client pings it, and seconds it waits for the ping's answer
+	// before it closes the connection. The time is gRPC's floor for a client,
+	// which raises a shorter one to it, and above the etcd server's default
+	// --grpc-keepalive-min-time of 5 seconds, under which the server closes
+	// a connection that pings, so an etcd at its defaults needs no flag for
+	// it.
+	DefaultEtcdKeepaliveTime    = 10
+	DefaultEtcdKeepaliveTimeout = 5
 	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
 	// etcd serving dnv MUST run with --max-txn-ops=1024 or higher; etcd's
 	// default is 128. etcd caps on max(len(Compare), len(Success), …), and

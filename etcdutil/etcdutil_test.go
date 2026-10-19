@@ -34,8 +34,11 @@ import (
 const stderrChildEnv = "DNV_ETCDUTIL_STDERR_CHILD"
 
 // testEndpoint is the client address of the etcd TestMain starts before any
-// test runs.
-var testEndpoint string
+// test runs, and testEtcdProc its process, which stopTestEtcd stops.
+var (
+	testEndpoint string
+	testEtcdProc *os.Process
+)
 
 // findEtcdBin returns the etcd binary ETCD_BIN names, or the one on PATH when
 // ETCD_BIN is empty or unset. When ETCD_BIN names no readable file, or is
@@ -80,21 +83,21 @@ func freePort() (int, error) {
 
 // startEtcd runs a single-node etcd on free localhost ports with a temporary
 // data dir and waits until it serves.
-func startEtcd(bin string) (string, func(), error) {
+func startEtcd(bin string) (string, *os.Process, func(), error) {
 	dir, err := os.MkdirTemp("", "dnv-etcdutil-")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	cleanupDir := func() { os.RemoveAll(dir) }
 	clientPort, err := freePort()
 	if err != nil {
 		cleanupDir()
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	peerPort, err := freePort()
 	if err != nil {
 		cleanupDir()
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	clientUrl := fmt.Sprintf("http://127.0.0.1:%d", clientPort)
 	peerUrl := fmt.Sprintf("http://127.0.0.1:%d", peerPort)
@@ -136,7 +139,7 @@ func startEtcd(bin string) (string, func(), error) {
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
 		cleanupDir()
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	stop := func() {
 		_ = cmd.Process.Kill()
@@ -146,9 +149,9 @@ func startEtcd(bin string) (string, func(), error) {
 	endpoint := fmt.Sprintf("127.0.0.1:%d", clientPort)
 	if err := waitForEtcd(endpoint); err != nil {
 		stop()
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return endpoint, stop, nil
+	return endpoint, cmd.Process, stop, nil
 }
 
 // waitForEtcd polls the server until one point read succeeds.
@@ -184,12 +187,12 @@ func TestMain(m *testing.M) {
 		runStderrChild()
 		os.Exit(0)
 	}
-	endpoint, stop, err := startEtcd(findEtcdBin())
+	endpoint, proc, stop, err := startEtcd(findEtcdBin())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot start etcd: %v\n", err)
 		os.Exit(1)
 	}
-	testEndpoint = endpoint
+	testEndpoint, testEtcdProc = endpoint, proc
 	code := m.Run()
 	stop()
 	os.Exit(code)

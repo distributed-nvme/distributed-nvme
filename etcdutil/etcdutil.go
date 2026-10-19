@@ -58,6 +58,17 @@ type Client struct {
 // as the cdc's scan of every CdcEntry, which no dnv constant sizes, and
 // clientv3 refuses one below the send limit.
 //
+// The client pings a connection it has read nothing on for
+// common.DefaultEtcdKeepaliveTime seconds and closes the connection when the
+// ping is not answered within common.DefaultEtcdKeepaliveTimeout seconds
+// (EU1). Without that, an etcd member that died without a TCP reset keeps
+// its connection among those the client spreads its requests over until the
+// kernel gives up retransmitting, and every request sent over it hangs to its
+// deadline. It
+// pings only while a request or a watch is open on the connection: the etcd
+// server counts a ping sent with none open as abuse and closes a connection
+// that sends a few.
+//
 // ctx bounds the construction only. It is deliberately not installed as the
 // client's own lifetime context, so that a short-lived startup ctx cannot
 // silently kill a long-lived client; Close releases it instead.
@@ -65,6 +76,33 @@ func New(
 	ctx context.Context,
 	endpoints []string,
 	dialTimeout time.Duration,
+) (*Client, error) {
+	return newClient(ctx, endpoints, dialTimeout, prodTimeouts())
+}
+
+// timeouts are the client's settings a test of the package may set: the
+// keepalive time and timeout of EU1. New uses prodTimeouts. gRPC raises a
+// keepalive time below its floor for a client to that floor, which is the
+// production time, so of the two only the timeout gets shorter in a test.
+type timeouts struct {
+	keepaliveTime    time.Duration
+	keepaliveTimeout time.Duration
+}
+
+// prodTimeouts are the production values of timeouts.
+func prodTimeouts() timeouts {
+	return timeouts{
+		keepaliveTime:    common.DefaultEtcdKeepaliveTime * time.Second,
+		keepaliveTimeout: common.DefaultEtcdKeepaliveTimeout * time.Second,
+	}
+}
+
+// newClient is New with the timeouts it is given.
+func newClient(
+	ctx context.Context,
+	endpoints []string,
+	dialTimeout time.Duration,
+	tmo timeouts,
 ) (*Client, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("etcd client: %w", err)
@@ -77,8 +115,10 @@ func New(
 		DialTimeout: dialTimeout,
 		// Silence the etcd client's own zap logger: stderr carries one JSON
 		// record per line (log.md R2) and the integration suite parses it.
-		Logger:             zap.NewNop(),
-		MaxCallSendMsgSize: common.EtcdMaxRequestBytes,
+		Logger:               zap.NewNop(),
+		MaxCallSendMsgSize:   common.EtcdMaxRequestBytes,
+		DialKeepAliveTime:    tmo.keepaliveTime,
+		DialKeepAliveTimeout: tmo.keepaliveTimeout,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("etcd client: %w", err)

@@ -75,8 +75,12 @@ that demotes a primary holds its sides and its other cntlrs for the demoted
 cntlr to report its demotion applied (RW22);
 `DefaultEtcdDialTimeout` and `DefaultEtcdOpTimeout`, the etcd client's dial
 deadline and its budget per plain operation and per whole transaction, every
-retry included (EU1, EU5); `EtcdMaxTxnOps`, the `--max-txn-ops` requirement on
-every etcd serving dnv, a constant the block holds for the gateway
+retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
+`DefaultEtcdKeepaliveTimeout`, how long a connection of the etcd client
+carries no read before the client pings it and how long the client waits for
+the answer before it closes the connection (EU1); `EtcdMaxTxnOps`, the
+`--max-txn-ops` requirement on every etcd serving dnv, a constant the block
+holds for the gateway
 (`gateway.md`, Constants this document owns) because the transaction it
 is sized by is `CreateStoragePool` at its widest shape, while the sp drain's
 slice batch (SPD13, SPD14), the created flip's transaction (RW19) and the
@@ -156,10 +160,19 @@ message interceptors). Its send limit is `EtcdMaxRequestBytes` (Constants
 this document owns): the client's own default is below the largest
 transactions dnv commits, and the client refuses a larger request before
 etcd sees it. Its receive limit stays the client's own default, since a set
-one would cap every range reply too, which no dnv constant sizes. `Close`
-releases it. A failure to reach any endpoint at construction is **not**
-fatal to the caller by itself: the client retries in the background; the
-worker's vote layer stays fenced until its first successful put (VW8).
+one would cap every range reply too, which no dnv constant sizes. It pings
+a connection that has carried no read for `DefaultEtcdKeepaliveTime` while a
+request or a watch is open on it, and closes the connection when the ping
+goes unanswered for `DefaultEtcdKeepaliveTimeout`, so that an etcd member
+that died without a TCP reset drops out of the connections the client
+spreads its requests over within those two times once a request or a watch
+is open on its connection, instead of when the kernel gives up
+retransmitting; the keepalive time is no
+shorter than the etcd server's default minimum ping interval, so etcd needs
+no flag for it. `Close` releases it. A failure to reach any endpoint at
+construction is **not** fatal to the caller by itself: the client retries in
+the background; the worker's vote layer stays fenced until its first
+successful put (VW8).
 
 EU2. **Typed plain operations.** All take a ctx, log the record of their kind
 with `slog.InfoContext` as `log.md`, Record obligations by subsystem,
